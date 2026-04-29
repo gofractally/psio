@@ -30,6 +30,10 @@ psio_add_test(psio_wrapper_tests wrapper_tests.cpp)
 # Phase 3: buffer / view / mutable_view + access-surface rule.
 psio_add_test(psio_view_access_tests view_access_tests.cpp)
 
+# native format + view_of concept: zero-cost shim adapting a live const T&
+# to the view<T, Fmt, Store> accessor surface.
+psio_add_test(psio_native_view_tests native_view_tests.cpp)
+
 # Phase 4: error model — codec_error, codec_status, or_throw.
 psio_add_test(psio_error_tests error_tests.cpp)
 
