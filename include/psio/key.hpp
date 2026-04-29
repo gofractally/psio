@@ -15,6 +15,23 @@
 //   record:             fields concatenated in reflected order
 //
 // `octet` means uint8_t / int8_t / char.
+//
+// Custom scalar types: a type with a `sortable_binary_category`
+// adapter (registered via `PSIO_ADAPTER`) bypasses the type-table
+// above and delegates encode/decode/validate to the adapter. The
+// adapter is responsible for emitting memcmp-sortable bytes —
+// `psio::key` adds no length prefix or framing around adapter
+// output, since framing would break key ordering. This is the
+// canonical extension point for non-reflected types like fixed-
+// width digests, opaque blobs, and types whose canonical sort order
+// is bespoke.
+//
+// Note: this is a separate adapter slot from `binary_category`
+// (which serves bin/pssz/frac/ssz). Wire encoding and sort encoding
+// can differ — signed integers are little-endian on the wire but
+// sign-flipped big-endian as a sort key. Types whose wire and sort
+// encodings happen to coincide (e.g. fixed-width digests) register
+// the same adapter impl in both slots.
 
 #include <psio/cpo.hpp>
 #include <psio/detail/variant_util.hpp>
@@ -202,7 +219,31 @@ namespace psio {
       template <typename T>
       void encode_value(const T& v, sink_t& s)
       {
-         if constexpr (std::is_same_v<T, std::string>)
+         // Adapter dispatch: a type with a sortable_binary_category
+         // adapter delegates encoding entirely to the adapter. The
+         // adapter is responsible for emitting memcmp-sortable bytes
+         // — no length prefix or framing is added on this side, since
+         // framing would break key ordering. This is the canonical
+         // extension point for non-reflected scalar types (digests,
+         // opaque blobs, custom-sortable wrappers).
+         //
+         // Note: this consults sortable_binary_category, NOT
+         // binary_category. A type whose wire encoding (bin/pssz) and
+         // sort encoding happen to coincide registers the same impl
+         // in both slots.
+         //
+         // The branch is the FIRST `if constexpr` in the chain so the
+         // tail `else { encode_scalar<T> }` is discarded for adapter
+         // types — encode_scalar's `sizeof(T) == 0` static_assert
+         // would otherwise trip.
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                           ::psio::key, T>)
+         {
+            using A = ::psio::adapter<std::remove_cvref_t<T>,
+                                      ::psio::sortable_binary_category>;
+            A::encode(v, s);
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
          {
             append_escaped(s, v.data(), v.size());
          }
@@ -388,7 +429,24 @@ namespace psio {
       template <typename T>
       T decode_value(std::span<const char> src, std::size_t& pos)
       {
-         if constexpr (std::is_same_v<T, std::string>)
+         // Adapter dispatch (mirrors encode_value). The adapter consumes
+         // its bytes; we report consumption back to `pos` via
+         // `adapter::packsize(decoded)`. Adapters that aren't byte-
+         // symmetric (encode/decode disagree on size) violate the
+         // contract; the round-trip tests in adapter_tests.cpp catch
+         // that. Must be the first branch of the chain — see
+         // encode_value's note on the static_assert tail.
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                           ::psio::key, T>)
+         {
+            using A = ::psio::adapter<std::remove_cvref_t<T>,
+                                      ::psio::sortable_binary_category>;
+            T v = A::decode(std::span<const char>(src.data() + pos,
+                                                  src.size() - pos));
+            pos += A::packsize(v);
+            return v;
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
          {
             return read_escaped(src, pos);
          }
@@ -492,7 +550,14 @@ namespace psio {
 
    struct key : format_tag_base<key>
    {
-      using preferred_presentation_category = ::psio::binary_category;
+      // Note: `sortable_binary_category`, NOT `binary_category`. A
+      // value's wire encoding (bin/pssz) and its sort encoding can
+      // differ — signed ints, floats, and structs whose canonical
+      // sort is bespoke all need a separate adapter slot. Types
+      // whose wire and sort happen to coincide (fixed-width digests,
+      // opaque blobs) register identical adapter impls in both slots.
+      using preferred_presentation_category =
+          ::psio::sortable_binary_category;
 
       template <typename T>
       friend void tag_invoke(decltype(::psio::encode), key, const T& v,
@@ -531,9 +596,18 @@ namespace psio {
       friend codec_status tag_invoke(decltype(::psio::validate<T>), key, T*,
                                      std::span<const char> bytes) noexcept
       {
-         if (bytes.empty())
-            return codec_fail("key: empty buffer", 0, "key");
-         return codec_ok();
+         if constexpr (::psio::format_should_dispatch_adapter_v<key, T>)
+         {
+            using A = ::psio::adapter<std::remove_cvref_t<T>,
+                                      ::psio::sortable_binary_category>;
+            return A::validate(bytes);
+         }
+         else
+         {
+            if (bytes.empty())
+               return codec_fail("key: empty buffer", 0, "key");
+            return codec_ok();
+         }
       }
 
       template <typename T>
@@ -541,9 +615,18 @@ namespace psio {
                                      T*,
                                      std::span<const char> bytes) noexcept
       {
-         if (bytes.empty())
-            return codec_fail("key: empty buffer", 0, "key");
-         return codec_ok();
+         if constexpr (::psio::format_should_dispatch_adapter_v<key, T>)
+         {
+            using A = ::psio::adapter<std::remove_cvref_t<T>,
+                                      ::psio::sortable_binary_category>;
+            return A::validate_strict(bytes);
+         }
+         else
+         {
+            if (bytes.empty())
+               return codec_fail("key: empty buffer", 0, "key");
+            return codec_ok();
+         }
       }
 
       template <typename T>

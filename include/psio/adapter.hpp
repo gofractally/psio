@@ -54,13 +54,20 @@ namespace psio {
    //
    // Nominal tags that formats use to decide which adapter slot of a
    // type they want to consult. A format whose wire is bytes asks for
-   // binary_category; a format whose wire is human-readable text asks
-   // for text_category. Additional categories can be added; nothing
-   // about the mechanism depends on these two specifically.
+   // `binary_category`; a format whose wire is human-readable text
+   // asks for `text_category`; a format whose wire is the SORT KEY
+   // asks for `sortable_binary_category`. The sortable slot is its
+   // own category because the wire and sort encodings can differ
+   // (e.g. `int32` is little-endian on the wire but sign-flipped
+   // big-endian as a sort key). Additional categories can be added;
+   // nothing about the mechanism depends on this list specifically.
    struct binary_category
    {
    };
    struct text_category
+   {
+   };
+   struct sortable_binary_category
    {
    };
 

@@ -16,6 +16,7 @@
 #include <psio/dynamic_value.hpp>
 #include <psio/frac.hpp>
 #include <psio/json.hpp>
+#include <psio/key.hpp>
 #include <psio/adapter.hpp>
 #include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
@@ -594,4 +595,134 @@ TEST_CASE("member-override works for bin", "[adapter][member-override][bin]")
    REQUIRE(back.id == "b");
    REQUIRE(back.checksum.bytes[0] == 0xFE);
    REQUIRE(back.checksum.bytes[3] == 0xCE);
+}
+
+// ── psio::key adapter dispatch ──────────────────────────────────────────
+//
+// Custom scalar types — fixed-width digests, opaque blobs, types with a
+// bespoke sort order — register a `sortable_binary_category` adapter
+// and use it transparently as a key. psio::key emits the adapter's
+// bytes verbatim (no length prefix), so the adapter is responsible for
+// memcmp-sortable output. Round-trips through encode + decode.
+//
+// `sortable_binary_category` is a separate slot from `binary_category`
+// because wire and sort encodings can differ (signed ints, floats).
+// For a fixed-width digest the two encodings coincide, so the same
+// codec impl is registered in both slots.
+
+struct KeyDigest
+{
+   std::array<std::uint8_t, 32> bytes{};
+   bool operator==(const KeyDigest&) const = default;
+};
+
+struct keydigest_codec
+{
+   static std::size_t packsize(const KeyDigest&) noexcept { return 32; }
+
+   static void encode(const KeyDigest& d, std::vector<char>& s)
+   {
+      s.insert(s.end(), reinterpret_cast<const char*>(d.bytes.data()),
+               reinterpret_cast<const char*>(d.bytes.data()) + 32);
+   }
+
+   static KeyDigest decode(std::span<const char> b) noexcept
+   {
+      KeyDigest d;
+      std::memcpy(d.bytes.data(), b.data(), 32);
+      return d;
+   }
+
+   static psio::codec_status validate(std::span<const char> b) noexcept
+   {
+      if (b.size() < 32)
+         return psio::codec_fail("KeyDigest: short buffer", 0, "key-adapter");
+      return psio::codec_ok();
+   }
+
+   static psio::codec_status validate_strict(std::span<const char> b) noexcept
+   {
+      return validate(b);
+   }
+};
+
+// Wire and sort encodings coincide for this fixed-width digest, so we
+// register the same codec impl in both slots. A signed-int wrapper
+// would register a 2's-complement codec under binary_category and a
+// sign-flipped-BE codec under sortable_binary_category.
+PSIO_ADAPTER(KeyDigest, psio::binary_category,          keydigest_codec)
+PSIO_ADAPTER(KeyDigest, psio::sortable_binary_category, keydigest_codec)
+
+TEST_CASE("psio::key dispatches into binary_category adapter for scalar types",
+          "[adapter][key]")
+{
+   KeyDigest d{};
+   for (std::size_t i = 0; i < 32; ++i)
+      d.bytes[i] = static_cast<std::uint8_t>(i);
+
+   auto bytes = psio::encode(psio::key{}, d);
+   REQUIRE(bytes.size() == 32);
+   for (std::size_t i = 0; i < 32; ++i)
+      REQUIRE(static_cast<std::uint8_t>(bytes[i]) == i);
+
+   auto back = psio::decode<KeyDigest>(psio::key{},
+                                       std::span<const char>{bytes});
+   REQUIRE(back == d);
+
+   REQUIRE(psio::size_of(psio::key{}, d) == 32);
+   REQUIRE(psio::validate<KeyDigest>(psio::key{},
+                                     std::span<const char>{bytes}).ok());
+}
+
+TEST_CASE("psio::key digest adapter sort order is memcmp-sortable",
+          "[adapter][key]")
+{
+   KeyDigest a{}, b{};
+   a.bytes[0] = 0x01;
+   b.bytes[0] = 0x02;
+   auto       ka = psio::encode(psio::key{}, a);
+   auto       kb = psio::encode(psio::key{}, b);
+   REQUIRE(std::memcmp(ka.data(), kb.data(),
+                       std::min(ka.size(), kb.size())) < 0);
+
+   // Two digests differing only in the last byte still order correctly.
+   a            = KeyDigest{};
+   b            = KeyDigest{};
+   a.bytes[31]  = 0x01;
+   b.bytes[31]  = 0x02;
+   ka           = psio::encode(psio::key{}, a);
+   kb           = psio::encode(psio::key{}, b);
+   REQUIRE(std::memcmp(ka.data(), kb.data(), 32) < 0);
+}
+
+// A reflected record whose first member is an adapted digest, second a
+// plain string. Confirms the adapter's bytes embed cleanly mid-record:
+// the digest's 32 bytes are followed by the string's NUL-terminated
+// encoding. The boundary is preserved by the adapter's fixed packsize.
+struct DigestRecord
+{
+   KeyDigest   d;
+   std::string label;
+};
+PSIO_REFLECT(DigestRecord, d, label)
+
+TEST_CASE("psio::key embeds an adapter-encoded digest inside a record",
+          "[adapter][key]")
+{
+   KeyDigest d{};
+   d.bytes[0] = 0xAB;
+   d.bytes[31] = 0xCD;
+
+   DigestRecord r{d, "hello"};
+   auto         bytes = psio::encode(psio::key{}, r);
+   // 32 raw digest bytes + "hello\0\0" = 39 bytes.
+   REQUIRE(bytes.size() == 32 + 5 + 2);
+   REQUIRE(static_cast<std::uint8_t>(bytes[0])  == 0xAB);
+   REQUIRE(static_cast<std::uint8_t>(bytes[31]) == 0xCD);
+   REQUIRE(std::string_view(&bytes[32], 5) == "hello");
+
+   auto back = psio::decode<DigestRecord>(psio::key{},
+                                          std::span<const char>{bytes});
+   REQUIRE(back.d == d);
+   REQUIRE(back.label == "hello");
 }
