@@ -98,25 +98,11 @@ psio_add_test(psio_compat_tests compat_tests.cpp)
 # Varint codec library — leb128, prefix2 (BE + LE), prefix3.
 psio_add_test(psio_varint_tests varint_tests.cpp)
 
-# Name encoding (psio::name_id) — v1↔v3 byte-parity.
-add_executable(psio_name_tests name_tests.cpp main.cpp)
-target_link_libraries(psio_name_tests PRIVATE psio psio1)
-target_include_directories(psio_name_tests PRIVATE ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_name_tests PRIVATE cxx_std_23)
-add_test(NAME psio_name_tests COMMAND psio_name_tests)
-
 # Small utility headers ported from psio v1.
 psio_add_test(psio_util_tests util_tests.cpp)
 
 # WIT resource vocabulary (own<T> / borrow<T> / wit_resource_drop).
 psio_add_test(psio_wit_resource_tests wit_resource_tests.cpp)
-
-# Method-name compressor + type-name source (compress_name + get_type_name).
-add_executable(psio_type_name_tests type_name_tests.cpp main.cpp)
-target_link_libraries(psio_type_name_tests PRIVATE psio psio)
-target_include_directories(psio_type_name_tests PRIVATE ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_type_name_tests PRIVATE cxx_std_23)
-add_test(NAME psio_type_name_tests COMMAND psio_type_name_tests)
 
 # WIT IR data structures (wit_types.hpp).
 psio_add_test(psio_wit_types_tests wit_types_tests.cpp)
@@ -212,106 +198,6 @@ endif()
 # wit_encode (resources, own/borrow, multi-interface).
 psio_add_test(psio_wit_wasi_shapes_tests wit_wasi_shapes_tests.cpp)
 
-# WIT Component Model binary encoder (wit_encode.hpp).
-# Links psio1 too — the byte-parity test compares v3 output against v1.
-add_executable(psio_wit_encode_tests wit_encode_tests.cpp main.cpp)
-target_link_libraries(psio_wit_encode_tests PRIVATE psio psio1)
-target_include_directories(psio_wit_encode_tests PRIVATE ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_wit_encode_tests PRIVATE cxx_std_23)
-add_test(NAME psio_wit_encode_tests COMMAND psio_wit_encode_tests)
-
-# Phase 6b partial: v1 ↔ psio SSZ byte-parity tests. Links BOTH psio
-# (v1) and psio into the same executable so we can encode the same
-# value through both codecs and assert identical bytes.
-add_executable(psio_v1_parity_ssz_tests v1_parity_ssz_tests.cpp main.cpp)
-target_link_libraries(psio_v1_parity_ssz_tests PRIVATE psio psio)
-target_include_directories(psio_v1_parity_ssz_tests PRIVATE
-   ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_v1_parity_ssz_tests PRIVATE cxx_std_23)
-add_test(NAME psio_v1_parity_ssz_tests COMMAND psio_v1_parity_ssz_tests)
-
-add_executable(psio_v1_parity_pssz_tests v1_parity_pssz_tests.cpp main.cpp)
-target_link_libraries(psio_v1_parity_pssz_tests PRIVATE psio psio)
-target_include_directories(psio_v1_parity_pssz_tests PRIVATE
-   ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_v1_parity_pssz_tests PRIVATE cxx_std_23)
-add_test(NAME psio_v1_parity_pssz_tests COMMAND psio_v1_parity_pssz_tests)
-
-add_executable(psio_v1_parity_frac_tests v1_parity_frac_tests.cpp main.cpp)
-target_link_libraries(psio_v1_parity_frac_tests PRIVATE psio psio)
-target_include_directories(psio_v1_parity_frac_tests PRIVATE
-   ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_v1_parity_frac_tests PRIVATE cxx_std_23)
-add_test(NAME psio_v1_parity_frac_tests COMMAND psio_v1_parity_frac_tests)
-
-add_executable(psio_v1_parity_borsh_tests v1_parity_borsh_tests.cpp main.cpp)
-target_link_libraries(psio_v1_parity_borsh_tests PRIVATE psio psio)
-target_include_directories(psio_v1_parity_borsh_tests PRIVATE
-   ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_v1_parity_borsh_tests PRIVATE cxx_std_23)
-add_test(NAME psio_v1_parity_borsh_tests COMMAND psio_v1_parity_borsh_tests)
-
-add_executable(psio_v1_parity_bincode_tests v1_parity_bincode_tests.cpp main.cpp)
-target_link_libraries(psio_v1_parity_bincode_tests PRIVATE psio psio)
-target_include_directories(psio_v1_parity_bincode_tests PRIVATE
-   ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_v1_parity_bincode_tests PRIVATE cxx_std_23)
-add_test(NAME psio_v1_parity_bincode_tests COMMAND psio_v1_parity_bincode_tests)
-
-add_executable(psio_v1_parity_key_tests v1_parity_key_tests.cpp main.cpp)
-target_link_libraries(psio_v1_parity_key_tests PRIVATE psio psio)
-target_include_directories(psio_v1_parity_key_tests PRIVATE
-   ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_v1_parity_key_tests PRIVATE cxx_std_23)
-add_test(NAME psio_v1_parity_key_tests COMMAND psio_v1_parity_key_tests)
-
-add_executable(psio_v1_parity_avro_tests v1_parity_avro_tests.cpp main.cpp)
-target_link_libraries(psio_v1_parity_avro_tests PRIVATE psio psio)
-target_include_directories(psio_v1_parity_avro_tests PRIVATE
-   ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_v1_parity_avro_tests PRIVATE cxx_std_23)
-add_test(NAME psio_v1_parity_avro_tests COMMAND psio_v1_parity_avro_tests)
-
-# Cross-format v1-oracle tests. Ported in pattern from psio2's
-# v1_oracle_tests.cpp: parallel v1/v3 types with matching shapes, byte
-# equality across every format. Exercises reflected records — coverage
-# the per-format parity tests were missing.
-add_executable(psio_v1_oracle_tests v1_oracle_tests.cpp main.cpp)
-target_link_libraries(psio_v1_oracle_tests PRIVATE psio psio)
-target_include_directories(psio_v1_oracle_tests PRIVATE
-   ${PSIO_CATCH2_INCLUDE})
-target_compile_features(psio_v1_oracle_tests PRIVATE cxx_std_23)
-add_test(NAME psio_v1_oracle_tests COMMAND psio_v1_oracle_tests)
-
-# Flatbuf-lib parity test — only if the Google flatbuffers C++ runtime is
-# available via find_package. Matches the same optional path v1 uses for
-# its flatbuf benchmarks.
-find_package(flatbuffers QUIET)
-if(flatbuffers_FOUND)
-   add_executable(psio_v1_parity_flatbuf_lib_tests
-      v1_parity_flatbuf_lib_tests.cpp main.cpp)
-   target_link_libraries(psio_v1_parity_flatbuf_lib_tests
-      PRIVATE psio psio flatbuffers::flatbuffers)
-   target_include_directories(psio_v1_parity_flatbuf_lib_tests PRIVATE
-      ${PSIO_CATCH2_INCLUDE})
-   target_compile_features(psio_v1_parity_flatbuf_lib_tests PRIVATE
-      cxx_std_23)
-   add_test(NAME psio_v1_parity_flatbuf_lib_tests
-      COMMAND psio_v1_parity_flatbuf_lib_tests)
-
-   # Native (zero-dep) vs lib (Google runtime) parity harness.
-   add_executable(psio_v1_parity_flatbuf_tests
-      v1_parity_flatbuf_tests.cpp main.cpp)
-   target_link_libraries(psio_v1_parity_flatbuf_tests
-      PRIVATE psio flatbuffers::flatbuffers)
-   target_include_directories(psio_v1_parity_flatbuf_tests PRIVATE
-      ${PSIO_CATCH2_INCLUDE})
-   target_compile_features(psio_v1_parity_flatbuf_tests PRIVATE
-      cxx_std_23)
-   add_test(NAME psio_v1_parity_flatbuf_tests
-      COMMAND psio_v1_parity_flatbuf_tests)
-endif()
-
 # Official Ethereum consensus-spec-tests harness.
 # Fixtures live in ${CMAKE_BINARY_DIR}/spec-tests/_decoded, produced by
 # libraries/psio/cpp/tests/spec_tests/preprocess.py. The test reads
@@ -322,14 +208,6 @@ psio_add_test(psio_spec_ssz_tests spec_ssz_tests.cpp)
 set_tests_properties(psio_spec_ssz_tests PROPERTIES
    ENVIRONMENT
       "PSIO_SPEC_MANIFEST=${CMAKE_BINARY_DIR}/spec-tests/_decoded/manifest.txt;PSIO_SPEC_DECODED_ROOT=${CMAKE_BINARY_DIR}/spec-tests/_decoded")
-
-# Smoke perf: v1 vs v3 timing on representative SSZ workloads. Built
-# as a regular executable (not a ctest) so ctest runs stay fast; run
-# manually: ./bin/psio_smoke_perf
-add_executable(psio_smoke_perf smoke_perf.cpp)
-target_link_libraries(psio_smoke_perf PRIVATE psio psio)
-target_compile_features(psio_smoke_perf PRIVATE cxx_std_23)
-target_compile_options(psio_smoke_perf PRIVATE -O3 -DNDEBUG)
 
 # psch — pSSZ schema binary (writer + view). Round-trip + lookup.
 psio_add_test(psio_psch_tests psch_tests.cpp)

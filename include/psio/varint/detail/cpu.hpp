@@ -15,7 +15,7 @@
 // free-function shape regardless.
 //
 
-namespace psio1::varint::detail {
+namespace psio::varint::detail {
 
 #if defined(__BMI2__)
    inline constexpr bool has_bmi2 = true;
@@ -29,4 +29,4 @@ namespace psio1::varint::detail {
    inline constexpr bool has_neon = false;
 #endif
 
-}  // namespace psio1::varint::detail
+}  // namespace psio::varint::detail
