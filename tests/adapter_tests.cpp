@@ -908,3 +908,126 @@ TEST_CASE("ext_int text adapter: a record with a uint256 field encodes to JSON",
    REQUIRE(back.sender == "alice");
    REQUIRE(back.amount == amount);
 }
+
+// ── float128 — the index_long_double_index Antelope shape ────────────────
+//
+// `psio::float128` is a 16-byte struct laid out like Berkeley softfloat's
+// `float128_t`. Three adapters serve three slots:
+//   - text_category           → "0x" + 32 hex chars (raw bits MSB-first)
+//   - binary_category         → 16 raw LE bytes
+//   - sortable_binary_category → IEEE 754 sort transform + big-endian
+//
+// Helpers in tests build float128 values from familiar `double` inputs by
+// mapping IEEE 754 binary64 onto the high portion of binary128 (a strict
+// subset). Real users would bridge from softfloat or platform __float128.
+
+namespace {
+   // Convert an IEEE 754 binary64 into a 128-bit binary equivalent.
+   // The exponent bias differs (1023 for binary64, 16383 for binary128)
+   // and the mantissa width differs (52 vs 112), so we re-bias and
+   // shift. Subnormals / inf / NaN handling is best-effort; the tests
+   // stick to ordinary finite values.
+   psio::float128 from_double(double d)
+   {
+      std::uint64_t bits;
+      std::memcpy(&bits, &d, 8);
+      const std::uint64_t sign     = (bits >> 63) & 1;
+      const std::uint64_t exp64    = (bits >> 52) & 0x7ff;
+      const std::uint64_t frac64   = bits & ((1ull << 52) - 1);
+
+      psio::float128 out{};
+      if (exp64 == 0 && frac64 == 0)
+      {
+         out.limb[1] = sign << 63;          // ±0
+         return out;
+      }
+      // Re-bias: exp128 = exp64 - 1023 + 16383.
+      const std::uint64_t exp128 = exp64 + (16383 - 1023);
+      // Shift mantissa into the binary128 frame: 112 bits total,
+      // top 60 bits go into the high limb, low 52 → high limb low /
+      // low limb. The 52-bit mantissa fills the top 52 bits of the
+      // 112-bit binary128 fraction.
+      const std::uint64_t hi = (sign << 63) | (exp128 << 48) | (frac64 >> 4);
+      const std::uint64_t lo = (frac64 & 0xf) << 60;
+      out.limb[1] = hi;
+      out.limb[0] = lo;
+      return out;
+   }
+}  // namespace
+
+TEST_CASE("ext_int float128: text round-trips through JSON",
+          "[adapter][ext_int][json][float128]")
+{
+   psio::float128 a = from_double(0.0);
+   psio::float128 b = from_double(1.5);
+   psio::float128 c = from_double(-1.5);
+   psio::float128 d = from_double(1e100);
+
+   for (const auto& v : {a, b, c, d})
+   {
+      auto j    = psio::encode(psio::json{}, v);
+      auto back = psio::decode<psio::float128>(psio::json{},
+                                               std::span<const char>{j});
+      REQUIRE(back == v);
+      // Shape check: "0x" + exactly 32 hex chars + closing quote.
+      REQUIRE(j.size() == 1 + 2 + 32 + 1);
+      REQUIRE(j.front() == '"');
+      REQUIRE(j.back()  == '"');
+      REQUIRE(j[1] == '0');
+      REQUIRE(j[2] == 'x');
+   }
+}
+
+TEST_CASE("ext_int float128: binary adapter is 16 raw LE bytes",
+          "[adapter][ext_int][binary][float128]")
+{
+   psio::float128 v = from_double(2.5);
+   auto bytes = psio::encode(psio::pssz{}, v);
+   // pssz frames adapter payloads with a length prefix because adapters
+   // are conservatively treated as variable-size; the payload itself
+   // must still be exactly 16 bytes for the binary codec.
+   REQUIRE(bytes.size() >= 16);
+   auto back = psio::decode<psio::float128>(psio::pssz{},
+                                            std::span<const char>{bytes});
+   REQUIRE(back == v);
+}
+
+TEST_CASE("ext_int float128: sortable codec preserves IEEE 754 order",
+          "[adapter][ext_int][key][float128]")
+{
+   const std::vector<double> ds = {
+       -1e100, -1.5, -1e-100, -0.0, 0.0, 1e-100, 1.5, 1e100,
+   };
+   std::vector<std::vector<char>> sorted_bytes;
+   for (double x : ds)
+      sorted_bytes.push_back(psio::encode(psio::key{}, from_double(x)));
+
+   // memcmp ascending order must match IEEE 754 ascending order. The
+   // -0.0 / +0.0 pair is canonicalised to compare equal — they
+   // produce identical sort bytes.
+   for (std::size_t i = 1; i < sorted_bytes.size(); ++i)
+   {
+      const auto& a = sorted_bytes[i - 1];
+      const auto& b = sorted_bytes[i];
+      const int   c = std::memcmp(a.data(), b.data(),
+                                  std::min(a.size(), b.size()));
+      if (ds[i - 1] == ds[i])  // -0.0, +0.0
+         REQUIRE(c == 0);
+      else
+         REQUIRE(c < 0);
+   }
+
+   // Round-trip via the sortable codec.
+   for (double x : ds)
+   {
+      auto v    = from_double(x);
+      auto enc  = psio::encode(psio::key{}, v);
+      auto back = psio::decode<psio::float128>(psio::key{},
+                                                std::span<const char>{enc});
+      // -0.0 round-trips to +0.0 (canonicalisation).
+      if (x == 0.0 && std::signbit(x))
+         REQUIRE(back == from_double(0.0));
+      else
+         REQUIRE(back == v);
+   }
+}

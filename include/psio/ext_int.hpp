@@ -26,6 +26,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace psio {
 
@@ -59,6 +60,33 @@ namespace psio {
    static_assert(alignof(uint256) == alignof(std::uint64_t));
    static_assert(std::is_standard_layout_v<uint256>);
    static_assert(std::is_trivially_copyable_v<uint256>);
+
+   // 16-byte IEEE 754 binary128. Layout matches the Berkeley softfloat
+   // `float128_t { uint64_t v[2]; }` — limb[0] = low 64 bits, limb[1]
+   // = high 64 bits (low limb at the lower address on little-endian
+   // hosts). Arithmetic is out of scope; this exists so `float128`
+   // values can flow through a psio table key, a pssz row, or a JSON
+   // payload without losing bits. Spring's `index_long_double_index`
+   // is the canonical consumer — bridge softfloat's `float128_t` to
+   // `psio::float128` with a delegate adapter or by memcpy.
+   //
+   // Sort order: psio::key's adapter applies the standard IEEE 754
+   // sort transform (sign-flip-or-bitnot, then big-endian) so memcmp
+   // matches IEEE less-than for finite, non-NaN values, including
+   // -0.0 == +0.0. NaN comparison stays unordered as the standard
+   // requires.
+   struct float128
+   {
+      std::uint64_t limb[2]{};
+
+      bool operator==(const float128&) const noexcept = default;
+      auto operator<=>(const float128&) const noexcept = default;
+   };
+
+   static_assert(sizeof(float128) == 16, "float128 must be exactly 16 bytes");
+   static_assert(alignof(float128) == alignof(std::uint64_t));
+   static_assert(std::is_standard_layout_v<float128>);
+   static_assert(std::is_trivially_copyable_v<float128>);
 
    // ── Hex helpers (used by the text adapters below) ───────────────────
 
@@ -336,6 +364,183 @@ namespace psio {
       }
    };
 
+   // ── float128 codecs ────────────────────────────────────────────────
+   //
+   // Three slots:
+   //   binary_category         → raw 16 LE bytes (bin / pssz / frac / ssz)
+   //   sortable_binary_category → sort-transformed BE (psio::key)
+   //   text_category           → "0x" + 32 lowercase hex chars
+   //
+   // The wire and sort encodings differ — IEEE 754 binary128 stored
+   // raw is NOT memcmp-sortable (sign bit is high, magnitude grows
+   // upward only for positives) — so the two binary slots get
+   // distinct codecs.
+
+   struct float128_binary_codec
+   {
+      static std::size_t packsize(const float128&) noexcept { return 16; }
+      static void encode(const float128& v, std::vector<char>& s)
+      {
+         s.insert(s.end(), reinterpret_cast<const char*>(&v),
+                  reinterpret_cast<const char*>(&v) + 16);
+      }
+      static float128 decode(std::span<const char> b) noexcept
+      {
+         float128 out{};
+         std::memcpy(&out, b.data(), 16);
+         return out;
+      }
+      static codec_status validate(std::span<const char> b) noexcept
+      {
+         return b.size() < 16
+                    ? codec_fail("float128: short buffer", 0, "float128")
+                    : codec_ok();
+      }
+      static codec_status validate_strict(std::span<const char> b) noexcept
+      {
+         return validate(b);
+      }
+   };
+
+   struct float128_sortable_codec
+   {
+      static std::size_t packsize(const float128&) noexcept { return 16; }
+
+      static void encode(const float128& v, std::vector<char>& s)
+      {
+         std::uint64_t hi = v.limb[1];
+         std::uint64_t lo = v.limb[0];
+         // Canonicalise -0.0 to +0.0 so they compare equal in the
+         // sort key (matches the existing double / float behaviour).
+         if (hi == 0x8000000000000000ull && lo == 0)
+         {
+            hi = 0;
+         }
+         if (hi & 0x8000000000000000ull)
+         {
+            // Negative: flip every bit.
+            hi = ~hi;
+            lo = ~lo;
+         }
+         else
+         {
+            // Positive: flip just the sign bit so positives sort
+            // above negatives.
+            hi ^= 0x8000000000000000ull;
+         }
+         // Big-endian on the wire so memcmp compares MSB first.
+         std::uint8_t buf[16];
+         for (int i = 0; i < 8; ++i)
+            buf[i] = static_cast<std::uint8_t>(hi >> (56 - 8 * i));
+         for (int i = 0; i < 8; ++i)
+            buf[8 + i] = static_cast<std::uint8_t>(lo >> (56 - 8 * i));
+         s.insert(s.end(), reinterpret_cast<const char*>(buf),
+                  reinterpret_cast<const char*>(buf) + 16);
+      }
+
+      static float128 decode(std::span<const char> b) noexcept
+      {
+         std::uint64_t hi = 0, lo = 0;
+         for (int i = 0; i < 8; ++i)
+            hi = (hi << 8) | static_cast<std::uint8_t>(b[i]);
+         for (int i = 0; i < 8; ++i)
+            lo = (lo << 8) | static_cast<std::uint8_t>(b[8 + i]);
+         if (hi & 0x8000000000000000ull)
+            hi ^= 0x8000000000000000ull;  // was positive: undo sign flip
+         else
+         {
+            hi = ~hi;                     // was negative: undo bit-not
+            lo = ~lo;
+         }
+         float128 out{};
+         out.limb[1] = hi;
+         out.limb[0] = lo;
+         return out;
+      }
+
+      static codec_status validate(std::span<const char> b) noexcept
+      {
+         return b.size() < 16
+                    ? codec_fail("float128: short buffer", 0, "float128")
+                    : codec_ok();
+      }
+      static codec_status validate_strict(std::span<const char> b) noexcept
+      {
+         return validate(b);
+      }
+   };
+
+   struct float128_text_codec
+   {
+      static std::size_t packsize(const float128&) noexcept
+      {
+         // "0x" + 32 hex chars.
+         return 2 + 32;
+      }
+
+      static void encode(const float128& v, std::string& s)
+      {
+         s += "0x";
+         for (int shift = 60; shift >= 0; shift -= 4)
+            s.push_back(ext_int_detail::hex_digit(
+                static_cast<unsigned>((v.limb[1] >> shift) & 0xfu)));
+         for (int shift = 60; shift >= 0; shift -= 4)
+            s.push_back(ext_int_detail::hex_digit(
+                static_cast<unsigned>((v.limb[0] >> shift) & 0xfu)));
+      }
+
+      static float128 decode(std::span<const char> in)
+      {
+         bool                  neg;
+         std::span<const char> body;
+         auto st = ext_int_detail::strip_framing(in, neg, body);
+         if (!st.ok() || neg || body.size() != 32)
+            return float128{};
+         std::uint64_t hi = 0, lo = 0;
+         for (std::size_t i = 0; i < 16; ++i)
+         {
+            int d = ext_int_detail::hex_value(body[i]);
+            if (d < 0)
+               return float128{};
+            hi = (hi << 4) | static_cast<std::uint64_t>(d);
+         }
+         for (std::size_t i = 16; i < 32; ++i)
+         {
+            int d = ext_int_detail::hex_value(body[i]);
+            if (d < 0)
+               return float128{};
+            lo = (lo << 4) | static_cast<std::uint64_t>(d);
+         }
+         float128 out{};
+         out.limb[1] = hi;
+         out.limb[0] = lo;
+         return out;
+      }
+
+      static codec_status validate(std::span<const char> in) noexcept
+      {
+         bool                  neg;
+         std::span<const char> body;
+         auto st = ext_int_detail::strip_framing(in, neg, body);
+         if (!st.ok())
+            return st;
+         if (neg)
+            return codec_fail("float128: leading '-' not allowed (encoding "
+                              "is signed-magnitude raw bits)", 0, "float128");
+         if (body.size() != 32)
+            return codec_fail("float128: expected 32 hex chars after 0x", 0,
+                              "float128");
+         for (char c : body)
+            if (ext_int_detail::hex_value(c) < 0)
+               return codec_fail("float128: invalid hex digit", 0, "float128");
+         return codec_ok();
+      }
+      static codec_status validate_strict(std::span<const char> in) noexcept
+      {
+         return validate(in);
+      }
+   };
+
    // Format codecs detect these as fixed-size primitives: for binary
    // formats the wire is their raw LE bytes. The per-format headers
    // (ssz.hpp / frac.hpp / …) are responsible for emitting the encode
@@ -346,3 +551,7 @@ namespace psio {
 PSIO_ADAPTER(psio::uint128, psio::text_category, psio::uint128_text_codec)
 PSIO_ADAPTER(psio::int128,  psio::text_category, psio::int128_text_codec)
 PSIO_ADAPTER(psio::uint256, psio::text_category, psio::uint256_text_codec)
+
+PSIO_ADAPTER(psio::float128, psio::binary_category,          psio::float128_binary_codec)
+PSIO_ADAPTER(psio::float128, psio::sortable_binary_category, psio::float128_sortable_codec)
+PSIO_ADAPTER(psio::float128, psio::text_category,            psio::float128_text_codec)
