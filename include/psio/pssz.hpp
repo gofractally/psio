@@ -383,7 +383,14 @@ namespace psio {
       template <std::size_t W, typename T>
       std::size_t size_of_v(const T& v) noexcept
       {
-         if constexpr (is_psio_box_v<T>)
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                          ::psio::pssz, T>)
+         {
+            using Proj = ::psio::adapter<std::remove_cvref_t<T>,
+                                          ::psio::binary_category>;
+            return Proj::packsize(v);
+         }
+         else if constexpr (is_psio_box_v<T>)
             return size_of_v<W>(*v.value);
          else if constexpr (is_fixed_v<T>)
             return fixed_size_of<T>();
@@ -478,6 +485,12 @@ namespace psio {
       template <std::size_t W, typename T, typename Sink>
       void encode_value(const T& v, Sink& s)
       {
+         // Adapter dispatch must be the FIRST branch of the if-else
+         // chain — separating it from the chain leaves the trailing
+         // `else { static_assert(sizeof(T)==0, ...) }` instantiated for
+         // non-reflected adapter types, which trips at compile time
+         // even though the runtime path returns from the adapter
+         // branch. Chaining via `else if constexpr` discards the tail.
          if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::pssz, T>)
          {
@@ -488,10 +501,8 @@ namespace psio {
             sink_t tmp;
             Proj::encode(v, tmp);
             s.write(tmp.data(), tmp.size());
-            return;
          }
-
-         if constexpr (is_psio_box_v<T>)
+         else if constexpr (is_psio_box_v<T>)
          {
             encode_value<W>(*v.value, s);
             return;
@@ -1062,6 +1073,9 @@ namespace psio {
       T decode_value(std::span<const char> src, std::size_t pos,
                      std::size_t end)
       {
+         // Adapter dispatch must chain into the if-else below so the
+         // trailing `else { static_assert }` is discarded for non-
+         // reflected adapter types — see encode_value's note.
          if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::pssz, T>)
          {
@@ -1070,8 +1084,7 @@ namespace psio {
             return Proj::decode(
                std::span<const char>(src.data() + pos, end - pos));
          }
-
-         if constexpr (is_psio_box_v<T>)
+         else if constexpr (is_psio_box_v<T>)
          {
             using E = typename is_psio_box<T>::elem;
             return T{decode_value<W, E>(src, pos, end)};
