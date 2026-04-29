@@ -210,6 +210,6 @@ set_tests_properties(psio_spec_ssz_tests PROPERTIES
       "PSIO_SPEC_MANIFEST=${CMAKE_BINARY_DIR}/spec-tests/_decoded/manifest.txt;PSIO_SPEC_DECODED_ROOT=${CMAKE_BINARY_DIR}/spec-tests/_decoded")
 
 # psch — pSSZ schema binary (writer + view). Round-trip + lookup.
+# Inherits the vendored xxhash include directory from the `psio`
+# target's PUBLIC interface.
 psio_add_test(psio_psch_tests psch_tests.cpp)
-target_include_directories(psio_psch_tests PRIVATE
-   ${CMAKE_SOURCE_DIR}/external/psitri/libraries/hash/include)

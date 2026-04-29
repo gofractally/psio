@@ -178,10 +178,9 @@ target_compile_features(psio_bench_pjson_types PRIVATE cxx_std_23)
 target_compile_options(psio_bench_pjson_types PRIVATE -O3 -DNDEBUG)
 
 # psch schema-format perf: encode + view + lookup latency, plus
-# size-versus-typical-alternatives.
+# size-versus-typical-alternatives.  Inherits the vendored xxhash
+# include directory from the `psio` target's PUBLIC interface.
 add_executable(psio_bench_psch bench_psch.cpp)
 target_link_libraries(psio_bench_psch PRIVATE psio)
-target_include_directories(psio_bench_psch PRIVATE
-   ${CMAKE_SOURCE_DIR}/external/psitri/libraries/hash/include)
 target_compile_features(psio_bench_psch PRIVATE cxx_std_23)
 target_compile_options(psio_bench_psch PRIVATE -O3 -DNDEBUG)

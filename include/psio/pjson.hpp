@@ -77,7 +77,7 @@
 #include <vector>
 
 #define XXH_INLINE_ALL
-#include <hash/xxhash.h>
+#include <xxhash.h>
 
 namespace psio {
 

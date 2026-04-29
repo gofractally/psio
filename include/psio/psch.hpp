@@ -20,7 +20,7 @@
 //   auto et  = v.type(fld->type_id).vector_elem_type();
 
 #define XXH_INLINE_ALL
-#include <hash/xxhash.h>
+#include <xxhash.h>
 
 #include <algorithm>
 #include <cstdint>

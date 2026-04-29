@@ -11,6 +11,7 @@
 //   * to_struct<T>(view)         — materialize T.
 //   * from_struct(t)             — encode T → pjson bytes.
 
+#include <psio/annotate.hpp>
 #include <psio/format.hpp>
 #include <psio/pjson_view.hpp>
 #include <psio/reflect.hpp>

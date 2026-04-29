@@ -22,18 +22,12 @@ add_library(psio
 target_include_directories(psio PUBLIC include)
 target_compile_features(psio PUBLIC cxx_std_23)
 
-# xxhash — vendored single-header under external/psitri; pjson uses it
-# for the 8-bit key prefilter. XXH_INLINE_ALL is defined at include
-# sites so no separate compilation unit is needed.
+# xxhash — vendored single-header at external/xxhash/xxhash.h.  pjson
+# uses it for the 8-bit key prefilter; psch uses it for the schema-
+# digest hash.  XXH_INLINE_ALL is defined at include sites so no
+# separate compilation unit is needed.
 target_include_directories(psio PUBLIC
-   ${CMAKE_SOURCE_DIR}/external/psitri/libraries/hash/include)
-
-# ucc — psitri's small-utility library. pjson_view leverages
-# ucc::find_byte (SWAR 8-byte-at-a-time scalar scan, falls back to
-# NEON/AVX2 on the supported targets) for the hash-prefilter walk
-# during object key lookup. Same pattern psitri's leaf nodes use.
-target_include_directories(psio PUBLIC
-   ${CMAKE_SOURCE_DIR}/external/psitri/libraries/ucc/include)
+   ${CMAKE_CURRENT_SOURCE_DIR}/external/xxhash)
 
 # simdjson — optional. Powers psio::pjson::from_json (JSON text →
 # pjson-binary). When available, callers get the SIMD stage-1 scan;

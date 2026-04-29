@@ -14,7 +14,7 @@
 #include <psio/format.hpp>
 #include <psio/pjson.hpp>
 
-#include <ucc/lower_bound.hpp>  // ucc::find_byte — SWAR 8-byte hash scan
+#include <psio/detail/find_byte.hpp>  // psio::detail::find_byte — SWAR 8-byte scan
 
 #include <cstdint>
 #include <cstring>
@@ -563,10 +563,10 @@ namespace psio {
 
       // Object key lookup: hash prefilter + key verify.
       //
-      // Prefilter uses `ucc::find_byte` (psitri's SWAR 8-byte-at-a-
+      // Prefilter uses `psio::detail::find_byte` (psitri's SWAR 8-byte-at-a-
       // time scan). Multi-trial bench (5M iterations × 5 trials):
       //
-      //   ucc::find_byte    15.0-15.8 ns/access   (winner)
+      //   psio::detail::find_byte    15.0-15.8 ns/access   (winner)
       //   libc memchr       16.1-16.3 ns/access
       //   scalar loop       17.9-18.9 ns/access
       //
@@ -596,7 +596,7 @@ namespace psio {
          std::size_t         base      = 0;
          while (remaining > 0)
          {
-            int hit = ucc::find_byte(hashes + base, remaining, want);
+            int hit = psio::detail::find_byte(hashes + base, remaining, want);
             if (hit >= static_cast<int>(remaining)) return std::nullopt;
             std::size_t i = base + static_cast<std::size_t>(hit);
             const std::uint8_t* slot =
@@ -838,7 +838,7 @@ namespace psio {
          std::size_t         base      = 0;
          while (remaining > 0)
          {
-            int hit = ucc::find_byte(hashes + base, remaining, want);
+            int hit = psio::detail::find_byte(hashes + base, remaining, want);
             if (hit >= static_cast<int>(remaining)) return std::nullopt;
             std::size_t j = base + static_cast<std::size_t>(hit);
             std::uint32_t kslot = read_u32_le(
