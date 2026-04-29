@@ -19,9 +19,11 @@
 #include <psio/key.hpp>
 #include <psio/adapter.hpp>
 #include <psio/pssz.hpp>
+#include <psio/pssz_view.hpp>
 #include <psio/reflect.hpp>
 #include <psio/schema.hpp>
 #include <psio/ssz.hpp>
+#include <psio/view.hpp>
 
 #include <algorithm>
 
@@ -725,4 +727,75 @@ TEST_CASE("psio::key embeds an adapter-encoded digest inside a record",
                                           std::span<const char>{bytes});
    REQUIRE(back.d == d);
    REQUIRE(back.label == "hello");
+}
+
+// ── Adapter view: zero-copy field access through an adapter-encoded type ─
+//
+// `view<T, Fmt>` for a type with a registered adapter activates the
+// adapter-view specialization: `.bytes()` returns the raw payload
+// (zero-copy), `.decode()` reconstructs the owned T. Inside a record,
+// `view<Record, Fmt>::get<N>()` for an adapter-typed field N yields
+// the adapter view rather than tripping the (now unreachable) record
+// walker.
+
+struct PsszEnvelope
+{
+   std::int32_t version;
+   KeyDigest    d;
+   std::string  note;
+};
+PSIO_REFLECT(PsszEnvelope, version, d, note)
+
+TEST_CASE("view<T, pssz>: top-level adapter type exposes bytes() + decode()",
+          "[adapter][view][pssz]")
+{
+   KeyDigest d{};
+   for (std::size_t i = 0; i < 32; ++i)
+      d.bytes[i] = static_cast<std::uint8_t>(0xA0 + i);
+
+   auto buf = psio::encode(psio::pssz{}, d);
+
+   psio::view<KeyDigest, psio::pssz, psio::storage::const_borrow> v{
+       std::span<const char>{buf}};
+
+   // Zero-copy raw access.
+   auto raw = v.bytes();
+   REQUIRE(raw.size() == 32);
+   REQUIRE(static_cast<std::uint8_t>(raw[0])  == 0xA0);
+   REQUIRE(static_cast<std::uint8_t>(raw[31]) == 0xBF);
+
+   // Owned-T reconstruction.
+   auto back = v.decode();
+   REQUIRE(back == d);
+}
+
+TEST_CASE("view<Record, pssz>::get<N> on an adapter-typed field",
+          "[adapter][view][pssz]")
+{
+   KeyDigest d{};
+   d.bytes[0]  = 0xDE;
+   d.bytes[1]  = 0xAD;
+   d.bytes[30] = 0xBE;
+   d.bytes[31] = 0xEF;
+
+   PsszEnvelope env{77, d, "hi"};
+   auto         buf = psio::encode(psio::pssz{}, env);
+
+   psio::view<PsszEnvelope, psio::pssz, psio::storage::const_borrow> rv{
+       std::span<const char>{buf}};
+
+   // version is a primitive — returned by value.
+   REQUIRE(rv.template get<0>() == 77);
+
+   // d is adapter-typed — returns the adapter view.
+   auto dv = rv.template get<1>();
+   REQUIRE(dv.bytes().size() == 32);
+   REQUIRE(static_cast<std::uint8_t>(dv.bytes()[0])  == 0xDE);
+   REQUIRE(static_cast<std::uint8_t>(dv.bytes()[31]) == 0xEF);
+   REQUIRE(dv.decode() == d);
+
+   // note is a string — its existing view machinery still works.
+   auto nv = rv.template get<2>();
+   REQUIRE(std::string_view(nv._psio_data().data(),
+                            nv._psio_data().size()) == "hi");
 }

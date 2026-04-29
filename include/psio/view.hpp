@@ -27,6 +27,7 @@
 // To add a format's view support, specialize `view_layout::traits<Fmt>`
 // in that format's companion header (e.g. `ssz_view.hpp`).
 
+#include <psio/adapter.hpp>
 #include <psio/buffer.hpp>
 #include <psio/shapes.hpp>
 #include <psio/storage.hpp>
@@ -412,6 +413,77 @@ namespace psio {
       }
    };
 
+   // ── view<T, Fmt, Store> for adapter-encoded T ─────────────────────────
+   //
+   // When T has an adapter registered under Fmt's preferred presentation
+   // category, the encoded bytes belong to the adapter — not to Fmt's
+   // shape walker. The Record-view, vector-view, etc. cannot interpret
+   // those bytes; only the adapter can. This specialization is the
+   // "opaque payload" view: it exposes the raw bytes for zero-copy use
+   // and a `decode()` accessor that hands back an owned T via
+   // `adapter::decode`.
+   //
+   // Activates whenever `format_should_dispatch_adapter_v<Fmt, T>` is
+   // true. The Record-view specialization adds the inverse constraint
+   // so a reflected struct with an adapter routes here, not through
+   // the field walker.
+   //
+   // For adapters that wish to publish a richer field-level surface
+   // (e.g. a length-prefixed structured payload), they can return a
+   // bespoke view from `decode()` — the contract here is just "the
+   // adapter owns the bytes, this view gives you an honest interface
+   // to them".
+   template <typename T, typename Fmt, storage Store>
+      requires (::psio::format_should_dispatch_adapter_v<Fmt,
+                   std::remove_cvref_t<T>>)
+   class view<T, Fmt, Store>
+   {
+      std::span<const char> data_;
+
+     public:
+      using element_type                    = T;
+      using format_type                     = Fmt;
+      static constexpr storage storage_kind = Store;
+
+      view() = default;
+      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      // Indirect-friendly ctor — the parent (record / vector / …) view
+      // passes a root span used by formats that follow offsets. The
+      // adapter view is opaque, so the root is discarded.
+      view(std::span<const char> s, std::span<const char> /*root*/) noexcept
+         : data_(s)
+      {
+      }
+
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      {
+         return data_;
+      }
+
+      // Raw bytes of the adapter payload — zero-copy.
+      [[nodiscard]] std::span<const char> bytes() const noexcept
+      {
+         return data_;
+      }
+
+      // Reconstruct an owned T by calling the adapter's decode. Pays
+      // an allocation / copy for variable-length adapters; for fixed-
+      // width adapters this is typically a memcpy.
+      [[nodiscard]] T decode() const
+      {
+         using A = ::psio::adapter<std::remove_cvref_t<T>,
+                                   ::psio::preferred_category_t<Fmt>>;
+         return A::decode(data_);
+      }
+
+      // Convenience alias matching the std::optional / std::vector
+      // surface — `.get()` on those returns a view; here we already
+      // are the view, so `.get()` returns the decoded T. Callers who
+      // want a sub-view should use `.bytes()` and construct one
+      // themselves with the appropriate adapter-specific viewer.
+      [[nodiscard]] T get() const { return decode(); }
+   };
+
    // ── view<T, Fmt, Store> for Reflected struct T ────────────────────────
    //
    // A Reflected struct view exposes per-field accessors via `get<N>()`.
@@ -430,9 +502,14 @@ namespace psio {
    // Formats that don't (or shapes the format can't handle, e.g., ssz on
    // a record with a variable field but no offset-table support) fall
    // through to whatever caller mechanism handles the unsupported case.
+   //
+   // Adapter exclusion: when T has an adapter under Fmt's category, the
+   // bytes aren't a record layout — they're the adapter's payload. The
+   // adapter-view specialization above wins instead.
    template <typename T, typename Fmt, storage Store>
       requires Reflected<T>
             && view_layout::has_record_support<Fmt, T>::value
+            && (!::psio::format_should_dispatch_adapter_v<Fmt, T>)
    class view<T, Fmt, Store>
    {
       // data_ — the bytes of THIS record (a slice of the encoded buffer).
