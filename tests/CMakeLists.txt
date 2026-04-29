@@ -4,7 +4,7 @@
 # add psio_<phase>_tests executables via psio_add_test().
 
 set(PSIO_CATCH2_INCLUDE
-   ${CMAKE_SOURCE_DIR}/libraries/psizam/external/Catch2/single_include/catch2)
+   ${CMAKE_CURRENT_SOURCE_DIR}/../external/catch2)
 
 # Helper — every phase's test executable calls this so they share the
 # same main(), Catch2 include path, C++ standard, and psio link.
