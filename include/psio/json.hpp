@@ -121,6 +121,12 @@ namespace psio {
          // produces the payload unquoted; JSON owns the surrounding
          // quotes + escape rules (double framing: outer owns
          // delimiters, inner owns payload — see §5.3.7).
+         //
+         // Must be the FIRST branch of the if-else chain so the
+         // trailing `else { static_assert(sizeof(T) == 0) }` is
+         // discarded for adapter-encoded types — otherwise it
+         // instantiates at compile time even though the runtime
+         // path returns from the adapter branch.
          if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::json, T>)
          {
@@ -129,10 +135,8 @@ namespace psio {
             std::string payload;
             Proj::encode(v, payload);
             write_escaped_string(std::string_view{payload}, s);
-            return;
          }
-
-         if constexpr (std::is_same_v<T, bool>)
+         else if constexpr (std::is_same_v<T, bool>)
             s += v ? "true" : "false";
          else if constexpr (std::is_integral_v<T>)
          {
@@ -351,7 +355,8 @@ namespace psio {
       {
          // Adapter mirror of the encode side: consume the JSON
          // string (outer frame); hand its unescaped contents to the
-         // adapter's decode.
+         // adapter's decode. Must be the first branch — see the
+         // encode-side note about chaining vs the static_assert tail.
          if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::json, T>)
          {
@@ -360,8 +365,7 @@ namespace psio {
             std::string payload = parse_string(pr);
             return Proj::decode(std::span<const char>{payload});
          }
-
-         if constexpr (std::is_same_v<T, bool>)
+         else if constexpr (std::is_same_v<T, bool>)
          {
             pr.skip_ws();
             if (pr.p < pr.end && *pr.p == 't')

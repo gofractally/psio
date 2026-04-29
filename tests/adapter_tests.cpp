@@ -799,3 +799,112 @@ TEST_CASE("view<Record, pssz>::get<N> on an adapter-typed field",
    REQUIRE(std::string_view(nv._psio_data().data(),
                             nv._psio_data().size()) == "hi");
 }
+
+// ── ext_int text adapters: uint128 / int128 / uint256 in JSON ────────────
+//
+// `psio::ext_int.hpp` registers default `text_category` adapters for the
+// three big-int types using `0x`-prefixed hex (signed-magnitude for
+// int128). JSON's encode/decode chain consults them like any other
+// text adapter — these tests cover round-trip, edge values, and the
+// negative form for int128.
+
+TEST_CASE("ext_int text adapter: uint128 round-trips through JSON",
+          "[adapter][ext_int][json]")
+{
+   const psio::uint128 zero      = 0;
+   const psio::uint128 small     = 0x42;
+   const psio::uint128 max64     = (psio::uint128{1} << 64) - 1;
+   const psio::uint128 above_64  = (psio::uint128{1} << 64);
+   const psio::uint128 max_value = ~psio::uint128{0};
+
+   for (const auto& v : {zero, small, max64, above_64, max_value})
+   {
+      auto j = psio::encode(psio::json{}, v);
+      auto back = psio::decode<psio::uint128>(psio::json{},
+                                              std::span<const char>{j});
+      REQUIRE(back == v);
+      // Sanity-check the textual form: starts with `"0x` and ends with `"`.
+      REQUIRE(j.size() >= 5);
+      REQUIRE(j.front() == '"');
+      REQUIRE(j.back()  == '"');
+      REQUIRE(j[1] == '0');
+      REQUIRE(j[2] == 'x');
+   }
+
+   // Specific shapes.
+   REQUIRE(psio::encode(psio::json{}, psio::uint128{0})  == std::string{"\"0x0\""});
+   REQUIRE(psio::encode(psio::json{}, psio::uint128{0xFF}) ==
+           std::string{"\"0xff\""});
+}
+
+TEST_CASE("ext_int text adapter: int128 signed-magnitude hex",
+          "[adapter][ext_int][json]")
+{
+   const psio::int128 zero  =  0;
+   const psio::int128 pos   =  0x7e;
+   const psio::int128 neg   = -0x7e;
+   const psio::int128 lo64  = -(psio::int128{1} << 60);
+   const psio::int128 hi    =  (psio::int128{1} << 100);
+
+   for (const auto& v : {zero, pos, neg, lo64, hi})
+   {
+      auto j    = psio::encode(psio::json{}, v);
+      auto back = psio::decode<psio::int128>(psio::json{},
+                                             std::span<const char>{j});
+      REQUIRE(back == v);
+   }
+
+   REQUIRE(psio::encode(psio::json{}, psio::int128{ 0xab}) == std::string{"\"0xab\""});
+   REQUIRE(psio::encode(psio::json{}, psio::int128{-0xab}) == std::string{"\"-0xab\""});
+}
+
+TEST_CASE("ext_int text adapter: uint256 round-trips through JSON",
+          "[adapter][ext_int][json]")
+{
+   psio::uint256 zero{};
+   psio::uint256 small{std::uint64_t{0x42}};
+   psio::uint256 mid;
+   mid.limb[1] = 0x1234;        // value spans two limbs
+   psio::uint256 high;
+   high.limb[3] = 0xfedcba9876543210ull;  // top limb only
+   psio::uint256 max_value;
+   for (auto& l : max_value.limb) l = ~std::uint64_t{0};
+
+   for (const auto& v : {zero, small, mid, high, max_value})
+   {
+      auto j    = psio::encode(psio::json{}, v);
+      auto back = psio::decode<psio::uint256>(psio::json{},
+                                              std::span<const char>{j});
+      REQUIRE(back == v);
+   }
+
+   REQUIRE(psio::encode(psio::json{}, psio::uint256{std::uint64_t{0}}) ==
+           std::string{"\"0x0\""});
+   REQUIRE(psio::encode(psio::json{}, psio::uint256{std::uint64_t{0xff}}) ==
+           std::string{"\"0xff\""});
+}
+
+// Confirms that a record with a uint256 field — previously a hard
+// compile error in JSON — now serializes via the type-default adapter.
+struct TxFee
+{
+   std::string   sender;
+   psio::uint256 amount;
+};
+PSIO_REFLECT(TxFee, sender, amount)
+
+TEST_CASE("ext_int text adapter: a record with a uint256 field encodes to JSON",
+          "[adapter][ext_int][json]")
+{
+   psio::uint256 amount;
+   amount.limb[0] = 0xdeadbeefULL;
+
+   TxFee f{"alice", amount};
+   auto  j = psio::encode(psio::json{}, f);
+   REQUIRE(j.find("\"sender\":\"alice\"") != std::string::npos);
+   REQUIRE(j.find("\"amount\":\"0xdeadbeef\"") != std::string::npos);
+
+   auto back = psio::decode<TxFee>(psio::json{}, std::span<const char>{j});
+   REQUIRE(back.sender == "alice");
+   REQUIRE(back.amount == amount);
+}
