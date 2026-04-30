@@ -15,8 +15,10 @@
 #define CATCH_CONFIG_FAST_COMPILE
 #include <catch.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <string>
 #include <string_view>
@@ -318,6 +320,66 @@ TEST_CASE("pjson wire: 16-byte negint encodes large negative __int128",
    auto d = pjson::decode({b.data(), b.size()});
    REQUIRE(d.holds<pjson_number>());
    CHECK(d.as<pjson_number>().mantissa == v);
+}
+
+namespace pjson_uint64_typed_test
+{
+   struct U64Holder
+   {
+      std::uint64_t v = 0;
+   };
+   PSIO_REFLECT(U64Holder, v)
+}
+
+TEST_CASE("pjson typed: u64 with high bit set encodes as uint, not negint",
+          "[pjson][typed][uint64]")
+{
+   // Spec §4.4: an unsigned source must encode as uint regardless of
+   // value. Earlier impl cast every integral to int64_t before
+   // dispatch, so std::uint64_t values ≥ 2⁶³ became negative i64 and
+   // emitted as negint. Verify the typed dispatch keeps unsigned
+   // unsigned.
+   using pjson_uint64_typed_test::U64Holder;
+   constexpr std::uint64_t high_bit_set = 0x8000'0000'0000'0001ull;  // 2⁶³ + 1
+   U64Holder h{high_bit_set};
+   auto bytes = psio::from_struct(h);
+
+   REQUIRE(pjson::validate({bytes.data(), bytes.size()}));
+   auto v = pjson::decode({bytes.data(), bytes.size()});
+   const auto& obj = v.as<pjson_object>();
+   REQUIRE(obj.size() == 1);
+   REQUIRE(obj[0].first == "v");
+   const auto& field = obj[0].second;
+   REQUIRE(field.holds<pjson_number>());
+   CHECK(field.as<pjson_number>().mantissa
+         == static_cast<__int128>(high_bit_set));
+
+   // Direct wire-byte assertion: the value tag inside this small
+   // object should be t_uint (high nibble 4), NOT t_negint (7).
+   // Object layout: tag(0xC0) + width_byte + value_data(...) + ...
+   //   value_data = key 'v' (0x76) + value tag + value bytes.
+   auto it = std::find(bytes.begin(), bytes.end(), std::uint8_t{0x76});
+   REQUIRE(it != bytes.end());
+   auto value_tag = *(++it);
+   CHECK((value_tag >> 4) == 0x4);  // t_uint, not t_negint (0x7)
+}
+
+TEST_CASE("pjson typed: full u64::MAX round-trips through uint",
+          "[pjson][typed][uint64]")
+{
+   using pjson_uint64_typed_test::U64Holder;
+   U64Holder h{std::numeric_limits<std::uint64_t>::max()};
+   auto bytes = psio::from_struct(h);
+   REQUIRE(pjson::validate({bytes.data(), bytes.size()}));
+   auto v = pjson::decode({bytes.data(), bytes.size()});
+   const auto& obj = v.as<pjson_object>();
+   REQUIRE(obj.size() == 1);
+   REQUIRE(obj[0].first == "v");
+   const auto& field = obj[0].second;
+   REQUIRE(field.holds<pjson_number>());
+   CHECK(field.as<pjson_number>().mantissa
+         == static_cast<__int128>(
+                std::numeric_limits<std::uint64_t>::max()));
 }
 
 TEST_CASE("pjson wire: ieee_float sci-source-bit ignored on decode",

@@ -608,6 +608,15 @@ namespace psio {
              : static_cast<std::uint64_t>(i);
          return 1u + u64_byte_count(mag);
       }
+      // Size for an unsigned 64-bit value. Distinct from int_size() so
+      // callers with a true unsigned source don't reinterpret the high
+      // bit as a sign — values ≥ 2⁶³ stay non-negative and encode as
+      // `uint`, not `negint` (§4.4).
+      inline std::size_t uint_size(std::uint64_t v) noexcept
+      {
+         if (v <= 15) return 1;
+         return 1u + u64_byte_count(v);
+      }
       inline std::size_t number_size(const pjson_number& n) noexcept
       {
          if (n.scale == 0 && n.mantissa >= 0 && n.mantissa <= 15)
@@ -757,6 +766,25 @@ namespace psio {
          std::uint8_t bc = u64_byte_count(mag);
          dst[pos] = static_cast<std::uint8_t>((t_negint << 4) | (bc - 1));
          std::memcpy(dst + pos + 1, &mag, bc);
+         return 1u + bc;
+      }
+      // Encode an unsigned 64-bit value. Always emits `uint_inline` /
+      // `uint` (never `negint`). Distinct from `encode_int64_at` so
+      // unsigned sources with the high bit set do not reinterpret as
+      // negative — see §4.4.
+      inline std::size_t encode_uint64_at(std::uint8_t* dst,
+                                          std::size_t   pos,
+                                          std::uint64_t v) noexcept
+      {
+         if (v <= 15)
+         {
+            dst[pos] = static_cast<std::uint8_t>(
+                (t_uint_inline << 4) | static_cast<std::uint8_t>(v));
+            return 1;
+         }
+         std::uint8_t bc = u64_byte_count(v);
+         dst[pos] = static_cast<std::uint8_t>((t_uint << 4) | (bc - 1));
+         std::memcpy(dst + pos + 1, &v, bc);
          return 1u + bc;
       }
       inline std::size_t encode_number_at(std::uint8_t*       dst,

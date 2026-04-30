@@ -342,7 +342,15 @@ namespace psio {
       {
          if constexpr (std::is_same_v<F, bool>) return 1;
          else if constexpr (std::is_integral_v<F>)
-            return int_size(static_cast<std::int64_t>(v));
+         {
+            // Sign-dispatch on the source type (§4.4): unsigned sources
+            // go through uint_size to keep the high bit's magnitude;
+            // signed sources go through int_size which may emit negint.
+            if constexpr (std::is_signed_v<F>)
+               return int_size(static_cast<std::int64_t>(v));
+            else
+               return uint_size(static_cast<std::uint64_t>(v));
+         }
          else if constexpr (std::is_floating_point_v<F>)
          {
             if (!std::isfinite(v)) return 9;
@@ -424,8 +432,16 @@ namespace psio {
             return 1;
          }
          else if constexpr (std::is_integral_v<F>)
-            return encode_int64_at(dst, pos,
-                                   static_cast<std::int64_t>(v));
+         {
+            // §4.4 sign-dispatch: unsigned sources go through
+            // encode_uint64_at to preserve high-bit magnitude.
+            if constexpr (std::is_signed_v<F>)
+               return encode_int64_at(dst, pos,
+                                      static_cast<std::int64_t>(v));
+            else
+               return encode_uint64_at(dst, pos,
+                                       static_cast<std::uint64_t>(v));
+         }
          else if constexpr (std::is_floating_point_v<F>)
             return encode_double_at(dst, pos, static_cast<double>(v));
          else if constexpr (std::is_same_v<F, std::string> ||
