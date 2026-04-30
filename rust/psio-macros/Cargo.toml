@@ -1,0 +1,16 @@
+[package]
+name = "psio-macros"
+version = "0.1.0"
+edition = "2021"
+description = "Derive macros for psio serialization formats (fracpack, capnp, flatbuf, WIT)"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+darling = "0.14"
+proc-macro-error = "1.0.4"
+proc-macro2 = "1.0.36"
+quote = "1.0.15"
+syn = { version = "1.0.86", features = ["full", "visit-mut"] }
