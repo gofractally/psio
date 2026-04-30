@@ -29,9 +29,13 @@
 //   0  null              raw = 0 bytes
 //   1  bool              raw = 0;  low nibble: 0=false, 1=true
 //   3  uint_inline       raw = 0;  unsigned value in low nibble (0..15)
-//   4  int               raw = (low_nibble+1) bytes;  zigzag-LE mantissa
+//   4  uint              raw = (low_nibble+1) bytes; raw LE unsigned magnitude
 //   5  decimal           raw = (low_nibble+1) mantissa bytes + varscale (1..4)
-//   6  ieee_float        raw = 8 bytes
+//   6  ieee_float        low nibble: bits 2..0 = log2(byte_count) (1=binary16,
+//                          2=binary32, 3=binary64, 4=binary128); bit 3 = sci-
+//                          source hint. raw = byte_count IEEE-754 LE bytes.
+//   7  negint            raw = (low_nibble+1) bytes; raw LE unsigned |value|;
+//                          all-zero payload reserved
 //   8  string            raw = (size - 1) bytes; low nibble flag:
 //                          0=raw_text, 1=escape_form
 //   A  bytes             raw = (size - 1) bytes; low nibble reserved (must be 0)
@@ -44,7 +48,7 @@
 //                                    8=f32 9=f64)
 //                          11..15 = reserved
 //   C  object            raw = container content
-//   2, 7, 9, D..F        reserved
+//   2, 9, D..F           reserved
 //
 // No magic, no version, no flags. Versioning lives in the application
 // wrapper (HTTP content-type, file header, RPC envelope). Buffer length
@@ -273,9 +277,14 @@ namespace psio {
          t_bool        = 1,    // low nibble: 0 = false, 1 = true
          // 2 reserved
          t_uint_inline = 3,    // low nibble: unsigned value 0..15
-         t_int         = 4,    // low nibble: byte_count - 1 (1..16)
+         t_uint        = 4,    // low nibble: byte_count - 1 (1..16);
+                               //   payload = magnitude as raw LE unsigned bytes
          t_decimal     = 5,    // low nibble: mantissa byte_count - 1
-         t_ieee_float  = 6,
+         t_ieee_float  = 6,    // low nibble: bits 2..0 = log2(byte_count),
+                               //   bit 3 = sci-source hint
+         t_negint      = 7,    // low nibble: byte_count - 1 (1..16);
+                               //   payload = |value| as raw LE unsigned bytes
+                               //   (all-zero payload reserved)
          t_string      = 8,    // low nibble: text encoding flag
          // 9 reserved
          t_bytes       = 0xA,  // low nibble reserved (must be 0)
@@ -283,6 +292,35 @@ namespace psio {
                                //   (element type code = low_nibble - 1)
          t_object      = 0xC,
       };
+
+      // ── ieee_float low-nibble layout (§4.6) ───────────────────────────
+      //
+      // bits 2..0 = log2(byte_count): 1=binary16, 2=binary32, 3=binary64,
+      //                                4=binary128 (others reserved)
+      // bit 3      = sci-source hint (0=decimal-form source, 1=scientific)
+      //
+      // The reference C++ implementation emits binary64 only (the only
+      // width C++ `double` natively exposes). Decode accepts binary32 and
+      // binary64; binary16/binary128 return decode failure with a
+      // "not implemented" semantic until software fp16/fp128 lands.
+      enum : std::uint8_t
+      {
+         ieee_width_mask  = 0x07,  // bits 2..0
+         ieee_sci_bit     = 0x08,  // bit 3
+         ieee_width_f16   = 1,     // log2(2) = 1
+         ieee_width_f32   = 2,     // log2(4) = 2
+         ieee_width_f64   = 3,     // log2(8) = 3
+         ieee_width_f128  = 4,     // log2(16) = 4
+      };
+
+      // Canonical NaN bit pattern at binary64 (§15.2.1): sign=0,
+      // exponent=all-1s, top mantissa bit=1, rest=0. Encoders must
+      // rewrite any source NaN to this pattern before emitting
+      // ieee_float.
+      inline constexpr std::uint64_t canonical_nan_f64 =
+          0x7FF8000000000000ull;
+      inline constexpr std::uint32_t canonical_nan_f32 =
+          0x7FC00000u;
 
       // Element type codes for the typed-array form of t_array (when
       // the tag's low nibble is non-zero). On the wire the low nibble
@@ -536,25 +574,55 @@ namespace psio {
       // ── value sizing (recursion over pjson_value) ─────────────────────
       inline std::size_t value_size(const pjson_value& v) noexcept;
 
+      // Byte count of a u64 magnitude as raw LE unsigned bytes.
+      // Returns 1 for v == 0 (canonical encoders use uint_inline for
+      // small values, but a uint with bc=1 / payload=0 is still legal).
+      inline std::uint8_t u64_byte_count(std::uint64_t v) noexcept
+      {
+         if (v == 0) return 1;
+         std::uint8_t bc = 1;
+         std::uint64_t t = v >> 8;
+         while (t) { ++bc; t >>= 8; }
+         return bc;
+      }
+      // Byte count of a u128 magnitude as raw LE unsigned bytes.
+      inline std::uint8_t u128_byte_count(__uint128_t v) noexcept
+      {
+         if (v == 0) return 1;
+         std::uint64_t hi = static_cast<std::uint64_t>(v >> 64);
+         std::uint64_t lo = static_cast<std::uint64_t>(v);
+         int bits = hi != 0 ? (128 - std::countl_zero(hi))
+                            : (64 - std::countl_zero(lo));
+         return static_cast<std::uint8_t>((bits + 7) / 8);
+      }
+
       inline std::size_t uint_inline_size() noexcept { return 1; }
       inline std::size_t int_size(std::int64_t i) noexcept
       {
          if (i >= 0 && i <= 15) return 1;
-         std::uint64_t zz =
-             (static_cast<std::uint64_t>(i) << 1) ^
-             static_cast<std::uint64_t>(i >> 63);
-         std::uint8_t bc = 1;
-         std::uint64_t t = zz >> 8;
-         while (t) { ++bc; t >>= 8; }
-         return 1u + bc;
+         // Sign-dispatch: uint for non-negative magnitudes, negint for
+         // negative. Magnitude is the raw |i| as unsigned bytes (no
+         // zigzag).
+         std::uint64_t mag = (i < 0)
+             ? static_cast<std::uint64_t>(-(i + 1)) + 1u  // safe |i|
+             : static_cast<std::uint64_t>(i);
+         return 1u + u64_byte_count(mag);
       }
       inline std::size_t number_size(const pjson_number& n) noexcept
       {
          if (n.scale == 0 && n.mantissa >= 0 && n.mantissa <= 15)
             return 1;
+         if (n.scale == 0)
+         {
+            // Sign-dispatch: uint for non-negative, negint for negative.
+            __uint128_t mag = (n.mantissa < 0)
+                ? static_cast<__uint128_t>(-n.mantissa)
+                : static_cast<__uint128_t>(n.mantissa);
+            return 1u + u128_byte_count(mag);
+         }
+         // Decimals still use zigzag mantissa per §4.5 (unchanged).
          __uint128_t  zz = zz128_encode(n.mantissa);
          std::uint8_t bc = mantissa_byte_count(zz);
-         if (n.scale == 0) return 1u + bc;
          return 1u + bc + varint62_byte_count(n.scale);
       }
       inline std::size_t string_size(std::string_view s) noexcept
@@ -673,14 +741,22 @@ namespace psio {
                 (t_uint_inline << 4) | static_cast<std::uint8_t>(i));
             return 1;
          }
-         std::uint64_t zz =
-             (static_cast<std::uint64_t>(i) << 1) ^
-             static_cast<std::uint64_t>(i >> 63);
-         std::uint8_t bc = 1;
-         std::uint64_t t = zz >> 8;
-         while (t) { ++bc; t >>= 8; }
-         dst[pos] = static_cast<std::uint8_t>((t_int << 4) | (bc - 1));
-         std::memcpy(dst + pos + 1, &zz, bc);
+         // §4.4 sign-dispatch: uint for ≥ 0, negint for < 0. Magnitude
+         // is raw little-endian unsigned bytes (no zigzag).
+         if (i >= 0)
+         {
+            std::uint64_t mag = static_cast<std::uint64_t>(i);
+            std::uint8_t  bc  = u64_byte_count(mag);
+            dst[pos] = static_cast<std::uint8_t>((t_uint << 4) | (bc - 1));
+            std::memcpy(dst + pos + 1, &mag, bc);
+            return 1u + bc;
+         }
+         // Compute |i| safely (handles INT64_MIN — `-i` would UB).
+         std::uint64_t mag =
+             static_cast<std::uint64_t>(-(i + 1)) + 1u;
+         std::uint8_t bc = u64_byte_count(mag);
+         dst[pos] = static_cast<std::uint8_t>((t_negint << 4) | (bc - 1));
+         std::memcpy(dst + pos + 1, &mag, bc);
          return 1u + bc;
       }
       inline std::size_t encode_number_at(std::uint8_t*       dst,
@@ -693,26 +769,55 @@ namespace psio {
                 (t_uint_inline << 4) | static_cast<std::uint8_t>(n.mantissa));
             return 1;
          }
-         __uint128_t  zz = zz128_encode(n.mantissa);
-         std::uint8_t bc = mantissa_byte_count(zz);
          if (n.scale == 0)
          {
-            dst[pos] = static_cast<std::uint8_t>((t_int << 4) | (bc - 1));
-            std::memcpy(dst + pos + 1, &zz, bc);
+            // §4.4 sign-dispatch on the i128 mantissa.
+            if (n.mantissa >= 0)
+            {
+               __uint128_t mag = static_cast<__uint128_t>(n.mantissa);
+               std::uint8_t bc = u128_byte_count(mag);
+               dst[pos] = static_cast<std::uint8_t>(
+                   (t_uint << 4) | (bc - 1));
+               std::memcpy(dst + pos + 1, &mag, bc);
+               return 1u + bc;
+            }
+            __uint128_t mag = static_cast<__uint128_t>(-n.mantissa);
+            std::uint8_t bc = u128_byte_count(mag);
+            dst[pos] = static_cast<std::uint8_t>(
+                (t_negint << 4) | (bc - 1));
+            std::memcpy(dst + pos + 1, &mag, bc);
             return 1u + bc;
          }
+         // Decimals still use zigzag mantissa per §4.5 (unchanged).
+         __uint128_t  zz = zz128_encode(n.mantissa);
+         std::uint8_t bc = mantissa_byte_count(zz);
          dst[pos] = static_cast<std::uint8_t>((t_decimal << 4) | (bc - 1));
          std::memcpy(dst + pos + 1, &zz, bc);
          std::size_t scale_bytes =
              write_varint62(dst, pos + 1 + bc, n.scale);
          return 1u + bc + scale_bytes;
       }
+      // Encode a double as ieee_float (§4.6). C++ exposes only `double`
+      // natively, so we always emit binary64; tag low nibble is
+      // `ieee_width_f64` (3), with sci-source hint cleared (we don't
+      // track JSON-source notation today). Per §15.2.1, NaN bit
+      // patterns are rewritten to the canonical quiet-NaN-with-zero-
+      // payload at the chosen width.
       inline std::size_t encode_double_raw_at(std::uint8_t* dst,
                                               std::size_t   pos,
                                               double        d) noexcept
       {
-         dst[pos] = static_cast<std::uint8_t>(t_ieee_float << 4);
-         std::memcpy(dst + pos + 1, &d, 8);
+         dst[pos] = static_cast<std::uint8_t>(
+             (t_ieee_float << 4) | ieee_width_f64);
+         if (std::isnan(d))
+         {
+            std::uint64_t bits = canonical_nan_f64;
+            std::memcpy(dst + pos + 1, &bits, 8);
+         }
+         else
+         {
+            std::memcpy(dst + pos + 1, &d, 8);
+         }
          return 9;
       }
       inline std::size_t encode_double_at(std::uint8_t* dst,
@@ -1361,23 +1466,71 @@ namespace psio {
             case t_uint_inline:
                out = pjson_value{static_cast<std::int64_t>(low)};
                return size == 1;
-            case t_int:
+            case t_uint:
             {
+               // §4.4 uint: payload is the magnitude as raw LE
+               // unsigned bytes; logical value = magnitude.
                std::uint8_t bc = static_cast<std::uint8_t>(low + 1);
                if (1u + bc != size) return false;
                if (bc <= 8)
                {
-                  std::uint64_t zz = 0;
-                  std::memcpy(&zz, p + 1, bc);
-                  out = pjson_value{static_cast<std::int64_t>(
-                      (zz >> 1) ^ (~(zz & 1) + 1))};
+                  std::uint64_t mag = 0;
+                  std::memcpy(&mag, p + 1, bc);
+                  if (mag <= static_cast<std::uint64_t>(
+                                 std::numeric_limits<std::int64_t>::max()))
+                     out = pjson_value{static_cast<std::int64_t>(mag)};
+                  else
+                     out = pjson_value{
+                         pjson_number{static_cast<__int128>(mag), 0}};
                }
                else
                {
-                  __uint128_t zz = 0;
-                  std::memcpy(&zz, p + 1, bc);
+                  __uint128_t mag = 0;
+                  std::memcpy(&mag, p + 1, bc);
                   out = pjson_value{
-                      pjson_number{zz128_decode(zz), 0}};
+                      pjson_number{static_cast<__int128>(mag), 0}};
+               }
+               return true;
+            }
+            case t_negint:
+            {
+               // §4.4 negint: payload is |value| as raw LE unsigned
+               // bytes; logical value = −magnitude. All-zero payload
+               // is reserved (no negative-zero integer).
+               std::uint8_t bc = static_cast<std::uint8_t>(low + 1);
+               if (1u + bc != size) return false;
+               if (bc <= 8)
+               {
+                  std::uint64_t mag = 0;
+                  std::memcpy(&mag, p + 1, bc);
+                  if (mag == 0) return false;
+                  // mag fits u64; -mag fits i64 iff mag ≤ 2^63.
+                  if (mag <= static_cast<std::uint64_t>(
+                                 std::numeric_limits<std::int64_t>::max()) +
+                                 1u)
+                  {
+                     // Compute -mag without UB at INT64_MIN.
+                     std::int64_t v =
+                         (mag == static_cast<std::uint64_t>(
+                                     std::numeric_limits<std::int64_t>::max()) +
+                                     1u)
+                             ? std::numeric_limits<std::int64_t>::min()
+                             : -static_cast<std::int64_t>(mag);
+                     out = pjson_value{v};
+                  }
+                  else
+                  {
+                     out = pjson_value{
+                         pjson_number{-static_cast<__int128>(mag), 0}};
+                  }
+               }
+               else
+               {
+                  __uint128_t mag = 0;
+                  std::memcpy(&mag, p + 1, bc);
+                  if (mag == 0) return false;
+                  out = pjson_value{
+                      pjson_number{-static_cast<__int128>(mag), 0}};
                }
                return true;
             }
@@ -1417,11 +1570,33 @@ namespace psio {
             }
             case t_ieee_float:
             {
-               if (size != 9) return false;
-               double d;
-               std::memcpy(&d, p + 1, 8);
-               out = pjson_value{d};
-               return true;
+               // §4.6: low nibble splits into width selector
+               // (bits 2..0 = log2(byte_count)) + sci-source hint
+               // (bit 3, ignored on decode beyond stripping). The
+               // reference implementation supports binary32 and
+               // binary64; binary16 / binary128 are reserved for
+               // future software-fp work.
+               std::uint8_t width_bits = low & ieee_width_mask;
+               // Mask out bit 3 (sci hint) before validation.
+               if (width_bits == ieee_width_f64)
+               {
+                  if (size != 9) return false;
+                  double d;
+                  std::memcpy(&d, p + 1, 8);
+                  out = pjson_value{d};
+                  return true;
+               }
+               if (width_bits == ieee_width_f32)
+               {
+                  if (size != 5) return false;
+                  float f;
+                  std::memcpy(&f, p + 1, 4);
+                  out = pjson_value{static_cast<double>(f)};
+                  return true;
+               }
+               // binary16, binary128, or reserved width — not supported
+               // by the reference C++ decoder yet.
+               return false;
             }
             case t_string:
             {

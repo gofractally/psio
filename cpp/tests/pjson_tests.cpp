@@ -124,6 +124,217 @@ TEST_CASE("pjson round-trip: empty containers", "[pjson][container]")
    CHECK(rt(pjson_value{pjson_object{}}).as<pjson_object>().empty());
 }
 
+// ── wire-format spec conformance (§4.4 uint/negint, §4.6 ieee_float) ─────
+
+TEST_CASE("pjson wire: uint sign-dispatch and raw LE magnitude",
+          "[pjson][wire][uint]")
+{
+   // Non-negative values ≥ 16 use t_uint (tag high nibble = 4); the
+   // payload is the magnitude as raw LE unsigned bytes (no zigzag).
+   //
+   //   v = 200  → bc=1, payload {0xC8}                  → 0x40 0xC8
+   //   v = 256  → bc=2, payload {0x00, 0x01}            → 0x41 0x00 0x01
+   {
+      auto b = pjson::encode(pjson_value{static_cast<std::int64_t>(200)});
+      REQUIRE(b.size() == 2);
+      CHECK(b[0] == 0x40);
+      CHECK(b[1] == 0xC8);
+   }
+   {
+      auto b = pjson::encode(pjson_value{static_cast<std::int64_t>(256)});
+      REQUIRE(b.size() == 3);
+      CHECK(b[0] == 0x41);
+      CHECK(b[1] == 0x00);
+      CHECK(b[2] == 0x01);
+   }
+   // Round-trip max int64 (8 bytes raw LE → bc=8 → low nibble 7).
+   {
+      std::int64_t v = std::numeric_limits<std::int64_t>::max();
+      auto b = pjson::encode(pjson_value{v});
+      REQUIRE(b.size() == 9);
+      CHECK(b[0] == 0x47);
+      auto d = pjson::decode({b.data(), b.size()});
+      REQUIRE(d.holds<std::int64_t>());
+      CHECK(d.as<std::int64_t>() == v);
+   }
+}
+
+TEST_CASE("pjson wire: negint sign-dispatch", "[pjson][wire][negint]")
+{
+   // Negative values use t_negint (tag high nibble = 7); payload is
+   // |value| as raw LE unsigned bytes.
+   //
+   //   v = -1   → mag=1,   bc=1 → 0x70 0x01
+   //   v = -128 → mag=128, bc=1 → 0x70 0x80
+   //   v = -256 → mag=256, bc=2 → 0x71 0x00 0x01
+   {
+      auto b = pjson::encode(pjson_value{static_cast<std::int64_t>(-1)});
+      REQUIRE(b.size() == 2);
+      CHECK(b[0] == 0x70);
+      CHECK(b[1] == 0x01);
+   }
+   {
+      auto b = pjson::encode(pjson_value{static_cast<std::int64_t>(-128)});
+      REQUIRE(b.size() == 2);
+      CHECK(b[0] == 0x70);
+      CHECK(b[1] == 0x80);
+   }
+   {
+      auto b = pjson::encode(pjson_value{static_cast<std::int64_t>(-256)});
+      REQUIRE(b.size() == 3);
+      CHECK(b[0] == 0x71);
+      CHECK(b[1] == 0x00);
+      CHECK(b[2] == 0x01);
+   }
+   // INT64_MIN — magnitude is 2^63, which fits 8 bytes as u64.
+   {
+      std::int64_t v = std::numeric_limits<std::int64_t>::min();
+      auto b = pjson::encode(pjson_value{v});
+      REQUIRE(b.size() == 9);
+      CHECK(b[0] == 0x77);
+      auto d = pjson::decode({b.data(), b.size()});
+      REQUIRE(d.holds<std::int64_t>());
+      CHECK(d.as<std::int64_t>() == v);
+   }
+}
+
+TEST_CASE("pjson wire: negint with all-zero payload is rejected",
+          "[pjson][wire][negint]")
+{
+   // §4.4: negint with all-zero payload is reserved; decoders must
+   // reject. Construct {0x70, 0x00} by hand — there is no logical
+   // value that produces this on encode.
+   std::uint8_t bad[] = {0x70, 0x00};
+   CHECK_FALSE(pjson::validate({bad, sizeof(bad)}));
+   // 16-byte negative-zero is also reserved.
+   std::uint8_t bad16[17] = {0x7F};  // bc=16, all zeros
+   CHECK_FALSE(pjson::validate({bad16, sizeof(bad16)}));
+}
+
+TEST_CASE("pjson wire: ieee_float emits binary64 with width selector",
+          "[pjson][wire][ieee_float]")
+{
+   // Encoder always emits binary64 (low nibble = ieee_width_f64 = 3).
+   // No sci-source bit (bit 3 cleared). Payload = 8 raw IEEE-754 LE
+   // bytes.
+   double d = 3.14;
+   auto b = pjson::encode(pjson_value{d});
+   // 3.14 → {314, -2} decimal; size 4 (tag + 2 mantissa + 1 varscale).
+   // The encoder picks the shorter form. So we test a value that's
+   // forced to the IEEE path: NaN.
+   auto nan_b = pjson::encode(pjson_value{
+       std::numeric_limits<double>::quiet_NaN()});
+   REQUIRE(nan_b.size() == 9);
+   CHECK(nan_b[0] == 0x63);  // (t_ieee_float << 4) | ieee_width_f64
+}
+
+TEST_CASE("pjson wire: NaN canonicalized to quiet-NaN-zero-payload",
+          "[pjson][wire][ieee_float][canonical]")
+{
+   // §15.2.1 — encoder rewrites any NaN to the canonical quiet-NaN
+   // bit pattern at the chosen width. binary64: 0x7FF8000000000000.
+   //
+   // Construct a non-canonical NaN (signaling-NaN with non-zero
+   // payload), encode it, and verify the on-wire bits are the
+   // canonical form.
+   std::uint64_t weird_nan_bits = 0x7FF8000000000123ull;  // payload set
+   double weird_nan;
+   std::memcpy(&weird_nan, &weird_nan_bits, 8);
+   REQUIRE(std::isnan(weird_nan));
+
+   auto b = pjson::encode(pjson_value{weird_nan});
+   REQUIRE(b.size() == 9);
+   CHECK(b[0] == 0x63);
+   std::uint64_t got;
+   std::memcpy(&got, b.data() + 1, 8);
+   CHECK(got == 0x7FF8000000000000ull);
+}
+
+TEST_CASE("pjson wire: ieee_float decode accepts binary32",
+          "[pjson][wire][ieee_float]")
+{
+   // Hand-build a binary32 ieee_float value: tag = 0x62
+   // (t_ieee_float << 4 | ieee_width_f32), payload = 4 raw bytes.
+   float f = -1.5f;
+   std::uint8_t buf[5];
+   buf[0] = 0x62;  // (t_ieee_float << 4) | ieee_width_f32
+   std::memcpy(buf + 1, &f, 4);
+   REQUIRE(pjson::validate({buf, 5}));
+   auto d = pjson::decode({buf, 5});
+   REQUIRE(d.holds<double>());
+   CHECK(d.as<double>() == -1.5);
+}
+
+TEST_CASE("pjson wire: ieee_float rejects binary16 / binary128",
+          "[pjson][wire][ieee_float]")
+{
+   // Width 0b001 (binary16) — 2-byte payload.
+   {
+      std::uint8_t bad[3] = {0x61, 0x00, 0x00};
+      CHECK_FALSE(pjson::validate({bad, 3}));
+   }
+   // Width 0b100 (binary128) — 16-byte payload.
+   {
+      std::uint8_t bad[17] = {0x64};
+      CHECK_FALSE(pjson::validate({bad, 17}));
+   }
+   // Width 0b000 reserved.
+   {
+      std::uint8_t bad[2] = {0x60, 0x00};
+      CHECK_FALSE(pjson::validate({bad, 2}));
+   }
+   // Width 0b101 reserved.
+   {
+      std::uint8_t bad[5] = {0x65, 0, 0, 0, 0};
+      CHECK_FALSE(pjson::validate({bad, 5}));
+   }
+}
+
+TEST_CASE("pjson wire: uint past i64 surfaces as pjson_number",
+          "[pjson][wire][uint]")
+{
+   // bc=8, mag = u64::max → exceeds i64. Variant decode promotes to
+   // pjson_number rather than narrowing.
+   std::uint8_t buf[9] = {0x47, 0xFF, 0xFF, 0xFF, 0xFF,
+                          0xFF, 0xFF, 0xFF, 0xFF};
+   REQUIRE(pjson::validate({buf, 9}));
+   auto v = pjson::decode({buf, 9});
+   REQUIRE(v.holds<pjson_number>());
+   CHECK(v.as<pjson_number>().mantissa ==
+         static_cast<__int128>(std::numeric_limits<std::uint64_t>::max()));
+}
+
+TEST_CASE("pjson wire: 16-byte negint encodes large negative __int128",
+          "[pjson][wire][negint][int128]")
+{
+   // pjson_number mantissa = -(2^100). On encode this becomes
+   // negint with bc such that mag fits — 2^100 needs 13 bytes.
+   __int128 v = -(static_cast<__int128>(1) << 100);
+   auto b = pjson::encode(pjson_value{pjson_number{v, 0}});
+   // Tag = (t_negint << 4) | (bc-1). 2^100 = 13 bytes (since 100/8 +
+   // 1 = 13).
+   CHECK(b[0] == ((0x07 << 4) | (13 - 1)));
+   REQUIRE(pjson::validate({b.data(), b.size()}));
+   auto d = pjson::decode({b.data(), b.size()});
+   REQUIRE(d.holds<pjson_number>());
+   CHECK(d.as<pjson_number>().mantissa == v);
+}
+
+TEST_CASE("pjson wire: ieee_float sci-source-bit ignored on decode",
+          "[pjson][wire][ieee_float]")
+{
+   // bit 3 of the low nibble is the sci-source hint. Decoder must
+   // mask it out before checking width. Hand-build a binary64 with
+   // sci hint set: tag = 0x6B (sci=1, width=3).
+   double d = 1.5;
+   std::uint8_t buf[9];
+   buf[0] = 0x6B;
+   std::memcpy(buf + 1, &d, 8);
+   REQUIRE(pjson::validate({buf, 9}));
+   auto v = pjson::decode({buf, 9});
+   CHECK(v.as<double>() == 1.5);
+}
+
 // ── pjson_view accessors ─────────────────────────────────────────────────
 
 TEST_CASE("pjson_view: object access", "[pjson][view]")
@@ -867,6 +1078,19 @@ TEST_CASE("pjson_json: JSON → pjson via simdjson", "[pjson][json]")
    CHECK(v["score"].as_double() == 3.14);
    CHECK(v["id"].as_int64() == 1234567890);
    CHECK(v["email"].as_string() == "alice@example.com");
+}
+
+TEST_CASE("pjson_json: negative integers route to t_negint",
+          "[pjson][json][negint]")
+{
+   // Negative integers from JSON parse to t_negint on the wire.
+   std::string_view doc = R"({"a":-1,"b":-128,"c":-256})";
+   auto bytes = psio::pjson_json::from_json(doc);
+   REQUIRE(pjson::validate({bytes.data(), bytes.size()}));
+   pjson_view v{bytes.data(), bytes.size()};
+   CHECK(v["a"].as_int64() == -1);
+   CHECK(v["b"].as_int64() == -128);
+   CHECK(v["c"].as_int64() == -256);
 }
 
 TEST_CASE("pjson_json: nested JSON", "[pjson][json]")
