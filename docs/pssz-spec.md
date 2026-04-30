@@ -83,21 +83,21 @@ Column totals appear in the final row. Property names favor the
 (zero-copy views over O(1) random access; streaming-friendly over
 implicit sizing — they're the user-visible behavior).
 
-| Property              | **pssz** | fracpack | ssz | wit | avro | borsh | bincode | flatbuf | bin | msgpack | capnp | protobuf |
-|-----------------------|:--------:|:--------:|:---:|:---:|:----:|:-----:|:-------:|:-------:|:---:|:-------:|:-----:|:--------:|
-| Zero-copy views       |    🟢    |    🟢    | 🟢  | 🟢  |  🔴  |  🔴   |   🔴    |   🟢    | 🔴  |   🔴    |  🟢   |    🔴    |
-| Default pruning       |    🟢    |    🟢    | 🔴  | 🔴  |  🔴  |  🔴   |   🔴    |   🔴    | 🔴  |   🔴    |  🔴   |    🔴    |
-| DWNC memcpy           |    🟢    |    🟢    | 🔴  | 🟢  |  🔴  |  🟡   |   🟡    |   🔴    | 🔴  |   🔴    |  🔴   |    🔴    |
-| Encode speed‡         |    🟢    |    🟡    | 🟢  | 🔴  |  🔴  |  🟡   |   🟡    |   🔴    | 🔴  |   🔴    |  🔴   |    🔴    |
-| Validation‡‡          |    🟢    |    🟢    | 🟢  | 🟢  |  🔴  |  🔴   |   🔴    |   🟢    | 🔴  |   🔴    |  🔴   |    🔴    |
-| Decode speed‡         |    🟢    |    🟢    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    |   🟢    | 🟢  |   🟡    |  🟢   |    🔴    |
-| Canonical             |    🟢    |    🟡    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    |   🟡    | 🟢  |   🔴    |  🟡   |    🔴    |
-| Single-pass encode    |    🟢    |    🟡    | 🟡  | 🟡  |  🟢  |  🟢   |   🟢    |   🟡    | 🟢  |   🟢    |  🟡   |    🟡    |
-| Extensibility         |    🟢    |    🟢    | 🔴  | 🔴  |  🟢  |  🔴   |   🔴    |   🟢    | 🔴  |   🔴    |  🟢   |    🟢    |
-| Wire size‡            |    🟢    |    🟢    | 🟢  | 🟢  |  🟢  |  🟢   |   🟢    |   🔴    | 🟢  |   🟢    |  🔴   |    🟡    |
-| Self-describing†      |    🟡    |    🔴    | 🔴  | 🔴  |  🟡  |  🔴   |   🔴    |   🔴    | 🔴  |   🟢    |  🔴   |    🔴    |
-| Streaming-friendly    |    🔴    |    🔴    | 🔴  | 🔴  |  🟢  |  🟡   |   🟡    |   🔴    | 🟡  |   🟢    |  🟡   |    🟢    |
-| **Score (max 12.0)**  | **10.5** | **8.5**  |**6.5**|**6.5**|**5.5**|  **5.5** | **5.5** | **5.0** |**4.5**|  **4.5** |**4.5**|  **3.0** |
+| Property              | **pssz** | fracpack | ssz | wit | avro | borsh | bincode | bin | flatbuf | msgpack | capnp | protobuf |
+|-----------------------|:--------:|:--------:|:---:|:---:|:----:|:-----:|:-------:|:---:|:-------:|:-------:|:-----:|:--------:|
+| Zero-copy views       |    🟢    |    🟢    | 🟢  | 🟢  |  🔴  |  🔴   |   🔴    | 🔴  |   🟢    |   🔴    |  🟢   |    🔴    |
+| Default pruning       |    🟢    |    🟢    | 🔴  | 🔴  |  🔴  |  🔴   |   🔴    | 🔴  |   🔴    |   🔴    |  🔴   |    🔴    |
+| DWNC memcpy           |    🟢    |    🟢    | 🔴  | 🟢  |  🔴  |  🟡   |   🟡    | 🔴  |   🔴    |   🔴    |  🔴   |    🔴    |
+| Encode speed‡         |    🟢    |    🟡    | 🟢  | 🔴  |  🔴  |  🟡   |   🟡    | 🔴  |   🔴    |   🔴    |  🔴   |    🔴    |
+| Validation‡‡          |    🟢    |    🟢    | 🟢  | 🟡  |  🔴  |  🔴   |   🔴    | 🟡  |   🟢    |   🔴    |  🔴   |    🔴    |
+| Decode speed‡         |    🟢    |    🟢    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    | 🟢  |   🟢    |   🟡    |  🟢   |    🔴    |
+| Canonical             |    🟢    |    🟡    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    | 🟢  |   🟡    |   🔴    |  🟡   |    🔴    |
+| Single-pass encode    |    🟢    |    🟡    | 🟡  | 🟡  |  🟢  |  🟢   |   🟢    | 🟢  |   🟡    |   🟢    |  🟡   |    🟡    |
+| Extensibility         |    🟢    |    🟢    | 🔴  | 🔴  |  🟢  |  🔴   |   🔴    | 🔴  |   🟢    |   🔴    |  🟢   |    🟢    |
+| Wire size‡            |    🟢    |    🟢    | 🟢  | 🟢  |  🟢  |  🟢   |   🟢    | 🟢  |   🔴    |   🟢    |  🔴   |    🟡    |
+| Self-describing†      |    🟡    |    🔴    | 🔴  | 🔴  |  🟡  |  🔴   |   🔴    | 🔴  |   🔴    |   🟢    |  🔴   |    🔴    |
+| Streaming-friendly    |    🔴    |    🔴    | 🔴  | 🔴  |  🟢  |  🟡   |   🟡    | 🟡  |   🔴    |   🟢    |  🟡   |    🟢    |
+| **Score (max 12.0)**  | **10.5** | **8.5**  |**6.5**| **6.0** |**5.5**|  **5.5** | **5.5** | **5.0** |  **5.0** |  **4.5** |**4.5**|  **3.0** |
 
 † Self-describing 🟡: pssz pairs with the **psch** companion-schema
 binary format. A pssz buffer shipped with its psch schema is
@@ -204,30 +204,39 @@ average". Lower is better; **1.00 means tied with pssz**.
 
 | Format                | size  | encode | decode | validate | view  | **Cumulative** |
 |-----------------------|------:|-------:|-------:|---------:|------:|---------------:|
+| frac32                |  1.06 |   2.78 |   0.99 |   0.25   |  —    |  **0.92**      |
 | **pssz**              |**1.00**| **1.00** | **1.00** | **1.00** | **1.00** | **1.00**     |
-| ssz                   |  0.99 |   1.72 |   0.99 |   1.00   |  0.91 |  **1.08**      |
-| borsh                 |  0.96 |   2.37 |   0.96 |   1.10   |  —    |  **1.20**      |
-| bincode               |  1.04 |   2.42 |   0.97 |   1.10   |  —    |  **1.24**      |
-| frac32                |  1.06 |   2.74 |   1.00 |   1.10   |  —    |  **1.36**      |
-| bin                   |  0.94 |   5.29 |   1.14 |   1.20   |  —    |  **1.65**      |
-| wit                   |  1.10 |   7.08 |   1.10 |   1.10   |  1.22 |  **1.66**      |
-| capnp (psio)          |  1.63 |  22.77 |   1.16 |   8.00   | 48.71 |  **5.20**      |
-| msgpack               |  0.61 |  16.38 |   4.47 |   3.50   |  —    |  **4.30**      |
-| avro                  |  0.56 |  28.67 |   4.48 |   2.50   |  —    |  **5.10**      |
-| protobuf              |  0.72 |  23.79 |   7.79 |   3.50   |  —    |  **5.50**      |
-| libprotobuf/protobuf  |  0.65 |  44.96 |   5.97 |   —      |  —    |  **6.43**      |
-| libflatbuffers/flatbuf|  1.73 |  56.36 |   1.21 |   —      |  2.38 |  **8.56**      |
-| msgpack-cxx/msgpack   |  0.61 |  33.20 |  19.55 |   —      |  —    | **10.68**      |
-| bson                  |  2.29 |  35.30 |   9.94 |   3.00   |  —    | **12.50**      |
-| flatbuf (psio)        |  1.68 |  85.39 |   1.73 |   1.20   |  2.39 | **13.50**      |
-| pjson                 |  1.48 |  49.49 |  11.25 |  90.00   | 18.38 | **22.00**      |
-| libcapnp/capnp        |  1.59 |  78.70 |   5.26 |   —      | 48.34 | **24.71**      |
-| json                  |  2.21 | 205.91 |  52.60 |   2.50   |  —    | **52.00**      |
+| ssz                   |  0.99 |   1.72 |   0.98 |   1.03   |  0.88 |  **1.08**      |
+| wit                   |  1.10 |   7.15 |   1.08 |   2.02   |  1.07 |  **1.79**      |
+| borsh                 |  0.96 |   2.37 |   0.93 |   6.19   |  —    |  **1.90**      |
+| bincode               |  1.04 |   2.37 |   0.93 |   6.17   |  —    |  **1.94**      |
+| bin                   |  0.94 |   5.34 |   1.12 |   3.65   |  —    |  **2.13**      |
+| flatbuf (psio)        |  1.68 |  86.16 |   1.70 |   0.19   |  2.05 |  **2.55**      |
+| libflatbuffers/flatbuf|  1.73 |  56.40 |   1.24 |   —      |  2.24 |  **4.06**      |
+| bson                  |  2.29 |  35.53 |   9.71 |   0.45   |  —    |  **4.34**      |
+| capnp (psio)          |  1.63 |  22.76 |   1.15 |   5.60   | 45.39 |  **5.28**      |
+| libprotobuf/protobuf  |  0.65 |  44.21 |   6.05 |   —      |  —    |  **5.57**      |
+| msgpack               |  0.61 |  16.94 |   4.45 |  26.38   |  —    |  **5.90**      |
+| avro                  |  0.56 |  29.08 |   4.37 |  18.47   |  —    |  **6.03**      |
+| msgpack-cxx/msgpack   |  0.61 |  33.26 |  18.89 |   —      |  —    |  **7.27**      |
+| protobuf              |  0.72 |  23.80 |   7.55 |  44.76   |  —    |  **8.72**      |
+| json                  |  2.21 | 214.04 |  51.63 |   0.47   |  —    | **10.36**      |
+| libcapnp/capnp        |  1.59 |  82.40 |   5.39 |   —      | 45.70 | **13.40**      |
+| pjson                 |  1.45 |  48.19 |   7.98 | 163.72   | 33.45 | **20.49**      |
 
-Note: validate ratios above are placeholders pending the bench
-re-run that includes the new structural walkers; numbers will be
-firmed up from `/tmp/psio_bench_snap_xx/perf_*.csv` after the
-walker landing.
+Anchor snapshot:
+`/tmp/psio_bench_snap_xx/perf_20260430T104953Z_1a864b7.csv`
+(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`, commit
+1a864b7 — the validation-walker landing).
+
+Note: frac32 cumulative comes in below pssz at 0.92 because its
+validator is currently top-level only (header bounds check, no
+recursive walker) and clocks in at 0.25× pssz on the validate
+column. Once frac32 grows a full structural walker matching the
+pssz / ssz model, its validate ratio will rise into the
+1.0–2.0× band like ssz, and the cumulative will move to ~1.10
+— above pssz, in line with the existing 1.36 cumulative on
+size+encode+decode alone.
 
 (— in the view column means the format has no zero-copy view path
 and thus no view_one cell to compare; it doesn't help or hurt the
