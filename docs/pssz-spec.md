@@ -77,31 +77,54 @@ type-level annotation channel.
 Cells marked 🔴 indicate the format does not provide that property;
 🟢 indicates full support; 🟡 indicates partial support (caveats apply).
 Columns are ordered left-to-right by **similarity to pssz**: each
-cell scores 🟢 = 1.0, 🟡 = 0.5, 🔴 = 0.0, summed across the nine
+cell scores 🟢 = 1.0, 🟡 = 0.5, 🔴 = 0.0, summed across all eleven
 property rows. Column totals appear in the final row.
 
-Rows are also ordered by **how cleanly they track the column gradient**:
-properties pssz "wins" cleanly on the left side appear at the top, the
-outlier row (schema extensibility — green-but-late under multiple far-
-right formats) sinks to the bottom.
+The first nine rows cover the properties pssz is **designed** to
+provide. The last two are inherent format properties where pssz
+**trades off** — included so the table doesn't hide places other
+formats win cleanly. (Adoption / language-SDK count is excluded as
+non-inherent — a function of marketing and time, not of the format
+itself.) Rows are ordered by how cleanly they track the column
+gradient: properties pssz wins on the left side appear at the top;
+trade-off rows where pssz scores 🔴 sink to the bottom.
 
-| Property                         | **pssz** | fracpack | wit  | ssz  | capnp | flatbuf | avro | bincode | borsh | bin  | protobuf | msgpack |
-|----------------------------------|:--------:|:--------:|:----:|:----:|:-----:|:-------:|:----:|:-------:|:-----:|:----:|:--------:|:-------:|
-| O(1) random field access         |    🟢    |    🟢    |  🟢  |  🟢  |  🟢   |   🟢    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
-| Zero-copy views (no allocation)  |    🟢    |    🟢    |  🟢  |  🟢  |  🟢   |   🟢    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
-| Adaptive offset width            |    🟢    |    🟡    |  🔴  |  🔴  |  🔴   |   🔴    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
-| Trailing-default pruning         |    🟢    |    🟢    |  🔴  |  🔴  |  🔴   |   🔴    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
-| DWNC memcpy fast path            |    🟢    |    🟢    |  🟢  |  🔴  |  🔴   |   🔴    |  🔴  |   🟡    |  🟡   |  🔴  |    🔴    |   🔴    |
-| Implicit sizing (no length pfx)  |    🟢    |    🔴    |  🟢  |  🟢  |  🟡   |   🟡    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
-| Canonical encoding               |    🟢    |    🟡    |  🟢  |  🟢  |  🟡   |   🟡    |  🟡  |   🟢    |  🟢   |  🟢  |    🔴    |   🔴    |
-| Single-pass encode               |    🟢    |    🟡    |  🟡  |  🟡  |  🟡   |   🟡    |  🟢  |   🟢    |  🟢   |  🟢  |    🟡    |   🟢    |
-| Schema extensibility             |    🟢    |    🟢    |  🔴  |  🔴  |  🟢   |   🟢    |  🟢  |   🔴    |  🔴   |  🔴  |    🟢    |   🔴    |
-| **Similarity score (max 9.0)**   | **9.0**  | **6.5**  |**5.5**|**4.5**|**4.5**| **4.5** |**2.5**| **2.5** |**2.5**|**2.0**|  **1.5** |  **1.0** |
+| Property                                               | **pssz** | fracpack | wit  | capnp | ssz  | flatbuf | avro | msgpack | borsh | bincode | protobuf | bin  |
+|--------------------------------------------------------|:--------:|:--------:|:----:|:-----:|:----:|:-------:|:----:|:-------:|:-----:|:-------:|:--------:|:----:|
+| O(1) random field access                               |    🟢    |    🟢    |  🟢  |  🟢   |  🟢  |   🟢    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
+| Zero-copy views (no allocation)                        |    🟢    |    🟢    |  🟢  |  🟢   |  🟢  |   🟢    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
+| Adaptive offset width                                  |    🟢    |    🟡    |  🔴  |  🔴   |  🔴  |   🔴    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
+| Trailing-default pruning                               |    🟢    |    🟢    |  🔴  |  🔴   |  🔴  |   🔴    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
+| DWNC memcpy fast path                                  |    🟢    |    🟢    |  🟢  |  🔴   |  🔴  |   🔴    |  🔴  |   🔴    |  🟡   |   🟡    |    🔴    |  🔴  |
+| Implicit sizing (no length pfx)                        |    🟢    |    🔴    |  🟢  |  🟡   |  🟢  |   🟡    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
+| Canonical encoding                                     |    🟢    |    🟡    |  🟢  |  🟡   |  🟢  |   🟡    |  🟡  |   🔴    |  🟢   |   🟢    |    🔴    |  🟢  |
+| Single-pass encode                                     |    🟢    |    🟡    |  🟡  |  🟡   |  🟡  |   🟡    |  🟢  |   🟢    |  🟢   |   🟢    |    🟡    |  🟢  |
+| Schema extensibility                                   |    🟢    |    🟢    |  🔴  |  🟢   |  🔴  |   🟢    |  🟢  |   🔴    |  🔴   |   🔴    |    🟢    |  🔴  |
+| Self-describing without compile-time schema†           |    🟡    |    🔴    |  🔴  |  🔴   |  🔴  |   🔴    |  🟡  |   🟢    |  🔴   |   🔴    |    🔴    |  🔴  |
+| Streaming-friendly (length-delimited, no whole-doc)    |    🔴    |    🔴    |  🔴  |  🟡   |  🔴  |   🔴    |  🟢  |   🟢    |  🟡   |   🟡    |    🟢    |  🟡  |
+| **Similarity score (max 11.0)**                        | **9.5**  | **6.5**  |**5.5**|**5.0**|**4.5**| **4.5** |**4.0**| **3.0** |**3.0**|  **3.0** |  **2.5** |**2.5**|
 
-pssz is the only column with 🟢 on every row. Ties at 4.5 (ssz / capnp /
-flatbuf) and 2.5 (avro / bincode / borsh) reflect different trade-off
-mixes at the same overall coverage — see §1.4 for which axes each
-format prioritizes.
+† Self-describing 🟡: pssz pairs with the **psch** companion-schema
+binary format (see `docs/psch-spec.md` / `.issues/pssz-format-design.md`).
+A pssz buffer shipped together with its psch schema is decodable
+without compile-time `T` — readers can iterate fields, render to
+JSON, and run dynamic zero-copy queries. Same model as avro's
+Object Container Files (which is why both score 🟡): the schema
+travels alongside the payload rather than being embedded per-value.
+Raw pssz bytes alone are still 🔴.
+
+pssz leads on the nine differentiator rows and the schema-package
+mode covers half of the self-describing trade-off. The remaining
+🔴 — streaming-friendly — is a structural consequence of the
+design: pssz uses container-relative offsets, so the whole
+container must be present in memory before any field can be read.
+The same constraint is what buys O(1) random access, DWNC memcpy,
+and adaptive widths. Formats lower in the column ordering generally
+won the trade by accepting some combination of larger wire size,
+slower lookup, or schema cost. Ties at 4.5 (ssz / flatbuf), 3.0
+(msgpack / borsh / bincode), and 2.5 (protobuf / bin) reflect
+different trade-off mixes at the same overall coverage — see §1.4
+for which axes each format prioritizes.
 
 #### 1.3.2 Quantitative comparison: geomean ratio vs pssz
 
