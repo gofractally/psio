@@ -1,16 +1,27 @@
-# psio — v2-architecture successor to psio.
+# psio — multi-format C++23 serialization library.
 #
-# Implements the design captured in .issues/psio-v2-design.md:
-#   - tag_invoke CPOs as the customization mechanism
-#   - format_tag_base<Derived> CRTP for format-scoped sugar
-#   - Shape concepts + reflection annotations (psio::annotate<X>)
-#   - Runtime reflection (psio::reflect<T>) with perfect-hash name lookup
-#   - Dynamic / schema-driven access (psio::schema, transcode, dynamic_view)
-#   - Rich wrapper types coexisting with annotations
-#   - [[nodiscard]] codec_status error model, exception-optional
+# Tag-dispatched CPOs (encode / decode / size_of / validate /
+# validate_or_throw) over a uniform reflection layer (psio::reflect<T>),
+# Shape concepts + annotation channel (psio::annotate<X>), rich
+# wrappers, schema IR + transcode, [[nodiscard]] codec_status error
+# model with optional exceptions.
 #
-# psio v1 (../psio/) remains as the reference implementation during
-# development. psio never #includes psio headers — they are reference-only.
+# Builds standalone (`cmake -S .` from a fresh clone) and as a
+# subdirectory / FetchContent target inside a parent project.
+# Standalone build defaults tests / benchmarks / tools OFF; turn on
+# with -DPSIO_ENABLE_TESTS=ON etc.  Dependency surface is documented
+# in docs/dependency-pattern.md.
+
+cmake_minimum_required(VERSION 3.20)
+
+# project() is only needed when psio is the top-level project (a
+# fresh clone built standalone).  When consumed as a subdirectory or
+# via FetchContent, the parent project's project() call has already
+# enabled languages and we don't want to override its build-type /
+# output-directory settings.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+   project(psio VERSION 0.1.0 LANGUAGES C CXX)
+endif()
 
 add_library(psio
    # Compiled units land here as phases 14+ introduce them.
