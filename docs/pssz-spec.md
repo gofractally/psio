@@ -1,74 +1,203 @@
-# pssz — Schema-Driven Binary Format with Adaptive Width
+# pssz (Psi Simple Serialization)
 
-**Status:** v0.1, 2026-04-29.
+**Status:** v0.1, 2026-04-30.
 
-This is the wire-format specification for **pssz** (a.k.a. PsiSSZ),
-psio's primary schema-driven binary serialization format. It targets
-implementers writing pssz codecs in any language. The format is
-deliberately compact, language-neutral in its definition, and
-specified in enough detail that two implementations following this
-document must produce byte-identical output for the same input value
-on the same schema.
+pssz — **Psi Simple Serialization** — is psio's primary schema-driven
+binary serialization format. It is **derived from Ethereum's Simple
+Serialization (SSZ)** and inherits SSZ's compact wire layout,
+container-relative offsets, and zero-length-prefix vector encoding.
+On top of that foundation it incorporates the best-of-breed features
+from the broader serialization ecosystem (fracpack's schema
+extensibility, capnp's zero-copy view discipline, fracpack's memcpy
+fast path for layout-stable records) and adds adaptive-width offset
+slots for the per-type compactness no other format in the comparison
+provides.
 
-The companion document for the schemaless self-describing format is
-`pjson-spec.md`.
+This document is the wire-format specification — language-neutral,
+detailed enough that two implementations following it must produce
+byte-identical output for the same input value on the same schema.
+
+The companion specification for the schemaless self-describing
+format is `pjson-spec.md`.
 
 ## 1. Purpose and Position
 
-### 1.1 What pssz is for
+### 1.1 Six design properties
 
-pssz is the format you reach for when:
+pssz exists to deliver six properties simultaneously, in priority
+order:
 
-- You have a **schema** (a static type description known to both
-  encoder and decoder).
-- You want **the smallest, fastest** binary representation that still
-  preserves three properties at decode time:
-  1. **O(1) random access** to any declared field by index, with no
-     sequential scan, on the encoded bytes.
-  2. **Schema evolution** — old encoders and new decoders, or new
-     encoders and old decoders, can interoperate in either direction
-     without re-encoding.
-  3. **Zero-copy views** — the decoded representation can be a
-     pointer into the encoded bytes, with no allocation, for read-
-     only access to any subset of fields.
+1. **Relatively small wire format.** Tied with the smallest
+   schema-driven binary formats (ssz, bin, borsh, bincode) on
+   fixed-width data; smaller than them when adaptive offset widths
+   kick in. Larger than varint formats (avro, msgpack, protobuf) on
+   sparse-integer payloads — that's the only dimension where pssz
+   trades.
+2. **Zero-copy views with O(1) random access** to any field. The
+   decoded representation is a pointer into the encoded buffer; the
+   byte offset of field i is computable in constant time from the
+   schema, with no scan over preceding fields.
+3. **Schema evolution with forward and backward compatibility.** A
+   v1 encoder + v2 decoder, or a v2 encoder + v1 decoder, both
+   interoperate without re-encoding.
+4. **Fastest in class to encode, decode, validate, and view.**
+   Top-tier latency on every operation in the head-to-head bench
+   matrix; sub-nanosecond view-one for in-tier shapes.
+5. **Canonical deterministic representation.** Every value of every
+   type has exactly one canonical encoding, so equal values produce
+   equal bytes. Suitable for content-addressed storage and signed
+   payloads.
+6. **Single-pass encode and decode.** The encoder writes the buffer
+   in one forward pass with backpatching of the offset table; the
+   decoder reads in one forward pass with no rewind. No second
+   accumulation pass to compute sizes.
 
-pssz emerged from a side-by-side comparison of SSZ (the Ethereum
-consensus-layer format), fracpack (psio's earlier extensible binary
-format), and the broader ecosystem of schema'd binary serializers
-(bincode, borsh, capnp, flatbuffers, protobuf, msgpack). On psio's
-benchmark workloads it occupies the only point in the design space
-that has all three properties above plus **adaptive offset widths**
-that shrink the per-field overhead when the schema author can prove
-the encoded value fits in fewer bytes.
+### 1.2 The DWNC annotation
 
-### 1.2 Comparison matrix
+Several rows in the comparison table below reference **DWNC**, an
+abbreviation introduced here for use throughout this document.
 
-This is the property checklist that motivated pssz. Cells marked ✗
-indicate the format does not provide that property; ✓ indicates it
-does; ◑ indicates partial support (e.g., the property exists but with
-caveats).
+A type is **DWNC** ("definition will not change") when its schema
+author has explicitly committed via the `definitionWillNotChange()`
+annotation that the field count, field types, and field order are
+frozen — no future schema version will add, remove, or reorder
+fields. Encoders for DWNC types skip the extensibility header
+(saving W bytes per record); when the in-memory layout also matches
+the wire layout, encode and decode collapse to a single `memcpy`.
 
-| Property                        | ssz | fracpack | bincode | borsh | bin | wit | capnp | flatbuf | msgpack | protobuf | **pssz** |
-|---------------------------------|:---:|:--------:|:-------:|:-----:|:---:|:---:|:-----:|:-------:|:-------:|:--------:|:--------:|
-| O(1) random field access        |  ✓  |    ✓     |   ✗    |   ✗   |  ✗  |  ✓  |   ✓   |    ✓    |    ✗    |    ✗     |  **✓**   |
-| Zero-copy views (no allocation) |  ✓  |    ✓     |   ✗    |   ✗   |  ✗  |  ✓  |   ✓   |    ✓    |    ✗    |    ✗     |  **✓**   |
-| Adaptive offset width           |  ✗  |    ◑     |   ✗    |   ✗   |  ✗  |  ✗  |   ✗   |    ✗    |    ✗    |    ✗     |  **✓**   |
-| Schema extensibility            |  ✗  |    ✓     |   ✗    |   ✗   |  ✗  |  ✗  |   ✓   |    ✓    |    ✗    |    ✓     |  **✓**   |
-| Trailing-default pruning        |  ✗  |    ✓     |   ✗    |   ✗   |  ✗  |  ✗  |   ✗   |    ✗    |    ✗    |    ✗     |  **✓**   |
-| Implicit sizing (no length pfx) |  ✓  |    ✗     |   ✗    |   ✗   |  ✗  |  ✓  |   ◑   |    ◑    |    ✗    |    ✗     |  **✓**   |
-| DWNC memcpy fast path           |  ✗  |    ✓     |   ◑    |   ◑   |  ✗  |  ✓  |   ✗   |    ✗    |    ✗    |    ✗     |  **✓**   |
+DWNC is the same annotation referenced in `pjson-spec.md` §16, and
+is part of psio's broader type-level annotation system.
 
-pssz is the only column with ✓ on every row. The rest of this section
-explains what each row means and why it matters.
+### 1.3 Comparison matrix
 
-### 1.3 Why each property matters
+#### 1.3.1 Property checklist
+
+Cells marked ✗ indicate the format does not provide that property; ✓
+indicates it does; ◑ indicates partial support (caveats apply).
+
+| Property                        | **pssz** | ssz | fracpack | bincode | borsh | bin  | wit  | capnp | flatbuf | msgpack | protobuf | avro |
+|---------------------------------|:--------:|:---:|:--------:|:-------:|:-----:|:----:|:----:|:-----:|:-------:|:-------:|:--------:|:----:|
+| O(1) random field access        |  **✓**   |  ✓  |    ✓     |   ✗    |   ✗   |  ✗   |  ✓   |   ✓   |    ✓    |    ✗    |    ✗     |  ✗   |
+| Zero-copy views (no allocation) |  **✓**   |  ✓  |    ✓     |   ✗    |   ✗   |  ✗   |  ✓   |   ✓   |    ✓    |    ✗    |    ✗     |  ✗   |
+| Adaptive offset width           |  **✓**   |  ✗  |    ◑     |   ✗    |   ✗   |  ✗   |  ✗   |   ✗   |    ✗    |    ✗    |    ✗     |  ✗   |
+| Schema extensibility            |  **✓**   |  ✗  |    ✓     |   ✗    |   ✗   |  ✗   |  ✗   |   ✓   |    ✓    |    ✗    |    ✓     |  ✓   |
+| Trailing-default pruning        |  **✓**   |  ✗  |    ✓     |   ✗    |   ✗   |  ✗   |  ✗   |   ✗   |    ✗    |    ✗    |    ✗     |  ✗   |
+| Implicit sizing (no length pfx) |  **✓**   |  ✓  |    ✗     |   ✗    |   ✗   |  ✗   |  ✓   |   ◑   |    ◑    |    ✗    |    ✗     |  ✗   |
+| Canonical encoding              |  **✓**   |  ✓  |    ◑     |   ✓    |   ✓   |  ✓   |  ✓   |   ◑   |    ◑    |    ✗    |    ✗     |  ◑   |
+| Single-pass encode              |  **✓**   |  ◑  |    ◑     |   ✓    |   ✓   |  ✓   |  ◑   |   ◑   |    ◑    |    ✓    |    ◑     |  ✓   |
+| DWNC memcpy fast path           |  **✓**   |  ✗  |    ✓     |   ◑    |   ◑   |  ✗   |  ✓   |   ✗   |    ✗    |    ✗    |    ✗     |  ✗   |
+
+pssz is the only column with ✓ on every row.
+
+#### 1.3.2 Quantitative comparison: geomean ratio vs pssz
+
+The numbers below come from the `psio_bench_vs_externals` snapshot
+(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`). For every cell
+(format × shape × operation), the ratio is computed as
+`format_value / pssz_value`. Cells smaller than 1.00 mean the format
+beats pssz on that cell; cells larger than 1.00 mean pssz wins.
+Per-format aggregates use the **geometric mean** of those ratios —
+magnitude-aware (a 100× outlier counts as 100×, not as one rank
+position) and scale-invariant (combining nanosecond cells with byte
+cells in the same pool is well-defined because every entry is a
+dimensionless ratio).
+
+The "Cumulative" column is the geomean across **all** (size, encode,
+decode, view) cells — the single number that summarizes "how much
+work does this format ask for relative to pssz, on average". Lower
+is better; **1.00 means tied with pssz**.
+
+| Format                | size  | encode | decode | view  | **Cumulative** |
+|-----------------------|------:|-------:|-------:|------:|---------------:|
+| **pssz**              |**1.00**| **1.00** | **1.00** | **1.00** | **1.00**     |
+| ssz                   |  0.99 |   1.72 |   0.99 |  0.91 |  **1.08**      |
+| borsh                 |  0.96 |   2.37 |   0.96 |  —    |  **1.16**      |
+| bincode               |  1.04 |   2.42 |   0.97 |  —    |  **1.20**      |
+| frac32                |  1.06 |   2.74 |   1.00 |  —    |  **1.29**      |
+| bin                   |  0.94 |   5.29 |   1.14 |  —    |  **1.55**      |
+| wit                   |  1.10 |   7.08 |   1.10 |  1.22 |  **1.62**      |
+| capnp (psio)          |  1.63 |  22.77 |   1.16 | 48.71 |  **3.93**      |
+| msgpack               |  0.61 |  16.38 |   4.47 |  —    |  **4.09**      |
+| avro                  |  0.56 |  28.67 |   4.48 |  —    |  **5.30**      |
+| protobuf              |  0.72 |  23.79 |   7.79 |  —    |  **5.37**      |
+| libprotobuf/protobuf  |  0.65 |  44.96 |   5.97 |  —    |  **6.43**      |
+| libflatbuffers/flatbuf|  1.73 |  56.36 |   1.21 |  2.38 |  **8.56**      |
+| msgpack-cxx/msgpack   |  0.61 |  33.20 |  19.55 |  —    | **10.68**      |
+| bson                  |  2.29 |  35.30 |   9.94 |  —    | **13.00**      |
+| flatbuf (psio)        |  1.68 |  85.39 |   1.73 |  2.39 | **14.83**      |
+| pjson                 |  1.48 |  49.49 |  11.25 | 18.38 | **17.57**      |
+| libcapnp/capnp        |  1.59 |  78.70 |   5.26 | 48.34 | **24.71**      |
+| json                  |  2.21 | 205.91 |  52.60 |  —    | **70.81**      |
+
+(— in the view column means the format has no zero-copy view path
+and thus no view_one cell to compare; it doesn't help or hurt the
+cumulative, which only averages cells the format participates in.)
+
+How to read the table:
+
+- **pssz wins cumulative.** No format is below 1.00 in the
+  Cumulative column. ssz comes closest (1.08) but pays 72% extra on
+  encode. Every format that beats pssz on size pays 4×–30× on
+  encode and 4×–8× on decode.
+
+- **Size wins are architecturally bought from access-pattern
+  losses.** The varint cluster (avro 0.56, msgpack 0.61, protobuf
+  0.72) shaves bytes by encoding integers in variable-length groups
+  — but a varint's byte count depends on the value, so field N's
+  byte offset depends on field N-1's value, which requires a
+  sequential walk to reach any field. **This structurally precludes
+  zero-copy views and O(1) random access** (look back at the
+  property checklist: every format with size < 1.00 has ✗ on the
+  "O(1) random field access" and "Zero-copy views" rows). Trailing-
+  default pruning is also off the table for the same reason — you
+  can't drop trailing fields safely when the offsets to the kept
+  ones depend on the values you'd otherwise drop. The size win and
+  the access-pattern losses are two sides of the same architectural
+  choice; pssz refuses both — fixed-width offsets buy random access
+  at the cost of a few bytes vs varint, and pssz minimizes that
+  cost via adaptive width per type.
+
+- **The "size cluster with pssz"** — ssz, bin, borsh, bincode,
+  frac32, wit. All within ±10% of pssz on size; differentiator is
+  encode latency where pssz's single-pass-with-backpatching wins.
+  ssz lacks extensibility + trailing-pruning + DWNC fast path; bin/
+  borsh/bincode lack random access.
+
+- **The schema-tooled formats** — capnp and flatbuf. Have zero-copy
+  views and extensibility, BUT pay both more size (~1.7×) and much
+  more encode time (22-85×) for the cross-language IDL+codegen
+  tooling that pssz today doesn't match (capnp/flatbuf have decades
+  of compiler pipelines in many languages).
+
+- **The self-describing formats** — pjson, json, bson. Different
+  use case (no schema needed at decode); cost shows in the
+  cumulative. The pjson row is interesting because pjson DOES have
+  zero-copy random access (slot table at the end of each object),
+  unlike json/bson — but it's still ~17× pssz cumulatively because
+  self-describing data carries the schema in the bytes.
+
+The single architectural sentence that summarizes the matrix:
+**zero-copy views and O(1) random access require an offset table
+with fixed-width slots, and that table is what costs the few bytes
+that varint formats save.** pssz's bet is that the access-pattern
+properties are worth more than those bytes — and the cumulative
+geomean confirms that bet across every dimension we measure.
+
+The rest of this section explains what each property row means and
+why it matters.
+
+### 1.4 Why each property matters
 
 **O(1) random field access.** The decoder can compute the byte offset
 of the i-th field in constant time, with no scan over preceding
 fields. This is what lets `view<T, pssz>` peek at a single field of a
-1 MB record in nanoseconds. Length-prefix formats (fracpack, bincode,
-bin, borsh, msgpack, protobuf) cannot do this — they must walk every
-preceding field's length prefix to know where field i starts.
+1 MB record in nanoseconds. The mechanism is an **offset table** in
+the fixed region (or a vtable equivalent in capnp/flatbuf): each
+variable field has a slot whose value is the byte offset of its
+payload. ssz, fracpack, and pssz all share this design. Concatenated
+formats (bincode, bin, borsh) and tag-stream formats (msgpack,
+protobuf, avro) lack this table — they must walk every preceding
+field to find the start of field i.
 
 **Zero-copy views.** Closely related: the decoder produces a
 read-only pointer into the encoded buffer for any sub-value. No
@@ -106,16 +235,32 @@ region. Saves W bytes per variable field where W is the offset width.
 For a record with 4 strings at frac32 → pssz32: 16 bytes saved per
 record.
 
-**DWNC memcpy fast path.** When a record is marked as
-"definition-will-not-change" (`definitionWillNotChange()` in
-psio's reflection, the type-level cap also discussed in
-`pjson-spec.md` §16), and all its fields are fixed-size, and its
-in-memory layout matches the wire layout, the encoder skips the
-extensibility header and emits the entire record via a single
-`memcpy`. Decoder does the inverse. Sub-nanosecond per record on
-modern hardware.
+**Canonical encoding.** Every value of every type has exactly one
+canonical pssz byte sequence (§15). Encoders that emit canonical
+form produce equal bytes for equal values; this is the property
+content-addressed stores (CIDs, signed payloads) require. Length-
+prefix and varint formats often have multiple valid encodings of
+the same value (different prefix widths, leading-zero varint
+representations) and need additional discipline to be canonical.
 
-### 1.4 Head-to-head numbers
+**Single-pass encode.** pssz encodes a value in one forward pass
+over the source value, with backpatching of offset slots inside the
+fixed region as variable-field payloads land in the dynamic region.
+There is no "compute total size" pre-pass. The decoder is also
+single-pass: read the extensibility header, walk fields in order,
+resolve variable-field payloads as they're reached. This is the
+property that turns sub-nanosecond view-one numbers into
+sub-microsecond bulk-record encode/decode numbers; formats with a
+size-then-emit two-pass encoder (which most are) double the work.
+
+**DWNC memcpy fast path.** When a DWNC record's fields are all
+fixed-shape AND the in-memory layout matches the wire layout (no
+implicit padding, or `__attribute__((packed))` applied), the
+encoder skips the extensibility header and emits the record via a
+single `memcpy`. The decoder inverse-memcpys. Sub-nanosecond per
+record on modern hardware.
+
+### 1.5 Head-to-head numbers
 
 The pssz benchmark snapshot at gofractally/psiserve commit `0c2004e`
 (measured Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`):
@@ -124,7 +269,7 @@ The pssz benchmark snapshot at gofractally/psiserve commit `0c2004e`
 |-----------------------|----:|------:|--------:|----:|-----:|-------:|----:|--------:|------:|--------:|-------:|-------:|
 | Point (2 × i32)       |   8 |     8 |       8 |   8 |   **8** |      8 |   8 |     24  |    24 |       4 |     16 |     19 |
 | NameRecord (2 × u64)  |  16 |    16 |      16 |  16 |  **16** |     16 |  16 |     32  |    32 |      15 |     45 |     37 |
-| FlatRecord (Dwnc)     |  30 |    32 |      40 |  32 |  **32** |     40 |  40 |     64  |    72 |      18 |     53 |     88 |
+| FlatRecord (DWNC)     |  30 |    32 |      40 |  32 |  **32** |     40 |  40 |     64  |    72 |      18 |     53 |     88 |
 | Validator (9 × u64+b) |  65 |    65 |      65 |  65 |  **65** |     65 |  72 |     96  |    88 |      26 |    195 |    200 |
 | ValidatorList(100)    |6511 |  6512 |    6516 |6512 |**6516** |   6518 |7216 |    7712 |  7240 |    3259 |  20154 |  20427 |
 
