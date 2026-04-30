@@ -38,6 +38,7 @@ impl<'a> TypedView<'a> {
     /// Adopt a buffer, parse the object header, and capture the index
     /// positions. Does NOT verify the canonical-template hash; callers
     /// that have one should call `verify_template`.
+    #[inline]
     pub fn from_buffer(data: &'a [u8]) -> PjsonResult<Self> {
         if data.len() < 4 {
             return Err(PjsonError("pjson typed: buffer too small"));
@@ -81,6 +82,7 @@ impl<'a> TypedView<'a> {
     /// The template is a slice of `n` bytes — `key_hash8(key_i)` for
     /// each canonical schema field i, in canonical order. A typical
     /// derive-macro output stores this as a static array.
+    #[inline]
     pub fn verify_template(&self, expected_hash_table: &[u8]) -> PjsonResult<()> {
         if expected_hash_table.len() != self.n {
             return Err(PjsonError(
@@ -97,6 +99,7 @@ impl<'a> TypedView<'a> {
 
     /// Sub-view for the i-th canonical field. No bounds check beyond
     /// the value_data range — callers must hold a valid template.
+    #[inline]
     pub fn field(&self, i: usize) -> View<'a> {
         let entry_stride = self.slot_w + 1;
         let slot = self.slot_table_pos + i * entry_stride;
@@ -116,6 +119,7 @@ impl<'a> TypedView<'a> {
     }
 
     /// Read a slot's first `slot_w` bytes as a u32 LE.
+    #[inline]
     fn read_width(&self, pos: usize) -> u32 {
         let mut tmp = [0u8; 4];
         tmp[..self.slot_w].copy_from_slice(&self.data[pos..pos + self.slot_w]);
@@ -127,6 +131,71 @@ impl<'a> TypedView<'a> {
 /// order). Used by derive macros to emit a `static` template.
 pub fn template_for(keys: &[&[u8]]) -> Vec<u8> {
     keys.iter().map(|k| key_hash8(k)).collect()
+}
+
+/// One-shot canonical-typed reader that **combines** header parse,
+/// template verification, and field<i> read into a single inlined
+/// call. This is the headline fast path the spec's §1 numbers claim:
+/// one memcmp + one slot lookup + one field decode, all in one
+/// procedure so the optimizer can fold the bounds checks across
+/// boundaries.
+///
+/// Returns the field's [`View`] on success; returns `None` if the
+/// buffer header is malformed, the template doesn't match, or `i`
+/// is out of range.
+///
+/// ```ignore
+/// let view = read_canonical_field(buf, &TEMPLATE, 0)?;
+/// let value = view.as_uint()?;
+/// ```
+#[inline]
+pub fn read_canonical_field<'a>(
+    data: &'a [u8],
+    expected_hash_table: &[u8],
+    i: usize,
+) -> Option<View<'a>> {
+    if data.len() < 4 {
+        return None;
+    }
+    let tag_byte = data[0];
+    if (tag_byte >> 4) != tag::OBJECT || (tag_byte & 0x0F) != obj_form::SINGLE {
+        return None;
+    }
+    let size = data.len();
+    let n = u16::from_le_bytes([data[size - 2], data[size - 1]]) as usize;
+    if expected_hash_table.len() != n || i >= n {
+        return None;
+    }
+    let width_byte = data[1];
+    let slot_w = ((width_byte & 0x03) as usize) + 1;
+    let entry_stride = slot_w + 1;
+    let value_data_start = 2;
+    let slot_table_pos = size.checked_sub(2 + entry_stride * n)?;
+    let hash_table_pos = slot_table_pos.checked_sub(n)?;
+    if hash_table_pos < value_data_start {
+        return None;
+    }
+    let value_data_size = hash_table_pos - value_data_start;
+    if data.get(hash_table_pos..hash_table_pos + n)? != expected_hash_table {
+        return None;
+    }
+    let slot = slot_table_pos + i * entry_stride;
+    let mut tmp = [0u8; 4];
+    tmp[..slot_w].copy_from_slice(data.get(slot..slot + slot_w)?);
+    let off_i = u32::from_le_bytes(tmp) as usize;
+    let key_size_byte = *data.get(slot + slot_w)?;
+    let off_next = if i + 1 < n {
+        let mut tmp2 = [0u8; 4];
+        let p = slot_table_pos + (i + 1) * entry_stride;
+        tmp2[..slot_w].copy_from_slice(data.get(p..p + slot_w)?);
+        u32::from_le_bytes(tmp2) as usize
+    } else {
+        value_data_size
+    };
+    let entry = data.get(value_data_start + off_i..value_data_start + off_next)?;
+    let klen = key_size_byte as usize;
+    let value_buf = entry.get(klen..)?;
+    Some(View::new(value_buf))
 }
 
 #[cfg(test)]

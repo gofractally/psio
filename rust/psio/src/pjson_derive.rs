@@ -127,41 +127,64 @@ macro_rules! pjson_struct {
             }
 
             fn pjson_decode(bytes: &[u8]) -> $crate::pjson::PjsonResult<Self> {
-                use $crate::pjson::{Pjson, Value, PjsonError};
-                let parsed = $crate::pjson::decode(bytes)?;
-                match parsed {
-                    Value::Object(entries) => {
-                        // Order-tolerant decode: look up each field by
-                        // key. The encoder produces canonical order, so
-                        // a same-engine round-trip will hit the
-                        // sequential path; cross-encoder buffers may
-                        // have a different order and still decode
-                        // correctly. (The C++ reference decoder is
-                        // order-tolerant for the same reason.)
-                        let mut by_key: std::collections::HashMap<&[u8], &Value<'_>> =
-                            std::collections::HashMap::with_capacity(entries.len());
-                        for (k, v) in entries.iter() {
-                            by_key.insert(*k, v);
-                        }
-                        $(
+                use $crate::pjson::{Pjson, PjsonError};
+                use $crate::pjson_view::View;
+                use $crate::pjson_typed::TypedView;
+                // Fast path: if the buffer was produced by the
+                // canonical encoder (canonical-typed template
+                // matches), every field is at a known slot index, so
+                // we can walk the slot table once and `pjson_decode`
+                // each field's raw sub-buffer directly. Falls back to
+                // schemaless View::find when the buffer is not
+                // canonical (foreign producer with shuffled keys, or
+                // long-key escape, etc.).
+                let view = View::new(bytes);
+                if !view.is_object() {
+                    return Err(PjsonError("pjson decode: expected object"));
+                }
+                let tv = TypedView::from_buffer(bytes)?;
+                // Pre-compute the canonical-template for this Ty, so
+                // we can check at runtime whether the buffer is in
+                // canonical-key-order. The template is materialized
+                // once per process via OnceLock.
+                fn template_static() -> &'static [u8] {
+                    use std::sync::OnceLock;
+                    static T: OnceLock<Vec<u8>> = OnceLock::new();
+                    T.get_or_init(|| {
+                        $crate::pjson_typed::template_for(&[
+                            $( stringify!($field).as_bytes(), )+
+                        ])
+                    }).as_slice()
+                }
+                let canonical = tv.verify_template(template_static()).is_ok();
+                if canonical {
+                    // Sequential field<I> reads — every field is at a
+                    // known index in the slot table.
+                    let mut idx: usize = 0;
+                    $(
+                        let $field: $FTy = {
+                            let sub = tv.field(idx);
+                            idx += 1;
+                            <$FTy as Pjson>::pjson_decode(sub.raw())?
+                        };
+                    )+
+                    let _ = idx;
+                    Ok($Ty { $($field),+ })
+                } else {
+                    // Order-tolerant fallback via View::find. Cross-
+                    // encoder buffers (foreign producers with
+                    // different key order) decode correctly here.
+                    $(
+                        let $field: $FTy = {
                             let key: &[u8] = stringify!($field).as_bytes();
-                            let $field: $FTy = {
-                                let v = by_key.get(key)
-                                    .ok_or(PjsonError(concat!(
-                                        "pjson decode: missing field ", stringify!($field))))?;
-                                // Re-encode the field's value to a temp
-                                // buffer and decode through Pjson::pjson_decode.
-                                // This is correctness-first; a fast
-                                // path that walks the original buffer
-                                // is the typed-view's job.
-                                let mut tmp = vec![];
-                                $crate::pjson::encode(v, &mut tmp);
-                                <$FTy as Pjson>::pjson_decode(&tmp)?
-                            };
-                        )+
-                        Ok($Ty { $($field),+ })
-                    }
-                    _ => Err(PjsonError("pjson decode: expected object")),
+                            let v = view.find(key).ok_or(
+                                PjsonError(concat!(
+                                    "pjson decode: missing field ",
+                                    stringify!($field))))?;
+                            <$FTy as Pjson>::pjson_decode(v.raw())?
+                        };
+                    )+
+                    Ok($Ty { $($field),+ })
                 }
             }
         }

@@ -221,6 +221,16 @@ target_include_directories(psio_bench_pjson_types PRIVATE
 target_compile_features(psio_bench_pjson_types PRIVATE cxx_std_23)
 target_compile_options(psio_bench_pjson_types PRIVATE -O3 -DNDEBUG)
 
+# pjson matched bench — Appendix-C 5 shapes × 5 ops in 1:1 alignment
+# with the Rust criterion bench at `rust/psio/benches/pjson_bench.rs`.
+# Cells in this CSV are directly comparable to Rust ns/iter numbers.
+add_executable(psio_bench_pjson_matched bench_pjson_matched.cpp)
+target_link_libraries(psio_bench_pjson_matched PRIVATE psio)
+target_include_directories(psio_bench_pjson_matched PRIVATE
+   ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(psio_bench_pjson_matched PRIVATE cxx_std_23)
+target_compile_options(psio_bench_pjson_matched PRIVATE -O3 -DNDEBUG)
+
 # psch schema-format perf: encode + view + lookup latency, plus
 # size-versus-typical-alternatives.  Inherits the vendored xxhash
 # include directory from the `psio` target's PUBLIC interface.

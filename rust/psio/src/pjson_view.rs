@@ -15,10 +15,12 @@ use crate::pjson::{
 };
 
 /// Width-byte helpers (mirrors §5.6).
+#[inline(always)]
 fn width_bytes(code: u8) -> usize {
     (code as usize) + 1
 }
 
+#[inline(always)]
 fn read_width(buf: &[u8], pos: usize, code: u8) -> u32 {
     let n = width_bytes(code);
     let mut tmp = [0u8; 4];
@@ -33,47 +35,60 @@ pub struct View<'a> {
 }
 
 impl<'a> View<'a> {
+    #[inline(always)]
     pub fn new(data: &'a [u8]) -> Self {
         Self { data }
     }
 
+    #[inline(always)]
     pub fn raw(&self) -> &'a [u8] {
         self.data
     }
 
+    #[inline(always)]
     pub fn tag(&self) -> u8 {
         self.data[0]
     }
 
+    #[inline(always)]
     pub fn type_code(&self) -> u8 {
         self.data[0] >> 4
     }
 
+    #[inline(always)]
     pub fn low_nibble(&self) -> u8 {
         self.data[0] & 0x0F
     }
 
+    #[inline(always)]
     pub fn is_null(&self) -> bool {
         self.type_code() == tag::NULL
     }
+    #[inline(always)]
     pub fn is_bool(&self) -> bool {
         self.type_code() == tag::BOOL
     }
+    #[inline(always)]
     pub fn is_uint(&self) -> bool {
         self.type_code() == tag::UINT_INLINE || self.type_code() == tag::UINT
     }
+    #[inline(always)]
     pub fn is_negint(&self) -> bool {
         self.type_code() == tag::NEGINT
     }
+    #[inline(always)]
     pub fn is_string(&self) -> bool {
         self.type_code() == tag::STRING
     }
+    #[inline(always)]
     pub fn is_bytes(&self) -> bool {
         self.type_code() == tag::BYTES
     }
+    #[inline(always)]
     pub fn is_array(&self) -> bool {
         self.type_code() == tag::ARRAY
     }
+    #[inline(always)]
     pub fn is_object(&self) -> bool {
         self.type_code() == tag::OBJECT
     }
@@ -130,6 +145,7 @@ impl<'a> View<'a> {
 
     /// Unsigned integer value as `u128`. Returns Err if the tag is
     /// neither uint_inline nor uint.
+    #[inline]
     pub fn as_uint(&self) -> PjsonResult<u128> {
         match self.type_code() {
             tag::UINT_INLINE => Ok(self.low_nibble() as u128),
@@ -149,6 +165,7 @@ impl<'a> View<'a> {
     /// Signed integer value as `i128`. Negint is decoded by negating
     /// the magnitude; for `i128::MIN` the magnitude is exactly 2^127
     /// and `wrapping_neg` produces the correct value.
+    #[inline]
     pub fn as_int(&self) -> PjsonResult<i128> {
         match self.type_code() {
             tag::UINT_INLINE | tag::UINT => {
