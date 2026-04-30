@@ -45,6 +45,7 @@ pub mod pjson;
 pub mod pjson_derive;
 pub mod pjson_view;
 pub mod pjson_typed;
+pub mod pjson_json;
 pub mod pssz;
 #[macro_use]
 pub mod pssz_derive;

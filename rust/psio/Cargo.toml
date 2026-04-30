@@ -13,7 +13,12 @@ custom_error = "1.9.2"
 hex = "0.3.1"
 indexmap = { version = "2.2.6", features = ["serde"] }
 serde = { version = "1.0", features = ["derive", "rc"] }
-serde_json = { version = "1.0.135", features = ["preserve_order"] }
+# `arbitrary_precision` exposes Number::as_str() so the pjson_json
+# transcoder can detect sci-source notation (e/E) in the original JSON
+# token without round-tripping through f64.  Cost is per-number string
+# allocation; the exchange is the §7.1 sci-source hint.
+serde_json = { version = "1.0.135",
+                features = ["preserve_order", "arbitrary_precision"] }
 serde-aux = "4.5"
 psio-macros = { path = "../psio-macros" }
 paste = "1"

@@ -168,6 +168,12 @@ fn write_varuint(dst: &mut [u8], pos: usize, v: u64) -> usize {
 
 /// Read a 2-bit-prefix varuint from `buf`. Returns `(value, bytes_consumed)`.
 pub(crate) fn read_varuint(buf: &[u8]) -> PjsonResult<(u64, usize)> {
+    peek_varuint(buf)
+}
+
+/// Public read alias used by external transcoders (pjson_json).
+/// Equivalent to `read_varuint` but exposed for API consumers.
+pub fn peek_varuint(buf: &[u8]) -> PjsonResult<(u64, usize)> {
     if buf.is_empty() {
         return Err(err("pjson: varuint underrun"));
     }
@@ -181,6 +187,12 @@ pub(crate) fn read_varuint(buf: &[u8]) -> PjsonResult<(u64, usize)> {
         v |= (buf[i] as u64) << (6 + (i - 1) * 8);
     }
     Ok((v, n))
+}
+
+/// Public write alias for varuint encoding (used by external
+/// transcoders).  Returns bytes written.
+pub fn write_varuint_at(dst: &mut [u8], pos: usize, v: u64) -> usize {
+    write_varuint(dst, pos, v)
 }
 
 // ── Varscale — 2-bit-prefix signed (zigzag) integer for decimal scale ───────
@@ -279,6 +291,12 @@ pub enum Value<'a> {
         scale: i32,
     },
     Float(f64),
+    /// `Float` with sci-source hint (§4.6 / §7.1) — encoded as
+    /// ieee_float with low-nibble bit 3 set so a downstream JSON
+    /// emitter can re-emit scientific notation.  Decode-side only
+    /// constructs this variant when the sci flag was observed in the
+    /// source buffer.
+    FloatSci(f64),
     /// `(text, encoding_flag)` — flag 0 = raw_text, 1 = escape_form.
     Str(&'a [u8], u8),
     Bytes(&'a [u8]),
@@ -387,7 +405,7 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
         }
         tag::IEEE_FLOAT => {
             let width_bits = low & 0x07;
-            let _sci = (low & 0x08) != 0; // cosmetic — spec §4.6
+            let sci = (low & 0x08) != 0; // §4.6 sci-source hint
             let w: usize = match width_bits {
                 1 => 2,
                 2 => 4,
@@ -398,24 +416,33 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
             if 1 + w != size {
                 return Err(err("pjson: ieee_float size mismatch"));
             }
-            // Spec §4.6: producers may emit any width, but a parser must
-            // accept all widths it can decode. binary16 / binary128 are
-            // rare in JSON sources; we reject them on decode for now and
-            // wire them up later. binary32 is widened to f64 losslessly.
-            match w {
+            // Spec §4.6: producers may emit any width, but a parser
+            // must accept all widths it can decode.  binary16 is
+            // widened losslessly via the helper in pjson_json.
+            // binary128 is deferred — the IEEE-754 quad codec is too
+            // large to inline without a dependency.
+            let f = match w {
+                2 => crate::pjson_json::f16_bits_to_f64(u16::from_le_bytes([
+                    value[1], value[2],
+                ])),
                 4 => {
                     let mut tmp = [0u8; 4];
                     tmp.copy_from_slice(&value[1..5]);
-                    Ok(Value::Float(f32::from_le_bytes(tmp) as f64))
+                    f32::from_le_bytes(tmp) as f64
                 }
                 8 => {
                     let mut tmp = [0u8; 8];
                     tmp.copy_from_slice(&value[1..9]);
-                    Ok(Value::Float(f64::from_le_bytes(tmp)))
+                    f64::from_le_bytes(tmp)
                 }
-                2 | 16 => Err(err("pjson: NotImplemented binary16/binary128")),
+                16 => return Err(err("pjson: NotImplemented binary128")),
                 _ => unreachable!(),
-            }
+            };
+            Ok(if sci {
+                Value::FloatSci(f)
+            } else {
+                Value::Float(f)
+            })
         }
         tag::NEGINT => {
             let bc = (low as usize) + 1;
@@ -796,6 +823,7 @@ pub fn value_size(value: &Value<'_>) -> usize {
         Value::NegInt(mag) => negint_size(*mag),
         Value::Decimal { mantissa, scale } => decimal_size(*mantissa, *scale),
         Value::Float(_) => 9, // binary64 only on encode
+        Value::FloatSci(_) => 9,
         Value::Str(b, _) => 1 + b.len(),
         Value::Bytes(b) => 1 + b.len(),
         Value::Array(children) => array_size(children),
@@ -912,6 +940,7 @@ fn encode_value_at(dst: &mut [u8], pos: usize, value: &Value<'_>) -> usize {
         Value::NegInt(mag) => encode_negint_at(dst, pos, *mag),
         Value::Decimal { mantissa, scale } => encode_decimal_at(dst, pos, *mantissa, *scale),
         Value::Float(f) => encode_f64_at(dst, pos, *f),
+        Value::FloatSci(f) => encode_f64_sci_at(dst, pos, *f),
         Value::Str(b, flag) => encode_string_at(dst, pos, b, *flag),
         Value::Bytes(b) => encode_bytes_at(dst, pos, b),
         Value::Array(children) => encode_generic_array_at(dst, pos, children),
@@ -984,6 +1013,17 @@ fn encode_f64_at(dst: &mut [u8], pos: usize, f: f64) -> usize {
     let canon = canonicalize_f64(f);
     // binary64, sci=0 → low nibble = 3.
     dst[pos] = (tag::IEEE_FLOAT << 4) | 0b011;
+    dst[pos + 1..pos + 9].copy_from_slice(&canon.to_le_bytes());
+    9
+}
+
+/// Like `encode_f64_at` but with the sci-source flag set per §4.6 /
+/// §7.1.  Used by the JSON transcoder when the source token contained
+/// `e` or `E`.
+fn encode_f64_sci_at(dst: &mut [u8], pos: usize, f: f64) -> usize {
+    let canon = canonicalize_f64(f);
+    // binary64, sci=1 → low nibble = 0b1011 = 0xB.
+    dst[pos] = (tag::IEEE_FLOAT << 4) | 0b1011;
     dst[pos + 1..pos + 9].copy_from_slice(&canon.to_le_bytes());
     9
 }
@@ -2152,11 +2192,29 @@ mod tests {
     }
 
     #[test]
-    fn ieee_float_binary16_not_implemented() {
-        // Width 1 → binary16 (2-byte payload). Decoder should report
-        // NotImplemented per spec footnote.
-        let buf = [0x61, 0x00, 0x00];
-        assert!(parse_value(&buf, 3).is_err());
+    fn ieee_float_binary16_decodes_widened() {
+        // Width 1 → binary16 (2-byte payload). Decoder widens
+        // losslessly to f64 via crate::pjson_json::f16_bits_to_f64.
+        // 1.5 in binary16 = 0x3E00.
+        let mut buf = vec![0x61];
+        buf.extend_from_slice(&0x3E00u16.to_le_bytes());
+        let v = parse_value(&buf, 3).unwrap();
+        match v {
+            Value::Float(f64v) => assert_eq!(f64v, 1.5),
+            other => panic!("expected float, got {:?}", other),
+        }
+
+        // ±0 in binary16 = 0x0000 / 0x8000.
+        let buf = vec![0x61, 0x00, 0x00];
+        let v = parse_value(&buf, 3).unwrap();
+        match v {
+            Value::Float(f64v) => assert_eq!(f64v, 0.0),
+            other => panic!("expected float, got {:?}", other),
+        }
+
+        // binary128 is still deferred.
+        let buf = vec![0x64; 17];
+        assert!(parse_value(&buf, 17).is_err());
     }
 
     #[test]
@@ -2173,15 +2231,26 @@ mod tests {
     }
 
     #[test]
-    fn ieee_float_sci_hint_ignored_for_value() {
-        // Bit 3 set → sci-source hint; value must round-trip.
+    fn ieee_float_sci_hint_decodes_as_floatsci() {
+        // Bit 3 set → sci-source hint per §4.6 / §7.1.  The decoder
+        // surfaces this via the FloatSci variant so the JSON
+        // re-emitter can preserve scientific notation on round-trip.
         let f: f64 = 1.5e10;
         let mut buf = vec![0x6B]; // 6<<4 | 0b1011 = sci=1, width=3 (binary64)
         buf.extend_from_slice(&f.to_le_bytes());
         let v = parse_value(&buf, 9).unwrap();
         match v {
+            Value::FloatSci(f64v) => assert_eq!(f64v, f),
+            other => panic!("expected FloatSci, got {:?}", other),
+        }
+
+        // Without the sci flag, the same payload decodes as Float.
+        let mut buf2 = vec![0x63]; // sci=0, width=3
+        buf2.extend_from_slice(&f.to_le_bytes());
+        let v2 = parse_value(&buf2, 9).unwrap();
+        match v2 {
             Value::Float(f64v) => assert_eq!(f64v, f),
-            _ => panic!("expected float"),
+            other => panic!("expected Float, got {:?}", other),
         }
     }
 

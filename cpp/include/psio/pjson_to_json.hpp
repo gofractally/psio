@@ -208,6 +208,12 @@ namespace psio {
                   std::memcpy(&f, p + 1, 4);
                   d = static_cast<double>(f);
                }
+               else if (width_bits == ieee_width_f16)
+               {
+                  std::uint16_t bits;
+                  std::memcpy(&bits, p + 1, 2);
+                  d = f16_bits_to_double(bits);
+               }
                else
                {
                   throw std::runtime_error(

@@ -314,6 +314,13 @@ namespace psio {
                std::memcpy(&f, data_ + 1, 4);
                return static_cast<double>(f);
             }
+            if (width_bits == ieee_width_f16)
+            {
+               // Software-widen binary16 → double.
+               std::uint16_t bits;
+               std::memcpy(&bits, data_ + 1, 2);
+               return f16_bits_to_double(bits);
+            }
             throw std::runtime_error(
                 "pjson_view::as_double: ieee_float width not supported");
          }

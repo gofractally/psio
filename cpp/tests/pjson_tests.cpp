@@ -267,15 +267,28 @@ TEST_CASE("pjson wire: ieee_float decode accepts binary32",
    CHECK(d.as<double>() == -1.5);
 }
 
-TEST_CASE("pjson wire: ieee_float rejects binary16 / binary128",
+TEST_CASE("pjson wire: ieee_float decodes binary16, defers binary128",
           "[pjson][wire][ieee_float]")
 {
-   // Width 0b001 (binary16) — 2-byte payload.
+   // Width 0b001 (binary16) — 2-byte payload, software-widened to f64.
    {
-      std::uint8_t bad[3] = {0x61, 0x00, 0x00};
-      CHECK_FALSE(pjson::validate({bad, 3}));
+      // 1.5 in binary16 = 0x3E00.
+      std::uint8_t buf[3] = {0x61, 0x00, 0x3E};
+      REQUIRE(pjson::validate({buf, 3}));
+      auto v = pjson::decode({buf, 3});
+      REQUIRE(v.holds<double>());
+      CHECK(v.as<double>() == 1.5);
    }
-   // Width 0b100 (binary128) — 16-byte payload.
+   {
+      // ±0 in binary16.
+      std::uint8_t buf[3] = {0x61, 0x00, 0x00};
+      REQUIRE(pjson::validate({buf, 3}));
+      auto v = pjson::decode({buf, 3});
+      REQUIRE(v.holds<double>());
+      CHECK(v.as<double>() == 0.0);
+   }
+   // Width 0b100 (binary128) — 16-byte payload, deferred (no soft
+   // float128 codec inline yet).
    {
       std::uint8_t bad[17] = {0x64};
       CHECK_FALSE(pjson::validate({bad, 17}));

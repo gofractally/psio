@@ -302,9 +302,10 @@ namespace psio {
       // bit 3      = sci-source hint (0=decimal-form source, 1=scientific)
       //
       // The reference C++ implementation emits binary64 only (the only
-      // width C++ `double` natively exposes). Decode accepts binary32 and
-      // binary64; binary16/binary128 return decode failure with a
-      // "not implemented" semantic until software fp16/fp128 lands.
+      // width C++ `double` natively exposes).  Decode accepts binary16
+      // (widened losslessly via the software helper below), binary32,
+      // and binary64; binary128 is deferred — IEEE-754 quad widening
+      // would pull in a soft-float dependency we don't want inline.
       enum : std::uint8_t
       {
          ieee_width_mask  = 0x07,  // bits 2..0
@@ -314,6 +315,59 @@ namespace psio {
          ieee_width_f64   = 3,     // log2(8) = 3
          ieee_width_f128  = 4,     // log2(16) = 4
       };
+
+      // Convert a binary16 (IEEE-754) bit pattern to double, lossless.
+      // Per IEEE-754: sign:1, exp:5, mant:10 → sign:1, exp:11, mant:52.
+      // Subnormals are normalised to f64; NaN payloads are preserved
+      // up to f64's wider mantissa.
+      [[gnu::always_inline]] inline double f16_bits_to_double(
+          std::uint16_t bits) noexcept
+      {
+         std::uint64_t sign = (bits >> 15) & 0x1u;
+         std::int32_t  exp  = static_cast<std::int32_t>((bits >> 10) & 0x1Fu);
+         std::uint64_t mant = bits & 0x3FFu;
+         std::uint64_t out_bits;
+         if (exp == 0)
+         {
+            if (mant == 0)
+               out_bits = sign << 63;  // ±0
+            else
+            {
+               // Subnormal: shift left until top bit set, drop the
+               // implicit bit, then bias into f64's exponent range.
+               std::uint64_t m = mant;
+               std::int32_t  e = -14;
+               while ((m & 0x400u) == 0)
+               {
+                  m <<= 1;
+                  --e;
+               }
+               m &= 0x3FFu;
+               out_bits =
+                   (sign << 63) |
+                   (static_cast<std::uint64_t>(e + 1023) << 52) |
+                   (m << (52 - 10));
+            }
+         }
+         else if (exp == 0x1F)
+         {
+            // Inf / NaN — preserve mantissa-as-payload up to f64
+            // width.
+            out_bits =
+                (sign << 63) | (0x7FFull << 52) | (mant << (52 - 10));
+         }
+         else
+         {
+            std::int32_t e = exp - 15 + 1023;
+            out_bits =
+                (sign << 63) |
+                (static_cast<std::uint64_t>(e) << 52) |
+                (mant << (52 - 10));
+         }
+         double d;
+         std::memcpy(&d, &out_bits, sizeof(d));
+         return d;
+      }
 
       // Canonical NaN bit pattern at binary64 (§15.2.1): sign=0,
       // exponent=all-1s, top mantissa bit=1, rest=0. Encoders must
@@ -1901,12 +1955,12 @@ namespace psio {
             {
                // §4.6: low nibble splits into width selector
                // (bits 2..0 = log2(byte_count)) + sci-source hint
-               // (bit 3, ignored on decode beyond stripping). The
-               // reference implementation supports binary32 and
-               // binary64; binary16 / binary128 are reserved for
-               // future software-fp work.
+               // (bit 3, ignored on decode beyond stripping the bit).
+               // The reference implementation emits binary64 and
+               // accepts binary16 / binary32 / binary64 on decode.
+               // binary128 is deferred — a software fp128 codec is
+               // outside the inline-header budget.
                std::uint8_t width_bits = low & ieee_width_mask;
-               // Mask out bit 3 (sci hint) before validation.
                if (width_bits == ieee_width_f64)
                {
                   if (size != 9) return false;
@@ -1923,8 +1977,16 @@ namespace psio {
                   out = pjson_value{static_cast<double>(f)};
                   return true;
                }
-               // binary16, binary128, or reserved width — not supported
-               // by the reference C++ decoder yet.
+               if (width_bits == ieee_width_f16)
+               {
+                  if (size != 3) return false;
+                  std::uint16_t bits;
+                  std::memcpy(&bits, p + 1, 2);
+                  out = pjson_value{f16_bits_to_double(bits)};
+                  return true;
+               }
+               // binary128 (width=4) or reserved width — not yet
+               // supported by the reference decoder.
                return false;
             }
             case t_string:
