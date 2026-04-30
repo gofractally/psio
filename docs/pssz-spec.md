@@ -74,22 +74,22 @@ type-level annotation channel.
 
 #### 1.3.1 Property checklist
 
-Cells marked ✗ indicate the format does not provide that property; ✓
-indicates it does; ◑ indicates partial support (caveats apply).
+Cells marked 🔴 indicate the format does not provide that property;
+🟢 indicates full support; 🟡 indicates partial support (caveats apply).
 
-| Property                        | **pssz** | ssz | fracpack | bincode | borsh | bin  | wit  | capnp | flatbuf | msgpack | protobuf | avro |
-|---------------------------------|:--------:|:---:|:--------:|:-------:|:-----:|:----:|:----:|:-----:|:-------:|:-------:|:--------:|:----:|
-| O(1) random field access        |  **✓**   |  ✓  |    ✓     |   ✗    |   ✗   |  ✗   |  ✓   |   ✓   |    ✓    |    ✗    |    ✗     |  ✗   |
-| Zero-copy views (no allocation) |  **✓**   |  ✓  |    ✓     |   ✗    |   ✗   |  ✗   |  ✓   |   ✓   |    ✓    |    ✗    |    ✗     |  ✗   |
-| Adaptive offset width           |  **✓**   |  ✗  |    ◑     |   ✗    |   ✗   |  ✗   |  ✗   |   ✗   |    ✗    |    ✗    |    ✗     |  ✗   |
-| Schema extensibility            |  **✓**   |  ✗  |    ✓     |   ✗    |   ✗   |  ✗   |  ✗   |   ✓   |    ✓    |    ✗    |    ✓     |  ✓   |
-| Trailing-default pruning        |  **✓**   |  ✗  |    ✓     |   ✗    |   ✗   |  ✗   |  ✗   |   ✗   |    ✗    |    ✗    |    ✗     |  ✗   |
-| Implicit sizing (no length pfx) |  **✓**   |  ✓  |    ✗     |   ✗    |   ✗   |  ✗   |  ✓   |   ◑   |    ◑    |    ✗    |    ✗     |  ✗   |
-| Canonical encoding              |  **✓**   |  ✓  |    ◑     |   ✓    |   ✓   |  ✓   |  ✓   |   ◑   |    ◑    |    ✗    |    ✗     |  ◑   |
-| Single-pass encode              |  **✓**   |  ◑  |    ◑     |   ✓    |   ✓   |  ✓   |  ◑   |   ◑   |    ◑    |    ✓    |    ◑     |  ✓   |
-| DWNC memcpy fast path           |  **✓**   |  ✗  |    ✓     |   ◑    |   ◑   |  ✗   |  ✓   |   ✗   |    ✗    |    ✗    |    ✗     |  ✗   |
+| Property                        | **pssz** | ssz | fracpack | bincode | borsh | bin | wit | capnp | flatbuf | msgpack | protobuf | avro |
+|---------------------------------|:--------:|:---:|:--------:|:-------:|:-----:|:---:|:---:|:-----:|:-------:|:-------:|:--------:|:----:|
+| O(1) random field access        |    🟢    | 🟢  |    🟢    |   🔴    |  🔴   | 🔴  | 🟢  |  🟢   |   🟢    |   🔴    |    🔴    |  🔴  |
+| Zero-copy views (no allocation) |    🟢    | 🟢  |    🟢    |   🔴    |  🔴   | 🔴  | 🟢  |  🟢   |   🟢    |   🔴    |    🔴    |  🔴  |
+| Adaptive offset width           |    🟢    | 🔴  |    🟡    |   🔴    |  🔴   | 🔴  | 🔴  |  🔴   |   🔴    |   🔴    |    🔴    |  🔴  |
+| Schema extensibility            |    🟢    | 🔴  |    🟢    |   🔴    |  🔴   | 🔴  | 🔴  |  🟢   |   🟢    |   🔴    |    🟢    |  🟢  |
+| Trailing-default pruning        |    🟢    | 🔴  |    🟢    |   🔴    |  🔴   | 🔴  | 🔴  |  🔴   |   🔴    |   🔴    |    🔴    |  🔴  |
+| Implicit sizing (no length pfx) |    🟢    | 🟢  |    🔴    |   🔴    |  🔴   | 🔴  | 🟢  |  🟡   |   🟡    |   🔴    |    🔴    |  🔴  |
+| Canonical encoding              |    🟢    | 🟢  |    🟡    |   🟢    |  🟢   | 🟢  | 🟢  |  🟡   |   🟡    |   🔴    |    🔴    |  🟡  |
+| Single-pass encode              |    🟢    | 🟡  |    🟡    |   🟢    |  🟢   | 🟢  | 🟡  |  🟡   |   🟡    |   🟢    |    🟡    |  🟢  |
+| DWNC memcpy fast path           |    🟢    | 🔴  |    🟢    |   🟡    |  🟡   | 🔴  | 🟢  |  🔴   |   🔴    |   🔴    |    🔴    |  🔴  |
 
-pssz is the only column with ✓ on every row.
+pssz is the only column with 🟢 on every row.
 
 #### 1.3.2 Quantitative comparison: geomean ratio vs pssz
 
@@ -149,7 +149,7 @@ How to read the table:
   byte offset depends on field N-1's value, which requires a
   sequential walk to reach any field. **This structurally precludes
   zero-copy views and O(1) random access** (look back at the
-  property checklist: every format with size < 1.00 has ✗ on the
+  property checklist: every format with size < 1.00 has 🔴 on the
   "O(1) random field access" and "Zero-copy views" rows). Trailing-
   default pruning is also off the table for the same reason — you
   can't drop trailing fields safely when the offsets to the kept
