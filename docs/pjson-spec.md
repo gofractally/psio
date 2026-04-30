@@ -3,6 +3,9 @@
 For anyone looking for a more compact, faster, self-describing
 format that can losslessly represent any valid JSON grammar —
 including large integers and perfect floating-point round-trip.
+Single-pass JSON transcoding at simdjson speeds (no intermediate
+value tree); canonical-typed field reads at memcpy speeds on the
+resulting binary.
 
 **Status:** v1 (stable). Reference implementation in
 `libraries/psio/cpp/include/psio/pjson*.hpp`. This document is the
@@ -20,6 +23,61 @@ documents whose structure is not known to the consumer at compile
 time. It is the binary peer of JSON: it can losslessly carry any value
 JSON's grammar can express, and it can be converted to JSON text and
 back.
+
+### Headline numbers
+
+**Wire size — the big wins.** pjson collapses to compact dedicated
+forms when JSON has structure: arrays of homogeneous-shape objects
+(`row_array`, §5.2.1) and dense primitive arrays (`typed_array`,
+§5.1.1). These two shapes dominate API responses, database query
+results, and bulk transit:
+
+| shape                                                  | JSON     | pjson    | ratio |
+|--------------------------------------------------------|----------|----------|-------|
+| 100 × `{"x":1,"y":2,"z":3}` as row_array               | 2 001 B  | 823 B    | 0.41× |
+| 1 000-element `u16` typed_array (`[1,2,…,1000]`)       | 3 894 B  | 2 003 B  | 0.51× |
+| 10-element `u8` typed_array (`[1,2,…,10]`)             | 22 B     | 13 B     | 0.59× |
+| Single `User` record with 6 fields (mixed types)       | 96 B     | 83 B     | 0.86× |
+| Single `{"x":1,"y":2,"z":3}` (no shape repetition)     | 19 B     | 19 B     | 1.00× |
+
+(Bytes computed from the encoding rules in this document. The
+bench at `cpp/benchmarks/bench_pjson_walk.cpp` prints the live
+`pjson size: NNN bytes (X.X% of JSON)` ratio for representative
+API payloads in its corpus.)
+
+Heterogeneous one-off objects roughly tie compact JSON — the
+slot-table overhead amortizes poorly over 3 single-character
+fields. The format pays off the moment a shape is repeated or
+elements are densely typed.
+
+**Read latency — constant time regardless of payload size.** A
+canonical-typed view runs a single `memcmp` against a precomputed
+schema-hash template, then indexes the offset table directly:
+
+| shape (canonical, in cache) | bytes | `view_one` ns |
+|-----------------------------|-------|---------------|
+| Point                       | 16    | 4.9           |
+| NameRecord                  | 35    | 5.4           |
+| FlatRecord                  | 51    | 4.1           |
+| Record                      | 59    | 4.2           |
+| Validator                   | 169   | 4.1           |
+
+(Apple M3, clang 22.1, Release; bench snapshot
+`perf_20260429T064728Z_7dfb0fb.csv` rows tagged `view_one`. Read
+latency is flat across a > 10× payload size range — the lookup
+is a fixed memcmp plus an offset-table index.)
+
+Schemaless reads through `pjson_view` (no precomputed template)
+run the hash-prefilter scan from §11 in ~15–25 ns on cached
+buffers — no JSON re-parse, no DOM allocation.
+
+**Transcode at simdjson speed.** JSON → pjson uses simdjson's
+on-demand parser to drive a single forward-write pjson encoder —
+no intermediate value tree, no DOM allocation. pjson → JSON walks
+the buffer once. Both directions run at simdjson-class parse
+speeds.
+
+### Wire size by encoder aggressiveness
 
 Wire-form size depends on the encoder's level of aggressiveness in
 detecting compactable shapes (§12.1). At the minimum-cost transcode
@@ -106,10 +164,10 @@ encoded data; for others it is reserved.
 | 1    | `bool`        | the boolean value: 0 = false, 1 = true (others reserved) | 0 bytes |
 | 2    | reserved      |                                                | — |
 | 3    | `uint_inline` | unsigned value 0..15 (the integer)             | 0 bytes |
-| 4    | `int`         | mantissa byte count − 1 (range 1..16)          | `bc` bytes (zigzag-LE) |
+| 4    | `uint`        | magnitude byte count − 1 (range 1..16)         | `bc` bytes (raw LE unsigned magnitude) |
 | 5    | `decimal`     | mantissa byte count − 1 (range 1..16)          | `bc` mantissa bytes + varscale (1..4 bytes) |
-| 6    | `ieee_float`  | reserved (must be 0)                           | 8 bytes (raw IEEE-754 binary64, LE) |
-| 7    | reserved      |                                                | — |
+| 6    | `ieee_float`  | bits 2..0 = `log₂(byte_count)` — 1 = binary16, 2 = binary32, 3 = binary64, 4 = binary128 (others reserved); bit 3 = sci-source hint (0 = decimal-form source, 1 = scientific-notation source). See §4.6. | 2 / 4 / 8 / 16 bytes (raw IEEE-754, LE) |
+| 7    | `negint`      | magnitude byte count − 1 (range 1..16); all-zero payload reserved | `bc` bytes (raw LE unsigned `\|value\|`) |
 | 8    | `string`      | encoding flag (see §4.7); 0..2 valid, others reserved | (size − 1) bytes (length implicit from `size`) |
 | 9    | reserved      |                                                | — |
 | 10 (A) | `bytes`     | reserved (must be 0)                           | (size − 1) bytes (raw octets) — see §4.8 |
@@ -146,34 +204,50 @@ Tag byte alone. The value is the **unsigned** integer encoded in the
 low nibble (range `0..15`). Container `size` is exactly 1 byte.
 
 The name reflects the encoding: only non-negative values 0..15 fit
-this form. Negative integers and values ≥ 16 use the `int` tag (code
-4).
+this form. Non-negative values ≥ 16 use `uint` (code 4); negative
+values use `negint` (code 7).
 
-### 4.4 `int` (code 4)
+### 4.4 `uint` (code 4) and `negint` (code 7)
 
-```
-tag (1 B): high = 4, low = bc − 1   where bc ∈ {1..16}
-mantissa (bc B): zigzag-encoded signed integer, little-endian
-```
-
-**Zigzag encoding** maps signed integers to unsigned for compact
-representation:
+Two parallel tags carry arbitrary-magnitude integers. The tag code
+encodes the sign; the payload carries the magnitude as raw little-
+endian unsigned bytes. There is no zigzag step, no per-value bit
+transform.
 
 ```
-zz_encode(v) = (v << 1) ^ (v >> 63)         // for i64
-zz_decode(z) = (z >> 1) ^ −(z & 1)          // arithmetic shift
+uint   tag (1 B):  high = 4, low = bc − 1   where bc ∈ {1..16}
+negint tag (1 B):  high = 7, low = bc − 1   where bc ∈ {1..16}
+payload (bc B):    magnitude as raw little-endian unsigned bytes
 ```
 
-For `bc ≤ 8` the value fits `i64`. For `bc ∈ 9..16` the value uses the
-full 128-bit range.
+A `uint` value is the unsigned integer in the payload. A `negint`
+value is the negation of the unsigned integer in the payload — e.g.,
+a `negint` with payload `1` decodes to logical value `−1`, payload
+`128` decodes to `−128`.
+
+For `bc ≤ 8` the magnitude fits `u64` (so `uint` covers the full
+`u64` range and `negint` covers `[−2⁶³ .. −1]` plus down to
+`−2⁶⁴ + 1`). For `bc ∈ 9..16` the magnitude extends through 128
+unsigned bits.
+
+`negint` with all-zero payload is **reserved**: there is no distinct
+"negative zero" integer. Decoders must reject this form.
 
 Encoders should choose the **smallest `bc`** that exactly represents
-the value. Decoders must accept any `bc ∈ 1..16`. There is no
-canonical-encoding requirement; both `bc = 2` and `bc = 8` are valid
-encodings of the value 200, but encoders should pick `bc = 1`.
+the magnitude. Decoders must accept any `bc ∈ 1..16`. There is no
+canonical-encoding requirement at the format level — see §15.2 for
+canonical rules.
 
-The `uint_inline` form (code 3) is preferred over `int` for values
-0..15.
+The `uint_inline` form (code 3) is preferred over `uint` for
+non-negative values 0..15.
+
+**Encode / decode is a pure raw-byte copy.** A typed unsigned source
+(`u32`, `u64`, `usize`) maps unambiguously to `uint`; a typed signed
+source inspects its sign and dispatches to `uint` or `negint`. No
+zigzag arithmetic, no branchy bit-fiddling — the bulk-decode
+SWAR/SIMD paths in §10 handle the payload as a fixed-width unsigned
+load. The split mirrors Postgres numeric, BSON, WIT canonical-ABI,
+and SSZ practice — sign in the type tag, magnitude in the bytes.
 
 ### 4.5 `decimal` (code 5)
 
@@ -223,12 +297,15 @@ Encoders must use the smallest byte count that fits the value.
 #### 4.5.2 Decimal vs IEEE float
 
 A floating-point value may be encoded either as `decimal`
-(mantissa × 10^scale) or `ieee_float` (raw IEEE-754 binary64). When
-both encodings can represent the value exactly:
+(mantissa × 10^scale) or `ieee_float` (raw IEEE-754 binary{16,32,
+64,128} — see §4.6). When both encodings can represent the value
+exactly:
 
-* If the **decimal form is shorter** in bytes, encoders **should**
+* If the **decimal form is shorter** in bytes than the smallest
+  ieee_float width that round-trips the value, encoders **should**
   choose `decimal`.
-* Otherwise encoders **should** choose `ieee_float`.
+* Otherwise encoders **should** choose `ieee_float` at the
+  smallest width that round-trips the value bit-exact.
 
 Decoders must accept either form for any numeric value.
 
@@ -239,14 +316,54 @@ notation (`1.5e10`) are normalized away.
 ### 4.6 `ieee_float` (code 6)
 
 ```
-tag (1 B): high = 6, low = 0
-bits (8 B): IEEE-754 binary64, little-endian
+tag (1 B):  high = 6
+            bits 2..0 = log₂(byte_count)
+            bit  3    = sci-source hint
+bits (N B): IEEE-754 binary{N×8}, little-endian
 ```
 
-The 8 bytes are the raw memory representation of the `double`. NaN and
-Infinity are technically representable but are forbidden in JSON; pjson
-encoders reading from JSON will not produce NaN or Infinity values.
-pjson encoders sourced from non-JSON inputs may emit them.
+The low nibble splits into a **width selector** (bits 2..0) and a
+**sci-source hint** (bit 3). The payload is the raw little-endian
+bit pattern of the selected format, copied byte-for-byte:
+
+| `low` | width bits | sci bit | byte_count | type        | sci-source hint |
+|-------|------------|---------|------------|-------------|-----------------|
+| 1     | 0b001      | 0       | 2          | binary16    | no              |
+| 2     | 0b010      | 0       | 4          | binary32    | no              |
+| 3     | 0b011      | 0       | 8          | binary64    | no              |
+| 4     | 0b100      | 0       | 16         | binary128   | no              |
+| 9     | 0b001      | 1       | 2          | binary16    | yes             |
+| 10    | 0b010      | 1       | 4          | binary32    | yes             |
+| 11    | 0b011      | 1       | 8          | binary64    | yes             |
+| 12    | 0b100      | 1       | 16         | binary128   | yes             |
+
+Width-selector codes 0 and 5..7 (and their sci-bit-set partners
+8 and 13..15) are reserved; decoders **must** reject.
+
+**Sci-source hint (bit 3, optional).** When set, the bit advises a
+JSON re-emitter that the source JSON token used scientific
+notation (e.g. `1.5e10`, `2E-3`). It is purely cosmetic — it does
+not affect the value, and decoders that don't care about
+re-emission may ignore it. Producers that don't track source
+notation (or that don't care to preserve it) leave the bit clear
+and the value still round-trips correctly numerically. The hint
+applies only on the `ieee_float` tag — see §7.1 for the coverage
+limits this implies.
+
+The bytes are the raw IEEE-754 little-endian representation; no
+endian swap, no padding. Producers without native support for a
+given width may emit only the widths their language exposes — a
+C-only producer typically emits binary32 and binary64; a producer
+on a platform with native `_Float16` may also emit binary16.
+
+NaN and Infinity are representable in every IEEE width but are
+forbidden in JSON text. pjson encoders sourced from JSON will not
+produce NaN or Infinity values; pjson encoders sourced from other
+inputs may emit them. For deterministic / content-addressable
+output, NaN and ±Inf use a **canonical bit pattern** specified in
+§15.2 — without that rule, a NaN value has many valid bit
+patterns and two encoders given "the same NaN" can produce
+byte-different output.
 
 ### 4.7 `string` (code 8)
 
@@ -408,7 +525,7 @@ Wire-size comparison for an `i32[100]`:
 
 | encoding | bytes |
 |---|---|
-| generic with per-element `int` tags | 1 (tag) + ≤ 5×100 (per-element tag+payload) + 4×100 (slot) + 2 = ~903 |
+| generic with per-element `uint`/`negint` tags | 1 (tag) + ≤ 5×100 (per-element tag+payload) + 4×100 (slot) + 2 = ~903 |
 | typed `i32`                         | 1 + 4×100 + 2 = 403 |
 
 A decoder must accept both forms for any homogeneous primitive
@@ -774,7 +891,15 @@ byte-for-byte. Specifically:
 
 * Whitespace and indentation are not preserved (compact emit only).
 * Trailing zeros in decimals are normalized (`100.00` → `100`).
-* Scientific notation may be normalized (`1.5e10` → `15000000000`).
+* Scientific notation **may** be preserved as a hint when the
+  value's canonical encoding is `ieee_float` (§4.6 sci-source
+  bit); for values that canonically go through `decimal` (which
+  is the common case — `1.5e10` decodes to a 3-byte decimal,
+  smaller than a 9-byte ieee_float), the source notation is not
+  preserved and re-emit normalizes (`1.5e10` → `15000000000`).
+  The bit is advisory only — a JSON re-emitter may also choose
+  scientific notation based on value magnitude regardless of the
+  hint.
 * Field encounter order **is** preserved.
 
 For applications requiring byte-identical round-trip (e.g., signature
@@ -789,8 +914,9 @@ the pjson.
 | `null` | 0 (null) |
 | `false` | 1 (bool, low nibble = 0) |
 | `true` | 1 (bool, low nibble = 1) |
-| integer fitting `i64` | 3 (uint_inline) for 0..15, else 4 (int) |
-| integer beyond `i64` | 4 (int) with bc 9..16 |
+| integer 0..15 | 3 (uint_inline) |
+| integer ≥ 16, fits `u128` | 4 (uint) with smallest bc |
+| integer < 0, fits `i128` magnitude | 7 (negint) with smallest bc on `\|v\|` |
 | fractional / exponent | 5 (decimal) when shortest, else 6 (ieee_float) |
 | `"..."` | 8 (string) — bytes between quotes, escape-form preserved |
 | `[ ... ]` (heterogeneous) | 11 (array, low nibble = 0 — generic) |
@@ -844,7 +970,7 @@ strips the suffix so `view["amount"]` and a stored key
 | max fields per container | 65 535 (`u16` count) |
 | max value_data bytes per container | 16 777 215 (24-bit offset) |
 | max key length | unbounded via long-key escape (§5.4); short-key path covers 0..254 bytes |
-| max integer mantissa | 128-bit signed (16-byte zigzag) |
+| max integer magnitude | 128 unsigned bits (16-byte raw LE) per `uint` / `negint` |
 | max decimal scale | ±536 870 911 (4-byte varscale) |
 | max nesting depth | implementation-defined; suggested cap: 256 |
 
@@ -858,7 +984,8 @@ A parser must detect and reject:
 * Tag with reserved low-nibble bits (e.g., `bool` low nibble > 1;
   `string` low nibble > 1; `array` low nibble 11..15; `bytes` low
   nibble != 0).
-* `int` or `decimal` with bc < 1 or bc > 16.
+* `uint`, `negint`, or `decimal` with bc < 1 or bc > 16; `negint`
+  with all-zero payload (negative-zero, reserved).
 * Container with stated count yielding `slot_table_pos < 1` or
   `value_data_size > size − overhead`.
 * `slot[i].offset` ≥ `value_data_size`, or `slot[i].offset` ≥
@@ -884,18 +1011,27 @@ parse_value(ptr, size) -> Value:
    0: return Null()                                       // tag 0x00
    1: assert low ≤ 1                                      // 0x10 = false, 0x11 = true
       return Bool(low == 1)
-   3: return Int(low)                                     // 0..15
-   4: bc = low + 1
+   3: return UInt(low)                                    // 0..15
+   4: bc = low + 1                                        // uint
       assert 1 + bc == size
-      zz = read_le_uint(ptr + 1, bc)
-      return Int(zz_decode(zz))
+      mag = read_le_uint(ptr + 1, bc)
+      return UInt(mag)
    5: bc = low + 1
       mantissa_zz = read_le_uint(ptr + 1, bc)
       (scale, scale_bytes) = read_varscale(ptr + 1 + bc, size - 1 - bc)
       assert 1 + bc + scale_bytes == size
       return Decimal(zz_decode(mantissa_zz), scale)
-   6: assert size == 9
-      return Double(read_le_double(ptr + 1))
+   6: width_bits = low & 0x07
+      sci         = (low & 0x08) != 0
+      assert width_bits ∈ {1, 2, 3, 4}                     // 1..4 = log₂(byte_count)
+      w = 1 << width_bits                                  // 2, 4, 8, or 16
+      assert 1 + w == size
+      return Float(read_le_float(ptr + 1, w), sci=sci)
+   7: bc = low + 1                                        // negint
+      assert 1 + bc == size
+      mag = read_le_uint(ptr + 1, bc)
+      assert mag != 0                                      // negative-zero reserved
+      return NegInt(mag)                                   // logical value = −mag
    8: assert low ≤ 1
       return String(ptr[1 .. size), encoding_flag = low)
    10: assert low == 0
@@ -1052,20 +1188,27 @@ encode_value(value, out: byte buffer):
       Bool(true)    -> append 0x11
       Int(v) where 0 ≤ v ≤ 15
                     -> append 0x30 | v
-      Int(v):
-         zz = zz_encode(v)
-         bc = byte_count(zz)         // smallest bc ∈ 1..16 fitting zz
+      Int(v) where v > 0:                              // uint
+         bc = byte_count(v)             // smallest bc ∈ 1..16 fitting v
          append 0x40 | (bc − 1)
-         append zz as bc bytes LE
+         append v as bc bytes LE
+      Int(v) where v < 0:                              // negint
+         mag = −v                       // unsigned magnitude
+         bc  = byte_count(mag)          // smallest bc ∈ 1..16
+         append 0x70 | (bc − 1)
+         append mag as bc bytes LE
       Decimal(m, s):
          zz = zz_encode(m)
          bc = byte_count(zz)
          append 0x50 | (bc − 1)
          append zz as bc bytes LE
          append varscale(s)
-      Double(d):
-         append 0x60
-         append d as 8 IEEE bytes LE
+      Float(f, sci=false):                                 // any IEEE binary{16,32,64,128}
+         w   = byte_count_of(format_of(f))                  // 2, 4, 8, or 16
+         lo  = log2(w)                                      // 1, 2, 3, or 4
+         lo |= (sci ? 0b1000 : 0)                           // bit 3 = sci-source hint
+         append 0x60 | lo
+         append f as w IEEE bytes LE
       String(text, encoding_flag):                       // flag ∈ {0, 1}
          append 0x80 | encoding_flag
          append text
@@ -1197,7 +1340,7 @@ side of the round-trip is the dominant cost.
 
 This is **pjson v1**. Future revisions of the format will:
 
-* Allocate previously-reserved tag codes (2, 7, 9, 13–15) for new types.
+* Allocate previously-reserved tag codes (2, 9, 13–15) for new types.
 * Allocate previously-reserved low-nibble bits as flags or extensions
   (e.g. new `string` flags, new typed-array element codes in
   `array`'s 11..15 reserved range).
@@ -1236,7 +1379,7 @@ A reference test corpus lives at `libraries/psio/cpp/tests/pjson_tests.cpp`.
 ## 15. Canonical Encoding
 
 The pjson format permits multiple wire encodings of the same logical
-value (e.g. a small integer can use `uint_inline` or `int`). For
+value (e.g. a small integer can use `uint_inline` or `uint`). For
 content-addressable hashing, signature verification, deduplication,
 and equality comparison via byte-compare, implementations need to
 agree on a single canonical form for every value.
@@ -1268,31 +1411,52 @@ same bytes for that value. (Field encounter order is excluded; see
 
 For an integer value `v`:
 
-| value range                          | canonical encoding              |
-|--------------------------------------|---------------------------------|
-| 0 ≤ v ≤ 15                           | `uint_inline` (1 byte)          |
-| v < 0 or v > 15, fits i64            | `int` with smallest bc (1..8)   |
-| beyond i64, fits i128                | `int` with smallest bc (9..16)  |
+| value range                                              | canonical encoding                              |
+|----------------------------------------------------------|-------------------------------------------------|
+| 0 ≤ v ≤ 15                                               | `uint_inline` (1 byte)                          |
+| 16 ≤ v, fits `u64`                                       | `uint` with smallest bc (1..8)                  |
+| u64::MAX < v, fits `u128`                                | `uint` with smallest bc (9..16)                 |
+| v = −1, fits `−2⁶³ ≤ v ≤ −1`                             | `negint` with smallest bc on `\|v\|` (1..8)      |
+| beyond `i64` magnitude, fits `i128` magnitude            | `negint` with smallest bc on `\|v\|` (9..16)     |
 
 For an integer-valued double (e.g. `42.0`): treat as integer and
 apply the table above. The fractional part is zero, so it round-trips
 through any integer encoding losslessly.
 
-For a fractional double `d` (non-zero fractional part):
+For a fractional value `f` (non-zero fractional part) sourced as
+some IEEE binary format:
 
-1. Compute the **shortest round-trip decimal** `(mantissa, scale)`
-   such that `from_double(d)` produces this pair (Ryu / Grisu /
-   Dragon4-equivalent). Trim trailing zeros from the mantissa
-   (incrementing `scale`) until either the last digit is non-zero
-   or `scale = 0`.
-2. Let `decimal_size = 1 + mantissa_bc + varscale_size(scale)`.
-3. If `decimal_size < 9` → encode as `decimal`.
-4. Else if `decimal_size > 9` → encode as `ieee_float`.
-5. Else (tie at 9 bytes) → encode as `ieee_float` (faster decode).
+1. Compute the **smallest IEEE width** `w ∈ {2, 4, 8, 16}` for
+   which `f` round-trips bit-exact. The candidate widths are
+   binary16, binary32, binary64, binary128. Let
+   `ieee_size = 1 + w`.
+2. Compute the **shortest round-trip decimal** `(mantissa, scale)`
+   such that `from_float(f, w)` produces this pair (Ryu / Grisu /
+   Dragon4-equivalent at width `w`). Trim trailing zeros from the
+   mantissa (incrementing `scale`) until either the last digit is
+   non-zero or `scale = 0`. Let
+   `decimal_size = 1 + mantissa_bc + varscale_size(scale)`.
+3. If `decimal_size < ieee_size` → encode as `decimal`.
+4. Else if `decimal_size > ieee_size` → encode as `ieee_float` at
+   width `w`.
+5. Else (tie) → encode as `ieee_float` at width `w` (faster
+   decode — a fixed-width raw load beats mantissa-and-scale
+   reconstruction).
 
-For a fractional with no representable shortest decimal (e.g.
-NaN, ±Inf — JSON-illegal but a non-JSON producer could emit them):
-encode as `ieee_float`.
+The `ieee_float` sci-source hint (§4.6 bit 3) is **outside** the
+canonical comparison: setting or clearing it does not change the
+numeric value or alter encoding-shortest selection. For
+strict-canonical / content-addressable encoding, the bit MUST be
+cleared (so that producers tracking source notation and producers
+not tracking it agree on the canonical bytes).
+
+For NaN, ±Inf, and other values that have no representable
+shortest decimal: encode as `ieee_float` at the **smallest width
+that represents the value** (binary16 for any NaN or ±Inf, since
+both are representable in every IEEE width). Use the canonical
+bit pattern specified in §15.2.1 below — multiple bit patterns
+encode "a NaN" in IEEE-754, and a deterministic encoder must pick
+exactly one.
 
 For a `(mantissa, scale)` pair supplied directly by a typed numeric
 source (not derived from a double): encode the `(mantissa, scale)`
@@ -1301,6 +1465,49 @@ typed value is **already** a `decimal` semantically; collapsing to
 double would lose its exact-decimal identity. Producers that want
 the smallest encoding regardless of identity should convert through
 double first and apply the rules above.
+
+#### 15.2.1 Canonical NaN and Infinity bit patterns
+
+IEEE-754 admits many bit patterns for "a NaN" — every value with
+exponent all 1s and a non-zero significand qualifies. For a
+deterministic / content-addressable encoding, exactly one pattern
+must be chosen. pjson's canonical encoder uses the **quiet NaN
+with zero payload** at every width: sign = 0, exponent = all 1s,
+top mantissa bit = 1 (the IEEE-754 quiet-bit), all other mantissa
+bits = 0.
+
+| width      | canonical NaN (LE bytes)                                 | canonical NaN (LE u{N}) |
+|------------|----------------------------------------------------------|--------------------------|
+| binary16   | `00 7E`                                                  | `0x7E00`                 |
+| binary32   | `00 00 C0 7F`                                            | `0x7FC00000`             |
+| binary64   | `00 00 00 00 00 00 F8 7F`                                | `0x7FF8000000000000`     |
+| binary128  | `00…00 00 80 FF 7F`  (16 bytes; first 14 are zero)       | `0x7FFF8000_00000000_00000000_00000000` |
+
+Encoders observing any other NaN bit pattern in the source value
+**must** rewrite to the canonical pattern at the chosen width
+before emitting `ieee_float`. The original payload bits are not
+preserved — pjson treats "NaN" as a single logical value, not a
+family.
+
+For ±Infinity the bit pattern is unambiguous (sign + exponent
+all 1s + mantissa all 0s). The sign bit is preserved from the
+source; no canonicalization is needed beyond that.
+
+| width      | +Infinity (LE)                                           | −Infinity (LE)                   |
+|------------|----------------------------------------------------------|----------------------------------|
+| binary16   | `0x7C00`                                                 | `0xFC00`                         |
+| binary32   | `0x7F800000`                                             | `0xFF800000`                     |
+| binary64   | `0x7FF0000000000000`                                     | `0xFFF0000000000000`             |
+| binary128  | `0x7FFF0000_00000000_00000000_00000000`                  | `0xFFFF0000_00000000_00000000_00000000` |
+
+A canonical encoder chooses the smallest width that represents
+the value (always binary16 for NaN, ±Inf, ±0, and any other
+"width-invariant" extreme).
+
+Decoders accept any well-formed IEEE bit pattern at any width;
+canonicalization is an encoder requirement, not a decoder rule.
+Strict-canonical validators (§15.7) **must** reject `ieee_float`
+payloads whose bits are a NaN but not the canonical pattern.
 
 ### 15.3 Strings
 
@@ -1507,7 +1714,7 @@ Compact JSON `{"a":1,"b":"two"}` (17 bytes) encodes as **20 bytes** of pjson:
 0xC0                       tag: object
                            ── value_data (10 bytes) ──
 0x61                       'a' (key for entry 0; key_size in slot)
-0x31                       int_inline 1 (entry 0 value)
+0x31                       uint_inline 1 (entry 0 value)
 0x62                       'b' (key for entry 1)
 0x80                       string tag (entry 1 value tag)
 0x74 0x77 0x6F             't', 'w', 'o' (string content)
@@ -1535,7 +1742,7 @@ Field `"a"`:
 * hash[0] at `ptr[8]`, slot[0] at `ptr[10..14]` → offset 0, key_size 1.
 * entry at `ptr+1`, key bytes `ptr[1..2)` = `'a'`.
 * value at `ptr+2`, size = (slot[1].offset − slot[0].offset) − 1 = 1 byte.
-* `parse_value(ptr+2, 1)` → tag `0x31` → int_inline = 1.
+* `parse_value(ptr+2, 1)` → tag `0x31` → uint_inline = 1.
 
 Field `"b"`:
 * hash[1] at `ptr[9]`, slot[1] at `ptr[14..18]` → offset 2, key_size 1.
