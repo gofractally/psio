@@ -91,7 +91,8 @@ namespace psio {
             case t_null:        return kind::null;
             case t_bool:        return kind::boolean;
             case t_uint_inline:
-            case t_int:         return kind::integer;
+            case t_uint:
+            case t_negint:      return kind::integer;
             case t_decimal:     return kind::decimal;
             case t_ieee_float:  return kind::floating;
             case t_string:      return kind::string;
@@ -211,17 +212,43 @@ namespace psio {
          }
          std::uint8_t t = data_[0] >> 4;
          if (t == t_uint_inline) return static_cast<std::int64_t>(data_[0] & 0x0F);
-         if (t == t_int)
+         if (t == t_uint)
          {
             std::uint8_t bc =
                 static_cast<std::uint8_t>((data_[0] & 0x0F) + 1);
             if (bc > 8)
                throw std::out_of_range(
                    "pjson_view::as_int64: exceeds int64");
-            std::uint64_t zz = 0;
-            std::memcpy(&zz, data_ + 1, bc);
-            return static_cast<std::int64_t>((zz >> 1) ^
-                                             (~(zz & 1) + 1));
+            std::uint64_t mag = 0;
+            std::memcpy(&mag, data_ + 1, bc);
+            if (mag > static_cast<std::uint64_t>(
+                         std::numeric_limits<std::int64_t>::max()))
+               throw std::out_of_range(
+                   "pjson_view::as_int64: exceeds int64");
+            return static_cast<std::int64_t>(mag);
+         }
+         if (t == t_negint)
+         {
+            std::uint8_t bc =
+                static_cast<std::uint8_t>((data_[0] & 0x0F) + 1);
+            if (bc > 8)
+               throw std::out_of_range(
+                   "pjson_view::as_int64: exceeds int64");
+            std::uint64_t mag = 0;
+            std::memcpy(&mag, data_ + 1, bc);
+            if (mag == 0)
+               throw std::runtime_error(
+                   "pjson_view::as_int64: negint zero is reserved");
+            // mag fits u64; -mag fits i64 iff mag ≤ 2^63.
+            constexpr std::uint64_t imin_mag =
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<std::int64_t>::max()) + 1u;
+            if (mag > imin_mag)
+               throw std::out_of_range(
+                   "pjson_view::as_int64: exceeds int64");
+            if (mag == imin_mag)
+               return std::numeric_limits<std::int64_t>::min();
+            return -static_cast<std::int64_t>(mag);
          }
          pjson_number n   = as_number();
          auto         opt = n.to_int64();
@@ -236,13 +263,21 @@ namespace psio {
          std::uint8_t t = data_[0] >> 4;
          if (t == t_uint_inline)
             return static_cast<__int128>(data_[0] & 0x0F);
-         if (t == t_int)
+         if (t == t_uint)
          {
             std::uint8_t bc =
                 static_cast<std::uint8_t>((data_[0] & 0x0F) + 1);
-            __uint128_t zz = 0;
-            std::memcpy(&zz, data_ + 1, bc);
-            return zz128_decode(zz);
+            __uint128_t mag = 0;
+            std::memcpy(&mag, data_ + 1, bc);
+            return static_cast<__int128>(mag);
+         }
+         if (t == t_negint)
+         {
+            std::uint8_t bc =
+                static_cast<std::uint8_t>((data_[0] & 0x0F) + 1);
+            __uint128_t mag = 0;
+            std::memcpy(&mag, data_ + 1, bc);
+            return -static_cast<__int128>(mag);
          }
          return as_number().mantissa;  // best-effort
       }
@@ -265,9 +300,22 @@ namespace psio {
          std::uint8_t t = data_[0] >> 4;
          if (t == t_ieee_float)
          {
-            double d;
-            std::memcpy(&d, data_ + 1, 8);
-            return d;
+            // §4.6 width selector: bits 2..0 of the low nibble.
+            std::uint8_t width_bits = data_[0] & ieee_width_mask;
+            if (width_bits == ieee_width_f64)
+            {
+               double d;
+               std::memcpy(&d, data_ + 1, 8);
+               return d;
+            }
+            if (width_bits == ieee_width_f32)
+            {
+               float f;
+               std::memcpy(&f, data_ + 1, 4);
+               return static_cast<double>(f);
+            }
+            throw std::runtime_error(
+                "pjson_view::as_double: ieee_float width not supported");
          }
          return as_number().to_double();
       }

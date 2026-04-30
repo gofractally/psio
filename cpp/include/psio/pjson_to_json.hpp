@@ -120,28 +120,54 @@ namespace psio {
                   out.push_back(static_cast<char>('0' + (low - 10)));
                }
                return;
-            case t_int:
+            case t_uint:
             {
+               // §4.4 uint: payload = magnitude as raw LE bytes.
                std::uint8_t bc = static_cast<std::uint8_t>(low + 1);
                if (bc <= 8)
                {
-                  std::uint64_t zz = 0;
-                  std::memcpy(&zz, p + 1, bc);
-                  std::int64_t v = static_cast<std::int64_t>(
-                      (zz >> 1) ^ (~(zz & 1) + 1));
+                  std::uint64_t mag = 0;
+                  std::memcpy(&mag, p + 1, bc);
                   char tmp[24];
-                  auto r = std::to_chars(tmp, tmp + sizeof(tmp), v);
+                  auto r = std::to_chars(tmp, tmp + sizeof(tmp), mag);
                   out.append(tmp, r.ptr);
                }
                else
                {
-                  // 128-bit path.
-                  __uint128_t zz = 0;
-                  std::memcpy(&zz, p + 1, bc);
-                  __int128 v = zz128_decode(zz);
-                  char     tmp[40];
+                  // 128-bit path: mag fits u128, emit as decimal text
+                  // via the i128 helper (cast through __int128).
+                  __uint128_t mag = 0;
+                  std::memcpy(&mag, p + 1, bc);
+                  char tmp[40];
                   std::size_t n =
-                      i128_to_chars(tmp, sizeof(tmp), v);
+                      i128_to_chars(tmp, sizeof(tmp),
+                                    static_cast<__int128>(mag));
+                  out.append(tmp, n);
+               }
+               return;
+            }
+            case t_negint:
+            {
+               // §4.4 negint: payload = |value| as raw LE bytes.
+               std::uint8_t bc = static_cast<std::uint8_t>(low + 1);
+               if (bc <= 8)
+               {
+                  std::uint64_t mag = 0;
+                  std::memcpy(&mag, p + 1, bc);
+                  // Render as -mag. INT64_MIN special case: emit literal.
+                  out.push_back('-');
+                  char tmp[24];
+                  auto r = std::to_chars(tmp, tmp + sizeof(tmp), mag);
+                  out.append(tmp, r.ptr);
+               }
+               else
+               {
+                  __uint128_t mag = 0;
+                  std::memcpy(&mag, p + 1, bc);
+                  char tmp[40];
+                  std::size_t n =
+                      i128_to_chars(tmp, sizeof(tmp),
+                                    -static_cast<__int128>(mag));
                   out.append(tmp, n);
                }
                return;
@@ -167,8 +193,26 @@ namespace psio {
             }
             case t_ieee_float:
             {
+               // §4.6 width selector. JSON forbids NaN/Inf, so any
+               // non-finite IEEE bit pattern raises (callers control
+               // their input domain).
+               std::uint8_t width_bits = low & ieee_width_mask;
                double d;
-               std::memcpy(&d, p + 1, 8);
+               if (width_bits == ieee_width_f64)
+               {
+                  std::memcpy(&d, p + 1, 8);
+               }
+               else if (width_bits == ieee_width_f32)
+               {
+                  float f;
+                  std::memcpy(&f, p + 1, 4);
+                  d = static_cast<double>(f);
+               }
+               else
+               {
+                  throw std::runtime_error(
+                      "pjson_to_json: ieee_float width not supported");
+               }
                char tmp[32];
                auto r = std::to_chars(tmp, tmp + sizeof(tmp), d);
                out.append(tmp, r.ptr);
