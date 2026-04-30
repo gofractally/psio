@@ -27,6 +27,7 @@
 // appended after. Containers follow the same fixed/variable split.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -1190,14 +1191,16 @@ namespace psio {
       template <typename T>
       codec_status validate_value(std::span<const char> src,
                                   std::size_t            pos,
-                                  std::size_t            end) noexcept;
+                                  std::size_t            end,
+                                  std::size_t            depth = 0) noexcept;
 
       // ── Vector / Array helpers ────────────────────────────────────────────
 
       template <typename E>
       codec_status validate_vector_payload(std::span<const char> src,
                                            std::size_t            pos,
-                                           std::size_t            end) noexcept
+                                           std::size_t            end,
+                                           std::size_t            depth) noexcept
       {
          if (pos > end || end > src.size())
             return codec_fail("ssz: vector span out of bounds",
@@ -1227,7 +1230,8 @@ namespace psio {
                for (std::size_t i = 0; i < n; ++i)
                {
                   auto st = validate_value<E>(src, pos + i * esz,
-                                              pos + (i + 1) * esz);
+                                              pos + (i + 1) * esz,
+                                              depth + 1);
                   if (!st.ok()) return st;
                }
             }
@@ -1271,7 +1275,8 @@ namespace psio {
                std::memcpy(&off_i, src.data() + pos + i * 4, 4);
                if (i + 1 < n)
                   std::memcpy(&stop, src.data() + pos + (i + 1) * 4, 4);
-               auto st = validate_value<E>(src, pos + off_i, pos + stop);
+               auto st = validate_value<E>(src, pos + off_i, pos + stop,
+                                            depth + 1);
                if (!st.ok()) return st;
             }
             return codec_ok();
@@ -1281,7 +1286,8 @@ namespace psio {
       template <typename E, std::size_t N>
       codec_status validate_array_payload(std::span<const char> src,
                                           std::size_t            pos,
-                                          std::size_t            end) noexcept
+                                          std::size_t            end,
+                                          std::size_t            depth) noexcept
       {
          // SSZ Vector[E, N] (std::array). Wire layout differs from
          // List[E]: no front count (N is part of the type).
@@ -1299,7 +1305,8 @@ namespace psio {
                for (std::size_t i = 0; i < N; ++i)
                {
                   auto st = validate_value<E>(src, pos + i * esz,
-                                              pos + (i + 1) * esz);
+                                              pos + (i + 1) * esz,
+                                              depth + 1);
                   if (!st.ok()) return st;
                }
             }
@@ -1338,7 +1345,8 @@ namespace psio {
                std::memcpy(&off_i, src.data() + pos + i * 4, 4);
                if (i + 1 < N)
                   std::memcpy(&stop, src.data() + pos + (i + 1) * 4, 4);
-               auto st = validate_value<E>(src, pos + off_i, pos + stop);
+               auto st = validate_value<E>(src, pos + off_i, pos + stop,
+                                            depth + 1);
                if (!st.ok()) return st;
             }
             return codec_ok();
@@ -1351,7 +1359,8 @@ namespace psio {
       codec_status validate_record(std::span<const char> src,
                                    std::size_t            pos,
                                    std::size_t            end,
-                                   std::index_sequence<Is...>) noexcept
+                                   std::index_sequence<Is...>,
+                                   std::size_t            depth) noexcept
       {
          using R = ::psio::reflect<T>;
          constexpr std::size_t NF = R::member_count;
@@ -1378,7 +1387,8 @@ namespace psio {
                    using F = typename R::template member_type<Is>;
                    constexpr std::size_t fs = fixed_size_of<F>();
                    auto st = validate_value<F>(src, fixed_cursor,
-                                               fixed_cursor + fs);
+                                               fixed_cursor + fs,
+                                               depth + 1);
                    if (!st.ok()) { err = std::move(st); return; }
                    fixed_cursor += fs;
                 }()),
@@ -1465,7 +1475,8 @@ namespace psio {
                    if constexpr (is_fixed_v<F>) return;
                    const std::size_t beg = pos + offsets[Is];
                    const std::size_t fin = pos + var_end[Is];
-                   auto st = validate_value<F>(src, beg, fin);
+                   auto st = validate_value<F>(src, beg, fin,
+                                                depth + 1);
                    if (!st.ok()) err = std::move(st);
                 }()),
                ...);
@@ -1889,8 +1900,12 @@ namespace psio {
       template <typename T>
       codec_status validate_value(std::span<const char> src,
                                   std::size_t            pos,
-                                  std::size_t            end) noexcept
+                                  std::size_t            end,
+                                  std::size_t            depth) noexcept
       {
+         if (depth > kMaxValidationDepth)
+            return codec_fail("ssz: max depth exceeded",
+                              static_cast<std::uint32_t>(pos), "ssz");
          // Adapter dispatch: opaque payload — defer to the adapter's
          // own validator.
          if constexpr (::psio::format_should_dispatch_adapter_v<
@@ -1920,7 +1935,8 @@ namespace psio {
                   for (std::size_t i = 0; i < N; ++i)
                   {
                      auto st = validate_value<E>(src, pos + i * esz,
-                                                 pos + (i + 1) * esz);
+                                                 pos + (i + 1) * esz,
+                                                 depth + 1);
                      if (!st.ok()) return st;
                   }
                }
@@ -1940,12 +1956,12 @@ namespace psio {
          {
             using E                 = typename T::value_type;
             constexpr std::size_t N = std::tuple_size<T>::value;
-            return validate_array_payload<E, N>(src, pos, end);
+            return validate_array_payload<E, N>(src, pos, end, depth + 1);
          }
          else if constexpr (is_std_vector_v<T>)
          {
             using E = typename T::value_type;
-            return validate_vector_payload<E>(src, pos, end);
+            return validate_vector_payload<E>(src, pos, end, depth + 1);
          }
          else if constexpr (is_std_optional_v<T>)
          {
@@ -1969,7 +1985,7 @@ namespace psio {
                return codec_fail("ssz: optional selector not 0/1",
                                  static_cast<std::uint32_t>(pos), "ssz");
             using V = typename T::value_type;
-            return validate_value<V>(src, pos + 1, end);
+            return validate_value<V>(src, pos + 1, end, depth + 1);
          }
          else if constexpr (is_std_variant_v<T>)
          {
@@ -1988,7 +2004,7 @@ namespace psio {
                (((sel == Js)
                     ? (err = validate_value<
                                 std::variant_alternative_t<Js, T>>(
-                          src, pos + 1, end),
+                          src, pos + 1, end, depth + 1),
                        true)
                     : false) ||
                 ...);
@@ -1999,7 +2015,8 @@ namespace psio {
          {
             using R = ::psio::reflect<T>;
             return validate_record<T>(
-               src, pos, end, std::make_index_sequence<R::member_count>{});
+               src, pos, end, std::make_index_sequence<R::member_count>{},
+               depth + 1);
          }
          else
          {

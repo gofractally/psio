@@ -72,6 +72,11 @@ psio_add_test(psio_static_dynamic_parity_tests
 # §9 step-2 follow-up: minimal fuzz smoke test for validate totality.
 psio_add_test(psio_validate_fuzz_tests validate_fuzz_tests.cpp)
 
+# Structural validation walkers (real bounds-checked decode-without-copy)
+# across every binary format. Round-trip + truncation + bad-tag + depth-cap.
+psio_add_test(psio_validate_structural_tests
+   validate_structural_tests.cpp)
+
 # Regression pins: padding-layout struct encoding + field-name collision
 # cases that v1 hit in consumer code.
 psio_add_test(psio_padding_and_names_tests

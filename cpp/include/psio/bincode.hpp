@@ -11,6 +11,7 @@
 //   * record:           fields concatenated in reflected order
 
 #include <psio/cpo.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -558,6 +559,229 @@ namespace psio {
          }
       }
 
+      // ── Structural validator ─────────────────────────────────────────
+      //
+      // Walks the buffer field-by-field by static type, advancing
+      // `pos` and confirming `pos <= bytes.size()` at every read.
+      // No allocation; no decoded value materialised. Hard depth cap
+      // enforced via kMaxValidationDepth — the untrusted-input path
+      // refuses pathological nesting regardless of the schema.
+
+      template <typename T>
+      codec_status
+      validate_value(std::span<const char> src, std::size_t& pos,
+                     std::size_t depth) noexcept
+      {
+         if (depth > kMaxValidationDepth)
+            return codec_fail("bincode: max depth exceeded",
+                              static_cast<std::uint32_t>(pos), "bincode");
+
+         const std::size_t avail = src.size() - pos;
+
+         if constexpr (std::is_same_v<T, bool>)
+         {
+            if (avail < 1)
+               return codec_fail("bincode: truncated bool",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            std::uint8_t b = static_cast<std::uint8_t>(src[pos]);
+            if (b > 1)
+               return codec_fail("bincode: bool not 0/1",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            ++pos;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, ::psio::uint256>)
+         {
+            if (avail < 32)
+               return codec_fail("bincode: truncated u256",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            pos += 32;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, ::psio::uint128> ||
+                            std::is_same_v<T, ::psio::int128>)
+         {
+            if (avail < 16)
+               return codec_fail("bincode: truncated u128/i128",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            pos += 16;
+            return codec_ok();
+         }
+         else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>)
+         {
+            if (avail < sizeof(T))
+               return codec_fail("bincode: truncated arithmetic",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            pos += sizeof(T);
+            return codec_ok();
+         }
+         else if constexpr (is_std_array<T>::value)
+         {
+            using E = typename T::value_type;
+            if constexpr (std::is_arithmetic_v<E> &&
+                          !std::is_same_v<E, bool>)
+            {
+               if (avail < std::tuple_size<T>::value * sizeof(E))
+                  return codec_fail("bincode: truncated array",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bincode");
+               pos += std::tuple_size<T>::value * sizeof(E);
+               return codec_ok();
+            }
+            else
+            {
+               for (std::size_t i = 0; i < std::tuple_size<T>::value; ++i)
+               {
+                  auto st = validate_value<E>(src, pos, depth + 1);
+                  if (!st.ok())
+                     return st;
+               }
+               return codec_ok();
+            }
+         }
+         else if constexpr (is_std_vector<T>::value)
+         {
+            using E = typename T::value_type;
+            if (avail < 8)
+               return codec_fail("bincode: truncated vector length",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            const std::uint64_t n = read_u64(src, pos);
+            pos += 8;
+            if constexpr (std::is_arithmetic_v<E> &&
+                          !std::is_same_v<E, bool>)
+            {
+               if (n > (src.size() - pos) / sizeof(E))
+                  return codec_fail("bincode: vector body OOB",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bincode");
+               pos += static_cast<std::size_t>(n) * sizeof(E);
+               return codec_ok();
+            }
+            else
+            {
+               for (std::uint64_t i = 0; i < n; ++i)
+               {
+                  auto st = validate_value<E>(src, pos, depth + 1);
+                  if (!st.ok())
+                     return st;
+               }
+               return codec_ok();
+            }
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
+         {
+            if (avail < 8)
+               return codec_fail("bincode: truncated string length",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            const std::uint64_t n = read_u64(src, pos);
+            pos += 8;
+            if (n > src.size() - pos)
+               return codec_fail("bincode: string body OOB",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            pos += static_cast<std::size_t>(n);
+            return codec_ok();
+         }
+         else if constexpr (is_std_optional<T>::value)
+         {
+            if (avail < 1)
+               return codec_fail("bincode: truncated optional tag",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            std::uint8_t tag = static_cast<std::uint8_t>(src[pos]);
+            ++pos;
+            if (tag > 1)
+               return codec_fail("bincode: optional tag not 0/1",
+                                 static_cast<std::uint32_t>(pos - 1),
+                                 "bincode");
+            if (tag == 0)
+               return codec_ok();
+            using V = typename T::value_type;
+            return validate_value<V>(src, pos, depth + 1);
+         }
+         else if constexpr (is_std_variant<T>::value)
+         {
+            if (avail < 4)
+               return codec_fail("bincode: truncated variant tag",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            std::uint32_t idx;
+            std::memcpy(&idx, src.data() + pos, 4);
+            pos += 4;
+            constexpr std::size_t N = std::variant_size_v<T>;
+            if (idx >= N)
+               return codec_fail("bincode: variant tag out of range",
+                                 static_cast<std::uint32_t>(pos - 4),
+                                 "bincode");
+            codec_status err = codec_ok();
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (((idx == Is)
+                    ? (err = validate_value<
+                          std::variant_alternative_t<Is, T>>(src, pos,
+                                                              depth + 1),
+                       false)
+                    : true) &&
+                ...);
+            }(std::make_index_sequence<N>{});
+            return err;
+         }
+         else if constexpr (is_bitvector<T>::value)
+         {
+            constexpr std::size_t nbytes = (T::size_value + 7) / 8;
+            if (avail < nbytes)
+               return codec_fail("bincode: truncated bitvector",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            pos += nbytes;
+            return codec_ok();
+         }
+         else if constexpr (is_bitlist<T>::value)
+         {
+            if (avail < 8)
+               return codec_fail("bincode: truncated bitlist length",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            const std::uint64_t bits = read_u64(src, pos);
+            pos += 8;
+            const std::size_t nbytes = static_cast<std::size_t>((bits + 7) / 8);
+            if (nbytes > src.size() - pos)
+               return codec_fail("bincode: bitlist body OOB",
+                                 static_cast<std::uint32_t>(pos),
+                                 "bincode");
+            pos += nbytes;
+            return codec_ok();
+         }
+         else if constexpr (Record<T>)
+         {
+            using R = ::psio::reflect<T>;
+            codec_status err = codec_ok();
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (((err.ok())
+                    ? (err = validate_value<
+                          typename R::template member_type<Is>>(
+                          src, pos, depth + 1),
+                       0)
+                    : 0),
+                ...);
+            }(std::make_index_sequence<R::member_count>{});
+            return err;
+         }
+         else
+         {
+            return codec_fail("bincode: unsupported type in validate",
+                              static_cast<std::uint32_t>(pos), "bincode");
+         }
+      }
+
    }  // namespace detail::bincode_impl
 
    struct bincode : format_tag_base<bincode>
@@ -614,6 +838,13 @@ namespace psio {
                 ::psio::check_max_dynamic_cap<T>(bytes.size(), "bincode");
              !st.ok())
             return st;
+         std::size_t pos = 0;
+         auto st = detail::bincode_impl::validate_value<T>(bytes, pos, 0);
+         if (!st.ok())
+            return st;
+         if (pos != bytes.size())
+            return codec_fail("bincode: trailing bytes",
+                              static_cast<std::uint32_t>(pos), "bincode");
          return codec_ok();
       }
 
