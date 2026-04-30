@@ -25,6 +25,7 @@ ethereum_ssz_derive = { version = "0.7",  optional = true }
 ssz_types           = { version = "0.8",  optional = true }
 typenum             = { version = "1",    optional = true }
 ssz_rs              = { version = "0.9",  optional = true }
+xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [features]
 default = []
@@ -42,4 +43,8 @@ rkyv = { version = "0.8", features = ["bytecheck"] }
 
 [[bench]]
 name = "psio_vs_externals"
+harness = false
+
+[[bench]]
+name = "pjson_bench"
 harness = false
