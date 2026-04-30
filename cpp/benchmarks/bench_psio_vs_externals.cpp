@@ -803,6 +803,11 @@ namespace {
          //  psio::bincode, psio::avro, psio::json have no zero-copy
          //  semantics — full decode is what users pay.
 
+         //  flatbuf / capnp use canonical-library zero-copy readers
+         //  on psio-encoded bytes.  Recorded then we fall through
+         //  to the psio::view chain block (which won't trigger for
+         //  these formats) and on to the validate cell.
+         bool view_recorded = false;
 #ifdef PSIO_HAVE_FLATBUF
          if constexpr (std::is_same_v<Fmt, psio::flatbuf> &&
                         requires {
@@ -822,7 +827,7 @@ namespace {
             record("view_one", t_view.min_ns, t_view.median_ns,
                    cv(t_view), wire, t_view.iters, t_view.trials,
                    "libflatbuffers GetRoot on psio bytes (zero-copy)");
-            return;
+            view_recorded = true;
          }
 #endif
 #ifdef PSIO_HAVE_CAPNP
@@ -853,46 +858,57 @@ namespace {
             record("view_one", t_view.min_ns, t_view.median_ns,
                    cv(t_view), wire, t_view.iters, t_view.trials,
                    "libcapnp FlatArrayMessageReader on psio bytes (zero-copy)");
-            return;
+            view_recorded = true;
          }
 #endif
 
          //  Try psio::view<T, Fmt> — genuine zero-copy field access
          //  via the format's record_field_span / vector_element_span
          //  traits.  Only enabled when the trait support is detected
-         //  AND a view-chain helper exists for this shape.
-         if constexpr (
-            ::psio::view_layout::has_record_support<Fmt, T>::value
-            && HasViewChain<Fmt, T>)
-         {
-            volatile std::uint64_t sink_v = 0;
-            auto t_view = ns_per_iter(0u, [&](std::size_t i) {
-               sink_v ^= view_target_via_view<Fmt>(
-                  spans[i & (kAntiDceK - 1)],
-                  std::type_identity<T>{});
-            });
-            record("view_one", t_view.min_ns, t_view.median_ns,
-                   cv(t_view), wire, t_view.iters, t_view.trials,
-                   "psio::view<T, Fmt> chain (zero-copy)");
-            return;
+         //  AND a view-chain helper exists for this shape AND no
+         //  external library already recorded a view_one cell.
+         //
+         //  Note: prior versions of this block ended with `return;`
+         //  which skipped the validate cell below for every
+         //  (Fmt, T) where the zero-copy view path was reachable —
+         //  that's why ssz/pssz never showed up in the validate
+         //  column. We now record into a local flag and run
+         //  validate below regardless.
+         if (!view_recorded) {
+            if constexpr (
+               ::psio::view_layout::has_record_support<Fmt, T>::value
+               && HasViewChain<Fmt, T>)
+            {
+               volatile std::uint64_t sink_v = 0;
+               auto t_view = ns_per_iter(0u, [&](std::size_t i) {
+                  sink_v ^= view_target_via_view<Fmt>(
+                     spans[i & (kAntiDceK - 1)],
+                     std::type_identity<T>{});
+               });
+               record("view_one", t_view.min_ns, t_view.median_ns,
+                      cv(t_view), wire, t_view.iters, t_view.trials,
+                      "psio::view<T, Fmt> chain (zero-copy)");
+            }
+            else
+            {
+               //  Fallback: decode-and-reach.  Captures the cost users
+               //  actually pay today on formats whose zero-copy view
+               //  trait specialisations aren't reachable — this is NOT
+               //  a "view", it's a full decode followed by an in-struct
+               //  field access.  Recorded under a distinct op name so
+               //  the report doesn't conflate it with genuine zero-copy
+               //  random access (psio::flatbuf / psio::capnp / lib*).
+               volatile std::uint64_t sink_v = 0;
+               auto t_view = ns_per_iter(0u, [&](std::size_t i) {
+                  auto decoded =
+                     psio::decode<T>(fmt, spans[i & (kAntiDceK - 1)]);
+                  sink_v ^= bench_view_target(decoded);
+               });
+               record("decode_then_view", t_view.min_ns, t_view.median_ns,
+                      cv(t_view), wire, t_view.iters, t_view.trials,
+                      "decode + reach (no native zero-copy view available)");
+            }
          }
-
-         //  Fallback: decode-and-reach.  Captures the cost users
-         //  actually pay today on formats whose zero-copy view
-         //  trait specialisations aren't reachable — this is NOT
-         //  a "view", it's a full decode followed by an in-struct
-         //  field access.  Recorded under a distinct op name so
-         //  the report doesn't conflate it with genuine zero-copy
-         //  random access (psio::flatbuf / psio::capnp / lib*).
-         volatile std::uint64_t sink_v = 0;
-         auto t_view = ns_per_iter(0u, [&](std::size_t i) {
-            auto decoded =
-               psio::decode<T>(fmt, spans[i & (kAntiDceK - 1)]);
-            sink_v ^= bench_view_target(decoded);
-         });
-         record("decode_then_view", t_view.min_ns, t_view.median_ns,
-                cv(t_view), wire, t_view.iters, t_view.trials,
-                "decode + reach (no native zero-copy view available)");
       }
 
       // validate — rotated input + bool-cast result XOR'd into a
