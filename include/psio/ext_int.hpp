@@ -17,6 +17,7 @@
 
 #include <psio/adapter.hpp>
 #include <psio/error.hpp>
+#include <psio/get_type_name.hpp>
 
 #include <array>
 #include <compare>
@@ -545,6 +546,13 @@ namespace psio {
    // formats the wire is their raw LE bytes. The per-format headers
    // (ssz.hpp / frac.hpp / …) are responsible for emitting the encode
    // and decode cases — this header only declares the types.
+
+   // Spelled type names for the reflection-driven introspection paths
+   // (schema emission, schema fingerprinting, etc.). uint128 / int128
+   // alias the compiler builtins, which already have `get_type_name`
+   // overloads upstream — only `uint256` / `float128` need their own.
+   PSIO_REFLECT_TYPENAME(uint256)
+   PSIO_REFLECT_TYPENAME(float128)
 
 }  // namespace psio
 
