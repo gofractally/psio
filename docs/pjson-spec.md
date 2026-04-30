@@ -1,4 +1,8 @@
-# pjson — Schemaless Self-Describing Binary Format
+# pjson — Binary JSON with Zero-Copy Random Access
+
+For anyone looking for a more compact, faster, self-describing
+format that can losslessly represent any valid JSON grammar —
+including large integers and perfect floating-point round-trip.
 
 **Status:** v1 (stable). Reference implementation in
 `libraries/psio/cpp/include/psio/pjson*.hpp`. This document is the
