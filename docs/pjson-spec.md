@@ -853,9 +853,30 @@ not designed for million-field containers.)
 
 ### 5.6 Offset width and container size limit
 
-The `offset` field within each `slot` is **24 bits**, bounding any
-single container's `value_data` region to **16 MiB**. Documents larger
-than this must split into multiple top-level containers.
+The `offset` field within each `slot` is **adaptive** — `slot_w` bytes
+per slot, where `slot_w ∈ {1, 2, 3, 4}` is selected by the encoder
+per container from the width byte's `slot_w_code` (low 2 bits — see
+§5.1, §5.2). The encoder picks the smallest width that fits the
+container's actual `value_data` size, so each container pays only
+for the bytes it needs:
+
+| `slot_w_code` | `slot_w` (offset bytes) | max `value_data` |
+|---------------|-------------------------|------------------|
+| 0             | 1 (`u8`)                | 256 B            |
+| 1             | 2 (`u16`)               | 64 KiB           |
+| 2             | 3 (`u24`)               | 16 MiB           |
+| 3             | 4 (`u32`)               | 4 GiB            |
+
+Picking `u8` for a small container saves 3 × N bytes versus a fixed
+`u32` slot table; the cost is one branch on container open to decode
+`slot_w` and a variable-width load to read each offset (typically 1–3
+cycles per offset, amortized over the lookup-vs.-walk path). Canonical
+typed views (§11.1) compile the width into the schema-hash template
+and pay zero runtime cost for adaptivity.
+
+Documents whose largest container exceeds 4 GiB must split into
+multiple top-level containers; pjson does not currently spec a
+`u64`-offset extension.
 
 ---
 
@@ -968,7 +989,7 @@ strips the suffix so `view["amount"]` and a stored key
 | limit | value |
 |---|---|
 | max fields per container | 65 535 (`u16` count) |
-| max value_data bytes per container | 16 777 215 (24-bit offset) |
+| max value_data bytes per container | 4 294 967 295 at `slot_w = u32`; 16 MiB at `u24`; 64 KiB at `u16`; 256 B at `u8` (encoder picks per container — see §5.6) |
 | max key length | unbounded via long-key escape (§5.4); short-key path covers 0..254 bytes |
 | max integer magnitude | 128 unsigned bits (16-byte raw LE) per `uint` / `negint` |
 | max decimal scale | ±536 870 911 (4-byte varscale) |
