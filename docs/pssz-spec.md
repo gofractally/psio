@@ -77,54 +77,105 @@ type-level annotation channel.
 Cells marked 🔴 indicate the format does not provide that property;
 🟢 indicates full support; 🟡 indicates partial support (caveats apply).
 Columns are ordered left-to-right by **similarity to pssz**: each
-cell scores 🟢 = 1.0, 🟡 = 0.5, 🔴 = 0.0, summed across all eleven
-property rows. Column totals appear in the final row.
+cell scores 🟢 = 1.0, 🟡 = 0.5, 🔴 = 0.0, summed across all rows.
+Column totals appear in the final row. Property names favor the
+**functional** description over the underlying technique
+(zero-copy views over O(1) random access; streaming-friendly over
+implicit sizing — they're the user-visible behavior).
 
-The first nine rows cover the properties pssz is **designed** to
-provide. The last two are inherent format properties where pssz
-**trades off** — included so the table doesn't hide places other
-formats win cleanly. (Adoption / language-SDK count is excluded as
-non-inherent — a function of marketing and time, not of the format
-itself.) Rows are ordered by how cleanly they track the column
-gradient: properties pssz wins on the left side appear at the top;
-trade-off rows where pssz scores 🔴 sink to the bottom.
-
-| Property                                               | **pssz** | fracpack | wit  | capnp | ssz  | flatbuf | avro | msgpack | borsh | bincode | protobuf | bin  |
-|--------------------------------------------------------|:--------:|:--------:|:----:|:-----:|:----:|:-------:|:----:|:-------:|:-----:|:-------:|:--------:|:----:|
-| O(1) random field access                               |    🟢    |    🟢    |  🟢  |  🟢   |  🟢  |   🟢    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
-| Zero-copy views (no allocation)                        |    🟢    |    🟢    |  🟢  |  🟢   |  🟢  |   🟢    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
-| Adaptive offset width                                  |    🟢    |    🟡    |  🔴  |  🔴   |  🔴  |   🔴    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
-| Trailing-default pruning                               |    🟢    |    🟢    |  🔴  |  🔴   |  🔴  |   🔴    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
-| DWNC memcpy fast path                                  |    🟢    |    🟢    |  🟢  |  🔴   |  🔴  |   🔴    |  🔴  |   🔴    |  🟡   |   🟡    |    🔴    |  🔴  |
-| Implicit sizing (no length pfx)                        |    🟢    |    🔴    |  🟢  |  🟡   |  🟢  |   🟡    |  🔴  |   🔴    |  🔴   |   🔴    |    🔴    |  🔴  |
-| Canonical encoding                                     |    🟢    |    🟡    |  🟢  |  🟡   |  🟢  |   🟡    |  🟡  |   🔴    |  🟢   |   🟢    |    🔴    |  🟢  |
-| Single-pass encode                                     |    🟢    |    🟡    |  🟡  |  🟡   |  🟡  |   🟡    |  🟢  |   🟢    |  🟢   |   🟢    |    🟡    |  🟢  |
-| Schema extensibility                                   |    🟢    |    🟢    |  🔴  |  🟢   |  🔴  |   🟢    |  🟢  |   🔴    |  🔴   |   🔴    |    🟢    |  🔴  |
-| Self-describing without compile-time schema†           |    🟡    |    🔴    |  🔴  |  🔴   |  🔴  |   🔴    |  🟡  |   🟢    |  🔴   |   🔴    |    🔴    |  🔴  |
-| Streaming-friendly (length-delimited, no whole-doc)    |    🔴    |    🔴    |  🔴  |  🟡   |  🔴  |   🔴    |  🟢  |   🟢    |  🟡   |   🟡    |    🟢    |  🟡  |
-| **Similarity score (max 11.0)**                        | **9.5**  | **6.5**  |**5.5**|**5.0**|**4.5**| **4.5** |**4.0**| **3.0** |**3.0**|  **3.0** |  **2.5** |**2.5**|
+| Property              | **pssz** | fracpack | ssz | wit | avro | borsh | bincode | flatbuf | msgpack | bin | capnp | protobuf |
+|-----------------------|:--------:|:--------:|:---:|:---:|:----:|:-----:|:-------:|:-------:|:-------:|:---:|:-----:|:--------:|
+| Zero-copy views       |    🟢    |    🟢    | 🟢  | 🟢  |  🔴  |  🔴   |   🔴    |   🟢    |   🔴    | 🔴  |  🟢   |    🔴    |
+| Default pruning       |    🟢    |    🟢    | 🔴  | 🔴  |  🔴  |  🔴   |   🔴    |   🔴    |   🔴    | 🔴  |  🔴   |    🔴    |
+| DWNC memcpy           |    🟢    |    🟢    | 🔴  | 🟢  |  🔴  |  🟡   |   🟡    |   🔴    |   🔴    | 🔴  |  🔴   |    🔴    |
+| Encode speed‡         |    🟢    |    🟡    | 🟢  | 🔴  |  🔴  |  🟡   |   🟡    |   🔴    |   🔴    | 🔴  |  🔴   |    🔴    |
+| Validation‡‡          |    🟢    |    🟢    | 🟢  | 🟢  |  🟡  |  🟡   |   🟡    |   🟢    |   🟡    | 🟡  |  🔴   |    🟡    |
+| Decode speed‡         |    🟢    |    🟢    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    |   🟢    |   🟡    | 🟢  |  🟢   |    🔴    |
+| Canonical             |    🟢    |    🟡    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    |   🟡    |   🔴    | 🟢  |  🟡   |    🔴    |
+| Single-pass encode    |    🟢    |    🟡    | 🟡  | 🟡  |  🟢  |  🟢   |   🟢    |   🟡    |   🟢    | 🟢  |  🟡   |    🟡    |
+| Extensibility         |    🟢    |    🟢    | 🔴  | 🔴  |  🟢  |  🔴   |   🔴    |   🟢    |   🔴    | 🔴  |  🟢   |    🟢    |
+| Wire size‡            |    🟢    |    🟢    | 🟢  | 🟢  |  🟢  |  🟢   |   🟢    |   🔴    |   🟢    | 🟢  |  🔴   |    🟡    |
+| Self-describing†      |    🟡    |    🔴    | 🔴  | 🔴  |  🟡  |  🔴   |   🔴    |   🔴    |   🟢    | 🔴  |  🔴   |    🔴    |
+| Streaming-friendly    |    🔴    |    🔴    | 🔴  | 🔴  |  🟢  |  🟡   |   🟡    |   🔴    |   🟢    | 🟡  |  🟡   |    🟢    |
+| **Score (max 12.0)**  | **10.5** | **8.5**  |**6.5**|**6.5**|**6.0**|  **6.0** | **6.0** | **5.0** |  **5.0** |**5.0**|**4.5**|  **3.5** |
 
 † Self-describing 🟡: pssz pairs with the **psch** companion-schema
-binary format (see `docs/psch-spec.md` / `.issues/pssz-format-design.md`).
-A pssz buffer shipped together with its psch schema is decodable
-without compile-time `T` — readers can iterate fields, render to
-JSON, and run dynamic zero-copy queries. Same model as avro's
-Object Container Files (which is why both score 🟡): the schema
-travels alongside the payload rather than being embedded per-value.
-Raw pssz bytes alone are still 🔴.
+binary format. A pssz buffer shipped with its psch schema is
+decodable without compile-time `T` — readers can iterate fields,
+render to JSON, and run dynamic zero-copy queries. Same model as
+avro's Object Container Files (which is why both score 🟡): the
+schema travels alongside the payload rather than being embedded
+per-value. Raw pssz bytes alone are still 🔴.
 
-pssz leads on the nine differentiator rows and the schema-package
-mode covers half of the self-describing trade-off. The remaining
-🔴 — streaming-friendly — is a structural consequence of the
-design: pssz uses container-relative offsets, so the whole
-container must be present in memory before any field can be read.
-The same constraint is what buys O(1) random access, DWNC memcpy,
-and adaptive widths. Formats lower in the column ordering generally
-won the trade by accepting some combination of larger wire size,
-slower lookup, or schema cost. Ties at 4.5 (ssz / flatbuf), 3.0
-(msgpack / borsh / bincode), and 2.5 (protobuf / bin) reflect
-different trade-off mixes at the same overall coverage — see §1.4
-for which axes each format prioritizes.
+‡ **Encode / Decode** thresholds are computed from §1.3.2's geomean
+ratios (smaller = faster; ratios normalized so pssz = 1.00):
+🟢 < 2.0×, 🟡 2.0–5.0×, 🔴 > 5.0×. **Wire size** is scored
+within feature class — a row that asked "absolute smallest"
+would always rank varint formats highest at the cost of random
+access, which isn't a fair comparison for the choices an
+implementer is actually making. So a format scores 🟢 if it's at
+or near the smallest within its class:
+
+* Zero-copy class (pssz, ssz, fracpack, wit, capnp, flatbuf):
+  pssz / ssz tie for smallest at 1.00, fracpack 1.06, wit 1.10
+  → 🟢 for the cluster within 10%; capnp 1.59, flatbuf 1.73
+  → 🔴 (alignment + vtable padding overhead).
+* Fixed-width non-zero-copy class (borsh, bincode, bin):
+  bin 0.94, borsh 0.96, bincode 1.04 — all 🟢 (tight cluster
+  within 11%).
+* Varint class (avro, msgpack, protobuf): avro 0.56, msgpack
+  0.61 → 🟢 (smallest absolute size); protobuf 0.72 → 🟡
+  (28% larger than avro within its class).
+
+So pssz scores 🟢 for being the smallest in its feature class
+even though varint formats are smaller absolutely. Adaptive
+offset width is the technique pssz uses to win that class — a
+schema-bounded container can pick `slot_w = u8/u16` and shed
+3× the slot-table overhead vs. a fixed-u32 layout.
+
+‡‡ **Validation** ≈ "decode minus allocation and copy" — walking
+the buffer to confirm a subsequent decode would succeed without
+reading past EOF, and (for many formats) computing the decoded
+buffer size. Specifically:
+
+* 🟢 = format admits fast structural validation in bounded
+  time AND our impl does it (pssz / fracpack / ssz / wit / flatbuf
+  walk offset tables or vtables; bounds checks + monotonicity
+  verification, no per-byte tag dispatch).
+* 🟡 = format admits validation but at higher per-byte cost OR
+  our impl is currently a no-op pending the structural walker
+  (avro / msgpack / protobuf carry varint tags so validation must
+  scan every value; borsh / bincode / bin have uniform fixed-
+  width fields so a structural walker would be cheap, but our
+  current `validate()` only checks non-empty + cap and accepts
+  any byte pattern — implementation work pending).
+* 🔴 = format **cannot** be fully safely validated. Cap'n Proto
+  permits structural cycles (pointers can self-reference);
+  bounded-time validation can only verify a depth-limited
+  approximation. Even with a complete impl, capnp validation is
+  fundamentally weaker than the alternatives.
+
+Numbers in this row will firm up once the bounds-checking
+validators land for borsh / bincode / bin and the bench harness
+gets a `validate` cell for each (format × shape) pair. Until
+then, treat 🟡 cells as "validatable in principle, measurement
+pending."
+
+pssz leads on the design-property rows, on encode / decode /
+validation, and on wire size **within its zero-copy class**;
+trades 🟡 on self-describing, 🔴 on streaming. The 🔴 is a
+structural consequence of the design — container-relative offsets
+require the whole container in memory before any field can be
+read; that's the same constraint that buys Zero-copy, DWNC
+memcpy, and the small adaptive-offset wire layout. Formats lower
+in the column ordering generally won the trade by accepting some
+combination of larger wire size in their class, slower encode,
+slower lookup, weaker validation, or alignment-padding overhead.
+Pairs at 6.5 (ssz / wit), three-way at 6.0 (avro / borsh /
+bincode), three-way at 5.0 (flatbuf / msgpack / bin), then 4.5
+(capnp) and 3.5 (protobuf) reflect different trade-off mixes at
+the same overall coverage — see §1.4 for which axes each format
+prioritizes.
 
 #### 1.3.2 Quantitative comparison: geomean ratio vs pssz
 
