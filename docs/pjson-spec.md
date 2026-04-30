@@ -1750,3 +1750,95 @@ Field `"b"`:
 * value at `ptr+4`, size = value_data_size − slot[1].offset − 1 = 4 bytes.
 * `parse_value(ptr+4, 4)` → tag `0x80` → string with content `"two"`.
 
+---
+
+## Appendix C. Reference shapes used in §1 numbers
+
+The "view_one ns" latency table in §1 references five reflected
+record shapes drawn from the pjson benchmark suite. They are
+reproduced here in schema notation so this document is self-
+contained. The C++ definitions used to generate the perf snapshot
+live at `cpp/benchmarks/shapes.hpp`.
+
+### Point — 8 B fixed, DWNC
+
+```
+record Point {
+    x : i32
+    y : i32
+} dwnc
+```
+
+Two signed 32-bit integers. DWNC ("definition will not change"),
+so encoders skip the extensibility header and the canonical-typed
+view's memcmp template covers the entire payload.
+
+### NameRecord — 16 B fixed, DWNC
+
+```
+record NameRecord {
+    account : u64
+    limit   : u64
+} dwnc
+```
+
+Two unsigned 64-bit integers. Same DWNC fast path as Point.
+
+### FlatRecord — variable, extensible
+
+```
+record FlatRecord {
+    id     : u32
+    label  : String
+    values : Vector(u16)
+}
+```
+
+Mixed fixed + variable: a numeric ID, a UTF-8 label, and a
+homogeneous `u16` array. Carries the extensibility header.
+
+### Record — variable, extensible, with optional
+
+```
+record Record {
+    id     : u32
+    label  : String
+    values : Vector(u16)
+    score  : Optional(u32)
+}
+```
+
+`FlatRecord` plus an optional trailing field. Exercises
+trailing-default pruning and the `Optional` encoding.
+
+### Validator — packed, DWNC
+
+```
+record Validator {
+    pubkey_lo          : u64
+    pubkey_hi          : u64
+    withdrawal_lo      : u64
+    withdrawal_hi      : u64
+    effective_balance  : u64
+    slashed            : bool
+    activation_epoch   : u64
+    exit_epoch         : u64
+    withdrawable_epoch : u64
+} dwnc, packed
+```
+
+The canonical Ethereum beacon-state Validator entry — eight `u64`
+fields plus a `bool`. The reflected layout is **packed**: total
+in-memory bytes equal the sum of field sizes (no platform
+alignment padding), so a memcpy of the live struct produces the
+canonical wire bytes byte-for-byte. This matches the layout used
+by pssz / ssz / bin DWNC memcpy fast paths and lets the
+canonical-typed view validate via a single memcmp against a
+precomputed schema-hash template.
+
+The 169-byte pjson size in §1 reflects the wire form for a
+populated Validator (object header, per-field key bytes, value
+encodings at the encoder's smallest-`bc` choice for each field,
+hash table, slot table, count). A field-by-field byte budget is
+out of scope for this appendix; the live bench corpus computes
+the exact byte count for each populated instance.
