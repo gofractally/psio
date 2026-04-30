@@ -34,11 +34,17 @@ pub use fracpack_impl::*;
 
 // New modules (populated in subsequent phases)
 pub mod xxh64;
+pub mod xxh3_64;
 pub mod dynamic_schema;
 
 // Multi-format wire formats
 pub mod capnp;
 pub mod flatbuf;
+pub mod pjson;
+#[macro_use]
+pub mod pjson_derive;
+pub mod pjson_view;
+pub mod pjson_typed;
 pub mod pssz;
 #[macro_use]
 pub mod pssz_derive;
@@ -52,6 +58,12 @@ pub mod wit;
 // Cross-validation tests against C++ encoder fixtures
 #[cfg(test)]
 mod cross_validation_tests;
+
+// pjson cross-validation: round-trip self-checks + #[ignore]-marked
+// byte-identity comparisons against C++ output (placeholders until
+// the sibling pjson-impl-conformance branch lands).
+#[cfg(test)]
+mod pjson_cross_validation_tests;
 
 // Ethereum Phase-0 BeaconState types (Rust port of beacon_types.hpp)
 pub mod beacon_types;
