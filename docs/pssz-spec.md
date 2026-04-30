@@ -76,20 +76,32 @@ type-level annotation channel.
 
 Cells marked 🔴 indicate the format does not provide that property;
 🟢 indicates full support; 🟡 indicates partial support (caveats apply).
+Columns are ordered left-to-right by **similarity to pssz**: each
+cell scores 🟢 = 1.0, 🟡 = 0.5, 🔴 = 0.0, summed across the nine
+property rows. Column totals appear in the final row.
 
-| Property                        | **pssz** | ssz | fracpack | bincode | borsh | bin | wit | capnp | flatbuf | msgpack | protobuf | avro |
-|---------------------------------|:--------:|:---:|:--------:|:-------:|:-----:|:---:|:---:|:-----:|:-------:|:-------:|:--------:|:----:|
-| O(1) random field access        |    🟢    | 🟢  |    🟢    |   🔴    |  🔴   | 🔴  | 🟢  |  🟢   |   🟢    |   🔴    |    🔴    |  🔴  |
-| Zero-copy views (no allocation) |    🟢    | 🟢  |    🟢    |   🔴    |  🔴   | 🔴  | 🟢  |  🟢   |   🟢    |   🔴    |    🔴    |  🔴  |
-| Adaptive offset width           |    🟢    | 🔴  |    🟡    |   🔴    |  🔴   | 🔴  | 🔴  |  🔴   |   🔴    |   🔴    |    🔴    |  🔴  |
-| Schema extensibility            |    🟢    | 🔴  |    🟢    |   🔴    |  🔴   | 🔴  | 🔴  |  🟢   |   🟢    |   🔴    |    🟢    |  🟢  |
-| Trailing-default pruning        |    🟢    | 🔴  |    🟢    |   🔴    |  🔴   | 🔴  | 🔴  |  🔴   |   🔴    |   🔴    |    🔴    |  🔴  |
-| Implicit sizing (no length pfx) |    🟢    | 🟢  |    🔴    |   🔴    |  🔴   | 🔴  | 🟢  |  🟡   |   🟡    |   🔴    |    🔴    |  🔴  |
-| Canonical encoding              |    🟢    | 🟢  |    🟡    |   🟢    |  🟢   | 🟢  | 🟢  |  🟡   |   🟡    |   🔴    |    🔴    |  🟡  |
-| Single-pass encode              |    🟢    | 🟡  |    🟡    |   🟢    |  🟢   | 🟢  | 🟡  |  🟡   |   🟡    |   🟢    |    🟡    |  🟢  |
-| DWNC memcpy fast path           |    🟢    | 🔴  |    🟢    |   🟡    |  🟡   | 🔴  | 🟢  |  🔴   |   🔴    |   🔴    |    🔴    |  🔴  |
+Rows are also ordered by **how cleanly they track the column gradient**:
+properties pssz "wins" cleanly on the left side appear at the top, the
+outlier row (schema extensibility — green-but-late under multiple far-
+right formats) sinks to the bottom.
 
-pssz is the only column with 🟢 on every row.
+| Property                         | **pssz** | fracpack | wit  | ssz  | capnp | flatbuf | avro | bincode | borsh | bin  | protobuf | msgpack |
+|----------------------------------|:--------:|:--------:|:----:|:----:|:-----:|:-------:|:----:|:-------:|:-----:|:----:|:--------:|:-------:|
+| O(1) random field access         |    🟢    |    🟢    |  🟢  |  🟢  |  🟢   |   🟢    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
+| Zero-copy views (no allocation)  |    🟢    |    🟢    |  🟢  |  🟢  |  🟢   |   🟢    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
+| Adaptive offset width            |    🟢    |    🟡    |  🔴  |  🔴  |  🔴   |   🔴    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
+| Trailing-default pruning         |    🟢    |    🟢    |  🔴  |  🔴  |  🔴   |   🔴    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
+| DWNC memcpy fast path            |    🟢    |    🟢    |  🟢  |  🔴  |  🔴   |   🔴    |  🔴  |   🟡    |  🟡   |  🔴  |    🔴    |   🔴    |
+| Implicit sizing (no length pfx)  |    🟢    |    🔴    |  🟢  |  🟢  |  🟡   |   🟡    |  🔴  |   🔴    |  🔴   |  🔴  |    🔴    |   🔴    |
+| Canonical encoding               |    🟢    |    🟡    |  🟢  |  🟢  |  🟡   |   🟡    |  🟡  |   🟢    |  🟢   |  🟢  |    🔴    |   🔴    |
+| Single-pass encode               |    🟢    |    🟡    |  🟡  |  🟡  |  🟡   |   🟡    |  🟢  |   🟢    |  🟢   |  🟢  |    🟡    |   🟢    |
+| Schema extensibility             |    🟢    |    🟢    |  🔴  |  🔴  |  🟢   |   🟢    |  🟢  |   🔴    |  🔴   |  🔴  |    🟢    |   🔴    |
+| **Similarity score (max 9.0)**   | **9.0**  | **6.5**  |**5.5**|**4.5**|**4.5**| **4.5** |**2.5**| **2.5** |**2.5**|**2.0**|  **1.5** |  **1.0** |
+
+pssz is the only column with 🟢 on every row. Ties at 4.5 (ssz / capnp /
+flatbuf) and 2.5 (avro / bincode / borsh) reflect different trade-off
+mixes at the same overall coverage — see §1.4 for which axes each
+format prioritizes.
 
 #### 1.3.2 Quantitative comparison: geomean ratio vs pssz
 
