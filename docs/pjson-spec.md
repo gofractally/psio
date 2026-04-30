@@ -15,8 +15,20 @@ pjson is a binary serialization format for **schemaless data** —
 documents whose structure is not known to the consumer at compile
 time. It is the binary peer of JSON: it can losslessly carry any value
 JSON's grammar can express, and it can be converted to JSON text and
-back. The wire form is approximately the same size as compact JSON
-text (~102% on representative API payloads).
+back.
+
+Wire-form size depends on the encoder's level of aggressiveness in
+detecting compactable shapes (§12.1). At the minimum-cost transcode
+level — emit-as-you-parse, no shape detection — pjson is approximately
+the same size as compact JSON text (~102% on representative API
+payloads). At canonical levels — using `row_array` for arrays of
+homogeneous-shape objects (§5.2.1) and `typed_array` for
+homogeneous-primitive arrays (§5.1.1) — pjson is **smaller than
+JSON text** on the shapes that dominate API responses, query
+results, and log payloads (typically 60–75% of compact JSON), while
+still permitting random-access reads. Static-typed encode paths
+(producers that know the source type at compile time) reach the
+canonical size at zero detection cost.
 
 The format is designed for:
 
@@ -24,6 +36,15 @@ The format is designed for:
   lookups on cached buffers in practice (see §11 for the algorithm and
   why a hash-prefilter scan outperforms binary-search-of-strings at
   realistic JSON field counts).
+* **Order-preserving.** Fields appear on the wire in the order the
+  producer emitted them. pjson does **not** impose a key-sort rule.
+  Slot-by-index iteration returns fields in declaration / encounter
+  order, which matches what consumers of typed records, JSON
+  re-emitters, and presentation-layer iterators expect. Applications
+  that want sort-based canonicalization (e.g. for cross-producer
+  byte-equality) run that sort in their own layer before encoding;
+  pjson's role is to preserve whatever order the layer above
+  declared as significant. See §15.4.
 * **Single-allocation, single-pass encode** — no DOM tape, no
   intermediate value tree. The encoder appends children forward and
   writes the index at the tail.
@@ -595,6 +616,13 @@ it emits row_array; otherwise it falls back to generic
 JSON array's first object's key list, then byte-compares against
 each subsequent object's first K key bytes.
 
+Whether a producer **runs** that detection pass depends on its
+aggressiveness level (§12.1). Statically-typed producers (e.g.
+encoding a reflected `Vec<R>`) skip detection entirely and emit
+row_array unconditionally because the schema is known; dynamic
+JSON-to-pjson transcoders pay the detection cost only when the
+caller asks for it.
+
 Strict canonical encoders (§15) **must** emit row_array when
 applicable.
 
@@ -1078,6 +1106,87 @@ The encoder is **single-pass forward-write**. No memmove, no
 header reservation, no backpatching beyond writing the index at the
 tail.
 
+### 12.1 Static vs. dynamic detection (encoder aggressiveness)
+
+Several pjson container forms — `row_array` (§5.2.1), `typed_array`
+(§5.1.1), canonical numeric encodings (§15.2) — give the same
+logical value a substantially smaller wire form than the generic
+fall-back. **Whether** a given encoder uses them depends on how it
+learns the schema:
+
+**Static (compile-time) detection.** When the producer is generated
+from a typed source — for example, encoding a reflected record
+type, or a `vector<R>` where `R`'s field list is known at compile
+time — the schema is fully known before encoding begins. The
+encoder emits `row_array` / `typed_array` unconditionally; there is
+no probing pass and no fall-back path. Detection is **free**.
+This is the path native code uses when emitting pjson from typed
+values.
+
+**Dynamic (transcode-time) detection.** When the producer is
+reading JSON text (or another self-describing source) and emitting
+pjson on the fly, the schema is not known until the array's
+elements have been parsed. To use `row_array` or `typed_array`,
+the encoder must **probe** each element as it arrives to confirm
+the array is still homogeneous. Probing costs cycles on the
+encode side; emitting the compactable form saves bytes on the
+wire. Implementations expose this trade-off as an
+**aggressiveness level**:
+
+| level | name           | dynamic detect                                                            | wire size                            | encode cost          |
+|-------|----------------|---------------------------------------------------------------------------|--------------------------------------|----------------------|
+| 0     | none           | off                                                                       | always generic; ≈ JSON               | minimum              |
+| 1     | shape-only     | row_array, typed_array                                                    | smaller than JSON on uniform arrays  | + one probe pass     |
+| 2     | canonical      | level 1 + numeric canonicalization (§15.2) + smallest adaptive widths     | minimum (matches static encode)      | maximum              |
+
+All levels preserve field encounter order (§15.4). Key sorting is
+**not** part of pjson canonicalization at any level — it is the
+application layer's responsibility, performed before pjson's
+encoder is called, and only when the application has declared
+order-independence as part of its logical equality contract.
+
+* **Level 0 — none.** Transcoder emits `t_array` of `t_object`
+  unconditionally and never combines neighbouring primitives into
+  `typed_array`. Wire size matches the §1 baseline (~102% of
+  compact JSON). Use when transcode latency dominates and storage
+  size is not constrained (e.g. high-throughput RPC where the
+  payload is decoded immediately on arrival).
+* **Level 1 — shape-only.** On each new element of an array,
+  compare its shape against the first element's. For an array of
+  objects: byte-compare the key list. For an array of primitives:
+  check the element type code. Match → continue buffering.
+  Mismatch → restart the array as generic and emit the buffered
+  elements using `t_object` / generic-array. Net cost: O(N·K)
+  extra key-byte compares per array; net saving: 30–50% on
+  uniform object arrays, 50–80% on dense numeric arrays. This is
+  the §5.2.1.5 / §5.1.1 encoder rule applied dynamically.
+* **Level 2 — canonical.** Apply §15 in full: typed_array for
+  homogeneous-primitive arrays; row_array for homogeneous-shape
+  object arrays; smallest adaptive widths; smallest numeric
+  encoding per §15.2. **Field order is preserved** — pjson does
+  not sort keys; the encoder writes fields in encounter order
+  (§15.4). Output is strictly canonical: bit-equal across encoders
+  for the same logical input under the application's order policy
+  (which, for pjson, is "the order the input declared" — sorting,
+  if wanted, is the layer above's job). Decode-time random-access
+  by name and by slot index is unaffected. This is the level a
+  database storing pjson rows or a content-addressable store
+  should run; transcode time grows by a small constant factor
+  (typically < 2× over level 0) and storage shrinks meaningfully
+  versus JSON text.
+
+A statically-typed encoder effectively runs at "level ∞" (every
+applicable optimization, by knowing the schema in advance) at zero
+extra cost. The aggressiveness ladder exists only to give dynamic
+producers a way to spend encode cycles on wire-size reductions
+that the static path gets for free.
+
+Implementations of the dynamic JSON → pjson transcoder should
+expose the level as a parameter on the entry point. The minimum
+contract: level 0 must be available (it is the baseline single-
+pass encoder); higher levels are recommended where the storage
+side of the round-trip is the dominant cost.
+
 ---
 
 ## 13. Versioning
@@ -1249,6 +1358,11 @@ recoff_w = smallest width fitting total records-body size
 Mismatched objects (extra fields, missing fields, different
 byte-order of keys) make the array non-homogeneous; canonical
 encoders fall back to generic `t_array` of `t_object`s in that case.
+
+For dynamic JSON → pjson transcoders, this rule is reachable only
+at aggressiveness level 1 or higher (§12.1). Level 0 transcoders
+always emit generic `t_array` of `t_object` — they are not
+canonical encoders, by definition.
 
 ### 15.6 Arrays — generic vs. typed
 

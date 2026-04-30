@@ -57,16 +57,18 @@ order:
 Several rows in the comparison table below reference **DWNC**, an
 abbreviation introduced here for use throughout this document.
 
-A type is **DWNC** ("definition will not change") when its schema
-author has explicitly committed via the `definitionWillNotChange()`
-annotation that the field count, field types, and field order are
-frozen — no future schema version will add, remove, or reorder
-fields. Encoders for DWNC types skip the extensibility header
-(saving W bytes per record); when the in-memory layout also matches
-the wire layout, encode and decode collapse to a single `memcpy`.
+A type is **DWNC** ("definition will not change") when the schema
+includes a type-level `dwnc` flag committing that the field count,
+field types, and field order are frozen — no future schema version
+will add, remove, or reorder fields. Encoders of DWNC types skip the
+extensibility header (saving W bytes per record); when an
+implementation can prove that the in-memory layout of T matches the
+wire layout exactly, encode and decode collapse to a single byte-
+range copy.
 
-DWNC is the same annotation referenced in `pjson-spec.md` §16, and
-is part of psio's broader type-level annotation system.
+The `dwnc` flag is the same schema annotation referenced in
+`pjson-spec.md` §16; both formats consume it from the schema's
+type-level annotation channel.
 
 ### 1.3 Comparison matrix
 
@@ -190,8 +192,8 @@ why it matters.
 
 **O(1) random field access.** The decoder can compute the byte offset
 of the i-th field in constant time, with no scan over preceding
-fields. This is what lets `view<T, pssz>` peek at a single field of a
-1 MB record in nanoseconds. The mechanism is an **offset table** in
+fields. A pssz reader (zero-copy view) of a record can peek at a
+single field in nanoseconds. The mechanism is an **offset table** in
 the fixed region (or a vtable equivalent in capnp/flatbuf): each
 variable field has a slot whose value is the byte offset of its
 payload. ssz, fracpack, and pssz all share this design. Concatenated
@@ -204,14 +206,14 @@ read-only pointer into the encoded buffer for any sub-value. No
 allocation, no decode of unused fields. Combines with O(1) access to
 give "decode the one field I asked for" semantics.
 
-**Adaptive offset width.** When the schema author can bound the total
-encoded size (via per-field length annotations, type-level
-`maxDynamicData(N)`, or container-relative encoding plus type
+**Adaptive offset width.** When the schema can bound the total
+encoded size (via per-field length bounds, a type-level `max-
+dynamic-data` cap, or container-relative encoding plus type
 analysis), pssz picks 1-, 2-, or 4-byte offsets accordingly. A bound
 of ≤ 256 bytes turns every offset slot from 4 bytes to 1 byte —
 saving 3 × N bytes for an N-field record. SSZ is fixed at 4-byte
-offsets; fracpack has a per-format-tag choice (frac16 / frac32) but
-not per-type adaptation.
+offsets; fracpack has a per-format-tag choice (16-bit vs 32-bit
+offsets) but not per-type adaptation.
 
 **Schema extensibility.** A version-1 record can be written with N
 fields and read by a version-2 decoder that knows about N+M fields,
@@ -346,16 +348,15 @@ the top-level pssz document.
 to N − 1 in declaration order.
 
 **Fixed field.** A field whose encoded size is the same for every
-value of its type. Examples: arithmetic primitives, std::array<T, N>
-where T is fixed, bitvector<N>, DWNC reflected records of all-fixed
-fields. Fixed field values are written **inline** in the fixed
-region.
+value of its type. Examples: arithmetic primitives, `Array(T, N)`
+where T is fixed, `Bitvector(N)`, DWNC records of all-fixed fields.
+Fixed field values are written **inline** in the fixed region.
 
 **Variable field.** A field whose encoded size depends on the value.
-Examples: std::string, std::vector<T>, bitlist<N>, std::optional<V>
-where V is variable, std::variant, non-DWNC reflected records.
-Variable field **payloads** live in the dynamic / heap region; the
-fixed region holds only an offset slot pointing at the payload.
+Examples: `String`, `Vector(T)`, `Bitlist(N)`, `Optional(V)` where
+V is variable, `Variant(...)`, non-DWNC records. Variable field
+**payloads** live in the dynamic / heap region; the fixed region
+holds only an offset slot pointing at the payload.
 
 **Fixed region.** The contiguous bytes immediately following the
 extensibility header that hold inline fixed-field values and
@@ -408,7 +409,7 @@ fn auto_pssz_width(T) -> {1, 2, 4}:
 `effective_max_dynamic(T)` returns the smaller of:
 
 - The **explicit cap**: if T carries a type-level
-  `maxDynamicData(N)` annotation, that's the cap. (This is the same
+  `max-dynamic-data: N` annotation, that's the cap. (This is the same
   annotation defined in `pjson-spec.md` §16.)
 - The **inferred bound**: `max_encoded_size(T)` — a recursive walk
   that returns Some(n) when every variable-length sub-field of T
@@ -431,16 +432,16 @@ combined result is None only when neither constrains the size.
 | `u128 / i128`                    | 16                                            |
 | `u256`                           | 32                                            |
 | enum with underlying U           | sizeof(U)                                     |
-| `std::array<T, N>`               | N × max_encoded_size(T) [None if T is None]   |
-| `bitvector<N>`                   | ⌈N/8⌉                                         |
-| `bitlist<N>`                     | ⌈N/8⌉ + 1   (delimiter bit, see §5.7)         |
-| `bounded_string<N>`              | N + W                                         |
-| `bounded_list<T, N>`             | N × max_encoded_size(T) + W [None if T None]  |
-| `std::string`                    | None                                          |
-| `std::vector<T>`                 | None                                          |
-| `std::optional<T>` where min(T)=0 | 1 + max(T)                                   |
-| `std::optional<T>` where min(T)>0 | max(T)                                       |
-| `std::variant<Ts...>`            | 1 + max(max_encoded_size(T_i))                |
+| `Array(T, N)`               | N × max_encoded_size(T) [None if T is None]   |
+| `Bitvector(N)`                   | ⌈N/8⌉                                         |
+| `Bitlist(N)`                     | ⌈N/8⌉ + 1   (delimiter bit, see §5.7)         |
+| `BoundedString(N)`              | N + W                                         |
+| `BoundedList(T, N)`             | N × max_encoded_size(T) + W [None if T None]  |
+| `String`                    | None                                          |
+| `Vector(T)`                 | None                                          |
+| `Optional(T)` where min(T)=0 | 1 + max(T)                                   |
+| `Optional(T)` where min(T)>0 | max(T)                                       |
+| `Variant(Ts...)`            | 1 + max(max_encoded_size(T_i))                |
 | reflected record (DWNC)          | sum(fixed_size_of(field_i))                   |
 | reflected record (extensible)    | W + sum(per-field max contribution)           |
 
@@ -464,8 +465,8 @@ Used to compute fixed-region size. Defined for fixed-shape T only:
 | arithmetic / enum                | sizeof(T)                         |
 | `u128 / i128`                    | 16                                |
 | `u256`                           | 32                                |
-| `std::array<T, N>`               | N × fixed_size_of(T)              |
-| `bitvector<N>`                   | ⌈N/8⌉                             |
+| `Array(T, N)`               | N × fixed_size_of(T)              |
+| `Bitvector(N)`                   | ⌈N/8⌉                             |
 | reflected record (DWNC)          | sum(fixed_size_of(field_i))       |
 | reflected record (extensible)    | **W** (only the offset slot)      |
 | variable T (string, vector, ...) | **W** (only the offset slot)      |
@@ -481,14 +482,14 @@ Used by the optional-encoding rule (§5.5).
 | T                                | min_encoded_size(T)                  |
 |----------------------------------|--------------------------------------|
 | arithmetic, enum, ext_int, bool  | sizeof(T)                            |
-| `std::array<T, N>` (N ≥ 1)       | N × min(T)                           |
-| `bitvector<N>`                   | ⌈N/8⌉                                |
-| `bitlist<N>`                     | 1                                    |
-| `std::string`                    | 0                                    |
-| `std::vector<T>`                 | 0                                    |
-| `bounded_string<N>`              | 0                                    |
-| `bounded_list<T, N>`             | 0                                    |
-| `std::optional<T>`               | 0                                    |
+| `Array(T, N)` (N ≥ 1)       | N × min(T)                           |
+| `Bitvector(N)`                   | ⌈N/8⌉                                |
+| `Bitlist(N)`                     | 1                                    |
+| `String`                    | 0                                    |
+| `Vector(T)`                 | 0                                    |
+| `BoundedString(N)`              | 0                                    |
+| `BoundedList(T, N)`             | 0                                    |
+| `Optional(T)`               | 0                                    |
 | reflected record (DWNC)          | fixed_size_of(T)                     |
 | reflected record (extensible)    | W (the empty header alone)           |
 
@@ -539,7 +540,7 @@ value the decoder doesn't recognize; decoder rejects with
 
 A record is a heterogeneous collection of named fields in a fixed
 declaration order. There are two encoding paths: extensible
-(default) and DWNC (opt-in via `definitionWillNotChange()`
+(default) and DWNC (opt-in via the `dwnc` flag
 annotation).
 
 #### 5.1.1 Extensible record (default)
@@ -577,7 +578,7 @@ annotation).
 
 #### 5.1.2 DWNC record (opt-in)
 
-A record marked `definitionWillNotChange()` skips the extensibility
+A record marked the `dwnc` flag skips the extensibility
 header:
 
 ```
@@ -612,20 +613,21 @@ walker is conformant.
 
 #### 5.1.4 Encode example: extensible record with one string
 
-Schema:
+Schema (notation: `Record { name: Type, ... }`):
+
 ```
-struct Greeting {
-    u32         number;        // fixed field
-    std::string message;       // variable field
+Record Greeting {
+    number:  u32      // fixed field
+    message: String   // variable field
 }
 ```
 
-Width selection: `message` is unbounded, so
-`effective_max_dynamic = None`, so W = 4.
+Width selection: `message` is unbounded, so `effective_max_dynamic
+= none`, so W = 4.
 
 `fixed_size_of(Greeting)` = sizeof(u32) + W = 4 + 4 = 8.
 
-For the value `Greeting{ .number = 42, .message = "hi" }`:
+For the value `Greeting { number = 42, message = "hi" }`:
 
 ```
 Offset  Bytes              Meaning
@@ -642,7 +644,7 @@ Total: 14 bytes.
 (Header at 0..4, fixed region at 4..12, payload at 12..14. Offset
 8 = (payload start) - (fixed region start) = 12 - 4 = 8.)
 
-### 5.2 Arrays — `std::array<T, N>`
+### 5.2 Arrays — `Array(T, N)`
 
 Encoded as N elements of T, concatenated in order, no separator, no
 length prefix (N is fixed by the schema).
@@ -662,7 +664,7 @@ that case:
 Offsets are relative to the start of the array's fixed region (i.e.,
 the start of the offset slots).
 
-### 5.3 Vectors and bounded lists — `std::vector<T>`, `bounded_list<T, N>`
+### 5.3 Vectors and bounded lists — `Vector(T)`, `BoundedList(T, N)`
 
 A variable-length sequence of T values. As a record field, the
 vector's payload lives in the dynamic region of the enclosing record;
@@ -695,20 +697,20 @@ so count = offsets[0] / W.)
 
 Offsets are container-relative within the vector payload.
 
-#### 5.3.3 std::string
+#### 5.3.3 String
 
-A specialization of vector<u8>: the payload is the raw UTF-8 bytes,
-size derived from the enclosing offset arithmetic. No length prefix.
-No null terminator.
+A specialization of `Vector(u8)`: the payload is the raw UTF-8
+bytes, size derived from the enclosing offset arithmetic. No length
+prefix. No null terminator.
 
-#### 5.3.4 bounded_string<N>
+#### 5.3.4 BoundedString(N)
 
-Same wire form as std::string. The bound N participates in width
+Same wire form as `String`. The bound N participates in width
 selection (§3) but is not encoded on the wire.
 
 ### 5.4 Bitvectors and bitlists
 
-#### 5.4.1 bitvector<N>
+#### 5.4.1 Bitvector(N)
 
 Fixed-size bitset of N bits. Encoded as ⌈N/8⌉ bytes, **least
 significant bit first** within each byte. Bit i is in byte i/8 at bit
@@ -736,7 +738,7 @@ delimiter; bits past that position are zero.
 
 A zero-length bitlist encodes as `[0x01]` (delimiter at position 0).
 
-### 5.5 Optionals — `std::optional<T>`
+### 5.5 Optionals — `Optional(T)`
 
 Encoding depends on `min_encoded_size(T)` (§3.4):
 
@@ -777,7 +779,7 @@ fixed-shape fields — significant for record types with several
 optional u64 fields where the sum-of-bytes matters for cache
 locality.
 
-### 5.6 Variants — `std::variant<T_0, T_1, ..., T_{n-1}>`
+### 5.6 Variants — `Variant(T_0, T_1, ..., T_{n-1})`
 
 A tagged union with up to 256 alternatives.
 
@@ -934,7 +936,7 @@ not change.
 ✗ Decrease a field's `length_bound{.max}` to a value smaller than
   any encoded buffer. (Width may shift narrower, breaking old wire
   bytes.)
-✗ Add `definitionWillNotChange()` to a previously-extensible record.
+✗ Add the `dwnc` flag to a previously-extensible record.
   (DWNC removes the header, so old decoders reading a header where
   there isn't one will misinterpret bytes.)
 
@@ -951,7 +953,7 @@ For a container with width tag W:
 
 ### 8.2 Cap-imposed limits
 
-If T carries a `maxDynamicData(N)` annotation, the encoded total must
+If T carries a `max-dynamic-data: N` annotation, the encoded total must
 satisfy `total ≤ N`. Encoders that exceed N MUST throw / return an
 error rather than silently widen to a larger W. Decoders MAY enforce
 the cap by rejecting encoded buffers with `bytes.size() > N`.
@@ -993,7 +995,7 @@ A pssz decoder can produce the following error categories:
   UTF-8 (strict mode only; default decoders pass strings through
   uninterpreted).
 - **cap_exceeded** — buffer size exceeds the type's
-  `maxDynamicData(N)` cap.
+  `max-dynamic-data: N` cap.
 
 Errors must be reported with a byte offset where possible.
 
@@ -1251,7 +1253,7 @@ A pssz implementation passes conformance when:
    defaulted. Reverse: v2 encoder + v1 decoder reads v1 fields
    correctly and silently drops v2-only fields.
 5. **Width-boundary behavior.** A type whose
-   `effective_max_dynamic_v<T>` straddles the 0xff or 0xffff boundary
+   `effective_max_dynamic(T)` straddles the 0xff or 0xffff boundary
    must produce different byte counts depending on which side of the
    boundary the encoded value falls — but the schema-derived W is
    determined at type-resolution time, not per-value.
@@ -1268,7 +1270,9 @@ The conformance corpus must include:
 - Records where trailing fields are at their defaults (testing
   pruning).
 - Recursive records (records containing records).
-- The `Box<T>` cycle-breaker passing through transparently.
+- Indirection wrappers used as cycle-breakers (recursive types
+  that bottom out through a heap-allocated owning pointer)
+  passing through transparently.
 
 ## 15. Canonical Encoding
 
@@ -1283,7 +1287,7 @@ A pssz encoding is **canonical** when:
 3. No unused / "padding" bytes between payloads in the dynamic
    region.
 4. The width tag W is the minimum width permitted by the schema's
-   `effective_max_dynamic_v<T>`. (W = 1 if the schema's effective
+   `effective_max_dynamic(T)`. (W = 1 if the schema's effective
    bound is ≤ 0xff, etc. — see §3.)
 
 A canonical encoder always produces a canonical encoding. A
@@ -1298,21 +1302,21 @@ hashes regardless of which encoder produced them.
 
 pssz honors the type-level caps documented in `pjson-spec.md` §16:
 
-- **`maxFields(N)`** — at decode time, the validator may reject
+- **`max-fields: N`** — at decode time, the validator may reject
   records whose declared field count exceeds N. (Today this is a
   schema-level discipline; pssz is concerned with byte counts more
   than field counts.)
-- **`maxDynamicData(N)`** — drives both width selection (§3) and an
+- **`max-dynamic-data: N`** — drives both width selection (§3) and an
   explicit ceiling at encode + decode. Encoders that produce > N
   bytes throw; validators that see > N bytes in the input reject.
 
 The interplay between explicit caps and per-field length bounds is:
 explicit cap wins downward (cap < bound ⇒ cap; cap ≥ bound ⇒ bound).
-A canonical encoder's W is determined by `effective_max_dynamic_v<T>
+A canonical encoder's W is determined by `effective_max_dynamic(T)
 = min(explicit_cap, inferred_bound)`.
 
 When a record is DWNC + all fields are fixed-shape +
-`maxDynamicData(N)` is small enough to drop W to 1 and the value's
+`max-dynamic-data: N` is small enough to drop W to 1 and the value's
 actual size fits the cap, the encoded record is exactly
 `fixed_size_of(T)` bytes — no header, no offsets, no overhead. This
 is the minimum-size case for pssz.
@@ -1351,21 +1355,21 @@ is the minimum-size case for pssz.
   the dynamic region with an offset slot in the fixed region.
 - **Width tag W.** The byte width of offset slots and the
   extensibility header for a given type T. Derived from
-  `effective_max_dynamic_v<T>`. W ∈ {1, 2, 4}.
+  `effective_max_dynamic(T)`. W ∈ {1, 2, 4}.
 
 ## Appendix B. Worked Example — A complete pssz buffer
 
 Schema:
 ```
-struct UserPrefs {
-    u32                 user_id;     // fixed
-    std::string         display;     // variable
-    std::optional<u64>  last_login;  // optional fixed (no selector)
-    std::vector<u32>    favorites;   // variable
+record UserPrefs {
+    user_id    : u32              // fixed
+    display    : String           // variable
+    last_login : Optional(u64)    // optional fixed (no selector)
+    favorites  : Vector(u32)      // variable
 }
 ```
 
-No `definitionWillNotChange()` — extensible. No length bounds —
+No `dwnc` flag — extensible. No length bounds —
 `max_encoded_size(UserPrefs) = None` ⇒ W = 4.
 
 Per-field fixed contribution:
@@ -1448,10 +1452,11 @@ Two equivalent encodings exist for the offset table:
 
 Container-relative is preferred because:
 
-- A `view<T, pssz>` constructed with a sub-span (a pointer into
-  another buffer's interior) doesn't need to know its parent
-  buffer's start. Offsets resolve as `fixed_start + offset_i`,
-  using the local fixed_start the view holds.
+- A pssz reader (zero-copy view) constructed over a sub-span (a
+  pointer into another buffer's interior) doesn't need to know
+  its parent buffer's start. Offsets resolve as
+  `fixed_start + offset_i`, using the local fixed_start the
+  reader holds.
 - Recursive sub-records can be passed to nested decode functions
   with a sub-span, no rebasing.
 - The single-pass encoder doesn't need to know its absolute
