@@ -116,14 +116,10 @@ pub fn sample_record() -> Record {
 
 pub fn sample_validator() -> Validator {
     // Mirrors the `validator()` factory in `cpp/benchmarks/shapes.hpp`
-    // (i = 1; epochs use 0xFFFF_FFFF, NOT u64::MAX). Keeping all u64
-    // values within the i64 positive range is important for cross-val
-    // because the current C++ pjson encoder casts u64 → i64 before
-    // dispatching, so a u64 with the high bit set would emit NEGINT
-    // (logical −1) under the C++ side — diverging from spec §4.4.
-    // Filed for the C++ branch separately; the cross-val here uses
-    // the safe values to confirm byte-equivalence on the bulk of the
-    // u64 range.
+    // (i = 1; epochs use 0xFFFF_FFFF). Held stable so the byte-identity
+    // test stays anchored against the published `CPP_BYTES_VALIDATOR`
+    // capture. High-bit u64 dispatch is covered by
+    // `validator_high_bit_u64_uint_dispatch` below.
     Validator {
         pubkey_lo: 7,
         pubkey_hi: 11,
@@ -191,14 +187,13 @@ fn validator_roundtrip_canonical() {
 // To regenerate after a future C++-side wire change: rebuild the
 // dumper and replace the byte arrays in this file.
 //
-// Note: the `sample_validator()` factory keeps all u64 fields in the
-// i64 positive range (epochs use 0xFFFF_FFFF, NOT u64::MAX) because
-// the current C++ encoder casts u64 → i64 in pjson_encoded_size /
-// typed_field_encode and emits NEGINT when the high bit is set —
-// divergence from spec §4.4 (uint payload = raw LE unsigned
-// magnitude). Filed against the C++ side; covered here by using
-// values that don't exercise the bug. The Rust side already follows
-// the spec (uint for non-negative, negint for negative).
+// `sample_validator()` keeps u64 fields in the i64 positive range
+// (epochs use 0xFFFF_FFFF, NOT u64::MAX). High-bit u64 dispatch is
+// covered separately by `validator_high_bit_u64_uint_dispatch` below
+// — see that test for the regression-class guard. (Earlier the C++
+// encoder cast every integral to i64 before dispatching, emitting
+// NEGINT for u64 ≥ 2⁶³. Fixed in psio commit aa3319a; the new test
+// asserts the wire-byte structure to prevent reintroduction.)
 
 // POINT — 16 bytes
 const CPP_BYTES_POINT: &[u8] = &[
@@ -307,4 +302,92 @@ fn validator_cpp_byte_identity() {
         CPP_BYTES_VALIDATOR,
         "Validator",
     );
+}
+
+// ── Regression: u64 with high bit set must dispatch to UINT, not NEGINT ─
+//
+// Spec §4.4: an unsigned source must encode as `uint`, regardless of
+// whether the value's high bit is set. Earlier the C++
+// pjson_typed.hpp::typed_field_size_dispatch / typed_field_encode
+// cast every integral to std::int64_t before dispatching, so a
+// std::uint64_t with the MSB set became negative i64 and emitted
+// `negint` with the wrong magnitude. Fixed in psio commit aa3319a;
+// this test asserts wire-byte structure so the regression cannot
+// reintroduce silently.
+
+#[test]
+fn validator_high_bit_u64_uint_dispatch() {
+    // pubkey_lo = 2⁶³ + 1 — high bit set, value > i64::MAX.
+    // Other fields kept small to make the wire layout easy to
+    // navigate from the test side.
+    let v = Validator {
+        pubkey_lo: 0x8000_0000_0000_0001u64,
+        pubkey_hi: 11,
+        withdrawal_lo: 13,
+        withdrawal_hi: 17,
+        effective_balance: 100,
+        slashed: false,
+        activation_epoch: 200,
+        exit_epoch: 300,
+        withdrawable_epoch: 400,
+    };
+
+    // Round-trip through Rust: pure spec conformance check.
+    let buf = to_pjson(&v);
+    let decoded: Validator =
+        from_pjson(&buf).expect("decode high-bit-u64 validator");
+    assert_eq!(decoded.pubkey_lo, 0x8000_0000_0000_0001u64);
+
+    // Wire-byte assertion: locate the value tag for the `pubkey_lo`
+    // field and assert its high nibble is 0x4 (t_uint), not 0x7
+    // (t_negint). The key bytes "pubkey_lo" appear once in the value
+    // data; the byte immediately following is the value tag.
+    let key = b"pubkey_lo";
+    let pos = buf
+        .windows(key.len())
+        .position(|w| w == key)
+        .expect("pubkey_lo key bytes present in encoded buffer");
+    let value_tag = buf[pos + key.len()];
+    assert_eq!(
+        value_tag >> 4,
+        0x4,
+        "expected t_uint (high nibble 0x4) for high-bit-u64 source, \
+         got tag 0x{value_tag:02X} (high nibble 0x{:X}); the typed \
+         dispatch is reinterpreting unsigned as signed again",
+        value_tag >> 4
+    );
+}
+
+// Smallest possible reflected struct holding one u64 field — used by
+// `u64_max_typed_round_trips_as_uint` to assert wire layout.
+#[derive(Debug, PartialEq, Clone)]
+pub struct U64Max {
+    pub v: u64,
+}
+pjson_struct!(U64Max { v: u64 });
+
+#[test]
+fn u64_max_typed_round_trips_as_uint() {
+    let h = U64Max { v: u64::MAX };
+    let buf = to_pjson(&h);
+    let decoded: U64Max = from_pjson(&buf).expect("decode u64::MAX");
+    assert_eq!(decoded.v, u64::MAX);
+
+    // The value bytes for `v` should be 8 raw 0xFF bytes (uint with
+    // bc = 8) — the all-1s pattern — preceded by tag 0x47
+    // (t_uint = 0x4, low_nibble = bc-1 = 7).
+    let key = b"v";
+    let pos = buf
+        .windows(1)
+        .position(|w| w == key)
+        .expect("v key byte present");
+    assert_eq!(
+        buf[pos + 1],
+        0x47,
+        "expected tag 0x47 (t_uint, bc=8), got 0x{:02X}",
+        buf[pos + 1]
+    );
+    for i in 0..8 {
+        assert_eq!(buf[pos + 2 + i], 0xFF);
+    }
 }
