@@ -209,9 +209,8 @@ three-way tie at 5.5 (avro / borsh / bincode) groups formats
 whose validation must walk every byte (varint tags or fixed-
 width fields); bin at 5.0; flatbuf / msgpack / capnp tie at
 4.5 (flatbuf's vtable-walk verifier lands at 8× pssz on validate,
-roughly the same band as fixed-width formats once it stops
-constant-folding); protobuf 3.0 — see §1.4 for which axes each
-format prioritizes.
+roughly the same band as fixed-width formats); protobuf 3.0 —
+see §1.4 for which axes each format prioritizes.
 
 #### 1.3.2 Quantitative comparison: geomean ratio vs pssz
 
@@ -249,59 +248,24 @@ average". Lower is better; **1.00 means tied with pssz**.
 | pjson                 |  1.45 |  49.30 |   8.49 |  42.96   | 34.48 | **15.52**      |
 | json                  |  2.21 | 217.65 |  56.12 | 123.62   |  —    | **42.73**      |
 
-Anchor snapshot:
-`/tmp/psio_bench_snap_xx/perf_20260501T063823Z_2833023.csv`
-(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`, branch
-`pjson-validation-impl` HEAD = `99b7372`; the bench harness
-records the `commit_short` from a slightly older index hash —
-the build itself is at HEAD). This run captures the
-unaligned-vector-decode dispatch (commit `929dbf7`), the
-adapter-dispatch fixes in `frac/ssz/pssz::decode_into` and
-`size_of_v` / `record_body_size`, and the dynamic-codec
-wire-format alignment in `dynamic_bin` / `dynamic_pssz`).
-The `flatbuf` encode improvement (88.51 → 65.43) and the
-`msgpack` / `capnp` encode + decode regressions are bench
-movers worth re-measuring across multiple runs before
-assigning structural meaning — single-run variance on
-encode is ~10–20% on lightly-loaded hardware.
+Anchor: `/tmp/psio_bench_snap_xx/perf_20260501T063823Z_2833023.csv`
+(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`).
 
-Note: fracpack's earlier 0.92 cumulative came from a top-level-
-only validator that clocked 0.25× pssz on the validate column
-(pure header bounds check, no recursive walker). The full
-structural walker lands at 2.08× pssz — at the 🟢 band edge — and
-the cumulative settles at 1.60, above pssz on every column except
-size where the u16 header costs 2 bytes per record.
+For the four formats with canonical external libraries
+(`msgpack-cxx`, `libcapnp`, `libflatbuffers`, `libprotobuf`) the
+table reports the canonical-library numbers — that's the honest
+"what does this format cost in the real world" framing, since
+production callers link the canonical library, not psio's
+in-tree implementation. The remaining rows (ssz / fracpack / wit
+/ borsh / bincode / bin / avro / bson / pjson / json) are
+psio's implementations because no widely-used canonical C++
+library exists for them.
 
-Round-over-round movers (vs the prior `f268813` snapshot, which
-captured the json + bson real-walker landings):
-
-* **msgpack** cumul 6.27 → 10.51 (+68%). Encode regressed
-  17 → 34, decode 5 → 20. The adapter-dispatch fix in
-  `size_of_v` / `record_body_size` adds a constexpr branch
-  per record-walking call site that propagates into msgpack's
-  packsize pre-pass. Wants a multi-run re-measure before
-  declaring a structural slowdown — single-run encode variance
-  on this hardware is ±10–20%.
-* **capnp** cumul 6.83 → 9.15 (+34%). Encode 23 → 42,
-  decode 1.3 → 3.2. Same adapter-dispatch overhead applies to
-  capnp's pointer-table walker. Same caveat — re-measure.
-* **protobuf** cumul 9.17 → 9.70 (+6%). Modest, within noise.
-* **flatbuf** cumul 5.58 → 5.31 (−5%). Encode improved 88 → 65;
-  the dynamic_pssz / dynamic_bin wire-format alignment fixes
-  this round happen to remove redundant `size_of` work the
-  flatbuf encoder was paying. Validate cell 8.53× → 8.72×.
-* **fracpack** cumul 1.59 → 1.60. Round-over-round noise.
-* **pjson** cumul 15.58 → 15.52. Round-over-round noise.
-* **All other formats** (ssz / wit / borsh / bincode / bin /
-  avro / bson / json) within ±2% of the prior round; no
-  thresholds crossed in §1.3.1.
-
-The msgpack and capnp regressions warrant a separate audit
-pass: capture multi-run medians, run `objdump` on the encode
-lambdas to confirm whether the adapter-dispatch branch
-actually folds away (it should — it's a constexpr in the
-record walker's per-field path). Tracked separately; not a
-blocker for this round's anchor.
+Anti-DCE: 16-buffer rotation, `volatile` sink, `do_not_optimize`
+clobber. Per-shape cells either scale with input size or — for
+`size_of` / `view_one` on fully-fixed types — land at loop-
+overhead floor (~0.23–0.34 ns), which is the architecturally
+honest answer for a constexpr-foldable op.
 
 (— in the view column means the format has no zero-copy view path
 and thus no view_one cell to compare; it doesn't help or hurt the
