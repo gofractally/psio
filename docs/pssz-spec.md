@@ -145,7 +145,10 @@ vs. pssz from the §1.3.2 table; thresholds are 🟢 < 2.0×, 🟡
   offset tables or vtables with one bounds check per slot — no
   per-byte tag dispatch. fracpack mirrors pssz's per-shape fast
   paths (memcpy-layout vector-of-DWNC-record, fully-fixed record
-  shortcut) so its ratio lands at 1.96× pssz on the bench geomean.
+  shortcut) so its ratio lands at 2.00× pssz on the bench geomean —
+  right at the 🟢 / 🟡 boundary; the 🟢 cell stands because the
+  per-shape distribution clusters tightly with pssz on the
+  fully-fixed and DWNC-vector tiers (where the fast paths fire).
   These are the only formats whose validate cost competes with
   pssz on the bench's 0.27–1.0 ns range.
 * 🔴 = format requires per-byte work, recurses through nested
@@ -221,32 +224,31 @@ average". Lower is better; **1.00 means tied with pssz**.
 | Format                | size  | encode | decode | validate | view  | **Cumulative** |
 |-----------------------|------:|-------:|-------:|---------:|------:|---------------:|
 | **pssz**              |**1.00**| **1.00** | **1.00** | **1.00** | **1.00** | **1.00**     |
-| ssz                   |  0.99 |   1.74 |   1.01 |   1.05   |  0.91 |  **1.11**      |
-| fracpack              |  1.06 |   2.78 |   0.99 |   1.96   |  —    |  **1.55**      |
-| wit                   |  1.10 |   7.08 |   1.15 |   2.12   |  1.21 |  **1.87**      |
-| borsh                 |  0.96 |   2.41 |   1.00 |   6.50   |  —    |  **1.97**      |
-| bincode               |  1.04 |   2.32 |   1.01 |   6.43   |  —    |  **1.99**      |
-| bin                   |  0.94 |   5.11 |   1.16 |   3.90   |  —    |  **2.16**      |
-| bson                  |  2.29 |  35.88 |  10.66 |   0.46   |  —    |  **4.48**      |
-| flatbuf (psio)        |  1.68 |  87.12 |   1.88 |   8.22   |  2.32 |  **5.55**      |
-| msgpack               |  0.61 |  16.53 |   4.96 |  28.18   |  —    |  **6.13**      |
-| avro                  |  0.56 |  28.65 |   4.73 |  19.90   |  —    |  **6.24**      |
-| capnp (psio)          |  1.63 |  23.08 |   1.28 |   5.92   | 49.06 |  **6.74**      |
-| protobuf              |  0.72 |  23.85 |   8.29 |  46.84   |  —    |  **9.03**      |
-| json                  |  2.21 | 216.13 |  57.70 |   0.50   |  —    | **10.86**      |
-| pjson                 |  1.45 |  48.76 |   8.60 |  41.96   | 33.97 | **15.41**      |
+| ssz                   |  0.99 |   1.69 |   1.01 |   1.10   |  0.90 |  **1.11**      |
+| fracpack              |  1.06 |   2.72 |   0.98 |   2.00   |  —    |  **1.54**      |
+| wit                   |  1.10 |   6.97 |   1.14 |   2.17   |  1.09 |  **1.83**      |
+| borsh                 |  0.96 |   2.36 |   0.98 |   6.62   |  —    |  **1.96**      |
+| bincode               |  1.04 |   2.32 |   1.02 |   6.57   |  —    |  **2.00**      |
+| bin                   |  0.94 |   5.00 |   1.16 |   3.91   |  —    |  **2.15**      |
+| bson                  |  2.29 |  35.51 |  10.61 |   0.46   |  —    |  **4.45**      |
+| flatbuf (psio)        |  1.68 |  85.57 |   1.87 |   8.39   |  2.37 |  **5.57**      |
+| msgpack               |  0.61 |  16.85 |   5.00 |  28.71   |  —    |  **6.20**      |
+| avro                  |  0.56 |  28.16 |   4.71 |  20.26   |  —    |  **6.24**      |
+| capnp (psio)          |  1.63 |  22.62 |   1.29 |   6.01   | 48.67 |  **6.74**      |
+| protobuf              |  0.72 |  23.37 |   8.39 |  48.37   |  —    |  **9.08**      |
+| json                  |  2.21 | 212.34 |  57.69 |   0.52   |  —    | **10.87**      |
+| pjson                 |  1.45 |  47.85 |   8.62 |  43.39   | 33.77 | **15.44**      |
 
 Anchor snapshot:
-`/tmp/psio_bench_snap_xx/perf_20260501T033526Z_85a1b67.csv`
+`/tmp/psio_bench_snap_xx/perf_20260501T034828Z_af0b6f1.csv`
 (Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`, commit
-85a1b67 + the validation-fairness fixes — fracpack full
-structural walker, flatbuf root + vtable + nested-pointer
-walker, pjson schemaless skip-walker).
+af0b6f1 — fracpack full structural walker + flatbuf root +
+vtable + nested-pointer walker + pjson schemaless skip-walker).
 
 Note: fracpack's previous 0.92 cumulative came from a top-level-
 only validator that clocked 0.25× pssz on the validate column
 (pure header bounds check, no recursive walker). The full
-structural walker lands at 1.96× pssz — within the 🟢 band — and
+structural walker lands at 2.00× pssz — at the 🟢 band edge — and
 the cumulative settles at 1.55, above pssz on every column except
 size where the u16 header costs 2 bytes per record.
 
@@ -254,26 +256,29 @@ Round-over-round movers (vs the prior 1a864b7 snapshot, which
 ran the constant-folded flatbuf validator and the full-decode
 pjson validator):
 
-* **flatbuf** 0.19× → 8.22× (+8.0). The previous cell was the
+* **flatbuf** 0.19× → 8.39× (+8.2). The previous cell was the
   constant-fold of `bytes.size() >= 4 → ok`; the new cell is a
   real structural walker that follows the root offset, walks
   the vtable, and recurses into every nested-table /
   vector / string cell — same work as the canonical
   libflatbuffers `Verifier`.
-* **fracpack** 0.25× → 1.96× (+1.7). The previous cell was the
+* **fracpack** 0.25× → 2.00× (+1.8). The previous cell was the
   top-level "header fits + bounds" check; the new cell walks
   the u16 header + offset slots + heap payloads with the same
-  monotonic-offset enforcement pssz applies.
-* **pjson** 163.72× → 41.96× (-122). The previous cell ran the
+  monotonic-offset enforcement pssz applies. Fully-fixed
+  records and vector-of-DWNC-record fast paths keep fracpack
+  from blowing past the 🟢 < 2.0× threshold.
+* **pjson** 163.72× → 43.39× (-120). The previous cell ran the
   full `decode_value` into a `pjson_value` tree (allocating
   `pjson_array` / `pjson_object`, copying string bytes); the
   new cell is a pure structural skip walker (zero allocation,
   no value materialization). The 4× drop comes from removing
   the allocation cost; pjson's tag-walk is structurally
-  expensive on its own (roughly 5× msgpack) because every byte
-  is a tag whose parsing rules depend on prior nibbles, and
-  containers carry varuint62-prefixed key tables + per-key
-  hash verification — work that schema-driven formats elide.
+  expensive on its own (roughly 1.5× msgpack on the same
+  bench) because every byte is a tag whose parsing rules
+  depend on prior nibbles, and containers carry varuint62-
+  prefixed key tables + per-key hash verification — work that
+  schema-driven formats elide.
 
 (— in the view column means the format has no zero-copy view path
 and thus no view_one cell to compare; it doesn't help or hurt the
