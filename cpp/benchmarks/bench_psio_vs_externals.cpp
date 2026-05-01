@@ -588,54 +588,112 @@ namespace {
    //
    //  For tiny shapes whose only fields are small (Point), the wire
    //  delta is at most ±1 byte for varint formats — within noise.
-   inline Point      vary(Point v, std::size_t i)
+   //
+   //  Critical: vary() must perturb the SAME scalar that
+   //  bench_view_target() reads. Otherwise the input rotation does not
+   //  feed the sink-XOR dependency chain, and the optimizer may elide
+   //  decoded fields that bench_view_target doesn't observe (e.g. for
+   //  WideRecord, decode → memcpy(128) followed by reading only f31
+   //  would let DCE drop the first 124 bytes of stores). Each vary()
+   //  below documents which field bench_view_target reads.
+   inline Point      vary(Point v, std::size_t i)  // bench_view_target → x
    { v.x ^= static_cast<std::int32_t>(i); return v; }
 
-   inline NameRecord vary(NameRecord v, std::size_t i)
+   inline NameRecord vary(NameRecord v, std::size_t i)  // bench_view_target → account
    { v.account ^= i; return v; }
 
-   inline FlatRecord vary(FlatRecord v, std::size_t i)
+   inline FlatRecord vary(FlatRecord v, std::size_t i)  // bench_view_target → id
    { v.id ^= static_cast<std::uint32_t>(i); return v; }
    inline FlatRecordBounded vary(FlatRecordBounded v, std::size_t i)
    { v.id ^= static_cast<std::uint32_t>(i); return v; }
    inline FlatRecordDwnc    vary(FlatRecordDwnc v, std::size_t i)
    { v.id ^= static_cast<std::uint32_t>(i); return v; }
 
-   inline Record vary(Record v, std::size_t i)
+   inline Record vary(Record v, std::size_t i)  // bench_view_target → id
    { v.id ^= static_cast<std::uint32_t>(i); return v; }
    inline RecordBounded vary(RecordBounded v, std::size_t i)
    { v.id ^= static_cast<std::uint32_t>(i); return v; }
    inline RecordDwnc    vary(RecordDwnc v, std::size_t i)
    { v.id ^= static_cast<std::uint32_t>(i); return v; }
 
-   inline Validator vary(Validator v, std::size_t i)
+   inline Validator vary(Validator v, std::size_t i)  // bench_view_target → pubkey_lo
    { v.pubkey_lo ^= i; return v; }
 
+   //  Order family — bench_view_target reads customer.id (deep field).
+   //  Perturb that scalar so the decode→view dependency chain holds.
    inline Order        vary(Order v, std::size_t i)
-   { v.id ^= i; return v; }
+   { v.customer.id ^= i; return v; }
    inline OrderBounded vary(OrderBounded v, std::size_t i)
-   { v.id ^= i; return v; }
+   { v.customer.id ^= i; return v; }
    inline OrderDwnc    vary(OrderDwnc v, std::size_t i)
-   { v.id ^= i; return v; }
+   { v.customer.id ^= i; return v; }
 
+   //  ValidatorList family — bench_view_target reads
+   //  validators[size/2].pubkey_lo (vector-mid element).  Perturb that
+   //  exact element so decode of the vector cannot elide the mid slot.
    inline ValidatorList vary(ValidatorList v, std::size_t i)
-   { v.epoch ^= i; return v; }
+   {
+      if (!v.validators.empty())
+         v.validators[v.validators.size() / 2].pubkey_lo ^= i;
+      return v;
+   }
    inline ValidatorListBounded vary(ValidatorListBounded v, std::size_t i)
-   { v.epoch ^= i; return v; }
+   {
+      if (!v.validators.empty())
+         v.validators[v.validators.size() / 2].pubkey_lo ^= i;
+      return v;
+   }
    inline ValidatorListDwnc    vary(ValidatorListDwnc v, std::size_t i)
-   { v.epoch ^= i; return v; }
+   {
+      if (!v.validators.empty())
+         v.validators[v.validators.size() / 2].pubkey_lo ^= i;
+      return v;
+   }
 
-   inline Deep4Ext  vary(Deep4Ext v, std::size_t i)
+   inline Deep4Ext  vary(Deep4Ext v, std::size_t i)  // bench_view_target → root.child.child.child.value
    { v.root.child.child.child.value ^= i; return v; }
    inline Deep4Dwnc vary(Deep4Dwnc v, std::size_t i)
    { v.root.child.child.child.value ^= i; return v; }
 
+   //  MlEmbedding — bench_view_target reads embedding[size/2] as bits.
+   //  Perturb that exact float slot so the bench can't elide the rest
+   //  of the float vector decode.
    inline MlEmbedding vary(MlEmbedding v, std::size_t i)
-   { v.id ^= i; return v; }
+   {
+      if (!v.embedding.empty())
+      {
+         std::uint32_t bits;
+         const std::size_t mid = v.embedding.size() / 2;
+         std::memcpy(&bits, &v.embedding[mid], sizeof(bits));
+         bits ^= static_cast<std::uint32_t>(i);
+         std::memcpy(&v.embedding[mid], &bits, sizeof(bits));
+      }
+      else
+      {
+         v.id ^= i;
+      }
+      return v;
+   }
+
+   //  BlobPayload — bench_view_target reads bytes[size/2].  Perturb
+   //  that exact byte so the bench can't elide the rest of the blob
+   //  decode.
    inline BlobPayload vary(BlobPayload v, std::size_t i)
-   { v.id ^= i; return v; }
+   {
+      if (!v.bytes.empty())
+         v.bytes[v.bytes.size() / 2] ^= static_cast<std::uint8_t>(i);
+      else
+         v.id ^= i;
+      return v;
+   }
+
+   //  WideRecord — bench_view_target reads f31 (the LAST field, picked
+   //  to defeat decode-prefix shortcuts).  Perturb f31 so the
+   //  decode→read-f31 dependency chain holds. (Earlier this perturbed
+   //  f00 which left f31 constant across the K input copies, letting
+   //  the optimizer DCE the rest of the 128-byte memcpy decode.)
    inline WideRecord  vary(WideRecord v, std::size_t i)
-   { v.f00 ^= static_cast<std::uint32_t>(i); return v; }
+   { v.f31 ^= static_cast<std::uint32_t>(i); return v; }
 
 
    //  Per-(format, shape) support gate.  Some psio formats fail to
