@@ -28,6 +28,7 @@
 // runtime size assertions against `max_encoded_size<T>()`.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/unaligned_iter.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
@@ -807,10 +808,9 @@ namespace psio {
                is_fixed_v<E> && fixed_size_of<E>() == sizeof(E);
             if constexpr (is_arith || is_memcpy_record)
             {
+               // Alignment-safe — see detail/unaligned_iter.hpp.
                const std::size_t n = (end - pos) / sizeof(E);
-               const E*          first =
-                  reinterpret_cast<const E*>(src.data() + pos);
-               out.assign(first, first + n);
+               psio::detail::assign_from_wire(out, src.data() + pos, n);
             }
             else
             {
@@ -904,8 +904,8 @@ namespace psio {
                fixed_size_of<T>() == sizeof(T);
             if constexpr (is_arith || is_memcpy_record)
             {
-               const T* first = reinterpret_cast<const T*>(src.data() + pos);
-               out.assign(first, first + n);
+               // Alignment-safe — see detail/unaligned_iter.hpp.
+               psio::detail::assign_from_wire(out, src.data() + pos, n);
             }
             else if constexpr (Record<T>)
             {

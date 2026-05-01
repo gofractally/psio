@@ -24,6 +24,7 @@
 //     whose fixed region exceeds 64 KiB
 
 #include <psio/cpo.hpp>
+#include <psio/detail/unaligned_iter.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
@@ -329,9 +330,9 @@ namespace psio {
                const std::uint32_t byte_count = read_word<W>(src, pos);
                const std::size_t   elem_count =
                   static_cast<std::size_t>(byte_count) / sizeof(E);
-               const E* first = reinterpret_cast<const E*>(
-                  src.data() + pos + W);
-               out.assign(first, first + elem_count);
+               // Alignment-safe — see detail/unaligned_iter.hpp.
+               psio::detail::assign_from_wire(
+                  out, src.data() + pos + W, elem_count);
             }
             else
             {
@@ -1050,10 +1051,10 @@ namespace psio {
          {
             // assign(p, p+n) avoids resize's value-init pass — for
             // trivially-copyable T it lowers to a single memcpy.
+            // Alignment-safe — see detail/unaligned_iter.hpp.
             const std::uint32_t n =
                byte_count / static_cast<std::uint32_t>(sizeof(T));
-            const T* first = reinterpret_cast<const T*>(src.data() + cursor);
-            out.assign(first, first + n);
+            psio::detail::assign_from_wire(out, src.data() + cursor, n);
          }
          else if constexpr (is_fixed_v<T>)
          {

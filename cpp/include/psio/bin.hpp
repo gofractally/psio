@@ -13,6 +13,7 @@
 // std::optional, reflected records. Matches the other-format MVPs.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/unaligned_iter.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
@@ -829,9 +830,12 @@ namespace psio {
                fixed_contrib<E>() == sizeof(E);
             if constexpr (is_arith || is_memcpy_record)
             {
-               const E* first =
-                  reinterpret_cast<const E*>(src.data() + pos);
-               out.assign(first, first + n);
+               // Alignment-safe: dispatches to the libc++ memcpy fast
+               // path on aligned src, falls back to unaligned_iter on
+               // strict-alignment hardware where reinterpret_cast<E*>
+               // on misaligned wire data would trap (SIGBUS on
+               // aarch64). See detail/unaligned_iter.hpp.
+               psio::detail::assign_from_wire(out, src.data() + pos, n);
                pos += sizeof(E) * n;
             }
             else
