@@ -523,11 +523,6 @@ namespace psio {
          }
          else if constexpr (is_std_vector_v<T>)
          {
-            // v1 wire: [W-byte byte_count][element bytes concatenated].
-            // Byte count, NOT element count. For arithmetic T this is
-            // one memcpy of v.size()*sizeof(E) bytes — likewise for
-            // DWNC packed records whose memory layout matches the wire
-            // (sizeof(E) == fixed_size_of<E>(), trivially-copyable).
             using E = typename T::value_type;
             constexpr bool is_arith =
                std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
@@ -538,23 +533,51 @@ namespace psio {
                fixed_size_of<E>() == sizeof(E);
             if constexpr (is_arith || is_memcpy_record)
             {
+               // v1 wire: [W-byte byte_count][element bytes concatenated].
+               // Byte count, NOT element count. Single memcpy of
+               // v.size()*sizeof(E) bytes for arithmetic T or DWNC
+               // packed records whose memory layout matches the wire.
                append_word<W>(s, v.size() * sizeof(E));
                if (!v.empty())
                   s.write(v.data(), v.size() * sizeof(E));
             }
-            else
+            else if constexpr (is_fixed_v<E>)
             {
                // Fixed non-arithmetic element (bool, non-DWNC fixed
                // record): still byte-count prefix over packed content.
-               static_assert(is_fixed_v<E>,
-                             "psio::frac: vector<variable-element> not "
-                             "yet supported (needs offset-table walker)");
                const std::size_t lenpos = s.written();
                s.skip(static_cast<std::int32_t>(W));
                const std::size_t start = s.written();
                for (const auto& x : v)
                   encode_value<W>(x, s);
                write_word<W>(s, lenpos, s.written() - start);
+            }
+            else
+            {
+               // v1 wire (variable element):
+               //   [W-byte byte_count = N × W  (slot-table bytes, NOT
+               //                                full payload size)]
+               //   [N × W-byte offset slots — slot[i] holds the offset
+               //                                from slot[i] to the
+               //                                start of element[i]'s
+               //                                payload]
+               //   [concatenated element payloads in heap order]
+               // Element count is recovered as byte_count / W. Same
+               // layout as legacy psio1 fracpack
+               // (psio1/fracpack.hpp:1024-1042).
+               const std::size_t n          = v.size();
+               const std::size_t slot_bytes = n * W;
+               append_word<W>(s, slot_bytes);
+               const std::size_t slot_start = s.written();
+               for (std::size_t i = 0; i < n; ++i)
+                  append_word<W>(s, 0);
+               for (std::size_t i = 0; i < n; ++i)
+               {
+                  const std::size_t slot_pos = slot_start + i * W;
+                  const std::size_t heap_pos = s.written();
+                  write_word<W>(s, slot_pos, heap_pos - slot_pos);
+                  encode_value<W>(v[i], s);
+               }
             }
          }
          else if constexpr (std::is_same_v<T, std::string>)
@@ -1102,9 +1125,34 @@ namespace psio {
          }
          else
          {
-            static_assert(is_fixed_v<T>,
-                          "psio::frac: vector<variable-element> decode "
-                          "not yet supported");
+            // vector<variable-element>: walk slot table, read each
+            // slot's relative offset, decode element at that payload
+            // position. See encode at is_std_vector_v<T> branch for
+            // the wire format.
+            const std::uint32_t n =
+               byte_count / static_cast<std::uint32_t>(W);
+            const std::size_t slot_start = cursor;
+            out.reserve(n);
+            for (std::uint32_t i = 0; i < n; ++i)
+            {
+               const std::size_t   slot_pos = slot_start + i * W;
+               const std::uint32_t rel      = read_word<W>(src, slot_pos);
+               const std::size_t   payload_pos = slot_pos + rel;
+               std::size_t         payload_end;
+               if (i + 1 < n)
+               {
+                  const std::size_t   next_slot = slot_start + (i + 1) * W;
+                  const std::uint32_t next_rel =
+                     read_word<W>(src, next_slot);
+                  payload_end = next_slot + next_rel;
+               }
+               else
+               {
+                  payload_end = end;
+               }
+               out.push_back(
+                  decode_value<W, T>(src, payload_pos, payload_end));
+            }
          }
          return out;
       }
@@ -1325,7 +1373,10 @@ namespace psio {
                return W + v.size() * fixed_size_of<E>();
             else
             {
-               std::size_t total = W;
+               // vector<variable-element>: W length prefix + N×W slot
+               // table + sum of element payload sizes (see encode at
+               // is_std_vector_v<T> branch above).
+               std::size_t total = W + v.size() * W;
                for (const auto& x : v)
                   total += size_of_v<W>(x);
                return total;
@@ -1801,14 +1852,52 @@ namespace psio {
             }
             else
             {
-               // vector<variable element> — wire format documented in
-               // encode as a stretch goal (offset-table walker). The
-               // codec is gated against this shape today, so the
-               // validator follows suit and refuses.
-               return codec_fail(
-                  "frac: vector<variable-element> validation not "
-                  "supported",
-                  static_cast<std::uint32_t>(pos), "frac");
+               // vector<variable-element>: byte_count must be a whole
+               // number of slots; each slot's offset must land in the
+               // heap region; each element must validate recursively.
+               // Element body extends to next slot's payload start
+               // (or end of container for the last element).
+               if (byte_count % W != 0)
+                  return codec_fail(
+                     "frac: vector<variable> byte_count not a multiple "
+                     "of W",
+                     static_cast<std::uint32_t>(pos), "frac");
+               const std::uint32_t n =
+                  byte_count / static_cast<std::uint32_t>(W);
+               const std::size_t slot_start = body_pos;
+               const std::size_t heap_start = body_pos + byte_count;
+               for (std::uint32_t i = 0; i < n; ++i)
+               {
+                  const std::size_t   slot_pos = slot_start + i * W;
+                  const std::uint32_t rel = read_word<W>(src, slot_pos);
+                  const std::size_t payload_pos = slot_pos + rel;
+                  if (payload_pos < heap_start || payload_pos > end)
+                     return codec_fail(
+                        "frac: vector<variable> slot offset OOB",
+                        static_cast<std::uint32_t>(slot_pos), "frac");
+                  std::size_t payload_end;
+                  if (i + 1 < n)
+                  {
+                     const std::size_t next_slot =
+                        slot_start + (i + 1) * W;
+                     const std::uint32_t next_rel =
+                        read_word<W>(src, next_slot);
+                     payload_end = next_slot + next_rel;
+                  }
+                  else
+                  {
+                     payload_end = end;
+                  }
+                  if (payload_end < payload_pos || payload_end > end)
+                     return codec_fail(
+                        "frac: vector<variable> element body OOB",
+                        static_cast<std::uint32_t>(payload_pos), "frac");
+                  auto st = validate_value<W, E>(
+                     src, payload_pos, payload_end, depth + 1);
+                  if (!st.ok())
+                     return st;
+               }
+               return codec_ok();
             }
          }
          else if constexpr (std::is_same_v<T, std::string>)

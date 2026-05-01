@@ -94,11 +94,13 @@ The headline:
   for IDL/codegen pipelines pssz today doesn't match.
 - **Self-describing formats** — pjson / json / bson — carry the
   schema in the bytes; geomean lands at 13–42× pssz cumulatively.
-- **After zstd-1 the size spread collapses.** A 2.5× raw-size
-  range (avro 0.76× → json 1.89×) becomes a 1.32× window
-  (avro 0.87× → bson 1.15×). If the transport compresses, the
-  few bytes pssz spends on its offset table cost <1% on the
-  wire vs the smallest format.
+- **After zstd-1 the size spread compresses to a 1.56× window**
+  (avro 0.87× → flatbuf 1.36×) from a 2.5× raw-size range
+  (avro 0.76× → json 1.89×). If the transport compresses, the
+  few bytes pssz spends on its offset table cost <13% on the
+  wire against any other format — and flatbuf actually
+  compresses *worse* than pssz because its vtable u16 values
+  have less zero-byte redundancy than pssz's offset table.
 
 The single architectural sentence: **zero-copy views and O(1)
 random access require an offset table with fixed-width slots,

@@ -712,18 +712,11 @@ namespace {
    template <typename Fmt, typename T>
    struct fmt_supports : std::true_type {};
 
-   //  frac32 / frac16 codec is missing the offset-table walker for
-   //  vector<variable-element> (frac.hpp:530 + 1086 — explicit
-   //  static_assert TODO; the wire format itself supports it, same
-   //  pattern as legacy fracpack).  Order has vector<LineItem>,
-   //  OrderBounded has vector<LineItemBounded>, OrderDwnc has
-   //  vector<LineItemDwnc> — all blocked on the codec, not the spec.
-   template <> struct fmt_supports<psio::frac32, Order>        : std::false_type {};
-   template <> struct fmt_supports<psio::frac32, OrderBounded> : std::false_type {};
-   template <> struct fmt_supports<psio::frac32, OrderDwnc>    : std::false_type {};
-   template <> struct fmt_supports<psio::frac16, Order>        : std::false_type {};
-   template <> struct fmt_supports<psio::frac16, OrderBounded> : std::false_type {};
-   template <> struct fmt_supports<psio::frac16, OrderDwnc>    : std::false_type {};
+   //  vector<variable-element> is now supported in frac.hpp via the
+   //  ported psio1 offset-table walker, so Order / OrderBounded /
+   //  OrderDwnc encode normally.  Specialisation table kept here as
+   //  an extension point if a future shape gates differently per
+   //  format.
 
    //  Per-(shape, format) op timings for the psio side.  Each call
    //  exercises one CPO and pushes one snapshot_row into `out`.

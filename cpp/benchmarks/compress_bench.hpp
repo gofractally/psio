@@ -372,49 +372,13 @@ namespace psio_bench::compress {
    }
 
    //  Driver: run every supported (format, shape) pair in the
-   //  realistic-shape set through run_cell().  The fmt_supports gate
-   //  is mirrored from bench_psio_vs_externals.cpp — fracpack still
-   //  doesn't ship vector<variable-element> support, so any shape
-   //  with a vector<record-with-strings> falls out of the fracpack
-   //  column.  We don't try to bench-test the json/bson/pjson side
-   //  for shapes those formats can't represent without lossy
-   //  round-trips; encode(fmt, v) succeeding is the gate.
-   //
-   //  Caller passes the shape set as a tuple of (name, value) pairs;
-   //  we want compile-time iteration over a list of names + factory
-   //  invocations, so the call site uses an auto-list of structured
-   //  bindings rather than a std::tuple.
+   //  realistic-shape set through run_cell().  All five realistic
+   //  shapes encode in every format (fracpack now supports
+   //  vector<variable-element> via the ported offset-table walker).
    //
    //  Public entry point: run_compress_block(rows).
-   //
-   //  fmt_supports — same logic the main bench uses.  We can't
-   //  forward-declare it from the main bench cleanly across TUs
-   //  while keeping the compress block in this header, so we
-   //  duplicate the explicit specialisations below.  Keep this list
-   //  in sync with bench_psio_vs_externals.cpp's fmt_supports table.
    template <typename Fmt, typename T>
    struct fmt_supports : std::true_type {};
-
-   //  fracpack lacks vector<variable-element> support — same as the
-   //  main bench file's specialisations.  Mirroring them here keeps
-   //  the compression block from ever attempting an unsupported
-   //  encode (which would static_assert at compile time).
-
-   //  None of the new realistic shapes are vector<variable> ones
-   //  whose element types are themselves variable (the main bench
-   //  blocks Order/OrderBounded/OrderDwnc).  But the new shapes
-   //  carry vector<HttpHeader>, vector<UserAction>, vector<Transaction>
-   //  — element types with strings/vectors inside.  fracpack rejects
-   //  those at compile time, so we list them explicitly here.
-   template <> struct fmt_supports<psio::frac32, HttpApiResponse>      : std::false_type {};
-   template <> struct fmt_supports<psio::frac32, BlockOfTransactions>  : std::false_type {};
-   template <> struct fmt_supports<psio::frac32, ConfigTree>           : std::false_type {};
-   template <> struct fmt_supports<psio::frac32, MixedDocument>        : std::false_type {};
-
-   //  TimeSeriesChunk has vector<TimePoint> (TimePoint is fixed-size)
-   //  + vector<string> labels — strings are variable, so fracpack
-   //  rejects the labels too.
-   template <> struct fmt_supports<psio::frac32, TimeSeriesChunk>      : std::false_type {};
 
    template <typename Fmt, typename T>
    void cell(std::vector<snapshot_row>& out, const std::string& shape,
@@ -443,6 +407,8 @@ namespace psio_bench::compress {
       cell(out, shape, "wit",      psio::wit{},     v);
       cell(out, shape, "json",     psio::json{},    v);
       cell(out, shape, "bson",     psio::bson{},    v);
+      cell(out, shape, "capnp",    psio::capnp{},   v);
+      cell(out, shape, "flatbuf",  psio::flatbuf{}, v);
 
       //  pjson uses from_struct/to_struct rather than the encode CPO.
       //  Its compressed-size story should be in the table too — emit

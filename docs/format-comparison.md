@@ -185,23 +185,26 @@ average". Lower is better; **1.00 means tied with pssz**.
 | Format    | size  | encode | decode | validate | view  | **Cumulative** |
 |-----------|------:|-------:|-------:|---------:|------:|---------------:|
 | **pssz**  |**1.00**| **1.00** | **1.00** | **1.00** | **1.00** | **1.00**     |
-| ssz       |  0.99 |   1.76 |   1.00 |   1.12   |  0.95 |  **1.13**      |
-| fracpack  |  1.06 |   2.80 |   0.98 |   2.04   |  —    |  **1.56**      |
-| wit       |  1.10 |   7.29 |   1.05 |   2.19   |  1.11 |  **1.83**      |
-| borsh     |  0.96 |   2.45 |   0.91 |   6.76   |  —    |  **1.95**      |
-| bincode   |  1.04 |   2.44 |   0.94 |   6.55   |  —    |  **1.99**      |
-| bin       |  0.94 |   5.36 |   1.12 |   4.04   |  —    |  **2.19**      |
-| flatbuf   |  1.73 |  55.82 |   1.24 |   8.64   |  2.21 |  **5.12**      |
-| avro      |  0.56 |  29.72 |   4.17 |  20.90   |  —    |  **6.18**      |
-| msgpack   |  0.61 |  33.70 |  18.55 |  29.33   |  —    | **10.29**      |
-| capnp     |  1.59 |  78.19 |   5.33 |   6.04   | 47.77 | **10.41**      |
-| protobuf  |  0.65 |  44.58 |   6.07 |  48.92   |  —    | **12.68**      |
-| bson      |  2.29 |  35.91 |   9.45 |  38.09   |  —    | **13.11**      |
-| pjson     |  1.45 |  50.08 |   8.30 |  43.89   | 34.80 | **15.88**      |
-| json      |  2.21 | 222.49 |  53.18 | 119.22   |  —    | **42.01**      |
+| ssz       |  0.99 |   1.68 |   1.02 |   1.02   |  0.95 |  **1.10**      |
+| fracpack  |  1.08 |   2.33 |   0.94 |   1.99   |  —    |  **1.48**      |
+| wit       |  1.10 |   7.02 |   1.09 |   2.15   |  1.11 |  **1.82**      |
+| borsh     |  0.96 |   2.39 |   0.96 |   6.52   |  —    |  **1.95**      |
+| bincode   |  1.04 |   2.38 |   0.95 |   6.56   |  —    |  **1.98**      |
+| bin       |  0.94 |   5.35 |   1.15 |   4.00   |  —    |  **2.19**      |
+| flatbuf   |  1.73 |  57.28 |   1.23 |   8.45   |  2.29 |  **5.13**      |
+| avro      |  0.56 |  29.06 |   4.10 |  20.03   |  —    |  **6.05**      |
+| msgpack   |  0.61 |  33.38 |  18.67 |  28.76   |  —    | **10.23**      |
+| capnp     |  1.59 |  81.96 |   5.38 |   6.12   | 47.57 | **10.55**      |
+| protobuf  |  0.65 |  43.40 |   6.36 |  48.01   |  —    | **12.64**      |
+| bson      |  2.29 |  34.94 |   9.42 |  37.94   |  —    | **13.00**      |
+| pjson     |  1.45 |  48.33 |   8.18 |  42.08   | 32.80 | **15.40**      |
+| json      |  2.21 | 218.56 |  52.90 | 117.45   |  —    | **41.61**      |
 
-Anchor: `/tmp/psio_bench_snap_xx/perf_20260501T073330Z_d620ba2.csv`
-(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`).
+Anchor: `/tmp/psio_bench_snap_xx/perf_20260501T081915Z_4b7ae98.csv`
+(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`). fracpack now
+covers all bench shapes — the previously-gated `vector<variable-
+element>` shapes (Order, OrderBounded, OrderDwnc, plus the realistic
+shapes in §3) now encode via the ported psio1 offset-table walker.
 
 For the four formats with canonical external libraries
 (`msgpack-cxx`, `libcapnp`, `libflatbuffers`, `libprotobuf`) the
@@ -285,39 +288,52 @@ ship.
 
 | Format    |   raw |   lz4 | lz4hc | zstd1 | zstd3 | lz4 dec | zstd dec |
 |-----------|------:|------:|------:|------:|------:|--------:|---------:|
-| avro      |  0.76 |  0.74 |  0.80 |  0.87 |  0.86 |    0.55 |     1.00 |
-| borsh     |  0.87 |  0.84 |  0.83 |  0.87 |  0.84 |    0.86 |     1.00 |
-| msgpack   |  0.77 |  0.77 |  0.79 |  0.87 |  0.85 |    0.61 |     1.00 |
-| bin       |  0.79 |  0.80 |  0.82 |  0.87 |  0.88 |    0.71 |     0.99 |
-| bincode   |  0.97 |  0.86 |  0.83 |  0.90 |  0.90 |    0.96 |     1.00 |
-| protobuf  |  0.81 |  0.82 |  0.85 |  0.91 |  0.90 |    0.72 |     1.00 |
-| json      |  1.89 |  1.09 |  1.00 |  0.98 |  0.99 |    1.25 |     1.02 |
-| ssz       |  0.96 |  0.98 |  0.99 |  0.99 |  0.99 |    0.92 |     1.00 |
+| avro      |  0.76 |  0.74 |  0.80 |  0.87 |  0.86 |    0.55 |     1.01 |
+| borsh     |  0.87 |  0.84 |  0.83 |  0.87 |  0.84 |    0.86 |     1.01 |
+| msgpack   |  0.77 |  0.77 |  0.79 |  0.87 |  0.85 |    0.62 |     1.01 |
+| bin       |  0.79 |  0.80 |  0.82 |  0.87 |  0.88 |    0.72 |     1.00 |
+| bincode   |  0.97 |  0.86 |  0.83 |  0.90 |  0.90 |    0.98 |     1.01 |
+| protobuf  |  0.81 |  0.82 |  0.85 |  0.91 |  0.90 |    0.72 |     0.99 |
+| json      |  1.89 |  1.09 |  1.00 |  0.98 |  0.99 |    1.23 |     1.01 |
+| ssz       |  0.96 |  0.98 |  0.99 |  0.99 |  0.99 |    0.95 |     1.01 |
 | **pssz**  |**1.00**|**1.00**|**1.00**|**1.00**|**1.00**|**1.00**|**1.00**|
+| capnp     |  1.19 |  1.06 |  1.05 |  1.03 |  1.07 |    1.20 |     1.00 |
+| fracpack  |  1.07 |  1.06 |  1.04 |  1.04 |  1.03 |    1.13 |     1.00 |
 | pjson     |  0.93 |  0.99 |  0.99 |  1.07 |  1.07 |    0.82 |     1.00 |
-| wit       |  1.13 |  1.14 |  1.14 |  1.12 |  1.12 |    1.16 |     1.00 |
-| bson      |  1.58 |  1.14 |  1.12 |  1.15 |  1.16 |    1.35 |     1.00 |
+| wit       |  1.13 |  1.14 |  1.14 |  1.12 |  1.12 |    1.17 |     1.00 |
+| bson      |  1.58 |  1.14 |  1.12 |  1.15 |  1.16 |    1.36 |     1.01 |
+| flatbuf   |  1.21 |  1.29 |  1.31 |  1.36 |  1.34 |    1.21 |     1.00 |
 
-Anchor: `/tmp/psio_bench_snap_xx/perf_20260501T073831Z_d620ba2.csv`
+Anchor: `/tmp/psio_bench_snap_xx/perf_20260501T081915Z_4b7ae98.csv`
 (Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`; lz4 v1.10.0
 vendored at `cpp/external/lz4/`; zstd from Homebrew via
-`find_package(zstd CONFIG)`). fracpack is omitted because every
-realistic shape carries a `vector<variable-element>`, which
-fracpack's codec doesn't yet emit.
+`find_package(zstd CONFIG)`). All 15 formats covered; fracpack
+encodes the realistic shapes via the ported psio1 offset-table
+walker for `vector<variable-element>` (frac.hpp's
+`is_std_vector_v<T>` + `!is_fixed_v<E>` branch).
 
-After zstd-1 the spread collapses from a 2.5× raw-size range
-(avro 0.76× → json 1.89×) to a 1.32× window (avro 0.87× → bson
-1.15×). The varint cluster (avro, msgpack, protobuf, bincode)
+After zstd-1 the spread is a 1.56× window (avro 0.87× → flatbuf
+1.36×) — wider than first reported because the previous table
+omitted capnp (1.03×), fracpack (1.04×), and flatbuf (1.36×).
+The varint cluster (avro, msgpack, protobuf, bincode, borsh)
 keeps about half of its raw-size lead — entropy already in the
-varint encoding survives compression — while the verbose
-self-describing formats lose most of theirs: json drops from
-1.89× raw to 0.98× zstd-1, basically tying with pssz. bson and
-wit do not reach parity (1.15× and 1.12× zstd-1 respectively):
-bson's typed-tag-per-value framing and wit's canonical-ABI
-alignment padding leave structural waste the compressor can't
-fully model. Decompression speed is bytes-per-second-bounded —
-zstd holds at ~550 ns flat across formats (the spread is noise),
-lz4 tracks compressed size linearly (avro at 0.55× → bson at
-1.35× pssz). The architectural conclusion from §2 stands: if
-the transport is going to compress anyway, the few bytes pssz
-spends on its offset table cost <1% on the wire after zstd-1.
+varint encoding survives compression. The verbose self-describing
+formats lose most of theirs: json drops from 1.89× raw to 0.98×
+zstd-1, basically tying with pssz. capnp at 1.03× zstd-1 nearly
+matches pssz (its alignment padding compresses well), and fracpack
+lands at 1.04× zstd-1 — the offset-table overhead on
+`vector<variable-element>` shapes is essentially noise after
+compression. bson, wit, and **flatbuf** do not reach parity
+(1.15× / 1.12× / 1.36× zstd-1 respectively): bson's
+typed-tag-per-value framing and wit's canonical-ABI alignment
+padding leave structural waste the compressor can't fully model;
+flatbuf's vtable+offset layout actually compresses *worse* than
+its raw size (1.21× raw → 1.36× zstd-1) because vtables encode
+dense u16 values that have less zero-byte redundancy than pssz's
+offset table — the compressor finds less to remove. Decompression
+speed is bytes-per-second-bounded — zstd holds at ~550 ns flat
+across formats (the spread is noise), lz4 tracks compressed size
+linearly (avro at 0.55× → bson at 1.36× pssz). The architectural
+conclusion from §2 stands: if the transport is going to compress
+anyway, the few bytes pssz spends on its offset table cost <13%
+on the wire after zstd-1 against any other format.
