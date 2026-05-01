@@ -157,11 +157,11 @@ vs. pssz from the §1.3.2 table; thresholds are 🟢 < 2.0×, 🟡
   accumulating offsets and verifying `pos ≤ buffer.size()` at
   every step; ratios land at 4–7× pssz. Tag-stream formats (avro,
   msgpack, protobuf) add per-byte tag dispatch on top of byte-
-  walking and clock 20–47×. flatbuf's structural validator
+  walking and clock 20–49×. flatbuf's structural validator
   follows the root offset, walks the vtable, then recursively
   follows every nested-table / vector cell — that's the same work
   the canonical libflatbuffers `Verifier` does and it lands at
-  8.22× pssz. capnp's pointer cycles and far pointers preclude
+  8.53× pssz. capnp's pointer cycles and far pointers preclude
   bounded-time fully-safe validation; a depth-limited
   approximation is the best the impl can do, and it's
   fundamentally weaker than the alternatives.
@@ -170,14 +170,24 @@ vs. pssz from the §1.3.2 table; thresholds are 🟢 < 2.0×, 🟡
   byte is a candidate tag whose parsing rules depend on the
   preceding nibble. The reference impl is a pure structural
   walker (no allocation, no decode-into-tree) and lands at
-  ~42× pssz; msgpack and protobuf in the same tag-walk class
-  land at 28× and 47× respectively (msgpack uses simpler tag
+  ~43× pssz; msgpack and protobuf in the same tag-walk class
+  land at 29× and 49× respectively (msgpack uses simpler tag
   rules; protobuf walks varint length-prefixes for every
   field). pjson sits between the two, slowed by the
   varuint62-prefixed slot tables, the row_array key-block walk,
   and per-key 8-bit prefilter-hash verification — work that the
   schema-driven formats elide because the type pins the layout
   ahead of time.
+* json and bson are tag-walk text/binary formats that, like
+  pjson, are fundamentally per-byte work. The json walker lexes
+  every byte (matched braces / brackets / quotes, RFC 8259
+  number grammar, escape-sequence validation) and lands at
+  ~119× pssz. bson walks the spec envelope `int32 total |
+  element* | 0x00` with per-type per-field bounds checks and
+  recurses into embedded docs / arrays under the depth cap; it
+  lands at ~40× pssz. Both formats appear in §1.3.2 only —
+  §1.3.1's column set is restricted to the schema-driven
+  binary cluster pssz competes against directly.
 
 The reference implementation hard-caps validator recursion depth
 at `psio::kMaxValidationDepth = 64` (see §8.3) — any format whose
@@ -224,61 +234,66 @@ average". Lower is better; **1.00 means tied with pssz**.
 | Format                | size  | encode | decode | validate | view  | **Cumulative** |
 |-----------------------|------:|-------:|-------:|---------:|------:|---------------:|
 | **pssz**              |**1.00**| **1.00** | **1.00** | **1.00** | **1.00** | **1.00**     |
-| ssz                   |  0.99 |   1.69 |   1.01 |   1.10   |  0.90 |  **1.11**      |
-| fracpack              |  1.06 |   2.72 |   0.98 |   2.00   |  —    |  **1.54**      |
-| wit                   |  1.10 |   6.97 |   1.14 |   2.17   |  1.09 |  **1.83**      |
-| borsh                 |  0.96 |   2.36 |   0.98 |   6.62   |  —    |  **1.96**      |
-| bincode               |  1.04 |   2.32 |   1.02 |   6.57   |  —    |  **2.00**      |
-| bin                   |  0.94 |   5.00 |   1.16 |   3.91   |  —    |  **2.15**      |
-| bson                  |  2.29 |  35.51 |  10.61 |   0.46   |  —    |  **4.45**      |
-| flatbuf (psio)        |  1.68 |  85.57 |   1.87 |   8.39   |  2.37 |  **5.57**      |
-| msgpack               |  0.61 |  16.85 |   5.00 |  28.71   |  —    |  **6.20**      |
-| avro                  |  0.56 |  28.16 |   4.71 |  20.26   |  —    |  **6.24**      |
-| capnp (psio)          |  1.63 |  22.62 |   1.29 |   6.01   | 48.67 |  **6.74**      |
-| protobuf              |  0.72 |  23.37 |   8.39 |  48.37   |  —    |  **9.08**      |
-| json                  |  2.21 | 212.34 |  57.69 |   0.52   |  —    | **10.87**      |
-| pjson                 |  1.45 |  47.85 |   8.62 |  43.39   | 33.77 | **15.44**      |
+| ssz                   |  0.99 |   1.65 |   1.06 |   1.04   |  0.91 |  **1.10**      |
+| fracpack              |  1.06 |   2.72 |   1.10 |   2.01   |  —    |  **1.59**      |
+| wit                   |  1.10 |   6.85 |   1.13 |   2.17   |  1.20 |  **1.86**      |
+| borsh                 |  0.96 |   2.40 |   0.94 |   6.43   |  —    |  **1.93**      |
+| bincode               |  1.04 |   2.35 |   0.92 |   6.59   |  —    |  **1.96**      |
+| bin                   |  0.94 |   5.15 |   1.17 |   4.00   |  —    |  **2.18**      |
+| flatbuf (psio)        |  1.68 |  88.51 |   1.92 |   8.53   |  2.21 |  **5.58**      |
+| msgpack               |  0.61 |  17.07 |   5.08 |  29.15   |  —    |  **6.27**      |
+| avro                  |  0.56 |  28.87 |   4.83 |  20.14   |  —    |  **6.31**      |
+| capnp (psio)          |  1.63 |  23.31 |   1.32 |   6.05   | 48.84 |  **6.83**      |
+| protobuf              |  0.72 |  23.52 |   8.54 |  49.10   |  —    |  **9.17**      |
+| bson                  |  2.29 |  35.79 |  11.02 |  40.20   |  —    | **13.80**      |
+| pjson                 |  1.45 |  48.52 |   8.93 |  42.74   | 34.16 | **15.58**      |
+| json                  |  2.21 | 214.27 |  58.41 | 118.71   |  —    | **42.56**      |
 
 Anchor snapshot:
-`/tmp/psio_bench_snap_xx/perf_20260501T034828Z_af0b6f1.csv`
+`/tmp/psio_bench_snap_xx/perf_20260501T042816Z_f268813.csv`
 (Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`, commit
-af0b6f1 — fracpack full structural walker + flatbuf root +
-vtable + nested-pointer walker + pjson schemaless skip-walker).
+f268813 + real structural walkers for `psio::json` and
+`psio::bson` validate — replaces the near-no-op cap-check
+stubs that were constant-folding through the bench's
+volatile sink).
 
-Note: fracpack's previous 0.92 cumulative came from a top-level-
+Note: fracpack's earlier 0.92 cumulative came from a top-level-
 only validator that clocked 0.25× pssz on the validate column
 (pure header bounds check, no recursive walker). The full
-structural walker lands at 2.00× pssz — at the 🟢 band edge — and
-the cumulative settles at 1.55, above pssz on every column except
+structural walker lands at 2.01× pssz — at the 🟢 band edge — and
+the cumulative settles at 1.59, above pssz on every column except
 size where the u16 header costs 2 bytes per record.
 
-Round-over-round movers (vs the prior 1a864b7 snapshot, which
-ran the constant-folded flatbuf validator and the full-decode
-pjson validator):
+Round-over-round movers (vs the prior af0b6f1 snapshot, which
+ran the no-op json + bson validators):
 
-* **flatbuf** 0.19× → 8.39× (+8.2). The previous cell was the
-  constant-fold of `bytes.size() >= 4 → ok`; the new cell is a
-  real structural walker that follows the root offset, walks
-  the vtable, and recurses into every nested-table /
-  vector / string cell — same work as the canonical
-  libflatbuffers `Verifier`.
-* **fracpack** 0.25× → 2.00× (+1.8). The previous cell was the
-  top-level "header fits + bounds" check; the new cell walks
-  the u16 header + offset slots + heap payloads with the same
-  monotonic-offset enforcement pssz applies. Fully-fixed
-  records and vector-of-DWNC-record fast paths keep fracpack
-  from blowing past the 🟢 < 2.0× threshold.
-* **pjson** 163.72× → 43.39× (-120). The previous cell ran the
-  full `decode_value` into a `pjson_value` tree (allocating
-  `pjson_array` / `pjson_object`, copying string bytes); the
-  new cell is a pure structural skip walker (zero allocation,
-  no value materialization). The 4× drop comes from removing
-  the allocation cost; pjson's tag-walk is structurally
-  expensive on its own (roughly 1.5× msgpack on the same
-  bench) because every byte is a tag whose parsing rules
-  depend on prior nibbles, and containers carry varuint62-
-  prefixed key tables + per-key hash verification — work that
-  schema-driven formats elide.
+* **json** 0.52× → 118.71× (+228×). The previous cell was a
+  4-instruction body — `bytes.empty() → fail; first char in
+  `{[" tfn-` digit → ok` — that the optimiser hoisted past the
+  bench's volatile sink, leaving validate clocking like a
+  constant-folded constant. The new cell is a pure structural
+  walker that lexes the entire buffer: matched braces /
+  brackets / quotes, RFC 8259 number grammar, escape-sequence
+  validation including `\uXXXX`, structural pairing of `,` /
+  `:`, depth-cap recursion through nested objects / arrays.
+  Allocates nothing. Per-shape costs scale linearly with input
+  bytes (BlobPayload: 884 ns, ValidatorList(100): 9.5 µs) —
+  the price of a self-describing text format whose bytes are
+  the schema. The cumulative jumps from 10.87 to 42.56 because
+  the prior cumulative was depressed by the no-op cell.
+* **bson** 0.46× → 40.20× (+87×). The previous cell was a
+  4-instruction header check (`bytes.size() < 5 → fail; total
+  prefix == size; last byte == 0x00`) that left the document
+  body unread. The new cell follows BSON's spec-mandated
+  envelope: `int32 total | element* | 0x00`, with per-type
+  per-field bounds checks (string lenWithNull, binary subtype,
+  embedded doc / array recursion threading the depth cap).
+  Per-shape costs scale with element count (ValidatorList(100):
+  5.2 µs vs Point: 5 ns). Cumulative shifts 4.45 → 13.80.
+* **flatbuf** 8.39× → 8.53× (+0.1). Round-over-round noise; the
+  prior af0b6f1 anchor already had the full vtable walker.
+* **fracpack** 2.00× → 2.01× (+0.0). Round-over-round noise.
+* **pjson** 43.39× → 42.74× (-0.6). Round-over-round noise.
 
 (— in the view column means the format has no zero-copy view path
 and thus no view_one cell to compare; it doesn't help or hurt the
@@ -287,7 +302,7 @@ cumulative, which only averages cells the format participates in.)
 How to read the table:
 
 - **pssz wins cumulative.** No format is below 1.00 in the
-  Cumulative column. ssz comes closest (1.11) but pays 74% extra on
+  Cumulative column. ssz comes closest (1.10) but pays 65% extra on
   encode. Every format that beats pssz on size pays 4×–30× on
   encode and 4×–8× on decode.
 

@@ -14,8 +14,10 @@
 // PSIO_FOR_EACH_SYMMETRIC_BINARY_FMT macro. New formats opt in by
 // adding a row to `conformance.hpp`.
 
+#include <psio/bson.hpp>
 #include <psio/conformance.hpp>
 #include <psio/detail/validate_depth.hpp>
+#include <psio/json.hpp>
 #include <psio/reflect.hpp>
 
 #include <catch.hpp>
@@ -479,5 +481,272 @@ TEST_CASE("validate [frac32]: corrupted ascending offsets rejected",
    //    payload offset (slot 0) was the note's larger value
    //    note offset (slot 1) was the payload's smaller value
    //  → non-monotonic; validate must reject.
+   REQUIRE(!st.ok());
+}
+
+// ── JSON structural validator ────────────────────────────────────────────
+
+TEST_CASE("validate [json]: round-trip is accepted",
+          "[validate][structural][json]")
+{
+   structural_validate::Mix in{42, {1, 2, 3}, "hi"};
+   auto bytes = psio::encode(psio::json{}, in);
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::json{}, std::span<const char>{bytes});
+   REQUIRE(st.ok());
+}
+
+TEST_CASE("validate [json]: rejects truncated prefixes",
+          "[validate][structural][json][truncate-strict]")
+{
+   structural_validate::Mix in{42, {1, 2, 3}, "hi"};
+   auto s = psio::encode(psio::json{}, in);
+   std::vector<char> bytes(s.begin(), s.end());
+   REQUIRE(bytes.size() > 1);
+   //  Drop one byte at a time; every strict prefix must fail. Note: a
+   //  single-byte JSON literal like `{` or `[` is also rejected by
+   //  the walker (unterminated). The walker enforces that the entire
+   //  buffer is consumed.
+   std::size_t accepted = 0;
+   for (std::size_t drop = 1; drop < bytes.size(); ++drop)
+   {
+      std::vector<char> trunc(bytes.begin(), bytes.end() - drop);
+      auto st = psio::validate<structural_validate::Mix>(
+         psio::json{}, std::span<const char>{trunc});
+      if (st.ok())
+         ++accepted;
+   }
+   INFO("truncations spuriously accepted = " << accepted);
+   REQUIRE(accepted == 0);
+}
+
+TEST_CASE("validate [json]: rejects unescaped control character",
+          "[validate][json][oob]")
+{
+   //  Raw 0x01 inside a JSON string literal is illegal per RFC 8259.
+   std::string buf = "\"a\x01""b\"";
+   auto st = psio::validate<std::string>(
+      psio::json{}, std::span<const char>{buf});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [json]: rejects unterminated string",
+          "[validate][json][oob]")
+{
+   std::string buf = "\"hello";
+   auto st = psio::validate<std::string>(
+      psio::json{}, std::span<const char>{buf});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [json]: rejects bad keyword",
+          "[validate][json][oob]")
+{
+   //  `tru` is not a complete keyword.
+   std::string buf = "tru";
+   auto st = psio::validate<bool>(
+      psio::json{}, std::span<const char>{buf});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [json]: rejects malformed number",
+          "[validate][json][oob]")
+{
+   //  Number with a fractional dot but no following digits.
+   std::string buf = "1.";
+   auto st = psio::validate<double>(
+      psio::json{}, std::span<const char>{buf});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [json]: rejects trailing comma",
+          "[validate][json][oob]")
+{
+   //  RFC 8259 forbids trailing commas; the walker flags the closing
+   //  bracket lookahead as `,` then expects another value and finds `]`.
+   std::string buf = "[1,2,]";
+   auto st = psio::validate<std::vector<int>>(
+      psio::json{}, std::span<const char>{buf});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [json]: rejects mismatched braces",
+          "[validate][json][oob]")
+{
+   std::string buf = "{\"k\":1";
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::json{}, std::span<const char>{buf});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [json]: depth cap rejects pathological nesting",
+          "[validate][json][depth]")
+{
+   //  Hand-craft a buffer of N opening brackets followed by N closes.
+   //  The walker's recursion depth is exactly N + 1 (outer call at
+   //  depth 0, then N levels). Pick N > kMaxValidationDepth.
+   const std::size_t n = psio::kMaxValidationDepth + 8;
+   std::string       buf;
+   buf.reserve(2 * n);
+   for (std::size_t i = 0; i < n; ++i)
+      buf.push_back('[');
+   for (std::size_t i = 0; i < n; ++i)
+      buf.push_back(']');
+   auto st = psio::validate<std::vector<int>>(
+      psio::json{}, std::span<const char>{buf});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [json]: trailing garbage rejected",
+          "[validate][json][oob]")
+{
+   std::string buf = "{\"k\":1} extra";
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::json{}, std::span<const char>{buf});
+   REQUIRE(!st.ok());
+}
+
+// ── BSON structural validator ────────────────────────────────────────────
+
+TEST_CASE("validate [bson]: round-trip is accepted",
+          "[validate][structural][bson]")
+{
+   structural_validate::Mix in{42, {1, 2, 3}, "hi"};
+   auto bytes = psio::encode(psio::bson{}, in);
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::bson{}, std::span<const char>{bytes});
+   REQUIRE(st.ok());
+}
+
+TEST_CASE("validate [bson]: rejects truncated prefixes",
+          "[validate][structural][bson][truncate-strict]")
+{
+   structural_validate::Mix in{42, {1, 2, 3}, "hi"};
+   auto bytes = psio::encode(psio::bson{}, in);
+   REQUIRE(bytes.size() > 1);
+   std::size_t accepted = 0;
+   for (std::size_t drop = 1; drop < bytes.size(); ++drop)
+   {
+      std::vector<char> trunc(bytes.begin(), bytes.end() - drop);
+      auto st = psio::validate<structural_validate::Mix>(
+         psio::bson{}, std::span<const char>{trunc});
+      if (st.ok())
+         ++accepted;
+   }
+   INFO("truncations spuriously accepted = " << accepted);
+   REQUIRE(accepted == 0);
+}
+
+TEST_CASE("validate [bson]: rejects oversized total",
+          "[validate][bson][oob]")
+{
+   //  Encode a real document, then bump its int32 total prefix past
+   //  the actual buffer size. Walker must reject before recursing.
+   structural_validate::Mix in{42, {1, 2, 3}, "hi"};
+   auto bytes = psio::encode(psio::bson{}, in);
+   REQUIRE(bytes.size() >= 4);
+   std::int32_t bigger =
+      static_cast<std::int32_t>(bytes.size() + 1024);
+   std::memcpy(bytes.data(), &bigger, 4);
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::bson{}, std::span<const char>{bytes});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [bson]: rejects undersized total",
+          "[validate][bson][oob]")
+{
+   //  Total < 5 (minimum: 4-byte length + 1 terminator).
+   std::vector<char> bad(5, 0);
+   std::int32_t      bogus = 4;
+   std::memcpy(bad.data(), &bogus, 4);
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::bson{}, std::span<const char>{bad});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [bson]: rejects missing document terminator",
+          "[validate][bson][oob]")
+{
+   structural_validate::Mix in{42, {1, 2, 3}, "hi"};
+   auto bytes = psio::encode(psio::bson{}, in);
+   REQUIRE(bytes.size() > 5);
+   //  Corrupt the trailing 0x00 to 0x01.
+   bytes.back() = 0x01;
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::bson{}, std::span<const char>{bytes});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [bson]: rejects unknown element type code",
+          "[validate][bson][oob]")
+{
+   //  Empty document is 5 bytes: int32 5 | 0x00. Inject an element
+   //  with an unknown type code (0xCC) before the terminator.
+   //  Layout: int32 total | 0xCC | 'k' 0x00 | 0x00 (term).
+   std::vector<char> bad(8, 0);
+   std::int32_t      total = 8;
+   std::memcpy(bad.data(), &total, 4);
+   bad[4] = static_cast<char>(0xCC);  // unknown element code
+   bad[5] = 'k';
+   bad[6] = 0x00;
+   bad[7] = 0x00;  // terminator
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::bson{}, std::span<const char>{bad});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [bson]: rejects unterminated cstring",
+          "[validate][bson][oob]")
+{
+   //  4-byte total + 0x10 (int32 type) + cstring without 0x00 + ...
+   std::vector<char> bad(10, 0);
+   std::int32_t      total = 10;
+   std::memcpy(bad.data(), &total, 4);
+   bad[4] = 0x10;          // int32 element type
+   bad[5] = 'a';           // start of name
+   bad[6] = 'b';           // ... no terminator within doc body
+   bad[7] = 'c';
+   bad[8] = 'd';
+   bad[9] = 0x00;          // doc terminator (but cstring above isn't
+                           // null-terminated before the int32 value
+                           // would start)
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::bson{}, std::span<const char>{bad});
+   REQUIRE(!st.ok());
+}
+
+TEST_CASE("validate [bson]: depth cap rejects deeply-nested documents",
+          "[validate][bson][depth]")
+{
+   //  Hand-build a chain of nested embedded documents
+   //  (type 0x03 + key "x" + sub-doc) to depth N > cap.
+   //  Innermost doc is the empty {} = int32 5 | 0x00.
+   const std::size_t n = psio::kMaxValidationDepth + 4;
+   //  Build bottom-up. Each wrapping layer adds:
+   //    int32 total | 0x03 | "x" 0x00 | INNER | 0x00
+   //  total = 4 + 1 + 2 + INNER.size() + 1 = 8 + INNER.size()
+   std::vector<char> doc(5, 0);
+   {
+      std::int32_t five = 5;
+      std::memcpy(doc.data(), &five, 4);
+   }
+   for (std::size_t i = 0; i < n; ++i)
+   {
+      std::vector<char> wrapped;
+      wrapped.reserve(doc.size() + 8);
+      const std::int32_t total =
+         static_cast<std::int32_t>(8 + doc.size());
+      wrapped.resize(4);
+      std::memcpy(wrapped.data(), &total, 4);
+      wrapped.push_back(static_cast<char>(0x03));  // embedded doc
+      wrapped.push_back('x');
+      wrapped.push_back(0x00);  // cstring terminator
+      wrapped.insert(wrapped.end(), doc.begin(), doc.end());
+      wrapped.push_back(0x00);  // doc terminator
+      doc = std::move(wrapped);
+   }
+   auto st = psio::validate<structural_validate::Mix>(
+      psio::bson{}, std::span<const char>{doc});
    REQUIRE(!st.ok());
 }

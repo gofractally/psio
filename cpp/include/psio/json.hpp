@@ -22,6 +22,7 @@
 // driven ordering. Decode is strict-comma / strict-colon only.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
@@ -517,26 +518,367 @@ namespace psio {
          }
       }
 
-      // ── Validation — delegate to a trial decode (MVP) ────────────────────
+      // ── Validation — structural skip walker ──────────────────────────────
       //
-      // A proper JSON validator would walk without allocation. Phase 9
-      // leaves that as a follow-up; the MVP validator answers "does this
-      // parse?" via trial decode, which is sufficient for round-trip
-      // correctness tests.
+      // Walks the buffer character-by-character, validating that the
+      // bytes form a syntactically well-formed JSON document per
+      // RFC 8259 with escape-sequence + structural-pairing checks.
+      // Allocates nothing, builds nothing; only confirms that the
+      // surface structure is parseable. Threads `kMaxValidationDepth`
+      // through every nested object/array level so adversarial deep
+      // nesting can't blow the C stack.
+      //
+      // Coverage:
+      //   - whitespace (space/tab/newline/CR) skipped between tokens
+      //   - object   { "key" : value , ... }   keys must be strings
+      //   - array    [ value , ... ]
+      //   - string   "..." with \" \\ \/ \n \r \t \b \f \uXXXX escapes
+      //   - number   optional minus, integer (or '0'), fractional,
+      //              exponent — RFC 8259 grammar
+      //   - keywords true / false / null (exact spelling)
+      //
+      // What it does NOT check:
+      //   - duplicate keys (legal under RFC, undefined by application)
+      //   - UTF-8 byte validity inside strings (the JSON grammar itself
+      //     accepts any byte ≥ 0x20 except `\` and `"`, which is what
+      //     we enforce — caller handles UTF-8 if it wants strictness)
+      //   - schema match against T (this is `validate`, not
+      //     `validate_strict_against_schema`)
+
+      inline std::size_t json_validate_skip_value(
+         std::span<const char> bytes, std::size_t pos, std::size_t depth,
+         codec_status& err) noexcept;
+
+      inline std::size_t json_validate_skip_ws(
+         std::span<const char> bytes, std::size_t pos) noexcept
+      {
+         while (pos < bytes.size())
+         {
+            const char c = bytes[pos];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+               ++pos;
+            else
+               break;
+         }
+         return pos;
+      }
+
+      inline bool json_is_hex_digit(char c) noexcept
+      {
+         return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                (c >= 'A' && c <= 'F');
+      }
+
+      inline std::size_t json_validate_skip_string(
+         std::span<const char> bytes, std::size_t pos,
+         codec_status& err) noexcept
+      {
+         //  pos is on the opening quote.
+         if (pos >= bytes.size() || bytes[pos] != '"')
+         {
+            err = codec_fail("json: expected '\"' opening string",
+                             static_cast<std::uint32_t>(pos), "json");
+            return pos;
+         }
+         ++pos;
+         while (pos < bytes.size())
+         {
+            const char c = bytes[pos];
+            if (c == '"')
+               return pos + 1;
+            if (c == '\\')
+            {
+               if (pos + 1 >= bytes.size())
+               {
+                  err = codec_fail("json: trailing backslash in string",
+                                   static_cast<std::uint32_t>(pos), "json");
+                  return pos;
+               }
+               const char esc = bytes[pos + 1];
+               switch (esc)
+               {
+                  case '"':
+                  case '\\':
+                  case '/':
+                  case 'b':
+                  case 'f':
+                  case 'n':
+                  case 'r':
+                  case 't':
+                     pos += 2;
+                     break;
+                  case 'u':
+                     if (pos + 5 >= bytes.size())
+                     {
+                        err = codec_fail(
+                           "json: truncated \\uXXXX escape",
+                           static_cast<std::uint32_t>(pos), "json");
+                        return pos;
+                     }
+                     for (int k = 2; k < 6; ++k)
+                        if (!json_is_hex_digit(bytes[pos + k]))
+                        {
+                           err = codec_fail(
+                              "json: bad hex digit in \\uXXXX",
+                              static_cast<std::uint32_t>(pos + k),
+                              "json");
+                           return pos;
+                        }
+                     pos += 6;
+                     break;
+                  default:
+                     err = codec_fail(
+                        "json: invalid escape character in string",
+                        static_cast<std::uint32_t>(pos + 1), "json");
+                     return pos;
+               }
+               continue;
+            }
+            //  Raw control bytes (< 0x20) are illegal inside strings
+            //  per RFC 8259; everything else (including high-bit UTF-8
+            //  continuation bytes) passes through as-is.
+            if (static_cast<unsigned char>(c) < 0x20)
+            {
+               err = codec_fail(
+                  "json: unescaped control character in string",
+                  static_cast<std::uint32_t>(pos), "json");
+               return pos;
+            }
+            ++pos;
+         }
+         err = codec_fail("json: unterminated string",
+                          static_cast<std::uint32_t>(pos), "json");
+         return pos;
+      }
+
+      inline std::size_t json_validate_skip_number(
+         std::span<const char> bytes, std::size_t pos,
+         codec_status& err) noexcept
+      {
+         //  RFC 8259 number grammar:
+         //    int = '-'? ( '0' | [1-9][0-9]* )
+         //    frac = '.' [0-9]+
+         //    exp  = [eE] [+-]? [0-9]+
+         //    number = int frac? exp?
+         const std::size_t start = pos;
+         if (pos < bytes.size() && bytes[pos] == '-')
+            ++pos;
+         if (pos >= bytes.size())
+         {
+            err = codec_fail("json: truncated number",
+                             static_cast<std::uint32_t>(start), "json");
+            return pos;
+         }
+         if (bytes[pos] == '0')
+            ++pos;
+         else if (bytes[pos] >= '1' && bytes[pos] <= '9')
+         {
+            ++pos;
+            while (pos < bytes.size() && bytes[pos] >= '0' &&
+                   bytes[pos] <= '9')
+               ++pos;
+         }
+         else
+         {
+            err = codec_fail("json: number missing integer part",
+                             static_cast<std::uint32_t>(start), "json");
+            return pos;
+         }
+         if (pos < bytes.size() && bytes[pos] == '.')
+         {
+            ++pos;
+            const std::size_t frac_start = pos;
+            while (pos < bytes.size() && bytes[pos] >= '0' &&
+                   bytes[pos] <= '9')
+               ++pos;
+            if (pos == frac_start)
+            {
+               err = codec_fail("json: number missing fractional digits",
+                                static_cast<std::uint32_t>(start), "json");
+               return pos;
+            }
+         }
+         if (pos < bytes.size() &&
+             (bytes[pos] == 'e' || bytes[pos] == 'E'))
+         {
+            ++pos;
+            if (pos < bytes.size() &&
+                (bytes[pos] == '+' || bytes[pos] == '-'))
+               ++pos;
+            const std::size_t exp_start = pos;
+            while (pos < bytes.size() && bytes[pos] >= '0' &&
+                   bytes[pos] <= '9')
+               ++pos;
+            if (pos == exp_start)
+            {
+               err = codec_fail("json: number missing exponent digits",
+                                static_cast<std::uint32_t>(start), "json");
+               return pos;
+            }
+         }
+         return pos;
+      }
+
+      inline std::size_t json_validate_skip_keyword(
+         std::span<const char> bytes, std::size_t pos,
+         std::string_view kw, codec_status& err) noexcept
+      {
+         if (bytes.size() - pos < kw.size() ||
+             std::memcmp(bytes.data() + pos, kw.data(), kw.size()) != 0)
+         {
+            err = codec_fail("json: malformed keyword",
+                             static_cast<std::uint32_t>(pos), "json");
+            return pos;
+         }
+         return pos + kw.size();
+      }
+
+      inline std::size_t json_validate_skip_value(
+         std::span<const char> bytes, std::size_t pos, std::size_t depth,
+         codec_status& err) noexcept
+      {
+         if (depth > kMaxValidationDepth)
+         {
+            err = codec_fail("json: max depth exceeded",
+                             static_cast<std::uint32_t>(pos), "json");
+            return pos;
+         }
+         pos = json_validate_skip_ws(bytes, pos);
+         if (pos >= bytes.size())
+         {
+            err = codec_fail("json: unexpected end of input",
+                             static_cast<std::uint32_t>(pos), "json");
+            return pos;
+         }
+         const char c = bytes[pos];
+         switch (c)
+         {
+            case '{':
+            {
+               ++pos;
+               pos = json_validate_skip_ws(bytes, pos);
+               if (pos < bytes.size() && bytes[pos] == '}')
+                  return pos + 1;
+               while (pos < bytes.size())
+               {
+                  pos = json_validate_skip_ws(bytes, pos);
+                  pos = json_validate_skip_string(bytes, pos, err);
+                  if (!err.ok())
+                     return pos;
+                  pos = json_validate_skip_ws(bytes, pos);
+                  if (pos >= bytes.size() || bytes[pos] != ':')
+                  {
+                     err = codec_fail(
+                        "json: expected ':' after object key",
+                        static_cast<std::uint32_t>(pos), "json");
+                     return pos;
+                  }
+                  ++pos;
+                  pos = json_validate_skip_value(bytes, pos, depth + 1,
+                                                 err);
+                  if (!err.ok())
+                     return pos;
+                  pos = json_validate_skip_ws(bytes, pos);
+                  if (pos >= bytes.size())
+                  {
+                     err = codec_fail(
+                        "json: unterminated object",
+                        static_cast<std::uint32_t>(pos), "json");
+                     return pos;
+                  }
+                  if (bytes[pos] == '}')
+                     return pos + 1;
+                  if (bytes[pos] != ',')
+                  {
+                     err = codec_fail(
+                        "json: expected ',' or '}' in object",
+                        static_cast<std::uint32_t>(pos), "json");
+                     return pos;
+                  }
+                  ++pos;
+               }
+               err = codec_fail("json: unterminated object",
+                                static_cast<std::uint32_t>(pos), "json");
+               return pos;
+            }
+            case '[':
+            {
+               ++pos;
+               pos = json_validate_skip_ws(bytes, pos);
+               if (pos < bytes.size() && bytes[pos] == ']')
+                  return pos + 1;
+               while (pos < bytes.size())
+               {
+                  pos = json_validate_skip_value(bytes, pos, depth + 1,
+                                                 err);
+                  if (!err.ok())
+                     return pos;
+                  pos = json_validate_skip_ws(bytes, pos);
+                  if (pos >= bytes.size())
+                  {
+                     err = codec_fail(
+                        "json: unterminated array",
+                        static_cast<std::uint32_t>(pos), "json");
+                     return pos;
+                  }
+                  if (bytes[pos] == ']')
+                     return pos + 1;
+                  if (bytes[pos] != ',')
+                  {
+                     err = codec_fail(
+                        "json: expected ',' or ']' in array",
+                        static_cast<std::uint32_t>(pos), "json");
+                     return pos;
+                  }
+                  ++pos;
+               }
+               err = codec_fail("json: unterminated array",
+                                static_cast<std::uint32_t>(pos), "json");
+               return pos;
+            }
+            case '"':
+               return json_validate_skip_string(bytes, pos, err);
+            case 't':
+               return json_validate_skip_keyword(bytes, pos, "true", err);
+            case 'f':
+               return json_validate_skip_keyword(bytes, pos, "false", err);
+            case 'n':
+               return json_validate_skip_keyword(bytes, pos, "null", err);
+            case '-':
+            case '0':
+            case '1':
+            case '2':
+            case '3':
+            case '4':
+            case '5':
+            case '6':
+            case '7':
+            case '8':
+            case '9':
+               return json_validate_skip_number(bytes, pos, err);
+            default:
+               err = codec_fail(
+                  "json: unexpected character at value start",
+                  static_cast<std::uint32_t>(pos), "json");
+               return pos;
+         }
+      }
+
       template <typename T>
       codec_status validate_value(std::span<const char> bytes) noexcept
       {
-         parser pr{bytes.data(), bytes.data() + bytes.size()};
-         pr.skip_ws();
-         if (pr.p >= pr.end)
+         if (bytes.empty())
             return codec_fail("json: empty input", 0, "json");
-         // Rough structural check: first char must be one of  { [ " t f n -
-         // or digit.
-         char c = *pr.p;
-         if (c != '{' && c != '[' && c != '"' && c != 't' && c != 'f' &&
-             c != 'n' && c != '-' && !(c >= '0' && c <= '9'))
-            return codec_fail("json: unexpected leading character", 0,
-                              "json");
+         codec_status      err = codec_ok();
+         const std::size_t pos =
+            json_validate_skip_value(bytes, 0, 0, err);
+         if (!err.ok())
+            return err;
+         //  Trailing whitespace is fine; trailing non-whitespace is not.
+         const std::size_t after = json_validate_skip_ws(bytes, pos);
+         if (after != bytes.size())
+            return codec_fail("json: trailing bytes after value",
+                              static_cast<std::uint32_t>(after), "json");
          return codec_ok();
       }
 
