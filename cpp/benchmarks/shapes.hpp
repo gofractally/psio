@@ -18,6 +18,7 @@
 #include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -369,6 +370,201 @@ PSIO_REFLECT(WideRecord,
              f24, f25, f26, f27, f28, f29, f30, f31,
              definitionWillNotChange())
 
+// ── Realistic shapes for the compressed-wire-size bench ───────────────
+//
+// The shapes above stress format mechanics (offset tables, DWNC fast
+// paths, varint widths) but produce wire bytes that are either too
+// small or too uniform for compressors to learn meaningful structure
+// from.  These five shapes are populated with deterministic but
+// compression-friendly data — repeated key strings, monotonic
+// timestamps, low-cardinality enums, structural redundancy at depth —
+// so lz4/zstd have something to express the format-vs-format gap on
+// after compression.
+//
+// Naming: Realistic* prefix.  Sizes target 1–50 KB raw — large enough
+// for the compressor to amortise its fixed overhead, small enough to
+// keep the bench tractable on every shape × format × op combination.
+
+// ── HttpApiResponse — mixed types in a nested record ──────────────────
+//
+// One status code, one optional error string, a request id, a small
+// header map, a body payload.  Realistic header keys repeat across
+// requests (content-type, x-request-id, …) → high compression ratio
+// on key columns even at this size.  Target ~1–2 KB raw.
+
+struct HttpHeader
+{
+   std::string key;
+   std::string value;
+   friend bool operator==(const HttpHeader&, const HttpHeader&) = default;
+};
+PSIO_REFLECT(HttpHeader, key, value)
+
+struct HttpApiResponse
+{
+   std::uint64_t              request_id = 0;
+   std::uint64_t              session_id = 0;
+   std::uint32_t              status     = 0;
+   std::optional<std::string> error;
+   std::vector<HttpHeader>    headers;
+   std::string                body;
+   friend bool operator==(const HttpApiResponse&,
+                          const HttpApiResponse&) = default;
+};
+PSIO_REFLECT(HttpApiResponse,
+             request_id, session_id, status, error, headers, body)
+
+// ── BlockOfTransactions — column-friendly ledger block ────────────────
+//
+// 100 transactions.  from/to addresses cluster around a small set
+// (high inter-record redundancy), nonce monotonically increases (most
+// bytes zero), amount stays in u64 territory (top half always 0), data
+// is mostly empty/short (about half the records carry a 32-byte
+// payload).  Target ~50 KB raw.  Canonical "ledger block" — the kind
+// of payload pssz/ssz/borsh compress very well on because the columnar
+// patterns repeat exactly the way a block-based compressor wants.
+
+struct Transaction
+{
+   std::uint64_t             from   = 0;
+   std::uint64_t             to     = 0;
+   std::uint64_t             nonce  = 0;
+   std::uint64_t             amount = 0;
+   std::vector<std::uint8_t> data;
+   friend bool operator==(const Transaction&,
+                          const Transaction&) = default;
+};
+PSIO_REFLECT(Transaction, from, to, nonce, amount, data)
+
+struct BlockOfTransactions
+{
+   std::uint64_t            block_number = 0;
+   std::uint64_t            timestamp    = 0;
+   std::vector<Transaction> txs;
+   friend bool operator==(const BlockOfTransactions&,
+                          const BlockOfTransactions&) = default;
+};
+PSIO_REFLECT(BlockOfTransactions, block_number, timestamp, txs)
+
+// ── ConfigTree — recursive config-style document ──────────────────────
+//
+// Three to four levels of nesting, lots of repeated string keys, mixed
+// optional leaves of each scalar type.  std::variant of recursive
+// types is hard to reflect cleanly, so this uses a flat record per
+// node with an optional of each leaf type and a vector of children.
+// Compressors love this shape because the same key strings recur
+// many times across siblings + descendants.  Target ~5 KB raw.
+
+struct ConfigEntry
+{
+   std::string                  key;
+   std::optional<std::string>   string_val;
+   std::optional<std::int64_t>  int_val;
+   std::optional<double>        double_val;
+   std::optional<bool>          bool_val;
+   friend bool operator==(const ConfigEntry&,
+                          const ConfigEntry&) = default;
+};
+PSIO_REFLECT(ConfigEntry, key, string_val, int_val, double_val, bool_val)
+
+struct ConfigSection
+{
+   std::string              name;
+   std::vector<ConfigEntry> entries;
+   friend bool operator==(const ConfigSection&,
+                          const ConfigSection&) = default;
+};
+PSIO_REFLECT(ConfigSection, name, entries)
+
+struct ConfigGroup
+{
+   std::string                name;
+   std::vector<ConfigSection> sections;
+   friend bool operator==(const ConfigGroup&,
+                          const ConfigGroup&) = default;
+};
+PSIO_REFLECT(ConfigGroup, name, sections)
+
+struct ConfigTree
+{
+   std::string              schema_version;
+   std::vector<ConfigGroup> groups;
+   friend bool operator==(const ConfigTree&, const ConfigTree&) = default;
+};
+PSIO_REFLECT(ConfigTree, schema_version, groups)
+
+// ── TimeSeriesChunk — metrics-database shape ──────────────────────────
+//
+// 1024 time points: timestamp monotonically increases by ~1000ns each
+// (top bits all zero), value drifts via a smooth function (most f64
+// bits stay in a narrow exponent range — good for delta-friendly
+// compressors), label_idx is one of ~10 distinct values (low
+// cardinality).  Target ~24 KB raw.  Tests how each format handles
+// the metrics / OLAP / time-series workload that production telemetry
+// systems run all day.
+
+struct TimePoint
+{
+   std::uint64_t timestamp = 0;
+   double        value     = 0.0;
+   std::uint32_t label_idx = 0;
+   friend bool operator==(const TimePoint&, const TimePoint&) = default;
+};
+PSIO_REFLECT(TimePoint, timestamp, value, label_idx,
+             definitionWillNotChange())
+
+struct TimeSeriesChunk
+{
+   std::uint64_t            series_id = 0;
+   std::uint64_t            start_ns  = 0;
+   std::vector<TimePoint>   points;
+   std::vector<std::string> labels;
+   friend bool operator==(const TimeSeriesChunk&,
+                          const TimeSeriesChunk&) = default;
+};
+PSIO_REFLECT(TimeSeriesChunk, series_id, start_ns, points, labels)
+
+// ── MixedDocument — JSON-equivalent payload ───────────────────────────
+//
+// User profile + activity feed.  Typical "what would normally be JSON
+// over HTTP" shape: nested objects, mixed scalar types, string-keyed
+// records, optional, vector-of-vectors via the actions list.  Target
+// ~2 KB raw.  Compressors find structural redundancy in the field
+// names and the repeated action types.
+
+struct UserPrefEntry
+{
+   std::string key;
+   std::string value;
+   friend bool operator==(const UserPrefEntry&,
+                          const UserPrefEntry&) = default;
+};
+PSIO_REFLECT(UserPrefEntry, key, value)
+
+struct UserAction
+{
+   std::uint64_t timestamp = 0;
+   std::string   verb;
+   std::string   target;
+   std::vector<std::string> tags;
+   friend bool operator==(const UserAction&, const UserAction&) = default;
+};
+PSIO_REFLECT(UserAction, timestamp, verb, target, tags)
+
+struct MixedDocument
+{
+   std::uint64_t                  id = 0;
+   std::string                    name;
+   std::string                    email;
+   std::optional<std::string>     bio;
+   std::vector<UserPrefEntry>     prefs;
+   std::vector<UserAction>        recent_actions;
+   friend bool operator==(const MixedDocument&,
+                          const MixedDocument&) = default;
+};
+PSIO_REFLECT(MixedDocument,
+             id, name, email, bio, prefs, recent_actions)
+
 // ── Sample factories ──────────────────────────────────────────────────
 namespace psio_bench {
 
@@ -573,6 +769,247 @@ namespace psio_bench {
                   .pad3 = 3},
                .pad2 = 2},
             .pad1 = 1}};
+   }
+
+   // ── Realistic-shape factories ───────────────────────────────────────
+   //
+   // Deterministic content — same call always returns the same bytes.
+   // Patterns chosen so each shape gives the compressor real structure
+   // to find: repeated key strings, monotonic timestamps,
+   // low-cardinality enums, narrow value distributions.
+
+   inline HttpApiResponse realistic_http_response()
+   {
+      // 14 typical HTTP headers — keys repeat across requests in real
+      // traffic; values vary in length and content.  Body is a small
+      // JSON-like payload.  Target ~1–2 KB raw.
+      HttpApiResponse r;
+      r.request_id = 0xABCD'1234'5678'90EFull;
+      r.session_id = 0xDEAD'BEEF'C0FF'EE77ull;
+      r.status     = 200;
+      r.error.reset();
+      r.headers = {
+         {"content-type",        "application/json; charset=utf-8"},
+         {"content-length",      "1024"},
+         {"x-request-id",        "f47ac10b-58cc-4372-a567-0e02b2c3d479"},
+         {"x-trace-id",          "00-0af7651916cd43dd-b7ad6b7169203331-01"},
+         {"cache-control",       "no-cache, no-store, must-revalidate"},
+         {"server",              "psiserve/0.1.0"},
+         {"date",                "Wed, 30 Apr 2026 12:34:56 GMT"},
+         {"x-ratelimit-limit",   "1000"},
+         {"x-ratelimit-remaining","997"},
+         {"x-ratelimit-reset",   "1714485356"},
+         {"access-control-allow-origin", "*"},
+         {"access-control-allow-methods","GET, POST, PUT, DELETE, OPTIONS"},
+         {"x-content-type-options","nosniff"},
+         {"strict-transport-security","max-age=31536000; includeSubDomains"},
+      };
+      r.body =
+         "{\"ok\":true,\"data\":{\"users\":["
+         "{\"id\":1001,\"name\":\"alice\",\"role\":\"admin\"},"
+         "{\"id\":1002,\"name\":\"bob\",\"role\":\"viewer\"},"
+         "{\"id\":1003,\"name\":\"carol\",\"role\":\"editor\"},"
+         "{\"id\":1004,\"name\":\"dave\",\"role\":\"viewer\"},"
+         "{\"id\":1005,\"name\":\"erin\",\"role\":\"viewer\"},"
+         "{\"id\":1006,\"name\":\"frank\",\"role\":\"editor\"}],"
+         "\"page\":1,\"per_page\":50,\"total\":6}}";
+      return r;
+   }
+
+   inline BlockOfTransactions realistic_block(std::uint32_t n = 100)
+   {
+      BlockOfTransactions b;
+      b.block_number = 19'500'000;
+      b.timestamp    = 1'714'485'356'000'000'000ull;  // 2024-04-30 ns
+
+      // Cluster from/to around a few hot addresses (~8 each); real
+      // ledger traffic has a long-tail distribution that compresses
+      // well at the column level.
+      static constexpr std::uint64_t hot_from[8] = {
+         0x0000'1111'2222'3333ull, 0x0000'4444'5555'6666ull,
+         0x0000'7777'8888'9999ull, 0x0000'AAAA'BBBB'CCCCull,
+         0x0000'DEAD'BEEF'0001ull, 0x0000'DEAD'BEEF'0002ull,
+         0x0000'CAFE'BABE'0001ull, 0x0000'CAFE'BABE'0002ull,
+      };
+      static constexpr std::uint64_t hot_to[8] = {
+         0x0000'1234'5678'9ABCull, 0x0000'2222'3333'4444ull,
+         0x0000'5555'6666'7777ull, 0x0000'8888'9999'AAAAull,
+         0x0000'F00D'CAFE'0001ull, 0x0000'F00D'CAFE'0002ull,
+         0x0000'BEEF'DEAD'0001ull, 0x0000'BEEF'DEAD'0002ull,
+      };
+
+      b.txs.reserve(n);
+      for (std::uint32_t i = 0; i < n; ++i)
+      {
+         Transaction t;
+         t.from   = hot_from[i % 8];
+         t.to     = hot_to[(i / 2) % 8];
+         t.nonce  = 1'000'000ull + i;             // monotonic
+         t.amount = 1'000'000ull * ((i % 7) + 1); // small u64
+         if (i % 2 == 0)
+         {
+            // 32-byte payload, deterministic but varied per index.
+            t.data.resize(32);
+            for (std::size_t j = 0; j < 32; ++j)
+               t.data[j] = static_cast<std::uint8_t>((i * 31 + j) & 0xFF);
+         }
+         b.txs.push_back(std::move(t));
+      }
+      return b;
+   }
+
+   inline ConfigTree realistic_config_tree()
+   {
+      // 4 groups × 3 sections × 6 entries = 72 leaf records.  Repeated
+      // key prefixes ("max_", "default_", "enable_") and section names
+      // give compressors plenty to learn.  Target ~5 KB raw.
+      static constexpr const char* group_names[4] = {
+         "network", "storage", "compute", "auth",
+      };
+      static constexpr const char* section_names[3] = {
+         "limits", "defaults", "feature_flags",
+      };
+      static constexpr const char* entry_keys[6] = {
+         "max_concurrent_requests", "max_queue_depth",
+         "default_timeout_ms",      "default_retries",
+         "enable_metrics_export",   "enable_debug_logging",
+      };
+
+      ConfigTree t;
+      t.schema_version = "config-v1.4.2";
+      t.groups.reserve(4);
+      for (std::size_t gi = 0; gi < 4; ++gi)
+      {
+         ConfigGroup g;
+         g.name = group_names[gi];
+         g.sections.reserve(3);
+         for (std::size_t si = 0; si < 3; ++si)
+         {
+            ConfigSection s;
+            s.name = section_names[si];
+            s.entries.reserve(6);
+            for (std::size_t ei = 0; ei < 6; ++ei)
+            {
+               ConfigEntry e;
+               e.key = entry_keys[ei];
+               // Fill exactly one of the four leaf types based on the
+               // entry index so every config row has a populated leaf
+               // (compressors see the same field-name pattern over
+               // and over with different leaf occupancy).
+               switch (ei)
+               {
+                  case 0:
+                  case 1:
+                     e.int_val =
+                        static_cast<std::int64_t>(1024 * (gi + 1) * (si + 1));
+                     break;
+                  case 2:
+                     e.int_val = 30'000;  // ms
+                     break;
+                  case 3:
+                     e.int_val = 5;
+                     break;
+                  case 4:
+                  case 5:
+                     e.bool_val = ((gi + si + ei) % 2) == 0;
+                     break;
+               }
+               // Add a description string on every other entry so
+               // string-key reuse compresses too.
+               if ((ei & 1) == 0)
+                  e.string_val =
+                     std::string{"applies to "} + group_names[gi] +
+                     std::string{"/"} + section_names[si];
+               s.entries.push_back(std::move(e));
+            }
+            g.sections.push_back(std::move(s));
+         }
+         t.groups.push_back(std::move(g));
+      }
+      return t;
+   }
+
+   inline TimeSeriesChunk realistic_time_series(std::uint32_t n = 1024)
+   {
+      TimeSeriesChunk c;
+      c.series_id = 0xC001'CAFE'D00D'5EEDull;
+      c.start_ns  = 1'714'485'000'000'000'000ull;
+      c.points.reserve(n);
+      // ~1000 ns spacing with small jitter — high-bit zeros stay
+      // identical across all records, low-bit drift gives compressors
+      // delta structure.  Value drifts via a smooth sinusoidal-style
+      // function that keeps f64 exponent bits near-constant.
+      for (std::uint32_t i = 0; i < n; ++i)
+      {
+         TimePoint p;
+         p.timestamp = c.start_ns +
+                       static_cast<std::uint64_t>(i) * 1000ull +
+                       (i * 13ull) % 7ull;        // jitter
+         // Smooth drift in [-1.0, 1.0] range — most mantissa bits
+         // change slowly, exponent stays near 1.0.
+         const double phase = static_cast<double>(i) * 0.006;
+         p.value = 0.5 + 0.4 * (
+            // Cheap sinusoid approximation without <cmath> dependency
+            // ordering pain — Taylor series at small phase.
+            phase - (phase * phase * phase) / 6.0);
+         p.label_idx = i % 10;  // 10 distinct labels
+         c.points.push_back(p);
+      }
+      // Label dictionary — short, low-cardinality strings repeated
+      // across the chunk via label_idx.
+      c.labels = {
+         "cpu.user",       "cpu.system",     "cpu.iowait",
+         "memory.rss",     "memory.virt",    "disk.read_bytes",
+         "disk.write_bytes","net.rx_bytes",  "net.tx_bytes",
+         "gc.pause_ms",
+      };
+      return c;
+   }
+
+   inline MixedDocument realistic_mixed_document()
+   {
+      MixedDocument d;
+      d.id    = 42'857'913;
+      d.name  = "Alice Stone";
+      d.email = "alice.stone@example.com";
+      d.bio   = std::string{
+         "Engineer; works on distributed systems; based in Berlin."};
+      d.prefs = {
+         {"locale",           "en-US"},
+         {"timezone",         "Europe/Berlin"},
+         {"theme",            "dark"},
+         {"notifications",    "email,push"},
+         {"two_factor",       "totp"},
+         {"items_per_page",   "50"},
+         {"sort_order",       "recent"},
+         {"experimental",     "beta-channel"},
+      };
+      // Activity feed: 24 actions across 4 verbs × 6 targets, with
+      // tag overlap.  Verbs and tag strings repeat → compressor
+      // expresses that as ~3-4× ratio on the activity portion.
+      static constexpr const char* verbs[4]   = {
+         "viewed", "edited", "commented_on", "starred",
+      };
+      static constexpr const char* targets[6] = {
+         "doc/architecture-overview", "doc/api-reference",
+         "issue/perf-regression-12",  "issue/release-checklist",
+         "pr/payments-refactor",      "pr/observability-rollout",
+      };
+      static constexpr const char* tag_pool[6] = {
+         "review", "follow-up", "urgent", "doc", "infra", "perf",
+      };
+      d.recent_actions.reserve(24);
+      for (std::uint32_t i = 0; i < 24; ++i)
+      {
+         UserAction a;
+         a.timestamp = 1'714'400'000'000'000'000ull +
+                       static_cast<std::uint64_t>(i) * 60'000'000'000ull;
+         a.verb   = verbs[i % 4];
+         a.target = targets[i % 6];
+         a.tags   = {tag_pool[i % 6], tag_pool[(i + 2) % 6]};
+         d.recent_actions.push_back(std::move(a));
+      }
+      return d;
    }
 
 }  // namespace psio_bench

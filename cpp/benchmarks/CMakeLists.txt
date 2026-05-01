@@ -21,6 +21,21 @@
 #    ${CMAKE_CURRENT_SOURCE_DIR})
 # target_compile_features(psio_bench_perf_report PRIVATE cxx_std_23)
 
+# lz4 — vendored single-source bundle at external/lz4/.  Used by the
+# compressed-wire-size cell of the bench to compress encoded buffers
+# with the same compressor every consumer of the benchmark would link.
+# BSD-2-Clause; LICENSE file shipped alongside the source.
+add_library(psio_bench_lz4 STATIC
+   ${CMAKE_CURRENT_SOURCE_DIR}/../external/lz4/lz4.c
+   ${CMAKE_CURRENT_SOURCE_DIR}/../external/lz4/lz4hc.c)
+target_include_directories(psio_bench_lz4 PUBLIC
+   ${CMAKE_CURRENT_SOURCE_DIR}/../external/lz4)
+# Mirror the bench's release-mode flags so the compressor sees the
+# same -O3 the encode/decode hot paths see — fairer head-to-head on
+# the lz4 side.
+target_compile_options(psio_bench_lz4 PRIVATE -O3 -DNDEBUG)
+set_target_properties(psio_bench_lz4 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # Unified head-to-head: psio's wire formats × canonical external libs
 # × shapes × ops.  Replaces the v1↔v3 bench_perf_report matrix.  The
 # psio side is built unconditionally; competitor adapters land via
@@ -28,11 +43,40 @@
 # PSIO_HAVE_CAPNP / PSIO_HAVE_FLATBUF / PSIO_HAVE_SSZPP) in follow-up
 # commits.
 add_executable(psio_bench_vs_externals bench_psio_vs_externals.cpp)
-target_link_libraries(psio_bench_vs_externals PRIVATE psio)
+target_link_libraries(psio_bench_vs_externals PRIVATE psio psio_bench_lz4)
 target_include_directories(psio_bench_vs_externals PRIVATE
    ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(psio_bench_vs_externals PRIVATE cxx_std_23)
 target_compile_options(psio_bench_vs_externals PRIVATE -O3 -DNDEBUG)
+target_compile_definitions(psio_bench_vs_externals PRIVATE
+   PSIO_HAVE_LZ4=1)
+
+# zstd — find_package gated; production transports increasingly use
+# zstd as the default compressor.  When zstd isn't installed the bench
+# silently drops the zstd cells from the compression block.
+find_package(zstd QUIET CONFIG)
+if(zstd_FOUND)
+   # Modern zstd config exports zstd::libzstd_shared / zstd::libzstd_static.
+   # Pick whichever exists; prefer shared (system default on macOS/Linux).
+   if(TARGET zstd::libzstd_shared)
+      target_link_libraries(psio_bench_vs_externals PRIVATE
+         zstd::libzstd_shared)
+   elseif(TARGET zstd::libzstd_static)
+      target_link_libraries(psio_bench_vs_externals PRIVATE
+         zstd::libzstd_static)
+   else()
+      # Older configs expose just `zstd::libzstd`.
+      target_link_libraries(psio_bench_vs_externals PRIVATE zstd::libzstd)
+   endif()
+   target_compile_definitions(psio_bench_vs_externals PRIVATE
+      PSIO_HAVE_ZSTD=1)
+   message(STATUS
+      "psio_bench_vs_externals: zstd found — enabled")
+else()
+   message(STATUS
+      "psio_bench_vs_externals: zstd not found — compression block "
+      "will skip zstd cells")
+endif()
 
 # Optional canonical-external library adapters.  Each is gated by
 # find_package; missing libraries quietly drop their column from the

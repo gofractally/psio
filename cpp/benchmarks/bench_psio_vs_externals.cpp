@@ -37,6 +37,13 @@
 
 #include "harness.hpp"
 #include "shapes.hpp"
+//
+// compress_bench.hpp — adds the compressed-wire-size cell.  Isolated
+// header so the existing per-format / per-shape bench cells in this
+// TU don't need refactoring; the entry point is
+// psio_bench::compress::run_compress_block(rows), called once at the
+// end of main() right before the snapshot is written.
+#include "compress_bench.hpp"
 
 #ifdef PSIO_HAVE_MSGPACK
 #  include "adapters/msgpack_adapter.hpp"
@@ -1708,6 +1715,17 @@ int main(int argc, char** argv)
    run_shape(rows, "MlEmbedding",  psio_bench::ml_embedding());
    run_shape(rows, "BlobPayload",  psio_bench::blob_payload());
    run_shape(rows, "WideRecord",   psio_bench::wide_record());
+
+   // ── Compressed-wire-size block ──────────────────────────────────
+   //
+   // Production transports compress; raw size differences shrink.
+   // For each realistic shape (HttpApiResponse, BlockOfTransactions,
+   // ConfigTree, TimeSeriesChunk, MixedDocument), the block emits
+   // raw_size + four compress timings (lz4, lz4hc, zstd1, zstd3) +
+   // two decompress timings (lz4, zstd) per format.  Driven from
+   // compress_bench.hpp so the existing per-format cells above stay
+   // unmodified.
+   psio_bench::compress::run_compress_block(rows);
 
    // Where to write the snapshot.  Default: bench_snapshots/.  Caller
    // can override via PSIO_BENCH_SNAPSHOT_DIR or argv[1].
