@@ -10,19 +10,25 @@
 #include <string>
 #include <vector>
 
+// definitionWillNotChange() opts the records out of bin's varuint
+// content_size prefix (added for forward-compat extensibility on
+// non-DWNC types). The size assertions below ("8" for BinPoint, no
+// record-level prefix in the round-trip checks) match the DWNC layout
+// where the body is concatenated directly. Non-DWNC bin records carry
+// a leading varuint with the body length.
 struct BinPoint
 {
    std::int32_t x;
    std::int32_t y;
 };
-PSIO_REFLECT(BinPoint, x, y)
+PSIO_REFLECT(BinPoint, x, y, definitionWillNotChange())
 
 struct BinPerson
 {
    std::string  name;
    std::int32_t age;
 };
-PSIO_REFLECT(BinPerson, name, age)
+PSIO_REFLECT(BinPerson, name, age, definitionWillNotChange())
 
 TEST_CASE("bin round-trips primitives", "[bin][primitive]")
 {
@@ -33,11 +39,14 @@ TEST_CASE("bin round-trips primitives", "[bin][primitive]")
    REQUIRE(v == 0xDEADBEEF01020304);
 }
 
-TEST_CASE("bin round-trips std::string with u32 length prefix", "[bin][string]")
+TEST_CASE("bin round-trips std::string with varuint length prefix",
+          "[bin][string]")
 {
+   // bin encodes string length as a LEB128 varuint32 (mirrors the EOSIO
+   // bin wire format), not a fixed u32. For len=2 the varuint is 1 byte.
    std::string s = "hi";
    auto        b = psio::encode(psio::bin{}, s);
-   REQUIRE(b.size() == 4 + 2);
+   REQUIRE(b.size() == 1 + 2);
    auto v =
       psio::decode<std::string>(psio::bin{}, std::span<const char>{b});
    REQUIRE(v == "hi");
@@ -45,9 +54,11 @@ TEST_CASE("bin round-trips std::string with u32 length prefix", "[bin][string]")
 
 TEST_CASE("bin round-trips std::vector", "[bin][vector]")
 {
+   // Vector length is also a LEB128 varuint32. For len=3 the varuint
+   // takes 1 byte; the three u32 elements take 12 bytes.
    std::vector<std::uint32_t> v{1, 2, 3};
    auto                       b = psio::encode(psio::bin{}, v);
-   REQUIRE(b.size() == 4 + 12);
+   REQUIRE(b.size() == 1 + 12);
    auto back = psio::decode<std::vector<std::uint32_t>>(
       psio::bin{}, std::span<const char>{b});
    REQUIRE(back == v);

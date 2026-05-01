@@ -17,26 +17,32 @@
 #include <string>
 #include <vector>
 
+// These fixtures opt into definitionWillNotChange(): the pssz wire
+// layout's u{W} fixed_size header is reserved for extensible types,
+// and the size-equality assertions below ("4 + 1 + 3", "8", etc.)
+// match the DWNC layout where the header is elided. Non-DWNC pssz
+// records carry a u{W} header (W=1/2/4 for pssz8/16/32). Tests that
+// exercise the header path live under the [pssz][caps] section.
 struct PssPoint
 {
    std::int32_t x;
    std::int32_t y;
 };
-PSIO_REFLECT(PssPoint, x, y)
+PSIO_REFLECT(PssPoint, x, y, definitionWillNotChange())
 
 struct PssLabelled
 {
    std::int32_t id;
    std::string  name;
 };
-PSIO_REFLECT(PssLabelled, id, name)
+PSIO_REFLECT(PssLabelled, id, name, definitionWillNotChange())
 
 struct PssPacket
 {
    std::uint16_t             version;
    std::vector<std::int32_t> payload;
 };
-PSIO_REFLECT(PssPacket, version, payload)
+PSIO_REFLECT(PssPacket, version, payload, definitionWillNotChange())
 
 TEMPLATE_TEST_CASE("pssz round-trips primitives across widths",
                    "[pssz][primitive]", psio::pssz8, psio::pssz16,

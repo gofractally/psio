@@ -3,9 +3,11 @@
 // psio/bin.hpp — `bin` format tag.
 //
 // `bin` is the simplest binary format: primitives serialize as raw LE
-// bytes; std::string and std::vector get a u32 length prefix; std::array
-// and reflected records concatenate their elements. No offset tables,
-// no headers, no heap region.
+// bytes; std::string and std::vector get a LEB128 varuint32 length
+// prefix; std::array concatenates its elements. Reflected records carry
+// a varuint content_size prefix on non-DWNC types (forward-compat
+// extensibility) and concatenate their fields when DWNC. No offset
+// tables, no fixed-size headers, no heap region.
 //
 // Scope (Phase 10 MVP): primitives, std::array, std::vector, std::string,
 // std::optional, reflected records. Matches the other-format MVPs.

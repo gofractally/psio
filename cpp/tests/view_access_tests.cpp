@@ -1,6 +1,7 @@
 // Phase 3 — buffer/view/mutable_view + access-surface rule.
 
 #include <psio/buffer.hpp>
+#include <psio/format.hpp>  // canonical view<T,Fmt,Store=const_borrow> decl
 #include <psio/mutable_view.hpp>
 #include <psio/storage.hpp>
 #include <psio/view.hpp>
