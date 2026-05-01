@@ -20,6 +20,7 @@
 // via PSIO_REFLECT order — field I maps to vtable voffset 4 + 2*I.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/adapter.hpp>
@@ -857,6 +858,225 @@ namespace psio {
          }(std::make_index_sequence<R::member_count>{});
       }
 
+      // ── Structural validator ─────────────────────────────────────────
+      //
+      // Walk the root table by following the same offset-resolution
+      // logic as unpack_table, but without materialising values. The
+      // walker's contract: every byte read happens through a bounds-
+      // checked accessor, and depth threads kMaxValidationDepth.
+      //
+      // flatbuf wire layout we validate:
+      //   [u32 root_offset]            byte 0
+      //   [int32 vtable back-pointer]  at root_offset (table start)
+      //   [vtable u16 size + u16 table_size + per-field u16 offsets]
+      //                                 at root_offset - back_ptr
+      //   [field cells]                 at root_offset + voffset
+      //
+      // For each variable field (string, vector, nested table) the
+      // cell holds a forward u32 offset to the payload. The payload
+      // header is u32 length (string / vector). Nested tables have
+      // their own vtable.
+
+      // Forward decl: depth-tracked table validator.
+      template <typename T>
+      bool validate_table(const std::uint8_t* buf, std::size_t size,
+                          std::uint32_t pos, std::size_t depth) noexcept;
+
+      // Validate a string at absolute position `abs` in `buf`. The
+      // string body is u32 len + len bytes (+ null terminator,
+      // optional). We only require len bytes fit inside `size`.
+      inline bool validate_string(const std::uint8_t* buf,
+                                  std::size_t size, std::uint32_t abs) noexcept
+      {
+         if (abs > size || size - abs < 4) return false;
+         std::uint32_t len = read_u32(buf + abs);
+         if (len > size - abs - 4) return false;
+         return true;
+      }
+
+      // Validate a vector at absolute position `abs`. Body is u32 n
+      // + n elements of `esz` bytes each (or per-element forward
+      // offsets for non-trivial elements).
+      template <typename E>
+      bool validate_vector(const std::uint8_t* buf, std::size_t size,
+                           std::uint32_t abs, std::size_t depth) noexcept
+      {
+         if (depth > ::psio::kMaxValidationDepth) return false;
+         if (abs > size || size - abs < 4) return false;
+         std::uint32_t n = read_u32(buf + abs);
+         if constexpr (std::is_arithmetic_v<E>)
+         {
+            //  Multiplication overflow + bounds.
+            if (n > (size - abs - 4) / sizeof(E)) return false;
+            return true;
+         }
+         else if constexpr (std::is_same_v<E, std::string>)
+         {
+            if (n > (size - abs - 4) / 4) return false;
+            for (std::uint32_t i = 0; i < n; ++i)
+            {
+               std::uint32_t cell = abs + 4 + i * 4;
+               if (cell > size || size - cell < 4) return false;
+               std::uint32_t fwd = read_u32(buf + cell);
+               if (fwd > size - cell) return false;
+               std::uint32_t sp = cell + fwd;
+               if (!validate_string(buf, size, sp)) return false;
+            }
+            return true;
+         }
+         else if constexpr (is_table<E>::value)
+         {
+            if (n > (size - abs - 4) / 4) return false;
+            for (std::uint32_t i = 0; i < n; ++i)
+            {
+               std::uint32_t cell = abs + 4 + i * 4;
+               if (cell > size || size - cell < 4) return false;
+               std::uint32_t fwd = read_u32(buf + cell);
+               if (fwd > size - cell) return false;
+               std::uint32_t sub = cell + fwd;
+               if (!validate_table<E>(buf, size, sub, depth + 1))
+                  return false;
+            }
+            return true;
+         }
+         else
+         {
+            //  Unsupported vector element — reject conservatively.
+            return false;
+         }
+      }
+
+      template <typename T>
+      bool validate_table(const std::uint8_t* buf, std::size_t size,
+                          std::uint32_t pos, std::size_t depth) noexcept
+      {
+         if (depth > ::psio::kMaxValidationDepth) return false;
+         //  Table starts with int32 vtable back-pointer.
+         if (pos > size || size - pos < 4) return false;
+         std::int32_t back = read_i32(buf + pos);
+         //  vtable position = pos - back. back may be negative
+         //  (vtable lies forward) or positive (vtable lies behind).
+         //  Use signed arithmetic; check for under/overflow.
+         std::int64_t vt_pos_s = static_cast<std::int64_t>(pos) - back;
+         if (vt_pos_s < 0) return false;
+         std::uint64_t vt_pos = static_cast<std::uint64_t>(vt_pos_s);
+         if (vt_pos > size || size - vt_pos < 4) return false;
+         std::uint16_t vtsize     = read_u16(buf + vt_pos);
+         std::uint16_t table_size = read_u16(buf + vt_pos + 2);
+         //  vtsize must cover its own header (4 bytes minimum).
+         if (vtsize < 4) return false;
+         if (vt_pos + vtsize > size) return false;
+         (void)table_size;
+
+         //  Walk fields in PSIO_REFLECT order. Each field's voffset
+         //  is 4 + 2*idx; if the vtable doesn't reach that voffset
+         //  the field is absent and we skip.
+         using R       = ::psio::reflect<T>;
+         bool ok       = true;
+         [&]<std::size_t... Is>(std::index_sequence<Is...>)
+         {
+            (((ok)
+                 ? ([&]
+                    {
+                       using V = typename R::template member_type<Is>;
+                       const std::uint16_t voff =
+                          static_cast<std::uint16_t>(4 + 2 * Is);
+                       if (voff + 2 > vtsize) return;
+                       std::uint16_t fo =
+                          read_u16(buf + vt_pos + voff);
+                       if (fo == 0) return;  //  not present
+                       //  Field cell lives at pos + fo.
+                       std::uint64_t cell_pos =
+                          static_cast<std::uint64_t>(pos) + fo;
+                       if (cell_pos > size) { ok = false; return; }
+
+                       if constexpr (std::is_same_v<V, bool>)
+                       {
+                          if (size - cell_pos < 1) { ok = false; return; }
+                          //  Single-byte bool — value 0 or 1, but
+                          //  flatbuf treats nonzero as true so we
+                          //  don't strict-check it here.
+                       }
+                       else if constexpr (std::is_arithmetic_v<V>)
+                       {
+                          if (size - cell_pos < sizeof(V))
+                          { ok = false; return; }
+                       }
+                       else if constexpr (std::is_same_v<V, std::string>)
+                       {
+                          if (size - cell_pos < 4)
+                          { ok = false; return; }
+                          std::uint32_t fwd = read_u32(buf + cell_pos);
+                          if (fwd > size - cell_pos)
+                          { ok = false; return; }
+                          std::uint32_t abs =
+                             static_cast<std::uint32_t>(cell_pos) + fwd;
+                          if (!validate_string(buf, size, abs))
+                          { ok = false; return; }
+                       }
+                       else if constexpr (is_optional<V>::value)
+                       {
+                          using Inner = typename V::value_type;
+                          if constexpr (std::is_same_v<Inner, bool> ||
+                                        std::is_arithmetic_v<Inner>)
+                          {
+                             constexpr std::size_t sz =
+                                std::is_same_v<Inner, bool>
+                                   ? 1
+                                   : sizeof(Inner);
+                             if (size - cell_pos < sz)
+                             { ok = false; return; }
+                          }
+                          else if constexpr (std::is_same_v<
+                                                Inner, std::string>)
+                          {
+                             if (size - cell_pos < 4)
+                             { ok = false; return; }
+                             std::uint32_t fwd =
+                                read_u32(buf + cell_pos);
+                             if (fwd > size - cell_pos)
+                             { ok = false; return; }
+                             std::uint32_t abs =
+                                static_cast<std::uint32_t>(cell_pos) +
+                                fwd;
+                             if (!validate_string(buf, size, abs))
+                             { ok = false; return; }
+                          }
+                       }
+                       else if constexpr (is_vector<V>::value)
+                       {
+                          using E = typename V::value_type;
+                          if (size - cell_pos < 4)
+                          { ok = false; return; }
+                          std::uint32_t fwd = read_u32(buf + cell_pos);
+                          if (fwd > size - cell_pos)
+                          { ok = false; return; }
+                          std::uint32_t abs =
+                             static_cast<std::uint32_t>(cell_pos) + fwd;
+                          if (!validate_vector<E>(buf, size, abs,
+                                                    depth + 1))
+                          { ok = false; return; }
+                       }
+                       else if constexpr (is_table<V>::value)
+                       {
+                          if (size - cell_pos < 4)
+                          { ok = false; return; }
+                          std::uint32_t fwd = read_u32(buf + cell_pos);
+                          if (fwd > size - cell_pos)
+                          { ok = false; return; }
+                          std::uint32_t abs =
+                             static_cast<std::uint32_t>(cell_pos) + fwd;
+                          if (!validate_table<V>(buf, size, abs,
+                                                   depth + 1))
+                          { ok = false; return; }
+                       }
+                    }())
+                 : (void)0),
+             ...);
+         }(std::make_index_sequence<R::member_count>{});
+         return ok;
+      }
+
    }  // namespace detail::flatbuf_impl
 
    struct flatbuf : format_tag_base<flatbuf>
@@ -934,6 +1154,24 @@ namespace psio {
                                                          "flatbuf");
              !st.ok())
             return st;
+         //  Real structural walker — follows the root offset, then
+         //  walks the root table by vtable + per-field
+         //  offset-resolution. Mirrors the discipline the canonical
+         //  libflatbuffers Verifier provides for the same-named
+         //  type. Threads kMaxValidationDepth through every nested
+         //  table / vector level.
+         const auto* buf =
+            reinterpret_cast<const std::uint8_t*>(bytes.data());
+         std::uint32_t root_off =
+            detail::flatbuf_impl::read_u32(buf);
+         if (root_off > bytes.size())
+            return codec_fail("flatbuf: root offset past buffer",
+                              0, "flatbuf");
+         if (!detail::flatbuf_impl::validate_table<T>(
+                buf, bytes.size(), root_off, 0))
+            return codec_fail("flatbuf: structural validation failed",
+                              static_cast<std::uint32_t>(root_off),
+                              "flatbuf");
          return codec_ok();
       }
 
