@@ -452,7 +452,23 @@ namespace psio {
                    {
                       using F = typename R::template member_type<Is>;
                       const auto& fref = v.*(R::template member_pointer<Is>);
-                      if constexpr (is_fixed_v<F>)
+                      using eff =
+                         typename ::psio::effective_annotations_for<
+                            T, F,
+                            R::template member_pointer<Is>>::value_t;
+                      constexpr bool override_v =
+                         ::psio::has_as_override_v<eff>;
+                      if constexpr (override_v)
+                      {
+                         // Member-level `as<Tag>` forces the field through
+                         // the named adapter — emit a W-byte offset slot
+                         // plus the adapter's payload.
+                         using Tag = ::psio::adapter_tag_of_t<eff>;
+                         using Proj = ::psio::adapter<
+                            std::remove_cvref_t<F>, Tag>;
+                         total += W + Proj::packsize(fref);
+                      }
+                      else if constexpr (is_fixed_v<F>)
                          total += fixed_size_of<F>();
                       else
                          total += W + size_of_v<W>(fref);
@@ -789,11 +805,24 @@ namespace psio {
       // Avoids the temp + move-assign overhead for these field types
       // when called from the Record walker. Falls back to
       // decode_value for other types.
+      //
+      // Adapter dispatch must come first — see frac_impl::decode_into for
+      // why. The record walker has already sliced [pos, end) to exactly
+      // the adapter's payload, so we hand it straight to the adapter.
       template <std::size_t W, typename T>
       void decode_into(std::span<const char> src, std::size_t pos,
                        std::size_t end, T& out)
       {
-         if constexpr (std::is_same_v<T, std::string>)
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                          ::psio::pssz, T>)
+         {
+            using Proj = ::psio::adapter<std::remove_cvref_t<T>,
+                                             ::psio::binary_category>;
+            out = Proj::decode(
+               std::span<const char>(src.data() + pos, end - pos));
+            return;
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
          {
             // pSSZ string: raw bytes from pos to end (no length).
             out.assign(src.data() + pos, src.data() + end);

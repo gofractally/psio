@@ -471,10 +471,18 @@ struct hash32_hex
    static Hash32 decode(std::span<const char> bytes) noexcept
    {
       Hash32 h{};
+      // Copy into a NUL-terminated stack buffer first — sscanf's
+      // implementation calls strlen on the input, which would walk
+      // past the end of `bytes` when the span comes from a record
+      // walker that hands us an exact-size slice (no NUL beyond it).
+      char buf[3] = {0, 0, 0};
       for (std::size_t i = 0; i < 4 && i * 2 + 1 < bytes.size(); ++i)
       {
+         buf[0] = bytes[i * 2];
+         buf[1] = bytes[i * 2 + 1];
+         buf[2] = '\0';
          unsigned v = 0;
-         std::sscanf(bytes.data() + i * 2, "%2x", &v);
+         std::sscanf(buf, "%2x", &v);
          h.bytes[i] = static_cast<std::uint8_t>(v);
       }
       return h;

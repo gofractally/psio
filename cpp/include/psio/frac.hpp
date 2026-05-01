@@ -305,11 +305,28 @@ namespace psio {
       // bulk-memcpy std::vector, and nested Records, write directly
       // into `out`; for everything else fall back to decode_value +
       // move-assign.
+      //
+      // Adapter dispatch must come first — a type with a binary-category
+      // adapter (e.g. PSIO_ADAPTER(Blob, binary_category, …)) presents to
+      // frac as opaque runtime-sized bytes. The outer record walker has
+      // already framed the payload with a [W-byte length] slot, so the
+      // span [pos, end) is exactly the adapter's bytes. Without this
+      // branch frac would walk Blob's reflected fields against bin-encoded
+      // bytes, mis-reading lengths and walking off the heap (BUS / SEGV).
       template <std::size_t W, typename T>
       void decode_into(std::span<const char> src, std::size_t pos,
                        std::size_t end, T& out)
       {
-         if constexpr (std::is_same_v<T, std::string>)
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                          ::psio::frac_<W>, T>)
+         {
+            using Proj = ::psio::adapter<std::remove_cvref_t<T>,
+                                             ::psio::binary_category>;
+            out = Proj::decode(
+               std::span<const char>(src.data() + pos, end - pos));
+            return;
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
          {
             const std::uint32_t n = read_word<W>(src, pos);
             out.assign(src.data() + pos + W,
@@ -1363,6 +1380,23 @@ namespace psio {
 
             using R = ::psio::reflect<T>;
 
+            // Member-level `as<Tag>` override forces a field to be
+            // serialized via the named adapter regardless of whether the
+            // underlying type would otherwise be fixed. Size accounting
+            // must mirror the encode walker: an overridden field gets a
+            // W-byte slot in the fixed_region and the adapter's payload
+            // contributes to heap.
+            constexpr auto field_has_override = []<std::size_t I>(
+                                                   std::integral_constant<
+                                                      std::size_t, I>) constexpr
+            {
+               using F = typename R::template member_type<I>;
+               using eff =
+                  typename ::psio::effective_annotations_for<
+                     T, F, R::template member_pointer<I>>::value_t;
+               return ::psio::has_as_override_v<eff>;
+            };
+
             // Phase 1 — fixed_region size (compile-time; fully folded
             // when every field is fixed).
             constexpr std::size_t fixed_region =
@@ -1371,7 +1405,10 @@ namespace psio {
                   (
                      ([&]<std::size_t I>() {
                         using F = typename R::template member_type<I>;
-                        if constexpr (is_fixed_v<F>)
+                        constexpr bool override_v =
+                           field_has_override(
+                              std::integral_constant<std::size_t, I>{});
+                        if constexpr (!override_v && is_fixed_v<F>)
                            total += fixed_size_of<F>();
                         else
                            total += W;  // offset slot
@@ -1387,10 +1424,27 @@ namespace psio {
                   ([&]
                    {
                       using F = typename R::template member_type<Is>;
-                      if constexpr (!is_fixed_v<F>)
+                      constexpr bool override_v =
+                         field_has_override(
+                            std::integral_constant<std::size_t, Is>{});
+                      const auto& fref =
+                         v.*(R::template member_pointer<Is>);
+                      if constexpr (override_v)
                       {
-                         const auto& fref =
-                            v.*(R::template member_pointer<Is>);
+                         // Overridden field: heap payload is the adapter's
+                         // packsize. Adapters always emit a payload
+                         // (no notion of empty / None).
+                         using eff = typename ::psio::
+                            effective_annotations_for<
+                               T, F,
+                               R::template member_pointer<Is>>::value_t;
+                         using Tag  = ::psio::adapter_tag_of_t<eff>;
+                         using Proj = ::psio::adapter<
+                            std::remove_cvref_t<F>, Tag>;
+                         heap += Proj::packsize(fref);
+                      }
+                      else if constexpr (!is_fixed_v<F>)
+                      {
                          if constexpr (is_std_optional_v<F>)
                          {
                             if (fref.has_value())

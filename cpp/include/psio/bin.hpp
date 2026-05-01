@@ -343,6 +343,12 @@ namespace psio {
       // no varuint content_size prefix. The caller adds the prefix for
       // non-DWNC records. Shared between variable_contrib<Record> and
       // the encode path so the size walk happens once.
+      //
+      // Member-level `as<Tag>` overrides force a field through the named
+      // adapter; the wire is then `varuint32 length + adapter bytes`
+      // regardless of what the underlying type would otherwise emit.
+      // Mirror the encode walker exactly so size_of-then-encode produces
+      // a buffer of the right size.
       template <typename T>
       std::size_t record_body_size(const T& v)
       {
@@ -353,10 +359,28 @@ namespace psio {
                ([&]
                 {
                    using F = typename R::template member_type<Is>;
-                   body += fixed_contrib<F>();
-                   if constexpr (!fully_fixed<F>())
-                      body += variable_contrib(
+                   using eff =
+                      typename ::psio::effective_annotations_for<
+                         T, F,
+                         R::template member_pointer<Is>>::value_t;
+                   if constexpr (::psio::has_as_override_v<eff>)
+                   {
+                      using Tag = ::psio::adapter_tag_of_t<eff>;
+                      using Proj = ::psio::adapter<
+                         std::remove_cvref_t<F>, Tag>;
+                      const auto n = Proj::packsize(
                          v.*(R::template member_pointer<Is>));
+                      body += varuint32_size(
+                                 static_cast<std::uint32_t>(n)) +
+                              n;
+                   }
+                   else
+                   {
+                      body += fixed_contrib<F>();
+                      if constexpr (!fully_fixed<F>())
+                         body += variable_contrib(
+                            v.*(R::template member_pointer<Is>));
+                   }
                 }()),
                ...);
          }(std::make_index_sequence<R::member_count>{});
@@ -400,11 +424,31 @@ namespace psio {
                ([&]
                 {
                    using F = typename R::template member_type<Is>;
-                   body += fixed_contrib<F>();
-                   if constexpr (!fully_fixed<F>())
-                      body += variable_contrib_collect(
-                         v.*(R::template member_pointer<Is>), sizes,
-                         idx);
+                   using eff =
+                      typename ::psio::effective_annotations_for<
+                         T, F,
+                         R::template member_pointer<Is>>::value_t;
+                   if constexpr (::psio::has_as_override_v<eff>)
+                   {
+                      // Member-level adapter: opaque [varuint length +
+                      // bytes]. No nested record slots in sizes[].
+                      using Tag = ::psio::adapter_tag_of_t<eff>;
+                      using Proj = ::psio::adapter<
+                         std::remove_cvref_t<F>, Tag>;
+                      const auto n = Proj::packsize(
+                         v.*(R::template member_pointer<Is>));
+                      body += varuint32_size(
+                                 static_cast<std::uint32_t>(n)) +
+                              n;
+                   }
+                   else
+                   {
+                      body += fixed_contrib<F>();
+                      if constexpr (!fully_fixed<F>())
+                         body += variable_contrib_collect(
+                            v.*(R::template member_pointer<Is>), sizes,
+                            idx);
+                   }
                 }()),
                ...);
          }(std::make_index_sequence<R::member_count>{});
@@ -566,7 +610,15 @@ namespace psio {
                   ([&]
                    {
                       using F = typename R::template member_type<Is>;
-                      if constexpr (!fully_fixed<F>())
+                      using eff =
+                         typename ::psio::effective_annotations_for<
+                            T, F,
+                            R::template member_pointer<Is>>::value_t;
+                      // Member-level overrides emit opaque adapter bytes
+                      // — no nested record slots required for them.
+                      if constexpr (::psio::has_as_override_v<eff>)
+                         return;
+                      else if constexpr (!fully_fixed<F>())
                          k += bin_count_records(
                             v.*(R::template member_pointer<Is>));
                    }()),
