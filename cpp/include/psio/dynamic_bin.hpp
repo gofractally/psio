@@ -2,10 +2,18 @@
 //
 // psio/dynamic_bin.hpp — schema-driven bin encoder/decoder over
 // dynamic_value.
+//
+// Wire format mirrors psio/bin.hpp (the static bin codec):
+//   - Length / count / index fields use LEB128 varuint32, never u32.
+//   - Non-DWNC reflected records are wrapped in `varuint32(body_size)`
+//     before the field bytes — the schema doesn't carry the DWNC flag,
+//     so dynamic transcode treats every record as non-DWNC (the common
+//     case for transcode-targeted shapes).
 
 #include <psio/bin.hpp>
 #include <psio/dynamic_value.hpp>
 #include <psio/schema.hpp>
+#include <psio/varint/leb128.hpp>
 
 #include <cstdint>
 #include <cstring>
@@ -24,16 +32,23 @@ namespace psio {
          s.insert(s.end(), cp, cp + n);
       }
 
-      inline void append_u32(sink_t& s, std::uint32_t v)
+      inline void append_varuint32(sink_t& s, std::uint32_t v)
       {
-         append_bytes(s, &v, 4);
+         std::uint8_t buf[::psio::varint::leb128::max_bytes_u32];
+         const auto   n = ::psio::varint::leb128::encode_u32(buf, v);
+         append_bytes(s, buf, n);
       }
 
-      inline std::uint32_t read_u32(std::span<const char> src, std::size_t pos)
+      inline std::uint32_t read_varuint32(std::span<const char> src,
+                                          std::size_t&          pos) noexcept
       {
-         std::uint32_t v{};
-         std::memcpy(&v, src.data() + pos, 4);
-         return v;
+         const auto avail = src.size() - pos;
+         const auto r     = ::psio::varint::leb128::decode_u32(
+            reinterpret_cast<const std::uint8_t*>(src.data() + pos), avail);
+         if (!r.ok)
+            return 0;
+         pos += r.len;
+         return r.value;
       }
 
       inline void encode_dv(const schema& sc, const dynamic_value& dv,
@@ -70,7 +85,7 @@ namespace psio {
             case primitive_kind::Bytes:
             {
                const auto& str = dv.as<std::string>();
-               append_u32(s, static_cast<std::uint32_t>(str.size()));
+               append_varuint32(s, static_cast<std::uint32_t>(str.size()));
                append_bytes(s, str.data(), str.size());
                break;
             }
@@ -86,10 +101,10 @@ namespace psio {
          }
          else if (sc.is_projected())
          {
-            // Bin frames projected payloads with a u32 length prefix
+            // Bin frames adapter payloads with a varuint length prefix
             // (matches bin's own variable-payload convention).
             const auto& str = dv.as<std::string>();
-            append_u32(s, static_cast<std::uint32_t>(str.size()));
+            append_varuint32(s, static_cast<std::uint32_t>(str.size()));
             append_bytes(s, str.data(), str.size());
          }
          else if (sc.is_sequence())
@@ -97,7 +112,8 @@ namespace psio {
             const auto& seq  = sc.as_sequence();
             const auto& dseq = dv.as<dynamic_sequence>();
             if (!seq.fixed_count.has_value())
-               append_u32(s, static_cast<std::uint32_t>(dseq.elements.size()));
+               append_varuint32(
+                  s, static_cast<std::uint32_t>(dseq.elements.size()));
             for (const auto& el : dseq.elements)
                encode_dv(*seq.element, el, s);
          }
@@ -110,6 +126,9 @@ namespace psio {
          }
          else if (sc.is_record())
          {
+            // Non-DWNC record — wrap field bytes in a varuint
+            // content_size prefix. Encode body to a temp first so we
+            // know the size before emitting the prefix.
             const auto& rec = dv.as<dynamic_record>();
             auto find = [&](std::string_view n) -> const dynamic_value* {
                for (const auto& kv : rec.fields)
@@ -117,12 +136,15 @@ namespace psio {
                      return &kv.second;
                return nullptr;
             };
+            sink_t body;
             for (const auto& f : sc.as_record().fields)
             {
                const auto* d = find(f.name);
                if (d)
-                  encode_dv(*f.type, *d, s);
+                  encode_dv(*f.type, *d, body);
             }
+            append_varuint32(s, static_cast<std::uint32_t>(body.size()));
+            append_bytes(s, body.data(), body.size());
          }
       }
 
@@ -161,8 +183,7 @@ namespace psio {
             case primitive_kind::String:
             case primitive_kind::Bytes:
             {
-               const auto n = read_u32(src, pos);
-               pos += 4;
+               const auto n = read_varuint32(src, pos);
                std::string s(src.data() + pos, src.data() + pos + n);
                pos += n;
                return dynamic_value{std::move(s)};
@@ -179,8 +200,7 @@ namespace psio {
             return decode_prim(sc.as_primitive(), src, pos);
          if (sc.is_projected())
          {
-            const auto n = read_u32(src, pos);
-            pos += 4;
+            const auto n = read_varuint32(src, pos);
             std::string s(src.data() + pos, src.data() + pos + n);
             pos += n;
             return dynamic_value{std::move(s)};
@@ -196,8 +216,7 @@ namespace psio {
             }
             else
             {
-               n = read_u32(src, pos);
-               pos += 4;
+               n = read_varuint32(src, pos);
             }
             for (std::size_t i = 0; i < n; ++i)
                out.elements.push_back(decode_dv(*seq.element, src, pos));
@@ -212,7 +231,9 @@ namespace psio {
                   decode_dv(*sc.as_optional().value_type, src, pos));
             return dynamic_value{std::move(o)};
          }
-         // record
+         // record — non-DWNC by default in dynamic mode: skip the varuint
+         // content_size prefix, then walk the fields.
+         (void)read_varuint32(src, pos);
          dynamic_record rec;
          for (const auto& f : sc.as_record().fields)
             rec.fields.push_back(

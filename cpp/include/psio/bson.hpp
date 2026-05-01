@@ -20,7 +20,10 @@
 // Top-level encoded type must be Reflected (BSON's spec only defines
 // documents at the top level).
 
+#include <psio/adapter.hpp>   // binary_category
+#include <psio/annotate.hpp>  // check_max_dynamic_cap
 #include <psio/cpo.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/reflect.hpp>
@@ -528,6 +531,224 @@ namespace psio {
          }
       }
 
+      // ── Structural validator ─────────────────────────────────────────
+      //
+      // BSON is well-defined with explicit length prefixes throughout:
+      //
+      //   document = int32 totalSize | element* | 0x00
+      //   element  = u8 type | cstring fieldName | value
+      //
+      // The walker confirms every span declared by a length prefix
+      // stays inside the buffer, every cstring is null-terminated
+      // before the document end, every element type code is one we
+      // recognise (or at least one of the spec's well-known codes),
+      // and recursion into embedded documents / arrays threads
+      // `kMaxValidationDepth`.
+
+      inline codec_status bson_validate_document(
+         std::span<const char> bytes, std::size_t& pos,
+         std::size_t depth) noexcept;
+
+      inline codec_status bson_validate_cstring(
+         std::span<const char> bytes, std::size_t& pos) noexcept
+      {
+         //  Walk until null. Spec says the cstring is "zero or more
+         //  bytes followed by 0x00, none of which are 0x00 themselves".
+         while (pos < bytes.size())
+         {
+            if (bytes[pos] == 0)
+            {
+               ++pos;
+               return codec_ok();
+            }
+            ++pos;
+         }
+         return codec_fail("bson: unterminated cstring",
+                           static_cast<std::uint32_t>(pos), "bson");
+      }
+
+      inline codec_status bson_validate_element_value(
+         std::uint8_t code, std::span<const char> bytes,
+         std::size_t& pos, std::size_t depth) noexcept
+      {
+         const std::size_t avail = bytes.size() - pos;
+         switch (code)
+         {
+            case 0x01:  // double
+               if (avail < 8)
+                  return codec_fail("bson: truncated double",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               pos += 8;
+               return codec_ok();
+            case 0x02:  // utf-8 string
+            {
+               if (avail < 4)
+                  return codec_fail("bson: truncated string length",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               std::int32_t len;
+               std::memcpy(&len, bytes.data() + pos, 4);
+               pos += 4;
+               if (len <= 0 ||
+                   static_cast<std::size_t>(len) > bytes.size() - pos)
+                  return codec_fail("bson: string body OOB",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               //  String body is `len` bytes including the trailing
+               //  0x00, which must actually be 0x00.
+               if (bytes[pos + static_cast<std::size_t>(len) - 1] != 0)
+                  return codec_fail(
+                     "bson: string missing terminator",
+                     static_cast<std::uint32_t>(pos), "bson");
+               pos += static_cast<std::size_t>(len);
+               return codec_ok();
+            }
+            case 0x03:  // embedded document
+            case 0x04:  // array
+               return bson_validate_document(bytes, pos, depth + 1);
+            case 0x05:  // binary
+            {
+               if (avail < 5)
+                  return codec_fail("bson: truncated binary header",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               std::int32_t len;
+               std::memcpy(&len, bytes.data() + pos, 4);
+               pos += 4;
+               //  Subtype byte then `len` bytes payload.
+               if (len < 0 ||
+                   static_cast<std::size_t>(len) > bytes.size() - pos - 1)
+                  return codec_fail("bson: binary body OOB",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               pos += 1 + static_cast<std::size_t>(len);
+               return codec_ok();
+            }
+            case 0x06:  // undefined (deprecated; zero payload)
+            case 0x0A:  // null
+            case 0x7F:  // max key
+            case 0xFF:  // min key
+               return codec_ok();
+            case 0x07:  // ObjectID — 12 bytes
+               if (avail < 12)
+                  return codec_fail("bson: truncated ObjectID",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               pos += 12;
+               return codec_ok();
+            case 0x08:  // bool
+               if (avail < 1)
+                  return codec_fail("bson: truncated bool",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               if (static_cast<std::uint8_t>(bytes[pos]) > 1)
+                  return codec_fail("bson: bool not 0/1",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               pos += 1;
+               return codec_ok();
+            case 0x09:  // datetime — int64 milliseconds
+            case 0x11:  // timestamp — u64
+            case 0x12:  // int64
+               if (avail < 8)
+                  return codec_fail("bson: truncated 8-byte value",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               pos += 8;
+               return codec_ok();
+            case 0x10:  // int32
+               if (avail < 4)
+                  return codec_fail("bson: truncated int32",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               pos += 4;
+               return codec_ok();
+            case 0x0B:  // regex — cstring + cstring
+               if (auto st = bson_validate_cstring(bytes, pos); !st.ok())
+                  return st;
+               return bson_validate_cstring(bytes, pos);
+            case 0x0D:  // JS code — same shape as string
+            case 0x0E:  // symbol (deprecated) — same shape as string
+            {
+               if (avail < 4)
+                  return codec_fail("bson: truncated code/symbol length",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               std::int32_t len;
+               std::memcpy(&len, bytes.data() + pos, 4);
+               pos += 4;
+               if (len <= 0 ||
+                   static_cast<std::size_t>(len) > bytes.size() - pos)
+                  return codec_fail("bson: code/symbol body OOB",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bson");
+               if (bytes[pos + static_cast<std::size_t>(len) - 1] != 0)
+                  return codec_fail(
+                     "bson: code/symbol missing terminator",
+                     static_cast<std::uint32_t>(pos), "bson");
+               pos += static_cast<std::size_t>(len);
+               return codec_ok();
+            }
+            default:
+               return codec_fail("bson: unknown element type code",
+                                 static_cast<std::uint32_t>(pos), "bson");
+         }
+      }
+
+      inline codec_status bson_validate_document(
+         std::span<const char> bytes, std::size_t& pos,
+         std::size_t depth) noexcept
+      {
+         if (depth > kMaxValidationDepth)
+            return codec_fail("bson: max depth exceeded",
+                              static_cast<std::uint32_t>(pos), "bson");
+         const std::size_t doc_start = pos;
+         if (bytes.size() - pos < 5)
+            return codec_fail("bson: document too small",
+                              static_cast<std::uint32_t>(pos), "bson");
+         std::int32_t total;
+         std::memcpy(&total, bytes.data() + pos, 4);
+         if (total < 5 ||
+             static_cast<std::size_t>(total) > bytes.size() - pos)
+            return codec_fail("bson: document length OOB",
+                              static_cast<std::uint32_t>(pos), "bson");
+         const std::size_t doc_end =
+            doc_start + static_cast<std::size_t>(total);
+         pos += 4;
+         while (pos < doc_end - 1)
+         {
+            const std::uint8_t code =
+               static_cast<std::uint8_t>(bytes[pos]);
+            ++pos;
+            if (code == 0)
+            {
+               //  A 0x00 inside the body before doc_end-1 is a
+               //  premature terminator — caught when we re-check
+               //  pos == doc_end below.
+               break;
+            }
+            //  Field name (cstring).
+            if (auto st = bson_validate_cstring(bytes, pos); !st.ok())
+               return st;
+            //  Value.
+            if (auto st = bson_validate_element_value(code, bytes, pos,
+                                                       depth);
+                !st.ok())
+               return st;
+         }
+         //  Final byte must be the document terminator 0x00 at
+         //  doc_end-1, and pos must land exactly there.
+         if (pos != doc_end - 1)
+            return codec_fail("bson: element list overran document",
+                              static_cast<std::uint32_t>(pos), "bson");
+         if (bytes[pos] != 0)
+            return codec_fail("bson: document missing terminator",
+                              static_cast<std::uint32_t>(pos), "bson");
+         pos = doc_end;
+         return codec_ok();
+      }
+
    }  // namespace detail::bson_impl
 
    struct bson : format_tag_base<bson>
@@ -587,12 +808,19 @@ namespace psio {
          if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "bson");
              !st.ok())
             return st;
-         std::uint32_t total;
-         std::memcpy(&total, bytes.data(), 4);
-         if (total != bytes.size())
-            return codec_fail("bson: total mismatch", 0, "bson");
-         if (bytes.back() != 0)
-            return codec_fail("bson: missing terminator", 0, "bson");
+         //  Real structural walker — confirms the spec-mandated
+         //  document shape: int32 total | element* | 0x00, with
+         //  per-type per-field bounds checks and depth-cap recursion
+         //  through embedded docs / arrays.
+         std::size_t pos = 0;
+         if (auto st = detail::bson_impl::bson_validate_document(
+                bytes, pos, 0);
+             !st.ok())
+            return st;
+         //  Top-level document must consume exactly the buffer.
+         if (pos != bytes.size())
+            return codec_fail("bson: trailing bytes after document",
+                              static_cast<std::uint32_t>(pos), "bson");
          return codec_ok();
       }
 

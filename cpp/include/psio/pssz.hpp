@@ -28,6 +28,8 @@
 // runtime size assertions against `max_encoded_size<T>()`.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/unaligned_iter.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -450,7 +452,23 @@ namespace psio {
                    {
                       using F = typename R::template member_type<Is>;
                       const auto& fref = v.*(R::template member_pointer<Is>);
-                      if constexpr (is_fixed_v<F>)
+                      using eff =
+                         typename ::psio::effective_annotations_for<
+                            T, F,
+                            R::template member_pointer<Is>>::value_t;
+                      constexpr bool override_v =
+                         ::psio::has_as_override_v<eff>;
+                      if constexpr (override_v)
+                      {
+                         // Member-level `as<Tag>` forces the field through
+                         // the named adapter — emit a W-byte offset slot
+                         // plus the adapter's payload.
+                         using Tag = ::psio::adapter_tag_of_t<eff>;
+                         using Proj = ::psio::adapter<
+                            std::remove_cvref_t<F>, Tag>;
+                         total += W + Proj::packsize(fref);
+                      }
+                      else if constexpr (is_fixed_v<F>)
                          total += fixed_size_of<F>();
                       else
                          total += W + size_of_v<W>(fref);
@@ -787,11 +805,24 @@ namespace psio {
       // Avoids the temp + move-assign overhead for these field types
       // when called from the Record walker. Falls back to
       // decode_value for other types.
+      //
+      // Adapter dispatch must come first — see frac_impl::decode_into for
+      // why. The record walker has already sliced [pos, end) to exactly
+      // the adapter's payload, so we hand it straight to the adapter.
       template <std::size_t W, typename T>
       void decode_into(std::span<const char> src, std::size_t pos,
                        std::size_t end, T& out)
       {
-         if constexpr (std::is_same_v<T, std::string>)
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                          ::psio::pssz, T>)
+         {
+            using Proj = ::psio::adapter<std::remove_cvref_t<T>,
+                                             ::psio::binary_category>;
+            out = Proj::decode(
+               std::span<const char>(src.data() + pos, end - pos));
+            return;
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
          {
             // pSSZ string: raw bytes from pos to end (no length).
             out.assign(src.data() + pos, src.data() + end);
@@ -806,10 +837,9 @@ namespace psio {
                is_fixed_v<E> && fixed_size_of<E>() == sizeof(E);
             if constexpr (is_arith || is_memcpy_record)
             {
+               // Alignment-safe — see detail/unaligned_iter.hpp.
                const std::size_t n = (end - pos) / sizeof(E);
-               const E*          first =
-                  reinterpret_cast<const E*>(src.data() + pos);
-               out.assign(first, first + n);
+               psio::detail::assign_from_wire(out, src.data() + pos, n);
             }
             else
             {
@@ -903,8 +933,8 @@ namespace psio {
                fixed_size_of<T>() == sizeof(T);
             if constexpr (is_arith || is_memcpy_record)
             {
-               const T* first = reinterpret_cast<const T*>(src.data() + pos);
-               out.assign(first, first + n);
+               // Alignment-safe — see detail/unaligned_iter.hpp.
+               psio::detail::assign_from_wire(out, src.data() + pos, n);
             }
             else if constexpr (Record<T>)
             {
@@ -1222,12 +1252,14 @@ namespace psio {
 
       template <std::size_t W, typename T>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
-                                  std::size_t end) noexcept;
+                                  std::size_t end,
+                                  std::size_t depth = 0) noexcept;
 
       template <std::size_t W, typename E>
       codec_status validate_vector_payload(std::span<const char> src,
                                            std::size_t            pos,
-                                           std::size_t            end) noexcept
+                                           std::size_t            end,
+                                           std::size_t            depth) noexcept
       {
          if (pos > end || end > src.size())
             return codec_fail("pssz: vector span out of bounds",
@@ -1253,7 +1285,8 @@ namespace psio {
                for (std::size_t i = 0; i < n; ++i)
                {
                   auto st = validate_value<W, E>(src, pos + i * esz,
-                                                  pos + (i + 1) * esz);
+                                                  pos + (i + 1) * esz,
+                                                  depth + 1);
                   if (!st.ok()) return st;
                }
             }
@@ -1291,7 +1324,8 @@ namespace psio {
                std::uint32_t stop  = (i + 1 < n)
                                         ? read_offset<W>(src, pos + (i + 1) * W)
                                         : span;
-               auto st = validate_value<W, E>(src, pos + off_i, pos + stop);
+               auto st = validate_value<W, E>(src, pos + off_i, pos + stop,
+                                               depth + 1);
                if (!st.ok()) return st;
             }
             return codec_ok();
@@ -1301,7 +1335,8 @@ namespace psio {
       template <std::size_t W, typename E, std::size_t N>
       codec_status validate_array_payload(std::span<const char> src,
                                           std::size_t            pos,
-                                          std::size_t            end) noexcept
+                                          std::size_t            end,
+                                          std::size_t            depth) noexcept
       {
          if constexpr (is_fixed_v<E>)
          {
@@ -1317,7 +1352,8 @@ namespace psio {
                for (std::size_t i = 0; i < N; ++i)
                {
                   auto st = validate_value<W, E>(src, pos + i * esz,
-                                                  pos + (i + 1) * esz);
+                                                  pos + (i + 1) * esz,
+                                                  depth + 1);
                   if (!st.ok()) return st;
                }
             }
@@ -1352,7 +1388,8 @@ namespace psio {
                std::uint32_t stop  = (i + 1 < N)
                                         ? read_offset<W>(src, pos + (i + 1) * W)
                                         : span;
-               auto st = validate_value<W, E>(src, pos + off_i, pos + stop);
+               auto st = validate_value<W, E>(src, pos + off_i, pos + stop,
+                                               depth + 1);
                if (!st.ok()) return st;
             }
             return codec_ok();
@@ -1389,7 +1426,8 @@ namespace psio {
       codec_status validate_record(std::span<const char> src,
                                    std::size_t            pos,
                                    std::size_t            end,
-                                   std::index_sequence<Is...>) noexcept
+                                   std::index_sequence<Is...>,
+                                   std::size_t            depth) noexcept
       {
          using R = ::psio::reflect<T>;
          constexpr std::size_t NF = R::member_count;
@@ -1494,7 +1532,8 @@ namespace psio {
                    if constexpr (is_fixed_v<F>) return;
                    const std::size_t beg = cstart + offsets[Is];
                    const std::size_t fin = cstart + var_end[Is];
-                   auto st = validate_value<W, F>(src, beg, fin);
+                   auto st = validate_value<W, F>(src, beg, fin,
+                                                   depth + 1);
                    if (!st.ok()) err = std::move(st);
                 }()),
                ...);
@@ -1888,8 +1927,12 @@ namespace psio {
 
       template <std::size_t W, typename T>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
-                                  std::size_t end) noexcept
+                                  std::size_t end,
+                                  std::size_t depth) noexcept
       {
+         if (depth > kMaxValidationDepth)
+            return codec_fail("pssz: max depth exceeded",
+                              static_cast<std::uint32_t>(pos), "pssz");
          if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::pssz, T>)
          {
@@ -1914,7 +1957,8 @@ namespace psio {
                   for (std::size_t i = 0; i < N; ++i)
                   {
                      auto st = validate_value<W, E>(src, pos + i * esz,
-                                                     pos + (i + 1) * esz);
+                                                     pos + (i + 1) * esz,
+                                                     depth + 1);
                      if (!st.ok()) return st;
                   }
                }
@@ -1934,12 +1978,14 @@ namespace psio {
          {
             using E                 = typename T::value_type;
             constexpr std::size_t N = std::tuple_size<T>::value;
-            return validate_array_payload<W, E, N>(src, pos, end);
+            return validate_array_payload<W, E, N>(src, pos, end,
+                                                    depth + 1);
          }
          else if constexpr (is_std_vector_v<T>)
          {
             using E = typename T::value_type;
-            return validate_vector_payload<W, E>(src, pos, end);
+            return validate_vector_payload<W, E>(src, pos, end,
+                                                  depth + 1);
          }
          else if constexpr (is_std_optional_v<T>)
          {
@@ -1957,7 +2003,7 @@ namespace psio {
                if (span != fixed_size_of<V>())
                   return codec_fail("pssz: optional<fixed> span mismatch",
                                     static_cast<std::uint32_t>(pos), "pssz");
-               return validate_value<W, V>(src, pos, end);
+               return validate_value<W, V>(src, pos, end, depth + 1);
             }
             else
             {
@@ -1977,7 +2023,7 @@ namespace psio {
                if (sel != 1)
                   return codec_fail("pssz: optional selector not 0/1",
                                     static_cast<std::uint32_t>(pos), "pssz");
-               return validate_value<W, V>(src, pos + 1, end);
+               return validate_value<W, V>(src, pos + 1, end, depth + 1);
             }
          }
          else if constexpr (is_std_variant_v<T>)
@@ -1997,7 +2043,7 @@ namespace psio {
                     ? (err = validate_value<
                                 W,
                                 std::variant_alternative_t<Js, T>>(
-                          src, pos + 1, end),
+                          src, pos + 1, end, depth + 1),
                        true)
                     : false) ||
                 ...);
@@ -2008,7 +2054,8 @@ namespace psio {
          {
             using R = ::psio::reflect<T>;
             return validate_record<W, T>(
-               src, pos, end, std::make_index_sequence<R::member_count>{});
+               src, pos, end, std::make_index_sequence<R::member_count>{},
+               depth + 1);
          }
          else
          {

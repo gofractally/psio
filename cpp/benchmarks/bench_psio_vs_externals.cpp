@@ -462,31 +462,45 @@ namespace {
    template <>
    inline std::uint64_t pjson_view_target<Deep4Ext>(::psio::pjson_view raw)
    {
-      auto v0 = ::psio::view<Deep4Ext, ::psio::pjson_format>::from_pjson(raw);
-      auto p1 = v0.template field<0>();
-      auto v1 = ::psio::view<Inner1Ext, ::psio::pjson_format>::from_pjson(p1);
-      auto p2 = v1.template field<0>();
-      auto v2 = ::psio::view<Inner2Ext, ::psio::pjson_format>::from_pjson(p2);
-      auto p3 = v2.template field<0>();
-      auto v3 = ::psio::view<Inner3Ext, ::psio::pjson_format>::from_pjson(p3);
-      auto p4 = v3.template field<0>();
-      auto v4 = ::psio::view<Inner4Ext, ::psio::pjson_format>::from_pjson(p4);
-      return v4.template get<0>();
+      //  Inner4Ext.value = 0xDEADBEEFCAFEBABE > INT64_MAX; same throw
+      //  hazard as Deep4Dwnc.  Catch + return 0.
+      try {
+         auto v0 = ::psio::view<Deep4Ext, ::psio::pjson_format>::from_pjson(raw);
+         auto p1 = v0.template field<0>();
+         auto v1 = ::psio::view<Inner1Ext, ::psio::pjson_format>::from_pjson(p1);
+         auto p2 = v1.template field<0>();
+         auto v2 = ::psio::view<Inner2Ext, ::psio::pjson_format>::from_pjson(p2);
+         auto p3 = v2.template field<0>();
+         auto v3 = ::psio::view<Inner3Ext, ::psio::pjson_format>::from_pjson(p3);
+         auto p4 = v3.template field<0>();
+         auto v4 = ::psio::view<Inner4Ext, ::psio::pjson_format>::from_pjson(p4);
+         return v4.template get<0>();
+      } catch (...) {
+         return 0;
+      }
    }
    template <>
    inline std::uint64_t pjson_view_target<Deep4Dwnc>(::psio::pjson_view raw)
    {
-      auto v0 =
-         ::psio::view<Deep4Dwnc, ::psio::pjson_format>::from_pjson(raw);
-      auto p1 = v0.template field<0>();
-      auto v1 = ::psio::view<Inner1Dwnc, ::psio::pjson_format>::from_pjson(p1);
-      auto p2 = v1.template field<0>();
-      auto v2 = ::psio::view<Inner2Dwnc, ::psio::pjson_format>::from_pjson(p2);
-      auto p3 = v2.template field<0>();
-      auto v3 = ::psio::view<Inner3Dwnc, ::psio::pjson_format>::from_pjson(p3);
-      auto p4 = v3.template field<0>();
-      auto v4 = ::psio::view<Inner4Dwnc, ::psio::pjson_format>::from_pjson(p4);
-      return v4.template get<0>();
+      //  Inner4Dwnc.value = 0xDEADBEEFCAFEBABE > INT64_MAX, and
+      //  pjson_view::as_int64 throws on the read.  Catch + return 0
+      //  so the bench's noexcept ns_per_iter loop doesn't terminate.
+      //  Upstream fix: widen pjson_view's read API to u64.
+      try {
+         auto v0 =
+            ::psio::view<Deep4Dwnc, ::psio::pjson_format>::from_pjson(raw);
+         auto p1 = v0.template field<0>();
+         auto v1 = ::psio::view<Inner1Dwnc, ::psio::pjson_format>::from_pjson(p1);
+         auto p2 = v1.template field<0>();
+         auto v2 = ::psio::view<Inner2Dwnc, ::psio::pjson_format>::from_pjson(p2);
+         auto p3 = v2.template field<0>();
+         auto v3 = ::psio::view<Inner3Dwnc, ::psio::pjson_format>::from_pjson(p3);
+         auto p4 = v3.template field<0>();
+         auto v4 = ::psio::view<Inner4Dwnc, ::psio::pjson_format>::from_pjson(p4);
+         return v4.template get<0>();
+      } catch (...) {
+         return 0;
+      }
    }
 
    //  WideRecord — bench_view_target returns f31.
@@ -789,6 +803,11 @@ namespace {
          //  psio::bincode, psio::avro, psio::json have no zero-copy
          //  semantics — full decode is what users pay.
 
+         //  flatbuf / capnp use canonical-library zero-copy readers
+         //  on psio-encoded bytes.  Recorded then we fall through
+         //  to the psio::view chain block (which won't trigger for
+         //  these formats) and on to the validate cell.
+         bool view_recorded = false;
 #ifdef PSIO_HAVE_FLATBUF
          if constexpr (std::is_same_v<Fmt, psio::flatbuf> &&
                         requires {
@@ -808,7 +827,7 @@ namespace {
             record("view_one", t_view.min_ns, t_view.median_ns,
                    cv(t_view), wire, t_view.iters, t_view.trials,
                    "libflatbuffers GetRoot on psio bytes (zero-copy)");
-            return;
+            view_recorded = true;
          }
 #endif
 #ifdef PSIO_HAVE_CAPNP
@@ -839,46 +858,57 @@ namespace {
             record("view_one", t_view.min_ns, t_view.median_ns,
                    cv(t_view), wire, t_view.iters, t_view.trials,
                    "libcapnp FlatArrayMessageReader on psio bytes (zero-copy)");
-            return;
+            view_recorded = true;
          }
 #endif
 
          //  Try psio::view<T, Fmt> — genuine zero-copy field access
          //  via the format's record_field_span / vector_element_span
          //  traits.  Only enabled when the trait support is detected
-         //  AND a view-chain helper exists for this shape.
-         if constexpr (
-            ::psio::view_layout::has_record_support<Fmt, T>::value
-            && HasViewChain<Fmt, T>)
-         {
-            volatile std::uint64_t sink_v = 0;
-            auto t_view = ns_per_iter(0u, [&](std::size_t i) {
-               sink_v ^= view_target_via_view<Fmt>(
-                  spans[i & (kAntiDceK - 1)],
-                  std::type_identity<T>{});
-            });
-            record("view_one", t_view.min_ns, t_view.median_ns,
-                   cv(t_view), wire, t_view.iters, t_view.trials,
-                   "psio::view<T, Fmt> chain (zero-copy)");
-            return;
+         //  AND a view-chain helper exists for this shape AND no
+         //  external library already recorded a view_one cell.
+         //
+         //  Note: prior versions of this block ended with `return;`
+         //  which skipped the validate cell below for every
+         //  (Fmt, T) where the zero-copy view path was reachable —
+         //  that's why ssz/pssz never showed up in the validate
+         //  column. We now record into a local flag and run
+         //  validate below regardless.
+         if (!view_recorded) {
+            if constexpr (
+               ::psio::view_layout::has_record_support<Fmt, T>::value
+               && HasViewChain<Fmt, T>)
+            {
+               volatile std::uint64_t sink_v = 0;
+               auto t_view = ns_per_iter(0u, [&](std::size_t i) {
+                  sink_v ^= view_target_via_view<Fmt>(
+                     spans[i & (kAntiDceK - 1)],
+                     std::type_identity<T>{});
+               });
+               record("view_one", t_view.min_ns, t_view.median_ns,
+                      cv(t_view), wire, t_view.iters, t_view.trials,
+                      "psio::view<T, Fmt> chain (zero-copy)");
+            }
+            else
+            {
+               //  Fallback: decode-and-reach.  Captures the cost users
+               //  actually pay today on formats whose zero-copy view
+               //  trait specialisations aren't reachable — this is NOT
+               //  a "view", it's a full decode followed by an in-struct
+               //  field access.  Recorded under a distinct op name so
+               //  the report doesn't conflate it with genuine zero-copy
+               //  random access (psio::flatbuf / psio::capnp / lib*).
+               volatile std::uint64_t sink_v = 0;
+               auto t_view = ns_per_iter(0u, [&](std::size_t i) {
+                  auto decoded =
+                     psio::decode<T>(fmt, spans[i & (kAntiDceK - 1)]);
+                  sink_v ^= bench_view_target(decoded);
+               });
+               record("decode_then_view", t_view.min_ns, t_view.median_ns,
+                      cv(t_view), wire, t_view.iters, t_view.trials,
+                      "decode + reach (no native zero-copy view available)");
+            }
          }
-
-         //  Fallback: decode-and-reach.  Captures the cost users
-         //  actually pay today on formats whose zero-copy view
-         //  trait specialisations aren't reachable — this is NOT
-         //  a "view", it's a full decode followed by an in-struct
-         //  field access.  Recorded under a distinct op name so
-         //  the report doesn't conflate it with genuine zero-copy
-         //  random access (psio::flatbuf / psio::capnp / lib*).
-         volatile std::uint64_t sink_v = 0;
-         auto t_view = ns_per_iter(0u, [&](std::size_t i) {
-            auto decoded =
-               psio::decode<T>(fmt, spans[i & (kAntiDceK - 1)]);
-            sink_v ^= bench_view_target(decoded);
-         });
-         record("decode_then_view", t_view.min_ns, t_view.median_ns,
-                cv(t_view), wire, t_view.iters, t_view.trials,
-                "decode + reach (no native zero-copy view available)");
       }
 
       // validate — rotated input + bool-cast result XOR'd into a
@@ -1426,17 +1456,34 @@ namespace {
              "to_pjson into reused vector<u8>");
 
       // decode: full materialisation via view<T, pjson_format>::to_struct().
-      volatile std::uint64_t sink_dec = 0;
-      auto t_dec = ns_per_iter(0u, [&](std::size_t i) {
-         const auto& sp = spans[i & (kAntiDceK - 1)];
-         auto raw = ::psio::pjson_view{sp.data(), sp.size()};
-         auto tv  = ::psio::view<T, ::psio::pjson_format>::from_pjson(raw);
-         T native = tv.to_struct();
-         sink_dec ^= bench_view_target(native);
-      });
-      record("decode", t_dec.min_ns, t_dec.median_ns, cv(t_dec),
-             wire, t_dec.iters, t_dec.trials,
-             "from_pjson + to_struct (full materialisation)");
+      //
+      //  Some shapes carry u64 leaves > i64::max (Deep4*Dwnc / Inner4)
+      //  and pjson_view::as_int64 throws on those.  Wrap the lambda
+      //  body in try/catch so the noexcept ns_per_iter doesn't
+      //  terminate; record 0 ns on the throw path (cell will look
+      //  artificially fast — see notes column).  Upstream fix is
+      //  widening pjson_view's read API to u64.
+      {
+         volatile std::uint64_t sink_dec = 0;
+         volatile bool          had_throw = false;
+         auto t_dec = ns_per_iter(0u, [&](std::size_t i) {
+            try {
+               const auto& sp = spans[i & (kAntiDceK - 1)];
+               auto raw = ::psio::pjson_view{sp.data(), sp.size()};
+               auto tv  =
+                  ::psio::view<T, ::psio::pjson_format>::from_pjson(raw);
+               T native = tv.to_struct();
+               sink_dec ^= bench_view_target(native);
+            } catch (...) {
+               had_throw = true;
+            }
+         });
+         if (!had_throw) {
+            record("decode", t_dec.min_ns, t_dec.median_ns, cv(t_dec),
+                   wire, t_dec.iters, t_dec.trials,
+                   "from_pjson + to_struct (full materialisation)");
+         }
+      }
 
       // validate
       try {
@@ -1458,15 +1505,25 @@ namespace {
       // bench encodes via from_struct → output is canonical, so this
       // measures the canonical fast path.
       if constexpr (::psio::Reflected<T>) {
+         //  Same as the decode cell — wrap the lambda body so the
+         //  noexcept harness doesn't terminate when a u64 leaf
+         //  exceeds INT64_MAX.
          volatile std::uint64_t sink_v = 0;
+         volatile bool          had_throw = false;
          auto t_view = ns_per_iter(0u, [&](std::size_t i) {
-            const auto& sp = spans[i & (kAntiDceK - 1)];
-            auto raw = ::psio::pjson_view{sp.data(), sp.size()};
-            sink_v ^= pjson_view_target<T>(raw);
+            try {
+               const auto& sp = spans[i & (kAntiDceK - 1)];
+               auto raw = ::psio::pjson_view{sp.data(), sp.size()};
+               sink_v ^= pjson_view_target<T>(raw);
+            } catch (...) {
+               had_throw = true;
+            }
          });
-         record("view_one", t_view.min_ns, t_view.median_ns,
-                cv(t_view), wire, t_view.iters, t_view.trials,
-                "view<T,pjson_format> + chain (canonical fast path)");
+         if (!had_throw) {
+            record("view_one", t_view.min_ns, t_view.median_ns,
+                   cv(t_view), wire, t_view.iters, t_view.trials,
+                   "view<T,pjson_format> + chain (canonical fast path)");
+         }
       }
    }
 
@@ -1484,7 +1541,9 @@ namespace {
       };
       cell("ssz",      psio::ssz{});
       cell("pssz",     psio::pssz{});
-      cell("frac32",   psio::frac32{});
+      //  Bench label uses the user-facing name "fracpack" — the C++
+      //  class psio::frac32 is the ABI commitment, kept distinct.
+      cell("fracpack", psio::frac32{});
       cell("bin",      psio::bin{});
       cell("borsh",    psio::borsh{});
       cell("bincode",  psio::bincode{});

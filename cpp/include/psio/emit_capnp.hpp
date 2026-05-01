@@ -186,8 +186,8 @@ namespace psio::schema_types
                {
                   indent();
                   _out << "# @" << a.name;
-                  if (!a.value.empty())
-                     _out << "(" << a.value << ")";
+                  if (a.value.has_value() && !a.value->empty())
+                     _out << "(" << *a.value << ")";
                   _out << "\n";
                }
             }

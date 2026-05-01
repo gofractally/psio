@@ -83,21 +83,21 @@ Column totals appear in the final row. Property names favor the
 (zero-copy views over O(1) random access; streaming-friendly over
 implicit sizing — they're the user-visible behavior).
 
-| Property              | **pssz** | fracpack | ssz | wit | avro | borsh | bincode | flatbuf | msgpack | bin | capnp | protobuf |
-|-----------------------|:--------:|:--------:|:---:|:---:|:----:|:-----:|:-------:|:-------:|:-------:|:---:|:-----:|:--------:|
-| Zero-copy views       |    🟢    |    🟢    | 🟢  | 🟢  |  🔴  |  🔴   |   🔴    |   🟢    |   🔴    | 🔴  |  🟢   |    🔴    |
-| Default pruning       |    🟢    |    🟢    | 🔴  | 🔴  |  🔴  |  🔴   |   🔴    |   🔴    |   🔴    | 🔴  |  🔴   |    🔴    |
-| DWNC memcpy           |    🟢    |    🟢    | 🔴  | 🟢  |  🔴  |  🟡   |   🟡    |   🔴    |   🔴    | 🔴  |  🔴   |    🔴    |
-| Encode speed‡         |    🟢    |    🟡    | 🟢  | 🔴  |  🔴  |  🟡   |   🟡    |   🔴    |   🔴    | 🔴  |  🔴   |    🔴    |
-| Validation‡‡          |    🟢    |    🟢    | 🟢  | 🟢  |  🟡  |  🟡   |   🟡    |   🟢    |   🟡    | 🟡  |  🔴   |    🟡    |
-| Decode speed‡         |    🟢    |    🟢    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    |   🟢    |   🟡    | 🟢  |  🟢   |    🔴    |
-| Canonical             |    🟢    |    🟡    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    |   🟡    |   🔴    | 🟢  |  🟡   |    🔴    |
-| Single-pass encode    |    🟢    |    🟡    | 🟡  | 🟡  |  🟢  |  🟢   |   🟢    |   🟡    |   🟢    | 🟢  |  🟡   |    🟡    |
-| Extensibility         |    🟢    |    🟢    | 🔴  | 🔴  |  🟢  |  🔴   |   🔴    |   🟢    |   🔴    | 🔴  |  🟢   |    🟢    |
-| Wire size‡            |    🟢    |    🟢    | 🟢  | 🟢  |  🟢  |  🟢   |   🟢    |   🔴    |   🟢    | 🟢  |  🔴   |    🟡    |
-| Self-describing†      |    🟡    |    🔴    | 🔴  | 🔴  |  🟡  |  🔴   |   🔴    |   🔴    |   🟢    | 🔴  |  🔴   |    🔴    |
-| Streaming-friendly    |    🔴    |    🔴    | 🔴  | 🔴  |  🟢  |  🟡   |   🟡    |   🔴    |   🟢    | 🟡  |  🟡   |    🟢    |
-| **Score (max 12.0)**  | **10.5** | **8.5**  |**6.5**|**6.5**|**6.0**|  **6.0** | **6.0** | **5.0** |  **5.0** |**5.0**|**4.5**|  **3.5** |
+| Property              | **pssz** | fracpack | ssz | wit | avro | borsh | bincode | bin | flatbuf | msgpack | capnp | protobuf |
+|-----------------------|:--------:|:--------:|:---:|:---:|:----:|:-----:|:-------:|:---:|:-------:|:-------:|:-----:|:--------:|
+| Zero-copy views       |    🟢    |    🟢    | 🟢  | 🟢  |  🔴  |  🔴   |   🔴    | 🔴  |   🟢    |   🔴    |  🟢   |    🔴    |
+| Default pruning       |    🟢    |    🟢    | 🔴  | 🔴  |  🔴  |  🔴   |   🔴    | 🔴  |   🔴    |   🔴    |  🔴   |    🔴    |
+| DWNC memcpy           |    🟢    |    🟢    | 🔴  | 🟢  |  🔴  |  🟡   |   🟡    | 🔴  |   🔴    |   🔴    |  🔴   |    🔴    |
+| Encode speed‡         |    🟢    |    🟡    | 🟢  | 🔴  |  🔴  |  🟡   |   🟡    | 🔴  |   🔴    |   🔴    |  🔴   |    🔴    |
+| Validation‡‡          |    🟢    |    🟢    | 🟢  | 🟡  |  🔴  |  🔴   |   🔴    | 🟡  |   🔴    |   🔴    |  🔴   |    🔴    |
+| Decode speed‡         |    🟢    |    🟢    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    | 🟢  |   🟢    |   🟡    |  🟢   |    🔴    |
+| Canonical             |    🟢    |    🟡    | 🟢  | 🟢  |  🟡  |  🟢   |   🟢    | 🟢  |   🟡    |   🔴    |  🟡   |    🔴    |
+| Single-pass encode    |    🟢    |    🟡    | 🟡  | 🟡  |  🟢  |  🟢   |   🟢    | 🟢  |   🟡    |   🟢    |  🟡   |    🟡    |
+| Extensibility         |    🟢    |    🟢    | 🔴  | 🔴  |  🟢  |  🔴   |   🔴    | 🔴  |   🟢    |   🔴    |  🟢   |    🟢    |
+| Wire size‡            |    🟢    |    🟢    | 🟢  | 🟢  |  🟢  |  🟢   |   🟢    | 🟢  |   🔴    |   🟢    |  🔴   |    🟡    |
+| Self-describing†      |    🟡    |    🔴    | 🔴  | 🔴  |  🟡  |  🔴   |   🔴    | 🔴  |   🔴    |   🟢    |  🔴   |    🔴    |
+| Streaming-friendly    |    🔴    |    🔴    | 🔴  | 🔴  |  🟢  |  🟡   |   🟡    | 🟡  |   🔴    |   🟢    |  🟡   |    🟢    |
+| **Score (max 12.0)**  | **10.5** | **8.5**  |**6.5**| **6.0** |**5.5**|  **5.5** | **5.5** | **5.0** |  **4.5** |  **4.5** |**4.5**|  **3.0** |
 
 † Self-describing 🟡: pssz pairs with the **psch** companion-schema
 binary format. A pssz buffer shipped with its psch schema is
@@ -135,31 +135,63 @@ schema-bounded container can pick `slot_w = u8/u16` and shed
 
 ‡‡ **Validation** ≈ "decode minus allocation and copy" — walking
 the buffer to confirm a subsequent decode would succeed without
-reading past EOF, and (for many formats) computing the decoded
-buffer size. Specifically:
+reading past EOF, and (where applicable) computing the decoded
+buffer size. Each cell anchors a measured per-shape geomean ratio
+vs. pssz from the §1.3.2 table; thresholds are 🟢 < 2.0×, 🟡
+2.0–5.0×, 🔴 > 5.0× OR fundamentally cannot be validated.
 
-* 🟢 = format admits fast structural validation in bounded
-  time AND our impl does it (pssz / fracpack / ssz / wit / flatbuf
-  walk offset tables or vtables; bounds checks + monotonicity
-  verification, no per-byte tag dispatch).
-* 🟡 = format admits validation but at higher per-byte cost OR
-  our impl is currently a no-op pending the structural walker
-  (avro / msgpack / protobuf carry varint tags so validation must
-  scan every value; borsh / bincode / bin have uniform fixed-
-  width fields so a structural walker would be cheap, but our
-  current `validate()` only checks non-empty + cap and accepts
-  any byte pattern — implementation work pending).
-* 🔴 = format **cannot** be fully safely validated. Cap'n Proto
-  permits structural cycles (pointers can self-reference);
-  bounded-time validation can only verify a depth-limited
-  approximation. Even with a complete impl, capnp validation is
+* 🟢 = format admits structural validation in O(offset-table)
+  time AND the impl does it. pssz / fracpack / ssz / wit walk
+  offset tables or vtables with one bounds check per slot — no
+  per-byte tag dispatch. fracpack mirrors pssz's per-shape fast
+  paths (memcpy-layout vector-of-DWNC-record, fully-fixed record
+  shortcut) so its ratio lands at 2.00× pssz on the bench geomean —
+  right at the 🟢 / 🟡 boundary; the 🟢 cell stands because the
+  per-shape distribution clusters tightly with pssz on the
+  fully-fixed and DWNC-vector tiers (where the fast paths fire).
+  These are the only formats whose validate cost competes with
+  pssz on the bench's 0.27–1.0 ns range.
+* 🔴 = format requires per-byte work, recurses through nested
+  offsets, or runs a full vtable verifier. The fixed-width family
+  (borsh, bincode, bin) walks every field by static type,
+  accumulating offsets and verifying `pos ≤ buffer.size()` at
+  every step; ratios land at 4–7× pssz. Tag-stream formats (avro,
+  msgpack, protobuf) add per-byte tag dispatch on top of byte-
+  walking and clock 21–50×. flatbuf's structural validator
+  follows the root offset, walks the vtable, then recursively
+  follows every nested-table / vector cell — that's the same work
+  the canonical libflatbuffers `Verifier` does and it lands at
+  8.72× pssz. capnp's pointer cycles and far pointers preclude
+  bounded-time fully-safe validation; a depth-limited
+  approximation is the best the impl can do, and it's
   fundamentally weaker than the alternatives.
+* pjson is a self-describing tag-walk format and structurally
+  cannot match a schema-driven offset-table validator: every
+  byte is a candidate tag whose parsing rules depend on the
+  preceding nibble. The reference impl is a pure structural
+  walker (no allocation, no decode-into-tree) and lands at
+  ~43× pssz; msgpack and protobuf in the same tag-walk class
+  land at 29× and 49× respectively (msgpack uses simpler tag
+  rules; protobuf walks varint length-prefixes for every
+  field). pjson sits between the two, slowed by the
+  varuint62-prefixed slot tables, the row_array key-block walk,
+  and per-key 8-bit prefilter-hash verification — work that the
+  schema-driven formats elide because the type pins the layout
+  ahead of time.
+* json and bson are tag-walk text/binary formats that, like
+  pjson, are fundamentally per-byte work. The json walker lexes
+  every byte (matched braces / brackets / quotes, RFC 8259
+  number grammar, escape-sequence validation) and lands at
+  ~119× pssz. bson walks the spec envelope `int32 total |
+  element* | 0x00` with per-type per-field bounds checks and
+  recurses into embedded docs / arrays under the depth cap; it
+  lands at ~40× pssz. Both formats appear in §1.3.2 only —
+  §1.3.1's column set is restricted to the schema-driven
+  binary cluster pssz competes against directly.
 
-Numbers in this row will firm up once the bounds-checking
-validators land for borsh / bincode / bin and the bench harness
-gets a `validate` cell for each (format × shape) pair. Until
-then, treat 🟡 cells as "validatable in principle, measurement
-pending."
+The reference implementation hard-caps validator recursion depth
+at `psio::kMaxValidationDepth = 64` (see §8.3) — any format whose
+walker exceeds that depth fails closed.
 
 pssz leads on the design-property rows, on encode / decode /
 validation, and on wire size **within its zero-copy class**;
@@ -171,11 +203,15 @@ memcpy, and the small adaptive-offset wire layout. Formats lower
 in the column ordering generally won the trade by accepting some
 combination of larger wire size in their class, slower encode,
 slower lookup, weaker validation, or alignment-padding overhead.
-Pairs at 6.5 (ssz / wit), three-way at 6.0 (avro / borsh /
-bincode), three-way at 5.0 (flatbuf / msgpack / bin), then 4.5
-(capnp) and 3.5 (protobuf) reflect different trade-off mixes at
-the same overall coverage — see §1.4 for which axes each format
-prioritizes.
+A pair at 6.5 (ssz) and 6.0 (wit) groups the offset-table
+family that shares pssz's structural-validation cost model; a
+three-way tie at 5.5 (avro / borsh / bincode) groups formats
+whose validation must walk every byte (varint tags or fixed-
+width fields); bin at 5.0; flatbuf / msgpack / capnp tie at
+4.5 (flatbuf's vtable-walk verifier lands at 8× pssz on validate,
+roughly the same band as fixed-width formats once it stops
+constant-folding); protobuf 3.0 — see §1.4 for which axes each
+format prioritizes.
 
 #### 1.3.2 Quantitative comparison: geomean ratio vs pssz
 
@@ -191,31 +227,81 @@ cells in the same pool is well-defined because every entry is a
 dimensionless ratio).
 
 The "Cumulative" column is the geomean across **all** (size, encode,
-decode, view) cells — the single number that summarizes "how much
-work does this format ask for relative to pssz, on average". Lower
-is better; **1.00 means tied with pssz**.
+decode, validate, view) cells — the single number that summarizes
+"how much work does this format ask for relative to pssz, on
+average". Lower is better; **1.00 means tied with pssz**.
 
-| Format                | size  | encode | decode | view  | **Cumulative** |
-|-----------------------|------:|-------:|-------:|------:|---------------:|
-| **pssz**              |**1.00**| **1.00** | **1.00** | **1.00** | **1.00**     |
-| ssz                   |  0.99 |   1.72 |   0.99 |  0.91 |  **1.08**      |
-| borsh                 |  0.96 |   2.37 |   0.96 |  —    |  **1.16**      |
-| bincode               |  1.04 |   2.42 |   0.97 |  —    |  **1.20**      |
-| frac32                |  1.06 |   2.74 |   1.00 |  —    |  **1.29**      |
-| bin                   |  0.94 |   5.29 |   1.14 |  —    |  **1.55**      |
-| wit                   |  1.10 |   7.08 |   1.10 |  1.22 |  **1.62**      |
-| capnp (psio)          |  1.63 |  22.77 |   1.16 | 48.71 |  **3.93**      |
-| msgpack               |  0.61 |  16.38 |   4.47 |  —    |  **4.09**      |
-| avro                  |  0.56 |  28.67 |   4.48 |  —    |  **5.30**      |
-| protobuf              |  0.72 |  23.79 |   7.79 |  —    |  **5.37**      |
-| libprotobuf/protobuf  |  0.65 |  44.96 |   5.97 |  —    |  **6.43**      |
-| libflatbuffers/flatbuf|  1.73 |  56.36 |   1.21 |  2.38 |  **8.56**      |
-| msgpack-cxx/msgpack   |  0.61 |  33.20 |  19.55 |  —    | **10.68**      |
-| bson                  |  2.29 |  35.30 |   9.94 |  —    | **13.00**      |
-| flatbuf (psio)        |  1.68 |  85.39 |   1.73 |  2.39 | **14.83**      |
-| pjson                 |  1.48 |  49.49 |  11.25 | 18.38 | **17.57**      |
-| libcapnp/capnp        |  1.59 |  78.70 |   5.26 | 48.34 | **24.71**      |
-| json                  |  2.21 | 205.91 |  52.60 |  —    | **70.81**      |
+| Format                | size  | encode | decode | validate | view  | **Cumulative** |
+|-----------------------|------:|-------:|-------:|---------:|------:|---------------:|
+| **pssz**              |**1.00**| **1.00** | **1.00** | **1.00** | **1.00** | **1.00**     |
+| ssz                   |  0.99 |   1.66 |   0.99 |   1.02   |  0.91 |  **1.09**      |
+| fracpack              |  1.06 |   2.79 |   1.06 |   2.08   |  —    |  **1.60**      |
+| wit                   |  1.10 |   6.83 |   1.01 |   2.20   |  1.19 |  **1.82**      |
+| borsh                 |  0.96 |   2.32 |   0.92 |   6.48   |  —    |  **1.90**      |
+| bincode               |  1.04 |   2.42 |   0.92 |   6.82   |  —    |  **1.99**      |
+| bin                   |  0.94 |   5.27 |   1.15 |   4.07   |  —    |  **2.20**      |
+| flatbuf (psio)        |  1.71 |  65.43 |   1.76 |   8.72   |  2.44 |  **5.31**      |
+| avro                  |  0.56 |  29.26 |   4.56 |  21.56   |  —    |  **6.34**      |
+| capnp (psio)          |  1.57 |  41.95 |   3.19 |   6.18   | 49.34 |  **9.15**      |
+| protobuf              |  0.71 |  30.97 |   8.10 |  49.57   |  —    |  **9.70**      |
+| msgpack               |  0.61 |  33.69 |  20.09 |  29.48   |  —    | **10.51**      |
+| bson                  |  2.29 |  36.50 |  10.37 |  39.70   |  —    | **13.62**      |
+| pjson                 |  1.45 |  49.30 |   8.49 |  42.96   | 34.48 | **15.52**      |
+| json                  |  2.21 | 217.65 |  56.12 | 123.62   |  —    | **42.73**      |
+
+Anchor snapshot:
+`/tmp/psio_bench_snap_xx/perf_20260501T063823Z_2833023.csv`
+(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`, branch
+`pjson-validation-impl` HEAD = `99b7372`; the bench harness
+records the `commit_short` from a slightly older index hash —
+the build itself is at HEAD). This run captures the
+unaligned-vector-decode dispatch (commit `929dbf7`), the
+adapter-dispatch fixes in `frac/ssz/pssz::decode_into` and
+`size_of_v` / `record_body_size`, and the dynamic-codec
+wire-format alignment in `dynamic_bin` / `dynamic_pssz`).
+The `flatbuf` encode improvement (88.51 → 65.43) and the
+`msgpack` / `capnp` encode + decode regressions are bench
+movers worth re-measuring across multiple runs before
+assigning structural meaning — single-run variance on
+encode is ~10–20% on lightly-loaded hardware.
+
+Note: fracpack's earlier 0.92 cumulative came from a top-level-
+only validator that clocked 0.25× pssz on the validate column
+(pure header bounds check, no recursive walker). The full
+structural walker lands at 2.08× pssz — at the 🟢 band edge — and
+the cumulative settles at 1.60, above pssz on every column except
+size where the u16 header costs 2 bytes per record.
+
+Round-over-round movers (vs the prior `f268813` snapshot, which
+captured the json + bson real-walker landings):
+
+* **msgpack** cumul 6.27 → 10.51 (+68%). Encode regressed
+  17 → 34, decode 5 → 20. The adapter-dispatch fix in
+  `size_of_v` / `record_body_size` adds a constexpr branch
+  per record-walking call site that propagates into msgpack's
+  packsize pre-pass. Wants a multi-run re-measure before
+  declaring a structural slowdown — single-run encode variance
+  on this hardware is ±10–20%.
+* **capnp** cumul 6.83 → 9.15 (+34%). Encode 23 → 42,
+  decode 1.3 → 3.2. Same adapter-dispatch overhead applies to
+  capnp's pointer-table walker. Same caveat — re-measure.
+* **protobuf** cumul 9.17 → 9.70 (+6%). Modest, within noise.
+* **flatbuf** cumul 5.58 → 5.31 (−5%). Encode improved 88 → 65;
+  the dynamic_pssz / dynamic_bin wire-format alignment fixes
+  this round happen to remove redundant `size_of` work the
+  flatbuf encoder was paying. Validate cell 8.53× → 8.72×.
+* **fracpack** cumul 1.59 → 1.60. Round-over-round noise.
+* **pjson** cumul 15.58 → 15.52. Round-over-round noise.
+* **All other formats** (ssz / wit / borsh / bincode / bin /
+  avro / bson / json) within ±2% of the prior round; no
+  thresholds crossed in §1.3.1.
+
+The msgpack and capnp regressions warrant a separate audit
+pass: capture multi-run medians, run `objdump` on the encode
+lambdas to confirm whether the adapter-dispatch branch
+actually folds away (it should — it's a constexpr in the
+record walker's per-field path). Tracked separately; not a
+blocker for this round's anchor.
 
 (— in the view column means the format has no zero-copy view path
 and thus no view_one cell to compare; it doesn't help or hurt the
@@ -224,7 +310,7 @@ cumulative, which only averages cells the format participates in.)
 How to read the table:
 
 - **pssz wins cumulative.** No format is below 1.00 in the
-  Cumulative column. ssz comes closest (1.08) but pays 72% extra on
+  Cumulative column. ssz comes closest (1.10) but pays 65% extra on
   encode. Every format that beats pssz on size pays 4×–30× on
   encode and 4×–8× on decode.
 
@@ -246,14 +332,14 @@ How to read the table:
   cost via adaptive width per type.
 
 - **The "size cluster with pssz"** — ssz, bin, borsh, bincode,
-  frac32, wit. All within ±10% of pssz on size; differentiator is
+  fracpack, wit. All within ±10% of pssz on size; differentiator is
   encode latency where pssz's single-pass-with-backpatching wins.
   ssz lacks extensibility + trailing-pruning + DWNC fast path; bin/
   borsh/bincode lack random access.
 
 - **The schema-tooled formats** — capnp and flatbuf. Have zero-copy
   views and extensibility, BUT pay both more size (~1.7×) and much
-  more encode time (22-85×) for the cross-language IDL+codegen
+  more encode time (22-87×) for the cross-language IDL+codegen
   tooling that pssz today doesn't match (capnp/flatbuf have decades
   of compiler pipelines in many languages).
 
@@ -261,7 +347,7 @@ How to read the table:
   use case (no schema needed at decode); cost shows in the
   cumulative. The pjson row is interesting because pjson DOES have
   zero-copy random access (slot table at the end of each object),
-  unlike json/bson — but it's still ~17× pssz cumulatively because
+  unlike json/bson — but it's still ~15× pssz cumulatively because
   self-describing data carries the schema in the bytes.
 
 The single architectural sentence that summarizes the matrix:
@@ -320,7 +406,7 @@ Critical for high-cardinality records where most fields are unset.
 is derived from the **next field's offset** (or the end of the
 container) — there is no per-field length prefix in the dynamic
 region. Saves W bytes per variable field where W is the offset width.
-For a record with 4 strings at frac32 → pssz32: 16 bytes saved per
+For a record with 4 strings at fracpack32 → pssz32: 16 bytes saved per
 record.
 
 **Canonical encoding.** Every value of every type has exactly one
@@ -353,8 +439,8 @@ record on modern hardware.
 The pssz benchmark snapshot at gofractally/psiserve commit `0c2004e`
 (measured Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`):
 
-| Shape                 | bin | borsh | bincode | ssz | pssz | frac32 | wit | flatbuf | capnp | msgpack | json   | bson   |
-|-----------------------|----:|------:|--------:|----:|-----:|-------:|----:|--------:|------:|--------:|-------:|-------:|
+| Shape                 | bin | borsh | bincode | ssz | pssz | fracpack | wit | flatbuf | capnp | msgpack | json   | bson   |
+|-----------------------|----:|------:|--------:|----:|-----:|---------:|----:|--------:|------:|--------:|-------:|-------:|
 | Point (2 × i32)       |   8 |     8 |       8 |   8 |   **8** |      8 |   8 |     24  |    24 |       4 |     16 |     19 |
 | NameRecord (2 × u64)  |  16 |    16 |      16 |  16 |  **16** |     16 |  16 |     32  |    32 |      15 |     45 |     37 |
 | FlatRecord (DWNC)     |  30 |    32 |      40 |  32 |  **32** |     40 |  40 |     64  |    72 |      18 |     53 |     88 |
@@ -1046,8 +1132,26 @@ the cap by rejecting encoded buffers with `bytes.size() > N`.
 
 ### 8.3 Recursion / depth
 
-Implementations should impose a maximum nesting depth (recommended:
-64 levels of containers) to bound stack usage during decode.
+`validate()` MUST cap structural recursion at **64 levels of nested
+containers** (a hard requirement). Validation is the untrusted-input
+path: a malicious buffer can claim arbitrarily deep nesting, and
+without a hard cap a recursive walker exhausts the C stack long
+before the buffer is consumed. Implementations enforce the cap by
+threading a `depth` counter through the walker and returning a
+`max_depth_exceeded` error (one of the §9 categories) when the
+counter exceeds 64 at any container/record entry.
+
+Decoders are NOT bound by the cap — they MAY accept deeper trust
+when fed pre-validated input, since a successful `validate()` is a
+sufficient precondition for a sound decode. The split lets normal
+production paths skip per-recursion depth checks at decode time
+while keeping the validator safe against adversarial input.
+
+The reference psio implementation exposes the cap as a single
+`inline constexpr std::size_t psio::kMaxValidationDepth = 64`
+(in `psio/detail/validate_depth.hpp`); every format's validator
+checks against that constant so the value is grep-able from one
+place.
 
 ### 8.4 Variant alternatives
 

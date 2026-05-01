@@ -62,6 +62,8 @@
 //   * Internal encode / decode helpers used by pjson_view, pjson_typed,
 //     pjson_json.
 
+#include <psio/detail/validate_depth.hpp>
+
 #include <algorithm>
 #include <bit>
 #include <charconv>
@@ -1256,6 +1258,305 @@ namespace psio {
              v.v);
       }
 
+      // ── structural validation (no materialization) ────────────────────
+      //
+      // skip_value is decode_value's structural twin: it performs the
+      // same bounds-check + tag-walk discipline without ever building
+      // a pjson_value tree, allocating containers, or copying string
+      // bytes. The result is a `bool` (well-formed under the size
+      // bound) — the caller's responsibility to provide the exact
+      // size that would normally come from a slot-table delta.
+      //
+      // depth threads kMaxValidationDepth through every container
+      // level (array, typed-array, object, row-array). The cap fires
+      // closed when nesting exceeds the limit, regardless of buffer
+      // size.
+
+      inline bool skip_value(const std::uint8_t* p, std::size_t size,
+                             std::size_t depth) noexcept;
+
+      // Tail-indexed generic-array structural walker. Mirrors
+      // decode_array's checks (slot table layout, monotonic offsets,
+      // child fits in container) but recurses into skip_value rather
+      // than decode_value.
+      inline bool skip_array(const std::uint8_t* p, std::size_t size,
+                             std::size_t depth) noexcept
+      {
+         if (size < 4) return false;  // tag + width + count u16 minimum
+         std::uint8_t width_byte = p[1];
+         if (width_byte & 0xFCu) return false;  // reserved bits
+         std::uint8_t  slot_w_code = width_byte & 0x03;
+         std::size_t   slot_w      = width_bytes(slot_w_code);
+         std::uint16_t N           = static_cast<std::uint16_t>(p[size - 2]) |
+                                     (static_cast<std::uint16_t>(p[size - 1])
+                                      << 8);
+         if (slot_w == 0) return false;
+         //  Multiplication-overflow guard — slot_w*N must not exceed
+         //  the available room before the trailing u16.
+         if (N > (size - 2) / slot_w) return false;
+         std::size_t slot_table_pos = size - 2 - slot_w * N;
+         if (slot_table_pos < 2 || slot_table_pos > size - 2)
+            return false;
+         std::size_t value_data_start = 2;
+         std::size_t value_data_size  = slot_table_pos - value_data_start;
+
+         for (std::uint16_t i = 0; i < N; ++i)
+         {
+            std::uint32_t off_i =
+                read_width(p + slot_table_pos + i * slot_w, slot_w_code);
+            std::uint32_t off_next =
+                i + 1 < N
+                    ? read_width(p + slot_table_pos + (i + 1) * slot_w,
+                                 slot_w_code)
+                    : static_cast<std::uint32_t>(value_data_size);
+            if (off_next < off_i || off_next > value_data_size)
+               return false;
+            if (!skip_value(p + value_data_start + off_i,
+                             off_next - off_i, depth + 1))
+               return false;
+         }
+         return true;
+      }
+
+      // Row-array structural walker. Validates the shared key block
+      // (key slots / hash bytes / key bytes) and then walks each
+      // record's per-field slot table, recursing skip_value into
+      // each value.
+      inline bool skip_row_array(const std::uint8_t* p, std::size_t size,
+                                 std::size_t depth) noexcept
+      {
+         if (size < 4) return false;
+         std::uint8_t width_byte    = p[1];
+         std::uint8_t slot_w_code   = width_byte & 0x03;
+         std::uint8_t recoff_w_code = (width_byte >> 2) & 0x03;
+         std::size_t  slot_w        = width_bytes(slot_w_code);
+         std::size_t  recoff_w      = width_bytes(recoff_w_code);
+
+         std::uint64_t K_u64;
+         std::size_t   K_bytes = read_varuint62(p + 2, size - 2, K_u64);
+         if (K_bytes == 0) return false;
+         std::size_t K = static_cast<std::size_t>(K_u64);
+         if (K == 0) return false;
+
+         std::size_t key_slots_pos = 2 + K_bytes;
+         //  4 bytes per key slot.
+         if (K > (size - key_slots_pos) / 4) return false;
+         std::size_t hash_pos = key_slots_pos + 4 * K;
+         std::size_t keys_pos = hash_pos + K;
+         if (keys_pos > size - 2) return false;
+
+         std::uint32_t last_slot =
+             read_u32_le(p + key_slots_pos + (K - 1) * 4);
+         std::uint32_t last_off = slot_offset(last_slot);
+         std::uint8_t  last_ks  = slot_key_size(last_slot);
+         if (last_ks == 0xFF) return false;
+         std::uint32_t keys_area_size = last_off + last_ks;
+         std::size_t   records_body_start = keys_pos + keys_area_size;
+
+         //  Verify each key slot's region lies within the keys area
+         //  (and walk hash bytes — caller's hash verification is
+         //  cheap, fail-closed on mismatch).
+         for (std::size_t j = 0; j < K; ++j)
+         {
+            std::uint32_t s_j = read_u32_le(p + key_slots_pos + j * 4);
+            std::uint32_t kof = slot_offset(s_j);
+            std::uint8_t  ksz = slot_key_size(s_j);
+            if (ksz == 0xFF) return false;
+            if (kof + ksz > keys_area_size) return false;
+            std::string_view k(
+                reinterpret_cast<const char*>(p + keys_pos + kof), ksz);
+            if (p[hash_pos + j] != key_hash8(k)) return false;
+         }
+
+         std::uint16_t N = static_cast<std::uint16_t>(p[size - 2]) |
+                           (static_cast<std::uint16_t>(p[size - 1]) << 8);
+         if (recoff_w == 0) return false;
+         if (N > (size - 2 - records_body_start) / recoff_w) return false;
+         std::size_t record_offsets_pos = size - 2 - N * recoff_w;
+         if (record_offsets_pos < records_body_start) return false;
+         std::size_t records_body_size =
+             record_offsets_pos - records_body_start;
+
+         for (std::uint16_t i = 0; i < N; ++i)
+         {
+            std::uint32_t roff_i =
+                read_width(p + record_offsets_pos + i * recoff_w,
+                           recoff_w_code);
+            std::uint32_t roff_next =
+                i + 1 < N
+                    ? read_width(p + record_offsets_pos +
+                                     (i + 1) * recoff_w,
+                                 recoff_w_code)
+                    : static_cast<std::uint32_t>(records_body_size);
+            if (roff_next < roff_i) return false;
+            std::size_t  rec_size = roff_next - roff_i;
+            const std::uint8_t* rec = p + records_body_start + roff_i;
+            if (K * slot_w > rec_size) return false;
+            std::size_t slot_pos  = rec_size - K * slot_w;
+            std::size_t body_size = slot_pos;
+
+            for (std::size_t j = 0; j < K; ++j)
+            {
+               std::uint32_t voff =
+                   read_width(rec + slot_pos + j * slot_w, slot_w_code);
+               std::uint32_t vend =
+                   j + 1 < K
+                       ? read_width(rec + slot_pos + (j + 1) * slot_w,
+                                    slot_w_code)
+                       : static_cast<std::uint32_t>(body_size);
+               if (vend < voff || vend > body_size) return false;
+               if (!skip_value(rec + voff, vend - voff, depth + 1))
+                  return false;
+            }
+         }
+         return true;
+      }
+
+      // Tail-indexed object structural walker.
+      inline bool skip_object(const std::uint8_t* p, std::size_t size,
+                              std::size_t depth) noexcept
+      {
+         if (size < 4) return false;
+         std::uint8_t width_byte = p[1];
+         if (width_byte & 0xFCu) return false;
+         std::uint8_t  slot_w_code = width_byte & 0x03;
+         std::size_t   slot_w      = width_bytes(slot_w_code);
+         std::size_t   slot_stride = slot_w + 1;
+         std::uint16_t N           = static_cast<std::uint16_t>(p[size - 2]) |
+                                     (static_cast<std::uint16_t>(p[size - 1])
+                                      << 8);
+         if (slot_stride == 0) return false;
+         if (N > (size - 2) / slot_stride) return false;
+         std::size_t slot_table_pos = size - 2 - slot_stride * N;
+         std::size_t hash_table_pos = slot_table_pos - N;
+         if (slot_table_pos < 2 || slot_table_pos > size - 2 ||
+             hash_table_pos < 2 || hash_table_pos > slot_table_pos)
+            return false;
+         std::size_t value_data_start = 2;
+         std::size_t value_data_size  = hash_table_pos - value_data_start;
+
+         for (std::uint16_t i = 0; i < N; ++i)
+         {
+            const std::uint8_t* slot =
+                p + slot_table_pos + i * slot_stride;
+            std::uint32_t off_i = read_width(slot, slot_w_code);
+            std::uint8_t  ks    = slot[slot_w];
+            std::uint32_t off_next =
+                i + 1 < N
+                    ? read_width(p + slot_table_pos +
+                                     (i + 1) * slot_stride,
+                                 slot_w_code)
+                    : static_cast<std::uint32_t>(value_data_size);
+            if (off_next < off_i || off_next > value_data_size)
+               return false;
+            const std::uint8_t* entry      = p + value_data_start + off_i;
+            std::size_t         entry_size = off_next - off_i;
+            std::size_t         klen_bytes;
+            std::size_t         klen;
+            if (ks != 0xFF)
+            {
+               klen       = ks;
+               klen_bytes = 0;
+            }
+            else
+            {
+               std::uint64_t excess;
+               klen_bytes =
+                   read_varuint62(entry, entry_size, excess);
+               if (klen_bytes == 0) return false;
+               klen = 0xFFu + static_cast<std::size_t>(excess);
+            }
+            if (klen_bytes + klen > entry_size) return false;
+            std::string_view k(
+                reinterpret_cast<const char*>(entry + klen_bytes), klen);
+            if (p[hash_table_pos + i] != key_hash8(k)) return false;
+            std::size_t value_off = klen_bytes + klen;
+            if (!skip_value(entry + value_off,
+                             entry_size - value_off, depth + 1))
+               return false;
+         }
+         return true;
+      }
+
+      inline bool skip_value(const std::uint8_t* p, std::size_t size,
+                             std::size_t depth) noexcept
+      {
+         if (depth > ::psio::kMaxValidationDepth) return false;
+         if (size == 0) return false;
+         std::uint8_t tag  = p[0];
+         std::uint8_t type = tag >> 4;
+         std::uint8_t low  = tag & 0x0F;
+
+         switch (type)
+         {
+            case t_null: return size == 1;
+            case t_bool:
+               return size == 1 && low <= 1;
+            case t_uint_inline:
+               return size == 1;
+            case t_uint:
+            case t_negint:
+            {
+               std::uint8_t bc = static_cast<std::uint8_t>(low + 1);
+               if (1u + bc != size) return false;
+               if (type == t_negint)
+               {
+                  // All-zero payload is reserved.
+                  bool all_zero = true;
+                  for (std::uint8_t i = 0; i < bc; ++i)
+                     if (p[1 + i] != 0) { all_zero = false; break; }
+                  if (all_zero) return false;
+               }
+               return true;
+            }
+            case t_decimal:
+            {
+               std::uint8_t bc = static_cast<std::uint8_t>(low + 1);
+               if (1u + bc > size) return false;
+               std::int32_t scale;
+               std::size_t  scale_bytes =
+                   read_varint62(p + 1 + bc, size - 1 - bc, scale);
+               if (scale_bytes == 0) return false;
+               return 1u + bc + scale_bytes == size;
+            }
+            case t_ieee_float:
+            {
+               std::uint8_t width_bits = low & ieee_width_mask;
+               if (width_bits == ieee_width_f64) return size == 9;
+               if (width_bits == ieee_width_f32) return size == 5;
+               return false;  // f16/f128 not supported
+            }
+            case t_string:
+            {
+               return low <= string_flag_escape_form;
+            }
+            case t_bytes:
+            {
+               return low == 0;
+            }
+            case t_array:
+            {
+               if (low == 0) return skip_array(p, size, depth);
+               std::uint8_t code = typed_array_code_from_low(low);
+               if (code == tac_invalid) return false;
+               std::size_t es = typed_array_elem_size(code);
+               if (es == 0 || size < 3) return false;
+               std::uint16_t N =
+                   static_cast<std::uint16_t>(p[size - 2]) |
+                   (static_cast<std::uint16_t>(p[size - 1]) << 8);
+               return 1u + es * static_cast<std::size_t>(N) + 2u == size;
+            }
+            case t_object:
+               if (low == object_form_single)
+                  return skip_object(p, size, depth);
+               if (low == object_form_row_array)
+                  return skip_row_array(p, size, depth);
+               return false;
+            default:
+               return false;
+         }
+      }
+
       // ── decoding (full materialize into pjson_value tree) ─────────────
       // The (ptr, size) pair fully describes the value.
 
@@ -1904,8 +2205,12 @@ namespace psio {
       }
       static bool validate(std::span<const std::uint8_t> bytes) noexcept
       {
-         pjson_value v;
-         return pjson_detail::decode_value(bytes.data(), bytes.size(), v);
+         //  Structural walker — the same bounds-check + tag-walk
+         //  discipline as decode_value, but never materialises a
+         //  pjson_value tree, allocates containers, or copies string
+         //  bytes. Threads kMaxValidationDepth through every
+         //  container nesting level.
+         return pjson_detail::skip_value(bytes.data(), bytes.size(), 0);
       }
    };
 

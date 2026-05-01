@@ -312,10 +312,20 @@ pub fn decode(bytes: &[u8]) -> PjsonResult<Value<'_>> {
     parse_value(bytes, bytes.len())
 }
 
+/// Hard cap on recursion depth for `validate()`. Mirrors the C++
+/// `psio::kMaxValidationDepth` constant — the validator MUST refuse
+/// any nesting deeper than this regardless of buffer length, since
+/// a malicious buffer can claim arbitrarily deep nesting and exhaust
+/// the call stack. Decoders are not bound by the cap; they MAY accept
+/// deeper trust on pre-validated input. See docs/pssz-spec.md §8.3.
+pub const K_MAX_VALIDATION_DEPTH: usize = 64;
+
 /// Top-level validate entry point — walks the buffer once, asserting
-/// every internal invariant without materializing values.
+/// every internal invariant without materializing values, and
+/// rejecting any buffer whose container nesting exceeds
+/// `K_MAX_VALIDATION_DEPTH`.
 pub fn validate(bytes: &[u8]) -> PjsonResult<()> {
-    validate_value(bytes, bytes.len())
+    validate_value_depth(bytes, bytes.len(), 0)
 }
 
 // ── Parser ──────────────────────────────────────────────────────────────────
@@ -686,7 +696,82 @@ fn validate_value(buf: &[u8], size: usize) -> PjsonResult<()> {
     // Re-parse-and-discard. The cost is the same; the validator becomes
     // a thin wrapper. If a faster validator is needed later, this can
     // walk without materializing — for now correctness >> speed.
-    parse_value(buf, size).map(|_| ())
+    validate_value_depth(buf, size, 0)
+}
+
+/// Depth-tracked validator. Caps recursion at `K_MAX_VALIDATION_DEPTH`
+/// container levels. Containers (Array, Object, RowArray,
+/// TypedArray) increment the depth; leaf scalars do not.
+///
+/// Note: this implementation parses the buffer first (via
+/// `parse_value`) and then walks the resulting `Value` tree with
+/// the depth counter. The parse step itself is currently not
+/// depth-bounded — a malicious buffer with > C_STACK levels of
+/// nesting would blow the stack inside `parse_value` before the
+/// validator's depth check fires. A true byte-walker that doesn't
+/// materialize is the upstream fix; for now the cap catches mid-
+/// range adversarial inputs (anything between
+/// `K_MAX_VALIDATION_DEPTH` and the C-stack limit).
+fn validate_value_depth(
+    buf: &[u8],
+    size: usize,
+    depth: usize,
+) -> PjsonResult<()> {
+    if depth > K_MAX_VALIDATION_DEPTH {
+        return Err(err("pjson: max validation depth exceeded"));
+    }
+    let v = parse_value(buf, size)?;
+    match v {
+        Value::Array(children) => {
+            for c in children {
+                validate_value_recurse(&c, depth + 1)?;
+            }
+        }
+        Value::Object(entries) => {
+            for (_k, child) in entries {
+                validate_value_recurse(&child, depth + 1)?;
+            }
+        }
+        Value::RowArray(records) => {
+            for rec in records {
+                for (_k, child) in rec {
+                    validate_value_recurse(&child, depth + 1)?;
+                }
+            }
+        }
+        // Leaf values: no container recursion.
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Sub-validator on already-parsed children. Re-checks depth against
+/// the cap; for container children, recurses one level deeper.
+fn validate_value_recurse(v: &Value<'_>, depth: usize) -> PjsonResult<()> {
+    if depth > K_MAX_VALIDATION_DEPTH {
+        return Err(err("pjson: max validation depth exceeded"));
+    }
+    match v {
+        Value::Array(children) => {
+            for c in children {
+                validate_value_recurse(c, depth + 1)?;
+            }
+        }
+        Value::Object(entries) => {
+            for (_k, child) in entries {
+                validate_value_recurse(child, depth + 1)?;
+            }
+        }
+        Value::RowArray(records) => {
+            for rec in records {
+                for (_k, child) in rec {
+                    validate_value_recurse(child, depth + 1)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 // ── Encoder primitives ──────────────────────────────────────────────────────
@@ -1899,6 +1984,38 @@ mod tests {
             (b"a".as_slice(), Value::UInt(1)),
             (b"b".as_slice(), Value::Str(b"two", str_flag::RAW_TEXT)),
         ]);
+        let mut out = vec![];
+        encode(&v, &mut out);
+        validate(&out).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_excessive_depth() {
+        // Build an array nested K_MAX_VALIDATION_DEPTH + 1 deep. The
+        // validator MUST refuse it; a plain decode of the same buffer
+        // is intentionally not bounded.
+        let mut v: Value = Value::Array(vec![]);
+        for _ in 0..(K_MAX_VALIDATION_DEPTH + 5) {
+            v = Value::Array(vec![v]);
+        }
+        let mut out = vec![];
+        encode(&v, &mut out);
+        let err = validate(&out).unwrap_err();
+        assert!(
+            err.0.contains("max validation depth"),
+            "expected depth error, got: {}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn validate_accepts_depth_at_cap() {
+        // Build an array nested exactly to the cap. Cap is 64, so 64
+        // arrays + 1 leaf. Should validate cleanly.
+        let mut v: Value = Value::Null;
+        for _ in 0..K_MAX_VALIDATION_DEPTH {
+            v = Value::Array(vec![v]);
+        }
         let mut out = vec![];
         encode(&v, &mut out);
         validate(&out).unwrap();

@@ -159,9 +159,35 @@ namespace {
 
 }  // namespace
 
+// The Ethereum consensus-spec ssz_generic corpus is not vendored or
+// auto-fetched into this repo (it depends on Python tooling — pyyaml +
+// cramjam for snappy decompression — and is licensed separately).
+// Developers who want to run these fixtures point PSIO_SPEC_MANIFEST /
+// PSIO_SPEC_DECODED_ROOT at a manifest produced by
+// `cpp/tests/spec_tests/preprocess.py`. When the manifest is absent,
+// skip the conformance test cleanly rather than failing — this is a
+// missing resource, not a regression in the SSZ codec.
+namespace {
+   bool corpus_available()
+   {
+      std::error_code ec;
+      return std::filesystem::exists(manifest_path(), ec) && !ec;
+   }
+}
+
 TEST_CASE("consensus-spec ssz_generic: decode + re-encode identity",
           "[spec][ssz][generic]")
 {
+   if (!corpus_available())
+   {
+      WARN("consensus-spec corpus not present at "
+           << manifest_path()
+           << " — set PSIO_SPEC_MANIFEST / PSIO_SPEC_DECODED_ROOT, or "
+              "run cpp/tests/spec_tests/preprocess.py against an extracted "
+              "consensus-spec-tests general.tar.gz to populate it. Skipping.");
+      return;
+   }
+
    auto entries = load_manifest();
    REQUIRE_FALSE(entries.empty());
 
@@ -199,6 +225,11 @@ TEST_CASE("consensus-spec ssz_generic: decode + re-encode identity",
 TEST_CASE("consensus-spec ssz_generic: manifest loaded",
           "[spec][ssz][generic][smoke]")
 {
+   if (!corpus_available())
+   {
+      WARN("consensus-spec corpus not present — skipping smoke check.");
+      return;
+   }
    auto entries = load_manifest();
    REQUIRE(entries.size() >= 30);
    INFO("Loaded " << entries.size() << " fixture entries");

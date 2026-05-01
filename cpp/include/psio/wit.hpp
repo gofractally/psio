@@ -24,6 +24,7 @@
 // entry points.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/adapter.hpp>
@@ -771,25 +772,33 @@ namespace psio {
       // ── Validate (bounds only for MVP) ────────────────────────────────────
 
       template <typename T>
-      bool validate_leaf(std::span<const char> buf, uint32_t at);
+      bool validate_leaf(std::span<const char> buf, uint32_t at,
+                         std::size_t depth = 0);
 
       template <typename T>
-      bool validate_record(std::span<const char> buf, uint32_t base)
+      bool validate_record(std::span<const char> buf, uint32_t base,
+                           std::size_t depth = 0)
       {
+         if (depth > ::psio::kMaxValidationDepth)
+            return false;
          using R                 = ::psio::reflect<T>;
          constexpr std::size_t N = R::member_count;
          bool                  ok = true;
          [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             ((ok = ok && validate_leaf<typename R::template member_type<Is>>(
-                            buf, base + canonical_field_offset<T, Is>())),
+                            buf, base + canonical_field_offset<T, Is>(),
+                            depth + 1)),
              ...);
          }(std::make_index_sequence<N>{});
          return ok;
       }
 
       template <typename T>
-      bool validate_leaf(std::span<const char> buf, uint32_t at)
+      bool validate_leaf(std::span<const char> buf, uint32_t at,
+                         std::size_t depth)
       {
+         if (depth > ::psio::kMaxValidationDepth)
+            return false;
          using U = std::remove_cvref_t<T>;
          if constexpr (std::is_arithmetic_v<U> || std::is_enum_v<U>)
          {
@@ -821,7 +830,7 @@ namespace psio {
                 buf.size())
                return false;
             for (uint32_t i = 0; i < count; ++i)
-               if (!validate_leaf<E>(buf, ptr + i * es))
+               if (!validate_leaf<E>(buf, ptr + i * es, depth + 1))
                   return false;
             return true;
          }
@@ -834,13 +843,13 @@ namespace psio {
                 buf.size())
                return false;
             for (std::size_t i = 0; i < is_array<U>::n; ++i)
-               if (!validate_leaf<E>(buf, at + i * es))
+               if (!validate_leaf<E>(buf, at + i * es, depth + 1))
                   return false;
             return true;
          }
          else if constexpr (Record<U>)
          {
-            return validate_record<U>(buf, at);
+            return validate_record<U>(buf, at, depth + 1);
          }
          else if constexpr (is_optional<U>::value)
          {
@@ -854,7 +863,7 @@ namespace psio {
             {
                using E = typename is_optional<U>::element_type;
                constexpr uint32_t off = optional_payload_offset<U>();
-               return validate_leaf<E>(buf, at + off);
+               return validate_leaf<E>(buf, at + off, depth + 1);
             }
             return true;
          }
@@ -874,7 +883,7 @@ namespace psio {
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                ((idx == Is
                     ? (ok = validate_leaf<std::variant_alternative_t<Is, U>>(
-                              buf, at + off),
+                              buf, at + off, depth + 1),
                        true)
                     : false) ||
                 ...);
@@ -888,7 +897,8 @@ namespace psio {
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                ((ok = ok &&
                       validate_leaf<std::tuple_element_t<Is, U>>(
-                          buf, at + tuple_field_offset<U, Is>())),
+                          buf, at + tuple_field_offset<U, Is>(),
+                          depth + 1)),
                 ...);
             }(std::make_index_sequence<N>{});
             return ok;

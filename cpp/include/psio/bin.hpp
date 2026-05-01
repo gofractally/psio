@@ -3,14 +3,18 @@
 // psio/bin.hpp — `bin` format tag.
 //
 // `bin` is the simplest binary format: primitives serialize as raw LE
-// bytes; std::string and std::vector get a u32 length prefix; std::array
-// and reflected records concatenate their elements. No offset tables,
-// no headers, no heap region.
+// bytes; std::string and std::vector get a LEB128 varuint32 length
+// prefix; std::array concatenates its elements. Reflected records carry
+// a varuint content_size prefix on non-DWNC types (forward-compat
+// extensibility) and concatenate their fields when DWNC. No offset
+// tables, no fixed-size headers, no heap region.
 //
 // Scope (Phase 10 MVP): primitives, std::array, std::vector, std::string,
 // std::optional, reflected records. Matches the other-format MVPs.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/unaligned_iter.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -339,6 +343,12 @@ namespace psio {
       // no varuint content_size prefix. The caller adds the prefix for
       // non-DWNC records. Shared between variable_contrib<Record> and
       // the encode path so the size walk happens once.
+      //
+      // Member-level `as<Tag>` overrides force a field through the named
+      // adapter; the wire is then `varuint32 length + adapter bytes`
+      // regardless of what the underlying type would otherwise emit.
+      // Mirror the encode walker exactly so size_of-then-encode produces
+      // a buffer of the right size.
       template <typename T>
       std::size_t record_body_size(const T& v)
       {
@@ -349,10 +359,28 @@ namespace psio {
                ([&]
                 {
                    using F = typename R::template member_type<Is>;
-                   body += fixed_contrib<F>();
-                   if constexpr (!fully_fixed<F>())
-                      body += variable_contrib(
+                   using eff =
+                      typename ::psio::effective_annotations_for<
+                         T, F,
+                         R::template member_pointer<Is>>::value_t;
+                   if constexpr (::psio::has_as_override_v<eff>)
+                   {
+                      using Tag = ::psio::adapter_tag_of_t<eff>;
+                      using Proj = ::psio::adapter<
+                         std::remove_cvref_t<F>, Tag>;
+                      const auto n = Proj::packsize(
                          v.*(R::template member_pointer<Is>));
+                      body += varuint32_size(
+                                 static_cast<std::uint32_t>(n)) +
+                              n;
+                   }
+                   else
+                   {
+                      body += fixed_contrib<F>();
+                      if constexpr (!fully_fixed<F>())
+                         body += variable_contrib(
+                            v.*(R::template member_pointer<Is>));
+                   }
                 }()),
                ...);
          }(std::make_index_sequence<R::member_count>{});
@@ -396,11 +424,31 @@ namespace psio {
                ([&]
                 {
                    using F = typename R::template member_type<Is>;
-                   body += fixed_contrib<F>();
-                   if constexpr (!fully_fixed<F>())
-                      body += variable_contrib_collect(
-                         v.*(R::template member_pointer<Is>), sizes,
-                         idx);
+                   using eff =
+                      typename ::psio::effective_annotations_for<
+                         T, F,
+                         R::template member_pointer<Is>>::value_t;
+                   if constexpr (::psio::has_as_override_v<eff>)
+                   {
+                      // Member-level adapter: opaque [varuint length +
+                      // bytes]. No nested record slots in sizes[].
+                      using Tag = ::psio::adapter_tag_of_t<eff>;
+                      using Proj = ::psio::adapter<
+                         std::remove_cvref_t<F>, Tag>;
+                      const auto n = Proj::packsize(
+                         v.*(R::template member_pointer<Is>));
+                      body += varuint32_size(
+                                 static_cast<std::uint32_t>(n)) +
+                              n;
+                   }
+                   else
+                   {
+                      body += fixed_contrib<F>();
+                      if constexpr (!fully_fixed<F>())
+                         body += variable_contrib_collect(
+                            v.*(R::template member_pointer<Is>), sizes,
+                            idx);
+                   }
                 }()),
                ...);
          }(std::make_index_sequence<R::member_count>{});
@@ -562,7 +610,15 @@ namespace psio {
                   ([&]
                    {
                       using F = typename R::template member_type<Is>;
-                      if constexpr (!fully_fixed<F>())
+                      using eff =
+                         typename ::psio::effective_annotations_for<
+                            T, F,
+                            R::template member_pointer<Is>>::value_t;
+                      // Member-level overrides emit opaque adapter bytes
+                      // — no nested record slots required for them.
+                      if constexpr (::psio::has_as_override_v<eff>)
+                         return;
+                      else if constexpr (!fully_fixed<F>())
                          k += bin_count_records(
                             v.*(R::template member_pointer<Is>));
                    }()),
@@ -826,9 +882,12 @@ namespace psio {
                fixed_contrib<E>() == sizeof(E);
             if constexpr (is_arith || is_memcpy_record)
             {
-               const E* first =
-                  reinterpret_cast<const E*>(src.data() + pos);
-               out.assign(first, first + n);
+               // Alignment-safe: dispatches to the libc++ memcpy fast
+               // path on aligned src, falls back to unaligned_iter on
+               // strict-alignment hardware where reinterpret_cast<E*>
+               // on misaligned wire data would trap (SIGBUS on
+               // aarch64). See detail/unaligned_iter.hpp.
+               psio::detail::assign_from_wire(out, src.data() + pos, n);
                pos += sizeof(E) * n;
             }
             else
@@ -1053,6 +1112,296 @@ namespace psio {
          }
       }
 
+      // ── Structural validator ─────────────────────────────────────────
+      //
+      // Walks the buffer field-by-field by static type, advancing `pos`
+      // and confirming `pos <= bytes.size()` at every read. Mirrors the
+      // decode walker shape-for-shape but allocates nothing and does
+      // not produce a value. Hard depth cap from kMaxValidationDepth
+      // refuses pathological recursion.
+      //
+      // For the adapter-dispatch slot we use the underlying adapter's
+      // own validate(span<const char>) hook when available; otherwise
+      // we fall back to packsize-checked decode-and-discard via Proj.
+      //
+      // varuint length prefixes are read with the bounded leb128
+      // decoder (`scalar::decode_u32`) so malformed continuation bytes
+      // are rejected explicitly instead of being silently truncated.
+
+      inline codec_status
+      read_varuint32_checked(std::span<const char> src, std::size_t& pos,
+                             std::uint32_t& out) noexcept
+      {
+         const auto avail = src.size() - pos;
+         const auto r     = ::psio::varint::leb128::scalar::decode_u32(
+            reinterpret_cast<const std::uint8_t*>(src.data() + pos),
+            avail);
+         if (!r.ok)
+            return codec_fail("bin: malformed varuint",
+                              static_cast<std::uint32_t>(pos), "bin");
+         out = r.value;
+         pos += r.len;
+         return codec_ok();
+      }
+
+      template <typename T>
+      codec_status
+      validate_value(std::span<const char> src, std::size_t& pos,
+                     std::size_t depth) noexcept
+      {
+         if (depth > kMaxValidationDepth)
+            return codec_fail("bin: max depth exceeded",
+                              static_cast<std::uint32_t>(pos), "bin");
+
+         const std::size_t avail = src.size() - pos;
+
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                          ::psio::bin, T>)
+         {
+            // Adapter slot: varuint length prefix then opaque payload.
+            std::uint32_t n = 0;
+            if (auto st = read_varuint32_checked(src, pos, n); !st.ok())
+               return st;
+            if (n > src.size() - pos)
+               return codec_fail("bin: adapter payload OOB",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            // Adapters are opaque to the bin walker; the bytes are
+            // accepted as-is (the underlying adapter's own validate
+            // would re-walk them, which is a layering boundary the
+            // structural pass intentionally does not cross).
+            pos += n;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, bool>)
+         {
+            if (avail < 1)
+               return codec_fail("bin: truncated bool",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            std::uint8_t b = static_cast<std::uint8_t>(src[pos]);
+            if (b > 1)
+               return codec_fail("bin: bool not 0/1",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            ++pos;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, ::psio::uint256>)
+         {
+            if (avail < 32)
+               return codec_fail("bin: truncated u256",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            pos += 32;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, ::psio::uint128> ||
+                            std::is_same_v<T, ::psio::int128>)
+         {
+            if (avail < 16)
+               return codec_fail("bin: truncated u128/i128",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            pos += 16;
+            return codec_ok();
+         }
+         else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>)
+         {
+            if (avail < sizeof(T))
+               return codec_fail("bin: truncated arithmetic",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            pos += sizeof(T);
+            return codec_ok();
+         }
+         else if constexpr (is_std_array<T>::value)
+         {
+            using E = typename T::value_type;
+            if constexpr (std::is_arithmetic_v<E> &&
+                          !std::is_same_v<E, bool>)
+            {
+               if (avail < std::tuple_size<T>::value * sizeof(E))
+                  return codec_fail("bin: truncated array",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bin");
+               pos += std::tuple_size<T>::value * sizeof(E);
+               return codec_ok();
+            }
+            else
+            {
+               for (std::size_t i = 0; i < std::tuple_size<T>::value; ++i)
+               {
+                  auto st = validate_value<E>(src, pos, depth + 1);
+                  if (!st.ok())
+                     return st;
+               }
+               return codec_ok();
+            }
+         }
+         else if constexpr (is_std_vector<T>::value)
+         {
+            using E = typename T::value_type;
+            std::uint32_t n = 0;
+            if (auto st = read_varuint32_checked(src, pos, n); !st.ok())
+               return st;
+            if constexpr (std::is_arithmetic_v<E> &&
+                          !std::is_same_v<E, bool>)
+            {
+               if (n > (src.size() - pos) / sizeof(E))
+                  return codec_fail("bin: vector body OOB",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bin");
+               pos += static_cast<std::size_t>(n) * sizeof(E);
+               return codec_ok();
+            }
+            else
+            {
+               for (std::uint32_t i = 0; i < n; ++i)
+               {
+                  auto st = validate_value<E>(src, pos, depth + 1);
+                  if (!st.ok())
+                     return st;
+               }
+               return codec_ok();
+            }
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
+         {
+            std::uint32_t n = 0;
+            if (auto st = read_varuint32_checked(src, pos, n); !st.ok())
+               return st;
+            if (n > src.size() - pos)
+               return codec_fail("bin: string body OOB",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            pos += n;
+            return codec_ok();
+         }
+         else if constexpr (is_std_optional<T>::value)
+         {
+            if (avail < 1)
+               return codec_fail("bin: truncated optional tag",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            std::uint8_t tag = static_cast<std::uint8_t>(src[pos]);
+            ++pos;
+            if (tag > 1)
+               return codec_fail("bin: optional tag not 0/1",
+                                 static_cast<std::uint32_t>(pos - 1),
+                                 "bin");
+            if (tag == 0)
+               return codec_ok();
+            using V = typename T::value_type;
+            return validate_value<V>(src, pos, depth + 1);
+         }
+         else if constexpr (is_std_variant<T>::value)
+         {
+            std::uint32_t idx = 0;
+            const std::size_t pre_pos = pos;
+            if (auto st = read_varuint32_checked(src, pos, idx); !st.ok())
+               return st;
+            constexpr std::size_t N = std::variant_size_v<T>;
+            if (idx >= N)
+               return codec_fail("bin: variant tag out of range",
+                                 static_cast<std::uint32_t>(pre_pos),
+                                 "bin");
+            codec_status err = codec_ok();
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (((idx == Is)
+                    ? (err = validate_value<
+                          std::variant_alternative_t<Is, T>>(src, pos,
+                                                              depth + 1),
+                       false)
+                    : true) &&
+                ...);
+            }(std::make_index_sequence<N>{});
+            return err;
+         }
+         else if constexpr (is_bitvector<T>::value)
+         {
+            constexpr std::size_t nbytes = (T::size_value + 7) / 8;
+            if (avail < nbytes)
+               return codec_fail("bin: truncated bitvector",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            pos += nbytes;
+            return codec_ok();
+         }
+         else if constexpr (is_bitlist<T>::value)
+         {
+            std::uint32_t bits = 0;
+            if (auto st = read_varuint32_checked(src, pos, bits); !st.ok())
+               return st;
+            const std::size_t nbytes = (static_cast<std::size_t>(bits) + 7) / 8;
+            if (nbytes > src.size() - pos)
+               return codec_fail("bin: bitlist body OOB",
+                                 static_cast<std::uint32_t>(pos), "bin");
+            pos += nbytes;
+            return codec_ok();
+         }
+         else if constexpr (Record<T>)
+         {
+            using R = ::psio::reflect<T>;
+            // Memcpy fast path mirror — DWNC packed records have no
+            // length prefix, fields are contiguous, no per-field
+            // bounds beyond the record's total span check.
+            if constexpr (::psio::is_dwnc_v<T> && fully_fixed<T>() &&
+                          std::is_trivially_copyable_v<T> &&
+                          fixed_contrib<T>() == sizeof(T))
+            {
+               if (avail < sizeof(T))
+                  return codec_fail("bin: truncated DWNC record",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bin");
+               pos += sizeof(T);
+               return codec_ok();
+            }
+            std::size_t body_end = src.size();
+            if constexpr (!::psio::is_dwnc_v<T>)
+            {
+               // Non-DWNC records carry a varuint content_size prefix.
+               // The body extent gates how far children can read; we
+               // still walk the children here so adversarial offsets
+               // inside the body are caught.
+               std::uint32_t body_size = 0;
+               if (auto st =
+                      read_varuint32_checked(src, pos, body_size);
+                   !st.ok())
+                  return st;
+               if (body_size > src.size() - pos)
+                  return codec_fail("bin: record body OOB",
+                                    static_cast<std::uint32_t>(pos),
+                                    "bin");
+               body_end = pos + body_size;
+            }
+            const std::size_t body_start = pos;
+            codec_status      err        = codec_ok();
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (((err.ok())
+                    ? (err = validate_value<
+                          typename R::template member_type<Is>>(
+                          src, pos, depth + 1),
+                       0)
+                    : 0),
+                ...);
+            }(std::make_index_sequence<R::member_count>{});
+            if (!err.ok())
+               return err;
+            if constexpr (!::psio::is_dwnc_v<T>)
+            {
+               // Per the bin extensibility rule, decoders skip past
+               // unread trailing fields. We require pos <= body_end
+               // and advance pos to body_end so trailing bytes are
+               // consumed by this record.
+               if (pos > body_end)
+                  return codec_fail("bin: record body overrun",
+                                    static_cast<std::uint32_t>(body_start),
+                                    "bin");
+               pos = body_end;
+            }
+            return codec_ok();
+         }
+         else
+         {
+            return codec_fail("bin: unsupported type in validate",
+                              static_cast<std::uint32_t>(pos), "bin");
+         }
+      }
+
    }  // namespace detail::bin_impl
 
    struct bin : format_tag_base<bin>
@@ -1132,12 +1481,21 @@ namespace psio {
       friend codec_status tag_invoke(decltype(::psio::validate<T>), bin, T*,
                                      std::span<const char> bytes) noexcept
       {
-         // Minimal structural check: non-empty for non-void types.
          if (bytes.empty())
             return codec_fail("bin: empty buffer", 0, "bin");
          if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "bin");
              !st.ok())
             return st;
+         std::size_t pos = 0;
+         auto st = detail::bin_impl::validate_value<T>(bytes, pos, 0);
+         if (!st.ok())
+            return st;
+         //  Top-level non-DWNC records consume their own trailing
+         //  bytes via the body_size prefix; for non-record top-level
+         //  types we expect every byte to be accounted for.
+         if (pos != bytes.size())
+            return codec_fail("bin: trailing bytes",
+                              static_cast<std::uint32_t>(pos), "bin");
          return codec_ok();
       }
 

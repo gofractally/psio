@@ -24,6 +24,8 @@
 //     whose fixed region exceeds 64 KiB
 
 #include <psio/cpo.hpp>
+#include <psio/detail/unaligned_iter.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -303,11 +305,28 @@ namespace psio {
       // bulk-memcpy std::vector, and nested Records, write directly
       // into `out`; for everything else fall back to decode_value +
       // move-assign.
+      //
+      // Adapter dispatch must come first — a type with a binary-category
+      // adapter (e.g. PSIO_ADAPTER(Blob, binary_category, …)) presents to
+      // frac as opaque runtime-sized bytes. The outer record walker has
+      // already framed the payload with a [W-byte length] slot, so the
+      // span [pos, end) is exactly the adapter's bytes. Without this
+      // branch frac would walk Blob's reflected fields against bin-encoded
+      // bytes, mis-reading lengths and walking off the heap (BUS / SEGV).
       template <std::size_t W, typename T>
       void decode_into(std::span<const char> src, std::size_t pos,
                        std::size_t end, T& out)
       {
-         if constexpr (std::is_same_v<T, std::string>)
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                          ::psio::frac_<W>, T>)
+         {
+            using Proj = ::psio::adapter<std::remove_cvref_t<T>,
+                                             ::psio::binary_category>;
+            out = Proj::decode(
+               std::span<const char>(src.data() + pos, end - pos));
+            return;
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
          {
             const std::uint32_t n = read_word<W>(src, pos);
             out.assign(src.data() + pos + W,
@@ -328,9 +347,9 @@ namespace psio {
                const std::uint32_t byte_count = read_word<W>(src, pos);
                const std::size_t   elem_count =
                   static_cast<std::size_t>(byte_count) / sizeof(E);
-               const E* first = reinterpret_cast<const E*>(
-                  src.data() + pos + W);
-               out.assign(first, first + elem_count);
+               // Alignment-safe — see detail/unaligned_iter.hpp.
+               psio::detail::assign_from_wire(
+                  out, src.data() + pos + W, elem_count);
             }
             else
             {
@@ -1049,10 +1068,10 @@ namespace psio {
          {
             // assign(p, p+n) avoids resize's value-init pass — for
             // trivially-copyable T it lowers to a single memcpy.
+            // Alignment-safe — see detail/unaligned_iter.hpp.
             const std::uint32_t n =
                byte_count / static_cast<std::uint32_t>(sizeof(T));
-            const T* first = reinterpret_cast<const T*>(src.data() + cursor);
-            out.assign(first, first + n);
+            psio::detail::assign_from_wire(out, src.data() + cursor, n);
          }
          else if constexpr (is_fixed_v<T>)
          {
@@ -1361,6 +1380,23 @@ namespace psio {
 
             using R = ::psio::reflect<T>;
 
+            // Member-level `as<Tag>` override forces a field to be
+            // serialized via the named adapter regardless of whether the
+            // underlying type would otherwise be fixed. Size accounting
+            // must mirror the encode walker: an overridden field gets a
+            // W-byte slot in the fixed_region and the adapter's payload
+            // contributes to heap.
+            constexpr auto field_has_override = []<std::size_t I>(
+                                                   std::integral_constant<
+                                                      std::size_t, I>) constexpr
+            {
+               using F = typename R::template member_type<I>;
+               using eff =
+                  typename ::psio::effective_annotations_for<
+                     T, F, R::template member_pointer<I>>::value_t;
+               return ::psio::has_as_override_v<eff>;
+            };
+
             // Phase 1 — fixed_region size (compile-time; fully folded
             // when every field is fixed).
             constexpr std::size_t fixed_region =
@@ -1369,7 +1405,10 @@ namespace psio {
                   (
                      ([&]<std::size_t I>() {
                         using F = typename R::template member_type<I>;
-                        if constexpr (is_fixed_v<F>)
+                        constexpr bool override_v =
+                           field_has_override(
+                              std::integral_constant<std::size_t, I>{});
+                        if constexpr (!override_v && is_fixed_v<F>)
                            total += fixed_size_of<F>();
                         else
                            total += W;  // offset slot
@@ -1385,10 +1424,27 @@ namespace psio {
                   ([&]
                    {
                       using F = typename R::template member_type<Is>;
-                      if constexpr (!is_fixed_v<F>)
+                      constexpr bool override_v =
+                         field_has_override(
+                            std::integral_constant<std::size_t, Is>{});
+                      const auto& fref =
+                         v.*(R::template member_pointer<Is>);
+                      if constexpr (override_v)
                       {
-                         const auto& fref =
-                            v.*(R::template member_pointer<Is>);
+                         // Overridden field: heap payload is the adapter's
+                         // packsize. Adapters always emit a payload
+                         // (no notion of empty / None).
+                         using eff = typename ::psio::
+                            effective_annotations_for<
+                               T, F,
+                               R::template member_pointer<Is>>::value_t;
+                         using Tag  = ::psio::adapter_tag_of_t<eff>;
+                         using Proj = ::psio::adapter<
+                            std::remove_cvref_t<F>, Tag>;
+                         heap += Proj::packsize(fref);
+                      }
+                      else if constexpr (!is_fixed_v<F>)
+                      {
                          if constexpr (is_std_optional_v<F>)
                          {
                             if (fref.has_value())
@@ -1432,34 +1488,871 @@ namespace psio {
       }
 
       // ── Validation (structural) ───────────────────────────────────────────
+      //
+      // Full structural walker matching the bounds + depth discipline of
+      // pssz / borsh / bincode / bin / avro. Walks the wire field-by-
+      // field by static type, reads length / offset prefixes, recurses
+      // into variable-field payloads via slot offsets, and confirms
+      // `pos <= buffer.size()` at every step.
+      //
+      // depth threads kMaxValidationDepth through every container /
+      // record / optional / variant / array level.
+      //
+      // Two entry points:
+      //   validate_value<W, T>(src, pos, end, depth)
+      //     — top-level value at [pos, end). Records read their own
+      //       u16 header (unless DWNC). Variable-field offsets in
+      //       records are pointer-relative to slot_pos and must
+      //       resolve to a payload that fits within the record's
+      //       containing region.
+      //   validate_record_fixed_inline<W, T>(src, cursor, end, depth)
+      //     — fixed nested record inlined into a parent's fixed
+      //       region. No header, no heap; just consume each field's
+      //       fixed bytes from `cursor`.
 
       template <std::size_t W, typename T>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
-                                  std::size_t end) noexcept
+                                  std::size_t end, std::size_t depth) noexcept;
+
+      // Forward decl — payload_end is used inside validate_value's record
+      // walker to track monotonic offsets across heap entries.
+      template <std::size_t W, typename T>
+      std::size_t payload_end(std::span<const char> src, std::size_t pos,
+                              std::size_t end) noexcept;
+
+      template <std::size_t W, Record T>
+      codec_status validate_record_fixed_inline(std::span<const char> src,
+                                                std::size_t&          cursor,
+                                                std::size_t           end,
+                                                std::size_t depth) noexcept
       {
-         if constexpr (is_fixed_v<T>)
-            return (end - pos) >= fixed_size_of<T>()
-                      ? codec_ok()
-                      : codec_fail("frac: buffer too small for fixed type",
-                                   static_cast<std::uint32_t>(pos), "frac");
-         else if constexpr (std::is_same_v<T, std::string>)
-            return codec_ok();
-         else if constexpr (is_std_vector_v<T>)
-            return (end - pos) >= W
-                      ? codec_ok()
-                      : codec_fail("frac: vector length prefix truncated",
-                                   static_cast<std::uint32_t>(pos), "frac");
-         else if constexpr (Record<T>)
+         if (depth > ::psio::kMaxValidationDepth)
+            return codec_fail("frac: max depth exceeded",
+                              static_cast<std::uint32_t>(cursor), "frac");
+         using R = ::psio::reflect<T>;
+         codec_status err = codec_ok();
+         [&]<std::size_t... Is>(std::index_sequence<Is...>)
          {
-            if constexpr (::psio::is_dwnc_v<T>)
-               return codec_ok();
-            return (end - pos) >= 2
+            (((err.ok())
+                 ? ([&]() -> int
+                    {
+                       using F = typename R::template member_type<Is>;
+                       static_assert(is_fixed_v<F>,
+                                     "validate_record_fixed_inline: variable "
+                                     "field in fixed record");
+                       const std::size_t fsz = fixed_size_of<F>();
+                       if (cursor > end || end - cursor < fsz)
+                       {
+                          err = codec_fail(
+                             "frac: fixed-region field overruns",
+                             static_cast<std::uint32_t>(cursor), "frac");
+                          return 0;
+                       }
+                       if constexpr (Record<F>)
+                       {
+                          auto saved = cursor;
+                          err = validate_record_fixed_inline<W, F>(
+                             src, cursor, end, depth + 1);
+                          (void)saved;
+                       }
+                       else
+                       {
+                          // Validate primitive / array / bitvector body
+                          // at [cursor, cursor+fsz). validate_value's
+                          // contract: caller passes the field's exclusive
+                          // end so the walker won't run past it.
+                          err = validate_value<W, F>(
+                             src, cursor, cursor + fsz, depth + 1);
+                          cursor += fsz;
+                       }
+                       return 0;
+                    }())
+                 : 0),
+              ...);
+         }(std::make_index_sequence<R::member_count>{});
+         return err;
+      }
+
+      template <std::size_t W, typename T>
+      codec_status validate_value(std::span<const char> src, std::size_t pos,
+                                  std::size_t end, std::size_t depth) noexcept
+      {
+         if (depth > ::psio::kMaxValidationDepth)
+            return codec_fail("frac: max depth exceeded",
+                              static_cast<std::uint32_t>(pos), "frac");
+         if (pos > end)
+            return codec_fail("frac: cursor past end",
+                              static_cast<std::uint32_t>(pos), "frac");
+         const std::size_t avail = end - pos;
+
+         // Adapter dispatch — the adapter framed bytes; treat the
+         // payload as opaque (the host framing already bounds it).
+         if constexpr (::psio::format_should_dispatch_adapter_v<
+                          ::psio::frac_<W>, T>)
+         {
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, bool>)
+         {
+            if (avail < 1)
+               return codec_fail("frac: truncated bool",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            std::uint8_t b = static_cast<std::uint8_t>(src[pos]);
+            if (b > 1)
+               return codec_fail("frac: bool not 0/1",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, ::psio::uint256>)
+         {
+            return avail >= 32
                       ? codec_ok()
-                      : codec_fail("frac: record header truncated",
+                      : codec_fail("frac: truncated u256",
                                    static_cast<std::uint32_t>(pos), "frac");
          }
-         else
+         else if constexpr (std::is_same_v<T, ::psio::uint128> ||
+                            std::is_same_v<T, ::psio::int128>)
+         {
+            return avail >= 16
+                      ? codec_ok()
+                      : codec_fail("frac: truncated u128/i128",
+                                   static_cast<std::uint32_t>(pos), "frac");
+         }
+         else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>)
+         {
+            return avail >= sizeof(T)
+                      ? codec_ok()
+                      : codec_fail("frac: truncated arithmetic",
+                                   static_cast<std::uint32_t>(pos), "frac");
+         }
+         else if constexpr (is_bitvector<T>::value)
+         {
+            constexpr std::size_t nbytes = (T::size_value + 7) / 8;
+            return avail >= nbytes
+                      ? codec_ok()
+                      : codec_fail("frac: truncated bitvector",
+                                   static_cast<std::uint32_t>(pos), "frac");
+         }
+         else if constexpr (is_bitlist<T>::value)
+         {
+            constexpr std::size_t LB =
+               bitlist_len_bytes<T::max_size_value>();
+            if (avail < LB)
+               return codec_fail("frac: truncated bitlist length",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            std::size_t bit_count = 0;
+            if constexpr (LB == 1)
+               bit_count = static_cast<std::uint8_t>(src[pos]);
+            else if constexpr (LB == 2)
+            {
+               std::uint16_t v;
+               std::memcpy(&v, src.data() + pos, 2);
+               bit_count = v;
+            }
+            else if constexpr (LB == 4)
+            {
+               std::uint32_t v;
+               std::memcpy(&v, src.data() + pos, 4);
+               bit_count = v;
+            }
+            else
+            {
+               std::uint64_t v;
+               std::memcpy(&v, src.data() + pos, 8);
+               bit_count = static_cast<std::size_t>(v);
+            }
+            if (bit_count > T::max_size_value)
+               return codec_fail("frac: bitlist exceeds declared bound",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            const std::size_t nbytes = (bit_count + 7) / 8;
+            if (nbytes > avail - LB)
+               return codec_fail("frac: bitlist body OOB",
+                                 static_cast<std::uint32_t>(pos), "frac");
             return codec_ok();
+         }
+         else if constexpr (is_std_array_v<T>)
+         {
+            using E                 = typename T::value_type;
+            constexpr std::size_t N = std::tuple_size<T>::value;
+            if constexpr (is_fixed_v<E>)
+            {
+               // Fixed array: N * fixed_size_of<E> bytes.
+               constexpr std::size_t total = N * fixed_size_of<E>();
+               if (avail < total)
+                  return codec_fail("frac: truncated fixed array",
+                                    static_cast<std::uint32_t>(pos), "frac");
+               // For non-record fixed Es the byte-count check above is
+               // sufficient (no internal validity beyond fitting).
+               // For record Es, walk each one — UNLESS its layout is
+               // memcpy-equivalent, in which case the bytes-fit check
+               // is the whole structural validation.
+               constexpr bool memcpy_layout =
+                  Record<E> && std::is_trivially_copyable_v<E> &&
+                  fixed_size_of<E>() == sizeof(E);
+               if constexpr (Record<E> && !memcpy_layout)
+               {
+                  std::size_t cursor = pos;
+                  for (std::size_t i = 0; i < N; ++i)
+                  {
+                     auto st = validate_record_fixed_inline<W, E>(
+                        src, cursor, pos + total, depth + 1);
+                     if (!st.ok())
+                        return st;
+                  }
+               }
+               return codec_ok();
+            }
+            else
+            {
+               // Array of variable-element: each slot is [W-byte len]
+               // [payload] back-to-back.
+               std::size_t cursor = pos;
+               for (std::size_t i = 0; i < N; ++i)
+               {
+                  if (cursor + W > end)
+                     return codec_fail(
+                        "frac: array element length truncated",
+                        static_cast<std::uint32_t>(cursor), "frac");
+                  const std::uint32_t len = read_word<W>(src, cursor);
+                  cursor += W;
+                  if (len > end - cursor)
+                     return codec_fail(
+                        "frac: array element body OOB",
+                        static_cast<std::uint32_t>(cursor), "frac");
+                  auto st = validate_value<W, E>(
+                     src, cursor, cursor + len, depth + 1);
+                  if (!st.ok())
+                     return st;
+                  cursor += len;
+               }
+               return codec_ok();
+            }
+         }
+         else if constexpr (is_std_vector_v<T>)
+         {
+            using E = typename T::value_type;
+            if (avail < W)
+               return codec_fail("frac: vector length prefix truncated",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            const std::uint32_t byte_count = read_word<W>(src, pos);
+            const std::size_t   body_pos   = pos + W;
+            if (byte_count > end - body_pos)
+               return codec_fail("frac: vector body OOB",
+                                 static_cast<std::uint32_t>(body_pos),
+                                 "frac");
+            constexpr bool is_arith =
+               std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
+            if constexpr (is_arith)
+            {
+               // Body must be a whole number of elements.
+               if (byte_count % sizeof(E) != 0)
+                  return codec_fail(
+                     "frac: vector<arith> byte_count not a multiple of "
+                     "element size",
+                     static_cast<std::uint32_t>(pos), "frac");
+               return codec_ok();
+            }
+            else if constexpr (std::is_same_v<E, bool>)
+            {
+               // Bool elements stored as 1 byte each; check value range
+               // for every element.
+               for (std::size_t i = 0; i < byte_count; ++i)
+               {
+                  const auto b =
+                     static_cast<std::uint8_t>(src[body_pos + i]);
+                  if (b > 1)
+                     return codec_fail("frac: vector<bool> non-0/1 byte",
+                                       static_cast<std::uint32_t>(
+                                          body_pos + i),
+                                       "frac");
+               }
+               return codec_ok();
+            }
+            else if constexpr (is_fixed_v<E>)
+            {
+               constexpr std::size_t esz = fixed_size_of<E>();
+               if (byte_count % esz != 0)
+                  return codec_fail(
+                     "frac: vector<fixed> byte_count not a multiple of "
+                     "element size",
+                     static_cast<std::uint32_t>(pos), "frac");
+               const std::size_t n = byte_count / esz;
+               // Memcpy-layout fast path: trivially-copyable +
+               // sized-equal records have wire bytes == memory bytes,
+               // so the byte-count + multiple-of-esz check above is
+               // sufficient. Mirrors pssz's same shortcut
+               // (pssz.hpp:1250). Without this, vector<DWNC record>
+               // walks every element and pays N× the per-element cost.
+               constexpr bool memcpy_layout =
+                  Record<E> && std::is_trivially_copyable_v<E> &&
+                  fixed_size_of<E>() == sizeof(E);
+               if constexpr (Record<E> && !memcpy_layout)
+               {
+                  std::size_t cursor = body_pos;
+                  for (std::size_t i = 0; i < n; ++i)
+                  {
+                     auto st = validate_record_fixed_inline<W, E>(
+                        src, cursor, body_pos + byte_count, depth + 1);
+                     if (!st.ok())
+                        return st;
+                  }
+               }
+               return codec_ok();
+            }
+            else
+            {
+               // vector<variable element> — wire format documented in
+               // encode as a stretch goal (offset-table walker). The
+               // codec is gated against this shape today, so the
+               // validator follows suit and refuses.
+               return codec_fail(
+                  "frac: vector<variable-element> validation not "
+                  "supported",
+                  static_cast<std::uint32_t>(pos), "frac");
+            }
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
+         {
+            if (avail < W)
+               return codec_fail("frac: string length prefix truncated",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            const std::uint32_t n        = read_word<W>(src, pos);
+            const std::size_t   body_pos = pos + W;
+            if (n > end - body_pos)
+               return codec_fail("frac: string body OOB",
+                                 static_cast<std::uint32_t>(body_pos),
+                                 "frac");
+            return codec_ok();
+         }
+         else if constexpr (is_std_optional_v<T>)
+         {
+            // Top-level std::optional: [W-byte slot]. slot==1 None,
+            // slot==0 empty/Some(empty), else offset to payload.
+            using V = typename T::value_type;
+            if (avail < W)
+               return codec_fail("frac: optional slot truncated",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            const std::uint32_t slot = read_word<W>(src, pos);
+            if (slot == 1)
+               return codec_ok();
+            if (slot == 0)
+            {
+               // Some(empty container) → no payload. Some(non-container)
+               // at the top level decodes by reading from pos+W with
+               // the buffer's full extent — we mirror that here.
+               if constexpr (is_std_vector_v<V> ||
+                             std::is_same_v<V, std::string>)
+                  return codec_ok();
+               return validate_value<W, V>(src, pos + W, end, depth + 1);
+            }
+            // Some(payload) at offset.
+            if (slot > end - pos)
+               return codec_fail(
+                  "frac: optional offset past buffer end",
+                  static_cast<std::uint32_t>(pos), "frac");
+            return validate_value<W, V>(
+               src, pos + slot, end, depth + 1);
+         }
+         else if constexpr (is_std_variant_v<T>)
+         {
+            // [u8 tag][W-byte size][payload bytes].
+            constexpr std::size_t hdr = 1 + W;
+            if (avail < hdr)
+               return codec_fail("frac: truncated variant header",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            const std::uint8_t idx =
+               static_cast<std::uint8_t>(src[pos]);
+            // High bit reserved (≤ 128 alts).
+            if (idx & 0x80)
+               return codec_fail(
+                  "frac: variant tag high bit set (reserved)",
+                  static_cast<std::uint32_t>(pos), "frac");
+            constexpr std::size_t N = std::variant_size_v<T>;
+            if (idx >= N)
+               return codec_fail("frac: variant tag out of range",
+                                 static_cast<std::uint32_t>(pos), "frac");
+            const std::uint32_t size_bytes =
+               read_word<W>(src, pos + 1);
+            const std::size_t content_pos = pos + hdr;
+            if (size_bytes > end - content_pos)
+               return codec_fail("frac: variant payload size OOB",
+                                 static_cast<std::uint32_t>(content_pos),
+                                 "frac");
+            const std::size_t content_end = content_pos + size_bytes;
+            codec_status      err          = codec_ok();
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (void)(((idx == Is)
+                    ? (err = validate_value<
+                          W,
+                          std::variant_alternative_t<Is, T>>(
+                          src, content_pos, content_end, depth + 1),
+                       false)
+                    : true) &&
+                ...);
+            }(std::make_index_sequence<N>{});
+            return err;
+         }
+         else if constexpr (Record<T>)
+         {
+            // Memcpy fast path (DWNC + trivially-copyable + sized).
+            if constexpr (::psio::is_dwnc_v<T> &&
+                          std::is_trivially_copyable_v<T> &&
+                          is_fixed_v<T>)
+               if constexpr (fixed_size_of<T>() == sizeof(T))
+            {
+               return avail >= sizeof(T)
+                         ? codec_ok()
+                         : codec_fail(
+                              "frac: dwnc record truncated",
+                              static_cast<std::uint32_t>(pos), "frac");
+            }
+            // Fully-fixed (non-DWNC) record fast path. The wire frame
+            // is [u16 header][fixed_region]. Once the buffer covers
+            // both, every field's bytes are accounted for — no per-
+            // field walk is needed because the static type pins each
+            // field's offset and size. Mirrors pssz's same shortcut
+            // (pssz.hpp:1430).
+            if constexpr (is_fixed_v<T>)
+            {
+               constexpr std::size_t hdr =
+                  ::psio::is_dwnc_v<T> ? std::size_t{0} : std::size_t{2};
+               return avail >= hdr + fixed_size_of<T>()
+                         ? codec_ok()
+                         : codec_fail(
+                              "frac: fixed record truncated",
+                              static_cast<std::uint32_t>(pos), "frac");
+            }
+
+            using R = ::psio::reflect<T>;
+
+            // 1. Read u16 header (unless DWNC). Header value names the
+            //    fixed_region byte count — must equal the
+            //    statically-computed sum of field sizes (offset slots
+            //    + inlined fixed fields).
+            std::size_t fixed_start;
+            std::size_t hdr_bytes;
+            if constexpr (::psio::is_dwnc_v<T>)
+            {
+               fixed_start = pos;
+               hdr_bytes   = 0;
+            }
+            else
+            {
+               if (avail < 2)
+                  return codec_fail("frac: record header truncated",
+                                    static_cast<std::uint32_t>(pos),
+                                    "frac");
+               fixed_start = pos + 2;
+               hdr_bytes   = 2;
+            }
+            (void)hdr_bytes;
+
+            // Compute fixed_region statically (per encode/size_of).
+            constexpr auto field_has_override = []<std::size_t I>(
+                                                   std::integral_constant<
+                                                      std::size_t, I>) constexpr
+            {
+               using F = typename R::template member_type<I>;
+               using eff =
+                  typename ::psio::effective_annotations_for<
+                     T, F, R::template member_pointer<I>>::value_t;
+               return ::psio::has_as_override_v<eff>;
+            };
+
+            constexpr std::size_t fixed_region =
+               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                  std::size_t total = 0;
+                  (
+                     ([&]<std::size_t I>() {
+                        using F = typename R::template member_type<I>;
+                        constexpr bool override_v = field_has_override(
+                           std::integral_constant<std::size_t, I>{});
+                        if constexpr (!override_v && is_fixed_v<F>)
+                           total += fixed_size_of<F>();
+                        else
+                           total += W;  // offset slot
+                     }.template operator()<Is>()),
+                     ...);
+                  return total;
+               }(std::make_index_sequence<R::member_count>{});
+
+            if (fixed_start > end || end - fixed_start < fixed_region)
+               return codec_fail("frac: fixed_region truncated",
+                                 static_cast<std::uint32_t>(fixed_start),
+                                 "frac");
+
+            const std::size_t heap_start = fixed_start + fixed_region;
+            // Each variable field's slot is at slot_pos = fixed_start +
+            // (sum of preceding field sizes); its payload starts at
+            // slot_pos + offset (offset is pointer-relative, NOT
+            // measured from heap_start). Encode appends payloads in
+            // field order; for canonical output the payload positions
+            // are monotonically non-decreasing. Validate enforces:
+            //   1. Each non-zero/non-one slot offset resolves to a
+            //      payload position within the record's bounding
+            //      region [heap_start, end).
+            //   2. Payload positions are monotonically non-decreasing
+            //      across the field list (canonical encoding).
+            //   3. Each payload validates structurally as its declared
+            //      type (recursive walk, depth + 1).
+
+            std::size_t  cursor               = fixed_start;
+            std::size_t  expected_payload_pos = heap_start;
+            codec_status err                  = codec_ok();
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (((err.ok())
+                    ? ([&]() -> int
+                       {
+                          using F = typename R::template member_type<Is>;
+                          constexpr bool override_v = field_has_override(
+                             std::integral_constant<std::size_t, Is>{});
+
+                          if constexpr (!override_v && is_fixed_v<F>)
+                          {
+                             // Inline fixed field — validate it from
+                             // [cursor, cursor + fsz). Recursive into
+                             // nested fixed records.
+                             const std::size_t fsz = fixed_size_of<F>();
+                             if constexpr (Record<F>)
+                             {
+                                auto st = validate_record_fixed_inline<
+                                   W, F>(src, cursor, fixed_start +
+                                                         fixed_region,
+                                          depth + 1);
+                                if (!st.ok())
+                                {
+                                   err = std::move(st);
+                                   return 0;
+                                }
+                             }
+                             else
+                             {
+                                auto st = validate_value<W, F>(
+                                   src, cursor, cursor + fsz,
+                                   depth + 1);
+                                if (!st.ok())
+                                {
+                                   err = std::move(st);
+                                   return 0;
+                                }
+                                cursor += fsz;
+                             }
+                          }
+                          else
+                          {
+                             // Variable field: W-byte offset slot.
+                             const std::size_t slot_pos = cursor;
+                             const std::uint32_t slot =
+                                read_word<W>(src, slot_pos);
+                             cursor += W;
+
+                             // Adapter override: payload bytes are
+                             // opaque to frac. Slot must be a real
+                             // offset (non-empty payload).
+                             if constexpr (override_v)
+                             {
+                                if (slot == 0 || slot == 1)
+                                {
+                                   err = codec_fail(
+                                      "frac: adapter slot must hold a "
+                                      "non-trivial offset",
+                                      static_cast<std::uint32_t>(
+                                         slot_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                if (slot >
+                                    end - slot_pos)
+                                {
+                                   err = codec_fail(
+                                      "frac: adapter offset past end",
+                                      static_cast<std::uint32_t>(
+                                         slot_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                const std::size_t payload_pos =
+                                   slot_pos + slot;
+                                if (payload_pos < heap_start ||
+                                    payload_pos > end)
+                                {
+                                   err = codec_fail(
+                                      "frac: adapter payload OOB",
+                                      static_cast<std::uint32_t>(
+                                         payload_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                if (payload_pos < expected_payload_pos)
+                                {
+                                   err = codec_fail(
+                                      "frac: non-monotonic offsets "
+                                      "(canonical encoding)",
+                                      static_cast<std::uint32_t>(
+                                         payload_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                expected_payload_pos = payload_pos;
+                                return 0;
+                             }
+
+                             if constexpr (is_std_optional_v<F>)
+                             {
+                                // None (slot==1) and Some(empty)
+                                // (slot==0) both have no payload.
+                                if (slot == 0 || slot == 1)
+                                   return 0;
+                                // Some(payload) at slot_pos + slot.
+                                if (slot > end - slot_pos)
+                                {
+                                   err = codec_fail(
+                                      "frac: optional offset past end",
+                                      static_cast<std::uint32_t>(
+                                         slot_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                const std::size_t payload_pos =
+                                   slot_pos + slot;
+                                if (payload_pos < heap_start)
+                                {
+                                   err = codec_fail(
+                                      "frac: optional payload below "
+                                      "heap",
+                                      static_cast<std::uint32_t>(
+                                         payload_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                if (payload_pos < expected_payload_pos)
+                                {
+                                   err = codec_fail(
+                                      "frac: non-monotonic offsets "
+                                      "(canonical encoding)",
+                                      static_cast<std::uint32_t>(
+                                         payload_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                using V = typename F::value_type;
+                                auto st = validate_value<W, V>(
+                                   src, payload_pos, end, depth + 1);
+                                if (!st.ok())
+                                {
+                                   err = std::move(st);
+                                   return 0;
+                                }
+                                // Advance expected_payload_pos past the
+                                // consumed payload — compute its end by
+                                // walking the validated payload size.
+                                expected_payload_pos =
+                                   payload_end<W, V>(src, payload_pos,
+                                                     end);
+                                return 0;
+                             }
+                             else
+                             {
+                                // Plain variable field. slot==0 marks
+                                // empty container (no payload).
+                                if (slot == 0)
+                                   return 0;
+                                if (slot > end - slot_pos)
+                                {
+                                   err = codec_fail(
+                                      "frac: variable offset past end",
+                                      static_cast<std::uint32_t>(
+                                         slot_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                const std::size_t payload_pos =
+                                   slot_pos + slot;
+                                if (payload_pos < heap_start)
+                                {
+                                   err = codec_fail(
+                                      "frac: variable payload below "
+                                      "heap",
+                                      static_cast<std::uint32_t>(
+                                         payload_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                if (payload_pos < expected_payload_pos)
+                                {
+                                   err = codec_fail(
+                                      "frac: non-monotonic offsets "
+                                      "(canonical encoding)",
+                                      static_cast<std::uint32_t>(
+                                         payload_pos),
+                                      "frac");
+                                   return 0;
+                                }
+                                auto st = validate_value<W, F>(
+                                   src, payload_pos, end, depth + 1);
+                                if (!st.ok())
+                                {
+                                   err = std::move(st);
+                                   return 0;
+                                }
+                                expected_payload_pos =
+                                   payload_end<W, F>(src, payload_pos,
+                                                     end);
+                                return 0;
+                             }
+                          }
+                          return 0;
+                       }())
+                    : 0),
+                ...);
+            }(std::make_index_sequence<R::member_count>{});
+            return err;
+         }
+         else
+         {
+            return codec_fail("frac: unsupported type in validate",
+                              static_cast<std::uint32_t>(pos), "frac");
+         }
+      }
+
+      // Compute the byte-end position of a validated payload for a
+      // variable type. Used by the record walker to track the
+      // monotonic-offset cursor across heap entries. Caller has
+      // already validated `[pos, end)` as `T`.
+      template <std::size_t W, typename T>
+      std::size_t payload_end(std::span<const char> src, std::size_t pos,
+                              std::size_t end) noexcept
+      {
+         if constexpr (std::is_same_v<T, std::string>)
+         {
+            const std::uint32_t n = read_word<W>(src, pos);
+            return pos + W + n;
+         }
+         else if constexpr (is_std_vector_v<T>)
+         {
+            const std::uint32_t n = read_word<W>(src, pos);
+            return pos + W + n;
+         }
+         else if constexpr (is_std_array_v<T>)
+         {
+            // Array of variable elements: walk the elements to sum
+            // sizes. Array of fixed elements is fixed-sized.
+            using E = typename T::value_type;
+            constexpr std::size_t N = std::tuple_size<T>::value;
+            if constexpr (is_fixed_v<E>)
+            {
+               return pos + N * fixed_size_of<E>();
+            }
+            else
+            {
+               std::size_t cursor = pos;
+               for (std::size_t i = 0; i < N; ++i)
+               {
+                  const std::uint32_t len = read_word<W>(src, cursor);
+                  cursor += W + len;
+               }
+               return cursor;
+            }
+         }
+         else if constexpr (is_std_optional_v<T>)
+         {
+            // Top-level optional uses [W-byte slot]; size depends on
+            // the slot. Validators only invoke payload_end on
+            // *embedded* optionals via record fields, where slot
+            // semantics differ — but the parent record advances
+            // expected_payload_pos using this helper. Conservative
+            // answer: if slot==0/1 the optional has no heap payload
+            // (it sits in the slot itself). If slot is an offset, the
+            // payload is the inner V at pos+slot. For our use case
+            // (record-field optional pointing to heap), the heap
+            // payload IS the inner V — recurse.
+            using V = typename T::value_type;
+            return payload_end<W, V>(src, pos, end);
+         }
+         else if constexpr (is_std_variant_v<T>)
+         {
+            // [u8 tag][W-byte size][content].
+            const std::uint32_t size_bytes = read_word<W>(src, pos + 1);
+            return pos + 1 + W + size_bytes;
+         }
+         else if constexpr (is_bitvector<T>::value)
+         {
+            constexpr std::size_t nbytes = (T::size_value + 7) / 8;
+            return pos + nbytes;
+         }
+         else if constexpr (is_bitlist<T>::value)
+         {
+            constexpr std::size_t LB =
+               bitlist_len_bytes<T::max_size_value>();
+            std::size_t bit_count = 0;
+            if constexpr (LB == 1)
+               bit_count = static_cast<std::uint8_t>(src[pos]);
+            else if constexpr (LB == 2)
+            {
+               std::uint16_t v;
+               std::memcpy(&v, src.data() + pos, 2);
+               bit_count = v;
+            }
+            else if constexpr (LB == 4)
+            {
+               std::uint32_t v;
+               std::memcpy(&v, src.data() + pos, 4);
+               bit_count = v;
+            }
+            else
+            {
+               std::uint64_t v;
+               std::memcpy(&v, src.data() + pos, 8);
+               bit_count = static_cast<std::size_t>(v);
+            }
+            return pos + LB + (bit_count + 7) / 8;
+         }
+         else if constexpr (is_fixed_v<T>)
+         {
+            // Fixed scalar / fixed record (with header inlined per
+            // encode rules). Header presence depends on whether the
+            // type is a Record and not DWNC; size_of_v handles this.
+            // We return pos + size_of_v_const for fixed types where
+            // possible; for fixed Records pulled in as a heap payload
+            // (only happens via std::optional<Fixed Record>), we use
+            // fixed_size_of and add the u16 header iff non-DWNC.
+            if constexpr (Record<T>)
+               return pos + (::psio::is_dwnc_v<T> ? 0u : 2u) +
+                      fixed_size_of<T>();
+            else
+               return pos + fixed_size_of<T>();
+         }
+         else if constexpr (Record<T>)
+         {
+            // Variable record: walk the record's u16 header + fixed_
+            // region + heap by following the same logic as the
+            // validator. To keep payload_end O(1), use the validator's
+            // computed end — the safe upper bound is `end`. The
+            // record's true byte length is computed by the walker
+            // separately; for monotonicity tracking we conservatively
+            // advance expected_payload_pos to `end` if we can't
+            // measure.
+            //
+            // Practical case: nested records as record-field heap
+            // payloads. Walk the header to find fixed_region; then
+            // walk variable fields' offsets to find the latest
+            // payload tail. For simplicity (and correctness for
+            // monotonicity) report `end` — this disables monotonicity
+            // checks against THIS specific payload's siblings, which
+            // is acceptable since we still validated the inner
+            // contents.
+            (void)src;
+            (void)pos;
+            return end;
+         }
+         else
+         {
+            (void)src;
+            (void)pos;
+            return end;
+         }
       }
 
    }  // namespace detail::frac_impl
@@ -1520,8 +2413,8 @@ namespace psio {
                                                          "frac");
              !st.ok())
             return st;
-         return detail::frac_impl::validate_value<W, T>(bytes, 0,
-                                                         bytes.size());
+         return detail::frac_impl::validate_value<W, T>(
+            bytes, 0, bytes.size(), 0);
       }
 
       template <typename T>
@@ -1529,8 +2422,8 @@ namespace psio {
                                      frac_<W>, T*,
                                      std::span<const char> bytes) noexcept
       {
-         auto st = detail::frac_impl::validate_value<W, T>(bytes, 0,
-                                                            bytes.size());
+         auto st = detail::frac_impl::validate_value<W, T>(
+            bytes, 0, bytes.size(), 0);
          if (!st.ok())
             return st;
          if constexpr (::psio::Reflected<T>)

@@ -188,6 +188,11 @@ namespace psio {
          }
          else if (sc.is_record())
          {
+            // Non-DWNC by default in dynamic mode: emit a u{W}
+            // fixed_size header before the fixed region. The static
+            // codec emits this header for every reflected record that
+            // isn't DWNC; the schema doesn't carry the DWNC flag, so
+            // we treat all schema records as non-DWNC.
             const auto& rec = dv.as<dynamic_record>();
             auto find = [&](std::string_view n) -> const dynamic_value* {
                for (const auto& kv : rec.fields)
@@ -195,12 +200,18 @@ namespace psio {
                      return &kv.second;
                return nullptr;
             };
-            const auto& fields       = sc.as_record().fields;
-            const std::size_t container_start = s.size();
+            const auto& fields = sc.as_record().fields;
             std::size_t fixed_region = 0;
             for (const auto& f : fields)
                fixed_region +=
                   sc_is_fixed(*f.type) ? sc_fixed_size(*f.type) : W;
+
+            // u{W} fixed_size header.
+            const std::size_t hdr_pos = s.size();
+            s.resize(s.size() + W, 0);
+            write_offset<W>(s, hdr_pos, fixed_region);
+
+            const std::size_t container_start = s.size();
             s.resize(container_start + fixed_region, 0);
             std::size_t cursor = container_start;
             for (const auto& f : fields)
@@ -318,12 +329,16 @@ namespace psio {
                   decode_dv<W>(*sc.as_optional().value_type, src, pos, end));
             return dynamic_value{std::move(o)};
          }
-         // record
+         // record — non-DWNC by default in dynamic mode: skip the
+         // u{W} fixed_size header, then walk against container_start =
+         // pos + W (offsets in pssz are relative to the byte after the
+         // header).
          const auto&                fields = sc.as_record().fields;
          const std::size_t          N      = fields.size();
+         const std::size_t          container_start = pos + W;
          std::vector<std::uint32_t> var_offsets(N);
          std::vector<bool>          is_var(N, false);
-         std::size_t                cursor = pos;
+         std::size_t                cursor = container_start;
          for (std::size_t i = 0; i < N; ++i)
          {
             if (sc_is_fixed(*fields[i].type))
@@ -342,18 +357,18 @@ namespace psio {
                if (is_var[i])
                {
                   var_end[i] = last;
-                  last       = pos + var_offsets[i];
+                  last       = container_start + var_offsets[i];
                }
          }
          dynamic_record rec;
-         std::size_t    fcursor = pos;
+         std::size_t    fcursor = container_start;
          for (std::size_t i = 0; i < N; ++i)
          {
             dynamic_value val;
             if (is_var[i])
             {
                val = decode_dv<W>(*fields[i].type, src,
-                                  pos + var_offsets[i], var_end[i]);
+                                  container_start + var_offsets[i], var_end[i]);
                fcursor += W;
             }
             else

@@ -15,6 +15,7 @@
 //   record:            fields concatenated in reflected order
 
 #include <psio/cpo.hpp>
+#include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -411,6 +412,260 @@ namespace psio {
          }
       }
 
+      // ── Structural validator ─────────────────────────────────────────
+      //
+      // Walks the Avro buffer field-by-field, advancing `pos` and
+      // confirming every read fits within bounds. zigzag-varint length
+      // / count prefixes are decoded with the bounded leb128 helper,
+      // and depth is capped at kMaxValidationDepth.
+
+      inline codec_status
+      read_long_checked(std::span<const char> src, std::size_t& pos,
+                        std::int64_t& out) noexcept
+      {
+         const auto avail = src.size() - pos;
+         const auto r     = ::psio::varint::leb128::scalar::decode_zigzag64(
+            reinterpret_cast<const std::uint8_t*>(src.data() + pos),
+            avail);
+         if (!r.ok)
+            return codec_fail("avro: malformed varint",
+                              static_cast<std::uint32_t>(pos), "avro");
+         out = r.value;
+         pos += r.len;
+         return codec_ok();
+      }
+
+      template <typename T>
+      codec_status
+      validate_value(std::span<const char> src, std::size_t& pos,
+                     std::size_t depth) noexcept
+      {
+         if (depth > kMaxValidationDepth)
+            return codec_fail("avro: max depth exceeded",
+                              static_cast<std::uint32_t>(pos), "avro");
+         const std::size_t avail = src.size() - pos;
+
+         if constexpr (std::is_same_v<T, bool>)
+         {
+            if (avail < 1)
+               return codec_fail("avro: truncated bool",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            ++pos;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, ::psio::uint256>)
+         {
+            if (avail < 32)
+               return codec_fail("avro: truncated u256",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            pos += 32;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, ::psio::uint128> ||
+                            std::is_same_v<T, ::psio::int128>)
+         {
+            if (avail < 16)
+               return codec_fail("avro: truncated u128/i128",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            pos += 16;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, float>)
+         {
+            if (avail < 4)
+               return codec_fail("avro: truncated float",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            pos += 4;
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, double>)
+         {
+            if (avail < 8)
+               return codec_fail("avro: truncated double",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            pos += 8;
+            return codec_ok();
+         }
+         else if constexpr (std::is_enum_v<T> || std::is_integral_v<T>)
+         {
+            std::int64_t v = 0;
+            return read_long_checked(src, pos, v);
+         }
+         else if constexpr (is_std_array<T>::value)
+         {
+            using E                 = typename T::value_type;
+            constexpr std::size_t N = std::tuple_size<T>::value;
+            if constexpr (sizeof(E) == 1 && std::is_arithmetic_v<E>)
+            {
+               if (avail < N)
+                  return codec_fail("avro: truncated byte-array",
+                                    static_cast<std::uint32_t>(pos),
+                                    "avro");
+               pos += N;
+               return codec_ok();
+            }
+            else
+            {
+               // Avro array-of-record: blocks of `count` followed by 0.
+               std::size_t consumed = 0;
+               while (true)
+               {
+                  std::int64_t count = 0;
+                  if (auto st = read_long_checked(src, pos, count); !st.ok())
+                     return st;
+                  if (count == 0)
+                     break;
+                  if (count < 0)
+                  {
+                     count = -count;
+                     std::int64_t bytes = 0;
+                     if (auto st =
+                            read_long_checked(src, pos, bytes); !st.ok())
+                        return st;
+                  }
+                  for (std::int64_t j = 0; j < count; ++j)
+                  {
+                     auto st = validate_value<E>(src, pos, depth + 1);
+                     if (!st.ok())
+                        return st;
+                     ++consumed;
+                  }
+               }
+               // For std::array we also expect exactly N elements
+               // total; under-fill is tolerable (decode silently
+               // ignores extras), but we don't attempt strict count
+               // matching here (matches decode_value's loose semantics).
+               (void)consumed;
+               (void)N;
+               return codec_ok();
+            }
+         }
+         else if constexpr (is_std_vector<T>::value)
+         {
+            using E = typename T::value_type;
+            while (true)
+            {
+               std::int64_t count = 0;
+               if (auto st = read_long_checked(src, pos, count); !st.ok())
+                  return st;
+               if (count == 0)
+                  break;
+               if (count < 0)
+               {
+                  count = -count;
+                  std::int64_t bytes = 0;
+                  if (auto st = read_long_checked(src, pos, bytes); !st.ok())
+                     return st;
+               }
+               for (std::int64_t j = 0; j < count; ++j)
+               {
+                  auto st = validate_value<E>(src, pos, depth + 1);
+                  if (!st.ok())
+                     return st;
+               }
+            }
+            return codec_ok();
+         }
+         else if constexpr (std::is_same_v<T, std::string>)
+         {
+            std::int64_t n = 0;
+            if (auto st = read_long_checked(src, pos, n); !st.ok())
+               return st;
+            if (n < 0)
+               return codec_fail("avro: negative string length",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            const std::size_t sn = static_cast<std::size_t>(n);
+            if (sn > src.size() - pos)
+               return codec_fail("avro: string body OOB",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            pos += sn;
+            return codec_ok();
+         }
+         else if constexpr (is_std_optional<T>::value)
+         {
+            std::int64_t branch = 0;
+            if (auto st = read_long_checked(src, pos, branch); !st.ok())
+               return st;
+            if (branch == 0)
+               return codec_ok();
+            if (branch != 1)
+               return codec_fail("avro: optional branch not 0/1",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            using V = typename T::value_type;
+            return validate_value<V>(src, pos, depth + 1);
+         }
+         else if constexpr (is_std_variant<T>::value)
+         {
+            std::int64_t idx = 0;
+            const std::size_t pre = pos;
+            if (auto st = read_long_checked(src, pos, idx); !st.ok())
+               return st;
+            constexpr std::size_t N = std::variant_size_v<T>;
+            if (idx < 0 ||
+                static_cast<std::size_t>(idx) >= N)
+               return codec_fail("avro: variant tag out of range",
+                                 static_cast<std::uint32_t>(pre), "avro");
+            codec_status err = codec_ok();
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (((static_cast<std::size_t>(idx) == Is)
+                    ? (err = validate_value<
+                          std::variant_alternative_t<Is, T>>(src, pos,
+                                                              depth + 1),
+                       false)
+                    : true) &&
+                ...);
+            }(std::make_index_sequence<N>{});
+            return err;
+         }
+         else if constexpr (is_bitvector<T>::value)
+         {
+            constexpr std::size_t nbytes = (T::size_value + 7) / 8;
+            if (avail < nbytes)
+               return codec_fail("avro: truncated bitvector",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            pos += nbytes;
+            return codec_ok();
+         }
+         else if constexpr (is_bitlist<T>::value)
+         {
+            std::int64_t bits = 0;
+            if (auto st = read_long_checked(src, pos, bits); !st.ok())
+               return st;
+            if (bits < 0)
+               return codec_fail("avro: negative bitlist length",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            const std::size_t nbytes =
+               (static_cast<std::size_t>(bits) + 7) / 8;
+            if (nbytes > src.size() - pos)
+               return codec_fail("avro: bitlist body OOB",
+                                 static_cast<std::uint32_t>(pos), "avro");
+            pos += nbytes;
+            return codec_ok();
+         }
+         else if constexpr (Record<T>)
+         {
+            using R = ::psio::reflect<T>;
+            codec_status err = codec_ok();
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (((err.ok())
+                    ? (err = validate_value<
+                          typename R::template member_type<Is>>(
+                          src, pos, depth + 1),
+                       0)
+                    : 0),
+                ...);
+            }(std::make_index_sequence<R::member_count>{});
+            return err;
+         }
+         else
+         {
+            return codec_fail("avro: unsupported type in validate",
+                              static_cast<std::uint32_t>(pos), "avro");
+         }
+      }
+
    }  // namespace detail::avro_impl
 
    struct avro : format_tag_base<avro>
@@ -469,6 +724,13 @@ namespace psio {
          if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "avro");
              !st.ok())
             return st;
+         std::size_t pos = 0;
+         auto st = detail::avro_impl::validate_value<T>(bytes, pos, 0);
+         if (!st.ok())
+            return st;
+         if (pos != bytes.size())
+            return codec_fail("avro: trailing bytes",
+                              static_cast<std::uint32_t>(pos), "avro");
          return codec_ok();
       }
 

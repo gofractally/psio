@@ -79,6 +79,7 @@ option(PSIO_ENABLE_BENCHMARKS "Build psio benchmarks" OFF)
 option(PSIO_ENABLE_TOOLS "Build psio tools (fixture emitters, psio_tool)" OFF)
 
 if(PSIO_ENABLE_TESTS AND NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
+   enable_testing()
    add_subdirectory(tests)
 endif()
 
