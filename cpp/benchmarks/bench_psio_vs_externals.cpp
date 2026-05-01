@@ -1541,7 +1541,9 @@ namespace {
       };
       cell("ssz",      psio::ssz{});
       cell("pssz",     psio::pssz{});
-      cell("frac32",   psio::frac32{});
+      //  Bench label uses the user-facing name "fracpack" — the C++
+      //  class psio::frac32 is the ABI commitment, kept distinct.
+      cell("fracpack", psio::frac32{});
       cell("bin",      psio::bin{});
       cell("borsh",    psio::borsh{});
       cell("bincode",  psio::bincode{});
