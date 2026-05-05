@@ -90,3 +90,7 @@ endif()
 if(PSIO_ENABLE_TOOLS AND NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
    add_subdirectory(tools)
 endif()
+
+# Spec conformance driver — always built (small, self-contained, used
+# by tools/run-conformance.sh and CI).  See conformance/CMakeLists.txt.
+add_subdirectory(conformance)

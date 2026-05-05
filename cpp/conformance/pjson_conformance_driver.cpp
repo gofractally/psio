@@ -1,0 +1,971 @@
+// pjson v1 spec conformance driver — C++ counterpart of
+// rust/psio/src/bin/pjson_conformance_driver.rs.
+//
+// Reads a fixture JSON on stdin in the format documented at
+// conformance/README.md, runs encode + decode + JSON projection
+// against the post-audit pjson v1 wire format
+// (docs/pjson-spec.md), and reports a verdict.
+//
+// Self-contained: no dependency on the pre-audit pjson library
+// code in include/psio/pjson*.hpp. The two drivers (this one and
+// the Rust binary) consume the same fixture files and must
+// produce byte-identical wire output.
+//
+// CLI:
+//   pjson_conformance_driver --check     < fixture.json   exit 0 = pass
+//   pjson_conformance_driver --xvalidate < fixture.json   wire+json on stdout
+//
+// Phase 1 scope: tag dispatch, null, bool, uint_inline,
+// nint_inline, uint, negint to 128-bit magnitude, ieee_float
+// widths 16/32/64, decimal with all four varscale tiers.
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+namespace pjson_conformance {
+
+// ── Spec-defined Value model ───────────────────────────────────────
+
+// 128-bit unsigned: __int128 is GCC/Clang; we use a manual struct
+// for portability and so the type is a regular value type that fits
+// in any std::variant arm.
+struct U128 {
+   std::uint64_t lo{};
+   std::uint64_t hi{};
+
+   bool operator==(const U128&) const = default;
+   bool is_zero() const noexcept { return lo == 0 && hi == 0; }
+   bool fits_u64() const noexcept { return hi == 0; }
+};
+
+// 128-bit signed for the decimal mantissa.
+struct I128 {
+   std::uint64_t lo{};
+   std::int64_t  hi{};   // sign bit lives in hi's MSB
+
+   bool operator==(const I128&) const = default;
+   bool is_zero() const noexcept { return lo == 0 && hi == 0; }
+   bool is_negative() const noexcept { return hi < 0; }
+};
+
+struct Null {
+   bool operator==(const Null&) const = default;
+};
+struct Bool {
+   bool value{};
+   bool operator==(const Bool&) const = default;
+};
+struct Uint {
+   U128 value{};
+   bool operator==(const Uint&) const = default;
+};
+struct NegInt {
+   U128 magnitude{};   // value = −magnitude; magnitude > 0
+   bool operator==(const NegInt&) const = default;
+};
+struct Float {
+   std::uint8_t  width_log2{};   // 1=binary16, 2=binary32, 3=binary64, 4=binary128
+   U128          bits{};         // raw IEEE little-endian bit pattern
+   bool operator==(const Float&) const = default;
+};
+struct Decimal {
+   I128         mantissa{};
+   std::int32_t scale{};
+   bool operator==(const Decimal&) const = default;
+};
+
+using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal>;
+
+// ── Errors ─────────────────────────────────────────────────────────
+
+class EncodeError : public std::runtime_error {
+public:
+   using std::runtime_error::runtime_error;
+};
+
+class DecodeError : public std::runtime_error {
+public:
+   using std::runtime_error::runtime_error;
+};
+
+// ── Helpers ────────────────────────────────────────────────────────
+
+// Smallest LE byte representation of a U128, leading zeros stripped.
+// Returns empty for value 0.
+static std::vector<std::uint8_t> u128_le_minimal(U128 n) {
+   std::vector<std::uint8_t> out;
+   out.reserve(16);
+   for (int i = 0; i < 8; ++i) out.push_back(static_cast<std::uint8_t>(n.lo >> (8 * i)));
+   for (int i = 0; i < 8; ++i) out.push_back(static_cast<std::uint8_t>(n.hi >> (8 * i)));
+   while (!out.empty() && out.back() == 0) out.pop_back();
+   return out;
+}
+
+static std::vector<std::uint8_t> u128_le_minimal_at_least_1(U128 n) {
+   auto v = u128_le_minimal(n);
+   if (v.empty()) v.push_back(0);
+   return v;
+}
+
+static U128 read_u128_le(std::span<const std::uint8_t> bytes) {
+   U128 v{};
+   for (std::size_t i = 0; i < bytes.size() && i < 16; ++i) {
+      if (i < 8) v.lo |= static_cast<std::uint64_t>(bytes[i]) << (8 * i);
+      else       v.hi |= static_cast<std::uint64_t>(bytes[i]) << (8 * (i - 8));
+   }
+   return v;
+}
+
+// Zigzag for i32 (varscale).
+static std::uint32_t zigzag_encode_i32(std::int32_t v) noexcept {
+   return static_cast<std::uint32_t>((v << 1) ^ (v >> 31));
+}
+static std::int32_t zigzag_decode_u32(std::uint32_t z) noexcept {
+   return static_cast<std::int32_t>((z >> 1) ^ -static_cast<std::int32_t>(z & 1));
+}
+
+// Zigzag for I128 (decimal mantissa).
+//   zz = (v << 1) ^ (v >> 127) — interpret as unsigned bits.
+static U128 zigzag_encode_i128(I128 v) noexcept {
+   // Represent v as a 128-bit unsigned bag of bits.
+   U128 bits{v.lo, static_cast<std::uint64_t>(v.hi)};
+   // (v << 1):
+   U128 shifted{bits.lo << 1, (bits.hi << 1) | (bits.lo >> 63)};
+   // (v >> 127), arithmetic — fills with sign bit:
+   std::uint64_t sign_mask = v.is_negative()
+                                ? std::numeric_limits<std::uint64_t>::max()
+                                : 0;
+   U128 sign_extend{sign_mask, sign_mask};
+   // XOR:
+   return U128{shifted.lo ^ sign_extend.lo, shifted.hi ^ sign_extend.hi};
+}
+
+static I128 zigzag_decode_u128(U128 z) noexcept {
+   //   v = (z >> 1) ^ -(z & 1)
+   U128 shifted{(z.lo >> 1) | (z.hi << 63), z.hi >> 1};
+   std::uint64_t lsb_mask = (z.lo & 1) ? std::numeric_limits<std::uint64_t>::max() : 0;
+   U128 mask{lsb_mask, lsb_mask};
+   return I128{shifted.lo ^ mask.lo,
+               static_cast<std::int64_t>(shifted.hi ^ mask.hi)};
+}
+
+// ── Encode (§12 reference algorithm) ───────────────────────────────
+
+static void varscale_encode(std::int32_t scale, std::vector<std::uint8_t>& out) {
+   const std::uint32_t zz = zigzag_encode_i32(scale);
+   std::uint32_t total_bytes;
+   if      (zz < (1u <<  6)) total_bytes = 1;
+   else if (zz < (1u << 14)) total_bytes = 2;
+   else if (zz < (1u << 22)) total_bytes = 3;
+   else if (zz < (1u << 30)) total_bytes = 4;
+   else throw EncodeError{"varscale overflow"};
+
+   const std::uint8_t prefix = static_cast<std::uint8_t>((total_bytes - 1) << 6);
+   const std::uint8_t lo6 = static_cast<std::uint8_t>(zz & 0x3F);
+   out.push_back(prefix | lo6);
+   std::uint32_t shifted = zz >> 6;
+   for (std::uint32_t i = 1; i < total_bytes; ++i) {
+      out.push_back(static_cast<std::uint8_t>(shifted & 0xFF));
+      shifted >>= 8;
+   }
+}
+
+static std::vector<std::uint8_t> encode(const Value& v);
+
+static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
+   std::visit([&](auto&& arg) {
+      using T = std::decay_t<decltype(arg)>;
+      if constexpr (std::is_same_v<T, Null>) {
+         out.push_back(0x00);
+      } else if constexpr (std::is_same_v<T, Bool>) {
+         out.push_back(arg.value ? 0x11 : 0x10);
+      } else if constexpr (std::is_same_v<T, Uint>) {
+         if (arg.value.fits_u64() && arg.value.lo <= 15) {
+            // uint_inline §4.3
+            out.push_back(static_cast<std::uint8_t>(0x20 | arg.value.lo));
+         } else {
+            // uint §4.5
+            const auto bytes = u128_le_minimal(arg.value);
+            const std::size_t bc = bytes.size();
+            if (bc == 0 || bc > 16) throw EncodeError{"uint magnitude"};
+            out.push_back(static_cast<std::uint8_t>(0x40 | (bc - 1)));
+            out.insert(out.end(), bytes.begin(), bytes.end());
+         }
+      } else if constexpr (std::is_same_v<T, NegInt>) {
+         if (arg.magnitude.is_zero()) {
+            throw EncodeError{"negint magnitude 0 reserved"};
+         }
+         if (arg.magnitude.fits_u64() && arg.magnitude.lo <= 15) {
+            // nint_inline §4.4
+            out.push_back(static_cast<std::uint8_t>(0x30 | arg.magnitude.lo));
+         } else {
+            // negint §4.5
+            const auto bytes = u128_le_minimal(arg.magnitude);
+            const std::size_t bc = bytes.size();
+            if (bc == 0 || bc > 16) throw EncodeError{"negint magnitude"};
+            out.push_back(static_cast<std::uint8_t>(0x50 | (bc - 1)));
+            out.insert(out.end(), bytes.begin(), bytes.end());
+         }
+      } else if constexpr (std::is_same_v<T, Float>) {
+         // §4.6 — width selector in low nibble bits 2..0; bit 3 reserved.
+         if (arg.width_log2 < 1 || arg.width_log2 > 4) {
+            throw EncodeError{"ieee_float width_log2"};
+         }
+         const std::size_t byte_count = std::size_t{1} << arg.width_log2;
+         out.push_back(static_cast<std::uint8_t>(0x60 | arg.width_log2));
+         std::uint8_t buf[16];
+         for (std::size_t i = 0; i < 16; ++i) {
+            buf[i] = (i < 8)
+                        ? static_cast<std::uint8_t>(arg.bits.lo >> (8 * i))
+                        : static_cast<std::uint8_t>(arg.bits.hi >> (8 * (i - 8)));
+         }
+         out.insert(out.end(), buf, buf + byte_count);
+      } else if constexpr (std::is_same_v<T, Decimal>) {
+         const auto zz = zigzag_encode_i128(arg.mantissa);
+         const auto m_bytes = u128_le_minimal_at_least_1(zz);
+         const std::size_t bc = m_bytes.size();
+         if (bc > 16) throw EncodeError{"decimal mantissa"};
+         out.push_back(static_cast<std::uint8_t>(0x70 | (bc - 1)));
+         out.insert(out.end(), m_bytes.begin(), m_bytes.end());
+         varscale_encode(arg.scale, out);
+      }
+   }, v);
+}
+
+static std::vector<std::uint8_t> encode(const Value& v) {
+   std::vector<std::uint8_t> out;
+   encode_into(v, out);
+   return out;
+}
+
+// ── Decode (§10 reference algorithm) ───────────────────────────────
+
+struct VarscaleResult {
+   std::int32_t value;
+   std::size_t  used_bytes;
+};
+
+static VarscaleResult varscale_decode(std::span<const std::uint8_t> buf) {
+   if (buf.empty()) throw DecodeError{"varscale first byte"};
+   const std::size_t total = static_cast<std::size_t>((buf[0] >> 6) + 1);
+   if (buf.size() < total) throw DecodeError{"varscale body"};
+   std::uint32_t zz = static_cast<std::uint32_t>(buf[0] & 0x3F);
+   for (std::size_t i = 1; i < total; ++i) {
+      zz |= static_cast<std::uint32_t>(buf[i]) << (6 + 8 * (i - 1));
+   }
+   return {zigzag_decode_u32(zz), total};
+}
+
+static Value decode(std::span<const std::uint8_t> buf) {
+   if (buf.empty()) throw DecodeError{"empty buffer"};
+   const std::uint8_t tag  = buf[0];
+   const std::uint8_t high = tag >> 4;
+   const std::uint8_t low  = tag & 0x0F;
+
+   switch (high) {
+      case 0:
+         if (low != 0) throw DecodeError{"reserved low_nibble for null"};
+         return Null{};
+      case 1:
+         if      (low == 0) return Bool{false};
+         else if (low == 1) return Bool{true};
+         throw DecodeError{"reserved low_nibble for bool"};
+      case 2:
+         return Uint{U128{low, 0}};
+      case 3:
+         if (low == 0) throw DecodeError{"nint_inline low_nibble 0 reserved"};
+         return NegInt{U128{low, 0}};
+      case 4: {
+         const std::size_t bc = static_cast<std::size_t>(low) + 1;
+         if (buf.size() < 1 + bc) throw DecodeError{"uint magnitude truncated"};
+         return Uint{read_u128_le(buf.subspan(1, bc))};
+      }
+      case 5: {
+         const std::size_t bc = static_cast<std::size_t>(low) + 1;
+         if (buf.size() < 1 + bc) throw DecodeError{"negint magnitude truncated"};
+         const auto mag = read_u128_le(buf.subspan(1, bc));
+         if (mag.is_zero()) throw DecodeError{"negint with all-zero payload reserved"};
+         return NegInt{mag};
+      }
+      case 6: {
+         if (low & 0x08) throw DecodeError{"reserved low_nibble for ieee_float (bit 3)"};
+         const std::uint8_t width_log2 = low & 0x07;
+         if (width_log2 < 1 || width_log2 > 4) {
+            throw DecodeError{"ieee_float bad width selector"};
+         }
+         const std::size_t byte_count = std::size_t{1} << width_log2;
+         if (buf.size() < 1 + byte_count) throw DecodeError{"ieee_float payload truncated"};
+         return Float{width_log2, read_u128_le(buf.subspan(1, byte_count))};
+      }
+      case 7: {
+         const std::size_t bc = static_cast<std::size_t>(low) + 1;
+         if (buf.size() < 1 + bc) throw DecodeError{"decimal mantissa truncated"};
+         const U128 zz = read_u128_le(buf.subspan(1, bc));
+         const I128 mantissa = zigzag_decode_u128(zz);
+         const auto scale_result = varscale_decode(buf.subspan(1 + bc));
+         return Decimal{mantissa, scale_result.value};
+      }
+      case 8: case 9: case 10: case 11: case 12: case 13: {
+         static const char* names[] = {
+            "numeric_string", "string", "bytes",
+            "array", "object", "extension"};
+         throw DecodeError{std::string{"Phase ≥2: "} + names[high - 8]};
+      }
+      case 14: case 15:
+         throw DecodeError{std::string{"reserved tag 0x"} +
+                           static_cast<char>("0123456789ABCDEF"[high]) + "0"};
+   }
+   throw DecodeError{"unreachable"};
+}
+
+// ── JSON projection ────────────────────────────────────────────────
+
+// binary16 → f64 widening (psio-style: NaN canonicalized with sign
+// preserved; subnormals normalized).
+static double f16_bits_to_f64(std::uint16_t bits) noexcept {
+   const std::uint64_t sign = (bits >> 15) & 1;
+   const int          exp  = (bits >> 10) & 0x1F;
+   const std::uint64_t mant = bits & 0x3FF;
+   const std::uint64_t sign_bit = sign << 63;
+   union { std::uint64_t u; double d; } u;
+   if (exp == 0) {
+      if (mant == 0) {
+         u.u = sign_bit;
+         return u.d;
+      }
+      // subnormal: normalize
+      std::uint64_t m = mant;
+      int e = -14;
+      while ((m & 0x400) == 0) { m <<= 1; --e; }
+      m &= 0x3FF;
+      const std::uint64_t new_exp = static_cast<std::uint64_t>(e + 1023) << 52;
+      u.u = sign_bit | new_exp | (m << (52 - 10));
+      return u.d;
+   }
+   if (exp == 0x1F) {
+      const std::uint64_t new_exp = std::uint64_t{0x7FF} << 52;
+      u.u = sign_bit | new_exp | (mant << (52 - 10));
+      return u.d;
+   }
+   const std::uint64_t new_exp = static_cast<std::uint64_t>(exp - 15 + 1023) << 52;
+   u.u = sign_bit | new_exp | (mant << (52 - 10));
+   return u.d;
+}
+
+// Render a U128 as decimal text without leading zeros.
+static std::string u128_to_decimal(U128 n) {
+   if (n.is_zero()) return "0";
+   std::string out;
+   while (!n.is_zero()) {
+      // long-division by 10
+      U128 quot{};
+      std::uint64_t r = 0;
+      for (int i = 1; i >= 0; --i) {
+         std::uint64_t hi_lo = (i == 1) ? n.hi : n.lo;
+         // Process 32-bit halves for portability without __int128.
+         std::uint64_t high_part = (r << 32) | (hi_lo >> 32);
+         std::uint64_t high_q    = high_part / 10;
+         std::uint64_t high_r    = high_part % 10;
+         std::uint64_t low_part  = (high_r << 32) | (hi_lo & 0xFFFFFFFFull);
+         std::uint64_t low_q     = low_part / 10;
+         std::uint64_t low_r     = low_part % 10;
+         std::uint64_t q_word    = (high_q << 32) | low_q;
+         if (i == 1) quot.hi = q_word;
+         else        quot.lo = q_word;
+         r = low_r;
+      }
+      out.push_back(static_cast<char>('0' + r));
+      n = quot;
+   }
+   std::reverse(out.begin(), out.end());
+   return out;
+}
+
+static std::string format_decimal(I128 mantissa, std::int32_t scale) {
+   const bool negative = mantissa.is_negative();
+   U128 mag;
+   if (negative) {
+      // two's complement: -v = ~v + 1
+      U128 x{static_cast<std::uint64_t>(mantissa.lo),
+             static_cast<std::uint64_t>(mantissa.hi)};
+      x.lo = ~x.lo;
+      x.hi = ~x.hi;
+      mag.lo = x.lo + 1;
+      mag.hi = x.hi + (mag.lo == 0 ? 1 : 0);  // carry
+   } else {
+      mag.lo = mantissa.lo;
+      mag.hi = static_cast<std::uint64_t>(mantissa.hi);
+   }
+   std::string mag_str = u128_to_decimal(mag);
+   const std::string sign = negative ? "-" : "";
+   if (scale == 0) {
+      return sign + mag_str;
+   }
+   if (scale > 0) {
+      std::string s = sign + mag_str + std::string(static_cast<std::size_t>(scale), '0');
+      return s;
+   }
+   const std::size_t neg = static_cast<std::size_t>(-scale);
+   if (neg < mag_str.size()) {
+      const std::size_t dot = mag_str.size() - neg;
+      return sign + mag_str.substr(0, dot) + "." + mag_str.substr(dot);
+   }
+   return sign + "0." + std::string(neg - mag_str.size(), '0') + mag_str;
+}
+
+static std::string render_json(const Value& v) {
+   return std::visit([&](auto&& arg) -> std::string {
+      using T = std::decay_t<decltype(arg)>;
+      if constexpr (std::is_same_v<T, Null>) {
+         return "null";
+      } else if constexpr (std::is_same_v<T, Bool>) {
+         return arg.value ? "true" : "false";
+      } else if constexpr (std::is_same_v<T, Uint>) {
+         return u128_to_decimal(arg.value);
+      } else if constexpr (std::is_same_v<T, NegInt>) {
+         return "-" + u128_to_decimal(arg.magnitude);
+      } else if constexpr (std::is_same_v<T, Float>) {
+         double f = std::numeric_limits<double>::quiet_NaN();
+         union { std::uint64_t u; double d; float f32; } u;
+         if      (arg.width_log2 == 3) { u.u = arg.bits.lo; f = u.d; }
+         else if (arg.width_log2 == 2) {
+            std::uint32_t bits32 = static_cast<std::uint32_t>(arg.bits.lo);
+            std::memcpy(&u.f32, &bits32, sizeof(u.f32));
+            f = static_cast<double>(u.f32);
+         }
+         else if (arg.width_log2 == 1) {
+            f = f16_bits_to_f64(static_cast<std::uint16_t>(arg.bits.lo));
+         }
+         if (std::isnan(f))                       return "NaN";
+         if (f ==  std::numeric_limits<double>::infinity())  return "Infinity";
+         if (f == -std::numeric_limits<double>::infinity())  return "-Infinity";
+         if (std::trunc(f) == f && std::abs(f) < 1e16) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%.0f", f);
+            return buf;
+         }
+         char buf[32];
+         std::snprintf(buf, sizeof buf, "%g", f);
+         return buf;
+      } else if constexpr (std::is_same_v<T, Decimal>) {
+         return format_decimal(arg.mantissa, arg.scale);
+      }
+   }, v);
+}
+
+// ── Hex helpers ────────────────────────────────────────────────────
+
+static std::vector<std::uint8_t> parse_hex(std::string_view s) {
+   while (!s.empty() && (s.front() == ' ' || s.front() == '\n' || s.front() == '\t')) s.remove_prefix(1);
+   while (!s.empty() && (s.back()  == ' ' || s.back()  == '\n' || s.back()  == '\t')) s.remove_suffix(1);
+   if (s.size() % 2 != 0) {
+      throw std::runtime_error{"hex string length not even"};
+   }
+   auto digit = [](char c) -> int {
+      if ('0' <= c && c <= '9') return c - '0';
+      if ('a' <= c && c <= 'f') return 10 + c - 'a';
+      if ('A' <= c && c <= 'F') return 10 + c - 'A';
+      throw std::runtime_error{std::string{"not a hex digit: "} + c};
+   };
+   std::vector<std::uint8_t> out;
+   out.reserve(s.size() / 2);
+   for (std::size_t i = 0; i < s.size(); i += 2) {
+      out.push_back(static_cast<std::uint8_t>((digit(s[i]) << 4) | digit(s[i + 1])));
+   }
+   return out;
+}
+
+static std::string to_hex(std::span<const std::uint8_t> bytes) {
+   static const char d[] = "0123456789abcdef";
+   std::string out;
+   out.reserve(bytes.size() * 2);
+   for (auto b : bytes) {
+      out.push_back(d[b >> 4]);
+      out.push_back(d[b & 0xF]);
+   }
+   return out;
+}
+
+// ── Minimal JSON parser for fixture files ──────────────────────────
+//
+// The fixture format documented at conformance/README.md is a small
+// subset of JSON: objects with string keys, strings (with the basic
+// escape set), numbers (integer + decimal, no scientific notation in
+// fixtures), bool, null, arrays. We hand-roll the parser to keep the
+// driver self-contained without vendoring a 26k-line single-header
+// JSON library.
+
+struct JNode;
+using JArray  = std::vector<JNode>;
+using JObject = std::vector<std::pair<std::string, JNode>>;
+struct JNode {
+   std::variant<std::nullptr_t, bool, double, std::int64_t, std::string,
+                JArray, JObject>
+       v;
+};
+
+class JParser {
+public:
+   explicit JParser(std::string_view s) : s_(s) {}
+
+   JNode parse() {
+      skip_ws();
+      auto out = parse_value();
+      skip_ws();
+      if (pos_ != s_.size()) {
+         throw std::runtime_error{"json: trailing data"};
+      }
+      return out;
+   }
+
+private:
+   void skip_ws() {
+      while (pos_ < s_.size() &&
+             (s_[pos_] == ' ' || s_[pos_] == '\n' || s_[pos_] == '\t' ||
+              s_[pos_] == '\r'))
+         ++pos_;
+   }
+
+   char peek() {
+      if (pos_ >= s_.size()) throw std::runtime_error{"json: unexpected EOF"};
+      return s_[pos_];
+   }
+   char eat() {
+      if (pos_ >= s_.size()) throw std::runtime_error{"json: unexpected EOF"};
+      return s_[pos_++];
+   }
+   bool eat_if(char c) {
+      if (pos_ < s_.size() && s_[pos_] == c) { ++pos_; return true; }
+      return false;
+   }
+   void expect(char c) {
+      if (eat() != c) throw std::runtime_error{std::string{"json: expected "} + c};
+   }
+
+   JNode parse_value() {
+      skip_ws();
+      char c = peek();
+      if (c == '"') return JNode{parse_string()};
+      if (c == '{') return JNode{parse_object()};
+      if (c == '[') return JNode{parse_array()};
+      if (c == 't' || c == 'f') return JNode{parse_bool()};
+      if (c == 'n') { parse_keyword("null"); return JNode{nullptr}; }
+      // number: optional minus, digits, optional . digits, optional e[+-]digits
+      return parse_number();
+   }
+
+   void parse_keyword(std::string_view kw) {
+      for (char c : kw) expect(c);
+   }
+
+   bool parse_bool() {
+      if (peek() == 't') { parse_keyword("true"); return true; }
+      parse_keyword("false");
+      return false;
+   }
+
+   std::string parse_string() {
+      expect('"');
+      std::string out;
+      while (true) {
+         char c = eat();
+         if (c == '"') return out;
+         if (c == '\\') {
+            char esc = eat();
+            switch (esc) {
+               case '"':  out.push_back('"');  break;
+               case '\\': out.push_back('\\'); break;
+               case '/':  out.push_back('/');  break;
+               case 'n':  out.push_back('\n'); break;
+               case 'r':  out.push_back('\r'); break;
+               case 't':  out.push_back('\t'); break;
+               case 'b':  out.push_back('\b'); break;
+               case 'f':  out.push_back('\f'); break;
+               default:
+                  throw std::runtime_error{std::string{"json: unsupported escape \\"} + esc};
+            }
+         } else {
+            out.push_back(c);
+         }
+      }
+   }
+
+   JNode parse_number() {
+      const std::size_t start = pos_;
+      if (peek() == '-') ++pos_;
+      while (pos_ < s_.size() && (s_[pos_] >= '0' && s_[pos_] <= '9')) ++pos_;
+      bool is_float = false;
+      if (pos_ < s_.size() && s_[pos_] == '.') {
+         is_float = true;
+         ++pos_;
+         while (pos_ < s_.size() && (s_[pos_] >= '0' && s_[pos_] <= '9')) ++pos_;
+      }
+      if (pos_ < s_.size() && (s_[pos_] == 'e' || s_[pos_] == 'E')) {
+         is_float = true;
+         ++pos_;
+         if (pos_ < s_.size() && (s_[pos_] == '+' || s_[pos_] == '-')) ++pos_;
+         while (pos_ < s_.size() && (s_[pos_] >= '0' && s_[pos_] <= '9')) ++pos_;
+      }
+      std::string token{s_.substr(start, pos_ - start)};
+      if (is_float) {
+         return JNode{std::stod(token)};
+      }
+      try {
+         return JNode{static_cast<std::int64_t>(std::stoll(token))};
+      } catch (const std::out_of_range&) {
+         // Out-of-i64-range integer — fall back to double for now.
+         // Fixture authors should quote-string such values for u128.
+         return JNode{std::stod(token)};
+      }
+   }
+
+   JArray parse_array() {
+      expect('[');
+      JArray out;
+      skip_ws();
+      if (eat_if(']')) return out;
+      while (true) {
+         out.push_back(parse_value());
+         skip_ws();
+         if (eat_if(']')) return out;
+         expect(',');
+      }
+   }
+
+   JObject parse_object() {
+      expect('{');
+      JObject out;
+      skip_ws();
+      if (eat_if('}')) return out;
+      while (true) {
+         skip_ws();
+         std::string key = parse_string();
+         skip_ws();
+         expect(':');
+         out.emplace_back(std::move(key), parse_value());
+         skip_ws();
+         if (eat_if('}')) return out;
+         expect(',');
+      }
+   }
+
+   std::string_view s_;
+   std::size_t      pos_{0};
+};
+
+// Helpers to navigate JNodes.
+static const JNode* obj_get(const JObject& o, std::string_view k) {
+   for (const auto& [key, val] : o) {
+      if (key == k) return &val;
+   }
+   return nullptr;
+}
+
+static const JObject& as_object(const JNode& n) {
+   if (auto* o = std::get_if<JObject>(&n.v)) return *o;
+   throw std::runtime_error{"json: expected object"};
+}
+
+static const std::string& as_string(const JNode& n) {
+   if (auto* s = std::get_if<std::string>(&n.v)) return *s;
+   throw std::runtime_error{"json: expected string"};
+}
+
+static bool as_bool(const JNode& n) {
+   if (auto* b = std::get_if<bool>(&n.v)) return *b;
+   throw std::runtime_error{"json: expected bool"};
+}
+
+// ── Fixture parsing ────────────────────────────────────────────────
+
+struct Fixture {
+   std::string             id;
+   std::optional<Value>    input_value;
+   std::string             wire_hex;
+   std::optional<std::string> json_compact;
+   bool                    must_round_trip = false;
+   bool                    must_validate   = false;
+   bool                    must_reject     = false;
+};
+
+// Parse an unsigned integer-or-string into U128. Accepts decimal
+// digits as either a JSON number (i64-fitting) or quoted decimal.
+static U128 parse_u128(const JNode& v) {
+   std::string s;
+   if (auto* str = std::get_if<std::string>(&v.v)) s = *str;
+   else if (auto* i = std::get_if<std::int64_t>(&v.v)) s = std::to_string(*i);
+   else if (auto* d = std::get_if<double>(&v.v)) {
+      char buf[40];
+      std::snprintf(buf, sizeof buf, "%.0f", *d);
+      s = buf;
+   } else throw std::runtime_error{"json: expected unsigned integer or string"};
+
+   if (s.empty()) throw std::runtime_error{"empty u128 string"};
+   if (s[0] == '-') throw std::runtime_error{"negative value in u128 parse"};
+
+   U128 out{};
+   for (char c : s) {
+      if (c < '0' || c > '9') throw std::runtime_error{"non-digit in u128"};
+      // out = out * 10 + (c - '0')
+      // multiply by 10:
+      std::uint64_t lo_old = out.lo;
+      out.lo = out.lo * 10;
+      // overflow into hi: x*10 = x*8 + x*2; carry from low's top-3 + top-1 bits.
+      std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
+      out.hi = out.hi * 10 + carry;
+      // add digit:
+      std::uint64_t add = static_cast<std::uint64_t>(c - '0');
+      std::uint64_t before = out.lo;
+      out.lo += add;
+      if (out.lo < before) ++out.hi;
+   }
+   return out;
+}
+
+// Parse a signed integer-or-string into I128.
+static I128 parse_i128(const JNode& v) {
+   std::string s;
+   if (auto* str = std::get_if<std::string>(&v.v)) s = *str;
+   else if (auto* i = std::get_if<std::int64_t>(&v.v)) s = std::to_string(*i);
+   else throw std::runtime_error{"json: expected signed integer or string"};
+
+   bool negative = false;
+   if (!s.empty() && s[0] == '-') { negative = true; s.erase(s.begin()); }
+   U128 mag = parse_u128(JNode{s});
+   if (!negative) {
+      if (mag.hi >> 63) throw std::runtime_error{"i128 positive overflow"};
+      return I128{mag.lo, static_cast<std::int64_t>(mag.hi)};
+   }
+   // Two's complement of mag.
+   U128 x{~mag.lo, ~mag.hi};
+   x.lo += 1;
+   if (x.lo == 0) x.hi += 1;
+   return I128{x.lo, static_cast<std::int64_t>(x.hi)};
+}
+
+static U128 parse_hex_to_u128(std::string_view s) {
+   while (s.size() >= 2 && (s.substr(0, 2) == "0x" || s.substr(0, 2) == "0X")) {
+      s.remove_prefix(2);
+   }
+   U128 out{};
+   for (char c : s) {
+      int d;
+      if      ('0' <= c && c <= '9') d = c - '0';
+      else if ('a' <= c && c <= 'f') d = 10 + c - 'a';
+      else if ('A' <= c && c <= 'F') d = 10 + c - 'A';
+      else throw std::runtime_error{"hex digit"};
+      // out = out << 4 | d
+      out.hi = (out.hi << 4) | (out.lo >> 60);
+      out.lo = (out.lo << 4) | static_cast<std::uint64_t>(d);
+   }
+   return out;
+}
+
+static Value parse_value_from_json(const JNode& j) {
+   const auto& obj = as_object(j);
+   const auto* k_node = obj_get(obj, "kind");
+   if (!k_node) throw std::runtime_error{"input_value missing 'kind'"};
+   const auto& kind = as_string(*k_node);
+
+   if (kind == "null") return Null{};
+   if (kind == "bool") {
+      const auto* v = obj_get(obj, "value");
+      if (!v) throw std::runtime_error{"bool missing 'value'"};
+      return Bool{as_bool(*v)};
+   }
+   if (kind == "uint") {
+      const auto* v = obj_get(obj, "value");
+      if (!v) throw std::runtime_error{"uint missing 'value'"};
+      return Uint{parse_u128(*v)};
+   }
+   if (kind == "int") {
+      const auto* v = obj_get(obj, "value");
+      if (!v) throw std::runtime_error{"int missing 'value'"};
+      I128 i = parse_i128(*v);
+      if (!i.is_negative()) return Uint{U128{i.lo, static_cast<std::uint64_t>(i.hi)}};
+      // magnitude = -i
+      U128 raw{i.lo, static_cast<std::uint64_t>(i.hi)};
+      U128 negated{~raw.lo, ~raw.hi};
+      negated.lo += 1;
+      if (negated.lo == 0) negated.hi += 1;
+      return NegInt{negated};
+   }
+   if (kind == "float") {
+      const auto* w_node = obj_get(obj, "width");
+      if (!w_node) throw std::runtime_error{"float missing 'width'"};
+      std::int64_t w = std::get<std::int64_t>(w_node->v);
+      std::uint8_t width_log2;
+      switch (w) {
+         case 16:  width_log2 = 1; break;
+         case 32:  width_log2 = 2; break;
+         case 64:  width_log2 = 3; break;
+         case 128: width_log2 = 4; break;
+         default: throw std::runtime_error{"float width not in {16,32,64,128}"};
+      }
+      const auto* b = obj_get(obj, "bits_hex");
+      if (!b) throw std::runtime_error{"float missing 'bits_hex'"};
+      U128 bits = parse_hex_to_u128(as_string(*b));
+      return Float{width_log2, bits};
+   }
+   if (kind == "decimal") {
+      const auto* m = obj_get(obj, "mantissa");
+      if (!m) throw std::runtime_error{"decimal missing 'mantissa'"};
+      I128 mantissa = parse_i128(*m);
+      const auto* sn = obj_get(obj, "scale");
+      if (!sn) throw std::runtime_error{"decimal missing 'scale'"};
+      std::int64_t scale = std::get<std::int64_t>(sn->v);
+      return Decimal{mantissa, static_cast<std::int32_t>(scale)};
+   }
+   throw std::runtime_error{std::string{"input_value kind '"} + kind +
+                            "' not supported in Phase 1"};
+}
+
+static Fixture parse_fixture(std::string_view json_text) {
+   JParser p{json_text};
+   JNode root = p.parse();
+   const auto& o = as_object(root);
+
+   Fixture f;
+   if (const auto* n = obj_get(o, "id")) f.id = as_string(*n);
+   else f.id = "<unnamed>";
+   if (const auto* n = obj_get(o, "wire_hex")) f.wire_hex = as_string(*n);
+   else throw std::runtime_error{"fixture missing wire_hex"};
+   if (const auto* n = obj_get(o, "json_compact")) f.json_compact = as_string(*n);
+   if (const auto* n = obj_get(o, "must_round_trip")) f.must_round_trip = as_bool(*n);
+   if (const auto* n = obj_get(o, "must_validate"))   f.must_validate   = as_bool(*n);
+   if (const auto* n = obj_get(o, "must_reject"))     f.must_reject     = as_bool(*n);
+
+   if (const auto* iv = obj_get(o, "input_value")) {
+      if (!std::holds_alternative<std::nullptr_t>(iv->v)) {
+         f.input_value = parse_value_from_json(*iv);
+      }
+   }
+   return f;
+}
+
+// ── --check / --xvalidate harness ──────────────────────────────────
+
+static std::string check(const Fixture& f) {
+   const auto wire = parse_hex(f.wire_hex);
+
+   if (f.must_reject) {
+      try {
+         (void)decode(wire);
+         return std::string{"expected reject but decoded successfully"};
+      } catch (const DecodeError&) {
+         return {};   // ok
+      }
+   }
+
+   Value decoded;
+   try {
+      decoded = decode(wire);
+   } catch (const std::exception& e) {
+      return std::string{"decode failed: "} + e.what();
+   }
+
+   if (f.input_value.has_value()) {
+      if (!(decoded == *f.input_value)) {
+         return "decode mismatch: structural inequality with expected input_value";
+      }
+   }
+
+   if (f.must_round_trip) {
+      try {
+         auto re_encoded = encode(decoded);
+         if (re_encoded != wire) {
+            return "round-trip mismatch: re-encode produced " + to_hex(re_encoded) +
+                   " (expected " + f.wire_hex + ")";
+         }
+         if (f.input_value.has_value()) {
+            auto e2 = encode(*f.input_value);
+            if (e2 != wire) {
+               return "encode-from-input mismatch: " + to_hex(e2);
+            }
+         }
+      } catch (const std::exception& e) {
+         return std::string{"re-encode failed: "} + e.what();
+      }
+   }
+
+   if (f.json_compact.has_value()) {
+      const std::string got = render_json(decoded);
+      if (got != *f.json_compact) {
+         return "json mismatch: expected " + *f.json_compact + ", got " + got;
+      }
+   }
+
+   return {};   // ok
+}
+
+static std::string xvalidate(const Fixture& f) {
+   const auto wire = parse_hex(f.wire_hex);
+   if (f.must_reject) {
+      try {
+         (void)decode(wire);
+         return "reject:<DID-NOT-REJECT>";
+      } catch (const DecodeError& e) {
+         return std::string{"reject:"} + e.what();
+      }
+   }
+   const auto v = decode(wire);
+   const auto re_wire = encode(v);
+   const auto json = render_json(v);
+   return "wire:" + to_hex(re_wire) + " json:" + json;
+}
+
+}   // namespace pjson_conformance
+
+// ── main ───────────────────────────────────────────────────────────
+
+int main(int argc, char** argv) {
+   if (argc < 2) {
+      std::fprintf(stderr, "usage: %s --check|--xvalidate < fixture.json\n",
+                   argv[0]);
+      return 2;
+   }
+   const std::string mode{argv[1]};
+   if (mode != "--check" && mode != "--xvalidate") {
+      std::fprintf(stderr, "usage: %s --check|--xvalidate < fixture.json\n",
+                   argv[0]);
+      return 2;
+   }
+
+   // Slurp stdin.
+   std::string input{
+       std::istreambuf_iterator<char>(std::cin),
+       std::istreambuf_iterator<char>()};
+
+   pjson_conformance::Fixture f;
+   try {
+      f = pjson_conformance::parse_fixture(input);
+   } catch (const std::exception& e) {
+      std::fprintf(stderr, "fixture parse: %s\n", e.what());
+      return 2;
+   }
+
+   if (mode == "--check") {
+      const std::string err = pjson_conformance::check(f);
+      if (err.empty()) return 0;
+      std::fprintf(stderr, "FAIL [%s]: %s\n", f.id.c_str(), err.c_str());
+      return 1;
+   } else {
+      try {
+         std::printf("%s\n", pjson_conformance::xvalidate(f).c_str());
+         return 0;
+      } catch (const std::exception& e) {
+         std::fprintf(stderr, "FAIL [%s]: %s\n", f.id.c_str(), e.what());
+         return 1;
+      }
+   }
+}

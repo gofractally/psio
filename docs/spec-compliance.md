@@ -56,21 +56,21 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| T-001 | code 0 = `null`, low nibble must be 0 | ❌ | ❌ | ✅ | ✅ corpus `null_basic` |
-| T-002 | code 1 = `bool`, low nibble ∈ {0, 1}, others reserved | ❌ | ❌ | ✅ | ✅ `bool_round_trip` |
-| T-003 | code 2 = `uint_inline`, low nibble = value 0..15 | ❌ | ❌ | ✅ | ✅ `uint_inline_round_trip` |
-| T-004 | code 3 = `nint_inline`, low nibble 1..15 → value −1..−15; low_nibble 0 reserved | ❌ | ❌ | ✅ | ✅ `nint_inline_round_trip` + `nint_inline_zero_rejected` |
-| T-005 | code 4 = `uint`, low nibble = bc−1 ∈ 0..15 (bc 1..16) | ❌ | ❌ | ✅ | ✅ `uint_full_round_trip` |
-| T-006 | code 5 = `negint`, low nibble = bc−1; all-zero payload reserved | ❌ | ❌ | ✅ | ✅ `negint_full_round_trip` + `negint_zero_rejected` |
-| T-007 | code 6 = `ieee_float`, low nibble bits 2..0 = log₂(byte_count) ∈ {1,2,3,4}; bit 3 reserved | ❌ | ❌ | ✅ | ✅ `ieee_float_round_trip` + `ieee_float_reserved_bit3_rejected` + `ieee_float_bad_width_rejected` |
-| T-008 | code 7 = `decimal`, low nibble = mantissa bc−1 | ❌ | ❌ | ✅ | ✅ `decimal_round_trip` |
+| T-001 | code 0 = `null`, low nibble must be 0 | ✅ | ✅ corpus `null_basic` | ✅ | ✅ corpus `null_basic` |
+| T-002 | code 1 = `bool`, low nibble ∈ {0, 1}, others reserved | ✅ | ✅ corpus `bool_{true,false}` | ✅ | ✅ `bool_round_trip` |
+| T-003 | code 2 = `uint_inline`, low nibble = value 0..15 | ✅ | ✅ corpus `uint_inline_{0,5,15}` | ✅ | ✅ `uint_inline_round_trip` |
+| T-004 | code 3 = `nint_inline`, low nibble 1..15 → value −1..−15; low_nibble 0 reserved | ✅ | ✅ corpus `nint_inline_{minus_1,minus_15}` + `nint_inline_zero_reserved` | ✅ | ✅ `nint_inline_round_trip` + `nint_inline_zero_rejected` |
+| T-005 | code 4 = `uint`, low nibble = bc−1 ∈ 0..15 (bc 1..16) | ✅ | ✅ corpus `uint_{16,256,u64_max}` | ✅ | ✅ `uint_full_round_trip` |
+| T-006 | code 5 = `negint`, low nibble = bc−1; all-zero payload reserved | ✅ | ✅ corpus `negint_minus_16` + `negint_zero_payload_reserved` | ✅ | ✅ `negint_full_round_trip` + `negint_zero_rejected` |
+| T-007 | code 6 = `ieee_float`, low nibble bits 2..0 = log₂(byte_count) ∈ {1,2,3,4}; bit 3 reserved | ✅ | ✅ corpus `ieee_float_{f16,f32,f64}_one` + bit3 + width0 reject | ✅ | ✅ `ieee_float_round_trip` + `ieee_float_reserved_bit3_rejected` + `ieee_float_bad_width_rejected` |
+| T-008 | code 7 = `decimal`, low nibble = mantissa bc−1 | ✅ | ✅ corpus `decimal_{one_point_five,12345}` | ✅ | ✅ `decimal_round_trip` |
 | T-009 | code 8 = `numeric_string`, low nibble must be 0; body is inner numeric value | ❌ | ❌ | ❌ | ❌ |
 | T-010 | code 9 = `string`, low nibble ∈ {0, 1} = encoding flag; others reserved | ❌ | ❌ | ❌ | ❌ |
 | T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
-| T-015 | codes 14, 15 reserved → reject | ❌ | ❌ | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
+| T-015 | codes 14, 15 reserved → reject | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
 | T-016 | predicates (is_atom, is_integer, is_real, is_numeric_value, is_number_projectable, is_json_string_emit, is_aggregate, is_extension, is_reserved) collapse to range tests | ❌ | ❌ | ❌ | ❌ |
 | T-017 | within is_integer: `bit 0 = sign`, `bit 1 = inline form` | ❌ | ❌ | ❌ | ❌ |
 
@@ -78,59 +78,59 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| N-001 | encode `null` → `0x00`, container size = 1 | ❌ | ❌ | ✅ | ✅ `null_round_trip` + corpus `null_basic` |
-| N-002 | decode `0x00` (size 1) → `null` | ❌ | ❌ | ✅ | ✅ `null_round_trip` + corpus `null_basic` |
-| N-003 | reject `0x0X` for X ≠ 0 | ❌ | ❌ | ✅ | ⚠️ |
+| N-001 | encode `null` → `0x00`, container size = 1 | ✅ | ✅ corpus `null_basic` | ✅ | ✅ `null_round_trip` + corpus `null_basic` |
+| N-002 | decode `0x00` (size 1) → `null` | ✅ | ✅ corpus `null_basic` | ✅ | ✅ `null_round_trip` + corpus `null_basic` |
+| N-003 | reject `0x0X` for X ≠ 0 | ✅ | ⚠️ | ✅ | ⚠️ |
 
 ## §4.2 — `bool`
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| B-001 | encode `false` → `0x10` | ❌ | ❌ | ✅ | ✅ `bool_round_trip` + corpus `bool_false` |
-| B-002 | encode `true` → `0x11` | ❌ | ❌ | ✅ | ✅ `bool_round_trip` + corpus `bool_true` |
-| B-003 | decode `0x10` → `false`, `0x11` → `true` | ❌ | ❌ | ✅ | ✅ `bool_round_trip` |
-| B-004 | reject `0x12..0x1F` | ❌ | ❌ | ✅ | ✅ `bool_round_trip` (asserts `decode(0x12)` is err) |
+| B-001 | encode `false` → `0x10` | ✅ | ✅ corpus `bool_false` | ✅ | ✅ `bool_round_trip` + corpus `bool_false` |
+| B-002 | encode `true` → `0x11` | ✅ | ✅ corpus `bool_true` | ✅ | ✅ `bool_round_trip` + corpus `bool_true` |
+| B-003 | decode `0x10` → `false`, `0x11` → `true` | ✅ | ✅ corpus `bool_{true,false}` | ✅ | ✅ `bool_round_trip` |
+| B-004 | reject `0x12..0x1F` | ✅ | ⚠️ no corpus reject fixture yet | ✅ | ✅ `bool_round_trip` |
 
 ## §4.3 — `uint_inline` (code 2)
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| UI-001 | encode 0..15 → `0x20..0x2F` | ❌ | ❌ | ✅ | ✅ `uint_inline_round_trip` + corpus `uint_inline_{0,5,15}` |
-| UI-002 | decode `0x20..0x2F` → 0..15 | ❌ | ❌ | ✅ | ✅ `uint_inline_round_trip` |
-| UI-003 | encoder picks `uint_inline` over `uint` for 0..15 | ❌ | ❌ | ✅ | ✅ corpus `uint_inline_5` (encodes 5 as 0x25, not 0x40 0x05) |
+| UI-001 | encode 0..15 → `0x20..0x2F` | ✅ | ✅ corpus `uint_inline_{0,5,15}` | ✅ | ✅ `uint_inline_round_trip` + corpus `uint_inline_{0,5,15}` |
+| UI-002 | decode `0x20..0x2F` → 0..15 | ✅ | ✅ corpus `uint_inline_{0,5,15}` | ✅ | ✅ `uint_inline_round_trip` |
+| UI-003 | encoder picks `uint_inline` over `uint` for 0..15 | ✅ | ✅ corpus `uint_inline_5` | ✅ | ✅ corpus `uint_inline_5` (encodes 5 as 0x25, not 0x40 0x05) |
 
 ## §4.4 — `nint_inline` (code 3)
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| NI-001 | encode −1..−15 → `0x31..0x3F` (low nibble = magnitude) | ❌ | ❌ | ✅ | ✅ `nint_inline_round_trip` + corpus `nint_inline_{minus_1, minus_15}` |
-| NI-002 | decode `0x31..0x3F` → −1..−15 | ❌ | ❌ | ✅ | ✅ `nint_inline_round_trip` |
-| NI-003 | reject `0x30` (negative-zero reserved) | ❌ | ❌ | ✅ | ✅ `nint_inline_zero_rejected` + corpus `nint_inline_zero_reserved` |
-| NI-004 | encoder picks `nint_inline` over `negint` for −1..−15 | ❌ | ❌ | ✅ | ✅ corpus `nint_inline_minus_1` |
+| NI-001 | encode −1..−15 → `0x31..0x3F` (low nibble = magnitude) | ✅ | ✅ corpus `nint_inline_{minus_1, minus_15}` | ✅ | ✅ `nint_inline_round_trip` + corpus `nint_inline_{minus_1, minus_15}` |
+| NI-002 | decode `0x31..0x3F` → −1..−15 | ✅ | ✅ corpus `nint_inline_{minus_1, minus_15}` | ✅ | ✅ `nint_inline_round_trip` |
+| NI-003 | reject `0x30` (negative-zero reserved) | ✅ | ✅ corpus `nint_inline_zero_reserved` | ✅ | ✅ `nint_inline_zero_rejected` + corpus `nint_inline_zero_reserved` |
+| NI-004 | encoder picks `nint_inline` over `negint` for −1..−15 | ✅ | ✅ corpus `nint_inline_minus_1` | ✅ | ✅ corpus `nint_inline_minus_1` |
 
 ## §4.5 — `uint` and `negint`
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| U-001 | encode `uint` magnitude n with smallest bc 1..16, payload raw LE | ❌ | ❌ | ✅ | ✅ `uint_full_round_trip` + corpus `uint_{16,256,u64_max}` |
-| U-002 | decode `uint` of any bc 1..16 | ❌ | ❌ | ✅ | ✅ `uint_full_round_trip` |
-| U-003 | encode `negint` magnitude with smallest bc, payload raw LE | ❌ | ❌ | ✅ | ✅ `negint_full_round_trip` + corpus `negint_minus_16` |
-| U-004 | decode `negint`, value = −payload | ❌ | ❌ | ✅ | ✅ `negint_full_round_trip` |
-| U-005 | reject `negint` with all-zero payload | ❌ | ❌ | ✅ | ✅ `negint_zero_rejected` + corpus `negint_zero_payload_reserved` |
-| U-006 | reject `uint`/`negint` with bc declared but truncated buffer | ❌ | ❌ | ✅ | ⚠️ |
-| U-007 | bc 9..16 reaches u128 / i128 range | ❌ | ❌ | ✅ | ⚠️ (only u64::MAX fixture so far) |
+| U-001 | encode `uint` magnitude n with smallest bc 1..16, payload raw LE | ✅ | ✅ corpus `uint_{16,256,u64_max}` | ✅ | ✅ `uint_full_round_trip` + corpus `uint_{16,256,u64_max}` |
+| U-002 | decode `uint` of any bc 1..16 | ✅ | ✅ corpus `uint_{16,256,u64_max}` | ✅ | ✅ `uint_full_round_trip` |
+| U-003 | encode `negint` magnitude with smallest bc, payload raw LE | ✅ | ✅ corpus `negint_minus_16` | ✅ | ✅ `negint_full_round_trip` + corpus `negint_minus_16` |
+| U-004 | decode `negint`, value = −payload | ✅ | ✅ corpus `negint_minus_16` | ✅ | ✅ `negint_full_round_trip` |
+| U-005 | reject `negint` with all-zero payload | ✅ | ✅ corpus `negint_zero_payload_reserved` | ✅ | ✅ `negint_zero_rejected` + corpus `negint_zero_payload_reserved` |
+| U-006 | reject `uint`/`negint` with bc declared but truncated buffer | ✅ | ⚠️ | ✅ | ⚠️ |
+| U-007 | bc 9..16 reaches u128 / i128 range | ✅ | ⚠️ (only u64::MAX fixture so far) | ✅ | ⚠️ (only u64::MAX fixture so far) |
 
 ## §4.6 — `ieee_float`
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| F-001 | binary16 round-trip (low_nibble 1, payload 2 bytes LE) | ❌ | ❌ | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f16_one` |
-| F-002 | binary32 round-trip (low_nibble 2, payload 4 bytes LE) | ❌ | ❌ | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f32_one` |
-| F-003 | binary64 round-trip (low_nibble 3, payload 8 bytes LE) | ❌ | ❌ | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f64_one` |
-| F-004 | binary128 round-trip (low_nibble 4, payload 16 bytes LE) — softfloat widen on decode | ❌ | ❌ | ⚠️ encode works, JSON-render via softfloat not wired | ⚠️ |
-| F-005 | reject low_nibble bit 3 set | ❌ | ❌ | ✅ | ✅ `ieee_float_reserved_bit3_rejected` + corpus `ieee_float_bit3_set_reserved` |
-| F-006 | reject low_nibble width selector ∈ {0, 5, 6, 7} | ❌ | ❌ | ✅ | ✅ `ieee_float_bad_width_rejected` (widths 0, 5) + corpus (width 0). Widths 6, 7 covered by code path but no dedicated fixture |
-| F-007 | binary16 software widen on decode (no host fp16 support assumed) | ❌ | ❌ | ✅ | ✅ corpus `ieee_float_f16_one` renders JSON `1` via `f16_bits_to_f64` |
+| F-001 | binary16 round-trip (low_nibble 1, payload 2 bytes LE) | ✅ | ✅ corpus `ieee_float_f16_one` | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f16_one` |
+| F-002 | binary32 round-trip (low_nibble 2, payload 4 bytes LE) | ✅ | ✅ corpus `ieee_float_f32_one` | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f32_one` |
+| F-003 | binary64 round-trip (low_nibble 3, payload 8 bytes LE) | ✅ | ✅ corpus `ieee_float_f64_one` | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f64_one` |
+| F-004 | binary128 round-trip (low_nibble 4, payload 16 bytes LE) — softfloat widen on decode | ⚠️ encode works, JSON-render via softfloat not wired | ⚠️ | ⚠️ encode works, JSON-render via softfloat not wired | ⚠️ |
+| F-005 | reject low_nibble bit 3 set | ✅ | ✅ corpus `ieee_float_bit3_set_reserved` | ✅ | ✅ `ieee_float_reserved_bit3_rejected` + corpus `ieee_float_bit3_set_reserved` |
+| F-006 | reject low_nibble width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_zero_reserved` (width 0) — widths 5–7 by code path | ✅ | ✅ `ieee_float_bad_width_rejected` (widths 0, 5) |
+| F-007 | binary16 software widen on decode (no host fp16 support assumed) | ✅ | ✅ corpus `ieee_float_f16_one` renders `1` via `f16_bits_to_f64` | ✅ | ✅ corpus `ieee_float_f16_one` renders JSON `1` via `f16_bits_to_f64` |
 | F-008 | NaN at any width preserves quiet-NaN canonical pattern (§15.2.1) | ❌ | ❌ | ⚠️ render-only, no canonicalization yet | ⚠️ |
 | F-009 | ±Inf round-trip at every width | ❌ | ❌ | ⚠️ | ⚠️ |
 
@@ -138,12 +138,12 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| D-001 | decimal(m, s) → `0x70..0x7F` tag, zigzag mantissa LE, varscale | ❌ | ❌ | ✅ | ✅ `decimal_round_trip` + corpus `decimal_{one_point_five, 12345}` |
-| D-002 | varscale 1-byte form (scale ∈ −32..31) | ❌ | ❌ | ✅ | ✅ `varscale_encode_decode_round_trip` + corpus `decimal_one_point_five` (scale −1) |
-| D-003 | varscale 2-byte form (scale ∈ −8192..8191) | ❌ | ❌ | ✅ | ✅ `varscale_encode_decode_round_trip` (8191, −8192) |
-| D-004 | varscale 3-byte form | ❌ | ❌ | ✅ | ✅ `varscale_encode_decode_round_trip` (100000, −100000) |
-| D-005 | varscale 4-byte form | ❌ | ❌ | ⚠️ encoder dispatches but no large-scale fixture | ⚠️ |
-| D-006 | varscale: encoder uses smallest byte count that fits | ❌ | ❌ | ✅ | ✅ `varscale_encode_decode_round_trip` (transitions at 32, 8192, etc.) |
+| D-001 | decimal(m, s) → `0x70..0x7F` tag, zigzag mantissa LE, varscale | ✅ | ✅ corpus `decimal_{one_point_five, 12345}` | ✅ | ✅ `decimal_round_trip` + corpus `decimal_{one_point_five, 12345}` |
+| D-002 | varscale 1-byte form (scale ∈ −32..31) | ✅ | ✅ corpus `decimal_one_point_five` (scale −1) | ✅ | ✅ `varscale_encode_decode_round_trip` + corpus `decimal_one_point_five` (scale −1) |
+| D-003 | varscale 2-byte form (scale ∈ −8192..8191) | ✅ | ⚠️ no fixture (covered by Rust unit test only) | ✅ | ✅ `varscale_encode_decode_round_trip` (8191, −8192) |
+| D-004 | varscale 3-byte form | ✅ | ⚠️ no fixture (covered by Rust unit test only) | ✅ | ✅ `varscale_encode_decode_round_trip` (100000, −100000) |
+| D-005 | varscale 4-byte form | ⚠️ encoder dispatches but no large-scale fixture | ⚠️ | ⚠️ encoder dispatches but no large-scale fixture | ⚠️ |
+| D-006 | varscale: encoder uses smallest byte count that fits | ✅ | ⚠️ no dedicated fixture | ✅ | ✅ `varscale_encode_decode_round_trip` (transitions at 32, 8192, etc.) |
 | D-007 | decimal-vs-ieee_float encoder rule (§4.7.2): pick decimal when strictly shorter, else smallest bit-exact ieee width | ❌ | ❌ | ❌ encoder does not yet pick between decimal and ieee | ❌ |
 
 ## §4.8 — `numeric_string`
@@ -305,26 +305,26 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| E-001 | reserved type code (14, 15) | ❌ | ❌ | ✅ | ✅ `reserved_codes_rejected` |
-| E-002 | reserved low-nibble bits per type | ❌ | ❌ | ⚠️ partial — covered for bool/nint_inline/ieee_float; remaining types pending | ⚠️ |
-| E-003 | `uint`/`negint`/`decimal` bc < 1 or bc > 16 | ❌ | ❌ | ⚠️ bc range enforced by 4-bit low nibble (bc-1 ∈ 0..15 → bc 1..16) by construction; out-of-range impossible to encode in tag | ⚠️ no negative test |
-| E-004 | `negint` all-zero payload | ❌ | ❌ | ✅ | ✅ `negint_zero_rejected` |
-| E-005 | `nint_inline` low_nibble = 0 | ❌ | ❌ | ✅ | ✅ `nint_inline_zero_rejected` |
+| E-001 | reserved type code (14, 15) | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` |
+| E-002 | reserved low-nibble bits per type | ⚠️ partial — covered for bool/nint_inline/ieee_float; remaining types pending | ⚠️ | ⚠️ partial — same | ⚠️ |
+| E-003 | `uint`/`negint`/`decimal` bc < 1 or bc > 16 | ⚠️ bc range enforced by 4-bit low nibble (bc-1 ∈ 0..15 → bc 1..16) by construction; out-of-range impossible to encode in tag | ⚠️ no negative test | ⚠️ same | ⚠️ |
+| E-004 | `negint` all-zero payload | ✅ | ✅ corpus `negint_zero_payload_reserved` | ✅ | ✅ `negint_zero_rejected` |
+| E-005 | `nint_inline` low_nibble = 0 | ✅ | ✅ corpus `nint_inline_zero_reserved` | ✅ | ✅ `nint_inline_zero_rejected` |
 | E-006 | container size too small for stated count | ❌ | ❌ | ❌ | ❌ |
 | E-007 | slot offset ≥ value_data_size | ❌ | ❌ | ❌ | ❌ |
 | E-008 | slot offsets non-monotone | ❌ | ❌ | ❌ | ❌ |
 | E-009 | hash[i] ≠ key_hash8(stored_key_i) | ❌ | ❌ | ❌ | ❌ |
-| E-010 | varscale / long-key varuint claims length past buffer | ❌ | ❌ | ⚠️ varscale truncation detected; long-key path not yet | ⚠️ |
+| E-010 | varscale / long-key varuint claims length past buffer | ⚠️ | ⚠️ | ⚠️ varscale truncation detected; long-key path not yet | ⚠️ |
 | E-011 | `numeric_string` inner tag's code not in {2..7} | ❌ | ❌ | ❌ | ❌ |
-| E-012 | `ieee_float` width selector ∈ {0, 5, 6, 7} | ❌ | ❌ | ✅ | ✅ `ieee_float_bad_width_rejected` |
+| E-012 | `ieee_float` width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_zero_reserved` | ✅ | ✅ `ieee_float_bad_width_rejected` |
 
 ## §13 — Versioning behavior
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
 | V-001 | extension framework: unknown sub-type id does not error | ❌ | ❌ | ❌ | ❌ |
-| V-002 | reserved codes (14, 15) reject without partial decode | ❌ | ❌ | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
-| V-003 | parse-fast-path predicate `(tag >> 4) >= 14` | ❌ | ❌ | ⚠️ implemented as match arm | ⚠️ |
+| V-002 | reserved codes (14, 15) reject without partial decode | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
+| V-003 | parse-fast-path predicate `(tag >> 4) >= 14` | ⚠️ | ⚠️ | ⚠️ implemented as match arm | ⚠️ |
 
 ## §15 — Canonical encoding
 
@@ -346,9 +346,9 @@ when applicable.
 
 | id | corpus area | C++ runner | Rust runner |
 |----|-------------|------------|-------------|
-| CC-001 | corpus loader exists and parses every fixture | ❌ | ❌ |
-| CC-002 | corpus harness compares wire bytes byte-exact | ❌ | ❌ |
-| CC-003 | corpus harness compares JSON output text-exact | ❌ | ❌ |
-| CC-004 | corpus harness compares decoded structural value | ❌ | ❌ |
-| CC-005 | cross-validation: C++ encode → Rust decode produces same Value | ❌ | ❌ |
-| CC-006 | cross-validation: Rust encode → C++ decode produces same Value | ❌ | ❌ |
+| CC-001 | corpus loader exists and parses every fixture | ✅ | ✅ |
+| CC-002 | corpus harness compares wire bytes byte-exact | ✅ | ✅ |
+| CC-003 | corpus harness compares JSON output text-exact | ✅ | ✅ |
+| CC-004 | corpus harness compares decoded structural value | ✅ | ✅ |
+| CC-005 | cross-validation: C++ encode → Rust decode produces same Value | ✅ | ✅ via xvalidate compare |
+| CC-006 | cross-validation: Rust encode → C++ decode produces same Value | ✅ | ✅ via xvalidate compare |
