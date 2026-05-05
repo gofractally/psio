@@ -16,7 +16,9 @@ target_compile_features(pjson_conformance_driver PRIVATE cxx_std_23)
 target_compile_options(pjson_conformance_driver PRIVATE
    -Wall -Wextra -Werror=unused-result)
 
-# Vendored Berkeley SoftFloat subset for binary128 → binary64 widening
-# (cpp/external/softfloat/psio_softfloat.h, single-header).
+# Vendored externals.
+#   softfloat — binary128 → binary64 widening (single-header).
+#   xxhash    — XXH3_64 for the §5.3 object-key prefilter hash.
 target_include_directories(pjson_conformance_driver PRIVATE
-   ${CMAKE_CURRENT_SOURCE_DIR}/../external/softfloat)
+   ${CMAKE_CURRENT_SOURCE_DIR}/../external/softfloat
+   ${CMAKE_CURRENT_SOURCE_DIR}/../external/xxhash)

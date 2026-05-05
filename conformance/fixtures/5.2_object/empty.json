@@ -1,0 +1,11 @@
+{
+  "id": "object_empty",
+  "spec_ref": "§5.2",
+  "rule_ids": ["O-001", "O-005", "T-013"],
+  "description": "empty object: tag 0xC0 + width 0x00 + count 0x00 0x00",
+  "input_value": {"kind": "object", "entries": []},
+  "wire_hex": "c0000000",
+  "json_compact": "{}",
+  "must_round_trip": true,
+  "must_validate": true
+}

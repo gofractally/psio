@@ -1,0 +1,14 @@
+{
+  "id": "object_suffix_strip_collision",
+  "spec_ref": "§5.2, §5.3",
+  "rule_ids": ["O-002", "O-003", "H-001"],
+  "description": "{amount: 1, amount.b64: 2} — keys 'amount' and 'amount.b64' have the SAME hash byte (0x9a) per §5.3 suffix-stripping. Decoder must verify hash matches and continue past collision. Tests both O-003 (suffix strip in hash) and H-001 (collision handling).",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "amount", "value": {"kind": "uint", "value": 1}},
+    {"key": "amount.b64", "value": {"kind": "uint", "value": 2}}
+  ]},
+  "wire_hex": "c000616d6f756e7421616d6f756e742e623634229a9a0006070a0200",
+  "json_compact": "{\"amount\":1,\"amount.b64\":2}",
+  "must_round_trip": true,
+  "must_validate": true
+}

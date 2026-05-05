@@ -68,7 +68,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-010 | code 9 = `string`, low nibble ∈ {0, 1} = encoding flag; others reserved | ❌ | ❌ | ❌ | ❌ |
 | T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ✅ | ✅ corpus `array_*` + `typed_array_*` + `typed_array_low_nibble_11_reserved` | ✅ | ✅ same |
-| T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ❌ | ❌ | ❌ | ❌ |
+| T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ⚠️ low_nibble 0 ✅; 1 (row_array) is Phase 2.4 | ⚠️ same | ⚠️ same | ⚠️ same |
 | T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
 | T-015 | codes 14, 15 reserved → reject | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
 | T-016 | predicates (is_atom, is_integer, is_real, is_numeric_value, is_number_projectable, is_json_string_emit, is_aggregate, is_extension, is_reserved) collapse to range tests | ✅ | ✅ `--self-test` runtime check | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` + `--self-test` |
@@ -223,13 +223,13 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| O-001 | encode object: tag `0xC0`, value_data, hash[N], slot[N], count u16 LE | ❌ | ❌ | ❌ | ❌ |
-| O-002 | hash byte = `key_hash8(key)` for each entry (XXH3_64 low byte after suffix strip) | ❌ | ❌ | ❌ | ❌ |
-| O-003 | suffix strip: `"foo.b64"` and `"foo"` hash to same byte | ❌ | ❌ | ❌ | ❌ |
-| O-004 | adaptive slot width per value_data size | ❌ | ❌ | ❌ | ❌ |
-| O-005 | empty object (N=0) round-trip | ❌ | ❌ | ❌ | ❌ |
-| O-006 | reject hash[i] ≠ key_hash8(stored_key_i) | ❌ | ❌ | ❌ | ❌ |
-| O-007 | reject low_nibble ∈ 2..15 | ❌ | ❌ | ❌ | ❌ |
+| O-001 | encode object: tag `0xC0`, value_data, hash[N], slot[N], count u16 LE | ✅ | ✅ corpus `object_*` | ✅ | ✅ `object_round_trip` + corpus |
+| O-002 | hash byte = `key_hash8(key)` for each entry (XXH3_64 low byte after suffix strip) | ✅ via XXH3_64bits + rfind('.') | ✅ corpus | ✅ via xxhash-rust + rfind | ✅ `key_hash8_strips_trailing_dot_suffix` + corpus |
+| O-003 | suffix strip: `"foo.b64"` and `"foo"` hash to same byte | ✅ | ✅ corpus `object_suffix_strip_collision` | ✅ | ✅ `key_hash8_strips_trailing_dot_suffix` + corpus |
+| O-004 | adaptive slot width per value_data size | ✅ | ⚠️ corpus exercises u8 in single_field/multi_field; u16 in long_key_255_escape | ✅ | ⚠️ same |
+| O-005 | empty object (N=0) round-trip | ✅ | ✅ corpus `object_empty` | ✅ | ✅ `object_round_trip` + corpus |
+| O-006 | reject hash[i] ≠ key_hash8(stored_key_i) | ✅ via decode hash check | ⚠️ no dedicated reject fixture (would need hand-crafted bad hash) | ✅ | ⚠️ |
+| O-007 | reject low_nibble ∈ 2..15 | ✅ | ✅ corpus `object_low_nibble_reserved` | ✅ | ✅ corpus |
 
 ### §5.2.1 — Row-array
 
@@ -243,17 +243,17 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| H-001 | hash collision behavior: lookup verifies stored key, advances on mismatch | ❌ | ❌ | ❌ | ❌ |
-| H-002 | long-key escape: `key_size_byte = 0xFF`, varuint excess inline in entry | ❌ | ❌ | ❌ | ❌ |
-| H-003 | round-trip key of exactly 254 bytes (no escape) | ❌ | ❌ | ❌ | ❌ |
-| H-004 | round-trip key of exactly 255 bytes (escape, excess = 0) | ❌ | ❌ | ❌ | ❌ |
-| H-005 | round-trip key of 64 KiB (4-byte varuint excess) | ❌ | ❌ | ❌ | ❌ |
+| H-001 | hash collision behavior: lookup verifies stored key, advances on mismatch | ✅ via decode hash verify | ✅ corpus `object_suffix_strip_collision` (round-trip with two same-hash entries) | ✅ | ✅ corpus + `object_round_trip` |
+| H-002 | long-key escape: `key_size_byte = 0xFF`, varuint excess inline in entry | ✅ | ✅ corpus `object_long_key_255_escape` | ✅ | ✅ `object_long_key_round_trip` + corpus |
+| H-003 | round-trip key of exactly 254 bytes (no escape) | ✅ | ✅ corpus `object_long_key_254` | ✅ | ✅ `object_long_key_round_trip` + corpus |
+| H-004 | round-trip key of exactly 255 bytes (escape, excess = 0) | ✅ | ✅ corpus `object_long_key_255_escape` | ✅ | ✅ `object_long_key_round_trip` + corpus |
+| H-005 | round-trip key of 64 KiB (4-byte varuint excess) | ⚠️ encoder supports 4-byte varuint; no fixture | ⚠️ | ⚠️ same | ⚠️ |
 
 ## §6 — Document level
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| DOC-001 | top-level value is a single pjson value; size from caller | ❌ | ❌ | ❌ | ❌ |
+| DOC-001 | top-level value is a single pjson value; size from caller | ✅ | ✅ corpus harness exercises this for every fixture | ✅ | ✅ same |
 
 ## §7 — JSON round-trip
 

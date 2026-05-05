@@ -1,0 +1,13 @@
+{
+  "id": "object_single_field",
+  "spec_ref": "§5.2",
+  "rule_ids": ["O-001", "O-002", "T-013"],
+  "description": "{\"a\":1} — value_data: 'a'(0x61) + uint_inline 1(0x21); hash[0]=0x1f (XXH3-64('a') low byte); slot[0]: offset=0(u8) + key_size=1; count=1.",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "a", "value": {"kind": "uint", "value": 1}}
+  ]},
+  "wire_hex": "c00061211f00010100",
+  "json_compact": "{\"a\":1}",
+  "must_round_trip": true,
+  "must_validate": true
+}

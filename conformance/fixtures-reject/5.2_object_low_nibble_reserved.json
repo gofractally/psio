@@ -1,0 +1,10 @@
+{
+  "id": "object_low_nibble_reserved",
+  "spec_ref": "§5.2",
+  "rule_ids": ["O-007", "T-013"],
+  "description": "object with low_nibble 2 (0xC2) is reserved — only 0 (single object) and 1 (row_array) defined",
+  "input_value": null,
+  "wire_hex": "c2",
+  "must_reject": true,
+  "reject_reason": "object_reserved_low_nibble"
+}

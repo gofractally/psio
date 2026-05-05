@@ -1,0 +1,15 @@
+{
+  "id": "object_multi_field",
+  "spec_ref": "§5.2",
+  "rule_ids": ["O-001", "O-002", "O-005", "T-013"],
+  "description": "{x:1, y:-1, z:true} — three different scalar types, three keys",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "x", "value": {"kind": "uint", "value": 1}},
+    {"key": "y", "value": {"kind": "int", "value": -1}},
+    {"key": "z", "value": {"kind": "bool", "value": true}}
+  ]},
+  "wire_hex": "c000782179317a1111e5b00001020104010300",
+  "json_compact": "{\"x\":1,\"y\":-1,\"z\":true}",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -25,6 +25,11 @@
 #define PSIO_SOFTFLOAT_IMPL
 #include <psio_softfloat.h>
 
+// xxhash for §5.3 prefilter hash. The vendored single-header is at
+// cpp/external/xxhash/. XXH_INLINE_ALL pulls the impls into this TU.
+#define XXH_INLINE_ALL
+#include <xxhash.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -111,7 +116,16 @@ struct TypedArray {
    bool operator==(const TypedArray&) const = default;
 };
 
-using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal, Array, TypedArray>;
+// Object (§5.2) — recursive, like Array. ObjectBody is forward-
+// declared so the variant can be sized.
+struct ObjectBody;
+struct Object {
+   std::shared_ptr<ObjectBody> body;
+   bool operator==(const Object& other) const;
+};
+
+using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal,
+                            Array, TypedArray, Object>;
 
 struct ArrayBody {
    std::vector<Value> children;
@@ -124,12 +138,38 @@ inline bool Array::operator==(const Array& other) const {
    return body->children == other.body->children;
 }
 
-// Helper to build an Array variant from a vector of children.
 inline Array make_array(std::vector<Value> children) {
    Array a;
    a.body = std::make_shared<ArrayBody>();
    a.body->children = std::move(children);
    return a;
+}
+
+struct ObjectBody {
+   std::vector<std::pair<std::string, Value>> entries;
+   bool operator==(const ObjectBody&) const = default;
+};
+
+inline bool Object::operator==(const Object& other) const {
+   if (!body && !other.body) return true;
+   if (!body || !other.body) return false;
+   return body->entries == other.body->entries;
+}
+
+inline Object make_object(std::vector<std::pair<std::string, Value>> entries) {
+   Object o;
+   o.body = std::make_shared<ObjectBody>();
+   o.body->entries = std::move(entries);
+   return o;
+}
+
+// §5.3 — 8-bit prefilter hash. Strip key from the last `.` onward
+// (e.g. "amount.decimal" → "amount") then XXH3-64 → low byte.
+inline std::uint8_t key_hash8(std::string_view key) noexcept {
+   const auto dot = key.rfind('.');
+   const auto stripped = (dot == std::string_view::npos) ? key : key.substr(0, dot);
+   const auto h = XXH3_64bits(stripped.data(), stripped.size());
+   return static_cast<std::uint8_t>(h & 0xFF);
 }
 
 // §5.1.1 — element_size in bytes for each typed-array element_code.
@@ -220,23 +260,44 @@ static I128 zigzag_decode_u128(U128 z) noexcept {
 
 // ── Encode (§12 reference algorithm) ───────────────────────────────
 
-static void varscale_encode(std::int32_t scale, std::vector<std::uint8_t>& out) {
-   const std::uint32_t zz = zigzag_encode_i32(scale);
+// 2-bit-prefix variable-length unsigned integer (§4.7.1 byte-tier
+// scheme, no zigzag). The primitive shared by varscale (§4.7.1
+// signed) and §5.4 long-key excess (§5.4 unsigned). Capacity:
+//   1 byte: 0..63          (6-bit payload)
+//   2 byte: 0..16383       (14-bit)
+//   3 byte: 0..4_194_303   (22-bit)
+//   4 byte: 0..1_073_741_823 (30-bit)
+inline void varuint_encode(std::uint32_t value, std::vector<std::uint8_t>& out) {
    std::uint32_t total_bytes;
-   if      (zz < (1u <<  6)) total_bytes = 1;
-   else if (zz < (1u << 14)) total_bytes = 2;
-   else if (zz < (1u << 22)) total_bytes = 3;
-   else if (zz < (1u << 30)) total_bytes = 4;
-   else throw EncodeError{"varscale overflow"};
-
-   const std::uint8_t prefix = static_cast<std::uint8_t>((total_bytes - 1) << 6);
-   const std::uint8_t lo6 = static_cast<std::uint8_t>(zz & 0x3F);
-   out.push_back(prefix | lo6);
-   std::uint32_t shifted = zz >> 6;
+   if      (value < (1u <<  6)) total_bytes = 1;
+   else if (value < (1u << 14)) total_bytes = 2;
+   else if (value < (1u << 22)) total_bytes = 3;
+   else if (value < (1u << 30)) total_bytes = 4;
+   else throw EncodeError{"varuint overflow"};
+   out.push_back(static_cast<std::uint8_t>(((total_bytes - 1) << 6) | (value & 0x3F)));
+   std::uint32_t shifted = value >> 6;
    for (std::uint32_t i = 1; i < total_bytes; ++i) {
       out.push_back(static_cast<std::uint8_t>(shifted & 0xFF));
       shifted >>= 8;
    }
+}
+
+struct VaruintResult { std::uint32_t value; std::size_t used; };
+
+inline VaruintResult varuint_decode(std::span<const std::uint8_t> buf) {
+   if (buf.empty()) throw DecodeError{"varuint first byte"};
+   const std::size_t total = static_cast<std::size_t>((buf[0] >> 6) + 1);
+   if (buf.size() < total) throw DecodeError{"varuint body"};
+   std::uint32_t v = static_cast<std::uint32_t>(buf[0] & 0x3F);
+   for (std::size_t i = 1; i < total; ++i) {
+      v |= static_cast<std::uint32_t>(buf[i]) << (6 + 8 * (i - 1));
+   }
+   return {v, total};
+}
+
+// §4.7.1 varscale — signed wrapper over varuint via zigzag.
+static void varscale_encode(std::int32_t scale, std::vector<std::uint8_t>& out) {
+   varuint_encode(zigzag_encode_i32(scale), out);
 }
 
 static std::vector<std::uint8_t> encode(const Value& v);
@@ -297,6 +358,61 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
          out.push_back(static_cast<std::uint8_t>(0x70 | (bc - 1)));
          out.insert(out.end(), m_bytes.begin(), m_bytes.end());
          varscale_encode(arg.scale, out);
+      } else if constexpr (std::is_same_v<T, Object>) {
+         // §5.2 single object.
+         const auto& entries = arg.body ? arg.body->entries
+                                        : std::vector<std::pair<std::string, Value>>{};
+         const std::size_t n = entries.size();
+         if (n > 0xFFFF) throw EncodeError{"object count > 65535 (LIM-001)"};
+
+         std::vector<std::uint8_t> value_data;
+         std::vector<std::size_t>  offsets;
+         std::vector<std::uint8_t> key_size_bytes;
+         offsets.reserve(n);
+         key_size_bytes.reserve(n);
+         for (const auto& [key, child] : entries) {
+            offsets.push_back(value_data.size());
+            const std::size_t klen = key.size();
+            if (klen < 0xFF) {
+               key_size_bytes.push_back(static_cast<std::uint8_t>(klen));
+               value_data.insert(value_data.end(), key.begin(), key.end());
+            } else {
+               key_size_bytes.push_back(0xFF);
+               const std::size_t excess = klen - 0xFF;
+               if (excess > std::numeric_limits<std::uint32_t>::max())
+                  throw EncodeError{"key length overflow (LIM-003)"};
+               varuint_encode(static_cast<std::uint32_t>(excess), value_data);
+               value_data.insert(value_data.end(), key.begin(), key.end());
+            }
+            encode_into(child, value_data);
+         }
+         const std::size_t value_data_size = value_data.size();
+
+         std::uint8_t slot_w_code;
+         std::size_t  slot_w;
+         if      (value_data_size <= 0xFF)         { slot_w_code = 0; slot_w = 1; }
+         else if (value_data_size <= 0xFFFF)       { slot_w_code = 1; slot_w = 2; }
+         else if (value_data_size <= 0xFF'FFFF)    { slot_w_code = 2; slot_w = 3; }
+         else if (value_data_size <= 0xFFFF'FFFFu) { slot_w_code = 3; slot_w = 4; }
+         else throw EncodeError{"value_data > u32 (LIM-002)"};
+
+         out.push_back(0xC0);
+         out.push_back(slot_w_code);
+         out.insert(out.end(), value_data.begin(), value_data.end());
+         // hash[N]
+         for (const auto& [key, _] : entries) {
+            out.push_back(key_hash8(key));
+         }
+         // slot[N]: offset_LE (slot_w bytes) + key_size_byte (1 byte)
+         for (std::size_t i = 0; i < n; ++i) {
+            const std::size_t off = offsets[i];
+            for (std::size_t b = 0; b < slot_w; ++b) {
+               out.push_back(static_cast<std::uint8_t>(off >> (8 * b)));
+            }
+            out.push_back(key_size_bytes[i]);
+         }
+         out.push_back(static_cast<std::uint8_t>(n & 0xFF));
+         out.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFF));
       } else if constexpr (std::is_same_v<T, TypedArray>) {
          // §5.1.1 typed homogeneous array.
          const std::size_t esize = typed_array_element_size(arg.element_code);
@@ -361,20 +477,15 @@ struct VarscaleResult {
 };
 
 static VarscaleResult varscale_decode(std::span<const std::uint8_t> buf) {
-   if (buf.empty()) throw DecodeError{"varscale first byte"};
-   const std::size_t total = static_cast<std::size_t>((buf[0] >> 6) + 1);
-   if (buf.size() < total) throw DecodeError{"varscale body"};
-   std::uint32_t zz = static_cast<std::uint32_t>(buf[0] & 0x3F);
-   for (std::size_t i = 1; i < total; ++i) {
-      zz |= static_cast<std::uint32_t>(buf[i]) << (6 + 8 * (i - 1));
-   }
-   return {zigzag_decode_u32(zz), total};
+   const auto vu = varuint_decode(buf);
+   return {zigzag_decode_u32(vu.value), vu.used};
 }
 
 static Value decode(std::span<const std::uint8_t> buf);
 static Value decode_generic_array(std::span<const std::uint8_t> buf);
 static Value decode_typed_array(std::span<const std::uint8_t> buf,
                                 std::uint8_t element_code);
+static Value decode_object(std::span<const std::uint8_t> buf);
 
 static Value decode(std::span<const std::uint8_t> buf) {
    if (buf.empty()) throw DecodeError{"empty buffer"};
@@ -435,13 +546,20 @@ static Value decode(std::span<const std::uint8_t> buf) {
          }
          throw DecodeError{"reserved low_nibble for array"};
       }
-      case 8: case 9: case 10: case 12: case 13: {
+      case 12: {
+         // §5.2 single object (low_nibble 0). Phase 2.4 will add
+         // row_array (low_nibble 1).
+         if (low == 0) return decode_object(buf);
+         if (low == 1) throw DecodeError{"Phase 2.4: row_array"};
+         throw DecodeError{"reserved low_nibble for object"};
+      }
+      case 8: case 9: case 10: case 13: {
          static const char* names[] = {
             "numeric_string",  // 8
             "string",          // 9
             "bytes",           // 10
             "<unused>",        // 11 — handled above
-            "object",          // 12
+            "<unused>",        // 12 — handled above
             "extension"};      // 13
          throw DecodeError{std::string{"Phase ≥2: "} + names[high - 8]};
       }
@@ -501,6 +619,74 @@ static Value decode_generic_array(std::span<const std::uint8_t> buf) {
       children.push_back(decode(child_span));
    }
    return make_array(std::move(children));
+}
+
+// §5.2 object decode. `buf` starts at the tag byte (0xC0).
+static Value decode_object(std::span<const std::uint8_t> buf) {
+   if (buf.size() < 4) throw DecodeError{"object minimum size"};
+   const std::uint8_t width_byte = buf[1];
+   const std::size_t  slot_w_code = width_byte & 0x03;
+   if ((width_byte & 0xFC) != 0)
+      throw DecodeError{"reserved high bits in object width byte"};
+   const std::size_t slot_w = slot_w_code + 1;
+   const std::size_t n = static_cast<std::size_t>(buf[buf.size() - 2])
+                       | (static_cast<std::size_t>(buf[buf.size() - 1]) << 8);
+   const std::size_t overhead = 4 + n + (slot_w + 1) * n;
+   if (buf.size() < overhead) throw DecodeError{"object slots/hash/count truncated"};
+   const std::size_t value_data_size = buf.size() - overhead;
+
+   const std::size_t value_data_start = 2;
+   const std::size_t hash_table_start = value_data_start + value_data_size;
+   const std::size_t slot_table_start = hash_table_start + n;
+
+   auto read_slot_offset = [&](std::size_t i) -> std::size_t {
+      const std::size_t pos = slot_table_start + i * (slot_w + 1);
+      std::size_t off = 0;
+      for (std::size_t b = 0; b < slot_w; ++b)
+         off |= static_cast<std::size_t>(buf[pos + b]) << (8 * b);
+      return off;
+   };
+   auto read_slot_key_size = [&](std::size_t i) -> std::uint8_t {
+      return buf[slot_table_start + i * (slot_w + 1) + slot_w];
+   };
+
+   std::vector<std::pair<std::string, Value>> entries;
+   entries.reserve(n);
+   for (std::size_t i = 0; i < n; ++i) {
+      const std::size_t off       = read_slot_offset(i);
+      const std::uint8_t ksize_b  = read_slot_key_size(i);
+      const std::size_t next_off  = (i + 1 < n) ? read_slot_offset(i + 1) : value_data_size;
+      if (off > value_data_size || next_off < off || next_off > value_data_size)
+         throw DecodeError{"object slot offset OOB or non-monotonic"};
+      const std::size_t entry_size = next_off - off;
+      auto entry_span = buf.subspan(value_data_start + off, entry_size);
+
+      std::string key;
+      std::size_t prefix_size, key_size;
+      if (ksize_b != 0xFF) {
+         key_size = ksize_b;
+         if (key_size > entry_span.size())
+            throw DecodeError{"object key bytes truncated"};
+         key.assign(reinterpret_cast<const char*>(entry_span.data()), key_size);
+         prefix_size = 0;
+      } else {
+         const auto vu = varuint_decode(entry_span);
+         prefix_size = vu.used;
+         key_size = std::size_t{0xFF} + vu.value;
+         if (prefix_size + key_size > entry_span.size())
+            throw DecodeError{"object long-key bytes truncated"};
+         key.assign(reinterpret_cast<const char*>(entry_span.data() + prefix_size), key_size);
+      }
+
+      const std::uint8_t stored_hash = buf[hash_table_start + i];
+      if (stored_hash != key_hash8(key))
+         throw DecodeError{"object hash byte mismatch"};
+
+      const std::size_t child_start = prefix_size + key_size;
+      auto child_span = entry_span.subspan(child_start);
+      entries.emplace_back(std::move(key), decode(child_span));
+   }
+   return make_object(std::move(entries));
 }
 
 // §5.1.1 typed-array decode. `buf` starts at the tag byte; the
@@ -672,6 +858,21 @@ static std::string render_json(const Value& v) {
             s += render_json(c);
          }
          s += "]";
+         return s;
+      } else if constexpr (std::is_same_v<T, Object>) {
+         std::string s = "{";
+         const auto& entries = arg.body ? arg.body->entries
+                                        : std::vector<std::pair<std::string, Value>>{};
+         bool first = true;
+         for (const auto& [key, value] : entries) {
+            if (!first) s += ",";
+            first = false;
+            s += "\"";
+            s += key;
+            s += "\":";
+            s += render_json(value);
+         }
+         s += "}";
          return s;
       } else if constexpr (std::is_same_v<T, TypedArray>) {
          const std::size_t esize = typed_array_element_size(arg.element_code);
@@ -1142,6 +1343,24 @@ static Value parse_value_from_json(const JNode& j) {
          children.push_back(parse_value_from_json(cj));
       }
       return make_array(std::move(children));
+   }
+   if (kind == "object") {
+      const auto* entries_node = obj_get(obj, "entries");
+      if (!entries_node) throw std::runtime_error{"object missing 'entries'"};
+      const auto* arr = std::get_if<JArray>(&entries_node->v);
+      if (!arr) throw std::runtime_error{"object 'entries' must be array"};
+      std::vector<std::pair<std::string, Value>> entries;
+      entries.reserve(arr->size());
+      for (const auto& ej : *arr) {
+         const auto* eobj = std::get_if<JObject>(&ej.v);
+         if (!eobj) throw std::runtime_error{"object entry must be object"};
+         const auto* k = obj_get(*eobj, "key");
+         if (!k) throw std::runtime_error{"object entry missing 'key'"};
+         const auto* v = obj_get(*eobj, "value");
+         if (!v) throw std::runtime_error{"object entry missing 'value'"};
+         entries.emplace_back(as_string(*k), parse_value_from_json(*v));
+      }
+      return make_object(std::move(entries));
    }
    if (kind == "typed_array") {
       const auto* ec_node = obj_get(obj, "element_code");

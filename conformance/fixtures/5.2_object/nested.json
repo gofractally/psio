@@ -1,0 +1,15 @@
+{
+  "id": "object_nested",
+  "spec_ref": "§5.2",
+  "rule_ids": ["O-001", "O-002", "O-005"],
+  "description": "{outer: {inner: 5}} — single-field object containing single-field object",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "outer", "value": {"kind": "object", "entries": [
+      {"key": "inner", "value": {"kind": "uint", "value": 5}}
+    ]}}
+  ]},
+  "wire_hex": "c0006f75746572c000696e6e657225eb00050100b600050100",
+  "json_compact": "{\"outer\":{\"inner\":5}}",
+  "must_round_trip": true,
+  "must_validate": true
+}

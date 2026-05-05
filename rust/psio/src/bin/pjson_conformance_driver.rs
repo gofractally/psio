@@ -68,6 +68,64 @@ enum Value {
     /// i8/i16/i32/i64/u8/u16/u32/u64/f32/f64. Raw bytes are stored
     /// little-endian, fixed-width per element_code.
     TypedArray { element_code: u8, raw: Vec<u8> },
+    /// Object (§5.2) — ordered list of (key, value) entries. Encounter
+    /// order is preserved; field iteration is the slot-table order.
+    /// Hash bytes (XXH3-64 low byte over suffix-stripped keys, §5.3)
+    /// power the prefilter scan in lookups.
+    Object(Vec<(String, Value)>),
+}
+
+/// §5.3 — 8-bit prefilter hash. Strip the key from the last `.`
+/// onward (e.g. `"amount.decimal"` → `"amount"`), hash with XXH3-64,
+/// return the low byte. Suffix-stripping enables presentation-tag-
+/// suffix matching where `"foo"` and `"foo.b64"` collide on the
+/// prefilter, then byte-equal compare distinguishes them.
+fn key_hash8(key: &str) -> u8 {
+    let stripped = match key.rfind('.') {
+        Some(idx) => &key[..idx],
+        None      => key,
+    };
+    (xxhash_rust::xxh3::xxh3_64(stripped.as_bytes()) & 0xFF) as u8
+}
+
+/// §5.4 long-key escape — 2-bit-prefix variable-length **unsigned**
+/// integer (same byte-count tiers as varscale, no zigzag step).
+fn varuint_encode_into(value: u32, out: &mut Vec<u8>) -> Result<(), EncodeError> {
+    let total_bytes = if value < (1u32 << 6) {
+        1
+    } else if value < (1u32 << 14) {
+        2
+    } else if value < (1u32 << 22) {
+        3
+    } else if value < (1u32 << 30) {
+        4
+    } else {
+        return Err(EncodeError::Overflow("varuint"));
+    };
+    let prefix = ((total_bytes - 1) as u8) << 6;
+    let lo6 = (value & 0x3F) as u8;
+    out.push(prefix | lo6);
+    let mut shifted = value >> 6;
+    for _ in 1..total_bytes {
+        out.push((shifted & 0xFF) as u8);
+        shifted >>= 8;
+    }
+    Ok(())
+}
+
+fn varuint_decode(buf: &[u8]) -> Result<(u32, usize), DecodeError> {
+    if buf.is_empty() {
+        return Err(DecodeError::Truncated("varuint first byte"));
+    }
+    let total_bytes = ((buf[0] >> 6) as usize) + 1;
+    if buf.len() < total_bytes {
+        return Err(DecodeError::Truncated("varuint body"));
+    }
+    let mut v: u32 = (buf[0] & 0x3F) as u32;
+    for i in 1..total_bytes {
+        v |= (buf[i] as u32) << (6 + 8 * (i - 1));
+    }
+    Ok((v, total_bytes))
 }
 
 /// §5.1.1 — element_size in bytes for each typed-array element_code.
@@ -201,6 +259,57 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&(n as u16).to_le_bytes());
         }
 
+        Value::Object(entries) => {
+            // §5.2 single object.
+            //   tag (0xC0)
+            //   width byte (slot_w_code in low 2 bits)
+            //   value_data (per-entry: [key_excess varuint?][key bytes][child])
+            //   hash[N]    (1 byte each — XXH3-64 low byte, suffix-stripped)
+            //   slot[N]    ((slot_w + 1) bytes each: offset_LE + key_size_byte)
+            //   count (u16 LE)
+            let n = entries.len();
+            if n > 0xFFFF {
+                return Err(EncodeError::Overflow("object count > 65 535 (LIM-001)"));
+            }
+            let mut value_data = Vec::new();
+            let mut offsets = Vec::with_capacity(n);
+            let mut key_size_bytes = Vec::with_capacity(n);
+            for (key, child) in entries {
+                offsets.push(value_data.len());
+                let key_len = key.len();
+                if key_len < 0xFF {
+                    key_size_bytes.push(key_len as u8);
+                    value_data.extend_from_slice(key.as_bytes());
+                } else {
+                    // Long-key escape: §5.4
+                    key_size_bytes.push(0xFF);
+                    let excess = key_len - 0xFF;
+                    if excess > u32::MAX as usize {
+                        return Err(EncodeError::Overflow("key length > u32 + 0xFF (LIM-003)"));
+                    }
+                    varuint_encode_into(excess as u32, &mut value_data)?;
+                    value_data.extend_from_slice(key.as_bytes());
+                }
+                encode_into(child, &mut value_data)?;
+            }
+            let value_data_size = value_data.len();
+            let (slot_w_code, slot_w) = pick_slot_width(value_data_size)?;
+            out.push(0xC0);
+            out.push(slot_w_code);
+            out.extend_from_slice(&value_data);
+            // hash[N]
+            for (key, _) in entries {
+                out.push(key_hash8(key));
+            }
+            // slot[N]: offset_LE (slot_w bytes) + key_size_byte (1 byte)
+            for (off, ksize) in offsets.iter().zip(key_size_bytes.iter()) {
+                let off_bytes = (*off as u32).to_le_bytes();
+                out.extend_from_slice(&off_bytes[..slot_w]);
+                out.push(*ksize);
+            }
+            out.extend_from_slice(&(n as u16).to_le_bytes());
+        }
+
         Value::TypedArray { element_code, raw } => {
             // §5.1.1: tag = 0xB0 | (element_code + 1); raw N × esize
             // bytes LE; count u16 LE.
@@ -274,30 +383,9 @@ fn zigzag_decode_u128(z: u128) -> i128 {
 ///   subsequent:  next 8 bits of zigzag(s) per byte, little-endian
 ///
 /// Capacities by total_bytes: 1=6 bits, 2=14, 3=22, 4=30.
+/// §4.7.1 varscale — signed wrapper over varuint via zigzag.
 fn varscale_encode_into(scale: i32, out: &mut Vec<u8>) -> Result<(), EncodeError> {
-    let zz = zigzag_encode_i32(scale);
-    let total_bytes = if zz < (1u32 << 6) {
-        1
-    } else if zz < (1u32 << 14) {
-        2
-    } else if zz < (1u32 << 22) {
-        3
-    } else if zz < (1u32 << 30) {
-        4
-    } else {
-        return Err(EncodeError::Overflow("varscale"));
-    };
-    // First byte: prefix + low 6 bits of zigzag.
-    let prefix = ((total_bytes - 1) as u8) << 6;
-    let lo6 = (zz & 0x3F) as u8;
-    out.push(prefix | lo6);
-    // Subsequent bytes: 8 bits each, starting at bit 6.
-    let mut shifted = zz >> 6;
-    for _ in 1..total_bytes {
-        out.push((shifted & 0xFF) as u8);
-        shifted >>= 8;
-    }
-    Ok(())
+    varuint_encode_into(zigzag_encode_i32(scale), out)
 }
 
 fn zigzag_encode_i32(v: i32) -> u32 {
@@ -428,12 +516,22 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             }
             Err(DecodeError::ReservedLowNibble("array", low))
         }
-        8 | 9 | 10 | 12 => {
+        12 => {
+            // §5.2 single object (low_nibble 0). Phase 2.4 will add
+            // row_array (low_nibble 1).
+            if low == 0 {
+                return decode_object(buf);
+            }
+            if low == 1 {
+                return Err(DecodeError::NotImplementedYet("row_array (Phase 2.4)"));
+            }
+            Err(DecodeError::ReservedLowNibble("object", low))
+        }
+        8 | 9 | 10 => {
             Err(DecodeError::NotImplementedYet(match high {
                 8  => "numeric_string",
                 9  => "string",
                 10 => "bytes",
-                12 => "object",
                 _  => unreachable!(),
             }))
         }
@@ -511,6 +609,96 @@ fn decode_generic_array(buf: &[u8]) -> Result<Value, DecodeError> {
     Ok(Value::Array(children))
 }
 
+/// §5.2 object decode. `buf` starts at the tag byte (0xC0).
+fn decode_object(buf: &[u8]) -> Result<Value, DecodeError> {
+    if buf.len() < 4 {
+        return Err(DecodeError::Truncated("object minimum size"));
+    }
+    let width_byte = buf[1];
+    let slot_w_code = (width_byte & 0x03) as usize;
+    if (width_byte & 0xFC) != 0 {
+        return Err(DecodeError::ReservedLowNibble("object width byte high bits", width_byte));
+    }
+    let slot_w = slot_w_code + 1;
+    let n = u16::from_le_bytes([buf[buf.len() - 2], buf[buf.len() - 1]]) as usize;
+    // Total: tag(1) + width(1) + V + hash(N) + slot((slot_w+1)*N) + count(2)
+    let overhead = 4 + n + (slot_w + 1) * n;
+    if buf.len() < overhead {
+        return Err(DecodeError::Truncated("object slots/hash/count"));
+    }
+    let value_data_size = buf.len() - overhead;
+    let value_data_start = 2;
+    let hash_table_start = value_data_start + value_data_size;
+    let slot_table_start = hash_table_start + n;
+
+    let mut entries = Vec::with_capacity(n);
+    for i in 0..n {
+        let slot_pos = slot_table_start + i * (slot_w + 1);
+        // Offset (slot_w bytes LE).
+        let mut off_buf = [0u8; 4];
+        off_buf[..slot_w].copy_from_slice(&buf[slot_pos..slot_pos + slot_w]);
+        let off = u32::from_le_bytes(off_buf) as usize;
+        // key_size_byte
+        let ksize_byte = buf[slot_pos + slot_w];
+        // Next entry's offset (or value_data_size for last).
+        let next_off = if i + 1 < n {
+            let np = slot_table_start + (i + 1) * (slot_w + 1);
+            let mut nb = [0u8; 4];
+            nb[..slot_w].copy_from_slice(&buf[np..np + slot_w]);
+            u32::from_le_bytes(nb) as usize
+        } else {
+            value_data_size
+        };
+        if off > value_data_size || next_off < off || next_off > value_data_size {
+            return Err(DecodeError::Truncated("object slot offset OOB or non-monotonic"));
+        }
+        let entry_size = next_off - off;
+        let entry = &buf[value_data_start + off..value_data_start + off + entry_size];
+
+        // Decode key.
+        let (key, key_size, key_prefix_size) = if ksize_byte != 0xFF {
+            let ks = ksize_byte as usize;
+            if ks > entry.len() {
+                return Err(DecodeError::Truncated("object key bytes"));
+            }
+            (
+                std::str::from_utf8(&entry[..ks])
+                    .map_err(|_| DecodeError::Truncated("object key UTF-8"))?
+                    .to_string(),
+                ks,
+                0,
+            )
+        } else {
+            // Long-key escape: §5.4
+            let (excess, prefix) = varuint_decode(entry)?;
+            let ks = 0xFFusize + excess as usize;
+            if prefix + ks > entry.len() {
+                return Err(DecodeError::Truncated("object long-key bytes"));
+            }
+            (
+                std::str::from_utf8(&entry[prefix..prefix + ks])
+                    .map_err(|_| DecodeError::Truncated("object long-key UTF-8"))?
+                    .to_string(),
+                ks,
+                prefix,
+            )
+        };
+
+        // Verify hash byte.
+        let stored_hash = buf[hash_table_start + i];
+        let computed = key_hash8(&key);
+        if stored_hash != computed {
+            return Err(DecodeError::Truncated("object hash byte mismatch"));
+        }
+
+        // Decode child.
+        let child_start = key_prefix_size + key_size;
+        let child = decode(&entry[child_start..])?;
+        entries.push((key, child));
+    }
+    Ok(Value::Object(entries))
+}
+
 /// §5.1.1 typed-array decode. `buf` starts at the tag byte; the
 /// caller has already extracted element_code from the low nibble.
 fn decode_typed_array(buf: &[u8], element_code: u8) -> Result<Value, DecodeError> {
@@ -542,18 +730,8 @@ fn read_u128_le(bytes: &[u8]) -> u128 {
 }
 
 fn varscale_decode(buf: &[u8]) -> Result<(i32, usize), DecodeError> {
-    if buf.is_empty() {
-        return Err(DecodeError::Truncated("varscale first byte"));
-    }
-    let total_bytes = ((buf[0] >> 6) as usize) + 1;
-    if buf.len() < total_bytes {
-        return Err(DecodeError::Truncated("varscale body"));
-    }
-    let mut zz: u32 = (buf[0] & 0x3F) as u32;
-    for i in 1..total_bytes {
-        zz |= (buf[i] as u32) << (6 + 8 * (i - 1));
-    }
-    Ok((zigzag_decode_u32(zz), total_bytes))
+    let (zz, used) = varuint_decode(buf)?;
+    Ok((zigzag_decode_u32(zz), used))
 }
 
 // ── JSON projection ─────────────────────────────────────────────────
@@ -613,6 +791,19 @@ fn render_json(v: &Value) -> String {
                 s.push_str(&render_json(c));
             }
             s.push(']');
+            s
+        }
+        Value::Object(entries) => {
+            let mut s = String::from("{");
+            for (i, (key, value)) in entries.iter().enumerate() {
+                if i > 0 { s.push(','); }
+                s.push('"');
+                s.push_str(key);  // Phase 2.3: assume key has no JSON-special chars
+                s.push('"');
+                s.push(':');
+                s.push_str(&render_json(value));
+            }
+            s.push('}');
             s
         }
         Value::TypedArray { element_code, raw } => {
@@ -975,6 +1166,24 @@ fn parse_value(j: &Json) -> Result<Value, String> {
                 children.push(parse_value(child_json)?);
             }
             Ok(Value::Array(children))
+        }
+        "object" => {
+            let arr = obj.get("entries")
+                         .and_then(|x| x.as_array())
+                         .ok_or("object missing 'entries' (array)")?;
+            let mut entries = Vec::with_capacity(arr.len());
+            for entry_json in arr {
+                let entry_obj = entry_json.as_object()
+                    .ok_or("object entry must be object")?;
+                let key = entry_obj.get("key")
+                    .and_then(|x| x.as_str())
+                    .ok_or("object entry missing 'key'")?
+                    .to_string();
+                let value = entry_obj.get("value")
+                    .ok_or("object entry missing 'value'")?;
+                entries.push((key, parse_value(value)?));
+            }
+            Ok(Value::Object(entries))
         }
         "typed_array" => {
             let element_code = obj.get("element_code")
@@ -1550,6 +1759,73 @@ mod tests {
         assert_eq!(dec_nested, nested);
         // JSON projection: [[1,2],[3]]
         assert_eq!(render_json(&dec_nested), "[[1,2],[3]]");
+    }
+
+    #[test]
+    fn object_round_trip() {
+        // Empty object: tag 0xC0, width 0, no value_data, no hash, no slots, count 0
+        let v0 = Value::Object(vec![]);
+        let enc0 = encode(&v0).unwrap();
+        assert_eq!(enc0, vec![0xC0, 0x00, 0x00, 0x00], "empty object");
+        assert_eq!(decode(&enc0).unwrap(), v0);
+
+        // {"a": 1}
+        let v1 = Value::Object(vec![("a".to_string(), Value::Uint(1))]);
+        let enc1 = encode(&v1).unwrap();
+        let dec1 = decode(&enc1).unwrap();
+        assert_eq!(dec1, v1);
+        // wire shape: tag(1) + width(1) + 'a'(1) + uint_inline(1) + hash(1) + slot(2) + count(2) = 9
+        assert_eq!(enc1.len(), 9);
+
+        // Multi-field {"x":1, "y":-1, "z":true}
+        let v2 = Value::Object(vec![
+            ("x".to_string(), Value::Uint(1)),
+            ("y".to_string(), Value::NegInt(1)),
+            ("z".to_string(), Value::Bool(true)),
+        ]);
+        let enc2 = encode(&v2).unwrap();
+        let dec2 = decode(&enc2).unwrap();
+        assert_eq!(dec2, v2);
+        assert_eq!(render_json(&dec2), r#"{"x":1,"y":-1,"z":true}"#);
+
+        // Nested: {"outer": {"inner": 5}}
+        let v3 = Value::Object(vec![(
+            "outer".to_string(),
+            Value::Object(vec![("inner".to_string(), Value::Uint(5))]),
+        )]);
+        let enc3 = encode(&v3).unwrap();
+        assert_eq!(decode(&enc3).unwrap(), v3);
+    }
+
+    #[test]
+    fn object_long_key_round_trip() {
+        // Key of exactly 254 bytes — short-form (key_size byte is the length).
+        let key254 = "a".repeat(254);
+        let v = Value::Object(vec![(key254, Value::Uint(1))]);
+        assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+
+        // Key of exactly 255 bytes — long-key escape (key_size byte = 0xFF,
+        // varuint excess = 0).
+        let key255 = "b".repeat(255);
+        let v = Value::Object(vec![(key255, Value::Uint(1))]);
+        assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+
+        // Key of 1024 bytes — long-key escape with non-zero excess.
+        let key1024 = "c".repeat(1024);
+        let v = Value::Object(vec![(key1024, Value::Uint(1))]);
+        assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+    }
+
+    #[test]
+    fn key_hash8_strips_trailing_dot_suffix() {
+        // "amount.decimal" and "amount" share the same hash byte
+        // (suffix-stripping for the prefilter, §5.3).
+        assert_eq!(key_hash8("amount.decimal"), key_hash8("amount"));
+        assert_eq!(key_hash8("avatar.b64"), key_hash8("avatar"));
+        // Different unsuffixed keys should generally differ — this
+        // isn't guaranteed (8-bit hash) but is overwhelmingly likely
+        // for random pairs:
+        assert_ne!(key_hash8("foo"), key_hash8("bar"));
     }
 
     #[test]
