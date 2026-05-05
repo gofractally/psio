@@ -32,6 +32,15 @@ mod fracpack_impl;
 
 pub use fracpack_impl::*;
 
+// Validation policy — type machinery for the format-tagged
+// `validate<F, T, P>` CPO described in `docs/psio-overview.md` §2.4.
+// Defines the `ValidationPolicy` trait and the spec-blessed preset
+// types (`DefaultSafe`, `StrictCanonical`, `JustDontCrash`,
+// `DynamicPolicy`) that callers parameterize the CPO with.
+mod policy;
+pub use policy::{ValidationPolicy, DefaultSafe, StrictCanonical,
+                  JustDontCrash, DynamicPolicy};
+
 // New modules (populated in subsequent phases)
 pub mod xxh64;
 pub mod xxh3_64;
