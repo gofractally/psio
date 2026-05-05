@@ -2122,28 +2122,21 @@ static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale) {
    const std::size_t scale_bc = (scale_bc_raw == 0) ? 5 : scale_bc_raw;
    const std::size_t decimal_size = 1 + m_bc + scale_bc;
 
+   const Decimal as_decimal{mantissa, scale};
+
    // Try to construct an exact f64 representation. None ⇒ no f64
    // represents this rational, so the picker MUST emit decimal.
    const auto maybe_f = decimal_to_f64_exact(mantissa, scale);
-   if (!maybe_f) {
-      Decimal d;
-      d.mantissa = mantissa;
-      d.scale = scale;
-      return d;
-   }
-   const double f_exact = *maybe_f;
+   if (!maybe_f) return as_decimal;
 
    union { std::uint64_t u; double f; } u;
-   u.f = f_exact;
+   u.f = *maybe_f;
    auto [w, bits] = canonical_float_width(3, U128{u.u, 0});
    const std::size_t ieee_size = 1u + (1u << w);
 
-   if (decimal_size < ieee_size) {
-      Decimal d;
-      d.mantissa = mantissa;
-      d.scale = scale;
-      return d;
-   }
+   // Strictly shorter decimal wins; ties go to ieee per §15.2 rule 5
+   // (faster decode beats mantissa-and-scale reconstruction).
+   if (decimal_size < ieee_size) return as_decimal;
    return Float{w, bits};
 }
 

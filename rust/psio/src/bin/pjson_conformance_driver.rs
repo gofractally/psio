@@ -32,10 +32,10 @@
 //! - `ieee_float` widths binary16/32/64 (F-001..003, F-005..009).
 //! - `decimal` with all four varscale tiers (D-*).
 //!
-//! Phase 2+ types (containers, strings, bytes, numeric_string,
-//! extension) return `Err(DecodeError::NotImplementedYet)` until they
-//! land — kept explicit so a fixture that targets unimplemented
-//! coverage fails loud instead of being silently mishandled.
+//! All spec types implemented; this comment used to flag Phase 2+
+//! types as `NotImplementedYet` but every variant now lands a real
+//! value. The error variant was removed in the post-Phase-4.2
+//! cleanup.
 
 use serde_json::Value as Json;
 use std::io::{self, Read};
@@ -396,8 +396,6 @@ fn typed_array_element_size(code: u8) -> Result<usize, &'static str> {
 enum EncodeError {
     /// Value out of range for the spec (e.g. mantissa needs > 16 bytes).
     Overflow(&'static str),
-    /// Variant not implemented in Phase 1 yet.
-    NotImplementedYet(&'static str),
 }
 
 /// RA-003 / §5.2.1.5 — homogeneous-shape detection + lift.
@@ -1279,11 +1277,9 @@ enum DecodeError {
     Truncated(&'static str),
     ReservedTag(u8),
     ReservedLowNibble(&'static str, u8),
-    BadVarscale,
     NegintZero,
     NintInlineZero,
     BadWidth(u8),
-    NotImplementedYet(&'static str),
 }
 
 impl std::fmt::Display for DecodeError {
@@ -1292,11 +1288,9 @@ impl std::fmt::Display for DecodeError {
             DecodeError::Truncated(s)            => write!(f, "truncated: {}", s),
             DecodeError::ReservedTag(b)          => write!(f, "reserved tag 0x{:02X}", b),
             DecodeError::ReservedLowNibble(t, n) => write!(f, "reserved low_nibble for {}: 0x{:X}", t, n),
-            DecodeError::BadVarscale             => write!(f, "malformed varscale"),
             DecodeError::NegintZero              => write!(f, "negint with all-zero payload (negative zero reserved)"),
             DecodeError::NintInlineZero          => write!(f, "nint_inline with low_nibble 0 (negative zero reserved)"),
             DecodeError::BadWidth(w)             => write!(f, "ieee_float bad width selector {}", w),
-            DecodeError::NotImplementedYet(s)    => write!(f, "Phase ≥2: {}", s),
         }
     }
 }
@@ -3917,12 +3911,16 @@ mod tests {
             other => panic!("1.5 should narrow to f16, got {:?}", other),
         }
 
-        // A value that doesn't fit in f16 but fits in f32: 1e-7
+        // A value that's f32-source-exact but out of f16 range:
+        // 1e-7_f32 has unbiased exponent ≈ -23, below f16's normal
+        // minimum of -14. f16 conversion must fail; f32 succeeds
+        // (the value is by construction f32-bit-exact).
         let v = Value::Float { width_log2: 3,
             bits: (1e-7f32 as f64).to_bits() as u128 };
         match canonicalize_value(&v) {
-            Value::Float { width_log2: w, .. } if w == 1 || w == 2 => {}
-            other => panic!("1e-7 should narrow to f16 or f32, got {:?}", other),
+            Value::Float { width_log2: 2, .. } => {}
+            other => panic!("1e-7_f32 → f64 must narrow exactly to f32 \
+                             (exp out of f16 range), got {:?}", other),
         }
 
         // π in f64 — doesn't fit in f32, stays at f64.
@@ -4040,17 +4038,11 @@ mod tests {
 
     #[test]
     fn d007_picks_decimal_when_ieee_inexact_above_22() {
-        // BUG REGRESSION TEST — D-007 picker uses
-        // `decimal_f64_roundtrips` to decide whether ieee_float can
-        // represent a (mantissa, scale) decimal exactly. The previous
-        // implementation gated on `(scaled - rounded).abs() <= 1e-9`
-        // — a magic FP tolerance that gave false positives for any
-        // 10^k with k > 22, since 5^k overflows f64's 53-bit mantissa.
-        //
-        // For decimal(1, 23) = 10^23, no f64 represents it exactly,
-        // so the picker MUST select decimal. Choosing ieee_float
-        // would silently lose the exact-decimal identity (a value
-        // ~10^23 ± a few thousand ULPs).
+        // For decimal(1, k) with k > 22, no f64 represents 10^k
+        // exactly (5^k overflows the 53-bit mantissa). The picker
+        // MUST select decimal — choosing ieee_float would silently
+        // lose the exact-decimal identity (a value ~10^k off by a
+        // few thousand ULPs at that magnitude).
         for scale in 23..=30 {
             let v = decimal_or_ieee_pick(1, scale);
             match v {
@@ -4084,12 +4076,15 @@ mod tests {
             other => panic!("1.5 should pick ieee_float, got {:?}", other),
         }
 
-        // 10^22 IS f64-exact (boundary case — 5^22 fits in 53 bits).
-        // Pick whichever the picker chooses but verify it round-trips.
-        let v = decimal_or_ieee_pick(1, 22);
-        match v {
-            Value::Decimal { .. } | Value::Float { .. } => {}
-            other => panic!("decimal(1, 22) unexpected variant {:?}", other),
+        // 10^22 IS f64-exact (boundary case — 5^22 fits in 53 bits)
+        // and ieee_float is shorter than decimal at this scale (size
+        // 9 vs 1+1+1=3? no: m_bc=1, scale_bc=1 → decimal_size=3,
+        // ieee at f64 = 9, so decimal wins on size). Pick MUST be
+        // decimal — both correct identity AND fewer bytes.
+        match decimal_or_ieee_pick(1, 22) {
+            Value::Decimal { mantissa: 1, scale: 22 } => {}
+            other => panic!("decimal(1, 22): expected Decimal{{1, 22}}, \
+                             got {:?}", other),
         }
     }
 
