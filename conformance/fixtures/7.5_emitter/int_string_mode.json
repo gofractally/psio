@@ -1,0 +1,16 @@
+{
+  "id": "emitter_int_string_mode",
+  "spec_ref": "section 7.5",
+  "rule_ids": ["EM-004", "EM-005", "EM-006"],
+  "description": "Object with a small bare integer (5) and a snowflake-class bare integer (123456789012345678 > 2^53-1). Each int_string_mode value produces a different JSON form: Never quotes nothing, LargeOnly quotes only the snowflake, All quotes both.",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "small", "value": {"kind": "uint", "value": 5}},
+    {"key": "big",   "value": {"kind": "uint", "value": "123456789012345678"}}
+  ]},
+  "wire_hex": "c000736d616c6c25626967474ef330a64b9bb6017866000506030200",
+  "json_compact": "{\"small\":5,\"big\":123456789012345678}",
+  "json_int_string_largeonly": "{\"small\":5,\"big\":\"123456789012345678\"}",
+  "json_int_string_all": "{\"small\":\"5\",\"big\":\"123456789012345678\"}",
+  "must_round_trip": true,
+  "must_validate": true
+}

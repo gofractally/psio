@@ -1,0 +1,16 @@
+{
+  "id": "emitter_pretty_array",
+  "spec_ref": "section 7.5",
+  "rule_ids": ["EM-001", "EM-002"],
+  "description": "array [1, true, -1] — compact and pretty (indent=2).",
+  "input_value": {"kind": "array", "children": [
+    {"kind": "uint", "value": 1},
+    {"kind": "bool", "value": true},
+    {"kind": "int", "value": -1}
+  ]},
+  "wire_hex": "b0002111310001020300",
+  "json_compact": "[1,true,-1]",
+  "json_pretty": "[\n  1,\n  true,\n  -1\n]",
+  "must_round_trip": true,
+  "must_validate": true
+}

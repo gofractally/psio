@@ -1267,6 +1267,48 @@ static std::string format_decimal(I128 mantissa, std::int32_t scale) {
    return sign + "0." + std::string(neg - mag_str.size(), '0') + mag_str;
 }
 
+// ── §7.5 JSON emitter options ──────────────────────────────────────
+
+enum class IntStringMode { Never, LargeOnly, All };
+
+struct EmitOptions {
+   bool          pretty           = false;
+   std::uint8_t  indent           = 2;     // 0 = use tabs
+   IntStringMode int_string_mode  = IntStringMode::Never;
+};
+
+inline constexpr U128 JS_MAX_SAFE_INTEGER{(1ull << 53) - 1, 0};
+
+inline bool quote_int_for_mode(const U128& mag, IntStringMode mode) {
+   switch (mode) {
+      case IntStringMode::Never:     return false;
+      case IntStringMode::All:       return true;
+      case IntStringMode::LargeOnly:
+         return mag.hi != 0 || mag.lo > JS_MAX_SAFE_INTEGER.lo;
+   }
+   return false;
+}
+
+inline void write_indent(const EmitOptions& opts, std::size_t depth, std::string& out) {
+   if (!opts.pretty) return;
+   out += '\n';
+   if (opts.indent == 0) {
+      for (std::size_t i = 0; i < depth; ++i) out += '\t';
+   } else {
+      for (std::size_t i = 0; i < depth * opts.indent; ++i) out += ' ';
+   }
+}
+
+static std::string render_json(const Value& v);
+static void render_with_opts_into(const Value& v, const EmitOptions& opts,
+                                   std::size_t depth, std::string& out);
+
+static std::string render_json_with(const Value& v, const EmitOptions& opts) {
+   std::string out;
+   render_with_opts_into(v, opts, 0, out);
+   return out;
+}
+
 static std::string render_json(const Value& v) {
    return std::visit([&](auto&& arg) -> std::string {
       using T = std::decay_t<decltype(arg)>;
@@ -1478,6 +1520,95 @@ static std::string render_json(const Value& v) {
          }
          s += "]";
          return s;
+      }
+   }, v);
+}
+
+// §7.5 emitter with options. Differs from `render_json` only for:
+//   - bare integers (Uint, NegInt) — quoted per `int_string_mode`
+//   - aggregates (Array, Object, RowArray) — when `pretty=true`,
+//     each element / entry on its own indented line
+// `numeric_string` and `bytes` are always quoted regardless of mode;
+// `Float`, `Decimal`, `String`, `TypedArray` re-use the simple path.
+static void render_with_opts_into(const Value& v, const EmitOptions& opts,
+                                   std::size_t depth, std::string& out) {
+   std::visit([&](auto&& arg) {
+      using T = std::decay_t<decltype(arg)>;
+      if constexpr (std::is_same_v<T, Null>)  { out += "null"; }
+      else if constexpr (std::is_same_v<T, Bool>)  {
+         out += arg.value ? "true" : "false";
+      }
+      else if constexpr (std::is_same_v<T, Uint>) {
+         const bool quoted = quote_int_for_mode(arg.value, opts.int_string_mode);
+         if (quoted) out += '"';
+         out += u128_to_decimal(arg.value);
+         if (quoted) out += '"';
+      }
+      else if constexpr (std::is_same_v<T, NegInt>) {
+         const bool quoted = quote_int_for_mode(arg.magnitude, opts.int_string_mode);
+         if (quoted) out += '"';
+         out += '-';
+         out += u128_to_decimal(arg.magnitude);
+         if (quoted) out += '"';
+      }
+      else if constexpr (std::is_same_v<T, Array>) {
+         const auto& children = arg.body ? arg.body->children
+                                         : std::vector<Value>{};
+         if (children.empty()) { out += "[]"; return; }
+         out += '[';
+         for (std::size_t i = 0; i < children.size(); ++i) {
+            if (i > 0) out += ',';
+            write_indent(opts, depth + 1, out);
+            render_with_opts_into(children[i], opts, depth + 1, out);
+         }
+         write_indent(opts, depth, out);
+         out += ']';
+      }
+      else if constexpr (std::is_same_v<T, Object>) {
+         const auto& entries = arg.body ? arg.body->entries
+                                        : std::vector<std::pair<std::string, Value>>{};
+         if (entries.empty()) { out += "{}"; return; }
+         out += '{';
+         for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (i > 0) out += ',';
+            write_indent(opts, depth + 1, out);
+            out += '"';
+            json_escape_into(entries[i].first, out);
+            out += "\":";
+            if (opts.pretty) out += ' ';
+            render_with_opts_into(entries[i].second, opts, depth + 1, out);
+         }
+         write_indent(opts, depth, out);
+         out += '}';
+      }
+      else if constexpr (std::is_same_v<T, RowArray>) {
+         if (!arg.body || arg.body->rows.empty()) { out += "[]"; return; }
+         const auto& keys = arg.body->keys;
+         out += '[';
+         for (std::size_t i = 0; i < arg.body->rows.size(); ++i) {
+            if (i > 0) out += ',';
+            write_indent(opts, depth + 1, out);
+            out += '{';
+            for (std::size_t j = 0; j < keys.size(); ++j) {
+               if (j > 0) out += ',';
+               write_indent(opts, depth + 2, out);
+               out += '"';
+               json_escape_into(keys[j], out);
+               out += "\":";
+               if (opts.pretty) out += ' ';
+               render_with_opts_into(arg.body->rows[i][j], opts, depth + 2, out);
+            }
+            write_indent(opts, depth + 1, out);
+            out += '}';
+         }
+         write_indent(opts, depth, out);
+         out += ']';
+      }
+      else {
+         // Float, Decimal, String, NumericString, Bytes, TypedArray
+         // are all unaffected by the §7.5 options — fall back to the
+         // simple renderer.
+         out += render_json(v);
       }
    }, v);
 }
@@ -1851,6 +1982,10 @@ struct Fixture {
    std::optional<std::string>   input_json;     // §4.8 / §7.1 ingress path
    std::string                  wire_hex;
    std::optional<std::string>   json_compact;
+   // §7.5 emitter-option assertions.
+   std::optional<std::string>   json_pretty;
+   std::optional<std::string>   json_int_string_largeonly;
+   std::optional<std::string>   json_int_string_all;
    bool                         must_round_trip = false;
    bool                         must_validate   = false;
    bool                         must_reject     = false;
@@ -2172,6 +2307,12 @@ static Fixture parse_fixture(std::string_view json_text) {
          f.input_json = *s;
       }
    }
+   if (const auto* n = obj_get(o, "json_pretty"))
+      if (auto* s = std::get_if<std::string>(&n->v)) f.json_pretty = *s;
+   if (const auto* n = obj_get(o, "json_int_string_largeonly"))
+      if (auto* s = std::get_if<std::string>(&n->v)) f.json_int_string_largeonly = *s;
+   if (const auto* n = obj_get(o, "json_int_string_all"))
+      if (auto* s = std::get_if<std::string>(&n->v)) f.json_int_string_all = *s;
    return f;
 }
 
@@ -2236,6 +2377,35 @@ static std::string check(const Fixture& f) {
       const std::string got = render_json(decoded);
       if (got != *f.json_compact) {
          return "json mismatch: expected " + *f.json_compact + ", got " + got;
+      }
+   }
+   // §7.5 emitter-option checks.
+   if (f.json_pretty.has_value()) {
+      EmitOptions opts;
+      opts.pretty = true;
+      opts.indent = 2;
+      const std::string got = render_json_with(decoded, opts);
+      if (got != *f.json_pretty) {
+         return "json_pretty mismatch: expected\n  " + *f.json_pretty +
+                "\n  got: " + got;
+      }
+   }
+   if (f.json_int_string_largeonly.has_value()) {
+      EmitOptions opts;
+      opts.int_string_mode = IntStringMode::LargeOnly;
+      const std::string got = render_json_with(decoded, opts);
+      if (got != *f.json_int_string_largeonly) {
+         return "json_int_string_largeonly mismatch: expected " +
+                *f.json_int_string_largeonly + ", got " + got;
+      }
+   }
+   if (f.json_int_string_all.has_value()) {
+      EmitOptions opts;
+      opts.int_string_mode = IntStringMode::All;
+      const std::string got = render_json_with(decoded, opts);
+      if (got != *f.json_int_string_all) {
+         return "json_int_string_all mismatch: expected " +
+                *f.json_int_string_all + ", got " + got;
       }
    }
 

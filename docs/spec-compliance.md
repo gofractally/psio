@@ -156,7 +156,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | NS-004 | encoder leaves non-canonical numeric strings (`"01"`, `"1.5e10"`) as plain `string` | ✅ canonical-form check rejects non-canonical | ✅ corpus `no_lift_leading_zero` + `no_lift_sci_notation` | ✅ same | ✅ same |
 | NS-005 | reject inner tag whose code is not in {2..7} | ✅ | ✅ corpus `numeric_string_inner_bool_rejected` + `numeric_string_inner_string_rejected` | ✅ | ✅ `numeric_string_round_trip` + corpus |
 | NS-006 | reject low_nibble ≠ 0 | ✅ | ✅ corpus `numeric_string_low_nibble_reserved` | ✅ | ✅ `numeric_string_round_trip` + corpus |
-| NS-007 | JSON emit always quoted regardless of `int_string_mode` (§7.5) | ✅ render always wraps in quotes | ⚠️ no `int_string_mode` flag yet (Phase 3.5) | ✅ same | ⚠️ |
+| NS-007 | JSON emit always quoted regardless of `int_string_mode` (§7.5) | ✅ | ✅ corpus `emitter_numeric_string_unaffected_by_mode` | ✅ | ✅ same |
 
 ## §4.9 — `string`
 
@@ -281,14 +281,14 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| EM-001 | `pretty=false` (default): no whitespace between tokens | ❌ | ❌ | ❌ | ❌ |
-| EM-002 | `pretty=true`, `indent=N`: each array element / object key on own line, indented N spaces | ❌ | ❌ | ❌ | ❌ |
-| EM-003 | `pretty=true`, `indent=0`: tab-indent | ❌ | ❌ | ❌ | ❌ |
-| EM-004 | `int_string_mode=Never`: every bare integer unquoted | ❌ | ❌ | ❌ | ❌ |
-| EM-005 | `int_string_mode=LargeOnly`: integers \|v\| > 2⁵³ − 1 quoted; smaller bare | ❌ | ❌ | ❌ | ❌ |
-| EM-006 | `int_string_mode=All`: every bare integer quoted | ❌ | ❌ | ❌ | ❌ |
-| EM-007 | `numeric_string` always quoted regardless of mode | ❌ | ❌ | ❌ | ❌ |
-| EM-008 | `ieee_float` and `decimal` not affected by `int_string_mode` | ❌ | ❌ | ❌ | ❌ |
+| EM-001 | `pretty=false` (default): no whitespace between tokens | ✅ | ✅ corpus `emitter_pretty_*` (json_compact path) | ✅ | ✅ same |
+| EM-002 | `pretty=true`, `indent=N`: each array element / object key on own line, indented N spaces | ✅ | ✅ corpus `emitter_pretty_object` + `emitter_pretty_array` | ✅ | ✅ same |
+| EM-003 | `pretty=true`, `indent=0`: tab-indent | ✅ implementation supports it | ⚠️ no fixture uses indent=0 yet | ✅ same | ⚠️ |
+| EM-004 | `int_string_mode=Never`: every bare integer unquoted | ✅ | ✅ corpus `emitter_int_string_mode` (json_compact path) | ✅ | ✅ same |
+| EM-005 | `int_string_mode=LargeOnly`: integers \|v\| > 2⁵³ − 1 quoted; smaller bare | ✅ | ✅ corpus `emitter_int_string_mode` (LargeOnly path) | ✅ | ✅ same |
+| EM-006 | `int_string_mode=All`: every bare integer quoted | ✅ | ✅ corpus `emitter_int_string_mode` (All path) | ✅ | ✅ same |
+| EM-007 | `numeric_string` always quoted regardless of mode | ✅ | ✅ corpus `emitter_numeric_string_unaffected_by_mode` | ✅ | ✅ same |
+| EM-008 | `ieee_float` and `decimal` not affected by `int_string_mode` | ✅ implementation falls through to default render for these | ⚠️ no dedicated fixture | ✅ same | ⚠️ |
 
 ## §8 — Limits
 

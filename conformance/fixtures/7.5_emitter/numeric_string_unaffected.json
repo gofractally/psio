@@ -1,0 +1,15 @@
+{
+  "id": "emitter_numeric_string_unaffected_by_mode",
+  "spec_ref": "section 7.5",
+  "rule_ids": ["EM-007", "NS-007"],
+  "description": "Object with a numeric_string (always quoted) AND a small bare uint (mode-controlled). Demonstrates EM-007 / NS-007: numeric_string emits quoted regardless of int_string_mode. Under mode=Never the bare uint is unquoted; under All it's quoted; numeric_string stays quoted in both.",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "id", "value": {"kind": "numeric_string", "inner": {"kind": "uint", "value": 7}}},
+    {"key": "count", "value": {"kind": "uint", "value": 3}}
+  ]},
+  "wire_hex": "c00069648027636f756e742383f1000204050200",
+  "json_compact": "{\"id\":\"7\",\"count\":3}",
+  "json_int_string_all": "{\"id\":\"7\",\"count\":\"3\"}",
+  "must_round_trip": true,
+  "must_validate": true
+}

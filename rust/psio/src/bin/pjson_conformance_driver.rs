@@ -1150,6 +1150,57 @@ fn varscale_decode(buf: &[u8]) -> Result<(i32, usize), DecodeError> {
 
 // ── JSON projection ─────────────────────────────────────────────────
 
+// ── §7.5 JSON emitter options ───────────────────────────────────────
+
+/// `int_string_mode` (§7.5):
+///   - Never: every bare integer unquoted (default).
+///   - LargeOnly: bare integers with |v| > 2^53-1 quoted; smaller bare.
+///   - All: every bare integer quoted regardless of magnitude.
+/// Always: `numeric_string` (§4.8) is quoted regardless of mode.
+/// Always: `ieee_float` and `decimal` are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum IntStringMode { Never, LargeOnly, All }
+
+/// `EmitOptions` controls per-call JSON-projection behavior.
+#[derive(Debug, Clone, Copy)]
+struct EmitOptions {
+    pretty: bool,
+    indent: u8,                    // spaces per level when pretty=true; 0 = tabs
+    int_string_mode: IntStringMode,
+}
+
+impl Default for EmitOptions {
+    fn default() -> Self {
+        Self { pretty: false, indent: 2, int_string_mode: IntStringMode::Never }
+    }
+}
+
+const JS_MAX_SAFE_INTEGER: u128 = (1u128 << 53) - 1;
+
+/// Returns true if a bare integer of magnitude `value_abs` should be
+/// emitted quoted under the given `mode`.
+fn quote_int_for_mode(value_abs: u128, mode: IntStringMode) -> bool {
+    match mode {
+        IntStringMode::Never     => false,
+        IntStringMode::All       => true,
+        IntStringMode::LargeOnly => value_abs > JS_MAX_SAFE_INTEGER,
+    }
+}
+
+/// Pretty-print indentation: writes a newline + N indent units to
+/// `out`. No-op when `pretty=false`.
+fn write_indent(opts: &EmitOptions, depth: usize, out: &mut String) {
+    if !opts.pretty { return; }
+    out.push('\n');
+    if opts.indent == 0 {
+        for _ in 0..depth { out.push('\t'); }
+    } else {
+        for _ in 0..(depth * opts.indent as usize) { out.push(' '); }
+    }
+}
+
+/// Default render — compact, no quoting of bare integers. Equivalent
+/// to `render_json_with(v, &EmitOptions::default())`.
 fn render_json(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
@@ -1305,6 +1356,100 @@ fn render_json(v: &Value) -> String {
             }
             s.push(']');
             s
+        }
+    }
+}
+
+/// §7.5 emitter with options. Differs from `render_json` only for:
+///   - bare integers (Uint, NegInt) — quoted per `int_string_mode`
+///   - aggregates (Array, Object, RowArray, TypedArray) — when
+///     `pretty=true`, each element/entry on its own indented line
+///   - object keys + JSON-strings — emitted with key escaping; same
+///     content as `render_json`
+/// `numeric_string` and `bytes` are always quoted regardless of mode.
+fn render_json_with(v: &Value, opts: &EmitOptions) -> String {
+    let mut out = String::new();
+    render_with_opts_into(v, opts, 0, &mut out);
+    out
+}
+
+fn render_with_opts_into(v: &Value, opts: &EmitOptions, depth: usize, out: &mut String) {
+    match v {
+        Value::Null     => out.push_str("null"),
+        Value::Bool(b)  => out.push_str(if *b { "true" } else { "false" }),
+        Value::Uint(n) => {
+            let quoted = quote_int_for_mode(*n, opts.int_string_mode);
+            if quoted { out.push('"'); }
+            out.push_str(&format!("{}", n));
+            if quoted { out.push('"'); }
+        }
+        Value::NegInt(mag) => {
+            let quoted = quote_int_for_mode(*mag, opts.int_string_mode);
+            if quoted { out.push('"'); }
+            out.push('-');
+            out.push_str(&format!("{}", mag));
+            if quoted { out.push('"'); }
+        }
+        // For everything else we can fall back to the simple renderer
+        // and post-process aggregates for pretty-print indentation.
+        Value::Float { .. } | Value::Decimal { .. }
+        | Value::String { .. } | Value::NumericString(_) | Value::Bytes { .. }
+        | Value::TypedArray { .. } => {
+            // None of these arms have nested aggregates that pretty-
+            // print would affect (TypedArray is flat numbers/floats,
+            // never wraps a Value), and none participate in
+            // int_string_mode. Reuse the default renderer.
+            out.push_str(&render_json(v));
+        }
+        Value::Array(children) => {
+            if children.is_empty() { out.push_str("[]"); return; }
+            out.push('[');
+            for (i, c) in children.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                write_indent(opts, depth + 1, out);
+                render_with_opts_into(c, opts, depth + 1, out);
+            }
+            write_indent(opts, depth, out);
+            out.push(']');
+        }
+        Value::Object(entries) => {
+            if entries.is_empty() { out.push_str("{}"); return; }
+            out.push('{');
+            for (i, (key, value)) in entries.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                write_indent(opts, depth + 1, out);
+                out.push('"');
+                json_escape_into(key, out);
+                out.push('"');
+                out.push(':');
+                if opts.pretty { out.push(' '); }
+                render_with_opts_into(value, opts, depth + 1, out);
+            }
+            write_indent(opts, depth, out);
+            out.push('}');
+        }
+        Value::RowArray { keys, rows } => {
+            if rows.is_empty() { out.push_str("[]"); return; }
+            out.push('[');
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 { out.push(','); }
+                write_indent(opts, depth + 1, out);
+                out.push('{');
+                for (j, value) in row.iter().enumerate() {
+                    if j > 0 { out.push(','); }
+                    write_indent(opts, depth + 2, out);
+                    out.push('"');
+                    json_escape_into(&keys[j], out);
+                    out.push('"');
+                    out.push(':');
+                    if opts.pretty { out.push(' '); }
+                    render_with_opts_into(value, opts, depth + 2, out);
+                }
+                write_indent(opts, depth + 1, out);
+                out.push('}');
+            }
+            write_indent(opts, depth, out);
+            out.push(']');
         }
     }
 }
@@ -1587,15 +1732,16 @@ fn format_decimal(mantissa: i128, scale: i32) -> String {
 #[derive(Debug)]
 struct Fixture {
     id: String,
-    /// Structured DSL input — built directly via the Value constructors.
     input_value: Option<Value>,
-    /// Raw JSON text input — transcoded via `from_json` into a Value
-    /// before the round-trip checks run. Exercises the §4.8 / §7.1
-    /// numeric_string lift detection and the broader JSON ingress path.
-    /// At most one of `input_value` / `input_json` should be present.
     input_json: Option<String>,
     wire_hex: String,
     json_compact: Option<String>,
+    /// §7.5 emitter options. Each, when present, asserts that
+    /// rendering the decoded value with the corresponding mode
+    /// produces this text:
+    json_pretty: Option<String>,                  // pretty=true, indent=2
+    json_int_string_largeonly: Option<String>,    // mode=LargeOnly
+    json_int_string_all: Option<String>,          // mode=All
     must_round_trip: bool,
     must_validate: bool,
     must_reject: bool,
@@ -1643,12 +1789,22 @@ fn parse_fixture(json_text: &str) -> Result<Fixture, String> {
         .and_then(|x| x.as_str())
         .map(|s| s.to_string());
 
+    let json_pretty = obj.get("json_pretty")
+        .and_then(|x| x.as_str()).map(|s| s.to_string());
+    let json_int_string_largeonly = obj.get("json_int_string_largeonly")
+        .and_then(|x| x.as_str()).map(|s| s.to_string());
+    let json_int_string_all = obj.get("json_int_string_all")
+        .and_then(|x| x.as_str()).map(|s| s.to_string());
+
     Ok(Fixture {
         id,
         input_value,
         input_json,
         wire_hex,
         json_compact,
+        json_pretty,
+        json_int_string_largeonly,
+        json_int_string_all,
         must_round_trip,
         must_validate,
         must_reject,
@@ -2000,6 +2156,39 @@ fn check(fixture: &Fixture) -> Result<(), String> {
                     "json mismatch:\n  expected: {:?}\n  got:      {:?}",
                     expected_json, got
                 ));
+            }
+        }
+        // §7.5 emitter-option checks. Each is independent: the fixture
+        // can specify one, several, or none. When present, render the
+        // decoded value with the matching opts and compare.
+        if let Some(expected_pretty) = &fixture.json_pretty {
+            let got = render_json_with(&decoded,
+                &EmitOptions { pretty: true, indent: 2,
+                                int_string_mode: IntStringMode::Never });
+            if &got != expected_pretty {
+                return Err(format!(
+                    "json_pretty mismatch:\n  expected: {:?}\n  got:      {:?}",
+                    expected_pretty, got));
+            }
+        }
+        if let Some(expected) = &fixture.json_int_string_largeonly {
+            let got = render_json_with(&decoded,
+                &EmitOptions { pretty: false, indent: 2,
+                                int_string_mode: IntStringMode::LargeOnly });
+            if &got != expected {
+                return Err(format!(
+                    "json_int_string_largeonly mismatch:\n  expected: {:?}\n  got:      {:?}",
+                    expected, got));
+            }
+        }
+        if let Some(expected) = &fixture.json_int_string_all {
+            let got = render_json_with(&decoded,
+                &EmitOptions { pretty: false, indent: 2,
+                                int_string_mode: IntStringMode::All });
+            if &got != expected {
+                return Err(format!(
+                    "json_int_string_all mismatch:\n  expected: {:?}\n  got:      {:?}",
+                    expected, got));
             }
         }
 

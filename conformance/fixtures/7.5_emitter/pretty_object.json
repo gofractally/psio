@@ -1,0 +1,16 @@
+{
+  "id": "emitter_pretty_object",
+  "spec_ref": "section 7.5",
+  "rule_ids": ["EM-001", "EM-002"],
+  "description": "object {x:1, y:-1, z:true} — compact (default) and pretty (indent=2). Pretty form puts each entry on its own line with 2-space indent and a space after the colon.",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "x", "value": {"kind": "uint", "value": 1}},
+    {"key": "y", "value": {"kind": "int", "value": -1}},
+    {"key": "z", "value": {"kind": "bool", "value": true}}
+  ]},
+  "wire_hex": "c000782179317a1111e5b00001020104010300",
+  "json_compact": "{\"x\":1,\"y\":-1,\"z\":true}",
+  "json_pretty": "{\n  \"x\": 1,\n  \"y\": -1,\n  \"z\": true\n}",
+  "must_round_trip": true,
+  "must_validate": true
+}
