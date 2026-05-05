@@ -3979,29 +3979,21 @@ mod tests {
 
     #[test]
     fn decimal_f64_roundtrips_must_be_exact() {
-        // CONTRACT TEST — not a regression test for end-to-end output.
+        // Helper-level regression test paired with the end-to-end
+        // `d007_natural_input_changes_picker_output` test above.
         //
-        // The original implementation of `decimal_f64_roundtrips` gated
-        // on `(scaled - rounded).abs() <= 1e-9` — a magic FP tolerance.
+        // The original implementation gated on
+        // `(scaled - rounded).abs() <= 1e-9` — a magic FP tolerance.
         // For 0.1, the f64 product `0.1_f64 * 10` rounds to *exactly*
         // 1.0 (a famous IEEE-754 coincidence with RNE), so the
-        // tolerance check passed even though 0.1_f64 ≠ 1/10. The
-        // function returned true, lying about its name.
+        // tolerance passed even though 0.1_f64 ≠ 1/10. The function
+        // returned true, lying about its name.
         //
-        // The lie did NOT change picker output for any current input:
-        // non-dyadic decimals' f64 reps have nonzero low mantissa
-        // bits, so `canonical_float_width` never narrows them, so
-        // `ieee_size = 9 (f64)` always loses to `decimal_size ≤ 5` on
-        // size. The size-comparison happens to mask the bug.
-        //
-        // We test the helper directly because:
-        //   (a) the helper's contract was wrong and a future caller
-        //       outside the picker would silently get wrong answers
-        //   (b) the picker's correctness shouldn't rest on an
-        //       unstated invariant about which f64s narrow.
-        //
-        // Inputs below all cause the OLD impl to return `true`
-        // incorrectly; the new exact-integer impl returns `false`.
+        // For most non-dyadic decimals (small mantissa, |s| ≤ 31)
+        // the lie is masked downstream by the picker's size-comparison
+        // (decimal_size beats ieee_size=9), but for `m_bc=7, s=-1`
+        // the size tie favors ieee and the bug surfaces — see the
+        // companion test for the natural input.
         assert!(!decimal_f64_roundtrips(1, -1, 0.1_f64),
             "0.1_f64 is not exactly 1/10 — function must reject");
         assert!(!decimal_f64_roundtrips(3, -1, 0.3_f64),
@@ -4025,6 +4017,52 @@ mod tests {
         // Wrong sign.
         assert!(!decimal_f64_roundtrips(-15, -1, 1.5_f64),
             "1.5 != -1.5");
+    }
+
+    #[test]
+    fn d007_natural_input_changes_picker_output() {
+        // PROOF that a natural input exhibits the bug end-to-end.
+        //
+        // Constraints derived analytically:
+        //   1. bug fires iff `m_back == m` after FP round-trip — needs
+        //      ulp(m) ≤ ~1, so m < 2^52 (use m = 2^48 with margin).
+        //   2. picker chooses ieee iff decimal_size ≥ ieee_size = 9.
+        //      decimal_size = 1 + m_bc + scale_bc — need ≥ 9, so
+        //      with scale_bc = 1 we need m_bc = 7, giving m ≥ 2^48.
+        //   3. divergence iff m·10^s is non-dyadic (so picker picks
+        //      ieee under bug but decimal under fix).
+        //
+        // m = 2^48, s = -1 satisfies all three. Source JSON literal
+        // "28147497671065.6" reaches `decimal_or_ieee_pick(2^48, -1)`.
+        //
+        // Verified empirically: under the OLD impl this test fails
+        // with `D-007 picked ieee_float (w=3, bits=0x42b999999999999a)`
+        // — the f64 nearest to 28147497671065.6, which differs from
+        // 2^48/10 = 2^47/5 by ~0.005 (lost identity).
+        // The new exact-integer impl returns Decimal{2^48, -1}.
+        let m: i128 = 1 << 48;
+        let s: i32 = -1;
+        let picked = decimal_or_ieee_pick(m, s);
+        match picked {
+            Value::Decimal { mantissa, scale } => {
+                assert_eq!(mantissa, m);
+                assert_eq!(scale, s);
+            }
+            Value::Float { width_log2, bits } => panic!(
+                "D-007 picked ieee_float (w={}, bits={:#x}) for \
+                 decimal(2^48, -1) — value 2^48/10 = 2^47/5 isn't \
+                 dyadic, so ieee can't represent it exactly",
+                width_log2, bits),
+            _ => panic!("unexpected variant"),
+        }
+
+        // Confirm via the public ingress path too.
+        let v_in = from_json("28147497671065.6").expect("parse");
+        let wire = encode(&v_in).unwrap();
+        // Tag must be 0x70 | (bc-1) (decimal), NOT 0x60 | log2(width) (ieee).
+        assert_eq!(wire[0] & 0xF0, 0x70,
+            "JSON ingress of 28147497671065.6 must encode as decimal, \
+             not ieee_float — wire[0] = {:#x}", wire[0]);
     }
 
     #[test]
