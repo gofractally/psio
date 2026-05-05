@@ -8,14 +8,15 @@ constraints that would need resolving before promoting to the spec.
 
 ---
 
-## E-001 — `array` "is_sorted" hint bit
+## E-001 — `is_sorted` hint bit on arrays AND objects
 
-**Intent.** When the encoder knows the children of an array are sorted
-(e.g. serializing a `std::set`, `BTreeMap` keyset, or a sorted index),
-record that fact so a view can use it.
+**Intent.** When the encoder knows the children of an `array` (§5.1)
+are sorted by value, OR the entries of an `object` (§5.2) are sorted
+by key bytes, record that fact so a view can use it.
 
 **Use cases enabled in views:**
 
+For arrays:
 - O(log N) binary search by child value, instead of the current O(N) scan.
 - Merge-join two sorted arrays without materializing intermediate state.
 - Membership queries against a sorted typed homogeneous array become a
@@ -23,47 +24,93 @@ record that fact so a view can use it.
 - Decoder fast paths that need not preserve insertion order can build
   set-like data structures without re-sorting.
 
-**Proposed mechanism.** Use a previously-reserved low-nibble bit on
-the `array` tag. The current low-nibble assignment (§5.1) is:
+For objects:
+- O(log N) `lower_bound(key)` and range queries via binary search on
+  the slot table (instead of the hash-prefilter + linear-verify scan).
+- Merge-join two sorted-key objects in O(N + M) without re-hashing.
+- Trivial sorted-traversal — the slot table already is the iteration
+  order.
+
+**Sources that get the bit "for free":**
+
+- C++ `std::map<string, T>` and `std::set<T>` — sorted by spec.
+- Rust `BTreeMap<String, T>` and `BTreeSet<T>` — same.
+- Go's `encoding/json` `MarshalSorted` mode; Python's `json` with
+  `sort_keys=True`; serde_json when fed a `BTreeMap`.
+- Canonical-JSON encoders (RFC 8785, JCS) — always lex-sorted by spec.
+
+**Proposed mechanism — objects (§5.2).**
+
+The object width byte already has reserved bits:
 
 ```
-array tag low nibble:
-  0       = generic array
-  1..10   = typed homogeneous (element type code = low_nibble − 1)
-  11..15  = reserved
+[width byte: low 2 bits = slot_w_code (u8/u16/u24/u32); bits 2..7 reserved]
 ```
 
-Plenty of headroom in the reserved range. One reasonable assignment:
-add a parallel range `0x?B..0x?F` that mirrors `0..A` with an
-"is_sorted" bit set. Or repurpose the high bit of the low nibble:
+Assign **bit 2 = is_sorted_keys**:
 
 ```
-bit 3 of low nibble = is_sorted hint  (1 = sorted)
-bits 2..0           = layout selector (0 = generic, 1..7 = typed
-                      element code with reduced range, ...)
+bit 0..1 = slot_w_code
+bit 2    = is_sorted_keys (1 = slot table in lex-sorted key-byte order)
+bit 3..7 = reserved
 ```
 
-The reduced typed-array range is the cost — fitting 10 element codes
-into 3 bits requires either dropping some (ssz/ssz-bool style: i8/i16/
-i32/i64/u8/u16/u32/u64 → 8 codes; drop f32/f64 to fit into 7) or using
-a 2-byte tag. Both have downsides; the design call has not been made.
+Free bit, no wire-size cost. The same width byte already exists in
+generic arrays (§5.1) and we'd add an equivalent **bit 2 = is_sorted_values**
+there.
 
-**Open questions before promoting:**
+**Sort key for objects** — open question: as-stored or
+suffix-stripped (§7.4)?
 
-1. Which low-nibble layout wins the bit? Reserved-range expansion or
-   high-bit repurposing?
-2. Should `is_sorted` apply to both generic and typed arrays, or only
-   typed (where the comparison is well-defined byte-for-byte)?
-3. For generic arrays: what's the comparison rule? Element-tag-then-
-   bytes lex? Defined per-element-type? Application-defined?
-4. Validator policy: when `is_sorted` is set but the bytes aren't
-   actually sorted, is that a wire error or a "hint was wrong, ignore"?
-   Suggest: **must** reject in strict-canonical, **may** accept in
-   lenient. See E-002 below.
+- **As-stored** — `"amount.b64"` and `"amount.hex"` sort distinctly.
+  Deterministic total order over key bytes. Matches what the bytes
+  literally are.
+- **Suffix-stripped** — collides with the hash-byte stripping
+  convention but leaves ties unresolved.
 
-**Status.** Deferred from v1. Revisit when a real consumer needs it
-and the trade-off space has been measured against typed-array bench
-shapes.
+Recommendation: **as-stored**. Sorting is a layout property; suffix-
+stripping is a hash-prefilter concern. Don't conflate.
+
+**Proposed mechanism — typed arrays (§5.1.1).**
+
+Typed arrays don't have a width byte (no slot table to encode width
+for). Two options:
+
+- (a) **Burn a low-nibble bit on the tag.** Currently low_nibble 1..10
+  encodes element_code 0..9. Reserved range is 11..15 (5 codes).
+  Reframe the low nibble as `[is_sorted_bit (bit 3)] [element_code 0..7
+  (bits 2..0)]`. That fits 8 element codes; `f32`/`f64` (codes 8/9)
+  would need a separate handling.
+- (b) **Add a 1-byte width-byte before the body.** Mirrors the generic
+  array / object structure. Costs 1 byte per typed array; uniform
+  with the rest.
+
+Recommendation: **(b)**. The 1-byte cost amortizes across N elements,
+and the uniform layout simplifies decoder code paths. Generic array
+and typed array would share the same width byte structure — only the
+element-format differs.
+
+**Validator policy** (linked to E-002 below):
+
+- **Lenient** — trust the bit; views can do binary search without
+  verifying sortedness. If the encoder lied, lookups may return wrong
+  answers (the cost of trusting an untrusted source).
+- **Strict** — validator walks the slot table and confirms order
+  before accepting the bit. Becomes E-002's `verify_sorted_hints` flag.
+- **Encoder rule**: emitting the bit means "I guarantee sorted
+  order." Lying is a wire-format bug.
+
+**Wire-byte cost summary:**
+
+| container | bit cost | extra wire bytes |
+|---|---|---|
+| generic array (§5.1) | bit 2 of width byte | 0 (bit was reserved) |
+| object (§5.2)        | bit 2 of width byte | 0 (bit was reserved) |
+| typed array (§5.1.1) | new width byte      | 1 (per typed array) |
+
+**Status.** Deferred from v1. Revisit when a real consumer needs it.
+Object-side hint is the highest-leverage of the three because
+JSON-from-sorted-maps is extremely common in API workloads.
 
 ---
 
