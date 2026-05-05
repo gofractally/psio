@@ -449,6 +449,11 @@ fn try_lift_to_row_array(
 /// RA-002 — random-access accessor for a `RowArray`. Returns the
 /// value at `(record_index, key)` without materializing the entire
 /// row. Returns None on out-of-range index or unknown key.
+///
+/// Spec-compliance API surface: covers RA-002. The conformance
+/// driver itself doesn't invoke random-access; it's exercised by
+/// the dedicated unit test against the public contract.
+#[allow(dead_code)]
 fn row_array_get<'a>(v: &'a Value, record_index: usize, key: &str) -> Option<&'a Value> {
     if let Value::RowArray { keys, rows } = v {
         let row = rows.get(record_index)?;
@@ -461,10 +466,17 @@ fn row_array_get<'a>(v: &'a Value, record_index: usize, key: &str) -> Option<&'a
 /// NS-002 — dual-projection accessors for a numeric_string. Returns
 /// `Some(inner_numeric)` and `Some(canonical_decimal_string)` for a
 /// `Value::NumericString`; `None` for any other variant.
+///
+/// Spec-compliance API surface: covers NS-002. The conformance
+/// driver doesn't invoke them on its own data; they're exercised
+/// by the dedicated unit test as the contract for downstream
+/// consumers.
+#[allow(dead_code)]
 fn numeric_string_as_numeric(v: &Value) -> Option<&Value> {
     if let Value::NumericString(inner) = v { Some(inner) } else { None }
 }
 
+#[allow(dead_code)]
 fn numeric_string_as_string(v: &Value) -> Option<String> {
     let inner = numeric_string_as_numeric(v)?;
     Some(render_json(inner))
@@ -581,6 +593,15 @@ fn decimal_to_f64_exact(mantissa: i128, scale: i32) -> Option<f64> {
 /// byte-for-byte. A canonical wire round-trips through this pipeline
 /// unchanged; any non-canonical wire produces different bytes on
 /// re-encode (e.g., `0x40 0x05` for the value 5 re-encodes as `0x25`).
+///
+/// Spec-compliance API: covers C-006. Not invoked from the driver's
+/// `--check` flow because many conformance fixtures DELIBERATELY test
+/// non-canonical encodings (e.g., `ieee_float_f64_one` stores 1.0 as
+/// f64 rather than narrowing to f16 — testing the regular encoder's
+/// width-preservation contract). The strict validator is exercised
+/// against handcrafted positive/negative inputs in
+/// `validate_canonical_round_trip`.
+#[allow(dead_code)]
 fn validate_canonical(wire: &[u8]) -> Result<(), String> {
     let mut v = decode(wire).map_err(|e| format!("decode: {:?}", e))?;
     canonicalize_in_place(&mut v);
@@ -599,6 +620,7 @@ fn validate_canonical(wire: &[u8]) -> Result<(), String> {
 /// is preserved for fixtures that want to test bit-for-bit
 /// preservation of the supplied form (e.g., asserting that an f64
 /// stays f64 even when 1.5 fits in f16).
+#[allow(dead_code)]
 fn encode_canonical(v: &Value) -> Result<Vec<u8>, EncodeError> {
     let mut owned = v.clone();
     canonicalize_in_place(&mut owned);
@@ -609,6 +631,7 @@ fn encode_canonical(v: &Value) -> Result<Vec<u8>, EncodeError> {
 /// would change (Float width, Decimal trailing zeros) — TypedArray,
 /// String, Bytes, Bool, Null, Uint, NegInt, and Extension are skipped
 /// without traversal cost beyond a discriminant test.
+#[allow(dead_code)]
 fn canonicalize_in_place(v: &mut Value) {
     match v {
         Value::Float { width_log2, bits } => {
@@ -641,13 +664,6 @@ fn canonicalize_in_place(v: &mut Value) {
     }
 }
 
-/// Backward-compatible wrapper: returns a fresh canonicalized clone.
-/// Tests use this; production code should prefer `canonicalize_in_place`.
-fn canonicalize_value(v: &Value) -> Value {
-    let mut owned = v.clone();
-    canonicalize_in_place(&mut owned);
-    owned
-}
 
 /// C-002 — find the smallest IEEE width in {1, 2, 3, 4} (binary16/32
 /// /64/128) for which `bits` (interpreted at `from_w`) round-trips
@@ -4027,40 +4043,38 @@ mod tests {
         // canonical_float_width sees it as f32 source — but it would
         // narrow to f16 too since 1.0 is exact at every width.
 
+        let canonicalize = |v: &Value| -> Value {
+            let mut owned = v.clone();
+            canonicalize_in_place(&mut owned);
+            owned
+        };
+
         // 1.0 stored as f64 → canonical narrows to f16.
-        let f64_one = Value::Float { width_log2: 3,
-            bits: 1.0f64.to_bits() as u128 };
-        let canon = canonicalize_value(&f64_one);
-        match canon {
-            Value::Float { width_log2: 1, bits } => {
-                assert_eq!(bits, 0x3C00); // f16(1.0)
-            }
-            other => panic!("expected width=1, got {:?}", other),
+        let f64_one = Value::Float { width_log2: 3, bits: 1.0f64.to_bits() as u128 };
+        match canonicalize(&f64_one) {
+            Value::Float { width_log2: 1, bits } => assert_eq!(bits, 0x3C00),
+            other => panic!("expected f16(1.0), got {:?}", other),
         }
 
         // 1.5 stored as f64 → narrows to f16 (also exact).
-        let v = Value::Float { width_log2: 3,
-            bits: 1.5f64.to_bits() as u128 };
-        match canonicalize_value(&v) {
+        let v = Value::Float { width_log2: 3, bits: 1.5f64.to_bits() as u128 };
+        match canonicalize(&v) {
             Value::Float { width_log2: 1, .. } => {}
             other => panic!("1.5 should narrow to f16, got {:?}", other),
         }
 
-        // A value that's f32-source-exact but out of f16 range:
         // 1e-7_f32 has unbiased exponent ≈ -23, below f16's normal
         // minimum of -14. f16 conversion must fail; f32 succeeds
         // (the value is by construction f32-bit-exact).
-        let v = Value::Float { width_log2: 3,
-            bits: (1e-7f32 as f64).to_bits() as u128 };
-        match canonicalize_value(&v) {
+        let v = Value::Float { width_log2: 3, bits: (1e-7f32 as f64).to_bits() as u128 };
+        match canonicalize(&v) {
             Value::Float { width_log2: 2, .. } => {}
-            other => panic!("1e-7_f32 → f64 must narrow exactly to f32 \
-                             (exp out of f16 range), got {:?}", other),
+            other => panic!("1e-7_f32 → f64 must narrow exactly to f32, got {:?}", other),
         }
 
         // π in f64 — doesn't fit in f32, stays at f64.
         let pi = Value::Float { width_log2: 3, bits: std::f64::consts::PI.to_bits() as u128 };
-        match canonicalize_value(&pi) {
+        match canonicalize(&pi) {
             Value::Float { width_log2: 3, .. } => {}
             other => panic!("π should stay f64, got {:?}", other),
         }
