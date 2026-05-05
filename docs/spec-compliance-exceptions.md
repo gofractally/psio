@@ -13,15 +13,16 @@ to ✅, the id is removed from this file.
 
 ## Status
 
-**Phase 1 is fully sealed.** **Phase 2.1 (generic array) is also
-green** — all six AG-* rows are ✅ on both languages.
+**Phase 1 is fully sealed. Phase 2.1 (generic array) and 2.2 (typed
+homogeneous array) are also green** — all six AG-* and all twelve
+AT-* rows are ✅ on both languages plus T-012 ✅.
 
 Tally:
-- 75 rows ✅ on **both** Rust and C++ (Phase 1 + Phase 2.1 generic array).
+- 88 rows ✅ on **both** Rust and C++ (Phase 1 + 2.1 + 2.2).
 - 5 rows ⚠️: F-008 (NaN canonicalization, Phase 5); AG-003/004/005 fixture
-  follow-ups (impl ✅, no dedicated reject fixture); T-012 partial (typed
-  array Phase 2.2).
-- 92 rows ❌ — Phase 2.2/3/4 scope, all enumerated below.
+  follow-ups (impl ✅, no dedicated reject fixture); AT-012 partial
+  fixture coverage.
+- 79 rows ❌ — Phase 2.3/3/4 scope, all enumerated below.
 
 ---
 
@@ -33,7 +34,6 @@ languages until the relevant phase lands. Both drivers return
 any of these will fail loud rather than silently mishandle.
 
 ```
-AT-001 AT-002 AT-003 AT-004 AT-005 AT-006 AT-007 AT-008 AT-009 AT-010 AT-011 AT-012
 BY-001 BY-002 BY-003 BY-004 BY-005 BY-006
 C-001 C-002 C-003 C-004 C-005 C-006
 D-007
@@ -80,7 +80,7 @@ F-008 AG-003 AG-004 AG-005 T-012
 | AG-003 | adaptive slot-width selection works in both impls (Rust unit test asserts u16-slot threshold) but no corpus fixture exercises u16/u24/u32 paths via cross-validation | add fixtures: array with 16+ u128 children → forces u16 slots; very large array → u24, etc. |
 | AG-004 | slot-monotonicity reject path exists in code (`array slot offset OOB or non-monotonic`) but no fixture | add reject fixture with hand-crafted non-monotonic slots |
 | AG-005 | slot-OOB reject path exists in code but no fixture | add reject fixture with slot offset > value_data_size |
-| T-012 | typed-array dispatch (low_nibble 1..10) is Phase 2.2 | implement typed homogeneous array (AT-*) |
+| AT-012 | empty typed array fixture only exists for element_code 0 (i8); other 9 codes covered by code path but no per-code empty fixture | add 9 more empty-typed-array fixtures (cheap; ~1 minute of work) |
 
 ---
 

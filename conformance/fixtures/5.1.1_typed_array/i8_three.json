@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_i8_min_zero_max",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-001", "T-012"],
+  "description": "i8 typed array [-128, 0, 127] — element_code 0, 1 byte each, count 3",
+  "input_value": {"kind": "typed_array", "element_code": 0, "elements": [-128, 0, 127]},
+  "wire_hex": "b180007f0300",
+  "json_compact": "[-128,0,127]",
+  "must_round_trip": true,
+  "must_validate": true
+}

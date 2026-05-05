@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_u8_zero_one_max",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-005", "T-012"],
+  "description": "u8 typed array [0, 1, 255] — element_code 4, 1 byte each",
+  "input_value": {"kind": "typed_array", "element_code": 4, "elements": [0, 1, 255]},
+  "wire_hex": "b50001ff0300",
+  "json_compact": "[0,1,255]",
+  "must_round_trip": true,
+  "must_validate": true
+}

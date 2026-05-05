@@ -64,6 +64,21 @@ enum Value {
     /// Generic array (§5.1) — heterogeneous children. Tail-indexed
     /// layout with adaptive slot width.
     Array(Vec<Value>),
+    /// Typed homogeneous array (§5.1.1) — element_code ∈ 0..9 maps to
+    /// i8/i16/i32/i64/u8/u16/u32/u64/f32/f64. Raw bytes are stored
+    /// little-endian, fixed-width per element_code.
+    TypedArray { element_code: u8, raw: Vec<u8> },
+}
+
+/// §5.1.1 — element_size in bytes for each typed-array element_code.
+fn typed_array_element_size(code: u8) -> Result<usize, &'static str> {
+    match code {
+        0 | 4 => Ok(1), // i8, u8
+        1 | 5 => Ok(2), // i16, u16
+        2 | 6 | 8 => Ok(4), // i32, u32, f32
+        3 | 7 | 9 => Ok(8), // i64, u64, f64
+        _ => Err("typed_array element_code out of range"),
+    }
 }
 
 // ── Encode (§12 reference algorithm) ────────────────────────────────
@@ -183,6 +198,26 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                 let bytes = (*off as u32).to_le_bytes();
                 out.extend_from_slice(&bytes[..slot_w]);
             }
+            out.extend_from_slice(&(n as u16).to_le_bytes());
+        }
+
+        Value::TypedArray { element_code, raw } => {
+            // §5.1.1: tag = 0xB0 | (element_code + 1); raw N × esize
+            // bytes LE; count u16 LE.
+            if *element_code > 9 {
+                return Err(EncodeError::Overflow("typed_array element_code"));
+            }
+            let esize = typed_array_element_size(*element_code)
+                .map_err(EncodeError::Overflow)?;
+            if raw.len() % esize != 0 {
+                return Err(EncodeError::Overflow("typed_array raw size not a multiple of element size"));
+            }
+            let n = raw.len() / esize;
+            if n > 0xFFFF {
+                return Err(EncodeError::Overflow("typed_array count > 65 535"));
+            }
+            out.push(0xB0 | (element_code + 1));
+            out.extend_from_slice(raw);
             out.extend_from_slice(&(n as u16).to_le_bytes());
         }
     }
@@ -384,13 +419,12 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             Ok(Value::Decimal { mantissa, scale })
         }
         11 => {
-            // §5.1/§5.1.1 array. Phase 2.1 implements low_nibble 0
-            // (generic). 1..10 (typed homogeneous) is Phase 2.2.
+            // §5.1/§5.1.1 array.
             if low == 0 {
                 return decode_generic_array(buf);
             }
             if (1..=10).contains(&low) {
-                return Err(DecodeError::NotImplementedYet("typed_array (Phase 2.2)"));
+                return decode_typed_array(buf, low - 1);
             }
             Err(DecodeError::ReservedLowNibble("array", low))
         }
@@ -477,6 +511,28 @@ fn decode_generic_array(buf: &[u8]) -> Result<Value, DecodeError> {
     Ok(Value::Array(children))
 }
 
+/// §5.1.1 typed-array decode. `buf` starts at the tag byte; the
+/// caller has already extracted element_code from the low nibble.
+fn decode_typed_array(buf: &[u8], element_code: u8) -> Result<Value, DecodeError> {
+    let esize = typed_array_element_size(element_code)
+        .map_err(DecodeError::Truncated)?;
+    if buf.len() < 3 {
+        // tag + 0 elements + count(2) = 3 bytes minimum
+        return Err(DecodeError::Truncated("typed_array minimum size"));
+    }
+    let n = u16::from_le_bytes([buf[buf.len() - 2], buf[buf.len() - 1]]) as usize;
+    let body_len = n.checked_mul(esize)
+        .ok_or(DecodeError::Truncated("typed_array body overflow"))?;
+    let expected = 1 + body_len + 2;
+    if buf.len() != expected {
+        return Err(DecodeError::Truncated("typed_array size mismatch"));
+    }
+    Ok(Value::TypedArray {
+        element_code,
+        raw: buf[1..1 + body_len].to_vec(),
+    })
+}
+
 fn read_u128_le(bytes: &[u8]) -> u128 {
     let mut v: u128 = 0;
     for (i, b) in bytes.iter().enumerate().take(16) {
@@ -559,6 +615,48 @@ fn render_json(v: &Value) -> String {
             s.push(']');
             s
         }
+        Value::TypedArray { element_code, raw } => {
+            let esize = typed_array_element_size(*element_code).unwrap_or(1);
+            let n = raw.len() / esize;
+            let mut s = String::from("[");
+            for i in 0..n {
+                if i > 0 { s.push(','); }
+                let elem = &raw[i * esize..(i + 1) * esize];
+                let rendered = match *element_code {
+                    0 => format!("{}", i8::from_le_bytes([elem[0]])),
+                    1 => format!("{}", i16::from_le_bytes([elem[0], elem[1]])),
+                    2 => format!("{}", i32::from_le_bytes([elem[0], elem[1], elem[2], elem[3]])),
+                    3 => format!("{}", i64::from_le_bytes(elem.try_into().unwrap())),
+                    4 => format!("{}", u8::from_le_bytes([elem[0]])),
+                    5 => format!("{}", u16::from_le_bytes([elem[0], elem[1]])),
+                    6 => format!("{}", u32::from_le_bytes([elem[0], elem[1], elem[2], elem[3]])),
+                    7 => format!("{}", u64::from_le_bytes(elem.try_into().unwrap())),
+                    8 => {
+                        let f = f32::from_le_bytes([elem[0], elem[1], elem[2], elem[3]]);
+                        format_typed_float(f as f64)
+                    }
+                    9 => {
+                        let f = f64::from_le_bytes(elem.try_into().unwrap());
+                        format_typed_float(f)
+                    }
+                    _ => "?".to_string(),
+                };
+                s.push_str(&rendered);
+            }
+            s.push(']');
+            s
+        }
+    }
+}
+
+fn format_typed_float(f: f64) -> String {
+    if f.is_nan() { return "NaN".to_string(); }
+    if f == f64::INFINITY { return "Infinity".to_string(); }
+    if f == f64::NEG_INFINITY { return "-Infinity".to_string(); }
+    if f == f.trunc() && f.abs() < 1e16 {
+        format!("{:.0}", f)
+    } else {
+        format!("{}", f)
     }
 }
 
@@ -877,6 +975,70 @@ fn parse_value(j: &Json) -> Result<Value, String> {
                 children.push(parse_value(child_json)?);
             }
             Ok(Value::Array(children))
+        }
+        "typed_array" => {
+            let element_code = obj.get("element_code")
+                .and_then(|x| x.as_u64())
+                .ok_or("typed_array missing 'element_code'")? as u8;
+            if element_code > 9 {
+                return Err(format!("typed_array element_code {} out of range", element_code));
+            }
+            let elements = obj.get("elements")
+                .and_then(|x| x.as_array())
+                .ok_or("typed_array missing 'elements'")?;
+            let esize = typed_array_element_size(element_code)
+                .map_err(|e| e.to_string())?;
+            let mut raw = Vec::with_capacity(elements.len() * esize);
+            for e in elements {
+                match element_code {
+                    0 => {
+                        let v = e.as_i64().ok_or("typed_array i8 element not integer")?;
+                        raw.push(v as i8 as u8);
+                    }
+                    1 => {
+                        let v = e.as_i64().ok_or("typed_array i16 element not integer")? as i16;
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                    2 => {
+                        let v = e.as_i64().ok_or("typed_array i32 element not integer")? as i32;
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                    3 => {
+                        let v = e.as_i64().ok_or("typed_array i64 element not integer")?;
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                    4 => {
+                        let v = e.as_u64().ok_or("typed_array u8 element not integer")? as u8;
+                        raw.push(v);
+                    }
+                    5 => {
+                        let v = e.as_u64().ok_or("typed_array u16 element not integer")? as u16;
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                    6 => {
+                        let v = e.as_u64().ok_or("typed_array u32 element not integer")? as u32;
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                    7 => {
+                        let v = e.as_u64().ok_or("typed_array u64 element not integer")?;
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                    8 => {
+                        let v = e.as_f64()
+                            .or_else(|| e.as_i64().map(|i| i as f64))
+                            .ok_or("typed_array f32 element not number")? as f32;
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                    9 => {
+                        let v = e.as_f64()
+                            .or_else(|| e.as_i64().map(|i| i as f64))
+                            .ok_or("typed_array f64 element not number")?;
+                        raw.extend_from_slice(&v.to_le_bytes());
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Ok(Value::TypedArray { element_code, raw })
         }
         other => Err(format!("input_value kind '{}' not supported yet", other)),
     }

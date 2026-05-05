@@ -67,7 +67,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-009 | code 8 = `numeric_string`, low nibble must be 0; body is inner numeric value | ❌ | ❌ | ❌ | ❌ |
 | T-010 | code 9 = `string`, low nibble ∈ {0, 1} = encoding flag; others reserved | ❌ | ❌ | ❌ | ❌ |
 | T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ❌ | ❌ | ❌ | ❌ |
-| T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ⚠️ low_nibble 0 (generic) ✅; 1..10 (typed) Phase 2.2 | ⚠️ | ⚠️ same | ⚠️ |
+| T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ✅ | ✅ corpus `array_*` + `typed_array_*` + `typed_array_low_nibble_11_reserved` | ✅ | ✅ same |
 | T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
 | T-015 | codes 14, 15 reserved → reject | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
@@ -206,18 +206,18 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| AT-001 | element code 0 (i8): tag `0xB1`, raw u8 elements | ❌ | ❌ | ❌ | ❌ |
-| AT-002 | element code 1 (i16): tag `0xB2`, raw 2-byte LE elements | ❌ | ❌ | ❌ | ❌ |
-| AT-003 | element code 2 (i32): tag `0xB3` | ❌ | ❌ | ❌ | ❌ |
-| AT-004 | element code 3 (i64): tag `0xB4` | ❌ | ❌ | ❌ | ❌ |
-| AT-005 | element code 4 (u8): tag `0xB5` | ❌ | ❌ | ❌ | ❌ |
-| AT-006 | element code 5 (u16): tag `0xB6` | ❌ | ❌ | ❌ | ❌ |
-| AT-007 | element code 6 (u32): tag `0xB7` | ❌ | ❌ | ❌ | ❌ |
-| AT-008 | element code 7 (u64): tag `0xB8` | ❌ | ❌ | ❌ | ❌ |
-| AT-009 | element code 8 (f32): tag `0xB9` | ❌ | ❌ | ❌ | ❌ |
-| AT-010 | element code 9 (f64): tag `0xBA` | ❌ | ❌ | ❌ | ❌ |
-| AT-011 | reject low_nibble 11..15 | ❌ | ❌ | ❌ | ❌ |
-| AT-012 | empty typed array (N=0) at every element code | ❌ | ❌ | ❌ | ❌ |
+| AT-001 | element code 0 (i8): tag `0xB1`, raw u8 elements | ✅ | ✅ corpus `typed_array_i8_min_zero_max` | ✅ | ✅ corpus |
+| AT-002 | element code 1 (i16): tag `0xB2`, raw 2-byte LE elements | ✅ | ✅ corpus `typed_array_i16_minus_zero_plus` | ✅ | ✅ corpus |
+| AT-003 | element code 2 (i32): tag `0xB3` | ✅ | ✅ corpus `typed_array_i32_minus_zero_plus` | ✅ | ✅ corpus |
+| AT-004 | element code 3 (i64): tag `0xB4` | ✅ | ✅ corpus `typed_array_i64_two` | ✅ | ✅ corpus |
+| AT-005 | element code 4 (u8): tag `0xB5` | ✅ | ✅ corpus `typed_array_u8_zero_one_max` | ✅ | ✅ corpus |
+| AT-006 | element code 5 (u16): tag `0xB6` | ✅ | ✅ corpus `typed_array_u16_zero_max` | ✅ | ✅ corpus |
+| AT-007 | element code 6 (u32): tag `0xB7` | ✅ | ✅ corpus `typed_array_u32_one_to_four` | ✅ | ✅ corpus |
+| AT-008 | element code 7 (u64): tag `0xB8` | ✅ | ✅ corpus `typed_array_u64_one` | ✅ | ✅ corpus |
+| AT-009 | element code 8 (f32): tag `0xB9` | ✅ | ✅ corpus `typed_array_f32_one_two` | ✅ | ✅ corpus |
+| AT-010 | element code 9 (f64): tag `0xBA` | ✅ | ✅ corpus `typed_array_f64_one` | ✅ | ✅ corpus |
+| AT-011 | reject low_nibble 11..15 | ✅ | ✅ corpus `typed_array_low_nibble_11_reserved` | ✅ | ✅ corpus |
+| AT-012 | empty typed array (N=0) at every element code | ✅ | ⚠️ only `typed_array_empty_i8` covered; others by code path | ✅ | ⚠️ same |
 
 ### §5.2 — Object (single)
 

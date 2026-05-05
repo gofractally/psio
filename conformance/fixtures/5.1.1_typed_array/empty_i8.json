@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_empty_i8",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-001", "AT-012"],
+  "description": "empty i8 typed array",
+  "input_value": {"kind": "typed_array", "element_code": 0, "elements": []},
+  "wire_hex": "b10000",
+  "json_compact": "[]",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_u32_one_to_four",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-007", "T-012"],
+  "description": "u32 typed array [1, 2, 3, 4]",
+  "input_value": {"kind": "typed_array", "element_code": 6, "elements": [1, 2, 3, 4]},
+  "wire_hex": "b7010000000200000003000000040000000400",
+  "json_compact": "[1,2,3,4]",
+  "must_round_trip": true,
+  "must_validate": true
+}

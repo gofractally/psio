@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_f64_one",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-010", "T-012"],
+  "description": "f64 typed array [1.0]",
+  "input_value": {"kind": "typed_array", "element_code": 9, "elements": [1.0]},
+  "wire_hex": "ba000000000000f03f0100",
+  "json_compact": "[1]",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -1,0 +1,10 @@
+{
+  "id": "typed_array_low_nibble_11_reserved",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-011"],
+  "description": "array tag with low_nibble 11 (0xBB) is reserved (typed_array element_codes 0..9 fit low_nibble 1..A)",
+  "input_value": null,
+  "wire_hex": "bb",
+  "must_reject": true,
+  "reject_reason": "array_reserved_low_nibble"
+}

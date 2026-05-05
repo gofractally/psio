@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_i32_minus_zero_plus",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-003", "T-012"],
+  "description": "i32 typed array [-1, 0, 1] — element_code 2, 4 bytes each, LE",
+  "input_value": {"kind": "typed_array", "element_code": 2, "elements": [-1, 0, 1]},
+  "wire_hex": "b3ffffffff00000000010000000300",
+  "json_compact": "[-1,0,1]",
+  "must_round_trip": true,
+  "must_validate": true
+}

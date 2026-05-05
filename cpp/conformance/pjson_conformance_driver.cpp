@@ -102,7 +102,16 @@ struct Array {
    bool operator==(const Array& other) const;
 };
 
-using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal, Array>;
+// Typed homogeneous array (§5.1.1). element_code ∈ 0..9 maps to
+// i8/i16/i32/i64/u8/u16/u32/u64/f32/f64. raw is N × element_size
+// bytes, little-endian. Leaf type — no recursion.
+struct TypedArray {
+   std::uint8_t              element_code{};
+   std::vector<std::uint8_t> raw;
+   bool operator==(const TypedArray&) const = default;
+};
+
+using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal, Array, TypedArray>;
 
 struct ArrayBody {
    std::vector<Value> children;
@@ -121,6 +130,19 @@ inline Array make_array(std::vector<Value> children) {
    a.body = std::make_shared<ArrayBody>();
    a.body->children = std::move(children);
    return a;
+}
+
+// §5.1.1 — element_size in bytes for each typed-array element_code.
+// Returns 0 for codes outside 0..9 so callers can produce the
+// appropriate (encode vs decode) error themselves.
+inline std::size_t typed_array_element_size(std::uint8_t code) noexcept {
+   switch (code) {
+      case 0: case 4:           return 1;  // i8, u8
+      case 1: case 5:           return 2;  // i16, u16
+      case 2: case 6: case 8:   return 4;  // i32, u32, f32
+      case 3: case 7: case 9:   return 8;  // i64, u64, f64
+      default:                  return 0;
+   }
 }
 
 // ── Errors ─────────────────────────────────────────────────────────
@@ -275,6 +297,18 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
          out.push_back(static_cast<std::uint8_t>(0x70 | (bc - 1)));
          out.insert(out.end(), m_bytes.begin(), m_bytes.end());
          varscale_encode(arg.scale, out);
+      } else if constexpr (std::is_same_v<T, TypedArray>) {
+         // §5.1.1 typed homogeneous array.
+         const std::size_t esize = typed_array_element_size(arg.element_code);
+         if (esize == 0) throw EncodeError{"typed_array element_code"};
+         if (arg.raw.size() % esize != 0)
+            throw EncodeError{"typed_array raw size not multiple of element size"};
+         const std::size_t n = arg.raw.size() / esize;
+         if (n > 0xFFFF) throw EncodeError{"typed_array count > 65 535"};
+         out.push_back(static_cast<std::uint8_t>(0xB0 | (arg.element_code + 1)));
+         out.insert(out.end(), arg.raw.begin(), arg.raw.end());
+         out.push_back(static_cast<std::uint8_t>(n & 0xFF));
+         out.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFF));
       } else if constexpr (std::is_same_v<T, Array>) {
          // §5.1 generic array.
          const auto& children = arg.body ? arg.body->children
@@ -339,6 +373,8 @@ static VarscaleResult varscale_decode(std::span<const std::uint8_t> buf) {
 
 static Value decode(std::span<const std::uint8_t> buf);
 static Value decode_generic_array(std::span<const std::uint8_t> buf);
+static Value decode_typed_array(std::span<const std::uint8_t> buf,
+                                std::uint8_t element_code);
 
 static Value decode(std::span<const std::uint8_t> buf) {
    if (buf.empty()) throw DecodeError{"empty buffer"};
@@ -395,7 +431,7 @@ static Value decode(std::span<const std::uint8_t> buf) {
             return decode_generic_array(buf);
          }
          if (low >= 1 && low <= 10) {
-            throw DecodeError{"Phase 2.2: typed_array"};
+            return decode_typed_array(buf, static_cast<std::uint8_t>(low - 1));
          }
          throw DecodeError{"reserved low_nibble for array"};
       }
@@ -465,6 +501,24 @@ static Value decode_generic_array(std::span<const std::uint8_t> buf) {
       children.push_back(decode(child_span));
    }
    return make_array(std::move(children));
+}
+
+// §5.1.1 typed-array decode. `buf` starts at the tag byte; the
+// caller has already extracted element_code from the low nibble.
+static Value decode_typed_array(std::span<const std::uint8_t> buf,
+                                std::uint8_t element_code) {
+   const std::size_t esize = typed_array_element_size(element_code);
+   if (esize == 0) throw DecodeError{"typed_array element_code out of range"};
+   if (buf.size() < 3) throw DecodeError{"typed_array minimum size"};
+   const std::size_t n = static_cast<std::size_t>(buf[buf.size() - 2])
+                       | (static_cast<std::size_t>(buf[buf.size() - 1]) << 8);
+   const std::size_t body_len = n * esize;
+   const std::size_t expected = 1 + body_len + 2;
+   if (buf.size() != expected) throw DecodeError{"typed_array size mismatch"};
+   TypedArray ta;
+   ta.element_code = element_code;
+   ta.raw.assign(buf.begin() + 1, buf.begin() + 1 + body_len);
+   return ta;
 }
 
 // ── JSON projection ────────────────────────────────────────────────
@@ -616,6 +670,97 @@ static std::string render_json(const Value& v) {
             if (!first) s += ",";
             first = false;
             s += render_json(c);
+         }
+         s += "]";
+         return s;
+      } else if constexpr (std::is_same_v<T, TypedArray>) {
+         const std::size_t esize = typed_array_element_size(arg.element_code);
+         if (esize == 0) return "<bad typed_array>";
+         const std::size_t n = arg.raw.size() / esize;
+         std::string s = "[";
+         for (std::size_t i = 0; i < n; ++i) {
+            if (i > 0) s += ",";
+            const std::uint8_t* el = arg.raw.data() + i * esize;
+            char buf[40];
+            switch (arg.element_code) {
+               case 0: {
+                  std::int8_t v;
+                  std::memcpy(&v, el, 1);
+                  std::snprintf(buf, sizeof buf, "%d", v);
+                  s += buf;
+                  break;
+               }
+               case 1: {
+                  std::int16_t v;
+                  std::memcpy(&v, el, 2);
+                  std::snprintf(buf, sizeof buf, "%d", v);
+                  s += buf;
+                  break;
+               }
+               case 2: {
+                  std::int32_t v;
+                  std::memcpy(&v, el, 4);
+                  std::snprintf(buf, sizeof buf, "%d", v);
+                  s += buf;
+                  break;
+               }
+               case 3: {
+                  std::int64_t v;
+                  std::memcpy(&v, el, 8);
+                  std::snprintf(buf, sizeof buf, "%lld",
+                                static_cast<long long>(v));
+                  s += buf;
+                  break;
+               }
+               case 4: s += std::to_string(el[0]); break;
+               case 5: {
+                  std::uint16_t v;
+                  std::memcpy(&v, el, 2);
+                  s += std::to_string(v);
+                  break;
+               }
+               case 6: {
+                  std::uint32_t v;
+                  std::memcpy(&v, el, 4);
+                  s += std::to_string(v);
+                  break;
+               }
+               case 7: {
+                  std::uint64_t v;
+                  std::memcpy(&v, el, 8);
+                  s += std::to_string(v);
+                  break;
+               }
+               case 8: {
+                  float fv;
+                  std::memcpy(&fv, el, 4);
+                  const double d = static_cast<double>(fv);
+                  if (std::isnan(d)) { s += "NaN"; break; }
+                  if (d ==  std::numeric_limits<double>::infinity())  { s += "Infinity";  break; }
+                  if (d == -std::numeric_limits<double>::infinity())  { s += "-Infinity"; break; }
+                  if (std::trunc(d) == d && std::abs(d) < 1e16) {
+                     std::snprintf(buf, sizeof buf, "%.0f", d);
+                  } else {
+                     std::snprintf(buf, sizeof buf, "%g", d);
+                  }
+                  s += buf;
+                  break;
+               }
+               case 9: {
+                  double d;
+                  std::memcpy(&d, el, 8);
+                  if (std::isnan(d)) { s += "NaN"; break; }
+                  if (d ==  std::numeric_limits<double>::infinity())  { s += "Infinity";  break; }
+                  if (d == -std::numeric_limits<double>::infinity())  { s += "-Infinity"; break; }
+                  if (std::trunc(d) == d && std::abs(d) < 1e16) {
+                     std::snprintf(buf, sizeof buf, "%.0f", d);
+                  } else {
+                     std::snprintf(buf, sizeof buf, "%g", d);
+                  }
+                  s += buf;
+                  break;
+               }
+            }
          }
          s += "]";
          return s;
@@ -997,6 +1142,70 @@ static Value parse_value_from_json(const JNode& j) {
          children.push_back(parse_value_from_json(cj));
       }
       return make_array(std::move(children));
+   }
+   if (kind == "typed_array") {
+      const auto* ec_node = obj_get(obj, "element_code");
+      if (!ec_node) throw std::runtime_error{"typed_array missing 'element_code'"};
+      std::int64_t code64 = std::get<std::int64_t>(ec_node->v);
+      if (code64 < 0 || code64 > 9)
+         throw std::runtime_error{"typed_array element_code out of range"};
+      auto code = static_cast<std::uint8_t>(code64);
+      const std::size_t esize = typed_array_element_size(code);
+      const auto* els_node = obj_get(obj, "elements");
+      if (!els_node) throw std::runtime_error{"typed_array missing 'elements'"};
+      const auto* els = std::get_if<JArray>(&els_node->v);
+      if (!els) throw std::runtime_error{"typed_array 'elements' must be array"};
+      TypedArray ta;
+      ta.element_code = code;
+      ta.raw.reserve(els->size() * esize);
+      auto append_le = [&](std::uint64_t v, std::size_t n) {
+         for (std::size_t i = 0; i < n; ++i) {
+            ta.raw.push_back(static_cast<std::uint8_t>(v >> (8 * i)));
+         }
+      };
+      for (const auto& e : *els) {
+         switch (code) {
+            case 0: case 1: case 2: case 3: {
+               // signed
+               std::int64_t v;
+               if (auto* p = std::get_if<std::int64_t>(&e.v)) v = *p;
+               else if (auto* p = std::get_if<double>(&e.v)) v = static_cast<std::int64_t>(*p);
+               else throw std::runtime_error{"typed_array signed element not integer"};
+               append_le(static_cast<std::uint64_t>(v), esize);
+               break;
+            }
+            case 4: case 5: case 6: case 7: {
+               std::uint64_t v;
+               if (auto* p = std::get_if<std::int64_t>(&e.v)) v = static_cast<std::uint64_t>(*p);
+               else if (auto* p = std::get_if<double>(&e.v)) v = static_cast<std::uint64_t>(*p);
+               else throw std::runtime_error{"typed_array unsigned element not integer"};
+               append_le(v, esize);
+               break;
+            }
+            case 8: {
+               double d;
+               if (auto* p = std::get_if<double>(&e.v)) d = *p;
+               else if (auto* p = std::get_if<std::int64_t>(&e.v)) d = static_cast<double>(*p);
+               else throw std::runtime_error{"typed_array f32 element not number"};
+               float f = static_cast<float>(d);
+               std::uint32_t bits;
+               std::memcpy(&bits, &f, 4);
+               append_le(bits, 4);
+               break;
+            }
+            case 9: {
+               double d;
+               if (auto* p = std::get_if<double>(&e.v)) d = *p;
+               else if (auto* p = std::get_if<std::int64_t>(&e.v)) d = static_cast<double>(*p);
+               else throw std::runtime_error{"typed_array f64 element not number"};
+               std::uint64_t bits;
+               std::memcpy(&bits, &d, 8);
+               append_le(bits, 8);
+               break;
+            }
+         }
+      }
+      return ta;
    }
    throw std::runtime_error{std::string{"input_value kind '"} + kind +
                             "' not supported yet"};

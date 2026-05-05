@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_f32_one_two",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-009", "T-012"],
+  "description": "f32 typed array [1.0, 2.0]",
+  "input_value": {"kind": "typed_array", "element_code": 8, "elements": [1.0, 2.0]},
+  "wire_hex": "b90000803f000000400200",
+  "json_compact": "[1,2]",
+  "must_round_trip": true,
+  "must_validate": true
+}
