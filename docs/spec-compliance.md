@@ -131,7 +131,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | F-005 | reject low_nibble bit 3 set | ✅ | ✅ corpus `ieee_float_bit3_set_reserved` | ✅ | ✅ `ieee_float_reserved_bit3_rejected` + corpus `ieee_float_bit3_set_reserved` |
 | F-006 | reject low_nibble width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_{zero,6,7}_reserved` (widths 0, 6, 7); width 5 by code path | ✅ | ✅ `ieee_float_bad_width_rejected` (widths 0, 5) + corpus widths 0, 6, 7 |
 | F-007 | binary16 software widen on decode (no host fp16 support assumed) | ✅ | ✅ corpus `ieee_float_f16_one` renders `1` via `f16_bits_to_f64` | ✅ | ✅ corpus `ieee_float_f16_one` renders JSON `1` via `f16_bits_to_f64` |
-| F-008 | NaN at any width preserves quiet-NaN canonical pattern (§15.2.1) | ❌ | ❌ | ⚠️ render-only, no canonicalization yet | ⚠️ |
+| F-008 | NaN at any width preserves quiet-NaN canonical pattern (§15.2.1) | ✅ | ✅ corpus `canonical_nan_{f16,f32,f64,f128}` | ✅ | ✅ same + Rust unit `nan_canonicalized_on_encode` |
 | F-009 | ±Inf round-trip at every width | ✅ | ✅ corpus `ieee_float_f64_{pos,neg}_inf` | ✅ | ✅ corpus `ieee_float_f64_{pos,neg}_inf` |
 
 ## §4.7 — `decimal` and varscale
@@ -330,11 +330,11 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| C-001 | integer canonical: smallest tag form (uint_inline / nint_inline / uint / negint smallest bc) | ❌ | ❌ | ❌ | ❌ |
+| C-001 | integer canonical: smallest tag form (uint_inline / nint_inline / uint / negint smallest bc) | ✅ | ✅ corpus `uint_inline_*` + `uint_*` + `nint_inline_*` + `negint_*` (encoder picks smallest) | ✅ | ✅ Rust unit `integer_canonical_smallest_tag_form` exhaustively asserts the table |
 | C-002 | float canonical: smallest bit-exact width; decimal preferred only when strictly shorter | ❌ | ❌ | ❌ | ❌ |
-| C-003 | NaN canonical bit pattern (§15.2.1) at every width | ❌ | ❌ | ❌ | ❌ |
-| C-004 | strings: `escape_form` from JSON source preserved byte-for-byte | ❌ | ❌ | ❌ | ❌ |
-| C-005 | field encounter order preserved (not sorted) | ❌ | ❌ | ❌ | ❌ |
+| C-003 | NaN canonical bit pattern (§15.2.1) at every width | ✅ via `canonicalize_nan_bits` rewrite at encode | ✅ corpus `canonical_nan_{f16,f32,f64,f128}` | ✅ same | ✅ Rust unit `nan_canonicalized_on_encode` exercises non-canonical → canonical at all 4 widths |
+| C-004 | strings: `escape_form` from JSON source preserved byte-for-byte | ✅ | ✅ corpus `string_escape_form_hello` (round-trip preserves encoding_flag and content bytes) | ✅ | ✅ same |
+| C-005 | field encounter order preserved (not sorted) | ✅ structural | ✅ corpus `object_*` round-trip preserves order | ✅ | ✅ Rust unit `object_field_encounter_order_preserved` |
 | C-006 | strict-canonical validator rejects non-canonical encodings | ❌ | ❌ | ❌ | ❌ |
 
 ## §14 — Conformance corpus

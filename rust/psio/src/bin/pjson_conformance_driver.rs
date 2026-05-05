@@ -400,8 +400,11 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             }
             let byte_count: usize = 1 << (*width_log2 as usize);
             out.push(0x60 | width_log2);
-            // Lay down byte_count bytes of `bits`, little-endian.
-            let raw = bits.to_le_bytes();
+            // §15.2.1: any NaN bit pattern is rewritten to the canonical
+            // quiet-NaN-with-zero-payload at the chosen width before
+            // emission. Non-NaN values pass through verbatim.
+            let canon_bits = canonicalize_nan_bits(*width_log2, *bits);
+            let raw = canon_bits.to_le_bytes();
             out.extend_from_slice(&raw[..byte_count]);
         }
 
@@ -678,6 +681,30 @@ fn u128_le_minimal_at_least_1(n: u128) -> Vec<u8> {
         v.push(0);
     }
     v
+}
+
+/// §15.2.1 — Canonical NaN bit patterns.
+///
+/// IEEE-754 admits many bit patterns for "a NaN" (exponent all 1s,
+/// mantissa non-zero). For determinism and content-addressability,
+/// pjson chooses exactly one: quiet NaN with zero payload. If
+/// `bits` (interpreted at the given width) is NaN but not the
+/// canonical pattern, this function returns the canonical bits.
+/// Non-NaN values (including ±Inf, ±0, finite values) pass
+/// through unchanged.
+fn canonicalize_nan_bits(width_log2: u8, bits: u128) -> u128 {
+    // (exp_mask, mant_mask, canon_nan) per width.
+    let (exp_mask, mant_mask, canon): (u128, u128, u128) = match width_log2 {
+        1 => (0x7C00_u128,                     0x03FF_u128,                     0x7E00_u128),
+        2 => (0x7F80_0000_u128,                0x007F_FFFF_u128,                0x7FC0_0000_u128),
+        3 => (0x7FF0_0000_0000_0000_u128,      0x000F_FFFF_FFFF_FFFF_u128,      0x7FF8_0000_0000_0000_u128),
+        4 => (0x7FFF_0000_0000_0000_0000_0000_0000_0000_u128,
+              0x0000_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_u128,
+              0x7FFF_8000_0000_0000_0000_0000_0000_0000_u128),
+        _ => return bits,
+    };
+    let is_nan = (bits & exp_mask) == exp_mask && (bits & mant_mask) != 0;
+    if is_nan { canon } else { bits }
 }
 
 /// Zigzag encoding of a signed integer (per §4.7's varscale and
@@ -3049,6 +3076,114 @@ mod tests {
         assert_eq!(enc_big[1], 0x01, "u16 slots when value_data > 256");
         // Round-trip preserves all 16 children byte-exact.
         assert_eq!(decode(&enc_big).unwrap(), big);
+    }
+
+    #[test]
+    fn integer_canonical_smallest_tag_form() {
+        // C-001 / §15.2: encoder must pick the smallest tag form per
+        // value range.
+        for n in 0u128..=15 {
+            let enc = encode(&Value::Uint(n)).unwrap();
+            assert_eq!(enc, vec![0x20 | n as u8],
+                       "uint {} must use uint_inline (1 byte)", n);
+        }
+        // 16: smallest non-inline; bc=1
+        let enc = encode(&Value::Uint(16)).unwrap();
+        assert_eq!(enc, vec![0x40, 0x10], "uint 16 must use uint bc=1");
+        // 255: bc=1
+        let enc = encode(&Value::Uint(255)).unwrap();
+        assert_eq!(enc, vec![0x40, 0xFF]);
+        // 256: bc=2
+        let enc = encode(&Value::Uint(256)).unwrap();
+        assert_eq!(enc, vec![0x41, 0x00, 0x01]);
+        // u64::MAX: bc=8
+        let enc = encode(&Value::Uint(u64::MAX as u128)).unwrap();
+        assert_eq!(enc[0], 0x47);
+        // u64::MAX + 1: bc=9
+        let enc = encode(&Value::Uint((u64::MAX as u128) + 1)).unwrap();
+        assert_eq!(enc[0], 0x48);
+
+        // negint: -1..-15 inline
+        for mag in 1u128..=15 {
+            let enc = encode(&Value::NegInt(mag)).unwrap();
+            assert_eq!(enc, vec![0x30 | mag as u8],
+                       "negint -{} must use nint_inline", mag);
+        }
+        // -16: smallest negint; bc=1
+        let enc = encode(&Value::NegInt(16)).unwrap();
+        assert_eq!(enc, vec![0x50, 0x10]);
+    }
+
+    #[test]
+    fn object_field_encounter_order_preserved() {
+        // C-005 / §15.4: field order is application-defined and MUST be
+        // preserved across round-trip. pjson does NOT canonicalize via
+        // sorting at the format level.
+        let entries = vec![
+            ("zebra".to_string(),  Value::Uint(1)),
+            ("alpha".to_string(),  Value::Uint(2)),
+            ("middle".to_string(), Value::Uint(3)),
+        ];
+        let v = Value::Object(entries.clone());
+        let enc = encode(&v).unwrap();
+        let dec = decode(&enc).unwrap();
+        match dec {
+            Value::Object(got) => assert_eq!(got, entries,
+                "field encounter order must be preserved (no sort)"),
+            _ => panic!("decoded non-Object"),
+        }
+        // The wire bytes reflect the source order verbatim — an alpha-
+        // sorted version would produce different bytes.
+        let sorted_entries = vec![
+            ("alpha".to_string(),  Value::Uint(2)),
+            ("middle".to_string(), Value::Uint(3)),
+            ("zebra".to_string(),  Value::Uint(1)),
+        ];
+        let enc_sorted = encode(&Value::Object(sorted_entries)).unwrap();
+        assert_ne!(enc, enc_sorted,
+            "different field orders must produce different wire bytes");
+    }
+
+    #[test]
+    fn nan_canonicalized_on_encode() {
+        // §15.2.1 / F-008: encoders rewrite any NaN bit pattern to the
+        // canonical quiet-NaN-zero-payload form at the chosen width.
+        // Inputs are non-canonical NaNs; the wire bytes after encode
+        // must match the canonical pattern.
+        //
+        // binary16: any NaN → 0x7E00 (LE: 00 7E)
+        let nc16 = Value::Float { width_log2: 1, bits: 0x7E01u128 }; // payload bit set
+        let enc = encode(&nc16).unwrap();
+        assert_eq!(&enc[1..], &[0x00, 0x7E], "binary16 NaN canonical");
+
+        // binary32: any NaN → 0x7FC00000 (LE: 00 00 C0 7F)
+        let nc32 = Value::Float { width_log2: 2, bits: 0x7FC00001u128 };
+        let enc = encode(&nc32).unwrap();
+        assert_eq!(&enc[1..], &[0x00, 0x00, 0xC0, 0x7F]);
+
+        // binary64: any NaN → 0x7FF8000000000000
+        let nc64 = Value::Float { width_log2: 3, bits: 0x7FF8000000000123u128 };
+        let enc = encode(&nc64).unwrap();
+        assert_eq!(&enc[1..], &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0x7F]);
+
+        // binary128: any NaN → 0x7FFF8000_00000000_00000000_00000000
+        // Build a non-canonical 128-bit NaN: exp = 0x7FFF, with stray
+        // mantissa bits beyond the quiet bit.
+        let nc128_bits: u128 = (0x7FFFu128 << 112) | (1u128 << 110) | 0x42u128;
+        let nc128 = Value::Float { width_log2: 4, bits: nc128_bits };
+        let enc = encode(&nc128).unwrap();
+        let canon128: u128 = (0x7FFFu128 << 112) | (1u128 << 111);
+        assert_eq!(&enc[1..], &canon128.to_le_bytes());
+
+        // ±Inf passes through unchanged (mantissa is zero — not a NaN).
+        let plus_inf = Value::Float { width_log2: 3, bits: 0x7FF0000000000000u128 };
+        let enc = encode(&plus_inf).unwrap();
+        assert_eq!(&enc[1..], &0x7FF0000000000000u128.to_le_bytes()[..8]);
+
+        // Finite values pass through.
+        let one = Value::Float { width_log2: 3, bits: (1.0f64).to_bits() as u128 };
+        let enc = encode(&one).unwrap();
+        assert_eq!(&enc[1..], &(1.0f64).to_bits().to_le_bytes());
     }
 
     #[test]

@@ -489,6 +489,43 @@ static std::vector<std::uint8_t> u128_le_minimal_at_least_1(U128 n) {
    return v;
 }
 
+// §15.2.1 canonical NaN bit-pattern rewrite. If `bits` (interpreted
+// as a width-`width_log2` IEEE float) is a NaN, returns the canonical
+// quiet-NaN-with-zero-payload pattern at that width. Non-NaN values
+// (including ±Inf, ±0, finite) pass through verbatim.
+static U128 canonicalize_nan_bits(std::uint8_t width_log2, U128 bits) noexcept {
+   U128 exp_mask{}, mant_mask{}, canon{};
+   switch (width_log2) {
+      case 1:
+         exp_mask  = U128{0x7C00ULL, 0};
+         mant_mask = U128{0x03FFULL, 0};
+         canon     = U128{0x7E00ULL, 0};
+         break;
+      case 2:
+         exp_mask  = U128{0x7F800000ULL, 0};
+         mant_mask = U128{0x007FFFFFULL, 0};
+         canon     = U128{0x7FC00000ULL, 0};
+         break;
+      case 3:
+         exp_mask  = U128{0x7FF0000000000000ULL, 0};
+         mant_mask = U128{0x000FFFFFFFFFFFFFULL, 0};
+         canon     = U128{0x7FF8000000000000ULL, 0};
+         break;
+      case 4:
+         exp_mask  = U128{0, 0x7FFF000000000000ULL};
+         mant_mask = U128{0xFFFFFFFFFFFFFFFFULL, 0x0000FFFFFFFFFFFFULL};
+         canon     = U128{0, 0x7FFF800000000000ULL};
+         break;
+      default: return bits;
+   }
+   const U128 exp_bits { bits.lo & exp_mask.lo,  bits.hi & exp_mask.hi  };
+   const U128 mant_bits{ bits.lo & mant_mask.lo, bits.hi & mant_mask.hi };
+   const bool exp_all_ones = (exp_bits == exp_mask);
+   const bool mant_nonzero = !mant_bits.is_zero();
+   if (exp_all_ones && mant_nonzero) return canon;
+   return bits;
+}
+
 static U128 read_u128_le(std::span<const std::uint8_t> bytes) {
    U128 v{};
    for (std::size_t i = 0; i < bytes.size() && i < 16; ++i) {
@@ -616,11 +653,14 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
          }
          const std::size_t byte_count = std::size_t{1} << arg.width_log2;
          out.push_back(static_cast<std::uint8_t>(0x60 | arg.width_log2));
+         // §15.2.1 — rewrite any NaN bits to canonical quiet-NaN-zero
+         // pattern at this width before emission. Non-NaN passes through.
+         const U128 emit_bits = canonicalize_nan_bits(arg.width_log2, arg.bits);
          std::uint8_t buf[16];
          for (std::size_t i = 0; i < 16; ++i) {
             buf[i] = (i < 8)
-                        ? static_cast<std::uint8_t>(arg.bits.lo >> (8 * i))
-                        : static_cast<std::uint8_t>(arg.bits.hi >> (8 * (i - 8)));
+                        ? static_cast<std::uint8_t>(emit_bits.lo >> (8 * i))
+                        : static_cast<std::uint8_t>(emit_bits.hi >> (8 * (i - 8)));
          }
          out.insert(out.end(), buf, buf + byte_count);
       } else if constexpr (std::is_same_v<T, Decimal>) {

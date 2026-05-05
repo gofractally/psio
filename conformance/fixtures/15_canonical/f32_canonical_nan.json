@@ -1,0 +1,11 @@
+{
+  "id": "canonical_nan_f32",
+  "spec_ref": "§15.2.1",
+  "rule_ids": ["F-008", "C-003"],
+  "description": "f32 canonical NaN = 0x7FC00000 (quiet NaN, zero payload). Tag 0x62 + LE bytes 00 00 C0 7F.",
+  "input_value": {"kind": "float", "width": 32, "bits_hex": "0x7FC00000"},
+  "wire_hex": "620000c07f",
+  "json_compact": "NaN",
+  "must_round_trip": true,
+  "must_validate": true
+}
