@@ -6,6 +6,5 @@
   "input_value": {"kind": "numeric_string", "inner": {"kind": "int", "value": -1}},
   "wire_hex": "8031",
   "json_compact": "\"-1\"",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

@@ -6,6 +6,5 @@
   "input_value": {"kind": "string", "encoding": "raw_text", "text": "say \"hi\""},
   "wire_hex": "907361792022686922",
   "json_compact": "\"say \\\"hi\\\"\"",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

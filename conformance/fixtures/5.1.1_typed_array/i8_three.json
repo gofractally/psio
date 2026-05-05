@@ -6,6 +6,5 @@
   "input_value": {"kind": "typed_array", "element_code": 0, "elements": [-128, 0, 127]},
   "wire_hex": "b180007f0300",
   "json_compact": "[-128,0,127]",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

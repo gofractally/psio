@@ -6,6 +6,5 @@
   "input_value": {"kind": "uint", "value": "18446744073709551615"},
   "wire_hex": "47ffffffffffffffff",
   "json_compact": "18446744073709551615",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

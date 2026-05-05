@@ -6,6 +6,5 @@
   "input_value": {"kind": "numeric_string", "inner": {"kind": "uint", "value": "123456789012345678"}},
   "wire_hex": "80474ef330a64b9bb601",
   "json_compact": "\"123456789012345678\"",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

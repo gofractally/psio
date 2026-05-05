@@ -6,6 +6,5 @@
   "input_value": {"kind": "float", "width": 16, "bits_hex": "0x7E00"},
   "wire_hex": "61007e",
   "json_compact": "NaN",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

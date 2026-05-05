@@ -1318,27 +1318,38 @@ static Value decode_at_depth(std::span<const std::uint8_t> buf, unsigned depth) 
    const std::uint8_t high = tag >> 4;
    const std::uint8_t low  = tag & 0x0F;
 
+   // Each variant verifies that the buffer is consumed exactly —
+   // trailing bytes past the value are an ill-formed wire (§10).
+   const auto expect_size = [&](std::size_t size) {
+      if (buf.size() < size) throw DecodeError{"value payload truncated"};
+      if (buf.size() > size) throw DecodeError{"trailing bytes after value"};
+   };
+
    switch (high) {
       case 0:
          if (low != 0) throw DecodeError{"reserved low_nibble for null"};
+         expect_size(1);
          return Null{};
       case 1:
+         expect_size(1);
          if      (low == 0) return Bool{false};
          else if (low == 1) return Bool{true};
          throw DecodeError{"reserved low_nibble for bool"};
       case 2:
+         expect_size(1);
          return Uint{U128{low, 0}};
       case 3:
+         expect_size(1);
          if (low == 0) throw DecodeError{"nint_inline low_nibble 0 reserved"};
          return NegInt{U128{low, 0}};
       case 4: {
          const std::size_t bc = static_cast<std::size_t>(low) + 1;
-         if (buf.size() < 1 + bc) throw DecodeError{"uint magnitude truncated"};
+         expect_size(1 + bc);
          return Uint{read_u128_le(buf.subspan(1, bc))};
       }
       case 5: {
          const std::size_t bc = static_cast<std::size_t>(low) + 1;
-         if (buf.size() < 1 + bc) throw DecodeError{"negint magnitude truncated"};
+         expect_size(1 + bc);
          const auto mag = read_u128_le(buf.subspan(1, bc));
          if (mag.is_zero()) throw DecodeError{"negint with all-zero payload reserved"};
          return NegInt{mag};
@@ -1350,7 +1361,7 @@ static Value decode_at_depth(std::span<const std::uint8_t> buf, unsigned depth) 
             throw DecodeError{"ieee_float bad width selector"};
          }
          const std::size_t byte_count = std::size_t{1} << width_log2;
-         if (buf.size() < 1 + byte_count) throw DecodeError{"ieee_float payload truncated"};
+         expect_size(1 + byte_count);
          return Float{width_log2, read_u128_le(buf.subspan(1, byte_count))};
       }
       case 7: {
@@ -1359,6 +1370,8 @@ static Value decode_at_depth(std::span<const std::uint8_t> buf, unsigned depth) 
          const U128 zz = read_u128_le(buf.subspan(1, bc));
          const I128 mantissa = zigzag_decode_u128(zz);
          const auto scale_result = varscale_decode(buf.subspan(1 + bc));
+         if (buf.size() != 1 + bc + scale_result.used_bytes)
+            throw DecodeError{"trailing bytes after decimal"};
          return Decimal{mantissa, scale_result.value};
       }
       case 11: {
@@ -2689,7 +2702,6 @@ struct Fixture {
    std::optional<std::string>   json_int_string_largeonly;
    std::optional<std::string>   json_int_string_all;
    bool                         must_round_trip = false;
-   bool                         must_validate   = false;
    bool                         must_reject     = false;
 };
 
@@ -3010,7 +3022,6 @@ static Fixture parse_fixture(std::string_view json_text) {
    else throw std::runtime_error{"fixture missing wire_hex"};
    if (const auto* n = obj_get(o, "json_compact")) f.json_compact = as_string(*n);
    if (const auto* n = obj_get(o, "must_round_trip")) f.must_round_trip = as_bool(*n);
-   if (const auto* n = obj_get(o, "must_validate"))   f.must_validate   = as_bool(*n);
    if (const auto* n = obj_get(o, "must_reject"))     f.must_reject     = as_bool(*n);
 
    if (const auto* iv = obj_get(o, "input_value")) {

@@ -9,6 +9,5 @@
   ]},
   "wire_hex": "b000b000212200010200b0002300010000080200",
   "json_compact": "[[1,2],[3]]",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

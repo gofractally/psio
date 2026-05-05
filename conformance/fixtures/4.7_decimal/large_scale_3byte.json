@@ -5,6 +5,5 @@
   "description": "decimal mantissa=1, scale=8192 forces varscale 3-byte form (zigzag(8192)=16384 > 8191 → can't fit 14 bits). Wire: tag 0x70 + mantissa 0x02 + varscale 0x80 0x00 0x01. JSON output omitted (would be 1 followed by 8192 zeros).",
   "input_value": {"kind": "decimal", "mantissa": "1", "scale": 8192},
   "wire_hex": "7002800001",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

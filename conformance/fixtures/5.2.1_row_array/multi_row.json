@@ -10,6 +10,5 @@
   ]},
   "wire_hex": "c100030000000101000001020000011f3f1b6162632111000001022210310001022311402a00010200060c0300",
   "json_compact": "[{\"a\":1,\"b\":true,\"c\":null},{\"a\":2,\"b\":false,\"c\":-1},{\"a\":3,\"b\":true,\"c\":42}]",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

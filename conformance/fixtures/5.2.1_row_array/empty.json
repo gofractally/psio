@@ -6,6 +6,5 @@
   "input_value": {"kind": "row_array", "keys": [], "rows": []},
   "wire_hex": "c100000000",
   "json_compact": "[]",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

@@ -6,6 +6,5 @@
   "input_json": "[{\"a\":1,\"b\":2},{\"a\":3,\"b\":4}]",
   "wire_hex": "c1000200000001010000011f3f6162212200012324000100040200",
   "json_compact": "[{\"a\":1,\"b\":2},{\"a\":3,\"b\":4}]",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

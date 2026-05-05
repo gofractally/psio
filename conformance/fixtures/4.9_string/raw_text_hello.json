@@ -6,6 +6,5 @@
   "input_value": {"kind": "string", "encoding": "raw_text", "text": "hello"},
   "wire_hex": "9068656c6c6f",
   "json_compact": "\"hello\"",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

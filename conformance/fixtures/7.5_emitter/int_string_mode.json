@@ -11,6 +11,5 @@
   "json_compact": "{\"small\":5,\"big\":123456789012345678}",
   "json_int_string_largeonly": "{\"small\":5,\"big\":\"123456789012345678\"}",
   "json_int_string_all": "{\"small\":\"5\",\"big\":\"123456789012345678\"}",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

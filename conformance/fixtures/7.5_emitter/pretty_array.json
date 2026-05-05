@@ -11,6 +11,5 @@
   "wire_hex": "b0002111310001020300",
   "json_compact": "[1,true,-1]",
   "json_pretty": "[\n  1,\n  true,\n  -1\n]",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

@@ -6,6 +6,5 @@
   "input_value": {"kind": "bool", "value": false},
   "wire_hex": "10",
   "json_compact": "false",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

@@ -6,6 +6,5 @@
   "input_json": "{\"avatar.b64\":\"AQID\"}",
   "wire_hex": "c0006176617461722e623634a00102038f000a0100",
   "json_compact": "{\"avatar.b64\":\"AQID\"}",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

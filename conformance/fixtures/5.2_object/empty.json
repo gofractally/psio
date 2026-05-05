@@ -6,6 +6,5 @@
   "input_value": {"kind": "object", "entries": []},
   "wire_hex": "c0000000",
   "json_compact": "{}",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

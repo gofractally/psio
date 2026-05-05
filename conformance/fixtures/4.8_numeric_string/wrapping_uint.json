@@ -6,6 +6,5 @@
   "input_value": {"kind": "numeric_string", "inner": {"kind": "uint", "value": 42}},
   "wire_hex": "80402a",
   "json_compact": "\"42\"",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

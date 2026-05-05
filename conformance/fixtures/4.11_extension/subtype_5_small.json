@@ -6,6 +6,5 @@
   "input_value": {"kind": "extension", "subtype": 5, "bytes_hex": "010203"},
   "wire_hex": "d5010203",
   "json_compact": "{\"__pjson_ext\":{\"subtype\":5,\"bytes_b64\":\"AQID\"}}",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

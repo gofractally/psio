@@ -11,6 +11,5 @@
   "json_compact": "{\"x\":1,\"y\":-1}",
   "json_pretty_tab": "{\n\t\"x\": 1,\n\t\"y\": -1\n}",
   "json_pretty_indent_4": "{\n    \"x\": 1,\n    \"y\": -1\n}",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

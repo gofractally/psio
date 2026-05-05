@@ -6,6 +6,5 @@
   "input_value": null,
   "wire_hex": "e0",
   "must_reject": true,
-  "reject_reason": "reserved_tag",
-  "must_validate": false
+  "reject_reason": "reserved_tag"
 }

@@ -6,6 +6,5 @@
   "input_json": "\"3.14\"",
   "wire_hex": "8071740203",
   "json_compact": "\"3.14\"",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

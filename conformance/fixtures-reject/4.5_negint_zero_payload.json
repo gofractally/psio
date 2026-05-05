@@ -6,6 +6,5 @@
   "input_value": null,
   "wire_hex": "5000",
   "must_reject": true,
-  "reject_reason": "negint_zero_payload",
-  "must_validate": false
+  "reject_reason": "negint_zero_payload"
 }

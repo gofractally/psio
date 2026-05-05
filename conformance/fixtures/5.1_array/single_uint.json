@@ -6,6 +6,5 @@
   "input_value": {"kind": "array", "children": [{"kind": "uint", "value": 1}]},
   "wire_hex": "b00021000100",
   "json_compact": "[1]",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

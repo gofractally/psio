@@ -10,6 +10,5 @@
   ]},
   "wire_hex": "c0006f75746572c000696e6e657225eb00050100b600050100",
   "json_compact": "{\"outer\":{\"inner\":5}}",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

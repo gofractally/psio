@@ -6,6 +6,5 @@
   "input_value": {"kind": "uint", "value": 16},
   "wire_hex": "4010",
   "json_compact": "16",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

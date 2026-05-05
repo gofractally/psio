@@ -12,6 +12,5 @@
   "json_compact": "{\"f\":1.5,\"d\":1.5,\"n\":42}",
   "json_int_string_largeonly": "{\"f\":1.5,\"d\":1.5,\"n\":42}",
   "json_int_string_all": "{\"f\":1.5,\"d\":1.5,\"n\":\"42\"}",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

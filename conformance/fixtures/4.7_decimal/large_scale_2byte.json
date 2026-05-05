@@ -6,6 +6,5 @@
   "input_value": {"kind": "decimal", "mantissa": "1", "scale": 33},
   "wire_hex": "70024201",
   "json_compact": "1000000000000000000000000000000000",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }

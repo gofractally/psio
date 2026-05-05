@@ -6,6 +6,5 @@
   "input_value": null,
   "wire_hex": "30",
   "must_reject": true,
-  "reject_reason": "nint_inline_zero",
-  "must_validate": false
+  "reject_reason": "nint_inline_zero"
 }

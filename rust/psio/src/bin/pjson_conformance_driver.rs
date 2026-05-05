@@ -1367,43 +1367,48 @@ fn decode_at_depth(buf: &[u8], depth: u32) -> Result<Value, DecodeError> {
     let high = tag >> 4;
     let low = tag & 0x0F;
 
+    // Each variant verifies that the buffer is consumed exactly —
+    // trailing bytes past the value are an ill-formed wire (§10).
+    let expect_size = |size: usize| -> Result<(), DecodeError> {
+        if buf.len() < size { Err(DecodeError::Truncated("value payload")) }
+        else if buf.len() > size { Err(DecodeError::Truncated("trailing bytes after value")) }
+        else { Ok(()) }
+    };
+
     match high {
         0 => {
             if low != 0 {
                 return Err(DecodeError::ReservedLowNibble("null", low));
             }
+            expect_size(1)?;
             Ok(Value::Null)
         }
-        1 => match low {
-            0 => Ok(Value::Bool(false)),
-            1 => Ok(Value::Bool(true)),
-            _ => Err(DecodeError::ReservedLowNibble("bool", low)),
-        },
-        2 => Ok(Value::Uint(low as u128)),
-        3 => {
-            if low == 0 {
-                return Err(DecodeError::NintInlineZero);
+        1 => {
+            expect_size(1)?;
+            match low {
+                0 => Ok(Value::Bool(false)),
+                1 => Ok(Value::Bool(true)),
+                _ => Err(DecodeError::ReservedLowNibble("bool", low)),
             }
+        }
+        2 => { expect_size(1)?; Ok(Value::Uint(low as u128)) }
+        3 => {
+            expect_size(1)?;
+            if low == 0 { return Err(DecodeError::NintInlineZero); }
             Ok(Value::NegInt(low as u128))
         }
         4 => {
             // uint
             let bc = (low as usize) + 1;
-            if buf.len() < 1 + bc {
-                return Err(DecodeError::Truncated("uint magnitude"));
-            }
+            expect_size(1 + bc)?;
             Ok(Value::Uint(read_u128_le(&buf[1..1 + bc])))
         }
         5 => {
             // negint
             let bc = (low as usize) + 1;
-            if buf.len() < 1 + bc {
-                return Err(DecodeError::Truncated("negint magnitude"));
-            }
+            expect_size(1 + bc)?;
             let mag = read_u128_le(&buf[1..1 + bc]);
-            if mag == 0 {
-                return Err(DecodeError::NegintZero);
-            }
+            if mag == 0 { return Err(DecodeError::NegintZero); }
             Ok(Value::NegInt(mag))
         }
         6 => {
@@ -1416,9 +1421,7 @@ fn decode_at_depth(buf: &[u8], depth: u32) -> Result<Value, DecodeError> {
                 return Err(DecodeError::BadWidth(width_log2));
             }
             let byte_count: usize = 1 << (width_log2 as usize);
-            if buf.len() < 1 + byte_count {
-                return Err(DecodeError::Truncated("ieee_float payload"));
-            }
+            expect_size(1 + byte_count)?;
             Ok(Value::Float {
                 width_log2,
                 bits: read_u128_le(&buf[1..1 + byte_count]),
@@ -1433,11 +1436,11 @@ fn decode_at_depth(buf: &[u8], depth: u32) -> Result<Value, DecodeError> {
             let zz = read_u128_le(&buf[1..1 + bc]);
             let mantissa = zigzag_decode_u128(zz);
             let (scale, scale_bytes) = varscale_decode(&buf[1 + bc..])?;
-            // Phase 1 validates exact-size match by allowing buf to
-            // extend exactly through the decoded bytes; trailing
-            // garbage is not flagged here because containers handle
-            // that level of bounds-checking in Phase 2.
-            let _ = scale_bytes;
+            // Trailing-byte enforcement: decoder rejects wires that
+            // declare a decimal but have bytes past the varscale.
+            if buf.len() != 1 + bc + scale_bytes {
+                return Err(DecodeError::Truncated("trailing bytes after decimal"));
+            }
             Ok(Value::Decimal { mantissa, scale })
         }
         11 => {
@@ -2513,7 +2516,6 @@ struct Fixture {
     json_int_string_largeonly: Option<String>,    // mode=LargeOnly
     json_int_string_all: Option<String>,          // mode=All
     must_round_trip: bool,
-    must_validate: bool,
     must_reject: bool,
 }
 
@@ -2536,11 +2538,6 @@ fn parse_fixture(json_text: &str) -> Result<Fixture, String> {
         .get("must_round_trip")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    let must_validate = obj
-        .get("must_validate")
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
-
     let wire_hex = obj
         .get("wire_hex")
         .and_then(|x| x.as_str())
@@ -2582,7 +2579,6 @@ fn parse_fixture(json_text: &str) -> Result<Fixture, String> {
         json_int_string_largeonly,
         json_int_string_all,
         must_round_trip,
-        must_validate,
         must_reject,
     })
 }
@@ -3001,8 +2997,6 @@ fn check(fixture: &Fixture) -> Result<(), String> {
                     expected, got));
             }
         }
-
-        let _ = fixture.must_validate; // Phase 1 has no separate validator path
 
         Ok(())
     }
@@ -3973,6 +3967,43 @@ mod tests {
         // f16-NORMAL still works (regression check).
         assert_eq!(f64_to_f16_exact(1.0_f64), Some(0x3C00));
         assert_eq!(f64_to_f16_exact(1.5_f64), Some(0x3E00));
+    }
+
+    #[test]
+    fn decode_rejects_trailing_bytes() {
+        // §10 — decoders reject wires whose buffer extends past the
+        // last byte of the encoded value. Trailing bytes are
+        // ill-formed and a security hazard (they can carry hidden
+        // payload past a length-prefixed value).
+        //
+        // The previous implementation:
+        //   * dropped `scale_bytes` after varscale_decode in the
+        //     decimal arm with a "Phase 1 / Phase 2 will handle it"
+        //     comment;
+        //   * passed `&buf[1..]` to numeric_string's inner decoder
+        //     without checking that the inner consumed all of it;
+        //   * accepted any extra trailing bytes after fixed-width
+        //     types (null, bool, uint_inline, nint_inline, uint,
+        //     negint, ieee_float).
+
+        // null + trailing
+        assert!(decode(&[0x00, 0xFF]).is_err());
+        // bool + trailing
+        assert!(decode(&[0x10, 0xFF]).is_err());
+        // uint_inline + trailing
+        assert!(decode(&[0x25, 0xFF]).is_err());
+        // uint bc=1 (5) + extra
+        assert!(decode(&[0x40, 0x05, 0xFF]).is_err());
+        // ieee_float f16 + extra
+        assert!(decode(&[0x61, 0x00, 0x3C, 0xFF]).is_err());
+        // decimal(0, 0): tag 0x70, mantissa 0x00, varscale 0x00 — exactly 3 bytes
+        assert!(decode(&[0x70, 0x00, 0x00]).is_ok());
+        // decimal(0, 0) + trailing
+        assert!(decode(&[0x70, 0x00, 0x00, 0xFF]).is_err());
+        // numeric_string with uint_inline 1 inner + extra
+        assert!(decode(&[0x80, 0x21, 0xFF]).is_err());
+        // numeric_string with uint_inline 1 inner — exactly 2 bytes
+        assert!(decode(&[0x80, 0x21]).is_ok());
     }
 
     #[test]

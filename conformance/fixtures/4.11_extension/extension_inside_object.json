@@ -8,6 +8,5 @@
   ]},
   "wire_hex": "c000746167d7abcdc200030100",
   "json_compact": "{\"tag\":{\"__pjson_ext\":{\"subtype\":7,\"bytes_b64\":\"q80=\"}}}",
-  "must_round_trip": true,
-  "must_validate": true
+  "must_round_trip": true
 }
