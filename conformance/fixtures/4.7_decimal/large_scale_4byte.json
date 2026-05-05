@@ -1,0 +1,10 @@
+{
+  "id": "decimal_large_scale_4byte",
+  "spec_ref": "§4.7.1",
+  "rule_ids": ["D-005"],
+  "description": "decimal mantissa=1, scale=2097152 forces varscale 4-byte form (zigzag(2097152)=4194304 > 2097151 → can't fit 22 bits). Wire: tag 0x70 + mantissa 0x02 + varscale 0xC0 0x00 0x00 0x01. JSON output omitted.",
+  "input_value": {"kind": "decimal", "mantissa": "1", "scale": 2097152},
+  "wire_hex": "7002c0000001",
+  "must_round_trip": true,
+  "must_validate": true
+}

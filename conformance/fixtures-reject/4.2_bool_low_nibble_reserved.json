@@ -1,0 +1,10 @@
+{
+  "id": "bool_low_nibble_reserved",
+  "spec_ref": "§4.2",
+  "rule_ids": ["B-004", "E-002"],
+  "description": "bool with low_nibble 2 (0x12) is reserved; only 0x10 and 0x11 are valid",
+  "input_value": null,
+  "wire_hex": "12",
+  "must_reject": true,
+  "reject_reason": "bool_reserved_low_nibble"
+}

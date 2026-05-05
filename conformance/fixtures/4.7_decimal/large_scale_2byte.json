@@ -1,0 +1,11 @@
+{
+  "id": "decimal_large_scale_2byte",
+  "spec_ref": "§4.7.1",
+  "rule_ids": ["D-003"],
+  "description": "decimal mantissa=1, scale=33 forces varscale 2-byte form (zigzag(33)=66 > 63 → can't fit 6 bits). Wire: tag 0x70 + mantissa 0x02 + varscale 0x42 0x01.",
+  "input_value": {"kind": "decimal", "mantissa": "1", "scale": 33},
+  "wire_hex": "70024201",
+  "json_compact": "1000000000000000000000000000000000",
+  "must_round_trip": true,
+  "must_validate": true
+}

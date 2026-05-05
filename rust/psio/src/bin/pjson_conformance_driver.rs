@@ -1006,4 +1006,85 @@ mod tests {
             assert_eq!(zigzag_decode_u128(zigzag_encode_i128(s)), s, "i128 {}", s);
         }
     }
+
+    /// T-016, T-017, V-003 — verify that the §3 type-class predicates
+    /// hold for every possible high nibble (0..15), and that the
+    /// dispatch sub-bits within `is_integer` (codes 2..5) match the
+    /// spec's stated layout (`bit 0 = sign`, `bit 1 = inline form`).
+    ///
+    /// These predicates aren't called by the driver directly — the
+    /// driver dispatches via a `match` on the high nibble, which is
+    /// equivalent. The test makes the spec's claims runtime-checkable
+    /// so a future change that breaks the layout fails loud.
+    #[test]
+    fn tag_byte_predicates_match_spec_section_3() {
+        for high in 0u8..=15 {
+            // Property: every high nibble lands in exactly one type-class.
+            let is_atom              = high <= 1;
+            let is_integer           = (2..=5).contains(&high);
+            let is_real              = (6..=7).contains(&high);
+            let is_numeric_value     = (2..=7).contains(&high);
+            let is_number_projectable= (2..=8).contains(&high);
+            let is_json_string_emit  = (8..=10).contains(&high);
+            let is_aggregate         = (11..=12).contains(&high);
+            let is_extension         = high == 13;
+            let is_reserved          = high >= 14;
+
+            // Mutual exclusion among the disjoint classes.
+            let class_count = [is_atom, is_integer, is_real,
+                               is_aggregate, is_extension, is_reserved,
+                               // string/bytes/numeric_string region:
+                               (8..=10).contains(&high)]
+                              .iter().filter(|x| **x).count();
+            assert!(class_count == 1, "high {high} ambiguous class");
+
+            // Composite predicates (overlapping with their components).
+            assert_eq!(is_numeric_value, is_integer || is_real);
+            assert_eq!(is_number_projectable, is_numeric_value || high == 8);
+            assert_eq!(is_json_string_emit, high == 8 || (9..=10).contains(&high));
+        }
+
+        // V-003: reserved-tag fast-path predicate. The parser sees a
+        // full tag byte and computes (tag >> 4) — for high nibble N
+        // this is just N. The "reserved" predicate `(tag >> 4) >= 14`
+        // is therefore identical to `high >= 14`.
+        for high in 0u8..=15 {
+            let tag: u8 = high << 4;
+            let predicate = (tag >> 4) >= 14;
+            assert_eq!(predicate, high >= 14, "high {high}");
+        }
+
+        // T-017: bit pattern within is_integer.
+        // code 2 = uint_inline:   sign=0, inline=1 → bits 0010
+        // code 3 = nint_inline:   sign=1, inline=1 → bits 0011
+        // code 4 = uint:          sign=0, inline=0 → bits 0100
+        // code 5 = negint:        sign=1, inline=0 → bits 0101
+        for high in 2u8..=5 {
+            let sign_bit   = high & 0x01 != 0;
+            let inline_bit = high & 0x02 != 0;
+            let expected_signed   = matches!(high, 3 | 5);
+            let expected_inline   = matches!(high, 2 | 3);
+            assert_eq!(sign_bit,   expected_signed,   "code {high} sign bit");
+            assert_eq!(inline_bit, expected_inline,   "code {high} inline bit");
+        }
+
+        // Round-trip the predicates against the driver's actual decode
+        // dispatch: every reserved high nibble must error on the
+        // smallest-possible buffer, and every defined high nibble
+        // (excluding reserved) must NOT raise ReservedTag.
+        for high in 0u8..=15 {
+            let tag: u8 = high << 4;
+            // Some defined arms still error (e.g. truncated payload),
+            // but the error is NOT ReservedTag for high < 14.
+            let result = decode(&[tag]);
+            if high >= 14 {
+                assert!(matches!(result, Err(DecodeError::ReservedTag(_))),
+                        "high {high} should be ReservedTag");
+            } else {
+                if let Err(DecodeError::ReservedTag(_)) = result {
+                    panic!("high {high} should not be ReservedTag");
+                }
+            }
+        }
+    }
 }

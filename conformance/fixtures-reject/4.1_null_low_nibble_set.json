@@ -1,0 +1,10 @@
+{
+  "id": "null_low_nibble_set_rejected",
+  "spec_ref": "§4.1",
+  "rule_ids": ["N-003", "E-002"],
+  "description": "null with non-zero low nibble (0x05) is reserved; decoder must reject",
+  "input_value": null,
+  "wire_hex": "05",
+  "must_reject": true,
+  "reject_reason": "null_reserved_low_nibble"
+}

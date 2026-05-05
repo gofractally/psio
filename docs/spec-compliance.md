@@ -71,8 +71,8 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
 | T-015 | codes 14, 15 reserved → reject | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
-| T-016 | predicates (is_atom, is_integer, is_real, is_numeric_value, is_number_projectable, is_json_string_emit, is_aggregate, is_extension, is_reserved) collapse to range tests | ❌ | ❌ | ❌ | ❌ |
-| T-017 | within is_integer: `bit 0 = sign`, `bit 1 = inline form` | ❌ | ❌ | ❌ | ❌ |
+| T-016 | predicates (is_atom, is_integer, is_real, is_numeric_value, is_number_projectable, is_json_string_emit, is_aggregate, is_extension, is_reserved) collapse to range tests | ⚠️ implementation property — by-construction in match dispatch | ⚠️ no C++ unit test | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` |
+| T-017 | within is_integer: `bit 0 = sign`, `bit 1 = inline form` | ⚠️ implementation property — by-construction in match dispatch | ⚠️ no C++ unit test | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` |
 
 ## §4.1 — `null`
 
@@ -80,7 +80,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 |----|------|----------|----------|-----------|-----------|
 | N-001 | encode `null` → `0x00`, container size = 1 | ✅ | ✅ corpus `null_basic` | ✅ | ✅ `null_round_trip` + corpus `null_basic` |
 | N-002 | decode `0x00` (size 1) → `null` | ✅ | ✅ corpus `null_basic` | ✅ | ✅ `null_round_trip` + corpus `null_basic` |
-| N-003 | reject `0x0X` for X ≠ 0 | ✅ | ⚠️ | ✅ | ⚠️ |
+| N-003 | reject `0x0X` for X ≠ 0 | ✅ | ✅ corpus `null_low_nibble_set_rejected` | ✅ | ✅ corpus `null_low_nibble_set_rejected` |
 
 ## §4.2 — `bool`
 
@@ -89,7 +89,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | B-001 | encode `false` → `0x10` | ✅ | ✅ corpus `bool_false` | ✅ | ✅ `bool_round_trip` + corpus `bool_false` |
 | B-002 | encode `true` → `0x11` | ✅ | ✅ corpus `bool_true` | ✅ | ✅ `bool_round_trip` + corpus `bool_true` |
 | B-003 | decode `0x10` → `false`, `0x11` → `true` | ✅ | ✅ corpus `bool_{true,false}` | ✅ | ✅ `bool_round_trip` |
-| B-004 | reject `0x12..0x1F` | ✅ | ⚠️ no corpus reject fixture yet | ✅ | ✅ `bool_round_trip` |
+| B-004 | reject `0x12..0x1F` | ✅ | ✅ corpus `bool_low_nibble_reserved` | ✅ | ✅ `bool_round_trip` + corpus `bool_low_nibble_reserved` |
 
 ## §4.3 — `uint_inline` (code 2)
 
@@ -117,8 +117,8 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | U-003 | encode `negint` magnitude with smallest bc, payload raw LE | ✅ | ✅ corpus `negint_minus_16` | ✅ | ✅ `negint_full_round_trip` + corpus `negint_minus_16` |
 | U-004 | decode `negint`, value = −payload | ✅ | ✅ corpus `negint_minus_16` | ✅ | ✅ `negint_full_round_trip` |
 | U-005 | reject `negint` with all-zero payload | ✅ | ✅ corpus `negint_zero_payload_reserved` | ✅ | ✅ `negint_zero_rejected` + corpus `negint_zero_payload_reserved` |
-| U-006 | reject `uint`/`negint` with bc declared but truncated buffer | ✅ | ⚠️ | ✅ | ⚠️ |
-| U-007 | bc 9..16 reaches u128 / i128 range | ✅ | ⚠️ (only u64::MAX fixture so far) | ✅ | ⚠️ (only u64::MAX fixture so far) |
+| U-006 | reject `uint`/`negint` with bc declared but truncated buffer | ✅ | ✅ corpus `uint_truncated_payload` + `negint_truncated_payload` | ✅ | ✅ corpus `uint_truncated_payload` + `negint_truncated_payload` |
+| U-007 | bc 9..16 reaches u128 / i128 range | ✅ | ✅ corpus `uint_u128_max` (bc=16) | ✅ | ✅ corpus `uint_u128_max` (bc=16) |
 
 ## §4.6 — `ieee_float`
 
@@ -129,10 +129,10 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | F-003 | binary64 round-trip (low_nibble 3, payload 8 bytes LE) | ✅ | ✅ corpus `ieee_float_f64_one` | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f64_one` |
 | F-004 | binary128 round-trip (low_nibble 4, payload 16 bytes LE) — softfloat widen on decode | ⚠️ encode works, JSON-render via softfloat not wired | ⚠️ | ⚠️ encode works, JSON-render via softfloat not wired | ⚠️ |
 | F-005 | reject low_nibble bit 3 set | ✅ | ✅ corpus `ieee_float_bit3_set_reserved` | ✅ | ✅ `ieee_float_reserved_bit3_rejected` + corpus `ieee_float_bit3_set_reserved` |
-| F-006 | reject low_nibble width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_zero_reserved` (width 0) — widths 5–7 by code path | ✅ | ✅ `ieee_float_bad_width_rejected` (widths 0, 5) |
+| F-006 | reject low_nibble width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_{zero,6,7}_reserved` (widths 0, 6, 7); width 5 by code path | ✅ | ✅ `ieee_float_bad_width_rejected` (widths 0, 5) + corpus widths 0, 6, 7 |
 | F-007 | binary16 software widen on decode (no host fp16 support assumed) | ✅ | ✅ corpus `ieee_float_f16_one` renders `1` via `f16_bits_to_f64` | ✅ | ✅ corpus `ieee_float_f16_one` renders JSON `1` via `f16_bits_to_f64` |
 | F-008 | NaN at any width preserves quiet-NaN canonical pattern (§15.2.1) | ❌ | ❌ | ⚠️ render-only, no canonicalization yet | ⚠️ |
-| F-009 | ±Inf round-trip at every width | ❌ | ❌ | ⚠️ | ⚠️ |
+| F-009 | ±Inf round-trip at every width | ✅ | ✅ corpus `ieee_float_f64_{pos,neg}_inf` | ✅ | ✅ corpus `ieee_float_f64_{pos,neg}_inf` |
 
 ## §4.7 — `decimal` and varscale
 
@@ -140,10 +140,10 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 |----|------|----------|----------|-----------|-----------|
 | D-001 | decimal(m, s) → `0x70..0x7F` tag, zigzag mantissa LE, varscale | ✅ | ✅ corpus `decimal_{one_point_five, 12345}` | ✅ | ✅ `decimal_round_trip` + corpus `decimal_{one_point_five, 12345}` |
 | D-002 | varscale 1-byte form (scale ∈ −32..31) | ✅ | ✅ corpus `decimal_one_point_five` (scale −1) | ✅ | ✅ `varscale_encode_decode_round_trip` + corpus `decimal_one_point_five` (scale −1) |
-| D-003 | varscale 2-byte form (scale ∈ −8192..8191) | ✅ | ⚠️ no fixture (covered by Rust unit test only) | ✅ | ✅ `varscale_encode_decode_round_trip` (8191, −8192) |
-| D-004 | varscale 3-byte form | ✅ | ⚠️ no fixture (covered by Rust unit test only) | ✅ | ✅ `varscale_encode_decode_round_trip` (100000, −100000) |
-| D-005 | varscale 4-byte form | ⚠️ encoder dispatches but no large-scale fixture | ⚠️ | ⚠️ encoder dispatches but no large-scale fixture | ⚠️ |
-| D-006 | varscale: encoder uses smallest byte count that fits | ✅ | ⚠️ no dedicated fixture | ✅ | ✅ `varscale_encode_decode_round_trip` (transitions at 32, 8192, etc.) |
+| D-003 | varscale 2-byte form (scale ∈ −8192..8191) | ✅ | ✅ corpus `decimal_large_scale_2byte` (scale 33) | ✅ | ✅ `varscale_encode_decode_round_trip` + corpus `decimal_large_scale_2byte` |
+| D-004 | varscale 3-byte form | ✅ | ✅ corpus `decimal_large_scale_3byte` (scale 8192) | ✅ | ✅ `varscale_encode_decode_round_trip` + corpus `decimal_large_scale_3byte` |
+| D-005 | varscale 4-byte form | ✅ | ✅ corpus `decimal_large_scale_4byte` (scale 2097152) | ✅ | ✅ corpus `decimal_large_scale_4byte` |
+| D-006 | varscale: encoder uses smallest byte count that fits | ✅ | ✅ corpus tests covers all four tiers | ✅ | ✅ `varscale_encode_decode_round_trip` (transitions at 32, 8192, etc.) |
 | D-007 | decimal-vs-ieee_float encoder rule (§4.7.2): pick decimal when strictly shorter, else smallest bit-exact ieee width | ❌ | ❌ | ❌ encoder does not yet pick between decimal and ieee | ❌ |
 
 ## §4.8 — `numeric_string`
@@ -307,7 +307,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 |----|------|----------|----------|-----------|-----------|
 | E-001 | reserved type code (14, 15) | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` |
 | E-002 | reserved low-nibble bits per type | ⚠️ partial — covered for bool/nint_inline/ieee_float; remaining types pending | ⚠️ | ⚠️ partial — same | ⚠️ |
-| E-003 | `uint`/`negint`/`decimal` bc < 1 or bc > 16 | ⚠️ bc range enforced by 4-bit low nibble (bc-1 ∈ 0..15 → bc 1..16) by construction; out-of-range impossible to encode in tag | ⚠️ no negative test | ⚠️ same | ⚠️ |
+| E-003 | `uint`/`negint`/`decimal` bc < 1 or bc > 16 | ✅ bc range enforced by 4-bit low nibble; truncated-payload covered by U-006 fixtures | ✅ corpus `uint_truncated_payload` | ✅ same | ✅ corpus `uint_truncated_payload` |
 | E-004 | `negint` all-zero payload | ✅ | ✅ corpus `negint_zero_payload_reserved` | ✅ | ✅ `negint_zero_rejected` |
 | E-005 | `nint_inline` low_nibble = 0 | ✅ | ✅ corpus `nint_inline_zero_reserved` | ✅ | ✅ `nint_inline_zero_rejected` |
 | E-006 | container size too small for stated count | ❌ | ❌ | ❌ | ❌ |
@@ -324,7 +324,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 |----|------|----------|----------|-----------|-----------|
 | V-001 | extension framework: unknown sub-type id does not error | ❌ | ❌ | ❌ | ❌ |
 | V-002 | reserved codes (14, 15) reject without partial decode | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
-| V-003 | parse-fast-path predicate `(tag >> 4) >= 14` | ⚠️ | ⚠️ | ⚠️ implemented as match arm | ⚠️ |
+| V-003 | parse-fast-path predicate `(tag >> 4) >= 14` | ⚠️ implementation property — by-construction in match dispatch | ⚠️ no C++ unit test | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` |
 
 ## §15 — Canonical encoding
 

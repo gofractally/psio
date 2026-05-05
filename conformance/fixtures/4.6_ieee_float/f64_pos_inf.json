@@ -1,0 +1,11 @@
+{
+  "id": "ieee_float_f64_pos_inf",
+  "spec_ref": "§4.6",
+  "rule_ids": ["F-009"],
+  "description": "f64 +Inf = 0x7FF0000000000000 → tag 0x63 + LE bytes 00 00 00 00 00 00 F0 7F",
+  "input_value": {"kind": "float", "width": 64, "bits_hex": "0x7FF0000000000000"},
+  "wire_hex": "63000000000000f07f",
+  "json_compact": "Infinity",
+  "must_round_trip": true,
+  "must_validate": true
+}

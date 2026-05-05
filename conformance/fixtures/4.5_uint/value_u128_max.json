@@ -1,0 +1,11 @@
+{
+  "id": "uint_u128_max",
+  "spec_ref": "§4.5",
+  "rule_ids": ["U-001", "U-002", "U-007"],
+  "description": "u128::MAX = 2^128 - 1 needs bc=16; tag 0x4F + 16 bytes 0xFF",
+  "input_value": {"kind": "uint", "value": "340282366920938463463374607431768211455"},
+  "wire_hex": "4fffffffffffffffffffffffffffffffff",
+  "json_compact": "340282366920938463463374607431768211455",
+  "must_round_trip": true,
+  "must_validate": true
+}
