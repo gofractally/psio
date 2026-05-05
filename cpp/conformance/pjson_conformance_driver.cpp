@@ -2387,74 +2387,47 @@ static bool as_bool(const JNode& n) {
 
 // ── JSON ingress (§4.8 / §7.1) ────────────────────────────────────
 
+// Decimal-digit string → U128 magnitude. Caller filters out the
+// optional leading '-' before passing `digits` (i.e., `digits` is
+// pure ASCII '0'..'9'). No overflow detection — the caller's
+// `parse_canonical_json_number_string` accepts only inputs whose
+// magnitude fits an i128, so 39 digits max.
+inline U128 u128_from_decimal_digits(std::string_view digits) {
+   U128 v{};
+   for (char c : digits) {
+      const std::uint64_t lo_old = v.lo;
+      v.lo *= 10;
+      const std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
+      v.hi = v.hi * 10 + carry;
+      const std::uint64_t add = static_cast<std::uint64_t>(c - '0');
+      const std::uint64_t before = v.lo;
+      v.lo += add;
+      if (v.lo < before) ++v.hi;
+   }
+   return v;
+}
+
+inline I128 i128_two_complement_negate(U128 mag) {
+   U128 neg{~mag.lo, ~mag.hi};
+   neg.lo += 1;
+   if (neg.lo == 0) neg.hi += 1;
+   return I128{neg.lo, static_cast<std::int64_t>(neg.hi)};
+}
+
 // Build a pjson Value from the canonical-form check, returning the
 // appropriate Uint/NegInt/Decimal. Caller provides the parsed
 // mantissa string and scale; this synthesizes the Value.
 inline Value canonical_string_to_numeric(std::string_view mantissa_str, std::int32_t scale) {
    const bool negative = !mantissa_str.empty() && mantissa_str[0] == '-';
+   const std::string_view digits = negative ? mantissa_str.substr(1) : mantissa_str;
+   const U128 mag = u128_from_decimal_digits(digits);
+
    if (scale == 0) {
-      // Integer
-      if (negative) {
-         // |v|  — strip the leading '-' then parse as u128.
-         U128 mag{};
-         for (std::size_t k = 1; k < mantissa_str.size(); ++k) {
-            std::uint64_t lo_old = mag.lo;
-            mag.lo *= 10;
-            std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
-            mag.hi = mag.hi * 10 + carry;
-            std::uint64_t add = static_cast<std::uint64_t>(mantissa_str[k] - '0');
-            std::uint64_t before = mag.lo;
-            mag.lo += add;
-            if (mag.lo < before) ++mag.hi;
-         }
-         return NegInt{mag};
-      }
-      U128 v{};
-      for (char c : mantissa_str) {
-         std::uint64_t lo_old = v.lo;
-         v.lo *= 10;
-         std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
-         v.hi = v.hi * 10 + carry;
-         std::uint64_t add = static_cast<std::uint64_t>(c - '0');
-         std::uint64_t before = v.lo;
-         v.lo += add;
-         if (v.lo < before) ++v.hi;
-      }
-      return Uint{v};
+      return negative ? Value{NegInt{mag}} : Value{Uint{mag}};
    }
-   // Decimal
-   I128 mantissa{};
-   if (negative) {
-      // Parse |mantissa| as u128 then two's-complement.
-      U128 mag{};
-      for (std::size_t k = 1; k < mantissa_str.size(); ++k) {
-         std::uint64_t lo_old = mag.lo;
-         mag.lo *= 10;
-         std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
-         mag.hi = mag.hi * 10 + carry;
-         std::uint64_t add = static_cast<std::uint64_t>(mantissa_str[k] - '0');
-         std::uint64_t before = mag.lo;
-         mag.lo += add;
-         if (mag.lo < before) ++mag.hi;
-      }
-      U128 neg{~mag.lo, ~mag.hi};
-      neg.lo += 1;
-      if (neg.lo == 0) neg.hi += 1;
-      mantissa = I128{neg.lo, static_cast<std::int64_t>(neg.hi)};
-   } else {
-      U128 v{};
-      for (char c : mantissa_str) {
-         std::uint64_t lo_old = v.lo;
-         v.lo *= 10;
-         std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
-         v.hi = v.hi * 10 + carry;
-         std::uint64_t add = static_cast<std::uint64_t>(c - '0');
-         std::uint64_t before = v.lo;
-         v.lo += add;
-         if (v.lo < before) ++v.hi;
-      }
-      mantissa = I128{v.lo, static_cast<std::int64_t>(v.hi)};
-   }
+   const I128 mantissa = negative
+      ? i128_two_complement_negate(mag)
+      : I128{mag.lo, static_cast<std::int64_t>(mag.hi)};
    return Decimal{mantissa, scale};
 }
 
@@ -2463,6 +2436,99 @@ inline Value canonical_string_to_numeric(std::string_view mantissa_str, std::int
 //
 // Honors the "host type controls" rule (E-005): byte inspection of
 // strings happens ONLY here, on the JSON-source path.
+// §4.11 — recognize a single-key JObject of the exact shape
+//   {"__pjson_ext": {"subtype": N, "bytes_b64": "..."}}
+// as an extension envelope. Returns nullopt for any other shape so
+// the caller treats it as a regular object.
+static std::optional<Extension> try_extension_envelope(const JObject& obj) {
+   if (obj.size() != 1 || obj[0].first != "__pjson_ext") return std::nullopt;
+   const auto* inner = std::get_if<JObject>(&obj[0].second.v);
+   if (!inner) return std::nullopt;
+
+   std::optional<std::int64_t> sub;
+   std::optional<std::string>  b64;
+   for (const auto& [ik, iv] : *inner) {
+      if      (ik == "subtype")   { if (auto* p = std::get_if<std::int64_t>(&iv.v)) sub = *p; }
+      else if (ik == "bytes_b64") { if (auto* p = std::get_if<std::string>(&iv.v))   b64 = *p; }
+   }
+   if (!sub || !b64 || *sub < 0 || *sub > 15) return std::nullopt;
+   Extension e;
+   e.subtype = static_cast<std::uint8_t>(*sub);
+   e.bytes   = b64_decode(*b64);
+   return e;
+}
+
+// §7.4 / J-013 — for a (key, value) pair where key ends in a known
+// suffix-vocabulary term, decode the JSON string value as binary
+// with the matching encoding hint. nullopt for any other shape
+// (non-string value, unknown suffix, malformed encoding).
+static std::optional<Bytes> try_bytes_from_suffix_keyed_value(
+   std::string_view key, const JNode& v) {
+   std::uint8_t hint;
+   if      (key.ends_with(".b64"))    hint = 0;
+   else if (key.ends_with(".hex"))    hint = 1;
+   else if (key.ends_with(".base58")) hint = 2;
+   else if (key.ends_with(".b64u"))   hint = 3;
+   else return std::nullopt;
+
+   const auto* s = std::get_if<std::string>(&v.v);
+   if (!s) return std::nullopt;
+
+   try {
+      Bytes b;
+      b.encoding_hint = hint;
+      switch (hint) {
+         case 0: b.content = b64_decode(*s); break;
+         case 1: b.content = parse_hex(*s); break;
+         case 2: b.content = base58_decode(*s); break;
+         case 3: b.content = b64url_decode(*s); break;
+      }
+      return b;
+   } catch (...) {
+      return std::nullopt;     // malformed encoding ⇒ caller falls back
+   }
+}
+
+// §5.2.1.5 / RA-003 — homogeneous-shape detection + lift. Returns
+// the lifted RowArray on success; the children vector is consumed.
+// On heterogeneous input returns nullopt and `children` is left
+// untouched (the caller emits a generic Array instead).
+//
+// Two-phase to avoid touching values twice: phase 1 verifies shape
+// against the first object's key block by reference; phase 2 moves
+// values out only after confirmation.
+static std::optional<RowArray> try_lift_to_row_array(std::vector<Value>& children) {
+   if (children.empty()) return std::nullopt;
+   const auto* first = std::get_if<Object>(&children[0]);
+   if (!first || !first->body || first->body->entries.empty()) return std::nullopt;
+
+   const auto& proto = first->body->entries;
+   for (std::size_t i = 1; i < children.size(); ++i) {
+      const auto* obj = std::get_if<Object>(&children[i]);
+      if (!obj || !obj->body) return std::nullopt;
+      const auto& entries = obj->body->entries;
+      if (entries.size() != proto.size()) return std::nullopt;
+      for (std::size_t j = 0; j < entries.size(); ++j) {
+         if (entries[j].first != proto[j].first) return std::nullopt;
+      }
+   }
+
+   std::vector<std::string> keys;
+   keys.reserve(proto.size());
+   for (const auto& [k, _v] : proto) keys.push_back(k);
+
+   std::vector<std::vector<Value>> rows;
+   rows.reserve(children.size());
+   for (auto& c : children) {
+      auto* obj = std::get_if<Object>(&c);
+      std::vector<Value> row;
+      row.reserve(keys.size());
+      for (auto& [_k, val] : obj->body->entries) row.push_back(std::move(val));
+      rows.push_back(std::move(row));
+   }
+   return make_row_array(std::move(keys), std::move(rows));
+}
+
 static Value from_json_node(const JNode& n) {
    if (std::holds_alternative<std::nullptr_t>(n.v)) return Null{};
    if (auto* b = std::get_if<bool>(&n.v)) return Bool{*b};
@@ -2521,100 +2587,20 @@ static Value from_json_node(const JNode& n) {
       std::vector<Value> children;
       children.reserve(arr->size());
       for (const auto& c : *arr) children.push_back(from_json_node(c));
-      // §5.2.1.5 / RA-003: lift homogeneous array-of-object to row_array.
-      if (!children.empty()) {
-         std::vector<std::string> first_keys;
-         bool homogeneous = true;
-         for (std::size_t i = 0; i < children.size(); ++i) {
-            const auto* obj = std::get_if<Object>(&children[i]);
-            if (!obj || !obj->body) { homogeneous = false; break; }
-            const auto& entries = obj->body->entries;
-            if (i == 0) {
-               if (entries.empty()) { homogeneous = false; break; }
-               first_keys.reserve(entries.size());
-               for (const auto& [k, _v] : entries) first_keys.push_back(k);
-            } else {
-               if (entries.size() != first_keys.size()) { homogeneous = false; break; }
-               for (std::size_t j = 0; j < entries.size(); ++j) {
-                  if (entries[j].first != first_keys[j]) {
-                     homogeneous = false; break;
-                  }
-               }
-               if (!homogeneous) break;
-            }
-         }
-         if (homogeneous) {
-            std::vector<std::vector<Value>> rows;
-            rows.reserve(children.size());
-            for (auto& c : children) {
-               auto* obj = std::get_if<Object>(&c);
-               std::vector<Value> row;
-               row.reserve(first_keys.size());
-               for (auto& [_k, val] : obj->body->entries) {
-                  row.push_back(std::move(val));
-               }
-               rows.push_back(std::move(row));
-            }
-            return make_row_array(std::move(first_keys), std::move(rows));
-         }
-      }
+      if (auto lifted = try_lift_to_row_array(children)) return *lifted;
       return make_array(std::move(children));
    }
    if (auto* obj = std::get_if<JObject>(&n.v)) {
-      // §4.11 envelope detection: a sole-key object {"__pjson_ext": {...}}
-      // round-trips back into an Extension.
-      if (obj->size() == 1 && (*obj)[0].first == "__pjson_ext") {
-         const JNode& inner = (*obj)[0].second;
-         if (auto* iobj = std::get_if<JObject>(&inner.v)) {
-            std::optional<std::int64_t> sub;
-            std::optional<std::string>  b64;
-            for (const auto& [ik, iv] : *iobj) {
-               if (ik == "subtype") {
-                  if (auto* p = std::get_if<std::int64_t>(&iv.v)) sub = *p;
-               } else if (ik == "bytes_b64") {
-                  if (auto* p = std::get_if<std::string>(&iv.v)) b64 = *p;
-               }
-            }
-            if (sub && b64 && *sub >= 0 && *sub <= 15) {
-               Extension e;
-               e.subtype = static_cast<std::uint8_t>(*sub);
-               e.bytes   = b64_decode(*b64);
-               return e;
-            }
-         }
-      }
+      if (auto ext = try_extension_envelope(*obj)) return *ext;
+
       std::vector<std::pair<std::string, Value>> entries;
       entries.reserve(obj->size());
       for (const auto& [k, v] : *obj) {
-         // §7.4 / J-013: a key ending in a suffix-vocabulary term tells
-         // the ingress to treat the JSON string value as opaque binary
-         // with the matching encoding hint. Suffix is preserved on key.
-         std::optional<std::uint8_t> hint;
-         if      (k.ends_with(".b64"))    hint = 0;
-         else if (k.ends_with(".hex"))    hint = 1;
-         else if (k.ends_with(".base58")) hint = 2;
-         else if (k.ends_with(".b64u"))   hint = 3;
-         if (hint.has_value()) {
-            if (auto* s = std::get_if<std::string>(&v.v)) {
-               try {
-                  std::vector<std::uint8_t> raw;
-                  switch (*hint) {
-                     case 0: raw = b64_decode(*s); break;
-                     case 1: raw = parse_hex(*s); break;
-                     case 2: raw = base58_decode(*s); break;
-                     case 3: raw = b64url_decode(*s); break;
-                  }
-                  Bytes b;
-                  b.encoding_hint = *hint;
-                  b.content = std::move(raw);
-                  entries.emplace_back(k, std::move(b));
-                  continue;
-               } catch (...) {
-                  // Decode failed — fall through to plain string mapping.
-               }
-            }
+         if (auto bytes = try_bytes_from_suffix_keyed_value(k, v)) {
+            entries.emplace_back(k, std::move(*bytes));
+         } else {
+            entries.emplace_back(k, from_json_node(v));
          }
-         entries.emplace_back(k, from_json_node(v));
       }
       return make_object(std::move(entries));
    }
