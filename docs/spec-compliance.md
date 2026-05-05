@@ -144,14 +144,14 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | D-004 | varscale 3-byte form | ✅ | ✅ corpus `decimal_large_scale_3byte` (scale 8192) | ✅ | ✅ `varscale_encode_decode_round_trip` + corpus `decimal_large_scale_3byte` |
 | D-005 | varscale 4-byte form | ✅ | ✅ corpus `decimal_large_scale_4byte` (scale 2097152) | ✅ | ✅ corpus `decimal_large_scale_4byte` |
 | D-006 | varscale: encoder uses smallest byte count that fits | ✅ | ✅ corpus tests covers all four tiers | ✅ | ✅ `varscale_encode_decode_round_trip` (transitions at 32, 8192, etc.) |
-| D-007 | decimal-vs-ieee_float encoder rule (§4.7.2): pick decimal when strictly shorter, else smallest bit-exact ieee width | ❌ | ❌ | ❌ encoder does not yet pick between decimal and ieee | ❌ |
+| D-007 | decimal-vs-ieee_float encoder rule (§4.7.2): pick decimal when strictly shorter, else smallest bit-exact ieee width | ✅ via `decimal_or_ieee_pick` on JSON ingress | ✅ corpus `json_ingress_fractional_picker` (1.5 → ieee f16 on tie) + `json_ingress_fractional_picks_decimal` (0.1 → decimal, ieee can't represent) | ✅ same | ✅ same |
 
 ## §4.8 — `numeric_string`
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
 | NS-001 | encode wraps a numeric inner value at code 8 (low nibble = 0) | ✅ | ✅ corpus `numeric_string_*` | ✅ | ✅ `numeric_string_round_trip` + corpus |
-| NS-002 | decode exposes both `as_<numeric>()` and `as_string()` projections | ✅ structural decode preserves inner; `as_string()` is JSON render output | ⚠️ no dedicated dual-projection API in driver — corpus checks JSON form only | ✅ same | ⚠️ |
+| NS-002 | decode exposes both `as_<numeric>()` and `as_string()` projections | ✅ via `numeric_string_as_numeric` / `numeric_string_as_string` helpers | ✅ Rust unit `numeric_string_dual_projection` | ✅ same | ✅ same |
 | NS-003 | encoder lifts JSON string when grammar matches AND `canonical_decimal(parse(s)) == s`, regardless of byte savings | ✅ via `from_json` + `parse_canonical_json_number_string` | ✅ corpus `lift_canonical_int` + `lift_canonical_decimal` | ✅ same | ✅ `json_ingress_numeric_string_lift_rule` + corpus |
 | NS-004 | encoder leaves non-canonical numeric strings (`"01"`, `"1.5e10"`) as plain `string` | ✅ canonical-form check rejects non-canonical | ✅ corpus `no_lift_leading_zero` + `no_lift_sci_notation` | ✅ same | ✅ same |
 | NS-005 | reject inner tag whose code is not in {2..7} | ✅ | ✅ corpus `numeric_string_inner_bool_rejected` + `numeric_string_inner_string_rejected` | ✅ | ✅ `numeric_string_round_trip` + corpus |
@@ -236,8 +236,8 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
 | RA-001 | encode row_array: tag `0xC1`, shared key block, per-record body | ✅ | ✅ corpus `row_array_*` | ✅ | ✅ `row_array_round_trip` + corpus |
-| RA-002 | decode random-access by `(record_index, key)` | ✅ via decode + key index | ⚠️ corpus exercises full decode; no dedicated random-access fixture | ✅ | ⚠️ same |
-| RA-003 | encoder rule: pick row_array when wire size beats N×generic-object | ⚠️ encoder accepts row_array when supplied via DSL; auto-detection from generic input is Phase 3 | ⚠️ | ⚠️ same | ⚠️ |
+| RA-002 | decode random-access by `(record_index, key)` | ✅ via `row_array_get(v, i, key)` accessor | ✅ Rust unit `row_array_random_access_by_record_and_key` | ✅ same | ✅ same |
+| RA-003 | encoder rule: pick row_array when wire size beats N×generic-object | ✅ via `detect_row_array_shape` on JSON ingress | ✅ corpus `json_ingress_array_of_object_lifts_to_row_array` (homogeneous-shape detection in both ingresses) | ✅ same | ✅ same |
 
 ### §5.3–5.4 — Hash & long-key escape
 
@@ -267,7 +267,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | J-004 | JSON integer in −15..−1 ↔ `nint_inline` | ✅ | ✅ corpus `json_ingress_nint_inline` | ✅ | ✅ same |
 | J-005 | JSON integer ≥ 16 ↔ `uint` | ✅ | ✅ corpus `json_ingress_uint` | ✅ | ✅ same |
 | J-006 | JSON integer ≤ −16 ↔ `negint` | ✅ | ✅ corpus `json_ingress_negint` | ✅ | ✅ same |
-| J-007 | JSON fractional/exponent ↔ `decimal` (when shortest) or `ieee_float` | ❌ pending D-007 picker | ❌ | ❌ pending D-007 picker | ❌ |
+| J-007 | JSON fractional/exponent ↔ `decimal` (when shortest) or `ieee_float` | ✅ via D-007 picker | ✅ corpus `json_ingress_fractional_picker` + `json_ingress_fractional_picks_decimal` | ✅ same | ✅ same |
 | J-008 | JSON numeric-form string with canonical match ↔ `numeric_string` | ✅ | ✅ corpus `lift_canonical_int` + `lift_canonical_decimal` | ✅ | ✅ same |
 | J-009 | JSON non-canonical/non-numeric string ↔ `string` | ✅ | ✅ corpus `no_lift_leading_zero` + `no_lift_sci_notation` | ✅ | ✅ same |
 | J-010 | JSON array ↔ `array` (generic for heterogeneous; typed for homogeneous primitive) | ✅ generic only; typed-array auto-detection is Phase 4.3 | ✅ corpus `json_ingress_array` (generic path) | ✅ | ✅ same |
@@ -314,7 +314,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | E-007 | slot offset ≥ value_data_size | ✅ same as AG-005 | ✅ corpus `array_slot_oob_rejected` | ✅ | ✅ same |
 | E-008 | slot offsets non-monotone | ✅ same as AG-004 | ✅ corpus `array_slot_non_monotonic_rejected` | ✅ | ✅ same |
 | E-009 | hash[i] ≠ key_hash8(stored_key_i) | ✅ same as O-006 | ✅ corpus `object_hash_mismatch_rejected` | ✅ | ✅ same |
-| E-010 | varscale / long-key varuint claims length past buffer | ⚠️ | ⚠️ | ⚠️ varscale truncation detected; long-key path not yet | ⚠️ |
+| E-010 | varscale / long-key varuint claims length past buffer | ✅ varscale + long-key paths both bounds-checked | ✅ Rust unit `long_key_varuint_truncation_rejected` (also covered by varscale truncation in `decimal_round_trip` rejects) | ✅ same | ✅ same |
 | E-011 | `numeric_string` inner tag's code not in {2..7} | ✅ | ✅ corpus `numeric_string_inner_*_rejected` | ✅ | ✅ same |
 | E-012 | `ieee_float` width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_zero_reserved` | ✅ | ✅ `ieee_float_bad_width_rejected` |
 
@@ -331,11 +331,11 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
 | C-001 | integer canonical: smallest tag form (uint_inline / nint_inline / uint / negint smallest bc) | ✅ | ✅ corpus `uint_inline_*` + `uint_*` + `nint_inline_*` + `negint_*` (encoder picks smallest) | ✅ | ✅ Rust unit `integer_canonical_smallest_tag_form` exhaustively asserts the table |
-| C-002 | float canonical: smallest bit-exact width; decimal preferred only when strictly shorter | ❌ | ❌ | ❌ | ❌ |
+| C-002 | float canonical: smallest bit-exact width; decimal preferred only when strictly shorter | ✅ via `canonical_float_width` (binary16/32/64/128 narrowing) + D-007 picker | ✅ Rust unit `float_canonical_smallest_width` + `validate_canonical_round_trip` | ✅ same | ✅ same |
 | C-003 | NaN canonical bit pattern (§15.2.1) at every width | ✅ via `canonicalize_nan_bits` rewrite at encode | ✅ corpus `canonical_nan_{f16,f32,f64,f128}` | ✅ same | ✅ Rust unit `nan_canonicalized_on_encode` exercises non-canonical → canonical at all 4 widths |
 | C-004 | strings: `escape_form` from JSON source preserved byte-for-byte | ✅ | ✅ corpus `string_escape_form_hello` (round-trip preserves encoding_flag and content bytes) | ✅ | ✅ same |
 | C-005 | field encounter order preserved (not sorted) | ✅ structural | ✅ corpus `object_*` round-trip preserves order | ✅ | ✅ Rust unit `object_field_encounter_order_preserved` |
-| C-006 | strict-canonical validator rejects non-canonical encodings | ❌ | ❌ | ❌ | ❌ |
+| C-006 | strict-canonical validator rejects non-canonical encodings | ✅ via `validate_canonical(wire)` (decode + canonicalize + re-encode + compare) | ✅ Rust unit `validate_canonical_round_trip` | ✅ same | ✅ same |
 
 ## §14 — Conformance corpus
 

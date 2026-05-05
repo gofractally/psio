@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_array_of_object_lifts_to_row_array",
+  "spec_ref": "section 5.2.1.5 / RA-003",
+  "rule_ids": ["RA-003"],
+  "description": "JSON ingress: a homogeneous array of objects (all with the same keys in the same order) lifts to row_array per §5.2.1.5. The shared key block lives once at the array level. Source [{a:1,b:2},{a:3,b:4}] wire begins with tag 0xC1 (row_array) — not 0xB0 (generic array).",
+  "input_json": "[{\"a\":1,\"b\":2},{\"a\":3,\"b\":4}]",
+  "wire_hex": "c1000200000001010000011f3f6162212200012324000100040200",
+  "json_compact": "[{\"a\":1,\"b\":2},{\"a\":3,\"b\":4}]",
+  "must_round_trip": true,
+  "must_validate": true
+}

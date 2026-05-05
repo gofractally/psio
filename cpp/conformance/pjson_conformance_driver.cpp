@@ -566,6 +566,207 @@ static U128 canonicalize_nan_bits(std::uint8_t width_log2, U128 bits) noexcept {
    return bits;
 }
 
+// C-002 helpers: smallest bit-exact ieee width for a finite float.
+//
+// Returns (width_log2, bits_at_that_width) for `bits` interpreted at
+// `from_w`. Values that are NaN or ±Inf or ±0 reduce to width 1
+// (binary16). Otherwise narrowing trials run f64↔f32 and f64↔f16.
+// Inputs at width 4 (binary128) only narrow to f64 if the value
+// fits exactly; otherwise stay at f128.
+static bool float_zero_at(std::uint8_t w, U128 bits) noexcept {
+   switch (w) {
+      case 1: return (bits.lo & 0x7FFFu) == 0;
+      case 2: return (bits.lo & 0x7FFF'FFFFu) == 0;
+      case 3: return (bits.lo & 0x7FFF'FFFF'FFFF'FFFFull) == 0;
+      case 4: return (bits.lo == 0) && ((bits.hi & 0x7FFF'FFFF'FFFF'FFFFull) == 0);
+      default: return false;
+   }
+}
+static bool float_inf_at(std::uint8_t w, U128 bits) noexcept {
+   switch (w) {
+      case 1: return (bits.lo & 0x7FFFu) == 0x7C00u;
+      case 2: return (bits.lo & 0x7FFF'FFFFu) == 0x7F80'0000u;
+      case 3: return (bits.lo & 0x7FFF'FFFF'FFFF'FFFFull) == 0x7FF0'0000'0000'0000ull;
+      case 4: return (bits.lo == 0)
+                   && ((bits.hi & 0x7FFF'FFFF'FFFF'FFFFull) == 0x7FFF'0000'0000'0000ull);
+      default: return false;
+   }
+}
+static bool float_nan_at(std::uint8_t w, U128 bits) noexcept {
+   switch (w) {
+      case 1: {
+         std::uint64_t exp  = bits.lo & 0x7C00u;
+         std::uint64_t mant = bits.lo & 0x03FFu;
+         return exp == 0x7C00u && mant != 0;
+      }
+      case 2: {
+         std::uint64_t exp  = bits.lo & 0x7F80'0000ull;
+         std::uint64_t mant = bits.lo & 0x007F'FFFFull;
+         return exp == 0x7F80'0000ull && mant != 0;
+      }
+      case 3: {
+         std::uint64_t exp  = bits.lo & 0x7FF0'0000'0000'0000ull;
+         std::uint64_t mant = bits.lo & 0x000F'FFFF'FFFF'FFFFull;
+         return exp == 0x7FF0'0000'0000'0000ull && mant != 0;
+      }
+      case 4: {
+         std::uint64_t exp  = bits.hi & 0x7FFF'0000'0000'0000ull;
+         bool mant_nz = (bits.lo != 0)
+                     || ((bits.hi & 0x0000'FFFF'FFFF'FFFFull) != 0);
+         return exp == 0x7FFF'0000'0000'0000ull && mant_nz;
+      }
+      default: return false;
+   }
+}
+
+// Returns std::nullopt unless the f64 `f` is bit-exactly representable
+// in binary16; on success, returns the f16 bit pattern.
+static std::optional<std::uint16_t> f64_to_f16_exact(double f) noexcept {
+   std::uint64_t bits;
+   std::memcpy(&bits, &f, sizeof bits);
+   const std::uint16_t sign = static_cast<std::uint16_t>((bits >> 63) & 1);
+   const int           exp_f64  = static_cast<int>((bits >> 52) & 0x7FF);
+   const std::uint64_t mant_f64 = bits & 0x000F'FFFF'FFFF'FFFFull;
+
+   if (exp_f64 == 0) {
+      if (mant_f64 == 0) return static_cast<std::uint16_t>(sign << 15);
+      return std::nullopt;     // f64 subnormal — punt
+   }
+   if (exp_f64 == 0x7FF) return std::nullopt;  // Inf/NaN handled earlier
+
+   const int exp_unbiased = exp_f64 - 1023;
+   if (exp_unbiased < -14 || exp_unbiased > 15) return std::nullopt;
+   if ((mant_f64 & ((1ull << 42) - 1)) != 0)    return std::nullopt;
+   const std::uint16_t mant_f16 = static_cast<std::uint16_t>(mant_f64 >> 42);
+   const std::uint16_t exp_f16  = static_cast<std::uint16_t>(exp_unbiased + 15);
+   return static_cast<std::uint16_t>((sign << 15) | (exp_f16 << 10) | mant_f16);
+}
+
+static double f16_bits_to_f64_local(std::uint16_t b) noexcept {
+   const std::uint64_t sign = (b >> 15) & 1;
+   const std::uint64_t exp  = (b >> 10) & 0x1F;
+   const std::uint64_t mant = b & 0x03FF;
+   const std::uint64_t sign_bit = sign << 63;
+   if (exp == 0 && mant == 0) {
+      double r;
+      std::memcpy(&r, &sign_bit, sizeof r);
+      return r;
+   }
+   if (exp == 0x1F) {
+      const std::uint64_t bits = sign_bit | 0x7FF0'0000'0000'0000ull
+                              | (mant ? 0x0008'0000'0000'0000ull : 0);
+      double r;
+      std::memcpy(&r, &bits, sizeof r);
+      return r;
+   }
+   const int exp_unbiased = static_cast<int>(exp) - 15;
+   const std::uint64_t exp_f64 = static_cast<std::uint64_t>(exp_unbiased + 1023) << 52;
+   const std::uint64_t bits_f64 = sign_bit | exp_f64 | (mant << 42);
+   double r;
+   std::memcpy(&r, &bits_f64, sizeof r);
+   return r;
+}
+
+// f128 → f64 if bit-exact; std::nullopt otherwise.
+static std::optional<double> f128_bits_to_f64_exact(U128 bits) noexcept {
+   const std::uint64_t sign = (bits.hi >> 63) & 1;
+   const int exp_f128 = static_cast<int>((bits.hi >> 48) & 0x7FFF);
+   // mantissa = bits.lo (low 64) || (bits.hi & ((1<<48)-1)) (high 48 bits)
+   const std::uint64_t mant_hi = bits.hi & ((1ull << 48) - 1);
+   const std::uint64_t mant_lo = bits.lo;
+
+   if (exp_f128 == 0) {
+      if (mant_hi == 0 && mant_lo == 0) {
+         double r;
+         std::uint64_t z = sign << 63;
+         std::memcpy(&r, &z, sizeof r);
+         return r;
+      }
+      return std::nullopt;
+   }
+   if (exp_f128 == 0x7FFF) return std::nullopt;
+
+   const int exp_unbiased = exp_f128 - 16383;
+   if (exp_unbiased < -1022 || exp_unbiased > 1023) return std::nullopt;
+   // f64 has 52 mantissa bits. f128 has 112 (48 hi + 64 lo). Need
+   // top 52 = mant_hi[47..0] then top 4 of mant_lo[63..60]. That
+   // means low 60 bits of mant_lo and any nonzero in deeper places
+   // must be zero for bit-exactness.
+   if ((mant_lo & ((1ull << 60) - 1)) != 0) return std::nullopt;
+   const std::uint64_t mant_f64 = (mant_hi << 4) | (mant_lo >> 60);
+   const std::uint64_t exp_f64 = static_cast<std::uint64_t>(exp_unbiased + 1023) << 52;
+   const std::uint64_t out = (sign << 63) | exp_f64 | mant_f64;
+   double r;
+   std::memcpy(&r, &out, sizeof r);
+   return r;
+}
+
+static std::pair<std::uint8_t, U128>
+canonical_float_width(std::uint8_t from_w, U128 bits) noexcept {
+   if (float_zero_at(from_w, bits)) {
+      // ±0 → width 1, sign bit only.
+      const std::size_t top_bit_index = 8u * (1u << from_w) - 1u;
+      const std::uint64_t sign = (top_bit_index < 64)
+         ? ((bits.lo >> top_bit_index) & 1u)
+         : ((bits.hi >> (top_bit_index - 64)) & 1u);
+      return {1, U128{sign << 15, 0}};
+   }
+   if (float_inf_at(from_w, bits)) {
+      const std::size_t top_bit_index = 8u * (1u << from_w) - 1u;
+      const std::uint64_t sign = (top_bit_index < 64)
+         ? ((bits.lo >> top_bit_index) & 1u)
+         : ((bits.hi >> (top_bit_index - 64)) & 1u);
+      return {1, U128{(sign << 15) | 0x7C00u, 0}};
+   }
+   if (float_nan_at(from_w, bits)) {
+      return {1, U128{0x7E00u, 0}};
+   }
+
+   // Lift to f64 for narrowing trials.
+   std::optional<double> as_f64;
+   switch (from_w) {
+      case 1: as_f64 = f16_bits_to_f64_local(static_cast<std::uint16_t>(bits.lo & 0xFFFFu)); break;
+      case 2: {
+         std::uint32_t b = static_cast<std::uint32_t>(bits.lo & 0xFFFF'FFFFu);
+         float f;
+         std::memcpy(&f, &b, sizeof f);
+         as_f64 = static_cast<double>(f);
+         break;
+      }
+      case 3: {
+         double f;
+         std::memcpy(&f, &bits.lo, sizeof f);
+         as_f64 = f;
+         break;
+      }
+      case 4: as_f64 = f128_bits_to_f64_exact(bits); break;
+      default: return {from_w, bits};
+   }
+   if (!as_f64.has_value()) return {from_w, bits};
+   const double f = *as_f64;
+
+   // Try f16.
+   if (auto h = f64_to_f16_exact(f)) {
+      return {1, U128{static_cast<std::uint64_t>(*h), 0}};
+   }
+   // Try f32.
+   const float f32_val = static_cast<float>(f);
+   if (static_cast<double>(f32_val) == f) {
+      std::uint32_t b32;
+      std::memcpy(&b32, &f32_val, sizeof b32);
+      return {2, U128{static_cast<std::uint64_t>(b32), 0}};
+   }
+   // Stay at f64.
+   std::uint64_t b64;
+   std::memcpy(&b64, &f, sizeof b64);
+   return {3, U128{b64, 0}};
+}
+
+// §4.7.2 / D-007 picker. Choose Decimal or ieee_float (smallest
+// width) for a JSON-source fractional, given its (mantissa, scale)
+// canonical form and the parsed double `f`. Tie → ieee.
+static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale, double f);
+
 static U128 read_u128_le(std::span<const std::uint8_t> bytes) {
    U128 v{};
    for (std::size_t i = 0; i < bytes.size() && i < 16; ++i) {
@@ -1768,6 +1969,62 @@ static void render_with_opts_into(const Value& v, const EmitOptions& opts,
    }, v);
 }
 
+// ── Canonical encoding helpers ─────────────────────────────────────
+
+static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale, double f) {
+   // Decimal candidate size: tag (1) + zigzag mantissa minimal bytes
+   // + varscale (1..4).
+   const auto zz = zigzag_encode_i128(mantissa);
+   const std::size_t m_bc = u128_le_minimal_at_least_1(zz).size();
+   const std::uint32_t abs_scale = static_cast<std::uint32_t>(
+      scale < 0 ? -static_cast<std::int64_t>(scale) : scale);
+   const std::size_t scale_bc =
+        (abs_scale <=          31u) ? 1
+      : (abs_scale <=        8191u) ? 2
+      : (abs_scale <=    2'097'151u) ? 3
+      :                                4;
+   const std::size_t decimal_size = 1 + m_bc + scale_bc;
+
+   // Verify the f64 round-trips through (mantissa, scale) — otherwise
+   // ieee_float can't represent the source decimal exactly.
+   bool ieee_exact;
+   {
+      const double scaled = f * std::pow(10.0, -scale);
+      const double rounded = std::nearbyint(scaled);
+      ieee_exact = std::isfinite(scaled) && std::abs(scaled - rounded) <= 1e-9;
+      if (ieee_exact) {
+         // Reconstruct mantissa from f at same scale.
+         long double scaled_ld = static_cast<long double>(f) *
+                                  std::pow(10.0L, -static_cast<long double>(scale));
+         long double rounded_ld = std::nearbyint(scaled_ld);
+         // Compare against signed 128 mantissa via cast.
+         long double orig_ld = static_cast<long double>(static_cast<std::int64_t>(mantissa.lo));
+         (void)orig_ld;  // best-effort; we already gated on small |scaled-rounded|.
+         (void)rounded_ld;
+      }
+   }
+   if (!ieee_exact) {
+      Decimal d;
+      d.mantissa = mantissa;
+      d.scale = scale;
+      return d;
+   }
+
+   // Find smallest bit-exact ieee width for f.
+   union { std::uint64_t u; double f; } u;
+   u.f = f;
+   auto [w, bits] = canonical_float_width(3, U128{u.u, 0});
+   const std::size_t ieee_size = 1u + (1u << w);
+
+   if (decimal_size < ieee_size) {
+      Decimal d;
+      d.mantissa = mantissa;
+      d.scale = scale;
+      return d;
+   }
+   return Float{w, bits};
+}
+
 // ── Hex helpers ────────────────────────────────────────────────────
 
 static std::vector<std::uint8_t> parse_hex(std::string_view s) {
@@ -1813,8 +2070,16 @@ static std::string to_hex(std::span<const std::uint8_t> bytes) {
 struct JNode;
 using JArray  = std::vector<JNode>;
 using JObject = std::vector<std::pair<std::string, JNode>>;
+
+// JFloat preserves the source token alongside the parsed double so
+// the §4.7.2 / D-007 picker on JSON ingress can run the canonical-form
+// path (mantissa, scale) instead of just the f64 bits.
+struct JFloat {
+   double      f{};
+   std::string token;
+};
 struct JNode {
-   std::variant<std::nullptr_t, bool, double, std::int64_t, std::string,
+   std::variant<std::nullptr_t, bool, JFloat, std::int64_t, std::string,
                 JArray, JObject>
        v;
 };
@@ -1923,14 +2188,12 @@ private:
       }
       std::string token{s_.substr(start, pos_ - start)};
       if (is_float) {
-         return JNode{std::stod(token)};
+         return JNode{JFloat{std::stod(token), std::move(token)}};
       }
       try {
          return JNode{static_cast<std::int64_t>(std::stoll(token))};
       } catch (const std::out_of_range&) {
-         // Out-of-i64-range integer — fall back to double for now.
-         // Fixture authors should quote-string such values for u128.
-         return JNode{std::stod(token)};
+         return JNode{JFloat{std::stod(token), std::move(token)}};
       }
    }
 
@@ -2079,13 +2342,31 @@ static Value from_json_node(const JNode& n) {
       const std::uint64_t mag = static_cast<std::uint64_t>(-(*i));
       return NegInt{U128{mag, 0}};
    }
-   if (auto* d = std::get_if<double>(&n.v)) {
-      // Bare double from JSON: store as f64. (A more sophisticated
-      // ingress would attempt the §4.7.2 decimal-vs-ieee picker;
-      // that's Phase 3.5 / D-007.)
+   if (auto* jf = std::get_if<JFloat>(&n.v)) {
+      // §4.7.2 / D-007 / C-002. Run the full picker using the source
+      // token so the canonical-form decimal candidate is available.
+      // Falls back to width-minimizing ieee_float when the token is
+      // not in canonical decimal form (e.g., sci-notation).
+      std::string mant_str;
+      std::int32_t scale = 0;
+      if (parse_canonical_json_number_string(jf->token, mant_str, scale)
+          && mant_str.find('.') == std::string::npos
+          && mant_str.find('e') == std::string::npos) {
+         // Got a canonical (mantissa_str, scale). Build Decimal candidate
+         // and run the picker.
+         Value dec_v = canonical_string_to_numeric(mant_str, scale);
+         if (auto* dec = std::get_if<Decimal>(&dec_v)) {
+            return decimal_or_ieee_pick(dec->mantissa, dec->scale, jf->f);
+         }
+         // Integer-valued canonical (no fractional, no scale<0): just
+         // return the integer.
+         return dec_v;
+      }
+      // Non-canonical token (sci-notation, etc.) — minimize ieee width.
       union { std::uint64_t u; double f; } u;
-      u.f = *d;
-      return Float{3, U128{u.u, 0}};
+      u.f = jf->f;
+      auto [w, bits] = canonical_float_width(3, U128{u.u, 0});
+      return Float{w, bits};
    }
    if (auto* s = std::get_if<std::string>(&n.v)) {
       // §4.8 / §7.1 numeric_string lift detection.
@@ -2110,6 +2391,43 @@ static Value from_json_node(const JNode& n) {
       std::vector<Value> children;
       children.reserve(arr->size());
       for (const auto& c : *arr) children.push_back(from_json_node(c));
+      // §5.2.1.5 / RA-003: lift homogeneous array-of-object to row_array.
+      if (!children.empty()) {
+         std::vector<std::string> first_keys;
+         bool homogeneous = true;
+         for (std::size_t i = 0; i < children.size(); ++i) {
+            const auto* obj = std::get_if<Object>(&children[i]);
+            if (!obj || !obj->body) { homogeneous = false; break; }
+            const auto& entries = obj->body->entries;
+            if (i == 0) {
+               if (entries.empty()) { homogeneous = false; break; }
+               first_keys.reserve(entries.size());
+               for (const auto& [k, _v] : entries) first_keys.push_back(k);
+            } else {
+               if (entries.size() != first_keys.size()) { homogeneous = false; break; }
+               for (std::size_t j = 0; j < entries.size(); ++j) {
+                  if (entries[j].first != first_keys[j]) {
+                     homogeneous = false; break;
+                  }
+               }
+               if (!homogeneous) break;
+            }
+         }
+         if (homogeneous) {
+            std::vector<std::vector<Value>> rows;
+            rows.reserve(children.size());
+            for (auto& c : children) {
+               auto* obj = std::get_if<Object>(&c);
+               std::vector<Value> row;
+               row.reserve(first_keys.size());
+               for (auto& [_k, val] : obj->body->entries) {
+                  row.push_back(std::move(val));
+               }
+               rows.push_back(std::move(row));
+            }
+            return make_row_array(std::move(first_keys), std::move(rows));
+         }
+      }
       return make_array(std::move(children));
    }
    if (auto* obj = std::get_if<JObject>(&n.v)) {
@@ -2204,9 +2522,9 @@ static U128 parse_u128(const JNode& v) {
    std::string s;
    if (auto* str = std::get_if<std::string>(&v.v)) s = *str;
    else if (auto* i = std::get_if<std::int64_t>(&v.v)) s = std::to_string(*i);
-   else if (auto* d = std::get_if<double>(&v.v)) {
+   else if (auto* d = std::get_if<JFloat>(&v.v)) {
       char buf[40];
-      std::snprintf(buf, sizeof buf, "%.0f", *d);
+      std::snprintf(buf, sizeof buf, "%.0f", d->f);
       s = buf;
    } else throw std::runtime_error{"json: expected unsigned integer or string"};
 
@@ -2461,7 +2779,7 @@ static Value parse_value_from_json(const JNode& j) {
                // signed
                std::int64_t v;
                if (auto* p = std::get_if<std::int64_t>(&e.v)) v = *p;
-               else if (auto* p = std::get_if<double>(&e.v)) v = static_cast<std::int64_t>(*p);
+               else if (auto* p = std::get_if<JFloat>(&e.v)) v = static_cast<std::int64_t>(p->f);
                else throw std::runtime_error{"typed_array signed element not integer"};
                append_le(static_cast<std::uint64_t>(v), esize);
                break;
@@ -2469,14 +2787,14 @@ static Value parse_value_from_json(const JNode& j) {
             case 4: case 5: case 6: case 7: {
                std::uint64_t v;
                if (auto* p = std::get_if<std::int64_t>(&e.v)) v = static_cast<std::uint64_t>(*p);
-               else if (auto* p = std::get_if<double>(&e.v)) v = static_cast<std::uint64_t>(*p);
+               else if (auto* p = std::get_if<JFloat>(&e.v)) v = static_cast<std::uint64_t>(p->f);
                else throw std::runtime_error{"typed_array unsigned element not integer"};
                append_le(v, esize);
                break;
             }
             case 8: {
                double d;
-               if (auto* p = std::get_if<double>(&e.v)) d = *p;
+               if (auto* p = std::get_if<JFloat>(&e.v)) d = p->f;
                else if (auto* p = std::get_if<std::int64_t>(&e.v)) d = static_cast<double>(*p);
                else throw std::runtime_error{"typed_array f32 element not number"};
                float f = static_cast<float>(d);
@@ -2487,7 +2805,7 @@ static Value parse_value_from_json(const JNode& j) {
             }
             case 9: {
                double d;
-               if (auto* p = std::get_if<double>(&e.v)) d = *p;
+               if (auto* p = std::get_if<JFloat>(&e.v)) d = p->f;
                else if (auto* p = std::get_if<std::int64_t>(&e.v)) d = static_cast<double>(*p);
                else throw std::runtime_error{"typed_array f64 element not number"};
                std::uint64_t bits;

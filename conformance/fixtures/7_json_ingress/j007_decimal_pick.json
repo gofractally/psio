@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_fractional_picks_decimal",
+  "spec_ref": "section 4.7.2 / D-007",
+  "rule_ids": ["J-007", "D-007"],
+  "description": "JSON 0.1 has no exact ieee_float representation, so the §4.7.2 picker must select the decimal form regardless of byte size. Decimal(1, -1) wire: 0x70 + zigzag(1)=0x02 + varscale(-1)=0x01.",
+  "input_json": "0.1",
+  "wire_hex": "700201",
+  "json_compact": "0.1",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -205,20 +205,22 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
         serde_json::Value::Bool(b) => Value::Bool(*b),
         serde_json::Value::Number(n) => {
             // Use the source token string to preserve "1.5" vs "1" exactly.
-            // (The arbitrary_precision feature on serde_json gives us as_str().)
-            // arbitrary_precision feature gives us the source token as &str.
             let token: &str = n.as_str();
-            // Try canonical-form parse first (handles ints + decimals).
             if let Some(val) = parse_canonical_json_number_string(token) {
+                // D-007: for a fractional (Decimal) result, apply the
+                // §4.7.2 picker to choose between decimal and ieee_float.
+                if let Value::Decimal { mantissa, scale } = val {
+                    return decimal_or_ieee_pick(mantissa, scale);
+                }
                 return val;
             }
-            // Fall back: must be sci-notation, "1.0", "-0", or out-of-range.
-            // Use serde_json's f64 conversion as the last resort.
+            // Fall back: sci-notation, "1.0", "-0", or out-of-range.
             if let Some(f) = n.as_f64() {
-                Value::Float { width_log2: 3, bits: f.to_bits() as u128 }
+                // No exact decimal source token — encode through the
+                // ieee path with width minimization (C-002).
+                let (w, b) = canonical_float_width(3, f.to_bits() as u128);
+                Value::Float { width_log2: w, bits: b }
             } else {
-                // Out-of-i128 large integer — represent as decimal? For now
-                // keep as-is via a 0-mantissa decimal (will likely never trigger).
                 Value::Decimal { mantissa: 0, scale: 0 }
             }
         }
@@ -231,7 +233,15 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
             }
         }
         serde_json::Value::Array(arr) => {
-            Value::Array(arr.iter().map(from_serde_json).collect())
+            let children: Vec<Value> = arr.iter().map(from_serde_json).collect();
+            // §5.2.1.5 / RA-003: detect homogeneous array-of-object.
+            // If every child is an Object and all share the same keys
+            // in the same order, lift to row_array — the shared key
+            // block lives once at the array level.
+            if let Some((keys, rows)) = detect_row_array_shape(&children) {
+                return Value::RowArray { keys, rows };
+            }
+            Value::Array(children)
         }
         serde_json::Value::Object(obj) => {
             // §4.11 envelope round-trip: an object of the exact shape
@@ -373,6 +383,342 @@ enum EncodeError {
     Overflow(&'static str),
     /// Variant not implemented in Phase 1 yet.
     NotImplementedYet(&'static str),
+}
+
+/// RA-003 / §5.2.1.5 — homogeneous-shape detection. Returns
+/// `Some((keys, rows))` if every child is an `Object` and all share
+/// the same key set in the same order. Returns `None` for empty
+/// arrays (a 0-row row_array provides no benefit and decoders
+/// can't infer a key block) or any heterogeneity.
+fn detect_row_array_shape(children: &[Value]) -> Option<(Vec<String>, Vec<Vec<Value>>)> {
+    if children.is_empty() { return None; }
+    // Must all be objects.
+    let first_keys: Vec<String> = match &children[0] {
+        Value::Object(entries) => entries.iter().map(|(k, _)| k.clone()).collect(),
+        _ => return None,
+    };
+    if first_keys.is_empty() { return None; }
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(children.len());
+    for c in children {
+        match c {
+            Value::Object(entries) => {
+                if entries.len() != first_keys.len() { return None; }
+                let mut row: Vec<Value> = Vec::with_capacity(first_keys.len());
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if k != &first_keys[i] { return None; }
+                    row.push(v.clone());
+                }
+                rows.push(row);
+            }
+            _ => return None,
+        }
+    }
+    Some((first_keys, rows))
+}
+
+/// RA-002 — random-access accessor for a `RowArray`. Returns the
+/// value at `(record_index, key)` without materializing the entire
+/// row. Returns None on out-of-range index or unknown key.
+fn row_array_get<'a>(v: &'a Value, record_index: usize, key: &str) -> Option<&'a Value> {
+    if let Value::RowArray { keys, rows } = v {
+        let row = rows.get(record_index)?;
+        let col = keys.iter().position(|k| k == key)?;
+        return row.get(col);
+    }
+    None
+}
+
+/// NS-002 — dual-projection accessors for a numeric_string. Returns
+/// `Some(inner_numeric)` and `Some(canonical_decimal_string)` for a
+/// `Value::NumericString`; `None` for any other variant.
+fn numeric_string_as_numeric(v: &Value) -> Option<&Value> {
+    if let Value::NumericString(inner) = v { Some(inner) } else { None }
+}
+
+fn numeric_string_as_string(v: &Value) -> Option<String> {
+    let inner = numeric_string_as_numeric(v)?;
+    Some(render_json(inner))
+}
+
+/// §4.7.2 / D-007 — decimal-vs-ieee_float picker. Given a JSON
+/// fractional source whose canonical-form (mantissa, scale) decimal
+/// is known, choose the encoding with smaller wire size. On a tie,
+/// prefer ieee_float (faster decode per §15.2 rule 5).
+///
+/// This is invoked **only** on the JSON-ingress path. Typed-decimal
+/// callers (passing `Value::Decimal` directly) keep their
+/// exact-decimal identity per §15.2's typed-source rule.
+fn decimal_or_ieee_pick(mantissa: i128, scale: i32) -> Value {
+    // Decimal wire size: tag (1) + zigzag mantissa minimal bytes
+    // (1..16) + varscale (1..4).
+    let zz = zigzag_encode_i128(mantissa);
+    let m_bc = u128_le_minimal_at_least_1(zz).len();
+    let scale_bc = match scale.unsigned_abs() {
+        0..=31           => 1,
+        32..=8191        => 2,
+        8192..=2_097_151 => 3,
+        _                => 4,
+    };
+    let decimal_size = 1 + m_bc + scale_bc;
+
+    // ieee_float candidate: convert (m, s) to f64, find smallest
+    // bit-exact width.
+    let f = (mantissa as f64) * 10f64.powi(scale);
+    // Verify the f64 round-trips through the (m, s) form, otherwise
+    // ieee can't represent the decimal exactly — use decimal.
+    if !decimal_f64_roundtrips(mantissa, scale, f) {
+        return Value::Decimal { mantissa, scale };
+    }
+    let (w, bits) = canonical_float_width(3, f.to_bits() as u128);
+    let ieee_size = 1 + (1usize << w);
+
+    // Strictly shorter decimal wins; otherwise prefer ieee (rule 5).
+    if decimal_size < ieee_size {
+        Value::Decimal { mantissa, scale }
+    } else {
+        Value::Float { width_log2: w, bits }
+    }
+}
+
+/// True when `f` (a double) round-trips back to the supplied
+/// (mantissa, scale) form bit-exactly. Used by the D-007 picker to
+/// rule out ieee_float for decimals that double can't represent
+/// (e.g., 0.1, 0.2 — every rational with a non-power-of-2 denominator
+/// of more than ~17 significant digits).
+fn decimal_f64_roundtrips(mantissa: i128, scale: i32, f: f64) -> bool {
+    // Reconstruct mantissa from f at the same scale.
+    let scaled = f * 10f64.powi(-scale);
+    if !scaled.is_finite() { return false; }
+    let rounded = scaled.round();
+    if (scaled - rounded).abs() > 1e-9 { return false; }
+    let m_back = rounded as i128;
+    m_back == mantissa
+}
+
+/// §15.7 / C-006 — strict-canonical validator. Returns `Ok(())` if
+/// `wire` is the canonical encoding of its decoded value, or
+/// `Err(reason)` describing the first non-canonical aspect found.
+///
+/// Implementation: decode + canonicalize + re-encode, then compare
+/// byte-for-byte. A canonical wire round-trips through this pipeline
+/// unchanged; any non-canonical wire produces different bytes on
+/// re-encode (e.g., `0x40 0x05` for the value 5 re-encodes as `0x25`).
+fn validate_canonical(wire: &[u8]) -> Result<(), String> {
+    let v = decode(wire).map_err(|e| format!("decode: {:?}", e))?;
+    let v_canon = canonicalize_value(&v);
+    let re = encode(&v_canon).map_err(|e| format!("re-encode: {:?}", e))?;
+    if re == wire { Ok(()) } else {
+        Err(format!("non-canonical: re-encoded as {} bytes (vs {})",
+                    re.len(), wire.len()))
+    }
+}
+
+/// §15.1 — canonical encoder. Applies width minimization (C-002),
+/// trailing-zero mantissa trim (decimal canonical), and the
+/// decimal-vs-ieee picker (D-007), then defers to `encode`.
+///
+/// Containers recurse element-wise. The non-canonical `encode` path
+/// is preserved for fixtures that want to test bit-for-bit
+/// preservation of the supplied form (e.g., asserting that an f64
+/// stays f64 even when 1.5 fits in f16).
+fn encode_canonical(v: &Value) -> Result<Vec<u8>, EncodeError> {
+    encode(&canonicalize_value(v))
+}
+
+fn canonicalize_value(v: &Value) -> Value {
+    match v {
+        Value::Float { width_log2, bits } => {
+            let (w, b) = canonical_float_width(*width_log2, *bits);
+            Value::Float { width_log2: w, bits: b }
+        }
+        Value::Decimal { mantissa, scale } => {
+            // Trim trailing zeros from mantissa, incrementing scale,
+            // until last digit is non-zero or scale == 0 (§15.2.2).
+            let (m, s) = trim_decimal(*mantissa, *scale);
+            // D-007: if a smaller ieee_float at smallest bit-exact
+            // width round-trips this decimal, pick whichever is shorter
+            // (tie → ieee). The decimal form remains the default for
+            // typed-decimal sources per §15.2; see comment there.
+            // For canonicalize_value we keep decimal — D-007 picker is
+            // applied on JSON ingress before a Decimal/Float is ever
+            // constructed (see `decimal_or_ieee_for_canonical_token`).
+            Value::Decimal { mantissa: m, scale: s }
+        }
+        Value::Array(children) => {
+            Value::Array(children.iter().map(canonicalize_value).collect())
+        }
+        Value::Object(entries) => {
+            Value::Object(entries.iter()
+                .map(|(k, v)| (k.clone(), canonicalize_value(v)))
+                .collect())
+        }
+        Value::RowArray { keys, rows } => {
+            Value::RowArray {
+                keys: keys.clone(),
+                rows: rows.iter()
+                    .map(|r| r.iter().map(canonicalize_value).collect())
+                    .collect(),
+            }
+        }
+        Value::NumericString(inner) => {
+            Value::NumericString(Box::new(canonicalize_value(inner)))
+        }
+        // TypedArray, String, Bytes, Bool, Null, Uint, NegInt,
+        // Extension are already canonical by construction.
+        other => other.clone(),
+    }
+}
+
+/// C-002 — find the smallest IEEE width in {1, 2, 3, 4} (binary16/32
+/// /64/128) for which `bits` (interpreted at `from_w`) round-trips
+/// bit-exact. Returns `(width_log2, bits_at_that_width)`.
+///
+/// Width-1 (binary16) and width-4 (binary128) require bit manipulation
+/// since Rust has no native f16/f128 — width-1 is checked via
+/// f64↔f16 conversions; width-4 is left in place if the source was
+/// already f128 (no narrower target tried beyond what fits in f64).
+fn canonical_float_width(from_w: u8, bits: u128) -> (u8, u128) {
+    // ±0 always renders identically at every width — pick the smallest.
+    if is_float_zero(from_w, bits) {
+        let sign = (bits >> (8 * (1 << from_w) - 1)) & 1;
+        return (1, (sign << 15) as u128);    // ±0.0 in binary16
+    }
+    // ±Inf and NaN at every width is representable at binary16.
+    // (NaN has already been canonicalized to the quiet pattern.)
+    if is_float_inf(from_w, bits) {
+        let sign = (bits >> (8 * (1 << from_w) - 1)) & 1;
+        return (1, ((sign << 15) | 0x7C00) as u128);
+    }
+    if is_float_nan(from_w, bits) {
+        // canonicalize_nan_bits will produce 0x7E00 at width 1.
+        return (1, 0x7E00u128);
+    }
+
+    // Lift to f64 for narrowing trials. f128 sources only narrow to
+    // f64 if the value fits exactly; if not, keep as f128.
+    let as_f64: Option<f64> = match from_w {
+        1 => Some(f16_bits_to_f64((bits & 0xFFFF) as u16)),
+        2 => Some(f32::from_bits(bits as u32) as f64),
+        3 => Some(f64::from_bits(bits as u64)),
+        4 => f128_bits_to_f64_exact(bits),
+        _ => None,
+    };
+    let f = match as_f64 {
+        Some(f) => f,
+        None => return (from_w, bits),  // f128 with no exact f64
+    };
+
+    // Try binary16.
+    if let Some(f16_bits) = f64_to_f16_exact(f) {
+        return (1, f16_bits as u128);
+    }
+    // Try binary32.
+    let f32_val = f as f32;
+    if (f32_val as f64).to_bits() == f.to_bits() {
+        return (2, f32_val.to_bits() as u128);
+    }
+    // Otherwise keep at binary64.
+    (3, f.to_bits() as u128)
+}
+
+fn is_float_zero(w: u8, bits: u128) -> bool {
+    let mask = match w {
+        1 => 0x7FFFu128,
+        2 => 0x7FFF_FFFFu128,
+        3 => 0x7FFF_FFFF_FFFF_FFFFu128,
+        4 => 0x7FFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFu128,
+        _ => return false,
+    };
+    (bits & mask) == 0
+}
+
+fn is_float_inf(w: u8, bits: u128) -> bool {
+    let (exp_mask, mant_mask) = match w {
+        1 => (0x7C00u128,                                 0x03FFu128),
+        2 => (0x7F80_0000u128,                            0x007F_FFFFu128),
+        3 => (0x7FF0_0000_0000_0000u128,                  0x000F_FFFF_FFFF_FFFFu128),
+        4 => (0x7FFF_0000_0000_0000_0000_0000_0000_0000u128,
+              0x0000_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFu128),
+        _ => return false,
+    };
+    (bits & exp_mask) == exp_mask && (bits & mant_mask) == 0
+}
+
+fn is_float_nan(w: u8, bits: u128) -> bool {
+    let (exp_mask, mant_mask) = match w {
+        1 => (0x7C00u128,                                 0x03FFu128),
+        2 => (0x7F80_0000u128,                            0x007F_FFFFu128),
+        3 => (0x7FF0_0000_0000_0000u128,                  0x000F_FFFF_FFFF_FFFFu128),
+        4 => (0x7FFF_0000_0000_0000_0000_0000_0000_0000u128,
+              0x0000_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFFu128),
+        _ => return false,
+    };
+    (bits & exp_mask) == exp_mask && (bits & mant_mask) != 0
+}
+
+/// f64 → f16 conversion that succeeds only if the value is bit-exact
+/// representable in binary16. Returns the 16-bit pattern on success.
+fn f64_to_f16_exact(f: f64) -> Option<u16> {
+    let bits = f.to_bits();
+    let sign = ((bits >> 63) & 1) as u16;
+    let exp_f64 = ((bits >> 52) & 0x7FF) as i32;
+    let mant_f64 = bits & 0x000F_FFFF_FFFF_FFFF;
+
+    if exp_f64 == 0 {
+        // Subnormal or zero. Zero handled by is_float_zero earlier.
+        // Subnormals in f64 don't fit in f16 unless mantissa is small.
+        // Conservative: only zero is exact.
+        if mant_f64 == 0 { return Some(sign << 15); }
+        return None;
+    }
+    if exp_f64 == 0x7FF { return None; }    // Inf/NaN handled earlier.
+
+    let exp_unbiased = exp_f64 - 1023;
+    // f16 normal range: exp_unbiased ∈ [-14, 15].
+    if exp_unbiased < -14 || exp_unbiased > 15 { return None; }
+    // Mantissa must use only top 10 bits — bottom 42 bits zero.
+    if mant_f64 & ((1u64 << 42) - 1) != 0 { return None; }
+    let mant_f16 = (mant_f64 >> 42) as u16;
+    let exp_f16 = (exp_unbiased + 15) as u16;
+    Some((sign << 15) | (exp_f16 << 10) | mant_f16)
+}
+
+/// f128 bits → f64 if bit-exact representable; else None.
+fn f128_bits_to_f64_exact(bits: u128) -> Option<f64> {
+    // f128: 1 sign + 15 exp + 112 mantissa.
+    let sign = ((bits >> 127) & 1) as u64;
+    let exp_f128 = ((bits >> 112) & 0x7FFF) as i32;
+    let mant_f128 = bits & ((1u128 << 112) - 1);
+
+    if exp_f128 == 0 {
+        if mant_f128 == 0 {
+            return Some(f64::from_bits(sign << 63));
+        }
+        return None;       // f128 subnormals — punt
+    }
+    if exp_f128 == 0x7FFF { return None; }
+
+    let exp_unbiased = exp_f128 - 16383;
+    if exp_unbiased < -1022 || exp_unbiased > 1023 { return None; }
+    // Mantissa must use only top 52 bits.
+    if mant_f128 & ((1u128 << 60) - 1) != 0 { return None; }
+    let mant_f64 = (mant_f128 >> 60) as u64;
+    let exp_f64 = ((exp_unbiased + 1023) as u64) << 52;
+    let out = (sign << 63) | exp_f64 | mant_f64;
+    Some(f64::from_bits(out))
+}
+
+/// Trim trailing zeros from a base-10 mantissa. (mantissa=10, scale=0)
+/// becomes (mantissa=1, scale=1). Stops when the last digit is non-zero
+/// or scale rolls over toward zero.
+fn trim_decimal(mantissa: i128, scale: i32) -> (i128, i32) {
+    let mut m = mantissa;
+    let mut s = scale;
+    while m != 0 && (m % 10) == 0 {
+        m /= 10;
+        s = s.saturating_add(1);
+    }
+    (m, s)
 }
 
 fn encode(v: &Value) -> Result<Vec<u8>, EncodeError> {
@@ -3178,6 +3524,93 @@ mod tests {
     }
 
     #[test]
+    fn long_key_varuint_truncation_rejected() {
+        // E-010: build an object whose key uses the long-key escape
+        // (key_size_byte = 0xFF) but the varuint excess claims more
+        // bytes than remain in the entry. Decoder must reject without
+        // running off the end.
+        //
+        // Start with a valid 255-byte-key wire, then overwrite the
+        // varuint excess byte to claim an additional 0x40 (=64) bytes
+        // beyond what the entry actually holds.
+        let key = "b".repeat(255);
+        let mut wire = encode(&Value::Object(vec![
+            (key, Value::Uint(1)),
+        ])).unwrap();
+        // First byte of the long-key entry's value_data is the varuint
+        // excess. value_data starts at offset 2 (tag + width byte).
+        // Varuint zero is one byte (0x00); patch to 0x40 → claims an
+        // extra 0x10 (16) bytes since varuint payload is in top 6 bits.
+        let varuint_pos = 2;
+        wire[varuint_pos] = 0xFD;   // 2-bit prefix = 11 → 4-byte varuint
+        wire[varuint_pos + 1] = 0xFF;
+        wire[varuint_pos + 2] = 0xFF;
+        wire[varuint_pos + 3] = 0xFF;
+        let r = decode(&wire);
+        assert!(r.is_err(), "long-key truncated varuint must be rejected");
+    }
+
+    #[test]
+    fn row_array_random_access_by_record_and_key() {
+        // RA-002: decode a row_array and access (record_index, key)
+        // pairs without iterating the full structure. The shared key
+        // block lives once at the array level — random access only
+        // needs the keys table + the slot offset for the given row.
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let rows = vec![
+            vec![Value::Uint(1), Value::Uint(10)],
+            vec![Value::Uint(2), Value::Uint(20)],
+            vec![Value::Uint(3), Value::Uint(30)],
+        ];
+        let v = Value::RowArray { keys: keys.clone(), rows: rows.clone() };
+        let enc = encode(&v).unwrap();
+        let dec = decode(&enc).unwrap();
+
+        // Access (1, "b") → 20 — the canonical "random access" target.
+        let got = row_array_get(&dec, 1, "b").expect("(1, b) lookup");
+        assert_eq!(*got, Value::Uint(20));
+
+        // Access (2, "a") → 3.
+        let got = row_array_get(&dec, 2, "a").expect("(2, a) lookup");
+        assert_eq!(*got, Value::Uint(3));
+
+        // Out-of-range record returns None (not panic).
+        assert!(row_array_get(&dec, 99, "a").is_none());
+        // Unknown key returns None.
+        assert!(row_array_get(&dec, 0, "c").is_none());
+    }
+
+    #[test]
+    fn numeric_string_dual_projection() {
+        // NS-002: a numeric_string value can be projected as either
+        // its inner numeric (e.g., uint 7) or as the string form
+        // ("7"). The dual access enables consumers to either parse
+        // the number for arithmetic or read the string verbatim.
+        let v = Value::NumericString(Box::new(Value::Uint(7)));
+
+        // as_numeric: returns the inner numeric value.
+        let inner = numeric_string_as_numeric(&v).expect("inner is numeric");
+        assert_eq!(*inner, Value::Uint(7));
+
+        // as_string: returns the canonical decimal source string.
+        let s = numeric_string_as_string(&v).expect("can render as string");
+        assert_eq!(s, "7");
+
+        // Decimal inner: as_numeric returns Decimal, as_string returns
+        // the canonical-form decimal string.
+        let v2 = Value::NumericString(Box::new(
+            Value::Decimal { mantissa: 314, scale: -2 }));
+        assert_eq!(*numeric_string_as_numeric(&v2).unwrap(),
+                   Value::Decimal { mantissa: 314, scale: -2 });
+        assert_eq!(numeric_string_as_string(&v2).unwrap(), "3.14");
+
+        // Non-numeric_string values: both projections return None.
+        let plain = Value::Uint(7);
+        assert!(numeric_string_as_numeric(&plain).is_none());
+        assert!(numeric_string_as_string(&plain).is_none());
+    }
+
+    #[test]
     fn nesting_depth_capped() {
         // LIM-006: build an array nest exactly at the cap (passes) and
         // one over (fails). Build inside-out: innermost is a leaf,
@@ -3294,6 +3727,70 @@ mod tests {
         let enc_sorted = encode(&Value::Object(sorted_entries)).unwrap();
         assert_ne!(enc, enc_sorted,
             "different field orders must produce different wire bytes");
+    }
+
+    #[test]
+    fn float_canonical_smallest_width() {
+        // C-002: encode_canonical narrows IEEE width to the smallest
+        // bit-exact form. 1.0 fits in f16; 1.0f32 stays at f32 if
+        // canonical_float_width sees it as f32 source — but it would
+        // narrow to f16 too since 1.0 is exact at every width.
+
+        // 1.0 stored as f64 → canonical narrows to f16.
+        let f64_one = Value::Float { width_log2: 3,
+            bits: 1.0f64.to_bits() as u128 };
+        let canon = canonicalize_value(&f64_one);
+        match canon {
+            Value::Float { width_log2: 1, bits } => {
+                assert_eq!(bits, 0x3C00); // f16(1.0)
+            }
+            other => panic!("expected width=1, got {:?}", other),
+        }
+
+        // 1.5 stored as f64 → narrows to f16 (also exact).
+        let v = Value::Float { width_log2: 3,
+            bits: 1.5f64.to_bits() as u128 };
+        match canonicalize_value(&v) {
+            Value::Float { width_log2: 1, .. } => {}
+            other => panic!("1.5 should narrow to f16, got {:?}", other),
+        }
+
+        // A value that doesn't fit in f16 but fits in f32: 1e-7
+        let v = Value::Float { width_log2: 3,
+            bits: (1e-7f32 as f64).to_bits() as u128 };
+        match canonicalize_value(&v) {
+            Value::Float { width_log2: w, .. } if w == 1 || w == 2 => {}
+            other => panic!("1e-7 should narrow to f16 or f32, got {:?}", other),
+        }
+
+        // π in f64 — doesn't fit in f32, stays at f64.
+        let pi = Value::Float { width_log2: 3, bits: std::f64::consts::PI.to_bits() as u128 };
+        match canonicalize_value(&pi) {
+            Value::Float { width_log2: 3, .. } => {}
+            other => panic!("π should stay f64, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_canonical_round_trip() {
+        // C-006: a canonical wire validates; a non-canonical one
+        // (uint encoding 5 as bc=1 instead of inline) does not.
+        let canonical = encode(&Value::Uint(5)).unwrap();   // 0x25
+        assert_eq!(canonical, vec![0x25]);
+        assert!(validate_canonical(&canonical).is_ok());
+
+        // Hand-craft a non-canonical 5 as uint with bc=1 → 0x40 0x05.
+        let noncanonical = vec![0x40, 0x05];
+        assert!(validate_canonical(&noncanonical).is_err());
+
+        // f64(1.0) — non-canonical because 1.0 fits in f16.
+        let mut nc_float = vec![0x63];
+        nc_float.extend_from_slice(&1.0f64.to_bits().to_le_bytes());
+        assert!(validate_canonical(&nc_float).is_err());
+
+        // f16(1.0) — canonical: 0x61 + LE bytes 00 3C
+        let canon_one = vec![0x61, 0x00, 0x3C];
+        assert!(validate_canonical(&canon_one).is_ok());
     }
 
     #[test]
