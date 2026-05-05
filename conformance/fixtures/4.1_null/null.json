@@ -1,0 +1,11 @@
+{
+  "id": "null_basic",
+  "spec_ref": "§4.1",
+  "rule_ids": ["N-001", "N-002"],
+  "description": "null encodes as a single byte 0x00",
+  "input_value": {"kind": "null"},
+  "wire_hex": "00",
+  "json_compact": "null",
+  "must_round_trip": true,
+  "must_validate": true
+}

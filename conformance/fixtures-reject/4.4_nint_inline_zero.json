@@ -1,0 +1,11 @@
+{
+  "id": "nint_inline_zero_reserved",
+  "spec_ref": "§4.4",
+  "rule_ids": ["NI-003", "E-005"],
+  "description": "nint_inline with low_nibble 0 (0x30) is reserved (no negative zero); decoder must reject",
+  "input_value": null,
+  "wire_hex": "30",
+  "must_reject": true,
+  "reject_reason": "nint_inline_zero",
+  "must_validate": false
+}

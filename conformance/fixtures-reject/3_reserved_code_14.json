@@ -1,0 +1,11 @@
+{
+  "id": "reserved_code_14_rejected",
+  "spec_ref": "§3, §13.2",
+  "rule_ids": ["T-015", "E-001", "V-002"],
+  "description": "tag with high nibble 14 (0xE0) is reserved for v2 wire-format change; v1 parser must reject without partial decode",
+  "input_value": null,
+  "wire_hex": "e0",
+  "must_reject": true,
+  "reject_reason": "reserved_tag",
+  "must_validate": false
+}

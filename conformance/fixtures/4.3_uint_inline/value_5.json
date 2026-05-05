@@ -1,0 +1,11 @@
+{
+  "id": "uint_inline_5",
+  "spec_ref": "§4.3",
+  "rule_ids": ["UI-001", "UI-002", "UI-003"],
+  "description": "uint 5 encodes as a single byte 0x25 via uint_inline (preferred over uint for 0..15)",
+  "input_value": {"kind": "uint", "value": 5},
+  "wire_hex": "25",
+  "json_compact": "5",
+  "must_round_trip": true,
+  "must_validate": true
+}

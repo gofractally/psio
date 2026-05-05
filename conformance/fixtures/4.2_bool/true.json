@@ -1,0 +1,11 @@
+{
+  "id": "bool_true",
+  "spec_ref": "§4.2",
+  "rule_ids": ["B-002", "B-003"],
+  "description": "true encodes as 0x11",
+  "input_value": {"kind": "bool", "value": true},
+  "wire_hex": "11",
+  "json_compact": "true",
+  "must_round_trip": true,
+  "must_validate": true
+}
