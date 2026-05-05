@@ -8,7 +8,8 @@ value tree); canonical-typed field reads at memcpy speeds on the
 resulting binary.
 
 **Status:** v1 (stable). Reference implementation in
-`libraries/psio/cpp/include/psio/pjson*.hpp`. This document is the
+`cpp/include/psio/pjson*.hpp` (with a Rust port at
+`rust/psio/src/pjson*.rs`). This document is the
 normative specification.
 
 **Audience:** anyone implementing a pjson parser, encoder, or
@@ -1393,7 +1394,10 @@ byte-for-byte through encode → decode → encode:
   u8, u16, u32, u64, f32, f64), including empty (N=0) and non-empty
   forms.
 
-A reference test corpus lives at `libraries/psio/cpp/tests/pjson_tests.cpp`.
+A reference test corpus lives at `cpp/tests/pjson_tests.cpp`
+(with parallel Rust coverage in `#[cfg(test)]` modules across
+`rust/psio/src/pjson*.rs`, including
+`rust/psio/src/pjson_cross_validation_tests.rs`).
 
 ---
 
