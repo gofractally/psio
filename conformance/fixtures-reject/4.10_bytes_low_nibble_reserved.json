@@ -1,0 +1,10 @@
+{
+  "id": "bytes_low_nibble_reserved",
+  "spec_ref": "section 4.10",
+  "rule_ids": ["BY-005"],
+  "description": "bytes with low_nibble 4 (0xA4) is reserved — only hints 0..3 defined",
+  "input_value": null,
+  "wire_hex": "a4",
+  "must_reject": true,
+  "reject_reason": "bytes_reserved_low_nibble"
+}

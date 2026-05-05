@@ -1,0 +1,11 @@
+{
+  "id": "bytes_hex_deadbeef",
+  "spec_ref": "section 4.10",
+  "rule_ids": ["BY-002", "BY-006"],
+  "description": "0xDEADBEEF with hint=hex. JSON emit: lowercase hex.",
+  "input_value": {"kind": "bytes", "encoding": "hex", "bytes_hex": "deadbeef"},
+  "wire_hex": "a1deadbeef",
+  "json_compact": "\"deadbeef\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

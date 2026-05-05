@@ -1,0 +1,11 @@
+{
+  "id": "string_raw_text_hello",
+  "spec_ref": "section 4.9",
+  "rule_ids": ["S-001", "T-010"],
+  "description": "raw_text 'hello' — tag 0x90 + ASCII content. JSON emit wraps in quotes.",
+  "input_value": {"kind": "string", "encoding": "raw_text", "text": "hello"},
+  "wire_hex": "9068656c6c6f",
+  "json_compact": "\"hello\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

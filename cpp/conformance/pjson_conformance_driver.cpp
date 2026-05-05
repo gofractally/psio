@@ -116,6 +116,20 @@ struct TypedArray {
    bool operator==(const TypedArray&) const = default;
 };
 
+// String (§4.9). UTF-8 bytes plus encoding flag.
+struct String {
+   std::uint8_t              encoding_flag{};   // 0 = raw_text, 1 = escape_form
+   std::vector<std::uint8_t> content;
+   bool operator==(const String&) const = default;
+};
+
+// Bytes (§4.10). Raw octets with JSON-emit encoding hint.
+struct Bytes {
+   std::uint8_t              encoding_hint{};   // 0=b64, 1=hex, 2=b58, 3=b64url
+   std::vector<std::uint8_t> content;
+   bool operator==(const Bytes&) const = default;
+};
+
 // Object (§5.2) — recursive, like Array. ObjectBody is forward-
 // declared so the variant can be sized.
 struct ObjectBody;
@@ -133,7 +147,7 @@ struct RowArray {
 };
 
 using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal,
-                            Array, TypedArray, Object, RowArray>;
+                            Array, TypedArray, Object, RowArray, String, Bytes>;
 
 struct ArrayBody {
    std::vector<Value> children;
@@ -190,6 +204,112 @@ inline RowArray make_row_array(std::vector<std::string> keys,
    r.body->keys = std::move(keys);
    r.body->rows = std::move(rows);
    return r;
+}
+
+// ── Base-N encoding helpers for §4.10 bytes JSON emit ──────────────
+
+inline std::string b64_encode(const std::vector<std::uint8_t>& bytes) {
+   static const char A[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+   std::string out;
+   out.reserve((bytes.size() + 2) / 3 * 4);
+   std::size_t i = 0;
+   for (; i + 3 <= bytes.size(); i += 3) {
+      std::uint32_t n = (static_cast<std::uint32_t>(bytes[i]) << 16)
+                      | (static_cast<std::uint32_t>(bytes[i + 1]) << 8)
+                      |  static_cast<std::uint32_t>(bytes[i + 2]);
+      out += A[(n >> 18) & 0x3F];
+      out += A[(n >> 12) & 0x3F];
+      out += A[(n >>  6) & 0x3F];
+      out += A[ n        & 0x3F];
+   }
+   const std::size_t rem = bytes.size() - i;
+   if (rem == 1) {
+      std::uint32_t n = static_cast<std::uint32_t>(bytes[i]) << 16;
+      out += A[(n >> 18) & 0x3F];
+      out += A[(n >> 12) & 0x3F];
+      out += "==";
+   } else if (rem == 2) {
+      std::uint32_t n = (static_cast<std::uint32_t>(bytes[i]) << 16)
+                      | (static_cast<std::uint32_t>(bytes[i + 1]) << 8);
+      out += A[(n >> 18) & 0x3F];
+      out += A[(n >> 12) & 0x3F];
+      out += A[(n >>  6) & 0x3F];
+      out += '=';
+   }
+   return out;
+}
+
+inline std::string b64url_encode(const std::vector<std::uint8_t>& bytes) {
+   std::string s = b64_encode(bytes);
+   while (!s.empty() && s.back() == '=') s.pop_back();
+   for (char& c : s) {
+      if      (c == '+') c = '-';
+      else if (c == '/') c = '_';
+   }
+   return s;
+}
+
+inline std::string hex_encode(const std::vector<std::uint8_t>& bytes) {
+   static const char d[] = "0123456789abcdef";
+   std::string out;
+   out.reserve(bytes.size() * 2);
+   for (std::uint8_t b : bytes) {
+      out += d[b >> 4];
+      out += d[b & 0xF];
+   }
+   return out;
+}
+
+inline std::string base58_encode(const std::vector<std::uint8_t>& bytes) {
+   static const char A[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+   if (bytes.empty()) return {};
+   std::size_t zeros = 0;
+   while (zeros < bytes.size() && bytes[zeros] == 0) ++zeros;
+   std::vector<std::uint8_t> input(bytes);
+   std::vector<std::uint8_t> digits;
+   while (true) {
+      bool all_zero = true;
+      for (auto v : input) if (v != 0) { all_zero = false; break; }
+      if (all_zero) break;
+      std::uint32_t carry = 0;
+      for (auto& b : input) {
+         std::uint32_t cur = (carry << 8) | static_cast<std::uint32_t>(b);
+         b = static_cast<std::uint8_t>(cur / 58);
+         carry = cur % 58;
+      }
+      digits.push_back(static_cast<std::uint8_t>(carry));
+   }
+   std::string out;
+   out.reserve(zeros + digits.size());
+   for (std::size_t i = 0; i < zeros; ++i) out += '1';
+   for (auto it = digits.rbegin(); it != digits.rend(); ++it) {
+      out += A[*it];
+   }
+   return out;
+}
+
+// Per-character JSON-string escape pass (RFC 8259). Used for
+// raw_text strings and object keys.
+inline void json_escape_into(std::string_view text, std::string& out) {
+   for (unsigned char c : text) {
+      switch (c) {
+         case '"':  out += "\\\""; break;
+         case '\\': out += "\\\\"; break;
+         case '\n': out += "\\n";  break;
+         case '\r': out += "\\r";  break;
+         case '\t': out += "\\t";  break;
+         case '\b': out += "\\b";  break;
+         case '\f': out += "\\f";  break;
+         default:
+            if (c < 0x20) {
+               char buf[8];
+               std::snprintf(buf, sizeof buf, "\\u%04x", c);
+               out += buf;
+            } else {
+               out += static_cast<char>(c);
+            }
+      }
+   }
 }
 
 // §5.3 — 8-bit prefilter hash. Strip key from the last `.` onward
@@ -442,6 +562,16 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
          }
          out.push_back(static_cast<std::uint8_t>(n & 0xFF));
          out.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFF));
+      } else if constexpr (std::is_same_v<T, String>) {
+         if (arg.encoding_flag > 1)
+            throw EncodeError{"string encoding_flag must be 0 or 1"};
+         out.push_back(static_cast<std::uint8_t>(0x90 | arg.encoding_flag));
+         out.insert(out.end(), arg.content.begin(), arg.content.end());
+      } else if constexpr (std::is_same_v<T, Bytes>) {
+         if (arg.encoding_hint > 3)
+            throw EncodeError{"bytes encoding_hint must be 0..3"};
+         out.push_back(static_cast<std::uint8_t>(0xA0 | arg.encoding_hint));
+         out.insert(out.end(), arg.content.begin(), arg.content.end());
       } else if constexpr (std::is_same_v<T, RowArray>) {
          // §5.2.1 row_array.
          const auto& keys = arg.body ? arg.body->keys : std::vector<std::string>{};
@@ -668,15 +798,31 @@ static Value decode(std::span<const std::uint8_t> buf) {
          if (low == 1) return decode_row_array(buf);
          throw DecodeError{"reserved low_nibble for object"};
       }
-      case 8: case 9: case 10: case 13: {
+      case 9: {
+         // §4.9 string.
+         if (low > 1) throw DecodeError{"reserved low_nibble for string"};
+         String s;
+         s.encoding_flag = low;
+         s.content.assign(buf.begin() + 1, buf.end());
+         return s;
+      }
+      case 10: {
+         // §4.10 bytes.
+         if (low > 3) throw DecodeError{"reserved low_nibble for bytes"};
+         Bytes b;
+         b.encoding_hint = low;
+         b.content.assign(buf.begin() + 1, buf.end());
+         return b;
+      }
+      case 8: case 13: {
          static const char* names[] = {
             "numeric_string",  // 8
-            "string",          // 9
-            "bytes",           // 10
-            "<unused>",        // 11 — handled above
-            "<unused>",        // 12 — handled above
+            "<unused>",        // 9
+            "<unused>",        // 10
+            "<unused>",        // 11
+            "<unused>",        // 12
             "extension"};      // 13
-         throw DecodeError{std::string{"Phase ≥2: "} + names[high - 8]};
+         throw DecodeError{std::string{"Phase ≥3: "} + names[high - 8]};
       }
       case 14: case 15:
          throw DecodeError{std::string{"reserved tag 0x"} +
@@ -1081,6 +1227,27 @@ static std::string render_json(const Value& v) {
          }
          s += "]";
          return s;
+      } else if constexpr (std::is_same_v<T, String>) {
+         std::string s = "\"";
+         std::string_view text(reinterpret_cast<const char*>(arg.content.data()),
+                                arg.content.size());
+         if (arg.encoding_flag == 0) {
+            json_escape_into(text, s);
+         } else {
+            s += text;
+         }
+         s += "\"";
+         return s;
+      } else if constexpr (std::is_same_v<T, Bytes>) {
+         std::string body;
+         switch (arg.encoding_hint) {
+            case 0: body = b64_encode(arg.content); break;
+            case 1: body = hex_encode(arg.content); break;
+            case 2: body = base58_encode(arg.content); break;
+            case 3: body = b64url_encode(arg.content); break;
+            default: body = "<bad bytes hint>";
+         }
+         return "\"" + body + "\"";
       } else if constexpr (std::is_same_v<T, Object>) {
          std::string s = "{";
          const auto& entries = arg.body ? arg.body->entries
@@ -1090,7 +1257,7 @@ static std::string render_json(const Value& v) {
             if (!first) s += ",";
             first = false;
             s += "\"";
-            s += key;
+            json_escape_into(key, s);
             s += "\":";
             s += render_json(value);
          }
@@ -1111,7 +1278,7 @@ static std::string render_json(const Value& v) {
                   if (!first_field) s += ",";
                   first_field = false;
                   s += "\"";
-                  s += keys[j];
+                  json_escape_into(keys[j], s);
                   s += "\":";
                   s += render_json(row[j]);
                }
@@ -1607,6 +1774,40 @@ static Value parse_value_from_json(const JNode& j) {
          entries.emplace_back(as_string(*k), parse_value_from_json(*v));
       }
       return make_object(std::move(entries));
+   }
+   if (kind == "bytes") {
+      const auto* enc_node = obj_get(obj, "encoding");
+      if (!enc_node) throw std::runtime_error{"bytes missing 'encoding'"};
+      const std::string& enc = as_string(*enc_node);
+      std::uint8_t hint;
+      if      (enc == "base64")    hint = 0;
+      else if (enc == "hex")       hint = 1;
+      else if (enc == "base58")    hint = 2;
+      else if (enc == "base64url") hint = 3;
+      else throw std::runtime_error{std::string{"bytes encoding '"} + enc + "' not in {base64,hex,base58,base64url}"};
+      const auto* bytes_node = obj_get(obj, "bytes_hex");
+      if (!bytes_node) throw std::runtime_error{"bytes missing 'bytes_hex'"};
+      auto raw = parse_hex(as_string(*bytes_node));
+      Bytes b;
+      b.encoding_hint = hint;
+      b.content = std::move(raw);
+      return b;
+   }
+   if (kind == "string") {
+      const auto* enc_node = obj_get(obj, "encoding");
+      if (!enc_node) throw std::runtime_error{"string missing 'encoding'"};
+      const std::string& enc = as_string(*enc_node);
+      std::uint8_t flag;
+      if      (enc == "raw_text")    flag = 0;
+      else if (enc == "escape_form") flag = 1;
+      else throw std::runtime_error{std::string{"string encoding '"} + enc + "' must be raw_text or escape_form"};
+      const auto* text_node = obj_get(obj, "text");
+      if (!text_node) throw std::runtime_error{"string missing 'text'"};
+      const std::string& text = as_string(*text_node);
+      String s;
+      s.encoding_flag = flag;
+      s.content.assign(text.begin(), text.end());
+      return s;
    }
    if (kind == "row_array") {
       const auto* keys_node = obj_get(obj, "keys");

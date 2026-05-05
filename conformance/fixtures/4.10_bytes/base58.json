@@ -1,0 +1,11 @@
+{
+  "id": "bytes_base58_deadbeef",
+  "spec_ref": "section 4.10",
+  "rule_ids": ["BY-003", "BY-006"],
+  "description": "0xDEADBEEF with hint=base58 (Bitcoin alphabet, no 0/O/I/l). JSON emit: '6h8cQN'.",
+  "input_value": {"kind": "bytes", "encoding": "base58", "bytes_hex": "deadbeef"},
+  "wire_hex": "a2deadbeef",
+  "json_compact": "\"6h8cQN\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

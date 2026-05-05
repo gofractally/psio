@@ -79,6 +79,16 @@ enum Value {
     /// at the array level, removing per-record key bytes and per-
     /// record hash tables vs `Object × N`.
     RowArray { keys: Vec<String>, rows: Vec<Vec<Value>> },
+    /// String (§4.9) — UTF-8 text. encoding_flag 0 = raw_text (the
+    /// JSON emitter must run a per-character escape pass); 1 =
+    /// escape_form (text is already in JSON-escape form, the emitter
+    /// just wraps it in quotes).
+    String { encoding_flag: u8, content: Vec<u8> },
+    /// Bytes (§4.10) — raw octets with a JSON-emit encoding hint
+    /// (0=base64, 1=hex, 2=base58, 3=base64url, 4..15 reserved).
+    /// Wire bytes are always raw octets; the hint only governs JSON
+    /// projection.
+    Bytes { encoding_hint: u8, content: Vec<u8> },
 }
 
 /// §5.3 — 8-bit prefilter hash. Strip the key from the last `.`
@@ -314,6 +324,24 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
                 out.push(*ksize);
             }
             out.extend_from_slice(&(n as u16).to_le_bytes());
+        }
+
+        Value::String { encoding_flag, content } => {
+            // §4.9: tag = 0x90 | flag (flag ∈ {0, 1}); content N-1 bytes.
+            if *encoding_flag > 1 {
+                return Err(EncodeError::Overflow("string encoding_flag must be 0 or 1"));
+            }
+            out.push(0x90 | encoding_flag);
+            out.extend_from_slice(content);
+        }
+
+        Value::Bytes { encoding_hint, content } => {
+            // §4.10: tag = 0xA0 | hint (hint ∈ {0..3}); raw octets.
+            if *encoding_hint > 3 {
+                return Err(EncodeError::Overflow("bytes encoding_hint must be 0..3"));
+            }
+            out.push(0xA0 | encoding_hint);
+            out.extend_from_slice(content);
         }
 
         Value::RowArray { keys, rows } => {
@@ -614,14 +642,21 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             if low == 1 { return decode_row_array(buf); }
             Err(DecodeError::ReservedLowNibble("object", low))
         }
-        8 | 9 | 10 => {
-            Err(DecodeError::NotImplementedYet(match high {
-                8  => "numeric_string",
-                9  => "string",
-                10 => "bytes",
-                _  => unreachable!(),
-            }))
+        9 => {
+            // §4.9 string. low_nibble = encoding flag.
+            if low > 1 {
+                return Err(DecodeError::ReservedLowNibble("string", low));
+            }
+            Ok(Value::String { encoding_flag: low, content: buf[1..].to_vec() })
         }
+        10 => {
+            // §4.10 bytes.
+            if low > 3 {
+                return Err(DecodeError::ReservedLowNibble("bytes", low));
+            }
+            Ok(Value::Bytes { encoding_hint: low, content: buf[1..].to_vec() })
+        }
+        8 => Err(DecodeError::NotImplementedYet("numeric_string")),
         13 => Err(DecodeError::NotImplementedYet("extension")),
         14 | 15 => Err(DecodeError::ReservedTag(tag)),
         _ => unreachable!(),
@@ -1006,12 +1041,39 @@ fn render_json(v: &Value) -> String {
             s.push(']');
             s
         }
+        Value::String { encoding_flag, content } => {
+            let text = std::str::from_utf8(content).unwrap_or("<invalid utf8>");
+            let mut s = String::with_capacity(text.len() + 2);
+            s.push('"');
+            if *encoding_flag == 0 {
+                json_escape_into(text, &mut s);
+            } else {
+                // escape_form — content already JSON-escape-encoded.
+                s.push_str(text);
+            }
+            s.push('"');
+            s
+        }
+        Value::Bytes { encoding_hint, content } => {
+            let body = match *encoding_hint {
+                0 => b64_encode(content),
+                1 => hex_encode(content),
+                2 => base58_encode(content),
+                3 => b64url_encode(content),
+                _ => "<bad bytes hint>".to_string(),
+            };
+            let mut s = String::with_capacity(body.len() + 2);
+            s.push('"');
+            s.push_str(&body);
+            s.push('"');
+            s
+        }
         Value::Object(entries) => {
             let mut s = String::from("{");
             for (i, (key, value)) in entries.iter().enumerate() {
                 if i > 0 { s.push(','); }
                 s.push('"');
-                s.push_str(key);  // Phase 2.3: assume key has no JSON-special chars
+                json_escape_into(key, &mut s);
                 s.push('"');
                 s.push(':');
                 s.push_str(&render_json(value));
@@ -1200,6 +1262,106 @@ fn shift_right_jam_u64(a: u64, dist: u32) -> u64 {
         1
     } else {
         0
+    }
+}
+
+// ── Base-N encoding helpers for §4.10 bytes JSON emit ───────────────
+
+/// Standard base64 (§4.10 hint 0). RFC 4648 §4 alphabet, `=` padding.
+fn b64_encode(bytes: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut chunks = bytes.chunks_exact(3);
+    for chunk in chunks.by_ref() {
+        let n = ((chunk[0] as u32) << 16) | ((chunk[1] as u32) << 8) | (chunk[2] as u32);
+        out.push(A[((n >> 18) & 0x3F) as usize] as char);
+        out.push(A[((n >> 12) & 0x3F) as usize] as char);
+        out.push(A[((n >> 6) & 0x3F) as usize] as char);
+        out.push(A[(n & 0x3F) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    match rem.len() {
+        1 => {
+            let n = (rem[0] as u32) << 16;
+            out.push(A[((n >> 18) & 0x3F) as usize] as char);
+            out.push(A[((n >> 12) & 0x3F) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let n = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
+            out.push(A[((n >> 18) & 0x3F) as usize] as char);
+            out.push(A[((n >> 12) & 0x3F) as usize] as char);
+            out.push(A[((n >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+/// URL-safe base64 (§4.10 hint 3). RFC 4648 §5 alphabet, no padding.
+fn b64url_encode(bytes: &[u8]) -> String {
+    let std = b64_encode(bytes);
+    std.trim_end_matches('=')
+        .chars()
+        .map(|c| match c { '+' => '-', '/' => '_', other => other })
+        .collect()
+}
+
+/// Lowercase hex (§4.10 hint 1).
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+/// Base58 with the Bitcoin alphabet (§4.10 hint 2). No `0`/`O`/`I`/`l`.
+fn base58_encode(bytes: &[u8]) -> String {
+    const A: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    if bytes.is_empty() { return String::new(); }
+    // Count leading zeros.
+    let zeros = bytes.iter().take_while(|&&b| b == 0).count();
+    // Convert big-endian bytes to base58 via repeated division.
+    let mut digits: Vec<u8> = Vec::new();
+    let mut input = bytes.to_vec();
+    while !input.iter().all(|&b| b == 0) {
+        let mut carry: u32 = 0;
+        for b in input.iter_mut() {
+            let cur = ((carry as u32) << 8) | (*b as u32);
+            *b = (cur / 58) as u8;
+            carry = cur % 58;
+        }
+        digits.push(carry as u8);
+    }
+    let mut out = String::with_capacity(zeros + digits.len());
+    for _ in 0..zeros { out.push('1'); }
+    for d in digits.iter().rev() {
+        out.push(A[*d as usize] as char);
+    }
+    out
+}
+
+/// Per-character JSON-string escape pass (RFC 8259 §7). Used by
+/// the JSON renderer for `raw_text` strings and for object keys.
+fn json_escape_into(text: &str, out: &mut String) {
+    for c in text.chars() {
+        match c {
+            '"'  => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
     }
 }
 
@@ -1416,6 +1578,37 @@ fn parse_value(j: &Json) -> Result<Value, String> {
                 entries.push((key, parse_value(value)?));
             }
             Ok(Value::Object(entries))
+        }
+        "bytes" => {
+            let encoding = obj.get("encoding")
+                .and_then(|x| x.as_str())
+                .ok_or("bytes missing 'encoding' (one of base64/hex/base58/base64url)")?;
+            let encoding_hint = match encoding {
+                "base64"    => 0u8,
+                "hex"       => 1,
+                "base58"    => 2,
+                "base64url" => 3,
+                other => return Err(format!("bytes encoding '{}' not in {{base64,hex,base58,base64url}}", other)),
+            };
+            let bytes_hex = obj.get("bytes_hex")
+                .and_then(|x| x.as_str())
+                .ok_or("bytes missing 'bytes_hex'")?;
+            let content = parse_hex(bytes_hex).map_err(|e| format!("bytes_hex parse: {}", e))?;
+            Ok(Value::Bytes { encoding_hint, content })
+        }
+        "string" => {
+            let encoding = obj.get("encoding")
+                .and_then(|x| x.as_str())
+                .ok_or("string missing 'encoding' (\"raw_text\" or \"escape_form\")")?;
+            let encoding_flag = match encoding {
+                "raw_text" => 0,
+                "escape_form" => 1,
+                other => return Err(format!("string encoding '{}' must be raw_text or escape_form", other)),
+            };
+            let text = obj.get("text")
+                .and_then(|x| x.as_str())
+                .ok_or("string missing 'text'")?;
+            Ok(Value::String { encoding_flag, content: text.as_bytes().to_vec() })
         }
         "row_array" => {
             let keys_json = obj.get("keys")
@@ -2069,6 +2262,70 @@ mod tests {
         let key1024 = "c".repeat(1024);
         let v = Value::Object(vec![(key1024, Value::Uint(1))]);
         assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+    }
+
+    #[test]
+    fn bytes_round_trip_all_hints() {
+        let raw = vec![0xDE, 0xAD, 0xBE, 0xEF];
+
+        // Hint 0 = base64
+        let v0 = Value::Bytes { encoding_hint: 0, content: raw.clone() };
+        assert_eq!(encode(&v0).unwrap(), vec![0xA0, 0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(decode(&encode(&v0).unwrap()).unwrap(), v0);
+        assert_eq!(render_json(&v0), r#""3q2+7w==""#);
+
+        // Hint 1 = hex
+        let v1 = Value::Bytes { encoding_hint: 1, content: raw.clone() };
+        assert_eq!(encode(&v1).unwrap(), vec![0xA1, 0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(render_json(&v1), r#""deadbeef""#);
+
+        // Hint 2 = base58 (Bitcoin alphabet, no `0`/`O`/`I`/`l`)
+        let v2 = Value::Bytes { encoding_hint: 2, content: raw.clone() };
+        // 0xDEADBEEF = 3735928559. base58 encoding...
+        // We trust the round-trip; just check it's not empty and has no forbidden chars.
+        let json2 = render_json(&v2);
+        assert!(json2.starts_with('"') && json2.ends_with('"'));
+        let body = &json2[1..json2.len()-1];
+        for c in body.chars() {
+            assert!(!"0OIl".contains(c), "base58 must not use 0/O/I/l");
+        }
+
+        // Hint 3 = base64url (no `=` padding)
+        let v3 = Value::Bytes { encoding_hint: 3, content: raw.clone() };
+        assert_eq!(render_json(&v3), r#""3q2-7w""#);
+
+        // Reject low_nibble 4..15
+        assert!(matches!(decode(&[0xA4]), Err(DecodeError::ReservedLowNibble(_, _))));
+    }
+
+    #[test]
+    fn string_round_trip() {
+        // raw_text "hello" → tag 0x90 + "hello" bytes
+        let v = Value::String { encoding_flag: 0, content: b"hello".to_vec() };
+        let enc = encode(&v).unwrap();
+        assert_eq!(enc, vec![0x90, b'h', b'e', b'l', b'l', b'o']);
+        assert_eq!(decode(&enc).unwrap(), v);
+        assert_eq!(render_json(&v), r#""hello""#);
+
+        // escape_form "hi" → tag 0x91 + "hi" bytes
+        let v2 = Value::String { encoding_flag: 1, content: b"hi".to_vec() };
+        let enc2 = encode(&v2).unwrap();
+        assert_eq!(enc2, vec![0x91, b'h', b'i']);
+        assert_eq!(decode(&enc2).unwrap(), v2);
+
+        // raw_text containing a quote: bytes are `say "hi"`. JSON
+        // emit escapes the quote: `"say \"hi\""`.
+        let v3 = Value::String { encoding_flag: 0, content: b"say \"hi\"".to_vec() };
+        assert_eq!(render_json(&v3), r#""say \"hi\"""#);
+
+        // escape_form containing a literal backslash-quote: bytes
+        // are exactly `say \"hi\"` (8 chars). JSON emit just wraps —
+        // no extra escaping (the bytes ARE already escape-form).
+        let v4 = Value::String { encoding_flag: 1, content: b"say \\\"hi\\\"".to_vec() };
+        assert_eq!(render_json(&v4), r#""say \"hi\"""#);
+
+        // Reject low_nibble > 1.
+        assert!(matches!(decode(&[0x92, b'a']), Err(DecodeError::ReservedLowNibble(_, _))));
     }
 
     #[test]

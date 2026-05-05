@@ -65,8 +65,8 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-007 | code 6 = `ieee_float`, low nibble bits 2..0 = log₂(byte_count) ∈ {1,2,3,4}; bit 3 reserved | ✅ | ✅ corpus `ieee_float_{f16,f32,f64}_one` + bit3 + width0 reject | ✅ | ✅ `ieee_float_round_trip` + `ieee_float_reserved_bit3_rejected` + `ieee_float_bad_width_rejected` |
 | T-008 | code 7 = `decimal`, low nibble = mantissa bc−1 | ✅ | ✅ corpus `decimal_{one_point_five,12345}` | ✅ | ✅ `decimal_round_trip` |
 | T-009 | code 8 = `numeric_string`, low nibble must be 0; body is inner numeric value | ❌ | ❌ | ❌ | ❌ |
-| T-010 | code 9 = `string`, low nibble ∈ {0, 1} = encoding flag; others reserved | ❌ | ❌ | ❌ | ❌ |
-| T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ❌ | ❌ | ❌ | ❌ |
+| T-010 | code 9 = `string`, low nibble ∈ {0, 1} = encoding flag; others reserved | ✅ | ✅ corpus `string_*` | ✅ | ✅ same |
+| T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ✅ | ✅ corpus `bytes_*` | ✅ | ✅ same |
 | T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ✅ | ✅ corpus `array_*` + `typed_array_*` + `typed_array_low_nibble_11_reserved` | ✅ | ✅ same |
 | T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ✅ | ✅ corpus `object_*` + `row_array_*` + `object_low_nibble_reserved` | ✅ | ✅ same |
 | T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
@@ -162,21 +162,21 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| S-001 | `raw_text` encode (low_nibble 0): JSON emit runs per-char escape pass | ❌ | ❌ | ❌ | ❌ |
-| S-002 | `escape_form` encode (low_nibble 1): JSON emit just wraps in quotes | ❌ | ❌ | ❌ | ❌ |
-| S-003 | reject low_nibble ∈ 2..15 | ❌ | ❌ | ❌ | ❌ |
-| S-004 | length is `size − 1` (no in-value length prefix) | ❌ | ❌ | ❌ | ❌ |
+| S-001 | `raw_text` encode (low_nibble 0): JSON emit runs per-char escape pass | ✅ | ✅ corpus `string_raw_text_hello` + `string_raw_text_with_quote` | ✅ | ✅ `string_round_trip` + corpus |
+| S-002 | `escape_form` encode (low_nibble 1): JSON emit just wraps in quotes | ✅ | ✅ corpus `string_escape_form_hello` | ✅ | ✅ `string_round_trip` + corpus |
+| S-003 | reject low_nibble ∈ 2..15 | ✅ | ✅ corpus `string_low_nibble_reserved` | ✅ | ✅ `string_round_trip` + corpus |
+| S-004 | length is `size − 1` (no in-value length prefix) | ✅ | ✅ implicit in every string round-trip (size from container) | ✅ | ✅ same |
 
 ## §4.10 — `bytes` with encoding hint
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| BY-001 | encoding hint 0 = base64; JSON emit produces standard base64 | ❌ | ❌ | ❌ | ❌ |
-| BY-002 | encoding hint 1 = hex; JSON emit produces lowercase hex | ❌ | ❌ | ❌ | ❌ |
-| BY-003 | encoding hint 2 = base58; JSON emit produces Bitcoin-alphabet base58 | ❌ | ❌ | ❌ | ❌ |
-| BY-004 | encoding hint 3 = base64url; JSON emit produces URL-safe base64 no padding | ❌ | ❌ | ❌ | ❌ |
-| BY-005 | reject low_nibble ∈ 4..15 | ❌ | ❌ | ❌ | ❌ |
-| BY-006 | wire bytes are raw octets regardless of hint | ❌ | ❌ | ❌ | ❌ |
+| BY-001 | encoding hint 0 = base64; JSON emit produces standard base64 | ✅ | ✅ corpus `bytes_base64_deadbeef` | ✅ | ✅ `bytes_round_trip_all_hints` + corpus |
+| BY-002 | encoding hint 1 = hex; JSON emit produces lowercase hex | ✅ | ✅ corpus `bytes_hex_deadbeef` | ✅ | ✅ same |
+| BY-003 | encoding hint 2 = base58; JSON emit produces Bitcoin-alphabet base58 | ✅ | ✅ corpus `bytes_base58_deadbeef` | ✅ | ✅ same |
+| BY-004 | encoding hint 3 = base64url; JSON emit produces URL-safe base64 no padding | ✅ | ✅ corpus `bytes_base64url_deadbeef` | ✅ | ✅ same |
+| BY-005 | reject low_nibble ∈ 4..15 | ✅ | ✅ corpus `bytes_low_nibble_reserved` | ✅ | ✅ same |
+| BY-006 | wire bytes are raw octets regardless of hint | ✅ | ✅ all four hint fixtures share the same payload bytes (`deadbeef`) | ✅ | ✅ same |
 
 ## §4.11 — `extension`
 

@@ -1,0 +1,10 @@
+{
+  "id": "string_low_nibble_reserved",
+  "spec_ref": "section 4.9",
+  "rule_ids": ["S-003"],
+  "description": "string with low_nibble 2 (0x92) is reserved — only flag 0 (raw_text) and 1 (escape_form) defined",
+  "input_value": null,
+  "wire_hex": "92",
+  "must_reject": true,
+  "reject_reason": "string_reserved_low_nibble"
+}

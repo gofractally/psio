@@ -1,0 +1,11 @@
+{
+  "id": "string_escape_form_hello",
+  "spec_ref": "section 4.9",
+  "rule_ids": ["S-002", "T-010"],
+  "description": "escape_form 'hello' — tag 0x91 + ASCII content. JSON emit just wraps in quotes (no escape pass).",
+  "input_value": {"kind": "string", "encoding": "escape_form", "text": "hello"},
+  "wire_hex": "9168656c6c6f",
+  "json_compact": "\"hello\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

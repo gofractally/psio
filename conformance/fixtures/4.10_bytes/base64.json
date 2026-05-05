@@ -1,0 +1,11 @@
+{
+  "id": "bytes_base64_deadbeef",
+  "spec_ref": "section 4.10",
+  "rule_ids": ["BY-001", "BY-006", "T-011"],
+  "description": "0xDEADBEEF with hint=base64 (default). JSON emit: standard base64 with padding.",
+  "input_value": {"kind": "bytes", "encoding": "base64", "bytes_hex": "deadbeef"},
+  "wire_hex": "a0deadbeef",
+  "json_compact": "\"3q2+7w==\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

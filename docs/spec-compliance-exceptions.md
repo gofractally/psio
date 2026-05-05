@@ -13,17 +13,16 @@ to ✅, the id is removed from this file.
 
 ## Status
 
-**Phase 1 is fully sealed. Phases 2.1 (generic array), 2.2 (typed
-array), 2.3 (object), and 2.4 (row_array) are all green.** All
-container types of pjson v1 are now implemented end-to-end with
-byte-equivalent cross-validation between Rust and C++.
+**Phase 1, all of Phase 2 (containers), and Phase 3.1 (string) +
+3.2 (bytes encoding hint) are sealed.** Cross-validation between
+Rust and C++ is byte-equivalent across every fixture.
 
 Tally:
-- 105 rows ✅ on **both** Rust and C++.
+- 117 rows ✅ on **both** Rust and C++.
 - 8 rows ⚠️: F-008 (Phase 5); AG-003/004/005 fixture follow-ups;
-  AT-012 partial; H-005; O-004 partial; O-006; RA-002 partial;
-  RA-003 partial.
-- 60 rows ❌ — Phase 3/4 scope (JSON-side semantics + extensibility).
+  AT-012; H-005; O-004 partial; O-006; RA-002/003.
+- 48 rows ❌ — Phase 3.3+/4 scope (numeric_string, JSON mappings,
+  emitter options, extension framework, canonical encoding).
 
 ---
 
@@ -34,7 +33,6 @@ These rows are not yet implemented. Both drivers return
 any of these will fail loud rather than silently mishandle.
 
 ```
-BY-001 BY-002 BY-003 BY-004 BY-005 BY-006
 C-001 C-002 C-003 C-004 C-005 C-006
 D-007
 E-006 E-007 E-008 E-009 E-010 E-011
@@ -43,8 +41,7 @@ EX-001 EX-002 EX-003 EX-004 EX-005 EX-006
 J-001 J-002 J-003 J-004 J-005 J-006 J-007 J-008 J-009 J-010 J-011 J-012 J-013 J-014 J-015
 LIM-001 LIM-002 LIM-003 LIM-004 LIM-005 LIM-006
 NS-001 NS-002 NS-003 NS-004 NS-005 NS-006 NS-007
-S-001 S-002 S-003 S-004
-T-009 T-010 T-011 T-014
+T-009 T-014
 V-001
 E-002
 ```

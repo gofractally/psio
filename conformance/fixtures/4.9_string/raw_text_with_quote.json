@@ -1,0 +1,11 @@
+{
+  "id": "string_raw_text_with_quote",
+  "spec_ref": "section 4.9",
+  "rule_ids": ["S-001"],
+  "description": "raw_text containing a literal quote — JSON emitter must escape it. Wire bytes: 0x90 + 'say \"hi\"' (8 chars literal). JSON emit: 'say \\\"hi\\\"' wrapped.",
+  "input_value": {"kind": "string", "encoding": "raw_text", "text": "say \"hi\""},
+  "wire_hex": "907361792022686922",
+  "json_compact": "\"say \\\"hi\\\"\"",
+  "must_round_trip": true,
+  "must_validate": true
+}
