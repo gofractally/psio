@@ -225,6 +225,76 @@ yet.
 
 ---
 
+## E-005 — serde adapter (Rust compatibility mode)
+
+**Intent.** Provide a Rust serde adapter so any type that derives
+`Serialize` / `Deserialize` round-trips through pjson with no extra
+code. This is a **compatibility layer** that leverages existing serde
+infrastructure (the rich `#[derive]` ecosystem, format-agnostic
+container types) — it is **not** a redefinition of the wire format.
+
+**Hard rule (binding constraint).**
+
+> When encoding a native typed value, **the host type controls.**
+> The encoder respects what the type system tells it (a `Vec<u32>`
+> is a typed homogeneous array; a `String` is a string; a `BTreeMap`
+> is a sorted-key object). The encoder **only peeks at string
+> contents** when parsing JSON source — to detect the JSON-number
+> grammar and lift to `numeric_string` (§4.8) on the JSON-side
+> ingress path.
+>
+> pjson does **not** change its wire format to fit serde's data
+> model. Serde adapts to pjson's types via attribute newtypes and
+> wrapper types where necessary.
+
+**Why this matters.** Serde's data model is a lowest-common-denominator
+intersection across many formats — it doesn't have first-class
+representations for several pjson types:
+
+| pjson type           | serde model has...                            | adapter strategy                  |
+|----------------------|-----------------------------------------------|-----------------------------------|
+| `numeric_string`     | (no equivalent — `String` looks like text)    | `pjson::NumericString<T>` newtype |
+| `bytes` + hint       | `Vec<u8>` or `serde_bytes::ByteBuf`           | `pjson::Bytes<HINT>` newtype OR a `#[pjson(bytes_encoding = "hex")]` field attr |
+| `decimal` (§4.7)     | (no equivalent — `f64` loses precision)       | `pjson::Decimal` type, similar to `rust_decimal::Decimal` shape |
+| `string` `raw_text` vs `escape_form` flag | `String` is just bytes      | adapter defaults to `escape_form` when invoked from JSON path; `raw_text` for typed `String` from native code |
+| typed-array element-code selection | sequence visitor, no element-type peek | rely on Rust's static typing — `Vec<u32>` → element_code 6, etc. |
+| `row_array`          | sequence-of-struct, but no homogeneity bit    | adapter detects when `Vec<S>` for reflected `S`; emit row_array unconditionally for that shape |
+
+**Constraint enforcement.**
+
+- **Native typed input:** the adapter sees `T` at compile time. It
+  emits the natural pjson form (typed array for `Vec<u32>`, row_array
+  for `Vec<Struct>`, decimal for `Decimal`, etc.) with **zero
+  inspection of string bytes**.
+- **JSON-source input:** when the entry point is a JSON parser
+  (e.g. `pjson::from_json_str`), the encoder runs the §4.8
+  numeric-string-lift detection on string fields. This is the
+  **only** byte-inspection path the spec allows.
+
+**Status.** Deferred to **Phase 6** (after Phases 1–5 complete).
+Order:
+
+| Phase | scope |
+|-------|-------|
+| 6.1 | `Serializer` for primitives (null, bool, ints, floats, strings, bytes via newtypes) |
+| 6.2 | `Serializer` for sequences and maps (generic array, object) |
+| 6.3 | `Serializer` for typed-array detection (specialization or attribute-driven) |
+| 6.4 | `Serializer` for row_array detection (struct-shape homogeneity) |
+| 6.5 | `Deserializer` symmetric to all of the above |
+| 6.6 | Integration tests against the conformance corpus — every fixture's `input_value` must round-trip through serde with the same wire bytes |
+
+**Out of scope.**
+
+- C++ analog: pjson's C++ side already has `psio::reflect<T>` doing
+  the type-driven dispatch. No "compatibility-mode for some other
+  C++ serialization framework" is planned. If a parallel C++ effort
+  is wanted later (e.g. Boost.PFR adapter), it would be its own
+  evolution-note entry.
+- Changing the wire format to make serde's life easier. The
+  binding constraint above is non-negotiable.
+
+---
+
 ## Conventions for this file
 
 - Each entry has a stable id (E-NNN). IDs are append-only — never reused
