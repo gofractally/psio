@@ -237,11 +237,14 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
             // §5.2.1.5 / RA-003: detect homogeneous array-of-object.
             // If every child is an Object and all share the same keys
             // in the same order, lift to row_array — the shared key
-            // block lives once at the array level.
-            if let Some((keys, rows)) = detect_row_array_shape(&children) {
-                return Value::RowArray { keys, rows };
+            // block lives once at the array level. The consume-or-
+            // give-back signature lets the lift happen with zero
+            // value clones; on heterogeneous input we get the original
+            // Vec back unchanged.
+            match try_lift_to_row_array(children) {
+                Ok((keys, rows)) => Value::RowArray { keys, rows },
+                Err(children)    => Value::Array(children),
             }
-            Value::Array(children)
         }
         serde_json::Value::Object(obj) => {
             // §4.11 envelope round-trip: an object of the exact shape
@@ -385,35 +388,57 @@ enum EncodeError {
     NotImplementedYet(&'static str),
 }
 
-/// RA-003 / §5.2.1.5 — homogeneous-shape detection. Returns
-/// `Some((keys, rows))` if every child is an `Object` and all share
-/// the same key set in the same order. Returns `None` for empty
-/// arrays (a 0-row row_array provides no benefit and decoders
-/// can't infer a key block) or any heterogeneity.
-fn detect_row_array_shape(children: &[Value]) -> Option<(Vec<String>, Vec<Vec<Value>>)> {
-    if children.is_empty() { return None; }
-    // Must all be objects.
+/// RA-003 / §5.2.1.5 — homogeneous-shape detection + lift.
+///
+/// Two-phase to avoid touching value bytes twice:
+///
+///   1. Borrow-pass: walk `children` by reference and verify that
+///      every element is `Value::Object` with the same keys in the
+///      same order as the first. Bail early on the first mismatch.
+///   2. Move-pass: only on success, consume `children` and move
+///      values out of each Object into the per-row `Vec<Value>`.
+///      Zero clones on the lift path.
+///
+/// On heterogeneous input the function returns `Err(children)` so
+/// the caller can fall through to `Value::Array(children)` without
+/// reallocating the outer Vec.
+fn try_lift_to_row_array(
+    mut children: Vec<Value>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>), Vec<Value>> {
+    if children.is_empty() { return Err(children); }
+    // Phase 1 — borrow check.
     let first_keys: Vec<String> = match &children[0] {
-        Value::Object(entries) => entries.iter().map(|(k, _)| k.clone()).collect(),
-        _ => return None,
+        Value::Object(entries) if !entries.is_empty() => {
+            entries.iter().map(|(k, _)| k.clone()).collect()
+        }
+        _ => return Err(children),
     };
-    if first_keys.is_empty() { return None; }
-    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(children.len());
-    for c in children {
+    for c in children.iter().skip(1) {
         match c {
             Value::Object(entries) => {
-                if entries.len() != first_keys.len() { return None; }
+                if entries.len() != first_keys.len() { return Err(children); }
+                for (i, (k, _)) in entries.iter().enumerate() {
+                    if k != &first_keys[i] { return Err(children); }
+                }
+            }
+            _ => return Err(children),
+        }
+    }
+    // Phase 2 — consume and move.
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(children.len());
+    for c in children.drain(..) {
+        match c {
+            Value::Object(entries) => {
                 let mut row: Vec<Value> = Vec::with_capacity(first_keys.len());
-                for (i, (k, v)) in entries.iter().enumerate() {
-                    if k != &first_keys[i] { return None; }
-                    row.push(v.clone());
+                for (_k, v) in entries.into_iter() {
+                    row.push(v);
                 }
                 rows.push(row);
             }
-            _ => return None,
+            _ => unreachable!("phase 1 verified all children are Object"),
         }
     }
-    Some((first_keys, rows))
+    Ok((first_keys, rows))
 }
 
 /// RA-002 — random-access accessor for a `RowArray`. Returns the
@@ -452,7 +477,7 @@ fn decimal_or_ieee_pick(mantissa: i128, scale: i32) -> Value {
     // Decimal wire size: tag (1) + zigzag mantissa minimal bytes
     // (1..16) + varscale (1..4).
     let zz = zigzag_encode_i128(mantissa);
-    let m_bc = u128_le_minimal_at_least_1(zz).len();
+    let m_bc = u128_minimal_byte_count(zz);
     let scale_bc = match scale.unsigned_abs() {
         0..=31           => 1,
         32..=8191        => 2,
@@ -504,9 +529,9 @@ fn decimal_f64_roundtrips(mantissa: i128, scale: i32, f: f64) -> bool {
 /// unchanged; any non-canonical wire produces different bytes on
 /// re-encode (e.g., `0x40 0x05` for the value 5 re-encodes as `0x25`).
 fn validate_canonical(wire: &[u8]) -> Result<(), String> {
-    let v = decode(wire).map_err(|e| format!("decode: {:?}", e))?;
-    let v_canon = canonicalize_value(&v);
-    let re = encode(&v_canon).map_err(|e| format!("re-encode: {:?}", e))?;
+    let mut v = decode(wire).map_err(|e| format!("decode: {:?}", e))?;
+    canonicalize_in_place(&mut v);
+    let re = encode(&v).map_err(|e| format!("re-encode: {:?}", e))?;
     if re == wire { Ok(()) } else {
         Err(format!("non-canonical: re-encoded as {} bytes (vs {})",
                     re.len(), wire.len()))
@@ -522,51 +547,53 @@ fn validate_canonical(wire: &[u8]) -> Result<(), String> {
 /// preservation of the supplied form (e.g., asserting that an f64
 /// stays f64 even when 1.5 fits in f16).
 fn encode_canonical(v: &Value) -> Result<Vec<u8>, EncodeError> {
-    encode(&canonicalize_value(v))
+    let mut owned = v.clone();
+    canonicalize_in_place(&mut owned);
+    encode(&owned)
 }
 
-fn canonicalize_value(v: &Value) -> Value {
+/// Recursive in-place canonical transform. Touches only nodes that
+/// would change (Float width, Decimal trailing zeros) — TypedArray,
+/// String, Bytes, Bool, Null, Uint, NegInt, and Extension are skipped
+/// without traversal cost beyond a discriminant test.
+fn canonicalize_in_place(v: &mut Value) {
     match v {
         Value::Float { width_log2, bits } => {
             let (w, b) = canonical_float_width(*width_log2, *bits);
-            Value::Float { width_log2: w, bits: b }
+            *width_log2 = w;
+            *bits = b;
         }
         Value::Decimal { mantissa, scale } => {
-            // Trim trailing zeros from mantissa, incrementing scale,
-            // until last digit is non-zero or scale == 0 (§15.2.2).
             let (m, s) = trim_decimal(*mantissa, *scale);
-            // D-007: if a smaller ieee_float at smallest bit-exact
-            // width round-trips this decimal, pick whichever is shorter
-            // (tie → ieee). The decimal form remains the default for
-            // typed-decimal sources per §15.2; see comment there.
-            // For canonicalize_value we keep decimal — D-007 picker is
-            // applied on JSON ingress before a Decimal/Float is ever
-            // constructed (see `decimal_or_ieee_for_canonical_token`).
-            Value::Decimal { mantissa: m, scale: s }
+            *mantissa = m;
+            *scale = s;
         }
         Value::Array(children) => {
-            Value::Array(children.iter().map(canonicalize_value).collect())
+            for c in children.iter_mut() { canonicalize_in_place(c); }
         }
         Value::Object(entries) => {
-            Value::Object(entries.iter()
-                .map(|(k, v)| (k.clone(), canonicalize_value(v)))
-                .collect())
+            for (_k, v) in entries.iter_mut() { canonicalize_in_place(v); }
         }
-        Value::RowArray { keys, rows } => {
-            Value::RowArray {
-                keys: keys.clone(),
-                rows: rows.iter()
-                    .map(|r| r.iter().map(canonicalize_value).collect())
-                    .collect(),
+        Value::RowArray { keys: _, rows } => {
+            for row in rows.iter_mut() {
+                for v in row.iter_mut() { canonicalize_in_place(v); }
             }
         }
         Value::NumericString(inner) => {
-            Value::NumericString(Box::new(canonicalize_value(inner)))
+            canonicalize_in_place(inner);
         }
         // TypedArray, String, Bytes, Bool, Null, Uint, NegInt,
-        // Extension are already canonical by construction.
-        other => other.clone(),
+        // Extension are canonical by construction — no traversal.
+        _ => {}
     }
+}
+
+/// Backward-compatible wrapper: returns a fresh canonicalized clone.
+/// Tests use this; production code should prefer `canonicalize_in_place`.
+fn canonicalize_value(v: &Value) -> Value {
+    let mut owned = v.clone();
+    canonicalize_in_place(&mut owned);
+    owned
 }
 
 /// C-002 — find the smallest IEEE width in {1, 2, 3, 4} (binary16/32
@@ -722,9 +749,70 @@ fn trim_decimal(mantissa: i128, scale: i32) -> (i128, i32) {
 }
 
 fn encode(v: &Value) -> Result<Vec<u8>, EncodeError> {
-    let mut out = Vec::new();
+    // Pre-size the output buffer to a rough upper bound so the inner
+    // `out.push` / `extend_from_slice` calls don't trigger geometric
+    // re-allocations on large inputs. The estimator is conservative
+    // (always ≥ actual size) so excess capacity ends up trimmed by
+    // the caller's `Vec` consumer if needed.
+    let mut out = Vec::with_capacity(estimate_encoded_size(v));
     encode_into(v, &mut out)?;
     Ok(out)
+}
+
+/// Conservative upper bound for the encoded byte count. Used only
+/// to pre-size the output buffer in `encode` — accuracy isn't
+/// required, but it should never under-report (would force a
+/// realloc) for typical inputs.
+fn estimate_encoded_size(v: &Value) -> usize {
+    match v {
+        Value::Null | Value::Bool(_) => 1,
+        Value::Uint(n) | Value::NegInt(n) => {
+            // Worst case: 1 tag + 16 magnitude bytes.
+            if *n <= 15 { 1 } else { 1 + u128_minimal_byte_count(*n) }
+        }
+        Value::Float { width_log2, .. } => 1 + (1usize << *width_log2),
+        Value::Decimal { mantissa, .. } => {
+            // tag + zigzag mantissa + up to 4 varscale bytes.
+            1 + u128_minimal_byte_count(zigzag_encode_i128(*mantissa)) + 4
+        }
+        Value::String { content, .. } | Value::Bytes { content, .. } => {
+            1 + content.len()
+        }
+        Value::NumericString(inner) => 1 + estimate_encoded_size(inner),
+        Value::Extension { bytes, .. } => 1 + bytes.len(),
+        Value::Array(children) => {
+            // tag + width + sum(children) + slot table (≤4·N) + count(2)
+            let body: usize = children.iter().map(estimate_encoded_size).sum();
+            4 + body + 4 * children.len()
+        }
+        Value::TypedArray { element_code, raw } => {
+            // tag + count varuint(≤5) + raw bytes (already sized by elements)
+            let _ = element_code;
+            1 + 5 + raw.len()
+        }
+        Value::Object(entries) => {
+            // tag + width + per-entry (key + child + slot+ksize + hash) + count(2)
+            let body: usize = entries.iter()
+                .map(|(k, v)| {
+                    // 1 (key_size_byte) + 4 (long-key varuint, worst) +
+                    // key.len() + child + 4 (slot offset) + 1 (hash byte)
+                    1 + 4 + k.len() + estimate_encoded_size(v) + 4 + 1
+                })
+                .sum();
+            4 + body
+        }
+        Value::RowArray { keys, rows } => {
+            // tag + width(1) + counts (~6) + key block + slots + per-record body.
+            let key_bytes: usize = keys.iter().map(|k| k.len() + 5).sum();
+            let n_records = rows.len();
+            let cells_per: usize = if n_records > 0 { rows[0].len() } else { 0 };
+            let body_size: usize = rows.iter()
+                .flat_map(|r| r.iter())
+                .map(estimate_encoded_size)
+                .sum();
+            16 + key_bytes + body_size + 4 * cells_per * n_records
+        }
+    }
 }
 
 fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
@@ -1054,6 +1142,15 @@ fn u128_le_minimal(n: u128) -> Vec<u8> {
         len -= 1;
     }
     raw[..len].to_vec()
+}
+
+/// Minimal byte count to represent `n` little-endian. Returns the
+/// same value as `u128_le_minimal_at_least_1(n).len()` without
+/// allocating — used by hot-path size estimators (e.g., D-007 picker).
+#[inline]
+fn u128_minimal_byte_count(n: u128) -> usize {
+    if n == 0 { 1 }
+    else { (((128 - n.leading_zeros()) as usize) + 7) / 8 }
 }
 
 fn u128_le_minimal_at_least_1(n: u128) -> Vec<u8> {
@@ -2162,21 +2259,29 @@ fn base58_decode(s: &str) -> Option<Vec<u8>> {
     };
     let bytes = s.as_bytes();
     let zeros = bytes.iter().take_while(|&&c| c == b'1').count();
-    let mut acc: Vec<u8> = Vec::new();
+    // Output byte count ≤ ceil(payload_len * log(58)/log(256)) ≈ 0.733.
+    // Reserve ahead so the inner mul-add loop never reallocates.
+    let payload = bytes.len() - zeros;
+    let cap = (payload * 733) / 1000 + 1;
+    // Internal accumulator is little-endian — append-only during the
+    // mul-add loop, then reverse once before returning.
+    let mut acc: Vec<u8> = Vec::with_capacity(cap);
     for &c in &bytes[zeros..] {
         let mut carry = val(c)? as u32;
-        for byte in acc.iter_mut().rev() {
+        for byte in acc.iter_mut() {
             carry += (*byte as u32) * 58;
             *byte = (carry & 0xFF) as u8;
             carry >>= 8;
         }
         while carry > 0 {
-            acc.insert(0, (carry & 0xFF) as u8);
+            acc.push((carry & 0xFF) as u8);
             carry >>= 8;
         }
     }
-    let mut out = vec![0u8; zeros];
-    out.append(&mut acc);
+    acc.reverse();
+    let mut out = Vec::with_capacity(zeros + acc.len());
+    out.resize(zeros, 0);
+    out.extend_from_slice(&acc);
     Some(out)
 }
 

@@ -34,6 +34,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <charconv>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -336,22 +337,31 @@ inline std::vector<std::uint8_t> base58_decode(std::string_view s) {
    };
    std::size_t zeros = 0;
    while (zeros < s.size() && s[zeros] == '1') ++zeros;
+   // Output is bounded by payload * log(58)/log(256) ≈ 0.733.
+   // Reserve up front so the mul-add loop never reallocates.
+   const std::size_t payload = s.size() - zeros;
    std::vector<std::uint8_t> acc;
+   acc.reserve((payload * 733) / 1000 + 1);
+   // Internal accumulator is little-endian (append on carry-out).
+   // Reversed once at the end to produce big-endian output.
    for (std::size_t i = zeros; i < s.size(); ++i) {
       int v = val(s[i]);
       if (v < 0) throw std::runtime_error{"base58_decode: invalid char"};
       std::uint32_t carry = static_cast<std::uint32_t>(v);
-      for (auto it = acc.rbegin(); it != acc.rend(); ++it) {
+      for (auto it = acc.begin(); it != acc.end(); ++it) {
          carry += static_cast<std::uint32_t>(*it) * 58u;
          *it = static_cast<std::uint8_t>(carry & 0xFF);
          carry >>= 8;
       }
       while (carry > 0) {
-         acc.insert(acc.begin(), static_cast<std::uint8_t>(carry & 0xFF));
+         acc.push_back(static_cast<std::uint8_t>(carry & 0xFF));
          carry >>= 8;
       }
    }
-   std::vector<std::uint8_t> out(zeros, 0);
+   std::reverse(acc.begin(), acc.end());
+   std::vector<std::uint8_t> out;
+   out.reserve(zeros + acc.size());
+   out.resize(zeros, 0);
    out.insert(out.end(), acc.begin(), acc.end());
    return out;
 }
@@ -527,6 +537,20 @@ static std::vector<std::uint8_t> u128_le_minimal_at_least_1(U128 n) {
    auto v = u128_le_minimal(n);
    if (v.empty()) v.push_back(0);
    return v;
+}
+
+// Minimal byte count for `n` little-endian (≥ 1). Returns the same
+// value as `u128_le_minimal_at_least_1(n).size()` without allocating.
+static inline std::size_t u128_minimal_byte_count(U128 n) noexcept {
+   if (n.is_zero()) return 1;
+   const std::uint64_t hi = n.hi;
+   if (hi != 0) {
+      // bits used in hi: 64 - clz(hi). total = 64 + that, in bytes.
+      const unsigned bits = 64u - static_cast<unsigned>(__builtin_clzll(hi)) + 64u;
+      return (bits + 7u) / 8u;
+   }
+   const unsigned bits = 64u - static_cast<unsigned>(__builtin_clzll(n.lo));
+   return (bits + 7u) / 8u;
 }
 
 // §15.2.1 canonical NaN bit-pattern rewrite. If `bits` (interpreted
@@ -1125,8 +1149,62 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
    }, v);
 }
 
+// Conservative upper bound for the encoded byte count. Used only
+// to reserve output capacity in `encode` — never under-reports for
+// typical inputs.
+static std::size_t estimate_encoded_size(const Value& v) {
+   return std::visit([](const auto& arg) -> std::size_t {
+      using T = std::decay_t<decltype(arg)>;
+      if constexpr (std::is_same_v<T, Null> || std::is_same_v<T, Bool>) {
+         return 1;
+      } else if constexpr (std::is_same_v<T, Uint>) {
+         if (arg.value.fits_u64() && arg.value.lo <= 15) return 1;
+         return 1 + u128_minimal_byte_count(arg.value);
+      } else if constexpr (std::is_same_v<T, NegInt>) {
+         if (arg.magnitude.fits_u64() && arg.magnitude.lo <= 15) return 1;
+         return 1 + u128_minimal_byte_count(arg.magnitude);
+      } else if constexpr (std::is_same_v<T, Float>) {
+         return 1u + (std::size_t{1} << arg.width_log2);
+      } else if constexpr (std::is_same_v<T, Decimal>) {
+         return 1 + u128_minimal_byte_count(zigzag_encode_i128(arg.mantissa)) + 4;
+      } else if constexpr (std::is_same_v<T, String>) {
+         return 1 + arg.content.size();
+      } else if constexpr (std::is_same_v<T, Bytes>) {
+         return 1 + arg.content.size();
+      } else if constexpr (std::is_same_v<T, NumericString>) {
+         return 1 + (arg.body ? estimate_encoded_size(arg.body->inner) : 1);
+      } else if constexpr (std::is_same_v<T, Extension>) {
+         return 1 + arg.bytes.size();
+      } else if constexpr (std::is_same_v<T, Array>) {
+         std::size_t body = 0;
+         if (arg.body) for (const auto& c : arg.body->children) body += estimate_encoded_size(c);
+         const std::size_t n = arg.body ? arg.body->children.size() : 0;
+         return 4 + body + 4 * n;
+      } else if constexpr (std::is_same_v<T, TypedArray>) {
+         return 1 + 5 + arg.raw.size();
+      } else if constexpr (std::is_same_v<T, Object>) {
+         std::size_t body = 0;
+         if (arg.body) for (const auto& [k, v] : arg.body->entries)
+            body += 1 + 4 + k.size() + estimate_encoded_size(v) + 4 + 1;
+         return 4 + body;
+      } else if constexpr (std::is_same_v<T, RowArray>) {
+         if (!arg.body) return 16;
+         std::size_t key_bytes = 0;
+         for (const auto& k : arg.body->keys) key_bytes += k.size() + 5;
+         std::size_t body = 0;
+         for (const auto& row : arg.body->rows)
+            for (const auto& c : row) body += estimate_encoded_size(c);
+         const std::size_t n_records = arg.body->rows.size();
+         const std::size_t cells_per = arg.body->keys.size();
+         return 16 + key_bytes + body + 4 * cells_per * n_records;
+      }
+      return 16;
+   }, v);
+}
+
 static std::vector<std::uint8_t> encode(const Value& v) {
    std::vector<std::uint8_t> out;
+   out.reserve(estimate_encoded_size(v));
    encode_into(v, out);
    return out;
 }
@@ -1143,35 +1221,26 @@ static VarscaleResult varscale_decode(std::span<const std::uint8_t> buf) {
    return {zigzag_decode_u32(vu.value), vu.used};
 }
 
-static Value decode(std::span<const std::uint8_t> buf);
-static Value decode_generic_array(std::span<const std::uint8_t> buf);
+// LIM-006: cap recursive container nesting at MAX_DECODE_DEPTH so
+// adversarial wires can't blow the parser's stack via runaway
+// recursion. Threaded as an explicit parameter (matching Rust's
+// `decode_at_depth`) to avoid thread-local fetch overhead per call.
+static constexpr unsigned MAX_DECODE_DEPTH = 256;
+
+static Value decode_at_depth(std::span<const std::uint8_t> buf, unsigned depth);
+static Value decode_generic_array(std::span<const std::uint8_t> buf, unsigned depth);
 static Value decode_typed_array(std::span<const std::uint8_t> buf,
                                 std::uint8_t element_code);
-static Value decode_object(std::span<const std::uint8_t> buf);
-static Value decode_row_array(std::span<const std::uint8_t> buf);
-
-// LIM-006: a thread-local depth counter caps recursive container
-// nesting at MAX_DECODE_DEPTH so adversarial wires can't blow the
-// parser's stack via runaway recursion.
-static constexpr unsigned MAX_DECODE_DEPTH = 256;
-inline unsigned& decode_depth() {
-   static thread_local unsigned d{0};
-   return d;
-}
-struct DepthGuard {
-   DepthGuard() {
-      auto& d = decode_depth();
-      if (d >= MAX_DECODE_DEPTH)
-         throw DecodeError{"nesting depth exceeded (LIM-006)"};
-      ++d;
-   }
-   ~DepthGuard() { --decode_depth(); }
-   DepthGuard(const DepthGuard&) = delete;
-   DepthGuard& operator=(const DepthGuard&) = delete;
-};
+static Value decode_object(std::span<const std::uint8_t> buf, unsigned depth);
+static Value decode_row_array(std::span<const std::uint8_t> buf, unsigned depth);
 
 static Value decode(std::span<const std::uint8_t> buf) {
-   DepthGuard depth_guard;
+   return decode_at_depth(buf, 0);
+}
+
+static Value decode_at_depth(std::span<const std::uint8_t> buf, unsigned depth) {
+   if (depth >= MAX_DECODE_DEPTH)
+      throw DecodeError{"nesting depth exceeded (LIM-006)"};
    if (buf.empty()) throw DecodeError{"empty buffer"};
    const std::uint8_t tag  = buf[0];
    const std::uint8_t high = tag >> 4;
@@ -1223,7 +1292,7 @@ static Value decode(std::span<const std::uint8_t> buf) {
       case 11: {
          // §5.1/§5.1.1 array dispatch.
          if (low == 0) {
-            return decode_generic_array(buf);
+            return decode_generic_array(buf, depth);
          }
          if (low >= 1 && low <= 10) {
             return decode_typed_array(buf, static_cast<std::uint8_t>(low - 1));
@@ -1231,8 +1300,8 @@ static Value decode(std::span<const std::uint8_t> buf) {
          throw DecodeError{"reserved low_nibble for array"};
       }
       case 12: {
-         if (low == 0) return decode_object(buf);
-         if (low == 1) return decode_row_array(buf);
+         if (low == 0) return decode_object(buf, depth);
+         if (low == 1) return decode_row_array(buf, depth);
          throw DecodeError{"reserved low_nibble for object"};
       }
       case 9: {
@@ -1255,7 +1324,7 @@ static Value decode(std::span<const std::uint8_t> buf) {
          // §4.8 numeric_string. low_nibble must be 0; body is an
          // inner numeric value (codes 2..7).
          if (low != 0) throw DecodeError{"reserved low_nibble for numeric_string"};
-         Value inner = decode(buf.subspan(1));
+         Value inner = decode_at_depth(buf.subspan(1), depth + 1);
          if (!is_numeric_value(inner))
             throw DecodeError{"numeric_string inner must be numeric (codes 2..7)"};
          return make_numeric_string(std::move(inner));
@@ -1276,7 +1345,7 @@ static Value decode(std::span<const std::uint8_t> buf) {
 }
 
 // §5.1 generic-array decode. `buf` starts at the tag byte (0xB0).
-static Value decode_generic_array(std::span<const std::uint8_t> buf) {
+static Value decode_generic_array(std::span<const std::uint8_t> buf, unsigned depth) {
    if (buf.size() < 4) throw DecodeError{"array minimum size"};
    const std::uint8_t width_byte = buf[1];
    const std::size_t  slot_w_code = width_byte & 0x03;
@@ -1321,13 +1390,13 @@ static Value decode_generic_array(std::span<const std::uint8_t> buf) {
       }
       const std::size_t child_size = next_off - off;
       auto child_span = buf.subspan(value_data_start + off, child_size);
-      children.push_back(decode(child_span));
+      children.push_back(decode_at_depth(child_span, depth + 1));
    }
    return make_array(std::move(children));
 }
 
 // §5.2.1 row_array decode. `buf` starts at the tag byte (0xC1).
-static Value decode_row_array(std::span<const std::uint8_t> buf) {
+static Value decode_row_array(std::span<const std::uint8_t> buf, unsigned depth) {
    if (buf.size() < 5) throw DecodeError{"row_array minimum size"};
    const std::uint8_t width_byte = buf[1];
    const std::size_t  slot_w_code   = width_byte & 0x03;
@@ -1425,7 +1494,7 @@ static Value decode_row_array(std::span<const std::uint8_t> buf) {
          const std::size_t next_field_off = (j + 1 < k) ? read_slot(j + 1) : value_data_size;
          if (off > value_data_size || next_field_off < off || next_field_off > value_data_size)
             throw DecodeError{"row_array slot offset OOB or non-monotonic"};
-         row.push_back(decode(buf.subspan(rec_start + off, next_field_off - off)));
+         row.push_back(decode_at_depth(buf.subspan(rec_start + off, next_field_off - off), depth + 1));
       }
       rows.push_back(std::move(row));
    }
@@ -1434,7 +1503,7 @@ static Value decode_row_array(std::span<const std::uint8_t> buf) {
 }
 
 // §5.2 object decode. `buf` starts at the tag byte (0xC0).
-static Value decode_object(std::span<const std::uint8_t> buf) {
+static Value decode_object(std::span<const std::uint8_t> buf, unsigned depth) {
    if (buf.size() < 4) throw DecodeError{"object minimum size"};
    const std::uint8_t width_byte = buf[1];
    const std::size_t  slot_w_code = width_byte & 0x03;
@@ -1496,7 +1565,7 @@ static Value decode_object(std::span<const std::uint8_t> buf) {
 
       const std::size_t child_start = prefix_size + key_size;
       auto child_span = entry_span.subspan(child_start);
-      entries.emplace_back(std::move(key), decode(child_span));
+      entries.emplace_back(std::move(key), decode_at_depth(child_span, depth + 1));
    }
    return make_object(std::move(entries));
 }
@@ -1975,7 +2044,7 @@ static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale, double f) {
    // Decimal candidate size: tag (1) + zigzag mantissa minimal bytes
    // + varscale (1..4).
    const auto zz = zigzag_encode_i128(mantissa);
-   const std::size_t m_bc = u128_le_minimal_at_least_1(zz).size();
+   const std::size_t m_bc = u128_minimal_byte_count(zz);
    const std::uint32_t abs_scale = static_cast<std::uint32_t>(
       scale < 0 ? -static_cast<std::int64_t>(scale) : scale);
    const std::size_t scale_bc =
@@ -2074,9 +2143,15 @@ using JObject = std::vector<std::pair<std::string, JNode>>;
 // JFloat preserves the source token alongside the parsed double so
 // the §4.7.2 / D-007 picker on JSON ingress can run the canonical-form
 // path (mantissa, scale) instead of just the f64 bits.
+//
+// The token is a non-owning view into the JParser's source buffer.
+// JNode is consumed before the source `std::string` goes out of
+// scope (see the fixture-parsing flow in `parse_fixture` and the
+// `from_json(text)` wrapper), so the view is always live during use.
+// This avoids one std::string allocation per fractional JSON number.
 struct JFloat {
-   double      f{};
-   std::string token;
+   double           f{};
+   std::string_view token;
 };
 struct JNode {
    std::variant<std::nullptr_t, bool, JFloat, std::int64_t, std::string,
@@ -2186,15 +2261,25 @@ private:
          if (pos_ < s_.size() && (s_[pos_] == '+' || s_[pos_] == '-')) ++pos_;
          while (pos_ < s_.size() && (s_[pos_] >= '0' && s_[pos_] <= '9')) ++pos_;
       }
-      std::string token{s_.substr(start, pos_ - start)};
+      std::string_view token = s_.substr(start, pos_ - start);
       if (is_float) {
-         return JNode{JFloat{std::stod(token), std::move(token)}};
+         double v;
+         auto [ptr, ec] = std::from_chars(token.data(),
+                                          token.data() + token.size(), v);
+         if (ec != std::errc()) throw std::runtime_error{"json: bad number"};
+         return JNode{JFloat{v, token}};
       }
-      try {
-         return JNode{static_cast<std::int64_t>(std::stoll(token))};
-      } catch (const std::out_of_range&) {
-         return JNode{JFloat{std::stod(token), std::move(token)}};
-      }
+      // Integer path — try i64 first; on overflow fall through to JFloat
+      // to preserve the source token for downstream u128 parsing.
+      std::int64_t iv;
+      auto [ptr, ec] = std::from_chars(token.data(),
+                                       token.data() + token.size(), iv);
+      if (ec == std::errc()) return JNode{iv};
+      double v;
+      auto [_p, _e] = std::from_chars(token.data(),
+                                      token.data() + token.size(), v);
+      if (_e != std::errc()) throw std::runtime_error{"json: bad number"};
+      return JNode{JFloat{v, token}};
    }
 
    JArray parse_array() {
