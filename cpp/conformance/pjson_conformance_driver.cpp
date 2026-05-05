@@ -15,9 +15,10 @@
 //   pjson_conformance_driver --check     < fixture.json   exit 0 = pass
 //   pjson_conformance_driver --xvalidate < fixture.json   wire+json on stdout
 //
-// Phase 1 scope: tag dispatch, null, bool, uint_inline,
-// nint_inline, uint, negint to 128-bit magnitude, ieee_float
-// widths 16/32/64/128, decimal with all four varscale tiers.
+// Scope: every type and rule in the v1 spec — tag dispatch, atoms,
+// integers, ieee_float (binary16/32/64/128), decimal, string,
+// bytes, numeric_string, generic/typed/row arrays, object,
+// extension — plus §15 canonical encoding and §8 limits.
 //
 // binary128 widening uses the vendored Berkeley SoftFloat-3e
 // subset at cpp/external/softfloat/psio_softfloat.h.

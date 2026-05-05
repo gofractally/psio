@@ -23,19 +23,14 @@
 //! (`wire:HEX json:STR`) so the cross-language harness can compare
 //! C++ and Rust results.
 //!
-//! ## Scope (Phase 1)
+//! ## Scope
 //!
-//! - Tag dispatch + reserved-code rejection (T-*, V-*).
-//! - `null`, `bool` (N-*, B-*).
-//! - `uint_inline`, `nint_inline` (UI-*, NI-*).
-//! - `uint`, `negint` to 128-bit magnitude (U-*).
-//! - `ieee_float` widths binary16/32/64 (F-001..003, F-005..009).
-//! - `decimal` with all four varscale tiers (D-*).
-//!
-//! All spec types implemented; this comment used to flag Phase 2+
-//! types as `NotImplementedYet` but every variant now lands a real
-//! value. The error variant was removed in the post-Phase-4.2
-//! cleanup.
+//! Every type and rule in the v1 spec — tag dispatch, atoms,
+//! integers, ieee_float (binary16/32/64/128), decimal, string,
+//! bytes, numeric_string, generic/typed/row arrays, object,
+//! extension — plus §15 canonical encoding (NaN canonicalization,
+//! width minimization, decimal-vs-ieee picker, strict-canonical
+//! validator) and §8 limits (including LIM-006 nesting depth cap).
 
 use serde_json::Value as Json;
 use std::io::{self, Read};
@@ -1521,19 +1516,15 @@ fn decode_generic_array(buf: &[u8], depth: u32) -> Result<Value, DecodeError> {
         0x1_0000..=0xFF_FFFF  => 3,
         _                     => 4,
     };
-    if slot_w != expected_slot_w {
-        // Note: the spec requires slot_w match value_data_size; a buffer
-        // with a wider-than-needed slot is technically non-canonical
-        // but the spec only mandates encoder compliance, not decoder
-        // rejection.  Phase 1 driver accepts any matching slot width
-        // (and rejects a slot too small to hold the offsets, since
-        // those wouldn't fit).
-        // For now: enforce strict canonical, which the encoder
-        // produces.  Strict-canonical decoder is the conservative pick.
-        if slot_w < expected_slot_w {
-            return Err(DecodeError::Truncated("slot width too small for value_data"));
-        }
-        // wider-than-needed: tolerate (non-canonical but well-formed)
+    // §15.7 split: regular decoder is permissive about non-canonical
+    // wires; the strict-canonical validator (`validate_canonical`)
+    // rejects them. Concretely, a wider-than-needed slot_w is
+    // non-canonical — the encoder always picks the smallest — but
+    // still well-formed: the slots can hold the offsets and decoding
+    // proceeds normally. A too-small slot_w can't hold the offsets,
+    // so it's actually ill-formed and rejected here.
+    if slot_w < expected_slot_w {
+        return Err(DecodeError::Truncated("slot width too small for value_data"));
     }
     let value_data_start = 2;
     let slot_table_start = value_data_start + value_data_size;
@@ -1887,9 +1878,10 @@ fn render_json(v: &Value) -> String {
             }
         }
         Value::Float { width_log2, bits } => {
-            // Phase 1 JSON projection: render the value as the
-            // shortest decimal that round-trips at the source width.
-            // Special cases: f16/f32 are widened to f64 for printing.
+            // Render as the shortest decimal that round-trips at
+            // the source width. f16/f32/f128 are widened to f64
+            // for printing — host JSON has no native non-double
+            // float anyway.
             let f = match width_log2 {
                 3 => f64::from_bits(*bits as u64),
                 2 => f32::from_bits(*bits as u32) as f64,
