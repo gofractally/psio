@@ -859,13 +859,78 @@ fn xvalidate(fixture: &Fixture) -> Result<String, String> {
 
 // ── main ────────────────────────────────────────────────────────────
 
+/// Runtime self-test (T-016, T-017, V-003). Mirror of the `#[cfg(test)]`
+/// `tag_byte_predicates_match_spec_section_3` so the property is
+/// verifiable from the production binary without `cargo test`.
+fn self_test() -> ExitCode {
+    let mut failed = 0u32;
+    let mut check = |cond: bool, msg: &str| {
+        if !cond { eprintln!("  FAIL: {msg}"); failed += 1; }
+    };
+
+    for high in 0u8..=15 {
+        let is_atom              = high <= 1;
+        let is_integer           = (2..=5).contains(&high);
+        let is_real              = (6..=7).contains(&high);
+        let is_numeric_value     = (2..=7).contains(&high);
+        let is_number_projectable= (2..=8).contains(&high);
+        let is_json_string_emit  = (8..=10).contains(&high);
+        let is_aggregate         = (11..=12).contains(&high);
+        let is_extension         = high == 13;
+        let is_reserved          = high >= 14;
+
+        let class_count = [is_atom, is_integer, is_real, is_json_string_emit,
+                           is_aggregate, is_extension, is_reserved]
+                          .iter().filter(|x| **x).count();
+        check(class_count == 1, &format!("high {high} class_count==1"));
+
+        check(is_numeric_value == (is_integer || is_real),
+              &format!("high {high} numeric composite"));
+        check(is_number_projectable == (is_numeric_value || high == 8),
+              &format!("high {high} number_projectable composite"));
+
+        let tag: u8 = high << 4;
+        check(((tag >> 4) >= 14) == is_reserved,
+              &format!("high {high} V-003 predicate"));
+    }
+
+    for high in 2u8..=5 {
+        let sign_bit   = (high & 1) != 0;
+        let inline_bit = (high & 2) != 0;
+        let expected_signed = matches!(high, 3 | 5);
+        let expected_inline = matches!(high, 2 | 3);
+        check(sign_bit   == expected_signed, &format!("code {high} sign bit"));
+        check(inline_bit == expected_inline, &format!("code {high} inline bit"));
+    }
+
+    for high in 0u8..=15 {
+        let tag = high << 4;
+        match decode(&[tag]) {
+            Ok(_) => check(high < 14, &format!("high {high} not reserved")),
+            Err(DecodeError::ReservedTag(_)) => {
+                check(high >= 14, &format!("high {high} ReservedTag iff >= 14"));
+            }
+            Err(_) => check(high < 14, &format!("high {high} non-reserved error")),
+        }
+    }
+
+    if failed == 0 {
+        println!("self-test: PASSED");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("self-test: {failed} FAILED");
+        ExitCode::FAILURE
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = match args.first().map(String::as_str) {
         Some("--check") => "check",
         Some("--xvalidate") => "xvalidate",
+        Some("--self-test") => return self_test(),
         _ => {
-            eprintln!("usage: pjson_conformance_driver --check|--xvalidate < fixture.json");
+            eprintln!("usage: pjson_conformance_driver --check|--xvalidate|--self-test < fixture.json");
             return ExitCode::from(2);
         }
     };

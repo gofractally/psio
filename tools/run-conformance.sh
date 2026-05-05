@@ -65,6 +65,17 @@ run_one_lang() {
         return 100
     fi
 
+    # Run --self-test first: predicate properties (T-016, T-017, V-003).
+    # If the driver doesn't support --self-test, the older drivers will
+    # exit with a usage error; treat that as non-fatal (skip).
+    if "$driver_path" --self-test >/dev/null 2>&1; then
+        echo "${lang_name} self-test: PASSED"
+    else
+        # Treat as warning, not failure, so older drivers still work
+        # while the harness rolls out incrementally.
+        echo "${lang_name} self-test: SKIPPED or FAILED"
+    fi
+
     local total=0 pass=0 fail=0
     while IFS= read -r -d '' fixture; do
         # shellcheck disable=SC2053

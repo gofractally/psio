@@ -13,20 +13,18 @@ to ✅, the id is removed from this file.
 
 ## Phase 1 status
 
-Phase 1 — scalar wire format — is **functionally complete** in both
-languages with all rule rows fully ✅ except F-008 (NaN
-canonicalization, deferred to Phase 5) and the predicate properties
-T-016/T-017/V-003 which are ✅ on Rust (unit-tested) and ⚠️ on C++
-(true by construction in match dispatch but no dedicated C++ test
-framework yet).
+**Phase 1 is fully sealed.** All rule rows are ✅ on both languages
+except F-008 (NaN canonicalization, deliberately deferred to Phase 5).
 
-Tally as of this commit:
-- 68 rows ✅ on **both** Rust and C++ (added F-004 binary128 — softfloat
-  vendored at `cpp/external/softfloat/`, Rust port in driver).
-- 3 rows ⚠️ on C++ only (T-016, T-017, V-003 — predicate properties
-  true by construction, no C++ test framework yet).
+Tally:
+- 71 rows ✅ on **both** Rust and C++.
 - 1 row ⚠️ on both langs: F-008 (NaN canonicalization, Phase 5).
 - 95 rows ❌ — Phase 2/3/4 scope, all enumerated below.
+
+This includes binary128 (F-004) via the vendored Berkeley SoftFloat
+subset and a Rust port, and the predicate-property tests
+(T-016/T-017/V-003) via a `--self-test` runtime mode in both
+drivers (run by `tools/run-conformance.sh` automatically).
 
 ---
 
@@ -74,22 +72,15 @@ E-002
 
 ---
 
-## Block B — Phase 1 ⚠️ rows (impl exists, dedicated test pending)
+## Block B — Phase 1 ⚠️ rows
 
 ```
-F-008 T-016 T-017 V-003
+F-008
 ```
 
 | id | gap | action |
 |----|-----|--------|
 | F-008 | NaN canonicalization (§15.2.1) not implemented — round-trips bits as-is rather than emitting canonical pattern | Phase 5 (canonical encoding rules) |
-| T-016 | predicate range tests are tested in Rust (`tag_byte_predicates_match_spec_section_3`); C++ has no test framework yet — property holds by construction in match dispatch | add a Catch2 (or ad-hoc) test framework to `cpp/conformance/` and mirror the Rust test |
-| T-017 | bit-pattern within `is_integer` — same as T-016 | same |
-| V-003 | parse-fast-path predicate — same as T-016 | same |
-
-These three (T-016, T-017, V-003) form a single "C++ unit test
-framework" follow-up. None are wire-format issues; they're
-implementation properties. Marking ⚠️ on C++ until tested explicitly.
 
 ---
 

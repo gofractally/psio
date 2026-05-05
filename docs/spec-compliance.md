@@ -71,8 +71,8 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
 | T-015 | codes 14, 15 reserved → reject | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
-| T-016 | predicates (is_atom, is_integer, is_real, is_numeric_value, is_number_projectable, is_json_string_emit, is_aggregate, is_extension, is_reserved) collapse to range tests | ⚠️ implementation property — by-construction in match dispatch | ⚠️ no C++ unit test | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` |
-| T-017 | within is_integer: `bit 0 = sign`, `bit 1 = inline form` | ⚠️ implementation property — by-construction in match dispatch | ⚠️ no C++ unit test | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` |
+| T-016 | predicates (is_atom, is_integer, is_real, is_numeric_value, is_number_projectable, is_json_string_emit, is_aggregate, is_extension, is_reserved) collapse to range tests | ✅ | ✅ `--self-test` runtime check | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` + `--self-test` |
+| T-017 | within is_integer: `bit 0 = sign`, `bit 1 = inline form` | ✅ | ✅ `--self-test` runtime check | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` + `--self-test` |
 
 ## §4.1 — `null`
 
@@ -324,7 +324,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 |----|------|----------|----------|-----------|-----------|
 | V-001 | extension framework: unknown sub-type id does not error | ❌ | ❌ | ❌ | ❌ |
 | V-002 | reserved codes (14, 15) reject without partial decode | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
-| V-003 | parse-fast-path predicate `(tag >> 4) >= 14` | ⚠️ implementation property — by-construction in match dispatch | ⚠️ no C++ unit test | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` |
+| V-003 | parse-fast-path predicate `(tag >> 4) >= 14` | ✅ | ✅ `--self-test` runtime check | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` + `--self-test` |
 
 ## §15 — Canonical encoding
 

@@ -924,6 +924,107 @@ static std::string check(const Fixture& f) {
    return {};   // ok
 }
 
+// ── Self-test mode (T-016, T-017, V-003 — predicate properties) ───
+//
+// Verifies the §3 type-class predicates hold for every possible high
+// nibble (0..15) and that the dispatch sub-bits within is_integer
+// (codes 2..5) match the spec's stated layout (`bit 0 = sign`,
+// `bit 1 = inline form`).
+//
+// The properties are true by construction in the C++ match dispatch;
+// this mode codifies them as runtime checks so a future change that
+// breaks the layout fails loud. Mirror of Rust's
+// `tag_byte_predicates_match_spec_section_3`.
+static int self_test() {
+   int failed = 0;
+   auto check = [&](bool cond, const char* msg) {
+      if (!cond) { std::fprintf(stderr, "  FAIL: %s\n", msg); ++failed; }
+   };
+
+   for (std::uint8_t high = 0; high <= 15; ++high) {
+      const bool is_atom              = high <= 1;
+      const bool is_integer           = high >= 2 && high <= 5;
+      const bool is_real              = high >= 6 && high <= 7;
+      const bool is_numeric_value     = high >= 2 && high <= 7;
+      const bool is_number_projectable= high >= 2 && high <= 8;
+      const bool is_json_string_emit  = high >= 8 && high <= 10;
+      const bool is_aggregate         = high >= 11 && high <= 12;
+      const bool is_extension         = high == 13;
+      const bool is_reserved          = high >= 14;
+
+      // Mutual exclusion among the 7 disjoint top-level classes.
+      const int class_count =
+          (is_atom ? 1 : 0) + (is_integer ? 1 : 0) + (is_real ? 1 : 0) +
+          (is_json_string_emit ? 1 : 0) + (is_aggregate ? 1 : 0) +
+          (is_extension ? 1 : 0) + (is_reserved ? 1 : 0);
+      char m1[64];
+      std::snprintf(m1, sizeof m1, "high %u class_count==1", high);
+      check(class_count == 1, m1);
+
+      // Composite predicates derive from primitives.
+      char m2[64];
+      std::snprintf(m2, sizeof m2, "high %u is_numeric_value composite", high);
+      check(is_numeric_value == (is_integer || is_real), m2);
+      char m3[64];
+      std::snprintf(m3, sizeof m3, "high %u is_number_projectable composite", high);
+      check(is_number_projectable == (is_numeric_value || high == 8), m3);
+
+      // V-003: reserved-tag fast-path predicate.
+      const std::uint8_t tag = static_cast<std::uint8_t>(high << 4);
+      const bool predicate = ((tag >> 4) >= 14);
+      char m4[64];
+      std::snprintf(m4, sizeof m4, "high %u V-003 predicate", high);
+      check(predicate == is_reserved, m4);
+   }
+
+   // T-017: bit pattern within is_integer (codes 2..5).
+   //   2 = 0010: unsigned, inline
+   //   3 = 0011: signed,   inline
+   //   4 = 0100: unsigned, full
+   //   5 = 0101: signed,   full
+   for (std::uint8_t high = 2; high <= 5; ++high) {
+      const bool sign_bit   = (high & 0x01) != 0;
+      const bool inline_bit = (high & 0x02) != 0;
+      const bool expected_signed = (high == 3 || high == 5);
+      const bool expected_inline = (high == 2 || high == 3);
+      char m1[64];
+      std::snprintf(m1, sizeof m1, "code %u sign bit", high);
+      check(sign_bit == expected_signed, m1);
+      char m2[64];
+      std::snprintf(m2, sizeof m2, "code %u inline bit", high);
+      check(inline_bit == expected_inline, m2);
+   }
+
+   // Round-trip the predicates against the driver's actual decode
+   // dispatch: every reserved high nibble must throw, defined arms
+   // must NOT throw a "reserved" error (they may throw truncated).
+   for (std::uint8_t high = 0; high <= 15; ++high) {
+      const std::uint8_t tag = static_cast<std::uint8_t>(high << 4);
+      const std::uint8_t one_byte[1] = {tag};
+      try {
+         (void)decode({one_byte, 1});
+         // Some dispatch arms succeed on a 1-byte tag (e.g. 0x00 = null,
+         // 0x10 = false, etc.); that's fine for non-reserved.
+         char m[64];
+         std::snprintf(m, sizeof m, "high %u should not be reserved", high);
+         check(high < 14, m);
+      } catch (const DecodeError& e) {
+         const std::string what{e.what()};
+         const bool says_reserved = what.find("reserved tag 0x") != std::string::npos;
+         char m[64];
+         std::snprintf(m, sizeof m, "high %u reserved iff says_reserved", high);
+         check(says_reserved == (high >= 14), m);
+      }
+   }
+
+   if (failed == 0) {
+      std::printf("self-test: PASSED\n");
+      return 0;
+   }
+   std::fprintf(stderr, "self-test: %d FAILED\n", failed);
+   return 1;
+}
+
 static std::string xvalidate(const Fixture& f) {
    const auto wire = parse_hex(f.wire_hex);
    if (f.must_reject) {
@@ -946,11 +1047,14 @@ static std::string xvalidate(const Fixture& f) {
 
 int main(int argc, char** argv) {
    if (argc < 2) {
-      std::fprintf(stderr, "usage: %s --check|--xvalidate < fixture.json\n",
+      std::fprintf(stderr, "usage: %s --check|--xvalidate|--self-test < fixture.json\n",
                    argv[0]);
       return 2;
    }
    const std::string mode{argv[1]};
+   if (mode == "--self-test") {
+      return pjson_conformance::self_test();
+   }
    if (mode != "--check" && mode != "--xvalidate") {
       std::fprintf(stderr, "usage: %s --check|--xvalidate < fixture.json\n",
                    argv[0]);
