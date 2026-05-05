@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_empty_i16",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-001", "AT-012"],
+  "description": "empty i16 typed array — exercises AT-012 for element_code 2",
+  "input_value": {"kind": "typed_array", "element_code": 2, "elements": []},
+  "wire_hex": "b30000",
+  "json_compact": "[]",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -197,9 +197,9 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 |----|------|----------|----------|-----------|-----------|
 | AG-001 | encode generic array: tag `0xB0`, width byte, value_data, slot table, count u16 LE | ✅ | ✅ corpus `array_empty` + `array_single_uint_inline` + `array_heterogeneous` + `array_nested` | ✅ | ✅ `generic_array_round_trip` + corpus |
 | AG-002 | decode: locate slot table from tail, walk forward into value_data | ✅ | ✅ corpus `array_*` round-trip | ✅ | ✅ `generic_array_round_trip` |
-| AG-003 | adaptive slot width selection: u8 / u16 / u24 / u32 per value_data size | ✅ | ⚠️ corpus only exercises u8 path; `array_adaptive_slot_width` Rust test exercises u16 | ✅ | ✅ `array_adaptive_slot_width` (asserts u16 slots when value_data > 256 B) |
-| AG-004 | reject slot offsets that violate monotonicity | ✅ via decode bounds check | ⚠️ no dedicated reject fixture | ✅ via decode bounds check | ⚠️ |
-| AG-005 | reject slot offset ≥ value_data_size | ✅ | ⚠️ no dedicated reject fixture | ✅ | ⚠️ |
+| AG-003 | adaptive slot width selection: u8 / u16 / u24 / u32 per value_data size | ✅ | ✅ corpus u8 + Rust unit test `array_adaptive_slot_width` (u16) + `array_adaptive_slot_width_u24_u32` (u24/u32) | ✅ | ✅ `array_adaptive_slot_width{,_u24_u32}` |
+| AG-004 | reject slot offsets that violate monotonicity | ✅ via decode bounds check | ✅ corpus `array_slot_non_monotonic_rejected` | ✅ via decode bounds check | ✅ corpus `array_slot_non_monotonic_rejected` |
+| AG-005 | reject slot offset ≥ value_data_size | ✅ | ✅ corpus `array_slot_oob_rejected` | ✅ | ✅ corpus `array_slot_oob_rejected` |
 | AG-006 | empty array (N=0) round-trip | ✅ | ✅ corpus `array_empty` | ✅ | ✅ `generic_array_round_trip` + corpus |
 
 ### §5.1.1 — Typed homogeneous array
@@ -217,7 +217,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | AT-009 | element code 8 (f32): tag `0xB9` | ✅ | ✅ corpus `typed_array_f32_one_two` | ✅ | ✅ corpus |
 | AT-010 | element code 9 (f64): tag `0xBA` | ✅ | ✅ corpus `typed_array_f64_one` | ✅ | ✅ corpus |
 | AT-011 | reject low_nibble 11..15 | ✅ | ✅ corpus `typed_array_low_nibble_11_reserved` | ✅ | ✅ corpus |
-| AT-012 | empty typed array (N=0) at every element code | ✅ | ⚠️ only `typed_array_empty_i8` covered; others by code path | ✅ | ⚠️ same |
+| AT-012 | empty typed array (N=0) at every element code | ✅ | ✅ corpus `typed_array_empty_{i8,i16,i32,i64,u8,u16,u32,u64,f32,f64}` | ✅ | ✅ same |
 
 ### §5.2 — Object (single)
 
@@ -226,9 +226,9 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | O-001 | encode object: tag `0xC0`, value_data, hash[N], slot[N], count u16 LE | ✅ | ✅ corpus `object_*` | ✅ | ✅ `object_round_trip` + corpus |
 | O-002 | hash byte = `key_hash8(key)` for each entry (XXH3_64 low byte after suffix strip) | ✅ via XXH3_64bits + rfind('.') | ✅ corpus | ✅ via xxhash-rust + rfind | ✅ `key_hash8_strips_trailing_dot_suffix` + corpus |
 | O-003 | suffix strip: `"foo.b64"` and `"foo"` hash to same byte | ✅ | ✅ corpus `object_suffix_strip_collision` | ✅ | ✅ `key_hash8_strips_trailing_dot_suffix` + corpus |
-| O-004 | adaptive slot width per value_data size | ✅ | ⚠️ corpus exercises u8 in single_field/multi_field; u16 in long_key_255_escape | ✅ | ⚠️ same |
+| O-004 | adaptive slot width per value_data size | ✅ | ✅ corpus u8/u16 + Rust unit test `object_long_key_64kib_round_trip` exercises u24/u32 path | ✅ | ✅ same |
 | O-005 | empty object (N=0) round-trip | ✅ | ✅ corpus `object_empty` | ✅ | ✅ `object_round_trip` + corpus |
-| O-006 | reject hash[i] ≠ key_hash8(stored_key_i) | ✅ via decode hash check | ⚠️ no dedicated reject fixture (would need hand-crafted bad hash) | ✅ | ⚠️ |
+| O-006 | reject hash[i] ≠ key_hash8(stored_key_i) | ✅ via decode hash check | ✅ corpus `object_hash_mismatch_rejected` | ✅ | ✅ corpus `object_hash_mismatch_rejected` |
 | O-007 | reject low_nibble ∈ 2..15 | ✅ | ✅ corpus `object_low_nibble_reserved` | ✅ | ✅ corpus |
 
 ### §5.2.1 — Row-array
@@ -247,7 +247,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | H-002 | long-key escape: `key_size_byte = 0xFF`, varuint excess inline in entry | ✅ | ✅ corpus `object_long_key_255_escape` | ✅ | ✅ `object_long_key_round_trip` + corpus |
 | H-003 | round-trip key of exactly 254 bytes (no escape) | ✅ | ✅ corpus `object_long_key_254` | ✅ | ✅ `object_long_key_round_trip` + corpus |
 | H-004 | round-trip key of exactly 255 bytes (escape, excess = 0) | ✅ | ✅ corpus `object_long_key_255_escape` | ✅ | ✅ `object_long_key_round_trip` + corpus |
-| H-005 | round-trip key of 64 KiB (4-byte varuint excess) | ⚠️ encoder supports 4-byte varuint; no fixture | ⚠️ | ⚠️ same | ⚠️ |
+| H-005 | round-trip key of 64 KiB (4-byte varuint excess) | ✅ | ✅ Rust unit test `object_long_key_64kib_round_trip` (cross-validates against C++ via wire bytes) | ✅ | ✅ `object_long_key_64kib_round_trip` |
 
 ## §6 — Document level
 
@@ -283,12 +283,12 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 |----|------|----------|----------|-----------|-----------|
 | EM-001 | `pretty=false` (default): no whitespace between tokens | ✅ | ✅ corpus `emitter_pretty_*` (json_compact path) | ✅ | ✅ same |
 | EM-002 | `pretty=true`, `indent=N`: each array element / object key on own line, indented N spaces | ✅ | ✅ corpus `emitter_pretty_object` + `emitter_pretty_array` | ✅ | ✅ same |
-| EM-003 | `pretty=true`, `indent=0`: tab-indent | ✅ implementation supports it | ⚠️ no fixture uses indent=0 yet | ✅ same | ⚠️ |
+| EM-003 | `pretty=true`, `indent=0`: tab-indent | ✅ | ✅ corpus `emitter_pretty_tab_indent` (also covers indent=4 alt-width) | ✅ | ✅ same |
 | EM-004 | `int_string_mode=Never`: every bare integer unquoted | ✅ | ✅ corpus `emitter_int_string_mode` (json_compact path) | ✅ | ✅ same |
 | EM-005 | `int_string_mode=LargeOnly`: integers \|v\| > 2⁵³ − 1 quoted; smaller bare | ✅ | ✅ corpus `emitter_int_string_mode` (LargeOnly path) | ✅ | ✅ same |
 | EM-006 | `int_string_mode=All`: every bare integer quoted | ✅ | ✅ corpus `emitter_int_string_mode` (All path) | ✅ | ✅ same |
 | EM-007 | `numeric_string` always quoted regardless of mode | ✅ | ✅ corpus `emitter_numeric_string_unaffected_by_mode` | ✅ | ✅ same |
-| EM-008 | `ieee_float` and `decimal` not affected by `int_string_mode` | ✅ implementation falls through to default render for these | ⚠️ no dedicated fixture | ✅ same | ⚠️ |
+| EM-008 | `ieee_float` and `decimal` not affected by `int_string_mode` | ✅ | ✅ corpus `emitter_float_decimal_unaffected_by_int_string_mode` | ✅ | ✅ same |
 
 ## §8 — Limits
 

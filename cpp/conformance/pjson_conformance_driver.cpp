@@ -2059,7 +2059,9 @@ struct Fixture {
    std::string                  wire_hex;
    std::optional<std::string>   json_compact;
    // §7.5 emitter-option assertions.
-   std::optional<std::string>   json_pretty;
+   std::optional<std::string>   json_pretty;             // pretty=true, indent=2
+   std::optional<std::string>   json_pretty_tab;         // pretty=true, indent_tab=true (EM-003)
+   std::optional<std::string>   json_pretty_indent_4;    // pretty=true, indent=4
    std::optional<std::string>   json_int_string_largeonly;
    std::optional<std::string>   json_int_string_all;
    bool                         must_round_trip = false;
@@ -2399,6 +2401,10 @@ static Fixture parse_fixture(std::string_view json_text) {
    }
    if (const auto* n = obj_get(o, "json_pretty"))
       if (auto* s = std::get_if<std::string>(&n->v)) f.json_pretty = *s;
+   if (const auto* n = obj_get(o, "json_pretty_tab"))
+      if (auto* s = std::get_if<std::string>(&n->v)) f.json_pretty_tab = *s;
+   if (const auto* n = obj_get(o, "json_pretty_indent_4"))
+      if (auto* s = std::get_if<std::string>(&n->v)) f.json_pretty_indent_4 = *s;
    if (const auto* n = obj_get(o, "json_int_string_largeonly"))
       if (auto* s = std::get_if<std::string>(&n->v)) f.json_int_string_largeonly = *s;
    if (const auto* n = obj_get(o, "json_int_string_all"))
@@ -2477,6 +2483,26 @@ static std::string check(const Fixture& f) {
       const std::string got = render_json_with(decoded, opts);
       if (got != *f.json_pretty) {
          return "json_pretty mismatch: expected\n  " + *f.json_pretty +
+                "\n  got: " + got;
+      }
+   }
+   if (f.json_pretty_tab.has_value()) {
+      EmitOptions opts;
+      opts.pretty = true;
+      opts.indent = 0;   // tab mode (EM-003)
+      const std::string got = render_json_with(decoded, opts);
+      if (got != *f.json_pretty_tab) {
+         return "json_pretty_tab mismatch: expected\n  " + *f.json_pretty_tab +
+                "\n  got: " + got;
+      }
+   }
+   if (f.json_pretty_indent_4.has_value()) {
+      EmitOptions opts;
+      opts.pretty = true;
+      opts.indent = 4;
+      const std::string got = render_json_with(decoded, opts);
+      if (got != *f.json_pretty_indent_4) {
+         return "json_pretty_indent_4 mismatch: expected\n  " + *f.json_pretty_indent_4 +
                 "\n  got: " + got;
       }
    }

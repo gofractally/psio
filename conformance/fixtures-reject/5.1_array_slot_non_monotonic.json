@@ -1,0 +1,8 @@
+{
+  "id": "array_slot_non_monotonic_rejected",
+  "spec_ref": "§5.1 / AG-004",
+  "rule_ids": ["AG-004"],
+  "description": "Hand-crafted: identical to corpus `array_heterogeneous` ([1,true,-1]) except the slot table 00 01 02 is rewritten as 00 02 01. Decoders MUST reject because slot[i+1] < slot[i] violates monotonicity.",
+  "wire_hex": "b0002111310002010300",
+  "must_reject": true
+}

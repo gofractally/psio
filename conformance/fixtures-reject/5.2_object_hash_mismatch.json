@@ -1,0 +1,8 @@
+{
+  "id": "object_hash_mismatch_rejected",
+  "spec_ref": "§5.2",
+  "rule_ids": ["O-006"],
+  "description": "Hand-crafted bad hash: identical to corpus `object_single_field` ({\"a\":1}) but the hash[0] byte 0x1f (XXH3-64('a') & 0xff) is overwritten with 0x00. Decoders MUST verify hash[i] == key_hash8(stored_key_i) and reject.",
+  "wire_hex": "c00061210000010100",
+  "must_reject": true
+}

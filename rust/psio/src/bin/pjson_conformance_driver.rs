@@ -1828,6 +1828,8 @@ struct Fixture {
     /// rendering the decoded value with the corresponding mode
     /// produces this text:
     json_pretty: Option<String>,                  // pretty=true, indent=2
+    json_pretty_tab: Option<String>,              // pretty=true, indent=0 (tabs) — EM-003
+    json_pretty_indent_4: Option<String>,         // pretty=true, indent=4
     json_int_string_largeonly: Option<String>,    // mode=LargeOnly
     json_int_string_all: Option<String>,          // mode=All
     must_round_trip: bool,
@@ -1879,6 +1881,10 @@ fn parse_fixture(json_text: &str) -> Result<Fixture, String> {
 
     let json_pretty = obj.get("json_pretty")
         .and_then(|x| x.as_str()).map(|s| s.to_string());
+    let json_pretty_tab = obj.get("json_pretty_tab")
+        .and_then(|x| x.as_str()).map(|s| s.to_string());
+    let json_pretty_indent_4 = obj.get("json_pretty_indent_4")
+        .and_then(|x| x.as_str()).map(|s| s.to_string());
     let json_int_string_largeonly = obj.get("json_int_string_largeonly")
         .and_then(|x| x.as_str()).map(|s| s.to_string());
     let json_int_string_all = obj.get("json_int_string_all")
@@ -1891,6 +1897,8 @@ fn parse_fixture(json_text: &str) -> Result<Fixture, String> {
         wire_hex,
         json_compact,
         json_pretty,
+        json_pretty_tab,
+        json_pretty_indent_4,
         json_int_string_largeonly,
         json_int_string_all,
         must_round_trip,
@@ -2271,6 +2279,26 @@ fn check(fixture: &Fixture) -> Result<(), String> {
                 return Err(format!(
                     "json_pretty mismatch:\n  expected: {:?}\n  got:      {:?}",
                     expected_pretty, got));
+            }
+        }
+        if let Some(expected) = &fixture.json_pretty_tab {
+            let got = render_json_with(&decoded,
+                &EmitOptions { pretty: true, indent: 0,
+                                int_string_mode: IntStringMode::Never });
+            if &got != expected {
+                return Err(format!(
+                    "json_pretty_tab mismatch:\n  expected: {:?}\n  got:      {:?}",
+                    expected, got));
+            }
+        }
+        if let Some(expected) = &fixture.json_pretty_indent_4 {
+            let got = render_json_with(&decoded,
+                &EmitOptions { pretty: true, indent: 4,
+                                int_string_mode: IntStringMode::Never });
+            if &got != expected {
+                return Err(format!(
+                    "json_pretty_indent_4 mismatch:\n  expected: {:?}\n  got:      {:?}",
+                    expected, got));
             }
         }
         if let Some(expected) = &fixture.json_int_string_largeonly {
@@ -3021,6 +3049,48 @@ mod tests {
         assert_eq!(enc_big[1], 0x01, "u16 slots when value_data > 256");
         // Round-trip preserves all 16 children byte-exact.
         assert_eq!(decode(&enc_big).unwrap(), big);
+    }
+
+    #[test]
+    fn array_adaptive_slot_width_u24_u32() {
+        // u24 selection: value_data ∈ [65536, 2^24). One String of 65540
+        // bytes (tag+size header + content) lands the value_data over
+        // 65536, but a single-element array still uses u8. Build many
+        // mid-size strings to push past the boundary while keeping >1
+        // child so multiple slots are written.
+        let s_mid = "x".repeat(8200);
+        let many: Vec<Value> = (0..10)
+            .map(|_| Value::String { encoding_flag: 0, content: s_mid.clone().into_bytes() })
+            .collect();
+        let big = Value::Array(many);
+        let enc = encode(&big).unwrap();
+        assert_eq!(enc[1], 0x02, "u24 slots (width_code=2) for value_data > 65535");
+        assert_eq!(decode(&enc).unwrap(), big);
+
+        // u32 selection: > 2^24 bytes value_data. Each string is 1.7M
+        // bytes; 10 of them push value_data past 16 MiB.
+        let s_big = "y".repeat(1_700_000);
+        let many32: Vec<Value> = (0..10)
+            .map(|_| Value::String { encoding_flag: 0, content: s_big.clone().into_bytes() })
+            .collect();
+        let huge = Value::Array(many32);
+        let enc32 = encode(&huge).unwrap();
+        assert_eq!(enc32[1], 0x03, "u32 slots (width_code=3) for value_data > 2^24");
+        assert_eq!(decode(&enc32).unwrap(), huge);
+    }
+
+    #[test]
+    fn object_long_key_64kib_round_trip() {
+        // H-005: a single object with a 64 KiB key. The §5.2 long-key
+        // escape stores `key_size_byte = 0xFF` and a varuint excess
+        // inline; for keys of 65535+ bytes the varuint reaches its
+        // 4-byte form (varuint encodes (size − 254)).
+        let huge_key = "k".repeat(65_536);
+        let entries = vec![(huge_key.clone(), Value::Uint(7))];
+        let v = Value::Object(entries);
+        let enc = encode(&v).unwrap();
+        let dec = decode(&enc).unwrap();
+        assert_eq!(dec, v);
     }
 
     #[test]

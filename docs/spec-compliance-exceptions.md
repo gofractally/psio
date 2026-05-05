@@ -15,18 +15,21 @@ to ✅, the id is removed from this file.
 
 **Phase 1, all of Phase 2 (containers), all of Phase 3 (string,
 bytes encoding hint, numeric_string, JSON ingress, emitter
-options), and Phase 4.1 (extension framework: T-014, V-001,
-EX-001..006) are sealed.** Cross-validation between Rust and C++ is
-byte-equivalent across every fixture (76/76 matches).
+options), Phase 4.1 (extension framework: T-014, V-001,
+EX-001..006), and the Phase 2/3 ⚠️ punch-list (AG-003/004/005,
+AT-012, H-005, O-004/006, EM-003/008) are sealed.** Cross-validation
+between Rust and C++ is byte-equivalent across every fixture
+(87/87 matches).
 
 Tally:
-- 142 rows ✅ on **both** Rust and C++.
-- 11 rows ⚠️: F-008; AG-003/004/005; AT-012; H-005; O-004; O-006;
-  RA-002/003; NS-002 (no dual-projection API); EM-003 (no
-  indent=0/tab fixture); EM-008 (no float-with-int_string_mode
-  fixture).
-- 22 rows ❌ — Phase 4.2+ scope (canonical encoding rules + the
-  remaining JSON-side and limit bookkeeping).
+- 152 rows ✅ on **both** Rust and C++.
+- 4 rows ⚠️: F-008 (NaN canonicalization — Phase 4.2);
+  RA-002 (random-access view fixture); RA-003 (encoder auto-detect
+  array-of-object); NS-002 (no dual-projection API).
+- 19 rows ❌ — Phase 4.2 canonical encoding (C-* + D-007), the
+  J-* JSON-mapping bookkeeping rows (overlap with already-✅
+  ingress code), LIM-* limits enforcement, and a few residual
+  E-* error-class rows that overlap with already-✅ rejects.
 
 ---
 
@@ -63,19 +66,12 @@ E-002
 ## Block B — ⚠️ rows (impl exists, dedicated test pending)
 
 ```
-F-008 AG-003 AG-004 AG-005 AT-012 H-005 O-004 O-006 RA-002 RA-003
-NS-002 EM-003 EM-008
+F-008 RA-002 RA-003 NS-002
 ```
 
 | id | gap | action |
 |----|-----|--------|
-| F-008 | NaN canonicalization (§15.2.1) not implemented — round-trips bits as-is rather than emitting canonical pattern | Phase 5 (canonical encoding rules) |
-| AG-003 | adaptive slot-width selection works; corpus exercises u8 only via cross-validation; Rust unit test exercises u16 | add fixtures for u24, u32 paths |
-| AG-004 | slot-monotonicity reject path exists but no fixture | add reject fixture with non-monotonic slots |
-| AG-005 | slot-OOB reject path exists but no fixture | add reject fixture with slot offset > value_data_size |
-| AT-012 | empty typed array fixture only exists for element_code 0 (i8) | add 9 more empty-typed-array fixtures |
-| H-005 | encoder supports 4-byte varuint excess for very long keys; no fixture | add 64 KiB-key fixture |
-| O-004 | adaptive slot width — exercised at u8 (single_field/multi_field) and u16 (long_key_255_escape); no u24/u32 fixtures | add larger-value_data fixtures |
-| O-006 | hash-mismatch reject path exists; no dedicated reject fixture (would need hand-crafted bad hash) | add reject fixture |
+| F-008 | NaN canonicalization (§15.2.1) not implemented — round-trips bits as-is rather than emitting canonical pattern | Phase 4.2 (canonical encoding rules) |
 | RA-002 | random-access by `(record_index, key)` works through full decode but no dedicated random-access view fixture | add fixture that decodes a single (i, key) pair without full row materialization |
 | RA-003 | encoder accepts row_array via DSL; auto-detection from `array of object` is Phase 3 (JSON-side encoder) | when JSON parser lands, add the homogeneity-detect pass per §5.2.1.5 |
+| NS-002 | dedicated dual-projection API (`as_<numeric>()` + `as_string()`) | add API surface and unit test that demonstrates both projections from a single decoded value |

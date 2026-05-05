@@ -1,0 +1,11 @@
+{
+  "id": "typed_array_empty_f64",
+  "spec_ref": "§5.1.1",
+  "rule_ids": ["AT-001", "AT-012"],
+  "description": "empty f64 typed array — exercises AT-012 for element_code 9",
+  "input_value": {"kind": "typed_array", "element_code": 9, "elements": []},
+  "wire_hex": "ba0000",
+  "json_compact": "[]",
+  "must_round_trip": true,
+  "must_validate": true
+}

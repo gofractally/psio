@@ -1,0 +1,8 @@
+{
+  "id": "array_slot_oob_rejected",
+  "spec_ref": "§5.1 / AG-005",
+  "rule_ids": ["AG-005"],
+  "description": "Hand-crafted: identical to corpus `array_heterogeneous` ([1,true,-1]) except slot[2] is rewritten from 02 to 03. value_data_size = 3, so slot offset 3 is out-of-bounds (must be < value_data_size). Decoders MUST reject.",
+  "wire_hex": "b0002111310001030300",
+  "must_reject": true
+}

@@ -1,0 +1,17 @@
+{
+  "id": "emitter_float_decimal_unaffected_by_int_string_mode",
+  "spec_ref": "section 7.5",
+  "rule_ids": ["EM-008"],
+  "description": "Object with an ieee_float and a decimal alongside a small bare uint. Demonstrates EM-008: int_string_mode quotes bare integers but does NOT quote floats or decimals — they pass through unchanged in every mode.",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "f", "value": {"kind": "float", "width": 64, "bits_hex": "0x3ff8000000000000"}},
+    {"key": "d", "value": {"kind": "decimal", "mantissa": "15", "scale": -1}},
+    {"key": "n", "value": {"kind": "uint", "value": 42}}
+  ]},
+  "wire_hex": "c0006663000000000000f83f64701e016e402a9aca0a00010a010e010300",
+  "json_compact": "{\"f\":1.5,\"d\":1.5,\"n\":42}",
+  "json_int_string_largeonly": "{\"f\":1.5,\"d\":1.5,\"n\":42}",
+  "json_int_string_all": "{\"f\":1.5,\"d\":1.5,\"n\":\"42\"}",
+  "must_round_trip": true,
+  "must_validate": true
+}

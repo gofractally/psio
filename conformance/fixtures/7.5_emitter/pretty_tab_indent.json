@@ -1,0 +1,16 @@
+{
+  "id": "emitter_pretty_tab_indent",
+  "spec_ref": "section 7.5",
+  "rule_ids": ["EM-003"],
+  "description": "object {x:1, y:-1} rendered with pretty=true and indent=0 (tab-indent mode). Each entry sits on its own line indented with one TAB per level. Also asserts indent=4 for an alternate width.",
+  "input_value": {"kind": "object", "entries": [
+    {"key": "x", "value": {"kind": "uint", "value": 1}},
+    {"key": "y", "value": {"kind": "int", "value": -1}}
+  ]},
+  "wire_hex": "c0007821793111e5000102010200",
+  "json_compact": "{\"x\":1,\"y\":-1}",
+  "json_pretty_tab": "{\n\t\"x\": 1,\n\t\"y\": -1\n}",
+  "json_pretty_indent_4": "{\n    \"x\": 1,\n    \"y\": -1\n}",
+  "must_round_trip": true,
+  "must_validate": true
+}
