@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_suffix_b64_to_bytes",
+  "spec_ref": "section 7.4 / J-013",
+  "rule_ids": ["J-013"],
+  "description": "JSON ingress: a key ending in `.b64` tells the encoder to treat the JSON string value as opaque binary with encoding hint=0 (base64). The literal suffix is preserved on the key. Source `{\"avatar.b64\":\"AQID\"}` ingests into object with one entry whose value is bytes(0x01 0x02 0x03) tagged as base64.",
+  "input_json": "{\"avatar.b64\":\"AQID\"}",
+  "wire_hex": "c0006176617461722e623634a00102038f000a0100",
+  "json_compact": "{\"avatar.b64\":\"AQID\"}",
+  "must_round_trip": true,
+  "must_validate": true
+}

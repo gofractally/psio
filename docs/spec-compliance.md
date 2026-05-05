@@ -261,21 +261,21 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| J-001 | JSON `null` ↔ pjson `null` | ❌ | ❌ | ❌ | ❌ |
-| J-002 | JSON `false`/`true` ↔ pjson `bool` | ❌ | ❌ | ❌ | ❌ |
-| J-003 | JSON integer in 0..15 ↔ `uint_inline` | ❌ | ❌ | ❌ | ❌ |
-| J-004 | JSON integer in −15..−1 ↔ `nint_inline` | ❌ | ❌ | ❌ | ❌ |
-| J-005 | JSON integer ≥ 16 ↔ `uint` | ❌ | ❌ | ❌ | ❌ |
-| J-006 | JSON integer ≤ −16 ↔ `negint` | ❌ | ❌ | ❌ | ❌ |
-| J-007 | JSON fractional/exponent ↔ `decimal` (when shortest) or `ieee_float` | ❌ | ❌ | ❌ | ❌ |
+| J-001 | JSON `null` ↔ pjson `null` | ✅ | ✅ corpus `json_ingress_null` | ✅ | ✅ same |
+| J-002 | JSON `false`/`true` ↔ pjson `bool` | ✅ | ✅ corpus `json_ingress_bool_{false,true}` | ✅ | ✅ same |
+| J-003 | JSON integer in 0..15 ↔ `uint_inline` | ✅ | ✅ corpus `json_ingress_uint_inline` | ✅ | ✅ same |
+| J-004 | JSON integer in −15..−1 ↔ `nint_inline` | ✅ | ✅ corpus `json_ingress_nint_inline` | ✅ | ✅ same |
+| J-005 | JSON integer ≥ 16 ↔ `uint` | ✅ | ✅ corpus `json_ingress_uint` | ✅ | ✅ same |
+| J-006 | JSON integer ≤ −16 ↔ `negint` | ✅ | ✅ corpus `json_ingress_negint` | ✅ | ✅ same |
+| J-007 | JSON fractional/exponent ↔ `decimal` (when shortest) or `ieee_float` | ❌ pending D-007 picker | ❌ | ❌ pending D-007 picker | ❌ |
 | J-008 | JSON numeric-form string with canonical match ↔ `numeric_string` | ✅ | ✅ corpus `lift_canonical_int` + `lift_canonical_decimal` | ✅ | ✅ same |
 | J-009 | JSON non-canonical/non-numeric string ↔ `string` | ✅ | ✅ corpus `no_lift_leading_zero` + `no_lift_sci_notation` | ✅ | ✅ same |
-| J-010 | JSON array ↔ `array` (generic for heterogeneous; typed for homogeneous primitive) | ❌ | ❌ | ❌ | ❌ |
-| J-011 | JSON object ↔ `object` | ❌ | ❌ | ❌ | ❌ |
-| J-012 | NaN / ±Inf in JSON: encoder rejects (JSON forbids); decoder rejects when emitting JSON | ❌ | ❌ | ❌ | ❌ |
-| J-013 | suffix vocabulary: `.b64`, `.hex`, `.base58`, `.b64u` map to bytes encoding hints | ❌ | ❌ | ❌ | ❌ |
-| J-014 | suffix-stripping in hash byte applies | ❌ | ❌ | ❌ | ❌ |
-| J-015 | field encounter order preserved across round-trip | ❌ | ❌ | ❌ | ❌ |
+| J-010 | JSON array ↔ `array` (generic for heterogeneous; typed for homogeneous primitive) | ✅ generic only; typed-array auto-detection is Phase 4.3 | ✅ corpus `json_ingress_array` (generic path) | ✅ | ✅ same |
+| J-011 | JSON object ↔ `object` | ✅ | ✅ corpus `json_ingress_object` | ✅ | ✅ same |
+| J-012 | NaN / ±Inf in JSON: encoder rejects (JSON forbids); decoder rejects when emitting JSON | ✅ JSON parser rejects `NaN`/`Infinity` tokens | ✅ verified by Rust unit `json_ingress_rejects_nan_and_infinity_tokens` (parser-side) | ✅ | ✅ same |
+| J-013 | suffix vocabulary: `.b64`, `.hex`, `.base58`, `.b64u` map to bytes encoding hints | ✅ via `from_json_node` suffix dispatch | ✅ corpus `json_ingress_suffix_b64_to_bytes` | ✅ | ✅ same |
+| J-014 | suffix-stripping in hash byte applies | ✅ | ✅ corpus `object_suffix_strip_collision` (cross-validates `amount` and `amount.b64` colliding hash) | ✅ | ✅ same |
+| J-015 | field encounter order preserved across round-trip | ✅ | ✅ corpus `json_ingress_field_order_preserved` | ✅ | ✅ same |
 
 ### §7.5 — Emitter options
 
@@ -294,26 +294,26 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| LIM-001 | container count is u16 LE — encoder rejects > 65 535 fields | ❌ | ❌ | ❌ | ❌ |
-| LIM-002 | value_data ≤ 4 294 967 295 at `slot_w_code=3`; 16 MiB at u24; 64 KiB at u16; 256 B at u8 | ❌ | ❌ | ❌ | ❌ |
-| LIM-003 | key length unbounded via long-key escape (§5.4 varuint excess) | ❌ | ❌ | ❌ | ❌ |
-| LIM-004 | integer magnitude ≤ 128 unsigned bits (16-byte raw LE) | ❌ | ❌ | ❌ | ❌ |
-| LIM-005 | decimal scale ∈ ±536 870 911 (4-byte varscale) | ❌ | ❌ | ❌ | ❌ |
-| LIM-006 | nesting depth: configurable cap with suggested default 256; parser rejects deeper | ❌ | ❌ | ❌ | ❌ |
+| LIM-001 | container count is u16 LE — encoder rejects > 65 535 fields | ✅ encoder check (`array/object/row_array count > 65 535`) | ✅ Rust unit `limits_enforced` | ✅ | ✅ same |
+| LIM-002 | value_data ≤ 4 294 967 295 at `slot_w_code=3`; 16 MiB at u24; 64 KiB at u16; 256 B at u8 | ✅ `pick_slot_width` rejects > 2³² | ✅ encoder reject path covered (`value_data_size > u32`) | ✅ | ✅ same |
+| LIM-003 | key length unbounded via long-key escape (§5.4 varuint excess) | ✅ same as H-005 | ✅ Rust unit `object_long_key_64kib_round_trip` | ✅ | ✅ same |
+| LIM-004 | integer magnitude ≤ 128 unsigned bits (16-byte raw LE) | ✅ U128 type cap; bc check ≤ 16 in encode | ✅ implicit via `uint_full_round_trip` | ✅ | ✅ same |
+| LIM-005 | decimal scale ∈ ±536 870 911 (4-byte varscale) | ✅ varscale_encode rejects out-of-range | ✅ Rust unit `limits_enforced` boundary check | ✅ | ✅ same |
+| LIM-006 | nesting depth: configurable cap with suggested default 256; parser rejects deeper | ✅ `MAX_DECODE_DEPTH` + DepthGuard (C++) / `decode_at_depth` (Rust) | ✅ Rust unit `nesting_depth_capped` | ✅ | ✅ same |
 
 ## §9 — Errors (parser must reject)
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
 | E-001 | reserved type code (14, 15) | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` |
-| E-002 | reserved low-nibble bits per type | ⚠️ partial — covered for bool/nint_inline/ieee_float; remaining types pending | ⚠️ | ⚠️ partial — same | ⚠️ |
+| E-002 | reserved low-nibble bits per type | ✅ | ✅ corpus reject fixtures: null/bool/nint_inline/ieee_float/string/bytes/numeric_string/object/typed_array | ✅ | ✅ same |
 | E-003 | `uint`/`negint`/`decimal` bc < 1 or bc > 16 | ✅ bc range enforced by 4-bit low nibble; truncated-payload covered by U-006 fixtures | ✅ corpus `uint_truncated_payload` | ✅ same | ✅ corpus `uint_truncated_payload` |
 | E-004 | `negint` all-zero payload | ✅ | ✅ corpus `negint_zero_payload_reserved` | ✅ | ✅ `negint_zero_rejected` |
 | E-005 | `nint_inline` low_nibble = 0 | ✅ | ✅ corpus `nint_inline_zero_reserved` | ✅ | ✅ `nint_inline_zero_rejected` |
-| E-006 | container size too small for stated count | ❌ | ❌ | ❌ | ❌ |
-| E-007 | slot offset ≥ value_data_size | ❌ | ❌ | ❌ | ❌ |
-| E-008 | slot offsets non-monotone | ❌ | ❌ | ❌ | ❌ |
-| E-009 | hash[i] ≠ key_hash8(stored_key_i) | ❌ | ❌ | ❌ | ❌ |
+| E-006 | container size too small for stated count | ✅ via decode bounds check (truncated buffer rejection) | ✅ corpus `array_slot_oob_rejected` (also exercises this path) | ✅ | ✅ same |
+| E-007 | slot offset ≥ value_data_size | ✅ same as AG-005 | ✅ corpus `array_slot_oob_rejected` | ✅ | ✅ same |
+| E-008 | slot offsets non-monotone | ✅ same as AG-004 | ✅ corpus `array_slot_non_monotonic_rejected` | ✅ | ✅ same |
+| E-009 | hash[i] ≠ key_hash8(stored_key_i) | ✅ same as O-006 | ✅ corpus `object_hash_mismatch_rejected` | ✅ | ✅ same |
 | E-010 | varscale / long-key varuint claims length past buffer | ⚠️ | ⚠️ | ⚠️ varscale truncation detected; long-key path not yet | ⚠️ |
 | E-011 | `numeric_string` inner tag's code not in {2..7} | ✅ | ✅ corpus `numeric_string_inner_*_rejected` | ✅ | ✅ same |
 | E-012 | `ieee_float` width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_zero_reserved` | ✅ | ✅ `ieee_float_bad_width_rejected` |

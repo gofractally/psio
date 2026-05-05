@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_uint",
+  "spec_ref": "section 7.1",
+  "rule_ids": ["J-005"],
+  "description": "JSON integer 256 (≥ 16) ↔ pjson uint with bc=2 (tag 0x41 + LE 0x00 0x01).",
+  "input_json": "256",
+  "wire_hex": "410001",
+  "json_compact": "256",
+  "must_round_trip": true,
+  "must_validate": true
+}

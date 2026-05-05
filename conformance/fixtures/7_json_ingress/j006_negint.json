@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_negint",
+  "spec_ref": "section 7.1",
+  "rule_ids": ["J-006"],
+  "description": "JSON integer -100 (≤ -16) ↔ pjson negint with bc=1 (tag 0x50 + magnitude 0x64).",
+  "input_json": "-100",
+  "wire_hex": "5064",
+  "json_compact": "-100",
+  "must_round_trip": true,
+  "must_validate": true
+}

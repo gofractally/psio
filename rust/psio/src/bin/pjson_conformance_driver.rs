@@ -259,10 +259,45 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
             }
             Value::Object(
                 obj.iter()
-                    .map(|(k, v)| (k.clone(), from_serde_json(v)))
+                    .map(|(k, v)| {
+                        // §7.4 / J-013: a key ending in a suffix-vocabulary
+                        // term tells the ingress to treat the string value
+                        // as opaque binary with the matching encoding hint.
+                        // The literal suffix is preserved on the key.
+                        if let Some(hint) = bytes_hint_for_key_suffix(k) {
+                            if let serde_json::Value::String(s) = v {
+                                if let Some(content) = decode_bytes_by_hint(hint, s) {
+                                    return (k.clone(), Value::Bytes {
+                                        encoding_hint: hint, content,
+                                    });
+                                }
+                            }
+                        }
+                        (k.clone(), from_serde_json(v))
+                    })
                     .collect()
             )
         }
+    }
+}
+
+/// §7.4 — known suffix vocabulary mapping a JSON key suffix to a
+/// `bytes` encoding hint.
+fn bytes_hint_for_key_suffix(key: &str) -> Option<u8> {
+    if      key.ends_with(".b64")    { Some(0) }
+    else if key.ends_with(".hex")    { Some(1) }
+    else if key.ends_with(".base58") { Some(2) }
+    else if key.ends_with(".b64u")   { Some(3) }
+    else                             { None }
+}
+
+fn decode_bytes_by_hint(hint: u8, s: &str) -> Option<Vec<u8>> {
+    match hint {
+        0 => b64_decode(s),
+        1 => hex_decode(s),
+        2 => base58_decode(s),
+        3 => b64url_decode(s),
+        _ => None,
     }
 }
 
@@ -766,7 +801,19 @@ impl std::fmt::Display for DecodeError {
     }
 }
 
+/// LIM-006 — suggested default cap on recursive container nesting.
+/// Decoders refuse to descend past this depth so an adversarial wire
+/// can't blow the parser's stack via runaway recursion.
+const MAX_DECODE_DEPTH: u32 = 256;
+
 fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
+    decode_at_depth(buf, 0)
+}
+
+fn decode_at_depth(buf: &[u8], depth: u32) -> Result<Value, DecodeError> {
+    if depth >= MAX_DECODE_DEPTH {
+        return Err(DecodeError::Truncated("nesting depth exceeded (LIM-006)"));
+    }
     if buf.is_empty() {
         return Err(DecodeError::Truncated("empty buffer"));
     }
@@ -850,7 +897,7 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
         11 => {
             // §5.1/§5.1.1 array.
             if low == 0 {
-                return decode_generic_array(buf);
+                return decode_generic_array(buf, depth);
             }
             if (1..=10).contains(&low) {
                 return decode_typed_array(buf, low - 1);
@@ -858,8 +905,8 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             Err(DecodeError::ReservedLowNibble("array", low))
         }
         12 => {
-            if low == 0 { return decode_object(buf); }
-            if low == 1 { return decode_row_array(buf); }
+            if low == 0 { return decode_object(buf, depth); }
+            if low == 1 { return decode_row_array(buf, depth); }
             Err(DecodeError::ReservedLowNibble("object", low))
         }
         9 => {
@@ -882,7 +929,7 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             if low != 0 {
                 return Err(DecodeError::ReservedLowNibble("numeric_string", low));
             }
-            let inner = decode(&buf[1..])?;
+            let inner = decode_at_depth(&buf[1..], depth + 1)?;
             if !is_numeric_value(&inner) {
                 return Err(DecodeError::Truncated("numeric_string inner must be numeric (codes 2..7)"));
             }
@@ -900,7 +947,7 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
 }
 
 /// §5.1 generic-array decode. Buffer starts at the tag byte (0xB0).
-fn decode_generic_array(buf: &[u8]) -> Result<Value, DecodeError> {
+fn decode_generic_array(buf: &[u8], depth: u32) -> Result<Value, DecodeError> {
     if buf.len() < 4 {
         // tag + width + 0 slots + count(2) = 4 bytes minimum
         return Err(DecodeError::Truncated("array minimum size"));
@@ -961,14 +1008,14 @@ fn decode_generic_array(buf: &[u8]) -> Result<Value, DecodeError> {
             return Err(DecodeError::Truncated("array slot offset OOB or non-monotonic"));
         }
         let child_size = next_off - off;
-        let child = decode(&buf[value_data_start + off..value_data_start + off + child_size])?;
+        let child = decode_at_depth(&buf[value_data_start + off..value_data_start + off + child_size], depth + 1)?;
         children.push(child);
     }
     Ok(Value::Array(children))
 }
 
 /// §5.2.1 row_array decode. `buf` starts at the tag byte (0xC1).
-fn decode_row_array(buf: &[u8]) -> Result<Value, DecodeError> {
+fn decode_row_array(buf: &[u8], depth: u32) -> Result<Value, DecodeError> {
     // Minimum: tag + width + K_varuint(1) + count(2) = 5 bytes (K=0, N=0).
     if buf.len() < 5 {
         return Err(DecodeError::Truncated("row_array minimum size"));
@@ -1085,7 +1132,7 @@ fn decode_row_array(buf: &[u8]) -> Result<Value, DecodeError> {
                 return Err(DecodeError::Truncated("row_array slot offset OOB or non-monotonic"));
             }
             let val_bytes = &buf[rec_start + off..rec_start + next_field_off];
-            row.push(decode(val_bytes)?);
+            row.push(decode_at_depth(val_bytes, depth + 1)?);
         }
         rows.push(row);
     }
@@ -1094,7 +1141,7 @@ fn decode_row_array(buf: &[u8]) -> Result<Value, DecodeError> {
 }
 
 /// §5.2 object decode. `buf` starts at the tag byte (0xC0).
-fn decode_object(buf: &[u8]) -> Result<Value, DecodeError> {
+fn decode_object(buf: &[u8], depth: u32) -> Result<Value, DecodeError> {
     if buf.len() < 4 {
         return Err(DecodeError::Truncated("object minimum size"));
     }
@@ -1177,7 +1224,7 @@ fn decode_object(buf: &[u8]) -> Result<Value, DecodeError> {
 
         // Decode child.
         let child_start = key_prefix_size + key_size;
-        let child = decode(&entry[child_start..])?;
+        let child = decode_at_depth(&entry[child_start..], depth + 1)?;
         entries.push((key, child));
     }
     Ok(Value::Object(entries))
@@ -1732,6 +1779,58 @@ fn b64_decode(s: &str) -> Option<Vec<u8>> {
         if !q3_pad { out.push(n as u8); }
         i += 4;
     }
+    Some(out)
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 { return None; }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let nyb = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(10 + c - b'a'),
+            b'A'..=b'F' => Some(10 + c - b'A'),
+            _ => None,
+        }
+    };
+    for chunk in bytes.chunks(2) {
+        out.push((nyb(chunk[0])? << 4) | nyb(chunk[1])?);
+    }
+    Some(out)
+}
+
+fn b64url_decode(s: &str) -> Option<Vec<u8>> {
+    // Re-pad and translate to standard alphabet, then reuse b64_decode.
+    let mut std: String = s.chars()
+        .map(|c| match c { '-' => '+', '_' => '/', other => other })
+        .collect();
+    while std.len() % 4 != 0 { std.push('='); }
+    b64_decode(&std)
+}
+
+fn base58_decode(s: &str) -> Option<Vec<u8>> {
+    const A: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let val = |c: u8| -> Option<u8> {
+        A.iter().position(|&x| x == c).map(|p| p as u8)
+    };
+    let bytes = s.as_bytes();
+    let zeros = bytes.iter().take_while(|&&c| c == b'1').count();
+    let mut acc: Vec<u8> = Vec::new();
+    for &c in &bytes[zeros..] {
+        let mut carry = val(c)? as u32;
+        for byte in acc.iter_mut().rev() {
+            carry += (*byte as u32) * 58;
+            *byte = (carry & 0xFF) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            acc.insert(0, (carry & 0xFF) as u8);
+            carry >>= 8;
+        }
+    }
+    let mut out = vec![0u8; zeros];
+    out.append(&mut acc);
     Some(out)
 }
 
@@ -3076,6 +3175,59 @@ mod tests {
         assert_eq!(enc_big[1], 0x01, "u16 slots when value_data > 256");
         // Round-trip preserves all 16 children byte-exact.
         assert_eq!(decode(&enc_big).unwrap(), big);
+    }
+
+    #[test]
+    fn nesting_depth_capped() {
+        // LIM-006: build an array nest exactly at the cap (passes) and
+        // one over (fails). Build inside-out: innermost is a leaf,
+        // each outer wraps the previous in a single-element array.
+        let cap = MAX_DECODE_DEPTH as usize;
+        let mut v = Value::Uint(0);
+        for _ in 0..cap - 1 {
+            v = Value::Array(vec![v]);
+        }
+        let enc = encode(&v).unwrap();
+        assert!(decode(&enc).is_ok(), "depth {} must succeed", cap);
+
+        // One more level — over the cap.
+        let too_deep = Value::Array(vec![v]);
+        let enc2 = encode(&too_deep).unwrap();
+        let r = decode(&enc2);
+        assert!(r.is_err(), "depth {} must reject (LIM-006)", cap + 1);
+    }
+
+    #[test]
+    fn limits_enforced() {
+        // LIM-001: container count > 65 535 → encoder rejects.
+        let n = 65_536;
+        let arr = Value::Array((0u128..n as u128).map(Value::Uint).collect());
+        let r = encode(&arr);
+        assert!(r.is_err(), "array count {} must be rejected", n);
+
+        // LIM-005: varscale scale outside ±2^29-1 → encoder rejects.
+        let bad_scale = Value::Decimal { mantissa: 1, scale: 600_000_000 };
+        assert!(encode(&bad_scale).is_err());
+        let bad_neg = Value::Decimal { mantissa: 1, scale: -600_000_000 };
+        assert!(encode(&bad_neg).is_err());
+
+        // LIM-005 boundary: scale = ±(2^29 - 1) succeeds.
+        let max_scale = Value::Decimal { mantissa: 1, scale: 536_870_911 };
+        assert!(encode(&max_scale).is_ok());
+        let min_scale = Value::Decimal { mantissa: 1, scale: -536_870_911 };
+        assert!(encode(&min_scale).is_ok());
+    }
+
+    #[test]
+    fn json_ingress_rejects_nan_and_infinity_tokens() {
+        // J-012: NaN / ±Inf are not valid JSON tokens. The JSON parser
+        // must reject them — they cannot enter a pjson value via JSON
+        // ingress. (Float NaN/Inf can only enter via typed float input,
+        // which goes through encode() directly, not from_json().)
+        for bad in ["NaN", "Infinity", "-Infinity", "nan", "inf"] {
+            let r = from_json(bad);
+            assert!(r.is_err(), "JSON parser must reject {:?}", bad);
+        }
     }
 
     #[test]

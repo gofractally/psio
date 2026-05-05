@@ -316,6 +316,46 @@ inline std::vector<std::uint8_t> b64_decode(std::string_view s) {
    return out;
 }
 
+inline std::vector<std::uint8_t> b64url_decode(std::string_view s) {
+   std::string std_b64;
+   std_b64.reserve(s.size() + 3);
+   for (char c : s) {
+      if      (c == '-') std_b64.push_back('+');
+      else if (c == '_') std_b64.push_back('/');
+      else                std_b64.push_back(c);
+   }
+   while (std_b64.size() % 4 != 0) std_b64.push_back('=');
+   return b64_decode(std_b64);
+}
+
+inline std::vector<std::uint8_t> base58_decode(std::string_view s) {
+   static const char A[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+   auto val = [](char c) -> int {
+      for (int i = 0; i < 58; ++i) if (A[i] == c) return i;
+      return -1;
+   };
+   std::size_t zeros = 0;
+   while (zeros < s.size() && s[zeros] == '1') ++zeros;
+   std::vector<std::uint8_t> acc;
+   for (std::size_t i = zeros; i < s.size(); ++i) {
+      int v = val(s[i]);
+      if (v < 0) throw std::runtime_error{"base58_decode: invalid char"};
+      std::uint32_t carry = static_cast<std::uint32_t>(v);
+      for (auto it = acc.rbegin(); it != acc.rend(); ++it) {
+         carry += static_cast<std::uint32_t>(*it) * 58u;
+         *it = static_cast<std::uint8_t>(carry & 0xFF);
+         carry >>= 8;
+      }
+      while (carry > 0) {
+         acc.insert(acc.begin(), static_cast<std::uint8_t>(carry & 0xFF));
+         carry >>= 8;
+      }
+   }
+   std::vector<std::uint8_t> out(zeros, 0);
+   out.insert(out.end(), acc.begin(), acc.end());
+   return out;
+}
+
 inline std::string hex_encode(const std::vector<std::uint8_t>& bytes) {
    static const char d[] = "0123456789abcdef";
    std::string out;
@@ -909,7 +949,28 @@ static Value decode_typed_array(std::span<const std::uint8_t> buf,
 static Value decode_object(std::span<const std::uint8_t> buf);
 static Value decode_row_array(std::span<const std::uint8_t> buf);
 
+// LIM-006: a thread-local depth counter caps recursive container
+// nesting at MAX_DECODE_DEPTH so adversarial wires can't blow the
+// parser's stack via runaway recursion.
+static constexpr unsigned MAX_DECODE_DEPTH = 256;
+inline unsigned& decode_depth() {
+   static thread_local unsigned d{0};
+   return d;
+}
+struct DepthGuard {
+   DepthGuard() {
+      auto& d = decode_depth();
+      if (d >= MAX_DECODE_DEPTH)
+         throw DecodeError{"nesting depth exceeded (LIM-006)"};
+      ++d;
+   }
+   ~DepthGuard() { --decode_depth(); }
+   DepthGuard(const DepthGuard&) = delete;
+   DepthGuard& operator=(const DepthGuard&) = delete;
+};
+
 static Value decode(std::span<const std::uint8_t> buf) {
+   DepthGuard depth_guard;
    if (buf.empty()) throw DecodeError{"empty buffer"};
    const std::uint8_t tag  = buf[0];
    const std::uint8_t high = tag >> 4;
@@ -2077,6 +2138,34 @@ static Value from_json_node(const JNode& n) {
       std::vector<std::pair<std::string, Value>> entries;
       entries.reserve(obj->size());
       for (const auto& [k, v] : *obj) {
+         // §7.4 / J-013: a key ending in a suffix-vocabulary term tells
+         // the ingress to treat the JSON string value as opaque binary
+         // with the matching encoding hint. Suffix is preserved on key.
+         std::optional<std::uint8_t> hint;
+         if      (k.ends_with(".b64"))    hint = 0;
+         else if (k.ends_with(".hex"))    hint = 1;
+         else if (k.ends_with(".base58")) hint = 2;
+         else if (k.ends_with(".b64u"))   hint = 3;
+         if (hint.has_value()) {
+            if (auto* s = std::get_if<std::string>(&v.v)) {
+               try {
+                  std::vector<std::uint8_t> raw;
+                  switch (*hint) {
+                     case 0: raw = b64_decode(*s); break;
+                     case 1: raw = parse_hex(*s); break;
+                     case 2: raw = base58_decode(*s); break;
+                     case 3: raw = b64url_decode(*s); break;
+                  }
+                  Bytes b;
+                  b.encoding_hint = *hint;
+                  b.content = std::move(raw);
+                  entries.emplace_back(k, std::move(b));
+                  continue;
+               } catch (...) {
+                  // Decode failed — fall through to plain string mapping.
+               }
+            }
+         }
          entries.emplace_back(k, from_json_node(v));
       }
       return make_object(std::move(entries));

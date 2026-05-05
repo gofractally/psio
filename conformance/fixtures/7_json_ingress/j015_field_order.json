@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_field_order_preserved",
+  "spec_ref": "section 7.1 / section 15.4",
+  "rule_ids": ["J-015"],
+  "description": "JSON ingress preserves field encounter order: {\"z\":1,\"a\":2} round-trips with z BEFORE a, NOT alpha-sorted. The wire bytes embed 'z' (0x7a) before 'a' (0x61) in value_data — reversing the input would produce different bytes.",
+  "input_json": "{\"z\":1,\"a\":2}",
+  "wire_hex": "c0007a216122b01f000102010200",
+  "json_compact": "{\"z\":1,\"a\":2}",
+  "must_round_trip": true,
+  "must_validate": true
+}

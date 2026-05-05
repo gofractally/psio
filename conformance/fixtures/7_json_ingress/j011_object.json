@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_object",
+  "spec_ref": "section 7.1",
+  "rule_ids": ["J-011"],
+  "description": "JSON {\"a\":1} ↔ pjson object with a single (key,value) entry.",
+  "input_json": "{\"a\":1}",
+  "wire_hex": "c00061211f00010100",
+  "json_compact": "{\"a\":1}",
+  "must_round_trip": true,
+  "must_validate": true
+}

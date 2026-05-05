@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_nint_inline",
+  "spec_ref": "section 7.1",
+  "rule_ids": ["J-004"],
+  "description": "JSON integer -3 (∈ -15..-1) ↔ pjson nint_inline (tag 0x33, low_nibble = magnitude 3).",
+  "input_json": "-3",
+  "wire_hex": "33",
+  "json_compact": "-3",
+  "must_round_trip": true,
+  "must_validate": true
+}

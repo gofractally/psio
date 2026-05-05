@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_null",
+  "spec_ref": "section 7.1",
+  "rule_ids": ["J-001"],
+  "description": "JSON null ↔ pjson null. The simplest 1-byte wire (0x00).",
+  "input_json": "null",
+  "wire_hex": "00",
+  "json_compact": "null",
+  "must_round_trip": true,
+  "must_validate": true
+}

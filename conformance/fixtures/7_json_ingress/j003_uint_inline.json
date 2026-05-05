@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_uint_inline",
+  "spec_ref": "section 7.1",
+  "rule_ids": ["J-003"],
+  "description": "JSON integer 7 (∈ 0..15) ↔ pjson uint_inline (tag 0x27).",
+  "input_json": "7",
+  "wire_hex": "27",
+  "json_compact": "7",
+  "must_round_trip": true,
+  "must_validate": true
+}
