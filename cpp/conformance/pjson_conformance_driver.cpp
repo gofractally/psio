@@ -644,26 +644,49 @@ static bool float_nan_at(std::uint8_t w, U128 bits) noexcept {
 }
 
 // Returns std::nullopt unless the f64 `f` is bit-exactly representable
-// in binary16; on success, returns the f16 bit pattern.
+// in binary16, including the f16 subnormal range [2⁻²⁴, 2⁻¹⁴).
+// Same algorithm as the Rust counterpart: decompose to canonical
+// (sign, p, e) and check the value's unbiased exponent and bits-of-p
+// against the f16 representable range.
 static std::optional<std::uint16_t> f64_to_f16_exact(double f) noexcept {
+   if (!std::isfinite(f)) return std::nullopt;
    std::uint64_t bits;
    std::memcpy(&bits, &f, sizeof bits);
-   const std::uint16_t sign = static_cast<std::uint16_t>((bits >> 63) & 1);
+   const std::uint16_t sign = static_cast<std::uint16_t>(((bits >> 63) & 1) << 15);
    const int           exp_f64  = static_cast<int>((bits >> 52) & 0x7FF);
    const std::uint64_t mant_f64 = bits & 0x000F'FFFF'FFFF'FFFFull;
 
-   if (exp_f64 == 0) {
-      if (mant_f64 == 0) return static_cast<std::uint16_t>(sign << 15);
-      return std::nullopt;     // f64 subnormal — punt
-   }
-   if (exp_f64 == 0x7FF) return std::nullopt;  // Inf/NaN handled earlier
+   if (exp_f64 == 0 && mant_f64 == 0) return sign;            // ±0
+   if (exp_f64 == 0x7FF) return std::nullopt;                 // NaN/Inf
 
-   const int exp_unbiased = exp_f64 - 1023;
-   if (exp_unbiased < -14 || exp_unbiased > 15) return std::nullopt;
-   if ((mant_f64 & ((1ull << 42) - 1)) != 0)    return std::nullopt;
-   const std::uint16_t mant_f16 = static_cast<std::uint16_t>(mant_f64 >> 42);
-   const std::uint16_t exp_f16  = static_cast<std::uint16_t>(exp_unbiased + 15);
-   return static_cast<std::uint16_t>((sign << 15) | (exp_f16 << 10) | mant_f16);
+   std::uint64_t significand;
+   int e;
+   if (exp_f64 == 0) {
+      significand = mant_f64;
+      e = -1074;                                              // f64 subnormal
+   } else {
+      significand = (1ull << 52) | mant_f64;
+      e = exp_f64 - 1023 - 52;
+   }
+   const int tz = __builtin_ctzll(significand);
+   const std::uint64_t p = significand >> tz;
+   e += tz;
+   const int bits_p = 64 - __builtin_clzll(p);
+   const int unbiased_exp = e + bits_p - 1;
+
+   if (unbiased_exp < -24 || unbiased_exp > 15) return std::nullopt;
+   const int max_bits = (unbiased_exp >= -14) ? 11 : (unbiased_exp + 25);
+   if (bits_p > max_bits) return std::nullopt;
+
+   if (unbiased_exp >= -14) {
+      const unsigned pad = static_cast<unsigned>(11 - bits_p);
+      const std::uint64_t m = p << pad;
+      const std::uint16_t mant_f16 = static_cast<std::uint16_t>(m & 0x3FF);
+      const std::uint16_t exp_f16  = static_cast<std::uint16_t>(unbiased_exp + 15);
+      return static_cast<std::uint16_t>(sign | (exp_f16 << 10) | mant_f16);
+   }
+   const unsigned m_shift = static_cast<unsigned>(e + 24);
+   return static_cast<std::uint16_t>(sign | (p << m_shift));
 }
 
 static double f16_bits_to_f64_local(std::uint16_t b) noexcept {
@@ -691,35 +714,73 @@ static double f16_bits_to_f64_local(std::uint16_t b) noexcept {
    return r;
 }
 
-// f128 → f64 if bit-exact; std::nullopt otherwise.
+// f128 → f64 if bit-exact representable, including f64 subnormal
+// targets and f128 subnormal sources. Algorithm matches f64_to_f16_exact
+// scaled up: canonical (sign, p, e), test unbiased_exp ∈ [-1074, 1023]
+// with precision capped by 53 (normal) or unbiased_exp + 1075 (subnormal).
 static std::optional<double> f128_bits_to_f64_exact(U128 bits) noexcept {
-   const std::uint64_t sign = (bits.hi >> 63) & 1;
+   const std::uint64_t sign_bit = ((bits.hi >> 63) & 1) << 63;
    const int exp_f128 = static_cast<int>((bits.hi >> 48) & 0x7FFF);
-   // mantissa = bits.lo (low 64) || (bits.hi & ((1<<48)-1)) (high 48 bits)
    const std::uint64_t mant_hi = bits.hi & ((1ull << 48) - 1);
    const std::uint64_t mant_lo = bits.lo;
 
-   if (exp_f128 == 0) {
-      if (mant_hi == 0 && mant_lo == 0) {
-         double r;
-         std::uint64_t z = sign << 63;
-         std::memcpy(&r, &z, sizeof r);
-         return r;
-      }
-      return std::nullopt;
+   if (exp_f128 == 0 && mant_hi == 0 && mant_lo == 0) {
+      double r;
+      std::memcpy(&r, &sign_bit, sizeof r);
+      return r;
    }
    if (exp_f128 == 0x7FFF) return std::nullopt;
 
-   const int exp_unbiased = exp_f128 - 16383;
-   if (exp_unbiased < -1022 || exp_unbiased > 1023) return std::nullopt;
-   // f64 has 52 mantissa bits. f128 has 112 (48 hi + 64 lo). Need
-   // top 52 = mant_hi[47..0] then top 4 of mant_lo[63..60]. That
-   // means low 60 bits of mant_lo and any nonzero in deeper places
-   // must be zero for bit-exactness.
-   if ((mant_lo & ((1ull << 60) - 1)) != 0) return std::nullopt;
-   const std::uint64_t mant_f64 = (mant_hi << 4) | (mant_lo >> 60);
-   const std::uint64_t exp_f64 = static_cast<std::uint64_t>(exp_unbiased + 1023) << 52;
-   const std::uint64_t out = (sign << 63) | exp_f64 | mant_f64;
+   // Build the full significand as __uint128 and decompose canonically.
+   unsigned __int128 significand;
+   int e;
+   if (exp_f128 == 0) {
+      significand = (static_cast<unsigned __int128>(mant_hi) << 64) | mant_lo;
+      e = -16494;
+   } else {
+      significand = (static_cast<unsigned __int128>((1ull << 48) | mant_hi) << 64) | mant_lo;
+      e = exp_f128 - 16383 - 112;
+   }
+   // Trailing-zero count on __int128: count low 64 first, then high if needed.
+   int tz;
+   if (mant_lo != 0 || exp_f128 == 0) {
+      // significand low 64 may be nonzero
+      const std::uint64_t lo_bits = static_cast<std::uint64_t>(significand);
+      if (lo_bits != 0)      tz = __builtin_ctzll(lo_bits);
+      else                    tz = 64 + __builtin_ctzll(static_cast<std::uint64_t>(significand >> 64));
+   } else {
+      // mant_lo == 0 and normal: low 64 of significand is mant_lo = 0
+      const std::uint64_t hi_bits = static_cast<std::uint64_t>(significand >> 64);
+      tz = 64 + __builtin_ctzll(hi_bits);
+   }
+   const unsigned __int128 p = significand >> tz;
+   e += tz;
+   // bits_p = 128 - leading_zero_count(p)
+   int bits_p;
+   {
+      const std::uint64_t hi = static_cast<std::uint64_t>(p >> 64);
+      if (hi != 0) bits_p = 128 - __builtin_clzll(hi);
+      else         bits_p = 64  - __builtin_clzll(static_cast<std::uint64_t>(p));
+   }
+   const int unbiased_exp = e + bits_p - 1;
+
+   if (unbiased_exp < -1074 || unbiased_exp > 1023) return std::nullopt;
+   const int max_bits = (unbiased_exp >= -1022) ? 53 : (unbiased_exp + 1075);
+   if (bits_p > max_bits) return std::nullopt;
+
+   if (unbiased_exp >= -1022) {
+      const unsigned pad = static_cast<unsigned>(53 - bits_p);
+      const std::uint64_t m = static_cast<std::uint64_t>(p << pad);
+      const std::uint64_t mant_f64 = m & ((1ull << 52) - 1);
+      const std::uint64_t exp_f64 = static_cast<std::uint64_t>(unbiased_exp + 1023) << 52;
+      const std::uint64_t out = sign_bit | exp_f64 | mant_f64;
+      double r;
+      std::memcpy(&r, &out, sizeof r);
+      return r;
+   }
+   const unsigned m_shift = static_cast<unsigned>(e + 1074);
+   const std::uint64_t mantissa = static_cast<std::uint64_t>(p << m_shift);
+   const std::uint64_t out = sign_bit | mantissa;
    double r;
    std::memcpy(&r, &out, sizeof r);
    return r;

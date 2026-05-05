@@ -524,9 +524,12 @@ fn decimal_or_ieee_pick(mantissa: i128, scale: i32) -> Value {
 ///   - non-dyadic values (5^|s| doesn't divide m for s < 0)
 ///   - mantissa overflow (m · 5^s for s ≥ 0 exceeds i128)
 ///   - mantissa precision loss (|p| needs > 53 bits)
-///   - exponent out of f64 normal range (subnormals are punted to
-///     decimal — a conservative choice; subnormal precision is ≤ 52
-///     bits anyway)
+///   - exponent out of f64 representable range
+///
+/// The exponent-range guard is unreachable for any i128 input —
+/// proved by: s ≥ 0 path forces unbiased_exp ≥ 0, and s < 0 path
+/// requires |m| ≥ 5^|s|, capping |s| at 54 for i128. Kept as a
+/// belt-and-suspenders bound check.
 fn decimal_to_f64_exact(mantissa: i128, scale: i32) -> Option<f64> {
     if mantissa == 0 { return Some(0.0); }
 
@@ -738,56 +741,105 @@ fn is_float_nan(w: u8, bits: u128) -> bool {
     (bits & exp_mask) == exp_mask && (bits & mant_mask) != 0
 }
 
-/// f64 → f16 conversion that succeeds only if the value is bit-exact
-/// representable in binary16. Returns the 16-bit pattern on success.
+/// f64 → f16 conversion that succeeds iff the value is bit-exact
+/// representable in binary16, including the f16 subnormal range
+/// [2⁻²⁴, 2⁻¹⁴). Algorithm:
+///
+/// 1. Decompose f to canonical (sign, p, e) with `value = ±p · 2ᵉ`,
+///    p odd (or zero).
+/// 2. Compute `unbiased_exp = e + bits(p) − 1` — the value's binary
+///    "scientific notation" exponent.
+/// 3. f16-representable ranges:
+///       normal:    unbiased_exp ∈ [−14, 15], precision 11 bits
+///       subnormal: unbiased_exp ∈ [−24, −15], precision = unbiased_exp + 25 bits
+///    Reject if `unbiased_exp` is outside [−24, 15] or `bits(p)`
+///    exceeds the precision available at that exponent.
+/// 4. Bake bits — normal vs subnormal layout differs.
 fn f64_to_f16_exact(f: f64) -> Option<u16> {
+    if !f.is_finite() { return None; }
     let bits = f.to_bits();
-    let sign = ((bits >> 63) & 1) as u16;
+    let sign: u16 = (((bits >> 63) & 1) as u16) << 15;
     let exp_f64 = ((bits >> 52) & 0x7FF) as i32;
     let mant_f64 = bits & 0x000F_FFFF_FFFF_FFFF;
 
-    if exp_f64 == 0 {
-        // Subnormal or zero. Zero handled by is_float_zero earlier.
-        // Subnormals in f64 don't fit in f16 unless mantissa is small.
-        // Conservative: only zero is exact.
-        if mant_f64 == 0 { return Some(sign << 15); }
-        return None;
-    }
-    if exp_f64 == 0x7FF { return None; }    // Inf/NaN handled earlier.
+    // ±0 short-circuit.
+    if exp_f64 == 0 && mant_f64 == 0 { return Some(sign); }
+    if exp_f64 == 0x7FF { return None; }    // NaN/Inf handled by caller.
 
-    let exp_unbiased = exp_f64 - 1023;
-    // f16 normal range: exp_unbiased ∈ [-14, 15].
-    if exp_unbiased < -14 || exp_unbiased > 15 { return None; }
-    // Mantissa must use only top 10 bits — bottom 42 bits zero.
-    if mant_f64 & ((1u64 << 42) - 1) != 0 { return None; }
-    let mant_f16 = (mant_f64 >> 42) as u16;
-    let exp_f16 = (exp_unbiased + 15) as u16;
-    Some((sign << 15) | (exp_f16 << 10) | mant_f16)
+    // Recover the value as p · 2^e (p odd, p ≥ 1).
+    let (significand, e) = if exp_f64 == 0 {
+        (mant_f64, -1074_i32)                   // f64 subnormal
+    } else {
+        ((1u64 << 52) | mant_f64, exp_f64 - 1023 - 52)
+    };
+    let tz = significand.trailing_zeros() as i32;
+    let p: u64 = significand >> tz;
+    let e: i32 = e + tz;
+    let bits_p: i32 = 64 - p.leading_zeros() as i32;
+    let unbiased_exp: i32 = e + bits_p - 1;
+
+    if !(-24..=15).contains(&unbiased_exp) { return None; }
+    let max_bits = if unbiased_exp >= -14 { 11 } else { unbiased_exp + 25 };
+    if bits_p > max_bits { return None; }
+
+    if unbiased_exp >= -14 {
+        // Normal: pad p left so its top bit lands at position 10.
+        let pad = (11 - bits_p) as u32;
+        let m = p << pad;
+        let mant_f16 = (m & 0x3FF) as u16;       // top bit is implicit
+        let exp_f16 = (unbiased_exp + 15) as u16;
+        Some(sign | (exp_f16 << 10) | mant_f16)
+    } else {
+        // Subnormal: value = mantissa · 2⁻²⁴, so mantissa = p · 2^(e+24).
+        // e + 24 ≥ 0 because at unbiased_exp = -24, bits_p ≤ 1 ⇒ e ≥ -24.
+        let m_shift = (e + 24) as u32;
+        Some(sign | (p << m_shift) as u16)
+    }
 }
 
 /// f128 bits → f64 if bit-exact representable; else None.
+///
+/// Same algorithm as `f64_to_f16_exact`, scaled up: decompose to
+/// canonical (sign, p, e) and check `unbiased_exp ∈ [−1074, 1023]`
+/// with precision capped by 53 bits in normal range or
+/// `unbiased_exp + 1075` bits in subnormal range. Handles f128
+/// subnormals AND f64 subnormals as targets.
 fn f128_bits_to_f64_exact(bits: u128) -> Option<f64> {
-    // f128: 1 sign + 15 exp + 112 mantissa.
-    let sign = ((bits >> 127) & 1) as u64;
+    let sign_bit: u64 = (((bits >> 127) & 1) as u64) << 63;
     let exp_f128 = ((bits >> 112) & 0x7FFF) as i32;
     let mant_f128 = bits & ((1u128 << 112) - 1);
 
-    if exp_f128 == 0 {
-        if mant_f128 == 0 {
-            return Some(f64::from_bits(sign << 63));
-        }
-        return None;       // f128 subnormals — punt
-    }
+    if exp_f128 == 0 && mant_f128 == 0 { return Some(f64::from_bits(sign_bit)); }
     if exp_f128 == 0x7FFF { return None; }
 
-    let exp_unbiased = exp_f128 - 16383;
-    if exp_unbiased < -1022 || exp_unbiased > 1023 { return None; }
-    // Mantissa must use only top 52 bits.
-    if mant_f128 & ((1u128 << 60) - 1) != 0 { return None; }
-    let mant_f64 = (mant_f128 >> 60) as u64;
-    let exp_f64 = ((exp_unbiased + 1023) as u64) << 52;
-    let out = (sign << 63) | exp_f64 | mant_f64;
-    Some(f64::from_bits(out))
+    let (significand, e) = if exp_f128 == 0 {
+        (mant_f128, -16494_i32)                          // f128 subnormal
+    } else {
+        ((1u128 << 112) | mant_f128, exp_f128 - 16383 - 112)
+    };
+    let tz = significand.trailing_zeros() as i32;
+    let p: u128 = significand >> tz;
+    let e: i32 = e + tz;
+    let bits_p: i32 = 128 - p.leading_zeros() as i32;
+    let unbiased_exp: i32 = e + bits_p - 1;
+
+    if !(-1074..=1023).contains(&unbiased_exp) { return None; }
+    let max_bits = if unbiased_exp >= -1022 { 53 } else { unbiased_exp + 1075 };
+    if bits_p > max_bits { return None; }
+
+    if unbiased_exp >= -1022 {
+        // Normal f64.
+        let pad = (53 - bits_p) as u32;
+        let m = (p << pad) as u64;
+        let mant_f64 = m & ((1u64 << 52) - 1);
+        let exp_f64 = ((unbiased_exp + 1023) as u64) << 52;
+        Some(f64::from_bits(sign_bit | exp_f64 | mant_f64))
+    } else {
+        // Subnormal f64: mantissa = p · 2^(e + 1074).
+        let m_shift = (e + 1074) as u32;
+        let mantissa = (p << m_shift) as u64;
+        Some(f64::from_bits(sign_bit | mantissa))
+    }
 }
 
 /// Trim trailing zeros from a base-10 mantissa. (mantissa=10, scale=0)
@@ -3883,6 +3935,66 @@ mod tests {
         let enc_sorted = encode(&Value::Object(sorted_entries)).unwrap();
         assert_ne!(enc, enc_sorted,
             "different field orders must produce different wire bytes");
+    }
+
+    #[test]
+    fn f64_to_f16_handles_subnormal_target() {
+        // Regression test: 2^-20 is f64-normal but f16-subnormal.
+        // Old `f64_to_f16_exact` rejected anything below the f16
+        // normal range (exp_unbiased < -14), forcing the picker to
+        // narrow only to f32 (5-byte wire) when f16 (3-byte) works.
+        //
+        // The entire f16 subnormal range [2^-24, 2^-14) MUST narrow
+        // exactly. Any power of 2 in that range is f16-subnormal-
+        // representable: 2^k for k ∈ [-24, -15] = mantissa 2^(k+24).
+        for k in -24..=-15_i32 {
+            let f = 2f64.powi(k);
+            let result = f64_to_f16_exact(f);
+            assert!(result.is_some(),
+                "2^{} must narrow to f16 subnormal", k);
+            // f16 subnormal: exp bits = 0, mantissa = 2^(k+24).
+            let expected_mantissa = 1u16 << (k + 24);
+            assert_eq!(result, Some(expected_mantissa),
+                "2^{} → f16 mantissa 2^{} = {}", k, k + 24, expected_mantissa);
+        }
+
+        // Smallest f16 subnormal: 2^-24 = mantissa 1.
+        assert_eq!(f64_to_f16_exact(2f64.powi(-24)), Some(0x0001));
+        // Just below: not representable.
+        assert_eq!(f64_to_f16_exact(2f64.powi(-25)), None);
+        // Largest subnormal value (just below smallest normal):
+        // 1023 × 2^-24 = 0x3FF × 2^-24.
+        let largest_sub = 1023f64 * 2f64.powi(-24);
+        assert_eq!(f64_to_f16_exact(largest_sub), Some(0x03FF));
+
+        // Sign preservation in subnormal.
+        assert_eq!(f64_to_f16_exact(-2f64.powi(-20)), Some(0x8010));
+
+        // f16-NORMAL still works (regression check).
+        assert_eq!(f64_to_f16_exact(1.0_f64), Some(0x3C00));
+        assert_eq!(f64_to_f16_exact(1.5_f64), Some(0x3E00));
+    }
+
+    #[test]
+    fn d007_picks_f16_subnormal_via_json_ingress() {
+        // End-to-end proof: 2^-20 = 0.00000095367431640625 is a
+        // canonical dyadic decimal. m = 95367431640625, s = -20.
+        // decimal_size = 1 + 6 + 1 = 8. The value is f16-subnormal
+        // exact (mantissa = 16 = 1 << 4, no implicit leading bit).
+        //
+        // Before the subnormal fix: canonical_float_width rejected
+        // f16 (exp -20 < -14), narrowed to f32, ieee_size = 5,
+        // wire was 5 bytes.
+        // After the fix: f16 succeeds, ieee_size = 3, wire is 3
+        // bytes — correct identity AND smaller.
+        let v = from_json("0.00000095367431640625").expect("parse");
+        let wire = encode(&v).unwrap();
+        // Tag must be 0x61 (ieee_float, width_log2=1 = binary16).
+        assert_eq!(wire[0], 0x61,
+            "expected f16 tag, got {:#04x}; wire = {:?}", wire[0], wire);
+        // f16 0x0010 = subnormal mantissa 16 = 16·2^-24 = 2^-20.
+        assert_eq!(&wire[1..], &[0x10, 0x00],
+            "expected f16 subnormal bits 0x0010 LE, got {:?}", &wire[1..]);
     }
 
     #[test]
