@@ -67,7 +67,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-009 | code 8 = `numeric_string`, low nibble must be 0; body is inner numeric value | ❌ | ❌ | ❌ | ❌ |
 | T-010 | code 9 = `string`, low nibble ∈ {0, 1} = encoding flag; others reserved | ❌ | ❌ | ❌ | ❌ |
 | T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ❌ | ❌ | ❌ | ❌ |
-| T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ❌ | ❌ | ❌ | ❌ |
+| T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ⚠️ low_nibble 0 (generic) ✅; 1..10 (typed) Phase 2.2 | ⚠️ | ⚠️ same | ⚠️ |
 | T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
 | T-015 | codes 14, 15 reserved → reject | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
@@ -195,12 +195,12 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| AG-001 | encode generic array: tag `0xB0`, width byte, value_data, slot table, count u16 LE | ❌ | ❌ | ❌ | ❌ |
-| AG-002 | decode: locate slot table from tail, walk forward into value_data | ❌ | ❌ | ❌ | ❌ |
-| AG-003 | adaptive slot width selection: u8 / u16 / u24 / u32 per value_data size | ❌ | ❌ | ❌ | ❌ |
-| AG-004 | reject slot offsets that violate monotonicity | ❌ | ❌ | ❌ | ❌ |
-| AG-005 | reject slot offset ≥ value_data_size | ❌ | ❌ | ❌ | ❌ |
-| AG-006 | empty array (N=0) round-trip | ❌ | ❌ | ❌ | ❌ |
+| AG-001 | encode generic array: tag `0xB0`, width byte, value_data, slot table, count u16 LE | ✅ | ✅ corpus `array_empty` + `array_single_uint_inline` + `array_heterogeneous` + `array_nested` | ✅ | ✅ `generic_array_round_trip` + corpus |
+| AG-002 | decode: locate slot table from tail, walk forward into value_data | ✅ | ✅ corpus `array_*` round-trip | ✅ | ✅ `generic_array_round_trip` |
+| AG-003 | adaptive slot width selection: u8 / u16 / u24 / u32 per value_data size | ✅ | ⚠️ corpus only exercises u8 path; `array_adaptive_slot_width` Rust test exercises u16 | ✅ | ✅ `array_adaptive_slot_width` (asserts u16 slots when value_data > 256 B) |
+| AG-004 | reject slot offsets that violate monotonicity | ✅ via decode bounds check | ⚠️ no dedicated reject fixture | ✅ via decode bounds check | ⚠️ |
+| AG-005 | reject slot offset ≥ value_data_size | ✅ | ⚠️ no dedicated reject fixture | ✅ | ⚠️ |
+| AG-006 | empty array (N=0) round-trip | ✅ | ✅ corpus `array_empty` | ✅ | ✅ `generic_array_round_trip` + corpus |
 
 ### §5.1.1 — Typed homogeneous array
 

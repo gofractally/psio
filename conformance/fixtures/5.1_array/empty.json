@@ -1,0 +1,11 @@
+{
+  "id": "array_empty",
+  "spec_ref": "§5.1",
+  "rule_ids": ["AG-001", "AG-002", "AG-006", "T-012"],
+  "description": "empty generic array: tag 0xB0 + width 0x00 + no value_data + no slots + count 0x00 0x00",
+  "input_value": {"kind": "array", "children": []},
+  "wire_hex": "b0000000",
+  "json_compact": "[]",
+  "must_round_trip": true,
+  "must_validate": true
+}

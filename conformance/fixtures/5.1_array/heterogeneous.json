@@ -1,0 +1,15 @@
+{
+  "id": "array_heterogeneous",
+  "spec_ref": "§5.1",
+  "rule_ids": ["AG-001", "AG-002", "AG-003", "T-012"],
+  "description": "[1, true, -1] generic array — three different scalar types. value_data = 0x21 0x11 0x31 (3 bytes). slot_w=u8, slots [0,1,2]. count=3.",
+  "input_value": {"kind": "array", "children": [
+    {"kind": "uint", "value": 1},
+    {"kind": "bool", "value": true},
+    {"kind": "int", "value": -1}
+  ]},
+  "wire_hex": "b0002111310001020300",
+  "json_compact": "[1,true,-1]",
+  "must_round_trip": true,
+  "must_validate": true
+}

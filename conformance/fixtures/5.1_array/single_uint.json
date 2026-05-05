@@ -1,0 +1,11 @@
+{
+  "id": "array_single_uint_inline",
+  "spec_ref": "§5.1",
+  "rule_ids": ["AG-001", "AG-002", "T-012"],
+  "description": "[1] generic array. value_data = uint_inline 1 (0x21). slot_w=u8, slot[0]=0. count=1.",
+  "input_value": {"kind": "array", "children": [{"kind": "uint", "value": 1}]},
+  "wire_hex": "b00021000100",
+  "json_compact": "[1]",
+  "must_round_trip": true,
+  "must_validate": true
+}

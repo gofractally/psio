@@ -1,0 +1,14 @@
+{
+  "id": "array_nested",
+  "spec_ref": "§5.1",
+  "rule_ids": ["AG-001", "AG-002", "AG-003"],
+  "description": "[[1,2],[3]] nested generic array",
+  "input_value": {"kind": "array", "children": [
+    {"kind": "array", "children": [{"kind": "uint", "value": 1}, {"kind": "uint", "value": 2}]},
+    {"kind": "array", "children": [{"kind": "uint", "value": 3}]}
+  ]},
+  "wire_hex": "b000b000212200010200b0002300010000080200",
+  "json_compact": "[[1,2],[3]]",
+  "must_round_trip": true,
+  "must_validate": true
+}

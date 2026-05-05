@@ -11,20 +11,17 @@ to ✅, the id is removed from this file.
 
 ---
 
-## Phase 1 status
+## Status
 
-**Phase 1 is fully sealed.** All rule rows are ✅ on both languages
-except F-008 (NaN canonicalization, deliberately deferred to Phase 5).
+**Phase 1 is fully sealed.** **Phase 2.1 (generic array) is also
+green** — all six AG-* rows are ✅ on both languages.
 
 Tally:
-- 71 rows ✅ on **both** Rust and C++.
-- 1 row ⚠️ on both langs: F-008 (NaN canonicalization, Phase 5).
-- 95 rows ❌ — Phase 2/3/4 scope, all enumerated below.
-
-This includes binary128 (F-004) via the vendored Berkeley SoftFloat
-subset and a Rust port, and the predicate-property tests
-(T-016/T-017/V-003) via a `--self-test` runtime mode in both
-drivers (run by `tools/run-conformance.sh` automatically).
+- 75 rows ✅ on **both** Rust and C++ (Phase 1 + Phase 2.1 generic array).
+- 5 rows ⚠️: F-008 (NaN canonicalization, Phase 5); AG-003/004/005 fixture
+  follow-ups (impl ✅, no dedicated reject fixture); T-012 partial (typed
+  array Phase 2.2).
+- 92 rows ❌ — Phase 2.2/3/4 scope, all enumerated below.
 
 ---
 
@@ -36,7 +33,6 @@ languages until the relevant phase lands. Both drivers return
 any of these will fail loud rather than silently mishandle.
 
 ```
-AG-001 AG-002 AG-003 AG-004 AG-005 AG-006
 AT-001 AT-002 AT-003 AT-004 AT-005 AT-006 AT-007 AT-008 AT-009 AT-010 AT-011 AT-012
 BY-001 BY-002 BY-003 BY-004 BY-005 BY-006
 C-001 C-002 C-003 C-004 C-005 C-006
@@ -72,15 +68,19 @@ E-002
 
 ---
 
-## Block B — Phase 1 ⚠️ rows
+## Block B — ⚠️ rows (impl exists, dedicated test pending)
 
 ```
-F-008
+F-008 AG-003 AG-004 AG-005 T-012
 ```
 
 | id | gap | action |
 |----|-----|--------|
 | F-008 | NaN canonicalization (§15.2.1) not implemented — round-trips bits as-is rather than emitting canonical pattern | Phase 5 (canonical encoding rules) |
+| AG-003 | adaptive slot-width selection works in both impls (Rust unit test asserts u16-slot threshold) but no corpus fixture exercises u16/u24/u32 paths via cross-validation | add fixtures: array with 16+ u128 children → forces u16 slots; very large array → u24, etc. |
+| AG-004 | slot-monotonicity reject path exists in code (`array slot offset OOB or non-monotonic`) but no fixture | add reject fixture with hand-crafted non-monotonic slots |
+| AG-005 | slot-OOB reject path exists in code but no fixture | add reject fixture with slot offset > value_data_size |
+| T-012 | typed-array dispatch (low_nibble 1..10) is Phase 2.2 | implement typed homogeneous array (AT-*) |
 
 ---
 

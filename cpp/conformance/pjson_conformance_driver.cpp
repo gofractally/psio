@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -91,7 +92,36 @@ struct Decimal {
    bool operator==(const Decimal&) const = default;
 };
 
-using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal>;
+// `Array` holds a recursive `std::vector<Value>`. The forward-declared
+// body lets the variant be sized (Array is a wrapper around a single
+// shared_ptr) while still letting Array's body refer back to Value
+// once the variant is fully declared.
+struct ArrayBody;
+struct Array {
+   std::shared_ptr<ArrayBody> body;
+   bool operator==(const Array& other) const;
+};
+
+using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal, Array>;
+
+struct ArrayBody {
+   std::vector<Value> children;
+   bool operator==(const ArrayBody&) const = default;
+};
+
+inline bool Array::operator==(const Array& other) const {
+   if (!body && !other.body) return true;
+   if (!body || !other.body) return false;
+   return body->children == other.body->children;
+}
+
+// Helper to build an Array variant from a vector of children.
+inline Array make_array(std::vector<Value> children) {
+   Array a;
+   a.body = std::make_shared<ArrayBody>();
+   a.body->children = std::move(children);
+   return a;
+}
 
 // ── Errors ─────────────────────────────────────────────────────────
 
@@ -245,6 +275,40 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
          out.push_back(static_cast<std::uint8_t>(0x70 | (bc - 1)));
          out.insert(out.end(), m_bytes.begin(), m_bytes.end());
          varscale_encode(arg.scale, out);
+      } else if constexpr (std::is_same_v<T, Array>) {
+         // §5.1 generic array.
+         const auto& children = arg.body ? arg.body->children
+                                         : std::vector<Value>{};
+         const std::size_t n = children.size();
+         if (n > 0xFFFF) throw EncodeError{"array count > 65535 (LIM-001)"};
+
+         std::vector<std::uint8_t> value_data;
+         std::vector<std::size_t>  offsets;
+         offsets.reserve(n);
+         for (const auto& child : children) {
+            offsets.push_back(value_data.size());
+            encode_into(child, value_data);
+         }
+         const std::size_t value_data_size = value_data.size();
+
+         std::uint8_t slot_w_code;
+         std::size_t  slot_w;
+         if      (value_data_size <= 0xFF)         { slot_w_code = 0; slot_w = 1; }
+         else if (value_data_size <= 0xFFFF)       { slot_w_code = 1; slot_w = 2; }
+         else if (value_data_size <= 0xFF'FFFF)    { slot_w_code = 2; slot_w = 3; }
+         else if (value_data_size <= 0xFFFF'FFFFu) { slot_w_code = 3; slot_w = 4; }
+         else throw EncodeError{"value_data > u32 (LIM-002)"};
+
+         out.push_back(0xB0);
+         out.push_back(slot_w_code);
+         out.insert(out.end(), value_data.begin(), value_data.end());
+         for (std::size_t off : offsets) {
+            for (std::size_t i = 0; i < slot_w; ++i) {
+               out.push_back(static_cast<std::uint8_t>(off >> (8 * i)));
+            }
+         }
+         out.push_back(static_cast<std::uint8_t>(n & 0xFF));
+         out.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFF));
       }
    }, v);
 }
@@ -272,6 +336,9 @@ static VarscaleResult varscale_decode(std::span<const std::uint8_t> buf) {
    }
    return {zigzag_decode_u32(zz), total};
 }
+
+static Value decode(std::span<const std::uint8_t> buf);
+static Value decode_generic_array(std::span<const std::uint8_t> buf);
 
 static Value decode(std::span<const std::uint8_t> buf) {
    if (buf.empty()) throw DecodeError{"empty buffer"};
@@ -322,10 +389,24 @@ static Value decode(std::span<const std::uint8_t> buf) {
          const auto scale_result = varscale_decode(buf.subspan(1 + bc));
          return Decimal{mantissa, scale_result.value};
       }
-      case 8: case 9: case 10: case 11: case 12: case 13: {
+      case 11: {
+         // §5.1/§5.1.1 array dispatch.
+         if (low == 0) {
+            return decode_generic_array(buf);
+         }
+         if (low >= 1 && low <= 10) {
+            throw DecodeError{"Phase 2.2: typed_array"};
+         }
+         throw DecodeError{"reserved low_nibble for array"};
+      }
+      case 8: case 9: case 10: case 12: case 13: {
          static const char* names[] = {
-            "numeric_string", "string", "bytes",
-            "array", "object", "extension"};
+            "numeric_string",  // 8
+            "string",          // 9
+            "bytes",           // 10
+            "<unused>",        // 11 — handled above
+            "object",          // 12
+            "extension"};      // 13
          throw DecodeError{std::string{"Phase ≥2: "} + names[high - 8]};
       }
       case 14: case 15:
@@ -333,6 +414,57 @@ static Value decode(std::span<const std::uint8_t> buf) {
                            static_cast<char>("0123456789ABCDEF"[high]) + "0"};
    }
    throw DecodeError{"unreachable"};
+}
+
+// §5.1 generic-array decode. `buf` starts at the tag byte (0xB0).
+static Value decode_generic_array(std::span<const std::uint8_t> buf) {
+   if (buf.size() < 4) throw DecodeError{"array minimum size"};
+   const std::uint8_t width_byte = buf[1];
+   const std::size_t  slot_w_code = width_byte & 0x03;
+   if ((width_byte & 0xFC) != 0) {
+      throw DecodeError{"reserved high bits in array width byte"};
+   }
+   const std::size_t  slot_w = slot_w_code + 1;
+   const std::size_t  n = static_cast<std::size_t>(buf[buf.size() - 2])
+                       | (static_cast<std::size_t>(buf[buf.size() - 1]) << 8);
+   const std::size_t  overhead = 4 + slot_w * n;
+   if (buf.size() < overhead) throw DecodeError{"array slots/count truncated"};
+   const std::size_t  value_data_size = buf.size() - overhead;
+
+   std::size_t expected_slot_w;
+   if      (value_data_size <= 0xFF)         expected_slot_w = 1;
+   else if (value_data_size <= 0xFFFF)       expected_slot_w = 2;
+   else if (value_data_size <= 0xFF'FFFF)    expected_slot_w = 3;
+   else                                       expected_slot_w = 4;
+   if (slot_w < expected_slot_w) {
+      throw DecodeError{"slot width too small for value_data"};
+   }
+
+   const std::size_t value_data_start = 2;
+   const std::size_t slot_table_start = value_data_start + value_data_size;
+
+   auto read_slot = [&](std::size_t i) -> std::size_t {
+      std::size_t pos = slot_table_start + i * slot_w;
+      std::size_t off = 0;
+      for (std::size_t b = 0; b < slot_w; ++b) {
+         off |= static_cast<std::size_t>(buf[pos + b]) << (8 * b);
+      }
+      return off;
+   };
+
+   std::vector<Value> children;
+   children.reserve(n);
+   for (std::size_t i = 0; i < n; ++i) {
+      const std::size_t off = read_slot(i);
+      const std::size_t next_off = (i + 1 < n) ? read_slot(i + 1) : value_data_size;
+      if (off > value_data_size || next_off < off || next_off > value_data_size) {
+         throw DecodeError{"array slot offset OOB or non-monotonic"};
+      }
+      const std::size_t child_size = next_off - off;
+      auto child_span = buf.subspan(value_data_start + off, child_size);
+      children.push_back(decode(child_span));
+   }
+   return make_array(std::move(children));
 }
 
 // ── JSON projection ────────────────────────────────────────────────
@@ -475,6 +607,18 @@ static std::string render_json(const Value& v) {
          return buf;
       } else if constexpr (std::is_same_v<T, Decimal>) {
          return format_decimal(arg.mantissa, arg.scale);
+      } else if constexpr (std::is_same_v<T, Array>) {
+         std::string s = "[";
+         const auto& children = arg.body ? arg.body->children
+                                         : std::vector<Value>{};
+         bool first = true;
+         for (const auto& c : children) {
+            if (!first) s += ",";
+            first = false;
+            s += render_json(c);
+         }
+         s += "]";
+         return s;
       }
    }, v);
 }
@@ -842,8 +986,20 @@ static Value parse_value_from_json(const JNode& j) {
       std::int64_t scale = std::get<std::int64_t>(sn->v);
       return Decimal{mantissa, static_cast<std::int32_t>(scale)};
    }
+   if (kind == "array") {
+      const auto* children_node = obj_get(obj, "children");
+      if (!children_node) throw std::runtime_error{"array missing 'children'"};
+      const auto* arr = std::get_if<JArray>(&children_node->v);
+      if (!arr) throw std::runtime_error{"array 'children' must be an array"};
+      std::vector<Value> children;
+      children.reserve(arr->size());
+      for (const auto& cj : *arr) {
+         children.push_back(parse_value_from_json(cj));
+      }
+      return make_array(std::move(children));
+   }
    throw std::runtime_error{std::string{"input_value kind '"} + kind +
-                            "' not supported in Phase 1"};
+                            "' not supported yet"};
 }
 
 static Fixture parse_fixture(std::string_view json_text) {

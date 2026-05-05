@@ -61,6 +61,9 @@ enum Value {
     Float { width_log2: u8, bits: u128 },
     /// Exact decimal `mantissa × 10^scale`. Mantissa is signed.
     Decimal { mantissa: i128, scale: i32 },
+    /// Generic array (§5.1) — heterogeneous children. Tail-indexed
+    /// layout with adaptive slot width.
+    Array(Vec<Value>),
 }
 
 // ── Encode (§12 reference algorithm) ────────────────────────────────
@@ -150,8 +153,50 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&m_bytes);
             varscale_encode_into(*scale, out)?;
         }
+
+        Value::Array(children) => {
+            // §5.1 generic array.
+            //   tag (0xB0)
+            //   width byte (slot_w_code in low 2 bits)
+            //   value_data (concatenated child encodings)
+            //   slot[N] (N × slot_w bytes — offsets within value_data)
+            //   count (u16 LE)
+            let n = children.len();
+            if n > 0xFFFF {
+                return Err(EncodeError::Overflow("array count > 65 535 (LIM-001)"));
+            }
+            // Encode children into a scratch buffer, recording each
+            // child's start offset within value_data.
+            let mut value_data = Vec::new();
+            let mut offsets = Vec::with_capacity(n);
+            for child in children {
+                offsets.push(value_data.len());
+                encode_into(child, &mut value_data)?;
+            }
+            let value_data_size = value_data.len();
+            let (slot_w_code, slot_w) = pick_slot_width(value_data_size)?;
+            // Emit.
+            out.push(0xB0);
+            out.push(slot_w_code);
+            out.extend_from_slice(&value_data);
+            for off in &offsets {
+                let bytes = (*off as u32).to_le_bytes();
+                out.extend_from_slice(&bytes[..slot_w]);
+            }
+            out.extend_from_slice(&(n as u16).to_le_bytes());
+        }
     }
     Ok(())
+}
+
+/// §5.6 — pick the smallest slot width that fits a value_data of the
+/// given size.  slot_w_code 0/1/2/3 → byte widths 1/2/3/4.
+fn pick_slot_width(value_data_size: usize) -> Result<(u8, usize), EncodeError> {
+    if value_data_size <= 0xFF              { Ok((0, 1)) }
+    else if value_data_size <= 0xFFFF       { Ok((1, 2)) }
+    else if value_data_size <= 0xFF_FF_FF   { Ok((2, 3)) }
+    else if value_data_size <= 0xFFFF_FFFF  { Ok((3, 4)) }
+    else { Err(EncodeError::Overflow("value_data_size > u32 (LIM-002)")) }
 }
 
 /// Smallest little-endian byte representation of a u128, with leading
@@ -338,12 +383,22 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             let _ = scale_bytes;
             Ok(Value::Decimal { mantissa, scale })
         }
-        8 | 9 | 10 | 11 | 12 => {
+        11 => {
+            // §5.1/§5.1.1 array. Phase 2.1 implements low_nibble 0
+            // (generic). 1..10 (typed homogeneous) is Phase 2.2.
+            if low == 0 {
+                return decode_generic_array(buf);
+            }
+            if (1..=10).contains(&low) {
+                return Err(DecodeError::NotImplementedYet("typed_array (Phase 2.2)"));
+            }
+            Err(DecodeError::ReservedLowNibble("array", low))
+        }
+        8 | 9 | 10 | 12 => {
             Err(DecodeError::NotImplementedYet(match high {
                 8  => "numeric_string",
                 9  => "string",
                 10 => "bytes",
-                11 => "array",
                 12 => "object",
                 _  => unreachable!(),
             }))
@@ -352,6 +407,74 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
         14 | 15 => Err(DecodeError::ReservedTag(tag)),
         _ => unreachable!(),
     }
+}
+
+/// §5.1 generic-array decode. Buffer starts at the tag byte (0xB0).
+fn decode_generic_array(buf: &[u8]) -> Result<Value, DecodeError> {
+    if buf.len() < 4 {
+        // tag + width + 0 slots + count(2) = 4 bytes minimum
+        return Err(DecodeError::Truncated("array minimum size"));
+    }
+    let width_byte = buf[1];
+    let slot_w_code = (width_byte & 0x03) as usize;
+    if (width_byte & 0xFC) != 0 {
+        return Err(DecodeError::ReservedLowNibble("array width byte high bits", width_byte));
+    }
+    let slot_w = slot_w_code + 1;     // codes 0..3 → widths 1..4
+    let n = u16::from_le_bytes([buf[buf.len() - 2], buf[buf.len() - 1]]) as usize;
+    // value_data_size = container - 2 (tag + width) - slot_w*N - 2 (count)
+    let overhead = 4 + slot_w * n;
+    if buf.len() < overhead {
+        return Err(DecodeError::Truncated("array slots/count"));
+    }
+    let value_data_size = buf.len() - overhead;
+    // Bounds: pick_slot_width's choice must agree with value_data_size.
+    let expected_slot_w = match value_data_size {
+        0..=0xFF              => 1,
+        0x100..=0xFFFF        => 2,
+        0x1_0000..=0xFF_FFFF  => 3,
+        _                     => 4,
+    };
+    if slot_w != expected_slot_w {
+        // Note: the spec requires slot_w match value_data_size; a buffer
+        // with a wider-than-needed slot is technically non-canonical
+        // but the spec only mandates encoder compliance, not decoder
+        // rejection.  Phase 1 driver accepts any matching slot width
+        // (and rejects a slot too small to hold the offsets, since
+        // those wouldn't fit).
+        // For now: enforce strict canonical, which the encoder
+        // produces.  Strict-canonical decoder is the conservative pick.
+        if slot_w < expected_slot_w {
+            return Err(DecodeError::Truncated("slot width too small for value_data"));
+        }
+        // wider-than-needed: tolerate (non-canonical but well-formed)
+    }
+    let value_data_start = 2;
+    let slot_table_start = value_data_start + value_data_size;
+    let mut children = Vec::with_capacity(n);
+    for i in 0..n {
+        let slot_pos = slot_table_start + i * slot_w;
+        let slot_bytes = &buf[slot_pos..slot_pos + slot_w];
+        let mut off_buf = [0u8; 4];
+        off_buf[..slot_w].copy_from_slice(slot_bytes);
+        let off = u32::from_le_bytes(off_buf) as usize;
+        let next_off = if i + 1 < n {
+            let np = slot_table_start + (i + 1) * slot_w;
+            let nb = &buf[np..np + slot_w];
+            let mut nbuf = [0u8; 4];
+            nbuf[..slot_w].copy_from_slice(nb);
+            u32::from_le_bytes(nbuf) as usize
+        } else {
+            value_data_size
+        };
+        if off > value_data_size || next_off < off || next_off > value_data_size {
+            return Err(DecodeError::Truncated("array slot offset OOB or non-monotonic"));
+        }
+        let child_size = next_off - off;
+        let child = decode(&buf[value_data_start + off..value_data_start + off + child_size])?;
+        children.push(child);
+    }
+    Ok(Value::Array(children))
 }
 
 fn read_u128_le(bytes: &[u8]) -> u128 {
@@ -427,6 +550,15 @@ fn render_json(v: &Value) -> String {
             }
         }
         Value::Decimal { mantissa, scale } => format_decimal(*mantissa, *scale),
+        Value::Array(children) => {
+            let mut s = String::from("[");
+            for (i, c) in children.iter().enumerate() {
+                if i > 0 { s.push(','); }
+                s.push_str(&render_json(c));
+            }
+            s.push(']');
+            s
+        }
     }
 }
 
@@ -736,7 +868,17 @@ fn parse_value(j: &Json) -> Result<Value, String> {
                 .ok_or("decimal missing 'scale'")? as i32;
             Ok(Value::Decimal { mantissa, scale })
         }
-        other => Err(format!("input_value kind '{}' not supported in Phase 1", other)),
+        "array" => {
+            let arr = obj.get("children")
+                         .and_then(|x| x.as_array())
+                         .ok_or("array missing 'children' (array)")?;
+            let mut children = Vec::with_capacity(arr.len());
+            for child_json in arr {
+                children.push(parse_value(child_json)?);
+            }
+            Ok(Value::Array(children))
+        }
+        other => Err(format!("input_value kind '{}' not supported yet", other)),
     }
 }
 
@@ -1211,6 +1353,60 @@ mod tests {
         //   Rounds to +0.
         let tiny_bits = 1u128;
         assert_eq!(f128_bits_to_f64(tiny_bits).to_bits(), 0u64);
+    }
+
+    #[test]
+    fn generic_array_round_trip() {
+        // Empty array: tag 0xB0, width 0x00, no value_data, no slots, count 0x00 0x00
+        let v0 = Value::Array(vec![]);
+        let enc0 = encode(&v0).unwrap();
+        assert_eq!(enc0, vec![0xB0, 0x00, 0x00, 0x00], "empty array");
+        assert_eq!(decode(&enc0).unwrap(), v0);
+
+        // [1] → tag 0xB0, width 0x00, value_data [0x21], slot[0]=0 (1 byte),
+        //         count 0x01 0x00
+        let v1 = Value::Array(vec![Value::Uint(1)]);
+        let enc1 = encode(&v1).unwrap();
+        assert_eq!(enc1, vec![0xB0, 0x00, 0x21, 0x00, 0x01, 0x00], "[1]");
+        assert_eq!(decode(&enc1).unwrap(), v1);
+
+        // [1, true]: value_data [0x21, 0x11], slots [0x00, 0x01], count 0x02 0x00
+        let v2 = Value::Array(vec![Value::Uint(1), Value::Bool(true)]);
+        let enc2 = encode(&v2).unwrap();
+        assert_eq!(enc2,
+            vec![0xB0, 0x00, 0x21, 0x11, 0x00, 0x01, 0x02, 0x00],
+            "[1, true]");
+        assert_eq!(decode(&enc2).unwrap(), v2);
+
+        // Nested: [[1, 2], [3]]
+        let nested = Value::Array(vec![
+            Value::Array(vec![Value::Uint(1), Value::Uint(2)]),
+            Value::Array(vec![Value::Uint(3)]),
+        ]);
+        let enc_nested = encode(&nested).unwrap();
+        let dec_nested = decode(&enc_nested).unwrap();
+        assert_eq!(dec_nested, nested);
+        // JSON projection: [[1,2],[3]]
+        assert_eq!(render_json(&dec_nested), "[[1,2],[3]]");
+    }
+
+    #[test]
+    fn array_adaptive_slot_width() {
+        // Small array uses u8 slots.
+        let small = Value::Array((0u128..3).map(Value::Uint).collect());
+        let enc_small = encode(&small).unwrap();
+        // width byte = 0 (u8 slots)
+        assert_eq!(enc_small[1], 0x00);
+
+        // Array large enough to force u16 slots: needs value_data > 256
+        // bytes. Each child u128_max (Uint with bc=16) is 17 bytes. 16
+        // children = 272 bytes value_data, forcing slot_w_code = 1.
+        let big_uint = Value::Uint(u128::MAX);
+        let big = Value::Array(vec![big_uint; 16]);
+        let enc_big = encode(&big).unwrap();
+        assert_eq!(enc_big[1], 0x01, "u16 slots when value_data > 256");
+        // Round-trip preserves all 16 children byte-exact.
+        assert_eq!(decode(&enc_big).unwrap(), big);
     }
 
     #[test]
