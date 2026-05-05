@@ -25,6 +25,38 @@ time. It is the binary peer of JSON: it can losslessly carry any value
 JSON's grammar can express, and it can be converted to JSON text and
 back.
 
+### Design invariants
+
+pjson is built around three properties that drive every wire-format
+choice:
+
+1. **Encode once, read many.** The encoder pays the cost of layout
+   discipline — sorted offsets, hash bytes, adaptive widths, canonical
+   numeric forms. Every reader thereafter projects out of the buffer
+   at constant cost. The asymmetry is deliberate: encode happens once
+   per value, reads happen continuously.
+
+2. **Bounded work per read.** Each access — typed field read, dynamic
+   key lookup, type-class dispatch — is a fixed number of operations
+   regardless of buffer size or surrounding structure. No tag-walking
+   to locate a field, no value-tree allocation to consult a child, no
+   size discovery to know where a value ends.
+
+3. **Dynamic-dispatch friendly.** A consumer without compile-time
+   schema knowledge incurs the same per-operation bound as one with
+   it, modulo a single tag-byte switch. The tag-byte layout (§3) is
+   organized so type-class predicates collapse to range tests; a
+   generic interpreter is fast by construction, not just a code-
+   generated typed reader.
+
+These cut directly against varint-tagged formats (where field N
+depends on field N-1's value to locate) and tagged-value formats
+(where any value can carry an arbitrary "consult a registry"
+wrapper). pjson trades the byte savings and runtime extensibility
+those buy for predictable performance — and supplies a bounded
+extension framework (§4.11) for cases where new types are genuinely
+needed.
+
 ### Headline numbers
 
 **Wire size — the big wins.** pjson collapses to compact dedicated
@@ -171,10 +203,11 @@ encoded data; for others it is reserved.
 | 7    | `decimal`        | mantissa byte count − 1 (range 1..16)                                             | `bc` mantissa bytes + varscale (1..4 bytes) |
 | 8    | `numeric_string` | reserved (must be 0); body is an inner pjson value of one of the numeric types    | inner pjson value (its own tag + payload) |
 | 9    | `string`         | encoding flag (see §4.9); 0..1 valid, others reserved                             | (size − 1) bytes (length implicit from `size`) |
-| 10 (A) | `bytes`        | reserved (must be 0)                                                              | (size − 1) bytes (raw octets) — see §4.10 |
+| 10 (A) | `bytes`        | JSON-emit encoding hint (0 = base64, 1 = hex, 2 = base58, 3 = base64url, 4..15 reserved) — see §4.10 | (size − 1) bytes (raw octets) |
 | 11 (B) | `array`        | layout selector — see §5.1: 0 = generic, 1..10 = typed homogeneous (element type code = low_nibble − 1), 11..15 reserved | container body — see §5 |
 | 12 (C) | `object`       | layout selector — see §5.2: 0 = single object, 1 = row_array (homogeneous-shape array of objects), 2..15 reserved | container body — see §5 |
-| 13–15  | reserved      |                                                                                   | — |
+| 13 (D) | `extension`    | sub-type id (0..15); body is opaque bytes — see §4.11 | (size − 1) bytes (sub-type-specific payload) |
+| 14–15  | reserved       |                                                                                   | — |
 
 Implementations must reject (return error) on any reserved tag code or
 non-zero low-nibble bits in tags that mark them reserved.
@@ -192,7 +225,8 @@ is_numeric_value     = 2 <= code <= 7        // pure numeric body
 is_number_projectable= 2 <= code <= 8        // includes numeric_string
 is_json_string_emit  = 8 <= code <= 10       // numeric_string + string + bytes
 is_aggregate         = 11 <= code <= 12
-is_reserved          = code >= 13
+is_extension         = code == 13
+is_reserved          = code >= 14
 ```
 
 The two `code == 8` overlaps (numeric_string is both `is_number_projectable`
@@ -480,26 +514,115 @@ Raw binary blobs are NOT a string sub-flag — they have their own
 ### 4.10 `bytes` (code 10)
 
 ```
-tag (1 B): high = A, low = 0 (reserved)
-content (size − 1 B): raw binary bytes
+tag (1 B): high = A, low = JSON-emit encoding hint (see table)
+content (size − 1 B): raw binary octets
 ```
 
 The `bytes` tag carries a contiguous run of raw binary octets. There
 is no length prefix; the length is `size − 1` from the caller-
-provided value `size`. The low nibble is reserved and must be 0;
-implementations must reject non-zero values.
+provided value `size`.
 
-**JSON round-trip.** JSON has no native binary literal. JSON emitters
-**should** base64-encode the bytes and emit a quoted string. JSON
-parsers cannot infer "this string was supposed to be bytes" from the
-text alone — convention is to use a key suffix (e.g. `"avatar.b64"`)
-so consumers know to base64-decode on input (§7).
+The low nibble is a **JSON-emit encoding hint** — when this value is
+rendered to JSON text, the hint tells the emitter which textual
+encoding to use. The wire bytes themselves are always raw octets
+regardless of hint:
+
+| flag | name        | meaning                                              |
+|------|-------------|------------------------------------------------------|
+| 0    | `base64`    | Standard base64 with `+`/`/` and `=` padding (default). |
+| 1    | `hex`       | Lowercase hexadecimal, no separators.                |
+| 2    | `base58`    | Bitcoin-alphabet base58 (no `0`/`O`/`I`/`l`).        |
+| 3    | `base64url` | URL-safe base64 with `-`/`_`, no padding.            |
+| 4..15 | reserved   | Implementations must reject.                         |
+
+A v1 conforming JSON emitter **must** support flag 0 (base64). It
+**should** support flags 1–3; encoding-aware applications can use
+the appropriate flag at encode time and rely on the emitter to render
+in matching form. JSON parsers feeding pjson encoders pick the flag
+based on a key-suffix convention (`.b64`/`.hex`/`.base58`/`.b64u`,
+see §7.4) or schema annotation; in the absence of a signal, the
+default is `base64` (flag 0).
+
+**JSON round-trip.** JSON has no native binary literal. The hint
+plus suffix vocabulary (§7.4) gives a complete round-trip:
+`{"avatar.b64": "iVBOR..."}` → `bytes` with hint = base64 → same
+JSON form on decode (the suffix may be reattached by the emitter
+based on the hint, or carried literally in the key — either is
+spec-conforming).
 
 **Why a separate tag (not a `string` sub-flag).** Text and binary
 are conceptually distinct: text is interpreted as UTF-8 codepoints
 and re-encoded for JSON; binary is opaque octets. Carrying them as
 separate tags keeps the type discrimination explicit at the wire
 layer and removes the binary value from the per-string flag table.
+
+### 4.11 `extension` (code 13)
+
+```
+tag (1 B): high = D, low = sub-type id (0..15)
+content (size − 1 B): opaque sub-type-specific payload
+```
+
+The `extension` tag is pjson's **soft-evolution** path: it lets
+applications and future spec versions introduce new value types
+without burning a top-level type code per type, and without breaking
+parsers that don't know the new sub-type.
+
+**Skip-on-unknown.** Because every pjson value's size is known from
+its surrounding container slot (not from a length prefix in the
+value), a parser that does not recognize sub-type id `N` can treat
+the value as opaque bytes and continue. It does not need a sub-type
+handler to advance through the buffer; structural parsing of the
+enclosing container is unaffected.
+
+**Sub-type id space (low nibble).** v1 of this spec assigns no
+sub-type ids — the framework is provided, the registry is empty.
+Applications and future minor revisions of the spec may populate
+ids 0..15 without a wire-format break. Once an id is published in a
+spec revision, its semantics are fixed; experimental or
+application-private ids should be selected from the upper half (8..15)
+to leave the lower half (0..7) for blessed assignments.
+
+**Body.** The body's bytes are sub-type-specific. The framework
+imposes no structure: a sub-type may interpret its body as raw
+bytes, as a fixed-format struct, as a string, or as another pjson
+value embedded as a flat blob. Sub-types **must not** rely on the
+parser to navigate into the body — that is, an extension is a leaf
+from the format's perspective. (A sub-type that wants nesting may
+encode its inner value as a nested pjson value at a fixed offset
+within its body, but that's a sub-type contract, not a framework
+feature.)
+
+**JSON projection of an unknown extension.** When the JSON emitter
+does not have a handler registered for the sub-type id, it **should**
+render the value as an opaque envelope object so that the round-trip
+preserves both id and bytes:
+
+```json
+{"__pjson_ext": {"subtype": 5, "bytes_b64": "qwf3..."}}
+```
+
+A subsequent encoder that also lacks a handler MAY round-trip the
+envelope back to the same `extension` tag with the same id and
+bytes. Strict / canonicalizing emitters MAY instead reject unknown
+extensions; this is an emitter-policy choice, not a format
+requirement.
+
+When an extension **is** known, the sub-type's handler renders it
+in whatever JSON form the application has assigned (e.g.
+`"550e8400-e29b-41d4-a716-446655440000"` for a UUID sub-type). On
+the encode side, the handler decides which JSON forms map to its
+sub-type — typically via a key-suffix convention (§7.4) or a schema
+annotation.
+
+**Why this and not generic tagged values.** A CBOR-style tag wrapper
+that can attach to any value would force every value-traversal
+through a "did I hit a tag? consult a registry?" branch — directly
+contradicting the bounded-work-per-read invariant (§1). The
+extension framework is bounded by design: one top-level dispatch
+arm, 16 sub-type ids, payload-is-opaque-bytes. New value types live
+inside the extension framework, not as wrappers around existing
+values.
 
 ---
 
@@ -1126,12 +1249,20 @@ value across any choice of `int_string_mode`.
 
 A parser must detect and reject:
 
-* Tag with reserved type code (2, 7, 9, 13–15).
-* Tag with reserved low-nibble bits (e.g., `bool` low nibble > 1;
-  `string` low nibble > 1; `array` low nibble 11..15; `bytes` low
-  nibble != 0).
+* Tag with reserved type code (14–15). Code 13 is `extension`
+  (§4.11) and is **not** an error; an unknown sub-type id is a
+  policy decision (skip / envelope / reject) rather than a wire
+  error.
+* Tag with reserved low-nibble bits: `bool` low nibble > 1;
+  `nint_inline` low nibble = 0 (negative zero); `ieee_float` low
+  nibble bit 3 set, or width-selector ∈ {0, 5, 6, 7};
+  `numeric_string` low nibble != 0; `string` low nibble > 1;
+  `bytes` low nibble ∈ 4..15; `array` low nibble 11..15; `object`
+  low nibble 2..15.
 * `uint`, `negint`, or `decimal` with bc < 1 or bc > 16; `negint`
   with all-zero payload (negative-zero, reserved).
+* `numeric_string` whose inner value's tag is not a numeric type
+  (codes 2..7).
 * Container with stated count yielding `slot_table_pos < 1` or
   `value_data_size > size − overhead`.
 * `slot[i].offset` ≥ `value_data_size`, or `slot[i].offset` ≥
@@ -1200,7 +1331,9 @@ parse_value(ptr, size) -> Value:
           return parse_row_array(ptr, size)
        else:
           error                                           // reserved
-   else: error
+   13: return Extension(subtype = low,
+                        bytes   = ptr[1 .. size))         // §4.11
+   else: error                                            // codes 14, 15 reserved
 
 parse_array(ptr, size):
    N = read_u16_le(ptr + size − 2)
@@ -1368,9 +1501,12 @@ encode_value(value, out: byte buffer):
       String(text, encoding_flag):                       // flag ∈ {0, 1}
          append 0x90 | encoding_flag
          append text
-      Bytes(b):
-         append 0xA0
+      Bytes(b, encoding_hint):                           // hint ∈ {0..3}
+         append 0xA0 | encoding_hint
          append b
+      Extension(subtype, body_bytes):                    // subtype ∈ {0..15}
+         append 0xD0 | subtype
+         append body_bytes
       Array(children):                                    // generic form
          append 0xB0
          start = out.position
@@ -1494,20 +1630,63 @@ side of the round-trip is the dominant cost.
 
 ## 13. Versioning
 
-This is **pjson v1**. Future revisions of the format will:
+This is **pjson v1**. The format provides two distinct evolution
+paths, deliberately separated so casual additions don't require a
+wire-format break and genuine wire-format breaks aren't ambiguous
+with extensions.
 
-* Allocate previously-reserved tag codes (13–15) for new types.
-* Allocate previously-reserved low-nibble bits as flags or extensions
-  (e.g. new `string` flags, new `ieee_float` low-nibble bit 3, new
-  typed-array element codes in `array`'s 11..15 reserved range).
-* Be detectable through application-layer means (file headers, MIME
-  types, RPC protocol versions). The pjson value format itself does
-  not carry a version byte.
+### 13.1 Soft evolution — the `extension` framework (code 13)
 
-A v1 parser encountering a v2 wire (e.g., a value with tag `0xD0`)
-must reject the buffer rather than guess. The fast-path predicate
-is `(tag >> 4) >= 13`, which the §3 layout makes a single
-comparison.
+New value types should be added through the `extension` framework
+(§4.11). A parser that does not know a given sub-type id can skip
+the value cleanly and continue parsing the surrounding container.
+This applies to:
+
+* New scalar types (UUIDs, IP addresses, durations, monotonic
+  timestamps, content-addressed references, application-coined
+  types).
+* Domain-specific encodings whose semantics live above the format
+  (cryptographic signatures, public keys, content hashes).
+* Spec-blessed types added in v1.x that don't justify a top-level
+  code.
+
+A v1.x release adding a sub-type id is **forward-compatible** with
+v1.0 readers: older parsers see the value as opaque bytes and
+either skip it or render it through the unknown-extension envelope
+(§4.11).
+
+### 13.2 Hard evolution — reserved codes 14, 15
+
+Reserved codes 14 and 15 are kept for genuine wire-format changes
+that v1 parsers cannot reasonably handle:
+
+* Restructuring an existing type (e.g. changing how `decimal`'s
+  varscale works).
+* Introducing a new tag layout that changes the high-nibble /
+  low-nibble split.
+* Anything that makes existing v1 buffers parseable in two
+  different ways.
+
+A v1 parser encountering tag `0xE0` or `0xF0` **must reject** —
+soft skip is not safe because the parser may misinterpret the
+value's size or surrounding structure. The fast-path predicate is
+`(tag >> 4) >= 14`, a single comparison.
+
+### 13.3 Discoverability
+
+The pjson value format itself does not carry a version byte. Major
+version transitions (v1 → v2) are detectable through application-
+layer means:
+
+* Container file headers (e.g. a magic string + version field at
+  the head of a `.pjson` file).
+* MIME types (`application/pjson; v=2`).
+* RPC protocol versions (negotiated separately from the pjson
+  payload).
+
+These are out of scope for the value format itself — the same
+buffer that round-trips today must round-trip across version
+boundaries because pjson is a value format, not a document format.
 
 ---
 
@@ -1532,8 +1711,23 @@ byte-for-byte through encode → decode → encode:
 * `numeric_string` rejection: decoders **must** reject a wrapper
   whose inner tag's high nibble is not in {2..7} (e.g. wrapping a
   string, array, or object).
-* Reserved-tag rejection: tag bytes whose high nibble is in {13, 14,
-  15} must be rejected without partial decode.
+* Reserved-tag rejection: tag bytes whose high nibble is in {14, 15}
+  must be rejected without partial decode.
+* Extension framework round-trip (§4.11): for at least three sub-type
+  ids drawn from {0..15}, encode an extension value with a 0-byte,
+  16-byte, and 1024-byte payload; verify byte-exact round-trip
+  through encode → decode → re-encode without registering a
+  sub-type handler. Verify the decoder exposes both `subtype` and
+  `bytes` to the caller.
+* Extension within an object: an object containing a known field
+  ("a" → `uint_inline 1`) and an unknown extension field
+  ("b" → `extension(subtype=7, payload=0x...)`) must round-trip
+  byte-exact, and key-lookup of "a" must succeed without the
+  extension's sub-type being known.
+* `bytes` encoding hint: round-trip a 32-byte payload at each of the
+  four defined hints (base64, hex, base58, base64url); JSON emit
+  must produce the corresponding textual encoding. Reject `bytes`
+  with low-nibble values 4..15.
 * Random nested structures up to depth 8 with mixed types.
 * Object key collision on the hash byte (multiple fields share the
   same hash byte; lookup must return the right one for each).
