@@ -14,18 +14,17 @@ to ✅, the id is removed from this file.
 ## Status
 
 **Phase 1, all of Phase 2 (containers), Phase 3.1 (string), 3.2
-(bytes encoding hint), and 3.3 (numeric_string) are sealed.**
-Cross-validation between Rust and C++ is byte-equivalent across
-every fixture.
+(bytes encoding hint), 3.3 (numeric_string), and 3.4 (JSON ingress
++ numeric_string lift) are sealed.** Cross-validation between Rust
+and C++ is byte-equivalent across every fixture (67/67 matches).
 
 Tally:
-- 121 rows ✅ on **both** Rust and C++.
-- 12 rows ⚠️: F-008; AG-003/004/005; AT-012; H-005; O-004; O-006;
-  RA-002/003; NS-002 (no dual-projection API); NS-003/004
-  (encoder JSON-ingress is Phase 3.4); NS-007 (no int_string_mode
-  flag yet — Phase 3.5).
-- 41 rows ❌ — Phase 3.4+/4 scope (JSON mappings, emitter options,
-  extension framework, canonical encoding).
+- 125 rows ✅ on **both** Rust and C++.
+- 10 rows ⚠️: F-008; AG-003/004/005; AT-012; H-005; O-004; O-006;
+  RA-002/003; NS-002 (no dual-projection API); NS-007 (no
+  int_string_mode flag yet — Phase 3.5).
+- 39 rows ❌ — Phase 3.5/4 scope (emitter options, extension
+  framework, canonical encoding rules).
 
 ---
 

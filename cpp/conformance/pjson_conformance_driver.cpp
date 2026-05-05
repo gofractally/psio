@@ -1705,16 +1705,155 @@ static bool as_bool(const JNode& n) {
    throw std::runtime_error{"json: expected bool"};
 }
 
+// ── JSON ingress (§4.8 / §7.1) ────────────────────────────────────
+
+// Build a pjson Value from the canonical-form check, returning the
+// appropriate Uint/NegInt/Decimal. Caller provides the parsed
+// mantissa string and scale; this synthesizes the Value.
+inline Value canonical_string_to_numeric(std::string_view mantissa_str, std::int32_t scale) {
+   const bool negative = !mantissa_str.empty() && mantissa_str[0] == '-';
+   if (scale == 0) {
+      // Integer
+      if (negative) {
+         // |v|  — strip the leading '-' then parse as u128.
+         U128 mag{};
+         for (std::size_t k = 1; k < mantissa_str.size(); ++k) {
+            std::uint64_t lo_old = mag.lo;
+            mag.lo *= 10;
+            std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
+            mag.hi = mag.hi * 10 + carry;
+            std::uint64_t add = static_cast<std::uint64_t>(mantissa_str[k] - '0');
+            std::uint64_t before = mag.lo;
+            mag.lo += add;
+            if (mag.lo < before) ++mag.hi;
+         }
+         return NegInt{mag};
+      }
+      U128 v{};
+      for (char c : mantissa_str) {
+         std::uint64_t lo_old = v.lo;
+         v.lo *= 10;
+         std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
+         v.hi = v.hi * 10 + carry;
+         std::uint64_t add = static_cast<std::uint64_t>(c - '0');
+         std::uint64_t before = v.lo;
+         v.lo += add;
+         if (v.lo < before) ++v.hi;
+      }
+      return Uint{v};
+   }
+   // Decimal
+   I128 mantissa{};
+   if (negative) {
+      // Parse |mantissa| as u128 then two's-complement.
+      U128 mag{};
+      for (std::size_t k = 1; k < mantissa_str.size(); ++k) {
+         std::uint64_t lo_old = mag.lo;
+         mag.lo *= 10;
+         std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
+         mag.hi = mag.hi * 10 + carry;
+         std::uint64_t add = static_cast<std::uint64_t>(mantissa_str[k] - '0');
+         std::uint64_t before = mag.lo;
+         mag.lo += add;
+         if (mag.lo < before) ++mag.hi;
+      }
+      U128 neg{~mag.lo, ~mag.hi};
+      neg.lo += 1;
+      if (neg.lo == 0) neg.hi += 1;
+      mantissa = I128{neg.lo, static_cast<std::int64_t>(neg.hi)};
+   } else {
+      U128 v{};
+      for (char c : mantissa_str) {
+         std::uint64_t lo_old = v.lo;
+         v.lo *= 10;
+         std::uint64_t carry = (static_cast<__uint128_t>(lo_old) * 10) >> 64;
+         v.hi = v.hi * 10 + carry;
+         std::uint64_t add = static_cast<std::uint64_t>(c - '0');
+         std::uint64_t before = v.lo;
+         v.lo += add;
+         if (v.lo < before) ++v.hi;
+      }
+      mantissa = I128{v.lo, static_cast<std::int64_t>(v.hi)};
+   }
+   return Decimal{mantissa, scale};
+}
+
+// JNode → pjson Value transcoder. Implements §4.8 numeric_string lift
+// detection on string nodes; everything else maps directly.
+//
+// Honors the "host type controls" rule (E-005): byte inspection of
+// strings happens ONLY here, on the JSON-source path.
+static Value from_json_node(const JNode& n) {
+   if (std::holds_alternative<std::nullptr_t>(n.v)) return Null{};
+   if (auto* b = std::get_if<bool>(&n.v)) return Bool{*b};
+   if (auto* i = std::get_if<std::int64_t>(&n.v)) {
+      if (*i >= 0) {
+         return Uint{U128{static_cast<std::uint64_t>(*i), 0}};
+      }
+      const std::uint64_t mag = static_cast<std::uint64_t>(-(*i));
+      return NegInt{U128{mag, 0}};
+   }
+   if (auto* d = std::get_if<double>(&n.v)) {
+      // Bare double from JSON: store as f64. (A more sophisticated
+      // ingress would attempt the §4.7.2 decimal-vs-ieee picker;
+      // that's Phase 3.5 / D-007.)
+      union { std::uint64_t u; double f; } u;
+      u.f = *d;
+      return Float{3, U128{u.u, 0}};
+   }
+   if (auto* s = std::get_if<std::string>(&n.v)) {
+      // §4.8 / §7.1 numeric_string lift detection.
+      std::string mantissa_str;
+      std::int32_t scale = 0;
+      if (parse_canonical_json_number_string(*s, mantissa_str, scale)) {
+         Value inner = canonical_string_to_numeric(mantissa_str, scale);
+         // Reject NegInt(0) — should be impossible since the canonical
+         // parser rejects "-0", but guard anyway.
+         if (auto* ni = std::get_if<NegInt>(&inner); ni && ni->magnitude.is_zero()) {
+            // Fall through to plain string.
+         } else {
+            return make_numeric_string(std::move(inner));
+         }
+      }
+      String str;
+      str.encoding_flag = 0;            // raw_text
+      str.content.assign(s->begin(), s->end());
+      return str;
+   }
+   if (auto* arr = std::get_if<JArray>(&n.v)) {
+      std::vector<Value> children;
+      children.reserve(arr->size());
+      for (const auto& c : *arr) children.push_back(from_json_node(c));
+      return make_array(std::move(children));
+   }
+   if (auto* obj = std::get_if<JObject>(&n.v)) {
+      std::vector<std::pair<std::string, Value>> entries;
+      entries.reserve(obj->size());
+      for (const auto& [k, v] : *obj) {
+         entries.emplace_back(k, from_json_node(v));
+      }
+      return make_object(std::move(entries));
+   }
+   throw std::runtime_error{"from_json_node: unhandled JNode variant"};
+}
+
+inline Value from_json(std::string_view text) {
+   JParser p{text};
+   JNode root = p.parse();
+   return from_json_node(root);
+}
+
 // ── Fixture parsing ────────────────────────────────────────────────
 
 struct Fixture {
-   std::string             id;
-   std::optional<Value>    input_value;
-   std::string             wire_hex;
-   std::optional<std::string> json_compact;
-   bool                    must_round_trip = false;
-   bool                    must_validate   = false;
-   bool                    must_reject     = false;
+   std::string                  id;
+   std::optional<Value>         input_value;
+   std::optional<std::string>   input_json;     // §4.8 / §7.1 ingress path
+   std::string                  wire_hex;
+   std::optional<std::string>   json_compact;
+   bool                         must_round_trip = false;
+   bool                         must_validate   = false;
+   bool                         must_reject     = false;
 };
 
 // Parse an unsigned integer-or-string into U128. Accepts decimal
@@ -2028,6 +2167,11 @@ static Fixture parse_fixture(std::string_view json_text) {
          f.input_value = parse_value_from_json(*iv);
       }
    }
+   if (const auto* ij = obj_get(o, "input_json")) {
+      if (auto* s = std::get_if<std::string>(&ij->v)) {
+         f.input_json = *s;
+      }
+   }
    return f;
 }
 
@@ -2069,6 +2213,18 @@ static std::string check(const Fixture& f) {
             auto e2 = encode(*f.input_value);
             if (e2 != wire) {
                return "encode-from-input mismatch: " + to_hex(e2);
+            }
+         }
+         if (f.input_json.has_value()) {
+            try {
+               Value v = from_json(*f.input_json);
+               auto e3 = encode(v);
+               if (e3 != wire) {
+                  return "encode-from-json mismatch: " + to_hex(e3) +
+                         " (expected " + f.wire_hex + ")";
+               }
+            } catch (const std::exception& e) {
+               return std::string{"from_json failed: "} + e.what();
             }
          }
       } catch (const std::exception& e) {

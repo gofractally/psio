@@ -152,8 +152,8 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 |----|------|----------|----------|-----------|-----------|
 | NS-001 | encode wraps a numeric inner value at code 8 (low nibble = 0) | ✅ | ✅ corpus `numeric_string_*` | ✅ | ✅ `numeric_string_round_trip` + corpus |
 | NS-002 | decode exposes both `as_<numeric>()` and `as_string()` projections | ✅ structural decode preserves inner; `as_string()` is JSON render output | ⚠️ no dedicated dual-projection API in driver — corpus checks JSON form only | ✅ same | ⚠️ |
-| NS-003 | encoder lifts JSON string when grammar matches AND `canonical_decimal(parse(s)) == s`, regardless of byte savings | ⚠️ encoder side requires JSON parsing path — Phase 3.4 | ⚠️ | ⚠️ same | ⚠️ |
-| NS-004 | encoder leaves non-canonical numeric strings (`"01"`, `"1.5e10"`) as plain `string` | ⚠️ same — JSON ingress is Phase 3.4 | ⚠️ | ⚠️ same | ⚠️ |
+| NS-003 | encoder lifts JSON string when grammar matches AND `canonical_decimal(parse(s)) == s`, regardless of byte savings | ✅ via `from_json` + `parse_canonical_json_number_string` | ✅ corpus `lift_canonical_int` + `lift_canonical_decimal` | ✅ same | ✅ `json_ingress_numeric_string_lift_rule` + corpus |
+| NS-004 | encoder leaves non-canonical numeric strings (`"01"`, `"1.5e10"`) as plain `string` | ✅ canonical-form check rejects non-canonical | ✅ corpus `no_lift_leading_zero` + `no_lift_sci_notation` | ✅ same | ✅ same |
 | NS-005 | reject inner tag whose code is not in {2..7} | ✅ | ✅ corpus `numeric_string_inner_bool_rejected` + `numeric_string_inner_string_rejected` | ✅ | ✅ `numeric_string_round_trip` + corpus |
 | NS-006 | reject low_nibble ≠ 0 | ✅ | ✅ corpus `numeric_string_low_nibble_reserved` | ✅ | ✅ `numeric_string_round_trip` + corpus |
 | NS-007 | JSON emit always quoted regardless of `int_string_mode` (§7.5) | ✅ render always wraps in quotes | ⚠️ no `int_string_mode` flag yet (Phase 3.5) | ✅ same | ⚠️ |
@@ -268,8 +268,8 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | J-005 | JSON integer ≥ 16 ↔ `uint` | ❌ | ❌ | ❌ | ❌ |
 | J-006 | JSON integer ≤ −16 ↔ `negint` | ❌ | ❌ | ❌ | ❌ |
 | J-007 | JSON fractional/exponent ↔ `decimal` (when shortest) or `ieee_float` | ❌ | ❌ | ❌ | ❌ |
-| J-008 | JSON numeric-form string with canonical match ↔ `numeric_string` | ❌ | ❌ | ❌ | ❌ |
-| J-009 | JSON non-canonical/non-numeric string ↔ `string` | ❌ | ❌ | ❌ | ❌ |
+| J-008 | JSON numeric-form string with canonical match ↔ `numeric_string` | ✅ | ✅ corpus `lift_canonical_int` + `lift_canonical_decimal` | ✅ | ✅ same |
+| J-009 | JSON non-canonical/non-numeric string ↔ `string` | ✅ | ✅ corpus `no_lift_leading_zero` + `no_lift_sci_notation` | ✅ | ✅ same |
 | J-010 | JSON array ↔ `array` (generic for heterogeneous; typed for homogeneous primitive) | ❌ | ❌ | ❌ | ❌ |
 | J-011 | JSON object ↔ `object` | ❌ | ❌ | ❌ | ❌ |
 | J-012 | NaN / ±Inf in JSON: encoder rejects (JSON forbids); decoder rejects when emitting JSON | ❌ | ❌ | ❌ | ❌ |
