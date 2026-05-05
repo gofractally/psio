@@ -225,6 +225,81 @@ yet.
 
 ---
 
+## E-006 — psio annotations drive pjson encoding (C++ binding)
+
+**Intent.** The C++ side of the project already has `psio::reflect<T>`
+and an annotation channel (`psio::annotate<X>`) that lets a type
+declare per-type and per-field text-representation hints. These
+annotations are part of psio's existing infrastructure (predates
+pjson). When pjson encodes a typed C++ value via psio's reflection
+layer, **the encoder must respect and emit per the annotations.**
+
+**Hard rule (binding constraint, parallel to E-005's rule for serde).**
+
+> When pjson encodes a typed C++ value through `psio::reflect<T>`,
+> per-type and per-field annotations drive the encoding choice.
+> The annotations are part of the type's contract — they specify
+> the JSON text representation the consumer expects, and pjson's
+> wire form must match.
+
+**Examples of annotations that should map to pjson encodings:**
+
+| psio annotation                          | pjson encoding choice                              |
+|------------------------------------------|----------------------------------------------------|
+| `bytes_encoding = "base64"`              | `bytes` with hint = 0                              |
+| `bytes_encoding = "hex"`                 | `bytes` with hint = 1                              |
+| `bytes_encoding = "base58"`              | `bytes` with hint = 2                              |
+| `bytes_encoding = "base64url"`           | `bytes` with hint = 3                              |
+| `as_numeric_string` on a `u64` field     | `numeric_string` wrapping `uint`                   |
+| `as_numeric_string` on a typed integer   | `numeric_string` wrapping the corresponding int    |
+| `as_decimal` on a `Decimal`-valued field | `decimal` (not `ieee_float` — even if shorter)     |
+| `key_suffix = ".b64"` on a field         | object key written as `<name>.b64` (suffix-stripped at hash byte per §5.3) |
+| `sorted_keys` on a struct                | (future) is_sorted hint bit per E-001 set on the object |
+| `is_sorted` on a `std::vector`           | (future) is_sorted hint bit per E-001 set on the array |
+
+**Why this matters.** psio's value proposition is that the type's
+declaration owns the wire shape — the user writes the type once, with
+annotations, and every format (pjson, fracpack, capnp, flatbuf, etc.)
+emits the same value with the same external representation. pjson is
+no exception: a `User` struct with a `binary_blob` field annotated
+`bytes_encoding = "hex"` MUST produce pjson `bytes` with hint=1, so a
+JSON consumer sees `"deadbeef"` whether the source was pjson, JSON,
+or any other psio-supported format.
+
+**Constraint enforcement.**
+
+- **Native typed input** (the dominant C++ path): `psio::reflect<T>`
+  walks the type. For each field, the encoder dispatch consults the
+  annotation channel and selects the pjson form accordingly. Zero
+  byte-inspection of values — the annotation IS the instruction.
+- **JSON-source input:** the JSON parser produces a generic value
+  tree. Annotations from a target schema (when one is provided) can
+  still drive the ingress: `from_json<User>(text)` knows the schema,
+  so a JSON string in a `bytes_encoding = "hex"` field is decoded
+  via hex, not stored as `string`. Without a schema, the §4.8 / §7.1
+  default rules apply (numeric_string lift detection, etc.).
+
+**Status.** Not deferred — this is a **binding requirement** for the
+production C++ encoder. Tracked here as a design contract that must
+hold across the existing-library-migration phase (when
+`cpp/include/psio/pjson*.hpp` migrates to the post-audit wire format
+and the conformance driver's logic gets promoted to library code).
+
+The conformance driver itself does NOT use `psio::reflect<T>` — it
+has its own DSL — so this requirement is invisible at the driver
+level. The library implementation that follows the driver must
+honor it.
+
+**Not in scope here:**
+- Defining a complete annotation taxonomy. That's psio's
+  responsibility; pjson consumes whatever annotations psio provides
+  and maps each to its wire form.
+- Cross-format consistency (e.g., the same annotation must produce
+  consistent JSON output across pjson, fracpack, etc.). That's
+  enforced at the format-tag-base layer, not pjson-internally.
+
+---
+
 ## E-005 — serde adapter (Rust compatibility mode)
 
 **Intent.** Provide a Rust serde adapter so any type that derives
@@ -292,6 +367,119 @@ Order:
   evolution-note entry.
 - Changing the wire format to make serde's life easier. The
   binding constraint above is non-negotiable.
+
+---
+
+## E-008 — Rust-side reflection + annotations + generic views
+
+**Intent.** Build a Rust analogue of psio's C++ infrastructure
+(`psio::reflect<T>`, `psio::annotate<X>`, format-tag dispatch, generic
+zero-copy views over arbitrary formats). The serde adapter (E-005) is
+a compatibility layer for *existing* infrastructure; **E-008 is the
+native Rust pjson library architecture** that pjson encoders and
+decoders should ultimately ride on.
+
+**Why both E-005 AND E-008?** They serve different audiences:
+
+- **E-005 (serde adapter):** users already invested in serde's
+  derive ecosystem get pjson support for free. They keep their
+  existing `#[derive(Serialize, Deserialize)]` types and add a new
+  format. Coverage is broad but constrained by serde's data model.
+- **E-008 (native Rust library):** users who want pjson's full
+  expressive power — multi-format dispatch, zero-copy views,
+  annotation-driven encoding, runtime reflection — write types
+  against the native Rust API. Mirrors the C++ side's architecture
+  exactly so a `User` struct in Rust and the same `User` in C++
+  produce byte-identical pjson on every wire format.
+
+**Components needed.**
+
+| Rust | C++ analogue | role |
+|------|--------------|------|
+| `psio::reflect<T>` derive | `psio::reflect<T>` macro/concept | walks a type's fields at compile time |
+| `psio::annotate` attribute | `psio::annotate<X>` template | per-type / per-field metadata channel |
+| `psio::format_tag<F>` trait | `psio::format_tag_base<F>` template | format-dispatch base |
+| `psio::View<T, F>` | C++ view/typed-view classes | zero-copy view over a buffer in format F, typed as T |
+| `psio::encode<F>(v)` | C++ encode CPO | format-dispatched encoder |
+| `psio::decode<F, T>(buf)` | C++ decode CPO | format-dispatched decoder |
+| `psio::validate<F, T>(buf)` | C++ validate CPO | format-dispatched validator |
+
+**Annotation-driven encoding.** The same binding constraint as E-006
+applies on the Rust side: when `psio::encode::<Pjson>(&user)` walks
+`User`'s fields, the annotation channel drives the wire-form
+selection.
+
+```rust
+#[derive(psio::reflect)]
+struct User {
+    id: u64,
+    #[psio(numeric_string)]
+    snowflake_id: u64,                    // → numeric_string wrapping uint
+    #[psio(bytes_encoding = "hex")]
+    pubkey: Vec<u8>,                      // → bytes hint=1
+    #[psio(bytes_encoding = "base58")]
+    address: Vec<u8>,                     // → bytes hint=2
+    #[psio(key_suffix = ".unix_ms")]
+    created_at: i64,                      // → object key written as "created_at.unix_ms"
+}
+
+let bytes = psio::encode::<Pjson>(&user)?;
+let user2: User = psio::decode::<Pjson, User>(&bytes)?;
+
+// Same type, different format:
+let json_text = psio::encode::<Json>(&user)?;
+let frac_bytes = psio::encode::<Fracpack>(&user)?;
+```
+
+**Generic views.** A pjson buffer should support typed-view access
+that's symmetric to C++'s `view::field<I>()` pattern:
+
+```rust
+let view = psio::View::<User, Pjson>::from_buffer(&bytes)?;
+let id: u64 = view.id();                              // typed accessor
+let pubkey: &[u8] = view.pubkey_bytes();              // zero-copy slice
+let snowflake: psio::NumericString<u64> = view.snowflake_id();
+```
+
+The view type is generated at compile time from `psio::reflect<T>`'s
+output — same approach as the C++ side.
+
+**Cross-format consistency requirement.** The same Rust type must
+produce byte-identical pjson on every host language (C++ and Rust).
+This is enforced at the conformance corpus level:
+
+```
+fixture user_with_snowflake_id.json:
+  - input_value: a Rust/C++ User struct with annotated fields
+  - wire_hex:   the canonical pjson byte sequence
+  - Both `psio::encode::<Pjson>(&user)` (Rust) and
+    `psio::encode<pjson>(user)` (C++) must produce wire_hex.
+```
+
+**Status.** Phase 7+ work — after the conformance driver and
+production library are stable across pjson, the Rust library
+architecture migrates from "ad-hoc Value enum + serde adapter" to
+the full reflection/annotation/views model. The serde adapter (E-005)
+remains as a compatibility layer for users who don't migrate.
+
+**Sequencing.** Likely order, after Phases 1–6 complete:
+
+| Phase | scope |
+|-------|-------|
+| 7.1 | `psio::reflect` derive — walk struct fields at compile time |
+| 7.2 | `psio::annotate` attribute — per-field metadata in the derive output |
+| 7.3 | `psio::format_tag<F>` trait + `Pjson` tag impl using the conformance driver's logic as the kernel |
+| 7.4 | `psio::encode::<Pjson>(&T)` / `psio::decode::<Pjson, T>` driven by reflect+annotate |
+| 7.5 | `psio::View<T, Pjson>` with typed-accessor methods |
+| 7.6 | Cross-format consistency tests — same types emit consistent bytes across `Pjson`, `Fracpack`, etc. |
+
+**Out of scope for this entry:**
+- Defining the format-dispatch trait surface in detail. That's a
+  large architectural exercise that depends on which other formats
+  the Rust library targets (just Pjson? Pjson + Fracpack?
+  full multi-format parity with C++?). Tracked as a follow-on once
+  the requirement is concrete.
+- Naming bikeshed. `reflect`, `annotate`, `format_tag` are placeholders.
 
 ---
 

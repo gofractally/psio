@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_no_lift_sci_notation",
+  "spec_ref": "section 4.8 / section 7.1",
+  "rule_ids": ["NS-004", "J-009"],
+  "description": "JSON ingress: source string \"1.5e10\" uses scientific notation — not canonical, kept as plain raw_text string. (Source value 15000000000 lifted to numeric_string would canonicalize to \"15000000000\" which differs from source.)",
+  "input_json": "\"1.5e10\"",
+  "wire_hex": "90312e35653130",
+  "json_compact": "\"1.5e10\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

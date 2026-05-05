@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_lift_canonical_int",
+  "spec_ref": "section 4.8 / section 7.1",
+  "rule_ids": ["NS-003", "J-008"],
+  "description": "JSON ingress: source string \"123\" is canonical-form, lifts to numeric_string wrapping uint(123). Wire: 0x80 + 0x40 0x7B (uint bc=1, 123).",
+  "input_json": "\"123\"",
+  "wire_hex": "80407b",
+  "json_compact": "\"123\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

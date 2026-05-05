@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_lift_canonical_decimal",
+  "spec_ref": "section 4.8 / section 7.1",
+  "rule_ids": ["NS-003", "J-008"],
+  "description": "JSON ingress: source string \"3.14\" is canonical-form decimal, lifts to numeric_string wrapping decimal(314, -2).",
+  "input_json": "\"3.14\"",
+  "wire_hex": "8071740203",
+  "json_compact": "\"3.14\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

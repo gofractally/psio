@@ -346,6 +346,63 @@ inline void json_escape_into(std::string_view text, std::string& out) {
    }
 }
 
+// §4.8 numeric_string requires inner ∈ codes 2..7. Validation helper
+// is defined later (after the recursive Object/RowArray bodies).
+
+// §4.8 / §7.1 numeric-string lift detection. Returns true if `s` is a
+// canonical-form JSON number string (suitable for lifting); writes
+// the parsed mantissa and scale to the out-params.
+//   - matches  ^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$
+//   - rejects  "-0", "1.0", "1.50", "01", "00123", "1e5", "+1", "1.", ".5"
+// On success, scale ≤ 0; mantissa fits i128.  scale == 0 means integer.
+inline bool parse_canonical_json_number_string(
+    std::string_view s, std::string& mantissa_str_out, std::int32_t& scale_out)
+{
+   if (s.empty()) return false;
+   std::size_t i = 0;
+   bool negative = (s[i] == '-');
+   if (negative) ++i;
+   if (i >= s.size()) return false;
+
+   // Integer part: 0 OR [1-9][0-9]*
+   const std::size_t int_start = i;
+   if (s[i] == '0') {
+      ++i;
+   } else if (s[i] >= '1' && s[i] <= '9') {
+      ++i;
+      while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+   } else return false;
+   const std::size_t int_end = i;
+
+   // Optional fractional: . then digits, must end in non-zero
+   std::size_t frac_start = i, frac_end = i;
+   if (i < s.size() && s[i] == '.') {
+      ++i;
+      frac_start = i;
+      while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+      frac_end = i;
+      if (frac_end == frac_start) return false;          // empty fractional
+      if (s[frac_end - 1] == '0')   return false;        // trailing zero
+   }
+   if (i != s.size()) return false;                      // trailing chars
+
+   // Reject "-0"
+   if (negative && (int_end - int_start) == 1 && s[int_start] == '0' && frac_start == frac_end)
+      return false;
+
+   // Build mantissa string (sign + int + frac digits, no decimal point).
+   mantissa_str_out.clear();
+   if (negative) mantissa_str_out += '-';
+   mantissa_str_out.append(s.substr(int_start, int_end - int_start));
+   if (frac_end > frac_start) {
+      mantissa_str_out.append(s.substr(frac_start, frac_end - frac_start));
+      scale_out = -static_cast<std::int32_t>(frac_end - frac_start);
+   } else {
+      scale_out = 0;
+   }
+   return true;
+}
+
 // §5.3 — 8-bit prefilter hash. Strip key from the last `.` onward
 // (e.g. "amount.decimal" → "amount") then XXH3-64 → low byte.
 inline std::uint8_t key_hash8(std::string_view key) noexcept {

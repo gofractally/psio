@@ -106,6 +106,137 @@ fn is_numeric_value(v: &Value) -> bool {
         Value::Uint(_) | Value::NegInt(_) | Value::Float { .. } | Value::Decimal { .. })
 }
 
+/// §4.8 / §7.1 numeric-string lift: returns Some(numeric_value) when
+/// `s` is a canonical-form JSON-number-grammar string (suitable for
+/// lifting to numeric_string), or None otherwise. The "canonical form"
+/// rule per spec:
+///
+///   - matches  ^-?(0|[1-9][0-9]*)(\.[0-9]*[1-9])?$
+///   - rejects  "-0"  (no negative-zero integer)
+///   - rejects  "1.0", "1.50"  (trailing zeros after decimal)
+///   - rejects  "01", "00123"  (leading zeros)
+///   - rejects  "1e5", "1.5e10"  (sci notation)
+///   - rejects  "+1"  (leading plus)
+///   - rejects  ".5", "1."  (missing integer or fractional part)
+///
+/// When the rule matches, the parsed numeric value is returned ready
+/// to wrap in `Value::NumericString`.
+fn parse_canonical_json_number_string(s: &str) -> Option<Value> {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() { return None; }
+
+    let mut i = 0;
+    let negative = bytes[0] == b'-';
+    if negative { i += 1; }
+    if i >= bytes.len() { return None; }
+
+    // Integer part: 0 OR [1-9][0-9]*
+    let int_start = i;
+    if bytes[i] == b'0' {
+        i += 1;
+    } else if (b'1'..=b'9').contains(&bytes[i]) {
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+    } else {
+        return None;
+    }
+    let int_part = &bytes[int_start..i];
+
+    // Optional fractional: . then digits, must end in non-zero
+    let frac_part: &[u8] = if i < bytes.len() && bytes[i] == b'.' {
+        i += 1;
+        let frac_start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() { i += 1; }
+        if i == frac_start { return None; }       // empty fractional
+        if bytes[i - 1] == b'0' { return None; }  // trailing zero → non-canonical
+        &bytes[frac_start..i]
+    } else { b"" };
+
+    // Must consume entire string — any trailing char (e/E/space/etc.) → reject.
+    if i != bytes.len() { return None; }
+
+    // "-0" is non-canonical (canonical is "0") and negint magnitude 0 is
+    // reserved (§4.4) — reject either way.
+    if negative && int_part == b"0" && frac_part.is_empty() { return None; }
+
+    if frac_part.is_empty() {
+        // Integer
+        let s_str = std::str::from_utf8(int_part).ok()?;
+        let n: u128 = s_str.parse().ok()?;
+        if negative {
+            if n == 0 { return None; }
+            Some(Value::NegInt(n))
+        } else {
+            Some(Value::Uint(n))
+        }
+    } else {
+        // Decimal: combine int + frac into mantissa, scale = -frac.len()
+        let mut mantissa_str = String::with_capacity(int_part.len() + frac_part.len() + 1);
+        if negative { mantissa_str.push('-'); }
+        mantissa_str.push_str(std::str::from_utf8(int_part).ok()?);
+        mantissa_str.push_str(std::str::from_utf8(frac_part).ok()?);
+        let mantissa: i128 = mantissa_str.parse().ok()?;
+        let scale = -(frac_part.len() as i32);
+        Some(Value::Decimal { mantissa, scale })
+    }
+}
+
+/// JSON ingress: parse a JSON text into a pjson Value, applying the
+/// numeric_string lift rule. The "host type controls" rule (E-005)
+/// holds: byte-inspection of strings happens **only** here, on the
+/// JSON-source path. Native typed callers go through the `Value`
+/// constructors directly.
+fn from_json(text: &str) -> Result<Value, String> {
+    let v: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| format!("from_json parse: {}", e))?;
+    Ok(from_serde_json(&v))
+}
+
+fn from_serde_json(v: &serde_json::Value) -> Value {
+    match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(*b),
+        serde_json::Value::Number(n) => {
+            // Use the source token string to preserve "1.5" vs "1" exactly.
+            // (The arbitrary_precision feature on serde_json gives us as_str().)
+            // arbitrary_precision feature gives us the source token as &str.
+            let token: &str = n.as_str();
+            // Try canonical-form parse first (handles ints + decimals).
+            if let Some(val) = parse_canonical_json_number_string(token) {
+                return val;
+            }
+            // Fall back: must be sci-notation, "1.0", "-0", or out-of-range.
+            // Use serde_json's f64 conversion as the last resort.
+            if let Some(f) = n.as_f64() {
+                Value::Float { width_log2: 3, bits: f.to_bits() as u128 }
+            } else {
+                // Out-of-i128 large integer — represent as decimal? For now
+                // keep as-is via a 0-mantissa decimal (will likely never trigger).
+                Value::Decimal { mantissa: 0, scale: 0 }
+            }
+        }
+        serde_json::Value::String(s) => {
+            // Numeric_string lift: §4.8 rule.
+            if let Some(num) = parse_canonical_json_number_string(s) {
+                Value::NumericString(Box::new(num))
+            } else {
+                Value::String { encoding_flag: 0, content: s.as_bytes().to_vec() }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            Value::Array(arr.iter().map(from_serde_json).collect())
+        }
+        serde_json::Value::Object(obj) => {
+            // serde_json with preserve_order keeps insertion order.
+            Value::Object(
+                obj.iter()
+                    .map(|(k, v)| (k.clone(), from_serde_json(v)))
+                    .collect()
+            )
+        }
+    }
+}
+
 /// §5.3 — 8-bit prefilter hash. Strip the key from the last `.`
 /// onward (e.g. `"amount.decimal"` → `"amount"`), hash with XXH3-64,
 /// return the low byte. Suffix-stripping enables presentation-tag-
@@ -1456,7 +1587,13 @@ fn format_decimal(mantissa: i128, scale: i32) -> String {
 #[derive(Debug)]
 struct Fixture {
     id: String,
+    /// Structured DSL input — built directly via the Value constructors.
     input_value: Option<Value>,
+    /// Raw JSON text input — transcoded via `from_json` into a Value
+    /// before the round-trip checks run. Exercises the §4.8 / §7.1
+    /// numeric_string lift detection and the broader JSON ingress path.
+    /// At most one of `input_value` / `input_json` should be present.
+    input_json: Option<String>,
     wire_hex: String,
     json_compact: Option<String>,
     must_round_trip: bool,
@@ -1502,10 +1639,14 @@ fn parse_fixture(json_text: &str) -> Result<Fixture, String> {
         Some(Json::Null) | None => None,
         Some(j) => Some(parse_value(j)?),
     };
+    let input_json = obj.get("input_json")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
 
     Ok(Fixture {
         id,
         input_value,
+        input_json,
         wire_hex,
         json_compact,
         must_round_trip,
@@ -1831,6 +1972,21 @@ fn check(fixture: &Fixture) -> Result<(), String> {
                         "encode-from-input mismatch:\n  expected wire: {}\n  got:           {}",
                         fixture.wire_hex,
                         to_hex(&e2)
+                    ));
+                }
+            }
+            // If input_json is provided, transcode JSON → Value, encode,
+            // compare to wire. Exercises the §4.8 / §7.1 ingress path.
+            if let Some(json_text) = &fixture.input_json {
+                let from_json_value = from_json(json_text)
+                    .map_err(|e| format!("from_json failed: {}", e))?;
+                let e3 = encode(&from_json_value)
+                    .map_err(|e| format!("encode-from-json failed: {:?}", e))?;
+                if e3 != expected_wire {
+                    return Err(format!(
+                        "encode-from-json mismatch:\n  expected wire: {}\n  got:           {}",
+                        fixture.wire_hex,
+                        to_hex(&e3)
                     ));
                 }
             }
@@ -2312,6 +2468,67 @@ mod tests {
         let key1024 = "c".repeat(1024);
         let v = Value::Object(vec![(key1024, Value::Uint(1))]);
         assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+    }
+
+    #[test]
+    fn json_ingress_numeric_string_lift_rule() {
+        // Lift cases (canonical match)
+        assert_eq!(parse_canonical_json_number_string("0"),    Some(Value::Uint(0)));
+        assert_eq!(parse_canonical_json_number_string("1"),    Some(Value::Uint(1)));
+        assert_eq!(parse_canonical_json_number_string("123"),  Some(Value::Uint(123)));
+        assert_eq!(parse_canonical_json_number_string("-1"),   Some(Value::NegInt(1)));
+        assert_eq!(parse_canonical_json_number_string("-123"), Some(Value::NegInt(123)));
+        assert_eq!(parse_canonical_json_number_string("100"),  Some(Value::Uint(100)));
+        assert_eq!(parse_canonical_json_number_string("0.1"),
+                   Some(Value::Decimal { mantissa: 1, scale: -1 }));
+        assert_eq!(parse_canonical_json_number_string("3.14"),
+                   Some(Value::Decimal { mantissa: 314, scale: -2 }));
+        assert_eq!(parse_canonical_json_number_string("123456789012345678"),
+                   Some(Value::Uint(123456789012345678)));
+
+        // Don't-lift cases
+        assert_eq!(parse_canonical_json_number_string(""),       None);
+        assert_eq!(parse_canonical_json_number_string("01"),     None);    // leading zero
+        assert_eq!(parse_canonical_json_number_string("00123"),  None);    // leading zeros
+        assert_eq!(parse_canonical_json_number_string("-0"),     None);    // negative zero
+        assert_eq!(parse_canonical_json_number_string("1.0"),    None);    // trailing zero
+        assert_eq!(parse_canonical_json_number_string("1.50"),   None);    // trailing zero
+        assert_eq!(parse_canonical_json_number_string("1e5"),    None);    // sci notation
+        assert_eq!(parse_canonical_json_number_string("1.5e10"), None);    // sci notation
+        assert_eq!(parse_canonical_json_number_string("+1"),     None);    // leading plus
+        assert_eq!(parse_canonical_json_number_string("1."),     None);    // empty fractional
+        assert_eq!(parse_canonical_json_number_string(".5"),     None);    // empty integer
+        assert_eq!(parse_canonical_json_number_string("hello"),  None);    // non-numeric
+
+        // End-to-end through from_json
+        let v = from_json(r#""123""#).unwrap();
+        assert_eq!(v, Value::NumericString(Box::new(Value::Uint(123))));
+
+        let v2 = from_json(r#""01""#).unwrap();
+        match v2 {
+            Value::String { encoding_flag: 0, content } => assert_eq!(content, b"01"),
+            other => panic!("expected raw_text string, got {:?}", other),
+        }
+
+        let v3 = from_json(r#""hello""#).unwrap();
+        match v3 {
+            Value::String { encoding_flag: 0, content } => assert_eq!(content, b"hello"),
+            other => panic!("expected string, got {:?}", other),
+        }
+
+        // JSON null/bool/integer/array/object
+        assert_eq!(from_json("null").unwrap(),  Value::Null);
+        assert_eq!(from_json("true").unwrap(),  Value::Bool(true));
+        assert_eq!(from_json("false").unwrap(), Value::Bool(false));
+        assert_eq!(from_json("42").unwrap(),    Value::Uint(42));
+        assert_eq!(from_json("-42").unwrap(),   Value::NegInt(42));
+        let arr = from_json("[1,2,3]").unwrap();
+        assert_eq!(arr, Value::Array(vec![Value::Uint(1), Value::Uint(2), Value::Uint(3)]));
+        let obj = from_json(r#"{"a":1,"b":true}"#).unwrap();
+        assert_eq!(obj, Value::Object(vec![
+            ("a".to_string(), Value::Uint(1)),
+            ("b".to_string(), Value::Bool(true)),
+        ]));
     }
 
     #[test]

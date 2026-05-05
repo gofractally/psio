@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_no_lift_leading_zero",
+  "spec_ref": "section 4.8 / section 7.1",
+  "rule_ids": ["NS-004", "J-009"],
+  "description": "JSON ingress: source string \"01\" has leading zero — not canonical, kept as plain raw_text string.",
+  "input_json": "\"01\"",
+  "wire_hex": "903031",
+  "json_compact": "\"01\"",
+  "must_round_trip": true,
+  "must_validate": true
+}
