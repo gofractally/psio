@@ -406,6 +406,7 @@ fn render_json(v: &Value) -> String {
                 3 => f64::from_bits(*bits as u64),
                 2 => f32::from_bits(*bits as u32) as f64,
                 1 => f16_bits_to_f64(*bits as u16),
+                4 => f128_bits_to_f64(*bits),
                 _ => f64::NAN,
             };
             // JSON forbids NaN and ±Inf; emit a non-conforming token
@@ -455,6 +456,98 @@ fn f16_bits_to_f64(bits: u16) -> f64 {
     }
     let new_exp = ((exp as i32 - 15 + 1023) as u64) << 52;
     f64::from_bits(sign_bit | new_exp | (mant << (52 - 10)))
+}
+
+/// IEEE-754 binary128 → binary64 narrowing conversion (round-to-
+/// nearest-even). Rust port of the vendored SoftFloat subset at
+/// `cpp/external/softfloat/psio_softfloat.h`. Mirrors the algorithm
+/// step-by-step so the C and Rust drivers agree byte-for-byte.
+///
+/// Modifications relative to upstream Berkeley SoftFloat-3e match the
+/// C side: RNE-only rounding, no exception flags, NaN canonicalized
+/// with sign preserved.
+fn f128_bits_to_f64(bits: u128) -> f64 {
+    let lo = bits as u64;
+    let hi = (bits >> 64) as u64;
+
+    let sign = (hi >> 63) & 1;
+    let exp = ((hi >> 48) & 0x7FFF) as i32;
+    let frac64 = hi & 0x0000_FFFF_FFFF_FFFF; // top 48 bits of mantissa
+    let frac0  = lo;                          // bottom 64 bits of mantissa
+
+    if exp == 0x7FFF {
+        // ±Inf or NaN.
+        if (frac64 | frac0) != 0 {
+            // NaN — canonical quiet, sign preserved.
+            return f64::from_bits((sign << 63) | 0x7FF8_0000_0000_0000);
+        }
+        // ±Inf.
+        return f64::from_bits((sign << 63) | (0x7FFu64 << 52));
+    }
+
+    // softfloat_shortShiftLeft128(frac64, frac0, 14):
+    //   z.v64 = (a64 << dist) | (a0 >> (64 - dist));
+    //   z.v0  = a0 << dist;
+    let shifted_v64 = (frac64 << 14) | (frac0 >> 50);
+    let shifted_v0  = frac0 << 14;
+    let frac64 = shifted_v64 | (if shifted_v0 != 0 { 1 } else { 0 });
+
+    if exp == 0 && frac64 == 0 {
+        return f64::from_bits(sign << 63); // ±0
+    }
+
+    let exp = exp - 0x3C01;
+    round_pack_to_f64(sign != 0, exp as i16, frac64 | 0x4000_0000_0000_0000)
+}
+
+/// Reduced subset of `softfloat_roundPackToF64` — RNE-only, no
+/// exception-flag tracking. Verbatim algorithm minus the rounding-
+/// mode and tininess-detection branches.
+fn round_pack_to_f64(sign: bool, mut exp: i16, mut sig: u64) -> f64 {
+    const ROUND_INCREMENT: u64 = 0x200; // RNE: half-LSB
+
+    // The C cast `(uint16_t) exp` makes both negative `exp` (subnormal)
+    // and large positive `exp` (overflow) trigger the special block.
+    let needs_special = (exp as u16) >= 0x7FD;
+    if needs_special {
+        if exp < 0 {
+            // Subnormal output — shift sig right with sticky-jam.
+            sig = shift_right_jam_u64(sig, (-exp) as u32);
+            exp = 0;
+        } else if exp > 0x7FD || sig.wrapping_add(ROUND_INCREMENT) >= 0x8000_0000_0000_0000 {
+            // Overflow → ±inf.
+            let sign_bit = if sign { 1u64 << 63 } else { 0 };
+            return f64::from_bits(sign_bit | (0x7FFu64 << 52));
+        }
+    }
+
+    let round_bits = sig & 0x3FF;
+    sig = (sig.wrapping_add(ROUND_INCREMENT)) >> 10;
+    // Tie-to-even: clear the LSB when round_bits is exactly 0x200.
+    sig &= !(if (round_bits ^ 0x200) == 0 { 1u64 } else { 0 });
+    if sig == 0 { exp = 0; }
+
+    let sign_bit = if sign { 1u64 << 63 } else { 0 };
+    // packToF64UI uses `+` so sig's bit 52 (the implicit-1 carrier)
+    // carries into the exponent field — that's why exp comes in
+    // 1 less than the f64-encoded exponent.
+    f64::from_bits(sign_bit
+                       .wrapping_add((exp as u64) << 52)
+                       .wrapping_add(sig))
+}
+
+/// Shifts `a` right by `dist` (which must not be zero). Any nonzero
+/// bits shifted off are jammed into the LSB. Verbatim from upstream
+/// `softfloat_shiftRightJam64`.
+fn shift_right_jam_u64(a: u64, dist: u32) -> u64 {
+    if dist < 63 {
+        let neg_dist = ((-(dist as i32)) & 63) as u32;
+        (a >> dist) | (if (a << neg_dist) != 0 { 1 } else { 0 })
+    } else if a != 0 {
+        1
+    } else {
+        0
+    }
 }
 
 fn format_decimal(mantissa: i128, scale: i32) -> String {
@@ -995,6 +1088,64 @@ mod tests {
             render_json(&Value::Decimal { mantissa: 1, scale: -2 }),
             "0.01"
         );
+    }
+
+    #[test]
+    fn f128_widen_canonical_values() {
+        // ±0.0
+        assert_eq!(f128_bits_to_f64(0u128).to_bits(), 0u64);
+        assert_eq!(f128_bits_to_f64(1u128 << 127).to_bits(), 1u64 << 63);
+
+        // 1.0: sign=0, exp=16383, mantissa=0
+        // bits = 0x3FFF_0000_0000_0000_0000_0000_0000_0000
+        let one_bits = 0x3FFF_0000_0000_0000_0000_0000_0000_0000u128;
+        assert_eq!(f128_bits_to_f64(one_bits), 1.0);
+
+        // -1.0: sign=1, exp=16383, mantissa=0
+        let neg_one_bits = 0xBFFF_0000_0000_0000_0000_0000_0000_0000u128;
+        assert_eq!(f128_bits_to_f64(neg_one_bits), -1.0);
+
+        // 2.0: sign=0, exp=16384, mantissa=0
+        let two_bits = 0x4000_0000_0000_0000_0000_0000_0000_0000u128;
+        assert_eq!(f128_bits_to_f64(two_bits), 2.0);
+
+        // 0.5: sign=0, exp=16382, mantissa=0
+        let half_bits = 0x3FFE_0000_0000_0000_0000_0000_0000_0000u128;
+        assert_eq!(f128_bits_to_f64(half_bits), 0.5);
+
+        // +Inf
+        let pos_inf_bits = 0x7FFF_0000_0000_0000_0000_0000_0000_0000u128;
+        assert_eq!(f128_bits_to_f64(pos_inf_bits), f64::INFINITY);
+
+        // -Inf
+        let neg_inf_bits = 0xFFFF_0000_0000_0000_0000_0000_0000_0000u128;
+        assert_eq!(f128_bits_to_f64(neg_inf_bits), f64::NEG_INFINITY);
+
+        // NaN — canonical quiet, sign-preserved
+        let nan_bits = 0x7FFF_8000_0000_0000_0000_0000_0000_0000u128;
+        let result = f128_bits_to_f64(nan_bits);
+        assert!(result.is_nan());
+        assert_eq!(result.to_bits(), 0x7FF8_0000_0000_0000);
+    }
+
+    #[test]
+    fn f128_widen_overflow_to_inf() {
+        // f128 with exp >= 16384 + 1024 (= 17408) overflows f64's
+        // 11-bit exponent range (max f64 exp = 1023).
+        // 2^1024 in f128: exp = 16383 + 1024 = 17407, mantissa = 0
+        // Largest finite f128 ≪ DBL_MAX → f64 inf.
+        let huge_bits = 0x7FFE_0000_0000_0000_0000_0000_0000_0000u128;
+        // exp = 0x7FFE = 32766. After -=0x3C01 → exp=17405. Way > 0x7FD=2045.
+        assert_eq!(f128_bits_to_f64(huge_bits), f64::INFINITY);
+    }
+
+    #[test]
+    fn f128_widen_underflow_to_zero() {
+        // Smallest positive subnormal f128 (exp=0, mantissa=...0001)
+        //   value = 2^-16494, way below f64 min subnormal 2^-1074.
+        //   Rounds to +0.
+        let tiny_bits = 1u128;
+        assert_eq!(f128_bits_to_f64(tiny_bits).to_bits(), 0u64);
     }
 
     #[test]

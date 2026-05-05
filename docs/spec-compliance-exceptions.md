@@ -13,21 +13,20 @@ to ✅, the id is removed from this file.
 
 ## Phase 1 status
 
-Phase 1 — scalar wire format — is **functionally green** in both
-languages with **all but two** rule rows fully ✅: F-008 (NaN
-canonicalization, deferred to Phase 5) and F-004 (binary128 decode
-JSON-render, vendored softfloat needs wiring). Plus T-016, T-017,
-V-003 are ✅ on Rust (unit-tested) and ⚠️ on C++ (the impl is
-correct by construction in the match dispatch, but no dedicated C++
-unit test framework yet).
+Phase 1 — scalar wire format — is **functionally complete** in both
+languages with all rule rows fully ✅ except F-008 (NaN
+canonicalization, deferred to Phase 5) and the predicate properties
+T-016/T-017/V-003 which are ✅ on Rust (unit-tested) and ⚠️ on C++
+(true by construction in match dispatch but no dedicated C++ test
+framework yet).
 
 Tally as of this commit:
-- 67 rows ✅ on **both** Rust and C++.
-- 3 rows ⚠️ on C++ only (predicate properties — true by construction,
-  no dedicated C++ test framework yet).
-- 2 rows ⚠️ on both langs: F-004 (binary128 JSON-render via softfloat)
-  and F-008 (NaN canonicalization).
-- 95 rows ❌ — Phase 2/3/4/5 scope, all enumerated below.
+- 68 rows ✅ on **both** Rust and C++ (added F-004 binary128 — softfloat
+  vendored at `cpp/external/softfloat/`, Rust port in driver).
+- 3 rows ⚠️ on C++ only (T-016, T-017, V-003 — predicate properties
+  true by construction, no C++ test framework yet).
+- 1 row ⚠️ on both langs: F-008 (NaN canonicalization, Phase 5).
+- 95 rows ❌ — Phase 2/3/4 scope, all enumerated below.
 
 ---
 
@@ -78,12 +77,11 @@ E-002
 ## Block B — Phase 1 ⚠️ rows (impl exists, dedicated test pending)
 
 ```
-F-004 F-008 T-016 T-017 V-003
+F-008 T-016 T-017 V-003
 ```
 
 | id | gap | action |
 |----|-----|--------|
-| F-004 | binary128 round-trip — driver encodes 16-byte payload but JSON-render via softfloat is not wired (Rust port pending; C++ vendored at `cpp/external/softfloat/`) | task #6 (binary128) — Phase 5 |
 | F-008 | NaN canonicalization (§15.2.1) not implemented — round-trips bits as-is rather than emitting canonical pattern | Phase 5 (canonical encoding rules) |
 | T-016 | predicate range tests are tested in Rust (`tag_byte_predicates_match_spec_section_3`); C++ has no test framework yet — property holds by construction in match dispatch | add a Catch2 (or ad-hoc) test framework to `cpp/conformance/` and mirror the Rust test |
 | T-017 | bit-pattern within `is_integer` — same as T-016 | same |

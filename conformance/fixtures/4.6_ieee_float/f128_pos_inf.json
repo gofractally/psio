@@ -1,0 +1,11 @@
+{
+  "id": "ieee_float_f128_pos_inf",
+  "spec_ref": "§4.6",
+  "rule_ids": ["F-004", "F-009"],
+  "description": "f128 +Inf = 0x7FFF0000000000000000000000000000 (exp=all-1, mantissa=0)",
+  "input_value": {"kind": "float", "width": 128, "bits_hex": "0x7FFF0000000000000000000000000000"},
+  "wire_hex": "640000000000000000000000000000ff7f",
+  "json_compact": "Infinity",
+  "must_round_trip": true,
+  "must_validate": true
+}

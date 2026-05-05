@@ -17,9 +17,16 @@
 //
 // Phase 1 scope: tag dispatch, null, bool, uint_inline,
 // nint_inline, uint, negint to 128-bit magnitude, ieee_float
-// widths 16/32/64, decimal with all four varscale tiers.
+// widths 16/32/64/128, decimal with all four varscale tiers.
+//
+// binary128 widening uses the vendored Berkeley SoftFloat-3e
+// subset at cpp/external/softfloat/psio_softfloat.h.
+
+#define PSIO_SOFTFLOAT_IMPL
+#include <psio_softfloat.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -445,6 +452,15 @@ static std::string render_json(const Value& v) {
          }
          else if (arg.width_log2 == 1) {
             f = f16_bits_to_f64(static_cast<std::uint16_t>(arg.bits.lo));
+         }
+         else if (arg.width_log2 == 4) {
+            // binary128 → binary64 via vendored SoftFloat subset.
+            std::uint8_t buf[16];
+            for (int i = 0; i < 8; ++i) {
+               buf[i]     = static_cast<std::uint8_t>(arg.bits.lo >> (8 * i));
+               buf[i + 8] = static_cast<std::uint8_t>(arg.bits.hi >> (8 * i));
+            }
+            f = psio_softfloat_f128_to_f64(buf);
          }
          if (std::isnan(f))                       return "NaN";
          if (f ==  std::numeric_limits<double>::infinity())  return "Infinity";

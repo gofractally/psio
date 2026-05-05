@@ -1,0 +1,11 @@
+{
+  "id": "ieee_float_f128_one",
+  "spec_ref": "§4.6",
+  "rule_ids": ["F-004"],
+  "description": "f128 1.0 = 0x3FFF0000000000000000000000000000 → tag 0x64 + 16-byte LE payload (00×14 then FF 3F)",
+  "input_value": {"kind": "float", "width": 128, "bits_hex": "0x3FFF0000000000000000000000000000"},
+  "wire_hex": "640000000000000000000000000000ff3f",
+  "json_compact": "1",
+  "must_round_trip": true,
+  "must_validate": true
+}

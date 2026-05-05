@@ -127,7 +127,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | F-001 | binary16 round-trip (low_nibble 1, payload 2 bytes LE) | ✅ | ✅ corpus `ieee_float_f16_one` | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f16_one` |
 | F-002 | binary32 round-trip (low_nibble 2, payload 4 bytes LE) | ✅ | ✅ corpus `ieee_float_f32_one` | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f32_one` |
 | F-003 | binary64 round-trip (low_nibble 3, payload 8 bytes LE) | ✅ | ✅ corpus `ieee_float_f64_one` | ✅ | ✅ `ieee_float_round_trip` + corpus `ieee_float_f64_one` |
-| F-004 | binary128 round-trip (low_nibble 4, payload 16 bytes LE) — softfloat widen on decode | ⚠️ encode works, JSON-render via softfloat not wired | ⚠️ | ⚠️ encode works, JSON-render via softfloat not wired | ⚠️ |
+| F-004 | binary128 round-trip (low_nibble 4, payload 16 bytes LE) — softfloat widen on decode | ✅ via vendored `psio_softfloat.h` | ✅ corpus `ieee_float_f128_{one,minus_one,pos_inf}` | ✅ via Rust port of softfloat (`f128_bits_to_f64`) | ✅ `f128_widen_canonical_values` + `f128_widen_overflow_to_inf` + `f128_widen_underflow_to_zero` + corpus fixtures |
 | F-005 | reject low_nibble bit 3 set | ✅ | ✅ corpus `ieee_float_bit3_set_reserved` | ✅ | ✅ `ieee_float_reserved_bit3_rejected` + corpus `ieee_float_bit3_set_reserved` |
 | F-006 | reject low_nibble width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_{zero,6,7}_reserved` (widths 0, 6, 7); width 5 by code path | ✅ | ✅ `ieee_float_bad_width_rejected` (widths 0, 5) + corpus widths 0, 6, 7 |
 | F-007 | binary16 software widen on decode (no host fp16 support assumed) | ✅ | ✅ corpus `ieee_float_f16_one` renders `1` via `f16_bits_to_f64` | ✅ | ✅ corpus `ieee_float_f16_one` renders JSON `1` via `f16_bits_to_f64` |
