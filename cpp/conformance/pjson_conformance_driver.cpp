@@ -130,6 +130,14 @@ struct Bytes {
    bool operator==(const Bytes&) const = default;
 };
 
+// NumericString (§4.8) wraps a numeric inner. Recursive type — uses
+// the same forward-declared body trick as Array/Object/RowArray.
+struct NumericStringBody;
+struct NumericString {
+   std::shared_ptr<NumericStringBody> body;
+   bool operator==(const NumericString& other) const;
+};
+
 // Object (§5.2) — recursive, like Array. ObjectBody is forward-
 // declared so the variant can be sized.
 struct ObjectBody;
@@ -147,7 +155,8 @@ struct RowArray {
 };
 
 using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal,
-                            Array, TypedArray, Object, RowArray, String, Bytes>;
+                            Array, TypedArray, Object, RowArray, String, Bytes,
+                            NumericString>;
 
 struct ArrayBody {
    std::vector<Value> children;
@@ -204,6 +213,31 @@ inline RowArray make_row_array(std::vector<std::string> keys,
    r.body->keys = std::move(keys);
    r.body->rows = std::move(rows);
    return r;
+}
+
+struct NumericStringBody {
+   Value inner;
+   bool operator==(const NumericStringBody&) const = default;
+};
+
+inline bool NumericString::operator==(const NumericString& other) const {
+   if (!body && !other.body) return true;
+   if (!body || !other.body) return false;
+   return body->inner == other.body->inner;
+}
+
+inline NumericString make_numeric_string(Value inner) {
+   NumericString ns;
+   ns.body = std::make_shared<NumericStringBody>();
+   ns.body->inner = std::move(inner);
+   return ns;
+}
+
+inline bool is_numeric_value(const Value& v) {
+   return std::holds_alternative<Uint>(v)
+       || std::holds_alternative<NegInt>(v)
+       || std::holds_alternative<Float>(v)
+       || std::holds_alternative<Decimal>(v);
 }
 
 // ── Base-N encoding helpers for §4.10 bytes JSON emit ──────────────
@@ -572,6 +606,12 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
             throw EncodeError{"bytes encoding_hint must be 0..3"};
          out.push_back(static_cast<std::uint8_t>(0xA0 | arg.encoding_hint));
          out.insert(out.end(), arg.content.begin(), arg.content.end());
+      } else if constexpr (std::is_same_v<T, NumericString>) {
+         if (!arg.body) throw EncodeError{"numeric_string body null"};
+         if (!is_numeric_value(arg.body->inner))
+            throw EncodeError{"numeric_string inner must be numeric (codes 2..7)"};
+         out.push_back(0x80);
+         encode_into(arg.body->inner, out);
       } else if constexpr (std::is_same_v<T, RowArray>) {
          // §5.2.1 row_array.
          const auto& keys = arg.body ? arg.body->keys : std::vector<std::string>{};
@@ -814,16 +854,16 @@ static Value decode(std::span<const std::uint8_t> buf) {
          b.content.assign(buf.begin() + 1, buf.end());
          return b;
       }
-      case 8: case 13: {
-         static const char* names[] = {
-            "numeric_string",  // 8
-            "<unused>",        // 9
-            "<unused>",        // 10
-            "<unused>",        // 11
-            "<unused>",        // 12
-            "extension"};      // 13
-         throw DecodeError{std::string{"Phase ≥3: "} + names[high - 8]};
+      case 8: {
+         // §4.8 numeric_string. low_nibble must be 0; body is an
+         // inner numeric value (codes 2..7).
+         if (low != 0) throw DecodeError{"reserved low_nibble for numeric_string"};
+         Value inner = decode(buf.subspan(1));
+         if (!is_numeric_value(inner))
+            throw DecodeError{"numeric_string inner must be numeric (codes 2..7)"};
+         return make_numeric_string(std::move(inner));
       }
+      case 13: throw DecodeError{"Phase ≥4: extension"};
       case 14: case 15:
          throw DecodeError{std::string{"reserved tag 0x"} +
                            static_cast<char>("0123456789ABCDEF"[high]) + "0"};
@@ -1248,6 +1288,9 @@ static std::string render_json(const Value& v) {
             default: body = "<bad bytes hint>";
          }
          return "\"" + body + "\"";
+      } else if constexpr (std::is_same_v<T, NumericString>) {
+         if (!arg.body) return "<bad numeric_string>";
+         return "\"" + render_json(arg.body->inner) + "\"";
       } else if constexpr (std::is_same_v<T, Object>) {
          std::string s = "{";
          const auto& entries = arg.body ? arg.body->entries
@@ -1774,6 +1817,12 @@ static Value parse_value_from_json(const JNode& j) {
          entries.emplace_back(as_string(*k), parse_value_from_json(*v));
       }
       return make_object(std::move(entries));
+   }
+   if (kind == "numeric_string") {
+      const auto* inner_node = obj_get(obj, "inner");
+      if (!inner_node) throw std::runtime_error{"numeric_string missing 'inner'"};
+      Value inner = parse_value_from_json(*inner_node);
+      return make_numeric_string(std::move(inner));
    }
    if (kind == "bytes") {
       const auto* enc_node = obj_get(obj, "encoding");

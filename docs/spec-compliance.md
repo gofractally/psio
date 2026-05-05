@@ -64,7 +64,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-006 | code 5 = `negint`, low nibble = bc−1; all-zero payload reserved | ✅ | ✅ corpus `negint_minus_16` + `negint_zero_payload_reserved` | ✅ | ✅ `negint_full_round_trip` + `negint_zero_rejected` |
 | T-007 | code 6 = `ieee_float`, low nibble bits 2..0 = log₂(byte_count) ∈ {1,2,3,4}; bit 3 reserved | ✅ | ✅ corpus `ieee_float_{f16,f32,f64}_one` + bit3 + width0 reject | ✅ | ✅ `ieee_float_round_trip` + `ieee_float_reserved_bit3_rejected` + `ieee_float_bad_width_rejected` |
 | T-008 | code 7 = `decimal`, low nibble = mantissa bc−1 | ✅ | ✅ corpus `decimal_{one_point_five,12345}` | ✅ | ✅ `decimal_round_trip` |
-| T-009 | code 8 = `numeric_string`, low nibble must be 0; body is inner numeric value | ❌ | ❌ | ❌ | ❌ |
+| T-009 | code 8 = `numeric_string`, low nibble must be 0; body is inner numeric value | ✅ | ✅ corpus `numeric_string_*` | ✅ | ✅ same |
 | T-010 | code 9 = `string`, low nibble ∈ {0, 1} = encoding flag; others reserved | ✅ | ✅ corpus `string_*` | ✅ | ✅ same |
 | T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ✅ | ✅ corpus `bytes_*` | ✅ | ✅ same |
 | T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ✅ | ✅ corpus `array_*` + `typed_array_*` + `typed_array_low_nibble_11_reserved` | ✅ | ✅ same |
@@ -150,13 +150,13 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| NS-001 | encode wraps a numeric inner value at code 8 (low nibble = 0) | ❌ | ❌ | ❌ | ❌ |
-| NS-002 | decode exposes both `as_<numeric>()` and `as_string()` projections | ❌ | ❌ | ❌ | ❌ |
-| NS-003 | encoder lifts JSON string when grammar matches AND `canonical_decimal(parse(s)) == s`, regardless of byte savings | ❌ | ❌ | ❌ | ❌ |
-| NS-004 | encoder leaves non-canonical numeric strings (`"01"`, `"1.5e10"`) as plain `string` | ❌ | ❌ | ❌ | ❌ |
-| NS-005 | reject inner tag whose code is not in {2..7} | ❌ | ❌ | ❌ | ❌ |
-| NS-006 | reject low_nibble ≠ 0 | ❌ | ❌ | ❌ | ❌ |
-| NS-007 | JSON emit always quoted regardless of `int_string_mode` (§7.5) | ❌ | ❌ | ❌ | ❌ |
+| NS-001 | encode wraps a numeric inner value at code 8 (low nibble = 0) | ✅ | ✅ corpus `numeric_string_*` | ✅ | ✅ `numeric_string_round_trip` + corpus |
+| NS-002 | decode exposes both `as_<numeric>()` and `as_string()` projections | ✅ structural decode preserves inner; `as_string()` is JSON render output | ⚠️ no dedicated dual-projection API in driver — corpus checks JSON form only | ✅ same | ⚠️ |
+| NS-003 | encoder lifts JSON string when grammar matches AND `canonical_decimal(parse(s)) == s`, regardless of byte savings | ⚠️ encoder side requires JSON parsing path — Phase 3.4 | ⚠️ | ⚠️ same | ⚠️ |
+| NS-004 | encoder leaves non-canonical numeric strings (`"01"`, `"1.5e10"`) as plain `string` | ⚠️ same — JSON ingress is Phase 3.4 | ⚠️ | ⚠️ same | ⚠️ |
+| NS-005 | reject inner tag whose code is not in {2..7} | ✅ | ✅ corpus `numeric_string_inner_bool_rejected` + `numeric_string_inner_string_rejected` | ✅ | ✅ `numeric_string_round_trip` + corpus |
+| NS-006 | reject low_nibble ≠ 0 | ✅ | ✅ corpus `numeric_string_low_nibble_reserved` | ✅ | ✅ `numeric_string_round_trip` + corpus |
+| NS-007 | JSON emit always quoted regardless of `int_string_mode` (§7.5) | ✅ render always wraps in quotes | ⚠️ no `int_string_mode` flag yet (Phase 3.5) | ✅ same | ⚠️ |
 
 ## §4.9 — `string`
 
@@ -315,7 +315,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | E-008 | slot offsets non-monotone | ❌ | ❌ | ❌ | ❌ |
 | E-009 | hash[i] ≠ key_hash8(stored_key_i) | ❌ | ❌ | ❌ | ❌ |
 | E-010 | varscale / long-key varuint claims length past buffer | ⚠️ | ⚠️ | ⚠️ varscale truncation detected; long-key path not yet | ⚠️ |
-| E-011 | `numeric_string` inner tag's code not in {2..7} | ❌ | ❌ | ❌ | ❌ |
+| E-011 | `numeric_string` inner tag's code not in {2..7} | ✅ | ✅ corpus `numeric_string_inner_*_rejected` | ✅ | ✅ same |
 | E-012 | `ieee_float` width selector ∈ {0, 5, 6, 7} | ✅ | ✅ corpus `ieee_float_width_zero_reserved` | ✅ | ✅ `ieee_float_bad_width_rejected` |
 
 ## §13 — Versioning behavior

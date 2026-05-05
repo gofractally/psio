@@ -13,16 +13,19 @@ to ✅, the id is removed from this file.
 
 ## Status
 
-**Phase 1, all of Phase 2 (containers), and Phase 3.1 (string) +
-3.2 (bytes encoding hint) are sealed.** Cross-validation between
-Rust and C++ is byte-equivalent across every fixture.
+**Phase 1, all of Phase 2 (containers), Phase 3.1 (string), 3.2
+(bytes encoding hint), and 3.3 (numeric_string) are sealed.**
+Cross-validation between Rust and C++ is byte-equivalent across
+every fixture.
 
 Tally:
-- 117 rows ✅ on **both** Rust and C++.
-- 8 rows ⚠️: F-008 (Phase 5); AG-003/004/005 fixture follow-ups;
-  AT-012; H-005; O-004 partial; O-006; RA-002/003.
-- 48 rows ❌ — Phase 3.3+/4 scope (numeric_string, JSON mappings,
-  emitter options, extension framework, canonical encoding).
+- 121 rows ✅ on **both** Rust and C++.
+- 12 rows ⚠️: F-008; AG-003/004/005; AT-012; H-005; O-004; O-006;
+  RA-002/003; NS-002 (no dual-projection API); NS-003/004
+  (encoder JSON-ingress is Phase 3.4); NS-007 (no int_string_mode
+  flag yet — Phase 3.5).
+- 41 rows ❌ — Phase 3.4+/4 scope (JSON mappings, emitter options,
+  extension framework, canonical encoding).
 
 ---
 
@@ -35,13 +38,12 @@ any of these will fail loud rather than silently mishandle.
 ```
 C-001 C-002 C-003 C-004 C-005 C-006
 D-007
-E-006 E-007 E-008 E-009 E-010 E-011
+E-006 E-007 E-008 E-009 E-010
 EM-001 EM-002 EM-003 EM-004 EM-005 EM-006 EM-007 EM-008
 EX-001 EX-002 EX-003 EX-004 EX-005 EX-006
 J-001 J-002 J-003 J-004 J-005 J-006 J-007 J-008 J-009 J-010 J-011 J-012 J-013 J-014 J-015
 LIM-001 LIM-002 LIM-003 LIM-004 LIM-005 LIM-006
-NS-001 NS-002 NS-003 NS-004 NS-005 NS-006 NS-007
-T-009 T-014
+T-014
 V-001
 E-002
 ```
@@ -66,6 +68,7 @@ E-002
 
 ```
 F-008 AG-003 AG-004 AG-005 AT-012 H-005 O-004 O-006 RA-002 RA-003
+NS-002 NS-003 NS-004 NS-007
 ```
 
 | id | gap | action |

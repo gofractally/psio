@@ -1,0 +1,11 @@
+{
+  "id": "numeric_string_snowflake_class",
+  "spec_ref": "section 4.8",
+  "rule_ids": ["NS-001", "NS-002", "T-009"],
+  "description": "numeric_string wrapping a snowflake-class u64 (123456789012345678). The motivating use case: APIs that ship 64-bit IDs as JSON strings to dodge JS f64 precision loss. Wire is 10 bytes: tag(1) + uint_tag(1) + 8 magnitude bytes. JSON emit: \"123456789012345678\" (quoted).",
+  "input_value": {"kind": "numeric_string", "inner": {"kind": "uint", "value": "123456789012345678"}},
+  "wire_hex": "80474ef330a64b9bb601",
+  "json_compact": "\"123456789012345678\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

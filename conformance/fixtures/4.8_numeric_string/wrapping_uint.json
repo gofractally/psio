@@ -1,0 +1,11 @@
+{
+  "id": "numeric_string_wrapping_uint_42",
+  "spec_ref": "section 4.8",
+  "rule_ids": ["NS-001", "NS-002", "T-009"],
+  "description": "numeric_string wrapping uint 42 — tag 0x80 + uint(0x40 0x2A). JSON emit: \"42\".",
+  "input_value": {"kind": "numeric_string", "inner": {"kind": "uint", "value": 42}},
+  "wire_hex": "80402a",
+  "json_compact": "\"42\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

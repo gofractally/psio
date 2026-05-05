@@ -1,0 +1,10 @@
+{
+  "id": "numeric_string_inner_string_rejected",
+  "spec_ref": "section 4.8",
+  "rule_ids": ["NS-005", "E-011"],
+  "description": "numeric_string wrapping another string (inner tag 0x90 = string raw_text) — must reject. Inner code 9 is not in {2..7}.",
+  "input_value": null,
+  "wire_hex": "809068656c6c6f",
+  "must_reject": true,
+  "reject_reason": "numeric_string_inner_not_numeric"
+}

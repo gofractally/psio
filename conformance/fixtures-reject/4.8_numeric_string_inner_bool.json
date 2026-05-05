@@ -1,0 +1,10 @@
+{
+  "id": "numeric_string_inner_bool_rejected",
+  "spec_ref": "section 4.8",
+  "rule_ids": ["NS-005", "E-011"],
+  "description": "numeric_string wrapping a non-numeric inner (bool true at 0x11) — must reject. Inner code 1 is not in {2..7}.",
+  "input_value": null,
+  "wire_hex": "8011",
+  "must_reject": true,
+  "reject_reason": "numeric_string_inner_not_numeric"
+}

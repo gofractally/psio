@@ -1,0 +1,11 @@
+{
+  "id": "numeric_string_wrapping_uint_inline_5",
+  "spec_ref": "section 4.8",
+  "rule_ids": ["NS-001", "NS-002", "T-009"],
+  "description": "numeric_string wrapping uint_inline 5 — tag 0x80 + 0x25. JSON emit: \"5\" (quoted).",
+  "input_value": {"kind": "numeric_string", "inner": {"kind": "uint", "value": 5}},
+  "wire_hex": "8025",
+  "json_compact": "\"5\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

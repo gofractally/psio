@@ -1,0 +1,11 @@
+{
+  "id": "numeric_string_wrapping_decimal_3_14",
+  "spec_ref": "section 4.8",
+  "rule_ids": ["NS-001", "NS-002"],
+  "description": "numeric_string wrapping decimal 3.14 (mantissa=314, scale=-2). Wire: 0x80 + decimal(0x71 zigzag(314)=628=0x274 LE: 74 02 + varscale(zigzag(-2)=3 → 0x03)). JSON emit: \"3.14\".",
+  "input_value": {"kind": "numeric_string", "inner": {"kind": "decimal", "mantissa": "314", "scale": -2}},
+  "wire_hex": "8071740203",
+  "json_compact": "\"3.14\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

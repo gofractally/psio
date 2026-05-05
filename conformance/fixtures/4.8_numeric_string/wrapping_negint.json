@@ -1,0 +1,11 @@
+{
+  "id": "numeric_string_wrapping_nint_inline_minus_1",
+  "spec_ref": "section 4.8",
+  "rule_ids": ["NS-001", "NS-002"],
+  "description": "numeric_string wrapping nint_inline -1 — tag 0x80 + 0x31. JSON emit: \"-1\".",
+  "input_value": {"kind": "numeric_string", "inner": {"kind": "int", "value": -1}},
+  "wire_hex": "8031",
+  "json_compact": "\"-1\"",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -89,6 +89,21 @@ enum Value {
     /// Wire bytes are always raw octets; the hint only governs JSON
     /// projection.
     Bytes { encoding_hint: u8, content: Vec<u8> },
+    /// Numeric-string (§4.8) — a dual-form value. Wire body is a
+    /// numeric inner (codes 2..7); JSON projection renders the inner
+    /// as canonical decimal, wrapped in quotes. Preserves "this was a
+    /// JSON string" type information for consumers that distinguish
+    /// `typeof === "string"` from `typeof === "number"`.
+    NumericString(Box<Value>),
+}
+
+/// §4.8 numeric_string requires an inner of code 2..7 (any of the
+/// numeric types: uint_inline, nint_inline, uint, negint, ieee_float,
+/// decimal). Aggregates / strings / wrapped numeric_strings are not
+/// permitted.
+fn is_numeric_value(v: &Value) -> bool {
+    matches!(v,
+        Value::Uint(_) | Value::NegInt(_) | Value::Float { .. } | Value::Decimal { .. })
 }
 
 /// §5.3 — 8-bit prefilter hash. Strip the key from the last `.`
@@ -342,6 +357,15 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             }
             out.push(0xA0 | encoding_hint);
             out.extend_from_slice(content);
+        }
+
+        Value::NumericString(inner) => {
+            // §4.8: tag = 0x80; body = full encoding of inner numeric.
+            if !is_numeric_value(inner) {
+                return Err(EncodeError::Overflow("numeric_string inner must be a numeric type (codes 2..7)"));
+            }
+            out.push(0x80);
+            encode_into(inner, out)?;
         }
 
         Value::RowArray { keys, rows } => {
@@ -656,7 +680,18 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             }
             Ok(Value::Bytes { encoding_hint: low, content: buf[1..].to_vec() })
         }
-        8 => Err(DecodeError::NotImplementedYet("numeric_string")),
+        8 => {
+            // §4.8 numeric_string. low_nibble must be 0; body is an
+            // inner numeric value (codes 2..7).
+            if low != 0 {
+                return Err(DecodeError::ReservedLowNibble("numeric_string", low));
+            }
+            let inner = decode(&buf[1..])?;
+            if !is_numeric_value(&inner) {
+                return Err(DecodeError::Truncated("numeric_string inner must be numeric (codes 2..7)"));
+            }
+            Ok(Value::NumericString(Box::new(inner)))
+        }
         13 => Err(DecodeError::NotImplementedYet("extension")),
         14 | 15 => Err(DecodeError::ReservedTag(tag)),
         _ => unreachable!(),
@@ -1051,6 +1086,15 @@ fn render_json(v: &Value) -> String {
                 // escape_form — content already JSON-escape-encoded.
                 s.push_str(text);
             }
+            s.push('"');
+            s
+        }
+        Value::NumericString(inner) => {
+            // §4.8: render inner as canonical decimal, wrap in quotes.
+            let body = render_json(inner);
+            let mut s = String::with_capacity(body.len() + 2);
+            s.push('"');
+            s.push_str(&body);
             s.push('"');
             s
         }
@@ -1578,6 +1622,12 @@ fn parse_value(j: &Json) -> Result<Value, String> {
                 entries.push((key, parse_value(value)?));
             }
             Ok(Value::Object(entries))
+        }
+        "numeric_string" => {
+            let inner_json = obj.get("inner")
+                .ok_or("numeric_string missing 'inner'")?;
+            let inner = parse_value(inner_json)?;
+            Ok(Value::NumericString(Box::new(inner)))
         }
         "bytes" => {
             let encoding = obj.get("encoding")
@@ -2262,6 +2312,42 @@ mod tests {
         let key1024 = "c".repeat(1024);
         let v = Value::Object(vec![(key1024, Value::Uint(1))]);
         assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+    }
+
+    #[test]
+    fn numeric_string_round_trip() {
+        // wrap uint 42: tag 0x80 + uint encoding (0x40 0x2A) = 3 bytes
+        let v = Value::NumericString(Box::new(Value::Uint(42)));
+        let enc = encode(&v).unwrap();
+        assert_eq!(enc, vec![0x80, 0x40, 0x2A]);
+        assert_eq!(decode(&enc).unwrap(), v);
+        // JSON projection: "42" with quotes
+        assert_eq!(render_json(&v), r#""42""#);
+
+        // wrap uint_inline 5: tag 0x80 + 0x25 = 2 bytes
+        let v2 = Value::NumericString(Box::new(Value::Uint(5)));
+        let enc2 = encode(&v2).unwrap();
+        assert_eq!(enc2, vec![0x80, 0x25]);
+        assert_eq!(decode(&enc2).unwrap(), v2);
+        assert_eq!(render_json(&v2), r#""5""#);
+
+        // wrap nint_inline -1: tag 0x80 + 0x31
+        let v3 = Value::NumericString(Box::new(Value::NegInt(1)));
+        let enc3 = encode(&v3).unwrap();
+        assert_eq!(enc3, vec![0x80, 0x31]);
+        assert_eq!(render_json(&v3), r#""-1""#);
+
+        // Reject low_nibble != 0
+        assert!(matches!(decode(&[0x81]), Err(DecodeError::ReservedLowNibble(_, _))));
+
+        // Reject inner = bool (not numeric)
+        // Wire: 0x80 0x11 — should fail at the inner-numeric check
+        let r = decode(&[0x80, 0x11]);
+        assert!(matches!(r, Err(DecodeError::Truncated(_))));
+
+        // Reject encoder for non-numeric inner
+        let bad = Value::NumericString(Box::new(Value::Bool(true)));
+        assert!(matches!(encode(&bad), Err(EncodeError::Overflow(_))));
     }
 
     #[test]
