@@ -3979,19 +3979,29 @@ mod tests {
 
     #[test]
     fn decimal_f64_roundtrips_must_be_exact() {
-        // BUG REGRESSION TEST. The original implementation gated on
-        // `(scaled - rounded).abs() <= 1e-9` — a magic FP tolerance.
+        // CONTRACT TEST — not a regression test for end-to-end output.
+        //
+        // The original implementation of `decimal_f64_roundtrips` gated
+        // on `(scaled - rounded).abs() <= 1e-9` — a magic FP tolerance.
         // For 0.1, the f64 product `0.1_f64 * 10` rounds to *exactly*
         // 1.0 (a famous IEEE-754 coincidence with RNE), so the
-        // tolerance check passes even though 0.1_f64 is NOT exactly
-        // 1/10. The function then returns true, lying about its
-        // contract.
+        // tolerance check passed even though 0.1_f64 ≠ 1/10. The
+        // function returned true, lying about its name.
         //
-        // Same for 1e23: 1e23_f64 isn't exactly 10^23 (5^23 > 2^53),
-        // but multiplying by 10^-23 in f64 rounds to a clean integer.
+        // The lie did NOT change picker output for any current input:
+        // non-dyadic decimals' f64 reps have nonzero low mantissa
+        // bits, so `canonical_float_width` never narrows them, so
+        // `ieee_size = 9 (f64)` always loses to `decimal_size ≤ 5` on
+        // size. The size-comparison happens to mask the bug.
         //
-        // Fix: use exact integer arithmetic on f64's underlying
-        // p · 2^e form to verify equality with mantissa · 10^scale.
+        // We test the helper directly because:
+        //   (a) the helper's contract was wrong and a future caller
+        //       outside the picker would silently get wrong answers
+        //   (b) the picker's correctness shouldn't rest on an
+        //       unstated invariant about which f64s narrow.
+        //
+        // Inputs below all cause the OLD impl to return `true`
+        // incorrectly; the new exact-integer impl returns `false`.
         assert!(!decimal_f64_roundtrips(1, -1, 0.1_f64),
             "0.1_f64 is not exactly 1/10 — function must reject");
         assert!(!decimal_f64_roundtrips(3, -1, 0.3_f64),
