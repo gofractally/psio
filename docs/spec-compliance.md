@@ -68,7 +68,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-010 | code 9 = `string`, low nibble ∈ {0, 1} = encoding flag; others reserved | ❌ | ❌ | ❌ | ❌ |
 | T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ❌ | ❌ | ❌ | ❌ |
 | T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ✅ | ✅ corpus `array_*` + `typed_array_*` + `typed_array_low_nibble_11_reserved` | ✅ | ✅ same |
-| T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ⚠️ low_nibble 0 ✅; 1 (row_array) is Phase 2.4 | ⚠️ same | ⚠️ same | ⚠️ same |
+| T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ✅ | ✅ corpus `object_*` + `row_array_*` + `object_low_nibble_reserved` | ✅ | ✅ same |
 | T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
 | T-015 | codes 14, 15 reserved → reject | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
 | T-016 | predicates (is_atom, is_integer, is_real, is_numeric_value, is_number_projectable, is_json_string_emit, is_aggregate, is_extension, is_reserved) collapse to range tests | ✅ | ✅ `--self-test` runtime check | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` + `--self-test` |
@@ -235,9 +235,9 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| RA-001 | encode row_array: tag `0xC1`, shared key block, per-record body | ❌ | ❌ | ❌ | ❌ |
-| RA-002 | decode random-access by `(record_index, key)` | ❌ | ❌ | ❌ | ❌ |
-| RA-003 | encoder rule: pick row_array when wire size beats N×generic-object | ❌ | ❌ | ❌ | ❌ |
+| RA-001 | encode row_array: tag `0xC1`, shared key block, per-record body | ✅ | ✅ corpus `row_array_*` | ✅ | ✅ `row_array_round_trip` + corpus |
+| RA-002 | decode random-access by `(record_index, key)` | ✅ via decode + key index | ⚠️ corpus exercises full decode; no dedicated random-access fixture | ✅ | ⚠️ same |
+| RA-003 | encoder rule: pick row_array when wire size beats N×generic-object | ⚠️ encoder accepts row_array when supplied via DSL; auto-detection from generic input is Phase 3 | ⚠️ | ⚠️ same | ⚠️ |
 
 ### §5.3–5.4 — Hash & long-key escape
 

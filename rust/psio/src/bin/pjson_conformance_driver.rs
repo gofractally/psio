@@ -73,6 +73,12 @@ enum Value {
     /// Hash bytes (XXH3-64 low byte over suffix-stripped keys, §5.3)
     /// power the prefilter scan in lookups.
     Object(Vec<(String, Value)>),
+    /// Row-array (§5.2.1) — homogeneous-shape array of objects.
+    /// `keys` holds the K shared field names, in order; `rows` holds
+    /// N records each with K values. The shared key block lives once
+    /// at the array level, removing per-record key bytes and per-
+    /// record hash tables vs `Object × N`.
+    RowArray { keys: Vec<String>, rows: Vec<Vec<Value>> },
 }
 
 /// §5.3 — 8-bit prefilter hash. Strip the key from the last `.`
@@ -310,6 +316,93 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             out.extend_from_slice(&(n as u16).to_le_bytes());
         }
 
+        Value::RowArray { keys, rows } => {
+            // §5.2.1 row_array.
+            //   tag (0xC1)
+            //   width byte: low 2 bits = slot_w_code, bits 2..3 = recoff_w_code
+            //   K (varuint)
+            //   shared_key_slots[K] (each u32 LE = key_size:8 << 24 | key_offset:24)
+            //   hash[K]
+            //   shared keys area (sum of key_sizes bytes)
+            //   records body (per record: value_data + slot_i[K])
+            //   record_offsets[N] (each recoff_w bytes LE)
+            //   count (u16 LE)
+            let k = keys.len();
+            let n = rows.len();
+            if k > u32::MAX as usize {
+                return Err(EncodeError::Overflow("row_array K too large"));
+            }
+            if n > 0xFFFF {
+                return Err(EncodeError::Overflow("row_array count > 65 535 (LIM-001)"));
+            }
+            // Validate row shapes.
+            for row in rows {
+                if row.len() != k {
+                    return Err(EncodeError::Overflow("row_array row arity mismatch"));
+                }
+            }
+            // Build shared key slots + keys area.
+            let mut keys_area = Vec::new();
+            let mut shared_slots = Vec::with_capacity(k);
+            for key in keys {
+                let offset = keys_area.len();
+                if offset > 0x00FF_FFFF {
+                    return Err(EncodeError::Overflow("row_array key_offset > u24"));
+                }
+                let key_size = key.len();
+                if key_size > 0xFF {
+                    return Err(EncodeError::Overflow("row_array key > 255 bytes (no long-key escape in shared block)"));
+                }
+                shared_slots.push(((key_size as u32) << 24) | (offset as u32 & 0x00FF_FFFF));
+                keys_area.extend_from_slice(key.as_bytes());
+            }
+            // Encode each record into a per-record buffer + record offsets.
+            let mut record_value_data: Vec<Vec<u8>> = Vec::with_capacity(n);
+            let mut record_offsets_within: Vec<Vec<usize>> = Vec::with_capacity(n);
+            for row in rows {
+                let mut value_data = Vec::new();
+                let mut offs = Vec::with_capacity(k);
+                for v in row {
+                    offs.push(value_data.len());
+                    encode_into(v, &mut value_data)?;
+                }
+                record_value_data.push(value_data);
+                record_offsets_within.push(offs);
+            }
+            let max_value_data_size = record_value_data.iter()
+                .map(|d| d.len()).max().unwrap_or(0);
+            let (slot_w_code, slot_w) = pick_slot_width(max_value_data_size)?;
+            // Compute records_body bytes.
+            let mut records_body = Vec::new();
+            let mut record_offsets: Vec<usize> = Vec::with_capacity(n);
+            for (value_data, offs) in record_value_data.iter().zip(record_offsets_within.iter()) {
+                record_offsets.push(records_body.len());
+                records_body.extend_from_slice(value_data);
+                for off in offs {
+                    let off_bytes = (*off as u32).to_le_bytes();
+                    records_body.extend_from_slice(&off_bytes[..slot_w]);
+                }
+            }
+            let (recoff_w_code, recoff_w) = pick_slot_width(records_body.len())?;
+            // Emit.
+            out.push(0xC1);
+            out.push(slot_w_code | (recoff_w_code << 2));
+            varuint_encode_into(k as u32, out)?;
+            for slot in &shared_slots {
+                out.extend_from_slice(&slot.to_le_bytes());
+            }
+            for key in keys {
+                out.push(key_hash8(key));
+            }
+            out.extend_from_slice(&keys_area);
+            out.extend_from_slice(&records_body);
+            for off in &record_offsets {
+                let bytes = (*off as u32).to_le_bytes();
+                out.extend_from_slice(&bytes[..recoff_w]);
+            }
+            out.extend_from_slice(&(n as u16).to_le_bytes());
+        }
+
         Value::TypedArray { element_code, raw } => {
             // §5.1.1: tag = 0xB0 | (element_code + 1); raw N × esize
             // bytes LE; count u16 LE.
@@ -517,14 +610,8 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             Err(DecodeError::ReservedLowNibble("array", low))
         }
         12 => {
-            // §5.2 single object (low_nibble 0). Phase 2.4 will add
-            // row_array (low_nibble 1).
-            if low == 0 {
-                return decode_object(buf);
-            }
-            if low == 1 {
-                return Err(DecodeError::NotImplementedYet("row_array (Phase 2.4)"));
-            }
+            if low == 0 { return decode_object(buf); }
+            if low == 1 { return decode_row_array(buf); }
             Err(DecodeError::ReservedLowNibble("object", low))
         }
         8 | 9 | 10 => {
@@ -607,6 +694,132 @@ fn decode_generic_array(buf: &[u8]) -> Result<Value, DecodeError> {
         children.push(child);
     }
     Ok(Value::Array(children))
+}
+
+/// §5.2.1 row_array decode. `buf` starts at the tag byte (0xC1).
+fn decode_row_array(buf: &[u8]) -> Result<Value, DecodeError> {
+    // Minimum: tag + width + K_varuint(1) + count(2) = 5 bytes (K=0, N=0).
+    if buf.len() < 5 {
+        return Err(DecodeError::Truncated("row_array minimum size"));
+    }
+    let width_byte = buf[1];
+    let slot_w_code = (width_byte & 0x03) as usize;
+    let recoff_w_code = ((width_byte >> 2) & 0x03) as usize;
+    if (width_byte & 0xF0) != 0 {
+        return Err(DecodeError::ReservedLowNibble("row_array width byte high bits", width_byte));
+    }
+    let slot_w = slot_w_code + 1;
+    let recoff_w = recoff_w_code + 1;
+    let n = u16::from_le_bytes([buf[buf.len() - 2], buf[buf.len() - 1]]) as usize;
+
+    // Read K (varuint at offset 2).
+    let (k_u32, k_used) = varuint_decode(&buf[2..])?;
+    let k = k_u32 as usize;
+    let mut pos = 2 + k_used;
+
+    // Shared key slots: K × u32 LE.
+    let need_slots = k * 4;
+    if buf.len() < pos + need_slots {
+        return Err(DecodeError::Truncated("row_array shared key slots"));
+    }
+    let mut key_slots: Vec<(u32, u8)> = Vec::with_capacity(k);
+    for i in 0..k {
+        let s_pos = pos + i * 4;
+        let s = u32::from_le_bytes([buf[s_pos], buf[s_pos + 1], buf[s_pos + 2], buf[s_pos + 3]]);
+        let key_offset = s & 0x00FF_FFFF;
+        let key_size = (s >> 24) as u8;
+        key_slots.push((key_offset, key_size));
+    }
+    pos += need_slots;
+
+    // hash[K]
+    if buf.len() < pos + k {
+        return Err(DecodeError::Truncated("row_array hash array"));
+    }
+    let hash_start = pos;
+    pos += k;
+
+    // Shared keys area: sum of key_sizes.
+    let total_key_size: usize = key_slots.iter().map(|(_, s)| *s as usize).sum();
+    if buf.len() < pos + total_key_size {
+        return Err(DecodeError::Truncated("row_array shared keys area"));
+    }
+    let keys_area_start = pos;
+    pos += total_key_size;
+
+    // Resolve keys into Strings, verify against hashes.
+    let mut keys: Vec<String> = Vec::with_capacity(k);
+    for (i, (off, ksize)) in key_slots.iter().enumerate() {
+        let off = *off as usize;
+        let ks = *ksize as usize;
+        if off + ks > total_key_size {
+            return Err(DecodeError::Truncated("row_array key slot OOB"));
+        }
+        let key_bytes = &buf[keys_area_start + off..keys_area_start + off + ks];
+        let key = std::str::from_utf8(key_bytes)
+            .map_err(|_| DecodeError::Truncated("row_array key UTF-8"))?
+            .to_string();
+        if buf[hash_start + i] != key_hash8(&key) {
+            return Err(DecodeError::Truncated("row_array hash byte mismatch"));
+        }
+        keys.push(key);
+    }
+
+    // record_offsets[N] live just before the count u16 at the tail.
+    let record_offsets_end = buf.len() - 2;
+    let record_offsets_start = record_offsets_end.checked_sub(n * recoff_w)
+        .ok_or(DecodeError::Truncated("row_array record_offsets"))?;
+    if record_offsets_start < pos {
+        return Err(DecodeError::Truncated("row_array record_offsets overlap header"));
+    }
+    let records_body_start = pos;
+    let records_body_end = record_offsets_start;
+    let records_body_size = records_body_end - records_body_start;
+
+    let read_recoff = |i: usize| -> usize {
+        let p = record_offsets_start + i * recoff_w;
+        let mut buf4 = [0u8; 4];
+        buf4[..recoff_w].copy_from_slice(&buf[p..p + recoff_w]);
+        u32::from_le_bytes(buf4) as usize
+    };
+
+    // Walk each record.
+    let mut rows: Vec<Vec<Value>> = Vec::with_capacity(n);
+    for i in 0..n {
+        let rec_off = read_recoff(i);
+        let next_off = if i + 1 < n { read_recoff(i + 1) } else { records_body_size };
+        if rec_off > records_body_size || next_off < rec_off || next_off > records_body_size {
+            return Err(DecodeError::Truncated("row_array record offset OOB or non-monotonic"));
+        }
+        let rec_size = next_off - rec_off;
+        if rec_size < k * slot_w {
+            return Err(DecodeError::Truncated("row_array record too small for slot table"));
+        }
+        let value_data_size = rec_size - k * slot_w;
+        let rec_start = records_body_start + rec_off;
+        let slot_table_start = rec_start + value_data_size;
+
+        let read_slot = |j: usize| -> usize {
+            let p = slot_table_start + j * slot_w;
+            let mut buf4 = [0u8; 4];
+            buf4[..slot_w].copy_from_slice(&buf[p..p + slot_w]);
+            u32::from_le_bytes(buf4) as usize
+        };
+
+        let mut row: Vec<Value> = Vec::with_capacity(k);
+        for j in 0..k {
+            let off = read_slot(j);
+            let next_field_off = if j + 1 < k { read_slot(j + 1) } else { value_data_size };
+            if off > value_data_size || next_field_off < off || next_field_off > value_data_size {
+                return Err(DecodeError::Truncated("row_array slot offset OOB or non-monotonic"));
+            }
+            let val_bytes = &buf[rec_start + off..rec_start + next_field_off];
+            row.push(decode(val_bytes)?);
+        }
+        rows.push(row);
+    }
+
+    Ok(Value::RowArray { keys, rows })
 }
 
 /// §5.2 object decode. `buf` starts at the tag byte (0xC0).
@@ -804,6 +1017,25 @@ fn render_json(v: &Value) -> String {
                 s.push_str(&render_json(value));
             }
             s.push('}');
+            s
+        }
+        Value::RowArray { keys, rows } => {
+            // Render as a JSON array of objects: [{"k1":v1,"k2":v2}, ...]
+            let mut s = String::from("[");
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 { s.push(','); }
+                s.push('{');
+                for (j, value) in row.iter().enumerate() {
+                    if j > 0 { s.push(','); }
+                    s.push('"');
+                    s.push_str(&keys[j]);
+                    s.push('"');
+                    s.push(':');
+                    s.push_str(&render_json(value));
+                }
+                s.push('}');
+            }
+            s.push(']');
             s
         }
         Value::TypedArray { element_code, raw } => {
@@ -1184,6 +1416,29 @@ fn parse_value(j: &Json) -> Result<Value, String> {
                 entries.push((key, parse_value(value)?));
             }
             Ok(Value::Object(entries))
+        }
+        "row_array" => {
+            let keys_json = obj.get("keys")
+                .and_then(|x| x.as_array())
+                .ok_or("row_array missing 'keys'")?;
+            let mut keys: Vec<String> = Vec::with_capacity(keys_json.len());
+            for k in keys_json {
+                keys.push(k.as_str().ok_or("row_array key not string")?.to_string());
+            }
+            let rows_json = obj.get("rows")
+                .and_then(|x| x.as_array())
+                .ok_or("row_array missing 'rows'")?;
+            let mut rows: Vec<Vec<Value>> = Vec::with_capacity(rows_json.len());
+            for row_json in rows_json {
+                let row_arr = row_json.as_array()
+                    .ok_or("row_array row not array")?;
+                let mut row: Vec<Value> = Vec::with_capacity(row_arr.len());
+                for cell in row_arr {
+                    row.push(parse_value(cell)?);
+                }
+                rows.push(row);
+            }
+            Ok(Value::RowArray { keys, rows })
         }
         "typed_array" => {
             let element_code = obj.get("element_code")
@@ -1814,6 +2069,42 @@ mod tests {
         let key1024 = "c".repeat(1024);
         let v = Value::Object(vec![(key1024, Value::Uint(1))]);
         assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+    }
+
+    #[test]
+    fn row_array_round_trip() {
+        // Empty row_array (no keys, no rows).
+        let v0 = Value::RowArray { keys: vec![], rows: vec![] };
+        let enc0 = encode(&v0).unwrap();
+        let dec0 = decode(&enc0).unwrap();
+        assert_eq!(dec0, v0);
+
+        // Single record [{x: 1, y: 2}]
+        let v1 = Value::RowArray {
+            keys: vec!["x".to_string(), "y".to_string()],
+            rows: vec![vec![Value::Uint(1), Value::Uint(2)]],
+        };
+        let enc1 = encode(&v1).unwrap();
+        let dec1 = decode(&enc1).unwrap();
+        assert_eq!(dec1, v1);
+        assert_eq!(render_json(&dec1), r#"[{"x":1,"y":2}]"#);
+
+        // Three records, each with three keys (a, b, c)
+        let v3 = Value::RowArray {
+            keys: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            rows: vec![
+                vec![Value::Uint(1), Value::Bool(true),  Value::Null],
+                vec![Value::Uint(2), Value::Bool(false), Value::NegInt(1)],
+                vec![Value::Uint(3), Value::Bool(true),  Value::Uint(42)],
+            ],
+        };
+        let enc3 = encode(&v3).unwrap();
+        let dec3 = decode(&enc3).unwrap();
+        assert_eq!(dec3, v3);
+        assert_eq!(
+            render_json(&dec3),
+            r#"[{"a":1,"b":true,"c":null},{"a":2,"b":false,"c":-1},{"a":3,"b":true,"c":42}]"#
+        );
     }
 
     #[test]

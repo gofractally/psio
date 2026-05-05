@@ -1,0 +1,13 @@
+{
+  "id": "row_array_single_row",
+  "spec_ref": "section 5.2.1",
+  "rule_ids": ["RA-001", "RA-002"],
+  "description": "[{x:1, y:2}] — K=2, N=1. Shared key slots, hash[2], keys area 'xy', single record body (vd=21 22 + slot=00 01).",
+  "input_value": {"kind": "row_array", "keys": ["x", "y"], "rows": [
+    [{"kind": "uint", "value": 1}, {"kind": "uint", "value": 2}]
+  ]},
+  "wire_hex": "c10002000000010100000111e5787921220001000100",
+  "json_compact": "[{\"x\":1,\"y\":2}]",
+  "must_round_trip": true,
+  "must_validate": true
+}

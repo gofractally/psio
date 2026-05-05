@@ -14,17 +14,16 @@ to ✅, the id is removed from this file.
 ## Status
 
 **Phase 1 is fully sealed. Phases 2.1 (generic array), 2.2 (typed
-homogeneous array), and 2.3 (object + hash + long-key) are all
-green.** §6 document level (DOC-001) is also ✅ — implicit in the
-existing harness.
+array), 2.3 (object), and 2.4 (row_array) are all green.** All
+container types of pjson v1 are now implemented end-to-end with
+byte-equivalent cross-validation between Rust and C++.
 
 Tally:
-- 102 rows ✅ on **both** Rust and C++.
-- 7 rows ⚠️: F-008 (NaN canonicalization, Phase 5); AG-003/004/005 fixture
-  follow-ups; AT-012 partial coverage; H-005 (no 64 KiB key fixture);
-  O-004 partial; O-006 (no hash-mismatch reject fixture); T-013 partial
-  (row_array is Phase 2.4).
-- 64 rows ❌ — Phase 2.4/3/4 scope.
+- 105 rows ✅ on **both** Rust and C++.
+- 8 rows ⚠️: F-008 (Phase 5); AG-003/004/005 fixture follow-ups;
+  AT-012 partial; H-005; O-004 partial; O-006; RA-002 partial;
+  RA-003 partial.
+- 60 rows ❌ — Phase 3/4 scope (JSON-side semantics + extensibility).
 
 ---
 
@@ -44,7 +43,6 @@ EX-001 EX-002 EX-003 EX-004 EX-005 EX-006
 J-001 J-002 J-003 J-004 J-005 J-006 J-007 J-008 J-009 J-010 J-011 J-012 J-013 J-014 J-015
 LIM-001 LIM-002 LIM-003 LIM-004 LIM-005 LIM-006
 NS-001 NS-002 NS-003 NS-004 NS-005 NS-006 NS-007
-RA-001 RA-002 RA-003
 S-001 S-002 S-003 S-004
 T-009 T-010 T-011 T-014
 V-001
@@ -70,7 +68,7 @@ E-002
 ## Block B — ⚠️ rows (impl exists, dedicated test pending)
 
 ```
-F-008 AG-003 AG-004 AG-005 AT-012 H-005 O-004 O-006 T-013
+F-008 AG-003 AG-004 AG-005 AT-012 H-005 O-004 O-006 RA-002 RA-003
 ```
 
 | id | gap | action |
@@ -83,4 +81,5 @@ F-008 AG-003 AG-004 AG-005 AT-012 H-005 O-004 O-006 T-013
 | H-005 | encoder supports 4-byte varuint excess for very long keys; no fixture | add 64 KiB-key fixture |
 | O-004 | adaptive slot width — exercised at u8 (single_field/multi_field) and u16 (long_key_255_escape); no u24/u32 fixtures | add larger-value_data fixtures |
 | O-006 | hash-mismatch reject path exists; no dedicated reject fixture (would need hand-crafted bad hash) | add reject fixture |
-| T-013 | object low_nibble 1 (row_array) is Phase 2.4 | implement row_array (RA-*) |
+| RA-002 | random-access by `(record_index, key)` works through full decode but no dedicated random-access view fixture | add fixture that decodes a single (i, key) pair without full row materialization |
+| RA-003 | encoder accepts row_array via DSL; auto-detection from `array of object` is Phase 3 (JSON-side encoder) | when JSON parser lands, add the homogeneity-detect pass per §5.2.1.5 |

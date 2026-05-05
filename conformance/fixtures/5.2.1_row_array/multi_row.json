@@ -1,0 +1,15 @@
+{
+  "id": "row_array_multi_row",
+  "spec_ref": "section 5.2.1",
+  "rule_ids": ["RA-001", "RA-002", "RA-003"],
+  "description": "Three records, three keys (a, b, c) — heterogeneous values per row. Demonstrates the wire-savings shape: keys 'abc' encoded ONCE in shared block.",
+  "input_value": {"kind": "row_array", "keys": ["a", "b", "c"], "rows": [
+    [{"kind": "uint", "value": 1}, {"kind": "bool", "value": true},  {"kind": "null"}],
+    [{"kind": "uint", "value": 2}, {"kind": "bool", "value": false}, {"kind": "int", "value": -1}],
+    [{"kind": "uint", "value": 3}, {"kind": "bool", "value": true},  {"kind": "uint", "value": 42}]
+  ]},
+  "wire_hex": "c100030000000101000001020000011f3f1b6162632111000001022210310001022311402a00010200060c0300",
+  "json_compact": "[{\"a\":1,\"b\":true,\"c\":null},{\"a\":2,\"b\":false,\"c\":-1},{\"a\":3,\"b\":true,\"c\":42}]",
+  "must_round_trip": true,
+  "must_validate": true
+}

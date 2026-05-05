@@ -124,8 +124,16 @@ struct Object {
    bool operator==(const Object& other) const;
 };
 
+// RowArray (§5.2.1) — homogeneous-shape array of objects. Same
+// recursion pattern as Array/Object.
+struct RowArrayBody;
+struct RowArray {
+   std::shared_ptr<RowArrayBody> body;
+   bool operator==(const RowArray& other) const;
+};
+
 using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal,
-                            Array, TypedArray, Object>;
+                            Array, TypedArray, Object, RowArray>;
 
 struct ArrayBody {
    std::vector<Value> children;
@@ -161,6 +169,27 @@ inline Object make_object(std::vector<std::pair<std::string, Value>> entries) {
    o.body = std::make_shared<ObjectBody>();
    o.body->entries = std::move(entries);
    return o;
+}
+
+struct RowArrayBody {
+   std::vector<std::string>          keys;
+   std::vector<std::vector<Value>>   rows;
+   bool operator==(const RowArrayBody&) const = default;
+};
+
+inline bool RowArray::operator==(const RowArray& other) const {
+   if (!body && !other.body) return true;
+   if (!body || !other.body) return false;
+   return body->keys == other.body->keys && body->rows == other.body->rows;
+}
+
+inline RowArray make_row_array(std::vector<std::string> keys,
+                                std::vector<std::vector<Value>> rows) {
+   RowArray r;
+   r.body = std::make_shared<RowArrayBody>();
+   r.body->keys = std::move(keys);
+   r.body->rows = std::move(rows);
+   return r;
 }
 
 // §5.3 — 8-bit prefilter hash. Strip key from the last `.` onward
@@ -413,6 +442,93 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
          }
          out.push_back(static_cast<std::uint8_t>(n & 0xFF));
          out.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFF));
+      } else if constexpr (std::is_same_v<T, RowArray>) {
+         // §5.2.1 row_array.
+         const auto& keys = arg.body ? arg.body->keys : std::vector<std::string>{};
+         const auto& rows = arg.body ? arg.body->rows : std::vector<std::vector<Value>>{};
+         const std::size_t k = keys.size();
+         const std::size_t n = rows.size();
+         if (k > std::numeric_limits<std::uint32_t>::max())
+            throw EncodeError{"row_array K too large"};
+         if (n > 0xFFFF) throw EncodeError{"row_array count > 65535 (LIM-001)"};
+         for (const auto& row : rows) {
+            if (row.size() != k) throw EncodeError{"row_array row arity mismatch"};
+         }
+         // Shared keys area + slots
+         std::vector<std::uint8_t> keys_area;
+         std::vector<std::uint32_t> shared_slots;
+         shared_slots.reserve(k);
+         for (const auto& key : keys) {
+            const std::uint32_t off = static_cast<std::uint32_t>(keys_area.size());
+            if (off > 0x00FF'FFFFu) throw EncodeError{"row_array key_offset > u24"};
+            if (key.size() > 0xFF) throw EncodeError{"row_array shared key > 255 bytes"};
+            shared_slots.push_back(
+                (static_cast<std::uint32_t>(key.size()) << 24) | (off & 0x00FF'FFFFu));
+            keys_area.insert(keys_area.end(), key.begin(), key.end());
+         }
+         // Per-record value_data + offsets
+         std::vector<std::vector<std::uint8_t>> rec_value_data;
+         std::vector<std::vector<std::size_t>>  rec_offsets;
+         rec_value_data.reserve(n);
+         rec_offsets.reserve(n);
+         for (const auto& row : rows) {
+            std::vector<std::uint8_t> vd;
+            std::vector<std::size_t>  offs;
+            offs.reserve(k);
+            for (const auto& v : row) {
+               offs.push_back(vd.size());
+               encode_into(v, vd);
+            }
+            rec_value_data.push_back(std::move(vd));
+            rec_offsets.push_back(std::move(offs));
+         }
+         std::size_t max_vd = 0;
+         for (const auto& vd : rec_value_data)
+            if (vd.size() > max_vd) max_vd = vd.size();
+
+         std::uint8_t slot_w_code, recoff_w_code;
+         std::size_t  slot_w, recoff_w;
+         auto pick = [](std::size_t s, std::uint8_t& code, std::size_t& w) {
+            if      (s <= 0xFF)         { code = 0; w = 1; }
+            else if (s <= 0xFFFF)       { code = 1; w = 2; }
+            else if (s <= 0xFF'FFFF)    { code = 2; w = 3; }
+            else if (s <= 0xFFFF'FFFFu) { code = 3; w = 4; }
+            else throw EncodeError{"row_array value_data > u32"};
+         };
+         pick(max_vd, slot_w_code, slot_w);
+
+         // Compose records body
+         std::vector<std::uint8_t> records_body;
+         std::vector<std::size_t>  record_offsets;
+         record_offsets.reserve(n);
+         for (std::size_t i = 0; i < n; ++i) {
+            record_offsets.push_back(records_body.size());
+            const auto& vd = rec_value_data[i];
+            const auto& offs = rec_offsets[i];
+            records_body.insert(records_body.end(), vd.begin(), vd.end());
+            for (std::size_t off : offs) {
+               for (std::size_t b = 0; b < slot_w; ++b)
+                  records_body.push_back(static_cast<std::uint8_t>(off >> (8 * b)));
+            }
+         }
+         pick(records_body.size(), recoff_w_code, recoff_w);
+
+         out.push_back(0xC1);
+         out.push_back(static_cast<std::uint8_t>(slot_w_code | (recoff_w_code << 2)));
+         varuint_encode(static_cast<std::uint32_t>(k), out);
+         for (std::uint32_t s : shared_slots) {
+            for (int b = 0; b < 4; ++b)
+               out.push_back(static_cast<std::uint8_t>(s >> (8 * b)));
+         }
+         for (const auto& key : keys) out.push_back(key_hash8(key));
+         out.insert(out.end(), keys_area.begin(), keys_area.end());
+         out.insert(out.end(), records_body.begin(), records_body.end());
+         for (std::size_t off : record_offsets) {
+            for (std::size_t b = 0; b < recoff_w; ++b)
+               out.push_back(static_cast<std::uint8_t>(off >> (8 * b)));
+         }
+         out.push_back(static_cast<std::uint8_t>(n & 0xFF));
+         out.push_back(static_cast<std::uint8_t>((n >> 8) & 0xFF));
       } else if constexpr (std::is_same_v<T, TypedArray>) {
          // §5.1.1 typed homogeneous array.
          const std::size_t esize = typed_array_element_size(arg.element_code);
@@ -486,6 +602,7 @@ static Value decode_generic_array(std::span<const std::uint8_t> buf);
 static Value decode_typed_array(std::span<const std::uint8_t> buf,
                                 std::uint8_t element_code);
 static Value decode_object(std::span<const std::uint8_t> buf);
+static Value decode_row_array(std::span<const std::uint8_t> buf);
 
 static Value decode(std::span<const std::uint8_t> buf) {
    if (buf.empty()) throw DecodeError{"empty buffer"};
@@ -547,10 +664,8 @@ static Value decode(std::span<const std::uint8_t> buf) {
          throw DecodeError{"reserved low_nibble for array"};
       }
       case 12: {
-         // §5.2 single object (low_nibble 0). Phase 2.4 will add
-         // row_array (low_nibble 1).
          if (low == 0) return decode_object(buf);
-         if (low == 1) throw DecodeError{"Phase 2.4: row_array"};
+         if (low == 1) return decode_row_array(buf);
          throw DecodeError{"reserved low_nibble for object"};
       }
       case 8: case 9: case 10: case 13: {
@@ -619,6 +734,113 @@ static Value decode_generic_array(std::span<const std::uint8_t> buf) {
       children.push_back(decode(child_span));
    }
    return make_array(std::move(children));
+}
+
+// §5.2.1 row_array decode. `buf` starts at the tag byte (0xC1).
+static Value decode_row_array(std::span<const std::uint8_t> buf) {
+   if (buf.size() < 5) throw DecodeError{"row_array minimum size"};
+   const std::uint8_t width_byte = buf[1];
+   const std::size_t  slot_w_code   = width_byte & 0x03;
+   const std::size_t  recoff_w_code = (width_byte >> 2) & 0x03;
+   if ((width_byte & 0xF0) != 0)
+      throw DecodeError{"reserved high bits in row_array width byte"};
+   const std::size_t slot_w = slot_w_code + 1;
+   const std::size_t recoff_w = recoff_w_code + 1;
+   const std::size_t n = static_cast<std::size_t>(buf[buf.size() - 2])
+                       | (static_cast<std::size_t>(buf[buf.size() - 1]) << 8);
+
+   const auto k_vu = varuint_decode(buf.subspan(2));
+   const std::size_t k = static_cast<std::size_t>(k_vu.value);
+   std::size_t pos = 2 + k_vu.used;
+
+   const std::size_t need_slots = k * 4;
+   if (buf.size() < pos + need_slots) throw DecodeError{"row_array shared key slots truncated"};
+   std::vector<std::pair<std::uint32_t, std::uint8_t>> key_slots;
+   key_slots.reserve(k);
+   for (std::size_t i = 0; i < k; ++i) {
+      const std::size_t sp = pos + i * 4;
+      const std::uint32_t s = static_cast<std::uint32_t>(buf[sp])
+                            | (static_cast<std::uint32_t>(buf[sp + 1]) << 8)
+                            | (static_cast<std::uint32_t>(buf[sp + 2]) << 16)
+                            | (static_cast<std::uint32_t>(buf[sp + 3]) << 24);
+      key_slots.emplace_back(s & 0x00FF'FFFFu,
+                             static_cast<std::uint8_t>(s >> 24));
+   }
+   pos += need_slots;
+
+   if (buf.size() < pos + k) throw DecodeError{"row_array hash array truncated"};
+   const std::size_t hash_start = pos;
+   pos += k;
+
+   std::size_t total_key_size = 0;
+   for (const auto& [_off, ksz] : key_slots) total_key_size += ksz;
+   if (buf.size() < pos + total_key_size) throw DecodeError{"row_array shared keys area truncated"};
+   const std::size_t keys_area_start = pos;
+   pos += total_key_size;
+
+   std::vector<std::string> keys;
+   keys.reserve(k);
+   for (std::size_t i = 0; i < k; ++i) {
+      const auto [koff, ksz] = key_slots[i];
+      if (static_cast<std::size_t>(koff) + ksz > total_key_size)
+         throw DecodeError{"row_array key slot OOB"};
+      const auto* p = reinterpret_cast<const char*>(buf.data() + keys_area_start + koff);
+      std::string key(p, ksz);
+      if (buf[hash_start + i] != key_hash8(key))
+         throw DecodeError{"row_array hash byte mismatch"};
+      keys.push_back(std::move(key));
+   }
+
+   if (buf.size() < 2 + n * recoff_w) throw DecodeError{"row_array record_offsets"};
+   const std::size_t record_offsets_end   = buf.size() - 2;
+   const std::size_t record_offsets_start = record_offsets_end - n * recoff_w;
+   if (record_offsets_start < pos) throw DecodeError{"row_array record_offsets overlap header"};
+   const std::size_t records_body_start = pos;
+   const std::size_t records_body_size  = record_offsets_start - records_body_start;
+
+   auto read_recoff = [&](std::size_t i) -> std::size_t {
+      const std::size_t p = record_offsets_start + i * recoff_w;
+      std::size_t v = 0;
+      for (std::size_t b = 0; b < recoff_w; ++b)
+         v |= static_cast<std::size_t>(buf[p + b]) << (8 * b);
+      return v;
+   };
+
+   std::vector<std::vector<Value>> rows;
+   rows.reserve(n);
+   for (std::size_t i = 0; i < n; ++i) {
+      const std::size_t rec_off  = read_recoff(i);
+      const std::size_t next_off = (i + 1 < n) ? read_recoff(i + 1) : records_body_size;
+      if (rec_off > records_body_size || next_off < rec_off || next_off > records_body_size)
+         throw DecodeError{"row_array record offset OOB or non-monotonic"};
+      const std::size_t rec_size = next_off - rec_off;
+      if (rec_size < k * slot_w)
+         throw DecodeError{"row_array record too small for slot table"};
+      const std::size_t value_data_size = rec_size - k * slot_w;
+      const std::size_t rec_start = records_body_start + rec_off;
+      const std::size_t slot_table_start = rec_start + value_data_size;
+
+      auto read_slot = [&](std::size_t j) -> std::size_t {
+         const std::size_t p = slot_table_start + j * slot_w;
+         std::size_t v = 0;
+         for (std::size_t b = 0; b < slot_w; ++b)
+            v |= static_cast<std::size_t>(buf[p + b]) << (8 * b);
+         return v;
+      };
+
+      std::vector<Value> row;
+      row.reserve(k);
+      for (std::size_t j = 0; j < k; ++j) {
+         const std::size_t off = read_slot(j);
+         const std::size_t next_field_off = (j + 1 < k) ? read_slot(j + 1) : value_data_size;
+         if (off > value_data_size || next_field_off < off || next_field_off > value_data_size)
+            throw DecodeError{"row_array slot offset OOB or non-monotonic"};
+         row.push_back(decode(buf.subspan(rec_start + off, next_field_off - off)));
+      }
+      rows.push_back(std::move(row));
+   }
+
+   return make_row_array(std::move(keys), std::move(rows));
 }
 
 // §5.2 object decode. `buf` starts at the tag byte (0xC0).
@@ -873,6 +1095,30 @@ static std::string render_json(const Value& v) {
             s += render_json(value);
          }
          s += "}";
+         return s;
+      } else if constexpr (std::is_same_v<T, RowArray>) {
+         std::string s = "[";
+         if (arg.body) {
+            const auto& keys = arg.body->keys;
+            const auto& rows = arg.body->rows;
+            bool first_row = true;
+            for (const auto& row : rows) {
+               if (!first_row) s += ",";
+               first_row = false;
+               s += "{";
+               bool first_field = true;
+               for (std::size_t j = 0; j < keys.size(); ++j) {
+                  if (!first_field) s += ",";
+                  first_field = false;
+                  s += "\"";
+                  s += keys[j];
+                  s += "\":";
+                  s += render_json(row[j]);
+               }
+               s += "}";
+            }
+         }
+         s += "]";
          return s;
       } else if constexpr (std::is_same_v<T, TypedArray>) {
          const std::size_t esize = typed_array_element_size(arg.element_code);
@@ -1361,6 +1607,31 @@ static Value parse_value_from_json(const JNode& j) {
          entries.emplace_back(as_string(*k), parse_value_from_json(*v));
       }
       return make_object(std::move(entries));
+   }
+   if (kind == "row_array") {
+      const auto* keys_node = obj_get(obj, "keys");
+      if (!keys_node) throw std::runtime_error{"row_array missing 'keys'"};
+      const auto* keys_arr = std::get_if<JArray>(&keys_node->v);
+      if (!keys_arr) throw std::runtime_error{"row_array 'keys' must be array"};
+      std::vector<std::string> keys;
+      keys.reserve(keys_arr->size());
+      for (const auto& kj : *keys_arr) keys.push_back(as_string(kj));
+
+      const auto* rows_node = obj_get(obj, "rows");
+      if (!rows_node) throw std::runtime_error{"row_array missing 'rows'"};
+      const auto* rows_arr = std::get_if<JArray>(&rows_node->v);
+      if (!rows_arr) throw std::runtime_error{"row_array 'rows' must be array"};
+      std::vector<std::vector<Value>> rows;
+      rows.reserve(rows_arr->size());
+      for (const auto& rj : *rows_arr) {
+         const auto* cells = std::get_if<JArray>(&rj.v);
+         if (!cells) throw std::runtime_error{"row_array row must be array"};
+         std::vector<Value> row;
+         row.reserve(cells->size());
+         for (const auto& c : *cells) row.push_back(parse_value_from_json(c));
+         rows.push_back(std::move(row));
+      }
+      return make_row_array(std::move(keys), std::move(rows));
    }
    if (kind == "typed_array") {
       const auto* ec_node = obj_get(obj, "element_code");

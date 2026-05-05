@@ -1,0 +1,11 @@
+{
+  "id": "row_array_empty",
+  "spec_ref": "section 5.2.1",
+  "rule_ids": ["RA-001", "RA-002", "T-013"],
+  "description": "empty row_array (K=0, N=0): tag 0xC1 + width 0x00 + K_varuint 0x00 + count 0x00 0x00",
+  "input_value": {"kind": "row_array", "keys": [], "rows": []},
+  "wire_hex": "c100000000",
+  "json_compact": "[]",
+  "must_round_trip": true,
+  "must_validate": true
+}
