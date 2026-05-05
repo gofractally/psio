@@ -290,6 +290,17 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | EM-007 | `numeric_string` always quoted regardless of mode | ❌ | ❌ | ❌ | ❌ |
 | EM-008 | `ieee_float` and `decimal` not affected by `int_string_mode` | ❌ | ❌ | ❌ | ❌ |
 
+## §8 — Limits
+
+| id | rule | C++ impl | C++ test | Rust impl | Rust test |
+|----|------|----------|----------|-----------|-----------|
+| LIM-001 | container count is u16 LE — encoder rejects > 65 535 fields | ❌ | ❌ | ❌ | ❌ |
+| LIM-002 | value_data ≤ 4 294 967 295 at `slot_w_code=3`; 16 MiB at u24; 64 KiB at u16; 256 B at u8 | ❌ | ❌ | ❌ | ❌ |
+| LIM-003 | key length unbounded via long-key escape (§5.4 varuint excess) | ❌ | ❌ | ❌ | ❌ |
+| LIM-004 | integer magnitude ≤ 128 unsigned bits (16-byte raw LE) | ❌ | ❌ | ❌ | ❌ |
+| LIM-005 | decimal scale ∈ ±536 870 911 (4-byte varscale) | ❌ | ❌ | ❌ | ❌ |
+| LIM-006 | nesting depth: configurable cap with suggested default 256; parser rejects deeper | ❌ | ❌ | ❌ | ❌ |
+
 ## §9 — Errors (parser must reject)
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |

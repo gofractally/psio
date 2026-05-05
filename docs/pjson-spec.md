@@ -1317,8 +1317,8 @@ parse_value(ptr, size) -> Value:
       return NumericString(inner)
    9: assert low ≤ 1                                      // string
       return String(ptr[1 .. size), encoding_flag = low)
-   10: assert low == 0
-       return Bytes(ptr[1 .. size))
+   10: assert low ≤ 3                                    // bytes encoding hint: 0..3
+       return Bytes(ptr[1 .. size), encoding_hint = low)
    11: if low == 0:
           return parse_array(ptr, size)                   // generic
        else if 1 ≤ low ≤ 10:
@@ -1788,9 +1788,10 @@ For an integer value `v`:
 | value range                                              | canonical encoding                              |
 |----------------------------------------------------------|-------------------------------------------------|
 | 0 ≤ v ≤ 15                                               | `uint_inline` (1 byte)                          |
+| −15 ≤ v ≤ −1                                             | `nint_inline` (1 byte)                          |
 | 16 ≤ v, fits `u64`                                       | `uint` with smallest bc (1..8)                  |
 | u64::MAX < v, fits `u128`                                | `uint` with smallest bc (9..16)                 |
-| v = −1, fits `−2⁶³ ≤ v ≤ −1`                             | `negint` with smallest bc on `\|v\|` (1..8)      |
+| v ≤ −16, magnitude fits `u64`                            | `negint` with smallest bc on `\|v\|` (1..8)      |
 | beyond `i64` magnitude, fits `i128` magnitude            | `negint` with smallest bc on `\|v\|` (9..16)     |
 
 For an integer-valued double (e.g. `42.0`): treat as integer and
