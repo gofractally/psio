@@ -2040,6 +2040,95 @@ static void render_with_opts_into(const Value& v, const EmitOptions& opts,
 
 // ── Canonical encoding helpers ─────────────────────────────────────
 
+// Multiply `n` by 5^k with i128 overflow detection. Returns false on
+// overflow — the picker treats that as "not exactly representable".
+static bool mul_pow5_i128(I128& n, std::uint32_t k) noexcept {
+   for (std::uint32_t i = 0; i < k; ++i) {
+      // n *= 5  with overflow check.
+      __int128 lhs = (static_cast<__int128>(n.hi) << 64)
+                   | static_cast<__int128>(n.lo);
+      __int128 prod;
+      if (__builtin_mul_overflow(lhs, static_cast<__int128>(5), &prod))
+         return false;
+      n.lo = static_cast<std::uint64_t>(prod);
+      n.hi = static_cast<std::int64_t>(prod >> 64);
+   }
+   return true;
+}
+
+static bool i128_shl(I128& n, std::uint32_t k) noexcept {
+   if (k >= 128) return false;
+   __int128 v = (static_cast<__int128>(n.hi) << 64)
+              | static_cast<__int128>(n.lo);
+   __int128 shifted = v << k;
+   if ((shifted >> k) != v) return false;     // overflowed bits out
+   n.lo = static_cast<std::uint64_t>(shifted);
+   n.hi = static_cast<std::int64_t>(shifted >> 64);
+   return true;
+}
+
+// True iff `f` is bit-exactly equal to mantissa·10^scale. Uses
+// exact integer arithmetic on f64's underlying p·2^e form. Mirror
+// of the Rust `decimal_f64_roundtrips`.
+static bool decimal_f64_roundtrips(I128 mantissa, std::int32_t scale, double f) {
+   if (!std::isfinite(f)) return false;
+   std::uint64_t bits;
+   std::memcpy(&bits, &f, sizeof bits);
+   const bool sign_neg = ((bits >> 63) & 1u) != 0;
+   const int  exp      = static_cast<int>((bits >> 52) & 0x7FFu);
+   const std::uint64_t frac = bits & 0x000F'FFFF'FFFF'FFFFull;
+   if (exp == 0x7FF) return false;
+
+   I128 p{};
+   int  e;
+   if (exp == 0) {
+      if (frac == 0) {
+         // ±0 matches mantissa == 0 only.
+         return mantissa.lo == 0 && mantissa.hi == 0;
+      }
+      p = I128{frac, 0};
+      e = -1074;
+   } else {
+      p = I128{(1ull << 52) | frac, 0};
+      e = exp - 1023 - 52;
+   }
+   if (sign_neg) {
+      // Two's-complement negate.
+      __int128 v = (static_cast<__int128>(p.hi) << 64)
+                 | static_cast<__int128>(p.lo);
+      v = -v;
+      p.lo = static_cast<std::uint64_t>(v);
+      p.hi = static_cast<std::int64_t>(v >> 64);
+   }
+
+   // Build both sides of the equation
+   //   m · 10^s == p · 2^e
+   // by absorbing 5^k onto whichever side holds it, then shifting
+   // by 2^k onto the other.
+   I128 m_side = mantissa;
+   I128 p_side = p;
+   std::int64_t shift_on_m = 0;
+   if (scale >= 0) {
+      if (!mul_pow5_i128(m_side, static_cast<std::uint32_t>(scale))) return false;
+      shift_on_m = static_cast<std::int64_t>(scale) - static_cast<std::int64_t>(e);
+   } else {
+      const std::uint32_t s_abs = static_cast<std::uint32_t>(-scale);
+      if (!mul_pow5_i128(p_side, s_abs)) return false;
+      shift_on_m = -(static_cast<std::int64_t>(e) + static_cast<std::int64_t>(s_abs));
+   }
+
+   if (shift_on_m >= 0) {
+      if (shift_on_m >= 128) return false;
+      if (!i128_shl(m_side, static_cast<std::uint32_t>(shift_on_m))) return false;
+      return m_side == p_side;
+   } else {
+      const std::uint32_t k = static_cast<std::uint32_t>(-shift_on_m);
+      if (k >= 128) return false;
+      if (!i128_shl(p_side, k)) return false;
+      return m_side == p_side;
+   }
+}
+
 static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale, double f) {
    // Decimal candidate size: tag (1) + zigzag mantissa minimal bytes
    // + varscale (1..4).
@@ -2054,25 +2143,10 @@ static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale, double f) {
       :                                4;
    const std::size_t decimal_size = 1 + m_bc + scale_bc;
 
-   // Verify the f64 round-trips through (mantissa, scale) — otherwise
-   // ieee_float can't represent the source decimal exactly.
-   bool ieee_exact;
-   {
-      const double scaled = f * std::pow(10.0, -scale);
-      const double rounded = std::nearbyint(scaled);
-      ieee_exact = std::isfinite(scaled) && std::abs(scaled - rounded) <= 1e-9;
-      if (ieee_exact) {
-         // Reconstruct mantissa from f at same scale.
-         long double scaled_ld = static_cast<long double>(f) *
-                                  std::pow(10.0L, -static_cast<long double>(scale));
-         long double rounded_ld = std::nearbyint(scaled_ld);
-         // Compare against signed 128 mantissa via cast.
-         long double orig_ld = static_cast<long double>(static_cast<std::int64_t>(mantissa.lo));
-         (void)orig_ld;  // best-effort; we already gated on small |scaled-rounded|.
-         (void)rounded_ld;
-      }
-   }
-   if (!ieee_exact) {
+   // Verify f exactly equals mantissa·10^scale before considering
+   // ieee_float. Anything inexact (e.g., 0.1, 10^23) MUST encode as
+   // decimal to preserve identity.
+   if (!decimal_f64_roundtrips(mantissa, scale, f)) {
       Decimal d;
       d.mantissa = mantissa;
       d.scale = scale;
