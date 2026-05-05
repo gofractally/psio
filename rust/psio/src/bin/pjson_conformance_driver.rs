@@ -95,6 +95,13 @@ enum Value {
     /// JSON string" type information for consumers that distinguish
     /// `typeof === "string"` from `typeof === "number"`.
     NumericString(Box<Value>),
+    /// Extension (§4.11) — soft-evolution path. `subtype` is the
+    /// sub-type id (0..15); `bytes` is the opaque body.  A parser
+    /// that doesn't recognize `subtype` still surfaces the value via
+    /// this variant; the JSON projection uses an envelope so the
+    /// round-trip preserves both id and bytes through unknown-aware
+    /// readers.
+    Extension { subtype: u8, bytes: Vec<u8> },
 }
 
 /// §4.8 numeric_string requires an inner of code 2..7 (any of the
@@ -227,7 +234,29 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
             Value::Array(arr.iter().map(from_serde_json).collect())
         }
         serde_json::Value::Object(obj) => {
-            // serde_json with preserve_order keeps insertion order.
+            // §4.11 envelope round-trip: an object of the exact shape
+            // `{"__pjson_ext": {"subtype": N, "bytes_b64": "..."}}` is
+            // an unknown-extension envelope that should reconstruct
+            // back to an Extension wire form. The check is shape-
+            // sensitive (single key, sub-object with exact keys) to
+            // avoid hijacking arbitrary user data.
+            if obj.len() == 1 {
+                if let Some(inner) = obj.get("__pjson_ext") {
+                    if let serde_json::Value::Object(ext) = inner {
+                        let sub = ext.get("subtype").and_then(|x| x.as_u64());
+                        let b64 = ext.get("bytes_b64").and_then(|x| x.as_str());
+                        if let (Some(s), Some(b64)) = (sub, b64) {
+                            if s <= 15 && ext.len() == 2 {
+                                if let Some(bytes) = b64_decode(b64) {
+                                    return Value::Extension {
+                                        subtype: s as u8, bytes,
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             Value::Object(
                 obj.iter()
                     .map(|(k, v)| (k.clone(), from_serde_json(v)))
@@ -497,6 +526,15 @@ fn encode_into(v: &Value, out: &mut Vec<u8>) -> Result<(), EncodeError> {
             }
             out.push(0x80);
             encode_into(inner, out)?;
+        }
+
+        Value::Extension { subtype, bytes } => {
+            // §4.11: tag = 0xD0 | subtype (0..15); body = opaque bytes.
+            if *subtype > 15 {
+                return Err(EncodeError::Overflow("extension subtype must be 0..15"));
+            }
+            out.push(0xD0 | subtype);
+            out.extend_from_slice(bytes);
         }
 
         Value::RowArray { keys, rows } => {
@@ -823,7 +861,12 @@ fn decode(buf: &[u8]) -> Result<Value, DecodeError> {
             }
             Ok(Value::NumericString(Box::new(inner)))
         }
-        13 => Err(DecodeError::NotImplementedYet("extension")),
+        13 => {
+            // §4.11 extension. low_nibble is the sub-type id; rest of
+            // the buffer is the opaque body. Unknown sub-type ids
+            // surface as Extension(id, bytes) — they DO NOT error.
+            Ok(Value::Extension { subtype: low, bytes: buf[1..].to_vec() })
+        }
         14 | 15 => Err(DecodeError::ReservedTag(tag)),
         _ => unreachable!(),
     }
@@ -1280,6 +1323,16 @@ fn render_json(v: &Value) -> String {
             s.push('"');
             s
         }
+        Value::Extension { subtype, bytes } => {
+            // §4.11: emit as opaque envelope object so a v1 emitter
+            // round-trips an unknown extension without losing the id
+            // or the body. Subsequent encoders aware of the envelope
+            // (see from_json) reconstruct the Extension value.
+            format!(
+                r#"{{"__pjson_ext":{{"subtype":{},"bytes_b64":"{}"}}}}"#,
+                subtype, b64_encode(bytes)
+            )
+        }
         Value::Bytes { encoding_hint, content } => {
             let body = match *encoding_hint {
                 0 => b64_encode(content),
@@ -1394,7 +1447,7 @@ fn render_with_opts_into(v: &Value, opts: &EmitOptions, depth: usize, out: &mut 
         // and post-process aggregates for pretty-print indentation.
         Value::Float { .. } | Value::Decimal { .. }
         | Value::String { .. } | Value::NumericString(_) | Value::Bytes { .. }
-        | Value::TypedArray { .. } => {
+        | Value::TypedArray { .. } | Value::Extension { .. } => {
             // None of these arms have nested aggregates that pretty-
             // print would affect (TypedArray is flat numbers/floats,
             // never wraps a Value), and none participate in
@@ -1618,6 +1671,41 @@ fn b64_encode(bytes: &[u8]) -> String {
         _ => {}
     }
     out
+}
+
+/// Standard base64 decode. Returns None on any malformed input
+/// (illegal char, wrong padding). Used by the §4.11 envelope
+/// round-trip on the JSON-ingress side.
+fn b64_decode(s: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(26 + c - b'a'),
+            b'0'..=b'9' => Some(52 + c - b'0'),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let s = s.as_bytes();
+    if s.len() % 4 != 0 { return None; }
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    let mut i = 0;
+    while i < s.len() {
+        let q0 = val(s[i])?;
+        let q1 = val(s[i + 1])?;
+        let q2_pad = s[i + 2] == b'=';
+        let q3_pad = s[i + 3] == b'=';
+        let q2 = if q2_pad { 0 } else { val(s[i + 2])? };
+        let q3 = if q3_pad { 0 } else { val(s[i + 3])? };
+        let n: u32 = ((q0 as u32) << 18) | ((q1 as u32) << 12)
+                   | ((q2 as u32) << 6)  | (q3 as u32);
+        out.push((n >> 16) as u8);
+        if !q2_pad { out.push((n >> 8) as u8); }
+        if !q3_pad { out.push(n as u8); }
+        i += 4;
+    }
+    Some(out)
 }
 
 /// URL-safe base64 (§4.10 hint 3). RFC 4648 §5 alphabet, no padding.
@@ -1925,6 +2013,20 @@ fn parse_value(j: &Json) -> Result<Value, String> {
                 .ok_or("numeric_string missing 'inner'")?;
             let inner = parse_value(inner_json)?;
             Ok(Value::NumericString(Box::new(inner)))
+        }
+        "extension" => {
+            let subtype = obj.get("subtype")
+                .and_then(|x| x.as_u64())
+                .ok_or("extension missing 'subtype'")? as u8;
+            if subtype > 15 {
+                return Err(format!("extension subtype {} > 15", subtype));
+            }
+            let bytes_hex = obj.get("bytes_hex")
+                .and_then(|x| x.as_str())
+                .ok_or("extension missing 'bytes_hex'")?;
+            let bytes = parse_hex(bytes_hex)
+                .map_err(|e| format!("extension bytes_hex parse: {}", e))?;
+            Ok(Value::Extension { subtype, bytes })
         }
         "bytes" => {
             let encoding = obj.get("encoding")
@@ -2657,6 +2759,40 @@ mod tests {
         let key1024 = "c".repeat(1024);
         let v = Value::Object(vec![(key1024, Value::Uint(1))]);
         assert_eq!(decode(&encode(&v).unwrap()).unwrap(), v);
+    }
+
+    #[test]
+    fn extension_round_trip_and_envelope() {
+        // Encode/decode a basic extension.
+        let v = Value::Extension { subtype: 5, bytes: vec![0xDE, 0xAD, 0xBE, 0xEF] };
+        let enc = encode(&v).unwrap();
+        assert_eq!(enc, vec![0xD5, 0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(decode(&enc).unwrap(), v);
+
+        // JSON projection: opaque envelope.
+        assert_eq!(
+            render_json(&v),
+            r#"{"__pjson_ext":{"subtype":5,"bytes_b64":"3q2+7w=="}}"#
+        );
+
+        // Envelope round-trip via JSON ingress: the JSON-text form of
+        // the envelope must reconstruct back to an Extension wire.
+        let from = from_json(
+            r#"{"__pjson_ext":{"subtype":5,"bytes_b64":"3q2+7w=="}}"#).unwrap();
+        assert_eq!(from, v);
+        assert_eq!(encode(&from).unwrap(), enc);
+
+        // Envelope with sub-type 0
+        let v0 = Value::Extension { subtype: 0, bytes: vec![] };
+        assert_eq!(encode(&v0).unwrap(), vec![0xD0]);
+        assert_eq!(render_json(&v0),
+                   r#"{"__pjson_ext":{"subtype":0,"bytes_b64":""}}"#);
+
+        // A regular object that happens to share keys but with extra
+        // fields stays a regular object (envelope detection is shape-
+        // sensitive: single key, exactly two inner keys).
+        let regular = from_json(r#"{"__pjson_ext":{"subtype":5,"bytes_b64":"3q2+7w==","extra":1}}"#).unwrap();
+        assert!(matches!(regular, Value::Object(_)));
     }
 
     #[test]

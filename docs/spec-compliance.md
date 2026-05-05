@@ -69,7 +69,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 | T-011 | code 10 = `bytes`, low nibble ∈ {0,1,2,3} = JSON-emit hint; 4..15 reserved | ✅ | ✅ corpus `bytes_*` | ✅ | ✅ same |
 | T-012 | code 11 = `array`, low nibble ∈ {0, 1..10}; 11..15 reserved | ✅ | ✅ corpus `array_*` + `typed_array_*` + `typed_array_low_nibble_11_reserved` | ✅ | ✅ same |
 | T-013 | code 12 = `object`, low nibble ∈ {0, 1}; 2..15 reserved | ✅ | ✅ corpus `object_*` + `row_array_*` + `object_low_nibble_reserved` | ✅ | ✅ same |
-| T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ❌ | ❌ | ❌ | ❌ |
+| T-014 | code 13 = `extension`, low nibble = sub-type id 0..15 | ✅ | ✅ corpus `extension_subtype_{0_empty,5_small,15_max}` | ✅ | ✅ same |
 | T-015 | codes 14, 15 reserved → reject | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
 | T-016 | predicates (is_atom, is_integer, is_real, is_numeric_value, is_number_projectable, is_json_string_emit, is_aggregate, is_extension, is_reserved) collapse to range tests | ✅ | ✅ `--self-test` runtime check | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` + `--self-test` |
 | T-017 | within is_integer: `bit 0 = sign`, `bit 1 = inline form` | ✅ | ✅ `--self-test` runtime check | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` + `--self-test` |
@@ -182,12 +182,12 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| EX-001 | encode `extension(subtype N, body)` → tag `0xD0 \| N`, body bytes | ❌ | ❌ | ❌ | ❌ |
-| EX-002 | decode preserves subtype and body bytes verbatim | ❌ | ❌ | ❌ | ❌ |
-| EX-003 | unknown sub-type id: parser does not error; surfaces as `Extension(id, bytes)` to caller | ❌ | ❌ | ❌ | ❌ |
-| EX-004 | extension as object child: enclosing key-lookup works without sub-type handler | ❌ | ❌ | ❌ | ❌ |
-| EX-005 | JSON emit of unknown extension produces `{"__pjson_ext": {...}}` envelope | ❌ | ❌ | ❌ | ❌ |
-| EX-006 | round-trip envelope: emit → parse → re-encode preserves subtype + bytes | ❌ | ❌ | ❌ | ❌ |
+| EX-001 | encode `extension(subtype N, body)` → tag `0xD0 \| N`, body bytes | ✅ | ✅ corpus `extension_subtype_{0_empty,5_small,15_max}` | ✅ | ✅ same |
+| EX-002 | decode preserves subtype and body bytes verbatim | ✅ | ✅ corpus `extension_subtype_*` | ✅ | ✅ same |
+| EX-003 | unknown sub-type id: parser does not error; surfaces as `Extension(id, bytes)` to caller | ✅ | ✅ corpus `extension_subtype_5_small` (no handler registered, decoded as opaque) | ✅ | ✅ same + `extension_round_trip_and_envelope` |
+| EX-004 | extension as object child: enclosing key-lookup works without sub-type handler | ✅ | ✅ corpus `extension_inside_object` | ✅ | ✅ same |
+| EX-005 | JSON emit of unknown extension produces `{"__pjson_ext": {...}}` envelope | ✅ | ✅ corpus `extension_subtype_*` (json_compact field) | ✅ | ✅ same + `extension_round_trip_and_envelope` |
+| EX-006 | round-trip envelope: emit → parse → re-encode preserves subtype + bytes | ✅ | ✅ corpus `json_ingress_extension_envelope` | ✅ | ✅ same |
 
 ## §5 — Containers
 
@@ -322,7 +322,7 @@ Tests cited in multiple rows are fine — one test can exercise several rules.
 
 | id | rule | C++ impl | C++ test | Rust impl | Rust test |
 |----|------|----------|----------|-----------|-----------|
-| V-001 | extension framework: unknown sub-type id does not error | ❌ | ❌ | ❌ | ❌ |
+| V-001 | extension framework: unknown sub-type id does not error | ✅ | ✅ corpus `extension_subtype_*` | ✅ | ✅ same |
 | V-002 | reserved codes (14, 15) reject without partial decode | ✅ | ✅ corpus `reserved_code_14_rejected` | ✅ | ✅ `reserved_codes_rejected` + corpus `reserved_code_14_rejected` |
 | V-003 | parse-fast-path predicate `(tag >> 4) >= 14` | ✅ | ✅ `--self-test` runtime check | ✅ | ✅ `tag_byte_predicates_match_spec_section_3` + `--self-test` |
 

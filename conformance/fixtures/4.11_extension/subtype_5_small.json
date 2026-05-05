@@ -1,0 +1,11 @@
+{
+  "id": "extension_subtype_5_small",
+  "spec_ref": "section 4.11",
+  "rule_ids": ["EX-001", "EX-002", "EX-003"],
+  "description": "Extension subtype=5 carrying a 3-byte opaque body 0x010203. Tag byte 0xD5 packs the subtype id in the low nibble; payload is consumed verbatim to end-of-buffer.",
+  "input_value": {"kind": "extension", "subtype": 5, "bytes_hex": "010203"},
+  "wire_hex": "d5010203",
+  "json_compact": "{\"__pjson_ext\":{\"subtype\":5,\"bytes_b64\":\"AQID\"}}",
+  "must_round_trip": true,
+  "must_validate": true
+}

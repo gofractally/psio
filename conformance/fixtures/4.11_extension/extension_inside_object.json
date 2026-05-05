@@ -1,0 +1,13 @@
+{
+  "id": "extension_inside_object",
+  "spec_ref": "section 4.11",
+  "rule_ids": ["EX-004"],
+  "description": "Extension as a field value inside an object. Verifies that key-lookup mechanics are unaffected by extension children — the parent decodes normally and the extension is preserved verbatim through round-trip.",
+  "input_value": {"kind": "object", "entries": [
+      {"key": "tag", "value": {"kind": "extension", "subtype": 7, "bytes_hex": "abcd"}}
+  ]},
+  "wire_hex": "c000746167d7abcdc200030100",
+  "json_compact": "{\"tag\":{\"__pjson_ext\":{\"subtype\":7,\"bytes_b64\":\"q80=\"}}}",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -1,0 +1,11 @@
+{
+  "id": "json_ingress_extension_envelope",
+  "spec_ref": "section 4.11 / section 7.1",
+  "rule_ids": ["EX-005", "EX-006"],
+  "description": "JSON ingress: a sole-key object {\"__pjson_ext\":{\"subtype\":N,\"bytes_b64\":\"...\"}} is recognized as the default extension envelope and round-trips through the binary form.",
+  "input_json": "{\"__pjson_ext\":{\"subtype\":5,\"bytes_b64\":\"AQID\"}}",
+  "wire_hex": "d5010203",
+  "json_compact": "{\"__pjson_ext\":{\"subtype\":5,\"bytes_b64\":\"AQID\"}}",
+  "must_round_trip": true,
+  "must_validate": true
+}

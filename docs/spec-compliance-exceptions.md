@@ -13,19 +13,20 @@ to ✅, the id is removed from this file.
 
 ## Status
 
-**Phase 1, all of Phase 2 (containers), and all of Phase 3 (string,
-bytes encoding hint, numeric_string, JSON ingress, emitter options)
-are sealed.** Cross-validation between Rust and C++ is byte-
-equivalent across every fixture (71/71 matches).
+**Phase 1, all of Phase 2 (containers), all of Phase 3 (string,
+bytes encoding hint, numeric_string, JSON ingress, emitter
+options), and Phase 4.1 (extension framework: T-014, V-001,
+EX-001..006) are sealed.** Cross-validation between Rust and C++ is
+byte-equivalent across every fixture (76/76 matches).
 
 Tally:
-- 134 rows ✅ on **both** Rust and C++.
+- 142 rows ✅ on **both** Rust and C++.
 - 11 rows ⚠️: F-008; AG-003/004/005; AT-012; H-005; O-004; O-006;
   RA-002/003; NS-002 (no dual-projection API); EM-003 (no
   indent=0/tab fixture); EM-008 (no float-with-int_string_mode
   fixture).
-- 30 rows ❌ — Phase 4 scope (extension framework + canonical
-  encoding rules).
+- 22 rows ❌ — Phase 4.2+ scope (canonical encoding rules + the
+  remaining JSON-side and limit bookkeeping).
 
 ---
 
@@ -39,11 +40,8 @@ any of these will fail loud rather than silently mishandle.
 C-001 C-002 C-003 C-004 C-005 C-006
 D-007
 E-006 E-007 E-008 E-009 E-010
-EX-001 EX-002 EX-003 EX-004 EX-005 EX-006
 J-001 J-002 J-003 J-004 J-005 J-006 J-007 J-010 J-011 J-012 J-013 J-014 J-015
 LIM-001 LIM-002 LIM-003 LIM-004 LIM-005 LIM-006
-T-014
-V-001
 E-002
 ```
 
@@ -53,8 +51,7 @@ E-002
 |--------|-------|------------------|
 | RA-*, T-013 partial | Phase 2.4 (row_array) | shared key block + per-record body layout |
 | NS-*, S-*, BY-*, J-*, EM-*, T-009..T-011 | Phase 3 (JSON-side) | numeric_string, string, bytes, JSON mappings, emitter options |
-| EX-*, T-014, V-001 | Phase 4 (extensibility) | extension framework |
-| C-*, F-008, D-007 | Phase 4/5 (canonical encoding) | canonical-form picker rules |
+| C-*, F-008, D-007 | Phase 4.2 / Phase 5 (canonical encoding) | canonical-form picker rules |
 | LIM-* | covered alongside the underlying types | (no separate work) |
 | E-002 | per-type as their phase lands | covered by the type-specific phases |
 | E-006..E-009 | container error paths — partly covered (slot OOB / monotonicity) | dedicated reject fixtures pending |

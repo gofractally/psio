@@ -138,6 +138,13 @@ struct NumericString {
    bool operator==(const NumericString& other) const;
 };
 
+// Extension (§4.11). Leaf type — opaque body, no recursion.
+struct Extension {
+   std::uint8_t              subtype{};   // 0..15
+   std::vector<std::uint8_t> bytes;       // opaque body
+   bool operator==(const Extension&) const = default;
+};
+
 // Object (§5.2) — recursive, like Array. ObjectBody is forward-
 // declared so the variant can be sized.
 struct ObjectBody;
@@ -156,7 +163,7 @@ struct RowArray {
 
 using Value = std::variant<Null, Bool, Uint, NegInt, Float, Decimal,
                             Array, TypedArray, Object, RowArray, String, Bytes,
-                            NumericString>;
+                            NumericString, Extension>;
 
 struct ArrayBody {
    std::vector<Value> children;
@@ -281,6 +288,32 @@ inline std::string b64url_encode(const std::vector<std::uint8_t>& bytes) {
       else if (c == '/') c = '_';
    }
    return s;
+}
+
+inline std::vector<std::uint8_t> b64_decode(std::string_view s) {
+   auto val = [](char c) -> int {
+      if ('A' <= c && c <= 'Z') return c - 'A';
+      if ('a' <= c && c <= 'z') return 26 + c - 'a';
+      if ('0' <= c && c <= '9') return 52 + c - '0';
+      if (c == '+') return 62;
+      if (c == '/') return 63;
+      return -1;
+   };
+   std::vector<std::uint8_t> out;
+   std::uint32_t buf = 0;
+   int bits = 0;
+   for (char c : s) {
+      if (c == '=' || c == ' ' || c == '\n' || c == '\t' || c == '\r') continue;
+      const int v = val(c);
+      if (v < 0) throw std::runtime_error{"b64_decode: invalid char"};
+      buf = (buf << 6) | static_cast<std::uint32_t>(v);
+      bits += 6;
+      if (bits >= 8) {
+         bits -= 8;
+         out.push_back(static_cast<std::uint8_t>((buf >> bits) & 0xFF));
+      }
+   }
+   return out;
 }
 
 inline std::string hex_encode(const std::vector<std::uint8_t>& bytes) {
@@ -669,6 +702,11 @@ static void encode_into(const Value& v, std::vector<std::uint8_t>& out) {
             throw EncodeError{"numeric_string inner must be numeric (codes 2..7)"};
          out.push_back(0x80);
          encode_into(arg.body->inner, out);
+      } else if constexpr (std::is_same_v<T, Extension>) {
+         if (arg.subtype > 15)
+            throw EncodeError{"extension subtype must be 0..15"};
+         out.push_back(static_cast<std::uint8_t>(0xD0 | arg.subtype));
+         out.insert(out.end(), arg.bytes.begin(), arg.bytes.end());
       } else if constexpr (std::is_same_v<T, RowArray>) {
          // §5.2.1 row_array.
          const auto& keys = arg.body ? arg.body->keys : std::vector<std::string>{};
@@ -920,7 +958,14 @@ static Value decode(std::span<const std::uint8_t> buf) {
             throw DecodeError{"numeric_string inner must be numeric (codes 2..7)"};
          return make_numeric_string(std::move(inner));
       }
-      case 13: throw DecodeError{"Phase ≥4: extension"};
+      case 13: {
+         // §4.11 extension. low_nibble = subtype id (0..15);
+         // remainder of buf is opaque body.
+         Extension e;
+         e.subtype = static_cast<std::uint8_t>(low);
+         e.bytes.assign(buf.begin() + 1, buf.end());
+         return e;
+      }
       case 14: case 15:
          throw DecodeError{std::string{"reserved tag 0x"} +
                            static_cast<char>("0123456789ABCDEF"[high]) + "0"};
@@ -1520,6 +1565,15 @@ static std::string render_json(const Value& v) {
          }
          s += "]";
          return s;
+      } else if constexpr (std::is_same_v<T, Extension>) {
+         // §4.11. Default JSON projection for an unknown extension is a
+         // self-describing envelope: {"__pjson_ext":{"subtype":N,"bytes_b64":"..."}}
+         std::string s = "{\"__pjson_ext\":{\"subtype\":";
+         s += std::to_string(static_cast<unsigned>(arg.subtype));
+         s += ",\"bytes_b64\":\"";
+         s += b64_encode(arg.bytes);
+         s += "\"}}";
+         return s;
       }
    }, v);
 }
@@ -1958,6 +2012,28 @@ static Value from_json_node(const JNode& n) {
       return make_array(std::move(children));
    }
    if (auto* obj = std::get_if<JObject>(&n.v)) {
+      // §4.11 envelope detection: a sole-key object {"__pjson_ext": {...}}
+      // round-trips back into an Extension.
+      if (obj->size() == 1 && (*obj)[0].first == "__pjson_ext") {
+         const JNode& inner = (*obj)[0].second;
+         if (auto* iobj = std::get_if<JObject>(&inner.v)) {
+            std::optional<std::int64_t> sub;
+            std::optional<std::string>  b64;
+            for (const auto& [ik, iv] : *iobj) {
+               if (ik == "subtype") {
+                  if (auto* p = std::get_if<std::int64_t>(&iv.v)) sub = *p;
+               } else if (ik == "bytes_b64") {
+                  if (auto* p = std::get_if<std::string>(&iv.v)) b64 = *p;
+               }
+            }
+            if (sub && b64 && *sub >= 0 && *sub <= 15) {
+               Extension e;
+               e.subtype = static_cast<std::uint8_t>(*sub);
+               e.bytes   = b64_decode(*b64);
+               return e;
+            }
+         }
+      }
       std::vector<std::pair<std::string, Value>> entries;
       entries.reserve(obj->size());
       for (const auto& [k, v] : *obj) {
@@ -2148,6 +2224,20 @@ static Value parse_value_from_json(const JNode& j) {
          entries.emplace_back(as_string(*k), parse_value_from_json(*v));
       }
       return make_object(std::move(entries));
+   }
+   if (kind == "extension") {
+      const auto* sub_node = obj_get(obj, "subtype");
+      if (!sub_node) throw std::runtime_error{"extension missing 'subtype'"};
+      std::int64_t sub = std::get<std::int64_t>(sub_node->v);
+      if (sub < 0 || sub > 15)
+         throw std::runtime_error{"extension subtype must be 0..15"};
+      const auto* bn = obj_get(obj, "bytes_hex");
+      std::vector<std::uint8_t> body;
+      if (bn) body = parse_hex(as_string(*bn));
+      Extension e;
+      e.subtype = static_cast<std::uint8_t>(sub);
+      e.bytes   = std::move(body);
+      return e;
    }
    if (kind == "numeric_string") {
       const auto* inner_node = obj_get(obj, "inner");
@@ -2543,8 +2633,8 @@ int main(int argc, char** argv) {
    if (mode == "--self-test") {
       return pjson_conformance::self_test();
    }
-   if (mode != "--check" && mode != "--xvalidate") {
-      std::fprintf(stderr, "usage: %s --check|--xvalidate < fixture.json\n",
+   if (mode != "--check" && mode != "--xvalidate" && mode != "--emit-wire") {
+      std::fprintf(stderr, "usage: %s --check|--xvalidate|--emit-wire < fixture.json\n",
                    argv[0]);
       return 2;
    }
@@ -2562,6 +2652,26 @@ int main(int argc, char** argv) {
       return 2;
    }
 
+   if (mode == "--emit-wire") {
+      // Authoring helper: encode the fixture's input_value (or input_json
+      // if input_value is absent) and print the wire bytes as hex.
+      try {
+         pjson_conformance::Value v;
+         if (f.input_value.has_value()) v = *f.input_value;
+         else if (f.input_json.has_value())
+            v = pjson_conformance::from_json(*f.input_json);
+         else {
+            std::fprintf(stderr, "--emit-wire: fixture has no input_value or input_json\n");
+            return 2;
+         }
+         auto wire = pjson_conformance::encode(v);
+         std::printf("%s\n", pjson_conformance::to_hex(wire).c_str());
+         return 0;
+      } catch (const std::exception& e) {
+         std::fprintf(stderr, "FAIL [%s]: %s\n", f.id.c_str(), e.what());
+         return 1;
+      }
+   }
    if (mode == "--check") {
       const std::string err = pjson_conformance::check(f);
       if (err.empty()) return 0;
