@@ -329,17 +329,29 @@ fn key_hash8(key: &str) -> u8 {
 
 /// §5.4 long-key escape — 2-bit-prefix variable-length **unsigned**
 /// integer (same byte-count tiers as varscale, no zigzag step).
+/// §4.7.1 varuint byte-tier table. Returns 1..=4 for in-range values
+/// or None for `value ≥ 2^30`. Single source of truth for both
+/// encoding and size estimation (e.g., D-007 picker's decimal_size).
+#[inline]
+fn varuint_byte_count(value: u32) -> Option<usize> {
+    if      value < (1u32 << 6)  { Some(1) }
+    else if value < (1u32 << 14) { Some(2) }
+    else if value < (1u32 << 22) { Some(3) }
+    else if value < (1u32 << 30) { Some(4) }
+    else                         { None }
+}
+
+/// §4.7.1 varscale (zigzag-then-varuint) byte-tier. None ⇒ out of
+/// representable range.
+#[inline]
+fn varscale_byte_count(scale: i32) -> Option<usize> {
+    varuint_byte_count(zigzag_encode_i32(scale))
+}
+
 fn varuint_encode_into(value: u32, out: &mut Vec<u8>) -> Result<(), EncodeError> {
-    let total_bytes = if value < (1u32 << 6) {
-        1
-    } else if value < (1u32 << 14) {
-        2
-    } else if value < (1u32 << 22) {
-        3
-    } else if value < (1u32 << 30) {
-        4
-    } else {
-        return Err(EncodeError::Overflow("varuint"));
+    let total_bytes = match varuint_byte_count(value) {
+        Some(n) => n,
+        None    => return Err(EncodeError::Overflow("varuint")),
     };
     let prefix = ((total_bytes - 1) as u8) << 6;
     let lo6 = (value & 0x3F) as u8;
@@ -478,12 +490,10 @@ fn decimal_or_ieee_pick(mantissa: i128, scale: i32) -> Value {
     // (1..16) + varscale (1..4).
     let zz = zigzag_encode_i128(mantissa);
     let m_bc = u128_minimal_byte_count(zz);
-    let scale_bc = match scale.unsigned_abs() {
-        0..=31           => 1,
-        32..=8191        => 2,
-        8192..=2_097_151 => 3,
-        _                => 4,
-    };
+    // Single source of truth: ask varscale how many bytes it would
+    // emit for `scale`. Out-of-range scale ⇒ encoding would fail
+    // anyway, so reporting a 5-byte upper bound is conservative.
+    let scale_bc = varscale_byte_count(scale).unwrap_or(5);
     let decimal_size = 1 + m_bc + scale_bc;
 
     // ieee_float candidate: try to construct an exact f64 for
@@ -525,18 +535,23 @@ fn decimal_to_f64_exact(mantissa: i128, scale: i32) -> Option<f64> {
     // Step 1 — factor m · 10^s as p · 2^q with p, q integers.
     //   s ≥ 0: p = m · 5^s, q = s
     //   s < 0: p = m / 5^|s| (exact division required), q = -|s|
+    // `scale.unsigned_abs()` is overflow-safe at i32::MIN (whereas
+    // `-scale as u32` would silently UB on that boundary).
     let (p, q): (i128, i32) = if scale >= 0 {
         let mut p = mantissa;
-        for _ in 0..scale { p = p.checked_mul(5)?; }
+        for _ in 0..scale.unsigned_abs() { p = p.checked_mul(5)?; }
         (p, scale)
     } else {
-        let s_abs = (-scale) as u32;
+        let s_abs: u32 = scale.unsigned_abs();
         let mut p = mantissa;
         for _ in 0..s_abs {
             if p % 5 != 0 { return None; }            // not dyadic
             p /= 5;
         }
-        (p, -(s_abs as i32))
+        // q = -s_abs; safe because s_abs ≤ 2^31 ≤ i32::MAX + 1 — but
+        // since scale was negative i32, s_abs ≤ -i32::MIN = 2^31, and
+        // -2^31 fits in i32.
+        (p, -(s_abs as i64) as i32)
     };
 
     // Step 2 — normalize p to exactly 53 significant bits so its high

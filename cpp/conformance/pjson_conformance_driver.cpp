@@ -789,7 +789,7 @@ canonical_float_width(std::uint8_t from_w, U128 bits) noexcept {
 // §4.7.2 / D-007 picker. Choose Decimal or ieee_float (smallest
 // width) for a JSON-source fractional, given its (mantissa, scale)
 // canonical form and the parsed double `f`. Tie → ieee.
-static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale, double f);
+static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale);
 
 static U128 read_u128_le(std::span<const std::uint8_t> bytes) {
    U128 v{};
@@ -842,13 +842,24 @@ static I128 zigzag_decode_u128(U128 z) noexcept {
 //   2 byte: 0..16383       (14-bit)
 //   3 byte: 0..4_194_303   (22-bit)
 //   4 byte: 0..1_073_741_823 (30-bit)
+// §4.7.1 varuint byte-tier table. Returns 0 for `value ≥ 2^30`
+// (out of range). Single source of truth for both encoding and size
+// estimation (e.g., D-007 picker's decimal_size).
+inline std::size_t varuint_byte_count(std::uint32_t value) noexcept {
+   if      (value < (1u <<  6)) return 1;
+   else if (value < (1u << 14)) return 2;
+   else if (value < (1u << 22)) return 3;
+   else if (value < (1u << 30)) return 4;
+   else                         return 0;
+}
+
+inline std::size_t varscale_byte_count(std::int32_t scale) noexcept {
+   return varuint_byte_count(zigzag_encode_i32(scale));
+}
+
 inline void varuint_encode(std::uint32_t value, std::vector<std::uint8_t>& out) {
-   std::uint32_t total_bytes;
-   if      (value < (1u <<  6)) total_bytes = 1;
-   else if (value < (1u << 14)) total_bytes = 2;
-   else if (value < (1u << 22)) total_bytes = 3;
-   else if (value < (1u << 30)) total_bytes = 4;
-   else throw EncodeError{"varuint overflow"};
+   const std::size_t total_bytes = varuint_byte_count(value);
+   if (total_bytes == 0) throw EncodeError{"varuint overflow"};
    out.push_back(static_cast<std::uint8_t>(((total_bytes - 1) << 6) | (value & 0x3F)));
    std::uint32_t shifted = value >> 6;
    for (std::uint32_t i = 1; i < total_bytes; ++i) {
@@ -2051,6 +2062,8 @@ decimal_to_f64_exact(I128 mantissa, std::int32_t scale) noexcept {
    __int128 p = (static_cast<__int128>(mantissa.hi) << 64)
               | static_cast<__int128>(mantissa.lo);
    std::int32_t q;
+   // Cast through int64_t to compute `|scale|` without invoking the
+   // signed-overflow that `-scale` would have at INT32_MIN.
    if (scale >= 0) {
       for (std::int32_t i = 0; i < scale; ++i) {
          __int128 prod;
@@ -2060,13 +2073,14 @@ decimal_to_f64_exact(I128 mantissa, std::int32_t scale) noexcept {
       }
       q = scale;
    } else {
-      const std::uint32_t s_abs = static_cast<std::uint32_t>(-scale);
+      const std::int64_t s_abs64 = -static_cast<std::int64_t>(scale);
+      const std::uint32_t s_abs = static_cast<std::uint32_t>(s_abs64);
       for (std::uint32_t i = 0; i < s_abs; ++i) {
          // Exact integer division by 5.
          if (p % 5 != 0) return std::nullopt;
          p /= 5;
       }
-      q = -static_cast<std::int32_t>(s_abs);
+      q = static_cast<std::int32_t>(-s_abs64);
    }
 
    // Step 2 — normalize |p| to exactly 53 significant bits.
@@ -2096,18 +2110,16 @@ decimal_to_f64_exact(I128 mantissa, std::int32_t scale) noexcept {
    return f;
 }
 
-static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale, double /*f_unused*/) {
+static Value decimal_or_ieee_pick(I128 mantissa, std::int32_t scale) {
    // Decimal candidate size: tag (1) + zigzag mantissa minimal bytes
    // + varscale (1..4).
    const auto zz = zigzag_encode_i128(mantissa);
    const std::size_t m_bc = u128_minimal_byte_count(zz);
-   const std::uint32_t abs_scale = static_cast<std::uint32_t>(
-      scale < 0 ? -static_cast<std::int64_t>(scale) : scale);
-   const std::size_t scale_bc =
-        (abs_scale <=          31u) ? 1
-      : (abs_scale <=        8191u) ? 2
-      : (abs_scale <=    2'097'151u) ? 3
-      :                                4;
+   // Single source of truth: ask varscale how many bytes it would
+   // emit for `scale`. 0 ⇒ out of range; encoding would fail anyway,
+   // so reporting 5 (one over the max) is a conservative upper bound.
+   const std::size_t scale_bc_raw = varscale_byte_count(scale);
+   const std::size_t scale_bc = (scale_bc_raw == 0) ? 5 : scale_bc_raw;
    const std::size_t decimal_size = 1 + m_bc + scale_bc;
 
    // Try to construct an exact f64 representation. None ⇒ no f64
@@ -2473,19 +2485,18 @@ static Value from_json_node(const JNode& n) {
       // token so the canonical-form decimal candidate is available.
       // Falls back to width-minimizing ieee_float when the token is
       // not in canonical decimal form (e.g., sci-notation).
+      //
+      // `parse_canonical_json_number_string` contract: when it returns
+      // true, mant_str is a digit-only string and scale is the
+      // negated frac-length. We trust that contract here.
       std::string mant_str;
       std::int32_t scale = 0;
-      if (parse_canonical_json_number_string(jf->token, mant_str, scale)
-          && mant_str.find('.') == std::string::npos
-          && mant_str.find('e') == std::string::npos) {
-         // Got a canonical (mantissa_str, scale). Build Decimal candidate
-         // and run the picker.
+      if (parse_canonical_json_number_string(jf->token, mant_str, scale)) {
          Value dec_v = canonical_string_to_numeric(mant_str, scale);
          if (auto* dec = std::get_if<Decimal>(&dec_v)) {
-            return decimal_or_ieee_pick(dec->mantissa, dec->scale, jf->f);
+            return decimal_or_ieee_pick(dec->mantissa, dec->scale);
          }
-         // Integer-valued canonical (no fractional, no scale<0): just
-         // return the integer.
+         // Integer-valued canonical (scale == 0): return the integer.
          return dec_v;
       }
       // Non-canonical token (sci-notation, etc.) — minimize ieee width.
