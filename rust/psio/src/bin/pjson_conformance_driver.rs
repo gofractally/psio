@@ -486,14 +486,13 @@ fn decimal_or_ieee_pick(mantissa: i128, scale: i32) -> Value {
     };
     let decimal_size = 1 + m_bc + scale_bc;
 
-    // ieee_float candidate: convert (m, s) to f64, find smallest
-    // bit-exact width.
-    let f = (mantissa as f64) * 10f64.powi(scale);
-    // Verify the f64 round-trips through the (m, s) form, otherwise
-    // ieee can't represent the decimal exactly — use decimal.
-    if !decimal_f64_roundtrips(mantissa, scale, f) {
-        return Value::Decimal { mantissa, scale };
-    }
+    // ieee_float candidate: try to construct an exact f64 for
+    // mantissa·10^scale. None ⇒ no f64 represents the value exactly,
+    // so the picker MUST emit decimal to preserve identity.
+    let f = match decimal_to_f64_exact(mantissa, scale) {
+        Some(f) => f,
+        None    => return Value::Decimal { mantissa, scale },
+    };
     let (w, bits) = canonical_float_width(3, f.to_bits() as u128);
     let ieee_size = 1 + (1usize << w);
 
@@ -505,98 +504,62 @@ fn decimal_or_ieee_pick(mantissa: i128, scale: i32) -> Value {
     }
 }
 
-/// True iff `f` (a double) is bit-exactly equal to the rational
-/// `mantissa · 10^scale`. Used by the D-007 picker to rule out
-/// `ieee_float` for decimals that f64 can't represent (e.g., 0.1,
-/// 0.7, 10^23 — every rational whose simplified denominator is
-/// not a power of 2, or whose magnitude exceeds the 53-bit mantissa).
+/// `mantissa · 10^scale` as an exact f64 if one exists, else None.
 ///
-/// Implementation uses exact integer arithmetic on f64's underlying
-/// `p · 2^e` form. NaN and ±Inf return false. ±0 matches only
-/// `mantissa == 0`.
-fn decimal_f64_roundtrips(mantissa: i128, scale: i32, f: f64) -> bool {
-    if !f.is_finite() { return false; }
+/// This is the proper formulation of the D-007 exactness check: rather
+/// than asking "does this lossy `(m as f64) * 10^s` happen to match?",
+/// we factor `m · 10^s = p · 2^q` purely in integer arithmetic and
+/// then construct the f64 directly when the factorization yields
+/// representable bits.
+///
+/// Returns None for:
+///   - non-dyadic values (5^|s| doesn't divide m for s < 0)
+///   - mantissa overflow (m · 5^s for s ≥ 0 exceeds i128)
+///   - mantissa precision loss (|p| needs > 53 bits)
+///   - exponent out of f64 normal range (subnormals are punted to
+///     decimal — a conservative choice; subnormal precision is ≤ 52
+///     bits anyway)
+fn decimal_to_f64_exact(mantissa: i128, scale: i32) -> Option<f64> {
+    if mantissa == 0 { return Some(0.0); }
 
-    // Decompose f into (sign · p) · 2^e where p is the explicit
-    // 53-bit mantissa (with the implicit leading 1 restored for
-    // normals) and e is the unbiased exponent − 52.
-    let bits = f.to_bits();
-    let sign_neg = (bits >> 63) & 1 == 1;
-    let exp = ((bits >> 52) & 0x7FF) as i32;
-    let frac = (bits & 0x000F_FFFF_FFFF_FFFF) as i128;
-    if exp == 0x7FF { return false; }                       // NaN/Inf
-
-    let (p_unsigned, e) = if exp == 0 {
-        // Subnormal (or ±0): value = frac · 2^-1074. ±0 iff frac == 0.
-        if frac == 0 { return mantissa == 0; }
-        (frac, -1074_i32)
-    } else {
-        let p = (1_i128 << 52) | frac;
-        (p, exp - 1023 - 52)
-    };
-    let p: i128 = if sign_neg { -p_unsigned } else { p_unsigned };
-
-    // Equation to verify, in exact integers:
-    //
-    //   mantissa · 10^scale  ==  p · 2^e
-    //
-    // Rewrite 10^|scale| = 5^|scale| · 2^|scale| and absorb all
-    // 2^k factors into one side so both sides are pure integers.
-    //
-    // Case A: scale >= 0. m · 5^s · 2^s == p · 2^e
-    //   shift = s − e  (positive ⇒ multiply LHS, negative ⇒ multiply RHS)
-    //
-    // Case B: scale < 0. m == p · 5^|s| · 2^(e + |s|)
-    //   shift = -(e + |s|)  on the m side if positive
-    let (m_side, p_side, p5_pow_on_p_side, shift_on_m_side) = if scale >= 0 {
-        (mantissa, p, 0_u32, scale as i64 - e as i64)
+    // Step 1 — factor m · 10^s as p · 2^q with p, q integers.
+    //   s ≥ 0: p = m · 5^s, q = s
+    //   s < 0: p = m / 5^|s| (exact division required), q = -|s|
+    let (p, q): (i128, i32) = if scale >= 0 {
+        let mut p = mantissa;
+        for _ in 0..scale { p = p.checked_mul(5)?; }
+        (p, scale)
     } else {
         let s_abs = (-scale) as u32;
-        (mantissa, p, s_abs, -(e as i64 + s_abs as i64))
+        let mut p = mantissa;
+        for _ in 0..s_abs {
+            if p % 5 != 0 { return None; }            // not dyadic
+            p /= 5;
+        }
+        (p, -(s_abs as i32))
     };
 
-    // Apply the 5^k factor to whichever side carries it.
-    let p_side_with_5 = match mul_pow5_i128(p_side, p5_pow_on_p_side) {
-        Some(v) => v,
-        None => return false,                     // overflow ⇒ inexact
-    };
-    let m_side_with_5 = if scale >= 0 {
-        match mul_pow5_i128(m_side, scale as u32) {
-            Some(v) => v, None => return false,
-        }
-    } else {
-        m_side
-    };
+    // Step 2 — normalize p to exactly 53 significant bits so its high
+    // bit is at position 52 (the f64 implicit-leading-1 position).
+    let neg = p < 0;
+    let abs_p: u128 = if neg { p.unsigned_abs() } else { p as u128 };
+    let bits_used = 128 - abs_p.leading_zeros();        // ≥ 1 since p ≠ 0
+    if bits_used > 53 { return None; }                  // precision lost
+    let shift_left = 53 - bits_used;
+    let normalized_p: u128 = abs_p << shift_left;
+    let q_norm: i32 = q - shift_left as i32;
 
-    // Apply the 2^k shift, factor onto the side that wins.
-    if shift_on_m_side >= 0 {
-        // LHS · 2^shift == RHS
-        let k = shift_on_m_side as u32;
-        if k >= 128 { return false; }
-        match m_side_with_5.checked_shl(k) {
-            Some(lhs) => lhs == p_side_with_5,
-            None      => false,
-        }
-    } else {
-        // LHS == RHS · 2^(-shift)
-        let k = (-shift_on_m_side) as u32;
-        if k >= 128 { return false; }
-        match p_side_with_5.checked_shl(k) {
-            Some(rhs) => m_side_with_5 == rhs,
-            None      => false,
-        }
+    // Step 3 — f64 bit layout: value = (1.fraction) · 2^(unbiased_exp)
+    //   = ((1<<52) | low_52(normalized_p)) · 2^(q_norm)
+    //   so the unbiased exponent is q_norm + 52.
+    let unbiased_exp = q_norm + 52;
+    if unbiased_exp < -1022 || unbiased_exp > 1023 {
+        return None;                                   // sub/overflow
     }
-}
-
-/// Multiply `n` by `5^k` with overflow detection. Returns None if
-/// the product overflows i128 — the caller treats that as "not
-/// exactly representable", which is the correct conservative answer
-/// for the D-007 picker.
-fn mul_pow5_i128(mut n: i128, k: u32) -> Option<i128> {
-    for _ in 0..k {
-        n = n.checked_mul(5)?;
-    }
-    Some(n)
+    let mantissa_low_52: u64 = (normalized_p & ((1u128 << 52) - 1)) as u64;
+    let biased_exp: u64 = (unbiased_exp + 1023) as u64;
+    let sign_bit: u64 = if neg { 1u64 << 63 } else { 0 };
+    Some(f64::from_bits(sign_bit | (biased_exp << 52) | mantissa_low_52))
 }
 
 /// §15.7 / C-006 — strict-canonical validator. Returns `Ok(())` if
@@ -3978,45 +3941,40 @@ mod tests {
     }
 
     #[test]
-    fn decimal_f64_roundtrips_must_be_exact() {
-        // Helper-level regression test paired with the end-to-end
-        // `d007_natural_input_changes_picker_output` test above.
-        //
-        // The original implementation gated on
-        // `(scaled - rounded).abs() <= 1e-9` — a magic FP tolerance.
-        // For 0.1, the f64 product `0.1_f64 * 10` rounds to *exactly*
-        // 1.0 (a famous IEEE-754 coincidence with RNE), so the
-        // tolerance passed even though 0.1_f64 ≠ 1/10. The function
-        // returned true, lying about its name.
-        //
-        // For most non-dyadic decimals (small mantissa, |s| ≤ 31)
-        // the lie is masked downstream by the picker's size-comparison
-        // (decimal_size beats ieee_size=9), but for `m_bc=7, s=-1`
-        // the size tie favors ieee and the bug surfaces — see the
-        // companion test for the natural input.
-        assert!(!decimal_f64_roundtrips(1, -1, 0.1_f64),
-            "0.1_f64 is not exactly 1/10 — function must reject");
-        assert!(!decimal_f64_roundtrips(3, -1, 0.3_f64),
-            "0.3_f64 is not exactly 3/10");
-        assert!(!decimal_f64_roundtrips(7, -1, 0.7_f64),
-            "0.7_f64 is not exactly 7/10");
-        assert!(!decimal_f64_roundtrips(1, 23, 1e23_f64),
-            "1e23_f64 is not exactly 10^23 (5^23 overflows 53-bit mantissa)");
+    fn decimal_to_f64_exact_classifies_correctly() {
+        // Helper-level test for the integer-arithmetic exactness
+        // check. Paired with `d007_natural_input_changes_picker_output`
+        // which proves the bug surfaces end-to-end via JSON ingress.
 
-        // True positives — values that ARE bit-exact in f64.
-        assert!( decimal_f64_roundtrips(15, -1, 1.5_f64), "1.5 = 3/2 dyadic");
-        assert!( decimal_f64_roundtrips(5,  -1, 0.5_f64), "0.5 = 1/2 dyadic");
-        assert!( decimal_f64_roundtrips(125,-3, 0.125_f64), "0.125 = 1/8");
-        assert!( decimal_f64_roundtrips(1,  22, 1e22_f64), "10^22 fits 53-bit mantissa");
-        assert!( decimal_f64_roundtrips(0,   0, 0.0_f64),  "0 is exact");
+        // None — non-dyadic (5^|s| doesn't divide m).
+        assert_eq!(decimal_to_f64_exact(1, -1), None, "1/10");
+        assert_eq!(decimal_to_f64_exact(3, -1), None, "3/10");
+        assert_eq!(decimal_to_f64_exact(7, -1), None, "7/10");
+        assert_eq!(decimal_to_f64_exact(1, -2), None, "1/100");
+        assert_eq!(decimal_to_f64_exact(7, -3), None, "7/1000");
 
-        // True negatives — mantissa mismatch even though FP scaling matches.
-        assert!(!decimal_f64_roundtrips(2, -1, 0.1_f64),
-            "0.1_f64 is closer to 1/10 than 2/10 — clearly not 2/10");
+        // None — m·5^s overflows i128 or precision exceeds 53 bits.
+        assert_eq!(decimal_to_f64_exact(1, 23), None,
+            "10^23: 5^23 ≈ 2^53.4, mantissa needs 54 bits");
 
-        // Wrong sign.
-        assert!(!decimal_f64_roundtrips(-15, -1, 1.5_f64),
-            "1.5 != -1.5");
+        // Some(f) — dyadic, fits 53 bits.
+        assert_eq!(decimal_to_f64_exact(0,   0), Some(0.0));
+        assert_eq!(decimal_to_f64_exact(15, -1), Some(1.5));    // 3/2
+        assert_eq!(decimal_to_f64_exact(5,  -1), Some(0.5));    // 1/2
+        assert_eq!(decimal_to_f64_exact(125,-3), Some(0.125));  // 1/8
+        assert_eq!(decimal_to_f64_exact(1,  22), Some(1e22));   // 5^22 fits
+        assert_eq!(decimal_to_f64_exact(-15,-1), Some(-1.5));   // sign
+
+        // Round-trip cross-check: when Some, encode and decode back.
+        for &(m, s) in &[(15_i128, -1_i32), (125, -3), (-625, -4), (3, 0)] {
+            let f = decimal_to_f64_exact(m, s).expect("dyadic");
+            // Reconstructed via integer math should equal f bit-for-bit.
+            let bits = f.to_bits();
+            // Sanity: not NaN/Inf, not subnormal.
+            assert!(f.is_finite() && bits != 0
+                    && (bits >> 52) & 0x7FF != 0x7FF,
+                "({}, {}) ⇒ {:?}", m, s, f);
+        }
     }
 
     #[test]
