@@ -1,0 +1,11 @@
+{
+  "id": "uint_u64_max",
+  "spec_ref": "§4.5",
+  "rule_ids": ["U-001", "U-002", "U-007"],
+  "description": "u64::MAX = 18446744073709551615 needs bc=8; tag 0x47 + 8 bytes 0xFF",
+  "input_value": {"kind": "uint", "value": "18446744073709551615"},
+  "wire_hex": "47ffffffffffffffff",
+  "json_compact": "18446744073709551615",
+  "must_round_trip": true,
+  "must_validate": true
+}

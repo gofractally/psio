@@ -1,0 +1,10 @@
+{
+  "id": "ieee_float_bit3_set_reserved",
+  "spec_ref": "§4.6",
+  "rule_ids": ["F-005", "E-012"],
+  "description": "ieee_float low_nibble bit 3 set (0x6B) is reserved (formerly sci-source hint)",
+  "input_value": null,
+  "wire_hex": "6b000000000000f03f",
+  "must_reject": true,
+  "reject_reason": "ieee_float_bit3"
+}

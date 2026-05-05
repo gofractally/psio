@@ -1,0 +1,11 @@
+{
+  "id": "negint_minus_16",
+  "spec_ref": "§4.5",
+  "rule_ids": ["U-003", "U-004"],
+  "description": "-16 is the smallest magnitude that escapes nint_inline; tag 0x50 + 0x10",
+  "input_value": {"kind": "int", "value": -16},
+  "wire_hex": "5010",
+  "json_compact": "-16",
+  "must_round_trip": true,
+  "must_validate": true
+}

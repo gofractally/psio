@@ -22,7 +22,7 @@ readonly REJECT_DIR="${REPO_ROOT}/conformance/fixtures-reject"
 
 # Driver binaries — built by Phase 1.
 readonly CPP_DRIVER="${REPO_ROOT}/cpp/build/conformance/pjson_conformance_driver"
-readonly RUST_DRIVER="${REPO_ROOT}/rust/psio/target/release/pjson_conformance_driver"
+readonly RUST_DRIVER="${REPO_ROOT}/rust/target/release/pjson_conformance_driver"
 
 lang="both"
 filter="*"

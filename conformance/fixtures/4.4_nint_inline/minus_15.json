@@ -1,0 +1,11 @@
+{
+  "id": "nint_inline_minus_15",
+  "spec_ref": "§4.4",
+  "rule_ids": ["NI-001", "NI-002", "NI-004"],
+  "description": "-15 encodes as 0x3F (max nint_inline magnitude)",
+  "input_value": {"kind": "int", "value": -15},
+  "wire_hex": "3f",
+  "json_compact": "-15",
+  "must_round_trip": true,
+  "must_validate": true
+}

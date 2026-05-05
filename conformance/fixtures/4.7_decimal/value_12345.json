@@ -1,0 +1,11 @@
+{
+  "id": "decimal_12345",
+  "spec_ref": "§4.7",
+  "rule_ids": ["D-001", "D-002"],
+  "description": "decimal 12345 (scale 0); zigzag(12345)=24690=0x6072 (bc=2), varscale(0)=0 (1-byte 0x00); tag 0x71 + 72 60 + 00",
+  "input_value": {"kind": "decimal", "mantissa": "12345", "scale": 0},
+  "wire_hex": "71726000",
+  "json_compact": "12345",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -1,0 +1,11 @@
+{
+  "id": "ieee_float_f64_one",
+  "spec_ref": "§4.6",
+  "rule_ids": ["F-003"],
+  "description": "f64 1.0 = 0x3FF0000000000000 → tag 0x63 + LE bytes 00 00 00 00 00 00 F0 3F",
+  "input_value": {"kind": "float", "width": 64, "bits_hex": "0x3FF0000000000000"},
+  "wire_hex": "63000000000000f03f",
+  "json_compact": "1",
+  "must_round_trip": true,
+  "must_validate": true
+}

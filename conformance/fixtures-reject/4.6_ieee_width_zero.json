@@ -1,0 +1,10 @@
+{
+  "id": "ieee_float_width_zero_reserved",
+  "spec_ref": "§4.6",
+  "rule_ids": ["F-006", "E-012"],
+  "description": "ieee_float width selector 0 (0x60) is reserved",
+  "input_value": null,
+  "wire_hex": "60",
+  "must_reject": true,
+  "reject_reason": "ieee_float_width"
+}

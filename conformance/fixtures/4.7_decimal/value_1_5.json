@@ -1,0 +1,11 @@
+{
+  "id": "decimal_one_point_five",
+  "spec_ref": "§4.7",
+  "rule_ids": ["D-001", "D-002"],
+  "description": "1.5 = 15 × 10^-1; mantissa zigzag(15)=30=0x1E (bc=1), varscale(-1)=zigzag(-1)=1 (1-byte form: 0x01); tag 0x70 + 1E + 01",
+  "input_value": {"kind": "decimal", "mantissa": "15", "scale": -1},
+  "wire_hex": "701e01",
+  "json_compact": "1.5",
+  "must_round_trip": true,
+  "must_validate": true
+}

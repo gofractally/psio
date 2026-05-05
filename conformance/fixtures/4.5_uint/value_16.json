@@ -1,0 +1,11 @@
+{
+  "id": "uint_16_smallest_full",
+  "spec_ref": "§4.5",
+  "rule_ids": ["U-001", "U-002"],
+  "description": "16 is the smallest value that escapes uint_inline; encodes as uint with bc=1",
+  "input_value": {"kind": "uint", "value": 16},
+  "wire_hex": "4010",
+  "json_compact": "16",
+  "must_round_trip": true,
+  "must_validate": true
+}

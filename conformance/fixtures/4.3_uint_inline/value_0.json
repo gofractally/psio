@@ -1,0 +1,11 @@
+{
+  "id": "uint_inline_0",
+  "spec_ref": "§4.3",
+  "rule_ids": ["UI-001", "UI-002"],
+  "description": "uint 0 encodes as 0x20 via uint_inline",
+  "input_value": {"kind": "uint", "value": 0},
+  "wire_hex": "20",
+  "json_compact": "0",
+  "must_round_trip": true,
+  "must_validate": true
+}

@@ -1,0 +1,11 @@
+{
+  "id": "ieee_float_f32_one",
+  "spec_ref": "§4.6",
+  "rule_ids": ["F-002"],
+  "description": "f32 1.0 = 0x3F800000 → tag 0x62 + LE bytes 00 00 80 3F",
+  "input_value": {"kind": "float", "width": 32, "bits_hex": "0x3F800000"},
+  "wire_hex": "620000803f",
+  "json_compact": "1",
+  "must_round_trip": true,
+  "must_validate": true
+}

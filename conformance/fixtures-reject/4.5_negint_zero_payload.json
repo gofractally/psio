@@ -1,0 +1,11 @@
+{
+  "id": "negint_zero_payload_reserved",
+  "spec_ref": "§4.5",
+  "rule_ids": ["U-005", "E-004"],
+  "description": "negint with all-zero payload (0x50 0x00) is reserved; decoder must reject",
+  "input_value": null,
+  "wire_hex": "5000",
+  "must_reject": true,
+  "reject_reason": "negint_zero_payload",
+  "must_validate": false
+}

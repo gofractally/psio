@@ -8,6 +8,15 @@ license = "MIT"
 [lib]
 path = "src/lib.rs"
 
+# Spec-conformance driver — self-contained reference implementation
+# of the pjson v1 spec (docs/pjson-spec.md). Reads a fixture JSON on
+# stdin, produces conformance verdicts. Has no dependency on the
+# pre-audit pjson library code; once Phase 1+ stabilizes, the library
+# will be migrated to use this implementation as its kernel.
+[[bin]]
+name = "pjson_conformance_driver"
+path = "src/bin/pjson_conformance_driver.rs"
+
 [dependencies]
 custom_error = "1.9.2"
 hex = "0.3.1"
