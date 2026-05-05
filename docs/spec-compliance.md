@@ -10,6 +10,84 @@ has a row here, and every row's cells must be one of:
 | ⚠️ | implemented but no dedicated test (must not stay across a release) |
 | ❌ | not implemented (must appear in `spec-compliance-exceptions.md` with a reason) |
 
+## What "✅" means today vs the end-state
+
+A ✅ in this matrix means **a spec-conformant reference implementation
+exists and is tested**. Today many ✅ rows point at code in
+`cpp/conformance/pjson_conformance_driver.cpp` and
+`rust/psio/src/bin/pjson_conformance_driver.rs` — the conformance
+drivers, which are intentionally self-contained reference impls.
+
+**The end-state is that those checkmarks point at the public psio
+library API** — the format-tagged CPOs from `docs/psio-overview.md`
+§2.4 with policy parameterization:
+
+```
+// runtime policy (caller passes a value)
+encode<F, T>(value, policy) -> bytes
+decode<F, T>(bytes) -> T
+validate<F, T>(bytes, policy) -> ok | error
+
+// compile-time policy (zero-cost when policy is statically known)
+encode<F, T, P>(value) -> bytes
+validate<F, T, P>(bytes) -> ok | error
+```
+
+dispatched on the format tag `F` (`Pjson`, `Pssz`, `Fracpack`, …)
+and the validation/encoding policy `P` (`DefaultSafe`,
+`StrictCanonical`, `JustDontCrash`, or a runtime-built struct).
+The conformance drivers become thin consumers that exercise the lib
+through these CPOs.
+
+The `<F, T, P>(bytes)` shape lets callers with a known policy at
+compile time get monomorphized fast paths; the `<F, T>(bytes,
+policy)` shape lets callers parameterize at runtime (CLI flags,
+config). Both forms are part of the approved API.
+
+### Library API status (pjson)
+
+| component | reference driver | psio library | status |
+|-----------|------------------|--------------|--------|
+| `psio::pjson::encode(value)` | ✅ | ✅ live | matches §2.4 `encode<Pjson>` |
+| `psio::pjson::decode(bytes)` | ✅ | ✅ live | matches §2.4 `decode<Pjson>` |
+| `psio::pjson::validate(bytes)` | ✅ | ✅ live (no policy param) | concrete impl that the §2.4 CPO will call once wired |
+| `psio::ValidationPolicy` trait + `DefaultSafe` / `StrictCanonical` / `JustDontCrash` preset types | n/a | ❌ not yet defined | needed before policy can be threaded |
+| Format-tagged CPO dispatch (`encode<F, T, P>` / `validate<F, T, P>` etc. at crate root) | n/a | ❌ not yet wired | pending Format trait + policy trait |
+| Canonicalizing encoder (C-002, F-008, etc.) | ✅ in driver | ❌ pending kernel migration | reference-only |
+| Strict-canonical validator (C-006) | ✅ in driver as `validate_canonical` | ❌ pending kernel migration; will live as the `P = StrictCanonical` body of `validate<Pjson, T, P>` | reference-only |
+| Width minimization helpers (`canonical_float_width`, `f64_to_f16_exact`, `f128_bits_to_f64_exact`) | ✅ in driver | ❌ pending kernel migration | reference-only |
+| Decimal-vs-ieee picker (D-007) | ✅ in driver (JSON ingress) | ❌ pending kernel migration | reference-only |
+| NaN canonicalization (`canonicalize_nan_bits`) | ✅ in driver | ❌ pending kernel migration | reference-only |
+| `decimal_to_f64_exact` (D-007 internals) | ✅ in driver | ❌ pending kernel migration | reference-only |
+| Dual-projection (NS-002): `numeric_string_as_numeric` / `_as_string` | ✅ helpers in driver, unit-tested | ❌ not in lib | reference-only |
+| Random-access (RA-002): `row_array_get` | ✅ helper in driver, unit-tested | ❌ not in lib | reference-only |
+| C++ counterpart of the lib API | ✅ in `cpp/conformance/...` | ❌ pending kernel migration | reference-only |
+
+The "reference-only" rows have spec-conformant implementations
+that real downstream callers can't link against. The migration plan
+in dependency order:
+
+1. **Define the `ValidationPolicy` trait + preset types** (`DefaultSafe`,
+   `StrictCanonical`, `JustDontCrash`) in `psio` crate root. Trait
+   carries the spec's per-flag bool table (E-002 enumeration);
+   presets are zero-sized types implementing it via associated
+   constants — this is what enables both the `<F, T, P>(bytes)`
+   compile-time shape and the `<F, T>(bytes, policy)` runtime shape
+   from a single CPO body.
+2. **Land the `Format` trait + format-tagged CPO dispatch** at the
+   crate root: `pub fn validate<F: Format, T, P: ValidationPolicy>(...)`.
+   Per-format modules provide `impl Format for Pjson { fn validate(...) }`.
+3. **Migrate the canonical-encoder kernel** (NaN canonicalization,
+   width minimization, decimal-vs-ieee picker, slot-width
+   minimization, mantissa trim) from the conformance drivers into
+   `psio::pjson`. Wire it into the `P = StrictCanonical` branch of
+   `Pjson::validate` and `Pjson::encode`.
+4. **Refactor the conformance drivers** to call the lib API instead
+   of their parallel implementations.
+5. **Mirror in C++** — same shape: `<psio/format.h>` for the format
+   tag, `<psio/policy.h>` for `ValidationPolicy`, `<psio/pjson.h>`
+   for the per-format impl.
+
 ## How this file is enforced
 
 - `tools/check-compliance.sh` parses this file and verifies that every
