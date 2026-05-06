@@ -18,8 +18,8 @@
 //! This module provides the building blocks; the per-type views
 //! (with named accessors) are emitted by the `pjson_struct!` macro.
 
-use crate::pjson::{key_hash8, obj_form, tag, PjsonError, PjsonResult};
-use crate::pjson_view::View;
+use crate::pjson_legacy::{key_hash8, obj_form, tag, PjsonError, PjsonResult};
+use crate::pjson_legacy_view::View;
 
 /// Type-erased canonical typed view. Holds a slice into the
 /// underlying buffer and a "field index" pointing at the slot table.
@@ -201,7 +201,7 @@ pub fn read_canonical_field<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pjson::{encode, Value};
+    use crate::pjson_legacy::{encode, Value};
 
     #[test]
     fn typed_view_basic() {
@@ -250,4 +250,4 @@ mod tests {
 }
 
 // Re-export helpers used by the derive macro.
-pub use crate::pjson::key_hash8 as derive_key_hash8;
+pub use crate::pjson_legacy::key_hash8 as derive_key_hash8;

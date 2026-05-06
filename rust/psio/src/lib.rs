@@ -53,12 +53,12 @@ pub mod dynamic_schema;
 // Multi-format wire formats
 pub mod capnp;
 pub mod flatbuf;
-pub mod pjson;
+pub mod pjson_legacy;
 #[macro_use]
-pub mod pjson_derive;
-pub mod pjson_view;
-pub mod pjson_typed;
-pub mod pjson_json;
+pub mod pjson_legacy_derive;
+pub mod pjson_legacy_view;
+pub mod pjson_legacy_typed;
+pub mod pjson_legacy_json;
 pub mod pssz;
 #[macro_use]
 pub mod pssz_derive;
@@ -77,7 +77,7 @@ mod cross_validation_tests;
 // byte-identity comparisons against C++ output (placeholders until
 // the sibling pjson-impl-conformance branch lands).
 #[cfg(test)]
-mod pjson_cross_validation_tests;
+mod pjson_legacy_cross_validation_tests;
 
 // Ethereum Phase-0 BeaconState types (Rust port of beacon_types.hpp)
 pub mod beacon_types;

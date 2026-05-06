@@ -9,7 +9,7 @@
 //! For canonical-typed access (memcmp + indexed offsets) see
 //! `pjson_typed::TypedView`.
 
-use crate::pjson::{
+use crate::pjson_legacy::{
     key_hash8, obj_form, parse_value, read_varuint, tag, typed_array_elem_size, PjsonError,
     PjsonResult, Value,
 };
@@ -420,7 +420,7 @@ pub fn view_of(buf: &[u8]) -> View<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pjson::{encode, str_flag, Value};
+    use crate::pjson_legacy::{encode, str_flag, Value};
 
     fn pjson_for(v: &Value<'_>) -> Vec<u8> {
         let mut out = vec![];
@@ -453,10 +453,10 @@ mod tests {
     #[test]
     fn view_typed_array() {
         let v: Vec<i32> = vec![-1, 0, 1, 100, 1000];
-        let buf = crate::pjson::to_pjson(&v);
+        let buf = crate::pjson_legacy::to_pjson(&v);
         let view = View::new(&buf);
         assert!(view.is_typed_array());
-        assert_eq!(view.typed_array_code().unwrap(), crate::pjson::tac::I32);
+        assert_eq!(view.typed_array_code().unwrap(), crate::pjson_legacy::tac::I32);
         assert_eq!(view.array_len().unwrap(), 5);
         let bytes = view.typed_array_bytes().unwrap();
         assert_eq!(bytes.len(), 20);

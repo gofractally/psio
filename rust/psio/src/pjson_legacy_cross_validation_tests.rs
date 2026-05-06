@@ -13,7 +13,7 @@
 //! constants below were dumped from a small C++ harness against the
 //! pjson_typed.hpp encoder on commit 851bea1 / merged in 9a272ae.
 
-use crate::pjson::{from_pjson, to_pjson, Pjson};
+use crate::pjson_legacy::{from_pjson, to_pjson, Pjson};
 
 // ── Appendix C shapes ──────────────────────────────────────────────────────
 

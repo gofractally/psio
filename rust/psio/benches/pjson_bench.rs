@@ -13,7 +13,7 @@
 //!     cargo bench -p psio --bench pjson_bench
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use psio::pjson::{from_pjson, to_pjson, validate};
+use psio::pjson_legacy::{from_pjson, to_pjson, validate};
 use psio::pjson_struct;
 use psio::pjson_view::View;
 

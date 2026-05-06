@@ -422,7 +422,7 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
             // binary128 is deferred — the IEEE-754 quad codec is too
             // large to inline without a dependency.
             let f = match w {
-                2 => crate::pjson_json::f16_bits_to_f64(u16::from_le_bytes([
+                2 => crate::pjson_legacy_json::f16_bits_to_f64(u16::from_le_bytes([
                     value[1], value[2],
                 ])),
                 4 => {
@@ -1714,28 +1714,28 @@ impl<T: Pjson> Pjson for Option<T> {
 }
 
 // ── Format tag + crate-root CPO impls ──────────────────────────────────────
+//
+// `format::PjsonLegacy` is the format tag for the pre-audit pjson
+// wire format implemented by this module. The audited-spec format
+// tag `psio::pjson::format::Pjson` does not yet exist — it lands
+// when the spec-correct rewrite of the module ships. Until then
+// downstream callers wanting the audited spec should reach for the
+// conformance driver's reference implementation; downstream callers
+// using the legacy pre-audit wire form continue to use this tag.
 
-/// `psio::pjson::format::Pjson` — the format tag used by the
-/// crate-root `encode<F, T>` / `decode<F, T>` / `validate<F, T, P>`
-/// CPOs. Zero-sized; never instantiated, only used as a generic
-/// parameter.
+/// Format tag for the pre-audit pjson wire format. **Not the
+/// audited-spec pjson** — see `docs/spec-compliance.md` "Library API
+/// status (pjson)" for the spec-rev reconciliation plan.
 pub mod format {
-    /// Format tag for pjson. Pass as the `F` parameter to
-    /// `psio::encode`, `psio::decode`, `psio::validate`.
     #[derive(Debug, Clone, Copy)]
-    pub struct Pjson;
+    pub struct PjsonLegacy;
 
-    impl crate::Format for Pjson {
+    impl crate::Format for PjsonLegacy {
         type Error = super::PjsonError;
     }
 }
 
-// Blanket impls of the crate-root per-type traits for any `T: Pjson`.
-// The body delegates to the existing per-type `Pjson` trait methods —
-// this is the bridge between the per-format trait (`pjson::Pjson`) and
-// the format-tagged CPO machinery (`Encode<format::Pjson>`, etc.).
-
-impl<T: Pjson> crate::Encode<format::Pjson> for T {
+impl<T: Pjson> crate::Encode<format::PjsonLegacy> for T {
     fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, PjsonError> {
         let n = self.pjson_size();
         let pos = out.len();
@@ -1746,26 +1746,23 @@ impl<T: Pjson> crate::Encode<format::Pjson> for T {
     }
 }
 
-impl<T: Pjson> crate::Decode<format::Pjson> for T {
+impl<T: Pjson> crate::Decode<format::PjsonLegacy> for T {
     fn decode(bytes: &[u8]) -> PjsonResult<T> {
         T::pjson_decode(bytes)
     }
 }
 
-impl<T: Pjson> crate::Validate<format::Pjson> for T {
+impl<T: Pjson> crate::Validate<format::PjsonLegacy> for T {
     fn validate<P: crate::ValidationPolicy>(
         bytes: &[u8], policy: &P,
     ) -> PjsonResult<()> {
-        // The current per-type `pjson_validate` doesn't yet honor a
-        // policy; it always runs the full DEFAULT_SAFE checks. Calling
-        // with `verify_canonical = true` or `verify_sorted_hints = true`
-        // returns an explicit "pending lib migration" error rather
-        // than silently doing partial work — see
-        // `docs/spec-compliance.md` "Library API status (pjson)".
+        // The legacy per-type `pjson_validate` always runs the full
+        // pre-audit checks; the canonical / sorted-hint flags don't
+        // map to legacy invariants, so they return explicit error.
         if policy.verify_canonical() || policy.verify_sorted_hints() {
             return Err(PjsonError(
-                "psio::pjson: verify_canonical / verify_sorted_hints \
-                 pending kernel migration; see docs/spec-compliance.md",
+                "psio::pjson_legacy: verify_canonical / verify_sorted_hints \
+                 not applicable to pre-audit wire form",
             ));
         }
         T::pjson_validate(bytes)
@@ -2100,9 +2097,9 @@ mod tests {
         use crate::{DefaultSafe, DynamicPolicy, StrictCanonical};
 
         // psio::encode::<Pjson, T>(&value) → psio::decode::<Pjson, T>(bytes)
-        let bytes = crate::encode::<format::Pjson, u32>(&5_u32)
+        let bytes = crate::encode::<format::PjsonLegacy, u32>(&5_u32)
             .expect("encode should succeed");
-        let v: u32 = crate::decode::<format::Pjson, u32>(&bytes)
+        let v: u32 = crate::decode::<format::PjsonLegacy, u32>(&bytes)
             .expect("decode should succeed");
         assert_eq!(v, 5, "round-trip preserves the value");
 
@@ -2115,17 +2112,17 @@ mod tests {
             verify_numeric_string: true,
             ..DynamicPolicy::default()
         };
-        crate::validate::<format::Pjson, u32, _>(&bytes, &runtime_policy)
+        crate::validate::<format::PjsonLegacy, u32, _>(&bytes, &runtime_policy)
             .expect("runtime policy validates");
 
         // psio::validate::<Pjson, T, P>(bytes, &policy) — compile-time
         // path (ZST preset; trait calls inline to constants).
-        crate::validate::<format::Pjson, u32, _>(&bytes, &DefaultSafe)
+        crate::validate::<format::PjsonLegacy, u32, _>(&bytes, &DefaultSafe)
             .expect("DefaultSafe ZST policy validates");
 
         // STRICT_CANONICAL surfaces the explicit "pending kernel
         // migration" error rather than silently doing partial work.
-        let r = crate::validate::<format::Pjson, u32, _>(&bytes, &StrictCanonical);
+        let r = crate::validate::<format::PjsonLegacy, u32, _>(&bytes, &StrictCanonical);
         assert!(r.is_err(),
                 "StrictCanonical must surface pending-migration error");
     }
@@ -2307,7 +2304,7 @@ mod tests {
     #[test]
     fn ieee_float_binary16_decodes_widened() {
         // Width 1 → binary16 (2-byte payload). Decoder widens
-        // losslessly to f64 via crate::pjson_json::f16_bits_to_f64.
+        // losslessly to f64 via crate::pjson_legacy_json::f16_bits_to_f64.
         // 1.5 in binary16 = 0x3E00.
         let mut buf = vec![0x61];
         buf.extend_from_slice(&0x3E00u16.to_le_bytes());
