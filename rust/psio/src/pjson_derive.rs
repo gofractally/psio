@@ -23,15 +23,15 @@ macro_rules! pjson_struct {
     };
 
     (@impl $Ty:ident { $($field:ident : $FTy:ty),+ }) => {
-        impl $crate::pjson_legacy::Pjson for $Ty {
+        impl $crate::pjson::Pjson for $Ty {
             fn pjson_size(&self) -> usize {
-                use $crate::pjson_legacy::{self, Pjson};
+                use $crate::pjson::{self, Pjson};
                 let mut vd: usize = 0;
                 $(
                     {
                         let key: &[u8] = stringify!($field).as_bytes();
                         let kx = if key.len() >= 0xFF {
-                            pjson_legacy::varuint_byte_count((key.len() - 0xFF) as u64)
+                            pjson::varuint_byte_count((key.len() - 0xFF) as u64)
                         } else { 0 };
                         vd += kx + key.len()
                             + <$FTy as Pjson>::pjson_size(&self.$field);
@@ -47,7 +47,7 @@ macro_rules! pjson_struct {
             }
 
             fn pjson_encode_at(&self, dst: &mut [u8], pos_in: usize) -> usize {
-                use $crate::pjson_legacy::{self, key_hash8, tag, Pjson};
+                use $crate::pjson::{self, key_hash8, tag, Pjson};
                 let mut pos = pos_in;
                 dst[pos] = tag::OBJECT << 4;
                 pos += 1;
@@ -58,7 +58,7 @@ macro_rules! pjson_struct {
                     {
                         let key: &[u8] = stringify!($field).as_bytes();
                         let kx = if key.len() >= 0xFF {
-                            pjson_legacy::varuint_byte_count((key.len() - 0xFF) as u64)
+                            pjson::varuint_byte_count((key.len() - 0xFF) as u64)
                         } else { 0 };
                         vd += kx + key.len()
                             + <$FTy as Pjson>::pjson_size(&self.$field);
@@ -98,7 +98,7 @@ macro_rules! pjson_struct {
                         if key.len() >= 0xFF {
                             // Long-key escape — varuint for the excess.
                             let excess = (key.len() - 0xFF) as u64;
-                            let nb = pjson_legacy::varuint_byte_count(excess);
+                            let nb = pjson::varuint_byte_count(excess);
                             // Inline write_varuint.
                             let prefix = ((nb - 1) as u8) << 6;
                             dst[pos] = prefix | ((excess & 0x3F) as u8);
@@ -126,10 +126,10 @@ macro_rules! pjson_struct {
                 count_pos + 2 - pos_in
             }
 
-            fn pjson_decode(bytes: &[u8]) -> $crate::pjson_legacy::PjsonResult<Self> {
-                use $crate::pjson_legacy::{Pjson, PjsonError};
-                use $crate::pjson_legacy_view::View;
-                use $crate::pjson_legacy_typed::TypedView;
+            fn pjson_decode(bytes: &[u8]) -> $crate::pjson::PjsonResult<Self> {
+                use $crate::pjson::{Pjson, PjsonError};
+                use $crate::pjson_view::View;
+                use $crate::pjson_typed::TypedView;
                 // Fast path: if the buffer was produced by the
                 // canonical encoder (canonical-typed template
                 // matches), every field is at a known slot index, so
@@ -151,7 +151,7 @@ macro_rules! pjson_struct {
                     use std::sync::OnceLock;
                     static T: OnceLock<Vec<u8>> = OnceLock::new();
                     T.get_or_init(|| {
-                        $crate::pjson_legacy_typed::template_for(&[
+                        $crate::pjson_typed::template_for(&[
                             $( stringify!($field).as_bytes(), )+
                         ])
                     }).as_slice()
@@ -195,20 +195,20 @@ macro_rules! pjson_struct {
         paste::paste! {
             #[allow(non_camel_case_types, dead_code)]
             pub trait [<$Ty PjsonAccessors>]<'a> {
-                $( fn $field(&self) -> $crate::pjson_legacy::PjsonResult<$FTy>; )+
+                $( fn $field(&self) -> $crate::pjson::PjsonResult<$FTy>; )+
             }
             impl<'a> [<$Ty PjsonAccessors>]<'a>
-                for $crate::pjson_legacy_view::View<'a>
+                for $crate::pjson_view::View<'a>
             {
                 $(
-                    fn $field(&self) -> $crate::pjson_legacy::PjsonResult<$FTy> {
+                    fn $field(&self) -> $crate::pjson::PjsonResult<$FTy> {
                         let key: &[u8] = stringify!($field).as_bytes();
                         let v = self.find(key).ok_or(
-                            $crate::pjson_legacy::PjsonError(concat!(
+                            $crate::pjson::PjsonError(concat!(
                                 "pjson view: missing field ",
                                 stringify!($field))))?;
                         // Decode the field's sub-view via Pjson trait.
-                        <$FTy as $crate::pjson_legacy::Pjson>::pjson_decode(v.raw())
+                        <$FTy as $crate::pjson::Pjson>::pjson_decode(v.raw())
                     }
                 )+
             }
@@ -218,7 +218,7 @@ macro_rules! pjson_struct {
 
 #[cfg(test)]
 mod tests {
-    use crate::pjson_legacy::{from_pjson, to_pjson};
+    use crate::pjson::{from_pjson, to_pjson};
 
     // Cross-cutting tests live here; the macro tests proper live in
     // each user file. Use a small struct to verify the macro output.
@@ -287,7 +287,7 @@ mod tests {
         use super::tests::PointPjsonAccessors;
         let p = Point { x: -42, y: 77 };
         let b = to_pjson(&p);
-        let v = crate::pjson_legacy_view::View::new(&b);
+        let v = crate::pjson_view::View::new(&b);
         assert_eq!(v.x().unwrap(), -42);
         assert_eq!(v.y().unwrap(), 77);
     }

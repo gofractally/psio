@@ -24,7 +24,7 @@
 //! `arbitrary_precision` feature so we can read the original number
 //! token's bytes via `Number::as_str()`.
 
-use crate::pjson_legacy::{encode, obj_form, str_flag, tag, PjsonError, PjsonResult, Value};
+use crate::pjson::{encode, obj_form, str_flag, tag, PjsonError, PjsonResult, Value};
 use serde_json::Value as JValue;
 
 /// JSON text → pjson bytes.
@@ -399,7 +399,7 @@ fn walk_generic_array_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
 }
 
 fn walk_typed_array_to_json(buf: &[u8], code: u8, out: &mut String) -> PjsonResult<()> {
-    use crate::pjson_legacy::{tac, typed_array_elem_size};
+    use crate::pjson::{tac, typed_array_elem_size};
     let size = buf.len();
     if size < 3 {
         return Err(PjsonError("pjson_json: typed_array too small"));
@@ -505,7 +505,7 @@ fn walk_object_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
         let (klen, klen_bytes) = if key_size_byte != 0xFF {
             (key_size_byte as usize, 0)
         } else {
-            let (excess, nb) = crate::pjson_legacy::peek_varuint(entry)?;
+            let (excess, nb) = crate::pjson::peek_varuint(entry)?;
             (0xFF + excess as usize, nb)
         };
         if klen_bytes + klen > entry_size {
@@ -531,7 +531,7 @@ fn walk_row_array_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
     // since row_array is the schema-shared shape and the walker is
     // 100+ lines.  Round-trip correctness is preserved via the
     // canonical Value-tree path.
-    let v = crate::pjson_legacy::decode(buf)?;
+    let v = crate::pjson::decode(buf)?;
     write_value_as_json(&v, out)
 }
 
@@ -610,9 +610,9 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
                 if i > 0 {
                     out.push(',');
                 }
-                let elem_size = crate::pjson_legacy::typed_array_elem_size(*code);
+                let elem_size = crate::pjson::typed_array_elem_size(*code);
                 let chunk = &elements[i * elem_size..(i + 1) * elem_size];
-                use crate::pjson_legacy::tac;
+                use crate::pjson::tac;
                 match *code {
                     tac::I8 => push_i64_decimal(out, chunk[0] as i8 as i64),
                     tac::U8 => push_u128_decimal(out, chunk[0] as u128),
@@ -710,7 +710,7 @@ fn read_width_at(buf: &[u8], pos: usize, n: usize) -> usize {
 }
 
 fn read_varuint_signed(buf: &[u8]) -> PjsonResult<(i32, usize)> {
-    let (zz, n) = crate::pjson_legacy::peek_varuint(buf)?;
+    let (zz, n) = crate::pjson::peek_varuint(buf)?;
     let scale = ((zz >> 1) as i32) ^ (-((zz & 1) as i32));
     Ok((scale, n))
 }
@@ -849,7 +849,7 @@ pub fn f16_bits_to_f64(bits: u16) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pjson_legacy::{from_pjson, to_pjson};
+    use crate::pjson::{from_pjson, to_pjson};
 
     #[test]
     fn round_trip_simple_object() {
@@ -1006,9 +1006,9 @@ mod tests {
         }"#;
         let pjson = from_json(json).unwrap();
         // Decode raw value tree.
-        let v = crate::pjson_legacy::decode(&pjson).unwrap();
+        let v = crate::pjson::decode(&pjson).unwrap();
         match v {
-            crate::pjson_legacy::Value::Object(entries) => {
+            crate::pjson::Value::Object(entries) => {
                 assert_eq!(entries.len(), 2);
                 assert_eq!(entries[0].0, b"x");
                 assert_eq!(entries[1].0, b"y");
