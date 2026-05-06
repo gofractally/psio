@@ -202,7 +202,13 @@ pub fn write_varuint_at(dst: &mut [u8], pos: usize, v: u64) -> usize {
 
 #[inline]
 fn zigzag_encode_i32(v: i32) -> u64 {
-    ((v as u32 as u64) << 1) ^ ((v as i64 >> 31) as u64)
+    // Zigzag at i32 width: ((v << 1) ^ (v >> 31)) is computed in i32
+    // arithmetic, then widened. Doing the shift directly on the
+    // i64-widened value sign-extends the high bits and produces a
+    // u64 in the wrong form (e.g. zigzag(-1) becomes ~2^33 instead
+    // of 1, which then varuint-encodes as 4 bytes instead of 1).
+    let zz = ((v << 1) ^ (v >> 31)) as u32;
+    zz as u64
 }
 
 #[inline]
@@ -304,7 +310,10 @@ pub enum Value<'a> {
     NumericString(Box<Value<'a>>),
     /// `(text, encoding_flag)` — flag 0 = raw_text, 1 = escape_form.
     Str(&'a [u8], u8),
-    Bytes(&'a [u8]),
+    /// Bytes payload with `(content, encoding_hint)`. Hint values
+    /// per §4.10: 0 = base64 (default), 1 = hex, 2 = base58,
+    /// 3 = base64url. Hints 4..15 are reserved.
+    Bytes(&'a [u8], u8),
     Array(Vec<Value<'a>>),
     /// Typed homogeneous array: code (0..9) and element bytes (raw, LE).
     TypedArray {
@@ -499,10 +508,12 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
             Ok(Value::Str(&value[1..], low))
         }
         tag::BYTES => {
-            if low != 0 {
-                return Err(err("pjson: reserved bytes low nibble"));
+            // §4.10: low nibble is the encoding hint; 0..3 are valid
+            // (b64, hex, b58, b64url), 4..15 are reserved.
+            if low > 3 {
+                return Err(err("pjson: reserved bytes encoding hint"));
             }
-            Ok(Value::Bytes(&value[1..]))
+            Ok(Value::Bytes(&value[1..], low))
         }
         tag::ARRAY => match low {
             0 => parse_generic_array(value),
@@ -868,7 +879,7 @@ pub fn value_size(value: &Value<'_>) -> usize {
         Value::Float(_) => 9, // binary64 only on encode
         Value::NumericString(inner) => 1 + value_size(inner),
         Value::Str(b, _) => 1 + b.len(),
-        Value::Bytes(b) => 1 + b.len(),
+        Value::Bytes(b, _) => 1 + b.len(),
         Value::Array(children) => array_size(children),
         Value::TypedArray { code, count, .. } => {
             1 + typed_array_elem_size(*code) * count + 2
@@ -995,7 +1006,7 @@ fn encode_value_at(dst: &mut [u8], pos: usize, value: &Value<'_>) -> usize {
             1 + encode_value_at(dst, pos + 1, inner)
         }
         Value::Str(b, flag) => encode_string_at(dst, pos, b, *flag),
-        Value::Bytes(b) => encode_bytes_at(dst, pos, b),
+        Value::Bytes(b, hint) => encode_bytes_at(dst, pos, b, *hint),
         Value::Array(children) => encode_generic_array_at(dst, pos, children),
         Value::TypedArray {
             code,
@@ -1088,8 +1099,9 @@ fn encode_string_at(dst: &mut [u8], pos: usize, s: &[u8], flag: u8) -> usize {
     1 + s.len()
 }
 
-fn encode_bytes_at(dst: &mut [u8], pos: usize, b: &[u8]) -> usize {
-    dst[pos] = tag::BYTES << 4;
+fn encode_bytes_at(dst: &mut [u8], pos: usize, b: &[u8], hint: u8) -> usize {
+    debug_assert!(hint <= 3, "bytes encoding hint must be 0..3");
+    dst[pos] = (tag::BYTES << 4) | (hint & 0x0F);
     if !b.is_empty() {
         dst[pos + 1..pos + 1 + b.len()].copy_from_slice(b);
     }
@@ -2275,7 +2287,7 @@ mod tests {
 
     #[test]
     fn bytes_round_trip() {
-        let v = Value::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let v = Value::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF], 0);
         let mut out = vec![];
         encode(&v, &mut out);
         assert_eq!(out[0], 0xA0);

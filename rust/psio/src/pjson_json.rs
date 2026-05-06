@@ -597,7 +597,12 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
             out.push('"');
             Ok(())
         }
-        Value::Bytes(b) => {
+        Value::Bytes(b, hint) => {
+            // §4.10 / §7 — render per the hint. For now everything
+            // routes through hex; full base64 / base58 / base64url
+            // emit lands when the lib's bytes-formatter helpers
+            // migrate from the conformance driver.
+            let _ = hint;
             out.push('"');
             for byte in *b {
                 out.push(hex_nybble(byte >> 4));
