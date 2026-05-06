@@ -180,17 +180,13 @@ fn json_number_to_pjson<'a>(
         // here with the appropriate flag.  The pjson::Value::Float
         // variant always emits low_nibble = 3 (binary64, sci=0); to
         // stamp the sci bit we encode directly into a tiny Vec and
-        // return it as a Value::Bytes wrapper.  Actually, since
-        // Value::Bytes is reserved for byte blobs (different tag), we
-        // can't go that route — so we route through a fresh
-        // ieee_float-with-flag emitter below by extending Value with
-        // a side channel.  Simpler: emit FloatSci which is a private
-        // variant only used here.
-        if has_sci && opts.preserve_sci_notation {
-            Ok(Value::FloatSci(f))
-        } else {
-            Ok(Value::Float(f))
-        }
+        // The pre-audit `Value::FloatSci` variant carried a sci-source
+        // hint; the audited spec dropped that hint (bit 3 reserved).
+        // The `preserve_sci_notation` option no longer has anything
+        // to ride on at the wire level — sci-form preservation now
+        // happens via `numeric_string` (§4.8) at the schema level.
+        let _ = (has_sci, opts.preserve_sci_notation);
+        Ok(Value::Float(f))
     }
 }
 
@@ -549,9 +545,34 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
             push_u128_decimal(out, *u);
             Ok(())
         }
+        Value::NIntInline(mag) => {
+            out.push('-');
+            out.push((b'0' + mag) as char);
+            Ok(())
+        }
         Value::NegInt(mag) => {
             out.push('-');
             push_u128_decimal(out, *mag);
+            Ok(())
+        }
+        Value::NumericString(inner) => {
+            // §7.5 / EM-007 / NS-007: numeric_string emits as quoted
+            // JSON string in every mode.
+            out.push('"');
+            write_value_as_json(inner, out)?;
+            out.push('"');
+            Ok(())
+        }
+        Value::Extension { subtype, bytes } => {
+            // §4.11 default JSON projection: self-describing envelope.
+            out.push_str("{\"__pjson_ext\":{\"subtype\":");
+            push_u128_decimal(out, (*subtype) as u128);
+            out.push_str(",\"bytes_b64\":\"");
+            // Reuse the bytes-encoding path with hint=0 (base64).
+            // Inline a tiny base64 encode here to avoid pulling another
+            // dependency for the default projection.
+            base64_encode_into(bytes, out);
+            out.push_str("\"}}");
             Ok(())
         }
         Value::Decimal { mantissa, scale } => {
@@ -561,10 +582,6 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
         }
         Value::Float(f) => {
             push_f64_text(out, *f, false);
-            Ok(())
-        }
-        Value::FloatSci(f) => {
-            push_f64_text(out, *f, true);
             Ok(())
         }
         Value::Str(b, fl) => {
@@ -793,6 +810,37 @@ fn emit_string_escaping(out: &mut String, bytes: &[u8]) {
 }
 
 #[inline]
+/// Standard base64 (§4.10 hint 0) — used by the default extension
+/// envelope projection.
+fn base64_encode_into(bytes: &[u8], out: &mut String) {
+    const A: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = ((bytes[i] as u32) << 16)
+              | ((bytes[i + 1] as u32) << 8)
+              |  (bytes[i + 2] as u32);
+        out.push(A[((n >> 18) & 0x3F) as usize] as char);
+        out.push(A[((n >> 12) & 0x3F) as usize] as char);
+        out.push(A[((n >>  6) & 0x3F) as usize] as char);
+        out.push(A[ (n        & 0x3F) as usize] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let n = (bytes[i] as u32) << 16;
+        out.push(A[((n >> 18) & 0x3F) as usize] as char);
+        out.push(A[((n >> 12) & 0x3F) as usize] as char);
+        out.push_str("==");
+    } else if rem == 2 {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+        out.push(A[((n >> 18) & 0x3F) as usize] as char);
+        out.push(A[((n >> 12) & 0x3F) as usize] as char);
+        out.push(A[((n >>  6) & 0x3F) as usize] as char);
+        out.push('=');
+    }
+}
+
 fn hex_nybble(n: u8) -> char {
     match n {
         0..=9 => (b'0' + n) as char,
@@ -893,29 +941,23 @@ mod tests {
     }
 
     #[test]
-    fn sci_notation_preserved() {
-        // 1.5e10 should round-trip with scientific notation.
+    fn sci_notation_value_round_trips() {
+        // The audited spec dropped the wire-level "sci-source" hint
+        // (ieee_float low-nibble bit 3 is reserved). Scientific
+        // notation as a TEXT FORM is now an emitter convention only —
+        // the f64 VALUE round-trips, but whether the output text uses
+        // 1.5e10 vs 15000000000 is up to the emitter and is no longer
+        // preserved through the binary form.
         let json = r#"{"x":1.5e10}"#;
         let pjson = from_json(json).unwrap();
         let json2 = to_json(&pjson).unwrap();
-        // The output should contain 'e' (scientific notation).
-        assert!(
-            json2.bytes().any(|b| b == b'e' || b == b'E'),
-            "sci flag lost: {}",
-            json2
-        );
-        // Parsed value still equal.
+        // Value preserved (both emitters parse to the same f64).
         let a: JValue = serde_json::from_str(json).unwrap();
         let b: JValue = serde_json::from_str(&json2).unwrap();
-        // Numbers compare via their f64 value.
         let a_n = a["x"].as_f64().unwrap();
         let b_n = b["x"].as_f64().unwrap();
-        assert!(
-            (a_n - b_n).abs() < 1e-6,
-            "value mismatch: {} vs {}",
-            a_n,
-            b_n
-        );
+        assert!((a_n - b_n).abs() < 1e-6,
+                "value mismatch: {} vs {}", a_n, b_n);
     }
 
     #[test]

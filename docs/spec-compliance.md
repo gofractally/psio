@@ -50,10 +50,12 @@ config). Both forms are part of the approved API.
 |-----------|------------------|--------------|--------|
 | `psio::pjson::encode(value)` | ✅ | ✅ live | matches §2.4 `encode<Pjson>` |
 | `psio::pjson::decode(bytes)` | ✅ | ✅ live | matches §2.4 `decode<Pjson>` |
-| `psio::pjson::validate(bytes)` | ✅ | ⚠️ live but **pre-audit tag layout** (UINT_INLINE=3 etc.); doesn't match the audited spec the conformance driver implements (UINT_INLINE=2 etc.) | wire-format spec-rev reconciliation pending |
+| `psio::pjson::validate(bytes)` | ✅ | ✅ live, spec-correct tag layout matching `docs/pjson-spec.md` | matches §2.4 `validate<Pjson>` |
 | `psio::ValidationPolicy` trait + `DefaultSafe` / `StrictCanonical` / `JustDontCrash` / `DynamicPolicy` preset types | n/a | ✅ live at `psio::{ValidationPolicy, ...}` | format-agnostic, doesn't depend on spec rev |
-| Format-tagged CPO dispatch (`encode<F, T>` / `decode<F, T>` / `validate<F, T, P>` at crate root) | n/a | ✅ live at `psio::{encode, decode, validate}` with `Format` trait + `Encode<F>` / `Decode<F>` / `Validate<F>` blanket impls | machinery wired; per-format bodies use whatever wire layout the format module implements |
-| `psio::pjson::format::Pjson` format tag | n/a | ✅ live; CPO works end-to-end (`crate_root_cpo_encodes_validates_pjson` test) | uses pre-audit lib bodies, see above |
+| Format-tagged CPO dispatch (`encode<F, T>` / `decode<F, T>` / `validate<F, T, P>` at crate root) | n/a | ✅ live at `psio::{encode, decode, validate}` with `Format` trait + `Encode<F>` / `Decode<F>` / `Validate<F>` blanket impls | both call shapes from §2.4 work |
+| `psio::pjson::format::Pjson` format tag | n/a | ✅ live; CPO emits spec-correct bytes (e.g. `encode::<Pjson, u32>(&5)` → `[0x25]`) | exercised by `crate_root_cpo_encodes_validates_pjson` |
+| Tag-code layout (`UINT_INLINE=2`, `NINT_INLINE=3`, `NEGINT=5`, `DECIMAL=7`, `NUMERIC_STRING=8`, `STRING=9`, `EXTENSION=13`, plus `IEEE_FLOAT` bit-3 reserved) | ✅ | ✅ live in `psio::pjson` | matches audited `docs/pjson-spec.md` |
+| `Value::NIntInline` / `NumericString` / `Extension` variants | ✅ | ✅ added to `psio::pjson::Value` enum | `FloatSci` variant removed (sci-source hint dropped from spec) |
 | Canonicalizing encoder (C-002, F-008, etc.) | ✅ in driver | ❌ pending kernel migration | reference-only |
 | Strict-canonical validator (C-006) | ✅ in driver as `validate_canonical` | ❌ pending kernel migration; will live as the `P = StrictCanonical` body of `validate<Pjson, T, P>` | reference-only |
 | Width minimization helpers (`canonical_float_width`, `f64_to_f16_exact`, `f128_bits_to_f64_exact`) | ✅ in driver | ❌ pending kernel migration | reference-only |
