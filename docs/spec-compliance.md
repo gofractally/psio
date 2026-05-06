@@ -50,9 +50,10 @@ config). Both forms are part of the approved API.
 |-----------|------------------|--------------|--------|
 | `psio::pjson::encode(value)` | ✅ | ✅ live | matches §2.4 `encode<Pjson>` |
 | `psio::pjson::decode(bytes)` | ✅ | ✅ live | matches §2.4 `decode<Pjson>` |
-| `psio::pjson::validate(bytes)` | ✅ | ✅ live (no policy param) | concrete impl that the §2.4 CPO will call once wired |
-| `psio::ValidationPolicy` trait + `DefaultSafe` / `StrictCanonical` / `JustDontCrash` preset types | n/a | ❌ not yet defined | needed before policy can be threaded |
-| Format-tagged CPO dispatch (`encode<F, T, P>` / `validate<F, T, P>` etc. at crate root) | n/a | ❌ not yet wired | pending Format trait + policy trait |
+| `psio::pjson::validate(bytes)` | ✅ | ⚠️ live but **pre-audit tag layout** (UINT_INLINE=3 etc.); doesn't match the audited spec the conformance driver implements (UINT_INLINE=2 etc.) | wire-format spec-rev reconciliation pending |
+| `psio::ValidationPolicy` trait + `DefaultSafe` / `StrictCanonical` / `JustDontCrash` / `DynamicPolicy` preset types | n/a | ✅ live at `psio::{ValidationPolicy, ...}` | format-agnostic, doesn't depend on spec rev |
+| Format-tagged CPO dispatch (`encode<F, T>` / `decode<F, T>` / `validate<F, T, P>` at crate root) | n/a | ✅ live at `psio::{encode, decode, validate}` with `Format` trait + `Encode<F>` / `Decode<F>` / `Validate<F>` blanket impls | machinery wired; per-format bodies use whatever wire layout the format module implements |
+| `psio::pjson::format::Pjson` format tag | n/a | ✅ live; CPO works end-to-end (`crate_root_cpo_encodes_validates_pjson` test) | uses pre-audit lib bodies, see above |
 | Canonicalizing encoder (C-002, F-008, etc.) | ✅ in driver | ❌ pending kernel migration | reference-only |
 | Strict-canonical validator (C-006) | ✅ in driver as `validate_canonical` | ❌ pending kernel migration; will live as the `P = StrictCanonical` body of `validate<Pjson, T, P>` | reference-only |
 | Width minimization helpers (`canonical_float_width`, `f64_to_f16_exact`, `f128_bits_to_f64_exact`) | ✅ in driver | ❌ pending kernel migration | reference-only |
@@ -67,26 +68,46 @@ The "reference-only" rows have spec-conformant implementations
 that real downstream callers can't link against. The migration plan
 in dependency order:
 
-1. **Define the `ValidationPolicy` trait + preset types** (`DefaultSafe`,
-   `StrictCanonical`, `JustDontCrash`) in `psio` crate root. Trait
-   carries the spec's per-flag bool table (E-002 enumeration);
-   presets are zero-sized types implementing it via associated
-   constants — this is what enables both the `<F, T, P>(bytes)`
-   compile-time shape and the `<F, T>(bytes, policy)` runtime shape
-   from a single CPO body.
-2. **Land the `Format` trait + format-tagged CPO dispatch** at the
-   crate root: `pub fn validate<F: Format, T, P: ValidationPolicy>(...)`.
-   Per-format modules provide `impl Format for Pjson { fn validate(...) }`.
-3. **Migrate the canonical-encoder kernel** (NaN canonicalization,
+1. ~~**Define the `ValidationPolicy` trait + preset types**~~ — done.
+   `psio::ValidationPolicy` trait + `JustDontCrash` / `DefaultSafe` /
+   `StrictCanonical` / `DynamicPolicy` types live at the crate root.
+   Both call shapes from §2.4 work via a single trait (compile-time
+   ZST presets, runtime `DynamicPolicy`).
+
+2. ~~**Land the `Format` trait + format-tagged CPO dispatch**~~ — done.
+   `psio::Format` trait + `Encode<F>` / `Decode<F>` / `Validate<F>`
+   per-type traits + crate-root `psio::{encode, decode, validate}`
+   functions. `psio::pjson::format::Pjson` is the first format tag;
+   `crate_root_cpo_encodes_validates_pjson` test exercises the full
+   round-trip + both validate shapes through the CPO.
+
+3. **Reconcile the `psio::pjson` lib with the audited spec.** The
+   pre-audit lib uses tag codes `UINT_INLINE=3`, `DECIMAL=5`,
+   `NEGINT=7`, …; the audited spec (and the conformance driver) uses
+   `UINT_INLINE=2`, `NEGINT=5`, `DECIMAL=7`, …. The CPO machinery
+   doesn't care which the lib implements, but the conformance corpus
+   bytes only match the audited layout. Either:
+     - Update the lib's tag constants and re-encoding paths to match
+       the audited spec (preferred — biggest single payoff), or
+     - Add a parallel `psio::pjson_v1` module that implements the
+       audited spec, leave `psio::pjson` for legacy callers.
+   This is a substantial chunk that touches every encoder/decoder
+   path in the lib and most of its existing 670+ tests.
+
+4. **Migrate the canonical-encoder kernel** (NaN canonicalization,
    width minimization, decimal-vs-ieee picker, slot-width
    minimization, mantissa trim) from the conformance drivers into
-   `psio::pjson`. Wire it into the `P = StrictCanonical` branch of
-   `Pjson::validate` and `Pjson::encode`.
-4. **Refactor the conformance drivers** to call the lib API instead
-   of their parallel implementations.
-5. **Mirror in C++** — same shape: `<psio/format.h>` for the format
+   the spec-correct `psio::pjson` module. Wire it into the
+   `P: ValidationPolicy where verify_canonical()` branch of
+   `Validate<Pjson>::validate` and (analogous) `Encode<Pjson>`.
+
+5. **Refactor the conformance drivers** to call the lib CPOs instead
+   of their parallel implementations. Net-large code deletion in
+   `bin/pjson_conformance_driver.rs` and `cpp/conformance/...`.
+
+6. **Mirror in C++** — same shape: `<psio/format.h>` for the format
    tag, `<psio/policy.h>` for `ValidationPolicy`, `<psio/pjson.h>`
-   for the per-format impl.
+   for the per-format impl matching the audited spec.
 
 ## How this file is enforced
 

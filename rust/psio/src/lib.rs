@@ -34,12 +34,16 @@ pub use fracpack_impl::*;
 
 // Validation policy — type machinery for the format-tagged
 // `validate<F, T, P>` CPO described in `docs/psio-overview.md` §2.4.
-// Defines the `ValidationPolicy` trait and the spec-blessed preset
-// types (`DefaultSafe`, `StrictCanonical`, `JustDontCrash`,
-// `DynamicPolicy`) that callers parameterize the CPO with.
 mod policy;
 pub use policy::{ValidationPolicy, DefaultSafe, StrictCanonical,
                   JustDontCrash, DynamicPolicy};
+
+// Format trait + crate-root CPOs (encode<F, T> / decode<F, T> /
+// validate<F, T, P>). Per-format modules (`pjson`, `pssz`, …) provide
+// a `Format` impl and per-type `Encode<F>` / `Decode<F>` / `Validate<F>`
+// blanket impls.
+mod format;
+pub use format::{Format, Encode, Decode, Validate, encode, decode, validate};
 
 // New modules (populated in subsequent phases)
 pub mod xxh64;

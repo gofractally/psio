@@ -1713,6 +1713,65 @@ impl<T: Pjson> Pjson for Option<T> {
     }
 }
 
+// ── Format tag + crate-root CPO impls ──────────────────────────────────────
+
+/// `psio::pjson::format::Pjson` — the format tag used by the
+/// crate-root `encode<F, T>` / `decode<F, T>` / `validate<F, T, P>`
+/// CPOs. Zero-sized; never instantiated, only used as a generic
+/// parameter.
+pub mod format {
+    /// Format tag for pjson. Pass as the `F` parameter to
+    /// `psio::encode`, `psio::decode`, `psio::validate`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct Pjson;
+
+    impl crate::Format for Pjson {
+        type Error = super::PjsonError;
+    }
+}
+
+// Blanket impls of the crate-root per-type traits for any `T: Pjson`.
+// The body delegates to the existing per-type `Pjson` trait methods —
+// this is the bridge between the per-format trait (`pjson::Pjson`) and
+// the format-tagged CPO machinery (`Encode<format::Pjson>`, etc.).
+
+impl<T: Pjson> crate::Encode<format::Pjson> for T {
+    fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, PjsonError> {
+        let n = self.pjson_size();
+        let pos = out.len();
+        out.resize(pos + n, 0);
+        let written = self.pjson_encode_at(out, pos);
+        debug_assert_eq!(written, n);
+        Ok(written)
+    }
+}
+
+impl<T: Pjson> crate::Decode<format::Pjson> for T {
+    fn decode(bytes: &[u8]) -> PjsonResult<T> {
+        T::pjson_decode(bytes)
+    }
+}
+
+impl<T: Pjson> crate::Validate<format::Pjson> for T {
+    fn validate<P: crate::ValidationPolicy>(
+        bytes: &[u8], policy: &P,
+    ) -> PjsonResult<()> {
+        // The current per-type `pjson_validate` doesn't yet honor a
+        // policy; it always runs the full DEFAULT_SAFE checks. Calling
+        // with `verify_canonical = true` or `verify_sorted_hints = true`
+        // returns an explicit "pending lib migration" error rather
+        // than silently doing partial work — see
+        // `docs/spec-compliance.md` "Library API status (pjson)".
+        if policy.verify_canonical() || policy.verify_sorted_hints() {
+            return Err(PjsonError(
+                "psio::pjson: verify_canonical / verify_sorted_hints \
+                 pending kernel migration; see docs/spec-compliance.md",
+            ));
+        }
+        T::pjson_validate(bytes)
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2015,6 +2074,60 @@ mod tests {
     fn validate_rejects_truncated_buffer() {
         let buf = [0x40]; // uint with bc=1 but no payload
         assert!(validate(&buf).is_err());
+    }
+
+    /// End-to-end test of the format-tagged CPO. Calls
+    /// `psio::encode::<Pjson, _>` and `psio::validate::<Pjson, _, _>`
+    /// through the crate-root entry points to verify the CPO machinery
+    /// is wired correctly, and that both call shapes from
+    /// `docs/psio-overview.md` §2.4 work.
+    /// End-to-end test of the format-tagged CPO machinery. Asserts
+    /// encode → decode round-trip and that both validation call shapes
+    /// (compile-time ZST + runtime DynamicPolicy) reach the right
+    /// trait body.
+    ///
+    /// **Note:** the per-type `psio::pjson::Pjson` trait this CPO
+    /// delegates to is the pre-audit implementation, which uses the
+    /// older tag-code layout (`UINT_INLINE=3` etc.). The conformance
+    /// driver's spec-correct layout (`UINT_INLINE=2`) doesn't match
+    /// because the lib hasn't been brought to the audited spec yet.
+    /// The CPO machinery is independent of which spec rev the lib
+    /// implements — it just dispatches through the trait. Spec-rev
+    /// reconciliation is a separate migration tracked in
+    /// `docs/spec-compliance.md` (Library API status).
+    #[test]
+    fn crate_root_cpo_encodes_validates_pjson() {
+        use crate::{DefaultSafe, DynamicPolicy, StrictCanonical};
+
+        // psio::encode::<Pjson, T>(&value) → psio::decode::<Pjson, T>(bytes)
+        let bytes = crate::encode::<format::Pjson, u32>(&5_u32)
+            .expect("encode should succeed");
+        let v: u32 = crate::decode::<format::Pjson, u32>(&bytes)
+            .expect("decode should succeed");
+        assert_eq!(v, 5, "round-trip preserves the value");
+
+        // psio::validate::<Pjson, T, P>(bytes, &policy) — runtime path
+        // (caller-built DynamicPolicy).
+        let runtime_policy = DynamicPolicy {
+            reject_reserved: true,
+            verify_slot_invariants: true,
+            verify_hash_bytes: true,
+            verify_numeric_string: true,
+            ..DynamicPolicy::default()
+        };
+        crate::validate::<format::Pjson, u32, _>(&bytes, &runtime_policy)
+            .expect("runtime policy validates");
+
+        // psio::validate::<Pjson, T, P>(bytes, &policy) — compile-time
+        // path (ZST preset; trait calls inline to constants).
+        crate::validate::<format::Pjson, u32, _>(&bytes, &DefaultSafe)
+            .expect("DefaultSafe ZST policy validates");
+
+        // STRICT_CANONICAL surfaces the explicit "pending kernel
+        // migration" error rather than silently doing partial work.
+        let r = crate::validate::<format::Pjson, u32, _>(&bytes, &StrictCanonical);
+        assert!(r.is_err(),
+                "StrictCanonical must surface pending-migration error");
     }
 
     #[test]
