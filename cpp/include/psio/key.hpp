@@ -40,8 +40,10 @@
 #include <psio/format_tag_base.hpp>
 #include <psio/adapter.hpp>
 #include <psio/reflect.hpp>
+#include <psio/stream.hpp>
 #include <psio/wrappers.hpp>
 
+#include <array>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -110,15 +112,20 @@ namespace psio {
             return bswap(v);
       }
 
-      template <typename T>
-      void append_be(sink_t& s, T v)
+      // The encode walker is templated on the sink, exactly like every other psio
+      // format (bin/borsh): it talks to `s.write(ch)` / `s.write(ptr, n)` only, so the
+      // SAME body drives `size_stream` (the packsize pass), `fast_buf_stream` (write
+      // straight into a caller buffer), and `vector_stream` (grow a std::vector). That is
+      // what lets a consumer size-then-encode into a stack/SBO buffer with no heap traffic.
+      template <typename S, typename T>
+      void append_be(S& s, T v)
       {
          v = to_big_endian(v);
-         s.insert(s.end(), reinterpret_cast<const char*>(&v),
-                  reinterpret_cast<const char*>(&v) + sizeof(T));
+         s.write(reinterpret_cast<const char*>(&v), sizeof(T));
       }
 
-      inline void append_escaped(sink_t& s, const char* data, std::size_t len)
+      template <typename S>
+      void append_escaped(S& s, const char* data, std::size_t len)
       {
          const char* p   = data;
          const char* end = data + len;
@@ -128,24 +135,24 @@ namespace psio {
                static_cast<const char*>(std::memchr(p, '\0', end - p));
             if (!null_pos)
             {
-               s.insert(s.end(), p, end);
+               s.write(p, static_cast<std::size_t>(end - p));
                break;
             }
             if (null_pos > p)
-               s.insert(s.end(), p, null_pos);
-            s.push_back('\0');
-            s.push_back('\1');
+               s.write(p, static_cast<std::size_t>(null_pos - p));
+            s.write('\0');
+            s.write('\1');
             p = null_pos + 1;
          }
-         s.push_back('\0');
-         s.push_back('\0');
+         s.write('\0');
+         s.write('\0');
       }
 
-      template <typename T>
-      void encode_scalar(const T& v, sink_t& s)
+      template <typename T, typename S>
+      void encode_scalar(const T& v, S& s)
       {
          if constexpr (std::is_same_v<T, bool>)
-            s.push_back(v ? '\x01' : '\x00');
+            s.write(static_cast<char>(v ? '\x01' : '\x00'));
          else if constexpr (std::is_same_v<T, ::psio::uint256>)
          {
             // Big-endian across all 32 bytes (MSB limb first, byte-
@@ -216,8 +223,8 @@ namespace psio {
          }
       }
 
-      template <typename T>
-      void encode_value(const T& v, sink_t& s)
+      template <typename T, typename S>
+      void encode_value(const T& v, S& s)
       {
          // Adapter dispatch: a type with a sortable_binary_category
          // adapter delegates encoding entirely to the adapter. The
@@ -241,7 +248,17 @@ namespace psio {
          {
             using A = ::psio::adapter<std::remove_cvref_t<T>,
                                       ::psio::sortable_binary_category>;
-            A::encode(v, s);
+            // Adapters emit their own memcmp-sortable bytes through a vector sink (the
+            // psio adapter convention, same as bin.hpp). Bridge to the generic stream:
+            // count on the size pass, copy the bytes through on a real write. Reached
+            // only by adapter-registered key types (e.g. float128) — the common scalar/
+            // struct path below never allocates.
+            std::vector<char> tmp;
+            A::encode(v, tmp);
+            if constexpr (std::is_same_v<S, ::psio::size_stream>)
+               s.write(nullptr, tmp.size());
+            else
+               s.write(tmp.data(), tmp.size());
          }
          else if constexpr (std::is_same_v<T, std::string>)
          {
@@ -251,12 +268,12 @@ namespace psio {
          {
             if (v.has_value())
             {
-               s.push_back('\x01');
+               s.write('\x01');
                encode_value(*v, s);
             }
             else
             {
-               s.push_back('\x00');
+               s.write('\x00');
             }
          }
          else if constexpr (is_std_vector<T>::value)
@@ -264,33 +281,34 @@ namespace psio {
             using E = typename T::value_type;
             if constexpr (is_octet_v<E>)
             {
-               // Per-element key bytes + escape + \0\0 terminator.
+               // Per-element key byte + null-escape + \0\0 terminator. An octet always
+               // encodes to exactly one byte, so a 1-byte stack stream suffices.
                for (const auto& elem : v)
                {
-                  sink_t tmp;
-                  encode_scalar(elem, tmp);
-                  // Single byte; escape if null.
-                  s.push_back(tmp[0]);
-                  if (tmp[0] == '\0')
-                     s.push_back('\1');
+                  char                    b = 0;
+                  ::psio::fast_buf_stream bs{&b, 1};
+                  encode_scalar(elem, bs);
+                  s.write(b);
+                  if (b == '\0')
+                     s.write('\1');
                }
-               s.push_back('\0');
-               s.push_back('\0');
+               s.write('\0');
+               s.write('\0');
             }
             else
             {
                for (const auto& elem : v)
                {
-                  s.push_back('\x01');
+                  s.write('\x01');
                   encode_value(elem, s);
                }
-               s.push_back('\x00');
+               s.write('\x00');
             }
          }
          else if constexpr (is_std_variant<T>::value)
          {
             // v1 key: 1-byte index + value.
-            s.push_back(static_cast<char>(v.index()));
+            s.write(static_cast<char>(v.index()));
             std::visit([&](const auto& alt) { encode_value(alt, s); }, v);
          }
          else if constexpr (is_bitvector<T>::value)
@@ -298,9 +316,7 @@ namespace psio {
             // Fixed-size — sortable directly as raw bytes.
             constexpr std::size_t nbytes = (T::size_value + 7) / 8;
             if constexpr (nbytes > 0)
-               s.insert(s.end(),
-                        reinterpret_cast<const char*>(v.data()),
-                        reinterpret_cast<const char*>(v.data()) + nbytes);
+               s.write(reinterpret_cast<const char*>(v.data()), nbytes);
          }
          else if constexpr (Record<T>)
          {
@@ -314,6 +330,59 @@ namespace psio {
          {
             encode_scalar(v, s);
          }
+      }
+
+      // Compile-time EXACT encoded size of a key, or nullopt when it depends on the value
+      // (strings, vectors, optionals, adapter types). A consumer can give a fixed-width key
+      // — double, integer, enum, fixed reflected struct — a stack buffer of the exact size
+      // and encode straight into it: no size pass, no allocation, branch-free.
+      template <typename T>
+      consteval std::optional<std::size_t> key_fixed_size()
+      {
+         using U = std::remove_cvref_t<T>;
+         if constexpr (::psio::format_should_dispatch_adapter_v<::psio::key, U>)
+            return std::nullopt;  // adapter bytes aren't known until encode
+         else if constexpr (std::is_same_v<U, bool>)
+            return std::size_t{1};
+         else if constexpr (std::is_same_v<U, ::psio::uint256>)
+            return std::size_t{32};
+         else if constexpr (std::is_same_v<U, ::psio::uint128> ||
+                            std::is_same_v<U, ::psio::int128>)
+            return std::size_t{16};
+         else if constexpr (std::is_same_v<U, float>)
+            return std::size_t{4};
+         else if constexpr (std::is_same_v<U, double>)
+            return std::size_t{8};
+         else if constexpr (std::is_enum_v<U>)
+            return key_fixed_size<std::underlying_type_t<U>>();
+         else if constexpr (std::is_integral_v<U>)
+            return sizeof(U);
+         else if constexpr (is_bitvector<U>::value)
+            return std::size_t{(U::size_value + 7) / 8};
+         else if constexpr (Record<U>)
+         {
+            using R              = ::psio::reflect<U>;
+            std::size_t total    = 0;
+            bool        allFixed = true;
+            [&]<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               (([&]
+                 {
+                    constexpr auto f =
+                       key_fixed_size<typename R::template member_type<Is>>();
+                    if constexpr (f.has_value())
+                       total += *f;
+                    else
+                       allFixed = false;
+                 }()),
+                ...);
+            }(std::make_index_sequence<R::member_count>{});
+            if (allFixed)
+               return total;
+            return std::nullopt;
+         }
+         else
+            return std::nullopt;  // string, vector, optional — variable length
       }
 
       // ── Decoder ───────────────────────────────────────────────────────
@@ -559,19 +628,31 @@ namespace psio {
       using preferred_presentation_category =
           ::psio::sortable_binary_category;
 
+      // Generic sink: drives size_stream (packsize), fast_buf_stream (write into a
+      // caller buffer), vector_stream, etc. — the path consumers use to encode straight
+      // into a stack/SBO buffer. The std::vector<char>& overload below is more specialized
+      // and wins for that sink (vectors have no .write()), bridging through vector_stream.
+      template <typename T, typename Sink>
+      friend void tag_invoke(decltype(::psio::encode), key, const T& v, Sink& sink)
+      {
+         detail::key_impl::encode_value(v, sink);
+      }
+
       template <typename T>
       friend void tag_invoke(decltype(::psio::encode), key, const T& v,
                              std::vector<char>& sink)
       {
-         detail::key_impl::encode_value(v, sink);
+         ::psio::vector_stream s{sink};  // appends, matching the other formats
+         detail::key_impl::encode_value(v, s);
       }
 
       template <typename T>
       friend std::vector<char> tag_invoke(decltype(::psio::encode), key,
                                           const T& v)
       {
-         std::vector<char> out;
-         detail::key_impl::encode_value(v, out);
+         std::vector<char>    out;
+         ::psio::vector_stream s{out};
+         detail::key_impl::encode_value(v, s);
          return out;
       }
 
@@ -587,9 +668,9 @@ namespace psio {
       friend std::size_t tag_invoke(decltype(::psio::size_of), key,
                                     const T& v)
       {
-         std::vector<char> tmp;
-         detail::key_impl::encode_value(v, tmp);
-         return tmp.size();
+         ::psio::size_stream s;  // packsize pass — counts, no allocation
+         detail::key_impl::encode_value(v, s);
+         return s.size;
       }
 
       template <typename T>
@@ -639,5 +720,33 @@ namespace psio {
             detail::key_impl::decode_value<T>(bytes, pos));
       }
    };
+
+   // ── to_key: value → memcmp-sortable `key` bytes ─────────────────────────────
+   // Returns std::array<char, N> when the encoded size is a compile-time constant
+   // (fixed-width keys — integers, floats, enums, fixed reflected structs): encoded
+   // straight into the array on the stack, no packsize pass, no allocation. Returns
+   // std::vector<char> when the size depends on the value (strings, vectors, optionals).
+   // Take the result with `auto`; both expose .data()/.size().
+   template <typename T>
+   auto to_key(const T& v)
+   {
+      constexpr auto fixed = detail::key_impl::key_fixed_size<T>();
+      if constexpr (fixed.has_value())
+      {
+         std::array<char, *fixed> out;
+         fast_buf_stream          fs{out.data(), out.size()};
+         detail::key_impl::encode_value(v, fs);
+         return out;
+      }
+      else
+      {
+         size_stream ss;
+         detail::key_impl::encode_value(v, ss);
+         std::vector<char> out(ss.size);
+         fast_buf_stream   fs{out.data(), out.size()};
+         detail::key_impl::encode_value(v, fs);
+         return out;
+      }
+   }
 
 }  // namespace psio
