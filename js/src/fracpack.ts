@@ -1,5 +1,7 @@
 // fracpack.ts — Fracpack binary serialization for JavaScript/TypeScript
 //
+// Legacy prototype retained for data-layout benchmarks; pSSZ is its successor.
+//
 // Binary format compatible with C++ (psio) and Rust (fracpack) implementations.
 // Schema-first design: define schemas, TypeScript infers the types.
 

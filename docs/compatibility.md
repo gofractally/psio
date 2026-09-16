@@ -3,12 +3,16 @@
 Status recorded during the September 16, 2026 recovery work. Passing the checks
 below does not certify the whole library as stable. C++ is the authority.
 
+pSSZ is the successor to fracpack and the primary schema-driven binary format.
+Fracpack is a legacy prototype retained for benchmark comparisons of data-layout
+designs. Its rows below describe benchmark implementation coverage.
+
 | Format | C++ public fixture | Rust comparison | JS/TS comparison |
 |---|---|---|---|
 | frac32 / fracpack | records, nesting, variants, empty values, scalar/string/vector/optional | encode/decode | encode/decode |
 | pjson | scalars, 274 doubles, typed containers, keys, rejection cases | encode/decode/validate | encode/decode/validate |
 | SSZ | two records | encode/decode | implementation absent |
-| PSSZ | two records | encode/decode | implementation absent |
+| pSSZ | two records | encode/decode | implementation absent |
 | Cap'n Proto | two records | encode/decode | implementation absent |
 | FlatBuffers | two records | encode/decode | implementation absent |
 | WIT binary | two records | encode only in shared fixture test | implementation absent; WIT text generation is separate |
@@ -37,8 +41,7 @@ declarations, not test code.
   encoding (including empty strings and optional elements), with matching views.
   Rust/JS now also reject legacy zero/one vector-slot sentinels that the current
   C++ validator rejects; eight shared malformed fixtures cover those offsets.
-   This changes bytes from the recovered legacy vector encoder; migration from
-   legacy stored data still needs an explicit compatibility policy.
+  These changes to the legacy prototype are recorded for benchmark reproducibility.
   Pjson revision 2 changes earlier C++ bytes. Version selection must be external;
   automatic detection is unsafe (`35` changes from +5 to -5). The former Rust
   draft shares the new numbering but includes additional unsupported features.

@@ -1,6 +1,12 @@
-# psio — Fracpack for JavaScript/TypeScript
+# psio — JavaScript/TypeScript serialization
 
 Schema-first binary serialization with full TypeScript type inference, zero-copy views, and cross-language compatibility with C++ and Rust.
+
+The fracpack API documented below implements a legacy prototype retained for
+benchmark comparisons of data-layout designs. pSSZ is its successor and psio's
+primary schema-driven binary format; the JS/TS pSSZ implementation is still
+pending. This package also provides the pjson codec described in the
+[repository README](../README.md#javascript--typescript).
 
 ## Install
 

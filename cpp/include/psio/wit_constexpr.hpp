@@ -26,6 +26,7 @@
 #include <psio/reflect.hpp>
 #include <psio/structural.hpp>
 #include <psio/wit_resource.hpp>
+#include <psio/wit_owned.hpp>
 
 #include <array>
 #include <cstddef>
@@ -118,6 +119,17 @@ namespace psio
             using arg                          = std::tuple_element_t<I, args>;
             static constexpr std::size_t arity = sizeof...(Args);
          };
+      template <typename R, typename C, typename... Args>
+      struct fn_decompose<R (C::*)(Args...)> : fn_decompose<R (*)(Args...)> {};
+      template <typename R, typename C, typename... Args>
+      struct fn_decompose<R (C::*)(Args...) const> : fn_decompose<R (*)(Args...)> {};
+      template <typename R, typename... Args>
+      struct fn_decompose<R (*)(Args...) noexcept> : fn_decompose<R (*)(Args...)> {};
+      template <typename R, typename C, typename... Args>
+      struct fn_decompose<R (C::*)(Args...) noexcept> : fn_decompose<R (*)(Args...)> {};
+      template <typename R, typename C, typename... Args>
+      struct fn_decompose<R (C::*)(Args...) const noexcept> : fn_decompose<R (*)(Args...)> {};
+
       }  // namespace cdetail
 
       // ── Kebab-case at compile time ─────────────────────────────────
@@ -128,17 +140,18 @@ namespace psio
       // lowercased.
       constexpr void emit_kebab(buffer& buf, std::string_view s)
       {
+         const auto begin = buf.len;
          for (std::size_t i = 0; i < s.size(); ++i)
          {
             char c = s[i];
             if (c == '_')
             {
-               if (buf.len > 0 && buf.data[buf.len - 1] != '-')
+               if (buf.len > begin && buf.data[buf.len - 1] != '-')
                   buf.put('-');
             }
             else if (c >= 'A' && c <= 'Z')
             {
-               if (buf.len > 0 && buf.data[buf.len - 1] != '-')
+               if (buf.len > begin && buf.data[buf.len - 1] != '-')
                   buf.put('-');
                buf.put(static_cast<char>(c + ('a' - 'A')));
             }
@@ -155,7 +168,9 @@ namespace psio
       {
          using U = std::remove_cvref_t<T>;
 
-         if constexpr (std::is_same_v<U, bool>)
+         if constexpr (::psio::detail::wit_owned_type<U>::value)
+            emit_wit_type<typename ::psio::detail::wit_owned_type<U>::type>(buf);
+         else if constexpr (std::is_same_v<U, bool>)
             buf.append("bool");
          else if constexpr (std::is_same_v<U, std::uint8_t>)
             buf.append("u8");
@@ -360,9 +375,7 @@ namespace psio
 
       // ── Magic header for pzam_wit ──────────────────────────────────
       //
-      // Distinct from v1's "PSIO1_WIT\x01" so a single host scanning a
-      // hybrid binary can route v1- and v3-emitted blobs separately
-      // without ambiguity.
+      // Identifies embedded WIT text for the engine post-link tool.
       inline constexpr char     MAGIC[]   = "PSIO_WIT\x01";
       inline constexpr unsigned MAGIC_LEN = sizeof(MAGIC) - 1;  // exclude NUL
 

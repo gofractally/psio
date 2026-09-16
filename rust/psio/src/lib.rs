@@ -1,9 +1,14 @@
 //! PSIO — Multi-format serialization library.
 //!
-//! Supports fracpack, Cap'n Proto, FlatBuffers, WIT Canonical ABI, JSON,
+//! Supports pSSZ, pjson, Cap'n Proto, FlatBuffers, WIT Canonical ABI, JSON,
 //! and more from a single set of derive macros.
 //!
-//! # Fracpack (default format)
+//! pSSZ is the primary schema-driven binary format and the successor to
+//! fracpack. Fracpack is a legacy prototype retained for benchmark comparisons
+//! of different data-layout designs. Its `Pack` / `Unpack` API remains
+//! re-exported at the crate root.
+//!
+//! # Legacy fracpack benchmark API
 //!
 //! ```
 //! use psio::{Pack, Unpack, Result};
@@ -26,7 +31,7 @@
 //! # Ok::<(), psio::Error>(())
 //! ```
 
-// Core fracpack format (re-exported at top level for convenience)
+// Legacy fracpack benchmark API (re-exported at the crate root)
 #[path = "fracpack.rs"]
 mod fracpack_impl;
 

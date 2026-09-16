@@ -2,6 +2,8 @@
 //
 // psio/pssz.hpp — pSSZ (PsiSSZ) format tag.
 //
+// Successor to the legacy fracpack prototype, which is retained for benchmarks.
+//
 // pSSZ is a variable-width variant of SSZ — offsets and container
 // headers use 1, 2, or 4 bytes rather than always 4. The width is
 // picked automatically per type by `auto_pssz_width_v<T>` from

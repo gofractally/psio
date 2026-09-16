@@ -3,7 +3,7 @@
 // Compile-time WIT ABI wire format — layout, serialize, validate, rebase.
 //
 // All driven by PSIO_REFLECT — no WASM runtime dependency.
-// For flat calling-convention dispatch (wit_abi_lower_flat / wit_abi_lift_flat),
+// For flat calling-convention dispatch (canonical_lower_flat / canonical_lift_flat),
 // see psizam/canonical_dispatch.hpp.
 //
 // Layout:
@@ -31,6 +31,8 @@
 #include <psio/wit_resource.hpp>
 
 #include <algorithm>
+#include <cstdlib>
+#include <stdexcept>
 #include <type_traits>
 #include <concepts>
 #include <cstdint>
@@ -44,13 +46,11 @@
 
 namespace psio {
 
-   // ---- Reflect-API adapters (typelist view over psio's index-based reflect) ----
-   //
-   // wit_abi was originally written for psio1's typelist-based reflect
-   // (data_members + apply_members). psio (formerly psio) uses an
-   // index-based shape (member_pointer<I>, member_count). These adapters
-   // synthesize the typelist API on top of the index-based one so the
-   // ABI machinery stays unchanged.
+   // Compile-time member lists let the recursive ABI walkers operate on
+   // current psio's indexed data reflection without runtime metadata.
+
+   template <typename... Ts>
+   struct TypeList {};
 
    template <auto... Ms>
    struct MemberList {};
@@ -73,10 +73,7 @@ namespace psio {
             std::make_index_sequence<reflect<T>::member_count>{}))>;
    }
 
-   // Member-pointer trait: extracts the value type and class type of a
-   // pointer-to-member. Specializations cover data, method (mutable),
-   // and method (const). Function-pointer-to-member-of-class form was
-   // a psio1 oddity not used by wit_abi proper; left out.
+   // Member pointers expose record field types and component method signatures.
    template <typename M>
    struct MemberPtrType;
 
@@ -92,6 +89,11 @@ namespace psio {
    {
       using ValueType = R;
       using ClassType = T;
+      using ReturnType = R;
+      using ArgTypes = TypeList<Args...>;
+      using ArgumentTuple = std::tuple<Args...>;
+      using SimplifiedArgTypes = TypeList<std::remove_cvref_t<Args>...>;
+      static constexpr std::size_t numArgs = sizeof...(Args);
    };
 
    template <typename R, typename T, typename... Args>
@@ -99,7 +101,29 @@ namespace psio {
    {
       using ValueType = R;
       using ClassType = T;
+      using ReturnType = R;
+      using ArgTypes = TypeList<Args...>;
+      using ArgumentTuple = std::tuple<Args...>;
+      using SimplifiedArgTypes = TypeList<std::remove_cvref_t<Args>...>;
+      static constexpr std::size_t numArgs = sizeof...(Args);
    };
+
+   template <typename R, typename... Args>
+   struct MemberPtrType<R (*)(Args...)> {
+      using ValueType = R;
+      using ReturnType = R;
+      using ArgTypes = TypeList<Args...>;
+      using ArgumentTuple = std::tuple<Args...>;
+      using SimplifiedArgTypes = TypeList<std::remove_cvref_t<Args>...>;
+      static constexpr std::size_t numArgs = sizeof...(Args);
+   };
+   template <typename R, typename... Args>
+   struct MemberPtrType<R (*)(Args...) noexcept> : MemberPtrType<R (*)(Args...)> {};
+
+   template <typename R, typename T, typename... Args>
+   struct MemberPtrType<R (T::*)(Args...) noexcept> : MemberPtrType<R (T::*)(Args...)> {};
+   template <typename R, typename T, typename... Args>
+   struct MemberPtrType<R (T::*)(Args...) const noexcept> : MemberPtrType<R (T::*)(Args...) const> {};
 
    namespace detail {
       template <typename T> struct is_psio_own : std::false_type {};
@@ -107,10 +131,7 @@ namespace psio {
       template <typename T> struct is_psio_borrow : std::false_type {};
       template <typename T> struct is_psio_borrow<psio::borrow<T>> : std::true_type {};
 
-      // Type-shape traits the canonical-ABI walker needs. Mirrors the
-      // helpers psio1's wview.hpp / wit_resource.hpp / reflect.hpp
-      // provided. They're entirely standalone — no psio reflect
-      // dependency — so they're trivially portable.
+      // Type-shape traits shared by memory layout, projections, and dispatch.
 
       template <typename T> struct is_std_string_ct : std::false_type {};
       template <> struct is_std_string_ct<std::string> : std::true_type {};
@@ -166,7 +187,7 @@ namespace psio {
    };
 
    // =========================================================================
-   // Compile-time WIT ABI layout from C++ types (PSIO1_REFLECT-driven)
+   // Compile-time WIT ABI layout from C++ types (PSIO_REFLECT-driven)
    // =========================================================================
 
    namespace detail_wit_abi {
@@ -1304,7 +1325,13 @@ namespace psio {
       const char* load_bytes(uint32_t off, uint32_t len) {
          if (static_cast<uint64_t>(off) + len > buf_size) {
 #ifdef __cpp_exceptions
+         {
+#if defined(__cpp_exceptions)
             throw std::runtime_error("load_bytes: out of bounds");
+#else
+            std::abort();
+#endif
+         }
 #else
             __builtin_trap();
 #endif

@@ -2,6 +2,9 @@
 //
 // psio/frac.hpp — fracpack format tag family.
 //
+// Legacy prototype retained for benchmark comparisons of data-layout designs.
+// pSSZ (psio/pssz.hpp) is its successor.
+//
 // Byte-compatible with v1 psio1::fracpack on the MVP shape set —
 // primitives, std::array, std::vector, std::string, std::optional,
 // std::variant, reflected records. Wire details:

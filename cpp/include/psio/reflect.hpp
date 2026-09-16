@@ -88,6 +88,22 @@ namespace psio {
 
 // ── Macro implementation ─────────────────────────────────────────────────
 //
+// Named accessors forward into a format-specific projection; no field storage is copied.
+#define PSIO_REFLECT_PROXY_FIELD_(r, TYPE, I, FIELD) \
+   decltype(auto) FIELD() { return this->psio_get_proxy().template get<I, &TYPE::FIELD>(); } \
+   decltype(auto) FIELD() const { return this->psio_get_proxy().template get<I, &TYPE::FIELD>(); }
+
+#define PSIO_REFLECT_PROXY_(TYPE, SEQ) \
+   template <typename Projection> \
+   struct _psio_record_proxy : Projection { \
+      using Projection::Projection; \
+      explicit _psio_record_proxy(Projection p) : Projection(::std::move(p)) {} \
+      Projection& psio_get_proxy() { return *this; } \
+      const Projection& psio_get_proxy() const { return *this; } \
+      BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_PROXY_FIELD_, TYPE, SEQ) \
+   }; \
+   template <typename Projection> using proxy = _psio_record_proxy<Projection>;
+
 // PSIO_REFLECT(Type, f1, f2, ...) emits an ADL-found helper function
 // in the enclosing namespace:
 //
@@ -402,6 +418,7 @@ namespace psio {
    struct BOOST_PP_CAT(psio_reflect_impl_, TYPE)                                        \
    {                                                                                     \
       using type = TYPE;                                                                 \
+      PSIO_REFLECT_PROXY_(TYPE, SEQ) \
       static constexpr bool               is_reflected = true;                           \
       static constexpr ::std::string_view name         = BOOST_PP_STRINGIZE(TYPE);       \
       static constexpr ::std::size_t      member_count = BOOST_PP_SEQ_SIZE(SEQ);         \

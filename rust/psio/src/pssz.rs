@@ -1,4 +1,5 @@
-//! pSSZ (PsiSSZ) — hybrid of SSZ's implicit sizing and fracpack's
+//! pSSZ (PsiSSZ) — successor to the legacy fracpack benchmark prototype.
+//! Combines SSZ's implicit sizing and fracpack's
 //! extensibility. See `.issues/pssz-format-design.md` (top of repo) for the
 //! full specification. This module is the Rust counterpart of
 //! `libraries/psio1/cpp/include/psio/to_pssz.hpp` and should round-trip

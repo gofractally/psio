@@ -64,6 +64,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <span>
 #include <tuple>
@@ -878,9 +879,15 @@ namespace psio {
       if constexpr (cap.has_value())
       {
          if (total > *cap)
+         {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
             throw codec_exception{codec_error{
                "encoded size exceeds maxDynamicData cap",
                static_cast<std::uint32_t>(total), format_name}};
+#else
+            std::abort();
+#endif
+         }
       }
    }
 

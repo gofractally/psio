@@ -143,6 +143,16 @@
 // no inline bodies if desired (host-side bodies live wherever).
 // =====================================================================
 
+// Method addresses are evaluated only when a host registration needs them.
+#define PSIO_IFACE_METHOD_(r, ANCHOR, I, elem) \
+   if constexpr (Index == I) return &ANCHOR::PSIO_IFACE_GET_IDENT(elem);
+#define PSIO_IFACE_PROXY_METHOD_(r, ANCHOR, I, elem) \
+   template <typename... Args> \
+   decltype(auto) PSIO_IFACE_GET_IDENT(elem)(Args&&... args) { \
+      return static_cast<Dispatch&>(*this).template call<I, decltype(&ANCHOR::PSIO_IFACE_GET_IDENT(elem))>( \
+         ::std::forward<Args>(args)...); \
+   }
+
 #define PSIO_IFACE_FN_TYPE(r, ANCHOR, elem) \
    decltype(&ANCHOR::PSIO_IFACE_GET_IDENT(elem))
 #define PSIO_IFACE_FN_NAME(r, _, elem) \
@@ -336,6 +346,14 @@ struct package_of
          static constexpr ::std::string_view name = #NAME;                            \
          using package    = PSIO_CURRENT_PACKAGE_;                                    \
          using types      = TYPES_TUPLE;                                              \
+         template <std::size_t Index> static constexpr auto method() { \
+            BOOST_PP_SEQ_FOR_EACH_I(PSIO_IFACE_METHOD_, ::NAME, FUNCS_SEQ) \
+         } \
+         template <typename Dispatch> struct _psio_interface_proxy : Dispatch { \
+            using Dispatch::Dispatch; \
+            BOOST_PP_SEQ_FOR_EACH_I(PSIO_IFACE_PROXY_METHOD_, ::NAME, FUNCS_SEQ) \
+         }; \
+         template <typename Dispatch> using proxy = _psio_interface_proxy<Dispatch>; \
          using func_types = ::std::tuple<PSIO_PP_SEQ_TO_VA_ARGS(                      \
              BOOST_PP_SEQ_TRANSFORM(PSIO_IFACE_FN_TYPE, ::NAME, FUNCS_SEQ))>;         \
          static constexpr ::std::array<::std::string_view,                            \

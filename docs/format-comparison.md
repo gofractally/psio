@@ -6,6 +6,10 @@ focused on **what pssz is** while the comparison can change as we
 re-bench, add formats, or refresh threshold judgments without
 churning the spec.
 
+pSSZ is the successor to fracpack. Fracpack is a legacy prototype retained
+in these benchmarks to demonstrate the relative performance of different
+data-layout designs. Its comparison columns record that experimental baseline.
+
 Two complementary views:
 
 - **§1 Property checklist** — qualitative, thresholded comparison

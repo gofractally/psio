@@ -34,6 +34,7 @@
 #include <psio/reflect.hpp>
 #include <psio/structural.hpp>
 #include <psio/wit_resource.hpp>
+#include <psio/wit_owned.hpp>
 #include <psio/wit_types.hpp>
 
 #include <cctype>
@@ -136,6 +137,17 @@ namespace psio
          using args                       = std::tuple<Args...>;
          static constexpr std::size_t arity = sizeof...(Args);
       };
+      template <typename R, typename C, typename... Args>
+      struct fn_decompose<R (C::*)(Args...)> : fn_decompose<R (*)(Args...)> {};
+      template <typename R, typename C, typename... Args>
+      struct fn_decompose<R (C::*)(Args...) const> : fn_decompose<R (*)(Args...)> {};
+      template <typename R, typename... Args>
+      struct fn_decompose<R (*)(Args...) noexcept> : fn_decompose<R (*)(Args...)> {};
+      template <typename R, typename C, typename... Args>
+      struct fn_decompose<R (C::*)(Args...) noexcept> : fn_decompose<R (*)(Args...)> {};
+      template <typename R, typename C, typename... Args>
+      struct fn_decompose<R (C::*)(Args...) const noexcept> : fn_decompose<R (*)(Args...)> {};
+
 
       // ── Kebab-case ──────────────────────────────────────────────────
       //
@@ -192,7 +204,11 @@ namespace psio
             using U = std::remove_cvref_t<T>;
 
             // 1. Primitives.
-            if constexpr (wit_prim_map<U>::has_value)
+            if constexpr (wit_owned_type<U>::value)
+            {
+               return resolve_type<typename wit_owned_type<U>::type>();
+            }
+            else if constexpr (wit_prim_map<U>::has_value)
             {
                return wit_prim_idx(wit_prim_map<U>::value);
             }

@@ -5,6 +5,11 @@ The public C++ implementation defines the interoperability contract.
 This checkout is under release preparation; `0.1.0` is a development version.
 See [compatibility](docs/compatibility.md) for the exact tested surface and gaps.
 
+pSSZ is psio's primary schema-driven binary format and the successor to
+fracpack. Fracpack is a legacy prototype retained as a benchmark comparison
+to demonstrate the relative performance of different data-layout designs.
+See the [format comparison](docs/format-comparison.md) for the measurements.
+
 ## C++
 
 Requires a C++23 compiler, CMake 3.20+, and Boost headers. simdjson is optional;
@@ -48,8 +53,9 @@ npm pack
 ```
 
 The package exports ESM and TypeScript declarations. Node 20+ is the declared
-runtime floor; local verification used Node 25.9.0. The recovered fracpack API
-is available at the package root. The pjson codec initializes its XXH3 helper
+runtime floor; local verification used Node 25.9.0. The legacy fracpack
+benchmark API is available at the package root; pSSZ is not yet implemented
+in JS/TS. The pjson codec initializes its XXH3 helper
 once, then provides synchronous operations:
 
 ```ts

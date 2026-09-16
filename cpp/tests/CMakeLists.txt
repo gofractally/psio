@@ -218,3 +218,5 @@ set_tests_properties(psio_spec_ssz_tests PROPERTIES
 # Inherits the vendored xxhash include directory from the `psio`
 # target's PUBLIC interface.
 psio_add_test(psio_psch_tests psch_tests.cpp)
+
+psio_add_test(psio_wit_owned_tests wit_owned_tests.cpp)

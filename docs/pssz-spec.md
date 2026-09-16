@@ -13,6 +13,10 @@ fast path for layout-stable records) and adds adaptive-width offset
 slots for the per-type compactness no other format in the comparison
 provides.
 
+pSSZ is the successor to fracpack, a legacy prototype retained as a benchmark
+comparison to demonstrate the relative performance of different data-layout
+designs.
+
 This document is the wire-format specification — language-neutral,
 detailed enough that two implementations following it must produce
 byte-identical output for the same input value on the same schema.

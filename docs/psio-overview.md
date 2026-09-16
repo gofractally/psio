@@ -6,7 +6,7 @@ user to recognize "this is the psio library I expect, expressed in
 this language's idioms."
 
 This document is **language-agnostic**. Specific format wire layouts
-(pjson, fracpack, etc.) live in their own `<format>-spec.md` files.
+(pjson, pSSZ, etc.) live in their own `<format>-spec.md` files.
 Implementation details for a given host (C++ template machinery, Rust
 derive macros, etc.) live in that language's source.
 
@@ -18,7 +18,7 @@ psio is a **multi-format, schema-driven, reflection-powered
 serialization library**. A user declares a type once, with
 annotations that capture text-representation hints, and gets:
 
-- **Encoding to any of N wire formats** — pjson, fracpack, capnp,
+- **Encoding to any of N wire formats** — pjson, pSSZ, capnp,
   flatbuf, ssz, JSON text, CBOR, MessagePack — without rewriting the
   type.
 - **Decoding from any of those formats** back into the same typed
@@ -29,7 +29,11 @@ annotations that capture text-representation hints, and gets:
   decoding.
 - **Cross-format consistency**: the same `User` type produces
   byte-identical pjson on C++ and Rust hosts. The same `User`
-  produces byte-identical fracpack on C++ and Rust hosts. Etc.
+  produces byte-identical pSSZ on C++ and Rust hosts. Etc.
+
+pSSZ is the primary schema-driven binary format and the successor to
+fracpack. Fracpack is a legacy prototype retained for benchmarks that
+compare the relative performance of different data-layout designs.
 
 The headline value: **declare the type once, serve it everywhere.**
 
@@ -62,12 +66,15 @@ applicable) `view` operations dispatched by the tag.
 
 | Format tag | Wire spec | Notes |
 |------------|-----------|-------|
-| `pjson` | `docs/pjson-spec.md` | Schemaless binary peer of JSON; primary format |
-| `fracpack` | (TBD spec doc) | Tail-indexed offset-table layout, generic and typed |
+| `pjson` | `docs/pjson-spec.md` | Primary schemaless binary format; binary peer of JSON |
+| `pssz` | `docs/pssz-spec.md` | Primary schema-driven binary format; successor to fracpack |
 | `json` | RFC 8259 | Text serialization for human/JS interop |
 | `capnp` | Cap'n Proto wire | Cross-language IDL-driven format |
 | `flatbuf` | FlatBuffers wire | IDL-driven, alignment-strict |
-| `ssz`, `pssz` | Eth2 SSZ + psio variant | Beacon-chain and content-addressed payloads |
+| `ssz` | Eth2 SSZ | Beacon-chain and content-addressed payloads |
+
+The legacy `fracpack` implementation is retained as a benchmark comparison;
+it is outside the required production-format set above.
 
 A host MAY support additional formats (msgpack, CBOR, protobuf, etc.)
 via the same dispatch mechanism. **Adding a format does not require
@@ -130,14 +137,14 @@ languages, for every supported format.**
 ```text
 // C++
 auto bytes_cpp = psio::encode<pjson>(user);
-auto bytes_cpp_frac = psio::encode<fracpack>(user);
+auto bytes_cpp_pssz = psio::encode<pssz>(user);
 
 // Rust
 let bytes_rust = psio::encode::<Pjson>(&user)?;
-let bytes_rust_frac = psio::encode::<Fracpack>(&user)?;
+let bytes_rust_pssz = psio::encode::<Pssz>(&user)?;
 
 assert(bytes_cpp == bytes_rust);
-assert(bytes_cpp_frac == bytes_rust_frac);
+assert(bytes_cpp_pssz == bytes_rust_pssz);
 ```
 
 Enforced via **the conformance corpus**: shared `*.json` fixtures
@@ -318,7 +325,7 @@ that format is considered shipped on that host.
 ## 8. Versioning
 
 Format wire formats version at the format-spec level (`pjson-spec.md`
-§13, `fracpack-spec.md` §X, etc.). The psio cross-language API
+§13, `pssz-spec.md`, etc.). The psio cross-language API
 versions independently — adding a new annotation or format tag is a
 psio API change, not a wire-format change.
 
