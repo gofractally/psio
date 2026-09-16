@@ -15,6 +15,7 @@
 #   tools/run-conformance.sh --filter '4.3_*'       # subset by glob
 
 set -euo pipefail
+printf '%s\n' 'Historical draft-spec tests only; use tools/verify-independent.sh for public libraries.' >&2
 
 readonly REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 readonly FIXTURES_DIR="${REPO_ROOT}/conformance/fixtures"
@@ -59,7 +60,7 @@ run_one_lang() {
                 echo "  build with: cmake --build cpp/build --target pjson_conformance_driver"
                 ;;
             rust)
-                echo "  build with: cargo build --release -p psio --bin pjson_conformance_driver"
+                echo "  build with: cargo build --release -p psio --features historical-draft-reference --bin pjson_conformance_driver"
                 ;;
         esac
         return 100

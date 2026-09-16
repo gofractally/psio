@@ -1,0 +1,77 @@
+namespace fb_bench;
+
+// Per-shape flatbuffers schemas for the unified psio-vs-externals
+// benchmark.  Field declaration order matches psio's reflection
+// order; flatbuffers itself reorders for slot allocation, so wire
+// bytes won't be byte-identical to psio::flatbuf, but both produce
+// VALID flatbuffers wire and the comparison is purely about library
+// performance.
+
+table fb_Point {
+   x: int32;
+   y: int32;
+}
+
+table fb_NameRecord {
+   account: uint64;
+   limit:   uint64;
+}
+
+// fbs has no uint16; use uint32 (flatbuffers stores it inline either
+// way as a fixed-width slot, no varint).
+table fb_FlatRecord {
+   id:     uint32;
+   label:  string;
+   values: [uint32];
+}
+
+// flatbuffers' built-in default-value semantics: an absent field
+// reads back as 0.  Good enough for the bench (we only care about
+// timings, not whether 0 means "default" or "explicitly zero").
+table fb_Record {
+   id:     uint32;
+   label:  string;
+   values: [uint32];
+   score:  uint32;
+}
+
+table fb_Validator {
+   pubkey_lo:          uint64;
+   pubkey_hi:          uint64;
+   withdrawal_lo:      uint64;
+   withdrawal_hi:      uint64;
+   effective_balance:  uint64;
+   slashed:            bool;
+   activation_epoch:   uint64;
+   exit_epoch:         uint64;
+   withdrawable_epoch: uint64;
+}
+
+table fb_LineItem {
+   product:    string;
+   qty:        uint32;
+   unit_price: float64;
+}
+
+table fb_UserProfile {
+   id:       uint64;
+   name:     string;
+   email:    string;
+   age:      uint32;
+   verified: bool;
+}
+
+table fb_Order {
+   id:       uint64;
+   customer: fb_UserProfile;
+   items:    [fb_LineItem];
+   total:    float64;
+   note:     string;
+}
+
+table fb_ValidatorList {
+   epoch:      uint64;
+   validators: [fb_Validator];
+}
+
+root_type fb_Order;

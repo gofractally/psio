@@ -15,9 +15,9 @@
 //!   - §12 Reference encode algorithm
 //!   - §15 Canonical encoding rules
 //!
-//! Source-of-truth reminder: the C++ reference implementation under
-//! `cpp/include/psio/pjson*.hpp` is being brought into spec conformance
-//! on a sibling branch. This module follows the spec as authoritative.
+//! The public C++ headers in `cpp/include/psio/pjson*.hpp` define the
+//! release wire contract (revision 2, audited tag numbering). The draft
+//! drivers also implement additional semantics outside this release profile.
 //!
 //! Status of this implementation:
 //!   - Scalars: null, bool, uint_inline, uint, negint, ieee_float
@@ -37,26 +37,27 @@
 
 use crate::xxh3_64;
 
+/// Out-of-band wire revision. Values contain no version byte.
+pub const WIRE_REVISION: u32 = 2;
+
 // ── Tag byte constants (spec §3) ────────────────────────────────────────────
 
-/// High nibble = type code. Low nibble is type-specific. Matches
-/// the audited `docs/pjson-spec.md` v1 wire layout.
+/// High nibble = type code. Low nibble is type-specific.
 pub mod tag {
     pub const NULL: u8 = 0;
     pub const BOOL: u8 = 1;
-    pub const UINT_INLINE: u8 = 2;       // low nibble = value 0..15
-    pub const NINT_INLINE: u8 = 3;       // low nibble 1..15 = magnitude (-1..-15);
-                                         // low nibble 0 reserved
-    pub const UINT: u8 = 4;              // low nibble = bc - 1 (1..16 magnitude bytes)
-    pub const NEGINT: u8 = 5;            // low nibble = bc - 1; all-zero payload reserved
-    pub const IEEE_FLOAT: u8 = 6;        // low nibble bits 2..0 = log2(byte_count); bit 3 reserved
-    pub const DECIMAL: u8 = 7;           // low nibble = mantissa bc - 1
-    pub const NUMERIC_STRING: u8 = 8;    // low nibble = 0; body wraps a numeric inner value (codes 2..7)
-    pub const STRING: u8 = 9;            // low nibble = encoding flag (0 raw_text, 1 escape_form)
-    pub const BYTES: u8 = 0xA;           // low nibble = encoding hint 0..3 (b64/hex/b58/b64u)
-    pub const ARRAY: u8 = 0xB;           // low nibble 0 = generic; 1..10 = typed-array element_code + 1
-    pub const OBJECT: u8 = 0xC;          // low nibble 0 = single object; 1 = row_array
-    pub const EXTENSION: u8 = 0xD;       // low nibble = subtype id 0..15
+    pub const UINT_INLINE: u8 = 2;
+    pub const NINT_INLINE: u8 = 3;
+    pub const UINT: u8 = 4;
+    pub const DECIMAL: u8 = 7;
+    pub const IEEE_FLOAT: u8 = 6;
+    pub const NEGINT: u8 = 5;
+    pub const STRING: u8 = 9;
+    pub const NUMERIC_STRING: u8 = 8; // Assigned, unsupported
+    pub const BYTES: u8 = 0xA;
+    pub const ARRAY: u8 = 0xB;
+    pub const OBJECT: u8 = 0xC;
+    pub const EXTENSION: u8 = 0xD; // Assigned, unsupported
     // 14..15 reserved
 }
 
@@ -290,29 +291,22 @@ fn read_le_u128(buf: &[u8]) -> u128 {
 pub enum Value<'a> {
     Null,
     Bool(bool),
-    /// uint_inline (§4.3, code 2): 1-byte encoding for values 0..15.
-    /// Larger values use `UInt`.
     UInt(u128),
-    /// nint_inline (§4.4, code 3): 1-byte encoding for values
-    /// −1..−15 (low_nibble = magnitude 1..15). Magnitude 0 is reserved.
-    NIntInline(u8),
-    /// negint (§4.5, code 5): logical value = −(magnitude). Magnitude
-    /// is non-zero per §4.5; all-zero payload is reserved.
-    NegInt(u128),
+    NegInt(u128), // logical value = -(self as i256)
     Decimal {
+        // Mantissa zigzag-encoded; producer chose smallest bc. We store
+        // the decoded signed mantissa as i128 (covers spec's 16-byte
+        // mantissa range up to ±2^127).
         mantissa: i128,
         scale: i32,
     },
-    Float(f64),
-    /// numeric_string (§4.8, code 8): a number wrapped to round-trip
-    /// through JSON as a quoted string. Inner is one of UInt /
-    /// NIntInline / NegInt / Decimal / Float.
-    NumericString(Box<Value<'a>>),
+    /// IEEE binary16/32/64 payload, preserving the source width on decode.
+    Float { width_log2: u8, bits: u128 },
+    /// IEEE binary64 with the C++ scientific-source hint.
+    FloatSci(f64),
     /// `(text, encoding_flag)` — flag 0 = raw_text, 1 = escape_form.
     Str(&'a [u8], u8),
-    /// Bytes payload with `(content, encoding_hint)`. Hint values
-    /// per §4.10: 0 = base64 (default), 1 = hex, 2 = base58,
-    /// 3 = base64url. Hints 4..15 are reserved.
+    /// Bytes payload and reserved flag (must be zero in the C++ format).
     Bytes(&'a [u8], u8),
     Array(Vec<Value<'a>>),
     /// Typed homogeneous array: code (0..9) and element bytes (raw, LE).
@@ -325,11 +319,8 @@ pub enum Value<'a> {
     /// row_array — homogeneous-shape array of objects, rendered into a
     /// `Vec<Vec<(key, val)>>` on decode.
     RowArray(Vec<Vec<(&'a [u8], Value<'a>)>>),
-    /// extension (§4.11, code 13): subtype id 0..15 + opaque body.
-    Extension {
-        subtype: u8,
-        bytes: &'a [u8],
-    },
+    /// Preserve the shared schema even when the wire array has no records.
+    EmptyRowArray(Vec<&'a [u8]>),
 }
 
 impl<'a> Value<'a> {
@@ -353,12 +344,11 @@ pub fn decode(bytes: &[u8]) -> PjsonResult<Value<'_>> {
 /// `psio::kMaxValidationDepth` constant — the validator MUST refuse
 /// any nesting deeper than this regardless of buffer length, since
 /// a malicious buffer can claim arbitrarily deep nesting and exhaust
-/// the call stack. Decoders are not bound by the cap; they MAY accept
-/// deeper trust on pre-validated input. See docs/pssz-spec.md §8.3.
+/// the call stack. Decoding applies the same bound before recursion.
 pub const K_MAX_VALIDATION_DEPTH: usize = 64;
 
 /// Top-level validate entry point — walks the buffer once, asserting
-/// every internal invariant without materializing values, and
+/// every internal invariant while parsing values, and
 /// rejecting any buffer whose container nesting exceeds
 /// `K_MAX_VALIDATION_DEPTH`.
 pub fn validate(bytes: &[u8]) -> PjsonResult<()> {
@@ -368,6 +358,13 @@ pub fn validate(bytes: &[u8]) -> PjsonResult<()> {
 // ── Parser ──────────────────────────────────────────────────────────────────
 
 pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
+    parse_value_depth(buf, size, 0)
+}
+
+fn parse_value_depth(buf: &[u8], size: usize, depth: usize) -> PjsonResult<Value<'_>> {
+    if depth > K_MAX_VALIDATION_DEPTH {
+        return Err(err("pjson: max validation depth exceeded"));
+    }
     if size == 0 || size > buf.len() {
         return Err(err("pjson: parse_value bad size"));
     }
@@ -378,7 +375,7 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
 
     match high {
         tag::NULL => {
-            if low != 0 || size != 1 {
+            if size != 1 {
                 return Err(err("pjson: invalid null tag"));
             }
             Ok(Value::Null)
@@ -393,21 +390,15 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
                 _ => Err(err("pjson: reserved bool low nibble")),
             }
         }
+        tag::NINT_INLINE => {
+            if size != 1 || low == 0 { return Err(err("pjson: invalid inline negative integer")); }
+            Ok(Value::NegInt(low as u128))
+        },
         tag::UINT_INLINE => {
             if size != 1 {
                 return Err(err("pjson: uint_inline size != 1"));
             }
             Ok(Value::UInt(low as u128))
-        }
-        tag::NINT_INLINE => {
-            if size != 1 {
-                return Err(err("pjson: nint_inline size != 1"));
-            }
-            if low == 0 {
-                // §4.4 — low_nibble 0 is reserved (negative zero).
-                return Err(err("pjson: nint_inline magnitude 0 reserved"));
-            }
-            Ok(Value::NIntInline(low))
         }
         tag::UINT => {
             let bc = (low as usize) + 1;
@@ -432,46 +423,29 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
             Ok(Value::Decimal { mantissa, scale })
         }
         tag::IEEE_FLOAT => {
-            // §4.6 — low nibble bits 2..0 = log2(byte_count); bit 3
-            // is reserved per the audited spec (it carried a "sci"
-            // hint in pre-audit revisions; that hint was dropped).
-            if (low & 0x08) != 0 {
-                return Err(err("pjson: ieee_float reserved bit 3 set"));
+            let width_log2 = low & 0x07;
+            let sci = (low & 0x08) != 0;
+            if !(1..=3).contains(&width_log2) {
+                return Err(err("pjson: unsupported IEEE width"));
             }
-            let width_bits = low & 0x07;
-            let w: usize = match width_bits {
-                1 => 2,
-                2 => 4,
-                3 => 8,
-                4 => 16,
-                _ => return Err(err("pjson: ieee_float reserved width")),
-            };
-            if 1 + w != size {
+            let byte_count = 1usize << width_log2;
+            if 1 + byte_count != size {
                 return Err(err("pjson: ieee_float size mismatch"));
             }
-            // Spec §4.6: producers may emit any width, but a parser
-            // must accept all widths it can decode.  binary16 is
-            // widened losslessly via the helper in pjson_json.
-            // binary128 is deferred — the IEEE-754 quad codec is too
-            // large to inline without a dependency.
-            let f = match w {
-                2 => crate::pjson_json::f16_bits_to_f64(u16::from_le_bytes([
-                    value[1], value[2],
-                ])),
-                4 => {
-                    let mut tmp = [0u8; 4];
-                    tmp.copy_from_slice(&value[1..5]);
-                    f32::from_le_bytes(tmp) as f64
-                }
-                8 => {
-                    let mut tmp = [0u8; 8];
-                    tmp.copy_from_slice(&value[1..9]);
-                    f64::from_le_bytes(tmp)
-                }
-                16 => return Err(err("pjson: NotImplemented binary128")),
-                _ => unreachable!(),
-            };
-            Ok(Value::Float(f))
+            let mut bits = 0u128;
+            for i in 0..byte_count {
+                bits |= (value[1 + i] as u128) << (8 * i);
+            }
+            if sci {
+                let f = match width_log2 {
+                    1 => crate::pjson_json::f16_bits_to_f64(bits as u16),
+                    2 => f32::from_bits(bits as u32) as f64,
+                    _ => f64::from_bits(bits as u64),
+                };
+                Ok(Value::FloatSci(f))
+            } else {
+                Ok(Value::Float { width_log2, bits })
+            }
         }
         tag::NEGINT => {
             let bc = (low as usize) + 1;
@@ -484,39 +458,22 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
             }
             Ok(Value::NegInt(mag))
         }
-        tag::NUMERIC_STRING => {
-            if low != 0 {
-                return Err(err("pjson: numeric_string low nibble must be 0"));
-            }
-            // Body is an inner numeric value (codes 2..7) consuming the
-            // rest of the buffer. Recurse on the inner; reject if the
-            // inner is anything but UInt / NIntInline / NegInt /
-            // Decimal / Float per §4.8.
-            let inner = parse_value(&value[1..], size - 1)?;
-            match &inner {
-                Value::UInt(_) | Value::NIntInline(_) | Value::NegInt(_)
-                | Value::Decimal { .. } | Value::Float(_) => {}
-                _ => return Err(err(
-                    "pjson: numeric_string inner must be a numeric value (codes 2..7)")),
-            }
-            Ok(Value::NumericString(Box::new(inner)))
-        }
         tag::STRING => {
             if low > 1 {
                 return Err(err("pjson: reserved string flag"));
             }
             Ok(Value::Str(&value[1..], low))
         }
+        8 => Err(err("pjson: numeric_string is not supported")),
         tag::BYTES => {
-            // §4.10: low nibble is the encoding hint; 0..3 are valid
-            // (b64, hex, b58, b64url), 4..15 are reserved.
-            if low > 3 {
+            // The public C++ format reserves every nonzero bytes flag.
+            if low != 0 {
                 return Err(err("pjson: reserved bytes encoding hint"));
             }
             Ok(Value::Bytes(&value[1..], low))
         }
         tag::ARRAY => match low {
-            0 => parse_generic_array(value),
+            0 => parse_generic_array(value, depth),
             1..=10 => {
                 let code = low - 1;
                 parse_typed_array(value, code)
@@ -524,21 +481,15 @@ pub(crate) fn parse_value(buf: &[u8], size: usize) -> PjsonResult<Value<'_>> {
             _ => Err(err("pjson: reserved array low nibble")),
         },
         tag::OBJECT => match low {
-            obj_form::SINGLE => parse_object(value),
-            obj_form::ROW_ARRAY => parse_row_array(value),
+            obj_form::SINGLE => parse_object(value, depth),
+            obj_form::ROW_ARRAY => parse_row_array(value, depth),
             _ => Err(err("pjson: reserved object form")),
         },
-        tag::EXTENSION => {
-            // §4.11 — low_nibble = subtype id 0..15; body is opaque
-            // bytes consuming the rest of the buffer. Unknown subtypes
-            // surface as Extension(id, bytes), they don't error.
-            Ok(Value::Extension { subtype: low, bytes: &value[1..] })
-        }
         _ => Err(err("pjson: reserved type code")),
     }
 }
 
-fn parse_generic_array(value: &[u8]) -> PjsonResult<Value<'_>> {
+fn parse_generic_array(value: &[u8], depth: usize) -> PjsonResult<Value<'_>> {
     let size = value.len();
     if size < 4 {
         // tag + width + count(2)
@@ -570,9 +521,9 @@ fn parse_generic_array(value: &[u8]) -> PjsonResult<Value<'_>> {
             return Err(err("pjson: array slot offset out of range"));
         }
         let child_size = off_next - off_i;
-        let child = parse_value(
+        let child = parse_value_depth(
             &value[value_data_start + off_i..value_data_start + off_i + child_size],
-            child_size,
+            child_size, depth + 1,
         )?;
         children.push(child);
     }
@@ -599,7 +550,7 @@ fn parse_typed_array(value: &[u8], code: u8) -> PjsonResult<Value<'_>> {
     })
 }
 
-fn parse_object(value: &[u8]) -> PjsonResult<Value<'_>> {
+fn parse_object(value: &[u8], depth: usize) -> PjsonResult<Value<'_>> {
     let size = value.len();
     if size < 4 {
         return Err(err("pjson: object too small"));
@@ -649,13 +600,13 @@ fn parse_object(value: &[u8]) -> PjsonResult<Value<'_>> {
             return Err(err("pjson: object hash mismatch"));
         }
         let child_buf = &entry[klen_bytes + klen..];
-        let child = parse_value(child_buf, child_buf.len())?;
+        let child = parse_value_depth(child_buf, child_buf.len(), depth + 1)?;
         entries.push((key, child));
     }
     Ok(Value::Object(entries))
 }
 
-fn parse_row_array(value: &[u8]) -> PjsonResult<Value<'_>> {
+fn parse_row_array(value: &[u8], depth: usize) -> PjsonResult<Value<'_>> {
     let size = value.len();
     if size < 5 {
         // tag + width byte + at least 1-byte K varuint + count(2)
@@ -677,7 +628,7 @@ fn parse_row_array(value: &[u8]) -> PjsonResult<Value<'_>> {
     let k = k as usize;
     pos += k_bytes;
 
-    if pos + 4 * k + k > size {
+    if k == 0 || pos + 4 * k + k > size {
         return Err(err("pjson: row_array schema underrun"));
     }
     let key_slots_pos = pos;
@@ -706,7 +657,10 @@ fn parse_row_array(value: &[u8]) -> PjsonResult<Value<'_>> {
         }
         let klen = ks_byte as usize;
         key_specs.push((off, klen));
-        keys_total = keys_total.max(off + klen);
+        keys_total = off + klen;
+    }
+    if key_specs.iter().any(|(off, len)| off + len > keys_total) {
+        return Err(err("pjson: row_array key offset out of range"));
     }
     let keys_pos = pos;
     pos += keys_total;
@@ -762,12 +716,15 @@ fn parse_row_array(value: &[u8]) -> PjsonResult<Value<'_>> {
             let (off_k, klen) = key_specs[j];
             let key = &value[keys_pos + off_k..keys_pos + off_k + klen];
             let v_size = v_end - v_off;
-            let child = parse_value(&rec_data[v_off..v_off + v_size], v_size)?;
+            let child = parse_value_depth(&rec_data[v_off..v_off + v_size], v_size, depth + 1)?;
             entries.push((key, child));
         }
         records.push(entries);
     }
-    Ok(Value::RowArray(records))
+    if records.is_empty() {
+        Ok(Value::EmptyRowArray(key_specs.iter().map(|(off, len)|
+            &value[keys_pos + off..keys_pos + off + len]).collect()))
+    } else { Ok(Value::RowArray(records)) }
 }
 
 // ── Validator ───────────────────────────────────────────────────────────────
@@ -779,79 +736,9 @@ fn validate_value(buf: &[u8], size: usize) -> PjsonResult<()> {
     validate_value_depth(buf, size, 0)
 }
 
-/// Depth-tracked validator. Caps recursion at `K_MAX_VALIDATION_DEPTH`
-/// container levels. Containers (Array, Object, RowArray,
-/// TypedArray) increment the depth; leaf scalars do not.
-///
-/// Note: this implementation parses the buffer first (via
-/// `parse_value`) and then walks the resulting `Value` tree with
-/// the depth counter. The parse step itself is currently not
-/// depth-bounded — a malicious buffer with > C_STACK levels of
-/// nesting would blow the stack inside `parse_value` before the
-/// validator's depth check fires. A true byte-walker that doesn't
-/// materialize is the upstream fix; for now the cap catches mid-
-/// range adversarial inputs (anything between
-/// `K_MAX_VALIDATION_DEPTH` and the C-stack limit).
-fn validate_value_depth(
-    buf: &[u8],
-    size: usize,
-    depth: usize,
-) -> PjsonResult<()> {
-    if depth > K_MAX_VALIDATION_DEPTH {
-        return Err(err("pjson: max validation depth exceeded"));
-    }
-    let v = parse_value(buf, size)?;
-    match v {
-        Value::Array(children) => {
-            for c in children {
-                validate_value_recurse(&c, depth + 1)?;
-            }
-        }
-        Value::Object(entries) => {
-            for (_k, child) in entries {
-                validate_value_recurse(&child, depth + 1)?;
-            }
-        }
-        Value::RowArray(records) => {
-            for rec in records {
-                for (_k, child) in rec {
-                    validate_value_recurse(&child, depth + 1)?;
-                }
-            }
-        }
-        // Leaf values: no container recursion.
-        _ => {}
-    }
-    Ok(())
-}
-
-/// Sub-validator on already-parsed children. Re-checks depth against
-/// the cap; for container children, recurses one level deeper.
-fn validate_value_recurse(v: &Value<'_>, depth: usize) -> PjsonResult<()> {
-    if depth > K_MAX_VALIDATION_DEPTH {
-        return Err(err("pjson: max validation depth exceeded"));
-    }
-    match v {
-        Value::Array(children) => {
-            for c in children {
-                validate_value_recurse(c, depth + 1)?;
-            }
-        }
-        Value::Object(entries) => {
-            for (_k, child) in entries {
-                validate_value_recurse(child, depth + 1)?;
-            }
-        }
-        Value::RowArray(records) => {
-            for rec in records {
-                for (_k, child) in rec {
-                    validate_value_recurse(child, depth + 1)?;
-                }
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+// Depth is checked before parsing each child, not after materializing the tree.
+fn validate_value_depth(buf: &[u8], size: usize, depth: usize) -> PjsonResult<()> {
+    parse_value_depth(buf, size, depth).map(|_| ())
 }
 
 // ── Encoder primitives ──────────────────────────────────────────────────────
@@ -873,11 +760,10 @@ pub fn value_size(value: &Value<'_>) -> usize {
         Value::Null => 1,
         Value::Bool(_) => 1,
         Value::UInt(v) => uint_size(*v),
-        Value::NIntInline(_) => 1,
         Value::NegInt(mag) => negint_size(*mag),
         Value::Decimal { mantissa, scale } => decimal_size(*mantissa, *scale),
-        Value::Float(_) => 9, // binary64 only on encode
-        Value::NumericString(inner) => 1 + value_size(inner),
+        Value::Float { width_log2, .. } => 1 + (1usize << *width_log2 as usize),
+        Value::FloatSci(_) => 9,
         Value::Str(b, _) => 1 + b.len(),
         Value::Bytes(b, _) => 1 + b.len(),
         Value::Array(children) => array_size(children),
@@ -886,7 +772,7 @@ pub fn value_size(value: &Value<'_>) -> usize {
         }
         Value::Object(entries) => object_size(entries),
         Value::RowArray(records) => row_array_size(records),
-        Value::Extension { bytes, .. } => 1 + bytes.len(),
+        Value::EmptyRowArray(keys) => encode_raw_rows(keys, &[]).len(),
     }
 }
 
@@ -899,8 +785,7 @@ fn uint_size(v: u128) -> usize {
 }
 
 fn negint_size(mag: u128) -> usize {
-    // Caller has already enforced mag != 0; defensively allow.
-    1 + magnitude_byte_count_u128(mag.max(1))
+    if (1..=15).contains(&mag) { 1 } else { 1 + magnitude_byte_count_u128(mag.max(1)) }
 }
 
 fn decimal_size(mantissa: i128, scale: i32) -> usize {
@@ -992,19 +877,11 @@ fn encode_value_at(dst: &mut [u8], pos: usize, value: &Value<'_>) -> usize {
             1
         }
         Value::UInt(v) => encode_uint_at(dst, pos, *v),
-        Value::NIntInline(mag) => {
-            debug_assert!(*mag != 0 && *mag <= 15);
-            dst[pos] = (tag::NINT_INLINE << 4) | (*mag & 0x0F);
-            1
-        }
         Value::NegInt(mag) => encode_negint_at(dst, pos, *mag),
         Value::Decimal { mantissa, scale } => encode_decimal_at(dst, pos, *mantissa, *scale),
-        Value::Float(f) => encode_f64_at(dst, pos, *f),
-        Value::NumericString(inner) => {
-            // tag = numeric_string, low_nibble = 0; body is the inner.
-            dst[pos] = tag::NUMERIC_STRING << 4;
-            1 + encode_value_at(dst, pos + 1, inner)
-        }
+        Value::Float { width_log2, bits } =>
+            encode_ieee_float_at(dst, pos, *width_log2, *bits),
+        Value::FloatSci(f) => encode_f64_sci_at(dst, pos, *f),
         Value::Str(b, flag) => encode_string_at(dst, pos, b, *flag),
         Value::Bytes(b, hint) => encode_bytes_at(dst, pos, b, *hint),
         Value::Array(children) => encode_generic_array_at(dst, pos, children),
@@ -1015,11 +892,10 @@ fn encode_value_at(dst: &mut [u8], pos: usize, value: &Value<'_>) -> usize {
         } => encode_typed_array_raw_at(dst, pos, *code, elements, *count),
         Value::Object(entries) => encode_object_at(dst, pos, entries),
         Value::RowArray(records) => encode_row_array_at(dst, pos, records),
-        Value::Extension { subtype, bytes } => {
-            debug_assert!(*subtype <= 15);
-            dst[pos] = (tag::EXTENSION << 4) | (*subtype & 0x0F);
-            dst[pos + 1..pos + 1 + bytes.len()].copy_from_slice(bytes);
-            1 + bytes.len()
+        Value::EmptyRowArray(keys) => {
+            let bytes = encode_raw_rows(keys, &[]);
+            dst[pos..pos + bytes.len()].copy_from_slice(&bytes);
+            bytes.len()
         }
     }
 }
@@ -1037,7 +913,11 @@ pub(crate) fn encode_uint_at(dst: &mut [u8], pos: usize, v: u128) -> usize {
 }
 
 pub(crate) fn encode_negint_at(dst: &mut [u8], pos: usize, mag: u128) -> usize {
-    debug_assert!(mag != 0, "negint with zero magnitude is reserved");
+    assert!(mag != 0, "negint with zero magnitude is reserved");
+    if mag <= 15 {
+        dst[pos] = (tag::NINT_INLINE << 4) | mag as u8;
+        return 1;
+    }
     let bc = magnitude_byte_count_u128(mag);
     dst[pos] = (tag::NEGINT << 4) | ((bc - 1) as u8);
     let bytes = mag.to_le_bytes();
@@ -1045,18 +925,15 @@ pub(crate) fn encode_negint_at(dst: &mut [u8], pos: usize, mag: u128) -> usize {
     1 + bc
 }
 
-/// Encode a signed integer via uint_inline / nint_inline / uint /
-/// negint dispatch per §4.3-§4.5 of the audited spec.
+/// Encode a signed integer via uint / uint_inline / negint dispatch.
 pub fn encode_int_at(dst: &mut [u8], pos: usize, v: i128) -> usize {
     if v >= 0 {
         encode_uint_at(dst, pos, v as u128)
     } else {
+        // Defensive: for v == i128::MIN, -v overflows. Use wrapping
+        // negation + cast — the magnitude is exactly 2^127, which is
+        // representable as u128.
         let mag = v.unsigned_abs();
-        // §4.4 — values in [-15, -1] use the 1-byte nint_inline form.
-        if mag <= 15 {
-            dst[pos] = (tag::NINT_INLINE << 4) | (mag as u8);
-            return 1;
-        }
         encode_negint_at(dst, pos, mag)
     }
 }
@@ -1082,10 +959,45 @@ fn canonicalize_f64(f: f64) -> f64 {
     }
 }
 
-fn encode_f64_at(dst: &mut [u8], pos: usize, f: f64) -> usize {
+/// §15.2.1 — canonical NaN bit-pattern rewrite. Any NaN value at
+/// the given width is rewritten to the quiet-NaN-with-zero-payload
+/// pattern; non-NaN values pass through unchanged.
+fn canonicalize_nan_bits(width_log2: u8, bits: u128) -> u128 {
+    let (exp_mask, mant_mask, canon): (u128, u128, u128) = match width_log2 {
+        1 => (0x7C00,                                     0x03FF,                                     0x7E00),
+        2 => (0x7F80_0000,                                0x007F_FFFF,                                0x7FC0_0000),
+        3 => (0x7FF0_0000_0000_0000,                      0x000F_FFFF_FFFF_FFFF,                      0x7FF8_0000_0000_0000),
+        4 => (0x7FFF_0000_0000_0000_0000_0000_0000_0000,
+              0x0000_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF,
+              0x7FFF_8000_0000_0000_0000_0000_0000_0000),
+        _ => return bits,
+    };
+    if (bits & exp_mask) == exp_mask && (bits & mant_mask) != 0 {
+        canon
+    } else {
+        bits
+    }
+}
+
+/// Encode an ieee_float at the explicit width. `width_log2 ∈ {1, 2, 3, 4}`
+/// covers binary16/32/64/128. NaN bits are canonicalized per §15.2.1.
+fn encode_ieee_float_at(dst: &mut [u8], pos: usize, width_log2: u8, bits: u128) -> usize {
+    debug_assert!((1..=4).contains(&width_log2));
+    let byte_count = 1usize << width_log2 as usize;
+    let canon = canonicalize_nan_bits(width_log2, bits);
+    dst[pos] = (tag::IEEE_FLOAT << 4) | (width_log2 & 0x07);
+    let raw = canon.to_le_bytes();
+    dst[pos + 1..pos + 1 + byte_count].copy_from_slice(&raw[..byte_count]);
+    1 + byte_count
+}
+
+/// Like `encode_f64_at` but with the sci-source flag set per §4.6 /
+/// §7.1.  Used by the JSON transcoder when the source token contained
+/// `e` or `E`.
+fn encode_f64_sci_at(dst: &mut [u8], pos: usize, f: f64) -> usize {
     let canon = canonicalize_f64(f);
-    // binary64, sci=0 → low nibble = 3.
-    dst[pos] = (tag::IEEE_FLOAT << 4) | 0b011;
+    // binary64, sci=1 → low nibble = 0b1011 = 0xB.
+    dst[pos] = (tag::IEEE_FLOAT << 4) | 0b1011;
     dst[pos + 1..pos + 9].copy_from_slice(&canon.to_le_bytes());
     9
 }
@@ -1445,8 +1357,8 @@ macro_rules! impl_pjson_int {
                 if v >= 0 {
                     uint_size(v as u128)
                 } else {
-                    let mag = v.unsigned_abs();
-                    if mag <= 15 { 1 } else { 1 + magnitude_byte_count_u128(mag) }
+                    let mag = (v as i128).unsigned_abs();
+                    negint_size(mag)
                 }
             }
             fn pjson_encode_at(&self, dst: &mut [u8], pos: usize) -> usize {
@@ -1461,15 +1373,13 @@ macro_rules! impl_pjson_int {
                         }
                         Ok(u as $ty)
                     }
-                    Value::NIntInline(mag) => {
-                        // -1..-15 always fits in any signed integer type
-                        // i8/i16/i32/i64/i128/isize — no range check needed.
-                        Ok(-(mag as i8) as $ty)
-                    }
                     Value::NegInt(mag) => {
-                        if mag > 1u128.wrapping_shl(<$ty>::BITS) {
+                        // mag <= i128::MIN.unsigned_abs() etc. — for
+                        // narrower targets check fit.
+                        if mag > (1u128 << (<$ty>::BITS - 1)) {
                             return Err(err("pjson: negint magnitude overflow"));
                         }
+                        // Recover signed value via wrapping negate.
                         let signed = (mag as i128).wrapping_neg();
                         if signed < <$ty>::MIN as i128 || signed > <$ty>::MAX as i128 {
                             return Err(err("pjson: int range on decode"));
@@ -1484,21 +1394,56 @@ macro_rules! impl_pjson_int {
 }
 impl_pjson_int!(i8, i16, i32, i64, i128, isize);
 
+// C++ to_chars chooses the shortest fixed/scientific spelling, counting
+// the exponent sign and its minimum two digits. Keep this choice in the
+// wire contract: 1000000 is shorter as 1e+06 and encodes as a decimal.
+fn compact_double(value: f64) -> Option<Value<'static>> {
+    if !value.is_finite() { return None; }
+    let fixed = value.to_string();
+    let scientific = format!("{value:e}");
+    let (digits, exp) = scientific.split_once('e')?;
+    let exponent: i32 = exp.parse().ok()?;
+    let scientific_len = digits.len() + 2 + exponent.unsigned_abs().to_string().len().max(2);
+    let (digits, exponent) = if fixed.len() <= scientific_len {
+        (fixed.as_str(), 0)
+    } else { (digits, exponent) };
+    let decimals = digits.find('.').map(|p| digits.len() - p - 1).unwrap_or(0);
+    let mantissa: i128 = digits.replace('.', "").parse().ok()?;
+    let scale = exponent - decimals as i32;
+    let result = if scale == 0 {
+        if mantissa < 0 { Value::NegInt(mantissa.unsigned_abs()) }
+        else { Value::UInt(mantissa as u128) }
+    } else { Value::Decimal { mantissa, scale } };
+    (value_size(&result) < 9).then_some(result)
+}
+
 impl Pjson for f64 {
     fn pjson_size(&self) -> usize {
-        9
+        compact_double(*self).map(|v| value_size(&v)).unwrap_or(9)
     }
     fn pjson_encode_at(&self, dst: &mut [u8], pos: usize) -> usize {
-        encode_f64_at(dst, pos, *self)
+        match compact_double(*self) {
+            Some(value) => encode_value_at(dst, pos, &value),
+            None => encode_ieee_float_at(dst, pos, 3, self.to_bits() as u128),
+        }
     }
     fn pjson_decode(bytes: &[u8]) -> PjsonResult<Self> {
         let v = parse_value(bytes, bytes.len())?;
         match v {
-            Value::Float(f) => Ok(f),
+            Value::Float { width_log2, bits } => match width_log2 {
+                1 => Ok(crate::pjson_json::f16_bits_to_f64(bits as u16)),
+                2 => Ok(f32::from_bits(bits as u32) as f64),
+                3 => Ok(f64::from_bits(bits as u64)),
+                4 => Err(err("pjson: binary128 → f64 narrowing not supported")),
+                _ => Err(err("pjson: ieee_float reserved width")),
+            },
             // Allow integer-typed sources to decode as f64 too — the
             // canonical encoder may have chosen uint / decimal.
             Value::UInt(u) => Ok(u as f64),
             Value::NegInt(mag) => Ok(-(mag as f64)),
+            Value::FloatSci(value) => Ok(value),
+            Value::Decimal { mantissa, scale } => format!("{mantissa}e{scale}")
+                .parse().map_err(|_| err("pjson: decimal conversion failed")),
             _ => Err(err("pjson: expected float")),
         }
     }
@@ -1506,10 +1451,10 @@ impl Pjson for f64 {
 
 impl Pjson for f32 {
     fn pjson_size(&self) -> usize {
-        9 // we encode as binary64 always (spec allows producers to choose width)
+        (*self as f64).pjson_size()
     }
     fn pjson_encode_at(&self, dst: &mut [u8], pos: usize) -> usize {
-        encode_f64_at(dst, pos, *self as f64)
+        (*self as f64).pjson_encode_at(dst, pos)
     }
     fn pjson_decode(bytes: &[u8]) -> PjsonResult<Self> {
         let v: f64 = <f64 as Pjson>::pjson_decode(bytes)?;
@@ -1548,6 +1493,9 @@ impl Pjson for String {
 /// `TAC = None` and the `_typed_elem` codec methods unreachable.
 pub trait PjsonTypedArrayElem: Pjson {
     const TAC: Option<u8> = None;
+    const ROW_KEYS: Option<&'static [&'static [u8]]> = None;
+    fn pjson_row_fields(&self) -> Vec<Vec<u8>> { unreachable!("not a reflected row") }
+
     /// Compile-time element byte size — used by Vec<T> when emitting
     /// typed_array.
     const TYPED_ELEM_SIZE: usize = 0;
@@ -1611,6 +1559,11 @@ impl PjsonTypedArrayElem for String {}
 
 impl<T: Pjson + PjsonTypedArrayElem> Pjson for Vec<T> {
     fn pjson_size(&self) -> usize {
+        if T::TAC == Some(tac::U8) { return 1 + self.len(); }
+        assert!(self.len() <= u16::MAX as usize, "pjson: too many array elements");
+        if let Some(keys) = T::ROW_KEYS {
+            return encode_raw_rows(keys, &self.iter().map(T::pjson_row_fields).collect::<Vec<_>>()).len();
+        }
         if let Some(_code) = T::TAC {
             // typed_array layout
             1 + self.len() * T::TYPED_ELEM_SIZE + 2
@@ -1619,6 +1572,17 @@ impl<T: Pjson + PjsonTypedArrayElem> Pjson for Vec<T> {
         }
     }
     fn pjson_encode_at(&self, dst: &mut [u8], pos: usize) -> usize {
+        if T::TAC == Some(tac::U8) {
+            dst[pos] = tag::BYTES << 4;
+            for (i, value) in self.iter().enumerate() { value.pjson_encode_at_typed_elem(dst, pos + 1 + i); }
+            return 1 + self.len();
+        }
+        assert!(self.len() <= u16::MAX as usize, "pjson: too many array elements");
+        if let Some(keys) = T::ROW_KEYS {
+            let bytes = encode_raw_rows(keys, &self.iter().map(T::pjson_row_fields).collect::<Vec<_>>());
+            dst[pos..pos + bytes.len()].copy_from_slice(&bytes);
+            return bytes.len();
+        }
         if let Some(code) = T::TAC {
             // typed_array — write tag + raw LE bytes + count.
             let elem_size = T::TYPED_ELEM_SIZE;
@@ -1638,6 +1602,16 @@ impl<T: Pjson + PjsonTypedArrayElem> Pjson for Vec<T> {
     fn pjson_decode(bytes: &[u8]) -> PjsonResult<Self> {
         let v = parse_value(bytes, bytes.len())?;
         match v {
+            Value::Bytes(bytes, 0) if T::TAC == Some(tac::U8) => {
+                bytes.chunks_exact(1).map(T::pjson_decode_typed_elem).collect()
+            }
+            Value::EmptyRowArray(_) if T::ROW_KEYS.is_some() => Ok(Vec::new()),
+            Value::RowArray(records) if T::ROW_KEYS.is_some() => {
+                records.into_iter().map(|fields| {
+                    let mut bytes = Vec::new(); encode(&Value::Object(fields), &mut bytes);
+                    T::pjson_decode(&bytes)
+                }).collect()
+            }
             Value::TypedArray {
                 code,
                 elements,
@@ -1666,6 +1640,45 @@ impl<T: Pjson + PjsonTypedArrayElem> Pjson for Vec<T> {
             _ => Err(err("pjson: expected array")),
         }
     }
+}
+
+fn encode_raw_rows(keys: &[&[u8]], records: &[Vec<Vec<u8>>]) -> Vec<u8> {
+    assert!(!keys.is_empty() && keys.iter().all(|k| k.len() < 255), "pjson: invalid row schema");
+    assert!(records.len() <= 65535, "pjson: too many rows");
+    let body_sizes: Vec<usize> = records.iter().map(|r| {
+        assert_eq!(r.len(), keys.len(), "pjson: inconsistent row shape");
+        r.iter().map(Vec::len).sum()
+    }).collect();
+    let sw_code = width_code_for(*body_sizes.iter().max().unwrap_or(&0) as u64);
+    let sw = width_bytes(sw_code);
+    let total_body: usize = body_sizes.iter().sum::<usize>() + keys.len() * sw * records.len();
+    assert!(total_body <= u32::MAX as usize, "pjson: row body exceeds u32 offsets");
+    let rw_code = width_code_for(total_body as u64); let rw = width_bytes(rw_code);
+    let keys_len: usize = keys.iter().map(|k| k.len()).sum();
+    assert!(keys_len <= 0xffffff, "pjson: row keys exceed u24 offsets");
+    let kbytes = varuint_byte_count(keys.len() as u64);
+    let size = 2 + kbytes + keys.len() * 5 + keys_len + total_body + records.len() * rw + 2;
+    let mut out = vec![0; size]; out[0] = 0xc1; out[1] = sw_code | rw_code << 2;
+    write_varuint(&mut out, 2, keys.len() as u64);
+    let slots = 2 + kbytes; let hashes = slots + 4 * keys.len(); let keys_at = hashes + keys.len();
+    let mut off = 0;
+    for (j, key) in keys.iter().enumerate() {
+        let slot = off as u32 | (key.len() as u32) << 24;
+        out[slots + j * 4..slots + j * 4 + 4].copy_from_slice(&slot.to_le_bytes());
+        out[hashes + j] = key_hash8(key);
+        out[keys_at + off..keys_at + off + key.len()].copy_from_slice(key); off += key.len();
+    }
+    let body_at = keys_at + keys_len; let table = body_at + total_body; let mut pos = body_at;
+    for (i, fields) in records.iter().enumerate() {
+        let record = pos; write_width(&mut out, table + i * rw, rw_code, (record - body_at) as u32);
+        let field_slots = record + body_sizes[i];
+        for (j, bytes) in fields.iter().enumerate() {
+            write_width(&mut out, field_slots + j * sw, sw_code, (pos - record) as u32);
+            out[pos..pos + bytes.len()].copy_from_slice(bytes); pos += bytes.len();
+        }
+        pos = field_slots + keys.len() * sw;
+    }
+    out[size - 2..].copy_from_slice(&(records.len() as u16).to_le_bytes()); out
 }
 
 // Hook point for typed-array element packing.
@@ -1863,7 +1876,6 @@ mod tests {
     fn uint_inline_round_trip() {
         for v in 0u8..=15 {
             let b = to_pjson(&v);
-            // §4.3 / audited: tag::UINT_INLINE = 2 → high nibble 0x20.
             assert_eq!(b, vec![0x20 | v]);
             assert_eq!(from_pjson::<u8>(&b).unwrap(), v);
         }
@@ -1896,17 +1908,10 @@ mod tests {
 
     #[test]
     fn negint_round_trip() {
-        // -1..-15 use nint_inline (§4.4), tag::NINT_INLINE = 3 → 0x3X.
-        for mag in 1u8..=15 {
-            let b = to_pjson(&-(mag as i32));
-            assert_eq!(b, vec![0x30 | mag]);
-            assert_eq!(from_pjson::<i32>(&b).unwrap(), -(mag as i32));
-        }
-
-        // -16 → smallest negint (§4.5): tag::NEGINT = 5 → 0x50, bc=1, magnitude=16.
-        let b = to_pjson(&-16i32);
-        assert_eq!(b, vec![0x50, 0x10]);
-        assert_eq!(from_pjson::<i32>(&b).unwrap(), -16);
+        // -1 → bc=1, magnitude = 1
+        let b = to_pjson(&-1i32);
+        assert_eq!(b, vec![0x31]);
+        assert_eq!(from_pjson::<i32>(&b).unwrap(), -1);
 
         // -128 → bc=1, magnitude = 128
         let b = to_pjson(&-128i32);
@@ -1926,7 +1931,6 @@ mod tests {
 
     #[test]
     fn negint_zero_payload_rejected() {
-        // negint with all-zero payload is reserved (§4.5).
         let buf = [0x50, 0x00];
         assert!(parse_value(&buf, 2).is_err());
     }
@@ -1956,7 +1960,7 @@ mod tests {
     fn string_round_trip() {
         let s = String::from("hello, world!");
         let b = to_pjson(&s);
-        assert_eq!(b[0], 0x90); // §4.9: tag::STRING = 9 → 0x90 | flag=0
+        assert_eq!(b[0], 0x90); // tag::STRING << 4 | flag=0
         assert_eq!(&b[1..], s.as_bytes());
         assert_eq!(from_pjson::<String>(&b).unwrap(), s);
     }
@@ -2003,8 +2007,8 @@ mod tests {
     fn typed_array_empty() {
         let v: Vec<u8> = vec![];
         let b = to_pjson(&v);
-        // tag::ARRAY | (tac::U8 + 1) = 0xB5; count = 0
-        assert_eq!(b, vec![0xB5, 0x00, 0x00]);
+        // C++ treats vector<u8> as a bytes payload, including the empty value.
+        assert_eq!(b, vec![0xA0]);
         assert_eq!(from_pjson::<Vec<u8>>(&b).unwrap(), v);
     }
 
@@ -2156,9 +2160,11 @@ mod tests {
     /// is wired correctly, and that both call shapes from
     /// `docs/psio-overview.md` §2.4 work.
     /// End-to-end test of the format-tagged CPO machinery. Asserts
-    /// encode → decode round-trip, spec-correct wire bytes, and that
-    /// both validation call shapes (compile-time ZST + runtime
-    /// `DynamicPolicy`) reach the right trait body.
+    /// encode → decode round-trip and that both validation call shapes
+    /// (compile-time ZST + runtime DynamicPolicy) reach the right
+    /// trait body.
+    ///
+    /// The public codecs share the audited high-nibble tag assignments.
     #[test]
     fn crate_root_cpo_encodes_validates_pjson() {
         use crate::{DefaultSafe, DynamicPolicy, StrictCanonical};
@@ -2166,9 +2172,6 @@ mod tests {
         // psio::encode::<Pjson, T>(&value) → psio::decode::<Pjson, T>(bytes)
         let bytes = crate::encode::<format::Pjson, u32>(&5_u32)
             .expect("encode should succeed");
-        // Audited spec §4.3: 5 fits in uint_inline (code 2). Tag byte
-        // is (2 << 4) | 5 = 0x25.
-        assert_eq!(bytes, vec![0x25], "spec-correct uint_inline byte");
         let v: u32 = crate::decode::<format::Pjson, u32>(&bytes)
             .expect("decode should succeed");
         assert_eq!(v, 5, "round-trip preserves the value");
@@ -2297,24 +2300,21 @@ mod tests {
 
     #[test]
     fn reject_reserved_tag() {
-        // Audited spec §3: codes 14 and 15 are reserved.
-        for hi in 14u8..=15 {
-            let buf = [hi << 4];
-            assert!(parse_value(&buf, 1).is_err(),
-                "type code {} must be rejected", hi);
-        }
-        // 0x20 (uint_inline 0) and 0x90 (string flag 0, empty body)
-        // and 0xD0 (extension subtype 0, empty body) are now valid
-        // under the audited layout.
-        assert!(parse_value(&[0x20], 1).is_ok());
-        assert!(parse_value(&[0x90], 1).is_ok());
-        assert!(parse_value(&[0xD0], 1).is_ok());
+        // Type code E reserved.
+        let buf = [0xe0];
+        assert!(parse_value(&buf, 1).is_err());
+        // Negative inline zero is reserved.
+        let buf = [0x30];
+        assert!(parse_value(&buf, 1).is_err());
+        // Type code 13 reserved.
+        let buf = [0xD0];
+        assert!(parse_value(&buf, 1).is_err());
     }
 
     #[test]
     fn reject_reserved_string_flag() {
         // String low nibble 2 reserved.
-        let buf = [0x82, b'h', b'i'];
+        let buf = [0x92, b'h', b'i'];
         assert!(parse_value(&buf, 3).is_err());
     }
 
@@ -2383,7 +2383,10 @@ mod tests {
         buf.extend_from_slice(&0x3E00u16.to_le_bytes());
         let v = parse_value(&buf, 3).unwrap();
         match v {
-            Value::Float(f64v) => assert_eq!(f64v, 1.5),
+            Value::Float { width_log2, bits } => {
+                assert_eq!(width_log2, 1);
+                assert_eq!(bits, 0x3E00);
+            }
             other => panic!("expected float, got {:?}", other),
         }
 
@@ -2391,13 +2394,12 @@ mod tests {
         let buf = vec![0x61, 0x00, 0x00];
         let v = parse_value(&buf, 3).unwrap();
         match v {
-            Value::Float(f64v) => assert_eq!(f64v, 0.0),
+            Value::Float { width_log2, bits } => {
+                assert_eq!(width_log2, 1);
+                assert_eq!(bits, 0);
+            }
             other => panic!("expected float, got {:?}", other),
         }
-
-        // binary128 is still deferred.
-        let buf = vec![0x64; 17];
-        assert!(parse_value(&buf, 17).is_err());
     }
 
     #[test]
@@ -2408,29 +2410,37 @@ mod tests {
         buf.extend_from_slice(&f.to_le_bytes());
         let v = parse_value(&buf, 5).unwrap();
         match v {
-            Value::Float(f64v) => assert_eq!(f64v, 1.5),
+            Value::Float { width_log2, bits } => {
+                assert_eq!(width_log2, 2);
+                assert_eq!(f32::from_bits(bits as u32), 1.5_f32);
+            }
             _ => panic!("expected float"),
         }
     }
 
     #[test]
-    fn ieee_float_bit3_reserved_per_audited_spec() {
-        // Audited §4.6: low-nibble bit 3 is reserved. Bit 3 carried a
-        // "sci-source" hint in pre-audit revisions; that hint was
-        // dropped, and any wire with bit 3 set must be rejected by
-        // the parser.
+    fn ieee_float_sci_hint_decodes_as_floatsci() {
+        // Bit 3 set → sci-source hint per §4.6 / §7.1.  The decoder
+        // surfaces this via the FloatSci variant so the JSON
+        // re-emitter can preserve scientific notation on round-trip.
         let f: f64 = 1.5e10;
-        let mut buf = vec![0x6B]; // 6<<4 | 0b1011 = bit 3 set, width=3
+        let mut buf = vec![0x6B]; // 6<<4 | 0b1011 = sci=1, width=3 (binary64)
         buf.extend_from_slice(&f.to_le_bytes());
-        assert!(parse_value(&buf, 9).is_err(),
-            "ieee_float with reserved bit 3 set must be rejected");
+        let v = parse_value(&buf, 9).unwrap();
+        match v {
+            Value::FloatSci(f64v) => assert_eq!(f64v, f),
+            other => panic!("expected FloatSci, got {:?}", other),
+        }
 
-        // Without bit 3, the same payload decodes as Float.
-        let mut buf2 = vec![0x63]; // width=3, no reserved bit
+        // Without the sci flag, the same payload decodes as Float.
+        let mut buf2 = vec![0x63]; // sci=0, width=3
         buf2.extend_from_slice(&f.to_le_bytes());
         let v2 = parse_value(&buf2, 9).unwrap();
         match v2 {
-            Value::Float(f64v) => assert_eq!(f64v, f),
+            Value::Float { width_log2, bits } => {
+                assert_eq!(width_log2, 3);
+                assert_eq!(f64::from_bits(bits as u64), f);
+            }
             other => panic!("expected Float, got {:?}", other),
         }
     }

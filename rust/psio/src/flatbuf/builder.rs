@@ -32,7 +32,7 @@ struct FieldLoc {
 ///
 /// # Example
 /// ```
-/// use psio1::flatbuf::{FbBuilder, FbPack};
+/// use psio::flatbuf::{FbBuilder, FbPack};
 ///
 /// let data = 42u32.fb_pack();
 /// assert!(!data.is_empty());

@@ -15,8 +15,8 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use psio1::capnp::pack::CapnpPack;
-//! use psio1::capnp::unpack::CapnpUnpack;
+//! use psio::capnp::pack::CapnpPack;
+//! use psio::capnp::unpack::CapnpUnpack;
 //!
 //! let msg = my_struct.capnp_pack();
 //! let restored = MyStruct::capnp_unpack(&msg).unwrap();

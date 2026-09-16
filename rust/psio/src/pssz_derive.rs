@@ -228,7 +228,7 @@ macro_rules! pssz_struct {
     // DWNC view accessors via a generated trait (same orphan-rule
     // workaround as ssz_struct!). Users `use ${Ty}PsszAccessors;`.
     (@view_dwnc $Ty:ident { $($field:ident : $FTy:ty),+ }) => {
-        paste::paste! {
+        $crate::__paste::paste! {
             pub trait [<$Ty PsszAccessors>]<'a, F: $crate::pssz::PsszFormat> {
                 $( fn $field(&self) -> $crate::pssz_view::PsszView<'a, $FTy, F>; )+
             }
@@ -266,7 +266,7 @@ macro_rules! pssz_struct {
 
     // Extensible-struct view accessors via generated trait.
     (@view $Ty:ident { $($field:ident : $FTy:ty),+ }) => {
-        paste::paste! {
+        $crate::__paste::paste! {
             pub trait [<$Ty PsszAccessors>]<'a, F: $crate::pssz::PsszFormat> {
                 $( fn $field(&self) -> $crate::pssz_view::PsszView<'a, $FTy, F>; )+
             }

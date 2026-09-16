@@ -1,3 +1,9 @@
+> **Draft semantics; tag numbering adopted.** The public C++, Rust and JS/TS
+> codecs now use the audited high-nibble assignments as wire revision 2.
+> The full draft includes features and canonicalization rules not yet implemented
+> by the public codecs. [Wire contract](wire-contract.md) and
+> [compatibility](compatibility.md) define the supported release profile.
+
 # pjson v1 spec compliance matrix
 
 This file is the load-bearing record of "does our implementation
@@ -56,11 +62,12 @@ config). Both forms are part of the approved API.
 | `psio::pjson::format::Pjson` format tag | n/a | ✅ live; CPO emits spec-correct bytes (e.g. `encode::<Pjson, u32>(&5)` → `[0x25]`) | exercised by `crate_root_cpo_encodes_validates_pjson` |
 | Tag-code layout (`UINT_INLINE=2`, `NINT_INLINE=3`, `NEGINT=5`, `DECIMAL=7`, `NUMERIC_STRING=8`, `STRING=9`, `EXTENSION=13`, plus `IEEE_FLOAT` bit-3 reserved) | ✅ | ✅ live in `psio::pjson` | matches audited `docs/pjson-spec.md` |
 | `Value::NIntInline` / `NumericString` / `Extension` variants | ✅ | ✅ added to `psio::pjson::Value` enum | `FloatSci` variant removed (sci-source hint dropped from spec) |
-| Canonicalizing encoder (C-002, F-008, etc.) | ✅ in driver | ❌ pending kernel migration | reference-only |
+| Canonicalizing encoder (C-002, F-008, etc.) | ✅ in driver | ⚠️ partial in lib — NaN canonicalization on encode at all 4 widths is live; width minimization / decimal picker still pending | covered by `conformance_corpus` test (105/105 byte-exact round-trip) |
 | Strict-canonical validator (C-006) | ✅ in driver as `validate_canonical` | ❌ pending kernel migration; will live as the `P = StrictCanonical` body of `validate<Pjson, T, P>` | reference-only |
 | Width minimization helpers (`canonical_float_width`, `f64_to_f16_exact`, `f128_bits_to_f64_exact`) | ✅ in driver | ❌ pending kernel migration | reference-only |
 | Decimal-vs-ieee picker (D-007) | ✅ in driver (JSON ingress) | ❌ pending kernel migration | reference-only |
-| NaN canonicalization (`canonicalize_nan_bits`) | ✅ in driver | ❌ pending kernel migration | reference-only |
+| NaN canonicalization (`canonicalize_nan_bits`) | ✅ in driver | ✅ live in `psio::pjson` at all 4 widths via `encode_ieee_float_at` | covered by `conformance_corpus` (`canonical_nan_{f16,f32,f64,f128}` fixtures) |
+| IEEE float width preservation (binary16/32/64/128) on the wire | ✅ in driver | ✅ live — `Value::Float { width_log2, bits }` carries source width | corpus `ieee_float_f{16,32,64,128}_*` round-trip byte-exact |
 | `decimal_to_f64_exact` (D-007 internals) | ✅ in driver | ❌ pending kernel migration | reference-only |
 | Dual-projection (NS-002): `numeric_string_as_numeric` / `_as_string` | ✅ helpers in driver, unit-tested | ❌ not in lib | reference-only |
 | Random-access (RA-002): `row_array_get` | ✅ helper in driver, unit-tested | ❌ not in lib | reference-only |

@@ -750,3 +750,31 @@ TEST_CASE("validate [bson]: depth cap rejects deeply-nested documents",
       psio::bson{}, std::span<const char>{doc});
    REQUIRE(!st.ok());
 }
+
+namespace nested_frac_validation {
+struct Inner { std::string text; };
+PSIO_REFLECT(Inner, text)
+struct Outer { Inner head; std::string tail; };
+PSIO_REFLECT(Outer, head, tail)
+struct VectorOuter { std::vector<std::string> rows; std::string tail; };
+PSIO_REFLECT(VectorOuter, rows, tail)
+}
+
+TEST_CASE("frac validation measures nested payloads before siblings", "[frac][validate][nested]")
+{
+   using namespace nested_frac_validation;
+   auto bytes = psio::encode(psio::frac32{}, Outer{{"abc"}, "tail"});
+   REQUIRE(psio::validate<Outer>(psio::frac32{}, std::span<const char>{bytes}).ok());
+   // Move the tail into the preceding nested record's string payload.
+   std::uint32_t overlap = 14; // slot 6 + 14 = 20, before nested payload end 23
+   std::memcpy(bytes.data() + 6, &overlap, sizeof(overlap));
+   REQUIRE_FALSE(psio::validate<Outer>(psio::frac32{}, std::span<const char>{bytes}).ok());
+
+   auto vector_bytes = psio::encode(psio::frac32{}, VectorOuter{{"hello"}, "tail"});
+   REQUIRE(psio::validate<VectorOuter>(psio::frac32{}, std::span<const char>{vector_bytes}).ok());
+   // Point to the vector's string prefix. A slot-table-only size calculation
+   // would allow this alias; measuring the last element must reject it.
+   std::uint32_t vector_overlap = 12; // slot 6 + 12 = 18
+   std::memcpy(vector_bytes.data() + 6, &vector_overlap, sizeof(vector_overlap));
+   REQUIRE_FALSE(psio::validate<VectorOuter>(psio::frac32{}, std::span<const char>{vector_bytes}).ok());
+}

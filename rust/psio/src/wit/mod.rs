@@ -17,9 +17,9 @@
 //! # Usage
 //!
 //! ```
-//! use psio1::wit::pack::WitPack;
-//! use psio1::wit::view::{WitUnpack, WitView};
-//! use psio1::wit::mutation::WitMut;
+//! use psio::wit::pack::WitPack;
+//! use psio::wit::view::{WitUnpack, WitView};
+//! use psio::wit::mutation::WitMut;
 //!
 //! // Pack a value
 //! let buf = 42u32.wit_pack();

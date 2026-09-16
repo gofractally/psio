@@ -33,6 +33,46 @@ using psio::pjson_object;
 using psio::pjson_value;
 using psio::pjson_view;
 
+struct TagRevisionSigned { std::int64_t value; };
+PSIO_REFLECT(TagRevisionSigned, value)
+
+TEST_CASE("pjson revision 2 tags agree across dynamic typed view and JSON APIs", "[pjson][wire]")
+{
+   CHECK(psio::pjson_wire_revision == 2);
+   for (std::int64_t n = -15; n <= 15; ++n)
+   {
+      const auto tag = static_cast<std::uint8_t>(n < 0 ? 0x30 | -n : 0x20 | n);
+      const std::vector<std::uint8_t> expected{tag};
+      auto bytes = pjson::encode(pjson_value{n});
+      CHECK(bytes == expected);
+      CHECK(pjson::encode(pjson_value{pjson_number{n, 0}}) == expected);
+      REQUIRE(pjson::validate(expected));
+      CHECK(pjson::decode(expected).as<std::int64_t>() == n);
+      pjson_view v{bytes.data(), bytes.size()};
+      CHECK(v.as_int64() == n);
+      CHECK(v.as_int128() == n);
+      CHECK(v.as_double() == double(n));
+      CHECK(psio::pjson_to_json(bytes) == std::to_string(n));
+#if defined(PSIO_HAVE_SIMDJSON) && PSIO_HAVE_SIMDJSON
+      auto json_object = psio::pjson_json::from_json("{\"value\":" + std::to_string(n) + "}");
+      pjson_view json_view{json_object.data(), json_object.size()};
+      CHECK(json_view["value"].as_int64() == n);
+      CHECK(json_view["value"].data()[0] == tag);
+#endif
+      auto typed = psio::from_struct(TagRevisionSigned{n});
+      pjson_view object{typed.data(), typed.size()};
+      CHECK(object["value"].as_int64() == n);
+      CHECK(object["value"].data()[0] == tag);
+   }
+   // 0x35 intentionally has the new meaning; no legacy auto-detection.
+   CHECK(pjson::decode(std::vector<std::uint8_t>{0x35}).as<std::int64_t>() == -5);
+   for (auto bytes : {std::vector<std::uint8_t>{0x30}, {0x35, 0}, {0x80, 0x25}, {0xd0}})
+   {
+      CHECK_FALSE(pjson::validate(bytes));
+      CHECK_FALSE(pjson::try_decode(bytes));
+   }
+}
+
 namespace {
    pjson_value rt(const pjson_value& v)
    {
@@ -163,28 +203,27 @@ TEST_CASE("pjson wire: uint sign-dispatch and raw LE magnitude",
 
 TEST_CASE("pjson wire: negint sign-dispatch", "[pjson][wire][negint]")
 {
-   // Negative values use t_negint (tag high nibble = 7); payload is
+   // Negative values use t_negint (tag high nibble = 5); payload is
    // |value| as raw LE unsigned bytes.
    //
-   //   v = -1   → mag=1,   bc=1 → 0x70 0x01
-   //   v = -128 → mag=128, bc=1 → 0x70 0x80
-   //   v = -256 → mag=256, bc=2 → 0x71 0x00 0x01
+   //   v = -1   → inline magnitude 1 → 0x31
+   //   v = -128 → mag=128, bc=1 → 0x50 0x80
+   //   v = -256 → mag=256, bc=2 → 0x51 0x00 0x01
    {
       auto b = pjson::encode(pjson_value{static_cast<std::int64_t>(-1)});
-      REQUIRE(b.size() == 2);
-      CHECK(b[0] == 0x70);
-      CHECK(b[1] == 0x01);
+      REQUIRE(b.size() == 1);
+      CHECK(b[0] == 0x31);
    }
    {
       auto b = pjson::encode(pjson_value{static_cast<std::int64_t>(-128)});
       REQUIRE(b.size() == 2);
-      CHECK(b[0] == 0x70);
+      CHECK(b[0] == 0x50);
       CHECK(b[1] == 0x80);
    }
    {
       auto b = pjson::encode(pjson_value{static_cast<std::int64_t>(-256)});
       REQUIRE(b.size() == 3);
-      CHECK(b[0] == 0x71);
+      CHECK(b[0] == 0x51);
       CHECK(b[1] == 0x00);
       CHECK(b[2] == 0x01);
    }
@@ -193,7 +232,7 @@ TEST_CASE("pjson wire: negint sign-dispatch", "[pjson][wire][negint]")
       std::int64_t v = std::numeric_limits<std::int64_t>::min();
       auto b = pjson::encode(pjson_value{v});
       REQUIRE(b.size() == 9);
-      CHECK(b[0] == 0x77);
+      CHECK(b[0] == 0x57);
       auto d = pjson::decode({b.data(), b.size()});
       REQUIRE(d.holds<std::int64_t>());
       CHECK(d.as<std::int64_t>() == v);
@@ -204,12 +243,12 @@ TEST_CASE("pjson wire: negint with all-zero payload is rejected",
           "[pjson][wire][negint]")
 {
    // §4.4: negint with all-zero payload is reserved; decoders must
-   // reject. Construct {0x70, 0x00} by hand — there is no logical
+   // reject. Construct {0x50, 0x00} by hand — there is no logical
    // value that produces this on encode.
-   std::uint8_t bad[] = {0x70, 0x00};
+   std::uint8_t bad[] = {0x50, 0x00};
    CHECK_FALSE(pjson::validate({bad, sizeof(bad)}));
    // 16-byte negative-zero is also reserved.
-   std::uint8_t bad16[17] = {0x7F};  // bc=16, all zeros
+   std::uint8_t bad16[17] = {0x5F};  // bc=16, all zeros
    CHECK_FALSE(pjson::validate({bad16, sizeof(bad16)}));
 }
 
@@ -328,7 +367,7 @@ TEST_CASE("pjson wire: 16-byte negint encodes large negative __int128",
    auto b = pjson::encode(pjson_value{pjson_number{v, 0}});
    // Tag = (t_negint << 4) | (bc-1). 2^100 = 13 bytes (since 100/8 +
    // 1 = 13).
-   CHECK(b[0] == ((0x07 << 4) | (13 - 1)));
+   CHECK(b[0] == ((0x05 << 4) | (13 - 1)));
    REQUIRE(pjson::validate({b.data(), b.size()}));
    auto d = pjson::decode({b.data(), b.size()});
    REQUIRE(d.holds<pjson_number>());
@@ -1267,3 +1306,24 @@ TEST_CASE("struct_to_json: T → JSON", "[pjson][json][typed]")
    CHECK(back.score == u.score);
 }
 #endif
+
+TEST_CASE("pjson rejects row schema outside buffer", "[pjson][validation]")
+{
+   const std::vector<std::uint8_t> bad{0xc1,0,1,0xff,0xff,0xff,0xfe,0,0,0};
+   CHECK_FALSE(pjson::validate(bad));
+   CHECK_FALSE(pjson::try_decode(bad));
+}
+TEST_CASE("pjson decode limits recursion before materialization", "[pjson][validation]")
+{
+   std::vector<std::uint8_t> bytes{0};
+   for (unsigned n = 0; n < 1000; ++n) {
+      auto code = psio::pjson_detail::width_code_for(bytes.size());
+      std::vector<std::uint8_t> outer{0xb0, code};
+      outer.insert(outer.end(), bytes.begin(), bytes.end());
+      outer.resize(outer.size() + code + 1, 0);
+      outer.push_back(1); outer.push_back(0);
+      bytes = std::move(outer);
+   }
+   CHECK_FALSE(pjson::validate(bytes));
+   CHECK_FALSE(pjson::try_decode(bytes));
+}

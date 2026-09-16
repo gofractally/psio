@@ -6,7 +6,7 @@
 //! # Fracpack (default format)
 //!
 //! ```
-//! use psio1::{Pack, Unpack, Result};
+//! use psio::{Pack, Unpack, Result};
 //!
 //! #[derive(Pack, Unpack, PartialEq, Debug)]
 //! #[fracpack(fracpack_mod = "psio")]
@@ -23,7 +23,7 @@
 //! let packed: Vec<u8> = orig.packed();
 //! let unpacked = Example::unpacked(&packed)?;
 //! assert_eq!(orig, unpacked);
-//! # Ok::<(), psio1::Error>(())
+//! # Ok::<(), psio::Error>(())
 //! ```
 
 // Core fracpack format (re-exported at top level for convenience)
@@ -92,3 +92,7 @@ pub mod dynamic_view;
 // Schema tooling
 pub mod schema_export;
 pub mod schema_import;
+
+// Macro dependencies are resolved through this crate for downstream consumers.
+#[doc(hidden)]
+pub use paste as __paste;

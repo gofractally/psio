@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```
-//! use psio1::{Pack, Unpack, FracViewType};
+//! use psio::{Pack, Unpack, FracViewType};
 //!
 //! // Zero-cost view (caller must ensure data is valid)
 //! let data = "hello".to_string().packed();
@@ -242,6 +242,18 @@ impl<'a> FracViewType<'a> for &'a [u8] {
     }
 }
 
+// Vector elements use complete top-level values in the C++ wire contract.
+#[inline(always)]
+fn view_vector_element<'a, T: FracViewType<'a>>(data: &'a [u8], fixed_pos: &mut u32) -> T::View {
+    if T::VARIABLE_SIZE {
+        let offset = read_u32_at(data, *fixed_pos as usize);
+        let target = *fixed_pos + offset;
+        *fixed_pos += 4;
+        return T::view_at(data, target);
+    }
+    T::view_embedded(data, fixed_pos)
+}
+
 // ── Vec<T> → FracVecView<'a, T> ──
 
 /// Zero-copy view of a fracpack `Vec<T>`.
@@ -278,7 +290,7 @@ impl<'a, T: FracViewType<'a>> FracVecView<'a, T> {
 
     pub fn get(&self, index: usize) -> T::View {
         let mut fixed_pos = self.start + (index as u32) * <T as Unpack>::FIXED_SIZE;
-        T::view_embedded(self.data, &mut fixed_pos)
+        view_vector_element::<T>(self.data, &mut fixed_pos)
     }
 
     pub fn iter(&self) -> FracVecViewIter<'a, T> {
@@ -333,7 +345,7 @@ impl<'a, T: FracViewType<'a>> Iterator for FracVecViewIter<'a, T> {
             return None;
         }
         self.remaining -= 1;
-        Some(T::view_embedded(self.data, &mut self.fixed_pos))
+        Some(view_vector_element::<T>(self.data, &mut self.fixed_pos))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {

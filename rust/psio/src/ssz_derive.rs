@@ -8,7 +8,7 @@
 //!
 //! Usage:
 //! ```ignore
-//! use psio1::ssz::{SszPack, SszUnpack};
+//! use psio::ssz::{SszPack, SszUnpack};
 //!
 //! struct Validator {
 //!     pubkey: [u8; 48],
@@ -325,7 +325,7 @@ macro_rules! ssz_struct {
     // The macro re-exports with a `pub use` shim so `use MyModule::*`
     // brings both the struct and the accessor trait along.
     (@view $Ty:ident { $($field:ident : $FTy:ty),+ }) => {
-        paste::paste! {
+        $crate::__paste::paste! {
             pub trait [<$Ty SszAccessors>]<'a> {
                 $(
                     fn $field(&self) -> $crate::ssz_view::SszView<'a, $FTy>;

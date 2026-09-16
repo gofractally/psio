@@ -8,14 +8,12 @@ license = "MIT"
 [lib]
 path = "src/lib.rs"
 
-# Spec-conformance driver — self-contained reference implementation
-# of the pjson v1 spec (docs/pjson-spec.md). Reads a fixture JSON on
-# stdin, produces conformance verdicts. Has no dependency on the
-# pre-audit pjson library code; once Phase 1+ stabilizes, the library
-# will be migrated to use this implementation as its kernel.
+# Historical draft-spec reference, excluded from normal library builds.
+# It does not define the public C++ wire contract.
 [[bin]]
 name = "pjson_conformance_driver"
 path = "src/bin/pjson_conformance_driver.rs"
+required-features = ["historical-draft-reference"]
 
 [dependencies]
 custom_error = "1.9.2"
@@ -29,7 +27,7 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 serde_json = { version = "1.0.135",
                 features = ["preserve_order", "arbitrary_precision"] }
 serde-aux = "4.5"
-psio-macros = { path = "../psio-macros" }
+psio-macros = { version = "0.1.0", path = "../psio-macros" }
 paste = "1"
 
 # Competitor Rust libraries, gated behind features.  Default build
@@ -43,6 +41,7 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [features]
 default = []
+historical-draft-reference = []
 bench_ethereum_ssz = ["dep:ethereum_ssz", "dep:ethereum_ssz_derive",
                        "dep:ssz_types", "dep:typenum"]
 bench_ssz_rs       = ["dep:ssz_rs"]

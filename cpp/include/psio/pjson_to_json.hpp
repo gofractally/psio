@@ -110,6 +110,10 @@ namespace psio {
                out.append((low & 1) ? "true" : "false",
                           (low & 1) ? 4 : 5);
                return;
+            case t_nint_inline:
+               if (size != 1 || low == 0) throw std::runtime_error("pjson_to_json: invalid inline negative integer");
+               out.push_back('-');
+               [[fallthrough]];
             case t_uint_inline:
                // Value 0..15.
                if (low < 10)

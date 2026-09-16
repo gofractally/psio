@@ -393,12 +393,10 @@ namespace psio {
             }
             else
             {
-               // Generic-array body: tag + Σ(child sizes) + 4*N slot
-               // table + 2 count.
-               std::size_t total = 1u + 4u * v.size() + 2u;
+               std::size_t vd = 0;
                for (const auto& x : v)
-                  total += typed_field_size_dispatch<E>(x);
-               return total;
+                  vd += typed_field_size_dispatch<E>(x);
+               return 2u + vd + width_bytes(width_code_for(vd)) * v.size() + 2u;
             }
          }
          else if constexpr (Reflected<F>)
@@ -494,22 +492,24 @@ namespace psio {
             }
             else
             {
-               // Generic-array form: [tag][value_data][slot[N]][count].
+               // Same adaptive-width layout as the dynamic array encoder.
                std::size_t start = pos;
                dst[pos++] = static_cast<std::uint8_t>(t_array << 4);
                std::size_t N  = v.size();
                std::size_t vd = 0;
                for (const auto& x : v)
                   vd += typed_field_size_dispatch<E>(x);
+               const auto code = width_code_for(vd);
+               const auto sw = width_bytes(code);
+               dst[pos++] = code;
                std::size_t value_data_start = pos;
                std::size_t slot_table_pos   = value_data_start + vd;
-               std::size_t count_pos        = slot_table_pos + 4 * N;
+               std::size_t count_pos        = slot_table_pos + sw * N;
                for (std::size_t i = 0; i < N; ++i)
                {
                   std::uint32_t off =
                      static_cast<std::uint32_t>(pos - value_data_start);
-                  write_u32_le(dst + slot_table_pos + i * 4,
-                               pack_slot(off, 0));
+                  write_width(dst + slot_table_pos + i * sw, code, off);
                   pos += typed_field_encode<E>(dst, pos, v[i]);
                }
                dst[count_pos]     =

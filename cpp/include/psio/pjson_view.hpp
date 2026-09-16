@@ -90,6 +90,7 @@ namespace psio {
          {
             case t_null:        return kind::null;
             case t_bool:        return kind::boolean;
+            case t_nint_inline:
             case t_uint_inline:
             case t_uint:
             case t_negint:      return kind::integer;
@@ -211,6 +212,10 @@ namespace psio {
             }
          }
          std::uint8_t t = data_[0] >> 4;
+         if (t == t_nint_inline) {
+            if (size_ != 1 || !(data_[0] & 15)) throw std::runtime_error("pjson_view: invalid inline negative integer");
+            return -static_cast<std::int64_t>(data_[0] & 15);
+         }
          if (t == t_uint_inline) return static_cast<std::int64_t>(data_[0] & 0x0F);
          if (t == t_uint)
          {
@@ -261,6 +266,7 @@ namespace psio {
       {
          using namespace pjson_detail;
          std::uint8_t t = data_[0] >> 4;
+         if (t == t_nint_inline) return as_int64();
          if (t == t_uint_inline)
             return static_cast<__int128>(data_[0] & 0x0F);
          if (t == t_uint)

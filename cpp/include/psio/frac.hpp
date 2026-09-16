@@ -2321,8 +2321,16 @@ namespace psio {
          }
          else if constexpr (is_std_vector_v<T>)
          {
+            using E = typename T::value_type;
             const std::uint32_t n = read_word<W>(src, pos);
-            return pos + W + n;
+            if constexpr (is_fixed_v<E>)
+               return pos + W + n;
+            else
+            {
+               if (n == 0) return pos + W;
+               const std::size_t last_slot = pos + n;
+               return payload_end<W, E>(src, last_slot + read_word<W>(src, last_slot), end);
+            }
          }
          else if constexpr (is_std_array_v<T>)
          {
@@ -2347,18 +2355,10 @@ namespace psio {
          }
          else if constexpr (is_std_optional_v<T>)
          {
-            // Top-level optional uses [W-byte slot]; size depends on
-            // the slot. Validators only invoke payload_end on
-            // *embedded* optionals via record fields, where slot
-            // semantics differ — but the parent record advances
-            // expected_payload_pos using this helper. Conservative
-            // answer: if slot==0/1 the optional has no heap payload
-            // (it sits in the slot itself). If slot is an offset, the
-            // payload is the inner V at pos+slot. For our use case
-            // (record-field optional pointing to heap), the heap
-            // payload IS the inner V — recurse.
             using V = typename T::value_type;
-            return payload_end<W, V>(src, pos, end);
+            const auto slot = read_word<W>(src, pos);
+            if (slot <= 1) return pos + W;
+            return payload_end<W, V>(src, pos + slot, end);
          }
          else if constexpr (is_std_variant_v<T>)
          {
@@ -2415,26 +2415,37 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            // Variable record: walk the record's u16 header + fixed_
-            // region + heap by following the same logic as the
-            // validator. To keep payload_end O(1), use the validator's
-            // computed end — the safe upper bound is `end`. The
-            // record's true byte length is computed by the walker
-            // separately; for monotonicity tracking we conservatively
-            // advance expected_payload_pos to `end` if we can't
-            // measure.
-            //
-            // Practical case: nested records as record-field heap
-            // payloads. Walk the header to find fixed_region; then
-            // walk variable fields' offsets to find the latest
-            // payload tail. For simplicity (and correctness for
-            // monotonicity) report `end` — this disables monotonicity
-            // checks against THIS specific payload's siblings, which
-            // is acceptable since we still validated the inner
-            // contents.
-            (void)src;
-            (void)pos;
-            return end;
+            // The caller has validated this record. Measure its actual tail;
+            // returning the parent's end incorrectly rejects every following
+            // sibling payload as overlapping the nested record.
+            using R = ::psio::reflect<T>;
+            std::size_t cursor = pos + (::psio::is_dwnc_v<T> ? 0u : 2u);
+            std::size_t tail = cursor;
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               ([&] {
+                  using F = typename R::template member_type<Is>;
+                  using eff = typename ::psio::effective_annotations_for<
+                     T, F, R::template member_pointer<Is>>::value_t;
+                  if constexpr (!::psio::has_as_override_v<eff> && is_fixed_v<F>)
+                     cursor += fixed_size_of<F>();
+                  else
+                  {
+                     const auto slot_pos = cursor;
+                     const auto slot = read_word<W>(src, cursor);
+                     cursor += W;
+                     if constexpr (::psio::has_as_override_v<eff>)
+                        tail = end; // opaque adapter payload has no typed size walker
+                     else if constexpr (is_std_optional_v<F>)
+                     {
+                        if (slot > 1)
+                           tail = std::max(tail, payload_end<W, typename F::value_type>(src, slot_pos + slot, end));
+                     }
+                     else if (slot != 0)
+                        tail = std::max(tail, payload_end<W, F>(src, slot_pos + slot, end));
+                  }
+               }(), ...);
+            }(std::make_index_sequence<R::member_count>{});
+            return std::max(cursor, tail);
          }
          else
          {

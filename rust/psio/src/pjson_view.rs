@@ -74,7 +74,7 @@ impl<'a> View<'a> {
     }
     #[inline(always)]
     pub fn is_negint(&self) -> bool {
-        self.type_code() == tag::NEGINT
+        matches!(self.type_code(), tag::NINT_INLINE | tag::NEGINT)
     }
     #[inline(always)]
     pub fn is_string(&self) -> bool {
@@ -174,6 +174,12 @@ impl<'a> View<'a> {
                     return Err(PjsonError("pjson view: int overflow"));
                 }
                 Ok(u as i128)
+            }
+            tag::NINT_INLINE => {
+                if self.data.len() != 1 || self.low_nibble() == 0 {
+                    return Err(PjsonError("pjson view: invalid inline negative integer"));
+                }
+                Ok(-(self.low_nibble() as i128))
             }
             tag::NEGINT => {
                 let bc = self.low_nibble() as usize + 1;

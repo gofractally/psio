@@ -198,7 +198,7 @@ fn read_offset_u32<F: PsszFormat>(src: &[u8]) -> u32 {
     }
 }
 
-/// Entry point matching C++ `psio1::pssz_view_of<T, F>(buf)`.
+/// Entry point matching C++ `psio::pssz_view_of<T, F>(buf)`.
 pub fn pssz_view_of<'a, T: ?Sized, F: PsszFormat>(buf: &'a [u8]) -> PsszView<'a, T, F> {
     PsszView::new(buf)
 }

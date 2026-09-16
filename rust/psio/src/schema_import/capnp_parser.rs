@@ -1352,7 +1352,7 @@ mod tests {
     #[test]
     #[ignore]
     fn test_bench_schemas() {
-        let input = include_str!("../../../../cpp/benchmarks/adapters/bench_schemas.capnp");
+        let input = include_str!("../../tests/fixtures/bench_schemas.capnp");
         let file = parse_capnp(input).unwrap();
 
         // Should have: Point, Token, UserProfile, LineItem, Order, SensorReading

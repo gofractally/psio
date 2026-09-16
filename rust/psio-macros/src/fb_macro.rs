@@ -85,7 +85,7 @@ fn pre_create_tokens(
     let stmt = match cls {
         FbFieldClass::Text => {
             quote! {
-                let #off_var = if #field_expr.is_empty() { 0u32 } else { b.create_string(&#field_expr) };
+                let #off_var = b.create_string(&#field_expr);
             }
         }
         FbFieldClass::VecScalar => {
@@ -311,8 +311,9 @@ fn gen_fb_pack(
         }
     }
 
-    // Add fields to table (smallest alignment first for back-to-front packing)
-    let add_stmts: Vec<_> = field_infos.iter().map(|(i, ident, _, cls)| {
+    // Match the C++ encoder's reverse declaration order. FlatBuffers permits
+    // other layouts, but psio promises deterministic cross-language bytes.
+    let add_stmts: Vec<_> = field_infos.iter().rev().map(|(i, ident, _, cls)| {
         let field_expr = quote!(self.#ident);
         let slot = *i as u16;
         add_field_tokens(cls, &field_expr, slot, off_vars[*i].as_ref())

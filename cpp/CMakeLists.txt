@@ -30,7 +30,12 @@ add_library(psio
    src/stub.cpp
 )
 
-target_include_directories(psio PUBLIC include)
+add_library(psio::psio ALIAS psio)
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+target_include_directories(psio PUBLIC
+   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_features(psio PUBLIC cxx_std_23)
 
 # xxhash — vendored single-header at external/xxhash/xxhash.h.  pjson
@@ -38,7 +43,8 @@ target_compile_features(psio PUBLIC cxx_std_23)
 # digest hash.  XXH_INLINE_ALL is defined at include sites so no
 # separate compilation unit is needed.
 target_include_directories(psio PUBLIC
-   ${CMAKE_CURRENT_SOURCE_DIR}/external/xxhash)
+   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/xxhash>
+   $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/psio/external>)
 
 # simdjson — optional. Powers psio::pjson::from_json (JSON text →
 # pjson-binary). When available, callers get the SIMD stage-1 scan;
@@ -59,9 +65,9 @@ endif()
 find_package(Boost REQUIRED)
 target_link_libraries(psio PUBLIC Boost::headers)
 
-# Exception-optional build. The generic API (validate returning
-# codec_status) works under -fno-exceptions; only the opt-in .or_throw()
-# helper disappears.
+# Controls exception helper declarations. A complete -fno-exceptions profile
+# is not yet supported: some headers still contain unguarded throws and
+# codec_exception references. See docs/compatibility.md at the repository root.
 option(PSIO_EXCEPTIONS_ENABLED "Enable exception-throwing helpers" ON)
 if(PSIO_EXCEPTIONS_ENABLED)
    target_compile_definitions(psio PUBLIC PSIO_EXCEPTIONS_ENABLED=1)
@@ -91,6 +97,29 @@ if(PSIO_ENABLE_TOOLS AND NOT CMAKE_SYSTEM_NAME STREQUAL "WASI")
    add_subdirectory(tools)
 endif()
 
-# Spec conformance driver — always built (small, self-contained, used
-# by tools/run-conformance.sh and CI).  See conformance/CMakeLists.txt.
-add_subdirectory(conformance)
+# Public-library conformance fixtures and optional historical draft driver.
+option(PSIO_ENABLE_REFERENCE_DRIVER "Build the historical pjson spec reference driver" OFF)
+if(PSIO_ENABLE_REFERENCE_DRIVER OR PSIO_ENABLE_TESTS)
+   add_subdirectory(conformance)
+endif()
+
+install(TARGETS psio EXPORT psioTargets
+   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY include/psio DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES external/xxhash/xxhash.h
+   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psio/external)
+set(PSIO_CONFIG_SIMDJSON ${simdjson_FOUND})
+configure_package_config_file(cmake/psioConfig.cmake.in
+   ${CMAKE_CURRENT_BINARY_DIR}/psioConfig.cmake
+   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psio)
+write_basic_package_version_file(
+   ${CMAKE_CURRENT_BINARY_DIR}/psioConfigVersion.cmake
+   VERSION 0.1.0 COMPATIBILITY SameMajorVersion)
+install(EXPORT psioTargets NAMESPACE psio::
+   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psio)
+install(FILES
+   ${CMAKE_CURRENT_BINARY_DIR}/psioConfig.cmake
+   ${CMAKE_CURRENT_BINARY_DIR}/psioConfigVersion.cmake
+   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psio)

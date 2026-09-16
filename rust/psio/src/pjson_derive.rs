@@ -23,6 +23,13 @@ macro_rules! pjson_struct {
     };
 
     (@impl $Ty:ident { $($field:ident : $FTy:ty),+ }) => {
+        impl $crate::pjson::PjsonTypedArrayElem for $Ty {
+            const ROW_KEYS: Option<&'static [&'static [u8]]> =
+                Some(&[$(stringify!($field).as_bytes()),+]);
+            fn pjson_row_fields(&self) -> Vec<Vec<u8>> {
+                vec![$($crate::pjson::to_pjson(&self.$field)),+]
+            }
+        }
         impl $crate::pjson::Pjson for $Ty {
             fn pjson_size(&self) -> usize {
                 use $crate::pjson::{self, Pjson};
@@ -192,7 +199,7 @@ macro_rules! pjson_struct {
 
     // Generate <Ty>PjsonAccessors trait + canonical-template view.
     (@view $Ty:ident { $($field:ident : $FTy:ty),+ }) => {
-        paste::paste! {
+        $crate::__paste::paste! {
             #[allow(non_camel_case_types, dead_code)]
             pub trait [<$Ty PjsonAccessors>]<'a> {
                 $( fn $field(&self) -> $crate::pjson::PjsonResult<$FTy>; )+

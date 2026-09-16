@@ -1,3 +1,9 @@
+> **Draft semantics; tag numbering adopted.** The public C++, Rust and JS/TS
+> codecs now use the audited high-nibble assignments as wire revision 2.
+> The full draft includes features and canonicalization rules not yet implemented
+> by the public codecs. [Wire contract](wire-contract.md) and
+> [compatibility](compatibility.md) define the supported release profile.
+
 # pjson — Binary JSON with Zero-Copy Random Access
 
 For anyone looking for a more compact, faster, self-describing
@@ -7,10 +13,9 @@ Single-pass JSON transcoding at simdjson speeds (no intermediate
 value tree); canonical-typed field reads at memcpy speeds on the
 resulting binary.
 
-**Status:** v1 (stable). Reference implementation in
+**Historical status claim (superseded):** v1. Reference implementation in
 `cpp/include/psio/pjson*.hpp` (with a Rust port at
-`rust/psio/src/pjson*.rs`). This document is the
-normative specification.
+`rust/psio/src/pjson*.rs`). This draft is not the active normative specification.
 
 **Audience:** anyone implementing a pjson parser, encoder, or
 interoperable consumer in another language.

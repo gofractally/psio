@@ -455,7 +455,7 @@ impl Default for DynamicSchema {
 /// Builder for constructing a `DynamicSchema` incrementally.
 ///
 /// ```
-/// use psio1::dynamic_schema::{SchemaBuilder, DynamicType};
+/// use psio::dynamic_schema::{SchemaBuilder, DynamicType};
 ///
 /// let schema = SchemaBuilder::new()
 ///     .field_scalar("x", DynamicType::I32, 0)

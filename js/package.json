@@ -1,0 +1,38 @@
+{
+  "name": "psio",
+  "version": "0.1.0",
+  "description": "C++-compatible fracpack and pjson serialization for JavaScript and TypeScript",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist/*.js",
+    "dist/*.d.ts",
+    "dist/*.js.map",
+    "dist/*.d.ts.map",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/test/*.js",
+    "prepublishOnly": "npm run build",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "hash-wasm": "4.12.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

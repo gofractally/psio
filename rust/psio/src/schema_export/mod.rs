@@ -55,8 +55,8 @@ fn to_kebab_case(s: &str) -> String {
 /// # Example
 ///
 /// ```
-/// use psio1::dynamic_schema::{SchemaBuilder, DynamicType};
-/// use psio1::schema_export::to_wit_schema;
+/// use psio::dynamic_schema::{SchemaBuilder, DynamicType};
+/// use psio::schema_export::to_wit_schema;
 ///
 /// let schema = SchemaBuilder::new()
 ///     .field_scalar("x", DynamicType::I32, 0)

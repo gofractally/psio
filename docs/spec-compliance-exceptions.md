@@ -1,3 +1,9 @@
+> **Draft semantics; tag numbering adopted.** The public C++, Rust and JS/TS
+> codecs now use the audited high-nibble assignments as wire revision 2.
+> The full draft includes features and canonicalization rules not yet implemented
+> by the public codecs. [Wire contract](wire-contract.md) and
+> [compatibility](compatibility.md) define the supported release profile.
+
 # pjson v1 spec compliance — exceptions
 
 This file accompanies `spec-compliance.md` and accounts for every row

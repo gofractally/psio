@@ -1,0 +1,8 @@
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(Boost)
+if(@PSIO_CONFIG_SIMDJSON@)
+   find_dependency(simdjson CONFIG)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/psioTargets.cmake")
+check_required_components(psio)

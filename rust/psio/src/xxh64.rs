@@ -2,7 +2,7 @@
 //!
 //! Used for field-name hashing in dynamic schema lookups.
 //!
-//! The implementation mirrors `psio1::xxh64` from `capnp_view.hpp` exactly,
+//! The implementation mirrors `psio::xxh64` from `capnp_view.hpp` exactly,
 //! producing identical output for all inputs. All functions are `const fn`
 //! (the Rust equivalent of C++ constexpr).
 
@@ -14,7 +14,7 @@ const PRIME5: u64 = 0x27D4EB2F165667C5;
 
 /// Compute the xxh64 hash of a byte slice with a given seed (default 0).
 ///
-/// Produces output identical to `psio1::xxh64::hash(input, len, seed)` in C++.
+/// Produces output identical to `psio::xxh64::hash(input, len, seed)` in C++.
 pub const fn hash(input: &[u8], seed: u64) -> u64 {
     let len = input.len();
     if len >= 32 {

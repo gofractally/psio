@@ -15,7 +15,7 @@
 //! # Example use
 //!
 //! ```
-//! use psio1::{Pack, Unpack, Result};
+//! use psio::{Pack, Unpack, Result};
 //!
 //! #[derive(Pack, Unpack, PartialEq, Debug)]
 //! #[fracpack(fracpack_mod = "psio")]
@@ -36,7 +36,7 @@
 //! let unpacked = Example::unpacked(&packed)?;
 //!
 //! assert_eq!(orig, unpacked);
-//! # Ok::<(), psio1::Error>(())
+//! # Ok::<(), psio::Error>(())
 //! ```
 //!
 //! Note: `#[fracpack(fracpack_mod = "psio")]` is only needed when using the `psio`
@@ -222,7 +222,7 @@ pub(crate) fn consume_trailing_optional(
 /// the source.
 ///
 /// ```
-/// use psio1::{UnpackOwned, Error};
+/// use psio::{UnpackOwned, Error};
 ///
 /// pub fn get_unpacked<T: UnpackOwned>(packed: &[u8]) -> Result<T, Error> {
 ///     T::unpacked(packed)
@@ -252,7 +252,7 @@ pub trait Pack {
     /// Example:
     ///
     /// ```rust
-    /// use psio1::Pack;
+    /// use psio::Pack;
     ///
     /// fn convert(src: &(u32, String)) -> Vec<u8> {
     ///     let mut bytes = Vec::new();
@@ -271,7 +271,7 @@ pub trait Pack {
     /// Example:
     ///
     /// ```rust
-    /// use psio1::Pack;
+    /// use psio::Pack;
     ///
     /// fn packSomething(a: u32, b: &str) -> Vec<u8> {
     ///     (a, b).packed()
@@ -354,7 +354,7 @@ pub trait Unpack<'a>: Sized {
     /// Example:
     ///
     /// ```rust
-    /// use psio1::Unpack;
+    /// use psio::Unpack;
     ///
     /// fn unpackSomething(src: &[u8]) -> String {
     ///     String::unpacked(src).unwrap()
@@ -371,7 +371,7 @@ pub trait Unpack<'a>: Sized {
     /// Example:
     ///
     /// ```rust
-    /// use psio1::Unpack;
+    /// use psio::Unpack;
     ///
     /// fn unpackSomething(src: &[u8]) -> (String, String) {
     ///     <(String, String)>::unpacked(src).unwrap()
@@ -871,30 +871,33 @@ impl<T: Pack> Pack for Vec<T> {
     const FIXED_SIZE: u32 = 4;
     const VARIABLE_SIZE: bool = true;
 
-    // TODO: optimize scalar
     fn pack(&self, dest: &mut Vec<u8>) {
-        let num_bytes = self.len() as u32 * T::FIXED_SIZE;
+        let num_bytes = u32::try_from(self.len()).expect("fracpack vector count overflow")
+            .checked_mul(T::FIXED_SIZE).expect("fracpack vector size overflow");
         dest.extend_from_slice(&num_bytes.to_le_bytes());
-        dest.reserve(num_bytes as usize);
-        let start = dest.len();
-        for x in self {
-            T::embedded_fixed_pack(x, dest);
-        }
-        for (i, x) in self.iter().enumerate() {
-            let heap_pos = dest.len() as u32;
-            T::embedded_fixed_repack(x, start as u32 + (i as u32) * T::FIXED_SIZE, heap_pos, dest);
-            T::embedded_variable_pack(x, dest);
+        if T::VARIABLE_SIZE {
+            let start = dest.len();
+            dest.resize(start + num_bytes as usize, 0);
+            for (i, x) in self.iter().enumerate() {
+                let slot = start + i * T::FIXED_SIZE as usize;
+                let offset = u32::try_from(dest.len() - slot).expect("fracpack vector offset overflow");
+                dest[slot..slot + 4].copy_from_slice(&offset.to_le_bytes());
+                // C++ encodes each vector element as a complete value, including
+                // empty containers and the inner slot of optional elements.
+                x.pack(dest);
+            }
+        } else {
+            for x in self { x.pack(dest); }
         }
     }
 
     fn packed_size(&self) -> usize {
-        4 + self.len() * T::FIXED_SIZE as usize
-            + self.iter().map(|x| x.embedded_variable_packed_size()).sum::<usize>()
+        4 + self.len() * T::FIXED_SIZE as usize + if T::VARIABLE_SIZE {
+            self.iter().map(Pack::packed_size).sum::<usize>()
+        } else { 0 }
     }
 
-    fn is_empty_container(&self) -> bool {
-        self.is_empty()
-    }
+    fn is_empty_container(&self) -> bool { self.is_empty() }
 }
 
 impl<'a, T: Unpack<'a>> Unpack<'a> for Vec<T> {
@@ -911,7 +914,14 @@ impl<'a, T: Unpack<'a>> Unpack<'a> for Vec<T> {
         let mut fixed_pos = src.advance(num_bytes)?;
         let mut result = Self::with_capacity(len);
         for _ in 0..len {
-            result.push(T::embedded_unpack(src, &mut fixed_pos)?);
+            if T::VARIABLE_SIZE {
+                let slot = fixed_pos;
+                let offset = src.unpack_at::<u32>(&mut fixed_pos)?;
+                src.set_pos(slot.checked_add(offset).ok_or(Error::ReadPastEnd)?)?;
+                result.push(T::unpack(src)?);
+            } else {
+                result.push(T::embedded_unpack(src, &mut fixed_pos)?);
+            }
         }
         Ok(result)
     }
@@ -924,7 +934,14 @@ impl<'a, T: Unpack<'a>> Unpack<'a> for Vec<T> {
         }
         let mut fixed_pos = src.advance(num_bytes)?;
         for _ in 0..num_bytes / T::FIXED_SIZE {
-            T::embedded_verify(src, &mut fixed_pos)?;
+            if T::VARIABLE_SIZE {
+                let slot = fixed_pos;
+                let offset = src.unpack_at::<u32>(&mut fixed_pos)?;
+                src.set_pos(slot.checked_add(offset).ok_or(Error::ReadPastEnd)?)?;
+                T::verify(src)?;
+            } else {
+                T::embedded_verify(src, &mut fixed_pos)?;
+            }
         }
         Ok(())
     }

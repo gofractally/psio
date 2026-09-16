@@ -12,10 +12,10 @@
 //! # Example
 //!
 //! ```
-//! use psio1::dynamic_schema::{SchemaBuilder, DynamicType};
-//! use psio1::dynamic_view::{DynamicView, WireFormat};
-//! use psio1::wit::pack::WitPack;
-//! use psio1::wit::layout::compute_struct_layout;
+//! use psio::dynamic_schema::{SchemaBuilder, DynamicType};
+//! use psio::dynamic_view::{DynamicView, WireFormat};
+//! use psio::wit::pack::WitPack;
+//! use psio::wit::layout::compute_struct_layout;
 //!
 //! // Build a schema for struct { x: u32, y: u32 }
 //! let (locs, _total, _align) = compute_struct_layout(&[(4, 4), (4, 4)]);
@@ -1333,7 +1333,7 @@ enum HashedSegment {
 ///
 /// # Example
 /// ```
-/// use psio1::dynamic_view::HashedPath;
+/// use psio::dynamic_view::HashedPath;
 ///
 /// let path = HashedPath::new("a.b[0].c");
 /// // path can now be used with view.eval(&path) without re-parsing or re-hashing
@@ -1432,10 +1432,10 @@ enum CompiledStep {
 ///
 /// # Example
 /// ```
-/// use psio1::dynamic_schema::{SchemaBuilder, DynamicType};
-/// use psio1::dynamic_view::{DynamicView, WireFormat, CompiledPath};
-/// use psio1::wit::pack::WitPack;
-/// use psio1::wit::layout::compute_struct_layout;
+/// use psio::dynamic_schema::{SchemaBuilder, DynamicType};
+/// use psio::dynamic_view::{DynamicView, WireFormat, CompiledPath};
+/// use psio::wit::pack::WitPack;
+/// use psio::wit::layout::compute_struct_layout;
 ///
 /// let (locs, _total, _align) = compute_struct_layout(&[(4, 4), (4, 4)]);
 /// let schema = SchemaBuilder::new()
@@ -1564,8 +1564,8 @@ impl<'a> DynamicValue<'a> {
 ///
 /// # Example
 /// ```
-/// use psio1::dynamic_view::{DynamicView, DynamicValue, FromDynamicView};
-/// use psio1::dynamic_schema::{DynamicSchema, DynamicType, SchemaBuilder};
+/// use psio::dynamic_view::{DynamicView, DynamicValue, FromDynamicView};
+/// use psio::dynamic_schema::{DynamicSchema, DynamicType, SchemaBuilder};
 ///
 /// struct Point { x: i32, y: i32 }
 ///

@@ -28,15 +28,16 @@
 // Tag types:
 //   0  null              raw = 0 bytes
 //   1  bool              raw = 0;  low nibble: 0=false, 1=true
-//   3  uint_inline       raw = 0;  unsigned value in low nibble (0..15)
+//   2  uint_inline       raw = 0;  unsigned value in low nibble (0..15)
+//   3  nint_inline       raw = 0; magnitude 1..15; zero reserved
 //   4  uint              raw = (low_nibble+1) bytes; raw LE unsigned magnitude
-//   5  decimal           raw = (low_nibble+1) mantissa bytes + varscale (1..4)
+//   7  decimal           raw = (low_nibble+1) mantissa bytes + varscale (1..4)
 //   6  ieee_float        low nibble: bits 2..0 = log2(byte_count) (1=binary16,
 //                          2=binary32, 3=binary64, 4=binary128); bit 3 = sci-
 //                          source hint. raw = byte_count IEEE-754 LE bytes.
-//   7  negint            raw = (low_nibble+1) bytes; raw LE unsigned |value|;
+//   5  negint            raw = (low_nibble+1) bytes; raw LE unsigned |value|;
 //                          all-zero payload reserved
-//   8  string            raw = (size - 1) bytes; low nibble flag:
+//   9  string            raw = (size - 1) bytes; low nibble flag:
 //                          0=raw_text, 1=escape_form
 //   A  bytes             raw = (size - 1) bytes; low nibble reserved (must be 0)
 //   B  array             raw = container content; low nibble selects layout:
@@ -48,7 +49,7 @@
 //                                    8=f32 9=f64)
 //                          11..15 = reserved
 //   C  object            raw = container content
-//   2, 9, D..F           reserved
+//   8 numeric_string, D extension: assigned, unsupported; E..F reserved
 //
 // No magic, no version, no flags. Versioning lives in the application
 // wrapper (HTTP content-type, file header, RPC envelope). Buffer length
@@ -86,6 +87,9 @@
 #include <xxhash.h>
 
 namespace psio {
+
+   // Out-of-band wire revision; no version byte is embedded in a pjson value.
+   inline constexpr unsigned pjson_wire_revision = 2;
 
    // ── numeric value type ────────────────────────────────────────────────
 
@@ -277,22 +281,23 @@ namespace psio {
       {
          t_null        = 0,
          t_bool        = 1,    // low nibble: 0 = false, 1 = true
-         // 2 reserved
-         t_uint_inline = 3,    // low nibble: unsigned value 0..15
+         t_uint_inline = 2,    // low nibble: unsigned value 0..15
+         t_nint_inline = 3,    // low nibble: magnitude 1..15; zero reserved
          t_uint        = 4,    // low nibble: byte_count - 1 (1..16);
                                //   payload = magnitude as raw LE unsigned bytes
-         t_decimal     = 5,    // low nibble: mantissa byte_count - 1
+         t_decimal     = 7,    // low nibble: mantissa byte_count - 1
          t_ieee_float  = 6,    // low nibble: bits 2..0 = log2(byte_count),
                                //   bit 3 = sci-source hint
-         t_negint      = 7,    // low nibble: byte_count - 1 (1..16);
+         t_negint      = 5,    // low nibble: byte_count - 1 (1..16);
                                //   payload = |value| as raw LE unsigned bytes
                                //   (all-zero payload reserved)
-         t_string      = 8,    // low nibble: text encoding flag
-         // 9 reserved
+         t_string      = 9,    // low nibble: text encoding flag
+         t_numeric_string = 8, // Assigned, not supported by this implementation.
          t_bytes       = 0xA,  // low nibble reserved (must be 0)
          t_array       = 0xB,  // low nibble: 0 = generic, 1..10 = typed
                                //   (element type code = low_nibble - 1)
          t_object      = 0xC,
+         t_extension   = 0xD, // Assigned, not supported by this implementation.
       };
 
       // ── ieee_float low-nibble layout (§4.6) ───────────────────────────
@@ -655,7 +660,7 @@ namespace psio {
       inline std::size_t uint_inline_size() noexcept { return 1; }
       inline std::size_t int_size(std::int64_t i) noexcept
       {
-         if (i >= 0 && i <= 15) return 1;
+         if (i >= -15 && i <= 15) return 1;
          // Sign-dispatch: uint for non-negative magnitudes, negint for
          // negative. Magnitude is the raw |i| as unsigned bytes (no
          // zigzag).
@@ -675,13 +680,13 @@ namespace psio {
       }
       inline std::size_t number_size(const pjson_number& n) noexcept
       {
-         if (n.scale == 0 && n.mantissa >= 0 && n.mantissa <= 15)
+         if (n.scale == 0 && n.mantissa >= -15 && n.mantissa <= 15)
             return 1;
          if (n.scale == 0)
          {
             // Sign-dispatch: uint for non-negative, negint for negative.
             __uint128_t mag = (n.mantissa < 0)
-                ? static_cast<__uint128_t>(-n.mantissa)
+                ? (__uint128_t{0} - static_cast<__uint128_t>(n.mantissa))
                 : static_cast<__uint128_t>(n.mantissa);
             return 1u + u128_byte_count(mag);
          }
@@ -806,6 +811,11 @@ namespace psio {
                 (t_uint_inline << 4) | static_cast<std::uint8_t>(i));
             return 1;
          }
+         if (i < 0 && i >= -15)
+         {
+            dst[pos] = static_cast<std::uint8_t>((t_nint_inline << 4) | -i);
+            return 1;
+         }
          // §4.4 sign-dispatch: uint for ≥ 0, negint for < 0. Magnitude
          // is raw little-endian unsigned bytes (no zigzag).
          if (i >= 0)
@@ -853,6 +863,11 @@ namespace psio {
                 (t_uint_inline << 4) | static_cast<std::uint8_t>(n.mantissa));
             return 1;
          }
+         if (n.scale == 0 && n.mantissa < 0 && n.mantissa >= -15)
+         {
+            dst[pos] = static_cast<std::uint8_t>((t_nint_inline << 4) | -n.mantissa);
+            return 1;
+         }
          if (n.scale == 0)
          {
             // §4.4 sign-dispatch on the i128 mantissa.
@@ -865,7 +880,7 @@ namespace psio {
                std::memcpy(dst + pos + 1, &mag, bc);
                return 1u + bc;
             }
-            __uint128_t mag = static_cast<__uint128_t>(-n.mantissa);
+            __uint128_t mag = (__uint128_t{0} - static_cast<__uint128_t>(n.mantissa));
             std::uint8_t bc = u128_byte_count(mag);
             dst[pos] = static_cast<std::uint8_t>(
                 (t_negint << 4) | (bc - 1));
@@ -1381,6 +1396,7 @@ namespace psio {
       {
          if (size < 4) return false;
          std::uint8_t width_byte    = p[1];
+         if (width_byte & 0xF0u) return false;
          std::uint8_t slot_w_code   = width_byte & 0x03;
          std::uint8_t recoff_w_code = (width_byte >> 2) & 0x03;
          std::size_t  slot_w        = width_bytes(slot_w_code);
@@ -1406,6 +1422,7 @@ namespace psio {
          if (last_ks == 0xFF) return false;
          std::uint32_t keys_area_size = last_off + last_ks;
          std::size_t   records_body_start = keys_pos + keys_area_size;
+         if (records_body_start > size - 2) return false;
 
          //  Verify each key slot's region lies within the keys area
          //  (and walk hash bytes — caller's hash verification is
@@ -1426,6 +1443,7 @@ namespace psio {
                            (static_cast<std::uint16_t>(p[size - 1]) << 8);
          if (recoff_w == 0) return false;
          if (N > (size - 2 - records_body_start) / recoff_w) return false;
+         if (N > (size - 2 - records_body_start) / recoff_w) return false;
          std::size_t record_offsets_pos = size - 2 - N * recoff_w;
          if (record_offsets_pos < records_body_start) return false;
          std::size_t records_body_size =
@@ -1442,7 +1460,7 @@ namespace psio {
                                      (i + 1) * recoff_w,
                                  recoff_w_code)
                     : static_cast<std::uint32_t>(records_body_size);
-            if (roff_next < roff_i) return false;
+            if (roff_next < roff_i || roff_next > records_body_size) return false;
             std::size_t  rec_size = roff_next - roff_i;
             const std::uint8_t* rec = p + records_body_start + roff_i;
             if (K * slot_w > rec_size) return false;
@@ -1548,6 +1566,8 @@ namespace psio {
                return size == 1 && low <= 1;
             case t_uint_inline:
                return size == 1;
+            case t_nint_inline:
+               return size == 1 && low != 0;
             case t_uint:
             case t_negint:
             {
@@ -1578,7 +1598,8 @@ namespace psio {
                std::uint8_t width_bits = low & ieee_width_mask;
                if (width_bits == ieee_width_f64) return size == 9;
                if (width_bits == ieee_width_f32) return size == 5;
-               return false;  // f16/f128 not supported
+               if (width_bits == ieee_width_f16) return size == 3;
+               return false;  // binary128 is not supported by the value decoder
             }
             case t_string:
             {
@@ -1670,6 +1691,7 @@ namespace psio {
       {
          if (size < 4) return false;  // tag + width + K + count u16 minimum
          std::uint8_t width_byte    = p[1];
+         if (width_byte & 0xF0u) return false;
          std::uint8_t slot_w_code   = width_byte & 0x03;
          std::uint8_t recoff_w_code = (width_byte >> 2) & 0x03;
          std::size_t  slot_w        = width_bytes(slot_w_code);
@@ -1695,9 +1717,11 @@ namespace psio {
          if (last_ks == 0xFF) return false;  // long keys not supported in row_array yet
          std::uint32_t keys_area_size = last_off + last_ks;
          std::size_t   records_body_start = keys_pos + keys_area_size;
+         if (records_body_start > size - 2) return false;
 
          std::uint16_t N = static_cast<std::uint16_t>(p[size - 2]) |
                            (static_cast<std::uint16_t>(p[size - 1]) << 8);
+         if (N > (size - 2 - records_body_start) / recoff_w) return false;
          std::size_t record_offsets_pos = size - 2 - N * recoff_w;
          if (record_offsets_pos < records_body_start) return false;
          std::size_t records_body_size =
@@ -1710,7 +1734,7 @@ namespace psio {
             std::uint32_t s_j = read_u32_le(p + key_slots_pos + j * 4);
             std::uint32_t kof = slot_offset(s_j);
             std::uint8_t  ksz = slot_key_size(s_j);
-            if (ksz == 0xFF) return false;
+            if (ksz == 0xFF || kof + ksz > keys_area_size) return false;
             keys[j] = std::string_view(
                 reinterpret_cast<const char*>(p + keys_pos + kof), ksz);
             if (p[hash_pos + j] != key_hash8(keys[j])) return false;
@@ -1729,7 +1753,7 @@ namespace psio {
                                      (i + 1) * recoff_w,
                                  recoff_w_code)
                     : static_cast<std::uint32_t>(records_body_size);
-            if (roff_next < roff_i) return false;
+            if (roff_next < roff_i || roff_next > records_body_size) return false;
             std::size_t  rec_size  = roff_next - roff_i;
             const std::uint8_t* rec = p + records_body_start + roff_i;
             if (K * slot_w > rec_size) return false;
@@ -1849,6 +1873,10 @@ namespace psio {
             case t_uint_inline:
                out = pjson_value{static_cast<std::int64_t>(low)};
                return size == 1;
+            case t_nint_inline:
+               if (size != 1 || low == 0) return false;
+               out = pjson_value{-static_cast<std::int64_t>(low)};
+               return true;
             case t_uint:
             {
                // §4.4 uint: payload is the magnitude as raw LE
@@ -1904,7 +1932,7 @@ namespace psio {
                   else
                   {
                      out = pjson_value{
-                         pjson_number{-static_cast<__int128>(mag), 0}};
+                         pjson_number{static_cast<__int128>(__uint128_t{0} - mag), 0}};
                   }
                }
                else
@@ -1913,7 +1941,7 @@ namespace psio {
                   std::memcpy(&mag, p + 1, bc);
                   if (mag == 0) return false;
                   out = pjson_value{
-                      pjson_number{-static_cast<__int128>(mag), 0}};
+                      pjson_number{static_cast<__int128>(__uint128_t{0} - mag), 0}};
                }
                return true;
             }
@@ -1930,9 +1958,10 @@ namespace psio {
                if (1u + bc + scale_bytes != size) return false;
                pjson_number n{zz128_decode(zz), scale};
                // Variant normalize: tag 5 → double when value fits exactly.
-               __int128 m_abs =
-                   n.mantissa < 0 ? -n.mantissa : n.mantissa;
-               if (m_abs < (static_cast<__int128>(1) << 53) &&
+               __uint128_t m_abs = n.mantissa < 0
+                   ? __uint128_t{0} - static_cast<__uint128_t>(n.mantissa)
+                   : static_cast<__uint128_t>(n.mantissa);
+               if (m_abs < (static_cast<__uint128_t>(1) << 53) &&
                    scale >= -22 && scale <= 22)
                {
                   out = pjson_value{n.to_double()};
@@ -2253,6 +2282,8 @@ namespace psio {
       static std::optional<pjson_value>
       try_decode(std::span<const std::uint8_t> bytes)
       {
+         // Bound recursion and reject malformed offsets before materializing.
+         if (!validate(bytes)) return std::nullopt;
          pjson_value v;
          if (!pjson_detail::decode_value(bytes.data(), bytes.size(), v))
             return std::nullopt;

@@ -193,6 +193,11 @@ impl WitPack for String {
 
     fn wit_store(&self, packer: &mut WitPacker<'_>, dest: u32) {
         let len = self.len() as u32;
+        if len == 0 {
+            packer.store_u32(dest, 0);
+            packer.store_u32(dest + 4, 0);
+            return;
+        }
         let ptr = packer.alloc(1, len);
         packer.store_bytes(ptr, self.as_bytes());
         packer.store_u32(dest, ptr);
@@ -204,6 +209,7 @@ impl WitPack for String {
 
 impl<T: WitPack> WitPack for Vec<T> {
     fn wit_accumulate_size(&self, bump: &mut u32) {
+        if self.is_empty() { return; }
         let ea = T::wit_alignment();
         let es = T::wit_size();
         let count = self.len() as u32;
@@ -219,6 +225,11 @@ impl<T: WitPack> WitPack for Vec<T> {
         let ea = T::wit_alignment();
         let es = T::wit_size();
         let count = self.len() as u32;
+        if count == 0 {
+            packer.store_u32(dest, 0);
+            packer.store_u32(dest + 4, 0);
+            return;
+        }
         let arr = packer.alloc(ea, count * es);
         for (i, elem) in self.iter().enumerate() {
             elem.wit_store(packer, arr + i as u32 * es);
