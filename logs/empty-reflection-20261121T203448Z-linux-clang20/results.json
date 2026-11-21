@@ -1,0 +1,155 @@
+{
+  "baseline": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "platform": "Linux-6.17.0-22-generic-x86_64-with-glibc2.42",
+  "load_before": [
+    1.8759765625,
+    2.0,
+    2.26513671875
+  ],
+  "free_bytes_before": 33165598720,
+  "jobs": 2,
+  "scope": "Existing reflection/PSSZ/view/native-view/cross-format tests plus zero-argument action-data consumer; no codec/IR/width or Rust changes.",
+  "source_sha256": {
+    "cpp/include/psio/reflect.hpp": "1132791f2d52d2e53af37415e067db9cdce539025656292633a94ae6478ecc78",
+    "cpp/include/psio/view.hpp": "d001327854d0266d5327cbe2a885cd9f2ef6671523d21d735ddc4fd430509101",
+    "cpp/tests/pssz_tests.cpp": "af6877253f03bd17f656b3dde1c45d05947622f74e6102ce0e918fd6b3ec72bf",
+    "cpp/tests/CMakeLists.txt": "77d181a52458a6b73af41ede057425fbe67b4469eadfb6bc98e7f09183b9d75e",
+    "cpp/tests/empty_action_consumer.cpp": "ecca49349417dc7daca1ef2d8f6033e2b4432a7ad02b94bf895661057a430815",
+    "cpp/tests/qualify_empty_reflection.py": "bbeee612b85513dde5ba41d807a8693a0744e6ad4aadd240d905f353775b5f40"
+  },
+  "commands": [
+    {
+      "name": "compiler",
+      "argv": [
+        "/usr/bin/clang++-20",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.0185171477496624
+    },
+    {
+      "name": "cmake-version",
+      "argv": [
+        "cmake",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.005433540791273117
+    },
+    {
+      "name": "hardware",
+      "argv": [
+        "lscpu"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.0032203420996665955
+    },
+    {
+      "name": "codec-probe",
+      "argv": [
+        "/usr/bin/clang++-20",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/home/dlarimer/psio-empty-reflection-20261121/cpp/include",
+        "-idirafter",
+        "/usr/include",
+        "-fsyntax-only",
+        "/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_CODEC_ONLY"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 1.0770816281437874
+    },
+    {
+      "name": "view-probe",
+      "argv": [
+        "/usr/bin/clang++-20",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/home/dlarimer/psio-empty-reflection-20261121/cpp/include",
+        "-idirafter",
+        "/usr/include",
+        "-fsyntax-only",
+        "/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_VIEW_ONLY"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 1.0586261712014675
+    },
+    {
+      "name": "invalid-index-probe",
+      "argv": [
+        "/usr/bin/clang++-20",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/home/dlarimer/psio-empty-reflection-20261121/cpp/include",
+        "-idirafter",
+        "/usr/include",
+        "-fsyntax-only",
+        "/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_VIEW_ONLY",
+        "-DPSIO_EMPTY_INVALID_INDEX"
+      ],
+      "exit_code": 1,
+      "expected": null,
+      "seconds": 0.9593829065561295
+    },
+    {
+      "name": "configure",
+      "argv": [
+        "cmake",
+        "-S",
+        "/home/dlarimer/psio-empty-reflection-20261121",
+        "-B",
+        "/home/dlarimer/psio-empty-reflection-20261121/build/empty-reflection",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=/usr/bin/clang-20",
+        "-DCMAKE_CXX_COMPILER=/usr/bin/clang++-20",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DPSIO_ENABLE_TESTS=ON",
+        "-DPSIO_ENABLE_BENCHMARKS=OFF",
+        "-DPSIO_ENABLE_TOOLS=OFF"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.48453831300139427
+    },
+    {
+      "name": "build",
+      "argv": [
+        "cmake",
+        "--build",
+        "/home/dlarimer/psio-empty-reflection-20261121/build/empty-reflection",
+        "--target",
+        "psio_reflect_tests",
+        "psio_pssz_tests",
+        "psio_empty_action_consumer",
+        "psio_view_access_tests",
+        "psio_native_view_tests",
+        "psio_conformance_tests",
+        "psio_wit_resource_tests",
+        "--parallel",
+        "2"
+      ],
+      "exit_code": 1,
+      "expected": 0,
+      "seconds": 4.929482713341713
+    }
+  ],
+  "passed": false,
+  "error": "build had unexpected exit code",
+  "load_after": [
+    3.75634765625,
+    2.4091796875,
+    2.396484375
+  ],
+  "free_bytes_after": 33148596224
+}

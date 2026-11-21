@@ -1,0 +1,38 @@
+{
+  "baseline": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "commands": [
+    {
+      "kind": "codec",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-Icpp/include",
+        "-I/opt/homebrew/include",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-DPSIO_EMPTY_CODEC_ONLY",
+        "-fsyntax-only",
+        "cpp/tests/empty_action_consumer.cpp"
+      ],
+      "exit_code": 1
+    },
+    {
+      "kind": "view",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-Icpp/include",
+        "-I/opt/homebrew/include",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-DPSIO_EMPTY_VIEW_ONLY",
+        "-fsyntax-only",
+        "cpp/tests/empty_action_consumer.cpp"
+      ],
+      "exit_code": 1
+    }
+  ],
+  "source_sha256": {
+    "cpp/include/psio/reflect.hpp": "2ddeb88fe4802596c870fc342e8905bc37a7e36fe0f3f3109e5cecf4e1ea828b",
+    "cpp/include/psio/view.hpp": "a8a78164231d84128b488fabe9f065e31bb2b93a2a2b222c2b629eb54a508771",
+    "cpp/tests/empty_action_consumer.cpp": "ecca49349417dc7daca1ef2d8f6033e2b4432a7ad02b94bf895661057a430815"
+  }
+}

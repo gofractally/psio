@@ -1,0 +1,53 @@
+[1/22] Building CXX object cpp/CMakeFiles/psio.dir/src/stub.cpp.o
+[2/22] Linking CXX static library cpp/libpsio.a
+[3/22] Building CXX object cpp/tests/CMakeFiles/psio_reflect_tests.dir/reflect_tests.cpp.o
+[4/22] Building CXX object cpp/tests/CMakeFiles/psio_view_access_tests.dir/view_access_tests.cpp.o
+[5/22] Building CXX object cpp/tests/CMakeFiles/psio_reflect_tests.dir/main.cpp.o
+FAILED: cpp/tests/CMakeFiles/psio_reflect_tests.dir/main.cpp.o 
+/usr/bin/clang++-20 -DPSIO_EXCEPTIONS_ENABLED=1 -DPSIO_HAVE_SIMDJSON=0 -I/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/../external/catch2 -I/home/dlarimer/psio-empty-reflection-20261121/cpp/include -I/home/dlarimer/psio-empty-reflection-20261121/cpp/external/xxhash -O3 -DNDEBUG -std=gnu++23 -Werror=unused-result -MD -MT cpp/tests/CMakeFiles/psio_reflect_tests.dir/main.cpp.o -MF cpp/tests/CMakeFiles/psio_reflect_tests.dir/main.cpp.o.d -o cpp/tests/CMakeFiles/psio_reflect_tests.dir/main.cpp.o -c /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/main.cpp
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/main.cpp:7:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/../external/catch2/catch.hpp:8756:34: error: constexpr variable 'sigStackSize' must be initialized by a constant expression
+ 8756 |     constexpr static std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;
+      |                                  ^              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/../external/catch2/catch.hpp:8756:58: note: non-constexpr function 'sysconf' cannot be used in a constant expression
+ 8756 |     constexpr static std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;
+      |                                                          ^
+/usr/include/x86_64-linux-gnu/bits/sigstksz.h:32:22: note: expanded from macro 'MINSIGSTKSZ'
+   32 | # define MINSIGSTKSZ SIGSTKSZ
+      |                      ^
+/usr/include/x86_64-linux-gnu/bits/sigstksz.h:28:19: note: expanded from macro 'SIGSTKSZ'
+   28 | # define SIGSTKSZ sysconf (_SC_SIGSTKSZ)
+      |                   ^
+/usr/include/unistd.h:640:17: note: declared here
+  640 | extern long int sysconf (int __name) __THROW;
+      |                 ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/main.cpp:7:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/../external/catch2/catch.hpp:8815:33: error: variable length array declaration not allowed at file scope
+ 8815 |     char FatalConditionHandler::altStackMem[sigStackSize] = {};
+      |                                 ^           ~~~~~~~~~~~~
+2 errors generated.
+[6/22] Building CXX object cpp/tests/CMakeFiles/psio_view_access_tests.dir/main.cpp.o
+FAILED: cpp/tests/CMakeFiles/psio_view_access_tests.dir/main.cpp.o 
+/usr/bin/clang++-20 -DPSIO_EXCEPTIONS_ENABLED=1 -DPSIO_HAVE_SIMDJSON=0 -I/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/../external/catch2 -I/home/dlarimer/psio-empty-reflection-20261121/cpp/include -I/home/dlarimer/psio-empty-reflection-20261121/cpp/external/xxhash -O3 -DNDEBUG -std=gnu++23 -Werror=unused-result -MD -MT cpp/tests/CMakeFiles/psio_view_access_tests.dir/main.cpp.o -MF cpp/tests/CMakeFiles/psio_view_access_tests.dir/main.cpp.o.d -o cpp/tests/CMakeFiles/psio_view_access_tests.dir/main.cpp.o -c /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/main.cpp
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/main.cpp:7:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/../external/catch2/catch.hpp:8756:34: error: constexpr variable 'sigStackSize' must be initialized by a constant expression
+ 8756 |     constexpr static std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;
+      |                                  ^              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/../external/catch2/catch.hpp:8756:58: note: non-constexpr function 'sysconf' cannot be used in a constant expression
+ 8756 |     constexpr static std::size_t sigStackSize = 32768 >= MINSIGSTKSZ ? 32768 : MINSIGSTKSZ;
+      |                                                          ^
+/usr/include/x86_64-linux-gnu/bits/sigstksz.h:32:22: note: expanded from macro 'MINSIGSTKSZ'
+   32 | # define MINSIGSTKSZ SIGSTKSZ
+      |                      ^
+/usr/include/x86_64-linux-gnu/bits/sigstksz.h:28:19: note: expanded from macro 'SIGSTKSZ'
+   28 | # define SIGSTKSZ sysconf (_SC_SIGSTKSZ)
+      |                   ^
+/usr/include/unistd.h:640:17: note: declared here
+  640 | extern long int sysconf (int __name) __THROW;
+      |                 ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/main.cpp:7:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/../external/catch2/catch.hpp:8815:33: error: variable length array declaration not allowed at file scope
+ 8815 |     char FatalConditionHandler::altStackMem[sigStackSize] = {};
+      |                                 ^           ~~~~~~~~~~~~
+2 errors generated.
+ninja: build stopped: subcommand failed.

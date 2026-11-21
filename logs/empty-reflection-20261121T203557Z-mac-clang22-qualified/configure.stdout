@@ -1,0 +1,5 @@
+-- psio: simdjson found, json_to_pjson enabled
+-- psio: msgpack-cxx found — psio_format_perf_external enabled
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection

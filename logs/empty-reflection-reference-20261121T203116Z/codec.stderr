@@ -1,0 +1,116 @@
+cpp/tests/empty_action_consumer.cpp:14:4: error: variable template specialization of 'annotate' not in a namespace enclosing 'psio'
+   14 |    PSIO_TYPE_ATTRS(StableNop, psio::definition_will_not_change{})
+      |    ^
+cpp/include/psio/annotate.hpp:1023:34: note: expanded from macro 'PSIO_TYPE_ATTRS'
+ 1023 |    inline constexpr auto ::psio::annotate<::psio::type<TYPE>{}> = \
+      |                                  ^
+cpp/include/psio/annotate.hpp:634:26: note: explicitly specialized declaration is here
+  634 |    inline constexpr auto annotate = std::tuple<>{};
+      |                          ^
+In file included from cpp/tests/empty_action_consumer.cpp:1:
+cpp/include/psio/pssz.hpp:455:54: error: no member named 'member_type' in 'psio::reflect<action_data::Nop>'
+  455 |                       using F = typename R::template member_type<Is>;
+      |                                          ~~~         ^
+cpp/include/psio/pssz.hpp:454:20: note: while substituting into a lambda expression here
+  454 |                    {
+      |                    ^
+cpp/include/psio/pssz.hpp:447:80: note: while substituting into a lambda expression here
+  447 |             return [&]<std::size_t... Is>(std::index_sequence<Is...>) noexcept {
+      |                                                                                ^
+cpp/include/psio/pssz.hpp:2142:55: note: in instantiation of function template specialization 'psio::detail::pssz_impl::size_of_v<1UL, action_data::Nop>' requested here
+ 2142 |          const std::size_t total = detail::pssz_impl::size_of_v<W>(v);
+      |                                                       ^
+cpp/include/psio/cpo.hpp:61:20: note: in instantiation of function template specialization 'psio::tag_invoke<action_data::Nop>' requested here
+   61 |             return tag_invoke(*this, fmt, v);
+      |                    ^
+cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<1>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+In file included from cpp/tests/empty_action_consumer.cpp:1:
+cpp/include/psio/pssz.hpp:456:58: error: no member named 'member_pointer' in 'psio::reflect<action_data::Nop>'
+  456 |                       const auto& fref = v.*(R::template member_pointer<Is>);
+      |                                              ~~~         ^
+cpp/include/psio/pssz.hpp:460:41: error: no member named 'member_pointer' in 'psio::reflect<action_data::Nop>'
+  460 |                             R::template member_pointer<Is>>::value_t;
+      |                             ~~~         ^
+PLEASE submit a bug report to https://github.com/Homebrew/homebrew-core/issues and include the crash backtrace, preprocessed source, and associated run script.
+Stack dump:
+0.	Program arguments: /opt/homebrew/opt/llvm/bin/clang++ -std=c++23 -Icpp/include -I/opt/homebrew/include -DPSIO_EXCEPTIONS_ENABLED=1 -DPSIO_EMPTY_CODEC_ONLY -fsyntax-only cpp/tests/empty_action_consumer.cpp
+1.	<eof> parser at end of file
+2.	cpp/tests/empty_action_consumer.cpp:53:6: instantiating function definition 'check_format<psio::pssz_<1>>'
+3.	cpp/tests/empty_action_consumer.cpp:18:6: instantiating function definition 'check_empty_action<action_data::Nop, psio::pssz_<1>>'
+4.	cpp/include/psio/pssz.hpp:2139:32: instantiating function definition 'psio::tag_invoke<action_data::Nop>'
+5.	cpp/include/psio/pssz.hpp:388:19: instantiating function definition 'psio::detail::pssz_impl::size_of_v<1UL, action_data::Nop>'
+6.	cpp/include/psio/pssz.hpp:447:20: instantiating function definition 'psio::detail::pssz_impl::size_of_v(const action_data::Nop &)::(lambda)::operator()<>'
+ #0 0x000000011901b5e4 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libLLVM.dylib+0x40e75e4)
+ #1 0x0000000115065dd4 llvm::sys::CleanupOnSignal(unsigned long) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libLLVM.dylib+0x131dd4)
+ #2 0x0000000118ff257c (anonymous namespace)::CrashRecoveryContextImpl::HandleCrash(int, unsigned long) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libLLVM.dylib+0x40be57c)
+ #3 0x0000000118ff2658 CrashRecoverySignalHandler(int) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libLLVM.dylib+0x40be658)
+ #4 0x000000018b43d764 (/usr/lib/system/libsystem_platform.dylib+0x1804e5764)
+ #5 0x000000010835ab24 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformCXXFoldExpr(clang::CXXFoldExpr*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x124eb24)
+ #6 0x000000010835ab24 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformCXXFoldExpr(clang::CXXFoldExpr*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x124eb24)
+ #7 0x000000010835f48c clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformCompoundStmt(clang::CompoundStmt*, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x125348c)
+ #8 0x00000001083d7090 clang::Sema::InstantiateFunctionDefinition(clang::SourceLocation, clang::FunctionDecl*, bool, bool, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x12cb090)
+ #9 0x00000001082ca6c0 clang::Sema::DeduceReturnType(clang::FunctionDecl*, clang::SourceLocation, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x11be6c0)
+#10 0x0000000107e43d94 clang::Sema::DiagnoseUseOfDecl(clang::NamedDecl*, llvm::ArrayRef<clang::SourceLocation>, clang::ObjCInterfaceDecl const*, bool, bool, clang::ObjCInterfaceDecl*, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0xd37d94)
+#11 0x00000001081ac5e4 CreateFunctionRefExpr(clang::Sema&, clang::FunctionDecl*, clang::NamedDecl*, clang::Expr const*, bool, clang::SourceLocation, clang::DeclarationNameLoc const&) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x10a05e4)
+#12 0x00000001081be8d8 clang::Sema::BuildCallToObjectOfClassType(clang::Scope*, clang::Expr*, clang::SourceLocation, llvm::MutableArrayRef<clang::Expr*>, clang::SourceLocation) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x10b28d8)
+#13 0x0000000107eb794c clang::Sema::ActOnCallExpr(clang::Scope*, clang::Expr*, clang::SourceLocation, llvm::MutableArrayRef<clang::Expr*>, clang::SourceLocation, clang::Expr*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0xdab94c)
+#14 0x000000010835526c clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformCallExpr(clang::CallExpr*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x124926c)
+#15 0x0000000108377368 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformReturnStmt(clang::ReturnStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126b368)
+#16 0x000000010835f47c clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformCompoundStmt(clang::CompoundStmt*, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x125347c)
+#17 0x0000000108379b0c clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db0c)
+#18 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#19 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#20 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#21 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#22 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#23 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#24 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#25 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#26 0x0000000108379b50 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformIfStmt(clang::IfStmt*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x126db50)
+#27 0x000000010835f718 clang::TreeTransform<(anonymous namespace)::TemplateInstantiator>::TransformCompoundStmt(clang::CompoundStmt*, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x1253718)
+#28 0x00000001083d7090 clang::Sema::InstantiateFunctionDefinition(clang::SourceLocation, clang::FunctionDecl*, bool, bool, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x12cb090)
+#29 0x00000001083d7324 clang::Sema::InstantiateFunctionDefinition(clang::SourceLocation, clang::FunctionDecl*, bool, bool, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x12cb324)
+#30 0x00000001083d7324 clang::Sema::InstantiateFunctionDefinition(clang::SourceLocation, clang::FunctionDecl*, bool, bool, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x12cb324)
+#31 0x00000001083d7324 clang::Sema::InstantiateFunctionDefinition(clang::SourceLocation, clang::FunctionDecl*, bool, bool, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x12cb324)
+#32 0x00000001083e1d48 clang::Sema::PerformPendingInstantiations(bool, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x12d5d48)
+#33 0x0000000107b57124 clang::Sema::ActOnEndOfTranslationUnitFragment(clang::TUFragmentKind) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0xa4b124)
+#34 0x0000000107b575bc clang::Sema::ActOnEndOfTranslationUnit() (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0xa4b5bc)
+#35 0x00000001072f0280 clang::ParseAST(clang::Sema&, bool, bool) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x1e4280)
+#36 0x0000000108bf379c clang::FrontendAction::Execute() (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x1ae779c)
+#37 0x0000000108b90b44 clang::CompilerInstance::ExecuteAction(clang::FrontendAction&) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x1a84b44)
+#38 0x0000000108c3fa78 clang::ExecuteCompilerInvocation(clang::CompilerInstance*) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x1b33a78)
+#39 0x0000000102c352f0 cc1_main(llvm::ArrayRef<char const*>, char const*, void*) (/opt/homebrew/Cellar/llvm/22.1.2/bin/clang-22+0x1000052f0)
+#40 0x0000000102c33390 ExecuteCC1Tool(llvm::SmallVectorImpl<char const*>&, llvm::ToolContext const&, llvm::IntrusiveRefCntPtr<llvm::vfs::FileSystem>) (/opt/homebrew/Cellar/llvm/22.1.2/bin/clang-22+0x100003390)
+#41 0x0000000102c34bb0 int llvm::function_ref<int (llvm::SmallVectorImpl<char const*>&)>::callback_fn<clang_main(int, char**, llvm::ToolContext const&)::$_0>(long, llvm::SmallVectorImpl<char const*>&) (/opt/homebrew/Cellar/llvm/22.1.2/bin/clang-22+0x100004bb0)
+#42 0x00000001089222b0 void llvm::function_ref<void ()>::callback_fn<clang::driver::CC1Command::Execute(llvm::ArrayRef<std::__1::optional<llvm::StringRef>>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>*, bool*) const::$_0>(long) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x18162b0)
+#43 0x0000000114fb49d0 llvm::CrashRecoveryContext::RunSafely(llvm::function_ref<void ()>) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libLLVM.dylib+0x809d0)
+#44 0x0000000108921de8 clang::driver::CC1Command::Execute(llvm::ArrayRef<std::__1::optional<llvm::StringRef>>, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>*, bool*) const (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x1815de8)
+#45 0x00000001088f1a84 clang::driver::Compilation::ExecuteCommand(clang::driver::Command const&, clang::driver::Command const*&, bool) const (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x17e5a84)
+#46 0x000000010890acc4 clang::driver::Driver::ExecuteCompilation(clang::driver::Compilation&, llvm::SmallVectorImpl<std::__1::pair<int, clang::driver::Command const*>>&) (/opt/homebrew/Cellar/llvm/22.1.2/lib/libclang-cpp.dylib+0x17fecc4)
+#47 0x0000000102c323c0 clang_main(int, char**, llvm::ToolContext const&) (/opt/homebrew/Cellar/llvm/22.1.2/bin/clang-22+0x1000023c0)
+#48 0x0000000102c3c7b8 main (/opt/homebrew/Cellar/llvm/22.1.2/bin/clang-22+0x10000c7b8)
+#49 0x000000018b069d54
+clang++: error: clang frontend command failed with exit code 139 (use -v to see invocation)
+Homebrew clang version 22.1.2
+Target: arm64-apple-darwin25.3.0
+Thread model: posix
+InstalledDir: /opt/homebrew/Cellar/llvm/22.1.2/bin
+Configuration file: /opt/homebrew/Cellar/llvm/22.1.2/etc/clang/arm64-apple-darwin25.cfg
+clang++: note: diagnostic msg: 
+********************
+
+PLEASE ATTACH THE FOLLOWING FILES TO THE BUG REPORT:
+Preprocessed source(s) and associated run script(s) are located at:
+clang++: note: diagnostic msg: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/empty_action_consumer-748734.cpp
+clang++: note: diagnostic msg: /var/folders/x0/js1_f1mn4hx_5j9pmxhmgv340000gn/T/empty_action_consumer-748734.sh
+clang++: note: diagnostic msg: Crash backtrace is located in
+clang++: note: diagnostic msg: /Users/dlarimer/Library/Logs/DiagnosticReports/clang-22_<YYYY-MM-DD-HHMMSS>_<hostname>.crash
+clang++: note: diagnostic msg: (choose the .crash file that corresponds to your crash)
+clang++: note: diagnostic msg: 
+
+********************

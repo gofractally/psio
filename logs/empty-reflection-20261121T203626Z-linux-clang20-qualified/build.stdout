@@ -1,0 +1,22 @@
+[1/22] Building CXX object cpp/CMakeFiles/psio.dir/src/stub.cpp.o
+[2/22] Linking CXX static library cpp/libpsio.a
+[3/22] Building CXX object cpp/tests/CMakeFiles/psio_reflect_tests.dir/reflect_tests.cpp.o
+[4/22] Building CXX object cpp/tests/CMakeFiles/psio_view_access_tests.dir/view_access_tests.cpp.o
+[5/22] Building CXX object cpp/tests/CMakeFiles/psio_reflect_tests.dir/main.cpp.o
+[6/22] Building CXX object cpp/tests/CMakeFiles/psio_native_view_tests.dir/native_view_tests.cpp.o
+[7/22] Building CXX object cpp/tests/CMakeFiles/psio_view_access_tests.dir/main.cpp.o
+[8/22] Building CXX object cpp/tests/CMakeFiles/psio_pssz_tests.dir/pssz_tests.cpp.o
+[9/22] Building CXX object cpp/tests/CMakeFiles/psio_native_view_tests.dir/main.cpp.o
+[10/22] Building CXX object cpp/tests/CMakeFiles/psio_empty_action_consumer.dir/empty_action_consumer.cpp.o
+[11/22] Building CXX object cpp/tests/CMakeFiles/psio_pssz_tests.dir/main.cpp.o
+[12/22] Building CXX object cpp/tests/CMakeFiles/psio_conformance_tests.dir/conformance_tests.cpp.o
+[13/22] Building CXX object cpp/tests/CMakeFiles/psio_wit_resource_tests.dir/wit_resource_tests.cpp.o
+[14/22] Building CXX object cpp/tests/CMakeFiles/psio_conformance_tests.dir/main.cpp.o
+[15/22] Linking CXX executable cpp/tests/psio_reflect_tests
+[16/22] Linking CXX executable cpp/tests/psio_view_access_tests
+[17/22] Linking CXX executable cpp/tests/psio_native_view_tests
+[18/22] Linking CXX executable cpp/tests/psio_pssz_tests
+[19/22] Linking CXX executable cpp/tests/psio_empty_action_consumer
+[20/22] Linking CXX executable cpp/tests/psio_conformance_tests
+[21/22] Building CXX object cpp/tests/CMakeFiles/psio_wit_resource_tests.dir/main.cpp.o
+[22/22] Linking CXX executable cpp/tests/psio_wit_resource_tests

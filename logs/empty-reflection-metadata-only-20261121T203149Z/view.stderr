@@ -1,0 +1,212 @@
+cpp/tests/empty_action_consumer.cpp:37:22: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<1>, psio::storage::const_borrow>'
+   37 |    const auto view = psio::as_view(owned);
+      |                      ^
+cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<1>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:592:4: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<1>, psio::storage::const_borrow>'
+  592 |    as_view(const buffer<T, Fmt, S>& b) noexcept
+      |    ^
+cpp/tests/empty_action_consumer.cpp:37:28: note: in instantiation of function template specialization 'psio::as_view<action_data::Nop, psio::pssz_<1>, psio::storage::owning>' requested here
+   37 |    const auto view = psio::as_view(owned);
+      |                            ^
+cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<1>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:594:14: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<1>, psio::storage::const_borrow>'
+  594 |       return view<T, Fmt, storage::const_borrow>{bytes(b)};
+      |              ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/tests/empty_action_consumer.cpp:37:22: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<1>, psio::storage::const_borrow>'
+   37 |    const auto view = psio::as_view(owned);
+      |                      ^
+cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<1>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:592:4: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<1>, psio::storage::const_borrow>'
+  592 |    as_view(const buffer<T, Fmt, S>& b) noexcept
+      |    ^
+cpp/tests/empty_action_consumer.cpp:37:28: note: in instantiation of function template specialization 'psio::as_view<action_data::StableNop, psio::pssz_<1>, psio::storage::owning>' requested here
+   37 |    const auto view = psio::as_view(owned);
+      |                            ^
+cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<1>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:594:14: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<1>, psio::storage::const_borrow>'
+  594 |       return view<T, Fmt, storage::const_borrow>{bytes(b)};
+      |              ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/tests/empty_action_consumer.cpp:37:22: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<2>, psio::storage::const_borrow>'
+   37 |    const auto view = psio::as_view(owned);
+      |                      ^
+cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<2>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:62:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<2>>' requested here
+   62 |    check_format<psio::pssz16>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:592:4: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<2>, psio::storage::const_borrow>'
+  592 |    as_view(const buffer<T, Fmt, S>& b) noexcept
+      |    ^
+cpp/tests/empty_action_consumer.cpp:37:28: note: in instantiation of function template specialization 'psio::as_view<action_data::Nop, psio::pssz_<2>, psio::storage::owning>' requested here
+   37 |    const auto view = psio::as_view(owned);
+      |                            ^
+cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<2>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:62:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<2>>' requested here
+   62 |    check_format<psio::pssz16>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:594:14: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<2>, psio::storage::const_borrow>'
+  594 |       return view<T, Fmt, storage::const_borrow>{bytes(b)};
+      |              ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/tests/empty_action_consumer.cpp:37:22: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<2>, psio::storage::const_borrow>'
+   37 |    const auto view = psio::as_view(owned);
+      |                      ^
+cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<2>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:62:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<2>>' requested here
+   62 |    check_format<psio::pssz16>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:592:4: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<2>, psio::storage::const_borrow>'
+  592 |    as_view(const buffer<T, Fmt, S>& b) noexcept
+      |    ^
+cpp/tests/empty_action_consumer.cpp:37:28: note: in instantiation of function template specialization 'psio::as_view<action_data::StableNop, psio::pssz_<2>, psio::storage::owning>' requested here
+   37 |    const auto view = psio::as_view(owned);
+      |                            ^
+cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<2>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:62:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<2>>' requested here
+   62 |    check_format<psio::pssz16>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:594:14: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<2>, psio::storage::const_borrow>'
+  594 |       return view<T, Fmt, storage::const_borrow>{bytes(b)};
+      |              ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/tests/empty_action_consumer.cpp:37:22: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<4>, psio::storage::const_borrow>'
+   37 |    const auto view = psio::as_view(owned);
+      |                      ^
+cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<4>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:63:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<4>>' requested here
+   63 |    check_format<psio::pssz32>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:592:4: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<4>, psio::storage::const_borrow>'
+  592 |    as_view(const buffer<T, Fmt, S>& b) noexcept
+      |    ^
+cpp/tests/empty_action_consumer.cpp:37:28: note: in instantiation of function template specialization 'psio::as_view<action_data::Nop, psio::pssz_<4>, psio::storage::owning>' requested here
+   37 |    const auto view = psio::as_view(owned);
+      |                            ^
+cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<4>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:63:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<4>>' requested here
+   63 |    check_format<psio::pssz32>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:594:14: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz_<4>, psio::storage::const_borrow>'
+  594 |       return view<T, Fmt, storage::const_borrow>{bytes(b)};
+      |              ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/tests/empty_action_consumer.cpp:37:22: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<4>, psio::storage::const_borrow>'
+   37 |    const auto view = psio::as_view(owned);
+      |                      ^
+cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<4>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:63:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<4>>' requested here
+   63 |    check_format<psio::pssz32>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:592:4: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<4>, psio::storage::const_borrow>'
+  592 |    as_view(const buffer<T, Fmt, S>& b) noexcept
+      |    ^
+cpp/tests/empty_action_consumer.cpp:37:28: note: in instantiation of function template specialization 'psio::as_view<action_data::StableNop, psio::pssz_<4>, psio::storage::owning>' requested here
+   37 |    const auto view = psio::as_view(owned);
+      |                            ^
+cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<4>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:63:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<4>>' requested here
+   63 |    check_format<psio::pssz32>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/include/psio/view.hpp:594:14: error: implicit instantiation of undefined template 'psio::view<action_data::StableNop, psio::pssz_<4>, psio::storage::const_borrow>'
+  594 |       return view<T, Fmt, storage::const_borrow>{bytes(b)};
+      |              ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+cpp/tests/empty_action_consumer.cpp:37:22: error: implicit instantiation of undefined template 'psio::view<action_data::Nop, psio::pssz, psio::storage::const_borrow>'
+   37 |    const auto view = psio::as_view(owned);
+      |                      ^
+cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+cpp/tests/empty_action_consumer.cpp:64:4: note: in instantiation of function template specialization 'check_format<psio::pssz>' requested here
+   64 |    check_format<psio::pssz>();
+      |    ^
+cpp/include/psio/view.hpp:56:10: note: template is declared here
+   56 |    class view;
+      |          ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated.

@@ -1,0 +1,199 @@
+{
+  "baseline": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "platform": "Linux-6.17.0-22-generic-x86_64-with-glibc2.42",
+  "load_before": [
+    3.39990234375,
+    2.5048828125,
+    2.421875
+  ],
+  "free_bytes_before": 33138733056,
+  "jobs": 2,
+  "scope": "Existing reflection/PSSZ/view/native-view/cross-format tests plus zero-argument action-data consumer; no codec/IR/width or Rust changes.",
+  "source_sha256": {
+    "cpp/include/psio/reflect.hpp": "1132791f2d52d2e53af37415e067db9cdce539025656292633a94ae6478ecc78",
+    "cpp/include/psio/view.hpp": "d001327854d0266d5327cbe2a885cd9f2ef6671523d21d735ddc4fd430509101",
+    "cpp/tests/pssz_tests.cpp": "af6877253f03bd17f656b3dde1c45d05947622f74e6102ce0e918fd6b3ec72bf",
+    "cpp/tests/CMakeLists.txt": "77d181a52458a6b73af41ede057425fbe67b4469eadfb6bc98e7f09183b9d75e",
+    "cpp/tests/empty_action_consumer.cpp": "ecca49349417dc7daca1ef2d8f6033e2b4432a7ad02b94bf895661057a430815",
+    "cpp/tests/qualify_empty_reflection.py": "6352a8c89d3f952bbed6bbdaa31324a266f8bcd71b135a50792f4cc4ed867814"
+  },
+  "commands": [
+    {
+      "name": "compiler",
+      "argv": [
+        "/usr/bin/clang++-20",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.018702305853366852
+    },
+    {
+      "name": "cmake-version",
+      "argv": [
+        "cmake",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.006380397826433182
+    },
+    {
+      "name": "hardware",
+      "argv": [
+        "lscpu"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.0031135156750679016
+    },
+    {
+      "name": "codec-probe",
+      "argv": [
+        "/usr/bin/clang++-20",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/home/dlarimer/psio-empty-reflection-20261121/cpp/include",
+        "-idirafter",
+        "/usr/include",
+        "-fsyntax-only",
+        "/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_CODEC_ONLY"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.9085100367665291
+    },
+    {
+      "name": "view-probe",
+      "argv": [
+        "/usr/bin/clang++-20",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/home/dlarimer/psio-empty-reflection-20261121/cpp/include",
+        "-idirafter",
+        "/usr/include",
+        "-fsyntax-only",
+        "/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_VIEW_ONLY"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.8904978446662426
+    },
+    {
+      "name": "invalid-index-probe",
+      "argv": [
+        "/usr/bin/clang++-20",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/home/dlarimer/psio-empty-reflection-20261121/cpp/include",
+        "-idirafter",
+        "/usr/include",
+        "-fsyntax-only",
+        "/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_VIEW_ONLY",
+        "-DPSIO_EMPTY_INVALID_INDEX"
+      ],
+      "exit_code": 1,
+      "expected": null,
+      "seconds": 0.9215545691549778
+    },
+    {
+      "name": "configure",
+      "argv": [
+        "cmake",
+        "-S",
+        "/home/dlarimer/psio-empty-reflection-20261121",
+        "-B",
+        "/home/dlarimer/psio-empty-reflection-20261121/build/empty-reflection",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=/usr/bin/clang-20",
+        "-DCMAKE_CXX_COMPILER=/usr/bin/clang++-20",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DPSIO_ENABLE_TESTS=ON",
+        "-DPSIO_ENABLE_BENCHMARKS=OFF",
+        "-DPSIO_ENABLE_TOOLS=OFF",
+        "-DCMAKE_CXX_FLAGS=-DCATCH_CONFIG_NO_POSIX_SIGNALS"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.0519842691719532
+    },
+    {
+      "name": "build",
+      "argv": [
+        "cmake",
+        "--build",
+        "/home/dlarimer/psio-empty-reflection-20261121/build/empty-reflection",
+        "--target",
+        "psio_reflect_tests",
+        "psio_pssz_tests",
+        "psio_empty_action_consumer",
+        "psio_view_access_tests",
+        "psio_native_view_tests",
+        "psio_conformance_tests",
+        "psio_wit_resource_tests",
+        "--parallel",
+        "2"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 32.61920062080026
+    },
+    {
+      "name": "build-commands",
+      "argv": [
+        "ninja",
+        "-C",
+        "/home/dlarimer/psio-empty-reflection-20261121/build/empty-reflection",
+        "-t",
+        "commands",
+        "psio_reflect_tests",
+        "psio_pssz_tests",
+        "psio_empty_action_consumer",
+        "psio_view_access_tests",
+        "psio_native_view_tests",
+        "psio_conformance_tests",
+        "psio_wit_resource_tests"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.00357707217335701
+    },
+    {
+      "name": "tests",
+      "argv": [
+        "ctest",
+        "--test-dir",
+        "/home/dlarimer/psio-empty-reflection-20261121/build/empty-reflection",
+        "--verbose",
+        "--output-on-failure",
+        "-R",
+        "^(psio_reflect_tests|psio_pssz_tests|psio_empty_action_consumer|psio_view_access_tests|psio_native_view_tests|psio_conformance_tests|psio_wit_resource_tests)$"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.021171435713768005
+    }
+  ],
+  "passed": true,
+  "binary_sha256": {
+    "psio_reflect_tests": "84d8cb942980f6bf77b8d9f4342527b099a1155791c216a11e433bab3374eea4",
+    "psio_pssz_tests": "3140b381005f80435a8edb6eb765aec8dbe0a3f6be4e53956e890ac41c7012c8",
+    "psio_empty_action_consumer": "468612689944f2dd560c12b1dd1561dcf1b1bdcc4ba23daabc0d93aec9f9ee95",
+    "psio_view_access_tests": "e58f79b9797f571aa8064973907919a8caf5254c0e4215044f38e529f52866aa",
+    "psio_native_view_tests": "5a99e9c9af800b1f4aa8230520ceb0fa500f278b2e66d8c56ac36527dd286475",
+    "psio_conformance_tests": "9adcfe88cbfd20fb35fbd43ba9289daecf802215112d5b4144e7b555ca31b58a",
+    "psio_wit_resource_tests": "cf8d32527eeef411f764952b12c59fef5f6513b8d1e1d360545723f9aff75e2d"
+  },
+  "load_after": [
+    2.69873046875,
+    2.4306640625,
+    2.3994140625
+  ],
+  "free_bytes_after": 33122443264
+}

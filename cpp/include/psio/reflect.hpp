@@ -48,6 +48,12 @@ namespace psio {
          static constexpr bool is_reflected = false;
       };
 
+      // Empty records still expose the metadata template names so generic
+      // pack-expansion walkers can look them up. No index is valid, and an
+      // attempt to instantiate one remains an error.
+      template <std::size_t>
+      struct empty_reflected_member;
+
       // Reasonable linear scan — sufficient for structs up to BeaconState
       // scale (~20 fields) at no measurable runtime cost. A true
       // perfect-hash backend lands in phase 13 (design § 5.2.5.1); the
@@ -370,6 +376,17 @@ namespace psio {
       static constexpr ::std::string_view name         = BOOST_PP_STRINGIZE(TYPE);     \
       static constexpr ::std::size_t      member_count = 0;                            \
       static constexpr ::std::array<::std::string_view, 0> _names_array_{};            \
+      template <::std::size_t Idx>                                                    \
+      using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      template <::std::size_t Idx>                                                    \
+      static constexpr auto member_pointer                                           \
+         = ::psio::detail::empty_reflected_member<Idx>::pointer;                       \
+      template <::std::size_t Idx>                                                    \
+      static constexpr ::std::string_view member_name                                 \
+         = ::psio::detail::empty_reflected_member<Idx>::name;                          \
+      template <::std::size_t Idx>                                                    \
+      static constexpr ::std::uint32_t field_number                                   \
+         = ::psio::detail::empty_reflected_member<Idx>::number;                        \
                                                                                        \
       static constexpr ::std::optional<::std::size_t>                                  \
       index_of(::std::string_view) noexcept                                            \

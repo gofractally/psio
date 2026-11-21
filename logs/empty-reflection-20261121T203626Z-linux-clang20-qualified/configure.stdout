@@ -1,0 +1,5 @@
+-- psio: simdjson not found; json_to_pjson disabled
+-- psio: msgpack-cxx not found — skipping psio_format_perf_external
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/dlarimer/psio-empty-reflection-20261121/build/empty-reflection

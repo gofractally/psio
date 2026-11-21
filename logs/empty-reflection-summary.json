@@ -1,0 +1,63 @@
+{
+  "baseline": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "scope": "Focused C++ empty reflection repair only; no new codecs, IR, width families, or Rust changes; no push/tag authorized before root review",
+  "code": "17-line dependent metadata names repair plus empty-record view eligibility disjunction; no valid field index added; nonempty view layout/width propagation untouched",
+  "fixtures": "No-argument Nop action-data record plus DWNC stable record, existing explicit8/16/32-bit PSSZ and automatic PSSZ; encode/validate/decode/reencode/views and zero metadata visits",
+  "reference_failures": {
+    "mac": "empty-reflection-reference-20261121T203128Z",
+    "linux": "empty-reflection-reference-20261121T203421Z",
+    "metadata_only": "empty-reflection-metadata-only-20261121T203149Z: codec succeeds, view still fails",
+    "setup_attempts": {
+      "empty-reflection-reference-20261121T203105Z": "Probe omitted required exceptions definition; setup failure, not empty-reflection evidence",
+      "empty-reflection-reference-20261121T203116Z": "Type annotation was incorrectly declared inside fixture namespace; setup failure retained, then corrected"
+    }
+  },
+  "qualified": {
+    "mac": {
+      "evidence": "empty-reflection-20261121T203557Z-mac-clang22-qualified",
+      "passed": true,
+      "test_targets": 7,
+      "catch_cases": 135,
+      "catch_assertions": 812,
+      "empty_action_combinations": 8,
+      "jobs": 2,
+      "invalid_get0": "Compile rejected for incomplete empty_reflected_member<0>",
+      "source_sha256": {
+        "cpp/include/psio/reflect.hpp": "1132791f2d52d2e53af37415e067db9cdce539025656292633a94ae6478ecc78",
+        "cpp/include/psio/view.hpp": "d001327854d0266d5327cbe2a885cd9f2ef6671523d21d735ddc4fd430509101",
+        "cpp/tests/pssz_tests.cpp": "af6877253f03bd17f656b3dde1c45d05947622f74e6102ce0e918fd6b3ec72bf",
+        "cpp/tests/CMakeLists.txt": "77d181a52458a6b73af41ede057425fbe67b4469eadfb6bc98e7f09183b9d75e",
+        "cpp/tests/empty_action_consumer.cpp": "ecca49349417dc7daca1ef2d8f6033e2b4432a7ad02b94bf895661057a430815",
+        "cpp/tests/qualify_empty_reflection.py": "6352a8c89d3f952bbed6bbdaa31324a266f8bcd71b135a50792f4cc4ed867814"
+      }
+    },
+    "linux": {
+      "evidence": "empty-reflection-20261121T203626Z-linux-clang20-qualified",
+      "passed": true,
+      "test_targets": 7,
+      "catch_cases": 135,
+      "catch_assertions": 812,
+      "empty_action_combinations": 8,
+      "jobs": 2,
+      "invalid_get0": "Compile rejected for incomplete empty_reflected_member<0>",
+      "source_sha256": {
+        "cpp/include/psio/reflect.hpp": "1132791f2d52d2e53af37415e067db9cdce539025656292633a94ae6478ecc78",
+        "cpp/include/psio/view.hpp": "d001327854d0266d5327cbe2a885cd9f2ef6671523d21d735ddc4fd430509101",
+        "cpp/tests/pssz_tests.cpp": "af6877253f03bd17f656b3dde1c45d05947622f74e6102ce0e918fd6b3ec72bf",
+        "cpp/tests/CMakeLists.txt": "77d181a52458a6b73af41ede057425fbe67b4469eadfb6bc98e7f09183b9d75e",
+        "cpp/tests/empty_action_consumer.cpp": "ecca49349417dc7daca1ef2d8f6033e2b4432a7ad02b94bf895661057a430815",
+        "cpp/tests/qualify_empty_reflection.py": "6352a8c89d3f952bbed6bbdaa31324a266f8bcd71b135a50792f4cc4ed867814"
+      }
+    }
+  },
+  "linux_catch_compatibility": "Initial unchanged Catch2v2 main.cpp build fails dynamic glibc SIGSTKSZ constexpr. Explicit CATCH_CONFIG_NO_POSIX_SIGNALS build flag only disables that crash reporter; assertions and process failure detection remain active. Raw failure retained in empty-reflection-20261121T203448Z-linux-clang20.",
+  "guest_scope": "Compile-only WASI object succeeds with existing SDKClang21.1.4 and PSIO_EXCEPTIONS_ENABLED=1; no link/runtime or exception-disabled guarantee.",
+  "source_sha256": {
+    "cpp/include/psio/reflect.hpp": "1132791f2d52d2e53af37415e067db9cdce539025656292633a94ae6478ecc78",
+    "cpp/include/psio/view.hpp": "d001327854d0266d5327cbe2a885cd9f2ef6671523d21d735ddc4fd430509101",
+    "cpp/tests/CMakeLists.txt": "77d181a52458a6b73af41ede057425fbe67b4469eadfb6bc98e7f09183b9d75e",
+    "cpp/tests/pssz_tests.cpp": "af6877253f03bd17f656b3dde1c45d05947622f74e6102ce0e918fd6b3ec72bf",
+    "cpp/tests/empty_action_consumer.cpp": "ecca49349417dc7daca1ef2d8f6033e2b4432a7ad02b94bf895661057a430815",
+    "cpp/tests/qualify_empty_reflection.py": "6352a8c89d3f952bbed6bbdaa31324a266f8bcd71b135a50792f4cc4ed867814"
+  }
+}

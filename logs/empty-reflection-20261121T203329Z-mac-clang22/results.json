@@ -1,0 +1,238 @@
+{
+  "baseline": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+  "load_before": [
+    2.40673828125,
+    2.30908203125,
+    2.63232421875
+  ],
+  "free_bytes_before": 2268206739456,
+  "jobs": 2,
+  "scope": "Existing reflection/PSSZ/view/native-view/cross-format tests plus zero-argument action-data consumer; no codec/IR/width or Rust changes.",
+  "source_sha256": {
+    "cpp/include/psio/reflect.hpp": "1132791f2d52d2e53af37415e067db9cdce539025656292633a94ae6478ecc78",
+    "cpp/include/psio/view.hpp": "d001327854d0266d5327cbe2a885cd9f2ef6671523d21d735ddc4fd430509101",
+    "cpp/tests/pssz_tests.cpp": "af6877253f03bd17f656b3dde1c45d05947622f74e6102ce0e918fd6b3ec72bf",
+    "cpp/tests/CMakeLists.txt": "77d181a52458a6b73af41ede057425fbe67b4469eadfb6bc98e7f09183b9d75e",
+    "cpp/tests/empty_action_consumer.cpp": "ecca49349417dc7daca1ef2d8f6033e2b4432a7ad02b94bf895661057a430815",
+    "cpp/tests/qualify_empty_reflection.py": "206ff7a54579e2177e5ef55560deb53b3ddc0fa896e3af4ba9c7ab3f524d987b"
+  },
+  "commands": [
+    {
+      "name": "compiler",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.017934791976585984
+    },
+    {
+      "name": "cmake-version",
+      "argv": [
+        "cmake",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.006204958073794842
+    },
+    {
+      "name": "hardware",
+      "argv": [
+        "sysctl",
+        "machdep.cpu.brand_string",
+        "hw.memsize",
+        "hw.ncpu"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.0022428330266848207
+    },
+    {
+      "name": "codec-probe",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/Users/dlarimer/psio-psibase-empty-reflect/cpp/include",
+        "-idirafter",
+        "/opt/homebrew/include",
+        "-fsyntax-only",
+        "/Users/dlarimer/psio-psibase-empty-reflect/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_CODEC_ONLY"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.4119078340008855
+    },
+    {
+      "name": "view-probe",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/Users/dlarimer/psio-psibase-empty-reflect/cpp/include",
+        "-idirafter",
+        "/opt/homebrew/include",
+        "-fsyntax-only",
+        "/Users/dlarimer/psio-psibase-empty-reflect/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_VIEW_ONLY"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.4032635421026498
+    },
+    {
+      "name": "invalid-index-probe",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/Users/dlarimer/psio-psibase-empty-reflect/cpp/include",
+        "-idirafter",
+        "/opt/homebrew/include",
+        "-fsyntax-only",
+        "/Users/dlarimer/psio-psibase-empty-reflect/cpp/tests/empty_action_consumer.cpp",
+        "-DPSIO_EMPTY_VIEW_ONLY",
+        "-DPSIO_EMPTY_INVALID_INDEX"
+      ],
+      "exit_code": 1,
+      "expected": null,
+      "seconds": 0.458139791036956
+    },
+    {
+      "name": "configure",
+      "argv": [
+        "cmake",
+        "-S",
+        "/Users/dlarimer/psio-psibase-empty-reflect",
+        "-B",
+        "/Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang",
+        "-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DPSIO_ENABLE_TESTS=ON",
+        "-DPSIO_ENABLE_BENCHMARKS=OFF",
+        "-DPSIO_ENABLE_TOOLS=OFF"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.08799329097382724
+    },
+    {
+      "name": "build",
+      "argv": [
+        "cmake",
+        "--build",
+        "/Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection",
+        "--target",
+        "psio_reflect_tests",
+        "psio_pssz_tests",
+        "psio_empty_action_consumer",
+        "psio_view_access_tests",
+        "psio_native_view_tests",
+        "psio_conformance_tests",
+        "--parallel",
+        "2"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.015247749979607761
+    },
+    {
+      "name": "build-commands",
+      "argv": [
+        "ninja",
+        "-C",
+        "/Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection",
+        "-t",
+        "commands",
+        "psio_reflect_tests",
+        "psio_pssz_tests",
+        "psio_empty_action_consumer",
+        "psio_view_access_tests",
+        "psio_native_view_tests",
+        "psio_conformance_tests"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.005524332984350622
+    },
+    {
+      "name": "tests",
+      "argv": [
+        "ctest",
+        "--test-dir",
+        "/Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection",
+        "--verbose",
+        "--output-on-failure",
+        "-R",
+        "^(psio_reflect_tests|psio_pssz_tests|psio_empty_action_consumer|psio_view_access_tests|psio_native_view_tests|psio_conformance_tests)$"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.9105661250650883
+    },
+    {
+      "name": "guest-compiler",
+      "argv": [
+        "/Users/dlarimer/psibase/build/wasi-sdk-prefix/src/wasi-sdk/bin/clang++",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.020385665935464203
+    },
+    {
+      "name": "guest-compile",
+      "argv": [
+        "/Users/dlarimer/psibase/build/wasi-sdk-prefix/src/wasi-sdk/bin/clang++",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/Users/dlarimer/psio-psibase-empty-reflect/cpp/include",
+        "-idirafter",
+        "/opt/homebrew/include",
+        "-c",
+        "/Users/dlarimer/psio-psibase-empty-reflect/cpp/tests/empty_action_consumer.cpp",
+        "-o",
+        "/Users/dlarimer/psio-psibase-empty-reflect/logs/empty-reflection-20261121T203329Z-mac-clang22/empty-action-wasi.o"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.5818657079944387
+    },
+    {
+      "name": "guest-object",
+      "argv": [
+        "file",
+        "/Users/dlarimer/psio-psibase-empty-reflect/logs/empty-reflection-20261121T203329Z-mac-clang22/empty-action-wasi.o"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.0034513749415054917
+    }
+  ],
+  "passed": true,
+  "binary_sha256": {
+    "psio_reflect_tests": "ab8478382c5bd2fe0b8f9235df68d5ad633bb92b230bb444a4cf8a5d67917872",
+    "psio_pssz_tests": "2df18e4a022d1090356476c2a5e843b491adc48e277944a4b3f728282aa29a50",
+    "psio_empty_action_consumer": "92464e0df5b81cccefbb65cea304248460718c876888c9ec9b409735a6d5fb87",
+    "psio_view_access_tests": "749090112f2c75f5a08b15ea7fbd678909d277e112945ad383323b1b9e6c5556",
+    "psio_native_view_tests": "fdcb9414c2119cc6b431ad287aadd9925021eddc9fb8c24ffcad2c13350b61de",
+    "psio_conformance_tests": "6502a36b6e647bcff79ae2007022f34a32eeeeae847b5b5ad28bd7fddb0cbb43"
+  },
+  "guest_scope": "Compile-only existing WASI SDK with exceptions enabled; no guest link or runtime qualification.",
+  "guest_object_sha256": "5a8594820e62c75364fec8cad77a0f84a677b69304bfe02ee0f526aa10108641",
+  "load_after": [
+    2.6943359375,
+    2.3701171875,
+    2.65185546875
+  ],
+  "free_bytes_after": 2268205993984
+}

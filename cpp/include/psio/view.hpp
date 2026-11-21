@@ -498,7 +498,8 @@ namespace psio {
    //     vector, optional, variant, nested record).  The sub-view shares
    //     the parent's backing span — no allocation, no decode.
    //
-   // Selection: only enabled when traits<Fmt> defines record_field_span<T, 0>.
+   // Empty records need no field layout: their view only borrows the bytes.
+   // Nonempty records require traits<Fmt>::record_field_span<T, 0>.
    // Formats that don't (or shapes the format can't handle, e.g., ssz on
    // a record with a variable field but no offset-table support) fall
    // through to whatever caller mechanism handles the unsupported case.
@@ -508,7 +509,8 @@ namespace psio {
    // adapter-view specialization above wins instead.
    template <typename T, typename Fmt, storage Store>
       requires Reflected<T>
-            && view_layout::has_record_support<Fmt, T>::value
+            && (reflect<T>::member_count == 0
+                || view_layout::has_record_support<Fmt, T>::value)
             && (!::psio::format_should_dispatch_adapter_v<Fmt, T>)
    class view<T, Fmt, Store>
    {

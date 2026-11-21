@@ -1,0 +1,78 @@
+UpdateCTestConfiguration  from :/Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/DartConfiguration.tcl
+Test project /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 2
+    Start  2: psio_reflect_tests
+
+2: Test command: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests/psio_reflect_tests
+2: Working Directory: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests
+2: Test timeout computed to be: 10000000
+2: ===============================================================================
+2: All tests passed (51 assertions in 10 test cases)
+2: 
+1/6 Test  #2: psio_reflect_tests ...............   Passed    0.17 sec
+test 6
+    Start  6: psio_view_access_tests
+
+6: Test command: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests/psio_view_access_tests
+6: Working Directory: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests
+6: Test timeout computed to be: 10000000
+6: ===============================================================================
+6: All tests passed (24 assertions in 10 test cases)
+6: 
+2/6 Test  #6: psio_view_access_tests ...........   Passed    0.14 sec
+test 7
+    Start  7: psio_native_view_tests
+
+7: Test command: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests/psio_native_view_tests
+7: Working Directory: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests
+7: Test timeout computed to be: 10000000
+7: ===============================================================================
+7: All tests passed (21 assertions in 7 test cases)
+7: 
+3/6 Test  #7: psio_native_view_tests ...........   Passed    0.15 sec
+test 11
+    Start 11: psio_pssz_tests
+
+11: Test command: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests/psio_pssz_tests
+11: Working Directory: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests
+11: Test timeout computed to be: 10000000
+11: ===============================================================================
+11: All tests passed (89 assertions in 39 test cases)
+11: 
+4/6 Test #11: psio_pssz_tests ..................   Passed    0.15 sec
+test 12
+    Start 12: psio_empty_action_consumer
+
+12: Test command: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests/psio_empty_action_consumer
+12: Working Directory: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests
+12: Test timeout computed to be: 10000000
+12: Empty action records: 2 layouts x 4 existing formats passed
+5/6 Test #12: psio_empty_action_consumer .......   Passed    0.14 sec
+test 18
+    Start 18: psio_conformance_tests
+
+18: Test command: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests/psio_conformance_tests
+18: Working Directory: /Users/dlarimer/psio-psibase-empty-reflect/build-empty-reflection/cpp/tests
+18: Test timeout computed to be: 10000000
+18: ===============================================================================
+18: All tests passed (612 assertions in 64 test cases)
+18: 
+6/6 Test #18: psio_conformance_tests ...........   Passed    0.16 sec
+
+The following tests passed:
+	psio_reflect_tests
+	psio_view_access_tests
+	psio_native_view_tests
+	psio_pssz_tests
+	psio_empty_action_consumer
+	psio_conformance_tests
+
+100% tests passed, 0 tests failed out of 6
+
+Total Test time (real) =   0.90 sec

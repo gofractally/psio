@@ -1,0 +1,5 @@
+clang version 21.1.4-wasi-sdk (https://github.com/llvm/llvm-project 222fc11f2b8f25f6a0f4976272ef1bb7bf49521d)
+Target: wasm32-unknown-wasi
+Thread model: posix
+InstalledDir: /Users/dlarimer/psibase/build/wasi-sdk-prefix/src/wasi-sdk/bin
+Configuration file: /Users/dlarimer/psibase/build/wasi-sdk-prefix/src/wasi-sdk/bin/clang++.cfg

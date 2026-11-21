@@ -1,0 +1,33 @@
+{
+  "scope": "Only17-line reflection metadata fix applied; view remains baseline",
+  "commands": [
+    {
+      "kind": "codec",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-Icpp/include",
+        "-I/opt/homebrew/include",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-DPSIO_EMPTY_CODEC_ONLY",
+        "-fsyntax-only",
+        "cpp/tests/empty_action_consumer.cpp"
+      ],
+      "exit_code": 0
+    },
+    {
+      "kind": "view",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-Icpp/include",
+        "-I/opt/homebrew/include",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-DPSIO_EMPTY_VIEW_ONLY",
+        "-fsyntax-only",
+        "cpp/tests/empty_action_consumer.cpp"
+      ],
+      "exit_code": 1
+    }
+  ]
+}

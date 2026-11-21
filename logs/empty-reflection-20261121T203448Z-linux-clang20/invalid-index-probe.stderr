@@ -1,0 +1,413 @@
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:11:4: error: implicit instantiation of undefined template 'psio::detail::empty_reflected_member<0>'
+   11 |    PSIO_REFLECT(Nop)
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/usr/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/usr/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+<scratch space>:469:1: note: expanded from here
+  469 | PSIO_REFLECT_DISPATCH_0
+      | ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:355:44: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0'
+  355 | #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+      |                                            ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:380:7: note: expanded from macro 'PSIO_REFLECT_NO_FIELDS_'
+  380 |       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:550:51: note: in instantiation of template type alias 'member_type' requested here
+  550 |             typename ::psio::reflect<T>::template member_type<N>>;
+      |                                                   ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::Nop, psio::pssz_<1>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<1>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:55:14: note: template is declared here
+   55 |       struct empty_reflected_member;
+      |              ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:2:
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:26:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:552:48: error: no member named 'record_field_span' in 'psio::view_layout::traits<psio::pssz_<1>>'
+  552 |             view_layout::traits<Fmt>::template record_field_span<T, N>(
+      |             ~~~~~~~~~~~~~~~~~~~~~~~~~~         ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::Nop, psio::pssz_<1>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<1>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:13:4: error: implicit instantiation of undefined template 'psio::detail::empty_reflected_member<0>'
+   13 |    PSIO_REFLECT(StableNop)
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/usr/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/usr/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+<scratch space>:473:1: note: expanded from here
+  473 | PSIO_REFLECT_DISPATCH_0
+      | ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:355:44: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0'
+  355 | #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+      |                                            ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:380:7: note: expanded from macro 'PSIO_REFLECT_NO_FIELDS_'
+  380 |       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:550:51: note: in instantiation of template type alias 'member_type' requested here
+  550 |             typename ::psio::reflect<T>::template member_type<N>>;
+      |                                                   ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::StableNop, psio::pssz_<1>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<1>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:55:14: note: template is declared here
+   55 |       struct empty_reflected_member;
+      |              ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:2:
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:26:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:552:48: error: no member named 'record_field_span' in 'psio::view_layout::traits<psio::pssz_<1>>'
+  552 |             view_layout::traits<Fmt>::template record_field_span<T, N>(
+      |             ~~~~~~~~~~~~~~~~~~~~~~~~~~         ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::StableNop, psio::pssz_<1>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<1>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:61:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<1>>' requested here
+   61 |    check_format<psio::pssz8>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:11:4: error: implicit instantiation of undefined template 'psio::detail::empty_reflected_member<0>'
+   11 |    PSIO_REFLECT(Nop)
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/usr/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/usr/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+<scratch space>:469:1: note: expanded from here
+  469 | PSIO_REFLECT_DISPATCH_0
+      | ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:355:44: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0'
+  355 | #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+      |                                            ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:380:7: note: expanded from macro 'PSIO_REFLECT_NO_FIELDS_'
+  380 |       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:550:51: note: in instantiation of template type alias 'member_type' requested here
+  550 |             typename ::psio::reflect<T>::template member_type<N>>;
+      |                                                   ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::Nop, psio::pssz_<2>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<2>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:62:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<2>>' requested here
+   62 |    check_format<psio::pssz16>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:55:14: note: template is declared here
+   55 |       struct empty_reflected_member;
+      |              ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:2:
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:26:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:552:48: error: no member named 'record_field_span' in 'psio::view_layout::traits<psio::pssz_<2>>'
+  552 |             view_layout::traits<Fmt>::template record_field_span<T, N>(
+      |             ~~~~~~~~~~~~~~~~~~~~~~~~~~         ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::Nop, psio::pssz_<2>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<2>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:62:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<2>>' requested here
+   62 |    check_format<psio::pssz16>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:13:4: error: implicit instantiation of undefined template 'psio::detail::empty_reflected_member<0>'
+   13 |    PSIO_REFLECT(StableNop)
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/usr/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/usr/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+<scratch space>:473:1: note: expanded from here
+  473 | PSIO_REFLECT_DISPATCH_0
+      | ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:355:44: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0'
+  355 | #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+      |                                            ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:380:7: note: expanded from macro 'PSIO_REFLECT_NO_FIELDS_'
+  380 |       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:550:51: note: in instantiation of template type alias 'member_type' requested here
+  550 |             typename ::psio::reflect<T>::template member_type<N>>;
+      |                                                   ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::StableNop, psio::pssz_<2>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<2>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:62:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<2>>' requested here
+   62 |    check_format<psio::pssz16>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:55:14: note: template is declared here
+   55 |       struct empty_reflected_member;
+      |              ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:2:
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:26:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:552:48: error: no member named 'record_field_span' in 'psio::view_layout::traits<psio::pssz_<2>>'
+  552 |             view_layout::traits<Fmt>::template record_field_span<T, N>(
+      |             ~~~~~~~~~~~~~~~~~~~~~~~~~~         ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::StableNop, psio::pssz_<2>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<2>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:62:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<2>>' requested here
+   62 |    check_format<psio::pssz16>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:11:4: error: implicit instantiation of undefined template 'psio::detail::empty_reflected_member<0>'
+   11 |    PSIO_REFLECT(Nop)
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/usr/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/usr/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+<scratch space>:469:1: note: expanded from here
+  469 | PSIO_REFLECT_DISPATCH_0
+      | ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:355:44: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0'
+  355 | #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+      |                                            ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:380:7: note: expanded from macro 'PSIO_REFLECT_NO_FIELDS_'
+  380 |       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:550:51: note: in instantiation of template type alias 'member_type' requested here
+  550 |             typename ::psio::reflect<T>::template member_type<N>>;
+      |                                                   ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::Nop, psio::pssz_<4>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<4>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:63:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<4>>' requested here
+   63 |    check_format<psio::pssz32>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:55:14: note: template is declared here
+   55 |       struct empty_reflected_member;
+      |              ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:2:
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:26:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:552:48: error: no member named 'record_field_span' in 'psio::view_layout::traits<psio::pssz_<4>>'
+  552 |             view_layout::traits<Fmt>::template record_field_span<T, N>(
+      |             ~~~~~~~~~~~~~~~~~~~~~~~~~~         ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::Nop, psio::pssz_<4>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz_<4>>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:63:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<4>>' requested here
+   63 |    check_format<psio::pssz32>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:13:4: error: implicit instantiation of undefined template 'psio::detail::empty_reflected_member<0>'
+   13 |    PSIO_REFLECT(StableNop)
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/usr/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/usr/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+<scratch space>:473:1: note: expanded from here
+  473 | PSIO_REFLECT_DISPATCH_0
+      | ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:355:44: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0'
+  355 | #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+      |                                            ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:380:7: note: expanded from macro 'PSIO_REFLECT_NO_FIELDS_'
+  380 |       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:550:51: note: in instantiation of template type alias 'member_type' requested here
+  550 |             typename ::psio::reflect<T>::template member_type<N>>;
+      |                                                   ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::StableNop, psio::pssz_<4>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<4>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:63:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<4>>' requested here
+   63 |    check_format<psio::pssz32>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:55:14: note: template is declared here
+   55 |       struct empty_reflected_member;
+      |              ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:2:
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:26:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:552:48: error: no member named 'record_field_span' in 'psio::view_layout::traits<psio::pssz_<4>>'
+  552 |             view_layout::traits<Fmt>::template record_field_span<T, N>(
+      |             ~~~~~~~~~~~~~~~~~~~~~~~~~~         ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::StableNop, psio::pssz_<4>, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz_<4>>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:63:4: note: in instantiation of function template specialization 'check_format<psio::pssz_<4>>' requested here
+   63 |    check_format<psio::pssz32>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:11:4: error: implicit instantiation of undefined template 'psio::detail::empty_reflected_member<0>'
+   11 |    PSIO_REFLECT(Nop)
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/usr/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/usr/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+<scratch space>:469:1: note: expanded from here
+  469 | PSIO_REFLECT_DISPATCH_0
+      | ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:355:44: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0'
+  355 | #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+      |                                            ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:380:7: note: expanded from macro 'PSIO_REFLECT_NO_FIELDS_'
+  380 |       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:550:51: note: in instantiation of template type alias 'member_type' requested here
+  550 |             typename ::psio::reflect<T>::template member_type<N>>;
+      |                                                   ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::Nop, psio::pssz, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:64:4: note: in instantiation of function template specialization 'check_format<psio::pssz>' requested here
+   64 |    check_format<psio::pssz>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:55:14: note: template is declared here
+   55 |       struct empty_reflected_member;
+      |              ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:2:
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:26:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:552:13: error: no matching function for call to 'record_field_span'
+  552 |             view_layout::traits<Fmt>::template record_field_span<T, N>(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::Nop, psio::pssz, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:55:4: note: in instantiation of function template specialization 'check_empty_action<action_data::Nop, psio::pssz>' requested here
+   55 |    check_empty_action<action_data::Nop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:64:4: note: in instantiation of function template specialization 'check_format<psio::pssz>' requested here
+   64 |    check_format<psio::pssz>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:303:7: note: candidate template ignored: constraints not satisfied [with T = action_data::Nop, N = 0]
+  303 |       record_field_span(std::span<const char> s,
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:301:23: note: because '0UL < ::psio::reflect<Nop>::member_count' (0 < 0) evaluated to false
+  301 |                   && (N < ::psio::reflect<T>::member_count)
+      |                       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:13:4: error: implicit instantiation of undefined template 'psio::detail::empty_reflected_member<0>'
+   13 |    PSIO_REFLECT(StableNop)
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/usr/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/usr/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+<scratch space>:473:1: note: expanded from here
+  473 | PSIO_REFLECT_DISPATCH_0
+      | ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:355:44: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0'
+  355 | #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+      |                                            ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:380:7: note: expanded from macro 'PSIO_REFLECT_NO_FIELDS_'
+  380 |       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:550:51: note: in instantiation of template type alias 'member_type' requested here
+  550 |             typename ::psio::reflect<T>::template member_type<N>>;
+      |                                                   ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::StableNop, psio::pssz, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:64:4: note: in instantiation of function template specialization 'check_format<psio::pssz>' requested here
+   64 |    check_format<psio::pssz>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/reflect.hpp:55:14: note: template is declared here
+   55 |       struct empty_reflected_member;
+      |              ^
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:2:
+In file included from /home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:26:
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/view.hpp:552:13: error: no matching function for call to 'record_field_span'
+  552 |             view_layout::traits<Fmt>::template record_field_span<T, N>(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:42:24: note: in instantiation of function template specialization 'psio::view<action_data::StableNop, psio::pssz, psio::storage::const_borrow>::get<0UL>' requested here
+   42 |    (void)view.template get<0>(); // this compile-failure probe must remain invalid
+      |                        ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:56:4: note: in instantiation of function template specialization 'check_empty_action<action_data::StableNop, psio::pssz>' requested here
+   56 |    check_empty_action<action_data::StableNop, F>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/tests/empty_action_consumer.cpp:64:4: note: in instantiation of function template specialization 'check_format<psio::pssz>' requested here
+   64 |    check_format<psio::pssz>();
+      |    ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:303:7: note: candidate template ignored: constraints not satisfied [with T = action_data::StableNop, N = 0]
+  303 |       record_field_span(std::span<const char> s,
+      |       ^
+/home/dlarimer/psio-empty-reflection-20261121/cpp/include/psio/pssz_view.hpp:301:23: note: because '0UL < ::psio::reflect<StableNop>::member_count' (0 < 0) evaluated to false
+  301 |                   && (N < ::psio::reflect<T>::member_count)
+      |                       ^
+16 errors generated.
