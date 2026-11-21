@@ -142,7 +142,7 @@ fn can_be_empty<F: PsszFormat>(schema: &Schema, ty: &AnyType, n: usize) -> PsszR
     let ty = schema.resolve(ty)?;
     Ok(match &ty.value {
         AnyValue::List(_) | AnyValue::BoundedList(_) => true,
-        AnyValue::Option(o) => !can_be_empty::<F>(schema, &o.r#type, 0)?,
+        AnyValue::Option(o) => !can_be_empty::<F>(schema, &o.r#type, n + 1)?,
         AnyValue::Array(a) => {
             a.len == 0 || {
                 let l = layout_at::<F>(schema, &a.r#type, n + 1)?;
@@ -244,6 +244,9 @@ fn encode_at<F: PsszFormat>(
         }
         (AnyValue::Custom(c), Value::Bytes(v)) if c.id == "hex" => {
             bound_bytes(schema, &c.r#type, v.len())?;
+            if !v.is_empty() {
+                depth(n + 1)?;
+            }
             out.extend_from_slice(v);
         }
         (AnyValue::Option(o), Value::Optional(v)) => {
@@ -485,6 +488,9 @@ fn decode_at<F: PsszFormat>(
         }
         AnyValue::Custom(c) if c.id == "hex" => {
             bound_bytes(schema, &c.r#type, bytes.len())?;
+            if !bytes.is_empty() {
+                depth(n + 1)?;
+            }
             Value::Bytes(bytes.into())
         }
         AnyValue::Option(o) => {

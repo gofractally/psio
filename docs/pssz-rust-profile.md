@@ -85,3 +85,7 @@ while Some(unit) also counts the unit payload. Checked typed and dynamic writers
 material readers, structural validation and validated views enforce this rule.
 Shared fixtures cover these boundaries and every width. Depth-invalid fixture
 bytes are built independently, never emitted by a supported checked writer.
+Strings are atomic UTF-8 nodes. Byte vectors, including the runtime `hex`
+adapter, traverse their nonempty elements; an empty byte vector has no child.
+Schema minimum/layout analysis has a separate bounded recursion counter, so a
+recursive optional alias fails explicitly rather than recursing indefinitely.

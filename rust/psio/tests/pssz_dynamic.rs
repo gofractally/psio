@@ -215,6 +215,70 @@ fn runtime_codec_handles_integer_bounds_and_rejects_legacy_markers() {
     }));
     assert!(codec::encode::<Pssz32>(&schema, &legacy, &Value::Unsigned(1)).is_err());
     assert!(codec::decode_exact::<Pssz32>(&schema, &legacy, &[1]).is_err());
+
+    // Aliases through a recursive optional are not a finite minimum-size
+    // definition. Schema analysis has its own monotone recursion budget.
+    let mut recursive = Schema::default();
+    recursive.types.push(Member {
+        name: "recursive".into(),
+        r#type: Box::new(AnyType::new(AnyValue::Option(Optional {
+            r#type: Box::new(AnyType::named("recursive")),
+        }))),
+        attributes: vec![],
+    });
+    let root = AnyType::named("recursive");
+    assert!(codec::encode::<Pssz32>(&recursive, &root, &Value::Optional(None)).is_err());
+    assert!(codec::decode_exact::<Pssz32>(&recursive, &root, &[]).is_err());
+}
+
+#[test]
+fn byte_vectors_traverse_elements_but_strings_are_atomic_at_depth_limit() {
+    #[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView, psio::ToPsszSchema)]
+    enum Nest<T> {
+        Next(Box<Nest<T>>),
+        Leaf(T),
+    }
+    fn value(mut payload: Value) -> Value {
+        payload = Value::Variant {
+            selector: 1,
+            value: Box::new(payload),
+        };
+        for _ in 0..63 {
+            payload = Value::Variant {
+                selector: 0,
+                value: Box::new(payload),
+            };
+        }
+        payload
+    }
+    fn bytes(payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![0; 63];
+        out.push(1);
+        out.extend(payload);
+        out
+    }
+    let (schema, root) = schema_for::<Nest<Vec<u8>>>().unwrap();
+    let nonempty = bytes(&[7]);
+    assert!(from_pssz_exact::<Pssz32, Nest<Vec<u8>>>(&nonempty).is_err());
+    assert!(psio::pssz_view::validated_view_exact::<Nest<Vec<u8>>, Pssz32>(&nonempty).is_err());
+    assert!(codec::decode_exact::<Pssz32>(&schema, &root, &nonempty).is_err());
+    assert!(codec::encode::<Pssz32>(&schema, &root, &value(Value::Bytes(vec![7]))).is_err());
+    let empty = bytes(&[]);
+    assert!(from_pssz_exact::<Pssz32, Nest<Vec<u8>>>(&empty).is_ok());
+    assert!(codec::decode_exact::<Pssz32>(&schema, &root, &empty).is_ok());
+    assert_eq!(
+        codec::encode::<Pssz32>(&schema, &root, &value(Value::Bytes(vec![]))).unwrap(),
+        empty
+    );
+    let (schema, root) = schema_for::<Nest<String>>().unwrap();
+    let text = bytes(b"a");
+    assert!(from_pssz_exact::<Pssz32, Nest<String>>(&text).is_ok());
+    assert!(psio::pssz_view::validated_view_exact::<Nest<String>, Pssz32>(&text).is_ok());
+    assert!(codec::decode_exact::<Pssz32>(&schema, &root, &text).is_ok());
+    assert_eq!(
+        codec::encode::<Pssz32>(&schema, &root, &value(Value::String("a".into()))).unwrap(),
+        text
+    );
 }
 
 #[test]
