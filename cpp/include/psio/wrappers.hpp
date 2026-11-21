@@ -35,6 +35,7 @@
 #include <unordered_set>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -43,12 +44,25 @@
 
 namespace psio {
 
+   namespace detail {
+      [[noreturn]] inline void wrapper_bound_failure(const char* message)
+      {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
+         throw std::length_error(message);
+#else
+         (void)message;
+         std::abort();
+#endif
+      }
+   }
+
    // ── bounded<T, N> ──────────────────────────────────────────────────────
    //
    // std::vector-like container with compile-time upper bound N. Throws
    // on push_back / construct when the bound would be violated (if
-   // exceptions enabled); otherwise rejects via codec_status at the
-   // wire boundary.
+   // exceptions enabled); unchecked mutation aborts in guest mode. A
+   // checked wire boundary must report invalid input via codec_status
+   // before constructing a wrapper.
    template <typename T, std::size_t N>
    class bounded
    {
@@ -81,13 +95,13 @@ namespace psio {
       void push_back(const T& v)
       {
          if (data_.size() >= N)
-            throw std::length_error("psio::bounded overflow");
+            detail::wrapper_bound_failure("psio::bounded overflow");
          data_.push_back(v);
       }
       void push_back(T&& v)
       {
          if (data_.size() >= N)
-            throw std::length_error("psio::bounded overflow");
+            detail::wrapper_bound_failure("psio::bounded overflow");
          data_.push_back(std::move(v));
       }
 
@@ -99,7 +113,7 @@ namespace psio {
       void enforce_bound_() const
       {
          if (data_.size() > N)
-            throw std::length_error("psio::bounded overflow on construct");
+            detail::wrapper_bound_failure("psio::bounded overflow on construct");
       }
    };
 
@@ -132,7 +146,7 @@ namespace psio {
       void enforce_bound_() const
       {
          if (data_.size() > N)
-            throw std::length_error("psio::utf8_string overflow");
+            detail::wrapper_bound_failure("psio::utf8_string overflow");
       }
    };
 
@@ -205,7 +219,7 @@ namespace psio {
       void        push_back(bool v)
       {
          if (bits_.size() >= MaxN)
-            throw std::length_error("psio::bitlist overflow");
+            detail::wrapper_bound_failure("psio::bitlist overflow");
          bits_.push_back(v);
       }
 

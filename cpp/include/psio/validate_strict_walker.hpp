@@ -40,11 +40,14 @@
 //     fit those well; a typed-validate sibling will land separately.
 
 #include <psio/annotate.hpp>   // element_spec
+#include <psio/adapter.hpp>
 #include <psio/error.hpp>
+#include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
 
 #include <cstddef>
+#include <array>
 #include <optional>
 #include <span>
 #include <string>
@@ -62,6 +65,75 @@ namespace psio {
    validate_specs_on_value(const T& value) noexcept;
 
    namespace detail::vstrict {
+
+      // Guest strict validation cannot catch a rejected construction during
+      // semantic materialization. Prove the metadata needs no such work, or
+      // return an unsupported status at the format boundary. This deliberately
+      // recognizes only layout/name annotations, not unchecked constraints.
+      template <typename Tuple>
+      consteval bool annotations_need_no_semantics()
+      {
+         return []<typename... S>(std::tuple<S...>*) {
+            return ((std::is_same_v<S, ::psio::definition_will_not_change> ||
+                     std::is_same_v<S, ::psio::field_num_spec>) && ...);
+         }(static_cast<std::remove_cvref_t<Tuple>*>(nullptr));
+      }
+
+      template <typename T>
+      struct semantic_free_sequence : std::false_type {};
+      template <typename T, typename A>
+      struct semantic_free_sequence<std::vector<T, A>> : std::true_type
+      { using element_type = T; };
+      template <typename T, std::size_t N>
+      struct semantic_free_sequence<std::array<T, N>> : std::true_type
+      { using element_type = T; };
+      template <typename T>
+      struct semantic_free_sequence<std::optional<T>> : std::true_type
+      { using element_type = T; };
+
+      template <typename T>
+      struct semantic_free_variant : std::false_type {};
+      template <typename... T>
+      struct semantic_free_variant<std::variant<T...>> : std::true_type {};
+
+      template <typename T, typename... Seen>
+      consteval bool can_validate_without_materialization()
+      {
+         using U = std::remove_cvref_t<T>;
+         if constexpr ((std::is_same_v<U, Seen> || ...))
+            return true; // A previously inspected node closes a type-graph cycle.
+         else if constexpr (
+            !annotations_need_no_semantics<decltype(::psio::annotate<::psio::type<U>{}>)>() ||
+            !annotations_need_no_semantics<decltype(::psio::inherent_annotations<U>::value)>() ||
+            ::psio::has_adapter_v<U, ::psio::binary_category>)
+            return false;
+         else if constexpr (std::is_arithmetic_v<U> || std::is_enum_v<U> ||
+                            std::is_same_v<U, std::string> ||
+                            std::is_same_v<U, ::psio::uint128> ||
+                            std::is_same_v<U, ::psio::int128> ||
+                            std::is_same_v<U, ::psio::uint256>)
+            return true;
+         else if constexpr (semantic_free_sequence<U>::value)
+            return can_validate_without_materialization<
+               typename semantic_free_sequence<U>::element_type, Seen..., U>();
+         else if constexpr (semantic_free_variant<U>::value)
+            return []<std::size_t... I>(std::index_sequence<I...>) {
+               return (can_validate_without_materialization<
+                  std::variant_alternative_t<I, U>, Seen..., U>() && ...);
+            }(std::make_index_sequence<std::variant_size_v<U>>{});
+         else if constexpr (::psio::Reflected<U> && std::is_aggregate_v<U>)
+            return []<std::size_t... I>(std::index_sequence<I...>) {
+               using R = ::psio::reflect<U>;
+               return ((annotations_need_no_semantics<typename
+                           ::psio::effective_annotations_for<U,
+                              typename R::template member_type<I>,
+                              R::template member_pointer<I>>::value_t>() &&
+                        can_validate_without_materialization<
+                           typename R::template member_type<I>, Seen..., U>()) && ...);
+            }(std::make_index_sequence<::psio::reflect<U>::member_count>{});
+         else
+            return false; // Unknown wrapper, adapter or construction capability.
+      }
 
       template <typename T>
       struct is_std_vector : std::false_type {};

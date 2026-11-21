@@ -2688,6 +2688,7 @@ namespace psio {
             bytes, 0, bytes.size(), 0, true);
          if (!st.ok())
             return st;
+#if defined(__cpp_exceptions)
          if constexpr (::psio::Reflected<T>)
          {
             try
@@ -2703,6 +2704,10 @@ namespace psio {
                   "frac");
             }
          }
+#else
+         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
+            return codec_fail("frac: guest strict semantic validation unsupported", 0, "frac");
+#endif
          return st;
       }
 

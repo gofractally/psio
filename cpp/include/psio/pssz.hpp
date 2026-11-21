@@ -47,6 +47,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <limits>
@@ -99,9 +100,15 @@ namespace psio {
          if constexpr (cap.has_value())
          {
             if (total > *cap)
+            {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
                throw codec_exception{codec_error{
                   "pssz: encoded size exceeds maxDynamicData cap",
                   static_cast<std::uint32_t>(total), "pssz"}};
+#else
+               std::abort();
+#endif
+            }
          }
       }
 
@@ -409,7 +416,12 @@ namespace psio {
 
       [[noreturn]] inline void size_failure(const char* message)
       {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
          throw codec_exception{codec_error{message, 0, "pssz"}};
+#else
+         (void)message;
+         std::abort();
+#endif
       }
       inline std::size_t checked_add(std::size_t a, std::size_t b)
       {
@@ -1776,7 +1788,13 @@ namespace psio {
       [[noreturn, gnu::cold]] inline void
       pssz_throw_fail(std::string_view msg, std::uint32_t off)
       {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
          throw codec_exception{codec_error{msg, off, "pssz"}};
+#else
+         (void)msg;
+         (void)off;
+         std::abort();
+#endif
       }
 
       template <std::size_t W, bool Auto, typename T>
@@ -2066,7 +2084,13 @@ namespace psio {
                src.data() + pos,
                (end > pos) ? (end - pos) : 0));
             if (!st.ok()) [[unlikely]]
+            {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
                throw codec_exception{st.error()};
+#else
+               std::abort();
+#endif
+            }
          }
          else if constexpr (is_fixed_v<T> && !Record<T>)
          {
@@ -2459,6 +2483,7 @@ namespace psio {
                                                             bytes.size());
          if (!st.ok())
             return st;
+#if defined(__cpp_exceptions)
          if constexpr (::psio::Reflected<T>)
          {
             try
@@ -2474,6 +2499,10 @@ namespace psio {
                   "pssz");
             }
          }
+#else
+         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
+            return codec_fail("pssz: guest strict semantic validation unsupported", 0, "pssz");
+#endif
          return st;
       }
 
@@ -2571,6 +2600,7 @@ namespace psio {
                                                             bytes.size());
          if (!st.ok())
             return st;
+#if defined(__cpp_exceptions)
          if constexpr (::psio::Reflected<T>)
          {
             try
@@ -2586,6 +2616,10 @@ namespace psio {
                   "pssz");
             }
          }
+#else
+         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
+            return codec_fail("pssz: guest strict semantic validation unsupported", 0, "pssz");
+#endif
          return st;
       }
 
