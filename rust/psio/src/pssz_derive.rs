@@ -3,8 +3,8 @@
 //!
 //! Unlike SSZ, pSSZ emits an extensibility header (`F::HEADER_BYTES` bytes
 //! holding the fixed-region size) before the fixed region. A DWNC variant
-//! skips the header and memcpy's the struct; that variant is a future
-//! derive attribute (`pssz_struct_dwnc!`).
+//! skips the header. Both variants use typed field codecs, not Rust memory
+//! layout assumptions; safe trait implementations do not establish POD validity.
 
 /// DWNC variant for pSSZ: all-fixed struct, skips the extensibility
 /// header entirely. Mirrors C++'s `definitionWillNotChange()` on pSSZ.
@@ -22,21 +22,6 @@ macro_rules! pssz_struct_dwnc {
                 <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE
             }
             fn pssz_pack(&self, out: &mut Vec<u8>) {
-                // Whole-struct memcpy fast path (see ssz_struct_dwnc!
-                // for full commentary). Gated on size_of == FIXED_SIZE
-                // which holds iff the user applied #[repr(C, packed)].
-                #[cfg(target_endian = "little")]
-                if ::core::mem::size_of::<Self>() ==
-                    <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                {
-                    let bytes = unsafe {
-                        ::core::slice::from_raw_parts(
-                            self as *const Self as *const u8,
-                            ::core::mem::size_of::<Self>())
-                    };
-                    out.extend_from_slice(bytes);
-                    return;
-                }
                 // See ssz_struct_dwnc! for the rationale behind the
                 // by-value copy — lets this compile under `#[repr(C,
                 // packed)]`. DWNC fields are Copy by construction.
@@ -50,36 +35,16 @@ macro_rules! pssz_struct_dwnc {
         }
         impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszUnpack<F> for $Ty {
             fn pssz_unpack(bytes: &[u8]) -> $crate::pssz::PsszResult<Self> {
-                if bytes.len() < <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE {
-                    return Err($crate::pssz::PsszError("pssz dwnc: underrun"));
-                }
-                // Whole-struct memcpy decode fast path.
-                #[cfg(target_endian = "little")]
-                if ::core::mem::size_of::<Self>() ==
-                    <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                {
-                    let fs = <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                    let mut out: ::core::mem::MaybeUninit<Self> =
-                        ::core::mem::MaybeUninit::uninit();
-                    unsafe {
-                        ::core::ptr::copy_nonoverlapping(
-                            bytes.as_ptr(),
-                            out.as_mut_ptr() as *mut u8,
-                            fs);
-                        return Ok(out.assume_init());
-                    }
-                }
-                let mut pos: usize = 0;
+                let spans = $crate::pssz::input::record_spans::<F, _>(bytes, [$(
+                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
+                        Some(<$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)
+                    } else { None },
+                )+], true)?;
+                let mut fields = spans.into_iter();
                 $(
-                    let $field = {
-                        let fs = <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                        let out = <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(
-                            &bytes[pos .. pos + fs])?;
-                        pos += fs;
-                        out
-                    };
+                    let $field = <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(
+                        &bytes[fields.next().expect("generated field span")])?;
                 )+
-                let _ = pos;
                 Ok($Ty { $($field),+ })
             }
         }
@@ -100,13 +65,13 @@ macro_rules! pssz_struct {
             fn pssz_size(&self) -> usize {
                 let mut total: usize = F::HEADER_BYTES;
                 $(
-                    total += if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
+                    total = total.checked_add(if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
                         <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                    } else { F::OFFSET_BYTES };
+                    } else { F::OFFSET_BYTES }).expect("pssz: record size overflow");
                 )+
                 $(
                     if !<$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        total += <$FTy as $crate::pssz::PsszPack<F>>::pssz_size(&self.$field);
+                        total = total.checked_add(<$FTy as $crate::pssz::PsszPack<F>>::pssz_size(&self.$field)).expect("pssz: record size overflow");
                     }
                 )+
                 total
@@ -115,18 +80,14 @@ macro_rules! pssz_struct {
                 // Extensibility header (size of fixed region).
                 let mut fixed_region_bytes: usize = 0;
                 $(
-                    fixed_region_bytes += if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
+                    fixed_region_bytes = fixed_region_bytes.checked_add(if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
                         <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                    } else { F::OFFSET_BYTES };
+                    } else { F::OFFSET_BYTES }).expect("pssz: fixed region overflow");
                 )+
-                // Emit header as F::HEADER_BYTES little-endian.
-                let hdr = fixed_region_bytes as u32;
-                match F::HEADER_BYTES {
-                    1 => out.push(hdr as u8),
-                    2 => out.extend_from_slice(&(hdr as u16).to_le_bytes()),
-                    4 => out.extend_from_slice(&hdr.to_le_bytes()),
-                    _ => unreachable!(),
-                }
+                // Share checked explicit-width storage with sequence offsets.
+                let header_start = out.len();
+                out.resize(header_start.checked_add(F::HEADER_BYTES).expect("pssz: header size overflow"), 0);
+                $crate::pssz::write_offset::<F>(&mut out[header_start..], fixed_region_bytes);
                 let fixed_start = out.len();
 
                 // Fixed region with offset placeholders.
@@ -136,7 +97,7 @@ macro_rules! pssz_struct {
                         <$FTy as $crate::pssz::PsszPack<F>>::pssz_pack(&self.$field, out);
                     } else {
                         slots.push(out.len());
-                        out.resize(out.len() + F::OFFSET_BYTES, 0);
+                        out.resize(out.len().checked_add(F::OFFSET_BYTES).expect("pssz: record slot overflow"), 0);
                     }
                 )+
 
@@ -144,14 +105,9 @@ macro_rules! pssz_struct {
                 let mut var_idx: usize = 0;
                 $(
                     if !<$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        let rel = (out.len() - fixed_start) as u32;
+                        let rel = out.len() - fixed_start;
                         let slot_pos = slots[var_idx];
-                        match F::OFFSET_BYTES {
-                            1 => out[slot_pos] = rel as u8,
-                            2 => out[slot_pos .. slot_pos + 2].copy_from_slice(&(rel as u16).to_le_bytes()),
-                            4 => out[slot_pos .. slot_pos + 4].copy_from_slice(&rel.to_le_bytes()),
-                            _ => unreachable!(),
-                        }
+                        $crate::pssz::write_offset::<F>(&mut out[slot_pos..slot_pos + F::OFFSET_BYTES], rel);
                         <$FTy as $crate::pssz::PsszPack<F>>::pssz_pack(&self.$field, out);
                         var_idx += 1;
                     }
@@ -162,64 +118,16 @@ macro_rules! pssz_struct {
 
         impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszUnpack<F> for $Ty {
             fn pssz_unpack(bytes: &[u8]) -> $crate::pssz::PsszResult<Self> {
-                if bytes.len() < F::HEADER_BYTES {
-                    return Err($crate::pssz::PsszError("pssz struct: header underrun"));
-                }
-                let hdr_bytes_used = F::HEADER_BYTES;
-                // Read header (we don't use it for trusted input; future:
-                // extensibility-aware decoding can consult it).
-                let _hdr: u32 = match F::HEADER_BYTES {
-                    1 => bytes[0] as u32,
-                    2 => u16::from_le_bytes([bytes[0], bytes[1]]) as u32,
-                    4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-                    _ => unreachable!(),
-                };
-
-                let data = &bytes[hdr_bytes_used..];
-                let mut field_pos: usize = 0;
-                let mut var_offsets: Vec<u32> = Vec::new();
-                $(
+                let spans = $crate::pssz::input::record_spans::<F, _>(bytes, [$(
                     if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        field_pos += <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                    } else {
-                        if field_pos + F::OFFSET_BYTES > data.len() {
-                            return Err($crate::pssz::PsszError("pssz struct: offset underrun"));
-                        }
-                        let off: u32 = match F::OFFSET_BYTES {
-                            1 => data[field_pos] as u32,
-                            2 => u16::from_le_bytes([data[field_pos], data[field_pos + 1]]) as u32,
-                            4 => u32::from_le_bytes([
-                                data[field_pos], data[field_pos + 1],
-                                data[field_pos + 2], data[field_pos + 3],
-                            ]),
-                            _ => unreachable!(),
-                        };
-                        var_offsets.push(off);
-                        field_pos += F::OFFSET_BYTES;
-                    }
-                    let _: &str = stringify!($field);
-                )+
-
-                let mut field_pos: usize = 0;
-                let mut var_i: usize = 0;
+                        Some(<$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)
+                    } else { None },
+                )+], false)?;
+                let mut fields = spans.into_iter();
                 $(
-                    let $field: $FTy = if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        let fs = <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                        let out = <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(&data[field_pos .. field_pos + fs])?;
-                        field_pos += fs;
-                        out
-                    } else {
-                        let beg = var_offsets[var_i] as usize;
-                        let stop = if var_i + 1 < var_offsets.len() {
-                            var_offsets[var_i + 1] as usize
-                        } else { data.len() };
-                        var_i += 1;
-                        field_pos += F::OFFSET_BYTES;
-                        <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(&data[beg .. stop])?
-                    };
+                    let $field = <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(
+                        &bytes[fields.next().expect("generated field span")])?;
                 )+
-                let _ = field_pos;
-                let _ = var_i;
                 Ok($Ty { $($field),+ })
             }
         }
@@ -247,15 +155,16 @@ macro_rules! pssz_struct {
             fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
                 data: &[u8], target: &str) -> (usize, usize)
             {
-                let _ = data;
-                let mut pos: usize = 0;
+                let spans = $crate::pssz::input::record_spans::<F, _>(data, [$(
+                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
+                        Some(<$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)
+                    } else { None },
+                )+], true).expect("pssz dwnc view: malformed record");
+                let mut spans = spans.into_iter();
                 $(
                     {
-                        if stringify!($field) == target {
-                            let fs = <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                            return (pos, pos + fs);
-                        }
-                        pos += <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
+                        let span = spans.next().expect("generated field span");
+                        if stringify!($field) == target { return (span.start, span.end); }
                     }
                 )+
                 panic!("pssz dwnc view: field {} not found in {}",
@@ -285,49 +194,18 @@ macro_rules! pssz_struct {
             fn [<__pssz_ext_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
                 data: &[u8], target: &str) -> (usize, usize)
             {
-            let hdr = F::HEADER_BYTES;
-            let body = &data[hdr..];
-            let mut pos: usize = 0;
-            let mut target_off: usize = 0;
-            let mut found_var = false;
-            $(
-                {
-                    let this = stringify!($field);
-                    let is_fixed = <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE;
-                    if this == target {
-                        if is_fixed {
-                            let fs = <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                            return (hdr + pos, hdr + pos + fs);
-                        } else {
-                            let ob = F::OFFSET_BYTES;
-                            target_off = match ob {
-                                1 => body[pos] as usize,
-                                2 => u16::from_le_bytes([body[pos], body[pos+1]]) as usize,
-                                4 => u32::from_le_bytes([
-                                    body[pos], body[pos+1], body[pos+2], body[pos+3]]) as usize,
-                                _ => unreachable!(),
-                            };
-                            found_var = true;
-                        }
-                    } else if found_var && !is_fixed {
-                        let ob = F::OFFSET_BYTES;
-                        let next_off = match ob {
-                            1 => body[pos] as usize,
-                            2 => u16::from_le_bytes([body[pos], body[pos+1]]) as usize,
-                            4 => u32::from_le_bytes([
-                                body[pos], body[pos+1], body[pos+2], body[pos+3]]) as usize,
-                            _ => unreachable!(),
-                        };
-                        return (hdr + target_off, hdr + next_off);
+                let spans = $crate::pssz::input::record_spans::<F, _>(data, [$(
+                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
+                        Some(<$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)
+                    } else { None },
+                )+], false).expect("pssz view: malformed record");
+                let mut spans = spans.into_iter();
+                $(
+                    {
+                        let span = spans.next().expect("generated field span");
+                        if stringify!($field) == target { return (span.start, span.end); }
                     }
-                    if is_fixed {
-                        pos += <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                    } else {
-                        pos += F::OFFSET_BYTES;
-                    }
-                }
-            )+
-                if found_var { return (hdr + target_off, data.len()); }
+                )+
                 panic!("pssz view: field {} not found in {}",
                         target, stringify!($Ty));
             }

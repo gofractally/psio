@@ -13,7 +13,7 @@
 //! `pssz_struct!` macro (parallel to how `ssz_struct!` generates named
 //! accessors for `SszView`).
 
-use crate::pssz::{Bitvector, Bitlist, BoundedList, BoundedString, PsszFormat, PsszPack, Uint256};
+use crate::pssz::{input, Bitvector, Bitlist, BoundedList, BoundedString, PsszFormat, PsszPack, PsszResult, PsszValidate, Uint256};
 
 /// Zero-copy pSSZ view parameterized by target type `T` and format tag `F`.
 #[derive(Debug, Clone, Copy)]
@@ -23,10 +23,20 @@ pub struct PsszView<'a, T: ?Sized, F: PsszFormat> {
 }
 
 impl<'a, T: ?Sized, F: PsszFormat> PsszView<'a, T, F> {
+    /// An unchecked borrowed byte view. Access to malformed bytes may panic.
+    /// Prefer `try_new` for untrusted input where T implements PsszValidate.
     pub fn new(data: &'a [u8]) -> Self {
         PsszView { data, _phantom: std::marker::PhantomData }
     }
     pub fn raw(&self) -> &'a [u8] { self.data }
+}
+
+impl<'a, T: PsszValidate<F> + ?Sized, F: PsszFormat> PsszView<'a, T, F> {
+    pub fn try_new(data: &'a [u8]) -> PsszResult<Self> {
+        input::format::<F>()?;
+        T::pssz_validate(data)?;
+        Ok(Self::new(data))
+    }
 }
 
 // ── Primitives ──────────────────────────────────────────────────────────────
@@ -45,7 +55,13 @@ macro_rules! impl_pssz_view_primitive {
 impl_pssz_view_primitive!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, f64);
 
 impl<'a, F: PsszFormat> PsszView<'a, bool, F> {
-    pub fn get(&self) -> bool { self.data[0] != 0 }
+    pub fn get(&self) -> bool {
+        match self.data.first() {
+            Some(0) => false,
+            Some(1) => true,
+            _ => panic!("pssz view: invalid bool"),
+        }
+    }
 }
 
 impl<'a, F: PsszFormat> PsszView<'a, Uint256, F> {
@@ -71,6 +87,7 @@ impl<'a, F: PsszFormat> PsszView<'a, String, F> {
 
 impl<'a, F: PsszFormat, const N: usize> PsszView<'a, BoundedString<N>, F> {
     pub fn view(&self) -> &'a str {
+        assert!(self.data.len() <= N, "pssz view: BoundedString overflow");
         std::str::from_utf8(self.data).expect("pssz view: invalid UTF-8")
     }
     pub fn len(&self) -> usize { self.data.len() }
@@ -80,31 +97,13 @@ impl<'a, F: PsszFormat, const N: usize> PsszView<'a, BoundedString<N>, F> {
 
 impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Vec<T>, F> {
     pub fn len(&self) -> usize {
-        if self.data.is_empty() { return 0; }
-        if T::IS_FIXED_SIZE {
-            self.data.len() / T::FIXED_SIZE
-        } else {
-            let ob = F::OFFSET_BYTES;
-            let first = read_offset_u32::<F>(&self.data[..ob]);
-            (first as usize) / ob
-        }
+        input::sequence_len::<F, T>(self.data, None).expect("pssz view: malformed vector")
     }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
     pub fn get(&self, i: usize) -> PsszView<'a, T, F> {
-        if T::IS_FIXED_SIZE {
-            let elem = T::FIXED_SIZE;
-            PsszView::new(&self.data[i * elem .. (i + 1) * elem])
-        } else {
-            let ob = F::OFFSET_BYTES;
-            let n = self.len();
-            let off_i = read_offset_u32::<F>(&self.data[i * ob .. (i + 1) * ob]) as usize;
-            let off_next = if i + 1 < n {
-                read_offset_u32::<F>(&self.data[(i + 1) * ob .. (i + 2) * ob]) as usize
-            } else {
-                self.data.len()
-            };
-            PsszView::new(&self.data[off_i .. off_next])
-        }
+        let n = self.len();
+        let span = input::sequence_span::<F, T>(self.data, n, i).expect("pssz view: invalid vector element");
+        PsszView::new(&self.data[span])
     }
 }
 
@@ -114,10 +113,13 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat, const N: usize>
     pub fn len(&self) -> usize {
         // Same wire as Vec<T>, so construct a Vec view internally.
         let v: PsszView<'a, Vec<T>, F> = PsszView::new(self.data);
-        v.len()
+        let n = v.len();
+        assert!(n <= N, "pssz view: BoundedList overflow");
+        n
     }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
     pub fn get(&self, i: usize) -> PsszView<'a, T, F> {
+        assert!(i < self.len(), "pssz view: BoundedList index out of range");
         let v: PsszView<'a, Vec<T>, F> = PsszView::new(self.data);
         v.get(i)
     }
@@ -130,19 +132,9 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat, const N: usize>
 {
     pub const fn size() -> usize { N }
     pub fn get(&self, i: usize) -> PsszView<'a, T, F> {
-        if T::IS_FIXED_SIZE {
-            let elem = T::FIXED_SIZE;
-            PsszView::new(&self.data[i * elem .. (i + 1) * elem])
-        } else {
-            let ob = F::OFFSET_BYTES;
-            let off_i = read_offset_u32::<F>(&self.data[i * ob .. (i + 1) * ob]) as usize;
-            let off_next = if i + 1 < N {
-                read_offset_u32::<F>(&self.data[(i + 1) * ob .. (i + 2) * ob]) as usize
-            } else {
-                self.data.len()
-            };
-            PsszView::new(&self.data[off_i .. off_next])
-        }
+        input::sequence_len::<F, T>(self.data, Some(N)).expect("pssz view: malformed array");
+        let span = input::sequence_span::<F, T>(self.data, N, i).expect("pssz view: invalid array element");
+        PsszView::new(&self.data[span])
     }
 }
 
@@ -151,12 +143,20 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat, const N: usize>
 impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Option<T>, F> {
     pub fn has_value(&self) -> bool {
         if T::MIN_ENCODED_SIZE == 0 {
-            !self.data.is_empty() && self.data[0] == 1
+            match self.data.first() {
+                Some(0) if self.data.len() == 1 => false,
+                Some(1) => true,
+                _ => panic!("pssz view: invalid optional selector or None payload"),
+            }
         } else {
+            if T::IS_FIXED_SIZE && !self.data.is_empty() {
+                assert_eq!(self.data.len(), T::FIXED_SIZE, "pssz view: optional fixed span mismatch");
+            }
             !self.data.is_empty()
         }
     }
     pub fn unwrap(&self) -> PsszView<'a, T, F> {
+        assert!(self.has_value(), "pssz view: unwrap of None");
         if T::MIN_ENCODED_SIZE == 0 {
             PsszView::new(&self.data[1..])
         } else {
@@ -169,6 +169,7 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Option<T>, F> {
 
 impl<'a, F: PsszFormat, const N: usize> PsszView<'a, Bitvector<N>, F> {
     pub fn test(&self, i: usize) -> bool {
+        assert!(i < N, "pssz view: bitvector index out of range");
         (self.data[i >> 3] >> (i & 7)) & 1 != 0
     }
     pub const fn size(&self) -> usize { N }
@@ -176,31 +177,25 @@ impl<'a, F: PsszFormat, const N: usize> PsszView<'a, Bitvector<N>, F> {
 
 impl<'a, F: PsszFormat, const MAX_N: usize> PsszView<'a, Bitlist<MAX_N>, F> {
     pub fn len(&self) -> usize {
-        let mut last = self.data.len() as isize - 1;
-        while last >= 0 && self.data[last as usize] == 0 { last -= 1; }
-        if last < 0 { return 0; }
-        let hi = 7 - self.data[last as usize].leading_zeros() as usize;
-        (last as usize) * 8 + hi
+        input::bitlist_len(self.data, MAX_N).expect("pssz view: malformed bitlist")
     }
     pub fn test(&self, i: usize) -> bool {
+        assert!(i < self.len(), "pssz view: bitlist index out of range");
         (self.data[i >> 3] >> (i & 7)) & 1 != 0
     }
 }
 
-// ── Offset width helpers ────────────────────────────────────────────────────
-
-fn read_offset_u32<F: PsszFormat>(src: &[u8]) -> u32 {
-    match F::OFFSET_BYTES {
-        1 => src[0] as u32,
-        2 => u16::from_le_bytes([src[0], src[1]]) as u32,
-        4 => u32::from_le_bytes([src[0], src[1], src[2], src[3]]),
-        _ => unreachable!(),
-    }
-}
-
 /// Entry point matching C++ `psio::pssz_view_of<T, F>(buf)`.
+/// This constructor does not validate; malformed access can panic.
 pub fn pssz_view_of<'a, T: ?Sized, F: PsszFormat>(buf: &'a [u8]) -> PsszView<'a, T, F> {
     PsszView::new(buf)
+}
+
+/// Validate the existing PsszValidate contract before borrowing untrusted bytes.
+pub fn try_pssz_view_of<'a, T: PsszValidate<F> + ?Sized, F: PsszFormat>(
+    buf: &'a [u8],
+) -> PsszResult<PsszView<'a, T, F>> {
+    PsszView::try_new(buf)
 }
 
 #[cfg(test)]

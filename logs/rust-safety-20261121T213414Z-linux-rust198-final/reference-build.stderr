@@ -1,0 +1,462 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded itoa v1.0.18
+  Downloaded hashbrown v0.17.0
+  Downloaded zmij v1.0.21
+  Downloaded serde_json v1.0.149
+  Downloaded unicode-ident v1.0.24
+  Downloaded proc-macro2 v1.0.106
+  Downloaded indexmap v2.14.0
+  Downloaded memchr v2.8.0
+  Downloaded syn v2.0.117
+  Downloaded chrono v0.4.44
+  Downloaded quote v1.0.45
+  Downloaded xxhash-rust v0.8.15
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling version_check v0.9.5
+   Compiling syn v1.0.109
+   Compiling autocfg v1.5.0
+   Compiling serde_core v1.0.228
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.117
+   Compiling proc-macro-error-attr v1.0.4
+   Compiling ident_case v1.0.1
+   Compiling strsim v0.10.0
+   Compiling fnv v1.0.7
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.21
+   Compiling serde_derive v1.0.228
+   Compiling darling_core v0.14.4
+   Compiling proc-macro-error v1.0.4
+   Compiling hashbrown v0.17.0
+   Compiling serde_json v1.0.149
+   Compiling equivalent v1.0.2
+   Compiling indexmap v2.14.0
+   Compiling darling_macro v0.14.4
+   Compiling ordered-float v2.10.1
+   Compiling itoa v1.0.18
+   Compiling memchr v2.8.0
+   Compiling paste v1.0.15
+   Compiling iana-time-zone v0.1.65
+   Compiling chrono v0.4.44
+   Compiling serde-value v0.7.0
+   Compiling darling v0.14.4
+   Compiling serde-aux v4.7.0
+   Compiling psio-macros v0.1.0 (/home/dlarimer/psio-rust-reference-20261121/rust/psio-macros)
+   Compiling custom_error v1.9.2
+   Compiling hex v0.3.2
+   Compiling xxhash-rust v0.8.15
+   Compiling psio v0.1.0 (/home/dlarimer/psio-rust-reference-20261121/rust/psio)
+warning: unused imports: `pssz_struct_dwnc`, `pssz_struct`, `ssz_struct_dwnc`, and `ssz_struct`
+  --> psio/src/beacon_types.rs:16:13
+   |
+16 | use crate::{pssz_struct, pssz_struct_dwnc, ssz_struct, ssz_struct_dwnc};
+   |             ^^^^^^^^^^^  ^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `field_pos` is never read
+   --> psio/src/ssz_derive.rs:232:25
+    |
+232 |                           field_pos += 4;
+    |                           ^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:165:1
+    |
+165 | / ssz_struct!(PendingAttestation {
+166 | |     aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
+167 | |     data:             AttestationData,
+168 | |     inclusion_delay:  Slot,
+169 | |     proposer_index:   ValidatorIndex,
+170 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+    = note: this warning originates in the macro `ssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `field_pos` is never read
+   --> psio/src/ssz_derive.rs:222:25
+    |
+222 |                           field_pos += <$FTy as $crate::ssz::SszPack>::FIXED_SIZE;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:165:1
+    |
+165 | / ssz_struct!(PendingAttestation {
+166 | |     aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
+167 | |     data:             AttestationData,
+168 | |     inclusion_delay:  Slot,
+169 | |     proposer_index:   ValidatorIndex,
+170 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `ssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `pos` is never read
+   --> psio/src/pssz_derive.rs:326:25
+    |
+326 |                           pos += F::OFFSET_BYTES;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:171:1
+    |
+171 | / pssz_struct!(PendingAttestation {
+172 | |     aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
+173 | |     data:             AttestationData,
+174 | |     inclusion_delay:  Slot,
+175 | |     proposer_index:   ValidatorIndex,
+176 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `pos` is never read
+   --> psio/src/pssz_derive.rs:324:25
+    |
+324 |                           pos += <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:171:1
+    |
+171 | / pssz_struct!(PendingAttestation {
+172 | |     aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
+173 | |     data:             AttestationData,
+174 | |     inclusion_delay:  Slot,
+175 | |     proposer_index:   ValidatorIndex,
+176 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `field_pos` is never read
+   --> psio/src/pssz_derive.rs:198:25
+    |
+198 |                           field_pos += F::OFFSET_BYTES;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:171:1
+    |
+171 | / pssz_struct!(PendingAttestation {
+172 | |     aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
+173 | |     data:             AttestationData,
+174 | |     inclusion_delay:  Slot,
+175 | |     proposer_index:   ValidatorIndex,
+176 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `field_pos` is never read
+   --> psio/src/pssz_derive.rs:183:25
+    |
+183 |                           field_pos += <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:171:1
+    |
+171 | / pssz_struct!(PendingAttestation {
+172 | |     aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
+173 | |     data:             AttestationData,
+174 | |     inclusion_delay:  Slot,
+175 | |     proposer_index:   ValidatorIndex,
+176 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `field_pos` is never read
+   --> psio/src/ssz_derive.rs:232:25
+    |
+232 |                           field_pos += 4;
+    |                           ^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:273:1
+    |
+273 | / ssz_struct!(BeaconState {
+274 | |     genesis_time:                  u64,
+275 | |     genesis_validators_root:       Root,
+276 | |     slot:                          Slot,
+...   |
+294 | |     finalized_checkpoint:          Checkpoint,
+295 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `ssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `field_pos` is never read
+   --> psio/src/ssz_derive.rs:222:25
+    |
+222 |                           field_pos += <$FTy as $crate::ssz::SszPack>::FIXED_SIZE;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:273:1
+    |
+273 | / ssz_struct!(BeaconState {
+274 | |     genesis_time:                  u64,
+275 | |     genesis_validators_root:       Root,
+276 | |     slot:                          Slot,
+...   |
+294 | |     finalized_checkpoint:          Checkpoint,
+295 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `ssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `pos` is never read
+   --> psio/src/pssz_derive.rs:326:25
+    |
+326 |                           pos += F::OFFSET_BYTES;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:296:1
+    |
+296 | / pssz_struct!(BeaconState {
+297 | |     genesis_time:                  u64,
+298 | |     genesis_validators_root:       Root,
+299 | |     slot:                          Slot,
+...   |
+317 | |     finalized_checkpoint:          Checkpoint,
+318 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `pos` is never read
+   --> psio/src/pssz_derive.rs:324:25
+    |
+324 |                           pos += <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:296:1
+    |
+296 | / pssz_struct!(BeaconState {
+297 | |     genesis_time:                  u64,
+298 | |     genesis_validators_root:       Root,
+299 | |     slot:                          Slot,
+...   |
+317 | |     finalized_checkpoint:          Checkpoint,
+318 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `field_pos` is never read
+   --> psio/src/pssz_derive.rs:198:25
+    |
+198 |                           field_pos += F::OFFSET_BYTES;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:296:1
+    |
+296 | / pssz_struct!(BeaconState {
+297 | |     genesis_time:                  u64,
+298 | |     genesis_validators_root:       Root,
+299 | |     slot:                          Slot,
+...   |
+317 | |     finalized_checkpoint:          Checkpoint,
+318 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: value assigned to `field_pos` is never read
+   --> psio/src/pssz_derive.rs:183:25
+    |
+183 |                           field_pos += <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: psio/src/beacon_types.rs:296:1
+    |
+296 | / pssz_struct!(BeaconState {
+297 | |     genesis_time:                  u64,
+298 | |     genesis_validators_root:       Root,
+299 | |     slot:                          Slot,
+...   |
+317 | |     finalized_checkpoint:          Checkpoint,
+318 | | });
+    | |__- in this macro invocation
+    |
+    = help: maybe it is overwritten before being read?
+    = note: this warning originates in the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `validate_value` is never used
+   --> psio/src/pjson.rs:732:4
+    |
+732 | fn validate_value(buf: &[u8], size: usize) -> PjsonResult<()> {
+    |    ^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `__pssz_dwnc_span_Fork` should have a snake case name
+   --> psio/src/pssz_derive.rs:247:16
+    |
+247 |               fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_dwnc_span_fork`
+    |
+   ::: psio/src/beacon_types.rs:65:1
+    |
+ 65 | / pssz_struct_dwnc!(Fork {
+ 66 | |     previous_version: Version,
+ 67 | |     current_version:  Version,
+ 68 | |     epoch:            Epoch,
+ 69 | | });
+    | |__- in this macro invocation
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct_dwnc` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `__pssz_dwnc_span_ForkData` should have a snake case name
+   --> psio/src/pssz_derive.rs:247:16
+    |
+247 |               fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_dwnc_span_fork_data`
+    |
+   ::: psio/src/beacon_types.rs:81:1
+    |
+ 81 | / pssz_struct_dwnc!(ForkData {
+ 82 | |     current_version:         Version,
+ 83 | |     genesis_validators_root: Root,
+ 84 | | });
+    | |__- in this macro invocation
+    |
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct_dwnc` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `__pssz_dwnc_span_Checkpoint` should have a snake case name
+   --> psio/src/pssz_derive.rs:247:16
+    |
+247 |             fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_dwnc_span_checkpoint`
+    |
+   ::: psio/src/beacon_types.rs:93:1
+    |
+ 93 | pssz_struct_dwnc!(Checkpoint { epoch: Epoch, root: Root });
+    | ---------------------------------------------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct_dwnc` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `__pssz_dwnc_span_Validator` should have a snake case name
+   --> psio/src/pssz_derive.rs:247:16
+    |
+247 |               fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_dwnc_span_validator`
+    |
+   ::: psio/src/beacon_types.rs:123:1
+    |
+123 | / pssz_struct_dwnc!(Validator {
+124 | |     pubkey:                       BLSPubkey,
+125 | |     withdrawal_credentials:       Bytes32,
+126 | |     effective_balance:            Gwei,
+...   |
+131 | |     withdrawable_epoch:           Epoch,
+132 | | });
+    | |__- in this macro invocation
+    |
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct_dwnc` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `__pssz_dwnc_span_AttestationData` should have a snake case name
+   --> psio/src/pssz_derive.rs:247:16
+    |
+247 |               fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_dwnc_span_attestation_data`
+    |
+   ::: psio/src/beacon_types.rs:150:1
+    |
+150 | / pssz_struct_dwnc!(AttestationData {
+151 | |     slot:              Slot,
+152 | |     index:             CommitteeIndex,
+153 | |     beacon_block_root: Root,
+154 | |     source:            Checkpoint,
+155 | |     target:            Checkpoint,
+156 | | });
+    | |__- in this macro invocation
+    |
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct_dwnc` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `__pssz_ext_span_PendingAttestation` should have a snake case name
+   --> psio/src/pssz_derive.rs:285:16
+    |
+285 |               fn [<__pssz_ext_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_ext_span_pending_attestation`
+    |
+   ::: psio/src/beacon_types.rs:171:1
+    |
+171 | / pssz_struct!(PendingAttestation {
+172 | |     aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
+173 | |     data:             AttestationData,
+174 | |     inclusion_delay:  Slot,
+175 | |     proposer_index:   ValidatorIndex,
+176 | | });
+    | |__- in this macro invocation
+    |
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `__pssz_dwnc_span_Eth1Data` should have a snake case name
+   --> psio/src/pssz_derive.rs:247:16
+    |
+247 |               fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_dwnc_span_eth1_data`
+    |
+   ::: psio/src/beacon_types.rs:190:1
+    |
+190 | / pssz_struct_dwnc!(Eth1Data {
+191 | |     deposit_root:  Root,
+192 | |     deposit_count: u64,
+193 | |     block_hash:    Hash32,
+194 | | });
+    | |__- in this macro invocation
+    |
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct_dwnc` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `__pssz_dwnc_span_BeaconBlockHeader` should have a snake case name
+   --> psio/src/pssz_derive.rs:247:16
+    |
+247 |               fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_dwnc_span_beacon_block_header`
+    |
+   ::: psio/src/beacon_types.rs:212:1
+    |
+212 | / pssz_struct_dwnc!(BeaconBlockHeader {
+213 | |     slot:           Slot,
+214 | |     proposer_index: ValidatorIndex,
+215 | |     parent_root:    Root,
+216 | |     state_root:     Root,
+217 | |     body_root:      Root,
+218 | | });
+    | |__- in this macro invocation
+    |
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct_dwnc` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: function `__pssz_ext_span_BeaconState` should have a snake case name
+   --> psio/src/pssz_derive.rs:285:16
+    |
+285 |               fn [<__pssz_ext_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `__pssz_ext_span_beacon_state`
+    |
+   ::: psio/src/beacon_types.rs:296:1
+    |
+296 | / pssz_struct!(BeaconState {
+297 | |     genesis_time:                  u64,
+298 | |     genesis_validators_root:       Root,
+299 | |     slot:                          Slot,
+...   |
+317 | |     finalized_checkpoint:          Checkpoint,
+318 | | });
+    | |__- in this macro invocation
+    |
+    = note: this warning originates in the macro `$crate::pssz_struct` which comes from the expansion of the macro `pssz_struct` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: `psio` (lib) generated 23 warnings (run `cargo fix --lib -p psio` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 10.86s

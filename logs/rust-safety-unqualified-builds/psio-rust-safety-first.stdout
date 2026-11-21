@@ -1,0 +1,9 @@
+
+running 4 tests
+test baseline_safe_truncation ... ok
+test baseline_safe_custom_traits ... ok
+test baseline_safe_zero_vector ... ok
+test baseline_safe_bool_view ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

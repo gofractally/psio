@@ -1,0 +1,15 @@
+
+running 10 tests
+test baseline_safe_zero_vector ... ok
+test invalid_bool_never_becomes_a_rust_bool ... ok
+test baseline_safe_truncation ... ok
+test baseline_safe_custom_traits ... ok
+test nested_record_children_use_bounded_exact_spans ... ok
+test baseline_safe_bool_view ... ok
+test zero_sized_fixed_arrays_have_known_count_without_raw_allocation ... ok
+test malformed_layouts_and_utf8_are_rejected ... ok
+test non_pod_owned_values_and_partial_panic_cleanup ... ok
+test small_malformed_input_totality ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

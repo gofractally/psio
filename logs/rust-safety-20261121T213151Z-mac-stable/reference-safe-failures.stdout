@@ -1,0 +1,17 @@
+
+running 4 tests
+test baseline_safe_bool_view ... FAILED
+test baseline_safe_truncation ... FAILED
+test baseline_safe_zero_vector ... FAILED
+test baseline_safe_custom_traits ... FAILED
+
+failures:
+
+failures:
+    baseline_safe_bool_view
+    baseline_safe_custom_traits
+    baseline_safe_truncation
+    baseline_safe_zero_vector
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -104,6 +104,176 @@ pub trait PsszUnpack<F: PsszFormat>: Sized {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self>;
 }
 
+// Shared input-layout checks. Public only so exported record macros can call
+// them in downstream crates; they do not describe Rust memory layouts.
+#[doc(hidden)]
+pub mod input {
+    use super::{PsszError, PsszFormat, PsszPack, PsszResult, PsszUnpack};
+    use std::ops::Range;
+
+    pub fn format<F: PsszFormat>() -> PsszResult<()> {
+        if !matches!(F::OFFSET_BYTES, 1 | 2 | 4) || F::HEADER_BYTES != F::OFFSET_BYTES {
+            return Err(PsszError("pssz: unsupported offset/header width"));
+        }
+        Ok(())
+    }
+
+    pub fn bitlist_len(bytes: &[u8], maximum: usize) -> PsszResult<usize> {
+        let last = bytes.iter().rposition(|byte| *byte != 0)
+            .ok_or(PsszError("pssz: bitlist missing delimiter"))?;
+        let hi = 7 - bytes[last].leading_zeros() as usize;
+        let len = last.checked_mul(8).and_then(|n| n.checked_add(hi))
+            .ok_or(PsszError("pssz: bitlist length overflow"))?;
+        if len > maximum { return Err(PsszError("pssz: bitlist bound exceeded")); }
+        Ok(len)
+    }
+
+    pub fn offset<F: PsszFormat>(bytes: &[u8]) -> PsszResult<usize> {
+        format::<F>()?;
+        let b = bytes.get(..F::OFFSET_BYTES).ok_or(PsszError("pssz: offset underrun"))?;
+        Ok(match F::OFFSET_BYTES {
+            1 => b[0] as usize,
+            2 => u16::from_le_bytes([b[0], b[1]]) as usize,
+            4 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize,
+            _ => return Err(PsszError("pssz: invalid offset width")),
+        })
+    }
+
+    pub fn fixed_child<F: PsszFormat, T: PsszPack<F>>(bytes: &[u8]) -> PsszResult<()> {
+        if T::IS_FIXED_SIZE && bytes.len() != T::FIXED_SIZE {
+            return Err(PsszError("pssz: fixed child span mismatch"));
+        }
+        Ok(())
+    }
+
+    pub fn sequence_len<F: PsszFormat, T: PsszPack<F>>(
+        bytes: &[u8], count: Option<usize>,
+    ) -> PsszResult<usize> {
+        format::<F>()?;
+        if T::IS_FIXED_SIZE {
+            let size = T::FIXED_SIZE;
+            let n = match count {
+                Some(n) => n,
+                None if bytes.is_empty() => 0,
+                None if size == 0 => return Err(PsszError("pssz: zero-size vector element")),
+                None if bytes.len() % size == 0 => bytes.len() / size,
+                None => return Err(PsszError("pssz: fixed sequence span mismatch")),
+            };
+            if n.checked_mul(size) != Some(bytes.len()) {
+                return Err(PsszError("pssz: fixed sequence span mismatch or overflow"));
+            }
+            return Ok(n);
+        }
+        let width = F::OFFSET_BYTES;
+        let n = match count {
+            Some(n) => n,
+            None if bytes.is_empty() => 0,
+            None => {
+                let first = offset::<F>(bytes)?;
+                if first == 0 || first % width != 0 || first > bytes.len() {
+                    return Err(PsszError("pssz: invalid sequence offset table"));
+                }
+                first / width
+            }
+        };
+        let table = n.checked_mul(width).ok_or(PsszError("pssz: sequence table overflow"))?;
+        if table > bytes.len() || (n == 0 && !bytes.is_empty()) {
+            return Err(PsszError("pssz: sequence table mismatch"));
+        }
+        let mut previous = table;
+        for i in 0..n {
+            let begin = offset::<F>(&bytes[i * width..])?;
+            if (i == 0 && begin != table) || begin < previous || begin > bytes.len() {
+                return Err(PsszError("pssz: sequence offset out of range"));
+            }
+            previous = begin;
+        }
+        Ok(n)
+    }
+
+    // Callers first check sequence_len on this same byte span and count.
+    pub fn sequence_span<F: PsszFormat, T: PsszPack<F>>(
+        bytes: &[u8], count: usize, index: usize,
+    ) -> PsszResult<Range<usize>> {
+        if index >= count { return Err(PsszError("pssz: sequence index out of range")); }
+        if T::IS_FIXED_SIZE {
+            let begin = index.checked_mul(T::FIXED_SIZE).ok_or(PsszError("pssz: element offset overflow"))?;
+            let end = begin.checked_add(T::FIXED_SIZE).ok_or(PsszError("pssz: element end overflow"))?;
+            if end > bytes.len() { return Err(PsszError("pssz: element truncated")); }
+            return Ok(begin..end);
+        }
+        format::<F>()?;
+        let slot = index.checked_mul(F::OFFSET_BYTES).ok_or(PsszError("pssz: offset slot overflow"))?;
+        let begin = offset::<F>(bytes.get(slot..).ok_or(PsszError("pssz: offset slot truncated"))?)?;
+        let end = if index + 1 < count {
+            let next = slot.checked_add(F::OFFSET_BYTES).ok_or(PsszError("pssz: next slot overflow"))?;
+            offset::<F>(bytes.get(next..).ok_or(PsszError("pssz: next slot truncated"))?)?
+        } else { bytes.len() };
+        if begin > end || end > bytes.len() {
+            return Err(PsszError("pssz: element span out of range"));
+        }
+        Ok(begin..end)
+    }
+
+    pub fn decode_sequence<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(
+        bytes: &[u8], count: Option<usize>,
+    ) -> PsszResult<Vec<T>> {
+        let n = sequence_len::<F, T>(bytes, count)?;
+        let mut result = Vec::new();
+        result.try_reserve(n).map_err(|_| PsszError("pssz: sequence allocation overflow"))?;
+        for i in 0..n {
+            result.push(T::pssz_unpack(&bytes[sequence_span::<F, T>(bytes, n, i)?])?);
+        }
+        Ok(result)
+    }
+
+    // Some(size) is a fixed wire field; None is an offset slot. Stack arrays
+    // keep generated borrowed view access free of heap allocation.
+    pub fn record_spans<F: PsszFormat, const N: usize>(
+        bytes: &[u8], fields: [Option<usize>; N], dwnc: bool,
+    ) -> PsszResult<[Range<usize>; N]> {
+        format::<F>()?;
+        if dwnc && fields.iter().any(Option::is_none) {
+            return Err(PsszError("pssz: DWNC record contains a variable field"));
+        }
+        let fixed = fields.iter().try_fold(0usize, |n, field|
+            n.checked_add(field.unwrap_or(F::OFFSET_BYTES)).ok_or(PsszError("pssz: fixed region overflow")))?;
+        let header = if dwnc { 0 } else { F::HEADER_BYTES };
+        if !dwnc && offset::<F>(bytes)? != fixed {
+            return Err(PsszError("pssz: unsupported or malformed record fixed region"));
+        }
+        let data = bytes.get(header..).ok_or(PsszError("pssz: record header truncated"))?;
+        if fixed > data.len() { return Err(PsszError("pssz: record fixed region truncated")); }
+        let mut spans = std::array::from_fn(|_| 0..0);
+        let mut cursor = 0;
+        let mut previous: Option<usize> = None;
+        for (i, field) in fields.iter().enumerate() {
+            if let Some(size) = field {
+                spans[i] = header + cursor..header + cursor + size;
+                cursor += size;
+            } else {
+                let begin = offset::<F>(&data[cursor..])?;
+                if begin > data.len() || begin < fixed || (previous.is_none() && begin != fixed) {
+                    return Err(PsszError("pssz: record offset out of range"));
+                }
+                if let Some(prev) = previous {
+                    if begin < spans[prev].start - header {
+                        return Err(PsszError("pssz: record offsets not monotone"));
+                    }
+                    spans[prev].end = header + begin;
+                }
+                spans[i] = header + begin..bytes.len();
+                previous = Some(i);
+                cursor += F::OFFSET_BYTES;
+            }
+        }
+        if previous.is_none() && data.len() != fixed {
+            return Err(PsszError("pssz: trailing fixed record bytes"));
+        }
+        Ok(spans)
+    }
+}
+
 // ── Macro-driven primitive impls ────────────────────────────────────────────
 
 macro_rules! pssz_impl_primitive_le {
@@ -212,38 +382,20 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for [T; N] {
     const FIXED_SIZE:       usize = if T::IS_FIXED_SIZE { N * T::FIXED_SIZE } else { 0 };
     fn pssz_size(&self) -> usize {
         if T::IS_FIXED_SIZE {
-            N * T::FIXED_SIZE
+            N.checked_mul(T::FIXED_SIZE).expect("pssz: array size overflow")
         } else {
-            let mut total = N * F::OFFSET_BYTES;
-            for e in self { total += e.pssz_size(); }
+            let mut total = N.checked_mul(F::OFFSET_BYTES).expect("pssz: array table overflow");
+            for e in self { total = total.checked_add(e.pssz_size()).expect("pssz: array size overflow"); }
             total
         }
     }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         if T::IS_FIXED_SIZE {
-            // Memcpy fast path: when T's wire representation equals its
-            // in-memory representation (true on LE for SSZ primitives
-            // where FIXED_SIZE == size_of::<T>()), copy the whole array
-            // in one go instead of per-element. Mirrors the SSZ side —
-            // without this [u8; 48] pubkey takes 48 u8 pushes per
-            // validator × 21k validators in BeaconState encode.
-            #[cfg(target_endian = "little")]
-            if T::FIXED_SIZE == std::mem::size_of::<T>() {
-                let byte_count = N * T::FIXED_SIZE;
-                // SAFETY: LE target + size match guarantee in-memory
-                // bytes equal SSZ/pSSZ wire bytes for primitives.
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        self.as_ptr() as *const u8, byte_count)
-                };
-                out.extend_from_slice(bytes);
-                return;
-            }
             for e in self { e.pssz_pack(out); }
         } else {
             let ob = F::OFFSET_BYTES;
             let slot_start = out.len();
-            out.resize(slot_start + N * ob, 0);
+            out.resize(slot_start.checked_add(N.checked_mul(ob).expect("pssz: array table overflow")).expect("pssz: output size overflow"), 0);
             for (i, e) in self.iter().enumerate() {
                 let rel = out.len() - slot_start;
                 write_offset::<F>(&mut out[slot_start + i * ob .. slot_start + (i + 1) * ob], rel);
@@ -255,40 +407,8 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for [T; N] {
 
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F> for [T; N] {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let v: Vec<T> = if T::IS_FIXED_SIZE {
-            let es = T::FIXED_SIZE;
-            if bytes.len() != N * es { return Err(PsszError("pssz: array span mismatch")); }
-            // Matching memcpy fast path for decode.
-            #[cfg(target_endian = "little")]
-            if T::FIXED_SIZE == std::mem::size_of::<T>() {
-                let byte_count = N * T::FIXED_SIZE;
-                let mut out: std::mem::MaybeUninit<[T; N]> = std::mem::MaybeUninit::uninit();
-                // SAFETY: same invariants as the encode fast path. Byte
-                // count checked against input len above.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        out.as_mut_ptr() as *mut u8,
-                        byte_count);
-                    return Ok(out.assume_init());
-                }
-            }
-            (0..N).map(|i| <T as PsszUnpack<F>>::pssz_unpack(&bytes[i * es .. (i + 1) * es]))
-                  .collect::<PsszResult<Vec<T>>>()?
-        } else {
-            let ob = F::OFFSET_BYTES;
-            if bytes.len() < N * ob { return Err(PsszError("pssz: variable array truncated")); }
-            let offsets: Vec<u32> = (0..N).map(|i| read_offset::<F>(&bytes[i * ob .. (i + 1) * ob])).collect();
-            (0..N).map(|i| {
-                let beg  = offsets[i] as usize;
-                let stop = if i + 1 < N { offsets[i + 1] as usize } else { bytes.len() };
-                if beg > stop || stop > bytes.len() {
-                    return Err(PsszError("pssz: array element offset out of range"));
-                }
-                <T as PsszUnpack<F>>::pssz_unpack(&bytes[beg .. stop])
-            }).collect::<PsszResult<Vec<T>>>()?
-        };
-        v.try_into().map_err(|_| PsszError("pssz: array length conversion failed"))
+        input::decode_sequence::<F, T>(bytes, Some(N))?
+            .try_into().map_err(|_| PsszError("pssz: array length conversion failed"))
     }
 }
 
@@ -325,6 +445,7 @@ impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
 }
 impl<F: PsszFormat, const MAX_N: usize> PsszUnpack<F> for Bitlist<MAX_N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        input::bitlist_len(bytes, MAX_N)?;
         use crate::ssz::SszUnpack;
         <Self as SszUnpack>::ssz_unpack(bytes).map_err(|e| PsszError(e.0))
     }
@@ -347,8 +468,10 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F
     for BoundedList<T, N>
 {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        if input::sequence_len::<F, T>(bytes, None)? > N {
+            return Err(PsszError("pssz: BoundedList overflow"));
+        }
         let v = <Vec<T> as PsszUnpack<F>>::pssz_unpack(bytes)?;
-        if v.len() > N { return Err(PsszError("pssz: BoundedList overflow")); }
         Ok(BoundedList(v))
     }
 }
@@ -378,27 +501,18 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Vec<T> {
     const FIXED_SIZE:       usize = 0;
     fn pssz_size(&self) -> usize {
         if T::IS_FIXED_SIZE {
-            self.len() * T::FIXED_SIZE
+            assert!(self.is_empty() || T::FIXED_SIZE != 0, "pssz: nonempty zero-size vector is unsupported");
+            self.len().checked_mul(T::FIXED_SIZE).expect("pssz: vector size overflow")
         } else {
             let ob = F::OFFSET_BYTES;
-            let mut total = self.len() * ob;
-            for e in self { total += e.pssz_size(); }
+            let mut total = self.len().checked_mul(ob).expect("pssz: vector table overflow");
+            for e in self { total = total.checked_add(e.pssz_size()).expect("pssz: vector size overflow"); }
             total
         }
     }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         if T::IS_FIXED_SIZE {
-            // Whole-vec memcpy fast path — mirror of the SSZ side.
-            #[cfg(target_endian = "little")]
-            if T::FIXED_SIZE == std::mem::size_of::<T>() {
-                let byte_count = self.len() * T::FIXED_SIZE;
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        self.as_ptr() as *const u8, byte_count)
-                };
-                out.extend_from_slice(bytes);
-                return;
-            }
+            assert!(self.is_empty() || T::FIXED_SIZE != 0, "pssz: nonempty zero-size vector is unsupported");
             for e in self { e.pssz_pack(out); }
         } else {
             // Single-pass backpatching: reserve offset slots, then write
@@ -406,7 +520,7 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Vec<T> {
             // slot_start) converted to the format's offset width.
             let ob = F::OFFSET_BYTES;
             let slot_start = out.len();
-            out.resize(slot_start + self.len() * ob, 0);
+            out.resize(slot_start.checked_add(self.len().checked_mul(ob).expect("pssz: vector table overflow")).expect("pssz: output size overflow"), 0);
             for (i, e) in self.iter().enumerate() {
                 let rel = out.len() - slot_start;
                 write_offset::<F>(&mut out[slot_start + i * ob .. slot_start + (i + 1) * ob], rel);
@@ -418,56 +532,7 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Vec<T> {
 
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Vec<T> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        if bytes.is_empty() { return Ok(Vec::new()); }
-        if T::IS_FIXED_SIZE {
-            let es = T::FIXED_SIZE;
-            if bytes.len() % es != 0 {
-                return Err(PsszError("pssz: vector span not divisible by fixed size"));
-            }
-            let n = bytes.len() / es;
-            // Whole-vec memcpy decode fast path.
-            #[cfg(target_endian = "little")]
-            if T::FIXED_SIZE == std::mem::size_of::<T>() {
-                let mut v: Vec<T> = Vec::with_capacity(n);
-                // SAFETY: capacity matches write size; all bit patterns
-                // are valid for T under the layout-match invariant.
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        v.as_mut_ptr() as *mut u8,
-                        n * T::FIXED_SIZE);
-                    v.set_len(n);
-                }
-                return Ok(v);
-            }
-            let mut out = Vec::with_capacity(n);
-            for i in 0..n {
-                out.push(<T as PsszUnpack<F>>::pssz_unpack(&bytes[i * es .. (i + 1) * es])?);
-            }
-            Ok(out)
-        } else {
-            let ob = F::OFFSET_BYTES;
-            if bytes.len() < ob { return Err(PsszError("pssz: vector too short")); }
-            let first = read_offset::<F>(&bytes[..ob]);
-            if first as usize % ob != 0 || first as usize > bytes.len() {
-                return Err(PsszError("pssz: invalid first offset in vector"));
-            }
-            let n = first as usize / ob;
-            let mut offsets = Vec::with_capacity(n);
-            for i in 0..n {
-                offsets.push(read_offset::<F>(&bytes[i * ob .. (i + 1) * ob]));
-            }
-            let mut out = Vec::with_capacity(n);
-            for i in 0..n {
-                let beg  = offsets[i] as usize;
-                let stop = if i + 1 < n { offsets[i + 1] as usize } else { bytes.len() };
-                if beg > stop || stop > bytes.len() {
-                    return Err(PsszError("pssz: vector element offset out of range"));
-                }
-                out.push(<T as PsszUnpack<F>>::pssz_unpack(&bytes[beg .. stop])?);
-            }
-            Ok(out)
-        }
+        input::decode_sequence::<F, T>(bytes, None)
     }
 }
 
@@ -516,41 +581,10 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F
     for Box<[T; N]>
 {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        if !T::IS_FIXED_SIZE {
-            // Variable-element path — fall back to the [T;N] decoder which
-            // still materializes on the stack. Not used by BeaconState
-            // (all boxed arrays are fixed-element).
-            return Ok(Box::new(<[T; N] as PsszUnpack<F>>::pssz_unpack(bytes)?));
-        }
-        let es = T::FIXED_SIZE;
-        if bytes.len() != N * es {
-            return Err(PsszError("pssz: boxed array span mismatch"));
-        }
-        let layout = std::alloc::Layout::new::<[T; N]>();
-        // SAFETY: layout is non-zero; pointer is either boxed back or freed.
-        unsafe {
-            let raw = std::alloc::alloc(layout) as *mut [T; N];
-            if raw.is_null() { std::alloc::handle_alloc_error(layout); }
-
-            #[cfg(target_endian = "little")]
-            if T::FIXED_SIZE == std::mem::size_of::<T>() {
-                std::ptr::copy_nonoverlapping(
-                    bytes.as_ptr(), raw as *mut u8, N * es);
-                return Ok(Box::from_raw(raw));
-            }
-            let elem_ptr = raw as *mut T;
-            for i in 0..N {
-                match <T as PsszUnpack<F>>::pssz_unpack(&bytes[i * es .. (i + 1) * es]) {
-                    Ok(v) => std::ptr::write(elem_ptr.add(i), v),
-                    Err(e) => {
-                        for j in 0..i { std::ptr::drop_in_place(elem_ptr.add(j)); }
-                        std::alloc::dealloc(raw as *mut u8, layout);
-                        return Err(e);
-                    }
-                }
-            }
-            Ok(Box::from_raw(raw))
-        }
+        // Vec owns each initialized T during errors and unwinding. Converting
+        // its boxed slice avoids raw allocation and any large inline array.
+        input::decode_sequence::<F, T>(bytes, Some(N))?.into_boxed_slice()
+            .try_into().map_err(|_| PsszError("pssz: boxed array length conversion failed"))
     }
 }
 
@@ -563,12 +597,16 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Option<T> 
                     if bytes.len() != 1 { return Err(PsszError("pssz: optional None must be empty")); }
                     Ok(None)
                 }
-                1 => Ok(Some(<T as PsszUnpack<F>>::pssz_unpack(&bytes[1..])?)),
+                1 => {
+                    input::fixed_child::<F, T>(&bytes[1..])?;
+                    Ok(Some(<T as PsszUnpack<F>>::pssz_unpack(&bytes[1..])?))
+                },
                 _ => Err(PsszError("pssz: invalid optional selector")),
             }
         } else if bytes.is_empty() {
             Ok(None)
         } else {
+            input::fixed_child::<F, T>(bytes)?;
             Ok(Some(<T as PsszUnpack<F>>::pssz_unpack(bytes)?))
         }
     }
@@ -576,25 +614,17 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Option<T> 
 
 // ── Offset width helpers ────────────────────────────────────────────────────
 
-fn write_offset<F: PsszFormat>(dst: &mut [u8], value: usize) {
+#[doc(hidden)]
+pub fn write_offset<F: PsszFormat>(dst: &mut [u8], value: usize) {
     // Store `value` as little-endian into `dst` which is exactly
     // F::OFFSET_BYTES long (1, 2, or 4 bytes).
-    debug_assert_eq!(dst.len(), F::OFFSET_BYTES);
-    let v = u32::try_from(value).expect("pssz: offset exceeds u32");
+    input::format::<F>().expect("pssz: invalid output format");
+    assert_eq!(dst.len(), F::OFFSET_BYTES);
+    assert!(value as u128 <= F::MAX_TOTAL as u128, "pssz: offset exceeds format limit");
     match F::OFFSET_BYTES {
-        1 => dst[0] = v as u8,
-        2 => dst.copy_from_slice(&(v as u16).to_le_bytes()),
-        4 => dst.copy_from_slice(&v.to_le_bytes()),
-        _ => unreachable!(),
-    }
-}
-
-fn read_offset<F: PsszFormat>(src: &[u8]) -> u32 {
-    debug_assert_eq!(src.len(), F::OFFSET_BYTES);
-    match F::OFFSET_BYTES {
-        1 => src[0] as u32,
-        2 => u16::from_le_bytes([src[0], src[1]]) as u32,
-        4 => u32::from_le_bytes([src[0], src[1], src[2], src[3]]),
+        1 => dst[0] = u8::try_from(value).expect("pssz: offset exceeds u8"),
+        2 => dst.copy_from_slice(&u16::try_from(value).expect("pssz: offset exceeds u16").to_le_bytes()),
+        4 => dst.copy_from_slice(&u32::try_from(value).expect("pssz: offset exceeds u32").to_le_bytes()),
         _ => unreachable!(),
     }
 }
@@ -608,6 +638,7 @@ pub fn to_pssz<F: PsszFormat, T: PsszPack<F>>(value: &T) -> Vec<u8> {
 }
 
 pub fn from_pssz<F: PsszFormat, T: PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
+    input::format::<F>()?;
     <T as PsszUnpack<F>>::pssz_unpack(bytes)
 }
 
@@ -652,43 +683,55 @@ impl<F: PsszFormat> PsszValidate<F> for String {
     }
 }
 
+fn validate_sequence<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>>(
+    bytes: &[u8], count: Option<usize>,
+) -> PsszResult<()> {
+    let n = input::sequence_len::<F, T>(bytes, count)?;
+    for i in 0..n {
+        T::pssz_validate(&bytes[input::sequence_span::<F, T>(bytes, n, i)?])?;
+    }
+    Ok(())
+}
 impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Vec<T> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        if bytes.is_empty() { return Ok(()); }
-        if T::IS_FIXED_SIZE {
-            if bytes.len() % T::FIXED_SIZE != 0 {
-                return Err(PsszError("pssz validate: vec span not divisible"));
-            }
-            let n = bytes.len() / T::FIXED_SIZE;
-            for i in 0..n {
-                T::pssz_validate(&bytes[i * T::FIXED_SIZE .. (i + 1) * T::FIXED_SIZE])?;
-            }
-            Ok(())
-        } else {
-            let ob = F::OFFSET_BYTES;
-            if bytes.len() < ob { return Err(PsszError("pssz validate: vec short")); }
-            let first = read_offset::<F>(&bytes[..ob]);
-            if first as usize % ob != 0 || first as usize > bytes.len() {
-                return Err(PsszError("pssz validate: bad first offset"));
-            }
-            let n = (first as usize) / ob;
-            let mut prev: u32 = first;
-            for i in 1..n {
-                let off = read_offset::<F>(&bytes[i * ob .. (i + 1) * ob]);
-                if off < prev || (off as usize) > bytes.len() {
-                    return Err(PsszError("pssz validate: non-monotone offset"));
-                }
-                prev = off;
-            }
-            for i in 0..n {
-                let beg = read_offset::<F>(&bytes[i * ob .. (i + 1) * ob]) as usize;
-                let stop = if i + 1 < n {
-                    read_offset::<F>(&bytes[(i + 1) * ob .. (i + 2) * ob]) as usize
-                } else { bytes.len() };
-                T::pssz_validate(&bytes[beg .. stop])?;
-            }
-            Ok(())
+        validate_sequence::<F, T>(bytes, None)
+    }
+}
+impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValidate<F> for [T; N] {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        validate_sequence::<F, T>(bytes, Some(N))
+    }
+}
+impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValidate<F> for Box<[T; N]> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        <[T; N] as PsszValidate<F>>::pssz_validate(bytes)
+    }
+}
+impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValidate<F> for BoundedList<T, N> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        if input::sequence_len::<F, T>(bytes, None)? > N {
+            return Err(PsszError("pssz validate: BoundedList overflow"));
         }
+        validate_sequence::<F, T>(bytes, None)
+    }
+}
+impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        if bytes.len() > N { return Err(PsszError("pssz validate: BoundedString overflow")); }
+        <String as PsszValidate<F>>::pssz_validate(bytes)
+    }
+}
+
+impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitvector<N> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let size = N.checked_add(7).ok_or(PsszError("pssz validate: bitvector size overflow"))? / 8;
+        if bytes.len() < size { return Err(PsszError("pssz validate: bitvector underrun")); }
+        Ok(())
+    }
+}
+impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitlist<N> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        input::bitlist_len(bytes, N).map(|_| ())
     }
 }
 
@@ -704,17 +747,22 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Option
                         Err(PsszError("pssz validate: None must have empty payload"))
                     } else { Ok(()) }
                 }
-                1 => T::pssz_validate(&bytes[1..]),
+                1 => {
+                    input::fixed_child::<F, T>(&bytes[1..])?;
+                    T::pssz_validate(&bytes[1..])
+                },
                 _ => Err(PsszError("pssz validate: bad selector")),
             }
         } else {
             if bytes.is_empty() { return Ok(()); }
+            input::fixed_child::<F, T>(bytes)?;
             T::pssz_validate(bytes)
         }
     }
 }
 
 pub fn pssz_validate<F: PsszFormat, T: PsszValidate<F>>(bytes: &[u8]) -> PsszResult<()> {
+    input::format::<F>()?;
     T::pssz_validate(bytes)
 }
 

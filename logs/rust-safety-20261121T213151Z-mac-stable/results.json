@@ -1,0 +1,181 @@
+{
+  "baseline": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "reference_source": "/Users/dlarimer/psio-psibase-rust-reference",
+  "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+  "load_before": [
+    3.3203125,
+    3.43017578125,
+    3.1904296875
+  ],
+  "free_bytes_before": 2260710723584,
+  "jobs": 2,
+  "commands": [
+    {
+      "name": "rustc",
+      "argv": [
+        "rustc",
+        "-vV"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.018136291997507215
+    },
+    {
+      "name": "cargo",
+      "argv": [
+        "cargo",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.016441375017166138
+    },
+    {
+      "name": "toolchains",
+      "argv": [
+        "rustup",
+        "toolchain",
+        "list"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.00938583305105567
+    },
+    {
+      "name": "hardware",
+      "argv": [
+        "sysctl",
+        "machdep.cpu.brand_string",
+        "hw.memsize",
+        "hw.ncpu"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.00249504204839468
+    },
+    {
+      "name": "reference-build",
+      "argv": [
+        "cargo",
+        "build",
+        "--manifest-path",
+        "/Users/dlarimer/psio-psibase-rust-reference/rust/Cargo.toml",
+        "-p",
+        "psio",
+        "--lib",
+        "--locked",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.05374683300033212
+    },
+    {
+      "name": "reference-safe-compile",
+      "argv": [
+        "rustc",
+        "--edition=2021",
+        "--extern",
+        "psio=/Users/dlarimer/psio-psibase-rust-reference/rust/target/debug/libpsio.rlib",
+        "-L",
+        "dependency=/Users/dlarimer/psio-psibase-rust-reference/rust/target/debug/deps",
+        "--test",
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/psio/tests/probes/pssz_safety_before.rs",
+        "-o",
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/target/safety-evidence/rust-safety-20261121T213151Z-mac-stable/reference-safe-failures"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.14997620892245322
+    },
+    {
+      "name": "reference-safe-failures",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/target/safety-evidence/rust-safety-20261121T213151Z-mac-stable/reference-safe-failures",
+        "--nocapture"
+      ],
+      "exit_code": 101,
+      "expected": 101,
+      "seconds": 0.21746225003153086
+    },
+    {
+      "name": "reference-emitter-compile",
+      "argv": [
+        "rustc",
+        "--edition=2021",
+        "--extern",
+        "psio=/Users/dlarimer/psio-psibase-rust-reference/rust/target/debug/libpsio.rlib",
+        "-L",
+        "dependency=/Users/dlarimer/psio-psibase-rust-reference/rust/target/debug/deps",
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/psio/examples/pssz_safety_reference.rs",
+        "-o",
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/target/safety-evidence/rust-safety-20261121T213151Z-mac-stable/reference-emitter"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.1566822499735281
+    },
+    {
+      "name": "reference-goldens",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/target/safety-evidence/rust-safety-20261121T213151Z-mac-stable/reference-emitter"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.18567387491930276
+    },
+    {
+      "name": "debug-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/Cargo.toml",
+        "-p",
+        "psio",
+        "--locked",
+        "-j",
+        "2",
+        "--lib",
+        "--tests"
+      ],
+      "exit_code": 101,
+      "expected": 0,
+      "seconds": 1.0465732079464942
+    }
+  ],
+  "passed": false,
+  "source_sha256": {
+    "rust/psio/src/pssz.rs": "390502a5c15c1480a02247e878d61740f40e26c7ef4b1c363420e7631856d2a5",
+    "rust/psio/src/pssz_derive.rs": "cacbf50c48072249f4b4ce8e80cf56f9984278c825f4d5cc12e6c4084a45a105",
+    "rust/psio/src/pssz_view.rs": "66d1367ab084abb58475467ea8c5d1197d2b4509530f3247ac9a7527f28617eb",
+    "rust/psio/src/lib.rs": "5da94a8a5426522a24466eb3c371cf4b9d5631b396a3be39d507d2f7e8c6270f",
+    "rust/psio/tests/pssz_safety.rs": "fc23bf293fa84988556dbf906971e37f47be7c8a7d35d14527ef190e71dd4abd",
+    "rust/psio/tests/probes/pssz_safety_before.rs": "d85281720883cdfa319c577a7794f4a886e40470a3893a3545d04f23177e8cbc",
+    "rust/psio/tests/qualify_pssz_safety.py": "7f5b80a7efff67f31f3aaf09605693b48fd061419cd0cfded94351e76e5e5638",
+    "rust/psio/tests/fixtures/pssz-safety-explicit.json": "bf3560d369462fb47fbb3d1977d56422b8d448ef11d15af21ab6eaff5cb32340",
+    "rust/psio/examples/pssz_safety_reference.rs": "7806d282274200d02a2a65eefbe6095bcb0100e4218d2e73dc0ec6f14496f223",
+    "rust/Cargo.lock": "52801f3f8c6eb3619ced910a3c8b9cc6820e3d78062b02e0b8a9b3b705fb17ee",
+    "rust/Cargo.toml": "bc81ee8c1f10bba4b96ca54a876a752b6dcd3fedf8ed4cba503c918281dec1f5",
+    "rust/psio/Cargo.toml": "b5cd543aaa21a06d3dc633b62b2c4367ab24cd17bf8c7b566dc156303a0436ae",
+    "rust/psio-macros/Cargo.toml": "e33f9c00ac16837eabaac4a8fcb16e43cc55061f722352ef8f204ee15cfbfe18"
+  },
+  "scope": "Existing Rust explicit PSSZ input/memory safety; safe trait metadata never proves POD. Not full strictness, append evolution, automatic widths, derive expansion or SDK activation.",
+  "reference_head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "reference_source_sha256": {
+    "rust/psio/src/pssz.rs": "3aed9b0ff70702c9149ce2cd685f37a266773f795c9bdbfd925e6c23b71138f6",
+    "rust/psio/src/pssz_derive.rs": "18f82c6882204d9e565fd600effd048d96fbcbcd01fbcfc2678e939d06622aee",
+    "rust/psio/src/pssz_view.rs": "0caf37b7e8d8b263e12f4f9105a50c70f8f3f556a42677d3fbba4cf79c4f3425",
+    "rust/Cargo.lock": "52801f3f8c6eb3619ced910a3c8b9cc6820e3d78062b02e0b8a9b3b705fb17ee"
+  },
+  "reference_golden_count": 39,
+  "error": "debug-tests had unexpected exit code",
+  "load_after": [
+    3.3203125,
+    3.43017578125,
+    3.1904296875
+  ],
+  "free_bytes_after": 2260690264064
+}

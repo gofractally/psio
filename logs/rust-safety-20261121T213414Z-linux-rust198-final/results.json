@@ -1,0 +1,234 @@
+{
+  "baseline": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "reference_source": "/home/dlarimer/psio-rust-reference-20261121",
+  "platform": "Linux-6.17.0-22-generic-x86_64-with-glibc2.42",
+  "load_before": [
+    0.60546875,
+    1.10595703125,
+    1.30712890625
+  ],
+  "free_bytes_before": 25925726208,
+  "jobs": 2,
+  "commands": [
+    {
+      "name": "rustc",
+      "argv": [
+        "rustc",
+        "-vV"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.008632238954305649
+    },
+    {
+      "name": "cargo",
+      "argv": [
+        "cargo",
+        "--version"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.005666643381118774
+    },
+    {
+      "name": "toolchains",
+      "argv": [
+        "rustup",
+        "toolchain",
+        "list"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.003850489854812622
+    },
+    {
+      "name": "hardware",
+      "argv": [
+        "lscpu"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.0030535124242305756
+    },
+    {
+      "name": "reference-build",
+      "argv": [
+        "cargo",
+        "build",
+        "--manifest-path",
+        "/home/dlarimer/psio-rust-reference-20261121/rust/Cargo.toml",
+        "-p",
+        "psio",
+        "--lib",
+        "--locked",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 10.882397677749395
+    },
+    {
+      "name": "reference-safe-compile",
+      "argv": [
+        "rustc",
+        "--edition=2021",
+        "--extern",
+        "psio=/home/dlarimer/psio-rust-reference-20261121/rust/target/debug/libpsio.rlib",
+        "-L",
+        "dependency=/home/dlarimer/psio-rust-reference-20261121/rust/target/debug/deps",
+        "--test",
+        "/home/dlarimer/psio-rust-safety-20261121/rust/psio/tests/probes/pssz_safety_before.rs",
+        "-o",
+        "/home/dlarimer/psio-rust-safety-20261121/rust/target/safety-evidence/rust-safety-20261121T213414Z-linux-rust198-final/reference-safe-failures"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.14879539608955383
+    },
+    {
+      "name": "reference-safe-failures",
+      "argv": [
+        "/home/dlarimer/psio-rust-safety-20261121/rust/target/safety-evidence/rust-safety-20261121T213414Z-linux-rust198-final/reference-safe-failures",
+        "--nocapture"
+      ],
+      "exit_code": 101,
+      "expected": 101,
+      "seconds": 0.001751687377691269
+    },
+    {
+      "name": "reference-emitter-compile",
+      "argv": [
+        "rustc",
+        "--edition=2021",
+        "--extern",
+        "psio=/home/dlarimer/psio-rust-reference-20261121/rust/target/debug/libpsio.rlib",
+        "-L",
+        "dependency=/home/dlarimer/psio-rust-reference-20261121/rust/target/debug/deps",
+        "/home/dlarimer/psio-rust-safety-20261121/rust/psio/examples/pssz_safety_reference.rs",
+        "-o",
+        "/home/dlarimer/psio-rust-safety-20261121/rust/target/safety-evidence/rust-safety-20261121T213414Z-linux-rust198-final/reference-emitter"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.18088147416710854
+    },
+    {
+      "name": "reference-goldens",
+      "argv": [
+        "/home/dlarimer/psio-rust-safety-20261121/rust/target/safety-evidence/rust-safety-20261121T213414Z-linux-rust198-final/reference-emitter"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.0013011135160923004
+    },
+    {
+      "name": "debug-tests",
+      "argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "/home/dlarimer/psio-rust-safety-20261121/rust/Cargo.toml",
+        "-p",
+        "psio",
+        "--locked",
+        "-j",
+        "2",
+        "--lib",
+        "--tests"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 24.42999244108796
+    },
+    {
+      "name": "release-safety",
+      "argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "/home/dlarimer/psio-rust-safety-20261121/rust/Cargo.toml",
+        "-p",
+        "psio",
+        "--locked",
+        "-j",
+        "2",
+        "--release",
+        "--test",
+        "pssz_safety"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 34.42516461759806
+    },
+    {
+      "name": "current-goldens",
+      "argv": [
+        "cargo",
+        "run",
+        "--manifest-path",
+        "/home/dlarimer/psio-rust-safety-20261121/rust/Cargo.toml",
+        "-p",
+        "psio",
+        "--locked",
+        "-j",
+        "2",
+        "--example",
+        "pssz_safety_reference"
+      ],
+      "exit_code": 0,
+      "expected": 0,
+      "seconds": 0.3681726045906544
+    }
+  ],
+  "passed": true,
+  "source_sha256": {
+    "rust/psio/src/pssz.rs": "c2b21b52fc71d656c46608c0b204bc8d76b0ba87c00e4caefc63f4b04355e7cf",
+    "rust/psio/src/pssz_derive.rs": "cacbf50c48072249f4b4ce8e80cf56f9984278c825f4d5cc12e6c4084a45a105",
+    "rust/psio/src/pssz_view.rs": "66d1367ab084abb58475467ea8c5d1197d2b4509530f3247ac9a7527f28617eb",
+    "rust/psio/src/lib.rs": "5da94a8a5426522a24466eb3c371cf4b9d5631b396a3be39d507d2f7e8c6270f",
+    "rust/psio/tests/pssz_safety.rs": "ed40e9c74635e83d770fe4156a4d0864643eafe4db857ff77ba4d20646404202",
+    "rust/psio/tests/probes/pssz_safety_before.rs": "d85281720883cdfa319c577a7794f4a886e40470a3893a3545d04f23177e8cbc",
+    "rust/psio/tests/qualify_pssz_safety.py": "7f5b80a7efff67f31f3aaf09605693b48fd061419cd0cfded94351e76e5e5638",
+    "rust/psio/tests/fixtures/pssz-safety-explicit.json": "bf3560d369462fb47fbb3d1977d56422b8d448ef11d15af21ab6eaff5cb32340",
+    "rust/psio/examples/pssz_safety_reference.rs": "7806d282274200d02a2a65eefbe6095bcb0100e4218d2e73dc0ec6f14496f223",
+    "rust/Cargo.lock": "52801f3f8c6eb3619ced910a3c8b9cc6820e3d78062b02e0b8a9b3b705fb17ee",
+    "rust/Cargo.toml": "bc81ee8c1f10bba4b96ca54a876a752b6dcd3fedf8ed4cba503c918281dec1f5",
+    "rust/psio/Cargo.toml": "b5cd543aaa21a06d3dc633b62b2c4367ab24cd17bf8c7b566dc156303a0436ae",
+    "rust/psio-macros/Cargo.toml": "e33f9c00ac16837eabaac4a8fcb16e43cc55061f722352ef8f204ee15cfbfe18"
+  },
+  "scope": "Existing Rust explicit PSSZ input/memory safety; safe trait metadata never proves POD. Not full strictness, append evolution, automatic widths, derive expansion or SDK activation.",
+  "reference_head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "reference_source_sha256": {
+    "rust/psio/src/pssz.rs": "3aed9b0ff70702c9149ce2cd685f37a266773f795c9bdbfd925e6c23b71138f6",
+    "rust/psio/src/pssz_derive.rs": "18f82c6882204d9e565fd600effd048d96fbcbcd01fbcfc2678e939d06622aee",
+    "rust/psio/src/pssz_view.rs": "0caf37b7e8d8b263e12f4f9105a50c70f8f3f556a42677d3fbba4cf79c4f3425",
+    "rust/Cargo.lock": "52801f3f8c6eb3619ced910a3c8b9cc6820e3d78062b02e0b8a9b3b705fb17ee"
+  },
+  "reference_golden_count": 39,
+  "debug_test_counts": [
+    676,
+    14,
+    13
+  ],
+  "release_test_counts": [
+    13
+  ],
+  "artifact_sha256": {
+    "/home/dlarimer/psio-rust-safety-20261121/rust/target/safety-evidence/rust-safety-20261121T213414Z-linux-rust198-final/reference-safe-failures": "e6546c6fac7591aa6feae44f5a1a03b891ad826ff29841cdfbff245a48bc16ca",
+    "/home/dlarimer/psio-rust-safety-20261121/rust/target/safety-evidence/rust-safety-20261121T213414Z-linux-rust198-final/reference-emitter": "df65ed45f0bbecc2526271076c33e889ba9497b76576660aa6218e2af1ab7ee5"
+  },
+  "binary_sha256": {
+    "/home/dlarimer/psio-rust-safety-20261121/rust/target/debug/deps/psio-e9dfbcb12bbf12df": "37ee4b5076d89c90103bec6539dcd9f73820a5fd7096b20d1a80d05265d1dfb4",
+    "/home/dlarimer/psio-rust-safety-20261121/rust/target/debug/deps/pssz_safety-791cf5377c65c4f2": "871d2922b071347c893d73d414d94003669857af14cc9a3a7a1182374a115281",
+    "/home/dlarimer/psio-rust-safety-20261121/rust/target/debug/deps/conformance_corpus-c61d52a2d9d47ff5": "06c8cf163e93e2701a61616b9405016f06367502db7ee6ef26024142e70f0e18",
+    "/home/dlarimer/psio-rust-safety-20261121/rust/target/release/deps/pssz_safety-54c20474508b4b6e": "f30b81f28f851d779cce71502b1a6454cda0807a733a2f0232ee8bd297b77794"
+  },
+  "load_after": [
+    1.48291015625,
+    1.25537109375,
+    1.3447265625
+  ],
+  "free_bytes_after": 24369688576
+}

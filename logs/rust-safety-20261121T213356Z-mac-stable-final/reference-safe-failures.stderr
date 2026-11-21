@@ -1,0 +1,19 @@
+
+thread 'baseline_safe_bool_view' (10909960) panicked at /Users/dlarimer/psio-psibase-rust-safety/rust/psio/tests/probes/pssz_safety_before.rs:123:5:
+assertion failed: std::panic::catch_unwind(|| pssz_view_of::<bool, F>(&[2]).get()).is_err()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'baseline_safe_custom_traits' (10909961) panicked at /Users/dlarimer/psio-psibase-rust-safety/rust/psio/tests/probes/pssz_safety_before.rs:77:5:
+assertion failed: from_pssz::<F, Vec<CheckedByte>>(&[2]).is_err()
+
+thread 'baseline_safe_truncation' (10909962) panicked at /Users/dlarimer/psio-psibase-rust-safety/rust/psio/tests/probes/pssz_safety_before.rs:43:1:
+range start index 6 out of range for slice of length 5
+
+thread 'baseline_safe_zero_vector' (10909963) panicked at psio/src/pssz.rs:424:16:
+attempt to calculate the remainder with a divisor of zero
+
+thread 'baseline_safe_truncation' (10909962) panicked at /Users/dlarimer/psio-psibase-rust-safety/rust/psio/tests/probes/pssz_safety_before.rs:108:9:
+safe decoder panicked on truncation 6
+
+thread 'baseline_safe_zero_vector' (10909963) panicked at /Users/dlarimer/psio-psibase-rust-safety/rust/psio/tests/probes/pssz_safety_before.rs:116:5:
+zero-size vector divided by zero

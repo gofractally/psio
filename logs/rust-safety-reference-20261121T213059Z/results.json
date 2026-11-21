@@ -1,0 +1,31 @@
+{
+  "reference": "/Users/dlarimer/psio-psibase-rust-reference",
+  "head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "clean": true,
+  "commands": [
+    {
+      "name": "compile",
+      "argv": [
+        "rustc",
+        "--edition=2021",
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/psio/examples/pssz_safety_reference.rs",
+        "--extern",
+        "psio=/Users/dlarimer/psio-psibase-rust-reference/rust/target/debug/libpsio.rlib",
+        "-L",
+        "dependency=/Users/dlarimer/psio-psibase-rust-reference/rust/target/debug/deps",
+        "-o",
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/target/pssz-safety-reference"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "emit",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-rust-safety/rust/target/pssz-safety-reference"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "fixture_source_sha256": "7806d282274200d02a2a65eefbe6095bcb0100e4218d2e73dc0ec6f14496f223",
+  "golden_count": 39
+}

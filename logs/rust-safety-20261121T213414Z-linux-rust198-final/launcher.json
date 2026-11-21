@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "python3",
+    "rust/psio/tests/qualify_pssz_safety.py",
+    "--reference-source",
+    "/home/dlarimer/psio-rust-reference-20261121",
+    "--label",
+    "linux-rust198-final"
+  ],
+  "PATH": "/home/dlarimer/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+  "RUSTUP_TOOLCHAIN": "1.98.0",
+  "lock": "/home/dlarimer/.cache/psibase-foundation-qualification.lock",
+  "jobs": 2,
+  "exit_code": 0
+}

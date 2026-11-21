@@ -1,0 +1,22 @@
+{
+  "head": "f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7",
+  "argv": [
+    "cargo",
+    "test",
+    "--manifest-path",
+    "rust/Cargo.toml",
+    "-p",
+    "psio",
+    "--test",
+    "pssz_safety",
+    "baseline_safe",
+    "--locked",
+    "-j",
+    "2",
+    "--",
+    "--nocapture"
+  ],
+  "exit_code": 101,
+  "scope": "Only memory-safe counterexamples: custom u8 wire codec bypass, bool view accepts2, record truncation panic, zero-sized vector division. Invalid bool/container and owning-T raw-copy paths are not executed on the unsafe baseline.",
+  "fixture_sha256": "553b32677091562dd90aa613f7ae9b93e5b7992b74826251ff6febd7dc66005f"
+}

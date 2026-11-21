@@ -1,0 +1,31 @@
+
+running 26 tests
+test beacon_state_tests::tests::mainnet_genesis_pssz_round_trip ... ok
+test pssz::tests::auto_pssz_format_picks_narrowest_width ... ok
+test pssz::tests::max_encoded_size_propagation ... ok
+test pssz::tests::cpp_pssz32_u32_cross ... ok
+test pssz::tests::cpp_pssz32_option_u32_cross ... ok
+test pssz::tests::option_fixed_inner_no_selector ... ok
+test pssz::tests::cpp_pssz32_string_cross ... ok
+test pssz::tests::cpp_pssz32_option_string_cross ... ok
+test pssz::tests::option_variable_inner_with_selector ... ok
+test pssz::tests::primitives_round_trip ... ok
+test pssz::tests::cpp_pssz32_vec_u32_cross ... ok
+test pssz::tests::string_no_length_prefix ... ok
+test pssz::tests::validate_primitives_and_containers ... ok
+test pssz::tests::cpp_pssz32_vec_string_cross ... ok
+test pssz::tests::pssz16_narrower_offsets ... ok
+test pssz::tests::vec_fixed_elements_flat ... ok
+test pssz::tests::vec_variable_elements_backpatched_offsets ... ok
+test pssz_derive::tests::cpp_pssz32_named_cross ... ok
+test pssz_derive::tests::named_round_trip ... ok
+test pssz_derive::tests::pssz_view_named_accessors ... ok
+test pssz_view::tests::option_fixed_no_selector_view ... ok
+test pssz_view::tests::option_variable_with_selector_view ... ok
+test pssz_view::tests::primitive_view ... ok
+test pssz_view::tests::string_view ... ok
+test pssz_view::tests::vec_fixed_view ... ok
+test pssz_view::tests::vec_variable_view ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 652 filtered out; finished in 0.00s
+
