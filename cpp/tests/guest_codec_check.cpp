@@ -129,7 +129,9 @@ int main(int argc, char** argv) {
        !check(psio::pssz{},"pssz-auto")) return 1;
     std::puts("guest-codec-preparation=PASS");
 #if defined(__cpp_exceptions)
-    } catch(const std::length_error&) { if(argc>1)return 0;throw;
-    } catch(const psio::codec_exception&) { if(argc>1)return 0;throw; }
+    } catch(const std::length_error&) { if(argc>1)return 0;throw; }
+#if defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
+      catch(const psio::codec_exception&) { if(argc>1)return 0;throw; }
+#endif
 #endif
 }
