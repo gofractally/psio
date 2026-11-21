@@ -4,6 +4,7 @@ use crate::pssz::{Decoded, PsszError, PsszFormat, PsszResult};
 use crate::pssz_checked::{self as checked, Layout};
 use crate::pssz_schema_ir::{AnyType, AnyValue, Attribute, Member, Schema};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Typed values preserve distinctions lost by plain JSON, especially
 /// None / Some(None), Some(unit), integer widths, and variant selectors.
@@ -37,11 +38,112 @@ fn dwnc(attributes: &[Attribute]) -> bool {
         .iter()
         .any(|a| a.name == "definitionWillNotChange")
 }
+fn attributes(values: &[Attribute], layout: bool) -> PsszResult<()> {
+    for value in values {
+        match value.name.as_str() {
+            "doc" | "description" | "visible" => (),
+            "definitionWillNotChange" if layout => (),
+            _ => {
+                return Err(failure(
+                    "pssz dynamic: unsupported schema constraint or annotation",
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+fn metadata(schema: &Schema, root: &AnyType) -> PsszResult<()> {
+    let mut pending = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(ty) = pending.pop() {
+        let ty = schema.resolve(ty)?;
+        if !seen.insert(ty as *const AnyType as usize) {
+            continue;
+        }
+        let fields = match &ty.value {
+            AnyValue::Object(o) => {
+                attributes(&o.attributes, true)?;
+                Some(o.members.as_slice())
+            }
+            AnyValue::Struct(s) => {
+                attributes(&s.attributes, true)?;
+                Some(s.members.as_slice())
+            }
+            AnyValue::Variant(v) => {
+                attributes(&v.attributes, false)?;
+                if v.members.is_empty() || v.members.len() > 256 {
+                    return Err(failure("pssz dynamic: invalid variant schema"));
+                }
+                Some(v.members.as_slice())
+            }
+            AnyValue::Tuple(t) => {
+                pending.extend(t.members.iter().map(|t| t.as_ref()));
+                None
+            }
+            AnyValue::List(l) => {
+                pending.push(&l.r#type);
+                None
+            }
+            AnyValue::BoundedList(l) => {
+                pending.push(&l.r#type);
+                None
+            }
+            AnyValue::Array(a) => {
+                pending.push(&a.r#type);
+                None
+            }
+            AnyValue::Option(o) => {
+                pending.push(&o.r#type);
+                None
+            }
+            AnyValue::Custom(c) => {
+                match c.id.as_str() {
+                    "bool" => unsigned_adapter(schema, &c.r#type, 1)?,
+                    "char" => unsigned_adapter(schema, &c.r#type, 8)?,
+                    "string" | "hex" => {
+                        byte_container(schema, &c.r#type)?;
+                    }
+                    _ => return Err(failure("pssz dynamic: unsupported custom adapter")),
+                }
+                pending.push(&c.r#type);
+                None
+            }
+            AnyValue::Int(i) => {
+                int_size(i.bits)?;
+                None
+            }
+            AnyValue::Float(f) if matches!((f.exp, f.mantissa), (8, 23 | 24) | (11, 52 | 53)) => {
+                None
+            }
+            _ => return Err(failure("pssz dynamic: unsupported schema type")),
+        };
+        if let Some(fields) = fields {
+            let mut names = HashSet::new();
+            for field in fields {
+                if !names.insert(field.name.as_str()) {
+                    return Err(failure("pssz dynamic: duplicate schema member"));
+                }
+                attributes(&field.attributes, false)?;
+                pending.push(&field.r#type);
+            }
+        }
+    }
+    Ok(())
+}
 fn int_size(bits: u32) -> PsszResult<usize> {
     match bits {
         1 => Ok(1),
         8 | 16 | 32 | 64 | 128 => Ok(bits as usize / 8),
         _ => Err(failure("pssz dynamic: unsupported integer width")),
+    }
+}
+fn unsigned_adapter(schema: &Schema, ty: &AnyType, bits: u32) -> PsszResult<()> {
+    if matches!(schema.resolve(ty)?.value, AnyValue::Int(ref i) if i.bits == bits && !i.isSigned) {
+        Ok(())
+    } else {
+        Err(failure(
+            "pssz dynamic: primitive adapter has incompatible inner schema",
+        ))
     }
 }
 
@@ -91,6 +193,12 @@ fn layout_at<F: PsszFormat>(schema: &Schema, ty: &AnyType, n: usize) -> PsszResu
         | AnyValue::BoundedList(_)
         | AnyValue::Variant(_) => (),
         AnyValue::Custom(c) if c.id == "bool" => {
+            unsigned_adapter(schema, &c.r#type, 1)?;
+            out.fixed = true;
+            out.size = 1;
+        }
+        AnyValue::Custom(c) if c.id == "char" => {
+            unsigned_adapter(schema, &c.r#type, 8)?;
             out.fixed = true;
             out.size = 1;
         }
@@ -149,12 +257,14 @@ fn can_be_empty<F: PsszFormat>(schema: &Schema, ty: &AnyType, n: usize) -> PsszR
                 l.fixed && l.size == 0
             }
         }
-        AnyValue::Struct(s) => s.members.iter().all(|m| {
-            layout_at::<F>(schema, &m.r#type, n + 1).is_ok_and(|l| l.fixed && l.size == 0)
-        }),
-        AnyValue::Object(o) if dwnc(&o.attributes) => o.members.iter().all(|m| {
-            layout_at::<F>(schema, &m.r#type, n + 1).is_ok_and(|l| l.fixed && l.size == 0)
-        }),
+        AnyValue::Struct(s) => {
+            let layout = record_layout::<F>(schema, &s.members, true, n)?;
+            layout.fixed && layout.size == 0
+        }
+        AnyValue::Object(o) if dwnc(&o.attributes) => {
+            let layout = record_layout::<F>(schema, &o.members, true, n)?;
+            layout.fixed && layout.size == 0
+        }
         AnyValue::Custom(c) if c.id == "string" || c.id == "hex" => {
             can_be_empty::<F>(schema, &c.r#type, n + 1)?
         }
@@ -163,7 +273,10 @@ fn can_be_empty<F: PsszFormat>(schema: &Schema, ty: &AnyType, n: usize) -> PsszR
         | AnyValue::Object(_)
         | AnyValue::Tuple(_)
         | AnyValue::Variant(_) => false,
-        AnyValue::Custom(c) if c.id == "bool" => false,
+        AnyValue::Custom(c) if c.id == "bool" || c.id == "char" => {
+            unsigned_adapter(schema, &c.r#type, if c.id == "bool" { 1 } else { 8 })?;
+            false
+        }
         _ => return Err(failure("pssz dynamic: unsupported optional inner schema")),
     })
 }
@@ -186,9 +299,9 @@ fn byte_container(schema: &Schema, ty: &AnyType) -> PsszResult<(Option<usize>, b
             ))
         }
     };
-    if !matches!(schema.resolve(element)?.value, AnyValue::Int(ref i) if i.bits == 8 && !i.isSigned)
-    {
-        return Err(failure("pssz dynamic: adapter element must be u8"));
+    match &schema.resolve(element)?.value {
+        AnyValue::Custom(c) if c.id == "char" => unsigned_adapter(schema, &c.r#type, 8)?,
+        _ => unsigned_adapter(schema, element, 8)?,
     }
     Ok((bound, exact))
 }
@@ -202,6 +315,7 @@ fn bound_bytes(schema: &Schema, ty: &AnyType, len: usize) -> PsszResult<()> {
 
 pub fn encode<F: PsszFormat>(schema: &Schema, ty: &AnyType, value: &Value) -> PsszResult<Vec<u8>> {
     checked::format::<F>()?;
+    metadata(schema, ty)?;
     encode_at::<F>(schema, ty, value, 0)
 }
 fn encode_at<F: PsszFormat>(
@@ -237,7 +351,14 @@ fn encode_at<F: PsszFormat>(
         (AnyValue::Float(f), Value::Float64(v)) if f.exp == 11 && matches!(f.mantissa, 52 | 53) => {
             out.extend_from_slice(&v.to_le_bytes())
         }
-        (AnyValue::Custom(c), Value::Bool(v)) if c.id == "bool" => out.push(u8::from(*v)),
+        (AnyValue::Custom(c), Value::Bool(v)) if c.id == "bool" => {
+            unsigned_adapter(schema, &c.r#type, 1)?;
+            out.push(u8::from(*v));
+        }
+        (AnyValue::Custom(c), Value::Unsigned(v)) if c.id == "char" => {
+            unsigned_adapter(schema, &c.r#type, 8)?;
+            out.push(u8::try_from(*v).map_err(|_| failure("pssz dynamic: char byte overflow"))?);
+        }
         (AnyValue::Custom(c), Value::String(v)) if c.id == "string" => {
             bound_bytes(schema, &c.r#type, v.len())?;
             out.extend_from_slice(v.as_bytes());
@@ -406,6 +527,7 @@ pub fn decode_exact<F: PsszFormat>(
     ty: &AnyType,
     bytes: &[u8],
 ) -> PsszResult<Value> {
+    metadata(schema, ty)?;
     checked::format::<F>()?;
     let session = checked::DecodeSession::enter(false);
     let value = decode_at::<F>(schema, ty, bytes, 0)?;
@@ -419,6 +541,7 @@ pub fn decode_compatible<F: PsszFormat>(
     ty: &AnyType,
     bytes: &[u8],
 ) -> PsszResult<Decoded<Value>> {
+    metadata(schema, ty)?;
     checked::format::<F>()?;
     let session = checked::DecodeSession::enter(true);
     let value = decode_at::<F>(schema, ty, bytes, 0)?;
@@ -473,11 +596,21 @@ fn decode_at<F: PsszFormat>(
             )),
             _ => return Err(failure("pssz dynamic: unsupported float or span mismatch")),
         },
-        AnyValue::Custom(c) if c.id == "bool" => match bytes {
-            [0] => Value::Bool(false),
-            [1] => Value::Bool(true),
-            _ => return Err(failure("pssz dynamic: invalid bool")),
-        },
+        AnyValue::Custom(c) if c.id == "bool" => {
+            unsigned_adapter(schema, &c.r#type, 1)?;
+            match bytes {
+                [0] => Value::Bool(false),
+                [1] => Value::Bool(true),
+                _ => return Err(failure("pssz dynamic: invalid bool")),
+            }
+        }
+        AnyValue::Custom(c) if c.id == "char" => {
+            unsigned_adapter(schema, &c.r#type, 8)?;
+            match bytes {
+                [value] => Value::Unsigned(u128::from(*value)),
+                _ => return Err(failure("pssz dynamic: char span mismatch")),
+            }
+        }
         AnyValue::Custom(c) if c.id == "string" => {
             bound_bytes(schema, &c.r#type, bytes.len())?;
             Value::String(

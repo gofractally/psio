@@ -75,6 +75,13 @@ Option state and variant selectors that ordinary JSON can collapse. Unsupported
 IR types/custom adapters return explicit errors, and the legacy FracPack marker
 never silently selects a different codec.
 
+The byte-preserving C++ `char` adapter maps to typed Unsigned(0..255), including
+inside hex containers; it is distinct from Rust's Unicode `char`. Runtime schema
+metadata is preflighted throughout the reachable graph, including omitted
+optional branches. DWNC and collection count bounds are supported. Unsupported
+constraints such as maxFields/maxDynamicData and unrecognized annotations reject
+explicitly; doc/description/visible are whitelisted descriptive metadata.
+
 The default safety budget numbers the root node 0: record/tuple fields, sequence
 elements, Some payloads and variant payloads add one level. Transparent boxes and
 wrappers add none; None and empty containers have no child. Node 64 is accepted;

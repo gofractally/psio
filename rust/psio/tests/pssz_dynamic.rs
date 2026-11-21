@@ -229,6 +229,139 @@ fn runtime_codec_handles_integer_bounds_and_rejects_legacy_markers() {
     let root = AnyType::named("recursive");
     assert!(codec::encode::<Pssz32>(&recursive, &root, &Value::Optional(None)).is_err());
     assert!(codec::decode_exact::<Pssz32>(&recursive, &root, &[]).is_err());
+    recursive.types[0].r#type = Box::new(AnyType::new(AnyValue::Struct(Struct {
+        members: vec![Member {
+            name: "self".into(),
+            r#type: Box::new(AnyType::named("recursive")),
+            attributes: vec![],
+        }],
+        attributes: vec![],
+    })));
+    let optional = AnyType::new(AnyValue::Option(Optional {
+        r#type: Box::new(root),
+    }));
+    assert!(codec::encode::<Pssz32>(&recursive, &optional, &Value::Optional(None)).is_err());
+}
+
+#[test]
+fn cpp_char_adapter_and_hex_byte_containers_preserve_all_byte_values() {
+    let schema = Schema::default();
+    let u8_type = AnyType::new(AnyValue::Int(Int {
+        bits: 8,
+        isSigned: false,
+    }));
+    let char_type = AnyType::new(AnyValue::Custom(Custom {
+        r#type: Box::new(u8_type.clone()),
+        id: "char".into(),
+    }));
+    assert_eq!(
+        codec::encode::<Pssz32>(&schema, &char_type, &Value::Unsigned(255)).unwrap(),
+        [255]
+    );
+    assert_eq!(
+        codec::decode_exact::<Pssz32>(&schema, &char_type, &[255]).unwrap(),
+        Value::Unsigned(255)
+    );
+    assert!(codec::encode::<Pssz32>(&schema, &char_type, &Value::Unsigned(256)).is_err());
+    let bytes_type = AnyType::new(AnyValue::Custom(Custom {
+        r#type: Box::new(AnyType::new(AnyValue::List(List {
+            r#type: Box::new(char_type),
+        }))),
+        id: "hex".into(),
+    }));
+    let value = Value::Bytes(vec![0, 128, 255]);
+    assert_eq!(
+        codec::encode::<Pssz32>(&schema, &bytes_type, &value).unwrap(),
+        [0, 128, 255]
+    );
+    assert_eq!(
+        codec::decode_exact::<Pssz32>(&schema, &bytes_type, &[0, 128, 255]).unwrap(),
+        value
+    );
+    let all: Vec<u8> = (0..=255).collect();
+    assert_eq!(
+        codec::encode::<Pssz32>(&schema, &bytes_type, &Value::Bytes(all.clone())).unwrap(),
+        all
+    );
+    assert_eq!(
+        codec::decode_exact::<Pssz32>(&schema, &bytes_type, &all).unwrap(),
+        Value::Bytes(all.clone())
+    );
+    let AnyValue::Custom(ref custom) = bytes_type.value else {
+        unreachable!()
+    };
+    let AnyValue::List(ref list) = custom.r#type.value else {
+        unreachable!()
+    };
+    for count in [0, 256] {
+        let array = AnyType::new(AnyValue::Custom(Custom {
+            r#type: Box::new(AnyType::new(AnyValue::Array(Array {
+                r#type: list.r#type.clone(),
+                len: count,
+            }))),
+            id: "hex".into(),
+        }));
+        let bytes = if count == 0 { vec![] } else { all.clone() };
+        assert_eq!(
+            codec::encode::<Pssz32>(&schema, &array, &Value::Bytes(bytes.clone())).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            codec::decode_exact::<Pssz32>(&schema, &array, &bytes).unwrap(),
+            Value::Bytes(bytes)
+        );
+    }
+    for byte in 0..=255 {
+        let value = Value::Unsigned(byte);
+        assert_eq!(
+            codec::encode::<Pssz32>(&schema, &list.r#type, &value).unwrap(),
+            [byte as u8]
+        );
+        assert_eq!(
+            codec::decode_exact::<Pssz32>(&schema, &list.r#type, &[byte as u8]).unwrap(),
+            value
+        );
+    }
+    let bad_bool = AnyType::new(AnyValue::Custom(Custom {
+        r#type: Box::new(u8_type),
+        id: "bool".into(),
+    }));
+    assert!(codec::encode::<Pssz32>(&schema, &bad_bool, &Value::Bool(true)).is_err());
+    assert!(codec::decode_exact::<Pssz32>(&schema, &bad_bool, &[1]).is_err());
+}
+
+#[test]
+fn runtime_schema_constraints_are_enforced_or_explicitly_rejected() {
+    let schema = Schema::default();
+    for name in ["maxFields", "maxDynamicData", "unknownConstraint"] {
+        let root = AnyType::new(AnyValue::Object(Object {
+            members: vec![],
+            attributes: vec![Attribute {
+                name: name.into(),
+                value: Some("0".into()),
+            }],
+        }));
+        assert!(codec::encode::<Pssz32>(&schema, &root, &Value::Record(vec![])).is_err());
+        assert!(codec::decode_exact::<Pssz32>(&schema, &root, &[0; 4]).is_err());
+        assert!(codec::decode_compatible::<Pssz32>(&schema, &root, &[0; 4]).is_err());
+        // Preflight also rejects unsupported constraints under an absent
+        // optional; a schema is never silently accepted by skipping its cap.
+        let optional = AnyType::new(AnyValue::Option(Optional {
+            r#type: Box::new(root),
+        }));
+        assert!(codec::encode::<Pssz32>(&schema, &optional, &Value::Optional(None)).is_err());
+    }
+    let root = AnyType::new(AnyValue::Object(Object {
+        members: vec![],
+        attributes: vec![Attribute {
+            name: "doc".into(),
+            value: Some("description".into()),
+        }],
+    }));
+    assert_eq!(
+        codec::encode::<Pssz32>(&schema, &root, &Value::Record(vec![])).unwrap(),
+        [0; 4]
+    );
 }
 
 #[test]
