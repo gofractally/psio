@@ -279,8 +279,9 @@ namespace psio::schema_types
    // ── AnyType — the open-world variant ────────────────────────────────
    //
    // Every IR type-position field is an AnyType.  The variant carries
-   // the discriminator + payload for the 14 alternatives plus a
-   // mutable `resolved` cache for Type-by-name lookups.  Constructors
+   // the discriminator + payload for the 14 alternatives. The legacy
+   // `resolved` slot is unwired and unused: cached pointers cannot remain
+   // valid across copies, moves, schema reuse or alias mutation. Constructors
    // accept each alternative by value plus a pair of std::string /
    // const char* convenience overloads that produce a Type
    // reference.
@@ -304,10 +305,22 @@ namespace psio::schema_types
       mutable const AnyType* resolved = nullptr;
 
       AnyType()                          = default;
-      AnyType(const AnyType&)            = default;
-      AnyType(AnyType&&)                 = default;
-      AnyType& operator=(const AnyType&) = default;
-      AnyType& operator=(AnyType&&)      = default;
+      AnyType(const AnyType& other) : value(other.value) {}
+      AnyType(AnyType&& other) noexcept : value(std::move(other.value))
+      { other.resolved = nullptr; }
+      AnyType& operator=(const AnyType& other)
+      {
+         if (this != &other) value = other.value;
+         resolved = nullptr;
+         return *this;
+      }
+      AnyType& operator=(AnyType&& other) noexcept
+      {
+         if (this != &other) value = std::move(other.value);
+         resolved = nullptr;
+         other.resolved = nullptr;
+         return *this;
+      }
 
       AnyType(Int v) : value(std::move(v)) {}
       AnyType(Float v) : value(std::move(v)) {}
@@ -332,8 +345,8 @@ namespace psio::schema_types
       }
 
       // Resolve Type-by-name references against a schema's `types`
-      // map.  Cached on `resolved`.  Defined inline below once Schema
-      // is complete.
+      // map with bounded alias traversal. Defined below once Schema is
+      // complete. The supplied schema always determines the result.
       const AnyType* resolve(const Schema& schema) const;
    };
    PSIO_REFLECT(AnyType, value)
@@ -473,15 +486,17 @@ namespace psio::schema_types
    // AnyType::resolve definition lands here, after Schema is complete.
    inline const AnyType* AnyType::resolve(const Schema& schema) const
    {
-      if (resolved)
-         return resolved;
-      if (auto* t = std::get_if<Type>(&value))
+      const AnyType* result = this;
+      // A terminating alias chain cannot visit more aliases than there are
+      // named definitions. A repeated definition is an invalid alias cycle.
+      for (std::size_t hops = 0; hops <= schema.types.size(); ++hops)
       {
-         if (auto* r = schema.get(t->type))
-            return resolved = r->resolve(schema);
-         return nullptr;
+         auto* t = std::get_if<Type>(&result->value);
+         if (!t) return result;
+         result = schema.get(t->type);
+         if (!result) return nullptr;
       }
-      return resolved = this;
+      return nullptr;
    }
 
 }  // namespace psio::schema_types
