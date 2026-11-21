@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 struct PssEmpty {};
@@ -22,6 +23,27 @@ PSIO_REFLECT(PssEmpty)
 struct PssUnit {};
 PSIO_REFLECT(PssUnit)
 PSIO_TYPE_ATTRS(PssUnit, psio::definition_will_not_change{})
+
+TEMPLATE_TEST_CASE("pssz positional tuples use extensible record framing",
+                   "[pssz][tuple]", psio::pssz8, psio::pssz16, psio::pssz32)
+{
+   using F = TestType;
+   auto empty = psio::encode(F{}, std::tuple<>{});
+   REQUIRE(empty == std::vector<char>(F::offset_width, 0));
+   REQUIRE(psio::validate<std::tuple<>>(F{}, empty).ok());
+   REQUIRE((psio::decode<std::tuple<>>(F{}, empty) == std::tuple<>{}));
+
+   using Arguments = std::tuple<std::uint32_t, std::string>;
+   const Arguments arguments{7, "hi"};
+   auto bytes = psio::encode(F{}, arguments);
+   REQUIRE(psio::validate<Arguments>(F{}, bytes).ok());
+   REQUIRE((psio::decode<Arguments>(F{}, bytes) == arguments));
+   using Choice = std::variant<std::uint32_t, Arguments>;
+   const Choice choice{std::in_place_index<1>, arguments};
+   auto variant = psio::encode(F{}, choice);
+   REQUIRE(psio::validate<Choice>(F{}, variant).ok());
+   REQUIRE((psio::decode<Choice>(F{}, variant) == choice));
+}
 
 TEMPLATE_TEST_CASE("pssz encodes actual zero-field records across widths",
                    "[pssz][empty]", psio::pssz8, psio::pssz16, psio::pssz32)

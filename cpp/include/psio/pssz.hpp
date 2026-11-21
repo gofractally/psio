@@ -51,6 +51,7 @@
 #include <variant>
 #include <span>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -206,7 +207,48 @@ namespace psio {
       };
 
       template <typename T>
-      concept Record = ::psio::Reflected<T>;
+      struct is_std_tuple : std::false_type {};
+      template <typename... Ts>
+      struct is_std_tuple<std::tuple<Ts...>> : std::true_type {};
+      template <typename T>
+      inline constexpr bool is_std_tuple_v = is_std_tuple<T>::value;
+
+      template <typename T>
+      struct record_traits : ::psio::reflect<T> {};
+      template <typename... Ts>
+      struct record_traits<std::tuple<Ts...>>
+      {
+         static constexpr std::size_t member_count = sizeof...(Ts);
+         template <std::size_t I>
+         using member_type = std::tuple_element_t<I, std::tuple<Ts...>>;
+      };
+
+      template <typename T, std::size_t I, bool = is_std_tuple_v<T>>
+      struct record_member_annotations
+      {
+         using R = record_traits<T>;
+         using F = typename R::template member_type<I>;
+         using value_t = typename ::psio::effective_annotations_for<
+            T, F, R::template member_pointer<I>>::value_t;
+      };
+      template <typename T, std::size_t I>
+      struct record_member_annotations<T, I, true>
+      {
+         using value_t = std::tuple<>;
+      };
+
+      template <std::size_t I, typename T>
+      decltype(auto) record_member(T&& value) noexcept
+      {
+         using U = std::remove_cvref_t<T>;
+         if constexpr (is_std_tuple_v<U>)
+            return std::get<I>(std::forward<T>(value));
+         else
+            return std::forward<T>(value).*(record_traits<U>::template member_pointer<I>);
+      }
+
+      template <typename T>
+      concept Record = ::psio::Reflected<T> || is_std_tuple_v<T>;
 
       template <typename T>
       inline constexpr bool is_fixed_v = is_fixed<T>::value;
@@ -214,14 +256,14 @@ namespace psio {
       template <Record T, std::size_t... Is>
       consteval bool record_fields_all_fixed(std::index_sequence<Is...>)
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          return (is_fixed_v<typename R::template member_type<Is>> && ...);
       }
 
       template <Record T>
       consteval bool record_all_fixed()
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          return record_fields_all_fixed<T>(
             std::make_index_sequence<R::member_count>{});
       }
@@ -256,7 +298,7 @@ namespace psio {
       template <Record T, std::size_t... Is>
       consteval std::size_t sum_record_fields(std::index_sequence<Is...>)
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          return (fixed_size_of<typename R::template member_type<Is>>() + ... + 0);
       }
 
@@ -268,7 +310,7 @@ namespace psio {
       template <std::size_t W, Record T, std::size_t I>
       consteval std::size_t pssz_member_fixed_size_simple()
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          using F = typename R::template member_type<I>;
          if constexpr (is_fixed_v<F>) return fixed_size_of<F>();
          else                          return W;
@@ -277,10 +319,9 @@ namespace psio {
       template <std::size_t W, Record T, std::size_t I>
       consteval std::size_t pssz_member_fixed_size_full()
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          using F = typename R::template member_type<I>;
-         using eff = typename ::psio::effective_annotations_for<
-            T, F, R::template member_pointer<I>>::value_t;
+         using eff = typename record_member_annotations<T, I>::value_t;
          constexpr bool override_v = ::psio::has_as_override_v<eff>;
          if constexpr (!override_v && is_fixed_v<F>)
             return fixed_size_of<F>();
@@ -316,7 +357,7 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return sum_record_fields<T>(
                std::make_index_sequence<R::member_count>{});
          }
@@ -443,7 +484,7 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return [&]<std::size_t... Is>(std::index_sequence<Is...>) noexcept {
                std::size_t total = 0;
                // u{W} fixed_size header — DWNC types skip it.
@@ -453,11 +494,9 @@ namespace psio {
                   ([&]
                    {
                       using F = typename R::template member_type<Is>;
-                      const auto& fref = v.*(R::template member_pointer<Is>);
+                      const auto& fref = record_member<Is>(v);
                       using eff =
-                         typename ::psio::effective_annotations_for<
-                            T, F,
-                            R::template member_pointer<Is>>::value_t;
+                         typename record_member_annotations<T, Is>::value_t;
                       constexpr bool override_v =
                          ::psio::has_as_override_v<eff>;
                       if constexpr (override_v)
@@ -679,7 +718,7 @@ namespace psio {
                s.write(&v, sizeof(T));
                return;
             }
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                constexpr std::size_t fixed_region =
                   (pssz_member_fixed_size_full<W, T, Is>() + ... + std::size_t{0});
@@ -706,11 +745,9 @@ namespace psio {
                    {
                       using F = typename R::template member_type<Is>;
                       const auto& fref =
-                         v.*(R::template member_pointer<Is>);
+                         record_member<Is>(v);
                       using eff =
-                         typename ::psio::effective_annotations_for<
-                            T, F,
-                            R::template member_pointer<Is>>::value_t;
+                         typename record_member_annotations<T, Is>::value_t;
                       constexpr bool override_v =
                          ::psio::has_as_override_v<eff>;
 
@@ -860,7 +897,7 @@ namespace psio {
                std::memcpy(&out, src.data() + pos, sizeof(T));
                return;
             }
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             record_decode_into<W, T>(
                src, pos, end, out,
                std::make_index_sequence<R::member_count>{});
@@ -943,7 +980,7 @@ namespace psio {
                // In-place decode — single bulk zero-init via resize, then
                // write directly into each slot. Mirrors the ssz path.
                out.resize(n);
-               using R = ::psio::reflect<T>;
+               using R = record_traits<T>;
                for (std::size_t i = 0; i < n; ++i)
                   record_decode_into<W, T>(
                      src, pos + i * esz, pos + (i + 1) * esz, out[i],
@@ -971,7 +1008,7 @@ namespace psio {
                // In-place: resize then walk each element directly into
                // its slot, avoiding push_back's move-construct.
                out.resize(n);
-               using R = ::psio::reflect<T>;
+               using R = record_traits<T>;
                for (std::size_t i = 0; i < n; ++i)
                {
                   const std::size_t beg = pos + offsets[i];
@@ -1005,7 +1042,7 @@ namespace psio {
                               std::size_t end, T& out,
                               std::index_sequence<Is...>)
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
 
          // Non-DWNC records carry a u{W} fixed_size header; skip it
          // before reading the fixed region. Offsets inside the record
@@ -1022,8 +1059,7 @@ namespace psio {
              {
                 using F = typename R::template member_type<Is>;
                 using eff =
-                   typename ::psio::effective_annotations_for<
-                      T, F, R::template member_pointer<Is>>::value_t;
+                   typename record_member_annotations<T, Is>::value_t;
                 constexpr bool override_v =
                    ::psio::has_as_override_v<eff>;
                 if constexpr (!override_v && is_fixed_v<F>)
@@ -1058,10 +1094,9 @@ namespace psio {
             ([&]
              {
                 using F = typename R::template member_type<Is>;
-                auto& fref = out.*(R::template member_pointer<Is>);
+                auto& fref = record_member<Is>(out);
                 using eff =
-                   typename ::psio::effective_annotations_for<
-                      T, F, R::template member_pointer<Is>>::value_t;
+                   typename record_member_annotations<T, Is>::value_t;
                 constexpr bool override_v =
                    ::psio::has_as_override_v<eff>;
 
@@ -1236,7 +1271,7 @@ namespace psio {
                std::memcpy(&out, src.data() + pos, sizeof(T));
                return out;
             }
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return record_decode<W, T>(
                src, pos, end, std::make_index_sequence<R::member_count>{});
          }
@@ -1431,7 +1466,7 @@ namespace psio {
                                    std::index_sequence<Is...>,
                                    std::size_t            depth) noexcept
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          constexpr std::size_t NF = R::member_count;
 
          constexpr std::size_t fixed_region = (
@@ -1703,7 +1738,7 @@ namespace psio {
                                     std::size_t            end,
                                     std::index_sequence<Is...>)
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          constexpr std::size_t NF = R::member_count;
 
          constexpr std::size_t fixed_region = (
@@ -1916,7 +1951,7 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             validate_or_throw_record<W, T>(
                src, pos, end, std::make_index_sequence<R::member_count>{});
          }
@@ -2054,7 +2089,7 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return validate_record<W, T>(
                src, pos, end, std::make_index_sequence<R::member_count>{},
                depth + 1);
