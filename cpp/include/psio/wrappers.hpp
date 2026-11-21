@@ -44,6 +44,18 @@
 
 namespace psio {
 
+   namespace detail {
+      [[noreturn]] inline void wrapper_overflow(const char* message)
+      {
+#if (defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED) || \
+    (!defined(PSIO_EXCEPTIONS_ENABLED) && defined(__cpp_exceptions))
+         throw std::length_error(message);
+#else
+         codec_abort({message,0,"wrapper"});
+#endif
+      }
+   }
+
    // ── bounded<T, N> ──────────────────────────────────────────────────────
    //
    // std::vector-like container with compile-time upper bound N. Throws
@@ -82,13 +94,13 @@ namespace psio {
       void push_back(const T& v)
       {
          if (data_.size() >= N)
-            codec_abort({"psio::bounded overflow",0,"wrapper"});
+            detail::wrapper_overflow("psio::bounded overflow");
          data_.push_back(v);
       }
       void push_back(T&& v)
       {
          if (data_.size() >= N)
-            codec_abort({"psio::bounded overflow",0,"wrapper"});
+            detail::wrapper_overflow("psio::bounded overflow");
          data_.push_back(std::move(v));
       }
 
@@ -100,7 +112,7 @@ namespace psio {
       void enforce_bound_() const
       {
          if (data_.size() > N)
-            codec_abort({"psio::bounded overflow on construct",0,"wrapper"});
+            detail::wrapper_overflow("psio::bounded overflow on construct");
       }
    };
 
@@ -133,7 +145,7 @@ namespace psio {
       void enforce_bound_() const
       {
          if (data_.size() > N)
-            codec_abort({"psio::utf8_string overflow",0,"wrapper"});
+            detail::wrapper_overflow("psio::utf8_string overflow");
       }
    };
 
@@ -206,7 +218,7 @@ namespace psio {
       void        push_back(bool v)
       {
          if (bits_.size() >= MaxN)
-            codec_abort({"psio::bitlist overflow",0,"wrapper"});
+            detail::wrapper_overflow("psio::bitlist overflow");
          bits_.push_back(v);
       }
 

@@ -41,7 +41,7 @@ TEST_CASE("bounded<T, N> enforces upper bound on push_back", "[wrapper]")
    b.push_back(2);
    b.push_back(3);
    REQUIRE(b.size() == 3);
-   REQUIRE_THROWS_AS(b.push_back(4), psio::codec_exception);
+   REQUIRE_THROWS_AS(b.push_back(4), std::length_error);
 }
 
 TEST_CASE("bounded<T, N> storage access and iteration", "[wrapper]")
@@ -59,7 +59,7 @@ TEST_CASE("utf8_string<N> enforces bound", "[wrapper]")
 {
    REQUIRE_NOTHROW(psio::utf8_string<10>{std::string{"hello"}});
    REQUIRE_THROWS_AS(psio::utf8_string<3>{std::string{"hello"}},
-                     psio::codec_exception);
+                     std::length_error);
 }
 
 TEST_CASE("byte_array<N> has compile-time size", "[wrapper]")
