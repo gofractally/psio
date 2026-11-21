@@ -1,0 +1,31 @@
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:1:
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1074:49: warning: division by zero is undefined [-Wdivision-by-zero]
+ 1074 |             const std::size_t n   = (end - pos) / esz;
+      |                                                 ^ ~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1324:20: note: in instantiation of function template specialization 'psio::detail::pssz_impl::decode_vector<4UL, true, Unit>' requested here
+ 1324 |             return decode_vector<W, Auto, typename T::value_type>(src, pos, end);
+      |                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2481:36: note: in instantiation of function template specialization 'psio::detail::pssz_impl::decode_value<4UL, true, std::vector<Unit>>' requested here
+ 2481 |          return detail::pssz_impl::decode_value<W, true, T>(bytes, 0, bytes.size());
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:74:20: note: in instantiation of function template specialization 'psio::tag_invoke<std::vector<Unit>>' requested here
+   74 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:1:
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1453:29: warning: remainder by zero is undefined [-Wdivision-by-zero]
+ 1453 |             if ((end - pos) % esz != 0)
+      |                             ^ ~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2203:20: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_vector_payload<4UL, true, Unit>' requested here
+ 2203 |             return validate_vector_payload<W, Auto, E>(src, pos, end,
+      |                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2500:36: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_value<4UL, true, std::vector<Unit>>' requested here
+ 2500 |          return detail::pssz_impl::validate_value<W, true, T>(bytes, 0,
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:103:20: note: in instantiation of function template specialization 'psio::tag_invoke<std::vector<Unit>>' requested here
+  103 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:1:
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1464:50: warning: division by zero is undefined [-Wdivision-by-zero]
+ 1464 |                const std::size_t n = (end - pos) / esz;
+      |                                                  ^ ~~~
+3 warnings generated.

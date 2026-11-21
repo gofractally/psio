@@ -102,14 +102,14 @@ namespace psio::view_layout {
       // ── optional ───────────────────────────────────────────────────────
       //
       // pssz splits on the payload's fixed/variable status:
-      //   fixed V    — no selector. Empty span = None; fixed_size<V>
+      //   nonzero fixed V — no selector. Empty span = None; fixed_size<V>
       //                 bytes = Some.
-      //   variable V — [u8 selector][payload if selector != 0].
+      //   zero-size fixed or variable V — [u8 selector][payload if selector != 0].
       template <typename T>
       bool optional_has_value(std::span<const char> s) noexcept
       {
          using V = typename T::value_type;
-         if constexpr (::psio::detail::pssz_impl::is_fixed_v<V>)
+         if constexpr (!::psio::detail::pssz_impl::optional_uses_selector_v<V>)
             return !s.empty();
          else
          {
@@ -124,7 +124,7 @@ namespace psio::view_layout {
       optional_payload_span(std::span<const char> s) noexcept
       {
          using V = typename T::value_type;
-         if constexpr (::psio::detail::pssz_impl::is_fixed_v<V>)
+         if constexpr (!::psio::detail::pssz_impl::optional_uses_selector_v<V>)
             return s;
          else
             return s.empty() ? std::span<const char>{} : s.subspan(1);

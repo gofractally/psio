@@ -1,0 +1,351 @@
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: too few arguments provided to function-like macro invocation
+    9 | PSIO_REFLECT(Unit, definitionWillNotChange())
+      | ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 11 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/opt/homebrew/include/boost/preprocessor/seq/elem.hpp:24:39: note: expanded from macro 'BOOST_PP_SEQ_ELEM'
+   24 | #    define BOOST_PP_SEQ_ELEM(i, seq) BOOST_PP_SEQ_ELEM_I(i, seq)
+      |                                       ^
+/opt/homebrew/include/boost/preprocessor/seq/elem.hpp:43:45: note: expanded from macro 'BOOST_PP_SEQ_ELEM_I'
+   43 | #        define BOOST_PP_SEQ_ELEM_I(i, seq) BOOST_PP_SEQ_ELEM_II(BOOST_PP_SEQ_ELEM_ ## i seq)
+      |                                             ^
+/opt/homebrew/include/boost/preprocessor/seq/elem.hpp:45:62: note: expanded from macro 'BOOST_PP_SEQ_ELEM_II'
+   45 | #    define BOOST_PP_SEQ_ELEM_II(im) BOOST_PP_SEQ_ELEM_III(im)
+      |                                                              ^
+/opt/homebrew/include/boost/preprocessor/seq/elem.hpp:46:13: note: macro 'BOOST_PP_SEQ_ELEM_III' defined here
+   46 | #    define BOOST_PP_SEQ_ELEM_III(x, _) x
+      |             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: expected member name or ';' after declaration specifiers
+    9 | PSIO_REFLECT(Unit, definitionWillNotChange())
+      | ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 12 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/opt/homebrew/include/boost/preprocessor/seq/for_each_i.hpp:80:80: note: expanded from macro 'BOOST_PP_SEQ_FOR_EACH_I_M_IM'
+   80 | #    define BOOST_PP_SEQ_FOR_EACH_I_M_IM(r, im) BOOST_PP_SEQ_FOR_EACH_I_M_I(r, im)
+      |                                                                                ^
+/opt/homebrew/include/boost/preprocessor/seq/for_each_i.hpp:85:66: note: expanded from macro 'BOOST_PP_SEQ_FOR_EACH_I_M_I'
+   85 | # define BOOST_PP_SEQ_FOR_EACH_I_M_I(r, macro, data, seq, i, sz) macro(r, data, i, BOOST_PP_SEQ_HEAD(seq))
+      |                                                                  ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:99:25: note: expanded from macro 'PSIO_REFLECT_PROXY_FIELD_'
+   99 |    decltype(auto) FIELD() { return this->psio_get_proxy().template get<I, &TYPE::FIELD>(); } \
+      |                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: expected unqualified-id
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:357:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0_HAS'
+  357 |    PSIO_REFLECT_DISPATCH_(                                                              \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:426:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_'
+  426 |    PSIO_REFLECT_IMPL_(                                                                   \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:446:34: note: expanded from macro 'PSIO_REFLECT_IMPL_'
+  446 |          BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_MEMBER_POINTER_CASE_, TYPE, SEQ)          \
+      |                                  ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: expected unqualified-id
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:357:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0_HAS'
+  357 |    PSIO_REFLECT_DISPATCH_(                                                              \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:426:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_'
+  426 |    PSIO_REFLECT_IMPL_(                                                                   \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:462:34: note: expanded from macro 'PSIO_REFLECT_IMPL_'
+  462 |          BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_MEMBER_TYPE_CASE_, TYPE, SEQ)             \
+      |                                  ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: expected unqualified-id
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:357:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0_HAS'
+  357 |    PSIO_REFLECT_DISPATCH_(                                                              \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:426:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_'
+  426 |    PSIO_REFLECT_IMPL_(                                                                   \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:493:34: note: expanded from macro 'PSIO_REFLECT_IMPL_'
+  493 |          BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_VISIT_NAME_CASE_, _, SEQ)                 \
+      |                                  ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: expected unqualified-id
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:357:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0_HAS'
+  357 |    PSIO_REFLECT_DISPATCH_(                                                              \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:426:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_'
+  426 |    PSIO_REFLECT_IMPL_(                                                                   \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:501:34: note: expanded from macro 'PSIO_REFLECT_IMPL_'
+  501 |          BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_VISIT_NUMBER_CASE_, _, SEQ)               \
+      |                                  ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: expected unqualified-id
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:357:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0_HAS'
+  357 |    PSIO_REFLECT_DISPATCH_(                                                              \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:426:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_'
+  426 |    PSIO_REFLECT_IMPL_(                                                                   \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:508:34: note: expanded from macro 'PSIO_REFLECT_IMPL_'
+  508 |          BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_FOR_EACH_CASE_, _, SEQ)                   \
+      |                                  ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: type 'decltype(_member_type_impl_<0UL>())' (aka 'void') cannot be used prior to '::' because it has no members
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:357:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0_HAS'
+  357 |    PSIO_REFLECT_DISPATCH_(                                                              \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:426:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_'
+  426 |    PSIO_REFLECT_IMPL_(                                                                   \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:465:7: note: expanded from macro 'PSIO_REFLECT_IMPL_'
+  465 |       using member_type = typename decltype(_member_type_impl_<Idx>())::type;            \
+      |       ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:205:50: note: in instantiation of template type alias 'member_type' requested here
+  205 |                   using F = typename R::template member_type<I>;
+      |                                                  ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:214:32: note: in instantiation of function template specialization 'psio::detail::max_size_impl::max_bare()::(lambda)::operator()(std::index_sequence<0UL>)::(lambda)::operator()<0UL>' requested here
+  214 |                (field.template operator()<Is>(), ...);
+      |                                ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:203:13: note: in instantiation of function template specialization 'psio::detail::max_size_impl::max_bare()::(lambda)::operator()<0UL>' requested here
+  203 |             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+      |             ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:141:22: note: in instantiation of function template specialization 'psio::detail::max_size_impl::max_bare<Unit>' requested here
+  141 |          else return max_bare<T>();
+      |                      ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:177:22: note: in instantiation of function template specialization 'psio::detail::max_size_impl::child_payload<Unit>' requested here
+  177 |          else return child_payload<F>();
+      |                      ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:175:24: note: (skipping 3 contexts in backtrace; use -ftemplate-backtrace-limit=0 to see all)
+  175 |             return add(max_field_with_annots<E>(annots), 1);
+      |                        ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2312:30: note: in instantiation of function template specialization 'psio::max_encoded_size<std::optional<Unit>>' requested here
+ 2312 |          else return ::psio::max_encoded_size<T>();
+      |                              ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2309:29: note: while substituting into a lambda expression here
+ 2309 |       constexpr auto m = [] {
+      |                             ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2330:53: note: in instantiation of function template specialization 'psio::auto_pssz_width<std::optional<Unit>>' requested here
+ 2330 |    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
+      |                                                     ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2467:36: note: in instantiation of variable template specialization 'psio::auto_pssz_width_v<std::optional<Unit>>' requested here
+ 2467 |          constexpr std::size_t W = auto_pssz_width_v<T>;
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:61:20: note: in instantiation of function template specialization 'psio::tag_invoke<std::optional<Unit>>' requested here
+   61 |             return tag_invoke(*this, fmt, v);
+      |                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:9:1: error: variable has incomplete type 'const void'
+    9 | PSIO_REFLECT(Unit, definitionWillNotChange())
+      | ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:352:4: note: expanded from macro 'PSIO_REFLECT'
+  352 |    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
+      |    ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:22:32: note: expanded from macro 'BOOST_PP_CAT'
+   22 | #    define BOOST_PP_CAT(a, b) BOOST_PP_CAT_I(a, b)
+      |                                ^
+/opt/homebrew/include/boost/preprocessor/cat.hpp:29:34: note: expanded from macro 'BOOST_PP_CAT_I'
+   29 | #    define BOOST_PP_CAT_I(a, b) a ## b
+      |                                  ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:357:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_0_HAS'
+  357 |    PSIO_REFLECT_DISPATCH_(                                                              \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:426:4: note: expanded from macro 'PSIO_REFLECT_DISPATCH_'
+  426 |    PSIO_REFLECT_IMPL_(                                                                   \
+      |    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/reflect.hpp:449:29: note: expanded from macro 'PSIO_REFLECT_IMPL_'
+  449 |       static constexpr auto member_pointer = _member_pointer_impl_<Idx>();               \
+      |                             ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:207:40: note: in instantiation of static data member 'psio_reflect_impl_Unit::member_pointer' requested here
+  207 |                      U, F, R::template member_pointer<I>>;
+      |                                        ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:214:32: note: in instantiation of function template specialization 'psio::detail::max_size_impl::max_bare()::(lambda)::operator()(std::index_sequence<0UL>)::(lambda)::operator()<0UL>' requested here
+  214 |                (field.template operator()<Is>(), ...);
+      |                                ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:203:13: note: in instantiation of function template specialization 'psio::detail::max_size_impl::max_bare()::(lambda)::operator()<0UL>' requested here
+  203 |             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+      |             ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:141:22: note: in instantiation of function template specialization 'psio::detail::max_size_impl::max_bare<Unit>' requested here
+  141 |          else return max_bare<T>();
+      |                      ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:177:22: note: in instantiation of function template specialization 'psio::detail::max_size_impl::child_payload<Unit>' requested here
+  177 |          else return child_payload<F>();
+      |                      ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp:175:24: note: (skipping 3 contexts in backtrace; use -ftemplate-backtrace-limit=0 to see all)
+  175 |             return add(max_field_with_annots<E>(annots), 1);
+      |                        ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2312:30: note: in instantiation of function template specialization 'psio::max_encoded_size<std::optional<Unit>>' requested here
+ 2312 |          else return ::psio::max_encoded_size<T>();
+      |                              ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2309:29: note: while substituting into a lambda expression here
+ 2309 |       constexpr auto m = [] {
+      |                             ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2330:53: note: in instantiation of function template specialization 'psio::auto_pssz_width<std::optional<Unit>>' requested here
+ 2330 |    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
+      |                                                     ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2467:36: note: in instantiation of variable template specialization 'psio::auto_pssz_width_v<std::optional<Unit>>' requested here
+ 2467 |          constexpr std::size_t W = auto_pssz_width_v<T>;
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:61:20: note: in instantiation of function template specialization 'psio::tag_invoke<std::optional<Unit>>' requested here
+   61 |             return tag_invoke(*this, fmt, v);
+      |                    ^
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:1:
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2309:22: error: constexpr variable 'm' must be initialized by a constant expression
+ 2309 |       constexpr auto m = [] {
+      |                      ^   ~~~~
+ 2310 |          if constexpr (::psio::max_dynamic_data_v<T>.has_value())
+      |          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2311 |             return ::psio::max_dynamic_data_v<T>;
+      |             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2312 |          else return ::psio::max_encoded_size<T>();
+      |          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2313 |       }();
+      |       ~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2330:53: note: in instantiation of function template specialization 'psio::auto_pssz_width<std::optional<Unit>>' requested here
+ 2330 |    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
+      |                                                     ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2467:36: note: in instantiation of variable template specialization 'psio::auto_pssz_width_v<std::optional<Unit>>' requested here
+ 2467 |          constexpr std::size_t W = auto_pssz_width_v<T>;
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:61:20: note: in instantiation of function template specialization 'psio::tag_invoke<std::optional<Unit>>' requested here
+   61 |             return tag_invoke(*this, fmt, v);
+      |                    ^
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:1:
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2314:21: error: constexpr if condition is not a constant expression
+ 2314 |       if constexpr (m.has_value())
+      |                     ^~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2314:23: note: initializer of 'm' is not a constant expression
+ 2314 |       if constexpr (m.has_value())
+      |                       ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2309:22: note: declared here
+ 2309 |       constexpr auto m = [] {
+      |                      ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2316:24: error: constexpr if condition is not a constant expression
+ 2316 |          if constexpr (*m <= 0xFFu)
+      |                        ^~~~~~~~~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2316:24: note: initializer of 'm' is not a constant expression
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2309:22: note: declared here
+ 2309 |       constexpr auto m = [] {
+      |                      ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2318:29: error: constexpr if condition is not a constant expression
+ 2318 |          else if constexpr (*m <= 0xFFFFu)
+      |                             ^~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2318:29: note: initializer of 'm' is not a constant expression
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2309:22: note: declared here
+ 2309 |       constexpr auto m = [] {
+      |                      ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2330:33: error: constexpr variable 'auto_pssz_width_v<std::optional<Unit>>' must be initialized by a constant expression
+ 2330 |    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
+      |                                 ^                   ~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2467:36: note: in instantiation of variable template specialization 'psio::auto_pssz_width_v<std::optional<Unit>>' requested here
+ 2467 |          constexpr std::size_t W = auto_pssz_width_v<T>;
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:61:20: note: in instantiation of function template specialization 'psio::tag_invoke<std::optional<Unit>>' requested here
+   61 |             return tag_invoke(*this, fmt, v);
+      |                    ^
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp:1:
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2330:53: error: call to consteval function 'psio::auto_pssz_width<std::optional<Unit>>' is not a constant expression
+ 2330 |    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
+      |                                                     ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2467:32: error: constexpr variable 'W' must be initialized by a constant expression
+ 2467 |          constexpr std::size_t W = auto_pssz_width_v<T>;
+      |                                ^   ~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:61:20: note: in instantiation of function template specialization 'psio::tag_invoke<std::optional<Unit>>' requested here
+   61 |             return tag_invoke(*this, fmt, v);
+      |                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2467:36: note: initializer of 'auto_pssz_width_v<std::optional<Unit>>' is not a constant expression
+ 2467 |          constexpr std::size_t W = auto_pssz_width_v<T>;
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2330:33: note: declared here
+ 2330 |    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
+      |                                 ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2468:36: error: no matching function for call to 'size_of_v'
+ 2468 |          const std::size_t total = detail::pssz_impl::size_of_v<W, true>(v);
+      |                                    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:604:19: note: candidate template ignored: invalid explicitly-specified argument for template parameter 'LegacyW'
+  604 |       std::size_t size_of_v(const T& value)
+      |                   ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2480:32: error: constexpr variable 'W' must be initialized by a constant expression
+ 2480 |          constexpr std::size_t W = auto_pssz_width_v<T>;
+      |                                ^   ~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:74:20: note: in instantiation of function template specialization 'psio::tag_invoke<std::optional<Unit>>' requested here
+   74 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2480:36: note: initializer of 'auto_pssz_width_v<std::optional<Unit>>' is not a constant expression
+ 2480 |          constexpr std::size_t W = auto_pssz_width_v<T>;
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2330:33: note: declared here
+ 2330 |    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
+      |                                 ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2481:17: error: no matching function for call to 'decode_value'
+ 2481 |          return detail::pssz_impl::decode_value<W, true, T>(bytes, 0, bytes.size());
+      |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1271:9: note: candidate template ignored: invalid explicitly-specified argument for template parameter 'LegacyW'
+ 1271 |       T decode_value(std::span<const char> src, std::size_t pos,
+      |         ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated.

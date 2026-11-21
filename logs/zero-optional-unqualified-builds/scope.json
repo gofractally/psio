@@ -1,0 +1,3 @@
+{
+  "scope": "Intermediate setup/prototype build output only. First source-generation attempt placed the new runtime span check inside the width-selection constexpr lambda; corrected before final qualification. Final exact sources are hashed in zero-optional final results."
+}

@@ -1,0 +1,8 @@
+[1/8] Building CXX object cpp/CMakeFiles/psio.dir/src/stub.cpp.o
+[2/8] Linking CXX static library cpp/libpsio.a
+[3/8] Building CXX object cpp/tests/CMakeFiles/psio_pssz_type_width_tests.dir/pssz_type_width_tests.cpp.o
+[4/8] Building CXX object cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/pssz_zero_tests.cpp.o
+[5/8] Building CXX object cpp/tests/CMakeFiles/psio_pssz_type_width_tests.dir/main.cpp.o
+[6/8] Linking CXX executable cpp/tests/psio_pssz_type_width_tests
+[7/8] Building CXX object cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/main.cpp.o
+[8/8] Linking CXX executable cpp/tests/psio_pssz_zero_tests

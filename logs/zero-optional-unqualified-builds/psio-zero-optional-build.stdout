@@ -1,0 +1,514 @@
+[1/13] Building CXX object cpp/CMakeFiles/psio.dir/src/stub.cpp.o
+[2/13] Linking CXX static library cpp/libpsio.a
+[3/13] Building CXX object cpp/tests/CMakeFiles/psio_pssz_tests.dir/pssz_tests.cpp.o
+FAILED: [code=1] cpp/tests/CMakeFiles/psio_pssz_tests.dir/pssz_tests.cpp.o 
+/opt/homebrew/opt/llvm/bin/clang++ -DPSIO_EXCEPTIONS_ENABLED=1 -DPSIO_HAVE_SIMDJSON=1 -DSIMDJSON_DEVELOPMENT_CHECKS -DSIMDJSON_THREADS_ENABLED=1 -I/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2 -I/Users/dlarimer/psio-psibase-zero-payload/cpp/include -I/Users/dlarimer/psio-psibase-zero-payload/cpp/external/xxhash -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -Werror=unused-result -MD -MT cpp/tests/CMakeFiles/psio_pssz_tests.dir/pssz_tests.cpp.o -MF cpp/tests/CMakeFiles/psio_pssz_tests.dir/pssz_tests.cpp.o.d -o cpp/tests/CMakeFiles/psio_pssz_tests.dir/pssz_tests.cpp.o -c /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_tests.cpp
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_tests.cpp:9:
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:966:52: error: variable 'src' cannot be implicitly captured in a lambda with no capture-default specified
+  966 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:962:46: note: 'src' declared here
+  962 |       void decode_into(std::span<const char> src, std::size_t pos,
+      |                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:36: note: lambda expression begins here
+  965 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: capture 'src' by value
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: capture 'src' by reference
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: default capture by value
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: default capture by reference
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:966:57: error: variable 'pos' cannot be implicitly captured in a lambda with no capture-default specified
+  966 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:962:63: note: 'pos' declared here
+  962 |       void decode_into(std::span<const char> src, std::size_t pos,
+      |                                                               ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:36: note: lambda expression begins here
+  965 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: capture 'pos' by value
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: capture 'pos' by reference
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: default capture by value
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: default capture by reference
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:966:62: error: variable 'end' cannot be implicitly captured in a lambda with no capture-default specified
+  966 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:963:36: note: 'end' declared here
+  963 |                        std::size_t end, T& out)
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:36: note: lambda expression begins here
+  965 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: capture 'end' by value
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: capture 'end' by reference
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: default capture by value
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:965:37: note: default capture by reference
+  965 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1174:52: error: variable 'src' cannot be implicitly captured in a lambda with no capture-default specified
+ 1174 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1169:53: note: 'src' declared here
+ 1169 |       void record_decode_into(std::span<const char> src, std::size_t pos,
+      |                                                     ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:36: note: lambda expression begins here
+ 1173 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: capture 'src' by value
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: capture 'src' by reference
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: default capture by value
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: default capture by reference
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1174:57: error: variable 'pos' cannot be implicitly captured in a lambda with no capture-default specified
+ 1174 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1169:70: note: 'pos' declared here
+ 1169 |       void record_decode_into(std::span<const char> src, std::size_t pos,
+      |                                                                      ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:36: note: lambda expression begins here
+ 1173 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: capture 'pos' by value
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: capture 'pos' by reference
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: default capture by value
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: default capture by reference
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1174:62: error: variable 'end' cannot be implicitly captured in a lambda with no capture-default specified
+ 1174 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1170:43: note: 'end' declared here
+ 1170 |                               std::size_t end, T& out,
+      |                                           ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:36: note: lambda expression begins here
+ 1173 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: capture 'end' by value
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: capture 'end' by reference
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: default capture by value
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1173:37: note: default capture by reference
+ 1173 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1296:52: error: variable 'src' cannot be implicitly captured in a lambda with no capture-default specified
+ 1296 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1292:44: note: 'src' declared here
+ 1292 |       T decode_value(std::span<const char> src, std::size_t pos,
+      |                                            ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:36: note: lambda expression begins here
+ 1295 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: capture 'src' by value
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: capture 'src' by reference
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: default capture by value
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: default capture by reference
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1296:57: error: variable 'pos' cannot be implicitly captured in a lambda with no capture-default specified
+ 1296 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1292:61: note: 'pos' declared here
+ 1292 |       T decode_value(std::span<const char> src, std::size_t pos,
+      |                                                             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:36: note: lambda expression begins here
+ 1295 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: capture 'pos' by value
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: capture 'pos' by reference
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: default capture by value
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: default capture by reference
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1296:62: error: variable 'end' cannot be implicitly captured in a lambda with no capture-default specified
+ 1296 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1293:34: note: 'end' declared here
+ 1293 |                      std::size_t end)
+      |                                  ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:36: note: lambda expression begins here
+ 1295 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: capture 'end' by value
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: capture 'end' by reference
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: default capture by value
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1295:37: note: default capture by reference
+ 1295 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2031:52: error: variable 'src' cannot be implicitly captured in a lambda with no capture-default specified
+ 2031 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2027:58: note: 'src' declared here
+ 2027 |       void validate_or_throw_value(std::span<const char> src,
+      |                                                          ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:36: note: lambda expression begins here
+ 2030 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: capture 'src' by value
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: capture 'src' by reference
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: default capture by value
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: default capture by reference
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2031:57: error: variable 'pos' cannot be implicitly captured in a lambda with no capture-default specified
+ 2031 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2028:48: note: 'pos' declared here
+ 2028 |                                    std::size_t pos, std::size_t end)
+      |                                                ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:36: note: lambda expression begins here
+ 2030 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: capture 'pos' by value
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: capture 'pos' by reference
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: default capture by value
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: default capture by reference
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2031:62: error: variable 'end' cannot be implicitly captured in a lambda with no capture-default specified
+ 2031 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2028:65: note: 'end' declared here
+ 2028 |                                    std::size_t pos, std::size_t end)
+      |                                                                 ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:36: note: lambda expression begins here
+ 2030 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: capture 'end' by value
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: capture 'end' by reference
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: default capture by value
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2030:37: note: default capture by reference
+ 2030 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2168:52: error: variable 'src' cannot be implicitly captured in a lambda with no capture-default specified
+ 2168 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2163:57: note: 'src' declared here
+ 2163 |       codec_status validate_value(std::span<const char> src, std::size_t pos,
+      |                                                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:36: note: lambda expression begins here
+ 2167 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'src' by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'src' by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2168:57: error: variable 'pos' cannot be implicitly captured in a lambda with no capture-default specified
+ 2168 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2163:74: note: 'pos' declared here
+ 2163 |       codec_status validate_value(std::span<const char> src, std::size_t pos,
+      |                                                                          ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:36: note: lambda expression begins here
+ 2167 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'pos' by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'pos' by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2168:62: error: variable 'end' cannot be implicitly captured in a lambda with no capture-default specified
+ 2168 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2164:47: note: 'end' declared here
+ 2164 |                                   std::size_t end,
+      |                                               ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:36: note: lambda expression begins here
+ 2167 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'end' by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'end' by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2168:52: error: variable 'src' cannot be implicitly captured in a lambda with no capture-default specified
+ 2168 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:39: note: while substituting into a lambda expression here
+ 2167 |          constexpr std::size_t W = [] {
+      |                                       ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2422:36: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_value<1UL, false, PssEmpty>' requested here
+ 2422 |          return detail::pssz_impl::validate_value<W, false, T>(bytes, 0,
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/cpo.hpp:103:20: note: in instantiation of function template specialization 'psio::tag_invoke<PssEmpty>' requested here
+  103 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_tests.cpp:26:1: note: in instantiation of function template specialization '____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____0<psio::pssz_<1>>' requested here
+   26 | TEMPLATE_TEST_CASE("pssz encodes actual zero-field records across widths",
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:125: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                                                                                                             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:386:56: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME_LINE2'
+  386 | #define INTERNAL_CATCH_UNIQUE_NAME_LINE2( name, line ) name##line
+      |                                                        ^
+<scratch space>:212:1: note: expanded from here
+  212 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____0
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:922:78: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  922 |                     (void)expander{(Catch::AutoReg( Catch::makeTestInvoker( &TestFunc<Types> ), CATCH_INTERNAL_LINEINFO, Catch::StringRef(), Catch::NameAndTags{ names, Tags } ), 0)... };/* NOLINT */ \
+      |                                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_tests.cpp:26:1: note: in instantiation of function template specialization '(anonymous namespace)::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____1<psio::pssz_<1>, psio::pssz_<2>, psio::pssz_<4>>::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____1<const char *, const char *, const char *>' requested here
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:46: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 2 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+<scratch space>:214:1: note: expanded from here
+  214 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____1
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:925:55: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  925 |             INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE(TestName, Name, __VA_ARGS__) \
+      |                                                       ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:947:13: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE'
+  947 |             TestName<CATCH_REC_LIST(INTERNAL_CATCH_REMOVE_PARENS, __VA_ARGS__)>(CATCH_REC_LIST_UD(INTERNAL_CATCH_TEMPLATE_UNIQUE_NAME,Name, __VA_ARGS__));\
+      |             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2163:57: note: 'src' declared here
+ 2163 |       codec_status validate_value(std::span<const char> src, std::size_t pos,
+      |                                                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:36: note: lambda expression begins here
+ 2167 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'src' by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'src' by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &src
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2168:57: error: variable 'pos' cannot be implicitly captured in a lambda with no capture-default specified
+ 2168 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                         ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2163:74: note: 'pos' declared here
+ 2163 |       codec_status validate_value(std::span<const char> src, std::size_t pos,
+      |                                                                          ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:36: note: lambda expression begins here
+ 2167 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'pos' by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'pos' by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &pos
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2168:62: error: variable 'end' cannot be implicitly captured in a lambda with no capture-default specified
+ 2168 |             if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+      |                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2164:47: note: 'end' declared here
+ 2164 |                                   std::size_t end,
+      |                                               ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:36: note: lambda expression begins here
+ 2167 |          constexpr std::size_t W = [] {
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'end' by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: capture 'end' by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &end
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by value
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     =
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2167:37: note: default capture by reference
+ 2167 |          constexpr std::size_t W = [] {
+      |                                     ^
+      |                                     &
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2171:18: error: return type 'unsigned long' must match previous return type 'codec_status' when lambda expression has unspecified explicit return type
+ 2171 |             else return LegacyW;
+      |                  ^
+fatal error: too many errors emitted, stopping now [-ferror-limit=]
+20 errors generated.
+[4/13] Building CXX object cpp/tests/CMakeFiles/psio_pssz_tests.dir/main.cpp.o
+ninja: build stopped: subcommand failed.

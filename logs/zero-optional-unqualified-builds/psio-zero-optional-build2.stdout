@@ -1,0 +1,10 @@
+[1/10] Building CXX object cpp/tests/CMakeFiles/psio_pssz_tests.dir/pssz_tests.cpp.o
+[2/10] Building CXX object cpp/tests/CMakeFiles/psio_pssz_type_width_tests.dir/pssz_type_width_tests.cpp.o
+[3/10] Building CXX object cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/pssz_zero_tests.cpp.o
+[4/10] Building CXX object cpp/tests/CMakeFiles/psio_pssz_type_width_tests.dir/main.cpp.o
+[5/10] Building CXX object cpp/tests/CMakeFiles/psio_empty_action_consumer.dir/empty_action_consumer.cpp.o
+[6/10] Linking CXX executable cpp/tests/psio_pssz_tests
+[7/10] Linking CXX executable cpp/tests/psio_pssz_type_width_tests
+[8/10] Linking CXX executable cpp/tests/psio_empty_action_consumer
+[9/10] Building CXX object cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/main.cpp.o
+[10/10] Linking CXX executable cpp/tests/psio_pssz_zero_tests

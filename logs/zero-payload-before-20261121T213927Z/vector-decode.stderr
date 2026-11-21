@@ -1,0 +1,2 @@
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1074:49: runtime error: division by zero
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1074:49 

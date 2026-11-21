@@ -332,6 +332,23 @@ namespace psio {
          }
       }
 
+      // A fixed payload of zero bytes cannot distinguish None from Some by
+      // length. Use the existing optional selector in that case as well.
+      template <typename T>
+      inline constexpr bool is_zero_fixed_v = is_fixed_v<T> && fixed_size_of<T>() == 0;
+      template <typename T>
+      inline constexpr bool optional_uses_selector_v = !is_fixed_v<T> || is_zero_fixed_v<T>;
+
+      template <typename T>
+      codec_status check_zero_fixed_span(std::span<const char> src, std::size_t pos,
+                                         std::size_t end) noexcept
+      {
+         if constexpr (is_zero_fixed_v<T>)
+            if (pos != end || end > src.size())
+               return codec_fail("pssz: zero-size fixed payload must be empty", 0, "pssz");
+         return codec_ok();
+      }
+
       // ── std-container trait helpers ───────────────────────────────────────
       template <typename T>
       struct is_std_array : std::false_type
@@ -523,9 +540,9 @@ namespace psio {
          else if constexpr (is_std_optional_v<T>)
          {
             using V = typename T::value_type;
-            // fixed V: no Union selector (length disambiguates).
-            // variable V: 1-byte selector + payload.
-            if constexpr (is_fixed_v<V>)
+            // Nonzero fixed V needs no selector; zero-size or variable V
+            // uses the existing 1-byte selector plus its payload.
+            if constexpr (!optional_uses_selector_v<V>)
                return v.has_value() ? size_of_v<W, Auto>(*v) : 0;
             else
                return checked_add(1, v.has_value() ? size_of_v<W, Auto>(*v) : 0);
@@ -728,11 +745,11 @@ namespace psio {
          {
             using V = typename T::value_type;
             // pSSZ optional selector rule (matches v1):
-            //   min_encoded_size(V) > 0 (fixed-size V) → no selector;
+            //   Nonzero fixed-size V → no selector;
             //     the byte-span length (0 vs fixed_size) disambiguates.
-            //   min_encoded_size(V) == 0 (variable V)  → 1-byte Union
+            //   Zero-size fixed or variable V → 1-byte Union
             //     selector (0x00 = None, 0x01 + payload = Some).
-            if constexpr (is_fixed_v<V>)
+            if constexpr (!optional_uses_selector_v<V>)
             {
                if (v.has_value())
                   encode_value<W, Auto>(*v, s);
@@ -949,6 +966,8 @@ namespace psio {
             if constexpr (Auto) return ::psio::auto_pssz_width<T>();
             else return LegacyW;
          }();
+         if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+            throw codec_exception{st.error()};
          if constexpr (Auto)
          {
             if (pos > end || end > src.size())
@@ -1155,6 +1174,8 @@ namespace psio {
             if constexpr (Auto) return ::psio::auto_pssz_width<T>();
             else return LegacyW;
          }();
+         if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+            throw codec_exception{st.error()};
          if constexpr (Auto)
          {
             if (pos > end || end > src.size()) size_failure("pssz: value span out of bounds");
@@ -1275,6 +1296,8 @@ namespace psio {
             if constexpr (Auto) return ::psio::auto_pssz_width<T>();
             else return LegacyW;
          }();
+         if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+            throw codec_exception{st.error()};
          if constexpr (Auto)
          {
             if (pos > end || end > src.size())
@@ -1325,7 +1348,7 @@ namespace psio {
          else if constexpr (is_std_optional_v<T>)
          {
             using V = typename T::value_type;
-            if constexpr (is_fixed_v<V>)
+            if constexpr (!optional_uses_selector_v<V>)
             {
                // No selector: length alone disambiguates (0 vs fixed size).
                if (pos >= end)
@@ -1334,6 +1357,12 @@ namespace psio {
             }
             else
             {
+               if constexpr (is_zero_fixed_v<V>)
+               {
+                  if (pos > end || end > src.size() || end - pos != 1 ||
+                      (src[pos] != 0 && src[pos] != 1))
+                     size_failure("pssz: zero-size optional requires one valid selector");
+               }
                // 1-byte Union selector at pos: 0x00 = None, 0x01 = Some.
                if (pos >= end)
                   return std::optional<V>{};
@@ -2002,6 +2031,8 @@ namespace psio {
             if constexpr (Auto) return ::psio::auto_pssz_width<T>();
             else return LegacyW;
          }();
+         if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+            throw codec_exception{st.error()};
          if constexpr (Auto)
          {
             if (pos > end || end > src.size())
@@ -2064,7 +2095,7 @@ namespace psio {
             if (pos > end || end > src.size()) [[unlikely]]
                pssz_throw_fail("pssz: optional span out of bounds",
                                static_cast<std::uint32_t>(pos));
-            if constexpr (is_fixed_v<V>)
+            if constexpr (!optional_uses_selector_v<V>)
             {
                const std::size_t span = end - pos;
                if (span == 0) return;
@@ -2137,6 +2168,8 @@ namespace psio {
             if constexpr (Auto) return ::psio::auto_pssz_width<T>();
             else return LegacyW;
          }();
+         if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
+            return st;
          if constexpr (Auto)
          {
             if (pos > end || end > src.size())
@@ -2209,7 +2242,7 @@ namespace psio {
             if (pos > end || end > src.size())
                return codec_fail("pssz: optional span out of bounds",
                                  static_cast<std::uint32_t>(pos), "pssz");
-            if constexpr (is_fixed_v<V>)
+            if constexpr (!optional_uses_selector_v<V>)
             {
                // pSSZ optional<fixed V>: span is 0 (None) or
                // fixed_size_of<V> (Some).
