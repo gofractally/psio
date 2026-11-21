@@ -68,7 +68,7 @@ ir_record!(UseRef {
     package: String,
     interface_name: String
 });
-ir_record!(Interface { name: String, r#typenames: Vec<String>, funcs: Vec<Func>, attributes: Vec<Attribute> });
+ir_record!(Interface { name: String, type_names: Vec<String>, funcs: Vec<Func>, attributes: Vec<Attribute> });
 ir_record!(World { name: String, imports: Vec<UseRef>, exports: Vec<String>, attributes: Vec<Attribute> });
 ir_record!(Schema { package: Package, interfaces: Vec<Interface>, worlds: Vec<World>, uses: Vec<Use>, types: Vec<Member> });
 

@@ -123,3 +123,168 @@ fn schema_alias_resolution_rejects_cycles_and_unknown_names() {
     assert!(schema.resolve(&schema.types[0].r#type).is_err());
     assert!(schema.resolve(&AnyType::named("missing")).is_err());
 }
+
+fn integer(bits: u32) -> AnyType {
+    AnyType::new(AnyValue::Int(Int {
+        bits,
+        isSigned: false,
+    }))
+}
+fn member(name: &str) -> Member {
+    Member {
+        name: name.into(),
+        r#type: Box::new(integer(32)),
+        attributes: vec![Attribute {
+            name: "visible".into(),
+            value: None,
+        }],
+    }
+}
+fn ir_sample(name: &str) -> AnyType {
+    AnyType::new(match name {
+        "Struct" => AnyValue::Struct(Struct {
+            members: vec![member("x")],
+            attributes: vec![Attribute {
+                name: "definitionWillNotChange".into(),
+                value: Some("".into()),
+            }],
+        }),
+        "Object" => AnyValue::Object(Object {
+            members: vec![member("x")],
+            attributes: vec![Attribute {
+                name: "doc".into(),
+                value: Some("example".into()),
+            }],
+        }),
+        "Array" => AnyValue::Array(Array {
+            r#type: Box::new(integer(8)),
+            len: 3,
+        }),
+        "List" => AnyValue::List(List {
+            r#type: Box::new(integer(32)),
+        }),
+        "BoundedList" => AnyValue::BoundedList(psio::pssz::schema_ir::BoundedList {
+            r#type: Box::new(integer(16)),
+            maxCount: 3,
+        }),
+        "Option" => AnyValue::Option(Optional {
+            r#type: Box::new(integer(64)),
+        }),
+        "Variant" => AnyValue::Variant(Variant {
+            members: vec![member("Left"), member("Right")],
+            attributes: vec![],
+        }),
+        "Tuple" => AnyValue::Tuple(Tuple {
+            members: vec![Box::new(integer(16)), Box::new(integer(32))],
+        }),
+        "Int" => return integer(32),
+        "Float" => AnyValue::Float(Float {
+            exp: 8,
+            mantissa: 24,
+        }),
+        "FracPack" => AnyValue::FracPack(FracPack {
+            r#type: Box::new(integer(8)),
+        }),
+        "Custom" => AnyValue::Custom(Custom {
+            r#type: Box::new(integer(64)),
+            id: "account".into(),
+        }),
+        "Resource" => AnyValue::Resource(Resource {
+            name: "handle".into(),
+            methods: vec![Func {
+                name: "run".into(),
+                params: vec![member("value")],
+                result: None,
+                attributes: vec![],
+            }],
+            attributes: vec![Attribute {
+                name: "capability".into(),
+                value: None,
+            }],
+        }),
+        "Type" => AnyValue::Type(Type {
+            r#type: "named".into(),
+        }),
+        other => panic!("unknown actual C++ IR fixture {other}"),
+    })
+}
+fn schema_sample() -> Schema {
+    Schema {
+        package: Package {
+            name: "abi".into(),
+            version: "1".into(),
+            attributes: vec![Attribute {
+                name: "stable".into(),
+                value: None,
+            }],
+        },
+        interfaces: vec![Interface {
+            name: "api".into(),
+            type_names: vec!["named".into()],
+            funcs: vec![Func {
+                name: "zero".into(),
+                params: vec![],
+                result: None,
+                attributes: vec![],
+            }],
+            attributes: vec![],
+        }],
+        worlds: vec![World {
+            name: "world".into(),
+            imports: vec![UseRef {
+                package: "base".into(),
+                interface_name: "common".into(),
+            }],
+            exports: vec!["api".into()],
+            attributes: vec![],
+        }],
+        uses: vec![Use {
+            package: "base".into(),
+            interface_name: "common".into(),
+            version: "1".into(),
+            items: vec![UseItem {
+                name: "type".into(),
+                alias: Some("alias".into()),
+            }],
+        }],
+        types: vec![Member {
+            name: "named".into(),
+            r#type: Box::new(AnyType::new(AnyValue::Object(Object {
+                members: vec![member("x")],
+                attributes: vec![],
+            }))),
+            attributes: vec![Attribute {
+                name: "doc".into(),
+                value: Some("named type".into()),
+            }],
+        }],
+    }
+}
+
+#[test]
+fn literal_cpp_ir_alternatives_and_envelope_match_bytes_in_both_directions() {
+    let mut rows = 0;
+    for line in include_str!("fixtures/pssz-schema-ir-golden.jsonl").lines() {
+        let row: serde_json::Value = serde_json::from_str(line).unwrap();
+        let bytes = hex::decode(row["hex"].as_str().unwrap()).unwrap();
+        let name = row["name"].as_str().unwrap();
+        if name == "Schema" {
+            let value = schema_sample();
+            let json = serde_json::to_value(&value).unwrap();
+            assert!(json["interfaces"][0].get("type_names").is_some());
+            assert!(json["interfaces"][0].get("typenames").is_none());
+            assert_eq!(try_to_pssz::<Pssz32, _>(&value).unwrap(), bytes);
+            assert_eq!(from_pssz::<Pssz32, Schema>(&bytes).unwrap(), value);
+        } else {
+            let value = ir_sample(name);
+            assert_eq!(
+                try_to_pssz::<Pssz32, _>(&value).unwrap(),
+                bytes,
+                "IR alternative {name}"
+            );
+            assert_eq!(from_pssz::<Pssz32, AnyType>(&bytes).unwrap(), value);
+        }
+        rows += 1;
+    }
+    assert_eq!(rows, 15);
+}
