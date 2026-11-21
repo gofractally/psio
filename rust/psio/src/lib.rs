@@ -68,6 +68,8 @@ pub mod pjson_json;
 pub mod pssz;
 #[doc(hidden)]
 pub mod pssz_checked;
+#[doc(hidden)]
+pub mod pssz_bits;
 pub mod pssz_schema_ir;
 pub mod pssz_dynamic;
 pub mod pssz_upgrade;

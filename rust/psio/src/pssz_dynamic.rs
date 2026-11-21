@@ -17,6 +17,7 @@ pub enum Value {
     Float64(f64),
     String(String),
     Bytes(Vec<u8>),
+    Bits { bytes: Vec<u8>, bit_count: u64 },
     Sequence(Vec<Value>),
     Record(Vec<(String, Value)>),
     Optional(Option<Box<Value>>),
@@ -103,6 +104,9 @@ fn metadata(schema: &Schema, root: &AnyType) -> PsszResult<()> {
                     "string" | "hex" => {
                         byte_container(schema, &c.r#type)?;
                     }
+                    "bitvector" | "bitlist" => {
+                        bit_shape(schema, c)?;
+                    }
                     _ => return Err(failure("pssz dynamic: unsupported custom adapter")),
                 }
                 pending.push(&c.r#type);
@@ -145,6 +149,23 @@ fn unsigned_adapter(schema: &Schema, ty: &AnyType, bits: u32) -> PsszResult<()> 
             "pssz dynamic: primitive adapter has incompatible inner schema",
         ))
     }
+}
+fn bit_shape(schema: &Schema, custom: &crate::pssz_schema_ir::Custom) -> PsszResult<(usize, bool)> {
+    let (element, count, list) = match (&custom.id[..], &schema.resolve(&custom.r#type)?.value) {
+        ("bitvector", AnyValue::Array(a)) => (&a.r#type, a.len, false),
+        ("bitlist", AnyValue::BoundedList(l)) => (&l.r#type, l.maxCount, true),
+        _ => {
+            return Err(failure(
+                "pssz dynamic: packed bit adapter requires bit count metadata",
+            ))
+        }
+    };
+    unsigned_adapter(schema, element, 1)?;
+    Ok((
+        usize::try_from(count)
+            .map_err(|_| failure("pssz dynamic: bit count exceeds platform capacity"))?,
+        list,
+    ))
 }
 
 pub fn layout<F: PsszFormat>(schema: &Schema, ty: &AnyType) -> PsszResult<Layout> {
@@ -201,6 +222,13 @@ fn layout_at<F: PsszFormat>(schema: &Schema, ty: &AnyType, n: usize) -> PsszResu
             unsigned_adapter(schema, &c.r#type, 8)?;
             out.fixed = true;
             out.size = 1;
+        }
+        AnyValue::Custom(c) if c.id == "bitvector" || c.id == "bitlist" => {
+            let (count, list) = bit_shape(schema, c)?;
+            out.fixed = !list;
+            if !list {
+                out.size = crate::pssz_bits::byte_count(count);
+            }
         }
         AnyValue::Custom(c) if c.id == "string" || c.id == "hex" => {
             return layout_at::<F>(schema, &c.r#type, n + 1)
@@ -276,6 +304,10 @@ fn can_be_empty<F: PsszFormat>(schema: &Schema, ty: &AnyType, n: usize) -> PsszR
         AnyValue::Custom(c) if c.id == "bool" || c.id == "char" => {
             unsigned_adapter(schema, &c.r#type, if c.id == "bool" { 1 } else { 8 })?;
             false
+        }
+        AnyValue::Custom(c) if c.id == "bitvector" || c.id == "bitlist" => {
+            let (count, list) = bit_shape(schema, c)?;
+            !list && count == 0
         }
         _ => return Err(failure("pssz dynamic: unsupported optional inner schema")),
     })
@@ -369,6 +401,22 @@ fn encode_at<F: PsszFormat>(
                 depth(n + 1)?;
             }
             out.extend_from_slice(v);
+        }
+        (AnyValue::Custom(c), Value::Bits { bytes, bit_count })
+            if c.id == "bitvector" || c.id == "bitlist" =>
+        {
+            let (bound, list) = bit_shape(schema, c)?;
+            let count = usize::try_from(*bit_count)
+                .map_err(|_| failure("pssz dynamic: bit count exceeds platform capacity"))?;
+            if list {
+                out = crate::pssz_bits::encode_list(bytes, count, bound)?;
+            } else {
+                if count != bound {
+                    return Err(failure("pssz dynamic: bitvector logical count mismatch"));
+                }
+                crate::pssz_bits::validate_data(bytes, count)?;
+                out.extend_from_slice(bytes);
+            }
         }
         (AnyValue::Option(o), Value::Optional(v)) => {
             if can_be_empty::<F>(schema, &o.r#type, 0)? {
@@ -625,6 +673,22 @@ fn decode_at<F: PsszFormat>(
                 depth(n + 1)?;
             }
             Value::Bytes(bytes.into())
+        }
+        AnyValue::Custom(c) if c.id == "bitvector" || c.id == "bitlist" => {
+            let (count, list) = bit_shape(schema, c)?;
+            if list {
+                let (data, count) = crate::pssz_bits::decode_list(bytes, count)?;
+                Value::Bits {
+                    bytes: data,
+                    bit_count: count as u64,
+                }
+            } else {
+                crate::pssz_bits::validate_data(bytes, count)?;
+                Value::Bits {
+                    bytes: bytes.to_vec(),
+                    bit_count: count as u64,
+                }
+            }
         }
         AnyValue::Option(o) => {
             if can_be_empty::<F>(schema, &o.r#type, 0)? {

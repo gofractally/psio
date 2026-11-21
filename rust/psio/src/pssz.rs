@@ -306,25 +306,30 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F
 pub use crate::ssz::{Bitlist, Bitvector, BoundedBytes, BoundedList, BoundedString};
 
 impl<F: PsszFormat, const N: usize> PsszPack<F> for Bitvector<N> {
-    const MIN_ENCODED_SIZE: usize         = (N + 7) / 8;
-    const MAX_ENCODED_SIZE: Option<usize> = Some((N + 7) / 8);
+    const MIN_ENCODED_SIZE: usize         = crate::pssz_bits::byte_count(N);
+    const MAX_ENCODED_SIZE: Option<usize> = Some(crate::pssz_bits::byte_count(N));
     const IS_FIXED_SIZE:    bool  = true;
-    const FIXED_SIZE:       usize = (N + 7) / 8;
-    fn pssz_size(&self) -> usize { (N + 7) / 8 }
+    const FIXED_SIZE:       usize = crate::pssz_bits::byte_count(N);
+    fn pssz_size(&self) -> usize { crate::pssz_bits::byte_count(N) }
     fn pssz_pack(&self, out: &mut Vec<u8>) { out.extend_from_slice(&self.bytes); }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let _depth=crate::pssz_checked::EncodeDepth::enter()?;
+        crate::pssz_bits::validate_data(&self.bytes,N)?;
+        out.try_reserve(self.bytes.len()).map_err(|_|PsszError("pssz: output allocation overflow"))?;
+        out.extend_from_slice(&self.bytes);Ok(())
+    }
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for Bitvector<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
         let _depth = crate::pssz_checked::DecodeDepth::enter()?;
-        let nb = (N + 7) / 8;
-        if bytes.len() < nb { return Err(PsszError("pssz: bitvector underrun")); }
-        Ok(Bitvector { bytes: bytes[..nb].to_vec() })
+        crate::pssz_bits::validate_data(bytes,N)?;
+        Ok(Bitvector { bytes: bytes.to_vec() })
     }
 }
 
 impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
     const MIN_ENCODED_SIZE: usize         = 1;  // always ≥ delimiter byte
-    const MAX_ENCODED_SIZE: Option<usize> = Some(1 + (MAX_N + 7) / 8);
+    const MAX_ENCODED_SIZE: Option<usize> = Some(MAX_N / 8 + 1);
     const IS_FIXED_SIZE:    bool  = false;
     const FIXED_SIZE:       usize = 0;
     fn pssz_size(&self) -> usize { (self.bits.len() / 8) + 1 }
@@ -332,10 +337,20 @@ impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
         use crate::ssz::SszPack;
         <Self as SszPack>::ssz_pack(self, out);  // wire-identical
     }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let _depth=crate::pssz_checked::EncodeDepth::enter()?;
+        if self.bits.len()>MAX_N {return Err(PsszError("pssz: bitlist count exceeds bound"));}
+        let mut bytes=Vec::new();
+        bytes.try_reserve(self.bits.len()/8+1).map_err(|_|PsszError("pssz: bitlist allocation overflow"))?;
+        <Self as PsszPack<F>>::pssz_pack(self,&mut bytes);
+        out.try_reserve(bytes.len()).map_err(|_|PsszError("pssz: output allocation overflow"))?;
+        out.extend_from_slice(&bytes);Ok(())
+    }
 }
 impl<F: PsszFormat, const MAX_N: usize> PsszUnpack<F> for Bitlist<MAX_N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
         let _depth = crate::pssz_checked::DecodeDepth::enter()?;
+        crate::pssz_bits::list_count(bytes,MAX_N)?;
         use crate::ssz::SszUnpack;
         <Self as SszUnpack>::ssz_unpack(bytes).map_err(|e| PsszError(e.0))
     }
@@ -787,14 +802,13 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitvector<N> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
         let _depth = crate::pssz_checked::DecodeDepth::enter()?;
-        if bytes.len() != N.saturating_add(7) / 8 { return Err(PsszError("pssz validate: bitvector span mismatch")); }
-        <Self as crate::ssz::SszValidate>::ssz_validate(bytes).map_err(|_| PsszError("pssz validate: invalid bitvector"))
+        crate::pssz_bits::validate_data(bytes,N)
     }
 }
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitlist<N> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
         let _depth = crate::pssz_checked::DecodeDepth::enter()?;
-        <Self as crate::ssz::SszValidate>::ssz_validate(bytes).map_err(|_| PsszError("pssz validate: invalid bitlist"))
+        crate::pssz_bits::list_count(bytes,N).map(|_|())
     }
 }
 

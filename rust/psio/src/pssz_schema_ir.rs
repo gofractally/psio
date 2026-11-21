@@ -311,6 +311,34 @@ impl<const N: usize> ToPsszSchema for crate::pssz::BoundedString<N> {
         })))
     }
 }
+impl<const N: usize> ToPsszSchema for crate::pssz::Bitvector<N> {
+    fn build_schema(_: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Ok(AnyType::new(AnyValue::Custom(Custom {
+            r#type: Box::new(AnyType::new(AnyValue::Array(Array {
+                r#type: Box::new(AnyType::new(AnyValue::Int(Int {
+                    bits: 1,
+                    isSigned: false,
+                }))),
+                len: N as u64,
+            }))),
+            id: "bitvector".into(),
+        })))
+    }
+}
+impl<const N: usize> ToPsszSchema for crate::pssz::Bitlist<N> {
+    fn build_schema(_: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Ok(AnyType::new(AnyValue::Custom(Custom {
+            r#type: Box::new(AnyType::new(AnyValue::BoundedList(BoundedList {
+                r#type: Box::new(AnyType::new(AnyValue::Int(Int {
+                    bits: 1,
+                    isSigned: false,
+                }))),
+                maxCount: N as u64,
+            }))),
+            id: "bitlist".into(),
+        })))
+    }
+}
 macro_rules! schema_tuple {
     ($($ty:ident),*) => {
         impl<$($ty: ToPsszSchema),*> ToPsszSchema for ($($ty,)*) {
