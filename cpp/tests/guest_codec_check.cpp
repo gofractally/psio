@@ -46,6 +46,8 @@ PSIO_REFLECT(GuestNestedGuard, value)
 struct GuestCapped { std::string label; };
 PSIO_REFLECT(GuestCapped, label)
 PSIO_TYPE_ATTRS(GuestCapped, psio::max_dynamic_data_spec{.value=16})
+struct GuestZero { std::array<std::uint8_t, 0> bytes; };
+PSIO_REFLECT(GuestZero, bytes, definitionWillNotChange())
 
 using psio::detail::vstrict::can_validate_without_materialization;
 static_assert(can_validate_without_materialization<GuestPlain>());
@@ -77,6 +79,16 @@ template<class Fmt> bool check(Fmt fmt, const char* name) {
         !psio::validate_strict<GuestPlain>(fmt,bytes).ok()) return fail(__LINE__);
     const auto decoded=psio::decode<GuestPlain>(fmt,bytes);
     if (decoded.id!=7 || decoded.label!="hi") return fail(__LINE__);
+    if constexpr (!std::is_same_v<Fmt, psio::frac32>) {
+        const auto some=psio::encode(fmt,std::optional<GuestZero>{GuestZero{}});
+        const auto none=psio::encode(fmt,std::optional<GuestZero>{});
+        if(some!=std::vector<char>{1} || none!=std::vector<char>{0} ||
+           !psio::validate<std::optional<GuestZero>>(fmt,some).ok() ||
+           !psio::decode<std::optional<GuestZero>>(fmt,some).has_value() ||
+           psio::decode<std::optional<GuestZero>>(fmt,none).has_value()) return fail(__LINE__);
+        const std::array<char,1> junk{0};
+        if(psio::validate<GuestZero>(fmt,junk).ok()) return fail(__LINE__);
+    }
     auto bad=bytes;std::fill(bad.begin()+4,bad.end(),static_cast<char>(0xff));
     if (psio::validate<GuestPlain>(fmt,bad).ok() || psio::validate_strict<GuestPlain>(fmt,bad).ok()) return fail(__LINE__);
     const auto utf8=psio::encode(fmt,GuestUtf8{"hi"});

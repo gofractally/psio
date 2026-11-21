@@ -983,7 +983,7 @@ namespace psio {
             else return LegacyW;
          }();
          if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
-            throw codec_exception{st.error()};
+            size_failure("pssz: zero-size fixed payload must be empty");
          if constexpr (Auto)
          {
             if (pos > end || end > src.size())
@@ -1195,7 +1195,7 @@ namespace psio {
             else return LegacyW;
          }();
          if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
-            throw codec_exception{st.error()};
+            size_failure("pssz: zero-size fixed payload must be empty");
          if constexpr (Auto)
          {
             if (pos > end || end > src.size()) size_failure("pssz: value span out of bounds");
@@ -1317,7 +1317,7 @@ namespace psio {
             else return LegacyW;
          }();
          if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
-            throw codec_exception{st.error()};
+            size_failure("pssz: zero-size fixed payload must be empty");
          if constexpr (Auto)
          {
             if (pos > end || end > src.size())
@@ -2067,7 +2067,7 @@ namespace psio {
             else return LegacyW;
          }();
          if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
-            throw codec_exception{st.error()};
+            size_failure("pssz: zero-size fixed payload must be empty");
          if constexpr (Auto)
          {
             if (pos > end || end > src.size())
