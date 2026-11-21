@@ -157,6 +157,15 @@ psio_add_test(psio_schema_ir_tests schema_ir_tests.cpp)
 
 # SchemaBuilder (schema_builder.hpp) — C++ reflection → Schema IR.
 psio_add_test(psio_schema_builder_tests schema_builder_tests.cpp)
+add_executable(psio_schema_builder_identity_test schema_builder_identity_main.cpp schema_builder_identity_other.cpp)
+target_include_directories(psio_schema_builder_identity_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_schema_builder_identity_test PRIVATE cxx_std_23)
+target_link_libraries(psio_schema_builder_identity_test PRIVATE Boost::headers)
+target_compile_definitions(psio_schema_builder_identity_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_schema_builder_identity_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_schema_builder_identity_test COMMAND psio_schema_builder_identity_test)
 
 # emit_wit (emit_wit.hpp) — Schema IR → WIT text emitter.
 psio_add_test(psio_emit_wit_tests emit_wit_tests.cpp)

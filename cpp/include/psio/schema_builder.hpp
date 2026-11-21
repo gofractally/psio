@@ -22,7 +22,8 @@
 //   Primitives          bool / [u]int{8,16,32,64} / float / double /
 //                       char / std::string / std::string_view
 //   Collections         std::vector<T> / std::optional<T> /
-//                       std::array<T,N>
+//                       std::array<T,N> / std::tuple / std::variant /
+//                       bounded<T,N> / utf8_string<N> / bitvector/bitlist
 //   Resources           wit_resource-derived (own<T>/borrow<T> wrap to
 //                       references, with the resource definition picked
 //                       up from interface_info<T>)
@@ -32,7 +33,7 @@
 //                       PSIO_USE       → Use
 //
 // Out of scope for now (lands as v3 ports the supporting types):
-//   bounded_list, bitvector, bitlist, std::bitset, std::variant,
+//   std::bitset,
 //   uint128 / int128 / uint256, chrono::duration / time_point,
 //   FracPack-nested wrappers, PackableWrapper unwraps, and the
 //   full custom-handler chain.  These are extensions to the same
@@ -43,22 +44,38 @@
 #include <psio/schema_ir.hpp>
 #include <psio/structural.hpp>
 #include <psio/wit_resource.hpp>
+#include <psio/wrappers.hpp>
 
+#include <array>
+#include <tuple>
+#include <variant>
 #include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
-#include <typeindex>
 #include <unordered_map>
 #include <vector>
+
+namespace psio
+{
+   // Optional metadata-only customization. Supply a constexpr array of unique,
+   // nonempty labels in std::variant alternative order. Unlabeled variants use
+   // numeric labels; type names are never guessed to be API alternative names.
+   template <typename Variant> struct schema_variant_labels
+   {
+   };
+} // namespace psio
 
 namespace psio::schema_types
 {
 
    namespace sb_detail
    {
+      // Private static identity within one linked image. The address is never
+      // serialized; the token avoids RTTI and is not a cross-DSO identity API.
+      template<typename T> inline unsigned char type_token = 0;
       // ── Std-container detectors (v3-local) ──────────────────────────
       template <typename T>
       struct sb_is_vector : std::false_type
@@ -90,7 +107,71 @@ namespace psio::schema_types
          using elem                       = E;
          static constexpr std::size_t len = N;
       };
-   }  // namespace detail
+      template <typename T> struct sb_is_tuple : std::false_type
+      {
+      };
+      template <typename... T> struct sb_is_tuple<std::tuple<T...>> : std::true_type
+      {
+      };
+      template <typename T> struct sb_is_variant : std::false_type
+      {
+      };
+      template <typename... T> struct sb_is_variant<std::variant<T...>> : std::true_type
+      {
+      };
+      template <typename T> struct sb_is_box : std::false_type
+      {
+      };
+      template <typename T> struct sb_is_box<Box<T>> : std::true_type
+      {
+         using elem = T;
+      };
+      template <typename T> struct sb_is_bounded : std::false_type
+      {
+      };
+      template <typename T, std::size_t N> struct sb_is_bounded<::psio::bounded<T, N>> : std::true_type
+      {
+         using elem = T;
+         static constexpr auto limit = N;
+      };
+      template <typename T> struct sb_is_utf8 : std::false_type
+      {
+      };
+      template <std::size_t N> struct sb_is_utf8<::psio::utf8_string<N>> : std::true_type
+      {
+         static constexpr auto limit = N;
+      };
+      template <typename T> struct sb_is_bitvector : std::false_type
+      {
+      };
+      template <std::size_t N> struct sb_is_bitvector<::psio::bitvector<N>> : std::true_type
+      {
+         static constexpr auto count = N;
+      };
+      template <typename T> struct sb_is_bitlist : std::false_type
+      {
+      };
+      template <std::size_t N> struct sb_is_bitlist<::psio::bitlist<N>> : std::true_type
+      {
+         static constexpr auto limit = N;
+      };
+      template <typename T> consteval bool valid_variant_labels()
+      {
+         if constexpr (requires { ::psio::schema_variant_labels<T>::names; })
+         {
+            constexpr auto &labels = ::psio::schema_variant_labels<T>::names;
+            for (std::size_t i = 0; i < std::size(labels); ++i)
+            {
+               if (std::string_view(labels[i]).empty())
+                  return false;
+               for (std::size_t j = 0; j < i; ++j)
+                  if (std::string_view(labels[i]) == std::string_view(labels[j]))
+                     return false;
+            }
+         }
+         return true;
+      }
+   }  // namespace sb_detail
 
    // ─────────────────────────────────────────────────────────────────────
    // SchemaBuilder
@@ -107,7 +188,7 @@ namespace psio::schema_types
       // types, the @-interned id otherwise) happens to equal the
       // user-supplied name, we leave the original definition in place
       // — overwriting it with a Type{} pointing at itself would
-      // produce a cycle that resolve() walks until the stack runs out.
+      // produce an invalid alias cycle rather than a type definition.
       template <typename T>
       SchemaBuilder& insert(std::string name) &
       {
@@ -147,7 +228,7 @@ namespace psio::schema_types
       {
          using U = std::remove_cvref_t<T>;
 
-         auto idx = std::type_index(typeid(U));
+         const void* idx = &sb_detail::type_token<U>;
          if (auto it = id_to_name_.find(idx); it != id_to_name_.end())
             return Type{it->second};
 
@@ -232,7 +313,7 @@ namespace psio::schema_types
 
     private:
       Schema                                   schema_;
-      std::unordered_map<std::type_index, std::string> id_to_name_;
+      std::unordered_map<const void*, std::string> id_to_name_;
       std::string                              package_name_;
       std::string                              package_version_;
 
@@ -262,6 +343,51 @@ namespace psio::schema_types
                             std::is_same_v<U, std::string_view>)
             return Custom{Box<AnyType>{List{Box<AnyType>{insert<std::uint8_t>()}}},
                           "string"};
+         else if constexpr (sb_detail::sb_is_box<U>::value)
+            return insert<typename sb_detail::sb_is_box<U>::elem>();
+         else if constexpr (sb_detail::sb_is_tuple<U>::value)
+            return [&]<std::size_t... I>(std::index_sequence<I...>)
+            {
+               return Tuple{{Box<AnyType>{insert<std::tuple_element_t<I, U>>()}...}};
+            }(std::make_index_sequence<std::tuple_size_v<U>>{});
+         else if constexpr (sb_detail::sb_is_variant<U>::value)
+         {
+            constexpr auto count = std::variant_size_v<U>;
+            static_assert(count <= 256, "schema variant exceeds u8 selector capacity");
+            if constexpr (requires { ::psio::schema_variant_labels<U>::names; })
+               static_assert(std::size(::psio::schema_variant_labels<U>::names) == count,
+                             "schema variant label count must match alternatives");
+            static_assert(sb_detail::valid_variant_labels<U>(),
+                          "schema variant labels must be nonempty and unique");
+            return [&]<std::size_t... I>(std::index_sequence<I...>)
+            {
+               auto name = [](std::size_t i)
+               {
+                  if constexpr (requires { ::psio::schema_variant_labels<U>::names; })
+                     return std::string(::psio::schema_variant_labels<U>::names[i]);
+                  else
+                     return std::to_string(i);
+               };
+               return Variant{
+                   {Member{name(I), Box<AnyType>{insert<std::variant_alternative_t<I, U>>()}, {}}...},
+                   {}};
+            }(std::make_index_sequence<count>{});
+         }
+         else if constexpr (sb_detail::sb_is_bounded<U>::value)
+            return BoundedList{Box<AnyType>{insert<typename sb_detail::sb_is_bounded<U>::elem>()},
+                               sb_detail::sb_is_bounded<U>::limit};
+         else if constexpr (sb_detail::sb_is_utf8<U>::value)
+            return Custom{Box<AnyType>{AnyType{BoundedList{Box<AnyType>{insert<std::uint8_t>()},
+                                                           sb_detail::sb_is_utf8<U>::limit}}},
+                          "string"};
+         else if constexpr (sb_detail::sb_is_bitvector<U>::value)
+            return Custom{Box<AnyType>{AnyType{Array{Box<AnyType>{Int{1, false}},
+                                                     sb_detail::sb_is_bitvector<U>::count}}},
+                          "bitvector"};
+         else if constexpr (sb_detail::sb_is_bitlist<U>::value)
+            return Custom{Box<AnyType>{AnyType{BoundedList{Box<AnyType>{Int{1, false}},
+                                                           sb_detail::sb_is_bitlist<U>::limit}}},
+                          "bitlist"};
          else if constexpr (sb_detail::sb_is_optional<U>::value)
             return Option{Box<AnyType>{insert<typename sb_detail::sb_is_optional<U>::elem>()}};
          else if constexpr (sb_detail::sb_is_vector<U>::value)
