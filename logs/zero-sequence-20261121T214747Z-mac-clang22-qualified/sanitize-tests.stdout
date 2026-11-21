@@ -1,0 +1,36 @@
+UpdateCTestConfiguration  from :/Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize/DartConfiguration.tcl
+Test project /Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 12
+    Start 12: psio_pssz_type_width_tests
+
+12: Test command: /Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize/cpp/tests/psio_pssz_type_width_tests
+12: Working Directory: /Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize/cpp/tests
+12: Test timeout computed to be: 10000000
+12: ===============================================================================
+12: All tests passed (765 assertions in 13 test cases)
+12: 
+1/2 Test #12: psio_pssz_type_width_tests .......   Passed    0.50 sec
+test 13
+    Start 13: psio_pssz_zero_tests
+
+13: Test command: /Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize/cpp/tests/psio_pssz_zero_tests
+13: Working Directory: /Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize/cpp/tests
+13: Test timeout computed to be: 10000000
+13: ===============================================================================
+13: All tests passed (1843 assertions in 24 test cases)
+13: 
+2/2 Test #13: psio_pssz_zero_tests .............   Passed    0.59 sec
+
+The following tests passed:
+	psio_pssz_type_width_tests
+	psio_pssz_zero_tests
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   1.09 sec

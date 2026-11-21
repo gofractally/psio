@@ -518,6 +518,8 @@ namespace psio {
             using E = typename T::value_type;
             if constexpr (is_fixed_v<E>)
             {
+               if constexpr (is_zero_fixed_v<E>)
+                  if (!v.empty()) size_failure("pssz: nonempty zero-size vector is unsupported");
                if constexpr (Auto)
                   if (!v.empty()) enforce_fixed_caps<E>();
                return checked_multiply(v.size(), fixed_size_of<E>());
@@ -709,6 +711,8 @@ namespace psio {
             using E = typename T::value_type;
             if constexpr (is_fixed_v<E>)
             {
+               if constexpr (is_zero_fixed_v<E>)
+                  if (!v.empty()) size_failure("pssz: nonempty zero-size vector is unsupported");
                // Bulk memcpy for arithmetic OR memcpy-layout records.
                constexpr bool is_arith =
                   std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
@@ -1047,6 +1051,8 @@ namespace psio {
                                     std::size_t end)
       {
          std::array<T, N> out{};
+         if constexpr (N == 0)
+            if (pos != end) size_failure("pssz: zero-count array payload must be empty");
          if constexpr (!is_fixed_v<T>) enforce_wire_span(end - pos);
          if constexpr (is_fixed_v<T>)
          {
@@ -1086,7 +1092,9 @@ namespace psio {
          if (pos >= end)
             return out;
          if constexpr (!is_fixed_v<T>) enforce_wire_span(end - pos);
-         if constexpr (is_fixed_v<T>)
+         if constexpr (is_zero_fixed_v<T>)
+            size_failure("pssz: nonempty zero-size vector is unsupported");
+         else if constexpr (is_fixed_v<T>)
          {
             if constexpr (Auto) enforce_fixed_caps<T>();
             const std::size_t esz = fixed_size_of<T>();
@@ -1474,7 +1482,9 @@ namespace psio {
          if (pos == end)
             return codec_ok();
 
-         if constexpr (is_fixed_v<E>)
+         if constexpr (is_zero_fixed_v<E>)
+            return codec_fail("pssz: nonempty zero-size vector is unsupported", 0, "pssz");
+         else if constexpr (is_fixed_v<E>)
          {
             if constexpr (Auto && !fixed_caps_valid<E>())
                return codec_fail("pssz: fixed payload exceeds a declared maxDynamicData budget", 0, "pssz");
@@ -1549,6 +1559,9 @@ namespace psio {
                                           std::size_t            end,
                                           std::size_t            depth) noexcept
       {
+         if constexpr (N == 0)
+            if (pos != end)
+               return codec_fail("pssz: zero-count array payload must be empty", 0, "pssz");
          if constexpr (is_fixed_v<E>)
          {
             constexpr std::size_t esz = fixed_size_of<E>();
@@ -1779,7 +1792,9 @@ namespace psio {
             pssz_throw_fail("pssz: vector span out of bounds",
                             static_cast<std::uint32_t>(pos));
          if (pos == end) return;
-         if constexpr (is_fixed_v<E>)
+         if constexpr (is_zero_fixed_v<E>)
+            pssz_throw_fail("pssz: nonempty zero-size vector is unsupported", static_cast<std::uint32_t>(pos));
+         else if constexpr (is_fixed_v<E>)
          {
             if constexpr (Auto) enforce_fixed_caps<E>();
             const std::size_t esz = fixed_size_of<E>();
@@ -1840,6 +1855,8 @@ namespace psio {
                                            std::size_t            pos,
                                            std::size_t            end)
       {
+         if constexpr (N == 0)
+            if (pos != end) size_failure("pssz: zero-count array payload must be empty");
          if constexpr (is_fixed_v<E>)
          {
             constexpr std::size_t esz = fixed_size_of<E>();

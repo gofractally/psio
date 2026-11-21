@@ -1,0 +1,89 @@
+{
+  "baseline": "7dff9e327e23cfc4307f5cdce2af7cc96f357e1c",
+  "head": "6e826595674f0fdbb989b688e116b8ec8b0f9c79",
+  "stage": "sequence",
+  "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+  "jobs": 2,
+  "load_before": [
+    4.8994140625,
+    5.25634765625,
+    4.31640625
+  ],
+  "free_bytes_before": 2259337560064,
+  "commands": [
+    {
+      "name": "compiler",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "--version"
+      ],
+      "exit_code": 0,
+      "seconds": 0.018768834066577256
+    },
+    {
+      "name": "hardware",
+      "argv": [
+        "sysctl",
+        "machdep.cpu.brand_string",
+        "hw.memsize",
+        "hw.ncpu"
+      ],
+      "exit_code": 0,
+      "seconds": 0.002308166935108602
+    },
+    {
+      "name": "native-configure",
+      "argv": [
+        "cmake",
+        "-S",
+        "/Users/dlarimer/psio-psibase-zero-payload",
+        "-B",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-native",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang",
+        "-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++",
+        "-DPSIO_ENABLE_TESTS=ON",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_CXX_FLAGS="
+      ],
+      "exit_code": 0,
+      "seconds": 0.09056462498847395
+    },
+    {
+      "name": "native-build",
+      "argv": [
+        "cmake",
+        "--build",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-native",
+        "--target",
+        "psio_pssz_zero_tests",
+        "psio_pssz_type_width_tests",
+        "psio_pssz_tests",
+        "psio_empty_action_consumer",
+        "--parallel",
+        "2"
+      ],
+      "exit_code": 1,
+      "seconds": 2.257197791012004
+    }
+  ],
+  "passed": false,
+  "source_sha256": {
+    "cpp/include/psio/pssz.hpp": "8f2a9d1bdcc0ffe24b9d60e8a723f46240f41231650a19ebacef4dd6309289a2",
+    "cpp/include/psio/pssz_view.hpp": "8529504e238def8599833a9025f42038034941f5943babc369461caadce15a91",
+    "cpp/tests/pssz_zero_tests.cpp": "6c71f1416017555648ad1beab4c5c4cec3174843ce2bcae88f4a1ba4bf97109e",
+    "cpp/tests/pssz_zero_reproducer.cpp": "98b97c794a02cb1b2b84a10e6a7efd9b9b3ab9e9949bd8796b3d80d710044dd0",
+    "cpp/tests/CMakeLists.txt": "bc7e45192f2cc1f6d526b160382a3f2a6297ad23a2ed43aea877b7e279b741ec",
+    "cpp/tests/qualify_zero_payload.py": "df5a3a1e8870bed3fb32e2e3024dbf048b584327ca78bec231e48333543f5571"
+  },
+  "scope": "Existing zero-size optional/sequence handling only. No typed length-bound or nonzero fixed-payload semantic validation repair.",
+  "error": "native-build failed",
+  "load_after": [
+    4.8994140625,
+    5.25634765625,
+    4.31640625
+  ],
+  "free_bytes_after": 2259337330688
+}

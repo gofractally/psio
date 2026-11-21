@@ -1,0 +1,66 @@
+{
+  "commands": [
+    {
+      "name": "compile",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-fsanitize=address,undefined",
+        "-fno-sanitize-recover=all",
+        "-fno-omit-frame-pointer",
+        "-g",
+        "-O1",
+        "-I/Users/dlarimer/psio-psibase-zero-payload/cpp/include",
+        "-idirafter",
+        "/opt/homebrew/include",
+        "/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_reproducer.cpp",
+        "-o",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-proofs/current"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "optional",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-proofs/current",
+        "optional"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "vector-encode",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-proofs/current",
+        "vector-encode"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "vector-validate",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-proofs/current",
+        "vector-validate"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "vector-decode",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-proofs/current",
+        "vector-decode"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "array-trailing",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-proofs/current",
+        "array-trailing"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "passed": true,
+  "source_sha256": "98b97c794a02cb1b2b84a10e6a7efd9b9b3ab9e9949bd8796b3d80d710044dd0"
+}

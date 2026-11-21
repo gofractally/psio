@@ -3,6 +3,7 @@
 #include <array>
 #include <optional>
 #include <vector>
+#include <variant>
 
 struct ZeroUnit {};
 PSIO_REFLECT(ZeroUnit)
@@ -98,4 +99,80 @@ TEMPLATE_TEST_CASE("malformed zero-size optional payloads reject without reading
       REQUIRE_THROWS_AS(psio::validate_or_throw<T>(TestType{},wire),psio::codec_exception);
       REQUIRE_THROWS_AS(psio::decode<T>(TestType{},wire),psio::codec_exception);
    }
+}
+
+template<typename T,typename F>
+void unsupported_zero_vector()
+{
+   const std::vector<T> empty;
+   zero_roundtrip<std::vector<T>,F>(empty);
+   REQUIRE(psio::encode(F{},empty).empty());
+   REQUIRE(psio::decode<std::vector<T>>(F{},std::vector<char>{}).empty());
+   REQUIRE(zero_view<std::vector<T>,F>(std::vector<char>{}).size()==0);
+   const std::vector<T> nonempty(3);
+   std::vector<char> destination{'p','r','e'};
+   REQUIRE_THROWS_AS(psio::size_of(F{},nonempty),psio::codec_exception);
+   REQUIRE_THROWS_AS(psio::encode(F{},nonempty),psio::codec_exception);
+   REQUIRE_THROWS_AS(psio::encode(F{},nonempty,destination),psio::codec_exception);
+   REQUIRE((destination==std::vector<char>{'p','r','e'}));
+   for(std::size_t length=1;length<=32;++length)
+   {
+      const std::vector<char> malformed(length,char(length));
+      REQUIRE_FALSE(psio::validate<std::vector<T>>(F{},malformed).ok());
+      REQUIRE_THROWS_AS(psio::validate_or_throw<std::vector<T>>(F{},malformed),psio::codec_exception);
+      REQUIRE_THROWS_AS(psio::decode<std::vector<T>>(F{},malformed),psio::codec_exception);
+   }
+}
+
+TEMPLATE_TEST_CASE("nonempty zero-size vectors reject instead of losing counts or dividing",
+                   "[pssz][zero][sequence][malformed]",psio::pssz8,psio::pssz16,psio::pssz32,psio::pssz)
+{
+   unsupported_zero_vector<ZeroUnit,TestType>();
+   unsupported_zero_vector<std::array<ZeroUnit,3>,TestType>();
+   unsupported_zero_vector<std::array<std::uint8_t,0>,TestType>();
+}
+
+TEMPLATE_TEST_CASE("zero-size arrays preserve their compile-time element count",
+                   "[pssz][zero][sequence]",psio::pssz8,psio::pssz16,psio::pssz32,psio::pssz)
+{
+   using A=std::array<ZeroUnit,7>;
+   const A value{};
+   zero_roundtrip<A,TestType>(value);
+   zero_roundtrip<std::array<ZeroUnit,0>,TestType>({});
+   zero_roundtrip<std::array<std::uint8_t,0>,TestType>({});
+   zero_roundtrip<std::array<std::string,0>,TestType>({});
+   // Retain the existing variable-element classification and offset table:
+   // unlike fixed-zero vectors, this table already represents its count.
+   std::vector<std::array<std::string,0>> known(2);
+   zero_roundtrip<decltype(known),TestType>(known);
+   REQUIRE(psio::decode<decltype(known)>(TestType{},psio::encode(TestType{},known)).size()==2);
+   const auto wire=psio::encode(TestType{},value);
+   REQUIRE(wire.empty());
+   REQUIRE(psio::decode<A>(TestType{},wire).size()==7);
+   auto view=zero_view<A,TestType>(wire);
+   REQUIRE(view.size()==7);
+   REQUIRE(psio::bytes(view[6]).empty());
+   std::size_t count=0;
+   for(auto element:view) { REQUIRE(psio::bytes(element).empty()); ++count; }
+   REQUIRE(count==7);
+   const std::vector<char> malformed{0};
+   REQUIRE_FALSE(psio::validate<A>(TestType{},malformed).ok());
+   REQUIRE_THROWS_AS(psio::validate_or_throw<A>(TestType{},malformed),psio::codec_exception);
+   REQUIRE_THROWS_AS(psio::decode<A>(TestType{},malformed),psio::codec_exception);
+   using EmptyVariableArray=std::array<std::string,0>;
+   REQUIRE_FALSE(psio::validate<EmptyVariableArray>(TestType{},malformed).ok());
+   REQUIRE_THROWS_AS(psio::validate_or_throw<EmptyVariableArray>(TestType{},malformed),psio::codec_exception);
+   REQUIRE_THROWS_AS(psio::decode<EmptyVariableArray>(TestType{},malformed),psio::codec_exception);
+}
+
+TEMPLATE_TEST_CASE("existing tagged containers can represent zero-size children without new framing",
+                   "[pssz][zero][sequence]",psio::pssz8,psio::pssz16,psio::pssz32,psio::pssz)
+{
+   using V=std::variant<ZeroUnit,std::uint32_t>;
+   zero_roundtrip<V,TestType>(ZeroUnit{});
+   zero_roundtrip<std::vector<V>,TestType>({ZeroUnit{},std::uint32_t(42),ZeroUnit{}});
+   const std::vector<char> malformed{0,1};
+   REQUIRE_FALSE(psio::validate<V>(TestType{},malformed).ok());
+   REQUIRE_THROWS_AS(psio::validate_or_throw<V>(TestType{},malformed),psio::codec_exception);
+   REQUIRE_THROWS_AS(psio::decode<V>(TestType{},malformed),psio::codec_exception);
 }

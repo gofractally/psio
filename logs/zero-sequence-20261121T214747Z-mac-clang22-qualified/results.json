@@ -1,0 +1,195 @@
+{
+  "baseline": "7dff9e327e23cfc4307f5cdce2af7cc96f357e1c",
+  "head": "6e826595674f0fdbb989b688e116b8ec8b0f9c79",
+  "stage": "sequence",
+  "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+  "jobs": 2,
+  "load_before": [
+    4.15283203125,
+    5.0107421875,
+    4.279296875
+  ],
+  "free_bytes_before": 2259327672320,
+  "commands": [
+    {
+      "name": "compiler",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "--version"
+      ],
+      "exit_code": 0,
+      "seconds": 0.01989133399911225
+    },
+    {
+      "name": "hardware",
+      "argv": [
+        "sysctl",
+        "machdep.cpu.brand_string",
+        "hw.memsize",
+        "hw.ncpu"
+      ],
+      "exit_code": 0,
+      "seconds": 0.002653874922543764
+    },
+    {
+      "name": "native-configure",
+      "argv": [
+        "cmake",
+        "-S",
+        "/Users/dlarimer/psio-psibase-zero-payload",
+        "-B",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-native",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang",
+        "-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++",
+        "-DPSIO_ENABLE_TESTS=ON",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_CXX_FLAGS="
+      ],
+      "exit_code": 0,
+      "seconds": 0.11370683298446238
+    },
+    {
+      "name": "native-build",
+      "argv": [
+        "cmake",
+        "--build",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-native",
+        "--target",
+        "psio_pssz_zero_tests",
+        "psio_pssz_type_width_tests",
+        "psio_pssz_tests",
+        "psio_empty_action_consumer",
+        "--parallel",
+        "2"
+      ],
+      "exit_code": 0,
+      "seconds": 2.2907597499433905
+    },
+    {
+      "name": "native-build-commands",
+      "argv": [
+        "ninja",
+        "-C",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-native",
+        "-t",
+        "commands",
+        "psio_pssz_zero_tests",
+        "psio_pssz_type_width_tests",
+        "psio_pssz_tests",
+        "psio_empty_action_consumer"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0071559170028194785
+    },
+    {
+      "name": "native-tests",
+      "argv": [
+        "ctest",
+        "--test-dir",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-native",
+        "--verbose",
+        "--output-on-failure",
+        "-R",
+        "^(psio_pssz_zero_tests|psio_pssz_type_width_tests|psio_pssz_tests|psio_empty_action_consumer)$"
+      ],
+      "exit_code": 0,
+      "seconds": 1.2271194170461968
+    },
+    {
+      "name": "sanitize-configure",
+      "argv": [
+        "cmake",
+        "-S",
+        "/Users/dlarimer/psio-psibase-zero-payload",
+        "-B",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize",
+        "-G",
+        "Ninja",
+        "-DCMAKE_BUILD_TYPE=Release",
+        "-DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang",
+        "-DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++",
+        "-DPSIO_ENABLE_TESTS=ON",
+        "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        "-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g"
+      ],
+      "exit_code": 0,
+      "seconds": 0.0869848330039531
+    },
+    {
+      "name": "sanitize-build",
+      "argv": [
+        "cmake",
+        "--build",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize",
+        "--target",
+        "psio_pssz_zero_tests",
+        "psio_pssz_type_width_tests",
+        "--parallel",
+        "2"
+      ],
+      "exit_code": 0,
+      "seconds": 5.557173584005795
+    },
+    {
+      "name": "sanitize-build-commands",
+      "argv": [
+        "ninja",
+        "-C",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize",
+        "-t",
+        "commands",
+        "psio_pssz_zero_tests",
+        "psio_pssz_type_width_tests"
+      ],
+      "exit_code": 0,
+      "seconds": 0.006356750032864511
+    },
+    {
+      "name": "sanitize-tests",
+      "argv": [
+        "ctest",
+        "--test-dir",
+        "/Users/dlarimer/psio-psibase-zero-payload/build/zero-sanitize",
+        "--verbose",
+        "--output-on-failure",
+        "-R",
+        "^(psio_pssz_zero_tests|psio_pssz_type_width_tests)$"
+      ],
+      "exit_code": 0,
+      "seconds": 1.0974025409668684
+    }
+  ],
+  "passed": true,
+  "source_sha256": {
+    "cpp/include/psio/pssz.hpp": "8f2a9d1bdcc0ffe24b9d60e8a723f46240f41231650a19ebacef4dd6309289a2",
+    "cpp/include/psio/pssz_view.hpp": "8529504e238def8599833a9025f42038034941f5943babc369461caadce15a91",
+    "cpp/tests/pssz_zero_tests.cpp": "1ccb9cd3902475e61be87641c462c39f76c95ad48d10c75b8672710a5d029d76",
+    "cpp/tests/pssz_zero_reproducer.cpp": "98b97c794a02cb1b2b84a10e6a7efd9b9b3ab9e9949bd8796b3d80d710044dd0",
+    "cpp/tests/CMakeLists.txt": "bc7e45192f2cc1f6d526b160382a3f2a6297ad23a2ed43aea877b7e279b741ec",
+    "cpp/tests/qualify_zero_payload.py": "df5a3a1e8870bed3fb32e2e3024dbf048b584327ca78bec231e48333543f5571"
+  },
+  "scope": "Existing zero-size optional/sequence handling only. No typed length-bound or nonzero fixed-payload semantic validation repair.",
+  "native_cases": 76,
+  "native_assertions": 2697,
+  "native_binary_sha256": {
+    "psio_pssz_zero_tests": "2633d3b3da53a7b55b867e6220817578e3f3f6a22cf2e7b8a8c5cbb4b8286bca",
+    "psio_pssz_type_width_tests": "186c696c1ed76183fa43fc93c6bd21ca7989855f1e01eff8d054be041acecff6",
+    "psio_pssz_tests": "1567fb3bd9f29eca9468fe10e1c092eb4694459ec57a981e9e59cb61c028c0e8",
+    "psio_empty_action_consumer": "495800912208a92be040a500909ccf0db8febd8a226e31db67ad79bb6de34d08"
+  },
+  "sanitize_cases": 37,
+  "sanitize_assertions": 2608,
+  "sanitize_binary_sha256": {
+    "psio_pssz_zero_tests": "bca25aa1a4d9ab8eb6ad936a7d4c647d59ad310c21c15c24140bb179a8fa974a",
+    "psio_pssz_type_width_tests": "9576c470b6c9a0b22cc7fbfc185e3ed5fdf4e67f3300876ff45cbf01f20a161e"
+  },
+  "load_after": [
+    4.349609375,
+    5.02587890625,
+    4.29296875
+  ],
+  "free_bytes_after": 2259323543552
+}

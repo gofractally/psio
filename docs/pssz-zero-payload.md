@@ -30,11 +30,33 @@ is pending the higher-priority integrated storage build.
 The retained baseline reproducer also demonstrates independent sequence problems:
 nonempty vector<Unit> loses its count, decode/validation divide by zero on
 nonempty bytes (UBSan reports retained), and array<Unit,3> accepted trailing junk.
-Vector rejection is intentionally the next separate commit. Fixed-count arrays
-can retain their compile-time count without a wire count. Borrowed C++ views
+The separate sequence repair now rejects nonempty fixed-zero vectors during
+sizing/encoding and rejects nonempty byte spans in decode and both validators
+before any divide/modulo. Empty vectors remain valid. An encoding size failure
+leaves an append destination unchanged. Fixed-count arrays retain their
+compile-time count without a wire count; zero-count arrays also reject extra
+bytes even when their element type is variable.
+
+The existing variable classification of array<String,0> remains unchanged. A
+vector of that type already carries an offset table, which preserves its count
+even though each payload is empty, and remains supported. There is no type
+reclassification or context-dependent width change. Borrowed C++ views
 require validated input; the existing noexcept zero-size vector-count guard
 returns zero without dividing, and does not itself certify arbitrary input.
 
+The final sequence source passes 76 native cases / 2,697 assertions plus the
+empty-action consumer, and 37 ASan/UBSan cases / 2,608 assertions on macOS. Exact
+sources and commands are recorded in
+`logs/zero-sequence-20261121T214747Z-mac-clang22-qualified/results.json`. The same
+sanitized baseline reproducer now passes all five modes. Earlier setup/prototype
+attempts are retained separately, including a test fixture that accidentally
+requested decoding a const-qualified target type; the corrected test does not
+expand the decoder API. Linux remains deferred behind the integrated storage
+qualification.
+
 Typed length-bound validation and canonical validation of nonzero fixed payloads
-(including bool and unused bitvector bits) remain independent activation gates.
+(including strict boolean canonicality and unused bitvector bits) remain
+independent activation gates. Ordinary boolean reads remain permissive under the
+documented specification; normalization of memcpy-decoded boolean fields is a
+separate safety repair.
 These focused checks are not global strict PSSZ or SDK cutover qualification.

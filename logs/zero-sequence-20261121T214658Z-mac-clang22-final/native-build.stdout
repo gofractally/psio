@@ -1,0 +1,225 @@
+[1/8] Building CXX object cpp/tests/CMakeFiles/psio_pssz_tests.dir/pssz_tests.cpp.o
+[2/8] Building CXX object cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/pssz_zero_tests.cpp.o
+FAILED: [code=1] cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/pssz_zero_tests.cpp.o 
+/opt/homebrew/opt/llvm/bin/clang++ -DPSIO_EXCEPTIONS_ENABLED=1 -DPSIO_HAVE_SIMDJSON=1 -DSIMDJSON_DEVELOPMENT_CHECKS -DSIMDJSON_THREADS_ENABLED=1 -I/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2 -I/Users/dlarimer/psio-psibase-zero-payload/cpp/include -I/Users/dlarimer/psio-psibase-zero-payload/cpp/external/xxhash -isystem /opt/homebrew/include -O3 -DNDEBUG -std=gnu++23 -arch arm64 -Werror=unused-result -MD -MT cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/pssz_zero_tests.cpp.o -MF cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/pssz_zero_tests.cpp.o.d -o cpp/tests/CMakeFiles/psio_pssz_zero_tests.dir/pssz_zero_tests.cpp.o -c /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:1:
+In file included from /Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz_view.hpp:25:
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1458:27: error: static assertion failed due to requirement 'sizeof(const std::vector<std::array<std::string, 0>, std::allocator<std::array<std::string, 0>>>) == 0': psio::pssz: unsupported type in decode_value
+ 1458 |             static_assert(sizeof(T) == 0,
+      |                           ^~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2421:36: note: in instantiation of function template specialization 'psio::detail::pssz_impl::decode_value<1UL, false, const std::vector<std::array<std::string, 0>>>' requested here
+ 2421 |          return detail::pssz_impl::decode_value<W, false, T>(bytes, 0, bytes.size());
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/cpo.hpp:74:20: note: in instantiation of function template specialization 'psio::tag_invoke<const std::vector<std::array<std::string, 0>>>' requested here
+   74 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:135:1: note: in instantiation of function template specialization '____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____12<psio::pssz_<1>>' requested here
+  135 | TEMPLATE_TEST_CASE("zero-size arrays preserve their compile-time element count",
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:125: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                                                                                                             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:386:56: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME_LINE2'
+  386 | #define INTERNAL_CATCH_UNIQUE_NAME_LINE2( name, line ) name##line
+      |                                                        ^
+<scratch space>:15:1: note: expanded from here
+   15 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____12
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:922:78: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  922 |                     (void)expander{(Catch::AutoReg( Catch::makeTestInvoker( &TestFunc<Types> ), CATCH_INTERNAL_LINEINFO, Catch::StringRef(), Catch::NameAndTags{ names, Tags } ), 0)... };/* NOLINT */ \
+      |                                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:135:1: note: in instantiation of function template specialization '(anonymous namespace)::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13<psio::pssz_<1>, psio::pssz_<2>, psio::pssz_<4>, psio::pssz>::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13<const char *, const char *, const char *, const char *>' requested here
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:46: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 2 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+<scratch space>:17:1: note: expanded from here
+   17 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:925:55: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  925 |             INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE(TestName, Name, __VA_ARGS__) \
+      |                                                       ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:947:13: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE'
+  947 |             TestName<CATCH_REC_LIST(INTERNAL_CATCH_REMOVE_PARENS, __VA_ARGS__)>(CATCH_REC_LIST_UD(INTERNAL_CATCH_TEMPLATE_UNIQUE_NAME,Name, __VA_ARGS__));\
+      |             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1458:37: note: expression evaluates to '24 == 0'
+ 1458 |             static_assert(sizeof(T) == 0,
+      |                           ~~~~~~~~~~^~~~
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1458:27: error: static assertion failed due to requirement 'sizeof(const std::vector<std::array<std::string, 0>, std::allocator<std::array<std::string, 0>>>) == 0': psio::pssz: unsupported type in decode_value
+ 1458 |             static_assert(sizeof(T) == 0,
+      |                           ^~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2421:36: note: in instantiation of function template specialization 'psio::detail::pssz_impl::decode_value<2UL, false, const std::vector<std::array<std::string, 0>>>' requested here
+ 2421 |          return detail::pssz_impl::decode_value<W, false, T>(bytes, 0, bytes.size());
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/cpo.hpp:74:20: note: in instantiation of function template specialization 'psio::tag_invoke<const std::vector<std::array<std::string, 0>>>' requested here
+   74 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:135:1: note: in instantiation of function template specialization '____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____12<psio::pssz_<2>>' requested here
+  135 | TEMPLATE_TEST_CASE("zero-size arrays preserve their compile-time element count",
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:125: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                                                                                                             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:386:56: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME_LINE2'
+  386 | #define INTERNAL_CATCH_UNIQUE_NAME_LINE2( name, line ) name##line
+      |                                                        ^
+<scratch space>:15:1: note: expanded from here
+   15 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____12
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:922:78: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  922 |                     (void)expander{(Catch::AutoReg( Catch::makeTestInvoker( &TestFunc<Types> ), CATCH_INTERNAL_LINEINFO, Catch::StringRef(), Catch::NameAndTags{ names, Tags } ), 0)... };/* NOLINT */ \
+      |                                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:135:1: note: in instantiation of function template specialization '(anonymous namespace)::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13<psio::pssz_<1>, psio::pssz_<2>, psio::pssz_<4>, psio::pssz>::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13<const char *, const char *, const char *, const char *>' requested here
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:46: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 2 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+<scratch space>:17:1: note: expanded from here
+   17 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:925:55: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  925 |             INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE(TestName, Name, __VA_ARGS__) \
+      |                                                       ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:947:13: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE'
+  947 |             TestName<CATCH_REC_LIST(INTERNAL_CATCH_REMOVE_PARENS, __VA_ARGS__)>(CATCH_REC_LIST_UD(INTERNAL_CATCH_TEMPLATE_UNIQUE_NAME,Name, __VA_ARGS__));\
+      |             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1458:37: note: expression evaluates to '24 == 0'
+ 1458 |             static_assert(sizeof(T) == 0,
+      |                           ~~~~~~~~~~^~~~
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1458:27: error: static assertion failed due to requirement 'sizeof(const std::vector<std::array<std::string, 0>, std::allocator<std::array<std::string, 0>>>) == 0': psio::pssz: unsupported type in decode_value
+ 1458 |             static_assert(sizeof(T) == 0,
+      |                           ^~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2421:36: note: in instantiation of function template specialization 'psio::detail::pssz_impl::decode_value<4UL, false, const std::vector<std::array<std::string, 0>>>' requested here
+ 2421 |          return detail::pssz_impl::decode_value<W, false, T>(bytes, 0, bytes.size());
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/cpo.hpp:74:20: note: in instantiation of function template specialization 'psio::tag_invoke<const std::vector<std::array<std::string, 0>>>' requested here
+   74 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:135:1: note: in instantiation of function template specialization '____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____12<psio::pssz_<4>>' requested here
+  135 | TEMPLATE_TEST_CASE("zero-size arrays preserve their compile-time element count",
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:125: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                                                                                                             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:386:56: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME_LINE2'
+  386 | #define INTERNAL_CATCH_UNIQUE_NAME_LINE2( name, line ) name##line
+      |                                                        ^
+<scratch space>:15:1: note: expanded from here
+   15 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____12
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:922:78: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  922 |                     (void)expander{(Catch::AutoReg( Catch::makeTestInvoker( &TestFunc<Types> ), CATCH_INTERNAL_LINEINFO, Catch::StringRef(), Catch::NameAndTags{ names, Tags } ), 0)... };/* NOLINT */ \
+      |                                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:135:1: note: in instantiation of function template specialization '(anonymous namespace)::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13<psio::pssz_<1>, psio::pssz_<2>, psio::pssz_<4>, psio::pssz>::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13<const char *, const char *, const char *, const char *>' requested here
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:46: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 2 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+<scratch space>:17:1: note: expanded from here
+   17 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:925:55: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  925 |             INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE(TestName, Name, __VA_ARGS__) \
+      |                                                       ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:947:13: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE'
+  947 |             TestName<CATCH_REC_LIST(INTERNAL_CATCH_REMOVE_PARENS, __VA_ARGS__)>(CATCH_REC_LIST_UD(INTERNAL_CATCH_TEMPLATE_UNIQUE_NAME,Name, __VA_ARGS__));\
+      |             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1458:37: note: expression evaluates to '24 == 0'
+ 1458 |             static_assert(sizeof(T) == 0,
+      |                           ~~~~~~~~~~^~~~
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1458:27: error: static assertion failed due to requirement 'sizeof(const std::vector<std::array<std::string, 0>, std::allocator<std::array<std::string, 0>>>) == 0': psio::pssz: unsupported type in decode_value
+ 1458 |             static_assert(sizeof(T) == 0,
+      |                           ^~~~~~~~~~~~~~
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:2531:36: note: in instantiation of function template specialization 'psio::detail::pssz_impl::decode_value<4UL, true, const std::vector<std::array<std::string, 0>>>' requested here
+ 2531 |          return detail::pssz_impl::decode_value<W, true, T>(bytes, 0, bytes.size());
+      |                                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/cpo.hpp:74:20: note: in instantiation of function template specialization 'psio::tag_invoke<const std::vector<std::array<std::string, 0>>>' requested here
+   74 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:135:1: note: in instantiation of function template specialization '____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____12<psio::pssz>' requested here
+  135 | TEMPLATE_TEST_CASE("zero-size arrays preserve their compile-time element count",
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:125: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                                                                                                             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 1 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:386:56: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME_LINE2'
+  386 | #define INTERNAL_CATCH_UNIQUE_NAME_LINE2( name, line ) name##line
+      |                                                        ^
+<scratch space>:15:1: note: expanded from here
+   15 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____12
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:922:78: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  922 |                     (void)expander{(Catch::AutoReg( Catch::makeTestInvoker( &TestFunc<Types> ), CATCH_INTERNAL_LINEINFO, Catch::StringRef(), Catch::NameAndTags{ names, Tags } ), 0)... };/* NOLINT */ \
+      |                                                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/pssz_zero_tests.cpp:135:1: note: in instantiation of function template specialization '(anonymous namespace)::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13<psio::pssz_<1>, psio::pssz_<2>, psio::pssz_<4>, psio::pssz>::____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13<const char *, const char *, const char *, const char *>' requested here
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:14795:35: note: expanded from macro 'TEMPLATE_TEST_CASE'
+ 14795 | #define TEMPLATE_TEST_CASE( ... ) INTERNAL_CATCH_TEMPLATE_TEST_CASE( __VA_ARGS__ )
+       |                                   ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:939:46: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE'
+  939 |         INTERNAL_CATCH_TEMPLATE_TEST_CASE_2( INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____ ), INTERNAL_CATCH_UNIQUE_NAME( ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____F_U_N_C____ ), Name, Tags, __VA_ARGS__ )
+      |                                              ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:389:46: note: expanded from macro 'INTERNAL_CATCH_UNIQUE_NAME'
+  389 | #  define INTERNAL_CATCH_UNIQUE_NAME( name ) INTERNAL_CATCH_UNIQUE_NAME_LINE( name, __COUNTER__ )
+      |                                              ^
+note: (skipping 2 expansions in backtrace; use -fmacro-backtrace-limit=0 to see all)
+<scratch space>:17:1: note: expanded from here
+   17 | ____C_A_T_C_H____T_E_M_P_L_A_T_E____T_E_S_T____13
+      | ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:925:55: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_TEST_CASE_2'
+  925 |             INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE(TestName, Name, __VA_ARGS__) \
+      |                                                       ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/tests/../external/catch2/catch.hpp:947:13: note: expanded from macro 'INTERNAL_CATCH_TEMPLATE_REGISTRY_INITIATE'
+  947 |             TestName<CATCH_REC_LIST(INTERNAL_CATCH_REMOVE_PARENS, __VA_ARGS__)>(CATCH_REC_LIST_UD(INTERNAL_CATCH_TEMPLATE_UNIQUE_NAME,Name, __VA_ARGS__));\
+      |             ^
+/Users/dlarimer/psio-psibase-zero-payload/cpp/include/psio/pssz.hpp:1458:37: note: expression evaluates to '24 == 0'
+ 1458 |             static_assert(sizeof(T) == 0,
+      |                           ~~~~~~~~~~^~~~
+4 errors generated.
+[3/8] Building CXX object cpp/tests/CMakeFiles/psio_pssz_type_width_tests.dir/pssz_type_width_tests.cpp.o
+ninja: build stopped: subcommand failed.

@@ -1,0 +1,56 @@
+UpdateCTestConfiguration  from :/Users/dlarimer/psio-psibase-zero-payload/build/zero-native/DartConfiguration.tcl
+Test project /Users/dlarimer/psio-psibase-zero-payload/build/zero-native
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 11
+    Start 11: psio_pssz_tests
+
+11: Test command: /Users/dlarimer/psio-psibase-zero-payload/build/zero-native/cpp/tests/psio_pssz_tests
+11: Working Directory: /Users/dlarimer/psio-psibase-zero-payload/build/zero-native/cpp/tests
+11: Test timeout computed to be: 10000000
+11: ===============================================================================
+11: All tests passed (89 assertions in 39 test cases)
+11: 
+1/4 Test #11: psio_pssz_tests ..................   Passed    0.32 sec
+test 12
+    Start 12: psio_pssz_type_width_tests
+
+12: Test command: /Users/dlarimer/psio-psibase-zero-payload/build/zero-native/cpp/tests/psio_pssz_type_width_tests
+12: Working Directory: /Users/dlarimer/psio-psibase-zero-payload/build/zero-native/cpp/tests
+12: Test timeout computed to be: 10000000
+12: ===============================================================================
+12: All tests passed (765 assertions in 13 test cases)
+12: 
+2/4 Test #12: psio_pssz_type_width_tests .......   Passed    0.15 sec
+test 13
+    Start 13: psio_pssz_zero_tests
+
+13: Test command: /Users/dlarimer/psio-psibase-zero-payload/build/zero-native/cpp/tests/psio_pssz_zero_tests
+13: Working Directory: /Users/dlarimer/psio-psibase-zero-payload/build/zero-native/cpp/tests
+13: Test timeout computed to be: 10000000
+13: ===============================================================================
+13: All tests passed (1787 assertions in 24 test cases)
+13: 
+3/4 Test #13: psio_pssz_zero_tests .............   Passed    0.16 sec
+test 15
+    Start 15: psio_empty_action_consumer
+
+15: Test command: /Users/dlarimer/psio-psibase-zero-payload/build/zero-native/cpp/tests/psio_empty_action_consumer
+15: Working Directory: /Users/dlarimer/psio-psibase-zero-payload/build/zero-native/cpp/tests
+15: Test timeout computed to be: 10000000
+15: Empty action records: 2 layouts x 4 existing formats passed
+4/4 Test #15: psio_empty_action_consumer .......   Passed    0.13 sec
+
+The following tests passed:
+	psio_pssz_tests
+	psio_pssz_type_width_tests
+	psio_pssz_zero_tests
+	psio_empty_action_consumer
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =   0.76 sec
