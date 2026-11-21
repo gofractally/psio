@@ -91,6 +91,14 @@ namespace psio {
       template <typename Fmt>
       struct traits;  // specialized per format
 
+      template <typename Fmt, typename Parent, typename = void>
+      struct nested_format { using type = Fmt; };
+      template <typename Fmt, typename Parent>
+      struct nested_format<Fmt, Parent, std::void_t<typename traits<Fmt>::template nested_format<Parent>>>
+      { using type = typename traits<Fmt>::template nested_format<Parent>; };
+      template <typename Fmt, typename Parent>
+      using nested_format_t = typename nested_format<Fmt, Parent>::type;
+
       template <typename Fmt, typename = void>
       struct has_vector_support : std::false_type {};
 
@@ -222,6 +230,7 @@ namespace psio {
       requires view_layout::has_vector_support<Fmt>::value
    class view<std::vector<T>, Fmt, Store>
    {
+      using child_format = view_layout::nested_format_t<Fmt, std::vector<T>>;
       std::span<const char> data_;
       std::span<const char> root_;
 
@@ -254,16 +263,16 @@ namespace psio {
 
       [[nodiscard]] bool empty() const noexcept { return size() == 0; }
 
-      [[nodiscard]] view<T, Fmt, Store> operator[](std::size_t i) const noexcept
+      [[nodiscard]] view<T, child_format, Store> operator[](std::size_t i) const noexcept
       {
-         return view<T, Fmt, Store>{
+         return view<T, child_format, Store>{
             view_layout::traits<Fmt>::template vector_element_span<T>(data_, i),
             root_};
       }
 
-      [[nodiscard]] view<T, Fmt, Store> at(std::size_t i) const noexcept
+      [[nodiscard]] view<T, child_format, Store> at(std::size_t i) const noexcept
       {
-         return i < size() ? (*this)[i] : view<T, Fmt, Store>{};
+         return i < size() ? (*this)[i] : view<T, child_format, Store>{};
       }
 
       class iterator
@@ -273,7 +282,7 @@ namespace psio {
 
         public:
          using iterator_category = std::forward_iterator_tag;
-         using value_type        = view<T, Fmt, Store>;
+         using value_type        = view<T, child_format, Store>;
          using difference_type   = std::ptrdiff_t;
          using pointer           = void;
          using reference         = value_type;
@@ -308,7 +317,9 @@ namespace psio {
       requires view_layout::has_optional_support<Fmt>::value
    class view<std::optional<T>, Fmt, Store>
    {
+      using child_format = view_layout::nested_format_t<Fmt, std::optional<T>>;
       std::span<const char> data_;
+      std::span<const char> root_;
 
      public:
       using element_type                    = std::optional<T>;
@@ -317,7 +328,8 @@ namespace psio {
       static constexpr storage storage_kind = Store;
 
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      explicit view(std::span<const char> s) noexcept : data_(s), root_(s) {}
+      view(std::span<const char> s, std::span<const char> root) noexcept : data_(s), root_(root) {}
 
       [[nodiscard]] std::span<const char> _psio_data() const noexcept
       {
@@ -335,13 +347,13 @@ namespace psio {
       }
 
       // Precondition: has_value(). Returns a view over the payload bytes.
-      [[nodiscard]] view<T, Fmt, Store> operator*() const noexcept
+      [[nodiscard]] view<T, child_format, Store> operator*() const noexcept
       {
-         return view<T, Fmt, Store>{
-            view_layout::traits<Fmt>::template optional_payload_span<T>(data_)};
+         return view<T, child_format, Store>{
+            view_layout::traits<Fmt>::template optional_payload_span<T>(data_), root_};
       }
 
-      [[nodiscard]] view<T, Fmt, Store> get() const noexcept { return **this; }
+      [[nodiscard]] view<T, child_format, Store> get() const noexcept { return **this; }
    };
 
    // ── view<std::variant<Ts...>, Fmt, Store> ─────────────────────────────
@@ -349,7 +361,9 @@ namespace psio {
       requires view_layout::has_variant_support<Fmt>::value
    class view<std::variant<Ts...>, Fmt, Store>
    {
+      using child_format = view_layout::nested_format_t<Fmt, std::variant<Ts...>>;
       std::span<const char> data_;
+      std::span<const char> root_;
 
      public:
       using element_type                    = std::variant<Ts...>;
@@ -357,7 +371,8 @@ namespace psio {
       static constexpr storage storage_kind = Store;
 
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      explicit view(std::span<const char> s) noexcept : data_(s), root_(s) {}
+      view(std::span<const char> s, std::span<const char> root) noexcept : data_(s), root_(root) {}
 
       [[nodiscard]] std::span<const char> _psio_data() const noexcept
       {
@@ -387,13 +402,13 @@ namespace psio {
                        std::index_sequence<Is...>) const
       {
          using R = std::common_type_t<decltype(std::forward<F>(fn)(
-            std::declval<view<Ts, Fmt, Store>>()))...>;
+            std::declval<view<Ts, child_format, Store>>()))...>;
 
          const std::size_t idx = index();
          if constexpr (std::is_void_v<R>)
          {
             ((idx == Is
-                 ? (std::forward<F>(fn)(view<Ts, Fmt, Store>{payload}), true)
+                 ? (std::forward<F>(fn)(view<Ts, child_format, Store>{payload, root_}), true)
                  : false) ||
              ...);
          }
@@ -403,7 +418,7 @@ namespace psio {
             bool matched = false;
             ((idx == Is
                  ? (result = std::forward<F>(fn)(
-                       view<Ts, Fmt, Store>{payload}),
+                       view<Ts, child_format, Store>{payload, root_}),
                     matched = true)
                  : false) ||
              ...);
@@ -559,7 +574,7 @@ namespace psio {
          }
          else
          {
-            return view<FieldT, Fmt, Store>{field_span, root_};
+            return view<FieldT, view_layout::nested_format_t<Fmt, T>, Store>{field_span, root_};
          }
       }
    };

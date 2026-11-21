@@ -135,12 +135,13 @@ namespace psio {
 
    struct fixed_buf_stream
    {
+      static inline char empty_storage{};
       char* begin;
       char* pos;
       char* end;
 
       fixed_buf_stream(char* p, std::size_t size) noexcept
-         : begin(p), pos(p), end(p + size)
+         : begin(p ? p : &empty_storage), pos(begin), end(begin + size)
       {
       }
 
@@ -149,22 +150,25 @@ namespace psio {
       void write(char ch)
       {
          if (pos >= end)
-            throw codec_exception{
-               codec_error{"stream overrun", 0, "fixed_buf_stream"}};
+            codec_abort(codec_error{"stream overrun", 0, "fixed_buf_stream"});
          *pos++ = ch;
       }
 
       void write(const void* src, std::size_t n)
       {
-         if (pos + n > end)
-            throw codec_exception{
-               codec_error{"stream overrun", 0, "fixed_buf_stream"}};
+         if (n > static_cast<std::size_t>(end - pos))
+            codec_abort(codec_error{"stream overrun", 0, "fixed_buf_stream"});
+         if (n == 0) return;
          std::memcpy(pos, src, n);
          pos += n;
       }
 
       void rewrite(std::size_t offset, const void* src, std::size_t n)
       {
+         const auto capacity = static_cast<std::size_t>(end - begin);
+         if (offset > capacity || n > capacity - offset)
+            codec_abort(codec_error{"stream overrun", 0, "fixed_buf_stream"});
+         if (n == 0) return;
          std::memcpy(begin + offset, src, n);
       }
 
@@ -186,9 +190,9 @@ namespace psio {
 
       void skip(std::int32_t s)
       {
-         if ((pos + s > end) || (pos + s < begin))
-            throw codec_exception{
-               codec_error{"stream overrun", 0, "fixed_buf_stream"}};
+         if ((s >= 0 && static_cast<std::uint32_t>(s) > static_cast<std::size_t>(end - pos)) ||
+             (s < 0 && -static_cast<std::int64_t>(s) > pos - begin))
+            codec_abort(codec_error{"stream overrun", 0, "fixed_buf_stream"});
          pos += s;
       }
 
@@ -205,12 +209,13 @@ namespace psio {
 
    struct fast_buf_stream
    {
+      static inline char empty_storage{};
       char* begin;
       char* pos;
       char* end;
 
       fast_buf_stream(char* p, std::size_t size) noexcept
-         : begin(p), pos(p), end(p + size)
+         : begin(p ? p : &empty_storage), pos(begin), end(begin + size)
       {
       }
 
@@ -220,12 +225,14 @@ namespace psio {
 
       void write(const void* src, std::size_t n) noexcept
       {
+         if (n == 0) return;
          std::memcpy(pos, src, n);
          pos += n;
       }
 
       void rewrite(std::size_t offset, const void* src, std::size_t n) noexcept
       {
+         if (n == 0) return;
          std::memcpy(begin + offset, src, n);
       }
 
