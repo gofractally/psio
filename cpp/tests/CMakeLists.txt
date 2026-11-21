@@ -49,6 +49,7 @@ psio_add_test(psio_ssz_tests ssz_tests.cpp)
 
 # Phase 7: pSSZ codec (parametric-width family).
 psio_add_test(psio_pssz_tests pssz_tests.cpp)
+psio_add_test(psio_pssz_record_layout_tests pssz_record_layout_tests.cpp)
 
 # Cross-format parity: maxFields / maxDynamicData enforcement.
 psio_add_test(psio_caps_parity_tests caps_parity_tests.cpp)
