@@ -13,7 +13,14 @@
 //! `pssz_struct!` macro (parallel to how `ssz_struct!` generates named
 //! accessors for `SszView`).
 
-use crate::pssz::{Bitvector, Bitlist, BoundedList, BoundedString, PsszFormat, PsszPack, Uint256};
+use crate::pssz::{Bitvector, Bitlist, BoundedList, BoundedString, PsszFormat, PsszPack, PsszValidate, PsszResult, Decoded, Uint256};
+
+pub trait PsszField<F: PsszFormat, const INDEX: usize> {
+    type Field: PsszPack<F>;
+    const LOCATION: crate::pssz_checked::FieldLocation;
+    const DWNC: bool = false;
+    const TRANSPARENT: bool = false;
+}
 
 /// Zero-copy pSSZ view parameterized by target type `T` and format tag `F`.
 #[derive(Debug, Clone, Copy)]
@@ -27,6 +34,29 @@ impl<'a, T: ?Sized, F: PsszFormat> PsszView<'a, T, F> {
         PsszView { data, _phantom: std::marker::PhantomData }
     }
     pub fn raw(&self) -> &'a [u8] { self.data }
+
+    pub fn field<const INDEX: usize>(&self) -> PsszView<'a, <T as PsszField<F, INDEX>>::Field, F>
+    where T: PsszField<F, INDEX> {
+        if <T as PsszField<F, INDEX>>::TRANSPARENT { return PsszView::new(self.data); }
+        let bytes = crate::pssz_checked::field_bytes::<F, <T as PsszField<F, INDEX>>::Field>(
+            self.data, <T as PsszField<F, INDEX>>::LOCATION, <T as PsszField<F, INDEX>>::DWNC,
+        ).expect("pssz view: use a validated buffer");
+        PsszView::new(bytes)
+    }
+}
+
+pub fn validated_view_exact<'a, T: PsszValidate<F>, F: PsszFormat>(bytes: &'a [u8]) -> PsszResult<PsszView<'a, T, F>> {
+    crate::pssz_checked::format::<F>()?;
+    let session = crate::pssz_checked::DecodeSession::enter(false);
+    T::pssz_validate(bytes)?;
+    if session.has_unknown() { return Err(crate::pssz::PsszError("pssz view: unknown fields in exact validation")); }
+    Ok(PsszView::new(bytes))
+}
+pub fn validated_view_compatible<'a, T: PsszValidate<F>, F: PsszFormat>(bytes: &'a [u8]) -> PsszResult<Decoded<PsszView<'a, T, F>>> {
+    crate::pssz_checked::format::<F>()?;
+    let session = crate::pssz_checked::DecodeSession::enter(true);
+    T::pssz_validate(bytes)?;
+    Ok(Decoded { value: PsszView::new(bytes), has_unknown: session.has_unknown() })
 }
 
 // ── Primitives ──────────────────────────────────────────────────────────────
@@ -82,6 +112,7 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Vec<T>, F> {
     pub fn len(&self) -> usize {
         if self.data.is_empty() { return 0; }
         if T::IS_FIXED_SIZE {
+            assert!(T::FIXED_SIZE != 0, "pssz view: nonempty zero-size list is invalid");
             self.data.len() / T::FIXED_SIZE
         } else {
             let ob = F::OFFSET_BYTES;
@@ -91,6 +122,7 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Vec<T>, F> {
     }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
     pub fn get(&self, i: usize) -> PsszView<'a, T, F> {
+        assert!(i < self.len(), "pssz view: list index out of bounds");
         if T::IS_FIXED_SIZE {
             let elem = T::FIXED_SIZE;
             PsszView::new(&self.data[i * elem .. (i + 1) * elem])
@@ -130,6 +162,7 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat, const N: usize>
 {
     pub const fn size() -> usize { N }
     pub fn get(&self, i: usize) -> PsszView<'a, T, F> {
+        assert!(i < N, "pssz view: array index out of bounds");
         if T::IS_FIXED_SIZE {
             let elem = T::FIXED_SIZE;
             PsszView::new(&self.data[i * elem .. (i + 1) * elem])
@@ -157,12 +190,17 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Option<T>, F> {
         }
     }
     pub fn unwrap(&self) -> PsszView<'a, T, F> {
+        assert!(self.has_value(), "pssz view: called unwrap on None");
         if T::MIN_ENCODED_SIZE == 0 {
             PsszView::new(&self.data[1..])
         } else {
             PsszView::new(self.data)
         }
     }
+}
+
+impl<'a, T: ?Sized, F: PsszFormat> PsszView<'a, Box<T>, F> {
+    pub fn deref(&self) -> PsszView<'a, T, F> { PsszView::new(self.data) }
 }
 
 // ── Bit types ───────────────────────────────────────────────────────────────

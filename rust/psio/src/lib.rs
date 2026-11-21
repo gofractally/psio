@@ -36,6 +36,7 @@
 mod fracpack_impl;
 
 pub use fracpack_impl::*;
+pub use psio_macros::{PsszPack, PsszUnpack, PsszView, ToPsszSchema};
 
 // Validation policy — type machinery for the format-tagged
 // `validate<F, T, P>` CPO described in `docs/psio-overview.md` §2.4.
@@ -67,6 +68,9 @@ pub mod pjson_json;
 pub mod pssz;
 #[doc(hidden)]
 pub mod pssz_checked;
+pub mod pssz_schema_ir;
+pub mod pssz_dynamic;
+pub mod pssz_upgrade;
 #[macro_use]
 pub mod pssz_derive;
 pub mod pssz_view;

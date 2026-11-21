@@ -1,43 +1,87 @@
-# Explicit PSSZ protocol profiles in Rust
+# Explicit Rust PSSZ APIs and optional suffix evolution
 
 The crate-root `Pack`, `Unpack`, and `ToSchema` APIs remain legacy fracpack.
-They do not switch formats when PSSZ support is enabled. PSSZ entry points live
-under `psio::pssz`; callers explicitly supply `Pssz8`, `Pssz16`, or `Pssz32`.
+Explicit `PsszPack`, `PsszUnpack`, `PsszView`, and `ToPsszSchema` derives are
+independent; deriving both families on one type does not change either wire.
+Use `#[pssz(crate = "renamed_crate")]` for a renamed dependency. Records are
+extensible by default; `definition_will_not_change` suppresses their header, and
+`transparent` explicitly unwraps a single-field struct.
 
-The initial psibase protocol profile is **PSSZ32**: C++ `psio::pssz32` and Rust
-`Pssz32`. This gives both languages the same deterministic header and offset
-width for every nested type. C++'s `psio::pssz` automatic width selector is a
-different profile and must not silently replace it. A future compact profile
-requires an explicit protocol version and its own cross-language fixtures.
+## Width is explicit and stable within a lineage
 
-Use `try_to_pssz::<F, _>(&value)` for fallible encoding and
-`from_pssz::<F, T>(&bytes)` for exact-span decoding. The infallible `to_pssz` and
-low-level `pssz_pack` remain compatibility conveniences and panic on an encode
-error. Checked container/record implementations validate bounds and offsets
-before appending to their caller's output. Custom implementations must override
-`pssz_pack_checked` when encoding can fail.
+`Pssz8`, `Pssz16`, and `Pssz32` select header/offset widths matching C++
+`psio::pssz8`, `psio::pssz16`, and `psio::pssz32`. All widths are tested. The
+migration's final width/profile is not selected here. Readers and writers of a
+compatible type lineage must keep the same width; C++ automatic width selection
+must not silently change a deployed lineage when fields are added.
 
-Primitive spans must have exactly the expected length; booleans must be 0 or 1.
-Generic arrays, vectors, boxed arrays, and records decode each field through its
-codec rather than treating arbitrary Rust memory layouts as wire data. A matching
-memory size does not establish a safe representation, particularly for bool and
-user-defined records. Boxed arrays are still constructed on the heap.
+## Evolution contract
 
-Variable sequence tables must begin exactly at the end of their offset table,
-and record payloads must begin exactly after their fixed region. Offsets must be
-monotone and in bounds. Checked record decoding requires the declared schema's
-exact fixed-region header; unknown extension layouts are explicit errors pending
-an extension-aware schema policy. Fixed records reject trailing bytes. Variable
-payload lengths belong to their field codecs; appended text bytes, for example,
-are part of that text value.
+An upgrade preserves the original ordered field prefix and may append only
+optional fields. Existing names, types, bounds, and annotations remain compatible;
+DWNC layouts cannot grow. The actual new C++ schema IR is mirrored under
+`pssz::schema_ir`, including its AnyType record wrapper, ordered alternatives,
+attributes and package/interface/world envelope. `ToPsszSchema` emits that IR.
+`upgrade::validate_optional_upgrade` checks old/new schema graphs at deployment;
+no writer schema or schema identity is needed to read stored records.
 
-Optionals follow the public C++ implementation: fixed inner types use zero bytes
-for None and the inner encoding for Some; variable inner types use selector 0
-for None and selector 1 followed by the payload for Some. This includes
-extensible records even when their minimum encoding length is nonzero. A Some
-value with a zero-byte fixed encoding cannot be distinguished from None and is
-rejected by checked encoding.
+The reader uses the writer's fixed-region header H and its known fixed region K.
+Present known slots must fit wholly inside H. Missing trailing known Options
+become None; a missing required field or split slot rejects. When H>K, every
+unknown suffix slot is an offset because schema upgrades enforce optional-only
+additions. H-K must be a multiple of W, even when K itself is odd. All known and
+unknown variable offsets share one checked monotone offset list, so the first
+unknown offset correctly terminates the last known variable field.
 
-This checked surface is a prerequisite for explicit derives and a mirror of the
-new C++ schema IR. The old fracpack `AnyType`/`CompiledSchema` do not describe the
-PSSZ layout and are not reused as PSSZ schema descriptors.
+Only trailing None values are pruned. Required empty strings and zero scalars
+remain present. DWNC records keep their entire layout. Option payloads use the
+minimum-encoded-size rule: a selector is present exactly when the inner type can
+encode zero bytes. Extensible records have a positive header minimum and need no
+selector; zero-byte DWNC units need one, preserving None versus Some(unit).
+
+## Checked entry points and unknown fields
+
+`try_to_pssz::<F,_>` returns encode errors. `from_pssz_exact::<F,T>` rejects
+unknown fields while accepting missing/pruned trailing Options. For compatible
+reads use `from_pssz_compatible`, returning `{value, has_unknown}`; the flag
+propagates through nested records and sequences. `into_known()` rejects a typed
+rewrite that would discard unknown fields. Reading through an older schema does
+not implicitly preserve unknown data when its typed value is re-encoded.
+
+`validate_canonical_for_profile` checks exact-schema bytes against the encoder
+for the supplied width, including maximal trailing-None pruning. Structural
+readers also accept well-formed older unpruned None encodings. This API does not
+choose a global schema width or claim the other published-spec canonical rules
+are finalized. Infallible `to_pssz` and `pssz_pack` remain conveniences that panic
+on encode error; protocol code should use the checked entry point.
+
+Primitive spans are exact, bool bytes are 0/1, offsets are in bounds and monotone,
+and first variable offsets equal the writer's fixed region. Arrays, vectors and
+records walk codecs instead of assuming Rust memory layout equals wire layout.
+Boxed arrays decode on the heap. A nonempty list of zero-byte fixed elements is
+ambiguous and rejected; a fixed-count array can represent those elements.
+
+## Views and runtime schemas
+
+`PsszView` derives constant field locations and named accessors. Checked exact
+and compatible view constructors structurally validate without materializing
+payload values. A getter reads its offset and next known/first unknown offset
+in O(1); omitted optional fields use static canonical None bytes. Legacy record
+macros share the same checked layout/span helpers. The low-level `PsszView::new`
+constructor is for already-trusted buffers.
+
+`pssz::dynamic` consumes the same new schema IR. Typed dynamic values preserve
+Option state and variant selectors that ordinary JSON can collapse. Unsupported
+IR types/custom adapters return explicit errors, and the legacy FracPack marker
+never silently selects a different codec.
+
+The default safety budget numbers the root node 0: record/tuple fields, sequence
+elements, Some payloads and variant payloads add one level. Transparent boxes and
+wrappers add none; None and empty containers have no child. Node 64 is accepted;
+node 65 rejects. This is a wire traversal budget: omitted trailing None fields
+are synthesized defaults, so they add no node. Writers prune those fields before
+traversing the kept prefix. A present unpruned None does count its Option node,
+while Some(unit) also counts the unit payload. Checked typed and dynamic writers,
+material readers, structural validation and validated views enforce this rule.
+Shared fixtures cover these boundaries and every width. Depth-invalid fixture
+bytes are built independently, never emitted by a supported checked writer.

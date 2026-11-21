@@ -17,6 +17,19 @@ mod schema_macro;
 mod capnp_macro;
 mod fb_macro;
 mod wit_macro;
+mod pssz_macro;
+
+#[proc_macro_derive(PsszPack, attributes(pssz))]
+pub fn derive_pssz_pack(input: TokenStream) -> TokenStream { pssz_macro::derive(input, false) }
+
+#[proc_macro_derive(PsszUnpack, attributes(pssz))]
+pub fn derive_pssz_unpack(input: TokenStream) -> TokenStream { pssz_macro::derive(input, true) }
+
+#[proc_macro_derive(ToPsszSchema, attributes(pssz))]
+pub fn derive_to_pssz_schema(input: TokenStream) -> TokenStream { pssz_macro::derive_schema(input) }
+
+#[proc_macro_derive(PsszView, attributes(pssz))]
+pub fn derive_pssz_view(input: TokenStream) -> TokenStream { pssz_macro::derive_view(input) }
 
 // TODO: remove
 #[proc_macro_derive(Fracpack, attributes(fracpack))]

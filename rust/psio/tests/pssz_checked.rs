@@ -38,15 +38,17 @@ fn fixed_custom_types_are_walked_instead_of_memcopied() {
 }
 
 #[test]
-fn variable_optional_record_uses_cpp_selector_rule() {
+fn variable_optional_record_uses_minimum_size_selector_rule() {
     let record = Record {
         flag: true,
         text: "a".into(),
         other: "b".into(),
     };
     let bytes = try_to_pssz::<Pssz8, _>(&Some(record)).unwrap();
-    assert_eq!(bytes, [1, 3, 1, 3, 4, b'a', b'b']);
-    assert_eq!(try_to_pssz::<Pssz8, Option<Record>>(&None).unwrap(), [0]);
+    assert_eq!(bytes, [3, 1, 3, 4, b'a', b'b']);
+    assert!(try_to_pssz::<Pssz8, Option<Record>>(&None)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -61,7 +63,9 @@ fn checked_encode_reports_nested_offset_and_bound_overflow() {
         &[(
             Layout {
                 fixed: true,
-                size: usize::MAX
+                size: usize::MAX,
+                optional: false,
+                omit: false,
             },
             vec![]
         )],

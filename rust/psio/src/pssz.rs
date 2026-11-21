@@ -20,6 +20,10 @@
 //!     uses a 1-byte selector. A fixed inner shape uses span length instead.
 
 use std::convert::TryFrom;
+pub use psio_macros::{PsszPack, PsszUnpack, PsszView, ToPsszSchema};
+pub use crate::pssz_schema_ir as schema_ir;
+pub use crate::pssz_dynamic as dynamic;
+pub use crate::pssz_upgrade as upgrade;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PsszError(pub &'static str);
@@ -61,6 +65,9 @@ impl PsszFormat for Pssz32 {
 
 /// Encoding trait. `F` picks the offset/header width.
 pub trait PsszPack<F: PsszFormat> {
+    const IS_OPTIONAL: bool = false;
+    fn pssz_is_none(&self) -> bool { false }
+    fn pssz_none_bytes() -> Option<&'static [u8]> { None }
     /// `min_encoded_size` — used by enclosing `Option<T>` to decide whether
     /// a 1-byte Union selector is needed. When this is 0, adjacency can't
     /// disambiguate None from Some(empty) and the selector is required.
@@ -88,6 +95,8 @@ pub trait PsszPack<F: PsszFormat> {
     /// Fallible append used by untrusted protocol entry points. Implementations
     /// with offsets or bounds override this to validate before appending.
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::EncodeDepth::enter()?;
+        out.try_reserve(self.pssz_size()).map_err(|_| PsszError("pssz: output allocation overflow"))?;
         self.pssz_pack(out);
         Ok(())
     }
@@ -116,6 +125,7 @@ pub trait PsszUnpack<F: PsszFormat>: Sized {
     fn pssz_unpack_boxed(bytes: &[u8]) -> PsszResult<Box<Self>> {
         Ok(Box::new(Self::pssz_unpack(bytes)?))
     }
+    fn pssz_missing_optional() -> PsszResult<Self> { Err(PsszError("pssz: missing nonoptional field")) }
 }
 
 // ── Macro-driven primitive impls ────────────────────────────────────────────
@@ -134,6 +144,7 @@ macro_rules! pssz_impl_primitive_le {
         }
         impl<F: PsszFormat> PsszUnpack<F> for $ty {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
                 const S: usize = std::mem::size_of::<$ty>();
                 if bytes.len() != S { return Err(PsszError("pssz: primitive span mismatch")); }
                 let mut buf = [0u8; S];
@@ -161,6 +172,7 @@ impl<F: PsszFormat> PsszPack<F> for Uint256 {
 }
 impl<F: PsszFormat> PsszUnpack<F> for Uint256 {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         if bytes.len() != 32 { return Err(PsszError("pssz: uint256 span mismatch")); }
         let mut limb = [0u64; 4];
         for i in 0..4 {
@@ -184,6 +196,7 @@ impl<F: PsszFormat> PsszPack<F> for bool {
 }
 impl<F: PsszFormat> PsszUnpack<F> for bool {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         if bytes.len() != 1 { return Err(PsszError("pssz: bool span mismatch")); }
         match bytes[0] {
             0 => Ok(false),
@@ -205,8 +218,41 @@ impl<F: PsszFormat> PsszPack<F> for String {
         out.extend_from_slice(self.as_bytes());
     }
 }
+impl<F: PsszFormat> PsszPack<F> for str {
+    const MIN_ENCODED_SIZE: usize = 0;
+    const MAX_ENCODED_SIZE: Option<usize> = None;
+    const IS_FIXED_SIZE: bool = false;
+    const FIXED_SIZE: usize = 0;
+    fn pssz_size(&self) -> usize { self.len() }
+    fn pssz_pack(&self, out: &mut Vec<u8>) { out.extend_from_slice(self.as_bytes()); }
+}
+impl<F: PsszFormat, T: PsszPack<F> + ?Sized> PsszPack<F> for &T {
+    const MIN_ENCODED_SIZE: usize = T::MIN_ENCODED_SIZE;
+    const MAX_ENCODED_SIZE: Option<usize> = T::MAX_ENCODED_SIZE;
+    const IS_FIXED_SIZE: bool = T::IS_FIXED_SIZE;
+    const FIXED_SIZE: usize = T::FIXED_SIZE;
+    const IS_OPTIONAL: bool = T::IS_OPTIONAL;
+    fn pssz_is_none(&self) -> bool { <T as PsszPack<F>>::pssz_is_none(self) }
+    fn pssz_none_bytes() -> Option<&'static [u8]> { T::pssz_none_bytes() }
+    fn pssz_size(&self) -> usize { <T as PsszPack<F>>::pssz_size(self) }
+    fn pssz_pack(&self, out: &mut Vec<u8>) { <T as PsszPack<F>>::pssz_pack(self, out) }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { <T as PsszPack<F>>::pssz_pack_checked(self,out) }
+}
+impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for [T] {
+    const MIN_ENCODED_SIZE: usize=0;
+    const MAX_ENCODED_SIZE: Option<usize>=None;
+    const IS_FIXED_SIZE: bool=false;
+    const FIXED_SIZE: usize=0;
+    fn pssz_size(&self) -> usize { crate::pssz::try_to_pssz::<F,_>(self).expect("pssz: slice encode failed").len() }
+    fn pssz_pack(&self,out:&mut Vec<u8>) { <Self as PsszPack<F>>::pssz_pack_checked(self,out).expect("pssz: slice encode failed"); }
+    fn pssz_pack_checked(&self,out:&mut Vec<u8>) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::EncodeDepth::enter()?;
+        crate::pssz_checked::encode_sequence::<F,T>(self,out)
+    }
+}
 impl<F: PsszFormat> PsszUnpack<F> for String {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         std::str::from_utf8(bytes)
             .map(|s| s.to_owned())
             .map_err(|_| PsszError("pssz: invalid UTF-8 in string"))
@@ -237,16 +283,19 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for [T; N] {
         self.pssz_pack_checked(out).expect("pssz: array encode failed; use try_to_pssz");
     }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        crate::pssz_checked::encode_sequence::<F, T>(self, out)
+        let _depth = crate::pssz_checked::EncodeDepth::enter()?;
+        crate::pssz_checked::encode_array::<F, T>(self, out)
     }
 }
 
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F> for [T; N] {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         crate::pssz_checked::decode_sequence::<F, T>(bytes, Some(N))?
             .try_into().map_err(|_| PsszError("pssz: array length mismatch"))
     }
     fn pssz_unpack_boxed(bytes: &[u8]) -> PsszResult<Box<Self>> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         crate::pssz_checked::decode_sequence::<F, T>(bytes, Some(N))?
             .into_boxed_slice().try_into().map_err(|_| PsszError("pssz: boxed array length mismatch"))
     }
@@ -266,6 +315,7 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for Bitvector<N> {
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for Bitvector<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         let nb = (N + 7) / 8;
         if bytes.len() < nb { return Err(PsszError("pssz: bitvector underrun")); }
         Ok(Bitvector { bytes: bytes[..nb].to_vec() })
@@ -285,6 +335,7 @@ impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
 }
 impl<F: PsszFormat, const MAX_N: usize> PsszUnpack<F> for Bitlist<MAX_N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         use crate::ssz::SszUnpack;
         <Self as SszUnpack>::ssz_unpack(bytes).map_err(|e| PsszError(e.0))
     }
@@ -326,8 +377,7 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedString<N> {
     fn pssz_pack(&self, out: &mut Vec<u8>) { out.extend_from_slice(self.0.as_bytes()); }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
         if self.0.len() > N { return Err(PsszError("pssz: BoundedString overflow")); }
-        out.extend_from_slice(self.0.as_bytes());
-        Ok(())
+        <String as PsszPack<F>>::pssz_pack_checked(&self.0, out)
     }
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedString<N> {
@@ -359,34 +409,39 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Vec<T> {
         self.pssz_pack_checked(out).expect("pssz: vector encode failed; use try_to_pssz");
     }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::EncodeDepth::enter()?;
         crate::pssz_checked::encode_sequence::<F, T>(self, out)
     }
 }
 
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Vec<T> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         crate::pssz_checked::decode_sequence::<F, T>(bytes, None)
     }
 }
 
 // ── Option<T> ───────────────────────────────────────────────────────────────
-// The public C++ codec uses a selector iff the inner wire shape is variable.
+// A selector is necessary iff an inner encoding may be empty.
 
 impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Option<T> {
-    const MIN_ENCODED_SIZE: usize = if T::IS_FIXED_SIZE { 0 } else { 1 };
-    // Option max = (selector_byte iff inner shape is variable) + max<T>.
+    const IS_OPTIONAL: bool = true;
+    fn pssz_is_none(&self) -> bool { self.is_none() }
+    fn pssz_none_bytes() -> Option<&'static [u8]> { Some(if T::MIN_ENCODED_SIZE == 0 { &[0] } else { &[] }) }
+    const MIN_ENCODED_SIZE: usize = if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 };
+    // Option max = (selector_byte iff inner minimum is zero) + max<T>.
     const MAX_ENCODED_SIZE: Option<usize> = match T::MAX_ENCODED_SIZE {
-        Some(m) => Some((if !T::IS_FIXED_SIZE { 1 } else { 0 }) + m),
+        Some(m) => Some((if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 }) + m),
         None    => None,
     };
     const IS_FIXED_SIZE:    bool  = false;
     const FIXED_SIZE:       usize = 0;
     fn pssz_size(&self) -> usize {
-        let selector = if !T::IS_FIXED_SIZE { 1 } else { 0 };
+        let selector = if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 };
         match self { Some(v) => selector + v.pssz_size(), None => selector }
     }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
-        if !T::IS_FIXED_SIZE {
+        if T::MIN_ENCODED_SIZE == 0 {
             out.push(if self.is_some() { 1 } else { 0 });
             if let Some(v) = self { v.pssz_pack(out); }
         } else if let Some(v) = self {
@@ -394,14 +449,13 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Option<T> {
         }
     }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::EncodeDepth::enter()?;
         let mut result = Vec::new();
-        if !T::IS_FIXED_SIZE { result.push(if self.is_some() { 1 } else { 0 }); }
+        if T::MIN_ENCODED_SIZE == 0 { result.push(if self.is_some() { 1 } else { 0 }); }
         if let Some(value) = self {
-            if T::IS_FIXED_SIZE && T::FIXED_SIZE == 0 {
-                return Err(PsszError("pssz: Some zero-size fixed value is ambiguous"));
-            }
             value.pssz_pack_checked(&mut result)?;
         }
+        out.try_reserve(result.len()).map_err(|_| PsszError("pssz: output allocation overflow"))?;
         out.extend_from_slice(&result);
         Ok(())
     }
@@ -409,6 +463,9 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Option<T> {
 
 // Box is wire-transparent. Array's boxed decoder stays on the heap.
 impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Box<T> {
+    const IS_OPTIONAL: bool = T::IS_OPTIONAL;
+    fn pssz_is_none(&self) -> bool { (**self).pssz_is_none() }
+    fn pssz_none_bytes() -> Option<&'static [u8]> { T::pssz_none_bytes() }
     const MIN_ENCODED_SIZE: usize = T::MIN_ENCODED_SIZE;
     const MAX_ENCODED_SIZE: Option<usize> = T::MAX_ENCODED_SIZE;
     const IS_FIXED_SIZE: bool = T::IS_FIXED_SIZE;
@@ -421,11 +478,88 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Box<T> {
 }
 impl<F: PsszFormat, T: PsszUnpack<F>> PsszUnpack<F> for Box<T> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> { T::pssz_unpack_boxed(bytes) }
+    fn pssz_missing_optional() -> PsszResult<Self> { Ok(Box::new(T::pssz_missing_optional()?)) }
 }
 
+// Positional products use the same extensible record layout as the C++ tuple
+// profile. In particular () is a zero-field record, not an empty byte span.
+macro_rules! pssz_tuple_fields {
+    (@each $all:tt;) => {};
+    (@each $all:tt; ($selected:ident, $index:tt) $(, ($rest:ident, $other:tt))*) => {
+        pssz_tuple_fields!(@one $all; $selected, $index);
+        pssz_tuple_fields!(@each $all; $(($rest, $other)),*);
+    };
+    (@one [$(($ty:ident, $position:tt)),*]; $selected:ident, $index:tt) => {
+        impl<F: PsszFormat, $($ty: PsszPack<F>),*> crate::pssz_view::PsszField<F, $index> for ($($ty,)*) {
+            type Field = $selected;
+            const LOCATION: crate::pssz_checked::FieldLocation = crate::pssz_checked::record_location::<F>(&[
+                $(crate::pssz_checked::Layout::of::<F, $ty>()),*
+            ], $index);
+        }
+    };
+}
+macro_rules! pssz_tuple {
+    ($(($ty:ident, $index:tt)),* $(,)?) => {
+        impl<F: PsszFormat, $($ty: PsszPack<F>),*> PsszPack<F> for ($($ty,)*) {
+            const MIN_ENCODED_SIZE: usize = F::HEADER_BYTES;
+            const MAX_ENCODED_SIZE: Option<usize> = None;
+            const IS_FIXED_SIZE: bool = false;
+            const FIXED_SIZE: usize = 0;
+            fn pssz_size(&self) -> usize { try_to_pssz::<F, _>(self).expect("pssz: tuple encode failed").len() }
+            fn pssz_pack(&self, out: &mut Vec<u8>) { <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: tuple encode failed; use try_to_pssz"); }
+            fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+                let _depth = crate::pssz_checked::EncodeDepth::enter()?;
+                let __keep = crate::pssz_checked::record_kept_fields(&[
+                    $(<$ty as PsszPack<F>>::IS_OPTIONAL && <$ty as PsszPack<F>>::pssz_is_none(&self.$index)),*
+                ], false);
+                crate::pssz_checked::encode_record::<F>(&[
+                    $(crate::pssz_checked::field_if_kept::<F, $ty>(&self.$index, $index < __keep)?),*
+                ], false, out)
+            }
+        }
+        impl<F: PsszFormat, $($ty: PsszPack<F> + PsszUnpack<F>),*> PsszUnpack<F> for ($($ty,)*) {
+            fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+                let _depth = crate::pssz_checked::DecodeDepth::enter()?;
+                let spans = crate::pssz_checked::record_spans::<F>(&[
+                    $(crate::pssz_checked::Layout::of::<F, $ty>()),*
+                ], bytes, false)?;
+                let _ = &spans;
+                Ok(($(crate::pssz_checked::decode_field::<F, $ty>(bytes, spans[$index].clone())?,)*))
+            }
+        }
+        impl<F: PsszFormat, $($ty: PsszPack<F> + PsszValidate<F>),*> PsszValidate<F> for ($($ty,)*) {
+            fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+                let _depth = crate::pssz_checked::DecodeDepth::enter()?;
+                let spans = crate::pssz_checked::record_spans::<F>(&[
+                    $(crate::pssz_checked::Layout::of::<F, $ty>()),*
+                ], bytes, false)?;
+                let _ = &spans;
+                $(if let Some(span) = &spans[$index] { $ty::pssz_validate(&bytes[span.clone()])?; })*
+                Ok(())
+            }
+        }
+        pssz_tuple_fields!(@each [$(($ty, $index)),*]; $(($ty, $index)),*);
+    };
+}
+pssz_tuple!();
+pssz_tuple!((A, 0));
+pssz_tuple!((A, 0), (B, 1));
+pssz_tuple!((A, 0), (B, 1), (C, 2));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7), (J, 8));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7), (J, 8), (K, 9));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7), (J, 8), (K, 9), (L, 10));
+pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7), (J, 8), (K, 9), (L, 10), (M, 11));
+
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Option<T> {
+    fn pssz_missing_optional() -> PsszResult<Self> { Ok(None) }
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        if !T::IS_FIXED_SIZE {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
+        if T::MIN_ENCODED_SIZE == 0 {
             if bytes.is_empty() { return Err(PsszError("pssz: optional selector missing")); }
             match bytes[0] {
                 0 => {
@@ -445,29 +579,6 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Option<T> 
 
 // ── Offset width helpers ────────────────────────────────────────────────────
 
-fn write_offset<F: PsszFormat>(dst: &mut [u8], value: usize) {
-    // Store `value` as little-endian into `dst` which is exactly
-    // F::OFFSET_BYTES long (1, 2, or 4 bytes).
-    debug_assert_eq!(dst.len(), F::OFFSET_BYTES);
-    let v = u32::try_from(value).expect("pssz: offset exceeds u32");
-    match F::OFFSET_BYTES {
-        1 => dst[0] = v as u8,
-        2 => dst.copy_from_slice(&(v as u16).to_le_bytes()),
-        4 => dst.copy_from_slice(&v.to_le_bytes()),
-        _ => unreachable!(),
-    }
-}
-
-fn read_offset<F: PsszFormat>(src: &[u8]) -> u32 {
-    debug_assert_eq!(src.len(), F::OFFSET_BYTES);
-    match F::OFFSET_BYTES {
-        1 => src[0] as u32,
-        2 => u16::from_le_bytes([src[0], src[1]]) as u32,
-        4 => u32::from_le_bytes([src[0], src[1], src[2], src[3]]),
-        _ => unreachable!(),
-    }
-}
-
 // ── Convenience top-level API ───────────────────────────────────────────────
 
 pub fn to_pssz<F: PsszFormat, T: PsszPack<F>>(value: &T) -> Vec<u8> {
@@ -484,7 +595,44 @@ pub fn try_to_pssz<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszRes
 }
 
 pub fn from_pssz<F: PsszFormat, T: PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
-    <T as PsszUnpack<F>>::pssz_unpack(bytes)
+    from_pssz_exact::<F, T>(bytes)
+}
+
+/// Decode the known schema and reject unknown fields. Missing trailing optional
+/// fields default to None, including fields omitted by canonical pruning.
+pub fn from_pssz_exact<F: PsszFormat, T: PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
+    crate::pssz_checked::format::<F>()?;
+    let session = crate::pssz_checked::DecodeSession::enter(false);
+    let value = <T as PsszUnpack<F>>::pssz_unpack(bytes)?;
+    if session.has_unknown() { return Err(PsszError("pssz: unknown fields rejected by exact decoder")); }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decoded<T> { pub value: T, pub has_unknown: bool }
+impl<T> Decoded<T> {
+    /// Refuse a lossy typed rewrite when an older reader skipped new fields.
+    pub fn into_known(self) -> PsszResult<T> {
+        if self.has_unknown { Err(PsszError("pssz: unknown fields would be lost by typed rewrite")) }
+        else { Ok(self.value) }
+    }
+}
+
+/// Read optional suffix extensions using only the known reader schema. The
+/// returned flag reports unknown fields anywhere in the decoded value tree.
+pub fn from_pssz_compatible<F: PsszFormat, T: PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<Decoded<T>> {
+    crate::pssz_checked::format::<F>()?;
+    let session = crate::pssz_checked::DecodeSession::enter(true);
+    let value = T::pssz_unpack(bytes)?;
+    Ok(Decoded { value, has_unknown: session.has_unknown() })
+}
+
+/// Canonicality for the caller's explicit width: exact known schema and bytes
+/// identical to its pruning encoder. This does not select/freeze a schema width.
+pub fn validate_canonical_for_profile<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<()> {
+    let value = from_pssz_exact::<F,T>(bytes)?;
+    if try_to_pssz::<F,T>(&value)? != bytes { return Err(PsszError("pssz: noncanonical bytes for explicit profile")); }
+    Ok(())
 }
 
 /// Structural validator — walks the pSSZ tree checking offsets, selectors,
@@ -497,6 +645,7 @@ macro_rules! pssz_validate_primitive {
     ($($ty:ty),* $(,)?) => {$(
         impl<F: PsszFormat> PsszValidate<F> for $ty {
             fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
                 if bytes.len() != std::mem::size_of::<$ty>() {
                     return Err(PsszError("pssz validate: primitive underrun"));
                 }
@@ -509,6 +658,7 @@ pssz_validate_primitive!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, 
 
 impl<F: PsszFormat> PsszValidate<F> for bool {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         if bytes.len() != 1 { return Err(PsszError("pssz validate: bool span mismatch")); }
         if bytes[0] > 1 { return Err(PsszError("pssz validate: invalid bool")); }
         Ok(())
@@ -517,6 +667,7 @@ impl<F: PsszFormat> PsszValidate<F> for bool {
 
 impl<F: PsszFormat> PsszValidate<F> for Uint256 {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         if bytes.len() != 32 { return Err(PsszError("pssz validate: uint256 span mismatch")); }
         Ok(())
     }
@@ -524,12 +675,14 @@ impl<F: PsszFormat> PsszValidate<F> for Uint256 {
 
 impl<F: PsszFormat> PsszValidate<F> for String {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         std::str::from_utf8(bytes).map(|_| ()).map_err(|_| PsszError("pssz validate: invalid UTF-8"))
     }
 }
 
 impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Vec<T> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
         if bytes.is_empty() { return Ok(()); }
         if T::IS_FIXED_SIZE {
             if T::FIXED_SIZE == 0 { return Err(PsszError("pssz validate: zero-size list element")); }
@@ -544,23 +697,23 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Vec<T>
         } else {
             let ob = F::OFFSET_BYTES;
             if bytes.len() < ob { return Err(PsszError("pssz validate: vec short")); }
-            let first = read_offset::<F>(&bytes[..ob]);
+            let first = crate::pssz_checked::read_offset::<F>(&bytes[..ob])?;
             if first == 0 || first as usize % ob != 0 || first as usize > bytes.len() {
                 return Err(PsszError("pssz validate: bad first offset"));
             }
             let n = (first as usize) / ob;
-            let mut prev: u32 = first;
+            let mut prev: usize = first;
             for i in 1..n {
-                let off = read_offset::<F>(&bytes[i * ob .. (i + 1) * ob]);
+                let off = crate::pssz_checked::read_offset::<F>(&bytes[i * ob .. (i + 1) * ob])?;
                 if off < prev || (off as usize) > bytes.len() {
                     return Err(PsszError("pssz validate: non-monotone offset"));
                 }
                 prev = off;
             }
             for i in 0..n {
-                let beg = read_offset::<F>(&bytes[i * ob .. (i + 1) * ob]) as usize;
+                let beg = crate::pssz_checked::read_offset::<F>(&bytes[i * ob .. (i + 1) * ob])?;
                 let stop = if i + 1 < n {
-                    read_offset::<F>(&bytes[(i + 1) * ob .. (i + 2) * ob]) as usize
+                    crate::pssz_checked::read_offset::<F>(&bytes[(i + 1) * ob .. (i + 2) * ob])?
                 } else { bytes.len() };
                 T::pssz_validate(&bytes[beg .. stop])?;
             }
@@ -571,7 +724,8 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Vec<T>
 
 impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Option<T> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        if !T::IS_FIXED_SIZE {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
+        if T::MIN_ENCODED_SIZE == 0 {
             if bytes.is_empty() {
                 return Err(PsszError("pssz validate: option selector missing"));
             }
@@ -591,8 +745,71 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Option
     }
 }
 
+impl<F: PsszFormat, T: PsszValidate<F>> PsszValidate<F> for Box<T> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> { T::pssz_validate(bytes) }
+}
+impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValidate<F> for [T; N] {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
+        if T::IS_FIXED_SIZE {
+            if N.checked_mul(T::FIXED_SIZE) != Some(bytes.len()) { return Err(PsszError("pssz validate: array span mismatch")); }
+            for i in 0..N { T::pssz_validate(&bytes[i * T::FIXED_SIZE..(i + 1) * T::FIXED_SIZE])?; }
+        } else {
+            let table = N.checked_mul(F::OFFSET_BYTES).ok_or(PsszError("pssz validate: array table overflow"))?;
+            if bytes.len() < table || (N == 0 && !bytes.is_empty()) { return Err(PsszError("pssz validate: array table mismatch")); }
+            let mut previous = table;
+            for i in 0..N {
+                let begin = crate::pssz_checked::read_offset::<F>(&bytes[i * F::OFFSET_BYTES..])?;
+                let end = if i + 1 < N { crate::pssz_checked::read_offset::<F>(&bytes[(i + 1) * F::OFFSET_BYTES..])? } else { bytes.len() };
+                if (i == 0 && begin != table) || begin < previous || begin > end || end > bytes.len() { return Err(PsszError("pssz validate: noncanonical array offset")); }
+                T::pssz_validate(&bytes[begin..end])?; previous = begin;
+            }
+        }
+        Ok(())
+    }
+}
+impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValidate<F> for BoundedList<T, N> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let count = if bytes.is_empty() { 0 } else if T::IS_FIXED_SIZE {
+            if T::FIXED_SIZE == 0 { return Err(PsszError("pssz validate: zero-size bounded list")); }
+            bytes.len() / T::FIXED_SIZE
+        } else { crate::pssz_checked::read_offset::<F>(bytes)? / F::OFFSET_BYTES };
+        if count > N { return Err(PsszError("pssz validate: bounded list count exceeded")); }
+        <Vec<T> as PsszValidate<F>>::pssz_validate(bytes)
+    }
+}
+impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        if bytes.len() > N { return Err(PsszError("pssz validate: bounded string length exceeded")); }
+        <String as PsszValidate<F>>::pssz_validate(bytes)
+    }
+}
+impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitvector<N> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
+        if bytes.len() != N.saturating_add(7) / 8 { return Err(PsszError("pssz validate: bitvector span mismatch")); }
+        <Self as crate::ssz::SszValidate>::ssz_validate(bytes).map_err(|_| PsszError("pssz validate: invalid bitvector"))
+    }
+}
+impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitlist<N> {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _depth = crate::pssz_checked::DecodeDepth::enter()?;
+        <Self as crate::ssz::SszValidate>::ssz_validate(bytes).map_err(|_| PsszError("pssz validate: invalid bitlist"))
+    }
+}
+
 pub fn pssz_validate<F: PsszFormat, T: PsszValidate<F>>(bytes: &[u8]) -> PsszResult<()> {
+    crate::pssz_checked::format::<F>()?;
+    let session = crate::pssz_checked::DecodeSession::enter(false);
+    T::pssz_validate(bytes)?;
+    if session.has_unknown() { return Err(PsszError("pssz: unknown fields rejected by exact validator")); }
+    Ok(())
+}
+pub fn pssz_validate_compatible<F: PsszFormat, T: PsszValidate<F>>(bytes: &[u8]) -> PsszResult<bool> {
+    crate::pssz_checked::format::<F>()?;
+    let session = crate::pssz_checked::DecodeSession::enter(true);
     T::pssz_validate(bytes)
+        .map(|_| session.has_unknown())
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────
