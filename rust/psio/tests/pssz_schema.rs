@@ -124,6 +124,42 @@ fn schema_alias_resolution_rejects_cycles_and_unknown_names() {
     assert!(schema.resolve(&AnyType::named("missing")).is_err());
 }
 
+#[test]
+fn schema_builder_reserves_preorder_slots_and_rolls_back_failed_insertions() {
+    let (schema, root) = schema_for::<(u32, Vec<Option<String>>)>().unwrap();
+    assert_eq!(
+        schema
+            .types
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
+        ["@0", "@1", "@2", "@3", "@4", "@5"]
+    );
+    assert_eq!(root, AnyType::named("@0"));
+    assert!(matches!(schema.types[0].r#type.value, AnyValue::Tuple(_)));
+    struct Failing;
+    impl ToPsszSchema for Failing {
+        fn build_schema(builder: &mut SchemaBuilder) -> psio::pssz::PsszResult<AnyType> {
+            builder.insert::<String>()?;
+            Err(PsszError("intentional schema fixture failure"))
+        }
+    }
+    let mut builder = SchemaBuilder::new();
+    builder.insert::<u8>().unwrap();
+    assert!(builder.insert::<Failing>().is_err());
+    assert_eq!(builder.insert::<u16>().unwrap(), AnyType::named("@1"));
+    let schema = builder.finish();
+    assert_eq!(schema.types.len(), 2);
+    assert!(matches!(
+        schema.types[0].r#type.value,
+        AnyValue::Int(Int { bits: 8, .. })
+    ));
+    assert!(matches!(
+        schema.types[1].r#type.value,
+        AnyValue::Int(Int { bits: 16, .. })
+    ));
+}
+
 fn integer(bits: u32) -> AnyType {
     AnyType::new(AnyValue::Int(Int {
         bits,

@@ -153,12 +153,29 @@ impl SchemaBuilder {
         }
         self.names.insert(id, name.clone());
         self.owners.insert(name.clone(), id);
-        let ty = T::build_schema(self)?;
+        // Match the C++ builder's declaration order: reserve this slot before
+        // walking children, so recursive references and emitted ordering agree.
+        let index = self.schema.types.len();
         self.schema.types.push(Member {
             name: name.clone(),
-            r#type: Box::new(ty),
+            r#type: Box::new(AnyType::new(AnyValue::Struct(Struct {
+                members: vec![],
+                attributes: vec![],
+            }))),
             attributes: vec![],
         });
+        match T::build_schema(self) {
+            Ok(ty) => self.schema.types[index].r#type = Box::new(ty),
+            Err(error) => {
+                self.schema.types.truncate(index);
+                let existing = &self.schema.types;
+                self.names
+                    .retain(|_, name| existing.iter().any(|m| m.name == *name));
+                self.owners
+                    .retain(|name, _| existing.iter().any(|m| m.name == *name));
+                return Err(error);
+            }
+        }
         Ok(AnyType::named(name))
     }
     pub fn finish(self) -> Schema {

@@ -22,6 +22,10 @@ optional fields. Existing names, types, bounds, and annotations remain compatibl
 DWNC layouts cannot grow. The actual new C++ schema IR is mirrored under
 `pssz::schema_ir`, including its AnyType record wrapper, ordered alternatives,
 attributes and package/interface/world envelope. `ToPsszSchema` emits that IR.
+Schema definitions reserve their slots before walking children, matching C++
+preorder declaration output and deterministic @N naming; failed insertion rolls
+back its new definitions. This changes schema metadata ordering, not user
+payload framing or bytes.
 `upgrade::validate_optional_upgrade` checks old/new schema graphs at deployment;
 no writer schema or schema identity is needed to read stored records.
 
