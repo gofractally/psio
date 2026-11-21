@@ -39,6 +39,7 @@
 #include <psio/validate_strict_walker.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -214,12 +215,55 @@ namespace psio {
       inline constexpr bool is_std_vector_v   = is_std_vector<T>::value;
       template <typename T>
       inline constexpr bool is_std_optional_v = is_std_optional<T>::value;
-      template <typename T>
-      inline constexpr bool is_std_variant_v  = is_std_variant<T>::value;
 
-      // Fixed byte count for fixed types.
+      template <Record T, std::size_t I>
+      consteval bool record_field_override()
+      {
+         using R = ::psio::reflect<T>;
+         using F = typename R::template member_type<I>;
+         using eff = typename ::psio::effective_annotations_for<
+            T, F, R::template member_pointer<I>>::value_t;
+         return ::psio::has_as_override_v<eff>;
+      }
+
       template <typename T>
       constexpr std::size_t fixed_size_of() noexcept;
+
+      template <std::size_t W, Record T, std::size_t I>
+      consteval std::size_t record_field_size()
+      {
+         using F = typename ::psio::reflect<T>::template member_type<I>;
+         if constexpr (!record_field_override<T, I>() && is_fixed_v<F>)
+            return fixed_size_of<F>();
+         else
+            return W;
+      }
+
+      // Legacy fracpack only prunes an absent optional suffix. Required empty
+      // containers and interior None remain present; frozen layouts never prune.
+      template <Record T>
+      std::size_t record_present_fields(const T& value)
+      {
+         using R = ::psio::reflect<T>;
+         if constexpr (::psio::is_dwnc_v<T>)
+            return R::member_count;
+         std::size_t result = 0;
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            ([&] {
+               using F = typename R::template member_type<Is>;
+               if constexpr (is_std_optional_v<F> && !record_field_override<T, Is>())
+               {
+                  if ((value.*R::template member_pointer<Is>).has_value())
+                     result = Is + 1;
+               }
+               else
+                  result = Is + 1;
+            }(), ...);
+         }(std::make_index_sequence<R::member_count>{});
+         return result;
+      }
+      template <typename T>
+      inline constexpr bool is_std_variant_v  = is_std_variant<T>::value;
 
       template <Record T, std::size_t... Is>
       consteval std::size_t sum_record_fields(std::index_sequence<Is...>)
@@ -286,6 +330,51 @@ namespace psio {
       }
 
       // ── Encoding ──────────────────────────────────────────────────────────
+
+      // Find the next nonempty sibling payload using the writer's actual fixed
+      // region. Known fields retain their declared widths; unknown extensions
+      // are optional W-byte slots, as in legacy verify_extensions. This bounds
+      // a nested compatible read without parsing unknown payload types.
+      template <std::size_t W, Record T>
+      std::size_t record_next_payload(std::span<const char> src,
+                                      std::size_t fixed_start,
+                                      std::size_t fixed_end,
+                                      std::size_t after,
+                                      std::size_t end) noexcept
+      {
+         using R = ::psio::reflect<T>;
+         std::size_t cursor = fixed_start;
+         std::size_t result = end;
+         bool stopped = false;
+         auto consider = [&](std::size_t slot_pos) {
+            const auto slot = read_word<W>(src, slot_pos);
+            if (slot >= 2 && slot <= end - slot_pos &&
+                slot_pos + slot >= fixed_end)
+               result = std::min(result, slot_pos + slot);
+         };
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            ([&] {
+               if (stopped) return;
+               constexpr auto width = record_field_size<W, T, Is>();
+               if (cursor > fixed_end || width > fixed_end - cursor)
+               {
+                  stopped = true;
+                  return;
+               }
+               using F = typename R::template member_type<Is>;
+               if constexpr (record_field_override<T, Is>() || !is_fixed_v<F>)
+                  if (Is > after) consider(cursor);
+               cursor += width;
+            }(), ...);
+         }(std::make_index_sequence<R::member_count>{});
+         if (!stopped)
+            while (cursor < fixed_end && W <= fixed_end - cursor)
+            {
+               consider(cursor);
+               cursor += W;
+            }
+         return result;
+      }
       //
       // Variable payloads are written as [u{W} length][payload]. Records
       // emit a [u{W} header][fixed_region][heap] triple where the header
@@ -723,11 +812,13 @@ namespace psio {
             };
 
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               const std::size_t present = record_present_fields(v);
                // Phase 1: compute fixed_region size.
                std::size_t fixed_region = 0;
                (
                   ([&]
                    {
+                      if (Is >= present) return;
                       using F = typename R::template member_type<Is>;
                       constexpr bool override_v =
                          field_has_override(
@@ -762,6 +853,7 @@ namespace psio {
                (
                   ([&]
                    {
+                      if (Is >= present) return;
                       using F = typename R::template member_type<Is>;
                       constexpr bool override_v =
                          field_has_override(
@@ -851,6 +943,7 @@ namespace psio {
                (
                   ([&]
                    {
+                      if (Is >= present) return;
                       using F = typename R::template member_type<Is>;
                       constexpr bool override_v =
                          field_has_override(
@@ -945,17 +1038,19 @@ namespace psio {
          [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             // Read u16 header (fixed_region size) unless T is DWNC —
             // DWNC types emit no header, so the fixed region starts
-            // at `pos` directly. fixed_region value is unused (only
-            // meaningful for trailing-field synthesis, not yet in v3).
+            // at `pos` directly. The writer's region can omit a known optional
+            // suffix or include unknown optional slots.
             std::size_t fixed_start;
+            std::size_t fixed_end;
             if constexpr (::psio::is_dwnc_v<T>)
             {
                fixed_start = pos;
+               fixed_end = pos + (std::size_t{0} + ... + record_field_size<W, T, Is>());
             }
             else
             {
-               (void)read_word<2>(src, pos);
                fixed_start = pos + 2;
+               fixed_end = fixed_start + read_word<2>(src, pos);
             }
             std::size_t cursor = fixed_start;
             (
@@ -969,6 +1064,15 @@ namespace psio {
                          R::template member_pointer<Is>>::value_t;
                    constexpr bool override_v =
                       ::psio::has_as_override_v<eff>;
+
+                   if constexpr (is_std_optional_v<F> && !override_v)
+                   {
+                      if (cursor == fixed_end)
+                      {
+                         fref.reset();
+                         return;
+                      }
+                   }
 
                    if constexpr (!override_v && is_fixed_v<F>)
                    {
@@ -989,6 +1093,8 @@ namespace psio {
                       const std::size_t   slot_pos = cursor;
                       const std::uint32_t slot     = read_word<W>(src, slot_pos);
                       cursor += W;
+                      const auto field_end = record_next_payload<W, T>(
+                         src, fixed_start, fixed_end, Is, end);
 
                       if constexpr (override_v)
                       {
@@ -998,7 +1104,7 @@ namespace psio {
                          const std::size_t payload_pos = slot_pos + slot;
                          fref = Proj::decode(std::span<const char>(
                             src.data() + payload_pos,
-                            end - payload_pos));
+                            field_end - payload_pos));
                          return;
                       }
 
@@ -1017,7 +1123,7 @@ namespace psio {
                          }
                          const std::size_t payload_pos = slot_pos + slot;
                          fref.emplace();
-                         decode_into<W, V>(src, payload_pos, end, *fref);
+                         decode_into<W, V>(src, payload_pos, field_end, *fref);
                          return;
                       }
 
@@ -1027,7 +1133,7 @@ namespace psio {
                          return;
                       }
                       const std::size_t payload_pos = slot_pos + slot;
-                      decode_into<W, F>(src, payload_pos, end, fref);
+                      decode_into<W, F>(src, payload_pos, field_end, fref);
                    }
                 }()),
                ...);
@@ -1451,13 +1557,14 @@ namespace psio {
                return ::psio::has_as_override_v<eff>;
             };
 
-            // Phase 1 — fixed_region size (compile-time; fully folded
-            // when every field is fixed).
-            constexpr std::size_t fixed_region =
+            // Size the same emitted prefix as the encoder.
+            const std::size_t present = record_present_fields(v);
+            const std::size_t fixed_region =
                [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                   std::size_t total = 0;
                   (
                      ([&]<std::size_t I>() {
+                        if (I >= present) return;
                         using F = typename R::template member_type<I>;
                         constexpr bool override_v =
                            field_has_override(
@@ -1477,6 +1584,7 @@ namespace psio {
                (
                   ([&]
                    {
+                      if (Is >= present) return;
                       using F = typename R::template member_type<Is>;
                       constexpr bool override_v =
                          field_has_override(
@@ -1566,7 +1674,7 @@ namespace psio {
 
       template <std::size_t W, typename T>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
-                                  std::size_t end, std::size_t depth) noexcept;
+                                  std::size_t end, std::size_t depth, bool strict = false) noexcept;
 
       // Forward decl — payload_end is used inside validate_value's record
       // walker to track monotonic offsets across heap entries.
@@ -1578,7 +1686,7 @@ namespace psio {
       codec_status validate_record_fixed_inline(std::span<const char> src,
                                                 std::size_t&          cursor,
                                                 std::size_t           end,
-                                                std::size_t depth) noexcept
+                                                std::size_t depth, bool strict = false) noexcept
       {
          if (depth > ::psio::kMaxValidationDepth)
             return codec_fail("frac: max depth exceeded",
@@ -1606,7 +1714,7 @@ namespace psio {
                        {
                           auto saved = cursor;
                           err = validate_record_fixed_inline<W, F>(
-                             src, cursor, end, depth + 1);
+                             src, cursor, end, depth + 1, strict);
                           (void)saved;
                        }
                        else
@@ -1616,7 +1724,7 @@ namespace psio {
                           // contract: caller passes the field's exclusive
                           // end so the walker won't run past it.
                           err = validate_value<W, F>(
-                             src, cursor, cursor + fsz, depth + 1);
+                             src, cursor, cursor + fsz, depth + 1, strict);
                           cursor += fsz;
                        }
                        return 0;
@@ -1629,7 +1737,7 @@ namespace psio {
 
       template <std::size_t W, typename T>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
-                                  std::size_t end, std::size_t depth) noexcept
+                                  std::size_t end, std::size_t depth, bool strict) noexcept
       {
          if (depth > ::psio::kMaxValidationDepth)
             return codec_fail("frac: max depth exceeded",
@@ -1749,7 +1857,7 @@ namespace psio {
                   for (std::size_t i = 0; i < N; ++i)
                   {
                      auto st = validate_record_fixed_inline<W, E>(
-                        src, cursor, pos + total, depth + 1);
+                        src, cursor, pos + total, depth + 1, strict);
                      if (!st.ok())
                         return st;
                   }
@@ -1774,7 +1882,7 @@ namespace psio {
                         "frac: array element body OOB",
                         static_cast<std::uint32_t>(cursor), "frac");
                   auto st = validate_value<W, E>(
-                     src, cursor, cursor + len, depth + 1);
+                     src, cursor, cursor + len, depth + 1, strict);
                   if (!st.ok())
                      return st;
                   cursor += len;
@@ -1846,7 +1954,7 @@ namespace psio {
                   for (std::size_t i = 0; i < n; ++i)
                   {
                      auto st = validate_record_fixed_inline<W, E>(
-                        src, cursor, body_pos + byte_count, depth + 1);
+                        src, cursor, body_pos + byte_count, depth + 1, strict);
                      if (!st.ok())
                         return st;
                   }
@@ -1896,7 +2004,7 @@ namespace psio {
                         "frac: vector<variable> element body OOB",
                         static_cast<std::uint32_t>(payload_pos), "frac");
                   auto st = validate_value<W, E>(
-                     src, payload_pos, payload_end, depth + 1);
+                     src, payload_pos, payload_end, depth + 1, strict);
                   if (!st.ok())
                      return st;
                }
@@ -1935,7 +2043,7 @@ namespace psio {
                if constexpr (is_std_vector_v<V> ||
                              std::is_same_v<V, std::string>)
                   return codec_ok();
-               return validate_value<W, V>(src, pos + W, end, depth + 1);
+               return validate_value<W, V>(src, pos + W, end, depth + 1, strict);
             }
             // Some(payload) at offset.
             if (slot > end - pos)
@@ -1943,7 +2051,7 @@ namespace psio {
                   "frac: optional offset past buffer end",
                   static_cast<std::uint32_t>(pos), "frac");
             return validate_value<W, V>(
-               src, pos + slot, end, depth + 1);
+               src, pos + slot, end, depth + 1, strict);
          }
          else if constexpr (is_std_variant_v<T>)
          {
@@ -1978,7 +2086,7 @@ namespace psio {
                     ? (err = validate_value<
                           W,
                           std::variant_alternative_t<Is, T>>(
-                          src, content_pos, content_end, depth + 1),
+                          src, content_pos, content_end, depth + 1, strict),
                        false)
                     : true) &&
                 ...);
@@ -1987,41 +2095,10 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            // Memcpy fast path (DWNC + trivially-copyable + sized).
-            if constexpr (::psio::is_dwnc_v<T> &&
-                          std::is_trivially_copyable_v<T> &&
-                          is_fixed_v<T>)
-               if constexpr (fixed_size_of<T>() == sizeof(T))
-            {
-               return avail >= sizeof(T)
-                         ? codec_ok()
-                         : codec_fail(
-                              "frac: dwnc record truncated",
-                              static_cast<std::uint32_t>(pos), "frac");
-            }
-            // Fully-fixed (non-DWNC) record fast path. The wire frame
-            // is [u16 header][fixed_region]. Once the buffer covers
-            // both, every field's bytes are accounted for — no per-
-            // field walk is needed because the static type pins each
-            // field's offset and size. Mirrors pssz's same shortcut
-            // (pssz.hpp:1430).
-            if constexpr (is_fixed_v<T>)
-            {
-               constexpr std::size_t hdr =
-                  ::psio::is_dwnc_v<T> ? std::size_t{0} : std::size_t{2};
-               return avail >= hdr + fixed_size_of<T>()
-                         ? codec_ok()
-                         : codec_fail(
-                              "frac: fixed record truncated",
-                              static_cast<std::uint32_t>(pos), "frac");
-            }
-
             using R = ::psio::reflect<T>;
 
-            // 1. Read u16 header (unless DWNC). Header value names the
-            //    fixed_region byte count — must equal the
-            //    statically-computed sum of field sizes (offset slots
-            //    + inlined fixed fields).
+            // The writer's fixed region may omit trailing None or include
+            // unknown optional slots; it need not equal the reader's layout.
             std::size_t fixed_start;
             std::size_t hdr_bytes;
             if constexpr (::psio::is_dwnc_v<T>)
@@ -2069,12 +2146,16 @@ namespace psio {
                   return total;
                }(std::make_index_sequence<R::member_count>{});
 
-            if (fixed_start > end || end - fixed_start < fixed_region)
+            const std::size_t writer_fixed_region = ::psio::is_dwnc_v<T>
+               ? fixed_region : read_word<2>(src, pos);
+            if (fixed_start > end || writer_fixed_region > end - fixed_start)
                return codec_fail("frac: fixed_region truncated",
-                                 static_cast<std::uint32_t>(fixed_start),
-                                 "frac");
-
-            const std::size_t heap_start = fixed_start + fixed_region;
+                                 static_cast<std::uint32_t>(fixed_start), "frac");
+            const std::size_t fixed_end = fixed_start + writer_fixed_region;
+            if (strict && writer_fixed_region > fixed_region)
+               return codec_fail("frac: strict validation rejects unknown optional fields",
+                                 static_cast<std::uint32_t>(fixed_end), "frac");
+            const std::size_t heap_start = fixed_end;
             // Each variable field's slot is at slot_pos = fixed_start +
             // (sum of preceding field sizes); its payload starts at
             // slot_pos + offset (offset is pointer-relative, NOT
@@ -2087,10 +2168,12 @@ namespace psio {
             //   2. Payload positions are monotonically non-decreasing
             //      across the field list (canonical encoding).
             //   3. Each payload validates structurally as its declared
-            //      type (recursive walk, depth + 1).
+            //      type (recursive walk, depth + 1, strict).
 
             std::size_t  cursor               = fixed_start;
             std::size_t  expected_payload_pos = heap_start;
+            bool last_has_value = true;
+            bool has_unknown = false;
             codec_status err                  = codec_ok();
             [&]<std::size_t... Is>(std::index_sequence<Is...>)
             {
@@ -2100,6 +2183,16 @@ namespace psio {
                           using F = typename R::template member_type<Is>;
                           constexpr bool override_v = field_has_override(
                              std::integral_constant<std::size_t, Is>{});
+                          if constexpr (is_std_optional_v<F> && !override_v)
+                             if (cursor == fixed_end) return 0;
+                          constexpr auto field_size = record_field_size<W, T, Is>();
+                          if (cursor > fixed_end || field_size > fixed_end - cursor)
+                          {
+                             err = codec_fail("frac: partial or missing required field",
+                                              static_cast<std::uint32_t>(cursor), "frac");
+                             return 0;
+                          }
+                          last_has_value = true;
 
                           if constexpr (!override_v && is_fixed_v<F>)
                           {
@@ -2110,9 +2203,8 @@ namespace psio {
                              if constexpr (Record<F>)
                              {
                                 auto st = validate_record_fixed_inline<
-                                   W, F>(src, cursor, fixed_start +
-                                                         fixed_region,
-                                          depth + 1);
+                                   W, F>(src, cursor, fixed_end,
+                                          depth + 1, strict);
                                 if (!st.ok())
                                 {
                                    err = std::move(st);
@@ -2123,7 +2215,7 @@ namespace psio {
                              {
                                 auto st = validate_value<W, F>(
                                    src, cursor, cursor + fsz,
-                                   depth + 1);
+                                   depth + 1, strict);
                                 if (!st.ok())
                                 {
                                    err = std::move(st);
@@ -2139,6 +2231,8 @@ namespace psio {
                              const std::uint32_t slot =
                                 read_word<W>(src, slot_pos);
                              cursor += W;
+                             const auto field_end = record_next_payload<W, T>(
+                                src, fixed_start, fixed_end, Is, end);
 
                              // Adapter override: payload bytes are
                              // opaque to frac. Slot must be a real
@@ -2177,7 +2271,7 @@ namespace psio {
                                       "frac");
                                    return 0;
                                 }
-                                if (payload_pos < expected_payload_pos)
+                                if (payload_pos != expected_payload_pos)
                                 {
                                    err = codec_fail(
                                       "frac: non-monotonic offsets "
@@ -2187,7 +2281,7 @@ namespace psio {
                                       "frac");
                                    return 0;
                                 }
-                                expected_payload_pos = payload_pos;
+                                expected_payload_pos = field_end;
                                 return 0;
                              }
 
@@ -2195,8 +2289,17 @@ namespace psio {
                              {
                                 // None (slot==1) and Some(empty)
                                 // (slot==0) both have no payload.
-                                if (slot == 0 || slot == 1)
+                                last_has_value = slot != 1;
+                                if (slot == 1) return 0;
+                                if (slot == 0)
+                                {
+                                   using V = typename F::value_type;
+                                   if constexpr (is_std_vector_v<V> || std::is_same_v<V, std::string>)
+                                      return 0;
+                                   err = codec_fail("frac: zero optional slot requires an empty container",
+                                                    static_cast<std::uint32_t>(slot_pos), "frac");
                                    return 0;
+                                }
                                 // Some(payload) at slot_pos + slot.
                                 if (slot > end - slot_pos)
                                 {
@@ -2219,7 +2322,7 @@ namespace psio {
                                       "frac");
                                    return 0;
                                 }
-                                if (payload_pos < expected_payload_pos)
+                                if (payload_pos != expected_payload_pos)
                                 {
                                    err = codec_fail(
                                       "frac: non-monotonic offsets "
@@ -2231,7 +2334,7 @@ namespace psio {
                                 }
                                 using V = typename F::value_type;
                                 auto st = validate_value<W, V>(
-                                   src, payload_pos, end, depth + 1);
+                                   src, payload_pos, field_end, depth + 1, strict);
                                 if (!st.ok())
                                 {
                                    err = std::move(st);
@@ -2242,7 +2345,7 @@ namespace psio {
                                 // walking the validated payload size.
                                 expected_payload_pos =
                                    payload_end<W, V>(src, payload_pos,
-                                                     end);
+                                                     field_end);
                                 return 0;
                              }
                              else
@@ -2250,7 +2353,13 @@ namespace psio {
                                 // Plain variable field. slot==0 marks
                                 // empty container (no payload).
                                 if (slot == 0)
+                                {
+                                   if constexpr (is_std_vector_v<F> || std::is_same_v<F, std::string>)
+                                      return 0;
+                                   err = codec_fail("frac: zero slot requires an empty container",
+                                                    static_cast<std::uint32_t>(slot_pos), "frac");
                                    return 0;
+                                }
                                 if (slot > end - slot_pos)
                                 {
                                    err = codec_fail(
@@ -2272,7 +2381,7 @@ namespace psio {
                                       "frac");
                                    return 0;
                                 }
-                                if (payload_pos < expected_payload_pos)
+                                if (payload_pos != expected_payload_pos)
                                 {
                                    err = codec_fail(
                                       "frac: non-monotonic offsets "
@@ -2283,7 +2392,7 @@ namespace psio {
                                    return 0;
                                 }
                                 auto st = validate_value<W, F>(
-                                   src, payload_pos, end, depth + 1);
+                                   src, payload_pos, field_end, depth + 1, strict);
                                 if (!st.ok())
                                 {
                                    err = std::move(st);
@@ -2291,7 +2400,7 @@ namespace psio {
                                 }
                                 expected_payload_pos =
                                    payload_end<W, F>(src, payload_pos,
-                                                     end);
+                                                     field_end);
                                 return 0;
                              }
                           }
@@ -2300,6 +2409,40 @@ namespace psio {
                     : 0),
                 ...);
             }(std::make_index_sequence<R::member_count>{});
+            if (!err.ok()) return err;
+            if (cursor < fixed_end)
+            {
+               has_unknown = true;
+               if ((fixed_end - cursor) % W != 0)
+                  return codec_fail("frac: unaligned optional extension slots",
+                                    static_cast<std::uint32_t>(cursor), "frac");
+               bool opaque = false;
+               while (cursor < fixed_end)
+               {
+                  const auto slot_pos = cursor;
+                  const auto slot = read_word<W>(src, cursor);
+                  cursor += W;
+                  last_has_value = slot != 1;
+                  if (slot < 2) continue;
+                  if (slot < W || slot > end - slot_pos)
+                     return codec_fail("frac: optional extension offset out of bounds",
+                                       static_cast<std::uint32_t>(slot_pos), "frac");
+                  const auto payload_pos = slot_pos + slot;
+                  if (payload_pos < heap_start || payload_pos < expected_payload_pos ||
+                      (!opaque && payload_pos != expected_payload_pos))
+                     return codec_fail("frac: invalid optional extension payload order",
+                                       static_cast<std::uint32_t>(slot_pos), "frac");
+                  expected_payload_pos = payload_pos;
+                  opaque = true;
+               }
+            }
+            if constexpr (!::psio::is_dwnc_v<T>)
+               if (!last_has_value)
+                  return codec_fail("frac: trailing None must be omitted",
+                                    static_cast<std::uint32_t>(fixed_end), "frac");
+            if (!has_unknown && expected_payload_pos != end)
+               return codec_fail("frac: record has unconsumed payload bytes",
+                                 static_cast<std::uint32_t>(expected_payload_pos), "frac");
             return err;
          }
          else
@@ -2401,7 +2544,7 @@ namespace psio {
             }
             return pos + LB + (bit_count + 7) / 8;
          }
-         else if constexpr (is_fixed_v<T>)
+         else if constexpr (is_fixed_v<T> && !Record<T>)
          {
             // Fixed scalar / fixed record (with header inlined per
             // encode rules). Header presence depends on whether the
@@ -2422,11 +2565,18 @@ namespace psio {
             // returning the parent's end incorrectly rejects every following
             // sibling payload as overlapping the nested record.
             using R = ::psio::reflect<T>;
-            std::size_t cursor = pos + (::psio::is_dwnc_v<T> ? 0u : 2u);
-            std::size_t tail = cursor;
+            const std::size_t fixed_start = pos + (::psio::is_dwnc_v<T> ? 0u : 2u);
+            const std::size_t fixed_bytes = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (std::size_t{0} + ... + record_field_size<W, T, Is>());
+            }(std::make_index_sequence<R::member_count>{});
+            const auto fixed_end = fixed_start + (::psio::is_dwnc_v<T> ? fixed_bytes : read_word<2>(src, pos));
+            std::size_t cursor = fixed_start;
+            std::size_t tail = fixed_end;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                ([&] {
                   using F = typename R::template member_type<Is>;
+                  if constexpr (is_std_optional_v<F> && !record_field_override<T, Is>())
+                     if (cursor == fixed_end) return;
                   using eff = typename ::psio::effective_annotations_for<
                      T, F, R::template member_pointer<Is>>::value_t;
                   if constexpr (!::psio::has_as_override_v<eff> && is_fixed_v<F>)
@@ -2436,18 +2586,22 @@ namespace psio {
                      const auto slot_pos = cursor;
                      const auto slot = read_word<W>(src, cursor);
                      cursor += W;
+                     const auto field_end = record_next_payload<W, T>(src, fixed_start, fixed_end, Is, end);
                      if constexpr (::psio::has_as_override_v<eff>)
-                        tail = end; // opaque adapter payload has no typed size walker
+                        tail = field_end; // opaque adapter payload has no typed size walker
                      else if constexpr (is_std_optional_v<F>)
                      {
                         if (slot > 1)
-                           tail = std::max(tail, payload_end<W, typename F::value_type>(src, slot_pos + slot, end));
+                           tail = std::max(tail, payload_end<W, typename F::value_type>(src, slot_pos + slot, field_end));
                      }
                      else if (slot != 0)
-                        tail = std::max(tail, payload_end<W, F>(src, slot_pos + slot, end));
+                        tail = std::max(tail, payload_end<W, F>(src, slot_pos + slot, field_end));
                   }
                }(), ...);
             }(std::make_index_sequence<R::member_count>{});
+            // Unknown extension payloads have no reader type/size walker.
+            // The parent has bounded this record by the next sibling payload.
+            if (cursor < fixed_end) return end;
             return std::max(cursor, tail);
          }
          else
@@ -2525,8 +2679,10 @@ namespace psio {
                                      frac_<W>, T*,
                                      std::span<const char> bytes) noexcept
       {
+         if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "frac"); !st.ok())
+            return st;
          auto st = detail::frac_impl::validate_value<W, T>(
-            bytes, 0, bytes.size(), 0);
+            bytes, 0, bytes.size(), 0, true);
          if (!st.ok())
             return st;
          if constexpr (::psio::Reflected<T>)
