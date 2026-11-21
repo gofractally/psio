@@ -349,3 +349,17 @@ TEST_CASE("frac strict retains the structural size cap before semantic decode", 
    CHECK_FALSE(psio::validate<CompatCapped>(psio::frac32{}, bytes).ok());
    CHECK_FALSE(psio::validate_strict<CompatCapped>(psio::frac32{}, bytes).ok());
 }
+
+TEST_CASE("frac32 keeps extensible fixed-field records variable in parents", "[frac][legacy][evolution]")
+{
+   require_legacy("fixed-nested", CompatFixedOuter{{7},"sibling"});
+   require_legacy("fixed-vector", std::vector<CompatFixed>{{7},{9}});
+   require_legacy("fixed-frozen-parent", CompatFixedFrozenOuter{{7},9});
+   require_legacy("fixed-extended-nested", CompatFixedOuterWriter{{7,std::string{"extra"}},"sibling"});
+   const auto bytes = legacy_bytes("fixed-extended-nested");
+   REQUIRE(psio::validate<CompatFixedOuter>(psio::frac32{}, bytes).ok());
+   CHECK_FALSE(psio::validate_strict<CompatFixedOuter>(psio::frac32{}, bytes).ok());
+   const auto older = psio::decode<CompatFixedOuter>(psio::frac32{}, bytes);
+   CHECK(older.child.id == 7);
+   CHECK(older.sibling == "sibling");
+}

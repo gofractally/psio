@@ -129,7 +129,10 @@ namespace psio {
             std::make_index_sequence<R::member_count>{});
       }
 
-      // Record-of-all-fixed is fixed *unless* the type has a binary
+      // Only a frozen (DWNC) record can be inline-fixed. Even an all-fixed
+      // extensible record carries its own header and uses a parent offset,
+      // preserving its type's framing when optional fields are later appended.
+      // A frozen record is fixed *unless* the type has a binary
       // adapter that frac itself is willing to honor — in which
       // case frac sees opaque runtime-sized bytes. A adapter that
       // delegates back to frac_<W> doesn't count (frac would recurse);
@@ -146,7 +149,7 @@ namespace psio {
 
       template <Record T>
          requires(!has_binary_adapter_v<T>)
-      struct is_fixed<T> : std::bool_constant<record_all_fixed<T>()>
+      struct is_fixed<T> : std::bool_constant<::psio::is_dwnc_v<T> && record_all_fixed<T>()>
       {
       };
 
