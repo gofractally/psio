@@ -17,6 +17,26 @@
 #include <string>
 #include <vector>
 
+struct PssEmpty {};
+PSIO_REFLECT(PssEmpty)
+struct PssUnit {};
+PSIO_REFLECT(PssUnit)
+PSIO_TYPE_ATTRS(PssUnit, psio::definition_will_not_change{})
+
+TEMPLATE_TEST_CASE("pssz encodes actual zero-field records across widths",
+                   "[pssz][empty]", psio::pssz8, psio::pssz16, psio::pssz32)
+{
+   using F = TestType;
+   auto empty = psio::encode(F{}, PssEmpty{});
+   REQUIRE(empty == std::vector<char>(F::offset_width, 0));
+   REQUIRE(psio::validate<PssEmpty>(F{}, empty).ok());
+   psio::decode<PssEmpty>(F{}, empty);
+   auto unit = psio::encode(F{}, PssUnit{});
+   REQUIRE(unit.empty());
+   REQUIRE(psio::validate<PssUnit>(F{}, unit).ok());
+   psio::decode<PssUnit>(F{}, unit);
+}
+
 // These fixtures opt into definitionWillNotChange(): the pssz wire
 // layout's u{W} fixed_size header is reserved for extensible types,
 // and the size-equality assertions below ("4 + 1 + 3", "8", etc.)
