@@ -65,6 +65,8 @@ pub mod pjson_view;
 pub mod pjson_typed;
 pub mod pjson_json;
 pub mod pssz;
+#[doc(hidden)]
+pub mod pssz_checked;
 #[macro_use]
 pub mod pssz_derive;
 pub mod pssz_view;

@@ -13,76 +13,7 @@ macro_rules! pssz_struct_dwnc {
     ($Ty:ident { $($field:ident : $FTy:ty),+ $(,)? }) => {
         $crate::pssz_struct!(@view_dwnc $Ty { $($field : $FTy),+ });
 
-        impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszPack<F> for $Ty {
-            const MIN_ENCODED_SIZE: usize = { 0 $( + <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE )+ };
-            const MAX_ENCODED_SIZE: ::core::option::Option<usize> = Some({ 0 $( + <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE )+ });
-            const IS_FIXED_SIZE: bool  = true;
-            const FIXED_SIZE:    usize = { 0 $( + <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE )+ };
-            fn pssz_size(&self) -> usize {
-                <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-            }
-            fn pssz_pack(&self, out: &mut Vec<u8>) {
-                // Whole-struct memcpy fast path (see ssz_struct_dwnc!
-                // for full commentary). Gated on size_of == FIXED_SIZE
-                // which holds iff the user applied #[repr(C, packed)].
-                #[cfg(target_endian = "little")]
-                if ::core::mem::size_of::<Self>() ==
-                    <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                {
-                    let bytes = unsafe {
-                        ::core::slice::from_raw_parts(
-                            self as *const Self as *const u8,
-                            ::core::mem::size_of::<Self>())
-                    };
-                    out.extend_from_slice(bytes);
-                    return;
-                }
-                // See ssz_struct_dwnc! for the rationale behind the
-                // by-value copy — lets this compile under `#[repr(C,
-                // packed)]`. DWNC fields are Copy by construction.
-                $(
-                    {
-                        let __f: $FTy = self.$field;
-                        <$FTy as $crate::pssz::PsszPack<F>>::pssz_pack(&__f, out);
-                    }
-                )+
-            }
-        }
-        impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszUnpack<F> for $Ty {
-            fn pssz_unpack(bytes: &[u8]) -> $crate::pssz::PsszResult<Self> {
-                if bytes.len() < <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE {
-                    return Err($crate::pssz::PsszError("pssz dwnc: underrun"));
-                }
-                // Whole-struct memcpy decode fast path.
-                #[cfg(target_endian = "little")]
-                if ::core::mem::size_of::<Self>() ==
-                    <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                {
-                    let fs = <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                    let mut out: ::core::mem::MaybeUninit<Self> =
-                        ::core::mem::MaybeUninit::uninit();
-                    unsafe {
-                        ::core::ptr::copy_nonoverlapping(
-                            bytes.as_ptr(),
-                            out.as_mut_ptr() as *mut u8,
-                            fs);
-                        return Ok(out.assume_init());
-                    }
-                }
-                let mut pos: usize = 0;
-                $(
-                    let $field = {
-                        let fs = <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                        let out = <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(
-                            &bytes[pos .. pos + fs])?;
-                        pos += fs;
-                        out
-                    };
-                )+
-                let _ = pos;
-                Ok($Ty { $($field),+ })
-            }
-        }
+        $crate::pssz_struct!(@impl $Ty { $($field : $FTy),+ }; true);
     };
 }
 
@@ -92,135 +23,44 @@ macro_rules! pssz_struct {
     ($Ty:ident { $($field:ident : $FTy:ty),+ $(,)? }) => {
         $crate::pssz_struct!(@view $Ty { $($field : $FTy),+ });
 
+        $crate::pssz_struct!(@impl $Ty { $($field : $FTy),+ }; false);
+    };
+
+    (@field $value:expr, $FTy:ty; true) => {{
+        let value: $FTy = $value;
+        $crate::pssz_checked::field::<F, $FTy>(&value)
+    }};
+    (@field $value:expr, $FTy:ty; false) => {
+        $crate::pssz_checked::field::<F, $FTy>(&$value)
+    };
+
+    (@impl $Ty:ident { $($field:ident : $FTy:ty),+ }; $dwnc:tt) => {
         impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszPack<F> for $Ty {
-            const MIN_ENCODED_SIZE: usize = F::HEADER_BYTES;  // header ≥ 1
-            const MAX_ENCODED_SIZE: ::core::option::Option<usize> = None;
-            const IS_FIXED_SIZE: bool  = false;
-            const FIXED_SIZE:    usize = 0;
+            const MIN_ENCODED_SIZE: usize = if $dwnc { 0 } else { F::HEADER_BYTES };
+            const MAX_ENCODED_SIZE: Option<usize> = None;
+            const IS_FIXED_SIZE: bool = $dwnc $(&& <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE)+;
+            const FIXED_SIZE: usize = if <Self as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE { 0 $(+ <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)+ } else { 0 };
             fn pssz_size(&self) -> usize {
-                let mut total: usize = F::HEADER_BYTES;
-                $(
-                    total += if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                    } else { F::OFFSET_BYTES };
-                )+
-                $(
-                    if !<$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        total += <$FTy as $crate::pssz::PsszPack<F>>::pssz_size(&self.$field);
-                    }
-                )+
-                total
+                $crate::pssz::try_to_pssz::<F, _>(self).expect("pssz: record size overflow").len()
             }
             fn pssz_pack(&self, out: &mut Vec<u8>) {
-                // Extensibility header (size of fixed region).
-                let mut fixed_region_bytes: usize = 0;
-                $(
-                    fixed_region_bytes += if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                    } else { F::OFFSET_BYTES };
-                )+
-                // Emit header as F::HEADER_BYTES little-endian.
-                let hdr = fixed_region_bytes as u32;
-                match F::HEADER_BYTES {
-                    1 => out.push(hdr as u8),
-                    2 => out.extend_from_slice(&(hdr as u16).to_le_bytes()),
-                    4 => out.extend_from_slice(&hdr.to_le_bytes()),
-                    _ => unreachable!(),
-                }
-                let fixed_start = out.len();
-
-                // Fixed region with offset placeholders.
-                let mut slots: Vec<usize> = Vec::new();
-                $(
-                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        <$FTy as $crate::pssz::PsszPack<F>>::pssz_pack(&self.$field, out);
-                    } else {
-                        slots.push(out.len());
-                        out.resize(out.len() + F::OFFSET_BYTES, 0);
-                    }
-                )+
-
-                // Emit variable payloads + backpatch offsets.
-                let mut var_idx: usize = 0;
-                $(
-                    if !<$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        let rel = (out.len() - fixed_start) as u32;
-                        let slot_pos = slots[var_idx];
-                        match F::OFFSET_BYTES {
-                            1 => out[slot_pos] = rel as u8,
-                            2 => out[slot_pos .. slot_pos + 2].copy_from_slice(&(rel as u16).to_le_bytes()),
-                            4 => out[slot_pos .. slot_pos + 4].copy_from_slice(&rel.to_le_bytes()),
-                            _ => unreachable!(),
-                        }
-                        <$FTy as $crate::pssz::PsszPack<F>>::pssz_pack(&self.$field, out);
-                        var_idx += 1;
-                    }
-                )+
-                let _ = var_idx;
+                <Self as $crate::pssz::PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: record encode failed; use try_to_pssz");
+            }
+            fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> $crate::pssz::PsszResult<()> {
+                $crate::pssz_checked::encode_record::<F>(&[
+                    $($crate::pssz_struct!(@field self.$field, $FTy; $dwnc)?),+
+                ], $dwnc, out)
             }
         }
-
         impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszUnpack<F> for $Ty {
             fn pssz_unpack(bytes: &[u8]) -> $crate::pssz::PsszResult<Self> {
-                if bytes.len() < F::HEADER_BYTES {
-                    return Err($crate::pssz::PsszError("pssz struct: header underrun"));
-                }
-                let hdr_bytes_used = F::HEADER_BYTES;
-                // Read header (we don't use it for trusted input; future:
-                // extensibility-aware decoding can consult it).
-                let _hdr: u32 = match F::HEADER_BYTES {
-                    1 => bytes[0] as u32,
-                    2 => u16::from_le_bytes([bytes[0], bytes[1]]) as u32,
-                    4 => u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-                    _ => unreachable!(),
-                };
-
-                let data = &bytes[hdr_bytes_used..];
-                let mut field_pos: usize = 0;
-                let mut var_offsets: Vec<u32> = Vec::new();
-                $(
-                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        field_pos += <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                    } else {
-                        if field_pos + F::OFFSET_BYTES > data.len() {
-                            return Err($crate::pssz::PsszError("pssz struct: offset underrun"));
-                        }
-                        let off: u32 = match F::OFFSET_BYTES {
-                            1 => data[field_pos] as u32,
-                            2 => u16::from_le_bytes([data[field_pos], data[field_pos + 1]]) as u32,
-                            4 => u32::from_le_bytes([
-                                data[field_pos], data[field_pos + 1],
-                                data[field_pos + 2], data[field_pos + 3],
-                            ]),
-                            _ => unreachable!(),
-                        };
-                        var_offsets.push(off);
-                        field_pos += F::OFFSET_BYTES;
-                    }
-                    let _: &str = stringify!($field);
-                )+
-
-                let mut field_pos: usize = 0;
-                let mut var_i: usize = 0;
-                $(
-                    let $field: $FTy = if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        let fs = <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE;
-                        let out = <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(&data[field_pos .. field_pos + fs])?;
-                        field_pos += fs;
-                        out
-                    } else {
-                        let beg = var_offsets[var_i] as usize;
-                        let stop = if var_i + 1 < var_offsets.len() {
-                            var_offsets[var_i + 1] as usize
-                        } else { data.len() };
-                        var_i += 1;
-                        field_pos += F::OFFSET_BYTES;
-                        <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(&data[beg .. stop])?
-                    };
-                )+
-                let _ = field_pos;
-                let _ = var_i;
-                Ok($Ty { $($field),+ })
+                let spans = $crate::pssz_checked::record_spans::<F>(&[
+                    $($crate::pssz_checked::Layout::of::<F, $FTy>()),+
+                ], bytes, $dwnc)?;
+                let mut spans = spans.into_iter();
+                Ok(Self {
+                    $($field: <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(&bytes[spans.next().expect("field count matches")])?),+
+                })
             }
         }
     };
