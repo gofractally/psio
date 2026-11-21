@@ -1,0 +1,33 @@
+{
+  "base": "552ca3744fc5a0cd3c69530cfd4f1e466eadd8f7",
+  "commands": [
+    {
+      "name": "compile",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/Users/dlarimer/psio-psibase-type-width/cpp/include",
+        "-idirafter",
+        "/opt/homebrew/include",
+        "/Users/dlarimer/Documents/ChatGPT/Exchange/artifacts/psibase-migration/psio-type-width-audit/reproduce.cpp",
+        "-o",
+        "/Users/dlarimer/Documents/ChatGPT/Exchange/artifacts/psibase-migration/psio-type-width-audit/reproduce"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "run",
+      "argv": [
+        "/Users/dlarimer/Documents/ChatGPT/Exchange/artifacts/psibase-migration/psio-type-width-audit/reproduce"
+      ],
+      "exit_code": 1
+    }
+  ],
+  "source_sha256": {
+    "/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp": "59af3276c0a332281e9c2cfb46afa45676809c9fa00a8fe384de0f6f9b0616d9",
+    "/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz_view.hpp": "5964753dc70471d8a2e0ccf144f8b0dc4f20cbda2c3cc655ca8ceca28a437c22",
+    "/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/max_size.hpp": "9248e7e57329035f3ba974f33e23d9830ef8b4758ecddee26614267da9ce29c5",
+    "/Users/dlarimer/Documents/ChatGPT/Exchange/artifacts/psibase-migration/psio-type-width-audit/reproduce.cpp": "6b9d845a509e143a69dd49cdf597d37f4df6de6da4239340c5d63428eb83d1ce"
+  }
+}

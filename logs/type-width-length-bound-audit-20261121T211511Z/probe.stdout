@@ -1,0 +1,3 @@
+/Users/dlarimer/psio-psibase-type-width/cpp/tests/pssz_type_width_tests.cpp:257: FAILED: !(psio::validate_strict<WidthCheckpoint>(psio::pssz{},wire).ok()) for: !true
+Failed 1 test case, failed 1 assertion.
+

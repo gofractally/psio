@@ -4,11 +4,9 @@
 // byte count, given its shape and its fields' length_bound annotations.
 //
 // `psio::max_encoded_size<T>()` returns `std::optional<std::size_t>`:
-//   - some(N) when every variable-length sub-field of T carries a
-//     `length_bound{.max=M}` (or exact=M) annotation, producing a
-//     finite upper bound over all possible encoded values
-//   - nullopt when any sub-field is unbounded — the encoder cannot
-//     guarantee the output will fit in any predetermined width
+//   - some(N) when annotations and declared child budgets provide a finite
+//     conservative upper bound, including container bookkeeping
+//   - nullopt when any sub-field is unbounded or bound arithmetic overflows
 //
 // Field-level bounds participate through psio's standard annotation
 // merge: effective_annotations_for<Rec, F, MemberPtr> gathers
@@ -21,11 +19,11 @@
 // W=4 offsets, it certainly fits with W=1 offsets; the narrower the
 // offset, the fewer overhead bytes spent, so the max only shrinks.
 //
-// Consumers today: `auto_pssz_width_v<T>` in pssz.hpp picks the
-// narrowest pssz width whose offsets can index every addressable byte
-// in the worst case. Future consumers: buffer pre-sizing in any
-// format, schema generation for fixed-width wire dialects.
+// `auto_pssz_width_v<T>` uses this bound only when T has no explicit
+// maxDynamicData budget. The W=4 bookkeeping intentionally permits threshold
+// slack rather than making width selection depend on its own result.
 
+#include <psio/adapter.hpp>
 #include <psio/annotate.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
@@ -36,6 +34,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <limits>
 #include <string>
 #include <tuple>
 #include <type_traits>
@@ -81,149 +80,145 @@ namespace psio {
          return std::nullopt;
       }
 
-      // Header bookkeeping each pssz-style format imposes on a variable
-      // field. We bill every variable field 4 bytes (offset or length
-      // prefix under W=4). Pure fixed records pay zero.
-      inline constexpr std::size_t kVariableFieldOverhead = 4;
-
-      // Max encoded bytes for a bare type, with no field-annotation
-      // context. Returns nullopt for unbounded variable-length types
-      // (std::vector, std::string) — those must be used via a
-      // length-bounded annotation or a bounded<> wrapper for the parent
-      // to have a finite max.
-      template <typename T>
-      consteval std::optional<std::size_t> max_bare() noexcept;
-
-      template <typename Annots>
-      struct find_length_bound
+      // These are conservative PSSZ payload bounds with W=4 bookkeeping.
+      // An enclosing record adds its own field slot separately. Declared child
+      // budgets are reserved in full so compatible child growth cannot silently
+      // change an inferred parent width.
+      using bound = std::optional<std::size_t>;
+      constexpr bound add(bound a, bound b) noexcept
       {
-         static constexpr auto value =
-            ::psio::find_spec<::psio::length_bound>(Annots{});
-      };
+         if (!a || !b || *b > std::numeric_limits<std::size_t>::max() - *a)
+            return std::nullopt;
+         return *a + *b;
+      }
+      constexpr bound multiply(std::size_t count, bound value) noexcept
+      {
+         if (count == 0) return 0;
+         if (!value || *value > std::numeric_limits<std::size_t>::max() / count)
+            return std::nullopt;
+         return count * *value;
+      }
+      template <typename T>
+      consteval bound max_bare() noexcept;
 
-      // Max encoded bytes for a *field* of FieldType, given its merged
-      // effective-annotations tuple. Honors length_bound when the field
-      // shape is variable-length (string, vector).
+      // Fixed payloads occupy their bytes inline. Adapter payloads and unknown
+      // shapes are conservatively treated as variable for bound bookkeeping.
+      template <typename T>
+      consteval bool fixed_payload() noexcept
+      {
+         using U = std::remove_cvref_t<T>;
+         if constexpr (::psio::has_adapter_v<U, ::psio::binary_category>)
+            return false;
+         else if constexpr (std::is_arithmetic_v<U> || std::is_enum_v<U> ||
+                            std::is_same_v<U, ::psio::uint128> ||
+                            std::is_same_v<U, ::psio::int128> ||
+                            std::is_same_v<U, ::psio::uint256>)
+            return true;
+         else if constexpr (is_std_array<U>::value)
+            return fixed_payload<typename is_std_array<U>::element_type>();
+         else if constexpr (::psio::Record<U>)
+         {
+            if constexpr (!::psio::is_dwnc_v<U>) return false;
+            else
+            {
+               using R = ::psio::reflect<U>;
+               return []<std::size_t... Is>(std::index_sequence<Is...>) {
+                  return ((fixed_payload<typename R::template member_type<Is>>() &&
+                           !::psio::has_as_override_v<typename ::psio::effective_annotations_for<
+                              U, typename R::template member_type<Is>,
+                              R::template member_pointer<Is>>::value_t>) && ...);
+               }(std::make_index_sequence<R::member_count>{});
+            }
+         }
+         else return false;
+      }
+
+      template <typename T>
+      consteval bound child_payload() noexcept
+      {
+         constexpr auto budget = ::psio::max_dynamic_data_v<std::remove_cvref_t<T>>;
+         if constexpr (budget.has_value()) return budget;
+         else return max_bare<T>();
+      }
+
       template <typename FieldType, typename AnnotsTuple>
-      consteval std::optional<std::size_t>
-      max_field_with_annots(AnnotsTuple annots) noexcept
+      consteval bound max_field_with_annots(AnnotsTuple annots) noexcept
       {
          using F = std::remove_cvref_t<FieldType>;
-
-         // String → length_bound is a byte count.
-         if constexpr (std::is_same_v<F, std::string>)
+         if constexpr (::psio::has_as_override_v<AnnotsTuple>)
+            return std::nullopt; // opaque alternate presentation
+         else if constexpr (::psio::max_dynamic_data_v<F>.has_value())
+            return ::psio::max_dynamic_data_v<F>;
+         else if constexpr (std::is_same_v<F, std::string>)
          {
             auto lb = ::psio::find_spec<::psio::length_bound>(annots);
-            if (lb)
-               if (auto n = bound_max(*lb))
-                  return static_cast<std::size_t>(*n) +
-                         kVariableFieldOverhead;
-            return std::nullopt;
+            if (!lb) return std::nullopt;
+            auto count = bound_max(*lb);
+            return count ? bound{*count} : bound{};
          }
-         // Vector → length_bound is an element count; multiply by
-         // per-element max. Fails if the element type is itself
-         // unbounded (e.g. vector<string> without nested bounds).
          else if constexpr (is_std_vector<F>::value)
          {
             using E = typename F::value_type;
             auto lb = ::psio::find_spec<::psio::length_bound>(annots);
-            if (!lb)
-               return std::nullopt;
-            auto n = bound_max(*lb);
-            if (!n)
-               return std::nullopt;
-            auto e = max_bare<E>();
-            if (!e)
-               return std::nullopt;
-            return static_cast<std::size_t>(*n) * *e +
-                   kVariableFieldOverhead;
+            if (!lb) return std::nullopt;
+            auto count = bound_max(*lb);
+            if (!count) return std::nullopt;
+            auto element = child_payload<E>();
+            if constexpr (!fixed_payload<E>()) element = add(element, 4);
+            return multiply(*count, element);
          }
-         // Optional → transparent w.r.t. annotations.  The bound
-         // applies to the inner U, not the optional itself.  Wire
-         // overhead is conservatively billed as: U's max payload
-         // (computed via the same field machinery, so a length_bound
-         // on the optional<U> field reaches U) + 1-byte union tag
-         // (always added — it over-counts by 1 byte for fixed-U
-         // cases where pssz uses span equality instead of a selector,
-         // which is acceptable for an upper bound) + the optional's
-         // own offset slot (kVariableFieldOverhead).
          else if constexpr (is_std_optional<F>::value)
          {
-            using U = typename F::value_type;
-            // Recurse via max_field_with_annots so length_bound
-            // propagates to U.  If U is itself a string/vector, the
-            // recursion will add U's own kVariableFieldOverhead — for
-            // an outer optional<string> with W=4 this conservatively
-            // bills two slots (the outer and the inner), one of which
-            // is fictitious in pssz but not in frac/bin.  Slack is
-            // acceptable for an upper bound.
-            auto inner = max_field_with_annots<U>(annots);
-            if (!inner)
-               return std::nullopt;
-            return *inner + 1u + kVariableFieldOverhead;
+            using E = typename F::value_type;
+            // One selector is conservative for fixed nonempty payloads, whose
+            // existing optional representation needs no selector.
+            return add(max_field_with_annots<E>(annots), 1);
          }
-         else
-         {
-            // Fixed shapes, records, primitives — bounds don't apply.
-            return max_bare<F>();
-         }
+         else return child_payload<F>();
       }
 
       template <typename T>
-      consteval std::optional<std::size_t> max_bare() noexcept
+      consteval bound max_bare() noexcept
       {
          using U = std::remove_cvref_t<T>;
-
-         if constexpr (std::is_same_v<U, bool>)
-            return 1;
-         else if constexpr (std::is_same_v<U, ::psio::uint256>)
-            return 32;
+         if constexpr (::psio::has_adapter_v<U, ::psio::binary_category>)
+            return std::nullopt;
+         else if constexpr (std::is_same_v<U, bool>) return 1;
+         else if constexpr (std::is_same_v<U, ::psio::uint256>) return 32;
          else if constexpr (std::is_same_v<U, ::psio::uint128> ||
-                            std::is_same_v<U, ::psio::int128>)
-            return 16;
-         else if constexpr (std::is_enum_v<U>)
-            return sizeof(std::underlying_type_t<U>);
-         else if constexpr (std::is_arithmetic_v<U>)
-            return sizeof(U);
+                            std::is_same_v<U, ::psio::int128>) return 16;
+         else if constexpr (std::is_enum_v<U>) return sizeof(std::underlying_type_t<U>);
+         else if constexpr (std::is_arithmetic_v<U>) return sizeof(U);
          else if constexpr (is_std_array<U>::value)
          {
             using E = typename is_std_array<U>::element_type;
-            auto e  = max_bare<E>();
-            if (!e)
-               return std::nullopt;
-            return is_std_array<U>::n * *e;
+            auto element = child_payload<E>();
+            if constexpr (!fixed_payload<E>()) element = add(element, 4);
+            return multiply(is_std_array<U>::n, element);
          }
          else if constexpr (::psio::Record<U>)
          {
-            using R                 = ::psio::reflect<U>;
-            constexpr std::size_t N = R::member_count;
-            std::size_t total = 0;
-            bool        bounded = true;
+            using R = ::psio::reflect<U>;
+            bound total = ::psio::is_dwnc_v<U> ? 0 : 4;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-               auto add_field = [&]<std::size_t I>() {
-                  using FT = typename R::template member_type<I>;
-                  using eff =
-                     ::psio::effective_annotations_for<
-                        U, FT, R::template member_pointer<I>>;
-                  auto m = max_field_with_annots<FT>(eff::value);
-                  if (!m)
-                  {
-                     bounded = false;
-                     return;
-                  }
-                  total += *m;
+               auto field = [&]<std::size_t I>() {
+                  using F = typename R::template member_type<I>;
+                  using eff = ::psio::effective_annotations_for<
+                     U, F, R::template member_pointer<I>>;
+                  auto payload = max_field_with_annots<F>(eff::value);
+                  if constexpr (!fixed_payload<F>() ||
+                                ::psio::has_as_override_v<typename eff::value_t>)
+                     payload = add(payload, 4);
+                  total = add(total, payload);
                };
-               (add_field.template operator()<Is>(), ...);
-            }(std::make_index_sequence<N>{});
-            if (!bounded)
-               return std::nullopt;
+               (field.template operator()<Is>(), ...);
+            }(std::make_index_sequence<R::member_count>{});
             return total;
          }
-         else
-         {
-            // std::string, std::vector<_> — require annotation context.
-            return std::nullopt;
-         }
+         else if constexpr (std::is_same_v<U, std::string> ||
+                            is_std_vector<U>::value || is_std_optional<U>::value)
+            return max_field_with_annots<U>(::psio::effective_annotations<U, ::psio::type<U>{}>::value);
+         else return std::nullopt;
       }
 
    }  // namespace detail::max_size_impl
@@ -231,7 +226,8 @@ namespace psio {
    // Public entry point — returns the upper bound in bytes over all
    // possible encoded values of T, or nullopt when any sub-field is
    // unbounded. The bound assumes pssz W=4 offset overhead and is a
-   // correct upper bound for every narrower pssz width.
+   // conservative upper bound for every narrower pssz width. Child records with
+   // declared budgets reserve their full budget, not only their present fields.
    template <typename T>
    consteval std::optional<std::size_t> max_encoded_size() noexcept
    {
@@ -251,8 +247,9 @@ namespace psio {
    //   cap nullopt, bound present → bound        (no override; trust inferred)
    //   cap nullopt, bound nullopt → nullopt      (caller picks conservative width)
    //
-   // Format consumers (pssz/frac/psch/pjson) use this for offset-width
-   // selection: pick the narrowest width whose addressable range fits.
+   // Retained downward-bound utility for consumers needing the tighter actual
+   // bound. Automatic PSSZ width selection uses the declared budget directly
+   // instead: its lifetime width promise must not shrink to current fields.
    template <typename T>
    inline constexpr std::optional<std::size_t> effective_max_dynamic_v = []
    {

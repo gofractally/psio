@@ -1,0 +1,4 @@
+Small width=1 Parent width=4
+standalone=01016869 nested=01016869
+nested validates as canonical Small=1
+parent self roundtrip=1

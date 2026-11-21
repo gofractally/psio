@@ -1,0 +1,25 @@
+{
+  "reason": "Generated executables/guest object are retained under ignored build artifacts, not checked into library source. Commands retain their original execution paths.",
+  "artifacts": [
+    {
+      "original": "/Users/dlarimer/psio-psibase-type-width/logs/type-width-20261121T211643Z-mac-clang22/fixed-probe",
+      "retained": "/Users/dlarimer/psio-psibase-type-width/build/type-width-evidence/type-width-20261121T211643Z-mac-clang22/fixed-probe",
+      "sha256": "dad87a93dbbe93555abab3c1313443e1b9efad79d21a7a67c096e2847a5995a3"
+    },
+    {
+      "original": "/Users/dlarimer/psio-psibase-type-width/logs/type-width-20261121T211643Z-mac-clang22/reference-goldens",
+      "retained": "/Users/dlarimer/psio-psibase-type-width/build/type-width-evidence/type-width-20261121T211643Z-mac-clang22/reference-goldens",
+      "sha256": "45364a81a0ee0ddff9c60f45e9bd78974c04a48d44a5bdff16c9fcc50e89858d"
+    },
+    {
+      "original": "/Users/dlarimer/psio-psibase-type-width/logs/type-width-20261121T211643Z-mac-clang22/reference-probe",
+      "retained": "/Users/dlarimer/psio-psibase-type-width/build/type-width-evidence/type-width-20261121T211643Z-mac-clang22/reference-probe",
+      "sha256": "c38f547caa4f55b20e1d960d96edd404231bc0d624d7d265c7cb99501f2ad2b6"
+    },
+    {
+      "original": "/Users/dlarimer/psio-psibase-type-width/logs/type-width-20261121T211643Z-mac-clang22/type-width-wasi.o",
+      "retained": "/Users/dlarimer/psio-psibase-type-width/build/type-width-evidence/type-width-20261121T211643Z-mac-clang22/type-width-wasi.o",
+      "sha256": "3a67b6c8bd840456dc2bf0f44a06ecee380ccac463a0dcc7cf3612ed2b7acf94"
+    }
+  ]
+}

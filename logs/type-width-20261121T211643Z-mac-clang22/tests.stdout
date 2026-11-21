@@ -1,0 +1,203 @@
+UpdateCTestConfiguration  from :/Users/dlarimer/psio-psibase-type-width/build/type-width/DartConfiguration.tcl
+Test project /Users/dlarimer/psio-psibase-type-width/build/type-width
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 2
+      Start  2: psio_reflect_tests
+
+2: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_reflect_tests
+2: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+2: Test timeout computed to be: 10000000
+2: ===============================================================================
+2: All tests passed (51 assertions in 10 test cases)
+2: 
+ 1/16 Test  #2: psio_reflect_tests .................   Passed    0.00 sec
+test 4
+      Start  4: psio_annotate_tests
+
+4: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_annotate_tests
+4: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+4: Test timeout computed to be: 10000000
+4: ===============================================================================
+4: All tests passed (112 assertions in 26 test cases)
+4: 
+ 2/16 Test  #4: psio_annotate_tests ................   Passed    0.16 sec
+test 6
+      Start  6: psio_view_access_tests
+
+6: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_view_access_tests
+6: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+6: Test timeout computed to be: 10000000
+6: ===============================================================================
+6: All tests passed (24 assertions in 10 test cases)
+6: 
+ 3/16 Test  #6: psio_view_access_tests .............   Passed    0.00 sec
+test 7
+      Start  7: psio_native_view_tests
+
+7: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_native_view_tests
+7: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+7: Test timeout computed to be: 10000000
+7: ===============================================================================
+7: All tests passed (21 assertions in 7 test cases)
+7: 
+ 4/16 Test  #7: psio_native_view_tests .............   Passed    0.00 sec
+test 11
+      Start 11: psio_pssz_tests
+
+11: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_pssz_tests
+11: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+11: Test timeout computed to be: 10000000
+11: ===============================================================================
+11: All tests passed (89 assertions in 39 test cases)
+11: 
+ 5/16 Test #11: psio_pssz_tests ....................   Passed    0.16 sec
+test 12
+      Start 12: psio_pssz_type_width_tests
+
+12: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_pssz_type_width_tests
+12: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+12: Test timeout computed to be: 10000000
+12: ===============================================================================
+12: All tests passed (765 assertions in 13 test cases)
+12: 
+ 6/16 Test #12: psio_pssz_type_width_tests .........   Passed    0.14 sec
+test 13
+      Start 13: psio_pssz_type_width_consumer
+
+13: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_pssz_type_width_consumer
+13: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+13: Test timeout computed to be: 10000000
+13: {
+13: "WidthCheckpoint":{"width":1,"declared_budget":64,"inferred_bound":28},
+13: "WidthRelayBatch":{"width":4,"declared_budget":null,"inferred_bound":null},
+13: "vector<WidthCheckpoint>":{"width":4,"declared_budget":null,"inferred_bound":null},
+13: "array<WidthCheckpoint,2>":{"width":1,"declared_budget":null,"inferred_bound":136},
+13: "array<WidthCheckpoint,4>":{"width":2,"declared_budget":null,"inferred_bound":272},
+13: "WidthLargeBudget":{"width":4,"declared_budget":1000000,"inferred_bound":5},
+13: "WidthNarrowEnvelope":{"width":1,"declared_budget":64,"inferred_bound":1000012},
+13: "WidthReserveParent":{"width":4,"declared_budget":null,"inferred_bound":1000008},
+13: "WidthGrowV1":{"width":2,"declared_budget":512,"inferred_bound":8},
+13: "WidthGrowV2":{"width":2,"declared_budget":512,"inferred_bound":17},
+13: "WidthGrowParentV1":{"width":2,"declared_budget":null,"inferred_bound":520},
+13: "WidthGrowParentV2":{"width":2,"declared_budget":null,"inferred_bound":520},
+13: "WidthThreshold251":{"width":1,"declared_budget":null,"inferred_bound":255},
+13: "WidthThreshold252":{"width":2,"declared_budget":null,"inferred_bound":256},
+13: "WidthBoundedBatch":{"width":2,"declared_budget":null,"inferred_bound":280},
+13: "WidthOverflowParent":{"width":4,"declared_budget":null,"inferred_bound":null}
+13: }
+ 7/16 Test #13: psio_pssz_type_width_consumer ......   Passed    0.14 sec
+test 14
+      Start 14: psio_empty_action_consumer
+
+14: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_empty_action_consumer
+14: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+14: Test timeout computed to be: 10000000
+14: Empty action records: 2 layouts x 4 existing formats passed
+ 8/16 Test #14: psio_empty_action_consumer .........   Passed    0.12 sec
+test 15
+      Start 15: psio_caps_parity_tests
+
+15: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_caps_parity_tests
+15: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+15: Test timeout computed to be: 10000000
+15: ===============================================================================
+15: All tests passed (15 assertions in 2 test cases)
+15: 
+ 9/16 Test #15: psio_caps_parity_tests .............   Passed    0.25 sec
+test 20
+      Start 20: psio_conformance_tests
+
+20: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_conformance_tests
+20: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+20: Test timeout computed to be: 10000000
+20: ===============================================================================
+20: All tests passed (612 assertions in 64 test cases)
+20: 
+10/16 Test #20: psio_conformance_tests .............   Passed    0.15 sec
+test 21
+      Start 21: psio_static_dynamic_parity_tests
+
+21: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_static_dynamic_parity_tests
+21: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+21: Test timeout computed to be: 10000000
+21: ===============================================================================
+21: All tests passed (15 assertions in 15 test cases)
+21: 
+11/16 Test #21: psio_static_dynamic_parity_tests ...   Passed    0.14 sec
+test 22
+      Start 22: psio_validate_fuzz_tests
+
+22: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_validate_fuzz_tests
+22: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+22: Test timeout computed to be: 10000000
+22: ===============================================================================
+22: All tests passed (9 assertions in 9 test cases)
+22: 
+12/16 Test #22: psio_validate_fuzz_tests ...........   Passed    0.15 sec
+test 23
+      Start 23: psio_validate_structural_tests
+
+23: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_validate_structural_tests
+23: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+23: Test timeout computed to be: 10000000
+23: ===============================================================================
+23: All tests passed (87 assertions in 63 test cases)
+23: 
+13/16 Test #23: psio_validate_structural_tests .....   Passed    0.15 sec
+test 28
+      Start 28: psio_adapter_tests
+
+28: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_adapter_tests
+28: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+28: Test timeout computed to be: 10000000
+28: ===============================================================================
+28: All tests passed (218 assertions in 33 test cases)
+28: 
+14/16 Test #28: psio_adapter_tests .................   Passed    0.15 sec
+test 33
+      Start 33: psio_wit_resource_tests
+
+33: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_wit_resource_tests
+33: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+33: Test timeout computed to be: 10000000
+33: ===============================================================================
+33: All tests passed (15 assertions in 5 test cases)
+33: 
+15/16 Test #33: psio_wit_resource_tests ............   Passed    0.00 sec
+test 42
+      Start 42: psio_schema_pssz_tests
+
+42: Test command: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_schema_pssz_tests
+42: Working Directory: /Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests
+42: Test timeout computed to be: 10000000
+42: ===============================================================================
+42: All tests passed (20 assertions in 8 test cases)
+42: 
+16/16 Test #42: psio_schema_pssz_tests .............   Passed    0.15 sec
+
+The following tests passed:
+	psio_reflect_tests
+	psio_annotate_tests
+	psio_view_access_tests
+	psio_native_view_tests
+	psio_pssz_tests
+	psio_pssz_type_width_tests
+	psio_pssz_type_width_consumer
+	psio_empty_action_consumer
+	psio_caps_parity_tests
+	psio_conformance_tests
+	psio_static_dynamic_parity_tests
+	psio_validate_fuzz_tests
+	psio_validate_structural_tests
+	psio_adapter_tests
+	psio_wit_resource_tests
+	psio_schema_pssz_tests
+
+100% tests passed, 0 tests failed out of 16
+
+Total Test time (real) =   1.88 sec

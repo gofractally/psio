@@ -164,6 +164,12 @@ namespace psio::view_layout {
          return detail_pssz::vector_element_span<W, T>(s, i);
       }
 
+      template <typename T, std::size_t N>
+      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i) noexcept
+      {
+         return detail_pssz::vector_element_span<W, T>(s, i);
+      }
+
       template <typename T>
       static bool optional_has_value(std::span<const char> s) noexcept
       {
@@ -213,6 +219,13 @@ namespace psio::view_layout {
       {
          constexpr std::size_t W =
             ::psio::auto_pssz_width_v<std::vector<T>>;
+         return detail_pssz::vector_element_span<W, T>(s, i);
+      }
+
+      template <typename T, std::size_t N>
+      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i) noexcept
+      {
+         constexpr auto W = ::psio::auto_pssz_width_v<std::array<T, N>>;
          return detail_pssz::vector_element_span<W, T>(s, i);
       }
 

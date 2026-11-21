@@ -1,0 +1,12 @@
+/Users/dlarimer/Documents/ChatGPT/Exchange/artifacts/psibase-migration/psio-type-width-audit/reproduce.cpp:24:10: error: too few template arguments for class template 'view'
+   24 |    psio::view<Parent,psio::pssz> root{parent};
+      |          ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/view.hpp:56:10: note: template is declared here
+   55 |    template <typename T, typename Fmt, storage Store>
+      |    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |    class view;
+      |          ^
+/Users/dlarimer/Documents/ChatGPT/Exchange/artifacts/psibase-migration/psio-type-width-audit/reproduce.cpp:25:22: error: missing 'template' keyword prior to dependent template name 'get'
+   25 |    auto child = root.get<0>();
+      |                      ^  ~~~
+2 errors generated.

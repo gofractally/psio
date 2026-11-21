@@ -1,0 +1,67 @@
+[1/2] Building CXX object cpp/tests/CMakeFiles/psio_pssz_type_width_tests.dir/pssz_type_width_tests.cpp.o
+In file included from /Users/dlarimer/psio-psibase-type-width/cpp/tests/pssz_type_width_tests.cpp:1:
+In file included from /Users/dlarimer/psio-psibase-type-width/cpp/tests/pssz_type_width_fixture.hpp:2:
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2226:17: warning: expression result unused [-Wunused-value]
+ 2220 |                (((sel == Js)
+      |                 ~~~~~~~~~~~~
+ 2221 |                     ? (err = validate_value<W, Auto,
+      |                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2222 |                                 std::variant_alternative_t<Js, T>>(
+      |                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2223 |                           src, pos + 1, end, depth + 1),
+      |                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2224 |                        true)
+      |                        ~~~~~
+ 2225 |                     : false) ||
+      |                     ~~~~~~~~
+ 2226 |                 ...);
+      |                 ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2218:20: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_value(std::span<const char>, std::size_t, std::size_t, std::size_t)::(lambda)::operator()<0UL, 1UL>' requested here
+ 2218 |             return [&]<std::size_t... Js>(std::index_sequence<Js...>) noexcept {
+      |                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1689:30: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_value<4UL, true, std::variant<WidthCheckpoint, unsigned int>>' requested here
+ 1689 |                    auto st = validate_value<W, Auto, F>(src, beg, fin,
+      |                              ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2233:20: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_record<4UL, true, WidthRelayBatch, 0UL, 1UL, 2UL, 3UL, 4UL, 5UL>' requested here
+ 2233 |             return validate_record<W, Auto, T>(
+      |                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2464:36: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_value<4UL, true, WidthRelayBatch>' requested here
+ 2464 |          return detail::pssz_impl::validate_value<W, true, T>(bytes, 0,
+      |                                    ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:103:20: note: in instantiation of function template specialization 'psio::tag_invoke<WidthRelayBatch>' requested here
+  103 |             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |                    ^
+In file included from /Users/dlarimer/psio-psibase-type-width/cpp/tests/pssz_type_width_tests.cpp:1:
+In file included from /Users/dlarimer/psio-psibase-type-width/cpp/tests/pssz_type_width_fixture.hpp:2:
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2077:17: warning: expression result unused [-Wunused-value]
+ 2071 |                (((sel == Js)
+      |                 ~~~~~~~~~~~~
+ 2072 |                     ? (validate_or_throw_value<W, Auto,
+      |                     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2073 |                           std::variant_alternative_t<Js, T>>(
+      |                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2074 |                           src, pos + 1, end),
+      |                           ~~~~~~~~~~~~~~~~~~~
+ 2075 |                        true)
+      |                        ~~~~~
+ 2076 |                     : false) ||
+      |                     ~~~~~~~~
+ 2077 |                 ...);
+      |                 ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2070:13: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_or_throw_value(std::span<const char>, std::size_t, std::size_t)::(lambda)::operator()<0UL, 1UL>' requested here
+ 2070 |             [&]<std::size_t... Js>(std::index_sequence<Js...>) {
+      |             ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:1953:23: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_or_throw_value<4UL, true, std::variant<WidthCheckpoint, unsigned int>>' requested here
+ 1953 |                       validate_or_throw_value<W, Auto, F>(src, beg, fin);
+      |                       ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2083:13: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_or_throw_record<4UL, true, WidthRelayBatch, 0UL, 1UL, 2UL, 3UL, 4UL, 5UL>' requested here
+ 2083 |             validate_or_throw_record<W, Auto, T>(
+      |             ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/pssz.hpp:2474:29: note: in instantiation of function template specialization 'psio::detail::pssz_impl::validate_or_throw_value<4UL, true, WidthRelayBatch>' requested here
+ 2474 |          detail::pssz_impl::validate_or_throw_value<W, true, T>(
+      |                             ^
+/Users/dlarimer/psio-psibase-type-width/cpp/include/psio/cpo.hpp:132:13: note: in instantiation of function template specialization 'psio::tag_invoke<WidthRelayBatch>' requested here
+  132 |             tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+      |             ^
+2 warnings generated.
+[2/2] Linking CXX executable cpp/tests/psio_pssz_type_width_tests

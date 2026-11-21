@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "/Users/dlarimer/psio-psibase-type-width/build/type-width/cpp/tests/psio_pssz_type_width_tests",
+    "field constraints remain strict validation while type budgets bound structural bytes",
+    "--reporter",
+    "compact"
+  ],
+  "exit_code": 1,
+  "expected_failure": true,
+  "finding": "Existing validate_strict_walker explicitly excludes typed length_bound size-only checks; not implemented by width repair."
+}

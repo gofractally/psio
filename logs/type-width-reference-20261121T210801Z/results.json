@@ -1,0 +1,28 @@
+{
+  "baseline": "552ca3744fc5a0cd3c69530cfd4f1e466eadd8f7",
+  "commands": [
+    {
+      "name": "compile",
+      "argv": [
+        "/opt/homebrew/opt/llvm/bin/clang++",
+        "-std=c++23",
+        "-DPSIO_EXCEPTIONS_ENABLED=1",
+        "-I/Users/dlarimer/psio-psibase-empty-reflect/cpp/include",
+        "-idirafter",
+        "/opt/homebrew/include",
+        "/Users/dlarimer/psio-psibase-type-width/cpp/tests/pssz_type_width_golden.cpp",
+        "-o",
+        "/Users/dlarimer/psio-psibase-type-width/build/type-width/reference-golden"
+      ],
+      "exit_code": 0
+    },
+    {
+      "name": "golden",
+      "argv": [
+        "/Users/dlarimer/psio-psibase-type-width/build/type-width/reference-golden"
+      ],
+      "exit_code": 0
+    }
+  ],
+  "fixture_sha256": "130268fdb46b18282eb3f529ab1285b4209015fb90fe4f930a0f631af2df39f9"
+}

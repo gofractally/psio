@@ -33,6 +33,7 @@
 #include <psio/storage.hpp>
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -99,6 +100,13 @@ namespace psio {
          Fmt,
          std::void_t<decltype(traits<Fmt>::template vector_count<int>(
             std::span<const char>{}))>> : std::true_type {};
+
+      template <typename Fmt, typename = void>
+      struct has_array_support : std::false_type {};
+      template <typename Fmt>
+      struct has_array_support<Fmt, std::void_t<decltype(
+         traits<Fmt>::template array_element_span<int, 1>(std::span<const char>{}, 0))>>
+         : std::true_type {};
 
       template <typename Fmt, typename = void>
       struct has_optional_support : std::false_type {};
@@ -303,12 +311,63 @@ namespace psio {
       [[nodiscard]] iterator end() const noexcept { return {*this, size()}; }
    };
 
+   // A fixed-count array has its own logical container width. Its element
+   // views still use Fmt, so automatic PSSZ selects the element's own width.
+   template <typename T, std::size_t N, typename Fmt, storage Store>
+      requires view_layout::has_array_support<Fmt>::value
+   class view<std::array<T, N>, Fmt, Store>
+   {
+      std::span<const char> data_;
+      std::span<const char> root_;
+     public:
+      using element_type = std::array<T, N>;
+      using format_type = Fmt;
+      using value_type = T;
+      static constexpr storage storage_kind = Store;
+      view() = default;
+      explicit view(std::span<const char> bytes) noexcept : data_(bytes), root_(bytes) {}
+      view(std::span<const char> bytes, std::span<const char> root) noexcept : data_(bytes), root_(root) {}
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
+      [[nodiscard]] std::span<const char> _psio_root() const noexcept { return root_; }
+      [[nodiscard]] constexpr std::size_t size() const noexcept { return N; }
+      [[nodiscard]] constexpr bool empty() const noexcept { return N == 0; }
+      [[nodiscard]] view<T, Fmt, Store> operator[](std::size_t index) const noexcept
+      {
+         return view<T, Fmt, Store>{
+            view_layout::traits<Fmt>::template array_element_span<T, N>(data_, index), root_};
+      }
+      [[nodiscard]] view<T, Fmt, Store> at(std::size_t index) const noexcept
+      {
+         return index < N ? (*this)[index] : view<T, Fmt, Store>{};
+      }
+      class iterator
+      {
+         const view* owner_ = nullptr;
+         std::size_t index_ = 0;
+       public:
+         using iterator_category = std::forward_iterator_tag;
+         using value_type = view<T, Fmt, Store>;
+         using difference_type = std::ptrdiff_t;
+         using pointer = void;
+         using reference = value_type;
+         iterator() = default;
+         iterator(const view& owner, std::size_t index) noexcept : owner_(&owner), index_(index) {}
+         [[nodiscard]] value_type operator*() const noexcept { return (*owner_)[index_]; }
+         iterator& operator++() noexcept { ++index_; return *this; }
+         iterator operator++(int) noexcept { auto copy = *this; ++*this; return copy; }
+         friend bool operator==(const iterator&, const iterator&) = default;
+      };
+      [[nodiscard]] iterator begin() const noexcept { return {*this, 0}; }
+      [[nodiscard]] iterator end() const noexcept { return {*this, N}; }
+   };
+
    // ── view<std::optional<T>, Fmt, Store> ────────────────────────────────
    template <typename T, typename Fmt, storage Store>
       requires view_layout::has_optional_support<Fmt>::value
    class view<std::optional<T>, Fmt, Store>
    {
       std::span<const char> data_;
+      std::span<const char> root_;
 
      public:
       using element_type                    = std::optional<T>;
@@ -317,7 +376,8 @@ namespace psio {
       static constexpr storage storage_kind = Store;
 
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      explicit view(std::span<const char> s) noexcept : data_(s), root_(s) {}
+      view(std::span<const char> s, std::span<const char> r) noexcept : data_(s), root_(r) {}
 
       [[nodiscard]] std::span<const char> _psio_data() const noexcept
       {
@@ -338,7 +398,7 @@ namespace psio {
       [[nodiscard]] view<T, Fmt, Store> operator*() const noexcept
       {
          return view<T, Fmt, Store>{
-            view_layout::traits<Fmt>::template optional_payload_span<T>(data_)};
+            view_layout::traits<Fmt>::template optional_payload_span<T>(data_), root_};
       }
 
       [[nodiscard]] view<T, Fmt, Store> get() const noexcept { return **this; }
@@ -350,6 +410,7 @@ namespace psio {
    class view<std::variant<Ts...>, Fmt, Store>
    {
       std::span<const char> data_;
+      std::span<const char> root_;
 
      public:
       using element_type                    = std::variant<Ts...>;
@@ -357,7 +418,8 @@ namespace psio {
       static constexpr storage storage_kind = Store;
 
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      explicit view(std::span<const char> s) noexcept : data_(s), root_(s) {}
+      view(std::span<const char> s, std::span<const char> r) noexcept : data_(s), root_(r) {}
 
       [[nodiscard]] std::span<const char> _psio_data() const noexcept
       {
@@ -393,7 +455,7 @@ namespace psio {
          if constexpr (std::is_void_v<R>)
          {
             ((idx == Is
-                 ? (std::forward<F>(fn)(view<Ts, Fmt, Store>{payload}), true)
+                 ? (std::forward<F>(fn)(view<Ts, Fmt, Store>{payload, root_}), true)
                  : false) ||
              ...);
          }
@@ -403,7 +465,7 @@ namespace psio {
             bool matched = false;
             ((idx == Is
                  ? (result = std::forward<F>(fn)(
-                       view<Ts, Fmt, Store>{payload}),
+                       view<Ts, Fmt, Store>{payload, root_}),
                     matched = true)
                  : false) ||
              ...);
