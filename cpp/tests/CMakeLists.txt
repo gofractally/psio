@@ -40,6 +40,7 @@ psio_add_test(psio_native_view_tests native_view_tests.cpp)
 
 # Phase 4: error model — codec_error, codec_status, or_throw.
 psio_add_test(psio_error_tests error_tests.cpp)
+psio_add_test(psio_stream_tests stream_tests.cpp)
 
 # Phase 5: CPOs + format_tag_base scoped sugar.
 psio_add_test(psio_cpo_dispatch_tests cpo_dispatch_tests.cpp)

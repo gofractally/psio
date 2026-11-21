@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <span>
 #include <string>
@@ -131,7 +132,9 @@ namespace psio {
    // ── fixed_buf_stream — bounds-checked raw cursor ────────────────────────
    //
    // Use when the caller cannot prove the buffer is big enough — every
-   // write checks `pos + n > end`. Throws `codec_exception` on overrun.
+   // write checks the remaining capacity. Overrun throws `codec_exception`
+   // with native exception support, or aborts when exceptions are disabled.
+   // Untrusted codec input should use validate()'s status API before writing.
 
    struct fixed_buf_stream
    {
@@ -149,16 +152,14 @@ namespace psio {
       void write(char ch)
       {
          if (pos >= end)
-            throw codec_exception{
-               codec_error{"stream overrun", 0, "fixed_buf_stream"}};
+            overrun();
          *pos++ = ch;
       }
 
       void write(const void* src, std::size_t n)
       {
-         if (pos + n > end)
-            throw codec_exception{
-               codec_error{"stream overrun", 0, "fixed_buf_stream"}};
+         if (n > remaining())
+            overrun();
          std::memcpy(pos, src, n);
          pos += n;
       }
@@ -186,15 +187,26 @@ namespace psio {
 
       void skip(std::int32_t s)
       {
-         if ((pos + s > end) || (pos + s < begin))
-            throw codec_exception{
-               codec_error{"stream overrun", 0, "fixed_buf_stream"}};
+         if ((s >= 0 && static_cast<std::uint32_t>(s) > remaining()) ||
+             (s < 0 && -static_cast<std::int64_t>(s) > consumed()))
+            overrun();
          pos += s;
       }
 
       std::size_t remaining() const noexcept { return end - pos; }
       std::size_t consumed() const noexcept { return pos - begin; }
       std::size_t written() const noexcept { return pos - begin; }
+
+     private:
+      [[noreturn]] static void overrun()
+      {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
+         throw codec_exception{
+            codec_error{"stream overrun", 0, "fixed_buf_stream"}};
+#else
+         std::abort();
+#endif
+      }
    };
 
    // ── fast_buf_stream — un-checked raw cursor ─────────────────────────────
