@@ -33,6 +33,12 @@ struct Unsigned
    friend bool operator==(const Unsigned &, const Unsigned &) = default;
 };
 using Bytes = std::vector<unsigned char>;
+struct Bits
+{
+   Bytes bytes;
+   std::uint64_t bit_count = 0;
+   friend bool operator==(const Bits &, const Bits &) = default;
+};
 using Sequence = std::vector<Value>;
 using Record = std::vector<std::pair<std::string, Value>>;
 struct Optional
@@ -48,8 +54,8 @@ struct Variant
 };
 struct Value
 {
-   using Storage = std::variant<bool, Signed, Unsigned, float, double, std::string, Bytes, Sequence,
-                                Record, Optional, Variant>;
+   using Storage = std::variant<bool, Signed, Unsigned, float, double, std::string, Bytes, Bits,
+                                Sequence, Record, Optional, Variant>;
    Storage value = Optional{};
    Value() = default;
    template <typename T>
@@ -139,6 +145,33 @@ struct Field
    std::vector<char> bytes;
    bool omit = false;
 };
+inline std::size_t packed_byte_count(std::size_t count)
+{
+   return count / 8 + (count % 8 != 0);
+}
+inline codec_status validate_bit_data(std::span<const unsigned char> data, std::size_t count)
+{
+   if (data.size() != packed_byte_count(count))
+      return fail("pssz IR: packed bit byte count mismatch");
+   if (count % 8 && (data.back() & ~((1u << (count % 8)) - 1)))
+      return fail("pssz IR: packed bits above logical count");
+   return codec_ok();
+}
+inline codec_status bitlist_count(std::span<const char> wire, std::size_t bound, std::size_t &count)
+{
+   if (wire.empty() || wire.back() == 0)
+      return fail("pssz IR: bitlist delimiter missing or noncanonical");
+   const auto last = static_cast<unsigned char>(wire.back());
+   unsigned highest = 0;
+   for (unsigned byte = last; byte > 1; byte >>= 1)
+      ++highest;
+   if (wire.size() - 1 > (std::numeric_limits<std::size_t>::max() - highest) / 8)
+      return fail("pssz IR: bitlist count overflow");
+   count = (wire.size() - 1) * 8 + highest;
+   if (count > bound)
+      return fail("pssz IR: bitlist count exceeds bound");
+   return codec_ok();
+}
 
 #define PSIO_PSSZ_IR_TRY(expression)                                                               \
    do                                                                                              \
@@ -237,6 +270,38 @@ template <std::size_t W> class Codec
                  ? codec_ok()
                  : fail("pssz IR: primitive adapter has incompatible inner schema");
    }
+   codec_status bit_shape(const schema_types::Custom &custom, std::size_t &count, bool &list) const
+   {
+      const schema_types::AnyType *container;
+      PSIO_PSSZ_IR_TRY(inner(custom.type, container));
+      const schema_types::AnyType *element;
+      std::uint64_t bound;
+      if (custom.id == "bitvector")
+      {
+         auto array = std::get_if<schema_types::Array>(&container->value);
+         if (!array)
+            return fail("pssz IR: bitvector requires array bit metadata");
+         PSIO_PSSZ_IR_TRY(inner(array->type, element));
+         bound = array->len;
+         list = false;
+      }
+      else
+      {
+         auto bounded = std::get_if<schema_types::BoundedList>(&container->value);
+         if (custom.id != "bitlist" || !bounded)
+            return fail("pssz IR: bitlist requires bounded bit metadata");
+         PSIO_PSSZ_IR_TRY(inner(bounded->type, element));
+         bound = bounded->maxCount;
+         list = true;
+      }
+      auto integer = std::get_if<schema_types::Int>(&element->value);
+      if (!integer || integer->bits != 1 || integer->isSigned)
+         return fail("pssz IR: packed bit element must be unsigned one-bit integer");
+      if (bound > std::numeric_limits<std::size_t>::max())
+         return fail("pssz IR: bit count exceeds platform capacity");
+      count = static_cast<std::size_t>(bound);
+      return codec_ok();
+   }
    codec_status layout(const schema_types::AnyType &input, Layout &out, std::size_t n = 0) const
    {
       PSIO_PSSZ_IR_TRY(depth(n));
@@ -298,6 +363,14 @@ template <std::size_t W> class Codec
                 {
                    PSIO_PSSZ_IR_TRY(primitive_adapter(t, t.id == "bool" ? 1 : 8));
                    out = {true, 1, false};
+                   return codec_ok();
+                }
+                if (t.id == "bitvector" || t.id == "bitlist")
+                {
+                   std::size_t count;
+                   bool list;
+                   PSIO_PSSZ_IR_TRY(bit_shape(t, count, list));
+                   out = {!list, list ? 0 : packed_byte_count(count), false};
                    return codec_ok();
                 }
                 if (t.id == "string" || t.id == "hex")
@@ -370,6 +443,14 @@ template <std::size_t W> class Codec
              {
                 if (t.id == "bool" || t.id == "char")
                    return primitive_adapter(t, t.id == "bool" ? 1 : 8);
+                if (t.id == "bitvector" || t.id == "bitlist")
+                {
+                   std::size_t count;
+                   bool list;
+                   PSIO_PSSZ_IR_TRY(bit_shape(t, count, list));
+                   out = !list && !count;
+                   return codec_ok();
+                }
                 if (t.id == "string" || t.id == "hex")
                 {
                    const schema_types::AnyType *child;
@@ -693,6 +774,12 @@ template <std::size_t W> class Codec
                 {
                    if (t.id == "bool" || t.id == "char")
                       PSIO_PSSZ_IR_TRY(primitive_adapter(t, t.id == "bool" ? 1 : 8));
+                   else if (t.id == "bitvector" || t.id == "bitlist")
+                   {
+                      std::size_t count;
+                      bool list;
+                      PSIO_PSSZ_IR_TRY(bit_shape(t, count, list));
+                   }
                    else if (t.id == "string" || t.id == "hex")
                    {
                       const schema_types::AnyType *child;
@@ -825,6 +912,32 @@ template <std::size_t W> class Codec
                       PSIO_PSSZ_IR_TRY(depth(n + 1));
                    PSIO_PSSZ_IR_TRY(
                        append(out, {reinterpret_cast<const char *>(v->data()), v->size()}));
+                }
+                else if (t.id == "bitvector" || t.id == "bitlist")
+                {
+                   auto value_bits = std::get_if<Bits>(&value.value);
+                   if (!value_bits)
+                      return fail("pssz IR: explicit packed Bits value required");
+                   std::size_t bound;
+                   bool list;
+                   PSIO_PSSZ_IR_TRY(bit_shape(t, bound, list));
+                   if (value_bits->bit_count > std::numeric_limits<std::size_t>::max())
+                      return fail("pssz IR: bit count exceeds platform capacity");
+                   const auto count = static_cast<std::size_t>(value_bits->bit_count);
+                   if (list ? count > bound : count != bound)
+                      return fail("pssz IR: packed bit logical count mismatch");
+                   PSIO_PSSZ_IR_TRY(validate_bit_data(value_bits->bytes, count));
+                   PSIO_PSSZ_IR_TRY(
+                       append(out, {reinterpret_cast<const char *>(value_bits->bytes.data()),
+                                    value_bits->bytes.size()}));
+                   if (list)
+                   {
+                      if (count % 8 == 0)
+                         out.push_back(1);
+                      else
+                         out.back() = static_cast<char>(static_cast<unsigned char>(out.back()) |
+                                                        (1u << (count % 8)));
+                   }
                 }
                 else
                    return fail("pssz IR: unsupported custom adapter");
@@ -997,6 +1110,27 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
                 if (!bytes.empty())
                    PSIO_PSSZ_IR_TRY(depth(n + 1));
                 out = Bytes(bytes.begin(), bytes.end());
+             }
+             else if (t.id == "bitvector" || t.id == "bitlist")
+             {
+                std::size_t bound;
+                bool list;
+                PSIO_PSSZ_IR_TRY(bit_shape(t, bound, list));
+                std::size_t count = bound;
+                if (list)
+                   PSIO_PSSZ_IR_TRY(bitlist_count(bytes, bound, count));
+                else
+                   PSIO_PSSZ_IR_TRY(validate_bit_data(
+                       {reinterpret_cast<const unsigned char *>(bytes.data()), bytes.size()},
+                       count));
+                Bits value_bits;
+                value_bits.bit_count = count;
+                const auto payload = bytes.first(packed_byte_count(count));
+                if (!payload.empty())
+                   value_bits.bytes.assign(payload.begin(), payload.end());
+                if (list && count % 8)
+                   value_bits.bytes.back() &= static_cast<unsigned char>((1u << (count % 8)) - 1);
+                out = std::move(value_bits);
              }
              else
                 return fail("pssz IR: unsupported custom adapter");

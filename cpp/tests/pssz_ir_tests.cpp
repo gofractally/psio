@@ -6,6 +6,7 @@
 
 namespace ir = psio::schema_types;
 namespace runtime = psio::pssz_ir;
+#include "fixtures/pssz_bits_shared.hpp"
 #include "fixtures/pssz_ir_shared.hpp"
 
 namespace
@@ -393,4 +394,182 @@ TEST_CASE("actual IR rejects unsupported constraint annotations before traversin
    std::vector<char> bytes;
    REQUIRE(runtime::encode<4>(schema, descriptive, runtime::Record{}, bytes).ok());
    REQUIRE(bytes == std::vector<char>(4, 0));
+}
+
+TEST_CASE("actual IR packed Bits match all shared static Rust frames", "[pssz][ir][bits][shared]")
+{
+   auto run = []<std::size_t W>(const auto &row)
+   {
+      INFO(row.name);
+      INFO(W);
+      std::vector<char> bytes;
+      runtime::Value decoded;
+      auto status = runtime::decode_exact<W>(row.schema, row.root, row.bytes, decoded);
+      REQUIRE(status.ok() == row.accept);
+      if (row.encode_check)
+      {
+         REQUIRE(runtime::encode<W>(row.schema, row.root, row.value, bytes).ok());
+         REQUIRE(bytes == row.bytes);
+         REQUIRE(decoded == row.value);
+      }
+   };
+   auto rows = shared_pssz_bits_fixtures::cases();
+   REQUIRE(rows.size() == 69);
+   for (const auto &row : rows)
+   {
+      if (row.width == 1)
+         run.operator()<1>(row);
+      else if (row.width == 2)
+         run.operator()<2>(row);
+      else if (row.width == 4)
+         run.operator()<4>(row);
+      else
+         FAIL("bad bit profile");
+   }
+}
+
+namespace
+{
+template <typename T> struct bit_option : std::false_type
+{
+};
+template <typename T> struct bit_option<std::optional<T>> : std::true_type
+{
+   using inner = T;
+};
+template <typename T> T native_bit_value(const runtime::Value &value)
+{
+   if constexpr (bit_option<T>::value)
+   {
+      const auto &optional = std::get<runtime::Optional>(value.value);
+      if (!optional.some)
+         return std::nullopt;
+      return native_bit_value<typename bit_option<T>::inner>(*optional.some);
+   }
+   else
+   {
+      const auto &bits = std::get<runtime::Bits>(value.value);
+      T result;
+      for (std::size_t i = 0; i < bits.bit_count; ++i)
+      {
+         const bool bit = (bits.bytes[i / 8] >> (i % 8)) & 1;
+         if constexpr (requires { T::bytes_value; })
+            result.set(i, bit);
+         else
+            result.push_back(bit);
+      }
+      return result;
+   }
+}
+template <std::size_t W, typename T> void actual_bit_schema(const auto &row)
+{
+   INFO(row.name);
+   INFO(W);
+   psio::SchemaBuilder builder;
+   auto root = builder.insert<T>();
+   auto schema = std::move(builder).build();
+   REQUIRE(root == row.root);
+   REQUIRE(schema == row.schema);
+   REQUIRE(psio::validate<T>(psio::pssz_<W>{}, row.bytes).ok() == row.accept);
+   if (row.encode_check)
+   {
+      auto value = native_bit_value<T>(row.value);
+      REQUIRE(psio::encode(psio::pssz_<W>{}, value) == row.bytes);
+   }
+}
+template <std::size_t W> void actual_bit_case(const auto &row)
+{
+   const std::string_view name = row.name;
+   const bool optional = name.starts_with("option_");
+   if (name.find("vector_zero") != name.npos)
+   {
+      if (optional)
+         actual_bit_schema<W, std::optional<psio::bitvector<0>>>(row);
+      else
+         actual_bit_schema<W, psio::bitvector<0>>(row);
+   }
+   else if (name.find("vector_one") != name.npos)
+      actual_bit_schema<W, psio::bitvector<1>>(row);
+   else if (name.find("vector") != name.npos)
+   {
+      if (optional)
+         actual_bit_schema<W, std::optional<psio::bitvector<9>>>(row);
+      else
+         actual_bit_schema<W, psio::bitvector<9>>(row);
+   }
+   else if (name == "list_zero_bound")
+      actual_bit_schema<W, psio::bitlist<0>>(row);
+   else
+   {
+      if (optional)
+         actual_bit_schema<W, std::optional<psio::bitlist<10>>>(row);
+      else
+         actual_bit_schema<W, psio::bitlist<10>>(row);
+   }
+}
+} // namespace
+
+TEST_CASE("actual C++ builder schemas and typed bit bytes match Rust literally",
+          "[pssz][ir][bits][builder]")
+{
+   for (const auto &row : shared_pssz_bits_fixtures::cases())
+   {
+      if (row.width == 1)
+         actual_bit_case<1>(row);
+      else if (row.width == 2)
+         actual_bit_case<2>(row);
+      else if (row.width == 4)
+         actual_bit_case<4>(row);
+      else
+         FAIL("bad bit width");
+   }
+}
+
+namespace
+{
+template <std::size_t N, typename T> struct bit_depth_type
+{
+   using type = std::array<typename bit_depth_type<N - 1, T>::type, 1>;
+};
+template <typename T> struct bit_depth_type<0, T>
+{
+   using type = T;
+};
+template <typename T> auto &bit_leaf(T &value)
+{
+   if constexpr (requires {
+                    typename T::value_type;
+                    value[0];
+                 })
+      return bit_leaf(value[0]);
+   else
+      return value;
+}
+} // namespace
+
+TEST_CASE("packed Bits adapters are atomic at node64", "[pssz][ir][bits][depth]")
+{
+   auto check = []<typename T>(const T &value)
+   {
+      psio::SchemaBuilder builder;
+      auto root = builder.insert<T>();
+      auto schema = std::move(builder).build();
+      auto bytes = psio::encode(psio::pssz32{}, value);
+      runtime::Value decoded;
+      REQUIRE(psio::validate<T>(psio::pssz32{}, bytes).ok());
+      REQUIRE(runtime::decode_exact<4>(schema, root, bytes, decoded).ok());
+      std::vector<char> encoded;
+      REQUIRE(runtime::encode<4>(schema, root, decoded, encoded).ok());
+      REQUIRE(encoded == bytes);
+   };
+   bit_depth_type<64, psio::bitlist<10>>::type list;
+   bit_leaf(list).push_back(true);
+   bit_leaf(list).push_back(false);
+   bit_leaf(list).push_back(false);
+   check(list);
+   bit_depth_type<64, psio::bitvector<9>>::type vector;
+   bit_leaf(vector).set(8, true);
+   check(vector);
+   bit_depth_type<64, psio::bitvector<0>>::type empty;
+   check(empty);
 }
