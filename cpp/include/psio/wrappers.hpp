@@ -23,6 +23,7 @@
 // in later phases where needed.
 
 #include <psio/annotate.hpp>
+#include <psio/error.hpp>
 #include <psio/shapes.hpp>
 
 // shape_tag_of<T> lives in shapes.hpp
@@ -81,13 +82,13 @@ namespace psio {
       void push_back(const T& v)
       {
          if (data_.size() >= N)
-            throw std::length_error("psio::bounded overflow");
+            codec_abort({"psio::bounded overflow",0,"wrapper"});
          data_.push_back(v);
       }
       void push_back(T&& v)
       {
          if (data_.size() >= N)
-            throw std::length_error("psio::bounded overflow");
+            codec_abort({"psio::bounded overflow",0,"wrapper"});
          data_.push_back(std::move(v));
       }
 
@@ -99,7 +100,7 @@ namespace psio {
       void enforce_bound_() const
       {
          if (data_.size() > N)
-            throw std::length_error("psio::bounded overflow on construct");
+            codec_abort({"psio::bounded overflow on construct",0,"wrapper"});
       }
    };
 
@@ -132,7 +133,7 @@ namespace psio {
       void enforce_bound_() const
       {
          if (data_.size() > N)
-            throw std::length_error("psio::utf8_string overflow");
+            codec_abort({"psio::utf8_string overflow",0,"wrapper"});
       }
    };
 
@@ -205,7 +206,7 @@ namespace psio {
       void        push_back(bool v)
       {
          if (bits_.size() >= MaxN)
-            throw std::length_error("psio::bitlist overflow");
+            codec_abort({"psio::bitlist overflow",0,"wrapper"});
          bits_.push_back(v);
       }
 
