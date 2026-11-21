@@ -50,6 +50,16 @@ psio_add_test(psio_ssz_tests ssz_tests.cpp)
 # Phase 7: pSSZ codec (parametric-width family).
 psio_add_test(psio_pssz_tests pssz_tests.cpp)
 psio_add_test(psio_pssz_record_layout_tests pssz_record_layout_tests.cpp)
+psio_add_test(psio_pssz_ir_tests pssz_ir_tests.cpp)
+add_executable(psio_pssz_ir_noexceptions_test pssz_ir_noexceptions.cpp)
+target_include_directories(psio_pssz_ir_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_ir_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_ir_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_ir_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_ir_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_ir_noexceptions_test COMMAND psio_pssz_ir_noexceptions_test)
 psio_add_test(psio_pssz_optional_contract_tests pssz_optional_contract_tests.cpp)
 
 # PSSZ guest profile must compile independently of the native library's
