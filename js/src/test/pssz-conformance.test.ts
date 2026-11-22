@@ -15,7 +15,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { IR_VERSION, PsszError, PsszSchema, validatePssz, type JsonFormat, type PsszType, type PsszWidth } from '../index.js';
+import {
+  IR_VERSION, PsszError, PsszSchema, PsszView, validatePssz, type JsonFormat, type PsszNestedBytes, type PsszType,
+  type PsszWidth,
+} from '../index.js';
 import { fixtureHandlers } from './support/custom-handlers.js';
 import { TypedFixture, type TypeSource } from './support/typed-from-ir.js';
 
@@ -30,14 +33,24 @@ interface PsszTypeRow {
   id: string;
   ir: boolean;
   auto_width: number;
+  /** The id of the type's `Custom` node: its handler is registered under it. */
+  custom_id?: string;
+  /** An invariant constrains values of the type (its own, or one it holds). */
+  invariant?: boolean;
 }
 interface PsszRow {
   name: string;
+  class: string;
   type: string;
   format: 'auto' | 'pssz8' | 'pssz16' | 'pssz32';
   hex: string;
   expect: 'canonical' | 'unknown' | 'reject';
+  /** For `reject`: the C++ error (class `invariant`: the invariant's message). */
+  reason: string;
   reencoded: string;
+  /** Id of the logical value written, or empty for a hand-made frame. */
+  value: string;
+  writer: string;
 }
 interface JsonTypeRow {
   id: string;
@@ -47,11 +60,13 @@ interface JsonTypeRow {
   auto_width?: number;
   /** The type holds a custom text form: its value rows carry `plain_*`. */
   custom?: boolean;
+  /** An invariant constrains values of the type: it has `invariant` rows. */
+  invariant?: boolean;
 }
 interface JsonRow {
   name: string;
   type: string;
-  kind: 'value' | 'accept' | 'reject';
+  kind: 'value' | 'accept' | 'reject' | 'invariant';
   format?: JsonFormat;
   json?: string;
   ijson?: string;
@@ -62,6 +77,8 @@ interface JsonRow {
   /** The text with no custom handler registered (the wire type's own). */
   plain_json?: string;
   plain_ijson?: string;
+  /** Kind `invariant`: the invariant's message. */
+  reason?: string;
 }
 
 function rejects(run: () => unknown, name: string): PsszError {
@@ -80,16 +97,37 @@ function rejects(run: () => unknown, name: string): PsszError {
 function hasSomeNone(value: unknown): boolean {
   if (typeof value !== 'object' || value === null || value instanceof Uint8Array) return false;
   if (Array.isArray(value)) return value.some(hasSomeNone);
+  if (value instanceof Set) return [...value].some(hasSomeNone);
+  if (value instanceof Map) return [...value].some(hasSomeNone);
   const keys = Object.keys(value);
   const record = value as Record<string, unknown>;
   if (keys.length === 1 && keys[0] === 'some' && record.some === null) return true;
   return keys.some((key) => hasSomeNone(record[key]));
 }
 
+// The classes of pssz-vectors.json and their sizes, as conformance/pssz-vectors.md
+// lists them: every one is replayed in full, and a fixture that changes must
+// be looked at.
+const PSSZ_CLASSES: { [cls: string]: number } = {
+  corpus: 956, 'evolution-forward': 660, 'evolution-backward': 1380, pruning: 212, malformed: 419,
+  'optional-presence': 400, width: 309, 'cap-overflow-explicit-nested': 15, tuple: 60, variant: 48, enum: 76,
+  'enum-unknown-value': 36, string: 308, 'string-raw-non-utf8': 44, 'length-bound-overflow': 32, box: 100,
+  bytes: 88, 'zero-fixed': 100, depth: 28, nested: 228, 'nested-unknown': 20, 'nested-deferred': 24,
+  'map-set': 266, 'map-set-order': 352, transparent: 160, custom: 116, invariant: 128,
+};
+const NO_HANDLER = 'pssz IR: no handler registered for a custom type';
+
 for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, () => {
   const fx: { schema_ir: string; types: PsszTypeRow[]; vectors: PsszRow[] } = fixture('pssz-vectors.json');
   const schema = PsszSchema.decode(fromHex(fx.schema_ir));
-  const source: TypeSource = path === 'typed' ? new TypedFixture(schema.ir) : schema;
+  // Three registries (conformance/custom-types.md): none, the handlers of
+  // the fixture's custom types, and a strict one that lacks them.
+  const typedPlain = new TypedFixture(schema.ir);
+  const source: TypeSource = path === 'typed' ? typedPlain : schema;
+  const handled: TypeSource = path === 'typed' ? new TypedFixture(schema.ir, fixtureHandlers) : schema.withHandlers(fixtureHandlers);
+  const strict: TypeSource = path === 'typed'
+    ? { type: (id, options) => typedPlain.type(id, { ...options, requireHandlers: true }) }
+    : PsszSchema.decode(fromHex(fx.schema_ir), { requireHandlers: true });
   // The IR travels as its own PSSZ encoding and re-encodes to the same bytes.
   assert.equal(toHex(schema.encode()), fx.schema_ir);
 
@@ -98,12 +136,28 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   const notExpressible = fx.types.filter((t) => !t.ir).map((t) => t.id);
   assert.deepEqual(notExpressible, []);
   let widthsChecked = 0;
+  const byName = new Map(schema.ir.types.map((m) => [m.name, m.type]));
+  const manifest = new Map(fx.types.map((t) => [t.id, t]));
+  let customIds = 0;
   for (const row of fx.types) {
     assert.ok(row.auto_width === 1 || row.auto_width === 2 || row.auto_width === 4, row.id);
     assert.equal(source.type(row.id).width, row.auto_width, `auto width of ${row.id}`);
+    assert.equal(handled.type(row.id).width, row.auto_width, `auto width of ${row.id}, with handlers`);
     ++widthsChecked;
+    // Manifest key `custom_id`: the id of the type's Schema IR `Custom`
+    // node, under which its handler is registered.
+    let node = byName.get(row.id)!.value;
+    for (let hops = 0; node.type === 'Type' && hops < 64; ++hops) node = byName.get(node.value.type)!.value;
+    const isCustom = node.type === 'Custom' && Object.hasOwn(fixtureHandlers, node.value.id);
+    assert.equal(isCustom, row.custom_id !== undefined, `custom_id of ${row.id}`);
+    if (row.custom_id !== undefined) {
+      assert.equal(node.type === 'Custom' && node.value.id, row.custom_id, `custom_id of ${row.id}`);
+      ++customIds;
+    }
+    assert.ok(row.invariant === undefined || row.invariant === true, row.id);
   }
   assert.equal(widthsChecked, fx.types.length);
+  assert.equal(customIds, 8);
   // A box gives its container no inferred bound; an explicit cap still does.
   const widthOf = (id: string) => source.type(id).width;
   assert.deepEqual(
@@ -112,18 +166,22 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   );
 
   const types = new Map<string, PsszType | PsszError>();
-  const typeOf = (id: string, width: PsszWidth): PsszType | PsszError => {
-    const key = `${width}/${id}`;
+  const typeOf = (from: TypeSource, tag: string, id: string, width: PsszWidth, nestedBytes: PsszNestedBytes = 'typed'): PsszType => {
+    const key = `${tag}/${nestedBytes}/${width}/${id}`;
     let type = types.get(key);
     if (!type) {
       try {
-        type = source.type(id, { width });
+        type = from.type(id, nestedBytes === 'typed' ? { width } : { width, nestedBytes });
       } catch (e) {
         assert.ok(e instanceof PsszError);
         type = e;
       }
       types.set(key, type);
     }
+    // Every fixture type builds under every profile. (The explicit profiles
+    // enforce maxDynamicData on the top-level type only, as the typed
+    // psio::pssz_<W> codecs that produced the fixture do.)
+    if (type instanceof PsszError) assert.fail(`${id} (${tag}, ${width}): ${type.message}`);
     return type;
   };
 
@@ -131,30 +189,132 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     auto: {
       vectors: 0, validateAccept: 0, validateReject: 0, canonicalReencode: 0, unknownReencode: 0,
       jsonRoundTrip: 0, ijsonRoundTrip: 0, someNoneLossy: 0, noJsonForm: 0,
-      ijsonNoncharacter: 0, rawNonUtf8NoText: 0,
+      ijsonNoncharacter: 0, rawNonUtf8NoText: 0, handlerTextRoundTrip: 0,
+      invariant: 0, nestedUnknown: 0, nestedDeferred: 0,
     },
     explicit: {
       vectors: 0, validateAccept: 0, validateReject: 0, canonicalReencode: 0,
-      unknownReencode: 0,
+      unknownReencode: 0, invariant: 0, nestedUnknown: 0, nestedDeferred: 0,
     },
   };
   const classes = new Map<string, number>();
+  const rowByName = new Map(fx.vectors.map((v) => [v.name, v]));
+  assert.equal(rowByName.size, fx.vectors.length, 'vector names are unique');
 
   for (const row of fx.vectors) {
     const bytes = fromHex(row.hex);
     const cls = row.name.slice(0, row.name.indexOf('/'));
+    assert.equal(row.class, cls, row.name);
     const automatic = row.format === 'auto';
     const width: PsszWidth = automatic ? 'auto' : row.format === 'pssz8' ? 1 : row.format === 'pssz16' ? 2 : 4;
     const c = automatic ? count.auto : count.explicit;
     ++c.vectors;
     classes.set(cls, (classes.get(cls) ?? 0) + 1);
-    const type = typeOf(row.type, width);
-    // Every fixture type builds under every profile. (The explicit profiles
-    // enforce maxDynamicData on the top-level type only, as the typed
-    // psio::pssz_<W> codecs that produced the fixture do.)
-    if (type instanceof PsszError) assert.fail(`${row.name}: ${type.message}`);
+    assert.equal(row.reason !== '', row.expect === 'reject', `${row.name}: reason`);
+
+    // ── Class `invariant`: a structurally valid frame of a value that
+    // violates an invariant. `reject` is the typed outcome, and that of a
+    // schema-driven codec given the handlers, under every width profile;
+    // with no handler the frame is its wire type; a strict registry that
+    // lacks the handler refuses the type.
+    if (cls === 'invariant') {
+      assert.equal(row.expect, 'reject', row.name);
+      assert.equal(manifest.get(row.type)?.invariant, true, `${row.name}: manifest invariant`);
+      const plain = typeOf(source, 'plain', row.type, width);
+      assert.deepEqual(plain.validate(bytes), { ok: true, hasUnknown: false }, `${row.name}: no handler`);
+      const value = plain.decode(bytes);
+      assert.equal(toHex(plain.encode(value)), row.hex, `${row.name}: no handler, re-encode`);
+      const checked = typeOf(handled, 'handled', row.type, width);
+      const refused = checked.validate(bytes);
+      assert.ok(!refused.ok, `${row.name}: accepted with the handlers`);
+      assert.equal(refused.error.message, row.reason, row.name);
+      assert.equal(refused.error.kind, 'bytes', row.name);
+      assert.equal(refused.error.invariant, true, row.name);
+      assert.equal(rejects(() => checked.decode(bytes), row.name).message, row.reason, row.name);
+      // A view does not check; decoding through it does.
+      const view = checked.view(bytes);
+      if (view instanceof PsszView)
+        assert.equal(rejects(() => view.toValue(), row.name).message, row.reason, `${row.name}: view.toValue`);
+      // No writer writes the value back: binary, key and text.
+      const written = rejects(() => checked.encode(value), `${row.name}: encode`);
+      assert.equal(written.message, row.reason, row.name);
+      assert.equal(written.kind, 'value', row.name);
+      assert.equal(written.invariant, true, row.name);
+      if (automatic) {
+        for (const format of ['json', 'ijson'] as const) {
+          assert.equal(rejects(() => checked.psszToJson(bytes, format), row.name).message, row.reason, `${row.name}: ${format}`);
+          assert.equal(rejects(() => checked.valueToJson(value, format), row.name).message, row.reason, `${row.name}: ${format} value`);
+          // The wire type's text reads back to the frame.
+          const text = plain.psszToJson(bytes, format);
+          assert.equal(toHex(plain.jsonToPssz(text, format)), row.hex, `${row.name}: plain ${format}`);
+        }
+      }
+      const required = typeOf(strict, 'strict', row.type, width).validate(bytes);
+      assert.ok(!required.ok, `${row.name}: accepted by a strict registry`);
+      assert.equal(required.error.message, NO_HANDLER, row.name);
+      assert.equal(required.error.invariant, false, row.name);
+      ++c.invariant;
+      continue;
+    }
+
+    // A typed nested<T,deferred> does not look inside its bytes. The schema
+    // does not record that policy, so the schema-driven reader gives the
+    // recorded outcome when told the nested bytes are opaque; the typed
+    // declarations say `deferred` themselves.
+    const deferred = cls === 'nested-deferred';
+    const mode: PsszNestedBytes = deferred && path === 'schema-driven' ? 'opaque' : 'typed';
+    const type = typeOf(source, 'plain', row.type, width, mode);
     const result = type.validate(bytes);
     if (!result.ok) assert.notEqual(result.error.kind, 'internal', `${row.name}: ${result.error.message}`);
+    // The handlers change nothing for a value that satisfies its
+    // invariants, or for a type that has none.
+    const withHandlers = typeOf(handled, 'handled', row.type, width, mode);
+    assert.equal(withHandlers.validate(bytes).ok, result.ok, `${row.name}: with handlers`);
+
+    if (deferred) {
+      // Any inner bytes (valid, garbage, empty, unknown fields) are
+      // canonical, and kept as they are.
+      assert.equal(row.expect, 'canonical', row.name);
+      assert.deepEqual(result, { ok: true, hasUnknown: false }, row.name);
+      assert.equal(toHex(type.encode(type.decode(bytes))), row.hex, row.name);
+      assert.deepEqual(type.decode(bytes, { rejectUnknown: true }), type.decode(bytes), row.name);
+      // The same through the option alone, on both paths.
+      const opaque = typeOf(source, 'plain', row.type, width, 'opaque');
+      assert.deepEqual(opaque.validate(bytes), { ok: true, hasUnknown: false }, row.name);
+      assert.equal(toHex(opaque.encode(opaque.decode(bytes))), row.hex, row.name);
+      ++c.nestedDeferred;
+      ++c.validateAccept;
+      ++c.canonicalReencode;
+      continue;
+    }
+
+    if (cls === 'nested-unknown' && row.expect === 'unknown') {
+      // Unknown fields inside nested bytes. The value of a nested node is
+      // the inner value, so the default re-encoding is canonical: the frame
+      // of the `nested` vector holding the same logical value for this
+      // reader. With the bytes opaque the frame is kept, which is what the
+      // typed C++ reader's re-encoding (`reencoded`) is.
+      assert.deepEqual(result, { ok: true, hasUnknown: true }, row.name);
+      rejects(() => type.decode(bytes, { rejectUnknown: true }), row.name);
+      const canonicalAgain = type.encode(type.decode(bytes));
+      assert.notEqual(toHex(canonicalAgain), row.hex, row.name);
+      assert.deepEqual(type.validate(canonicalAgain), { ok: true, hasUnknown: false }, row.name);
+      assert.equal(toHex(type.encode(type.decode(canonicalAgain, { rejectUnknown: true }))), toHex(canonicalAgain), row.name);
+      if (row.value !== '') {
+        const same = rowByName.get(`nested/${row.value}/as/${row.type}/${row.format}`);
+        assert.ok(same && same.expect === 'canonical', `${row.name}: no nested vector of the same value`);
+        assert.equal(toHex(canonicalAgain), same.hex, row.name);
+      }
+      const opaque = typeOf(source, 'plain', row.type, width, 'opaque');
+      assert.deepEqual(opaque.validate(bytes), { ok: true, hasUnknown: false }, row.name);
+      const kept = toHex(opaque.encode(opaque.decode(bytes)));
+      assert.equal(kept, row.reencoded, row.name);
+      assert.equal(kept, row.hex, row.name);
+      ++c.nestedUnknown;
+      ++c.validateAccept;
+      ++c.unknownReencode;
+      continue;
+    }
 
     // Non-UTF-8 bytes in a raw string (Custom "string") are valid PSSZ, as
     // for the typed codecs: recorded canonical, replayed like any other row.
@@ -162,6 +322,9 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     if (row.expect === 'reject') {
       assert.equal(result.ok, false, `${row.name}: accepted`);
       rejects(() => type.decode(bytes), row.name);
+      // A map / set out of order is refused for its order.
+      if (cls === 'map-set-order' && !result.ok)
+        assert.equal(result.error.message.replace(/^pssz IR: /, 'pssz: '), row.reason, row.name);
       ++c.validateReject;
       continue;
     }
@@ -178,6 +341,7 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     }
     assert.equal(again, row.hex, row.name);
     assert.deepEqual(type.decode(bytes, { rejectUnknown: true }), value, row.name);
+    assert.equal(toHex(withHandlers.encode(withHandlers.decode(bytes))), row.hex, `${row.name}: with handlers`);
     ++c.canonicalReencode;
     if (!automatic) continue;
 
@@ -215,6 +379,12 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
       }
       assert.equal(toHex(type.jsonToPssz(text, format)) === row.hex, !lossy, `${row.name} via ${format}: ${text}`);
       if (!lossy) ++count.auto[format === 'json' ? 'jsonRoundTrip' : 'ijsonRoundTrip'];
+      // The same through the handlers' text forms.
+      if (!lossy) {
+        const typedText = withHandlers.psszToJson(bytes, format);
+        assert.equal(toHex(withHandlers.jsonToPssz(typedText, format)), row.hex, `${row.name} via ${format}, handlers: ${typedText}`);
+        ++count.auto.handlerTextRoundTrip;
+      }
     }
     if (noText) ++count.auto.noJsonForm;
     else if (lossy) ++count.auto.someNoneLossy;
@@ -225,25 +395,27 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   console.log(`pssz-vectors.json (${path}):`, JSON.stringify({ types: fx.types.length, vectors: fx.vectors.length, ...count }));
   const a = count.auto;
   const e = count.explicit;
+  // Every vector was replayed: nothing is skipped.
   assert.equal(a.vectors + e.vectors, fx.vectors.length);
-  assert.equal(a.validateAccept + a.validateReject, a.vectors);
+  assert.equal(a.validateAccept + a.validateReject + a.invariant, a.vectors);
   assert.equal(a.canonicalReencode + a.unknownReencode, a.validateAccept);
-  assert.equal(a.jsonRoundTrip + a.someNoneLossy + a.noJsonForm, a.canonicalReencode);
-  assert.equal(e.validateAccept + e.validateReject, e.vectors);
+  assert.equal(a.jsonRoundTrip + a.someNoneLossy + a.noJsonForm, a.canonicalReencode - a.nestedDeferred);
+  assert.equal(e.validateAccept + e.validateReject + e.invariant, e.vectors);
   assert.equal(e.canonicalReencode + e.unknownReencode, e.validateAccept);
-  // The fixture as checked in (a change to it must be looked at).
-  // The classes this change is about are replayed in full, none skipped.
-  assert.equal(classes.get('box'), 100);
-  assert.equal(classes.get('string-raw-non-utf8'), 44);
-  assert.equal(classes.get('cap-overflow-explicit-nested'), 15);
+  // The fixture as checked in (a change to it must be looked at): every
+  // class of conformance/pssz-vectors.md, at its recorded size.
+  assert.deepEqual(Object.fromEntries([...classes].sort()), Object.fromEntries(Object.entries(PSSZ_CLASSES).sort()));
+  assert.equal(a.invariant + e.invariant, PSSZ_CLASSES.invariant);
+  assert.equal(a.nestedDeferred + e.nestedDeferred, PSSZ_CLASSES['nested-deferred']);
+  assert.equal(a.nestedUnknown + e.nestedUnknown, 16);
   assert.ok(a.rawNonUtf8NoText >= 11);
   // Top-level caps under an explicit width are rejections that were replayed.
   const explicitCap = fx.vectors.filter(
     (v) => v.format !== 'auto' && v.name.startsWith('width/') && v.name.includes('cap') && v.expect === 'reject',
   );
   assert.equal(explicitCap.length, 12);
-  assert.equal(fx.types.length, 220);
-  assert.equal(fx.vectors.length, 5267);
+  assert.equal(fx.types.length, 306);
+  assert.equal(fx.vectors.length, 6565);
 });
 
 for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, () => {
@@ -277,7 +449,7 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
 
   const count = {
     value: 0, valueTextToBytes: 0, valueBytesMatchFixture: 0, valueBytesToText: 0, accept: 0, reject: 0,
-    notExpressibleInIr: 0, plainValue: 0, strictRefused: 0,
+    invariant: 0, notExpressibleInIr: 0, plainValue: 0, strictRefused: 0, strictBinaryRefused: 0,
   };
   const notExpressible = new Set<string>();
   const covered = new Set<string>();
@@ -294,6 +466,7 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
     covered.add(row.type);
     const type = types.get(row.type)!;
     assert.equal(row.pssz !== undefined, info.pssz && row.kind !== 'reject', row.name);
+    assert.equal(row.reason !== undefined, row.kind === 'invariant', `${row.name}: reason`);
     if (row.kind === 'value') {
       ++count.value;
       const bytes = type.jsonToPssz(row.json!, 'json');
@@ -331,14 +504,31 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
         ++count.plainValue;
         const required = strict.type(row.type);
         for (const format of ['json', 'ijson'] as const) {
-          const write = rejects(() => required.psszToJson(bytes, format), row.name);
+          // (The bytes are refused first; then the value's text.)
+          const bytesToText = rejects(() => required.psszToJson(bytes, format), row.name);
+          assert.equal(bytesToText.message, 'pssz IR: no handler registered for a custom type', row.name);
+          const write = rejects(() => required.valueToJson(plain.decode(bytes), format), row.name);
           assert.equal(write.kind, 'value', row.name);
           assert.equal(write.message, 'pssz IR: no handler registered for a custom type', row.name);
           const read = rejects(() => required.jsonToPssz(row[format]!, format), row.name);
           assert.equal(read.kind, 'json', row.name);
           assert.equal(read.message, 'pssz IR: no handler registered for a custom type', row.name);
         }
-        assert.equal(toHex(required.encode(required.decode(bytes))), toHex(bytes), row.name);
+        // A strict registry applies on the binary entry points as well:
+        // wherever a value of a custom type occurs (an empty map keyed by
+        // one holds none).
+        const refused = required.validate(bytes);
+        if (refused.ok) {
+          assert.equal(toHex(required.encode(required.decode(bytes))), toHex(bytes), row.name);
+        } else {
+          assert.equal(refused.error.message, 'pssz IR: no handler registered for a custom type', row.name);
+          assert.equal(refused.error.kind, 'bytes', row.name);
+          assert.equal(rejects(() => required.decode(bytes), row.name).kind, 'bytes', row.name);
+          const unwritten = rejects(() => required.encode(plain.decode(bytes)), row.name);
+          assert.equal(unwritten.kind, 'value', row.name);
+          assert.equal(unwritten.message, 'pssz IR: no handler registered for a custom type', row.name);
+          ++count.strictBinaryRefused;
+        }
         ++count.strictRefused;
       }
     } else if (row.kind === 'accept') {
@@ -346,6 +536,48 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
       const bytes = type.jsonToPssz(inputOf(row), row.format!);
       if (row.pssz !== undefined) assert.equal(toHex(bytes), row.pssz, row.name);
       assert.equal(type.psszToJson(bytes, row.format!), row.canonical, row.name);
+    } else if (row.kind === 'invariant') {
+      // Well-formed text of the type (the typed text: a custom text form
+      // where the type has one) whose value violates an invariant. With
+      // the handlers every entry point, text and binary, reports the
+      // invariant's own message; with none the value is its wire type; a
+      // strict registry that lacks the handler refuses the type.
+      ++count.invariant;
+      assert.equal(info.invariant, true, row.name);
+      const format = row.format!;
+      const bytes = fromHex(row.pssz!);
+      const read = rejects(() => type.jsonToPssz(row.text!, format), `${row.name}: text`);
+      assert.equal(read.message, row.reason, row.name);
+      assert.equal(read.kind, 'json', row.name);
+      assert.equal(read.invariant, true, row.name);
+      assert.equal(rejects(() => type.jsonToValue(row.text!, format), row.name).message, row.reason, row.name);
+      for (const f of ['json', 'ijson'] as const)
+        assert.equal(rejects(() => type.psszToJson(bytes, f), `${row.name}: bytes to ${f}`).message, row.reason, row.name);
+      const refused = type.validate(bytes);
+      assert.ok(!refused.ok, row.name);
+      assert.equal(refused.error.message, row.reason, row.name);
+      assert.equal(refused.error.invariant, true, row.name);
+      assert.equal(rejects(() => type.decode(bytes), row.name).message, row.reason, row.name);
+      // No handler: valid bytes, the wire type's texts, each reading back.
+      const plain = schema.type(row.type);
+      assert.deepEqual(plain.validate(bytes), { ok: true, hasUnknown: false }, row.name);
+      const value = plain.decode(bytes);
+      assert.equal(plain.psszToJson(bytes, 'json'), row.plain_json, row.name);
+      assert.equal(plain.psszToJson(bytes, 'ijson'), row.plain_ijson, row.name);
+      assert.equal(toHex(plain.jsonToPssz(row.plain_json!, 'json')), row.pssz, row.name);
+      assert.equal(toHex(plain.jsonToPssz(row.plain_ijson!, 'ijson')), row.pssz, row.name);
+      // Writers refuse the value too: binary and text.
+      const written = rejects(() => type.encode(value), `${row.name}: encode`);
+      assert.equal(written.message, row.reason, row.name);
+      assert.equal(written.kind, 'value', row.name);
+      for (const f of ['json', 'ijson'] as const) {
+        const text = rejects(() => type.valueToJson(value, f), `${row.name}: value to ${f}`);
+        assert.equal(text.message, row.reason, row.name);
+        assert.equal(text.kind, 'value', row.name);
+      }
+      const required = strict.type(row.type).validate(bytes);
+      assert.ok(!required.ok, row.name);
+      assert.equal(required.error.message, 'pssz IR: no handler registered for a custom type', row.name);
     } else {
       assert.equal(row.kind, 'reject', row.name);
       ++count.reject;
@@ -359,7 +591,14 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
   );
   // Every expressible type is exercised, and every vector is accounted for.
   for (const row of fx.types) if (row.ir) assert.ok(covered.has(row.id), row.id);
-  assert.equal(count.value + count.accept + count.reject + count.notExpressibleInIr, fx.vectors.length);
+  assert.equal(count.value + count.accept + count.reject + count.invariant + count.notExpressibleInIr, fx.vectors.length);
+  // Every type an invariant constrains has `invariant` rows, and only those.
+  for (const row of fx.types)
+    assert.equal(fx.vectors.some((v) => v.type === row.id && v.kind === 'invariant'), row.invariant === true, row.id);
+  assert.deepEqual(
+    { value: count.value, accept: count.accept, reject: count.reject, invariant: count.invariant },
+    { value: 818, accept: 194, reject: 697, invariant: 50 },
+  );
   // Enums and 128 / 256-bit integers are replayed, not skipped.
   // The custom types are expressible and were replayed with and without
   // handlers.
@@ -370,13 +609,21 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
     assert.ok(fx.vectors.some((v) => v.type === id && v.kind === 'reject'), id);
   }
   assert.ok(count.plainValue >= 14 && count.strictRefused === count.plainValue);
+  assert.ok(count.strictBinaryRefused >= 30 && count.strictBinaryRefused <= count.strictRefused);
   for (const id of ['Color', 'Status', 'u128', 'i128', 'u256', 'Wide']) {
     assert.ok(rows.get(id)?.ir && covered.has(id), id);
     for (const kind of id === 'Wide' ? ['value'] : ['value', 'accept', 'reject'])
       assert.ok(fx.vectors.some((v) => v.type === id && v.kind === kind), `${id} ${kind}`);
   }
-  assert.equal(fx.types.length, 51);
-  assert.equal(fx.vectors.length, 1325);
+  // The custom types of conformance/custom-types.md, the maps keyed by a
+  // text form, and the nested values.
+  for (const id of ['Blob', 'Endpoint', 'Ratio', 'Ref', 'Guarded', 'map<Account,u64>', 'map<Version,string>', 'map<Ref,u8>'])
+    assert.ok(rows.get(id)?.custom && fx.vectors.some((v) => v.type === id && v.plain_json !== undefined), id);
+  for (const id of ['nested<u64>', 'nested<NestedArgs>', 'nested<NestedArgs,deferred>', 'NestedAction', 'set<nested<u64>>',
+    'map<nested<u64>,u8>', 'nested<map<string,u32>>', 'map<string,u32>', 'set<string>', 'pair<u32,string>', 'Id', 'Tag'])
+    assert.ok(rows.get(id)?.ir && covered.has(id), id);
+  assert.equal(fx.types.length, 96);
+  assert.equal(fx.vectors.length, 1759);
 });
 
 // Malformed schemas: all three languages refuse the same ones, with an
@@ -449,8 +696,8 @@ test('JSON fixture: malformed schemas are refused, their neighbours accepted', (
     schemaAcceptsTyped: typedRan.length, notDeclarable,
   }));
   assert.equal(typedRan.length + Object.keys(notDeclarable).length, fx.schema_accepts.length);
-  assert.equal(fx.schema_rejects.length, 52);
-  assert.equal(fx.schema_accepts.length, 15);
+  assert.equal(fx.schema_rejects.length, 77);
+  assert.equal(fx.schema_accepts.length, 28);
 });
 
 // The IR root says which version of the IR it is written in. The field was

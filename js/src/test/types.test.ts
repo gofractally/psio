@@ -424,11 +424,12 @@ test('typed layer: a custom type is its wire type with its own text', () => {
   assert.deepEqual(Balance.jsonToValue('{"owner":"alice","amount":7}'), { owner: alice, amount: 7n });
   // With a handler the text is the handler's: the plain number is not read.
   throwsKind(() => Balance.jsonToValue(`{"owner":${alice},"amount":7}`), 'json');
-  // No handler: the wire type's text; required: an error, in text only.
+  // No handler: the wire type's text; required: an error, binary and text.
   const Plain = custom('AccountNumber', u64);
   assert.equal(Plain.valueToJson(5n), '5');
   throwsKind(() => Plain.type({ requireHandlers: true }).valueToJson(5n), 'value', /no handler/);
-  assert.deepEqual(Plain.type({ requireHandlers: true }).decode(Plain.encode(5n)), 5n);
+  throwsKind(() => Plain.type({ requireHandlers: true }).decode(Plain.encode(5n)), 'bytes', /no handler/);
+  throwsKind(() => Plain.type({ requireHandlers: true }).encode(5n), 'value', /no handler/);
   // A handler that throws, or returns the wrong value, is a typed error.
   const Bad = custom('Bad', u8, { toText: () => { throw new Error('no'); }, fromText: () => 999 });
   throwsKind(() => Bad.valueToJson(1), 'value');

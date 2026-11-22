@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   PsszSchema, RecordView, boundedList, boundedUtf8, bytes, custom, emitWit, fixedBytes, fromHex, generateSchema, i32,
   i64, keyPrefixUpperBound, lazy, list, nameToNumber, numberToName, optional, pjsonDecode, pjsonEncode, pjsonValidate,
-  PjsonObject, record, toHex, tuple, u16, u32, u64, utf8, timePoint,
+  PjsonObject, PsszError, map, nested, pair, record, set, toHex, transparent, tuple, u16, u32, u64, u8, utf8, timePoint,
   type Infer, type ListView, type PsszCustomHandler, type TypeDef,
 } from '../index.js';
 
@@ -183,4 +183,75 @@ test('README: WIT, pjson, hex', () => {
   assert.equal(toHex(Uint8Array.of(0xde, 0xad)), 'dead');
   assert.deepEqual(fromHex('DEad'), Uint8Array.of(0xde, 0xad));
   assert.throws(() => fromHex('xyz'));
+});
+
+test('README: pairs, maps, sets, nested values, transparent types', () => {
+  const Args = record('Args', { to: utf8, amount: u64 });
+  const Id = transparent('Id', u64);
+  const Book = record('Book', {
+    owner: Id,
+    head: pair(u16, utf8),
+    counts: map(utf8, u32),
+    ids: set(u16),
+    byPoint: map(tuple(u8, u8), utf8),
+    call: nested(Args),
+  });
+  type Book = Infer<typeof Book>;
+  const value: Book = {
+    owner: 7n, head: [513, 'x'],
+    counts: new Map([['b', 2], ['a', 1]]),
+    ids: new Set([513, 2]),
+    byPoint: new Map([[[1, 2], 'p']]),
+    call: { to: 'bob', amount: 5n },
+  };
+  const encoded = Book.encode(value);
+  const book = Book.decode(encoded);
+  assert.deepEqual([...book.counts], [['a', 1], ['b', 2]]);
+  assert.deepEqual([...book.ids], [2, 513]);
+  assert.equal(Book.psszToJson(encoded),
+    '{"owner":7,"head":[513,"x"],"counts":{"a":1,"b":2},"ids":[2,513],"byPoint":[[[1,2],"p"]],"call":{"to":"bob","amount":5}}');
+  // A Map finds a composite key by identity: iterate.
+  assert.equal(book.byPoint.get([1, 2]), undefined);
+  assert.deepEqual([...book.byPoint], [[[1, 2], 'p']]);
+  // The same record with a bytes member is byte-identical.
+  const Routed = record('Book', {
+    owner: u64, head: tuple(u16, utf8), counts: list(tuple(utf8, u32)), ids: list(u16),
+    byPoint: list(tuple(tuple(u8, u8), utf8)), call: bytes,
+  });
+  assert.equal(toHex(Routed.encode({
+    owner: 7n, head: [513, 'x'], counts: [['a', 1], ['b', 2]], ids: [2, 513], byPoint: [[[1, 2], 'p']],
+    call: Args.encode({ to: 'bob', amount: 5n }),
+  })), toHex(encoded));
+});
+
+test('README: invariants', () => {
+  const DerKey = custom('DerKey', transparent('DerKey', bytes), {
+    check: (b) => (b.length > 0 && b[0] === 0x30 ? undefined : 'DerKey: not a DER sequence'),
+  });
+  const Range = custom('Range', record('Range', { lo: u32, hi: u32 }), {
+    check: (r) => (r.lo <= r.hi ? undefined : 'Range: lo is greater than hi'),
+  });
+  assert.equal(toHex(Range.encode({ lo: 1, hi: 5 })), '080100000005000000');
+  const reversedBytes = fromHex('080500000001000000');
+  const failure = (run: () => unknown): PsszError => {
+    try {
+      run();
+    } catch (e) {
+      assert.ok(e instanceof PsszError);
+      return e;
+    }
+    return assert.fail('accepted');
+  };
+  const written = failure(() => Range.encode({ lo: 5, hi: 1 }));
+  assert.deepEqual([written.kind, written.message, written.invariant], ['value', 'Range: lo is greater than hi', true]);
+  const validated = Range.validate(reversedBytes);
+  assert.ok(!validated.ok && validated.error.kind === 'bytes' && validated.error.message === 'Range: lo is greater than hi');
+  const read = failure(() => Range.jsonToValue('{"lo":5,"hi":1}'));
+  assert.deepEqual([read.kind, read.message], ['json', 'Range: lo is greater than hi']);
+  // A view reads in place and runs no check; decoding through it does.
+  assert.equal(Range.view(reversedBytes).get('lo'), 5);
+  assert.equal(failure(() => Range.view(reversedBytes).toValue()).message, 'Range: lo is greater than hi');
+  assert.equal(failure(() => DerKey.encode(new Uint8Array(0))).message, 'DerKey: not a DER sequence');
+  assert.equal(toHex(DerKey.encode(fromHex('3000'))), '3000');
+  assert.equal(failure(() => DerKey.encodeKey(fromHex('31'))).message, 'DerKey: not a DER sequence');
 });

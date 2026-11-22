@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PsszError, PsszSchema, type JsonFormat, type PsszCustomHandler, type PsszTypeInput } from '../index.js';
+import { PsszError, PsszSchema, RecordView, type JsonFormat, type PsszCustomHandler, type PsszTypeInput } from '../index.js';
 import { accountHandler, versionHandler } from './support/custom-handlers.js';
 
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -359,7 +359,7 @@ const transfer = {
 };
 
 test('custom type: on the wire exactly its inner type, whatever is registered', () => {
-  for (const schema of [plain, custom, strict]) {
+  for (const schema of [plain, custom, strict.withHandlers(handlers, { requireHandlers: false }), custom.withHandlers({}, { requireHandlers: true })]) {
     // Width, bytes, validation and the decoded value are the inner type's.
     assert.equal(schema.type('Version').width, plain.type('Plain').width);
     assert.equal(hex(schema.type('Version').encode({ major: 12, minor: 345 })), '040c005901');
@@ -452,10 +452,11 @@ test('custom type: with no handler it reads and writes as its wire type', () => 
   }
 });
 
-test('custom type: requireHandlers makes a missing handler an error in text only', () => {
+test('custom type: requireHandlers makes a missing handler an error on every entry point', () => {
   for (const format of FORMATS) {
     rejects(() => strict.type('Version').valueToJson({ major: 1, minor: 2 }, format), 'value', /no handler registered for a custom type/);
-    rejects(() => strict.type('Version').psszToJson(fromHex('0401000200'), format), 'value', /no handler registered for a custom type/);
+    // (The bytes are refused before any text is written.)
+    rejects(() => strict.type('Version').psszToJson(fromHex('0401000200'), format), 'bytes', /no handler registered for a custom type/);
     rejects(() => strict.type('Version').jsonToValue('"1.2"', format), 'json', /no handler registered for a custom type/);
     rejects(() => strict.type('Version').jsonToPssz('{"major":1,"minor":2}', format), 'json', /no handler registered for a custom type/);
     rejects(() => strict.type('Transfer').valueToJson(transfer, format), 'value', /no handler registered/);
@@ -469,9 +470,30 @@ test('custom type: requireHandlers makes a missing handler an error in text only
     rejects(() => all.type('Odd').valueToJson(1, format), 'value', /no handler registered/);
     rejects(() => all.type('Nested').valueToJson(ALICE, format), 'value', /no handler registered/);
   }
-  // Binary is exact either way.
-  assert.equal(hex(strict.type('Version').encode({ major: 1, minor: 2 })), '0401000200');
-  assert.deepEqual(strict.type('Version').decode(fromHex('0401000200')), { major: 1, minor: 2 });
+  // A strict registry applies on the binary entry points as well: a caller
+  // that must not accept or produce a value it cannot check and present.
+  for (const width of ['auto', 1, 2, 4] as const) {
+    const version = strict.type('Version', { width });
+    const bytes = plain.type('Version', { width }).encode({ major: 1, minor: 2 });
+    rejects(() => version.encode({ major: 1, minor: 2 }), 'value', /no handler registered for a custom type/);
+    rejects(() => version.decode(bytes), 'bytes', /no handler registered for a custom type/);
+    const validated = version.validate(bytes);
+    assert.ok(!validated.ok && validated.error.kind === 'bytes' && !validated.error.invariant);
+    rejects(() => (version.view(bytes) as RecordView).toValue(), 'bytes', /no handler registered/);
+    // A view reads in place and consults no handler.
+    assert.equal((version.view(bytes) as RecordView).get('major'), 1);
+  }
+  rejects(() => strict.type('Transfer').encode(transfer), 'value', /no handler registered/);
+  rejects(() => strict.type('Account').encodeKey(ALICE), 'value', /no handler registered/);
+  rejects(() => strict.type('Account').decodeKey(plain.type('Account').encodeKey(ALICE)), 'bytes', /no handler registered/);
+  // A type with no custom member, a box and the built-in ids are unaffected.
+  assert.equal(hex(strict.type('Plain').encode({ major: 1, minor: 2 })), '0401000200');
+  assert.equal(hex(strict.type({ Custom: { type: U8, id: 'box' } }).encode(7)), '07');
+  // With every id registered the binary side is exact.
+  const all = strict.withHandlers({ ...handlers, Odd: {}, Outer: {} });
+  assert.equal(hex(all.type('Version').encode({ major: 1, minor: 2 })), '0401000200');
+  assert.deepEqual(all.type('Version').decode(fromHex('0401000200')), { major: 1, minor: 2 });
+  assert.equal(hex(all.type('Transfer').encode(transfer)), hex(plain.type('Transfer').encode(transfer)));
 });
 
 test('custom handlers: the registry (schema, withHandlers, per type); bound once per type', () => {
@@ -521,7 +543,17 @@ test('custom handlers: the registry (schema, withHandlers, per type); bound once
   for (const id of ['bool', 'char', 'string', 'utf8', 'hex', 'bitvector', 'bitlist', 'box', 'unknown'])
     rejects(() => new PsszSchema(customIr, { handlers: { [id]: versionHandler } }), 'schema', /part of the binary form/, id);
   rejects(() => plain.withHandlers({ box: versionHandler }), 'schema', /part of the binary form/);
-  rejects(() => new PsszSchema(customIr, { handlers: { Version: {} as PsszCustomHandler } }), 'schema', /needs toText and fromText/);
+  for (const id of ['map', 'set'])
+    rejects(() => new PsszSchema(customIr, { handlers: { [id]: versionHandler } }), 'schema', /part of the binary form/, id);
+  // Every member of a handler is optional; one that is present is a function.
+  for (const member of ['toText', 'fromText', 'check'])
+    rejects(() => new PsszSchema(customIr, { handlers: { Version: { [member]: 1 } as unknown as PsszCustomHandler } }),
+      'schema', /must be a function/, member);
+  rejects(() => new PsszSchema(customIr, { handlers: { Version: null as unknown as PsszCustomHandler } }), 'schema', /must be an object/);
+  // A handler with nothing registers the id (a strict registry is satisfied): the type is its wire type.
+  const known = new PsszSchema(customIr, { handlers: { Version: {} }, requireHandlers: true });
+  assert.equal(known.type('Version').valueToJson({ major: 1, minor: 2 }), '{"major":1,"minor":2}');
+  assert.equal(hex(known.type('Version').encode({ major: 1, minor: 2 })), '0401000200');
 });
 
 test('custom handlers: a handler that throws or misbehaves is an ordinary error', () => {

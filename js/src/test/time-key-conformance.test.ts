@@ -11,11 +11,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PsszError, PsszSchema, keyPrefixUpperBound, type JsonFormat, type PsszType } from '../index.js';
+import { fixtureHandlers } from './support/custom-handlers.js';
 import { TypedFixture, type TypeSource } from './support/typed-from-ir.js';
 
 interface Row {
   name: string;
-  kind: 'value' | 'text-accept' | 'text-reject' | 'key-reject' | 'key-order' | 'key-order-bits' | 'key-prefix' | 'bound';
+  kind: 'value' | 'text-accept' | 'text-reject' | 'key-reject' | 'key-order' | 'key-order-bits' | 'key-prefix' | 'bound'
+    | 'key-invariant';
   type: string;
   pssz?: string;
   key?: string;
@@ -26,6 +28,8 @@ interface Row {
   bound?: string | null;
   count?: number;
   values?: string[];
+  /** Kind `key-invariant`: the invariant's message. */
+  reason?: string;
 }
 interface Fixture {
   version: number;
@@ -41,15 +45,15 @@ const fromHex = (hex: string) => Uint8Array.from(Buffer.from(hex, 'hex'));
 const toHex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const FORMATS: JsonFormat[] = ['json', 'ijson'];
 
-function rejects(run: () => unknown, name: string): void {
+function rejects(run: () => unknown, name: string): PsszError {
   try {
     run();
   } catch (e) {
     assert.ok(e instanceof PsszError, `${name}: threw ${String(e)}`);
     assert.notEqual(e.kind, 'internal', `${name}: ${e.message}`);
-    return;
+    return e;
   }
-  assert.fail(`${name}: accepted`);
+  return assert.fail(`${name}: accepted`);
 }
 
 // Replayed through the schema-driven path and through the typed layer
@@ -57,9 +61,17 @@ function rejects(run: () => unknown, name: string): void {
 for (const path of ['schema-driven', 'typed'] as const) test(`time/key conformance: every vector holds, ${path}`, () => {
   assert.equal(fixture.version, 1);
   const decoded = PsszSchema.decode(fromHex(fixture.schema_ir));
-  const schema: TypeSource = path === 'typed' ? new TypedFixture(decoded.ir) : decoded;
+  // The rows are the typed codec's: the handlers of the fixture's custom
+  // types (conformance/custom-types.md) give the schema their text forms
+  // and invariants. `plain` knows only the wire types.
+  const plainSource: TypeSource = path === 'typed' ? new TypedFixture(decoded.ir) : decoded;
+  const schema: TypeSource = path === 'typed' ? new TypedFixture(decoded.ir, fixtureHandlers) : decoded.withHandlers(fixtureHandlers);
   const types = new Map<string, PsszType>();
-  for (const row of fixture.types) types.set(row.id, schema.type(row.id));
+  const plainTypes = new Map<string, PsszType>();
+  for (const row of fixture.types) {
+    types.set(row.id, schema.type(row.id));
+    plainTypes.set(row.id, plainSource.type(row.id));
+  }
   const composite = new Map(fixture.types.map((t) => [t.id, t.composite]));
 
   const counts: Record<string, number> = {};
@@ -166,12 +178,43 @@ for (const path of ['schema-driven', 'typed'] as const) test(`time/key conforman
         if (bound) assert.ok(Buffer.compare(full, bound) < 0, `${name}: below the bound`);
         break;
       }
+      case 'key-invariant': {
+        // `key` and `pssz` are those of a value of the wire type that
+        // violates an invariant of the type. The readers that know the
+        // type (validate, decode; the PSSZ validator) reject them with the
+        // invariant's message, and no writer writes the value; a reader
+        // that knows only the wire type decodes the key to the value.
+        const key = fromHex(row.key!);
+        const pssz = fromHex(row.pssz!);
+        const read = rejects(() => type.decodeKey(key), `${name}: decodeKey`);
+        assert.equal(read.message, row.reason, name);
+        assert.equal(read.kind, 'bytes', name);
+        assert.equal(read.invariant, true, name);
+        const validated = type.validateKey(key);
+        assert.ok(!validated.ok && validated.error.message === row.reason, `${name}: validateKey`);
+        const binary = type.validate(pssz);
+        assert.ok(!binary.ok && binary.error.message === row.reason, `${name}: validate`);
+        const plain = plainTypes.get(row.type)!;
+        assert.deepEqual(plain.validateKey(key), { ok: true }, `${name}: wire type`);
+        const value = plain.decodeKey(key);
+        assert.equal(toHex(plain.encode(value)), row.pssz, `${name}: wire type value`);
+        assert.equal(toHex(plain.encodeKey(plain.decode(pssz))), row.key, `${name}: wire type key`);
+        const written = rejects(() => type.encodeKey(value), `${name}: encodeKey`);
+        assert.equal(written.message, row.reason, name);
+        assert.equal(written.kind, 'value', name);
+        // A prefix element is checked as the value it is.
+        if (composite.get(row.type)) {
+          const elements = Array.isArray(value) ? value : Object.values(value as object);
+          assert.equal(toHex(plain.encodeKeyPrefix(elements)), row.key, `${name}: wire type prefix`);
+        }
+        break;
+      }
       default:
         assert.fail(`${name}: unknown kind ${String(row.kind)}`);
     }
   }
 
-  const kinds = ['value', 'text-accept', 'text-reject', 'key-reject', 'key-order', 'key-order-bits', 'key-prefix', 'bound'];
+  const kinds = ['value', 'text-accept', 'text-reject', 'key-reject', 'key-order', 'key-order-bits', 'key-prefix', 'bound', 'key-invariant'];
   assert.deepEqual(Object.keys(counts).sort(), [...kinds].sort());
   let total = 0;
   for (const kind of kinds) {
@@ -181,8 +224,13 @@ for (const path of ['schema-driven', 'typed'] as const) test(`time/key conforman
   assert.equal(total, fixture.vectors.length);
   assert.ok(total >= 500);
   console.log(`time-key-vectors.json (${path}):`, JSON.stringify({ types: fixture.types.length, vectors: total, ...counts }));
-  assert.equal(fixture.types.length, 33);
-  assert.equal(fixture.vectors.length, 844);
+  assert.equal(fixture.types.length, 55);
+  assert.equal(fixture.vectors.length, 1147);
+  // The file as checked in, by kind (conformance/time-key-vectors.md).
+  assert.deepEqual(counts, {
+    value: 354, 'key-order': 53, 'text-accept': 56, 'text-reject': 124, 'key-reject': 141, 'key-prefix': 387,
+    'key-order-bits': 5, bound: 17, 'key-invariant': 10,
+  });
   // The monotonic time points: every row of theirs was replayed above.
   const monotonicTypes = ['monotonic<seconds>', 'monotonic<micros>', 'monotonic<millis,u32>', 'Timer', 'tuple<monotonic<micros>,string>'];
   const monotonicRows = fixture.vectors.filter((row) => monotonicTypes.includes(row.type));

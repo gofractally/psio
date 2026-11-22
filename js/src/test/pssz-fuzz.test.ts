@@ -15,7 +15,7 @@ import { fixtureHandlers } from './support/custom-handlers.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  ListView, PsszError, PsszNaN, PsszSchema, PsszView, RecordView, TupleView, VariantView,
+  ListView, PsszError, PsszNaN, PsszNegativeZero, PsszSchema, PsszView, RecordView, TupleView, VariantView,
   type JsonFormat, type PsszType, type PsszWidth,
 } from '../index.js';
 import { TypedFixture, type TypeSource } from './support/typed-from-ir.js';
@@ -77,6 +77,10 @@ function show(v: unknown): string {
     if (typeof x === 'number' && Object.is(x, -0)) return 'float -0';
     if (x instanceof Uint8Array) return `hex ${Buffer.from(x).toString('hex')}`;
     if (x instanceof PsszNaN) return `nan ${x.bits}`;
+    // A map is the list of its entries and a set the list of its elements
+    // (what a view walks); a float -0 key is held apart from +0.
+    if (x instanceof PsszNegativeZero) return 'float -0';
+    if (x instanceof Map || x instanceof Set) return [...x];
     if (x !== null && typeof x === 'object' && !Array.isArray(x) && !('type' in x && 'value' in x && Object.keys(x).length === 2)
         && !('some' in x && Object.keys(x).length === 1) && !('bitCount' in x))
       return Object.keys(x).map((name) => [name, (x as Record<string, unknown>)[name]]);
