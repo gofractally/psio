@@ -828,3 +828,26 @@ psio_custom_compile_fail(invariant_no_schema_id CT_FAIL_INVARIANT_NO_SCHEMA_ID
    "needs a schema id")
 psio_custom_compile_fail(text_no_schema_id CT_FAIL_TEXT_NO_SCHEMA_ID
    "needs a schema id")
+# Invariants (psio/invariant.hpp) block in-place mutation: a leaf inside any
+# type with an invariant is not writable, wherever the type sits.
+set(PSIO_MV_BLOCKED "in-place mutation is blocked for this type")
+psio_mutable_view_assoc_compile_fail(invariant_leaf MV_FAIL_INVARIANT_LEAF "${PSIO_MV_BLOCKED}")
+psio_mutable_view_assoc_compile_fail(invariant_whole_type MV_FAIL_INVARIANT_WHOLE_TYPE
+   "${PSIO_MV_BLOCKED}")
+psio_mutable_view_assoc_compile_fail(invariant_transparent MV_FAIL_INVARIANT_TRANSPARENT
+   "${PSIO_MV_BLOCKED}")
+psio_mutable_view_assoc_compile_fail(invariant_map_value MV_FAIL_INVARIANT_MAP_VALUE
+   "${PSIO_MV_BLOCKED}")
+psio_mutable_view_assoc_compile_fail(invariant_nested MV_FAIL_INVARIANT_NESTED
+   "${PSIO_MV_BLOCKED}")
+psio_mutable_view_assoc_compile_fail(invariant_list_element MV_FAIL_INVARIANT_LIST_ELEMENT
+   "${PSIO_MV_BLOCKED}")
+psio_mutable_view_assoc_compile_fail(invariant_contained MV_FAIL_INVARIANT_CONTAINED
+   "the value contains a type whose in-place mutation is blocked")
+
+# Transparent types, custom text forms and invariants with maps, sets, pairs
+# and nested values: invariants on keys / values / elements and inside
+# nested bytes, transparent wrappers of containers, text-keyed maps; typed
+# and schema-driven (the exception-disabled run is part of
+# psio_custom_noexceptions_test).
+psio_add_test(psio_custom_assoc_tests custom_assoc_tests.cpp)

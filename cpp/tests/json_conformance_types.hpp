@@ -492,6 +492,13 @@ namespace json_conf
    using custom_conf::Range;
    using custom_conf::Ratio;
    using custom_conf::Ref;
+   using custom_conf::Tag;
+   // Custom types in maps, sets and nested values.
+   using MapTagU32    = std::map<Tag, std::uint32_t>;
+   using MapNameRange = std::map<Name, Range>;
+   using SetLevel     = std::set<Level>;
+   using MapRefU8     = std::map<Ref, std::uint8_t>;
+   using NestedRange  = psio::nested<Range>;
 }  // namespace json_conf
 
 PSIO_FIELD_ATTRS(json_conf::Overrides, a, psio::json_string)
@@ -613,6 +620,12 @@ namespace json_conf
    JSON_CONF_TYPE(std::vector<Level>, "list<Level>")
    JSON_CONF_TYPE(std::optional<Name>, "optional<Name>")
    JSON_CONF_TYPE(std::vector<Endpoint>, "list<Endpoint>")
+   JSON_CONF_TYPE(Tag, "Tag")
+   JSON_CONF_TYPE(MapTagU32, "map<Tag,u32>")
+   JSON_CONF_TYPE(MapNameRange, "map<Name,Range>")
+   JSON_CONF_TYPE(SetLevel, "set<Level>")
+   JSON_CONF_TYPE(MapRefU8, "map<Ref,u8>")
+   JSON_CONF_TYPE(NestedRange, "nested<Range>")
 #undef JSON_CONF_TYPE
 
    // Every fixture type is expressible in the Schema IR: a type with a
@@ -633,7 +646,7 @@ namespace json_conf
       std::is_same_v<T, Transfer> || std::is_same_v<T, Blob> || std::is_same_v<T, Endpoint> ||
       std::is_same_v<T, Ratio> || std::is_same_v<T, Ref> || std::is_same_v<T, Guarded> ||
       std::is_same_v<T, std::vector<Endpoint>> || std::is_same_v<T, MapAccount> ||
-      std::is_same_v<T, MapVersion> || std::is_same_v<T, Registry>;
+      std::is_same_v<T, MapVersion> || std::is_same_v<T, Registry> || std::is_same_v<T, MapRefU8>;
    // The type holds a type with an invariant somewhere: "invariant" rows
    // exist for it, and a schema-driven codec needs the handlers' `check` to
    // reject what the typed codec rejects.
@@ -699,7 +712,11 @@ namespace json_conf
            std::type_identity<DerKey>{}, std::type_identity<Range>{},
            std::type_identity<Level>{}, std::type_identity<Guarded>{},
            std::type_identity<std::vector<Level>>{}, std::type_identity<std::optional<Name>>{},
-           std::type_identity<std::vector<Endpoint>>{});
+           std::type_identity<std::vector<Endpoint>>{},
+           // Appended: custom types in maps, sets and nested values.
+           std::type_identity<Tag>{}, std::type_identity<MapTagU32>{},
+           std::type_identity<MapNameRange>{}, std::type_identity<SetLevel>{},
+           std::type_identity<MapRefU8>{}, std::type_identity<NestedRange>{});
    }
 
    // One Schema holding every type under its fixture id. (Also recorded, as
@@ -912,12 +929,23 @@ namespace json_conf
       value = psio::decode<T>(psio::pssz{}, in);
       std::vector<char> out;
       auto              enc = psio::encode_pssz_checked(psio::pssz{}, value, out);
-      if (enc.ok() || enc.error().what != reason || !out.empty())
-         return "encode_pssz_checked writes a value that violates its invariant";
-      std::string text;
-      auto        js = psio::encode_json_checked(psio::json{}, value, text);
-      if (js.ok() || js.error().what != reason || !text.empty())
-         return "encode_json_checked writes a value that violates its invariant";
+      std::string       text;
+      auto              js = psio::encode_json_checked(psio::json{}, value, text);
+      if constexpr (psio::detail::is_nested_v<T>)
+      {
+         // A nested value adopted without a check (which the trusted decode
+         // does) is written as the bytes it holds: the holder vouched for
+         // them. It has no text: its bytes are not a value of the inner type.
+         if (!enc.ok() || out != bytes) return "a nested value is not written as its bytes";
+         if (js.ok() || !text.empty()) return "encode_json_checked writes nested bytes that are not a value";
+      }
+      else
+      {
+         if (enc.ok() || enc.error().what != reason || !out.empty())
+            return "encode_pssz_checked writes a value that violates its invariant";
+         if (js.ok() || js.error().what != reason || !text.empty())
+            return "encode_json_checked writes a value that violates its invariant";
+      }
       if (psio::encode_json_checked(psio::ijson{}, value, text).ok())
          return "encode_json_checked (ijson) writes a value that violates its invariant";
       return "";

@@ -1902,6 +1902,41 @@ namespace
 
    // Transparent wrappers, custom text forms of any shape, invariants
    // (custom_conformance_types.hpp; conformance/custom-types.md).
+   // Custom types in maps, sets and nested values: a map keyed by a
+   // transparent string or by a custom text form is an object; an invariant
+   // holds for a key (also one read from a member name), a mapped value, a
+   // set element and the value inside nested bytes.
+   void emit_custom_assoc()
+   {
+      using namespace custom_conf;
+      const std::string name_reason  = "Name: value is not a canonical name";
+      const std::string range_reason = "Range: lo is greater than hi";
+
+      value<Tag>("some", Tag{"t"});
+      reject_both<Tag>("as_record", R"({"text":"t"})");
+      value<MapTagU32>("empty", {});
+      value<MapTagU32>("two", {{Tag{"b"}, 2}, {Tag{"a"}, 1}});
+      accept_both<MapTagU32>("any_order", R"({"b":2,"a":1})", R"({"a":1,"b":2})");
+      reject_both<MapTagU32>("duplicate_key", R"({"a":1,"a":2})");
+      reject_both<MapTagU32>("pairs_form", R"([["a",1]])");
+
+      value<MapNameRange>("two", {{Name{7}, Range{1, 2}}, {Name{3}, Range{0, 0}}});
+      invariant<MapNameRange>("key_non_canonical", name_reason,
+                              R"([[{"value":1152921504606846976},{"lo":0,"hi":1}]])");
+      invariant<MapNameRange>("value_reversed", range_reason,
+                              R"([[{"value":1},{"lo":5,"hi":1}]])");
+      value<SetLevel>("two", {Level::top, Level::low});
+      invariant<SetLevel>("unlisted", "Level: not a listed level", R"(["low",9])");
+
+      // A key with a text form and an invariant: read from a member name.
+      value<MapRefU8>("two", {{Ref{std::string{"alice"}}, 1}, {Ref{std::uint64_t{9}}, 2}});
+      invariant<MapRefU8>("empty_name_key", "Ref: a name is not empty", R"([[[1,""],1]])",
+                          R"({"@":1})", R"({"@":1})");
+
+      value<NestedRange>("ordered", NestedRange::from(Range{3, 9}));
+      invariant<NestedRange>("reversed", range_reason, R"({"lo":9,"hi":3})");
+   }
+
    void emit_custom_types()
    {
       using namespace custom_conf;
@@ -2196,6 +2231,7 @@ int main(int argc, char** argv)
    emit_nested_assoc();
    emit_schema_rows();
    emit_custom_types();
+   emit_custom_assoc();
 
    const std::string text = render();
    // The fixture is itself read back with the codec under test.

@@ -22,6 +22,7 @@ is in the fixtures.
 | type | wire type | schema node | text form | invariant |
 |---|---|---|---|---|
 | `Id` | `u64` (transparent, member `value`) | named alias of `u64` | the integer's | none |
+| `Tag` | `raw_string` (transparent, member `text`) | named alias of the string | the string's | none |
 | `Blob` | `bytes` (transparent, member `data`) | `Custom{bytes, "Blob"}` | base64 | none |
 | `Endpoint` | `variant<V4, V6>` | `Custom{variant, "Endpoint"}` | address and port | none |
 | `Ratio` | `tuple<i16, u16>` | `Custom{tuple, "Ratio"}` | `n/d` | none |
@@ -127,6 +128,30 @@ reader do with it:
 | schema-driven with **no** handler for the type's id | accepts: the value is its wire type. Its bytes validate, decode and re-encode; its text is the wire type's |
 | schema-driven **with** the handlers of the ids above | rejects, with the same message, on the binary and the text entry points |
 | schema-driven with a **strict** registry that lacks the handler | rejects: "no handler registered for a custom type" |
+
+### In maps, sets and nested values
+
+`map<Tag,u32>`, `map<Name,Range>`, `set<Level>`, `map<Ref,u8>` (JSON fixture)
+and `nested<Range>` put the types above where a map, a set or a nested value
+holds them:
+
+- a **transparent key** is its member: `map<Tag,u32>` has the bytes of
+  `map<raw_string,u32>` and, its key being a string by type, is a JSON
+  object. So is `map<Ref,u8>`, whose key has a text form (`{"@alice":1}`;
+  the pairs form of the variant without the handler);
+- an **invariant** holds for a key, a mapped value and a set element where
+  they occur — the key's violation is reported before its mapped value's —
+  and for a key read from a JSON object member name (`map<Ref,u8>`,
+  `{"@":1}`);
+- the value **inside nested bytes** is validated as its type, invariants
+  included, by every reader of the nested value (`nested<Range>`, pssz class
+  `invariant`, vector `nested/range_reversed`: the frame is the inner
+  frame, the same bytes in every width profile). A typed nested value that
+  adopted such bytes without a check writes them back as they are and has
+  no text;
+- the **order** of map entries and set elements is defined for every key,
+  valid or not: a reader reports the invariant, not the order, for an
+  entry whose key violates one and is in its place.
 
 ### pssz-vectors.json
 

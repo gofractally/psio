@@ -85,6 +85,16 @@ namespace custom_conf
       }
    };
 
+   // A transparent wrapper of a string, with no text form and no invariant:
+   // a string in every format, so a map keyed by it is a JSON object.
+   struct Tag
+   {
+      std::string text;
+      friend bool operator==(const Tag&, const Tag&) = default;
+      friend auto operator<=>(const Tag&, const Tag&) = default;
+      PSIO_REFLECT(Tag, transparent(), text)
+   };
+
    // ── Id: a transparent wrapper with nothing else ───────────────────────
    struct Id
    {

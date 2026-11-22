@@ -47,11 +47,21 @@ namespace psio
 
    namespace detail
    {
+      // The sink of the bytes entries are ORDERED by. The key encoder runs
+      // no invariant on a value written to it: the order of two keys is
+      // defined whether or not they satisfy their types' invariants, and
+      // each codec checks the keys where it writes or reads them — with a
+      // status, where this computation has none to give.
+      struct order_key_stream : ::psio::vector_stream
+      {
+         using ::psio::vector_stream::vector_stream;
+      };
+
       // Appends the key encoding of `value`.
       template <typename K>
       void append_key_bytes(const K& value, std::vector<char>& out)
       {
-         ::psio::vector_stream s{out};
+         order_key_stream s{out};
          key_impl::encode_value(value, s);
       }
 

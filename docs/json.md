@@ -171,7 +171,8 @@ pairs** otherwise. The rule is the same in `json` and `ijson`.
 | key type | map text |
 |---|---|
 | a string kind: C++ `std::string`, `utf8_string<N>`; Rust `String`, `RawString`, bounded strings; Schema IR `string` / `utf8` | `{"apple":1,"pear":3}` |
-| a type with a custom text form: C++ `text_category` adapter, Rust `TextForm`, a schema `Custom` presented by its handler | `{"alice":5,"bob":7}` |
+| a type with a custom text form, of any shape (a record, a variant, a transparent wrapper, ...): C++ `text_category` adapter, Rust `TextForm`, a schema `Custom` presented by its handler | `{"alice":5,"bob":7}`, `{"127.0.0.1:80":4}` |
+| a transparent wrapper (`docs/pssz-spec.md` §5.10) of one of the above: its text is its member's. In a schema it is a named alias of the member's type, or a `Custom` whose handler only checks (an invariant, no text form) | `{"apple":1}` |
 | anything else — integers, enums, time values, byte sequences, tuples, records, floats, ... | `[[1,"one"],[256,"x"]]` |
 
 A key that merely *happens* to be written as a string (an enumerator name, a
@@ -194,7 +195,10 @@ values.
   an enum key, `{"a":1,"a":2}` and `[0.0,-0.0]` are all duplicates.
 - An object key is read exactly as the same text would be read as a string
   of the key type: I-JSON refuses a noncharacter, a `utf8_string<N>` key its
-  bound, a custom text form its own `validate`.
+  bound, a custom text form its own `validate` — and a key type with an
+  invariant (`docs/pssz-spec.md` §18) its invariant, with the invariant's
+  own message, as for a value read anywhere else. Schema-driven: the
+  handler's `check` runs on a key read from, or written as, a member name.
 - The entries of the pairs form are tuples: `[k, v]` with exactly two
   elements. An object where the pairs form is expected, or the reverse, is
   an error.
@@ -741,8 +745,11 @@ produce on every write (a dynamic map value is the sequence of its
 `[key, value]` entries, in any order when handed to an encoder). They take no
 handler. Their text is that of "Maps and sets" above, decided from the key
 type's node: an object when it is a `string` / `utf8` node, or a custom
-presentation **whose handler is registered** (the key text is the handler's);
-the pairs form otherwise. A custom presentation with no handler falls back,
+presentation **whose handler is registered and has a text form** (the key
+text is the handler's); the pairs form otherwise. A custom node whose
+handler only checks (an invariant) does not decide the form: the node under
+it does, so a transparent string with an invariant keys an object with or
+without its handler. A custom presentation with no handler falls back,
 as everywhere, to the plain form of its wire type — and the map's form
 follows it: an account-keyed map is `{"alice":5}` with the account handler
 and `[[235814801429757952,5]]` without. A strict registry

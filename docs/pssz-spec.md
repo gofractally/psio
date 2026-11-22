@@ -1780,15 +1780,19 @@ The reference implementation rejects each of these at compile time:
   adapter-encoded value;
 - resizing of any kind — there is no such operation;
 - any write beneath a value whose **content is constrained beyond its
-  own encoding**: a type with a semantic invariant, or a record member
+  own encoding**: a type with an invariant (§18), or a record member
   whose annotations constrain it (`sorted_spec`, `unique_keys_spec`,
   `element_spec`, any spec with a validator). A leaf write could
   falsify the constraint without changing a single structural byte, so
   such a type has no mutable view and such a member cannot be
   navigated into; `set` of a whole fixed-size value that contains one
-  is rejected as well. The extension point is
-  `psio::detail::mutation_blocked_v<T>`, specialized to `true` for a
-  type or an annotation spec;
+  is rejected as well. A type that declares an invariant is blocked by
+  that declaration — wherever it sits: a record member, a list element,
+  a mapped value, the value inside nested bytes, a transparent wrapper
+  with an invariant. (A transparent wrapper without one is its member:
+  navigation and `set` are the member's.) The extension point for any
+  other constraint is `psio::detail::mutation_blocked_v<T>`, specialized
+  to `true` for a type or an annotation spec;
 - any write to the **key** of a map entry or to an element of a
   **set**, and navigation into a set at all (§17.2.1): a set has no
   mutable view, and an entry of a mutable map exposes its key for
@@ -1862,9 +1866,12 @@ Rules:
    value, and a structural error is reported as such.
 3. **Innermost first.** Nested values are checked where they occur — record
    members, list and array elements, optional and variant payloads, tuple
-   elements, the member of a transparent wrapper, boxed values — before the
-   value that holds them, so a type's check may rely on those of its
-   members. The first failure in wire order is the one reported.
+   and pair elements, the keys and mapped values of a map and the elements
+   of a set (§5.9), the value inside nested bytes (§5.8), the member of a
+   transparent wrapper, boxed values — before the value that holds them, so
+   a type's check may rely on those of its members. The first failure in
+   wire order is the one reported (in a map entry: the key's, then the
+   mapped value's).
 4. **The error is the type's own.** The status the check returns
    (by convention `codec_fail(message, 0, "<type name>")`) is passed through
    unchanged by every entry point.
@@ -1883,6 +1890,22 @@ Where it runs:
 | `key` encode / `to_key`, key `validate`, `validate_strict`, `decode` (`docs/key-spec.md`) | **checked** |
 | `json` / `ijson` encode, `encode_json_checked`, `validate`, `validate_strict`, `validate_json`, `decode`, `decode_json_checked`, `make_boxed` (`docs/json.md`) | **checked** |
 | formats outside the core set (bin, ssz, frac, borsh, ...) | **not checked** |
+
+**Maps and sets.** The order of the entries (§5.9.1) is defined for every
+key, whether or not it satisfies its type's invariant: computing it runs no
+check. Each codec checks the keys where it writes or reads them as values —
+a writer before any byte, a reader after the structure — also a key read
+from a JSON object member name (`docs/json.md`, "Maps and sets"), which is
+a value of its type like any other.
+
+**Nested values.** The bytes of a `Nested(T)` are validated as a T, which
+runs T's invariants, by every reader of the enclosing value and by the
+nested value's own checked constructors (C++ `nested<T>::from` /
+`from_checked` / `checked` / `validate`). A writer of the enclosing value
+does not look inside (§5.8): bytes adopted without a check (C++
+`nested<T>::unchecked`, or the trusted `psio::decode`) are written as they
+are, and every reader rejects them. A deferred nested value is not looked
+into by an enclosing reader, invariants included.
 
 The explicit-width profiles (`psio::pssz_<W>`) check exactly as the
 automatic one. With exceptions disabled every checked entry point reports
@@ -1909,7 +1932,11 @@ handlers' checks, as do `decode_auto` / `encode_auto` /
 `decode_compatible<W>` / `decode_exact<W>` / `encode<W>` /
 `validate_canonical_for_width<W>` and the text conversions given the
 registry. On reads a check runs after the value's structure is accepted, on
-writes before any byte is returned, nested values first.
+writes before any byte is returned, nested values first. The entries of a
+map / set and the value inside a `Nested` node are values like any other:
+their custom nodes are checked (and, under a strict registry, required to
+have a handler) where they occur, unless the nested bytes are read as
+opaque.
 
 The fixture classes `invariant` (`conformance/pssz-vectors.md`), the JSON
 row kind `invariant` and the key row kind `key-invariant` hold structurally

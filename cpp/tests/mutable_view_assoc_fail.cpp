@@ -4,6 +4,7 @@
 // the compiler on this file once per case and requires the corresponding
 // message.
 
+#include <psio/invariant.hpp>
 #include <psio/mutable_view.hpp>
 #include <psio/nested.hpp>
 #include <psio/pssz.hpp>
@@ -34,6 +35,52 @@ PSIO_REFLECT(FailRange, low, high, definitionWillNotChange())
 template <>
 inline constexpr bool psio::detail::mutation_blocked_v<FailRange> = true;
 
+// Types with a real invariant (invariant.hpp): blocked without a
+// mutation_blocked_v specialization.
+struct FailSpan
+{
+   std::uint32_t lo = 0;
+   std::uint32_t hi = 0;
+   static psio::codec_status check(const FailSpan& s) noexcept
+   {
+      return s.lo <= s.hi ? psio::codec_ok() : psio::codec_fail("FailSpan: lo > hi", 0, "FailSpan");
+   }
+   PSIO_REFLECT(FailSpan, definitionWillNotChange(), invariant(check), lo, hi)
+};
+struct FailEven
+{
+   std::uint32_t value = 0;
+   static psio::codec_status check(const FailEven& e) noexcept
+   {
+      return e.value % 2 == 0 ? psio::codec_ok() : psio::codec_fail("FailEven: odd", 0, "FailEven");
+   }
+   PSIO_REFLECT(FailEven, transparent(), invariant(check), value)
+};
+// A transparent wrapper without an invariant is its member.
+struct FailCount
+{
+   std::uint32_t value = 0;
+   PSIO_REFLECT(FailCount, transparent(), value)
+};
+struct FailPairOfSpans
+{
+   FailSpan      span;
+   std::uint32_t tag = 0;
+   PSIO_REFLECT(FailPairOfSpans, definitionWillNotChange(), span, tag)
+};
+struct FailGuarded
+{
+   FailSpan                                  span;
+   FailEven                                  even;
+   FailCount                                 count;
+   std::map<std::string, FailSpan>           spans;
+   psio::nested<FailSpan>                    packed;
+   FailPairOfSpans                           holder;
+   std::vector<FailEven>                     evens;
+   std::map<std::string, FailCount>          counts;
+   PSIO_REFLECT(FailGuarded, span, even, count, spans, packed, holder, evens, counts)
+};
+
 struct FailBook
 {
    std::set<std::uint32_t>                                          ids;
@@ -57,6 +104,10 @@ int main()
              mv.get<2>().size() == 0 && mv.get<3>().get().set(FailBalance{}) &&
              (*mv.get<3>()).get<0>().set(1) && mv.get<7>().empty() &&
              psio::size(mv.get<8>()[0].value()) == 0;
+   psio::mutable_view<FailGuarded, psio::pssz> guarded{bytes};
+   ok = ok && guarded.get<2>().set(1) && guarded.get<3>().empty() &&
+        guarded.get<5>().get<1>().set(1) && guarded.get<7>()[0].value().set(1) &&
+        psio::size(guarded.get<4>()) == 0;
 #if defined(MV_FAIL_SET)
    // An element write could break the order of the set.
    ok = mv.get<0>().size() == 0;
@@ -88,6 +139,23 @@ int main()
    ok = mv.get<4>().get().set(FailBalance{});
 #elif defined(MV_FAIL_NESTED_BLOCKED)
    ok = mv.get<5>().get().get<0>().set(1);
+#elif defined(MV_FAIL_INVARIANT_LEAF)
+   // A leaf of a type with an invariant: lo <= hi would not be re-checked.
+   ok = guarded.get<0>().get<0>().set(1);
+#elif defined(MV_FAIL_INVARIANT_WHOLE_TYPE)
+   // Nor the whole value: `set` writes what it is given, unchecked.
+   ok = guarded.get<0>().set(FailSpan{});
+#elif defined(MV_FAIL_INVARIANT_TRANSPARENT)
+   ok = guarded.get<1>().set(2);
+#elif defined(MV_FAIL_INVARIANT_MAP_VALUE)
+   ok = guarded.get<3>()[0].value().get<1>().set(1);
+#elif defined(MV_FAIL_INVARIANT_NESTED)
+   ok = guarded.get<4>().get().get<1>().set(1);
+#elif defined(MV_FAIL_INVARIANT_LIST_ELEMENT)
+   ok = guarded.get<6>()[0].set(2);
+#elif defined(MV_FAIL_INVARIANT_CONTAINED)
+   // A fixed-size value that contains a type with an invariant.
+   ok = guarded.get<5>().set(FailPairOfSpans{});
 #endif
    return ok ? 0 : 1;
 }

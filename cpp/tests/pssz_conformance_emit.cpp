@@ -2626,6 +2626,46 @@ namespace
       });
    }
 
+   // Custom types in maps, sets and nested values: the invariant of a key,
+   // a mapped value, a set element and of the value inside nested bytes is
+   // checked where it occurs; a transparent key is its member.
+   void emit_custom_assoc()
+   {
+      using namespace custom_conf;
+      using MapTag  = std::map<Tag, u32>;
+      using MapName = std::map<Name, Range>;
+      using SetLvl  = std::set<Level>;
+      const std::string name_reason  = "Name: value is not a canonical name";
+      const std::string range_reason = "Range: lo is greater than hi";
+      const std::string level_reason = "Level: not a listed level";
+      const Name        bad_name{u64{1} << 60};
+
+      transparent<Tag, Raw>("tag/some", Tag{"t"}, Raw{"t"});
+      transparent<MapTag, MapRawU32>("tag/map_keys", {{Tag{"b"}, 2}, {Tag{"a"}, 1}},
+                                     {{"a", 1}, {"b", 2}});
+      corpus<MapName>("custom", "map_name_range/empty", {});
+      corpus<MapName>("custom", "map_name_range/two",
+                      {{Name{7}, Range{1, 2}}, {Name{3}, Range{0, 0}}});
+      corpus<SetLvl>("custom", "set_level/two", {Level::top, Level::low});
+      corpus<Nested<Range>>("custom", "nested_range/ordered", Nested<Range>::from(Range{3, 9}));
+
+      violates<MapName>("map/key_name", {{bad_name, Range{0, 1}}}, name_reason);
+      violates<MapName>("map/value_range", {{Name{1}, Range{0, 1}}, {Name{2}, Range{5, 1}}},
+                        range_reason);
+      // The key comes first on the wire: its violation is the one reported.
+      violates<MapName>("map/key_and_value", {{bad_name, Range{5, 1}}}, name_reason);
+      violates<SetLvl>("set/element_level", {Level::low, static_cast<Level>(9)}, level_reason);
+      // Inside nested bytes: the inner frame is the automatic profile's
+      // whatever the enclosing one. (A writer holding such bytes does not
+      // look inside; every reader does.)
+      Bytes inner;
+      if (!impl::encode_ignoring_invariants(psio::pssz{}, Range{9, 3}, inner).ok())
+         die("invariant/nested: the inner value has no frame");
+      formats([&]<typename F>() {
+         add<F, Nested<Range>>("invariant", "nested/range_reversed", inner, reject(range_reason));
+      });
+   }
+
    void emit_custom_types()
    {
       using namespace custom_conf;
@@ -2860,6 +2900,7 @@ int main(int argc, char** argv)
    emit_assoc();
    emit_nested_assoc();
    emit_custom_types();
+   emit_custom_assoc();
 
    if (!unregistered.empty())
    {

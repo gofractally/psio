@@ -56,14 +56,18 @@ inline map_key_text key_text_of(const Schema &schema, const AnyType &key,
          if (::psio::parse_time_schema_id(custom->id) ||
              ::psio::reserved_time_schema_id(custom->id))
             return out;
-         if (auto handler = customs.find(*custom))
+         // A handler that presents the type decides the key's text. One
+         // that only checks it (an invariant, no text form) leaves the text
+         // to the wire type, like no handler at all.
+         auto handler = customs.find(*custom);
+         if (handler && (handler->to_text || handler->from_text))
          {
             out.form = map_key_text::kind::handler;
             out.node = custom;
             out.handler = handler;
             return out;
          }
-         if (customs.required())
+         if (!handler && customs.required())
          {
             out.missing_handler = true;
             return out;
@@ -97,6 +101,24 @@ bool Reader<C>::key_from_text(const map_key_text &key, std::string_view text, Va
        unknown)
       return c.fail("json: custom handler produced bytes that are not the inner type");
    return true;
+}
+
+// A key read from a member name did not pass through `read`: the checks of
+// the custom nodes of its type (invariants) run here, on its bytes.
+template <JsonCursor C> bool Reader<C>::key_checked(const AnyType &type, const Value &key)
+{
+   const CustomHandlers *registry = customs.registry();
+   if (!registry || !registry->checks_values())
+      return true;
+   const detail::Codec<0> codec(schema, registry);
+   std::vector<char> bytes;
+   auto status = codec.encode_at(type, key, bytes);
+   if (status.ok())
+      return true;
+   const std::string_view what = status.error().what;
+   if (codec.check_failed && failure.ok())
+      failure = std::move(status);
+   return c.fail(what.empty() ? std::string_view{"json: invariant violated"} : what);
 }
 
 template <JsonCursor C> bool Reader<C>::assoc(const Custom &type, int_form form, Value &out)
@@ -145,7 +167,7 @@ template <JsonCursor C> bool Reader<C>::assoc(const Custom &type, int_form form,
             if (shape.max && items.size() >= *shape.max)
                return c.fail("json: array exceeds its bound");
             Sequence entry(2);
-            if (!key_from_text(key, name, entry[0]) ||
+            if (!key_from_text(key, name, entry[0]) || !key_checked(*shape.key, entry[0]) ||
                 !read(*shape.value, int_form::natural, 0, entry[1]))
                return false;
             items.push_back(std::move(entry));
@@ -206,6 +228,16 @@ inline void Writer::assoc(const Custom &type, const Value &value, int_form form)
          continue;
       }
       const Sequence &entry = std::get<Sequence>(item.value);
+      if (checks)
+         if (auto registry = customs.registry(); registry && registry->checks_values())
+         {
+            // The key is written from its value, not through `write`: the
+            // checks of its type's custom nodes run here.
+            const detail::Codec<0> key_codec(schema, registry);
+            std::vector<char> key_bytes;
+            if (auto status = key_codec.encode_at(*shape.key, entry[0], key_bytes); !status.ok())
+               return w.fail(status.error());
+         }
       if (key.form == map_key_text::kind::string)
       {
          auto text = std::get_if<std::string>(&entry[0].value);

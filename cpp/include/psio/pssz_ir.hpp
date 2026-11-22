@@ -793,9 +793,12 @@ template <std::size_t W> class Codec
          return encode_at(type, value, out, n);
       else
       {
-         Codec<0> codec(schema);
+         // The inner value is checked like any other: same registry.
+         Codec<0> codec(schema, customs);
          codec.opaque_nested = opaque_nested;
-         return codec.encode_at(type, value, out, n);
+         auto status = codec.encode_at(type, value, out, n);
+         check_failed |= codec.check_failed;
+         return status;
       }
    }
    codec_status nested_decode(const schema_types::AnyType &type, std::span<const char> bytes,
@@ -805,11 +808,12 @@ template <std::size_t W> class Codec
          return decode_at(type, bytes, out, n);
       else
       {
-         Codec<0> codec(schema);
+         Codec<0> codec(schema, customs);
          codec.opaque_nested = opaque_nested;
          codec.allow_unknown = allow_unknown;
          auto status = codec.decode_at(type, bytes, out, n);
          has_unknown |= codec.has_unknown;
+         check_failed |= codec.check_failed;
          return status;
       }
    }
@@ -1023,6 +1027,7 @@ template <std::size_t W> class Codec
       if constexpr (!automatic)
       {
          Codec<0> codec(schema);
+         codec.opaque_nested = opaque_nested;
          PSIO_PSSZ_IR_TRY(codec.encode_at(input, value, canonical));
          bytes = std::span<const char>{canonical};
       }

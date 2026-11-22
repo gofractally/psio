@@ -904,6 +904,7 @@ template <JsonCursor C> class Reader
    // Maps and sets (detail/pssz_ir_json_assoc.hpp).
    bool assoc(const Custom &type, int_form form, Value &out);
    bool key_from_text(const map_key_text &key, std::string_view text, Value &out);
+   bool key_checked(const AnyType &type, const Value &key);
 
    bool record(const std::vector<Member> &members, [[maybe_unused]] std::size_t n, Value &out)
    {

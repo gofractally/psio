@@ -49,6 +49,18 @@ namespace warnings_check
       std::uint64_t value = 0;
       PSIO_REFLECT(handle, transparent(), value)
    };
+   // Transparent wrappers of a string (a text key) and of a map.
+   struct label
+   {
+      std::string text;
+      friend auto operator<=>(const label&, const label&) = default;
+      PSIO_REFLECT(label, transparent(), text)
+   };
+   struct table
+   {
+      std::map<std::string, std::uint8_t> rows;
+      PSIO_REFLECT(table, transparent(), rows)
+   };
    struct span_of
    {
       std::uint32_t lo = 0;
@@ -139,12 +151,18 @@ namespace warnings_check
       either                                  either_one;
       std::vector<grade>                      grades;
       std::array<grade, 2>                    two_grades{};
+      std::map<label, span_of>                spans_by_label;
+      std::set<grade>                         grade_set;
+      std::map<either, handle>                by_either;
+      psio::nested<span_of>                   packed_span;
+      table                                   rows;
       PSIO_REFLECT(everything, flag, u8, i32, u64, f64, wide, shade, raw, text, bounded_text,
                    bytes, digest, numbers, records, pair_of_fixed, tuple, choice,
                    maybe_number, maybe_record, elapsed, at, packed,
                    attr(packed_later, max<4>), maybe_packed, packed_list, pair, counts, by_id,
                    ids, ratios, attr(index, max<8>), owner, maybe_owner, window, certificate,
-                   either_one, grades, two_grades)
+                   either_one, grades, two_grades, spans_by_label, grade_set, by_either,
+                   packed_span, rows)
    };
 
    struct key_type
@@ -183,6 +201,11 @@ namespace warnings_check
       value.ids    = {3, -3};
       value.ratios = {0.5, -0.5};
       value.index  = {{{1, "x"}, {2, 1}}};
+      value.spans_by_label = {{label{"b"}, span_of{1, 2}}, {label{"a"}, span_of{}}};
+      value.grade_set      = {grade::b, grade::a};
+      value.by_either      = {{either{std::uint16_t{0}}, handle{2}}, {either{std::uint8_t{0}}, handle{1}}};
+      value.packed_span    = psio::nested<span_of>::from(span_of{3, 4});
+      value.rows           = table{{{"r", 1}}};
       bool ok = true;
 
       // pssz: both encoders, every reader, the view.
@@ -283,6 +306,11 @@ namespace warnings_check
       ok &= !mutable_view.get<26>()[0].key().view_().empty();
       ok &= mutable_view.get<25>().first().set(1);
       ok &= mutable_view.get<21>().get().get<0>().set(7) && (*mutable_view.get<21>()).get<0>().get() == 7;
+      // A transparent wrapper is its member; a map keyed by one.
+      ok &= mutable_view.get<31>().set(9) && mutable_view.get<42>()[0].value().set(2);
+      ok &= mutable_view.get<40>()[0].value().set(3);
+      static_assert(psio::detail::mutation_blocked_v<span_of> &&
+                    !psio::detail::mutation_blocked_v<handle>);
       ok &= psio::validate<everything>(psio::pssz{}, std::span<const char>{writable}).ok();
 
       // Custom types: the registry on the binary and the text entry points.

@@ -23,11 +23,21 @@
 
 namespace psio::detail::json_impl
 {
-   // The text of K is a JSON string whatever the value.
+   // The text of K is a JSON string whatever the value: a string kind, a
+   // type with a text adapter, or a transparent wrapper of one (its text is
+   // its member's).
    template <typename Fmt, typename K>
-   inline constexpr bool text_key_v = dispatch_adapter_v<Fmt, K> ||
-                                      std::is_same_v<K, std::string> ||
-                                      is_utf8_string<K>::value;
+   consteval bool text_key() noexcept
+   {
+      if constexpr (dispatch_adapter_v<Fmt, K>)
+         return true;
+      else if constexpr (::psio::is_transparent_v<K>)
+         return text_key<Fmt, ::psio::transparent_inner_t<K>>();
+      else
+         return std::is_same_v<K, std::string> || is_utf8_string<K>::value;
+   }
+   template <typename Fmt, typename K>
+   inline constexpr bool text_key_v = text_key<Fmt, K>();
 
    template <typename Fmt, int_mode IM, typename T>
    void encode_assoc(const T& v, writer& w)
@@ -83,7 +93,27 @@ namespace psio::detail::json_impl
    // An object member name as a key of text-keyed type K: what read_value
    // makes of the same text as a JSON string.
    template <typename Fmt, typename K, typename C>
+   bool read_key_shape(typed_reader<C>& r, std::string_view text, K& out);
+
+   // The key, then — as for every value read — its type's invariant.
+   template <typename Fmt, typename K, typename C>
    bool read_key_text(typed_reader<C>& r, std::string_view text, K& out)
+   {
+      if (!read_key_shape<Fmt>(r, text, out))
+         return false;
+      if constexpr (::psio::has_invariant_v<K>)
+         if (auto st = ::psio::check_invariant(out); !st.ok())
+         {
+            const std::string_view what = st.error().what;
+            if (r.invariant.ok())
+               r.invariant = std::move(st);
+            return r.c.fail(what);
+         }
+      return true;
+   }
+
+   template <typename Fmt, typename K, typename C>
+   bool read_key_shape(typed_reader<C>& r, std::string_view text, K& out)
    {
       if constexpr (dispatch_adapter_v<Fmt, K>)
       {
@@ -94,6 +124,8 @@ namespace psio::detail::json_impl
          out = Proj::decode(payload);
          return true;
       }
+      else if constexpr (::psio::is_transparent_v<K>)
+         return read_key_text<Fmt>(r, text, ::psio::transparent_inner(out));
       else if constexpr (std::is_same_v<K, std::string>)
       {
          out.assign(text);

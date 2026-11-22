@@ -143,7 +143,7 @@ member attribute `lengthBound`.
 
 ## Classes
 
-301 types, 6513 vectors.
+306 types, 6565 vectors.
 
 | class | vectors | contents |
 |---|---|---|
@@ -171,9 +171,16 @@ member attribute `lengthBound`.
 | `nested-deferred` | 24 | `nested<T,deferred>` readers: any inner bytes (valid, garbage, empty, unknown fields) are `canonical`, strict validation included. The Schema IR does not record the policy, so a schema-driven reader gives these outcomes with its "nested bytes are opaque" option (the consumers run this class that way). |
 | `map-set` | 266 | Pairs, maps and sets (`docs/pssz-spec.md` §5.9), all `canonical`. Every map / set value appears twice with the same bytes: read as the map / set (`type` = `writer`) and read as the list it is (`type` = the list, `writer` = the map / set), so each language checks that its encoder writes the bytes of the sorted list. Keys: strings, integers (numeric order, not wire-byte order), signed integers, tuples, records, floats including NaNs and `-0`; values: scalars, lists, records, nested maps and sets; an optional set, a map as a variant alternative, maps / sets / a pair as record members (`AssocRec`, whose list spelling is `AssocLists`). |
 | `map-set-order` | 352 | Lists that are **not** strictly ascending by key — swapped entries, a repeated key, a repeated key with another value, `+0` with `-0`, a NaN out of place, at the top level and nested in records, optionals, lists, variants and maps. Each appears twice: `reject` as the map / set (`reason`: `pssz: map entries are not in strictly ascending key order` or `pssz: set elements are not in strictly ascending order`) and `canonical` as the list type (`writer`). Encoders cannot produce these frames from a map / set. |
-| `transparent` | 144 | Values of transparent types (`Id`, `Blob`, `Ref`, `DerKey`), bare and in lists, arrays, optionals and tuples; every frame is also read as the member's type (`type` is the member's type, `writer` the wrapper): the bytes, the fixedness and the optional form are the member's. Two rejects: `Id` framed as a one-field record, and a short frame. |
-| `custom` | 100 | Values of the custom types (a text form, an invariant, or both: `custom-types.md`) and of `Guarded`, which holds each in every position. The bytes are the wire type's. |
-| `invariant` | 108 | Structurally valid frames of values that violate an invariant, as a writer that does not check would produce them, bare and nested (list, array, optional, variant alternative, record member, two violations in one record). `expect` is `reject` and `reason` the invariant's message: the outcome of the typed codec — every checked entry point rejects, the trusted decode reads the value, no writer writes it back — and of a schema-driven codec given the handlers. A schema-driven codec with no handler accepts every one of these frames; with a strict registry lacking the handler it refuses the type. |
+| `transparent` | 160 | Values of transparent types (`Id`, `Blob`, `Ref`, `DerKey`), bare and in lists, arrays, optionals and tuples; every frame is also read as the member's type (`type` is the member's type, `writer` the wrapper): the bytes, the fixedness and the optional form are the member's. Two rejects: `Id` framed as a one-field record, and a short frame. |
+| `custom` | 116 | Values of the custom types (a text form, an invariant, or both: `custom-types.md`) and of `Guarded`, which holds each in every position. The bytes are the wire type's. |
+| `invariant` | 128 | Structurally valid frames of values that violate an invariant, as a writer that does not check would produce them, bare and nested (list, array, optional, variant alternative, record member, two violations in one record). `expect` is `reject` and `reason` the invariant's message: the outcome of the typed codec — every checked entry point rejects, the trusted decode reads the value, no writer writes it back — and of a schema-driven codec given the handlers. A schema-driven codec with no handler accepts every one of these frames; with a strict registry lacking the handler it refuses the type. |
+
+Custom types in maps, sets and nested values (`Tag`, `map<Tag,u32>`,
+`map<Name,Range>`, `set<Level>`, `nested<Range>`; `custom-types.md`, "In maps,
+sets and nested values") have rows in `transparent` (`tag/...`: a transparent
+string key, read also as `map<raw_string,u32>`), `custom` and `invariant`
+(`map/key_name`, `map/value_range`, `map/key_and_value`, `set/element_level`,
+`nested/range_reversed`).
 
 Nested values in maps and sets — `map<raw_string,nested<NArgs>>`,
 `set<nested<u32>>`, `map<nested<u32>,u8>` — and a map inside nested bytes,

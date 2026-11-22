@@ -817,7 +817,10 @@ namespace pssz_conf
             Vec<Id>, Opt<Id>, Arr2<Id>, Vec<Blob>, Opt<Blob>, std::tuple<Id, Blob>,
             Vec<u64>, Opt<u64>, Arr2<u64>, Vec<Vec<u8>>, Opt<Vec<u8>>, std::tuple<u64, Vec<u8>>,
             std::variant<u64, Raw>, Vec<Name>, Opt<Name>, Vec<Level>, Arr2<Level>, Vec<DerKey>,
-            Opt<DerKey>, std::variant<Name, Range>, Vec<Endpoint>>>::type;
+            Opt<DerKey>, std::variant<Name, Range>, Vec<Endpoint>>,
+      // custom types in maps, sets and nested values (appended)
+      types<custom_conf::Tag, std::map<custom_conf::Tag, u32>, std::map<Name, Range>,
+            std::set<Level>, Nested<Range>>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)

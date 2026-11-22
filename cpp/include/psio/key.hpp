@@ -388,13 +388,16 @@ namespace psio {
 
       // Every value is encoded through here: its bytes (encode_shape), then
       // — for a type that has one — its invariant, so nested values are
-      // checked innermost first. A sizing pass (size_stream) writes nothing
+      // checked innermost first. The bytes map / set entries are ordered by
+      // (order_key_stream, detail/assoc_order.hpp) are not a write of the
+      // value and check nothing. A sizing pass (size_stream) writes nothing
       // and checks nothing; the write that follows it does.
       template <typename T, typename S>
       void encode_value(const T& v, S& s)
       {
          encode_shape(v, s);
-         if constexpr (::psio::has_invariant_v<T> && !std::is_same_v<S, ::psio::size_stream>)
+         if constexpr (::psio::has_invariant_v<T> && !std::is_same_v<S, ::psio::size_stream> &&
+                       !std::is_same_v<S, ::psio::detail::order_key_stream>)
             if (auto st = ::psio::check_invariant(v); !st.ok())
                ::psio::codec_abort(st.error());
       }

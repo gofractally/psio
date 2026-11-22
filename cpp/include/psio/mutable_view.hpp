@@ -57,6 +57,7 @@
 #include <psio/buffer.hpp>
 #include <psio/detail/assoc.hpp>
 #include <psio/detail/nested_fwd.hpp>
+#include <psio/invariant.hpp>
 #include <psio/pssz_view.hpp>
 #include <psio/storage.hpp>
 
@@ -103,8 +104,12 @@ namespace psio {
       // type can: a member carrying a blocked spec is not addressable. The
       // library's own content-constraining specs are blocked below, and so
       // is every spec that has a `validate(std::span<const char>)` member.
+      //
+      // A type with an invariant (invariant.hpp) is blocked without being
+      // told: the invariant is exactly such a constraint, and a leaf write
+      // beneath the type would not run it.
       template <typename T>
-      inline constexpr bool mutation_blocked_v = false;
+      inline constexpr bool mutation_blocked_v = ::psio::has_invariant_v<T>;
 
       template <>
       inline constexpr bool mutation_blocked_v<::psio::sorted_spec> = true;
@@ -172,6 +177,8 @@ namespace psio {
                return contains_blocked<typename pz::is_psio_box<T>::elem>();
             else if constexpr (pz::is_std_array_v<T>)
                return contains_blocked<typename T::value_type>();
+            else if constexpr (::psio::is_transparent_v<T>)
+               return contains_blocked<::psio::transparent_inner_t<T>>();
             else if constexpr (pz::Record<T>)
                return []<std::size_t... Is>(std::index_sequence<Is...>) {
                   return ((blocked_annotations_v<std::remove_cvref_t<
@@ -606,6 +613,27 @@ namespace psio {
    {
     public:
       using mutable_view<T, Fmt>::mutable_view;
+   };
+
+   // A transparent type (transparent.hpp) is its member on the wire, and so
+   // is its view: navigation and `set` are the member's. A transparent type
+   // with an invariant is blocked like any type with one.
+   template <typename T, typename Fmt>
+      requires (::psio::is_transparent_v<T> &&
+                !::psio::format_should_dispatch_adapter_v<Fmt, T>)
+   class mutable_view<T, Fmt> : public mutable_view<::psio::transparent_inner_t<T>, Fmt>
+   {
+      static_assert(!detail::mutation_blocked_v<T>,
+                    "psio::mutable_view: in-place mutation is blocked for this type "
+                    "(psio::detail::mutation_blocked_v)");
+
+    public:
+      using mutable_view<::psio::transparent_inner_t<T>, Fmt>::mutable_view;
+      mutable_view() = default;
+      mutable_view(mutable_view<::psio::transparent_inner_t<T>, Fmt> inner) noexcept
+         : mutable_view<::psio::transparent_inner_t<T>, Fmt>(inner)
+      {
+      }
    };
 
    // ── One entry of a map ────────────────────────────────────────────────

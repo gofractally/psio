@@ -44,6 +44,9 @@ namespace psio::detail::key_impl
          return key_form::none;
       else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::key, U>)
          return key_form::adapted;
+      else if constexpr (::psio::is_transparent_v<U>)
+         // A transparent type has its member's key.
+         return key_form_of<::psio::transparent_inner_t<U>>();
       else if constexpr (::psio::detail::is_nested_v<U>)
          // The key of a byte list, whatever the inner type is.
          return key_form::plain;

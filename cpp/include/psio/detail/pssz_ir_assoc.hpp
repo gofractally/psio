@@ -597,7 +597,8 @@ codec_status Codec<W>::encode_assoc(const schema_types::Custom &custom, const Va
    std::vector<std::size_t> order;
    PSIO_PSSZ_IR_TRY(assoc_order(custom, *items, order));
    const schema_types::AnyType *element;
-   PSIO_PSSZ_IR_TRY(inner(*shape.element, element));
+   // As written: the element codec sees the custom nodes on the way.
+   PSIO_PSSZ_IR_TRY(child_of(*shape.element, element));
    std::size_t w;
    PSIO_PSSZ_IR_TRY(width_of(*shape.list, w));
    const std::uint64_t bound = shape.max ? *shape.max : 0;
@@ -619,7 +620,8 @@ codec_status Codec<W>::decode_assoc(const schema_types::Custom &custom,
    AssocShape shape;
    PSIO_PSSZ_IR_TRY(assoc_shape(custom, shape));
    const schema_types::AnyType *element;
-   PSIO_PSSZ_IR_TRY(inner(*shape.element, element));
+   // As written: the element codec sees the custom nodes on the way.
+   PSIO_PSSZ_IR_TRY(child_of(*shape.element, element));
    std::size_t w;
    PSIO_PSSZ_IR_TRY(width_of(*shape.list, w));
    Sequence items;

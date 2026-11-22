@@ -5,6 +5,7 @@
 // (psio::encode, the key decode) are not called on bad values here: without
 // exceptions they abort by contract.
 
+#include "custom_assoc_cases.hpp"
 #include "custom_conformance_types.hpp"
 
 #include <psio/json.hpp>
@@ -233,6 +234,9 @@ int main()
                 .ok());
       EXPECT(out == good_bytes);
    }
+
+   // With maps, sets, pairs and nested values (custom_assoc_cases.hpp).
+   failures += custom_assoc_cases::run();
 
    if (failures == 0) std::printf("custom types without exceptions: ok\n");
    return failures == 0 ? 0 : 1;
