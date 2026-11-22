@@ -735,7 +735,7 @@ special-cased:
   `[index, {...}]` under `json`. The names are the alternatives' reflected
   names and the index their position: `Struct` 0, `Object` 1, `Array` 2,
   `List` 3, `BoundedList` 4, `Option` 5, `Variant` 6, `Tuple` 7, `Int` 8,
-  `Float` 9, `FracPack` 10, `Custom` 11, `Resource` 12, `Type` 13, `Enum` 14;
+  `Float` 9, `Nested` 10, `Custom` 11, `Resource` 12, `Type` 13, `Enum` 14;
 - optional members are `null` or the value: `Schema.ir_version` (a number),
   `Func.result`, `Attribute.value`, `UseItem.alias`;
 - `Array.len`, `BoundedList.maxCount` and `Enumerator.value` are 64-bit

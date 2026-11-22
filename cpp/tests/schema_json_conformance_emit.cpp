@@ -157,7 +157,7 @@ namespace
       s.insert("tuple", Tuple{{B{Int{256, false}}, B{Type{"text"}}, B{Tuple{{B{Int{8, true}}}}}}});
       s.insert("int", Int{64, true});
       s.insert("float", Float{11, 52});
-      s.insert("nested", psio::schema_types::FracPack{B{Type{"shape"}}});
+      s.insert("nested", psio::schema_types::Nested{B{Type{"shape"}}});
       s.insert("text", Custom{B{List{B{Int{8, false}}}}, "utf8"});
       s.insert("boxed", Custom{B{Type{"shape"}}, "box"});
       s.insert("resource",
