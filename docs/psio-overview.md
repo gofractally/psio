@@ -366,6 +366,11 @@ the first use of the annotations it adds to, does not compile.
 
 ### Bounds by annotation
 
+Every annotation, per type and per format, in C++, Rust and TypeScript:
+the reference [annotations.md](annotations.md), the tutorial
+[tutorial-annotations.md](tutorial-annotations.md), and the rules for AI
+coding agents and reviewers [annotations-for-agents.md](annotations-for-agents.md).
+
 A bound does not have to change a member's type. The member stays the
 `std::vector<std::string>` (or map, tuple, optional, …) the code wants, and
 its `attr` states the bounds, at any depth:

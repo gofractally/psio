@@ -61,6 +61,11 @@ cap for their arguments (`method(transfer, to, attr(memo, max<80>),
 maxDynamicData(256))`). See
 [bounds by annotation](docs/psio-overview.md#bounds-by-annotation).
 
+Annotations — bounds, `utf8`, caps, text forms, invariants — in C++, Rust and
+TypeScript: the [reference](docs/annotations.md), the
+[tutorial](docs/tutorial-annotations.md) and the
+[rules for AI coding agents and reviewers](docs/annotations-for-agents.md).
+
 The same names exist for the other formats (`to_json`, `from_key<T>`,
 `ssz_view<T>`, …). A view only reads; the view that writes is spelled
 `pssz_mutable_view<T>`. `from_F<T>(bytes)` validates before it decodes;
