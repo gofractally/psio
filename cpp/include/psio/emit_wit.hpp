@@ -26,6 +26,13 @@
 //   exists ("bool", "string", "char"); otherwise the underlying
 //   shape passes through.
 //
+//   Strings: WIT `string` is Unicode text, which is what the "utf8"
+//   custom id (psio::utf8_string, validated UTF-8) means, so "utf8" is
+//   `string`. The raw "string" id (std::string: bytes, not validated) is
+//   also written `string` — every existing interface spells its text
+//   std::string — so WIT does not tell the two apart; js/src/wit.ts does
+//   the same.
+//
 // Companion / inverse: psio/wit_parser.hpp (WIT → Schema) — already
 // ported.
 
@@ -455,7 +462,10 @@ namespace psio::schema_types
             // (`Custom{List<u8>, "hex"}` → `list<u8>`).
             if (c.id == "bool")
                return "bool";
-            if (c.id == "string")
+            // WIT `string` is Unicode text: that is the validated "utf8"
+            // string. The raw "string" id keeps its historical `string`
+            // spelling (see the note in the header comment).
+            if (c.id == "string" || c.id == "utf8")
                return "string";
             if (c.id == "char")
                return "char";

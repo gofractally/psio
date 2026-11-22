@@ -206,3 +206,59 @@ TEST_CASE("emit_wit + wit_parser: emitted text re-parses",
          found_anywhere = true;
    CHECK(found_anywhere);
 }
+
+// WIT `string` is Unicode text: the validated "utf8" string is `string`,
+// bounded or not, hand-built or as SchemaBuilder writes it.
+#include <psio/wrappers.hpp>
+
+namespace emit_wit_text
+{
+   struct labels
+   {
+      psio::utf8_string<>          title;
+      psio::utf8_string<16>        tag;
+      std::optional<psio::utf8_string<>> note;
+      std::vector<psio::utf8_string<>>   lines;
+      std::string                  raw;
+      std::vector<std::uint8_t>    blob;
+      PSIO_REFLECT(labels, title, tag, note, lines, raw, blob)
+   };
+}  // namespace emit_wit_text
+
+TEST_CASE("emit_wit: a utf8 string is WIT string", "[emit_wit]")
+{
+   using namespace psio::schema_types;
+
+   Schema s;
+   s.insert("labels",
+            AnyType{Object{
+               .members = {
+                  Member{.name = "title",
+                         .type = Box<AnyType>{Custom{
+                            Box<AnyType>{List{Box<AnyType>{Int{8, false}}}}, "utf8"}}},
+                  Member{.name = "tag",
+                         .type = Box<AnyType>{Custom{
+                            Box<AnyType>{BoundedList{Box<AnyType>{Int{8, false}}, 16}},
+                            "utf8"}}},
+                  Member{.name = "blob",
+                         .type = Box<AnyType>{List{Box<AnyType>{Int{8, false}}}}}}}});
+   s.interfaces.push_back(Interface{.name = "texts", .type_names = {"labels"}, .funcs = {}});
+   const auto text = psio::emit_wit(s);
+   CHECK(contains(text, "title: string"));
+   CHECK(contains(text, "tag: string"));
+   CHECK(contains(text, "blob: list<u8>"));
+
+   // What SchemaBuilder records for psio::utf8_string.
+   auto built = psio::SchemaBuilder{}.insert<emit_wit_text::labels>("labels").build();
+   built.interfaces.push_back(Interface{.name = "texts", .type_names = {"labels"}, .funcs = {}});
+   const auto built_text = psio::emit_wit(built);
+   INFO(built_text);
+   CHECK(contains(built_text, "title: string"));
+   CHECK(contains(built_text, "tag: string"));
+   CHECK(contains(built_text, "note: option<string>"));
+   CHECK(contains(built_text, "lines: list<string>"));
+   CHECK(contains(built_text, "raw: string"));
+   CHECK(contains(built_text, "blob: list<u8>"));
+   // The text re-parses as WIT.
+   CHECK_NOTHROW(psio::wit_parse(built_text));
+}
