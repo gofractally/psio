@@ -38,6 +38,7 @@ mod fracpack_impl;
 pub use fracpack_impl::*;
 pub use psio_macros::{PsszPack, PsszUnpack, PsszView, ToPsszSchema};
 pub use psio_macros::JsonText;
+pub use psio_macros::Key;
 
 // Validation policy — type machinery for the format-tagged
 // `validate<F, T, P>` CPO described in `docs/psio-overview.md` §2.4.
@@ -66,6 +67,8 @@ pub mod pjson_derive;
 pub mod pjson_view;
 pub mod pjson_typed;
 pub mod pjson_json;
+pub mod key;
+pub mod time;
 pub mod pssz;
 #[doc(hidden)]
 pub mod pssz_checked;

@@ -14,6 +14,7 @@ mod dynamic_schema_macro;
 mod fracpack_macro;
 mod json_macro;
 mod json_text_macro;
+mod key_macro;
 mod schema_macro;
 mod capnp_macro;
 mod fb_macro;
@@ -82,6 +83,14 @@ pub fn derive_from_canonical_json(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(JsonText, attributes(json))]
 pub fn derive_json_text(input: TokenStream) -> TokenStream {
     json_text_macro::derive(input)
+}
+
+/// The memcmp-sortable `key` format (`psio::key`): a struct is the
+/// concatenation of its fields' keys (a composite key), an enum of
+/// single-field variants is the variant index byte and the payload.
+#[proc_macro_derive(Key)]
+pub fn derive_key(input: TokenStream) -> TokenStream {
+    key_macro::derive(input)
 }
 
 // ── Cap'n Proto derive macros ───────────────────────────────────────────
