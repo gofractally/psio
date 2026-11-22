@@ -153,6 +153,17 @@ namespace
       out.clear();
       auto st = ir::json_to_pssz(schema, psio::schema_types::Type{type}, Fmt{},
                                  std::span<const char>{text}, out);
+      // The same decode with the schema's names compiled once (hash lookup
+      // instead of a member scan) gives the same bytes or the same error.
+      const ir::JsonNames names(schema);
+      Bytes               indexed;
+      auto st2 = ir::json_to_pssz(schema, psio::schema_types::Type{type}, Fmt{},
+                                  std::span<const char>{text}, indexed, &names);
+      REQUIRE(st.ok() == st2.ok());
+      if (st.ok())
+         REQUIRE(indexed == out);
+      else
+         REQUIRE(std::string_view{st.error().what} == std::string_view{st2.error().what});
       return st.ok() ? "" : std::string(st.error().what);
    }
    template <typename Fmt>
@@ -171,6 +182,7 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
 {
    const auto         fx     = load<JsonFixture>(PSIO_JSON_VECTORS);
    const psio::Schema schema = schema_of(fx.schema_ir);
+   const ir::JsonNames names(schema);
    std::map<std::string, TypeRow> types;
    for (const auto& t : fx.types) types[t.id] = t;
    REQUIRE(types.size() >= 40);
@@ -228,6 +240,15 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
                       : ir::json_to_pssz(schema, psio::schema_types::Type{row.type}, psio::json{},
                                          std::span<const char>{input_text(row)}, bytes);
          REQUIRE_FALSE(st.ok());
+         REQUIRE(bytes == Bytes{'x'});
+         auto st2 = ij ? ir::json_to_pssz(schema, psio::schema_types::Type{row.type},
+                                          psio::ijson{}, std::span<const char>{input_text(row)},
+                                          bytes, &names)
+                       : ir::json_to_pssz(schema, psio::schema_types::Type{row.type},
+                                          psio::json{}, std::span<const char>{input_text(row)},
+                                          bytes, &names);
+         REQUIRE_FALSE(st2.ok());
+         REQUIRE(std::string_view{st.error().what} == std::string_view{st2.error().what});
          REQUIRE(bytes == Bytes{'x'});
       }
    }

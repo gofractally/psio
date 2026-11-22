@@ -145,6 +145,38 @@ only, it keeps one leniency of the old decoder: a missing non-optional
 member is left value-initialized. `validate` and `decode_json_checked` are
 the entry points for untrusted text.
 
+## Member lookup
+
+A key is resolved without scanning the member list:
+
+1. **Expected order first.** Writers emit members in declaration order, so
+   the reader compares each incoming key with the next member it expects (a
+   compare against a constant) before any lookup. A member the text leaves
+   out costs one failed compare.
+2. **Perfect hash otherwise.** A key that is out of order, repeated or
+   unknown is looked up through a table generated at compile time from the
+   member names (`psio/name_lookup.hpp`, C++ `reflect<T>::find_index`; a
+   generated `match` on length and bytes in the Rust derive): a fixed
+   number of loads and multiplies and exactly one confirming compare,
+   whatever the member count, with no run-time initialization. An `ijson`
+   variant's alternative name is looked up the same way.
+
+Neither step changes what is accepted: any order, unknown keys skipped,
+repeated keys read again in a single pass with the last one winning.
+
+The schema-driven path (below) knows its member names only at run time. It
+applies the same expected-order compare, and a `psio::pssz_ir::JsonNames`
+built once for a schema (`JsonNames names(schema);`, passed as the last
+argument of `json_to_value` / `json_to_pssz`) turns its fallback from a
+member scan into a hash probe for every decode that reuses it.
+
+`reflect<T>` exposes the same tables directly: `index_of(name)` /
+`find_index(name)`, `index_of_field_number(n)` (a direct table) and
+`index_of_hash<Hash>(key)` for a 64-bit key the caller computes with its own
+constexpr hash; two members with the same key under that hash are a compile
+error (`cpp/tests/name_lookup_collision_fail.cpp`, run by ctest as a
+must-not-compile check).
+
 ## Length bounds
 
 A bounded wrapper (C++ `psio::bounded<T, N>`, `utf8_string<N>`; Rust

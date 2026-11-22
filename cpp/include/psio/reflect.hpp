@@ -10,8 +10,10 @@
 //   psio::reflect<T>::member_name<I>                 "field_I"
 //   psio::reflect<T>::field_number<I>                1-based ordinal (source order)
 //   psio::reflect<T>::member_type<I>                 type of field I
-//   psio::reflect<T>::index_of(name)                 runtime name → index
+//   psio::reflect<T>::index_of(name)                 name → index (optional)
+//   psio::reflect<T>::find_index(name)               name → index, member_count if absent
 //   psio::reflect<T>::index_of_field_number(n)       field-number → index
+//   psio::reflect<T>::index_of_hash<Hash>(key)       Hash{}(name) == key → index
 //   psio::reflect<T>::visit_field_by_name(obj, name, fn)
 //   psio::reflect<T>::visit_field_by_number(obj, n, fn)
 //   psio::reflect<T>::for_each_field(obj, fn)        iterate all
@@ -28,6 +30,18 @@
 // is_reflected = false.
 //
 // Reflection covers public non-static data members only (design § 5.2.5.4).
+//
+// Lookup. `index_of`, `find_index` and `visit_field_by_name` resolve a name
+// through a perfect hash generated at compile time from the member names
+// (name_lookup.hpp): a fixed number of loads and multiplies and exactly one
+// confirming compare, whatever the member count, with no run-time
+// initialization. `index_of_field_number` / `visit_field_by_number` use a
+// direct table. `index_of_hash<Hash>(key)` looks a member up by a 64-bit key
+// the caller computed with its own constexpr hash (`Hash{}(std::string_view)`);
+// two members with the same key under that hash are a compile error. The
+// tables are instantiated only for types that are actually looked up.
+
+#include <psio/name_lookup.hpp>
 
 #include <boost/preprocessor.hpp>
 
@@ -53,20 +67,6 @@ namespace psio {
       // attempt to instantiate one remains an error.
       template <std::size_t>
       struct empty_reflected_member;
-
-      // Reasonable linear scan — sufficient for structs up to BeaconState
-      // scale (~20 fields) at no measurable runtime cost. A true
-      // perfect-hash backend lands in phase 13 (design § 5.2.5.1); the
-      // public surface does not change.
-      template <std::size_t N>
-      constexpr std::optional<std::size_t>
-      linear_index_of(const std::array<std::string_view, N>& names,
-                      std::string_view target) noexcept
-      {
-         for (std::size_t i = 0; i < N; ++i)
-            if (names[i] == target) return i;
-         return std::nullopt;
-      }
    }
 
    // Fallback ADL hook: returns the default empty impl for unreflected
@@ -136,19 +136,14 @@ namespace psio {
 #define PSIO_REFLECT_NAME_ARRAY_ELEM_(r, _, I, FIELD) \
    BOOST_PP_COMMA_IF(I) ::std::string_view(BOOST_PP_STRINGIZE(FIELD))
 
-#define PSIO_REFLECT_VISIT_NAME_CASE_(r, _, I, FIELD)                \
-   if (lookup_name == ::std::string_view(BOOST_PP_STRINGIZE(FIELD)))  \
-   {                                                                  \
-      ::std::invoke(::std::forward<F>(fn), obj.FIELD);                \
-      return true;                                                    \
-   }
-
-#define PSIO_REFLECT_VISIT_NUMBER_CASE_(r, _, I, FIELD)  \
-   if (lookup_num == static_cast<::std::uint32_t>((I) + 1)) \
-   {                                                      \
+// One `case` of the switch over a member index.
+#define PSIO_REFLECT_VISIT_INDEX_CASE_(r, _, I, FIELD)   \
+   case (I):                                              \
       ::std::invoke(::std::forward<F>(fn), obj.FIELD);    \
-      return true;                                        \
-   }
+      return true;
+
+#define PSIO_REFLECT_NUMBER_ARRAY_ELEM_(r, _, I, FIELD) \
+   BOOST_PP_COMMA_IF(I) field_number<(I)>
 
 #define PSIO_REFLECT_FOR_EACH_CASE_(r, _, I, FIELD)              \
    ::std::invoke(::std::forward<F>(fn),                           \
@@ -352,12 +347,32 @@ namespace psio {
    BOOST_PP_CAT(PSIO_REFLECT_DISPATCH_, \
                 BOOST_PP_CAT(0, __VA_OPT__(_HAS)))(TYPE, __VA_ARGS__)
 
+// (a, b, c) -> (a)(b)(c) by __VA_OPT__ recursion. BOOST_PP_VARIADIC_TO_SEQ
+// stops at 64 arguments (BOOST_PP_LIMIT_VARIADIC); this one is bounded only
+// by the rescans below (4^4 = 256), which is also Boost's sequence limit, so
+// a record may list up to 255 members and keywords.
+#define PSIO_PP_PARENS_ ()
+#define PSIO_PP_RESCAN_(...) \
+   PSIO_PP_RESCAN1_(PSIO_PP_RESCAN1_(PSIO_PP_RESCAN1_(PSIO_PP_RESCAN1_(__VA_ARGS__))))
+#define PSIO_PP_RESCAN1_(...) \
+   PSIO_PP_RESCAN2_(PSIO_PP_RESCAN2_(PSIO_PP_RESCAN2_(PSIO_PP_RESCAN2_(__VA_ARGS__))))
+#define PSIO_PP_RESCAN2_(...) \
+   PSIO_PP_RESCAN3_(PSIO_PP_RESCAN3_(PSIO_PP_RESCAN3_(PSIO_PP_RESCAN3_(__VA_ARGS__))))
+#define PSIO_PP_RESCAN3_(...) \
+   PSIO_PP_RESCAN4_(PSIO_PP_RESCAN4_(PSIO_PP_RESCAN4_(PSIO_PP_RESCAN4_(__VA_ARGS__))))
+#define PSIO_PP_RESCAN4_(...) __VA_ARGS__
+#define PSIO_PP_VARIADIC_TO_SEQ(...) \
+   __VA_OPT__(PSIO_PP_RESCAN_(PSIO_PP_VARIADIC_TO_SEQ_STEP_(__VA_ARGS__)))
+#define PSIO_PP_VARIADIC_TO_SEQ_STEP_(a, ...) \
+   (a) __VA_OPT__(PSIO_PP_VARIADIC_TO_SEQ_AGAIN_ PSIO_PP_PARENS_(__VA_ARGS__))
+#define PSIO_PP_VARIADIC_TO_SEQ_AGAIN_() PSIO_PP_VARIADIC_TO_SEQ_STEP_
+
 #define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
 #define PSIO_REFLECT_DISPATCH_0_HAS(TYPE, ...)                                         \
    PSIO_REFLECT_DISPATCH_(                                                              \
       TYPE,                                                                             \
       BOOST_PP_SEQ_TRANSFORM(PSIO_REFLECT_CLASSIFY, _,                                  \
-                             BOOST_PP_VARIADIC_TO_SEQ(__VA_ARGS__)))
+                             PSIO_PP_VARIADIC_TO_SEQ(__VA_ARGS__)))
 
 // Zero-field reflection — used for resource markers like
 //
@@ -390,6 +405,18 @@ namespace psio {
                                                                                        \
       static constexpr ::std::optional<::std::size_t>                                  \
       index_of(::std::string_view) noexcept                                            \
+      {                                                                                \
+         return ::std::nullopt;                                                        \
+      }                                                                                \
+                                                                                       \
+      static constexpr ::std::size_t find_index(::std::string_view) noexcept          \
+      {                                                                                \
+         return 0;                                                                     \
+      }                                                                                \
+                                                                                       \
+      template <typename Hash>                                                         \
+      static constexpr ::std::optional<::std::size_t>                                  \
+      index_of_hash(::std::uint64_t) noexcept                                          \
       {                                                                                \
          return ::std::nullopt;                                                        \
       }                                                                                \
@@ -473,33 +500,72 @@ namespace psio {
       static constexpr ::std::array<::std::string_view, member_count> _names_array_      \
          = {BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_NAME_ARRAY_ELEM_, _, SEQ)};             \
                                                                                          \
+      static constexpr ::std::array<::std::uint32_t, member_count> numbers               \
+         = {BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_NUMBER_ARRAY_ELEM_, _, SEQ)};           \
+                                                                                         \
+      /* Index of the member named name_, or member_count. */                            \
+      static constexpr ::std::size_t find_index(::std::string_view name_) noexcept       \
+      {                                                                                  \
+         return ::psio::detail::name_table_for<BOOST_PP_CAT(psio_reflect_impl_, TYPE)>   \
+            .find(name_);                                                                \
+      }                                                                                  \
+                                                                                         \
       static constexpr ::std::optional<::std::size_t>                                    \
       index_of(::std::string_view name_) noexcept                                        \
       {                                                                                  \
-         return ::psio::detail::linear_index_of(_names_array_, name_);                  \
+         const ::std::size_t i_ = find_index(name_);                                     \
+         if (i_ == member_count) return ::std::nullopt;                                  \
+         return i_;                                                                      \
+      }                                                                                  \
+                                                                                         \
+      /* Index of the member whose name hashes to key_ under Hash. */                    \
+      template <typename Hash>                                                           \
+      static constexpr ::std::optional<::std::size_t>                                    \
+      index_of_hash(::std::uint64_t key_) noexcept                                       \
+      {                                                                                  \
+         const ::std::size_t i_ = ::psio::detail::hashed_table_for<                      \
+            BOOST_PP_CAT(psio_reflect_impl_, TYPE), Hash>::table.find(key_);             \
+         if (i_ == member_count) return ::std::nullopt;                                  \
+         return i_;                                                                      \
       }                                                                                  \
                                                                                          \
       static constexpr ::std::optional<::std::size_t>                                    \
       index_of_field_number(::std::uint32_t n) noexcept                                  \
       {                                                                                  \
-         if (n < 1 || n > member_count) return ::std::nullopt;                           \
-         return static_cast<::std::size_t>(n - 1);                                       \
+         const ::std::size_t i_ = ::psio::detail::number_table_for<                      \
+            BOOST_PP_CAT(psio_reflect_impl_, TYPE)>.find(n);                             \
+         if (i_ == member_count) return ::std::nullopt;                                  \
+         return i_;                                                                      \
+      }                                                                                  \
+                                                                                         \
+      template <typename Obj, typename F>                                                \
+      static constexpr bool visit_field_by_index(                                        \
+         Obj& obj, ::std::size_t index_, F&& fn)                                         \
+      {                                                                                  \
+         switch (index_)                                                                 \
+         {                                                                               \
+            BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_VISIT_INDEX_CASE_, _, SEQ)             \
+            default: return false;                                                       \
+         }                                                                               \
       }                                                                                  \
                                                                                          \
       template <typename Obj, typename F>                                                \
       static constexpr bool visit_field_by_name(                                         \
          Obj& obj, ::std::string_view lookup_name, F&& fn)                               \
       {                                                                                  \
-         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_VISIT_NAME_CASE_, _, SEQ)                 \
-         return false;                                                                   \
+         return visit_field_by_index(obj, find_index(lookup_name),                       \
+                                     ::std::forward<F>(fn));                             \
       }                                                                                  \
                                                                                          \
       template <typename Obj, typename F>                                                \
       static constexpr bool visit_field_by_number(                                       \
          Obj& obj, ::std::uint32_t lookup_num, F&& fn)                                   \
       {                                                                                  \
-         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_VISIT_NUMBER_CASE_, _, SEQ)               \
-         return false;                                                                   \
+         return visit_field_by_index(                                                    \
+            obj,                                                                         \
+            ::psio::detail::number_table_for<BOOST_PP_CAT(psio_reflect_impl_, TYPE)>     \
+               .find(lookup_num),                                                        \
+            ::std::forward<F>(fn));                                                      \
       }                                                                                  \
                                                                                          \
       template <typename Obj, typename F>                                                \

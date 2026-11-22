@@ -1171,6 +1171,71 @@ namespace psio {
          return true;
       }
 
+      // Reads the value of member I of record T (the reader is at it).
+      // `depth` is the record's own depth.
+      template <typename Fmt, typename T, std::size_t I>
+      bool read_member(reader& r, T* out, std::size_t depth)
+      {
+         using R = ::psio::reflect<T>;
+         using F = typename R::template member_type<I>;
+         F* fptr = out ? &(out->*(R::template member_pointer<I>)) : nullptr;
+         using eff_for =
+            ::psio::effective_annotations_for<T, F, R::template member_pointer<I>>;
+         using eff = typename eff_for::value_t;
+         if constexpr (::psio::has_as_override_v<eff>)
+         {
+            // Member-level presentation override (as<Tag>).
+            using Tag  = ::psio::adapter_tag_of_t<eff>;
+            using Proj = ::psio::adapter<std::remove_cvref_t<F>, Tag>;
+            std::string payload;
+            r.ws();
+            if (!read_string(r, &payload, Fmt::i_json))
+               return false;
+            const std::span<const char> text{payload};
+            if (auto st = Proj::validate(text); !st.ok())
+               return r.fail(st.error().what);
+            if (fptr)
+               *fptr = Proj::decode(text);
+            return true;
+         }
+         else
+         {
+            constexpr int_mode mode = field_mode<Fmt, eff>(eff_for::value);
+            if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
+            {
+               // The member's length_bound is part of its type. It is
+               // checked on the value read, so the member is materialized
+               // even when only validating.
+               F  scratch{};
+               F* dst = fptr ? fptr : &scratch;
+               r.ws();
+               const char* value_at = r.p;
+               if (!read_value<Fmt, mode, F>(r, dst, depth + 1))
+                  return false;
+               if (!::psio::detail::length_bound_ok(
+                      *dst, std::get<::psio::length_bound>(eff_for::value)))
+               {
+                  r.p = value_at;
+                  return r.fail("json: member length_bound violated");
+               }
+               return true;
+            }
+            else
+               return read_value<Fmt, mode, F>(r, fptr, depth + 1);
+         }
+      }
+
+      // Member readers by index, for keys that arrive out of order.
+      template <typename Fmt, typename T>
+      struct member_readers
+      {
+         using fn = bool (*)(reader&, T*, std::size_t);
+         static constexpr auto table =
+            []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return std::array<fn, sizeof...(Is)>{&read_member<Fmt, T, Is>...};
+            }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
+      };
+
       template <typename Fmt, int_mode IM, typename T>
       bool read_value(reader& r, T* out, std::size_t depth)
       {
@@ -1452,100 +1517,58 @@ namespace psio {
             std::string             scratch;
             if (!r.take('}'))
             {
-               while (true)
-               {
-                  std::string_view key;
+               std::string_view key;
+               bool             more = true;
+               // Reads the member at `key`'s value position, then the
+               // separator and the next key (or the closing brace).
+               auto advance = [&]() -> bool {
+                  if (r.take('}'))
+                  {
+                     more = false;
+                     return true;
+                  }
+                  if (!r.take(','))
+                     return r.fail("json: expected ',' or '}' in object");
                   if (!read_key(r, scratch, key, Fmt::i_json))
                      return false;
                   if (!r.take(':'))
                      return r.fail("json: expected ':' after object key");
-                  bool matched = false;
-                  bool ok      = true;
-                  [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                     (
-                        ([&]
-                         {
-                            if (matched ||
-                                key != R::template member_name<Is>)
-                               return;
-                            matched = true;
-                            seen[Is] = true;
-                            using F = typename R::template member_type<Is>;
-                            F* fptr = out
-                               ? &(out->*(R::template member_pointer<Is>))
-                               : nullptr;
-                            using eff_for =
-                               ::psio::effective_annotations_for<
-                                  T, F, R::template member_pointer<Is>>;
-                            using eff = typename eff_for::value_t;
-                            if constexpr (::psio::has_as_override_v<eff>)
-                            {
-                               using Tag  = ::psio::adapter_tag_of_t<eff>;
-                               using Proj = ::psio::adapter<
-                                  std::remove_cvref_t<F>, Tag>;
-                               std::string payload;
-                               r.ws();
-                               if (!read_string(r, &payload, Fmt::i_json))
-                               {
-                                  ok = false;
-                                  return;
-                               }
-                               const std::span<const char> text{payload};
-                               if (auto st = Proj::validate(text); !st.ok())
-                               {
-                                  ok = r.fail(st.error().what);
-                                  return;
-                               }
-                               if (fptr)
-                                  *fptr = Proj::decode(text);
-                            }
-                            else
-                            {
-                               constexpr int_mode mode =
-                                  field_mode<Fmt, eff>(eff_for::value);
-                               if constexpr (::psio::has_spec_v<
-                                                ::psio::length_bound, eff>)
-                               {
-                                  // The member's length_bound is part of
-                                  // its type. It is checked on the value
-                                  // read, so the member is materialized
-                                  // even when only validating.
-                                  F  scratch{};
-                                  F* dst = fptr ? fptr : &scratch;
-                                  r.ws();
-                                  const char* value_at = r.p;
-                                  ok = read_value<Fmt, mode, F>(r, dst,
-                                                                depth + 1);
-                                  if (ok &&
-                                      !::psio::detail::length_bound_ok(
-                                         *dst,
-                                         std::get<::psio::length_bound>(
-                                            eff_for::value)))
-                                  {
-                                     r.p = value_at;
-                                     ok  = r.fail("json: member length_bound "
-                                                  "violated");
-                                  }
-                               }
-                               else
-                                  ok = read_value<Fmt, mode, F>(r, fptr,
-                                                                depth + 1);
-                            }
-                         }()),
-                        ...);
-                  }(std::make_index_sequence<N>{});
-                  if (!ok)
-                     return false;
-                  if (!matched)
+                  return true;
+               };
+               if (!read_key(r, scratch, key, Fmt::i_json))
+                  return false;
+               if (!r.take(':'))
+                  return r.fail("json: expected ':' after object key");
+               // Expected order first: writers emit members in declaration
+               // order, so each key is compared with the next member's name
+               // (a compare against a constant) before any lookup. A member
+               // the text leaves out costs one failed compare.
+               bool ok = true;
+               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                  (void)((!more || key != R::template member_name<Is>
+                             ? true
+                             : (seen[Is] = true,
+                                ok = read_member<Fmt, T, Is>(r, out, depth) &&
+                                     advance())) &&
+                         ...);
+               }(std::make_index_sequence<N>{});
+               if (!ok)
+                  return false;
+               // Whatever is left is out of order, repeated or unknown: one
+               // perfect-hash lookup per key (reflect<T>::find_index).
+               while (more)
+               {
+                  const std::size_t index = R::find_index(key);
+                  if (index < N)
                   {
-                     // Unknown key: skip its value.
-                     if (!skip_value(r, depth + 1, Fmt::i_json))
+                     seen[index] = true;
+                     if (!member_readers<Fmt, T>::table[index](r, out, depth))
                         return false;
                   }
-                  if (r.take('}'))
-                     break;
-                  if (!r.take(','))
-                     return r.fail("json: expected ',' or '}' in object");
+                  else if (!skip_value(r, depth + 1, Fmt::i_json))
+                     return false;  // unknown key: its value is skipped
+                  if (!advance())
+                     return false;
                }
             }
             // A missing std::optional member is empty; any other missing

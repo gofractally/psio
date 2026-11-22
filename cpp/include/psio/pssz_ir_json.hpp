@@ -33,12 +33,19 @@
 // No JSON form (an error, not a guess): integers wider than 64 bits and the
 // bitvector / bitlist adapters. The typed codec has none to agree with.
 //
+// Member and alternative names are resolved by comparing the incoming key
+// with the next expected member first (writers emit declaration order) and,
+// on a mismatch, by lookup. A `JsonNames` built once for a schema makes that
+// lookup a hash probe for every decode that is handed it; without one the
+// fallback is a scan of the member list.
+//
 // The reader is a type walk over a JsonCursor (json_cursor.hpp): it holds no
 // text positions and does no tokenizing, so another parser can be put
 // under it. Everything is checked and status-returning: no exceptions, no
 // aborts, nesting and schema recursion limited by kMaxValidationDepth.
 
 #include <psio/json_cursor.hpp>
+#include <psio/name_lookup.hpp>
 #include <psio/pssz_ir.hpp>
 
 #include <charconv>
@@ -47,6 +54,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace psio::pssz_ir
@@ -54,6 +62,91 @@ namespace psio::pssz_ir
 namespace json_detail
 {
 using namespace schema_types;
+inline std::string_view variant_name(const Member &member);
+} // namespace json_detail
+
+// Name -> member index for every record and variant of a schema: the
+// run-time counterpart of the tables psio::reflect<T> gets at compile time.
+// Build it once per schema (it walks `schema.types`, and `root` when the
+// root is not a named type) and pass it to any number of json_to_value /
+// json_to_pssz calls; lookups are const and thread-safe. It views the
+// schema's strings: the schema must outlive it and must not be modified.
+class JsonNames
+{
+   using entry = std::pair<const std::vector<schema_types::Member> *, runtime_name_index>;
+   std::vector<entry> tables_;  // sorted by member-list address
+
+   void add(const std::vector<schema_types::Member> &members, bool variant)
+   {
+      std::vector<std::string_view> names;
+      names.reserve(members.size());
+      for (const auto &member : members)
+         names.push_back(variant ? json_detail::variant_name(member) : std::string_view{member.name});
+      tables_.emplace_back(&members, runtime_name_index(std::move(names)));
+   }
+   void walk(const schema_types::Box<schema_types::AnyType> &box)
+   {
+      if (box.get())
+         walk(*box);
+   }
+   void walk(const schema_types::AnyType &type)
+   {
+      using namespace schema_types;
+      std::visit(
+          [&](const auto &t)
+          {
+             using T = std::decay_t<decltype(t)>;
+             if constexpr (std::is_same_v<T, Object> || std::is_same_v<T, Struct> ||
+                           std::is_same_v<T, schema_types::Variant>)
+             {
+                add(t.members, std::is_same_v<T, schema_types::Variant>);
+                for (const auto &member : t.members)
+                   walk(member.type);
+             }
+             else if constexpr (std::is_same_v<T, Tuple>)
+             {
+                for (const auto &member : t.members)
+                   walk(member);
+             }
+             else if constexpr (requires { t.type.get(); })
+                walk(t.type);
+          },
+          type.value);
+   }
+   void finish()
+   {
+      std::sort(tables_.begin(), tables_.end(),
+                [](const entry &a, const entry &b) { return std::less<>{}(a.first, b.first); });
+   }
+
+ public:
+   JsonNames() = default;
+   explicit JsonNames(const schema_types::Schema &schema)
+   {
+      for (const auto &named : schema.types)
+         walk(named.type);
+      finish();
+   }
+   JsonNames(const schema_types::Schema &schema, const schema_types::AnyType &root)
+   {
+      for (const auto &named : schema.types)
+         walk(named.type);
+      walk(root);
+      finish();
+   }
+
+   // The index of `members`, or null when it was not part of the walk.
+   const runtime_name_index *find(const std::vector<schema_types::Member> &members) const noexcept
+   {
+      auto at = std::lower_bound(tables_.begin(), tables_.end(), &members,
+                                 [](const entry &a, const std::vector<schema_types::Member> *b)
+                                 { return std::less<>{}(a.first, b); });
+      return at != tables_.end() && at->first == &members ? &at->second : nullptr;
+   }
+};
+
+namespace json_detail
+{
 
 enum class int_form : std::uint8_t
 {
@@ -166,8 +259,26 @@ template <JsonCursor C> class Reader
    const Schema &schema;
    C &c;
    const bool ijson;
+   const JsonNames *names;
 
    const AnyType *resolve(const AnyType &type) { return type.resolve(schema); }
+
+   // Index of the member `key` names, or members.size(). `expected` is
+   // the member after the previous one read: tried first, with one compare.
+   template <typename Name>
+   std::size_t member_index(const std::vector<Member> &members, std::string_view key,
+                            std::size_t expected, Name &&name_of)
+   {
+      if (expected < members.size() && name_of(members[expected]) == key)
+         return expected;
+      if (names)
+         if (auto table = names->find(members))
+            return table->find(key);
+      std::size_t index = 0;
+      while (index < members.size() && name_of(members[index]) != key)
+         ++index;
+      return index;
+   }
 
    bool integer(const Int &type, int_form form, Value &out)
    {
@@ -340,6 +451,7 @@ template <JsonCursor C> class Reader
       // One slot per member, filled as keys arrive; a repeated key
       // overwrites its slot (last one wins).
       std::vector<std::optional<Value>> slots(members.size());
+      std::size_t expected = 0;
       while (true)
       {
          bool has;
@@ -348,15 +460,16 @@ template <JsonCursor C> class Reader
             return false;
          if (!has)
             break;
-         std::size_t index = 0;
-         while (index < members.size() && members[index].name != key)
-            ++index;
+         const std::size_t index =
+             member_index(members, key, expected,
+                          [](const Member &m) -> std::string_view { return m.name; });
          if (index == members.size())
          {
             if (!c.skip())
                return false;
             continue;
          }
+         expected = index + 1;
          const Member &member = members[index];
          if (!member.type.get())
             return c.fail("pssz IR: null schema box");
@@ -411,9 +524,8 @@ template <JsonCursor C> class Reader
             return false;
          if (!has)
             return c.fail("ijson: variant object must have one key");
-         for (index = 0; index < type.members.size(); ++index)
-            if (variant_name(type.members[index]) == key)
-               break;
+         index = member_index(type.members, key, type.members.size(),
+                              [](const Member &m) { return variant_name(m); });
          if (index == type.members.size())
             return c.fail("ijson: unknown variant alternative");
          if (!alternative() || !c.next_field(has, key))
@@ -453,7 +565,8 @@ template <JsonCursor C> class Reader
    }
 
  public:
-   Reader(const Schema &schema, C &cursor, bool ijson) : schema(schema), c(cursor), ijson(ijson)
+   Reader(const Schema &schema, C &cursor, bool ijson, const JsonNames *names = nullptr)
+       : schema(schema), c(cursor), ijson(ijson), names(names)
    {
    }
 
@@ -839,13 +952,14 @@ class Writer
 //
 // Reads one value of `root` from `cursor` (which must be positioned at it)
 // and requires the document to end. Errors are recorded in the cursor.
+// `names`, when given, must have been built for `schema`.
 template <JsonCursor C>
 [[nodiscard]] bool read_json(const schema_types::Schema &schema,
                              const schema_types::AnyType &root, bool ijson, C &cursor,
-                             Value &output)
+                             Value &output, const JsonNames *names = nullptr)
 {
    Value value;
-   json_detail::Reader<C> reader(schema, cursor, ijson);
+   json_detail::Reader<C> reader(schema, cursor, ijson, names);
    if (!reader.read(root, json_detail::int_form::natural, 0, value) || !cursor.finish())
       return false;
    output = std::move(value);
@@ -856,14 +970,15 @@ template <JsonCursor C>
 template <psio::detail::json_impl::json_family Fmt>
 [[nodiscard]] codec_status json_to_value(const schema_types::Schema &schema,
                                          const schema_types::AnyType &root, Fmt,
-                                         std::span<const char> text, Value &output)
+                                         std::span<const char> text, Value &output,
+                                         const JsonNames *names = nullptr)
 {
    // Schema errors (unsupported shapes, bad attributes) come first.
    detail::Codec<0> codec(schema);
    if (auto status = codec.metadata(root); !status.ok())
       return status;
    json_text_cursor cursor(text, Fmt::i_json);
-   if (!read_json(schema, root, Fmt::i_json, cursor, output))
+   if (!read_json(schema, root, Fmt::i_json, cursor, output, names))
       return cursor.status(Fmt::name);
    return codec_ok();
 }
@@ -893,10 +1008,11 @@ template <psio::detail::json_impl::json_family Fmt>
 template <psio::detail::json_impl::json_family Fmt>
 [[nodiscard]] codec_status json_to_pssz(const schema_types::Schema &schema,
                                         const schema_types::AnyType &root, Fmt format,
-                                        std::span<const char> text, std::vector<char> &out)
+                                        std::span<const char> text, std::vector<char> &out,
+                                        const JsonNames *names = nullptr)
 {
    Value value;
-   if (auto status = json_to_value(schema, root, format, text, value); !status.ok())
+   if (auto status = json_to_value(schema, root, format, text, value, names); !status.ok())
       return status;
    return encode_auto(schema, root, value, out);
 }

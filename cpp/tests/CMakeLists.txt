@@ -22,6 +22,17 @@ psio_add_test(psio_scaffold_test scaffold_test.cpp)
 # Phase 1: reflection core — psio::reflect<T>.
 psio_add_test(psio_reflect_tests reflect_tests.cpp)
 
+# Compile-time name / number / hashed-key lookup tables (name_lookup.hpp).
+psio_add_test(psio_name_lookup_tests name_lookup_tests.cpp)
+# Two members colliding under a caller-supplied hash must not compile.
+get_target_property(PSIO_BOOST_INCLUDES Boost::headers INTERFACE_INCLUDE_DIRECTORIES)
+add_test(NAME psio_name_lookup_collision_compile_fail
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/name_lookup_collision_fail.cpp)
+set_tests_properties(psio_name_lookup_collision_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "two names of one type collide under the supplied hash")
+
 # Phase 2: shape concepts + annotation system + rich wrappers.
 psio_add_test(psio_shape_tests shape_tests.cpp)
 psio_add_test(psio_annotate_tests annotate_tests.cpp)
@@ -115,6 +126,9 @@ psio_add_test(psio_caps_parity_tests caps_parity_tests.cpp)
 psio_add_test(psio_json_tests json_tests.cpp)
 # I-JSON (psio::ijson), tuples, integer-form annotations, typed validation.
 psio_add_test(psio_ijson_tests ijson_tests.cpp)
+# Member / alternative lookup in the typed readers: expected order, any other
+# order through the perfect hash, repeated and unknown keys, 200 members.
+psio_add_test(psio_json_lookup_tests json_lookup_tests.cpp)
 # Shared cross-language JSON / I-JSON fixture (conformance/json-vectors.json):
 # emitted from the implementation, checked for drift, and consumed here and
 # by cargo test (rust/psio/tests/json_conformance.rs).
