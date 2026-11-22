@@ -149,6 +149,22 @@ namespace warnings_check
                                         std::span<const char>{bytes}, text, nullptr)
                .ok();
       ok &= psio::pssz_ir::json_to_pssz(schema, "everything", psio::ijson{}, text, again).ok();
+
+      // An explicit-width frame around nested values, whose bytes stay in
+      // the automatic profile, and the opaque option.
+      const auto           wide = psio::encode(psio::pssz_<4>{}, value);
+      psio::pssz_ir::Value dynamic;
+      std::vector<char>    wide_again;
+      ok &= psio::validate<everything>(psio::pssz_<4>{}, std::span<const char>{wide}).ok();
+      ok &= psio::validate_strict<everything>(psio::pssz_<4>{}, std::span<const char>{wide}).ok();
+      ok &= psio::pssz_ir::decode_exact<4>(schema, "everything", std::span<const char>{wide},
+                                           dynamic)
+               .ok();
+      ok &= psio::pssz_ir::encode<4>(schema, "everything", dynamic, wide_again).ok();
+      ok &= wide_again == wide;
+      ok &= psio::pssz_ir::validate_pssz(schema, "everything", std::span<const char>{bytes},
+                                         nullptr, psio::pssz_ir::nested_bytes::opaque)
+               .ok();
       return ok;
    }
 }  // namespace warnings_check

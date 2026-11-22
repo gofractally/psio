@@ -35,6 +35,10 @@
 //   std::variant          1-byte alternative index + the alternative
 //   std::tuple, record    elements / reflected fields concatenated in
 //                         order; tuple<> and an empty record are zero bytes
+//   psio::nested<T>       the key of the byte list holding the PSSZ encoding
+//                         of the T (nested.hpp): string framing, bytes order.
+//                         The reader validates the bytes as T unless the
+//                         member is declared deferred
 //
 // std::pair is not a PSIO value in any format, and bitlist has no key
 // form; both are compile errors.

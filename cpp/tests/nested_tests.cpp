@@ -12,6 +12,10 @@ TEST_CASE("nested: every checked entry point, without a throw", "[nested]")
    CHECK(failed == 0);
 }
 
+#include <psio/emit_capnp.hpp>
+#include <psio/emit_fbs.hpp>
+#include <psio/emit_protobuf.hpp>
+#include <psio/emit_wit.hpp>
 #include <psio/graphql.hpp>
 
 #include <random>
@@ -165,18 +169,35 @@ TEST_CASE("nested: a recursive schema through a nested member", "[nested][schema
 TEST_CASE("nested: foreign IDL emitters render the node as bytes", "[nested][schema]")
 {
    namespace ir = psio::schema_types;
-   const auto schema = psio::SchemaBuilder{}.insert<Action>("Action").build();
-   // (The emitters are exercised by their own suites; here only that a
-   // schema holding a Nested node is one they accept.)
-   const ir::AnyType* args = nullptr;
-   for (const auto& named : schema.types)
+   ir::Schema schema;
+   ir::Object inner;
+   inner.members.push_back(ir::Member{"amount", ir::Box<ir::AnyType>{ir::Int{64, false}}, {}});
+   ir::Object action;
+   action.members.push_back(ir::Member{"method", ir::Box<ir::AnyType>{ir::Int{32, false}}, {}});
+   action.members.push_back(ir::Member{
+      "args",
+      ir::Box<ir::AnyType>{ir::Nested{ir::Box<ir::AnyType>{ir::AnyType{ir::Type{"transfer"}}}}},
+      {}});
+   schema.insert("transfer", ir::AnyType{inner});
+   schema.insert("action", ir::AnyType{action});
+   CHECK(psio::emit_wit(schema).find("args: list<u8>") != std::string::npos);
+   CHECK(psio::emit_capnp(schema).find("args @1 :Data;") != std::string::npos);
+   CHECK(psio::emit_fbs(schema).find("args:[ubyte];") != std::string::npos);
+   CHECK(psio::emit_protobuf(schema).find("bytes args = 2;") != std::string::npos);
+
+   // What SchemaBuilder writes for a nested member: Nested{inner type}.
+   const auto         built = psio::SchemaBuilder{}.insert<Action>("Action").build();
+   const ir::AnyType* args  = nullptr;
+   for (const auto& named : built.types)
       if (named.name == "Action")
-         args = std::get<ir::Object>(named.type->value).members[2].type->resolve(schema);
+         args = std::get<ir::Object>(named.type->value).members[2].type->resolve(built);
    REQUIRE(args);
    REQUIRE(std::holds_alternative<ir::Nested>(args->value));
-   const auto* inner = std::get<ir::Nested>(args->value).type->resolve(schema);
-   REQUIRE(inner);
-   CHECK(std::holds_alternative<ir::Object>(inner->value));
+   const auto* inner_type = std::get<ir::Nested>(args->value).type->resolve(built);
+   REQUIRE(inner_type);
+   CHECK(std::holds_alternative<ir::Object>(inner_type->value));
+   // Position 10 of AnyType, as the alternative it replaces.
+   CHECK(args->value.index() == 10);
 }
 
 // ── Hostile input ────────────────────────────────────────────────────────

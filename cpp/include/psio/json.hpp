@@ -46,6 +46,9 @@
 //   text adapter              "..." holding the adapter's text
 //                             (PSIO_ADAPTER(T, psio::text_category, ...), or a
 //                             member-level psio::as<Tag>)
+//   psio::nested<T>           the text of the T its bytes hold (nested.hpp);
+//                             read as a T and stored as its canonical PSSZ
+//                             encoding. Bytes that are not a T have no text
 //
 // Integer form per member: psio::json_number / psio::json_string and
 // psio::ijson_number / psio::ijson_string (annotate.hpp) force a number or a
