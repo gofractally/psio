@@ -51,6 +51,9 @@ Common to both formats:
 - strings: C++ `utf8_string<N>` / Rust `String` and the raw strings C++
   `std::string` / Rust `RawString` are JSON strings;
 - enum without payload: its underlying integer (follows the integer rule);
+- time values (`docs/time.md`): a duration is its tick count (follows the
+  integer rule); a time point is an RFC 3339 UTC string with exactly its
+  unit's fraction digits, `"2026-11-22T10:15:30.123Z"`;
 - floats: shortest round-trip decimal as `std::to_chars` writes it
   (`0.1`, `1e+21`, `1e-07`, `-0`);
 - a type with a custom text form is a JSON string holding that text: C++

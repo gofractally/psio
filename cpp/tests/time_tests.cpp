@@ -8,6 +8,7 @@
 #include <psio/json.hpp>
 #include <psio/key.hpp>
 #include <psio/pssz.hpp>
+#include <psio/pssz_view.hpp>
 #include <psio/schema_builder.hpp>
 #include <psio/ssz.hpp>
 #include <psio/time.hpp>
@@ -334,6 +335,22 @@ TEST_CASE("time: binary formats carry the tick count", "[time][pssz][bin][ssz]")
    round(psio::pssz{}, std::optional<sys_millis>{});
    round(psio::pssz{}, std::array<milliseconds, 2>{milliseconds{1}, milliseconds{-1}});
    round(psio::pssz{}, std::tuple{sys_seconds{seconds{9}}, std::string{"x"}});
+   // Zero-copy views read time members by value.
+   {
+      const auto wire = psio::encode(psio::pssz{}, stamps);
+      auto       view = psio::view<Stamps, psio::pssz, psio::storage::const_borrow>{wire};
+      REQUIRE(view.get<0>().get() == stamps.created);
+      REQUIRE(view.get<1>().get() == stamps.updated);
+      REQUIRE(view.get<2>().get() == stamps.ttl);
+      REQUIRE(view.get<3>().get() == stamps.legacy);
+      const auto wire2 = psio::encode(psio::pssz{}, event);
+      auto       view2 = psio::view<Event, psio::pssz, psio::storage::const_borrow>{wire2};
+      REQUIRE(view2.get<1>().get() == event.at);
+      REQUIRE(view2.get<2>().has_value());
+      REQUIRE(view2.get<2>().get().get() == *event.precise);
+      REQUIRE(view2.get<4>().get() == event.elapsed);
+      REQUIRE(view2.get<5>().get() == event.timeout);
+   }
    // A wrong-size payload is rejected.
    REQUIRE_FALSE(psio::validate<sys_seconds>(psio::pssz{}, std::span<const char>{"1234567", 7}).ok());
 }
