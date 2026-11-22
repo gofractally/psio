@@ -75,6 +75,20 @@ builder records everything those depend on:
 Not recorded: a member `as<Tag>` override, text / binary adapters, and `Box`
 (transparent). See "Not expressible" in `docs/json.md`.
 
+## Serialized forms of a schema
+
+A `Schema` is itself a reflected value and travels in three forms, identical
+in C++, Rust and JavaScript: PSSZ (`psio::encode(psio::pssz{}, schema)`, the
+`schema_ir` of the shared fixtures) and the two JSON texts
+(`psio::encode(psio::ijson{}, schema)` / `psio::json{}`, read back with
+`psio::decode_json_checked`). The texts are the generic JSON codec's output
+for the IR's own records, with `Box` transparent as in PSSZ — a type is
+`{"value":{"Int":{"bits":32,"isSigned":false}}}` under `ijson` and
+`{"value":[8,{...}]}` under `json` — so nothing about them is specific to
+schemas. Rules, example, per-language entry points and the shared fixture
+(`conformance/schema-json-vectors.json`) are in `docs/json.md`, "The Schema
+IR as JSON".
+
 ## JavaScript / TypeScript
 
 The typed definitions of the JS package (`js/src/types.ts`: `record`, `list`,

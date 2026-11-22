@@ -68,6 +68,8 @@ Common to both formats:
 - `std::tuple` / Rust tuple: array of the elements in order; the empty tuple
   is `[]`. `std::pair` is not supported (no other PSIO format supports it);
 - optional: `null` or the value;
+- a boxed value (C++ `psio::schema_types::Box<T>`, Rust `Box<T>`): the value
+  it holds, as in PSSZ. An empty C++ box (a moved-from one) has no text;
 - strings: C++ `utf8_string<N>` / Rust `String` and the raw strings C++
   `std::string` / Rust `RawString` are JSON strings;
 - enum without payload: the enumerator's **name** as a string (`"active"`)
@@ -670,6 +672,118 @@ the older runtime `psio::schema`) is unchanged apart from the 64-bit integer
 rule; it has no variant or tuple and its reader is unchecked. New code
 should use the Schema IR path above. `view_to_json.hpp` renders a schemaless
 pjson view and has no type information.
+
+## The Schema IR as JSON
+
+A Schema IR (`psio::Schema`) has three serialized forms, the same in C++,
+Rust and JavaScript: its PSSZ bytes (how a schema is stored and hashed) and
+its `json` and `ijson` texts (how a client fetches one).
+
+**Rule.** The text is not a format of its own. It is what the rules above
+give the IR's own reflected records (`schema_ir.hpp`: `Schema`, `Member`,
+`AnyType`, ...), with a box transparent as it is in PSSZ. Nothing is
+special-cased:
+
+- every record is an object with its members in declaration order;
+- a type (`AnyType`) is the record `{"value": <variant>}`. Its cached
+  `resolved` pointer is not reflected and is in no form;
+- the variant is `{"<alternative>": {...}}` under `ijson` and
+  `[index, {...}]` under `json`. The names are the alternatives' reflected
+  names and the index their position: `Struct` 0, `Object` 1, `Array` 2,
+  `List` 3, `BoundedList` 4, `Option` 5, `Variant` 6, `Tuple` 7, `Int` 8,
+  `Float` 9, `FracPack` 10, `Custom` 11, `Resource` 12, `Type` 13, `Enum` 14;
+- optional members are `null` or the value: `Schema.ir_version` (a number),
+  `Func.result`, `Attribute.value`, `UseItem.alias`;
+- `Array.len`, `BoundedList.maxCount` and `Enumerator.value` are 64-bit
+  integers: bare under `json`; under `ijson` bare up to 2^53 - 1 and a
+  decimal string beyond (`"len":"18446744073709551615"`);
+- reading follows "Reading" above: members in any order, unknown keys
+  skipped, a missing member an error unless it is optional (a text without
+  `ir_version` is a schema without one, which the schema-driven codecs
+  refuse to use), a repeated key read again with the last one winning, the
+  `ijson` variant object exactly one member.
+
+**Example.** `struct Point { std::int32_t x; std::uint64_t id; };` inserted
+as `Point` (`SchemaBuilder`), under `ijson`:
+
+```json
+{"package":{"name":"","version":"","attributes":[]},"interfaces":[],"worlds":[],"uses":[],
+ "types":[
+  {"name":"Point","type":{"value":{"Object":{"members":[
+     {"name":"x","type":{"value":{"Type":{"type":"@1"}}},"attributes":[]},
+     {"name":"id","type":{"value":{"Type":{"type":"@2"}}},"attributes":[]}],"attributes":[]}}},"attributes":[]},
+  {"name":"@1","type":{"value":{"Int":{"bits":32,"isSigned":true}}},"attributes":[]},
+  {"name":"@2","type":{"value":{"Int":{"bits":64,"isSigned":false}}},"attributes":[]}],
+ "ir_version":1}
+```
+
+and under `json`, where only the variants differ:
+
+```json
+{"package":{"name":"","version":"","attributes":[]},"interfaces":[],"worlds":[],"uses":[],
+ "types":[
+  {"name":"Point","type":{"value":[1,{"members":[
+     {"name":"x","type":{"value":[13,{"type":"@1"}]},"attributes":[]},
+     {"name":"id","type":{"value":[13,{"type":"@2"}]},"attributes":[]}],"attributes":[]}]},"attributes":[]},
+  {"name":"@1","type":{"value":[8,{"bits":32,"isSigned":true}]},"attributes":[]},
+  {"name":"@2","type":{"value":[8,{"bits":64,"isSigned":false}]},"attributes":[]}],
+ "ir_version":1}
+```
+
+(The writers emit no whitespace; the line breaks are for this page.)
+
+**Entry points.**
+
+| | schema → text | text → schema |
+|---|---|---|
+| C++ | `psio::encode(psio::ijson{}, schema)`, `psio::encode_json_checked(psio::ijson{}, schema, out)` | `psio::decode_json_checked(psio::ijson{}, text, schema)` (any `json_parser`), `psio::validate<psio::Schema>(psio::ijson{}, text)`, `psio::decode<psio::Schema>(psio::ijson{}, text)` |
+| Rust | `psio::json::to_string::<IJson, _>(&schema)` (`Schema: JsonText`) | `psio::json::from_str::<IJson, Schema>(text)`, `json::validate::<IJson, Schema>(bytes)` |
+| JS | `schema.toJson('ijson')` on a `PsszSchema` | `PsszSchema.fromJson(text, 'ijson', options)` |
+
+`psio::json{}` / `Json` / `'json'` give the other text. The typed C++ and
+Rust codecs read the IR's reflected types directly. JavaScript has no typed
+IR: it runs its schema-driven text codec over the schema of `psio::Schema`
+(`PsszSchema.meta()`, the IR of the IR). C++ can do the same —
+`SchemaBuilder::insert<psio::Schema>("Schema")`, then `pssz_ir::pssz_to_json`
+/ `json_to_pssz` with root `"Schema"` — and gives the typed text and bytes
+(the fixture's emitter and the ctest consumer require it for every row).
+The serde derives on the Rust IR types are a different, serde-shaped form
+(64-bit integers always bare, no `json` variant form) and are not this text.
+
+**Nesting.** The readers' limit of 64 nested arrays / objects applies to a
+schema's text like any other. A type nested inline costs three levels (the
+`AnyType` record, the variant, the alternative's record), under the three of
+the schema, its `types` array and the named member: a list of a list of ...
+an integer reads up to 19 lists deep and is rejected at 20; a record or
+variant member adds two more (the `members` array and the member). Deeper
+types are written through named types (`Type`), as `SchemaBuilder` does for
+every type it interns. PSSZ has a node-depth limit of the same size, and
+its checked encoder refuses that list chain at the same point (19 encodes,
+20 does not), so the text limit takes nothing away from what a schema's
+PSSZ form can hold. The text writers themselves do not check depth: for a
+hand-built schema nested beyond the limit they write a text that no reader
+accepts.
+
+**Fixture.** `conformance/schema-json-vectors.json`
+(`cpp/tests/schema_json_conformance_emit.cpp`; ctest
+`psio_schema_json_conformance_regen` fails when the checked-in file is not
+what C++ generates) holds, for the schemas the PSSZ, JSON and time/key
+fixtures record, the schema of `psio::Schema`, an empty schema, a hand-built
+one with every alternative, attributes, interfaces, worlds, uses, a package,
+64-bit values on both sides of 2^53 - 1 and no `ir_version`, and a type
+nested to the depth limit: `ir_hex` (the PSSZ bytes), `json` and `ijson`.
+`accepts` rows are texts no writer produces (reordered members, unknown and
+repeated keys, a missing or `null` `ir_version`, a small 64-bit integer as a
+string) with the bytes they read as; `rejects` rows are texts that are not a
+schema (an unknown alternative name, a variant object with two members or
+none, a missing member, an index out of range or of another alternative, a
+bare 64-bit integer beyond 2^53 - 1 under `ijson`, one nesting level too
+many, ...). Consumed by `cpp/tests/schema_json_conformance_tests.cpp`,
+`rust/psio/tests/schema_json_conformance.rs` and
+`js/src/test/schema-json-conformance.test.ts`: bytes → schema → text equals
+the recorded text, text → schema → bytes equals `ir_hex`, every reject is
+rejected. `cpp/tests/schema_json_noexceptions.cpp` runs the C++ entry
+points with exceptions and RTTI disabled.
 
 ## Open
 
