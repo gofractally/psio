@@ -114,6 +114,7 @@ shape.
 | time point of another clock (monotonic) | `MonotonicSeconds`, `MonotonicMilliseconds`, `MonotonicMicroseconds`, `MonotonicNanoseconds`, or `Monotonic_<num>_<den>` — the tick count |
 | type with a text adapter (`PSIO_ADAPTER(T, psio::text_category, …)`) | scalar named after the type (the adapter's `schema_id`, else the reflected name) — a string holding the adapter's text |
 | `psio::view<T, Fmt, Store>`, `psio::buffer<T, Fmt, Store>`, `std::reference_wrapper<T>` | `T` (see [Views](#views)). The same record reached through different sources is one GraphQL type |
+| `psio::nested<T>` (`psio/nested.hpp`), as a value or through a view | `T`: the inner value, read in place through the view over the nested bytes. Output only |
 | `psio::graphql::connection<Node>` | `<Node>Connection`, `<Node>Edge`, `PageInfo` (see [Connections](#connections)) |
 
 Scalars are written by `psio::ijson`'s writer and arguments and variables
@@ -169,6 +170,10 @@ same GraphQL name (including `Foo`'s input object against a type named
 has no mapping, a `std::variant` alternative that is not a record, a method
 with unnamed parameters, an unsupported argument type, an optional of an
 optional, `id` on a non-scalar, an object type with no visible field.
+A `psio::nested<T, nested_validation::deferred>` member is a type with no
+mapping (an enclosing reader has not checked that its bytes are a `T`: hide
+it, or expose the `T` from a method after validating), and a nested value
+is not an argument type (`cpp/tests/nested_fail.cpp`).
 
 The list of a schema's types is computed at compile time by walking the
 descriptors. A very large schema can exceed the compiler's constant
@@ -204,7 +209,8 @@ Limits of the view path:
 
 - **Views are over validated bytes**, as everywhere in psio
   (`validated_pssz_view`, or bytes the program wrote itself). The engine
-  does not re-validate.
+  does not re-validate. The same holds for a `psio::nested<T>` value held in
+  memory: one built with `nested<T>::unchecked` must hold a valid encoding.
 - **A method needs the object.** Selecting a reflected *method* of a
   view-backed record decodes that one record (`psio::decode`) for the call,
   once per selected method. Data members never do.

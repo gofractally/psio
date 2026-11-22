@@ -83,7 +83,49 @@ Common to both formats:
 - a type with a custom text form is a JSON string holding that text: C++
   `PSIO_ADAPTER(T, psio::text_category, ...)` or a member `psio::as<Tag>`;
   Rust `TextForm` + `psio::json_text_form!(T)`. Through a schema it is a
-  `Custom` node with a handler ("Custom types through a schema" below).
+  `Custom` node with a handler ("Custom types through a schema" below);
+- a nested value (C++ `psio::nested<T>`, Schema IR `Nested`): the text of the
+  inner value ("Nested values" below).
+
+### Nested values
+
+A nested value is, in binary, a byte list holding the PSSZ encoding of a `T`
+(`docs/pssz-spec.md` §5.8). Its text, in both formats, is **the inner value's
+own text** — not hex, not an array of byte numbers:
+
+```
+struct Action { u32 method; nested<Transfer> args; }
+
+{"method":9,"args":{"to":"bob","amount":5,"memo":"rent"}}
+```
+
+| | rule |
+|---|---|
+| writing | the bytes are validated as `T` (the compatible rule), decoded, and the value is written by `T`'s rules. Bytes that are not a valid `T` have no text: an error ("nested bytes are not a valid encoding of their type") |
+| reading | a `T` is read by `T`'s rules (any member order, unknown keys skipped, a missing optional member, the last of a repeated key), and the nested value is the **canonical** PSSZ encoding of that `T`. A text that reads as a `T` with no encoding (a member outside its length bound, a value over a `maxDynamicData` cap) is rejected ("nested value has no encoding") |
+| validating | the same reader: the value is built and encoded even when only validating |
+| integer form | a member's `json_string` / `ijson_number` / ... reaches the inner value, as it reaches through an optional. Otherwise `T`'s own forms apply: `nested<u64>` holding 2^60 is `"1152921504606846976"` under `ijson` |
+| variant alternative (`ijson`) | `nested_<name of T>`: `{"nested_Transfer":{...}}` |
+| nesting limit | a nested value adds no array or object of its own |
+| deferred validation (`nested<T, deferred>`) | the same text. The writer validates the bytes in every case |
+
+**Text round trips are value round trips.** If the bytes were written by a
+newer program whose inner record has appended optional fields, the text
+shows the fields this reader knows, and reading that text back produces the
+canonical encoding of those — the unknown fields are gone, as after any
+typed read and re-write. A holder that must keep foreign bytes exactly uses
+a byte list (hex in `ijson`) instead of a nested value.
+
+A member `length_bound` on a nested member counts the bytes of the inner
+encoding and is enforced by both the reader and the writer.
+
+Through a schema the node is `Nested{type}` and the rules are the same:
+`pssz_to_json` writes the inner value's text and `json_to_pssz` stores its
+canonical encoding. The dynamic value of a nested node (C++
+`psio::pssz_ir::Value`) is the inner value itself, so `json_to_value` /
+`value_to_json` simply read and write the inner type; a member
+`lengthBound`, which counts encoded bytes, is checked where the bytes exist
+(`json_to_pssz`, `pssz_to_json`, and the binary codec).
 
 ### Enums
 
@@ -498,6 +540,7 @@ indexer — converts and validates with:
 | text → PSSZ | `json_to_pssz(schema, root, psio::ijson{}, text, bytes)` | `json_to_pssz::<IJson>(&schema, &root, text)` |
 | PSSZ → text | `pssz_to_json(schema, root, psio::ijson{}, bytes, text, &has_unknown)` | `pssz_to_json::<IJson>(&schema, &root, bytes)` |
 | validate PSSZ | `validate_pssz(schema, root, bytes, &has_unknown)` | `validate_pssz(&schema, &root, bytes)` |
+| ... leaving nested bytes unexamined | `validate_pssz(schema, root, bytes, &has_unknown, nested_bytes::opaque)` | |
 
 The C++ text reader runs on the same syntax layers as the typed readers
 (trailing `json_parser` argument; the default is the same automatic choice).
@@ -555,7 +598,8 @@ The IR carries what that needs (the C++ `SchemaBuilder` and the Rust
   variants, options, lists, arrays, bounded lists, the `string` (raw bytes)
   / `utf8` (UTF-8) / `hex` / `bool` / `char` / `bitvector` / `bitlist`
   adapters, `box` (a boxed value: the inner type, with no inferred size
-  bound), integers of 8-256 bits,
+  bound), `Nested` (a byte list holding the PSSZ encoding of its inner
+  type: "Nested values" above), integers of 8-256 bits,
   enums (`Enum`: the underlying integer plus the enumerator names and
   values; a C++ enum without `PSIO_REFLECT_ENUM` is just its integer),
   floats;
