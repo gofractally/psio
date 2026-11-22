@@ -15,11 +15,71 @@ use std::collections::HashMap;
 
 macro_rules! ir_record {
     ($name:ident { $($field:ident: $ty:ty),* $(,)? }) => {
+        ir_record!($name as stringify!($name), { $($field: $ty),* });
+    };
+    // `as`: the record's name in a schema (its C++ name).
+    ($name:ident as $schema_name:expr, { $($field:ident: $ty:ty),* $(,)? }) => {
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack, JsonText)]
         #[psio(crate = "crate")]
-        #[psio(crate = "crate")]
         pub struct $name { $(pub $field: $ty),* }
+
+        // The record's own schema, so a schema can be a member or an
+        // argument: the Object C++ `SchemaBuilder{}.insert<psio::$name>()`
+        // builds (conformance/schema-json-vectors.json, `schema-of-schema`).
+        impl ToPsszSchema for $name {
+            fn schema_name() -> Option<String> {
+                Some($schema_name.into())
+            }
+            fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+                Ok(AnyType::new(AnyValue::Object(Object {
+                    members: vec![$(Member {
+                        name: stringify!($field).trim_start_matches("r#").into(),
+                        r#type: Box::new(<<$ty as IrMember>::Described as ToPsszSchema>::schema(builder)?),
+                        attributes: <<$ty as IrMember>::Described as ToPsszSchema>::member_attributes(),
+                    }),*],
+                    attributes: vec![],
+                })))
+            }
+        }
     };
+}
+
+/// How a member of an IR record is described in the IR's own schema. A
+/// text member is C++ `std::string` — a raw string, id `string` — which is
+/// what the schema says in both languages; the Rust records hold `String`
+/// and so also require UTF-8 when they read.
+trait IrMember {
+    type Described: ToPsszSchema;
+}
+macro_rules! ir_member {
+    ($($ty:ty => $described:ty),* $(,)?) => {$(
+        impl IrMember for $ty {
+            type Described = $described;
+        }
+    )*};
+}
+ir_member! {
+    String => crate::pssz::RawString,
+    Option<String> => Option<crate::pssz::RawString>,
+    Vec<String> => Vec<crate::pssz::RawString>,
+    bool => bool,
+    u32 => u32,
+    u64 => u64,
+    Option<u32> => Option<u32>,
+    Box<AnyType> => Box<AnyType>,
+    Option<Box<AnyType>> => Option<Box<AnyType>>,
+    Vec<Box<AnyType>> => Vec<Box<AnyType>>,
+    AnyValue => AnyValue,
+    Package => Package,
+    Vec<Attribute> => Vec<Attribute>,
+    Vec<Member> => Vec<Member>,
+    Vec<Func> => Vec<Func>,
+    Vec<Enumerator> => Vec<Enumerator>,
+    Vec<Interface> => Vec<Interface>,
+    Vec<World> => Vec<World>,
+    Vec<Use> => Vec<Use>,
+    Vec<UseItem> => Vec<UseItem>,
+    Vec<UseRef> => Vec<UseRef>,
 }
 ir_record!(Attribute { name: String, value: Option<String> });
 ir_record!(Member { name: String, r#type: Box<AnyType>, attributes: Vec<Attribute> });
@@ -30,7 +90,7 @@ ir_record!(Resource { name: String, methods: Vec<Func>, attributes: Vec<Attribut
 ir_record!(Array { r#type: Box<AnyType>, len: u64 });
 ir_record!(List { r#type: Box<AnyType> });
 ir_record!(BoundedList { r#type: Box<AnyType>, maxCount: u64 });
-ir_record!(Optional { r#type: Box<AnyType> });
+ir_record!(Optional as "Option", { r#type: Box<AnyType> });
 ir_record!(Variant { members: Vec<Member>, attributes: Vec<Attribute> });
 ir_record!(Tuple { members: Vec<Box<AnyType>> });
 ir_record!(Custom { r#type: Box<AnyType>, id: String });
@@ -57,7 +117,6 @@ ir_record!(Enum { r#type: Box<AnyType>, members: Vec<Enumerator> });
 /// the reflected name of each alternative).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack, JsonText)]
 #[psio(crate = "crate")]
-#[psio(crate = "crate")]
 pub enum AnyValue {
     Struct(Struct),
     Object(Object),
@@ -77,6 +136,31 @@ pub enum AnyValue {
     // unchanged.
     Enum(Enum),
 }
+// The schema of the variant itself. C++ `AnyType::value` is a std::variant,
+// which has no name of its own in a schema, so this one has none either.
+impl ToPsszSchema for AnyValue {
+    fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        // A std::variant's alternatives are numbered; the name each has in
+        // text is its `ijsonName`.
+        let mut members = Vec::new();
+        macro_rules! alternatives {
+            ($($name:ident: $ty:ty),*) => {$(
+                members.push(Member {
+                    name: members.len().to_string(),
+                    r#type: Box::new(<$ty as ToPsszSchema>::schema(builder)?),
+                    attributes: vec![Attribute { name: "ijsonName".into(), value: Some(stringify!($name).into()) }],
+                });
+            )*};
+        }
+        alternatives!(
+            Struct: Struct, Object: Object, Array: Array, List: List, BoundedList: BoundedList,
+            Option: Optional, Variant: Variant, Tuple: Tuple, Int: Int, Float: Float, Nested: Nested,
+            Custom: Custom, Resource: Resource, Type: Type, Enum: Enum
+        );
+        Ok(AnyType::new(AnyValue::Variant(Variant { members, attributes: vec![] })))
+    }
+}
+
 // The wrapper is essential: C++ AnyType is a reflected one-field record, not
 // a transparent alias for its variant. Its mutable resolution cache is unwired.
 ir_record!(AnyType { value: AnyValue });

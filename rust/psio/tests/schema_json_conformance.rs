@@ -168,3 +168,52 @@ fn a_box_is_its_value_in_text() {
     assert_eq!(psio::to_ijson(&boxed), r#"{"value":{"Int":{"bits":8,"isSigned":false}}}"#);
     assert_eq!(psio::from_ijson::<Box<AnyType>>(r#"{"value":{"Int":{"bits":8,"isSigned":false}}}"#).unwrap(), boxed);
 }
+
+// ── The schema of the Schema IR (RG5) ───────────────────────────────────────
+
+/// The IR's own records describe themselves: `schema_for::<Schema>()` is
+/// the fixture's `schema-of-schema`, which C++ writes with
+/// `SchemaBuilder{}.insert<psio::Schema>()`.
+#[test]
+fn the_schema_of_the_schema_ir_is_the_cpp_one() {
+    let fixture = fixture();
+    let row = fixture.schemas.iter().find(|s| s.name == "schema-of-schema").expect("the fixture row");
+    let (schema, root) = psio::pssz::schema_ir::schema_for::<Schema>().unwrap();
+    assert_eq!(root, psio::pssz::schema_ir::AnyType::named("Schema"));
+    let expected = from_bytes(&row.ir_hex);
+    let names = |s: &Schema| s.types.iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&schema), names(&expected));
+    for (ours, theirs) in schema.types.iter().zip(&expected.types) {
+        assert_eq!(ours, theirs, "type {}", ours.name);
+    }
+    assert_eq!(schema, expected);
+    assert_eq!(to_hex(&schema), row.ir_hex);
+    assert_eq!(psio::to_ijson(&schema), row.ijson);
+}
+
+/// A schema is a value: a member of a record, an argument of a method.
+#[test]
+fn a_schema_is_a_member_and_an_argument() {
+    use psio::{JsonText, PsszPack, PsszUnpack, ToPsszSchema};
+
+    #[derive(Debug, PartialEq, PsszPack, PsszUnpack, ToPsszSchema, JsonText)]
+    struct Published {
+        service: String,
+        schema: Schema,
+        root: psio::pssz::schema_ir::AnyType,
+    }
+    let (schema, root) = psio::pssz::schema_ir::schema_for::<(u32, String)>().unwrap();
+    let value = Published { service: "tokens".into(), schema, root };
+    let bytes = psio::to_pssz(&value);
+    assert_eq!(psio::from_pssz::<Published>(&bytes).unwrap(), value);
+    assert_eq!(psio::from_ijson::<Published>(&psio::to_ijson(&value)).unwrap(), value);
+
+    // Its schema names the IR's records, and the schema-driven codec reads
+    // the value with it.
+    let (described, described_root) = psio::pssz::schema_ir::schema_for::<Published>().unwrap();
+    assert!(described.get("Schema").is_some() && described.get("AnyType").is_some());
+    psio::pssz::dynamic::validate(&described, &described_root, &bytes).unwrap();
+    let (text, _) =
+        psio::pssz::dynamic::json::pssz_to_json::<psio::IJson>(&described, &described_root, &bytes).unwrap();
+    assert_eq!(text, psio::to_ijson(&value));
+}
