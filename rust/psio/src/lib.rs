@@ -59,12 +59,18 @@
 //! | `psio` | `definition_will_not_change` | type | the record never gains members |
 //! | `psio` | `variant` | type | a field-less enum is a variant of unit alternatives, not its integer |
 //! | `psio` | `custom`, `custom = "id"` | type | the type has a text form of its own; the id defaults to the schema name |
-//! | `psio` | `name = "..."` | type, variant | the type's name in a schema; an enumerator's or alternative's name in a schema and in text |
+//! | `psio` | `name = "..."` | type, variant, field | the type's name in a schema; an enumerator's, alternative's or member's name in a schema and in text |
+//! | `psio` | `rename_all = "..."` | type | a case convention (`"camelCase"`, `"snake_case"`, ...) for the member names of a struct or the variant names of an enum |
+//! | `psio` | `skip` | field | the field is not a member of the type in any format; a reader fills it with its default |
 //! | `psio` | `other` | variant | the catch-all of a field-less `#[repr(int)]` enum |
 //! | `pssz` | `max_dynamic_data = N` | type | pSSZ cap on the record's variable part |
 //! | `json` | `json_number`, `json_string`, `ijson_number`, `ijson_string` | type, field | integer form in Json / IJson text |
 //!
-//! `#[serde(transparent)]` on the type means `#[psio(transparent)]`.
+//! The derives also read `#[serde(...)]`: `transparent`, `rename`,
+//! `rename_all` and `skip` mean what the `psio` keys above mean, an attribute
+//! PSIO's text cannot honour is a compile error on the derives that describe
+//! text, and the rest is ignored. [`serde_attrs`] has the rule for every
+//! serde attribute.
 //!
 //! ```
 //! use psio::{JsonText, PsszPack, PsszUnpack};
@@ -142,6 +148,7 @@
 //! with their cargo feature.
 
 pub mod experimental;
+pub mod serde_attrs;
 
 // The derives. A derive and the trait it implements share a name; the trait
 // lives in its format's module.

@@ -15,7 +15,7 @@ pub(crate) struct Options {
 
 impl Options {
     pub(crate) fn new(input: &DeriveInput) -> syn::Result<Self> {
-        let item = crate::attrs::item(input)?;
+        let item = crate::attrs::item(input, crate::attrs::Derive::Frac)?;
         let krate = item.krate();
         Ok(Options {
             definition_will_not_change: item.definition_will_not_change,
@@ -39,7 +39,7 @@ struct EnumField<'a> {
     unpack: proc_macro2::TokenStream,
 }
 
-/// `#[frac(skip)]`. A malformed attribute is reported by `Options::new`.
+/// `#[psio(skip)]`. A malformed attribute is reported by `Options::new`.
 pub(crate) fn skip_field(field: &Field) -> bool {
     crate::attrs::field(field).map_or(false, |attrs| attrs.skip)
 }

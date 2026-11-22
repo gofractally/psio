@@ -239,7 +239,7 @@ fn extract_vec_inner(ty: &Type) -> proc_macro2::TokenStream {
 
 pub fn fb_pack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("FbPack")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };
@@ -258,7 +258,7 @@ pub fn fb_pack_macro_impl(input: TokenStream) -> TokenStream {
 
 pub fn fb_unpack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("FbUnpack")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };
@@ -373,7 +373,7 @@ fn gen_fb_unpack(
 
 pub fn fb_view_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("FbView")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };

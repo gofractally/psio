@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 use syn::{
     parse_macro_input, parse_quote, Data, DeriveInput, Fields, Member, Meta, NestedMeta, Type,
 };
-use crate::attrs::{self, Forms};
+use crate::attrs::{self, Case, Derive, Forms};
 
 struct Options {
     krate: syn::Path,
@@ -27,6 +27,12 @@ struct Options {
     /// checking reader and every writer enforces it; the schema node is
     /// `Custom { wire type, id }`.
     invariant: Option<syn::Path>,
+    /// The JSON integer forms of the type's members.
+    forms: Forms,
+    /// The convention of the member names (a struct) or the variant names
+    /// (an enum), and that of the members of struct variants.
+    rename_all: Option<Case>,
+    rename_all_fields: Option<Case>,
 }
 use crate::c_enum::{self, CEnum};
 
@@ -66,7 +72,7 @@ fn field_ref(packed: bool, member: &Member) -> Tokens {
         quote!(&self.#member)
     }
 }
-fn options(input: &DeriveInput) -> syn::Result<Options> {
+fn options(input: &DeriveInput, derive: Derive) -> syn::Result<Options> {
     for param in &input.generics.params {
         let reserved = match param {
             syn::GenericParam::Type(t) => t.ident == "__PsszFormat",
@@ -75,7 +81,7 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
         };
         if reserved { return Err(syn::Error::new_spanned(param, "generic name is reserved by PSSZ derives")); }
     }
-    let item = attrs::item(input)?;
+    let item = attrs::item(input, derive)?;
     let out = Options {
         krate: item.krate(),
         dwnc: item.definition_will_not_change,
@@ -85,6 +91,9 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
         variant: item.variant,
         custom: item.custom,
         invariant: item.invariant,
+        forms: item.forms,
+        rename_all: item.rename_all,
+        rename_all_fields: item.rename_all_fields,
     };
     if out.cap.is_some() && (out.transparent || !matches!(input.data, Data::Struct(_))) {
         return Err(syn::Error::new_spanned(
@@ -104,20 +113,10 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
     Ok(out)
 }
 
-fn field_info(fields: &Fields) -> Vec<(Member, &Type)> {
-    fields
-        .iter()
-        .enumerate()
-        .map(|(i, f)| {
-            (
-                f.ident
-                    .clone()
-                    .map(Member::Named)
-                    .unwrap_or_else(|| Member::Unnamed(i.into())),
-                &f.ty,
-            )
-        })
-        .collect()
+/// The members of a record: its fields without the skipped ones
+/// (`#[psio(skip)]`), which are in no format.
+fn field_info(fields: &Fields) -> syn::Result<Vec<(Member, &Type)>> {
+    Ok(attrs::members(fields)?.into_iter().map(|m| (m.member, &m.field.ty)).collect())
 }
 
 fn generic_fields(input: &DeriveInput) -> Vec<&Type> {
@@ -134,6 +133,8 @@ fn generic_fields(input: &DeriveInput) -> Vec<&Type> {
     };
     fields
         .into_iter()
+        // A skipped field is not encoded, so its type needs no codec.
+        .filter(|field| !attrs::field(field).is_ok_and(|a| a.skip))
         .filter_map(|field| {
             let ty = &field.ty;
             let text = quote!(#ty).to_string();
@@ -182,22 +183,19 @@ fn record_encode(k: &syn::Path, types: &[&Type], values: &[Tokens], dwnc: bool, 
     }
 }
 
-fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, frame: &Frame) -> Tokens {
-    let info = field_info(fields);
+fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, frame: &Frame) -> syn::Result<Tokens> {
+    let info = field_info(fields)?;
     let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
     let values: Vec<_> = (0..info.len())
         .map(|i| format_ident!("__pssz_field_{i}"))
         .collect();
-    let initializer = match fields {
-        Fields::Named(_) => {
-            let names: Vec<_> = info.iter().map(|(m, _)| m).collect();
-            quote! { #construct { #(#names: #values),* } }
-        }
-        Fields::Unnamed(_) => quote! { #construct ( #(#values),* ) },
-        Fields::Unit => construct,
-    };
+    let initializer = attrs::construct(
+        construct,
+        fields,
+        &values.iter().map(|v| quote!(#v)).collect::<Vec<_>>(),
+    )?;
     let (width, cap) = (&frame.width, &frame.cap);
-    quote! {
+    Ok(quote! {
         #k::pssz_checked::enter_record::<__PsszFormat>(#cap, bytes)?;
         let __spans = #k::pssz_checked::record_spans_n(#width, [
             #(#k::pssz_checked::Layout::of::<__PsszFormat, #types>()),*
@@ -207,14 +205,14 @@ fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, 
         #(let #values = #k::pssz_checked::decode_field::<__PsszFormat, #types>(bytes,
             __spans.next().flatten())?;)*
         ::core::result::Result::Ok(#initializer)
-    }
+    })
 }
 
-fn record_validate(k: &syn::Path, fields: &Fields, dwnc: bool, frame: &Frame) -> Tokens {
-    let info = field_info(fields);
+fn record_validate(k: &syn::Path, fields: &Fields, dwnc: bool, frame: &Frame) -> syn::Result<Tokens> {
+    let info = field_info(fields)?;
     let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
     let (width, cap) = (&frame.width, &frame.cap);
-    quote! {
+    Ok(quote! {
         #k::pssz_checked::enter_record::<__PsszFormat>(#cap, bytes)?;
         let __spans = #k::pssz_checked::record_spans_n(#width, [
             #(#k::pssz_checked::Layout::of::<__PsszFormat, #types>()),*
@@ -225,14 +223,14 @@ fn record_validate(k: &syn::Path, fields: &Fields, dwnc: bool, frame: &Frame) ->
             <#types as #k::pssz::PsszValidate<__PsszFormat>>::pssz_validate(&bytes[span])?;
         })*
         ::core::result::Result::Ok(())
-    }
+    })
 }
 
 /// Associated consts of the generated `PsszPack` impl.
 struct Consts { fixed: Tokens, size: Tokens, min: Tokens, extra: Tokens }
 
 fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
-    let opts = options(&input)?;
+    let opts = options(&input, Derive::Pssz)?;
     let k = &opts.krate;
     let name = &input.ident;
     let pack = quote!(#k::pssz::PsszPack<__PsszFormat>);
@@ -265,26 +263,22 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
     let mut missing_optional = quote!();
     let (body, consts) = match &input.data {
         Data::Struct(data) => {
-            let info = field_info(&data.fields);
+            let info = field_info(&data.fields)?;
             let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
             let members: Vec<_> = info.iter().map(|(m, _)| m).collect();
             if opts.transparent {
                 if info.len() != 1 {
                     return Err(syn::Error::new_spanned(
                         &data.fields,
-                        "transparent PSSZ structs require exactly one field",
+                        "transparent PSSZ structs require exactly one member",
                     ));
                 }
                 let ty = types[0];
                 let member = members[0];
                 let member_ref = field_ref(packed(&input), member);
-                let construct = |value: Tokens| if matches!(&data.fields, Fields::Named(_)) {
-                    quote!(Self { #member: #value })
-                } else {
-                    quote!(Self(#value))
-                };
-                let decoded = construct(quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack(bytes)?));
-                let missing = construct(quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_missing_optional()?));
+                let construct = |value: Tokens| attrs::construct(quote!(Self), &data.fields, &[value]);
+                let decoded = construct(quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack(bytes)?))?;
+                let missing = construct(quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_missing_optional()?))?;
                 missing_optional = quote! { fn pssz_missing_optional() -> #k::pssz::PsszResult<Self> { ::core::result::Result::Ok(#missing) } };
                 validation_body = quote! { <#ty as #k::pssz::PsszValidate<__PsszFormat>>::pssz_validate(bytes) };
                 (
@@ -319,10 +313,10 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     Some(cap) => { let cap = cap as usize; quote!(::core::option::Option::Some(#cap)) }
                     None => quote!(::core::option::Option::None),
                 };
-                validation_body = record_validate(k, &data.fields, dwnc, &frame);
+                validation_body = record_validate(k, &data.fields, dwnc, &frame)?;
                 (
                     if unpack {
-                        record_decode(k, &data.fields, quote!(Self), dwnc, &frame)
+                        record_decode(k, &data.fields, quote!(Self), dwnc, &frame)?
                     } else {
                         record_encode(k, &types, &values, dwnc, &frame)
                     },
@@ -450,7 +444,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     return Err(syn::Error::new_spanned(variant, "PSSZ selectors use declaration order; explicit discriminants are unsupported"));
                 }
                 let vname = &variant.ident;
-                let info = field_info(&variant.fields);
+                let info = field_info(&variant.fields)?;
                 let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
                 let bindings: Vec<_> = (0..info.len())
                     .map(|i| format_ident!("__pssz_value_{i}"))
@@ -466,7 +460,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 validate_arms.push(match &variant.fields {
                     Fields::Unit => quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; if bytes.is_empty() { ::core::result::Result::Ok(()) } else { ::core::result::Result::Err(#k::pssz::PsszError::new("pssz: zero-size fixed payload must be empty")) } } },
                     _ if single => { let ty = types[0]; quote! { #tag => { <#ty as #k::pssz::PsszValidate<__PsszFormat>>::pssz_validate(bytes) } } }
-                    _ => { let body = record_validate(k, &variant.fields, false, &frame); quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; #body } } }
+                    _ => { let body = record_validate(k, &variant.fields, false, &frame)?; quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; #body } } }
                 });
                 if unpack {
                     let decode = match &variant.fields {
@@ -478,7 +472,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                             quote! { ::core::result::Result::Ok(Self::#vname(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack(bytes)?)) }
                         }
                         _ => {
-                            let body = record_decode(k, &variant.fields, quote!(Self::#vname), false, &frame);
+                            let body = record_decode(k, &variant.fields, quote!(Self::#vname), false, &frame)?;
                             quote! { let _payload_depth = #k::pssz_checked::DecodeDepth::enter()?; #body }
                         }
                     };
@@ -577,17 +571,9 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
         // A value that violates its invariant is not a value of the type:
         // a pruned trailing optional is checked like a stored one.
         if !missing_optional.is_empty() {
-            let ty = match &input.data {
-                Data::Struct(data) => data.fields.iter().next().map(|f| f.ty.clone()),
-                _ => None,
-            };
-            if let (Some(ty), Data::Struct(data)) = (ty, &input.data) {
-                let member = field_info(&data.fields).remove(0).0;
-                let construct = if matches!(&data.fields, Fields::Named(_)) {
-                    quote!(Self { #member: __inner })
-                } else {
-                    quote!(Self(__inner))
-                };
+            if let Data::Struct(data) = &input.data {
+                let ty = field_info(&data.fields)?.remove(0).1.clone();
+                let construct = attrs::construct(quote!(Self), &data.fields, &[quote!(__inner)])?;
                 missing_optional = quote! {
                     fn pssz_missing_optional() -> #k::pssz::PsszResult<Self> {
                         let __inner = <#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_missing_optional()?;
@@ -701,19 +687,26 @@ fn schema_int_forms(k: &syn::Path, field: &syn::Field, defaults: Forms) -> syn::
     Ok(out)
 }
 
-fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool, cap: Option<u64>, forms: Forms) -> syn::Result<Tokens> {
-    let info = field_info(fields);
-    let names: Vec<_> = info
+fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool, cap: Option<u64>, forms: Forms, case: Option<Case>) -> syn::Result<Tokens> {
+    let members = attrs::members(fields)?;
+    // The member's name in text: its identifier, `#[psio(name)]` /
+    // `#[serde(rename)]`, or the identifier under the `rename_all` convention.
+    let names: Vec<_> = members
         .iter()
-        .map(|(m, _)| match m {
-            Member::Named(id) => id.to_string().trim_start_matches("r#").to_string(),
+        .map(|m| match &m.member {
+            Member::Named(_) => attrs::member_name(m.field, &m.attrs, case),
             Member::Unnamed(index) => index.index.to_string(),
         })
         .collect();
-    let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
-    let member_attributes = fields
+    for (i, name) in names.iter().enumerate() {
+        if names[..i].contains(name) {
+            return Err(syn::Error::new_spanned(members[i].field, "duplicate member name"));
+        }
+    }
+    let types: Vec<_> = members.iter().map(|m| &m.field.ty).collect();
+    let member_attributes = members
         .iter()
-        .map(|field| schema_int_forms(k, field, forms))
+        .map(|m| schema_int_forms(k, m.field, forms))
         .collect::<syn::Result<Vec<_>>>()?;
     // The order C++ SchemaBuilder emits.
     let mut attributes = Vec::new();
@@ -739,7 +732,7 @@ fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool, cap: Option<u64>, f
 }
 
 fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
-    let opts = options(&input)?;
+    let opts = options(&input, Derive::Schema)?;
     let k = &opts.krate;
     let name = &input.ident;
     let mut generics = input.generics.clone();
@@ -770,7 +763,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             let names = shape
                 .declared
                 .iter()
-                .map(|v| Ok(attrs::variant(v)?.name.unwrap_or_else(|| v.ident.to_string())))
+                .map(|v| Ok(attrs::variant_name(v, &attrs::variant(v)?, opts.rename_all)))
                 .collect::<syn::Result<Vec<String>>>()?;
             quote! {{
                 #preamble
@@ -784,13 +777,14 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             }}
         }
         Data::Struct(data) if opts.transparent => {
-            if data.fields.len() != 1 {
+            let info = field_info(&data.fields)?;
+            if info.len() != 1 {
                 return Err(syn::Error::new_spanned(
                     &data.fields,
-                    "transparent PSSZ structs require exactly one field",
+                    "transparent PSSZ structs require exactly one member",
                 ));
             }
-            let ty = &data.fields.iter().next().unwrap().ty;
+            let ty = info[0].1;
             if opts.custom.is_some() || opts.invariant.is_some() {
                 // The wire type inline under the Custom node, as the C++
                 // builder writes a strong typedef.
@@ -800,7 +794,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             }
         }
         Data::Struct(data) => {
-            schema_record(k, &data.fields, opts.dwnc, opts.cap, attrs::item(&input)?.forms)?
+            schema_record(k, &data.fields, opts.dwnc, opts.cap, opts.forms, opts.rename_all)?
         }
         Data::Enum(data) => {
             if opts.dwnc || opts.transparent {
@@ -824,6 +818,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                     ));
                 }
                 let variant_name = variant.ident.to_string();
+                let variant_attrs = attrs::variant(variant)?;
                 let ty = match &variant.fields {
                     Fields::Unit => {
                         quote! { #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Struct(#k::pssz::schema_ir::Struct { members: ::std::vec![], attributes: ::std::vec![] })) }
@@ -838,11 +833,20 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                             #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Tuple(#k::pssz::schema_ir::Tuple { members: ::std::vec![#(::std::boxed::Box::new(<#types as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?)),*] }))
                         }
                     }
-                    _ => schema_record(k, &variant.fields, false, None, Forms::default())?,
+                    _ => schema_record(
+                        k,
+                        &variant.fields,
+                        false,
+                        None,
+                        Forms::default(),
+                        variant_attrs.rename_all.or(opts.rename_all_fields),
+                    )?,
                 };
-                // The I-JSON form names an alternative by `#[psio(name)]`.
-                let attributes: Vec<_> = attrs::variant(variant)?
-                    .name
+                // The I-JSON form names an alternative by `#[psio(name)]` /
+                // `#[serde(rename)]`, or by the enum's `rename_all`.
+                let text_name = attrs::variant_name(variant, &variant_attrs, opts.rename_all);
+                let attributes: Vec<_> = Some(&text_name)
+                    .filter(|name| **name != variant_name)
                     .iter()
                     .map(|name| schema_attribute(k, "ijsonName", name))
                     .collect();
@@ -914,7 +918,7 @@ pub fn derive_schema(input: TokenStream) -> TokenStream {
 }
 
 fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
-    let opts = options(&input)?;
+    let opts = options(&input, Derive::Pssz)?;
     let k = &opts.krate;
     let name = &input.ident;
     let accessor = format_ident!("{}PsszAccessors", name);
@@ -940,7 +944,7 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
     let mut mut_methods = Vec::new();
     match &input.data {
         Data::Struct(data) => {
-            let info = field_info(&data.fields);
+            let info = field_info(&data.fields)?;
             let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
             if opts.transparent && info.len() != 1 {
                 return Err(syn::Error::new_spanned(
@@ -1036,7 +1040,7 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
             ));
             for (index, variant) in data.variants.iter().enumerate() {
                 let method = format_ident!("as_{}", variant.ident);
-                let info = field_info(&variant.fields);
+                let info = field_info(&variant.fields)?;
                 let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
                 let payload = match &variant.fields {
                     Fields::Unit => quote!([u8; 0]),

@@ -13,11 +13,16 @@
 //!
 //! Every derive reads `#[psio(...)]`, the annotations that describe the type
 //! for all formats (`crate`, `transparent`, `invariant`,
-//! `definition_will_not_change`, `variant`, `custom`, `name`, `other`). A
-//! format-named attribute holds only that format's keys: `#[pssz(...)]`
-//! (`max_dynamic_data`), `#[json(...)]` (the integer text forms) and
-//! `#[frac(...)]` (`skip`). The table is in `attrs.rs`; a key under the wrong
-//! attribute or an unknown key is a compile error.
+//! `definition_will_not_change`, `variant`, `custom`, `name`, `rename_all`,
+//! `skip`, `other`). A format-named attribute holds only that format's keys:
+//! `#[pssz(...)]` (`max_dynamic_data`) and `#[json(...)]` (the integer text
+//! forms). The table is in `attrs.rs`; a key under the wrong attribute or an
+//! unknown key is a compile error.
+//!
+//! Every derive also reads `#[serde(...)]`: an attribute with a PSIO meaning
+//! (`transparent`, `rename`, `rename_all`, `skip`) is honoured, one that
+//! would make PSIO's text differ from what it says is an error on the
+//! derives that describe text, and the rest is ignored (`attrs.rs`).
 
 use proc_macro::TokenStream;
 
@@ -35,58 +40,58 @@ mod key_macro;
 mod pssz_macro;
 mod wit_macro;
 
-#[proc_macro_derive(PsszPack, attributes(psio, pssz))]
+#[proc_macro_derive(PsszPack, attributes(psio, pssz, serde))]
 pub fn derive_pssz_pack(input: TokenStream) -> TokenStream { pssz_macro::derive(input, false) }
 
-#[proc_macro_derive(PsszUnpack, attributes(psio, pssz))]
+#[proc_macro_derive(PsszUnpack, attributes(psio, pssz, serde))]
 pub fn derive_pssz_unpack(input: TokenStream) -> TokenStream { pssz_macro::derive(input, true) }
 
 /// Also reads `#[json(...)]` (see `JsonText`): integer forms become the member
 /// attributes `jsonInt` / `ijsonInt`. A variant's `#[psio(name = "...")]` is
 /// its enumerator name, or its `ijsonName` when it is an alternative.
-#[proc_macro_derive(ToPsszSchema, attributes(psio, pssz, json))]
+#[proc_macro_derive(ToPsszSchema, attributes(psio, pssz, json, serde))]
 pub fn derive_to_pssz_schema(input: TokenStream) -> TokenStream { pssz_macro::derive_schema(input) }
 
-#[proc_macro_derive(PsszView, attributes(psio, pssz))]
+#[proc_macro_derive(PsszView, attributes(psio, pssz, serde))]
 pub fn derive_pssz_view(input: TokenStream) -> TokenStream { pssz_macro::derive_view(input) }
 
 // ── psio::experimental::frac derive macros ──────────────────────────────
 
 #[cfg(feature = "experimental-frac")]
-#[proc_macro_derive(Pack, attributes(psio, frac))]
+#[proc_macro_derive(Pack, attributes(psio, serde))]
 pub fn derive_pack(input: TokenStream) -> TokenStream {
     frac_macro::frac_macro_impl(input, true, false)
 }
 
 #[cfg(feature = "experimental-frac")]
-#[proc_macro_derive(Unpack, attributes(psio, frac))]
+#[proc_macro_derive(Unpack, attributes(psio, serde))]
 pub fn derive_unpack(input: TokenStream) -> TokenStream {
     frac_macro::frac_macro_impl(input, false, true)
 }
 
 #[cfg(feature = "experimental-frac")]
 #[proc_macro_error::proc_macro_error]
-#[proc_macro_derive(FracView, attributes(psio, frac))]
+#[proc_macro_derive(FracView, attributes(psio, serde))]
 pub fn derive_frac_view(input: TokenStream) -> TokenStream {
     frac_macro::fracview_macro_impl(input)
 }
 
 #[cfg(feature = "experimental-frac")]
 #[proc_macro_error::proc_macro_error]
-#[proc_macro_derive(FracMutView, attributes(psio, frac))]
+#[proc_macro_derive(FracMutView, attributes(psio, serde))]
 pub fn derive_frac_mut_view(input: TokenStream) -> TokenStream {
     frac_macro::fracmutview_macro_impl(input)
 }
 
 #[cfg(feature = "experimental-frac")]
-#[proc_macro_derive(ToSchema, attributes(psio, frac))]
+#[proc_macro_derive(ToSchema, attributes(psio, serde))]
 pub fn to_schema(input: TokenStream) -> TokenStream {
     frac_schema_macro::schema_derive_macro(input)
 }
 
 /// The Json / IJson text formats (`psio::json::{Json, IJson}`); see
 /// `json_text_macro.rs` for the supported shapes and `#[json(...)]` attributes.
-#[proc_macro_derive(JsonText, attributes(psio, json))]
+#[proc_macro_derive(JsonText, attributes(psio, json, serde))]
 pub fn derive_json_text(input: TokenStream) -> TokenStream {
     json_text_macro::derive(input)
 }
@@ -97,65 +102,65 @@ pub fn derive_json_text(input: TokenStream) -> TokenStream {
 ///
 ///
 /// Reads `#[psio(transparent)]` and `#[psio(invariant = "path")]`.
-#[proc_macro_derive(Key, attributes(psio))]
+#[proc_macro_derive(Key, attributes(psio, serde))]
 pub fn derive_key(input: TokenStream) -> TokenStream {
     key_macro::derive(input)
 }
 
 // ── Cap'n Proto derive macros ───────────────────────────────────────────
 
-#[proc_macro_derive(CapnpPack, attributes(psio))]
+#[proc_macro_derive(CapnpPack, attributes(psio, serde))]
 pub fn derive_capnp_pack(input: TokenStream) -> TokenStream {
     capnp_macro::capnp_pack_macro_impl(input)
 }
 
-#[proc_macro_derive(CapnpUnpack, attributes(psio))]
+#[proc_macro_derive(CapnpUnpack, attributes(psio, serde))]
 pub fn derive_capnp_unpack(input: TokenStream) -> TokenStream {
     capnp_macro::capnp_unpack_macro_impl(input)
 }
 
-#[proc_macro_derive(CapnpView, attributes(psio))]
+#[proc_macro_derive(CapnpView, attributes(psio, serde))]
 pub fn derive_capnp_view(input: TokenStream) -> TokenStream {
     capnp_macro::capnp_view_macro_impl(input)
 }
 
 // ── FlatBuffers derive macros ───────────────────────────────────────────
 
-#[proc_macro_derive(FbPack, attributes(psio))]
+#[proc_macro_derive(FbPack, attributes(psio, serde))]
 pub fn derive_fb_pack(input: TokenStream) -> TokenStream {
     fb_macro::fb_pack_macro_impl(input)
 }
 
-#[proc_macro_derive(FbUnpack, attributes(psio))]
+#[proc_macro_derive(FbUnpack, attributes(psio, serde))]
 pub fn derive_fb_unpack(input: TokenStream) -> TokenStream {
     fb_macro::fb_unpack_macro_impl(input)
 }
 
-#[proc_macro_derive(FbView, attributes(psio))]
+#[proc_macro_derive(FbView, attributes(psio, serde))]
 pub fn derive_fb_view(input: TokenStream) -> TokenStream {
     fb_macro::fb_view_macro_impl(input)
 }
 
 // ── WIT Canonical ABI derive macros ─────────────────────────────────────
 
-#[proc_macro_derive(WitPack, attributes(psio))]
+#[proc_macro_derive(WitPack, attributes(psio, serde))]
 pub fn derive_wit_pack(input: TokenStream) -> TokenStream {
     wit_macro::wit_pack_macro_impl(input)
 }
 
-#[proc_macro_derive(WitUnpack, attributes(psio))]
+#[proc_macro_derive(WitUnpack, attributes(psio, serde))]
 pub fn derive_wit_unpack(input: TokenStream) -> TokenStream {
     wit_macro::wit_unpack_macro_impl(input)
 }
 
-#[proc_macro_derive(WitView, attributes(psio))]
+#[proc_macro_derive(WitView, attributes(psio, serde))]
 pub fn derive_wit_view(input: TokenStream) -> TokenStream {
     wit_macro::wit_view_macro_impl(input)
 }
 
 // ── Dynamic schema derive macro ────────────────────────────────────────
 
-#[proc_macro_derive(ToDynamicSchema, attributes(psio))]
+#[proc_macro_derive(ToDynamicSchema, attributes(psio, serde))]
 pub fn derive_to_dynamic_schema(input: TokenStream) -> TokenStream {
     dynamic_schema_macro::dynamic_schema_derive_impl(input)
 }

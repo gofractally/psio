@@ -72,7 +72,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let type_attrs = attrs::item(input)?;
+    let type_attrs = attrs::item(input, attrs::Derive::JsonText)?;
     let krate = type_attrs.krate();
     let j = quote!(#krate::json);
     let mut generics = input.generics.clone();
@@ -83,14 +83,21 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let shared = &type_attrs;
     let mut json_string = quote!();
 
+    // A struct's members: its fields without the skipped ones.
+    let members = match &input.data {
+        Data::Struct(data) => attrs::members(&data.fields)?,
+        _ => Vec::new(),
+    };
+    // One unnamed member, the others (if any) skipped: the type is that
+    // member, like a transparent one.
+    let newtype = matches!(&input.data, Data::Struct(data)
+        if matches!(data.fields, Fields::Unnamed(_)) && members.len() == 1);
+
     let (write, read) = match &input.data {
-        Data::Struct(data) if shared.transparent && data.fields.len() == 1 => {
-            let field = data.fields.iter().next().unwrap();
-            let ty = &field.ty;
-            let (member, construct) = match &field.ident {
-                Some(ident) => (quote!(#ident), quote!(Self { #ident: __inner })),
-                None => (quote!(0), quote!(Self(__inner))),
-            };
+        Data::Struct(data) if (shared.transparent || newtype) && members.len() == 1 => {
+            let member = &members[0].member;
+            let ty = &members[0].field.ty;
+            let construct = attrs::construct(quote!(Self), &data.fields, &[quote!(__inner)])?;
             json_string = quote!(const JSON_STRING: bool = <#ty as #j::JsonText>::JSON_STRING;);
             (
                 quote! { <#ty as #j::JsonText>::write_json(&self.#member, w) },
@@ -114,12 +121,19 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 let mut builds = Vec::new();
                 let mut keys = Vec::new();
                 let mut index_arms = Vec::new();
-                for (index, field) in fields.named.iter().enumerate() {
+                let _ = fields;
+                for (index, member) in members.iter().enumerate() {
+                    let field = member.field;
                     let ident = field.ident.as_ref().unwrap();
-                    let key = ident.to_string();
-                    let key = key.strip_prefix("r#").unwrap_or(&key).to_string();
+                    let attrs = &member.attrs;
+                    // The member's name: its identifier, `#[psio(name)]` /
+                    // `#[serde(rename)]`, or the identifier under the
+                    // type's `rename_all` convention.
+                    let key = attrs::member_name(field, attrs, type_attrs.rename_all);
+                    if keys.contains(&key) {
+                        return Err(syn::Error::new_spanned(field, "duplicate member name"));
+                    }
                     let ty = &field.ty;
-                    let attrs = attrs::field(field)?;
                     let json = form_tokens(&j, attrs.forms.json.or(type_attrs.forms.json));
                     let ijson = form_tokens(&j, attrs.forms.ijson.or(type_attrs.forms.ijson));
                     let first = index == 0;
@@ -141,8 +155,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     };
                     arms.push(quote! { #key => #read });
                     index_arms.push(quote! { #index => #read });
+                    let _ = ident;
                     builds.push(quote! {
-                        #ident: match #slot {
+                        match #slot {
                             ::core::option::Option::Some(v) => v,
                             ::core::option::Option::None => match <#ty as #j::JsonText>::json_missing() {
                                 ::core::option::Option::Some(v) => v,
@@ -153,6 +168,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         }
                     });
                 }
+                // A skipped field is its default.
+                let built = attrs::construct(quote!(Self), &data.fields, &builds)?;
                 let count = keys.len();
                 let members = if count > EXPECTED_ORDER_MIN {
                     let lookup = lookup_tokens(&keys, quote!(__key));
@@ -213,22 +230,14 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             #members
                         }
                         r.end_object();
-                        ::core::result::Result::Ok(Self { #(#builds),* })
+                        ::core::result::Result::Ok(#built)
                     },
-                )
-            }
-            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                let ty = &fields.unnamed[0].ty;
-                json_string = quote!(const JSON_STRING: bool = <#ty as #j::JsonText>::JSON_STRING;);
-                (
-                    quote! { <#ty as #j::JsonText>::write_json(&self.0, w) },
-                    quote! { ::core::result::Result::Ok(Self(<#ty as #j::JsonText>::read_json(r)?)) },
                 )
             }
             _ => {
                 return Err(syn::Error::new_spanned(
                     input,
-                    "JsonText supports structs with named fields and single-field tuple structs",
+                    "JsonText supports structs with named fields and tuple structs of one member",
                 ))
             }
         },
@@ -244,9 +253,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 let variants: Vec<_> = shape.declared.iter().map(|v| &v.ident).collect();
                 let mut names: Vec<String> = Vec::new();
                 for variant in &shape.declared {
-                    let label = attrs::variant(variant)?
-                        .name
-                        .unwrap_or_else(|| variant.ident.to_string());
+                    let label = attrs::variant_name(
+                        variant,
+                        &attrs::variant(variant)?,
+                        type_attrs.rename_all,
+                    );
                     // A name must be told apart from a number and from the
                     // "name:number" form.
                     let first = label.bytes().next();
@@ -327,7 +338,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         ));
                     }
                     let ty = &fields.unnamed[0].ty;
-                    let label = attrs::variant(variant)?.name.unwrap_or_else(|| ident.to_string());
+                    let label =
+                        attrs::variant_name(variant, &attrs::variant(variant)?, type_attrs.rename_all);
                     if names.contains(&label) {
                         return Err(syn::Error::new_spanned(variant, "duplicate variant name"));
                     }

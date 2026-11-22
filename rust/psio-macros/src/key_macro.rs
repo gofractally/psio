@@ -32,7 +32,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let shared = crate::attrs::item(input)?;
+    let shared = crate::attrs::item(input, crate::attrs::Derive::Key)?;
     let krate = shared.krate();
     let k = quote!(#krate::key);
     let mut pack_generics = input.generics.clone();
@@ -60,18 +60,17 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
     match &input.data {
         Data::Struct(data) if shared.transparent => {
-            if data.fields.len() != 1 {
+            let members = crate::attrs::members(&data.fields)?;
+            if members.len() != 1 {
                 return Err(syn::Error::new_spanned(
                     &data.fields,
                     "a transparent type has exactly one member",
                 ));
             }
-            let field = data.fields.iter().next().unwrap();
-            let ty = &field.ty;
-            let (member, construct) = match &field.ident {
-                Some(ident) => (quote!(#ident), quote!(Self { #ident: __inner })),
-                None => (quote!(0), quote!(Self(__inner))),
-            };
+            let ty = &members[0].field.ty;
+            let member = &members[0].member;
+            let construct =
+                crate::attrs::construct(quote!(Self), &data.fields, &[quote!(__inner)])?;
             // A transparent wrapper of a composite key is that composite key.
             let composite = match ty {
                 syn::Type::Tuple(_) => quote! {
@@ -108,18 +107,15 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             })
         }
         Data::Struct(data) => {
-            let members: Vec<syn::Member> = match &data.fields {
-                Fields::Named(fields) => fields
-                    .named
-                    .iter()
-                    .map(|f| syn::Member::Named(f.ident.clone().unwrap()))
-                    .collect(),
-                Fields::Unnamed(fields) => {
-                    (0..fields.unnamed.len()).map(|i| syn::Member::Unnamed(i.into())).collect()
-                }
-                Fields::Unit => Vec::new(),
-            };
-            let types: Vec<&syn::Type> = data.fields.iter().map(|f| &f.ty).collect();
+            // The key is that of the members: a skipped field is in no key.
+            let kept = crate::attrs::members(&data.fields)?;
+            let members: Vec<&syn::Member> = kept.iter().map(|m| &m.member).collect();
+            let types: Vec<&syn::Type> = kept.iter().map(|m| &m.field.ty).collect();
+            let unpacked: Vec<TokenStream2> = types
+                .iter()
+                .map(|ty| quote!(<#ty as #k::KeyUnpack>::key_unpack(r)?))
+                .collect();
+            let construct = crate::attrs::construct(quote!(Self), &data.fields, &unpacked)?;
             Ok(quote! {
                 impl #pack_impl #k::KeyPack for #name #ty_generics #where_clause {
                     const FIXED_SIZE: ::core::option::Option<usize> = #k::record_fixed_size(
@@ -140,9 +136,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 impl #unpack_impl #k::KeyUnpack for #name #ty_generics #where_clause {
                     #[allow(unused_variables)]
                     fn key_unpack(r: &mut #k::KeyReader<'_>) -> #k::KeyResult<Self> {
-                        let __value = Self {
-                            #(#members: <#types as #k::KeyUnpack>::key_unpack(r)?,)*
-                        };
+                        let __value = #construct;
                         #check_value
                         ::core::result::Result::Ok(__value)
                     }

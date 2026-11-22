@@ -32,9 +32,9 @@
 //! # Ok::<(), psio::experimental::frac::Error>(())
 //! ```
 //!
-//! The derives read `#[psio(crate = "path")]` and
-//! `#[psio(definition_will_not_change)]` like every PSIO derive, and
-//! `#[frac(skip)]` on a field to leave it out.
+//! The derives read `#[psio(crate = "path")]`,
+//! `#[psio(definition_will_not_change)]` and `#[psio(skip)]` (a field that
+//! is not a member) like every PSIO derive.
 //!
 //! A fixed-size array reference (`&[T; 7]`) converts silently to a slice
 //! (`&[T]`), and the two have different, incompatible encodings.

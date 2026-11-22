@@ -138,7 +138,7 @@ fn unpack_field_tokens(
 
 pub fn wit_pack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("WitPack")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };
@@ -158,7 +158,7 @@ pub fn wit_pack_macro_impl(input: TokenStream) -> TokenStream {
 
 pub fn wit_unpack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("WitUnpack")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };
@@ -783,7 +783,7 @@ fn gen_wit_unpack_enum(
 
 pub fn wit_view_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("WitView")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };

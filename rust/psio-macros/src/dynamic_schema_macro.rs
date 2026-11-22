@@ -63,7 +63,7 @@ pub fn dynamic_schema_derive_impl(input: TokenStream) -> TokenStream {
         }
     };
 
-    let k = match crate::attrs::item(&input) {
+    let k = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("ToDynamicSchema")) {
         Ok(item) => item.krate(),
         Err(err) => return err.to_compile_error().into(),
     };

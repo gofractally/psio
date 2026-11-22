@@ -257,7 +257,7 @@ fn unpack_field_tokens(
 
 pub fn capnp_pack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("CapnpPack")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };
@@ -276,7 +276,7 @@ pub fn capnp_pack_macro_impl(input: TokenStream) -> TokenStream {
 
 pub fn capnp_unpack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("CapnpUnpack")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };
@@ -386,7 +386,7 @@ fn gen_capnp_unpack(
 
 pub fn capnp_view_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input) {
+    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("CapnpView")) {
         Ok(item) => item.krate().into_token_stream(),
         Err(err) => return err.to_compile_error().into(),
     };
