@@ -67,5 +67,8 @@ pub fn registry() -> Registry {
     reg!(Vec<Name>, Option<Name>, Vec<Level>, [Level; 2], Vec<DerKey>, Option<DerKey>);
     reg!(NameOrRange, Vec<Endpoint>);
     reg!(BTreeMap<Tag, u32>, BTreeMap<Name, Range>, BTreeSet<Level>, Nested<Range>);
+    // Bounds below the member, and method argument tuples.
+    reg!(WrapTags, AnnTags, AnnRawTags, AnnGrid, AnnOpt, AnnArr, AnnMap, AnnSet, AnnTup, AnnVar);
+    reg!(TransferArgs, BatchArgs, TransferCapped, TransferCapped2, NoteCapped);
     r
 }

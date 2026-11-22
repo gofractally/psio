@@ -57,6 +57,7 @@ macro_rules! variant {
     };
 }
 variant!(V2<A, B>);
+variant!(V3<A, B, C>);
 variant!(V5<A, B, C, D, E>);
 
 rec!(Scalars { t: bool, a: u8, b: u16, c: u32, d: u64, e: i8, f: i16, g: i32, h: i64, x: f32, y: f64 });
@@ -238,3 +239,39 @@ rec!(AssocLists {
     names: Option<Vec<(u32, Raw)>>, limited: BoundedList<(u8, u8), 2>, groups: Vec<Vec<i32>>,
 });
 
+
+// Bounds below the member (docs/pssz-spec.md 3.5). `WrapTags` states them
+// with wrapper types, as its C++ counterpart does; the `Ann*` records are
+// the same shapes, which C++ declares by member annotations.
+rec!(WrapTags { tags: BoundedList<BoundedString<16>, 8> });
+rec!(AnnTags { tags: BoundedList<BoundedString<16>, 8> });
+rec!(AnnRawTags { tags: BoundedList<BoundedRawString<16>, 8> });
+rec!(AnnGrid { rows: BoundedList<BoundedList<u16, 4>, 3> });
+rec!(AnnOpt { names: Option<BoundedList<BoundedString<16>, 2>> });
+rec!(AnnArr { names: [BoundedString<16>; 3] });
+rec!(AnnMap { m: BoundedMap<BoundedString<16>, BoundedList<u32, 2>, 4> });
+rec!(AnnSet { s: BoundedSet<BoundedString<16>, 4> });
+rec!(AnnTup { t: (BoundedString<16>, u32, BoundedList<u8, 5>), p: (BoundedString<16>, BoundedString<16>) });
+rec!(AnnVar { v: V3<u32, BoundedString<16>, BoundedList<BoundedString<16>, 2>> });
+
+// Method argument tuples (docs/pssz-spec.md 16). Without a cap the tuple of
+// the bounded parameters; with one, the positional record of the
+// parameters under `maxDynamicData`, whose id is the tuple's with the cap.
+pub type TransferArgs = (BoundedString<16>, u64, BoundedString<80>);
+pub type BatchArgs = (BoundedList<BoundedRawString<8>, 4>, Option<u32>);
+macro_rules! capped_args {
+    ($name:ident, $cap:literal { $($f:ident : $t:ty),* }) => {
+        #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+        #[pssz(max_dynamic_data = $cap)]
+        pub struct $name { $(pub $f: $t),* }
+        impl Conf for $name {
+            fn id() -> String {
+                let parts: Vec<String> = vec![$(<$t as Conf>::id()),*];
+                format!("tuple<{}>@cap={}", parts.join(","), $cap)
+            }
+        }
+    };
+}
+capped_args!(TransferCapped, 256 { to: BoundedString<16>, amount: u64, memo: BoundedString<80> });
+capped_args!(TransferCapped2, 256 { to: BoundedString<16>, amount: u64, memo: BoundedString<80>, fee: Option<u32> });
+capped_args!(NoteCapped, 64 { text: Raw });

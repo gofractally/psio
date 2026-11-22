@@ -126,10 +126,12 @@ fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
     for (class, count) in [
         ("nested", 252), ("nested-unknown", 20), ("nested-deferred", 24), ("map-set", 266),
         ("map-set-order", 352), ("transparent", 160), ("custom", 116), ("invariant", 128),
+        ("annotated-bounds", 148), ("method-args", 62), ("string-raw-non-utf8", 48),
     ] {
         assert_eq!(classes.get(class), Some(&count), "{class}");
     }
-    assert_eq!(fixture.vectors.len(), 6589);
+    assert_eq!(fixture.vectors.len(), 6803);
+    assert_eq!(fixture.types.len(), 323);
     // Every invariant rejection carries the invariant's own message, and
     // every order rejection the order rule's: compared word for word above.
     let shared: Vec<_> = fixture.vectors.iter().filter(|v| v.reason_is_shared() && v.expect == "reject").collect();

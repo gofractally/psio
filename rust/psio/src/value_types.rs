@@ -78,7 +78,7 @@ impl<const MAX_N: usize> Bitlist<MAX_N> {
 // Wire format is byte-identical to `Vec<T>` / `String` — the bound is a
 // Rust-side schema invariant, enforced on decode.
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BoundedList<T, const N: usize>(pub Vec<T>);
 
 impl<T, const N: usize> BoundedList<T, N> {
@@ -93,7 +93,7 @@ impl<T, const N: usize> BoundedList<T, N> {
     pub fn is_empty(&self) -> bool { self.0.is_empty() }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct BoundedString<const N: usize>(pub String);
 
 impl<const N: usize> BoundedString<N> {
