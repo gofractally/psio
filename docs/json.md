@@ -66,7 +66,10 @@ Common to both formats:
 - record: object with the member names, in declaration order;
 - `std::vector` / `std::array` / `psio::bounded` / `Vec` / `[T; N]`: array;
 - `std::tuple` / Rust tuple: array of the elements in order; the empty tuple
-  is `[]`. `std::pair` is not supported (no other PSIO format supports it);
+  is `[]`. A `std::pair` is the 2-tuple: `[a, b]`;
+- set: array of the elements; map: an object when its key type's text is a
+  string by type, else an array of `[key, value]` pairs — see "Maps and
+  sets" below;
 - optional: `null` or the value;
 - strings: C++ `utf8_string<N>` / Rust `String` and the raw strings C++
   `std::string` / Rust `RawString` are JSON strings;
@@ -115,12 +118,59 @@ and through a schema; in Rust only when the enum has a catch-all variant
 (`#[pssz(other)] Unknown(i32)`), otherwise it is an error. When two
 enumerators share a value, the first declared name is written.
 
+### Maps and sets
+
+A set is an **array** of its elements. A map is an **object** when the text
+of its key type is a JSON string *by type*, and an **array of `[key, value]`
+pairs** otherwise. The rule is the same in `json` and `ijson`.
+
+| key type | map text |
+|---|---|
+| a string kind: C++ `std::string`, `utf8_string<N>`; Rust `String`, `RawString`, bounded strings; Schema IR `string` / `utf8` | `{"apple":1,"pear":3}` |
+| a type with a custom text form: C++ `text_category` adapter, Rust `TextForm`, a schema `Custom` presented by its handler | `{"alice":5,"bob":7}` |
+| anything else — integers, enums, time values, byte sequences, tuples, records, floats, ... | `[[1,"one"],[256,"x"]]` |
+
+A key that merely *happens* to be written as a string (an enumerator name, a
+time point, a 64-bit integer above 2^53 under `ijson`, hex bytes) is not an
+object key: the form of a map depends on the key type alone, never on the
+values.
+
+- **Writers** emit the entries in canonical order: ascending key bytes of
+  the key (`docs/pssz-spec.md` §5.8), the order of the binary form. That is
+  not the order of the key texts (`{"9.5":…,"10.0":…}` for a version key
+  `major.minor`; an account-name key orders by its number). A value with two
+  entries of equal key bytes has no text (`json: map has duplicate keys` /
+  `json: set has duplicate elements`).
+- **Readers** accept the entries in any order, and reject a repeated key or
+  element (`json: duplicate map key`, `json: duplicate set element`).
+  Unlike a record's member names, where a repeated name is read again and
+  the last one wins, a map's keys are data (and RFC 7493 forbids duplicate
+  names). Two keys are the same when their key bytes are equal, whatever
+  their texts: `[["5","a"],[5,"b"]]` under `ijson`, `[["red",1],[0,2]]` for
+  an enum key, `{"a":1,"a":2}` and `[0.0,-0.0]` are all duplicates.
+- An object key is read exactly as the same text would be read as a string
+  of the key type: I-JSON refuses a noncharacter, a `utf8_string<N>` key its
+  bound, a custom text form its own `validate`.
+- The entries of the pairs form are tuples: `[k, v]` with exactly two
+  elements. An object where the pairs form is expected, or the reverse, is
+  an error.
+- A set of bytes (`set<u8>`) is an array of numbers in both formats: a set
+  is not a byte string.
+- A map or set is one nesting level (64 at most), like any array or object.
+- A member's integer form (`json_string`, `ijson_number`, ...) reaches the
+  elements of a set, as it reaches the elements of a list. The key and the
+  value of a map entry take the natural form: an entry is a tuple.
+- A C++ container whose comparator or equality merges keys the encoding
+  distinguishes cannot hold what was read: `decode` reports `json: map
+  container merged distinct keys`.
+
 ### Variant alternative names
 
 C++ uses `get_type_name` of the alternative: a record's reflected name, and
 `bool int8 uint8 int16 uint16 int32 uint32 int64 uint64 float32 double
 string` for primitives, `T[]` for a vector, `T[N]` for an array, `T?` for an
-optional, `tuple_A_B`. Alternatives must have distinct names (checked at
+optional, `tuple_A_B` (also for a `std::pair<A, B>`), `map_K_V` for a map and
+`set_K` for a set (whatever container holds them). Alternatives must have distinct names (checked at
 compile time). In Rust the name is the enum variant's identifier unless
 `#[json(name = "uint32")]` renames it; use that to pair with a C++ variant.
 
@@ -243,7 +293,8 @@ A bounded wrapper (C++ `psio::bounded<T, N>`, `utf8_string<N>`; Rust
 annotated `length_bound{.max/.exact/.min}` (looking through `optional`) are
 enforced on both sides: the reader rejects a string or list outside its
 bound (`validate`, `decode_json_checked`, `decode`), and the writer refuses
-to produce one. The count is bytes for a string and elements for a list.
+to produce one. The count is bytes for a string, elements for a list or
+set, and entries for a map.
 
 ## Writing can fail
 
@@ -599,9 +650,33 @@ point, `major.minor` over a record — is, in the Schema IR, the existing
 `Custom` node: `Custom { type: <the wire type>, id: "<presentation>" }`.
 The wire type says exactly what the bytes are; the id names how the value
 reads as text. (The ids PSIO itself gives a binary meaning to — `bool`,
-`char`, `string`, `utf8`, `hex`, `bitvector`, `bitlist`, `box` — are fixed;
-every other id is a text presentation and never changes the bytes, the
-widths or validation.)
+`char`, `string`, `utf8`, `hex`, `bitvector`, `bitlist`, `map`, `set`, `box`
+— are fixed; every other id is a text presentation and never changes the
+bytes, the widths or validation.)
+
+**Maps and sets.** `Custom{ List{ Tuple{[K, V]} }, "map" }` and
+`Custom{ List{ K }, "set" }` (`BoundedList` in place of `List` under a
+maximum count) are a map and a set: the list's entries are in strictly
+ascending key order, which the schema-driven codecs check on every read and
+produce on every write (a dynamic map value is the sequence of its
+`[key, value]` entries, in any order when handed to an encoder). They take no
+handler. Their text is that of "Maps and sets" above, decided from the key
+type's node: an object when it is a `string` / `utf8` node, or a custom
+presentation **whose handler is registered** (the key text is the handler's);
+the pairs form otherwise. A custom presentation with no handler falls back,
+as everywhere, to the plain form of its wire type — and the map's form
+follows it: an account-keyed map is `{"alice":5}` with the account handler
+and `[[235814801429757952,5]]` without. A strict registry
+(`require_all`) makes the missing handler an error instead.
+
+Malformed schemas, refused by every schema-driven entry point in every
+language (`schema_rejects` rows of the JSON fixture): `map` anywhere but
+directly on a `List` / `BoundedList` whose element is (an alias of) a `Tuple`
+of exactly two members; `set` anywhere but directly on a `List` /
+`BoundedList`; a key type with no key encoding (`bitlist`, a one-bit
+integer, a boxed type — `docs/key-spec.md`). "Directly" allows named
+aliases and nothing else: not a `box`, an `Option`, a presentation or
+another adapter in between.
 
 **Built-in presentations.** The time ids (`time-point-<unit>`,
 `duration-<unit>`, `monotonic-<unit>`, `docs/time.md`) are presentations
@@ -633,7 +708,8 @@ type") instead of the fallback. With a handler registered the presentation
 is exactly its text: the plain form is not also accepted.
 
 The JSON fixture records, for every value of a type holding a custom form
-(`Version`, `Release`, `Account`, `Transfer`), the typed text (`json`,
+(`Version`, `Release`, `Account`, `Transfer`, and the maps keyed by one:
+`map<Account,u64>`, `map<Version,string>`, `Registry`), the typed text (`json`,
 `ijson`) and the fallback text (`plain_json`, `plain_ijson`); all three
 languages reproduce both from the bytes, and the bytes from both.
 

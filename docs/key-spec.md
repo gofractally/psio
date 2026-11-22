@@ -36,11 +36,20 @@ concatenation of the elements, compared lexicographically.
 | fixed array `[T; N]`, byte array | the N element keys concatenated, no framing |
 | bitvector<N> | its `(N+7)/8` bytes (equality only: bit 0 is the low bit of byte 0) |
 | variant | one byte: the alternative's index; then key(alternative) |
-| tuple, record | the element / field keys concatenated in order. `tuple<>` and an empty record are zero bytes |
+| tuple, pair, record | the element / field keys concatenated in order. `tuple<>` and an empty record are zero bytes. A pair (C++ `std::pair`) is the 2-tuple |
+| map, set (`docs/pssz-spec.md` §5.8) | the key of the list of its entries / elements **in ascending key order**: `01` + key(k) + key(v) per entry, then `00`; for a set `01` + key(element) per element, then `00`; and the octet framing for a set of octets. So `set<u8>` has the key of the sorted `vector<u8>`, and maps order lexicographically by their sorted entries |
 | boxed value, custom-presented value (Schema IR `Custom` ids that are not part of the binary form) | the key of the inner type |
 
-Not key types (compile errors in C++): `std::pair` (not a PSIO value in any
-format — use a tuple), `bitlist`. A variant has at most 256 alternatives.
+Not key types (compile errors in C++): `bitlist`, and the containers that are
+not PSIO values (`std::multimap`, `std::multiset` and their unordered
+forms). A variant has at most 256 alternatives.
+
+**Keys order maps and sets.** The entries of a map and the elements of a set
+are ordered, in every format, by the bytes this document defines for their
+key type, and two entries are duplicates when those bytes are equal
+(`docs/pssz-spec.md` §5.8). The key type of a map must therefore be a key
+type by the table above — not one that supplies its own bytes (below): its
+order would not be visible in the schema.
 
 **Custom types** provide their own bytes: C++ registers a
 `sortable_binary_category` adapter (`PSIO_ADAPTER`), Rust implements the key
@@ -60,7 +69,8 @@ the one-NUL string (`00 01 00 00`) are all distinct.
 The key of `tuple<A, B>` is a byte-prefix of the key of `tuple<A, B, C>` for
 equal `A`, `B`; tuple keys order lexicographically by element, including when
 a variable-length element is followed by more elements. A record's key is the
-key of the tuple of its fields; reflected methods are not part of it.
+key of the tuple of its fields; reflected methods are not part of it. A pair
+is a composite key of two elements.
 
 A database layer needs three operations; each implementation provides them:
 
@@ -101,6 +111,24 @@ are `00 01`, strings and lists are terminated, bounded types are within
 bounds (a bounded type's own bound, and a record member's declared length
 bound — C++ `length_bound`, Schema IR `lengthBound` — exactly as in PSSZ),
 UTF-8 string types hold UTF-8, a variant index is in range, unused
-bitvector bits are zero, a float is not the image of `-0`, and nothing
-trails. `decode` runs the same checks and fails on anything `validate`
+bitvector bits are zero, a float is not the image of `-0`, the entries of a
+map and the elements of a set are strictly ascending (`key: map entries are
+not in strictly ascending key order` / `key: set elements are not in
+strictly ascending order`), and nothing trails. `decode` runs the same checks and fails on anything `validate`
 rejects; it never reads out of bounds.
+
+Encoding a map or set writes the ascending order whatever the container's
+own order is, and fails on two entries with equal key bytes (`-0` and `+0`
+held apart by a custom comparator).
+
+## 6. Keys from a schema
+
+A reader that has only the Schema IR encodes the key of a dynamic value with
+C++ `psio::pssz_ir::to_key(schema, root, value, out)` (Rust
+`psio::pssz::dynamic`, JS `type.encodeKey`): the bytes of the table above for
+the type the schema describes. The value is checked against the schema
+first; the entries of a map / set may be given in any order. This is the
+encoder the schema-driven codecs use to check and produce the order of maps
+and sets. Two things the schema does not carry: a C++ / Rust type's own key
+adapter (the key is that of its wire type), and whether an 8-bit integer
+list element was an enum without names (it is an octet).

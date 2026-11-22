@@ -103,11 +103,20 @@ raw_string<=N       std::string member with length_bound max N
 list<T>             std::vector<T>
 list<T><=N          std::vector<T> member with length_bound max N
 array<T,N>  optional<T>  variant<A,B,...>  tuple<A,B,...>  box<T>
+map<K,V>            entries in ascending key order (C++ std::map / std::unordered_map,
+                    Rust BTreeMap / HashMap); on the wire list<tuple<K,V>>
+set<K>              elements in ascending key order (C++ std::set / std::unordered_set,
+                    Rust BTreeSet / HashSet); on the wire list<K>
+map<K,V><=N  set<K><=N   map / set member with length_bound max N (entries)
 bitvector<N>  bitlist<N>
 enum<u8>{A=0,B=1}   enumerator names and values
 record{name:T,...}  extensible record       dwnc{name:T,...}  definition_will_not_change
 record{...}@cap=N   explicit maxDynamicData
 ```
+
+A `std::pair<A,B>` is the tuple and has the tuple's shape and id
+(`tuple<u16,raw_string>` is a `std::pair` in the C++ fixture types). The
+container holding a map or set is not part of its shape.
 
 A nested record or enum is referred to by its id; every id referred to is in
 `types`. Field names are part of the shape. `<=N` on a `raw_string` or `list`
@@ -115,7 +124,7 @@ exists only for record members.
 
 ## Classes
 
-204 types, 5167 vectors.
+244 types, 5817 vectors.
 
 | class | vectors | contents |
 |---|---|---|
@@ -133,11 +142,13 @@ exists only for record members.
 | `enum-unknown-value` | 36 | A value that names no enumerator: structurally valid (spec §4.5), accepted in every entry point. C++ enums hold it; the Rust mirror types take it in their `#[pssz(other)]` catch-all variant (a Rust enum without one rejects it, which Rust's own tests pin). |
 | `string` | 308 | UTF-8 and bound rules for `string`, `string<=N`, `raw_string`. |
 | `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`: valid PSSZ, recorded as `canonical`, for the typed codecs and for the schema-driven ones alike (the IR tells a raw string, Custom `string`, from a UTF-8 one, Custom `utf8`). The one exception is C++ `validate_strict`, which checks every plain string. Such a value has no JSON / I-JSON text: writing it is an error in every language. |
-| `length-bound-overflow` | 28 | Frames exceeding a member `length_bound`, as a writer that skips the bound check would produce them. Every reader rejects them; the C++ and Rust encoders refuse the values. |
+| `length-bound-overflow` | 32 | Frames exceeding a member `length_bound`, as a writer that skips the bound check would produce them. Every reader rejects them; the C++ and Rust encoders refuse the values. |
 | `box` | 100 | Boxed values (`box<T>`: C++ / Rust `Box<T>`). The bytes are T's; a box gives its container no inferred size bound, so `BoxRec` uses 4-byte offsets where `BDirect` uses 1. The IR records the box (Custom `box`) and a schema-only reader derives the same widths. |
 | `bytes` | 88 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. |
 | `zero-fixed` | 100 | Zero-field and all-fixed records and their containers. |
 | `depth` | 28 | Node depth 63 / 64 accepted, 65+ rejected (`kMaxValidationDepth` = 64). |
+| `map-set` | 234 | Pairs, maps and sets (`docs/pssz-spec.md` §5.8), all `canonical`. Every map / set value appears twice with the same bytes: read as the map / set (`type` = `writer`) and read as the list it is (`type` = the list, `writer` = the map / set), so each language checks that its encoder writes the bytes of the sorted list. Keys: strings, integers (numeric order, not wire-byte order), signed integers, tuples, records, floats including NaNs and `-0`; values: scalars, lists, records, nested maps and sets; an optional set, a map as a variant alternative, maps / sets / a pair as record members (`AssocRec`, whose list spelling is `AssocLists`). |
+| `map-set-order` | 312 | Lists that are **not** strictly ascending by key — swapped entries, a repeated key, a repeated key with another value, `+0` with `-0`, a NaN out of place, at the top level and nested in records, optionals, lists, variants and maps. Each appears twice: `reject` as the map / set (`reason`: `pssz: map entries are not in strictly ascending key order` or `pssz: set elements are not in strictly ascending order`) and `canonical` as the list type (`writer`). Encoders cannot produce these frames from a map / set. |
 
 Evolution vector names carry the lineage and its automatic width
 (`w4-fixed-string-vector`, `w1-capped`, `w2-capped`, `w1-inferred`, ...) and

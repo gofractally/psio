@@ -51,6 +51,18 @@ to rewrite a record must reject `has_unknown` or preserve/rewrite it through a
 suitable newer schema; blindly re-encoding the older typed value loses data.
 Output and unknown flag remain unchanged on any failure.
 
+**Maps and sets.** `Custom{List{Tuple{[K, V]}}, "map"}` and
+`Custom{List{K}, "set"}` (`docs/pssz-spec.md` §5.8) are lists whose entries
+are in strictly ascending order of the `key` encoding of K. A dynamic map
+value is a `Sequence` of entries, each a `Sequence{key, value}`; a set value
+is the `Sequence` of its elements. `encode` sorts the entries (a value built
+in any order encodes to the one canonical frame) and refuses two entries with
+equal key bytes; `decode_*` / `validate_auto` reject a frame whose entries
+are not strictly ascending and return them in wire order. `metadata` refuses
+a `map` / `set` node of the wrong shape or with a key type that has no key
+encoding. `to_key(schema, root, value, out)` is the key encoder over dynamic
+values that this uses, exposed for callers (`docs/key-spec.md` §6).
+
 The node budget matches Rust: root 0, node 64 accepted, node 65 rejected;
 present record/tuple fields, sequence items, Some payloads and variant payloads
 add one. Pruned/synthesized trailing None adds no child. String is atomic;

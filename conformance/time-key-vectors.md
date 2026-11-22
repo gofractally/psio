@@ -20,7 +20,7 @@ All byte strings are lower-case hex. A value is identified by its PSSZ
 
 | kind | fields | meaning |
 |---|---|---|
-| `value` | `type`, `pssz`, `key`, `json`?, `ijson`? | the value encodes to `key`; to `json` / `ijson`, which read back as the value. `json` and `ijson` are absent when the value has no text (a time point outside years 0000..9999, a NaN): writing text must fail. A NaN value is identified by its bits: the key decodes to a value with the same PSSZ bytes |
+| `value` | `type`, `pssz`, `key`, `json`?, `ijson`? | the value encodes to `key` (also through a schema-driven key encoder, from `schema_ir` and `pssz` alone); to `json` / `ijson`, which read back as the value. `json` and `ijson` are absent when the value has no text (a time point outside years 0000..9999, a NaN): writing text must fail. A NaN value is identified by its bits: the key decodes to a value with the same PSSZ bytes |
 | `text-accept` | `type`, `text`, `pssz`, `json` | the JSON document `text` reads, under json and under ijson, as the value `pssz`; `json` is that value's canonical text |
 | `text-reject` | `type`, `text` | `text` is rejected under json and under ijson |
 | `key-reject` | `type`, `key` | the bytes are not a key of `type` |
@@ -35,6 +35,20 @@ signed; `time_point<seconds,u32>`, `duration<60/1,i32>` and
 time point (Schema IR id `monotonic-<unit>`): its text is the tick count.
 `Timer` is `{expires: monotonic<micros>, started:
 optional<monotonic<seconds>>, laps: list<monotonic<millis,u32>>}`.
+`pair<u32,string>` is the 2-tuple (a C++ `std::pair`): same bytes, key, text
+and prefixes as `tuple<u32,string>`. `map<K,V>` / `set<K>` are maps and sets
+(`docs/pssz-spec.md` §5.8): `map<string,u32>`, `map<tuple<u8,string>,list<i16>>`,
+`map<string,map<u8,set<string>>>`, `set<u8>` (octet framing in key),
+`set<string>`, `set<i64>`, `set<f64>` and the composite
+`tuple<map<u16,string>,u8>`. Their `value` rows hold the entries in ascending
+key order in `pssz` and `key` (the key of a map is the key of the list of its
+entries); `json` is an object for a string key and an array of `[k, v]` pairs
+otherwise; `text-accept` rows give the entries in another order;
+`text-reject` rows repeat a key or element; `key-reject` rows named
+`not_ascending_<n>` are keys of lists that are out of order or repeat a key
+(for `set<f64>`: `+0` with `-0`, a NaN out of place); `key-order` rows order
+whole maps / sets (lexicographically by sorted entries); the `set<f64>` NaN
+rows are `key-order-bits` and text-less `value` rows.
 `Stamps` is a fixed-layout record `{created: time_point<seconds>, updated:
 time_point<micros>, ttl: duration<millis>, legacy: time_point<seconds,u32>}`;
 `Event` is `{name: string, at: time_point<millis>, precise:

@@ -101,6 +101,9 @@ shape.
 | enum with `PSIO_REFLECT_ENUM` | Enum of the listed names (a value without a name is a field error). An enum without names is its integer |
 | `std::tuple` of one element type | List |
 | any other `std::tuple` | Object `Tuple_<A>_<B>…` with fields `_0`, `_1`, … |
+| `std::pair<A, B>` | the tuple `std::tuple<A, B>`: a List when `A` and `B` are one type, else the Object `Tuple_<A>_<B>` |
+| `std::set`, `std::unordered_set` | List of the elements, in the container's iteration order |
+| `std::map`, `std::unordered_map` | List of its entries, each the pair `(key, value)`: `[Tuple_<K>_<V>!]!` with fields `_0` (key) and `_1` (value). Through a `psio::view` the entries come in wire (ascending key) order |
 | `bool` | `Boolean` |
 | integers of at most 32 bits | `Int` |
 | `float`, `double` | `Float` |
