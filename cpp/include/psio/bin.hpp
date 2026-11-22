@@ -296,7 +296,6 @@ namespace psio {
          }
          else if constexpr (is_std_array<T>::value)
          {
-            using E = typename T::value_type;
             // Fully-fixed array short-circuits via the top guard.
             std::size_t total = 0;
             for (const auto& x : v)

@@ -28,8 +28,9 @@
 // running out of memory while reporting an error is unrecoverable
 // either way.
 //
-// `[[nodiscard]]` at the class level + -Werror=unused-result keeps
-// the "did you check the status?" invariant.
+// `[[nodiscard]]` at the class level keeps the "did you check the
+// status?" invariant: a dropped status is a -Wunused-result warning in any
+// consumer, and an error (-Werror=unused-result) in psio's own targets.
 
 #include <cstdint>
 #include <cstdlib>

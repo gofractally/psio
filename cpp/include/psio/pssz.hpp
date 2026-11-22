@@ -893,7 +893,6 @@ namespace psio {
             return fixed_size_of<T>();
          else if constexpr (is_std_array_v<T>)
          {
-            using E                 = typename T::value_type;
             constexpr std::size_t N = std::tuple_size<T>::value;
             std::size_t           total = checked_multiply(N, W, check);
             if constexpr (N > 0) (void)checked_offset<W>(total, check);

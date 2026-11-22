@@ -113,7 +113,7 @@ namespace psio {
       std::string                name;
       // negative = wit_prim, non-negative = index into types[]
       std::int32_t               type_idx = 0;
-      std::vector<wit_attribute> attributes;
+      std::vector<wit_attribute> attributes = {};
    };
    PSIO_REFLECT(wit_named_type, name, type_idx, attributes)
 
@@ -165,7 +165,7 @@ namespace psio {
       std::string                name;
       std::vector<std::uint32_t> type_idxs;
       std::vector<std::uint32_t> func_idxs;
-      std::vector<wit_attribute> attributes;
+      std::vector<wit_attribute> attributes = {};
    };
    PSIO_REFLECT(wit_interface, name, type_idxs, func_idxs, attributes)
 

@@ -689,7 +689,7 @@ template <JsonCursor C> class Reader
    }
 
    bool sequence(const Box<AnyType> &element, std::optional<std::uint64_t> limit, bool exact,
-                 int_form form, std::size_t n, Value &out)
+                 int_form form, [[maybe_unused]] std::size_t n, Value &out)
    {
       if (!element.get())
          return c.fail("pssz IR: null schema box");
@@ -860,7 +860,7 @@ template <JsonCursor C> class Reader
       return true;
    }
 
-   bool record(const std::vector<Member> &members, std::size_t n, Value &out)
+   bool record(const std::vector<Member> &members, [[maybe_unused]] std::size_t n, Value &out)
    {
       if (!c.begin_object())
          return false;
@@ -918,7 +918,7 @@ template <JsonCursor C> class Reader
       return true;
    }
 
-   bool variant(const schema_types::Variant &type, std::size_t n, Value &out)
+   bool variant(const schema_types::Variant &type, [[maybe_unused]] std::size_t n, Value &out)
    {
       std::size_t index = type.members.size();
       Value payload;

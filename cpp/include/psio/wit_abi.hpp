@@ -534,7 +534,6 @@ namespace psio {
             return 0;
          }
          else if constexpr (is_std_optional_ct<U>::value) {
-            using E = typename optional_elem_ct<U>::type;
             if (value.has_value())
                packed_size_field(*value, bump);
             return 0;
@@ -691,7 +690,6 @@ namespace psio {
          }
          else if constexpr (is_std_expected_ct<U>::value) {
             using V = typename expected_value_ct<U>::type;
-            using Err = typename expected_error_ct<U>::type;
             constexpr uint32_t a = wit_abi_align_impl<U>();
             constexpr uint32_t po = (1 + a - 1) & ~(a - 1);
             if (value.has_value()) {

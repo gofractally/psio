@@ -143,6 +143,23 @@ Open issue:
 [`psio-standalone-dependencies.md`](../../.issues/psio-standalone-dependencies.md)
 ("Nice-to-have").
 
+### 6d. What psio puts on a consumer's compile line
+
+Linking `psio` adds exactly: the include directories, C++23, the
+`PSIO_HAVE_SIMDJSON` / `PSIO_EXCEPTIONS_ENABLED` definitions, and its
+dependencies' usage requirements. It adds **no warning flags**.
+
+`psio::codec_status` is `[[nodiscard]]`, so a consumer that drops a status
+gets the compiler's `-Wunused-result` warning and chooses its own
+`-Werror` policy. `-Werror=unused-result` is set on psio's own targets
+only (the library, its tests, benchmarks, tools and conformance drivers).
+
+psio's public headers are warning-free under clang `-Wall -Wextra` when
+included as a plain `-I` directory (not `SYSTEM`), with the core codecs
+instantiated: the ctest target `psio_warnings_check`
+(`cpp/tests/warnings_check.cpp`) compiles every public header that way
+with `-Werror`.
+
 ## 7. License posture
 
 Every vendored file carries the upstream license verbatim:

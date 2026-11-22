@@ -1133,11 +1133,6 @@ namespace psio {
          std::uint8_t recoff_w_code = width_code_for(running);
          std::size_t recoff_w = width_bytes(recoff_w_code);
 
-         // Compute total keys area size + write shared schema.
-         std::uint32_t keys_area_size = 0;
-         for (std::size_t j = 0; j < K; ++j)
-            keys_area_size += static_cast<std::uint32_t>(
-                first[j].first.size());
 
          // Layout positions, written front-to-back:
          //   tag(1) width(1) K(varuint) keyslots(4K) hash(K) keys(...)

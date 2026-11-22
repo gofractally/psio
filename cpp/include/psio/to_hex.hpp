@@ -13,9 +13,11 @@
 
 namespace psio {
 
+   // (`psio::hex` is the hex presentation tag of annotate.hpp; the
+   // conversion functions are all named to_hex / from_hex.)
    template <typename SrcIt, typename DestIt>
-   void hex(SrcIt begin, SrcIt end, DestIt dest,
-            std::optional<char> delimiter = std::nullopt)
+   void to_hex(SrcIt begin, SrcIt end, DestIt dest,
+               std::optional<char> delimiter = std::nullopt)
    {
       auto nibble = [&dest](std::uint8_t i) {
          if (i <= 9)
@@ -38,22 +40,22 @@ namespace psio {
    }
 
    template <typename SrcIt>
-   std::string hex(SrcIt begin, SrcIt end,
-                   std::optional<char> delimiter = std::nullopt)
+   std::string to_hex(SrcIt begin, SrcIt end,
+                      std::optional<char> delimiter = std::nullopt)
    {
       std::string s;
       std::size_t size = (end - begin) * 2;
       if (delimiter && begin != end)
          size += (end - begin - 1);
       s.reserve(size);
-      hex(begin, end, std::back_inserter(s), delimiter);
+      to_hex(begin, end, std::back_inserter(s), delimiter);
       return s;
    }
 
    inline std::string to_hex(const std::span<const char>& bytes,
                              std::optional<char> delimiter = std::nullopt)
    {
-      return hex(bytes.begin(), bytes.end(), delimiter);
+      return to_hex(bytes.begin(), bytes.end(), delimiter);
    }
 
    inline bool from_hex(std::string_view h, std::vector<char>& bytes)

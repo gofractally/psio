@@ -109,8 +109,14 @@ else()
    target_compile_definitions(psio PUBLIC PSIO_EXCEPTIONS_ENABLED=0)
 endif()
 
-# Phase 4 will make this required for all v3 library code.
-target_compile_options(psio INTERFACE -Werror=unused-result)
+# A dropped codec_status is an error in PSIO's own code: the option is set on
+# PSIO's targets (the library, and everything declared below: tests,
+# benchmarks, tools, conformance), never on the interface. A consumer's
+# targets are compiled with the consumer's flags; `codec_status` is
+# [[nodiscard]] (psio/error.hpp), so a consumer that drops one still gets
+# the compiler's -Wunused-result warning and decides its own -Werror.
+target_compile_options(psio PRIVATE -Werror=unused-result)
+add_compile_options(-Werror=unused-result)
 
 # Build-gated components ------------------------------------------------------
 

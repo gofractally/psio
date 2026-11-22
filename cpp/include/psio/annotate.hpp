@@ -221,9 +221,11 @@ namespace psio {
                                       BitfieldShape,
                                       FixedSequenceShape>;
 
-      std::optional<std::uint32_t> exact;
-      std::optional<std::uint32_t> max;
-      std::optional<std::uint32_t> min;
+      // Default member initializers: `length_bound{.max = N}` names one
+      // field and is complete (no -Wmissing-designated-field-initializers).
+      std::optional<std::uint32_t> exact = std::nullopt;
+      std::optional<std::uint32_t> max   = std::nullopt;
+      std::optional<std::uint32_t> min   = std::nullopt;
 
       // Used by the conflict-checker in effective_annotations.
       constexpr bool operator==(const length_bound&) const = default;

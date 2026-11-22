@@ -194,7 +194,7 @@ namespace psio {
       void skip(std::int32_t s)
       {
          if ((s >= 0 && static_cast<std::uint32_t>(s) > remaining()) ||
-             (s < 0 && -static_cast<std::int64_t>(s) > consumed()))
+             (s < 0 && static_cast<std::size_t>(-static_cast<std::int64_t>(s)) > consumed()))
             overrun();
          pos += s;
       }

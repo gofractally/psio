@@ -105,7 +105,7 @@ namespace psio::schema_types
    struct Attribute
    {
       std::string                name;
-      std::optional<std::string> value;
+      std::optional<std::string> value = std::nullopt;
       friend bool                operator==(const Attribute&,
                                             const Attribute&) = default;
    };

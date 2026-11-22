@@ -1155,7 +1155,7 @@ namespace psio {
 
       template <std::size_t W, typename T, std::size_t N>
       std::array<T, N> decode_array(std::span<const char> src, std::size_t pos,
-                                    std::size_t end)
+                                    [[maybe_unused]] std::size_t end)
       {
          std::array<T, N> out{};
          std::size_t      cursor = pos;

@@ -340,7 +340,6 @@ inline std::string number_to_name(uint64_t input)
    code_value high  = detail_name::name_model::MAX_CODE;
    code_value low   = 0;
    code_value value = 0;
-   int        count = 0;
    for (int i = 0; (i < detail_name::name_model::code_value_bits) and not_eof; i++)
    {
       value <<= 1;
@@ -349,7 +348,6 @@ inline std::string number_to_name(uint64_t input)
    while (not_eof)
    {
       code_value range = high - low + 1;
-      ++count;
 
       if (range == 0)
          return "RUNTIME LOGIC ERROR";
