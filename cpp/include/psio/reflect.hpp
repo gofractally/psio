@@ -972,3 +972,141 @@ namespace psio {
    };                                                                                    \
    static_assert(sizeof(::psio::detail::reflect_bind<                                    \
                     TYPE, BOOST_PP_CAT(psio_reflect_impl_, TYPE)<TYPE>>) > 0, "");
+
+// ── Enumerator names ──────────────────────────────────────────────────────
+//
+// C++ has no enumerator reflection. One line gives an enum its names:
+//
+//     namespace chain {
+//        enum class status : std::uint8_t { pending, active = 2, closed };
+//        PSIO_REFLECT_ENUM(status, pending, active, closed)
+//     }
+//
+// usable at namespace scope in any namespace (unqualified enum name) and
+// inside a class body for a nested enum. `psio::reflect_enum<E>` then has
+//
+//   is_reflected            true (false, with nothing else, for other types)
+//   name                    "status"
+//   count                   number of listed enumerators
+//   names / values          std::array<std::string_view, N> / std::array<E, N>
+//   name_of(e)              optional<string_view>; nullopt for a value that
+//                           is not a listed enumerator (the first listed name
+//                           when two enumerators share a value)
+//   value_of(name)          optional<E>
+//
+// The text formats use the names (json.hpp: an enumerator is written as its
+// name, any other value as its number); binary formats are unaffected — an
+// enum is its underlying integer. An enum without the declaration is its
+// number in text too.
+
+namespace psio
+{
+   namespace detail
+   {
+      struct reflect_enum_default
+      {
+         static constexpr bool is_reflected = false;
+      };
+      template <typename E>
+      struct enum_slot
+      {
+         friend constexpr auto psio_enum_lookup(enum_slot);
+      };
+      template <typename E, typename Impl>
+      struct enum_bind
+      {
+         friend constexpr auto psio_enum_lookup(enum_slot<E>) { return Impl{}; }
+      };
+      template <typename E, typename = void>
+      struct enum_base
+      {
+         using type = reflect_enum_default;
+      };
+      template <typename E>
+      struct enum_base<E, std::void_t<decltype(psio_enum_lookup(enum_slot<E>{}))>>
+      {
+         using type = decltype(psio_enum_lookup(enum_slot<E>{}));
+      };
+
+      // The listed values are 0, 1, ... in order: name_of is an index.
+      template <typename E, std::size_t N>
+      constexpr bool enum_values_dense(const std::array<E, N>& values) noexcept
+      {
+         for (std::size_t i = 0; i < N; ++i)
+            if (static_cast<std::underlying_type_t<E>>(values[i]) !=
+                static_cast<std::underlying_type_t<E>>(i))
+               return false;
+         return true;
+      }
+
+      template <typename Impl>
+      struct reflect_enum_api : Impl
+      {
+         using enum_type = typename Impl::type;
+         static constexpr bool dense = enum_values_dense(Impl::values);
+
+         static constexpr std::optional<std::string_view> name_of(enum_type value) noexcept
+         {
+            using U = std::underlying_type_t<enum_type>;
+            if constexpr (dense)
+            {
+               const U raw = static_cast<U>(value);
+               if (raw >= 0 && static_cast<std::make_unsigned_t<U>>(raw) < Impl::count)
+                  return Impl::names[static_cast<std::size_t>(raw)];
+               return std::nullopt;
+            }
+            else
+            {
+               for (std::size_t i = 0; i < Impl::count; ++i)
+                  if (Impl::values[i] == value)
+                     return Impl::names[i];
+               return std::nullopt;
+            }
+         }
+         static constexpr std::optional<enum_type> value_of(std::string_view name) noexcept
+         {
+            const std::size_t i = name_table_for<Impl>.find(name);
+            if (i == Impl::count)
+               return std::nullopt;
+            return Impl::values[i];
+         }
+      };
+      template <>
+      struct reflect_enum_api<reflect_enum_default> : reflect_enum_default
+      {
+      };
+   }  // namespace detail
+
+   template <typename E>
+   struct reflect_enum : detail::reflect_enum_api<typename detail::enum_base<E>::type>
+   {
+   };
+
+   template <typename E>
+   concept ReflectedEnum = std::is_enum_v<E> && reflect_enum<E>::is_reflected;
+}  // namespace psio
+
+#define PSIO_REFLECT_ENUM_NAME_(r, _, I, NAME) \
+   BOOST_PP_COMMA_IF(I) ::std::string_view(BOOST_PP_STRINGIZE(NAME))
+#define PSIO_REFLECT_ENUM_VALUE_(r, ENUM, I, NAME) BOOST_PP_COMMA_IF(I) ENUM::NAME
+
+// PSIO_REFLECT_ENUM(Enum, enumerator...) — at least one enumerator, each
+// listed once, in any order (the order is the order of `names` / `values`).
+#define PSIO_REFLECT_ENUM(ENUM, ...)                                                    \
+   PSIO_REFLECT_ENUM_I_(ENUM, PSIO_PP_VARIADIC_TO_SEQ(__VA_ARGS__))
+#define PSIO_REFLECT_ENUM_I_(ENUM, SEQ)                                                 \
+   struct BOOST_PP_CAT(psio_enum_impl_, ENUM)                                           \
+   {                                                                                     \
+      using type = ENUM;                                                                 \
+      static constexpr bool               is_reflected = true;                           \
+      static constexpr ::std::string_view name         = BOOST_PP_STRINGIZE(ENUM);       \
+      static constexpr ::std::size_t      count        = BOOST_PP_SEQ_SIZE(SEQ);         \
+      static constexpr ::std::array<::std::string_view, count> names                     \
+         = {BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_ENUM_NAME_, _, SEQ)};                   \
+      static constexpr ::std::array<ENUM, count> values                                  \
+         = {BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_ENUM_VALUE_, ENUM, SEQ)};               \
+      static constexpr const auto& _names_array_ = names;                                \
+   };                                                                                    \
+   static_assert(::std::is_enum_v<ENUM>, "psio: PSIO_REFLECT_ENUM takes an enum");      \
+   static_assert(sizeof(::psio::detail::enum_bind<                                       \
+                    ENUM, BOOST_PP_CAT(psio_enum_impl_, ENUM)>) > 0, "");

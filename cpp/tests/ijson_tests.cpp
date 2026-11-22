@@ -62,6 +62,15 @@ namespace ij
    };
    PSIO_REFLECT(Ints128, u, i, w)
 
+   // Forced forms and the per-member hex form of a wide integer.
+   struct Ints128Forms
+   {
+      psio::uint128 as_string = 0;
+      psio::uint128 as_number = 0;
+      psio::uint128 as_hex    = 0;
+   };
+   PSIO_REFLECT(Ints128Forms, as_string, as_number, as_hex)
+
    struct HexMember
    {
       psio::uint128 plain = 0;
@@ -69,6 +78,10 @@ namespace ij
    };
    PSIO_REFLECT(HexMember, plain, n)
 }  // namespace ij
+
+PSIO_FIELD_ATTRS(ij::Ints128Forms, as_string, psio::json_string | psio::ijson_string)
+PSIO_FIELD_ATTRS(ij::Ints128Forms, as_number, psio::json_number | psio::ijson_number)
+PSIO_FIELD_ATTRS(ij::Ints128Forms, as_hex, psio::as<psio::hex_tag>)
 
 using namespace ij;
 
@@ -258,12 +271,21 @@ TEST_CASE("a value without a JSON text fails to encode", "[json][ijson][encode]"
    CHECK(js(std::string("t\xC3\xA9xt")) == "\"t\xC3\xA9xt\"");
    CHECK(ijs(std::string("t\xC3\xA9xt")) == "\"t\xC3\xA9xt\"");
 
-   // Non-finite floats: an error under ijson, unchanged under json.
+   // Non-finite floats have no JSON text: an error in both formats.
    CHECK(!psio::encode_json_checked(psio::ijson{}, std::nan(""), out).ok());
    CHECK(!psio::encode_json_checked(psio::ijson{}, -std::numeric_limits<float>::infinity(), out)
              .ok());
    CHECK_THROWS_AS(psio::encode(psio::ijson{}, std::nan("")), psio::codec_exception);
-   CHECK(js(std::numeric_limits<double>::infinity()) == "inf");
+   CHECK(!psio::encode_json_checked(psio::json{}, std::nan(""), out).ok());
+   CHECK(!psio::encode_json_checked(psio::json{}, std::numeric_limits<double>::infinity(), out)
+             .ok());
+   CHECK(!psio::encode_json_checked(psio::json{}, -std::numeric_limits<float>::infinity(), out)
+             .ok());
+   CHECK(!psio::encode_json_checked(psio::json{}, std::vector<double>{1.0, std::nan("")}, out)
+             .ok());
+   CHECK_THROWS_AS(psio::encode(psio::json{}, std::numeric_limits<double>::infinity()),
+                   psio::codec_exception);
+   CHECK(out == "keep");
    // Noncharacters are refused by ijson only.
    CHECK(js(std::string("\xEF\xBF\xBF")) == "\"\xEF\xBF\xBF\"");
    CHECK(!psio::encode_json_checked(psio::ijson{}, std::string("\xEF\xBF\xBF"), out).ok());
@@ -332,25 +354,137 @@ TEST_CASE("depth bombs are rejected without deep recursion", "[json][ijson][dept
    CHECK(!valid<psio::json, Point>(unknown));
 }
 
-TEST_CASE("128-bit and 256-bit integers keep their text adapter form", "[json][ijson][ext_int]")
+TEST_CASE("128-bit and 256-bit integers are decimal", "[json][ijson][ext_int]")
 {
-   // ext_int.hpp registers a text adapter ("0x" + lowercase hex) for
-   // uint128 / int128 / uint256. A text adapter applies in ijson exactly as
-   // in json, so these are NOT decimal strings. See the report: the owner's
-   // "wider integers are decimal strings" rule conflicts with this
-   // documented form and is left undecided.
+   // json: a bare decimal number. ijson: a decimal string, always.
    Ints128 v;
    v.u = (psio::uint128{1} << 100) + 5;
    v.i = -42;
    v.w = psio::uint256{std::uint64_t{255}};
-   const std::string want = R"({"u":"0x10000000000000000000000005","i":"-0x2a","w":"0xff"})";
-   CHECK(js(v) == want);
-   CHECK(ijs(v) == want);
-   const auto back = read<psio::ijson, Ints128>(want);
-   CHECK(back.u == v.u);
-   CHECK(back.i == v.i);
-   CHECK(back.w == v.w);
-   CHECK(!valid<psio::ijson, Ints128>(R"({"u":"5","i":"-0x2a","w":"0xff"})"));
+   CHECK(js(v) == R"({"u":1267650600228229401496703205381,"i":-42,"w":255})");
+   CHECK(ijs(v) == R"({"u":"1267650600228229401496703205381","i":"-42","w":"255"})");
+   for (const std::string text : {js(v), ijs(v)})
+   {
+      const auto back = read<psio::ijson, Ints128>(ijs(v));
+      CHECK(back.u == v.u);
+      CHECK(back.i == v.i);
+      CHECK(back.w == v.w);
+      (void)text;
+   }
+   const auto from_json = read<psio::json, Ints128>(js(v));
+   CHECK(from_json.u == v.u);
+   CHECK(from_json.i == v.i);
+   CHECK(from_json.w == v.w);
+
+   // The older "0x" text is still read, in both formats; a decimal string
+   // and (within the safe range under ijson) a bare number are too.
+   const std::string legacy = R"({"u":"0x10000000000000000000000005","i":"-0x2a","w":"0xff"})";
+   for (bool i_json : {false, true})
+   {
+      const auto back = i_json ? read<psio::ijson, Ints128>(legacy)
+                               : read<psio::json, Ints128>(legacy);
+      CHECK(back.u == v.u);
+      CHECK(back.i == v.i);
+      CHECK(back.w == v.w);
+   }
+   CHECK(valid<psio::ijson, Ints128>(R"({"u":"5","i":"-0x2a","w":"0xff"})"));
+   CHECK(valid<psio::ijson, Ints128>(R"({"u":5,"i":-7,"w":9007199254740991})"));
+   CHECK(!valid<psio::ijson, Ints128>(R"({"u":9007199254740992,"i":0,"w":0})"));
+   CHECK(valid<psio::json, Ints128>(R"({"u":9007199254740992,"i":0,"w":0})"));
+   CHECK(!valid<psio::json, Ints128>(R"({"u":-1,"i":0,"w":0})"));
+   CHECK(!valid<psio::json, Ints128>(R"({"u":340282366920938463463374607431768211456,"i":0,"w":0})"));
+   CHECK(!valid<psio::ijson, Ints128>(R"({"u":"0x","i":0,"w":0})"));
+   CHECK(!valid<psio::ijson, Ints128>(R"({"u":"05","i":0,"w":0})"));
+   CHECK(!valid<psio::ijson, Ints128>(R"({"u":"5","i":"0x80000000000000000000000000000000","w":0})"));
+
+   // A forced form, and the hex form kept per member with as<hex_tag>.
+   Ints128Forms f;
+   f.as_string = 7;
+   f.as_number = (psio::uint128{1} << 70);
+   f.as_hex    = 255;
+   CHECK(js(f) == R"({"as_string":"7","as_number":1180591620717411303424,"as_hex":"0xff"})");
+   CHECK(ijs(f) == R"({"as_string":"7","as_number":1180591620717411303424,"as_hex":"0xff"})");
+   const auto fb = read<psio::ijson, Ints128Forms>(ijs(f));
+   CHECK(fb.as_string == f.as_string);
+   CHECK(fb.as_number == f.as_number);
+   CHECK(fb.as_hex == f.as_hex);
+   CHECK(!valid<psio::json, Ints128Forms>(R"({"as_string":7,"as_number":1,"as_hex":"0x1"})"));
+   CHECK(!valid<psio::ijson, Ints128Forms>(R"({"as_string":"7","as_number":"1","as_hex":"0x1"})"));
+}
+
+namespace ijson_enum_test
+{
+   enum class Status : std::int16_t { pending = -1, active = 2, closed = 7 };
+   PSIO_REFLECT_ENUM(Status, pending, active, closed)
+   enum Plain : std::uint8_t { plain_a, plain_b };
+   enum class Dense : std::uint64_t { zero, one, two };
+   PSIO_REFLECT_ENUM(Dense, zero, one, two)
+   struct Holder
+   {
+      enum class Mode { off, on };
+      PSIO_REFLECT_ENUM(Mode, off, on)
+      Mode                  mode = Mode::off;
+      Status                status = Status::pending;
+      std::vector<Status>   history;
+      std::optional<Dense>  dense;
+      Plain                 plain = plain_a;
+   };
+   PSIO_REFLECT(Holder, mode, status, history, dense, plain)
+}
+
+TEST_CASE("enums are written by name and read by name or number", "[json][ijson][enum]")
+{
+   using namespace ijson_enum_test;
+   static_assert(psio::reflect_enum<Status>::is_reflected);
+   static_assert(!psio::reflect_enum<Plain>::is_reflected);
+   static_assert(!psio::reflect_enum<int>::is_reflected);
+   static_assert(psio::reflect_enum<Status>::count == 3);
+   static_assert(psio::reflect_enum<Status>::name == "Status");
+   static_assert(psio::reflect_enum<Status>::name_of(Status::active) == "active");
+   static_assert(!psio::reflect_enum<Status>::name_of(static_cast<Status>(3)));
+   static_assert(psio::reflect_enum<Status>::value_of("closed") == Status::closed);
+   static_assert(!psio::reflect_enum<Status>::value_of("Closed"));
+   static_assert(psio::reflect_enum<Dense>::name_of(Dense::two) == "two");
+   static_assert(!psio::reflect_enum<Dense>::name_of(static_cast<Dense>(3)));
+   static_assert(psio::reflect_enum<Holder::Mode>::name_of(Holder::Mode::on) == "on");
+
+   CHECK(js(Status::active) == R"("active")");
+   CHECK(ijs(Status::pending) == R"("pending")");
+   CHECK(js(static_cast<Status>(3)) == "3");
+   CHECK(ijs(static_cast<Status>(-9)) == "-9");
+   CHECK(js(plain_b) == "1");  // no names declared: its number, as before
+   // An unnamed 64-bit value follows the integer rule of its format.
+   CHECK(js(static_cast<Dense>(~std::uint64_t{0})) == "18446744073709551615");
+   CHECK(ijs(static_cast<Dense>(~std::uint64_t{0})) == R"("18446744073709551615")");
+
+   Holder h{Holder::Mode::on, Status::closed, {Status::active, static_cast<Status>(0)},
+            Dense::one, plain_b};
+   const std::string want =
+      R"({"mode":"on","status":"closed","history":["active",0],"dense":"one","plain":1})";
+   CHECK(js(h) == want);
+   CHECK(ijs(h) == want);
+   for (const char* text : {R"({"mode":"on","status":"closed","history":["active",0],"dense":"one","plain":1})",
+                            R"({"mode":1,"status":7,"history":[2,"0"],"dense":"1","plain":1})",
+                            R"({"mode":"on:1","status":"closed:7","history":["active:2","0"],"dense":"one:1","plain":1})"})
+   {
+      const auto back = read<psio::ijson, Holder>(text);
+      CHECK(back.mode == h.mode);
+      CHECK(back.status == h.status);
+      CHECK(back.history == h.history);
+      CHECK(back.dense == h.dense);
+      CHECK(back.plain == h.plain);
+      CHECK(js(read<psio::json, Holder>(text)) == want);
+   }
+   for (const char* bad : {R"("Active")", R"("active:3")", R"("active:")", R"(":2")", R"("")",
+                           R"("02")", R"("2:active")", R"("40000")", "40000", "1.0", "null"})
+   {
+      CHECK(!valid<psio::json, Status>(bad));
+      CHECK(!valid<psio::ijson, Status>(bad));
+   }
+   // An enum without names accepts numbers only.
+   CHECK(!valid<psio::json, Plain>(R"("plain_a")"));
+   CHECK(!valid<psio::json, Plain>(R"("1")"));
+   CHECK(valid<psio::json, Plain>("1"));
 }
 
 TEST_CASE("validate and the checked decode agree on mutated text", "[json][ijson][fuzz]")

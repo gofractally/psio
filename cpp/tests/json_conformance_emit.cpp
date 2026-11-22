@@ -269,6 +269,213 @@ namespace
       value<double>("1.25e-100", 1.25e-100);
    }
 
+   // Enums with enumerator names: a listed value is its name, any other
+   // its number; the name, the number, the numeric string and "name:number"
+   // are all read.
+   void emit_enums()
+   {
+      value<Color>("green", Color::green);
+      value<Color>("unnamed_2", static_cast<Color>(2));
+      value<Status>("pending", Status::pending);
+      value<Status>("active", Status::active);
+      value<Status>("closed", Status::closed);
+      value<Status>("unnamed_0", static_cast<Status>(0));
+      value<Status>("unnamed_min", static_cast<Status>(std::numeric_limits<std::int32_t>::min()));
+      value<Status>("unnamed_max", static_cast<Status>(std::numeric_limits<std::int32_t>::max()));
+
+      accept_both<Color>("name", R"("blue")", R"("blue")");
+      accept_both<Color>("number_of_a_name", "7", R"("blue")");
+      accept_both<Color>("numeric_string_of_a_name", R"("7")", R"("blue")");
+      accept_both<Color>("name_and_number", R"("blue:7")", R"("blue")");
+      accept_both<Color>("name_and_zero", R"("red:0")", R"("red")");
+      accept_both<Color>("numeric_string_unnamed", R"("9")", "9");
+      accept_both<Color>("number_unnamed", "9", "9");
+      accept_both<Color>("escaped_name", R"("red")", R"("red")");
+      accept_both<Status>("negative_name", R"("pending")", R"("pending")");
+      accept_both<Status>("negative_number", "-1", R"("pending")");
+      accept_both<Status>("negative_numeric_string", R"("-1")", R"("pending")");
+      accept_both<Status>("name_and_negative_number", R"("pending:-1")", R"("pending")");
+      accept_both<Status>("unnamed_negative", "-5", "-5");
+
+      reject_both<Color>("unknown_name", R"("purple")");
+      reject_both<Color>("name_wrong_case", R"("Red")");
+      reject_both<Color>("empty_string", R"("")");
+      reject_both<Color>("name_and_wrong_number", R"("red:1")");
+      reject_both<Color>("name_and_missing_number", R"("red:")");
+      reject_both<Color>("missing_name", R"(":0")");
+      reject_both<Color>("number_then_name", R"("0:red")");
+      reject_both<Color>("unknown_name_and_number", R"("purple:0")");
+      reject_both<Color>("name_and_noncanonical_number", R"("red:00")");
+      reject_both<Color>("name_and_out_of_range_number", R"("red:256")");
+      reject_both<Color>("numeric_string_leading_zero", R"("07")");
+      reject_both<Color>("numeric_string_out_of_range", R"("256")");
+      reject_both<Color>("numeric_string_negative", R"("-1")");
+      reject_both<Color>("numeric_string_plus", R"("+1")");
+      reject_both<Color>("name_with_space", R"(" red")");
+      reject_both<Color>("two_colons", R"("red:0:0")");
+      reject_both<Color>("fraction", "1.0");
+      reject_both<Color>("bool", "true");
+      reject_both<Color>("null", "null");
+      reject_both<Color>("array", R"(["red"])");
+      reject_both<Status>("out_of_range", "2147483648");
+      reject_both<Status>("minus_zero", "-0");
+      reject_both<Status>("name_and_wrong_sign", R"("pending:1")");
+   }
+
+   // 128- and 256-bit integers: a bare decimal number in json, a decimal
+   // string in ijson. Read from either, and from the older "0x" string.
+   void emit_wide_integers()
+   {
+      using u128 = psio::uint128;
+      using i128 = psio::int128;
+      using u256 = psio::uint256;
+      const u128 u128_max = ~u128{0};
+      const i128 i128_max = static_cast<i128>(u128_max >> 1);
+      const i128 i128_min = -i128_max - 1;
+      u256       u256_max;
+      for (auto& limb : u256_max.limb)
+         limb = ~std::uint64_t{0};
+      u256 two_pow_128;
+      two_pow_128.limb[2] = 1;
+      u256 mixed;
+      mixed.limb[0] = 0x0123456789abcdefull;
+      mixed.limb[1] = 0xfedcba9876543210ull;
+      mixed.limb[2] = 0x0f1e2d3c4b5a6978ull;
+      mixed.limb[3] = 0x8877665544332211ull;
+
+      value<u128>("zero", 0);
+      value<u128>("one", 1);
+      value<u128>("safe_max", (u128{1} << 53) - 1);
+      value<u128>("safe_max_plus_one", u128{1} << 53);
+      value<u128>("u64_max", ~std::uint64_t{0});
+      value<u128>("2^64", u128{1} << 64);
+      value<u128>("1e30", u128{1000000000000000ull} * 1000000000000000ull);
+      value<u128>("max", u128_max);
+      value<i128>("zero", 0);
+      value<i128>("minus_one", -1);
+      value<i128>("minus_safe_max", -static_cast<i128>((u128{1} << 53) - 1));
+      value<i128>("minus_2^64", -static_cast<i128>(u128{1} << 64));
+      value<i128>("max", i128_max);
+      value<i128>("min", i128_min);
+      value<u256>("zero", u256{});
+      value<u256>("one", u256{std::uint64_t{1}});
+      value<u256>("u64_max", u256{~std::uint64_t{0}});
+      value<u256>("2^128", two_pow_128);
+      value<u256>("mixed", mixed);
+      value<u256>("max", u256_max);
+      value<Wide>("zero", Wide{});
+      value<Wide>("some", Wide{u128{1} << 100, i128_min, mixed, u128_max, {0, -1, i128_max},
+                               Status::active});
+      value<Wide>("small", Wide{7, -7, u256{std::uint64_t{7}}, u128{7}, {7},
+                                static_cast<Status>(3)});
+
+      const std::string max128 = "340282366920938463463374607431768211455";
+      const std::string max256 =
+         "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+      // Either form is read in both formats; the writer has one per format.
+      accept<u128>("json", "decimal_string", "\"" + max128 + "\"", max128);
+      accept<u128>("ijson", "decimal_string_small", R"("7")", R"("7")");
+      accept<u128>("ijson", "bare_number_small", "7", R"("7")");
+      accept<u128>("ijson", "bare_number_safe_max", "9007199254740991", R"("9007199254740991")");
+      accept<u128>("json", "bare_number_max", max128, max128);
+      accept<u128>("json", "hex_string", R"("0xff")", "255");
+      accept<u128>("ijson", "hex_string", R"("0xff")", R"("255")");
+      accept<u128>("ijson", "hex_string_upper", R"("0XFF")", R"("255")");
+      accept<u128>("ijson", "hex_string_max", R"("0xffffffffffffffffffffffffffffffff")",
+                   "\"" + max128 + "\"");
+      accept<i128>("ijson", "hex_string_negative", R"("-0x2a")", R"("-42")");
+      accept<i128>("json", "hex_string_negative", R"("-0x2a")", "-42");
+      accept<i128>("ijson", "bare_number_negative", "-9007199254740991", R"("-9007199254740991")");
+      accept<i128>("ijson", "hex_string_min", R"("-0x80000000000000000000000000000000")",
+                   R"("-170141183460469231731687303715884105728")");
+      accept<u256>("json", "decimal_string", "\"" + max256 + "\"", max256);
+      accept<u256>("ijson", "bare_number_small", "12", R"("12")");
+      accept<u256>("ijson", "hex_string", R"("0x100")", R"("256")");
+      accept<u256>("json", "hex_string", R"("0x100")", "256");
+
+      reject<u128>("ijson", "bare_number_over_safe", "9007199254740992");
+      reject<i128>("ijson", "bare_number_under_safe", "-9007199254740992");
+      reject<u256>("ijson", "bare_number_over_safe", "9007199254740992");
+      for (const char* f : {"json", "ijson"})
+      {
+         reject<u128>(f, "over_max", "\"340282366920938463463374607431768211456\"");
+         reject<u128>(f, "negative", R"("-1")");
+         reject<u128>(f, "leading_zero", R"("01")");
+         reject<u128>(f, "empty_string", R"("")");
+         reject<u128>(f, "plus", R"("+1")");
+         reject<u128>(f, "space", R"(" 1")");
+         reject<u128>(f, "fraction", "1.5");
+         reject<u128>(f, "exponent", "1e3");
+         reject<u128>(f, "hex_without_digits", R"("0x")");
+         reject<u128>(f, "hex_over_max", R"("0x100000000000000000000000000000000")");
+         reject<u128>(f, "hex_negative", R"("-0x1")");
+         reject<u128>(f, "hex_bad_digit", R"("0xfg")");
+         reject<u128>(f, "bool", "true");
+         reject<u128>(f, "null", "null");
+         reject<i128>(f, "over_max", "\"170141183460469231731687303715884105728\"");
+         reject<i128>(f, "under_min", "\"-170141183460469231731687303715884105729\"");
+         reject<i128>(f, "minus_zero", R"("-0")");
+         reject<i128>(f, "hex_over_max", R"("0x80000000000000000000000000000000")");
+         reject<i128>(f, "hex_under_min", R"("-0x80000000000000000000000000000001")");
+         reject<u256>(f, "over_max",
+                      "\"115792089237316195423570985008687907853269984665640564039457584007913129639936\"");
+         reject<u256>(f, "negative", R"("-1")");
+         reject<u256>(f, "leading_zero", R"("00")");
+         reject<u256>(f, "hex_over_max",
+                      R"("0x10000000000000000000000000000000000000000000000000000000000000000")");
+      }
+      reject<u128>("json", "bare_over_max", "340282366920938463463374607431768211456");
+      reject<u128>("json", "bare_negative", "-1");
+      reject<u128>("json", "bare_leading_zero", "01");
+      reject<u256>("json", "bare_over_max",
+                   "115792089237316195423570985008687907853269984665640564039457584007913129639936");
+   }
+
+   // Shortest round-trip edge cases: a value halfway between two equally
+   // short candidates (2^-24), subnormals, and the magnitudes where a
+   // JavaScript number changes notation (1e21, 1e-7).
+   void emit_float_edges()
+   {
+      value<double>("2^-24", 0x1p-24);
+      value<double>("minus_2^-24", -0x1p-24);
+      value<double>("2^-1074", 0x1p-1074);
+      value<double>("2^-1073", 0x1p-1073);
+      value<double>("max_subnormal", 0x0.fffffffffffffp-1022);
+      value<double>("min_normal", 0x1p-1022);
+      value<double>("just_below_1e21", 999999999999999868928.0);
+      value<double>("just_above_1e21", 1000000000000000131072.0);
+      value<double>("1e20", 1e20);
+      value<double>("1.5e21", 1.5e21);
+      value<double>("123456789012345680000", 123456789012345680000.0);
+      value<double>("1e-6", 1e-6);
+      value<double>("1.5e-7", 1.5e-7);
+      value<double>("just_below_1e-6", 9.999999999999999e-7);
+      value<double>("just_above_1e-7", 1.0000000000000001e-7);
+      value<double>("0.000001234", 0.000001234);
+      value<double>("1e-5", 1e-5);
+      value<double>("1e23", 1e23);
+      value<double>("5e-324_times_3", 1.5e-323);
+      value<double>("2^63", 0x1p63);
+      value<double>("2^64", 0x1p64);
+      value<double>("2^70", 0x1p70);
+      value<double>("0.3", 0.3);
+      value<double>("2^-10", 0x1p-10);
+      value<float>("2^-24", 0x1p-24f);
+      value<float>("2^-149", 0x1p-149f);
+      value<float>("max_subnormal", 0x0.fffffep-126f);
+      value<float>("min_normal", 0x1p-126f);
+      value<float>("1e21", 1e21f);
+      value<float>("1e20", 1e20f);
+      value<float>("1e-7", 1e-7f);
+      value<float>("1e-6", 1e-6f);
+      value<float>("9.999999e-8", 9.999999e-8f);
+      value<float>("2^63", 0x1p63f);
+      value<float>("2^-10", 0x1p-10f);
+      value<float>("0.3", 0.3f);
+      value<float>("16777217_rounds", 16777217.0f);
+      value<float>("3.4e38", 3.4e38f);
+   }
+
    // Floats whose text must agree digit for digit across languages: random
    // bit patterns, and short decimals across the fixed / scientific boundary.
    void emit_float_sweep()
@@ -417,6 +624,9 @@ namespace
       value<Color>("red", Color::red);
       value<Color>("blue", Color::blue);
       value<Color>("unnamed_255", static_cast<Color>(255));
+      emit_enums();
+      emit_wide_integers();
+      emit_float_edges();
       value<Capped>("empty", Capped{});
       value<Capped>("some", Capped{9, "memo", Fixed{1, 2, true}, {Fixed{3, 4, false}, Fixed{}}});
       value<Capped>("trailing_none", Capped{1, "", std::nullopt, {}});
@@ -503,7 +713,6 @@ namespace
       reject_both<Fixed>("missing_member", R"({"x":1,"y":2})");
       reject_both<Fixed>("out_of_range", R"({"x":2147483648,"y":2,"on":true})");
       reject_both<Color>("out_of_range", "256");
-      reject_both<Color>("string", R"("red")");
       reject_both<Color>("negative", "-1");
       accept_both<Capped>("missing_optional_member", R"({"id":1,"memo":"","path":[]})",
                           R"({"id":1,"memo":"","at":null,"path":[]})");

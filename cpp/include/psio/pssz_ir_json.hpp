@@ -30,8 +30,15 @@
 //                     reaches the integer through option, list and array
 //   bool, Float       true / false; shortest round-trip decimal
 //
-// No JSON form (an error, not a guess): integers wider than 64 bits and the
-// bitvector / bitlist adapters. The typed codec has none to agree with.
+//   Int 128 / 256     decimal: a string under ijson, a bare number under
+//                     json. Read from a decimal string, the legacy "0x"
+//                     string, or a bare number (ijson: |v| <= 2^53 - 1)
+//   Enum              a listed value is its name, any other its number; read
+//                     from the name, the number (or numeric string), or
+//                     "name:number" (which must agree)
+//
+// No JSON form (an error, not a guess): the bitvector / bitlist adapters.
+// The typed codec has none to agree with. A non-finite float has no text.
 //
 // Member and alternative names are resolved by comparing the incoming key
 // with the next expected member first (writers emit declaration order) and,
@@ -208,20 +215,24 @@ inline bool parse_integer(std::string_view text, bool is_signed, std::uint32_t b
    if (negative && !is_signed)
       return false;
    const std::string_view digits = text.substr(negative ? 1 : 0);
-   if (digits.empty() || digits.size() > 20)
+   if (digits.empty() || digits.size() > 39)
       return false;
    if (digits[0] == '0' && (digits.size() > 1 || negative))
       return false;
    magnitude = 0;
+   constexpr unsigned __int128 all = ~static_cast<unsigned __int128>(0);
    for (char c : digits)
    {
       if (c < '0' || c > '9')
          return false;
-      magnitude = magnitude * 10 + static_cast<unsigned>(c - '0');
+      const unsigned d = static_cast<unsigned>(c - '0');
+      if (magnitude > (all - d) / 10)
+         return false;
+      magnitude = magnitude * 10 + d;
    }
    const unsigned __int128 one = 1;
    if (!is_signed)
-      return magnitude <= (one << bits) - 1;
+      return bits >= 128 || magnitude <= (one << bits) - 1;
    const unsigned __int128 half = one << (bits - 1);
    return negative ? magnitude <= half : magnitude <= half - 1;
 }
@@ -282,11 +293,150 @@ template <JsonCursor C> class Reader
       return index;
    }
 
+   // A 128 / 256-bit integer: a decimal string (or the legacy "0x" string),
+   // or a bare decimal number — any in-range value under json, at most
+   // 2^53 - 1 in magnitude under ijson. A forced form accepts that form only.
+   bool wide_integer(const Int &type, int_form form, Value &out)
+   {
+      if (type.bits != 128 && !(type.bits == 256 && !type.isSigned))
+         return c.fail("json: this integer width has no JSON form");
+      json_kind kind;
+      if (!c.kind(kind))
+         return false;
+      std::string_view text;
+      const bool quoted = kind == json_kind::string;
+      if (quoted)
+      {
+         if (form == int_form::number)
+            return c.fail("json: expected a number, found a string");
+         bool escaped;
+         if (!c.string(text, escaped))
+            return false;
+         if (escaped)
+            return c.fail("json: integer string is not a canonical in-range decimal");
+      }
+      else
+      {
+         if (form == int_form::string)
+            return c.fail("json: expected an integer string");
+         if (kind != json_kind::number)
+            return c.fail("json: expected an integer");
+         if (!c.number(text))
+            return false;
+      }
+      const char *const bad = quoted ? "json: integer string is not a canonical in-range decimal"
+                                     : "json: integer is not a canonical in-range decimal";
+      const bool bare_limit = !quoted && ijson && form == int_form::natural;
+      if (type.bits == 256)
+      {
+         ::psio::uint256 v{};
+         if (!psio::detail::json_impl::parse_wide_text(text, v))
+            return c.fail(bad);
+         if (bare_limit && !psio::detail::json_impl::wide_is_safe(v))
+            return c.fail("ijson: bare integer outside the safe range must be a string");
+         Bytes bytes(32);
+         for (int i = 0; i < 32; ++i)
+            bytes[i] = static_cast<unsigned char>(v.limb[i / 8] >> (8 * (i % 8)));
+         out = std::move(bytes);
+         return true;
+      }
+      if (type.isSigned)
+      {
+         ::psio::int128 v = 0;
+         if (!psio::detail::json_impl::parse_wide_text(text, v))
+            return c.fail(bad);
+         if (bare_limit && !psio::detail::json_impl::wide_is_safe(v))
+            return c.fail("ijson: bare integer outside the safe range must be a string");
+         out = Signed{v};
+      }
+      else
+      {
+         ::psio::uint128 v = 0;
+         if (!psio::detail::json_impl::parse_wide_text(text, v))
+            return c.fail(bad);
+         if (bare_limit && !psio::detail::json_impl::wide_is_safe(v))
+            return c.fail("ijson: bare integer outside the safe range must be a string");
+         out = Unsigned{v};
+      }
+      return true;
+   }
+
+   // An Enum: the enumerator's name ("active"), the number (2 or the numeric
+   // string "2"), or both ("active:2", which must agree). An unknown name is
+   // an error; a number that names no enumerator is accepted.
+   bool enumeration(const schema_types::Enum &type, int_form form, Value &out)
+   {
+      const AnyType *under = type.type.get() ? resolve(*type.type) : nullptr;
+      const Int *integer_type = under ? std::get_if<Int>(&under->value) : nullptr;
+      if (!integer_type || integer_type->bits > 64 || integer_type->bits < 8)
+         return c.fail("pssz IR: an enum needs an underlying integer of 8 to 64 bits");
+      json_kind kind;
+      if (!c.kind(kind))
+         return false;
+      if (kind != json_kind::string)
+         return integer(*integer_type, form, out);
+      std::string_view text;
+      bool escaped;
+      if (!c.string(text, escaped))
+         return false;
+      bool negative = false;
+      unsigned __int128 magnitude = 0;
+      auto number = [&](std::string_view digits) {
+         return parse_integer(digits, integer_type->isSigned, integer_type->bits, negative,
+                              magnitude);
+      };
+      auto bits_of = [&]() -> std::uint64_t {
+         const std::uint64_t low = static_cast<std::uint64_t>(magnitude);
+         return negative ? std::uint64_t{0} - low : low;
+      };
+      if (!text.empty() && (text[0] == '-' || (text[0] >= '0' && text[0] <= '9')))
+      {
+         if (!number(text))
+            return c.fail("json: enum number is not a canonical in-range decimal");
+      }
+      else
+      {
+         const std::size_t colon = text.find(':');
+         const std::string_view name = text.substr(0, colon);
+         const Enumerator *found = nullptr;
+         for (const auto &member : type.members)
+            if (member.name == name)
+            {
+               found = &member;
+               break;
+            }
+         if (!found)
+            return c.fail("json: unknown enumerator name");
+         if (colon != std::string_view::npos)
+         {
+            if (!number(text.substr(colon + 1)))
+               return c.fail("json: enum number is not a canonical in-range decimal");
+            if (bits_of() != found->value)
+               return c.fail("json: enumerator name and number disagree");
+         }
+         else
+         {
+            const auto raw = static_cast<std::int64_t>(found->value);
+            negative = integer_type->isSigned && raw < 0;
+            magnitude = negative ? static_cast<unsigned __int128>(-(raw + 1)) + 1
+                                 : static_cast<unsigned __int128>(found->value);
+         }
+      }
+      if (integer_type->isSigned)
+         out = Signed{negative ? -static_cast<__int128>(magnitude)
+                               : static_cast<__int128>(magnitude)};
+      else
+         out = Unsigned{magnitude};
+      return true;
+   }
+
    bool integer(const Int &type, int_form form, Value &out)
    {
+      if (type.bits > 64)
+         return wide_integer(type, form, out);
       if (type.bits != 1 && type.bits != 8 && type.bits != 16 && type.bits != 32 &&
           type.bits != 64)
-         return c.fail("json: integers wider than 64 bits have no JSON form");
+         return c.fail("json: this integer width has no JSON form");
       const bool wide = ijson && type.bits == 64 && form == int_form::natural;
       json_kind kind;
       if (!c.kind(kind))
@@ -625,6 +775,8 @@ template <JsonCursor C> class Reader
              }
              else if constexpr (std::is_same_v<T, Custom>)
                 return custom(t, form, n, out);
+             else if constexpr (std::is_same_v<T, schema_types::Enum>)
+                return enumeration(t, form, out);
              else if constexpr (std::is_same_v<T, Option>)
              {
                 json_kind kind;
@@ -689,18 +841,19 @@ class Writer
 
    void integer(const Int &type, int_form form, bool negative, unsigned __int128 magnitude)
    {
-      if (type.bits > 64)
-         return w.fail("json: integers wider than 64 bits have no JSON form");
+      // 64 bits: a string beyond 2^53 - 1 under ijson. Wider: always a
+      // string under ijson, a bare number under json.
       const bool quoted =
           form == int_form::string ||
-          (form == int_form::natural && ijson && type.bits == 64 && magnitude > safe_integer);
+          (form == int_form::natural && ijson &&
+           (type.bits > 64 || (type.bits == 64 && magnitude > safe_integer)));
       char buffer[48];
       char *p = buffer;
       if (quoted)
          *p++ = '"';
       if (negative)
          *p++ = '-';
-      p = std::to_chars(p, buffer + sizeof(buffer) - 1, static_cast<std::uint64_t>(magnitude)).ptr;
+      p = std::to_chars(p, buffer + sizeof(buffer) - 1, magnitude).ptr;
       if (quoted)
          *p++ = '"';
       w.append(buffer, p);
@@ -726,16 +879,18 @@ class Writer
          magnitude = v->value;
       }
       const unsigned __int128 one = 1;
-      const std::uint32_t bits = type.bits > 64 ? 64 : type.bits;
+      const std::uint32_t bits = type.bits > 128 ? 128 : type.bits;
       if (!type.isSigned)
-         return magnitude <= (one << bits) - 1;
+         return bits == 128 || magnitude <= (one << bits) - 1;
       const unsigned __int128 half = one << (bits - 1);
       return negative ? magnitude <= half : magnitude <= half - 1;
    }
    template <typename F> void floating(F value)
    {
-      if (ijson && !std::isfinite(value))
-         return w.fail("ijson: non-finite float has no JSON text");
+      // NaN and the infinities have no JSON text, in either format.
+      if (!std::isfinite(value))
+         return w.fail(ijson ? "ijson: non-finite float has no JSON text"
+                             : "json: non-finite float has no JSON text");
       char buffer[64];
       auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
       w.append(buffer, result.ptr);
@@ -829,8 +984,26 @@ class Writer
              using T = std::decay_t<decltype(t)>;
              if constexpr (std::is_same_v<T, Int>)
              {
-                if (t.bits > 64)
-                   return w.fail("json: integers wider than 64 bits have no JSON form");
+                if (t.bits == 256 && !t.isSigned)
+                {
+                   auto bytes = std::get_if<Bytes>(&value.value);
+                   if (!bytes || bytes->size() != 32)
+                      return w.fail("pssz IR: 256-bit integer needs 32 little-endian bytes");
+                   ::psio::uint256 v{};
+                   for (int i = 0; i < 32; ++i)
+                      v.limb[i / 8] |= static_cast<std::uint64_t>((*bytes)[i]) << (8 * (i % 8));
+                   const bool quoted = form == int_form::string ||
+                                       (form == int_form::natural && ijson);
+                   std::string digits;
+                   if (quoted)
+                      digits.push_back('"');
+                   ::psio::ext_int_detail::append_decimal_u256(digits, v);
+                   if (quoted)
+                      digits.push_back('"');
+                   return w.append(std::string_view{digits});
+                }
+                if (t.bits > 128)
+                   return w.fail("json: this integer width has no JSON form");
                 bool negative;
                 unsigned __int128 magnitude;
                 if (!integer_value(t, value, negative, magnitude))
@@ -848,6 +1021,24 @@ class Writer
              }
              else if constexpr (std::is_same_v<T, Custom>)
                 custom(t, value, form);
+             else if constexpr (std::is_same_v<T, schema_types::Enum>)
+             {
+                const AnyType *under = t.type.get() ? t.type->resolve(schema) : nullptr;
+                const Int *integer_type = under ? std::get_if<Int>(&under->value) : nullptr;
+                if (!integer_type || integer_type->bits > 64 || integer_type->bits < 8)
+                   return w.fail("pssz IR: an enum needs an underlying integer of 8 to 64 bits");
+                bool negative;
+                unsigned __int128 magnitude;
+                if (!integer_value(*integer_type, value, negative, magnitude))
+                   return w.fail("pssz IR: integer value does not match the schema");
+                const std::uint64_t low = static_cast<std::uint64_t>(magnitude);
+                const std::uint64_t raw = negative ? std::uint64_t{0} - low : low;
+                // A listed value is its (first) name; any other its number.
+                for (const auto &member : t.members)
+                   if (member.value == raw)
+                      return psio::detail::json_impl::write_string(w, member.name, ijson);
+                integer(*integer_type, form, negative, magnitude);
+             }
              else if constexpr (std::is_same_v<T, Option>)
              {
                 auto v = std::get_if<Optional>(&value.value);

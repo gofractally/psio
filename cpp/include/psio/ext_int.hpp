@@ -7,12 +7,14 @@
 // Wire form is always 16 or 32 raw LE bytes; arithmetic is out of scope
 // (users convert to their preferred bignum library via the limb array).
 //
-// Text representation: `0x`-prefixed lowercase hex with no leading
-// zeros except for the zero value itself (`"0x0"`). Signed types use a
-// leading `-` for negatives (signed-magnitude, NOT 2's complement
-// hex). Registered as the default `text_category` adapter at the
-// bottom of this header — that's the form JSON, WIT, and textual
-// schemas emit and consume. Binary formats keep their existing
+// Text representation. In JSON and I-JSON (json.hpp) these integers are
+// decimal: a bare number in `json`, a decimal string in `ijson`. The
+// `text_category` adapter registered at the bottom of this header is the
+// other form — `0x`-prefixed lowercase hex with no leading zeros except for
+// the zero value itself (`"0x0"`), signed types with a leading `-` for
+// negatives (signed-magnitude, NOT 2's complement hex). It is available in
+// JSON / I-JSON per member as `psio::as<psio::hex_tag>`, and the JSON
+// readers accept it on input wherever a wide integer string is accepted. Binary formats keep their existing
 // little-endian wire form via per-format dispatch.
 
 #include <psio/adapter.hpp>
@@ -208,6 +210,69 @@ namespace psio {
                               "ext_int");
          body_out = std::span<const char>(in.data() + 2, in.size() - 2);
          return codec_ok();
+      }
+
+      // ── Decimal text of a 256-bit unsigned integer ────────────────────
+      //
+      // Canonical decimal: `0 | [1-9][0-9]*`, at most 78 digits.
+      inline void append_decimal_u256(std::string& s, const uint256& v)
+      {
+         std::uint64_t limb[4] = {v.limb[0], v.limb[1], v.limb[2], v.limb[3]};
+         char          buf[80];
+         int           n = 0;
+         auto nonzero = [&] { return (limb[0] | limb[1] | limb[2] | limb[3]) != 0; };
+         if (!nonzero())
+         {
+            s.push_back('0');
+            return;
+         }
+         while (nonzero())
+         {
+            // Divide by 10^18 (the largest power of ten below 2^64 / 16).
+            constexpr std::uint64_t chunk = 1000000000000000000ull;
+            unsigned __int128       rem   = 0;
+            for (int i = 3; i >= 0; --i)
+            {
+               const unsigned __int128 cur = (rem << 64) | limb[i];
+               limb[i]                     = static_cast<std::uint64_t>(cur / chunk);
+               rem                         = cur % chunk;
+            }
+            std::uint64_t part = static_cast<std::uint64_t>(rem);
+            for (int d = 0; d < 18; ++d)
+            {
+               buf[n++] = static_cast<char>('0' + part % 10);
+               part /= 10;
+               if (part == 0 && !nonzero())
+                  break;
+            }
+         }
+         while (n > 0)
+            s.push_back(buf[--n]);
+      }
+
+      // False when `text` is not canonical decimal or exceeds 2^256 - 1.
+      inline bool parse_decimal_u256(std::string_view text, uint256& out) noexcept
+      {
+         if (text.empty() || text.size() > 78 || (text[0] == '0' && text.size() > 1))
+            return false;
+         std::uint64_t limb[4] = {0, 0, 0, 0};
+         for (char c : text)
+         {
+            if (c < '0' || c > '9')
+               return false;
+            unsigned __int128 carry = static_cast<unsigned>(c - '0');
+            for (int i = 0; i < 4; ++i)
+            {
+               const unsigned __int128 cur = static_cast<unsigned __int128>(limb[i]) * 10 + carry;
+               limb[i]                     = static_cast<std::uint64_t>(cur);
+               carry                       = cur >> 64;
+            }
+            if (carry)
+               return false;
+         }
+         for (int i = 0; i < 4; ++i)
+            out.limb[i] = limb[i];
+         return true;
       }
 
    }  // namespace ext_int_detail
@@ -556,6 +621,12 @@ namespace psio {
 
 }  // namespace psio
 
+// JSON and I-JSON write these three types as decimal (json.hpp); the
+// text_category adapter (the "0x" form) serves the other text consumers.
+// For the "0x" form in JSON / I-JSON, annotate the member `as<hex_tag>`.
+PSIO_ADAPTER(psio::uint128, psio::hex_tag, psio::uint128_text_codec)
+PSIO_ADAPTER(psio::int128,  psio::hex_tag, psio::int128_text_codec)
+PSIO_ADAPTER(psio::uint256, psio::hex_tag, psio::uint256_text_codec)
 PSIO_ADAPTER(psio::uint128, psio::text_category, psio::uint128_text_codec)
 PSIO_ADAPTER(psio::int128,  psio::text_category, psio::int128_text_codec)
 PSIO_ADAPTER(psio::uint256, psio::text_category, psio::uint256_text_codec)

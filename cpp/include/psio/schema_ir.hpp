@@ -264,6 +264,30 @@ namespace psio::schema_types
    };
    PSIO_REFLECT(Float, exp, mantissa)
 
+   // ── Enum ────────────────────────────────────────────────────────────
+   //
+   // An enumeration without payloads. On the wire it is exactly `type`,
+   // its underlying integer, and any in-range value is structurally
+   // valid; the enumerators give the text formats their names (a listed
+   // value is written as its name, any other as its number). `value` is
+   // the enumerator's value as 64 two's-complement bits (sign-extended
+   // for a signed underlying type).
+   struct Enumerator
+   {
+      std::string   name;
+      std::uint64_t value = 0;
+      friend bool   operator==(const Enumerator&, const Enumerator&) = default;
+   };
+   PSIO_REFLECT(Enumerator, name, value)
+
+   struct Enum
+   {
+      Box<AnyType>            type;
+      std::vector<Enumerator> members;
+      friend bool             operator==(const Enum&, const Enum&) = default;
+   };
+   PSIO_REFLECT(Enum, type, members)
+
    // ── Named-type reference ────────────────────────────────────────────
    //
    // `Type{"my-record"}` resolves against Schema::types[name].
@@ -279,7 +303,7 @@ namespace psio::schema_types
    // ── AnyType — the open-world variant ────────────────────────────────
    //
    // Every IR type-position field is an AnyType.  The variant carries
-   // the discriminator + payload for the 14 alternatives. The legacy
+   // the discriminator + payload for the 15 alternatives. The legacy
    // `resolved` slot is unwired and unused: cached pointers cannot remain
    // valid across copies, moves, schema reuse or alias mutation. Constructors
    // accept each alternative by value plus a pair of std::string /
@@ -300,7 +324,10 @@ namespace psio::schema_types
                    FracPack,
                    Custom,
                    Resource,
-                   Type>
+                   Type,
+                   // Added after the original 14: schemas written before
+                   // it existed decode unchanged.
+                   Enum>
                              value;
       mutable const AnyType* resolved = nullptr;
 
@@ -336,6 +363,7 @@ namespace psio::schema_types
       AnyType(Custom v) : value(std::move(v)) {}
       AnyType(Resource v) : value(std::move(v)) {}
       AnyType(Type v) : value(std::move(v)) {}
+      AnyType(Enum v) : value(std::move(v)) {}
       AnyType(std::string name) : value(Type{std::move(name)}) {}
       AnyType(const char* name) : value(Type{std::string{name}}) {}
 

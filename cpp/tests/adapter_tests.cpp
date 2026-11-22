@@ -831,18 +831,26 @@ TEST_CASE("ext_int text adapter: uint128 round-trips through JSON",
       auto back = psio::decode<psio::uint128>(psio::json{},
                                               std::span<const char>{j});
       REQUIRE(back == v);
-      // Sanity-check the textual form: starts with `"0x` and ends with `"`.
-      REQUIRE(j.size() >= 5);
-      REQUIRE(j.front() == '"');
-      REQUIRE(j.back()  == '"');
-      REQUIRE(j[1] == '0');
-      REQUIRE(j[2] == 'x');
+      // JSON writes a wide integer as a bare decimal number; the "0x"
+      // text of the adapter is still read.
+      REQUIRE(!j.empty());
+      REQUIRE(j.find_first_not_of("0123456789") == std::string::npos);
+      std::string hex = "\"";
+      psio::uint128_text_codec::encode(v, hex);
+      hex += '"';
+      REQUIRE(hex[1] == '0');
+      REQUIRE(hex[2] == 'x');
+      REQUIRE(psio::decode<psio::uint128>(psio::json{}, std::span<const char>{hex}) == v);
    }
 
    // Specific shapes.
-   REQUIRE(psio::encode(psio::json{}, psio::uint128{0})  == std::string{"\"0x0\""});
-   REQUIRE(psio::encode(psio::json{}, psio::uint128{0xFF}) ==
-           std::string{"\"0xff\""});
+   REQUIRE(psio::encode(psio::json{}, psio::uint128{0})  == std::string{"0"});
+   REQUIRE(psio::encode(psio::json{}, psio::uint128{0xFF}) == std::string{"255"});
+   REQUIRE(psio::encode(psio::ijson{}, psio::uint128{0xFF}) == std::string{"\"255\""});
+   // The adapter itself (the text form other consumers use) is unchanged.
+   std::string adapted;
+   psio::uint128_text_codec::encode(psio::uint128{0xFF}, adapted);
+   REQUIRE(adapted == "0xff");
 }
 
 TEST_CASE("ext_int text adapter: int128 signed-magnitude hex",
@@ -862,8 +870,16 @@ TEST_CASE("ext_int text adapter: int128 signed-magnitude hex",
       REQUIRE(back == v);
    }
 
-   REQUIRE(psio::encode(psio::json{}, psio::int128{ 0xab}) == std::string{"\"0xab\""});
-   REQUIRE(psio::encode(psio::json{}, psio::int128{-0xab}) == std::string{"\"-0xab\""});
+   REQUIRE(psio::encode(psio::json{}, psio::int128{ 0xab}) == std::string{"171"});
+   REQUIRE(psio::encode(psio::json{}, psio::int128{-0xab}) == std::string{"-171"});
+   REQUIRE(psio::encode(psio::ijson{}, psio::int128{-0xab}) == std::string{"\"-171\""});
+   // Signed-magnitude hex is the adapter's text and is still read by JSON.
+   std::string adapted;
+   psio::int128_text_codec::encode(psio::int128{-0xab}, adapted);
+   REQUIRE(adapted == "-0xab");
+   const std::string quoted = "\"-0xab\"";
+   REQUIRE(psio::decode<psio::int128>(psio::json{}, std::span<const char>{quoted}) ==
+           psio::int128{-0xab});
 }
 
 TEST_CASE("ext_int text adapter: uint256 round-trips through JSON",
@@ -886,10 +902,14 @@ TEST_CASE("ext_int text adapter: uint256 round-trips through JSON",
       REQUIRE(back == v);
    }
 
-   REQUIRE(psio::encode(psio::json{}, psio::uint256{std::uint64_t{0}}) ==
-           std::string{"\"0x0\""});
+   REQUIRE(psio::encode(psio::json{}, psio::uint256{std::uint64_t{0}}) == std::string{"0"});
    REQUIRE(psio::encode(psio::json{}, psio::uint256{std::uint64_t{0xff}}) ==
-           std::string{"\"0xff\""});
+           std::string{"255"});
+   REQUIRE(psio::encode(psio::ijson{}, max_value) ==
+           std::string{"\"115792089237316195423570985008687907853269984665640564039457584007913129639935\""});
+   const std::string legacy = "\"0xff\"";
+   REQUIRE(psio::decode<psio::uint256>(psio::json{}, std::span<const char>{legacy}) ==
+           psio::uint256{std::uint64_t{0xff}});
 }
 
 // Confirms that a record with a uint256 field — previously a hard
@@ -910,7 +930,7 @@ TEST_CASE("ext_int text adapter: a record with a uint256 field encodes to JSON",
    TxFee f{"alice", amount};
    auto  j = psio::encode(psio::json{}, f);
    REQUIRE(j.find("\"sender\":\"alice\"") != std::string::npos);
-   REQUIRE(j.find("\"amount\":\"0xdeadbeef\"") != std::string::npos);
+   REQUIRE(j.find("\"amount\":3735928559") != std::string::npos);
 
    auto back = psio::decode<TxFee>(psio::json{}, std::span<const char>{j});
    REQUIRE(back.sender == "alice");

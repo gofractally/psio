@@ -371,9 +371,25 @@ namespace psio::schema_types
                                  std::numeric_limits<U>::digits)};
          }
          else if constexpr (std::is_enum_v<U>)
+         {
             // A plain C++ enum is its underlying integer type in the schema,
-            // matching its wire form. Enumerator names are not recorded.
-            return build_anytype<std::underlying_type_t<U>>();
+            // matching its wire form. With PSIO_REFLECT_ENUM it is an Enum
+            // over that integer, carrying the enumerator names and values.
+            if constexpr (::psio::ReflectedEnum<U>)
+            {
+               using R = ::psio::reflect_enum<U>;
+               Enum e;
+               e.type = Box<AnyType>{build_anytype<std::underlying_type_t<U>>()};
+               for (std::size_t i = 0; i < R::count; ++i)
+                  e.members.push_back(Enumerator{
+                      std::string{R::names[i]},
+                      static_cast<std::uint64_t>(static_cast<std::int64_t>(
+                          static_cast<std::underlying_type_t<U>>(R::values[i])))});
+               return e;
+            }
+            else
+               return build_anytype<std::underlying_type_t<U>>();
+         }
          else if constexpr (std::is_same_v<U, std::string> ||
                             std::is_same_v<U, std::string_view>)
             return Custom{Box<AnyType>{List{Box<AnyType>{insert<std::uint8_t>()}}},

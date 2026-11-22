@@ -220,6 +220,31 @@ namespace json_conf
       blue  = 7,
    };
 
+   // Enumerator names: a listed value is written as its name.
+   PSIO_REFLECT_ENUM(Color, red, green, blue)
+
+   // A signed, sparse enum.
+   enum class Status : std::int32_t
+   {
+      pending = -1,
+      active  = 2,
+      closed  = 7,
+   };
+   PSIO_REFLECT_ENUM(Status, pending, active, closed)
+
+   // 128- and 256-bit integers: decimal in both text formats.
+   struct Wide
+   {
+      psio::uint128                amount = 0;
+      psio::int128                 delta  = 0;
+      psio::uint256                hash{};
+      std::optional<psio::uint128> maybe;
+      std::vector<psio::int128>    list;
+      Status                       status = Status::pending;
+      friend bool operator==(const Wide&, const Wide&) = default;
+   };
+   PSIO_REFLECT(Wide, amount, delta, hash, maybe, list, status)
+
    // Explicit maxDynamicData cap: 2-byte offsets whatever the fields hold.
    struct Capped
    {
@@ -328,6 +353,11 @@ namespace json_conf
    JSON_CONF_TYPE(Bounds, "Bounds")
    JSON_CONF_TYPE(Fixed, "Fixed")
    JSON_CONF_TYPE(Color, "Color")
+   JSON_CONF_TYPE(Status, "Status")
+   JSON_CONF_TYPE(psio::uint128, "u128")
+   JSON_CONF_TYPE(psio::int128, "i128")
+   JSON_CONF_TYPE(psio::uint256, "u256")
+   JSON_CONF_TYPE(Wide, "Wide")
    JSON_CONF_TYPE(Capped, "Capped")
    JSON_CONF_TYPE(Shapes, "Shapes")
    JSON_CONF_TYPE(Text4, "string<=4")
@@ -377,7 +407,9 @@ namespace json_conf
            std::type_identity<Fixed>{}, std::type_identity<Color>{},
            std::type_identity<Capped>{}, std::type_identity<Shapes>{},
            std::type_identity<Text4>{}, std::type_identity<ListU16Max3>{},
-           std::type_identity<BytesMax2>{});
+           std::type_identity<BytesMax2>{}, std::type_identity<Status>{},
+           std::type_identity<psio::uint128>{}, std::type_identity<psio::int128>{},
+           std::type_identity<psio::uint256>{}, std::type_identity<Wide>{});
    }
 
    // ── Fixture rows ──────────────────────────────────────────────────────

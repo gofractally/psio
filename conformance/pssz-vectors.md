@@ -129,7 +129,7 @@ exists only for record members.
 | `tuple` | 60 | Tuples as positional extensible records, including pruning. |
 | `variant` | 48 | One index byte plus the alternative; every index. |
 | `enum` | 76 | Enums as their underlying integer. |
-| `enum-unknown-value` | 36 | A value that names no enumerator. C++ accepts it in every entry point. |
+| `enum-unknown-value` | 36 | A value that names no enumerator: structurally valid (spec §4.5), accepted in every entry point. C++ enums hold it; the Rust mirror types take it in their `#[pssz(other)]` catch-all variant (a Rust enum without one rejects it, which Rust's own tests pin). |
 | `string` | 308 | UTF-8 and bound rules for `string`, `string<=N`, `raw_string`. |
 | `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`. Recorded as `canonical`; the exceptions are C++ `validate_strict`, which checks every plain string, and the schema-driven codec (the IR has one `string` for raw and UTF-8 strings and treats it as UTF-8): both reject these. |
 | `length-bound-overflow` | 28 | Frames exceeding a member `length_bound`, as a writer that skips the bound check would produce them. Every reader rejects them; the C++ and Rust encoders refuse the values. |

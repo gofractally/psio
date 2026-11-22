@@ -22,8 +22,18 @@
 // Everything else is the same in both:
 //
 //   bool                      true / false
-//   integers, enums           decimal (an enum is its underlying integer)
-//   float, double             shortest round-trip decimal (std::to_chars)
+//   integers                  decimal
+//   uint128, int128, uint256  decimal: a bare number under json, a string
+//                             under ijson (always). Read from a decimal
+//                             string, a bare number (ijson: |n| <= 2^53 - 1)
+//                             or the older "0x..." string
+//   enums                     with PSIO_REFLECT_ENUM: the enumerator's name
+//                             ("active") for a listed value, the number for
+//                             any other; read from "active", 2, "2" or
+//                             "active:2" (which must agree). Without it: the
+//                             underlying integer
+//   float, double             shortest round-trip decimal (std::to_chars);
+//                             NaN and the infinities have no text
 //   std::string, utf8_string  "..." with JSON escaping
 //   std::vector, std::array,
 //   psio::bounded             [ ... ]
@@ -39,8 +49,8 @@
 // string for one format.
 //
 // Writing fails for a value that has no JSON text: a string that is not
-// valid UTF-8 (a std::string is raw bytes and may hold anything), and under
-// ijson a non-finite float or a string holding a Unicode noncharacter. The
+// valid UTF-8 (a std::string is raw bytes and may hold anything), a
+// non-finite float, and under ijson a string holding a Unicode noncharacter. The
 // fail-fast `encode` raises codec_exception (aborts when exceptions are
 // disabled); `encode_json_checked` returns a codec_status instead.
 //
@@ -87,6 +97,7 @@
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
+#include <psio/ext_int.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/get_type_name.hpp>
 #include <psio/json_cursor.hpp>
@@ -235,6 +246,20 @@ namespace psio {
       {
          static constexpr bool fixed = true;
       };
+
+      // Integers wider than 64 bits. They are decimal in JSON text, whatever
+      // text adapter the type has for other consumers (ext_int.hpp's is the
+      // "0x" form, still read here and available per member as as<hex_tag>).
+      template <typename T>
+      inline constexpr bool is_wide_int_v =
+         std::is_same_v<T, ::psio::uint128> || std::is_same_v<T, ::psio::int128> ||
+         std::is_same_v<T, ::psio::uint256>;
+
+      // The type-level text adapter applies (member-level as<Tag> is
+      // handled where the member is known).
+      template <typename Fmt, typename T>
+      inline constexpr bool dispatch_adapter_v =
+         ::psio::format_should_dispatch_adapter_v<Fmt, T> && !is_wide_int_v<T>;
 
       // How an integer is written in the current position.
       enum class int_mode : std::uint8_t
@@ -539,14 +564,23 @@ namespace psio {
       template <typename Fmt, typename T>
       constexpr std::size_t text_bound() noexcept
       {
-         if constexpr (::psio::format_should_dispatch_adapter_v<Fmt, T>)
+         if constexpr (dispatch_adapter_v<Fmt, T>)
             return 0;
          else if constexpr (std::is_same_v<T, bool>)
             return 5;
          else if constexpr (std::is_same_v<T, std::byte>)
             return 5;
          else if constexpr (std::is_enum_v<T>)
-            return text_bound<Fmt, std::underlying_type_t<T>>();
+         {
+            // A name in quotes, or the number.
+            std::size_t bound = text_bound<Fmt, std::underlying_type_t<T>>();
+            if constexpr (::psio::ReflectedEnum<T>)
+               for (auto name : ::psio::reflect_enum<T>::names)
+                  bound = std::max(bound, name.size() + 2);
+            return bound;
+         }
+         else if constexpr (is_wide_int_v<T>)
+            return 0;
          else if constexpr (std::is_integral_v<T>)
             // digits, sign, and the quotes of a string form
             return sizeof(T) <= 8
@@ -615,12 +649,9 @@ namespace psio {
             // string. One unsigned compare decides either sign.
             constexpr std::uint64_t safe = (std::uint64_t{1} << 53) - 1;
             if constexpr (sizeof(I) > 8)
-            {
-               constexpr I limit = static_cast<I>(safe);
-               quoted            = v > limit;
-               if constexpr (std::is_signed_v<I>)
-                  quoted = quoted || v < -limit;
-            }
+               // A 128-bit integer is always a decimal string under ijson:
+               // one form for the type (amounts), whatever the value.
+               quoted = true;
             else if constexpr (std::is_signed_v<I>)
                quoted = static_cast<std::uint64_t>(v) + safe > 2 * safe;
             else
@@ -681,7 +712,7 @@ namespace psio {
          //
          // Must be the FIRST branch so the trailing static_assert is
          // discarded for adapter-encoded types.
-         if constexpr (::psio::format_should_dispatch_adapter_v<Fmt, T>)
+         if constexpr (dispatch_adapter_v<Fmt, T>)
          {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
                                          ::psio::text_category>;
@@ -692,21 +723,53 @@ namespace psio {
          else if constexpr (std::is_same_v<T, bool>)
             w.append(v ? std::string_view{"true"} : std::string_view{"false"});
          else if constexpr (std::is_enum_v<T> && !std::is_same_v<T, std::byte>)
+         {
+            // A declared enumerator is its name; any other value (and
+            // every value of an enum without PSIO_REFLECT_ENUM) its number.
+            if constexpr (::psio::ReflectedEnum<T>)
+               if (const auto name = ::psio::reflect_enum<T>::name_of(v))
+               {
+                  char* p = w.reserve(name->size() + 2);
+                  *p++    = '"';
+                  std::memcpy(p, name->data(), name->size());
+                  p += name->size();
+                  *p++ = '"';
+                  w.commit(p);
+                  return;
+               }
             encode_integer<Fmt, IM>(
                static_cast<std::underlying_type_t<T>>(v), w);
+         }
+         else if constexpr (std::is_same_v<T, ::psio::uint128> ||
+                            std::is_same_v<T, ::psio::int128>)
+            encode_integer<Fmt, IM>(v, w);
+         else if constexpr (std::is_same_v<T, ::psio::uint256>)
+         {
+            // Decimal: a string under ijson, a bare number under json.
+            constexpr bool quoted = IM == int_mode::string ||
+                                    (IM == int_mode::natural && Fmt::i_json);
+            std::string digits;
+            if (quoted)
+               digits.push_back('"');
+            ::psio::ext_int_detail::append_decimal_u256(digits, v);
+            if (quoted)
+               digits.push_back('"');
+            w.append(std::string_view{digits});
+         }
          else if constexpr (std::is_same_v<T, std::byte>)
             encode_integer<Fmt, IM>(static_cast<unsigned char>(v), w);
          else if constexpr (std::is_integral_v<T>)
             encode_integer<Fmt, IM>(v, w);
          else if constexpr (std::is_floating_point_v<T>)
          {
-            if constexpr (Fmt::i_json)
-               if (!std::isfinite(v))
-               {
-                  w.fail("ijson: non-finite float has no JSON text");
-                  w.append("null");
-                  return;
-               }
+            // NaN and the infinities have no JSON text, in either format.
+            if (!std::isfinite(v))
+            {
+               w.fail(Fmt::i_json ? "ijson: non-finite float has no JSON text"
+                                  : "json: non-finite float has no JSON text");
+               w.append("null");
+               return;
+            }
             char* const out = w.reserve(64);
             w.commit(std::to_chars(out, out + 64, v).ptr);
          }
@@ -963,6 +1026,157 @@ namespace psio {
          }
          if (out)
             *out = v;
+         return true;
+      }
+
+      // Decimal (`0 | -?[1-9][0-9]*`) or the legacy `[-]0x<hex>` text of a
+      // 128 / 256-bit integer, in range.
+      template <typename I>
+      bool parse_wide_text(std::string_view text, I& v) noexcept
+      {
+         const std::string_view body =
+            !text.empty() && text[0] == '-' ? text.substr(1) : text;
+         if (body.size() > 2 && body[0] == '0' && (body[1] == 'x' || body[1] == 'X'))
+         {
+            const bool                  negative = body.size() != text.size();
+            const std::span<const char> hex{body.data() + 2, body.size() - 2};
+            if constexpr (std::is_same_v<I, ::psio::uint256>)
+               return !negative && ::psio::ext_int_detail::parse_hex_u256(hex, v).ok();
+            else
+            {
+               ::psio::uint128 magnitude = 0;
+               if (!::psio::ext_int_detail::parse_hex_u128(hex, magnitude).ok())
+                  return false;
+               if constexpr (std::is_signed_v<I>)
+               {
+                  constexpr ::psio::uint128 half = ::psio::uint128{1} << 127;
+                  if (negative ? magnitude > half : magnitude >= half)
+                     return false;
+                  v = negative ? static_cast<I>(::psio::uint128{0} - magnitude)
+                               : static_cast<I>(magnitude);
+               }
+               else
+               {
+                  if (negative)
+                     return false;
+                  v = magnitude;
+               }
+               return true;
+            }
+         }
+         if constexpr (std::is_same_v<I, ::psio::uint256>)
+            return ::psio::ext_int_detail::parse_decimal_u256(text, v);
+         else
+            return parse_integer(text, v);
+      }
+
+      // |v| <= 2^53 - 1: what a bare I-JSON number may hold.
+      template <typename I>
+      constexpr bool wide_is_safe(const I& v) noexcept
+      {
+         constexpr std::uint64_t safe = (std::uint64_t{1} << 53) - 1;
+         if constexpr (std::is_same_v<I, ::psio::uint256>)
+            return v.limb[1] == 0 && v.limb[2] == 0 && v.limb[3] == 0 && v.limb[0] <= safe;
+         else if constexpr (std::is_signed_v<I>)
+            return v <= static_cast<I>(safe) && v >= -static_cast<I>(safe);
+         else
+            return v <= static_cast<I>(safe);
+      }
+
+      // A 128 / 256-bit integer: a decimal string (or the legacy "0x"
+      // string), or a bare decimal number — any in-range value under json,
+      // |n| <= 2^53 - 1 under ijson. A forced form accepts that form only.
+      template <typename Fmt, int_mode IM, typename I, typename C>
+      bool read_wide_integer(typed_reader<C>& r, I* out)
+      {
+         I         v{};
+         json_kind kind;
+         if (!r.c.kind(kind))
+            return false;
+         if (kind == json_kind::string)
+         {
+            if constexpr (IM == int_mode::number)
+               return r.c.fail("json: expected a number, found a string");
+            std::string_view text;
+            bool             escaped = false;
+            if (!r.c.string(text, escaped))
+               return false;
+            if (escaped || !parse_wide_text(text, v))
+               return r.c.fail("json: integer string is not a canonical "
+                               "in-range decimal");
+         }
+         else
+         {
+            if constexpr (IM == int_mode::string)
+               return r.c.fail("json: expected an integer string");
+            std::string_view text;
+            if (!r.c.number(text))
+               return false;
+            if (!parse_wide_text(text, v) || text.find_first_of("xX") != text.npos)
+               return r.c.fail("json: integer is not a canonical in-range "
+                               "decimal");
+            if constexpr (Fmt::i_json && IM == int_mode::natural)
+               if (!wide_is_safe(v))
+                  return r.c.fail("ijson: bare integer outside the safe range "
+                                  "must be a string");
+         }
+         if (out)
+            *out = v;
+         return true;
+      }
+
+      // An enum with PSIO_REFLECT_ENUM names. Accepted: the name ("active"),
+      // the number (2, or the numeric string "2"), and both ("active:2",
+      // which must agree). An unknown name is an error; a number that names
+      // no enumerator is accepted (a C++ enum holds any underlying value).
+      template <typename Fmt, int_mode IM, typename E, typename C>
+      bool read_named_enum(typed_reader<C>& r, E* out)
+      {
+         using U = std::underlying_type_t<E>;
+         json_kind kind;
+         if (!r.c.kind(kind))
+            return false;
+         if (kind != json_kind::string)
+         {
+            U v{};
+            if (!read_integer<Fmt, IM, U>(r, &v))
+               return false;
+            if (out)
+               *out = static_cast<E>(v);
+            return true;
+         }
+         std::string_view text;
+         bool             escaped = false;
+         if (!r.c.string(text, escaped))
+            return false;
+         auto number = [&](std::string_view digits, U& v) {
+            return !digits.empty() && parse_integer(digits, v);
+         };
+         U v{};
+         if (!text.empty() && (text[0] == '-' || (text[0] >= '0' && text[0] <= '9')))
+         {
+            if (!number(text, v))
+               return r.c.fail("json: enum number is not a canonical in-range decimal");
+         }
+         else
+         {
+            const std::size_t      colon = text.find(':');
+            const std::string_view name  = text.substr(0, colon);
+            const auto             named = ::psio::reflect_enum<E>::value_of(name);
+            if (!named)
+               return r.c.fail("json: unknown enumerator name");
+            v = static_cast<U>(*named);
+            if (colon != std::string_view::npos)
+            {
+               U stated{};
+               if (!number(text.substr(colon + 1), stated))
+                  return r.c.fail("json: enum number is not a canonical in-range decimal");
+               if (stated != v)
+                  return r.c.fail("json: enumerator name and number disagree");
+            }
+         }
+         if (out)
+            *out = static_cast<E>(v);
          return true;
       }
 
@@ -1224,7 +1438,7 @@ namespace psio {
       template <typename Fmt, int_mode IM, typename T, typename C>
       bool read_value(typed_reader<C>& r, T* out)
       {
-         if constexpr (::psio::format_should_dispatch_adapter_v<Fmt, T>)
+         if constexpr (dispatch_adapter_v<Fmt, T>)
             return read_adapted<Fmt, ::psio::adapter<std::remove_cvref_t<T>,
                                                      ::psio::text_category>>(r, out);
          else if constexpr (std::is_same_v<T, bool>)
@@ -1245,12 +1459,19 @@ namespace psio {
          }
          else if constexpr (std::is_enum_v<T>)
          {
-            std::underlying_type_t<T> v{};
-            if (!read_integer<Fmt, IM, std::underlying_type_t<T>>(r, &v))
-               return false;
-            if (out) *out = static_cast<T>(v);
-            return true;
+            if constexpr (::psio::ReflectedEnum<T>)
+               return read_named_enum<Fmt, IM, T>(r, out);
+            else
+            {
+               std::underlying_type_t<T> v{};
+               if (!read_integer<Fmt, IM, std::underlying_type_t<T>>(r, &v))
+                  return false;
+               if (out) *out = static_cast<T>(v);
+               return true;
+            }
          }
+         else if constexpr (is_wide_int_v<T>)
+            return read_wide_integer<Fmt, IM, T>(r, out);
          else if constexpr (std::is_integral_v<T>)
             return read_integer<Fmt, IM, T>(r, out);
          else if constexpr (std::is_floating_point_v<T>)

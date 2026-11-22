@@ -332,6 +332,9 @@ namespace psio::schema_types
                [&]<typename T>(const T& v) { return inline_type(v); },
                t.value);
          }
+         // An enum is rendered as its underlying integer.
+         std::string inline_type(const Enum& e) { return inline_any(*e.type); }
+
          std::string inline_type(const Int& i)
          {
             std::string out = i.isSigned ? "Int" : "UInt";

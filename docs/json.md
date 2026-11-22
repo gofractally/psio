@@ -21,11 +21,12 @@ carries a value's `json` and `ijson` texts, or a text one format must accept
 number, a byte sequence is an array of numbers, a variant is
 `[index, value]`.
 
-`ijson` differs in exactly three ways, with no per-type annotation:
+`ijson` differs in exactly four ways, with no per-type annotation:
 
 | Shape | `json` | `ijson` |
 |---|---|---|
 | 64-bit integers (`u64`, `i64`) | `18446744073709551615` | `7`, `"18446744073709551615"` (see below) |
+| 128- and 256-bit integers | `340282366920938463463374607431768211455` | `"340282366920938463463374607431768211455"` (always a string) |
 | byte sequence | `[1,255]` | `"01FF"` (uppercase on output) |
 | variant | `[3,{...}]` | `{"Inner":{...}}` |
 
@@ -35,6 +36,25 @@ number; a larger magnitude is written as a decimal string. So `0`, `-1` and
 `9007199254740991` are bare, `"9007199254740992"`, `"-9007199254740992"`,
 `"18446744073709551615"` and `"-9223372036854775808"` are strings. The form
 depends on the value, not only on the type: a consumer must accept both.
+
+**128- and 256-bit integers** (C++ `psio::uint128` / `int128` / `uint256`,
+Rust `u128` / `i128` / `U256`, Schema IR `Int{128}` / `Int{256}`) are
+decimal. `json` writes a bare number (arbitrary precision is legal JSON);
+`ijson` writes a decimal string for every value, small ones included, so a
+currency amount has one form: `"7"`. Both formats read all of:
+
+- a decimal string, `"340282366920938463463374607431768211455"`;
+- a bare decimal number: any in-range value under `json`, a magnitude of at
+  most 2^53 - 1 under `ijson` (the 64-bit rule);
+- the older `"0x..."` string (`"0xff"`, `"-0x2a"` for a negative `int128`;
+  hex digits of either case, at least one). It is accepted for backward
+  compatibility only: output is always decimal. To keep writing the hex form
+  for one member, annotate it `psio::as<psio::hex_tag>` (C++); the
+  `text_category` adapter of these types (the hex form) still serves
+  non-JSON text consumers.
+
+A member forced with `json_string` / `ijson_number` etc. is written in and
+reads exactly that form.
 
 8/16/32-bit integers, `bool` and floats are numbers in both. Byte sequences
 are C++ `std::vector` / `std::array` of `char`, `unsigned char` or
@@ -50,12 +70,45 @@ Common to both formats:
 - optional: `null` or the value;
 - strings: C++ `utf8_string<N>` / Rust `String` and the raw strings C++
   `std::string` / Rust `RawString` are JSON strings;
-- enum without payload: its underlying integer (follows the integer rule);
+- enum without payload: the enumerator's **name** as a string (`"active"`)
+  when the value is a declared enumerator, the **number** otherwise (see
+  "Enums" below);
 - floats: shortest round-trip decimal as `std::to_chars` writes it
-  (`0.1`, `1e+21`, `1e-07`, `-0`);
+  (`0.1`, `1e+21`, `1e-07`, `-0`, `5.960464477539063e-08`); NaN and the
+  infinities have no text (writing one is an error in both formats);
 - a type with a custom text form is a JSON string holding that text: C++
   `PSIO_ADAPTER(T, psio::text_category, ...)` or a member `psio::as<Tag>`;
   Rust `TextForm` + `psio::json_text_form!(T)`.
+
+### Enums
+
+An enum is its underlying integer on the wire (PSSZ and every binary
+format); the names exist for text.
+
+| | declaration |
+|---|---|
+| C++ | `enum class Status : std::int32_t { pending = -1, active = 2 };` then `PSIO_REFLECT_ENUM(Status, pending, active)` — one line, any namespace or in a class body. Without it the enum has no names and is written and read as its number. |
+| Rust | the derive takes the variant identifiers; `#[json(name = "active")]` renames one. |
+| Schema IR | `Enum { type, members: [{name, value}] }` over the underlying `Int`. |
+
+Output: `"active"` for a declared value; the number (by the integer rule of
+its width and format) for any other value: `3`.
+
+Input, in both formats, for a named enum:
+
+| text | meaning |
+|---|---|
+| `"active"` | the name |
+| `2` | the number |
+| `"2"` | the number as a string |
+| `"active:2"` | both; they must agree |
+
+An unknown name, a name whose stated number disagrees (`"active:3"`), and a
+non-canonical or out-of-range number are errors. A number that names no
+enumerator is accepted where the reader's type can hold it: always in C++
+and through a schema; in Rust only when the enum has a catch-all variant
+(`#[pssz(other)] Unknown(i32)`), otherwise it is an error. When two
+enumerators share a value, the first declared name is written.
 
 ### Variant alternative names
 
@@ -114,7 +167,8 @@ crate-root `psio::decode` / `psio::validate`.
 - Hex: an even number of hex digits of either case; exactly 2N for a
   fixed-size array.
 - Floats: any RFC 8259 number that is finite in the target type (underflow
-  reads as zero). `NaN`, `Infinity` and strings are rejected.
+  reads as zero). `NaN`, `Infinity`, `-Infinity`, any other spelling of a
+  non-finite value, and strings are rejected.
 - Strings: valid UTF-8, `\u` escapes with correctly paired surrogates, no raw
   control characters. `ijson` also rejects Unicode noncharacters (RFC 7493).
 - Arrays, tuples and fixed arrays require their exact element count.
@@ -193,13 +247,14 @@ A value with no JSON text is an error, never lossy or invalid output:
 - a string or list outside its length bound (above);
 - a raw string (C++ `std::string`, Rust `RawString`) whose bytes are not
   valid UTF-8, in both formats;
-- under `ijson`, a non-finite float and a string holding a noncharacter.
+- a non-finite float (NaN, +Infinity, -Infinity), in both formats and in
+  every language: there is no JSON text for it;
+- under `ijson`, a string holding a noncharacter.
 
 C++ `psio::encode` fails fast (`codec_exception`, or abort without
 exceptions); `psio::encode_json_checked(fmt, value, out)` returns a
-`codec_status` and leaves `out` unchanged on failure. Rust returns `Err`.
-C++ `psio::json` still prints a non-finite float as `nan` / `inf` (not JSON,
-unchanged); Rust `Json` returns an error instead.
+`codec_status` and leaves `out` unchanged on failure. Rust returns `Err`;
+the JS package throws.
 
 ## Exception-disabled builds
 
@@ -461,8 +516,10 @@ The IR carries what that needs (the C++ `SchemaBuilder` and the Rust
 
 - shape: records (`definitionWillNotChange` for fixed layout), tuples,
   variants, options, lists, arrays, bounded lists, the `string` / `hex` /
-  `bool` / `char` / `bitvector` / `bitlist` adapters, integers of 8-256 bits
-  (an enum is its underlying integer), floats;
+  `bool` / `char` / `bitvector` / `bitlist` adapters, integers of 8-256 bits,
+  enums (`Enum`: the underlying integer plus the enumerator names and
+  values; a C++ enum without `PSIO_REFLECT_ENUM` is just its integer),
+  floats;
 - width inputs: the record attribute `maxDynamicData`; bounded lists and
   strings; a member `length_bound{.max = N}` on a string or list is the
   bounded form of the member's type, any other bound the member attribute
@@ -495,8 +552,7 @@ Not expressible in the IR, so not available through a schema:
   prints a `std::vector<char>` element with the platform's `char` sign.
 
 No JSON form through a schema (an error, not a guess), because the typed
-text codecs have none to agree with: integers wider than 64 bits (their text
-form is undecided), `bitvector` / `bitlist`.
+text codecs have none to agree with: `bitvector` / `bitlist`.
 
 **Raw strings.** The IR has one `string` adapter for a UTF-8 string (C++
 `utf8_string`, Rust `String`) and a raw string (C++ `std::string`, Rust
@@ -516,12 +572,6 @@ pjson view and has no type information.
 
 ## Open
 
-- **128- and 256-bit integers.** `ext_int.hpp` registers a text adapter for
-  `uint128` / `int128` / `uint256` that writes `"0x..."` lowercase hex, and a
-  text adapter applies in `ijson` exactly as in `json`. That conflicts with
-  writing wide integers as decimal strings; the adapter form stands in both
-  formats until decided. Rust has no JSON form for `u128` / `i128` /
-  `Uint256`.
 - Bit types (`psio::bitvector` / `bitlist`, Rust `Bitvector` / `Bitlist`)
   have no JSON form in either language; one has to be chosen before either
   can implement it.

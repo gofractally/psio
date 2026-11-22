@@ -641,8 +641,16 @@ template <std::size_t W> class Codec
    codec_status resolve(const schema_types::AnyType &input, const schema_types::AnyType *&out) const
    {
       out = &input;
-      for (std::size_t hops = 0; hops <= schema.types.size(); ++hops)
+      for (std::size_t hops = 0; hops <= 2 * schema.types.size() + 2; ++hops)
       {
+         // An Enum is its underlying integer on the wire.
+         if (auto named = std::get_if<schema_types::Enum>(&out->value))
+         {
+            if (!named->type.get())
+               return fail("pssz IR: null schema box");
+            out = named->type.get();
+            continue;
+         }
          auto ref = std::get_if<schema_types::Type>(&out->value);
          if (!ref)
             return codec_ok();

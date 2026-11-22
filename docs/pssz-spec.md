@@ -470,10 +470,29 @@ are preserved bit-for-bit by both encoder and decoder.
 
 ### 4.5 Enums
 
-Encoded as the underlying integral type. Decoder is responsible for
-range-checking against the declared variants (encoder may emit a
-value the decoder doesn't recognize; decoder rejects with
-`enum_out_of_range`).
+An enum is its underlying integer on the wire: the same bytes, size and
+alignment as that integer in every position (record field, list element,
+optional payload, variant alternative).
+
+Any value in the underlying integer's range is **structurally valid** PSSZ,
+whether or not it is a declared enumerator. `validate` accepts it, and a
+schema-driven reader (which has only the Schema IR's `Enum` — the integer
+plus the enumerator names for text) carries it through unchanged. This is
+what lets an old reader keep reading data from a writer that has since
+added enumerators.
+
+Whether a reader's **type** can represent an undeclared value is a property
+of that type, not of the format:
+
+- a C++ `enum` holds any value of its underlying type, so C++ accepts it
+  everywhere;
+- a Rust enum holds only its variants. It opts in with a catch-all variant,
+  `#[pssz(other)] Unknown(<repr>)`: an undeclared wire value decodes into
+  it. A wire value equal to a declared enumerator always decodes to the
+  declared variant, and encoding `Unknown(n)` where `n` is a declared
+  enumerator is an error, so each value has exactly one in-memory
+  representation. Without the catch-all, decoding an undeclared value into
+  that type is an error (`enum_out_of_range`).
 
 ## 5. Containers
 

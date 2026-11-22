@@ -44,6 +44,12 @@ namespace pssz_conf
    enum class E16 : std::uint16_t { Lo = 1, Hi = 258 };
    enum class E32 : std::int32_t { Neg = -2, Zero = 0, Pos = 16909060 };
    enum class E64 : std::uint64_t { Zero = 0, Big = 72623859790382856ull };
+   // Enumerator names: the Schema IR records these as Enum (names + values)
+   // over the underlying integer; the bytes are the integer's.
+   PSIO_REFLECT_ENUM(Color, Red, Green, Blue)
+   PSIO_REFLECT_ENUM(E16, Lo, Hi)
+   PSIO_REFLECT_ENUM(E32, Neg, Zero, Pos)
+   PSIO_REFLECT_ENUM(E64, Zero, Big)
 
    // ── Scalars ───────────────────────────────────────────────────────────
    struct Scalars

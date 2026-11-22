@@ -371,6 +371,12 @@ namespace psio::schema_types
             return inline_type(v, none);
          }
 
+         // An enum is rendered as its underlying integer.
+         std::string inline_type(const Enum& e, const std::vector<Attribute>& attrs)
+         {
+            return inline_any(*e.type, attrs);
+         }
+
          std::string inline_type(const Int&                    i,
                                  const std::vector<Attribute>& attrs)
          {
