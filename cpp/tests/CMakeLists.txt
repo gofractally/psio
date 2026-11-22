@@ -414,3 +414,35 @@ target_compile_definitions(psio_time_key_conformance_tests PRIVATE
 # Key / time and schema fidelity together: time ids as built-in custom
 # presentations, enums and raw / UTF-8 strings in keys, member bounds in keys.
 psio_add_test(psio_key_time_schema_tests key_time_schema_tests.cpp)
+
+# Annotations declared inside PSIO_REFLECT, and with the separate statements,
+# for types in nested namespaces (in-class and namespace-scope forms).
+psio_add_test(psio_annotate_namespace_tests annotate_namespace_tests.cpp)
+# One attribute declared twice, or declared after its first use, must not
+# compile. The file compiles without any ANN_FAIL_* (control).
+function(psio_annotate_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_annotate_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/annotate_conflict_fail.cpp)
+   set_tests_properties(psio_annotate_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+add_test(NAME psio_annotate_conflict_control_compiles
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/annotate_conflict_fail.cpp)
+psio_annotate_compile_fail(reflect_and_field_attrs ANN_FAIL_REFLECT_AND_FIELD_ATTRS
+   "an annotation is declared twice")
+psio_annotate_compile_fail(reflect_and_type_attrs ANN_FAIL_REFLECT_AND_TYPE_ATTRS
+   "an annotation is declared twice")
+psio_annotate_compile_fail(field_attrs_twice ANN_FAIL_FIELD_ATTRS_TWICE
+   "redefinition of 'psio_annotation_lookup'")
+psio_annotate_compile_fail(type_attrs_twice ANN_FAIL_TYPE_ATTRS_TWICE
+   "redefinition of 'psio_annotation_lookup'")
+psio_annotate_compile_fail(type_keyword_twice ANN_FAIL_TYPE_KEYWORD_TWICE
+   "lists a type-level attribute twice")
+psio_annotate_compile_fail(field_attrs_after_use ANN_FAIL_FIELD_ATTRS_AFTER_USE
+   "comes after the first use of the field's annotations")
+psio_annotate_compile_fail(type_attrs_after_use ANN_FAIL_TYPE_ATTRS_AFTER_USE
+   "comes after the first use of the type's annotations")

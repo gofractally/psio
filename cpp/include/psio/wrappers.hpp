@@ -556,7 +556,8 @@ namespace psio {
    {
       using field_t = std::remove_cvref_t<FieldType>;
 
-      static constexpr auto member_value   = annotate<MemberPtr>;
+      static constexpr auto member_value =
+         detail::member_annotations_in<EnclosingT, MemberPtr>();
       static constexpr auto wrapper_value  = inherent_annotations<field_t>::value;
       static constexpr auto type_value     = annotate<type<EnclosingT>{}>;
 

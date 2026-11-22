@@ -7,9 +7,21 @@
 // § 5.3.
 //
 // Producer / consumer model:
-//   - Producers (users) specialize `psio::annotate<X>` for
-//     `X = &T::field` (member-level) or `X = psio::type<T>{}` (type-level),
-//     attaching a tuple of spec structs — pure data, no behavior.
+//   - Producers (users) attach a tuple of spec structs — pure data, no
+//     behavior — to `X = &T::field` (member-level) or
+//     `X = psio::type<T>{}` (type-level). The annotation of X is declared,
+//     for a type in ANY namespace:
+//       * inside the type's PSIO_REFLECT, next to the type or in its class
+//         body: `attr(field, spec)`, `definitionWillNotChange()`,
+//         `maxFields(N)`, `maxDynamicData(N)` (reflect.hpp);
+//       * or as a separate statement at namespace scope — the type's own
+//         namespace, an enclosing one, or the global one:
+//         `PSIO_FIELD_ATTRS(T, field, spec)`, `PSIO_TYPE_ATTRS(T, spec)`,
+//         `PSIO_ATTRS(T, (field, (spec)), ...)`.
+//     The two forms compose when they give different spec types; the same
+//     spec type declared twice for one X is a compile error. A separate
+//     statement must come before the first use of the annotations it adds
+//     to (a later one is a compile error, never silently ignored).
 //   - Consumers (formats) query specs via `find_spec<Spec>(anns)` /
 //     `has_spec_v<Spec, Tuple>`; unknown specs are ignored.
 //
@@ -668,12 +680,211 @@ namespace psio {
 
    // ── Annotation trait ───────────────────────────────────────────────────
    //
-   // The primary template is an empty tuple. Users specialize for each
-   // field/type they want to annotate; specializations hold a tuple of
-   // spec values.
+   // `annotate<X>` is the tuple of spec values declared for X. It is found
+   // from X alone, wherever the declaration was written, by the technique
+   // psio::reflect uses (reflect.hpp, detail::reflect_slot):
+   //
+   //   - annotations listed in PSIO_REFLECT are members of the metadata the
+   //     macro binds to the type (`reflect<T>::type_annotations`,
+   //     `reflect<T>::member_annotations<I>`), so they work at namespace
+   //     scope and in a class body, for private members and for members
+   //     declared after the macro;
+   //   - a separate PSIO_FIELD_ATTRS / PSIO_TYPE_ATTRS statement defines a
+   //     friend function of `detail::annotation_slot<X>`, which ADL finds
+   //     from X whatever namespace the statement is in.
+   //
+   // Nothing here is an explicit specialization, which C++ allows only in
+   // the global namespace or in namespace psio.
+
+   namespace detail
+   {
+      // Separate statements. `annotation_bind<X, Holder>` defines the
+      // friend `annotation_slot<X>` declares; a second bind for one X
+      // redefines it, which does not compile.
+      template <auto X>
+      struct annotation_slot
+      {
+         friend constexpr auto psio_annotation_lookup(annotation_slot);
+      };
+      template <auto X, typename Holder>
+      struct annotation_bind
+      {
+         friend constexpr auto psio_annotation_lookup(annotation_slot<X>) { return Holder{}(); }
+      };
+
+      // A read that found no separate statement records the fact, so that
+      // a statement written after it is an error and not a silent no-op.
+      template <auto X>
+      struct annotation_read_slot
+      {
+         friend constexpr auto psio_annotation_was_read(annotation_read_slot);
+      };
+      template <auto X>
+      struct annotation_read_mark
+      {
+         friend constexpr auto psio_annotation_was_read(annotation_read_slot<X>) { return true; }
+      };
+      template <auto X, typename = void>
+      struct annotation_was_read : std::false_type
+      {
+      };
+      template <auto X>
+      struct annotation_was_read<
+         X, std::void_t<decltype(psio_annotation_was_read(annotation_read_slot<X>{}))>>
+         : std::true_type
+      {
+      };
+
+      template <auto X, typename = void>
+      struct declared_annotations : annotation_read_mark<X>
+      {
+         static constexpr std::tuple<> value{};
+      };
+      template <auto X>
+      struct declared_annotations<
+         X, std::void_t<decltype(psio_annotation_lookup(annotation_slot<X>{}))>>
+      {
+         static constexpr auto value = psio_annotation_lookup(annotation_slot<X>{});
+      };
+
+      // Annotations carried by the reflection metadata.
+      template <typename T>
+      constexpr auto carried_type_annotations() noexcept
+      {
+         if constexpr (std::is_class_v<T>)
+         {
+            if constexpr (requires { ::psio::reflect<T>::type_annotations; })
+               return ::psio::reflect<T>::type_annotations;
+            else
+               return std::tuple<>{};
+         }
+         else
+            return std::tuple<>{};
+      }
+
+      template <typename A, typename B>
+      constexpr bool same_member(A a, B b) noexcept
+      {
+         if constexpr (std::is_same_v<A, B>)
+            return a == b;
+         else
+            return false;
+      }
+      // The annotations `E`'s PSIO_REFLECT gives the member X of E.
+      template <typename E, auto X>
+      constexpr auto carried_member_annotations() noexcept
+      {
+         using R = ::psio::reflect<E>;
+         if constexpr (requires { requires R::has_member_annotations; })
+         {
+            constexpr std::size_t index = []<std::size_t... Is>(std::index_sequence<Is...>)
+            {
+               std::size_t found = sizeof...(Is);
+               (void)((same_member(R::template member_pointer<Is>, X) ? (found = Is, true)
+                                                                      : false) ||
+                      ...);
+               return found;
+            }(std::make_index_sequence<R::member_count>{});
+            if constexpr (index < R::member_count)
+               return R::template member_annotations<index>;
+            else
+               return std::tuple<>{};
+         }
+         else
+            return std::tuple<>{};
+      }
+
+      template <typename A, typename... Bs>
+      inline constexpr std::size_t spec_count = (std::size_t{std::is_same_v<A, Bs>} + ... + 0);
+      template <typename A, typename B>
+      struct specs_disjoint;
+      template <typename... As, typename... Bs>
+      struct specs_disjoint<std::tuple<As...>, std::tuple<Bs...>>
+         : std::bool_constant<((spec_count<As, Bs...> == 0) && ...)>
+      {
+      };
+      template <typename A>
+      struct specs_distinct;
+      template <typename... As>
+      struct specs_distinct<std::tuple<As...>>
+         : std::bool_constant<((spec_count<As, As...> == 1) && ...)>
+      {
+      };
+
+      // The two sources of one X: they compose, and may not both give the
+      // same spec type.
+      template <typename Carried, typename Declared>
+      constexpr auto merge_annotations(const Carried& carried, const Declared& declared) noexcept
+      {
+         if constexpr (std::tuple_size_v<Declared> == 0)
+            return carried;
+         else if constexpr (std::tuple_size_v<Carried> == 0)
+            return declared;
+         else
+         {
+            static_assert(
+               specs_disjoint<Carried, Declared>::value,
+               "psio: an annotation is declared twice — in PSIO_REFLECT (attr / "
+               "definitionWillNotChange / maxFields / maxDynamicData) and again with "
+               "PSIO_FIELD_ATTRS / PSIO_TYPE_ATTRS / PSIO_ATTRS");
+            return std::tuple_cat(carried, declared);
+         }
+      }
+
+      template <typename M>
+      struct member_pointer_class
+      {
+      };
+      template <typename M, typename C>
+      struct member_pointer_class<M C::*>
+      {
+         using type = C;
+      };
+
+      // Dispatch on what X is.
+      template <auto X, typename K = std::remove_const_t<decltype(X)>>
+      struct annotations_of
+      {
+         static constexpr auto value = declared_annotations<X>::value;
+      };
+      template <auto X, typename T>
+      struct annotations_of<X, ::psio::type<T>>
+      {
+         static constexpr auto value =
+            merge_annotations(carried_type_annotations<T>(), declared_annotations<X>::value);
+      };
+      template <auto X, typename M, typename C>
+      struct annotations_of<X, M C::*>
+      {
+         static constexpr auto value = merge_annotations(carried_member_annotations<C, X>(),
+                                                         declared_annotations<X>::value);
+      };
+
+   }  // namespace detail
 
    template <auto X>
-   inline constexpr auto annotate = std::tuple<>{};
+   inline constexpr auto annotate = detail::annotations_of<X>::value;
+
+   namespace detail
+   {
+      // The annotations of member X as a member of E. X's own class is
+      // where `annotate` looks; a class that reflects an inherited member
+      // may annotate it in its own PSIO_REFLECT as well.
+      template <typename E, auto X>
+      constexpr auto member_annotations_in() noexcept
+      {
+         if constexpr (requires { typename member_pointer_class<decltype(X)>::type; })
+         {
+            if constexpr (std::is_same_v<typename member_pointer_class<decltype(X)>::type, E>)
+               return ::psio::annotate<X>;
+            else
+               return merge_annotations(carried_member_annotations<E, X>(),
+                                        ::psio::annotate<X>);
+         }
+         else
+            return ::psio::annotate<X>;
+      }
+   }  // namespace detail
 
    // ── find_spec helper ───────────────────────────────────────────────────
    //
@@ -1045,8 +1256,8 @@ namespace psio {
 //      (effective_balance, psio::field_num_spec{.value = 3}),
 //      (type,              psio::definition_will_not_change{}))
 //
-// Each (name, specs) pair expands to one namespace-scope specialization
-// of `psio::annotate<X>`. `specs` may be a single spec value or a
+// Each (name, specs) pair expands to one namespace-scope declaration that
+// binds the specs to `psio::annotate<X>`. `specs` may be a single spec value or a
 // `spec | spec | …` composition; it is wrapped via `to_spec_tuple` so
 // both shapes work uniformly.
 //
@@ -1055,15 +1266,29 @@ namespace psio {
 //   PSIO_FIELD_ATTRS(Validator, pubkey, psio::length_bound{.exact = 48})
 //   PSIO_TYPE_ATTRS(Validator, psio::definition_will_not_change{})
 
-#define PSIO_FIELD_ATTRS(TYPE, FIELD, ...)                         \
-   template <>                                                      \
-   inline constexpr auto ::psio::annotate<&TYPE::FIELD> =          \
-      ::psio::to_spec_tuple(__VA_ARGS__);
+// Both are single declarations that are legal at any namespace scope: they
+// bind the spec tuple to `&TYPE::FIELD` / `psio::type<TYPE>` through
+// detail::annotation_slot, so TYPE may live in any namespace and the
+// statement may be in TYPE's namespace, an enclosing one, or the global one.
+// The spec expression is evaluated where the statement is written.
+#define PSIO_FIELD_ATTRS(TYPE, FIELD, ...)                                                   \
+   static_assert(!::psio::detail::annotation_was_read<&TYPE::FIELD>::value,                   \
+                 "psio: PSIO_FIELD_ATTRS(" BOOST_PP_STRINGIZE(TYPE) ", "                      \
+                 BOOST_PP_STRINGIZE(FIELD)                                                    \
+                 ") comes after the first use of the field's annotations");                   \
+   static_assert(sizeof(::psio::detail::annotation_bind<                                      \
+                    &TYPE::FIELD,                                                             \
+                    decltype([] { return ::psio::to_spec_tuple(__VA_ARGS__); })>) > 0,        \
+                 "");
 
-#define PSIO_TYPE_ATTRS(TYPE, ...)                                 \
-   template <>                                                      \
-   inline constexpr auto ::psio::annotate<::psio::type<TYPE>{}> = \
-      ::psio::to_spec_tuple(__VA_ARGS__);
+#define PSIO_TYPE_ATTRS(TYPE, ...)                                                           \
+   static_assert(!::psio::detail::annotation_was_read<::psio::type<TYPE>{}>::value,           \
+                 "psio: PSIO_TYPE_ATTRS(" BOOST_PP_STRINGIZE(TYPE)                            \
+                 ") comes after the first use of the type's annotations");                    \
+   static_assert(sizeof(::psio::detail::annotation_bind<                                      \
+                    ::psio::type<TYPE>{},                                                     \
+                    decltype([] { return ::psio::to_spec_tuple(__VA_ARGS__); })>) > 0,        \
+                 "");
 
 // Multi-field form — each entry is `(field_name, (spec_expr))`. The
 // inner parens isolate any commas in the spec expression (such as

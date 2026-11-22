@@ -210,11 +210,40 @@ namespace chain::svc {
 `index_of_method_hash<Hash>(key)` (a caller-supplied 64-bit hash; two
 methods with one key do not compile), `for_each_method(fn)` and
 `invoke_method<I>(object, argument_tuple)`. Overloaded member functions
-cannot be listed (their address is ambiguous). `attr(...)` and the
-type-level keywords are explicit specializations and work only in a
-`PSIO_REFLECT` written at global scope: for a namespaced or in-class
-reflected type attach them at global scope with
-`PSIO_FIELD_ATTRS(ns::T, field, spec)` / `PSIO_TYPE_ATTRS(ns::T, spec)`.
+cannot be listed (their address is ambiguous).
+
+Annotations are part of the same declaration, for a type in any (nested)
+namespace, in the class body or after the type:
+
+```cpp
+namespace chain::state {
+   struct account {
+      std::uint64_t              id = 0;
+      std::string                owner;
+      std::vector<std::uint16_t> tags;
+      std::uint32_t balance_of(std::uint32_t asset) const;
+      PSIO_REFLECT(account,
+                   attr(id, json_string),          // field: JSON integer form
+                   attr(owner, max<32>),           // field: length bound
+                   attr(tags, max<4> | sorted),    // field: several specs
+                   method(balance_of, asset),
+                   definitionWillNotChange(),      // type: fixed layout
+                   maxFields(8),                   // type: field-count cap
+                   maxDynamicData(200))            // type: encoded-size cap
+   };
+}
+```
+
+`attr(field, spec)` lists the field and annotates it; its spec expression is
+evaluated with `using namespace psio` in effect. The annotations are members
+of the reflection metadata (`reflect<T>::member_annotations<I>`,
+`reflect<T>::type_annotations`) and `psio::annotate<X>` — what every format
+reads — finds them there. `PSIO_FIELD_ATTRS(T, field, spec)`,
+`PSIO_TYPE_ATTRS(T, spec)` and `PSIO_ATTRS(T, (field, (spec)), ...)` remain
+as separate statements, legal at any namespace scope (the type's own, an
+enclosing one, the global one). The two forms compose; the same spec type
+declared twice for one field or type, or a separate statement placed after
+the first use of the annotations it adds to, does not compile.
 
 There is one proxy, `psio::reflect<T>::proxy<P>`. It inherits `P`; each
 field is a member `name()` that returns `P::get<I, &T::name>()` and each
@@ -242,7 +271,7 @@ the reflection walk. Same taxonomy across hosts (§2.5).
 
 | Host  | Mechanism |
 |-------|-----------|
-| C++   | `psio::annotate<X>` template wrapping the field type, OR `PSIO_REFLECT_TYPE_ANNOTATIONS(...)` for type-level |
+| C++   | `attr(field, spec)` and the type-level keywords inside `PSIO_REFLECT` (any namespace, in-class or after the type), or `PSIO_FIELD_ATTRS` / `PSIO_TYPE_ATTRS` as separate statements; read through `psio::annotate<X>` |
 | Rust  | `#[psio(annotation = "value")]` attribute on the field/struct |
 | Python| Class decorator with field metadata, OR `Annotated[T, psio.AnnotationName]` from `typing` |
 | Go    | Extended field-tag syntax: `` `psio:"name,bytes_encoding=hex"` `` |
