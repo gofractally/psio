@@ -324,3 +324,71 @@ fn literal_cpp_ir_alternatives_and_envelope_match_bytes_in_both_directions() {
     }
     assert_eq!(rows, 15);
 }
+
+#[derive(Debug, PartialEq, PsszPack, PsszUnpack, ToPsszSchema)]
+struct StringKinds {
+    text: String,
+    bounded_text: BoundedString<8>,
+    raw: RawString,
+    bounded_raw: BoundedRawString<8>,
+    level: Level,
+}
+#[derive(Debug, Clone, Copy, PartialEq, PsszPack, PsszUnpack, ToPsszSchema)]
+#[repr(u16)]
+enum Level {
+    Low = 1,
+    High = 2,
+}
+
+#[test]
+fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
+    use psio::pssz::dynamic as codec;
+    let (schema, root) = schema_for::<StringKinds>().unwrap();
+    let AnyValue::Object(object) = &schema.resolve(&root).unwrap().value else {
+        panic!("expected Object IR")
+    };
+    let adapter = |index: usize| {
+        let AnyValue::Custom(custom) = &schema.resolve(&object.members[index].r#type).unwrap().value
+        else {
+            panic!("expected an adapter")
+        };
+        let bound = match &custom.r#type.value {
+            AnyValue::List(_) => None,
+            AnyValue::BoundedList(list) => Some(list.maxCount),
+            _ => panic!("expected a byte list"),
+        };
+        (custom.id.clone(), bound)
+    };
+    // UTF-8 strings use the "string" adapter (as C++ utf8_string does); raw
+    // strings are byte lists the IR codecs do not UTF-8-check.
+    assert_eq!(adapter(0), ("string".to_string(), None));
+    assert_eq!(adapter(1), ("string".to_string(), Some(8)));
+    assert_eq!(adapter(2), ("hex".to_string(), None));
+    assert_eq!(adapter(3), ("hex".to_string(), Some(8)));
+    // A field-less enum is its underlying integer, as in C++.
+    let AnyValue::Int(level) = &schema.resolve(&object.members[4].r#type).unwrap().value else {
+        panic!("expected Int")
+    };
+    assert_eq!((level.bits, level.isSigned), (16, false));
+
+    // The schema-driven codec accepts exactly what the typed codec accepts.
+    let value = StringKinds {
+        text: "\u{e9}".into(),
+        bounded_text: BoundedString("ab".into()),
+        raw: RawString(vec![0xff]),
+        bounded_raw: BoundedRawString(vec![0xc0, 0x80]),
+        level: Level::High,
+    };
+    let bytes = try_to_pssz::<Pssz32, _>(&value).unwrap();
+    let dynamic = codec::decode_exact::<Pssz32>(&schema, &root, &bytes).unwrap();
+    assert_eq!(codec::encode::<Pssz32>(&schema, &root, &dynamic).unwrap(), bytes);
+    // Invalid UTF-8 in the UTF-8 field is rejected by both.
+    let mut bad = bytes.clone();
+    let at = bad.iter().position(|b| *b == 0xc3).unwrap();
+    bad[at] = 0xff;
+    assert!(from_pssz::<Pssz32, StringKinds>(&bad).is_err());
+    assert!(codec::decode_exact::<Pssz32>(&schema, &root, &bad).is_err());
+    // The schema-driven codec has no type-derived width profile yet.
+    assert!(codec::encode::<Pssz>(&schema, &root, &dynamic).is_err());
+    assert!(codec::decode_exact::<Pssz>(&schema, &root, &bytes).is_err());
+}
