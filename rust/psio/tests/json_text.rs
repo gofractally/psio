@@ -351,3 +351,229 @@ mod cursor {
         assert!(TextCursor::new(bomb.as_bytes(), true).unwrap().skip().is_err());
     }
 }
+
+// ── Member and variant lookup, in any order ──────────────────────────────────
+//
+// WideRecord has more members than the derive's expected-order threshold
+// (64), OrderProbe fewer: both member-matching paths are exercised.
+
+#[derive(psio::JsonText, Debug, Clone, PartialEq, Default)]
+struct WideRecord {
+    member_00: u32,
+    member_01_x: u32,
+    member_02_x_x: u32,
+    member_03_x_x_x: u32,
+    member_04: u32,
+    member_05_x: u32,
+    member_06_x_x: u32,
+    member_07_x_x_x: u32,
+    member_08: u32,
+    member_09_x: u32,
+    member_10_x_x: u32,
+    member_11_x_x_x: u32,
+    member_12: u32,
+    member_13_x: u32,
+    member_14_x_x: u32,
+    member_15_x_x_x: u32,
+    member_16: u32,
+    member_17_x: u32,
+    member_18_x_x: u32,
+    member_19_x_x_x: u32,
+    member_20: u32,
+    member_21_x: u32,
+    member_22_x_x: u32,
+    member_23_x_x_x: u32,
+    member_24: u32,
+    member_25_x: u32,
+    member_26_x_x: u32,
+    member_27_x_x_x: u32,
+    member_28: u32,
+    member_29_x: u32,
+    member_30_x_x: u32,
+    member_31_x_x_x: u32,
+    member_32: u32,
+    member_33_x: u32,
+    member_34_x_x: u32,
+    member_35_x_x_x: u32,
+    member_36: u32,
+    member_37_x: u32,
+    member_38_x_x: u32,
+    member_39_x_x_x: u32,
+    member_40: u32,
+    member_41_x: u32,
+    member_42_x_x: u32,
+    member_43_x_x_x: u32,
+    member_44: u32,
+    member_45_x: u32,
+    member_46_x_x: u32,
+    member_47_x_x_x: u32,
+    member_48: u32,
+    member_49_x: u32,
+    member_50_x_x: u32,
+    member_51_x_x_x: u32,
+    member_52: u32,
+    member_53_x: u32,
+    member_54_x_x: u32,
+    member_55_x_x_x: u32,
+    member_56: u32,
+    member_57_x: u32,
+    member_58_x_x: u32,
+    member_59_x_x_x: u32,
+    member_60: u32,
+    member_61_x: u32,
+    member_62_x_x: u32,
+    member_63_x_x_x: u32,
+    member_64: u32,
+    member_65_x: u32,
+    member_66_x_x: u32,
+    member_67_x_x_x: u32,
+    member_68: u32,
+    member_69_x: u32,
+    member_70_x_x: u32,
+    member_71_x_x_x: u32,
+    member_72: u32,
+    member_73_x: u32,
+    member_74_x_x: u32,
+    member_75_x_x_x: u32,
+    member_76: u32,
+    member_77_x: u32,
+    member_78_x_x: u32,
+    member_79_x_x_x: u32,
+}
+
+#[derive(psio::JsonText, Debug, Clone, PartialEq)]
+enum ManyAlternatives {
+    Alt0(u32),
+    Alt1(u32),
+    Alt2(u32),
+    Alt3(u32),
+    Alt4(u32),
+    Alt5(u32),
+    Alt6(u32),
+    Alt7(u32),
+    Alt8(u32),
+    #[json(name = "string")]
+    Text(String),
+}
+
+#[derive(psio::JsonText, Debug, Clone, PartialEq, Default)]
+struct OrderProbe {
+    a: u32,
+    b: Option<u32>,
+    c: String,
+    d: Option<String>,
+    e: Vec<u32>,
+    f: u64,
+}
+
+fn wide_names() -> Vec<&'static str> {
+    vec!["member_00", "member_01_x", "member_02_x_x", "member_03_x_x_x", "member_04", "member_05_x", "member_06_x_x", "member_07_x_x_x", "member_08", "member_09_x", "member_10_x_x", "member_11_x_x_x", "member_12", "member_13_x", "member_14_x_x", "member_15_x_x_x", "member_16", "member_17_x", "member_18_x_x", "member_19_x_x_x", "member_20", "member_21_x", "member_22_x_x", "member_23_x_x_x", "member_24", "member_25_x", "member_26_x_x", "member_27_x_x_x", "member_28", "member_29_x", "member_30_x_x", "member_31_x_x_x", "member_32", "member_33_x", "member_34_x_x", "member_35_x_x_x", "member_36", "member_37_x", "member_38_x_x", "member_39_x_x_x", "member_40", "member_41_x", "member_42_x_x", "member_43_x_x_x", "member_44", "member_45_x", "member_46_x_x", "member_47_x_x_x", "member_48", "member_49_x", "member_50_x_x", "member_51_x_x_x", "member_52", "member_53_x", "member_54_x_x", "member_55_x_x_x", "member_56", "member_57_x", "member_58_x_x", "member_59_x_x_x", "member_60", "member_61_x", "member_62_x_x", "member_63_x_x_x", "member_64", "member_65_x", "member_66_x_x", "member_67_x_x_x", "member_68", "member_69_x", "member_70_x_x", "member_71_x_x_x", "member_72", "member_73_x", "member_74_x_x", "member_75_x_x_x", "member_76", "member_77_x", "member_78_x_x", "member_79_x_x_x"]
+}
+
+fn wide_text(order: &[usize]) -> String {
+    let names = wide_names();
+    let members: Vec<String> =
+        order.iter().map(|i| format!("\"{}\":{}", names[*i], (i + 1) * 3)).collect();
+    format!("{{{}}}", members.join(","))
+}
+
+#[test]
+fn wide_record_reads_in_any_member_order() {
+    let names = wide_names();
+    let declared: Vec<usize> = (0..names.len()).collect();
+    let want: WideRecord = json::from_str::<Json, _>(&wide_text(&declared)).unwrap();
+    assert_eq!(json::to_string::<Json, _>(&want).unwrap(), wide_text(&declared));
+    assert_eq!(want.member_00, 3);
+    assert_eq!(want.member_59_x_x_x, 180);
+
+    let mut reversed = declared.clone();
+    reversed.reverse();
+    assert_eq!(json::from_str::<Json, WideRecord>(&wide_text(&reversed)).unwrap(), want);
+    assert_eq!(json::from_str::<IJson, WideRecord>(&wide_text(&reversed)).unwrap(), want);
+
+    // A fixed pseudo-random shuffle, several rounds.
+    let mut order = declared.clone();
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    for _ in 0..25 {
+        for i in (1..order.len()).rev() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            order.swap(i, (state >> 33) as usize % (i + 1));
+        }
+        assert_eq!(json::from_str::<Json, WideRecord>(&wide_text(&order)).unwrap(), want);
+    }
+
+    // A missing member, an unknown key, near-miss names, a repeated key.
+    for drop in [0usize, 31, 59] {
+        let fewer: Vec<usize> = declared.iter().copied().filter(|i| *i != drop).collect();
+        assert!(json::from_str::<Json, WideRecord>(&wide_text(&fewer)).is_err());
+    }
+    let text = wide_text(&reversed);
+    let extra = format!("{{\"member_0\":[1,{{}}],\"member_000\":null,\"\":0,{}", &text[1..]);
+    assert_eq!(json::from_str::<Json, WideRecord>(&extra).unwrap(), want);
+    let repeated = format!("{},\"member_00\":7}}", &text[..text.len() - 1]);
+    assert_eq!(json::from_str::<Json, WideRecord>(&repeated).unwrap().member_00, 7);
+    let bad_then_good = format!("{{\"member_00\":\"x\",{}", &wide_text(&declared)[1..]);
+    assert!(json::from_str::<Json, WideRecord>(&bad_then_good).is_err());
+}
+
+#[test]
+fn small_record_reads_in_every_member_order() {
+    let want = OrderProbe { a: 1, b: Some(2), c: "x".into(), d: Some("y".into()), e: vec![4, 5], f: 6 };
+    let members =
+        ["\"a\":1", "\"b\":2", "\"c\":\"x\"", "\"d\":\"y\"", "\"e\":[4,5]", "\"f\":6"];
+    fn permute(items: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
+        if k == items.len() {
+            out.push(items.clone());
+            return;
+        }
+        for i in k..items.len() {
+            items.swap(k, i);
+            permute(items, k + 1, out);
+            items.swap(k, i);
+        }
+    }
+    let mut orders = Vec::new();
+    permute(&mut (0..members.len()).collect(), 0, &mut orders);
+    assert_eq!(orders.len(), 720);
+    for order in orders {
+        let text =
+            format!("{{{}}}", order.iter().map(|i| members[*i]).collect::<Vec<_>>().join(","));
+        assert_eq!(json::from_str::<Json, OrderProbe>(&text).unwrap(), want, "{text}");
+        assert_eq!(json::from_str::<IJson, OrderProbe>(&text).unwrap(), want, "{text}");
+    }
+    // Optional members left out; repeated keys, the last one wins.
+    assert_eq!(
+        json::from_str::<Json, OrderProbe>(r#"{"f":6,"e":[],"c":"x","a":1}"#).unwrap(),
+        OrderProbe { a: 1, c: "x".into(), f: 6, ..Default::default() }
+    );
+    assert_eq!(
+        json::from_str::<Json, OrderProbe>(r#"{"a":1,"a":2,"c":"x","e":[1],"f":6,"e":[2,3],"c":"y","a":9}"#)
+            .unwrap(),
+        OrderProbe { a: 9, c: "y".into(), e: vec![2, 3], f: 6, ..Default::default() }
+    );
+    assert!(json::from_str::<Json, OrderProbe>(r#"{"a":"bad","a":2,"c":"x","e":[],"f":6}"#).is_err());
+    assert!(json::from_str::<Json, OrderProbe>(r#"{"c":"x","e":[],"f":6}"#).is_err());
+}
+
+#[test]
+fn variant_alternatives_resolve_by_name() {
+    for (index, name) in ["Alt0", "Alt1", "Alt2", "Alt3", "Alt4", "Alt5", "Alt6", "Alt7", "Alt8"]
+        .iter()
+        .enumerate()
+    {
+        let text = format!("{{\"{name}\":{index}}}");
+        let value: ManyAlternatives = json::from_str::<IJson, _>(&text).unwrap();
+        assert_eq!(json::to_string::<IJson, _>(&value).unwrap(), text);
+        let positional = format!("[{index},{index}]");
+        assert_eq!(json::from_str::<Json, ManyAlternatives>(&positional).unwrap(), value);
+    }
+    assert_eq!(
+        json::from_str::<IJson, ManyAlternatives>(r#"{"string":"s"}"#).unwrap(),
+        ManyAlternatives::Text("s".into())
+    );
+    for bad in [r#"{"Alt9":1}"#, r#"{"Alt":1}"#, r#"{"Alt00":1}"#, r#"{"":1}"#, r#"{"Text":"s"}"#, "{}"]
+    {
+        assert!(json::from_str::<IJson, ManyAlternatives>(bad).is_err(), "{bad}");
+    }
+    assert!(json::from_str::<Json, ManyAlternatives>("[10,1]").is_err());
+}

@@ -71,6 +71,29 @@ pub(crate) fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
     Ok(out)
 }
 
+// ── Member lookup ────────────────────────────────────────────────────────────
+//
+// A key is matched with a `match` on the member names: rustc compiles it to
+// a switch on the key's length followed by compares, which measured as fast
+// as a perfect hash built here (benches/json_text_bench.rs) and is what
+// records of up to EXPECTED_ORDER_MIN members use, unchanged.
+//
+// A wider record first compares each key with the member after the last one
+// read (writers emit declaration order) and only then falls back to the
+// match. That measured ~11% faster on a 200-member record read in declared
+// order and the same in reversed order; on 5- to 10-member records the extra
+// compare measured ~8% slower, hence the threshold.
+const EXPECTED_ORDER_MIN: usize = 64;
+
+/// `match key { "name0" => 0, ..., _ => count }` as a usize expression.
+fn lookup_tokens(names: &[String], key: TokenStream2) -> TokenStream2 {
+    let count = names.len();
+    let indices = 0..count;
+    quote! {
+        match #key { #(#names => #indices,)* _ => #count }
+    }
+}
+
 fn form_tokens(form: Option<bool>) -> TokenStream2 {
     match form {
         None => quote!(::psio::json::IntForm::Natural),
@@ -128,6 +151,8 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 let mut slots = Vec::new();
                 let mut arms = Vec::new();
                 let mut builds = Vec::new();
+                let mut keys = Vec::new();
+                let mut index_arms = Vec::new();
                 for (index, field) in fields.named.iter().enumerate() {
                     let ident = field.ident.as_ref().unwrap();
                     let key = ident.to_string();
@@ -151,13 +176,16 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         w.restore_form(__saved);
                     });
                     slots.push(quote! { let mut #slot: ::core::option::Option<#ty> = ::core::option::Option::None; });
-                    arms.push(quote! {
-                        #key => {
+                    keys.push(key.clone());
+                    let read = quote! {
+                        {
                             let __saved = r.member_form(#json, #ijson);
                             #slot = ::core::option::Option::Some(<#ty as #j::JsonText>::read_json(r)?);
                             r.restore_form(__saved);
                         }
-                    });
+                    };
+                    arms.push(quote! { #key => #read });
+                    index_arms.push(quote! { #index => #read });
                     builds.push(quote! {
                         #ident: match #slot {
                             ::core::option::Option::Some(v) => v,
@@ -170,6 +198,52 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         }
                     });
                 }
+                let count = keys.len();
+                let members = if count > EXPECTED_ORDER_MIN {
+                    let lookup = lookup_tokens(&keys, quote!(__key));
+                    quote! {
+                        const __NAMES: [&str; #count] = [#(#keys),*];
+                        // The member after the last one read: writers emit
+                        // declaration order, so it is tried first, with one
+                        // compare, before the match.
+                        let mut __expected: usize = 0;
+                        loop {
+                            // A repeated key is read again: the last one wins.
+                            let __key = r.key()?;
+                            let __key: &str = &__key;
+                            let __index: usize =
+                                if __expected < #count && __NAMES[__expected] == __key {
+                                    __expected
+                                } else {
+                                    #lookup
+                                };
+                            match __index {
+                                #(#index_arms)*
+                                _ => r.skip_unknown()?,
+                            }
+                            if __index < #count {
+                                __expected = __index + 1;
+                            }
+                            if r.object_next()? {
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    quote! {
+                        loop {
+                            // A repeated key is read again: the last one wins.
+                            let __key = r.key()?;
+                            match &*__key {
+                                #(#arms)*
+                                _ => r.skip_unknown()?,
+                            }
+                            if r.object_next()? {
+                                break;
+                            }
+                        }
+                    }
+                };
                 (
                     quote! {
                         w.raw("{");
@@ -181,17 +255,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         r.begin(b'{', "json: expected '{'")?;
                         #(#slots)*
                         if !r.take(b'}') {
-                            loop {
-                                // A repeated key is read again: the last one wins.
-                                let __key = r.key()?;
-                                match &*__key {
-                                    #(#arms)*
-                                    _ => r.skip_unknown()?,
-                                }
-                                if r.object_next()? {
-                                    break;
-                                }
-                            }
+                            #members
                         }
                         r.end_object();
                         ::core::result::Result::Ok(Self { #(#builds),* })
@@ -271,13 +335,16 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     });
                     names.push(label);
                 }
+                let variant_count = names.len();
+                let variant_lookup = lookup_tokens(&names, quote!(__key));
                 (
                     quote! {
                         match self { #(#write_arms)* }
                         ::core::result::Result::Ok(())
                     },
                     quote! {
-                        let (__index, __saved) = #j::read_variant_open(r, &[#(#names),*])?;
+                        let (__index, __saved) = #j::read_variant_open_by(
+                            r, #variant_count, |__key: &str| -> usize { #variant_lookup })?;
                         let __value = match __index {
                             #(#read_arms)*
                             _ => unreachable!("read_variant_open returns a valid index"),

@@ -53,6 +53,9 @@ borsh = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 rmp-serde = "1"
 rkyv = { version = "0.8", features = ["bytecheck"] }
+# Bench only: raw parse speed of a candidate JSON syntax layer
+# (benches/json_text_bench.rs). Not a dependency of the library.
+simd-json = "0.14"
 
 [[bench]]
 name = "psio_vs_externals"
@@ -60,4 +63,8 @@ harness = false
 
 [[bench]]
 name = "pjson_bench"
+harness = false
+
+[[bench]]
+name = "json_text_bench"
 harness = false

@@ -1257,6 +1257,19 @@ pub fn write_variant_close(w: &mut Writer, saved: IntForm) {
 /// Reads the head of an enum with payloads and returns the index of the
 /// alternative among `names`.
 pub fn read_variant_open(r: &mut Reader<'_>, names: &[&str]) -> Result<(usize, IntForm)> {
+    read_variant_open_by(r, names.len(), |key| {
+        names.iter().position(|n| *n == key).unwrap_or(names.len())
+    })
+}
+
+/// The same with the caller's name lookup: `index_of(name)` returns the
+/// alternative's index, or `count` for an unknown name. The derive passes a
+/// `match` on the names (a switch on length, then compares) instead of a scan.
+pub fn read_variant_open_by(
+    r: &mut Reader<'_>,
+    count: usize,
+    index_of: impl Fn(&str) -> usize,
+) -> Result<(usize, IntForm)> {
     let saved = r.member_form(IntForm::Natural, IntForm::Natural);
     if r.ijson {
         r.begin(b'{', "ijson: expected a variant object")?;
@@ -1267,15 +1280,16 @@ pub fn read_variant_open(r: &mut Reader<'_>, names: &[&str]) -> Result<(usize, I
         }
         // Variant names are checked as I-JSON strings.
         let key = r.string_here(true)?;
-        let Some(index) = names.iter().position(|n| *n == key) else {
+        let index = index_of(&key);
+        if index >= count {
             return Err(r.err_at(at, "ijson: unknown variant alternative"));
-        };
+        }
         r.expect(b':', "json: expected ':' after object key")?;
         Ok((index, saved))
     } else {
         r.begin(b'[', "json: expected a [index, value] variant")?;
         let index = u32::read_json(r)? as usize;
-        if index >= names.len() {
+        if index >= count {
             return Err(r.err("json: variant index out of range"));
         }
         r.expect(b',', "json: expected ',' in variant")?;
