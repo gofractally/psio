@@ -26,9 +26,22 @@
 #include <psio/error.hpp>
 #include <psio/shapes.hpp>
 
+namespace psio
+{
+   template <typename T, std::size_t N>
+   class bounded;
+   template <std::size_t N>
+   class utf8_string;
+   template <std::size_t N>
+   class bitlist;
+}
+#include <psio/detail/annotation_tree.hpp>
+
 // shape_tag_of<T> lives in shapes.hpp
 
 #include <array>
+#include <compare>
+#include <concepts>
 #include <map>
 #include <set>
 #include <string>
@@ -117,6 +130,18 @@ namespace psio {
       const std::vector<T>& storage() const noexcept { return data_; }
       std::vector<T>&       storage() noexcept       { return data_; }
 
+      // Compares as its elements do (a map value, a set element, a key).
+      friend bool operator==(const bounded& a, const bounded& b)
+         requires requires(const T& x) { { x == x } -> std::convertible_to<bool>; }
+      {
+         return a.data_ == b.data_;
+      }
+      friend auto operator<=>(const bounded& a, const bounded& b)
+         requires requires(const std::vector<T>& x) { x <=> x; }
+      {
+         return a.data_ <=> b.data_;
+      }
+
     private:
       void enforce_bound_() const
       {
@@ -160,6 +185,8 @@ namespace psio {
       const std::string& storage() const noexcept { return data_; }
 
       friend bool operator==(const utf8_string&, const utf8_string&) = default;
+      // Bytewise, as std::string orders: usable as a std::map / std::set key.
+      friend auto operator<=>(const utf8_string&, const utf8_string&) = default;
 
     private:
       void enforce_bound_() const
@@ -607,7 +634,24 @@ namespace psio {
          "the spec's `applies_to = shape_set<...>` declaration and the "
          "field's shape (e.g. attaching length_bound to a Record is "
          "meaningless).");
+
+      // Position specs (element / keys / values / at<I>) and the specs
+      // below them must fit the member's type at every depth.
+      static_assert(detail::ann::tree_ok<field_t, effective_annotations_for>(),
+                    "psio: a member annotation does not fit the member's type");
    };
+
+   // The value-side check of a member's whole annotation tree: its own
+   // length_bound and utf8, and those stated for its elements, keys, values
+   // and tuple elements at any depth. `format` names the reporting codec
+   // ("pssz", "json", "key"); the length message is that codec's own.
+   template <typename F, typename Annotations>
+   codec_status check_member_annotations(const F& value, const Annotations& annotations,
+                                         const char*      length_message,
+                                         std::string_view format) noexcept
+   {
+      return detail::ann::check_value(value, annotations, length_message, format);
+   }
 
    // ── length_bound on a value ───────────────────────────────────────────
    //
@@ -640,6 +684,125 @@ namespace psio {
       }
    }  // namespace detail
 
+   // ── annotated_tuple ───────────────────────────────────────────────────
+   //
+   // A std::tuple<Ts...> whose elements carry annotations and which has a
+   // cap of its own, stated by `Meta`:
+   //
+   //   Meta::annotations        a std::tuple of at_spec<I, specs>: what
+   //                            `at<I>(specs) | at<J>(specs)` builds
+   //   Meta::type_annotations   std::tuple{max_dynamic_data_spec{N}} or
+   //                            std::tuple<>{}
+   //
+   // It is the tuple (it derives from it, converts from it, and std::get /
+   // std::apply / structured bindings work on it); the codecs read the
+   // annotations of element I as they read a record member's: they bound
+   // the tuple (max_encoded_size, the offset width) and are enforced on
+   // encode, validate and decode. The cap is the tuple's maxDynamicData: an
+   // explicit cap rules, and fixes the width for the type's lifetime.
+   //
+   // `reflect<T>::method_arg_tuple<I>` is the annotated tuple of a method's
+   // arguments (Meta = method_arg_meta<T, I>).
+   template <typename Meta, typename... Ts>
+   struct annotated_tuple : std::tuple<Ts...>
+   {
+      using tuple_type           = std::tuple<Ts...>;
+      using meta_type            = Meta;
+      using psio_annotated_tuple = void;
+
+      using std::tuple<Ts...>::tuple;
+      annotated_tuple() = default;
+      annotated_tuple(const tuple_type& t) : tuple_type(t) {}
+      annotated_tuple(tuple_type&& t) : tuple_type(std::move(t)) {}
+
+      tuple_type&       tuple() noexcept { return *this; }
+      const tuple_type& tuple() const noexcept { return *this; }
+
+      static constexpr auto psio_annotations      = Meta::annotations;
+      static constexpr auto psio_type_annotations = Meta::type_annotations;
+
+      struct psio_annotation_holder_
+      {
+         static constexpr auto value = Meta::annotations;
+      };
+      static_assert(detail::ann::tree_ok<tuple_type, psio_annotation_holder_>(),
+                    "psio: an annotation of this tuple does not fit its element's type");
+   };
+
+   namespace detail
+   {
+      // (specs0, specs1, ...) -> the at_spec<I, specsI> of every annotated I.
+      template <std::size_t I, typename Specs>
+      constexpr auto indexed_spec(const Specs& specs) noexcept
+      {
+         if constexpr (std::tuple_size_v<Specs> == 0)
+            return std::tuple<>{};
+         else
+            return std::tuple{at_spec<I, Specs>{specs}};
+      }
+      template <typename... Ps, std::size_t... Is>
+      constexpr auto indexed_specs(const std::tuple<Ps...>& params,
+                                   std::index_sequence<Is...>) noexcept
+      {
+         return std::tuple_cat(indexed_spec<Is>(std::get<Is>(params))...);
+      }
+      template <bool Has, std::size_t N>
+      struct cap_annotation
+      {
+         static constexpr auto value = std::tuple{max_dynamic_data_spec{N}};
+      };
+      template <std::size_t N>
+      struct cap_annotation<false, N>
+      {
+         static constexpr auto value = std::tuple<>{};
+      };
+   }  // namespace detail
+
+   // The annotations of the argument tuple of method I of reflected T, from
+   // what its `method(name, attr(p, specs)..., maxDynamicData(N))` lists.
+   template <typename T, std::size_t I>
+   struct method_arg_meta
+   {
+      static constexpr auto& meta = reflect<T>::template method_annotations<I>;
+      using params_t              = std::remove_cvref_t<decltype(meta.params)>;
+      static_assert(std::tuple_size_v<params_t> <=
+                       std::tuple_size_v<typename reflect<T>::template method_params<I>>,
+                    "psio: method(...) lists more parameters than the function has");
+
+      // The parameter names, as far as method(...) lists them.
+      static constexpr auto& names = reflect<T>::template method_param_names<I>;
+
+      static constexpr auto annotations = detail::indexed_specs(
+         meta.params, std::make_index_sequence<std::tuple_size_v<params_t>>{});
+      static constexpr auto type_annotations =
+         detail::cap_annotation<meta.max_dynamic_data.has_value(),
+                                meta.max_dynamic_data.value_or(0)>::value;
+   };
+
+   // The annotations returns(...) lists for method I, and their value-side
+   // check: a return value has no enclosing record, so whoever packs one
+   // checks it with this (the bytes of a bare string or list do not depend
+   // on its bound).
+   template <typename T, std::size_t I>
+   inline constexpr auto method_result_annotations =
+      reflect<T>::template method_annotations<I>.result;
+   namespace detail
+   {
+      template <typename T, std::size_t I>
+      struct method_result_holder
+      {
+         static constexpr auto value = method_result_annotations<T, I>;
+      };
+   }
+   template <typename T, std::size_t I, typename R>
+   codec_status check_method_result(const R& value, std::string_view format = "psio") noexcept
+   {
+      static_assert(detail::ann::tree_ok<R, detail::method_result_holder<T, I>>(),
+                    "psio: a returns(...) annotation does not fit the method's return type");
+      return detail::ann::check_value(value, method_result_annotations<T, I>,
+                                      "psio: return value length_bound violated", format);
+   }
+
    template <typename FieldType, auto MemberPtr>
    inline constexpr auto effective_annotations_v =
       effective_annotations<FieldType, MemberPtr>::value;
@@ -649,3 +812,15 @@ namespace psio {
       effective_annotations_for<EnclosingT, FieldType, MemberPtr>::value;
 
 }  // namespace psio
+
+// std::get / std::apply / structured bindings see the tuple it is.
+template <typename Meta, typename... Ts>
+struct std::tuple_size<psio::annotated_tuple<Meta, Ts...>>
+   : std::integral_constant<std::size_t, sizeof...(Ts)>
+{
+};
+template <std::size_t I, typename Meta, typename... Ts>
+struct std::tuple_element<I, psio::annotated_tuple<Meta, Ts...>>
+   : std::tuple_element<I, std::tuple<Ts...>>
+{
+};

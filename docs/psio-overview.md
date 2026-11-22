@@ -364,6 +364,76 @@ enclosing one, the global one). The two forms compose; the same spec type
 declared twice for one field or type, or a separate statement placed after
 the first use of the annotations it adds to, does not compile.
 
+### Bounds by annotation
+
+A bound does not have to change a member's type. The member stays the
+`std::vector<std::string>` (or map, tuple, optional, …) the code wants, and
+its `attr` states the bounds, at any depth:
+
+```cpp
+struct Post {
+   std::string                               title;
+   std::vector<std::string>                  tags;
+   std::map<std::string, std::uint64_t>      votes;
+   std::optional<std::vector<std::uint8_t>>  thumb;
+   std::pair<std::string, std::uint32_t>     author;
+   PSIO_REFLECT(Post,
+                attr(title, utf8 | max<64>),                       // UTF-8, <= 64 bytes
+                attr(tags, max<8> | element(utf8 | max<16>)),      // <= 8 strings of <= 16 bytes
+                attr(votes, max<32> | keys(utf8 | max<16>)),       // <= 32 entries, keys <= 16 bytes
+                attr(thumb, max<1024>),                            // when present: <= 1024 bytes
+                attr(author, at<0>(utf8 | max<32>)))               // pair / tuple element 0
+};
+static_assert(psio::auto_pssz_width_v<Post> == 2);   // every part is bounded: 16-bit offsets
+```
+
+| spec | applies to | states |
+|---|---|---|
+| `max<N>` | string, list, map, set, nested value | at most N bytes (string, nested) / elements (list, map, set) |
+| `exact<N>`, `min<N>` | the same, on the member itself | exactly / at least N |
+| `utf8` | string | the bytes are UTF-8 (a plain `std::string` is raw bytes) |
+| `element(specs)` | list, `std::array`, set | `specs` for every element |
+| `keys(specs)`, `values(specs)` | map | `specs` for every key / mapped value |
+| `at<I>(specs)` | tuple, pair, variant | `specs` for element / alternative I |
+
+`specs` is one spec or a `spec | spec` list and may itself hold position specs
+(`element(element(max<4>))` for a list of lists). A `std::optional` is looked
+through: what is written for it applies to its payload. An annotation on the
+wrong shape — `element(...)` on a string, `keys(...)` on a list, `at<2>` on a
+pair, `max<N>` on an integer element — does not compile, with a message
+naming the mistake.
+
+The same bounds can be stated in the type instead; a user who prefers the
+type to enforce the bound at construction picks the wrapper. The two spellings
+are one type on the wire: the same bytes, the same offset widths, the same
+`max_encoded_size`, the same Schema IR.
+
+| constraint | annotation on the plain type | wrapper type | Schema IR node |
+|---|---|---|---|
+| UTF-8 string | `std::string` + `utf8` | `psio::utf8_string<>` | `Custom{List<u8>, "utf8"}` |
+| UTF-8 string, ≤ N bytes | `std::string` + `utf8 \| max<N>` | `psio::utf8_string<N>` | `Custom{BoundedList<u8, N>, "utf8"}` |
+| raw string, ≤ N bytes | `std::string` + `max<N>` | — | `Custom{BoundedList<u8, N>, "string"}` |
+| list of ≤ N elements | `std::vector<T>` + `max<N>` | `psio::bounded<T, N>` | `BoundedList<T, N>` (bytes: `Custom{…, "hex"}`) |
+| ≤ N strings of ≤ M bytes | `std::vector<std::string>` + `max<N> \| element(utf8 \| max<M>)` | `psio::bounded<psio::utf8_string<M>, N>` | `BoundedList<Custom{BoundedList<u8, M>, "utf8"}, N>` |
+| elements of an array | `std::array<std::string, K>` + `element(utf8 \| max<M>)` | `std::array<psio::utf8_string<M>, K>` | `Array<…, K>` |
+| map of ≤ N entries, bounded keys / values | `std::map<K, V>` + `max<N> \| keys(…) \| values(…)` | `std::map<bounded K, bounded V>` + `max<N>` | `Custom{BoundedList<Tuple<K', V'>, N>, "map"}` |
+| tuple / pair element, variant alternative | `at<I>(…)` | the element's wrapper type | `Tuple` / `Variant` with the bounded member |
+| exact / minimum length (member only) | `exact<N>`, `min<N>` | — | member attribute `lengthBound` |
+
+Every bound is enforced wherever the value crosses a codec: `psio::pssz`
+refuses a value outside the tree on encode (`encode` throws,
+`encode_pssz_checked` reports) and a frame that holds one on `validate`,
+`validate_strict`, the checked decode and the fail-fast decode; `psio::json`
+/ `psio::ijson` refuse it when writing and reading; `psio::key` refuses it
+when reading a key; the schema-driven codecs enforce the bounded nodes the
+schema carries. A list's own offset table is 4 bytes wide whatever bounds it;
+a record, a tuple, a pair, a map entry and an array of variable elements take
+their width from their bound, and the annotations of their position narrow it
+exactly as the wrapper types would. A member whose annotations narrow such a
+nested value is not addressable through a `pssz_view` (state the bound in the
+type to view it), and a member with `element` / `keys` / `values` / `at`
+annotations is not addressable through a mutable view.
+
 There is one proxy, `psio::reflect<T>::proxy<P>`. It inherits `P`; each
 field is a member `name()` that returns `P::get<I, &T::name>()` and each
 method a member `name(args...)` that returns

@@ -41,6 +41,26 @@ psio::pssz_view<Account> view{bytes};                    // read without decodin
 psio::shared_pssz<Account> shared{std::move(bytes)};     // bytes with several owners
 ```
 
+Bounds are annotations on the reflection, not changes to the types: a
+`std::vector<std::string>` stays one, and its `attr` says how large it may get.
+Bounded members give a record narrow offsets, and every codec enforces them.
+
+```cpp
+struct Post {
+   std::string              title;
+   std::vector<std::string> tags;
+   PSIO_REFLECT(Post, attr(title, utf8 | max<64>),
+                attr(tags, max<8> | element(utf8 | max<16>)))   // <= 8 tags of <= 16 bytes
+};
+static_assert(psio::auto_pssz_width_v<Post> == 1);              // 1-byte offsets
+```
+
+`psio::bounded<T, N>` and `psio::utf8_string<N>` state the same bounds in the
+type, with the same bytes and schema; methods take the same annotations and a
+cap for their arguments (`method(transfer, to, attr(memo, max<80>),
+maxDynamicData(256))`). See
+[bounds by annotation](docs/psio-overview.md#bounds-by-annotation).
+
 The same names exist for the other formats (`to_json`, `from_key<T>`,
 `ssz_view<T>`, …). A view only reads; the view that writes is spelled
 `pssz_mutable_view<T>`. `from_F<T>(bytes)` validates before it decodes;

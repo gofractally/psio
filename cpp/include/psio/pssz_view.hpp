@@ -298,7 +298,21 @@ namespace psio::view_layout {
                    N < ::psio::detail::pssz_impl::record_traits<T>::member_count)
       static std::span<const char> record_field_span(
          std::span<const char> s, std::span<const char> = {}) noexcept
-      { return detail_pssz::record_field_span<::psio::auto_pssz_width_v<T>, T, N>(s); }
+      {
+         // A child view re-selects its width from the member's type alone.
+         // That is the width the encoder used unless the member's
+         // annotations narrow a value nested in it (an array of bounded
+         // variable elements, a tuple / pair / map entry with bounded
+         // elements): such a member is not addressable through a view.
+         static_assert(
+            ::psio::detail::pssz_impl::widths_unchanged<
+               typename ::psio::detail::pssz_impl::record_traits<T>::template member_type<N>,
+               ::psio::detail::pssz_impl::member_ann<T, N>>(),
+            "psio: a pssz view cannot address this member: its annotations (element / keys / "
+            "values / at<I>) narrow the offset width of a value nested in it. State the bound "
+            "in the member's type (psio::bounded, psio::utf8_string) to view it");
+         return detail_pssz::record_field_span<::psio::auto_pssz_width_v<T>, T, N>(s);
+      }
 
       template <typename T>
       static std::size_t vector_count(std::span<const char> s) noexcept

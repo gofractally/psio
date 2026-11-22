@@ -122,6 +122,14 @@ namespace psio {
       inline constexpr bool mutation_blocked_v<::psio::unique_keys_spec> = true;
       template <typename Child>
       inline constexpr bool mutation_blocked_v<::psio::element_spec<Child>> = true;
+      // The other position specs constrain content below the member as
+      // element_spec does (a key's or a tuple element's bytes, UTF-8).
+      template <typename Child>
+      inline constexpr bool mutation_blocked_v<::psio::keys_spec<Child>> = true;
+      template <typename Child>
+      inline constexpr bool mutation_blocked_v<::psio::values_spec<Child>> = true;
+      template <std::size_t I, typename Child>
+      inline constexpr bool mutation_blocked_v<::psio::at_spec<I, Child>> = true;
 
       namespace mutable_view_impl {
 

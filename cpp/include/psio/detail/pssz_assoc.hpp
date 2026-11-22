@@ -61,7 +61,7 @@ namespace psio::detail::pssz_impl
 
    // The size of the list of the entries in canonical order (the offsets
    // checked against W are those the encoder writes).
-   template <std::size_t W, bool Auto, typename T>
+   template <std::size_t W, bool Auto, typename T, typename A>
    std::size_t assoc_size(const T& v, size_check* check)
    {
       using E = ::psio::detail::assoc_entry_t<T>;
@@ -83,14 +83,18 @@ namespace psio::detail::pssz_impl
             (void)checked_offset<W>(total, check);
          order.for_each([&](const auto& item) {
             (void)checked_offset<W>(total, check);
-            total = checked_add(total, size_of_v<W, Auto>(item, check), check);
+            total = checked_add(
+               total,
+               size_of_v<W, Auto, std::remove_cvref_t<decltype(item)>, ann::entry_ann<T, A>>(
+                  item, check),
+               check);
          });
          enforce_wire_span(total, check);
          return total;
       }
    }
 
-   template <std::size_t W, bool Auto, typename T, typename Sink>
+   template <std::size_t W, bool Auto, typename T, typename Sink, typename A>
    void assoc_encode(const T& v, Sink& s)
    {
       using E = ::psio::detail::assoc_entry_t<T>;
@@ -112,7 +116,8 @@ namespace psio::detail::pssz_impl
          order.for_each([&](const auto& item) {
             write_offset<W>(s, slot, s.written() - table);
             slot += W;
-            encode_value<W, Auto>(item, s);
+            encode_value<W, Auto, std::remove_cvref_t<decltype(item)>, Sink,
+                         ann::entry_ann<T, A>>(item, s);
          });
       }
    }
@@ -120,7 +125,7 @@ namespace psio::detail::pssz_impl
    // Trusted decode: the list, inserted into the container. A container
    // whose comparator / equality merges keys the encoding distinguishes
    // would silently lose entries: that is a failure.
-   template <std::size_t W, bool Auto, typename T>
+   template <std::size_t W, bool Auto, typename T, typename A>
    T assoc_decode(std::span<const char> src, std::size_t pos, std::size_t end)
    {
       PSIO_REQUIRE_ENTRY_ORDER("psio::pssz", T);
@@ -130,14 +135,15 @@ namespace psio::detail::pssz_impl
       if constexpr (::psio::detail::is_map_v<T>)
       {
          auto items =
-            decode_vector<W, Auto, std::pair<K, typename T::mapped_type>>(src, pos, end);
+            decode_vector<W, Auto, std::pair<K, typename T::mapped_type>, ann::entry_ann<T, A>>(
+               src, pos, end);
          count = items.size();
          for (auto& item : items)
             out.emplace_hint(out.end(), std::move(item));
       }
       else
       {
-         auto items = decode_vector<W, Auto, K>(src, pos, end);
+         auto items = decode_vector<W, Auto, K, ann::entry_ann<T, A>>(src, pos, end);
          count      = items.size();
          for (auto&& item : items)
             out.emplace_hint(out.end(), std::move(item));
@@ -151,10 +157,11 @@ namespace psio::detail::pssz_impl
 
    // The keys of a structurally valid list of entries, in wire order:
    // f(const K&) -> bool (false stops the walk).
-   template <std::size_t W, bool Auto, typename T, typename F>
+   template <std::size_t W, bool Auto, typename T, typename F, typename A = no_ann>
    codec_status assoc_for_each_key(std::span<const char> src, std::size_t pos, std::size_t end,
                                    F&& f)
    {
+      using EA = ann::entry_ann<T, A>;
       using E = ::psio::detail::assoc_entry_t<T>;
       using K = ::psio::detail::assoc_key_t<T>;
       if (pos == end || is_zero_fixed_v<E>)
@@ -164,7 +171,7 @@ namespace psio::detail::pssz_impl
          if constexpr (::psio::detail::is_map_v<T>)
          {
             constexpr std::size_t EW = [] {
-               if constexpr (Auto) return ::psio::auto_pssz_width<E>();
+               if constexpr (Auto) return width_for<E, EA>();
                else return W;
             }();
             constexpr auto layout = record_layout<EW, E>(std::make_index_sequence<2>{});
@@ -177,12 +184,13 @@ namespace psio::detail::pssz_impl
             // An absent key slot is a pruned trailing optional: None.
             K key{};
             if (spans[0].present)
-               key = decode_value<EW, Auto, K>(src, spans[0].begin, spans[0].end);
+               key = decode_value<EW, Auto, K, ann::at_ann<EA, 0>>(src, spans[0].begin,
+                                                                   spans[0].end);
             more = f(static_cast<const K&>(key));
          }
          else
          {
-            const K key = decode_value<W, Auto, K>(src, begin, stop);
+            const K key = decode_value<W, Auto, K, EA>(src, begin, stop);
             more        = f(key);
          }
          return codec_ok();
@@ -212,7 +220,7 @@ namespace psio::detail::pssz_impl
 
    // Strictly ascending keys. With a key type whose `<` is the key order the
    // decoded keys are compared directly; otherwise their key bytes are.
-   template <std::size_t W, bool Auto, typename T>
+   template <std::size_t W, bool Auto, typename T, typename A = no_ann>
    codec_status assoc_check_order(std::span<const char> src, std::size_t pos, std::size_t end)
    {
       using K = ::psio::detail::assoc_key_t<T>;
@@ -221,18 +229,19 @@ namespace psio::detail::pssz_impl
       if constexpr (::psio::detail::key_order_is_less<K>())
       {
          std::optional<K> previous;
-         status = assoc_for_each_key<W, Auto, T>(src, pos, end, [&](const K& key) {
+         const auto visit = [&](const K& key) {
             if (previous && !(*previous < key))
                return ascending = false;
             previous = key;
             return true;
-         });
+         };
+         status = assoc_for_each_key<W, Auto, T, decltype(visit)&, A>(src, pos, end, visit);
       }
       else
       {
          std::vector<char> previous, current;
          bool              first = true;
-         status = assoc_for_each_key<W, Auto, T>(src, pos, end, [&](const K& key) {
+         const auto visit = [&](const K& key) {
             current.clear();
             ::psio::detail::append_key_bytes(key, current);
             if (!first && ::psio::detail::compare_key_bytes(previous.data(), previous.size(),
@@ -241,7 +250,8 @@ namespace psio::detail::pssz_impl
             first = false;
             previous.swap(current);
             return true;
-         });
+         };
+         status = assoc_for_each_key<W, Auto, T, decltype(visit)&, A>(src, pos, end, visit);
       }
       if (!status.ok())
          return status;
@@ -252,18 +262,20 @@ namespace psio::detail::pssz_impl
 
    // The list of entries, then their order. The keys are materialised from
    // spans the structural walk has just accepted.
-   template <std::size_t W, bool Auto, typename T>
+   template <std::size_t W, bool Auto, typename T, typename A>
    codec_status assoc_validate(std::span<const char> src, std::size_t pos, std::size_t end,
                                std::size_t depth, validate_flags* flags) noexcept
    {
       PSIO_REQUIRE_ENTRY_ORDER("psio::pssz", T);
       using E = ::psio::detail::assoc_entry_t<T>;
-      if (auto st = validate_vector_payload<W, Auto, E>(src, pos, end, depth, flags); !st.ok())
+      if (auto st = validate_vector_payload<W, Auto, E, ann::entry_ann<T, A>>(src, pos, end,
+                                                                              depth, flags);
+          !st.ok())
          return st;
 #if defined(__cpp_exceptions)
       try
       {
-         return assoc_check_order<W, Auto, T>(src, pos, end);
+         return assoc_check_order<W, Auto, T, A>(src, pos, end);
       }
       catch (...)
       {
@@ -271,7 +283,7 @@ namespace psio::detail::pssz_impl
                            "pssz");
       }
 #else
-      return assoc_check_order<W, Auto, T>(src, pos, end);
+      return assoc_check_order<W, Auto, T, A>(src, pos, end);
 #endif
    }
 

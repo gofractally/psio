@@ -202,13 +202,13 @@ namespace psio {
       struct encode_preflight;
       template <typename T>
       codec_status assoc_check_encode(const T& value, std::size_t depth, encode_preflight bounds);
-      template <std::size_t W, bool Auto, typename T>
+      template <std::size_t W, bool Auto, typename T, typename A>
       std::size_t assoc_size(const T& v, size_check* check);
-      template <std::size_t W, bool Auto, typename T, typename Sink>
+      template <std::size_t W, bool Auto, typename T, typename Sink, typename A>
       void assoc_encode(const T& v, Sink& s);
-      template <std::size_t W, bool Auto, typename T>
+      template <std::size_t W, bool Auto, typename T, typename A>
       T assoc_decode(std::span<const char> src, std::size_t pos, std::size_t end);
-      template <std::size_t W, bool Auto, typename T>
+      template <std::size_t W, bool Auto, typename T, typename A>
       codec_status assoc_validate(std::span<const char> src, std::size_t pos, std::size_t end,
                                   std::size_t depth, validate_flags* flags) noexcept;
       template <typename Old, typename New>
@@ -290,6 +290,10 @@ namespace psio {
       // pair<const K, V>, included).
       template <typename A, typename B>
       struct is_std_tuple<std::pair<A, B>> : std::true_type {};
+      // A tuple carrying element annotations and a cap (wrappers.hpp): the
+      // same positional record, read with those annotations.
+      template <typename Meta, typename... Ts>
+      struct is_std_tuple<::psio::annotated_tuple<Meta, Ts...>> : std::true_type {};
       template <typename T>
       inline constexpr bool is_std_tuple_v = is_std_tuple<T>::value;
 
@@ -301,6 +305,12 @@ namespace psio {
          static constexpr std::size_t member_count = sizeof...(Ts);
          template <std::size_t I>
          using member_type = std::tuple_element_t<I, std::tuple<Ts...>>;
+      };
+
+      template <typename Meta, typename... Ts>
+      struct record_traits<::psio::annotated_tuple<Meta, Ts...>>
+         : record_traits<std::tuple<Ts...>>
+      {
       };
 
       template <typename A, typename B>
@@ -321,12 +331,58 @@ namespace psio {
          static constexpr value_t value = ::psio::effective_annotations_for<
             T, F, R::template member_pointer<I>>::value;
       };
+      // A plain tuple / pair element has no annotation of its own; an
+      // annotated tuple (psio::annotated_tuple: a method's argument tuple)
+      // carries one per element.
+      template <typename T, std::size_t I>
+      constexpr auto tuple_member_specs() noexcept
+      {
+         if constexpr (requires { typename T::psio_annotated_tuple; })
+            return ::psio::detail::ann::at_specs<I>(T::psio_annotations);
+         else
+            return std::tuple<>{};
+      }
       template <typename T, std::size_t I>
       struct record_member_annotations<T, I, true>
       {
-         using value_t = std::tuple<>;
-         static constexpr value_t value{};
+         using value_t = std::remove_cvref_t<decltype(tuple_member_specs<T, I>())>;
+         static constexpr value_t value = tuple_member_specs<T, I>();
       };
+
+      // ── Annotation carriers (detail/annotation_tree.hpp) ───────────────
+      //
+      // Every walk below takes, after the value type, the carrier of the
+      // annotations of the position it is at: no_ann for a bare position
+      // (the default, and what every position without an annotation gets),
+      // the member's effective annotations for a record member, and what
+      // element(...) / keys(...) / values(...) / at<I>(...) state for the
+      // positions below one. The carrier selects the offset width of a
+      // nested array, tuple, pair or map entry, exactly as the equivalent
+      // wrapper types (psio::bounded, psio::utf8_string) would, and the
+      // validator checks its length_bound / utf8 at each position.
+      namespace ann = ::psio::detail::ann;
+      using ann::no_ann;
+      template <typename T, std::size_t I>
+      using member_ann = ann::holder_ann<record_member_annotations<T, I>>;
+      // The carrier of field I of record T reached under carrier A: a
+      // reflected record's (or an annotated tuple's) own member annotation;
+      // for a plain tuple / pair, what at<I>(...) states in A.
+      template <typename T, typename A, std::size_t I>
+      struct field_ann_of
+      {
+         using type = member_ann<T, I>;
+      };
+      template <typename T, typename A, std::size_t I>
+         requires(is_std_tuple_v<T> && !requires { typename T::psio_annotated_tuple; })
+      struct field_ann_of<T, A, I>
+      {
+         using type = ann::at_ann<A, I>;
+      };
+      template <typename T, typename A, std::size_t I>
+      using field_ann = typename field_ann_of<T, A, I>::type;
+
+      template <typename T, typename A>
+      consteval std::size_t width_for() noexcept;
 
       template <std::size_t I, typename T>
       decltype(auto) record_member(T&& value) noexcept
@@ -551,6 +607,11 @@ namespace psio {
       struct is_utf8_string<::psio::utf8_string<N>> : std::true_type {};
       template <typename T>
       inline constexpr bool is_utf8_string_v = is_utf8_string<T>::value;
+
+      // psio::bounded<E, N>: a std::vector<E> of at most N elements. On the
+      // wire it is the list; N is checked on encode, validate and decode.
+      template <typename T>
+      inline constexpr bool is_bounded_v = ann::is_bounded<T>::value;
 
       template <typename T>
       inline constexpr bool is_bitvector_v = is_bitvector<T>::value;
@@ -778,6 +839,12 @@ namespace psio {
          {
             if (value) return check_encode_depth_impl(*value, depth + 1, bounds);
          }
+         else if constexpr (is_bounded_v<T>)
+         {
+            if (bounds && value.size() > T::max_size_value)
+               return codec_fail("pssz: bounded list exceeds its bound", 0, "pssz");
+            return check_encode_shape(value.storage(), depth, bounds);
+         }
          else if constexpr (is_std_array_v<T> || is_std_vector_v<T>)
          {
             using E = typename T::value_type;
@@ -822,15 +889,15 @@ namespace psio {
                      status = check_encode_depth_impl(record_member<Is>(value), depth + 1,
                                                       bounds);
                      using eff = typename record_member_annotations<T, Is>::value_t;
-                     if constexpr (::psio::has_spec_v<::psio::length_bound, eff> &&
+                     // The member's whole annotation tree: its own
+                     // length_bound / utf8 and those of the positions below.
+                     if constexpr (ann::has_tree_specs_v<eff> &&
                                    !::psio::has_as_override_v<eff>)
-                        if (status.ok() && bounds &&
-                            !::psio::detail::length_bound_ok(
-                               record_member<Is>(value),
-                               std::get<::psio::length_bound>(
-                                  record_member_annotations<T, Is>::value)))
-                           status = codec_fail("pssz: member length_bound violated", 0,
-                                               "pssz");
+                        if (status.ok() && bounds)
+                           status = ::psio::check_member_annotations(
+                              record_member<Is>(value),
+                              record_member_annotations<T, Is>::value,
+                              "pssz: member length_bound violated", "pssz");
                   }
                }()), ...);
                (void)count;
@@ -979,10 +1046,10 @@ namespace psio {
             size_fail(check, "pssz: fixed payload exceeds a declared maxDynamicData budget");
       }
 
-      template <std::size_t W, bool Auto = false, typename T>
+      template <std::size_t W, bool Auto = false, typename T, typename A = no_ann>
       std::size_t size_of_v(const T& v, size_check* check = nullptr);
 
-      template <std::size_t W, bool Auto, typename T>
+      template <std::size_t W, bool Auto, typename T, typename A>
       std::size_t size_of_v_impl(const T& v, size_check* check)
       {
          if constexpr (::psio::format_should_dispatch_adapter_v<
@@ -999,7 +1066,10 @@ namespace psio {
          else if constexpr (is_nested_v<T>)
             return v.size();
          else if constexpr (is_assoc_v<T>)
-            return assoc_size<W, Auto>(v, check);
+            return assoc_size<W, Auto, T, A>(v, check);
+         else if constexpr (is_bounded_v<T>)
+            return size_of_v_impl<W, Auto, std::vector<typename T::value_type>, A>(
+               v.storage(), check);
          else if constexpr (is_fixed_v<T>)
             return fixed_size_of<T>();
          else if constexpr (is_std_array_v<T>)
@@ -1010,7 +1080,10 @@ namespace psio {
             for (const auto& x : v)
             {
                (void)checked_offset<W>(total, check);
-               total = checked_add(total, size_of_v<W, Auto>(x, check), check);
+               total = checked_add(
+                  total,
+                  size_of_v<W, Auto, typename T::value_type, ann::element_ann<A>>(x, check),
+                  check);
             }
             enforce_wire_span(total, check);
             return total;
@@ -1033,7 +1106,8 @@ namespace psio {
                for (const auto& x : v)
                {
                   (void)checked_offset<W>(total, check);
-                  total = checked_add(total, size_of_v<W, Auto>(x, check), check);
+                  total = checked_add(
+                     total, size_of_v<W, Auto, E, ann::element_ann<A>>(x, check), check);
                }
                enforce_wire_span(total, check);
                return total;
@@ -1047,17 +1121,31 @@ namespace psio {
             // Positive-minimum V needs no selector; a V that can encode to
             // zero bytes uses the 1-byte selector plus its payload.
             if constexpr (!optional_uses_selector_v<V>)
-               return v.has_value() ? size_of_v<W, Auto>(*v, check) : 0;
+               return v.has_value() ? size_of_v<W, Auto, V, A>(*v, check) : 0;
             else
-               return checked_add(1, v.has_value() ? size_of_v<W, Auto>(*v, check) : 0, check);
+               return checked_add(1, v.has_value() ? size_of_v<W, Auto, V, A>(*v, check) : 0,
+                                  check);
          }
          else if constexpr (is_bitlist_v<T>)
             return (v.size() + 8) / 8;
          else if constexpr (is_std_variant_v<T>)
          {
             std::size_t total = 1;
-            std::visit([&](const auto& alt) { total = checked_add(total, size_of_v<W, Auto>(alt, check), check); },
-                       v);
+            if constexpr (std::is_same_v<A, no_ann>)
+               std::visit([&](const auto& alt) { total = checked_add(total, size_of_v<W, Auto>(alt, check), check); },
+                          v);
+            else
+               [&]<std::size_t... Js>(std::index_sequence<Js...>) {
+                  (([&] {
+                      if (v.index() == Js)
+                         total = checked_add(
+                            total,
+                            size_of_v<W, Auto, std::variant_alternative_t<Js, T>,
+                                      ann::at_ann<A, Js>>(std::get<Js>(v), check),
+                            check);
+                   }()),
+                   ...);
+               }(std::make_index_sequence<std::variant_size_v<T>>{});
             return total;
          }
          else if constexpr (Record<T>)
@@ -1108,7 +1196,8 @@ namespace psio {
                       else
                       {
                          (void)checked_offset<W>(dynamic_cursor, check);
-                         const auto payload = size_of_v<W, Auto>(fref, check);
+                         const auto payload =
+                            size_of_v<W, Auto, F, field_ann<T, A, Is>>(fref, check);
                          total = checked_add(total, checked_add(W, payload, check), check);
                          dynamic_cursor = checked_add(dynamic_cursor, payload, check);
                       }
@@ -1129,15 +1218,15 @@ namespace psio {
          }
       }
 
-      template <std::size_t LegacyW, bool Auto, typename T>
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
       std::size_t size_of_v(const T& value, size_check* check)
       {
          constexpr std::size_t W = [] {
-            if constexpr (Auto) return ::psio::auto_pssz_width<T>();
+            if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
          }();
          if constexpr (Auto) enforce_fixed_caps<T>(check);
-         const auto total = size_of_v_impl<W, Auto>(value, check);
+         const auto total = size_of_v_impl<W, Auto, T, A>(value, check);
          if constexpr (Auto) enforce_max_dynamic<T>(total, check);
          return total;
       }
@@ -1157,11 +1246,12 @@ namespace psio {
       // Sink-templated encoder. Top-level tag_invoke pre-sizes the
       // output buffer via size_of_v then walks once with
       // fast_buf_stream — same algorithm v1's convert_to_pssz uses.
-      template <std::size_t LegacyW, bool Auto = false, typename T, typename Sink>
+      template <std::size_t LegacyW, bool Auto = false, typename T, typename Sink,
+                typename A = no_ann>
       void encode_value(const T& v, Sink& s)
       {
          constexpr std::size_t W = [] {
-            if constexpr (Auto) return ::psio::auto_pssz_width<T>();
+            if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
          }();
          // Adapter dispatch must be the FIRST branch of the if-else
@@ -1198,7 +1288,9 @@ namespace psio {
                s.write(v.bytes().data(), v.size());
          }
          else if constexpr (is_assoc_v<T>)
-            assoc_encode<W, Auto>(v, s);
+            assoc_encode<W, Auto, T, Sink, A>(v, s);
+         else if constexpr (is_bounded_v<T>)
+            encode_value<W, Auto, std::vector<typename T::value_type>, Sink, A>(v.storage(), s);
          else if constexpr (std::is_same_v<T, bool>)
             s.write(v ? '\x01' : '\x00');
          else if constexpr (std::is_same_v<T, ::psio::uint256>)
@@ -1237,7 +1329,7 @@ namespace psio {
                {
                   write_offset<W>(s, table + i * W,
                                   s.written() - table);
-                  encode_value<W, Auto>(v[i], s);
+                  encode_value<W, Auto, E, Sink, ann::element_ann<A>>(v[i], s);
                }
             }
          }
@@ -1274,7 +1366,7 @@ namespace psio {
                {
                   write_offset<W>(s, table + i * W,
                                   s.written() - table);
-                  encode_value<W, Auto>(v[i], s);
+                  encode_value<W, Auto, E, Sink, ann::element_ann<A>>(v[i], s);
                }
             }
          }
@@ -1291,7 +1383,7 @@ namespace psio {
             if constexpr (!optional_uses_selector_v<V>)
             {
                if (v.has_value())
-                  encode_value<W, Auto>(*v, s);
+                  encode_value<W, Auto, V, Sink, A>(*v, s);
                // None → no bytes appended.
             }
             else
@@ -1299,7 +1391,7 @@ namespace psio {
                if (v.has_value())
                {
                   s.write('\x01');
-                  encode_value<W, Auto>(*v, s);
+                  encode_value<W, Auto, V, Sink, A>(*v, s);
                }
                else
                {
@@ -1347,8 +1439,18 @@ namespace psio {
             static_assert(std::variant_size_v<T> <= 256,
                           "pssz variant selector is u8 (≤ 256 alternatives)");
             s.write(static_cast<char>(v.index()));
-            std::visit(
-               [&](const auto& alt) { encode_value<W, Auto>(alt, s); }, v);
+            if constexpr (std::is_same_v<A, no_ann>)
+               std::visit(
+                  [&](const auto& alt) { encode_value<W, Auto>(alt, s); }, v);
+            else
+               [&]<std::size_t... Js>(std::index_sequence<Js...>) {
+                  (([&] {
+                      if (v.index() == Js)
+                         encode_value<W, Auto, std::variant_alternative_t<Js, T>, Sink,
+                                      ann::at_ann<A, Js>>(std::get<Js>(v), s);
+                   }()),
+                   ...);
+               }(std::make_index_sequence<std::variant_size_v<T>>{});
          }
          else if constexpr (Record<T>)
          {
@@ -1458,7 +1560,7 @@ namespace psio {
                          }
                          else
                          {
-                            encode_value<W, Auto>(fref, s);
+                            encode_value<W, Auto, F, Sink, field_ann<T, A, Is>>(fref, s);
                          }
                       }
                    }()),
@@ -1486,11 +1588,11 @@ namespace psio {
          return static_cast<std::uint32_t>(v);
       }
 
-      template <std::size_t W, bool Auto, typename T>
+      template <std::size_t W, bool Auto, typename T, typename A = no_ann>
       T decode_value(std::span<const char> src, std::size_t pos,
                      std::size_t end);
 
-      template <std::size_t W, bool Auto, Record T, std::size_t... Is>
+      template <std::size_t W, bool Auto, Record T, typename A, std::size_t... Is>
       void record_decode_into(std::span<const char> src, std::size_t pos,
                               std::size_t end, T& out,
                               std::index_sequence<Is...>);
@@ -1503,12 +1605,12 @@ namespace psio {
       // Adapter dispatch must come first — see frac_impl::decode_into for
       // why. The record walker has already sliced [pos, end) to exactly
       // the adapter's payload, so we hand it straight to the adapter.
-      template <std::size_t LegacyW, bool Auto, typename T>
+      template <std::size_t LegacyW, bool Auto, typename T, typename A = no_ann>
       void decode_into(std::span<const char> src, std::size_t pos,
                        std::size_t end, T& out)
       {
          constexpr std::size_t W = [] {
-            if constexpr (Auto) return ::psio::auto_pssz_width<T>();
+            if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
          }();
          enforce_exact_fixed_span<T>(src, pos, end);
@@ -1557,7 +1659,7 @@ namespace psio {
             }
             else
             {
-               out = decode_value<W, Auto, T>(src, pos, end);
+               out = decode_value<W, Auto, T, A>(src, pos, end);
             }
          }
          else if constexpr (Record<T>)
@@ -1573,13 +1675,13 @@ namespace psio {
                return;
             }
             using R = record_traits<T>;
-            record_decode_into<W, Auto, T>(
+            record_decode_into<W, Auto, T, A>(
                src, pos, end, out,
                std::make_index_sequence<R::member_count>{});
          }
          else
          {
-            out = decode_value<W, Auto, T>(src, pos, end);
+            out = decode_value<W, Auto, T, A>(src, pos, end);
          }
       }
 
@@ -1592,7 +1694,8 @@ namespace psio {
          return out;
       }
 
-      template <std::size_t W, bool Auto, typename T, std::size_t N>
+      // EA: the carrier of one element.
+      template <std::size_t W, bool Auto, typename T, std::size_t N, typename EA = no_ann>
       std::array<T, N> decode_array(std::span<const char> src, std::size_t pos,
                                     std::size_t end)
       {
@@ -1617,7 +1720,7 @@ namespace psio {
                const std::size_t beg = pos + offsets[i];
                const std::size_t fin =
                   (i + 1 < N) ? (pos + offsets[i + 1]) : end;
-               out[i] = decode_value<W, Auto, T>(src, beg, fin);
+               out[i] = decode_value<W, Auto, T, EA>(src, beg, fin);
             }
          }
          return out;
@@ -1625,12 +1728,13 @@ namespace psio {
 
       // Forward declaration — used by decode_vector to decode record
       // elements in-place. Definition appears later in this file.
-      template <std::size_t W, bool Auto, Record T, std::size_t... Is>
+      template <std::size_t W, bool Auto, Record T, typename A, std::size_t... Is>
       void record_decode_into(std::span<const char> src, std::size_t pos,
                               std::size_t end, T& out,
                               std::index_sequence<Is...>);
 
-      template <std::size_t W, bool Auto, typename T>
+      // EA: the carrier of one element.
+      template <std::size_t W, bool Auto, typename T, typename EA = no_ann>
       std::vector<T> decode_vector(std::span<const char> src, std::size_t pos,
                                    std::size_t end)
       {
@@ -1666,7 +1770,7 @@ namespace psio {
                out.resize(n);
                using R = record_traits<T>;
                for (std::size_t i = 0; i < n; ++i)
-                  record_decode_into<W, Auto, T>(
+                  record_decode_into<W, Auto, T, EA>(
                      src, pos + i * esz, pos + (i + 1) * esz, out[i],
                      std::make_index_sequence<R::member_count>{});
             }
@@ -1700,7 +1804,7 @@ namespace psio {
                   const std::size_t beg = pos + offset_at(i);
                   const std::size_t fin =
                      (i + 1 < n) ? (pos + offset_at(i + 1)) : end;
-                  record_decode_into<W, Auto, T>(
+                  record_decode_into<W, Auto, T, EA>(
                      src, beg, fin, out[i],
                      std::make_index_sequence<R::member_count>{});
                }
@@ -1713,7 +1817,7 @@ namespace psio {
                   const std::size_t beg = pos + offset_at(i);
                   const std::size_t fin =
                      (i + 1 < n) ? (pos + offset_at(i + 1)) : end;
-                  out.push_back(decode_value<W, Auto, T>(src, beg, fin));
+                  out.push_back(decode_value<W, Auto, T, EA>(src, beg, fin));
                }
             }
          }
@@ -1728,13 +1832,13 @@ namespace psio {
       // the writer's fixed-region header: known trailing optional fields the
       // writer pruned decode as None, and unknown appended slots are skipped
       // while still delimiting the last known variable payload.
-      template <std::size_t LegacyW, bool Auto, Record T, std::size_t... Is>
+      template <std::size_t LegacyW, bool Auto, Record T, typename A, std::size_t... Is>
       void record_decode_into(std::span<const char> src, std::size_t pos,
                               std::size_t end, T& out,
                               std::index_sequence<Is...> seq)
       {
          constexpr std::size_t W = [] {
-            if constexpr (Auto) return ::psio::auto_pssz_width<T>();
+            if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
          }();
          enforce_exact_fixed_span<T>(src, pos, end);
@@ -1782,37 +1886,39 @@ namespace psio {
                 }
                 else
                 {
-                   decode_into<W, Auto, F>(src, spans[Is].begin,
-                                           spans[Is].end, fref);
-                   // A member's declared length_bound is part of its type
-                   // (it selected the offset widths this frame was read
+                   decode_into<W, Auto, F, field_ann<T, A, Is>>(src, spans[Is].begin,
+                                                                spans[Is].end, fref);
+                   // A member's declared annotations are part of its type
+                   // (they selected the offset widths this frame was read
                    // with): the fail-fast decode refuses a member outside
-                   // it, as the validator and the encoder do.
-                   if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
-                      if (!::psio::detail::length_bound_ok(
-                             fref, std::get<::psio::length_bound>(
-                                      record_member_annotations<T, Is>::value)))
-                         size_failure("pssz: member length_bound violated");
+                   // its length_bound / utf8 at any depth, as the validator
+                   // and the encoder do.
+                   if constexpr (ann::has_tree_specs_v<eff>)
+                      if (auto st = ::psio::check_member_annotations(
+                             fref, record_member_annotations<T, Is>::value,
+                             "pssz: member length_bound violated", "pssz");
+                          !st.ok())
+                         status_failure(st);
                 }
              }()),
             ...);
       }
 
-      template <std::size_t W, bool Auto, Record T, std::size_t... Is>
+      template <std::size_t W, bool Auto, Record T, typename A, std::size_t... Is>
       T record_decode(std::span<const char> src, std::size_t pos,
                       std::size_t end, std::index_sequence<Is...> seq)
       {
          T out{};
-         record_decode_into<W, Auto, T>(src, pos, end, out, seq);
+         record_decode_into<W, Auto, T, A>(src, pos, end, out, seq);
          return out;
       }
 
-      template <std::size_t LegacyW, bool Auto, typename T>
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
       T decode_value(std::span<const char> src, std::size_t pos,
                      std::size_t end)
       {
          constexpr std::size_t W = [] {
-            if constexpr (Auto) return ::psio::auto_pssz_width<T>();
+            if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
          }();
          enforce_exact_fixed_span<T>(src, pos, end);
@@ -1849,7 +1955,15 @@ namespace psio {
          else if constexpr (is_nested_v<T>)
             return T::unchecked(std::vector<char>(src.data() + pos, src.data() + end));
          else if constexpr (is_assoc_v<T>)
-            return assoc_decode<W, Auto, T>(src, pos, end);
+            return assoc_decode<W, Auto, T, A>(src, pos, end);
+         else if constexpr (is_bounded_v<T>)
+         {
+            auto items =
+               decode_value<W, Auto, std::vector<typename T::value_type>, A>(src, pos, end);
+            if (items.size() > T::max_size_value)
+               size_failure("pssz: bounded list exceeds its bound");
+            return T{std::move(items)};
+         }
          else if constexpr (std::is_same_v<T, bool>)
             return static_cast<unsigned char>(src[pos]) != 0;
          else if constexpr (std::is_same_v<T, ::psio::uint256>)
@@ -1898,9 +2012,10 @@ namespace psio {
          }
          else if constexpr (is_std_array_v<T>)
             return decode_array<W, Auto, typename T::value_type,
-                                std::tuple_size<T>::value>(src, pos, end);
+                                std::tuple_size<T>::value, ann::element_ann<A>>(src, pos, end);
          else if constexpr (is_std_vector_v<T>)
-            return decode_vector<W, Auto, typename T::value_type>(src, pos, end);
+            return decode_vector<W, Auto, typename T::value_type, ann::element_ann<A>>(
+               src, pos, end);
          else if constexpr (is_std_optional_v<T>)
          {
             using V = typename T::value_type;
@@ -1909,7 +2024,7 @@ namespace psio {
                // No selector: length alone disambiguates (empty vs not).
                if (pos >= end)
                   return std::optional<V>{};
-               return std::optional<V>{decode_value<W, Auto, V>(src, pos, end)};
+               return std::optional<V>{decode_value<W, Auto, V, A>(src, pos, end)};
             }
             else
             {
@@ -1929,7 +2044,7 @@ namespace psio {
                if (sel != 1)
                   size_failure("pssz: optional selector not 0/1");
                return std::optional<V>{
-                  decode_value<W, Auto, V>(src, pos + 1, end)};
+                  decode_value<W, Auto, V, A>(src, pos + 1, end)};
             }
          }
          else if constexpr (is_std_variant_v<T>)
@@ -1942,7 +2057,8 @@ namespace psio {
                const bool found = ((idx == Is
                     ? (out = T{std::in_place_index<Is>,
                                decode_value<W, Auto,
-                                  std::variant_alternative_t<Is, T>>(
+                                  std::variant_alternative_t<Is, T>,
+                                  ann::at_ann<A, Is>>(
                                   src, pos + 1, end)},
                        true)
                     : false) ||
@@ -2000,7 +2116,7 @@ namespace psio {
                return out;
             }
             using R = record_traits<T>;
-            return record_decode<W, Auto, T>(
+            return record_decode<W, Auto, T, A>(
                src, pos, end, std::make_index_sequence<R::member_count>{});
          }
          else
@@ -2039,17 +2155,18 @@ namespace psio {
          bool exact          = false;
       };
 
-      template <std::size_t W, bool Auto, typename T>
+      template <std::size_t W, bool Auto, typename T, typename A = no_ann>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
                                   std::size_t end,
                                   std::size_t depth = 0,
                                   validate_flags* flags = nullptr) noexcept;
-      template <std::size_t W, bool Auto, typename T>
+      template <std::size_t W, bool Auto, typename T, typename A = no_ann>
       codec_status validate_shape(std::span<const char> src, std::size_t pos,
                                   std::size_t end, std::size_t depth,
                                   validate_flags* flags) noexcept;
 
-      template <std::size_t W, bool Auto, typename E>
+      // EA: the carrier of one element.
+      template <std::size_t W, bool Auto, typename E, typename EA = no_ann>
       codec_status validate_vector_payload(std::span<const char> src,
                                            std::size_t            pos,
                                            std::size_t            end,
@@ -2131,15 +2248,16 @@ namespace psio {
                std::uint32_t stop  = (i + 1 < n)
                                         ? read_offset<W>(src, pos + (i + 1) * W)
                                         : span;
-               auto st = validate_value<W, Auto, E>(src, pos + off_i, pos + stop,
-                                               depth + 1, flags);
+               auto st = validate_value<W, Auto, E, EA>(src, pos + off_i, pos + stop,
+                                                   depth + 1, flags);
                if (!st.ok()) return st;
             }
             return codec_ok();
          }
       }
 
-      template <std::size_t W, bool Auto, typename E, std::size_t N>
+      // EA: the carrier of one element.
+      template <std::size_t W, bool Auto, typename E, std::size_t N, typename EA = no_ann>
       codec_status validate_array_payload(std::span<const char> src,
                                           std::size_t            pos,
                                           std::size_t            end,
@@ -2209,8 +2327,8 @@ namespace psio {
                std::uint32_t stop  = (i + 1 < N)
                                         ? read_offset<W>(src, pos + (i + 1) * W)
                                         : span;
-               auto st = validate_value<W, Auto, E>(src, pos + off_i, pos + stop,
-                                               depth + 1, flags);
+               auto st = validate_value<W, Auto, E, EA>(src, pos + off_i, pos + stop,
+                                                   depth + 1, flags);
                if (!st.ok()) return st;
             }
             return codec_ok();
@@ -2247,9 +2365,10 @@ namespace psio {
       // inference does (max_size.hpp); it constrains strings and lists
       // only, every other shape has no length to check.
       template <std::size_t LegacyW, bool Auto, typename F>
-      codec_status check_member_length_bound(std::span<const char> src,
-                                             std::size_t pos, std::size_t end,
-                                             const ::psio::length_bound& lb) noexcept
+      codec_status check_member_length_bound(
+         std::span<const char> src, std::size_t pos, std::size_t end,
+         const ::psio::length_bound& lb,
+         const char* message = "pssz: member length_bound violated") noexcept
       {
          if constexpr (is_std_optional_v<F>)
          {
@@ -2257,12 +2376,13 @@ namespace psio {
             if constexpr (!optional_uses_selector_v<V>)
             {
                if (pos == end) return codec_ok();
-               return check_member_length_bound<LegacyW, Auto, V>(src, pos, end, lb);
+               return check_member_length_bound<LegacyW, Auto, V>(src, pos, end, lb, message);
             }
             else
             {
                if (pos == end || src[pos] == 0) return codec_ok();
-               return check_member_length_bound<LegacyW, Auto, V>(src, pos + 1, end, lb);
+               return check_member_length_bound<LegacyW, Auto, V>(src, pos + 1, end, lb,
+                                                                  message);
             }
          }
          else if constexpr (is_nested_v<F>)
@@ -2271,12 +2391,11 @@ namespace psio {
             const std::size_t count = end - pos;
             if ((lb.max && count > *lb.max) || (lb.exact && count != *lb.exact) ||
                 (lb.min && count < *lb.min))
-               return codec_fail("pssz: member length_bound violated",
-                                 static_cast<std::uint32_t>(pos), "pssz");
+               return codec_fail(message, static_cast<std::uint32_t>(pos), "pssz");
             return codec_ok();
          }
          else if constexpr (std::is_same_v<F, std::string> || is_utf8_string_v<F> ||
-                            is_std_vector_v<F> || is_assoc_v<F>)
+                            is_std_vector_v<F> || is_assoc_v<F> || is_bounded_v<F>)
          {
             std::size_t count = 0;
             if constexpr (std::is_same_v<F, std::string> || is_utf8_string_v<F>)
@@ -2290,6 +2409,7 @@ namespace psio {
                   count = (end - pos) / fixed_size_of<E>();
                else
                {
+                  // A list's offset table is 4 wide whatever bounds it.
                   constexpr std::size_t W = [] {
                      if constexpr (Auto) return ::psio::auto_pssz_width<F>();
                      else return LegacyW;
@@ -2299,15 +2419,14 @@ namespace psio {
             }
             if ((lb.max && count > *lb.max) || (lb.exact && count != *lb.exact) ||
                 (lb.min && count < *lb.min))
-               return codec_fail("pssz: member length_bound violated",
-                                 static_cast<std::uint32_t>(pos), "pssz");
+               return codec_fail(message, static_cast<std::uint32_t>(pos), "pssz");
             return codec_ok();
          }
          else
             return codec_ok();
       }
 
-      template <std::size_t W, bool Auto, Record T, std::size_t... Is>
+      template <std::size_t W, bool Auto, Record T, typename A, std::size_t... Is>
       codec_status validate_record(std::span<const char> src,
                                    std::size_t            pos,
                                    std::size_t            end,
@@ -2356,17 +2475,12 @@ namespace psio {
                 }
                 else
                 {
-                   status = validate_value<W, Auto, F>(
+                   // The member's declared annotations are part of its
+                   // type: validate_value checks the length_bound / utf8 of
+                   // its carrier at every position it reaches.
+                   status = validate_value<W, Auto, F, field_ann<T, A, Is>>(
                       src, spans[Is].begin, spans[Is].end, depth + 1,
                       flags);
-                   // A member's declared length_bound is part of its type:
-                   // a string or list outside the bound is rejected.
-                   if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
-                      if (status.ok())
-                         status = check_member_length_bound<W, Auto, F>(
-                            src, spans[Is].begin, spans[Is].end,
-                            std::get<::psio::length_bound>(
-                               record_member_annotations<T, Is>::value));
                 }
              }()),
             ...);
@@ -2379,31 +2493,54 @@ namespace psio {
       // this span. The nested values were validated the same way by the
       // walk, so invariants run innermost first, for every shape the walk
       // knows.
-      template <std::size_t LegacyW, bool Auto, typename T>
+      // What the carrier states for this position itself, on a span the
+      // structural walk has accepted: its length_bound (bytes of a string,
+      // elements of a list) and utf8. A std::optional is looked through: its
+      // payload is checked when the walk reaches it with the same carrier.
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
+      codec_status check_position(std::span<const char> src, std::size_t pos,
+                                  std::size_t end) noexcept
+      {
+         if constexpr (!std::is_same_v<A, no_ann> && !is_std_optional_v<T>)
+         {
+            if constexpr (ann::has_length_bound_v<A>)
+               if (auto st = check_member_length_bound<LegacyW, Auto, T>(
+                      src, pos, end, std::get<::psio::length_bound>(A::value));
+                   !st.ok())
+                  return st;
+            if constexpr (ann::has_utf8_v<A> && std::is_same_v<T, std::string>)
+               return ::psio::utf8_spec::validate(
+                  std::span<const char>(src.data() + pos, end - pos));
+         }
+         return codec_ok();
+      }
+
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
                                   std::size_t end,
                                   std::size_t depth,
                                   validate_flags* flags) noexcept
       {
-         if constexpr (::psio::has_invariant_v<T>)
-         {
-            if (auto st = validate_shape<LegacyW, Auto, T>(src, pos, end, depth, flags);
-                !st.ok())
+         if (auto st = validate_shape<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
+             !st.ok())
+            return st;
+         if constexpr (!std::is_same_v<A, no_ann>)
+            if (auto st = check_position<LegacyW, Auto, T, A>(src, pos, end); !st.ok())
                return st;
-            return ::psio::check_invariant(decode_value<LegacyW, Auto, T>(src, pos, end));
-         }
+         if constexpr (::psio::has_invariant_v<T>)
+            return ::psio::check_invariant(decode_value<LegacyW, Auto, T, A>(src, pos, end));
          else
-            return validate_shape<LegacyW, Auto, T>(src, pos, end, depth, flags);
+            return codec_ok();
       }
 
-      template <std::size_t LegacyW, bool Auto, typename T>
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
       codec_status validate_shape(std::span<const char> src, std::size_t pos,
                                   std::size_t end,
                                   std::size_t depth,
                                   validate_flags* flags) noexcept
       {
          constexpr std::size_t W = [] {
-            if constexpr (Auto) return ::psio::auto_pssz_width<T>();
+            if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
          }();
          if (pos > end || end > src.size())
@@ -2438,7 +2575,17 @@ namespace psio {
             return ::psio::detail::nested_impl::pssz_validate<T>(
                src.subspan(pos, end - pos), depth, flags);
          else if constexpr (is_assoc_v<T>)
-            return assoc_validate<W, Auto, T>(src, pos, end, depth, flags);
+            return assoc_validate<W, Auto, T, A>(src, pos, end, depth, flags);
+         else if constexpr (is_bounded_v<T>)
+         {
+            using L = std::vector<typename T::value_type>;
+            if (auto st = validate_shape<W, Auto, L, A>(src, pos, end, depth, flags); !st.ok())
+               return st;
+            return check_member_length_bound<W, Auto, L>(
+               src, pos, end,
+               ::psio::length_bound{.max = static_cast<std::uint32_t>(T::max_size_value)},
+               "pssz: bounded list exceeds its bound");
+         }
          else if constexpr (is_fixed_v<T> && !Record<T>)
          {
             if (end - pos != fixed_size_of<T>())
@@ -2490,14 +2637,14 @@ namespace psio {
          {
             using E                 = typename T::value_type;
             constexpr std::size_t N = std::tuple_size<T>::value;
-            return validate_array_payload<W, Auto, E, N>(src, pos, end,
-                                                    depth, flags);
+            return validate_array_payload<W, Auto, E, N, ann::element_ann<A>>(
+               src, pos, end, depth, flags);
          }
          else if constexpr (is_std_vector_v<T>)
          {
             using E = typename T::value_type;
-            return validate_vector_payload<W, Auto, E>(src, pos, end,
-                                                  depth, flags);
+            return validate_vector_payload<W, Auto, E, ann::element_ann<A>>(
+               src, pos, end, depth, flags);
          }
          else if constexpr (is_std_optional_v<T>)
          {
@@ -2514,8 +2661,8 @@ namespace psio {
                   if (span != fixed_size_of<V>())
                      return codec_fail("pssz: optional<fixed> span mismatch",
                                        static_cast<std::uint32_t>(pos), "pssz");
-               return validate_value<W, Auto, V>(src, pos, end, depth + 1,
-                                            flags);
+               return validate_value<W, Auto, V, A>(src, pos, end, depth + 1,
+                                               flags);
             }
             else
             {
@@ -2535,8 +2682,8 @@ namespace psio {
                if (sel != 1)
                   return codec_fail("pssz: optional selector not 0/1",
                                     static_cast<std::uint32_t>(pos), "pssz");
-               return validate_value<W, Auto, V>(src, pos + 1, end, depth + 1,
-                                            flags);
+               return validate_value<W, Auto, V, A>(src, pos + 1, end, depth + 1,
+                                               flags);
             }
          }
          else if constexpr (is_std_variant_v<T>)
@@ -2554,7 +2701,8 @@ namespace psio {
                codec_status err = codec_ok();
                const bool dispatched = (((sel == Js)
                     ? (err = validate_value<W, Auto,
-                                std::variant_alternative_t<Js, T>>(
+                                std::variant_alternative_t<Js, T>,
+                                ann::at_ann<A, Js>>(
                           src, pos + 1, end, depth + 1, flags),
                        true)
                     : false) ||
@@ -2566,7 +2714,7 @@ namespace psio {
          else if constexpr (Record<T>)
          {
             using R = record_traits<T>;
-            return validate_record<W, Auto, T>(
+            return validate_record<W, Auto, T, A>(
                src, pos, end, std::make_index_sequence<R::member_count>{},
                depth, flags);
          }
@@ -2683,9 +2831,86 @@ namespace psio {
    // of a particular value's payload size. The explicit pssz_<W> compatibility
    // profile instead retains its original single W throughout recursion.
 
+   namespace detail::pssz_impl
+   {
+      // The offset width of T at a position carrying A's annotations.
+      //
+      //   - A list (std::vector, psio::bounded, a map, a set) writes its
+      //     offset table 4 wide, whatever bounds it: a bound on the list
+      //     narrows the record that holds it, never the list's own table.
+      //   - Everything else — a record, an array of variable elements, a
+      //     tuple, a pair — takes its declared maxDynamicData when it has
+      //     one, else the bound inferred for it with the annotations of its
+      //     position (max_size.hpp), exactly the bound the equivalent
+      //     wrapper types would give.
+      template <typename T, typename A>
+      consteval std::size_t width_for() noexcept
+      {
+         if constexpr (is_std_vector_v<T> || is_bounded_v<T> || is_assoc_v<T>)
+            return 4;
+         else
+         {
+            constexpr auto m = [] {
+               if constexpr (::psio::max_dynamic_data_v<T>.has_value())
+                  return ::psio::max_dynamic_data_v<T>;
+               else
+                  return ::psio::detail::max_size_impl::max_field_with_annots<T>(A::value);
+            }();
+            if constexpr (m.has_value())
+               return *m <= 0xFFu ? 1 : *m <= 0xFFFFu ? 2 : 4;
+            else
+               return 4;
+         }
+      }
+   }  // namespace detail::pssz_impl
+
+   namespace detail::pssz_impl
+   {
+      // Whether every value nested in a T at a position carrying A has the
+      // offset width its type alone gives it. A typed view (pssz_view.hpp)
+      // re-selects widths from types, so it can address exactly such members.
+      template <typename T, typename A>
+      consteval bool widths_unchanged() noexcept
+      {
+         // Only a type that writes offsets has a width to compare: an array
+         // of variable elements and a tuple / pair (a list's table is 4 wide
+         // either way; a reflected record's width is its own).
+         if constexpr (std::is_same_v<A, no_ann>)
+            return true;
+         else if constexpr (is_std_optional_v<T>)
+            return widths_unchanged<typename T::value_type, A>();
+         else if constexpr (is_std_vector_v<T> || is_bounded_v<T>)
+            return widths_unchanged<typename T::value_type, ann::element_ann<A>>();
+         else if constexpr (is_std_array_v<T>)
+            return (is_fixed_v<typename T::value_type> ||
+                    width_for<T, A>() == width_for<T, no_ann>()) &&
+                   widths_unchanged<typename T::value_type, ann::element_ann<A>>();
+         else if constexpr (is_assoc_v<T>)
+            return widths_unchanged<::psio::detail::assoc_entry_t<T>, ann::entry_ann<T, A>>();
+         else if constexpr (is_std_variant_v<T>)
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (widths_unchanged<std::variant_alternative_t<Is, T>, ann::at_ann<A, Is>>() &&
+                       ...);
+            }(std::make_index_sequence<std::variant_size_v<T>>{});
+         else if constexpr (is_std_tuple_v<T> && !requires { typename T::psio_annotated_tuple; })
+            return width_for<T, A>() == width_for<T, no_ann>() &&
+                   []<std::size_t... Is>(std::index_sequence<Is...>) {
+                      return (widths_unchanged<std::remove_const_t<std::tuple_element_t<Is, T>>,
+                                               ann::at_ann<A, Is>>() &&
+                              ...);
+                   }(std::make_index_sequence<std::tuple_size_v<T>>{});
+         else
+            return true;
+      }
+   }  // namespace detail::pssz_impl
+
    template <typename T>
    consteval std::size_t auto_pssz_width() noexcept
    {
+      // A list's offset table is always 4 wide (see width_for).
+      if constexpr (detail::pssz_impl::is_std_vector_v<T> ||
+                    detail::pssz_impl::is_bounded_v<T> || detail::pssz_impl::is_assoc_v<T>)
+         return 4;
       // A declared budget is the lifetime wire-width promise for this logical
       // type. It stays authoritative even while current fields need less space.
       constexpr auto m = [] {
@@ -2738,6 +2963,31 @@ namespace psio {
       template <typename Old, typename New>
       consteval bool layout_evolves() noexcept;
 
+      template <typename T, typename A>
+      consteval bool widths_unchanged() noexcept;
+
+      // Field I of Old and of New agree on what their annotations do to the
+      // widths of the values nested in the field: either neither narrows
+      // anything (the widths are those of the types, which layout_evolves
+      // compares), or the two fields are the same type with the same
+      // annotations.
+      template <Record Old, Record New, std::size_t I>
+      consteval bool member_widths_agree() noexcept
+      {
+         using FO = typename record_traits<Old>::template member_type<I>;
+         using FN = typename record_traits<New>::template member_type<I>;
+         if constexpr (widths_unchanged<FO, member_ann<Old, I>>() &&
+                       widths_unchanged<FN, member_ann<New, I>>())
+            return true;
+         else if constexpr (std::is_same_v<FO, FN> &&
+                            std::is_same_v<typename record_member_annotations<Old, I>::value_t,
+                                           typename record_member_annotations<New, I>::value_t>)
+            return record_member_annotations<Old, I>::value ==
+                   record_member_annotations<New, I>::value;
+         else
+            return false;
+      }
+
       template <Record Old, Record New>
       consteval bool record_evolves() noexcept
       {
@@ -2762,8 +3012,9 @@ namespace psio {
                             typename record_member_annotations<Old, Is>::value_t>
                             ? std::is_same_v<typename RO::template member_type<Is>,
                                              typename RN::template member_type<Is>>
-                            : layout_evolves<typename RO::template member_type<Is>,
-                                             typename RN::template member_type<Is>>())) &&
+                            : (layout_evolves<typename RO::template member_type<Is>,
+                                              typename RN::template member_type<Is>>() &&
+                               member_widths_agree<Old, New, Is>()))) &&
                        ...);
             }(std::make_index_sequence<NO>{});
             constexpr bool suffix = []<std::size_t... Is>(std::index_sequence<Is...>) {

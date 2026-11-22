@@ -98,6 +98,12 @@ and has no helper names.
 pjson is not in the table. It has no format tag in the generic layer; its
 entry points are in `psio/pjson.hpp` and `psio/pjson_typed.hpp`.
 
+A value outside the bounds its type declares — a member `max<N>`, the bounds
+of its elements, keys and values (`element` / `keys` / `values` / `at<I>`), a
+`psio::bounded` or `psio::utf8_string`, a `maxDynamicData` cap — has no
+encoding: `to_F` throws, and `from_F` / `validate_F` refuse bytes that hold
+one. See [bounds by annotation](psio-overview.md#bounds-by-annotation).
+
 ## Checked and trusted decode
 
 `from_F<T>(bytes)` is the checked decode. It returns a `T`, or it does not

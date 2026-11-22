@@ -1015,16 +1015,19 @@ namespace psio {
                using F   = typename R::template member_type<I>;
                using Ann = ::psio::effective_annotations_for<T, F, R::template member_pointer<I>>;
                using eff = std::remove_cvref_t<decltype(Ann::value)>;
-               if constexpr (::psio::has_spec_v<::psio::length_bound, eff> &&
+               if constexpr (::psio::detail::ann::has_tree_specs_v<eff> &&
                              !::psio::has_as_override_v<eff>)
                {
                   F        scratch{};
                   F* const dst = out ? &(out->*(R::template member_pointer<I>)) : &scratch;
                   if (!read_value<F>(r, dst))
                      return false;
-                  if (!::psio::detail::length_bound_ok(
-                         *dst, std::get<::psio::length_bound>(Ann::value)))
-                     return r.fail("key: member length_bound violated");
+                  // The whole annotation tree: the member's length_bound /
+                  // utf8 and those of every position below it.
+                  if (auto st = ::psio::check_member_annotations(
+                         *dst, Ann::value, "key: member length_bound violated", "key");
+                      !st.ok())
+                     return r.fail(st.error().what.data());
                   return true;
                }
                else

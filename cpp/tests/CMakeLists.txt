@@ -272,6 +272,45 @@ psio_add_test(psio_pssz_length_bound_tests pssz_length_bound_tests.cpp)
 # The inferred size bound of variants, tuples and pairs, and the widths
 # that follow from it (typed and schema-driven).
 psio_add_test(psio_pssz_inferred_bound_tests pssz_inferred_bound_tests.cpp)
+# Bounds by annotation at any depth (element / keys / values / at<I>) and by
+# wrapper type (psio::bounded, psio::utf8_string): widths, bytes, enforcement.
+psio_add_test(psio_annotation_tree_tests annotation_tree_tests.cpp)
+# An annotation on the wrong shape is a compile error that names the mistake.
+add_test(NAME psio_annotation_tree_control_compiles
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/annotation_tree_fail.cpp)
+function(psio_annotation_tree_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_annotation_tree_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/annotation_tree_fail.cpp)
+   set_tests_properties(psio_annotation_tree_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_AT_ELEMENT "element\\(\\.\\.\\.\\) annotates the elements of a list")
+psio_annotation_tree_compile_fail(element_on_string AT_FAIL_ELEMENT_ON_STRING "${PSIO_AT_ELEMENT}")
+psio_annotation_tree_compile_fail(element_on_map AT_FAIL_ELEMENT_ON_MAP "${PSIO_AT_ELEMENT}")
+psio_annotation_tree_compile_fail(keys_on_vector AT_FAIL_KEYS_ON_VECTOR
+   "keys\\(\\.\\.\\.\\) annotates the keys of a map")
+psio_annotation_tree_compile_fail(values_on_vector AT_FAIL_VALUES_ON_VECTOR
+   "values\\(\\.\\.\\.\\) annotates the mapped values of a map")
+psio_annotation_tree_compile_fail(at_on_vector AT_FAIL_AT_ON_VECTOR
+   "at<I>\\(\\.\\.\\.\\) annotates element I of a std::tuple / std::pair")
+psio_annotation_tree_compile_fail(at_out_of_range AT_FAIL_AT_OUT_OF_RANGE
+   "I is not an element of this tuple / pair")
+psio_annotation_tree_compile_fail(at_variant_out_of_range AT_FAIL_AT_VARIANT_OUT_OF_RANGE
+   "I is not an alternative of this variant")
+psio_annotation_tree_compile_fail(max_on_int_element AT_FAIL_MAX_ON_INT_ELEMENT
+   "bounds a std::string \\(bytes\\) or a std::vector, map or set \\(elements\\)")
+psio_annotation_tree_compile_fail(utf8_on_list_element AT_FAIL_UTF8_ON_LIST_ELEMENT
+   "this position is not a string")
+psio_annotation_tree_compile_fail(nested_exact AT_FAIL_NESTED_EXACT
+   "below the member itself a length bound is max<N>")
+psio_annotation_tree_compile_fail(view_narrowed AT_FAIL_VIEW_NARROWED
+   "a pssz view cannot address this member")
+psio_annotation_tree_compile_fail(deep AT_FAIL_DEEP
+   "bounds a std::string \\(bytes\\) or a std::vector, map or set \\(elements\\)")
 
 # Shared cross-language conformance fixture (conformance/pssz-vectors.json).
 # The emitter generates it from the implementation; the regen test fails when

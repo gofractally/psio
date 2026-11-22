@@ -460,45 +460,47 @@ namespace psio::schema_types
             return Custom{
                 Box<AnyType>{List{Box<AnyType>{insert<::psio::detail::assoc_entry_t<U>>()}}},
                 ::psio::detail::is_map_v<U> ? "map" : "set"};
+         else if constexpr (requires { typename U::psio_annotated_tuple; })
+         {
+            // A tuple with element annotations and a cap (a method's
+            // argument tuple). A Tuple node has no attributes, so it is
+            // written as what a tuple is on the wire — the extensible record
+            // of its elements (docs/pssz-spec.md 3.2) — which can carry the
+            // cap: an Object whose members are the elements, named by the
+            // parameter names where the Meta has them and by position
+            // otherwise.
+            using Tuple = typename U::tuple_type;
+            Object o;
+            [&]<std::size_t... I>(std::index_sequence<I...>)
+            {
+               auto name = [](std::size_t i) -> std::string
+               {
+                  if constexpr (requires { U::meta_type::names; })
+                     if (i < U::meta_type::names.size())
+                        return std::string{U::meta_type::names[i]};
+                  return std::to_string(i);
+               };
+               (o.members.push_back(
+                   Member{name(I),
+                          Box<AnyType>{annotated_type<std::tuple_element_t<I, Tuple>>(
+                             ::psio::detail::ann::at_specs<I>(U::psio_annotations))},
+                          {}}),
+                ...);
+            }(std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+            if constexpr (::psio::max_dynamic_data_v<U>.has_value())
+               o.attributes.push_back(Attribute{
+                  "maxDynamicData", std::to_string(::psio::max_dynamic_data_v<U>.value())});
+            return o;
+         }
          else if constexpr (sb_detail::sb_is_tuple<U>::value)
             return [&]<std::size_t... I>(std::index_sequence<I...>)
             {
                return Tuple{{Box<AnyType>{insert<std::tuple_element_t<I, U>>()}...}};
             }(std::make_index_sequence<std::tuple_size_v<U>>{});
          else if constexpr (sb_detail::sb_is_variant<U>::value)
-         {
-            constexpr auto count = std::variant_size_v<U>;
-            static_assert(count <= 256, "schema variant exceeds u8 selector capacity");
-            if constexpr (requires { ::psio::schema_variant_labels<U>::names; })
-               static_assert(std::size(::psio::schema_variant_labels<U>::names) == count,
-                             "schema variant label count must match alternatives");
-            static_assert(sb_detail::valid_variant_labels<U>(),
-                          "schema variant labels must be nonempty and unique");
-            return [&]<std::size_t... I>(std::index_sequence<I...>)
-            {
-               auto name = [](std::size_t i)
-               {
-                  if constexpr (requires { ::psio::schema_variant_labels<U>::names; })
-                     return std::string(::psio::schema_variant_labels<U>::names[i]);
-                  else
-                     return std::to_string(i);
-               };
-               // The I-JSON form names an alternative by its type name.
-               auto attributes = []<typename A>(std::type_identity<A>)
-               {
-                  std::vector<Attribute> out;
-                  if constexpr (requires { get_type_name(static_cast<const A *>(nullptr)); })
-                     out.push_back(Attribute{
-                         "ijsonName",
-                         std::string(std::string_view{get_type_name(static_cast<const A *>(nullptr))})});
-                  return out;
-               };
-               return Variant{
-                   {Member{name(I), Box<AnyType>{insert<std::variant_alternative_t<I, U>>()},
-                           attributes(std::type_identity<std::variant_alternative_t<I, U>>{})}...},
-                   {}};
-            }(std::make_index_sequence<count>{});
-         }
+            return build_variant<U>([&]<std::size_t I>() {
+               return insert<std::variant_alternative_t<I, U>>();
+            });
          else if constexpr (sb_detail::sb_is_bounded<U>::value)
          {
             using E = typename sb_detail::sb_is_bounded<U>::elem;
@@ -591,49 +593,193 @@ namespace psio::schema_types
          }
       }
 
-      // The bounded form of a std::string / std::vector member type (looking
-      // through std::optional) for `length_bound{.max = N}`; false when F
-      // has no such form.
-      template <typename F>
-      bool bounded_member_type(std::uint64_t max, AnyType& out)
+      // A variant: `alternative<I>()` gives the type of alternative I.
+      template <typename U, typename Alternative>
+      AnyType build_variant(Alternative&& alternative)
       {
-         if constexpr (sb_detail::sb_is_optional<F>::value)
+         constexpr auto count = std::variant_size_v<U>;
+         static_assert(count <= 256, "schema variant exceeds u8 selector capacity");
+         if constexpr (requires { ::psio::schema_variant_labels<U>::names; })
+            static_assert(std::size(::psio::schema_variant_labels<U>::names) == count,
+                          "schema variant label count must match alternatives");
+         static_assert(sb_detail::valid_variant_labels<U>(),
+                       "schema variant labels must be nonempty and unique");
+         return [&]<std::size_t... I>(std::index_sequence<I...>)
          {
-            AnyType inner;
-            if (!bounded_member_type<typename sb_detail::sb_is_optional<F>::elem>(max, inner))
-               return false;
-            out = Option{Box<AnyType>{std::move(inner)}};
-            return true;
-         }
-         else if constexpr (std::is_same_v<F, std::string>)
+            auto name = [](std::size_t i)
+            {
+               if constexpr (requires { ::psio::schema_variant_labels<U>::names; })
+                  return std::string(::psio::schema_variant_labels<U>::names[i]);
+               else
+                  return std::to_string(i);
+            };
+            // The I-JSON form names an alternative by its type name.
+            auto attributes = []<typename A>(std::type_identity<A>)
+            {
+               std::vector<Attribute> out;
+               if constexpr (requires { get_type_name(static_cast<const A *>(nullptr)); })
+                  out.push_back(Attribute{
+                      "ijsonName",
+                      std::string(std::string_view{get_type_name(static_cast<const A *>(nullptr))})});
+               return out;
+            };
+            return Variant{
+                {Member{name(I), Box<AnyType>{alternative.template operator()<I>()},
+                        attributes(std::type_identity<std::variant_alternative_t<I, U>>{})}...},
+                {}};
+         }(std::make_index_sequence<count>{});
+      }
+
+      // The type of an F at a position that carries `annots` — a member's
+      // effective annotations, or what element(...) / keys(...) /
+      // values(...) / at<I>(...) state for a position below one
+      // (detail/annotation_tree.hpp). A `max<N>` becomes the bounded form of
+      // a string / list / map / set (BoundedList, or the string / hex / map /
+      // set adapter over one), `utf8` the "utf8" string: the nodes a wrapper
+      // type (psio::bounded, psio::utf8_string) or a Rust BoundedList /
+      // BoundedString produces. A position with nothing to say is insert<F>().
+      //
+      // `use_bound` false: the position's own length bound is carried
+      // elsewhere (the member attribute lengthBound).
+      template <typename F, typename Annots>
+      AnyType annotated_type(const Annots& annots, bool use_bound = true)
+      {
+         namespace ann = ::psio::detail::ann;
+         using A = std::remove_cvref_t<Annots>;
+         if constexpr (!ann::has_tree_specs_v<A>)
+            return insert<F>();
+         else if constexpr (sb_detail::sb_is_optional<F>::value)
          {
-            out = Custom{Box<AnyType>{AnyType{BoundedList{Box<AnyType>{insert<std::uint8_t>()}, max}}},
-                         "string"};
-            return true;
-         }
-         else if constexpr (::psio::detail::is_assoc_v<F>)
-         {
-            out = Custom{Box<AnyType>{AnyType{BoundedList{
-                            Box<AnyType>{insert<::psio::detail::assoc_entry_t<F>>()}, max}}},
-                         ::psio::detail::is_map_v<F> ? "map" : "set"};
-            return true;
-         }
-         else if constexpr (sb_detail::sb_is_vector<F>::value)
-         {
-            using E = typename sb_detail::sb_is_vector<F>::elem;
-            AnyType list = BoundedList{Box<AnyType>{insert<E>()}, max};
-            if constexpr (sb_detail::sb_is_byte_v<E>)
-               out = Custom{Box<AnyType>{std::move(list)}, "hex"};
-            else
-               out = std::move(list);
-            return true;
+            using E     = typename sb_detail::sb_is_optional<F>::elem;
+            auto  inner = annotated_type<E>(annots, use_bound);
+            if (inner == insert<E>())
+               return insert<F>();  // nothing to say about the payload
+            return Option{Box<AnyType>{std::move(inner)}};
          }
          else
          {
-            (void)max;
-            (void)out;
-            return false;
+            std::optional<std::uint64_t> max;
+            if (use_bound)
+               if (auto lb = ::psio::find_spec<::psio::length_bound>(annots);
+                   lb && lb->max && !lb->exact && !lb->min)
+                  max = *lb->max;
+            auto list_of = [&](AnyType element) -> AnyType {
+               if (max)
+                  return BoundedList{Box<AnyType>{std::move(element)}, *max};
+               return List{Box<AnyType>{std::move(element)}};
+            };
+            if constexpr (std::is_same_v<F, std::string>)
+            {
+               const bool utf8 = ann::enforces_utf8(annots);
+               if (!max && !utf8)
+                  return insert<F>();
+               return Custom{Box<AnyType>{list_of(insert<std::uint8_t>())},
+                             utf8 ? "utf8" : "string"};
+            }
+            else if constexpr (::psio::detail::is_map_v<F>)
+            {
+               const auto key_annots   = ann::key_specs(annots);
+               const auto value_annots = ann::value_specs(annots);
+               constexpr bool below =
+                  ann::has_tree_specs_v<std::remove_cvref_t<decltype(key_annots)>> ||
+                  ann::has_tree_specs_v<std::remove_cvref_t<decltype(value_annots)>>;
+               if (!max && !below)
+                  return insert<F>();
+               AnyType entry;
+               if constexpr (below)
+               {
+                  // (in this order: the key's types are registered first)
+                  auto key   = annotated_type<::psio::detail::assoc_key_t<F>>(key_annots);
+                  auto value = annotated_type<typename F::mapped_type>(value_annots);
+                  entry      = Tuple{{Box<AnyType>{std::move(key)}, Box<AnyType>{std::move(value)}}};
+               }
+               else
+                  entry = insert<::psio::detail::assoc_entry_t<F>>();
+               return Custom{Box<AnyType>{list_of(std::move(entry))}, "map"};
+            }
+            else if constexpr (::psio::detail::is_set_v<F>)
+            {
+               const auto inner = ann::element_specs(annots);
+               if constexpr (!ann::has_tree_specs_v<std::remove_cvref_t<decltype(inner)>>)
+                  if (!max)
+                     return insert<F>();
+               return Custom{Box<AnyType>{list_of(
+                                annotated_type<::psio::detail::assoc_key_t<F>>(inner))},
+                             "set"};
+            }
+            else if constexpr (sb_detail::sb_is_vector<F>::value ||
+                               sb_detail::sb_is_bounded<F>::value ||
+                               sb_detail::sb_is_array<F>::value)
+            {
+               using E          = typename F::value_type;
+               const auto inner = ann::element_specs(annots);
+               constexpr bool below =
+                  ann::has_tree_specs_v<std::remove_cvref_t<decltype(inner)>>;
+               AnyType sequence;
+               if constexpr (sb_detail::sb_is_vector<F>::value)
+               {
+                  if constexpr (!below)
+                     if (!max)
+                        return insert<F>();
+                  sequence = list_of(annotated_type<E>(inner));
+               }
+               else if constexpr (!below)
+                  // The wrapper's bound / the array's length is in its type.
+                  return insert<F>();
+               else if constexpr (sb_detail::sb_is_bounded<F>::value)
+                  sequence = BoundedList{Box<AnyType>{annotated_type<E>(inner)},
+                                         sb_detail::sb_is_bounded<F>::limit};
+               else
+                  sequence = Array{Box<AnyType>{annotated_type<E>(inner)},
+                                   sb_detail::sb_is_array<F>::len};
+               if constexpr (sb_detail::sb_is_byte_v<E>)
+                  return Custom{Box<AnyType>{std::move(sequence)}, "hex"};
+               return sequence;
+            }
+            else if constexpr (sb_detail::sb_is_tuple<F>::value)
+            {
+               constexpr bool below = ann::has_position_specs_v<A>;
+               if constexpr (!below)
+                  return insert<F>();
+               else
+                  return [&]<std::size_t... I>(std::index_sequence<I...>)
+                  {
+                     Tuple tuple;
+                     // (braced: the elements are built in order)
+                     (tuple.members.push_back(Box<AnyType>{
+                         annotated_type<std::remove_const_t<std::tuple_element_t<I, F>>>(
+                            ann::at_specs<I>(annots))}),
+                      ...);
+                     return AnyType{std::move(tuple)};
+                  }(std::make_index_sequence<std::tuple_size_v<F>>{});
+            }
+            else if constexpr (sb_detail::sb_is_variant<F>::value)
+            {
+               if constexpr (!ann::has_position_specs_v<A>)
+                  return insert<F>();
+               else
+                  return build_variant<F>([&]<std::size_t I>() {
+                     return annotated_type<std::variant_alternative_t<I, F>>(
+                        ann::at_specs<I>(annots));
+                  });
+            }
+            else
+               return insert<F>();
          }
+      }
+
+      // Whether a `max<N>` on a member of type F (through std::optional) has
+      // a bounded type form; when it has none (a psio::utf8_string, a nested
+      // value) or the bound uses exact / min, it is the member attribute
+      // lengthBound.
+      template <typename F>
+      static constexpr bool has_bounded_form()
+      {
+         if constexpr (sb_detail::sb_is_optional<F>::value)
+            return has_bounded_form<typename sb_detail::sb_is_optional<F>::elem>();
+         else
+            return std::is_same_v<F, std::string> || sb_detail::sb_is_vector<F>::value ||
+                   ::psio::detail::is_assoc_v<F>;
       }
 
       // Whether a member length_bound constrains F at all (the typed codecs
@@ -649,53 +795,67 @@ namespace psio::schema_types
                    ::psio::detail::is_assoc_v<F>;
       }
 
+      // The schema's view of member annotations (shared by record members
+      // and method parameters): the annotated type, and the attributes that
+      // have no type form.
+      template <typename F, typename Annots>
+      void apply_member_annotations(Member& member, const Annots& annots)
+      {
+         using eff_t = std::remove_cvref_t<Annots>;
+         if constexpr (::psio::detail::ann::has_tree_specs_v<eff_t> &&
+                       !::psio::has_as_override_v<eff_t>)
+         {
+            bool as_attribute = false;
+            if constexpr (::psio::has_spec_v<::psio::length_bound, eff_t>)
+            {
+               const ::psio::length_bound lb = std::get<::psio::length_bound>(annots);
+               if constexpr (length_bound_applies<F>())
+               {
+                  if (!(lb.max && !lb.exact && !lb.min && has_bounded_form<F>()))
+                  {
+                     as_attribute = true;
+                     std::string text;
+                     auto item = [&](const char* key, const std::optional<std::uint32_t>& v) {
+                        if (!v) return;
+                        if (!text.empty()) text += ',';
+                        text += key;
+                        text += '=';
+                        text += std::to_string(*v);
+                     };
+                     item("exact", lb.exact);
+                     item("min", lb.min);
+                     item("max", lb.max);
+                     if (!text.empty())
+                        member.attributes.push_back(Attribute{"lengthBound", std::move(text)});
+                  }
+               }
+               else
+                  as_attribute = true;  // the bound constrains nothing here
+            }
+            *member.type = annotated_type<F>(annots, !as_attribute);
+         }
+         if constexpr (::psio::has_spec_v<::psio::json_int_spec, eff_t>)
+            member.attributes.push_back(Attribute{
+                "jsonInt", std::get<::psio::json_int_spec>(annots).form ==
+                                 ::psio::int_text::string
+                              ? "string"
+                              : "number"});
+         if constexpr (::psio::has_spec_v<::psio::ijson_int_spec, eff_t>)
+            member.attributes.push_back(Attribute{
+                "ijsonInt", std::get<::psio::ijson_int_spec>(annots).form ==
+                                  ::psio::int_text::string
+                               ? "string"
+                               : "number"});
+      }
+
       template <typename U, std::size_t I>
       Member build_record_member()
       {
          using R   = reflect<U>;
          using F   = typename R::template member_type<I>;
          using eff = ::psio::effective_annotations_for<U, F, R::template member_pointer<I>>;
-         using eff_t = typename eff::value_t;
          Member member{std::string{R::template member_name<I>}, Box<AnyType>{insert<F>()}, {}};
-         if constexpr (::psio::has_spec_v<::psio::length_bound, eff_t> &&
-                       !::psio::has_as_override_v<eff_t>)
-         {
-            if constexpr (length_bound_applies<F>())
-            {
-               const ::psio::length_bound lb = std::get<::psio::length_bound>(eff::value);
-               AnyType bounded;
-               if (lb.max && !lb.exact && !lb.min && bounded_member_type<F>(*lb.max, bounded))
-                  *member.type = std::move(bounded);
-               else
-               {
-                  std::string text;
-                  auto item = [&](const char* key, const std::optional<std::uint32_t>& v) {
-                     if (!v) return;
-                     if (!text.empty()) text += ',';
-                     text += key;
-                     text += '=';
-                     text += std::to_string(*v);
-                  };
-                  item("exact", lb.exact);
-                  item("min", lb.min);
-                  item("max", lb.max);
-                  if (!text.empty())
-                     member.attributes.push_back(Attribute{"lengthBound", std::move(text)});
-               }
-            }
-         }
-         if constexpr (::psio::has_spec_v<::psio::json_int_spec, eff_t>)
-            member.attributes.push_back(Attribute{
-                "jsonInt", std::get<::psio::json_int_spec>(eff::value).form ==
-                                 ::psio::int_text::string
-                              ? "string"
-                              : "number"});
-         if constexpr (::psio::has_spec_v<::psio::ijson_int_spec, eff_t>)
-            member.attributes.push_back(Attribute{
-                "ijsonInt", std::get<::psio::ijson_int_spec>(eff::value).form ==
-                                  ::psio::int_text::string
-                               ? "string"
-                               : "number"});
+         apply_member_annotations<F>(member, eff::value);
          return member;
       }
 
@@ -765,12 +925,50 @@ namespace psio::schema_types
       template <typename Tag, std::size_t... Is>
       void add_interface_funcs(Interface& iface, std::index_sequence<Is...>)
       {
+         (iface.funcs.push_back(build_interface_func<Tag, Is>()), ...);
+      }
+
+      // Function I of an interface. One whose functions are reflect<Tag>'s
+      // methods carries what method(...) lists: parameter annotations (the
+      // bounded parameter types), returns(...) and the argument cap.
+      template <typename Tag, std::size_t I>
+      Func build_interface_func()
+      {
          using info       = ::psio::detail::interface_info<Tag>;
          using func_types = typename info::func_types;
-         (iface.funcs.push_back(
-             build_func<std::tuple_element_t<Is, func_types>>(
-                info::func_names[Is], info::param_names[Is])),
-          ...);
+         Func f = build_func<std::tuple_element_t<I, func_types>>(info::func_names[I],
+                                                                  info::param_names[I]);
+         if constexpr (requires { typename info::reflected_tag; })
+         {
+            using R      = reflect<typename info::reflected_tag>;
+            using Params = typename R::template method_params<I>;
+            const auto& meta = R::template method_annotations<I>;
+            [&]<std::size_t... Ps>(std::index_sequence<Ps...>) {
+               (apply_member_annotations<std::tuple_element_t<Ps, Params>>(
+                   f.params[Ps], std::get<Ps>(meta.params)),
+                ...);
+            }(std::make_index_sequence<
+                 std::tuple_size_v<std::remove_cvref_t<decltype(meta.params)>>>{});
+            if constexpr (!std::is_void_v<typename R::template method_result<I>>)
+            {
+               using Result = std::remove_cvref_t<typename R::template method_result<I>>;
+               if (f.result)
+               {
+                  Member result{"", std::move(*f.result), {}};
+                  apply_member_annotations<Result>(result, meta.result);
+                  f.result = std::move(result.type);
+                  for (auto& attribute : result.attributes)
+                     f.attributes.push_back(
+                        Attribute{"result." + attribute.name, std::move(attribute.value)});
+               }
+            }
+            // The cap of the argument tuple: its encoded size limit and its
+            // offset width.
+            if (meta.max_dynamic_data)
+               f.attributes.push_back(
+                  Attribute{"maxDynamicData", std::to_string(*meta.max_dynamic_data)});
+         }
+         return f;
       }
 
       // Build a Resource's methods (same shape as a free interface's

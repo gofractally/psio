@@ -238,6 +238,12 @@ namespace psio {
 
       std::uint32_t max       = 0;   // runtime upper bound; 0 = unbounded
       std::uint32_t field_num = 0;
+      // false: the bytes are checked by strict validation only (the spec as
+      // first shipped: `psio::utf8_spec{}`). true — what the `psio::utf8`
+      // helper states — the string IS a UTF-8 string, exactly as
+      // psio::utf8_string is: pssz, json and key refuse a value that is not
+      // UTF-8 on encode, validate and decode, and the schema says "utf8".
+      bool enforced = false;
 
       constexpr bool operator==(const utf8_spec&) const = default;
 
@@ -368,7 +374,8 @@ namespace psio {
    struct element_spec
    {
       using spec_category = runtime_spec_tag;
-      using applies_to    = shape_set<VariableSequenceShape, FixedSequenceShape>;
+      // (No applies_to: where a position spec fits is checked, with its own
+      // message, by detail::ann::tree_ok.)
 
       ChildSpec child{};
 
@@ -376,6 +383,48 @@ namespace psio {
    };
    template <typename C>
    element_spec(C) -> element_spec<C>;
+
+   // ── Position specs: annotations below the member itself ──────────────
+   //
+   // An annotation tree states constraints at any depth of a member's type
+   // without changing the type:
+   //
+   //   attr(tags,     max<8> | element(max<16>))        vector<string>
+   //   attr(grid,     max<4> | element(max<4>))         vector<vector<u8>>
+   //   attr(balances, max<32> | keys(utf8 | max<16>))   map<string, u64>
+   //   attr(pair,     at<0>(max<12>))                   pair / tuple / variant
+   //
+   //   element(specs)   every element of a list, an array or a set
+   //   keys(specs)      every key of a map
+   //   values(specs)    every mapped value of a map
+   //   at<I>(specs)     element I of a tuple / pair, alternative I of a variant
+   //
+   // A std::optional is looked through: the specs written for an optional
+   // apply to its payload. `specs` is one spec or a `spec | spec` list, and
+   // may itself contain position specs (any depth). The child of every
+   // position spec is a std::tuple of specs (element_spec also accepts the
+   // bare spec struct it was first written with; see child_specs).
+   template <typename ChildSpecs>
+   struct keys_spec
+   {
+      using spec_category = runtime_spec_tag;
+      ChildSpecs child{};
+      constexpr bool operator==(const keys_spec&) const = default;
+   };
+   template <typename ChildSpecs>
+   struct values_spec
+   {
+      using spec_category = runtime_spec_tag;
+      ChildSpecs child{};
+      constexpr bool operator==(const values_spec&) const = default;
+   };
+   template <std::size_t I, typename ChildSpecs>
+   struct at_spec
+   {
+      using spec_category = runtime_spec_tag;
+      ChildSpecs child{};
+      constexpr bool operator==(const at_spec&) const = default;
+   };
 
    template <typename T>
    struct default_value_spec
@@ -868,7 +917,11 @@ namespace psio {
       {
          if constexpr (std::is_class_v<T>)
          {
-            if constexpr (requires { ::psio::reflect<T>::type_annotations; })
+            // A type that states its own type-level annotations
+            // (psio::annotated_tuple: a method's argument cap).
+            if constexpr (requires { T::psio_type_annotations; })
+               return T::psio_type_annotations;
+            else if constexpr (requires { ::psio::reflect<T>::type_annotations; })
             {
                static_assert(specs_distinct<std::remove_cvref_t<
                                 decltype(::psio::reflect<T>::type_annotations)>>::value,
@@ -1265,7 +1318,14 @@ namespace psio {
    inline constexpr field_num_spec field{.value = N};
 
    template <std::uint32_t N>
-   inline constexpr utf8_spec utf8{.max = N};
+   inline constexpr length_bound min{.min = N};
+
+   // The bytes of a string are UTF-8: `utf8`, or with a byte bound
+   // `utf8 | max<16>`. On a std::string it is exactly psio::utf8_string:
+   // enforced by pssz, json and key on encode, validate and decode, and
+   // "utf8" in the schema. (`psio::utf8_spec{}` written out is the older,
+   // weaker statement: checked by strict validation only.)
+   inline constexpr utf8_spec utf8{.enforced = true};
 
    inline constexpr sorted_spec sorted{};
    inline constexpr sorted_spec unique{.unique = true};
@@ -1311,6 +1371,39 @@ namespace psio {
    {
       return std::tuple_cat(to_spec_tuple(a), to_spec_tuple(b));
    }
+
+   // Position helpers (see keys_spec above): `element(max<16>)`,
+   // `element(utf8 | max<16>)`, `element(element(max<4>))`,
+   // `keys(max<16>) | values(max<64>)`, `at<1>(max<8>)`.
+   template <typename S>
+   constexpr auto element(const S& specs) noexcept
+   {
+      return element_spec<decltype(to_spec_tuple(specs))>{to_spec_tuple(specs)};
+   }
+   template <typename S>
+   constexpr auto keys(const S& specs) noexcept
+   {
+      return keys_spec<decltype(to_spec_tuple(specs))>{to_spec_tuple(specs)};
+   }
+   template <typename S>
+   constexpr auto values(const S& specs) noexcept
+   {
+      return values_spec<decltype(to_spec_tuple(specs))>{to_spec_tuple(specs)};
+   }
+   namespace detail
+   {
+      template <std::size_t I>
+      struct at_helper
+      {
+         template <typename S>
+         constexpr auto operator()(const S& specs) const noexcept
+         {
+            return at_spec<I, decltype(to_spec_tuple(specs))>{to_spec_tuple(specs)};
+         }
+      };
+   }
+   template <std::size_t I>
+   inline constexpr detail::at_helper<I> at{};
 
 }  // namespace psio
 

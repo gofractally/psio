@@ -771,12 +771,14 @@ namespace psio {
          }
          else
          {
-            // A member outside its declared length_bound has no text: the
-            // reader would reject it.
-            if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
-               if (!::psio::detail::length_bound_ok(
-                      fref, std::get<::psio::length_bound>(eff_for::value)))
-                  w.fail("json: member length_bound violated");
+            // A member outside its declared annotations (its length_bound
+            // / utf8, and those of its elements, keys, values and tuple
+            // elements at any depth) has no text: the reader would reject it.
+            if constexpr (::psio::detail::ann::has_tree_specs_v<eff>)
+               if (auto st = ::psio::check_member_annotations(
+                      fref, eff_for::value, "json: member length_bound violated", "json");
+                   !st.ok())
+                  w.fail(st.error());
             constexpr int_mode mode = field_mode<Fmt, eff>(eff_for::value);
             encode_value<Fmt, mode>(fref, w);
          }
@@ -989,6 +991,17 @@ namespace psio {
                   v);
                w.put(']');
             }
+         }
+         else if constexpr (requires { typename T::psio_annotated_tuple; })
+         {
+            // A tuple carrying element annotations (wrappers.hpp: a
+            // method's argument tuple): the tuple's text, for a value
+            // inside its annotations.
+            if (auto st = ::psio::detail::ann::check_value(
+                   v.tuple(), T::psio_annotations, "json: member length_bound violated", "json");
+                !st.ok())
+               w.fail(st.error());
+            encode_value<Fmt, int_mode::natural>(v.tuple(), w);
          }
          else if constexpr (is_std_tuple<T>::value)
          {
@@ -1484,18 +1497,20 @@ namespace psio {
          else
          {
             constexpr int_mode mode = field_mode<Fmt, eff>(eff_for::value);
-            if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
+            if constexpr (::psio::detail::ann::has_tree_specs_v<eff>)
             {
-               // The member's length_bound is part of its type. It is
-               // checked on the value read, so the member is materialized
-               // even when only validating.
+               // The member's annotations are part of its type: its
+               // length_bound / utf8 and those of every position below it.
+               // They are checked on the value read, so the member is
+               // materialized even when only validating.
                F  scratch{};
                F* dst = fptr ? fptr : &scratch;
                if (!read_value<Fmt, mode, F>(r, dst))
                   return false;
-               if (!::psio::detail::length_bound_ok(
-                      *dst, std::get<::psio::length_bound>(eff_for::value)))
-                  return r.c.fail("json: member length_bound violated");
+               if (auto st = ::psio::check_member_annotations(
+                      *dst, eff_for::value, "json: member length_bound violated", "json");
+                   !st.ok())
+                  return r.c.fail(st.error().what);
                return true;
             }
             else
@@ -1892,6 +1907,19 @@ namespace psio {
                   return r.c.fail("json: expected ']' after variant value");
                return true;
             }
+         }
+         else if constexpr (requires { typename T::psio_annotated_tuple; })
+         {
+            using Tuple = typename T::tuple_type;
+            Tuple        scratch{};
+            Tuple* const dst = out ? &out->tuple() : &scratch;
+            if (!read_value<Fmt, int_mode::natural, Tuple>(r, dst))
+               return false;
+            if (auto st = ::psio::detail::ann::check_value(
+                   *dst, T::psio_annotations, "json: member length_bound violated", "json");
+                !st.ok())
+               return r.c.fail(st.error().what);
+            return true;
          }
          else if constexpr (is_std_tuple<T>::value)
          {
