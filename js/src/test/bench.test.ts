@@ -3,6 +3,9 @@
 // Measures pack, unpack, view, readField, validate, JSON conversion,
 // in-place mutation, and competitor (JSON.parse/stringify) performance
 // across multiple schema tiers.
+//
+// A benchmark: it reports numbers and asserts nothing about time, so it
+// cannot fail on a busy machine.
 
 import { describe, it, after } from 'node:test';
 import {

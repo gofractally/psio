@@ -101,7 +101,10 @@ describe('fixedStruct view correctness', () => {
   });
 });
 
-describe('view performance: view beats unpack', () => {
+// Benchmarks: these report numbers and never fail on timing (a wall-clock
+// relation does not hold on a busy machine). What they assert is that every
+// measured path reads the right value.
+describe('view benchmark: view, unpack and readField', () => {
   // Build a struct with many string fields — string decode is the expensive operation
   const BigStruct = struct({
     field0: str, field1: str, field2: str, field3: str, field4: str,
@@ -124,7 +127,7 @@ describe('view performance: view beats unpack', () => {
   const packed = BigStruct.pack(testData);
   const ITERATIONS = 10_000;
 
-  it('partial access: view is faster than unpack', () => {
+  it('partial access: view vs unpack (reported)', () => {
     // unpack: decode ALL 10 string fields
     const unpackStart = performance.now();
     for (let i = 0; i < ITERATIONS; i++) {
@@ -142,10 +145,11 @@ describe('view performance: view beats unpack', () => {
     const viewTime = performance.now() - viewStart;
 
     console.log(`  partial access (1/10 fields, ${ITERATIONS} iters): view=${viewTime.toFixed(2)}ms, unpack=${unpackTime.toFixed(2)}ms, ratio=${(unpackTime / viewTime).toFixed(2)}x`);
-    assert.ok(viewTime < unpackTime, `view (${viewTime.toFixed(2)}ms) should be faster than unpack (${unpackTime.toFixed(2)}ms) for partial access`);
+    assert.strictEqual(BigStruct.view(packed).field0, testData.field0);
+    assert.strictEqual(BigStruct.unpack(packed).field0, testData.field0);
   });
 
-  it('repeated access: cached view matches plain object speed', () => {
+  it('repeated access: cached view vs plain object (reported)', () => {
     const v = BigStruct.view(packed);
     void v.field0; // prime cache
 
@@ -163,11 +167,11 @@ describe('view performance: view beats unpack', () => {
     const objTime = performance.now() - objStart;
 
     console.log(`  cached access (${ITERATIONS * 10} reads): view=${cachedTime.toFixed(2)}ms, plain=${objTime.toFixed(2)}ms`);
-    // Proxy cached access has overhead; allow 10x
-    assert.ok(cachedTime < objTime * 10, `cached view access (${cachedTime.toFixed(2)}ms) should be within 10x of plain object (${objTime.toFixed(2)}ms)`);
+    assert.strictEqual(v.field0, obj.field0);
+    assert.strictEqual(v.field9, testData.field9);
   });
 
-  it('vec of structs: view beats unpack for partial access', () => {
+  it('vec of structs: view vs unpack for partial access (reported)', () => {
     const PersonList = vec(BigStruct);
     const items = Array.from({ length: 100 }, () => testData);
     const packedVec = PersonList.pack(items);
@@ -189,10 +193,12 @@ describe('view performance: view beats unpack', () => {
     const viewTime = performance.now() - viewStart;
 
     console.log(`  vec[100] single element access (1000 iters): view=${viewTime.toFixed(2)}ms, unpack=${unpackTime.toFixed(2)}ms, ratio=${(unpackTime / viewTime).toFixed(2)}x`);
-    assert.ok(viewTime < unpackTime, `view (${viewTime.toFixed(2)}ms) should be faster than unpack (${unpackTime.toFixed(2)}ms) for vec partial access`);
+    assert.strictEqual(PersonList.view(packedVec)[0].field0, testData.field0);
+    assert.strictEqual(PersonList.view(packedVec)[99].field9, testData.field9);
+    assert.deepStrictEqual(PersonList.unpack(packedVec)[99], testData);
   });
 
-  it('readField: zero-allocation beats view and unpack', () => {
+  it('readField vs view vs unpack (reported)', () => {
     // readField: no Proxy, no target object — just offset computation + decode
     const readFieldStart = performance.now();
     for (let i = 0; i < ITERATIONS; i++) {
@@ -217,7 +223,8 @@ describe('view performance: view beats unpack', () => {
     const unpackTime = performance.now() - unpackStart;
 
     console.log(`  readField vs view vs unpack (${ITERATIONS} iters): readField=${readFieldTime.toFixed(2)}ms, view=${viewTime.toFixed(2)}ms, unpack=${unpackTime.toFixed(2)}ms, readField/unpack=${(unpackTime / readFieldTime).toFixed(2)}x`);
-    assert.ok(readFieldTime < viewTime, `readField (${readFieldTime.toFixed(2)}ms) should be faster than view (${viewTime.toFixed(2)}ms)`);
+    assert.strictEqual(BigStruct.readField(packed, 'field0'), testData.field0);
+    assert.strictEqual(BigStruct.readField(packed, 'field9'), testData.field9);
   });
 });
 
@@ -280,7 +287,7 @@ describe('TypedArray vec views', () => {
     assert.deepStrictEqual(result, [10, 20, 30]);
   });
 
-  it('vec(u32)[10000]: TypedArray view vs unpack', () => {
+  it('vec(u32)[10000]: TypedArray view vs unpack (reported)', () => {
     const IntList = vec(u32);
     const items = Array.from({ length: 10_000 }, (_, i) => i);
     const packed = IntList.pack(items);
@@ -300,6 +307,8 @@ describe('TypedArray vec views', () => {
     const viewTime = performance.now() - viewStart;
 
     console.log(`  vec<u32>[10000] (1000 iters): view=${viewTime.toFixed(2)}ms, unpack=${unpackTime.toFixed(2)}ms, ratio=${(unpackTime / viewTime).toFixed(2)}x`);
-    assert.ok(viewTime < unpackTime, `TypedArray view should be faster than unpack`);
+    assert.strictEqual(IntList.view(packed).length, 10_000);
+    assert.strictEqual(IntList.view(packed)[9_999], 9_999);
+    assert.deepStrictEqual(Array.from(IntList.view(packed)), IntList.unpack(packed));
   });
 });
