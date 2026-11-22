@@ -453,7 +453,7 @@ fn unpruned_and_malformed_frames_are_rejected<F: PsszFormat>() {
     rejects::<F, R3>(&all_none);
     assert_eq!(
         decode::<F, R1>(&fixed_none).unwrap_err(),
-        PsszError("pssz: trailing absent optional field was not pruned")
+        PsszError::new("pssz: trailing absent optional field was not pruned")
     );
     // An older reader cannot judge the writer's last slot: accepts, reports.
     reads::<F, _>(&fixed_none, &r0(), true);

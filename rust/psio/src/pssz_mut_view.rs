@@ -150,7 +150,7 @@ impl<'a, T: ?Sized, F: PsszFormat> PsszMutView<'a, T, F> {
         self.data
             .get_mut(range)
             .map(PsszMutView::trusted)
-            .ok_or(PsszError("pssz mutable view: span outside the buffer"))
+            .ok_or(PsszError::new("pssz mutable view: span outside the buffer"))
     }
 
     /// Positional field access, consuming the view (keeps its lifetime).
@@ -161,7 +161,7 @@ impl<'a, T: ?Sized, F: PsszFormat> PsszMutView<'a, T, F> {
         }
         let range = checked::field_bytes::<F, <T as PsszField<F, INDEX>>::Field>(
             self.data, <T as PsszField<F, INDEX>>::LOCATION, <T as PsszField<F, INDEX>>::DWNC,
-        ).and_then(|field| subrange(self.data, field).ok_or(PsszError(
+        ).and_then(|field| subrange(self.data, field).ok_or(PsszError::new(
             "pssz mutable view: the field is not stored in the frame (a pruned trailing optional)",
         )));
         self.narrow(range)
@@ -204,12 +204,12 @@ impl<'a, T: PsszPack<F>, F: PsszFormat> PsszMutView<'a, T, F> {
             )
         };
         if self.data.len() != T::FIXED_SIZE {
-            return Err(PsszError("pssz mutable view: span is not the fixed size of the type"));
+            return Err(PsszError::new("pssz mutable view: span is not the fixed size of the type"));
         }
         let mut encoded = Vec::with_capacity(T::FIXED_SIZE);
         value.pssz_pack_checked(&mut encoded)?;
         if encoded.len() != self.data.len() {
-            return Err(PsszError("pssz mutable view: encoding is not the fixed size of the type"));
+            return Err(PsszError::new("pssz mutable view: encoding is not the fixed size of the type"));
         }
         self.data.copy_from_slice(&encoded);
         Ok(())

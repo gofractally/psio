@@ -600,7 +600,7 @@ fn check_pssz<T: Packed>(row: &Row) -> Result<(), String> {
             psio::pssz::decode_checked::<Pssz, T>(&bytes).map(drop),
         ];
         for outcome in outcomes {
-            if outcome.map_err(|e| e.0) != Err(reason) {
+            if outcome.as_ref().map_err(|e| e.message()) != Err(reason) {
                 return Err(format!("typed pssz: {outcome:?}, want {reason:?}"));
             }
         }
@@ -1255,7 +1255,7 @@ fn custom_text_forms_go_through_the_handler_registry_or_fall_back_to_the_wire_ty
     let mut failing = dynamic::CustomHandlers::new();
     failing.add(
         "AccountName",
-        |_bytes: &[u8]| Err(psio::pssz::PsszError("no text")),
+        |_bytes: &[u8]| Err(psio::pssz::PsszError::new("no text")),
         |_text: &str| Ok(vec![1, 2, 3]), // not a u64
     );
     assert_eq!(
@@ -1340,7 +1340,7 @@ fn writers_refuse_invariant_violations_and_write_maps_in_key_order() {
             json::try_encode::<Json, T>(&value).map_err(|e| e.what),
             json::try_encode::<IJson, T>(&value).map_err(|e| e.what),
         ] {
-            assert_eq!(what, Err(reason), "{value:?}");
+            assert_eq!(what, Err(reason.into()), "{value:?}");
         }
     }
     let bad_name = Name { value: 1 << 60 };
@@ -1365,7 +1365,7 @@ fn writers_refuse_invariant_violations_and_write_maps_in_key_order() {
     assert!(psio::try_to_json(&adopted).is_err());
     assert_eq!(
         psio::from_json::<Nested<Range>>(r#"{"lo":9,"hi":3}"#).map_err(|e| e.what),
-        Err("Range: lo is greater than hi")
+        Err("Range: lo is greater than hi".into())
     );
 
     // Maps and sets: the canonical order (ascending key bytes) whatever the
@@ -1385,15 +1385,15 @@ fn writers_refuse_invariant_violations_and_write_maps_in_key_order() {
     for (text, what) in [
         (r#"{"a":1,"a":2}"#, "json: duplicate map key"),
     ] {
-        assert_eq!(psio::from_json::<BTreeMap<String, u32>>(text).map_err(|e| e.what), Err(what));
+        assert_eq!(psio::from_json::<BTreeMap<String, u32>>(text).map_err(|e| e.what), Err(what.into()));
     }
     assert_eq!(
         psio::from_ijson::<BTreeMap<u64, String>>(r#"[["5","a"],[5,"b"]]"#).map_err(|e| e.what),
-        Err("json: duplicate map key")
+        Err("json: duplicate map key".into())
     );
     assert_eq!(
         psio::from_json::<BTreeSet<psio::key::ByKey<f64>>>("[0.0,-0.0]").map_err(|e| e.what),
-        Err("json: duplicate set element")
+        Err("json: duplicate set element".into())
     );
     // The form of a map is its key type's: an object where pairs are
     // expected, or the reverse, is an error.

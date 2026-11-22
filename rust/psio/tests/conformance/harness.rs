@@ -285,7 +285,7 @@ fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Res
             // message in every language.
             if v.reason_is_shared() {
                 for (name, error) in &outcomes {
-                    if error.map(|e| e.0) != Some(v.reason.as_str()) {
+                    if error.as_ref().map(|e| e.message()) != Some(v.reason.as_str()) {
                         return fail(name, format!("{error:?}, want {:?}", v.reason));
                     }
                 }
@@ -407,7 +407,7 @@ pub fn encode<T: All>(format: &str, value: &T) -> PsszResult<Vec<u8>> {
         "pssz8" => try_encode::<Pssz8, T>(value),
         "pssz16" => try_encode::<Pssz16, T>(value),
         "pssz32" => try_encode::<Pssz32, T>(value),
-        _ => Err(PsszError("unknown format")),
+        _ => Err(PsszError::new("unknown format")),
     }
 }
 pub type Native = Box<dyn Fn(&str) -> PsszResult<Vec<u8>>>;

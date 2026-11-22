@@ -22,7 +22,8 @@ struct Options {
     /// id defaults to the schema name. The bytes are unaffected.
     custom: Option<Option<String>>,
     /// `#[psio(invariant = "path")]`: the type's invariant, a
-    /// `fn(&Self) -> Result<(), &'static str>` (docs/pssz-spec.md 18). Every
+    /// `fn(&Self) -> Result<(), E>` with `E: Into<Cow<'static, str>>`
+    /// (docs/pssz-spec.md 18). Every
     /// checking reader and every writer enforces it; the schema node is
     /// `Custom { wire type, id }`.
     invariant: Option<syn::Path>,
@@ -375,7 +376,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                         quote! {
                             Self::#other(__n) => {
                                 #(if *__n == #values {
-                                    return ::core::result::Result::Err(#k::pssz::PsszError(
+                                    return ::core::result::Result::Err(#k::pssz::PsszError::new(
                                         "pssz: catch-all enum variant holds a declared enumerator"));
                                 })*
                                 *__n
@@ -384,8 +385,8 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     )
                 }
                 None => (
-                    quote!(::core::result::Result::Err(#k::pssz::PsszError("pssz: value is not an enumerator"))),
-                    quote!(::core::result::Result::Err(#k::pssz::PsszError("pssz: value is not an enumerator"))),
+                    quote!(::core::result::Result::Err(#k::pssz::PsszError::new("pssz: value is not an enumerator"))),
+                    quote!(::core::result::Result::Err(#k::pssz::PsszError::new("pssz: value is not an enumerator"))),
                     quote!(),
                 ),
             };
@@ -463,14 +464,14 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     _ => quote!(<(#(#types,)*) as #pack>::SHAPE),
                 });
                 validate_arms.push(match &variant.fields {
-                    Fields::Unit => quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; if bytes.is_empty() { ::core::result::Result::Ok(()) } else { ::core::result::Result::Err(#k::pssz::PsszError("pssz: zero-size fixed payload must be empty")) } } },
+                    Fields::Unit => quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; if bytes.is_empty() { ::core::result::Result::Ok(()) } else { ::core::result::Result::Err(#k::pssz::PsszError::new("pssz: zero-size fixed payload must be empty")) } } },
                     _ if single => { let ty = types[0]; quote! { #tag => { <#ty as #k::pssz::PsszValidate<__PsszFormat>>::pssz_validate(bytes) } } }
                     _ => { let body = record_validate(k, &variant.fields, false, &frame); quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; #body } } }
                 });
                 if unpack {
                     let decode = match &variant.fields {
                         Fields::Unit => {
-                            quote! { let _payload_depth = #k::pssz_checked::DecodeDepth::enter()?; if !bytes.is_empty() { return ::core::result::Result::Err(#k::pssz::PsszError("pssz: zero-size fixed payload must be empty")); } ::core::result::Result::Ok(Self::#vname) }
+                            quote! { let _payload_depth = #k::pssz_checked::DecodeDepth::enter()?; if !bytes.is_empty() { return ::core::result::Result::Err(#k::pssz::PsszError::new("pssz: zero-size fixed payload must be empty")); } ::core::result::Result::Ok(Self::#vname) }
                         }
                         _ if single => {
                             let ty = types[0];
@@ -515,13 +516,13 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 }
             }
             validation_body = quote! {
-                let (&selector, bytes) = bytes.split_first().ok_or(#k::pssz::PsszError("pssz: variant span out of bounds"))?;
-                match selector { #(#validate_arms,)* _ => ::core::result::Result::Err(#k::pssz::PsszError("pssz: variant selector out of range")) }
+                let (&selector, bytes) = bytes.split_first().ok_or(#k::pssz::PsszError::new("pssz: variant span out of bounds"))?;
+                match selector { #(#validate_arms,)* _ => ::core::result::Result::Err(#k::pssz::PsszError::new("pssz: variant selector out of range")) }
             };
             let body = if unpack {
                 quote! {
-                    let (&selector, bytes) = bytes.split_first().ok_or(#k::pssz::PsszError("pssz: variant span out of bounds"))?;
-                    match selector { #(#arms,)* _ => ::core::result::Result::Err(#k::pssz::PsszError("pssz: variant selector out of range")) }
+                    let (&selector, bytes) = bytes.split_first().ok_or(#k::pssz::PsszError::new("pssz: variant span out of bounds"))?;
+                    match selector { #(#arms,)* _ => ::core::result::Result::Err(#k::pssz::PsszError::new("pssz: variant selector out of range")) }
                 }
             } else {
                 quote! { match self { #(#arms),* } }
@@ -565,7 +566,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
     let check = |value: Tokens| match &opts.invariant {
         Some(path) => quote! {
             if let ::core::result::Result::Err(__why) = #path(#value) {
-                return ::core::result::Result::Err(#k::pssz::PsszError(__why));
+                return ::core::result::Result::Err(#k::pssz::PsszError(::core::convert::Into::into(__why)));
             }
         },
         None => quote!(),
@@ -603,7 +604,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
         Some(path) => quote! {
             if #k::pssz_checked::writer_checks_invariants() {
                 if let ::core::result::Result::Err(__why) = #path(self) {
-                    return ::core::result::Result::Err(#k::pssz::PsszError(__why));
+                    return ::core::result::Result::Err(#k::pssz::PsszError(::core::convert::Into::into(__why)));
                 }
             }
         },
@@ -665,7 +666,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     let result: #k::pssz::PsszResult<()> = (|| { #body })();
                     result?;
                     #pack_check
-                    destination.try_reserve(temporary.len()).map_err(|_| #k::pssz::PsszError("pssz: output allocation overflow"))?;
+                    destination.try_reserve(temporary.len()).map_err(|_| #k::pssz::PsszError::new("pssz: output allocation overflow"))?;
                     destination.extend_from_slice(&temporary);
                     ::core::result::Result::Ok(())
                 }

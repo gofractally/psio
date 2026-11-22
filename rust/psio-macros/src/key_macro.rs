@@ -10,8 +10,8 @@
 //! * A struct of one member marked `#[psio(transparent)]` (or
 //!   `#[serde(transparent)]`) is that member: same key, and a composite key
 //!   when the member is a tuple.
-//! * `#[psio(invariant = "path")]` (a `fn(&Self) -> Result<(), &'static
-//!   str>`): `try_to_key` / `to_key` refuse a value that violates it and the
+//! * `#[psio(invariant = "path")]` (a `fn(&Self) -> Result<(), E>` with
+//!   `E: Into<Cow<'static, str>>`): `try_to_key` / `to_key` refuse a value that violates it and the
 //!   readers reject its key with the invariant's message.
 //! * Any other enum, whose variants each hold one unnamed field, is a
 //!   variant: one byte holding the variant's index, then the payload's key
@@ -50,7 +50,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let own_check = |value: TokenStream2| match &shared.invariant {
         Some(path) => quote! {
             if let ::core::result::Result::Err(__why) = #path(#value) {
-                return ::core::result::Result::Err(#k::KeyError(__why));
+                return ::core::result::Result::Err(#k::KeyError(::core::convert::Into::into(__why)));
             }
         },
         None => quote!(),
@@ -174,7 +174,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 None => (
                     quote!(),
                     quote!(::core::result::Result::Err(
-                        #k::KeyError("key: value is not an enumerator"))),
+                        #k::KeyError::new("key: value is not an enumerator"))),
                 ),
             };
             Ok(quote! {
@@ -266,7 +266,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let __value = match r.byte()? {
                             #(#indexes => Self::#idents(<#types as #k::KeyUnpack>::key_unpack(r)?),)*
                             _ => return ::core::result::Result::Err(
-                                #k::KeyError("key: variant index out of range")),
+                                #k::KeyError::new("key: variant index out of range")),
                         };
                         #check_value
                         ::core::result::Result::Ok(__value)

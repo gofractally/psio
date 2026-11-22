@@ -62,7 +62,7 @@ pub struct Nested<T, V = Checked, const N: usize = { usize::MAX }> {
     _phantom: PhantomData<fn() -> (T, V)>,
 }
 
-const OVERFLOW: PsszError = PsszError("pssz: member length_bound violated");
+const OVERFLOW: PsszError = PsszError::new("pssz: member length_bound violated");
 
 impl<T, V, const N: usize> Nested<T, V, N> {
     /// Adopts bytes the caller vouches for. Bytes that are not a `T` (or
@@ -225,7 +225,7 @@ impl<F: PsszFormat, T: PsszPack<Pssz>, V: NestedValidation, const N: usize> Pssz
         if self.bytes.len() > N {
             return Err(OVERFLOW);
         }
-        out.try_reserve(self.bytes.len()).map_err(|_| PsszError("pssz: output allocation overflow"))?;
+        out.try_reserve(self.bytes.len()).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
         out.extend_from_slice(&self.bytes);
         Ok(())
     }
@@ -239,7 +239,7 @@ where
         let _depth = checked::DecodeDepth::enter()?;
         Self::descend(bytes)?;
         let mut out = Vec::new();
-        out.try_reserve(bytes.len()).map_err(|_| PsszError("pssz: nested allocation overflow"))?;
+        out.try_reserve(bytes.len()).map_err(|_| PsszError::new("pssz: nested allocation overflow"))?;
         out.extend_from_slice(bytes);
         Ok(Self::unchecked(out))
     }

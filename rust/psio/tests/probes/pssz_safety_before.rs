@@ -19,7 +19,7 @@ impl<F: PsszFormat> PsszPack<F> for CheckedByte {
 impl<F: PsszFormat> PsszUnpack<F> for CheckedByte {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
         if bytes != [0x81] {
-            return Err(PsszError("custom byte rejected"));
+            return Err(PsszError::new("custom byte rejected"));
         }
         Ok(Self(1))
     }
@@ -63,7 +63,7 @@ impl<F: PsszFormat> PsszUnpack<F> for Zero {
         if bytes.is_empty() {
             Ok(Self)
         } else {
-            Err(PsszError("zero span"))
+            Err(PsszError::new("zero span"))
         }
     }
 }

@@ -55,7 +55,7 @@
 //! |-----------|-----|----|---------|
 //! | `psio` | `crate = "path"` | type | path of the psio crate (default `::psio`) |
 //! | `psio` | `transparent` | type | the type is its one member in every format |
-//! | `psio` | `invariant = "path"` | type | a `fn(&Self) -> Result<(), &'static str>` every reader and writer enforces |
+//! | `psio` | `invariant = "path"` | type | a `fn(&Self) -> Result<(), E>` with `E: Into<Cow<'static, str>>` (a `&'static str`, or a `String` computed from the value) every reader and writer enforces |
 //! | `psio` | `definition_will_not_change` | type | the record never gains members |
 //! | `psio` | `variant` | type | a field-less enum is a variant of unit alternatives, not its integer |
 //! | `psio` | `custom`, `custom = "id"` | type | the type has a text form of its own; the id defaults to the schema name |

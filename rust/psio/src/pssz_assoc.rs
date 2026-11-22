@@ -39,13 +39,13 @@ impl<K, const N: usize> Default for BoundedSet<K, N> {
 }
 
 pub(crate) const MAP_ORDER: PsszError =
-    PsszError("pssz: map entries are not in strictly ascending key order");
+    PsszError::new("pssz: map entries are not in strictly ascending key order");
 pub(crate) const SET_ORDER: PsszError =
-    PsszError("pssz: set elements are not in strictly ascending order");
-pub(crate) const MAP_DUPLICATE: PsszError = PsszError("pssz: map has duplicate keys");
-pub(crate) const SET_DUPLICATE: PsszError = PsszError("pssz: set has duplicate elements");
-const MAP_BOUND: PsszError = PsszError("pssz: map exceeds its bound");
-const SET_BOUND: PsszError = PsszError("pssz: set exceeds its bound");
+    PsszError::new("pssz: set elements are not in strictly ascending order");
+pub(crate) const MAP_DUPLICATE: PsszError = PsszError::new("pssz: map has duplicate keys");
+pub(crate) const SET_DUPLICATE: PsszError = PsszError::new("pssz: set has duplicate elements");
+const MAP_BOUND: PsszError = PsszError::new("pssz: map exceeds its bound");
+const SET_BOUND: PsszError = PsszError::new("pssz: set exceeds its bound");
 
 /// The items in canonical order: ascending key bytes of `key_of(item)`;
 /// `duplicate` when two keys have equal bytes.
@@ -229,7 +229,7 @@ macro_rules! pssz_map {
                 let out: Self = $build;
                 let $s = &out;
                 if $inner.len() != count {
-                    return Err(PsszError("pssz: map container merged distinct keys"));
+                    return Err(PsszError::new("pssz: map container merged distinct keys"));
                 }
                 Ok(out)
             }
@@ -279,7 +279,7 @@ macro_rules! pssz_set {
                 let out: Self = $build;
                 let $s = &out;
                 if $inner.len() != count {
-                    return Err(PsszError("pssz: set container merged distinct elements"));
+                    return Err(PsszError::new("pssz: set container merged distinct elements"));
                 }
                 Ok(out)
             }

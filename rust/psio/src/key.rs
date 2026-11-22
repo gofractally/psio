@@ -43,16 +43,46 @@
 //! its key with the invariant's message.
 
 use crate::pssz::{Bitvector, BoundedList, BoundedRawString, BoundedString, RawString, Uint256};
+use std::borrow::Cow;
 
 pub use psio_macros::Key;
 
-/// Why bytes are not a key of the requested type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyError(pub &'static str);
+/// Why bytes are not a key of the requested type, or why a value has no
+/// key. The message is a constant (`Cow::Borrowed`, no allocation) or text
+/// computed from the value (`Cow::Owned`), which is what a type's invariant
+/// may return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyError(pub Cow<'static, str>);
+
+impl KeyError {
+    /// An error with a constant message.
+    pub const fn new(message: &'static str) -> Self {
+        Self(Cow::Borrowed(message))
+    }
+    /// The message.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+impl From<&'static str> for KeyError {
+    fn from(message: &'static str) -> Self {
+        Self(Cow::Borrowed(message))
+    }
+}
+impl From<String> for KeyError {
+    fn from(message: String) -> Self {
+        Self(Cow::Owned(message))
+    }
+}
+impl From<Cow<'static, str>> for KeyError {
+    fn from(message: Cow<'static, str>) -> Self {
+        Self(message)
+    }
+}
 
 impl std::fmt::Display for KeyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 impl std::error::Error for KeyError {}
@@ -112,10 +142,10 @@ pub trait KeyUnpack: Sized {
             match r.byte()? {
                 0 => return Ok(out),
                 1 => {}
-                _ => return Err(KeyError("key: invalid list element marker")),
+                _ => return Err(KeyError::new("key: invalid list element marker")),
             }
             if out.len() >= limit {
-                return Err(KeyError("key: list exceeds its bound"));
+                return Err(KeyError::new("key: list exceeds its bound"));
             }
             out.push(Self::key_unpack(r)?);
         }
@@ -139,7 +169,7 @@ impl<'a> KeyReader<'a> {
     pub fn take(&mut self, n: usize) -> KeyResult<&'a [u8]> {
         let rest = self.remaining();
         if rest.len() < n {
-            return Err(KeyError("key: truncated"));
+            return Err(KeyError::new("key: truncated"));
         }
         self.pos += n;
         Ok(&rest[..n])
@@ -158,10 +188,10 @@ impl<'a> KeyReader<'a> {
         loop {
             let rest = self.remaining();
             let Some(zero) = rest.iter().position(|&b| b == 0) else {
-                return Err(KeyError("key: unterminated string"));
+                return Err(KeyError::new("key: unterminated string"));
             };
             match rest.get(zero + 1) {
-                None => return Err(KeyError("key: unterminated string")),
+                None => return Err(KeyError::new("key: unterminated string")),
                 Some(0) => {
                     out.extend_from_slice(&rest[..zero]);
                     self.pos += zero + 2;
@@ -171,7 +201,7 @@ impl<'a> KeyReader<'a> {
                     out.extend_from_slice(&rest[..=zero]);
                     self.pos += zero + 2;
                 }
-                Some(_) => return Err(KeyError("key: invalid escape")),
+                Some(_) => return Err(KeyError::new("key: invalid escape")),
             }
         }
     }
@@ -233,7 +263,7 @@ pub fn from_key<T: KeyUnpack>(bytes: &[u8]) -> KeyResult<T> {
     let mut r = KeyReader::new(bytes);
     let value = T::key_unpack(&mut r)?;
     if !r.remaining().is_empty() {
-        return Err(KeyError("key: trailing bytes"));
+        return Err(KeyError::new("key: trailing bytes"));
     }
     Ok(value)
 }
@@ -406,7 +436,7 @@ impl KeyUnpack for bool {
         match r.byte()? {
             0 => Ok(false),
             1 => Ok(true),
-            _ => Err(KeyError("key: invalid bool")),
+            _ => Err(KeyError::new("key: invalid bool")),
         }
     }
 }
@@ -465,7 +495,7 @@ macro_rules! key_octet {
             fn key_unpack_list(r: &mut KeyReader<'_>, limit: usize) -> KeyResult<Vec<Self>> {
                 let bytes = r.escaped()?;
                 if bytes.len() > limit {
-                    return Err(KeyError("key: list exceeds its bound"));
+                    return Err(KeyError::new("key: list exceeds its bound"));
                 }
                 Ok(bytes.into_iter().map(|b| (b ^ $flip) as $ty).collect())
             }
@@ -495,7 +525,7 @@ macro_rules! key_float {
                 let mut bits = <$bits>::from_be_bytes(r.array()?);
                 bits = if bits & SIGN != 0 { bits ^ SIGN } else { !bits };
                 if bits == SIGN {
-                    return Err(KeyError("key: negative zero is not canonical"));
+                    return Err(KeyError::new("key: negative zero is not canonical"));
                 }
                 Ok(<$ty>::from_bits(bits))
             }
@@ -545,7 +575,7 @@ impl KeyPack for String {
 }
 impl KeyUnpack for String {
     fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
-        String::from_utf8(r.escaped()?).map_err(|_| KeyError("key: string is not valid UTF-8"))
+        String::from_utf8(r.escaped()?).map_err(|_| KeyError::new("key: string is not valid UTF-8"))
     }
 }
 impl<const N: usize> KeyPack for BoundedString<N> {
@@ -560,7 +590,7 @@ impl<const N: usize> KeyUnpack for BoundedString<N> {
     fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
         let text = String::key_unpack(r)?;
         if text.len() > N {
-            return Err(KeyError("key: string exceeds its bound"));
+            return Err(KeyError::new("key: string exceeds its bound"));
         }
         Ok(BoundedString(text))
     }
@@ -590,7 +620,7 @@ impl<const N: usize> KeyUnpack for BoundedRawString<N> {
     fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
         let bytes = r.escaped()?;
         if bytes.len() > N {
-            return Err(KeyError("key: string exceeds its bound"));
+            return Err(KeyError::new("key: string exceeds its bound"));
         }
         Ok(BoundedRawString(bytes))
     }
@@ -695,7 +725,7 @@ impl<T: KeyUnpack> KeyUnpack for Option<T> {
         match r.byte()? {
             0 => Ok(None),
             1 => T::key_unpack(r).map(Some),
-            _ => Err(KeyError("key: invalid optional marker")),
+            _ => Err(KeyError::new("key: invalid optional marker")),
         }
     }
 }
@@ -728,7 +758,7 @@ impl<T: KeyUnpack, const N: usize> KeyUnpack for [T; N] {
         for _ in 0..N {
             items.push(T::key_unpack(r)?);
         }
-        items.try_into().map_err(|_| KeyError("key: array length"))
+        items.try_into().map_err(|_| KeyError::new("key: array length"))
     }
 }
 
@@ -752,7 +782,7 @@ impl<const N: usize> KeyUnpack for Bitvector<N> {
     fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
         let bytes = r.take((N + 7) / 8)?;
         if N % 8 != 0 && bytes[bytes.len() - 1] >> (N % 8) != 0 {
-            return Err(KeyError("key: bitvector padding bits are set"));
+            return Err(KeyError::new("key: bitvector padding bits are set"));
         }
         Ok(Bitvector { bytes: bytes.to_vec() })
     }
@@ -899,9 +929,9 @@ impl<T: KeyUnpack> KeyUnpack for ByKey<T> {
 // then `00`, and the string framing for a set of octets.
 
 pub(crate) const MAP_ORDER: KeyError =
-    KeyError("key: map entries are not in strictly ascending key order");
+    KeyError::new("key: map entries are not in strictly ascending key order");
 pub(crate) const SET_ORDER: KeyError =
-    KeyError("key: set elements are not in strictly ascending order");
+    KeyError::new("key: set elements are not in strictly ascending order");
 
 /// The key bytes of each item, ascending.
 pub(crate) fn sorted_keys<'a, K: KeyPack + 'a>(keys: impl Iterator<Item = &'a K>) -> Vec<Vec<u8>> {
@@ -979,7 +1009,7 @@ macro_rules! key_set {
                 let out: Self = $build;
                 let $s = &out;
                 if $inner.len() != count {
-                    return Err(KeyError("key: set container merged distinct elements"));
+                    return Err(KeyError::new("key: set container merged distinct elements"));
                 }
                 Ok(out)
             }
@@ -1013,7 +1043,7 @@ macro_rules! key_map {
                 let out: Self = $build;
                 let $s = &out;
                 if $inner.len() != count {
-                    return Err(KeyError("key: map container merged distinct keys"));
+                    return Err(KeyError::new("key: map container merged distinct keys"));
                 }
                 Ok(out)
             }

@@ -148,11 +148,11 @@ impl Schema {
     pub fn check_ir_version(&self) -> PsszResult<()> {
         match self.ir_version {
             Some(IR_VERSION) => Ok(()),
-            None => Err(PsszError(
+            None => Err(PsszError::new(
                 "pssz schema: no ir_version marker (the schema predates the box / utf8 markers and \
                  would derive different widths); regenerate it",
             )),
-            Some(_) => Err(PsszError("pssz schema: ir_version is newer than this library")),
+            Some(_) => Err(PsszError::new("pssz schema: ir_version is newer than this library")),
         }
     }
     pub fn get(&self, name: &str) -> Option<&AnyType> {
@@ -167,12 +167,12 @@ impl Schema {
                 AnyValue::Type(reference) => {
                     ty = self
                         .get(&reference.r#type)
-                        .ok_or(PsszError("pssz schema: unresolved named type"))?
+                        .ok_or(PsszError::new("pssz schema: unresolved named type"))?
                 }
                 _ => return Ok(ty),
             }
         }
-        Err(PsszError("pssz schema: cyclic aliases"))
+        Err(PsszError::new("pssz schema: cyclic aliases"))
     }
     /// The type as it is on the wire: `resolve`, looking through the nodes
     /// that add nothing to the bytes — an `Enum` (its underlying integer)
@@ -192,7 +192,7 @@ impl Schema {
                 AnyValue::Type(reference) => {
                     ty = self
                         .get(&reference.r#type)
-                        .ok_or(PsszError("pssz schema: unresolved named type"))?
+                        .ok_or(PsszError::new("pssz schema: unresolved named type"))?
                 }
                 AnyValue::Enum(named) => {
                     self.enum_underlying(&named.r#type)?;
@@ -203,14 +203,14 @@ impl Schema {
                     if crate::time::parse_time_schema_id(&custom.id).is_some() {
                         self.time_ticks(&custom.r#type)?;
                     } else if crate::time::reserved_time_schema_id(&custom.id) {
-                        return Err(PsszError("pssz schema: unsupported custom adapter"));
+                        return Err(PsszError::new("pssz schema: unsupported custom adapter"));
                     }
                     ty = &custom.r#type;
                 }
                 _ => return Ok((ty, boxed)),
             }
         }
-        Err(PsszError("pssz schema: cyclic aliases"))
+        Err(PsszError::new("pssz schema: cyclic aliases"))
     }
 }
 
@@ -221,7 +221,7 @@ impl Schema {
     /// schema in every language, not something to look through.
     pub fn direct<'a>(&'a self, ty: &'a AnyType) -> PsszResult<&'a AnyType> {
         const WRAPPED: PsszError =
-            PsszError("pssz schema: an adapter or enum must sit directly on its wire type");
+            PsszError::new("pssz schema: an adapter or enum must sit directly on its wire type");
         let ty = self.resolve(ty)?;
         match &ty.value {
             AnyValue::Enum(_) => Err(WRAPPED),
@@ -234,7 +234,7 @@ impl Schema {
     pub fn enum_underlying<'a>(&'a self, inner: &'a AnyType) -> PsszResult<&'a Int> {
         match &self.direct(inner)?.value {
             AnyValue::Int(int) => Ok(int),
-            _ => Err(PsszError("pssz schema: an enum needs an underlying integer")),
+            _ => Err(PsszError::new("pssz schema: an enum needs an underlying integer")),
         }
     }
     /// The tick integer under a time id (`time-point-<unit>` /
@@ -243,7 +243,7 @@ impl Schema {
     pub fn time_ticks<'a>(&'a self, inner: &'a AnyType) -> PsszResult<&'a Int> {
         match &self.direct(inner)?.value {
             AnyValue::Int(ticks) if matches!(ticks.bits, 8 | 16 | 32 | 64) => Ok(ticks),
-            _ => Err(PsszError("pssz schema: time value requires an 8/16/32/64-bit tick integer")),
+            _ => Err(PsszError::new("pssz schema: time value requires an 8/16/32/64-bit tick integer")),
         }
     }
 }
@@ -334,7 +334,7 @@ impl SchemaBuilder {
         }
         let name = T::schema_name().unwrap_or_else(|| format!("@{}", self.names.len()));
         if self.owners.contains_key(&name) {
-            return Err(PsszError("pssz schema: conflicting named types"));
+            return Err(PsszError::new("pssz schema: conflicting named types"));
         }
         self.names.insert(id, name.clone());
         self.owners.insert(name.clone(), id);

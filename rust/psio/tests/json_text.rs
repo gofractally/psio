@@ -324,7 +324,7 @@ mod cursor {
         let mut c = TextCursor::new(b"[1]", false).unwrap();
         c.begin_array().unwrap();
         let error = c.error("walk: wrong shape");
-        assert_eq!((error.what, error.offset, error.format), ("walk: wrong shape", 1, "json"));
+        assert_eq!((&*error.what, error.offset, error.format), ("walk: wrong shape", 1, "json"));
     }
 
     #[test]

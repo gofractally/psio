@@ -59,7 +59,7 @@ fn unknown_fields() -> PsszResult<()> {
     if ALLOW_UNKNOWN.with(|v| v.get()) {
         Ok(())
     } else {
-        Err(PsszError("pssz: unknown fields rejected by exact reader"))
+        Err(PsszError::new("pssz: unknown fields rejected by exact reader"))
     }
 }
 
@@ -75,7 +75,7 @@ impl DecodeDepth {
         DECODE_DEPTH.with(|depth| {
             // Root is node 0. Node 64 is allowed; a child at 65 is rejected.
             if depth.get() > MAX_DEPTH {
-                return Err(PsszError("pssz: max depth exceeded"));
+                return Err(PsszError::new("pssz: max depth exceeded"));
             }
             depth.set(depth.get() + 1);
             Ok(Self)
@@ -95,7 +95,7 @@ impl EncodeDepth {
     pub fn enter() -> PsszResult<Self> {
         ENCODE_DEPTH.with(|depth| {
             if depth.get() > MAX_DEPTH {
-                return Err(PsszError("pssz: max depth exceeded"));
+                return Err(PsszError::new("pssz: max depth exceeded"));
             }
             depth.set(depth.get() + 1);
             Ok(Self)
@@ -137,7 +137,7 @@ pub fn writer_checks_invariants() -> bool {
 
 pub fn format<F: PsszFormat>() -> PsszResult<()> {
     if !matches!(F::OFFSET_BYTES, 1 | 2 | 4) || F::HEADER_BYTES != F::OFFSET_BYTES {
-        return Err(PsszError("pssz: unsupported offset/header width"));
+        return Err(PsszError::new("pssz: unsupported offset/header width"));
     }
     Ok(())
 }
@@ -146,14 +146,14 @@ fn width(w: usize) -> PsszResult<()> {
     if matches!(w, 1 | 2 | 4) {
         Ok(())
     } else {
-        Err(PsszError("pssz: unsupported offset/header width"))
+        Err(PsszError::new("pssz: unsupported offset/header width"))
     }
 }
 
 /// C++ `wire_span_fits`: a variable payload is addressed by at most 32 bits.
 pub fn wire_span(len: usize) -> PsszResult<()> {
     if len as u128 > u32::MAX as u128 {
-        return Err(PsszError(
+        return Err(PsszError::new(
             "pssz: variable payload exceeds 32-bit address space",
         ));
     }
@@ -161,25 +161,25 @@ pub fn wire_span(len: usize) -> PsszResult<()> {
 }
 
 pub fn read_offset_w(bytes: &[u8], w: usize) -> PsszResult<usize> {
-    let b = bytes.get(..w).ok_or(PsszError("pssz: offset underrun"))?;
+    let b = bytes.get(..w).ok_or(PsszError::new("pssz: offset underrun"))?;
     Ok(match w {
         1 => b[0] as usize,
         2 => u16::from_le_bytes([b[0], b[1]]) as usize,
         4 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize,
-        _ => return Err(PsszError("pssz: unsupported offset/header width")),
+        _ => return Err(PsszError::new("pssz: unsupported offset/header width")),
     })
 }
 
 pub fn write_offset_w(bytes: &mut [u8], w: usize, value: usize) -> PsszResult<()> {
     if bytes.len() != w {
-        return Err(PsszError("pssz: offset width overflow"));
+        return Err(PsszError::new("pssz: offset width overflow"));
     }
-    const OVERFLOW: PsszError = PsszError("pssz: value exceeds the static offset width");
+    const OVERFLOW: PsszError = PsszError::new("pssz: value exceeds the static offset width");
     match w {
         1 => bytes.copy_from_slice(&u8::try_from(value).map_err(|_| OVERFLOW)?.to_le_bytes()),
         2 => bytes.copy_from_slice(&u16::try_from(value).map_err(|_| OVERFLOW)?.to_le_bytes()),
         4 => bytes.copy_from_slice(&u32::try_from(value).map_err(|_| OVERFLOW)?.to_le_bytes()),
-        _ => return Err(PsszError("pssz: unsupported offset/header width")),
+        _ => return Err(PsszError::new("pssz: unsupported offset/header width")),
     }
     Ok(())
 }
@@ -198,7 +198,7 @@ pub fn write_offset<F: PsszFormat>(bytes: &mut [u8], value: usize) -> PsszResult
 /// it compares the complete encoded size of the value against the cap.
 pub fn check_cap(cap: Option<usize>, len: usize) -> PsszResult<()> {
     match cap {
-        Some(cap) if len > cap => Err(PsszError(
+        Some(cap) if len > cap => Err(PsszError::new(
             "pssz: encoded size exceeds maxDynamicData cap",
         )),
         _ => Ok(()),
@@ -315,7 +315,7 @@ pub fn record_spans_into(
 ) -> PsszResult<bool> {
     width(w)?;
     if layouts.len() != spans.len() {
-        return Err(PsszError("pssz: invalid record span"));
+        return Err(PsszError::new("pssz: invalid record span"));
     }
     for span in spans.iter_mut() {
         *span = None;
@@ -323,27 +323,27 @@ pub fn record_spans_into(
     let mut known = 0usize;
     for layout in layouts {
         if layout.optional && layout.fixed {
-            return Err(PsszError("pssz: invalid reader field layout"));
+            return Err(PsszError::new("pssz: invalid reader field layout"));
         }
         known = known
             .checked_add(layout.slot(w))
-            .ok_or(PsszError("pssz: invalid reader field layout"))?;
+            .ok_or(PsszError::new("pssz: invalid reader field layout"))?;
     }
     let mut fixed_start = 0usize;
     let mut fixed_size = known;
     if !dwnc {
         if bytes.len() < w {
-            return Err(PsszError("pssz: record header truncated"));
+            return Err(PsszError::new("pssz: record header truncated"));
         }
         fixed_size = read_offset_w(bytes, w)?;
         fixed_start = w;
     }
     let payload_size = bytes.len() - fixed_start;
     if fixed_size > payload_size {
-        return Err(PsszError("pssz: record fixed region truncated"));
+        return Err(PsszError::new("pssz: record fixed region truncated"));
     }
     if fixed_size > known && (fixed_size - known) % w != 0 {
-        return Err(PsszError("pssz: partial unknown optional slot"));
+        return Err(PsszError::new("pssz: partial unknown optional slot"));
     }
     let unknown = fixed_size > known;
     if unknown || !(dwnc && layouts.iter().all(|l| l.fixed)) {
@@ -361,7 +361,7 @@ pub fn record_spans_into(
             || offset < previous_offset
             || (!seen_variable && offset != fixed_size)
         {
-            return Err(PsszError("pssz: invalid record payload offset"));
+            return Err(PsszError::new("pssz: invalid record payload offset"));
         }
         if let Some(previous) = previous_field {
             if let Some(span) = spans[previous].as_mut() {
@@ -384,10 +384,10 @@ pub fn record_spans_into(
         let slot = layout.slot(w);
         if missing || slot > fixed_size - cursor {
             if cursor != fixed_size {
-                return Err(PsszError("pssz: header cuts a known field"));
+                return Err(PsszError::new("pssz: header cuts a known field"));
             }
             if !layout.optional || dwnc {
-                return Err(PsszError("pssz: required record field missing"));
+                return Err(PsszError::new("pssz: required record field missing"));
             }
             missing = true;
             continue;
@@ -410,7 +410,7 @@ pub fn record_spans_into(
         }
     }
     if !seen_variable && payload_size != fixed_size {
-        return Err(PsszError("pssz: fixed record has trailing payload"));
+        return Err(PsszError::new("pssz: fixed record has trailing payload"));
     }
     // Mandatory pruning: one encoding per value. When the writer's last slot
     // is one this reader knows and it is an absent optional, the writer
@@ -421,7 +421,7 @@ pub fn record_spans_into(
             if layouts[last].optional {
                 if let Some(span) = &spans[last] {
                     if span_is_none(bytes, span, layouts[last].selector) {
-                        return Err(PsszError(
+                        return Err(PsszError::new(
                             "pssz: trailing absent optional field was not pruned",
                         ));
                     }
@@ -468,7 +468,7 @@ pub fn record_spans_w(
     let mut spans = Vec::new();
     spans
         .try_reserve(layouts.len())
-        .map_err(|_| PsszError("pssz: record allocation overflow"))?;
+        .map_err(|_| PsszError::new("pssz: record allocation overflow"))?;
     spans.resize(layouts.len(), None);
     if record_spans_into(w, layouts, bytes, dwnc, &mut spans)? {
         unknown_fields()?;
@@ -484,7 +484,7 @@ pub fn decode_field<F: PsszFormat, T: PsszUnpack<F>>(
         Some(span) => T::pssz_unpack(
             bytes
                 .get(span)
-                .ok_or(PsszError("pssz: field span out of range"))?,
+                .ok_or(PsszError::new("pssz: field span out of range"))?,
         ),
         None => T::pssz_missing_optional(),
     }
@@ -494,7 +494,7 @@ pub fn field<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<(L
     let mut bytes = Vec::new();
     value.pssz_pack_checked(&mut bytes)?;
     if T::IS_FIXED_SIZE && bytes.len() != T::FIXED_SIZE {
-        return Err(PsszError("pssz: fixed encoder size mismatch"));
+        return Err(PsszError::new("pssz: fixed encoder size mismatch"));
     }
     let mut layout = Layout::of::<F, T>();
     layout.omit = T::IS_OPTIONAL && value.pssz_is_none();
@@ -521,7 +521,7 @@ pub fn field_if_kept<F: PsszFormat, T: PsszPack<F> + ?Sized>(
         field::<F, T>(value)
     } else {
         if !T::IS_OPTIONAL || !value.pssz_is_none() {
-            return Err(PsszError("pssz: cannot prune required or present field"));
+            return Err(PsszError::new("pssz: cannot prune required or present field"));
         }
         let mut layout = Layout::of::<F, T>();
         layout.omit = true;
@@ -550,16 +550,16 @@ pub fn encode_record_w(
     let fields = &fields[..keep];
     let fixed = fields.iter().try_fold(0usize, |n, (layout, _)| {
         n.checked_add(layout.slot(w))
-            .ok_or(PsszError("pssz: fixed region overflow"))
+            .ok_or(PsszError::new("pssz: fixed region overflow"))
     })?;
     let header = if dwnc { 0 } else { w };
     let size = header
         .checked_add(fixed)
-        .ok_or(PsszError("pssz: record size overflow"))?;
+        .ok_or(PsszError::new("pssz: record size overflow"))?;
     let mut result = Vec::new();
     result
         .try_reserve(size)
-        .map_err(|_| PsszError("pssz: record allocation overflow"))?;
+        .map_err(|_| PsszError::new("pssz: record allocation overflow"))?;
     result.resize(size, 0);
     if !dwnc {
         write_offset_w(&mut result[..header], w, fixed)?;
@@ -568,7 +568,7 @@ pub fn encode_record_w(
     for (layout, bytes) in fields {
         if layout.fixed {
             if layout.size != bytes.len() {
-                return Err(PsszError("pssz: fixed field size mismatch"));
+                return Err(PsszError::new("pssz: fixed field size mismatch"));
             }
             result[cursor..cursor + layout.size].copy_from_slice(bytes);
         } else {
@@ -576,14 +576,14 @@ pub fn encode_record_w(
             write_offset_w(&mut result[cursor..cursor + w], w, offset)?;
             result
                 .try_reserve(bytes.len())
-                .map_err(|_| PsszError("pssz: record allocation overflow"))?;
+                .map_err(|_| PsszError::new("pssz: record allocation overflow"))?;
             result.extend_from_slice(bytes);
         }
         cursor += layout.slot(w);
     }
     wire_span(result.len() - header)?;
     out.try_reserve(result.len())
-        .map_err(|_| PsszError("pssz: output allocation overflow"))?;
+        .map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
     out.extend_from_slice(&result);
     Ok(())
 }
@@ -614,7 +614,7 @@ pub fn finish_record<F: PsszFormat>(
         check_cap(cap, result.len())?;
     }
     out.try_reserve(result.len())
-        .map_err(|_| PsszError("pssz: output allocation overflow"))?;
+        .map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
     out.extend_from_slice(&result);
     Ok(())
 }
@@ -687,24 +687,24 @@ pub fn field_bytes<'a, F: PsszFormat, T: PsszPack<F> + ?Sized>(
     };
     let body = bytes
         .get(header..)
-        .ok_or(PsszError("pssz view: header underrun"))?;
+        .ok_or(PsszError::new("pssz view: header underrun"))?;
     if written_fixed > body.len() {
-        return Err(PsszError("pssz view: fixed region underrun"));
+        return Err(PsszError::new("pssz view: fixed region underrun"));
     }
     let end_slot = location
         .slot
         .checked_add(location.slot_size)
-        .ok_or(PsszError("pssz view: field location overflow"))?;
+        .ok_or(PsszError::new("pssz view: field location overflow"))?;
     if end_slot > written_fixed {
         if dwnc || location.slot < written_fixed || !location.optional {
-            return Err(PsszError("pssz view: absent required field"));
+            return Err(PsszError::new("pssz view: absent required field"));
         }
-        return T::pssz_none_bytes().ok_or(PsszError("pssz view: optional default unavailable"));
+        return T::pssz_none_bytes().ok_or(PsszError::new("pssz view: optional default unavailable"));
     }
     if location.fixed {
         return body
             .get(location.slot..end_slot)
-            .ok_or(PsszError("pssz view: field span mismatch"));
+            .ok_or(PsszError::new("pssz view: field span mismatch"));
     }
     let begin = read_offset_w(&body[location.slot..], w)?;
     let end = match location.next_variable {
@@ -717,10 +717,10 @@ pub fn field_bytes<'a, F: PsszFormat, T: PsszPack<F> + ?Sized>(
         _ => body.len(),
     };
     if begin < written_fixed || begin > end {
-        return Err(PsszError("pssz view: invalid field offset"));
+        return Err(PsszError::new("pssz view: invalid field offset"));
     }
     body.get(begin..end)
-        .ok_or(PsszError("pssz view: field offset outside buffer"))
+        .ok_or(PsszError::new("pssz view: field offset outside buffer"))
 }
 
 // ── Sequences ───────────────────────────────────────────────────────────────
@@ -739,15 +739,15 @@ pub fn sequence_len<F: PsszFormat, T: PsszPack<F>>(
             Some(n) => n,
             None if bytes.is_empty() => 0,
             None if size == 0 => {
-                return Err(PsszError(
+                return Err(PsszError::new(
                     "pssz: nonempty zero-size vector is unsupported",
                 ))
             }
             None if bytes.len() % size == 0 => bytes.len() / size,
-            None => return Err(PsszError("pssz: fixed sequence span mismatch")),
+            None => return Err(PsszError::new("pssz: fixed sequence span mismatch")),
         };
         if n.checked_mul(size) != Some(bytes.len()) {
-            return Err(PsszError(
+            return Err(PsszError::new(
                 "pssz: fixed sequence span mismatch or overflow",
             ));
         }
@@ -759,23 +759,23 @@ pub fn sequence_len<F: PsszFormat, T: PsszPack<F>>(
         None => {
             let first = read_offset_w(bytes, w)?;
             if first == 0 || first % w != 0 || first > bytes.len() {
-                return Err(PsszError("pssz: invalid sequence offset table"));
+                return Err(PsszError::new("pssz: invalid sequence offset table"));
             }
             first / w
         }
     };
     let table = n
         .checked_mul(w)
-        .ok_or(PsszError("pssz: sequence table overflow"))?;
+        .ok_or(PsszError::new("pssz: sequence table overflow"))?;
     if table > bytes.len() || (n == 0 && !bytes.is_empty()) {
-        return Err(PsszError("pssz: sequence table mismatch"));
+        return Err(PsszError::new("pssz: sequence table mismatch"));
     }
     wire_span(bytes.len())?;
     let mut previous = table;
     for i in 0..n {
         let begin = read_offset_w(&bytes[i * w..], w)?;
         if (i == 0 && begin != table) || begin < previous || begin > bytes.len() {
-            return Err(PsszError("pssz: sequence offset out of range"));
+            return Err(PsszError::new("pssz: sequence offset out of range"));
         }
         previous = begin;
     }
@@ -790,45 +790,45 @@ pub fn sequence_span<F: PsszFormat, T: PsszPack<F>>(
     index: usize,
 ) -> PsszResult<Range<usize>> {
     if index >= count {
-        return Err(PsszError("pssz: sequence index out of range"));
+        return Err(PsszError::new("pssz: sequence index out of range"));
     }
     if T::IS_FIXED_SIZE {
         let begin = index
             .checked_mul(T::FIXED_SIZE)
-            .ok_or(PsszError("pssz: element offset overflow"))?;
+            .ok_or(PsszError::new("pssz: element offset overflow"))?;
         let end = begin
             .checked_add(T::FIXED_SIZE)
-            .ok_or(PsszError("pssz: element end overflow"))?;
+            .ok_or(PsszError::new("pssz: element end overflow"))?;
         if end > bytes.len() {
-            return Err(PsszError("pssz: element truncated"));
+            return Err(PsszError::new("pssz: element truncated"));
         }
         return Ok(begin..end);
     }
     width(w)?;
     let slot = index
         .checked_mul(w)
-        .ok_or(PsszError("pssz: offset slot overflow"))?;
+        .ok_or(PsszError::new("pssz: offset slot overflow"))?;
     let begin = read_offset_w(
         bytes
             .get(slot..)
-            .ok_or(PsszError("pssz: offset slot truncated"))?,
+            .ok_or(PsszError::new("pssz: offset slot truncated"))?,
         w,
     )?;
     let end = if index + 1 < count {
         let next = slot
             .checked_add(w)
-            .ok_or(PsszError("pssz: next slot overflow"))?;
+            .ok_or(PsszError::new("pssz: next slot overflow"))?;
         read_offset_w(
             bytes
                 .get(next..)
-                .ok_or(PsszError("pssz: next slot truncated"))?,
+                .ok_or(PsszError::new("pssz: next slot truncated"))?,
             w,
         )?
     } else {
         bytes.len()
     };
     if begin > end || end > bytes.len() {
-        return Err(PsszError("pssz: element span out of range"));
+        return Err(PsszError::new("pssz: element span out of range"));
     }
     Ok(begin..end)
 }
@@ -843,7 +843,7 @@ pub fn decode_sequence<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(
     let mut result = Vec::new();
     result
         .try_reserve(n)
-        .map_err(|_| PsszError("pssz: sequence allocation overflow"))?;
+        .map_err(|_| PsszError::new("pssz: sequence allocation overflow"))?;
     for i in 0..n {
         result.push(T::pssz_unpack(
             &bytes[sequence_span::<F, T>(w, bytes, n, i)?],
@@ -865,29 +865,29 @@ pub fn encode_sequence<F: PsszFormat, T: PsszPack<F>>(
     let mut result = Vec::new();
     if T::IS_FIXED_SIZE {
         if T::FIXED_SIZE == 0 && !values.is_empty() && !known_count {
-            return Err(PsszError(
+            return Err(PsszError::new(
                 "pssz: nonempty zero-size vector is unsupported",
             ));
         }
         values
             .len()
             .checked_mul(T::FIXED_SIZE)
-            .ok_or(PsszError("pssz: sequence size overflow"))?;
+            .ok_or(PsszError::new("pssz: sequence size overflow"))?;
         for value in values {
             let before = result.len();
             value.pssz_pack_checked(&mut result)?;
             if result.len() - before != T::FIXED_SIZE {
-                return Err(PsszError("pssz: fixed encoder size mismatch"));
+                return Err(PsszError::new("pssz: fixed encoder size mismatch"));
             }
         }
     } else {
         let table = values
             .len()
             .checked_mul(w)
-            .ok_or(PsszError("pssz: sequence table overflow"))?;
+            .ok_or(PsszError::new("pssz: sequence table overflow"))?;
         result
             .try_reserve(table)
-            .map_err(|_| PsszError("pssz: sequence allocation overflow"))?;
+            .map_err(|_| PsszError::new("pssz: sequence allocation overflow"))?;
         result.resize(table, 0);
         for (i, value) in values.iter().enumerate() {
             let offset = result.len();
@@ -897,7 +897,7 @@ pub fn encode_sequence<F: PsszFormat, T: PsszPack<F>>(
         wire_span(result.len())?;
     }
     out.try_reserve(result.len())
-        .map_err(|_| PsszError("pssz: output allocation overflow"))?;
+        .map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
     out.extend_from_slice(&result);
     Ok(())
 }

@@ -90,7 +90,7 @@ impl<'c, 'a, 'k> KeyDecoder<'c, 'a, 'k> {
                 }
             }
             AnyValue::Float(f) => {
-                const ZERO: PsszError = PsszError("key: negative zero is not canonical");
+                const ZERO: PsszError = PsszError::new("key: negative zero is not canonical");
                 if float_size(f)? == 4 {
                     const SIGN: u32 = 1 << 31;
                     let mut bits = u32::from_be_bytes(self.take(4)?.try_into().unwrap());

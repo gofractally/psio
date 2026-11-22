@@ -83,11 +83,11 @@ pub enum SchemaJsonError {
     Json(JsonTextError),
 }
 impl SchemaJsonError {
-    /// The static description, without position.
-    pub fn what(&self) -> &'static str {
+    /// The description, without position.
+    pub fn what(&self) -> &str {
         match self {
-            Self::Pssz(e) => e.0,
-            Self::Json(e) => e.what,
+            Self::Pssz(e) => &e.0,
+            Self::Json(e) => &e.what,
         }
     }
 }
@@ -265,7 +265,7 @@ struct Reader<'a, C: JsonCursor> {
 }
 
 impl<C: JsonCursor> Reader<'_, C> {
-    fn fail<T>(&self, what: &'static str) -> Text<T> {
+    fn fail<T>(&self, what: impl Into<std::borrow::Cow<'static, str>>) -> Text<T> {
         Err(self.c.error(what))
     }
     fn resolve<'s>(&self, schema: &'s Schema, ty: &'s AnyType) -> Text<&'s AnyType> {
@@ -840,7 +840,7 @@ struct ValueWriter<'a> {
 }
 
 impl ValueWriter<'_> {
-    fn fail<T>(&self, what: &'static str) -> Text<T> {
+    fn fail<T>(&self, what: impl Into<std::borrow::Cow<'static, str>>) -> Text<T> {
         Err(self.w.err(what))
     }
     fn resolve<'s>(&self, schema: &'s Schema, ty: &'s AnyType) -> Text<&'s AnyType> {
@@ -1358,7 +1358,7 @@ impl CustomHandlers {
             },
             |text: &str| {
                 let value = T::from_text(text)
-                    .ok_or(PsszError("json: text is not a value of the custom type"))?;
+                    .ok_or(PsszError::new("json: text is not a value of the custom type"))?;
                 // The wire bytes of what the text says. Whether they are a
                 // value of the type is the check's to report, with the
                 // invariant's own message.
@@ -1376,7 +1376,7 @@ impl CustomHandlers {
         T: TextForm + ToPsszSchema + PsszPack<Pssz> + PsszUnpack<Pssz>,
     {
         let id = T::custom_id()
-            .ok_or(PsszError("pssz dynamic: the type has no custom schema id"))?;
+            .ok_or(PsszError::new("pssz dynamic: the type has no custom schema id"))?;
         Ok(self.add_type_as::<T>(id))
     }
     /// Registers `T`'s typed validation (its invariant, and those of its
@@ -1396,7 +1396,7 @@ impl CustomHandlers {
         T: ToPsszSchema + PsszPack<Pssz> + PsszUnpack<Pssz>,
     {
         let id = T::custom_id()
-            .ok_or(PsszError("pssz dynamic: the type has no custom schema id"))?;
+            .ok_or(PsszError::new("pssz dynamic: the type has no custom schema id"))?;
         Ok(self.add_invariant_type_as::<T>(id))
     }
     /// Whether `id` has a handler.
@@ -1430,7 +1430,7 @@ impl CustomHandlers {
     pub(crate) fn check_of(&self, id: &str) -> Result<Option<&Check>, PsszError> {
         match self.find(id) {
             Some(handler) => Ok(handler.check.as_deref()),
-            None if self.strict => Err(PsszError(NO_HANDLER)),
+            None if self.strict => Err(PsszError::new(NO_HANDLER)),
             None => Ok(None),
         }
     }
@@ -1535,7 +1535,7 @@ fn write_value<F: JsonFormat>(
     writer.write(root, value, 0)?;
     // The writer only emits validated UTF-8.
     String::from_utf8(writer.w.into_bytes()).map_err(|_| {
-        JsonTextError { what: "json: string is not valid UTF-8", offset: 0, format: F::NAME }.into()
+        JsonTextError { what: "json: string is not valid UTF-8".into(), offset: 0, format: F::NAME }.into()
     })
 }
 

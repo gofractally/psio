@@ -497,13 +497,13 @@ fn a_custom_text_form_is_its_wire_type_in_binary_and_its_handler_in_text() {
     handlers.add(
         "Seconds",
         |bytes: &[u8]| {
-            let seconds = u32::from_le_bytes(bytes.try_into().map_err(|_| PsszError("Seconds: not a u32"))?);
+            let seconds = u32::from_le_bytes(bytes.try_into().map_err(|_| PsszError::new("Seconds: not a u32"))?);
             Ok(format!("{seconds}s"))
         },
         |text: &str| {
             Stamp::from_text(text)
                 .map(|stamp| stamp.0.to_le_bytes().to_vec())
-                .ok_or(PsszError("Seconds: expected <seconds>s"))
+                .ok_or(PsszError::new("Seconds: expected <seconds>s"))
         },
     );
     assert!(handlers.contains("Seconds") && handlers.contains("Point") && !handlers.contains("Stamp"));

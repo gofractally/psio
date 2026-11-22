@@ -148,7 +148,7 @@ impl<'a, F: PsszFormat> PsszView<'a, Uint256, F> {
 // the bytes.
 
 fn utf8<'a>(data: &'a [u8]) -> PsszResult<&'a str> {
-    std::str::from_utf8(data).map_err(|_| PsszError("pssz view: invalid UTF-8 in string"))
+    std::str::from_utf8(data).map_err(|_| PsszError::new("pssz view: invalid UTF-8 in string"))
 }
 
 impl<'a, F: PsszFormat> PsszView<'a, String, F> {
@@ -159,7 +159,7 @@ impl<'a, F: PsszFormat> PsszView<'a, String, F> {
 
 impl<'a, F: PsszFormat, const N: usize> PsszView<'a, BoundedString<N>, F> {
     pub fn view(&self) -> PsszResult<&'a str> {
-        if self.data.len() > N { return Err(PsszError("pssz view: BoundedString overflow")); }
+        if self.data.len() > N { return Err(PsszError::new("pssz view: BoundedString overflow")); }
         utf8(self.data)
     }
     pub fn len(&self) -> usize { self.data.len() }
@@ -174,7 +174,7 @@ impl<'a, F: PsszFormat> PsszView<'a, RawString, F> {
 
 impl<'a, F: PsszFormat, const N: usize> PsszView<'a, BoundedRawString<N>, F> {
     pub fn view(&self) -> PsszResult<RawStr<'a>> {
-        if self.data.len() > N { return Err(PsszError("pssz view: BoundedRawString overflow")); }
+        if self.data.len() > N { return Err(PsszError::new("pssz view: BoundedRawString overflow")); }
         Ok(RawStr(self.data))
     }
     pub fn len(&self) -> usize { self.data.len() }
@@ -241,11 +241,11 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Option<T>, F> {
             match self.data.first() {
                 Some(0) if self.data.len() == 1 => Ok(false),
                 Some(1) => Ok(true),
-                _ => Err(PsszError("pssz view: invalid optional selector or None payload")),
+                _ => Err(PsszError::new("pssz view: invalid optional selector or None payload")),
             }
         } else {
             if T::IS_FIXED_SIZE && !self.data.is_empty() && self.data.len() != T::FIXED_SIZE {
-                return Err(PsszError("pssz view: optional fixed span mismatch"));
+                return Err(PsszError::new("pssz view: optional fixed span mismatch"));
             }
             Ok(!self.data.is_empty())
         }
@@ -305,7 +305,7 @@ impl<'a, K: PsszPack<F>, V: PsszPack<F>, F: PsszFormat> PsszMapEntry<'a, K, V, F
 fn bounded_len<F: PsszFormat, T: PsszPack<F>>(data: &[u8], max: usize) -> PsszResult<usize> {
     let n = checked::sequence_len::<F, T>(<Vec<T> as PsszPack<F>>::OFFSET_WIDTH, data, None)?;
     if n > max {
-        return Err(PsszError("pssz view: map / set exceeds its bound"));
+        return Err(PsszError::new("pssz view: map / set exceeds its bound"));
     }
     Ok(n)
 }

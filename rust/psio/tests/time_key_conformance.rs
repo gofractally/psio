@@ -371,7 +371,7 @@ where
         ("decode", psio::pssz::from_pssz::<T>(&pssz).map(drop).map_err(|e| e.0)),
     ];
     for (what, outcome) in rejections {
-        if outcome != Err(reason) {
+        if outcome != Err(reason.into()) {
             return Err(format!("{what}: {outcome:?}, want {reason:?}"));
         }
     }
@@ -391,7 +391,7 @@ where
         ("try_encode", psio::pssz::try_encode::<Pssz, T>(&value).map(drop).map_err(|e| e.0)),
     ];
     for (what, outcome) in outcomes {
-        if outcome != Err(reason) {
+        if outcome != Err(reason.into()) {
             return Err(format!("{what}: {outcome:?}, want {reason:?}"));
         }
     }
@@ -583,13 +583,13 @@ fn every_vector_holds() {
     let bad = Name { value: 1 << 60 };
     assert_eq!(
         try_key_prefix::<Guards, _>(&(&bad,)).map_err(|e| e.0),
-        Err("Name: value is not a canonical name")
+        Err("Name: value is not a canonical name".into())
     );
     let good = Name { value: 5 };
     assert_eq!(try_key_prefix::<Guards, _>(&(&good,)), Ok(to_key(&good)));
     assert_eq!(
         try_key_prefix::<Guards, _>(&(&good, &Some(Range { lo: 2, hi: 1 }))).map_err(|e| e.0),
-        Err("Range: lo is greater than hi")
+        Err("Range: lo is greater than hi".into())
     );
 }
 

@@ -179,12 +179,12 @@ fn keys_of_maps_and_sets() {
     let unsorted = to_key(&vec![("b".to_string(), 2u32), ("a".to_string(), 1)]);
     assert_eq!(
         from_key::<BTreeMap<String, u32>>(&unsorted).map_err(|e| e.0),
-        Err("key: map entries are not in strictly ascending key order")
+        Err("key: map entries are not in strictly ascending key order".into())
     );
     let twice = to_key(&vec![2u16, 2]);
     assert_eq!(
         from_key::<BTreeSet<u16>>(&twice).map_err(|e| e.0),
-        Err("key: set elements are not in strictly ascending order")
+        Err("key: set elements are not in strictly ascending order".into())
     );
     let bounded = to_key(&vec![1u16, 2, 3, 4]);
     assert!(from_key::<BoundedSet<u16, 3>>(&bounded).is_err());
@@ -290,13 +290,13 @@ fn transparent_types_and_invariants_in_every_format() {
     assert_eq!(custom.id, "Even");
     const ODD: &str = "Even: the number is odd";
     let odd = Even { n: 3 };
-    assert_eq!(try_to_pssz(&odd).map_err(|e| e.0), Err(ODD));
-    assert_eq!(from_pssz::<Even>(&[3, 0, 0, 0]).map_err(|e| e.0), Err(ODD));
-    assert_eq!(validate::<Pssz, Vec<Even>>(&[2, 0, 0, 0, 3, 0, 0, 0]).map_err(|e| e.0), Err(ODD));
-    assert_eq!(psio::try_to_json(&odd).map_err(|e| e.what), Err(ODD));
-    assert_eq!(psio::from_json::<Even>("3").map_err(|e| e.what), Err(ODD));
-    assert_eq!(try_to_key(&odd).map_err(|e| e.0), Err(ODD));
-    assert_eq!(from_key::<Even>(&[0, 0, 0, 3]).map_err(|e| e.0), Err(ODD));
+    assert_eq!(try_to_pssz(&odd).map_err(|e| e.0), Err(ODD.into()));
+    assert_eq!(from_pssz::<Even>(&[3, 0, 0, 0]).map_err(|e| e.0), Err(ODD.into()));
+    assert_eq!(validate::<Pssz, Vec<Even>>(&[2, 0, 0, 0, 3, 0, 0, 0]).map_err(|e| e.0), Err(ODD.into()));
+    assert_eq!(psio::try_to_json(&odd).map_err(|e| e.what), Err(ODD.into()));
+    assert_eq!(psio::from_json::<Even>("3").map_err(|e| e.what), Err(ODD.into()));
+    assert_eq!(try_to_key(&odd).map_err(|e| e.0), Err(ODD.into()));
+    assert_eq!(from_key::<Even>(&[0, 0, 0, 3]).map_err(|e| e.0), Err(ODD.into()));
     assert_eq!(from_key::<Even>(&[0, 0, 0, 4]), Ok(Even { n: 4 }));
     // The order of a map is defined for every key, valid or not.
     assert_eq!(key_bytes(&odd), [0, 0, 0, 3]);
@@ -305,13 +305,13 @@ fn transparent_types_and_invariants_in_every_format() {
     handlers.add_invariant_type::<Even>().unwrap();
     assert_eq!(dynamic::validate_pssz(&schema, &root, &[3, 0, 0, 0]), Ok(false));
     assert_eq!(
-        dynamic::validate_pssz_with(&schema, &root, &[3, 0, 0, 0], &handlers).map_err(|e| e.what()),
-        Err(ODD)
+        dynamic::validate_pssz_with(&schema, &root, &[3, 0, 0, 0], &handlers).map_err(|e| e.what().to_string()),
+        Err(ODD.to_string())
     );
     assert_eq!(dynamic::validate_pssz_with(&schema, &root, &[4, 0, 0, 0], &handlers), Ok(false));
     assert_eq!(
-        dynamic::json_to_pssz_with::<Json>(&schema, &root, b"3", &handlers).map_err(|e| e.what()),
-        Err(ODD)
+        dynamic::json_to_pssz_with::<Json>(&schema, &root, b"3", &handlers).map_err(|e| e.what().to_string()),
+        Err(ODD.to_string())
     );
 }
 

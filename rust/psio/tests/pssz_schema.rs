@@ -142,7 +142,7 @@ fn schema_builder_reserves_preorder_slots_and_rolls_back_failed_insertions() {
     impl ToPsszSchema for Failing {
         fn build_schema(builder: &mut SchemaBuilder) -> psio::pssz::PsszResult<AnyType> {
             builder.insert::<String>()?;
-            Err(PsszError("intentional schema fixture failure"))
+            Err(PsszError::new("intentional schema fixture failure"))
         }
     }
     let mut builder = SchemaBuilder::new();

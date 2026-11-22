@@ -19,7 +19,7 @@ impl<F: PsszFormat> PsszPack<F> for CheckedByte {
 impl<F: PsszFormat> PsszUnpack<F> for CheckedByte {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
         if bytes != [0x81] {
-            return Err(PsszError("custom byte rejected"));
+            return Err(PsszError::new("custom byte rejected"));
         }
         Ok(Self(1))
     }
@@ -58,7 +58,7 @@ impl<F: PsszFormat> PsszUnpack<F> for Zero {
         if bytes.is_empty() {
             Ok(Self)
         } else {
-            Err(PsszError("zero span"))
+            Err(PsszError::new("zero span"))
         }
     }
 }
@@ -148,12 +148,12 @@ impl<F: PsszFormat> PsszPack<F> for Huge {
 }
 impl<F: PsszFormat> PsszUnpack<F> for Huge {
     fn pssz_unpack(_: &[u8]) -> PsszResult<Self> {
-        Err(PsszError("huge value unsupported"))
+        Err(PsszError::new("huge value unsupported"))
     }
 }
 impl<F: PsszFormat> PsszValidate<F> for Huge {
     fn pssz_validate(_: &[u8]) -> PsszResult<()> {
-        Err(PsszError("huge value unsupported"))
+        Err(PsszError::new("huge value unsupported"))
     }
 }
 #[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
@@ -325,12 +325,12 @@ impl<F: PsszFormat> PsszPack<F> for Owned {
 }
 impl<F: PsszFormat> PsszUnpack<F> for Owned {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let n = u64::from_le_bytes(bytes.try_into().map_err(|_| PsszError("owned span"))?);
+        let n = u64::from_le_bytes(bytes.try_into().map_err(|_| PsszError::new("owned span"))?);
         if n == 254 {
             panic!("custom decoder panic");
         }
         if n == 255 {
-            return Err(PsszError("owned rejected"));
+            return Err(PsszError::new("owned rejected"));
         }
         Ok(Self(Box::new(n)))
     }
@@ -342,7 +342,7 @@ impl<F: PsszFormat> PsszValidate<F> for Owned {
         if bytes.len() == 8 {
             Ok(())
         } else {
-            Err(PsszError("owned span"))
+            Err(PsszError::new("owned span"))
         }
     }
 }

@@ -4,8 +4,8 @@
 //! * A struct with one unnamed field is transparent, and so is a struct of
 //!   one named field marked `#[psio(transparent)]` (or
 //!   `#[serde(transparent)]`): its text is its member's.
-//! * `#[psio(invariant = "path")]` (a `fn(&Self) -> Result<(), &'static
-//!   str>`) is enforced by the writer and the reader: a value that violates
+//! * `#[psio(invariant = "path")]` (a `fn(&Self) -> Result<(), E>` with
+//!   `E: Into<Cow<'static, str>>`) is enforced by the writer and the reader: a value that violates
 //!   it has no text, and text that reads as one is rejected with its message.
 //! * An enum whose variants each hold one unnamed field is a variant:
 //!   `{"Name": value}` under IJson, `[index, value]` under Json. The name is

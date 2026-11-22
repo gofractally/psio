@@ -11,8 +11,8 @@ use psio::pssz::PsszError;
 pub const CUSTOM_IDS: [&str; 8] =
     ["Blob", "Endpoint", "Ratio", "Ref", "Name", "DerKey", "Range", "Level"];
 
-const NOT_WIRE: PsszError = PsszError("handler: bytes are not the wire type");
-const NOT_TEXT: PsszError = PsszError("handler: text is not the presentation");
+const NOT_WIRE: PsszError = PsszError::new("handler: bytes are not the wire type");
+const NOT_TEXT: PsszError = PsszError::new("handler: text is not the presentation");
 
 /// variant<V4, V6>: the index byte, the address bytes, the port (u16 LE).
 fn endpoint_of(bytes: &[u8]) -> Result<EndpointParts, PsszError> {
@@ -82,16 +82,16 @@ pub fn fixture_custom_handlers(handlers: &mut CustomHandlers) {
     );
     // Invariants.
     handlers.add_check("Ref", |bytes: &[u8]| match ref_of(bytes)? {
-        RefParts::Name(name) if name.is_empty() => Err(PsszError(REF)),
+        RefParts::Name(name) if name.is_empty() => Err(PsszError::new(REF)),
         _ => Ok(()),
     });
     // Name: the fixed-layout record {value: u64}: 8 LE bytes.
     handlers.add_check("Name", |bytes: &[u8]| {
         let value = u64::from_le_bytes(bytes.try_into().map_err(|_| NOT_WIRE)?);
-        if value >> 60 == 0 { Ok(()) } else { Err(PsszError(NAME)) }
+        if value >> 60 == 0 { Ok(()) } else { Err(PsszError::new(NAME)) }
     });
     handlers.add_check("DerKey", |bytes: &[u8]| {
-        if bytes.first() == Some(&0x30) { Ok(()) } else { Err(PsszError(DER_KEY)) }
+        if bytes.first() == Some(&0x30) { Ok(()) } else { Err(PsszError::new(DER_KEY)) }
     });
     // Range: the record {lo: u32, hi: u32} at one-byte offsets: the header
     // (8), then the two members.
@@ -99,13 +99,13 @@ pub fn fixture_custom_handlers(handlers: &mut CustomHandlers) {
         [8, rest @ ..] if rest.len() == 8 => {
             let lo = u32::from_le_bytes(rest[..4].try_into().unwrap());
             let hi = u32::from_le_bytes(rest[4..].try_into().unwrap());
-            if lo <= hi { Ok(()) } else { Err(PsszError(RANGE)) }
+            if lo <= hi { Ok(()) } else { Err(PsszError::new(RANGE)) }
         }
         _ => Err(NOT_WIRE),
     });
     handlers.add_check("Level", |bytes: &[u8]| match bytes {
         [level] if *level <= 3 => Ok(()),
-        [_] => Err(PsszError(LEVEL)),
+        [_] => Err(PsszError::new(LEVEL)),
         _ => Err(NOT_WIRE),
     });
 }

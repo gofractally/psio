@@ -272,7 +272,7 @@ pub enum Value {
 }
 
 fn failure(message: &'static str) -> PsszError {
-    PsszError(message)
+    PsszError::new(message)
 }
 fn depth(n: usize) -> PsszResult<()> {
     if n > 64 {
@@ -333,7 +333,7 @@ fn parse_u64(text: &str) -> Option<u64> {
 }
 /// "max=N", "exact=N", "min=N", comma-separated, each at most once.
 pub(crate) fn parse_length_bound(values: &[Attribute]) -> PsszResult<Option<LengthBound>> {
-    const MALFORMED: PsszError = PsszError("pssz dynamic: malformed lengthBound attribute");
+    const MALFORMED: PsszError = PsszError::new("pssz dynamic: malformed lengthBound attribute");
     let Some(attribute) = find_attribute(values, "lengthBound") else {
         return Ok(None);
     };

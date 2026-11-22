@@ -410,7 +410,7 @@ fn a_value_that_violates_an_invariant_has_no_encoding() {
         for format in ["auto", "pssz8", "pssz16", "pssz32"] {
             assert_eq!(
                 encode::<T>(format, &value).map_err(|e| e.0),
-                Err(reason),
+                Err(reason.into()),
                 "{} {format}: {value:?}",
                 T::id()
             );
@@ -442,12 +442,12 @@ fn a_value_that_violates_an_invariant_has_no_encoding() {
     // A nested value is checked when it is made: there is no Nested<Range>
     // holding a reversed range except through `unchecked`, whose bytes every
     // reader then rejects (the vector invariant/nested/range_reversed).
-    assert_eq!(Nested::<Range>::new(&bad_range).map_err(|e| e.0), Err(RANGE));
+    assert_eq!(Nested::<Range>::new(&bad_range).map_err(|e| e.0), Err(RANGE.into()));
     let adopted = Nested::<Range>::unchecked(vec![8, 9, 0, 0, 0, 3, 0, 0, 0]);
-    assert_eq!(adopted.validate().map_err(|e| e.0), Err(RANGE));
+    assert_eq!(adopted.validate().map_err(|e| e.0), Err(RANGE.into()));
     let frame = try_to_pssz(&adopted).expect("a writer does not look inside");
-    assert_eq!(from_pssz::<Nested<Range>>(&frame).map_err(|e| e.0), Err(RANGE));
-    assert_eq!(Nested::<Range>::checked(frame).map_err(|e| e.0), Err(RANGE));
+    assert_eq!(from_pssz::<Nested<Range>>(&frame).map_err(|e| e.0), Err(RANGE.into()));
+    assert_eq!(Nested::<Range>::checked(frame).map_err(|e| e.0), Err(RANGE.into()));
     // A value that satisfies its invariants is written.
     assert!(try_to_pssz(&Name { value: (1 << 60) - 1 }).is_ok());
 }
@@ -466,16 +466,16 @@ fn a_map_or_set_is_written_in_key_order_and_refuses_equal_keys() {
     let swapped = try_to_pssz(&vec![("b".to_string(), 2u32), ("a".to_string(), 1)]).unwrap();
     assert_eq!(
         from_pssz::<HashMap<String, u32>>(&swapped).map_err(|e| e.0),
-        Err("pssz: map entries are not in strictly ascending key order")
+        Err("pssz: map entries are not in strictly ascending key order".into())
     );
     // Two entries whose keys have equal key bytes are duplicates, whatever
     // the container thinks: `Low` and `Unknown(0)` are one key (the order is
     // computed before, and without, the invariant that refuses the second).
     let twice: BTreeSet<Level> = [Level::Low, Level::Unknown(0)].into_iter().collect();
     assert_eq!(twice.len(), 2);
-    assert_eq!(try_to_pssz(&twice).map_err(|e| e.0), Err("pssz: set has duplicate elements"));
+    assert_eq!(try_to_pssz(&twice).map_err(|e| e.0), Err("pssz: set has duplicate elements".into()));
     let twice: BTreeMap<Level, u8> = [(Level::Low, 1), (Level::Unknown(0), 2)].into_iter().collect();
-    assert_eq!(try_to_pssz(&twice).map_err(|e| e.0), Err("pssz: map has duplicate keys"));
+    assert_eq!(try_to_pssz(&twice).map_err(|e| e.0), Err("pssz: map has duplicate keys".into()));
     // -0 and +0 are one key: a set by key order cannot hold both.
     let zeros: BTreeSet<ByKey<f64>> = [ByKey(0.0), ByKey(-0.0)].into_iter().collect();
     assert_eq!(zeros.len(), 1);

@@ -56,7 +56,7 @@ fn references(schema: &Schema, root: &AnyType) -> PsszResult<()> {
             AnyValue::Custom(c) => pending.push(&c.r#type),
             AnyValue::Nested(n) => pending.push(&n.r#type),
             AnyValue::Resource(_) => {
-                return Err(PsszError(
+                return Err(PsszError::new(
                     "pssz upgrade: resource values require a registered adapter",
                 ))
             }
@@ -86,7 +86,7 @@ impl Checker<'_> {
         depth: usize,
     ) -> PsszResult<()> {
         if depth > 128 {
-            return Err(PsszError("pssz upgrade: schema comparison depth exceeded"));
+            return Err(PsszError::new("pssz upgrade: schema comparison depth exceeded"));
         }
         let old = self.old.wire(old)?;
         let new = self.new.wire(new)?;
@@ -110,14 +110,14 @@ impl Checker<'_> {
             }
             (AnyValue::Tuple(a), AnyValue::Tuple(b)) => {
                 if b.members.len() < a.members.len() {
-                    return Err(PsszError("pssz upgrade: tuple fields removed"));
+                    return Err(PsszError::new("pssz upgrade: tuple fields removed"));
                 }
                 for (i, (old, new)) in a.members.iter().zip(&b.members).enumerate() {
                     self.compare(old, new, &format!("{path}.{i}"), depth + 1)?;
                 }
                 for (i, ty) in b.members.iter().enumerate().skip(a.members.len()) {
                     if !matches!(self.new.wire(ty)?.value, AnyValue::Option(_)) {
-                        return Err(PsszError(
+                        return Err(PsszError::new(
                             "pssz upgrade: appended tuple field is not optional",
                         ));
                     }
@@ -151,7 +151,7 @@ impl Checker<'_> {
             }
             (AnyValue::Int(a), AnyValue::Int(b)) if a == b => Ok(()),
             (AnyValue::Float(a), AnyValue::Float(b)) if a == b => Ok(()),
-            _ => Err(PsszError(
+            _ => Err(PsszError::new(
                 "pssz upgrade: existing field type, bounds, attributes, or variant changed",
             )),
         }
@@ -165,7 +165,7 @@ impl Checker<'_> {
         depth: usize,
     ) -> PsszResult<()> {
         if new.len() < old.len() || (!extend && new.len() != old.len()) {
-            return Err(PsszError(
+            return Err(PsszError::new(
                 "pssz upgrade: fields removed or frozen layout extended",
             ));
         }
@@ -178,11 +178,11 @@ impl Checker<'_> {
                 .enumerate()
                 .any(|(i, m)| new[..i].iter().any(|p| p.name == m.name))
         {
-            return Err(PsszError("pssz upgrade: duplicate member names"));
+            return Err(PsszError::new("pssz upgrade: duplicate member names"));
         }
         for (old, new) in old.iter().zip(new) {
             if old.name != new.name || old.attributes != new.attributes {
-                return Err(PsszError(
+                return Err(PsszError::new(
                     "pssz upgrade: existing member renamed, reordered, or reannotated",
                 ));
             }
@@ -195,7 +195,7 @@ impl Checker<'_> {
         }
         for member in new.iter().skip(old.len()) {
             if !matches!(self.new.wire(&member.r#type)?.value, AnyValue::Option(_)) {
-                return Err(PsszError("pssz upgrade: appended field is not optional"));
+                return Err(PsszError::new("pssz upgrade: appended field is not optional"));
             }
             self.added.push(format!("{path}.{}", member.name));
         }

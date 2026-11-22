@@ -46,8 +46,10 @@ const SAFE_INTEGER: u64 = (1 << 53) - 1;
 /// Why text was rejected, or why a value has no JSON text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsonTextError {
-    /// Static description.
-    pub what: &'static str,
+    /// Description: a constant (`Cow::Borrowed`, no allocation) or text
+    /// computed from the value (`Cow::Owned`), which is what a type's
+    /// invariant may return.
+    pub what: Cow<'static, str>,
     /// Byte offset in the input (reading) or output (writing).
     pub offset: usize,
     /// "json" or "ijson".
@@ -172,8 +174,8 @@ pub trait TextForm: Sized {
 /// Implements [`JsonText`] for a type through its [`TextForm`].
 ///
 /// `json_text_form!(Type, invariant = path)` also enforces the type's
-/// invariant (the `fn(&Type) -> Result<(), &'static str>` named by its
-/// `#[psio(invariant = "path")]`): the text form says what is well-formed
+/// invariant (the `fn(&Type) -> Result<(), E>`, `E: Into<Cow<'static, str>>`,
+/// named by its `#[psio(invariant = "path")]`): the text form says what is well-formed
 /// text, the invariant whether the value read is a value of the type.
 #[macro_export]
 macro_rules! json_text_form {
@@ -403,8 +405,8 @@ impl Writer {
     fn format(&self) -> &'static str {
         if self.ijson { "ijson" } else { "json" }
     }
-    pub fn err(&self, what: &'static str) -> JsonTextError {
-        JsonTextError { what, offset: self.out.len(), format: self.format() }
+    pub fn err(&self, what: impl Into<Cow<'static, str>>) -> JsonTextError {
+        JsonTextError { what: what.into(), offset: self.out.len(), format: self.format() }
     }
     /// Appends text that is already JSON (punctuation, keywords).
     pub fn raw(&mut self, text: &str) {
@@ -598,11 +600,11 @@ impl<'a> Reader<'a> {
     pub fn position(&self) -> usize {
         self.pos
     }
-    pub fn err(&self, what: &'static str) -> JsonTextError {
+    pub fn err(&self, what: impl Into<Cow<'static, str>>) -> JsonTextError {
         self.err_at(self.pos, what)
     }
-    pub fn err_at(&self, offset: usize, what: &'static str) -> JsonTextError {
-        JsonTextError { what, offset, format: if self.ijson { "ijson" } else { "json" } }
+    pub fn err_at(&self, offset: usize, what: impl Into<Cow<'static, str>>) -> JsonTextError {
+        JsonTextError { what: what.into(), offset, format: if self.ijson { "ijson" } else { "json" } }
     }
     fn peek(&self) -> Option<u8> {
         self.src.get(self.pos).copied()
@@ -1935,7 +1937,7 @@ pub trait JsonCursor {
     /// Nothing but whitespace remains.
     fn finish(&mut self) -> Result<()>;
     /// A type-layer error at the current position.
-    fn error(&self, what: &'static str) -> JsonTextError;
+    fn error(&self, what: impl Into<Cow<'static, str>>) -> JsonTextError;
 }
 
 /// The hand-written [`Reader`] as a cursor. `ijson` applies the I-JSON
@@ -2054,7 +2056,7 @@ impl JsonCursor for TextCursor<'_> {
         }
         Ok(())
     }
-    fn error(&self, what: &'static str) -> JsonTextError {
+    fn error(&self, what: impl Into<Cow<'static, str>>) -> JsonTextError {
         self.r.err(what)
     }
 }

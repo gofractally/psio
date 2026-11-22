@@ -170,16 +170,16 @@ fn fixture_handlers() -> dynamic::CustomHandlers {
     handlers.add(
         "AccountName",
         |bytes: &[u8]| {
-            let value = u64::from_le_bytes(bytes.try_into().map_err(|_| PsszError("AccountName: not a u64"))?);
+            let value = u64::from_le_bytes(bytes.try_into().map_err(|_| PsszError::new("AccountName: not a u64"))?);
             let mut text: Vec<u8> =
                 (0..12).map(|i| ALPHABET[((value >> (5 * (11 - i))) & 31) as usize]).collect();
             while text.last() == Some(&b'.') {
                 text.pop();
             }
-            String::from_utf8(text).map_err(|_| PsszError("AccountName: not text"))
+            String::from_utf8(text).map_err(|_| PsszError::new("AccountName: not text"))
         },
         |text: &str| {
-            const BAD: PsszError = PsszError("AccountName: expected up to 12 of [a-z1-5.]");
+            const BAD: PsszError = PsszError::new("AccountName: expected up to 12 of [a-z1-5.]");
             if text.len() > 12 || text.ends_with('.') {
                 return Err(BAD);
             }
@@ -205,10 +205,10 @@ fn fixture_handlers() -> dynamic::CustomHandlers {
                 u16::from_le_bytes([*a, *b]),
                 u16::from_le_bytes([*c, *d])
             )),
-            _ => Err(PsszError("Version: not the record")),
+            _ => Err(PsszError::new("Version: not the record")),
         },
         |text: &str| {
-            const BAD: PsszError = PsszError("Version: expected major.minor");
+            const BAD: PsszError = PsszError::new("Version: expected major.minor");
             let part = |digits: &str| -> Result<u16, PsszError> {
                 let canonical = !digits.is_empty()
                     && digits.bytes().all(|b| b.is_ascii_digit())
@@ -689,7 +689,7 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
             // The order of a map / set is the schema's to check: the same
             // rule, the same message as the typed codec.
             if class == "map-set-order" {
-                assert_eq!(outcome, Err(row.reason.as_str()), "{name}: reason");
+                assert_eq!(outcome, Err((row.reason.as_str()).into()), "{name}: reason");
             }
             rejected += 1;
             continue;

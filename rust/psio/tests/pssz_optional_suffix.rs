@@ -260,7 +260,7 @@ fn none_in_nontrailing_slot_is_preserved_and_noncanonical_trailing_none_can_be_n
     // previously expected decode_strict to accept these bytes and
     // re-encode them as [4, 0, 0, 0, 4, 0, 0, 0, b'a'].)
     let unpruned = [8, 0, 0, 0, 8, 0, 0, 0, 9, 0, 0, 0, b'a', 0];
-    const UNPRUNED: PsszError = PsszError("pssz: trailing absent optional field was not pruned");
+    const UNPRUNED: PsszError = PsszError::new("pssz: trailing absent optional field was not pruned");
     assert_eq!(decode_strict::<Pssz32, Extended>(&unpruned).unwrap_err(), UNPRUNED);
     assert_eq!(decode::<Pssz32, Extended>(&unpruned).unwrap_err(), UNPRUNED);
     assert_eq!(decode_checked::<Pssz32, Extended>(&unpruned).unwrap_err(), UNPRUNED);
