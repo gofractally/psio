@@ -1684,9 +1684,11 @@ namespace psio {
                return out;
             const std::uint32_t first = read_offset<W>(src, pos);
             const std::size_t   n     = first / W;
-            std::vector<std::uint32_t> offsets(n);
-            for (std::size_t i = 0; i < n; ++i)
-               offsets[i] = read_offset<W>(src, pos + i * W);
+            // The offset table is read in place: no temporary copy of it
+            // (a heap allocation per list decoded).
+            const auto offset_at = [&](std::size_t i) {
+               return read_offset<W>(src, pos + i * W);
+            };
             if constexpr (Record<T>)
             {
                // In-place: resize then walk each element directly into
@@ -1695,9 +1697,9 @@ namespace psio {
                using R = record_traits<T>;
                for (std::size_t i = 0; i < n; ++i)
                {
-                  const std::size_t beg = pos + offsets[i];
+                  const std::size_t beg = pos + offset_at(i);
                   const std::size_t fin =
-                     (i + 1 < n) ? (pos + offsets[i + 1]) : end;
+                     (i + 1 < n) ? (pos + offset_at(i + 1)) : end;
                   record_decode_into<W, Auto, T>(
                      src, beg, fin, out[i],
                      std::make_index_sequence<R::member_count>{});
@@ -1708,9 +1710,9 @@ namespace psio {
                out.reserve(n);
                for (std::size_t i = 0; i < n; ++i)
                {
-                  const std::size_t beg = pos + offsets[i];
+                  const std::size_t beg = pos + offset_at(i);
                   const std::size_t fin =
-                     (i + 1 < n) ? (pos + offsets[i + 1]) : end;
+                     (i + 1 < n) ? (pos + offset_at(i + 1)) : end;
                   out.push_back(decode_value<W, Auto, T>(src, beg, fin));
                }
             }
@@ -1746,7 +1748,7 @@ namespace psio {
          constexpr auto layout = record_layout<W, T>(seq);
          std::array<::psio::detail::pssz_field_span, R::member_count> spans{};
          bool unknown = false;
-         if (auto st = ::psio::detail::pssz_record_spans<W>(
+         if (auto st = ::psio::detail::pssz_record_spans_inline<W>(
                 src, pos, end, ::psio::is_dwnc_v<T>, layout, spans, unknown);
              !st.ok())
             status_failure(st);
@@ -2313,7 +2315,7 @@ namespace psio {
          // field; checks offsets are monotone, in bounds and start at the
          // fixed region; accepts pruned trailing optionals and unknown
          // appended optional slots.
-         auto status = ::psio::detail::pssz_record_spans<W>(
+         auto status = ::psio::detail::pssz_record_spans_inline<W>(
             src, pos, end, ::psio::is_dwnc_v<T>, layout, spans, unknown);
          if (!status.ok()) return status;
          if constexpr (!is_fixed_v<T>)

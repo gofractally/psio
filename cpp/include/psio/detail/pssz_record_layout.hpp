@@ -27,8 +27,17 @@ namespace psio::detail
    // optional fields. Consequently every unknown fixed-region slot is an
    // offset, and can delimit the last variable field the reader knows.
    // Layout metadata is compiled into the reader; no writer schema is needed.
+   //
+   // Two spellings of one parser. `pssz_record_spans_inline` is always
+   // inlined into its caller: the typed codec passes a constexpr layout, so
+   // the loops over `fields` unroll, the layout checks fold away and the
+   // positions of the fixed fields become constants — one straight-line
+   // frame parser per record type instead of an interpreter over a layout
+   // table (decode of a nested record with a list ran 1.6x slower through
+   // the shared out-of-line copy). `pssz_record_spans` is that out-of-line
+   // copy, for callers whose layout is only known at run time (pssz_ir.hpp).
    template <std::size_t W>
-   codec_status pssz_record_spans(std::span<const char> bytes,
+   [[gnu::always_inline]] inline codec_status pssz_record_spans_inline(std::span<const char> bytes,
                                   std::size_t begin,
                                   std::size_t end,
                                   bool dwnc,
@@ -133,5 +142,17 @@ namespace psio::detail
       if (!seen_variable && payload_size != fixed_size)
          return codec_fail("pssz: fixed record has trailing payload", 0, "pssz");
       return codec_ok();
+   }
+
+   template <std::size_t W>
+   codec_status pssz_record_spans(std::span<const char> bytes,
+                                  std::size_t begin,
+                                  std::size_t end,
+                                  bool dwnc,
+                                  std::span<const pssz_field_layout> fields,
+                                  std::span<pssz_field_span> spans,
+                                  bool& has_unknown) noexcept
+   {
+      return pssz_record_spans_inline<W>(bytes, begin, end, dwnc, fields, spans, has_unknown);
    }
 }

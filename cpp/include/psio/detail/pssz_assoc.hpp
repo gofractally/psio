@@ -170,7 +170,7 @@ namespace psio::detail::pssz_impl
             constexpr auto layout = record_layout<EW, E>(std::make_index_sequence<2>{});
             std::array<::psio::detail::pssz_field_span, 2> spans{};
             bool unknown = false;
-            if (auto st = ::psio::detail::pssz_record_spans<EW>(src, begin, stop, false, layout,
+            if (auto st = ::psio::detail::pssz_record_spans_inline<EW>(src, begin, stop, false, layout,
                                                                spans, unknown);
                 !st.ok())
                return st;
