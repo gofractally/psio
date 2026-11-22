@@ -34,6 +34,31 @@
 //   PSIO_ADAPTER(Widget, psio::binary_category,
 //                 psio::delegate_adapter<Widget, psio::bin>)
 //
+// What a format requires of an adapter on untrusted input. `validate`
+// (and `validate_strict`) is the gate: every checking reader calls it on
+// the payload first and calls `decode` only on a payload it accepted. So
+//   - `validate` must report through the status it returns. It must not
+//     throw and must not abort, whatever the bytes / text: the checking
+//     entry points (validate, decode_json_checked, the schema-driven
+//     codecs' handlers, ...) promise a status in builds with and without
+//     exceptions, and a guest has no exceptions to catch. A parser that
+//     throws or aborts on malformed input (a third-party DER / PEM
+//     reader, say) cannot be the validator as it is: catch inside
+//     `validate` where exceptions exist, or check the structure with code
+//     that reports;
+//   - the message of the status `validate` returns is static storage
+//     (`codec_fail("...", ...)` with a literal): the text readers keep the
+//     view, not the status. (An invariant's status is kept whole, so its
+//     message may be built at run time with codec_fail_owned.);
+//   - `decode` may assume `validate` accepted the same payload. The
+//     trusted, fail-fast paths (psio::decode on bytes already validated)
+//     call it without validating: there it may throw or abort like the
+//     rest of the fail-fast decode;
+//   - text a `text_category` adapter accepts is the type's whole text
+//     form (one JSON string); a type invariant, if the type has one, runs
+//     on the decoded value afterwards (invariant.hpp, which states the
+//     same contract for the check: noexcept, a status, never an abort).
+//
 // Tags are nominal types. Formats declare a default tag via
 // `using preferred_presentation_category = …` (JSON → text_category;
 // ssz / pssz / frac / bin → binary_category). Member annotations can

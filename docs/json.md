@@ -270,6 +270,22 @@ integers of any width.
   the value read. A reader that only validates materialises the values of
   types that have an invariant, and only those. Every syntax layer behaves
   identically. Unknown keys are skipped without being read as any type.
+- **What PSIO requires of the code a type supplies.** An invariant check
+  and a text adapter's `validate` run on untrusted input, inside entry
+  points that promise a status and never a throw or an abort, in builds
+  with and without exceptions. A check is `noexcept` and returns
+  `psio::codec_status` (both enforced at compile time by `invariant(fn)` /
+  `PSIO_INVARIANT`); an adapter's `validate(span)` returns one. Neither may
+  throw or abort on any input: a check built on a library that throws or
+  aborts on malformed data (a DER or PEM parser) must catch that, or test
+  the structure itself first. An adapter's `decode` is called by the
+  checking readers only on text its `validate` accepted, and may rely on
+  that. The status is passed through unchanged; a message that names the
+  offending value is made with `psio::codec_fail_owned(text, 0, "Type")`
+  (`psio/error.hpp`), a fixed one with `psio::codec_fail("...", 0, "Type")`.
+  That holds for an invariant's status (and a schema handler's `check`),
+  which is kept whole; the message of an adapter's `validate` must be a
+  literal, because the text readers keep only its view.
 
 ## Reading
 
