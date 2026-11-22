@@ -1,8 +1,17 @@
 {
   "name": "psio",
   "version": "0.1.0",
-  "description": "C++-compatible fracpack and pjson serialization for JavaScript and TypeScript",
+  "description": "PSIO serialization for JavaScript and TypeScript: PSSZ, key, JSON / I-JSON and pjson from a Schema IR or typed definitions",
+  "keywords": [
+    "psio",
+    "pssz",
+    "serialization",
+    "schema",
+    "i-json",
+    "pjson"
+  ],
   "type": "module",
+  "sideEffects": false,
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -24,15 +33,13 @@
     "prepublishOnly": "npm run build",
     "prepack": "npm run build"
   },
-  "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
-  },
-  "license": "MIT",
-  "dependencies": {
-    "hash-wasm": "4.12.0"
-  },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "hash-wasm": "4.12.0",
+    "typescript": "^5.7.0"
+  },
+  "license": "MIT"
 }

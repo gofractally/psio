@@ -34,14 +34,17 @@ import {
 import { jsonToValue, valueToJson, type JsonFormat } from './pssz-json.js';
 import { reservedTimeId } from './time.js';
 import { decodeKey, encodeKey, encodeKeyPrefix, keyPrefixUpperBound as upperBound } from './pssz-key.js';
+import { viewAt } from './pssz-view.js';
 
 export {
   PsszError, PsszNaN, IR_VERSION,
   type PsszErrorKind, type IrSchema, type IrAnyType, type IrMember, type IrAttribute, type IrTypeValue,
-  type IrEnum, type IrEnumerator, type CompactEnumerator, type PsszCustomHandler,
+  type IrEnum, type IrEnumerator, type IrFunc, type IrResource, type IrInterface, type IrWorld, type IrUse,
+  type CompactEnumerator, type PsszCustomHandler,
   type CompactType, type PsszSchemaInput, type PsszTypeInput, type Some, type VariantValue, type BitsValue,
 } from './pssz-core.js';
 export { type JsonFormat } from './pssz-json.js';
+export { PsszView, RecordView, TupleView, ListView, VariantView } from './pssz-view.js';
 
 /** `auto`: type-derived offset widths (`psio::pssz`). 1 / 2 / 4: one inherited width (`psio::pssz_<W>`). */
 export type PsszWidth = 'auto' | 1 | 2 | 4;
@@ -94,8 +97,12 @@ function asBytes(bytes: unknown): Uint8Array {
   return bytes.constructor === Uint8Array ? bytes : new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.length);
 }
 
-/** One type of a schema under one width profile. */
-export class PsszType {
+/**
+ * One type of a schema under one width profile. From a schema fetched at
+ * run time the value type `T` and the view type `V` are `unknown`; the typed
+ * definitions of `types.ts` state them.
+ */
+export class PsszType<T = unknown, V = unknown> {
   // The type on the wire: "box" and custom text wrappers looked through.
   private readonly node: Node;
   private readonly boxed: boolean;
@@ -114,16 +121,34 @@ export class PsszType {
   }
 
   /** The canonical PSSZ bytes of `value`. */
-  encode(value: unknown): Uint8Array {
+  encode(value: T): Uint8Array {
     return guarded(() => this.codec.encodeTop(this.node, value));
   }
 
   /** Decodes fully validated PSSZ bytes. */
-  decode(bytes: Uint8Array, options?: PsszDecodeOptions): unknown {
+  decode(bytes: Uint8Array, options?: PsszDecodeOptions): T {
     return guarded(() => {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false };
-      return this.codec.decodeTop(this.node, input, ctx);
+      return this.codec.decodeTop(this.node, input, ctx) as T;
+    });
+  }
+
+  /**
+   * Reads the value in place: a scalar or text is returned as its value,
+   * bytes as a subarray of `bytes`, a record / tuple / list / variant as a
+   * view (`RecordView`, `TupleView`, `ListView`, `VariantView`) that reads
+   * one field or element at a time. A view checks the frames and values it
+   * reads, not the rest: use `validate` first when the whole encoding must
+   * be known to be canonical.
+   */
+  view(bytes: Uint8Array): V {
+    return guarded(() => {
+      const input = asBytes(bytes);
+      this.codec.checkTopCap(this.node, input.length, (m) => {
+        throw new PsszError('bytes', m);
+      });
+      return viewAt(this.codec, this.node, input, 0, input.length, 0) as V;
     });
   }
 
@@ -140,7 +165,7 @@ export class PsszType {
   }
 
   /** The `key` bytes of `value`: bytewise order is value order. */
-  encodeKey(value: unknown): Uint8Array {
+  encodeKey(value: T): Uint8Array {
     return guarded(() => encodeKey(this.node, value));
   }
 
@@ -148,8 +173,8 @@ export class PsszType {
    * Decodes key bytes. Checked: exactly one canonical key spanning the
    * whole input, or a PsszError.
    */
-  decodeKey(bytes: Uint8Array): unknown {
-    return guarded(() => decodeKey(this.node, asBytes(bytes)));
+  decodeKey(bytes: Uint8Array): T {
+    return guarded(() => decodeKey(this.node, asBytes(bytes))) as T;
   }
 
   /** Checks key bytes against the type. Never throws. */
@@ -172,12 +197,12 @@ export class PsszType {
   }
 
   /** JSON / I-JSON text -> value. */
-  jsonToValue(text: string | Uint8Array, format: JsonFormat = 'ijson'): unknown {
-    return guarded(() => jsonToValue(this.codec, this.ref, format, text));
+  jsonToValue(text: string | Uint8Array, format: JsonFormat = 'ijson'): T {
+    return guarded(() => jsonToValue(this.codec, this.ref, format, text)) as T;
   }
 
   /** Value -> JSON / I-JSON text. */
-  valueToJson(value: unknown, format: JsonFormat = 'ijson'): string {
+  valueToJson(value: T, format: JsonFormat = 'ijson'): string {
     return guarded(() => valueToJson(this.codec, this.ref, format, value));
   }
 
@@ -232,12 +257,12 @@ export class PsszSchema {
 
   /** From the PSSZ encoding of `psio::Schema` (how a schema travels). */
   static decode(bytes: Uint8Array, options?: PsszSchemaOptions): PsszSchema {
-    return new PsszSchema(PsszSchema.meta().type('Schema').decode(bytes) as IrSchema, options);
+    return new PsszSchema(PsszSchema.meta().type<IrSchema>('Schema').decode(bytes), options);
   }
 
   /** From the JSON / I-JSON text of `psio::Schema`. */
   static fromJson(text: string | Uint8Array, format: JsonFormat = 'ijson', options?: PsszSchemaOptions): PsszSchema {
-    return new PsszSchema(PsszSchema.meta().type('Schema').jsonToValue(text, format) as IrSchema, options);
+    return new PsszSchema(PsszSchema.meta().type<IrSchema>('Schema').jsonToValue(text, format), options);
   }
 
   /**
@@ -270,7 +295,7 @@ export class PsszSchema {
    * when the type, or anything it reaches, is not expressible in PSSZ, and
    * when the schema carries no `ir_version` (or one newer than `IR_VERSION`).
    */
-  type(root: string | PsszTypeInput, options?: PsszTypeOptions): PsszType {
+  type<T = unknown, V = unknown>(root: string | PsszTypeInput, options?: PsszTypeOptions): PsszType<T, V> {
     return guarded(() => {
       // A schema written before the IR was versioned would give other
       // widths and other values: refused, not guessed at.
@@ -281,11 +306,11 @@ export class PsszSchema {
       const w = width === 'auto' ? 0 : width;
       // Handlers given for this type alone: its own compilation.
       if (options?.handlers !== undefined || options?.requireHandlers !== undefined)
-        return this.withHandlers(options.handlers ?? {}, { requireHandlers: options.requireHandlers }).type(root, { width });
+        return this.withHandlers(options.handlers ?? {}, { requireHandlers: options.requireHandlers }).type<T, V>(root, { width });
       let codec = this.codecs.get(w);
       if (!codec) this.codecs.set(w, (codec = new Codec(this.ir, w, this.handlers, this.requireHandlers)));
       const ir: IrAnyType = normalizeType(root);
-      return new PsszType(codec, codec.node(ir));
+      return new PsszType<T, V>(codec, codec.node(ir));
     });
   }
 }

@@ -74,3 +74,18 @@ builder records everything those depend on:
 
 Not recorded: a member `as<Tag>` override, text / binary adapters, and `Box`
 (transparent). See "Not expressible" in `docs/json.md`.
+
+## JavaScript / TypeScript
+
+The typed definitions of the JS package (`js/src/types.ts`: `record`, `list`,
+`optional`, `variant`, `enumeration`, `custom`, ...) are a builder for the
+same IR: `generateSchema({ name: definition, ... })` follows
+`SchemaBuilder::insert<T>(name)` — a record under its own name, every other
+type interned as `@N` in first-visit order with its slot taken before its
+children, a `max`-only member length bound written into the member type,
+`utf8_string<N>`'s own bound as the `lengthBound` attribute — and produces the
+bytes `SchemaBuilder` produces for the equivalent C++ types.
+`js/src/test/typed-ir.test.ts` declares every type of the three shared
+fixtures this way and requires the generated schema to equal each fixture's
+`schema_ir`. A variant alternative's `ijsonName` is stated explicitly there
+(`alt(type, { ijsonName })`): JavaScript has no `get_type_name`.

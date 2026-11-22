@@ -9,16 +9,16 @@ designs. Its rows below describe benchmark implementation coverage.
 
 | Format | C++ public fixture | Rust comparison | JS/TS comparison |
 |---|---|---|---|
-| frac32 / fracpack | records, nesting, variants, empty values, scalar/string/vector/optional | encode/decode | encode/decode |
+| frac32 / fracpack | records, nesting, variants, empty values, scalar/string/vector/optional | encode/decode | removed: the JS package implements the current formats only |
 | pjson | scalars, 274 doubles, typed containers, keys, rejection cases | encode/decode/validate | encode/decode/validate |
 | SSZ | two records | encode/decode | implementation absent |
-| pSSZ | two records in the public corpus; `conformance/pssz-vectors.json` (generated from the C++ codec, checked by ctest) | encode/decode/validate/views against the whole PSSZ fixture, for `pssz_struct!` records and derives | implementation absent |
+| pSSZ | two records in the public corpus; `conformance/pssz-vectors.json` (generated from the C++ codec, checked by ctest) | encode/decode/validate/views against the whole PSSZ fixture, for `pssz_struct!` records and derives | encode/decode/validate/views against the whole PSSZ fixture, schema-driven and through typed definitions (`js/README.md`) |
 | Cap'n Proto | two records | encode/decode | implementation absent |
 | FlatBuffers | two records | encode/decode | implementation absent |
-| WIT binary | two records | encode only in shared fixture test | implementation absent; WIT text generation is separate |
+| WIT binary | two records | encode only in shared fixture test | implementation absent; WIT text from a Schema IR is `emitWit` |
 | frac16 | two records | not covered | implementation absent |
-| bin, Borsh, bincode, Avro, key, BSON, MessagePack, Protobuf | two records each | public codecs not implemented | public codecs not implemented |
-| JSON / I-JSON text | two records in the public corpus; `conformance/json-vectors.json` (990 vectors generated from the C++ codec, checked by ctest; `docs/json.md`) | encode/decode/validate against the whole JSON fixture | conversion APIs exist; not compared here |
+| bin, Borsh, bincode, Avro, key, BSON, MessagePack, Protobuf | two records each | public codecs not implemented | `key` implemented (`conformance/time-key-vectors.json`); the others not implemented |
+| JSON / I-JSON text | two records in the public corpus; `conformance/json-vectors.json` (990 vectors generated from the C++ codec, checked by ctest; `docs/json.md`) | encode/decode/validate against the whole JSON fixture | encode/decode against the whole JSON fixture, schema-driven and through typed definitions |
 
 The standalone packages now build without psiserve. Installed CMake and
 FetchContent consumers pass. Rust archive verification includes the macro crate
@@ -121,7 +121,8 @@ languages can represent.
 - **C++-only types.** `psio::bounded<T, N>`, `byte_array<N>` and
   `std::monostate` are not PSSZ types in C++ and have no pairing. A Rust unit
   enum alternative is a zero-field fixed-layout record alternative in C++.
-- JavaScript / TypeScript has no PSSZ implementation.
+- JavaScript / TypeScript implements PSSZ schema-driven (`js/src/pssz-core.ts`); its typed
+  definitions generate the Schema IR of the C++ schema builder.
 
 ## Still required for a stable release
 
@@ -131,8 +132,8 @@ languages can represent.
    schema evolution, resources, views and in-place mutation. Two records cannot
    establish the full Rust codecs' compatibility.
    Define the binding for arbitrary C++ `std::string` bytes as well: C++ fracpack
-   validates their length without requiring UTF-8, Rust `String` requires UTF-8,
-   and the current JS `str` decoder replaces malformed UTF-8. Raw byte bindings
+   validates their length without requiring UTF-8 and Rust `String` requires UTF-8
+   (the JS package no longer has a fracpack codec). Raw byte bindings
    and shared fixtures are needed before claiming lossless parity for that case.
    For PSSZ this is settled: Rust `String` pairs with C++ `psio::utf8_string`
    and Rust `RawString` with C++ `std::string`, with shared fixtures.

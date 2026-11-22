@@ -1,304 +1,201 @@
-// wit.ts — WIT (WebAssembly Interface Types) text generation
+// wit.ts — Schema IR -> WIT text.
 //
-// Generates WIT text format from FracType definitions, compatible with
-// the C++ psio wit_gen.hpp output.
+// A port of C++ `psio::emit_wit` (cpp/include/psio/emit_wit.hpp): the
+// package, `use` lines, interfaces (their named types and functions), worlds
+// and, last, the named types no interface lists. It is driven by the IR
+// alone, so it works on a schema fetched at run time and on one generated
+// from typed definitions (`generateSchema`).
+//
+// Type mapping: Int -> u8..u64 / s8..s64; Float -> f32 / f64; bool, char;
+// text -> string; List -> list<T>; Option -> option<T>; Tuple -> tuple<..>;
+// record (Object / Struct) -> record; Variant -> variant (an empty tuple is
+// a case with no payload); Resource -> resource; an Enum is its integer; any
+// other Custom is its wire type. What WIT cannot say is written as a
+// comment, as in C++: a bounded list is `list<T>/* @psio:max=N */` and a
+// fixed-size array `/* TODO: fixed-size array */`.
+//
+// Two deliberate differences from emit_wit.hpp as of this port: a float is
+// recognized in both IR spellings (mantissa 23 / 24 and 52 / 53 — the C++
+// schema builder writes 24 / 53, which emit_wit.hpp prints as a TODO
+// comment), and a `utf8` string is `string` (emit_wit.hpp maps only the raw
+// `string` id and prints `utf8` as `list<u8>`).
 
-import type { FracType, SchemaNode } from './fracpack.js';
+import {
+  PsszError, type IrAnyType, type IrAttribute, type IrFunc, type IrMember, type IrSchema,
+} from './pssz-core.js';
+import { PsszSchema } from './pssz.js';
 
-// ========================= WIT function descriptor =========================
-
-/** Describes a WIT function's parameter and return types. */
-export interface WitFunc {
-  params: Record<string, FracType<any>>;
-  result?: FracType<any>;
-}
-
-/** Options for WIT world generation. */
-export interface WitOptions {
-  types?: Record<string, FracType<any>>;
-  exports?: Record<string, WitFunc>;
-  imports?: Record<string, WitFunc>;
-}
-
-// ========================= Name conversion =========================
-
-const kebabCache = new Map<string, string>();
-
-/** Convert camelCase or snake_case to kebab-case (matching C++ to_kebab_case). */
-export function toKebabCase(s: string): string {
-  let cached = kebabCache.get(s);
-  if (cached !== undefined) return cached;
-
-  let result = '';
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
+function kebab(name: string): string {
+  let out = '';
+  for (let i = 0; i < name.length; ++i) {
+    const c = name[i];
     if (c === '_') {
-      if (result.length > 0 && result[result.length - 1] !== '-') result += '-';
-    } else if (c >= 'A' && c <= 'Z') {
-      if (result.length > 0 && result[result.length - 1] !== '-') result += '-';
-      result += c.toLowerCase();
-    } else {
-      result += c;
+      out += '-';
+      continue;
     }
+    const upper = c >= 'A' && c <= 'Z';
+    if (i > 0 && upper && name[i - 1] >= 'a' && name[i - 1] <= 'z') out += '-';
+    out += upper ? c.toLowerCase() : c;
+  }
+  return out;
+}
+
+class Emitter {
+  private out = '';
+  private depth = 0;
+  private readonly byName = new Map<string, IrAnyType>();
+
+  constructor(private readonly schema: IrSchema) {
+    // The first entry of a name wins, as `Schema::get`.
+    for (const m of schema.types) if (!this.byName.has(m.name)) this.byName.set(m.name, m.type);
   }
 
-  kebabCache.set(s, result);
-  return result;
-}
-
-// ========================= Type context =========================
-
-interface WitGenCtx {
-  /** Named type definitions to emit. Maps name → SchemaNode. */
-  typeDefs: Map<string, SchemaNode>;
-  /** FracType → registered name (O(1) reverse lookup). */
-  nameOf: Map<FracType<any>, string>;
-  /** Auto-name counter (local to this context, not global). */
-  nextId: number;
-}
-
-function newCtx(): WitGenCtx {
-  return { typeDefs: new Map(), nameOf: new Map(), nextId: 0 };
-}
-
-function autoName(ctx: WitGenCtx): string {
-  return `type-${ctx.nextId++}`;
-}
-
-// ========================= Type expression =========================
-
-/**
- * Convert a FracType to an inline WIT type expression.
- * Records and variants are registered as named types and referenced by name.
- */
-function typeExpr(type: FracType<any>, ctx: WitGenCtx, nameHint?: string): string {
-  return nodeToWit(type.schema, type, ctx, nameHint);
-}
-
-function nodeToWit(node: SchemaNode, type: FracType<any>, ctx: WitGenCtx, nameHint?: string): string {
-  switch (node.kind) {
-    case 'bool':
-      return 'bool';
-
-    case 'int': {
-      const prefix = node.signed ? 's' : 'u';
-      return `${prefix}${node.bits}`;
+  run(): string {
+    const s = this.schema;
+    if (s.package.name !== '')
+      this.out += `package ${s.package.name}${s.package.version !== '' ? `@${s.package.version}` : ''};\n\n`;
+    if (s.uses.length) {
+      for (const u of s.uses)
+        this.out += `use ${u.package !== '' ? `${u.package}/` : ''}${kebab(u.interface_name)}${u.version !== '' ? `@${u.version}` : ''};\n`;
+      this.out += '\n';
     }
-
-    case 'float':
-      return node.exp === 8 ? 'f32' : 'f64';
-
-    case 'string':
-      return 'string';
-
-    case 'bytes':
-      return 'list<u8>';
-
-    case 'optional':
-      return `option<${typeExpr(node.inner, ctx)}>`;
-
-    case 'list':
-      return `list<${typeExpr(node.element, ctx)}>`;
-
-    case 'array':
-      // WIT has no fixed-length array; use list
-      return `list<${typeExpr(node.element, ctx)}>`;
-
-    case 'tuple': {
-      const parts: string[] = [];
-      for (const e of node.elements) parts.push(typeExpr(e, ctx));
-      return `tuple<${parts.join(', ')}>`;
-    }
-
-    case 'variant':
-    case 'struct':
-    case 'fixedStruct': {
-      // O(1) lookup for already-registered types
-      const existing = ctx.nameOf.get(type);
-      if (existing !== undefined) return toKebabCase(existing);
-
-      // Register new named type
-      const name = nameHint || autoName(ctx);
-      ctx.nameOf.set(type, name);
-      ctx.typeDefs.set(name, node);
-      // Recursively discover nested named types
-      discoverNested(node, ctx);
-      return toKebabCase(name);
-    }
-
-    case 'map':
-      // WIT has no map type; use list<tuple<key, value>>
-      return `list<tuple<${typeExpr(node.key, ctx)}, ${typeExpr(node.value, ctx)}>>`;
-  }
-}
-
-/**
- * Recursively discover named types (struct/variant) nested inside a schema node,
- * including through containers like optional, list, array, tuple.
- */
-function discoverNested(node: SchemaNode, ctx: WitGenCtx): void {
-  switch (node.kind) {
-    case 'struct':
-    case 'fixedStruct':
-      for (const type of Object.values(node.fields)) {
-        discoverInner(type, ctx);
+    for (const iface of s.interfaces) {
+      this.out += `interface ${kebab(iface.name)} {\n`;
+      ++this.depth;
+      for (const name of iface.type_names) {
+        const type = this.byName.get(name);
+        if (type) this.declare(name, type);
+        else this.line(`/* TODO: missing type "${name}" */`);
       }
-      break;
-    case 'variant':
-      for (const type of Object.values(node.cases)) {
-        discoverInner(type, ctx);
+      for (const fn of iface.funcs) this.func(fn);
+      --this.depth;
+      this.out += '}\n\n';
+    }
+    for (const world of s.worlds) {
+      this.out += `world ${kebab(world.name)} {\n`;
+      ++this.depth;
+      for (const i of world.imports) this.line(`import ${i.package !== '' ? `${i.package}/` : ''}${kebab(i.interface_name)};`);
+      for (const e of world.exports) this.line(`export ${kebab(e)};`);
+      --this.depth;
+      this.out += '}\n\n';
+    }
+    const listed = new Set(s.interfaces.flatMap((iface) => iface.type_names));
+    for (const m of s.types) if (!listed.has(m.name) && !m.name.startsWith('@')) this.declare(m.name, m.type);
+    return this.out;
+  }
+
+  private line(text: string): void {
+    this.out += '  '.repeat(this.depth) + text + '\n';
+  }
+
+  private declare(name: string, type: IrAnyType): void {
+    const t = type.value;
+    switch (t.type) {
+      case 'Object':
+      case 'Struct':
+        this.attributes(t.value.attributes);
+        this.block('record', name, t.value.members, (m) => `${kebab(m.name)}: ${this.inline(m.type, 0)}`);
+        break;
+      case 'Variant':
+        this.block('variant', name, t.value.members, (m) => {
+          const empty = m.type.value.type === 'Tuple' && m.type.value.value.members.length === 0;
+          return empty ? kebab(m.name) : `${kebab(m.name)}(${this.inline(m.type, 0)})`;
+        });
+        break;
+      case 'Resource':
+        this.line(`resource ${kebab(t.value.name)} {`);
+        ++this.depth;
+        for (const method of t.value.methods) this.func(method);
+        --this.depth;
+        this.line('}');
+        break;
+      default:
+        this.line(`type ${kebab(name)} = ${this.inline(type, 0)};`);
+    }
+  }
+
+  private attributes(attributes: IrAttribute[]): void {
+    for (const a of attributes)
+      if (a.name === 'definitionWillNotChange' || a.name === 'maxFields' || a.name === 'maxDynamicData')
+        this.line(`@${a.name}${a.value !== null && a.value !== '' ? `(${a.value})` : ''}`);
+  }
+
+  private block(keyword: string, name: string, members: IrMember[], text: (m: IrMember) => string): void {
+    this.line(`${keyword} ${kebab(name)} {`);
+    ++this.depth;
+    members.forEach((m, i) => this.line(text(m) + (i + 1 < members.length ? ',' : '')));
+    --this.depth;
+    this.line('}');
+  }
+
+  private func(fn: IrFunc): void {
+    const params = fn.params.map((p) => `${kebab(p.name)}: ${this.inline(p.type, 0)}`).join(', ');
+    this.line(`${kebab(fn.name)}: func(${params})${fn.result ? ` -> ${this.inline(fn.result, 0)}` : ''};`);
+  }
+
+  private inline(type: IrAnyType, depth: number): string {
+    if (depth > 128) throw new PsszError('schema', 'wit: type nesting too deep (cyclic aliases?)');
+    const t = type.value;
+    const sub = (x: IrAnyType) => this.inline(x, depth + 1);
+    switch (t.type) {
+      case 'Int':
+        return `${t.value.isSigned ? 's' : 'u'}${t.value.bits}`;
+      case 'Float':
+        if (t.value.exp === 8 && (t.value.mantissa === 23 || t.value.mantissa === 24)) return 'f32';
+        if (t.value.exp === 11 && (t.value.mantissa === 52 || t.value.mantissa === 53)) return 'f64';
+        return '/* TODO: non-IEEE float */';
+      case 'Type': {
+        const name = t.value.type;
+        if (name === 'bool' || name === 'string' || name === 'char') return name;
+        if (name.startsWith('@')) {
+          const target = this.byName.get(name);
+          return target ? sub(target) : `/* TODO: unresolved ${name} */`;
+        }
+        return kebab(name);
       }
-      break;
-    case 'optional':
-      discoverInner(node.inner, ctx);
-      break;
-    case 'list':
-      discoverInner(node.element, ctx);
-      break;
-    case 'array':
-      discoverInner(node.element, ctx);
-      break;
-    case 'tuple':
-      for (const e of node.elements) {
-        discoverInner(e, ctx);
-      }
-      break;
-    case 'map':
-      discoverInner(node.key, ctx);
-      discoverInner(node.value, ctx);
-      break;
-  }
-}
-
-function discoverInner(type: FracType<any>, ctx: WitGenCtx): void {
-  const inner = type.schema;
-  if ((inner.kind === 'struct' || inner.kind === 'fixedStruct' || inner.kind === 'variant')
-      && !ctx.nameOf.has(type)) {
-    typeExpr(type, ctx);
-  } else {
-    // Recurse into containers to find deeper nested named types
-    discoverNested(inner, ctx);
-  }
-}
-
-// ========================= Type definition emission =========================
-
-function emitTypeDef(name: string, node: SchemaNode, ctx: WitGenCtx): string {
-  const kebabName = toKebabCase(name);
-
-  switch (node.kind) {
-    case 'struct':
-    case 'fixedStruct': {
-      const fields = Object.entries(node.fields)
-        .map(([fname, ftype]) => `  ${toKebabCase(fname)}: ${typeExpr(ftype, ctx)},`)
-        .join('\n');
-      return `record ${kebabName} {\n${fields}\n}`;
-    }
-
-    case 'variant': {
-      const cases = Object.entries(node.cases)
-        .map(([cname, ctype]) => {
-          const expr = typeExpr(ctype, ctx);
-          return `  ${toKebabCase(cname)}(${expr}),`;
-        })
-        .join('\n');
-      return `variant ${kebabName} {\n${cases}\n}`;
-    }
-
-    default:
-      // For non-composite types, emit a type alias
-      return `type ${kebabName} = ${nodeToWit(node, null!, ctx)};`;
-  }
-}
-
-// ========================= Function emission =========================
-
-function emitFunc(name: string, func: WitFunc, ctx: WitGenCtx): string {
-  const params = Object.entries(func.params)
-    .map(([pname, ptype]) => `${toKebabCase(pname)}: ${typeExpr(ptype, ctx)}`)
-    .join(', ');
-
-  let result = '';
-  if (func.result) {
-    result = ` -> ${typeExpr(func.result, ctx)}`;
-  }
-
-  return `${toKebabCase(name)}: func(${params})${result}`;
-}
-
-// ========================= World generation =========================
-
-/**
- * Generate WIT text for a world.
- *
- * @example
- * const Person = struct({ name: str, age: u32, active: bool });
- * const wit = generateWit('my-api', {
- *   types: { Person },
- *   exports: {
- *     getPerson: { params: {}, result: Person },
- *     setPerson: { params: { p: Person }, result: undefined },
- *   },
- * });
- */
-export function generateWit(worldName: string, opts: WitOptions = {}): string {
-  const ctx = newCtx();
-
-  // Phase 1: register explicitly named types (names first, then nested)
-  if (opts.types) {
-    // First pass: reserve all explicit names
-    for (const [name, type] of Object.entries(opts.types)) {
-      ctx.nameOf.set(type, name);
-      ctx.typeDefs.set(name, type.schema);
-    }
-    // Second pass: discover nested named types
-    for (const type of Object.values(opts.types)) {
-      discoverNested(type.schema, ctx);
+      case 'List':
+        return `list<${sub(t.value.type)}>`;
+      case 'BoundedList':
+        return `list<${sub(t.value.type)}>/* @psio:max=${t.value.maxCount} */`;
+      case 'Option':
+        return `option<${sub(t.value.type)}>`;
+      case 'Tuple':
+        return `tuple<${t.value.members.map(sub).join(', ')}>`;
+      case 'Enum':
+        return sub(t.value.type);
+      case 'Custom':
+        if (t.value.id === 'bool' || t.value.id === 'char') return t.value.id;
+        if (t.value.id === 'string' || t.value.id === 'utf8') return 'string';
+        return sub(t.value.type);
+      case 'Resource':
+        return `own<${kebab(t.value.name)}>`;
+      case 'Object':
+      case 'Struct':
+        return '/* TODO: inline record not supported */';
+      case 'Variant':
+        return '/* TODO: inline variant not supported */';
+      case 'Array':
+        return '/* TODO: fixed-size array */';
+      default:
+        return '/* TODO: fracpack wrapper */';
     }
   }
-
-  // Phase 2: resolve types referenced by functions
-  const exportLines: string[] = [];
-  if (opts.exports) {
-    for (const [name, func] of Object.entries(opts.exports)) {
-      exportLines.push(`  export ${emitFunc(name, func, ctx)};`);
-    }
-  }
-
-  const importLines: string[] = [];
-  if (opts.imports) {
-    for (const [name, func] of Object.entries(opts.imports)) {
-      importLines.push(`  import ${emitFunc(name, func, ctx)};`);
-    }
-  }
-
-  // Phase 3: emit type definitions (outside world block)
-  const typeBlocks: string[] = [];
-  for (const [name, node] of ctx.typeDefs) {
-    typeBlocks.push(emitTypeDef(name, node, ctx));
-  }
-
-  // Phase 4: assemble
-  const lines: string[] = [];
-
-  if (typeBlocks.length > 0) {
-    lines.push(typeBlocks.join('\n\n'));
-    lines.push('');
-  }
-
-  lines.push(`world ${toKebabCase(worldName)} {`);
-  for (const line of importLines) lines.push(line);
-  for (const line of exportLines) lines.push(line);
-  lines.push('}');
-
-  return lines.join('\n');
 }
 
 /**
- * Generate just the WIT type expression for a single type (no world wrapper).
- * Useful for inline type references.
+ * The WIT text of a schema: its package, interfaces and worlds, and the
+ * named types (records, variants, resources, aliases). Throws a `PsszError`
+ * of kind `schema` / `value` for a schema that is not a well-formed
+ * `psio::Schema`.
  */
-export function typeToWitExpr(type: FracType<any>): string {
-  const ctx = newCtx();
-  return typeExpr(type, ctx);
+export function emitWit(schema: PsszSchema): string {
+  if (!(schema instanceof PsszSchema)) throw new PsszError('schema', 'wit: a PsszSchema is required');
+  // Through its own encoding: the envelope is checked like any other value.
+  const checked = PsszSchema.decode(schema.encode()).ir;
+  try {
+    return new Emitter(checked).run();
+  } catch (e) {
+    if (e instanceof PsszError) throw e;
+    throw new PsszError('internal', e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+  }
 }

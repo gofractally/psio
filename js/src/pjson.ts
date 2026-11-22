@@ -1,8 +1,14 @@
 // Wire contract: docs/wire-contract.md; audited tags, current public C++ semantics.
 export const PJSON_WIRE_REVISION = 2;
-import { createXXHash3 } from 'hash-wasm';
+import { xxh3 } from './xxh3.js';
 
-export class PjsonError extends Error {}
+/** The only error the pjson functions throw. */
+export class PjsonError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PjsonError';
+  }
+}
 export class PjsonDecimal {
   constructor(readonly mantissa: bigint, readonly scale: number) {}
 }
@@ -125,179 +131,204 @@ function expandDecimal(s: string): string {
   return (negative ? '-' : '') + fixed;
 }
 
-/** Initialize XXH3 once. The returned codec has synchronous operations. */
-export async function createPjson() {
-  const hash = await createXXHash3();
-  function hash8(bytes: Uint8Array): number {
-    const dot = bytes.lastIndexOf(46);
-    hash.init().update(dot < 0 ? bytes : bytes.subarray(0, dot));
-    return parseInt(hash.digest('hex').slice(-2), 16);
+// The hash byte of an object key: XXH3-64 of the key up to its last '.'.
+function hash8(bytes: Uint8Array): number {
+  const dot = bytes.lastIndexOf(46);
+  return Number(xxh3(dot < 0 ? bytes : bytes.subarray(0, dot)) & 0xffn);
+}
+function encode(value: PjsonValue, depth = 0): Uint8Array {
+  require(depth <= 64, 'Maximum nesting depth exceeded');
+  if (value === null) return Uint8Array.of(0);
+  if (typeof value === 'boolean') return Uint8Array.of(value ? 0x11 : 0x10);
+  if (typeof value === 'bigint') return integer(value);
+  if (typeof value === 'number') return number(value);
+  if (typeof value === 'string') return join([Uint8Array.of(0x90), utf8.encode(value)]);
+  if (value instanceof PjsonString) return join([Uint8Array.of(value.escaped ? 0x91 : 0x90), value.bytes]);
+  if (value instanceof PjsonDecimal) return decimal(value.mantissa, value.scale);
+  if (value instanceof PjsonFloat) return ieee(value);
+  if (value instanceof Uint8Array) return join([Uint8Array.of(0xa0), value]);
+  if (value instanceof PjsonTypedArray) {
+    const size = sizes[value.code];
+    require(size && value.bytes.length % size === 0, 'Invalid typed array');
+    return join([Uint8Array.of(0xb1 + value.code), value.bytes, le(value.bytes.length / size, 2)]);
   }
-  function encode(value: PjsonValue, depth = 0): Uint8Array {
-    require(depth <= 64, 'Maximum nesting depth exceeded');
-    if (value === null) return Uint8Array.of(0);
-    if (typeof value === 'boolean') return Uint8Array.of(value ? 0x11 : 0x10);
-    if (typeof value === 'bigint') return integer(value);
-    if (typeof value === 'number') return number(value);
-    if (typeof value === 'string') return join([Uint8Array.of(0x90), utf8.encode(value)]);
-    if (value instanceof PjsonString) return join([Uint8Array.of(value.escaped ? 0x91 : 0x90), value.bytes]);
-    if (value instanceof PjsonDecimal) return decimal(value.mantissa, value.scale);
-    if (value instanceof PjsonFloat) return ieee(value);
-    if (value instanceof Uint8Array) return join([Uint8Array.of(0xa0), value]);
-    if (value instanceof PjsonTypedArray) {
-      const size = sizes[value.code];
-      require(size && value.bytes.length % size === 0, 'Invalid typed array');
-      return join([Uint8Array.of(0xb1 + value.code), value.bytes, le(value.bytes.length / size, 2)]);
-    }
-    if (value instanceof PjsonRows) return encodeRows(value.records, depth, value.keys);
-    const array = Array.isArray(value);
-    const entries: [string | PjsonString, PjsonValue][] = array ? value.map(v => ['', v]) :
-      value instanceof PjsonObject ? value.entries :
-      value instanceof Map ? [...value.entries()] : Object.entries(value);
-    require(entries.length <= 65535, 'Container exceeds 65535 entries');
-    const parts: Uint8Array[] = [], offsets: number[] = [], keys: Uint8Array[] = [];
-    let length = 0;
-    for (const [key, child] of entries) {
-      offsets.push(length);
-      const k = key instanceof PjsonString ? key.bytes : utf8.encode(key); keys.push(k);
-      const prefix = array ? new Uint8Array() :
-        k.length < 255 ? k : join([varuint(k.length - 255), k]);
-      const part = join([prefix, encode(child, depth + 1)]);
-      parts.push(part); length += part.length;
-    }
-    const w = width(length);
-    return join([Uint8Array.of(array ? 0xb0 : 0xc0, w - 1), ...parts,
-      array ? new Uint8Array() : Uint8Array.from(keys.map(hash8)),
-      ...offsets.map((off, i) => array ? le(off, w) : join([le(off, w), Uint8Array.of(Math.min(keys[i].length, 255))])),
-      le(entries.length, 2)]);
+  if (value instanceof PjsonRows) return encodeRows(value.records, depth, value.keys);
+  const array = Array.isArray(value);
+  const entries: [string | PjsonString, PjsonValue][] = array ? value.map(v => ['', v]) :
+    value instanceof PjsonObject ? value.entries :
+    value instanceof Map ? [...value.entries()] : Object.entries(value);
+  require(entries.length <= 65535, 'Container exceeds 65535 entries');
+  const parts: Uint8Array[] = [], offsets: number[] = [], keys: Uint8Array[] = [];
+  let length = 0;
+  for (const [key, child] of entries) {
+    offsets.push(length);
+    const k = key instanceof PjsonString ? key.bytes : utf8.encode(key); keys.push(k);
+    const prefix = array ? new Uint8Array() :
+      k.length < 255 ? k : join([varuint(k.length - 255), k]);
+    const part = join([prefix, encode(child, depth + 1)]);
+    parts.push(part); length += part.length;
   }
-  function encodeRows(records: (Map<string, PjsonValue> | PjsonObject)[], depth: number,
-                      schema?: (string | PjsonString)[]): Uint8Array {
-    require(records.length <= 65535, 'Invalid row count');
-    const entries = records.map(r => r instanceof PjsonObject ? r.entries : [...r.entries()]);
-    const names = entries.length ? entries[0].map(([k]) => k) : schema ?? [];
-    const keys = names.map(k => k instanceof PjsonString ? k.bytes : utf8.encode(k));
-    require(keys.length > 0 && keys.every(k => k.length < 255), 'Invalid row schema');
-    const rows = entries.map(r => {
-      require(r.length === keys.length && r.every(([k], i) => {
-        const bytes = k instanceof PjsonString ? k.bytes : utf8.encode(k);
-        return bytes.length === keys[i].length && bytes.every((b, j) => b === keys[i][j]);
-      }), 'Mismatched row schema');
-      return r.map(([, v]) => encode(v, depth + 1));
-    });
-    const sw = width(rows.reduce((max, row) => Math.max(max, row.reduce((n, v) => n + v.length, 0)), 0));
-    const bodies = rows.map(row => {
-      let pos = 0; const offsets = row.map(v => { const at = pos; pos += v.length; return le(at, sw); });
-      return join([...row, ...offsets]);
-    });
-    let total = 0; const offsets = bodies.map(b => { const at = total; total += b.length; return at; });
-    const rw = width(total); let keyOffset = 0;
-    const slots = keys.map(k => { const at = keyOffset; keyOffset += k.length;
-      require(keyOffset <= 0xffffff, 'Row keys exceed 24-bit offsets');
-      return join([le(at, 3), Uint8Array.of(k.length)]); });
-    return join([Uint8Array.of(0xc1, (sw - 1) | ((rw - 1) << 2)), varuint(keys.length),
-      ...slots, Uint8Array.from(keys.map(hash8)), ...keys, ...bodies,
-      ...offsets.map(o => le(o, rw)), le(records.length, 2)]);
+  const w = width(length);
+  return join([Uint8Array.of(array ? 0xb0 : 0xc0, w - 1), ...parts,
+    array ? new Uint8Array() : Uint8Array.from(keys.map(hash8)),
+    ...offsets.map((off, i) => array ? le(off, w) : join([le(off, w), Uint8Array.of(Math.min(keys[i].length, 255))])),
+    le(entries.length, 2)]);
+}
+function encodeRows(records: (Map<string, PjsonValue> | PjsonObject)[], depth: number,
+                    schema?: (string | PjsonString)[]): Uint8Array {
+  require(records.length <= 65535, 'Invalid row count');
+  const entries = records.map(r => r instanceof PjsonObject ? r.entries : [...r.entries()]);
+  const names = entries.length ? entries[0].map(([k]) => k) : schema ?? [];
+  const keys = names.map(k => k instanceof PjsonString ? k.bytes : utf8.encode(k));
+  require(keys.length > 0 && keys.every(k => k.length < 255), 'Invalid row schema');
+  const rows = entries.map(r => {
+    require(r.length === keys.length && r.every(([k], i) => {
+      const bytes = k instanceof PjsonString ? k.bytes : utf8.encode(k);
+      return bytes.length === keys[i].length && bytes.every((b, j) => b === keys[i][j]);
+    }), 'Mismatched row schema');
+    return r.map(([, v]) => encode(v, depth + 1));
+  });
+  const sw = width(rows.reduce((max, row) => Math.max(max, row.reduce((n, v) => n + v.length, 0)), 0));
+  const bodies = rows.map(row => {
+    let pos = 0; const offsets = row.map(v => { const at = pos; pos += v.length; return le(at, sw); });
+    return join([...row, ...offsets]);
+  });
+  let total = 0; const offsets = bodies.map(b => { const at = total; total += b.length; return at; });
+  const rw = width(total); let keyOffset = 0;
+  const slots = keys.map(k => { const at = keyOffset; keyOffset += k.length;
+    require(keyOffset <= 0xffffff, 'Row keys exceed 24-bit offsets');
+    return join([le(at, 3), Uint8Array.of(k.length)]); });
+  return join([Uint8Array.of(0xc1, (sw - 1) | ((rw - 1) << 2)), varuint(keys.length),
+    ...slots, Uint8Array.from(keys.map(hash8)), ...keys, ...bodies,
+    ...offsets.map(o => le(o, rw)), le(records.length, 2)]);
+}
+function decodeKey(bytes: Uint8Array): string | PjsonString {
+  try { return text.decode(bytes); } catch { return new PjsonString(bytes.slice()); }
+}
+function decode(data: Uint8Array, depth = 0): PjsonValue {
+  require(depth <= 64 && data.length > 0, 'Empty value or maximum depth exceeded');
+  const low = data[0] & 15, tag = data[0] >> 4, len = data.length;
+  if (tag === 0) { require(len === 1, 'Invalid null'); return null; }
+  if (tag === 1) { require(len === 1 && low <= 1, 'Invalid bool'); return low === 1; }
+  if (tag === 2) { require(len === 1, 'Invalid inline uint'); return BigInt(low); }
+  if (tag === 3) { require(len === 1 && low !== 0, 'Invalid inline negative integer'); return -BigInt(low); }
+  if (tag === 4 || tag === 5) {
+    require(len === low + 2, 'Invalid integer size');
+    const n = read(data, 1, low + 1);
+    require(tag !== 5 || n !== 0n, 'Negative zero is reserved');
+    return tag === 5 ? -n : n;
   }
-  function decodeKey(bytes: Uint8Array): string | PjsonString {
-    try { return text.decode(bytes); } catch { return new PjsonString(bytes.slice()); }
+  if (tag === 7) {
+    const zz = read(data, 1, low + 1), [scale, consumed] = readVar(data, low + 2);
+    require(len === low + 2 + consumed, 'Trailing decimal bytes');
+    return new PjsonDecimal((zz >> 1n) ^ -(zz & 1n), scale % 2 ? -(scale + 1) / 2 : scale / 2);
   }
-  function decode(data: Uint8Array, depth = 0): PjsonValue {
-    require(depth <= 64 && data.length > 0, 'Empty value or maximum depth exceeded');
-    const low = data[0] & 15, tag = data[0] >> 4, len = data.length;
-    if (tag === 0) { require(len === 1, 'Invalid null'); return null; }
-    if (tag === 1) { require(len === 1 && low <= 1, 'Invalid bool'); return low === 1; }
-    if (tag === 2) { require(len === 1, 'Invalid inline uint'); return BigInt(low); }
-    if (tag === 3) { require(len === 1 && low !== 0, 'Invalid inline negative integer'); return -BigInt(low); }
-    if (tag === 4 || tag === 5) {
-      require(len === low + 2, 'Invalid integer size');
-      const n = read(data, 1, low + 1);
-      require(tag !== 5 || n !== 0n, 'Negative zero is reserved');
-      return tag === 5 ? -n : n;
-    }
-    if (tag === 7) {
-      const zz = read(data, 1, low + 1), [scale, consumed] = readVar(data, low + 2);
-      require(len === low + 2 + consumed, 'Trailing decimal bytes');
-      return new PjsonDecimal((zz >> 1n) ^ -(zz & 1n), scale % 2 ? -(scale + 1) / 2 : scale / 2);
-    }
-    if (tag === 6) {
-      const w = low & 7; require(w >= 1 && w <= 3 && len === 1 + (1 << w), 'Invalid IEEE value');
-      return new PjsonFloat(read(data, 1, 1 << w), w as 1 | 2 | 3, !!(low & 8));
-    }
-    if (tag === 9) {
-      require(low <= 1, 'Reserved string flag');
-      // Preserve escape-form and invalid UTF-8 strings losslessly.
-      if (low) return new PjsonString(data.slice(1), true);
-      try { return text.decode(data.subarray(1)); } catch { return new PjsonString(data.slice(1)); }
-    }
-    if (tag === 10) { require(low === 0, 'Reserved bytes flag'); return data.slice(1); }
-    if (tag === 11 && low !== 0) {
-      require(low <= 10 && len >= 3, 'Invalid typed array');
-      require(len === 3 + Number(read(data, len - 2, 2)) * sizes[low - 1], 'Invalid typed array size');
-      return new PjsonTypedArray(low - 1, data.slice(1, -2));
-    }
-    if (tag === 12 && low === 1) return decodeRows(data, depth);
-    require((tag === 11 || tag === 12) && low === 0 && len >= 4, 'Reserved tag or short container');
-    require((data[1] & 0xfc) === 0, 'Reserved container width bits');
-    const object = tag === 12, w = data[1] + 1, stride = w + (object ? 1 : 0);
-    const count = Number(read(data, len - 2, 2)), table = len - 2 - count * stride;
-    const end = table - (object ? count : 0); require(end >= 2, 'Truncated container index');
-    const children: PjsonValue[] = [], entries: [string | PjsonString, PjsonValue][] = [];
-    for (let i = 0; i < count; ++i) {
-      const at = 2 + Number(read(data, table + i * stride, w));
-      const next = i + 1 === count ? end : 2 + Number(read(data, table + (i + 1) * stride, w));
-      require(at <= next && next <= end, 'Invalid child offset');
-      let start = at;
-      let key: string | PjsonString = '';
-      if (object) {
-        let size = data[table + i * stride + w];
-        if (size === 255) { const [excess, used] = readVar(data.subarray(0, next), start); size += excess; start += used; }
-        require(start + size <= next, 'Truncated object key');
-        const bytes = data.subarray(start, start + size);
-        require(hash8(bytes) === data[end + i], 'Object key hash mismatch');
-        key = decodeKey(bytes); start += size;
-      }
-      const child = decode(data.subarray(start, next), depth + 1);
-      if (object) entries.push([key, child]); else children.push(child);
-    }
-    return object ? new PjsonObject(entries) : children;
+  if (tag === 6) {
+    const w = low & 7; require(w >= 1 && w <= 3 && len === 1 + (1 << w), 'Invalid IEEE value');
+    return new PjsonFloat(read(data, 1, 1 << w), w as 1 | 2 | 3, !!(low & 8));
   }
-  function decodeRows(data: Uint8Array, depth: number): PjsonRows {
-    const len = data.length;
-    require(len >= 5 && (data[1] & 0xf0) === 0, 'Invalid row array header');
-    const sw = (data[1] & 3) + 1, rw = ((data[1] >> 2) & 3) + 1;
-    const [k, used] = readVar(data, 2), slots = 2 + used, hashes = slots + k * 4, keysAt = hashes + k;
-    require(k > 0 && keysAt <= len - 2, 'Invalid row schema');
-    const specs: [number, number][] = [];
+  if (tag === 9) {
+    require(low <= 1, 'Reserved string flag');
+    // Preserve escape-form and invalid UTF-8 strings losslessly.
+    if (low) return new PjsonString(data.slice(1), true);
+    try { return text.decode(data.subarray(1)); } catch { return new PjsonString(data.slice(1)); }
+  }
+  if (tag === 10) { require(low === 0, 'Reserved bytes flag'); return data.slice(1); }
+  if (tag === 11 && low !== 0) {
+    require(low <= 10 && len >= 3, 'Invalid typed array');
+    require(len === 3 + Number(read(data, len - 2, 2)) * sizes[low - 1], 'Invalid typed array size');
+    return new PjsonTypedArray(low - 1, data.slice(1, -2));
+  }
+  if (tag === 12 && low === 1) return decodeRows(data, depth);
+  require((tag === 11 || tag === 12) && low === 0 && len >= 4, 'Reserved tag or short container');
+  require((data[1] & 0xfc) === 0, 'Reserved container width bits');
+  const object = tag === 12, w = data[1] + 1, stride = w + (object ? 1 : 0);
+  const count = Number(read(data, len - 2, 2)), table = len - 2 - count * stride;
+  const end = table - (object ? count : 0); require(end >= 2, 'Truncated container index');
+  const children: PjsonValue[] = [], entries: [string | PjsonString, PjsonValue][] = [];
+  for (let i = 0; i < count; ++i) {
+    const at = 2 + Number(read(data, table + i * stride, w));
+    const next = i + 1 === count ? end : 2 + Number(read(data, table + (i + 1) * stride, w));
+    require(at <= next && next <= end, 'Invalid child offset');
+    let start = at;
+    let key: string | PjsonString = '';
+    if (object) {
+      let size = data[table + i * stride + w];
+      if (size === 255) { const [excess, used] = readVar(data.subarray(0, next), start); size += excess; start += used; }
+      require(start + size <= next, 'Truncated object key');
+      const bytes = data.subarray(start, start + size);
+      require(hash8(bytes) === data[end + i], 'Object key hash mismatch');
+      key = decodeKey(bytes); start += size;
+    }
+    const child = decode(data.subarray(start, next), depth + 1);
+    if (object) entries.push([key, child]); else children.push(child);
+  }
+  return object ? new PjsonObject(entries) : children;
+}
+function decodeRows(data: Uint8Array, depth: number): PjsonRows {
+  const len = data.length;
+  require(len >= 5 && (data[1] & 0xf0) === 0, 'Invalid row array header');
+  const sw = (data[1] & 3) + 1, rw = ((data[1] >> 2) & 3) + 1;
+  const [k, used] = readVar(data, 2), slots = 2 + used, hashes = slots + k * 4, keysAt = hashes + k;
+  require(k > 0 && keysAt <= len - 2, 'Invalid row schema');
+  const specs: [number, number][] = [];
+  for (let j = 0; j < k; ++j) {
+    const off = Number(read(data, slots + j * 4, 3)), size = data[slots + j * 4 + 3];
+    require(size < 255, 'Unsupported long row key'); specs.push([off, size]);
+  }
+  const keysSize = specs[k - 1][0] + specs[k - 1][1], start = keysAt + keysSize;
+  const count = Number(read(data, len - 2, 2)), table = len - 2 - count * rw;
+  require(start <= table, 'Truncated row body');
+  const names = specs.map(([off, size], j) => {
+    require(off + size <= keysSize, 'Invalid row key offset');
+    const bytes = data.subarray(keysAt + off, keysAt + off + size);
+    require(hash8(bytes) === data[hashes + j], 'Row key hash mismatch'); return decodeKey(bytes);
+  });
+  const records: PjsonObject[] = [];
+  for (let i = 0; i < count; ++i) {
+    const at = start + Number(read(data, table + i * rw, rw));
+    const next = i + 1 === count ? table : start + Number(read(data, table + (i + 1) * rw, rw));
+    const fields = next - k * sw;
+    require(at <= fields && next <= table, 'Invalid row offset');
+    const record: [string | PjsonString, PjsonValue][] = [];
     for (let j = 0; j < k; ++j) {
-      const off = Number(read(data, slots + j * 4, 3)), size = data[slots + j * 4 + 3];
-      require(size < 255, 'Unsupported long row key'); specs.push([off, size]);
+      const off = at + Number(read(data, fields + j * sw, sw));
+      const end = j + 1 === k ? fields : at + Number(read(data, fields + (j + 1) * sw, sw));
+      require(off <= end && end <= fields, 'Invalid row field offset');
+      record.push([names[j], decode(data.subarray(off, end), depth + 1)]);
     }
-    const keysSize = specs[k - 1][0] + specs[k - 1][1], start = keysAt + keysSize;
-    const count = Number(read(data, len - 2, 2)), table = len - 2 - count * rw;
-    require(start <= table, 'Truncated row body');
-    const names = specs.map(([off, size], j) => {
-      require(off + size <= keysSize, 'Invalid row key offset');
-      const bytes = data.subarray(keysAt + off, keysAt + off + size);
-      require(hash8(bytes) === data[hashes + j], 'Row key hash mismatch'); return decodeKey(bytes);
-    });
-    const records: PjsonObject[] = [];
-    for (let i = 0; i < count; ++i) {
-      const at = start + Number(read(data, table + i * rw, rw));
-      const next = i + 1 === count ? table : start + Number(read(data, table + (i + 1) * rw, rw));
-      const fields = next - k * sw;
-      require(at <= fields && next <= table, 'Invalid row offset');
-      const record: [string | PjsonString, PjsonValue][] = [];
-      for (let j = 0; j < k; ++j) {
-        const off = at + Number(read(data, fields + j * sw, sw));
-        const end = j + 1 === k ? fields : at + Number(read(data, fields + (j + 1) * sw, sw));
-        require(off <= end && end <= fields, 'Invalid row field offset');
-        record.push([names[j], decode(data.subarray(off, end), depth + 1)]);
-      }
-      records.push(new PjsonObject(record));
-    }
-    return new PjsonRows(records, names);
+    records.push(new PjsonObject(record));
   }
-  return { encode: (v: PjsonValue) => encode(v), decode: (data: Uint8Array) => decode(data),
-    validate: (data: Uint8Array): boolean => { try { decode(data); return true; } catch { return false; } } };
+  return new PjsonRows(records, names);
+}
+// Every public entry point throws PjsonError and nothing else.
+function guarded<T>(run: () => T): T {
+  try {
+    return run();
+  } catch (e) {
+    if (e instanceof PjsonError) throw e;
+    throw new PjsonError(e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+  }
+}
+function input(data: unknown): Uint8Array {
+  if (!(data instanceof Uint8Array)) throw new PjsonError('pjson: input must be a Uint8Array');
+  return data.constructor === Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.length);
+}
+
+/** The pjson bytes of `value`. */
+export function pjsonEncode(value: PjsonValue): Uint8Array {
+  return guarded(() => encode(value));
+}
+/** Decodes pjson bytes; throws a `PjsonError` for anything malformed. */
+export function pjsonDecode(data: Uint8Array): PjsonValue {
+  return guarded(() => decode(input(data)));
+}
+/** Whether `data` is well-formed pjson. Never throws. */
+export function pjsonValidate(data: Uint8Array): boolean {
+  try {
+    decode(input(data));
+    return true;
+  } catch {
+    return false;
+  }
 }

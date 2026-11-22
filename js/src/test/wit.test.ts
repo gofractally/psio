@@ -1,179 +1,132 @@
-import { describe, it } from 'node:test';
-import * as assert from 'node:assert/strict';
+// emitWit: the cases of cpp/tests/emit_wit_tests.cpp on the same IR, and
+// the typed layer's schema as WIT.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import {
-  bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64,
-  str, bytes, optional, vec, tuple, variant,
-  struct, fixedStruct,
-  generateWit, typeToWitExpr, toKebabCase,
+  PsszError, PsszSchema, array, bool, boundedList, bytes, emitWit, enumeration, f32, f64, generateSchema, i32, list,
+  optional, record, tuple, u32, u64, u8, utf8, variant, rawString, type IrSchema, type PsszTypeInput,
 } from '../index.js';
 
-describe('toKebabCase', () => {
-  it('snake_case → kebab-case', () => {
-    assert.strictEqual(toKebabCase('fire_and_forget'), 'fire-and-forget');
-  });
+const U8 = { Int: { bits: 8, isSigned: false } };
+const full = (parts: Omit<Partial<IrSchema>, 'types'> & { types?: { name: string; type: PsszTypeInput }[] }): PsszSchema =>
+  new PsszSchema({
+    package: { name: '', version: '', attributes: [] }, interfaces: [], worlds: [], uses: [], types: [],
+    ir_version: 1, ...parts,
+  } as never);
 
-  it('camelCase → kebab-case', () => {
-    assert.strictEqual(toKebabCase('myFunction'), 'my-function');
-  });
-
-  it('PascalCase → kebab-case', () => {
-    assert.strictEqual(toKebabCase('MyFunction'), 'my-function');
-  });
-
-  it('already kebab → unchanged', () => {
-    assert.strictEqual(toKebabCase('my-function'), 'my-function');
-  });
-
-  it('simple lowercase → unchanged', () => {
-    assert.strictEqual(toKebabCase('greet'), 'greet');
-  });
+test('emitWit: package + bare interface + funcs', () => {
+  const text = emitWit(full({
+    package: { name: 'wasi:clocks', version: '0.2.3', attributes: [] },
+    interfaces: [{
+      name: 'wall_clock', type_names: [], attributes: [],
+      funcs: [{ name: 'now', params: [], result: { value: { type: 'Int', value: { bits: 64, isSigned: false } } }, attributes: [] }],
+    }],
+  }));
+  assert.equal(text, 'package wasi:clocks@0.2.3;\n\ninterface wall-clock {\n  now: func() -> u64;\n}\n\n');
 });
 
-describe('typeToWitExpr', () => {
-  it('bool → bool', () => {
-    assert.strictEqual(typeToWitExpr(bool), 'bool');
-  });
-
-  it('u32 → u32', () => {
-    assert.strictEqual(typeToWitExpr(u32), 'u32');
-  });
-
-  it('i32 → s32', () => {
-    assert.strictEqual(typeToWitExpr(i32), 's32');
-  });
-
-  it('f64 → f64', () => {
-    assert.strictEqual(typeToWitExpr(f64), 'f64');
-  });
-
-  it('str → string', () => {
-    assert.strictEqual(typeToWitExpr(str), 'string');
-  });
-
-  it('bytes → list<u8>', () => {
-    assert.strictEqual(typeToWitExpr(bytes), 'list<u8>');
-  });
-
-  it('vec(u32) → list<u32>', () => {
-    assert.strictEqual(typeToWitExpr(vec(u32)), 'list<u32>');
-  });
-
-  it('optional(str) → option<string>', () => {
-    assert.strictEqual(typeToWitExpr(optional(str)), 'option<string>');
-  });
-
-  it('tuple(u32, str) → tuple<u32, string>', () => {
-    assert.strictEqual(typeToWitExpr(tuple(u32, str)), 'tuple<u32, string>');
-  });
+test('emitWit: record with primitive + list + option fields', () => {
+  const text = emitWit(full({
+    types: [{
+      name: 'bag',
+      type: {
+        Object: {
+          name: { Custom: { type: { List: U8 }, id: 'string' } },
+          items: { List: { Int: { bits: 32, isSigned: false } } },
+          count: { Option: { Int: { bits: 32, isSigned: true } } },
+        },
+      },
+    }],
+    interfaces: [{ name: 'bags', type_names: ['bag'], funcs: [], attributes: [] }],
+  }));
+  assert.equal(text, 'interface bags {\n  record bag {\n    name: string,\n    items: list<u32>,\n    count: option<s32>\n  }\n}\n\n');
 });
 
-describe('generateWit', () => {
-  it('empty world', () => {
-    const wit = generateWit('empty');
-    assert.strictEqual(wit, 'world empty {\n}');
-  });
-
-  it('world with exports', () => {
-    const wit = generateWit('test-exports', {
-      exports: {
-        greet: { params: { name: str }, result: str },
-        add: { params: { a: u32, b: u32 }, result: u32 },
-        fireAndForget: { params: {} },
+test('emitWit: variant + resource', () => {
+  const boolIr = { value: { type: 'Custom', value: { type: { value: { type: 'Int', value: { bits: 1, isSigned: false } } }, id: 'bool' } } };
+  const text = emitWit(full({
+    types: [
+      { name: 'status', type: { Variant: { ok: { Tuple: [] }, err: { Int: { bits: 32, isSigned: false } } } } },
+      {
+        name: 'pollable',
+        type: {
+          value: {
+            type: 'Resource',
+            value: {
+              name: 'pollable', attributes: [],
+              methods: [
+                { name: 'ready', params: [], result: boolIr, attributes: [] },
+                { name: 'block', params: [], result: null, attributes: [] },
+              ],
+            },
+          },
+        } as never,
       },
-    });
-    assert.ok(wit.includes('world test-exports {'));
-    assert.ok(wit.includes('export greet: func(name: string) -> string;'));
-    assert.ok(wit.includes('export add: func(a: u32, b: u32) -> u32;'));
-    assert.ok(wit.includes('export fire-and-forget: func();'));
-  });
+    ],
+    interfaces: [{ name: 'io', type_names: ['status', 'pollable'], funcs: [], attributes: [] }],
+  }));
+  assert.equal(text, [
+    'interface io {', '  variant status {', '    ok,', '    err(u32)', '  }', '  resource pollable {',
+    '    ready: func() -> bool;', '    block: func();', '  }', '}', '', '',
+  ].join('\n'));
+});
 
-  it('world with imports', () => {
-    const wit = generateWit('test-imports', {
-      imports: {
-        log: { params: { message: str } },
-      },
-    });
-    assert.ok(wit.includes('import log: func(message: string);'));
-  });
+test('emitWit: world with imports and exports', () => {
+  const text = emitWit(full({
+    package: { name: 'wasi:cli', version: '0.2.3', attributes: [] },
+    uses: [{ package: 'wasi:io', interface_name: 'poll', version: '0.2.3', items: [] }],
+    worlds: [{ name: 'command', imports: [{ package: 'wasi:io', interface_name: 'poll' }], exports: ['environment'], attributes: [] }],
+    interfaces: [{ name: 'environment', type_names: [], funcs: [], attributes: [] }],
+  }));
+  assert.equal(text, [
+    'package wasi:cli@0.2.3;', '', 'use wasi:io/poll@0.2.3;', '', 'interface environment {', '}', '',
+    'world command {', '  import wasi:io/poll;', '  export environment;', '}', '', '',
+  ].join('\n'));
+});
 
-  it('record type definition', () => {
-    const Person = struct({ name: str, age: u32 });
-    const wit = generateWit('test-record', {
-      types: { Person },
-      exports: {
-        getPerson: { params: {}, result: Person },
-      },
-    });
-    assert.ok(wit.includes('record person {'));
-    assert.ok(wit.includes('  name: string,'));
-    assert.ok(wit.includes('  age: u32,'));
-    assert.ok(wit.includes('export get-person: func() -> person;'));
-  });
+test('emitWit: the schema of typed definitions', () => {
+  const Point = record('Point', { x: i32, y: i32 }, { fixed: true });
+  const Shape = variant({ none: tuple(), circle: f64, polygon: list(Point) });
+  const Drawing = record('DrawingFile', {
+    title: utf8, raw_name: rawString, shapes: list(Shape), origin: optional(Point), tags: boundedList(utf8, 4),
+    color: enumeration(u8, { red: 0, green: 1 }), scale: f32, blob: bytes, corners: array(Point, 2), ok: bool,
+    pair: tuple(u32, u64),
+  }, { maxDynamicData: 4096 });
+  const text = emitWit(generateSchema({ Drawing, Shape }));
+  assert.equal(text, [
+    '@maxDynamicData(4096)',
+    'record drawing-file {',
+    '  title: string,',
+    '  raw-name: string,',
+    '  shapes: list</* TODO: inline variant not supported */>,',
+    '  origin: option<point>,',
+    '  tags: list<string>/* @psio:max=4 */,',
+    '  color: u8,',
+    '  scale: f32,',
+    '  blob: list<u8>,',
+    '  corners: /* TODO: fixed-size array */,',
+    '  ok: bool,',
+    '  pair: tuple<u32, u64>',
+    '}',
+    '@definitionWillNotChange',
+    'record point {',
+    '  x: s32,',
+    '  y: s32',
+    '}',
+    'type drawing = drawing-file;',
+    'type shape = /* TODO: inline variant not supported */;',
+    '',
+  ].join('\n'));
+  // A schema that travelled gives the same text.
+  assert.equal(emitWit(PsszSchema.decode(generateSchema({ Drawing, Shape }).encode())), text);
+});
 
-  it('fixed struct as record', () => {
-    const Point = fixedStruct({ x: f64, y: f64 });
-    const wit = generateWit('test-fixed', {
-      types: { Point },
-    });
-    assert.ok(wit.includes('record point {'));
-    assert.ok(wit.includes('  x: f64,'));
-    assert.ok(wit.includes('  y: f64,'));
-  });
-
-  it('variant type definition', () => {
-    const Shape = variant({ Circle: f64, Rectangle: tuple(f64, f64) });
-    const wit = generateWit('test-variant', {
-      types: { Shape },
-    });
-    assert.ok(wit.includes('variant shape {'));
-    assert.ok(wit.includes('  circle(f64),'));
-    assert.ok(wit.includes('  rectangle(tuple<f64, f64>),'));
-  });
-
-  it('complex nested types', () => {
-    const Address = struct({ street: str, city: str });
-    const Person = struct({
-      name: str,
-      age: u32,
-      home: Address,
-    });
-    const wit = generateWit('test-nested', {
-      types: { Person, Address },
-      exports: {
-        getPerson: { params: {}, result: Person },
-        setPerson: { params: { p: Person } },
-      },
-    });
-    assert.ok(wit.includes('record person {'));
-    assert.ok(wit.includes('record address {'));
-    assert.ok(wit.includes('  home: address,'));
-    assert.ok(wit.includes('export get-person: func() -> person;'));
-    assert.ok(wit.includes('export set-person: func(p: person);'));
-  });
-
-  it('discovers named types nested inside containers', () => {
-    const Tag = struct({ label: str, weight: f32 });
-    const Item = struct({ name: str, tags: vec(Tag), primary: optional(Tag) });
-    const wit = generateWit('test-deep', {
-      types: { Item, Tag },
-    });
-    // Tag should be discovered even though it's inside vec() and optional()
-    assert.ok(wit.includes('record tag {'), 'Tag record should be emitted');
-    assert.ok(wit.includes('  tags: list<tag>,'), 'vec(Tag) should reference tag');
-    assert.ok(wit.includes('  primary: option<tag>,'), 'optional(Tag) should reference tag');
-  });
-
-  it('optional and list fields in record', () => {
-    const Config = struct({
-      name: str,
-      tags: vec(str),
-      email: optional(str),
-    });
-    const wit = generateWit('test-containers', {
-      types: { Config },
-    });
-    assert.ok(wit.includes('record config {'));
-    assert.ok(wit.includes('  tags: list<string>,'));
-    assert.ok(wit.includes('  email: option<string>,'));
-  });
+test('emitWit: a malformed envelope is a typed error', () => {
+  assert.throws(() => emitWit({} as never), PsszError);
+  assert.throws(() => emitWit(full({ interfaces: [{ name: 5 }] as never })), PsszError);
+  assert.throws(() => emitWit(full({ worlds: ['x'] as never })), PsszError);
+  // A cycle of aliases does not hang.
+  const cyclic = full({ types: [{ name: '@0', type: { List: '@0' } }, { name: 'a', type: '@0' }] });
+  assert.throws(() => emitWit(cyclic), (e) => e instanceof PsszError && e.kind === 'schema');
 });

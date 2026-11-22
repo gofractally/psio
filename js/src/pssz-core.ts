@@ -2,7 +2,7 @@
 //
 // A port of the checked runtime codec `cpp/include/psio/pssz_ir.hpp` (and its
 // Rust twin `psio::pssz::dynamic`): the same width derivation, the same frame
-// parser, the same accept / reject set. It holds no reference to fracpack.
+// parser, the same accept / reject set.
 //
 // This file is internal. The public API is `pssz.ts`.
 
@@ -75,7 +75,7 @@ export type IrTypeValue =
   | { type: 'Float'; value: { exp: number; mantissa: number } }
   | { type: 'FracPack'; value: { type: IrAnyType } }
   | { type: 'Custom'; value: { type: IrAnyType; id: string } }
-  | { type: 'Resource'; value: unknown }
+  | { type: 'Resource'; value: IrResource }
   | { type: 'Type'; value: { type: string } }
   | { type: 'Enum'; value: IrEnum };
 /** `psio::schema_types::Enumerator`. */
@@ -92,12 +92,49 @@ export interface IrEnum {
 export interface IrAnyType {
   value: IrTypeValue;
 }
-/** `psio::Schema`. Only `types` is read by the codec. */
+/** `psio::schema_types::Func`. */
+export interface IrFunc {
+  name: string;
+  params: IrMember[];
+  result: IrAnyType | null;
+  attributes: IrAttribute[];
+}
+/** `psio::schema_types::Resource`. */
+export interface IrResource {
+  name: string;
+  methods: IrFunc[];
+  attributes: IrAttribute[];
+}
+/** `psio::schema_types::Interface`. */
+export interface IrInterface {
+  name: string;
+  type_names: string[];
+  funcs: IrFunc[];
+  attributes: IrAttribute[];
+}
+/** `psio::schema_types::World`. */
+export interface IrWorld {
+  name: string;
+  imports: { package: string; interface_name: string }[];
+  exports: string[];
+  attributes: IrAttribute[];
+}
+/** `psio::schema_types::Use`. */
+export interface IrUse {
+  package: string;
+  interface_name: string;
+  version: string;
+  items: { name: string; alias: string | null }[];
+}
+/**
+ * `psio::Schema`. Only `types` is read by the codecs; the envelope
+ * (package, interfaces, worlds, uses) describes an API and is carried as is.
+ */
 export interface IrSchema {
   package: { name: string; version: string; attributes: IrAttribute[] };
-  interfaces: unknown[];
-  worlds: unknown[];
-  uses: unknown[];
+  interfaces: IrInterface[];
+  worlds: IrWorld[];
+  uses: IrUse[];
   types: IrMember[];
   /**
    * The version of the IR's meaning the schema was written in
@@ -129,8 +166,7 @@ export function checkIrVersion(schema: IrSchema): void {
 }
 
 /**
- * The compact spelling of a type (`schema.ts` `AnyType` is this type, and
- * `generateSchema` emits it). Accepted wherever a type is expected and
+ * The compact spelling of a type. Accepted wherever a type is expected and
  * normalized to `IrAnyType`.
  *
  * Byte containers: `Custom` id `"utf8"` is text (a JavaScript `string`),
@@ -282,7 +318,7 @@ export function normalizeType(x: unknown, depth = 0): IrAnyType {
     case 'Variant':
       return { value: { type: kind, value: normalizeRecord(body, d) } };
     case 'Resource':
-      return { value: { type: 'Resource', value: body } };
+      return { value: { type: 'Resource', value: body as IrResource } };
     default:
       break;
   }
@@ -345,7 +381,7 @@ export function normalizeSchema(x: unknown): IrSchema {
   // full form says for itself which version it is (absent: none).
   let version: number | null = IR_VERSION;
   let pkg = { name: '', version: '', attributes: [] as IrAttribute[] };
-  let rest: { interfaces: unknown[]; worlds: unknown[]; uses: unknown[] } = {
+  let rest: { interfaces: IrInterface[]; worlds: IrWorld[]; uses: IrUse[] } = {
     interfaces: [], worlds: [], uses: [],
   };
   if (Array.isArray(x.types)) {
@@ -1250,7 +1286,7 @@ export class Codec {
 
   // A record over its explicit cap is not a value of its type. The automatic
   // profile checks every record where it is read or written.
-  private overCap(node: Node, size: number): boolean {
+  overCap(node: Node, size: number): boolean {
     return this.automatic && node.cap !== null && BigInt(size) > node.cap;
   }
 
@@ -1275,7 +1311,7 @@ export class Codec {
     return this.decodeAt(root, bytes, 0, bytes.length, 0, ctx);
   }
 
-  private fieldLayouts(node: Node, w: number): FieldLayout[] {
+  fieldLayouts(node: Node, w: number): FieldLayout[] {
     if (!node.fields) {
       node.fields = node.members.map((member) => {
         const info = this.layout(member.node);
@@ -1324,7 +1360,7 @@ export class Codec {
     return out;
   }
 
-  private checkDepth(n: number, fail: (m: string) => never): void {
+  checkDepth(n: number, fail: (m: string) => never): void {
     if (n > MAX_DEPTH) fail('pssz IR: node depth limit exceeded');
   }
 
@@ -1499,7 +1535,7 @@ export class Codec {
   }
 
   // The byte container under a string / hex adapter admits `count` bytes.
-  private boundBytes(container: Node, count: number, fail: (m: string) => never): void {
+  boundBytes(container: Node, count: number, fail: (m: string) => never): void {
     if (container.kind === 'array') {
       if (count !== container.countNum) fail('pssz IR: byte array count mismatch');
     } else if (container.bounded && count > container.countNum) fail('pssz IR: byte count bound exceeded');
@@ -1507,7 +1543,7 @@ export class Codec {
 
   // ── Decode ────────────────────────────────────────────────────────────────
 
-  private readOffset(bytes: Uint8Array, at: number, w: number): number {
+  readOffset(bytes: Uint8Array, at: number, w: number): number {
     let out = 0;
     for (let i = 0; i < w; ++i) out += bytes[at + i] * 2 ** (8 * i);
     return out;
@@ -1518,7 +1554,7 @@ export class Codec {
    * whether the writer stored it; `unknown` when the writer appended slots
    * this reader does not know.
    */
-  private recordSpans(
+  recordSpans(
     bytes: Uint8Array, begin: number, end: number, w: number, stable: boolean, fields: FieldLayout[],
   ): { begins: number[]; ends: number[]; present: boolean[]; unknown: boolean } {
     const count = fields.length;

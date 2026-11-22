@@ -3,12 +3,24 @@
 // input must never crash or hang, must fail only with a typed PsszError, and
 // must agree with validate: whatever validate accepts decodes, and
 // re-encodes to the same bytes (a value has exactly one encoding).
+//
+// Both tests run twice: on the schema-driven path and on the typed layer
+// (the fixture's types declared with the typed definitions). Every frame is
+// also read through a view: walking a view fails only with a typed
+// PsszError, never reads outside the frame, and on bytes that validate it
+// yields exactly the decoded value.
 
 import { test } from 'node:test';
 import { fixtureHandlers } from './support/custom-handlers.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PsszError, PsszSchema, type JsonFormat, type PsszType, type PsszWidth } from '../index.js';
+import {
+  ListView, PsszError, PsszNaN, PsszSchema, PsszView, RecordView, TupleView, VariantView,
+  type JsonFormat, type PsszType, type PsszWidth,
+} from '../index.js';
+import { TypedFixture, type TypeSource } from './support/typed-from-ir.js';
+
+const PATHS = ['schema-driven', 'typed'] as const;
 
 const fixture = (name: string) =>
   JSON.parse(readFileSync(new URL(`../../../conformance/${name}`, import.meta.url), 'utf8'));
@@ -36,12 +48,78 @@ function typed(run: () => unknown, what: string): PsszError | undefined {
   }
 }
 
-const stats = { frames: 0, accepted: 0, acceptedUnknown: 0, rejected: 0, texts: 0, textsAccepted: 0 };
+const fresh = () => ({
+  frames: 0, accepted: 0, acceptedUnknown: 0, rejected: 0, texts: 0, textsAccepted: 0,
+  viewWalked: 0, viewRejected: 0, viewLazyAccepted: 0,
+});
+let stats = fresh();
+
+// Reads everything a view can reach, into the shape `decode` gives.
+function walk(v: unknown): unknown {
+  if (v instanceof RecordView) return v.fields.map((name) => [name, walk(v.get(name))]);
+  if (v instanceof TupleView) return Array.from({ length: v.length }, (_, i) => walk(v.at(i)));
+  if (v instanceof ListView) {
+    // No more elements than the frame can hold (zero-size elements aside).
+    const out: unknown[] = [];
+    for (const element of v) out.push(walk(element));
+    return out;
+  }
+  if (v instanceof VariantView) return { type: v.type, value: walk(v.value) };
+  if (v !== null && typeof v === 'object' && !(v instanceof Uint8Array) && !(v instanceof PsszNaN) && 'some' in v)
+    return { some: walk((v as { some: unknown }).some) };
+  return v;
+}
+// One spelling for a decoded value and a walked view.
+function show(v: unknown): string {
+  return JSON.stringify(v, (_key, x) => {
+    if (typeof x === 'bigint') return `${x}n`;
+    if (typeof x === 'number' && !Number.isFinite(x)) return `float ${x}`;
+    if (typeof x === 'number' && Object.is(x, -0)) return 'float -0';
+    if (x instanceof Uint8Array) return `hex ${Buffer.from(x).toString('hex')}`;
+    if (x instanceof PsszNaN) return `nan ${x.bits}`;
+    if (x !== null && typeof x === 'object' && !Array.isArray(x) && !('type' in x && 'value' in x && Object.keys(x).length === 2)
+        && !('some' in x && Object.keys(x).length === 1) && !('bitCount' in x))
+      return Object.keys(x).map((name) => [name, (x as Record<string, unknown>)[name]]);
+    return x;
+  });
+}
+
+// The contract of a view over arbitrary bytes.
+function checkView(type: PsszType, bytes: Uint8Array, valid: boolean, what: string): void {
+  let walked: unknown;
+  // A view must stay inside its frame: surround the frame with other bytes.
+  const padded = new Uint8Array(bytes.length + 16).fill(0xa5);
+  padded.set(bytes, 8);
+  const frame = padded.subarray(8, 8 + bytes.length);
+  let root: unknown;
+  const error = typed(() => {
+    root = type.view(frame);
+    walked = walk(root);
+  }, `${what}: view`);
+  if (root instanceof PsszView) {
+    // toValue of the root is decode.
+    let full: unknown;
+    const failed = typed(() => (full = (root as PsszView).toValue()), `${what}: toValue`);
+    assert.equal(!failed, valid, `${what}: view.toValue disagrees with validate`);
+    if (!failed) assert.equal(show(full), show(type.decode(bytes)), `${what}: toValue`);
+  }
+  if (error) {
+    assert.ok(!valid, `${what}: validate accepts, the view fails: ${error.message}`);
+    assert.equal(error.kind, 'bytes', `${what}: ${error.message}`);
+    ++stats.viewRejected;
+    return;
+  }
+  if (valid) {
+    assert.equal(show(walked), show(type.decode(bytes)), `${what}: view differs from decode`);
+    ++stats.viewWalked;
+  } else ++stats.viewLazyAccepted; // structurally readable, not canonical
+}
 
 // The contract between validate, decode and encode for arbitrary bytes.
 function checkFrame(type: PsszType, bytes: Uint8Array, what: string): void {
   ++stats.frames;
   const result = type.validate(bytes);
+  checkView(type, bytes, result.ok, what);
   if (!result.ok) {
     assert.ok(result.error instanceof PsszError, what);
     assert.notEqual(result.error.kind, 'internal', `${what}: ${result.error.message}`);
@@ -70,9 +148,11 @@ function checkFrame(type: PsszType, bytes: Uint8Array, what: string): void {
   }
 }
 
-test('PSSZ frames: truncation, mutation and extension agree with validate', () => {
+for (const path of PATHS) test(`PSSZ frames and views: truncation, mutation and extension agree with validate, ${path}`, () => {
+  stats = fresh();
   const fx = fixture('pssz-vectors.json');
-  const schema = PsszSchema.decode(fromHex(fx.schema_ir));
+  const decoded = PsszSchema.decode(fromHex(fx.schema_ir));
+  const schema: TypeSource = path === 'typed' ? new TypedFixture(decoded.ir) : decoded;
   const random = prng(0x5eed);
   const types = new Map<string, PsszType>();
   let sources = 0;
@@ -109,16 +189,20 @@ test('PSSZ frames: truncation, mutation and extension agree with validate', () =
       checkFrame(type, longer, `${row.name} + ${extra}`);
     }
   }
-  console.log('pssz fuzz:', JSON.stringify({ sources, ...stats }));
+  console.log(`pssz fuzz (${path}):`, JSON.stringify({ sources, ...stats }));
   assert.ok(sources > 4000);
   assert.ok(stats.rejected > 50000 && stats.accepted > 10000);
+  assert.ok(stats.viewWalked > 10000 && stats.viewRejected > 10000);
+  assert.equal(stats.viewWalked + stats.viewRejected + stats.viewLazyAccepted, stats.frames);
 });
 
-test('JSON / I-JSON text: truncation and mutation fail typed or round-trip', () => {
+for (const path of PATHS) test(`JSON / I-JSON text: truncation and mutation fail typed or round-trip, ${path}`, () => {
+  stats = fresh();
   const fx = fixture('json-vectors.json');
   const schema = PsszSchema.decode(fromHex(fx.schema_ir));
   // The fixture's custom text forms are registered, as its texts need.
-  const handled = schema.withHandlers(fixtureHandlers);
+  const handled: TypeSource =
+    path === 'typed' ? new TypedFixture(schema.ir, fixtureHandlers) : schema.withHandlers(fixtureHandlers);
   const random = prng(0xfeed);
   const expressible = new Set((fx.types as { id: string; ir: boolean }[]).filter((t) => t.ir).map((t) => t.id));
   const checkText = (type: PsszType, format: JsonFormat, text: Uint8Array, what: string) => {
@@ -153,6 +237,6 @@ test('JSON / I-JSON text: truncation and mutation fail typed or round-trip', () 
       }
     }
   }
-  console.log('json fuzz:', JSON.stringify({ texts: stats.texts, accepted: stats.textsAccepted }));
+  console.log(`json fuzz (${path}):`, JSON.stringify({ texts: stats.texts, accepted: stats.textsAccepted }));
   assert.ok(stats.texts > 20000 && stats.textsAccepted > 500);
 });

@@ -1,27 +1,59 @@
-# psio — JavaScript/TypeScript serialization
+# psio — PSIO serialization for JavaScript and TypeScript
 
-Schema-first binary serialization with full TypeScript type inference, zero-copy views, and cross-language compatibility with C++ and Rust.
+The PSIO formats for browser and Node clients:
 
-pSSZ is psio's primary schema-driven binary format; this package implements it
-schema-driven (from a Schema IR, no generated types), together with the JSON
-and I-JSON text forms of the same values: see [PSSZ, JSON and
-I-JSON](#pssz-json-and-i-json) below. The fracpack API documented after it
-implements a legacy prototype retained for benchmark comparisons of
-data-layout designs. This package also provides the pjson codec described in
-the [repository README](../README.md#javascript--typescript).
+- **PSSZ**, the schema-driven binary format (`docs/pssz-spec.md`): encode,
+  decode, validate, and read in place through views;
+- **key**, the order-preserving binary format for database keys
+  (`docs/key-spec.md`);
+- **JSON and I-JSON**, the text forms of the same values (`docs/json.md`),
+  exact for 64-bit and wider integers;
+- **pjson**, the self-describing binary JSON (`docs/pjson-spec.md`);
+- time values (`docs/time.md`), custom text forms, WIT text of a schema.
 
-## PSSZ, JSON and I-JSON
+Types come from a **Schema IR fetched at run time** (no generated code) or
+from **typed definitions written in TypeScript**, which produce the same
+Schema IR the C++ and Rust schema builders produce. Both run one codec. The
+bytes, the text and the accept / reject decisions are those of the C++ and
+Rust implementations: the test suite replays every vector of
+`conformance/pssz-vectors.json`, `json-vectors.json` and
+`time-key-vectors.json` through both paths.
+
+```bash
+npm install psio
+```
+
+**Environments.** ES modules only, no runtime dependencies, no Node-specific
+APIs, `"sideEffects": false` (tree-shakeable), type declarations included.
+It needs ES2022 with `BigInt`, `TextEncoder` / `TextDecoder` and the
+`DataView` 64-bit accessors: Node 20 or later, and current Chrome, Edge,
+Firefox and Safari (15.4 or later). TypeScript 5 for the typed layer.
+
+## Contents
+
+- [From a schema fetched at run time](#from-a-schema-fetched-at-run-time)
+- [Typed definitions](#typed-definitions)
+- [Views](#views)
+- [Keys](#keys)
+- [JSON and I-JSON](#json-and-i-json)
+- [Custom types](#custom-types)
+- [What a blockchain client needs](#what-a-blockchain-client-needs)
+- [Errors and untrusted input](#errors-and-untrusted-input)
+- [Reference](#reference): values, text rules, widths, IR version, hand-written schemas
+- [WIT, pjson, names, hex](#wit-pjson-names-hex)
+- [Exports](#exports)
+- [Performance](#performance)
+
+## From a schema fetched at run time
 
 A client that has a Schema IR (`psio::Schema`, normally fetched as its PSSZ
 bytes) converts between JavaScript values, PSSZ bytes, JSON and I-JSON with no
-other knowledge of the types. The results are those of the C++ and Rust codecs
-(`docs/pssz-spec.md`, `docs/json.md`): the test suite replays every vector of
-`conformance/pssz-vectors.json` and `conformance/json-vectors.json`.
+other knowledge of the types.
 
 ```typescript
 import { PsszSchema } from 'psio';
 
-const schema = PsszSchema.decode(schemaBytes);        // or new PsszSchema({...}), PsszSchema.fromJson(text)
+const schema = PsszSchema.decode(schemaBytes);        // or PsszSchema.fromJson(text), new PsszSchema({...})
 const Transfer = schema.type('Transfer');
 
 const bytes = Transfer.jsonToPssz('{"from":"alice","amount":"18446744073709551615"}');
@@ -30,31 +62,345 @@ Transfer.decode(bytes);                               // { from: 'alice', amount
 Transfer.psszToJson(bytes);                           // I-JSON: 64-bit beyond 2^53-1 as a string
 Transfer.psszToJson(bytes, 'json');                   // strict JSON: {"from":"alice","amount":18446744073709551615}
 Transfer.encode({ from: 'alice', amount: 5n });       // Uint8Array
+Transfer.view(bytes).get('amount');                   // 18446744073709551615n, nothing else decoded
 ```
-
-### API
 
 | | |
 |---|---|
-| `new PsszSchema(ir, options)` | From a `psio::Schema` value, or a compact `{ Name: type }` map (below). `options`: `{ handlers, requireHandlers }` ([custom text handlers](#custom-text-handlers)). |
+| `new PsszSchema(ir, options)` | From a `psio::Schema` value, or a compact `{ Name: type }` map ([below](#schemas-written-by-hand)). `options`: `{ handlers, requireHandlers }` ([custom types](#custom-types)). |
 | `PsszSchema.decode(bytes, options)` / `.fromJson(text, format, options)` | From the PSSZ / I-JSON encoding of `psio::Schema`. `schema.encode()` writes it back; `schema.ir` is the IR. |
 | `schema.withHandlers(handlers, { requireHandlers })` | The same schema with these custom text handlers added. |
 | `schema.type(root, { width, handlers, requireHandlers })` | A `PsszType` for a type name or an inline type. `width`: `'auto'` (default; type-derived offset widths, the `psio::pssz` format) or `1` / `2` / `4` (one inherited width, `psio::pssz_<W>`; see [explicit widths](#explicit-widths)). Throws when the type is not expressible. |
 | `type.encode(value)` | Canonical bytes. Trailing absent optionals are pruned; length bounds and caps are enforced. |
 | `type.decode(bytes, { rejectUnknown })` | The value. The bytes are fully validated first. Unknown appended optional fields are dropped unless `rejectUnknown`. |
 | `type.validate(bytes)` | `{ ok: true, hasUnknown }` or `{ ok: false, error }`. Never throws. |
+| `type.view(bytes)` | The value read in place ([views](#views)). |
 | `type.jsonToPssz(text, format)` / `type.psszToJson(bytes, format)` | Text to bytes and back; `format` is `'ijson'` (default) or `'json'`. |
 | `type.jsonToValue(text, format)` / `type.valueToJson(value, format)` | Text to value and back. |
-| `jsonToPssz(schema, root, format, text)`, `psszToJson(schema, root, format, bytes)`, `validatePssz(schema, root, bytes)` | The same, under the C++ / Rust names. |
-| `type.encodeKey(value)` / `type.decodeKey(bytes)` / `type.validateKey(bytes)` | The `key` format (`docs/key-spec.md`): bytes whose bytewise order is the value's order. `decodeKey` is checked (one canonical key spanning the input); `validateKey` returns `{ ok }` / `{ ok: false, error }`. |
-| `type.encodeKeyPrefix(elements)` / `keyPrefixUpperBound(bytes)` | The key of the first K elements of a tuple (fields of a record), and the exclusive end of the range of keys with that prefix (`null`: no bound). |
-| `timePointToIso` / `timePointFromIso` / `timePointToDate` / `timePointFromDate(…, unit)` | Explicit, exact conversions for time values (`docs/time.md`). `unit` is `'seconds'`, `'millis'`, `'micros'`, `'nanos'` or `{ num, den }`. `timePointToDate` throws rather than drop sub-millisecond precision. |
+| `type.encodeKey(value)` / `type.decodeKey(bytes)` / `type.validateKey(bytes)` | The `key` format ([keys](#keys)). |
+| `type.encodeKeyPrefix(elements)` / `keyPrefixUpperBound(bytes)` | A prefix key and the exclusive end of its range. |
+| `type.width` | The offset width of the type's own header / slots / offset table. |
+| `jsonToPssz(schema, root, format, text)`, `psszToJson(schema, root, format, bytes)`, `validatePssz(schema, root, bytes)` | The text conversions and validation under the C++ / Rust names. |
 
-Every failure is a `PsszError` with a `kind`: `'schema'` (the IR), `'value'` (a
-JavaScript value that does not fit the type, or has no text), `'bytes'`
-(rejected PSSZ), `'json'` (rejected text, with a byte `offset`). Untrusted
-bytes and text never raise anything else, nest at most 64 levels, and no
-length they claim is trusted before it is checked against the input.
+## Typed definitions
+
+Application code declares its types once, in TypeScript. The decoded value is
+statically typed, and the definition has every operation of `PsszType`.
+
+```typescript
+import { record, optional, list, u32, u64, utf8, generateSchema, type Infer } from 'psio';
+
+const Transfer = record('Transfer', {
+  from: utf8,
+  to: utf8,
+  amount: u64,
+  memo: optional(utf8),
+  tags: list(utf8),
+});
+type Transfer = Infer<typeof Transfer>;
+// { from: string; to: string; amount: bigint; memo: string | null; tags: string[] }
+
+const bytes = Transfer.encode({ from: 'alice', to: 'bob', amount: 5n, memo: null, tags: [] });
+const value = Transfer.decode(bytes);       // typed: value.amount is a bigint
+Transfer.validate(bytes);                   // { ok: true, hasUnknown: false }
+Transfer.psszToJson(bytes);                 // '{"from":"alice","to":"bob","amount":5,"memo":null,"tags":[]}'
+Transfer.jsonToValue('{"from":"a","to":"b","amount":"7","memo":"hi","tags":[]}');
+Transfer.view(bytes).get('amount');         // 5n
+
+const schema = generateSchema({ Transfer }); // a PsszSchema: schema.ir, schema.encode()
+```
+
+A definition holds no codec of its own: it produces the Schema IR and runs
+the schema-driven codec on it. `generateSchema({ name: definition, ... })`
+gives the IR that C++ `psio::SchemaBuilder` builds from `insert<T>(name)` of
+the equivalent types in the same order — records under their own names,
+every other type interned as `@N` — so a schema generated here is byte for
+byte the one a C++ service publishes for the same types (the test suite
+checks this against the three shared fixtures). `definition.schema` is the
+schema of one definition and what it reaches.
+
+| Definition | Value | C++ |
+|---|---|---|
+| `bool` | `boolean` | `bool` |
+| `u8` `u16` `u32` `i8` `i16` `i32` | `number` | fixed-width integers |
+| `u64` `i64` `u128` `i128` `u256` | `bigint` | `std::uint64_t`, ..., `psio::uint256` |
+| `f32` `f64` | `number` | `float`, `double` |
+| `char` | `number` (one byte) | `char` |
+| `utf8`, `boundedUtf8(max)` | `string` (validated UTF-8) | `psio::utf8_string<>`, `utf8_string<N>` |
+| `rawString` | `Uint8Array` (any bytes) | `std::string` |
+| `bytes`, `boundedBytes(max)`, `fixedBytes(n)` | `Uint8Array` | `std::vector<std::uint8_t>`, `psio::bounded<std::uint8_t, N>`, `std::array<std::uint8_t, N>` |
+| `bitvector(n)`, `bitlist(max)` | `{ bytes, bitCount }` | `psio::bitvector<N>`, `psio::bitlist<N>` |
+| `optional(T)` | `T \| null` (of an optional: `{ some: T } \| null`) | `std::optional<T>` |
+| `list(T)`, `boundedList(T, max)`, `array(T, n)` | `T[]` | `std::vector<T>`, `psio::bounded<T, N>`, `std::array<T, N>` |
+| `tuple(A, B, ...)` | `[A, B, ...]` | `std::tuple<A, B, ...>` |
+| `variant({ name: T, ... })` | `{ type: 'name', value: T }` (a discriminated union) | `std::variant<...>` |
+| `record(name, { field: T, ... }, options)` | `{ field: T, ... }` | a `PSIO_REFLECT`ed struct |
+| `enumeration(u8, { red: 0, green: 1 })` | the integer (`number` / `bigint`); the name in text | a reflected `enum class` |
+| `timePoint(unit, tick = i64)`, `duration(unit, tick = i64)` | `bigint` ticks | `std::chrono` time points and durations (`docs/time.md`) |
+| `custom(id, T, handler)` | `T`; its own text ([custom types](#custom-types)) | a type with `schema_custom` |
+| `box(T)` | `T` | `psio::Box<T>` |
+| `lazy(() => T)` | `T` | (a recursive reference) |
+
+**Records** grow by appending optional fields. A reader of the older
+definition skips them (`validate` reports `hasUnknown`); a reader of the
+newer one sees `null` for fields an older writer did not store. Trailing
+absent optionals are never written.
+
+```typescript
+const V1 = record('Person', { name: utf8, age: u32 });
+const V2 = record('Person', { name: utf8, age: u32, email: optional(utf8) });
+V2.decode(V1.encode({ name: 'Alice', age: 30 }));     // { name: 'Alice', age: 30, email: null }
+V1.decode(V2.encode({ name: 'Alice', age: 30, email: 'a@b' }));  // { name: 'Alice', age: 30 }
+```
+
+Record options: `{ fixed: true }` (the definition will not change: no header,
+no evolution), `{ maxDynamicData: n }` (a cap on the encoded size) and
+`{ maxFields: n }`. Member options are given with `field(type, options)`:
+`lengthBound: { max, min, exact }` for a string, bytes or list member
+(through `optional`), and `jsonInt` / `ijsonInt: 'number' | 'string'` for the
+text form of its integers. A variant alternative's I-JSON key is its name, or
+`alt(type, { ijsonName })`; a C++ `std::variant` without labels is
+`variant({ 0: alt(u32, { ijsonName: 'uint32' }), 1: ... })`.
+
+**Widths, caps and bounds.** Offset widths are derived from the type: a
+record whose size is bounded (fixed-size members, bounded strings and lists,
+or an explicit `maxDynamicData`) uses 1- or 2-byte offsets, otherwise 4.
+Bounds and caps are enforced on encode and on decode.
+
+```typescript
+const Small = record('Small', { tag: boundedUtf8(8), ids: boundedList(u16, 4), key: fixedBytes(4) });
+Small.width;                                    // 1
+record('Note', { text: utf8 }, { maxDynamicData: 200 }).width;   // 1
+record('Open', { text: utf8 }).width;           // 4
+Small.type({ width: 2 });                       // the explicit psio::pssz_<2> profile, a PsszType
+```
+
+**Recursive types** name themselves through `lazy`, with the type written out:
+
+```typescript
+interface Tree { label: string; children: Tree[] }
+const Tree: TypeDef<Tree, RecordView<Tree>> = record('Tree', { label: utf8, children: list(lazy(() => Tree)) });
+```
+
+## Views
+
+`type.view(bytes)` reads a value in place. A record view finds one field
+from the record's header and slots, a list view one element from its offset
+table; nothing else is decoded or allocated.
+
+```typescript
+const Line = record('Line', { sku: utf8, qty: u32, note: optional(utf8) });
+const Order = record('Order', { id: u64, lines: list(Line), blob: bytes });
+
+const view = Order.view(orderBytes);        // RecordView, statically typed from the definition
+view.get('id');                             // bigint
+const lines = view.get('lines');            // ListView
+lines.length;                               // from the frame; no element is read
+lines.at(1).get('sku');                     // string: one element, one field
+for (const line of lines) total += line.get('qty');
+view.get('blob');                           // Uint8Array: a subarray of orderBytes, not a copy
+lines.at(0).toValue();                      // the element decoded in full: { sku, qty, note }
+```
+
+| | |
+|---|---|
+| `RecordView` | `get(name)`, `fields`, `hasUnknown` |
+| `TupleView` | `at(index)`, `length` |
+| `ListView` (lists and arrays) | `length`, `at(index)`, iteration |
+| `VariantView` | `type`, `index`, `value` |
+| all of them | `toValue({ rejectUnknown })` (full, checked decode of that value), `bytes` (its encoding, a subarray) |
+
+A scalar, text, optional (`null`) or bit value is returned as its value;
+bytes and raw strings alias the input. From a fetched schema the views are
+the same objects, untyped (`schema.type('Order').view(bytes) as RecordView`).
+
+**What a view checks.** Every frame on the path to what is read (header,
+slot, offset, selector, span, cap) and the value read, with the errors
+`decode` gives: corrupt bytes are a `PsszError` when they are reached, never
+a wrong value from outside the frame. A view does not look at what it is not
+asked for, so the whole-value rules — trailing optionals pruned, member
+length bounds, text validity of unread fields — are those of `validate` /
+`decode`. For bytes from an untrusted source whose canonical form matters
+(anything that is hashed or signed), call `validate` first.
+
+**No in-place mutation.** A PSSZ encoding is canonical: offset widths follow
+from the type, trailing absent optionals are pruned, and a value has exactly
+one encoding. Patching bytes cannot keep that in general (changing an
+optional or a string moves every later offset and may change the pruning),
+so this package does not offer it. To change a value: decode, modify, encode.
+
+```typescript
+const order = Order.decode(orderBytes);
+order.lines[0].qty += 1;
+const updated = Order.encode(order);
+```
+
+## Keys
+
+The `key` encoding of a value is a byte string whose bytewise order is the
+value's order (`docs/key-spec.md`): database keys, range scans, prefix scans.
+
+```typescript
+import { tuple, u32, utf8, optional, i64, keyPrefixUpperBound } from 'psio';
+
+const Key = tuple(u32, utf8, optional(i64));
+const key = Key.encodeKey([7, 'alice', -1n]);
+Key.decodeKey(key);                          // [7, 'alice', -1n]  (checked: one canonical key)
+Key.validateKey(key);                        // { ok: true }
+
+const from = Key.encodeKeyPrefix([7]);       // every key of shard 7 ...
+const to = keyPrefixUpperBound(from);        // ... lies in [from, to); null: no upper bound
+```
+
+A record is a key as well, its fields in order. `schema.type(...)` of a
+fetched schema has the same methods.
+
+## JSON and I-JSON
+
+Every type has two text forms. **`'json'`** is strict JSON: every integer is
+a bare number, of any size. **`'ijson'`** (the default) is what a browser
+exchanges safely: a 64-bit integer is a bare number while its magnitude is at
+most 2^53 − 1 and a decimal string beyond; 128- and 256-bit integers are
+always strings; bytes are hex; a variant is `{"Name": value}`.
+
+```typescript
+const Balance = record('Balance', { owner: utf8, amount: u64 });
+
+Balance.valueToJson({ owner: 'alice', amount: 9007199254740991n });
+// '{"owner":"alice","amount":9007199254740991}'
+Balance.valueToJson({ owner: 'alice', amount: 9007199254740992n });
+// '{"owner":"alice","amount":"9007199254740992"}'          beyond 2^53 - 1: a string
+Balance.valueToJson({ owner: 'alice', amount: 9007199254740992n }, 'json');
+// '{"owner":"alice","amount":9007199254740992}'            strict JSON: always a number
+
+Balance.jsonToValue('{"owner":"alice","amount":"7"}');      // { owner: 'alice', amount: 7n }
+Balance.jsonToValue('{"owner":"alice","amount":7}');        // the same: both forms are read
+```
+
+In JavaScript a 64-bit (or wider) integer is always a `bigint`, whatever its
+size, so arithmetic never loses precision; `encode` also accepts an exact
+`number`. Text is read by an exact parser, not `JSON.parse` (which would
+round a large bare number), and written by the codec, not `JSON.stringify`
+(which cannot write a `bigint`): pass the text itself to and from `fetch`.
+To hand a value to code that expects plain JSON data, use
+`JSON.parse(type.valueToJson(value))` — under `'ijson'` every number in it is
+safe. The member options `jsonInt` / `ijsonInt` force a number or a string
+for one field. The full rules are under [Text](#text).
+
+## Custom types
+
+A type with its own text form — an account name over a `u64`, `major.minor`
+over a record — is `custom(id, wire, handler)`: on the wire and as a
+JavaScript value it is exactly its wire type; in JSON and I-JSON it is one
+string, written and read by the handler. In the Schema IR it is
+`Custom { type: <wire type>, id }`.
+
+```typescript
+import { custom, record, u64, nameToNumber, numberToName } from 'psio';
+
+// An account name: a u64 in the bytes and in JavaScript, its name in text.
+const AccountNumber = custom('AccountNumber', u64, { toText: numberToName, fromText: nameToNumber });
+const Balance = record('Balance', { owner: AccountNumber, amount: u64 });
+
+const bytes = Balance.encode({ owner: nameToNumber('alice'), amount: 5n });
+Balance.decode(bytes);            // { owner: <the u64 of "alice">, amount: 5n }
+Balance.psszToJson(bytes);        // '{"owner":"alice","amount":5}'
+Balance.jsonToValue('{"owner":"alice","amount":5}');
+```
+
+- A handler works on the **decoded value of the wire type**: `toText(value)`
+  returns the text, `fromText(text)` returns a value, which is checked
+  against the wire type. Either may throw; that is an ordinary `PsszError`
+  (`'json'` on read, `'value'` on write).
+- With a handler the presentation is exactly its text: the plain form is not
+  also accepted. Without one (`custom(id, wire)`) the type reads and writes
+  as its wire type; `type({ requireHandlers: true })` makes that an error in
+  text. Binary encode / decode / validate never depend on handlers.
+- One handler per id: declaring the same id with two different handlers in
+  one schema is a `'schema'` error.
+
+### Handlers for a fetched schema
+
+A schema fetched at run time names its custom types by id only; the handlers
+are registered by id:
+
+```typescript
+import { PsszSchema, type PsszCustomHandler } from 'psio';
+
+// Custom { type: Object { major: u16, minor: u16 }, id: "Version" } as "1.2"
+const version: PsszCustomHandler = {
+  toText: (v) => `${(v as { major: number }).major}.${(v as { minor: number }).minor}`,
+  fromText(text) {
+    const m = /^(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$/.exec(text);
+    if (!m) throw new Error('not a version');
+    return { major: Number(m[1]), minor: Number(m[2]) };   // range-checked against u16 by the codec
+  },
+};
+
+const schema = PsszSchema.decode(schemaBytes, { handlers: { Version: version } });
+const Release = schema.type('Release');
+Release.psszToJson(bytes);                       // {"version":"1.2","name":"first"}
+Release.jsonToPssz('{"version":"1.2","name":"first"}');
+Release.decode(bytes);                           // { version: { major: 1, minor: 2 }, name: 'first' }
+```
+
+- A handler works on the **decoded value of the wire type** (what `decode`
+  returns for it), not on its bytes: `toText(value)` returns the text,
+  `fromText(text)` returns a value. The value `fromText` returns is checked
+  against the wire type (and normalized as `decode` would give it); either
+  function may throw, which is an ordinary `PsszError` (`'json'` on read,
+  `'value'` on write).
+- The text is carried as one JSON string in both formats. With a handler
+  registered the presentation is exactly its text: the plain form is not also
+  accepted.
+- Handlers are given once, as `{ id: handler }` or a `Map`: to `new
+  PsszSchema` / `PsszSchema.decode` / `PsszSchema.fromJson`, with
+  `schema.withHandlers(...)`, or for one type with `schema.type(root, {
+  handlers })`. A handler is bound to the type when it is compiled
+  (`schema.type`), not looked up per value.
+- **Fallback.** An id with no handler reads and writes as its wire type (the
+  account as its number, the version as `{"major":1,"minor":2}`); the plain
+  text reads back to the same bytes. `requireHandlers: true` makes a missing
+  handler an error when text is read or written ("no handler registered for a
+  custom type"); binary encode / decode / validate are unaffected.
+- The ids of the binary form (`bool`, `char`, `string`, `utf8`, `hex`,
+  `bitvector`, `bitlist`, `box`, `unknown`) take no handler.
+
+
+## What a blockchain client needs
+
+| Need | Where |
+|---|---|
+| Pack an action's arguments from a schema the service publishes | `PsszSchema.decode(schemaBytes).type(name).jsonToPssz(text)` or `.encode(value)` |
+| Build the bytes of a transaction | a typed definition (`record('Transaction', ...)`) or the node's schema; `encode` gives the one canonical encoding |
+| Sign it | the bytes are canonical, so hash and sign them with WebCrypto or a wallet (`crypto.subtle.digest('SHA-256', bytes)`); this package holds no keys and no signature code. `toHex` / `fromHex` for transport |
+| Decode query results and events | `type.decode(bytes)` / `type.psszToJson(bytes)`; `type.view(bytes)` to read a few fields of large results |
+| Check untrusted bytes | `type.validate(bytes)`; every reader fails with a typed error |
+| Compute database keys and scan ranges | `encodeKey`, `encodeKeyPrefix`, `keyPrefixUpperBound` |
+| Present 64-bit values safely | `bigint` values; I-JSON text (numbers up to 2^53 − 1, strings beyond) |
+| Account names | `nameToNumber` / `numberToName`, as the handler of a `custom` type |
+| Timestamps | `timePoint` / `duration` types; `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate` |
+
+## Errors and untrusted input
+
+Every failure of the PSSZ, key, JSON and view entry points is a `PsszError`
+with a `kind`:
+
+| kind | meaning |
+|---|---|
+| `'schema'` | the Schema IR or a typed declaration is malformed, or uses something PSSZ cannot carry |
+| `'value'` | a JavaScript value does not fit the type, or has no text |
+| `'bytes'` | PSSZ or key bytes were rejected |
+| `'json'` | JSON / I-JSON text was rejected (with a byte `offset`) |
+| `'internal'` | a defect in this library; never expected |
+
+Untrusted bytes and text never raise anything else, never loop on a length
+they claim, and no claimed length is trusted before it is checked against
+the input. Values and JSON nest at most 64 levels. `validate` /
+`validateKey` / `validatePssz` / `pjsonValidate` return a result and never
+throw. pjson failures are a `PjsonError`.
+
+## Reference
 
 ### Values
 
@@ -76,6 +422,10 @@ length they claim is trusted before it is checked against the input.
 | variant | `{ type: 'Name', value }` |
 | optional | `null` or the value; an optional of an optional is `null` or `{ some: inner }` |
 | `bitvector` / `bitlist` | `{ bytes, bitCount }` (no text form) |
+
+A view (`type.view(bytes)`) returns the same values for scalars and text, a
+subarray of the input for bytes and raw strings, and `RecordView` /
+`TupleView` / `ListView` / `VariantView` for the composites.
 
 ### Text
 
@@ -147,56 +497,6 @@ scientific, whichever is shorter (`0.1`, `1e+21`, `1e-07`,
 `5.960464477539063e-08`, `999999999999999868928`). A 32-bit float is rounded
 once, from the decimal text.
 
-### Custom text handlers
-
-A type with its own text form (an account name over a `u64`, `major.minor`
-over a record) is, in the Schema IR, `Custom { type: <wire type>, id }` with
-an id that is not one of the binary adapters. On the wire it is exactly its
-wire type: widths, bytes, validation and the decoded JavaScript value do not
-depend on the id. Its text comes from a handler registered for the id:
-
-```typescript
-import { PsszSchema, type PsszCustomHandler } from 'psio';
-
-// Custom { type: Object { major: u16, minor: u16 }, id: "Version" } as "1.2"
-const version: PsszCustomHandler = {
-  toText: (v) => `${(v as { major: number }).major}.${(v as { minor: number }).minor}`,
-  fromText(text) {
-    const m = /^(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$/.exec(text);
-    if (!m) throw new Error('not a version');
-    return { major: Number(m[1]), minor: Number(m[2]) };   // range-checked against u16 by the codec
-  },
-};
-
-const schema = PsszSchema.decode(schemaBytes, { handlers: { Version: version } });
-const Release = schema.type('Release');
-Release.psszToJson(bytes);                       // {"version":"1.2","name":"first"}
-Release.jsonToPssz('{"version":"1.2","name":"first"}');
-Release.decode(bytes);                           // { version: { major: 1, minor: 2 }, name: 'first' }
-```
-
-- A handler works on the **decoded value of the wire type** (what `decode`
-  returns for it), not on its bytes: `toText(value)` returns the text,
-  `fromText(text)` returns a value. The value `fromText` returns is checked
-  against the wire type (and normalized as `decode` would give it); either
-  function may throw, which is an ordinary `PsszError` (`'json'` on read,
-  `'value'` on write).
-- The text is carried as one JSON string in both formats. With a handler
-  registered the presentation is exactly its text: the plain form is not also
-  accepted.
-- Handlers are given once, as `{ id: handler }` or a `Map`: to `new
-  PsszSchema` / `PsszSchema.decode` / `PsszSchema.fromJson`, with
-  `schema.withHandlers(...)`, or for one type with `schema.type(root, {
-  handlers })`. A handler is bound to the type when it is compiled
-  (`schema.type`), not looked up per value.
-- **Fallback.** An id with no handler reads and writes as its wire type (the
-  account as its number, the version as `{"major":1,"minor":2}`); the plain
-  text reads back to the same bytes. `requireHandlers: true` makes a missing
-  handler an error when text is read or written ("no handler registered for a
-  custom type"); binary encode / decode / validate are unaffected.
-- The ids of the binary form (`bool`, `char`, `string`, `utf8`, `hex`,
-  `bitvector`, `bitlist`, `box`, `unknown`) take no handler.
-
 ### Explicit widths
 
 `width: 1 | 2 | 4` is the typed `psio::pssz_<W>` format: one inherited offset
@@ -228,8 +528,7 @@ types written in JavaScript is always in the current version; the full form
 
 ### Schemas written by hand
 
-The compact spelling is the one `generateSchema` produces, plus `BoundedList`,
-`Enum` and member attributes:
+A schema can be written as a map of named types in the compact spelling:
 
 ```typescript
 const U8 = { Int: { bits: 8, isSigned: false } };
@@ -255,7 +554,7 @@ const schema = new PsszSchema({
 carries the `definitionWillNotChange` attribute. Adapters (`Custom.id`):
 `bool`, `char`, `utf8` (a UTF-8 string), `string` (a raw string: any bytes),
 `hex`, `bitvector`, `bitlist`, `box`. Any other id is a custom text form over
-its inner type ([custom text handlers](#custom-text-handlers)).
+its inner type ([custom types](#custom-types)).
 
 `Enum` is `{ type, members }`: `type` is the underlying integer (8 to 64 bits
 for a text form) and `members` a `{ name: value }` map or a list of
@@ -266,538 +565,59 @@ spelling accepts the negative number and converts it. `Enum` is the last
 alternative of the IR's `AnyType` (index 14); a schema encoded before it
 existed decodes unchanged.
 
-## Install
+## WIT, pjson, names, hex
 
-```bash
-npm install psio
-```
-
-## Quick Start
+**WIT.** `emitWit(schema)` is the WIT text of a schema — package, interfaces,
+worlds and named types — a port of C++ `psio::emit_wit`, for a fetched schema
+or one from `generateSchema`:
 
 ```typescript
-import { struct, str, u32, bool, vec, optional } from 'psio';
-
-// Define a schema — TypeScript infers the type automatically
-const Person = struct({
-  name: str,
-  age: u32,
-  active: bool,
-  tags: vec(str),
-  bio: optional(str),
-});
-
-// Pack to binary
-const data = Person.pack({
-  name: 'Alice',
-  age: 30,
-  active: true,
-  tags: ['engineer', 'rust'],
-  bio: 'Likes cats',
-});
-
-// Unpack from binary
-const alice = Person.unpack(data);
-console.log(alice.name); // 'Alice'
-
-// Zero-copy view (lazy, no deserialization until field access)
-const view = Person.view(data);
-console.log(view.age); // 30 — only this field is decoded
+import { emitWit, generateSchema, record, i32 } from 'psio';
+emitWit(generateSchema({ Point: record('Point', { x: i32, y: i32 }) }));
+// record point {
+//   x: s32,
+//   y: s32
+// }
 ```
 
-## Type System
-
-### Scalar Types
-
-| Type | TypeScript | Size | Description |
-|------|-----------|------|-------------|
-| `bool` | `boolean` | 1 byte | 0 or 1 |
-| `u8` | `number` | 1 byte | Unsigned 8-bit integer |
-| `u16` | `number` | 2 bytes | Unsigned 16-bit integer |
-| `u32` | `number` | 4 bytes | Unsigned 32-bit integer |
-| `u64` | `bigint` | 8 bytes | Unsigned 64-bit integer |
-| `i8` | `number` | 1 byte | Signed 8-bit integer |
-| `i16` | `number` | 2 bytes | Signed 16-bit integer |
-| `i32` | `number` | 4 bytes | Signed 32-bit integer |
-| `i64` | `bigint` | 8 bytes | Signed 64-bit integer |
-| `f32` | `number` | 4 bytes | 32-bit float |
-| `f64` | `number` | 8 bytes | 64-bit float |
-
-### Variable-Size Types
+**pjson** (wire revision 2, `docs/wire-contract.md`): self-describing binary
+JSON. `pjsonEncode(value)`, `pjsonDecode(bytes)`, `pjsonValidate(bytes)`.
+Integers are `bigint`; a decoded object is a `PjsonObject` (ordered entries,
+duplicate names kept); `PjsonDecimal`, `PjsonFloat`, `PjsonString`,
+`PjsonTypedArray` and `PjsonRows` carry what plain JavaScript values cannot.
 
 ```typescript
-import { str, bytes } from 'psio';
-
-// UTF-8 string
-const packed = str.pack('hello world');
-
-// Raw bytes
-const raw = bytes.pack(new Uint8Array([0xDE, 0xAD]));
+import { pjsonEncode, pjsonDecode, pjsonValidate } from 'psio';
+const bytes = pjsonEncode({ id: 42n, name: 'Alice', tags: ['a', 'b'] });
+pjsonValidate(bytes);    // true
+pjsonDecode(bytes);      // PjsonObject { entries: [['id', 42n], ['name', 'Alice'], ['tags', ['a', 'b']]] }
 ```
 
-### Containers
-
-```typescript
-import { optional, vec, array, tuple, map } from 'psio';
-
-// Optional — null or value
-const optAge = optional(u32);
-optAge.pack(42);    // Some(42)
-optAge.pack(null);  // None
-
-// Variable-length list
-const scores = vec(u32);
-scores.pack([95, 87, 92]);
-
-// Fixed-length array (no length prefix in binary)
-const rgb = array(u8, 3);
-rgb.pack([255, 128, 0]);
-
-// Heterogeneous tuple
-const pair = tuple(str, u32);
-pair.pack(['Alice', 30]);
-
-// String-keyed map
-const config = map(str);
-config.pack({ host: 'localhost', port: '8080' });
-```
-
-### Variant (Tagged Union)
-
-```typescript
-import { variant, tuple } from 'psio';
-
-const Shape = variant({
-  Circle: f64,                    // radius
-  Rectangle: tuple(f64, f64),     // width, height
-  Point: tuple(),                 // no data
-});
-
-// Pack with { type, value } syntax
-Shape.pack({ type: 'Circle', value: 3.14 });
-Shape.pack({ type: 'Rectangle', value: [10, 20] });
-Shape.pack({ type: 'Point', value: [] });
-
-// Unpack returns { type, value }
-const shape = Shape.unpack(data);
-if (shape.type === 'Circle') {
-  console.log(`radius: ${shape.value}`);
-}
-```
-
-### Struct (Extensible Record)
-
-```typescript
-import { struct, str, u32, bool, optional } from 'psio';
-
-const Person = struct({
-  name: str,
-  age: u32,
-  active: bool,
-});
-
-// Structs are forward-compatible — you can add trailing optional fields
-// and old readers will still be able to read the data.
-const PersonV2 = struct({
-  name: str,
-  age: u32,
-  active: bool,
-  email: optional(str),  // new field, optional
-});
-
-// V2 can read V1 data (missing email → null)
-const v1data = Person.pack({ name: 'Alice', age: 30, active: true });
-const person = PersonV2.unpack(v1data);
-console.log(person.email); // null
-```
-
-### Fixed Struct (Non-Extensible Record)
-
-```typescript
-import { fixedStruct, f64 } from 'psio';
-
-// No u16 size header — slightly smaller, slightly faster,
-// but cannot add fields later without breaking compatibility.
-const Point = fixedStruct({ x: f64, y: f64 });
-const packed = Point.pack({ x: 1.5, y: 2.5 }); // exactly 16 bytes
-```
-
-### Nested Types
-
-Types compose freely:
-
-```typescript
-const Address = struct({
-  street: str,
-  city: str,
-  zip: str,
-});
-
-const Person = struct({
-  name: str,
-  age: u32,
-  address: Address,
-  phones: vec(str),
-  scores: map(u32),
-  shape: variant({ Circle: f64, Square: f64 }),
-});
-```
-
-## Zero-Copy Views
-
-`view()` returns a lazy Proxy that decodes fields on demand. For partial reads of large structs, this is significantly faster than `unpack()`.
-
-```typescript
-const BigStruct = struct({
-  id: u64,
-  name: str,
-  // ... 20 more fields ...
-});
-
-const data = BigStruct.pack(value);
-
-// unpack() decodes ALL fields upfront
-const full = BigStruct.unpack(data);
-
-// view() decodes nothing until you access a field
-const view = BigStruct.view(data);
-console.log(view.id); // only 'id' is decoded — ~5x faster for partial access
-```
-
-### TypedArray Views for Numeric Vectors
-
-Scalar vecs (`vec(u32)`, `vec(f64)`, etc.) return zero-copy TypedArray views:
-
-```typescript
-const data = vec(u32).pack([1, 2, 3, 4, 5]);
-const viewed = vec(u32).view(data);
-// viewed is a Uint32Array pointing directly into the packed buffer
-// No copying, no element-by-element decode — 500x+ faster than unpack
-```
-
-### Direct Field Access
-
-`readField()` reads a single field without creating any intermediate objects:
-
-```typescript
-const name = Person.readField(data, 'name');  // zero-allocation decode
-const age = Person.readField(data, 'age');
-```
-
-### In-Place Field Mutation
-
-`setField()` updates a single field and returns a new buffer:
-
-```typescript
-// Fixed-size fields are patched in-place (fast, O(field_size))
-const updated = Person.setField(data, 'age', 31);
-
-// Variable-size fields trigger a full repack (correct, O(total_size))
-const renamed = Person.setField(data, 'name', 'Bob');
-```
-
-## JSON Conversion
-
-Schema-aware conversion between fracpack binary and JSON. Compatible with Rust's JSON conventions.
-
-```typescript
-import { fracToJson, jsonToFrac, valueToJson, jsonToValue } from 'psio';
-
-const Person = struct({ name: str, age: u32, id: u64, avatar: bytes });
-
-// Binary → JSON-friendly value
-const json = fracToJson(Person, packedData);
-// { name: 'Alice', age: 30, id: '999', avatar: 'deadbeef' }
-//   u64 → string (JSON has no 64-bit int)
-//   bytes → hex string
-//   optional null → null
-//   variant → { CaseName: value }
-
-// JSON-friendly value → binary
-const repacked = jsonToFrac(Person, json);
-// Reverses all conversions: string → bigint, hex → bytes, etc.
-
-// For working with already-unpacked JS values:
-const jsonValue = valueToJson(Person, unpackedObject);
-const packReady = jsonToValue(Person, jsonValue);
-```
-
-### Hex Utilities
-
-```typescript
-import { toHex, fromHex } from 'psio';
-
-toHex(new Uint8Array([0xDE, 0xAD])); // 'dead'
-fromHex('cafebabe'); // Uint8Array([0xCA, 0xFE, 0xBA, 0xBE])
-```
-
-## Validation
-
-Validate packed binary data against a schema without unpacking:
-
-```typescript
-import { validate } from 'psio';
-
-const result = validate(Person, data);
-switch (result.status) {
-  case 'valid':
-    // Data matches schema exactly
-    break;
-  case 'extended':
-    // Valid but has unknown fields (forward-compatible extension)
-    console.log(result.message);
-    break;
-  case 'invalid':
-    // Data is malformed
-    console.error(result.message);
-    break;
-}
-```
-
-## Schema Generation
-
-### Schema IR
-
-`generateSchema` turns named type combinators into the Schema IR of C++
-`psio::SchemaBuilder` and Rust `ToPsszSchema`, in its compact spelling. The
-result is a `PsszSchema` input:
-
-```typescript
-import { generateSchema, typeToAnyType, PsszSchema, struct, str, bytes, u32 } from 'psio';
-
-const Person = struct({ name: str, avatar: bytes, age: u32 });
-
-typeToAnyType(Person);
-// { Object: { name:   { Custom: { type: { List: <u8> }, id: 'utf8' } },
-//             avatar: { Custom: { type: { List: <u8> }, id: 'hex' } },
-//             age:    { Int: { bits: 32, isSigned: false } } } }
-
-const schema = generateSchema({ Person });          // { Person: { Object: { ... } } }
-const type = new PsszSchema(schema).type('Person'); // PSSZ, JSON, I-JSON, key
-```
-
-Text and bytes are explicit, here and in every schema-driven codec:
-
-| IR node | from | JavaScript value |
-|---|---|---|
-| `Custom { List<u8>, "utf8" }` | `str`; C++ `utf8_string`; Rust `String` | `string`, validated UTF-8 |
-| `Custom { List<u8>, "string" }` | C++ `std::string`; Rust `RawString` (no JS combinator) | `Uint8Array`: any bytes (`encode` also accepts a `string`, as its UTF-8) |
-| `Custom { List<u8>, "hex" }` | `bytes`; C++ / Rust byte vectors | `Uint8Array` |
-
-### WIT Generation (WebAssembly Interface Types)
-
-Generate WIT text format for WebAssembly component model interop:
-
-```typescript
-import { generateWit, typeToWitExpr } from 'psio';
-
-const Person = struct({ name: str, age: u32, active: bool });
-
-// Single type expression
-typeToWitExpr(Person); // generates an inline reference
-
-// Full world definition
-const wit = generateWit('my-api', {
-  types: { Person },
-  exports: {
-    getPerson: { params: { id: u32 }, result: Person },
-    setPerson: { params: { person: Person } },
-  },
-  imports: {
-    log: { params: { msg: str } },
-  },
-});
-```
-
-Output:
-
-```wit
-record person {
-  name: string,
-  age: u32,
-  active: bool,
-}
-
-world my-api {
-  import log: func(msg: string);
-  export get-person: func(id: u32) -> person;
-  export set-person: func(person: person);
-}
-```
-
-## Name Compression
-
-Compact name encoding for string identifiers (matches C++ `compress_name` and Rust equivalents):
-
-```typescript
-import { nameToNumber, numberToName, hashName, isHashName, isCompressedName } from 'psio';
-
-// Short names (≤12 chars, limited charset) compress to 64-bit numbers
-const n = nameToNumber('alice');
-const s = numberToName(n); // 'alice'
-
-// Longer or unusual names fall back to a hash
-const h = hashName('some-long-identifier');
-isHashName(h);       // true
-isCompressedName(n); // true (no hash bit set)
-```
-
-## Varint Encoding
-
-Variable-length integer encoding for compact wire format:
-
-```typescript
-import {
-  packVaruint32, unpackVaruint32,
-  packVarint32, unpackVarint32,
-} from 'psio';
-
-// Pack to Uint8Array
-const buf = packVaruint32(300);    // [0xAC, 0x02]
-const val = unpackVaruint32(buf);  // { value: 300, bytesRead: 2 }
-
-// Signed
-const sbuf = packVarint32(-1);
-const sval = unpackVarint32(sbuf);
-```
-
-## Type Inference
-
-`Infer<T>` extracts the TypeScript type from any `FracType`:
-
-```typescript
-import { type Infer } from 'psio';
-
-const Person = struct({
-  name: str,
-  age: u32,
-  tags: vec(str),
-  bio: optional(str),
-});
-
-type Person = Infer<typeof Person>;
-// { name: string; age: number; tags: string[]; bio: string | null }
-
-function greet(p: Person) {
-  console.log(`Hello ${p.name}, age ${p.age}`);
-}
-```
-
-## Binary Format
-
-Fracpack uses a fixed-section + heap layout, little-endian throughout:
-
-- **Scalars**: inline at their natural size
-- **Strings/bytes**: `u32 length` + data
-- **Vec**: `u32 num_bytes` + elements (fixed parts inline, variable parts on heap)
-- **Optional**: `u32 offset` (0 = empty container, 1 = None, >1 = relative offset to data)
-- **Struct (extensible)**: `u16 fixed_size` + fixed fields + heap data. Trailing optional fields can be elided.
-- **Fixed struct**: fields concatenated, no header
-- **Variant**: `u8 case_index` + `u32 size` + case data
-- **Tuple**: `u16 fixed_size` + fields + heap data (like struct but positional)
-- **Array**: elements concatenated, no length prefix (length is part of the type)
-- **Map**: encoded as `vec(struct({ key: str, value: V }))`
-
-All offsets are relative (position of offset field + offset value = target position).
+**Names.** `nameToNumber(name)` / `numberToName(number)` compress a short
+name into a 64-bit number (C++ `psio::compress_name`); `isCompressedName` /
+`isHashName` tell a compressed name from a hashed one.
+
+**Hex.** `toHex(bytes)` (lowercase) and `fromHex(text)` (either case).
+
+## Exports
+
+| | |
+|---|---|
+| Schema-driven | `PsszSchema`, `PsszType`, `PsszError`, `PsszNaN`, `IR_VERSION`, `jsonToPssz`, `psszToJson`, `validatePssz`, `keyPrefixUpperBound` |
+| Views | `PsszView`, `RecordView`, `TupleView`, `ListView`, `VariantView` |
+| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `enumeration`, `timePoint`, `duration`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
+| Time | `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate`, `timeSchemaId`, `parseTimeSchemaId`, `timeFractionDigits` |
+| Other | `emitWit`, `toHex`, `fromHex`, `nameToNumber`, `numberToName`, `hashName`, `isHashName`, `isCompressedName` |
+| pjson | `pjsonEncode`, `pjsonDecode`, `pjsonValidate`, `PJSON_WIRE_REVISION`, `PjsonError`, `PjsonDecimal`, `PjsonFloat`, `PjsonString`, `PjsonTypedArray`, `PjsonRows`, `PjsonObject` |
+| Types | `Infer`, `InferView`, `CustomHandler`, `FieldOptions`, `AltOptions`, `RecordOptions`, `LengthBoundOption`, `IntText`, `TypeDefOptions`, `JsonFormat`, `PsszWidth`, `PsszErrorKind`, `PsszValidation`, `PsszKeyValidation`, `PsszDecodeOptions`, `PsszTypeOptions`, `PsszSchemaOptions`, `PsszCustomHandler`, `PsszCustomHandlers`, `PsszSchemaInput`, `PsszTypeInput`, `CompactType`, `CompactEnumerator`, `Some`, `VariantValue`, `BitsValue`, `TimeKind`, `TimeUnit`, `TickType`, `PjsonValue`, and the IR: `IrSchema`, `IrAnyType`, `IrTypeValue`, `IrMember`, `IrAttribute`, `IrEnum`, `IrEnumerator`, `IrFunc`, `IrResource`, `IrInterface`, `IrWorld`, `IrUse` |
 
 ## Performance
 
-Benchmarks on typical workloads (Node.js, Apple M-series):
-
-| Operation | vs unpack |
-|-----------|-----------|
-| Struct view, partial access (1/10 fields) | ~5x faster |
-| Vec of structs, single element access | ~115x faster |
-| Scalar vec (10K u32s), TypedArray view | ~565x faster |
-| `readField()` single field | ~6x faster |
-
-## Cross-Language Compatibility
-
-The binary format is byte-identical across JavaScript, C++ (`psio`), and Rust (`fracpack`). Data packed in one language can be unpacked in another with no conversion.
-
-## API Reference
-
-### Core
-
-| Export | Description |
-|--------|-------------|
-| `FracType<T>` | Type descriptor interface — `pack()`, `unpack()`, `view()` |
-| `StructType<T>` | Extends FracType with `readField()` and `setField()` |
-| `Infer<T>` | Extract TypeScript type from FracType |
-| `SchemaNode` | Union type describing type structure |
-| `FracpackError` | Error class for pack/unpack failures |
-
-### Type Constructors
-
-| Export | Description |
-|--------|-------------|
-| `bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64` | Scalar types |
-| `str` | UTF-8 string |
-| `bytes` | Raw byte array |
-| `optional(inner)` | Nullable wrapper |
-| `vec(element)` | Variable-length list |
-| `array(element, len)` | Fixed-length array |
-| `tuple(...elements)` | Heterogeneous tuple |
-| `variant(cases)` | Tagged union |
-| `struct(fields)` | Extensible record (returns `StructType`) |
-| `fixedStruct(fields)` | Non-extensible record (returns `StructType`) |
-| `map(valueType)` | String-keyed map |
-
-### JSON
-
-| Export | Description |
-|--------|-------------|
-| `fracToJson(type, data)` | Binary → JSON-friendly value |
-| `jsonToFrac(type, json)` | JSON-friendly value → binary |
-| `valueToJson(type, value)` | JS value → JSON-friendly value |
-| `jsonToValue(type, json)` | JSON-friendly value → pack-ready JS value |
-| `toHex(data)` | Uint8Array → hex string |
-| `fromHex(hex)` | Hex string → Uint8Array |
-
-### Validation
-
-| Export | Description |
-|--------|-------------|
-| `validate(type, data)` | Validate binary data without unpacking |
-| `ValidationResult` | `{ status: 'valid' \| 'extended' \| 'invalid', message? }` |
-
-### Schema
-
-| Export | Description |
-|--------|-------------|
-| `typeToAnyType(type)` | type combinator → Schema IR node (compact spelling) |
-| `generateSchema(types)` | Named types → Schema registry |
-| `AnyType` | a Schema IR type in the compact spelling (`CompactType`) |
-| `Schema` | `{ [name]: AnyType }`: a `PsszSchema` input |
-
-### WIT
-
-| Export | Description |
-|--------|-------------|
-| `generateWit(worldName, opts)` | Generate WIT world text |
-| `typeToWitExpr(type)` | Single type → WIT expression |
-| `toKebabCase(s)` | camelCase/snake_case → kebab-case |
-| `WitFunc` | Function descriptor for WIT generation |
-| `WitOptions` | Options for `generateWit()` |
-
-### Name Compression
-
-| Export | Description |
-|--------|-------------|
-| `nameToNumber(name)` | String → compressed 64-bit number |
-| `numberToName(n)` | Compressed number → string |
-| `hashName(name)` | String → hashed 64-bit number |
-| `isHashName(n)` | Check if number is a hash (vs compressed) |
-| `isCompressedName(n)` | Check if number is losslessly compressed |
-
-### Varint
-
-| Export | Description |
-|--------|-------------|
-| `packVaruint32(v)` | Unsigned varint → bytes |
-| `unpackVaruint32(buf)` | Bytes → unsigned varint |
-| `packVarint32(v)` | Signed varint → bytes |
-| `unpackVarint32(buf)` | Bytes → signed varint |
-| `encodeVaruint32(v, w)` | Encode into Writer |
-| `decodeVaruint32(r)` | Decode from Reader |
-| `encodeVarint32(v, w)` | Encode signed into Writer |
-| `decodeVarint32(r)` | Decode signed from Reader |
+`npm test` prints a small benchmark (`src/test/bench.test.ts`; reported, it
+never fails on timing): encode, decode, validate and view of a typical record
+and of a list of 1,000 records, through the typed layer and through a fetched
+schema. The two paths run the same codec and measure the same. On an Apple
+M-series laptop under Node 22, for an 87-byte record: encode about 2 µs,
+decode 1.3 µs, one field through a view 0.5 µs; for the list of 1,000
+(88 KB): decode 1.5 ms, one field of one element through a view under 1 µs,
+one field of every element 0.6 ms.
