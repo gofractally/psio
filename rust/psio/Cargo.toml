@@ -43,9 +43,20 @@ ssz_types           = { version = "0.8",  optional = true }
 typenum             = { version = "1",    optional = true }
 ssz_rs              = { version = "0.9",  optional = true }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+# Conversions between psio::time and chrono (feature `chrono`).
+chrono = { version = "0.4.38", default-features = false, optional = true }
+# psio's leaf types as async-graphql scalars (feature `async-graphql`).
+async-graphql = { version = "7.0.17", default-features = false, optional = true }
 
 [features]
 default = []
+# `TryFrom` between psio::time values and chrono::DateTime / chrono::TimeDelta.
+chrono = ["dep:chrono"]
+# psio::graphql_scalars: psio::time values, RawString, the bounded strings and
+# Uint256 are async-graphql scalars, and `psio::async_graphql_scalar!` makes
+# one of any JsonText type. async-graphql is taken without its default
+# features; it adds nothing to serde_json's.
+async-graphql = ["dep:async-graphql"]
 # psio::experimental::frac: a format kept to benchmark pSSZ against. Not a
 # supported wire format.
 experimental-frac = ["psio-macros/experimental-frac", "dep:custom_error", "dep:hex",

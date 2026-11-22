@@ -229,6 +229,8 @@ pub mod pjson_view;
 pub mod pjson_typed;
 pub mod pjson_json;
 pub mod json;
+#[cfg(feature = "async-graphql")]
+pub mod graphql_scalars;
 pub mod key;
 pub mod compress_name;
 pub mod interface;

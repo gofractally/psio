@@ -23,12 +23,27 @@
 //! (`2026-11-22T10:15:30.123456Z`), years 0000..9999. A monotonic time
 //! point is the tick integer, exactly as a duration: never a date.
 //!
+//! Values compute: `point + duration`, `point - point`, `duration * n` and
+//! the rest of the operators are exact and panic on overflow of the tick
+//! type in every build profile (`checked_*` return `None`); `to_unit` /
+//! `floor` / `ceil` convert between units; `Display` and `FromStr` are the
+//! JSON text without the quotes; the values order, hash and default. The
+//! cargo feature `chrono` adds exact `TryFrom` conversions with
+//! `chrono::DateTime` / `TimeDelta`, and `async-graphql` makes the values
+//! GraphQL scalars (`psio::graphql_scalars`).
+//!
 //! ```
-//! use psio::time::{Micros, Seconds, TimePoint};
+//! use psio::time::{Duration, Micros, Seconds, TimePoint};
 //!
 //! let t = TimePoint::<Seconds>::from_rfc3339("2026-11-22T12:15:30+02:00").unwrap();
 //! assert_eq!(t.ticks(), 1795342530);
 //! assert_eq!(t.to_rfc3339().unwrap(), "2026-11-22T10:15:30Z");
+//! assert_eq!(t.to_string(), "2026-11-22T10:15:30Z");
+//! assert_eq!("2026-11-22T10:15:30Z".parse::<TimePoint<Seconds>>().unwrap(), t);
+//! let later = t + Duration::from_ticks(90);
+//! assert_eq!((later - t).ticks(), 90);
+//! let micros: TimePoint<Micros> = later.to_unit().unwrap();
+//! assert_eq!(micros.floor::<Seconds>(), later);
 //! // A fraction the unit cannot hold exactly is rejected, never rounded.
 //! assert!(TimePoint::<Seconds>::from_rfc3339("2026-11-22T10:15:30.5Z").is_err());
 //! assert!(TimePoint::<Micros>::from_rfc3339("2026-11-22T10:15:30.5Z").is_ok());
@@ -781,5 +796,359 @@ impl<U: Unit, R: Tick> JsonText for TimePoint<U, R> {
         let at = r.position();
         let text = r.string()?;
         Self::from_rfc3339(&text).map_err(|e| r.err_at(at, e.0))
+    }
+}
+
+// ── Arithmetic operators ────────────────────────────────────────────────────
+//
+// `point + duration`, `point - duration`, `point - point`, `duration +
+// duration`, `duration - duration`, `-duration`, `duration * n`, `duration /
+// n`, with the assigning forms. Exact: a result that does not fit the tick
+// type panics, in every build profile (never wraps); the `checked_*`
+// functions return `None` instead.
+
+const OVERFLOW: &str = "psio::time: arithmetic overflow of the tick type";
+
+macro_rules! point_operators {
+    ($name:ident) => {
+        impl<U: Unit, R: Tick> std::ops::Add<Duration<U, R>> for $name<U, R> {
+            type Output = Self;
+            #[track_caller]
+            fn add(self, by: Duration<U, R>) -> Self {
+                self.checked_add(by).expect(OVERFLOW)
+            }
+        }
+        impl<U: Unit, R: Tick> std::ops::Sub<Duration<U, R>> for $name<U, R> {
+            type Output = Self;
+            #[track_caller]
+            fn sub(self, by: Duration<U, R>) -> Self {
+                self.checked_sub(by).expect(OVERFLOW)
+            }
+        }
+        impl<U: Unit, R: Tick> std::ops::Sub for $name<U, R> {
+            type Output = Duration<U, R>;
+            #[track_caller]
+            fn sub(self, earlier: Self) -> Duration<U, R> {
+                self.checked_duration_since(earlier).expect(OVERFLOW)
+            }
+        }
+        impl<U: Unit, R: Tick> std::ops::AddAssign<Duration<U, R>> for $name<U, R> {
+            #[track_caller]
+            fn add_assign(&mut self, by: Duration<U, R>) {
+                *self = *self + by;
+            }
+        }
+        impl<U: Unit, R: Tick> std::ops::SubAssign<Duration<U, R>> for $name<U, R> {
+            #[track_caller]
+            fn sub_assign(&mut self, by: Duration<U, R>) {
+                *self = *self - by;
+            }
+        }
+    };
+}
+point_operators!(TimePoint);
+point_operators!(MonotonicPoint);
+
+impl<U: Unit, R: Tick> Duration<U, R> {
+    /// No time at all.
+    pub fn zero() -> Self {
+        Self::from_ticks(R::default())
+    }
+    pub fn is_zero(&self) -> bool {
+        self.ticks == R::default()
+    }
+    /// `self + other`; `None` when it does not fit the tick type.
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        R::from_i128(self.ticks.to_i128() + other.ticks.to_i128()).map(Self::from_ticks)
+    }
+    /// `self - other`; `None` when it does not fit the tick type.
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        R::from_i128(self.ticks.to_i128() - other.ticks.to_i128()).map(Self::from_ticks)
+    }
+    /// `-self`; `None` when it does not fit the tick type (an unsigned tick
+    /// type holds no negative duration).
+    pub fn checked_neg(self) -> Option<Self> {
+        R::from_i128(-self.ticks.to_i128()).map(Self::from_ticks)
+    }
+    /// `self * factor`; `None` when it does not fit the tick type.
+    pub fn checked_mul(self, factor: R) -> Option<Self> {
+        self.ticks.to_i128().checked_mul(factor.to_i128()).and_then(R::from_i128).map(Self::from_ticks)
+    }
+    /// `self / divisor`, toward zero; `None` for a zero divisor or a
+    /// quotient that does not fit.
+    pub fn checked_div(self, divisor: R) -> Option<Self> {
+        self.ticks.to_i128().checked_div(divisor.to_i128()).and_then(R::from_i128).map(Self::from_ticks)
+    }
+}
+impl<U: Unit, R: Tick> std::ops::Add for Duration<U, R> {
+    type Output = Self;
+    #[track_caller]
+    fn add(self, other: Self) -> Self {
+        self.checked_add(other).expect(OVERFLOW)
+    }
+}
+impl<U: Unit, R: Tick> std::ops::Sub for Duration<U, R> {
+    type Output = Self;
+    #[track_caller]
+    fn sub(self, other: Self) -> Self {
+        self.checked_sub(other).expect(OVERFLOW)
+    }
+}
+impl<U: Unit, R: Tick> std::ops::Neg for Duration<U, R> {
+    type Output = Self;
+    #[track_caller]
+    fn neg(self) -> Self {
+        self.checked_neg().expect(OVERFLOW)
+    }
+}
+impl<U: Unit, R: Tick> std::ops::Mul<R> for Duration<U, R> {
+    type Output = Self;
+    #[track_caller]
+    fn mul(self, factor: R) -> Self {
+        self.checked_mul(factor).expect(OVERFLOW)
+    }
+}
+impl<U: Unit, R: Tick> std::ops::Div<R> for Duration<U, R> {
+    type Output = Self;
+    #[track_caller]
+    fn div(self, divisor: R) -> Self {
+        self.checked_div(divisor).expect("psio::time: division by zero or overflow of the tick type")
+    }
+}
+impl<U: Unit, R: Tick> std::ops::AddAssign for Duration<U, R> {
+    #[track_caller]
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+impl<U: Unit, R: Tick> std::ops::SubAssign for Duration<U, R> {
+    #[track_caller]
+    fn sub_assign(&mut self, other: Self) {
+        *self = *self - other;
+    }
+}
+impl<U: Unit, R: Tick> std::iter::Sum for Duration<U, R> {
+    #[track_caller]
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::zero(), |total, item| total + item)
+    }
+}
+
+// ── Unit and tick-type conversions ──────────────────────────────────────────
+
+/// How a conversion to a coarser unit treats a value between two ticks.
+#[derive(Clone, Copy)]
+enum Rounding {
+    /// Only a whole number of ticks converts.
+    Exact,
+    /// Toward negative infinity (the tick at or before).
+    Floor,
+    /// Toward positive infinity (the tick at or after).
+    Ceil,
+}
+
+/// ticks of `U` → ticks of `V` in `S`. `Err` says why not.
+fn convert_ticks<U: Unit, V: Unit, R: Tick, S: Tick>(ticks: R, rounding: Rounding) -> Result<S, TimeError> {
+    // ticks * (U::NUM / U::DEN) / (V::NUM / V::DEN)
+    let numerator = (U::NUM as i128).checked_mul(V::DEN as i128).ok_or(TimeError("time: out of range"))?;
+    let denominator = (U::DEN as i128).checked_mul(V::NUM as i128).ok_or(TimeError("time: out of range"))?;
+    let scaled = ticks.to_i128().checked_mul(numerator).ok_or(TimeError("time: out of range"))?;
+    let (quotient, remainder) = (scaled.div_euclid(denominator), scaled.rem_euclid(denominator));
+    let value = match rounding {
+        Rounding::Exact if remainder != 0 => return Err(TimeError("time: not a whole number of ticks")),
+        Rounding::Ceil if remainder != 0 => quotient + 1,
+        _ => quotient,
+    };
+    S::from_i128(value).ok_or(TimeError("time: outside the range of the tick type"))
+}
+
+macro_rules! conversions {
+    ($name:ident) => {
+        impl<U: Unit, R: Tick> $name<U, R> {
+            /// The same value in unit `V`, exactly: an error when it is not
+            /// a whole number of `V` ticks or does not fit the tick type.
+            /// Seconds to micros always is whole; micros to seconds only
+            /// for a whole second (use [`floor`](Self::floor) or
+            /// [`ceil`](Self::ceil) otherwise).
+            pub fn to_unit<V: Unit>(self) -> Result<$name<V, R>, TimeError> {
+                convert_ticks::<U, V, R, R>(self.ticks, Rounding::Exact).map($name::from_ticks)
+            }
+            /// The value in unit `V` at or before this one (toward negative
+            /// infinity; C++ `std::chrono::floor`). Panics when the result
+            /// does not fit the tick type, which a conversion to a coarser
+            /// unit never does; [`checked_floor`](Self::checked_floor)
+            /// returns `None` instead.
+            #[track_caller]
+            pub fn floor<V: Unit>(self) -> $name<V, R> {
+                self.checked_floor().expect(OVERFLOW)
+            }
+            /// The value in unit `V` at or after this one (toward positive
+            /// infinity; C++ `std::chrono::ceil`). Panics when the result
+            /// does not fit the tick type; [`checked_ceil`](Self::checked_ceil)
+            /// returns `None` instead.
+            #[track_caller]
+            pub fn ceil<V: Unit>(self) -> $name<V, R> {
+                self.checked_ceil().expect(OVERFLOW)
+            }
+            pub fn checked_floor<V: Unit>(self) -> Option<$name<V, R>> {
+                convert_ticks::<U, V, R, R>(self.ticks, Rounding::Floor).ok().map($name::from_ticks)
+            }
+            pub fn checked_ceil<V: Unit>(self) -> Option<$name<V, R>> {
+                convert_ticks::<U, V, R, R>(self.ticks, Rounding::Ceil).ok().map($name::from_ticks)
+            }
+            /// The same tick count held in another tick integer; an error
+            /// when it does not fit.
+            pub fn to_tick_type<S: Tick>(self) -> Result<$name<U, S>, TimeError> {
+                S::from_i128(self.ticks.to_i128())
+                    .map($name::from_ticks)
+                    .ok_or(TimeError("time: outside the range of the tick type"))
+            }
+        }
+    };
+}
+conversions!(TimePoint);
+conversions!(MonotonicPoint);
+conversions!(Duration);
+
+impl<U: Unit, R: Tick> TimePoint<U, R> {
+    /// The time since the Unix epoch.
+    pub fn since_epoch(self) -> Duration<U, R> {
+        Duration::from_ticks(self.ticks)
+    }
+    /// The time point `since_epoch` after the Unix epoch.
+    pub fn from_since_epoch(since_epoch: Duration<U, R>) -> Self {
+        Self::from_ticks(since_epoch.ticks)
+    }
+    /// The current time of the system clock, at or before now in unit `U`.
+    /// An error when the tick type cannot hold it.
+    pub fn now() -> Result<Self, TimeError> {
+        let nanos = match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(after) => after.as_nanos() as i128,
+            Err(before) => -(before.duration().as_nanos() as i128),
+        };
+        let per_tick = (U::NUM as i128 * NANOS_PER_SECOND, U::DEN as i128);
+        let ticks = (nanos * per_tick.1).div_euclid(per_tick.0);
+        R::from_i128(ticks).map(Self::from_ticks).ok_or(TimeError("time: outside the range of the tick type"))
+    }
+}
+
+// ── Display / FromStr ───────────────────────────────────────────────────────
+//
+// The text a value has in JSON, without the quotes: a time point is its
+// RFC 3339 UTC text (C++ `psio::to_rfc3339` / `from_rfc3339`), a duration
+// and a monotonic time point are the tick count in decimal.
+
+/// The RFC 3339 UTC text with exactly the unit's fraction digits
+/// ([`to_rfc3339`](TimePoint::to_rfc3339)). An instant outside years
+/// 0000..9999 has no RFC 3339 text: it is written as its tick count in
+/// parentheses, `(ticks)`, which [`FromStr`](std::str::FromStr) does not
+/// read (C++ `to_rfc3339` returns the empty string there).
+impl<U: Unit, R: Tick> std::fmt::Display for TimePoint<U, R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.to_rfc3339() {
+            Ok(text) => f.write_str(&text),
+            Err(_) => write!(f, "({})", self.ticks.to_i128()),
+        }
+    }
+}
+/// Any RFC 3339 date-time ([`from_rfc3339`](TimePoint::from_rfc3339)).
+impl<U: Unit, R: Tick> std::str::FromStr for TimePoint<U, R> {
+    type Err = TimeError;
+    fn from_str(text: &str) -> Result<Self, TimeError> {
+        Self::from_rfc3339(text)
+    }
+}
+
+macro_rules! tick_display {
+    ($name:ident) => {
+        /// The tick count in decimal.
+        impl<U: Unit, R: Tick> std::fmt::Display for $name<U, R> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}", self.ticks.to_i128())
+            }
+        }
+        /// The tick count in decimal: an optional `-`, then digits with no
+        /// leading zero (the JSON integer grammar), within the tick type.
+        impl<U: Unit, R: Tick> std::str::FromStr for $name<U, R> {
+            type Err = TimeError;
+            fn from_str(text: &str) -> Result<Self, TimeError> {
+                let digits = text.strip_prefix('-').unwrap_or(text);
+                if digits.is_empty()
+                    || !digits.bytes().all(|b| b.is_ascii_digit())
+                    || (digits.len() > 1 && digits.starts_with('0'))
+                    || text == "-0"
+                {
+                    return Err(TimeError("time: a tick count is a decimal integer"));
+                }
+                text.parse::<i128>()
+                    .ok()
+                    .and_then(R::from_i128)
+                    .map(Self::from_ticks)
+                    .ok_or(TimeError("time: outside the range of the tick type"))
+            }
+        }
+    };
+}
+tick_display!(Duration);
+tick_display!(MonotonicPoint);
+
+// ── chrono (feature `chrono`) ───────────────────────────────────────────────
+
+#[cfg(feature = "chrono")]
+mod chrono_conversions {
+    use super::*;
+
+    fn nanos_of<Tz: chrono::TimeZone>(time: &chrono::DateTime<Tz>) -> i128 {
+        time.timestamp() as i128 * NANOS_PER_SECOND + time.timestamp_subsec_nanos() as i128
+    }
+
+    /// Exact: fails when the instant is not a whole number of ticks or does
+    /// not fit the tick type. `TimePoint::from_chrono_floor` rounds down.
+    impl<U: Unit, R: Tick, Tz: chrono::TimeZone> TryFrom<chrono::DateTime<Tz>> for TimePoint<U, R> {
+        type Error = TimeError;
+        fn try_from(time: chrono::DateTime<Tz>) -> Result<Self, TimeError> {
+            ticks_from_nanos::<U, R>(nanos_of(&time)).map(Self::from_ticks)
+        }
+    }
+    /// Exact: fails when the instant is not a whole number of nanoseconds
+    /// or is outside what chrono holds.
+    impl<U: Unit, R: Tick> TryFrom<TimePoint<U, R>> for chrono::DateTime<chrono::Utc> {
+        type Error = TimeError;
+        fn try_from(time: TimePoint<U, R>) -> Result<Self, TimeError> {
+            let nanos = nanos_from_ticks::<U, R>(time.ticks)?;
+            let secs = i64::try_from(nanos.div_euclid(NANOS_PER_SECOND))
+                .map_err(|_| TimeError("time: outside the range of chrono::DateTime"))?;
+            chrono::DateTime::from_timestamp(secs, nanos.rem_euclid(NANOS_PER_SECOND) as u32)
+                .ok_or(TimeError("time: outside the range of chrono::DateTime"))
+        }
+    }
+    impl<U: Unit, R: Tick> TimePoint<U, R> {
+        /// The time point at or before `time` in unit `U` (a `DateTime`
+        /// holds nanoseconds); `None` when the tick type cannot hold it.
+        pub fn from_chrono_floor<Tz: chrono::TimeZone>(time: chrono::DateTime<Tz>) -> Option<Self> {
+            let per_tick = U::NUM as i128 * NANOS_PER_SECOND;
+            R::from_i128((nanos_of(&time) * U::DEN as i128).div_euclid(per_tick)).map(Self::from_ticks)
+        }
+    }
+    /// Exact: fails when the duration is not a whole number of ticks or
+    /// does not fit the tick type.
+    impl<U: Unit, R: Tick> TryFrom<chrono::TimeDelta> for Duration<U, R> {
+        type Error = TimeError;
+        fn try_from(delta: chrono::TimeDelta) -> Result<Self, TimeError> {
+            let nanos = delta.num_seconds() as i128 * NANOS_PER_SECOND + delta.subsec_nanos() as i128;
+            ticks_from_nanos::<U, R>(nanos).map(Self::from_ticks)
+        }
+    }
+    /// Exact: fails when the duration is not a whole number of nanoseconds
+    /// or is outside what chrono holds.
+    impl<U: Unit, R: Tick> TryFrom<Duration<U, R>> for chrono::TimeDelta {
+        type Error = TimeError;
+        fn try_from(duration: Duration<U, R>) -> Result<Self, TimeError> {
+            let nanos = nanos_from_ticks::<U, R>(duration.ticks)?;
+            let secs = i64::try_from(nanos.div_euclid(NANOS_PER_SECOND))
+                .map_err(|_| TimeError("time: outside the range of chrono::TimeDelta"))?;
+            chrono::TimeDelta::new(secs, nanos.rem_euclid(NANOS_PER_SECOND) as u32)
+                .ok_or(TimeError("time: outside the range of chrono::TimeDelta"))
+        }
     }
 }
