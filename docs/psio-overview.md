@@ -69,6 +69,7 @@ applicable) `view` operations dispatched by the tag.
 | `pjson` | `docs/pjson-spec.md` | Primary schemaless binary format; binary peer of JSON |
 | `pssz` | `docs/pssz-spec.md` | Primary schema-driven binary format; successor to fracpack |
 | `json` | RFC 8259 | Text serialization for human/JS interop |
+| `ijson` | RFC 7493 (`docs/json.md`) | I-JSON: 64-bit integers as strings, bytes as hex, named variants |
 | `capnp` | Cap'n Proto wire | Cross-language IDL-driven format |
 | `flatbuf` | FlatBuffers wire | IDL-driven, alignment-strict |
 | `ssz` | Eth2 SSZ | Beacon-chain and content-addressed payloads |

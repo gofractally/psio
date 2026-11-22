@@ -18,7 +18,7 @@ designs. Its rows below describe benchmark implementation coverage.
 | WIT binary | two records | encode only in shared fixture test | implementation absent; WIT text generation is separate |
 | frac16 | two records | not covered | implementation absent |
 | bin, Borsh, bincode, Avro, key, BSON, MessagePack, Protobuf | two records each | public codecs not implemented | public codecs not implemented |
-| JSON text | two records | conversion APIs exist; not compared here | conversion APIs exist; not compared here |
+| JSON / I-JSON text | two records in the public corpus; `conformance/json-vectors.json` (990 vectors generated from the C++ codec, checked by ctest; `docs/json.md`) | encode/decode/validate against the whole JSON fixture | conversion APIs exist; not compared here |
 
 The standalone packages now build without psiserve. Installed CMake and
 FetchContent consumers pass. Rust archive verification includes the macro crate
