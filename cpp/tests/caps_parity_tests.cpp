@@ -65,7 +65,7 @@ TEST_CASE("caps: every format's validate rejects oversized input",
           "[caps][parity][validate]")
 {
    expect_validate_rejects_oversized(psio::pssz{},     "pssz");
-   expect_validate_rejects_oversized(psio::frac32{},   "frac32");
+   expect_validate_rejects_oversized(psio::experimental::frac32{},   "frac32");
    expect_validate_rejects_oversized(psio::bin{},      "bin");
    expect_validate_rejects_oversized(psio::borsh{},    "borsh");
    expect_validate_rejects_oversized(psio::bincode{},  "bincode");

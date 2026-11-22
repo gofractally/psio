@@ -2236,4 +2236,6 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(ssz)
+
 }  // namespace psio

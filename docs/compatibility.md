@@ -3,9 +3,19 @@
 Status recorded during the September 16, 2026 recovery work. Passing the checks
 below does not certify the whole library as stable. C++ is the authority.
 
-pSSZ is the successor to fracpack and the primary schema-driven binary format.
-Fracpack is a legacy prototype retained for benchmark comparisons of data-layout
-designs. Its rows below describe benchmark implementation coverage.
+pSSZ is the primary schema-driven binary format.
+Fracpack is an experimental format (`psio::experimental`, `psio/frac.hpp`),
+not a supported wire format. It is kept to measure one design trade-off against
+pSSZ: fracpack stores a size with every variable-size value, pSSZ stores none
+and infers each size from the offsets around the value. It is not
+byte-compatible with psibase's fracpack in general.
+Known differences from psibase's fracpack: `std::tuple` is not supported, and
+`std::vector<std::optional<std::string>>` encodes differently. In C++ the
+tags are `psio::experimental::frac32` and `psio::experimental::frac16`, and
+`<psio/psio.hpp>` does not include them. The Rust crate still exports its
+fracpack traits and derives (`Pack`, `Unpack`, `Fracpack`, `FracView`) at the
+crate root; the JS package has no fracpack codec. The fracpack rows below
+describe benchmark implementation coverage.
 
 | Format | C++ public fixture | Rust comparison | JS/TS comparison |
 |---|---|---|---|

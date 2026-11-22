@@ -121,6 +121,75 @@ psio_mutable_view_compile_fail(validated_member MV_FAIL_VALIDATED_MEMBER
 psio_mutable_view_compile_fail(format MV_FAIL_FORMAT
    "in-place mutation is defined for PSSZ formats only")
 
+# The per-format helper names (psio/helpers.hpp): to_F / from_F / validate_F /
+# F_size / F_view / F_buffer / shared_F, exercised for every format tag.
+psio_add_test(psio_helpers_tests helpers_tests.cpp)
+# The same names with exceptions and RTTI disabled. The checked decode of a
+# rejected input calls std::abort there: the second test expects the process
+# to die of SIGABRT (exit status 134 as the shell reports it).
+add_executable(psio_helpers_noexceptions_test helpers_noexceptions.cpp)
+target_include_directories(psio_helpers_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_helpers_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_helpers_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_helpers_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_helpers_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_helpers_noexceptions_test COMMAND psio_helpers_noexceptions_test)
+add_test(NAME psio_helpers_noexceptions_checked_decode_aborts
+         COMMAND sh -c "\"$1\" abort; test $? -eq 134" sh
+                 $<TARGET_FILE:psio_helpers_noexceptions_test>)
+# A helper its format does not have must not compile, and the diagnostic
+# names the helper. The control (no case selected) must compile.
+set(PSIO_HELPERS_FAIL_COMMAND
+    ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -DPSIO_EXCEPTIONS_ENABLED=1
+    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES})
+add_test(NAME psio_helpers_control_compiles
+         COMMAND ${PSIO_HELPERS_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/helpers_fail.cpp)
+function(psio_helpers_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_helpers_${NAME}_compile_fail
+            COMMAND ${PSIO_HELPERS_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/helpers_fail.cpp)
+   set_tests_properties(psio_helpers_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_helpers_compile_fail(json_view HELPERS_FAIL_JSON_VIEW
+   "constraints not satisfied for alias template 'json_view'")
+psio_helpers_compile_fail(ssz_mutable_view HELPERS_FAIL_SSZ_MUTABLE_VIEW
+   "constraints not satisfied for alias template 'ssz_mutable_view'")
+psio_helpers_compile_fail(wit_sink HELPERS_FAIL_WIT_SINK
+   "no matching function for call to 'to_wit'")
+psio_helpers_compile_fail(json_vector_sink HELPERS_FAIL_JSON_VECTOR_SINK
+   "no matching function for call to 'to_json'")
+psio_helpers_compile_fail(unchecked_bytes HELPERS_FAIL_UNCHECKED_BYTES
+   "no viable conversion from 'std::span<const char>' to 'psio::trusted'")
+# Const safety: a view never writes, and a mutable view is made from mutable
+# bytes only — not from const bytes, a const or shared buffer, or a view.
+psio_helpers_compile_fail(view_set HELPERS_FAIL_VIEW_SET
+   "member reference base type")
+psio_helpers_compile_fail(const_view_set HELPERS_FAIL_CONST_VIEW_SET
+   "no member named 'set' in 'psio::view<const Rec, psio::pssz>'")
+psio_helpers_compile_fail(shared_mutable HELPERS_FAIL_SHARED_MUTABLE
+   "no matching function for call to 'as_mutable_view'")
+psio_helpers_compile_fail(mutable_from_const_bytes HELPERS_FAIL_MUTABLE_FROM_CONST_BYTES
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<Rec>'")
+psio_helpers_compile_fail(mutable_from_const_span HELPERS_FAIL_MUTABLE_FROM_CONST_SPAN
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<Rec>'")
+psio_helpers_compile_fail(mutable_from_const_buffer HELPERS_FAIL_MUTABLE_FROM_CONST_BUFFER
+   "no matching function for call to 'as_mutable_view'")
+psio_helpers_compile_fail(mutable_from_view HELPERS_FAIL_MUTABLE_FROM_VIEW
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<Rec>'")
+psio_helpers_compile_fail(mutable_from_view_bytes HELPERS_FAIL_MUTABLE_FROM_VIEW_BYTES
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<Rec>'")
+psio_helpers_compile_fail(view_assigned_to_mutable HELPERS_FAIL_VIEW_ASSIGNED_TO_MUTABLE
+   "no viable conversion from 'psio::pssz_view<Rec>'")
+psio_helpers_compile_fail(mutable_view_of_const HELPERS_FAIL_MUTABLE_VIEW_OF_CONST
+   "constraints not satisfied for alias template 'pssz_mutable_view' .with X = const Rec.")
+psio_helpers_compile_fail(generic_mutable_view_of_const HELPERS_FAIL_GENERIC_MUTABLE_VIEW_OF_CONST
+   "a mutable view of a const type is a contradiction")
+psio_helpers_compile_fail(view_mut_borrow HELPERS_FAIL_VIEW_MUT_BORROW
+   "psio::view is the read-only view; the view that writes is psio::mutable_view")
+
 # native format + view_of concept: zero-cost shim adapting a live const T&
 # to the view<T, Fmt, Store> accessor surface.
 psio_add_test(psio_native_view_tests native_view_tests.cpp)
@@ -238,7 +307,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 add_test(NAME psio_ijson_noexceptions_test COMMAND psio_ijson_noexceptions_test)
 
-# Phase 8: fracpack codec (frac32/frac16).
+# The experimental fracpack codec (psio::experimental::frac32 / frac16).
 psio_add_test(psio_frac_tests frac_tests.cpp)
 
 # Phase 10: bin codec (simplest length-prefixed binary).

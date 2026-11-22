@@ -65,7 +65,7 @@ namespace sdp {
 #define SDP_ALL_FMTS(FixtureName, FixtureValue)                         \
    SDP_BINARY_CASE(ssz,    ::psio::ssz{},    FixtureName, FixtureValue)\
    SDP_BINARY_CASE(pssz32, ::psio::pssz32{}, FixtureName, FixtureValue)\
-   SDP_BINARY_CASE(frac32, ::psio::frac32{}, FixtureName, FixtureValue)\
+   SDP_BINARY_CASE(frac32, ::psio::experimental::frac32{}, FixtureName, FixtureValue)\
    SDP_BINARY_CASE(bin,    ::psio::bin{},    FixtureName, FixtureValue)\
    SDP_BINARY_CASE(json,   ::psio::json{},   FixtureName, FixtureValue)
 

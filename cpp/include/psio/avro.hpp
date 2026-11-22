@@ -755,4 +755,6 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(avro)
+
 }  // namespace psio

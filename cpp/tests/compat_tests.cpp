@@ -54,7 +54,7 @@ TEST_CASE("psio1:: identity with psio:: — they name the same entities",
    // Tag types are the same struct regardless of namespace spelling.
    STATIC_REQUIRE(std::is_same_v<psio1::ssz, psio::ssz>);
    STATIC_REQUIRE(std::is_same_v<psio1::json, psio::json>);
-   STATIC_REQUIRE(std::is_same_v<psio1::frac32, psio::frac32>);
+   STATIC_REQUIRE(std::is_same_v<psio1::pssz, psio::pssz>);
 }
 
 TEST_CASE("psio1::schema_of routes to psio schema emitter",

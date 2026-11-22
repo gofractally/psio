@@ -1020,4 +1020,6 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(wit)
+
 }  // namespace psio

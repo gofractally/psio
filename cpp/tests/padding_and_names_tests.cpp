@@ -80,7 +80,7 @@ namespace reg {
    }
 PADDING_CASE(ssz,     ::psio::ssz{})
 PADDING_CASE(pssz32,  ::psio::pssz32{})
-PADDING_CASE(frac32,  ::psio::frac32{})
+PADDING_CASE(frac32,  ::psio::experimental::frac32{})
 PADDING_CASE(bin,     ::psio::bin{})
 PADDING_CASE(borsh,   ::psio::borsh{})
 PADDING_CASE(bincode, ::psio::bincode{})
@@ -101,7 +101,7 @@ PADDING_CASE(avro,    ::psio::avro{})
    }
 FIELD_NAME_CASE(ssz,     ::psio::ssz{})
 FIELD_NAME_CASE(pssz32,  ::psio::pssz32{})
-FIELD_NAME_CASE(frac32,  ::psio::frac32{})
+FIELD_NAME_CASE(frac32,  ::psio::experimental::frac32{})
 FIELD_NAME_CASE(bin,     ::psio::bin{})
 FIELD_NAME_CASE(borsh,   ::psio::borsh{})
 FIELD_NAME_CASE(bincode, ::psio::bincode{})

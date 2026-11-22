@@ -1296,4 +1296,6 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(capnp)
+
 }  // namespace psio

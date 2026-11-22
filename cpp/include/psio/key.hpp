@@ -1214,35 +1214,48 @@ namespace psio {
             ::psio::codec_abort(st.error());
          return out;
       }
+
+      // The fresh buffer of `psio::to_key(v)`: std::array<char, N> when the
+      // encoded size is a compile-time constant (fixed-width keys — integers,
+      // floats, enums, fixed reflected structs), encoded straight into the
+      // array on the stack with no packsize pass and no allocation;
+      // std::vector<char> when the size depends on the value (strings,
+      // vectors, optionals). Take the result with `auto`; both expose
+      // .data()/.size().
+      template <typename T>
+      [[nodiscard]] static auto to_fresh(const T& v)
+      {
+         constexpr auto fixed = detail::key_impl::key_fixed_size<T>();
+         if constexpr (fixed.has_value())
+         {
+            std::array<char, *fixed> out;
+            fast_buf_stream          fs{out.data(), out.size()};
+            detail::key_impl::encode_value(v, fs);
+            return out;
+         }
+         else
+         {
+            size_stream ss;
+            detail::key_impl::encode_value(v, ss);
+            std::vector<char> out(ss.size);
+            fast_buf_stream   fs{out.data(), out.size()};
+            detail::key_impl::encode_value(v, fs);
+            return out;
+         }
+      }
+
+      // Validate and decode in one pass (the checked decode of
+      // psio/helpers.hpp): the reader checks everything `validate` checks.
+      template <typename T>
+      [[nodiscard]] static codec_status decode_checked(
+         std::span<const char> bytes, T& out)
+      {
+         return detail::key_impl::read_document<T>(bytes, &out);
+      }
    };
 
-   // ── to_key: value → memcmp-sortable `key` bytes ─────────────────────────────
-   // Returns std::array<char, N> when the encoded size is a compile-time constant
-   // (fixed-width keys — integers, floats, enums, fixed reflected structs): encoded
-   // straight into the array on the stack, no packsize pass, no allocation. Returns
-   // std::vector<char> when the size depends on the value (strings, vectors, optionals).
-   // Take the result with `auto`; both expose .data()/.size().
-   template <typename T>
-   auto to_key(const T& v)
-   {
-      constexpr auto fixed = detail::key_impl::key_fixed_size<T>();
-      if constexpr (fixed.has_value())
-      {
-         std::array<char, *fixed> out;
-         fast_buf_stream          fs{out.data(), out.size()};
-         detail::key_impl::encode_value(v, fs);
-         return out;
-      }
-      else
-      {
-         size_stream ss;
-         detail::key_impl::encode_value(v, ss);
-         std::vector<char> out(ss.size);
-         fast_buf_stream   fs{out.data(), out.size()};
-         detail::key_impl::encode_value(v, fs);
-         return out;
-      }
-   }
+   // psio::to_key(v), from_key<T>(bytes), validate_key<T>(bytes), key_size(v).
+   PSIO_FORMAT_HELPERS(key)
 
    // ── Composite keys ──────────────────────────────────────────────────────────
    //

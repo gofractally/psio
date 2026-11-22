@@ -278,6 +278,7 @@ namespace psio
       using element_type                    = nested<T, V>;
       using format_type                     = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
       view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}

@@ -80,6 +80,11 @@ namespace psio {
    template <typename K, typename V, typename Fmt>
    class mutable_map_entry;
 
+   // The formats that have the `F_mutable_view<T>` helper (psio/helpers.hpp).
+   template <typename Fmt>
+      requires detail::is_pssz_format_v<Fmt>
+   inline constexpr bool detail::helpers::mutable_view_format_v<Fmt> = true;
+
    namespace detail {
 
       // ── The extension point for types that must not be mutated in place ──
@@ -257,6 +262,9 @@ namespace psio {
    template <typename T, typename Fmt>
    class mutable_view
    {
+      static_assert(!std::is_const_v<T>,
+                    "psio::mutable_view<const T, Fmt>: a mutable view of a const type is a "
+                    "contradiction; the read-only view is psio::view<T, Fmt>");
       static_assert(detail::is_pssz_format_v<Fmt>,
                     "psio::mutable_view: in-place mutation is defined for PSSZ formats only");
       static_assert(!detail::mutation_blocked_v<T>,

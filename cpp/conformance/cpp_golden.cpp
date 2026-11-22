@@ -90,32 +90,32 @@ int main() {
       PSIO_FOR_EACH_SYMMETRIC_BINARY_FMT(RECORDS)
       PSIO_FOR_EACH_TEXT_FMT(RECORDS)
 #undef RECORDS
-      records("frac16", psio::frac16{});
+      records("frac16", psio::experimental::frac16{});
       records("bson", psio::bson{});
       records("msgpack", psio::msgpack{});
       records("protobuf", psio::protobuf{});
       records("flatbuf", psio::flatbuf{});
-      fixture("frac32", "u32", psio::frac32{}, std::uint32_t{0xdeadbeef});
-      fixture("frac32", "string", psio::frac32{}, std::string{"hello"});
-      fixture("frac32", "vector", psio::frac32{}, std::vector<std::uint32_t>{1, 2, 3});
-      fixture("frac32", "optional_some", psio::frac32{}, std::optional<std::uint32_t>{42});
-      fixture("frac32", "optional_none", psio::frac32{}, std::optional<std::uint32_t>{});
-      fixture("frac32", "nested", psio::frac32{}, InteropEnvelope{
+      fixture("frac32", "u32", psio::experimental::frac32{}, std::uint32_t{0xdeadbeef});
+      fixture("frac32", "string", psio::experimental::frac32{}, std::string{"hello"});
+      fixture("frac32", "vector", psio::experimental::frac32{}, std::vector<std::uint32_t>{1, 2, 3});
+      fixture("frac32", "optional_some", psio::experimental::frac32{}, std::optional<std::uint32_t>{42});
+      fixture("frac32", "optional_none", psio::experimental::frac32{}, std::optional<std::uint32_t>{});
+      fixture("frac32", "nested", psio::experimental::frac32{}, InteropEnvelope{
          {42,"Alice",{1,256,65536},true}, {{0,"",{},false},{7,"Bob",{9},true}},
          "hello", std::string{"chosen"}});
-      fixture("frac32", "nested_empty", psio::frac32{}, InteropEnvelope{
+      fixture("frac32", "nested_empty", psio::experimental::frac32{}, InteropEnvelope{
          {0,"",{},false}, {}, std::nullopt, std::uint32_t{7}});
-      fixture("frac32", "string_vector", psio::frac32{}, std::vector<std::string>{"", "hello", "world"});
-      fixture("frac32", "optional_vector", psio::frac32{}, std::vector<std::optional<std::string>>{std::nullopt, "", "hello"});
-      fixture("frac32", "optional_empty_string", psio::frac32{}, std::optional<std::string>{""});
-      fixture("frac32", "optional_empty_vector", psio::frac32{}, std::optional<std::vector<std::uint32_t>>{{}});
-      fixture("frac32", "optional_missing_vector", psio::frac32{}, std::optional<std::vector<std::uint32_t>>{});
+      fixture("frac32", "string_vector", psio::experimental::frac32{}, std::vector<std::string>{"", "hello", "world"});
+      fixture("frac32", "optional_vector", psio::experimental::frac32{}, std::vector<std::optional<std::string>>{std::nullopt, "", "hello"});
+      fixture("frac32", "optional_empty_string", psio::experimental::frac32{}, std::optional<std::string>{""});
+      fixture("frac32", "optional_empty_vector", psio::experimental::frac32{}, std::optional<std::vector<std::uint32_t>>{{}});
+      fixture("frac32", "optional_missing_vector", psio::experimental::frac32{}, std::optional<std::vector<std::uint32_t>>{});
       // Vector slots point to complete values. The legacy embedded-container
       // sentinels (0/1) and offsets into the fixed section are not valid here.
       for (unsigned offset = 0; offset < 4; ++offset) {
          std::vector<char> bytes{4,0,0,0,static_cast<char>(offset),0,0,0};
-         if (psio::validate<std::vector<std::string>>(psio::frac32{}, std::span<const char>{bytes}).ok() ||
-             psio::validate<std::vector<std::optional<std::string>>>(psio::frac32{}, std::span<const char>{bytes}).ok())
+         if (psio::validate<std::vector<std::string>>(psio::experimental::frac32{}, std::span<const char>{bytes}).ok() ||
+             psio::validate<std::vector<std::optional<std::string>>>(psio::experimental::frac32{}, std::span<const char>{bytes}).ok())
             throw std::runtime_error("C++ accepted a vector offset into its fixed section");
          emit("frac32_invalid_strings", std::to_string(offset), bytes);
          emit("frac32_invalid_optionals", std::to_string(offset), bytes);

@@ -29,6 +29,7 @@
 
 #include <psio/adapter.hpp>
 #include <psio/buffer.hpp>
+#include <psio/format.hpp>
 #include <psio/shapes.hpp>
 #include <psio/storage.hpp>
 
@@ -55,6 +56,42 @@ namespace psio {
    // is a hard error).
    template <typename T, typename Fmt, storage Store>
    class view;
+
+   // `view` reads. Every specialization instantiates this, so naming the
+   // mutable-borrow storage kind for a view is an error with a pointer to
+   // the type that writes, not a read-only view with a misleading tag.
+   namespace detail {
+      template <storage Store>
+      struct read_view_store
+      {
+         static_assert(Store != storage::mut_borrow,
+                       "psio::view<T, Fmt, storage::mut_borrow>: psio::view is the read-only "
+                       "view; the view that writes is psio::mutable_view<T, Fmt>");
+      };
+   }  // namespace detail
+
+   // ── view<const T, Fmt, Store> ─────────────────────────────────────────
+   //
+   // A view is read-only whether or not T is spelled const: view<const T,
+   // Fmt> is view<T, Fmt> under another name (like std::span<const T>, the
+   // const says the bytes are not written, which is true of every view). It
+   // derives from view<T, Fmt, Store>, adds nothing, and converts implicitly
+   // both ways, so either spelling can be passed where the other is
+   // expected. Sub-views (members, elements) are the plain view<Child, …>.
+   //
+   // pjson's typed view (psio/pjson_typed.hpp) is a separate template
+   // specialization with its own surface and is not covered.
+   template <typename T, typename Fmt, storage Store>
+      requires (!std::is_same_v<Fmt, pjson_format>)
+   class view<const T, Fmt, Store> : public view<T, Fmt, Store>
+   {
+      using base = view<T, Fmt, Store>;
+
+    public:
+      using base::base;
+      view() = default;
+      view(const base& v) noexcept : base(v) {}
+   };
 
    // ── view_layout traits ────────────────────────────────────────────────
    //
@@ -169,6 +206,7 @@ namespace psio {
       using element_type                    = T;
       using format_type                     = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
@@ -208,6 +246,7 @@ namespace psio {
       using element_type                    = std::string;
       using format_type                     = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
@@ -247,6 +286,7 @@ namespace psio {
       using format_type                     = Fmt;
       using value_type                      = T;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s), root_(s) {}
@@ -333,6 +373,7 @@ namespace psio {
       using format_type = Fmt;
       using value_type = T;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
       explicit view(std::span<const char> bytes) noexcept : data_(bytes), root_(bytes) {}
       view(std::span<const char> bytes, std::span<const char> root) noexcept : data_(bytes), root_(root) {}
@@ -384,6 +425,7 @@ namespace psio {
       using format_type                     = Fmt;
       using value_type                      = T;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s), root_(s) {}
@@ -427,6 +469,7 @@ namespace psio {
       using element_type                    = std::variant<Ts...>;
       using format_type                     = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s), root_(s) {}
@@ -517,6 +560,7 @@ namespace psio {
       using element_type                    = T;
       using format_type                     = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
@@ -600,6 +644,7 @@ namespace psio {
       using element_type                    = T;
       using format_type                     = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s), root_(s) {}

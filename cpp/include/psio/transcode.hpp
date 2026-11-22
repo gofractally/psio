@@ -29,7 +29,6 @@
 
 #include <psio/cpo.hpp>
 #include <psio/dynamic_bin.hpp>
-#include <psio/dynamic_frac.hpp>
 #include <psio/dynamic_json.hpp>
 #include <psio/dynamic_pssz.hpp>
 #include <psio/dynamic_ssz.hpp>

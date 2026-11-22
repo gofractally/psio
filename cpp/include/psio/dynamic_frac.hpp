@@ -5,9 +5,12 @@
 // uses frac's header + heap-offset + length-prefix wire format
 // (design § 5.3.7 / Phase 8 / §14f).
 //
+// Fracpack is an experimental format, not a supported wire format: see
+// psio/frac.hpp. Everything public here is in psio::experimental.
+//
 // Provides:
-//   psio::frac_encode_dynamic<W>(schema, dv)       → std::vector<char>
-//   psio::frac_decode_dynamic<W>(schema, bytes)    → dynamic_value
+//   psio::experimental::frac_encode_dynamic<W>(schema, dv)    → std::vector<char>
+//   psio::experimental::frac_decode_dynamic<W>(schema, bytes) → dynamic_value
 //
 // and the matching `tag_invoke` overloads so `psio::encode_dynamic(frac_<W>{}, …)`
 // and `psio::decode_dynamic(frac_<W>{}, …)` route through these.
@@ -623,6 +626,9 @@ namespace psio
 
    }  // namespace detail::dyn_frac_impl
 
+   namespace experimental
+   {
+
    template <std::size_t W>
    std::vector<char> frac_encode_dynamic(const schema& sc, const dynamic_value& dv)
    {
@@ -667,5 +673,7 @@ namespace psio
    {
       return frac_decode_dynamic<2>(sc, bytes);
    }
+
+   }  // namespace experimental
 
 }  // namespace psio

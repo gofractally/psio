@@ -1,7 +1,7 @@
 # Exception-disabled codec preparation
 
-The focused consumer `cpp/tests/guest_codec_check.cpp` uses the existing frac32
-and PSSZ codecs, status CPOs, and annotation metadata. It introduces no format,
+The focused consumer `cpp/tests/guest_codec_check.cpp` uses the experimental frac32
+(`psio::experimental`) and PSSZ codecs, status CPOs, and annotation metadata. It introduces no format,
 wire framing, or replacement runtime validation walker. Valid encodings remain
 unchanged.
 

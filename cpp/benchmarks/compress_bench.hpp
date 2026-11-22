@@ -397,7 +397,7 @@ namespace psio_bench::compress {
    {
       cell(out, shape, "ssz",      psio::ssz{},     v);
       cell(out, shape, "pssz",     psio::pssz{},    v);
-      cell(out, shape, "fracpack", psio::frac32{},  v);
+      cell(out, shape, "fracpack", psio::experimental::frac32{},  v);
       cell(out, shape, "bin",      psio::bin{},     v);
       cell(out, shape, "borsh",    psio::borsh{},   v);
       cell(out, shape, "bincode",  psio::bincode{}, v);

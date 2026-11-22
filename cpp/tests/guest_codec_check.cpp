@@ -26,17 +26,17 @@ PSIO_REFLECT(GuestGuarded, id)
 struct GuestGuardAdapter {
     static std::size_t packsize(const GuestGuarded&) { return 4; }
     template<class Sink> static void encode(const GuestGuarded& x, Sink& sink) {
-        psio::encode(psio::frac32{},x.id,sink);
+        psio::encode(psio::experimental::frac32{},x.id,sink);
     }
     static GuestGuarded decode(std::span<const char> bytes) {
 #if defined(__cpp_exceptions)
-        return {psio::decode<std::uint32_t>(psio::frac32{},bytes)};
+        return {psio::decode<std::uint32_t>(psio::experimental::frac32{},bytes)};
 #else
         std::abort(); // A guest strict validator must never reach this.
 #endif
     }
     static psio::codec_status validate(std::span<const char> bytes) {
-        return psio::validate<std::uint32_t>(psio::frac32{},bytes);
+        return psio::validate<std::uint32_t>(psio::experimental::frac32{},bytes);
     }
     static psio::codec_status validate_strict(std::span<const char> bytes) { return validate(bytes); }
 };
@@ -79,7 +79,7 @@ template<class Fmt> bool check(Fmt fmt, const char* name) {
         !psio::validate_strict<GuestPlain>(fmt,bytes).ok()) return fail(__LINE__);
     const auto decoded=psio::decode<GuestPlain>(fmt,bytes);
     if (decoded.id!=7 || decoded.label!="hi") return fail(__LINE__);
-    if constexpr (!std::is_same_v<Fmt, psio::frac32>) {
+    if constexpr (!std::is_same_v<Fmt, psio::experimental::frac32>) {
         const auto some=psio::encode(fmt,std::optional<GuestZero>{GuestZero{}});
         const auto none=psio::encode(fmt,std::optional<GuestZero>{});
         if(some!=std::vector<char>{1} || none!=std::vector<char>{0} ||
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
         }
         return 3;
     }
-    if(!check(psio::frac32{},"frac32") || !check(psio::pssz_<1>{},"pssz8") ||
+    if(!check(psio::experimental::frac32{},"frac32") || !check(psio::pssz_<1>{},"pssz8") ||
        !check(psio::pssz_<2>{},"pssz16") || !check(psio::pssz_<4>{},"pssz32") ||
        !check(psio::pssz{},"pssz-auto")) return 1;
     std::puts("guest-codec-preparation=PASS");

@@ -880,4 +880,6 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(bincode)
+
 }  // namespace psio

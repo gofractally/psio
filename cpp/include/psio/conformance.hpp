@@ -63,7 +63,7 @@
 #define PSIO_FOR_EACH_SYMMETRIC_BINARY_FMT(X) \
    X(ssz,     ::psio::ssz{})                   \
    X(pssz,    ::psio::pssz{})                \
-   X(frac32,  ::psio::frac32{})                \
+   X(frac32,  ::psio::experimental::frac32{})                \
    X(bin,     ::psio::bin{})                   \
    X(borsh,   ::psio::borsh{})                 \
    X(bincode, ::psio::bincode{})               \
@@ -75,7 +75,7 @@
 #define PSIO_FOR_EACH_RECORD_BINARY_FMT(X) \
    X(ssz,     ::psio::ssz{})                \
    X(pssz,    ::psio::pssz{})             \
-   X(frac32,  ::psio::frac32{})             \
+   X(frac32,  ::psio::experimental::frac32{})             \
    X(bin,     ::psio::bin{})                \
    X(borsh,   ::psio::borsh{})              \
    X(bincode, ::psio::bincode{})            \

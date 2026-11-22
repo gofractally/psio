@@ -1,30 +1,46 @@
 #pragma once
 //
-// psio/frac.hpp — fracpack format tag family.
+// psio/frac.hpp — fracpack, an experimental format: psio::experimental.
 //
-// Legacy prototype retained for benchmark comparisons of data-layout designs.
-// pSSZ (psio/pssz.hpp) is its successor.
+// NOT A SUPPORTED WIRE FORMAT. Fracpack exists in psio to study one format
+// design trade-off against pSSZ (psio/pssz.hpp), psio's schema-driven binary
+// format:
 //
-// Byte-compatible with v1 psio1::fracpack on the MVP shape set —
-// primitives, std::array, std::vector, std::string, std::optional,
-// std::variant, reflected records. Wire details:
+//   - fracpack stores a size with every variable-size value (a byte-count
+//     prefix on each string and vector, a fixed-region size on each
+//     extensible record) and addresses heap values by an offset relative to
+//     the slot that holds it;
+//   - pSSZ stores no sizes: the size of a value is inferred from the offsets
+//     around it (the delta between consecutive offsets).
+//
+// It is kept so the two layouts can be measured on the same shapes with the
+// same encoder discipline (cpp/benchmarks, docs/format-comparison.md). No
+// data should be stored or exchanged in it, it may change or be removed
+// without notice, and it has none of the per-format helper names
+// (docs/helpers.md).
+//
+// It is not byte-compatible with psibase's fracpack. It produces the same
+// bytes for the shapes in cpp/tests/frac_legacy_fixtures.hpp (records with
+// optional members, a SignedTransaction), and differs elsewhere: std::tuple
+// is not supported, and std::vector<std::optional<std::string>> encodes
+// differently. Nothing here should be used to read or write psibase
+// fracpack data.
+//
+// Wire details:
 //
 //   1. Records use pointer-relative offsets (heap_pos − slot_pos) with
 //      a u16 header holding the fixed_region size. Sentinel slot values:
 //        0 → Some(empty container) / non-optional empty container
 //        1 → None (std::optional only)
 //   2. Vectors and strings use a W-byte byte-count prefix.
-//   3. Variant encoding (v1 parity): 1-byte tag (high bit MUST be
-//      clear, ≤ 128 alternatives) + W-byte size_type + payload bytes.
+//   3. Variant encoding: 1-byte tag (high bit MUST be clear, ≤ 128
+//      alternatives) + W-byte size_type + payload bytes.
 //
-// Exposed tags:
-//   psio::frac_<4>  (alias psio::frac32)
-//   psio::frac_<2>  (alias psio::frac16)
+// Tags:
+//   psio::experimental::frac_<4>  (alias psio::experimental::frac32)
+//   psio::experimental::frac_<2>  (alias psio::experimental::frac16)
 //
-// Pending follow-ups (not required for byte-parity tests to pass):
-//   - DWNC (definition_will_not_change) raw-memcpy fast path
-//   - header_type selection per PSIO1_FRAC_MAX_FIXED_SIZE for structs
-//     whose fixed region exceeds 64 KiB
+// The implementation is in psio::detail::frac_impl.
 
 #include <psio/cpo.hpp>
 #include <psio/detail/unaligned_iter.hpp>
@@ -53,8 +69,10 @@
 
 namespace psio {
 
-   template <std::size_t W>
-   struct frac_;  // fwd — used by adapter-dispatch trait below.
+   namespace experimental {
+      template <std::size_t W>
+      struct frac_;  // fwd — used by adapter-dispatch trait below.
+   }
 
    namespace detail::frac_impl {
 
@@ -413,7 +431,7 @@ namespace psio {
                        std::size_t end, T& out)
       {
          if constexpr (::psio::format_should_dispatch_adapter_v<
-                          ::psio::frac_<W>, T>)
+                          ::psio::experimental::frac_<W>, T>)
          {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
                                              ::psio::binary_category>;
@@ -576,7 +594,7 @@ namespace psio {
          // assume a vector<char>-like sink; route through a temp
          // vector for non-vector sinks.
          if constexpr (::psio::format_should_dispatch_adapter_v<
-                          ::psio::frac_<W>, T>)
+                          ::psio::experimental::frac_<W>, T>)
          {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
                                              ::psio::binary_category>;
@@ -1277,7 +1295,7 @@ namespace psio {
          // frac only framed it. Self-delegating adapters fall
          // through to the shape walk.
          if constexpr (::psio::format_should_dispatch_adapter_v<
-                          ::psio::frac_<W>, T>)
+                          ::psio::experimental::frac_<W>, T>)
          {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
                                              ::psio::binary_category>;
@@ -1450,7 +1468,7 @@ namespace psio {
       std::size_t size_of_v(const T& v) noexcept
       {
          if constexpr (::psio::format_should_dispatch_adapter_v<
-                          ::psio::frac_<W>, T>)
+                          ::psio::experimental::frac_<W>, T>)
          {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
                                           ::psio::binary_category>;
@@ -1753,7 +1771,7 @@ namespace psio {
          // Adapter dispatch — the adapter framed bytes; treat the
          // payload as opaque (the host framing already bounds it).
          if constexpr (::psio::format_should_dispatch_adapter_v<
-                          ::psio::frac_<W>, T>)
+                          ::psio::experimental::frac_<W>, T>)
          {
             return codec_ok();
          }
@@ -2617,6 +2635,10 @@ namespace psio {
 
    }  // namespace detail::frac_impl
 
+   // The experimental namespace is the statement that these tags are not a
+   // supported wire format (see the top of this header).
+   namespace experimental {
+
    template <std::size_t W>
    struct frac_ : format_tag_base<frac_<W>>
    {
@@ -2723,5 +2745,7 @@ namespace psio {
 
    using frac16 = frac_<2>;
    using frac32 = frac_<4>;
+
+   }  // namespace experimental
 
 }  // namespace psio

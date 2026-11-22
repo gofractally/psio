@@ -229,12 +229,12 @@ template <typename Fmt>
 struct fmt_traits;
 
 template <>
-struct fmt_traits<psio::frac32>
+struct fmt_traits<psio::experimental::frac32>
 {
    static constexpr const char* name = "frac32";
 };
 template <>
-struct fmt_traits<psio::frac16>
+struct fmt_traits<psio::experimental::frac16>
 {
    static constexpr const char* name = "frac16";
 };
@@ -328,8 +328,8 @@ int main()
    std::printf("encoder is O(N); growing ns/leaf means fractal cost.\n");
 
    run_one_format<psio::protobuf>();
-   run_one_format<psio::frac32>();
-   run_one_format<psio::frac16>();
+   run_one_format<psio::experimental::frac32>();
+   run_one_format<psio::experimental::frac16>();
    run_one_format<psio::pssz>();
    run_one_format<psio::ssz>();
    run_one_format<psio::bin>();
