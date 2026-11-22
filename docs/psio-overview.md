@@ -235,12 +235,47 @@ namespace chain::svc {
 
 `psio::reflect<T>` then exposes, next to the field API, `method_count`,
 `method_pointer<I>`, `method_type<I>`, `method_name<I>` / `method_names`,
-`method_param_names<I>`, `method_result<I>`, `method_args<I>`,
-`method_params<I>`, `index_of_method(name)`,
+`method_param_names<I>`, `method_traits<I>`, `method_result<I>`,
+`method_args<I>`, `method_params<I>`, `method_is_static<I>`,
+`method_is_const<I>`, `index_of_method(name)`, `find_method_index(name)`,
 `index_of_method_hash<Hash>(key)` (a caller-supplied 64-bit hash; two
 methods with one key do not compile), `for_each_method(fn)` and
 `invoke_method<I>(object, argument_tuple)`. Overloaded member functions
 cannot be listed (their address is ambiguous).
+
+Rules of the method surface:
+
+- **Every reflected type has all of it.** A type that lists no `method(...)`
+  has the same members with the same names and kinds: `method_count` is 0,
+  `method_names` is empty, the lookups find nothing, `for_each_method` calls
+  nothing. Generic code may name `reflect<T>::method_param_names<I>` (or any
+  other member) in a per-method callback for any reflected `T`. Using a
+  per-index member with an index that is not below `method_count` is a
+  compile error, "psio: method index out of range".
+- **The walk gives the index and the name.** `for_each_method(fn)` calls
+  `fn(std::integral_constant<std::size_t, I>{}, name)` per method, in the
+  order listed. Everything else about method `I` is a member of
+  `reflect<T>` named with that index:
+
+  ```cpp
+  psio::reflect<T>::for_each_method([&](auto index, std::string_view name) {
+     constexpr std::size_t I = decltype(index)::value;
+     using params = typename psio::reflect<T>::template method_params<I>;
+     describe(name, psio::reflect<T>::template method_param_names<I>,
+              std::type_identity<params>{});
+  });
+  ```
+- **Metadata does not need the methods' definitions.** Only
+  `method_pointer<I>` and `invoke_method<I>` refer to the functions. The
+  count, the names, the parameter names, `method_type<I>` and what derives
+  from it (`method_traits`, `method_result`, `method_args`, `method_params`,
+  `method_is_static`, `method_is_const`), the lookups, `for_each_method`, an
+  interface taken from the reflected type (`interface_info`, the schema
+  builder's `insert_interface`, the WIT generators), a GraphQL schema's
+  `sdl()` and a proxy (below) are
+  computed from the declarations. A program that describes a type — its
+  schema, the encoding of a call to it — links without the type's
+  implementation.
 
 Annotations are part of the same declaration, for a type in any (nested)
 namespace, in the class body or after the type:
@@ -280,7 +315,47 @@ field is a member `name()` that returns `P::get<I, &T::name>()` and each
 method a member `name(args...)` that returns
 `P::call<I, &T::name>(args...)` — index and member pointer are template
 value arguments. An interface's `interface_info<Tag>::proxy<P>` uses the
-same call convention.
+same call convention. A call dispatcher declares
+
+```cpp
+template <std::size_t I, auto MemberPtr, typename... Args>
+auto call(Args&&... args);
+```
+
+Rules of a proxied call:
+
+- **Arguments are forwarded as references.** `Args&&...` are forwarding
+  references: `call` sees an lvalue argument as `A&` (or `const A&`) and an
+  rvalue as `A`, and nothing is copied or moved between the caller and
+  `call`. There is no by-value mode. A dispatcher that needs decayed or
+  owned types — to choose an encoding from `std::decay_t<Args>`, or to keep
+  the arguments after the call returns — decays them itself.
+- **A proxy does not need the method's definition.** The member pointer is
+  a template argument; a dispatcher that encodes a call instead of making it
+  links without the reflected type's implementation.
+- **`call` is not told the reflected type.** `MemberPtr` is `&T::name` as
+  the language types it: for a method `T` inherits it is
+  `R (Base::*)(...)`, and for a static method a plain function pointer. The
+  class recovered from the pointer's type is then the base — in whose
+  reflection index `I` is another method, or none — or no class at all. A
+  dispatcher that needs `T` takes it as its own template parameter, which
+  is right for every method (whoever writes `reflect<T>::proxy<P>` knows
+  `T`):
+
+  ```cpp
+  template <typename T>
+  struct recorder {
+     template <std::size_t I, auto MemberPtr, typename... Args>
+     void call(Args&&...) { log(psio::reflect<T>::template method_name<I>); }
+  };
+  psio::reflect<token>::proxy<recorder<token>> api;
+  ```
+
+  A dispatcher that recovers the class from the pointer anyway uses
+  `psio::proxied_class<I, MemberPtr>`: the class of `MemberPtr`, checked to
+  be the type whose reflection has `MemberPtr` as method `I`. For an
+  inherited or a static method it does not compile, with a message that
+  says to pass the reflected type.
 
 `PSIO_INTERFACE(Tag, [types(...)], [funcs(...)], [name("...")],
 [package(pkg)])` registers a WIT interface from any namespace. With
