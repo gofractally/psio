@@ -391,6 +391,39 @@ namespace psio {
       }
    };
 
+   // A std::pair is the 2-tuple of its members: the tuple's view, with the
+   // members also reachable as first() / second().
+   template <typename A, typename B, typename Fmt, storage Store>
+      requires (detail::is_pssz_format_v<Fmt> &&
+                !::psio::format_should_dispatch_adapter_v<Fmt, std::pair<A, B>>)
+   class view<std::pair<A, B>, Fmt, Store>
+       : public view<typename detail::is_std_pair<std::pair<A, B>>::tuple_type, Fmt, Store>
+   {
+      using base = view<typename detail::is_std_pair<std::pair<A, B>>::tuple_type, Fmt, Store>;
+
+    public:
+      using element_type = std::pair<A, B>;
+      using base::base;
+      auto first() const noexcept { return this->template get<0>(); }
+      auto second() const noexcept { return this->template get<1>(); }
+   };
+
+   // A map / set is the list of its entries / elements in canonical order:
+   // the view of that list (size(), operator[], iteration), whose elements
+   // are views of the entries (tuple<K, V>) or of the elements. The frame is
+   // expected to have been validated, which checks the order.
+   template <typename M, typename Fmt, storage Store>
+      requires (detail::is_assoc_v<M> && detail::is_pssz_format_v<Fmt> &&
+                !::psio::format_should_dispatch_adapter_v<Fmt, M>)
+   class view<M, Fmt, Store> : public view<detail::assoc_list_t<M>, Fmt, Store>
+   {
+      using base = view<detail::assoc_list_t<M>, Fmt, Store>;
+
+    public:
+      using element_type = M;
+      using base::base;
+   };
+
    // utf8_string<N> is a String on the wire: the view borrows its bytes. As
    // for every view, the frame is expected to have been validated (which
    // checks UTF-8 and the bound for this type).

@@ -339,6 +339,10 @@ inline codec_status bitlist_count(std::span<const char> wire, std::size_t bound,
 //                          and write
 //   hex                    bytes over a byte container
 //   bitvector, bitlist     packed bits
+//   map, set               a list whose entries are in strictly ascending
+//                          key order (detail/pssz_ir_assoc.hpp): "map" over
+//                          a list of two-member tuples (key, value), "set"
+//                          over a list of elements
 //   box                    the inner type on the wire, with no inferred
 //                          size bound (C++ / Rust Box<T>): the typed codecs
 //                          give a boxed value no bound, so a type holding
@@ -358,10 +362,14 @@ inline bool text_adapter_id(std::string_view id) noexcept
 {
    return id == "string" || id == "utf8";
 }
+inline bool assoc_id(std::string_view id) noexcept
+{
+   return id == "map" || id == "set";
+}
 inline bool wire_custom_id(std::string_view id) noexcept
 {
    return id == "bool" || id == "char" || byte_adapter_id(id) || id == "bitvector" ||
-          id == "bitlist" || id == "unknown";
+          id == "bitlist" || assoc_id(id) || id == "unknown";
 }
 
 // W = 1, 2, 4: the explicit profile. W = 0: the automatic profile.
@@ -573,6 +581,13 @@ template <std::size_t W> class Codec
                    PSIO_PSSZ_IR_TRY(inner(t.type, child));
                    return sequence(*child);
                 }
+                else if (assoc_id(t.id))
+                {
+                   // A map / set is bounded as the list of its entries.
+                   AssocShape shape;
+                   PSIO_PSSZ_IR_TRY(assoc_shape(t, shape));
+                   return sequence(*shape.list);
+                }
                 // Bit types have no inferred bound.
              }
              else if constexpr (std::is_same_v<T, schema_types::Struct> ||
@@ -629,8 +644,10 @@ template <std::size_t W> class Codec
          out = 4;
          // A list's offset table is always 4 wide (a std::vector has no
          // bound of its own; a bounded list keeps the vector's width).
+         auto custom = std::get_if<schema_types::Custom>(&type.value);
          if (!std::holds_alternative<schema_types::List>(type.value) &&
-             !std::holds_alternative<schema_types::BoundedList>(type.value))
+             !std::holds_alternative<schema_types::BoundedList>(type.value) &&
+             !(custom && assoc_id(custom->id)))
          {
             std::optional<std::uint64_t> cap;
             PSIO_PSSZ_IR_TRY(cap_of(type, cap));
@@ -1018,6 +1035,12 @@ template <std::size_t W> class Codec
                    PSIO_PSSZ_IR_TRY(inner(t.type, child));
                    return layout(*child, out, n + 1);
                 }
+                if (assoc_id(t.id))
+                {
+                   // A list: variable size.
+                   AssocShape shape;
+                   return assoc_shape(t, shape);
+                }
                 return fail("pssz IR: unsupported custom adapter");
              }
              else if constexpr (std::is_same_v<T, schema_types::FracPack>)
@@ -1095,6 +1118,11 @@ template <std::size_t W> class Codec
                    const schema_types::AnyType *child;
                    PSIO_PSSZ_IR_TRY(inner(t.type, child));
                    return can_be_empty(*child, out, n + 1);
+                }
+                if (assoc_id(t.id))
+                {
+                   out = true;
+                   return codec_ok();
                 }
                 return fail("pssz IR: unsupported optional adapter");
              }
@@ -1477,6 +1505,11 @@ template <std::size_t W> class Codec
                          return fail("pssz IR: null schema box");
                       PSIO_PSSZ_IR_TRY(bound_bytes(*t.type, 0, false));
                    }
+                   else if (assoc_id(t.id))
+                   {
+                      AssocShape shape;
+                      PSIO_PSSZ_IR_TRY(assoc_shape(t, shape, true));
+                   }
                    else
                       return fail("pssz IR: unsupported custom adapter");
                    PSIO_PSSZ_IR_TRY(push(t.type));
@@ -1573,6 +1606,8 @@ template <std::size_t W> class Codec
              }
              else if constexpr (std::is_same_v<T, schema_types::Custom>)
              {
+                if (assoc_id(t.id))
+                   return encode_assoc(t, value, out, n);
                 const schema_types::AnyType *child;
                 PSIO_PSSZ_IR_TRY(inner(t.type, child));
                 if (t.id == "bool")
@@ -1736,6 +1771,40 @@ template <std::size_t W> class Codec
 
    codec_status decode_at(const schema_types::AnyType &input, std::span<const char> bytes,
                           Value &out, std::size_t n = 0);
+
+   // ── Maps, sets and the key encoding (detail/pssz_ir_assoc.hpp) ──────────
+   //
+   // A "map" / "set" Custom node: its list, the list's element, and the
+   // key (and mapped value) types.
+   struct AssocShape
+   {
+      bool map = false;
+      const schema_types::AnyType *list = nullptr;
+      const schema_types::Box<schema_types::AnyType> *element = nullptr;
+      const schema_types::AnyType *key = nullptr;
+      const schema_types::AnyType *value = nullptr;  // map only
+      std::optional<std::uint64_t> max;              // BoundedList
+   };
+   codec_status assoc_shape(const schema_types::Custom &custom, AssocShape &out,
+                            bool check_key = false) const;
+   // The `key` encoding (docs/key-spec.md) of a dynamic value, appended.
+   codec_status key_at(const schema_types::AnyType &input, const Value &value,
+                       std::vector<char> &out, std::size_t n = 0) const;
+   // Indices of a map / set value's entries in canonical order.
+   codec_status assoc_order(const schema_types::Custom &custom, const Sequence &items,
+                            std::vector<std::size_t> &order, bool *duplicate = nullptr) const;
+
+ private:
+   codec_status has_key(const schema_types::AnyType &input,
+                        std::vector<const schema_types::AnyType *> &active) const;
+   codec_status key_octet(const schema_types::AnyType &element, bool &octet,
+                          bool &is_signed) const;
+   codec_status assoc_keys(const AssocShape &shape, const Sequence &items,
+                           std::vector<std::vector<char>> &keys) const;
+   codec_status encode_assoc(const schema_types::Custom &custom, const Value &value,
+                             std::vector<char> &out, std::size_t n) const;
+   codec_status decode_assoc(const schema_types::Custom &custom, std::span<const char> bytes,
+                             Value &out, std::size_t n);
 };
 
 template <std::size_t W>
@@ -1796,6 +1865,8 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
           }
           else if constexpr (std::is_same_v<T, schema_types::Custom>)
           {
+             if (assoc_id(t.id))
+                return decode_assoc(t, bytes, out, n);
              const schema_types::AnyType *child;
              PSIO_PSSZ_IR_TRY(inner(t.type, child));
              if (t.id == "bool")
@@ -2094,3 +2165,5 @@ template <std::size_t W>
    return codec_ok();
 }
 } // namespace psio::pssz_ir
+
+#include <psio/detail/pssz_ir_assoc.hpp>

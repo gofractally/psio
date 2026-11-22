@@ -25,6 +25,7 @@
 
 #include <psio/adapter.hpp>
 #include <psio/annotate.hpp>
+#include <psio/detail/assoc.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
 #include <psio/shapes.hpp>
@@ -179,6 +180,9 @@ namespace psio {
             if constexpr (!fixed_payload<E>()) element = add(element, 4);
             return multiply(*count, element);
          }
+         else if constexpr (::psio::detail::is_assoc_v<F>)
+            // A map / set is the list of its entries / elements.
+            return max_field_with_annots<::psio::detail::assoc_list_t<F>>(annots);
          else if constexpr (is_std_optional<F>::value)
          {
             using E = typename F::value_type;
@@ -236,7 +240,7 @@ namespace psio {
             }(std::make_index_sequence<R::member_count>{});
             return total;
          }
-         else if constexpr (std::is_same_v<U, std::string> ||
+         else if constexpr (std::is_same_v<U, std::string> || ::psio::detail::is_assoc_v<U> ||
                             is_std_vector<U>::value || is_std_optional<U>::value)
             return max_field_with_annots<U>(::psio::effective_annotations<U, ::psio::type<U>{}>::value);
          else return std::nullopt;

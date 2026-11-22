@@ -20,6 +20,13 @@
 //                     attribute, else its name); json [index, value]
 //   option            null or the value
 //   list / array      array (exact count for an array, at most N bounded)
+//   set               array of its elements, in any order; a repeated
+//                     element is an error
+//   map               object {"k": v, ...} when the key type's text is a
+//                     string by type ("string" / "utf8", or a custom
+//                     presentation with a registered handler), else an array
+//                     of [k, v] pairs; any order, a repeated key is an error
+//                     (detail/pssz_ir_json_assoc.hpp)
 //   string adapters   JSON string (ijson: no noncharacters). "utf8" is
 //                     UTF-8 by type; a raw "string" whose bytes are not
 //                     UTF-8 is valid PSSZ but has no text (an error)
@@ -78,12 +85,13 @@ namespace json_detail
 {
 using namespace schema_types;
 inline std::string_view variant_name(const Member &member);
+struct map_key_text;
 } // namespace json_detail
 
 // ── Custom text presentations ──────────────────────────────────────────────
 //
 // A Custom node whose id is not part of the binary form (pssz_ir.hpp lists
-// those: bool, char, string, utf8, hex, bitvector, bitlist, box) names a
+// those: bool, char, string, utf8, hex, bitvector, bitlist, map, set, box) names a
 // text presentation of its inner type: `Custom{type: Int{64}, id:
 // "AccountNumber"}` is a u64 on the wire that reads and writes as the
 // account's name. A handler registered for the id converts between the
@@ -797,6 +805,8 @@ template <JsonCursor C> class Reader
          return integer(Int{8, false}, form, out);
       if (type.id == "bitvector" || type.id == "bitlist")
          return c.fail("json: bit types have no JSON form");
+      if (detail::assoc_id(type.id))
+         return assoc(type, form, out);
       if (!detail::wire_custom_id(type.id))
          return transparent(type, form, n, out);
       if (!detail::byte_adapter_id(type.id))
@@ -859,6 +869,10 @@ template <JsonCursor C> class Reader
       out = std::move(bytes);
       return true;
    }
+
+   // Maps and sets (detail/pssz_ir_json_assoc.hpp).
+   bool assoc(const Custom &type, int_form form, Value &out);
+   bool key_from_text(const map_key_text &key, std::string_view text, Value &out);
 
    bool record(const std::vector<Member> &members, [[maybe_unused]] std::size_t n, Value &out)
    {
@@ -1207,6 +1221,8 @@ class Writer
       }
       if (type.id == "bitvector" || type.id == "bitlist")
          return w.fail("json: bit types have no JSON form");
+      if (detail::assoc_id(type.id))
+         return assoc(type, value, form);
       if (!detail::wire_custom_id(type.id))
       {
          if (!type.type.get())
@@ -1268,6 +1284,9 @@ class Writer
       }
       w.put(']');
    }
+   // Maps and sets (detail/pssz_ir_json_assoc.hpp).
+   void assoc(const Custom &type, const Value &value, int_form form);
+
    void sequence(const Box<AnyType> &element, const Value &value,
                  std::optional<std::uint64_t> limit, bool exact, int_form form, std::size_t n)
    {
@@ -1603,3 +1622,5 @@ template <psio::detail::json_impl::json_family Fmt>
    return validate_auto(schema, root, bytes, has_unknown);
 }
 } // namespace psio::pssz_ir
+
+#include <psio/detail/pssz_ir_json_assoc.hpp>

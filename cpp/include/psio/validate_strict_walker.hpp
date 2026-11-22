@@ -41,6 +41,7 @@
 
 #include <psio/annotate.hpp>   // element_spec
 #include <psio/adapter.hpp>
+#include <psio/detail/assoc.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
@@ -97,12 +98,33 @@ namespace psio {
       template <typename... T>
       struct semantic_free_variant<std::variant<T...>> : std::true_type {};
 
+      template <typename T>
+      struct semantic_free_tuple : std::false_type {};
+      template <typename... T>
+      struct semantic_free_tuple<std::tuple<T...>> : std::true_type {};
+      template <typename A, typename B>
+      struct semantic_free_tuple<std::pair<A, B>> : std::true_type {};
+
       template <typename T, typename... Seen>
       consteval bool can_validate_without_materialization()
       {
          using U = std::remove_cvref_t<T>;
          if constexpr ((std::is_same_v<U, Seen> || ...))
             return true; // A previously inspected node closes a type-graph cycle.
+         else if constexpr (::psio::detail::is_map_v<U>)
+            // A map / set constrains only the order of its entries, which the
+            // structural walk checks; a pair / tuple is its elements.
+            return can_validate_without_materialization<
+                      ::psio::detail::assoc_key_t<U>, Seen..., U>() &&
+                   can_validate_without_materialization<typename U::mapped_type, Seen..., U>();
+         else if constexpr (::psio::detail::is_set_v<U>)
+            return can_validate_without_materialization<
+               ::psio::detail::assoc_key_t<U>, Seen..., U>();
+         else if constexpr (semantic_free_tuple<U>::value)
+            return []<std::size_t... I>(std::index_sequence<I...>) {
+               return (can_validate_without_materialization<
+                  std::tuple_element_t<I, U>, Seen..., U>() && ...);
+            }(std::make_index_sequence<std::tuple_size_v<U>>{});
          else if constexpr (
             !annotations_need_no_semantics<decltype(::psio::annotate<::psio::type<U>{}>)>() ||
             !annotations_need_no_semantics<decltype(::psio::inherent_annotations<U>::value)>() ||
@@ -251,6 +273,28 @@ namespace psio {
                for (const auto& e : value)
                {
                   auto st = recurse_into<E>(e);
+                  if (!st.ok())
+                     return st;
+               }
+            }
+            return codec_ok();
+         }
+         else if constexpr (::psio::detail::is_assoc_v<U>)
+         {
+            // Keys and mapped values may hold records with their own specs.
+            for (const auto& item : value)
+            {
+               if constexpr (::psio::detail::is_map_v<U>)
+               {
+                  auto st = recurse_into(item.first);
+                  if (st.ok())
+                     st = recurse_into(item.second);
+                  if (!st.ok())
+                     return st;
+               }
+               else
+               {
+                  auto st = recurse_into(item);
                   if (!st.ok())
                      return st;
                }

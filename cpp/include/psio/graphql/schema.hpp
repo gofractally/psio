@@ -346,6 +346,13 @@ namespace psio::graphql
       {
          using type = std::remove_cv_t<T>;
       };
+      // A std::pair is the 2-tuple of its members (the entries of a map
+      // are pairs): `Tuple_<A>_<B>`, or a List when A and B are one type.
+      template <typename A, typename B>
+      struct logical<std::pair<A, B>>
+      {
+         using type = std::tuple<std::remove_const_t<A>, B>;
+      };
       template <typename S>
       using logical_t = typename logical<std::remove_cvref_t<S>>::type;
       template <typename S>
