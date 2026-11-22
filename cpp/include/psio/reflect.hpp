@@ -10,6 +10,9 @@
 //   psio::reflect<T>::member_name<I>                 "field_I"
 //   psio::reflect<T>::field_number<I>                1-based ordinal (source order)
 //   psio::reflect<T>::member_type<I>                 type of field I
+//   psio::reflect<T>::member_types                   std::tuple of the field types
+//   psio::reflect<T>::index_of_member(&T::f)         member pointer → index (optional)
+//   psio::reflect<T>::find_member_index(&T::f)       member pointer → index, member_count if absent
 //   psio::reflect<T>::index_of(name)                 name → index (optional)
 //   psio::reflect<T>::find_index(name)               name → index, member_count if absent
 //   psio::reflect<T>::index_of_field_number(n)       field-number → index
@@ -24,6 +27,9 @@
 //   psio::reflect<T>::method_count
 //   psio::reflect<T>::method_pointer<I>              &T::method_I (a value)
 //   psio::reflect<T>::method_type<I>                 its type
+//   psio::reflect<T>::method_types                   std::tuple of the method types
+//   psio::reflect<T>::index_of_method_pointer(&T::m) method pointer → index (optional)
+//   psio::reflect<T>::find_method_pointer_index(&T::m)  ... method_count if absent
 //   psio::reflect<T>::method_name<I> / method_names  "method_I" / std::array of all
 //   psio::reflect<T>::method_param_names<I>          std::array<string_view, K> as written
 //   psio::reflect<T>::method_result<I>               return type
@@ -246,10 +252,112 @@ namespace psio {
       };
    }
 
+   namespace detail {
+      // What every reflected type has on top of what the macro generates,
+      // computed from member_pointer<I> / member_type<I> / method_type<I>.
+      // Empty for an unreflected type.
+      template <typename Impl, bool = Impl::is_reflected>
+      struct reflect_extras
+      {
+      };
+      template <typename Impl, typename Seq>
+      struct reflect_member_types;
+      template <typename Impl, std::size_t... Is>
+      struct reflect_member_types<Impl, std::index_sequence<Is...>>
+      {
+         using type = std::tuple<typename Impl::template member_type<Is>...>;
+      };
+      template <typename Impl, typename Seq>
+      struct reflect_method_types;
+      template <typename Impl, std::size_t... Is>
+      struct reflect_method_types<Impl, std::index_sequence<Is...>>
+      {
+         using type = std::tuple<typename Impl::template method_type<Is>...>;
+      };
+      // Whether two pointers (to members, to member functions, to
+      // functions) are of one type and equal.
+      template <typename A, typename B>
+      constexpr bool same_pointer(A a, B b) noexcept
+      {
+         if constexpr (std::is_same_v<A, B>)
+            return a == b;
+         else
+            return false;
+      }
+      template <typename Impl>
+         requires requires { Impl::member_count; Impl::method_count; }
+      struct reflect_extras<Impl, true>
+      {
+         // std::tuple<member_type<0>, ..., member_type<member_count - 1>>.
+         using member_types =
+            typename reflect_member_types<Impl, std::make_index_sequence<Impl::member_count>>::type;
+         // std::tuple<method_type<0>, ...>: the types of &T::method.
+         using method_types =
+            typename reflect_method_types<Impl, std::make_index_sequence<Impl::method_count>>::type;
+
+         // The index of the data member `ptr` names (`&T::field`), or
+         // member_count when it is not a listed member.
+         template <typename P>
+         static constexpr std::size_t find_member_index(P ptr) noexcept
+         {
+            return find_member_index_(ptr, std::make_index_sequence<Impl::member_count>{});
+         }
+         // The same as an optional, like index_of(name).
+         template <typename P>
+         static constexpr std::optional<std::size_t> index_of_member(P ptr) noexcept
+         {
+            const std::size_t i = find_member_index(ptr);
+            if (i == Impl::member_count)
+               return std::nullopt;
+            return i;
+         }
+         // The index of the method `ptr` names (`&T::method`), or
+         // method_count. Names method_pointer<I> of every method with the
+         // type of `ptr`, so (unlike the name lookups) it refers to those
+         // functions.
+         template <typename P>
+         static constexpr std::size_t find_method_pointer_index(P ptr) noexcept
+         {
+            return find_method_index_(ptr, std::make_index_sequence<Impl::method_count>{});
+         }
+         template <typename P>
+         static constexpr std::optional<std::size_t> index_of_method_pointer(P ptr) noexcept
+         {
+            const std::size_t i = find_method_pointer_index(ptr);
+            if (i == Impl::method_count)
+               return std::nullopt;
+            return i;
+         }
+
+       private:
+         template <typename P, std::size_t... Is>
+         static constexpr std::size_t find_member_index_(P ptr,
+                                                         std::index_sequence<Is...>) noexcept
+         {
+            std::size_t found = Impl::member_count;
+            (void)((same_pointer(ptr, Impl::template member_pointer<Is>) ? (found = Is, true)
+                                                                        : false) ||
+                   ...);
+            return found;
+         }
+         template <typename P, std::size_t... Is>
+         static constexpr std::size_t find_method_index_(P ptr,
+                                                         std::index_sequence<Is...>) noexcept
+         {
+            std::size_t found = Impl::method_count;
+            (void)((same_pointer(ptr, Impl::template method_pointer<Is>) ? (found = Is, true)
+                                                                        : false) ||
+                   ...);
+            return found;
+         }
+      };
+   }
+
    // Public facade. Inherits from the metadata PSIO_REFLECT registered for
    // T, or from detail::reflect_default_impl for unreflected types.
    template <typename T>
-   struct reflect : detail::reflect_base<T>::type
+   struct reflect : detail::reflect_base<T>::type,
+                    detail::reflect_extras<typename detail::reflect_base<T>::type>
    {
    };
 

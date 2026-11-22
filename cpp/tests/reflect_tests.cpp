@@ -295,3 +295,75 @@ namespace reflect_sfinae
    static_assert(psio::ReflectedEnum<Kind>);
    static_assert(!psio::ReflectedEnum<const Kind&>);
 }  // namespace reflect_sfinae
+
+// ── member_types, index_of_member and the method equivalents (G20) ──────
+namespace reflect_index
+{
+   struct Row
+   {
+      std::uint32_t id;
+      std::string   name;
+      std::uint32_t age;
+      double        score;
+      int           unlisted;
+      void          rename(std::string to);
+      int           total() const;
+      static int    version();
+      int           hidden() const;
+      PSIO_REFLECT(Row, id, name, age, score, method(rename, to), method(total), method(version))
+   };
+   struct Empty
+   {
+      PSIO_REFLECT(Empty)
+   };
+   struct Other
+   {
+      std::uint32_t id;
+      PSIO_REFLECT(Other, id)
+   };
+   using R = psio::reflect<Row>;
+
+   static_assert(std::is_same_v<R::member_types,
+                                std::tuple<std::uint32_t, std::string, std::uint32_t, double>>);
+   static_assert(std::is_same_v<psio::reflect<Empty>::member_types, std::tuple<>>);
+   static_assert(std::is_same_v<psio::reflect<Empty>::method_types, std::tuple<>>);
+   static_assert(std::is_same_v<R::method_types,
+                                std::tuple<void (Row::*)(std::string), int (Row::*)() const,
+                                           int (*)()>>);
+
+   // Two members of one type are told apart; the result is a constant.
+   static_assert(R::find_member_index(&Row::id) == 0);
+   static_assert(R::find_member_index(&Row::name) == 1);
+   static_assert(R::find_member_index(&Row::age) == 2);
+   static_assert(R::find_member_index(&Row::score) == 3);
+   static_assert(R::index_of_member(&Row::age) == std::optional<std::size_t>{2});
+   static_assert(std::is_same_v<R::member_type<R::find_member_index(&Row::name)>, std::string>);
+   static_assert(R::member_name<R::find_member_index(&Row::score)> == "score");
+   // Not a listed member; a member of another type; not a member pointer.
+   static_assert(R::find_member_index(&Row::unlisted) == R::member_count);
+   static_assert(!R::index_of_member(&Row::unlisted));
+   static_assert(!R::index_of_member(&Other::id));
+   static_assert(!R::index_of_member(42));
+   static_assert(!psio::reflect<Empty>::index_of_member(&Row::id));
+
+   static_assert(R::find_method_pointer_index(&Row::rename) == 0);
+   static_assert(R::find_method_pointer_index(&Row::total) == 1);
+   static_assert(R::find_method_pointer_index(&Row::version) == 2);
+   static_assert(R::index_of_method_pointer(&Row::total) == std::optional<std::size_t>{1});
+   static_assert(!R::index_of_method_pointer(&Row::hidden));
+   static_assert(R::method_names[R::find_method_pointer_index(&Row::total)] == "total");
+
+   // An unreflected type has none of these (the facade stays empty).
+   template <typename T>
+   concept has_member_types = requires { typename psio::reflect<T>::member_types; };
+   static_assert(has_member_types<Row> && !has_member_types<int> && !has_member_types<Row&>);
+}  // namespace reflect_index
+
+TEST_CASE("reflect: index_of_member at run time", "[reflect]")
+{
+   using R = psio::reflect<reflect_index::Row>;
+   std::uint32_t reflect_index::Row::* which = &reflect_index::Row::age;
+   CHECK(R::find_member_index(which) == 2);
+   which = &reflect_index::Row::id;
+   CHECK(R::find_member_index(which) == 0);
+}
