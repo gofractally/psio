@@ -107,6 +107,20 @@ test('README: JSON and I-JSON', () => {
     { owner: 'alice', amount: '9007199254740992' });
 });
 
+test('README: the schema as JSON', () => {
+  const schema = new PsszSchema({ Point: { Object: { x: { Int: { bits: 32, isSigned: true } } } } });
+  assert.equal(schema.toJson(),
+    '{"package":{"name":"","version":"","attributes":[]},"interfaces":[],"worlds":[],"uses":[],' +
+    '"types":[{"name":"Point","type":{"value":{"Object":{"members":[{"name":"x","type":{"value":' +
+    '{"Int":{"bits":32,"isSigned":true}}},"attributes":[]}],"attributes":[]}}},"attributes":[]}],"ir_version":1}');
+  assert.equal(schema.toJson('json'),
+    '{"package":{"name":"","version":"","attributes":[]},"interfaces":[],"worlds":[],"uses":[],' +
+    '"types":[{"name":"Point","type":{"value":[1,{"members":[{"name":"x","type":{"value":' +
+    '[8,{"bits":32,"isSigned":true}]},"attributes":[]}],"attributes":[]}]},"attributes":[]}],"ir_version":1}');
+  assert.deepEqual(PsszSchema.fromJson(schema.toJson()).ir, schema.ir);
+  assert.deepEqual(PsszSchema.fromJson(schema.toJson('json'), 'json').ir, schema.ir);
+});
+
 test('README: custom types', () => {
   const AccountNumber = custom('AccountNumber', u64, { toText: numberToName, fromText: nameToNumber });
   const Balance = record('Balance', { owner: AccountNumber, amount: u64 });

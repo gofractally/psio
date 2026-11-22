@@ -260,9 +260,21 @@ export class PsszSchema {
     return new PsszSchema(PsszSchema.meta().type<IrSchema>('Schema').decode(bytes), options);
   }
 
-  /** From the JSON / I-JSON text of `psio::Schema`. */
+  /**
+   * From the JSON / I-JSON text of `psio::Schema`: the text C++
+   * `psio::encode(psio::ijson{}, schema)` and Rust
+   * `json::to_string::<IJson, _>(&schema)` write (docs/json.md, "The Schema
+   * IR as JSON"). Read by this package's own schema-driven text codec over
+   * the schema of `psio::Schema` (`PsszSchema.meta()`): 64-bit integers
+   * (`Array.len`, `BoundedList.maxCount`, `Enumerator.value`) are exact.
+   */
   static fromJson(text: string | Uint8Array, format: JsonFormat = 'ijson', options?: PsszSchemaOptions): PsszSchema {
     return new PsszSchema(PsszSchema.meta().type<IrSchema>('Schema').jsonToValue(text, format), options);
+  }
+
+  /** The JSON / I-JSON text of this schema, byte for byte the C++ and Rust text. */
+  toJson(format: JsonFormat = 'ijson'): string {
+    return PsszSchema.meta().type<IrSchema>('Schema').valueToJson(this.ir, format);
   }
 
   /**

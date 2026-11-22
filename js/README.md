@@ -39,7 +39,7 @@ Firefox and Safari (15.4 or later). TypeScript 5 for the typed layer.
 - [Custom types](#custom-types)
 - [What a blockchain client needs](#what-a-blockchain-client-needs)
 - [Errors and untrusted input](#errors-and-untrusted-input)
-- [Reference](#reference): values, text rules, widths, IR version, hand-written schemas
+- [Reference](#reference): values, text rules, widths, IR version, the schema as JSON, hand-written schemas
 - [WIT, pjson, names, hex](#wit-pjson-names-hex)
 - [Exports](#exports)
 - [Performance](#performance)
@@ -68,7 +68,7 @@ Transfer.view(bytes).get('amount');                   // 18446744073709551615n, 
 | | |
 |---|---|
 | `new PsszSchema(ir, options)` | From a `psio::Schema` value, or a compact `{ Name: type }` map ([below](#schemas-written-by-hand)). `options`: `{ handlers, requireHandlers }` ([custom types](#custom-types)). |
-| `PsszSchema.decode(bytes, options)` / `.fromJson(text, format, options)` | From the PSSZ / I-JSON encoding of `psio::Schema`. `schema.encode()` writes it back; `schema.ir` is the IR. |
+| `PsszSchema.decode(bytes, options)` / `.fromJson(text, format, options)` | From the PSSZ bytes / the JSON or I-JSON text of `psio::Schema`. `schema.encode()` / `schema.toJson(format)` write them back ([the schema as JSON](#the-schema-as-json)); `schema.ir` is the IR. |
 | `schema.withHandlers(handlers, { requireHandlers })` | The same schema with these custom text handlers added. |
 | `schema.type(root, { width, handlers, requireHandlers })` | A `PsszType` for a type name or an inline type. `width`: `'auto'` (default; type-derived offset widths, the `psio::pssz` format) or `1` / `2` / `4` (one inherited width, `psio::pssz_<W>`; see [explicit widths](#explicit-widths)). Throws when the type is not expressible. |
 | `type.encode(value)` | Canonical bytes. Trailing absent optionals are pruned; length bounds and caps are enforced. |
@@ -525,6 +525,44 @@ caller that knows what it means states so:
 `new PsszSchema({ ...old.ir, ir_version: IR_VERSION })`. A map of named
 types written in JavaScript is always in the current version; the full form
 (`{ types: [...], ir_version }`) says for itself.
+
+### The schema as JSON
+
+A schema travels as PSSZ bytes or as text, and the text is the same in C++,
+Rust and JavaScript, byte for byte:
+
+```typescript
+const schema = new PsszSchema({ Point: { Object: { x: { Int: { bits: 32, isSigned: true } } } } });
+
+schema.toJson();          // I-JSON (the default)
+// '{"package":{"name":"","version":"","attributes":[]},"interfaces":[],"worlds":[],"uses":[],' +
+// '"types":[{"name":"Point","type":{"value":{"Object":{"members":[{"name":"x","type":{"value":' +
+// '{"Int":{"bits":32,"isSigned":true}}},"attributes":[]}],"attributes":[]}}},"attributes":[]}],"ir_version":1}'
+schema.toJson('json');    // strict JSON: the type is {"value":[1,{...}]}, the member's {"value":[8,{...}]}
+
+PsszSchema.fromJson(schema.toJson());                  // the same schema
+PsszSchema.fromJson(schema.toJson('json'), 'json');
+```
+
+It is not a format of its own: it is the text the JSON codec of this package
+gives the value `schema.ir` under the schema of `psio::Schema`
+(`PsszSchema.meta()`), exactly as C++ `psio::encode(psio::ijson{}, schema)`
+and Rust `json::to_string::<IJson, _>(&schema)` give it from the IR's
+reflected records. So the [text rules](#text) apply unchanged: members in
+declaration order; a type is the record `{"value": <variant>}` and the
+variant `{"Int": {...}}` under `'ijson'`, `[8, {...}]` under `'json'`; an
+unknown key is skipped, a missing member is an error unless it is optional
+(`ir_version`, a function's `result`, an attribute's `value`), a repeated
+key is read again and the last one wins. `Array.len`,
+`BoundedList.maxCount` and `Enumerator.value` are 64-bit: a `bigint` in
+`schema.ir`, a bare number up to 2^53 − 1 and a decimal string beyond under
+`'ijson'`, read exactly (never through `JSON.parse`). Text nested deeper
+than 64 arrays / objects is rejected, which allows a type 19 levels of
+inline list nesting (the PSSZ form has the same limit); deeper types go
+through a named type. The shared fixture
+`conformance/schema-json-vectors.json` pins the bytes and both texts of
+several schemas, and texts that must be rejected, for all three languages
+(`src/test/schema-json-conformance.test.ts`).
 
 ### Schemas written by hand
 
