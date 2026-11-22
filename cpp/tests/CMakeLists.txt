@@ -55,6 +55,8 @@ psio_add_test(psio_ssz_tests ssz_tests.cpp)
 psio_add_test(psio_pssz_tests pssz_tests.cpp)
 psio_add_test(psio_pssz_type_width_tests pssz_type_width_tests.cpp)
 psio_add_test(psio_pssz_zero_tests pssz_zero_tests.cpp)
+# Plain C++ enums: the underlying integer in every position and width.
+psio_add_test(psio_pssz_enum_tests pssz_enum_tests.cpp)
 add_executable(psio_pssz_type_width_consumer pssz_type_width_consumer.cpp)
 target_link_libraries(psio_pssz_type_width_consumer PRIVATE psio::psio)
 add_test(NAME psio_pssz_type_width_consumer COMMAND psio_pssz_type_width_consumer)

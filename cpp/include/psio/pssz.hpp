@@ -188,6 +188,17 @@ namespace psio {
       struct is_fixed<T> : std::true_type
       {
       };
+      // Plain C++ enums (`enum` and `enum class`) are their underlying
+      // integer on the wire: sizeof(underlying) little-endian bytes, exactly
+      // as the legacy format packed them. An enum is never a Record, even
+      // if it is reflected, and an enum routed through a binary adapter is
+      // the adapter's payload instead (see the adapter specialization).
+      template <typename T>
+         requires(std::is_enum_v<T> &&
+                  !::psio::has_adapter_v<T, ::psio::binary_category>)
+      struct is_fixed<T> : std::true_type
+      {
+      };
       template <typename T, std::size_t N>
       struct is_fixed<std::array<T, N>> : is_fixed<T>
       {
@@ -266,7 +277,7 @@ namespace psio {
       }
 
       template <typename T>
-      concept Record = ::psio::Reflected<T> || is_std_tuple_v<T>;
+      concept Record = (::psio::Reflected<T> && !std::is_enum_v<T>) || is_std_tuple_v<T>;
 
       template <typename T>
       inline constexpr bool is_fixed_v = is_fixed<T>::value;
@@ -360,6 +371,8 @@ namespace psio {
          else if constexpr (std::is_same_v<T, ::psio::uint128> ||
                             std::is_same_v<T, ::psio::int128>)
             return 16;
+         else if constexpr (std::is_enum_v<T>)
+            return sizeof(std::underlying_type_t<T>);
          else if constexpr (std::is_arithmetic_v<T>)
             return sizeof(T);
          else if constexpr (requires { T::bytes_value; T::size_value; })
@@ -634,7 +647,7 @@ namespace psio {
                if constexpr (fixed_size_of<E>() == 0)
                   if (!value.empty())
                      return codec_fail("pssz: nonempty zero-size vector is unsupported", 0, "pssz");
-            if constexpr (std::is_arithmetic_v<E>)
+            if constexpr (std::is_arithmetic_v<E> || std::is_enum_v<E>)
             {
                // Leaf elements: one depth check covers all of them.
                if (!value.empty() && depth + 1 > kMaxValidationDepth)
@@ -998,6 +1011,12 @@ namespace psio {
          else if constexpr (std::is_same_v<T, ::psio::uint128> ||
                             std::is_same_v<T, ::psio::int128>)
             s.write(&v, 16);
+         else if constexpr (std::is_enum_v<T>)
+         {
+            // The underlying integer, little-endian.
+            const auto raw = static_cast<std::underlying_type_t<T>>(v);
+            s.write(&raw, sizeof(raw));
+         }
          else if constexpr (std::is_arithmetic_v<T>)
             s.put(v);
          else if constexpr (is_std_array_v<T>)
@@ -1188,8 +1207,10 @@ namespace psio {
                             char b = fref ? '\x01' : '\x00';
                             s.rewrite(fixed_cursor, &b, 1);
                          }
-                         else if constexpr (std::is_arithmetic_v<F>)
+                         else if constexpr (std::is_arithmetic_v<F> ||
+                                            std::is_enum_v<F>)
                          {
+                            // sizeof(enum) == sizeof(its underlying type).
                             s.rewrite(fixed_cursor, &fref, sizeof(F));
                          }
                          else if constexpr (is_std_array_v<F>)
@@ -1616,6 +1637,16 @@ namespace psio {
             std::memcpy(&out, src.data() + pos, 16);
             return out;
          }
+         else if constexpr (std::is_enum_v<T>)
+         {
+            // Any value of the underlying integer is accepted: the wire
+            // carries the integer, and the enumerator set is not part of
+            // the format (a newer writer may know enumerators this reader
+            // does not). Callers that need a closed set check it themselves.
+            std::underlying_type_t<T> raw{};
+            std::memcpy(&raw, src.data() + pos, sizeof(raw));
+            return static_cast<T>(raw);
+         }
          else if constexpr (std::is_arithmetic_v<T>)
             return decode_arith<W, T>(src, pos);
          else if constexpr (std::is_same_v<T, std::string>)
@@ -1798,7 +1829,8 @@ namespace psio {
                return codec_fail("pssz: vector span not a multiple of "
                                  "element size",
                                  static_cast<std::uint32_t>(pos), "pssz");
-            if constexpr (std::is_arithmetic_v<E> && !std::is_same_v<E, bool>)
+            if constexpr ((std::is_arithmetic_v<E> && !std::is_same_v<E, bool>) ||
+                          std::is_enum_v<E>)
             {
                // Leaf elements with no invalid bit patterns: the only check
                // a per-element walk would perform is the node depth.
@@ -1882,7 +1914,8 @@ namespace psio {
             if (end - pos != N * esz)
                return codec_fail("pssz: array span does not match its fixed size",
                                  static_cast<std::uint32_t>(pos), "pssz");
-            if constexpr (std::is_arithmetic_v<E> && !std::is_same_v<E, bool>)
+            if constexpr ((std::is_arithmetic_v<E> && !std::is_same_v<E, bool>) ||
+                          std::is_enum_v<E>)
             {
                if constexpr (N > 0)
                   if (depth + 1 > kMaxValidationDepth)
@@ -2060,6 +2093,8 @@ namespace psio {
             if (end - pos != fixed_size_of<T>())
                return codec_fail("pssz: fixed primitive span mismatch",
                                  static_cast<std::uint32_t>(pos), "pssz");
+            // An enum is its underlying integer: every bit pattern of the
+            // right size is valid (no enumerator-set check).
             if constexpr (std::is_same_v<T, bool>)
             {
                if (static_cast<unsigned char>(src[pos]) > 1)

@@ -339,6 +339,10 @@ namespace psio::schema_types
             return Float{exp, static_cast<std::uint32_t>(
                                  std::numeric_limits<U>::digits)};
          }
+         else if constexpr (std::is_enum_v<U>)
+            // A plain C++ enum is its underlying integer type in the schema,
+            // matching its wire form. Enumerator names are not recorded.
+            return build_anytype<std::underlying_type_t<U>>();
          else if constexpr (std::is_same_v<U, std::string> ||
                             std::is_same_v<U, std::string_view>)
             return Custom{Box<AnyType>{List{Box<AnyType>{insert<std::uint8_t>()}}},

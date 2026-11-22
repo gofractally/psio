@@ -582,6 +582,7 @@ namespace psio {
    // adapter-view specialization above wins instead.
    template <typename T, typename Fmt, storage Store>
       requires Reflected<T>
+            && (!std::is_enum_v<T>)  // a reflected enum is a scalar, not a record
             && (reflect<T>::member_count == 0
                 || view_layout::has_record_support<Fmt, T>::value)
             && (!::psio::format_should_dispatch_adapter_v<Fmt, T>)

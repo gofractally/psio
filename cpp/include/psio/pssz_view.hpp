@@ -391,6 +391,30 @@ namespace psio {
       }
    };
 
+   // A plain enum is its underlying integer on the wire; the view reads it
+   // by value. Any underlying value is returned as-is (no enumerator check).
+   template <typename T, typename Fmt, storage Store>
+      requires (std::is_enum_v<T> && detail::is_pssz_format_v<Fmt> &&
+                !::psio::format_should_dispatch_adapter_v<Fmt, T>)
+   class view<T, Fmt, Store>
+   {
+      std::span<const char> data_;
+    public:
+      using element_type = T;
+      using format_type = Fmt;
+      static constexpr storage storage_kind = Store;
+      view() = default;
+      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
+      [[nodiscard]] T get() const noexcept
+      {
+         std::underlying_type_t<T> raw{};
+         if (data_.size() >= sizeof(raw)) std::memcpy(&raw, data_.data(), sizeof(raw));
+         return static_cast<T>(raw);
+      }
+   };
+
    template <typename T, typename Fmt, storage Store>
       requires detail::is_pssz_format_v<Fmt>
    class view<schema_types::Box<T>, Fmt, Store> : public view<T, Fmt, Store>
