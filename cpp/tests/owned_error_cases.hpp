@@ -84,7 +84,7 @@ namespace owned_error_cases
             auto        status = psio::codec_fail_owned(text, 7, "test");
             text.assign(text.size(), 'x');   // the source is gone
             OWNED_CHECK(!status.ok() && status.error().what == "built at run time");
-            OWNED_CHECK(status.error().byte_offset == 7 && status.error().owned != nullptr);
+            OWNED_CHECK(status.error().byte_offset == 7 && status.error().owns_text());
             kept = status.error();
             psio::codec_status moved = std::move(status);
             OWNED_CHECK(moved.error().what == "built at run time");
@@ -94,8 +94,24 @@ namespace owned_error_cases
          psio::codec_status again{kept};
          OWNED_CHECK(again.error().what == "built at run time");
          // A static message owns nothing.
-         OWNED_CHECK(psio::codec_fail("static", 0, "test").error().owned == nullptr);
+         OWNED_CHECK(!psio::codec_fail("static", 0, "test").error().owns_text());
          OWNED_CHECK(psio::codec_fail_owned("", 0, "test").error().what.empty());
+         // A fixed message is still a constant.
+         constexpr psio::codec_error fixed{"fixed", 3, "test"};
+         static_assert(fixed.what == "fixed" && fixed.byte_offset == 3 && !fixed.owns_text());
+         constexpr psio::codec_error fixed_copy = fixed;
+         static_assert(fixed_copy.what == "fixed");
+         // Copy and move assignment keep, share and drop the text.
+         psio::codec_error a = psio::codec_fail_owned("first", 0, "test").error();
+         psio::codec_error b = psio::codec_fail_owned("second", 0, "test").error();
+         a = b;
+         OWNED_CHECK(a.what == "second" && b.what == "second");
+         b = fixed;
+         OWNED_CHECK(a.what == "second" && b.what == "fixed" && !b.owns_text());
+         psio::codec_error c = std::move(a);
+         OWNED_CHECK(c.what == "second" && a.what.empty() && !a.owns_text());
+         a = std::move(c);
+         OWNED_CHECK(a.what == "second" && a.owns_text());
       }
 
       OWNED_CHECK(psio::check_invariant(Precision{8}).ok());

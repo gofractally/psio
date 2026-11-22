@@ -32,10 +32,12 @@
 // status?" invariant: a dropped status is a -Wunused-result warning in any
 // consumer, and an error (-Werror=unused-result) in psio's own targets.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <new>
 #include <string_view>
 #include <utility>
 
@@ -46,27 +48,131 @@
 
 namespace psio {
 
+   namespace detail {
+      // The text of a message built at run time: a reference count followed
+      // by the characters, in one block. See codec_fail_owned.
+      struct owned_text
+      {
+         std::atomic<std::size_t> refs{1};
+
+         char*       chars() noexcept { return reinterpret_cast<char*>(this + 1); }
+         static owned_text* make(std::string_view text)
+         {
+            void* block = ::operator new(sizeof(owned_text) + text.size() + 1);
+            auto* out   = ::new (block) owned_text{};
+            for (std::size_t i = 0; i < text.size(); ++i)
+               out->chars()[i] = text[i];
+            out->chars()[text.size()] = '\0';
+            return out;
+         }
+         void retain() noexcept { refs.fetch_add(1, std::memory_order_relaxed); }
+         void release() noexcept
+         {
+            if (refs.fetch_sub(1, std::memory_order_acq_rel) == 1)
+            {
+               this->~owned_text();
+               ::operator delete(static_cast<void*>(this));
+            }
+         }
+      };
+   }  // namespace detail
+
    // Structured error payload.
    //
    // `what` and `format_name` are views. For the common case — a fixed
-   // message — they point to static storage (string literals) and the
-   // payload allocates nothing. A message computed at run time ("value 9
-   // outside the allowed precision range") is made with codec_fail_owned():
-   // the text is copied once into a reference-counted buffer that `owned`
-   // holds, `what` views it, and every copy of the codec_error — into
+   // message — they point to static storage (string literals), the payload
+   // allocates nothing, and a codec_error is a literal type: it can be a
+   // constexpr variable. A message computed at run time ("Value 9 outside
+   // allowed Precision range") is made with codec_fail_owned(): the text
+   // is copied once into a reference-counted block that the codec_error
+   // shares, `what` views it, and every copy of the codec_error — into
    // another status, into a codec_exception, into a writer's state — keeps
-   // it alive. `owned` is null for a static message.
+   // it alive. A moved-from codec_error has an empty `what`.
    struct codec_error
    {
       std::string_view what{};          // the message, e.g. "offset out of range"
       std::uint32_t    byte_offset = 0; // where in the buffer the problem was
       std::string_view format_name{};   // "ssz", "frac", a type name: static storage
-      std::shared_ptr<const char[]> owned{};  // storage of `what`, when it is not static
 
       constexpr codec_error() = default;
       constexpr codec_error(std::string_view w, std::uint32_t off,
                             std::string_view fmt) noexcept
          : what(w), byte_offset(off), format_name(fmt) {}
+
+      constexpr codec_error(const codec_error& other) noexcept
+         : what(other.what), byte_offset(other.byte_offset), format_name(other.format_name),
+           owned_(other.owned_)
+      {
+         if (owned_)
+            owned_->retain();
+      }
+      constexpr codec_error(codec_error&& other) noexcept
+         : what(other.what), byte_offset(other.byte_offset), format_name(other.format_name),
+           owned_(other.owned_)
+      {
+         if (other.owned_)
+         {
+            other.owned_ = nullptr;
+            other.what   = {};
+         }
+      }
+      constexpr codec_error& operator=(const codec_error& other) noexcept
+      {
+         if (this != &other)
+         {
+            if (other.owned_)
+               other.owned_->retain();
+            if (owned_)
+               owned_->release();
+            what        = other.what;
+            byte_offset = other.byte_offset;
+            format_name = other.format_name;
+            owned_      = other.owned_;
+         }
+         return *this;
+      }
+      constexpr codec_error& operator=(codec_error&& other) noexcept
+      {
+         if (this != &other)
+         {
+            if (owned_)
+               owned_->release();
+            what        = other.what;
+            byte_offset = other.byte_offset;
+            format_name = other.format_name;
+            owned_      = other.owned_;
+            if (other.owned_)
+            {
+               other.owned_ = nullptr;
+               other.what   = {};
+            }
+         }
+         return *this;
+      }
+      constexpr ~codec_error()
+      {
+         if (owned_)
+            owned_->release();
+      }
+
+      // Whether `what` is text this error keeps alive (codec_fail_owned)
+      // rather than static storage.
+      constexpr bool owns_text() const noexcept { return owned_ != nullptr; }
+
+      // `text`, copied; `format_name` is static storage as always.
+      static codec_error with_owned_text(std::string_view text, std::uint32_t off,
+                                         std::string_view fmt)
+      {
+         codec_error out;
+         out.owned_      = detail::owned_text::make(text);
+         out.what        = std::string_view{out.owned_->chars(), text.size()};
+         out.byte_offset = off;
+         out.format_name = fmt;
+         return out;
+      }
+
+    private:
+      detail::owned_text* owned_ = nullptr;
    };
 
 #if defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
@@ -153,14 +259,7 @@ namespace psio {
                                         std::uint32_t    byte_offset,
                                         std::string_view format_name)
    {
-      // (not make_shared<char[]>: libc++ gained it late; one extra block)
-      std::shared_ptr<char[]> text(new char[what.size() + 1]);
-      for (std::size_t i = 0; i < what.size(); ++i)
-         text[i] = what[i];
-      text[what.size()] = '\0';
-      codec_error error{std::string_view{text.get(), what.size()}, byte_offset, format_name};
-      error.owned = std::move(text);
-      return codec_status{std::move(error)};
+      return codec_status{codec_error::with_owned_text(what, byte_offset, format_name)};
    }
 
    // Factory for success. Returns a default-constructed (null) status —
