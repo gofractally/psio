@@ -747,13 +747,15 @@ template <std::size_t W> class Codec
          return bound.admits(items->size());
       return true;
    }
-   // Whether a (resolved) member type is a Nested, looking through Option:
-   // its lengthBound then counts the bytes of the inner encoding, which only
-   // the wire form has (the dynamic value is the inner value).
+   // Whether a member type (as written: SchemaBuilder names it through an
+   // alias) is a Nested, looking through Option: its lengthBound then counts
+   // the bytes of the inner encoding, which only the wire form has (the
+   // dynamic value is the inner value).
    codec_status nested_member(const schema_types::AnyType &type, bool &out) const
    {
-      const schema_types::AnyType *at = &type;
+      const schema_types::AnyType *at;
       out = false;
+      PSIO_PSSZ_IR_TRY(resolve(type, at));
       for (std::size_t hops = 0; hops <= kMaxValidationDepth; ++hops)
       {
          auto option = std::get_if<schema_types::Option>(&at->value);
@@ -771,7 +773,8 @@ template <std::size_t W> class Codec
    codec_status nested_bound(const schema_types::AnyType &type, std::span<const char> wire,
                              const LengthBound &bound) const
    {
-      const schema_types::AnyType *at = &type;
+      const schema_types::AnyType *at;
+      PSIO_PSSZ_IR_TRY(resolve(type, at));
       while (auto option = std::get_if<schema_types::Option>(&at->value))
       {
          PSIO_PSSZ_IR_TRY(inner(option->type, at));

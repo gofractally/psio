@@ -122,6 +122,47 @@ namespace nested_cases
    static_assert(psio::auto_pssz_width_v<Capped> == psio::auto_pssz_width_v<RawCapped>);
    static_assert(psio::auto_pssz_width_v<Capped> == 1);
 
+   // The same, where the inner value's own length and its encoded byte count
+   // differ. A record has no length of its own (Point is 9 bytes); a list of
+   // u16 has half as many elements as bytes. The schema IR names the member
+   // type through an alias ("nested_Point"), so the schema-driven codec has
+   // to see the Nested node behind it.
+   struct Point
+   {
+      std::uint32_t x = 0;
+      std::uint32_t y = 0;
+      PSIO_REFLECT(Point, x, y)
+   };
+   struct PointFits
+   {
+      psio::nested<Point>                at;
+      std::optional<psio::nested<Point>> maybe;
+      PSIO_REFLECT(PointFits, attr(at, max<9>), attr(maybe, max<9>))
+   };
+   struct PointOver
+   {
+      psio::nested<Point>                at;
+      std::optional<psio::nested<Point>> maybe;
+      PSIO_REFLECT(PointOver, attr(at, max<8>), attr(maybe, max<8>))
+   };
+   using Words = std::vector<std::uint16_t>;
+   // Elements <= max < bytes: the bytes are over the bound.
+   struct WordsMax
+   {
+      psio::nested<Words>                words;
+      std::optional<psio::nested<Words>> maybe;
+      PSIO_REFLECT(WordsMax, attr(words, max<5>), attr(maybe, max<5>))
+   };
+   // Elements < min <= bytes: the bytes satisfy the bound.
+   struct WordsMin
+   {
+      psio::nested<Words>                words;
+      std::optional<psio::nested<Words>> maybe;
+      PSIO_REFLECT(WordsMin,
+                   attr(words, length_bound{.min = 6}),
+                   attr(maybe, length_bound{.min = 6}))
+   };
+
    // A type that nests itself: depth across the nesting boundary.
    struct Chain
    {
@@ -873,6 +914,116 @@ namespace nested_cases
                        .ok());
    }
 
+   // ── lengthBound on a nested member counts encoded bytes ─────────────────
+   //
+   // Typed and schema-driven codecs must agree on every entry point where
+   // the inner value's own length (none for a record, the element count for
+   // a list) differs from the byte count of its encoding.
+   template <typename T>
+   void bound_agreement(const psio::schema_types::Schema& schema, const std::string& name,
+                        const T& value, bool admitted)
+   {
+      namespace rt = psio::pssz_ir;
+      const Bytes wire = psio::detail::pssz_impl::encode_ignoring_length_bounds(psio::pssz{}, value);
+      Bytes       typed;
+      // Typed: encode and validate.
+      NESTED_CHECK(psio::encode_pssz_checked(psio::pssz{}, value, typed).ok() == admitted);
+      NESTED_CHECK(valid<T>(wire) == admitted);
+      if (admitted)
+         NESTED_CHECK(typed == wire);
+      // Schema-driven: validate, decode, encode of the decoded value.
+      NESTED_CHECK(rt::validate_pssz(schema, name, wire).ok() == admitted);
+      rt::Value decoded;
+      bool      unknown = false;
+      NESTED_CHECK(rt::decode_auto(schema, name, wire, decoded, unknown).ok() == admitted);
+      // The dynamic value of the same data, built without the bound in the
+      // way: the relaxed twin of the schema decodes the same bytes.
+      rt::Value   free_value;
+      const auto  twin = name + "Free";
+      NESTED_CHECK(rt::decode_auto(schema, twin, wire, free_value, unknown).ok());
+      Bytes again;
+      NESTED_CHECK(rt::encode_auto(schema, name, free_value, again).ok() == admitted);
+      if (admitted)
+         NESTED_CHECK(again == wire);
+      // JSON in: the text of the unbounded twin through the bounded schema.
+      std::string text;
+      NESTED_CHECK(rt::pssz_to_json(schema, twin, psio::ijson{}, wire, text).ok());
+      again.clear();
+      NESTED_CHECK(rt::json_to_pssz(schema, name, psio::ijson{}, std::string_view{text}, again)
+                      .ok() == admitted);
+      if (admitted)
+         NESTED_CHECK(again == wire);
+      std::string out_text;
+      NESTED_CHECK(rt::pssz_to_json(schema, name, psio::ijson{}, wire, out_text).ok() ==
+                   admitted);
+   }
+   // The schema of T under `name`, with a copy under name+"Free" whose
+   // bounds admit every value used here.
+   template <typename T>
+   psio::schema_types::Schema bound_schema(std::string_view name)
+   {
+      namespace ir = psio::schema_types;
+      auto        schema = psio::SchemaBuilder{}.insert<T>(std::string{name}).build();
+      const auto  count  = schema.types.size();
+      for (std::size_t i = 0; i < count; ++i)
+         if (schema.types[i].name == name)
+         {
+            const auto& object = std::get<ir::Object>(schema.types[i].type->value);
+            // The member is written as a named alias of the Nested node (or
+            // of an Option of one), not as the node itself.
+            NESTED_CHECK(std::holds_alternative<ir::Type>(object.members[0].type->value));
+            NESTED_CHECK(
+               std::holds_alternative<ir::Nested>(object.members[0].type->resolve(schema)->value));
+            NESTED_CHECK(object.members[0].attributes.size() == 1 &&
+                         object.members[0].attributes[0].name == "lengthBound");
+            // Same offset width as the original (two members of at most
+            // 100 bytes still take one-byte offsets; a minimum alone leaves
+            // the record unbounded), nothing in the way.
+            ir::Object free = object;
+            for (auto& member : free.members)
+               member.attributes[0].value =
+                  std::string{member.attributes[0].value->starts_with("min") ? "min=0" : "max=100"};
+            schema.types.push_back(ir::Member{
+               std::string{name} + "Free",
+               ir::Box<ir::AnyType>{ir::AnyType{std::move(free)}}, {}});
+            break;
+         }
+      return schema;
+   }
+   inline void nested_bound_counts_bytes()
+   {
+      const auto point = psio::nested<Point>::from(Point{1, 2});   // 9 bytes, no length
+      {
+         const auto schema = bound_schema<PointFits>("PointFits");
+         bound_agreement(schema, "PointFits", PointFits{point, {}}, true);
+         bound_agreement(schema, "PointFits", PointFits{point, point}, true);
+      }
+      {
+         const auto schema = bound_schema<PointOver>("PointOver");
+         bound_agreement(schema, "PointOver", PointOver{point, {}}, false);
+      }
+      const auto three = psio::nested<Words>::from(Words{1, 2, 3});   // 3 elements, 6 bytes
+      const auto two   = psio::nested<Words>::from(Words{1, 2});      // 2 elements, 4 bytes
+      const auto five  = psio::nested<Words>::from(Words{1, 2, 3, 4, 5});
+      {
+         const auto schema = bound_schema<WordsMax>("WordsMax");
+         bound_agreement(schema, "WordsMax", WordsMax{two, {}}, true);
+         bound_agreement(schema, "WordsMax", WordsMax{two, two}, true);
+         // 3 <= 5 elements but 6 > 5 bytes.
+         bound_agreement(schema, "WordsMax", WordsMax{three, {}}, false);
+         bound_agreement(schema, "WordsMax", WordsMax{two, three}, false);
+      }
+      {
+         const auto schema = bound_schema<WordsMin>("WordsMin");
+         // 3 < 6 elements but 6 >= 6 bytes.
+         bound_agreement(schema, "WordsMin", WordsMin{three, {}}, true);
+         bound_agreement(schema, "WordsMin", WordsMin{three, three}, true);
+         bound_agreement(schema, "WordsMin", WordsMin{five, five}, true);
+         bound_agreement(schema, "WordsMin", WordsMin{two, {}}, false);
+         bound_agreement(schema, "WordsMin", WordsMin{three, two}, false);
+      }
+   }
+
    inline int run()
    {
       failures() = 0;
@@ -886,6 +1037,7 @@ namespace nested_cases
       text_format<psio::ijson>(
          R"({"sender":1,"method":2,"args":{"to":"bob","amount":5,"memo":"rent"}})");
       schema_driven();
+      nested_bound_counts_bytes();
       return failures();
    }
 }  // namespace nested_cases

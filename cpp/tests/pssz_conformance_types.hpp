@@ -225,6 +225,13 @@ namespace pssz_conf
    PSIO_REFLECT(NShapes, scalar, twice, maybe, many)
    struct NCapped { u8 id; Nested<Raw> note; };  // note <= 8 bytes of encoding
    PSIO_REFLECT(NCapped, id, note)
+   // The bound counts encoded bytes where the inner value's own length is
+   // something else: a record has none, a list of u16 has half as many
+   // elements as bytes.
+   struct NCapRec { u8 id; Nested<NArgs> args; };          // args <= 28 bytes of encoding
+   PSIO_REFLECT(NCapRec, id, args)
+   struct NCapWords { u8 id; Nested<std::vector<u16>> words; };  // words <= 5 bytes of encoding
+   PSIO_REFLECT(NCapWords, id, words)
    struct NChain { std::optional<Nested<NChain>> next; };  // depth across the boundary
    PSIO_REFLECT(NChain, next)
 
@@ -415,6 +422,8 @@ PSIO_TYPE_ATTRS(pssz_conf::Mix2x4, psio::max_dynamic_data_spec{60000})
 PSIO_FIELD_ATTRS(pssz_conf::Bounded, s, psio::length_bound{.max = 4})
 PSIO_FIELD_ATTRS(pssz_conf::Bounded, v, psio::length_bound{.max = 2})
 PSIO_FIELD_ATTRS(pssz_conf::NCapped, note, psio::length_bound{.max = 8})
+PSIO_FIELD_ATTRS(pssz_conf::NCapRec, args, psio::length_bound{.max = 28})
+PSIO_FIELD_ATTRS(pssz_conf::NCapWords, words, psio::length_bound{.max = 5})
 
 namespace pssz_conf
 {
@@ -820,7 +829,9 @@ namespace pssz_conf
             Opt<DerKey>, std::variant<Name, Range>, Vec<Endpoint>>,
       // custom types in maps, sets and nested values (appended)
       types<custom_conf::Tag, std::map<custom_conf::Tag, u32>, std::map<Name, Range>,
-            std::set<Level>, Nested<Range>>>::type;
+            std::set<Level>, Nested<Range>>,
+      // nested members whose bound is not their inner value's length (appended)
+      types<NCapRec, NCapWords>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)

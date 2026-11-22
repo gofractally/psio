@@ -2445,6 +2445,13 @@ namespace
       // A member length_bound counts the bytes of the inner encoding.
       corpus<NCapped>(c, "capped_at_bound", NCapped{1, Nested<Raw>::from("12345678")});
       corpus<NCapped>(c, "capped_empty", NCapped{1, Nested<Raw>::from("")});
+      // ...also where the inner value is a record (no length of its own) or
+      // a list (fewer elements than bytes).
+      if (args_bytes.size() != 28) die("the NArgs sample is not 28 bytes");
+      corpus<NCapRec>(c, "cap_record_at_bound", NCapRec{1, Nested<NArgs>::from(args)});
+      corpus<NCapRec>(c, "cap_record_small", NCapRec{1, Nested<NArgs>::from(plain)});
+      corpus<NCapWords>(c, "cap_words_two", NCapWords{1, Nested<Vec<u16>>::from(Vec<u16>{1, 2})});
+      corpus<NCapWords>(c, "cap_words_empty", NCapWords{1, Nested<Vec<u16>>::from(Vec<u16>{})});
       corpus<NChain>(c, "chain_3", nchain(3));
 
       // ── Rejections: the inner bytes are not the inner type ──────────────
@@ -2516,6 +2523,25 @@ namespace
          add<F, NCapped>(c, "capped_one_over",
                          psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, over),
                          reject("pssz: member length_bound violated"));
+      });
+
+      // The same for a record (one byte over: a longer `to`) and for a list
+      // of three u16 (3 elements <= 5, 6 bytes > 5).
+      formats([&]<typename F>() {
+         const NCapRec   record{1, Nested<NArgs>::from(NArgs{"bobs", 5, Raw{"rent"}})};
+         const NCapWords words{1, Nested<Vec<u16>>::from(Vec<u16>{1, 2, 3})};
+         Bytes           refused;
+         if (try_encode<F>(record, refused) ||
+             psio::encode_pssz_checked(F{}, record, refused).ok() || !refused.empty() ||
+             try_encode<F>(words, refused) ||
+             psio::encode_pssz_checked(F{}, words, refused).ok() || !refused.empty())
+            die("the encoder accepted a nested member outside its length_bound");
+         add<F, NCapRec>(c, "cap_record_one_over",
+                         psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, record),
+                         reject("pssz: member length_bound violated"));
+         add<F, NCapWords>(c, "cap_words_three",
+                           psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, words),
+                           reject("pssz: member length_bound violated"));
       });
 
       // ── Node depth across the nesting boundary ──────────────────────────
