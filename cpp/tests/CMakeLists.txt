@@ -545,3 +545,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_nested_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_nested_noexceptions_test COMMAND psio_nested_noexceptions_test)
+# Uses of nested<T> that must not compile, each with a message naming the
+# reason.
+function(psio_nested_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_nested_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -DPSIO_EXCEPTIONS_ENABLED=1
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/nested_fail.cpp)
+   set_tests_properties(psio_nested_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_nested_compile_fail(cv_qualified NESTED_FAIL_CV "T is a value type")
+psio_nested_compile_fail(graphql_deferred NESTED_FAIL_GRAPHQL_DEFERRED
+   "this type has no GraphQL mapping")
+psio_nested_compile_fail(graphql_argument NESTED_FAIL_GRAPHQL_ARGUMENT
+   "an argument must be a scalar")
+psio_nested_compile_fail(other_format NESTED_FAIL_OTHER_FORMAT "psio::ssz: .*unsupported type")
