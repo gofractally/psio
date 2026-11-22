@@ -359,24 +359,26 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
         };
         (custom.id.clone(), bound)
     };
-    // UTF-8 strings use the "string" adapter (as C++ utf8_string does); raw
-    // strings are byte lists the IR codecs do not UTF-8-check.
+    // UTF-8 strings and raw strings both use the "string" adapter, exactly
+    // as C++ utf8_string and std::string do: the schema carries no marker
+    // that tells them apart. Byte lists stay "hex".
     assert_eq!(adapter(0), ("string".to_string(), None));
     assert_eq!(adapter(1), ("string".to_string(), Some(8)));
-    assert_eq!(adapter(2), ("hex".to_string(), None));
-    assert_eq!(adapter(3), ("hex".to_string(), Some(8)));
+    assert_eq!(adapter(2), ("string".to_string(), None));
+    assert_eq!(adapter(3), ("string".to_string(), Some(8)));
     // A field-less enum is its underlying integer, as in C++.
     let AnyValue::Int(level) = &schema.resolve(&object.members[4].r#type).unwrap().value else {
         panic!("expected Int")
     };
     assert_eq!((level.bits, level.isSigned), (16, false));
 
-    // The schema-driven codec accepts exactly what the typed codec accepts.
+    // The schema-driven codec round-trips every value whose strings are
+    // UTF-8.
     let value = StringKinds {
         text: "\u{e9}".into(),
         bounded_text: BoundedString("ab".into()),
-        raw: RawString(vec![0xff]),
-        bounded_raw: BoundedRawString(vec![0xc0, 0x80]),
+        raw: RawString("raw \u{e9}".as_bytes().to_vec()),
+        bounded_raw: BoundedRawString(b"bytes".to_vec()),
         level: Level::High,
     };
     let bytes = try_to_pssz::<Pssz32, _>(&value).unwrap();
@@ -388,6 +390,19 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
     bad[at] = 0xff;
     assert!(from_pssz::<Pssz32, StringKinds>(&bad).is_err());
     assert!(codec::decode_exact::<Pssz32>(&schema, &root, &bad).is_err());
+    // A raw string holding non-UTF-8 bytes is a valid typed value, but the
+    // schema describes it as "string" and the schema-driven codec, like the
+    // C++ one, UTF-8-checks every "string": it rejects these bytes.
+    let non_utf8 = StringKinds {
+        text: "t".into(),
+        bounded_text: BoundedString("ab".into()),
+        raw: RawString(vec![0xff]),
+        bounded_raw: BoundedRawString(vec![0xc0, 0x80]),
+        level: Level::High,
+    };
+    let raw_bytes = try_to_pssz::<Pssz32, _>(&non_utf8).unwrap();
+    assert_eq!(from_pssz::<Pssz32, StringKinds>(&raw_bytes).unwrap(), non_utf8);
+    assert!(codec::decode_exact::<Pssz32>(&schema, &root, &raw_bytes).is_err());
     // The schema-driven codec has no type-derived width profile yet.
     assert!(codec::encode::<Pssz>(&schema, &root, &dynamic).is_err());
     assert!(codec::decode_exact::<Pssz>(&schema, &root, &bytes).is_err());

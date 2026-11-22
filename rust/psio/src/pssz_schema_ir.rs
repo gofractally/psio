@@ -311,17 +311,20 @@ impl<const N: usize> ToPsszSchema for crate::pssz::BoundedString<N> {
         })))
     }
 }
-// Raw byte strings (C++ std::string) carry no UTF-8 requirement. They are
-// described as the byte-list adapter the IR codecs already treat as raw
-// bytes, so a schema distinguishes them from the UTF-8 "string" adapter and
-// the schema-driven codec accepts exactly what the typed codec accepts.
+// Raw byte strings (C++ std::string) carry no UTF-8 requirement. They use
+// the same "string" identifier C++ emits for std::string: "hex" would limit
+// the JSON form to hex digits, while a raw string is text-shaped bytes. The
+// emitted schema therefore does not distinguish a raw string from a UTF-8
+// string (C++ utf8_string / Rust String); the schema-driven codecs treat
+// every "string" as UTF-8, so they reject a raw string holding non-UTF-8
+// bytes that the typed codec accepts. Byte lists and arrays stay "hex".
 impl ToPsszSchema for crate::pssz::RawString {
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
         Ok(AnyType::new(AnyValue::Custom(Custom {
             r#type: Box::new(AnyType::new(AnyValue::List(List {
                 r#type: Box::new(u8::schema(builder)?),
             }))),
-            id: "hex".into(),
+            id: "string".into(),
         })))
     }
 }
@@ -332,7 +335,7 @@ impl<const N: usize> ToPsszSchema for crate::pssz::BoundedRawString<N> {
                 r#type: Box::new(u8::schema(builder)?),
                 maxCount: N as u64,
             }))),
-            id: "hex".into(),
+            id: "string".into(),
         })))
     }
 }

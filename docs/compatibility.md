@@ -62,13 +62,21 @@ every rejected one, and it checks the fixture's width / bound / cap / fixed
 manifest for every type. See `conformance/pssz-vectors.md` for the classes.
 
 The fixture has 5167 vectors over 204 types. Rust reaches the C++ outcome on
-5099 of them. The other 68 record a deliberate difference of type design, and
+5131 of them. The other 36 record a deliberate difference of type design, and
 the Rust test asserts that Rust rejects exactly those:
 
 | Difference | C++ | Rust |
 |---|---|---|
-| Enum value that is not an enumerator (`enum-unknown-value`) | accepted: an enum is any value of its underlying integer. `pssz-spec.md` 4.5 (`enum_out_of_range`) says a decoder rejects it, so C++ and the spec disagree here | rejected, as the spec says: a Rust enum cannot hold it |
-| Member `length_bound` exceeded (`length-bound-overflow`, and the four `width/cap/checkpoint_at_cap` frames) | accepted: the bound only feeds width inference, no reader or writer enforces it (open gate in `pssz-type-width.md`) | rejected: `BoundedRawString<N>` / `BoundedList<T, N>` enforce the bound on encode, decode and validate |
+| Enum value that is not an enumerator (`enum-unknown-value`) | accepted: an enum is any value of its underlying integer, so a reader keeps accepting data from a writer that added enumerators. `pssz-spec.md` 4.5 (`enum_out_of_range`) says a decoder rejects it, so C++ and the spec disagree here | rejected, as the spec says: a Rust enum cannot hold it |
+
+A member `length_bound` is enforced on read in both languages: the 28
+`length-bound-overflow` vectors and the four `width/cap/checkpoint_at_cap`
+frames are rejections in the fixture. C++ `validate`, `validate_strict` and
+the checked readers built on them (`decode_pssz_checked`,
+`validated_pssz_view`) reject a string or list member outside its declared
+`max` / `exact` / `min`, also through `std::optional`. The C++ encoder and
+the unchecked `decode` still do not check the bound (Rust
+`BoundedRawString<N>` / `BoundedList<T, N>` check it on encode as well).
 
 Other differences that remain. None changes the bytes of a value both
 languages can represent.
@@ -83,11 +91,15 @@ languages can represent.
   Rust exact readers reject unknown fields and non-UTF-8 raw strings;
   canonical comparison is `validate_canonical_for_profile`; Rust has no
   member annotations.
-- **Schema for raw strings.** C++ `schema_builder` describes `std::string`
-  with the UTF-8 `"string"` adapter (the same schema as `utf8_string<>`), and
-  the C++ schema-IR runtime therefore UTF-8-checks a field the typed codec
-  passes through. Rust describes `RawString` as the raw byte-list adapter
-  (`"hex"`). The identifier for raw strings is an open owner decision.
+- **Schema for raw strings.** A raw string is `"string"` in the schema in
+  both languages: C++ `std::string` and Rust `RawString` /
+  `BoundedRawString<N>` emit the same `"string"` adapter over a byte list as
+  the UTF-8 types (C++ `utf8_string<>`, Rust `String`). Byte lists and arrays
+  stay `"hex"`. The emitted schema carries no marker that distinguishes a
+  raw string from a UTF-8 string, and both schema-driven codecs UTF-8-check
+  every `"string"`: they reject a raw string holding non-UTF-8 bytes that
+  the typed codecs pass through. Whether the schema should mark raw strings
+  is open.
 - **Schema-driven codec.** Rust `pssz::dynamic` supports only the
   explicit-width tags; it rejects the automatic profile with an error.
 - **Rust-only restrictions.** No member-level annotations or `as<Tag>`

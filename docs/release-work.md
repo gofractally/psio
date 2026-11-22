@@ -28,10 +28,12 @@ supported encodings. Pjson now adopts the audited tag numbering as wire revision
   tuples, proc-macro derives and `pssz_struct!` macros over one checked
   codec, and a `const fn pssz_evolves_from`. Remaining differences are listed
   in `compatibility.md` ("PSSZ: Rust and C++").
-- [ ] Decide the schema identifier for raw byte strings (C++ `std::string`
-  still emits the UTF-8 `"string"` adapter; Rust `RawString` emits `"hex"`),
-  enforce member `length_bound` in C++, and give the Rust schema-driven codec
-  the automatic width profile.
+- [x] Schema identifier for raw byte strings: `"string"` in both languages
+  (C++ `std::string`, Rust `RawString`). Member `length_bound` is enforced by
+  C++ `validate` and the checked readers.
+- [ ] Decide whether the schema marks raw strings apart from UTF-8 strings
+  (today it does not), enforce `length_bound` in the C++ encoder, and give
+  the Rust schema-driven codec the automatic width profile.
 - [ ] Complete the missing language/format implementations. The recovered
   TypeScript package now implements fracpack, pjson and JSON conversion; its WIT
   module generates interface definitions, rather than implementing a WIT
