@@ -32,6 +32,7 @@
 // status?" invariant: a dropped status is a -Wunused-result warning in any
 // consumer, and an error (-Werror=unused-result) in psio's own targets.
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -45,13 +46,22 @@
 
 namespace psio {
 
-   // Structured error payload. No allocation inside the payload itself —
-   // string_views must point to static storage (string literals).
+   // Structured error payload.
+   //
+   // `what` and `format_name` are views. For the common case — a fixed
+   // message — they point to static storage (string literals) and the
+   // payload allocates nothing. A message computed at run time ("value 9
+   // outside the allowed precision range") is made with codec_fail_owned():
+   // the text is copied once into a reference-counted buffer that `owned`
+   // holds, `what` views it, and every copy of the codec_error — into
+   // another status, into a codec_exception, into a writer's state — keeps
+   // it alive. `owned` is null for a static message.
    struct codec_error
    {
-      std::string_view what{};          // static message, e.g. "offset out of range"
+      std::string_view what{};          // the message, e.g. "offset out of range"
       std::uint32_t    byte_offset = 0; // where in the buffer the problem was
-      std::string_view format_name{};   // "ssz", "frac", etc.
+      std::string_view format_name{};   // "ssz", "frac", a type name: static storage
+      std::shared_ptr<const char[]> owned{};  // storage of `what`, when it is not static
 
       constexpr codec_error() = default;
       constexpr codec_error(std::string_view w, std::uint32_t off,
@@ -69,7 +79,7 @@ namespace psio {
     public:
       explicit codec_exception(codec_error e)
          : std::runtime_error(std::string{e.what}),
-           err_(e) {}
+           err_(std::move(e)) {}
 
       const codec_error& error() const noexcept { return err_; }
    };
@@ -101,7 +111,7 @@ namespace psio {
       // Error path. Allocates the payload. Use `codec_fail()` factory
       // for readability; this constructor is the implementation hook.
       explicit codec_status(codec_error e)
-         : err_(std::make_unique<codec_error>(e)) {}
+         : err_(std::make_unique<codec_error>(std::move(e))) {}
 
       codec_status(codec_status&&) noexcept            = default;
       codec_status& operator=(codec_status&&) noexcept = default;
@@ -132,6 +142,25 @@ namespace psio {
                                   std::string_view format_name)
    {
       return codec_status{codec_error{what, byte_offset, format_name}};
+   }
+
+   // The error path with a message built at run time: `what` is copied (one
+   // allocation, on the error path only) and lives as long as any copy of
+   // the error does. For a check whose message names the offending value;
+   // a fixed message should stay a literal passed to codec_fail. Works the
+   // same with exceptions disabled. `format_name` is still static storage.
+   inline codec_status codec_fail_owned(std::string_view what,
+                                        std::uint32_t    byte_offset,
+                                        std::string_view format_name)
+   {
+      // (not make_shared<char[]>: libc++ gained it late; one extra block)
+      std::shared_ptr<char[]> text(new char[what.size() + 1]);
+      for (std::size_t i = 0; i < what.size(); ++i)
+         text[i] = what[i];
+      text[what.size()] = '\0';
+      codec_error error{std::string_view{text.get(), what.size()}, byte_offset, format_name};
+      error.owned = std::move(text);
+      return codec_status{std::move(error)};
    }
 
    // Factory for success. Returns a default-constructed (null) status —

@@ -213,6 +213,18 @@ psio_add_test(psio_native_view_tests native_view_tests.cpp)
 
 # Phase 4: error model — codec_error, codec_status, or_throw.
 psio_add_test(psio_error_tests error_tests.cpp)
+# An error message built at run time (codec_fail_owned): through every
+# checked entry point, with and without exceptions.
+psio_add_test(psio_owned_error_tests owned_error_tests.cpp)
+add_executable(psio_owned_error_noexceptions_test owned_error_noexceptions.cpp)
+target_include_directories(psio_owned_error_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_owned_error_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_owned_error_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_owned_error_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_owned_error_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_owned_error_noexceptions_test COMMAND psio_owned_error_noexceptions_test)
 psio_add_test(psio_stream_tests stream_tests.cpp)
 add_executable(psio_guest_codec_check guest_codec_check.cpp)
 target_link_libraries(psio_guest_codec_check PRIVATE psio)

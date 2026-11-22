@@ -42,6 +42,21 @@
 // The status the check returns is the type's own and is passed through
 // unchanged by every codec: by convention
 // `codec_fail(message, 0, "<type name>")`.
+// A message that names the offending value is made with
+// `codec_fail_owned(text, 0, "<type name>")` (error.hpp): the text is copied
+// once, on the failing path only, and travels with the status (and with a
+// codec_exception made from it). A fixed message stays a literal.
+//
+// The contract of a check. It is called on every value of the type that is
+// read or written through a checking entry point, including on hostile
+// input, so it must (1) be noexcept and return its verdict as the status —
+// the macros reject a check that is not `noexcept` or does not return
+// `psio::codec_status`; (2) not throw (a throw out of a noexcept function
+// is std::terminate) and not abort: a check built on a library that throws
+// or aborts on malformed data must catch that or test the data first,
+// because the status-returning entry points promise never to do either, in
+// builds with and without exceptions; (3) depend only on the value. The
+// same holds for a text adapter's `validate` / `decode` on text (adapter.hpp).
 //
 // Where it runs (docs/pssz-spec.md "Type invariants"): every reader that
 // checks its input and every writer of the core formats — pssz validate /
