@@ -500,6 +500,20 @@ namespace psio::graphql
          }
          else if constexpr (is_reference_wrapper_v<U>)
             return write(e, s.get(), f, set);
+         else if constexpr (is_nested_source_v<U>)
+         {
+            // A nested value resolves as its inner value, read in place.
+            if constexpr (is_view_v<U>)
+            {
+               auto v = s.get();
+               return write(e, v, f, set);
+            }
+            else
+            {
+               auto v = s.view();
+               return write(e, v, f, set);
+            }
+         }
          else if constexpr (shape_of<L>() == shape::leaf)
          {
             if constexpr (is_view_v<U>)

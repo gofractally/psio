@@ -197,11 +197,14 @@ namespace psio
    };
 
    // ── Variant alternative name ("nested_<T>") ────────────────────────────
+   template <typename T, nested_validation V>
+   constexpr const char* get_type_name(const nested<T, V>*);
+
    namespace detail::nested_impl
    {
       template <typename T>
       constexpr auto type_name = [] {
-         constexpr std::string_view inner = ::psio::get_type_name(static_cast<const T*>(nullptr));
+         constexpr std::string_view inner = get_type_name(static_cast<const T*>(nullptr));
          std::array<char, 7 + inner.size() + 1> out{'n', 'e', 's', 't', 'e', 'd', '_'};
          for (std::size_t i = 0; i < inner.size(); ++i)
             out[7 + i] = inner[i];
