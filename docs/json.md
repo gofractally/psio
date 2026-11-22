@@ -471,6 +471,16 @@ The IR carries what that needs (the C++ `SchemaBuilder` and the Rust
   `"string"`), and the variant-member attribute `ijsonName` (the alternative's
   I-JSON name; without it the member name is used).
 
+**JavaScript / TypeScript.** The `psio` package (`js/`) implements only this
+schema-driven path: `PsszSchema.decode(schemaBytes).type("Transfer")` gives
+`jsonToPssz`, `psszToJson`, `validate`, `encode`, `decode`, `jsonToValue` and
+`valueToJson` (`js/README.md`). `js/src/test/pssz-conformance.test.ts` replays
+both shared fixtures from the recorded IR. Text is read by an exact parser
+(integers from their token text into `BigInt`), not `JSON.parse`; a non-finite
+float has no text in either format, as in Rust. Its explicit-width profiles
+(`width: 1 | 2 | 4`) accept `maxDynamicData` and, like the typed
+`psio::pssz_<W>` codecs, enforce it on the top-level type only.
+
 Not expressible in the IR, so not available through a schema:
 
 - a custom text form (`PSIO_ADAPTER(..., text_category, ...)`, a member

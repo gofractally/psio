@@ -87,3 +87,15 @@ embeds the JSONL SHA256 and is reproducible with
 through actual C++ SchemaBuilder vector/array/optional char shapes, native typed
 byte parity, signed/unsigned char builds, unknown suffixes, malformed inputs,
 zero-sized fixed values, bounds, recursion, output atomicity and canonicality.
+
+## JavaScript / TypeScript
+
+`js/src/pssz-core.ts` is a port of this codec (both profiles) for browser
+clients, with the JSON / I-JSON walk in `js/src/pssz-json.ts`; the public API
+is `PsszSchema` / `PsszType` (`js/README.md`). It is checked against every
+vector of `conformance/pssz-vectors.json` (all four formats) and
+`conformance/json-vectors.json` through the recorded IR alone. Differences from
+the C++ value model: 64/128/256-bit integers are `bigint`, a NaN with a payload
+is a `PsszNaN` (bit-exact re-encode), `Some` of a nested optional is
+`{ some }`, and a fixed-count array of zero-size elements is limited to 2^20
+elements.
