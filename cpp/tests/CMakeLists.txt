@@ -459,3 +459,37 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_checked_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_checked_noexceptions_test COMMAND psio_checked_noexceptions_test)
+
+# psio::graphql (docs/graphql.md): parse, validate, plan, execute over values
+# and PSSZ views; introspection and SDL; connections; limits; seeded fuzz.
+psio_add_test(psio_graphql_tests graphql_tests.cpp)
+# The same engine with exceptions and RTTI disabled (how a WebAssembly guest
+# builds it): every failure is an error in the response, nothing aborts.
+add_executable(psio_graphql_noexceptions_test graphql_noexceptions.cpp)
+target_include_directories(psio_graphql_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_graphql_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_graphql_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_graphql_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_graphql_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_graphql_noexceptions_test COMMAND psio_graphql_noexceptions_test)
+# Schemas that must not compile, each with a message naming the reason.
+function(psio_graphql_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_graphql_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/graphql_schema_fail.cpp)
+   set_tests_properties(psio_graphql_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_graphql_compile_fail(type_name_conflict GQL_FAIL_TYPE_NAME "have the same GraphQL type name")
+psio_graphql_compile_fail(input_name_conflict GQL_FAIL_INPUT_NAME "have the same GraphQL type name")
+psio_graphql_compile_fail(member_name_conflict GQL_FAIL_MEMBER_NAME "have the same GraphQL name")
+psio_graphql_compile_fail(unmapped_member GQL_FAIL_UNMAPPED "this type has no GraphQL mapping")
+psio_graphql_compile_fail(union_of_scalars GQL_FAIL_UNION "must be a reflected record")
+psio_graphql_compile_fail(unnamed_parameter GQL_FAIL_PARAM_NAMES "must name every parameter")
+psio_graphql_compile_fail(unsupported_argument GQL_FAIL_ARGUMENT "an argument must be a scalar")
+psio_graphql_compile_fail(nested_optional GQL_FAIL_OPTIONAL "an optional of an optional has no GraphQL type")
+psio_graphql_compile_fail(id_on_object GQL_FAIL_ID "psio::graphql::id annotates a scalar member")
+psio_graphql_compile_fail(empty_object GQL_FAIL_EMPTY "needs at least one visible field")
