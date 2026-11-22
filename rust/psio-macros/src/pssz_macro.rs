@@ -439,6 +439,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
             let mut arms = Vec::new();
             let mut validate_arms = Vec::new();
             let mut shapes = Vec::new();
+            let mut bounds = Vec::new();
             for (index, variant) in data.variants.iter().enumerate() {
                 if variant.discriminant.is_some() {
                     return Err(syn::Error::new_spanned(variant, "PSSZ selectors use declaration order; explicit discriminants are unsupported"));
@@ -452,6 +453,13 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 let tag = index as u8;
                 let single = matches!(&variant.fields, Fields::Unnamed(_)) && info.len() == 1;
                 let frame = tuple_frame(k, &types);
+                // What the alternative reserves: nothing, its one
+                // payload, or the tuple of its fields.
+                bounds.push(match &variant.fields {
+                    Fields::Unit => quote!(::core::option::Option::Some(0usize)),
+                    _ if single => { let ty = types[0]; quote!(<#ty as #pack>::AUTO_BOUND) }
+                    _ => quote!(<(#(#types,)*) as #pack>::AUTO_BOUND),
+                });
                 shapes.push(match &variant.fields {
                     Fields::Unit => quote!(#k::pssz::Shape::record(false, true, #k::pssz::offset_width::<__PsszFormat>(::core::option::Option::Some(0)), true, &[])),
                     _ if single => { let ty = types[0]; quote!(<#ty as #pack>::SHAPE) }
@@ -528,9 +536,11 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     size: quote!(0),
                     min: quote!(1),
                     extra: quote! {
-                        const MAX_ENCODED_SIZE: ::core::option::Option<usize> = ::core::option::Option::None;
-                        // C++ max_encoded_size has no bound for a variant.
-                        const AUTO_BOUND: ::core::option::Option<usize> = ::core::option::Option::None;
+                        // One selector byte, then the widest alternative
+                        // (C++ max_encoded_size of a std::variant).
+                        const AUTO_BOUND: ::core::option::Option<usize> =
+                            #k::pssz::variant_bound(&[#(#bounds),*]);
+                        const MAX_ENCODED_SIZE: ::core::option::Option<usize> = <Self as #pack>::AUTO_BOUND;
                         const SHAPE: #k::pssz::Shape = #k::pssz::Shape::node(
                             #k::pssz::ShapeKind::Variant, 0, <Self as #pack>::OFFSET_WIDTH, false, &[#(#shapes),*]);
                     },

@@ -105,6 +105,9 @@ fn column<F: PsszFormat>() -> usize {
     if F::AUTO { 2 } else { match F::OFFSET_BYTES { 1 => 0, 2 => 1, _ => 2 } }
 }
 fn width<F: PsszFormat>() -> usize { if F::AUTO { 4 } else { F::OFFSET_BYTES } }
+/// The width of `T`'s own header and slots: under the automatic profile a
+/// bounded tuple has narrower ones than an unbounded type.
+fn width_of<F: PsszFormat, T: PsszPack<F>>() -> usize { T::OFFSET_WIDTH }
 
 /// C++ `reads<F, Reader>`: every entry point accepts and agrees.
 fn reads<F, T>(wire: &[u8], expect: &T, unknown: bool)
@@ -685,7 +688,7 @@ fn exact_spans<F: PsszFormat>() {
     reads::<F, _>(&[1, 0], &1u16, false);
     // Tuples are extensible records.
     let w = width::<F>();
-    reads::<F, _>(&Frame::new(w).o(0).bytes, &(), false);
+    reads::<F, _>(&Frame::new(width_of::<F, ()>()).o(0).bytes, &(), false);
     let t = (7u32, raw("hi"));
     let wire = Frame::new(w).o(4 + w).u32(7).o(4 + w).raw("hi").bytes;
     reads::<F, _>(&wire, &t, false);
@@ -696,7 +699,9 @@ fn exact_spans<F: PsszFormat>() {
     let mut trailing = wire.clone();
     trailing.push(0);
     reads::<F, _>(&trailing, &(7u32, raw("hi\0")), false);
-    rejects::<F, (u32, u8)>(&Frame::new(w).o(5).u32(7).byte(1).byte(2).bytes);
+    rejects::<F, (u32, u8)>(
+        &Frame::new(width_of::<F, (u32, u8)>()).o(5).u32(7).byte(1).byte(2).bytes,
+    );
 }
 each_format!(exact_spans_in_every_profile, exact_spans);
 
@@ -787,7 +792,11 @@ fn enums<F: PsszFormat>() {
     reads::<F, _>(&point, &Shape3::Point(5, raw("p")), false);
     // Several fields form a positional tuple record, with pruning.
     assert_eq!(try_encode::<F, _>(&(5u8, raw("p"))).unwrap(), point[1..]);
-    let named = [&[3u8][..], &Frame::new(w).o(2).byte(9).byte(0).bytes].concat();
+    let named = [
+        &[3u8][..],
+        &Frame::new(width_of::<F, (u16, Option<u8>)>()).o(2).byte(9).byte(0).bytes,
+    ]
+    .concat();
     reads::<F, _>(&named, &Shape3::Named { a: 9, b: None }, false);
     rejects::<F, Shape3>(&[]);
     rejects::<F, Shape3>(&[4]);

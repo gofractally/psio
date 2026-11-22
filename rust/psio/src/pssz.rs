@@ -890,9 +890,36 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Option
 // std::tuple: header, slots, optional-suffix pruning. () is a zero-field
 // record (a bare header), not an empty span.
 
-/// C++ `max_encoded_size<std::tuple<...>>()`.
+/// C++ `max_encoded_size<std::tuple<...>>()` (docs/pssz-spec.md 3.2): a
+/// tuple is the extensible positional record of its elements. The header,
+/// then per element its bound (its explicit cap in full when it has one)
+/// and a slot when it is not an inline fixed payload, each counted as four
+/// bytes. Unbounded when an element is.
 #[doc(hidden)]
-pub const fn tuple_bound(_fields: &[(Option<usize>, bool)]) -> Option<usize> { None }
+pub const fn tuple_bound(fields: &[(Option<usize>, bool)]) -> Option<usize> {
+    checked::record_bound(fields, false)
+}
+
+/// C++ `max_encoded_size<std::variant<...>>()` (docs/pssz-spec.md 3.2): one
+/// selector byte, then the widest alternative. Unbounded when an
+/// alternative is.
+#[doc(hidden)]
+pub const fn variant_bound(alternatives: &[Option<usize>]) -> Option<usize> {
+    let mut widest = 0usize;
+    let mut at = 0;
+    while at < alternatives.len() {
+        match alternatives[at] {
+            Some(bound) => {
+                if bound > widest {
+                    widest = bound;
+                }
+            }
+            None => return None,
+        }
+        at += 1;
+    }
+    widest.checked_add(1)
+}
 
 macro_rules! pssz_tuple_fields {
     (@each $all:tt;) => {};
@@ -913,7 +940,7 @@ macro_rules! pssz_tuple {
     ($(($ty:ident, $index:tt)),* $(,)?) => {
         impl<F: PsszFormat, $($ty: PsszPack<F>),*> PsszPack<F> for ($($ty,)*) {
             const MIN_ENCODED_SIZE: usize = 1;  // the header
-            const MAX_ENCODED_SIZE: Option<usize> = None;
+            const MAX_ENCODED_SIZE: Option<usize> = <Self as PsszPack<F>>::AUTO_BOUND;
             const IS_FIXED_SIZE: bool = false;
             const FIXED_SIZE: usize = 0;
             const AUTO_BOUND: Option<usize> = tuple_bound(&[$((<$ty as PsszPack<F>>::AUTO_BOUND, <$ty as PsszPack<F>>::IS_FIXED_SIZE)),*]);

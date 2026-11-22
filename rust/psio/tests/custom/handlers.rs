@@ -55,19 +55,20 @@ pub fn fixture_custom_handlers(handlers: &mut CustomHandlers) {
             })
         },
     );
-    // Ratio: tuple<i16, u16>, an unbounded tuple: a 4-byte header holding
-    // the fixed region's size (4), then the two members.
+    // Ratio: tuple<i16, u16>, bounded by 8 bytes (header 4 + 2 + 2): a
+    // 1-byte header holding the fixed region's size (4), then the two
+    // members.
     handlers.add(
         "Ratio",
         |bytes: &[u8]| match bytes {
-            [4, 0, 0, 0, a, b, c, d] => {
+            [4, a, b, c, d] => {
                 Ok(ratio_to_text(i16::from_le_bytes([*a, *b]), u16::from_le_bytes([*c, *d])))
             }
             _ => Err(NOT_WIRE),
         },
         |text: &str| {
             let (n, d) = ratio_from_text(text).ok_or(NOT_TEXT)?;
-            Ok([&[4u8, 0, 0, 0][..], &n.to_le_bytes()[..], &d.to_le_bytes()[..]].concat())
+            Ok([&[4u8][..], &n.to_le_bytes()[..], &d.to_le_bytes()[..]].concat())
         },
     );
     handlers.add(

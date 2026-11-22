@@ -82,9 +82,10 @@ fn the_ir_rust_builds_for_maps_sets_and_nested_values() {
     let AnyValue::Custom(seen) = node("seen").value else { panic!("Custom") };
     assert!(matches!(&seen.r#type.value, AnyValue::BoundedList(l) if l.maxCount == 3));
     // The schema derives the typed offset width from them.
-    // A map entry is a tuple, which has no inferred bound: 4, as typed.
+    // A map entry is a tuple, bounded by its elements: 4 (header) + 1 +
+    // (8 + 4) + (3 * 2 + 4) + (2 * (4 + 1 + 1 + 4) + 4) = 51, one-byte offsets.
     assert_eq!(dynamic::auto_width(&schema, &root).unwrap(), auto_pssz_width::<Capped>());
-    assert_eq!(auto_pssz_width::<Capped>(), 4);
+    assert_eq!(auto_pssz_width::<Capped>(), 1);
     // Without it the bounds select one-byte offsets: 4 (header) + 1 + (8 + 4) + (6 + 4).
     let (schema, root) = schema_for::<Small>().unwrap();
     assert_eq!(dynamic::auto_width(&schema, &root).unwrap(), auto_pssz_width::<Small>());

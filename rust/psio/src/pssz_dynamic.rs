@@ -1023,7 +1023,36 @@ impl<'a> Codec<'a> {
             }
             AnyValue::Struct(s) => record(&s.members, true, active),
             AnyValue::Object(o) => record(&o.members, dwnc(&o.attributes), active),
-            // Bit types, tuples, variants: no inferred bound.
+            // The extensible positional record of its members: the header,
+            // then per member its reserved payload and, when it is not an
+            // inline fixed payload, an offset slot.
+            AnyValue::Tuple(t) => {
+                let mut total: Bound = Some(4);
+                for member in &t.members {
+                    let mut payload = self.bound_of(member, None, true, active)?;
+                    if !self.fixed_payload(member, &mut Vec::new())? {
+                        payload = bound_add(payload, 4);
+                    }
+                    total = match (total, payload) {
+                        (Some(total), Some(payload)) => total.checked_add(payload),
+                        _ => None,
+                    };
+                }
+                Ok(total)
+            }
+            // One selector byte, then the widest alternative's payload.
+            AnyValue::Variant(v) => {
+                let mut widest: Bound = Some(0);
+                for member in &v.members {
+                    let payload = self.bound_of(&member.r#type, None, true, active)?;
+                    widest = match (widest, payload) {
+                        (Some(widest), Some(payload)) => Some(widest.max(payload)),
+                        _ => None,
+                    };
+                }
+                Ok(bound_add(widest, 1))
+            }
+            // Bit types: no inferred bound.
             _ => Ok(None),
         }
     }
@@ -1039,8 +1068,7 @@ impl<'a> Codec<'a> {
             return Ok(*width);
         }
         // A list's offset table is always 4 wide (a Vec has no bound of its
-        // own; a bounded list keeps the Vec's width). Tuples and variants
-        // have no inferred bound: 4.
+        // own; a bounded list keeps the Vec's width).
         let width = if matches!(ty.value, AnyValue::List(_) | AnyValue::BoundedList(_)) {
             4
         } else {
