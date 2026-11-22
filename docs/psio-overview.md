@@ -94,6 +94,11 @@ view.field_by_name(s) // dynamic key lookup
 Constant-time access; no allocation; no value-tree materialization.
 **Bounded work per read** is the load-bearing invariant.
 
+A format MAY also offer a mutable view. pssz does, for exactly one
+operation: overwriting a fixed-size value in place
+(`psio::mutable_view<T, pssz>`, `docs/pssz-spec.md` §17). Any change of
+size or presence is a decode → modify → encode.
+
 ### 2.4 Encode / Decode / Validate (CPOs)
 
 Three customization-point operations dispatched by the format tag:

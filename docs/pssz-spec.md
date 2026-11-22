@@ -1325,6 +1325,147 @@ actual size fits the cap, the encoded record is exactly
 `fixed_size_of(T)` bytes — no header, no offsets, no overhead. This
 is the minimum-size case for pssz.
 
+## 17. In-place mutation
+
+A pssz buffer can be modified without decoding it, but only in one way:
+**a fixed-size value may be overwritten by another value of the same
+type.** Everything else requires decode → modify → encode. This
+section gives the rule, the reason, and the reference surface
+(`psio::mutable_view<T, Fmt>`, `cpp/include/psio/mutable_view.hpp`).
+
+### 17.1 Why most mutations are impossible in place
+
+Three properties of the format decide it:
+
+- **One encoding per value.** Trailing absent optionals are pruned and
+  the record header records the pruned size (§7.2); every valid frame
+  is canonical in this respect (§15).
+- **Sizes are derived, never stored.** A variable-size value ends where
+  the next offset, or its container, says it ends (§5, §6.2). There is
+  no length field to adjust and no slack to grow into.
+- **No padding.** Payloads are contiguous and the frame ends exactly at
+  the last payload byte (§15 item 3, §6.2).
+
+So a mutation that changes the **size** of a value (a string, a vector,
+a bitlist, a variant switching alternative, a nested extensible record
+gaining a field) moves every later byte of every enclosing container
+and changes every later offset in each of them — and may no longer fit
+the type-derived offset width (§3). A mutation that changes the
+**presence** of an optional changes a size as well (None is zero bytes
+or one selector byte) and, for a trailing member, the pruning decision
+and therefore the header of the enclosing record. Neither is an
+in-place operation; both are a re-encode.
+
+### 17.2 Why a fixed-size overwrite is sound
+
+Call a value *fixed-size* when `fixed_size_of(T)` is defined (§3.3):
+Bool, integers, floats, enums, durations and time points, 128- and
+256-bit integers, `Bitvector(N)`, `Array(T, N)` of fixed-size T, and a
+DWNC record whose members are all fixed-size. Its encoding is
+`fixed_size_of(T)` bytes for every value, with no header, offset,
+selector or count inside it.
+
+In a valid frame the bytes are partitioned: each byte is either
+*structural* (a record header, an offset slot, an optional or variant
+selector, a bitlist delimiter) or belongs to exactly one scalar leaf.
+Offsets are monotonic and spans are exact, so no two values overlap.
+Every structural decision a reader makes — where a member starts and
+ends, how many elements a vector has, whether an optional is present,
+which alternative a variant holds, how many trailing members were
+pruned, whether unknown members follow — is a function of the type,
+the frame length and the structural bytes only. The bytes of a
+fixed-size value are never structural. In particular:
+
+- the count of a `Vector` of fixed-size elements is its span divided
+  by the element size, and a selector-less optional is present when
+  its span is non-empty (§5.5.1): both are lengths, not contents;
+- pruning concerns absent optionals only. `Some(0)` is a value, not a
+  default (§7.2), so no content written into a present optional can
+  make it prunable;
+- offset width, caps and nesting depth are properties of the type.
+
+Therefore, if the bytes of a fixed-size value are replaced by the
+encoding of another value `v'` of the same type, every reader computes
+the same structure as before and finds `v'` at that position. The
+result is byte-for-byte the canonical encoding of the original value
+with that one part replaced: exactly what decode → modify → encode
+would have produced.
+
+One condition remains: the written bytes must themselves be a valid
+encoding. Two fixed-size types constrain their bytes — a Bool is
+written as `00` or `01` (§4.1) and the unused high bits of a
+`Bitvector(N)` are zero (§5.4.1). A writer MUST produce the encoding of a value (never copy
+arbitrary bytes into the span) and MUST refuse a value that has none.
+
+### 17.3 The permitted operation
+
+`set(v)` on a position holding a fixed-size value of type T, where the
+position is any that exists in the frame:
+
+| Position | Exists when |
+|----------|-------------|
+| Fixed-size member of a DWNC record | always |
+| Fixed-size member of an extensible record | always: only optional members can be pruned, and an optional is never fixed-size |
+| Element `i` of `Array(T, N)` | `i < N` |
+| Element `i` of `Vector(T)` | `i < count` |
+| Payload of `Optional(T)` | the optional is present (Some → Some only) |
+| Payload of a variant's active alternative | that alternative is fixed-size |
+| Any of the above reached through any chain of members, elements, present optionals and active alternatives | every step exists |
+
+Navigation may pass through variable-size values (it only reads
+offsets); only the value written must be fixed-size. A fixed-size
+record or array may be overwritten as a whole or part by part.
+
+A frame written by a newer schema (unknown trailing optional members,
+§7.3) can be mutated through the older type: the unknown members are
+not touched and the frame remains the writer's canonical encoding.
+
+### 17.4 What an implementation must reject
+
+The reference implementation rejects each of these at compile time:
+
+- `set` on any variable-size type: String and bounded strings, Vector,
+  Bitlist, Optional (presence), Variant (alternative), an extensible
+  record, a DWNC record with a variable-size member, an
+  adapter-encoded value;
+- resizing of any kind — there is no such operation;
+- any write beneath a value whose **content is constrained beyond its
+  own encoding**: a type with a semantic invariant, or a record member
+  whose annotations constrain it (`sorted_spec`, `unique_keys_spec`,
+  `element_spec`, any spec with a validator). A leaf write could
+  falsify the constraint without changing a single structural byte, so
+  such a type has no mutable view and such a member cannot be
+  navigated into; `set` of a whole fixed-size value that contains one
+  is rejected as well. The extension point is
+  `psio::detail::mutation_blocked_v<T>`, specialized to `true` for a
+  type or an annotation spec;
+- navigation into a member with an `as<Tag>` override: its bytes are
+  the adapter's, not the member type's;
+- any format other than pssz. The argument above is specific to this
+  format.
+
+At run time `set` returns `false` and writes nothing when the position
+does not exist (payload of an absent optional, element index out of
+range) or the value has no valid encoding (a `Bitvector(N)` with unused
+bits set, a null `Box`). It never allocates and never throws.
+
+### 17.5 Preconditions
+
+A mutable view, like the read view, assumes a frame that has been
+validated for T (§10) and does not re-validate; `set` on a frame that
+was never valid is bounded to the caller's bytes but otherwise
+meaningless. After any sequence of successful or refused `set` calls on
+a valid frame, the frame passes `validate` and `validate_strict`, and
+equals the encoding of the value it decodes to.
+
+```cpp
+std::vector<char> bytes = psio::encode(psio::pssz{}, account);
+psio::mutable_view<Account, psio::pssz> mv{bytes};   // or span<char>, psio::buffer
+bool ok = mv.get<1>().set(std::uint64_t{42});        // member 1, a fixed-size u64
+ok = mv.get<3>()[2].get<0>().set(true);              // member 0 of element 2 of member 3
+ok = (*mv.get<5>()).set(7);                          // payload of a present optional
+```
+
 ## Appendix A. Glossary
 
 - **Container.** A compound type with internal layout (record,
