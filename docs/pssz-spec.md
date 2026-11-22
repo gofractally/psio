@@ -334,19 +334,28 @@ fn auto_pssz_width(T) -> {1, 2, 4}:
 
 ### 3.1 effective_max_dynamic(T)
 
-`effective_max_dynamic(T)` returns the smaller of:
+`effective_max_dynamic(T)` is:
 
-- The **explicit cap**: if T carries a type-level
-  `max-dynamic-data: N` annotation, that's the cap. (This is the same
-  annotation defined in `pjson-spec.md` §16.)
-- The **inferred bound**: `max_encoded_size(T)` — a recursive walk
-  that returns Some(n) when every variable-length sub-field of T
+- The **explicit cap**, when T carries a type-level
+  `max-dynamic-data: N` annotation. (This is the same annotation
+  defined in `pjson-spec.md` §16.) An explicit cap always rules: it is
+  not reduced to the inferred bound when the current fields happen to
+  be smaller.
+- Otherwise the **inferred bound**: `max_encoded_size(T)` — a recursive
+  walk that returns Some(n) when every variable-length sub-field of T
   carries a `length_bound{.max = M}` (or `.exact = M`) annotation,
   producing a finite upper bound. Returns None when any sub-field is
   unbounded.
 
-The smaller of the two wins. Both can independently be None; the
-combined result is None only when neither constrains the size.
+The result is None only when T has no explicit cap and its inferred
+bound is None; W is then 4.
+
+**Evolution and width.** W is fixed for the lifetime of a type. An
+optional field may be appended (§7) only if it does not change W. A
+type without an explicit cap therefore has only the slack between its
+inferred bound and the top of its width class (255, 65 535). A type
+that needs room for future optional fields must declare an explicit
+cap large enough to cover them from the start.
 
 ### 3.2 max_encoded_size(T)
 
