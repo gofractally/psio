@@ -41,8 +41,13 @@
 //   - member integer forms: jsonInt / ijsonInt = "number" | "string";
 //   - a variant alternative's I-JSON name: ijsonName (get_type_name);
 //   - type-level definitionWillNotChange / maxDynamicData / maxFields.
+//   - string kinds: std::string is the Custom "string" (raw bytes),
+//     utf8_string the Custom "utf8" (validated UTF-8), each over its byte
+//     container;
+//   - Box<T> is the Custom "box" over T: T on the wire, with no inferred
+//     size bound, exactly as the typed codecs treat it.
 // Not expressible: a member `as<Tag>` override or a text / binary adapter
-// (the IR has the member's declared type), and Box<T> is transparent.
+// (the IR has the member's declared type).
 //   Envelope            PSIO_INTERFACE → Interface,
 //                       PSIO_WORLD     → World (with imports/exports),
 //                       PSIO_USE       → Use
@@ -395,7 +400,10 @@ namespace psio::schema_types
             return Custom{Box<AnyType>{List{Box<AnyType>{insert<std::uint8_t>()}}},
                           "string"};
          else if constexpr (sb_detail::sb_is_box<U>::value)
-            return insert<typename sb_detail::sb_is_box<U>::elem>();
+            // The inner type on the wire, marked: a boxed value has no
+            // inferred size bound in the typed codecs, and a schema reader
+            // must derive the same offset widths.
+            return Custom{Box<AnyType>{insert<typename sb_detail::sb_is_box<U>::elem>()}, "box"};
          else if constexpr (sb_detail::sb_is_tuple<U>::value)
             return [&]<std::size_t... I>(std::index_sequence<I...>)
             {
@@ -443,15 +451,17 @@ namespace psio::schema_types
                return Custom{Box<AnyType>{std::move(list)}, "hex"};
             return list;
          }
+         // utf8_string is "utf8" (validated UTF-8); std::string above is
+         // "string" (raw bytes).
          else if constexpr (sb_detail::sb_is_utf8<U>::unbounded)
-            // Unbounded UTF-8: the string adapter over an unbounded byte
-            // list, with no fabricated maximum.
+            // Unbounded UTF-8: over an unbounded byte list, with no
+            // fabricated maximum.
             return Custom{Box<AnyType>{List{Box<AnyType>{insert<std::uint8_t>()}}},
-                          "string"};
+                          "utf8"};
          else if constexpr (sb_detail::sb_is_utf8<U>::value)
             return Custom{Box<AnyType>{AnyType{BoundedList{Box<AnyType>{insert<std::uint8_t>()},
                                                            sb_detail::sb_is_utf8<U>::limit}}},
-                          "string"};
+                          "utf8"};
          else if constexpr (sb_detail::sb_is_bitvector<U>::value)
             return Custom{Box<AnyType>{AnyType{Array{Box<AnyType>{Int{1, false}},
                                                      sb_detail::sb_is_bitvector<U>::count}}},

@@ -33,8 +33,9 @@ namespace schema_conf
       std::string         id;
       bool                ir = false;
       std::optional<bool> pssz;
+      std::optional<std::uint32_t> auto_width;
    };
-   PSIO_REFLECT(TypeRow, id, ir, pssz)
+   PSIO_REFLECT(TypeRow, id, ir, pssz, auto_width)
 
    struct JsonRow
    {
@@ -197,6 +198,19 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
    std::map<std::string, TypeRow> types;
    for (const auto& t : fx.types) types[t.id] = t;
    REQUIRE(types.size() >= 40);
+   // Every type with a pssz form: IR-derived offset width == typed width.
+   std::size_t widths = 0;
+   for (const auto& t : fx.types)
+   {
+      if (!t.ir || !t.pssz.value_or(false)) continue;
+      INFO(t.id);
+      REQUIRE(t.auto_width.has_value());
+      std::size_t width = 0;
+      REQUIRE(ir::auto_width(schema, psio::schema_types::Type{t.id}, width).ok());
+      REQUIRE(width == *t.auto_width);
+      ++widths;
+   }
+   REQUIRE(widths >= 40);
 
    std::size_t values = 0, accepted = 0, rejected = 0, with_bytes = 0;
    std::set<std::string> covered;
@@ -295,8 +309,23 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
    for (const auto& t : fx.types) expressible[t.id] = t.ir;
    REQUIRE(expressible.size() >= 200);
 
+   // Every type: the offset width derived from the IR alone is the width
+   // the typed codec uses (recorded by the emitter as `auto_width`).
+   std::size_t widths = 0;
+   for (const auto& t : fx.types)
+   {
+      INFO(t.id);
+      REQUIRE(t.ir);  // nothing in this fixture is beyond the IR
+      REQUIRE(t.auto_width.has_value());
+      std::size_t width = 0;
+      REQUIRE(ir::auto_width(schema, psio::schema_types::Type{t.id}, width).ok());
+      REQUIRE(width == *t.auto_width);
+      ++widths;
+   }
+   REQUIRE(widths == fx.types.size());
+
    std::size_t canonical = 0, unknown = 0, rejected = 0, raw_non_utf8 = 0, json_trips = 0,
-               no_json = 0, explicit_width = 0;
+               no_json = 0, explicit_width = 0, explicit_capped = 0, explicit_top_cap = 0;
    for (const auto& row : fx.vectors)
    {
       if (!expressible.at(row.type)) continue;
@@ -307,9 +336,9 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
 
       if (row.format != "auto")
       {
-         // The explicit profiles (one inherited width). The IR codec does
-         // not implement caps there and says so; those types are skipped.
-         if (cls == "cap-overflow-explicit-nested") continue;
+         // The explicit profiles (one inherited width). A maxDynamicData cap
+         // is enforced on the top-level type only, as psio::pssz_<W> does;
+         // `cap-overflow-explicit-nested` records exactly that outcome.
          ir::Value value;
          bool      has_unknown = false;
          auto      run = [&]<std::size_t W>(std::integral_constant<std::size_t, W>) {
@@ -320,13 +349,14 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
                             ? run(std::integral_constant<std::size_t, 1>{})
                             : row.format == "pssz16" ? run(std::integral_constant<std::size_t, 2>{})
                                                      : run(std::integral_constant<std::size_t, 4>{});
-         if (!st.ok() &&
-             st.error().what == "pssz IR: unsupported schema constraint or annotation")
-            continue;
+         REQUIRE((st.ok() ||
+                  st.error().what != "pssz IR: unsupported schema constraint or annotation"));
          ++explicit_width;
-         if (cls == "string-raw-non-utf8")
-            REQUIRE_FALSE(st.ok());
-         else if (row.expect == "reject")
+         explicit_capped += cls.starts_with("cap-overflow");
+         // The top-level type over its cap under an explicit width.
+         explicit_top_cap += cls == "width" && row.name.find("/cap/") != std::string::npos &&
+                             row.expect == "reject";
+         if (row.expect == "reject")
             REQUIRE_FALSE(st.ok());
          else
          {
@@ -340,12 +370,24 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
       const auto st = ir::validate_pssz(schema, root, std::span<const char>{bytes}, &has_unknown);
       if (cls == "string-raw-non-utf8")
       {
-         // The IR has one "string" for raw and UTF-8 strings and the codec
-         // treats it as UTF-8: these frames, valid for the typed raw
-         // string, are rejected through the schema. Pinned so that a change
-         // is noticed; see docs/json.md.
+         // The IR tells a raw string ("string") from a UTF-8 one ("utf8"):
+         // bytes that are not UTF-8 in a raw string are valid PSSZ through
+         // the schema, exactly as for the typed codec, and round-trip. They
+         // have no JSON text in either format: writing it is an error.
          REQUIRE(row.expect == "canonical");
-         REQUIRE_FALSE(st.ok());
+         REQUIRE(st.ok());
+         REQUIRE_FALSE(has_unknown);
+         ir::Value raw;
+         REQUIRE(ir::decode_auto(schema, root, std::span<const char>{bytes}, raw, has_unknown)
+                    .ok());
+         Bytes raw_again;
+         REQUIRE(ir::encode_auto(schema, root, raw, raw_again).ok());
+         REQUIRE(raw_again == bytes);
+         std::string raw_text = "keep";
+         REQUIRE(to_text<psio::ijson>(schema, row.type, bytes, raw_text) ==
+                 "json: string is not valid UTF-8");
+         REQUIRE(to_text<psio::json>(schema, row.type, bytes, raw_text) ==
+                 "json: string is not valid UTF-8");
          ++raw_non_utf8;
          continue;
       }
@@ -400,6 +442,8 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
    REQUIRE(json_trips >= 800);
    REQUIRE(no_json >= 1);
    REQUIRE(explicit_width >= 1000);
+   REQUIRE(explicit_capped == 15);
+   REQUIRE(explicit_top_cap >= 12);
 }
 
 TEST_CASE("the schema-driven entry points are checked", "[schema][conformance]")

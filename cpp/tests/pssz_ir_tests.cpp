@@ -15,9 +15,15 @@ ir::AnyType integer(std::uint32_t bits)
 {
    return ir::Int{bits, false};
 }
+// A raw string: any bytes.
 ir::AnyType text()
 {
    return ir::Custom{ir::AnyType{ir::List{integer(8)}}, "string"};
+}
+// A UTF-8 string: validated.
+ir::AnyType utf8_text()
+{
+   return ir::Custom{ir::AnyType{ir::List{integer(8)}}, "utf8"};
 }
 ir::AnyType optional(ir::AnyType type)
 {
@@ -85,11 +91,18 @@ template <std::size_t W> void profile()
    REQUIRE_FALSE(runtime::decode_exact<W>(schema, integer(32), std::vector<char>(5), value).ok());
    ir::AnyType bool_type = ir::Custom{integer(1), "bool"};
    REQUIRE_FALSE(runtime::decode_exact<W>(schema, bool_type, std::vector<char>{2}, value).ok());
+   // "utf8" is validated on read and on write; a raw "string" is any bytes.
    REQUIRE_FALSE(
-       runtime::decode_exact<W>(schema, text(), std::vector<char>{char(0xff)}, value).ok());
+       runtime::decode_exact<W>(schema, utf8_text(), std::vector<char>{char(0xff)}, value).ok());
    std::vector<char> invalid_string;
    REQUIRE_FALSE(
-       runtime::encode<W>(schema, text(), std::string(1, char(0xff)), invalid_string).ok());
+       runtime::encode<W>(schema, utf8_text(), std::string(1, char(0xff)), invalid_string).ok());
+   REQUIRE(invalid_string.empty());
+   REQUIRE(runtime::decode_exact<W>(schema, text(), std::vector<char>{char(0xff)}, value).ok());
+   REQUIRE(value == runtime::Value(std::string(1, char(0xff))));
+   REQUIRE(runtime::encode<W>(schema, text(), std::string(1, char(0xff)), invalid_string).ok());
+   REQUIRE(invalid_string == std::vector<char>{char(0xff)});
+   invalid_string.clear();
    REQUIRE_FALSE(
        runtime::encode<W>(schema, ir::FracPack{integer(8)}, runtime::Unsigned{7}, destination)
            .ok());
@@ -379,7 +392,7 @@ TEST_CASE("actual IR rejects unsupported constraint annotations before traversin
           "[pssz][ir][metadata]")
 {
    ir::Schema schema;
-   for (auto name : {"maxFields", "maxDynamicData", "unknownConstraint"})
+   for (auto name : {"maxFields", "unknownConstraint"})
    {
       ir::AnyType root = ir::Object{{}, {ir::Attribute{name, "0"}}};
       std::vector<char> bytes{9};
@@ -399,6 +412,39 @@ TEST_CASE("actual IR rejects unsupported constraint annotations before traversin
    std::vector<char> bytes;
    REQUIRE(runtime::encode<4>(schema, descriptive, runtime::Record{}, bytes).ok());
    REQUIRE(bytes == std::vector<char>(4, 0));
+
+   // maxDynamicData under an explicit width is what psio::pssz_<W> does with
+   // it: the cap of the top-level type bounds the whole encoding; a nested
+   // record's cap is not looked up. A malformed value is still an error.
+   {
+      ir::AnyType capped4 = ir::Object{{}, {ir::Attribute{"maxDynamicData", "4"}}};
+      ir::AnyType capped0 = ir::Object{{}, {ir::Attribute{"maxDynamicData", "0"}}};
+      ir::AnyType broken  = ir::Object{{}, {ir::Attribute{"maxDynamicData", "x"}}};
+      std::vector<char> out{9};
+      runtime::Value    value = runtime::Unsigned{99};
+      bool              unknown = false;
+      REQUIRE(runtime::encode<4>(schema, capped4, runtime::Record{}, out).ok());
+      REQUIRE(out == std::vector<char>{9, 0, 0, 0, 0});
+      REQUIRE(runtime::decode_exact<4>(schema, capped4, std::vector<char>(4, 0), value).ok());
+      REQUIRE(value == runtime::Value(runtime::Record{}));
+      // Top-level type over its cap: refused on write and on read.
+      out = {9};
+      value = runtime::Unsigned{99};
+      REQUIRE_FALSE(runtime::encode<4>(schema, capped0, runtime::Record{}, out).ok());
+      REQUIRE(out == std::vector<char>{9});
+      REQUIRE_FALSE(runtime::decode_exact<4>(schema, capped0, std::vector<char>(4, 0), value).ok());
+      REQUIRE(value == runtime::Value(runtime::Unsigned{99}));
+      REQUIRE_FALSE(
+          runtime::decode_compatible<4>(schema, capped0, std::vector<char>(4, 0), value, unknown)
+              .ok());
+      // Nested (here under an Option): not looked up.
+      out.clear();
+      REQUIRE(runtime::encode<4>(schema, optional(capped0),
+                                 runtime::Value::some(runtime::Record{}), out)
+                 .ok());
+      REQUIRE(runtime::decode_exact<4>(schema, optional(capped0), out, value).ok());
+      REQUIRE_FALSE(runtime::encode<4>(schema, broken, runtime::Record{}, out).ok());
+   }
 }
 
 TEST_CASE("actual IR packed Bits match all shared static Rust frames", "[pssz][ir][bits][shared]")

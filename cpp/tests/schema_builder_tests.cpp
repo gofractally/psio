@@ -86,7 +86,7 @@ TEST_CASE("SchemaBuilder emits count bounds and packed bit metadata", "[schema_b
    auto schema=std::move(builder).build();
    REQUIRE(std::get<ir::BoundedList>(list.resolve(schema)->value).maxCount==5);
    const auto& string=std::get<ir::Custom>(text.resolve(schema)->value);
-   REQUIRE(string.id=="string");REQUIRE(std::get<ir::BoundedList>(string.type->value).maxCount==8);
+   REQUIRE(string.id=="utf8");REQUIRE(std::get<ir::BoundedList>(string.type->value).maxCount==8);
    const auto& vector=std::get<ir::Custom>(bits.resolve(schema)->value);
    REQUIRE(vector.id=="bitvector");const auto& array=std::get<ir::Array>(vector.type->value);
    REQUIRE(array.len==9);REQUIRE(std::get<ir::Int>(array.type->value).bits==1);
@@ -101,7 +101,11 @@ TEST_CASE("SchemaBuilder preserves recursive graphs through transparent boxes", 
    auto schema=std::move(builder).build();
    const auto& object=std::get<ir::Object>(root.resolve(schema)->value);
    const auto& next=std::get<ir::Option>(object.members[1].type->resolve(schema)->value);
-   REQUIRE(next.type->resolve(schema)==root.resolve(schema));
+   // The box is recorded (Custom "box": the inner type on the wire, with no
+   // inferred size bound) and leads back to the same record.
+   const auto& boxed=std::get<ir::Custom>(next.type->resolve(schema)->value);
+   REQUIRE(boxed.id=="box");
+   REQUIRE(boxed.type->resolve(schema)==root.resolve(schema));
    recursive_schema::Node value{1,ir::Box<recursive_schema::Node>{recursive_schema::Node{2,std::nullopt}}};
    auto bytes=psio::encode(psio::pssz32{},value);codec::Value decoded;
    REQUIRE(codec::decode_exact<4>(schema,root,bytes,decoded).ok());

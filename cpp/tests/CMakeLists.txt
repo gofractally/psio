@@ -33,6 +33,10 @@ add_test(NAME psio_name_lookup_collision_compile_fail
 set_tests_properties(psio_name_lookup_collision_compile_fail PROPERTIES
    PASS_REGULAR_EXPRESSION "two names of one type collide under the supplied hash")
 
+# Schema fidelity: IR-derived widths, raw vs UTF-8 strings, explicit-width
+# caps and custom text handlers agree with the typed codecs.
+psio_add_test(psio_schema_fidelity_tests schema_fidelity_tests.cpp)
+
 # Method reflection, the one proxy, interfaces from a reflected type.
 psio_add_test(psio_reflect_method_tests reflect_method_tests.cpp)
 # A field and a method with one name, or a member named like a proxy

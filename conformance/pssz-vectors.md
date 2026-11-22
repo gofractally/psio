@@ -48,9 +48,10 @@ implementation disagrees. The class marked OBSERVED ONLY is exempt.
 `schema_ir` is the `psio::pssz` encoding (lowercase hex) of one Schema IR
 (`psio::Schema`) that holds every fixture type under its id. The schema-driven
 tests (`cpp/tests/schema_conformance_tests.cpp`,
-`rust/psio/tests/schema_conformance.rs`) use it and nothing else: IR + bytes
-must give the outcome recorded for the typed codec (see `string-raw-non-utf8`
-for the one documented difference).
+`rust/psio/tests/schema_conformance.rs`,
+`js/src/test/pssz-conformance.test.ts`) use it and nothing else: IR + bytes
+must give the outcome recorded for the typed codec, for every vector, and the
+offset width derived from the IR must equal every type's `auto_width`.
 
 Types:
 
@@ -125,14 +126,15 @@ exists only for record members.
 | `malformed` | 419 | Hand-made frames every entry point rejects. Two `canonical` entries document that at four-byte offsets an appended required `u32` is indistinguishable from an appended optional slot. |
 | `optional-presence` | 400 | Every presence class, None and Some, standalone and as middle / trailing record fields. |
 | `width` | 309 | Type-derived widths, thresholds, caps, mixed parent/child widths, cap overflow. |
-| `cap-overflow-explicit-nested` | 15 | OBSERVED ONLY, no expectation. A nested value over its type's cap under an explicit-width tag: C++ checks only the top-level type's cap there. |
+| `cap-overflow-explicit-nested` | 15 | A nested value over its type's `maxDynamicData` cap under an explicit-width tag. Recorded as the typed C++ codec behaves: an explicit width enforces the cap of the top-level type only, so these are `canonical` (one is a `reject` for an unrelated reason: the frame does not fit one-byte offsets). The schema-driven codecs of all three languages do the same: they accept `maxDynamicData` under an explicit width and enforce it on the top-level type (`width/cap/...` holds the top-level rejections). |
 | `tuple` | 60 | Tuples as positional extensible records, including pruning. |
 | `variant` | 48 | One index byte plus the alternative; every index. |
 | `enum` | 76 | Enums as their underlying integer. |
 | `enum-unknown-value` | 36 | A value that names no enumerator: structurally valid (spec §4.5), accepted in every entry point. C++ enums hold it; the Rust mirror types take it in their `#[pssz(other)]` catch-all variant (a Rust enum without one rejects it, which Rust's own tests pin). |
 | `string` | 308 | UTF-8 and bound rules for `string`, `string<=N`, `raw_string`. |
-| `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`. Recorded as `canonical`; the exceptions are C++ `validate_strict`, which checks every plain string, and the schema-driven codec (the IR has one `string` for raw and UTF-8 strings and treats it as UTF-8): both reject these. |
+| `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`: valid PSSZ, recorded as `canonical`, for the typed codecs and for the schema-driven ones alike (the IR tells a raw string, Custom `string`, from a UTF-8 one, Custom `utf8`). The one exception is C++ `validate_strict`, which checks every plain string. Such a value has no JSON / I-JSON text: writing it is an error in every language. |
 | `length-bound-overflow` | 28 | Frames exceeding a member `length_bound`, as a writer that skips the bound check would produce them. Every reader rejects them; the C++ and Rust encoders refuse the values. |
+| `box` | 100 | Boxed values (`box<T>`: C++ / Rust `Box<T>`). The bytes are T's; a box gives its container no inferred size bound, so `BoxRec` uses 4-byte offsets where `BDirect` uses 1. The IR records the box (Custom `box`) and a schema-only reader derives the same widths. |
 | `bytes` | 88 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. |
 | `zero-fixed` | 100 | Zero-field and all-fixed records and their containers. |
 | `depth` | 28 | Node depth 63 / 64 accepted, 65+ rejected (`kMaxValidationDepth` = 64). |

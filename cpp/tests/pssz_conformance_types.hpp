@@ -160,6 +160,31 @@ namespace pssz_conf
    struct DepthNode { u8 value; std::optional<psio::schema_types::Box<DepthNode>> next; };
    PSIO_REFLECT(DepthNode, value, next)
 
+   // ── Boxed values ──────────────────────────────────────────────────────
+   // A Box<T> is T on the wire, and the typed codecs infer no size bound
+   // through it: a record holding a boxed bounded value uses 4-byte offsets
+   // unless it carries an explicit cap. The Schema IR marks the box (Custom
+   // "box") so that a schema-only reader derives the same widths.
+   template <typename T> using Boxed = psio::schema_types::Box<T>;
+   struct BLeaf { u16 n; psio::utf8_string<4> t; };  // bounded: at most 11 bytes
+   PSIO_REFLECT(BLeaf, n, t)
+   struct BDirect { u32 id; BLeaf leaf; };  // no box: 1-byte offsets
+   PSIO_REFLECT(BDirect, id, leaf)
+   struct BoxRec { u32 id; Boxed<BLeaf> leaf; };  // boxed: no bound, 4-byte offsets
+   PSIO_REFLECT(BoxRec, id, leaf)
+   struct BoxCapRec { u32 id; Boxed<BLeaf> leaf; };  // boxed under a cap of 200
+   PSIO_REFLECT(BoxCapRec, id, leaf)
+   struct BoxOptRec { u32 id; std::optional<Boxed<BLeaf>> leaf; u8 tail; };
+   PSIO_REFLECT(BoxOptRec, id, leaf, tail)
+   struct BoxVecRec { u8 id; std::vector<Boxed<BLeaf>> leaves; };  // leaves <= 3
+   PSIO_REFLECT(BoxVecRec, id, leaves)
+   struct BoxVecCapRec { u8 id; std::vector<Boxed<BLeaf>> leaves; };  // cap 60000
+   PSIO_REFLECT(BoxVecCapRec, id, leaves)
+   struct BoxFixedRec { u8 id; Boxed<u32> word; Boxed<std::array<u8, 2>> pair; };
+   PSIO_REFLECT(BoxFixedRec, id, word, pair)
+   struct BoxOuter { u8 k; BoxCapRec capped; BoxRec open; std::optional<BDirect> direct; };
+   PSIO_REFLECT(BoxOuter, k, capped, open, direct)
+
    // ── Zero-size and fixed records ───────────────────────────────────────
    struct Unit {};  // zero-field DWNC: encodes to zero bytes
    PSIO_REFLECT(Unit)
@@ -315,6 +340,9 @@ namespace pssz_conf
 PSIO_TYPE_ATTRS(pssz_conf::Unit, psio::definition_will_not_change{})
 PSIO_TYPE_ATTRS(pssz_conf::Pair, psio::definition_will_not_change{})
 PSIO_TYPE_ATTRS(pssz_conf::DwncVar, psio::definition_will_not_change{})
+PSIO_TYPE_ATTRS(pssz_conf::BoxCapRec, psio::max_dynamic_data_spec{200})
+PSIO_FIELD_ATTRS(pssz_conf::BoxVecRec, leaves, psio::length_bound{.max = 3})
+PSIO_TYPE_ATTRS(pssz_conf::BoxVecCapRec, psio::max_dynamic_data_spec{60000})
 PSIO_TYPE_ATTRS(pssz_conf::C1a, psio::max_dynamic_data_spec{200})
 PSIO_TYPE_ATTRS(pssz_conf::C1b, psio::max_dynamic_data_spec{200})
 PSIO_TYPE_ATTRS(pssz_conf::C1c, psio::max_dynamic_data_spec{200})
@@ -599,6 +627,10 @@ namespace pssz_conf
       // bytes
       types<Vec<u8>, std::array<u8, 4>, psio::bitvector<12>, Bits12, BytesRec, Vec<u32>,
             Arr2<bool>>,
+      // boxed values
+      types<BLeaf, BDirect, BoxRec, BoxCapRec, BoxOptRec, BoxVecRec, BoxVecCapRec, BoxFixedRec,
+            BoxOuter, Boxed<BLeaf>, Vec<Boxed<BLeaf>>, Opt<Boxed<BLeaf>>, Vec<BoxRec>,
+            Opt<BoxCapRec>, std::variant<Boxed<BLeaf>, u8>, std::tuple<Boxed<BLeaf>, u8>>,
       // tuples and variants
       types<std::tuple<>, std::tuple<u32>, std::tuple<Raw>, TupBS,
             std::tuple<u32, Raw, std::optional<u16>>,

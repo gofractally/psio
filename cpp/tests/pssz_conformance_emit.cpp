@@ -1673,6 +1673,78 @@ namespace
       }
    }
 
+   // Boxed values: the bytes are the inner type's; the offset width of the
+   // container is what the box changes (see the types).
+   void emit_boxes()
+   {
+      const char* c    = "box";
+      auto        leaf = [](u16 n, std::string_view t) {
+         return BLeaf{n, psio::utf8_string<4>{std::string(t)}};
+      };
+      auto boxed = [&](u16 n, std::string_view t) { return Boxed<BLeaf>{leaf(n, t)}; };
+      static_assert(psio::auto_pssz_width_v<BDirect> == 1);
+      static_assert(psio::auto_pssz_width_v<BoxRec> == 4);
+      static_assert(psio::auto_pssz_width_v<BoxCapRec> == 1);
+      static_assert(psio::auto_pssz_width_v<BoxOptRec> == 4);
+      static_assert(psio::auto_pssz_width_v<BoxVecRec> == 4);
+      static_assert(psio::auto_pssz_width_v<BoxVecCapRec> == 2);
+      corpus<BLeaf>(c, "leaf", leaf(7, "abcd"));
+      corpus<BDirect>(c, "direct", BDirect{1, leaf(2, "ab")});
+      corpus<BoxRec>(c, "record", BoxRec{1, boxed(2, "ab")});
+      corpus<BoxRec>(c, "record_empty_text", BoxRec{0, boxed(0, "")});
+      corpus<BoxCapRec>(c, "record_capped", BoxCapRec{1, boxed(2, "ab")});
+      corpus<BoxOptRec>(c, "optional_some", BoxOptRec{3, boxed(4, "xyz"), 9});
+      corpus<BoxOptRec>(c, "optional_none", BoxOptRec{3, std::nullopt, 9});
+      {
+         BoxVecRec v{5, {}};
+         corpus<BoxVecRec>(c, "vector_empty", v);
+         v.leaves.push_back(boxed(1, "a"));
+         v.leaves.push_back(boxed(2, ""));
+         v.leaves.push_back(boxed(3, "abcd"));
+         corpus<BoxVecRec>(c, "vector_three", v);
+         BoxVecCapRec w{5, {}};
+         w.leaves.push_back(boxed(1, "a"));
+         w.leaves.push_back(boxed(2, "bc"));
+         corpus<BoxVecCapRec>(c, "vector_capped", w);
+      }
+      corpus<BoxFixedRec>(c, "fixed", BoxFixedRec{1, Boxed<u32>{0x01020304u},
+                                                  Boxed<std::array<u8, 2>>{{{5, 6}}}});
+      corpus<BoxOuter>(c, "outer",
+                       BoxOuter{1, BoxCapRec{2, boxed(3, "c")}, BoxRec{4, boxed(5, "open")},
+                                BDirect{6, leaf(7, "d")}});
+      corpus<BoxOuter>(c, "outer_pruned",
+                       BoxOuter{1, BoxCapRec{2, boxed(3, "")}, BoxRec{4, boxed(5, "")},
+                                std::nullopt});
+      corpus<Boxed<BLeaf>>(c, "top_level", boxed(9, "top"));
+      corpus<Vec<Boxed<BLeaf>>>(c, "in_vector", {boxed(1, "a"), boxed(2, "bb")});
+      corpus<Vec<Boxed<BLeaf>>>(c, "in_vector_empty", {});
+      corpus<Opt<Boxed<BLeaf>>>(c, "in_optional", boxed(1, "a"));
+      corpus<Opt<Boxed<BLeaf>>>(c, "in_optional_none", std::nullopt);
+      corpus<Vec<BoxRec>>(c, "records_in_vector", {BoxRec{1, boxed(2, "ab")}, BoxRec{3, boxed(4, "")}});
+      corpus<Opt<BoxCapRec>>(c, "capped_in_optional", BoxCapRec{1, boxed(2, "ab")});
+      corpus<std::variant<Boxed<BLeaf>, u8>>(c, "in_variant",
+                                             std::variant<Boxed<BLeaf>, u8>{boxed(1, "v")});
+      corpus<std::tuple<Boxed<BLeaf>, u8>>(c, "in_tuple",
+                                           std::tuple<Boxed<BLeaf>, u8>{boxed(1, "t"), 2});
+      // The boxed text is still a bounded UTF-8 string, and a box does not
+      // make a frame of the wrong shape acceptable.
+      formats([&]<typename F>() {
+         const std::size_t W = wof<F, BoxRec>();
+         const std::size_t L = wof<F, BLeaf>();
+         auto frame = [&](const Bytes& text_bytes) {
+            Fr leaf_frame{L};
+            leaf_frame.o(2 + L).byte(7).byte(0).o(2 + L).cat(text_bytes);
+            Fr rec{W};
+            rec.o(4 + W).u32(1).o(4 + W).cat(leaf_frame);
+            return Bytes(rec);
+         };
+         add<F, BoxRec>(c, "valid_frame", frame(text("abcd")), canonical());
+         add<F, BoxRec>(c, "text_over_bound", frame(text("abcde")),
+                        reject("pssz: utf8_string exceeds its bound"));
+         add<F, BoxRec>(c, "text_not_utf8", frame(hx("ff")), reject());
+      });
+   }
+
    void emit_strings()
    {
       const char*       c       = "string";
@@ -2049,6 +2121,7 @@ int main(int argc, char** argv)
    emit_width();
    emit_length_bound_overflow();
    emit_tuples_variants_enums();
+   emit_boxes();
    emit_strings();
    emit_bytes_and_scalars();
    emit_zero_fixed();

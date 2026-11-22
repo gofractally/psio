@@ -65,11 +65,16 @@
 //     }
 //
 // In-class reflection sees private members and members declared after the
-// macro; `attr(...)` and the type-level keywords are not available there
-// (they are explicit specializations, which C++ only allows at namespace
-// scope) — attach those after the class with PSIO_FIELD_ATTRS /
-// PSIO_TYPE_ATTRS. At namespace scope every listed member must be accessible
-// (public).
+// macro. At namespace scope every listed member must be accessible (public).
+//
+// `attr(...)` and the type-level keywords (definitionWillNotChange(),
+// maxFields(N), maxDynamicData(N)) expand to explicit specializations of
+// psio::annotate, which C++ allows only at global scope (or in namespace
+// psio). They therefore work only in a PSIO_REFLECT written at global scope
+// for a global type. For a type in a namespace, or reflected in its class
+// body, list plain fields and methods in PSIO_REFLECT and attach the
+// annotations at global scope with PSIO_FIELD_ATTRS(ns::T, field, spec) /
+// PSIO_TYPE_ATTRS(ns::T, spec) (annotate.hpp).
 //
 // A method is named by `&T::name`, so an overloaded member function cannot
 // be reflected (the address is ambiguous): give the overloads distinct

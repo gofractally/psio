@@ -17,7 +17,8 @@
 //
 // Attributes read by the codec (schema_builder.hpp writes them):
 //   Object  definitionWillNotChange    fixed layout (no header)
-//           maxDynamicData = "N"       explicit cap (automatic profile)
+//           maxDynamicData = "N"       explicit cap (automatic profile: every
+//                                      record; explicit: the top-level type)
 //   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
 //           jsonInt / ijsonInt = "number" | "string"   (pssz_ir_json.hpp)
 //   Variant member  ijsonName = "..."                   (pssz_ir_json.hpp)
@@ -218,11 +219,16 @@ enum class attribute_site
    variant,
    variant_member,
 };
-// `caps`: the automatic profile, which implements maxDynamicData. The
-// explicit profile rejects the constraints it does not enforce.
+// maxDynamicData is implemented by both profiles, as the typed codecs do:
+// the automatic profile (psio::pssz) derives widths from it and enforces it
+// on every record; an explicit profile (psio::pssz_<W>) keeps its one
+// inherited width and enforces the cap of the top-level type only.
+// `caps`: the automatic profile, which also takes maxFields; an explicit
+// profile rejects that constraint, as it rejects any it does not implement.
 inline codec_status attributes(const std::vector<schema_types::Attribute> &values,
                                attribute_site site, bool caps)
 {
+
    for (const auto &value : values)
    {
       const auto &name = value.name;
@@ -230,8 +236,8 @@ inline codec_status attributes(const std::vector<schema_types::Attribute> &value
          continue;
       if (site == attribute_site::record && name == "definitionWillNotChange")
          continue;
-      if (site == attribute_site::record && caps &&
-          (name == "maxDynamicData" || name == "maxFields"))
+      if (site == attribute_site::record &&
+          (name == "maxDynamicData" || (caps && name == "maxFields")))
          continue;
       if (site == attribute_site::record_member &&
           (name == "lengthBound" || name == "jsonInt" || name == "ijsonInt"))
@@ -250,7 +256,7 @@ inline codec_status attributes(const std::vector<schema_types::Attribute> &value
       std::optional<LengthBound> bound;
       return parse_length_bound(values, bound);
    }
-   if (site == attribute_site::record && caps)
+   if (site == attribute_site::record)
    {
       std::optional<std::uint64_t> cap;
       return parse_cap(values, cap);
@@ -318,6 +324,42 @@ inline codec_status bitlist_count(std::span<const char> wire, std::size_t bound,
       if (!psio_ir_status_.ok())                                                                   \
          return psio_ir_status_;                                                                   \
    } while (false)
+
+// ── Custom ids ─────────────────────────────────────────────────────────────
+//
+// A Custom node is `type` (what is on the wire) plus an `id`. These ids are
+// part of the binary form:
+//
+//   bool, char             a one-byte primitive over Int{1} / Int{8}
+//   string                 a RAW string: any bytes (C++ std::string, Rust
+//                          RawString) over a byte container
+//   utf8                   a UTF-8 string (C++ utf8_string, Rust String)
+//                          over a byte container: validated on every read
+//                          and write
+//   hex                    bytes over a byte container
+//   bitvector, bitlist     packed bits
+//   box                    the inner type on the wire, with no inferred
+//                          size bound (C++ / Rust Box<T>): the typed codecs
+//                          give a boxed value no bound, so a type holding
+//                          one gets the same offset width from the schema
+//
+// "unknown" marks a C++ type the schema builder could not describe and has
+// no codec. Every other id names a text presentation only (a custom text
+// form registered with the text codecs, pssz_ir_json.hpp): on the wire it
+// is exactly its inner type.
+inline bool byte_adapter_id(std::string_view id) noexcept
+{
+   return id == "string" || id == "utf8" || id == "hex";
+}
+inline bool text_adapter_id(std::string_view id) noexcept
+{
+   return id == "string" || id == "utf8";
+}
+inline bool wire_custom_id(std::string_view id) noexcept
+{
+   return id == "bool" || id == "char" || byte_adapter_id(id) || id == "bitvector" ||
+          id == "bitlist" || id == "unknown";
+}
 
 // W = 1, 2, 4: the explicit profile. W = 0: the automatic profile.
 template <std::size_t W> class Codec
@@ -394,7 +436,7 @@ template <std::size_t W> class Codec
              {
                 if (t.id == "bool" || t.id == "char")
                    out = true;
-                else if (t.id == "hex" || t.id == "string")
+                else if (byte_adapter_id(t.id))
                 {
                    const schema_types::AnyType *child;
                    PSIO_PSSZ_IR_TRY(inner(t.type, child));
@@ -433,8 +475,12 @@ template <std::size_t W> class Codec
                          std::vector<const schema_types::AnyType *> &active) const
    {
       const schema_types::AnyType *type;
-      PSIO_PSSZ_IR_TRY(resolve(input, type));
+      bool boxed = false;
+      PSIO_PSSZ_IR_TRY(resolve(input, type, &boxed));
       out.reset();
+      // A boxed value has no inferred bound (max_size.hpp has none for Box).
+      if (boxed)
+         return codec_ok();
       if (std::find(active.begin(), active.end(), type) != active.end())
          return codec_ok();
       if (reserve_cap)
@@ -462,7 +508,8 @@ template <std::size_t W> class Codec
          const schema_types::AnyType *child;
          PSIO_PSSZ_IR_TRY(inner(box, child));
          Bound element;
-         PSIO_PSSZ_IR_TRY(bound_of(*child, nullptr, true, element, active));
+         // (the unresolved type: a box on the way must be seen)
+         PSIO_PSSZ_IR_TRY(bound_of(*box.get(), nullptr, true, element, active));
          bool fixed;
          std::vector<const schema_types::AnyType *> fresh;
          PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, fresh));
@@ -510,14 +557,14 @@ template <std::size_t W> class Codec
                 // One selector byte is reserved for every optional.
                 const schema_types::AnyType *child;
                 PSIO_PSSZ_IR_TRY(inner(t.type, child));
-                PSIO_PSSZ_IR_TRY(bound_of(*child, annotation, true, out, active));
+                PSIO_PSSZ_IR_TRY(bound_of(*t.type.get(), annotation, true, out, active));
                 out = bound_add(out, 1);
              }
              else if constexpr (std::is_same_v<T, schema_types::Custom>)
              {
                 if (t.id == "bool" || t.id == "char")
                    out = 1;
-                else if (t.id == "string" || t.id == "hex")
+                else if (byte_adapter_id(t.id))
                 {
                    const schema_types::AnyType *child;
                    PSIO_PSSZ_IR_TRY(inner(t.type, child));
@@ -540,7 +587,8 @@ template <std::size_t W> class Codec
                    PSIO_PSSZ_IR_TRY(parse_length_bound(member.attributes, bound));
                    Bound payload;
                    PSIO_PSSZ_IR_TRY(
-                       bound_of(*child, bound ? &*bound : nullptr, true, payload, active));
+                       bound_of(*member.type.get(), bound ? &*bound : nullptr, true, payload,
+                                active));
                    bool fixed;
                    std::vector<const schema_types::AnyType *> fresh;
                    PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, fresh));
@@ -598,6 +646,33 @@ template <std::size_t W> class Codec
          return codec_ok();
       }
    }
+ public:
+   // Explicit profile: the cap of the top-level type bounds the whole
+   // encoding (psio::pssz_<W>'s encode_pssz_checked / validate). Nested caps
+   // are not looked up. No-op for the automatic profile, which checks every
+   // record where it is read or written.
+   codec_status check_top_cap(const schema_types::AnyType &root, std::size_t size) const
+   {
+      if constexpr (!automatic)
+      {
+         const schema_types::AnyType *type;
+         PSIO_PSSZ_IR_TRY(resolve(root, type));
+         if (auto values = record_attributes(*type))
+         {
+            std::optional<std::uint64_t> cap;
+            PSIO_PSSZ_IR_TRY(parse_cap(*values, cap));
+            if (cap && size > *cap)
+               return fail("pssz IR: encoded size exceeds maxDynamicData cap");
+         }
+      }
+      else
+      {
+         (void)root;
+         (void)size;
+      }
+      return codec_ok();
+   }
+ private:
    // A record over its explicit cap is not a value of its type.
    static codec_status check_cap(const schema_types::AnyType &type, std::size_t size)
    {
@@ -638,10 +713,16 @@ template <std::size_t W> class Codec
       }
    }
 
-   codec_status resolve(const schema_types::AnyType &input, const schema_types::AnyType *&out) const
+   // The type `input` is on the wire: named aliases followed, and the nodes
+   // that add nothing to the bytes (Enum, Custom ids that are not part of
+   // the binary form) looked through. `boxed` reports a "box" on the way.
+   codec_status resolve(const schema_types::AnyType &input, const schema_types::AnyType *&out,
+                        bool *boxed = nullptr) const
    {
       out = &input;
-      for (std::size_t hops = 0; hops <= 2 * schema.types.size() + 2; ++hops)
+      // Wrappers (Enum, Custom) between two aliases are finite in a valid
+      // schema; the limit only stops a malformed one.
+      for (std::size_t hops = 0; hops <= 4 * schema.types.size() + 64; ++hops)
       {
          // An Enum is its underlying integer on the wire.
          if (auto named = std::get_if<schema_types::Enum>(&out->value))
@@ -649,6 +730,16 @@ template <std::size_t W> class Codec
             if (!named->type.get())
                return fail("pssz IR: null schema box");
             out = named->type.get();
+            continue;
+         }
+         if (auto custom = std::get_if<schema_types::Custom>(&out->value);
+             custom && !wire_custom_id(custom->id))
+         {
+            if (!custom->type.get())
+               return fail("pssz IR: null schema box");
+            if (boxed && custom->id == "box")
+               *boxed = true;
+            out = custom->type.get();
             continue;
          }
          auto ref = std::get_if<schema_types::Type>(&out->value);
@@ -839,7 +930,7 @@ template <std::size_t W> class Codec
                    out = {!list, list ? 0 : packed_byte_count(count), false};
                    return codec_ok();
                 }
-                if (t.id == "string" || t.id == "hex")
+                if (byte_adapter_id(t.id))
                 {
                    const schema_types::AnyType *child;
                    PSIO_PSSZ_IR_TRY(inner(t.type, child));
@@ -917,7 +1008,7 @@ template <std::size_t W> class Codec
                    out = !list && !count;
                    return codec_ok();
                 }
-                if (t.id == "string" || t.id == "hex")
+                if (byte_adapter_id(t.id))
                 {
                    const schema_types::AnyType *child;
                    PSIO_PSSZ_IR_TRY(inner(t.type, child));
@@ -1217,7 +1308,16 @@ template <std::size_t W> class Codec
    codec_status width(const schema_types::AnyType &root, std::size_t &out) const
    {
       const schema_types::AnyType *type;
-      PSIO_PSSZ_IR_TRY(resolve(root, type));
+      bool boxed = false;
+      PSIO_PSSZ_IR_TRY(resolve(root, type, &boxed));
+      // A box has no header of its own: the boxed type is encoded at its
+      // own width. As a root, the typed trait reports the unbounded width.
+      if constexpr (automatic)
+         if (boxed)
+         {
+            out = 4;
+            return codec_ok();
+         }
       return width_of(*type, out);
    }
 
@@ -1288,7 +1388,7 @@ template <std::size_t W> class Codec
                       bool list;
                       PSIO_PSSZ_IR_TRY(bit_shape(t, count, list));
                    }
-                   else if (t.id == "string" || t.id == "hex")
+                   else if (byte_adapter_id(t.id))
                    {
                       const schema_types::AnyType *child;
                       PSIO_PSSZ_IR_TRY(inner(t.type, child));
@@ -1408,13 +1508,15 @@ template <std::size_t W> class Codec
                       return fail("pssz IR: char byte value required");
                    out.push_back(static_cast<char>(v->value));
                 }
-                else if (t.id == "string")
+                else if (text_adapter_id(t.id))
                 {
                    auto v = std::get_if<std::string>(&value.value);
                    if (!v)
                       return fail("pssz IR: string value required");
                    PSIO_PSSZ_IR_TRY(bound_bytes(*child, v->size()));
-                   PSIO_PSSZ_IR_TRY(utf8_spec::validate(std::span<const char>(*v)));
+                   // "utf8" is UTF-8; "string" is raw bytes.
+                   if (t.id == "utf8")
+                      PSIO_PSSZ_IR_TRY(utf8_spec::validate(std::span<const char>(*v)));
                    PSIO_PSSZ_IR_TRY(append(out, *v));
                 }
                 else if (t.id == "hex")
@@ -1627,10 +1729,11 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
                    return fail("pssz IR: char span mismatch");
                 out = Unsigned{static_cast<unsigned char>(bytes[0])};
              }
-             else if (t.id == "string")
+             else if (text_adapter_id(t.id))
              {
                 PSIO_PSSZ_IR_TRY(bound_bytes(*child, bytes.size()));
-                PSIO_PSSZ_IR_TRY(utf8_spec::validate(bytes));
+                if (t.id == "utf8")
+                   PSIO_PSSZ_IR_TRY(utf8_spec::validate(bytes));
                 out = bytes.empty() ? std::string{} : std::string(bytes.data(), bytes.size());
              }
              else if (t.id == "hex")
@@ -1799,6 +1902,8 @@ template <std::size_t W>
    status = codec.encode_at(root, value, bytes);
    if (!status.ok())
       return status;
+   if (status = codec.check_top_cap(root, bytes.size()); !status.ok())
+      return status;
    return detail::append(destination, bytes);
 }
 template <std::size_t W>
@@ -1811,6 +1916,8 @@ decode_compatible(const schema_types::Schema &schema, const schema_types::AnyTyp
    Value value;
    auto status = codec.metadata(root);
    if (!status.ok())
+      return status;
+   if (status = codec.check_top_cap(root, bytes.size()); !status.ok())
       return status;
    status = codec.decode_at(root, bytes, value);
    if (!status.ok())
@@ -1831,6 +1938,8 @@ template <std::size_t W>
    Value value;
    auto status = codec.metadata(root);
    if (!status.ok())
+      return status;
+   if (status = codec.check_top_cap(root, bytes.size()); !status.ok())
       return status;
    status = codec.decode_at(root, bytes, value);
    if (!status.ok())

@@ -20,7 +20,10 @@
 //                     attribute, else its name); json [index, value]
 //   option            null or the value
 //   list / array      array (exact count for an array, at most N bounded)
-//   string adapter    JSON string (UTF-8; ijson: no noncharacters)
+//   string adapters   JSON string (ijson: no noncharacters). "utf8" is
+//                     UTF-8 by type; a raw "string" whose bytes are not
+//                     UTF-8 is valid PSSZ but has no text (an error)
+//   box               the inner type's text
 //   hex adapter       ijson: one hex string (UPPERCASE on output);
 //                     json: array of numbers
 //   Int               number; a 64-bit integer under ijson is a bare number
@@ -178,6 +181,25 @@ inline std::string_view variant_name(const Member &member)
    if (auto a = detail::find_attribute(member.attributes, "ijsonName"); a && a->value)
       return *a->value;
    return member.name;
+}
+
+// `type` with named aliases followed and the Custom nodes that are not part
+// of the binary form ("box", text presentations) looked through: what
+// decides whether a missing member reads as an empty Option.
+inline const AnyType *shape_of(const Schema &schema, const AnyType &type)
+{
+   const AnyType *at = &type;
+   for (std::size_t hops = 0; hops <= 4 * schema.types.size() + 64; ++hops)
+   {
+      at = at->resolve(schema);
+      if (!at)
+         return nullptr;
+      auto custom = std::get_if<Custom>(&at->value);
+      if (!custom || detail::wire_custom_id(custom->id) || !custom->type.get())
+         return at;
+      at = custom->type.get();
+   }
+   return nullptr;
 }
 
 // The byte container under a string / hex adapter.
@@ -520,9 +542,17 @@ template <JsonCursor C> class Reader
       return true;
    }
 
+   // A Custom id that is not part of the binary form ("box", or a text
+   // presentation): the inner type's text.
+   bool transparent(const Custom &type, int_form form, std::size_t n, Value &out)
+   {
+      if (!type.type.get())
+         return c.fail("pssz IR: null schema box");
+      return read(*type.type, form, n + 1, out);
+   }
+
    bool custom(const Custom &type, int_form form, std::size_t n, Value &out)
    {
-      (void)n;
       if (type.id == "bool")
       {
          bool value;
@@ -535,12 +565,14 @@ template <JsonCursor C> class Reader
          return integer(Int{8, false}, form, out);
       if (type.id == "bitvector" || type.id == "bitlist")
          return c.fail("json: bit types have no JSON form");
-      if (type.id != "string" && type.id != "hex")
+      if (!detail::wire_custom_id(type.id))
+         return transparent(type, form, n, out);
+      if (!detail::byte_adapter_id(type.id))
          return c.fail("pssz IR: unsupported custom adapter");
       const byte_shape shape = bytes_of(schema, type);
       if (!shape.valid)
          return c.fail("pssz IR: byte adapter requires byte container");
-      if (type.id == "string")
+      if (detail::text_adapter_id(type.id))
       {
          json_kind kind;
          if (!c.kind(kind))
@@ -642,7 +674,8 @@ template <JsonCursor C> class Reader
          if (!slots[i])
          {
             // A missing Option member is empty; any other is an error.
-            const AnyType *type = members[i].type.get() ? resolve(*members[i].type) : nullptr;
+            const AnyType *type =
+                members[i].type.get() ? shape_of(schema, *members[i].type) : nullptr;
             if (!type || !std::holds_alternative<Option>(type->value))
                return c.fail("json: missing required member");
             slots[i] = Value::none();
@@ -914,13 +947,22 @@ class Writer
       }
       if (type.id == "bitvector" || type.id == "bitlist")
          return w.fail("json: bit types have no JSON form");
-      if (type.id != "string" && type.id != "hex")
+      if (!detail::wire_custom_id(type.id))
+      {
+         // "box", or a text presentation: the inner type.
+         if (!type.type.get())
+            return w.fail("pssz IR: null schema box");
+         return write(*type.type, value, form, 0);
+      }
+      if (!detail::byte_adapter_id(type.id))
          return w.fail("pssz IR: unsupported custom adapter");
       const byte_shape shape = bytes_of(schema, type);
       if (!shape.valid)
          return w.fail("pssz IR: byte adapter requires byte container");
-      if (type.id == "string")
+      if (detail::text_adapter_id(type.id))
       {
+         // A raw "string" holding bytes that are not UTF-8 has no JSON
+         // text: write_string reports it.
          auto v = std::get_if<std::string>(&value.value);
          if (!v)
             return w.fail("pssz IR: string value required");
@@ -1093,7 +1135,9 @@ class Writer
                        member.type.get() ? member.type->resolve(schema) : nullptr;
                    if (!member_type)
                       return w.fail("pssz IR: unresolved named type");
-                   if (!found && !std::holds_alternative<Option>(member_type->value))
+                   const AnyType *member_shape = shape_of(schema, *member_type);
+                   if (!found &&
+                       (!member_shape || !std::holds_alternative<Option>(member_shape->value)))
                       return w.fail("pssz IR: missing required record value");
                    std::optional<detail::LengthBound> bound;
                    if (!detail::parse_length_bound(member.attributes, bound).ok())

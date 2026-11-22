@@ -1091,7 +1091,12 @@ namespace
          if constexpr (has_ir<T>) builder.insert<T>(type_id<T>());
          types += std::string(types.empty() ? "" : ",\n") + "{\"id\":" + quoted(type_id<T>()) +
                   ",\"ir\":" + (has_ir<T> ? "true" : "false") + ",\"pssz\":" +
-                  (has_pssz<T> ? "true" : "false") + "}";
+                  (has_pssz<T> ? "true" : "false");
+         // The offset width the typed psio::pssz codec uses for T: what a
+         // schema-only reader must derive from the IR.
+         if constexpr (has_pssz<T>)
+            types += ",\"auto_width\":" + std::to_string(psio::auto_pssz_width_v<T>);
+         types += "}";
       });
       const psio::Schema schema = std::move(builder).build();
       std::string out = "{\"version\":1,\"schema_ir\":\"" +

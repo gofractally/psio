@@ -364,16 +364,15 @@ TEST_CASE("SchemaBuilder: string types", "[pssz][string][schema]")
    auto unbounded = builder.insert<Text>();
    auto bounded   = builder.insert<Text4>();
    auto schema    = std::move(builder).build();
-   // All three use the "string" adapter. The unbounded UTF-8 string is over
-   // an unbounded byte list (no fabricated maximum); the bounded one over a
-   // BoundedList. Note the schema does not distinguish a raw std::string from
-   // an unbounded UTF-8 string.
+   // A raw std::string is the "string" adapter; the UTF-8 strings are
+   // "utf8". The unbounded UTF-8 string is over an unbounded byte list (no
+   // fabricated maximum); the bounded one over a BoundedList.
    const auto& p = std::get<ir::Custom>(plain.resolve(schema)->value);
    const auto& u = std::get<ir::Custom>(unbounded.resolve(schema)->value);
    const auto& b = std::get<ir::Custom>(bounded.resolve(schema)->value);
    REQUIRE(p.id == "string");
-   REQUIRE(u.id == "string");
-   REQUIRE(b.id == "string");
+   REQUIRE(u.id == "utf8");
+   REQUIRE(b.id == "utf8");
    REQUIRE(std::holds_alternative<ir::List>(p.type->resolve(schema)->value));
    REQUIRE(std::holds_alternative<ir::List>(u.type->resolve(schema)->value));
    REQUIRE(std::get<ir::BoundedList>(b.type->resolve(schema)->value).maxCount == 4);

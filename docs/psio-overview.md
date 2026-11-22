@@ -211,8 +211,10 @@ namespace chain::svc {
 methods with one key do not compile), `for_each_method(fn)` and
 `invoke_method<I>(object, argument_tuple)`. Overloaded member functions
 cannot be listed (their address is ambiguous). `attr(...)` and the
-type-level keywords need namespace scope: with in-class reflection attach
-them after the class (`PSIO_FIELD_ATTRS`, `PSIO_TYPE_ATTRS`).
+type-level keywords are explicit specializations and work only in a
+`PSIO_REFLECT` written at global scope: for a namespaced or in-class
+reflected type attach them at global scope with
+`PSIO_FIELD_ATTRS(ns::T, field, spec)` / `PSIO_TYPE_ATTRS(ns::T, spec)`.
 
 There is one proxy, `psio::reflect<T>::proxy<P>`. It inherits `P`; each
 field is a member `name()` that returns `P::get<I, &T::name>()` and each

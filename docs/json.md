@@ -515,8 +515,10 @@ The IR carries what that needs (the C++ `SchemaBuilder` and the Rust
 `ToPsszSchema` derive write it):
 
 - shape: records (`definitionWillNotChange` for fixed layout), tuples,
-  variants, options, lists, arrays, bounded lists, the `string` / `hex` /
-  `bool` / `char` / `bitvector` / `bitlist` adapters, integers of 8-256 bits,
+  variants, options, lists, arrays, bounded lists, the `string` (raw bytes)
+  / `utf8` (UTF-8) / `hex` / `bool` / `char` / `bitvector` / `bitlist`
+  adapters, `box` (a boxed value: the inner type, with no inferred size
+  bound), integers of 8-256 bits,
   enums (`Enum`: the underlying integer plus the enumerator names and
   values; a C++ enum without `PSIO_REFLECT_ENUM` is just its integer),
   floats;
@@ -533,36 +535,48 @@ schema-driven path: `PsszSchema.decode(schemaBytes).type("Transfer")` gives
 `jsonToPssz`, `psszToJson`, `validate`, `encode`, `decode`, `jsonToValue` and
 `valueToJson` (`js/README.md`). `js/src/test/pssz-conformance.test.ts` replays
 both shared fixtures from the recorded IR. Text is read by an exact parser
-(integers from their token text into `BigInt`), not `JSON.parse`; a non-finite
-float has no text in either format, as in Rust. Its explicit-width profiles
-(`width: 1 | 2 | 4`) accept `maxDynamicData` and, like the typed
-`psio::pssz_<W>` codecs, enforce it on the top-level type only.
+(integers from their token text into `BigInt`), not `JSON.parse`.
+
+**Explicit-width profiles** (C++ `encode<W>` / `decode_exact<W>` /
+`decode_compatible<W>`, Rust and JS `width: 1 | 2 | 4`) do what the typed
+`psio::pssz_<W>` codecs do with `maxDynamicData`: the type is accepted, the
+one inherited width is kept, and the cap of the **top-level** type bounds
+the whole encoding (over it: an error on write and on read). A nested
+record's cap is not looked up. The automatic profile derives widths from
+caps and enforces every record's.
+
+**Width fidelity.** The offset width a schema-only reader derives equals the
+typed codec's for every type; both fixtures record the typed width of each
+type (`auto_width`) and all three languages assert it. In particular a boxed
+value (C++ `psio::schema_types::Box<T>`, Rust `Box<T>`) has no inferred size
+bound in the typed codecs, and the IR records the box (`Custom{T, "box"}`)
+so that the schema derives the same: `record{id: u32, leaf: box<Leaf>}`
+uses 4-byte offsets where the same record without the box uses 1, unless it
+carries an explicit cap. A schema written before the marker existed has the
+boxed type inline and derives the narrower width: re-export it.
 
 Not expressible in the IR, so not available through a schema:
 
-- a custom text form (`PSIO_ADAPTER(..., text_category, ...)`, a member
-  `as<Tag>`, Rust `TextForm`) and binary adapters: the IR has the declared
+- a member `as<Tag>` override and binary adapters: the IR has the declared
   type;
-- `Box<T>` is transparent in the IR, while the typed codecs give a boxed
-  member no inferred bound. A record whose bound would be finite but for a
-  non-recursive `Box` member gets a narrower width from the IR than from the
-  type. (Recursive types are unbounded both ways.) Do not box a member of a
-  type that relies on an inferred width; give it an explicit cap;
 - C++ `char` elements are bytes 0..255 in the IR; the typed `json` writer
   prints a `std::vector<char>` element with the platform's `char` sign.
 
 No JSON form through a schema (an error, not a guess), because the typed
 text codecs have none to agree with: `bitvector` / `bitlist`.
 
-**Raw strings.** The IR has one `string` adapter for a UTF-8 string (C++
-`utf8_string`, Rust `String`) and a raw string (C++ `std::string`, Rust
-`RawString`), and the schema-driven codec treats it as UTF-8. A raw string
-holding bytes that are not UTF-8 is therefore **rejected** by
-`validate_pssz` and by `pssz_to_json` (a status; no text is produced),
-although the typed `validate` accepts it. The typed text writers refuse the
-same value ("string is not valid UTF-8"), so no text is lost, but schema
-validation is stricter than the type here. The fixture class
-`string-raw-non-utf8` pins this.
+**Raw strings and UTF-8 strings.** The type says which: C++ `std::string` /
+Rust `RawString` is the Custom `string` (any bytes), C++ `utf8_string` /
+Rust `String` is the Custom `utf8`, each over its byte container. The
+schema-driven codecs do what the typed ones do: a `utf8` value is validated
+on every read and write; a raw `string` holding bytes that are not UTF-8 is
+valid PSSZ (`validate_pssz` accepts it, it decodes and re-encodes
+unchanged) but has no JSON or I-JSON text, so `pssz_to_json` returns
+"string is not valid UTF-8" and produces nothing. The fixture class
+`string-raw-non-utf8` pins this in all three languages. A schema written
+before the `utf8` id existed records every string as `string`: through it
+UTF-8 strings are no longer validated at the PSSZ level (their text is
+still refused when invalid); re-export it to get the check back.
 
 `dynamic_json.hpp` (`ijson_encode_dynamic` / `ijson_decode_dynamic`, over
 the older runtime `psio::schema`) is unchanged apart from the 64-bit integer
