@@ -7,12 +7,23 @@
 
 use psio::json::{self, IJson, Json, JsonText};
 use psio::key::{from_key, key_prefix, key_prefix_upper_bound, key_size, to_key, validate_key};
-use psio::key::{KeyPack, KeyUnpack};
+use psio::key::{try_key_prefix, try_to_key, ByKey, KeyPack, KeyUnpack};
+use psio::pssz::Nested;
 use psio::pssz::schema_ir::{schema_for, AnyValue, ToPsszSchema};
 use psio::pssz::{Pssz, PsszPack, PsszUnpack};
 use psio::time::{Duration, Micros, Millis, MonotonicPoint, Nanos, Seconds, TimePoint, Unit};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
+
+// The transparent wrappers, custom types and invariants of
+// conformance/custom-types.md.
+#[path = "custom/text.rs"]
+mod text;
+#[path = "custom/types.rs"]
+mod custom_types;
+#[path = "custom/handlers.rs"]
+mod custom_handlers;
+use custom_types::*;
 
 /// A user-declared unit: minutes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -79,6 +90,61 @@ enum U8OrString {
     Text(String),
 }
 
+// A transparent wrapper of a composite key is that composite key: its
+// prefixes are the tuple's.
+#[derive(
+    Debug, Clone, PartialEq, PartialOrd, psio::JsonText, psio::PsszPack, psio::PsszUnpack,
+    psio::ToPsszSchema, psio::Key,
+)]
+#[pssz(transparent)]
+struct ShardKey {
+    key: (u32, String),
+}
+
+// The wire types of the types that have an invariant: what a reader that
+// knows only the wire type (a schema with no handler) reads, and what a
+// writer that does not check would write (`key-invariant` rows).
+#[derive(Debug, Clone, PartialEq, PartialOrd, psio::PsszPack, psio::PsszUnpack, psio::Key)]
+#[pssz(definition_will_not_change)]
+struct NameWire {
+    value: u64,
+}
+#[derive(Debug, Clone, PartialEq, PartialOrd, psio::PsszPack, psio::PsszUnpack, psio::Key)]
+struct RangeWire {
+    lo: u32,
+    hi: u32,
+}
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd, psio::PsszPack, psio::PsszUnpack, psio::Key)]
+#[repr(u8)]
+enum LevelWire {
+    Low = 0,
+    #[pssz(other)]
+    Other(u8),
+}
+impl From<NameWire> for Name {
+    fn from(wire: NameWire) -> Self {
+        Name { value: wire.value }
+    }
+}
+impl From<RangeWire> for Range {
+    fn from(wire: RangeWire) -> Self {
+        Range { lo: wire.lo, hi: wire.hi }
+    }
+}
+impl From<LevelWire> for Level {
+    fn from(wire: LevelWire) -> Self {
+        match wire {
+            LevelWire::Low => Level::Low,
+            LevelWire::Other(1) => Level::Mid,
+            LevelWire::Other(2) => Level::High,
+            LevelWire::Other(3) => Level::Top,
+            LevelWire::Other(n) => Level::Unknown(n),
+        }
+    }
+}
+type Guards = (Name, Option<Range>, Vec<Level>, DerKey);
+type GuardsWire = (NameWire, Option<RangeWire>, Vec<LevelWire>, Vec<u8>);
+
 type KInts = (bool, i8, i16, i32, i64, u8, u16, u32, u64);
 type KTime = (TimePoint<Micros>, String, Duration<Seconds>);
 
@@ -96,6 +162,7 @@ struct Row {
     bound: Option<String>,
     count: Option<usize>,
     values: Option<Vec<String>>,
+    reason: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -282,6 +349,55 @@ fn check<T: Conf>(row: &Row, prefix: Option<PrefixFn<T>>) -> Result<(), String> 
     }
 }
 
+/// A `key-invariant` row: the key and the bytes of a value of `T`'s wire
+/// type `W` that violates an invariant of `T`. Every typed reader rejects
+/// both with the invariant's message; a reader that knows only the wire type
+/// reads them; no typed writer writes the value.
+fn check_invariant<T, W>(row: &Row, into: impl Fn(W) -> T) -> Result<(), String>
+where
+    T: Conf,
+    W: PsszPack<Pssz> + PsszUnpack<Pssz> + KeyPack + KeyUnpack + Debug,
+{
+    let key = unhex(row.key.as_ref().ok_or("no key")?);
+    let pssz = unhex(row.pssz.as_ref().ok_or("no pssz")?);
+    let reason = row.reason.as_deref().ok_or("no reason")?;
+    let rejections = [
+        ("validate_key", validate_key::<T>(&key).map_err(|e| e.0)),
+        ("from_key", from_key::<T>(&key).map(drop).map_err(|e| e.0)),
+        ("pssz_validate", psio::pssz::from_pssz_exact::<Pssz, T>(&pssz).map(drop).map_err(|e| e.0)),
+        ("from_pssz", psio::pssz::from_pssz::<Pssz, T>(&pssz).map(drop).map_err(|e| e.0)),
+    ];
+    for (what, outcome) in rejections {
+        if outcome != Err(reason) {
+            return Err(format!("{what}: {outcome:?}, want {reason:?}"));
+        }
+    }
+    // The wire type: the key decodes to the value `pssz`.
+    let wire = from_key::<W>(&key).map_err(|e| format!("wire from_key {e}"))?;
+    let bytes = psio::pssz::try_to_pssz::<Pssz, W>(&wire).map_err(|e| format!("wire to_pssz {e:?}"))?;
+    if bytes != pssz {
+        return Err(format!("the wire type's key decodes to {}", hex(&bytes)));
+    }
+    if to_key(&wire) != key {
+        return Err("the wire type's key does not round-trip".into());
+    }
+    // The same value as a `T`: it has no key and no encoding.
+    let value = into(wire);
+    let outcomes = [
+        ("try_to_key", try_to_key(&value).map(drop).map_err(|e| e.0)),
+        ("try_to_pssz", psio::pssz::try_to_pssz::<Pssz, T>(&value).map(drop).map_err(|e| e.0)),
+    ];
+    for (what, outcome) in outcomes {
+        if outcome != Err(reason) {
+            return Err(format!("{what}: {outcome:?}, want {reason:?}"));
+        }
+    }
+    if !std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| to_key(&value))).is_err() {
+        return Err("to_key wrote a value that violates an invariant".into());
+    }
+    Ok(())
+}
+
 // `|v, count|` → key_prefix::<T, _>(&(&v.f0, ..., &v.f{count-1})), one
 // typed call per prefix length.
 macro_rules! prefix_steps {
@@ -317,7 +433,62 @@ fn dispatch(row: &Row) -> Result<(), String> {
             Err("bound".into())
         };
     }
+    if row.kind == "key-invariant" {
+        return match row.r#type.as_str() {
+            "Name" => check_invariant::<Name, NameWire>(row, Name::from),
+            "DerKey" => check_invariant::<DerKey, Vec<u8>>(row, |data| DerKey { data }),
+            "Range" => check_invariant::<Range, RangeWire>(row, Range::from),
+            "Level" => check_invariant::<Level, LevelWire>(row, Level::from),
+            "tuple<Name,optional<Range>,list<Level>,DerKey>" => {
+                check_invariant::<Guards, GuardsWire>(row, |(name, range, levels, data)| {
+                    (
+                        name.into(),
+                        range.map(Range::from),
+                        levels.into_iter().map(Level::from).collect(),
+                        DerKey { data },
+                    )
+                })
+            }
+            other => Err(format!("unknown type {other}")),
+        };
+    }
     match row.r#type.as_str() {
+        // Nested values, pairs, maps and sets.
+        "tuple<u32,nested<Account>>" => composite!(row, (u32, Nested<Account>); 0 1),
+        "pair<u32,string>" => composite!(row, (u32, String); 0 1),
+        "map<string,u32>" => check::<BTreeMap<String, u32>>(row, None),
+        "map<tuple<u8,string>,list<i16>>" => check::<BTreeMap<(u8, String), Vec<i16>>>(row, None),
+        "map<string,map<u8,set<string>>>" => {
+            check::<BTreeMap<String, BTreeMap<u8, BTreeSet<String>>>>(row, None)
+        }
+        "set<u8>" => check::<BTreeSet<u8>>(row, None),
+        "set<string>" => check::<BTreeSet<String>>(row, None),
+        "set<i64>" => check::<BTreeSet<i64>>(row, None),
+        "set<f64>" => check::<BTreeSet<ByKey<f64>>>(row, None),
+        "tuple<map<u16,string>,u8>" => composite!(row, (BTreeMap<u16, String>, u8); 0 1),
+        "set<nested<u32>>" => check::<BTreeSet<Nested<u32>>>(row, None),
+        // Transparent wrappers, custom types, invariants.
+        "Id" => check::<Id>(row, None),
+        "Blob" => check::<Blob>(row, None),
+        "Endpoint" => check::<Endpoint>(row, None),
+        "Ratio" => check::<Ratio>(row, None),
+        "Ref" => check::<Ref>(row, None),
+        "Name" => check::<Name>(row, None),
+        "DerKey" => check::<DerKey>(row, None),
+        "Range" => check::<Range>(row, None),
+        "Level" => check::<Level>(row, None),
+        "ShardKey" => {
+            fn prefix(v: &ShardKey, count: usize) -> Vec<u8> {
+                match count {
+                    0 => key_prefix::<ShardKey, _>(&()),
+                    1 => key_prefix::<ShardKey, _>(&(&v.key.0,)),
+                    2 => key_prefix::<ShardKey, _>(&(&v.key.0, &v.key.1)),
+                    _ => panic!("prefix count {count} out of range"),
+                }
+            }
+            check::<ShardKey>(row, Some(prefix))
+        }
+        "tuple<Name,optional<Range>,list<Level>,DerKey>" => composite!(row, Guards; 0 1 2 3),
         "time_point<seconds>" => check::<TimePoint<Seconds>>(row, None),
         "time_point<millis>" => check::<TimePoint<Millis>>(row, None),
         "time_point<micros>" => check::<TimePoint<Micros>>(row, None),
@@ -384,6 +555,7 @@ fn every_vector_holds() {
         kinds.keys().copied().collect::<Vec<_>>(),
         [
             "bound",
+            "key-invariant",
             "key-order",
             "key-order-bits",
             "key-prefix",
@@ -400,7 +572,22 @@ fn every_vector_holds() {
             fx.vectors.iter().any(|r| r.r#type == ty.id && r.kind == "key-prefix");
         assert!(!has_prefix || ty.composite, "prefix rows for non-composite {}", ty.id);
     }
-    assert_eq!(types.len(), fx.types.len() + 1); // + "bytes" of the bound rows
+    assert_eq!(types.len(), fx.types.len() + 1); // + "bytes" of the bound rows    assert_eq!(kinds["key-invariant"], 10);
+    assert_eq!(checked, 1147, "every row of the fixture was checked");
+
+    // A prefix encodes elements: each is checked as the value it is; the
+    // composite as a whole is not (a prefix is not a value of it).
+    let bad = Name { value: 1 << 60 };
+    assert_eq!(
+        try_key_prefix::<Guards, _>(&(&bad,)).map_err(|e| e.0),
+        Err("Name: value is not a canonical name")
+    );
+    let good = Name { value: 5 };
+    assert_eq!(try_key_prefix::<Guards, _>(&(&good,)), Ok(to_key(&good)));
+    assert_eq!(
+        try_key_prefix::<Guards, _>(&(&good, &Some(Range { lo: 2, hi: 1 }))).map_err(|e| e.0),
+        Err("Range: lo is greater than hi")
+    );
 }
 
 /// The Schema IR Rust generates for the time types is the IR C++ generates:
@@ -448,11 +635,22 @@ fn the_schema_ir_drives_pssz_and_text() {
     let ir = unhex(&fx.schema_ir);
     psio::pssz::pssz_validate::<Pssz, Schema>(&ir).expect("schema_ir validates");
     let schema = psio::pssz::from_pssz::<Pssz, Schema>(&ir).expect("schema_ir decodes");
-    // Every custom id must be handled: the time ids are built in.
+    // Every custom id must be handled: the time ids are built in, and the
+    // custom types of conformance/custom-types.md have their handlers
+    // (written by hand over the wire types' bytes).
     let mut strict = dynamic::CustomHandlers::new();
+    custom_handlers::fixture_custom_handlers(&mut strict);
     strict.set_strict(true);
+    let checked = dynamic::Options::handlers(&strict);
 
     let (mut values, mut accepted, mut rejected) = (0, 0, 0);
+    let (mut keys, mut violated) = (0, 0);
+    // The key of the value `pssz` through the schema-driven key encoder,
+    // from the IR and the bytes alone.
+    let key_of = |root: &AnyType, pssz: &[u8]| -> Result<Vec<u8>, String> {
+        let value = dynamic::decode_exact::<Pssz>(&schema, root, pssz).map_err(|e| e.0.to_string())?;
+        dynamic::to_key(&schema, root, &value).map_err(|e| e.0.to_string())
+    };
     for row in &fx.vectors {
         let name = &row.name;
         if row.kind == "bound" {
@@ -463,7 +661,14 @@ fn the_schema_ir_drives_pssz_and_text() {
             "value" => {
                 let bytes = unhex(row.pssz.as_ref().unwrap());
                 assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false), "{name}");
-                let json = dynamic::pssz_to_json::<Json>(&schema, &root, &bytes);
+                assert_eq!(dynamic::validate_pssz_with(&schema, &root, &bytes, &strict), Ok(false), "{name}");
+                // The key, with and without the registry.
+                let key = unhex(row.key.as_ref().unwrap());
+                assert_eq!(key_of(&root, &bytes), Ok(key.clone()), "{name}: key");
+                let value = dynamic::decode_exact_with::<Pssz>(&schema, &root, &bytes, checked).unwrap();
+                assert_eq!(dynamic::to_key_with(&schema, &root, &value, checked), Ok(key), "{name}: key");
+                keys += 1;
+                let json = dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &strict);
                 let ijson = dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &strict);
                 assert_eq!(json.is_ok(), row.json.is_some(), "{name}: json {json:?}");
                 assert_eq!(ijson.is_ok(), row.ijson.is_some(), "{name}: ijson {ijson:?}");
@@ -471,7 +676,8 @@ fn the_schema_ir_drives_pssz_and_text() {
                     assert_eq!(&json.unwrap().0, want_json, "{name}");
                     assert_eq!(&ijson.unwrap().0, want_ijson, "{name}");
                     assert_eq!(
-                        dynamic::json_to_pssz::<Json>(&schema, &root, want_json.as_bytes()).unwrap(),
+                        dynamic::json_to_pssz_with::<Json>(&schema, &root, want_json.as_bytes(), &strict)
+                            .unwrap(),
                         bytes,
                         "{name}: json read"
                     );
@@ -503,12 +709,50 @@ fn the_schema_ir_drives_pssz_and_text() {
                 rejected += 1;
             }
             "key-order" | "key-order-bits" => {
+                // The schema-driven keys ascend bytewise too.
+                let mut last: Option<Vec<u8>> = None;
                 for pssz in row.values.as_ref().unwrap() {
-                    assert_eq!(dynamic::validate_pssz(&schema, &root, &unhex(pssz)), Ok(false), "{name}");
+                    let bytes = unhex(pssz);
+                    assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false), "{name}");
+                    let key = key_of(&root, &bytes).unwrap_or_else(|e| panic!("{name}: key: {e}"));
+                    assert!(last.as_ref().is_none_or(|last| *last < key), "{name}: keys not ascending");
+                    last = Some(key);
                 }
             }
-            _ => (),
+            "key-prefix" => {
+                // The full key of the value starts with the prefix.
+                let bytes = unhex(row.pssz.as_ref().unwrap());
+                let key = key_of(&root, &bytes).unwrap_or_else(|e| panic!("{name}: key: {e}"));
+                assert!(key.starts_with(&unhex(row.prefix.as_ref().unwrap())), "{name}");
+            }
+            "key-invariant" => {
+                // A schema with no handler reads the wire type: the bytes
+                // validate and their key is the row's. With the handlers the
+                // value is refused, with the invariant's message, by the
+                // readers and by the key encoder.
+                let bytes = unhex(row.pssz.as_ref().unwrap());
+                let reason = row.reason.as_ref().unwrap();
+                assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false), "{name}");
+                assert_eq!(key_of(&root, &bytes), Ok(unhex(row.key.as_ref().unwrap())), "{name}: key");
+                assert_eq!(
+                    dynamic::validate_pssz_with(&schema, &root, &bytes, &strict).map_err(|e| e.what().to_string()),
+                    Err(reason.clone()),
+                    "{name}"
+                );
+                let value = dynamic::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap();
+                assert_eq!(
+                    dynamic::to_key_with(&schema, &root, &value, checked).map_err(|e| e.0.to_string()),
+                    Err(reason.clone()),
+                    "{name}: key with the handlers"
+                );
+                violated += 1;
+            }
+            // The schema-driven codec has a key encoder, not a key reader.
+            "key-reject" => (),
+            other => panic!("{name}: unknown kind {other}"),
         }
     }
     assert!(values > 100 && accepted > 20 && rejected > 40, "{values} {accepted} {rejected}");
+    assert_eq!(keys, fx.vectors.iter().filter(|row| row.kind == "value").count());
+    assert_eq!(violated, 10, "key-invariant rows");
 }
