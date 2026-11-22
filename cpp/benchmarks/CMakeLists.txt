@@ -248,3 +248,36 @@ target_include_directories(psio_bench_json_text PRIVATE
    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../tests)
 target_compile_features(psio_bench_json_text PRIVATE cxx_std_23)
 target_compile_options(psio_bench_json_text PRIVATE -O3 -DNDEBUG)
+
+# psio::graphql against the previous engine (psio1::gql_query) on the same
+# data: values and PSSZ views, with and without plan reuse; ns per request
+# and allocations. The old engine is built, in its own translation unit, when
+# its sources are found (psio1 headers + rapidjson; override the two paths
+# below); otherwise the bench reports the new engine alone.
+set(PSIO_BENCH_OLD_GRAPHQL_INCLUDE "/Users/dlarimer/psibase-claude-pssz/libraries/psio1/include"
+   CACHE PATH "Include root of the previous engine (psio1/graphql.hpp)")
+set(PSIO_BENCH_OLD_GRAPHQL_RAPIDJSON "/Users/dlarimer/psibase-claude-pssz/external/rapidjson/include"
+   CACHE PATH "rapidjson include root for the previous engine")
+if(EXISTS "${PSIO_BENCH_OLD_GRAPHQL_INCLUDE}/psio1/graphql.hpp" AND
+   EXISTS "${PSIO_BENCH_OLD_GRAPHQL_RAPIDJSON}/rapidjson/encodings.h")
+   # psio1's float-to-text routine is the one compiled unit the engine needs.
+   add_library(psio_bench_graphql_old OBJECT bench_graphql_old.cpp
+      ${PSIO_BENCH_OLD_GRAPHQL_INCLUDE}/../src/fpconv.c)
+   target_include_directories(psio_bench_graphql_old PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}
+      ${PSIO_BENCH_OLD_GRAPHQL_INCLUDE} ${PSIO_BENCH_OLD_GRAPHQL_RAPIDJSON})
+   target_link_libraries(psio_bench_graphql_old PRIVATE Boost::headers)
+   target_compile_options(psio_bench_graphql_old PRIVATE -w)
+   message(STATUS "psio_bench_graphql: old engine found at ${PSIO_BENCH_OLD_GRAPHQL_INCLUDE}")
+else()
+   add_library(psio_bench_graphql_old OBJECT bench_graphql_no_old.cpp)
+   target_include_directories(psio_bench_graphql_old PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+   message(STATUS "psio_bench_graphql: old engine not found; benchmarking the new engine only")
+endif()
+set_target_properties(psio_bench_graphql_old PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)
+target_compile_options(psio_bench_graphql_old PRIVATE -O3 -DNDEBUG)
+add_executable(psio_bench_graphql bench_graphql.cpp $<TARGET_OBJECTS:psio_bench_graphql_old>)
+target_link_libraries(psio_bench_graphql PRIVATE psio)
+target_include_directories(psio_bench_graphql PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(psio_bench_graphql PRIVATE cxx_std_23)
+target_compile_options(psio_bench_graphql PRIVATE -O3 -DNDEBUG)
