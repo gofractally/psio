@@ -45,6 +45,9 @@ Transfer.encode({ from: 'alice', amount: 5n });       // Uint8Array
 | `type.jsonToPssz(text, format)` / `type.psszToJson(bytes, format)` | Text to bytes and back; `format` is `'ijson'` (default) or `'json'`. |
 | `type.jsonToValue(text, format)` / `type.valueToJson(value, format)` | Text to value and back. |
 | `jsonToPssz(schema, root, format, text)`, `psszToJson(schema, root, format, bytes)`, `validatePssz(schema, root, bytes)` | The same, under the C++ / Rust names. |
+| `type.encodeKey(value)` / `type.decodeKey(bytes)` / `type.validateKey(bytes)` | The `key` format (`docs/key-spec.md`): bytes whose bytewise order is the value's order. `decodeKey` is checked (one canonical key spanning the input); `validateKey` returns `{ ok }` / `{ ok: false, error }`. |
+| `type.encodeKeyPrefix(elements)` / `keyPrefixUpperBound(bytes)` | The key of the first K elements of a tuple (fields of a record), and the exclusive end of the range of keys with that prefix (`null`: no bound). |
+| `timePointToIso` / `timePointFromIso` / `timePointToDate` / `timePointFromDate(…, unit)` | Explicit, exact conversions for time values (`docs/time.md`). `unit` is `'seconds'`, `'millis'`, `'micros'`, `'nanos'` or `{ num, den }`. `timePointToDate` throws rather than drop sub-millisecond precision. |
 
 Every failure is a `PsszError` with a `kind`: `'schema'` (the IR), `'value'` (a
 JavaScript value that does not fit the type, or has no text), `'bytes'`
@@ -59,6 +62,7 @@ length they claim is trusted before it is checked against the input.
 | `bool` | `boolean` |
 | integers of 8, 16, 32 bits; `char` | `number` |
 | integers of 64, 128, 256 bits | `bigint` (an exact `number` is accepted on encode) |
+| duration / time point (`Custom` id `duration-…` / `time-point-…` over the tick `Int`) | `bigint` ticks at every width. JSON: a duration is its tick integer; a time point is an RFC 3339 UTC string with exactly the unit's fraction digits |
 | floats | `number`; a NaN carrying a payload decodes to a `PsszNaN` (its `bits` re-encode exactly) |
 | string | `string` (UTF-8 on the wire; an unpaired surrogate is an error) |
 | bytes (`hex` adapter) | `Uint8Array` |

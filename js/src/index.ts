@@ -109,6 +109,8 @@ export {
   jsonToPssz,
   psszToJson,
   validatePssz,
+  keyPrefixUpperBound,
+  type PsszKeyValidation,
   type PsszErrorKind,
   type PsszWidth,
   type PsszTypeOptions,
@@ -127,3 +129,17 @@ export {
   type VariantValue,
   type BitsValue,
 } from './pssz.js';
+
+export {
+  // Time values (docs/time.md): bigint ticks, exact Date / RFC 3339 conversions
+  timePointToIso,
+  timePointFromIso,
+  timePointToDate,
+  timePointFromDate,
+  timeSchemaId,
+  parseTimeSchemaId,
+  timeFractionDigits,
+  type TimeKind,
+  type TimeUnit,
+  type TickType,
+} from './time.js';

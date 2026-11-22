@@ -6,6 +6,8 @@
 //
 // This file is internal. The public API is `pssz.ts`.
 
+import { parseTimeSchemaId, timeFractionDigits, type TimeKind } from './time.js';
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 /**
@@ -434,6 +436,13 @@ export class Node {
   stable = false;
   /** record: explicit maxDynamicData. */
   cap: bigint | null = null;
+  /**
+   * int: a time value (Custom time id over the tick integer, docs/time.md).
+   * Its value is always a bigint tick count.
+   */
+  time: TimeKind | null = null;
+  /** time point: fraction digits of its RFC 3339 text; -1 for no text form. */
+  timeDigits = -1;
 
   layoutMemo?: Memo<Layout>;
   emptyMemo?: Memo<boolean>;
@@ -743,6 +752,20 @@ export class Codec {
       case 'Custom': {
         const id = t.value.id;
         const inner = this.resolve(t.value.type).value;
+        const time = parseTimeSchemaId(id);
+        if (time) {
+          // A duration / time point is its tick integer, marked.
+          const bits = inner.type === 'Int' ? inner.value.bits : 0;
+          if (inner.type !== 'Int' || (bits !== 8 && bits !== 16 && bits !== 32 && bits !== 64))
+            return schemaError('pssz IR: time adapter requires an 8 / 16 / 32 / 64-bit tick integer');
+          node.kind = 'int';
+          node.bits = bits;
+          node.signed = inner.value.isSigned;
+          node.size = bits / 8;
+          node.time = time;
+          node.timeDigits = time.point ? timeFractionDigits(time.num, time.den) : -1;
+          break;
+        }
         const unsignedInt = (x: IrTypeValue, bits: number) =>
           x.type === 'Int' && x.value.bits === bits && !x.value.isSigned;
         if (id === 'bool' || id === 'char') {
@@ -1403,7 +1426,7 @@ export class Codec {
           if (node.bits === 1 && raw !== 0 && raw !== (node.signed ? 0xff : 1))
             bytesError('pssz IR: one-bit integer overflow');
           if (node.signed && bytes[end - 1] & 0x80) raw -= 2 ** (node.size * 8);
-          return raw;
+          return node.time ? BigInt(raw) : raw;
         }
         let raw = 0n;
         for (let i = node.size - 1; i >= 0; --i) raw = (raw << 8n) | BigInt(bytes[start + i]);

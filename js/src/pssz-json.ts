@@ -17,6 +17,8 @@ import {
   type IntForm, type VariantValue,
 } from './pssz-core.js';
 
+import { tickTypeAdmits, timeTextOf, timeTicksOf } from './time.js';
+
 export type JsonFormat = 'json' | 'ijson';
 
 const SAFE_INTEGER = (1n << 53n) - 1n;
@@ -556,6 +558,21 @@ class Reader {
     return bits <= 32 ? Number(value) : value;
   }
 
+  // A time value: bigint ticks. A duration is its tick integer; a time
+  // point is an RFC 3339 string (the JSON string's value, however escaped).
+  private time(node: Node, form: IntForm): bigint {
+    const c = this.c;
+    if (!node.time!.point) return BigInt(this.integer(node.bits, node.signed, form));
+    if (node.timeDigits < 0) c.fail('json: this time point unit has no RFC 3339 text form');
+    if (c.kind() !== 'string') c.fail('json: expected an RFC 3339 date-time string');
+    const s = c.string();
+    // A date-time is ASCII; anything else fails the grammar.
+    let text = '';
+    if (s.end - s.start <= 256) for (let i = s.start; i < s.end; ++i) text += String.fromCharCode(s.bytes[i]);
+    const out = timeTicksOf(text, node.timeDigits, { bits: node.bits as 8 | 16 | 32 | 64, signed: node.signed });
+    return typeof out === 'string' ? c.fail(out) : out.ticks;
+  }
+
   private arrayItems(limit: number | null, exact: boolean, item: () => void): void {
     const c = this.c;
     c.beginArray();
@@ -642,6 +659,7 @@ class Reader {
     if (n > MAX_DEPTH) c.fail('json: max depth exceeded');
     switch (node.kind) {
       case 'int':
+        if (node.time) return this.time(node, form);
         return this.integer(node.bits, node.signed, form);
       case 'float': {
         const token = c.number();
@@ -800,6 +818,18 @@ class Writer {
     const out = this.out;
     switch (node.kind) {
       case 'int':
+        if (node.time?.point) {
+          if (typeof value !== 'bigint' && !(typeof value === 'number' && Number.isSafeInteger(value)))
+            return fail('pssz IR: integer value does not match the schema');
+          const ticks = BigInt(value);
+          if (!tickTypeAdmits({ bits: node.bits as 8 | 16 | 32 | 64, signed: node.signed }, ticks))
+            return fail('pssz IR: integer value does not match the schema');
+          if (node.timeDigits < 0) return fail('json: this time point unit has no RFC 3339 text form');
+          const text = timeTextOf(ticks, node.timeDigits);
+          if (typeof text === 'string') return fail(text);
+          out.push('"' + text.text + '"');
+          return;
+        }
         return this.integer(node.bits, node.signed, form, value);
       case 'float':
         if (value instanceof PsszNaN) return fail('json: non-finite float has no JSON text');

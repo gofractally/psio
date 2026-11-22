@@ -15,12 +15,22 @@
 // { type, value }; optional -> null or the value (an optional of an optional
 // holds null or { some: inner }); bit types -> { bytes, bitCount }. A NaN
 // with a payload decodes to a PsszNaN so that it re-encodes bit for bit.
+// A time value (duration or time point, docs/time.md) -> bigint ticks at
+// every width; see time.ts for the Date / RFC 3339 conversions.
+//
+// The same values have a `key` encoding (docs/key-spec.md): bytes whose
+// bytewise order is the value's order, for database keys.
+//
+//   const Key = schema.type({ Tuple: [U32, STRING] });
+//   const from = Key.encodeKeyPrefix([7]);          // every key of shard 7 ...
+//   const to   = keyPrefixUpperBound(from);         // ... lies in [from, to)
 
 import {
   Codec, Node, PsszError, normalizeSchema, normalizeType,
   type DecodeContext, type IrAnyType, type IrSchema, type PsszSchemaInput, type PsszTypeInput,
 } from './pssz-core.js';
 import { jsonToValue, valueToJson, type JsonFormat } from './pssz-json.js';
+import { decodeKey, encodeKey, encodeKeyPrefix, keyPrefixUpperBound as upperBound } from './pssz-key.js';
 
 export {
   PsszError, PsszNaN,
@@ -43,6 +53,7 @@ export interface PsszDecodeOptions {
    */
   rejectUnknown?: boolean;
 }
+export type PsszKeyValidation = { ok: true } | { ok: false; error: PsszError };
 export type PsszValidation =
   | { ok: true; /** Unknown appended optional fields were present. */ hasUnknown: boolean }
   | { ok: false; error: PsszError };
@@ -97,6 +108,38 @@ export class PsszType {
     } catch (e) {
       return { ok: false, error: e as PsszError };
     }
+  }
+
+  /** The `key` bytes of `value`: bytewise order is value order. */
+  encodeKey(value: unknown): Uint8Array {
+    return guarded(() => encodeKey(this.node, value));
+  }
+
+  /**
+   * Decodes key bytes. Checked: exactly one canonical key spanning the
+   * whole input, or a PsszError.
+   */
+  decodeKey(bytes: Uint8Array): unknown {
+    return guarded(() => decodeKey(this.node, asBytes(bytes)));
+  }
+
+  /** Checks key bytes against the type. Never throws. */
+  validateKey(bytes: Uint8Array): PsszKeyValidation {
+    try {
+      this.decodeKey(bytes);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e as PsszError };
+    }
+  }
+
+  /**
+   * The key of the first `elements.length` elements of a tuple type (fields
+   * of a record type), each encoded as the type's element at its position:
+   * the prefix every full key with those leading elements starts with.
+   */
+  encodeKeyPrefix(elements: unknown[]): Uint8Array {
+    return guarded(() => encodeKeyPrefix(this.node, elements));
   }
 
   /** JSON / I-JSON text -> value. */
@@ -176,6 +219,16 @@ export class PsszSchema {
 }
 
 // ── Functional spellings (the C++ / Rust names) ─────────────────────────────
+
+/**
+ * The exclusive upper bound of a prefix scan over keys: the smallest byte
+ * string greater than every byte string starting with `prefix` (trailing FF
+ * bytes dropped, last byte incremented). `null`: no bound — the prefix is
+ * empty or all FF, and the scan runs to the end of the key space.
+ */
+export function keyPrefixUpperBound(prefix: Uint8Array): Uint8Array | null {
+  return guarded(() => upperBound(prefix));
+}
 
 /** JSON / I-JSON text of a `root` value -> its canonical PSSZ bytes. */
 export function jsonToPssz(
