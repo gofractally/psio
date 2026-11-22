@@ -460,6 +460,29 @@ namespace psio {
       }
    };
 
+   // uint256 is its 32 little-endian bytes on the wire; the view reads it by
+   // value. (uint128 / int128 are arithmetic and use the primitive path.)
+   template <typename Fmt, storage Store>
+      requires detail::is_pssz_format_v<Fmt>
+   class view<uint256, Fmt, Store>
+   {
+      std::span<const char> data_;
+    public:
+      using element_type = uint256;
+      using format_type = Fmt;
+      static constexpr storage storage_kind = Store;
+      view() = default;
+      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
+      [[nodiscard]] uint256 get() const noexcept
+      {
+         uint256 out{};
+         if (data_.size() >= sizeof(out.limb)) std::memcpy(out.limb, data_.data(), sizeof(out.limb));
+         return out;
+      }
+   };
+
    template <typename T, typename Fmt, storage Store>
       requires detail::is_pssz_format_v<Fmt>
    class view<schema_types::Box<T>, Fmt, Store> : public view<T, Fmt, Store>
