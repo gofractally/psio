@@ -638,3 +638,43 @@ psio_nested_compile_fail(graphql_deferred NESTED_FAIL_GRAPHQL_DEFERRED
 psio_nested_compile_fail(graphql_argument NESTED_FAIL_GRAPHQL_ARGUMENT
    "an argument must be a scalar")
 psio_nested_compile_fail(other_format NESTED_FAIL_OTHER_FORMAT "psio::ssz: .*unsupported type")
+
+# The method surface of reflect<T>: identical for types with and without
+# methods; the proxy's argument forwarding and the reflected type of a
+# proxied call.
+psio_add_test(psio_reflect_method_surface_tests reflect_method_surface_tests.cpp)
+# Describing a type whose methods are declared and never defined links: the
+# method metadata, the interface schema and a call proxy do not refer to the
+# functions. Built without optimisation so nothing is optimised away.
+add_executable(psio_reflect_method_metadata_only reflect_method_metadata_only.cpp)
+target_link_libraries(psio_reflect_method_metadata_only PRIVATE psio)
+target_compile_features(psio_reflect_method_metadata_only PRIVATE cxx_std_23)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_reflect_method_metadata_only PRIVATE -O0)
+endif()
+add_test(NAME psio_reflect_method_metadata_only COMMAND psio_reflect_method_metadata_only)
+# Uses of the method surface that must not compile, each with a message
+# naming the reason.
+function(psio_reflect_method_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_reflect_method_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/reflect_method_surface_fail.cpp)
+   set_tests_properties(psio_reflect_method_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_METHOD_INDEX_MESSAGE "psio: method index out of range")
+psio_reflect_method_compile_fail(empty_param_names METHOD_FAIL_EMPTY_PARAM_NAMES "${PSIO_METHOD_INDEX_MESSAGE}")
+psio_reflect_method_compile_fail(empty_type METHOD_FAIL_EMPTY_TYPE "${PSIO_METHOD_INDEX_MESSAGE}")
+psio_reflect_method_compile_fail(empty_result METHOD_FAIL_EMPTY_RESULT "${PSIO_METHOD_INDEX_MESSAGE}")
+psio_reflect_method_compile_fail(empty_name METHOD_FAIL_EMPTY_NAME "${PSIO_METHOD_INDEX_MESSAGE}")
+psio_reflect_method_compile_fail(empty_pointer METHOD_FAIL_EMPTY_POINTER "${PSIO_METHOD_INDEX_MESSAGE}")
+psio_reflect_method_compile_fail(empty_is_const METHOD_FAIL_EMPTY_IS_CONST "${PSIO_METHOD_INDEX_MESSAGE}")
+psio_reflect_method_compile_fail(empty_invoke METHOD_FAIL_EMPTY_INVOKE "${PSIO_METHOD_INDEX_MESSAGE}")
+psio_reflect_method_compile_fail(past_end METHOD_FAIL_PAST_END "${PSIO_METHOD_INDEX_MESSAGE}")
+psio_reflect_method_compile_fail(walk_pointer METHOD_FAIL_WALK_POINTER
+   "for_each_method calls fn\\(std::integral_constant<std::size_t, I>, name\\)")
+psio_reflect_method_compile_fail(proxy_inherited METHOD_FAIL_PROXY_INHERITED
+   "the member pointer is not method I of the reflection of its class")
+psio_reflect_method_compile_fail(proxy_static METHOD_FAIL_PROXY_STATIC
+   "a static method's pointer names no class")

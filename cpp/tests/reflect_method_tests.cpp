@@ -181,9 +181,9 @@ TEST_CASE("reflect methods: for_each_method and invoke_method", "[reflect][metho
 {
    std::vector<std::string> seen;
    std::size_t              statics = 0;
-   TR::for_each_method([&](auto index, std::string_view name, auto pointer) {
+   TR::for_each_method([&](auto index, std::string_view name) {
       seen.push_back(std::to_string(index.value) + ":" + std::string{name});
-      if (!std::is_member_function_pointer_v<decltype(pointer)>)
+      if (!std::is_member_function_pointer_v<TR::method_type<decltype(index)::value>>)
          ++statics;
    });
    CHECK(seen == std::vector<std::string>{"0:balance_of", "1:transfer", "2:version", "3:find",
