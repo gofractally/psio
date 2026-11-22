@@ -40,10 +40,12 @@
 // fallback is a scan of the member list.
 //
 // The reader is a type walk over a JsonCursor (json_cursor.hpp): it holds no
-// text positions and does no tokenizing, so another parser can be put
-// under it. Everything is checked and status-returning: no exceptions, no
+// text positions and does no tokenizing, and runs on the same syntax layers
+// as the typed readers (the hand-written lexer or simdjson, chosen by
+// `json_parser`; the default takes the fastest for the document). Everything is checked and status-returning: no exceptions, no
 // aborts, nesting and schema recursion limited by kMaxValidationDepth.
 
+#include <psio/json.hpp>
 #include <psio/json_cursor.hpp>
 #include <psio/name_lookup.hpp>
 #include <psio/pssz_ir.hpp>
@@ -701,7 +703,7 @@ class Writer
       p = std::to_chars(p, buffer + sizeof(buffer) - 1, static_cast<std::uint64_t>(magnitude)).ptr;
       if (quoted)
          *p++ = '"';
-      w.s.append(buffer, p);
+      w.append(buffer, p);
    }
    bool integer_value(const Int &type, const Value &value, bool &negative,
                       unsigned __int128 &magnitude)
@@ -736,7 +738,7 @@ class Writer
          return w.fail("ijson: non-finite float has no JSON text");
       char buffer[64];
       auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
-      w.s.append(buffer, result.ptr);
+      w.append(buffer, result.ptr);
    }
    void custom(const Custom &type, const Value &value, int_form form)
    {
@@ -745,7 +747,7 @@ class Writer
          auto v = std::get_if<bool>(&value.value);
          if (!v)
             return w.fail("pssz IR: bool value required");
-         w.s += *v ? "true" : "false";
+         w.append(*v ? std::string_view{"true"} : std::string_view{"false"});
          return;
       }
       if (type.id == "char")
@@ -777,15 +779,15 @@ class Writer
       if (!shape.admits(v->size()))
          return w.fail("json: array exceeds its bound");
       if (ijson)
-         return psio::detail::json_impl::write_hex(w.s, v->data(), v->size());
-      w.s.push_back('[');
+         return psio::detail::json_impl::write_hex(w, v->data(), v->size());
+      w.put('[');
       for (std::size_t i = 0; i < v->size(); ++i)
       {
          if (i)
-            w.s.push_back(',');
+            w.put(',');
          integer(Int{8, false}, form, false, (*v)[i]);
       }
-      w.s.push_back(']');
+      w.put(']');
    }
    void sequence(const Box<AnyType> &element, const Value &value,
                  std::optional<std::uint64_t> limit, bool exact, int_form form, std::size_t n)
@@ -795,14 +797,14 @@ class Writer
          return w.fail("pssz IR: sequence value required");
       if (limit && (exact ? items->size() != *limit : items->size() > *limit))
          return w.fail("json: array exceeds its bound");
-      w.s.push_back('[');
+      w.put('[');
       for (std::size_t i = 0; i < items->size(); ++i)
       {
          if (i)
-            w.s.push_back(',');
+            w.put(',');
          write(*element, (*items)[i], form, n + 1);
       }
-      w.s.push_back(']');
+      w.put(']');
    }
 
  public:
@@ -852,7 +854,7 @@ class Writer
                 if (!v || !t.type.get())
                    return w.fail("pssz IR: explicit optional value required");
                 if (!v->some)
-                   w.s += "null";
+                   w.append("null");
                 else
                    write(*t.type, *v->some, form, n + 1);
              }
@@ -867,16 +869,16 @@ class Writer
                 auto items = std::get_if<Sequence>(&value.value);
                 if (!items || items->size() != t.members.size())
                    return w.fail("pssz IR: tuple value count mismatch");
-                w.s.push_back('[');
+                w.put('[');
                 for (std::size_t i = 0; i < items->size(); ++i)
                 {
                    if (i)
-                      w.s.push_back(',');
+                      w.put(',');
                    if (!t.members[i].get())
                       return w.fail("pssz IR: null schema box");
                    write(*t.members[i], (*items)[i], int_form::natural, n + 1);
                 }
-                w.s.push_back(']');
+                w.put(']');
              }
              else if constexpr (std::is_same_v<T, Object> || std::is_same_v<T, Struct>)
              {
@@ -884,7 +886,7 @@ class Writer
                 if (!fields)
                    return w.fail("pssz IR: ordered record value required");
                 const Value absent = Value::none();
-                w.s.push_back('{');
+                w.put('{');
                 bool first = true;
                 for (const auto &member : t.members)
                 {
@@ -908,13 +910,13 @@ class Writer
                    if (bound && !Reader<json_text_cursor>::admits(*bound, *field))
                       return w.fail("json: member length_bound violated");
                    if (!first)
-                      w.s.push_back(',');
+                      w.put(',');
                    first = false;
                    psio::detail::json_impl::write_string(w, member.name, false);
-                   w.s.push_back(':');
+                   w.put(':');
                    write(*member_type, *field, member_form(member.attributes, ijson), n + 1);
                 }
-                w.s.push_back('}');
+                w.put('}');
              }
              else if constexpr (std::is_same_v<T, schema_types::Variant>)
              {
@@ -925,19 +927,22 @@ class Writer
                 const Member &member = t.members[v->selector];
                 if (ijson)
                 {
-                   w.s.push_back('{');
+                   w.put('{');
                    psio::detail::json_impl::write_string(w, variant_name(member), false);
-                   w.s.push_back(':');
+                   w.put(':');
                    write(*member.type, *v->payload, int_form::natural, n + 1);
-                   w.s.push_back('}');
+                   w.put('}');
                 }
                 else
                 {
-                   w.s.push_back('[');
-                   w.s += std::to_string(v->selector);
-                   w.s.push_back(',');
+                   w.put('[');
+                   {
+                      char digits[24];
+                      w.append(digits, std::to_chars(digits, digits + sizeof(digits), v->selector).ptr);
+                   }
+                   w.put(',');
                    write(*member.type, *v->payload, int_form::natural, n + 1);
-                   w.s.push_back(']');
+                   w.put(']');
                 }
              }
              else
@@ -971,12 +976,32 @@ template <psio::detail::json_impl::json_family Fmt>
 [[nodiscard]] codec_status json_to_value(const schema_types::Schema &schema,
                                          const schema_types::AnyType &root, Fmt,
                                          std::span<const char> text, Value &output,
-                                         const JsonNames *names = nullptr)
+                                         const JsonNames *names = nullptr,
+                                         json_parser parser = json_parser::automatic)
 {
    // Schema errors (unsupported shapes, bad attributes) come first.
    detail::Codec<0> codec(schema);
    if (auto status = codec.metadata(root); !status.ok())
       return status;
+   // The same choice of syntax layer as the typed readers (json.hpp).
+#if PSIO_HAVE_SIMDJSON
+   if (psio::detail::json_impl::use_simdjson(text, parser))
+   {
+      if (parser == json_parser::simdjson)
+      {
+         simdjson_cursor cursor(text, Fmt::i_json);
+         if (!read_json(schema, root, Fmt::i_json, cursor, output, names))
+            return cursor.status(Fmt::name);
+         return codec_ok();
+      }
+      simdjson_index_cursor cursor(text, Fmt::i_json);
+      if (!read_json(schema, root, Fmt::i_json, cursor, output, names))
+         return cursor.status(Fmt::name);
+      return codec_ok();
+   }
+#else
+   (void)parser;
+#endif
    json_text_cursor cursor(text, Fmt::i_json);
    if (!read_json(schema, root, Fmt::i_json, cursor, output, names))
       return cursor.status(Fmt::name);
@@ -995,6 +1020,7 @@ template <psio::detail::json_impl::json_family Fmt>
    const std::size_t start = out.size();
    psio::detail::json_impl::writer w{out, Fmt::name, false};
    json_detail::Writer(schema, w, Fmt::i_json).write(root, value, json_detail::int_form::natural, 0);
+   w.finish();
    if (w.err.empty())
       return codec_ok();
    out.resize(start);
@@ -1009,10 +1035,12 @@ template <psio::detail::json_impl::json_family Fmt>
 [[nodiscard]] codec_status json_to_pssz(const schema_types::Schema &schema,
                                         const schema_types::AnyType &root, Fmt format,
                                         std::span<const char> text, std::vector<char> &out,
-                                        const JsonNames *names = nullptr)
+                                        const JsonNames *names = nullptr,
+                                        json_parser parser = json_parser::automatic)
 {
    Value value;
-   if (auto status = json_to_value(schema, root, format, text, value, names); !status.ok())
+   if (auto status = json_to_value(schema, root, format, text, value, names, parser);
+       !status.ok())
       return status;
    return encode_auto(schema, root, value, out);
 }

@@ -2,8 +2,10 @@
 
 psio is **standalone-buildable**. A `git clone` + `cmake -B build &&
 cmake --build build` works on any host with a C++23 compiler, system
-Boost headers, and (optionally) simdjson — no other org repos in the
-include path, no submodules, no fetch step.
+Boost headers — no other org repos in the include path and no submodules.
+The one fetch step is simdjson (a pinned release archive, section 2); pass
+`-DPSIO_ENABLE_SIMDJSON=OFF` or `-DFETCHCONTENT_SOURCE_DIR_SIMDJSON=<dir>`
+to configure without network access.
 
 This doc lists every dep the library and its tests / benches reach,
 explains *which category* each falls in, and writes down the
@@ -19,7 +21,7 @@ psio's actual surface.
 |---|---|---|
 | **Vendored** | Single-header (or near-single-file) stable 3rd-party where we want zero configure-time friction | Copy under `external/<name>/` with a one-line provenance comment at the top of each file |
 | **`find_package`** | Stable 3rd-party where consumers reasonably already have it installed (system / vcpkg / Conan / Homebrew) | `find_package(<Name> [QUIET])` in `CMakeLists.txt`; `target_link_libraries(psio PUBLIC ...)` when found, compile-time gate with `PSIO_HAVE_<NAME>` define |
-| **`FetchContent`** | Internal libraries we co-edit (no current psio consumers fall here yet) | `FetchContent_Declare(... SOURCE_DIR external/<name> ...)`; first-declare-wins lets a parent project override pins |
+| **`FetchContent`** | Internal libraries we co-edit, and a 3rd-party library every build must get at one exact version (simdjson: the JSON readers' accepted set is tested against that version) | `FetchContent_Declare(... URL ... URL_HASH ...)`; first-declare-wins and `FETCHCONTENT_SOURCE_DIR_<NAME>` let a parent project override pins |
 
 The categories shake out cleanly because psio sits at the leaves of
 the dep graph — it pulls in stable 3rd-party but has zero internal
@@ -42,7 +44,7 @@ stack deps of its own. (Consumers like `psiserve`, `psizam`,
 
 | Dep | Category | Define | Effect when present |
 |---|---|---|---|
-| simdjson | `find_package(simdjson QUIET)` | `PSIO_HAVE_SIMDJSON=1` | `psio::pjson::from_json` (JSON text → pjson binary) |
+| simdjson 5.2.0 | `FetchContent`, pinned by release tag and archive SHA-256; on by default, `-DPSIO_ENABLE_SIMDJSON=OFF` to build without (default OFF for WASI). Not looked up on the system. Override with `-DFETCHCONTENT_SOURCE_DIR_SIMDJSON=<dir>` or a parent `simdjson::simdjson` target | `PSIO_HAVE_SIMDJSON=1` | The JSON syntax layer of the typed and schema-driven JSON / I-JSON readers (`json_simdjson.hpp`, see `docs/json.md`) and `psio::pjson::from_json` |
 | libflatbuffers | `find_package(flatbuffers QUIET)` (in tests) | — | Enables `psio::flatbuf_lib` parity tests |
 | msgpack-cxx | `find_package(msgpack-cxx QUIET CONFIG)` (in benches) | `PSIO_HAVE_MSGPACK` | `psio_format_perf_external` head-to-head bench |
 | libcapnp | `find_package(CapnProto QUIET)` (in benches) | `PSIO_HAVE_CAPNP` | capnp adapter column in `psio_bench_vs_externals` |
@@ -68,7 +70,7 @@ The split we land on:
   works everywhere." Provenance comments at the top of each vendored
   file prevent the file from drifting from upstream silently.
 - **`find_package`** when the dep is reasonably common in the
-  ecosystem (Boost, simdjson, flatbuffers, capnp, protobuf,
+  ecosystem (Boost, flatbuffers, capnp, protobuf,
   msgpack-cxx) and the consumers we have / expect already have it
   installed via Homebrew / apt / vcpkg / Conan. Friction cost of
   configure-time fetch is higher than expecting the install.
@@ -81,7 +83,7 @@ The split we land on:
 Decision tree:
 
 1. **Is it a single-header library?** → Vendor it under `external/<name>/<file>.h`. Add a one-line provenance comment naming the upstream URL + version / commit. No CMake fetch step required.
-2. **Is it a stable, ecosystem-common multi-file library?** (Boost, simdjson, capnp, protobuf, etc.) → `find_package(<Name> QUIET)` with a `PSIO_HAVE_<NAME>` gate. Either feature compiles out cleanly when absent, or it's marked REQUIRED if psio cannot work without it (today only Boost is REQUIRED).
+2. **Is it a stable, ecosystem-common multi-file library?** (Boost, capnp, protobuf, etc.) → `find_package(<Name> QUIET)` with a `PSIO_HAVE_<NAME>` gate. Either feature compiles out cleanly when absent, or it's marked REQUIRED if psio cannot work without it (today only Boost is REQUIRED).
 3. **Is it an internal library we own and co-edit?** → `FetchContent_Declare(... SOURCE_DIR external/<name> ...)` and let parent projects (`psiserve`, `psizam`, etc.) override the pin. Pattern as in [`psitri-multiindex/docs/dependency-pattern.md`][1] §6.
 4. **Is it test-only and small?** → vendor under `external/<name>/`, gate behind `PSIO_ENABLE_TESTS`. Catch2 fits this case.
 5. **Is it large, compiled, or platform-specific?** → `find_package`; do NOT vendor.

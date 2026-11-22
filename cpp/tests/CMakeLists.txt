@@ -129,6 +129,10 @@ psio_add_test(psio_ijson_tests ijson_tests.cpp)
 # Member / alternative lookup in the typed readers: expected order, any other
 # order through the perfect hash, repeated and unknown keys, 200 members.
 psio_add_test(psio_json_lookup_tests json_lookup_tests.cpp)
+# The two syntax layers under the typed readers (hand-written lexer and
+# simdjson) accept the same texts and read the same values: pointed cases
+# and a differential run over mutated documents.
+psio_add_test(psio_json_parser_tests json_parser_tests.cpp)
 # Shared cross-language JSON / I-JSON fixture (conformance/json-vectors.json):
 # emitted from the implementation, checked for drift, and consumed here and
 # by cargo test (rust/psio/tests/json_conformance.rs).

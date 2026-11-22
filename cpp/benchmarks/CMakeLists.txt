@@ -238,3 +238,13 @@ add_executable(psio_bench_psch bench_psch.cpp)
 target_link_libraries(psio_bench_psch PRIVATE psio)
 target_compile_features(psio_bench_psch PRIVATE cxx_std_23)
 target_compile_options(psio_bench_psch PRIVATE -O3 -DNDEBUG)
+
+# Typed JSON / I-JSON text: decode per syntax layer (hand-written lexer,
+# simdjson on-demand) and encode, on five shapes. The header of the source
+# says how the "before" numbers are produced from the previous commit.
+add_executable(psio_bench_json_text bench_json_text.cpp)
+target_link_libraries(psio_bench_json_text PRIVATE psio)
+target_include_directories(psio_bench_json_text PRIVATE
+   ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../tests)
+target_compile_features(psio_bench_json_text PRIVATE cxx_std_23)
+target_compile_options(psio_bench_json_text PRIVATE -O3 -DNDEBUG)

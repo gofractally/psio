@@ -444,6 +444,31 @@ namespace json_conf
       if (!(psio::decode<T>(Fmt{}, in) == value)) return "decode differs from decode_json_checked";
       auto boxed = psio::make_boxed<T>(Fmt{}, in);
       if (!boxed || !(*boxed == value)) return "make_boxed differs";
+      // Every syntax layer, with and without caller padding, reads the
+      // same value. (json_parser::simdjson is the hand-written lexer when
+      // simdjson is not built in or the root is a scalar.)
+      for (const auto parser : {psio::json_parser::text, psio::json_parser::simdjson,
+                                psio::json_parser::simdjson_index})
+      {
+         const std::string which = parser == psio::json_parser::text
+                                    ? "text"
+                                    : parser == psio::json_parser::simdjson ? "simdjson" : "simdjson_index";
+         T                 again{};
+         if (auto st = psio::decode_json_checked(Fmt{}, in, again, parser); !st.ok())
+            return which + " parser rejects: " + std::string(st.error().what);
+         if (!(again == value)) return which + " parser reads a different value";
+         if (auto st = psio::validate_json<T>(Fmt{}, in, parser); !st.ok())
+            return which + " parser validate rejects: " + std::string(st.error().what);
+         std::string padded = text;
+         T           in_place{};
+         if (auto st = psio::decode_json_checked(Fmt{}, psio::padded_json::of(padded), in_place,
+                                                 parser);
+             !st.ok())
+            return which + " parser (padded) rejects: " + std::string(st.error().what);
+         if (!(in_place == value)) return which + " parser (padded) reads a different value";
+         if (!psio::validate_json<T>(Fmt{}, psio::padded_json::of(padded), parser).ok())
+            return which + " parser (padded) validate rejects";
+      }
       return "";
    }
 
@@ -471,6 +496,22 @@ namespace json_conf
       if (psio::validate_strict<T>(Fmt{}, in).ok()) return "validate_strict accepts";
       T value{};
       if (psio::decode_json_checked(Fmt{}, in, value).ok()) return "decode_json_checked accepts";
+      for (const auto parser : {psio::json_parser::text, psio::json_parser::simdjson,
+                                psio::json_parser::simdjson_index})
+      {
+         const std::string which = parser == psio::json_parser::text
+                                    ? "text"
+                                    : parser == psio::json_parser::simdjson ? "simdjson" : "simdjson_index";
+         if (psio::decode_json_checked(Fmt{}, in, value, parser).ok())
+            return which + " parser accepts";
+         if (psio::validate_json<T>(Fmt{}, in, parser).ok())
+            return which + " parser validate accepts";
+         std::string padded = text;
+         if (psio::decode_json_checked(Fmt{}, psio::padded_json::of(padded), value, parser).ok())
+            return which + " parser (padded) accepts";
+         if (psio::validate_json<T>(Fmt{}, psio::padded_json::of(padded), parser).ok())
+            return which + " parser (padded) validate accepts";
+      }
       return "";
    }
 

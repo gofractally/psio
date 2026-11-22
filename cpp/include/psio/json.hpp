@@ -45,7 +45,12 @@
 // disabled); `encode_json_checked` returns a codec_status instead.
 //
 // Reading. One typed reader defines the accepted set; `validate`,
-// `validate_strict`, `decode_json_checked` and `decode` all run it:
+// `validate_strict`, `decode_json_checked` and `decode` all run it. It is
+// written against the JsonCursor concept (json_cursor.hpp) and runs on
+// either syntax layer: the hand-written lexer, or simdjson when
+// PSIO_HAVE_SIMDJSON is 1 (json_simdjson.hpp). `json_parser` selects one per
+// call; the default takes the fastest for the document, and the choice
+// never changes what is accepted:
 //
 //   - the text must be exactly one value of T's shape, with optional JSON
 //     whitespace between tokens and nothing after it;
@@ -84,6 +89,7 @@
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/get_type_name.hpp>
+#include <psio/json_cursor.hpp>
 #include <psio/reflect.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for, byte_array, ...
 
@@ -95,6 +101,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -104,6 +111,13 @@
 #include <type_traits>
 #include <variant>
 #include <vector>
+
+#ifndef PSIO_HAVE_SIMDJSON
+#define PSIO_HAVE_SIMDJSON 0
+#endif
+#if PSIO_HAVE_SIMDJSON
+#include <psio/json_simdjson.hpp>
+#endif
 
 namespace psio {
 
@@ -268,94 +282,34 @@ namespace psio {
             static_cast<const std::variant_alternative_t<I, V>*>(nullptr))};
       }
 
+      // The alternative names of V, as a lookup table source.
+      template <typename V>
+      struct alt_names
+      {
+         static constexpr auto _names_array_ =
+            []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return std::array<std::string_view, sizeof...(Is)>{alt_name<V, Is>()...};
+            }(std::make_index_sequence<std::variant_size_v<V>>{});
+      };
+
       template <typename V>
       constexpr bool alt_names_unique() noexcept
       {
-         constexpr std::size_t N = std::variant_size_v<V>;
-         return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            const std::array<std::string_view, N> names{alt_name<V, Is>()...};
-            for (std::size_t a = 0; a < N; ++a)
-               for (std::size_t b = a + 1; b < N; ++b)
-                  if (names[a] == names[b])
-                     return false;
-            return true;
-         }(std::make_index_sequence<N>{});
-      }
-
-      // ── UTF-8 ─────────────────────────────────────────────────────────────
-
-      // Length (2..4) of the well-formed multi-byte sequence at p, or 0.
-      // Rejects overlong forms, surrogates and values above U+10FFFF.
-      inline unsigned utf8_multibyte(const unsigned char* p,
-                                     const unsigned char* end,
-                                     std::uint32_t&       cp) noexcept
-      {
-         const unsigned char b = *p;
-         unsigned            n;
-         std::uint32_t       min;
-         if ((b & 0xE0) == 0xC0)
-         {
-            n   = 2;
-            cp  = b & 0x1F;
-            min = 0x80;
-         }
-         else if ((b & 0xF0) == 0xE0)
-         {
-            n   = 3;
-            cp  = b & 0x0F;
-            min = 0x800;
-         }
-         else if ((b & 0xF8) == 0xF0)
-         {
-            n   = 4;
-            cp  = b & 0x07;
-            min = 0x10000;
-         }
-         else
-            return 0;
-         if (static_cast<std::size_t>(end - p) < n)
-            return 0;
-         for (unsigned k = 1; k < n; ++k)
-         {
-            if ((p[k] & 0xC0) != 0x80)
-               return 0;
-            cp = (cp << 6) | (p[k] & 0x3F);
-         }
-         if (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
-            return 0;
-         return n;
-      }
-
-      constexpr bool is_noncharacter(std::uint32_t cp) noexcept
-      {
-         return (cp >= 0xFDD0 && cp <= 0xFDEF) || (cp & 0xFFFE) == 0xFFFE;
-      }
-
-      inline void append_utf8(std::string& out, std::uint32_t cp)
-      {
-         if (cp < 0x80)
-            out.push_back(static_cast<char>(cp));
-         else if (cp < 0x800)
-         {
-            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-         }
-         else if (cp < 0x10000)
-         {
-            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-         }
-         else
-         {
-            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-         }
+         const auto& names = alt_names<V>::_names_array_;
+         for (std::size_t a = 0; a < names.size(); ++a)
+            for (std::size_t b = a + 1; b < names.size(); ++b)
+               if (names[a] == names[b])
+                  return false;
+         return true;
       }
 
       // ── Encoding ──────────────────────────────────────────────────────────
+      //
+      // The writer owns the tail of the output string as a raw buffer: text
+      // is written through a pointer after one capacity check per value
+      // (`reserve`), and the string's size is set once at the end
+      // (`finish`). While a writer is live, `s.size()` is the buffer's
+      // extent, not the text's length; `n` is the length.
 
       struct writer
       {
@@ -363,14 +317,64 @@ namespace psio {
          std::string_view format;
          bool             fail_fast = true;
          std::string_view err{};
+         std::size_t      n = s.size();  // bytes of `s` that are text
+
+         // Room for `k` more bytes; returns where they go.
+         char* reserve(std::size_t k)
+         {
+            if (s.size() - n < k) [[unlikely]]
+               grow(k);
+            return s.data() + n;
+         }
+         // The bytes [reserve(), end) are now text.
+         void commit(const char* end) noexcept
+         {
+            n = static_cast<std::size_t>(end - s.data());
+         }
+         void put(char c)
+         {
+            *reserve(1) = c;
+            ++n;
+         }
+         void append(std::string_view text)
+         {
+            std::memcpy(reserve(text.size()), text.data(), text.size());
+            n += text.size();
+         }
+         void append(const char* b, const char* e)
+         {
+            append(std::string_view{b, static_cast<std::size_t>(e - b)});
+         }
+         template <std::size_t N>
+         void literal(const std::array<char, N>& text)
+         {
+            std::memcpy(reserve(N), text.data(), N);
+            n += N;
+         }
+         // Ends the buffer phase: `s` is exactly the text.
+         void finish() { s.resize(n); }
 
          void fail(std::string_view what)
          {
             if (fail_fast)
-               ::psio::codec_abort(::psio::codec_error{
-                  what, static_cast<std::uint32_t>(s.size()), format});
+            {
+               const auto at = static_cast<std::uint32_t>(n);
+               finish();
+               ::psio::codec_abort(::psio::codec_error{what, at, format});
+            }
             if (err.empty())
                err = what;
+         }
+
+        private:
+         void grow(std::size_t k)
+         {
+            const std::size_t want = std::max({n + k, s.size() * 2, std::size_t{128}});
+#if defined(__cpp_lib_string_resize_and_overwrite)
+            s.resize_and_overwrite(want, [&](char*, std::size_t) { return want; });
+#else
+            s.resize(want);
+#endif
          }
       };
 
@@ -378,79 +382,222 @@ namespace psio {
       // refuses Unicode noncharacters (I-JSON).
       inline void write_string(writer& w, std::string_view sv, bool nonchar)
       {
-         std::string& s = w.s;
-         s.push_back('"');
-         const auto* const base =
-            reinterpret_cast<const unsigned char*>(sv.data());
-         const auto* const end = base + sv.size();
-         const auto*       p   = base;
-         const auto*       run = base;
-         auto flush = [&] {
-            s.append(reinterpret_cast<const char*>(run),
-                     static_cast<std::size_t>(p - run));
-         };
-         while (p < end)
+         // Worst case without escapes; each escape reserves again.
+         char* out = w.reserve(sv.size() + 2);
+         *out++    = '"';
+         const auto* p   = reinterpret_cast<const unsigned char*>(sv.data());
+         const auto* end = p + sv.size();
+         while (true)
          {
+            // Plain ASCII, eight bytes at a time.
+            while (end - p >= 8)
+            {
+               std::uint64_t word;
+               std::memcpy(&word, p, 8);
+               if (string_special(word))
+                  break;
+               std::memcpy(out, p, 8);
+               out += 8;
+               p += 8;
+            }
+            if (p >= end)
+               break;
             const unsigned char c = *p;
             if (c >= 0x80)
             {
-               std::uint32_t  cp = 0;
-               const unsigned n  = utf8_multibyte(p, end, cp);
-               if (n == 0)
+               std::uint32_t  cp  = 0;
+               const unsigned len = utf8_multibyte(p, end, cp);
+               if (len == 0)
                {
+                  w.commit(out);
                   w.fail("json: string is not valid UTF-8");
+                  out = w.reserve(1);
                   break;
                }
                if (nonchar && is_noncharacter(cp))
                {
+                  w.commit(out);
                   w.fail("ijson: string holds a Unicode noncharacter");
+                  out = w.reserve(1);
                   break;
                }
-               p += n;
+               for (unsigned k = 0; k < len; ++k)
+                  *out++ = static_cast<char>(p[k]);
+               p += len;
                continue;
             }
             if (c >= 0x20 && c != '"' && c != '\\')
             {
+               *out++ = static_cast<char>(c);
                ++p;
                continue;
             }
-            flush();
+            // An escape: up to six bytes instead of one.
+            w.commit(out);
+            out = w.reserve(static_cast<std::size_t>(end - p) + 7);
+            *out++ = '\\';
             switch (c)
             {
-               case '"':  s += R"(\")"; break;
-               case '\\': s += R"(\\)"; break;
-               case '\n': s += R"(\n)"; break;
-               case '\r': s += R"(\r)"; break;
-               case '\t': s += R"(\t)"; break;
+               case '"':  *out++ = '"'; break;
+               case '\\': *out++ = '\\'; break;
+               case '\n': *out++ = 'n'; break;
+               case '\r': *out++ = 'r'; break;
+               case '\t': *out++ = 't'; break;
                default:
                {
                   static constexpr char hex[] = "0123456789abcdef";
-                  const char buf[6] = {'\\', 'u', '0', '0', hex[c >> 4],
-                                       hex[c & 0xF]};
-                  s.append(buf, 6);
+                  *out++ = 'u';
+                  *out++ = '0';
+                  *out++ = '0';
+                  *out++ = hex[c >> 4];
+                  *out++ = hex[c & 0xF];
                }
             }
             ++p;
-            run = p;
          }
-         flush();
-         s.push_back('"');
+         *out++ = '"';
+         w.commit(out);
       }
 
-      inline void write_hex(std::string& s, const unsigned char* data,
-                            std::size_t n)
+      // Two uppercase hex digits per byte value.
+      inline constexpr auto hex_pairs = [] {
+         std::array<char, 512> t{};
+         constexpr char        digits[] = "0123456789ABCDEF";
+         for (std::size_t i = 0; i < 256; ++i)
+         {
+            t[2 * i]     = digits[i >> 4];
+            t[2 * i + 1] = digits[i & 0xF];
+         }
+         return t;
+      }();
+
+      inline void write_hex(writer& w, const unsigned char* data, std::size_t n)
       {
-         static constexpr char hex[] = "0123456789ABCDEF";
-         const std::size_t     at    = s.size();
-         s.resize(at + 2 * n + 2);
-         char* out = s.data() + at;
+         char* out = w.reserve(2 * n + 2);
          *out++    = '"';
          for (std::size_t i = 0; i < n; ++i)
          {
-            *out++ = hex[data[i] >> 4];
-            *out++ = hex[data[i] & 0xF];
+            std::memcpy(out, hex_pairs.data() + 2 * std::size_t{data[i]}, 2);
+            out += 2;
          }
-         *out = '"';
+         *out++ = '"';
+         w.commit(out);
+      }
+
+      // A member's key as it appears in the text, built at compile time:
+      // the separator before it ('{' for the first member, ',' after),
+      // the quoted and escaped name, and the colon.
+      template <typename T, std::size_t I>
+      struct member_key
+      {
+         static constexpr std::string_view name = ::psio::reflect<T>::template member_name<I>;
+         static constexpr std::size_t escaped_size = [] {
+            std::size_t size = 0;
+            for (char ch : name)
+            {
+               const auto c = static_cast<unsigned char>(ch);
+               size += (c == '"' || c == '\\') ? 2 : c < 0x20 ? 6 : 1;
+            }
+            return size;
+         }();
+         static constexpr std::array<char, escaped_size + 4> text = [] {
+            std::array<char, escaped_size + 4> out{};
+            std::size_t                        at = 0;
+            out[at++] = I == 0 ? '{' : ',';
+            out[at++] = '"';
+            for (char ch : name)
+            {
+               const auto c = static_cast<unsigned char>(ch);
+               if (c == '"' || c == '\\')
+               {
+                  out[at++] = '\\';
+                  out[at++] = ch;
+               }
+               else if (c < 0x20)
+               {
+                  constexpr char hex[] = "0123456789abcdef";
+                  out[at++] = '\\';
+                  out[at++] = 'u';
+                  out[at++] = '0';
+                  out[at++] = '0';
+                  out[at++] = hex[c >> 4];
+                  out[at++] = hex[c & 0xF];
+               }
+               else
+                  out[at++] = ch;
+            }
+            out[at++] = '"';
+            out[at++] = ':';
+            return out;
+         }();
+      };
+
+      // The most text a value of T can take, when that is a small constant
+      // known from the type alone (numbers, bool, and optionals, fixed
+      // arrays, tuples and records of them); 0 otherwise. Lets a list of
+      // such elements, and such a value at the top level, reserve once.
+      template <typename Fmt, typename T>
+      constexpr std::size_t text_bound() noexcept
+      {
+         if constexpr (::psio::format_should_dispatch_adapter_v<Fmt, T>)
+            return 0;
+         else if constexpr (std::is_same_v<T, bool>)
+            return 5;
+         else if constexpr (std::is_same_v<T, std::byte>)
+            return 5;
+         else if constexpr (std::is_enum_v<T>)
+            return text_bound<Fmt, std::underlying_type_t<T>>();
+         else if constexpr (std::is_integral_v<T>)
+            // digits, sign, and the quotes of a string form
+            return sizeof(T) <= 8
+                      ? static_cast<std::size_t>(std::numeric_limits<T>::digits10) + 4
+                      : 0;
+         else if constexpr (std::is_floating_point_v<T>)
+            return 32;
+         else if constexpr (is_std_optional<T>::value)
+         {
+            constexpr std::size_t inner = text_bound<Fmt, typename T::value_type>();
+            return inner ? std::max<std::size_t>(inner, 4) : 0;
+         }
+         else if constexpr (Fmt::i_json && byte_seq<T>::value)
+         {
+            if constexpr (is_std_array<T>::value)
+               return 2 * std::tuple_size_v<T> + 2;
+            else if constexpr (is_byte_array<T>::value)
+               return 2 * sizeof(T) + 2;
+            else
+               return 0;
+         }
+         else if constexpr (is_std_array<T>::value)
+         {
+            constexpr std::size_t inner = text_bound<Fmt, typename T::value_type>();
+            return inner && std::tuple_size_v<T> <= 4096
+                      ? std::tuple_size_v<T> * (inner + 1) + 2
+                      : 0;
+         }
+         else if constexpr (Record<T>)
+         {
+            using R = ::psio::reflect<T>;
+            return []<std::size_t... Is>(std::index_sequence<Is...>) -> std::size_t {
+               std::size_t total = 2;
+               bool        fixed = true;
+               (([&] {
+                   using F   = typename R::template member_type<Is>;
+                   using eff = typename ::psio::effective_annotations_for<
+                      T, F, R::template member_pointer<Is>>::value_t;
+                   std::size_t inner = 0;
+                   if constexpr (!::psio::has_as_override_v<eff>)
+                      inner = text_bound<Fmt, F>();
+                   if (inner == 0)
+                      fixed = false;
+                   total += member_key<T, Is>::text.size() + inner;
+                }()),
+                ...);
+               return fixed && total <= 65536 ? total : 0;
+            }(std::make_index_sequence<R::member_count>{});
+         }
+         else
+            return 0;
       }
 
       template <typename Fmt, int_mode IM, typename T>
@@ -459,32 +606,74 @@ namespace psio {
       template <typename Fmt, int_mode IM, typename I>
       void encode_integer(I v, writer& w)
       {
-         char buf[48];
-         auto r = std::to_chars(buf + 1, buf + sizeof(buf) - 1, v);
-         bool quoted = int_as_string_v<Fmt, IM, I>;
+         char* const out    = w.reserve(48);
+         bool        quoted = int_as_string_v<Fmt, IM, I>;
          if constexpr (IM == int_mode::natural && int_as_string_v<Fmt, IM, I>)
          {
             // Natural ijson: a wide integer JavaScript holds exactly
-            // (|v| <= 2^53 - 1) is a bare number; anything larger is a string.
-            constexpr I safe = static_cast<I>((std::uint64_t{1} << 53) - 1);
-            quoted           = v > safe;
-            if constexpr (std::is_signed_v<I>)
-               quoted = quoted || v < -safe;
+            // (|v| <= 2^53 - 1) is a bare number; anything larger is a
+            // string. One unsigned compare decides either sign.
+            constexpr std::uint64_t safe = (std::uint64_t{1} << 53) - 1;
+            if constexpr (sizeof(I) > 8)
+            {
+               constexpr I limit = static_cast<I>(safe);
+               quoted            = v > limit;
+               if constexpr (std::is_signed_v<I>)
+                  quoted = quoted || v < -limit;
+            }
+            else if constexpr (std::is_signed_v<I>)
+               quoted = static_cast<std::uint64_t>(v) + safe > 2 * safe;
+            else
+               quoted = static_cast<std::uint64_t>(v) > safe;
          }
-         if (quoted)
+         char* p = out;
+         *p      = '"';
+         p += quoted;
+         p  = std::to_chars(p, out + 46, v).ptr;
+         *p = '"';
+         p += quoted;
+         w.commit(p);
+      }
+
+      // Member I of record T: its key literal, then its value.
+      template <typename Fmt, typename T, std::size_t I>
+      void encode_member(const T& v, writer& w)
+      {
+         using R = ::psio::reflect<T>;
+         using F = typename R::template member_type<I>;
+         w.literal(member_key<T, I>::text);
+         const auto& fref = v.*(R::template member_pointer<I>);
+
+         // Member-level presentation override: if the field's effective
+         // annotations include as_spec<Tag>, use adapter<F, Tag> for this
+         // field (member beats type, §5.3.7).
+         using eff_for =
+            ::psio::effective_annotations_for<T, F, R::template member_pointer<I>>;
+         using eff = typename eff_for::value_t;
+         if constexpr (::psio::has_as_override_v<eff>)
          {
-            buf[0]   = '"';
-            *r.ptr++ = '"';
-            w.s.append(buf, r.ptr);
+            using Tag  = ::psio::adapter_tag_of_t<eff>;
+            using Proj = ::psio::adapter<std::remove_cvref_t<F>, Tag>;
+            std::string payload;
+            Proj::encode(fref, payload);
+            write_string(w, std::string_view{payload}, Fmt::i_json);
          }
          else
-            w.s.append(buf + 1, r.ptr);
+         {
+            // A member outside its declared length_bound has no text: the
+            // reader would reject it.
+            if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
+               if (!::psio::detail::length_bound_ok(
+                      fref, std::get<::psio::length_bound>(eff_for::value)))
+                  w.fail("json: member length_bound violated");
+            constexpr int_mode mode = field_mode<Fmt, eff>(eff_for::value);
+            encode_value<Fmt, mode>(fref, w);
+         }
       }
 
       template <typename Fmt, int_mode IM, typename T>
       void encode_value(const T& v, writer& w)
       {
-         std::string& s = w.s;
          // Adapter check — if the type registered a text adapter (and it
          // doesn't delegate back to this format), delegate and write the
          // result as a JSON string. The adapter produces the payload
@@ -501,7 +690,7 @@ namespace psio {
             write_string(w, std::string_view{payload}, Fmt::i_json);
          }
          else if constexpr (std::is_same_v<T, bool>)
-            s += v ? "true" : "false";
+            w.append(v ? std::string_view{"true"} : std::string_view{"false"});
          else if constexpr (std::is_enum_v<T> && !std::is_same_v<T, std::byte>)
             encode_integer<Fmt, IM>(
                static_cast<std::underlying_type_t<T>>(v), w);
@@ -515,12 +704,11 @@ namespace psio {
                if (!std::isfinite(v))
                {
                   w.fail("ijson: non-finite float has no JSON text");
-                  s += "null";
+                  w.append("null");
                   return;
                }
-            char buf[64];
-            auto r = std::to_chars(buf, buf + sizeof(buf), v);
-            s.append(buf, r.ptr);
+            char* const out = w.reserve(64);
+            w.commit(std::to_chars(out, out + 64, v).ptr);
          }
          else if constexpr (std::is_same_v<T, std::string>)
             write_string(w, std::string_view{v}, Fmt::i_json);
@@ -535,7 +723,7 @@ namespace psio {
             encode_value<Fmt, IM>(v.storage(), w);
          }
          else if constexpr (Fmt::i_json && byte_seq<T>::value)
-            write_hex(s, reinterpret_cast<const unsigned char*>(v.data()),
+            write_hex(w, reinterpret_cast<const unsigned char*>(v.data()),
                       v.size());
          else if constexpr (is_byte_array<T>::value)
             encode_value<Fmt, IM>(v.storage(), w);
@@ -543,23 +731,26 @@ namespace psio {
                             is_std_vector<T>::value)
          {
             using E = typename T::value_type;
-            s.push_back('[');
+            // Elements of a constant text bound: one reservation for all.
+            if constexpr (constexpr std::size_t bound = text_bound<Fmt, E>(); bound != 0)
+               (void)w.reserve(v.size() * (bound + 1) + 2);
+            w.put('[');
             bool first = true;
             for (const E& x : v)
             {
                if (!first)
-                  s.push_back(',');
+                  w.put(',');
                first = false;
                encode_value<Fmt, IM>(x, w);
             }
-            s.push_back(']');
+            w.put(']');
          }
          else if constexpr (is_std_optional<T>::value)
          {
             if (v.has_value())
                encode_value<Fmt, IM>(*v, w);
             else
-               s += "null";
+               w.append("null");
          }
          else if constexpr (is_std_variant<T>::value)
          {
@@ -571,12 +762,12 @@ namespace psio {
                              "distinct type names");
                [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                   (void)((v.index() == Is
-                             ? (s.push_back('{'),
+                             ? (w.put('{'),
                                 write_string(w, alt_name<T, Is>(), false),
-                                s.push_back(':'),
+                                w.put(':'),
                                 encode_value<Fmt, int_mode::natural>(
                                    *std::get_if<Is>(&v), w),
-                                s.push_back('}'), true)
+                                w.put('}'), true)
                              : false) ||
                          ...);
                }(std::make_index_sequence<std::variant_size_v<T>>{});
@@ -584,82 +775,37 @@ namespace psio {
             else
             {
                // Positional tagged form: [index, value].
-               s.push_back('[');
-               char buf[24];
-               auto r = std::to_chars(buf, buf + sizeof(buf), v.index());
-               s.append(buf, r.ptr);
-               s.push_back(',');
+               w.put('[');
+               char* const out = w.reserve(24);
+               w.commit(std::to_chars(out, out + 24, v.index()).ptr);
+               w.put(',');
                std::visit(
                   [&](const auto& alt) {
                      encode_value<Fmt, int_mode::natural>(alt, w);
                   },
                   v);
-               s.push_back(']');
+               w.put(']');
             }
          }
          else if constexpr (is_std_tuple<T>::value)
          {
-            s.push_back('[');
+            w.put('[');
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-               (((Is ? s.push_back(',') : void()),
+               (((Is ? w.put(',') : void()),
                  encode_value<Fmt, int_mode::natural>(std::get<Is>(v), w)),
                 ...);
             }(std::make_index_sequence<std::tuple_size_v<T>>{});
-            s.push_back(']');
+            w.put(']');
          }
          else if constexpr (Record<T>)
          {
             using R = ::psio::reflect<T>;
-            s.push_back('{');
-            bool first = true;
+            if constexpr (R::member_count == 0)
+               w.put('{');
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-               (
-                  ([&]
-                   {
-                      if (!first)
-                         s.push_back(',');
-                      first = false;
-                      write_string(w, R::template member_name<Is>, false);
-                      s.push_back(':');
-
-                      using F = typename R::template member_type<Is>;
-                      const auto& fref =
-                         v.*(R::template member_pointer<Is>);
-
-                      // Member-level presentation override: if the
-                      // field's effective annotations include
-                      // as_spec<Tag>, use adapter<F, Tag> for this field
-                      // (member beats type, §5.3.7).
-                      using eff_for = ::psio::effective_annotations_for<
-                         T, F, R::template member_pointer<Is>>;
-                      using eff = typename eff_for::value_t;
-                      if constexpr (::psio::has_as_override_v<eff>)
-                      {
-                         using Tag  = ::psio::adapter_tag_of_t<eff>;
-                         using Proj =
-                            ::psio::adapter<std::remove_cvref_t<F>, Tag>;
-                         std::string payload;
-                         Proj::encode(fref, payload);
-                         write_string(w, std::string_view{payload},
-                                      Fmt::i_json);
-                      }
-                      else
-                      {
-                         // A member outside its declared length_bound has
-                         // no text: the reader would reject it.
-                         if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
-                            if (!::psio::detail::length_bound_ok(
-                                   fref, std::get<::psio::length_bound>(
-                                            eff_for::value)))
-                               w.fail("json: member length_bound violated");
-                         constexpr int_mode mode =
-                            field_mode<Fmt, eff>(eff_for::value);
-                         encode_value<Fmt, mode>(fref, w);
-                      }
-                   }()),
-                  ...);
+               (encode_member<Fmt, T, Is>(v, w), ...);
             }(std::make_index_sequence<R::member_count>{});
-            s.push_back('}');
+            w.put('}');
          }
          else
          {
@@ -668,465 +814,238 @@ namespace psio {
          }
       }
 
+      // Encodes one whole value and leaves `w.s` as the text.
+      template <typename Fmt, typename T>
+      void encode_document(const T& v, writer& w)
+      {
+         if constexpr (constexpr std::size_t bound = text_bound<Fmt, T>(); bound != 0)
+            (void)w.reserve(bound);
+         encode_value<Fmt, int_mode::natural>(v, w);
+         w.finish();
+      }
+
       // ── Reading ───────────────────────────────────────────────────────────
       //
-      // One typed reader. With `out == nullptr` it validates without
+      // One typed reader, written against the JsonCursor concept
+      // (json_cursor.hpp): it checks the cursor's events against T and never
+      // looks at the text, so it runs unchanged over the hand-written lexer
+      // and over simdjson. With `out == nullptr` it validates without
       // building a value; otherwise it also stores the value. Every failure
-      // is reported through the reader (no exceptions, no aborts), so the
-      // same code serves validate, the checked decode and guests.
+      // is recorded in the cursor (no exceptions, no aborts), so the same
+      // code serves validate, the checked decode and guests.
 
-      struct reader
+      template <typename C>
+      struct typed_reader
       {
-         const char*      begin;
-         const char*      p;
-         const char*      end;
-         bool             lenient_missing = false;
-         std::string_view err{};
-         const char*      err_at = nullptr;
-
-         bool fail(std::string_view what) noexcept
-         {
-            if (err.empty())
-            {
-               err    = what;
-               err_at = p;
-            }
-            return false;
-         }
-
-         void ws() noexcept
-         {
-            while (p < end &&
-                   (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r'))
-               ++p;
-         }
-
-         // Skips whitespace, then consumes c if it is next.
-         bool take(char c) noexcept
-         {
-            ws();
-            if (p < end && *p == c)
-            {
-               ++p;
-               return true;
-            }
-            return false;
-         }
-
-         bool keyword(std::string_view kw) noexcept
-         {
-            if (static_cast<std::size_t>(end - p) >= kw.size() &&
-                std::memcmp(p, kw.data(), kw.size()) == 0)
-            {
-               p += kw.size();
-               return true;
-            }
-            return false;
-         }
+         C&   c;
+         bool lenient_missing = false;
       };
 
-      constexpr int hex_digit(char c) noexcept
-      {
-         if (c >= '0' && c <= '9') return c - '0';
-         if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-         if (c >= 'A' && c <= 'F') return c - 'A' + 10;
-         return -1;
-      }
-
-      inline bool read_hex4(reader& r, std::uint32_t& v) noexcept
-      {
-         if (r.end - r.p < 4)
-            return r.fail("json: truncated \\uXXXX escape");
-         v = 0;
-         for (int k = 0; k < 4; ++k)
-         {
-            const int d = hex_digit(r.p[k]);
-            if (d < 0)
-               return r.fail("json: bad hex digit in \\uXXXX");
-            v = (v << 4) | static_cast<std::uint32_t>(d);
-         }
-         r.p += 4;
-         return true;
-      }
-
-      // Reads a JSON string; r.p must be at its opening quote. Appends the
-      // unescaped UTF-8 to *out when given. `escaped` reports whether the
-      // text between the quotes differs from the value.
-      inline bool read_string(reader& r, std::string* out, bool nonchar,
-                              bool* escaped = nullptr)
-      {
-         if (r.p >= r.end || *r.p != '"')
-            return r.fail("json: expected a string");
-         ++r.p;
-         const char* run = r.p;
-         auto flush = [&] {
-            if (out)
-               out->append(run, static_cast<std::size_t>(r.p - run));
-         };
-         if (escaped)
-            *escaped = false;
-         while (true)
-         {
-            if (r.p >= r.end)
-               return r.fail("json: unterminated string");
-            const unsigned char c = static_cast<unsigned char>(*r.p);
-            if (c == '"')
-            {
-               flush();
-               ++r.p;
-               return true;
-            }
-            if (c == '\\')
-            {
-               flush();
-               if (escaped)
-                  *escaped = true;
-               if (r.end - r.p < 2)
-                  return r.fail("json: trailing backslash in string");
-               const char e = r.p[1];
-               r.p += 2;
-               std::uint32_t cp;
-               switch (e)
-               {
-                  case '"':  cp = '"'; break;
-                  case '\\': cp = '\\'; break;
-                  case '/':  cp = '/'; break;
-                  case 'b':  cp = '\b'; break;
-                  case 'f':  cp = '\f'; break;
-                  case 'n':  cp = '\n'; break;
-                  case 'r':  cp = '\r'; break;
-                  case 't':  cp = '\t'; break;
-                  case 'u':
-                  {
-                     if (!read_hex4(r, cp))
-                        return false;
-                     if (cp >= 0xDC00 && cp <= 0xDFFF)
-                        return r.fail("json: unpaired surrogate escape");
-                     if (cp >= 0xD800 && cp <= 0xDBFF)
-                     {
-                        std::uint32_t lo = 0;
-                        if (r.end - r.p < 2 || r.p[0] != '\\' ||
-                            r.p[1] != 'u')
-                           return r.fail("json: unpaired surrogate escape");
-                        r.p += 2;
-                        if (!read_hex4(r, lo))
-                           return false;
-                        if (lo < 0xDC00 || lo > 0xDFFF)
-                           return r.fail("json: unpaired surrogate escape");
-                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-                     }
-                     if (nonchar && is_noncharacter(cp))
-                        return r.fail("ijson: Unicode noncharacter in string");
-                     break;
-                  }
-                  default:
-                     r.p -= 1;
-                     return r.fail("json: invalid escape character in string");
-               }
-               if (out)
-                  append_utf8(*out, cp);
-               run = r.p;
-               continue;
-            }
-            if (c < 0x20)
-               return r.fail("json: unescaped control character in string");
-            if (c < 0x80)
-            {
-               ++r.p;
-               continue;
-            }
-            std::uint32_t  cp = 0;
-            const unsigned n  = utf8_multibyte(
-               reinterpret_cast<const unsigned char*>(r.p),
-               reinterpret_cast<const unsigned char*>(r.end), cp);
-            if (n == 0)
-               return r.fail("json: string is not valid UTF-8");
-            if (nonchar && is_noncharacter(cp))
-               return r.fail("ijson: Unicode noncharacter in string");
-            r.p += n;
-         }
-      }
-
-      // Reads an object key. `key` views the input when the key has no
-      // escapes, else `scratch`.
-      inline bool read_key(reader& r, std::string& scratch,
-                           std::string_view& key, bool nonchar)
-      {
-         r.ws();
-         const char* start   = r.p;
-         bool        escaped = false;
-         if (!read_string(r, nullptr, nonchar, &escaped))
-            return false;
-         if (!escaped)
-         {
-            key = std::string_view{start + 1,
-                                   static_cast<std::size_t>(r.p - start - 2)};
-            return true;
-         }
-         r.p = start;
-         scratch.clear();
-         if (!read_string(r, &scratch, nonchar))
-            return false;
-         key = scratch;
-         return true;
-      }
-
-      // RFC 8259 number grammar; r.p at its first character.
-      inline bool skip_number(reader& r) noexcept
-      {
-         const char* p = r.p;
-         if (p < r.end && *p == '-')
-            ++p;
-         if (p >= r.end)
-            return r.fail("json: truncated number");
-         if (*p == '0')
-            ++p;
-         else if (*p >= '1' && *p <= '9')
-         {
-            ++p;
-            while (p < r.end && *p >= '0' && *p <= '9')
-               ++p;
-         }
-         else
-            return r.fail("json: number missing integer part");
-         if (p < r.end && *p == '.')
-         {
-            ++p;
-            const char* frac = p;
-            while (p < r.end && *p >= '0' && *p <= '9')
-               ++p;
-            if (p == frac)
-               return r.fail("json: number missing fractional digits");
-         }
-         if (p < r.end && (*p == 'e' || *p == 'E'))
-         {
-            ++p;
-            if (p < r.end && (*p == '+' || *p == '-'))
-               ++p;
-            const char* exp = p;
-            while (p < r.end && *p >= '0' && *p <= '9')
-               ++p;
-            if (p == exp)
-               return r.fail("json: number missing exponent digits");
-         }
-         r.p = p;
-         return true;
-      }
-
-      // Skips one well-formed JSON value of any shape (the value of an
-      // unknown key). `unique_keys` applies the I-JSON string rule
-      // (no noncharacters) inside it; repeated keys are not an error.
-      inline bool skip_value(reader& r, std::size_t depth, bool unique_keys)
-      {
-         r.ws();
-         if (r.p >= r.end)
-            return r.fail("json: unexpected end of input");
-         switch (*r.p)
-         {
-            case '{':
-            {
-               if (depth >= kMaxValidationDepth)
-                  return r.fail("json: max depth exceeded");
-               ++r.p;
-               if (r.take('}'))
-                  return true;
-               std::string scratch;
-               while (true)
-               {
-                  std::string_view key;
-                  if (!read_key(r, scratch, key, unique_keys))
-                     return false;
-                  if (!r.take(':'))
-                     return r.fail("json: expected ':' after object key");
-                  if (!skip_value(r, depth + 1, unique_keys))
-                     return false;
-                  if (r.take('}'))
-                     break;
-                  if (!r.take(','))
-                     return r.fail("json: expected ',' or '}' in object");
-               }
-               return true;
-            }
-            case '[':
-            {
-               if (depth >= kMaxValidationDepth)
-                  return r.fail("json: max depth exceeded");
-               ++r.p;
-               if (r.take(']'))
-                  return true;
-               while (true)
-               {
-                  if (!skip_value(r, depth + 1, unique_keys))
-                     return false;
-                  if (r.take(']'))
-                     return true;
-                  if (!r.take(','))
-                     return r.fail("json: expected ',' or ']' in array");
-               }
-            }
-            case '"':
-               return read_string(r, nullptr, unique_keys);
-            case 't':
-               return r.keyword("true") || r.fail("json: malformed keyword");
-            case 'f':
-               return r.keyword("false") || r.fail("json: malformed keyword");
-            case 'n':
-               return r.keyword("null") || r.fail("json: malformed keyword");
-            default:
-               if (*r.p == '-' || (*r.p >= '0' && *r.p <= '9'))
-                  return skip_number(r);
-               return r.fail("json: unexpected character at value start");
-         }
-      }
-
-      // Canonical decimal integer over exactly [b, e): 0 | -?[1-9][0-9]*.
+      // Canonical decimal integer over exactly `text`: 0 | -?[1-9][0-9]*,
+      // in range for I. One pass, exact over the whole 64-bit range.
       template <typename I>
-      bool parse_integer(const char* b, const char* e, I& v) noexcept
+      constexpr bool parse_integer(std::string_view text, I& v) noexcept
       {
-         const char* q = b;
-         if (q < e && *q == '-')
+         const char*       p = text.data();
+         const char* const e = p + text.size();
+         bool              negative = false;
+         if (p < e && *p == '-')
          {
             if (!std::is_signed_v<I>)
                return false;
-            ++q;
+            negative = true;
+            ++p;
          }
-         if (q >= e)
+         if (p >= e)
             return false;
-         if (*q == '0')
+         if (*p == '0')
          {
-            if (q != b || q + 1 != e)
+            // "0" alone; no leading zero and no "-0".
+            if (negative || p + 1 != e)
                return false;
+            v = 0;
+            return true;
          }
-         for (const char* d = q; d < e; ++d)
-            if (*d < '0' || *d > '9')
-               return false;
-         const auto res = std::from_chars(b, e, v);
-         return res.ec == std::errc{} && res.ptr == e;
-      }
-
-      template <typename Fmt, int_mode IM, typename I>
-      bool read_integer(reader& r, I* out) noexcept
-      {
-         constexpr bool as_string = int_as_string_v<Fmt, IM, I>;
-         r.ws();
-         if (r.p >= r.end)
-            return r.fail("json: unexpected end of input");
-         I v{};
-         if (*r.p == '"')
+         if constexpr (sizeof(I) > 8)
          {
-            if constexpr (!as_string)
-               return r.fail("json: expected a number, found a string");
-            const char* b = r.p + 1;
-            const char* q = b;
-            while (q < r.end && *q != '"')
-               ++q;
-            if (q >= r.end)
-               return r.fail("json: unterminated string");
-            if (!parse_integer(b, q, v))
-               return r.fail("json: integer string is not a canonical "
-                             "in-range decimal");
-            r.p = q + 1;
+            for (const char* d = p; d < e; ++d)
+               if (*d < '0' || *d > '9')
+                  return false;
+            const auto res = std::from_chars(text.data(), e, v);
+            return res.ec == std::errc{} && res.ptr == e;
          }
          else
          {
-            if constexpr (as_string && IM == int_mode::string)
-               return r.fail("json: expected an integer string");
-            const char* b = r.p;
-            const char* q = b;
-            if (q < r.end && *q == '-')
-               ++q;
-            while (q < r.end && *q >= '0' && *q <= '9')
-               ++q;
-            if (q == b)
-               return r.fail("json: expected an integer");
-            if (q < r.end && (*q == '.' || *q == 'e' || *q == 'E'))
-               return r.fail("json: integer has a fraction or exponent");
-            if (!parse_integer(b, q, v))
-               return r.fail("json: integer is not a canonical in-range "
-                             "decimal");
-            if constexpr (as_string)
+            const std::size_t digits = static_cast<std::size_t>(e - p);
+            if (digits > 20)
+               return false;
+            std::uint64_t acc = 0;
+            for (; p < e; ++p)
             {
-               // Natural ijson: a bare number is accepted only where a
-               // JavaScript number is exact.
-               constexpr I safe = static_cast<I>((std::uint64_t{1} << 53) - 1);
-               bool        ok   = v <= safe;
-               if constexpr (std::is_signed_v<I>)
-                  ok = ok && v >= -safe;
-               if (!ok)
-                  return r.fail("ijson: bare integer outside the safe range "
-                                "must be a string");
+               const unsigned d = static_cast<unsigned char>(*p) - unsigned{'0'};
+               if (d > 9)
+                  return false;
+               if (digits == 20 && (acc > 1844674407370955161ull ||
+                                    (acc == 1844674407370955161ull && d > 5)))
+                  return false;
+               acc = acc * 10 + d;
             }
-            r.p = q;
+            using U = std::make_unsigned_t<I>;
+            constexpr std::uint64_t max =
+               static_cast<std::uint64_t>(std::numeric_limits<I>::max());
+            if (negative)
+            {
+               if (acc > max + 1)
+                  return false;
+               v = static_cast<I>(static_cast<U>(0) - static_cast<U>(acc));
+            }
+            else
+            {
+               if (acc > max)
+                  return false;
+               v = static_cast<I>(acc);
+            }
+            return true;
+         }
+      }
+
+      template <typename Fmt, int_mode IM, typename I, typename C>
+      bool read_integer(typed_reader<C>& r, I* out)
+      {
+         constexpr bool   as_string = int_as_string_v<Fmt, IM, I>;
+         I                v{};
+         std::string_view text;
+         if constexpr (as_string)
+         {
+            json_kind kind;
+            if (!r.c.kind(kind))
+               return false;
+            if (kind == json_kind::string)
+            {
+               bool escaped = false;
+               if (!r.c.string(text, escaped))
+                  return false;
+               if (escaped || !parse_integer(text, v))
+                  return r.c.fail("json: integer string is not a canonical "
+                                  "in-range decimal");
+               if (out)
+                  *out = v;
+               return true;
+            }
+            if constexpr (IM == int_mode::string)
+               return r.c.fail("json: expected an integer string");
+         }
+         // The number is taken as its token text and parsed here, exactly:
+         // nothing is lost on the way through a double.
+         // parse_integer accepts a subset of the number grammar, so a
+         // cursor that can hand the token over unchecked need not check it.
+         if constexpr (requires { r.c.scalar(text); })
+         {
+            if (!r.c.scalar(text))
+               return false;
+         }
+         else if (!r.c.number(text))
+            return false;
+         if (!parse_integer(text, v))
+            return r.c.fail("json: integer is not a canonical in-range "
+                            "decimal");
+         if constexpr (as_string)
+         {
+            // Natural ijson: a bare number is accepted only where a
+            // JavaScript number is exact.
+            constexpr I safe = static_cast<I>((std::uint64_t{1} << 53) - 1);
+            bool        ok   = v <= safe;
+            if constexpr (std::is_signed_v<I>)
+               ok = ok && v >= -safe;
+            if (!ok)
+               return r.c.fail("ijson: bare integer outside the safe range "
+                               "must be a string");
          }
          if (out)
             *out = v;
          return true;
       }
 
-      template <typename F>
-      bool read_float(reader& r, F* out)
+      template <typename F, typename C>
+      bool read_float(typed_reader<C>& r, F* out)
       {
-         r.ws();
-         const char* b = r.p;
-         if (b >= r.end || !(*b == '-' || (*b >= '0' && *b <= '9')))
-            return r.fail("json: expected a number");
-         if (!skip_number(r))
+         if constexpr (std::is_same_v<F, double> && requires(double d) { r.c.real(d); })
+         {
+            // The syntax layer's own exact double parser.
+            double v = 0;
+            if (!r.c.real(v))
+               return false;
+            if (out)
+               *out = v;
+            return true;
+         }
+         std::string_view token;
+         if (!r.c.number(token))
             return false;
-         F          v{};
-         const auto res = std::from_chars(b, r.p, v);
+         const char* const b = token.data();
+         const char* const e = b + token.size();
+         F                 v{};
+         const auto        res = std::from_chars(b, e, v);
          if (res.ec == std::errc::result_out_of_range)
          {
             // Overflow is an error; underflow rounds toward zero.
-            const std::string token(b, r.p);
-            const double      wide = std::strtod(token.c_str(), nullptr);
+            const std::string copy(token);
+            const double      wide = std::strtod(copy.c_str(), nullptr);
             v = static_cast<F>(wide);
             if (!std::isfinite(wide) || !std::isfinite(v))
-            {
-               r.p = b;
-               return r.fail("json: number out of range");
-            }
+               return r.c.fail("json: number out of range");
          }
-         else if (res.ec != std::errc{} || res.ptr != r.p)
-         {
-            r.p = b;
-            return r.fail("json: malformed number");
-         }
+         else if (res.ec != std::errc{} || res.ptr != e)
+            return r.c.fail("json: malformed number");
          if (!std::isfinite(v))
-         {
-            r.p = b;
-            return r.fail("json: number out of range");
-         }
+            return r.c.fail("json: number out of range");
          if (out)
             *out = v;
          return true;
       }
 
-      // Hex string into a byte sequence.
-      template <typename T>
-      bool read_hex(reader& r, T* out)
-      {
-         r.ws();
-         if (r.p >= r.end || *r.p != '"')
-            return r.fail("ijson: expected a hex string");
-         const char* b = r.p + 1;
-         const char* q = b;
-         while (q < r.end && hex_digit(*q) >= 0)
-            ++q;
-         if (q >= r.end)
-            return r.fail("json: unterminated string");
-         if (*q != '"')
+      // Value of a hex digit, or -1.
+      inline constexpr auto hex_values = [] {
+         std::array<signed char, 256> t{};
+         for (auto& x : t)
+            x = -1;
+         for (int i = 0; i < 10; ++i)
+            t['0' + i] = static_cast<signed char>(i);
+         for (int i = 0; i < 6; ++i)
          {
-            r.p = q;
-            return r.fail("ijson: non-hex character in hex string");
+            t['a' + i] = static_cast<signed char>(10 + i);
+            t['A' + i] = static_cast<signed char>(10 + i);
          }
-         const std::size_t digits = static_cast<std::size_t>(q - b);
-         if (digits & 1)
-            return r.fail("ijson: odd-length hex string");
-         const std::size_t n = digits / 2;
+         return t;
+      }();
+
+      // Hex string into a byte sequence.
+      template <typename T, typename C>
+      bool read_hex(typed_reader<C>& r, T* out)
+      {
+         json_kind kind;
+         if (!r.c.kind(kind))
+            return false;
+         if (kind != json_kind::string)
+            return r.c.fail("ijson: expected a hex string");
+         std::string_view text;
+         bool             escaped = false;
+         if (!r.c.string(text, escaped))
+            return false;
+         if (escaped)
+            return r.c.fail("ijson: non-hex character in hex string");
+         int bad = 0;
+         for (const char ch : text)
+            bad |= hex_values[static_cast<unsigned char>(ch)];
+         if (bad < 0)
+            return r.c.fail("ijson: non-hex character in hex string");
+         if (text.size() & 1)
+            return r.c.fail("ijson: odd-length hex string");
+         const std::size_t n = text.size() / 2;
          if constexpr (is_std_array<T>::value)
          {
             if (n != std::tuple_size_v<T>)
-               return r.fail("ijson: hex string has the wrong length");
+               return r.c.fail("ijson: hex string has the wrong length");
          }
          if (out)
          {
@@ -1135,46 +1054,57 @@ namespace psio {
             auto* dst = reinterpret_cast<unsigned char*>(out->data());
             for (std::size_t i = 0; i < n; ++i)
                dst[i] = static_cast<unsigned char>(
-                  (hex_digit(b[2 * i]) << 4) | hex_digit(b[2 * i + 1]));
+                  (hex_values[static_cast<unsigned char>(text[2 * i])] << 4) |
+                  hex_values[static_cast<unsigned char>(text[2 * i + 1])]);
          }
-         r.p = q + 1;
          return true;
       }
 
-      template <typename Fmt, int_mode IM, typename T>
-      bool read_value(reader& r, T* out, std::size_t depth);
+      // A text adapter's payload: a JSON string checked by the adapter.
+      template <typename Fmt, typename Proj, typename F, typename C>
+      bool read_adapted(typed_reader<C>& r, F* out)
+      {
+         std::string_view payload;
+         bool             escaped = false;
+         if (!r.c.string(payload, escaped))
+            return false;
+         const std::span<const char> text{payload};
+         if (auto st = Proj::validate(text); !st.ok())
+            return r.c.fail(st.error().what);
+         if (out)
+            *out = Proj::decode(text);
+         return true;
+      }
+
+      template <typename Fmt, int_mode IM, typename T, typename C>
+      bool read_value(typed_reader<C>& r, T* out);
 
       // "[" e0 "," e1 ... "]" with exactly N elements read by `element(i)`.
-      template <typename Element>
-      bool read_fixed_array(reader& r, std::size_t n, std::size_t depth,
-                            Element&& element)
+      template <typename C, typename Element>
+      bool read_fixed_array(typed_reader<C>& r, std::size_t n, Element&& element)
       {
-         if (!r.take('['))
-            return r.fail("json: expected '['");
-         if (depth >= kMaxValidationDepth)
-            return r.fail("json: max depth exceeded");
+         if (!r.c.begin_array())
+            return false;
+         bool has = false;
          for (std::size_t i = 0; i < n; ++i)
          {
-            if (i && !r.take(','))
-               return r.fail("json: array has too few elements");
-            if (!i)
-            {
-               r.ws();
-               if (r.p < r.end && *r.p == ']')
-                  return r.fail("json: array has too few elements");
-            }
+            if (!r.c.next_element(has))
+               return false;
+            if (!has)
+               return r.c.fail("json: array has too few elements");
             if (!element(i))
                return false;
          }
-         if (!r.take(']'))
-            return r.fail("json: array has too many elements or is unterminated");
+         if (!r.c.next_element(has))
+            return false;
+         if (has)
+            return r.c.fail("json: array has too many elements");
          return true;
       }
 
-      // Reads the value of member I of record T (the reader is at it).
-      // `depth` is the record's own depth.
-      template <typename Fmt, typename T, std::size_t I>
-      bool read_member(reader& r, T* out, std::size_t depth)
+      // Reads the value of member I of record T (the cursor is at it).
+      template <typename Fmt, typename T, std::size_t I, typename C>
+      bool read_member(typed_reader<C>& r, T* out)
       {
          using R = ::psio::reflect<T>;
          using F = typename R::template member_type<I>;
@@ -1185,18 +1115,8 @@ namespace psio {
          if constexpr (::psio::has_as_override_v<eff>)
          {
             // Member-level presentation override (as<Tag>).
-            using Tag  = ::psio::adapter_tag_of_t<eff>;
-            using Proj = ::psio::adapter<std::remove_cvref_t<F>, Tag>;
-            std::string payload;
-            r.ws();
-            if (!read_string(r, &payload, Fmt::i_json))
-               return false;
-            const std::span<const char> text{payload};
-            if (auto st = Proj::validate(text); !st.ok())
-               return r.fail(st.error().what);
-            if (fptr)
-               *fptr = Proj::decode(text);
-            return true;
+            using Tag = ::psio::adapter_tag_of_t<eff>;
+            return read_adapted<Fmt, ::psio::adapter<std::remove_cvref_t<F>, Tag>>(r, fptr);
          }
          else
          {
@@ -1208,66 +1128,112 @@ namespace psio {
                // even when only validating.
                F  scratch{};
                F* dst = fptr ? fptr : &scratch;
-               r.ws();
-               const char* value_at = r.p;
-               if (!read_value<Fmt, mode, F>(r, dst, depth + 1))
+               if (!read_value<Fmt, mode, F>(r, dst))
                   return false;
                if (!::psio::detail::length_bound_ok(
                       *dst, std::get<::psio::length_bound>(eff_for::value)))
-               {
-                  r.p = value_at;
-                  return r.fail("json: member length_bound violated");
-               }
+                  return r.c.fail("json: member length_bound violated");
                return true;
             }
             else
-               return read_value<Fmt, mode, F>(r, fptr, depth + 1);
+               return read_value<Fmt, mode, F>(r, fptr);
          }
       }
 
       // Member readers by index, for keys that arrive out of order.
-      template <typename Fmt, typename T>
+      template <typename Fmt, typename T, typename C>
       struct member_readers
       {
-         using fn = bool (*)(reader&, T*, std::size_t);
+         using fn = bool (*)(typed_reader<C>&, T*);
          static constexpr auto table =
             []<std::size_t... Is>(std::index_sequence<Is...>) {
-               return std::array<fn, sizeof...(Is)>{&read_member<Fmt, T, Is>...};
+               return std::array<fn, sizeof...(Is)>{&read_member<Fmt, T, Is, C>...};
             }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
       };
 
-      template <typename Fmt, int_mode IM, typename T>
-      bool read_value(reader& r, T* out, std::size_t depth)
+      template <typename Fmt, typename T, typename C>
+      bool read_record(typed_reader<C>& r, T* out)
+      {
+         using R = ::psio::reflect<T>;
+         constexpr std::size_t N = R::member_count;
+         if (!r.c.begin_object())
+            return false;
+         // `seen` only records which members were given, to find the
+         // missing ones; a repeated key is simply read again.
+         std::array<bool, N + 1> seen{};
+         std::string_view        key;
+         bool                    more = false;
+         if (!r.c.next_field(more, key))
+            return false;
+         // Expected order first: writers emit members in declaration order,
+         // so each key is compared with the next member's name (a compare
+         // against a constant) before any lookup. A member the text leaves
+         // out costs one failed compare.
+         bool ok = true;
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            (void)((!more || key != R::template member_name<Is>
+                       ? true
+                       : (seen[Is] = true,
+                          ok = read_member<Fmt, T, Is>(r, out) &&
+                               r.c.next_field(more, key))) &&
+                   ...);
+         }(std::make_index_sequence<N>{});
+         if (!ok)
+            return false;
+         // Whatever is left is out of order, repeated or unknown: one
+         // perfect-hash lookup per key (reflect<T>::find_index).
+         while (more)
+         {
+            const std::size_t index = R::find_index(key);
+            if (index < N)
+            {
+               seen[index] = true;
+               if (!member_readers<Fmt, T, C>::table[index](r, out))
+                  return false;
+            }
+            else if (!r.c.skip())
+               return false;  // unknown key: its value is skipped
+            if (!r.c.next_field(more, key))
+               return false;
+         }
+         // A missing std::optional member is empty; any other missing
+         // member is an error.
+         bool complete = true;
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            (
+               ([&]
+                {
+                   if (seen[Is])
+                      return;
+                   using F = typename R::template member_type<Is>;
+                   if constexpr (is_std_optional<F>::value)
+                   {
+                      if (out)
+                         (out->*(R::template member_pointer<Is>)).reset();
+                   }
+                   else if (!r.lenient_missing)
+                      complete = false;
+                }()),
+               ...);
+         }(std::make_index_sequence<N>{});
+         if (!complete)
+            return r.c.fail("json: missing required member");
+         return true;
+      }
+
+      template <typename Fmt, int_mode IM, typename T, typename C>
+      bool read_value(typed_reader<C>& r, T* out)
       {
          if constexpr (::psio::format_should_dispatch_adapter_v<Fmt, T>)
-         {
-            using Proj = ::psio::adapter<std::remove_cvref_t<T>,
-                                         ::psio::text_category>;
-            std::string payload;
-            r.ws();
-            if (!read_string(r, &payload, Fmt::i_json))
-               return false;
-            const std::span<const char> text{payload};
-            if (auto st = Proj::validate(text); !st.ok())
-               return r.fail(st.error().what);
-            if (out)
-               *out = Proj::decode(text);
-            return true;
-         }
+            return read_adapted<Fmt, ::psio::adapter<std::remove_cvref_t<T>,
+                                                     ::psio::text_category>>(r, out);
          else if constexpr (std::is_same_v<T, bool>)
          {
-            r.ws();
-            if (r.keyword("true"))
-            {
-               if (out) *out = true;
-               return true;
-            }
-            if (r.keyword("false"))
-            {
-               if (out) *out = false;
-               return true;
-            }
-            return r.fail("json: expected true or false");
+            bool v = false;
+            if (!r.c.boolean(v))
+               return false;
+            if (out) *out = v;
+            return true;
          }
          else if constexpr (std::is_same_v<T, std::byte>)
          {
@@ -1291,23 +1257,22 @@ namespace psio {
             return read_float<T>(r, out);
          else if constexpr (std::is_same_v<T, std::string>)
          {
-            r.ws();
-            if (out) out->clear();
-            return read_string(r, out, Fmt::i_json);
+            std::string_view text;
+            bool             escaped = false;
+            if (!r.c.string(text, escaped))
+               return false;
+            if (out) out->assign(text);
+            return true;
          }
          else if constexpr (is_utf8_string<T>::value)
          {
-            std::string text;
-            r.ws();
-            const char* at = r.p;
-            if (!read_string(r, &text, Fmt::i_json))
+            std::string_view text;
+            bool             escaped = false;
+            if (!r.c.string(text, escaped))
                return false;
             if (text.size() > T::max_size_value)
-            {
-               r.p = at;
-               return r.fail("json: string exceeds its bound");
-            }
-            if (out) *out = T{std::move(text)};
+               return r.c.fail("json: string exceeds its bound");
+            if (out) *out = T{std::string(text)};
             return true;
          }
          else if constexpr (Fmt::i_json && byte_seq<T>::value)
@@ -1318,31 +1283,23 @@ namespace psio {
                return read_hex(r, out);
          }
          else if constexpr (is_byte_array<T>::value)
-            return read_value<Fmt, IM>(r, out ? &out->storage() : nullptr,
-                                       depth);
+            return read_value<Fmt, IM>(r, out ? &out->storage() : nullptr);
          else if constexpr (is_std_array<T>::value)
          {
             using E = typename T::value_type;
-            return read_fixed_array(
-               r, std::tuple_size_v<T>, depth, [&](std::size_t i) {
-                  return read_value<Fmt, IM, E>(r, out ? &(*out)[i] : nullptr,
-                                                depth + 1);
-               });
+            return read_fixed_array(r, std::tuple_size_v<T>, [&](std::size_t i) {
+               return read_value<Fmt, IM, E>(r, out ? &(*out)[i] : nullptr);
+            });
          }
          else if constexpr (Fmt::i_json && is_bounded_bytes<T>::value)
          {
             // Written as one hex string (its storage is a byte sequence),
             // so it is read as one.
             std::vector<typename T::value_type> bytes;
-            r.ws();
-            const char* at = r.p;
             if (!read_hex(r, &bytes))
                return false;
             if (bytes.size() > T::max_size_value)
-            {
-               r.p = at;
-               return r.fail("json: array exceeds its bound");
-            }
+               return r.c.fail("json: array exceeds its bound");
             if (out) out->storage() = std::move(bytes);
             return true;
          }
@@ -1357,52 +1314,57 @@ namespace psio {
             else
                dst = out;
             if (dst) dst->clear();
-            if (!r.take('['))
-               return r.fail("json: expected '['");
-            if (depth >= kMaxValidationDepth)
-               return r.fail("json: max depth exceeded");
-            if (r.take(']'))
-               return true;
+            if (!r.c.begin_array())
+               return false;
             std::size_t count = 0;
             while (true)
             {
+               bool has = false;
+               if (!r.c.next_element(has))
+                  return false;
+               if (!has)
+                  return true;
                if constexpr (is_bounded<T>::value)
                   if (count >= T::max_size_value)
-                     return r.fail("json: array exceeds its bound");
+                     return r.c.fail("json: array exceeds its bound");
                ++count;
                if (dst)
                {
-                  E element{};
-                  if (!read_value<Fmt, IM, E>(r, &element, depth + 1))
-                     return false;
-                  dst->push_back(std::move(element));
+                  if constexpr (std::is_same_v<E, bool>)
+                  {
+                     bool element = false;
+                     if (!read_value<Fmt, IM, bool>(r, &element))
+                        return false;
+                     dst->push_back(element);
+                  }
+                  else
+                  {
+                     // Read in place: no move of each element.
+                     if (!read_value<Fmt, IM, E>(r, &dst->emplace_back()))
+                        return false;
+                  }
                }
-               else if (!read_value<Fmt, IM, E>(r, nullptr, depth + 1))
+               else if (!read_value<Fmt, IM, E>(r, nullptr))
                   return false;
-               if (r.take(']'))
-                  return true;
-               if (!r.take(','))
-                  return r.fail("json: expected ',' or ']' in array");
             }
          }
          else if constexpr (is_std_optional<T>::value)
          {
             using V = typename T::value_type;
-            r.ws();
-            if (r.p < r.end && *r.p == 'n')
+            json_kind kind;
+            if (!r.c.kind(kind))
+               return false;
+            if (kind == json_kind::null)
             {
-               if (!r.keyword("null"))
-                  return r.fail("json: malformed keyword");
+               if (!r.c.null())
+                  return false;
                if (out) out->reset();
                return true;
             }
             if (!out)
-               return read_value<Fmt, IM, V>(r, nullptr, depth);
-            V value{};
-            if (!read_value<Fmt, IM, V>(r, &value, depth))
-               return false;
-            *out = std::move(value);
-            return true;
+               return read_value<Fmt, IM, V>(r, nullptr);
+            // A fresh value, built in place.
+            return read_value<Fmt, IM, V>(r, &out->emplace());
          }
          else if constexpr (is_std_variant<T>::value)
          {
@@ -1415,10 +1377,10 @@ namespace psio {
                                    using A = std::variant_alternative_t<Is, T>;
                                    if (!out)
                                       return read_value<Fmt, int_mode::natural, A>(
-                                         r, nullptr, depth + 1);
+                                         r, nullptr);
                                    A value{};
                                    if (!read_value<Fmt, int_mode::natural, A>(
-                                          r, &value, depth + 1))
+                                          r, &value))
                                       return false;
                                    out->template emplace<Is>(std::move(value));
                                    return true;
@@ -1429,73 +1391,70 @@ namespace psio {
                }(std::make_index_sequence<N>{});
                return ok;
             };
+            bool has = false;
             if constexpr (Fmt::i_json)
             {
                static_assert(alt_names_unique<T>(),
                              "psio::ijson: variant alternatives must have "
                              "distinct type names");
-               if (!r.take('{'))
-                  return r.fail("ijson: expected a variant object");
-               if (depth >= kMaxValidationDepth)
-                  return r.fail("json: max depth exceeded");
-               std::string      scratch;
+               json_kind kind;
+               if (!r.c.kind(kind))
+                  return false;
+               if (kind != json_kind::object)
+                  return r.c.fail("ijson: expected a variant object");
                std::string_view key;
-               const char*      at = (r.ws(), r.p);
-               if (at < r.end && *at == '}')
-                  return r.fail("ijson: variant object must have one key");
-               if (!read_key(r, scratch, key, true))
+               if (!r.c.begin_object() || !r.c.next_field(has, key))
                   return false;
-               std::size_t index = N;
-               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                  (void)((key == alt_name<T, Is>() ? (index = Is, true)
-                                                   : false) ||
-                         ...);
-               }(std::make_index_sequence<N>{});
+               if (!has)
+                  return r.c.fail("ijson: variant object must have one key");
+               // Perfect hash over the alternative names, one compare.
+               const std::size_t index =
+                  ::psio::detail::name_table_for<alt_names<T>>.find(key);
                if (index == N)
-               {
-                  r.p = at;
-                  return r.fail("ijson: unknown variant alternative");
-               }
-               if (!r.take(':'))
-                  return r.fail("json: expected ':' after object key");
-               if (!alternative(index))
+                  return r.c.fail("ijson: unknown variant alternative");
+               if (!alternative(index) || !r.c.next_field(has, key))
                   return false;
-               if (!r.take('}'))
-                  return r.fail("ijson: variant object must have one key");
+               if (has)
+                  return r.c.fail("ijson: variant object must have one key");
                return true;
             }
             else
             {
-               if (!r.take('['))
-                  return r.fail("json: expected a [index, value] variant");
-               if (depth >= kMaxValidationDepth)
-                  return r.fail("json: max depth exceeded");
+               json_kind kind;
+               if (!r.c.kind(kind))
+                  return false;
+               if (kind != json_kind::array)
+                  return r.c.fail("json: expected a [index, value] variant");
+               if (!r.c.begin_array() || !r.c.next_element(has))
+                  return false;
+               if (!has)
+                  return r.c.fail("json: expected a [index, value] variant");
                std::uint32_t index = 0;
-               if (!read_integer<Fmt, int_mode::natural, std::uint32_t>(
-                      r, &index))
+               if (!read_integer<Fmt, int_mode::natural, std::uint32_t>(r, &index))
                   return false;
                if (index >= N)
-                  return r.fail("json: variant index out of range");
-               if (!r.take(','))
-                  return r.fail("json: expected ',' in variant");
-               if (!alternative(index))
+                  return r.c.fail("json: variant index out of range");
+               if (!r.c.next_element(has))
                   return false;
-               if (!r.take(']'))
-                  return r.fail("json: expected ']' after variant value");
+               if (!has)
+                  return r.c.fail("json: expected ',' in variant");
+               if (!alternative(index) || !r.c.next_element(has))
+                  return false;
+               if (has)
+                  return r.c.fail("json: expected ']' after variant value");
                return true;
             }
          }
          else if constexpr (is_std_tuple<T>::value)
          {
             constexpr std::size_t N = std::tuple_size_v<T>;
-            return read_fixed_array(r, N, depth, [&](std::size_t i) {
+            return read_fixed_array(r, N, [&](std::size_t i) {
                bool ok = false;
                [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                   (void)((i == Is
                              ? (ok = read_value<Fmt, int_mode::natural,
                                                 std::tuple_element_t<Is, T>>(
-                                   r, out ? &std::get<Is>(*out) : nullptr,
-                                   depth + 1),
+                                   r, out ? &std::get<Is>(*out) : nullptr),
                                 true)
                              : false) ||
                          ...);
@@ -1504,97 +1463,7 @@ namespace psio {
             });
          }
          else if constexpr (Record<T>)
-         {
-            using R = ::psio::reflect<T>;
-            constexpr std::size_t N = R::member_count;
-            if (!r.take('{'))
-               return r.fail("json: expected '{'");
-            if (depth >= kMaxValidationDepth)
-               return r.fail("json: max depth exceeded");
-            // `seen` only records which members were given, to find the
-            // missing ones; a repeated key is simply read again.
-            std::array<bool, N + 1> seen{};
-            std::string             scratch;
-            if (!r.take('}'))
-            {
-               std::string_view key;
-               bool             more = true;
-               // Reads the member at `key`'s value position, then the
-               // separator and the next key (or the closing brace).
-               auto advance = [&]() -> bool {
-                  if (r.take('}'))
-                  {
-                     more = false;
-                     return true;
-                  }
-                  if (!r.take(','))
-                     return r.fail("json: expected ',' or '}' in object");
-                  if (!read_key(r, scratch, key, Fmt::i_json))
-                     return false;
-                  if (!r.take(':'))
-                     return r.fail("json: expected ':' after object key");
-                  return true;
-               };
-               if (!read_key(r, scratch, key, Fmt::i_json))
-                  return false;
-               if (!r.take(':'))
-                  return r.fail("json: expected ':' after object key");
-               // Expected order first: writers emit members in declaration
-               // order, so each key is compared with the next member's name
-               // (a compare against a constant) before any lookup. A member
-               // the text leaves out costs one failed compare.
-               bool ok = true;
-               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                  (void)((!more || key != R::template member_name<Is>
-                             ? true
-                             : (seen[Is] = true,
-                                ok = read_member<Fmt, T, Is>(r, out, depth) &&
-                                     advance())) &&
-                         ...);
-               }(std::make_index_sequence<N>{});
-               if (!ok)
-                  return false;
-               // Whatever is left is out of order, repeated or unknown: one
-               // perfect-hash lookup per key (reflect<T>::find_index).
-               while (more)
-               {
-                  const std::size_t index = R::find_index(key);
-                  if (index < N)
-                  {
-                     seen[index] = true;
-                     if (!member_readers<Fmt, T>::table[index](r, out, depth))
-                        return false;
-                  }
-                  else if (!skip_value(r, depth + 1, Fmt::i_json))
-                     return false;  // unknown key: its value is skipped
-                  if (!advance())
-                     return false;
-               }
-            }
-            // A missing std::optional member is empty; any other missing
-            // member is an error.
-            bool complete = true;
-            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-               (
-                  ([&]
-                   {
-                      if (seen[Is])
-                         return;
-                      using F = typename R::template member_type<Is>;
-                      if constexpr (is_std_optional<F>::value)
-                      {
-                         if (out)
-                            (out->*(R::template member_pointer<Is>)).reset();
-                      }
-                      else if (!r.lenient_missing)
-                         complete = false;
-                   }()),
-                  ...);
-            }(std::make_index_sequence<N>{});
-            if (!complete)
-               return r.fail("json: missing required member");
-            return true;
-         }
+            return read_record<Fmt, T>(r, out);
          else
          {
             static_assert(sizeof(T) == 0,
@@ -1602,31 +1471,62 @@ namespace psio {
          }
       }
 
-      // Reads exactly one value of T spanning the whole text.
+      // Reads exactly one value of T, which must be the whole document.
+      template <typename Fmt, typename T, typename C>
+      codec_status read_with(C& cursor, T* out, bool lenient_missing)
+      {
+         typed_reader<C> r{cursor, lenient_missing};
+         if (read_value<Fmt, int_mode::natural, T>(r, out))
+            (void)cursor.finish();
+         return cursor.status(Fmt::name);
+      }
+
+      // Reads `bytes` as one T through the syntax layer `parser` selects.
       template <typename Fmt, typename T>
       codec_status read_document(std::span<const char> bytes, T* out,
-                                 bool lenient_missing)
+                                 bool        lenient_missing,
+                                 json_parser parser = json_parser::automatic)
       {
-         reader r{bytes.data(), bytes.data(), bytes.data() + bytes.size(),
-                  lenient_missing};
-         bool ok = true;
-         if (bytes.empty())
-            ok = r.fail("json: empty input");
-         else
+#if PSIO_HAVE_SIMDJSON
+         if (use_simdjson(bytes, parser))
          {
-            ok = read_value<Fmt, int_mode::natural, T>(r, out, 0);
-            if (ok)
+            if (parser == json_parser::simdjson)
             {
-               r.ws();
-               if (r.p != r.end)
-                  ok = r.fail("json: trailing bytes after value");
+               simdjson_cursor cursor(bytes, Fmt::i_json);
+               return read_with<Fmt, T>(cursor, out, lenient_missing);
             }
+            simdjson_index_cursor cursor(bytes, Fmt::i_json);
+            return read_with<Fmt, T>(cursor, out, lenient_missing);
          }
-         if (ok)
-            return codec_ok();
-         return codec_fail(r.err,
-                           static_cast<std::uint32_t>(r.err_at - r.begin),
-                           Fmt::name);
+#else
+         (void)parser;
+#endif
+         json_text_cursor cursor(bytes, Fmt::i_json);
+         return read_with<Fmt, T>(cursor, out, lenient_missing);
+      }
+
+      // `text` has at least json_padding readable bytes after it: simdjson
+      // parses it in place, with no copy.
+      template <typename Fmt, typename T>
+      codec_status read_document(padded_json text, T* out, bool lenient_missing,
+                                 json_parser parser = json_parser::automatic)
+      {
+#if PSIO_HAVE_SIMDJSON
+         if (use_simdjson(text.text, parser))
+         {
+            if (parser == json_parser::simdjson)
+            {
+               simdjson_cursor cursor(text, Fmt::i_json);
+               return read_with<Fmt, T>(cursor, out, lenient_missing);
+            }
+            simdjson_index_cursor cursor(text, Fmt::i_json);
+            return read_with<Fmt, T>(cursor, out, lenient_missing);
+         }
+#else
+         (void)parser;
+#endif
+         json_text_cursor cursor(text.text, Fmt::i_json);
+         return read_with<Fmt, T>(cursor, out, lenient_missing);
       }
 
       // ── Tag operations shared by psio::json and psio::ijson ──────────────
@@ -1646,7 +1546,7 @@ namespace psio {
                                 std::string& sink)
          {
             writer w{sink, Derived::name};
-            encode_value<Derived, int_mode::natural>(v, w);
+            encode_document<Derived>(v, w);
          }
 
          template <typename T>
@@ -1655,7 +1555,7 @@ namespace psio {
          {
             std::string out;
             writer      w{out, Derived::name};
-            encode_value<Derived, int_mode::natural>(v, w);
+            encode_document<Derived>(v, w);
             return out;
          }
 
@@ -1682,7 +1582,7 @@ namespace psio {
          {
             std::string tmp;
             writer      w{tmp, Derived::name};
-            encode_value<Derived, int_mode::natural>(v, w);
+            encode_document<Derived>(v, w);
             return tmp.size();
          }
 
@@ -1754,14 +1654,39 @@ namespace psio {
    // Usable with exceptions disabled. Neither throws or aborts on bad
    // input or on a value without a JSON text.
 
-   // Reads `text` as one T. On failure `out` is unspecified.
+   // Reads `text` as one T. On failure `out` is unspecified. `parser`
+   // selects the syntax layer (json_cursor.hpp); every choice accepts the
+   // same texts and reads the same value.
    template <detail::json_impl::json_family Fmt, typename T>
-   [[nodiscard]] codec_status decode_json_checked(Fmt,
-                                                  std::span<const char> text,
-                                                  T& out)
+   [[nodiscard]] codec_status decode_json_checked(
+      Fmt, std::span<const char> text, T& out, json_parser parser = json_parser::automatic)
    {
       out = T{};
-      return detail::json_impl::read_document<Fmt, T>(text, &out, false);
+      return detail::json_impl::read_document<Fmt, T>(text, &out, false, parser);
+   }
+
+   // The same for text the caller has padded (padded_json): simdjson then
+   // parses it in place instead of copying it into a padded buffer.
+   template <detail::json_impl::json_family Fmt, typename T>
+   [[nodiscard]] codec_status decode_json_checked(
+      Fmt, padded_json text, T& out, json_parser parser = json_parser::automatic)
+   {
+      out = T{};
+      return detail::json_impl::read_document<Fmt, T>(text, &out, false, parser);
+   }
+
+   // Checks that `text` is one T without building it.
+   template <typename T, detail::json_impl::json_family Fmt>
+   [[nodiscard]] codec_status validate_json(Fmt, std::span<const char> text,
+                                            json_parser parser = json_parser::automatic)
+   {
+      return detail::json_impl::read_document<Fmt, T>(text, nullptr, false, parser);
+   }
+   template <typename T, detail::json_impl::json_family Fmt>
+   [[nodiscard]] codec_status validate_json(Fmt, padded_json text,
+                                            json_parser parser = json_parser::automatic)
+   {
+      return detail::json_impl::read_document<Fmt, T>(text, nullptr, false, parser);
    }
 
    // Appends the text of `value` to `out`. On failure `out` is restored.
@@ -1771,8 +1696,7 @@ namespace psio {
    {
       const std::size_t           start = out.size();
       detail::json_impl::writer w{out, Fmt::name, false};
-      detail::json_impl::encode_value<Fmt, detail::json_impl::int_mode::natural>(
-         value, w);
+      detail::json_impl::encode_document<Fmt>(value, w);
       if (w.err.empty())
          return codec_ok();
       out.resize(start);

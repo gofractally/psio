@@ -8,10 +8,10 @@
 //   1. Syntax (this header). A cursor owns everything about the text:
 //      whitespace, punctuation, string escapes and UTF-8, the RFC 8259
 //      number grammar, nesting depth, skipping a value. It hands out events.
-//   2. Types (pssz_ir_json.hpp for the Schema IR). A walk that checks the
-//      cursor's events against the type being read: member names, arity,
-//      integer ranges and forms, hex digits, variant names, length bounds.
-//      It never looks at the text itself.
+//   2. Types (json.hpp for a C++ type, pssz_ir_json.hpp for the Schema IR). A
+//      walk that checks the cursor's events against the type being read:
+//      member names, arity, integer ranges and forms, hex digits, variant
+//      names, length bounds. It never looks at the text itself.
 //
 // A cursor is forward-only and single-pass: values are consumed in document
 // order, exactly once, and a string view is valid only until the next call.
@@ -45,11 +45,32 @@
 //   bool fail(std::string_view what)  a type-layer error at this position
 //   codec_status status(std::string_view format) const
 //
-// `json_text_cursor` implements it over the hand-written reader of json.hpp.
+// Optional fast paths. A cursor may also offer either of these; a type walk
+// uses them when present (`requires`) and the required events otherwise.
+// Neither changes what is accepted.
+//
+//   bool scalar(std::string_view& token)
+//                                     for a value that starts like a number:
+//                                     its characters up to the next
+//                                     whitespace or structural character,
+//                                     NOT checked against the number
+//                                     grammar. For a caller that parses the
+//                                     token itself and thereby validates it
+//                                     (an integer is `0 | -?[1-9][0-9]*`,
+//                                     stricter than the grammar).
+//   bool real(double& value)          a number as its correctly rounded
+//                                     double: the RFC 8259 grammar, an
+//                                     error when out of range
+//
+// Three cursors implement it: `json_text_cursor` (here) over the hand-written
+// lexer of detail/json_syntax.hpp, and, when PSIO_HAVE_SIMDJSON,
+// `simdjson_index_cursor` (simdjson's stage 1 plus a walk over its token
+// index) and `simdjson_cursor` (simdjson's on-demand API), both in
+// json_simdjson.hpp.
 
+#include <psio/detail/json_syntax.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/error.hpp>
-#include <psio/json.hpp>
 
 #include <array>
 #include <concepts>
@@ -70,6 +91,53 @@ namespace psio
       null,
    };
 
+   // Which syntax layer a typed read runs on.
+   //
+   //   automatic   the fastest measured for the document: with simdjson
+   //               built in (PSIO_HAVE_SIMDJSON), simdjson_index_cursor for
+   //               a document of at least 64 bytes whose root is an object
+   //               or array; the hand-written lexer otherwise (small
+   //               documents, root scalars, builds without simdjson)
+   //   text        the hand-written lexer (json_text_cursor), always
+   //   simdjson    simdjson's on-demand parser (simdjson_cursor) whenever it
+   //               can take the document: it is built in and the root is an
+   //               object or array; else the lexer
+   //   simdjson_index
+   //               simdjson's stage 1 (SIMD token index and UTF-8 check)
+   //               with PSIO's own walk over the index
+   //               (simdjson_index_cursor); same conditions
+   //
+   // The choice never changes what is accepted or what is read.
+   enum class json_parser : std::uint8_t
+   {
+      automatic,
+      text,
+      simdjson,
+      simdjson_index,
+   };
+
+   // Readable bytes simdjson needs after the last byte of a document.
+   inline constexpr std::size_t json_padding = 64;
+
+   // JSON text followed by at least `json_padding` readable bytes (their
+   // content does not matter). Handing a document over as `padded_json`
+   // lets the simdjson layer parse it in place; a plain span is copied once
+   // into a padded buffer first.
+   struct padded_json
+   {
+      std::span<const char> text;
+
+      // The caller vouches for the padding.
+      static padded_json assume(std::span<const char> text) noexcept { return {text}; }
+      // Grows `s`'s capacity (not its size) to cover the padding.
+      static padded_json of(std::string& s)
+      {
+         if (s.capacity() - s.size() < json_padding)
+            s.reserve(s.size() + json_padding);
+         return {std::span<const char>{s.data(), s.size()}};
+      }
+   };
+
    template <typename C>
    concept JsonCursor = requires(C& c, const C& cc, json_kind& kind, bool& flag,
                                  std::string_view& text) {
@@ -88,7 +156,7 @@ namespace psio
       { cc.status(std::string_view{}) } -> std::same_as<codec_status>;
    };
 
-   // The hand-written reader of json.hpp as a cursor. `ijson` applies the
+   // The hand-written lexer as a cursor. `ijson` applies the
    // I-JSON string rule (no Unicode noncharacters), also inside skipped
    // values. Nesting deeper than kMaxValidationDepth is an error. It never
    // throws or aborts and allocates only for strings that carry escapes.
@@ -227,6 +295,24 @@ namespace psio
          if (!detail::json_impl::skip_number(r_))
             return false;
          token = std::string_view{begin, static_cast<std::size_t>(r_.p - begin)};
+         return true;
+      }
+
+      // Optional fast path: the token's characters, unchecked.
+      bool scalar(std::string_view& token)
+      {
+         if (failed())
+            return false;
+         r_.ws();
+         const char* const begin = r_.p;
+         if (begin >= r_.end || !(*begin == '-' || (*begin >= '0' && *begin <= '9')))
+            return r_.fail("json: expected a number");
+         const char* p = begin + 1;
+         while (p < r_.end && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\n' &&
+                *p != '\t' && *p != '\r')
+            ++p;
+         r_.p  = p;
+         token = std::string_view{begin, static_cast<std::size_t>(p - begin)};
          return true;
       }
 

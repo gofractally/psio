@@ -97,7 +97,7 @@ namespace
                  R"({"zz":[1,{"a":2}],"a":1,"aa":null,"c":"x","":0,"e":[],"ff":"f","f":6,"g":{}})") ==
               Rec{1, {}, "x", {}, {}, 6});
       // An escaped spelling of a member name is that member.
-      REQUIRE(read<Fmt, Rec>(R"({"a":1,"c":"x","e":[],"f":6})") ==
+      REQUIRE(read<Fmt, Rec>(R"({"\u0061":1,"c":"x","e":[],"\u0066":6})") ==
               Rec{1, {}, "x", {}, {}, 6});
 
       // Repeated keys: single pass, the last one wins, every occurrence
@@ -190,7 +190,7 @@ TEST_CASE("ijson: variant alternatives by name", "[ijson][lookup]")
    REQUIRE(read<F, Holder>(R"({"v":{"bool":true}})") == Holder{Alt{true}});
    REQUIRE(read<F, Holder>(R"({"v":{"int64":-5}})") == Holder{Alt{std::int64_t{-5}}});
    // An escaped spelling names the same alternative.
-   REQUIRE(read<F, Holder>(R"({"v":{"bool":false}})") == Holder{Alt{false}});
+   REQUIRE(read<F, Holder>(R"({"v":{"\u0062ool":false}})") == Holder{Alt{false}});
    // Unknown, near-miss and empty names; exactly one key.
    REQUIRE(!read<F, Holder>(R"({"v":{"uint33":7}})"));
    REQUIRE(!read<F, Holder>(R"({"v":{"uint3":7}})"));

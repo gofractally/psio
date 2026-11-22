@@ -46,18 +46,52 @@ target_include_directories(psio PUBLIC
    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/external/xxhash>
    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/psio/external>)
 
-# simdjson — optional. Powers psio::pjson::from_json (JSON text →
-# pjson-binary). When available, callers get the SIMD stage-1 scan;
-# the fused encoder walks simdjson's DOM tape twice (size + write) and
-# emits pjson bytes directly with no intermediate value tree.
-find_package(simdjson QUIET)
-if(simdjson_FOUND)
+# simdjson — the JSON syntax layer of the typed and schema-driven JSON /
+# I-JSON readers (psio/json_simdjson.hpp) and of psio::pjson::from_json.
+#
+# PSIO fetches it itself, pinned to an exact release and archive hash; a
+# system install is never looked up, so every build parses with the same
+# code. Overrides, in order of precedence:
+#   * a `simdjson::simdjson` target the parent project already defines;
+#   * -DFETCHCONTENT_SOURCE_DIR_SIMDJSON=<dir> (a local source tree, no
+#     download; standard FetchContent behaviour);
+#   * a parent FetchContent_Declare(simdjson ...) made before this one.
+# -DPSIO_ENABLE_SIMDJSON=OFF builds without it (PSIO_HAVE_SIMDJSON=0): the
+# readers then run on the hand-written lexer alone. That is the default for
+# WASI, where guest builds do not link it.
+set(PSIO_SIMDJSON_VERSION 5.2.0)
+set(PSIO_SIMDJSON_SHA256 499176afd4b32fbe6f65551ef573b880407280072e1c19e22df0b45da58cdf64)
+if(CMAKE_SYSTEM_NAME STREQUAL "WASI")
+   set(PSIO_ENABLE_SIMDJSON_DEFAULT OFF)
+else()
+   set(PSIO_ENABLE_SIMDJSON_DEFAULT ON)
+endif()
+option(PSIO_ENABLE_SIMDJSON
+   "Use simdjson (fetched, pinned) as the JSON syntax layer"
+   ${PSIO_ENABLE_SIMDJSON_DEFAULT})
+if(PSIO_ENABLE_SIMDJSON)
+   if(NOT TARGET simdjson::simdjson)
+      include(FetchContent)
+      if(POLICY CMP0135)
+         cmake_policy(SET CMP0135 NEW)
+      endif()
+      FetchContent_Declare(simdjson
+         URL https://github.com/simdjson/simdjson/archive/refs/tags/v${PSIO_SIMDJSON_VERSION}.tar.gz
+         URL_HASH SHA256=${PSIO_SIMDJSON_SHA256})
+      # psio's installed targets link simdjson::simdjson, so the fetched
+      # simdjson is installed with psio (its own export set and package
+      # config, which psioConfig.cmake finds with find_dependency).
+      if(NOT DEFINED SIMDJSON_INSTALL)
+         set(SIMDJSON_INSTALL ON CACHE BOOL "Install the simdjson psio was built with")
+      endif()
+      FetchContent_MakeAvailable(simdjson)
+   endif()
    target_link_libraries(psio PUBLIC simdjson::simdjson)
    target_compile_definitions(psio PUBLIC PSIO_HAVE_SIMDJSON=1)
-   message(STATUS "psio: simdjson found, json_to_pjson enabled")
+   message(STATUS "psio: simdjson ${PSIO_SIMDJSON_VERSION} (pinned) is the JSON syntax layer")
 else()
    target_compile_definitions(psio PUBLIC PSIO_HAVE_SIMDJSON=0)
-   message(STATUS "psio: simdjson not found; json_to_pjson disabled")
+   message(STATUS "psio: simdjson disabled; hand-written JSON lexer only, json_to_pjson disabled")
 endif()
 
 # Boost::headers is needed by the reflection macro machinery (preprocessor
@@ -110,7 +144,7 @@ install(TARGETS psio EXPORT psioTargets
 install(DIRECTORY include/psio DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES external/xxhash/xxhash.h
    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/psio/external)
-set(PSIO_CONFIG_SIMDJSON ${simdjson_FOUND})
+set(PSIO_CONFIG_SIMDJSON ${PSIO_ENABLE_SIMDJSON})
 configure_package_config_file(cmake/psioConfig.cmake.in
    ${CMAKE_CURRENT_BINARY_DIR}/psioConfig.cmake
    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/psio)

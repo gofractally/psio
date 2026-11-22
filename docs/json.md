@@ -155,11 +155,11 @@ A key is resolved without scanning the member list:
    out costs one failed compare.
 2. **Perfect hash otherwise.** A key that is out of order, repeated or
    unknown is looked up through a table generated at compile time from the
-   member names (`psio/name_lookup.hpp`, C++ `reflect<T>::find_index`; a
-   generated `match` on length and bytes in the Rust derive): a fixed
-   number of loads and multiplies and exactly one confirming compare,
+   member names (`psio/name_lookup.hpp`, C++ `reflect<T>::find_index`): a
+   fixed number of loads and multiplies and exactly one confirming compare,
    whatever the member count, with no run-time initialization. An `ijson`
-   variant's alternative name is looked up the same way.
+   variant's alternative name is looked up the same way. (Rust: see "Rust"
+   under "Two layers" below.)
 
 Neither step changes what is accepted: any order, unknown keys skipped,
 repeated keys read again in a single pass with the last one winning.
@@ -219,41 +219,213 @@ any type rule:
    `psio::json::JsonCursor`. Events: `kind` (peek), `begin_object` /
    `next_field`, `begin_array` / `next_element`, `string` (unescaped, with an
    `escaped` flag), `number` (as its token text), `boolean`, `null`, `skip`,
-   `finish`.
+   `finish`. Two optional fast paths a cursor may add: `scalar` (a number's
+   characters, unchecked, for a caller whose own parse validates them) and
+   `real` (a number as its exact `double`).
 2. **Types** — a walk that checks the cursor's events against the type:
    member names, arity, integer range and form, hex digits, variant names,
    length bounds, missing members. It holds no text positions and does no
    tokenizing.
 
 A cursor is forward-only and single-pass (values consumed once, in document
-order; a string view is valid until the next call), which is the contract of
-simdjson's on-demand API. The walks need no random access and no second
-pass: record members are stored as they arrive (a repeated key is read again
-and replaces the earlier value), and a variant's selector precedes its value
-in both text forms (`[index, value]`, `{"Name": value}`).
+order; a string view is valid until the next call). The walks need no random
+access and no second pass: record members are stored as they arrive (a
+repeated key is read again and replaces the earlier value), and a variant's
+selector precedes its value in both text forms (`[index, value]`,
+`{"Name": value}`).
 
-Today the only cursor is the hand-written reader (`psio::json_text_cursor`,
-Rust `Reader`), and the schema-driven walk below is the only walk written
-against the cursor. The typed readers (`json.hpp` `read_value`, Rust
-`JsonText::read_json`) still read the text directly; moving them onto the
-cursor is a mechanical follow-up.
+In C++ both walks are written against the cursor: the typed readers of
+`json.hpp` (`decode`, `validate`, `decode_json_checked`, ...) and the
+schema-driven walk of `pssz_ir_json.hpp`. Three cursors exist:
 
-What the hand-written syntax layer does that a replacement must also do (or
-that the walk would have to take over):
+| Cursor | Syntax layer | Built when |
+|---|---|---|
+| `json_text_cursor` | the hand-written lexer (`detail/json_syntax.hpp`): no padding, no copy, no allocation except for escaped strings; builds for a WASI guest with exceptions and RTTI off | always |
+| `simdjson_index_cursor` | simdjson stage 1 (one SIMD pass: token index, whole-document UTF-8 check, control characters in strings) + PSIO's own walk over the index | `PSIO_HAVE_SIMDJSON` |
+| `simdjson_cursor` | simdjson's on-demand API | `PSIO_HAVE_SIMDJSON` |
+
+Rust has the hand-written `Reader` only (see "Rust" below).
+
+### What every syntax layer does
+
+The type rules rest on these, and all three cursors implement them; the
+differential tests (`cpp/tests/json_parser_tests.cpp`) and the shared fixture
+run every text through all of them and require the same outcome:
 
 - reports, for a string, whether it was written with escapes (integer and
   hex strings must be written literally);
 - rejects Unicode noncharacters in `ijson` strings and keys, also inside
   skipped values; rejects raw control characters, unpaired surrogate
   escapes and invalid UTF-8;
-- hands a number over as text (integers are parsed exactly, including the
-  full `u64` range and the "bare only up to 2^53 - 1" rule; `-0`, leading
-  zeros, fractions and exponents are told apart);
+- hands a number over as text. Integers are parsed by PSIO, exactly: the
+  full `u64` range, bare big integers in strict `json`, the "bare only up to
+  2^53 - 1" rule of `ijson`; `-0`, leading zeros, fractions and exponents
+  are told apart. simdjson's 64-bit accessors are not used; only a `double`
+  target takes simdjson's number parser (exact, same grammar);
+- checks a skipped value like a read one;
 - limits nesting to `kMaxValidationDepth` (64), on skipped values too;
-- never throws or aborts, needs no padding or copy of the input, and builds
-  for a WASI guest with exceptions and RTTI disabled.
+- never throws or aborts.
+
+Where simdjson's on-demand API is more lenient than that, the cursor adds
+the check itself: on-demand skips a value by counting brackets (so `[1 2]`
+or `nul` inside an unknown key would pass), does not look at what follows a
+string's closing quote inside the token (`"a"x`), does not require a
+consumed number or literal to be well-formed unless its accessor is called,
+and skips a leading UTF-8 byte order mark. None of these reach the type
+layer: `simdjson_cursor` walks skipped values, checks the token tail, parses
+or compares every scalar, and rejects a BOM.
 
 Repeated keys need nothing from the syntax layer (last one wins).
+
+### Choosing the syntax layer
+
+`psio::json_parser` selects it per call; every choice accepts the same texts
+and reads the same value:
+
+```cpp
+psio::decode_json_checked(psio::ijson{}, text, out);                              // automatic
+psio::decode_json_checked(psio::ijson{}, text, out, psio::json_parser::text);     // hand-written
+psio::decode_json_checked(psio::ijson{}, text, out, psio::json_parser::simdjson_index);
+psio::decode_json_checked(psio::ijson{}, text, out, psio::json_parser::simdjson); // on-demand
+psio::validate_json<T>(psio::ijson{}, text, parser);
+```
+
+`automatic` (also what `decode`, `validate`, `validate_strict` and
+`make_boxed` use) is the fastest measured: `simdjson_index_cursor` for a
+document of at least 64 bytes (`PSIO_JSON_SIMDJSON_MIN_SIZE`) whose root is
+an object or array, the hand-written lexer otherwise — small documents,
+root scalars, a read started from inside another read on the same thread,
+and every build without simdjson.
+
+**Padding.** simdjson reads up to `psio::json_padding` (64) bytes past the
+document. A `std::span<const char>` is copied once into a padded per-thread
+buffer. A caller that owns padded storage passes `psio::padded_json` and the
+document is parsed in place:
+
+```cpp
+std::string text = ...;
+psio::decode_json_checked(psio::ijson{}, psio::padded_json::of(text), out);  // grows capacity, not size
+psio::decode_json_checked(psio::ijson{}, psio::padded_json::assume(span), out);  // caller vouches
+```
+
+**Build.** PSIO fetches simdjson itself, pinned to release 5.2.0 by archive
+hash (`cpp/CMakeLists.txt`); a system install is not looked up.
+`-DFETCHCONTENT_SOURCE_DIR_SIMDJSON=<dir>` substitutes a local source tree,
+and a parent project's `simdjson::simdjson` target is used as is.
+`-DPSIO_ENABLE_SIMDJSON=OFF` (the default for WASI) builds with
+`PSIO_HAVE_SIMDJSON=0`: the hand-written lexer alone, same accepted set.
+
+### Writing
+
+The writer formats into the tail of the output string through a raw pointer
+(one capacity check per value, the size set once at the end). Each member
+key is a literal built at compile time — separator, quoted and escaped name,
+colon (`,"name":`). A value whose text has a small constant bound (numbers,
+bool, and optionals, fixed arrays, tuples and records of them) reserves once,
+as does a list of such elements. Integers and floats are formatted in place
+with `std::to_chars`, hex through a 256-entry pair table, strings eight
+plain bytes at a time, and the `ijson` 2^53 test is one unsigned compare.
+
+### Measurements
+
+`cpp/benchmarks/bench_json_text.cpp` (arm64, Apple M-series, clang 22 -O3;
+minimum of repeated short trials; the machine was running other work, so
+treat differences under ~10% as noise). ns per document, MB/s in brackets.
+"before" is the same benchmark built against the previous reader
+(hand-written, linear member scan, `std::string` appends).
+
+**Decode** (typed; `text`, `index` and `on-demand` all use the perfect-hash lookup and the expected-order fast path)
+
+| shape | format | bytes | before | text | on-demand | index | index, padded |
+|---|---|---:|---:|---:|---:|---:|---:|
+| small | json | 92 | 90 ns (1024) | 92 ns (999) | 132 ns (695) | 69 ns (1335) | 64 ns (1444) |
+| small | ijson | 92 | 92 ns (1003) | 93 ns (992) | 145 ns (634) | 77 ns (1201) | 72 ns (1280) |
+| medium | json | 2492 | 2814 ns (886) | 2809 ns (887) | 2373 ns (1050) | 1999 ns (1247) | 1933 ns (1289) |
+| medium | ijson | 2499 | 2778 ns (900) | 2863 ns (873) | 2671 ns (935) | 2290 ns (1091) | 2286 ns (1093) |
+| large | json | 884816 | 1.00 ms (882) | 971.1 µs (911) | 811.4 µs (1090) | 675.4 µs (1310) | 656.4 µs (1348) |
+| large | ijson | 884816 | 1.00 ms (882) | 981.6 µs (901) | 901.2 µs (982) | 753.2 µs (1175) | 737.2 µs (1200) |
+| wideint | json | 932 | 1220 ns (764) | 942 ns (989) | 878 ns (1062) | 705 ns (1322) | 694 ns (1344) |
+| wideint | ijson | 1006 | 1131 ns (890) | 839 ns (1199) | 1058 ns (951) | 880 ns (1143) | 851 ns (1183) |
+| wide200 | json | 4627 | 10.4 µs (446) | 2742 ns (1687) | 2328 ns (1988) | 1996 ns (2318) | 1971 ns (2348) |
+| wide200 | ijson | 4627 | 10.6 µs (436) | 2780 ns (1665) | 2778 ns (1665) | 2310 ns (2003) | 2283 ns (2026) |
+| wide200r | json | 4627 | 10.4 µs (445) | 5333 ns (868) | 5417 ns (854) | 4581 ns (1010) | 4473 ns (1034) |
+| wide200r | ijson | 4627 | 10.6 µs (435) | 5378 ns (860) | 5560 ns (832) | 4979 ns (929) | 4834 ns (957) |
+
+**Encode**
+
+| shape | format | bytes | before | after |
+|---|---|---:|---:|---:|
+| small | json | 92 | 104 ns (881) | 44 ns (2110) |
+| small | ijson | 92 | 105 ns (877) | 43 ns (2160) |
+| medium | json | 2492 | 2751 ns (906) | 684 ns (3643) |
+| medium | ijson | 2499 | 2734 ns (914) | 699 ns (3574) |
+| large | json | 884816 | 940.5 µs (941) | 350.0 µs (2528) |
+| large | ijson | 884816 | 952.4 µs (929) | 340.6 µs (2598) |
+| wideint | json | 932 | 691 ns (1350) | 450 ns (2071) |
+| wideint | ijson | 1006 | 715 ns (1407) | 454 ns (2214) |
+| wide200 | json | 4627 | 3647 ns (1269) | 528 ns (8762) |
+| wide200 | ijson | 4627 | 3759 ns (1231) | 533 ns (8675) |
+
+Shapes: `small` a flat 5-member record; `medium` a nested record with strings,
+a variant, optionals and a 20-element vector of records; `large` an array of
+10 000 records; `wideint` u64 beyond 2^53 and u128 values; `wide200` a
+200-member record with keys in declared order, `wide200r` the same in reversed
+order. `index, padded` is `padded_json` input (no copy); the other simdjson
+columns include the copy into a padded buffer.
+
+Read: the index walk is the fastest reader on every shape of 64 bytes or
+more except one and is the default there. The exception is the `ijson`
+wideint shape (mostly quoted integers and hex strings), where the
+hand-written lexer is about 5% ahead; the default is chosen by size, not by
+content, so that shape also goes to the index walk. Below 64 bytes the
+hand-written lexer is the default because it wins (a 28-byte record: 35 ns
+against 48 ns; a 16-byte one: 21 ns against 36 ns). On-demand is not the
+fastest anywhere. Against the previous reader the hand-written lexer alone
+is unchanged on 5- to 10-member records (member lookup was not their cost),
+3.8x faster on a 200-member record in declared order and 1.9x in reversed
+order, where every key after the first goes through the perfect hash.
+
+**WASI.** simdjson's single-header build (`singleheader/simdjson.cpp`)
+compiles for `wasm32-wasi` with `-fno-exceptions -fno-rtti`
+(wasi-sdk 29, clang 21), and a PSIO program using all three cursors links
+and runs correctly under wasmtime. simdjson has no WebAssembly kernel: it
+runs its scalar `fallback` implementation there, so it buys no speed, and it
+adds about 200 kB of object code. A guest would need that translation unit
+built for the guest target and `PSIO_HAVE_SIMDJSON=1`; nothing else in PSIO
+changes. This is not wired into the build: WASI configures with
+`PSIO_ENABLE_SIMDJSON=OFF` and reads with the hand-written lexer.
+
+### Rust
+
+The Rust derive matches a key with a `match` on the member names (rustc
+compiles it to a switch on the key's length followed by compares). A record
+of more than 64 members first compares each key with the member after the
+last one read. Measured (`rust/psio/benches/json_text_bench.rs`, same
+machine, before -> after): unchanged on the 5-member record (116 -> 112 ns),
+the nested record (3.42 -> 3.34 µs) and the 10 000-record array
+(1.28 -> 1.27 ms); 10% faster on the 200-member record in declared order
+(5.22 -> 4.70 µs); unchanged in reversed order (5.08 -> 5.07 µs). Two
+variants were measured and dropped: the expected-order compare on small
+records (8% slower than the plain match) and a perfect hash built by the
+derive for the fallback (no faster than the match, slower under `ijson`).
+
+Candidate syntax layers, raw parse speed on the same inputs (no typed value
+built), against the typed PSIO read:
+
+| input | PSIO typed read | `serde_json` (`IgnoredAny`) | `serde_json::Value` | `simd-json` tape |
+|---|---:|---:|---:|---:|
+| small, 92 B | 112 ns (820 MB/s) | 74 ns (1238) | 432 ns (213) | 174 ns (528) |
+| medium, 2.5 kB | 3.34 µs (745) | 1.94 µs (1285) | 11.4 µs (218) | 1.26 µs (1985) |
+| large, 885 kB | 1.27 ms (699) | 0.80 ms (1104) | 4.53 ms (195) | 0.51 ms (1742) |
+| wide200, 3.6 kB | 4.70 µs (760) | 2.55 µs (1397) | 13.5 µs (264) | 1.60 µs (2234) |
+
+`simd-json`'s tape is 1.6x to 3x the speed of the whole typed read above
+100 bytes and slower below it, so a cursor over it could at best approach
+the C++ result (the typed work stays). Neither crate was put under
+`JsonCursor` in this pass: the typed derive reads through `Reader` directly,
+not through the trait, and `simd-json` needs a mutable, owned input buffer.
+`simd-json` is a dev-dependency of the bench only; the library's
+dependencies are unchanged.
 
 ## Schema-driven path (no C++ / Rust type)
 
@@ -266,6 +438,9 @@ indexer — converts and validates with:
 | text → PSSZ | `json_to_pssz(schema, root, psio::ijson{}, text, bytes)` | `json_to_pssz::<IJson>(&schema, &root, text)` |
 | PSSZ → text | `pssz_to_json(schema, root, psio::ijson{}, bytes, text, &has_unknown)` | `pssz_to_json::<IJson>(&schema, &root, bytes)` |
 | validate PSSZ | `validate_pssz(schema, root, bytes, &has_unknown)` | `validate_pssz(&schema, &root, bytes)` |
+
+The C++ text reader runs on the same syntax layers as the typed readers
+(trailing `json_parser` argument; the default is the same automatic choice).
 
 `root` is an `AnyType`; a named type is `Type{"Name"}` (C++ also accepts the
 name itself: `json_to_pssz(schema, "Transfer", ...)`). Use `psio::json{}` /
@@ -341,3 +516,5 @@ pjson view and has no type information.
   have no JSON form in either language; one has to be chosen before either
   can implement it.
 - Rust `validate` materializes the value and drops it.
+- Rust has one syntax layer (the hand-written `Reader`); its writer has not
+  had the C++ writer's work (about 285 MB/s against 2-3.5 GB/s).

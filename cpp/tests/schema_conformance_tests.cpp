@@ -164,6 +164,17 @@ namespace
          REQUIRE(indexed == out);
       else
          REQUIRE(std::string_view{st.error().what} == std::string_view{st2.error().what});
+      // Every syntax layer gives the same bytes or rejects.
+      for (const auto parser : {psio::json_parser::text, psio::json_parser::simdjson,
+                                psio::json_parser::simdjson_index})
+      {
+         Bytes other;
+         auto  st3 = ir::json_to_pssz(schema, psio::schema_types::Type{type}, Fmt{},
+                                      std::span<const char>{text}, other, &names, parser);
+         REQUIRE(st.ok() == st3.ok());
+         if (st.ok())
+            REQUIRE(other == out);
+      }
       return st.ok() ? "" : std::string(st.error().what);
    }
    template <typename Fmt>
@@ -250,6 +261,20 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
          REQUIRE_FALSE(st2.ok());
          REQUIRE(std::string_view{st.error().what} == std::string_view{st2.error().what});
          REQUIRE(bytes == Bytes{'x'});
+         for (const auto parser : {psio::json_parser::text, psio::json_parser::simdjson,
+                                   psio::json_parser::simdjson_index})
+         {
+            auto st3 = ij ? ir::json_to_pssz(schema, psio::schema_types::Type{row.type},
+                                             psio::ijson{},
+                                             std::span<const char>{input_text(row)}, bytes,
+                                             &names, parser)
+                          : ir::json_to_pssz(schema, psio::schema_types::Type{row.type},
+                                             psio::json{},
+                                             std::span<const char>{input_text(row)}, bytes,
+                                             &names, parser);
+            REQUIRE_FALSE(st3.ok());
+            REQUIRE(bytes == Bytes{'x'});
+         }
       }
    }
    REQUIRE(values >= 600);
