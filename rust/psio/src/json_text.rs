@@ -5,7 +5,9 @@
 //
 //   Json    every integer is a bare number, a byte sequence is an array of
 //           numbers, an enum with payloads is `[index, value]`.
-//   IJson   64-bit integers are decimal strings, a byte sequence (`Vec<u8>`,
+//   IJson   a 64-bit integer is a bare number while its magnitude is at most
+//           2^53 - 1 and a decimal string beyond that (either form is read,
+//           a bare number only within that range), a byte sequence (`Vec<u8>`,
 //           `[u8; N]`) is one UPPERCASE hex string, an enum with payloads is
 //           `{"Name": value}`.
 //
@@ -290,6 +292,7 @@ impl Writer {
         Ok(())
     }
 
+    /// `wide`: a 64-bit integer whose magnitude exceeds 2^53 - 1.
     fn integer(&mut self, digits: std::fmt::Arguments<'_>, wide: bool) {
         use std::io::Write;
         let quote = match self.form {
@@ -915,7 +918,13 @@ macro_rules! integer {
     ($($ty:ty, $signed:expr;)*) => {$(
         impl JsonText for $ty {
             fn write_json(&self, w: &mut Writer) -> Result<()> {
-                w.integer(format_args!("{}", self), std::mem::size_of::<$ty>() >= 8);
+                // A 64-bit integer is quoted under IJson only beyond the
+                // range JavaScript holds exactly.
+                w.integer(
+                    format_args!("{}", self),
+                    std::mem::size_of::<$ty>() >= 8
+                        && (*self as i128).unsigned_abs() > SAFE_INTEGER as u128,
+                );
                 Ok(())
             }
             fn read_json(r: &mut Reader<'_>) -> Result<Self> {

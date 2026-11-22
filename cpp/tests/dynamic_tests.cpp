@@ -124,7 +124,7 @@ TEST_CASE("ijson_encode_dynamic matches the static ijson codec",
    const std::string typed = psio::encode(psio::ijson{}, v);
    REQUIRE(typed ==
            R"({"big":"18446744073709551615","neg":"-9223372036854775808","small":7,)"
-           R"("blob":"01FF","maybe":"5","list":["-1","2"],"point":{"x":3,"y":4},"text":"t"})");
+           R"("blob":"01FF","maybe":5,"list":[-1,2],"point":{"x":3,"y":4},"text":"t"})");
    REQUIRE(psio::ijson_encode_dynamic(sc, dv) == typed);
    REQUIRE(psio::encode_dynamic(psio::ijson{}, sc, dv) == typed);
    // The json form through the same schema is unchanged.

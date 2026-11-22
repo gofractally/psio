@@ -10,9 +10,10 @@
 //                 are arrays of numbers, std::variant is `[index, value]`.
 //
 //   psio::ijson   RFC 7493 (I-JSON), the profile JavaScript reads without
-//                 loss. Integers of 64 bits and wider are decimal strings
+//                 loss. A 64-bit integer is a bare number while its magnitude
+//                 is at most 2^53 - 1 and a decimal string beyond that
 //                 (`"18446744073709551615"`); 8/16/32-bit integers, bool and
-//                 floats stay numbers. Byte sequences (std::vector / std::array
+//                 floats are always numbers. Byte sequences (std::vector / std::array
 //                 of char, unsigned char, std::byte, and psio::byte_array<N>)
 //                 are one UPPERCASE hex string. std::variant is
 //                 `{"Name": value}` where Name is get_type_name of the
@@ -51,11 +52,11 @@
 //   - integers match `0 | -?[1-9][0-9]*` (no leading zero, plus sign,
 //     fraction or exponent) and must fit the type. An integer written as a
 //     string must be exactly those characters between the quotes;
-//   - under ijson an integer of 64 bits or wider is read from its string
-//     form, and also from a bare number when it lies in the range JavaScript
-//     represents exactly (|n| <= 2^53 - 1). A larger bare number is rejected:
-//     an I-JSON producer could not have written it without loss. A member
-//     with a forced form accepts exactly that form;
+//   - under ijson a 64-bit integer is read from its string form (any
+//     in-range value), and from a bare number when it lies in the range
+//     JavaScript represents exactly (|n| <= 2^53 - 1). A larger bare number
+//     is rejected: an I-JSON producer could not have written it without
+//     loss. A member with a forced form accepts exactly that form;
 //   - a hex string has an even number of hex digits of either case (and
 //     exactly 2N for a fixed array);
 //   - strings must be valid UTF-8, `\u` escapes must pair surrogates, raw
@@ -447,7 +448,17 @@ namespace psio {
       {
          char buf[48];
          auto r = std::to_chars(buf + 1, buf + sizeof(buf) - 1, v);
-         if constexpr (int_as_string_v<Fmt, IM, I>)
+         bool quoted = int_as_string_v<Fmt, IM, I>;
+         if constexpr (IM == int_mode::natural && int_as_string_v<Fmt, IM, I>)
+         {
+            // Natural ijson: a wide integer JavaScript holds exactly
+            // (|v| <= 2^53 - 1) is a bare number; anything larger is a string.
+            constexpr I safe = static_cast<I>((std::uint64_t{1} << 53) - 1);
+            quoted           = v > safe;
+            if constexpr (std::is_signed_v<I>)
+               quoted = quoted || v < -safe;
+         }
+         if (quoted)
          {
             buf[0]   = '"';
             *r.ptr++ = '"';
@@ -1661,8 +1672,8 @@ namespace psio {
       static constexpr bool        i_json = false;
    };
 
-   // RFC 7493 I-JSON: 64-bit and wider integers are decimal strings, byte
-   // sequences are hex strings, variants are {"Name": value}.
+   // RFC 7493 I-JSON: 64-bit integers beyond +/-(2^53 - 1) are decimal
+   // strings, byte sequences are hex strings, variants are {"Name": value}.
    struct ijson : detail::json_impl::tag_ops<ijson>
    {
       static constexpr const char* name   = "ijson";

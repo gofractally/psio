@@ -25,9 +25,16 @@ number, a byte sequence is an array of numbers, a variant is
 
 | Shape | `json` | `ijson` |
 |---|---|---|
-| 64-bit integers (`u64`, `i64`) | `18446744073709551615` | `"18446744073709551615"` |
+| 64-bit integers (`u64`, `i64`) | `18446744073709551615` | `7`, `"18446744073709551615"` (see below) |
 | byte sequence | `[1,255]` | `"01FF"` (uppercase on output) |
 | variant | `[3,{...}]` | `{"Inner":{...}}` |
+
+**64-bit integers under `ijson`.** A value whose magnitude is at most
+2^53 - 1 (the range a JavaScript number holds exactly) is written as a bare
+number; a larger magnitude is written as a decimal string. So `0`, `-1` and
+`9007199254740991` are bare, `"9007199254740992"`, `"-9007199254740992"`,
+`"18446744073709551615"` and `"-9223372036854775808"` are strings. The form
+depends on the value, not only on the type: a consumer must accept both.
 
 8/16/32-bit integers, `bool` and floats are numbers in both. Byte sequences
 are C++ `std::vector` / `std::array` of `char`, `unsigned char` or
@@ -96,12 +103,14 @@ crate-root `psio::decode` / `psio::validate`.
 - Integers match `0 | -?[1-9][0-9]*` and must fit the type: no leading zero,
   plus sign, `-0`, fraction or exponent. The string form holds exactly those
   characters (no whitespace, no escapes).
-- **Wide integers under ijson** are read from the string form and also from
-  a bare number in the range JavaScript holds exactly (|n| <= 2^53 - 1). A
-  larger bare number is rejected: an I-JSON producer could not have written
-  it without loss. Output is always the string, so there is one canonical
-  form. A member with a forced form accepts exactly that form; narrow
-  integers and every `json` integer accept numbers only.
+- **64-bit integers under ijson** are read from the string form (any
+  in-range value, so `"7"` is accepted) and from a bare number in the range
+  JavaScript holds exactly (|n| <= 2^53 - 1). A larger bare number is
+  rejected: an I-JSON producer could not have written it without loss. The
+  writer emits one form per value (bare within the range, string beyond it),
+  so re-encoding `"7"` gives `7`. A member with a forced form
+  (`ijson_number`, `ijson_string`) is written in and accepts exactly that
+  form; narrow integers and every `json` integer accept numbers only.
 - Hex: an even number of hex digits of either case; exactly 2N for a
   fixed-size array.
 - Floats: any RFC 8259 number that is finite in the target type (underflow
@@ -152,7 +161,7 @@ depth-bomb input.
 
 `dynamic_json.hpp` has `ijson_encode_dynamic` / `ijson_decode_dynamic` and
 the `encode_dynamic` / `decode_dynamic` CPOs for `psio::ijson`: 64-bit
-integers as strings, `Bytes` and sequences of `Uint8` as uppercase hex. The
+integers by the rule above, `Bytes` and sequences of `Uint8` as uppercase hex. The
 runtime `psio::schema` has no variant or tuple shape, so those rules have no
 dynamic form, and the dynamic reader (like the `json` one) assumes
 well-formed text and reports no errors. `view_to_json.hpp` renders a

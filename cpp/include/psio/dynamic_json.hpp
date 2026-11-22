@@ -89,10 +89,22 @@ namespace psio {
       {
          if (ij)
          {
+            // A 64-bit integer is a bare number while JavaScript holds it
+            // exactly (|v| <= 2^53 - 1), a decimal string beyond that.
+            constexpr std::int64_t safe = (std::int64_t{1} << 53) - 1;
             if (k == primitive_kind::Int64)
-               return write_int_string(dv.as<std::int64_t>(), s);
+            {
+               const auto v = dv.as<std::int64_t>();
+               return (v > safe || v < -safe) ? write_int_string(v, s)
+                                              : write_int(v, s);
+            }
             if (k == primitive_kind::Uint64)
-               return write_int_string(dv.as<std::uint64_t>(), s);
+            {
+               const auto v = dv.as<std::uint64_t>();
+               return v > static_cast<std::uint64_t>(safe)
+                         ? write_int_string(v, s)
+                         : write_int(v, s);
+            }
             if (k == primitive_kind::Bytes)
                return write_hex_string(dv.as<std::string>(), s);
          }

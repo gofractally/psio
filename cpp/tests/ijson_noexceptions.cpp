@@ -120,7 +120,7 @@ int main()
    if (int rc = run<psio::ijson>(
           200,
           "{\"big\":\"18446744073709551615\",\"as_number\":18446744073709551615,\"small\":7,"
-          "\"bytes\":\"01FF\",\"maybe\":\"-5\",\"choice\":{\"GuestInner\":{\"id\":\"9\",\"label\":\"nine\"}},"
+          "\"bytes\":\"01FF\",\"maybe\":-5,\"choice\":{\"GuestInner\":{\"id\":9,\"label\":\"nine\"}},"
           "\"pair\":[3,\"three\"],\"unit\":[],\"code\":\"c\",\"ratio\":0.5,\"text\":\"t\xC3\xA9xt\"}"))
       return rc;
 

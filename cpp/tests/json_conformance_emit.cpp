@@ -188,6 +188,8 @@ namespace
       value<u64>("max", std::numeric_limits<u64>::max());
       value<i64>("zero", 0);
       value<i64>("minus_one", -1);
+      value<i64>("safe_max_2^53-1", (i64{1} << 53) - 1);
+      value<i64>("safe_min_-(2^53-1)", -((i64{1} << 53) - 1));
       value<i64>("min", std::numeric_limits<i64>::min());
       value<i64>("max", std::numeric_limits<i64>::max());
       value<i64>("2^53", i64{1} << 53);
@@ -371,13 +373,25 @@ namespace
    void emit_accepted()
    {
       // Bare numbers for wide integers under ijson, within the safe range.
-      accept<u64>("ijson", "bare_number_small", "42", "\"42\"");
-      accept<u64>("ijson", "bare_number_zero", "0", "\"0\"");
-      accept<u64>("ijson", "bare_number_safe_max", "9007199254740991", "\"9007199254740991\"");
-      accept<i64>("ijson", "bare_number_safe_min", "-9007199254740991", "\"-9007199254740991\"");
+      // Wide integers under ijson: a bare number within the safe range is
+      // the canonical form there; the string form is accepted for any value.
+      accept<u64>("ijson", "bare_number_small", "42", "42");
+      accept<u64>("ijson", "bare_number_zero", "0", "0");
+      accept<u64>("ijson", "bare_number_safe_max", "9007199254740991", "9007199254740991");
+      accept<i64>("ijson", "bare_number_safe_min", "-9007199254740991", "-9007199254740991");
+      accept<u64>("ijson", "string_small", "\"42\"", "42");
+      accept<u64>("ijson", "string_zero", "\"0\"", "0");
+      accept<u64>("ijson", "string_safe_max", "\"9007199254740991\"", "9007199254740991");
+      accept<i64>("ijson", "string_safe_min", "\"-9007199254740991\"", "-9007199254740991");
+      accept<i64>("ijson", "string_minus_one", "\"-1\"", "-1");
+      accept<u64>("ijson", "string_2^53", "\"9007199254740992\"", "\"9007199254740992\"");
+      accept<i64>("ijson", "string_-2^53", "\"-9007199254740992\"", "\"-9007199254740992\"");
       accept<Inner>("ijson", "bare_number_member", R"({"id":7,"label":"seven","flag":true})",
-                    R"({"id":"7","label":"seven","flag":true})");
-      accept<Vec<u64>>("ijson", "mixed_forms", R"([1,"2",3])", R"(["1","2","3"])");
+                    R"({"id":7,"label":"seven","flag":true})");
+      accept<Inner>("ijson", "string_member", R"({"id":"7","label":"seven","flag":true})",
+                    R"({"id":7,"label":"seven","flag":true})");
+      accept<Vec<u64>>("ijson", "mixed_forms", R"([1,"2",3,"9007199254740992"])",
+                       R"([1,2,3,"9007199254740992"])");
 
       // Whitespace between tokens.
       accept_both<Vec<u32>>("whitespace", " [ 1 ,\t2 ,\n3 ]\r\n", "[1,2,3]");
@@ -535,7 +549,7 @@ namespace
 
       // ── Forced forms accept exactly that form ──────────────────────────
       const std::string ov_json  = R"({"a":"1","b":2,"c":"3","d":[4,5],"e":"-6","f":-7})";
-      const std::string ov_ijson = R"({"a":"1","b":2,"c":"3","d":[4,5],"e":"-6","f":"-7"})";
+      const std::string ov_ijson = R"({"a":1,"b":2,"c":"3","d":[4,5],"e":-6,"f":-7})";
       if (psio::encode(psio::json{}, Overrides{1, 2, 3, {4, 5}, i64{-6}, -7}) != ov_json ||
           psio::encode(psio::ijson{}, Overrides{1, 2, 3, {4, 5}, i64{-6}, -7}) != ov_ijson)
          die("Overrides texts are stale");

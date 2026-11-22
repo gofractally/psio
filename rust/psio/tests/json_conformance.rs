@@ -335,6 +335,12 @@ fn native_values_have_the_fixture_texts() {
     assert_eq!(text(&|| json::to_string::<Json, _>(&u64::MAX)), "18446744073709551615");
     assert_eq!(text(&|| json::to_string::<IJson, _>(&i64::MIN)), "\"-9223372036854775808\"");
     assert_eq!(text(&|| json::to_string::<IJson, _>(&(1u64 << 53))), "\"9007199254740992\"");
+    assert_eq!(text(&|| json::to_string::<IJson, _>(&((1u64 << 53) - 1))), "9007199254740991");
+    assert_eq!(text(&|| json::to_string::<IJson, _>(&((1i64 << 53) - 1))), "9007199254740991");
+    assert_eq!(text(&|| json::to_string::<IJson, _>(&-((1i64 << 53) - 1))), "-9007199254740991");
+    assert_eq!(text(&|| json::to_string::<IJson, _>(&-(1i64 << 53))), "\"-9007199254740992\"");
+    assert_eq!(text(&|| json::to_string::<IJson, _>(&0u64)), "0");
+    assert_eq!(text(&|| json::to_string::<IJson, _>(&i64::MAX)), "\"9223372036854775807\"");
     assert_eq!(text(&|| json::to_string::<IJson, _>(&((1u64 << 53) + 1))), "\"9007199254740993\"");
     assert_eq!(text(&|| json::to_string::<IJson, _>(&u32::MAX)), "4294967295");
     assert_eq!(text(&|| json::to_string::<IJson, _>(&vec![0x01u8, 0xff])), "\"01FF\"");
@@ -350,14 +356,14 @@ fn native_values_have_the_fixture_texts() {
     let inner = Inner { id: 7, label: "seven".into(), flag: true };
     assert_eq!(
         text(&|| json::to_string::<IJson, _>(&Choice::Inner(inner.clone()))),
-        r#"{"Inner":{"id":"7","label":"seven","flag":true}}"#
+        r#"{"Inner":{"id":7,"label":"seven","flag":true}}"#
     );
     assert_eq!(
         text(&|| json::to_string::<Json, _>(&Choice::Inner(inner.clone()))),
         r#"[3,{"id":7,"label":"seven","flag":true}]"#
     );
     assert_eq!(text(&|| json::to_string::<IJson, _>(&Choice::U32(42))), r#"{"uint32":42}"#);
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&Choice::U64(42))), r#"{"uint64":"42"}"#);
+    assert_eq!(text(&|| json::to_string::<IJson, _>(&Choice::U64(42))), r#"{"uint64":42}"#);
     let overrides = Overrides { a: 1, b: 2, c: 3, d: vec![4, 5], e: Some(-6), f: -7 };
     assert_eq!(
         text(&|| json::to_string::<Json, _>(&overrides)),
@@ -365,7 +371,7 @@ fn native_values_have_the_fixture_texts() {
     );
     assert_eq!(
         text(&|| json::to_string::<IJson, _>(&overrides)),
-        r#"{"a":"1","b":2,"c":"3","d":[4,5],"e":"-6","f":"-7"}"#
+        r#"{"a":1,"b":2,"c":"3","d":[4,5],"e":-6,"f":-7}"#
     );
     assert_eq!(
         text(&|| json::to_string::<IJson, _>(&Version { major: 12, minor: 345 })),

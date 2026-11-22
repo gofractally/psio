@@ -93,16 +93,24 @@ namespace
    }
 }  // namespace
 
-TEST_CASE("ijson writes wide integers as decimal strings", "[ijson]")
+TEST_CASE("ijson writes wide integers beyond 2^53 - 1 as decimal strings", "[ijson]")
 {
    CHECK(ijs(std::uint64_t{18446744073709551615ull}) == "\"18446744073709551615\"");
    CHECK(ijs(std::numeric_limits<std::int64_t>::min()) == "\"-9223372036854775808\"");
-   CHECK(ijs(std::uint64_t{0}) == "\"0\"");
+   CHECK(ijs(std::uint64_t{0}) == "0");
+   // The boundary: |v| <= 2^53 - 1 is a bare number, beyond it a string.
+   CHECK(ijs(std::uint64_t{9007199254740991ull}) == "9007199254740991");
+   CHECK(ijs(std::uint64_t{9007199254740992ull}) == "\"9007199254740992\"");
+   CHECK(ijs(std::int64_t{9007199254740991ll}) == "9007199254740991");
+   CHECK(ijs(std::int64_t{9007199254740992ll}) == "\"9007199254740992\"");
+   CHECK(ijs(std::int64_t{-9007199254740991ll}) == "-9007199254740991");
+   CHECK(ijs(std::int64_t{-9007199254740992ll}) == "\"-9007199254740992\"");
+   CHECK(ijs(std::numeric_limits<std::int64_t>::max()) == "\"9223372036854775807\"");
    CHECK(ijs(std::uint32_t{4294967295u}) == "4294967295");
    CHECK(ijs(std::int8_t{-5}) == "-5");
    CHECK(ijs(true) == "true");
    CHECK(ijs(1.5) == "1.5");
-   CHECK(ijs(Wide{1, -2, 3}) == R"({"u":"1","i":"-2","small":3})");
+   CHECK(ijs(Wide{1, -2, 3}) == R"({"u":1,"i":-2,"small":3})");
    // psio::json is unchanged: every integer is a bare number.
    CHECK(js(std::uint64_t{18446744073709551615ull}) == "18446744073709551615");
    CHECK(js(Wide{1, -2, 3}) == R"({"u":1,"i":-2,"small":3})");
@@ -139,7 +147,7 @@ TEST_CASE("ijson names variant alternatives; json keeps [index, value]", "[ijson
    CHECK(ijs(V{std::in_place_index<0>, 42u}) == R"({"uint32":42})");
    CHECK(ijs(V{std::in_place_index<1>, "hi"}) == R"({"string":"hi"})");
    CHECK(ijs(V{std::in_place_index<2>, Point{1, 2}}) == R"({"Point":{"x":1,"y":2}})");
-   CHECK(ijs(V{std::in_place_index<3>, std::uint64_t{7}}) == R"({"uint64":"7"})");
+   CHECK(ijs(V{std::in_place_index<3>, std::uint64_t{7}}) == R"({"uint64":7})");
    CHECK(ijs(V{std::in_place_index<4>, std::vector<std::int32_t>{1}}) == R"({"int32[]":[1]})");
    CHECK(ijs(V{std::in_place_index<5>, std::optional<bool>{}}) == R"({"bool?":null})");
    CHECK(ijs(V{std::in_place_index<6>, 2.5}) == R"({"double":2.5})");
@@ -179,7 +187,7 @@ TEST_CASE("tuples are arrays in json and ijson", "[json][ijson][tuple]")
    using T = std::tuple<std::uint32_t, std::string, std::uint64_t, std::tuple<>, std::tuple<bool>>;
    const T v{1, "two", 3, {}, {true}};
    CHECK(js(v) == R"([1,"two",3,[],[true]])");
-   CHECK(ijs(v) == R"([1,"two","3",[],[true]])");
+   CHECK(ijs(v) == R"([1,"two",3,[],[true]])");
    CHECK(js(std::tuple<>{}) == "[]");
    CHECK(ijs(std::tuple<>{}) == "[]");
    CHECK(read<psio::json, T>(js(v)) == v);

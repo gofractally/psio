@@ -81,7 +81,7 @@ fn round_trips_and_is_deterministic() {
     check::<IJson>(concat!(
         r#"[{"value":"18446744073709551615","type":2},"#,
         r#"[{"Point":{"x":1,"y":-2}},{"string":"s\n"#, "\u{e9}", r#""},{"Boxed":{"string":"in"}}],"#,
-        r#""0102FF","text \"q\" \"#, "u0001", r#"","#, r#"-1.25e-07,[],[null,"5"]]"#
+        r#""0102FF","text \"q\" \"#, "u0001", r#"","#, r#"-1.25e-07,[],[null,5]]"#
     ));
 }
 
@@ -95,7 +95,7 @@ fn enums_newtypes_and_generics() {
     assert_eq!(json::to_string::<IJson, _>(&Big::Huge).unwrap(), "\"18446744073709551615\"");
     assert_eq!(json::to_string::<Json, _>(&Big::Huge).unwrap(), "18446744073709551615");
     assert_eq!(json::from_str::<IJson, Big>("\"18446744073709551615\"").unwrap(), Big::Huge);
-    assert_eq!(json::to_string::<IJson, _>(&Meters(5)).unwrap(), "\"5\"");
+    assert_eq!(json::to_string::<IJson, _>(&Meters(5)).unwrap(), "5");
     assert_eq!(json::from_str::<IJson, Meters>("\"5\"").unwrap(), Meters(5));
     let g = Generic { value: vec![1u8, 2], r#type: Color::Red };
     assert_eq!(json::to_string::<IJson, _>(&g).unwrap(), r#"{"value":"0102","type":0}"#);
