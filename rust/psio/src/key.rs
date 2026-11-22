@@ -29,6 +29,18 @@
 //! Where byte order is not `Ord` / `PartialOrd` (docs/key-spec.md §4): a NaN
 //! with the sign bit clear sorts above +inf and one with it set below -inf;
 //! `-0.0` and `+0.0` share one key, which decodes to `+0.0`.
+//!
+//! Maps and sets (`BTreeMap`, `HashMap`, `BTreeSet`, `HashSet`,
+//! `pssz::BoundedMap` / `BoundedSet`) are the key of the list of their
+//! entries in ascending key order; that order — the bytes of this format —
+//! is the one every PSIO format gives their entries (docs/pssz-spec.md 5.9).
+//! [`ByKey`] makes any key type an `Ord + Hash` container key with exactly
+//! that order (`BTreeSet<ByKey<f64>>`).
+//!
+//! Type invariants (docs/pssz-spec.md §18, `#[pssz(invariant = "path")]`)
+//! are part of both directions: [`try_to_key`] refuses a value that violates
+//! one ([`to_key`] panics on it) and [`from_key`] / [`validate_key`] reject
+//! its key with the invariant's message.
 
 use crate::pssz::{Bitvector, BoundedList, BoundedRawString, BoundedString, RawString, Uint256};
 
@@ -52,10 +64,22 @@ pub trait KeyPack {
     /// The encoded size when it is the same for every value of the type.
     const FIXED_SIZE: Option<usize> = None;
 
+    /// One key byte per value (`u8`, `i8`): a list, set or map of them
+    /// uses the string framing.
+    const KEY_OCTET: bool = false;
+
     /// Exact size of [`KeyPack::key_pack`]'s output.
     fn key_size(&self) -> usize;
-    /// Appends the key bytes.
+    /// Appends the key bytes. Runs no invariant: the bytes are defined for
+    /// every value (they order the entries of maps and sets). Writers go
+    /// through [`try_to_key`] / [`to_key`], which check first.
     fn key_pack(&self, out: &mut Vec<u8>);
+    /// The invariants of the value and of the values it holds, innermost
+    /// first (`#[pssz(invariant = "path")]`). Containers forward to their
+    /// elements; a type without one accepts every value.
+    fn key_check(&self) -> KeyResult<()> {
+        Ok(())
+    }
 
     /// A list of `Self`: `01` + element per element, then `00`. Octets
     /// (`u8`, `i8`) override this pair with the string framing.
@@ -170,8 +194,21 @@ fn pack_escaped(bytes: &[u8], out: &mut Vec<u8>) {
 
 // ── Entry points ────────────────────────────────────────────────────────────
 
-/// The key of `value`.
+/// The key of `value`. Panics when the value violates a type invariant
+/// (it has no key): use [`try_to_key`] for values that were not checked.
 pub fn to_key<T: KeyPack + ?Sized>(value: &T) -> Vec<u8> {
+    try_to_key(value).expect("key: the value violates a type invariant; use try_to_key")
+}
+
+/// The key of `value`, or the invariant it (or a value it holds) violates.
+pub fn try_to_key<T: KeyPack + ?Sized>(value: &T) -> KeyResult<Vec<u8>> {
+    value.key_check()?;
+    Ok(key_bytes(value))
+}
+
+/// The key bytes of `value` with no invariant check: the bytes maps and
+/// sets are ordered by, defined for every value.
+pub fn key_bytes<T: KeyPack + ?Sized>(value: &T) -> Vec<u8> {
     let mut out = Vec::with_capacity(value.key_size());
     value.key_pack(&mut out);
     out
@@ -223,6 +260,11 @@ pub trait CompositeKey {
 pub trait KeyElementAs<E> {
     fn key_element_size(&self) -> usize;
     fn key_element_pack(&self, out: &mut Vec<u8>);
+    /// The element's invariants: each element of a prefix is checked as the
+    /// value it is.
+    fn key_element_check(&self) -> KeyResult<()> {
+        Ok(())
+    }
 }
 impl<E: KeyPack> KeyElementAs<E> for E {
     fn key_element_size(&self) -> usize {
@@ -231,6 +273,9 @@ impl<E: KeyPack> KeyElementAs<E> for E {
     fn key_element_pack(&self, out: &mut Vec<u8>) {
         self.key_pack(out)
     }
+    fn key_element_check(&self) -> KeyResult<()> {
+        self.key_check()
+    }
 }
 impl<E: KeyPack> KeyElementAs<E> for &E {
     fn key_element_size(&self) -> usize {
@@ -238,6 +283,9 @@ impl<E: KeyPack> KeyElementAs<E> for &E {
     }
     fn key_element_pack(&self, out: &mut Vec<u8>) {
         (**self).key_pack(out)
+    }
+    fn key_element_check(&self) -> KeyResult<()> {
+        (**self).key_check()
     }
 }
 impl KeyElementAs<String> for &str {
@@ -255,22 +303,37 @@ impl<T: KeyPack> KeyElementAs<Vec<T>> for &[T] {
     fn key_element_pack(&self, out: &mut Vec<u8>) {
         T::key_pack_list(self, out)
     }
+    fn key_element_check(&self) -> KeyResult<()> {
+        self.iter().try_for_each(T::key_check)
+    }
 }
 
 /// A tuple of the first K elements of the element tuple `Elements`.
 pub trait KeyPrefixOf<Elements> {
     fn key_prefix_size(&self) -> usize;
     fn key_prefix_pack(&self, out: &mut Vec<u8>);
+    fn key_prefix_check(&self) -> KeyResult<()>;
 }
 
 /// The key of the first K elements of `K` — the prefix every full key whose
 /// leading elements equal `prefix` starts with. `prefix` is a tuple of 0 up
 /// to all of `K`'s elements; each is checked at compile time against, and
 /// encoded as, the key's element type at its position.
+///
+/// Panics when an element violates its type's invariant: use
+/// [`try_key_prefix`] for elements that were not checked. The composite as a
+/// whole is not checked (a prefix is not a value of the composite type).
 pub fn key_prefix<K: CompositeKey, P: KeyPrefixOf<K::Elements>>(prefix: &P) -> Vec<u8> {
+    try_key_prefix::<K, P>(prefix)
+        .expect("key: a prefix element violates a type invariant; use try_key_prefix")
+}
+
+/// [`key_prefix`], or the invariant an element violates.
+pub fn try_key_prefix<K: CompositeKey, P: KeyPrefixOf<K::Elements>>(prefix: &P) -> KeyResult<Vec<u8>> {
+    prefix.key_prefix_check()?;
     let mut out = Vec::with_capacity(prefix.key_prefix_size());
     prefix.key_prefix_pack(&mut out);
-    out
+    Ok(out)
 }
 
 // ── Scalars ─────────────────────────────────────────────────────────────────
@@ -324,6 +387,7 @@ macro_rules! key_octet {
     ($($ty:ty, $flip:expr;)*) => {$(
         impl KeyPack for $ty {
             const FIXED_SIZE: Option<usize> = Some(1);
+            const KEY_OCTET: bool = true;
             fn key_size(&self) -> usize { 1 }
             fn key_pack(&self, out: &mut Vec<u8>) { out.push(*self as u8 ^ $flip); }
             fn key_list_size(items: &[Self]) -> usize {
@@ -482,11 +546,15 @@ impl<const N: usize> KeyUnpack for BoundedRawString<N> {
 
 impl<T: KeyPack + ?Sized> KeyPack for &T {
     const FIXED_SIZE: Option<usize> = T::FIXED_SIZE;
+    const KEY_OCTET: bool = T::KEY_OCTET;
     fn key_size(&self) -> usize {
         (**self).key_size()
     }
     fn key_pack(&self, out: &mut Vec<u8>) {
         (**self).key_pack(out)
+    }
+    fn key_check(&self) -> KeyResult<()> {
+        (**self).key_check()
     }
 }
 impl<T: KeyPack + ?Sized> KeyPack for Box<T> {
@@ -496,6 +564,9 @@ impl<T: KeyPack + ?Sized> KeyPack for Box<T> {
     }
     fn key_pack(&self, out: &mut Vec<u8>) {
         (**self).key_pack(out)
+    }
+    fn key_check(&self) -> KeyResult<()> {
+        (**self).key_check()
     }
 }
 impl<T: KeyUnpack> KeyUnpack for Box<T> {
@@ -511,6 +582,9 @@ impl<T: KeyPack> KeyPack for [T] {
     fn key_pack(&self, out: &mut Vec<u8>) {
         T::key_pack_list(self, out)
     }
+    fn key_check(&self) -> KeyResult<()> {
+        self.iter().try_for_each(T::key_check)
+    }
 }
 impl<T: KeyPack> KeyPack for Vec<T> {
     fn key_size(&self) -> usize {
@@ -518,6 +592,9 @@ impl<T: KeyPack> KeyPack for Vec<T> {
     }
     fn key_pack(&self, out: &mut Vec<u8>) {
         T::key_pack_list(self, out)
+    }
+    fn key_check(&self) -> KeyResult<()> {
+        self.iter().try_for_each(T::key_check)
     }
 }
 impl<T: KeyUnpack> KeyUnpack for Vec<T> {
@@ -531,6 +608,9 @@ impl<T: KeyPack, const N: usize> KeyPack for BoundedList<T, N> {
     }
     fn key_pack(&self, out: &mut Vec<u8>) {
         T::key_pack_list(&self.0, out)
+    }
+    fn key_check(&self) -> KeyResult<()> {
+        self.0.iter().try_for_each(T::key_check)
     }
 }
 impl<T: KeyUnpack, const N: usize> KeyUnpack for BoundedList<T, N> {
@@ -551,6 +631,9 @@ impl<T: KeyPack> KeyPack for Option<T> {
                 value.key_pack(out);
             }
         }
+    }
+    fn key_check(&self) -> KeyResult<()> {
+        self.as_ref().map_or(Ok(()), T::key_check)
     }
 }
 impl<T: KeyUnpack> KeyUnpack for Option<T> {
@@ -580,6 +663,9 @@ impl<T: KeyPack, const N: usize> KeyPack for [T; N] {
         for item in self {
             item.key_pack(out);
         }
+    }
+    fn key_check(&self) -> KeyResult<()> {
+        self.iter().try_for_each(T::key_check)
     }
 }
 impl<T: KeyUnpack, const N: usize> KeyUnpack for [T; N] {
@@ -646,6 +732,7 @@ macro_rules! key_tuple {
             fn key_size(&self) -> usize { 0 $(+ self.$index.key_size())* }
             #[allow(unused_variables)]
             fn key_pack(&self, out: &mut Vec<u8>) { $(self.$index.key_pack(out);)* }
+            fn key_check(&self) -> KeyResult<()> { $(self.$index.key_check()?;)* Ok(()) }
         }
         impl<$($ty: KeyUnpack),*> KeyUnpack for ($($ty,)*) {
             #[allow(unused_variables, clippy::unused_unit)]
@@ -671,6 +758,7 @@ macro_rules! key_tuple {
             fn key_prefix_size(&self) -> usize { 0 $(+ self.$index.key_element_size())* }
             #[allow(unused_variables)]
             fn key_prefix_pack(&self, out: &mut Vec<u8>) { $(self.$index.key_element_pack(out);)* }
+            fn key_prefix_check(&self) -> KeyResult<()> { $(self.$index.key_element_check()?;)* Ok(()) }
         }
     };
 }
@@ -687,3 +775,226 @@ key_tuple!((A, PA, 0), (B, PB, 1), (C, PC, 2), (D, PD, 3), (E, PE, 4), (G, PG, 5
 key_tuple!((A, PA, 0), (B, PB, 1), (C, PC, 2), (D, PD, 3), (E, PE, 4), (G, PG, 5), (H, PH, 6), (I, PI, 7), (J, PJ, 8), (K, PK, 9));
 key_tuple!((A, PA, 0), (B, PB, 1), (C, PC, 2), (D, PD, 3), (E, PE, 4), (G, PG, 5), (H, PH, 6), (I, PI, 7), (J, PJ, 8), (K, PK, 9), (L, PL, 10));
 key_tuple!((A, PA, 0), (B, PB, 1), (C, PC, 2), (D, PD, 3), (E, PE, 4), (G, PG, 5), (H, PH, 6), (I, PI, 7), (J, PJ, 8), (K, PK, 9), (L, PL, 10), (M, PM, 11));
+
+// ── Keys as container keys ──────────────────────────────────────────────────
+
+/// `T` ordered, compared and hashed by its key bytes: the order PSIO gives
+/// the entries of a map and the elements of a set (docs/pssz-spec.md 5.9),
+/// whatever `T`'s own `Ord` is and whether or not it has one. In every
+/// format it is `T` (same bytes, key, text and schema).
+///
+/// ```
+/// use psio::key::ByKey;
+/// use std::collections::BTreeSet;
+/// // f64 has no `Ord`; its key has (NaNs included, -0.0 == +0.0).
+/// let set: BTreeSet<ByKey<f64>> = [2.5, -1.0, f64::NAN].map(ByKey).into();
+/// assert_eq!(set.iter().next().unwrap().0, -1.0);
+/// ```
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ByKey<T>(pub T);
+
+impl<T: KeyPack> PartialEq for ByKey<T> {
+    fn eq(&self, other: &Self) -> bool {
+        key_bytes(&self.0) == key_bytes(&other.0)
+    }
+}
+impl<T: KeyPack> Eq for ByKey<T> {}
+impl<T: KeyPack> PartialOrd for ByKey<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl<T: KeyPack> Ord for ByKey<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        key_bytes(&self.0).cmp(&key_bytes(&other.0))
+    }
+}
+impl<T: KeyPack> std::hash::Hash for ByKey<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        key_bytes(&self.0).hash(state)
+    }
+}
+impl<T> From<T> for ByKey<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+impl<T: KeyPack> KeyPack for ByKey<T> {
+    const FIXED_SIZE: Option<usize> = T::FIXED_SIZE;
+    const KEY_OCTET: bool = T::KEY_OCTET;
+    fn key_size(&self) -> usize {
+        self.0.key_size()
+    }
+    fn key_pack(&self, out: &mut Vec<u8>) {
+        self.0.key_pack(out)
+    }
+    fn key_check(&self) -> KeyResult<()> {
+        self.0.key_check()
+    }
+}
+impl<T: KeyUnpack> KeyUnpack for ByKey<T> {
+    fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
+        T::key_unpack(r).map(ByKey)
+    }
+}
+
+// ── Maps and sets ───────────────────────────────────────────────────────────
+//
+// The key of the list of the entries in ascending key order: `01` + key(k) +
+// key(v) per entry, then `00`; for a set `01` + key(element) per element,
+// then `00`, and the string framing for a set of octets.
+
+pub(crate) const MAP_ORDER: KeyError =
+    KeyError("key: map entries are not in strictly ascending key order");
+pub(crate) const SET_ORDER: KeyError =
+    KeyError("key: set elements are not in strictly ascending order");
+
+/// The key bytes of each item, ascending.
+pub(crate) fn sorted_keys<'a, K: KeyPack + 'a>(keys: impl Iterator<Item = &'a K>) -> Vec<Vec<u8>> {
+    let mut out: Vec<Vec<u8>> = keys.map(|key| key_bytes(key)).collect();
+    out.sort();
+    out
+}
+pub(crate) fn pack_set<'a, K: KeyPack + 'a>(keys: impl Iterator<Item = &'a K>, out: &mut Vec<u8>) {
+    let sorted = sorted_keys(keys);
+    if K::KEY_OCTET {
+        let octets: Vec<u8> = sorted.iter().map(|key| key[0]).collect();
+        pack_escaped(&octets, out);
+    } else {
+        for key in sorted {
+            out.push(1);
+            out.extend_from_slice(&key);
+        }
+        out.push(0);
+    }
+}
+pub(crate) fn pack_map<'a, K: KeyPack + 'a, V: KeyPack + 'a>(
+    entries: impl Iterator<Item = (&'a K, &'a V)>,
+    out: &mut Vec<u8>,
+) {
+    let mut sorted: Vec<(Vec<u8>, &V)> = entries.map(|(k, v)| (key_bytes(k), v)).collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (key, value) in sorted {
+        out.push(1);
+        out.extend_from_slice(&key);
+        value.key_pack(out);
+    }
+    out.push(0);
+}
+pub(crate) fn unpack_set<K: KeyPack + KeyUnpack>(r: &mut KeyReader<'_>, limit: usize) -> KeyResult<Vec<K>> {
+    let items = K::key_unpack_list(r, limit)?;
+    let keys: Vec<Vec<u8>> = items.iter().map(|key| key_bytes(key)).collect();
+    if keys.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(SET_ORDER);
+    }
+    Ok(items)
+}
+pub(crate) fn unpack_map<K: KeyPack + KeyUnpack, V: KeyUnpack>(
+    r: &mut KeyReader<'_>,
+    limit: usize,
+) -> KeyResult<Vec<(K, V)>> {
+    let items = <(K, V)>::key_unpack_list(r, limit)?;
+    let keys: Vec<Vec<u8>> = items.iter().map(|(key, _)| key_bytes(key)).collect();
+    if keys.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(MAP_ORDER);
+    }
+    Ok(items)
+}
+
+macro_rules! key_set {
+    ([$($kb:tt)*], [$($cg:tt)*], $ty:ty, $limit:expr, |$s:ident| $inner:expr, |$items:ident| $build:expr) => {
+        impl<K: KeyPack + $($kb)*, $($cg)*> KeyPack for $ty {
+            fn key_size(&self) -> usize {
+                let mut out = Vec::new();
+                self.key_pack(&mut out);
+                out.len()
+            }
+            fn key_pack(&self, out: &mut Vec<u8>) {
+                let $s = self;
+                pack_set($inner.iter(), out)
+            }
+            fn key_check(&self) -> KeyResult<()> {
+                let $s = self;
+                $inner.iter().try_for_each(K::key_check)
+            }
+        }
+        impl<K: KeyPack + KeyUnpack + $($kb)*, $($cg)*> KeyUnpack for $ty {
+            fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
+                let $items = unpack_set::<K>(r, $limit)?;
+                let count = $items.len();
+                let out: Self = $build;
+                let $s = &out;
+                if $inner.len() != count {
+                    return Err(KeyError("key: set container merged distinct elements"));
+                }
+                Ok(out)
+            }
+        }
+    };
+}
+macro_rules! key_map {
+    ([$($kb:tt)*], [$($cg:tt)*], $ty:ty, $limit:expr, |$s:ident| $inner:expr, |$items:ident| $build:expr) => {
+        impl<K: KeyPack + $($kb)*, V: KeyPack, $($cg)*> KeyPack for $ty {
+            fn key_size(&self) -> usize {
+                let mut out = Vec::new();
+                self.key_pack(&mut out);
+                out.len()
+            }
+            fn key_pack(&self, out: &mut Vec<u8>) {
+                let $s = self;
+                pack_map($inner.iter(), out)
+            }
+            fn key_check(&self) -> KeyResult<()> {
+                let $s = self;
+                $inner.iter().try_for_each(|(k, v)| {
+                    k.key_check()?;
+                    v.key_check()
+                })
+            }
+        }
+        impl<K: KeyPack + KeyUnpack + $($kb)*, V: KeyUnpack, $($cg)*> KeyUnpack for $ty {
+            fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
+                let $items = unpack_map::<K, V>(r, $limit)?;
+                let count = $items.len();
+                let out: Self = $build;
+                let $s = &out;
+                if $inner.len() != count {
+                    return Err(KeyError("key: map container merged distinct keys"));
+                }
+                Ok(out)
+            }
+        }
+    };
+}
+use crate::pssz::{BoundedMap, BoundedSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
+key_set!([Ord], [], BTreeSet<K>, usize::MAX, |s| s, |items| items.into_iter().collect());
+key_set!([Eq + Hash], [], HashSet<K>, usize::MAX, |s| s, |items| items.into_iter().collect());
+key_set!([Ord], [const N: usize], BoundedSet<K, N>, N, |s| s.0,
+         |items| BoundedSet(items.into_iter().collect()));
+key_map!([Ord], [], BTreeMap<K, V>, usize::MAX, |s| s, |items| items.into_iter().collect());
+key_map!([Eq + Hash], [], HashMap<K, V>, usize::MAX, |s| s, |items| items.into_iter().collect());
+key_map!([Ord], [const N: usize], BoundedMap<K, V, N>, N, |s| s.0,
+         |items| BoundedMap(items.into_iter().collect()));
+
+// A nested value (`pssz::Nested`) is the key of the byte list holding its
+// inner encoding: the octet framing, ordered by those bytes. Reading
+// validates the bytes as the inner type unless the value is deferred.
+impl<T, V, const N: usize> KeyPack for crate::pssz::Nested<T, V, N> {
+    fn key_size(&self) -> usize {
+        escaped_size(self.bytes())
+    }
+    fn key_pack(&self, out: &mut Vec<u8>) {
+        pack_escaped(self.bytes(), out)
+    }
+}
+impl<T, V, const N: usize> KeyUnpack for crate::pssz::Nested<T, V, N>
+where
+    T: crate::pssz::PsszPack<crate::pssz::Pssz> + crate::pssz::PsszValidate<crate::pssz::Pssz>,
+    V: crate::pssz::NestedValidation,
+{
+    fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
+        Self::adopt(r.escaped()?).map_err(|error| KeyError(error.0))
+    }
+}

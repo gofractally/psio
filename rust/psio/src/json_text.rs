@@ -103,6 +103,12 @@ pub enum IntForm {
 /// `#[derive(psio::JsonText)]`, or give a type a custom string form with
 /// [`TextForm`] and `psio::json_text_form!`.
 pub trait JsonText: Sized {
+    /// The text of the type is a JSON string *by type* (a string kind, a
+    /// custom text form, or a transparent wrapper of one): a map keyed by it
+    /// is a JSON object. A type that merely happens to be written as a
+    /// string (an enumerator name, a time point, hex bytes) is not.
+    const JSON_STRING: bool = false;
+
     fn write_json(&self, w: &mut Writer) -> Result<()>;
     fn read_json(r: &mut Reader<'_>) -> Result<Self>;
 
@@ -164,10 +170,47 @@ pub trait TextForm: Sized {
 }
 
 /// Implements [`JsonText`] for a type through its [`TextForm`].
+///
+/// `json_text_form!(Type, invariant = path)` also enforces the type's
+/// invariant (the `fn(&Type) -> Result<(), &'static str>` named by its
+/// `#[pssz(invariant = "path")]`): the text form says what is well-formed
+/// text, the invariant whether the value read is a value of the type.
 #[macro_export]
 macro_rules! json_text_form {
+    ($ty:ty, invariant = $check:path) => {
+        impl $crate::json::JsonText for $ty {
+            const JSON_STRING: bool = true;
+            fn write_json(
+                &self,
+                w: &mut $crate::json::Writer,
+            ) -> ::core::result::Result<(), $crate::json::JsonTextError> {
+                if let ::core::result::Result::Err(why) = $check(self) {
+                    return ::core::result::Result::Err(w.err(why));
+                }
+                let mut text = ::std::string::String::new();
+                <$ty as $crate::json::TextForm>::to_text(self, &mut text);
+                w.string(text.as_bytes())
+            }
+            fn read_json(
+                r: &mut $crate::json::Reader<'_>,
+            ) -> ::core::result::Result<Self, $crate::json::JsonTextError> {
+                r.ws();
+                let at = r.position();
+                let text = r.string()?;
+                let value = <$ty as $crate::json::TextForm>::from_text(&text)
+                    .ok_or_else(|| r.err_at(at, "json: text form rejected the value"))?;
+                match $check(&value) {
+                    ::core::result::Result::Ok(()) => ::core::result::Result::Ok(value),
+                    ::core::result::Result::Err(why) => {
+                        ::core::result::Result::Err(r.err_at(at, why))
+                    }
+                }
+            }
+        }
+    };
     ($ty:ty) => {
         impl $crate::json::JsonText for $ty {
+            const JSON_STRING: bool = true;
             fn write_json(
                 &self,
                 w: &mut $crate::json::Writer,
@@ -1254,6 +1297,7 @@ macro_rules! float {
 float!(f32 f64);
 
 impl JsonText for String {
+    const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.string(self.as_bytes())
     }
@@ -1266,6 +1310,7 @@ impl JsonText for String {
 /// UTF-8, and an error to write otherwise (hex would hide the text, and
 /// invalid UTF-8 is not JSON).
 impl JsonText for RawString {
+    const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.string(&self.0)
     }
@@ -1279,6 +1324,7 @@ impl JsonText for RawString {
 // `std::vector` member annotated `length_bound{.max = N}`, and
 // `psio::bounded<T, N>`.
 impl<const N: usize> JsonText for crate::pssz::BoundedString<N> {
+    const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         if self.0.len() > N {
             return Err(w.err("json: string exceeds its bound"));
@@ -1297,6 +1343,7 @@ impl<const N: usize> JsonText for crate::pssz::BoundedString<N> {
 }
 
 impl<const N: usize> JsonText for crate::pssz::BoundedRawString<N> {
+    const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         if self.0.len() > N {
             return Err(w.err("json: string exceeds its bound"));
@@ -1369,6 +1416,7 @@ impl<T: JsonText> JsonText for Option<T> {
 }
 
 impl<T: JsonText> JsonText for Box<T> {
+    const JSON_STRING: bool = T::JSON_STRING;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         (**self).write_json(w)
     }
@@ -1422,6 +1470,219 @@ tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8);
 tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9);
 tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10);
 tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10, L 11);
+
+// ── Maps and sets (docs/json.md, "Maps and sets") ───────────────────────────
+//
+// A set is an array of its elements. A map is an object when the text of its
+// key type is a JSON string by type (`JsonText::JSON_STRING`), and an array
+// of `[key, value]` pairs otherwise. Writers emit the canonical order
+// (ascending key bytes); readers accept any order and reject a repeated key
+// or element (two keys are the same when their key bytes are equal).
+
+use crate::key::{key_bytes, ByKey, KeyPack};
+
+fn duplicates<K: KeyPack>(keys: impl Iterator<Item = K>) -> bool {
+    let mut bytes: Vec<Vec<u8>> = keys.map(|key| key_bytes(&key)).collect();
+    bytes.sort();
+    bytes.windows(2).any(|pair| pair[0] == pair[1])
+}
+fn sorted<I, K: KeyPack>(items: impl Iterator<Item = I>, key_of: impl Fn(&I) -> &K) -> Option<Vec<I>> {
+    let mut keyed: Vec<(Vec<u8>, I)> = items.map(|item| (key_bytes(key_of(&item)), item)).collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    if keyed.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return None;
+    }
+    Some(keyed.into_iter().map(|(_, item)| item).collect())
+}
+
+fn write_map<'a, K, V>(
+    entries: impl Iterator<Item = (&'a K, &'a V)>,
+    bound: usize,
+    w: &mut Writer,
+) -> Result<()>
+where
+    K: JsonText + KeyPack + 'a,
+    V: JsonText + 'a,
+{
+    let Some(entries) = sorted(entries, |entry| entry.0) else {
+        return Err(w.err("json: map has duplicate keys"));
+    };
+    if entries.len() > bound {
+        return Err(w.err("json: array exceeds its bound"));
+    }
+    // An entry is a tuple: its key and value take the natural form.
+    let saved = w.member_form(IntForm::Natural, IntForm::Natural);
+    w.raw(if K::JSON_STRING { "{" } else { "[" });
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            w.raw(",");
+        }
+        if K::JSON_STRING {
+            key.write_json(w)?;
+            w.raw(":");
+            value.write_json(w)?;
+        } else {
+            w.raw("[");
+            key.write_json(w)?;
+            w.raw(",");
+            value.write_json(w)?;
+            w.raw("]");
+        }
+    }
+    w.raw(if K::JSON_STRING { "}" } else { "]" });
+    w.restore_form(saved);
+    Ok(())
+}
+/// An object key is read exactly as the same text would be read as a string
+/// of the key type: its bound, its text form, its invariant.
+fn read_map<K: JsonText + KeyPack, V: JsonText>(r: &mut Reader<'_>, bound: usize) -> Result<Vec<(K, V)>> {
+    r.ws();
+    let at = r.pos;
+    let saved = r.member_form(IntForm::Natural, IntForm::Natural);
+    let mut entries: Vec<(K, V)> = Vec::new();
+    if K::JSON_STRING {
+        r.begin(b'{', "json: expected an object (a map with string keys)")?;
+        if !r.take(b'}') {
+            loop {
+                r.ws();
+                let key = K::read_json(r)?;
+                r.expect(b':', "json: expected ':' after object key")?;
+                entries.push((key, V::read_json(r)?));
+                if r.object_next()? {
+                    break;
+                }
+            }
+        }
+        r.end_object();
+    } else {
+        entries = <(K, V)>::read_json_vec(r)?;
+    }
+    r.restore_form(saved);
+    if entries.len() > bound {
+        return Err(r.err_at(at, "json: array exceeds its bound"));
+    }
+    if duplicates(entries.iter().map(|entry| &entry.0)) {
+        return Err(r.err_at(at, "json: duplicate map key"));
+    }
+    Ok(entries)
+}
+/// A member's integer form reaches the elements of a set, as of a list. A
+/// set of bytes is an array of numbers in both formats: not a byte string.
+fn write_set<'a, K: JsonText + KeyPack + 'a>(
+    elements: impl Iterator<Item = &'a K>,
+    bound: usize,
+    w: &mut Writer,
+) -> Result<()> {
+    let Some(elements) = sorted(elements, |element| *element) else {
+        return Err(w.err("json: set has duplicate elements"));
+    };
+    if elements.len() > bound {
+        return Err(w.err("json: array exceeds its bound"));
+    }
+    w.raw("[");
+    for (i, element) in elements.into_iter().enumerate() {
+        if i > 0 {
+            w.raw(",");
+        }
+        element.write_json(w)?;
+    }
+    w.raw("]");
+    Ok(())
+}
+fn read_set<K: JsonText + KeyPack>(r: &mut Reader<'_>, bound: usize) -> Result<Vec<K>> {
+    r.ws();
+    let at = r.pos;
+    let mut elements = Vec::new();
+    r.begin(b'[', "json: expected '['")?;
+    if !r.take(b']') {
+        loop {
+            elements.push(K::read_json(r)?);
+            if r.take(b']') {
+                break;
+            }
+            if !r.take(b',') {
+                return Err(r.err("json: expected ',' or ']' in array"));
+            }
+        }
+    }
+    r.end();
+    if elements.len() > bound {
+        return Err(r.err_at(at, "json: array exceeds its bound"));
+    }
+    if duplicates(elements.iter()) {
+        return Err(r.err_at(at, "json: duplicate set element"));
+    }
+    Ok(elements)
+}
+
+macro_rules! json_map {
+    ([$($kb:tt)*], [$($cg:tt)*], $ty:ty, $bound:expr, |$s:ident| $inner:expr, |$items:ident| $build:expr) => {
+        impl<K: JsonText + KeyPack + $($kb)*, V: JsonText, $($cg)*> JsonText for $ty {
+            fn write_json(&self, w: &mut Writer) -> Result<()> {
+                let $s = self;
+                write_map($inner.iter(), $bound, w)
+            }
+            fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+                r.ws();
+                let at = r.pos;
+                let $items = read_map::<K, V>(r, $bound)?;
+                let count = $items.len();
+                let out: Self = $build;
+                let $s = &out;
+                if $inner.len() != count {
+                    return Err(r.err_at(at, "json: map container merged distinct keys"));
+                }
+                Ok(out)
+            }
+        }
+    };
+}
+macro_rules! json_set {
+    ([$($kb:tt)*], [$($cg:tt)*], $ty:ty, $bound:expr, |$s:ident| $inner:expr, |$items:ident| $build:expr) => {
+        impl<K: JsonText + KeyPack + $($kb)*, $($cg)*> JsonText for $ty {
+            fn write_json(&self, w: &mut Writer) -> Result<()> {
+                let $s = self;
+                write_set($inner.iter(), $bound, w)
+            }
+            fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+                r.ws();
+                let at = r.pos;
+                let $items = read_set::<K>(r, $bound)?;
+                let count = $items.len();
+                let out: Self = $build;
+                let $s = &out;
+                if $inner.len() != count {
+                    return Err(r.err_at(at, "json: set container merged distinct elements"));
+                }
+                Ok(out)
+            }
+        }
+    };
+}
+use crate::pssz::{BoundedMap, BoundedSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::hash::Hash;
+json_map!([Ord], [], BTreeMap<K, V>, usize::MAX, |s| s, |items| items.into_iter().collect());
+json_map!([Eq + Hash], [], HashMap<K, V>, usize::MAX, |s| s, |items| items.into_iter().collect());
+json_map!([Ord], [const N: usize], BoundedMap<K, V, N>, N, |s| s.0,
+          |items| BoundedMap(items.into_iter().collect()));
+json_set!([Ord], [], BTreeSet<K>, usize::MAX, |s| s, |items| items.into_iter().collect());
+json_set!([Eq + Hash], [], HashSet<K>, usize::MAX, |s| s, |items| items.into_iter().collect());
+json_set!([Ord], [const N: usize], BoundedSet<K, N>, N, |s| s.0,
+          |items| BoundedSet(items.into_iter().collect()));
+
+impl<T: JsonText> JsonText for ByKey<T> {
+    const JSON_STRING: bool = T::JSON_STRING;
+    fn write_json(&self, w: &mut Writer) -> Result<()> {
+        self.0.write_json(w)
+    }
+    fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+        T::read_json(r).map(ByKey)
+    }
+    fn json_missing() -> Option<Self> {
+        T::json_missing().map(ByKey)
+    }
+}
 
 // ── Support for #[derive(JsonText)] on enums ────────────────────────────────
 

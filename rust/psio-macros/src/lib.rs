@@ -89,7 +89,9 @@ pub fn derive_json_text(input: TokenStream) -> TokenStream {
 /// The memcmp-sortable `key` format (`psio::key`): a struct is the
 /// concatenation of its fields' keys (a composite key), an enum of
 /// single-field variants is the variant index byte and the payload.
-#[proc_macro_derive(Key)]
+///
+/// Also reads `#[pssz(transparent)]` and `#[pssz(invariant = "path")]`.
+#[proc_macro_derive(Key, attributes(pssz))]
 pub fn derive_key(input: TokenStream) -> TokenStream {
     key_macro::derive(input)
 }

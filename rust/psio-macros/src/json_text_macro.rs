@@ -1,7 +1,12 @@
 //! `#[derive(JsonText)]`: the Json / IJson text formats (`psio::json`).
 //!
 //! * A struct with named fields is an object in declaration order.
-//! * A struct with one unnamed field is transparent.
+//! * A struct with one unnamed field is transparent, and so is a struct of
+//!   one named field marked `#[pssz(transparent)]` (or
+//!   `#[serde(transparent)]`): its text is its member's.
+//! * `#[pssz(invariant = "path")]` (a `fn(&Self) -> Result<(), &'static
+//!   str>`) is enforced by the writer and the reader: a value that violates
+//!   it has no text, and text that reads as one is rejected with its message.
 //! * An enum whose variants each hold one unnamed field is a variant:
 //!   `{"Name": value}` under IJson, `[index, value]` under Json. The name is
 //!   the variant identifier unless `#[json(name = "...")]` renames it (use it
@@ -137,8 +142,32 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         param.bounds.push(syn::parse_quote!(#j::JsonText));
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let shared = crate::pssz_macro::shared(input)?;
+    let mut json_string = quote!();
 
     let (write, read) = match &input.data {
+        Data::Struct(data) if shared.transparent && data.fields.len() == 1 => {
+            let field = data.fields.iter().next().unwrap();
+            let ty = &field.ty;
+            let (member, construct) = match &field.ident {
+                Some(ident) => (quote!(#ident), quote!(Self { #ident: __inner })),
+                None => (quote!(0), quote!(Self(__inner))),
+            };
+            json_string = quote!(const JSON_STRING: bool = <#ty as #j::JsonText>::JSON_STRING;);
+            (
+                quote! { <#ty as #j::JsonText>::write_json(&self.#member, w) },
+                quote! {
+                    let __inner = <#ty as #j::JsonText>::read_json(r)?;
+                    ::core::result::Result::Ok(#construct)
+                },
+            )
+        }
+        Data::Struct(data) if shared.transparent => {
+            return Err(syn::Error::new_spanned(
+                &data.fields,
+                "a transparent type has exactly one member",
+            ))
+        }
         Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => {
                 let mut writes = Vec::new();
@@ -261,6 +290,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                 let ty = &fields.unnamed[0].ty;
+                json_string = quote!(const JSON_STRING: bool = <#ty as #j::JsonText>::JSON_STRING;);
                 (
                     quote! { <#ty as #j::JsonText>::write_json(&self.0, w) },
                     quote! { ::core::result::Result::Ok(Self(<#ty as #j::JsonText>::read_json(r)?)) },
@@ -410,8 +440,33 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
 
+    // The invariant: after the members were written / read (innermost
+    // first), before any text or value is returned.
+    let (write, read) = match &shared.invariant {
+        None => (write, read),
+        Some(path) => (
+            quote! {
+                let __written: ::core::result::Result<(), #j::JsonTextError> = (|| { #write })();
+                __written?;
+                if let ::core::result::Result::Err(__why) = #path(self) {
+                    return ::core::result::Result::Err(w.err(__why));
+                }
+                ::core::result::Result::Ok(())
+            },
+            quote! {
+                r.ws();
+                let __start = r.position();
+                let __value: Self = (|| -> ::core::result::Result<Self, #j::JsonTextError> { #read })()?;
+                if let ::core::result::Result::Err(__why) = #path(&__value) {
+                    return ::core::result::Result::Err(r.err_at(__start, __why));
+                }
+                ::core::result::Result::Ok(__value)
+            },
+        ),
+    };
     Ok(quote! {
         impl #impl_generics #j::JsonText for #name #ty_generics #where_clause {
+            #json_string
             fn write_json(&self, w: &mut #j::Writer) -> ::core::result::Result<(), #j::JsonTextError> {
                 #write
             }

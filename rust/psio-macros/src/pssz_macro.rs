@@ -21,8 +21,63 @@ struct Options {
     /// text form (`TextForm`). Its schema is `Custom { wire type, id }`; the
     /// id defaults to the schema name. The bytes are unaffected.
     custom: Option<Option<String>>,
+    /// `#[pssz(invariant = "path")]`: the type's invariant, a
+    /// `fn(&Self) -> Result<(), &'static str>` (docs/pssz-spec.md 18). Every
+    /// checking reader and every writer enforces it; the schema node is
+    /// `Custom { wire type, id }`.
+    invariant: Option<syn::Path>,
 }
 use crate::c_enum::{self, CEnum};
+
+/// What the other derives (`JsonText`, `Key`) read of `#[pssz(...)]`: the
+/// attributes that are properties of the type in every format.
+pub(crate) struct Shared {
+    pub(crate) transparent: bool,
+    pub(crate) invariant: Option<syn::Path>,
+}
+/// `#[serde(transparent)]` says the same thing as `#[pssz(transparent)]`: a
+/// type that is its one member for serde is its one member here.
+fn serde_transparent(attr: &syn::Attribute) -> bool {
+    if !attr.path.is_ident("serde") {
+        return false;
+    }
+    match attr.parse_meta() {
+        Ok(Meta::List(list)) => list.nested.iter().any(
+            |item| matches!(item, NestedMeta::Meta(Meta::Path(path)) if path.is_ident("transparent")),
+        ),
+        _ => false,
+    }
+}
+pub(crate) fn shared(input: &DeriveInput) -> syn::Result<Shared> {
+    let mut out = Shared { transparent: false, invariant: None };
+    for attr in &input.attrs {
+        if serde_transparent(attr) {
+            out.transparent = true;
+        }
+        if !attr.path.is_ident("pssz") {
+            continue;
+        }
+        let Meta::List(list) = attr.parse_meta()? else { continue };
+        for item in list.nested {
+            match item {
+                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("transparent") => {
+                    out.transparent = true
+                }
+                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("invariant") => {
+                    out.invariant = Some(invariant_path(&nv)?);
+                }
+                _ => (),
+            }
+        }
+    }
+    Ok(out)
+}
+fn invariant_path(nv: &syn::MetaNameValue) -> syn::Result<syn::Path> {
+    match &nv.lit {
+        Lit::Str(value) => value.parse(),
+        _ => Err(syn::Error::new_spanned(nv, "invariant must be a path string: invariant = \"path::to::check\"")),
+    }
+}
 /// A field-less enum encoded as its underlying integer (C++ plain `enum`).
 fn c_like<'a>(input: &'a DeriveInput, opts: &Options) -> syn::Result<Option<CEnum<'a>>> {
     let Some(shape) = c_enum::analyze(input)? else { return Ok(None) };
@@ -55,8 +110,12 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
         cap: None,
         variant: false,
         custom: None,
+        invariant: None,
     };
     for attr in &input.attrs {
+        if serde_transparent(attr) {
+            out.transparent = true;
+        }
         if !attr.path.is_ident("pssz") {
             continue;
         }
@@ -86,6 +145,12 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
                     } else {
                         return Err(syn::Error::new_spanned(nv, "custom must be a string"));
                     }
+                }
+                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("invariant") => {
+                    if out.invariant.is_some() {
+                        return Err(syn::Error::new_spanned(nv, "a type has one invariant"));
+                    }
+                    out.invariant = Some(invariant_path(&nv)?);
                 }
                 NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("max_dynamic_data") => {
                     if let Lit::Int(value) = &nv.lit {
@@ -605,23 +670,80 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
         quote!(let _depth = #k::pssz_checked::EncodeDepth::enter()?;)
     };
     let Consts { fixed, size, min, extra } = consts;
+    // An invariant runs on a value after its structure (and the invariants
+    // of what it holds) was accepted, and before any byte of it is returned.
+    let check = |value: Tokens| match &opts.invariant {
+        Some(path) => quote! {
+            if let ::core::result::Result::Err(__why) = #path(#value) {
+                return ::core::result::Result::Err(#k::pssz::PsszError(__why));
+            }
+        },
+        None => quote!(),
+    };
+    if let Some(path) = &opts.invariant {
+        let checked = check(quote!(&__value));
+        let _ = path;
+        // A value that violates its invariant is not a value of the type:
+        // a pruned trailing optional is checked like a stored one.
+        if !missing_optional.is_empty() {
+            let ty = match &input.data {
+                Data::Struct(data) => data.fields.iter().next().map(|f| f.ty.clone()),
+                _ => None,
+            };
+            if let (Some(ty), Data::Struct(data)) = (ty, &input.data) {
+                let member = field_info(&data.fields).remove(0).0;
+                let construct = if matches!(&data.fields, Fields::Named(_)) {
+                    quote!(Self { #member: __inner })
+                } else {
+                    quote!(Self(__inner))
+                };
+                missing_optional = quote! {
+                    fn pssz_missing_optional() -> #k::pssz::PsszResult<Self> {
+                        let __inner = <#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_missing_optional()?;
+                        let __value = #construct;
+                        #checked
+                        ::core::result::Result::Ok(__value)
+                    }
+                };
+            }
+        }
+    }
+    let unpack_check = check(quote!(&__value));
+    let pack_check = check(quote!(self));
     Ok(if unpack {
+        // With an invariant, validation materialises the value: the decoder
+        // is the validator (same structure checks, then the invariant).
+        let validation = if opts.invariant.is_some() {
+            quote! {
+                impl #impl_g #k::pssz::PsszValidate<__PsszFormat> for #name #type_g #where_c {
+                    fn pssz_validate(bytes: &[u8]) -> #k::pssz::PsszResult<()> {
+                        <Self as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack(bytes).map(|_| ())
+                    }
+                }
+            }
+        } else {
+            quote! {
+                impl #validation_g #k::pssz::PsszValidate<__PsszFormat> for #name #type_g #validation_where {
+                    #[allow(unused_variables)]
+                    fn pssz_validate(bytes: &[u8]) -> #k::pssz::PsszResult<()> {
+                        #depth_guard
+                        #validation_body
+                    }
+                }
+            }
+        };
         quote! {
             impl #impl_g #k::pssz::PsszUnpack<__PsszFormat> for #name #type_g #where_c {
                 #missing_optional
                 #[allow(unused_variables)]
                 fn pssz_unpack(bytes: &[u8]) -> #k::pssz::PsszResult<Self> {
                     #depth_guard
-                    #body
+                    let __value: Self = (|| -> #k::pssz::PsszResult<Self> { #body })()?;
+                    #unpack_check
+                    ::core::result::Result::Ok(__value)
                 }
             }
-            impl #validation_g #k::pssz::PsszValidate<__PsszFormat> for #name #type_g #validation_where {
-                #[allow(unused_variables)]
-                fn pssz_validate(bytes: &[u8]) -> #k::pssz::PsszResult<()> {
-                    #depth_guard
-                    #validation_body
-                }
-            }
+            #validation
         }
     } else {
         quote! {
@@ -643,6 +765,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     let out = &mut temporary;
                     let result: #k::pssz::PsszResult<()> = (|| { #body })();
                     result?;
+                    #pack_check
                     destination.try_reserve(temporary.len()).map_err(|_| #k::pssz::PsszError("pssz: output allocation overflow"))?;
                     destination.extend_from_slice(&temporary);
                     ::core::result::Result::Ok(())
@@ -706,7 +829,13 @@ fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool, cap: Option<u64>, f
     Ok(quote! {
         #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Object(#k::pssz::schema_ir::Object {
             members: ::std::vec![#(#k::pssz::schema_ir::Member {
-                name: #names.into(), r#type: ::std::boxed::Box::new(<#types as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?), attributes: ::std::vec![#(#member_attributes),*]
+                name: #names.into(), r#type: ::std::boxed::Box::new(<#types as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?),
+                attributes: {
+                    #[allow(unused_mut)]
+                    let mut __attributes: ::std::vec::Vec<#k::pssz::schema_ir::Attribute> = ::std::vec![#(#member_attributes),*];
+                    __attributes.extend(<#types as #k::pssz::schema_ir::ToPsszSchema>::member_attributes());
+                    __attributes
+                }
             }),*], attributes: ::std::vec![#(#attributes),*]
         }))
     })
@@ -765,7 +894,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                 ));
             }
             let ty = &data.fields.iter().next().unwrap().ty;
-            if opts.custom.is_some() {
+            if opts.custom.is_some() || opts.invariant.is_some() {
                 // The wire type inline under the Custom node, as the C++
                 // builder writes a strong typedef.
                 quote! { <#ty as #k::pssz::schema_ir::ToPsszSchema>::build_schema(builder)? }
@@ -841,8 +970,14 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             ::std::any::type_name::<Self>().into()
         ))
     };
-    // A custom text form: Custom { the wire type, id }.
-    let (body, custom_id) = match &opts.custom {
+    // A custom type (a text form, an invariant, or both): Custom { the wire
+    // type, id }.
+    let custom = match (&opts.custom, &opts.invariant) {
+        (Some(id), _) => Some(id.clone()),
+        (None, Some(_)) => Some(None),
+        (None, None) => None,
+    };
+    let (body, custom_id) = match &custom {
         None => (body, quote!()),
         Some(id) => {
             let id = match id {

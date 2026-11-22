@@ -7,6 +7,12 @@
 //!   catch-all) is its underlying integer, exactly as in PSSZ and as a C++
 //!   enum: key order is the order of the values. Its names exist in JSON
 //!   only.
+//! * A struct of one member marked `#[pssz(transparent)]` (or
+//!   `#[serde(transparent)]`) is that member: same key, and a composite key
+//!   when the member is a tuple.
+//! * `#[pssz(invariant = "path")]` (a `fn(&Self) -> Result<(), &'static
+//!   str>`): `try_to_key` / `to_key` refuse a value that violates it and the
+//!   readers reject its key with the invariant's message.
 //! * Any other enum, whose variants each hold one unnamed field, is a
 //!   variant: one byte holding the variant's index, then the payload's key
 //!   (C++ `std::variant`). At most 256 variants.
@@ -38,8 +44,68 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let (pack_impl, ty_generics, where_clause) = pack_generics.split_for_impl();
     let (unpack_impl, _, _) = unpack_generics.split_for_impl();
     let (plain_impl, _, _) = input.generics.split_for_impl();
+    let shared = crate::pssz_macro::shared(input)?;
+    // The type's own invariant, after those of what it holds.
+    let own_check = |value: TokenStream2| match &shared.invariant {
+        Some(path) => quote! {
+            if let ::core::result::Result::Err(__why) = #path(#value) {
+                return ::core::result::Result::Err(#k::KeyError(__why));
+            }
+        },
+        None => quote!(),
+    };
+    let check_self = own_check(quote!(self));
+    let check_value = own_check(quote!(&__value));
 
     match &input.data {
+        Data::Struct(data) if shared.transparent => {
+            if data.fields.len() != 1 {
+                return Err(syn::Error::new_spanned(
+                    &data.fields,
+                    "a transparent type has exactly one member",
+                ));
+            }
+            let field = data.fields.iter().next().unwrap();
+            let ty = &field.ty;
+            let (member, construct) = match &field.ident {
+                Some(ident) => (quote!(#ident), quote!(Self { #ident: __inner })),
+                None => (quote!(0), quote!(Self(__inner))),
+            };
+            // A transparent wrapper of a composite key is that composite key.
+            let composite = match ty {
+                syn::Type::Tuple(_) => quote! {
+                    impl #plain_impl #k::CompositeKey for #name #ty_generics #where_clause {
+                        type Elements = #ty;
+                    }
+                },
+                _ => quote!(),
+            };
+            Ok(quote! {
+                impl #pack_impl #k::KeyPack for #name #ty_generics #where_clause {
+                    const FIXED_SIZE: ::core::option::Option<usize> = <#ty as #k::KeyPack>::FIXED_SIZE;
+                    fn key_size(&self) -> usize {
+                        #k::KeyPack::key_size(&self.#member)
+                    }
+                    fn key_pack(&self, out: &mut ::std::vec::Vec<u8>) {
+                        #k::KeyPack::key_pack(&self.#member, out)
+                    }
+                    fn key_check(&self) -> #k::KeyResult<()> {
+                        #k::KeyPack::key_check(&self.#member)?;
+                        #check_self
+                        ::core::result::Result::Ok(())
+                    }
+                }
+                impl #unpack_impl #k::KeyUnpack for #name #ty_generics #where_clause {
+                    fn key_unpack(r: &mut #k::KeyReader<'_>) -> #k::KeyResult<Self> {
+                        let __inner = <#ty as #k::KeyUnpack>::key_unpack(r)?;
+                        let __value = #construct;
+                        #check_value
+                        ::core::result::Result::Ok(__value)
+                    }
+                }
+                #composite
+            })
+        }
         Data::Struct(data) => {
             let members: Vec<syn::Member> = match &data.fields {
                 Fields::Named(fields) => fields
@@ -64,13 +130,20 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     fn key_pack(&self, out: &mut ::std::vec::Vec<u8>) {
                         #(#k::KeyPack::key_pack(&self.#members, out);)*
                     }
+                    fn key_check(&self) -> #k::KeyResult<()> {
+                        #(#k::KeyPack::key_check(&self.#members)?;)*
+                        #check_self
+                        ::core::result::Result::Ok(())
+                    }
                 }
                 impl #unpack_impl #k::KeyUnpack for #name #ty_generics #where_clause {
                     #[allow(unused_variables)]
                     fn key_unpack(r: &mut #k::KeyReader<'_>) -> #k::KeyResult<Self> {
-                        ::core::result::Result::Ok(Self {
+                        let __value = Self {
                             #(#members: <#types as #k::KeyUnpack>::key_unpack(r)?,)*
-                        })
+                        };
+                        #check_value
+                        ::core::result::Result::Ok(__value)
                     }
                 }
                 impl #plain_impl #k::CompositeKey for #name #ty_generics #where_clause {
@@ -118,15 +191,23 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         };
                         #k::KeyPack::key_pack(&__value, out);
                     }
+                    fn key_check(&self) -> #k::KeyResult<()> {
+                        #check_self
+                        ::core::result::Result::Ok(())
+                    }
                 }
                 impl #plain_impl #k::KeyUnpack for #name #ty_generics #where_clause {
                     fn key_unpack(r: &mut #k::KeyReader<'_>) -> #k::KeyResult<Self> {
-                        #preamble
-                        let __value = <#repr as #k::KeyUnpack>::key_unpack(r)?;
-                        #(if __value == #values {
-                            return ::core::result::Result::Ok(Self::#variants);
-                        })*
-                        #unpack_other
+                        let __value: Self = (|| -> #k::KeyResult<Self> {
+                            #preamble
+                            let __value = <#repr as #k::KeyUnpack>::key_unpack(r)?;
+                            #(if __value == #values {
+                                return ::core::result::Result::Ok(Self::#variants);
+                            })*
+                            #unpack_other
+                        })()?;
+                        #check_value
+                        ::core::result::Result::Ok(__value)
                     }
                 }
             })
@@ -171,15 +252,23 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             })*
                         }
                     }
+                    fn key_check(&self) -> #k::KeyResult<()> {
+                        match self {
+                            #(Self::#idents(value) => #k::KeyPack::key_check(value)?,)*
+                        }
+                        #check_self
+                        ::core::result::Result::Ok(())
+                    }
                 }
                 impl #unpack_impl #k::KeyUnpack for #name #ty_generics #where_clause {
                     fn key_unpack(r: &mut #k::KeyReader<'_>) -> #k::KeyResult<Self> {
-                        match r.byte()? {
-                            #(#indexes => ::core::result::Result::Ok(
-                                Self::#idents(<#types as #k::KeyUnpack>::key_unpack(r)?)),)*
-                            _ => ::core::result::Result::Err(
+                        let __value = match r.byte()? {
+                            #(#indexes => Self::#idents(<#types as #k::KeyUnpack>::key_unpack(r)?),)*
+                            _ => return ::core::result::Result::Err(
                                 #k::KeyError("key: variant index out of range")),
-                        }
+                        };
+                        #check_value
+                        ::core::result::Result::Ok(__value)
                     }
                 }
             })

@@ -943,6 +943,17 @@ pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7), (J, 
 pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7), (J, 8), (K, 9), (L, 10));
 pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7), (J, 8), (K, 9), (L, 10), (M, 11));
 
+// ── Nested values, maps and sets ────────────────────────────────────────────
+
+#[path = "pssz_nested.rs"]
+mod nested;
+pub use nested::{Checked, Deferred, Nested, NestedValidation};
+
+#[path = "pssz_assoc.rs"]
+mod assoc;
+pub use assoc::{BoundedMap, BoundedSet};
+pub use crate::key::ByKey;
+
 // ── Top-level API ───────────────────────────────────────────────────────────
 
 /// Infallible convenience: panics when the value is not representable.
