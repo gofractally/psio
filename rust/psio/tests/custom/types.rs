@@ -133,9 +133,8 @@ impl TextForm for Ref {
             RefTarget::Number(n) => RefParts::Number(*n),
             RefTarget::Name(name) => RefParts::Name(name.0.clone()),
         };
-        // A name that is not UTF-8 has no text: the JSON writer refuses the
-        // replacement character's absence of a round trip by not being asked
-        // (the fixture holds none).
+        // A name that is not UTF-8 has no text; the empty text is no value
+        // of the type (it does not read back).
         out.push_str(&ref_to_text(&parts).unwrap_or_default());
     }
     fn from_text(text: &str) -> Option<Self> {

@@ -18,8 +18,10 @@ mod harness {
 // conformance/custom-types.md: one declaration (the derives), used by both
 // record flavours.
 #[path = "custom/text.rs"]
+#[allow(dead_code)]
 mod text;
 #[path = "custom/types.rs"]
+#[allow(dead_code)]
 mod custom_types;
 
 mod macro_rules_records {

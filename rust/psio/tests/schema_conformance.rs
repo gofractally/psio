@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[allow(dead_code)]
 mod text;
 #[path = "custom/handlers.rs"]
+#[allow(dead_code)]
 mod custom_handlers;
 
 #[derive(Debug, Clone, serde::Deserialize)]

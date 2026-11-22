@@ -18,10 +18,13 @@ use std::fmt::Debug;
 // The transparent wrappers, custom types and invariants of
 // conformance/custom-types.md.
 #[path = "custom/text.rs"]
+#[allow(dead_code)]
 mod text;
 #[path = "custom/types.rs"]
+#[allow(dead_code)]
 mod custom_types;
 #[path = "custom/handlers.rs"]
+#[allow(dead_code)]
 mod custom_handlers;
 use custom_types::*;
 
