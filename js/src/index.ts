@@ -39,6 +39,11 @@ export {
   type IrTypeValue,
   type IrEnum,
   type IrEnumerator,
+  type IrFunc,
+  type IrResource,
+  type IrInterface,
+  type IrWorld,
+  type IrUse,
   type CompactEnumerator,
   type CompactType,
   type Some,
@@ -88,6 +93,9 @@ export {
 } from './time.js';
 
 export { toHex, fromHex } from './hex.js';
+
+// WIT text of a schema (the port of C++ psio::emit_wit)
+export { emitWit } from './wit.js';
 
 export {
   // Account-name compression (a 64-bit number <-> a short name)

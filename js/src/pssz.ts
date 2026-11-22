@@ -39,7 +39,8 @@ import { viewAt } from './pssz-view.js';
 export {
   PsszError, PsszNaN, IR_VERSION,
   type PsszErrorKind, type IrSchema, type IrAnyType, type IrMember, type IrAttribute, type IrTypeValue,
-  type IrEnum, type IrEnumerator, type CompactEnumerator, type PsszCustomHandler,
+  type IrEnum, type IrEnumerator, type IrFunc, type IrResource, type IrInterface, type IrWorld, type IrUse,
+  type CompactEnumerator, type PsszCustomHandler,
   type CompactType, type PsszSchemaInput, type PsszTypeInput, type Some, type VariantValue, type BitsValue,
 } from './pssz-core.js';
 export { type JsonFormat } from './pssz-json.js';

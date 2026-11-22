@@ -75,7 +75,7 @@ export type IrTypeValue =
   | { type: 'Float'; value: { exp: number; mantissa: number } }
   | { type: 'FracPack'; value: { type: IrAnyType } }
   | { type: 'Custom'; value: { type: IrAnyType; id: string } }
-  | { type: 'Resource'; value: unknown }
+  | { type: 'Resource'; value: IrResource }
   | { type: 'Type'; value: { type: string } }
   | { type: 'Enum'; value: IrEnum };
 /** `psio::schema_types::Enumerator`. */
@@ -92,12 +92,49 @@ export interface IrEnum {
 export interface IrAnyType {
   value: IrTypeValue;
 }
-/** `psio::Schema`. Only `types` is read by the codec. */
+/** `psio::schema_types::Func`. */
+export interface IrFunc {
+  name: string;
+  params: IrMember[];
+  result: IrAnyType | null;
+  attributes: IrAttribute[];
+}
+/** `psio::schema_types::Resource`. */
+export interface IrResource {
+  name: string;
+  methods: IrFunc[];
+  attributes: IrAttribute[];
+}
+/** `psio::schema_types::Interface`. */
+export interface IrInterface {
+  name: string;
+  type_names: string[];
+  funcs: IrFunc[];
+  attributes: IrAttribute[];
+}
+/** `psio::schema_types::World`. */
+export interface IrWorld {
+  name: string;
+  imports: { package: string; interface_name: string }[];
+  exports: string[];
+  attributes: IrAttribute[];
+}
+/** `psio::schema_types::Use`. */
+export interface IrUse {
+  package: string;
+  interface_name: string;
+  version: string;
+  items: { name: string; alias: string | null }[];
+}
+/**
+ * `psio::Schema`. Only `types` is read by the codecs; the envelope
+ * (package, interfaces, worlds, uses) describes an API and is carried as is.
+ */
 export interface IrSchema {
   package: { name: string; version: string; attributes: IrAttribute[] };
-  interfaces: unknown[];
-  worlds: unknown[];
-  uses: unknown[];
+  interfaces: IrInterface[];
+  worlds: IrWorld[];
+  uses: IrUse[];
   types: IrMember[];
   /**
    * The version of the IR's meaning the schema was written in
@@ -281,7 +318,7 @@ export function normalizeType(x: unknown, depth = 0): IrAnyType {
     case 'Variant':
       return { value: { type: kind, value: normalizeRecord(body, d) } };
     case 'Resource':
-      return { value: { type: 'Resource', value: body } };
+      return { value: { type: 'Resource', value: body as IrResource } };
     default:
       break;
   }
@@ -344,7 +381,7 @@ export function normalizeSchema(x: unknown): IrSchema {
   // full form says for itself which version it is (absent: none).
   let version: number | null = IR_VERSION;
   let pkg = { name: '', version: '', attributes: [] as IrAttribute[] };
-  let rest: { interfaces: unknown[]; worlds: unknown[]; uses: unknown[] } = {
+  let rest: { interfaces: IrInterface[]; worlds: IrWorld[]; uses: IrUse[] } = {
     interfaces: [], worlds: [], uses: [],
   };
   if (Array.isArray(x.types)) {
