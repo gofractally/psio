@@ -160,8 +160,10 @@ fn serde_json_writes_the_ijson_text_and_reads_it_back() {
     assert_eq!(serde_json::from_str::<Everything>(&pretty).unwrap(), value);
 
     // Through serde_json::Value, in both directions.
+    // (A Value orders an object's members by name: psio does not turn on
+    // serde_json's preserve_order for the program.)
     let tree = serde_json::to_value(&value).unwrap();
-    assert_eq!(tree.to_string(), text);
+    assert_eq!(tree, serde_json::from_str::<serde_json::Value>(&text).unwrap());
     assert_eq!(serde_json::from_value::<Everything>(tree).unwrap(), value);
 }
 

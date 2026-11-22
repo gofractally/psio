@@ -1,0 +1,14 @@
+[package]
+name = "psio-serde-json-stock"
+version = "0.0.0"
+edition = "2021"
+description = "Test only: a crate that depends on psio with its default features sees stock serde_json"
+license = "MIT"
+publish = false
+
+# No [features]; psio is taken exactly as a dependent takes it by default.
+[dependencies]
+psio = { version = "0.1.0", path = "../psio" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
+serde-aux = "4"

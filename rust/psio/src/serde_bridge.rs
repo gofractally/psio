@@ -98,17 +98,47 @@
 //!   struct `#[derive(psio::JsonText, psio::Serde)]`, or the member
 //!   `#[serde(with = "psio::serde_bridge")]`, for PSIO's text.
 //!
-//! psio builds `serde_json` with `arbitrary_precision` and `raw_value`,
-//! which is how a number and a value reach this module as text.
+//! # `serde_json` features
+//!
+//! psio enables one `serde_json` feature, `raw_value`, which is how a value
+//! reaches this module as the text it has in the input. It adds the
+//! `RawValue` type and changes nothing else, so depending on psio leaves
+//! `serde_json` behaving for the rest of the program exactly as it does
+//! without psio (`rust/psio-serde-json-stock` asserts it). psio does **not**
+//! enable `arbitrary_precision`, `preserve_order` or `float_roundtrip`.
+//!
+//! What that leaves out is confined to reading a PSIO type from something
+//! that is not `serde_json`'s own reader over text or bytes: a
+//! `serde_json::Value` (`serde_json::from_value`), or the buffer serde's
+//! derive puts in front of an untagged or internally tagged enum and a
+//! `#[serde(flatten)]` member. There a number arrives as the `u64` / `i64`
+//! / `f64` that was parsed, as from any other format:
+//!
+//! * a bare integer beyond the 64-bit range has already become an `f64`,
+//!   so a 128- or 256-bit member written as a bare number in `Json` text is
+//!   not recovered from a `Value` (in `IJson` text, which is what this
+//!   bridge reads, such an integer is a string and is unaffected);
+//! * a float is read from the shortest round-trip text of the `f64`
+//!   `serde_json` parsed. Without its `float_roundtrip` feature that parse
+//!   may differ from the correctly rounded value in the last bit for long
+//!   digit strings.
+//!
+//! A program that enables `serde_json/arbitrary_precision` itself gets the
+//! digits through a `Value` as well: the number is then presented as a map
+//! of one private member, which this module recognises.
 
 use crate::json::{JsonCursor, JsonKind, JsonText, JsonTextError, TextCursor};
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{self, SerializeMap, SerializeSeq, Serializer};
 use std::fmt;
 
-/// The name `serde_json` built with `arbitrary_precision` gives the one
-/// member of the map it presents a number as; its value is the number's
-/// text.
+// The `raw_value` feature of serde_json, which `deserialize` relies on.
+#[allow(unused_imports)]
+use serde_json::value::RawValue as _;
+
+/// The name `serde_json` gives the one member of the map it presents a
+/// number as when the program enabled its `arbitrary_precision` feature
+/// (psio does not); its value is the number's text.
 const NUMBER_TOKEN: &str = "$serde_json::private::Number";
 
 /// The newtype name `serde_json` built with `raw_value` answers with a map
@@ -348,8 +378,8 @@ impl<'de> Visitor<'de> for Text<'_> {
                 return Ok(());
             }
             if first && self.out[name_at..] == format!("\"{NUMBER_TOKEN}\"") {
-                // serde_json presents a number as a map of this one member
-                // holding the number's text.
+                // serde_json with arbitrary_precision presents a number as a
+                // map of this one member holding the number's text.
                 let token: String = map.next_value()?;
                 if !number_like(&token) {
                     return Err(de::Error::custom("json: malformed number"));

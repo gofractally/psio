@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
-members = ["psio", "psio-macros"]
+members = ["psio", "psio-macros", "psio-serde-json-stock"]
 

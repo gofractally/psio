@@ -1,11 +1,10 @@
 //! pjson ↔ JSON text transcoder.
 //!
 //! Counterpart of C++'s `pjson_json::from_json` (JSON → pjson) and
-//! `pjson_to_json` (pjson → JSON text).  Implementation walks
-//! serde_json's `Value` tree (with `preserve_order` so object key
-//! order is preserved on the round trip) and emits / consumes pjson
-//! bytes through the canonical encoder/decoder primitives in
-//! `pjson.rs`.
+//! `pjson_to_json` (pjson → JSON text).  Implementation reads the text
+//! with psio's own JSON cursor (object members stay in document order)
+//! and emits / consumes pjson bytes through the canonical
+//! encoder/decoder primitives in `pjson.rs`.
 //!
 //! API (mirrors C++):
 //!     fn from_json(text: &str) -> PjsonResult<Vec<u8>>;
@@ -20,31 +19,32 @@
 //! `e` or `E` in its source representation, the resulting `ieee_float`
 //! tag's bit 3 is set (becomes `0x6B` for binary64 instead of `0x63`).
 //! `to_json` reads this flag and emits scientific notation iff the
-//! flag is set.  The detection requires `serde_json`'s
-//! `arbitrary_precision` feature so we can read the original number
-//! token's bytes via `Number::as_str()`.
+//! flag is set.  The cursor hands over the number's source token, so
+//! nothing is asked of `serde_json`: psio enables none of its
+//! behaviour-changing features (`arbitrary_precision`, `preserve_order`).
 
+use crate::json::{JsonCursor, JsonKind, TextCursor};
 use crate::pjson::{encode, obj_form, str_flag, tag, PjsonError, PjsonResult, Value};
-use serde_json::Value as JValue;
 
 /// JSON text → pjson bytes.
 ///
-/// Uses serde_json's parser, then walks the resulting `Value` tree
-/// with shape preservation (key order, scalar precision via
-/// `arbitrary_precision`).  Output bytes are wire-equivalent to what
-/// the C++ `pjson_json::from_json` produces for the same input
-/// (subject to format-detection differences — see `from_json_with`
-/// for the controllable level).
+/// Reads the text with psio's own JSON cursor, which hands over every
+/// number as its source token, so integer precision and the scientific
+/// notation hint come from the text itself. Output bytes are
+/// wire-equivalent to what the C++ `pjson_json::from_json` produces for
+/// the same input (subject to format-detection differences — see
+/// `from_json_with` for the controllable level).
 pub fn from_json(text: &str) -> PjsonResult<Vec<u8>> {
     from_json_with(text, FromJsonOptions::default())
 }
 
 /// `from_json` with options.  Supplied so tests / consumers that
-/// don't need sci-source preservation can opt out (a sci scan adds a
-/// per-number string allocation pass; the default is on).
+/// don't need sci-source preservation can opt out.
 pub fn from_json_with(text: &str, opts: FromJsonOptions) -> PjsonResult<Vec<u8>> {
-    let parsed: JValue =
-        serde_json::from_str(text).map_err(|_| PjsonError("pjson_json: parse failed"))?;
+    const PARSE: PjsonError = PjsonError("pjson_json: parse failed");
+    let mut cursor = TextCursor::new(text.as_bytes(), false).map_err(|_| PARSE)?;
+    let parsed = JValue::read(&mut cursor).map_err(|_| PARSE)?;
+    cursor.finish().map_err(|_| PARSE)?;
     encode_jvalue(&parsed, &opts)
 }
 
@@ -79,7 +79,60 @@ impl Default for FromJsonOptions {
 
 // ── JSON → pjson (encoder) ───────────────────────────────────────────────
 
-/// Encode a `serde_json::Value` to pjson, applying the supplied
+/// A parsed JSON text. A number keeps its source token; an object keeps
+/// its members in document order, and a repeated name keeps its first
+/// position and its last value.
+enum JValue {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<JValue>),
+    Object(Vec<(String, JValue)>),
+}
+
+impl JValue {
+    fn read(cursor: &mut TextCursor<'_>) -> Result<JValue, crate::json::JsonTextError> {
+        Ok(match cursor.kind()? {
+            JsonKind::Null => {
+                cursor.null()?;
+                JValue::Null
+            }
+            JsonKind::Bool => JValue::Bool(cursor.boolean()?),
+            JsonKind::Number => JValue::Number(cursor.number()?.to_string()),
+            JsonKind::String => JValue::String(cursor.string()?.0.into_owned()),
+            JsonKind::Array => {
+                cursor.begin_array()?;
+                let mut items = Vec::new();
+                while cursor.next_element()? {
+                    items.push(JValue::read(cursor)?);
+                }
+                JValue::Array(items)
+            }
+            JsonKind::Object => {
+                cursor.begin_object()?;
+                let mut members: Vec<(String, JValue)> = Vec::new();
+                let mut index = std::collections::HashMap::<String, usize>::new();
+                loop {
+                    let Some(name) = cursor.next_field()?.map(|name| name.into_owned()) else {
+                        break;
+                    };
+                    let value = JValue::read(cursor)?;
+                    match index.get(&name) {
+                        Some(&at) => members[at].1 = value,
+                        None => {
+                            index.insert(name.clone(), members.len());
+                            members.push((name, value));
+                        }
+                    }
+                }
+                JValue::Object(members)
+            }
+        })
+    }
+}
+
+/// Encode a parsed JSON text to pjson, applying the supplied
 /// options.  Numbers are dispatched per their source representation:
 ///
 /// * Integer source (no `.`/`e`/`E`) → `Value::UInt` or `Value::NegInt`,
@@ -94,11 +147,8 @@ fn encode_jvalue(v: &JValue, opts: &FromJsonOptions) -> PjsonResult<Vec<u8>> {
     Ok(out)
 }
 
-/// Translate a serde_json::Value to a pjson::Value, recursively.
-/// Note: pjson::Value's borrowed string lifetime forces us to allocate
-/// owned bytes here (returned in a side `String` arena).  We dodge
-/// the lifetime issue by encoding objects/arrays in-place using the
-/// number-and-shape-aware writer below.
+/// Translate a parsed JSON text to a pjson::Value, recursively; the
+/// strings are borrowed from the tree.
 fn jvalue_to_pjson_value<'a>(
     v: &'a JValue,
     opts: &FromJsonOptions,
@@ -125,16 +175,13 @@ fn jvalue_to_pjson_value<'a>(
     })
 }
 
-/// Map a serde_json::Number to a pjson::Value.  With
-/// `arbitrary_precision`, `Number::as_str()` returns the source
-/// digit-string verbatim — we scan it for `e`/`E` to set the sci
-/// flag, and dispatch integer vs. fractional from the digit shape.
+/// Map a number's source token to a pjson::Value: scan it for `e`/`E`
+/// to set the sci flag, and dispatch integer vs. fractional from the
+/// digit shape.
 fn json_number_to_pjson<'a>(
-    n: &serde_json::Number,
+    token: &str,
     opts: &FromJsonOptions,
 ) -> PjsonResult<Value<'a>> {
-    // With arbitrary_precision, the source text is preserved.
-    let token = n.as_str();
     let has_dot = token.bytes().any(|b| b == b'.');
     let has_sci = token.bytes().any(|b| b == b'e' || b == b'E');
 
@@ -868,6 +915,7 @@ pub fn f16_bits_to_f64(bits: u16) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value as JValue;
     use crate::pjson::{from_pjson, to_pjson};
 
     #[test]

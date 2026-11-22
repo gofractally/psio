@@ -79,4 +79,15 @@ fn main() {
 }
 ''')
     subprocess.run(['cargo','run','--offline','--manifest-path',str(consumer/'Cargo.toml')], check=True)
+    # A dependent of the published psio (default features) gets a serde_json
+    # with no behaviour-changing feature: Cargo unifies features, so one
+    # required here would apply to every crate of the dependent's program.
+    tree = subprocess.run(['cargo','tree','--offline','--manifest-path',str(consumer/'Cargo.toml'),
+                           '-e','features,normal,build','--prefix','none','--format','{p} [{f}]'],
+                          check=True, capture_output=True, text=True).stdout
+    serde_json = sorted({line for line in tree.splitlines() if line.startswith('serde_json v')})
+    assert serde_json, tree
+    for line in serde_json:
+        for feature in ['arbitrary_precision', 'preserve_order', 'float_roundtrip', 'unbounded_depth']:
+            assert feature not in line, f'psio imposes serde_json/{feature} on its dependents: {line}'
 print('Rust archive consumer passed')

@@ -22,14 +22,13 @@ hex = { version = "0.3.1", optional = true }
 indexmap = { version = "2.2.6", features = ["serde"], optional = true }
 serde-aux = { version = "4.5", optional = true }
 serde = { version = "1.0", features = ["derive", "rc"] }
-# `arbitrary_precision` exposes Number::as_str() so the pjson_json
-# transcoder can detect sci-source notation (e/E) in the original JSON
-# token without round-tripping through f64.  Cost is per-number string
-# allocation; the exchange is the §7.1 sci-source hint.
-# `raw_value` lets psio::serde_bridge take the exact text of a value from
-# serde_json's reader, so reading through serde accepts what from_ijson does.
-serde_json = { version = "1.0.135",
-                features = ["preserve_order", "arbitrary_precision", "raw_value"] }
+# psio enables no serde_json feature that changes what serde_json does for
+# the other crates of a program (Cargo unifies features across the graph):
+# no `arbitrary_precision`, no `preserve_order`, no `float_roundtrip`.
+# `raw_value` only adds the `RawValue` type and the private newtype name it
+# is requested by; psio::serde_bridge asks for a value's exact text through
+# it, so reading through serde accepts what from_ijson does.
+serde_json = { version = "1.0.135", features = ["raw_value"] }
 psio-macros = { version = "0.1.0", path = "../psio-macros" }
 paste = "1"
 # Shortest round-trip float digits, the algorithm of C++ std::to_chars

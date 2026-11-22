@@ -1791,6 +1791,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "psio-serde-json-stock"
+version = "0.0.0"
+dependencies = [
+ "psio",
+ "serde",
+ "serde-aux",
+ "serde_json",
+]
+
+[[package]]
 name = "ptr_meta"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2294,7 +2304,6 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
- "indexmap",
  "itoa",
  "memchr",
  "serde",

@@ -549,16 +549,63 @@ thread_local! {
 /// Whether two JSON texts differ only in how a number that is not a 64-bit
 /// integer, or a string escape, is spelled.
 fn same_but_spelling(a: &str, b: &str) -> bool {
-    use serde_json::Value;
+    use psio::json::{JsonCursor, JsonKind, TextCursor};
+    // The text as a tree; a number keeps its token and an object its
+    // members in document order. (serde_json::Value would do neither: psio
+    // does not enable its arbitrary_precision or preserve_order features.)
+    #[derive(PartialEq)]
+    enum Value {
+        Null,
+        Bool(bool),
+        Number(String),
+        String(String),
+        Array(Vec<Value>),
+        Object(Vec<(String, Value)>),
+    }
+    fn read(c: &mut TextCursor<'_>) -> Result<Value, psio::json::JsonTextError> {
+        Ok(match c.kind()? {
+            JsonKind::Null => {
+                c.null()?;
+                Value::Null
+            }
+            JsonKind::Bool => Value::Bool(c.boolean()?),
+            JsonKind::Number => Value::Number(c.number()?.to_string()),
+            JsonKind::String => Value::String(c.string()?.0.into_owned()),
+            JsonKind::Array => {
+                c.begin_array()?;
+                let mut items = Vec::new();
+                while c.next_element()? {
+                    items.push(read(c)?);
+                }
+                Value::Array(items)
+            }
+            JsonKind::Object => {
+                c.begin_object()?;
+                let mut members = Vec::new();
+                loop {
+                    let Some(name) = c.next_field()?.map(|n| n.into_owned()) else { break };
+                    members.push((name, read(c)?));
+                }
+                Value::Object(members)
+            }
+        })
+    }
+    fn parse(text: &str) -> Option<Value> {
+        let mut c = TextCursor::new(text.as_bytes(), false).ok()?;
+        let value = read(&mut c).ok()?;
+        c.finish().ok()?;
+        Some(value)
+    }
     fn same(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Number(a), Value::Number(b)) => {
-                // Two integers are the same token. (serde_json::Value reads
-                // "-0" as 0, so the sign of a zero is not compared here; the
-                // caller re-reads the text and compares the values.)
-                let (a, b) = (a.as_str(), b.as_str());
+                // Two integers are the same token. (The sign of a zero is
+                // not compared here; the caller re-reads the text and
+                // compares the values.)
+                let zero = |t: &str| t == "0" || t == "-0";
                 let integer = |t: &str| t.parse::<i128>().is_ok();
                 a == b
+                    || (zero(a) && zero(b))
                     || (!(integer(a) && integer(b))
                         && a.parse::<f64>().unwrap() == b.parse::<f64>().unwrap())
             }
@@ -572,8 +619,8 @@ fn same_but_spelling(a: &str, b: &str) -> bool {
             (a, b) => a == b,
         }
     }
-    match (serde_json::from_str::<Value>(a), serde_json::from_str::<Value>(b)) {
-        (Ok(a), Ok(b)) => same(&a, &b),
+    match (parse(a), parse(b)) {
+        (Some(a), Some(b)) => same(&a, &b),
         _ => false,
     }
 }
