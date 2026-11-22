@@ -37,6 +37,15 @@
 //   psio::reflect<T>::method_result<I>               return type
 //   psio::reflect<T>::method_args<I>                 std::tuple<Args...> as declared
 //   psio::reflect<T>::method_params<I>               std::tuple<remove_cvref_t<Args>...>
+//   psio::reflect<T>::method_annotations<I>          what method(...) lists beyond names:
+//                                                    .params (one spec tuple per listed
+//                                                    parameter), .result (returns(...)),
+//                                                    .max_dynamic_data (maxDynamicData(N))
+//   psio::reflect<T>::method_max_dynamic_data<I>     the argument-tuple cap (optional)
+//   psio::reflect<T>::method_arg_tuple<I>            method_params<I> carrying those
+//                                                    annotations and the cap: a
+//                                                    psio::annotated_tuple, the type to
+//                                                    encode / decode / validate arguments as
 //   psio::reflect<T>::method_is_static<I> / method_is_const<I>
 //   psio::reflect<T>::method_traits<I>               psio::method_traits<method_type<I>>
 //   psio::reflect<T>::index_of_method(name)          name → index (optional)
@@ -376,6 +385,25 @@ namespace psio {
    template <typename T>
    concept Reflected = reflect<T>::is_reflected;
 
+   // A std::tuple<Ts...> that carries annotations for its elements and a
+   // cap for the whole (wrappers.hpp). `reflect<T>::method_arg_tuple<I>` is
+   // the one of method I's arguments.
+   template <typename Meta, typename... Ts>
+   struct annotated_tuple;
+   // The Meta of a method's argument tuple (wrappers.hpp).
+   template <typename T, std::size_t I>
+   struct method_arg_meta;
+   namespace detail
+   {
+      template <typename T, std::size_t I, typename Params>
+      struct method_arg_tuple_of;
+      template <typename T, std::size_t I, typename... Ps>
+      struct method_arg_tuple_of<T, I, std::tuple<Ps...>>
+      {
+         using type = annotated_tuple<method_arg_meta<T, I>, Ps...>;
+      };
+   }
+
    // ── Function-type decomposition ────────────────────────────────────────
    //
    // method_traits<F> for a pointer to a member function (const or not,
@@ -538,6 +566,104 @@ namespace psio {
                   return false;
          return true;
       }
+      // ── method(...) items ────────────────────────────────────────────
+      //
+      // `method(name, item...)` lists, in one flat list:
+      //
+      //   p                     a parameter name
+      //   attr(p, specs)        a parameter name with annotations (the specs
+      //                         a field's attr takes: max<N>, utf8,
+      //                         element(...), keys(...), at<I>(...), ...)
+      //   maxDynamicData(N)     the cap of the method's argument tuple: its
+      //                         encoded size limit, and what fixes its offset
+      //                         width for the method's lifetime (room for
+      //                         optional arguments appended later)
+      //   returns(specs)        annotations of the return value
+      //
+      // The macro turns each into one of the item values below;
+      // make_method_meta folds them into the method's metadata.
+      template <typename Specs = std::tuple<>>
+      struct method_param_item
+      {
+         Specs specs{};
+      };
+      template <typename Specs>
+      method_param_item(Specs) -> method_param_item<Specs>;
+      struct method_cap_item
+      {
+         std::size_t value;
+      };
+      template <typename Specs>
+      struct method_result_item
+      {
+         Specs specs{};
+      };
+      template <typename Specs>
+      method_result_item(Specs) -> method_result_item<Specs>;
+      struct method_items_end
+      {
+      };
+
+      // What method(...) says about one method beyond its parameter names.
+      //
+      //   params            std::tuple with one element per listed parameter,
+      //                     in order: the std::tuple of its annotation specs
+      //                     (std::tuple<> for a bare name)
+      //   result            the std::tuple of specs of returns(...)
+      //   max_dynamic_data  maxDynamicData(N), if listed
+      template <typename Params, typename Result>
+      struct method_meta
+      {
+         Params                     params{};
+         Result                     result{};
+         std::optional<std::size_t> max_dynamic_data{};
+      };
+
+      template <typename Item>
+      inline constexpr bool is_method_param_item = false;
+      template <typename Specs>
+      inline constexpr bool is_method_param_item<method_param_item<Specs>> = true;
+      template <typename Item>
+      inline constexpr bool is_method_result_item = false;
+      template <typename Specs>
+      inline constexpr bool is_method_result_item<method_result_item<Specs>> = true;
+
+      template <typename Item>
+      constexpr auto method_param_part(const Item& item) noexcept
+      {
+         if constexpr (is_method_param_item<Item>)
+            return std::tuple<decltype(item.specs)>{item.specs};
+         else
+            return std::tuple<>{};
+      }
+      template <typename Item>
+      constexpr auto method_result_part(const Item& item) noexcept
+      {
+         if constexpr (is_method_result_item<Item>)
+            return item.specs;
+         else
+            return std::tuple<>{};
+      }
+      template <typename Item>
+      constexpr void method_cap_part(const Item& item, std::optional<std::size_t>& cap) noexcept
+      {
+         if constexpr (std::is_same_v<Item, method_cap_item>)
+            cap = item.value;
+      }
+      template <typename... Items>
+      constexpr auto make_method_meta(const Items&... items) noexcept
+      {
+         static_assert((std::size_t{std::is_same_v<Items, method_cap_item>} + ... + 0) <= 1,
+                       "psio: method(...) lists maxDynamicData(N) more than once");
+         static_assert((std::size_t{is_method_result_item<Items>} + ... + 0) <= 1,
+                       "psio: method(...) lists returns(...) more than once");
+         auto                       params = std::tuple_cat(method_param_part(items)...);
+         auto                       result = std::tuple_cat(method_result_part(items)...);
+         std::optional<std::size_t> cap;
+         (method_cap_part(items, cap), ...);
+         return method_meta<decltype(params), decltype(result)>{params, result, cap};
+      }
+
       constexpr bool reflected_name_reserved(std::string_view name)
       {
          return name == "psio_get_proxy" || name == "_psio_record_proxy";
@@ -666,9 +792,52 @@ namespace psio {
 #define PSIO_PP_QUOTE_STEP_(a, ...) \
    BOOST_PP_STRINGIZE(a), __VA_OPT__(PSIO_PP_QUOTE_AGAIN_ PSIO_PP_PARENS_(__VA_ARGS__))
 #define PSIO_PP_QUOTE_AGAIN_() PSIO_PP_QUOTE_STEP_
-#define PSIO_REFLECT_METHOD_PARAMS_(kind, name, ...) PSIO_PP_QUOTE_EACH_(__VA_ARGS__)
+// The items of method(name, item...): a bare parameter name, or one of the
+// keywords below (recognised by token pasting, as PSIO_REFLECT's own are).
+#define PSIO_REFLECT_MKW_attr(F, ...) (mattr, F, __VA_ARGS__), 1
+#define PSIO_REFLECT_MKW_maxDynamicData(N) (mcap, N), 1
+#define PSIO_REFLECT_MKW_returns(...) (mret, __VA_ARGS__), 1
+// item -> FN_PLAIN(item), or FN_<kind> (kind, payload...) for a keyword.
+#define PSIO_REFLECT_MITEM_(FN, item)                                             \
+   BOOST_PP_IIF(PSIO_PP_MATCH(PSIO_REFLECT_MKW_, item), PSIO_REFLECT_MITEM_KW_,   \
+                PSIO_REFLECT_MITEM_PLAIN_)(FN, item)
+#define PSIO_REFLECT_MITEM_PLAIN_(FN, item) BOOST_PP_CAT(FN, PLAIN)(item)
+#define PSIO_REFLECT_MITEM_KW_(FN, item) \
+   PSIO_REFLECT_MITEM_KW_I_(FN, PSIO_PP_APPLY_FIRST(BOOST_PP_CAT(PSIO_REFLECT_MKW_, item)))
+#define PSIO_REFLECT_MITEM_KW_I_(FN, kt) BOOST_PP_CAT(FN, BOOST_PP_TUPLE_ELEM(0, kt)) kt
+// FN over every item (nothing for no items).
+#define PSIO_PP_MITEM_EACH_(FN, ...) \
+   __VA_OPT__(PSIO_PP_RESCAN2_(PSIO_PP_MITEM_STEP_(FN, __VA_ARGS__)))
+#define PSIO_PP_MITEM_STEP_(FN, a, ...) \
+   PSIO_REFLECT_MITEM_(FN, a) __VA_OPT__(PSIO_PP_MITEM_AGAIN_ PSIO_PP_PARENS_(FN, __VA_ARGS__))
+#define PSIO_PP_MITEM_AGAIN_() PSIO_PP_MITEM_STEP_
+
+// "p1", "p2", ...: the parameter names (a bare name or attr's).
+#define PSIO_REFLECT_MNAME_PLAIN(item) BOOST_PP_STRINGIZE(item),
+#define PSIO_REFLECT_MNAME_mattr(kind, F, ...) BOOST_PP_STRINGIZE(F),
+#define PSIO_REFLECT_MNAME_mcap(kind, N)
+#define PSIO_REFLECT_MNAME_mret(kind, ...)
+#define PSIO_REFLECT_METHOD_PARAMS_(kind, name, ...) \
+   PSIO_PP_MITEM_EACH_(PSIO_REFLECT_MNAME_, __VA_ARGS__)
 #define PSIO_REFLECT_METHOD_PARAM_LIST_(r, _, I, kt) \
    ::std::initializer_list<const char*>{PSIO_REFLECT_METHOD_PARAMS_ kt},
+
+// The item values make_method_meta folds (detail::method_param_item, ...).
+#define PSIO_REFLECT_MVALUE_PLAIN(item) ::psio::detail::method_param_item<>{},
+#define PSIO_REFLECT_MVALUE_mattr(kind, F, ...) \
+   ::psio::detail::method_param_item{::psio::to_spec_tuple(__VA_ARGS__)},
+#define PSIO_REFLECT_MVALUE_mcap(kind, N) ::psio::detail::method_cap_item{N},
+#define PSIO_REFLECT_MVALUE_mret(kind, ...) \
+   ::psio::detail::method_result_item{::psio::to_spec_tuple(__VA_ARGS__)},
+#define PSIO_REFLECT_METHOD_VALUES_(kind, name, ...) \
+   PSIO_PP_MITEM_EACH_(PSIO_REFLECT_MVALUE_, __VA_ARGS__)
+#define PSIO_REFLECT_METHOD_META_CASE_(r, _, I, kt)                                    \
+   if constexpr (Idx == (I))                                                           \
+   {                                                                                   \
+      using namespace ::psio;                                                          \
+      return ::psio::detail::make_method_meta(                                         \
+         PSIO_REFLECT_METHOD_VALUES_ kt ::psio::detail::method_items_end{});           \
+   }
 
 // NOTE: this macro takes an *unqualified* type identifier. Invoke
 // PSIO_REFLECT inside the namespace containing the type:
@@ -719,7 +888,19 @@ namespace psio {
 //      → registered as a method: an instance member function (const or
 //      not), or a static member function. The parameter names are optional
 //      metadata (WIT / schema parameter names); list none, or one per
-//      parameter.
+//      parameter. In the same flat list a parameter may carry annotations
+//      and the method a cap and return-value annotations:
+//
+//         method(transfer, to, amount, attr(memo, utf8 | max<80>),
+//                maxDynamicData(256), returns(max<32>))
+//
+//      attr(p, specs) names parameter p and annotates it exactly as a
+//      field's attr does; maxDynamicData(N) caps the encoded argument
+//      tuple (and fixes its offset width: room for optional arguments
+//      appended later); returns(specs) annotates the return value. They are
+//      read back as reflect<T>::method_annotations<I>, and
+//      reflect<T>::method_arg_tuple<I> is the argument tuple type that
+//      carries them into the codecs.
 //
 //   7. transparent()                  type-level keyword
 //      → emits the type-level `psio::transparent_spec` annotation: the
@@ -1227,6 +1408,22 @@ namespace psio {
       static constexpr auto method_param_names                                           \
          = ::psio::detail::method_param_name_array<_psio_self_, Idx>();                  \
                                                                                          \
+      /* What method(...) lists beyond the names: per-parameter annotations, */          \
+      /* returns(...) and maxDynamicData(N) (detail::method_meta).           */          \
+      template <::std::size_t Idx>                                                       \
+      static constexpr auto _method_meta_impl_() noexcept                                \
+      {                                                                                  \
+         static_assert(Idx < method_count, PSIO_REFLECT_METHOD_INDEX_MSG_);              \
+         PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_METHOD_META_CASE_, _, SEQ)                 \
+      }                                                                                  \
+      /* (declared with its type, not auto: nameable in decltype before use) */          \
+      template <::std::size_t Idx>                                                       \
+      static constexpr decltype(_method_meta_impl_<Idx>()) method_annotations            \
+         = _method_meta_impl_<Idx>();                                                    \
+      template <::std::size_t Idx>                                                       \
+      static constexpr ::std::optional<::std::size_t> method_max_dynamic_data            \
+         = method_annotations<Idx>.max_dynamic_data;                                     \
+                                                                                         \
       template <::std::size_t Idx>                                                       \
       using method_traits = ::psio::method_traits<method_type<Idx>>;                     \
       template <::std::size_t Idx>                                                       \
@@ -1235,6 +1432,11 @@ namespace psio {
       using method_args = typename method_traits<Idx>::args;                             \
       template <::std::size_t Idx>                                                       \
       using method_params = typename method_traits<Idx>::params;                         \
+      /* method_params<Idx> carrying the method's parameter annotations and */           \
+      /* cap: the type to encode / decode / validate the arguments as.      */           \
+      template <::std::size_t Idx>                                                       \
+      using method_arg_tuple = typename ::psio::detail::method_arg_tuple_of<             \
+         psio_T_, Idx, method_params<Idx>>::type;                                        \
       template <::std::size_t Idx>                                                       \
       static constexpr bool method_is_static = method_traits<Idx>::is_static;            \
       template <::std::size_t Idx>                                                       \

@@ -434,6 +434,57 @@ nested value is not addressable through a `pssz_view` (state the bound in the
 type to view it), and a member with `element` / `keys` / `values` / `at`
 annotations is not addressable through a mutable view.
 
+### Method parameters and the argument cap
+
+`method(name, ...)` takes the same annotations for its parameters, a cap for
+its argument tuple, and annotations for its return value, in one flat list:
+
+```cpp
+struct token {
+   void        transfer(std::string to, std::uint64_t amount, std::string memo);
+   std::string symbol(std::uint32_t id) const;
+   PSIO_REFLECT(token,
+                method(transfer, to, amount, attr(memo, utf8 | max<80>), maxDynamicData(256)),
+                method(symbol, id, returns(utf8 | max<8>)))
+};
+```
+
+`attr(p, specs)` names parameter `p` and annotates it; a bare name is a
+parameter without annotations; `maxDynamicData(N)` caps the encoded argument
+tuple and — as for a record — fixes its offset width for the method's
+lifetime, reserving room for optional arguments appended later;
+`returns(specs)` annotates the return value. Existing `method(name, p...)`
+declarations are unchanged.
+
+- `reflect<T>::method_annotations<I>` is the metadata (`.params`, one spec
+  tuple per listed parameter; `.result`; `.max_dynamic_data`), and
+  `reflect<T>::method_max_dynamic_data<I>` the cap.
+- `reflect<T>::method_arg_tuple<I>` is the argument tuple type that carries
+  them: `psio::annotated_tuple<…, decayed parameters…>`. It derives from and
+  converts from `std::tuple<decayed parameters…>`; encode, decode and
+  validate it like any value and the parameter bounds select its width and
+  are enforced, and the cap rules:
+
+  ```cpp
+  using Args = psio::reflect<token>::method_arg_tuple<0>;
+  static_assert(psio::auto_pssz_width_v<Args> == 2);            // the cap: 256
+  auto bytes = psio::to_pssz(Args{to, amount, memo});           // refuses a memo of 81 bytes
+  auto args  = psio::from_pssz<Args>(bytes);                    // refuses one too
+  std::apply([&](auto&... a) { t.transfer(a...); }, args.tuple());
+  ```
+
+- A trailing `std::optional` argument added under the cap keeps the width:
+  `psio::pssz_evolves_from<OldArgs, NewArgs>` is true. Without a cap the width
+  is the inferred bound's; an added argument that crosses 255 or 65 535 bytes
+  changes it, and `pssz_evolves_from` is false at compile time.
+- `psio::check_method_result<T, I>(value)` checks a return value against
+  `returns(...)`. (A bare string or list has no width of its own, so its
+  bytes do not depend on the bound.)
+- In the Schema IR of a `PSIO_INTERFACE` whose functions come from
+  `reflect<T>`, the parameters and the result are the bounded types and the
+  cap is the function's `maxDynamicData` attribute; `emit_wit` writes it as
+  `@maxDynamicData(N)` above the function.
+
 There is one proxy, `psio::reflect<T>::proxy<P>`. It inherits `P`; each
 field is a member `name()` that returns `P::get<I, &T::name>()` and each
 method a member `name(args...)` that returns

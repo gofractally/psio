@@ -437,6 +437,9 @@ struct reflected_interface
       typename func_types_of<std::make_index_sequence<reflect<Tag>::method_count>>::type;
    static constexpr auto  func_names  = reflect<Tag>::method_names;
    static constexpr auto& param_names = reflect<Tag>::method_param_name_lists;
+   // Function I is reflect<reflected_tag>'s method I: its parameter
+   // annotations, cap and returns(...) are reflect's method_annotations<I>.
+   using reflected_tag = Tag;
 };
 
 // ─── Cross-package use registry — specialized by PSIO_USE ──────────

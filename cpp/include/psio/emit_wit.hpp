@@ -338,6 +338,9 @@ namespace psio::schema_types
 
          void emit_func(const Func& fn)
          {
+            // The cap of the function's argument tuple (method(...,
+            // maxDynamicData(N))), as the same @-attribute a record's is.
+            emit_type_attribute_lines(fn.attributes);
             indent();
             _out << to_kebab(fn.name) << ": func(";
             for (std::size_t i = 0; i < fn.params.size(); ++i)

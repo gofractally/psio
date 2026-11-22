@@ -275,6 +275,9 @@ psio_add_test(psio_pssz_inferred_bound_tests pssz_inferred_bound_tests.cpp)
 # Bounds by annotation at any depth (element / keys / values / at<I>) and by
 # wrapper type (psio::bounded, psio::utf8_string): widths, bytes, enforcement.
 psio_add_test(psio_annotation_tree_tests annotation_tree_tests.cpp)
+# method(name, attr(p, specs)..., maxDynamicData(N), returns(specs)): metadata,
+# the annotated argument tuple, evolution, the interface schema.
+psio_add_test(psio_method_annotation_tests method_annotation_tests.cpp)
 # An annotation on the wrong shape is a compile error that names the mistake.
 add_test(NAME psio_annotation_tree_control_compiles
          COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
