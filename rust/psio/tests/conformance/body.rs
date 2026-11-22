@@ -104,6 +104,19 @@ fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
         .collect::<Vec<_>>();
     assert_eq!(bound_rejections.len(), 36);
     assert!(bound_rejections.iter().all(|v| v.expect == "reject"));
+    // A member outside its length_bound is refused by every reader that is
+    // not explicitly trusted (the eleven entry points of `check`, the
+    // fail-fast decode included), in every profile.
+    let overflows: Vec<_> =
+        fixture.vectors.iter().filter(|v| v.class == "length-bound-overflow").collect();
+    assert_eq!(overflows.len(), 32);
+    for format in ["auto", "pssz8", "pssz16", "pssz32"] {
+        assert_eq!(overflows.iter().filter(|v| v.format == format).count(), 8, "{format}");
+    }
+    for v in &overflows {
+        let entry = registry.get(&v.ty).expect("mapped above");
+        assert_eq!((entry.check)(v), Ok(()), "{}", v.name);
+    }
     // Every vector of every class was checked above: none is skipped.
     let classes: std::collections::BTreeMap<&str, usize> =
         fixture.vectors.iter().fold(Default::default(), |mut count, v| {

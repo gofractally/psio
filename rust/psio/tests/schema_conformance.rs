@@ -590,6 +590,7 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
     let (mut explicit_nested_caps, mut explicit_top_caps) = (0usize, 0usize);
     let (mut nested, mut nested_unknown, mut nested_deferred) = (0usize, 0usize, 0usize);
     let (mut violated, mut violated_explicit) = (0usize, 0usize);
+    let mut bound_overflows = 0usize;
     // The handlers of the fixture's custom types, and a strict registry
     // that has none.
     let mut handlers = dynamic::CustomHandlers::new();
@@ -663,6 +664,13 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
             }
             if row.expect == "reject" {
                 assert!(outcome.is_err(), "{name}: accepted");
+                let exact = match row.format.as_str() {
+                    "pssz8" => dynamic::decode_exact_with::<Pssz8>(&schema, &root, &bytes, options),
+                    "pssz16" => dynamic::decode_exact_with::<Pssz16>(&schema, &root, &bytes, options),
+                    _ => dynamic::decode_exact_with::<Pssz32>(&schema, &root, &bytes, options),
+                };
+                assert!(exact.is_err(), "{name}: decode_exact accepted");
+                bound_overflows += usize::from(class == "length-bound-overflow");
             } else {
                 assert_eq!(outcome, Ok(row.expect == "unknown"), "{name}");
             }
@@ -686,6 +694,16 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
         if row.expect == "reject" {
             assert!(outcome.is_err(), "{name}: accepted");
             assert!(dynamic::validate(&schema, &root, &bytes).is_err(), "{name}");
+            // Every schema-driven reader refuses it, the text conversions
+            // included.
+            assert!(dynamic::decode_exact_with::<Pssz>(&schema, &root, &bytes, options).is_err(), "{name}: decode_exact");
+            assert!(dynamic::decode_compatible_with::<Pssz>(&schema, &root, &bytes, options).is_err(), "{name}: decode_compatible");
+            if class != "nested-deferred" {
+                assert!(dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).is_err(), "{name}: to json");
+                assert!(dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes).is_err(), "{name}: to ijson");
+                assert!(dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &handlers).is_err(), "{name}: to ijson, handlers");
+            }
+            bound_overflows += usize::from(class == "length-bound-overflow");
             // The order of a map / set is the schema's to check: the same
             // rule, the same message as the typed codec.
             if class == "map-set-order" {
@@ -824,6 +842,13 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
         fx.vectors.iter().filter(|row| row.format != "auto").count()
     );
     assert_eq!(explicit_nested_caps, 15, "cap-overflow-explicit-nested");
+    // Every length-bound-overflow vector, in every profile, was refused by
+    // every schema-driven reader.
+    assert_eq!(bound_overflows, 32, "length-bound-overflow");
+    assert_eq!(
+        fx.vectors.iter().filter(|row| row.name.starts_with("length-bound-overflow/")).count(),
+        32
+    );
     // Every vector of the nested / invariant classes, in every profile.
     let count = |class: &str, auto: bool| {
         fx.vectors.iter().filter(|row| row.name.starts_with(class) && (row.format == "auto") == auto).count()

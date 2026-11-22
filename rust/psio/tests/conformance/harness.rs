@@ -211,7 +211,11 @@ impl<T> All for T where
 {
 }
 
-fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Result<(), String> {
+fn check_format<F, T>(v: &Vector) -> Result<(), String>
+where
+    F: PsszFormat + psio::Format<Error = PsszError>,
+    T: Codec<F> + psio::Validate<F> + std::fmt::Debug,
+{
     let bytes = unhex(&v.hex);
     let bytes = &bytes[..];
     let fail = |what: &str, detail: String| Err(format!("{what}: {detail}"));
@@ -225,12 +229,17 @@ fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Res
     let view = PsszView::<T, F>::new(bytes).map(|_| ());
     let view_compatible = PsszView::<T, F>::new_checked(bytes).map(|d| d.has_unknown);
     let view_exact = PsszView::<T, F>::new_strict(bytes).map(|_| ());
+    // The owners of validated bytes validate what they are given.
+    let buffer = psio::Buffer::<T, F>::new(bytes.to_vec()).map(|_| ());
+    let shared = psio::Shared::<T, F>::new(bytes).map(|_| ());
     match v.expect.as_str() {
         "canonical" | "unknown" => {
             let unknown = v.expect == "unknown";
             if let Err(e) = &validate { return fail("validate rejected", e.to_string()); }
             if compatible != Ok(unknown) { return fail("validate_compatible", format!("{compatible:?}")); }
             if view.is_err() { return fail("view rejected", format!("{view:?}")); }
+            if let Err(e) = &buffer { return fail("Buffer::new rejected", e.to_string()); }
+            if let Err(e) = &shared { return fail("Shared::new rejected", e.to_string()); }
             if view_compatible != Ok(unknown) { return fail("view_compatible", format!("{view_compatible:?}")); }
             let value = match decode { Ok(v) => v, Err(e) => return fail("decode rejected", e.to_string()) };
             match decode_compatible {
@@ -264,7 +273,7 @@ fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Res
             Ok(())
         }
         "reject" => {
-            let outcomes: [(&str, Option<PsszError>); 9] = [
+            let outcomes: [(&str, Option<PsszError>); 11] = [
                 ("validate", validate.err()),
                 ("validate_compatible", compatible.err()),
                 ("validate_exact", exact.err()),
@@ -274,6 +283,8 @@ fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Res
                 ("view", view.err()),
                 ("view_compatible", view_compatible.err()),
                 ("view_exact", view_exact.err()),
+                ("Buffer::new", buffer.err()),
+                ("Shared::new", shared.err()),
             ];
             let accepted: Vec<&str> =
                 outcomes.iter().filter(|(_, e)| e.is_none()).map(|(name, _)| *name).collect();
