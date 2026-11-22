@@ -18,6 +18,20 @@ supported encodings. Pjson now adopts the audited tag numbering as wire revision
   negative-inline integers, views and JSON output. Retain independent safety fixes.
 - [ ] Expand the existing Rust and TypeScript fixture coverage, including
   decode, encode, views where supported, malformed input, and boundaries.
+  PSSZ is done for Rust: `conformance/pssz-vectors.json` is generated from the
+  C++ codec and run by both ctest and cargo test (encode, decode, validation,
+  views, evolution in both directions, pruning, type-derived widths, malformed
+  input). TypeScript has no PSSZ implementation.
+- [x] Bring Rust PSSZ to parity with C++: record evolution through the
+  writer's header, mandatory pruning, type-derived offset widths (`Pssz`,
+  `max_dynamic_data`), UTF-8 vs raw strings, enums as integers, variants and
+  tuples, proc-macro derives and `pssz_struct!` macros over one checked
+  codec, and a `const fn pssz_evolves_from`. Remaining differences are listed
+  in `compatibility.md` ("PSSZ: Rust and C++").
+- [ ] Decide the schema identifier for raw byte strings (C++ `std::string`
+  still emits the UTF-8 `"string"` adapter; Rust `RawString` emits `"hex"`),
+  enforce member `length_bound` in C++, and give the Rust schema-driven codec
+  the automatic width profile.
 - [ ] Complete the missing language/format implementations. The recovered
   TypeScript package now implements fracpack, pjson and JSON conversion; its WIT
   module generates interface definitions, rather than implementing a WIT
@@ -72,3 +86,12 @@ conversion, and rejection. A broader pjson sanitizer attempt found existing
 alignment defects and root-scalar JSON parsing trouble; see `compatibility.md`.
 Current evidence is retained under psiserve's
 `outputs/tag-and-pzam-fixes-2026-09-16/`.
+
+## PSSZ parity checkpoint (`codex/psibase-core-evolution`)
+
+macOS ARM64: 69 CTest targets pass (65 before, plus plain enums, the string
+pairing tests, the conformance consumer and the fixture regeneration check).
+`cargo test` passes: 676 library tests (2 ignored), 14 public conformance
+tests, and the PSSZ integration suites - abi golden 1, bits 4, checked 6,
+conformance 10, derive 8, dynamic 7, optional suffix 5, parity 24, safety 13,
+schema 7, upgrade 2, zero-sized 1 - plus 16 doctests (9 ignored).

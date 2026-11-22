@@ -12,7 +12,7 @@ designs. Its rows below describe benchmark implementation coverage.
 | frac32 / fracpack | records, nesting, variants, empty values, scalar/string/vector/optional | encode/decode | encode/decode |
 | pjson | scalars, 274 doubles, typed containers, keys, rejection cases | encode/decode/validate | encode/decode/validate |
 | SSZ | two records | encode/decode | implementation absent |
-| pSSZ | two records | encode/decode | implementation absent |
+| pSSZ | two records in the public corpus; `conformance/pssz-vectors.json` (generated from the C++ codec, checked by ctest) | encode/decode/validate/views against the whole PSSZ fixture, for `pssz_struct!` records and derives | implementation absent |
 | Cap'n Proto | two records | encode/decode | implementation absent |
 | FlatBuffers | two records | encode/decode | implementation absent |
 | WIT binary | two records | encode only in shared fixture test | implementation absent; WIT text generation is separate |
@@ -48,6 +48,69 @@ declarations, not test code.
 - Retained applicable pre-existing uncommitted Rust fixes. The pre-edit patch is
   saved in the psiserve `outputs/psio-release-work-2026-09-16` directory.
 
+## PSSZ: Rust and C++
+
+`conformance/pssz-vectors.json` is emitted by `cpp/tests/pssz_conformance_emit.cpp`
+from the C++ implementation and consumed by `cpp/tests/pssz_conformance_tests.cpp`
+(ctest, which also fails if the checked-in file differs from a fresh emission)
+and `rust/psio/tests/pssz_conformance.rs` (cargo test). Each vector names a
+type id that both languages map to a concrete type, a format (`auto`,
+`pssz8`, `pssz16`, `pssz32`), the bytes, and the outcome: valid and canonical,
+valid with unknown fields (and the reader's re-encoding), or rejected. Rust
+must decode and re-encode every valid vector to identical bytes and reject
+every rejected one, and it checks the fixture's width / bound / cap / fixed
+manifest for every type. See `conformance/pssz-vectors.md` for the classes.
+
+The fixture has 5167 vectors over 204 types. Rust reaches the C++ outcome on
+5099 of them. The other 68 record a deliberate difference of type design, and
+the Rust test asserts that Rust rejects exactly those:
+
+| Difference | C++ | Rust |
+|---|---|---|
+| Enum value that is not an enumerator (`enum-unknown-value`) | accepted: an enum is any value of its underlying integer. `pssz-spec.md` 4.5 (`enum_out_of_range`) says a decoder rejects it, so C++ and the spec disagree here | rejected, as the spec says: a Rust enum cannot hold it |
+| Member `length_bound` exceeded (`length-bound-overflow`, and the four `width/cap/checkpoint_at_cap` frames) | accepted: the bound only feeds width inference, no reader or writer enforces it (open gate in `pssz-type-width.md`) | rejected: `BoundedRawString<N>` / `BoundedList<T, N>` enforce the bound on encode, decode and validate |
+
+Other differences that remain. None changes the bytes of a value both
+languages can represent.
+
+- **Unvalidated C++ `decode`.** C++ `decode` is a fail-fast path that assumes
+  `validate` ran: on its own it accepts any nonzero bool, does not check
+  sequence offset tables, bit padding or variant indices, and under the
+  explicit tags does not apply the `maxDynamicData` cap. Rust has no such
+  path: `from_pssz` accepts exactly what C++ `validate` accepts.
+- **Strict validation.** C++ `validate_strict` also materializes the value,
+  runs member annotation specs and compares the canonical re-encoding. The
+  Rust exact readers reject unknown fields and non-UTF-8 raw strings;
+  canonical comparison is `validate_canonical_for_profile`; Rust has no
+  member annotations.
+- **Schema for raw strings.** C++ `schema_builder` describes `std::string`
+  with the UTF-8 `"string"` adapter (the same schema as `utf8_string<>`), and
+  the C++ schema-IR runtime therefore UTF-8-checks a field the typed codec
+  passes through. Rust describes `RawString` as the raw byte-list adapter
+  (`"hex"`). The identifier for raw strings is an open owner decision.
+- **Schema-driven codec.** Rust `pssz::dynamic` supports only the
+  explicit-width tags; it rejects the automatic profile with an error.
+- **Rust-only restrictions.** No member-level annotations or `as<Tag>`
+  adapters; tuples up to 12 elements; `pssz_struct_dwnc!` requires `Copy`
+  fields and a directly recursive `pssz_struct!` record has no validator (use
+  the derives for both); a directly recursive type has no const `SHAPE`, so
+  `pssz_evolves_from` cannot be evaluated for it.
+- **Explicit tags and nested caps.** Under `pssz8/16/32` both languages check
+  only the top-level type's cap, so a nested value over its own cap is
+  accepted (fixture class `cap-overflow-explicit-nested`); the automatic
+  profile rejects it at every level in both.
+- **Appended required fields.** At four-byte offsets a reader whose schema
+  appended a required `u32` cannot tell it from an appended optional slot and
+  reads such a frame as valid in both languages (two `canonical` entries in
+  the `malformed` class). Only the schema check (`pssz_evolves_from`) prevents
+  that upgrade.
+- **Rust-only types.** `Vec<bool>` works in Rust; C++ pssz cannot encode
+  `std::vector<bool>`.
+- **C++-only types.** `psio::bounded<T, N>`, `byte_array<N>` and
+  `std::monostate` are not PSSZ types in C++ and have no pairing. A Rust unit
+  enum alternative is a zero-field fixed-layout record alternative in C++.
+- JavaScript / TypeScript has no PSSZ implementation.
+
 ## Still required for a stable release
 
 1. Complete the missing format implementations if the release promises full C++
@@ -59,6 +122,8 @@ declarations, not test code.
    validates their length without requiring UTF-8, Rust `String` requires UTF-8,
    and the current JS `str` decoder replaces malformed UTF-8. Raw byte bindings
    and shared fixtures are needed before claiming lossless parity for that case.
+   For PSSZ this is settled: Rust `String` pairs with C++ `psio::utf8_string`
+   and Rust `RawString` with C++ `std::string`, with shared fixtures.
 3. Decide and enforce numeric/API limits. C++'s dynamic pjson value uses an i128
    mantissa and cannot faithfully represent the entire wire u128 range. Several
    encoders still need overflow/count rejection and consistent error contracts.

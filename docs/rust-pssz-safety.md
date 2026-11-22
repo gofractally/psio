@@ -116,3 +116,49 @@ including the analogous generic raw copies in SSZ, are outside this focused
 PSSZ repair. Complete strict semantic/malformed parity, generated record
 validation, empty/tuple expansion, append evolution, Rust/C++/browser automatic
 width parity, and the consumer SDK cutover remain independent activation gates.
+
+## After the derive merge (`codex/psibase-core-evolution`)
+
+The focused repair above predates the merge of the derive line and the parity
+work. What changed, and what still holds:
+
+- The affected PSSZ modules still contain no unsafe blocks or raw memory
+  copies. `pssz.rs`, `pssz_checked.rs`, `pssz_derive.rs`, `pssz_view.rs`,
+  `pssz_evolves.rs` and the generated derive code decode only through typed
+  field codecs.
+- There is one set of layout helpers, `pssz_checked`, used by the built-in
+  codecs, the `pssz_struct!` macros, the derives, tuples, variants and views.
+  The former `pssz::input` module is gone. Record frames are still resolved
+  into stack arrays (`record_spans_n`); only the schema-driven codec uses the
+  heap variant. Offset widths are passed explicitly because they belong to
+  the type that owns the slots.
+- The record decoder now implements appended-field evolution and mandatory
+  pruning (it previously required the reader's own fixed-region size): the
+  header may be smaller (trailing optionals missing) or larger by whole slots
+  (unknown appended fields). Every offset, including unknown ones, is checked
+  to start at the fixed region, be monotone and stay in the frame; a header
+  that cuts a field, omits a required field, or leaves a partial slot is
+  rejected; a stored trailing None is rejected.
+- Depth: decode, validate and checked encode count nodes with a thread-local
+  guard (root 0, node 64 accepted, 65 rejected), matching C++
+  `kMaxValidationDepth`. A wire-transparent wrapper adds no node.
+- Decoding and validating untrusted input return errors and do not panic.
+  Allocation is bounded by the input: element counts are derived from the
+  validated table or span before `try_reserve`, bounded lists check their
+  count first.
+- The scalar-prefix policy is gone; every value must occupy its exact span.
+  `PsszValidate` is now generated for records whenever every field type has
+  it (a `where` bound, so records with custom Pack/Unpack-only fields still
+  compile), and validated views (`PsszView::try_new`) reject everything
+  decode rejects, including unpruned records.
+- Views over unvalidated bytes: record field accessors and sequence / optional
+  accessors have `try_*` forms that return errors. The plain accessors panic
+  with a defined message on malformed bytes, as before. A `String` view
+  returns `Result<&str>`: invalid UTF-8 is an error, not a panic.
+- The infallible `to_pssz` / `pssz_pack` remain panicking conveniences over
+  the checked encoder (`try_to_pssz` / `pssz_pack_checked`), which reports
+  offset-width overflow, cap overflow, bound overflow, zero-size vectors and
+  depth as errors and appends nothing on failure.
+- Not done: Miri, fuzzing beyond the small-buffer sweeps in
+  `tests/pssz_safety.rs` and the truncation/corruption sweeps in
+  `tests/pssz_parity.rs`, and an input-size policy for network endpoints.

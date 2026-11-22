@@ -115,3 +115,9 @@ and metadata APIs; it does not copy a codec into psibase or create a wire family
   byte and becomes two with an appended `optional<u8>`), such a step is not a
   legal evolution. `psio::pssz_evolves_from<Old, New>` checks this at compile
   time; reserve room with an explicit `maxDynamicData` to evolve.
+- Rust parity is no longer open for the typed codec: `rust/psio` has the
+  automatic tag `Pssz` with the same width selection (`PsszPack::AUTO_BOUND`
+  mirrors `max_encoded_size`, `#[pssz(max_dynamic_data = N)]` is the explicit
+  budget), checked against the shared fixture `conformance/pssz-vectors.json`.
+  The Rust schema-driven codec (`pssz::dynamic`) still supports only the
+  explicit-width tags.

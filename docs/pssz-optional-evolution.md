@@ -70,9 +70,12 @@ occupy exactly their span in decode as well as validate.
 **Compile-time check.** `psio::pssz_evolves_from<Old, New>` is true iff New is
 Old plus optional fields at an unchanged automatic width and DWNC status.
 
-**Rust.** `rust/psio` implements the presence rule and exact spans but not
-optional-suffix evolution or pruning: its record decoder requires the reader's
-own fixed-region size and its encoder always writes every slot. A C++ value
-whose trailing optional is absent is therefore not readable by Rust, and Rust's
-encoding of such a value is rejected by C++ as unpruned. Rust `String` also
-rejects non-UTF-8 bytes that C++ passes through.
+**Rust.** `rust/psio` implements the same rules through one frame parser
+(`pssz_checked::record_spans_into`, a port of `pssz_record_spans` and
+`record_has_unpruned_tail`) shared by the `pssz_struct!` macros, the derives,
+tuples, variant payloads, views and the schema-driven codec: readers honor the
+writer's header, the encoder always prunes, and every reader rejects a stored
+trailing None. `pssz::pssz_evolves_from::<Old, New>()` is the `const fn`
+counterpart of the compile-time check. Rust `String` pairs with the UTF-8
+string types and `RawString` with `std::string`; see
+`docs/pssz-rust-profile.md`.
