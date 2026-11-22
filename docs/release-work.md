@@ -34,9 +34,11 @@ supported encodings. Pjson now adopts the audited tag numbering as wire revision
 - [x] Schema identifier for raw byte strings: `"string"` in both languages
   (C++ `std::string`, Rust `RawString`). Member `length_bound` is enforced by
   C++ `validate` and the checked readers.
-- [ ] Decide whether the schema marks raw strings apart from UTF-8 strings
-  (today it does not), enforce `length_bound` in the C++ encoder, and give
-  the Rust schema-driven codec the automatic width profile.
+- [x] The schema marks raw strings apart from UTF-8 strings (Custom ids
+  `string` / `utf8`); the C++ encoder enforces a member `length_bound`
+  (as do `validate`, the checked readers and the fail-fast `decode`); the
+  Rust schema-driven codec has the automatic width profile
+  (`psio::pssz::dynamic` with `Pssz`).
 - [ ] Complete the missing language/format implementations. The recovered
   TypeScript package now implements fracpack, pjson and JSON conversion; its WIT
   module generates interface definitions, rather than implementing a WIT

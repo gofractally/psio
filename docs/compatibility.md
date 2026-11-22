@@ -84,9 +84,12 @@ A member `length_bound` is enforced on read in both languages: the 28
 frames are rejections in the fixture. C++ `validate`, `validate_strict` and
 the checked readers built on them (`decode_pssz_checked`,
 `validated_pssz_view`) reject a string or list member outside its declared
-`max` / `exact` / `min`, also through `std::optional`. The C++ encoder and
-the unchecked `decode` still do not check the bound (Rust
-`BoundedRawString<N>` / `BoundedList<T, N>` check it on encode as well).
+`max` / `exact` / `min`, also through `std::optional`. The C++ encoder
+checks it too (`encode` raises `codec_exception`, or aborts without
+exceptions; `encode_pssz_checked` returns a status and leaves the sink
+unchanged), as does the fail-fast `psio::decode` (the same exception /
+abort for a member outside its bound). Rust `BoundedRawString<N>` /
+`BoundedList<T, N>` check it on encode and decode as well.
 
 Other differences that remain. None changes the bytes of a value both
 languages can represent.

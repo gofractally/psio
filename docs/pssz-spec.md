@@ -1633,10 +1633,23 @@ pssz honors the type-level caps documented in `pjson-spec.md` §16:
   explicit ceiling at encode + decode. Encoders that produce > N
   bytes throw; validators that see > N bytes in the input reject.
 
-The interplay between explicit caps and per-field length bounds is:
-explicit cap wins downward (cap < bound ⇒ cap; cap ≥ bound ⇒ bound).
-A canonical encoder's W is determined by `effective_max_dynamic(T)
-= min(explicit_cap, inferred_bound)`.
+The interplay between explicit caps and per-field length bounds is
+that of §3.1: **an explicit cap always rules**. When T carries
+`max-dynamic-data: N`, `effective_max_dynamic(T) = N` and W follows
+from N alone — also when the bound inferred from the current fields is
+smaller (the cap is the type's lifetime width promise: it reserves room
+for optional fields appended later, and must not shrink to what the
+fields need today) and when it is larger or absent. Only a type with no
+explicit cap uses the inferred bound `max_encoded_size(T)`. There is no
+`min(explicit_cap, inferred_bound)`.
+
+The two are enforced independently. The cap bounds the encoded size of
+the record (above). A member `length_bound` (`max` / `exact` / `min`
+on a string, list, map, set or nested member, §3.2) bounds that
+member: an encoder refuses a value outside it, and every reader —
+validating, checked and fail-fast — rejects a frame that holds one. A
+value can satisfy every member bound and still exceed the cap, or the
+reverse; either is an error.
 
 When a record is DWNC + all fields are fixed-shape +
 `max-dynamic-data: N` is small enough to drop W to 1 and the value's

@@ -2,7 +2,7 @@
 // and therefore by validate, validate_strict and the checked readers built on
 // it (decode_pssz_checked, validated_pssz_view), under every width. The encoder
 // refuses a value outside the bound (codec_exception from encode, a status from
-// encode_pssz_checked); the unchecked decode does not check it.
+// encode_pssz_checked), and so does the fail-fast decode (codec_exception).
 
 #include <psio/pssz.hpp>
 #include <psio/pssz_ir_json.hpp>
@@ -76,6 +76,13 @@ namespace
          CHECK_THROWS_AS(psio::encode(Fmt{}, value, appended), psio::codec_exception);
          CHECK(appended == std::vector<char>{'x'});
       }
+      // The fail-fast decode agrees too: it reads what validate accepts and
+      // raises for a member outside its bound (max, exact or min, through
+      // an optional, a string or a list).
+      if (ok)
+         CHECK(psio::encode(Fmt{}, psio::decode<LbRec>(Fmt{}, bytes)) == bytes);
+      else
+         CHECK_THROWS_AS(psio::decode<LbRec>(Fmt{}, bytes), psio::codec_exception);
       // Every checked entry point agrees with validate.
       CHECK(psio::validate_strict<LbRec>(Fmt{}, bytes).ok() == ok);
       LbRec out;
@@ -155,6 +162,14 @@ TEST_CASE("pssz length_bound violation reports its own error", "[pssz][length_bo
    CHECK(enc.error().what == "pssz: member length_bound violated");
    REQUIRE(!st.ok());
    CHECK(st.error().what == "pssz: member length_bound violated");
-   // The unchecked decode is the fail-fast path and does not check bounds.
-   CHECK(psio::decode<LbRec>(psio::pssz32{}, bytes).s == "12345");
+   // The fail-fast decode enforces the bound too, with the same message.
+   try
+   {
+      (void)psio::decode<LbRec>(psio::pssz32{}, bytes);
+      FAIL("decode accepted a member outside its length_bound");
+   }
+   catch (const psio::codec_exception& e)
+   {
+      CHECK(e.error().what == "pssz: member length_bound violated");
+   }
 }

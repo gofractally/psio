@@ -1784,6 +1784,15 @@ namespace psio {
                 {
                    decode_into<W, Auto, F>(src, spans[Is].begin,
                                            spans[Is].end, fref);
+                   // A member's declared length_bound is part of its type
+                   // (it selected the offset widths this frame was read
+                   // with): the fail-fast decode refuses a member outside
+                   // it, as the validator and the encoder do.
+                   if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
+                      if (!::psio::detail::length_bound_ok(
+                             fref, std::get<::psio::length_bound>(
+                                      record_member_annotations<T, Is>::value)))
+                         size_failure("pssz: member length_bound violated");
                 }
              }()),
             ...);

@@ -115,8 +115,9 @@ and metadata APIs; it does not copy a codec into psibase or create a wire family
   17-byte label above is now rejected. The encoder checks it too: `encode`
   raises `codec_exception` (aborts without exceptions) and
   `encode_pssz_checked` returns a status for a member outside its bound,
-  leaving the sink unchanged. The unchecked `psio::decode` does not check
-  bounds; it is for bytes already validated.
+  leaving the sink unchanged. The fail-fast `psio::decode` checks it as
+  well (the same exception, or abort): a member bound is part of the type,
+  and every pssz entry point that reads or writes a record enforces it.
 - Width selection is unchanged: an explicit `maxDynamicData` always rules,
   otherwise the inferred bound applies. Because an appended optional can move
   an inferred bound across a threshold (for example `{array<u8,251>}` is one

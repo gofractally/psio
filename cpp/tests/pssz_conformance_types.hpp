@@ -938,6 +938,7 @@ namespace pssz_conf
          "pssz: None has trailing bytes",
          "pssz: optional selector not 0/1",
          "pssz: utf8_string exceeds its bound",
+         "pssz: member length_bound violated",
          "pssz: nonempty zero-size vector is unsupported",
          "pssz: vector span not a multiple of element size",
       };
