@@ -38,6 +38,7 @@
 //   std::vector, std::array,
 //   psio::bounded             [ ... ]
 //   std::optional             null or the value
+//   schema_types::Box<T>      the T it holds (transparent, as in pssz)
 //   std::tuple                [ e0, e1, ... ] in order; tuple<> is []
 //   reflected record          {"field": value, ...} in declaration order
 //   chrono duration           its tick count, as an integer (time.hpp)
@@ -134,6 +135,15 @@
 #include <psio/json_simdjson.hpp>
 #endif
 
+namespace psio::schema_types
+{
+   // Fwd decl: Box<T> (schema_ir.hpp) owns one T behind a pointer so that a
+   // recursive type can hold itself. It is transparent in text as it is in
+   // pssz: a Box<T> is written and read as its T.
+   template <typename T>
+   struct Box;
+}  // namespace psio::schema_types
+
 namespace psio {
 
    struct json;
@@ -206,6 +216,16 @@ namespace psio {
       };
 
       using ::psio::detail::is_std_variant;
+
+      template <typename T>
+      struct is_box : std::false_type
+      {
+      };
+      template <typename U>
+      struct is_box<::psio::schema_types::Box<U>> : std::true_type
+      {
+         using elem = U;
+      };
 
       template <typename T>
       struct is_bounded_bytes : std::false_type
@@ -601,6 +621,10 @@ namespace psio {
             constexpr std::size_t inner = text_bound<Fmt, typename T::value_type>();
             return inner ? std::max<std::size_t>(inner, 4) : 0;
          }
+         else if constexpr (is_box<T>::value)
+            // A box is how a type holds itself: its text has no constant
+            // bound, and looking through it here would not terminate.
+            return 0;
          else if constexpr (Fmt::i_json && byte_seq<T>::value)
          {
             if constexpr (is_std_array<T>::value)
@@ -727,6 +751,18 @@ namespace psio {
             std::string payload;
             Proj::encode(v, payload);
             write_string(w, std::string_view{payload}, Fmt::i_json);
+         }
+         else if constexpr (is_box<T>::value)
+         {
+            // Transparent: the text of the boxed value. An empty box (a
+            // moved-from one) holds no value to write.
+            if (!v.value)
+            {
+               w.fail("json: null Box");
+               w.append("null");
+               return;
+            }
+            encode_value<Fmt, IM>(*v.value, w);
          }
          else if constexpr (std::is_same_v<T, bool>)
             w.append(v ? std::string_view{"true"} : std::string_view{"false"});
@@ -1468,6 +1504,16 @@ namespace psio {
          if constexpr (dispatch_adapter_v<Fmt, T>)
             return read_adapted<Fmt, ::psio::adapter<std::remove_cvref_t<T>,
                                                      ::psio::text_category>>(r, out);
+         else if constexpr (is_box<T>::value)
+         {
+            // Transparent: the boxed value's text, read into the box.
+            using E = typename is_box<T>::elem;
+            if (!out)
+               return read_value<Fmt, IM, E>(r, nullptr);
+            if (!out->value)
+               out->value = std::make_unique<E>();
+            return read_value<Fmt, IM, E>(r, out->value.get());
+         }
          else if constexpr (std::is_same_v<T, bool>)
          {
             bool v = false;
