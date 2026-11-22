@@ -1,6 +1,6 @@
-// Rust mapping of cpp/tests/pssz_conformance_types.hpp. Included twice by
-// ../pssz_conformance.rs: `rec!` / `dwnc!` expand once to the pssz_struct!
-// macros and once to the proc-macro derives. Each also implements `Conf`
+// Rust mapping of cpp/tests/pssz_conformance_types.hpp. Included by
+// ../pssz_conformance.rs, which defines `rec!` / `dwnc!`: a record
+// declaration with the PSSZ derives. Each also implements `Conf`
 // (id = type name, shape = the fixture's definition string), so a wrong
 // mapping fails the manifest check before any vector is read.
 //
@@ -109,10 +109,8 @@ rec!(OddBase { flag: bool, name: Raw });
 rec!(OddExtended { flag: bool, name: Raw, extra: Option<Raw> });
 rec!(OldOuter { inner: Base, values: Vec<Base> });
 rec!(NewOuter { inner: Extended, values: Vec<Extended> });
-// A directly recursive record: pssz_struct! generates PsszValidate behind a
-// `where field: PsszValidate` bound (so records with Pack/Unpack-only fields
-// still compile), which cannot be resolved through a cycle. Recursive
-// records use the derive in both passes.
+// A directly recursive record: its shape names the type instead of
+// expanding it, so `Conf` is written out.
 #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 pub struct DepthNode { pub value: u8, pub next: Option<Box<DepthNode>> }
 impl Conf for DepthNode {
@@ -124,8 +122,8 @@ impl Conf for DepthNode {
 dwnc!(Unit {});
 rec!(Empty {});
 dwnc!(Pair { x: u8, y: u8 });
-// pssz_struct_dwnc! copies fields by value, so a fixed-layout record with a
-// non-Copy field is declared with the derive in both passes.
+// A fixed-layout record with a non-Copy field (`dwnc!` declares `Copy`
+// records).
 #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[pssz(definition_will_not_change)]
 pub struct DwncVar { pub k: u8, pub s: Raw }
@@ -221,8 +219,7 @@ rec!(NCapped { id: u8, note: Nested<Raw, Checked, 8> });
 // list of u16 (half as many elements as bytes).
 rec!(NCapRec { id: u8, args: Nested<NArgs, Checked, 28> });
 rec!(NCapWords { id: u8, words: Nested<Vec<u16>, Checked, 5> });
-// A self-nesting chain: recursive, so the derive in both passes (see
-// DepthNode).
+// A self-nesting chain: recursive, declared like DepthNode.
 #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 pub struct NChain { pub next: Option<Nested<NChain>> }
 impl Conf for NChain {

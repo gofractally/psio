@@ -13,7 +13,6 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use psio::pssz::{Pssz32, PsszPack, PsszUnpack};
-use psio::pssz_struct_dwnc;
 
 // Concrete pssz width.  Pssz32 = 4-byte offset slots, the auto-default
 // the C++ side picks for Validator/Order/ValidatorList class shapes.
@@ -21,7 +20,8 @@ type W = Pssz32;
 
 // ── Shape definitions ────────────────────────────────────────────────────
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+#[pssz(definition_will_not_change)]
 pub struct Validator {
     pub pubkey_lo:          u64,
     pub pubkey_hi:          u64,
@@ -33,37 +33,20 @@ pub struct Validator {
     pub exit_epoch:         u64,
     pub withdrawable_epoch: u64,
 }
-pssz_struct_dwnc!(Validator {
-    pubkey_lo:          u64,
-    pubkey_hi:          u64,
-    withdrawal_lo:      u64,
-    withdrawal_hi:      u64,
-    effective_balance:  u64,
-    slashed:            bool,
-    activation_epoch:   u64,
-    exit_epoch:         u64,
-    withdrawable_epoch: u64,
-});
 
-#[derive(Debug, PartialEq, Eq, Clone, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Default, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+#[pssz(definition_will_not_change)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
 }
-pssz_struct_dwnc!(Point {
-    x: i32,
-    y: i32,
-});
 
-#[derive(Debug, PartialEq, Eq, Clone, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Default, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+#[pssz(definition_will_not_change)]
 pub struct NameRecord {
     pub account: u64,
     pub limit:   u64,
 }
-pssz_struct_dwnc!(NameRecord {
-    account: u64,
-    limit:   u64,
-});
 
 // ── Sample data (matches shapes.hpp) ─────────────────────────────────────
 

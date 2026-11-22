@@ -27,18 +27,23 @@ psio-macros = {{ path = {json.dumps(str(work/'psio-macros-0.1.0'))} }}
 ''')
     (consumer/'src/main.rs').write_text('''
 use psio::{Pack, Unpack};
-#[derive(Debug, PartialEq, psio::Pack, psio::Unpack)]
+#[derive(Debug, PartialEq, psio::Pack, psio::Unpack, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 #[fracpack(fracpack_mod = "psio")]
 struct Record { id: u32, name: String }
 psio::pjson_struct!(Record { id: u32, name: String });
 psio::ssz_struct!(Record { id: u32, name: String });
-psio::pssz_struct!(Record { id: u32, name: String });
 fn main() {
     assert_eq!(psio::pjson::WIRE_REVISION, 2);
     assert_eq!(psio::pjson::to_pjson(&5i64), vec![0x25]);
     assert_eq!(psio::pjson::to_pjson(&-5i64), vec![0x35]);
     let value = Record { id: 42, name: "Alice".into() };
     assert_eq!(Record::unpacked(&value.packed()).unwrap(), value);
+    let bytes = psio::pssz::to_pssz(&value);
+    assert_eq!(psio::pssz::from_pssz::<Record>(&bytes).unwrap(), value);
+    {
+        use psio::pssz::PsszView;
+        assert_eq!(PsszView::<Record>::new(&bytes).unwrap().id().get(), 42);
+    }
     let bytes = psio::pjson::to_pjson(&value);
     assert_eq!(psio::pjson::from_pjson::<Record>(&bytes).unwrap(), value);
     let rows = vec![value]; let bytes = psio::pjson::to_pjson(&rows);

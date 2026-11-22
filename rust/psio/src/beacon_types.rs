@@ -13,7 +13,7 @@
 //! `std::make_unique<eth::BeaconState>()` pattern for the outer state.
 
 use crate::ssz::{Bitvector, BoundedList};
-use crate::{pssz_struct, pssz_struct_dwnc, ssz_struct, ssz_struct_dwnc};
+use crate::{ssz_struct, ssz_struct_dwnc};
 
 // ── Constants (mainnet preset) ──────────────────────────────────────────────
 
@@ -51,7 +51,8 @@ pub type BLSSignature   = [u8; 96];
 // ── Containers ──────────────────────────────────────────────────────────────
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate", definition_will_not_change)]
 pub struct Fork {
     pub previous_version: Version,
     pub current_version:  Version,
@@ -62,14 +63,10 @@ ssz_struct_dwnc!(Fork {
     current_version:  Version,
     epoch:            Epoch,
 });
-pssz_struct_dwnc!(Fork {
-    previous_version: Version,
-    current_version:  Version,
-    epoch:            Epoch,
-});
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate", definition_will_not_change)]
 pub struct ForkData {
     pub current_version:         Version,
     pub genesis_validators_root: Root,
@@ -78,19 +75,15 @@ ssz_struct_dwnc!(ForkData {
     current_version:         Version,
     genesis_validators_root: Root,
 });
-pssz_struct_dwnc!(ForkData {
-    current_version:         Version,
-    genesis_validators_root: Root,
-});
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate", definition_will_not_change)]
 pub struct Checkpoint {
     pub epoch: Epoch,
     pub root:  Root,
 }
 ssz_struct_dwnc!(Checkpoint { epoch: Epoch, root: Root });
-pssz_struct_dwnc!(Checkpoint { epoch: Epoch, root: Root });
 
 // `#[repr(C, packed)]` — sizeof(Validator) == 121 exactly, matching the
 // SSZ wire size. Default Rust layout reorders + pads to 128 bytes, which
@@ -99,7 +92,8 @@ pssz_struct_dwnc!(Checkpoint { epoch: Epoch, root: Root });
 // the resulting unaligned u64 accesses natively with no per-field cost.
 // Counterpart of `__attribute__((packed))` on the C++ Validator.
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate", definition_will_not_change)]
 pub struct Validator {
     pub pubkey:                       BLSPubkey,
     pub withdrawal_credentials:       Bytes32,
@@ -120,19 +114,10 @@ ssz_struct_dwnc!(Validator {
     exit_epoch:                   Epoch,
     withdrawable_epoch:           Epoch,
 });
-pssz_struct_dwnc!(Validator {
-    pubkey:                       BLSPubkey,
-    withdrawal_credentials:       Bytes32,
-    effective_balance:            Gwei,
-    slashed:                      bool,
-    activation_eligibility_epoch: Epoch,
-    activation_epoch:             Epoch,
-    exit_epoch:                   Epoch,
-    withdrawable_epoch:           Epoch,
-});
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate", definition_will_not_change)]
 pub struct AttestationData {
     pub slot:              Slot,
     pub index:             CommitteeIndex,
@@ -147,15 +132,9 @@ ssz_struct_dwnc!(AttestationData {
     source:            Checkpoint,
     target:            Checkpoint,
 });
-pssz_struct_dwnc!(AttestationData {
-    slot:              Slot,
-    index:             CommitteeIndex,
-    beacon_block_root: Root,
-    source:            Checkpoint,
-    target:            Checkpoint,
-});
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate")]
 pub struct PendingAttestation {
     pub aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
     pub data:             AttestationData,
@@ -168,15 +147,10 @@ ssz_struct!(PendingAttestation {
     inclusion_delay:  Slot,
     proposer_index:   ValidatorIndex,
 });
-pssz_struct!(PendingAttestation {
-    aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
-    data:             AttestationData,
-    inclusion_delay:  Slot,
-    proposer_index:   ValidatorIndex,
-});
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate", definition_will_not_change)]
 pub struct Eth1Data {
     pub deposit_root:  Root,
     pub deposit_count: u64,
@@ -187,14 +161,10 @@ ssz_struct_dwnc!(Eth1Data {
     deposit_count: u64,
     block_hash:    Hash32,
 });
-pssz_struct_dwnc!(Eth1Data {
-    deposit_root:  Root,
-    deposit_count: u64,
-    block_hash:    Hash32,
-});
 
 #[repr(C, packed)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate", definition_will_not_change)]
 pub struct BeaconBlockHeader {
     pub slot:            Slot,
     pub proposer_index:  ValidatorIndex,
@@ -203,13 +173,6 @@ pub struct BeaconBlockHeader {
     pub body_root:       Root,
 }
 ssz_struct_dwnc!(BeaconBlockHeader {
-    slot:           Slot,
-    proposer_index: ValidatorIndex,
-    parent_root:    Root,
-    state_root:     Root,
-    body_root:      Root,
-});
-pssz_struct_dwnc!(BeaconBlockHeader {
     slot:           Slot,
     proposer_index: ValidatorIndex,
     parent_root:    Root,
@@ -228,7 +191,8 @@ pssz_struct_dwnc!(BeaconBlockHeader {
 // The outer BeaconState is also typically allocated via `Box<BeaconState>`
 // by callers to avoid materializing 2.56 MiB on the stack during decode.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
+#[pssz(crate = "crate")]
 pub struct BeaconState {
     // Versioning
     pub genesis_time:            u64,
@@ -271,29 +235,6 @@ pub struct BeaconState {
 }
 
 ssz_struct!(BeaconState {
-    genesis_time:                  u64,
-    genesis_validators_root:       Root,
-    slot:                          Slot,
-    fork:                          Fork,
-    latest_block_header:           BeaconBlockHeader,
-    block_roots:                   Box<[Root; SLOTS_PER_HISTORICAL_ROOT]>,
-    state_roots:                   Box<[Root; SLOTS_PER_HISTORICAL_ROOT]>,
-    historical_roots:              BoundedList<Root, HISTORICAL_ROOTS_LIMIT>,
-    eth1_data:                     Eth1Data,
-    eth1_data_votes:               BoundedList<Eth1Data, SLOTS_PER_ETH1_VOTING_PERIOD>,
-    eth1_deposit_index:            u64,
-    validators:                    BoundedList<Validator, VALIDATOR_REGISTRY_LIMIT>,
-    balances:                      BoundedList<Gwei, VALIDATOR_REGISTRY_LIMIT>,
-    randao_mixes:                  Box<[Bytes32; EPOCHS_PER_HISTORICAL_VECTOR]>,
-    slashings:                     Box<[Gwei; EPOCHS_PER_SLASHINGS_VECTOR]>,
-    previous_epoch_attestations:   BoundedList<PendingAttestation, MAX_PENDING_ATTESTATIONS>,
-    current_epoch_attestations:    BoundedList<PendingAttestation, MAX_PENDING_ATTESTATIONS>,
-    justification_bits:            Bitvector<JUSTIFICATION_BITS_LENGTH>,
-    previous_justified_checkpoint: Checkpoint,
-    current_justified_checkpoint:  Checkpoint,
-    finalized_checkpoint:          Checkpoint,
-});
-pssz_struct!(BeaconState {
     genesis_time:                  u64,
     genesis_validators_root:       Root,
     slot:                          Slot,

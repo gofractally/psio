@@ -29,9 +29,11 @@ report = {'baseline': 'f6b10ec7d7bba4022cd1c9394f88ad1440b4b2b7',
           'load_before': list(os.getloadavg()), 'free_bytes_before': shutil.disk_usage(root).free,
           'jobs': 2, 'commands': [], 'passed': False, 'source_sha256': {},
           'scope': 'Existing Rust explicit PSSZ input/memory safety; safe trait metadata never proves POD. Not full strictness, append evolution, automatic widths, derive expansion or SDK activation.'}
-for name in ['rust/psio/src/pssz.rs', 'rust/psio/src/pssz_derive.rs', 'rust/psio/src/pssz_view.rs',
+for name in ['rust/psio/src/pssz.rs', 'rust/psio-macros/src/pssz_macro.rs', 'rust/psio/src/pssz_view.rs',
              'rust/psio/src/lib.rs', 'rust/psio/tests/pssz_safety.rs',
-             'rust/psio/tests/probes/pssz_safety_before.rs', 'rust/psio/tests/qualify_pssz_safety.py',
+             'rust/psio/tests/probes/pssz_safety_before.rs',
+             'rust/psio/tests/probes/pssz_safety_reference_before.rs',
+             'rust/psio/tests/qualify_pssz_safety.py',
              'rust/psio/tests/fixtures/pssz-safety-explicit.json',
              'rust/psio/examples/pssz_safety_reference.rs', 'rust/Cargo.lock',
              'rust/Cargo.toml', 'rust/psio/Cargo.toml', 'rust/psio-macros/Cargo.toml']:
@@ -81,7 +83,7 @@ try:
     if '0 passed; 4 failed' not in before_run.stdout:
         raise RuntimeError('safe baseline probe did not demonstrate the four expected failures')
     emitter = artifacts / 'reference-emitter'
-    run('reference-emitter-compile', [*ref_args, root / 'rust/psio/examples/pssz_safety_reference.rs', '-o', emitter])
+    run('reference-emitter-compile', [*ref_args, root / 'rust/psio/tests/probes/pssz_safety_reference_before.rs', '-o', emitter])
     emitted = run('reference-goldens', [emitter])
     pinned = json.loads((root / 'rust/psio/tests/fixtures/pssz-safety-explicit.json').read_text())
     if json.loads(emitted.stdout) != pinned or len(pinned) != 40:

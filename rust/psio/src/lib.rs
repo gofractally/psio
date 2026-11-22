@@ -107,8 +107,6 @@ pub mod pssz_schema_ir;
 pub mod pssz_dynamic;
 pub mod pssz_upgrade;
 pub mod pssz_evolves;
-#[macro_use]
-pub mod pssz_derive;
 pub mod pssz_view;
 pub mod ssz;
 #[macro_use]

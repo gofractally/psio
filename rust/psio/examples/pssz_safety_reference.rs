@@ -1,36 +1,27 @@
-//! Valid explicit-profile bytes, compiled against the exact f6 reference too.
+//! Valid explicit-profile bytes: prints the JSON object pinned in
+//! tests/fixtures/pssz-safety-explicit.json. The same values declared for
+//! the f6 reference revision are tests/probes/pssz_safety_reference_before.rs.
 use psio::pssz::*;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Action {
     id: u32,
     name: String,
     active: bool,
 }
-psio::pssz_struct!(Action {
-    id: u32,
-    name: String,
-    active: bool
-});
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+#[pssz(definition_will_not_change)]
 struct Fixed {
     id: u32,
     active: bool,
 }
-psio::pssz_struct_dwnc!(Fixed {
-    id: u32,
-    active: bool
-});
 #[repr(C, packed)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+#[pssz(definition_will_not_change)]
 struct Packed {
     first: bool,
     second: u8,
 }
-psio::pssz_struct_dwnc!(Packed {
-    first: bool,
-    second: u8
-});
 
 fn emit<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(name: &str, value: &T) {
     let wire = encode::<F, _>(value);

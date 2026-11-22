@@ -93,6 +93,27 @@ fn c_like<'a>(input: &'a DeriveInput, opts: &Options) -> syn::Result<Option<CEnu
     }
     Ok(Some(shape))
 }
+/// `#[repr(packed)]` / `#[repr(packed(N))]`: a field may be unaligned, so it
+/// cannot be borrowed. The generated code copies each field instead, which
+/// makes every field of a packed record `Copy`.
+fn packed(input: &DeriveInput) -> bool {
+    input.attrs.iter().any(|attr| {
+        attr.path.is_ident("repr")
+            && matches!(attr.parse_meta(), Ok(Meta::List(list)) if list.nested.iter().any(|item| match item {
+                NestedMeta::Meta(Meta::Path(path)) => path.is_ident("packed"),
+                NestedMeta::Meta(Meta::List(inner)) => inner.path.is_ident("packed"),
+                _ => false,
+            }))
+    })
+}
+/// A borrow of field `member` of `self`.
+fn field_ref(packed: bool, member: &Member) -> Tokens {
+    if packed {
+        quote!(&{ self.#member })
+    } else {
+        quote!(&self.#member)
+    }
+}
 fn options(input: &DeriveInput) -> syn::Result<Options> {
     for param in &input.generics.params {
         let reserved = match param {
@@ -388,6 +409,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 }
                 let ty = types[0];
                 let member = members[0];
+                let member_ref = field_ref(packed(&input), member);
                 let construct = |value: Tokens| if matches!(&data.fields, Fields::Named(_)) {
                     quote!(Self { #member: #value })
                 } else {
@@ -401,7 +423,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     if unpack {
                         quote! { ::core::result::Result::Ok(#decoded) }
                     } else {
-                        quote! { <#ty as #pack>::pssz_pack_checked(&self.#member, out) }
+                        quote! { <#ty as #pack>::pssz_pack_checked(#member_ref, out) }
                     },
                     Consts {
                         fixed: quote!(<#ty as #pack>::IS_FIXED_SIZE),
@@ -410,7 +432,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                         extra: quote! {
                             const IS_OPTIONAL: bool = <#ty as #pack>::IS_OPTIONAL;
                             const OPTIONAL_SELECTOR: bool = <#ty as #pack>::OPTIONAL_SELECTOR;
-                            fn pssz_is_none(&self) -> bool { <#ty as #pack>::pssz_is_none(&self.#member) }
+                            fn pssz_is_none(&self) -> bool { <#ty as #pack>::pssz_is_none(#member_ref) }
                             fn pssz_none_bytes() -> ::core::option::Option<&'static [u8]> { <#ty as #pack>::pssz_none_bytes() }
                             const MAX_ENCODED_SIZE: ::core::option::Option<usize> = <#ty as #pack>::MAX_ENCODED_SIZE;
                             const MAX_DYNAMIC_DATA: ::core::option::Option<usize> = <#ty as #pack>::MAX_DYNAMIC_DATA;
@@ -423,7 +445,8 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
             } else {
                 let dwnc = opts.dwnc;
                 let frame = self_frame(k);
-                let values = members.iter().map(|m| quote!(&self.#m)).collect::<Vec<_>>();
+                let packed = packed(&input);
+                let values = members.iter().map(|m| field_ref(packed, m)).collect::<Vec<_>>();
                 let cap = match opts.cap {
                     Some(cap) => { let cap = cap as usize; quote!(::core::option::Option::Some(#cap)) }
                     None => quote!(::core::option::Option::None),

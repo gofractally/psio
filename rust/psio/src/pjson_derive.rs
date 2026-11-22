@@ -12,8 +12,8 @@
 //! - Stores the canonical hash template (one byte per field) as a
 //!   static array, matching the layout the canonical encoder writes.
 //!
-//! Mirrors the patterns from `pssz_derive.rs` — declarative macro,
-//! no proc-macro dependency, paste! for trait/method name interpolation.
+//! A declarative macro: no proc-macro dependency, paste! for trait / method
+//! name interpolation.
 
 #[macro_export]
 macro_rules! pjson_struct {

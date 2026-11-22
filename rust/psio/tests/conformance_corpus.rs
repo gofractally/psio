@@ -10,9 +10,9 @@ use psio::wit::pack::WitPack;
          psio::CapnpPack, psio::CapnpUnpack, psio::FbPack, psio::FbUnpack,
          psio::WitPack)]
 #[fracpack(fracpack_mod = "psio")]
+#[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Record { id: u32, name: String, values: Vec<u32>, active: bool }
 psio::ssz_struct!(Record { id: u32, name: String, values: Vec<u32>, active: bool });
-psio::pssz_struct!(Record { id: u32, name: String, values: Vec<u32>, active: bool });
 
 #[derive(Debug, PartialEq, psio::Pack, psio::Unpack)]
 #[fracpack(fracpack_mod = "psio")]

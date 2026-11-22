@@ -237,3 +237,86 @@ fn checked_encoding_counts_present_wire_nodes_and_skips_synthesized_defaults() {
     assert!(psio::pssz_view::PsszView::<Nest, Pssz32>::new_strict(&present_none).is_err());
     assert!(dynamic::decode_exact::<Pssz32>(&schema, &root, &present_none).is_err());
 }
+
+#[derive(Debug, PartialEq, Eq, PsszPack, PsszUnpack, PsszView)]
+struct Named {
+    name: String,
+    value: u32,
+}
+
+#[test]
+fn a_record_has_the_bytes_cpp_writes_and_named_view_accessors() {
+    // C++: Named{"alice", 77} under pssz32: the header (the fixed region is
+    // 8 bytes), the offset of `name`, `value`, then the bytes of `name`.
+    let expected: Vec<u8> = [
+        &[8u8, 0, 0, 0][..],
+        &[8, 0, 0, 0],
+        &[77, 0, 0, 0],
+        b"alice",
+    ]
+    .concat();
+    let named = Named { name: "alice".into(), value: 77 };
+    assert_eq!(encode::<Pssz32, _>(&named), expected);
+    assert_eq!(decode::<Pssz32, Named>(&expected).unwrap(), named);
+    let view = PsszView::<Named, Pssz32>::new(&expected).unwrap();
+    assert_eq!(view.name().view().unwrap(), "alice");
+    assert_eq!(view.value().get(), 77);
+}
+
+// A packed record: its fields may be unaligned, so the generated code copies
+// them instead of borrowing.
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq, PsszPack, PsszUnpack, PsszView)]
+#[pssz(definition_will_not_change)]
+struct PackedFixed {
+    tag: u8,
+    wide: u64,
+    half: u16,
+}
+#[repr(packed(2))]
+#[derive(Debug, Clone, Copy, PartialEq, PsszPack, PsszUnpack, PsszView)]
+struct PackedOpen {
+    tag: u8,
+    wide: u64,
+    more: Option<u32>,
+}
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy, PartialEq, PsszPack, PsszUnpack)]
+#[pssz(transparent)]
+struct PackedId(u64);
+
+#[derive(Debug, PartialEq, PsszPack, PsszUnpack)]
+#[pssz(definition_will_not_change)]
+struct UnpackedFixed {
+    tag: u8,
+    wide: u64,
+    half: u16,
+}
+#[derive(Debug, PartialEq, PsszPack, PsszUnpack)]
+struct UnpackedOpen {
+    tag: u8,
+    wide: u64,
+    more: Option<u32>,
+}
+
+#[test]
+fn packed_records_encode_like_unpacked_ones() {
+    assert_eq!(std::mem::size_of::<PackedFixed>(), 11);
+    let fixed = PackedFixed { tag: 1, wide: 0x0102030405060708, half: 0x0a0b };
+    let bytes = to_pssz(&fixed);
+    assert_eq!(bytes, to_pssz(&UnpackedFixed { tag: 1, wide: 0x0102030405060708, half: 0x0a0b }));
+    assert_eq!(bytes.len(), 11);
+    assert_eq!(from_pssz::<PackedFixed>(&bytes).unwrap(), fixed);
+    let view = PsszView::<PackedFixed>::new(&bytes).unwrap();
+    assert_eq!(view.wide().get(), 0x0102030405060708);
+
+    for more in [None, Some(5)] {
+        let open = PackedOpen { tag: 2, wide: 9, more };
+        let bytes = to_pssz(&open);
+        assert_eq!(bytes, to_pssz(&UnpackedOpen { tag: 2, wide: 9, more }));
+        assert_eq!(from_pssz::<PackedOpen>(&bytes).unwrap(), open);
+        validate_pssz::<PackedOpen>(&bytes).unwrap();
+    }
+    assert_eq!(to_pssz(&PackedId(7)), to_pssz(&7u64));
+    assert_eq!(from_pssz::<PackedId>(&to_pssz(&7u64)).unwrap(), PackedId(7));
+}

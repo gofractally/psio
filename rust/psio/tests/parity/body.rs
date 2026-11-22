@@ -1,5 +1,5 @@
-// Included twice by ../pssz_parity.rs: once with `rec!`/`dwnc!` expanding to
-// the pssz_struct! macros, once to the proc-macro derives. Type names mirror
+// Included by ../pssz_parity.rs, which defines `rec!` / `dwnc!` (a record
+// declaration with the PSSZ derives). Type names mirror
 // cpp/tests/pssz_evolution_fixture.hpp and pssz_type_width_fixture.hpp.
 // C++ std::string is RawString; a length_bound member is a Bounded* type.
 
@@ -71,8 +71,6 @@ rec!(LabelMaybe { id: u32, label: Option<BoundedString<16>> });
 dwnc!(Unit {});
 rec!(Empty {});
 dwnc!(Pair { x: u8, y: u8 });
-// pssz_struct_dwnc! copies fields by value (it supports #[repr(packed)]
-// structs), so a fixed-layout record with a non-Copy field uses the derive.
 #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 #[pssz(definition_will_not_change)]
 pub struct DwncVar { pub a: u8, pub s: RawString, pub b: u16 }

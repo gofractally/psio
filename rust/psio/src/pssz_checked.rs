@@ -1,6 +1,5 @@
-//! Bounds-checked layout helpers shared by the PSSZ codecs, the declarative
-//! record macros, the proc-macro derives, the borrowed views and the
-//! schema-driven codec.
+//! Bounds-checked layout helpers shared by the PSSZ codecs, the proc-macro
+//! derives, the borrowed views and the schema-driven codec.
 //!
 //! Offset width is passed explicitly (`w`): it is a property of the logical
 //! type that owns the header / offset slots (`PsszPack::OFFSET_WIDTH`), not of

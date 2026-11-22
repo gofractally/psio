@@ -1,6 +1,5 @@
-//! Rust/C++ PSSZ parity for the owner's rules, run once against records
-//! declared with the `pssz_struct!` macros and once against the proc-macro
-//! derives. Expected bytes come from the C++ golden tables in `cpp/tests`
+//! Rust/C++ PSSZ parity for the owner's rules, on records declared with the
+//! proc-macro derives. Expected bytes come from the C++ golden tables in `cpp/tests`
 //! (read at test time, not copied) wherever C++ pins them.
 //!
 //! Rules covered (see docs/pssz-rust-profile.md):
@@ -62,35 +61,7 @@ pub mod support {
     }
 }
 
-mod macro_rules_records {
-    macro_rules! rec {
-        (#[cap($cap:literal)] $name:ident { $($f:ident : $t:ty),* $(,)? }) => {
-            #[derive(Debug, Clone, PartialEq)]
-            pub struct $name { $(pub $f: $t),* }
-            psio::pssz_struct!(#[pssz(max_dynamic_data = $cap)] $name { $($f: $t),* });
-        };
-        ($name:ident { $($f:ident : $t:ty),* $(,)? }) => {
-            #[derive(Debug, Clone, PartialEq)]
-            pub struct $name { $(pub $f: $t),* }
-            psio::pssz_struct!($name { $($f: $t),* });
-        };
-    }
-    macro_rules! dwnc {
-        (#[cap($cap:literal)] $name:ident { $($f:ident : $t:ty),* $(,)? }) => {
-            #[derive(Debug, Clone, Copy, PartialEq)]
-            pub struct $name { $(pub $f: $t),* }
-            psio::pssz_struct_dwnc!(#[pssz(max_dynamic_data = $cap)] $name { $($f: $t),* });
-        };
-        ($name:ident { $($f:ident : $t:ty),* $(,)? }) => {
-            #[derive(Debug, Clone, PartialEq)]
-            pub struct $name { $(pub $f: $t),* }
-            psio::pssz_struct_dwnc!($name { $($f: $t),* });
-        };
-    }
-    include!("parity/body.rs");
-}
-
-mod derived_records {
+mod records {
     macro_rules! rec {
         (#[cap($cap:literal)] $name:ident { $($f:ident : $t:ty),* $(,)? }) => {
             #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]

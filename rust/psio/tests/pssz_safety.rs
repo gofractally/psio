@@ -29,22 +29,17 @@ impl<F: PsszFormat> PsszValidate<F> for CheckedByte {
         <Self as PsszUnpack<F>>::pssz_unpack(bytes).map(|_| ())
     }
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+#[pssz(definition_will_not_change)]
 struct FixedRecord {
     field: CheckedByte,
 }
-psio::pssz_struct_dwnc!(FixedRecord { field: CheckedByte });
-#[derive(Debug)]
+#[derive(Debug, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Action {
     id: u32,
     label: String,
     active: bool,
 }
-psio::pssz_struct!(Action {
-    id: u32,
-    label: String,
-    active: bool
-});
 
 #[derive(Debug)]
 struct Zero;
@@ -161,34 +156,25 @@ impl<F: PsszFormat> PsszValidate<F> for Huge {
         Err(PsszError("huge value unsupported"))
     }
 }
+#[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct HugeRecord {
     first: Huge,
     second: Huge,
 }
-psio::pssz_struct!(HugeRecord {
-    first: Huge,
-    second: Huge
-});
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Leaf {
     id: u32,
     flag: bool,
     count: u64,
 }
-psio::pssz_struct!(Leaf {
-    id: u32,
-    flag: bool,
-    count: u64
-});
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Nested {
     leaf: Leaf,
     list: Vec<Leaf>,
     note: Option<String>,
     final_value: u16,
 }
-psio::pssz_struct!(Nested { leaf: Leaf, list: Vec<Leaf>, note: Option<String>, final_value: u16 });
 
 fn bool_containers<F: PsszFormat>() {
     for invalid in [2, 127, 255] {
@@ -315,16 +301,11 @@ widths!(nested_record_children_use_bounded_exact_spans, nested);
 use std::sync::atomic::{AtomicUsize, Ordering};
 static DROPS: AtomicUsize = AtomicUsize::new(0);
 struct Owned(Box<u64>);
+#[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct OwnedRecord {
     owner: Owned,
     id: u8,
 }
-// Owned deliberately has no PsszValidate implementation: the existing macro
-// contract must continue accepting custom Pack/Unpack-only field codecs.
-psio::pssz_struct!(OwnedRecord {
-    owner: Owned,
-    id: u8
-});
 impl Drop for Owned {
     fn drop(&mut self) {
         DROPS.fetch_add(1, Ordering::SeqCst);
@@ -352,6 +333,17 @@ impl<F: PsszFormat> PsszUnpack<F> for Owned {
             return Err(PsszError("owned rejected"));
         }
         Ok(Self(Box::new(n)))
+    }
+}
+// The validator checks the span only: the values the decoder refuses or
+// panics on reach it, which is what `cleanup` exercises.
+impl<F: PsszFormat> PsszValidate<F> for Owned {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        if bytes.len() == 8 {
+            Ok(())
+        } else {
+            Err(PsszError("owned span"))
+        }
     }
 }
 fn cleanup<F: PsszFormat>() {
@@ -443,18 +435,15 @@ fn unsupported_public_format_metadata_returns_errors() {
     invalid_format::<InvalidHeader>();
 }
 
+#[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Pair {
     first: String,
     last: String,
 }
-psio::pssz_struct!(Pair {
-    first: String,
-    last: String
-});
+#[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct LargeFixed {
     bytes: [u8; 256],
 }
-psio::pssz_struct!(LargeFixed { bytes: [u8; 256] });
 #[test]
 fn output_offsets_and_headers_reject_overflow_instead_of_truncating() {
     let value = Pair {

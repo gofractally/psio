@@ -1,22 +1,17 @@
 use psio::pssz::*;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Record {
     flag: bool,
     text: String,
     other: String,
 }
-psio::pssz_struct!(Record {
-    flag: bool,
-    text: String,
-    other: String
-});
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+#[pssz(definition_will_not_change)]
 struct Fixed {
     value: u32,
 }
-psio::pssz_struct_dwnc!(Fixed { value: u32 });
 
 #[test]
 fn exact_scalar_spans_and_valid_bool_values() {
