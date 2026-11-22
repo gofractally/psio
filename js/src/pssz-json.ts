@@ -12,12 +12,14 @@
 // A 128 / 256-bit integer is decimal (a string under ijson, a bare number
 // under json; the legacy "0x" string is read). An Enum is its enumerator's
 // name when the value is listed and its number otherwise. A non-finite float
-// has no text.
+// has no text. A raw string (Custom "string") holding bytes that are not
+// UTF-8 has no text. A Custom id that is not part of the binary form is its
+// handler's text as one JSON string, or its inner type's text without one.
 //
 // This file is internal. The public API is `pssz.ts`.
 
 import {
-  MAX_DEPTH, Node, PsszError, PsszNaN, isNoncharacter, memberBoundAdmits, setField, unwrapOption, utf8CodePoint,
+  Codec, MAX_DEPTH, Node, PsszError, PsszNaN, isNoncharacter, memberBoundAdmits, setField, unwrapOption, utf8CodePoint, utf8Valid,
   utf8Decode, utf8Encode, utf8Length, utf8Multibyte, wellFormed, wrapSome,
   type IntForm, type IrEnumerator, type VariantValue,
 } from './pssz-core.js';
@@ -553,8 +555,38 @@ function bytesAdmit(container: Node, n: number): boolean {
   return !container.bounded || n <= container.countNum;
 }
 
+// The value a custom handler deals in: checked against the wire type and
+// returned as `decode` would give it. Throws PsszError when it does not fit.
+function canonical(codec: Codec, node: Node, value: unknown): unknown {
+  const bytes = codec.encodeAt(node, value, 0);
+  return codec.decodeAt(node, bytes, 0, bytes.length, 0, { allowUnknown: false, hasUnknown: false });
+}
+
 class Reader {
-  constructor(private readonly c: JsonCursor, private readonly ijson: boolean) {}
+  constructor(
+    private readonly c: JsonCursor,
+    private readonly ijson: boolean,
+    private readonly codec: Codec,
+  ) {}
+
+  // A custom presentation: one JSON string, turned by its handler into a
+  // value of the inner type.
+  private presented(node: Node): unknown {
+    const c = this.c;
+    if (c.kind() !== 'string') c.fail('json: expected a string (custom text form)');
+    const s = c.string();
+    let value: unknown;
+    try {
+      value = node.handler!.fromText(utf8Decode(s.bytes, s.start, s.end));
+    } catch {
+      return c.fail('json: text is not a value of the custom type');
+    }
+    try {
+      return canonical(this.codec, this.codec.wireOf(node).node, value);
+    } catch {
+      return c.fail('json: custom handler produced a value that is not the inner type');
+    }
+  }
 
   // A 128 / 256-bit integer: a decimal string (or the legacy "0x" string),
   // or a bare decimal number: any in-range value under json, at most
@@ -651,7 +683,7 @@ class Reader {
   private sequence(node: Node, form: IntForm): unknown[] {
     const items: unknown[] = [];
     this.arrayItems(node.bounded ? node.countNum : null, node.exact, () => {
-      items.push(this.read(node.child, form, 0));
+      items.push(this.read(node.textChild, form, 0));
     });
     return items;
   }
@@ -671,7 +703,7 @@ class Reader {
         continue;
       }
       const member = node.members[index];
-      const value = this.read(member.node, this.ijson ? member.ijsonInt : member.jsonInt, 0);
+      const value = this.read(member.text, this.ijson ? member.ijsonInt : member.jsonInt, 0);
       if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
         c.fail('json: member length_bound violated');
       slots[index] = value;
@@ -699,7 +731,7 @@ class Reader {
       if (key === null) return c.fail('ijson: variant object must have one key');
       index = node.members.findIndex((m) => m.ijsonName === key);
       if (index < 0) c.fail('ijson: unknown variant alternative');
-      payload = this.read(node.members[index].node, 'natural', 0);
+      payload = this.read(node.members[index].text, 'natural', 0);
       if (c.nextField() !== null) c.fail('ijson: variant object must have one key');
     } else {
       if (c.kind() !== 'array') c.fail('json: expected a [index, value] variant');
@@ -708,7 +740,7 @@ class Reader {
       index = this.integer(32, false, 'natural') as number;
       if (index >= node.members.length) c.fail('json: variant index out of range');
       if (!c.nextElement()) c.fail("json: expected ',' in variant");
-      payload = this.read(node.members[index].node, 'natural', 0);
+      payload = this.read(node.members[index].text, 'natural', 0);
       if (c.nextElement()) c.fail("json: expected ']' after variant value");
     }
     return { type: node.members[index].name, value: payload };
@@ -740,6 +772,8 @@ class Reader {
         if (c.kind() !== 'string') c.fail('json: expected a string');
         const s = c.string();
         if (!bytesAdmit(node.child, s.end - s.start)) c.fail('json: string exceeds its bound');
+        // A raw string is its bytes (here: the UTF-8 of the text).
+        if (node.raw) return s.bytes.slice(s.start, s.end);
         return utf8Decode(s.bytes, s.start, s.end);
       }
       case 'hex': {
@@ -770,14 +804,14 @@ class Reader {
           c.null();
           return null;
         }
-        return wrapSome(node, this.read(node.child, form, n + 1));
+        return wrapSome(node, this.read(node.textChild, form, n + 1));
       case 'list':
       case 'array':
         return this.sequence(node, form);
       case 'tuple': {
         const items: unknown[] = [];
         this.arrayItems(node.members.length, true, () => {
-          items.push(this.read(node.members[items.length].node, 'natural', 0));
+          items.push(this.read(node.members[items.length].text, 'natural', 0));
         });
         return items;
       }
@@ -785,12 +819,19 @@ class Reader {
         return this.record(node);
       case 'variant':
         return this.variant(node);
+      case 'custom':
+        // "box", or a text presentation with no handler: the inner type.
+        if (!node.boxed) {
+          if (node.handler) return this.presented(node);
+          if (this.codec.requireHandlers) c.fail('pssz IR: no handler registered for a custom type');
+        }
+        return this.read(node.inner!, form, n + 1);
     }
   }
 }
 
 /** Reads exactly one value of `node` from JSON / I-JSON text. */
-export function jsonToValue(node: Node, format: JsonFormat, text: string | Uint8Array): unknown {
+export function jsonToValue(codec: Codec, node: Node, format: JsonFormat, text: string | Uint8Array): unknown {
   let bytes: Uint8Array;
   if (typeof text === 'string') {
     if (!wellFormed(text)) throw new PsszError('json', 'json: text holds an unpaired surrogate', 0);
@@ -798,7 +839,7 @@ export function jsonToValue(node: Node, format: JsonFormat, text: string | Uint8
   } else bytes = text;
   const ijson = format === 'ijson';
   const cursor = new JsonCursor(bytes, ijson);
-  const value = new Reader(cursor, ijson).read(node, 'natural', 0);
+  const value = new Reader(cursor, ijson, codec).read(node, 'natural', 0);
   cursor.finish();
   return value;
 }
@@ -844,7 +885,7 @@ function writeString(out: string[], s: string, nonchar: boolean): void {
 
 class Writer {
   readonly out: string[] = [];
-  constructor(private readonly ijson: boolean) {}
+  constructor(private readonly ijson: boolean, private readonly codec: Codec) {}
 
   private integer(
     bits: number, signed: boolean, form: IntForm, value: unknown, enumerators?: IrEnumerator[],
@@ -879,7 +920,7 @@ class Writer {
     this.out.push('[');
     for (let i = 0; i < value.length; ++i) {
       if (i) this.out.push(',');
-      this.write(node.child, value[i], form, n + 1);
+      this.write(node.textChild, value[i], form, n + 1);
     }
     this.out.push(']');
   }
@@ -893,12 +934,12 @@ class Writer {
       case 'int':
         return this.integer(node.bits, node.signed, form, value, node.enumerators);
       case 'float':
-        if (value instanceof PsszNaN) return fail('json: non-finite float has no JSON text');
+        if (value instanceof PsszNaN) return fail(`${this.ijson ? 'ijson' : 'json'}: non-finite float has no JSON text`);
         if (typeof value !== 'number') return fail('pssz IR: float value does not match the schema');
       {
         // The value as the float holds it: a number beyond binary32 is infinite there.
         const held = node.size === 4 ? Math.fround(value) : value;
-        if (!Number.isFinite(held)) return fail('json: non-finite float has no JSON text');
+        if (!Number.isFinite(held)) return fail(`${this.ijson ? 'ijson' : 'json'}: non-finite float has no JSON text`);
         out.push(formatFloat(held, node.size === 4));
         return;
       }
@@ -912,6 +953,12 @@ class Writer {
       case 'bitlist':
         return fail('json: bit types have no JSON form');
       case 'string':
+        if (node.raw && value instanceof Uint8Array) {
+          // A raw string holding bytes that are not UTF-8 has no JSON text.
+          if (!bytesAdmit(node.child, value.length)) fail('json: string exceeds its bound');
+          if (!utf8Valid(value, 0, value.length)) fail('json: string is not valid UTF-8');
+          return writeString(out, utf8Decode(value, 0, value.length), this.ijson);
+        }
         if (typeof value !== 'string') return fail('pssz IR: string value required');
         if (!wellFormed(value)) return fail('json: string is not valid UTF-8');
         if (!bytesAdmit(node.child, utf8Length(value))) fail('json: string exceeds its bound');
@@ -936,7 +983,7 @@ class Writer {
       case 'option': {
         const [some, payload] = unwrapOption(node, value, fail);
         if (!some) out.push('null');
-        else this.write(node.child, payload, form, n + 1);
+        else this.write(node.textChild, payload, form, n + 1);
         return;
       }
       case 'list':
@@ -948,7 +995,7 @@ class Writer {
         out.push('[');
         for (let i = 0; i < value.length; ++i) {
           if (i) out.push(',');
-          this.write(node.members[i].node, value[i], 'natural', n + 1);
+          this.write(node.members[i].text, value[i], 'natural', n + 1);
         }
         out.push(']');
         return;
@@ -969,7 +1016,7 @@ class Writer {
           first = false;
           writeString(out, member.name, false);
           out.push(':');
-          this.write(member.node, field, this.ijson ? member.ijsonInt : member.jsonInt, n + 1);
+          this.write(member.text, field, this.ijson ? member.ijsonInt : member.jsonInt, n + 1);
         }
         out.push('}');
         return;
@@ -985,22 +1032,48 @@ class Writer {
           out.push('{');
           writeString(out, member.ijsonName, false);
           out.push(':');
-          this.write(member.node, v.value, 'natural', n + 1);
+          this.write(member.text, v.value, 'natural', n + 1);
           out.push('}');
         } else {
           out.push(`[${index},`);
-          this.write(member.node, v.value, 'natural', n + 1);
+          this.write(member.text, v.value, 'natural', n + 1);
           out.push(']');
         }
         return;
+      }
+      case 'custom': {
+        if (!node.boxed) {
+          if (node.handler) {
+            // The inner value as `decode` gives it, then the handler's text
+            // as one JSON string.
+            let inner: unknown;
+            try {
+              inner = canonical(this.codec, this.codec.wireOf(node).node, value);
+            } catch (e) {
+              if (!(e instanceof PsszError)) throw e;
+              return fail('pssz IR: custom value does not match its inner type');
+            }
+            let text: unknown;
+            try {
+              text = node.handler.toText(inner);
+            } catch {
+              return fail('json: custom handler has no text for the value');
+            }
+            if (typeof text !== 'string') return fail('json: custom handler has no text for the value');
+            return writeString(out, text, this.ijson);
+          }
+          if (this.codec.requireHandlers) fail('pssz IR: no handler registered for a custom type');
+        }
+        // "box", or a text presentation with no handler: the inner type.
+        return this.write(node.inner!, value, form, n + 1);
       }
     }
   }
 }
 
 /** The JSON / I-JSON text of `value`. */
-export function valueToJson(node: Node, format: JsonFormat, value: unknown): string {
-  const writer = new Writer(format === 'ijson');
+export function valueToJson(codec: Codec, node: Node, format: JsonFormat, value: unknown): string {
+  const writer = new Writer(format === 'ijson', codec);
   writer.write(node, value, 'natural', 0);
   return writer.out.join('');
 }

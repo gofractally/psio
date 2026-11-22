@@ -5,6 +5,7 @@
 // re-encodes to the same bytes (a value has exactly one encoding).
 
 import { test } from 'node:test';
+import { fixtureHandlers } from './support/custom-handlers.js';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PsszError, PsszSchema, type JsonFormat, type PsszType, type PsszWidth } from '../index.js';
@@ -76,7 +77,7 @@ test('PSSZ frames: truncation, mutation and extension agree with validate', () =
   const types = new Map<string, PsszType>();
   let sources = 0;
   for (const row of fx.vectors as { name: string; type: string; format: string; hex: string; expect: string }[]) {
-    if (row.expect === 'reject' || row.name.startsWith('string-raw-non-utf8/')) continue;
+    if (row.expect === 'reject') continue;
     const width: PsszWidth = row.format === 'auto' ? 'auto' : row.format === 'pssz8' ? 1 : row.format === 'pssz16' ? 2 : 4;
     const key = `${width}/${row.type}`;
     let type = types.get(key);
@@ -116,6 +117,8 @@ test('PSSZ frames: truncation, mutation and extension agree with validate', () =
 test('JSON / I-JSON text: truncation and mutation fail typed or round-trip', () => {
   const fx = fixture('json-vectors.json');
   const schema = PsszSchema.decode(fromHex(fx.schema_ir));
+  // The fixture's custom text forms are registered, as its texts need.
+  const handled = schema.withHandlers(fixtureHandlers);
   const random = prng(0xfeed);
   const expressible = new Set((fx.types as { id: string; ir: boolean }[]).filter((t) => t.ir).map((t) => t.id));
   const checkText = (type: PsszType, format: JsonFormat, text: Uint8Array, what: string) => {
@@ -136,7 +139,7 @@ test('JSON / I-JSON text: truncation and mutation fail typed or round-trip', () 
   const alphabet = Buffer.from('{}[]",:\\0123456789-+.eEtfnu aA\u0000\u007fÿ', 'latin1');
   for (const row of fx.vectors as { name: string; type: string; kind: string; json?: string; ijson?: string }[]) {
     if (row.kind !== 'value' || !expressible.has(row.type)) continue;
-    const type = schema.type(row.type);
+    const type = handled.type(row.type);
     for (const format of ['json', 'ijson'] as const) {
       const good = Buffer.from(row[format]!, 'utf8');
       const step = Math.max(1, Math.floor(good.length / 32));

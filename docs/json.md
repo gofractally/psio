@@ -575,8 +575,8 @@ text adapter.
 | | emits the node | registers a handler |
 |---|---|---|
 | C++ | `SchemaBuilder`, for a type with a `text_category` adapter that is a reflected record or an enum (a strong integer typedef). Id: the adapter's `static constexpr std::string_view schema_id`, else the reflected name. | `psio::pssz_ir::CustomHandlers h; h.add<AccountNumber>();` (the type's own text adapter, registered once) or `h.add("Id", {to_text, from_text})`; passed as the trailing argument of `json_to_pssz` / `pssz_to_json` / `json_to_value` / `value_to_json`, or bound once per schema with `JsonNames names(schema, h)`. |
-| Rust | see `rust/psio/src/pssz_dynamic` (CustomHandlers) | |
-| JS | see `js/README.md` (custom handlers) | |
+| Rust | `ToPsszSchema` derive with `#[pssz(custom)]` (id: the type name) or `#[pssz(custom = "AccountName")]`; with `#[pssz(transparent)]` the wire type is the inner field's. | `let mut h = psio::pssz::dynamic::CustomHandlers::new(); h.add_type::<Account>()?;` (the type's own `TextForm`), `h.add_type_as::<T>("Id")`, or `h.add("Id", to_text, from_text)` over the wire type's PSSZ bytes; `h.set_strict(true)`; passed to `json_to_pssz_with` / `pssz_to_json_with` / `json_to_value_with` / `value_to_json_with`. Looked up by id per custom value (the Rust dynamic path has no bind step). |
+| JS | (reads the node from the schema) | `PsszSchema.decode(irBytes, { handlers: { Version: versionHandler, AccountName: accountHandler }, requireHandlers })`, `schema.withHandlers(...)` or `schema.type(root, { handlers })`; a handler is `{ toText(value): string, fromText(text): value }` over the decoded JS value of the wire type, bound once when the type is compiled. |
 
 **Fallback.** An id with no registered handler reads and writes as its wire
 type: the account as its number, the version as `{"major":1,"minor":2}`.

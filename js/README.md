@@ -36,9 +36,10 @@ Transfer.encode({ from: 'alice', amount: 5n });       // Uint8Array
 
 | | |
 |---|---|
-| `new PsszSchema(ir)` | From a `psio::Schema` value, or a compact `{ Name: type }` map (below). |
-| `PsszSchema.decode(bytes)` / `.fromJson(text)` | From the PSSZ / I-JSON encoding of `psio::Schema`. `schema.encode()` writes it back; `schema.ir` is the IR. |
-| `schema.type(root, { width })` | A `PsszType` for a type name or an inline type. `width`: `'auto'` (default; type-derived offset widths, the `psio::pssz` format) or `1` / `2` / `4` (one inherited width, `psio::pssz_<W>`). Throws when the type is not expressible. |
+| `new PsszSchema(ir, options)` | From a `psio::Schema` value, or a compact `{ Name: type }` map (below). `options`: `{ handlers, requireHandlers }` ([custom text handlers](#custom-text-handlers)). |
+| `PsszSchema.decode(bytes, options)` / `.fromJson(text, format, options)` | From the PSSZ / I-JSON encoding of `psio::Schema`. `schema.encode()` writes it back; `schema.ir` is the IR. |
+| `schema.withHandlers(handlers, { requireHandlers })` | The same schema with these custom text handlers added. |
+| `schema.type(root, { width, handlers, requireHandlers })` | A `PsszType` for a type name or an inline type. `width`: `'auto'` (default; type-derived offset widths, the `psio::pssz` format) or `1` / `2` / `4` (one inherited width, `psio::pssz_<W>`; see [explicit widths](#explicit-widths)). Throws when the type is not expressible. |
 | `type.encode(value)` | Canonical bytes. Trailing absent optionals are pruned; length bounds and caps are enforced. |
 | `type.decode(bytes, { rejectUnknown })` | The value. The bytes are fully validated first. Unknown appended optional fields are dropped unless `rejectUnknown`. |
 | `type.validate(bytes)` | `{ ok: true, hasUnknown }` or `{ ok: false, error }`. Never throws. |
@@ -61,7 +62,10 @@ length they claim is trusted before it is checked against the input.
 | integers of 64, 128, 256 bits | `bigint` (an exact `number` is accepted on encode). A 256-bit integer is 32 little-endian bytes on the wire and one `bigint` here |
 | enum (`Enum`) | the value of its underlying integer: `number` for 8 to 32 bits, `bigint` for 64. Never the name; names exist only in text |
 | floats | `number`; a NaN carrying a payload decodes to a `PsszNaN` (its `bits` re-encode exactly) |
-| string | `string` (UTF-8 on the wire; an unpaired surrogate is an error) |
+| UTF-8 string (`utf8` adapter: C++ `utf8_string`, Rust `String`) | `string` (validated UTF-8 on the wire; an unpaired surrogate is an error) |
+| raw string (`string` adapter: C++ `std::string`, Rust `RawString`) | `Uint8Array`: any bytes, not validated. `encode` and `valueToJson` also accept a JavaScript `string` (its UTF-8) |
+| boxed value (`box`) | the value of the boxed type |
+| custom type (any other `Custom` id) | the value of its wire type; a handler changes only its text |
 | bytes (`hex` adapter) | `Uint8Array` |
 | record | object, members in declaration order; a missing optional member is `null` |
 | list, bounded list, array, tuple | array |
@@ -118,6 +122,16 @@ format: `valueToJson` / `psszToJson` throw a `PsszError` of kind `'value'`
 (a number too large for a 32-bit float counts as infinite there), and no
 spelling of one is read. They remain valid PSSZ values.
 
+**Raw strings.** A raw `string` may hold bytes that are not UTF-8, which is
+why its value is a `Uint8Array` and not a JavaScript string (decoding to a
+string would lose them, or make the value's type depend on the data). Such a
+value is valid PSSZ: it validates, decodes and re-encodes unchanged. In text a
+raw string is a JSON string of the UTF-8 it holds; when its bytes are not
+UTF-8 it has no text and `psszToJson` / `valueToJson` throw a `'value'` error
+("string is not valid UTF-8"). `jsonToValue` returns the bytes of the text.
+Use `new TextDecoder().decode(value)` to show one. A `utf8` string is checked
+on every read and write and is a JavaScript string throughout.
+
 Text is read by an exact parser, not `JSON.parse`: integers are converted from
 their token text with `BigInt`, so strict `json` integers beyond 2^53 are
 lossless in both directions, and the rules `JSON.parse` cannot see (`-0`,
@@ -129,6 +143,72 @@ scientific, whichever is shorter (`0.1`, `1e+21`, `1e-07`,
 `5.960464477539063e-08`, `999999999999999868928`). A 32-bit float is rounded
 once, from the decimal text.
 
+### Custom text handlers
+
+A type with its own text form (an account name over a `u64`, `major.minor`
+over a record) is, in the Schema IR, `Custom { type: <wire type>, id }` with
+an id that is not one of the binary adapters. On the wire it is exactly its
+wire type: widths, bytes, validation and the decoded JavaScript value do not
+depend on the id. Its text comes from a handler registered for the id:
+
+```typescript
+import { PsszSchema, type PsszCustomHandler } from 'psio';
+
+// Custom { type: Object { major: u16, minor: u16 }, id: "Version" } as "1.2"
+const version: PsszCustomHandler = {
+  toText: (v) => `${(v as { major: number }).major}.${(v as { minor: number }).minor}`,
+  fromText(text) {
+    const m = /^(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$/.exec(text);
+    if (!m) throw new Error('not a version');
+    return { major: Number(m[1]), minor: Number(m[2]) };   // range-checked against u16 by the codec
+  },
+};
+
+const schema = PsszSchema.decode(schemaBytes, { handlers: { Version: version } });
+const Release = schema.type('Release');
+Release.psszToJson(bytes);                       // {"version":"1.2","name":"first"}
+Release.jsonToPssz('{"version":"1.2","name":"first"}');
+Release.decode(bytes);                           // { version: { major: 1, minor: 2 }, name: 'first' }
+```
+
+- A handler works on the **decoded value of the wire type** (what `decode`
+  returns for it), not on its bytes: `toText(value)` returns the text,
+  `fromText(text)` returns a value. The value `fromText` returns is checked
+  against the wire type (and normalized as `decode` would give it); either
+  function may throw, which is an ordinary `PsszError` (`'json'` on read,
+  `'value'` on write).
+- The text is carried as one JSON string in both formats. With a handler
+  registered the presentation is exactly its text: the plain form is not also
+  accepted.
+- Handlers are given once, as `{ id: handler }` or a `Map`: to `new
+  PsszSchema` / `PsszSchema.decode` / `PsszSchema.fromJson`, with
+  `schema.withHandlers(...)`, or for one type with `schema.type(root, {
+  handlers })`. A handler is bound to the type when it is compiled
+  (`schema.type`), not looked up per value.
+- **Fallback.** An id with no handler reads and writes as its wire type (the
+  account as its number, the version as `{"major":1,"minor":2}`); the plain
+  text reads back to the same bytes. `requireHandlers: true` makes a missing
+  handler an error when text is read or written ("no handler registered for a
+  custom type"); binary encode / decode / validate are unaffected.
+- The ids of the binary form (`bool`, `char`, `string`, `utf8`, `hex`,
+  `bitvector`, `bitlist`, `box`, `unknown`) take no handler.
+
+### Explicit widths
+
+`width: 1 | 2 | 4` is the typed `psio::pssz_<W>` format: one inherited offset
+width for every record, list and array. A record's `maxDynamicData` is
+accepted there and does not change the width; the cap of the **top-level**
+type bounds the whole encoding (over it: an error from `encode`, `decode` and
+`validate`), and a nested record's cap is not looked up. The `maxFields`
+record attribute is an unsupported constraint under an explicit width (a
+`'schema'` error from `schema.type`), as in C++. The automatic profile
+derives widths from caps and enforces every record's.
+
+A boxed value (`Custom { type, id: "box" }`: C++ / Rust `Box<T>`) is its inner
+type on the wire and in text, with no inferred size bound: under `'auto'` a
+record holding one uses 4-byte offsets unless it carries an explicit cap, and
+a box as the root type reports width 4.
+
 ### Schemas written by hand
 
 The compact spelling is the one `generateSchema` produces, plus `BoundedList`,
@@ -137,7 +217,7 @@ The compact spelling is the one `generateSchema` produces, plus `BoundedList`,
 ```typescript
 const U8 = { Int: { bits: 8, isSigned: false } };
 const schema = new PsszSchema({
-  Name: { Custom: { type: { BoundedList: { type: U8, maxCount: 32 } }, id: 'string' } },
+  Name: { Custom: { type: { BoundedList: { type: U8, maxCount: 32 } }, id: 'utf8' } },
   Point: { Struct: { x: { Float: { exp: 11, mantissa: 52 } }, y: { Float: { exp: 11, mantissa: 52 } } } },
   Color: { Enum: { type: U8, members: { red: 0, green: 1, blue: 7 } } },
   Shape: {
@@ -156,7 +236,9 @@ const schema = new PsszSchema({
 
 `Struct` is a fixed-layout record (no header); `Object` is extensible unless it
 carries the `definitionWillNotChange` attribute. Adapters (`Custom.id`):
-`bool`, `char`, `string`, `hex`, `bitvector`, `bitlist`.
+`bool`, `char`, `utf8` (a UTF-8 string), `string` (a raw string: any bytes),
+`hex`, `bitvector`, `bitlist`, `box`. Any other id is a custom text form over
+its inner type ([custom text handlers](#custom-text-handlers)).
 
 `Enum` is `{ type, members }`: `type` is the underlying integer (8 to 64 bits
 for a text form) and `members` a `{ name: value }` map or a list of

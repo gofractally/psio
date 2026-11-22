@@ -428,19 +428,66 @@ function boundAdmits(bound: LengthBound, n: number): boolean {
 
 export type IntForm = 'natural' | 'number' | 'string';
 
-export interface MemberInfo {
-  name: string;
-  node: Node;
-  bound: LengthBound | null;
-  jsonInt: IntForm;
-  ijsonInt: IntForm;
-  /** Variant alternative's I-JSON name. */
-  ijsonName: string;
+/**
+ * The text form of a custom type (a `Custom` id that is not part of the
+ * binary form): `toText` gets the decoded value of the wire type, `fromText`
+ * returns one. Either may throw for a value / text it does not accept.
+ */
+export interface PsszCustomHandler {
+  toText(value: unknown): string;
+  fromText(text: string): unknown;
+}
+
+// Custom ids that are part of the binary form (pssz_ir.hpp "Custom ids").
+// Any other id is "box" or a text presentation: its inner type on the wire.
+const WIRE_CUSTOM_IDS = new Set(['bool', 'char', 'string', 'utf8', 'hex', 'bitvector', 'bitlist', 'unknown']);
+/** Ids a handler cannot be registered for. */
+export function reservedCustomId(id: string): boolean {
+  return id === 'box' || WIRE_CUSTOM_IDS.has(id);
+}
+
+// The node a reference is on the wire: wrappers ("box", text presentations)
+// looked through. `boxed`: a "box" was on the way.
+function strip(ref: Node): { node: Node; boxed: boolean } {
+  let boxed = false;
+  for (let hops = 0; ref.kind === 'custom'; ++hops) {
+    if (!ref.inner || hops > 4096) schemaError('pssz IR: cyclic named aliases');
+    boxed = boxed || ref.boxed;
+    ref = ref.inner;
+  }
+  return { node: ref, boxed };
+}
+
+/** One member of a record / tuple / variant. */
+export class MemberInfo {
+  private wire?: { node: Node; boxed: boolean };
+  constructor(
+    readonly name: string,
+    /** The member's type as written: wrappers included (the text walk). */
+    readonly text: Node,
+    readonly bound: LengthBound | null,
+    readonly jsonInt: IntForm,
+    readonly ijsonInt: IntForm,
+    /** Variant alternative's I-JSON name. */
+    readonly ijsonName: string,
+  ) {}
+  /** The member's type on the wire. */
+  get node(): Node {
+    return (this.wire ??= strip(this.text)).node;
+  }
+  /** The member is a boxed value: no inferred size bound. */
+  get boxed(): boolean {
+    return (this.wire ??= strip(this.text)).boxed;
+  }
 }
 
 export type NodeKind =
   | 'int' | 'float' | 'bool' | 'char' | 'string' | 'hex' | 'bitvector' | 'bitlist'
-  | 'option' | 'list' | 'array' | 'tuple' | 'record' | 'variant';
+  | 'option' | 'list' | 'array' | 'tuple' | 'record' | 'variant'
+  // A wrapper that adds nothing to the bytes: "box" or a text presentation.
+  // Only the text walk and `strip` see it; the binary codec works on `child`
+  // / `MemberInfo.node`, which look through it.
+  | 'custom';
 
 interface Layout {
   fixed: boolean;
@@ -461,8 +508,27 @@ export class Node {
   bits = 0;
   signed = false;
   size = 0;
-  /** option payload; list / array element; string / hex byte container. */
-  child!: Node;
+  /**
+   * option payload; list / array element; string / hex byte container, as
+   * written (wrappers included). The binary codec uses `child`.
+   */
+  textChild!: Node;
+  private wireChild?: { node: Node; boxed: boolean };
+  /** `textChild` on the wire. */
+  get child(): Node {
+    return (this.wireChild ??= strip(this.textChild)).node;
+  }
+  /** `textChild` is a boxed value: no inferred size bound. */
+  get childBoxed(): boolean {
+    return (this.wireChild ??= strip(this.textChild)).boxed;
+  }
+  /** string: raw bytes (Custom "string"), not validated as UTF-8 ("utf8"). */
+  raw = false;
+  /** custom wrapper: the wrapped type, the Custom id, "box", the handler. */
+  inner?: Node;
+  id = '';
+  boxed = false;
+  handler?: PsszCustomHandler;
   /** array length or bounded-list maximum. */
   count = 0n;
   /** `count` as a number (Infinity beyond 2^53). */
@@ -537,11 +603,13 @@ function intForm(attributes: IrAttribute[], name: string): IntForm {
 
 type Site = 'record' | 'record_member' | 'variant' | 'variant_member';
 
-function checkAttributes(values: IrAttribute[], site: Site): void {
+// `caps`: the automatic profile, which also takes maxFields; an explicit
+// profile rejects that constraint, as the typed psio::pssz_<W> codecs do.
+function checkAttributes(values: IrAttribute[], site: Site, caps: boolean): void {
   for (const { name, value } of values) {
     if (name === 'doc' || name === 'description' || name === 'visible') continue;
     if (site === 'record' && name === 'definitionWillNotChange') continue;
-    if (site === 'record' && (name === 'maxDynamicData' || name === 'maxFields')) continue;
+    if (site === 'record' && (name === 'maxDynamicData' || (caps && name === 'maxFields'))) continue;
     if (site === 'record_member' && (name === 'lengthBound' || name === 'jsonInt' || name === 'ijsonInt')) {
       if (name !== 'lengthBound' && value !== 'number' && value !== 'string')
         schemaError('pssz IR: malformed integer form attribute');
@@ -663,7 +731,14 @@ export class Codec {
   private readonly named = new Map<string, IrMember | null>();
   private readonly nodes = new Map<IrAnyType, Node>();
 
-  constructor(readonly schema: IrSchema, readonly W: 0 | 1 | 2 | 4) {
+  constructor(
+    readonly schema: IrSchema,
+    readonly W: 0 | 1 | 2 | 4,
+    /** Custom id -> text handler, bound to the nodes as they are built. */
+    readonly handlers: ReadonlyMap<string, PsszCustomHandler> = new Map(),
+    /** A custom id with no handler is an error in text, not the inner type's text. */
+    readonly requireHandlers = false,
+  ) {
     for (const member of schema.types)
       this.named.set(member.name, this.named.has(member.name) ? null : member);
   }
@@ -682,6 +757,25 @@ export class Codec {
       out = found!.type;
     }
     return schemaError('pssz IR: cyclic named aliases');
+  }
+
+  // The type `input` is on the wire: aliases followed, and the nodes that
+  // add nothing to the bytes (Enum, "box", text presentations) looked through.
+  private wire(input: IrAnyType): IrTypeValue {
+    let out = input;
+    for (let hops = 0; hops <= 4 * this.schema.types.length + 64; ++hops) {
+      out = this.resolve(out);
+      const t = out.value;
+      if (t.type === 'Enum') out = t.value.type;
+      else if (t.type === 'Custom' && !WIRE_CUSTOM_IDS.has(t.value.id)) out = t.value.type;
+      else return t;
+    }
+    return schemaError('pssz IR: cyclic named aliases');
+  }
+
+  /** `ref` on the wire, and whether it is a boxed value. */
+  wireOf(ref: Node): { node: Node; boxed: boolean } {
+    return strip(ref);
   }
 
   /**
@@ -723,9 +817,15 @@ export class Codec {
       }
       case 'Enum': {
         // On the wire an Enum is exactly its underlying integer.
-        const under = this.resolve(t.value.type).value;
-        if (under.type !== 'Int') return schemaError('pssz IR: an enum needs an underlying integer');
-        const integer = this.build(t.value.type, added, d);
+        let under: IrTypeValue | undefined;
+        try {
+          under = this.wire(t.value.type);
+        } catch (e) {
+          // An enum over itself has no integer under it.
+          if (!(e instanceof PsszError) || !e.message.includes('cyclic')) throw e;
+        }
+        if (under?.type !== 'Int') return schemaError('pssz IR: an enum needs an underlying integer');
+        const integer = strip(this.build(t.value.type, added, d)).node;
         node.kind = 'int';
         node.bits = integer.bits;
         node.signed = integer.signed;
@@ -743,11 +843,11 @@ export class Codec {
       }
       case 'Option':
         node.kind = 'option';
-        node.child = this.build(t.value.type, added, d);
+        node.textChild = this.build(t.value.type, added, d);
         break;
       case 'List':
         node.kind = 'list';
-        node.child = this.build(t.value.type, added, d);
+        node.textChild = this.build(t.value.type, added, d);
         break;
       case 'BoundedList':
       case 'Array':
@@ -756,25 +856,20 @@ export class Codec {
         node.exact = t.type === 'Array';
         node.count = t.type === 'Array' ? t.value.len : t.value.maxCount;
         node.countNum = node.count > BigInt(Number.MAX_SAFE_INTEGER) ? Infinity : Number(node.count);
-        node.child = this.build(t.value.type, added, d);
+        node.textChild = this.build(t.value.type, added, d);
         break;
       case 'Tuple':
         node.kind = 'tuple';
-        node.members = t.value.members.map((m, i) => ({
-          name: String(i),
-          node: this.build(m, added, d),
-          bound: null,
-          jsonInt: 'natural' as IntForm,
-          ijsonInt: 'natural' as IntForm,
-          ijsonName: '',
-        }));
+        node.members = t.value.members.map(
+          (m, i) => new MemberInfo(String(i), this.build(m, added, d), null, 'natural', 'natural', ''),
+        );
         break;
       case 'Struct':
       case 'Object':
       case 'Variant': {
         const record = t.type !== 'Variant';
         node.kind = record ? 'record' : 'variant';
-        checkAttributes(t.value.attributes, record ? 'record' : 'variant');
+        checkAttributes(t.value.attributes, record ? 'record' : 'variant', this.automatic);
         if (record) {
           node.stable =
             t.type === 'Struct' || t.value.attributes.some((a) => a.name === 'definitionWillNotChange');
@@ -785,23 +880,32 @@ export class Codec {
         for (const member of t.value.members) {
           if (seen.has(member.name)) schemaError('pssz IR: duplicate schema member');
           seen.add(member.name);
-          checkAttributes(member.attributes, record ? 'record_member' : 'variant_member');
+          checkAttributes(member.attributes, record ? 'record_member' : 'variant_member', this.automatic);
           const name = record ? undefined : findAttribute(member.attributes, 'ijsonName');
-          node.members.push({
-            name: member.name,
-            node: this.build(member.type, added, d),
-            bound: record ? parseLengthBound(member.attributes) : null,
-            jsonInt: record ? intForm(member.attributes, 'jsonInt') : 'natural',
-            ijsonInt: record ? intForm(member.attributes, 'ijsonInt') : 'natural',
-            ijsonName: name && name.value !== null ? name.value : member.name,
-          });
+          node.members.push(new MemberInfo(
+            member.name,
+            this.build(member.type, added, d),
+            record ? parseLengthBound(member.attributes) : null,
+            record ? intForm(member.attributes, 'jsonInt') : 'natural',
+            record ? intForm(member.attributes, 'ijsonInt') : 'natural',
+            name && name.value !== null ? name.value : member.name,
+          ));
         }
         node.byName = new Map(node.members.map((m, i) => [m.name, i]));
         break;
       }
       case 'Custom': {
         const id = t.value.id;
-        const inner = this.resolve(t.value.type).value;
+        if (!WIRE_CUSTOM_IDS.has(id)) {
+          // "box" or a text presentation: the inner type on the wire.
+          node.kind = 'custom';
+          node.id = id;
+          node.boxed = id === 'box';
+          if (!node.boxed) node.handler = this.handlers.get(id);
+          node.inner = this.build(t.value.type, added, d);
+          break;
+        }
+        const inner = this.wire(t.value.type);
         const unsignedInt = (x: IrTypeValue, bits: number) =>
           x.type === 'Int' && x.value.bits === bits && !x.value.isSigned;
         if (id === 'bool' || id === 'char') {
@@ -822,23 +926,25 @@ export class Codec {
             element = inner.value.type;
             bound = inner.value.maxCount;
           }
-          if (!unsignedInt(this.resolve(element).value, 1))
+          if (!unsignedInt(this.wire(element), 1))
             schemaError('pssz IR: packed bit element must be unsigned one-bit integer');
           if (bound > BigInt(Number.MAX_SAFE_INTEGER))
             schemaError('pssz IR: bit count exceeds platform capacity');
           node.kind = id;
           node.size = Number(bound);
-        } else if (id === 'string' || id === 'hex') {
+        } else if (id === 'string' || id === 'utf8' || id === 'hex') {
           if (inner.type !== 'List' && inner.type !== 'BoundedList' && inner.type !== 'Array')
             return schemaError('pssz IR: byte adapter requires byte container');
-          const element = this.resolve(inner.value.type).value;
+          const element = this.wire(inner.value.type);
           if (element.type === 'Custom' && element.value.id === 'char') {
-            if (!unsignedInt(this.resolve(element.value.type).value, 8))
+            if (!unsignedInt(this.wire(element.value.type), 8))
               schemaError('pssz IR: primitive adapter has incompatible inner schema');
           } else if (!unsignedInt(element, 8)) schemaError('pssz IR: byte adapter requires unsigned bytes');
-          node.kind = id;
+          // "string" is raw bytes; "utf8" is validated on every read and write.
+          node.kind = id === 'hex' ? 'hex' : 'string';
+          node.raw = id === 'string';
         } else schemaError('pssz IR: unsupported custom adapter');
-        node.child = this.build(t.value.type, added, d);
+        node.textChild = this.build(t.value.type, added, d);
         break;
       }
       case 'FracPack':
@@ -1004,18 +1110,19 @@ export class Codec {
     active.push(node);
     // N elements, each its reserved payload plus an offset slot when it is
     // not an inline fixed payload.
-    const elements = (child: Node, count: bigint): bigint | null => {
+    const elements = (child: Node, boxed: boolean, count: bigint): bigint | null => {
       if (count === 0n) return 0n;
-      let element = this.boundOf(child, null, true, active);
+      // A boxed value has no inferred bound (the typed codecs give it none).
+      let element = boxed ? null : this.boundOf(child, null, true, active);
       if (!this.fixedPayload(child, [])) element = boundAdd(element, 4n);
       return boundMultiply(count, element);
     };
     const sequence = (container: Node): bigint | null => {
       if (container.kind === 'list' && !container.bounded) {
         const count = annotation ? annotation.exact ?? annotation.max : null;
-        return count !== null ? elements(container.child, count) : null;
+        return count !== null ? elements(container.child, container.childBoxed, count) : null;
       }
-      return elements(container.child, container.count);
+      return elements(container.child, container.childBoxed, container.count);
     };
     let out: bigint | null = null;
     switch (node.kind) {
@@ -1031,16 +1138,16 @@ export class Codec {
         break;
       case 'option':
         // One selector byte is reserved for every optional.
-        out = boundAdd(this.boundOf(node.child, annotation, true, active), 1n);
+        out = node.childBoxed ? null : boundAdd(this.boundOf(node.child, annotation, true, active), 1n);
         break;
       case 'string':
       case 'hex':
-        out = sequence(node.child);
+        out = node.childBoxed ? null : sequence(node.child);
         break;
       case 'record': {
         let total: bigint | null = node.stable ? 0n : 4n;
         for (const member of node.members) {
-          let payload = this.boundOf(member.node, member.bound, true, active);
+          let payload = member.boxed ? null : this.boundOf(member.node, member.bound, true, active);
           if (!this.fixedPayload(member.node, [])) payload = boundAdd(payload, 4n);
           total = boundAdd(total, payload);
         }
@@ -1071,10 +1178,30 @@ export class Codec {
   }
 
   // A record over its explicit cap is not a value of its type. The automatic
-  // profile checks every record; the explicit profiles, like the typed
-  // `psio::pssz_<W>` codecs, check only the top-level type.
-  private overCap(node: Node, size: number, n: number): boolean {
-    return node.cap !== null && (this.automatic || n === 0) && BigInt(size) > node.cap;
+  // profile checks every record where it is read or written.
+  private overCap(node: Node, size: number): boolean {
+    return this.automatic && node.cap !== null && BigInt(size) > node.cap;
+  }
+
+  /**
+   * Explicit profiles, as the typed `psio::pssz_<W>` codecs: the cap of the
+   * top-level type bounds the whole encoding; nested caps are not looked up.
+   * `fail` is called when `size` bytes are over it.
+   */
+  checkTopCap(root: Node, size: number, fail: (m: string) => never): void {
+    if (!this.automatic && root.cap !== null && BigInt(size) > root.cap)
+      fail('pssz IR: encoded size exceeds maxDynamicData cap');
+  }
+  /** `encodeAt` of a top-level value, with the explicit profiles' cap check. */
+  encodeTop(root: Node, value: unknown): Uint8Array {
+    const out = this.encodeAt(root, value, 0);
+    this.checkTopCap(root, out.length, valueError);
+    return out;
+  }
+  /** `decodeAt` of a whole top-level frame, with the explicit profiles' cap check. */
+  decodeTop(root: Node, bytes: Uint8Array, ctx: DecodeContext): unknown {
+    this.checkTopCap(root, bytes.length, bytesError);
+    return this.decodeAt(root, bytes, 0, bytes.length, 0, ctx);
   }
 
   private fieldLayouts(node: Node, w: number): FieldLayout[] {
@@ -1175,9 +1302,13 @@ export class Codec {
           return valueError('pssz IR: char byte value required');
         return Uint8Array.of(value);
       case 'string': {
-        if (typeof value !== 'string') return valueError('pssz IR: string value required');
-        if (!wellFormed(value)) return valueError('pssz IR: string is not valid UTF-8');
-        const bytes = utf8Encode(value);
+        // A raw string is bytes; a JavaScript string stands for its UTF-8.
+        let bytes: Uint8Array;
+        if (node.raw && value instanceof Uint8Array) bytes = new Uint8Array(value);
+        else if (typeof value !== 'string')
+          return valueError(node.raw ? 'pssz IR: raw string value (bytes or string) required' : 'pssz IR: string value required');
+        else if (!wellFormed(value)) return valueError('pssz IR: string is not valid UTF-8');
+        else bytes = utf8Encode(value);
         this.boundBytes(node.child, bytes.length, valueError);
         return bytes;
       }
@@ -1244,7 +1375,7 @@ export class Codec {
         for (let i = 0; i < keep; ++i) parts.push(this.encodeAt(node.members[i].node, values[i], n + 1));
         layouts.length = keep;
         const out = this.encodeFields(layouts, parts, node.stable, w);
-        if (this.overCap(node, out.length, n)) valueError('pssz IR: encoded size exceeds maxDynamicData cap');
+        if (this.overCap(node, out.length)) valueError('pssz IR: encoded size exceeds maxDynamicData cap');
         return out;
       }
       case 'tuple': {
@@ -1290,6 +1421,9 @@ export class Codec {
         out.set(inner, 1);
         return out;
       }
+      case 'custom':
+        // A wrapper adds nothing to the bytes.
+        return this.encodeAt(strip(node).node, value, n);
     }
   }
 
@@ -1486,6 +1620,8 @@ export class Codec {
         return bytes[start];
       case 'string':
         this.boundBytes(node.child, size, bytesError);
+        // "string" is raw bytes; "utf8" is validated.
+        if (node.raw) return bytes.slice(start, end);
         if (!utf8Valid(bytes, start, end)) bytesError('pssz IR: string is not valid UTF-8');
         return utf8Decode(bytes, start, end);
       case 'hex':
@@ -1524,7 +1660,7 @@ export class Codec {
         return wrapSome(node, this.decodeAt(node.child, bytes, start, end, n + 1, ctx));
       }
       case 'record': {
-        if (this.overCap(node, size, n)) bytesError('pssz IR: encoded size exceeds maxDynamicData cap');
+        if (this.overCap(node, size)) bytesError('pssz IR: encoded size exceeds maxDynamicData cap');
         const values = this.decodeMembers(node, bytes, start, end, node.stable, n, ctx);
         const out: Record<string, unknown> = {};
         for (let i = 0; i < values.length; ++i) setField(out, node.members[i].name, values[i]);
@@ -1546,6 +1682,8 @@ export class Codec {
         };
         return value;
       }
+      case 'custom':
+        return this.decodeAt(strip(node).node, bytes, start, end, n, ctx);
     }
   }
 }

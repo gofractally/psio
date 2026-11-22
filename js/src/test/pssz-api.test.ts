@@ -14,7 +14,7 @@ const U64 = { Int: { bits: 64, isSigned: false } };
 const I64 = { Int: { bits: 64, isSigned: true } };
 const F32 = { Float: { exp: 8, mantissa: 23 } };
 const F64 = { Float: { exp: 11, mantissa: 52 } };
-const STRING = { Custom: { type: { List: U8 }, id: 'string' } };
+const STRING = { Custom: { type: { List: U8 }, id: 'utf8' } };
 const BYTES = { Custom: { type: { List: U8 }, id: 'hex' } };
 
 const schema = new PsszSchema({

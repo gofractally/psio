@@ -10,23 +10,24 @@
 //   const text  = Transfer.psszToJson(bytes);    // I-JSON by default
 //
 // Values: bool -> boolean; integers up to 32 bits -> number; 64 / 128 / 256
-// bits -> bigint; floats -> number; string -> string; bytes (hex adapter) ->
-// Uint8Array; enum -> the number / bigint of its underlying integer (the
+// bits -> bigint; floats -> number; UTF-8 string ("utf8") -> string; raw
+// string ("string": any bytes) and bytes (hex adapter) -> Uint8Array; enum -> the number / bigint of its underlying integer (the
 // enumerator name appears only in text); record -> object; list / array /
-// tuple -> array; variant -> { type, value }; optional -> null or the value (an optional of an optional
-// holds null or { some: inner }); bit types -> { bytes, bitCount }. A NaN
+// tuple -> array; variant -> { type, value }; optional -> null or the value
+// (an optional of an optional holds null or { some: inner }); bit types -> { bytes, bitCount }. A NaN
 // with a payload decodes to a PsszNaN so that it re-encodes bit for bit.
 
 import {
-  Codec, Node, PsszError, normalizeSchema, normalizeType,
-  type DecodeContext, type IrAnyType, type IrSchema, type PsszSchemaInput, type PsszTypeInput,
+  Codec, Node, PsszError, normalizeSchema, normalizeType, reservedCustomId,
+  type DecodeContext, type IrAnyType, type IrSchema, type PsszCustomHandler, type PsszSchemaInput,
+  type PsszTypeInput,
 } from './pssz-core.js';
 import { jsonToValue, valueToJson, type JsonFormat } from './pssz-json.js';
 
 export {
   PsszError, PsszNaN,
   type PsszErrorKind, type IrSchema, type IrAnyType, type IrMember, type IrAttribute, type IrTypeValue,
-  type IrEnum, type IrEnumerator, type CompactEnumerator,
+  type IrEnum, type IrEnumerator, type CompactEnumerator, type PsszCustomHandler,
   type CompactType, type PsszSchemaInput, type PsszTypeInput, type Some, type VariantValue, type BitsValue,
 } from './pssz-core.js';
 export { type JsonFormat } from './pssz-json.js';
@@ -34,7 +35,23 @@ export { type JsonFormat } from './pssz-json.js';
 /** `auto`: type-derived offset widths (`psio::pssz`). 1 / 2 / 4: one inherited width (`psio::pssz_<W>`). */
 export type PsszWidth = 'auto' | 1 | 2 | 4;
 
-export interface PsszTypeOptions {
+/** Custom id -> the handler of its text form. */
+export type PsszCustomHandlers = { [id: string]: PsszCustomHandler } | ReadonlyMap<string, PsszCustomHandler>;
+
+export interface PsszSchemaOptions {
+  /**
+   * Text handlers of custom types (`Custom` ids that are not part of the
+   * binary form), by id. A handler is bound when a type is compiled
+   * (`schema.type`), not looked up per value.
+   */
+  handlers?: PsszCustomHandlers;
+  /**
+   * A custom id with no handler is an error when text is read or written
+   * (default: it reads and writes as its wire type's own text).
+   */
+  requireHandlers?: boolean;
+}
+export interface PsszTypeOptions extends PsszSchemaOptions {
   /** Offset-width profile; default `auto`. */
   width?: PsszWidth;
 }
@@ -67,17 +84,26 @@ function asBytes(bytes: unknown): Uint8Array {
 
 /** One type of a schema under one width profile. */
 export class PsszType {
-  /** @internal */
-  constructor(private readonly codec: Codec, private readonly node: Node) {}
+  // The type on the wire: "box" and custom text wrappers looked through.
+  private readonly node: Node;
+  private readonly boxed: boolean;
 
-  /** The offset width of this type's own header / slots / offset table. */
+  /** @internal `ref` is the type as written (the text walk starts there). */
+  constructor(private readonly codec: Codec, private readonly ref: Node) {
+    ({ node: this.node, boxed: this.boxed } = codec.wireOf(ref));
+  }
+
+  /**
+   * The offset width of this type's own header / slots / offset table. A
+   * boxed value has no inferred bound: 4 under the automatic profile.
+   */
   get width(): number {
-    return guarded(() => this.codec.widthOf(this.node));
+    return guarded(() => (this.boxed && this.codec.W === 0 ? 4 : this.codec.widthOf(this.node)));
   }
 
   /** The canonical PSSZ bytes of `value`. */
   encode(value: unknown): Uint8Array {
-    return guarded(() => this.codec.encodeAt(this.node, value, 0));
+    return guarded(() => this.codec.encodeTop(this.node, value));
   }
 
   /** Decodes fully validated PSSZ bytes. */
@@ -85,7 +111,7 @@ export class PsszType {
     return guarded(() => {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false };
-      return this.codec.decodeAt(this.node, input, 0, input.length, 0, ctx);
+      return this.codec.decodeTop(this.node, input, ctx);
     });
   }
 
@@ -94,7 +120,7 @@ export class PsszType {
     try {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: true, hasUnknown: false };
-      guarded(() => this.codec.decodeAt(this.node, input, 0, input.length, 0, ctx));
+      guarded(() => this.codec.decodeTop(this.node, input, ctx));
       return { ok: true, hasUnknown: ctx.hasUnknown };
     } catch (e) {
       return { ok: false, error: e as PsszError };
@@ -103,23 +129,38 @@ export class PsszType {
 
   /** JSON / I-JSON text -> value. */
   jsonToValue(text: string | Uint8Array, format: JsonFormat = 'ijson'): unknown {
-    return guarded(() => jsonToValue(this.node, format, text));
+    return guarded(() => jsonToValue(this.codec, this.ref, format, text));
   }
 
   /** Value -> JSON / I-JSON text. */
   valueToJson(value: unknown, format: JsonFormat = 'ijson'): string {
-    return guarded(() => valueToJson(this.node, format, value));
+    return guarded(() => valueToJson(this.codec, this.ref, format, value));
   }
 
   /** JSON / I-JSON text -> canonical PSSZ bytes. */
   jsonToPssz(text: string | Uint8Array, format: JsonFormat = 'ijson'): Uint8Array {
-    return guarded(() => this.codec.encodeAt(this.node, jsonToValue(this.node, format, text), 0));
+    return guarded(() => this.codec.encodeTop(this.node, jsonToValue(this.codec, this.ref, format, text)));
   }
 
   /** PSSZ bytes (fully validated) -> JSON / I-JSON text. */
   psszToJson(bytes: Uint8Array, format: JsonFormat = 'ijson', options?: PsszDecodeOptions): string {
-    return guarded(() => valueToJson(this.node, format, this.decode(bytes, options)));
+    return guarded(() => valueToJson(this.codec, this.ref, format, this.decode(bytes, options)));
   }
+}
+
+function handlerMap(input: PsszCustomHandlers | undefined): Map<string, PsszCustomHandler> {
+  const out = new Map<string, PsszCustomHandler>();
+  if (input === undefined) return out;
+  const entries: Iterable<[string, PsszCustomHandler]> =
+    input instanceof Map ? input : Object.entries(input as { [id: string]: PsszCustomHandler });
+  for (const [id, handler] of entries) {
+    if (reservedCustomId(id))
+      throw new PsszError('schema', `pssz: custom id "${id}" is part of the binary form and takes no handler`);
+    if (!handler || typeof handler.toText !== 'function' || typeof handler.fromText !== 'function')
+      throw new PsszError('schema', `pssz: the handler of custom id "${id}" needs toText and fromText`);
+    out.set(id, handler);
+  }
+  return out;
 }
 
 let metaSchema: PsszSchema | undefined;
@@ -129,24 +170,43 @@ export class PsszSchema {
   /** The canonical IR (`psio::Schema` as this library decodes it). */
   readonly ir: IrSchema;
   private readonly codecs = new Map<number, Codec>();
+  private readonly handlers: ReadonlyMap<string, PsszCustomHandler>;
+  private readonly requireHandlers: boolean;
 
   /**
    * `input` is a `psio::Schema` value (as `PsszSchema.decode` produces), or
    * a `{ name: type }` map in the compact spelling, e.g.
    * `{ Point: { Object: { x: { Int: { bits: 32, isSigned: true } }, y: 'Coord' } } }`.
    */
-  constructor(input: PsszSchemaInput) {
+  constructor(input: PsszSchemaInput, options?: PsszSchemaOptions) {
     this.ir = guarded(() => normalizeSchema(input));
+    this.handlers = guarded(() => handlerMap(options?.handlers));
+    this.requireHandlers = options?.requireHandlers ?? false;
   }
 
   /** From the PSSZ encoding of `psio::Schema` (how a schema travels). */
-  static decode(bytes: Uint8Array): PsszSchema {
-    return new PsszSchema(PsszSchema.meta().type('Schema').decode(bytes) as IrSchema);
+  static decode(bytes: Uint8Array, options?: PsszSchemaOptions): PsszSchema {
+    return new PsszSchema(PsszSchema.meta().type('Schema').decode(bytes) as IrSchema, options);
   }
 
   /** From the JSON / I-JSON text of `psio::Schema`. */
-  static fromJson(text: string | Uint8Array, format: JsonFormat = 'ijson'): PsszSchema {
-    return new PsszSchema(PsszSchema.meta().type('Schema').jsonToValue(text, format) as IrSchema);
+  static fromJson(text: string | Uint8Array, format: JsonFormat = 'ijson', options?: PsszSchemaOptions): PsszSchema {
+    return new PsszSchema(PsszSchema.meta().type('Schema').jsonToValue(text, format) as IrSchema, options);
+  }
+
+  /**
+   * The same schema with these custom text handlers (added to, and
+   * replacing by id, the ones it has) and this `requireHandlers`.
+   */
+  withHandlers(handlers: PsszCustomHandlers, options?: { requireHandlers?: boolean }): PsszSchema {
+    return guarded(() => {
+      const merged = new Map(this.handlers);
+      for (const [id, handler] of handlerMap(handlers)) merged.set(id, handler);
+      return new PsszSchema(this.ir, {
+        handlers: merged,
+        requireHandlers: options?.requireHandlers ?? this.requireHandlers,
+      });
+    });
   }
 
   /** The PSSZ encoding of this schema. */
@@ -169,8 +229,11 @@ export class PsszSchema {
       if (width !== 'auto' && width !== 1 && width !== 2 && width !== 4)
         throw new PsszError('schema', 'pssz: width must be "auto", 1, 2 or 4');
       const w = width === 'auto' ? 0 : width;
+      // Handlers given for this type alone: its own compilation.
+      if (options?.handlers !== undefined || options?.requireHandlers !== undefined)
+        return this.withHandlers(options.handlers ?? {}, { requireHandlers: options.requireHandlers }).type(root, { width });
       let codec = this.codecs.get(w);
-      if (!codec) this.codecs.set(w, (codec = new Codec(this.ir, w)));
+      if (!codec) this.codecs.set(w, (codec = new Codec(this.ir, w, this.handlers, this.requireHandlers)));
       const ir: IrAnyType = normalizeType(root);
       return new PsszType(codec, codec.node(ir));
     });
@@ -208,7 +271,8 @@ const U8: PsszTypeInput = { Int: { bits: 8, isSigned: false } };
 const U32: PsszTypeInput = { Int: { bits: 32, isSigned: false } };
 const U64: PsszTypeInput = { Int: { bits: 64, isSigned: false } };
 const BOOL: PsszTypeInput = { Custom: { type: { Int: { bits: 1, isSigned: false } }, id: 'bool' } };
-const STRING: PsszTypeInput = { Custom: { type: { List: U8 }, id: 'string' } };
+// The names of a schema are text: a JavaScript string.
+const STRING: PsszTypeInput = { Custom: { type: { List: U8 }, id: 'utf8' } };
 const list = (type: PsszTypeInput): PsszTypeInput => ({ List: type });
 const option = (type: PsszTypeInput): PsszTypeInput => ({ Option: type });
 const object = (members: { [name: string]: PsszTypeInput }): PsszTypeInput => ({ Object: members });
