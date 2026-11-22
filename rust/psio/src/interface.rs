@@ -140,15 +140,6 @@
 //! ```
 //!
 //! ```compile_fail
-//! #[psio::interface]
-//! trait Store {
-//!     #[pssz(max_dynamic_data = 256)] // not yet: see Annotations
-//!     fn put(&mut self, key: String, value: Vec<u8>);
-//! }
-//! # fn main() {}
-//! ```
-//!
-//! ```compile_fail
 //! #[psio::interface(nmae = "store")] // an unknown key
 //! trait Store {
 //!     fn get(&self, key: String) -> Vec<u8>;
@@ -156,15 +147,47 @@
 //! # fn main() {}
 //! ```
 //!
-//! # Annotations
+//! # Annotations: parameter bounds, the argument cap, the result's bounds
 //!
-//! A parameter carries no annotation yet, and a method no argument cap:
-//! `#[psio(...)]`, `#[pssz(...)]` and `#[json(...)]` on a method or a
-//! parameter are compile errors until member bounds land in Rust. Their
-//! place is fixed by this design, the same attributes a record takes: a
-//! parameter's annotation is its member's in the argument record
-//! (C++ `attr(param, max<N>)`), a method's is the record's
-//! (C++ `maxDynamicData(N)`: `#[pssz(max_dynamic_data = N)]`).
+//! A parameter takes the annotations a record member takes
+//! ([`psio::pssz::bounds`](crate::pssz::bounds)), a method the cap of its
+//! argument record, and `returns(...)` the bounds of its result:
+//!
+//! ```
+//! #[psio::interface]
+//! pub trait Token {
+//!     #[pssz(max_dynamic_data = 256)]
+//!     fn transfer(&mut self, #[psio(max = 16)] to: String, amount: u64, #[psio(max = 80)] memo: String);
+//!     #[psio(returns(max = 8))]
+//!     fn symbol(&self, id: u32) -> String;
+//! }
+//! # fn main() {
+//! use psio::pssz::auto_pssz_width;
+//! // The cap fixes the width of the argument frame for the method's
+//! // lifetime: an optional argument appended later keeps it.
+//! assert_eq!(auto_pssz_width::<token::args::transfer>(), 2);
+//! let long = token::args::transfer { to: "x".repeat(17), amount: 1, memo: String::new() };
+//! assert!(psio::try_to_pssz(&long).is_err());
+//! # }
+//! ```
+//!
+//! | Rust | C++ `method(...)` item |
+//! |------|------------------------|
+//! | `#[psio(max = 80)] memo: String` | `attr(memo, utf8 \| max<80>)` |
+//! | `#[pssz(max_dynamic_data = 256)]` on the function | `maxDynamicData(256)` |
+//! | `#[psio(returns(max = 32))]` on the function | `returns(utf8 \| max<32>)` |
+//!
+//! The parameter's annotation is its member's in the argument record and
+//! the cap is the record's `max_dynamic_data`, so the record has the width
+//! the cap (or, without one, the inferred bound of the bounded parameters)
+//! selects, refuses a parameter outside its bound when it is written, and
+//! [`dispatch`](self) refuses a frame that holds one. A bounded result is
+//! checked by `Method::result_to_pssz` and `Method::result_from_pssz`. In
+//! the Schema IR the function's parameters and result are the bounded
+//! types and the cap is its `maxDynamicData` attribute, as C++ writes them;
+//! the argument record's own schema is the Object of the parameters
+//! carrying `maxDynamicData`. `Method::Tuple` is the tuple of the bounded
+//! parameter types (a tuple has no cap of its own).
 
 use crate::pssz::schema_ir;
 use crate::pssz::{Pssz, PsszError, PsszPack, PsszResult, PsszUnpack};
@@ -220,7 +243,7 @@ pub trait Method: PsszPack<Pssz> + PsszUnpack<Pssz> + Sized {
     /// The tuple of the parameter types: the type whose pSSZ the arguments
     /// have, and what C++ `method_arg_tuple<I>` is. The record converts to
     /// and from it.
-    type Tuple: PsszPack<Pssz> + PsszUnpack<Pssz> + From<Self> + Into<Self>;
+    type Tuple: PsszPack<Pssz> + PsszUnpack<Pssz>;
     /// The function's return type; `()` when it returns nothing.
     type Result;
     /// Position in [`Interface::METHODS`].
@@ -371,6 +394,16 @@ pub fn type_name_for<T: schema_ir::ToPsszSchema>(builder: &mut schema_ir::Schema
         schema_ir::AnyValue::Type(reference) => Ok(reference.r#type),
         _ => Err(PsszError::new("pssz schema: an inserted type is a reference")),
     }
+}
+
+/// The attributes a function carries for its result: those a member of the
+/// result's type would, named `result.<name>` (C++ `build_interface_func`).
+#[doc(hidden)]
+pub fn result_attributes<T: schema_ir::ToPsszSchema>() -> Vec<schema_ir::Attribute> {
+    T::member_attributes()
+        .into_iter()
+        .map(|attribute| schema_ir::Attribute { name: format!("result.{}", attribute.name), value: attribute.value })
+        .collect()
 }
 
 /// A parameter of a function: its type inserted in `builder`, with the

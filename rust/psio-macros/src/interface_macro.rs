@@ -106,14 +106,43 @@ enum Receiver {
     Mut,
 }
 
+struct Param {
+    ident: Ident,
+    ty: Type,
+    /// `#[psio(...)]` / `#[json(...)]` on the parameter: its member's in
+    /// the argument record.
+    attrs: Vec<syn::Attribute>,
+}
+
 struct Method {
     ident: Ident,
     /// The identifier as text, without `r#`.
     name: String,
     receiver: Receiver,
-    params: Vec<(Ident, Type)>,
+    params: Vec<Param>,
     /// `None`: the function returns nothing.
     result: Option<Type>,
+    /// `#[pssz(max_dynamic_data = N)]`: the cap of the argument record.
+    cap: Option<u64>,
+    /// `#[psio(returns(...))]`: the bounds of the result, as the attribute
+    /// a member of the result's type would carry.
+    returns: Option<syn::Attribute>,
+}
+
+/// The bounds of a value of type `ty` under `attrs`, read as a field's.
+fn annotation(attrs: &[syn::Attribute], ty: &Type, k: &syn::Path) -> syn::Result<Option<crate::attrs::Annotated>> {
+    use syn::parse::Parser;
+    let field = syn::Field::parse_named.parse2(quote!(#(#attrs)* value: #ty))?;
+    crate::attrs::annotated(&field, &crate::attrs::field(&field)?, k)
+}
+
+/// The type a parameter or result has on the wire and in a schema: the
+/// type its annotation describes, or its own.
+fn wire_type(attrs: &[syn::Attribute], ty: &Type, k: &syn::Path) -> syn::Result<Type> {
+    Ok(match annotation(attrs, ty, k)? {
+        Some(annotated) => annotated.described(k),
+        None => ty.clone(),
+    })
 }
 
 fn snake_case(name: &str) -> String {
@@ -139,23 +168,67 @@ fn unraw(ident: &Ident) -> String {
     text.strip_prefix("r#").map(str::to_string).unwrap_or(text)
 }
 
-/// An annotation attribute on a method or a parameter: not supported until
-/// member bounds exist in Rust; their place is the argument record.
-fn refuse_annotations(attrs: &[syn::Attribute], what: &str) -> syn::Result<()> {
+/// The annotations of a method: `#[pssz(max_dynamic_data = N)]` (the cap of
+/// its argument record) and `#[psio(returns(...))]` (the bounds of its
+/// result).
+fn method_annotations(attrs: &[syn::Attribute]) -> syn::Result<(Option<u64>, Option<syn::Attribute>)> {
+    const ACCEPTED: &str = "a function of a #[psio::interface] takes #[pssz(max_dynamic_data = N)] and \
+                            #[psio(returns(...))]";
+    let mut cap = None;
+    let mut returns = None;
     for attr in attrs {
-        for namespace in ["psio", "pssz", "json", "serde"] {
-            if attr.path.is_ident(namespace) {
-                return Err(syn::Error::new_spanned(
-                    attr,
-                    format!(
-                        "#[{namespace}(...)] on {what} of a #[psio::interface] is not supported yet: \
-                         parameter annotations and argument caps arrive with member bounds"
-                    ),
-                ));
+        if attr.path.is_ident("json") || attr.path.is_ident("serde") {
+            return Err(syn::Error::new_spanned(attr, ACCEPTED));
+        }
+        if !attr.path.is_ident("pssz") && !attr.path.is_ident("psio") {
+            continue;
+        }
+        let syn::Meta::List(list) = attr.parse_meta()? else {
+            return Err(syn::Error::new_spanned(attr, ACCEPTED));
+        };
+        for item in &list.nested {
+            match item {
+                syn::NestedMeta::Meta(syn::Meta::NameValue(nv))
+                    if attr.path.is_ident("pssz") && nv.path.is_ident("max_dynamic_data") =>
+                {
+                    let syn::Lit::Int(value) = &nv.lit else {
+                        return Err(syn::Error::new_spanned(nv, "max_dynamic_data is an integer"));
+                    };
+                    if cap.replace(value.base10_parse()?).is_some() {
+                        return Err(syn::Error::new_spanned(nv, "`max_dynamic_data` is given twice"));
+                    }
+                }
+                syn::NestedMeta::Meta(syn::Meta::List(inner))
+                    if attr.path.is_ident("psio") && inner.path.is_ident("returns") =>
+                {
+                    let bounds = &inner.nested;
+                    if returns.replace(syn::parse_quote!(#[psio(#bounds)])).is_some() {
+                        return Err(syn::Error::new_spanned(inner, "`returns` is given twice"));
+                    }
+                }
+                other => return Err(syn::Error::new_spanned(other, ACCEPTED)),
             }
         }
     }
-    Ok(())
+    Ok((cap, returns))
+}
+
+/// The annotations of a parameter: `#[psio(...)]` and `#[json(...)]`, as
+/// on a member of a record.
+fn param_annotations(attrs: &[syn::Attribute]) -> syn::Result<Vec<syn::Attribute>> {
+    let mut out = Vec::new();
+    for attr in attrs {
+        if attr.path.is_ident("psio") || attr.path.is_ident("json") {
+            out.push(attr.clone());
+        } else if attr.path.is_ident("pssz") || attr.path.is_ident("serde") {
+            return Err(syn::Error::new_spanned(
+                attr,
+                "a parameter of a #[psio::interface] function takes #[psio(...)] and #[json(...)], as a \
+                 member of a record does",
+            ));
+        }
+    }
+    Ok(out)
 }
 
 fn contains_reference(ty: &Type) -> bool {
@@ -178,7 +251,7 @@ fn contains_reference(ty: &Type) -> bool {
 
 fn method(item: &syn::TraitItemMethod) -> syn::Result<Method> {
     let sig = &item.sig;
-    refuse_annotations(&item.attrs, "a method")?;
+    let (cap, returns) = method_annotations(&item.attrs)?;
     if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(&sig.generics, "a function of a #[psio::interface] is not generic"));
     }
@@ -205,7 +278,7 @@ fn method(item: &syn::TraitItemMethod) -> syn::Result<Method> {
                 receiver = if this.mutability.is_some() { Receiver::Mut } else { Receiver::Ref };
             }
             FnArg::Typed(arg) => {
-                refuse_annotations(&arg.attrs, "a parameter")?;
+                let attrs = param_annotations(&arg.attrs)?;
                 let Pat::Ident(pat) = &*arg.pat else {
                     return Err(syn::Error::new_spanned(
                         &arg.pat,
@@ -225,7 +298,7 @@ fn method(item: &syn::TraitItemMethod) -> syn::Result<Method> {
                          call are the tuple of the parameter types): write `String`, not `&str`",
                     ));
                 }
-                params.push((pat.ident.clone(), (*arg.ty).clone()));
+                params.push(Param { ident: pat.ident.clone(), ty: (*arg.ty).clone(), attrs });
             }
         }
     }
@@ -244,7 +317,10 @@ fn method(item: &syn::TraitItemMethod) -> syn::Result<Method> {
             }
         },
     };
-    Ok(Method { ident: sig.ident.clone(), name: unraw(&sig.ident), receiver, params, result })
+    if returns.is_some() && result.is_none() {
+        return Err(syn::Error::new_spanned(&sig.ident, "returns(...) bounds a result, and this function has none"));
+    }
+    Ok(Method { ident: sig.ident.clone(), name: unraw(&sig.ident), receiver, params, result, cap, returns })
 }
 
 pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
@@ -286,15 +362,16 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
         if methods[..i].iter().any(|other| other.name == m.name) {
             return Err(syn::Error::new(m.ident.span(), "two functions of an interface have one name"));
         }
-        for (j, (param, _)) in m.params.iter().enumerate() {
-            if m.params[..j].iter().any(|(other, _)| other == param) {
-                return Err(syn::Error::new(param.span(), "two parameters of a function have one name"));
+        for (j, param) in m.params.iter().enumerate() {
+            if m.params[..j].iter().any(|other| other.ident == param.ident) {
+                return Err(syn::Error::new(param.ident.span(), "two parameters of a function have one name"));
             }
         }
     }
-    // Parameter attributes are consumed here (none is accepted yet).
+    // The annotations are consumed here: they are the argument record's.
     for member in &mut item.items {
         if let TraitItem::Method(m) = member {
+            m.attrs.retain(|a| !["psio", "pssz"].iter().any(|n| a.path.is_ident(n)));
             for arg in &mut m.sig.inputs {
                 if let FnArg::Typed(arg) = arg {
                     arg.attrs.retain(|a| !["psio", "pssz", "json"].iter().any(|n| a.path.is_ident(n)));
@@ -353,17 +430,35 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
         let ident = &m.ident;
         let name = &m.name;
         let schema_name = format!("{interface_name}.{name}");
-        let param_idents: Vec<_> = m.params.iter().map(|(ident, _)| ident).collect();
-        let param_types: Vec<_> = m.params.iter().map(|(_, ty)| ty).collect();
-        let param_names: Vec<_> = m.params.iter().map(|(ident, _)| unraw(ident)).collect();
+        let param_idents: Vec<_> = m.params.iter().map(|p| &p.ident).collect();
+        let param_types: Vec<_> = m.params.iter().map(|p| &p.ty).collect();
+        let param_names: Vec<_> = m.params.iter().map(|p| unraw(&p.ident)).collect();
+        let param_attrs: Vec<_> = m.params.iter().map(|p| &p.attrs).collect();
+        // What each parameter is on the wire and in the schema.
+        let param_wire: Vec<Type> =
+            m.params.iter().map(|p| wire_type(&p.attrs, &p.ty, &k)).collect::<syn::Result<_>>()?;
+        let record_cap = m.cap.map(|cap| quote!(#[pssz(max_dynamic_data = #cap)]));
+        let returns: &[syn::Attribute] = m.returns.as_slice();
+        let result_bound = match &m.result {
+            Some(ty) => annotation(returns, ty, &k)?,
+            None => None,
+        };
         let has_result = m.result.is_some();
         let result_type = m.result.clone().unwrap_or_else(|| syn::parse_quote!(()));
-        let (result_to, result_from) = match &m.result {
-            Some(_) => (
+        let (result_to, result_from) = match (&m.result, &result_bound) {
+            // A bounded result is checked when it is written and read.
+            (Some(_), Some(crate::attrs::Annotated { own, spec })) => (
+                quote!(#k::pssz::try_to_pssz(&#k::pssz::bounds::Described::<#own, #spec>::new(result))),
+                quote! {
+                    #k::pssz::from_pssz::<<#own as #k::pssz::bounds::Bounds<#spec>>::As>(bytes)
+                        .map(<#own as #k::pssz::bounds::Bounds<#spec>>::from_as)
+                },
+            ),
+            (Some(_), None) => (
                 quote!(#k::pssz::try_to_pssz(result)),
                 quote!(#k::pssz::from_pssz::<Self::Result>(bytes)),
             ),
-            None => (
+            (None, _) => (
                 quote!(::core::result::Result::Ok(::std::vec::Vec::new())),
                 quote! {
                     if bytes.is_empty() {
@@ -382,7 +477,8 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
             #[allow(non_camel_case_types)]
             #[derive(#k::PsszPack, #k::PsszUnpack, #k::ToPsszSchema, #k::JsonText #(, #derives)*)]
             #[psio(crate = #k_text, name = #schema_name)]
-            #vis2 struct #ident { #(pub #param_idents: #param_types),* }
+            #record_cap
+            #vis2 struct #ident { #(#(#param_attrs)* pub #param_idents: #param_types),* }
 
             impl #ident {
                 /// The index of the method in the interface.
@@ -403,7 +499,7 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
             }
             impl #k::interface::Method for #ident {
                 type Interface = super::Tag;
-                type Tuple = (#(#param_types,)*);
+                type Tuple = (#(#param_wire,)*);
                 type Result = #result_type;
                 const INDEX: usize = #index;
                 const NAME: &'static str = #name;
@@ -431,20 +527,44 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 has_result: #has_result,
             }
         });
-        let result_schema = match &m.result {
-            Some(ty) => quote! {
-                ::core::option::Option::Some(::std::boxed::Box::new(
-                    <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?,
-                ))
-            },
-            None => quote!(::core::option::Option::None),
+        let (result_schema, result_attributes) = match &m.result {
+            Some(ty) => {
+                let ty = wire_type(returns, ty, &k)?;
+                (
+                    quote! {
+                        ::core::option::Option::Some(::std::boxed::Box::new(
+                            <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?,
+                        ))
+                    },
+                    quote!(#k::interface::result_attributes::<#ty>()),
+                )
+            }
+            None => (quote!(::core::option::Option::None), quote!(::std::vec::Vec::new())),
+        };
+        // The cap of the argument record: its size limit and its width.
+        let cap_attribute = match m.cap {
+            Some(cap) => {
+                let cap = cap.to_string();
+                quote! {
+                    __attributes.push(#k::pssz::schema_ir::Attribute {
+                        name: "maxDynamicData".into(),
+                        value: ::core::option::Option::Some(#cap.into()),
+                    });
+                }
+            }
+            None => quote!(),
         };
         funcs.push(quote! {
             #k::pssz::schema_ir::Func {
                 name: #name.into(),
-                params: ::std::vec![#(#k::interface::param::<#param_types>(builder, #param_names)?),*],
+                params: ::std::vec![#(#k::interface::param::<#param_wire>(builder, #param_names)?),*],
                 result: #result_schema,
-                attributes: ::std::vec![],
+                attributes: {
+                    #[allow(unused_mut)]
+                    let mut __attributes: ::std::vec::Vec<#k::pssz::schema_ir::Attribute> = #result_attributes;
+                    #cap_attribute
+                    __attributes
+                },
             }
         });
         let call = match m.receiver {

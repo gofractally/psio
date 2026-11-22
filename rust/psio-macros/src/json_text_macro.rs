@@ -74,6 +74,7 @@ fn form_tokens(j: &TokenStream2, form: Option<bool>) -> TokenStream2 {
 /// it and the expression that reads it. `access` gives the expression of a
 /// member's reference, `path` what is constructed (`Self`, `Self::Variant`).
 fn record_tokens(
+    k: &syn::Path,
     j: &TokenStream2,
     fields: &Fields,
     path: TokenStream2,
@@ -105,9 +106,13 @@ fn record_tokens(
             let ijson = form_tokens(&j, attrs.forms.ijson.or(forms.ijson));
             let first = index == 0;
             let slot = syn::Ident::new(&format!("__f{index}"), proc_macro2::Span::call_site());
+            // A member with bounds: the text is the plain type's, checked
+            // against the annotation in both directions.
+            let (check_write, check_read) = bound_checks(k, field, attrs)?;
             writes.push(quote! {
                 w.key(#key, #first)?;
                 let __saved = w.member_form(#json, #ijson);
+                { let __member = #access; #check_write }
                 <#ty as #j::JsonText>::write_json(#access, w)?;
                 w.restore_form(__saved);
             });
@@ -116,7 +121,11 @@ fn record_tokens(
             let read = quote! {
                 {
                     let __saved = r.member_form(#json, #ijson);
-                    #slot = ::core::option::Option::Some(<#ty as #j::JsonText>::read_json(r)?);
+                    r.ws();
+                    let __at = r.position();
+                    let __member = <#ty as #j::JsonText>::read_json(r)?;
+                    { let __member = &__member; #check_read }
+                    #slot = ::core::option::Option::Some(__member);
                     r.restore_form(__saved);
                 }
             };
@@ -200,6 +209,32 @@ fn record_tokens(
         ))
 }
 
+/// The statements that check `__member` (a reference) against the field's
+/// bounds, for the writer and for the reader (which has the value's
+/// position in `__at`). Empty for a field without bounds.
+fn bound_checks(
+    k: &syn::Path,
+    field: &syn::Field,
+    attrs: &attrs::Attrs,
+) -> syn::Result<(TokenStream2, TokenStream2)> {
+    let Some(attrs::Annotated { own, spec }) = attrs::annotated(field, attrs, k)? else {
+        return Ok((quote!(), quote!()));
+    };
+    let check = quote!(#k::pssz::bounds::check::<#own, #spec>(__member));
+    Ok((
+        quote! {
+            if #check.is_err() {
+                return ::core::result::Result::Err(w.err("json: member length_bound violated"));
+            }
+        },
+        quote! {
+            if #check.is_err() {
+                return ::core::result::Result::Err(r.err_at(__at, "json: member length_bound violated"));
+            }
+        },
+    ))
+}
+
 pub fn derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     match expand(&input) {
@@ -237,10 +272,17 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let ty = &members[0].field.ty;
             let construct = attrs::construct(quote!(Self), &data.fields, &[quote!(__inner)])?;
             json_string = quote!(const JSON_STRING: bool = <#ty as #j::JsonText>::JSON_STRING;);
+            let (check_write, check_read) = bound_checks(&krate, members[0].field, &members[0].attrs)?;
             (
-                quote! { <#ty as #j::JsonText>::write_json(&self.#member, w) },
                 quote! {
+                    { let __member = &self.#member; #check_write }
+                    <#ty as #j::JsonText>::write_json(&self.#member, w)
+                },
+                quote! {
+                    r.ws();
+                    let __at = r.position();
                     let __inner = <#ty as #j::JsonText>::read_json(r)?;
+                    { let __member = &__inner; #check_read }
                     ::core::result::Result::Ok(#construct)
                 },
             )
@@ -254,6 +296,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         Data::Struct(data) => match &data.fields {
             Fields::Named(_) => {
                 let (write, read) = record_tokens(
+                    &krate,
                     &j,
                     &data.fields,
                     quote!(Self),
@@ -373,10 +416,21 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     let (pattern, write, read) = match &variant.fields {
                         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                             let ty = &fields.unnamed[0].ty;
+                            let (check_write, check_read) =
+                                bound_checks(&krate, &fields.unnamed[0], &attrs::field(&fields.unnamed[0])?)?;
                             (
                                 quote!(Self::#ident(__v)),
-                                quote!(<#ty as #j::JsonText>::write_json(__v, w)?;),
-                                quote!(Self::#ident(<#ty as #j::JsonText>::read_json(r)?)),
+                                quote! {
+                                    { let __member = __v; #check_write }
+                                    <#ty as #j::JsonText>::write_json(__v, w)?;
+                                },
+                                quote! {{
+                                    r.ws();
+                                    let __at = r.position();
+                                    let __member = <#ty as #j::JsonText>::read_json(r)?;
+                                    { let __member = &__member; #check_read }
+                                    Self::#ident(__member)
+                                }},
                             )
                         }
                         Fields::Unnamed(fields) => {
@@ -386,12 +440,20 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                 .collect();
                             let positions = 0..types.len();
                             let commas = (0..types.len()).map(|i| if i > 0 { quote!(w.raw(",");) } else { quote!() });
+                            let mut check_writes = Vec::new();
+                            let mut check_reads = Vec::new();
+                            for field in &fields.unnamed {
+                                let (write, read) = bound_checks(&krate, field, &attrs::field(field)?)?;
+                                check_writes.push(write);
+                                check_reads.push(read);
+                            }
                             (
                                 quote!(Self::#ident(#(#bindings),*)),
                                 quote! {
                                     let __tuple = w.member_form(#j::IntForm::Natural, #j::IntForm::Natural);
                                     w.raw("[");
-                                    #(#commas <#types as #j::JsonText>::write_json(#bindings, w)?;)*
+                                    #(#commas { let __member = #bindings; #check_writes }
+                                      <#types as #j::JsonText>::write_json(#bindings, w)?;)*
                                     w.raw("]");
                                     w.restore_form(__tuple);
                                 },
@@ -400,7 +462,11 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                     r.begin(b'[', "json: expected '['")?;
                                     let __value = Self::#ident(#({
                                         r.element(#positions)?;
-                                        <#types as #j::JsonText>::read_json(r)?
+                                        r.ws();
+                                        let __at = r.position();
+                                        let __member = <#types as #j::JsonText>::read_json(r)?;
+                                        { let __member = &__member; #check_reads }
+                                        __member
                                     }),*);
                                     r.close_array()?;
                                     r.restore_form(__tuple);
@@ -417,6 +483,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                 )
                             };
                             let (write, read) = record_tokens(
+                                &krate,
                                 &j,
                                 &variant.fields,
                                 quote!(Self::#ident),

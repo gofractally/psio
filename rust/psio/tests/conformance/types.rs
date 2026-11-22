@@ -244,15 +244,54 @@ rec!(AssocLists {
 // with wrapper types, as its C++ counterpart does; the `Ann*` records are
 // the same shapes, which C++ declares by member annotations.
 rec!(WrapTags { tags: BoundedList<BoundedString<16>, 8> });
-rec!(AnnTags { tags: BoundedList<BoundedString<16>, 8> });
-rec!(AnnRawTags { tags: BoundedList<BoundedRawString<16>, 8> });
-rec!(AnnGrid { rows: BoundedList<BoundedList<u16, 4>, 3> });
-rec!(AnnOpt { names: Option<BoundedList<BoundedString<16>, 2>> });
-rec!(AnnArr { names: [BoundedString<16>; 3] });
-rec!(AnnMap { m: BoundedMap<BoundedString<16>, BoundedList<u32, 2>, 4> });
-rec!(AnnSet { s: BoundedSet<BoundedString<16>, 4> });
-rec!(AnnTup { t: (BoundedString<16>, u32, BoundedList<u8, 5>), p: (BoundedString<16>, BoundedString<16>) });
-rec!(AnnVar { v: V3<u32, BoundedString<16>, BoundedList<BoundedString<16>, 2>> });
+// The annotation spelling: the member keeps its plain type. The shape is
+// written out, since the field type no longer says it.
+macro_rules! ann {
+    ($name:ident, $shape:literal { $($(#[$meta:meta])* $f:ident : $t:ty),* $(,)? }) => {
+        #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+        pub struct $name { $($(#[$meta])* pub $f: $t),* }
+        impl Conf for $name {
+            fn id() -> String { stringify!($name).into() }
+            fn shape() -> String { $shape.into() }
+        }
+    };
+}
+ann!(AnnTags, "record{tags:list<string<=16><=8}" {
+    #[psio(max = 8, element(max = 16))] tags: Vec<String>
+});
+ann!(AnnRawTags, "record{tags:list<raw_string<=16><=8}" {
+    #[psio(max = 8, element(max = 16))] tags: Vec<Raw>
+});
+ann!(AnnGrid, "record{rows:list<list<u16><=4><=3}" {
+    #[psio(max = 3, element(max = 4))] rows: Vec<Vec<u16>>
+});
+ann!(AnnOpt, "record{names:optional<list<string<=16><=2>}" {
+    #[psio(max = 2, element(max = 16))] names: Option<Vec<String>>
+});
+ann!(AnnArr, "record{names:array<string<=16,3>}" {
+    #[psio(element(max = 16))] names: [String; 3]
+});
+ann!(AnnMap, "record{m:map<string<=16,list<u32><=2><=4}" {
+    #[psio(max = 4, keys(max = 16), values(max = 2))] m: BTreeMap<String, Vec<u32>>
+});
+ann!(AnnSet, "record{s:set<string<=16><=4}" {
+    #[psio(max = 4, element(max = 16))] s: BTreeSet<String>
+});
+ann!(AnnTup, "record{t:tuple<string<=16,u32,list<u8><=5>,p:tuple<string<=16,string<=16>}" {
+    #[psio(at(0, max = 16), at(2, max = 5))] t: (String, u32, Vec<u8>),
+    #[psio(at(0, max = 16), at(1, max = 16))] p: (String, String)
+});
+// A variant's alternatives are annotated where the enum declares them.
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+pub enum AnnChoice {
+    Number(u32),
+    Text(#[psio(max = 16)] String),
+    List(#[psio(max = 2, element(max = 16))] Vec<String>),
+}
+impl Conf for AnnChoice {
+    fn id() -> String { "variant<u32,string<=16,list<string<=16><=2>".into() }
+}
+rec!(AnnVar { v: AnnChoice });
 
 // Method argument tuples (docs/pssz-spec.md 16). Without a cap the tuple of
 // the bounded parameters; with one, the positional record of the
@@ -272,6 +311,4 @@ macro_rules! capped_args {
         }
     };
 }
-capped_args!(TransferCapped, 256 { to: BoundedString<16>, amount: u64, memo: BoundedString<80> });
-capped_args!(TransferCapped2, 256 { to: BoundedString<16>, amount: u64, memo: BoundedString<80>, fee: Option<u32> });
 capped_args!(NoteCapped, 64 { text: Raw });

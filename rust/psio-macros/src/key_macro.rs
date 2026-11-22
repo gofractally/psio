@@ -116,6 +116,21 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 .map(|ty| quote!(<#ty as #k::KeyUnpack>::key_unpack(r)?))
                 .collect();
             let construct = crate::attrs::construct(quote!(Self), &data.fields, &unpacked)?;
+            // A member with bounds: the key is the plain type's, checked
+            // against the annotation by the writers and the reader.
+            let mut bound_checks = Vec::new();
+            for m in &kept {
+                if let Some(crate::attrs::Annotated { own, spec }) =
+                    crate::attrs::annotated(m.field, &m.attrs, &krate)?
+                {
+                    let member = &m.member;
+                    bound_checks.push(quote! {
+                        if #krate::pssz::bounds::check::<#own, #spec>(&__bounded.#member).is_err() {
+                            return ::core::result::Result::Err(#k::KeyError::new("key: member length_bound violated"));
+                        }
+                    });
+                }
+            }
             Ok(quote! {
                 impl #pack_impl #k::KeyPack for #name #ty_generics #where_clause {
                     const FIXED_SIZE: ::core::option::Option<usize> = #k::record_fixed_size(
@@ -129,6 +144,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     }
                     fn key_check(&self) -> #k::KeyResult<()> {
                         #(#k::KeyPack::key_check(&self.#members)?;)*
+                        { let __bounded = self; #(#bound_checks)* }
                         #check_self
                         ::core::result::Result::Ok(())
                     }
@@ -137,6 +153,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #[allow(unused_variables)]
                     fn key_unpack(r: &mut #k::KeyReader<'_>) -> #k::KeyResult<Self> {
                         let __value = #construct;
+                        { let __bounded = &__value; #(#bound_checks)* }
                         #check_value
                         ::core::result::Result::Ok(__value)
                     }

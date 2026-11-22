@@ -22,6 +22,38 @@ mod text;
 #[allow(dead_code)]
 mod custom_types;
 
+// Method argument tuples under a cap (docs/pssz-spec.md 16), declared as
+// C++ declares them: `method(transfer, attr(to, utf8 | max<16>), amount,
+// attr(memo, utf8 | max<80>), maxDynamicData(256))`. The fixture names the
+// argument type by the tuple's shape and the cap.
+mod method_args {
+    use super::harness::*;
+
+    #[psio::interface(name = "token", derive(Debug, Clone, PartialEq))]
+    pub trait Token {
+        #[pssz(max_dynamic_data = 256)]
+        fn transfer(&mut self, #[psio(max = 16)] to: String, amount: u64, #[psio(max = 80)] memo: String);
+        #[pssz(max_dynamic_data = 256)]
+        fn transfer_fee(
+            &mut self,
+            #[psio(max = 16)] to: String,
+            amount: u64,
+            #[psio(max = 80)] memo: String,
+            fee: Option<u32>,
+        );
+    }
+    impl Conf for token::args::transfer {
+        fn id() -> String { "tuple<string<=16,u64,string<=80>@cap=256".into() }
+    }
+    impl Conf for token::args::transfer_fee {
+        fn id() -> String { "tuple<string<=16,u64,string<=80,optional<u32>>@cap=256".into() }
+    }
+    pub fn register(registry: &mut Registry) {
+        super::harness::register::<token::args::transfer>(registry);
+        super::harness::register::<token::args::transfer_fee>(registry);
+    }
+}
+
 mod records {
     macro_rules! rec {
         (#[cap($cap:literal)] $name:ident { $($f:ident : $t:ty),* $(,)? }) => {

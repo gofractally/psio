@@ -74,6 +74,16 @@ const KEYS: &[Key] = &[
           because: "names the members or variants for every format", usage: "rename_all = \"...\"" },
     Key { name: "skip", namespace: "psio", sites: &[Site::Field],
           because: "says what the members of the type are for every format", usage: "skip" },
+    Key { name: "max", namespace: "psio", sites: &[Site::Field],
+          because: "bounds the member for every format", usage: "max = N" },
+    Key { name: "element", namespace: "psio", sites: &[Site::Field],
+          because: "bounds the member's elements for every format", usage: "element(...)" },
+    Key { name: "keys", namespace: "psio", sites: &[Site::Field],
+          because: "bounds the member's keys for every format", usage: "keys(...)" },
+    Key { name: "values", namespace: "psio", sites: &[Site::Field],
+          because: "bounds the member's values for every format", usage: "values(...)" },
+    Key { name: "at", namespace: "psio", sites: &[Site::Field],
+          because: "bounds an element of the member for every format", usage: "at(I, ...)" },
     Key { name: "other", namespace: "psio", sites: &[Site::Variant],
           because: "describes the enum for every format", usage: "other" },
     Key { name: "max_dynamic_data", namespace: "pssz", sites: &[Site::Item],
@@ -127,6 +137,9 @@ pub(crate) struct Attrs {
     pub(crate) max_dynamic_data: Option<u64>,
     /// `#[json(json_number)]` and the other three integer forms.
     pub(crate) forms: Forms,
+    /// `#[psio(max = N, element(...), keys(...), values(...), at(I, ...))]`:
+    /// the bounds of the member and of the positions below it.
+    pub(crate) bound: Option<Bound>,
     /// `#[psio(skip)]` or `#[serde(skip)]`.
     pub(crate) skip: bool,
     /// `#[serde(default = "path")]` on a skipped field: what a reader fills
@@ -145,6 +158,206 @@ pub(crate) fn reserved_custom_id(id: &str) -> bool {
     ) || ["time-point", "duration", "monotonic"]
         .iter()
         .any(|kind| id.strip_prefix(kind).is_some_and(|rest| rest.is_empty() || rest.starts_with('-')))
+}
+
+/// The bounds a member carries (docs/pssz-spec.md 3.5): on the member
+/// itself and, nested, on the positions below it.
+#[derive(Default, Clone)]
+pub(crate) struct Bound {
+    max: Option<u64>,
+    element: Option<Box<Bound>>,
+    keys: Option<Box<Bound>>,
+    values: Option<Box<Bound>>,
+    at: Vec<(usize, Bound)>,
+}
+
+impl Bound {
+    fn nested<'a>(items: impl Iterator<Item = &'a NestedMeta>) -> syn::Result<Bound> {
+        let mut out = Bound::default();
+        for item in items {
+            let NestedMeta::Meta(meta) = item else {
+                return Err(syn::Error::new_spanned(item, BOUND_KEYS));
+            };
+            out.store(meta)?;
+        }
+        Ok(out)
+    }
+
+    fn store(&mut self, meta: &Meta) -> syn::Result<()> {
+        let key = path_text(meta.path());
+        let duplicate = || syn::Error::new_spanned(meta, format!("`{key}` is given twice"));
+        match (key.as_str(), meta) {
+            ("max", Meta::NameValue(nv)) => {
+                let Lit::Int(value) = &nv.lit else {
+                    return Err(syn::Error::new_spanned(nv, "max is an integer: max = N"));
+                };
+                if self.max.replace(value.base10_parse()?).is_some() {
+                    return Err(duplicate());
+                }
+            }
+            ("element", Meta::List(list)) => {
+                if self.element.replace(Box::new(Bound::nested(list.nested.iter())?)).is_some() {
+                    return Err(duplicate());
+                }
+            }
+            ("keys", Meta::List(list)) => {
+                if self.keys.replace(Box::new(Bound::nested(list.nested.iter())?)).is_some() {
+                    return Err(duplicate());
+                }
+            }
+            ("values", Meta::List(list)) => {
+                if self.values.replace(Box::new(Bound::nested(list.nested.iter())?)).is_some() {
+                    return Err(duplicate());
+                }
+            }
+            ("at", Meta::List(list)) => {
+                let mut items = list.nested.iter();
+                let Some(NestedMeta::Lit(Lit::Int(index))) = items.next() else {
+                    return Err(syn::Error::new_spanned(list, "at takes the element's index first: at(I, ...)"));
+                };
+                let index: usize = index.base10_parse()?;
+                if self.at.iter().any(|(i, _)| *i == index) {
+                    return Err(duplicate());
+                }
+                self.at.push((index, Bound::nested(items)?));
+            }
+            _ => return Err(syn::Error::new_spanned(meta, BOUND_KEYS)),
+        }
+        Ok(())
+    }
+
+    /// The marker type of `psio::pssz::bounds` for these bounds on a value
+    /// of type `ty` (needed to count a tuple's elements).
+    fn spec(&self, ty: Option<&syn::Type>, k: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
+        use quote::quote;
+        let b = quote!(#k::pssz::bounds);
+        // An optional is looked through.
+        let ty = ty.map(peel_option);
+        let args = ty.map(type_args).unwrap_or_default();
+        if !self.at.is_empty() {
+            let Some(syn::Type::Tuple(tuple)) = ty else {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "at(I, ...) annotates a tuple written out as a tuple type: (A, B, ...)",
+                ));
+            };
+            if self.max.is_some() || self.element.is_some() || self.keys.is_some() || self.values.is_some() {
+                return Err(syn::Error::new_spanned(tuple, "a tuple takes at(I, ...) only"));
+            }
+            let mut specs = Vec::new();
+            for (index, element) in tuple.elems.iter().enumerate() {
+                specs.push(match self.at.iter().find(|(i, _)| *i == index) {
+                    Some((_, bound)) => bound.spec(Some(element), k)?,
+                    None => quote!(#b::Plain),
+                });
+            }
+            if let Some((index, _)) = self.at.iter().find(|(i, _)| *i >= tuple.elems.len()) {
+                return Err(syn::Error::new_spanned(tuple, format!("at({index}, ...): the tuple has no element {index}")));
+            }
+            return Ok(quote!(#b::At<(#(#specs,)*)>));
+        }
+        let inner = if self.keys.is_some() || self.values.is_some() {
+            if self.element.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "a map takes keys(...) and values(...), a list element(...)",
+                ));
+            }
+            let keys = match &self.keys {
+                Some(bound) => bound.spec(args.first().copied(), k)?,
+                None => quote!(#b::Plain),
+            };
+            let values = match &self.values {
+                Some(bound) => bound.spec(args.get(1).copied(), k)?,
+                None => quote!(#b::Plain),
+            };
+            Some(quote!(#b::Entry<#keys, #values>))
+        } else if let Some(element) = &self.element {
+            let child = match ty {
+                Some(syn::Type::Array(array)) => Some(&*array.elem),
+                _ => args.first().copied(),
+            };
+            Some(element.spec(child, k)?)
+        } else {
+            None
+        };
+        Ok(match (self.max, inner) {
+            (Some(max), Some(inner)) => {
+                let max = max as usize;
+                quote!(#b::Max<#max, #inner>)
+            }
+            (Some(max), None) => {
+                let max = max as usize;
+                quote!(#b::Max<#max>)
+            }
+            (None, Some(inner)) => quote!(#b::Each<#inner>),
+            (None, None) => quote!(#b::Plain),
+        })
+    }
+}
+
+const BOUND_KEYS: &str = "a bound is max = N, element(...), keys(...), values(...) or at(I, ...)";
+
+/// A type passed through a `macro_rules!` fragment arrives in a group.
+fn ungroup(mut ty: &syn::Type) -> &syn::Type {
+    loop {
+        match ty {
+            syn::Type::Group(group) => ty = &group.elem,
+            syn::Type::Paren(paren) => ty = &paren.elem,
+            _ => return ty,
+        }
+    }
+}
+
+fn peel_option(ty: &syn::Type) -> &syn::Type {
+    let ty = ungroup(ty);
+    if let syn::Type::Path(path) = ty {
+        if let Some(last) = path.path.segments.last() {
+            if last.ident == "Option" {
+                if let Some(inner) = type_args(ty).first() {
+                    return peel_option(inner);
+                }
+            }
+        }
+    }
+    ty
+}
+
+/// The type arguments of a path type: `T` of `Vec<T>`, `K, V` of a map.
+fn type_args(ty: &syn::Type) -> Vec<&syn::Type> {
+    let syn::Type::Path(path) = ungroup(ty) else { return Vec::new() };
+    let Some(last) = path.path.segments.last() else { return Vec::new() };
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else { return Vec::new() };
+    args.args
+        .iter()
+        .filter_map(|arg| match arg {
+            syn::GenericArgument::Type(ty) => Some(ty),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A field with bounds: its own type and the marker type of its bounds.
+pub(crate) struct Annotated {
+    pub(crate) own: syn::Type,
+    pub(crate) spec: proc_macro2::TokenStream,
+}
+
+impl Annotated {
+    /// The type the annotation describes.
+    pub(crate) fn described(&self, k: &syn::Path) -> syn::Type {
+        let (own, spec) = (&self.own, &self.spec);
+        syn::parse_quote!(<#own as #k::pssz::bounds::Bounds<#spec>>::As)
+    }
+}
+
+/// The annotation of a field, if it has one.
+pub(crate) fn annotated(f: &syn::Field, attrs: &Attrs, k: &syn::Path) -> syn::Result<Option<Annotated>> {
+    let Some(bound) = &attrs.bound else { return Ok(None) };
+    let spec = bound
+        .spec(Some(&f.ty), k)
+        .map_err(|error| syn::Error::new_spanned(&f.ty, error.to_string()))?;
+    Ok(Some(Annotated { own: f.ty.clone(), spec }))
 }
 
 impl Attrs {
@@ -258,6 +471,9 @@ fn store(out: &mut Attrs, key: &Key, meta: &Meta) -> syn::Result<()> {
             out.rename_all = Some(Case::parse(&text)?);
         }
         "other" => set_flag(&mut out.other, meta)?,
+        "max" | "element" | "keys" | "values" | "at" => {
+            out.bound.get_or_insert_with(Bound::default).store(meta)?
+        }
         "max_dynamic_data" => {
             let nv = name_value(meta, key.usage)?;
             let Lit::Int(value) = &nv.lit else {

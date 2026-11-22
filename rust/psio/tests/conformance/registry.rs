@@ -69,6 +69,7 @@ pub fn registry() -> Registry {
     reg!(BTreeMap<Tag, u32>, BTreeMap<Name, Range>, BTreeSet<Level>, Nested<Range>);
     // Bounds below the member, and method argument tuples.
     reg!(WrapTags, AnnTags, AnnRawTags, AnnGrid, AnnOpt, AnnArr, AnnMap, AnnSet, AnnTup, AnnVar);
-    reg!(TransferArgs, BatchArgs, TransferCapped, TransferCapped2, NoteCapped);
+    reg!(TransferArgs, BatchArgs, NoteCapped);
+    crate::method_args::register(&mut r);
     r
 }

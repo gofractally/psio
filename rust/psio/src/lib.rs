@@ -90,6 +90,7 @@
 //! | `psio` | `name = "..."` | type, variant, field | the type's name in a schema; an enumerator's, alternative's or member's name in a schema and in text |
 //! | `psio` | `rename_all = "..."` | type | a case convention (`"camelCase"`, `"snake_case"`, ...) for the member names of a struct or the variant names of an enum |
 //! | `psio` | `skip` | field | the field is not a member of the type in any format; a reader fills it with its default |
+//! | `psio` | `max = N`, `element(...)`, `keys(...)`, `values(...)`, `at(I, ...)` | field | bounds of the member and of the positions below it ([`pssz::bounds`]): the member is the bounded type in every format |
 //! | `psio` | `other` | variant | the catch-all of a field-less `#[repr(int)]` enum |
 //! | `pssz` | `max_dynamic_data = N` | type | pSSZ cap on the record's variable part |
 //! | `json` | `json_number`, `json_string`, `ijson_number`, `ijson_string` | type, field | integer form in Json / IJson text |
@@ -285,6 +286,7 @@ pub mod pssz;
 pub mod pssz_checked;
 #[doc(hidden)]
 pub mod pssz_bits;
+pub mod pssz_bounds;
 pub mod pssz_schema_ir;
 pub mod pssz_dynamic;
 pub mod pssz_upgrade;

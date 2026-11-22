@@ -427,3 +427,193 @@ fn the_module_follows_the_trait() {
     assert_eq!(inner::http_server2::Tag::METHODS[0].params, ["in"]);
     assert_eq!(psio::to_json(&inner::http_server2::args::r#type { r#in: 7 }), r#"{"in":7}"#);
 }
+
+// ── Parameter annotations, the argument cap and the result's bounds ─────────
+//
+// The C++ declaration (cpp/tests/method_annotation_tests.cpp, docs/pssz-spec
+// 16):
+//
+//   PSIO_REFLECT(token,
+//      method(transfer, attr(to, utf8 | max<16>), amount, attr(memo, utf8 | max<80>),
+//             maxDynamicData(256)),
+//      method(name_of, id, returns(utf8 | max<32>)), ...)
+
+#[psio::interface(name = "bounded", derive(Debug, Clone, PartialEq))]
+pub trait Bounded {
+    #[pssz(max_dynamic_data = 256)]
+    fn transfer(&mut self, #[psio(max = 16)] to: String, amount: u64, #[psio(max = 80)] memo: String);
+    /// No cap: the width is the inferred bound's.
+    fn transfer_uncapped(&mut self, #[psio(max = 16)] to: String, amount: u64, #[psio(max = 80)] memo: String);
+    #[psio(returns(max = 32))]
+    fn name_of(&self, id: u32) -> String;
+    fn batch(&mut self, #[psio(max = 4, element(max = 8))] names: Vec<psio::pssz::RawString>, fee: Option<u32>);
+    #[pssz(max_dynamic_data = 64)]
+    fn note(&mut self, text: psio::pssz::RawString);
+    #[psio(returns(max = 2, element(max = 3)))]
+    fn tags(&self) -> Vec<String>;
+}
+
+struct Names(Vec<String>);
+impl Bounded for Names {
+    fn transfer(&mut self, to: String, _amount: u64, memo: String) {
+        self.0.push(format!("{to}:{memo}"));
+    }
+    fn transfer_uncapped(&mut self, to: String, _amount: u64, _memo: String) {
+        self.0.push(to);
+    }
+    fn name_of(&self, id: u32) -> String {
+        "n".repeat(id as usize)
+    }
+    fn batch(&mut self, names: Vec<psio::pssz::RawString>, _fee: Option<u32>) {
+        self.0.push(names.len().to_string());
+    }
+    fn note(&mut self, text: psio::pssz::RawString) {
+        self.0.push(text.0.len().to_string());
+    }
+    fn tags(&self) -> Vec<String> {
+        self.0.clone()
+    }
+}
+
+/// The schema of the fixture, which C++ wrote from its declarations.
+fn fixture_schema() -> schema_ir::Schema {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../conformance/pssz-vectors.json"))
+        .unwrap();
+    let fixture: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let hex = fixture["schema_ir"].as_str().unwrap();
+    let bytes: Vec<u8> =
+        (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+    psio::from_pssz(&bytes).unwrap()
+}
+
+/// A node with every reference replaced by what it refers to, so two
+/// schemas that number their anonymous types differently compare.
+fn resolved(schema: &schema_ir::Schema, ty: &schema_ir::AnyType) -> schema_ir::AnyType {
+    use schema_ir::{AnyType, AnyValue as V};
+    let go = |ty: &AnyType| Box::new(resolved(schema, ty));
+    let members = |members: &Vec<schema_ir::Member>| {
+        members
+            .iter()
+            .map(|m| schema_ir::Member { name: m.name.clone(), r#type: go(&m.r#type), attributes: m.attributes.clone() })
+            .collect()
+    };
+    AnyType::new(match &ty.value {
+        V::Type(reference) => return resolved(schema, schema.get(&reference.r#type).expect("a known type")),
+        V::Object(o) => V::Object(schema_ir::Object { members: members(&o.members), attributes: o.attributes.clone() }),
+        V::Struct(o) => V::Struct(schema_ir::Struct { members: members(&o.members), attributes: o.attributes.clone() }),
+        V::List(l) => V::List(schema_ir::List { r#type: go(&l.r#type) }),
+        V::BoundedList(l) => V::BoundedList(schema_ir::BoundedList { r#type: go(&l.r#type), maxCount: l.maxCount }),
+        V::Option(o) => V::Option(schema_ir::Optional { r#type: go(&o.r#type) }),
+        V::Custom(c) => V::Custom(schema_ir::Custom { r#type: go(&c.r#type), id: c.id.clone() }),
+        V::Tuple(t) => V::Tuple(schema_ir::Tuple { members: t.members.iter().map(|m| go(m)).collect() }),
+        other => other.clone(),
+    })
+}
+
+#[test]
+fn the_cap_and_the_parameter_bounds_select_the_width_and_are_enforced() {
+    use bounded::args;
+    use psio::pssz::{auto_pssz_width, BoundedList, BoundedRawString, BoundedString, PsszPack, RawString};
+    // conformance/pssz-vectors.json: tuple<string<=16,u64,string<=80>@cap=256
+    // has 2-byte offsets (the cap rules), the uncapped tuple 1-byte ones
+    // (the inferred bound, 116).
+    assert_eq!(auto_pssz_width::<args::transfer>(), 2);
+    assert_eq!(<args::transfer as PsszPack<psio::Pssz>>::MAX_DYNAMIC_DATA, Some(256));
+    assert_eq!(auto_pssz_width::<args::transfer_uncapped>(), 1);
+    assert_eq!(<args::transfer_uncapped as PsszPack<psio::Pssz>>::MAX_ENCODED_SIZE, Some(116));
+    assert_eq!(<args::batch as PsszPack<psio::Pssz>>::MAX_ENCODED_SIZE, Some(65));
+    assert_eq!(auto_pssz_width::<args::note>(), 1);
+
+    // `method-args/transfer/...` of the fixture: ("al", 5, "hi").
+    let uncapped = args::transfer_uncapped { to: "al".into(), amount: 5, memo: "hi".into() };
+    assert_eq!(hex(&psio::to_pssz(&uncapped)), "0a0a05000000000000000c616c6869");
+    // The uncapped record is the tuple of the bounded parameters.
+    let tuple: <args::transfer_uncapped as Method>::Tuple =
+        (BoundedString("al".into()), 5u64, BoundedString("hi".into()));
+    assert_eq!(psio::to_pssz(&uncapped), psio::to_pssz(&tuple));
+    let batch = args::batch { names: vec![RawString(b"a".to_vec())], fee: None };
+    let batch_tuple: <args::batch as Method>::Tuple = (BoundedList(vec![BoundedRawString(b"a".to_vec())]), None);
+    assert_eq!(psio::to_pssz(&batch), psio::to_pssz(&batch_tuple));
+    // Under the cap the same arguments have 2-byte offsets.
+    let capped = args::transfer { to: "al".into(), amount: 5, memo: "hi".into() };
+    assert_eq!(psio::to_pssz(&capped).len(), psio::to_pssz(&uncapped).len() + 3);
+
+    // A parameter outside its annotation is refused by the encoder and, as
+    // a frame, by dispatch.
+    let mut target = Names(vec![]);
+    let over = args::transfer { to: "x".repeat(17), amount: 0, memo: String::new() };
+    assert!(psio::try_to_pssz(&over).is_err());
+    let frame = psio::pssz::encode::<psio::pssz::Pssz16, _>(&("x".repeat(17), 0u64, String::new()));
+    assert!(matches!(bounded::dispatch_name(&mut target, "transfer", &frame), Err(DispatchError::Arguments(_))));
+    let frame = psio::pssz::encode::<psio::pssz::Pssz16, _>(&("al".to_string(), 0u64, "m".repeat(81)));
+    assert!(matches!(bounded::dispatch_name(&mut target, "transfer", &frame), Err(DispatchError::Arguments(_))));
+    assert!(target.0.is_empty(), "the method did not run");
+    bounded::dispatch_name(&mut target, "transfer", &psio::to_pssz(&capped)).unwrap();
+    assert_eq!(target.0, ["al:hi"]);
+    // The cap bounds the whole argument record.
+    assert!(psio::try_to_pssz(&args::note { text: RawString(vec![0; 64]) }).is_err());
+    assert!(psio::try_to_pssz(&args::note { text: RawString(vec![0; 60]) }).is_ok());
+    assert!(psio::try_to_pssz(&args::batch { names: vec![RawString(vec![]); 5], fee: None }).is_err());
+    assert!(psio::try_to_pssz(&args::batch { names: vec![RawString(vec![0; 9])], fee: None }).is_err());
+
+    // returns(...): the result is checked when it is written and when read.
+    let reply = bounded::dispatch_name(&mut target, "name_of", &psio::to_pssz(&(32u32,))).unwrap();
+    assert_eq!(<args::name_of as Method>::result_from_pssz(&reply).unwrap(), "n".repeat(32));
+    assert!(matches!(
+        bounded::dispatch_name(&mut target, "name_of", &psio::to_pssz(&(33u32,))),
+        Err(DispatchError::Result(_))
+    ));
+    assert!(<args::name_of as Method>::result_from_pssz(&psio::to_pssz(&"n".repeat(33))).is_err());
+    assert!(<args::name_of as Method>::result_to_pssz(&"n".repeat(33)).is_err());
+    assert!(<args::tags as Method>::result_to_pssz(&vec!["abc".to_string(); 2]).is_ok());
+    assert!(<args::tags as Method>::result_to_pssz(&vec!["abc".to_string(); 3]).is_err());
+    assert!(<args::tags as Method>::result_to_pssz(&vec!["abcd".to_string()]).is_err());
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn the_interface_schema_carries_the_bounds_and_the_cap() {
+    use schema_ir::{AnyType, AnyValue as V, Attribute};
+    let mut builder = SchemaBuilder::new();
+    builder.insert_interface::<bounded::Tag>().unwrap();
+    let schema = builder.finish();
+    let funcs = &schema.interfaces[0].funcs;
+    let u8_type = AnyType::new(V::Int(schema_ir::Int { bits: 8, isSigned: false }));
+    let text = |n: u64| {
+        AnyType::new(V::Custom(schema_ir::Custom {
+            r#type: Box::new(AnyType::new(V::BoundedList(schema_ir::BoundedList {
+                r#type: Box::new(u8_type.clone()),
+                maxCount: n,
+            }))),
+            id: "utf8".into(),
+        }))
+    };
+    let cap = |n: &str| vec![Attribute { name: "maxDynamicData".into(), value: Some(n.into()) }];
+
+    // transfer(to: utf8 <= 16, amount, memo: utf8 <= 80) under a cap of 256:
+    // what C++ method_annotation_tests.cpp checks of its interface schema.
+    assert_eq!(funcs[0].name, "transfer");
+    assert_eq!(resolved(&schema, &funcs[0].params[0].r#type), text(16));
+    assert!(matches!(resolved(&schema, &funcs[0].params[1].r#type).value, V::Int(_)));
+    assert_eq!(resolved(&schema, &funcs[0].params[2].r#type), text(80));
+    assert_eq!(funcs[0].attributes, cap("256"));
+    assert!(funcs[1].attributes.is_empty());
+    // name_of returns utf8 <= 32.
+    assert_eq!(resolved(&schema, funcs[2].result.as_ref().unwrap()), text(32));
+    assert!(funcs[2].attributes.is_empty());
+    assert_eq!(funcs[4].attributes, cap("64"));
+
+    // The argument record's own schema is the fixture's: C++ describes a
+    // method's argument tuple as the Object of its parameters carrying
+    // maxDynamicData (conformance/pssz-vectors.md).
+    let fixture = fixture_schema();
+    let (ours, root) = schema_ir::schema_for::<bounded::args::transfer>().unwrap();
+    let theirs = fixture.get("tuple<string<=16,u64,string<=80>@cap=256").expect("the fixture type");
+    assert_eq!(resolved(&ours, &root), resolved(&fixture, theirs));
+    let (ours, root) = schema_ir::schema_for::<bounded::args::note>().unwrap();
+    let theirs = fixture.get("tuple<raw_string>@cap=64").expect("the fixture type");
+    assert_eq!(resolved(&ours, &root), resolved(&fixture, theirs));
+}
