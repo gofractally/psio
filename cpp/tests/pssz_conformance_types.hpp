@@ -15,12 +15,18 @@
 // derived from the C++ types here, never written by hand.
 
 #include <psio/nested.hpp>
+#include <psio/key.hpp>
 #include <psio/pssz.hpp>
 #include <psio/pssz_view.hpp>
 #include <psio/schema_builder.hpp>
 #include <psio/schema_ir.hpp>
 
 #include <array>
+#include <cstring>
+#include <map>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -499,7 +505,13 @@ namespace pssz_conf
                ((out += (I ? "," : "") + ref<std::variant_alternative_t<I, T>>()), ...);
                return out + ">";
             }(std::make_index_sequence<std::variant_size_v<T>>{});
+         else if constexpr (psio::detail::is_map_v<T>)
+            return "map<" + ref<psio::detail::assoc_key_t<T>>() + "," +
+                   ref<typename T::mapped_type>() + ">";
+         else if constexpr (psio::detail::is_set_v<T>)
+            return "set<" + ref<psio::detail::assoc_key_t<T>>() + ">";
          else if constexpr (impl::is_std_tuple_v<T>)
+            // (a std::pair is the 2-tuple: the same shape, the same id)
             return []<std::size_t... I>(std::index_sequence<I...>) {
                std::string out = "tuple<";
                ((out += (I ? "," : "") + ref<std::tuple_element_t<I, T>>()), ...);
@@ -547,8 +559,8 @@ namespace pssz_conf
                        !impl::is_utf8_string_v<F>)
          {
             static_assert(std::is_same_v<F, std::string> || impl::is_std_vector_v<F> ||
-                             impl::is_nested_v<F>,
-                          "pssz_conf: length_bound only on string, vector and nested members");
+                             impl::is_nested_v<F> || psio::detail::is_assoc_v<F>,
+                          "pssz_conf: length_bound only on string, vector, nested, map and set members");
             const auto bound = std::get<psio::length_bound>(
                psio::effective_annotations_for<T, F, R::template member_pointer<I>>::value);
             out += "<=" + std::to_string(*bound.max);
@@ -619,6 +631,69 @@ namespace pssz_conf
    template <typename T> using Vec  = std::vector<T>;
    template <typename T> using Opt  = std::optional<T>;
    template <typename T> using VarU = std::variant<u32, T>;
+
+   // ── std::pair, maps and sets ──────────────────────────────────────────
+   //
+   // A pair is the 2-tuple (PairT's id is tuple<u16,raw_string>). A map /
+   // set is the list of its entries / elements in ascending key order; each
+   // is registered next to the list type whose bytes it shares. The C++
+   // container (ordered, hashed, custom comparator) is not part of the type.
+   struct F64KeyOrder  // docs/key-spec.md float order: -0 = +0, NaNs by bits
+   {
+      bool operator()(double a, double b) const
+      {
+         const auto x = psio::to_key(a);
+         const auto y = psio::to_key(b);
+         return std::memcmp(x.data(), y.data(), x.size()) < 0;
+      }
+   };
+   struct PairOrder
+   {
+      bool operator()(const Pair& a, const Pair& b) const
+      {
+         return a.x != b.x ? a.x < b.x : a.y < b.y;
+      }
+   };
+   using PairT     = std::pair<u16, Raw>;
+   using MapRawU32 = std::map<Raw, u32>;
+   using MapU32Raw = std::unordered_map<u32, Raw>;
+   using MapTup    = std::map<TupBS, Vec<u16>>;
+   using MapInner  = std::map<u16, Inner>;
+   using MapNest   = std::map<Raw, std::map<u8, std::set<Raw>>>;
+   using ListNest  = Vec<std::tuple<Raw, Vec<std::tuple<u8, Vec<Raw>>>>>;
+   using SetU16    = std::set<u16>;
+   using SetRaw    = std::set<Raw, std::greater<Raw>>;
+   using SetI32    = std::unordered_set<std::int32_t>;
+   using SetTup    = std::set<TupBS>;
+   using SetF64    = std::set<double, F64KeyOrder>;
+   using SetPair   = std::set<Pair, PairOrder>;
+   using VarMap    = std::variant<MapRawU32, u32>;
+   struct AssocRec
+   {
+      MapRawU32          counts;
+      SetU16             ids;
+      PairT              head;
+      Opt<MapU32Raw>     names;
+      std::map<u8, u8>   limited;  // <= 2 entries
+      Vec<SetI32>        groups;
+   };
+   PSIO_REFLECT(AssocRec, counts, ids, head, names, limited, groups)
+   // AssocRec spelled with the lists (and the tuple) it is on the wire.
+   struct AssocLists
+   {
+      Vec<std::tuple<Raw, u32>>       counts;
+      Vec<u16>                        ids;
+      std::tuple<u16, Raw>            head;
+      Opt<Vec<std::tuple<u32, Raw>>>  names;
+      Vec<std::tuple<u8, u8>>         limited;  // <= 2 entries
+      Vec<Vec<std::int32_t>>          groups;
+   };
+   PSIO_REFLECT(AssocLists, counts, ids, head, names, limited, groups)
+}  // namespace pssz_conf
+PSIO_FIELD_ATTRS(pssz_conf::AssocRec, limited, psio::length_bound{.max = 2})
+PSIO_FIELD_ATTRS(pssz_conf::AssocLists, limited, psio::length_bound{.max = 2})
+namespace pssz_conf
+{
    template <typename T> using TupS = std::tuple<T, Raw>;
    template <typename T> using Arr2 = std::array<T, 2>;
 
@@ -680,7 +755,13 @@ namespace pssz_conf
       types<NArgs, NArgs2, NAction, NAction2, NActionRaw, NActionLater, NShapes, NCapped, NChain,
             Nested<u32>, Nested<NArgs>, NestedLater<NArgs>, Opt<Nested<Raw>>, Vec<Nested<u32>>,
             std::variant<u8, Nested<NArgs>>, std::tuple<Nested<Raw>, u8>, Opt<NChain>,
-            Opt<Opt<NChain>>>>::type;
+            Opt<Opt<NChain>>>,
+      // pairs, maps and sets, and the lists they are (appended: the ids above
+      // keep their positions)
+      types<PairT, MapRawU32, Vec<std::tuple<Raw, u32>>, MapU32Raw, Vec<std::tuple<u32, Raw>>,
+            MapTup, Vec<std::tuple<TupBS, Vec<u16>>>, MapInner, Vec<std::tuple<u16, Inner>>,
+            MapNest, ListNest, SetU16, Vec<u16>, SetRaw, SetI32, Vec<std::int32_t>, SetTup,
+            SetF64, Vec<double>, SetPair, AssocRec, AssocLists, Opt<SetU16>, VarMap>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)

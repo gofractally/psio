@@ -3,12 +3,15 @@
 #include <psio/key.hpp>
 
 #include <chrono>
+#include <map>
 #include <utility>
 
 int main()
 {
-#if defined(KEY_FAIL_PAIR)
-   auto k = psio::encode(psio::key{}, std::pair<int, int>{1, 2});
+#if defined(KEY_FAIL_MULTIMAP)
+   // A std::pair is a value (the 2-tuple); a container that can hold two
+   // entries with one key is not.
+   auto k = psio::encode(psio::key{}, std::multimap<int, int>{{1, 2}});
 #elif defined(KEY_FAIL_BITLIST)
    auto k = psio::encode(psio::key{}, psio::bitlist<8>{});
 #elif defined(KEY_FAIL_STEADY_CLOCK)

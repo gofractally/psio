@@ -71,6 +71,7 @@
 #include <psio/adapter.hpp>
 #include <psio/annotate.hpp>
 #include <psio/detail/nested_fwd.hpp>
+#include <psio/detail/assoc.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/get_type_name.hpp>
 #include <psio/reflect.hpp>
@@ -145,6 +146,10 @@ namespace psio::schema_types
       {
       };
       template <typename... T> struct sb_is_tuple<std::tuple<T...>> : std::true_type
+      {
+      };
+      // A std::pair is the 2-tuple of its members.
+      template <typename A, typename B> struct sb_is_tuple<std::pair<A, B>> : std::true_type
       {
       };
       template <typename T> struct sb_is_variant : std::false_type
@@ -445,6 +450,12 @@ namespace psio::schema_types
             // A byte list holding the PSSZ encoding of the inner type. The
             // validation policy (eager / deferred) is not part of the schema.
             return Nested{Box<AnyType>{insert<typename ::psio::detail::is_nested<U>::inner>()}};
+         else if constexpr (::psio::detail::is_assoc_v<U>)
+            // A map / set: the list of its entries (K, V) / elements, in
+            // strictly ascending key order.
+            return Custom{
+                Box<AnyType>{List{Box<AnyType>{insert<::psio::detail::assoc_entry_t<U>>()}}},
+                ::psio::detail::is_map_v<U> ? "map" : "set"};
          else if constexpr (sb_detail::sb_is_tuple<U>::value)
             return [&]<std::size_t... I>(std::index_sequence<I...>)
             {
@@ -592,6 +603,13 @@ namespace psio::schema_types
                          "string"};
             return true;
          }
+         else if constexpr (::psio::detail::is_assoc_v<F>)
+         {
+            out = Custom{Box<AnyType>{AnyType{BoundedList{
+                            Box<AnyType>{insert<::psio::detail::assoc_entry_t<F>>()}, max}}},
+                         ::psio::detail::is_map_v<F> ? "map" : "set"};
+            return true;
+         }
          else if constexpr (sb_detail::sb_is_vector<F>::value)
          {
             using E = typename sb_detail::sb_is_vector<F>::elem;
@@ -619,7 +637,8 @@ namespace psio::schema_types
             return length_bound_applies<typename sb_detail::sb_is_optional<F>::elem>();
          else
             return std::is_same_v<F, std::string> || sb_detail::sb_is_vector<F>::value ||
-                   sb_detail::sb_is_utf8<F>::value || ::psio::detail::is_nested_v<F>;
+                   sb_detail::sb_is_utf8<F>::value || ::psio::detail::is_nested_v<F> ||
+                   ::psio::detail::is_assoc_v<F>;
       }
 
       template <typename U, std::size_t I>

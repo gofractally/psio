@@ -33,6 +33,7 @@
 
 #include <psio/cpo.hpp>
 #include <psio/detail/nested_fwd.hpp>
+#include <psio/detail/assoc.hpp>
 #include <psio/detail/unaligned_iter.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/pssz_record_layout.hpp>
@@ -191,6 +192,25 @@ namespace psio {
       // T. Variable-size, unbounded, minimum size 0, like vector<u8>.
       using ::psio::detail::is_nested;
       using ::psio::detail::is_nested_v;
+      // ── Maps and sets (detail/pssz_assoc.hpp) ─────────────────────────
+      //
+      // A map / set is the list of its entries / elements in canonical
+      // order; each ladder below dispatches here.
+      using ::psio::detail::is_assoc_v;
+      struct validate_flags;
+      template <typename T>
+      codec_status assoc_check_encode(const T& value, std::size_t depth, bool bounds);
+      template <std::size_t W, bool Auto, typename T>
+      std::size_t assoc_size(const T& v, size_check* check);
+      template <std::size_t W, bool Auto, typename T, typename Sink>
+      void assoc_encode(const T& v, Sink& s);
+      template <std::size_t W, bool Auto, typename T>
+      T assoc_decode(std::span<const char> src, std::size_t pos, std::size_t end);
+      template <std::size_t W, bool Auto, typename T>
+      codec_status assoc_validate(std::span<const char> src, std::size_t pos, std::size_t end,
+                                  std::size_t depth, validate_flags* flags) noexcept;
+      template <typename Old, typename New>
+      consteval bool assoc_evolves() noexcept;
 
       // ── Shape classification (same as SSZ) ────────────────────────────────
 
@@ -264,6 +284,10 @@ namespace psio {
       struct is_std_tuple : std::false_type {};
       template <typename... Ts>
       struct is_std_tuple<std::tuple<Ts...>> : std::true_type {};
+      // A std::pair is the 2-tuple of its members (a map's value_type,
+      // pair<const K, V>, included).
+      template <typename A, typename B>
+      struct is_std_tuple<std::pair<A, B>> : std::true_type {};
       template <typename T>
       inline constexpr bool is_std_tuple_v = is_std_tuple<T>::value;
 
@@ -275,6 +299,14 @@ namespace psio {
          static constexpr std::size_t member_count = sizeof...(Ts);
          template <std::size_t I>
          using member_type = std::tuple_element_t<I, std::tuple<Ts...>>;
+      };
+
+      template <typename A, typename B>
+      struct record_traits<std::pair<A, B>>
+      {
+         static constexpr std::size_t member_count = 2;
+         template <std::size_t I>
+         using member_type = std::remove_const_t<std::tuple_element_t<I, std::pair<A, B>>>;
       };
 
       template <typename T, std::size_t I, bool = is_std_tuple_v<T>>
@@ -675,6 +707,8 @@ namespace psio {
          }
          else if constexpr (is_nested_v<T>)
             return ::psio::detail::nested_impl::pssz_check_encode(value, depth);
+         else if constexpr (is_assoc_v<T>)
+            return assoc_check_encode(value, depth, bounds);
          else if constexpr (is_bitlist_v<T>)
          {
             if (bounds && value.size() > T::max_size_value)
@@ -901,6 +935,8 @@ namespace psio {
             return size_of_v<W, Auto>(*v.value, check);
          else if constexpr (is_nested_v<T>)
             return v.size();
+         else if constexpr (is_assoc_v<T>)
+            return assoc_size<W, Auto>(v, check);
          else if constexpr (is_fixed_v<T>)
             return fixed_size_of<T>();
          else if constexpr (is_std_array_v<T>)
@@ -1023,6 +1059,7 @@ namespace psio {
          }
          else
          {
+            PSIO_REJECT_MULTI_ASSOC("psio::pssz", T);
             static_assert(sizeof(T) == 0,
                           "psio::pssz: unsupported type in size_of_v");
             return 0;
@@ -1092,6 +1129,8 @@ namespace psio {
             if (v.size() != 0)
                s.write(v.bytes().data(), v.size());
          }
+         else if constexpr (is_assoc_v<T>)
+            assoc_encode<W, Auto>(v, s);
          else if constexpr (std::is_same_v<T, bool>)
             s.write(v ? '\x01' : '\x00');
          else if constexpr (std::is_same_v<T, ::psio::uint256>)
@@ -1362,6 +1401,7 @@ namespace psio {
          }
          else
          {
+            PSIO_REJECT_MULTI_ASSOC("psio::pssz", T);
             static_assert(sizeof(T) == 0,
                           "psio::pssz: unsupported type in encode_value");
          }
@@ -1718,6 +1758,8 @@ namespace psio {
          }
          else if constexpr (is_nested_v<T>)
             return T::unchecked(std::vector<char>(src.data() + pos, src.data() + end));
+         else if constexpr (is_assoc_v<T>)
+            return assoc_decode<W, Auto, T>(src, pos, end);
          else if constexpr (std::is_same_v<T, bool>)
             return static_cast<unsigned char>(src[pos]) != 0;
          else if constexpr (std::is_same_v<T, ::psio::uint256>)
@@ -1873,6 +1915,7 @@ namespace psio {
          }
          else
          {
+            PSIO_REJECT_MULTI_ASSOC("psio::pssz", T);
             static_assert(sizeof(T) == 0,
                           "psio::pssz: unsupported type in decode_value");
          }
@@ -2139,7 +2182,7 @@ namespace psio {
             return codec_ok();
          }
          else if constexpr (std::is_same_v<F, std::string> || is_utf8_string_v<F> ||
-                            is_std_vector_v<F>)
+                            is_std_vector_v<F> || is_assoc_v<F>)
          {
             std::size_t count = 0;
             if constexpr (std::is_same_v<F, std::string> || is_utf8_string_v<F>)
@@ -2274,6 +2317,8 @@ namespace psio {
          else if constexpr (is_nested_v<T>)
             return ::psio::detail::nested_impl::pssz_validate<T>(
                src.subspan(pos, end - pos), depth, flags);
+         else if constexpr (is_assoc_v<T>)
+            return assoc_validate<W, Auto, T>(src, pos, end, depth, flags);
          else if constexpr (is_fixed_v<T> && !Record<T>)
          {
             if (end - pos != fixed_size_of<T>())
@@ -2407,6 +2452,7 @@ namespace psio {
          }
          else
          {
+            PSIO_REJECT_MULTI_ASSOC("psio::pssz", T);
             return codec_fail("pssz: unsupported type in validate",
                               static_cast<std::uint32_t>(pos), "pssz");
          }
@@ -2621,6 +2667,8 @@ namespace psio {
          else if constexpr (is_nested_v<Old> && is_nested_v<New>)
             return layout_evolves<typename is_nested<Old>::inner,
                                   typename is_nested<New>::inner>();
+         else if constexpr (is_assoc_v<Old> || is_assoc_v<New>)
+            return assoc_evolves<Old, New>();
          else if constexpr (is_std_optional_v<Old> && is_std_optional_v<New>)
             return optional_uses_selector_v<typename Old::value_type> ==
                       optional_uses_selector_v<typename New::value_type> &&
@@ -2974,3 +3022,5 @@ namespace psio {
    }
 
 }  // namespace psio
+
+#include <psio/detail/pssz_assoc.hpp>

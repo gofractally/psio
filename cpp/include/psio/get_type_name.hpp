@@ -15,6 +15,9 @@
 //   options:       std::optional<T>    → "T?"
 //   sums:          std::variant<...>   → "variant_T1_T2_..."
 //                  std::tuple<...>     → "tuple_T1_T2_..."
+//                  std::pair<A, B>     → "tuple_A_B" (a pair is a 2-tuple)
+//   maps / sets:   std::map<K, V>, std::unordered_map<K, V>   → "map_K_V"
+//                  std::set<K>, std::unordered_set<K>         → "set_K"
 //   chrono:        std::chrono::duration<...>             → "duration"
 //                  time_point<system_clock, duration<R>>  → "TimePointSec"
 //                  time_point<system_clock, duration<R, micro>>
@@ -31,7 +34,12 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -86,6 +94,16 @@ namespace psio {
    constexpr const char* get_type_name(const std::tuple<T...>*);
    template <typename... T>
    constexpr const char* get_type_name(const std::variant<T...>*);
+   template <typename A, typename B>
+   constexpr const char* get_type_name(const std::pair<A, B>*);
+   template <typename K, typename V, typename C, typename A>
+   constexpr const char* get_type_name(const std::map<K, V, C, A>*);
+   template <typename K, typename V, typename H, typename E, typename A>
+   constexpr const char* get_type_name(const std::unordered_map<K, V, H, E, A>*);
+   template <typename K, typename C, typename A>
+   constexpr const char* get_type_name(const std::set<K, C, A>*);
+   template <typename K, typename H, typename E, typename A>
+   constexpr const char* get_type_name(const std::unordered_set<K, H, E, A>*);
    template <typename Rep, typename Period>
    constexpr const char* get_type_name(
       const std::chrono::duration<Rep, Period>*);
@@ -259,6 +277,54 @@ namespace psio {
    constexpr const char* get_type_name(const std::tuple<T...>*)
    {
       return tuple_type_name<T...>.data();
+   }
+
+   // A std::pair is the 2-tuple of its members.
+   template <typename A, typename B>
+   constexpr const char* get_type_name(const std::pair<A, B>*)
+   {
+      return tuple_type_name<std::remove_const_t<A>, B>.data();
+   }
+
+   // A map / set is named by its key and value types, whatever container
+   // holds it: "map_K_V", "set_K".
+   template <std::size_t N, typename... T>
+   constexpr auto get_prefixed_type_name(const char (&prefix)[N])
+   {
+      constexpr std::size_t size =
+         N + ((std::string_view(get_type_name((T*)nullptr)).size() + 1) + ... + 0);
+      std::array<char, size> buffer{};
+      for (std::size_t i = 0; i + 1 < N; ++i)
+         buffer[i] = prefix[i];
+      (variant_type_appender{buffer.data() + N - 1} + ... +
+       std::string_view(get_type_name((T*)nullptr)));
+      buffer[buffer.size() - 1] = '\0';
+      return buffer;
+   }
+   template <typename K, typename V>
+   constexpr auto map_type_name = get_prefixed_type_name<4, K, V>("map");
+   template <typename K>
+   constexpr auto set_type_name = get_prefixed_type_name<4, K>("set");
+
+   template <typename K, typename V, typename C, typename A>
+   constexpr const char* get_type_name(const std::map<K, V, C, A>*)
+   {
+      return map_type_name<K, V>.data();
+   }
+   template <typename K, typename V, typename H, typename E, typename A>
+   constexpr const char* get_type_name(const std::unordered_map<K, V, H, E, A>*)
+   {
+      return map_type_name<K, V>.data();
+   }
+   template <typename K, typename C, typename A>
+   constexpr const char* get_type_name(const std::set<K, C, A>*)
+   {
+      return set_type_name<K>.data();
+   }
+   template <typename K, typename H, typename E, typename A>
+   constexpr const char* get_type_name(const std::unordered_set<K, H, E, A>*)
+   {
+      return set_type_name<K>.data();
    }
 
    template <typename Rep, typename Period>

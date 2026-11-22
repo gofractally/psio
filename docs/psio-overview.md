@@ -50,6 +50,15 @@ A user-declared aggregate (struct, record, class) with named fields
 of typed values. The type's **declaration is the wire contract** —
 adding/removing/renaming fields is a wire change.
 
+Field values are scalars, strings, lists, arrays, optionals, variants,
+tuples, nested types, and **pairs, maps and sets**: a pair is the 2-tuple,
+and a map / set is the list of its entries / elements in ascending key order
+— one rule for every core format and language (`docs/pssz-spec.md` §5.9;
+text forms in `docs/json.md`, key form in `docs/key-spec.md`). C++
+`std::pair`, `std::map`, `std::set`, `std::unordered_map`,
+`std::unordered_set`; Rust tuples, `BTreeMap`, `BTreeSet`, `HashMap`,
+`HashSet`; JS `Map` / `Set`.
+
 **Per-host:**
 - C++: any class with `PSIO_REFLECT(...)` macro applied
 - Rust: any struct with `#[derive(psio::Reflect)]`

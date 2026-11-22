@@ -11,7 +11,12 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <span>
 #include <string>
 #include <tuple>
@@ -65,10 +70,17 @@ namespace warnings_check
       psio::nested<std::uint32_t, psio::nested_validation::deferred> packed_later;
       std::optional<psio::nested<fixed>>      maybe_packed;
       std::vector<psio::nested<std::string>>  packed_list;
+      std::pair<std::uint8_t, std::string>             pair;
+      std::map<std::string, std::uint32_t>             counts;
+      std::unordered_map<std::uint32_t, inner>         by_id;
+      std::set<std::int16_t>                           ids;
+      std::unordered_set<double>                       ratios;
+      std::map<std::pair<std::uint8_t, std::string>, std::set<std::uint8_t>> index;
       PSIO_REFLECT(everything, flag, u8, i32, u64, f64, wide, shade, raw, text, bounded_text,
                    bytes, digest, numbers, records, pair_of_fixed, tuple, choice,
                    maybe_number, maybe_record, elapsed, at, packed,
-                   attr(packed_later, max<4>), maybe_packed, packed_list)
+                   attr(packed_later, max<4>), maybe_packed, packed_list, pair, counts, by_id,
+                   ids, ratios, attr(index, max<8>))
    };
 
    struct key_type
@@ -78,6 +90,17 @@ namespace warnings_check
       std::optional<std::int64_t> rank;
       psio::nested<fixed>        packed;
       PSIO_REFLECT(key_type, table, name, rank, packed)
+   };
+
+   struct assoc_key_type
+   {
+      std::uint32_t              table = 0;
+      std::string                name;
+      std::optional<std::int64_t> rank;
+      std::pair<std::uint8_t, bool>         pair;
+      std::set<std::uint8_t>                flags;
+      std::map<std::string, std::set<double>> series;
+      PSIO_REFLECT(assoc_key_type, table, name, rank, pair, flags, series)
    };
 
    template <typename Fmt>
@@ -94,7 +117,12 @@ namespace warnings_check
    bool exercise()
    {
       everything value;
-      bool       ok = true;
+      value.counts = {{"b", 2}, {"a", 1}};
+      value.by_id  = {{2, inner{2, "two", {}}}, {1, inner{1, "one", "n"}}};
+      value.ids    = {3, -3};
+      value.ratios = {0.5, -0.5};
+      value.index  = {{{1, "x"}, {2, 1}}};
+      bool ok = true;
 
       // pssz: both encoders, every reader, the view.
       std::vector<char> bytes;
@@ -126,11 +154,16 @@ namespace warnings_check
       static_assert(psio::pssz_evolves_from<psio::nested<inner>, psio::nested<inner>>);
 
       // key
-      const key_type key{1, "a", 2, psio::nested<fixed>::from(fixed{3, 4})};
-      const auto     key_bytes = psio::to_key(key);
-      ok &= psio::validate<key_type>(psio::key{}, std::span<const char>{key_bytes}).ok();
-      ok &= psio::decode<key_type>(psio::key{}, std::span<const char>{key_bytes}).table == 1;
+      const key_type packed_key{1, "a", 2, psio::nested<fixed>::from(fixed{3, 4})};
+      const auto     packed_key_bytes = psio::to_key(packed_key);
+      ok &= psio::validate<key_type>(psio::key{}, std::span<const char>{packed_key_bytes}).ok();
+      ok &= psio::decode<key_type>(psio::key{}, std::span<const char>{packed_key_bytes}).table == 1;
       ok &= !psio::key_prefix<key_type>(1u).empty();
+      const assoc_key_type key{1, "a", 2, {3, true}, {2, 1}, {{"s", {1.5, -1.5}}}};
+      const auto           key_bytes = psio::to_key(key);
+      ok &= psio::validate<assoc_key_type>(psio::key{}, std::span<const char>{key_bytes}).ok();
+      ok &= psio::decode<assoc_key_type>(psio::key{}, std::span<const char>{key_bytes}).table == 1;
+      ok &= !psio::key_prefix<assoc_key_type>(1u).empty();
 
       // json / ijson
       ok &= text_round_trip<psio::json>(value);
@@ -149,22 +182,41 @@ namespace warnings_check
                                         std::span<const char>{bytes}, text, nullptr)
                .ok();
       ok &= psio::pssz_ir::json_to_pssz(schema, "everything", psio::ijson{}, text, again).ok();
+      ok &= again == bytes;
 
       // An explicit-width frame around nested values, whose bytes stay in
       // the automatic profile, and the opaque option.
       const auto           wide = psio::encode(psio::pssz_<4>{}, value);
-      psio::pssz_ir::Value dynamic;
+      psio::pssz_ir::Value wide_value;
       std::vector<char>    wide_again;
       ok &= psio::validate<everything>(psio::pssz_<4>{}, std::span<const char>{wide}).ok();
       ok &= psio::validate_strict<everything>(psio::pssz_<4>{}, std::span<const char>{wide}).ok();
       ok &= psio::pssz_ir::decode_exact<4>(schema, "everything", std::span<const char>{wide},
-                                           dynamic)
+                                           wide_value)
                .ok();
-      ok &= psio::pssz_ir::encode<4>(schema, "everything", dynamic, wide_again).ok();
+      ok &= psio::pssz_ir::encode<4>(schema, "everything", wide_value, wide_again).ok();
       ok &= wide_again == wide;
       ok &= psio::pssz_ir::validate_pssz(schema, "everything", std::span<const char>{bytes},
                                          nullptr, psio::pssz_ir::nested_bytes::opaque)
                .ok();
+
+      // The schema-driven key encoder.
+      const auto             key_schema =
+         psio::SchemaBuilder{}.insert<assoc_key_type>("key_type").build();
+      psio::pssz_ir::Value   dynamic;
+      std::vector<char>      dynamic_key;
+      const auto             key_frame = psio::encode(psio::pssz{}, key);
+      ok &= psio::pssz_ir::decode_auto(key_schema, "key_type", std::span<const char>{key_frame},
+                                       dynamic, unknown)
+               .ok();
+      ok &= psio::pssz_ir::to_key(key_schema, "key_type", dynamic, dynamic_key).ok();
+      ok &= dynamic_key == key_bytes;
+
+      // Views of a pair, a map and a set.
+      const psio::view<everything, psio::pssz, psio::storage::const_borrow> view{
+         std::span<const char>{bytes}};
+      ok &= view.get<26>().size() == 2;
+      ok &= view.get<25>().first() == 0;
       return ok;
    }
 }  // namespace warnings_check

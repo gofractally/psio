@@ -69,6 +69,17 @@ builder records everything those depend on:
   `unsigned char` or `std::byte` use the hex adapter.
 - **Wide integers.** `uint128` / `int128` are `Int{128}`, `uint256` is
   `Int{256, unsigned}`.
+- **Pairs, maps and sets.** A `std::pair<A, B>` is `Tuple{[A, B]}`, the node
+  of `std::tuple<A, B>`. A map (`std::map`, `std::unordered_map`) is
+  `Custom{ List{ Tuple{[K, V]} }, "map" }` and a set (`std::set`,
+  `std::unordered_set`) is `Custom{ List{ K }, "set" }`; with a member
+  `length_bound{.max = N}` the list is `BoundedList{..., N}` (other bounds
+  are the member attribute `lengthBound`, counting entries). `map` and `set`
+  are part of the binary form — the entries are in strictly ascending key
+  order (`docs/pssz-spec.md` §5.9) — and take no handler. A schema-driven
+  codec refuses a `map` that is not directly on a list of two-member tuples,
+  a `set` that is not directly on a list, and a key type without a key
+  encoding (`docs/json.md`, "Custom types through a schema").
 - **Floats** are `Float{8, 24}` and `Float{11, 53}` (the exponent width was
   one short before; the Rust builder and the codec use these values).
 - **Nested values.** `psio::nested<T>` (`psio/nested.hpp`) is the node

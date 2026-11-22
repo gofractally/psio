@@ -33,15 +33,19 @@
 //   byte_array<N>         the N bytes
 //   bitvector<N>          its (N+7)/8 bytes (equality order only)
 //   std::variant          1-byte alternative index + the alternative
-//   std::tuple, record    elements / reflected fields concatenated in
+//   std::tuple, std::pair,
+//   record                elements / reflected fields concatenated in
 //                         order; tuple<> and an empty record are zero bytes
 //   psio::nested<T>       the key of the byte list holding the PSSZ encoding
 //                         of the T (nested.hpp): string framing, bytes order.
 //                         The reader validates the bytes as T unless the
 //                         member is declared deferred
+//   map, set              the key of the list of its entries / elements in
+//                         canonical (ascending key) order: std::map,
+//                         std::set, std::unordered_map, std::unordered_set
 //
-// std::pair is not a PSIO value in any format, and bitlist has no key
-// form; both are compile errors.
+// bitlist has no key form, and the multi containers are not PSIO values;
+// both are compile errors.
 //
 // Custom types: a type with a `sortable_binary_category` adapter
 // (PSIO_ADAPTER) delegates encode/decode/validate to the adapter, and
@@ -68,6 +72,7 @@
 
 #include <psio/cpo.hpp>
 #include <psio/detail/nested_fwd.hpp>
+#include <psio/detail/assoc_order.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -83,6 +88,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -119,10 +125,9 @@ namespace psio {
       struct is_std_tuple : std::false_type {};
       template <typename... Ts>
       struct is_std_tuple<std::tuple<Ts...>> : std::true_type {};
-      template <typename T>
-      struct is_std_pair : std::false_type {};
+      // A std::pair is the 2-tuple of its members.
       template <typename A, typename B>
-      struct is_std_pair<std::pair<A, B>> : std::true_type {};
+      struct is_std_tuple<std::pair<A, B>> : std::true_type {};
       template <typename T>
       struct is_bounded : std::false_type {};
       template <typename T, std::size_t N>
@@ -163,7 +168,8 @@ namespace psio {
 
       // No key form at all: a clear error instead of a deep one.
       template <typename T>
-      inline constexpr bool unsupported_v = is_std_pair<T>::value || is_bitlist<T>::value;
+      inline constexpr bool unsupported_v =
+         is_bitlist<T>::value || ::psio::detail::is_multi_assoc_v<T>;
 
       using sink_t = std::vector<char>;
 
@@ -330,6 +336,10 @@ namespace psio {
       template <typename T, typename S>
       void encode_value(const T& v, S& s);
 
+      // Maps and sets (detail/key_assoc.hpp).
+      template <typename C, typename S>
+      void encode_assoc(const C& v, S& s);
+
       // 01 + element per element, then 00; octets share the string framing.
       template <typename V, typename S>
       void encode_list(const V& v, S& s)
@@ -367,9 +377,8 @@ namespace psio {
       template <typename T, typename S>
       void encode_value(const T& v, S& s)
       {
-         static_assert(!is_std_pair<T>::value,
-                       "psio::key: std::pair is not a PSIO value; use std::tuple");
          static_assert(!is_bitlist<T>::value, "psio::key: bitlist has no key encoding");
+         PSIO_REJECT_MULTI_ASSOC("psio::key", T);
          // Adapter dispatch: a type with a sortable_binary_category
          // adapter delegates encoding entirely to the adapter. The
          // adapter is responsible for emitting memcmp-sortable,
@@ -403,6 +412,8 @@ namespace psio {
          else if constexpr (::psio::detail::is_nested_v<T>)
             // The key of the byte list holding the inner encoding.
             append_escaped(s, v.bytes().data(), v.size());
+         else if constexpr (::psio::detail::is_assoc_v<T>)
+            encode_assoc(v, s);
          else if constexpr (std::is_same_v<T, std::string>)
             append_escaped(s, v.data(), v.size());
          else if constexpr (is_utf8_string<T>::value)
@@ -721,6 +732,10 @@ namespace psio {
       template <typename T>
       bool read_value(reader& r, T* out);
 
+      // Maps and sets (detail/key_assoc.hpp).
+      template <typename C>
+      bool read_assoc(reader& r, C* out);
+
       // `limit` is the element bound of a psio::bounded (SIZE_MAX: none).
       template <typename E, typename A>
       bool read_list(reader& r, std::vector<E, A>* out, std::size_t limit)
@@ -765,9 +780,8 @@ namespace psio {
       template <typename T>
       bool read_value(reader& r, T* out)
       {
-         static_assert(!is_std_pair<T>::value,
-                       "psio::key: std::pair is not a PSIO value; use std::tuple");
          static_assert(!is_bitlist<T>::value, "psio::key: bitlist has no key encoding");
+         PSIO_REJECT_MULTI_ASSOC("psio::key", T);
          if constexpr (unsupported_v<T>)
             return false;
          else if constexpr (::psio::format_should_dispatch_adapter_v<
@@ -806,6 +820,8 @@ namespace psio {
                *out = std::move(value);
             return true;
          }
+         else if constexpr (::psio::detail::is_assoc_v<T>)
+            return read_assoc(r, out);
          else if constexpr (std::is_same_v<T, std::string>)
          {
             return read_escaped(r, [&](const char* data, std::size_t n) {
@@ -990,6 +1006,13 @@ namespace psio {
          static constexpr std::size_t count = sizeof...(Ts);
          template <std::size_t I>
          using type = std::remove_cvref_t<std::tuple_element_t<I, std::tuple<Ts...>>>;
+      };
+      template <typename A, typename B>
+      struct key_elements<std::pair<A, B>>
+      {
+         static constexpr std::size_t count = 2;
+         template <std::size_t I>
+         using type = std::remove_cvref_t<std::tuple_element_t<I, std::pair<A, B>>>;
       };
       template <Record K>
       struct key_elements<K>
@@ -1197,3 +1220,5 @@ namespace psio {
    }
 
 }  // namespace psio
+
+#include <psio/detail/key_assoc.hpp>

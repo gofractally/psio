@@ -380,6 +380,8 @@ cap large enough to cover them from the start.
 | `Optional(T)` where min(T)=0 | 1 + max(T)                                   |
 | `Optional(T)` where min(T)>0 | max(T)                                       |
 | `Variant(Ts...)`            | 1 + max(max_encoded_size(T_i))                |
+| `Pair(A, B)`                | that of `Tuple(A, B)`                         |
+| `Map(K, V)`, `Set(K)`       | that of `Vector(Tuple(K, V))`, `Vector(K)` (§5.9) |
 | reflected record (DWNC)          | sum(fixed_size_of(field_i))                   |
 | reflected record (extensible)    | W + sum(per-field max contribution)           |
 
@@ -888,6 +890,140 @@ psio::view<Action, psio::pssz>{frame}.get<2>().get();     // view<TransferArgs> 
 A default-constructed `nested<T>` is the encoding of `T{}`; `==` compares
 bytes. The other C++ formats (bin, ssz, frac, ...) have no nested value: it
 is an unsupported type there.
+### 5.9 Pairs, maps and sets — `Pair(A, B)`, `Map(K, V)`, `Set(K)`
+
+These add no wire shape. A pair is a tuple, and a map or a set is a list
+with one constraint on its content.
+
+**Pair.** `Pair(A, B)` is `Tuple(A, B)`: the extensible positional record of
+two members (§5.1.1), with the tuple's header, slots, trailing-optional
+pruning, width and evolution rules. C++ `std::pair<A, B>`; the entries of a
+map are pairs.
+
+**Map and set.** `Map(K, V)` is `Vector(Tuple(K, V))` and `Set(K)` is
+`Vector(K)`, with the entries in **strictly ascending key order**:
+
+```
+encode(Map(K, V)) = encode(Vector(Tuple(K, V)))   of the entries, sorted by key
+encode(Set(K))    = encode(Vector(K))             of the elements, sorted
+```
+
+Everything that is derived from the encoding is the list's: the offset width
+(§3; a list's table is 4 wide under the automatic profile), `max_encoded_size`
+(None unless a member bound makes it finite, as for a vector),
+`min_encoded_size` = 0 (so `Optional(Map)` and `Optional(Set)` take the
+selector form, §5.5.2), the element rules of §5.3 (fixed elements are packed
+with no table, a zero-size element type cannot be counted), node depth (an
+entry is one node below the map, its key and value one below the entry), and
+views (a view of a map is the view of the list of its entries). A member
+`length_bound` counts entries.
+
+#### 5.9.1 The order
+
+One rule, the same in every language and for every key type:
+
+> Entries are ordered by the bytewise (unsigned, lexicographic) order of the
+> **`key` encoding of K** (`docs/key-spec.md`). Two entries whose keys have
+> equal key bytes are duplicates; a map or set holds at most one of them.
+
+Why this order and not the language's own:
+
+- It is the one total order PSIO already defines for every key type in every
+  language. JavaScript has no `<` for composite values, a C++ record's `<` is
+  user code, Rust `Ord` derives differ from both.
+- It needs nothing but the schema: a tool that knows the type only through
+  its Schema IR can check and produce it.
+- For the usual key types it is the order a sorted container already has, so
+  such a container iterates in wire order:
+
+| K | order |
+|---|---|
+| unsigned / signed integers, enums, time values | numeric (not the order of the little-endian wire bytes: `2` sorts before `513`) |
+| `bool` | `false`, `true` |
+| strings, byte lists | bytewise; a prefix sorts first |
+| tuples, pairs, records | lexicographic by element / by member in declaration order |
+| optional | none first |
+| lists, arrays, variants | lexicographic by element; by alternative index, then value |
+| floats | key-spec §4: `-0` and `+0` are one key (they cannot both be in a set); NaNs are ordered by their bits, sign-bit-set NaNs below `-inf`, the others above `+inf` |
+
+K must have a key encoding (`bitlist` has none), and the order must be
+visible in the schema: a C++ type that supplies its own key bytes through a
+`sortable_binary_category` adapter cannot be K. Both are compile errors in
+C++ ("the key type of a map ... must have a key encoding") and malformed
+schemas for the schema-driven codecs.
+
+#### 5.9.2 Writers and readers
+
+- **Encoders** write the canonical order whatever order the container
+  iterates in (a hash container, a custom comparator), and refuse a value
+  holding two entries with equal key bytes: `encode_pssz_checked` returns
+  `pssz: map has duplicate keys` / `pssz: set has duplicate elements`, the
+  plain `encode` fails fast as for any value without an encoding.
+- **Every reader that checks its input** — `validate`, `validate_or_throw`,
+  `validate_strict`, `validate_pssz_compatible`, `decode_pssz_checked`,
+  validated views, and the schema-driven codecs — validates the list and
+  then requires the order: `pssz: map entries are not in strictly ascending
+  key order` / `pssz: set elements are not in strictly ascending order`. A
+  repeated key is the same failure. The order holds at every level: a map
+  inside a record, an optional, a list, a variant, a map.
+- **The trusted `decode`** (validated input) inserts the entries into the
+  container. If the container ends with fewer entries than the list had —
+  its comparator or equality merges keys the encoding distinguishes — that
+  is a decode failure, never silent loss.
+
+Language types:
+
+| | maps | sets | not values |
+|---|---|---|---|
+| C++ | `std::map`, `std::unordered_map` (any comparator / hash / allocator) | `std::set`, `std::unordered_set` | `std::multimap`, `std::multiset` and their unordered forms: duplicates have no canonical form (compile error) |
+| Rust | `BTreeMap`, `HashMap` | `BTreeSet`, `HashSet` | |
+| JS | `map(K, V)`: decodes to a `Map` in canonical order, encodes any iterable of entries | `set(K)`: a `Set` / any iterable | |
+
+The container is not part of the type: `std::map<K, V>` and
+`std::unordered_map<K, V>` are one value kind with one encoding. No
+implementation may rely on the container's own order (`Ord`, `operator<`, JS
+identity) unless it is known to coincide with key order; C++ walks a
+`std::map` / `std::set` with the default comparator in place when K is made
+of integers, enums, `std::string`, time values and arrays / vectors /
+optionals / tuples / pairs / variants of those, and sorts by key bytes
+otherwise. That is an optimisation: the bytes are the same.
+
+#### 5.9.3 Encode example
+
+`Map(String, u32)` holding `{"b": 2, "a": 1}`. The list and the entry tuples
+are unbounded: W = 4 throughout.
+
+```
+Offset  Bytes              Meaning
+--------------------------------------------
+00      08 00 00 00         list offset[0] = 8   (2 entries × W)
+04      15 00 00 00         list offset[1] = 21
+08      08 00 00 00         entry ("a", 1): tuple fixed_size = 8
+0C      08 00 00 00           key offset = 8 (relative to byte 0C)
+10      01 00 00 00           value = 1
+14      61                    "a"
+15      08 00 00 00         entry ("b", 2): tuple fixed_size = 8
+19      08 00 00 00           key offset = 8
+1D      02 00 00 00           value = 2
+21      62                    "b"
+```
+
+34 bytes, and exactly `encode(Vector(Tuple(String, u32)))` of
+`[("a", 1), ("b", 2)]`. The frame with the two entries exchanged is a valid
+`Vector(Tuple(String, u32))` and not a valid `Map(String, u32)`.
+
+`Set(u16)` holding `{513, 2}` is `02 00 01 02`: `2` then `513`, by key
+(`00 02` < `02 01`), although the wire bytes of 513 (`01 02`) sort below
+those of 2 (`02 00`).
+
+#### 5.9.4 Evolution
+
+`Map(K, V)` → `Map(K, V')` is a compatible change exactly when `V` → `V'`
+is (the entry tuple evolves like any tuple). The key type cannot change: a
+different key type has a different order. Bytes written as a map are always
+readable as the list of entries; the reverse holds only for sorted lists, so
+`pssz_evolves_from` does not relate a map to its list type. A pair and the
+2-tuple of the same elements are one type for this check.
 
 ## 6. Document — top-level
 
@@ -1029,6 +1165,8 @@ not change.
   pjson and protobuf), so this is a no-op for the wire but consumers
   using reflected names will break.
 ✗ Reorder variant alternatives.
+✗ Change the key type of a map or the element type of a set, or turn a
+  list into a map / set of the same entries (§5.9.4).
 ✗ Decrease a field's `length_bound{.max}` to a value smaller than
   any encoded buffer. (Width may shift narrower, breaking old wire
   bytes.)
@@ -1114,6 +1252,9 @@ A pssz decoder can produce the following error categories:
   uninterpreted).
 - **cap_exceeded** — buffer size exceeds the type's
   `max-dynamic-data: N` cap.
+- **entries_not_ascending** — the entries of a map or the elements of a
+  set are not in strictly ascending key order: out of order, or a key
+  twice (§5.9).
 
 Errors must be reported with a byte offset where possible.
 
@@ -1411,6 +1552,10 @@ A pssz encoding is **canonical** when:
 4. The width tag W is the minimum width permitted by the schema's
    `effective_max_dynamic(T)`. (W = 1 if the schema's effective
    bound is ≤ 0xff, etc. — see §3.)
+5. The entries of a map and the elements of a set are in strictly
+   ascending key order (§5.9). Like pruning this is mandatory: every
+   reader rejects any other order, so a map or set value has exactly one
+   encoding.
 
 A canonical encoder always produces a canonical encoding. A
 non-canonical decoder accepts both canonical and non-canonical inputs

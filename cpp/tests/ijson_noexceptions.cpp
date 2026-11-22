@@ -7,6 +7,10 @@
 
 #include <cmath>
 #include <limits>
+#include <map>
+#include <set>
+#include <unordered_map>
+#include <utility>
 
 struct GuestInner
 {
@@ -20,6 +24,11 @@ struct GuestCode
 {
    std::uint8_t value = 0;
    friend bool  operator==(const GuestCode&, const GuestCode&) = default;
+};
+PSIO_REFLECT(GuestCode, value)
+struct GuestCodeLess
+{
+   bool operator()(const GuestCode& a, const GuestCode& b) const { return a.value < b.value; }
 };
 struct GuestCodeText
 {
@@ -147,5 +156,48 @@ int main()
    const std::string code = "\"too long\"";
    GuestCode c;
    if (psio::decode_json_checked(psio::ijson{}, std::span<const char>{code}, c).ok()) return 6;
+
+   // Maps and sets: an object for a text key, pairs otherwise, any order
+   // in, canonical order out; a repeated key / element is a status (unlike
+   // a repeated member name above).
+   using Counts = std::map<std::string, std::uint64_t>;
+   using ById   = std::unordered_map<std::uint32_t, GuestInner>;
+   Counts            counts;
+   const std::string counts_text = R"({"b":"18446744073709551615","a":1})";
+   if (!psio::decode_json_checked(psio::ijson{}, std::span<const char>{counts_text}, counts).ok() ||
+       counts != Counts{{"a", 1}, {"b", 18446744073709551615ull}})
+      return 7;
+   out.clear();
+   if (!psio::encode_json_checked(psio::ijson{}, counts, out).ok() ||
+       out != R"({"a":1,"b":"18446744073709551615"})")
+      return 8;
+   ById              by_id;
+   const std::string by_id_text = R"([[2,{"id":2,"label":"two"}],[1,{"id":1,"label":"one"}]])";
+   if (!psio::decode_json_checked(psio::ijson{}, std::span<const char>{by_id_text}, by_id).ok() ||
+       by_id.size() != 2 || by_id[1].label != "one")
+      return 9;
+   out.clear();
+   if (!psio::encode_json_checked(psio::json{}, by_id, out).ok() ||
+       out != R"([[1,{"id":1,"label":"one"}],[2,{"id":2,"label":"two"}]])")
+      return 10;
+   const std::string dup_key = R"({"a":1,"a":1})";
+   if (psio::validate<Counts>(psio::ijson{}, std::span<const char>{dup_key}).ok()) return 11;
+   if (psio::decode_json_checked(psio::json{}, std::span<const char>{dup_key}, counts).ok())
+      return 12;
+   const std::string dup_element = R"(["x","y","x"])";
+   std::set<std::string> tags;
+   if (psio::decode_json_checked(psio::ijson{}, std::span<const char>{dup_element}, tags).ok())
+      return 13;
+   const std::string dup_pair = R"([[1,{"id":1,"label":"a"}],[1,{"id":1,"label":"a"}]])";
+   if (psio::validate<ById>(psio::json{}, std::span<const char>{dup_pair}).ok()) return 14;
+   std::map<GuestCode, int, GuestCodeLess> coded;
+   const std::string coded_text = R"({"c":1,"too long":2})";
+   if (psio::decode_json_checked(psio::ijson{}, std::span<const char>{coded_text}, coded).ok())
+      return 15;
+   const std::string pair_text = R"([7,"seven"])";
+   std::pair<std::uint8_t, std::string> pair;
+   if (!psio::decode_json_checked(psio::ijson{}, std::span<const char>{pair_text}, pair).ok() ||
+       pair.first != 7 || pair.second != "seven")
+      return 16;
    return 0;
 }

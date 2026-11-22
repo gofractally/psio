@@ -11,6 +11,11 @@
 //   bytes         byte list          (C++ vector<uint8_t>, Rust Vec<u8>)
 //   bytes4        four bytes         (C++ array<uint8_t,4>, Rust [u8; 4])
 //   list<T> array<T,N> optional<T> tuple<...>
+//   pair<A,B>     the 2-tuple            (C++ std::pair)
+//   map<K,V>      entries in ascending key order: an object when K's text is
+//                 a string by type (string, raw_string, Account, Version),
+//                 else an array of [k, v]   (C++ std::map / std::unordered_map)
+//   set<K>        elements in ascending key order: an array   (C++ std::set)
 //   string<=N     UTF-8, at most N bytes   (C++ utf8_string<N>, Rust BoundedString<N>)
 //   list<T><=N    at most N elements       (C++ psio::bounded<T,N>, Rust BoundedList<T,N>)
 //   bytes<=N      at most N bytes          (C++ psio::bounded<uint8_t,N>, Rust BoundedList<u8,N>)
@@ -34,7 +39,11 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -402,6 +411,53 @@ namespace json_conf
    using Tuple3  = std::tuple<std::uint32_t, Text, std::uint64_t>;
    using TupleN  = std::tuple<std::tuple<std::uint8_t, std::int64_t>, std::tuple<>,
                               std::vector<Bytes>>;
+
+   // ── std::pair, maps and sets ──────────────────────────────────────────
+   // Comparators for key types without an operator<: any strict order does,
+   // the codecs order entries by key bytes.
+   struct TextLess
+   {
+      template <typename S>
+      bool operator()(const S& a, const S& b) const { return a.storage() < b.storage(); }
+   };
+   struct VersionLess
+   {
+      bool operator()(const Version& a, const Version& b) const
+      {
+         return a.major != b.major ? a.major < b.major : a.minor < b.minor;
+      }
+   };
+   using PairU32Str   = std::pair<std::uint32_t, Text>;
+   using MapStrU32    = std::map<Text, std::uint32_t, TextLess>;
+   using MapRawU32    = std::unordered_map<std::string, std::uint32_t>;
+   using MapU64Str    = std::map<std::uint64_t, Text>;
+   using MapAccount   = std::map<Account, std::uint64_t>;
+   using MapVersion   = std::map<Version, Text, VersionLess>;
+   using MapColor     = std::map<Color, std::uint8_t>;
+   using MapStrInner  = std::map<Text, Inner, TextLess>;
+   using SetStr       = std::set<Text, TextLess>;
+   using SetU32       = std::unordered_set<std::uint32_t>;
+   using SetTuple     = std::set<std::tuple<std::uint8_t, std::string>>;
+   using MapNested    = std::map<Text, std::map<std::uint32_t, SetStr>, TextLess>;
+   // ijson names: map_string_uint32, set_uint32, tuple_uint32_string.
+   using MapChoice    = std::variant<std::map<std::string, std::uint32_t>, std::set<std::uint32_t>,
+                                     std::pair<std::uint32_t, std::string>>;
+
+   // Maps, sets and pairs as record members: optional, bounded, with an
+   // integer form override (it reaches a set's elements as it does a
+   // list's; a map entry is a tuple, whose members take the natural form).
+   struct Registry
+   {
+      MapStrU32                              counts;
+      std::set<std::uint64_t>                ids;       // json: string, ijson: number
+      MapAccount                             balances;  // json: string (not applied: tuple rule)
+      PairU32Str                             head;
+      std::optional<MapU64Str>               names;
+      std::map<std::uint8_t, std::uint8_t>   limited;   // max 2 entries
+      std::vector<SetU32>                    groups;
+      friend bool operator==(const Registry&, const Registry&) = default;
+   };
+   PSIO_REFLECT(Registry, counts, ids, balances, head, names, limited, groups)
 }  // namespace json_conf
 
 PSIO_FIELD_ATTRS(json_conf::Overrides, a, psio::json_string)
@@ -418,6 +474,9 @@ PSIO_FIELD_ATTRS(json_conf::Bounds, blob, psio::length_bound{.max = 2})
 PSIO_FIELD_ATTRS(json_conf::Bounds, note, psio::length_bound{.max = 3})
 PSIO_TYPE_ATTRS(json_conf::Fixed, psio::definition_will_not_change{})
 PSIO_TYPE_ATTRS(json_conf::Capped, psio::max_dynamic_data_spec{300})
+PSIO_FIELD_ATTRS(json_conf::Registry, ids, psio::json_string | psio::ijson_number)
+PSIO_FIELD_ATTRS(json_conf::Registry, balances, psio::json_string)
+PSIO_FIELD_ATTRS(json_conf::Registry, limited, psio::length_bound{.max = 2})
 
 namespace json_conf
 {
@@ -489,6 +548,20 @@ namespace json_conf
    JSON_CONF_TYPE(std::optional<NestedU64>, "optional<nested<u64>>")
    JSON_CONF_TYPE(std::vector<NestedRecord>, "list<nested<NestedArgs>>")
    JSON_CONF_TYPE(NestedChoice, "NestedChoice")
+   JSON_CONF_TYPE(PairU32Str, "pair<u32,string>")
+   JSON_CONF_TYPE(MapStrU32, "map<string,u32>")
+   JSON_CONF_TYPE(MapRawU32, "map<raw_string,u32>")
+   JSON_CONF_TYPE(MapU64Str, "map<u64,string>")
+   JSON_CONF_TYPE(MapAccount, "map<Account,u64>")
+   JSON_CONF_TYPE(MapVersion, "map<Version,string>")
+   JSON_CONF_TYPE(MapColor, "map<Color,u8>")
+   JSON_CONF_TYPE(MapStrInner, "map<string,Inner>")
+   JSON_CONF_TYPE(SetStr, "set<string>")
+   JSON_CONF_TYPE(SetU32, "set<u32>")
+   JSON_CONF_TYPE(SetTuple, "set<tuple<u8,raw_string>>")
+   JSON_CONF_TYPE(MapNested, "map<string,map<u32,set<string>>>")
+   JSON_CONF_TYPE(MapChoice, "MapChoice")
+   JSON_CONF_TYPE(Registry, "Registry")
 #undef JSON_CONF_TYPE
 
    // Every fixture type is expressible in the Schema IR: a type with a
@@ -505,7 +578,10 @@ namespace json_conf
    // text a schema-driven codec writes WITHOUT a handler (the wire type's).
    template <typename T>
    inline constexpr bool has_custom = std::is_same_v<T, Version> || std::is_same_v<T, Release> ||
-                                      std::is_same_v<T, Account> || std::is_same_v<T, Transfer>;
+                                      std::is_same_v<T, Account> || std::is_same_v<T, Transfer> ||
+                                      std::is_same_v<T, MapAccount> ||
+                                      std::is_same_v<T, MapVersion> ||
+                                      std::is_same_v<T, Registry>;
 
    template <typename T>
    std::string type_id() { return std::string(type_name<T>::id); }
@@ -547,7 +623,15 @@ namespace json_conf
            std::type_identity<NestedU64>{}, std::type_identity<NestedRecord>{},
            std::type_identity<NestedLater>{}, std::type_identity<std::optional<NestedU64>>{},
            std::type_identity<std::vector<NestedRecord>>{},
-           std::type_identity<NestedChoice>{});
+           std::type_identity<NestedChoice>{},
+           // Appended: pairs, maps and sets.
+           std::type_identity<PairU32Str>{}, std::type_identity<MapStrU32>{},
+           std::type_identity<MapRawU32>{}, std::type_identity<MapU64Str>{},
+           std::type_identity<MapAccount>{}, std::type_identity<MapVersion>{},
+           std::type_identity<MapColor>{}, std::type_identity<MapStrInner>{},
+           std::type_identity<SetStr>{}, std::type_identity<SetU32>{},
+           std::type_identity<SetTuple>{}, std::type_identity<MapNested>{},
+           std::type_identity<MapChoice>{}, std::type_identity<Registry>{});
    }
 
    // One Schema holding every type under its fixture id. (Also recorded, as

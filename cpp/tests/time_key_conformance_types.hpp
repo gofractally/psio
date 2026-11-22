@@ -15,7 +15,10 @@
 #include <psio/time.hpp>
 
 #include <chrono>
+#include <cstring>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <tuple>
 #include <variant>
@@ -113,6 +116,30 @@ namespace tk_conf
    // holding the PSSZ encoding of the inner value.
    using KPacked  = Tup<std::uint32_t, psio::nested<Account>>;
 
+   // std::pair, maps and sets (docs/pssz-spec.md "Pairs, maps and sets"). A
+   // pair is the 2-tuple; a map / set is the list of its entries / elements
+   // in ascending key order, so its key is the key of that list.
+   using KPair    = std::pair<std::uint32_t, std::string>;
+   using MStrU32  = std::map<std::string, std::uint32_t>;
+   using MTuple   = std::map<Tup<std::uint8_t, std::string>, std::vector<std::int16_t>>;
+   using MNested  = std::map<std::string, std::map<std::uint8_t, std::set<std::string>>>;
+   using SU8      = std::set<std::uint8_t>;
+   using SStr     = std::set<std::string>;
+   using SI64     = std::set<std::int64_t>;
+   // Floats order by their key bytes (docs/key-spec.md §4): -0 and +0 are
+   // one element, NaNs are ordered by their bits.
+   struct F64KeyOrder
+   {
+      bool operator()(double a, double b) const
+      {
+         const auto x = psio::to_key(a);
+         const auto y = psio::to_key(b);
+         return std::memcmp(x.data(), y.data(), x.size()) < 0;
+      }
+   };
+   using SF64     = std::set<double, F64KeyOrder>;
+   using KMap     = Tup<std::map<std::uint16_t, std::string>, std::uint8_t>;
+
    // ── Fixture ids ────────────────────────────────────────────────────────
    template <typename T>
    struct type_name;
@@ -156,6 +183,15 @@ namespace tk_conf
    TK_TYPE(KVariant, "tuple<variant<u8,string>,u8>")
    TK_TYPE(KNested, "tuple<tuple<string,u8>,string>")
    TK_TYPE(KPacked, "tuple<u32,nested<Account>>")
+   TK_TYPE(KPair, "pair<u32,string>")
+   TK_TYPE(MStrU32, "map<string,u32>")
+   TK_TYPE(MTuple, "map<tuple<u8,string>,list<i16>>")
+   TK_TYPE(MNested, "map<string,map<u8,set<string>>>")
+   TK_TYPE(SU8, "set<u8>")
+   TK_TYPE(SStr, "set<string>")
+   TK_TYPE(SI64, "set<i64>")
+   TK_TYPE(SF64, "set<f64>")
+   TK_TYPE(KMap, "tuple<map<u16,string>,u8>")
 #undef TK_TYPE
 
    template <typename T>
@@ -176,7 +212,8 @@ namespace tk_conf
                       KEmpty, KShard, KAccount, KStrU8, KStrStr, KBytes, KList, KOptStr, KStrList,
                       KInts, KFloats, KTime, KArray, KVariant, KNested,
                       // Appended (the ids above keep their schema positions).
-                      mono_seconds, mono_micros, mono_ms32, Timer, KMono, KPacked>>{});
+                      mono_seconds, mono_micros, mono_ms32, Timer, KMono, KPacked,
+                      KPair, MStrU32, MTuple, MNested, SU8, SStr, SI64, SF64, KMap>>{});
    }
 
    // The Schema IR of every fixture type, each under its fixture id. (Also

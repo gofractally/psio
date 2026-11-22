@@ -53,7 +53,13 @@ struct Query
    int other = 0;
    PSIO_REFLECT(Query, ok, attr(other, psio::graphql::name_as{"ok"}))
 #elif defined(GQL_FAIL_UNMAPPED)
-   std::map<std::string, int> table;
+   // (A std::map is a List of its entries; a type that is not reflected has
+   // no mapping.)
+   struct Unreflected
+   {
+      int x = 0;
+   };
+   Unreflected table;
    PSIO_REFLECT(Query, ok, table)
 #elif defined(GQL_FAIL_UNION)
    std::variant<int, std::string> either;

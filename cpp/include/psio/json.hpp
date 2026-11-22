@@ -102,6 +102,7 @@
 #include <psio/adapter.hpp>
 #include <psio/cpo.hpp>
 #include <psio/detail/nested_fwd.hpp>
+#include <psio/detail/assoc.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
@@ -189,6 +190,11 @@ namespace psio {
       };
       template <typename... Ts>
       struct is_std_tuple<std::tuple<Ts...>> : std::true_type
+      {
+      };
+      // A std::pair is the 2-tuple of its members: [a, b].
+      template <typename A, typename B>
+      struct is_std_tuple<std::pair<A, B>> : std::true_type
       {
       };
 
@@ -673,6 +679,10 @@ namespace psio {
       template <typename Fmt, int_mode IM, typename T>
       void encode_value(const T& v, writer& w);
 
+      // Maps and sets (detail/json_assoc.hpp).
+      template <typename Fmt, int_mode IM, typename T>
+      void encode_assoc(const T& v, writer& w);
+
       template <typename Fmt, int_mode IM, typename I>
       void encode_integer(I v, writer& w)
       {
@@ -888,6 +898,8 @@ namespace psio {
             }
             w.put(']');
          }
+         else if constexpr (::psio::detail::is_assoc_v<T>)
+            encode_assoc<Fmt, IM>(v, w);
          else if constexpr (is_std_optional<T>::value)
          {
             if (v.has_value())
@@ -952,6 +964,7 @@ namespace psio {
          }
          else
          {
+            PSIO_REJECT_MULTI_ASSOC("psio::json", T);
             static_assert(sizeof(T) == 0,
                           "psio::json: unsupported type in encode_value");
          }
@@ -1373,6 +1386,10 @@ namespace psio {
       template <typename Fmt, int_mode IM, typename T, typename C>
       bool read_value(typed_reader<C>& r, T* out);
 
+      // Maps and sets (detail/json_assoc.hpp).
+      template <typename Fmt, int_mode IM, typename T, typename C>
+      bool read_assoc(typed_reader<C>& r, T* out);
+
       // "[" e0 "," e1 ... "]" with exactly N elements read by `element(i)`.
       template <typename C, typename Element>
       bool read_fixed_array(typed_reader<C>& r, std::size_t n, Element&& element)
@@ -1697,6 +1714,8 @@ namespace psio {
                   return false;
             }
          }
+         else if constexpr (::psio::detail::is_assoc_v<T>)
+            return read_assoc<Fmt, IM, T>(r, out);
          else if constexpr (is_std_optional<T>::value)
          {
             using V = typename T::value_type;
@@ -1815,6 +1834,7 @@ namespace psio {
             return read_record<Fmt, T>(r, out);
          else
          {
+            PSIO_REJECT_MULTI_ASSOC("psio::json", T);
             static_assert(sizeof(T) == 0,
                           "psio::json: unsupported type in read_value");
          }
@@ -2053,3 +2073,5 @@ namespace psio {
    }
 
 }  // namespace psio
+
+#include <psio/detail/json_assoc.hpp>

@@ -347,6 +347,34 @@ namespace
       {
          std::apply([&](auto&... e) { ((*this)(e), ...); }, v);
       }
+      template <typename A, typename B>
+      void operator()(std::pair<A, B>& v)
+      {
+         (*this)(v.first);
+         (*this)(v.second);
+      }
+      template <typename K, typename V, typename C>
+      void operator()(std::map<K, V, C>& v)
+      {
+         v.clear();
+         for (std::size_t n = u(4); n > 0; --n)
+         {
+            K key{};
+            (*this)(key);
+            (*this)(v[std::move(key)]);
+         }
+      }
+      template <typename K, typename C>
+      void operator()(std::set<K, C>& v)
+      {
+         v.clear();
+         for (std::size_t n = u(4); n > 0; --n)
+         {
+            K key{};
+            (*this)(key);
+            v.insert(std::move(key));
+         }
+      }
       void operator()(Account& v)
       {
          (*this)(v.shard);
@@ -655,6 +683,151 @@ namespace
       }
    }
 
+   // ── Pairs, maps and sets ───────────────────────────────────────────────
+   //
+   // The key of a map / set is the key of the list of its entries /
+   // elements in ascending key order: every value row is checked against
+   // the list type, and a list that is not strictly ascending is rejected.
+   template <typename T, typename List>
+   void assoc_type(std::vector<T> picked, const std::vector<List>& not_ascending,
+                   std::size_t random = 32)
+   {
+      for (const T& v : picked)
+      {
+         const List list(v.begin(), v.end());
+         if (psio::encode(psio::key{}, v) != psio::encode(psio::key{}, list) ||
+             psio::encode(psio::pssz{}, v) != psio::encode(psio::pssz{}, list))
+            die(type_id<T>() + ": a map / set is not the list of its entries");
+      }
+      for (std::size_t i = 0; i < not_ascending.size(); ++i)
+      {
+         const auto key   = psio::encode(psio::key{}, not_ascending[i]);
+         const auto bytes = psio::encode(psio::pssz{}, not_ascending[i]);
+         if (psio::validate<T>(psio::pssz{}, std::span<const char>{bytes}).ok())
+            die(type_id<T>() + ": pssz accepts entries that are not ascending");
+         key_reject<T>("not_ascending_" + std::to_string(i), to_hex(key));
+      }
+      key_type<T>(std::move(picked), random);
+   }
+
+   void emit_assoc()
+   {
+      using namespace std::string_literals;
+      const std::string nul("\0", 1);
+
+      // A pair is the tuple: the same bytes, key, text and prefixes.
+      for (const KPair& p : {KPair{7, "bob"}, KPair{0, ""}})
+         if (psio::encode(psio::key{}, p) != psio::encode(psio::key{}, KShard{p.first, p.second}) ||
+             psio::encode(psio::pssz{}, p) != psio::encode(psio::pssz{}, KShard{p.first, p.second}) ||
+             psio::encode(psio::ijson{}, p) != psio::encode(psio::ijson{}, KShard{p.first, p.second}))
+            die("a pair is not the 2-tuple");
+      key_type<KPair>({{0, ""}, {7, "bob"}, {7, "bo"}, {7, "bob" + nul}, {0xffffffffu, "\xc3\xbf"}});
+      accept<KPair>("array_of_two", R"( [ 7 , "bob" ] )", KPair{7, "bob"});
+      reject<KPair>("one_element", "[7]");
+      reject<KPair>("three_elements", R"([7,"bob",1])");
+      reject<KPair>("object", R"({"first":7,"second":"bob"})");
+
+      // map<string, u32>: an object in text.
+      using LStrU32 = std::vector<Tup<std::string, std::uint32_t>>;
+      assoc_type<MStrU32, LStrU32>(
+         {{}, {{"", 0}}, {{"a", 1}}, {{"b", 2}, {"a", 1}}, {{"a", 2}, {"a" + nul, 1}, {"ab", 0}},
+          {{nul, 1}, {"\x01", 2}, {"", 3}}, {{"\xc3\xbf", 0xffffffffu}, {"z", 0}}},
+         {{{"b", 2}, {"a", 1}}, {{"a", 1}, {"a", 1}}, {{"a", 1}, {"a", 2}},
+          {{"a", 1}, {"b", 2}, {"ab", 3}}, {{"a" + nul, 1}, {"a", 2}}});
+      accept<MStrU32>("any_order", R"({"b":2,"a":1})", MStrU32{{"a", 1}, {"b", 2}});
+      accept<MStrU32>("empty", " { } ", MStrU32{});
+      accept<MStrU32>("escaped_keys", R"({"\u0061b":1,"a":2,"":3})",
+                      MStrU32{{"", 3}, {"a", 2}, {"ab", 1}});
+      reject<MStrU32>("duplicate_key", R"({"a":1,"a":1})");
+      reject<MStrU32>("duplicate_key_other_value", R"({"a":1,"b":2,"a":3})");
+      reject<MStrU32>("duplicate_key_escaped", R"({"a":1,"\u0061":2})");
+      reject<MStrU32>("pairs_form", R"([["a",1]])");
+      reject<MStrU32>("value_out_of_range", R"({"a":4294967296})");
+      reject<MStrU32>("null", "null");
+
+      // map<tuple<u8, string>, list<i16>>: an array of [k, v] pairs.
+      using LTuple = std::vector<Tup<Tup<std::uint8_t, std::string>, std::vector<std::int16_t>>>;
+      assoc_type<MTuple, LTuple>(
+         {{}, {{{0, ""}, {}}}, {{{2, "b"}, {1}}, {{1, "z"}, {}}, {{1, "a"}, {-1, 2}}},
+          {{{255, nul}, {0}}, {{255, ""}, {32767, -32768}}}},
+         {{{{2, "b"}, {}}, {{1, "z"}, {}}}, {{{1, "z"}, {}}, {{1, "a"}, {}}},
+          {{{1, "a"}, {1}}, {{1, "a"}, {2}}}});
+      accept<MTuple>("any_order", R"([[[2,"b"],[1]],[[1,"z"],[]],[[1,"a"],[-1,2]]])",
+                     MTuple{{{1, "a"}, {-1, 2}}, {{1, "z"}, {}}, {{2, "b"}, {1}}});
+      reject<MTuple>("duplicate_key", R"([[[1,"a"],[]],[[1,"a"],[1]]])");
+      reject<MTuple>("object_form", "{}");
+      reject<MTuple>("entry_of_three", R"([[[1,"a"],[],0]])");
+      reject<MTuple>("entry_of_one", R"([[[1,"a"]]])");
+
+      // Nested maps and sets, each in its own order.
+      using Inner = std::map<std::uint8_t, std::set<std::string>>;
+      key_type<MNested>({{}, {{"k", {}}}, {{"k", {{1, {"z", "y"}}, {0, {}}}}, {"", {{255, {""}}}}},
+                         {{"a", {{2, {"b", "a" + nul, "a"}}}}}},
+                        24);
+      accept<MNested>("any_order", R"({"k":[[1,["z","y"]],[0,[]]],"":[[255,[""]]]})",
+                      MNested{{"", Inner{{255, {""}}}}, {"k", Inner{{0, {}}, {1, {"y", "z"}}}}});
+      reject<MNested>("duplicate_inner_key", R"({"k":[[1,[]],[1,[]]]})");
+      reject<MNested>("duplicate_inner_element", R"({"k":[[1,["a","a"]]]})");
+
+      // set<u8>: the octet-list framing in key, an array (never a hex
+      // string) in text.
+      using LU8 = std::vector<std::uint8_t>;
+      assoc_type<SU8, LU8>({{}, {0}, {255}, {0, 1}, {3, 0, 1}, {0, 255}, {1, 2, 3, 254, 255}},
+                           {{1, 0}, {0, 0}, {1, 1}, {0, 2, 1}, {255, 0}});
+      accept<SU8>("any_order", "[3,0,1]", SU8{0, 1, 3});
+      reject<SU8>("duplicate_element", "[1,2,1]");
+      reject<SU8>("hex_string", R"("0102")");
+      reject<SU8>("out_of_range", "[256]");
+
+      using LStr = std::vector<std::string>;
+      assoc_type<SStr, LStr>({{}, {""}, {"a"}, {"b", "a"}, {"a", "a" + nul, "ab"}, {nul, "\x01", ""}},
+                             {{"b", "a"}, {"a", "a"}, {"a", "ab", "a" + nul}, {"", ""}});
+      accept<SStr>("any_order", R"(["b","","a"])", SStr{"", "a", "b"});
+      reject<SStr>("duplicate_element", R"(["a","b","a"])");
+      reject<SStr>("duplicate_element_escaped", R"(["a","\u0061"])");
+      reject<SStr>("object", "{}");
+
+      // set<i64>: numeric order, not the order of the little-endian bytes.
+      using LI64 = std::vector<std::int64_t>;
+      const auto lo = std::numeric_limits<std::int64_t>::min();
+      const auto hi = std::numeric_limits<std::int64_t>::max();
+      assoc_type<SI64, LI64>({{}, {0}, {-1, 1, 0}, {256, 255, 1}, {lo, hi, -1, 0}},
+                             {{1, 0}, {0, -1}, {255, 256, 1}, {hi, lo}, {7, 7}});
+      accept<SI64>("any_order", "[256,-1,255]", SI64{-1, 255, 256});
+      reject<SI64>("duplicate_element", "[5,5]");
+
+      // set<f64>: key-spec float order. A set with a NaN has no text.
+      using LF64 = std::vector<double>;
+      const double inf = std::numeric_limits<double>::infinity();
+      const auto   f64 = [](std::uint64_t bits) { return std::bit_cast<double>(bits); };
+      assoc_type<SF64, LF64>({{}, {0.0}, {1.5, -2.0, 0.0}, {-5e-324, 5e-324, 1e300, -1e300}},
+                             {{1.0, 0.0}, {0.0, -1.0}, {1.0, 1.0}, {0.0, -0.0}, {-0.0, 0.0},
+                              {inf, -inf}, {f64(0x7ff8000000000000ull), 1.0},
+                              {1.0, f64(0xfff8000000000000ull)}},
+                             0);
+      order<SF64>("infinities", {{inf}, {-inf}, {-inf, inf}, {-inf, 0.0}, {0.0}, {0.0, inf}, {}});
+      nan_value<SF64>("nan_first_and_last",
+                      {f64(0x7ff8000000000000ull), 1.0, -inf, f64(0xfff8000000000000ull), inf});
+      nan_value<SF64>("nan_payloads", {f64(0x7ff8000000000001ull), f64(0x7ff8000000000000ull),
+                                       f64(0x7ff0000000000001ull), f64(0xffffffffffffffffull)});
+      order_bits<SF64>("nan",
+                       {{f64(0xffffffffffffffffull)}, {f64(0xfff8000000000000ull)},
+                        {f64(0xfff8000000000000ull), -inf}, {-inf}, {-inf, f64(0x7ff8000000000000ull)},
+                        {0.0}, {0.0, f64(0x7ff8000000000000ull)}, {inf},
+                        {inf, f64(0x7ff8000000000000ull)}, {f64(0x7ff8000000000000ull)},
+                        {f64(0x7ff8000000000000ull), f64(0x7ff8000000000001ull)}});
+      accept<SF64>("any_order", "[1.5,-2,0]", SF64{-2.0, 0.0, 1.5});
+      reject<SF64>("duplicate_element", "[1,1.0]");
+      reject<SF64>("both_zeros", "[0.0,-0.0]");
+
+      // A map as an element of a composite key.
+      key_type<KMap>({{{}, 0}, {{{1, "a"}}, 0}, {{{2, "b"}, {1, "a"}}, 255}, {{{0, ""}}, 1},
+                      {{{65535, nul}, {256, "x"}, {255, "y"}}, 7}});
+      accept<KMap>("any_order", R"([[[2,"b"],[1,"a"]],255])",
+                   KMap{{{1, "a"}, {2, "b"}}, 255});
+      reject<KMap>("duplicate_key", R"([[[1,"a"],[1,"b"]],0])");
+   }
+
    void emit_keys()
    {
       using namespace std::string_literals;
@@ -797,6 +970,7 @@ namespace
          key_reject<KPacked>("inner_truncated", framed(short_inner));
          key_reject<KPacked>("invalid_escape", "00000007" "0c0002" "0000");
       }
+      emit_assoc();
 
       // Non-canonical or malformed encodings.
       key_reject<KShard>("escape_02", "00000007" "610002" "0000");

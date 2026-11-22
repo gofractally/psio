@@ -1188,6 +1188,183 @@ namespace
       reject_both<Vec<u32>>("array_bomb", repeat("[", 5000));
    }
 
+   // ── std::pair, maps and sets ───────────────────────────────────────────
+   //
+   // A pair is the 2-tuple. A set is an array; a map an object when its key
+   // type's text is a string by type, else an array of [k, v]. Writers emit
+   // ascending key order; readers take any order and refuse a repeated key
+   // or element. Each value's pssz bytes are those of the sorted list.
+   template <typename T, typename List>
+   void same_bytes_as_list(const T& v, const List& sorted)
+   {
+      if (psio::encode(psio::pssz{}, v) != psio::encode(psio::pssz{}, sorted))
+         die(type_id<T>() + ": pssz bytes are not those of the sorted list");
+   }
+
+   void emit_assoc()
+   {
+      auto account = [](std::string_view name) {
+         Account a{};
+         if (!AccountText::parse(std::span<const char>{name.data(), name.size()}, a))
+            die("bad account literal");
+         return a;
+      };
+      const u64 big = 9007199254740993ull;  // 2^53 + 1
+
+      // pair<u32, string>: the tuple's text.
+      value<PairU32Str>("zero", {0, text("")});
+      value<PairU32Str>("some", {4000000000u, text("p \"q\"")});
+      if (psio::encode(psio::ijson{}, PairU32Str{7, text("x")}) !=
+             psio::encode(psio::ijson{}, std::tuple<u32, Text>{7, text("x")}) ||
+          psio::encode(psio::pssz{}, PairU32Str{7, text("x")}) !=
+             psio::encode(psio::pssz{}, std::tuple<u32, Text>{7, text("x")}))
+         die("a pair is not the 2-tuple");
+      accept_both<PairU32Str>("spaces", " [ 7 , \"x\" ] ", R"([7,"x"])");
+      reject_both<PairU32Str>("one_element", "[7]");
+      reject_both<PairU32Str>("three_elements", R"([7,"x",1])");
+      reject_both<PairU32Str>("object", R"({"first":7,"second":"x"})");
+      reject_both<PairU32Str>("swapped", R"(["x",7])");
+
+      // map<string, u32>: an object.
+      value<MapStrU32>("empty", {});
+      value<MapStrU32>("one", {{text("a"), 1}});
+      value<MapStrU32>("many", {{text("pear"), 3}, {text("apple"), 1}, {text(""), 9},
+                                {text("apple pie"), 2}, {text("Zebra"), 0}});
+      value<MapStrU32>("unicode_and_escapes",
+                       {{text("\xC3\xA9"), 1}, {text("a\"b\\c\n"), 2}, {text("\xF0\x9F\x98\x80"), 3},
+                        {text(std::string("nul\0in", 6)), 4}, {text("z"), 4294967295u}});
+      same_bytes_as_list(MapStrU32{{text("b"), 2}, {text("a"), 1}},
+                         Vec<std::tuple<Text, u32>>{{text("a"), 1}, {text("b"), 2}});
+      accept_both<MapStrU32>("any_order", R"({"b":2,"":0,"a":1})", R"({"":0,"a":1,"b":2})");
+      accept_both<MapStrU32>("escaped_key", " { \"" + u("0062") + "\" : 2 , \"a\" : 1 } ",
+                             R"({"a":1,"b":2})");
+      reject_both<MapStrU32>("duplicate_key", R"({"a":1,"a":1})");
+      reject_both<MapStrU32>("duplicate_key_other_value", R"({"a":1,"b":2,"a":3})");
+      reject_both<MapStrU32>("duplicate_key_escaped", "{\"a\":1,\"" + u("0061") + "\":2}");
+      reject_both<MapStrU32>("pairs_form", R"([["a",1]])");
+      reject_both<MapStrU32>("value_out_of_range", R"({"a":4294967296})");
+      reject_both<MapStrU32>("value_as_string", R"({"a":"1"})");
+      reject_both<MapStrU32>("null", "null");
+      reject_both<MapStrU32>("unterminated", R"({"a":1)");
+      reject<MapStrU32>("ijson", "noncharacter_key", "{\"\xEF\xBF\xBE\":1}");
+
+      // The same over a raw string key, held in a hash container.
+      value<MapRawU32>("many", {{"b", 2}, {"a", 1}, {"", 0}});
+      accept_both<MapRawU32>("any_order", R"({"b":2,"a":1})", R"({"a":1,"b":2})");
+      reject_both<MapRawU32>("duplicate_key", R"({"b":2,"a":1,"b":2})");
+
+      // map<u64, string>: integers are not object keys.
+      value<MapU64Str>("empty", {});
+      value<MapU64Str>("some", {{256, text("two-five-six")}, {1, text("one")}, {255, text("ff")}});
+      value<MapU64Str>("large_keys", {{big, text("big")}, {std::numeric_limits<u64>::max(),
+                                                           text("max")}, {0, text("zero")}});
+      same_bytes_as_list(MapU64Str{{256, text("b")}, {1, text("a")}},
+                         Vec<std::tuple<u64, Text>>{{1, text("a")}, {256, text("b")}});
+      accept_both<MapU64Str>("any_order", R"([[256,"b"],[1,"a"]])", R"([[1,"a"],[256,"b"]])");
+      accept<MapU64Str>("ijson", "key_as_string", R"([["5","a"]])", R"([[5,"a"]])");
+      reject_both<MapU64Str>("duplicate_key", R"([[1,"a"],[1,"b"]])");
+      reject<MapU64Str>("ijson", "duplicate_key_two_forms", R"([["5","a"],[5,"b"]])");
+      reject_both<MapU64Str>("object_form", R"({"1":"a"})");
+      reject_both<MapU64Str>("entry_of_one", R"([[1]])");
+      reject_both<MapU64Str>("entry_of_three", R"([[1,"a",2]])");
+      reject_both<MapU64Str>("entry_not_an_array", R"([1,"a"])");
+
+      // map<Account, u64>: a custom text form is an object key. Without the
+      // handler a schema-driven codec writes the pairs form of the wire
+      // type (plain_json / plain_ijson).
+      value<MapAccount>("one", {{account("alice"), 1}});
+      value<MapAccount>("many", {{account("bob"), big}, {account("alice"), 1}, {account(""), 0},
+                                 {account("zzzzzzzzzzzz"), 7}, {account("a1"), 2}});
+      accept_both<MapAccount>("any_order", R"({"bob":2,"alice":1})", R"({"alice":1,"bob":2})");
+      reject_both<MapAccount>("duplicate_key", R"({"alice":1,"alice":2})");
+      reject_both<MapAccount>("bad_key", R"({"Alice":1})");
+      reject_both<MapAccount>("trailing_dot_key", R"({"alice.":1})");
+      reject_both<MapAccount>("pairs_form", R"([["alice",1]])");
+
+      // map<Version, string>: ordered by the key bytes of the value (major,
+      // then minor), not by the text of the key.
+      value<MapVersion>("many", {{Version{10, 0}, text("ten")}, {Version{9, 5}, text("nine-five")},
+                                 {Version{9, 10}, text("nine-ten")}, {Version{0, 0}, text("")}});
+      accept_both<MapVersion>("any_order", R"({"10.0":"b","9.5":"a"})", R"({"9.5":"a","10.0":"b"})");
+      reject_both<MapVersion>("duplicate_key", R"({"1.2":"a","1.2":"b"})");
+      reject_both<MapVersion>("non_canonical_key", R"({"01.2":"a"})");
+
+      // map<Color, u8>: an enum is not an object key either.
+      value<MapColor>("all", {{Color::blue, 3}, {Color::red, 1}, {Color::green, 2}});
+      value<MapColor>("unnamed_value", {{static_cast<Color>(5), 5}, {Color::red, 0}});
+      accept_both<MapColor>("key_as_number", R"([[7,3],["red",1]])", R"([["red",1],["blue",3]])");
+      reject_both<MapColor>("duplicate_key_two_forms", R"([["red",1],[0,2]])");
+      reject_both<MapColor>("object_form", R"({"red":1})");
+
+      // Records as map values; nested maps and sets.
+      value<MapStrInner>("some", {{text("b"), inner_big}, {text("a"), inner1}});
+      accept_both<MapStrInner>("any_order_and_member_order",
+                               R"({"b":{"flag":true,"label":"seven","id":7},"a":{"id":7,"label":"seven","flag":true}})",
+                               R"({"a":{"id":7,"label":"seven","flag":true},"b":{"id":7,"label":"seven","flag":true}})");
+      reject_both<MapStrInner>("duplicate_key", R"({"a":{"id":7,"label":"seven","flag":true},"a":{"id":7,"label":"seven","flag":true}})");
+      value<MapNested>("empty", {});
+      value<MapNested>("some", {{text("k"), {{7, {text("z"), text("y")}}, {1, {}}}},
+                                {text(""), {{4294967295u, {text("")}}}}, {text("e"), {}}});
+      accept_both<MapNested>("any_order", R"({"k":[[7,["z","y"]],[1,[]]],"e":[]})",
+                             R"({"e":[],"k":[[1,[]],[7,["y","z"]]]})");
+      reject_both<MapNested>("duplicate_inner_key", R"({"k":[[1,[]],[1,[]]]})");
+      reject_both<MapNested>("duplicate_inner_element", R"({"k":[[1,["a","a"]]]})");
+
+      // Sets.
+      value<SetStr>("empty", {});
+      value<SetStr>("one", {text("a")});
+      value<SetStr>("many", {text("b"), text(""), text("a"), text("ab"), text("B")});
+      same_bytes_as_list(SetStr{text("b"), text("a")}, Vec<Text>{text("a"), text("b")});
+      accept_both<SetStr>("any_order", R"(["b","","a"])", R"(["","a","b"])");
+      reject_both<SetStr>("duplicate_element", R"(["a","b","a"])");
+      reject_both<SetStr>("duplicate_element_escaped", "[\"a\",\"" + u("0061") + "\"]");
+      reject_both<SetStr>("object", "{}");
+      value<SetU32>("empty", {});
+      value<SetU32>("many", {256, 1, 255, 4294967295u, 0});
+      same_bytes_as_list(SetU32{256, 1, 255}, Vec<u32>{1, 255, 256});
+      accept_both<SetU32>("any_order", "[256,1,255]", "[1,255,256]");
+      reject_both<SetU32>("duplicate_element", "[1,2,1]");
+      reject_both<SetU32>("out_of_range", "[4294967296]");
+      value<SetTuple>("many", {{2, "a"}, {1, "b"}, {1, "a"}, {1, ""}});
+      accept_both<SetTuple>("any_order", R"([[2,"a"],[1,"b"]])", R"([[1,"b"],[2,"a"]])");
+      reject_both<SetTuple>("duplicate_element", R"([[1,"a"],[1,"a"]])");
+
+      // Variant alternatives: map_K_V, set_K, tuple_A_B.
+      value<MapChoice>("map", MapChoice{std::in_place_index<0>,
+                                        std::map<std::string, u32>{{"b", 2}, {"a", 1}}});
+      value<MapChoice>("set", MapChoice{std::in_place_index<1>, std::set<u32>{3, 1}});
+      value<MapChoice>("pair", MapChoice{std::in_place_index<2>,
+                                         std::pair<u32, std::string>{7, "seven"}});
+      accept<MapChoice>("ijson", "set_any_order", R"({"set_uint32":[3,1]})",
+                        R"({"set_uint32":[1,3]})");
+      reject<MapChoice>("ijson", "duplicate_in_alternative", R"({"set_uint32":[1,1]})");
+      reject<MapChoice>("json", "duplicate_in_alternative", R"([0,{"a":1,"a":2}])");
+
+      // As record members.
+      value<Registry>("empty", Registry{});
+      value<Registry>("full",
+                      Registry{{{text("b"), 2}, {text("a"), 1}},
+                               {big, 1, std::numeric_limits<u64>::max()},
+                               {{account("bob"), big}, {account("alice"), 5}},
+                               {7, text("head")},
+                               MapU64Str{{2, text("two")}, {1, text("one")}},
+                               {{9, 1}, {2, 2}},
+                               {{3, 1, 2}, {}, {4294967295u}}});
+      accept_both<Registry>(
+         "any_order_and_missing_optional",
+         R"({"groups":[[2,1]],"limited":[[2,2],[1,1]],"head":[7,"h"],"balances":{"bob":2,"alice":1},"ids":[],"counts":{"b":2,"a":1}})",
+         R"({"counts":{"a":1,"b":2},"ids":[],"balances":{"alice":1,"bob":2},"head":[7,"h"],"names":null,"limited":[[1,1],[2,2]],"groups":[[1,2]]})");
+      reject_both<Registry>(
+         "over_member_bound",
+         R"({"counts":{},"ids":[],"balances":{},"head":[0,""],"names":null,"limited":[[1,1],[2,2],[3,3]],"groups":[]})");
+      reject_both<Registry>(
+         "duplicate_in_member",
+         R"({"counts":{"a":1,"a":2},"ids":[],"balances":{},"head":[0,""],"names":null,"limited":[],"groups":[]})");
+      reject_both<Registry>(
+         "duplicate_in_list_of_sets",
+         R"({"counts":{},"ids":[],"balances":{},"head":[0,""],"names":null,"limited":[],"groups":[[1,1]]})");
+   }
+
    std::string quoted(const std::string& s) { return psio::encode(psio::json{}, s); }
 
    // ── Malformed schemas and their well-formed neighbours ─────────────────
@@ -1483,6 +1660,111 @@ namespace
          old.ir_version = 0;
          schema_reject("ir_version_zero", old);
       }
+      // "map" / "set": part of the binary form (entries in ascending key
+      // order). A map sits directly on a List / BoundedList whose element
+      // is (an alias of) a Tuple of exactly two members; a set directly on
+      // a List / BoundedList; the key type must have a key encoding.
+      {
+         const auto tuple = [&](std::vector<st::AnyType> members) {
+            st::Tuple t;
+            for (auto& member : members)
+               t.members.push_back(box_of(std::move(member)));
+            return st::AnyType{std::move(t)};
+         };
+         const auto bounded = [&](st::AnyType element, std::uint64_t n) {
+            return st::AnyType{st::BoundedList{box_of(std::move(element)), n}};
+         };
+         const auto array = [&](st::AnyType element, std::uint64_t n) {
+            return st::AnyType{st::Array{box_of(std::move(element)), n}};
+         };
+         const auto option  = [&](st::AnyType inner) { return st::AnyType{st::Option{box_of(std::move(inner))}}; };
+         const auto string  = [&] { return custom(bytes(), "string"); };
+         const auto bitlist = [&] { return custom(bounded(sint(1, false), 8), "bitlist"); };
+         const auto entry   = [&] { return tuple({string(), i32()}); };
+
+         schema_accept("map", schema_with({{"T", custom(list(entry()), "map")}}),
+                       R"({"a":1,"b":-2})");
+         schema_accept("map_pairs", schema_with({{"T", custom(list(tuple({i32(), u8()})), "map")}}),
+                       "[[-1,2],[5,0]]");
+         schema_accept("map_entry_alias",
+                       schema_with({{"E", entry()}, {"L", list(named("E"))},
+                                    {"T", custom(named("L"), "map")}}),
+                       R"({"k":7})");
+         schema_accept("map_bounded", schema_with({{"T", custom(bounded(entry(), 2), "map")}}),
+                       R"({"a":1,"b":2})");
+         schema_accept("map_key_alias_to_string",
+                       schema_with({{"K", string()},
+                                    {"T", custom(list(tuple({named("K"), u8()})), "map")}}),
+                       R"({"k":7})");
+         schema_accept("map_key_presentation_without_handler",
+                       schema_with({{"T", custom(list(tuple({custom(i64(), "AccountNumber"), u8()})),
+                                                 "map")}}),
+                       "[[-5,1],[12345,0]]");
+         schema_accept("map_value_boxed",
+                       schema_with({{"T", custom(list(tuple({u8(), custom(bytes(), "box")})), "map")}}),
+                       "[[1,[2]]]");
+         schema_accept("map_of_maps",
+                       schema_with({{"T", custom(list(tuple({custom(list(tuple({u8(), u8()})), "map"),
+                                                             u8()})),
+                                                 "map")}}),
+                       "[[[],0],[[[1,2]],1]]");
+         schema_accept("set", schema_with({{"T", custom(list(i32()), "set")}}), "[-2,1]");
+         schema_accept("set_bounded", schema_with({{"T", custom(bounded(string(), 2), "set")}}),
+                       R"(["a","b"])");
+         schema_accept("set_of_tuples",
+                       schema_with({{"T", custom(list(tuple({u8(), string()})), "set")}}),
+                       R"([[1,"b"],[2,"a"]])");
+         schema_accept("set_of_bytes", schema_with({{"T", custom(list(u8()), "set")}}), "[1,2]");
+         schema_accept("box_over_set",
+                       schema_with({{"T", custom(custom(list(u8()), "set"), "box")}}), "[1,2]");
+
+         schema_reject("map_over_list_of_non_tuple", schema_with({{"T", custom(list(i32()), "map")}}));
+         schema_reject("map_entry_of_one",
+                       schema_with({{"T", custom(list(tuple({i32()})), "map")}}));
+         schema_reject("map_entry_of_three",
+                       schema_with({{"T", custom(list(tuple({i32(), u8(), u8()})), "map")}}));
+         schema_reject("map_entry_is_a_record",
+                       schema_with({{"T", custom(list(st::Object{{st::Member{"k", box_of(i32()), {}},
+                                                                 st::Member{"v", box_of(u8()), {}}},
+                                                                {}}),
+                                                 "map")}}));
+         schema_reject("map_over_array", schema_with({{"T", custom(array(entry(), 2), "map")}}));
+         schema_reject("map_over_tuple", schema_with({{"T", custom(entry(), "map")}}));
+         schema_reject("map_over_option", schema_with({{"T", custom(option(list(entry())), "map")}}));
+         schema_reject("map_over_box",
+                       schema_with({{"T", custom(custom(list(entry()), "box"), "map")}}));
+         schema_reject("map_over_presentation",
+                       schema_with({{"T", custom(custom(list(entry()), "Ledger"), "map")}}));
+         schema_reject("map_over_set",
+                       schema_with({{"T", custom(custom(list(entry()), "set"), "map")}}));
+         schema_reject("map_over_boxed_entry",
+                       schema_with({{"T", custom(list(custom(entry(), "box")), "map")}}));
+         schema_reject("map_key_bitlist",
+                       schema_with({{"T", custom(list(tuple({bitlist(), u8()})), "map")}}));
+         schema_reject("map_key_optional_bitlist",
+                       schema_with({{"T", custom(list(tuple({option(bitlist()), u8()})), "map")}}));
+         schema_reject("map_key_boxed",
+                       schema_with({{"T", custom(list(tuple({custom(i32(), "box"), u8()})), "map")}}));
+         schema_reject("map_key_one_bit",
+                       schema_with({{"T", custom(list(tuple({sint(1, false), u8()})), "map")}}));
+         schema_reject("map_key_map_with_bad_key",
+                       schema_with({{"T", custom(list(tuple({custom(list(tuple({bitlist(), u8()})),
+                                                                    "map"),
+                                                             u8()})),
+                                                 "map")}}));
+         schema_reject("set_over_array", schema_with({{"T", custom(array(i32(), 2), "set")}}));
+         schema_reject("set_over_integer", schema_with({{"T", custom(i32(), "set")}}));
+         schema_reject("set_over_hex", schema_with({{"T", custom(custom(bytes(), "hex"), "set")}}));
+         schema_reject("set_over_string", schema_with({{"T", custom(string(), "set")}}));
+         schema_reject("set_over_box", schema_with({{"T", custom(custom(list(i32()), "box"), "set")}}));
+         schema_reject("set_over_option", schema_with({{"T", custom(option(list(i32())), "set")}}));
+         schema_reject("set_of_bitlist", schema_with({{"T", custom(list(bitlist()), "set")}}));
+         schema_reject("set_of_boxed", schema_with({{"T", custom(list(custom(i32(), "box")), "set")}}));
+         schema_reject("member_map_over_non_tuple",
+                       schema_with({{"T", st::Object{{st::Member{"m", box_of(custom(list(i32()), "map")),
+                                                                 {}}},
+                                                     {}}}}));
+      }
    }
 
    std::string render()
@@ -1562,6 +1844,7 @@ int main(int argc, char** argv)
    emit_accepted();
    emit_rejected();
    emit_nested();
+   emit_assoc();
    emit_schema_rows();
 
    const std::string text = render();

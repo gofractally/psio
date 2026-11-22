@@ -428,7 +428,7 @@ function(psio_key_compile_fail NAME DEFINE MESSAGE)
    set_tests_properties(psio_key_${NAME}_compile_fail PROPERTIES
       PASS_REGULAR_EXPRESSION "${MESSAGE}")
 endfunction()
-psio_key_compile_fail(pair KEY_FAIL_PAIR "std::pair is not a PSIO value")
+psio_key_compile_fail(multimap KEY_FAIL_MULTIMAP "are not PSIO values")
 psio_key_compile_fail(bitlist KEY_FAIL_BITLIST "bitlist has no key encoding")
 psio_key_compile_fail(steady_clock KEY_FAIL_STEADY_CLOCK "no matching function for call to 'to_rfc3339'")
 psio_key_compile_fail(float_rep KEY_FAIL_FLOAT_REP "needs an integer Rep")
@@ -638,3 +638,34 @@ psio_nested_compile_fail(graphql_deferred NESTED_FAIL_GRAPHQL_DEFERRED
 psio_nested_compile_fail(graphql_argument NESTED_FAIL_GRAPHQL_ARGUMENT
    "an argument must be a scalar")
 psio_nested_compile_fail(other_format NESTED_FAIL_OTHER_FORMAT "psio::ssz: .*unsupported type")
+# std::pair, maps and sets as values (docs/pssz-spec.md "Pairs, maps and
+# sets"): every core format, typed and schema-driven, the canonical order and
+# its checks, hostile input.
+psio_add_test(psio_assoc_tests assoc_tests.cpp)
+# The multi containers, and a map / set whose key type has no key encoding
+# (or only an adapter's), must fail with a clear message.
+function(psio_assoc_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_assoc_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/assoc_unsupported_fail.cpp)
+   set_tests_properties(psio_assoc_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+add_test(NAME psio_assoc_unsupported_control
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/assoc_unsupported_fail.cpp)
+psio_assoc_compile_fail(pssz_multimap ASSOC_FAIL_PSSZ_MULTIMAP "psio::pssz: std::multimap / std::multiset")
+psio_assoc_compile_fail(pssz_multiset ASSOC_FAIL_PSSZ_MULTISET "psio::pssz: std::multimap / std::multiset")
+psio_assoc_compile_fail(pssz_unordered_multimap ASSOC_FAIL_PSSZ_UNORDERED_MULTIMAP "psio::pssz: std::multimap / std::multiset")
+psio_assoc_compile_fail(pssz_validate_multiset ASSOC_FAIL_PSSZ_VALIDATE_MULTISET "psio::pssz: std::multimap / std::multiset")
+psio_assoc_compile_fail(json_multimap ASSOC_FAIL_JSON_MULTIMAP "psio::json: std::multimap / std::multiset")
+psio_assoc_compile_fail(ijson_multiset ASSOC_FAIL_IJSON_MULTISET "psio::json: std::multimap / std::multiset")
+psio_assoc_compile_fail(key_multiset ASSOC_FAIL_KEY_MULTISET "psio::key: std::multimap / std::multiset")
+psio_assoc_compile_fail(pssz_bitlist_key ASSOC_FAIL_PSSZ_BITLIST_KEY "psio::pssz: the key type of a map")
+psio_assoc_compile_fail(pssz_validate_bitlist_set ASSOC_FAIL_PSSZ_VALIDATE_BITLIST_SET "psio::pssz: the key type of a map")
+psio_assoc_compile_fail(json_bitlist_key ASSOC_FAIL_JSON_BITLIST_KEY "psio::json: the key type of a map")
+psio_assoc_compile_fail(key_nested_key ASSOC_FAIL_KEY_NESTED_KEY "psio::key: the key type of a map")
+psio_assoc_compile_fail(pssz_adapter_key ASSOC_FAIL_PSSZ_ADAPTER_KEY "psio::pssz: the key type of a map")
+psio_assoc_compile_fail(json_adapter_key ASSOC_FAIL_JSON_ADAPTER_KEY "psio::json: the key type of a map")

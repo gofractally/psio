@@ -2,8 +2,76 @@
 #include <psio/pssz_ir_json.hpp>
 #include <psio/pssz.hpp>
 
+#include <algorithm>
 #include <string>
 #include <string_view>
+
+// Maps and sets through a hand-written schema: the order check, the text
+// forms and the key encoder, all status-returning.
+static int maps_and_sets()
+{
+   namespace ir = psio::schema_types;
+   namespace runtime = psio::pssz_ir;
+   auto box = [](ir::AnyType t) { return ir::Box<ir::AnyType>{std::move(t)}; };
+   auto string = [&] {
+      return ir::AnyType{ir::Custom{box(ir::List{box(ir::Int{8, false})}), "string"}};
+   };
+   ir::Schema schema;
+   schema.ir_version = ir::schema_ir_version;
+   // { counts: map<string, u32>, ids: set<i16> }
+   ir::Tuple entry;
+   entry.members.push_back(box(string()));
+   entry.members.push_back(box(ir::Int{32, false}));
+   schema.insert("Maps",
+                 ir::Object{{ir::Member{"counts",
+                                        box(ir::Custom{box(ir::List{box(ir::AnyType{entry})}),
+                                                       "map"}),
+                                        {}},
+                             ir::Member{"ids",
+                                        box(ir::Custom{box(ir::List{box(ir::Int{16, true})}),
+                                                       "set"}),
+                                        {}}},
+                            {}});
+   const ir::AnyType root{ir::Type{"Maps"}};
+   const std::string text = R"({"counts":{"b":2,"a":1},"ids":[300,-1,7]})";
+   std::vector<char> bytes;
+   if (!runtime::json_to_pssz(schema, root, psio::ijson{}, std::span<const char>{text}, bytes).ok())
+      return 20;
+   std::string canonical;
+   if (!runtime::pssz_to_json(schema, root, psio::json{}, std::span<const char>{bytes}, canonical)
+           .ok() ||
+       canonical != R"({"counts":{"a":1,"b":2},"ids":[-1,7,300]})")
+      return 21;
+   runtime::Value value;
+   bool           unknown = false;
+   if (!runtime::decode_auto(schema, root, std::span<const char>{bytes}, value, unknown).ok())
+      return 22;
+   std::vector<char> key;
+   if (!runtime::to_key(schema, root, value, key).ok() || key.empty()) return 23;
+   // Swap the two i16 elements at the end of the frame: no longer ascending.
+   std::vector<char> unsorted = bytes;
+   std::swap_ranges(unsorted.end() - 6, unsorted.end() - 4, unsorted.end() - 4);
+   if (runtime::validate_pssz(schema, root, std::span<const char>{unsorted}).ok()) return 24;
+   canonical.clear();
+   if (runtime::pssz_to_json(schema, root, psio::json{}, std::span<const char>{unsorted}, canonical)
+          .ok())
+      return 25;
+   for (std::string_view bad : {std::string_view{R"({"counts":{"a":1,"a":2},"ids":[]})"},
+                                std::string_view{R"({"counts":{},"ids":[1,1]})"},
+                                std::string_view{R"({"counts":[["a",1]],"ids":[]})"}})
+   {
+      std::vector<char> out;
+      if (runtime::json_to_pssz(schema, root, psio::json{}, std::span<const char>{bad}, out).ok())
+         return 26;
+   }
+   // A malformed schema is refused before any bytes are read.
+   ir::Schema malformed;
+   malformed.ir_version = ir::schema_ir_version;
+   malformed.insert("Bad", ir::Custom{box(ir::List{box(ir::Int{8, false})}), "map"});
+   if (runtime::validate_pssz(malformed, ir::AnyType{ir::Type{"Bad"}}, std::span<const char>{}).ok())
+      return 27;
+   return 0;
+}
 
 // The schema-driven text <-> PSSZ path with exceptions and RTTI disabled:
 // every failure is a status.
@@ -134,5 +202,6 @@ int main()
    if(!psio::decode_pssz_checked(psio::pssz32{},packed,unpacked,unknown).ok())return 5;
    if(unknown||unpacked.size()!=2||!unpacked.test(0)||unpacked.test(1))return 6;
    if(bounded.size()!=2||string.size()!=4)return 7;
+   if (int rc = maps_and_sets()) return rc;
    return schema_driven();
 }
