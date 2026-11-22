@@ -101,6 +101,13 @@ inline std::string_view variant_name(const Member &member);
 // the presentation is plainer. Set `require_all` to make it an error
 // instead, for a caller that must produce the exact presentation.
 //
+// Built-in presentations. The time ids ("time-point-<unit>", "duration-
+// <unit>", time.hpp) are presentations this codec supplies itself, at the
+// same place a registered handler is consulted: a duration is its tick
+// integer, a time point RFC 3339 text. They take no handler (one registered
+// under a time id is never consulted) and are presented under `require_all`
+// as well.
+//
 // A handler cannot express a presentation that is not a single JSON string
 // (an object, a bare number), or one that depends on the text format or on
 // the surrounding value.
