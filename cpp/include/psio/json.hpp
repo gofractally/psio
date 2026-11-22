@@ -1941,6 +1941,15 @@ namespace psio {
             return out;
          }
 
+         // Validate and decode in one pass: accepts exactly what
+         // `validate` accepts (the checked decode of psio/helpers.hpp).
+         template <typename T>
+         [[nodiscard]] static codec_status decode_checked(
+            std::span<const char> bytes, T& out)
+         {
+            return read_document<Derived, T>(bytes, &out, false);
+         }
+
          // ── size_of ─────────────────────────────────────────────────────
          //
          // JSON has no compile-time-constant size; we produce the string
@@ -2017,6 +2026,9 @@ namespace psio {
       static constexpr const char* name   = "ijson";
       static constexpr bool        i_json = true;
    };
+
+   PSIO_FORMAT_HELPERS(json)
+   PSIO_FORMAT_HELPERS(ijson)
 
    // ── Status-returning entry points ──────────────────────────────────────
    //

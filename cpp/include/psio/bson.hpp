@@ -836,4 +836,6 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(bson)
+
 }  // namespace psio

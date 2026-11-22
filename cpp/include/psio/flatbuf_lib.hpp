@@ -331,4 +331,6 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(flatbuf_lib)
+
 }  // namespace psio

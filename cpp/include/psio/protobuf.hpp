@@ -2253,4 +2253,6 @@ namespace psio
       }
    };
 
+   PSIO_FORMAT_HELPERS(protobuf)
+
 }  // namespace psio

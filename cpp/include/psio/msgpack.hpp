@@ -1291,4 +1291,6 @@ namespace psio
       }
    };
 
+   PSIO_FORMAT_HELPERS(msgpack)
+
 }  // namespace psio

@@ -121,6 +121,53 @@ psio_mutable_view_compile_fail(validated_member MV_FAIL_VALIDATED_MEMBER
 psio_mutable_view_compile_fail(format MV_FAIL_FORMAT
    "in-place mutation is defined for PSSZ formats only")
 
+# The per-format helper names (psio/helpers.hpp): to_F / from_F / validate_F /
+# F_size / F_view / F_buffer / shared_F, exercised for every format tag.
+psio_add_test(psio_helpers_tests helpers_tests.cpp)
+# The same names with exceptions and RTTI disabled. The checked decode of a
+# rejected input calls std::abort there: the second test expects the process
+# to die of SIGABRT (exit status 134 as the shell reports it).
+add_executable(psio_helpers_noexceptions_test helpers_noexceptions.cpp)
+target_include_directories(psio_helpers_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_helpers_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_helpers_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_helpers_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_helpers_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_helpers_noexceptions_test COMMAND psio_helpers_noexceptions_test)
+add_test(NAME psio_helpers_noexceptions_checked_decode_aborts
+         COMMAND sh -c "\"$1\" abort; test $? -eq 134" sh
+                 $<TARGET_FILE:psio_helpers_noexceptions_test>)
+# A helper its format does not have must not compile, and the diagnostic
+# names the helper. The control (no case selected) must compile.
+set(PSIO_HELPERS_FAIL_COMMAND
+    ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -DPSIO_EXCEPTIONS_ENABLED=1
+    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES})
+add_test(NAME psio_helpers_control_compiles
+         COMMAND ${PSIO_HELPERS_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/helpers_fail.cpp)
+function(psio_helpers_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_helpers_${NAME}_compile_fail
+            COMMAND ${PSIO_HELPERS_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/helpers_fail.cpp)
+   set_tests_properties(psio_helpers_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_helpers_compile_fail(json_view HELPERS_FAIL_JSON_VIEW
+   "constraints not satisfied for alias template 'json_view'")
+psio_helpers_compile_fail(ssz_mutable_view HELPERS_FAIL_SSZ_MUTABLE_VIEW
+   "constraints not satisfied for alias template 'ssz_view'")
+psio_helpers_compile_fail(wit_sink HELPERS_FAIL_WIT_SINK
+   "no matching function for call to 'to_wit'")
+psio_helpers_compile_fail(json_vector_sink HELPERS_FAIL_JSON_VECTOR_SINK
+   "no matching function for call to 'to_json'")
+psio_helpers_compile_fail(unchecked_bytes HELPERS_FAIL_UNCHECKED_BYTES
+   "no viable conversion from 'std::span<const char>' to 'psio::trusted'")
+psio_helpers_compile_fail(const_view_set HELPERS_FAIL_CONST_VIEW_SET
+   "member reference base type")
+psio_helpers_compile_fail(shared_mutable HELPERS_FAIL_SHARED_MUTABLE
+   "no matching function for call to 'as_mutable_view'")
+
 # native format + view_of concept: zero-cost shim adapting a live const T&
 # to the view<T, Fmt, Store> accessor surface.
 psio_add_test(psio_native_view_tests native_view_tests.cpp)

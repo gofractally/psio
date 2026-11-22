@@ -11,6 +11,10 @@
 //   - storage::owning       → std::vector<char> (default)
 //   - storage::mut_borrow   → std::span<char>
 //   - storage::const_borrow → std::span<const char>
+//   - storage::shared       → reference-counted immutable bytes; a copy
+//                             of the buffer is another owner of the same
+//                             bytes (a block or transaction held by
+//                             several owners)
 //
 // Storage-layer operations (`bytes`, `size`, `format_of`, `to_buffer`,
 // `as_view`) are free functions in `psio::`. Buffer's `.` surface
@@ -25,6 +29,8 @@
 #include <psio/storage.hpp>
 
 #include <cstddef>
+#include <cstring>
+#include <memory>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -95,6 +101,49 @@ namespace psio {
       [[nodiscard]] std::span<char> _psio_data() noexcept { return data_; }
    };
 
+   // ── shared variant ────────────────────────────────────────────────────
+   //
+   // Immutable bytes with shared ownership. Copying the buffer copies a
+   // pointer and bumps an atomic count: every copy reads the same bytes,
+   // which live until the last copy is destroyed. The bytes are never
+   // written after construction, so copies may be read from different
+   // threads without synchronization. There is no mutable access: a
+   // write through one owner would be seen by all of them.
+   template <typename T, typename Fmt>
+   class buffer<T, Fmt, storage::shared>
+   {
+      std::shared_ptr<const char[]> data_;
+      std::size_t                   size_ = 0;
+
+    public:
+      using element_type = T;
+      using format_type  = Fmt;
+      static constexpr storage storage_kind = storage::shared;
+
+      buffer() = default;
+
+      // Takes over the vector's allocation: no byte is copied.
+      explicit buffer(std::vector<char>&& v) : size_(v.size())
+      {
+         auto owner = std::make_shared<std::vector<char>>(std::move(v));
+         data_      = std::shared_ptr<const char[]>(owner, owner->data());
+      }
+
+      // Copies the bytes once, into one allocation shared by all copies.
+      explicit buffer(std::span<const char> s) : size_(s.size())
+      {
+         auto block = std::make_shared_for_overwrite<char[]>(s.size());
+         if (!s.empty())
+            std::memcpy(block.get(), s.data(), s.size());
+         data_ = std::move(block);
+      }
+
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      {
+         return std::span<const char>{data_.get(), size_};
+      }
+   };
+
    // ── Free-function storage API ─────────────────────────────────────────
    //
    // These are the canonical user-facing storage operations. Each is a
@@ -116,6 +165,13 @@ namespace psio {
    template <typename T, typename Fmt>
    [[nodiscard]] std::span<const char>
    bytes(const buffer<T, Fmt, storage::mut_borrow>& b) noexcept
+   {
+      return b._psio_data();
+   }
+
+   template <typename T, typename Fmt>
+   [[nodiscard]] std::span<const char>
+   bytes(const buffer<T, Fmt, storage::shared>& b) noexcept
    {
       return b._psio_data();
    }
@@ -153,6 +209,29 @@ namespace psio {
       auto span = bytes(b);
       return buffer<T, Fmt, storage::owning>{
           std::vector<char>{span.begin(), span.end()}};
+   }
+
+   // ── Convert any buffer to shared ───────────────────────────────────────
+   //
+   // An owning rvalue gives up its allocation; anything else is copied
+   // once. A shared buffer is returned as another owner of its bytes.
+   template <typename T, typename Fmt>
+   [[nodiscard]] buffer<T, Fmt, storage::shared>
+   to_shared(buffer<T, Fmt, storage::owning>&& b)
+   {
+      return buffer<T, Fmt, storage::shared>{std::move(b._psio_data())};
+   }
+   template <typename T, typename Fmt>
+   [[nodiscard]] buffer<T, Fmt, storage::shared>
+   to_shared(const buffer<T, Fmt, storage::shared>& b) noexcept
+   {
+      return b;
+   }
+   template <typename T, typename Fmt, storage S>
+   [[nodiscard]] buffer<T, Fmt, storage::shared>
+   to_shared(const buffer<T, Fmt, S>& b)
+   {
+      return buffer<T, Fmt, storage::shared>{bytes(b)};
    }
 
 }  // namespace psio

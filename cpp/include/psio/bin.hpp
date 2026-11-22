@@ -1544,6 +1544,8 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(bin)
+
 }  // namespace psio
 
 // ── Forward declarations — dynamic CPO friend overloads live in

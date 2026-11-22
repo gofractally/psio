@@ -14,6 +14,7 @@
 
 #include <psio/cpo.hpp>
 #include <psio/error.hpp>
+#include <psio/helpers.hpp>
 
 #include <memory>
 #include <span>

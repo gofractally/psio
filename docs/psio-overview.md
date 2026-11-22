@@ -119,6 +119,12 @@ Three customization-point operations dispatched by the format tag:
 Each is a per-format implementation that walks the type's fields
 (via reflection) and performs the wire-format-specific work.
 
+In C++ these are the generic layer, called with the format tag as an
+argument. Code that names its format uses the per-format helper names built
+on them — `to_pssz(v)`, `from_pssz<T>(bytes)` (validate, then decode),
+`validate_pssz<T>(bytes)`, `pssz_view<const T>` — listed for every format
+in `docs/helpers.md`.
+
 ### 2.5 Annotation channel
 
 Per-type and per-field metadata that drives wire-form selection
@@ -399,7 +405,7 @@ templates, function-overload sets, or runtime registry.
 
 | Host  | Mechanism |
 |-------|-----------|
-| C++   | `psio::encode<format_tag>(v)` — function template specialized per format, dispatched via `tag_invoke` |
+| C++   | `psio::to_pssz(v)` where the format is named (`docs/helpers.md`); `psio::encode(format_tag{}, v)` in generic code — a customization point object dispatched via `tag_invoke` |
 | Rust  | `psio::encode::<F: Format>(&v)` — generic over a `Format` trait |
 | Python| `psio.encode(v, format='pjson')` — string lookup against a registry |
 | Go    | `psio.Encode(v, psio.Pjson)` — interface-typed format parameter |

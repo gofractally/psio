@@ -2897,6 +2897,8 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(pssz)
+
    // ── Checked compatible reads ──────────────────────────────────────────
    //
    // Validate the whole known frame, accept unknown optional suffix fields

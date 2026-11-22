@@ -882,4 +882,6 @@ namespace psio {
       }
    };
 
+   PSIO_FORMAT_HELPERS(borsh)
+
 }  // namespace psio

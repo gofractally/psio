@@ -79,6 +79,11 @@ namespace psio {
    template <typename K, typename V, typename Fmt>
    class mutable_map_entry;
 
+   // The formats whose `F_view<T>` helper (psio/helpers.hpp) is this view.
+   template <typename Fmt>
+      requires detail::is_pssz_format_v<Fmt>
+   inline constexpr bool detail::helpers::mutable_view_format_v<Fmt> = true;
+
    namespace detail {
 
       // ── The extension point for types that must not be mutated in place ──
