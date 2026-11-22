@@ -55,7 +55,13 @@ selector for `optional<record>` were regenerated.
 default validation and views do not check UTF-8. Strict validation checks every
 string, the `utf8_spec` annotation is checked by strict validation, and the
 `utf8_string<N>` wrapper carries the constraint in its type (enforced by
-encode, decode and both validation modes).
+encode, decode and both validation modes). `utf8_string<>` is the unbounded
+UTF-8 string. The user type encodes the restriction, and pairs across
+languages as: C++ `std::string` = Rust `RawString` (raw bytes), C++
+`utf8_string<>` = Rust `String` (UTF-8), `utf8_string<N>` = UTF-8 of at most N
+bytes. The bounded wrapper does not currently contribute to the inferred width
+bound; only a `length_bound` member annotation does (and that annotation is not
+itself enforced by any codec path).
 
 **Trailing data.** A buffer holds exactly one value. Fixed-size values must
 occupy exactly their span in decode as well as validate.

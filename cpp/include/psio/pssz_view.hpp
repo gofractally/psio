@@ -391,6 +391,28 @@ namespace psio {
       }
    };
 
+   // utf8_string<N> is a String on the wire: the view borrows its bytes. As
+   // for every view, the frame is expected to have been validated (which
+   // checks UTF-8 and the bound for this type).
+   template <std::size_t N, typename Fmt, storage Store>
+      requires detail::is_pssz_format_v<Fmt>
+   class view<utf8_string<N>, Fmt, Store>
+   {
+      std::span<const char> data_;
+    public:
+      using element_type = utf8_string<N>;
+      using format_type = Fmt;
+      static constexpr storage storage_kind = Store;
+      view() = default;
+      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
+      [[nodiscard]] std::string_view view_() const noexcept
+      {
+         return std::string_view{data_.data(), data_.size()};
+      }
+   };
+
    // A plain enum is its underlying integer on the wire; the view reads it
    // by value. Any underlying value is returned as-is (no enumerator check).
    template <typename T, typename Fmt, storage Store>

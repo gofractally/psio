@@ -52,6 +52,16 @@ namespace psio {
    template <typename T>
    concept Enum = std::is_enum_v<T>;
 
+   // ── Byte strings ───────────────────────────────────────────────────────
+   //
+   // std::string is the byte-string shape. A wrapper whose payload is a byte
+   // string (utf8_string) registers here so the byte-oriented specs it
+   // carries (length_bound, utf8_spec) apply to it as a record member.
+   template <typename T>
+   struct is_byte_string : std::false_type
+   {
+   };
+
    // ── FixedSequence ──────────────────────────────────────────────────────
    //
    // Compile-time-sized sequence. std::array, C arrays, and user types
@@ -223,7 +233,7 @@ namespace psio {
       constexpr auto compute_shape_tag_of() noexcept
       {
          using U = std::remove_cvref_t<T>;
-         if constexpr (std::same_as<U, std::string>)
+         if constexpr (std::same_as<U, std::string> || is_byte_string<U>::value)
             return ::psio::ByteStringShape{};
          else if constexpr (Primitive<U>)
             return ::psio::PrimitiveShape{};

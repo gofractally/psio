@@ -136,10 +136,12 @@ namespace psio::schema_types
       };
       template <typename T> struct sb_is_utf8 : std::false_type
       {
+         static constexpr bool unbounded = false;
       };
       template <std::size_t N> struct sb_is_utf8<::psio::utf8_string<N>> : std::true_type
       {
          static constexpr auto limit = N;
+         static constexpr bool unbounded = N == ::psio::utf8_unbounded;
       };
       template <typename T> struct sb_is_bitvector : std::false_type
       {
@@ -380,6 +382,11 @@ namespace psio::schema_types
          else if constexpr (sb_detail::sb_is_bounded<U>::value)
             return BoundedList{Box<AnyType>{insert<typename sb_detail::sb_is_bounded<U>::elem>()},
                                sb_detail::sb_is_bounded<U>::limit};
+         else if constexpr (sb_detail::sb_is_utf8<U>::unbounded)
+            // Unbounded UTF-8: the string adapter over an unbounded byte
+            // list, with no fabricated maximum.
+            return Custom{Box<AnyType>{List{Box<AnyType>{insert<std::uint8_t>()}}},
+                          "string"};
          else if constexpr (sb_detail::sb_is_utf8<U>::value)
             return Custom{Box<AnyType>{AnyType{BoundedList{Box<AnyType>{insert<std::uint8_t>()},
                                                            sb_detail::sb_is_utf8<U>::limit}}},

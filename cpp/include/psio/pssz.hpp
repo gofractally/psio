@@ -464,10 +464,11 @@ namespace psio {
       template <std::size_t N>
       struct is_bitlist<::psio::bitlist<N>> : std::true_type {};
 
-      // utf8_string<N>: a bounded string whose bytes must be UTF-8. On the
-      // wire it is a String (raw bytes to the end of its span); unlike a
-      // plain std::string its UTF-8 and length constraints are part of the
-      // type and are enforced by encode, decode and every validation mode.
+      // utf8_string<N>: a string whose bytes must be UTF-8, at most N bytes
+      // (utf8_string<> is unbounded). On the wire it is a String (raw bytes
+      // to the end of its span); unlike a plain std::string, which is raw
+      // bytes, its UTF-8 and length constraints are part of the type and are
+      // enforced by encode, decode and every validation mode.
       template <typename T>
       struct is_utf8_string : std::false_type {};
       template <std::size_t N>
@@ -661,8 +662,14 @@ namespace psio {
                }
          }
          else if constexpr (is_utf8_string_v<T>)
+         {
+            // The wrapper's constructor checks only the bound; the encoder
+            // owns the UTF-8 check (and re-checks the bound defensively).
+            if (value.size() > T::max_size_value)
+               return codec_fail("pssz: utf8_string exceeds its bound", 0, "pssz");
             return ::psio::utf8_spec::validate(
                std::span<const char>(value.data(), value.size()));
+         }
          else if constexpr (is_std_variant_v<T>)
             return std::visit([&](const auto& element) {
                return check_encode_depth_impl(element, depth + 1);

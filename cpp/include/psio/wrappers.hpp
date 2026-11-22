@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -126,15 +127,24 @@ namespace psio {
 
    // ── utf8_string<N> ─────────────────────────────────────────────────────
    //
-   // std::string-like with compile-time max byte length N. Constructor
-   // validates UTF-8 well-formedness and bound; same for assignment.
-   // Access returns std::string_view.
-   template <std::size_t N>
+   // A string whose bytes must be UTF-8, with a compile-time maximum byte
+   // length N. `utf8_string<>` (N = utf8_unbounded) has no length bound: it
+   // is the unbounded UTF-8 string, the counterpart of a Rust `String`,
+   // while a plain std::string is raw bytes (a Rust `RawString`).
+   //
+   // The constructor checks only the length bound. UTF-8 well-formedness is
+   // a wire-side contract: pssz rejects a non-UTF-8 value on encode and
+   // non-UTF-8 bytes on decode and in every validation mode.
+   inline constexpr std::size_t utf8_unbounded =
+      std::numeric_limits<std::size_t>::max();
+
+   template <std::size_t N = utf8_unbounded>
    class utf8_string
    {
       std::string data_;
     public:
       static constexpr std::size_t max_size_value = N;
+      static constexpr bool        is_bounded     = N != utf8_unbounded;
 
       utf8_string() = default;
       explicit utf8_string(std::string s) : data_(std::move(s))
@@ -148,6 +158,8 @@ namespace psio {
       std::size_t size() const noexcept { return data_.size(); }
       const char* data() const noexcept { return data_.data(); }
       const std::string& storage() const noexcept { return data_; }
+
+      friend bool operator==(const utf8_string&, const utf8_string&) = default;
 
     private:
       void enforce_bound_() const
@@ -272,6 +284,12 @@ namespace psio {
    template <std::size_t N>
    constexpr std::size_t fixed_size_of_v<utf8_string<N>> = N;
 
+   // Its payload is a byte string: length_bound and utf8_spec apply to it.
+   template <std::size_t N>
+   struct is_byte_string<utf8_string<N>> : std::true_type
+   {
+   };
+
    template <std::size_t N>
    struct is_bitfield<bitvector<N>> : std::true_type {};
    template <std::size_t N>
@@ -302,6 +320,13 @@ namespace psio {
       static constexpr auto value = std::tuple{
          length_bound{.max = static_cast<std::uint32_t>(N)},
          utf8_spec{.max = static_cast<std::uint32_t>(N)}};
+   };
+
+   // The unbounded form carries the UTF-8 constraint and no length bound.
+   template <>
+   struct inherent_annotations<utf8_string<utf8_unbounded>>
+   {
+      static constexpr auto value = std::tuple{utf8_spec{}};
    };
 
    template <std::size_t N>
