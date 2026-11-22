@@ -39,8 +39,8 @@ implementation disagrees. The class marked OBSERVED ONLY is exempt.
 ```
 { "version": 1,
   "schema_ir": "<hex>",
-  "types":   [ { "id", "ir", "shape", "auto_width", "max_encoded_size",
-                 "max_dynamic_data", "fixed", "fixed_size" } ... ],
+  "types":   [ { "id", "ir", "shape", "custom_id"?, "invariant"?, "auto_width",
+                 "max_encoded_size", "max_dynamic_data", "fixed", "fixed_size" } ... ],
   "vectors": [ { "name", "class", "type", "format", "hex", "expect",
                  "reason", "reencoded", "value", "writer" } ... ] }
 ```
@@ -60,6 +60,11 @@ Types:
 - `id` - stable type id. A record or enum is a named type and its id is its
   name. Every other type is structural and its id is its shape string.
 - `shape` - the logical type (grammar below).
+- `custom_id` - present for a custom type (one with a custom text form and /
+  or an invariant): the id of its Schema IR `Custom` node, under which its
+  handler is registered with a schema-driven codec.
+- `invariant` - present (`true`) when an invariant constrains values of the
+  type: its own, or that of a type it holds (`custom-types.md`).
 - `auto_width` - `auto_pssz_width_v<T>`: 1, 2 or 4.
 - `max_encoded_size` - `psio::max_encoded_size<T>()`, or null when unbounded.
 - `max_dynamic_data` - the explicit cap, or null.
@@ -78,8 +83,12 @@ Vectors:
     and `encode(decode(bytes)) == bytes`.
   - `unknown`: compatible validation and decoding accept and report unknown
     fields, strict validation rejects, and `encode(decode(bytes)) == reencoded`.
-  - `reject`: every checked entry point rejects.
-- `reason` - for `reject`, the C++ `validate` error message; otherwise empty.
+  - `reject`: every checked entry point rejects. (For class `invariant` this
+    is the outcome of the typed codec, and of a schema-driven codec given
+    the handlers; a schema-driven codec with no handler accepts the frame:
+    `custom-types.md`.)
+- `reason` - for `reject`, the C++ `validate` error message (for class
+  `invariant`, the invariant's own message); otherwise empty.
 - `reencoded` - for `unknown`, the hex of the reader's re-encoding; otherwise empty.
 - `value` - id of the logical value written, or empty for a hand-made frame.
 - `writer` - the writer's type id, or empty for a hand-made frame.
@@ -119,13 +128,14 @@ bitvector<N>  bitlist<N>
 enum<u8>{A=0,B=1}   enumerator names and values
 record{name:T,...}  extensible record       dwnc{name:T,...}  definition_will_not_change
 record{...}@cap=N   explicit maxDynamicData
+transparent{name:T} a transparent type: on the wire it is T (docs/pssz-spec.md 5.10)
 ```
 
 A `std::pair<A,B>` is the tuple and has the tuple's shape and id
 (`tuple<u16,raw_string>` is a `std::pair` in the C++ fixture types). The
 container holding a map or set is not part of its shape.
 
-A nested record or enum is referred to by its id; every id referred to is in
+A nested record, enum or transparent type is referred to by its id; every id referred to is in
 `types`. Field names are part of the shape. `<=N` on a `raw_string`, `list` or `nested`
 exists only for record members. In the Schema IR a nested value is the node
 `Nested{T}` whatever its validation policy, and a nested member's bound is the
@@ -133,7 +143,7 @@ member attribute `lengthBound`.
 
 ## Classes
 
-268 types, 6161 vectors.
+301 types, 6513 vectors.
 
 | class | vectors | contents |
 |---|---|---|
@@ -161,6 +171,9 @@ member attribute `lengthBound`.
 | `nested-deferred` | 24 | `nested<T,deferred>` readers: any inner bytes (valid, garbage, empty, unknown fields) are `canonical`, strict validation included. The Schema IR does not record the policy, so a schema-driven reader gives these outcomes with its "nested bytes are opaque" option (the consumers run this class that way). |
 | `map-set` | 266 | Pairs, maps and sets (`docs/pssz-spec.md` §5.9), all `canonical`. Every map / set value appears twice with the same bytes: read as the map / set (`type` = `writer`) and read as the list it is (`type` = the list, `writer` = the map / set), so each language checks that its encoder writes the bytes of the sorted list. Keys: strings, integers (numeric order, not wire-byte order), signed integers, tuples, records, floats including NaNs and `-0`; values: scalars, lists, records, nested maps and sets; an optional set, a map as a variant alternative, maps / sets / a pair as record members (`AssocRec`, whose list spelling is `AssocLists`). |
 | `map-set-order` | 352 | Lists that are **not** strictly ascending by key — swapped entries, a repeated key, a repeated key with another value, `+0` with `-0`, a NaN out of place, at the top level and nested in records, optionals, lists, variants and maps. Each appears twice: `reject` as the map / set (`reason`: `pssz: map entries are not in strictly ascending key order` or `pssz: set elements are not in strictly ascending order`) and `canonical` as the list type (`writer`). Encoders cannot produce these frames from a map / set. |
+| `transparent` | 144 | Values of transparent types (`Id`, `Blob`, `Ref`, `DerKey`), bare and in lists, arrays, optionals and tuples; every frame is also read as the member's type (`type` is the member's type, `writer` the wrapper): the bytes, the fixedness and the optional form are the member's. Two rejects: `Id` framed as a one-field record, and a short frame. |
+| `custom` | 100 | Values of the custom types (a text form, an invariant, or both: `custom-types.md`) and of `Guarded`, which holds each in every position. The bytes are the wire type's. |
+| `invariant` | 108 | Structurally valid frames of values that violate an invariant, as a writer that does not check would produce them, bare and nested (list, array, optional, variant alternative, record member, two violations in one record). `expect` is `reject` and `reason` the invariant's message: the outcome of the typed codec — every checked entry point rejects, the trusted decode reads the value, no writer writes it back — and of a schema-driven codec given the handlers. A schema-driven codec with no handler accepts every one of these frames; with a strict registry lacking the handler it refuses the type. |
 
 Nested values in maps and sets — `map<raw_string,nested<NArgs>>`,
 `set<nested<u32>>`, `map<nested<u32>,u8>` — and a map inside nested bytes,

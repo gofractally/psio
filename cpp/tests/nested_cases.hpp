@@ -599,7 +599,7 @@ namespace nested_cases
       NESTED_CHECK(!psio::pssz_ir::validate_pssz(schema, "Over", over).ok());
       // ...and does not count what it does not open.
       NESTED_CHECK(psio::pssz_ir::validate_pssz(schema, "Over", over, nullptr,
-                                                psio::pssz_ir::nested_bytes::opaque)
+                                                nullptr, psio::pssz_ir::nested_bytes::opaque)
                       .ok());
    }
 
@@ -764,13 +764,13 @@ namespace nested_cases
 
       // Opaque: the bytes, untouched.
       NESTED_CHECK(rt::decode_auto(schema, "Action", bytes, value, unknown,
-                                   rt::nested_bytes::opaque)
+                                   nullptr, rt::nested_bytes::opaque)
                       .ok());
       record = std::get_if<rt::Record>(&value.value);
       NESTED_CHECK(record && std::holds_alternative<rt::Bytes>((*record)[2].second.value));
       again.clear();
       NESTED_CHECK(
-         rt::encode_auto(schema, "Action", value, again, rt::nested_bytes::opaque).ok() &&
+         rt::encode_auto(schema, "Action", value, again, nullptr, rt::nested_bytes::opaque).ok() &&
          again == bytes);
       again.clear();
       NESTED_CHECK(!rt::encode_auto(schema, "Action", value, again).ok() && again.empty());
@@ -779,9 +779,9 @@ namespace nested_cases
       const Bytes garbage = pssz_of(RawAction{1, 2, {1, 2, 3}});
       NESTED_CHECK(!rt::validate_pssz(schema, "Action", garbage).ok());
       NESTED_CHECK(
-         rt::validate_pssz(schema, "Action", garbage, nullptr, rt::nested_bytes::opaque).ok());
+         rt::validate_pssz(schema, "Action", garbage, nullptr, nullptr, rt::nested_bytes::opaque).ok());
       NESTED_CHECK(rt::validate_pssz(schema, "DeferredAction", garbage, nullptr,
-                                     rt::nested_bytes::opaque)
+                                     nullptr, rt::nested_bytes::opaque)
                       .ok());
       const Bytes newer =
          pssz_of(RawAction{1, 2, octets(pssz_of(TransferV2{"bob", 5, std::string{"rent"}, 7u}))});

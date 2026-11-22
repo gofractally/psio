@@ -2588,6 +2588,170 @@ namespace
       });
    }
 
+   // ── Transparent wrappers, custom types, invariants ────────────────────
+   //
+   // `transparent`: a transparent type's bytes are its member's — every
+   // value is also read, from the same frame, as the member's type.
+   // `custom`: values of types with a custom text form or an invariant:
+   // the bytes are the wire type's.
+   // `invariant`: structurally valid frames of values that violate an
+   // invariant, as a writer that does not check would produce them. The
+   // typed codec rejects them with the invariant's message; so does a
+   // schema-driven codec given the handlers, and without them it accepts.
+   template <typename T, typename Inner>
+   void transparent(const std::string& vname, const T& value, const Inner& same)
+   {
+      formats([&]<typename F>() {
+         const Bytes bytes = must_encode<F>(value, vname);
+         if (must_encode<F>(same, vname) != bytes)
+            die("transparent/" + vname + ": the wrapper's bytes are not its member's");
+         add<F, T>("transparent", vname, bytes, canonical(), vname, type_id<T>());
+         add<F, Inner>("transparent", vname, bytes, canonical(), vname, type_id<T>());
+      });
+   }
+   template <typename T>
+   void violates(const std::string& vname, const T& value, const std::string& reason)
+   {
+      formats([&]<typename F>() {
+         Bytes bytes;
+         if (!impl::encode_ignoring_invariants(F{}, value, bytes).ok())
+            die("invariant/" + vname + ": the value has no frame");
+         // Every writer refuses the value, with the invariant's status.
+         Bytes none;
+         auto  status = psio::encode_pssz_checked(F{}, value, none);
+         if (status.ok() || status.error().what != reason || !none.empty())
+            die("invariant/" + vname + ": encode_pssz_checked does not report " + reason);
+         if (try_encode<F>(value, none)) die("invariant/" + vname + ": encode writes the value");
+         add<F, T>("invariant", vname, bytes, reject(reason));
+      });
+   }
+
+   void emit_custom_types()
+   {
+      using namespace custom_conf;
+      const u64 top = ~u64{0};
+
+      transparent<Id, u64>("id/zero", Id{0}, u64{0});
+      transparent<Id, u64>("id/max", Id{top}, top);
+      transparent<Vec<Id>, Vec<u64>>("id/list_empty", {}, {});
+      transparent<Vec<Id>, Vec<u64>>("id/list", {Id{1}, Id{2}, Id{top}}, {1, 2, top});
+      transparent<Opt<Id>, Opt<u64>>("id/none", std::nullopt, std::nullopt);
+      transparent<Opt<Id>, Opt<u64>>("id/some", Id{7}, u64{7});
+      transparent<Arr2<Id>, Arr2<u64>>("id/array", {Id{3}, Id{4}}, {3, 4});
+      transparent<Blob, Vec<u8>>("blob/empty", Blob{}, {});
+      transparent<Blob, Vec<u8>>("blob/bytes", Blob{{1, 2, 3}}, {1, 2, 3});
+      transparent<Vec<Blob>, Vec<Vec<u8>>>("blob/list", {Blob{}, Blob{{9}}, Blob{{7, 8}}},
+                                           {{}, {9}, {7, 8}});
+      // A byte list can be empty: its optional has a selector, and so does
+      // the wrapper's.
+      transparent<Opt<Blob>, Opt<Vec<u8>>>("blob/none", std::nullopt, std::nullopt);
+      transparent<Opt<Blob>, Opt<Vec<u8>>>("blob/some_empty", Blob{}, Vec<u8>{});
+      transparent<Opt<Blob>, Opt<Vec<u8>>>("blob/some", Blob{{5}}, Vec<u8>{5});
+      transparent<std::tuple<Id, Blob>, std::tuple<u64, Vec<u8>>>(
+         "tuple", {Id{6}, Blob{{1}}}, {u64{6}, Vec<u8>{1}});
+      transparent<Ref, std::variant<u64, Raw>>("ref/number", Ref{u64{42}}, u64{42});
+      transparent<Ref, std::variant<u64, Raw>>("ref/name", Ref{Raw{"alice"}}, Raw{"alice"});
+      transparent<DerKey, Vec<u8>>("derkey/sequence", DerKey{{0x30, 0x01, 0x00}},
+                                   {0x30, 0x01, 0x00});
+      // A transparent type is not a record: a struct-framed value (header,
+      // then the member) is not its encoding.
+      formats([&]<typename F>() {
+         constexpr std::size_t W = wof<F, Scalars>();
+         add<F, Id>("transparent", "id/struct_framed",
+                    Fr{W}.o(8).u32(7).u32(0), reject("pssz: fixed primitive span mismatch"));
+      });
+      frame_all<Id>("transparent", "id/short", hx("01020304050607"),
+                    reject("pssz: fixed primitive span mismatch"));
+
+      V6 loopback;
+      loopback.address[15] = 1;
+      loopback.port        = 443;
+      corpus<V4>("custom", "v4/local", V4{{127, 0, 0, 1}, 8080});
+      corpus<V6>("custom", "v6/loopback", loopback);
+      corpus<Endpoint>("custom", "endpoint/v4", Endpoint{V4{{10, 0, 0, 7}, 1}});
+      corpus<Endpoint>("custom", "endpoint/v6", Endpoint{loopback});
+      corpus<Vec<Endpoint>>("custom", "endpoint/list",
+                            Vec<Endpoint>{V4{{1, 2, 3, 4}, 5}, loopback});
+      corpus<Ratio>("custom", "ratio/negative", Ratio{-3, 4});
+      corpus<Ratio>("custom", "ratio/zero", Ratio{0, 0});
+      corpus<Name>("custom", "name/zero", Name{0});
+      corpus<Name>("custom", "name/largest", Name{(u64{1} << 60) - 1});
+      corpus<Vec<Name>>("custom", "name/list", Vec<Name>{Name{1}, Name{2}});
+      corpus<Opt<Name>>("custom", "name/none", Opt<Name>{});
+      corpus<Opt<Name>>("custom", "name/some", Opt<Name>{Name{3}});
+      corpus<Range>("custom", "range/ordered", Range{3, 9});
+      corpus<Range>("custom", "range/equal", Range{4, 4});
+      corpus<Level>("custom", "level/low", Level::low);
+      corpus<Level>("custom", "level/top", Level::top);
+      corpus<Vec<Level>>("custom", "level/list", Vec<Level>{Level::low, Level::high});
+      corpus<Arr2<Level>>("custom", "level/array", Arr2<Level>{Level::mid, Level::top});
+      corpus<Vec<DerKey>>("custom", "derkey/list", Vec<DerKey>{DerKey{{0x30}}, DerKey{{0x30, 1}}});
+      corpus<Opt<DerKey>>("custom", "derkey/none", Opt<DerKey>{});
+      corpus<Opt<DerKey>>("custom", "derkey/some", Opt<DerKey>{DerKey{{0x30, 0}}});
+      corpus<std::variant<Name, Range>>("custom", "either/name", Name{5});
+      corpus<std::variant<Name, Range>>("custom", "either/range", Range{1, 2});
+      const Guarded good = guarded_sample();
+      corpus<Guarded>("custom", "guarded/sample", good);
+      {
+         Guarded g = good;
+         g.delegate.reset();
+         g.members.clear();
+         g.levels.clear();
+         g.either = Name{1};
+         g.ref    = Ref{u64{7}};
+         g.blob.reset();
+         g.endpoint = loopback;
+         g.ratios.clear();
+         corpus<Guarded>("custom", "guarded/other_alternatives", g);
+      }
+
+      const std::string name_reason  = "Name: value is not a canonical name";
+      const std::string der_reason   = "DerKey: not a DER sequence";
+      const std::string range_reason = "Range: lo is greater than hi";
+      const std::string level_reason = "Level: not a listed level";
+      const std::string ref_reason   = "Ref: a name is not empty";
+      const Name        bad_name{u64{1} << 60};
+      violates<Name>("name/first_non_canonical", bad_name, name_reason);
+      violates<Name>("name/all_ones", Name{top}, name_reason);
+      violates<Vec<Name>>("name/in_list", {Name{1}, bad_name, Name{2}}, name_reason);
+      violates<Opt<Name>>("name/in_optional", bad_name, name_reason);
+      violates<DerKey>("derkey/empty", DerKey{}, der_reason);
+      violates<DerKey>("derkey/wrong_tag", DerKey{{0x31, 0x00}}, der_reason);
+      violates<Vec<DerKey>>("derkey/in_list", {DerKey{{0x30}}, DerKey{}}, der_reason);
+      violates<Opt<DerKey>>("derkey/in_optional", DerKey{{0x02}}, der_reason);
+      violates<Range>("range/reversed", Range{9, 3}, range_reason);
+      violates<Range>("range/off_by_one", Range{1, 0}, range_reason);
+      violates<Level>("level/unlisted", static_cast<Level>(4), level_reason);
+      violates<Level>("level/largest", static_cast<Level>(255), level_reason);
+      // Lists and arrays of an enum are checked element by element.
+      violates<Vec<Level>>("level/in_list", {Level::low, static_cast<Level>(9)}, level_reason);
+      violates<Arr2<Level>>("level/in_array", {static_cast<Level>(4), Level::top}, level_reason);
+      violates<std::variant<Name, Range>>("either/name", bad_name, name_reason);
+      violates<std::variant<Name, Range>>("either/range", Range{2, 1}, range_reason);
+      violates<Ref>("ref/empty_name", Ref{Raw{}}, ref_reason);
+      auto guarded = [&](const std::string& vname, const std::string& reason, auto&& change) {
+         Guarded g = good;
+         change(g);
+         violates<Guarded>("guarded/" + vname, g, reason);
+      };
+      guarded("owner", name_reason, [&](Guarded& g) { g.owner = bad_name; });
+      guarded("delegate", name_reason, [&](Guarded& g) { g.delegate = bad_name; });
+      guarded("member", name_reason, [&](Guarded& g) { g.members.back() = bad_name; });
+      guarded("key", der_reason, [&](Guarded& g) { g.key.data[0] = 4; });
+      guarded("window", range_reason, [&](Guarded& g) { g.window = Range{10, 9}; });
+      guarded("level_in_list", level_reason,
+              [&](Guarded& g) { g.levels.back() = static_cast<Level>(200); });
+      guarded("level_in_array", level_reason,
+              [&](Guarded& g) { g.pair[0] = static_cast<Level>(4); });
+      guarded("variant_alternative", range_reason, [&](Guarded& g) { g.either = Range{2, 1}; });
+      guarded("ref", ref_reason, [&](Guarded& g) { g.ref = Ref{Raw{}}; });
+      // The first violation in wire order is the one reported.
+      guarded("two_violations", name_reason, [&](Guarded& g) {
+         g.owner  = bad_name;
+         g.window = Range{10, 9};
+      });
+   }
+
    // ── JSON ──────────────────────────────────────────────────────────────
    std::string jq(std::string_view s)
    {
@@ -2621,8 +2785,14 @@ namespace
    {
       std::ostringstream out;
       out << "{\"id\": " << jq(type_id<T>()) << ", \"ir\": " << (ir_flag<T>() ? "true" : "false")
-          << ", \"shape\": " << jq(type_shape<T>())
-          << ", \"auto_width\": " << psio::auto_pssz_width_v<T> << ", \"max_encoded_size\": ";
+          << ", \"shape\": " << jq(type_shape<T>());
+      // A custom type: the id of its Schema IR node, under which its handler
+      // is registered. `invariant`: an invariant constrains values of the
+      // type (its own, or one of a type it holds).
+      if constexpr (psio::schema_custom_v<T>)
+         out << ", \"custom_id\": " << jq(psio::schema_custom_id<T>());
+      if constexpr (psio::contains_invariant_v<T>) out << ", \"invariant\": true";
+      out << ", \"auto_width\": " << psio::auto_pssz_width_v<T> << ", \"max_encoded_size\": ";
       if (constexpr auto m = psio::max_encoded_size<T>(); m) out << *m;
       else out << "null";
       out << ", \"max_dynamic_data\": ";
@@ -2689,6 +2859,7 @@ int main(int argc, char** argv)
    emit_nested();
    emit_assoc();
    emit_nested_assoc();
+   emit_custom_types();
 
    if (!unregistered.empty())
    {

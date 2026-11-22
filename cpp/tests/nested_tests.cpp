@@ -267,7 +267,7 @@ namespace
          std::string        text;
          REQUIRE_NOTHROW(dynamic = psio::pssz_ir::validate_pssz(schema, root, bytes));
          REQUIRE_NOTHROW(opaque = psio::pssz_ir::validate_pssz(
-                            schema, root, bytes, nullptr, psio::pssz_ir::nested_bytes::opaque));
+                            schema, root, bytes, nullptr, nullptr, psio::pssz_ir::nested_bytes::opaque));
          REQUIRE_NOTHROW(
             (void)psio::pssz_ir::pssz_to_json(schema, root, psio::ijson{}, bytes, text));
          // The schema-driven validator and the typed one accept the same

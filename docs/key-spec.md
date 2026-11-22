@@ -38,7 +38,8 @@ concatenation of the elements, compared lexicographically.
 | variant | one byte: the alternative's index; then key(alternative) |
 | tuple, pair, record | the element / field keys concatenated in order. `tuple<>` and an empty record are zero bytes. A pair (C++ `std::pair`) is the 2-tuple |
 | map, set (`docs/pssz-spec.md` §5.9) | the key of the list of its entries / elements **in ascending key order**: `01` + key(k) + key(v) per entry, then `00`; for a set `01` + key(element) per element, then `00`; and the octet framing for a set of octets. So `set<u8>` has the key of the sorted `vector<u8>`, and maps order lexicographically by their sorted entries |
-| boxed value, custom-presented value (Schema IR `Custom` ids that are not part of the binary form) | the key of the inner type |
+| transparent type (`docs/pssz-spec.md` §5.10) | the key of its member: a transparent wrapper of a fixed-width key is fixed-width, of a composite key is that composite key |
+| boxed value, custom type (Schema IR `Custom` ids that are not part of the binary form) | the key of the inner type: a text form plays no part in a key |
 | nested value (C++ `psio::nested<T>`, Schema IR `Nested`; `docs/pssz-spec.md` §5.8) | the key of the byte list holding the PSSZ encoding of the inner value: the octet-list framing above (`00` → `00 01`, terminator `00 00`). **Not** the key of the inner value |
 
 Not key types (compile errors in C++): `bitlist`, and the containers that are
@@ -71,7 +72,10 @@ The key of `tuple<A, B>` is a byte-prefix of the key of `tuple<A, B, C>` for
 equal `A`, `B`; tuple keys order lexicographically by element, including when
 a variable-length element is followed by more elements. A record's key is the
 key of the tuple of its fields; reflected methods are not part of it. A pair
-is a composite key of two elements.
+is a composite key of two elements. A
+transparent wrapper of a composite key type is that composite key type: its
+elements are the wrapped type's (`key_prefix<Wrapper>(a)` is
+`key_prefix<tuple<A, B>>(a)`).
 
 A database layer needs three operations; each implementation provides them:
 
@@ -133,6 +137,17 @@ rejects; it never reads out of bounds.
 Encoding a map or set writes the ascending order whatever the container's
 own order is, and fails on two entries with equal key bytes (`-0` and `+0`
 held apart by a custom comparator).
+
+**Type invariants** (`docs/pssz-spec.md` §18) are part of both directions:
+a value that violates its type's invariant has no key — `encode` and
+`to_key` fail on it (a sizing pass alone does not check) — and `validate`,
+`validate_strict` and `decode` reject the key of such a value with the
+invariant's own status, after its bytes were read. Nested values are
+checked where they occur, innermost first. `key_prefix` encodes elements:
+each is checked as the value it is, the composite as a whole is not (a
+prefix is not a value of the composite type). A reader that knows only the
+wire type (a schema with no handler) accepts such a key: the fixture kind
+`key-invariant` (`conformance/time-key-vectors.md`).
 
 ## 6. Keys from a schema
 

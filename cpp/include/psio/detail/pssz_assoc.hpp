@@ -37,7 +37,7 @@ namespace psio::detail::pssz_impl
    // Encoder preflight: every entry is encodable one node below the
    // container (as a list's elements are), and no two keys are equal.
    template <typename T>
-   codec_status assoc_check_encode(const T& value, std::size_t depth, bool bounds)
+   codec_status assoc_check_encode(const T& value, std::size_t depth, encode_preflight bounds)
    {
       PSIO_REQUIRE_ENTRY_ORDER("psio::pssz", T);
       using E = ::psio::detail::assoc_entry_t<T>;

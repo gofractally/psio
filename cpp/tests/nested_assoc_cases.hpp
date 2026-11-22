@@ -385,9 +385,9 @@ namespace nested_assoc_cases
       {
          rt::Value dynamic;
          bool      unknown = true;
-         NESTED_CHECK(rt::decode_auto(schema, "T", frame, dynamic, unknown, mode).ok() && !unknown);
+         NESTED_CHECK(rt::decode_auto(schema, "T", frame, dynamic, unknown, nullptr, mode).ok() && !unknown);
          Bytes key{'k'};
-         NESTED_CHECK(rt::to_key(schema, "T", dynamic, key, mode).ok());
+         NESTED_CHECK(rt::to_key(schema, "T", dynamic, key, nullptr, mode).ok());
          NESTED_CHECK(key.size() == typed.size() + 1 && key[0] == 'k' &&
                       std::equal(typed.begin(), typed.end(), key.begin() + 1));
       }
@@ -483,16 +483,16 @@ namespace nested_assoc_cases
       const Bytes bad_value = pssz_of(ByNameRaw{{"a", good}, {"b", cut}});
       NESTED_CHECK(!rt::validate_pssz(schema, "ByName", bad_value).ok());
       NESTED_CHECK(
-         rt::validate_pssz(schema, "ByName", bad_value, nullptr, rt::nested_bytes::opaque).ok());
+         rt::validate_pssz(schema, "ByName", bad_value, nullptr, nullptr, rt::nested_bytes::opaque).ok());
       const SeenRaw two = sorted({good, inner_of(Transfer{"z", 0, std::nullopt})});
       const Bytes   swapped = pssz_of(SeenRaw{two[1], two[0]});
       const Bytes   doubled = pssz_of(SeenRaw{two[0], two[0]});
       for (auto mode : {rt::nested_bytes::typed, rt::nested_bytes::opaque})
       {
-         NESTED_CHECK(rt::validate_pssz(schema, "Seen", pssz_of(two), nullptr, mode).ok());
-         NESTED_CHECK(fails_with(rt::validate_pssz(schema, "Seen", swapped, nullptr, mode),
+         NESTED_CHECK(rt::validate_pssz(schema, "Seen", pssz_of(two), nullptr, nullptr, mode).ok());
+         NESTED_CHECK(fails_with(rt::validate_pssz(schema, "Seen", swapped, nullptr, nullptr, mode),
                                  "pssz IR: set elements are not in strictly ascending order"));
-         NESTED_CHECK(fails_with(rt::validate_pssz(schema, "Seen", doubled, nullptr, mode),
+         NESTED_CHECK(fails_with(rt::validate_pssz(schema, "Seen", doubled, nullptr, nullptr, mode),
                                  "pssz IR: set elements are not in strictly ascending order"));
       }
       const Octets one = octets(pssz_of(std::uint32_t{1}));

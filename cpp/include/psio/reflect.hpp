@@ -110,7 +110,8 @@
 // macro. At namespace scope every listed member must be accessible (public).
 //
 // `attr(field, spec)` and the type-level keywords (definitionWillNotChange(),
-// maxFields(N), maxDynamicData(N)) work in every PSIO_REFLECT: at namespace
+// maxFields(N), maxDynamicData(N), transparent(), invariant(fn)) work in
+// every PSIO_REFLECT: at namespace
 // scope and in a class body, for a type in any (nested) namespace. The
 // annotations are members of the metadata the macro binds to the type, and
 // `psio::annotate<&T::field>` / `psio::annotate<psio::type<T>{}>` read them
@@ -155,11 +156,13 @@
 // two members with the same key under that hash are a compile error. The
 // tables are instantiated only for types that are actually looked up.
 
+#include <psio/error.hpp>
 #include <psio/name_lookup.hpp>
 
 #include <boost/preprocessor.hpp>
 
 #include <array>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -552,7 +555,7 @@ namespace psio {
 
 // ── Keyword dispatch ──────────────────────────────────────────────────────
 //
-// PSIO_REFLECT accepts six kinds of arguments:
+// PSIO_REFLECT accepts eight kinds of arguments:
 //
 //   1. A bare identifier              `pubkey`
 //      → registered as a field, name = identifier
@@ -587,7 +590,19 @@ namespace psio {
 //      metadata (WIT / schema parameter names); list none, or one per
 //      parameter.
 //
-// All type-level keywords (3-5) are aggregated into one
+//   7. transparent()                  type-level keyword
+//      → emits the type-level `psio::transparent_spec` annotation: the
+//      type has exactly one data member and IS that member in every core
+//      format (psio/transparent.hpp).
+//
+//   8. invariant(fn)                  type-level keyword
+//      → the type's semantic invariant (psio/invariant.hpp): `fn` is any
+//      expression callable as `fn(const T&) noexcept` returning
+//      `psio::codec_status`. In a class body it may name a static member
+//      declared anywhere in the class; at namespace scope it is looked up
+//      where the macro is written. At most one per type.
+//
+// All type-level keywords (3-5, 7) are aggregated into one
 // `annotate<type<T>{}>` specialization via `std::tuple_cat`, so they
 // compose freely.  Per-keyword paren form (`maxFields(N)`, NOT
 // `maxFields<N>()`) is required because the cat-detect dispatch can't
@@ -599,8 +614,9 @@ namespace psio {
 // to the "field" handler.  Adding a new keyword = one macro definition.
 //
 // The keywords are recognised by token pasting only: no macro named `attr`,
-// `method`, `definitionWillNotChange`, `maxFields` or `maxDynamicData` is
-// defined, so they do not collide with user identifiers.
+// `method`, `definitionWillNotChange`, `maxFields`, `maxDynamicData`,
+// `transparent` or `invariant` is defined, so they do not collide with user
+// identifiers.
 
 #define PSIO_PP_FIRST(a, ...) a
 #define PSIO_PP_APPLY_FIRST(a) PSIO_PP_FIRST(a)
@@ -626,6 +642,10 @@ namespace psio {
 #define PSIO_REFLECT_KW_maxDynamicData(N) (typeattr_max_dyn_data, N), 1
 // method(name, param1, param2, ...) → (method, name, param1, param2, ...), 1
 #define PSIO_REFLECT_KW_method(...) (method, __VA_ARGS__), 1
+// transparent() → (typeattr_transparent), 1
+#define PSIO_REFLECT_KW_transparent(...) (typeattr_transparent), 1
+// invariant(fn) → (typeattr_invariant, fn), 1
+#define PSIO_REFLECT_KW_invariant(...) (typeattr_invariant, __VA_ARGS__), 1
 
 // Classify each item into `(KIND, payload...)`.  Bare ident → (field, ident).
 #define PSIO_REFLECT_CLASSIFY(s, _, item)                                  \
@@ -647,6 +667,8 @@ namespace psio {
 #define PSIO_REFLECT_KIND_typeattr_max_fields    3
 #define PSIO_REFLECT_KIND_typeattr_max_dyn_data  4
 #define PSIO_REFLECT_KIND_method                 5
+#define PSIO_REFLECT_KIND_typeattr_transparent   6
+#define PSIO_REFLECT_KIND_typeattr_invariant     7
 #define PSIO_REFLECT_KEEP_METHOD(s, _, kt) \
    BOOST_PP_EQUAL(5, BOOST_PP_CAT(PSIO_REFLECT_KIND_, BOOST_PP_TUPLE_ELEM(0, kt)))
 
@@ -710,6 +732,10 @@ namespace psio {
 #define PSIO_REFLECT_TYPEATTR_TUPLE_typeattr_max_dyn_data(kt)                  \
    , ::std::tuple{::psio::max_dynamic_data_spec{BOOST_PP_TUPLE_ELEM(1, kt)}}
 
+#define PSIO_REFLECT_TYPEATTR_TUPLE_typeattr_transparent(kt)                   \
+   , ::std::tuple{::psio::transparent_spec{}}
+#define PSIO_REFLECT_TYPEATTR_TUPLE_typeattr_invariant(kt)                     /**/
+
 #define PSIO_REFLECT_TYPEATTR_PRESENT(s, _, kt)                                \
    BOOST_PP_CAT(PSIO_REFLECT_TYPEATTR_PRESENT_, BOOST_PP_TUPLE_ELEM(0, kt))
 #define PSIO_REFLECT_TYPEATTR_PRESENT_field                                    /**/
@@ -718,6 +744,8 @@ namespace psio {
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_dwnc          1
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_max_fields    1
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_max_dyn_data  1
+#define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_transparent   1
+#define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_invariant     /**/
 
 #define PSIO_REFLECT_TYPE_ANN_(TYPE, KIND_SEQ)                                             \
    BOOST_PP_IIF(BOOST_PP_CHECK_EMPTY(                                                      \
@@ -728,6 +756,70 @@ namespace psio {
 #define PSIO_REFLECT_TYPE_ANN_SOME_(TYPE, KIND_SEQ)                                        \
       static constexpr auto type_annotations = ::std::tuple_cat(                           \
          ::std::tuple<>{} BOOST_PP_SEQ_FOR_EACH(PSIO_REFLECT_TYPEATTR_TUPLE, _, KIND_SEQ));
+
+// The invariant: `invariant(fn)` becomes one static member function of the
+// metadata, `_psio_invariant_(integral_constant<I>, const T&)` where I is the
+// keyword's position in the argument list, so that a second `invariant(...)`
+// is a distinct overload and the count below gives the diagnostic.
+// psio/invariant.hpp reads it (has_invariant_v, check_invariant). The call
+// is in a member function body: in a class body that is a complete-class
+// context, so `fn` may name a static member declared after the macro.
+#define PSIO_PP_REST1_(a, ...) __VA_ARGS__
+#define PSIO_REFLECT_INVARIANT_FN_(r, TYPE, I, kt) \
+   BOOST_PP_CAT(PSIO_REFLECT_INVARIANT_FN_, BOOST_PP_TUPLE_ELEM(0, kt))(TYPE, I, kt)
+#define PSIO_REFLECT_INVARIANT_FN_field(TYPE, I, kt)                  /**/
+#define PSIO_REFLECT_INVARIANT_FN_attrfield(TYPE, I, kt)              /**/
+#define PSIO_REFLECT_INVARIANT_FN_method(TYPE, I, kt)                 /**/
+#define PSIO_REFLECT_INVARIANT_FN_typeattr_dwnc(TYPE, I, kt)          /**/
+#define PSIO_REFLECT_INVARIANT_FN_typeattr_max_fields(TYPE, I, kt)    /**/
+#define PSIO_REFLECT_INVARIANT_FN_typeattr_max_dyn_data(TYPE, I, kt)  /**/
+#define PSIO_REFLECT_INVARIANT_FN_typeattr_transparent(TYPE, I, kt)   /**/
+#define PSIO_REFLECT_INVARIANT_FN_typeattr_invariant(TYPE, I, kt)                          \
+      static ::psio::codec_status _psio_invariant_(                                        \
+         ::std::integral_constant<::std::size_t, I>, const psio_T_& psio_v_) noexcept      \
+      {                                                                                    \
+         constexpr bool psio_ok_ = requires {                                              \
+            { (PSIO_PP_REST1_ kt)(psio_v_) } noexcept                                      \
+               -> ::std::same_as<::psio::codec_status>;                                    \
+         };                                                                                \
+         static_assert(psio_ok_,                                                           \
+                       "psio: invariant(fn) in PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)     \
+                       ") needs fn callable as fn(const T&), declared noexcept and "       \
+                       "returning psio::codec_status");                                    \
+         if constexpr (psio_ok_)                                                           \
+            return (PSIO_PP_REST1_ kt)(psio_v_);                                           \
+         else                                                                              \
+            return {};                                                                     \
+      }
+#define PSIO_REFLECT_INVARIANT_ONE_(r, _, I, kt) \
+   BOOST_PP_CAT(PSIO_REFLECT_INVARIANT_ONE_, BOOST_PP_TUPLE_ELEM(0, kt))(I)
+#define PSIO_REFLECT_INVARIANT_ONE_field(I)                  /**/
+#define PSIO_REFLECT_INVARIANT_ONE_attrfield(I)              /**/
+#define PSIO_REFLECT_INVARIANT_ONE_method(I)                 /**/
+#define PSIO_REFLECT_INVARIANT_ONE_typeattr_dwnc(I)          /**/
+#define PSIO_REFLECT_INVARIANT_ONE_typeattr_max_fields(I)    /**/
+#define PSIO_REFLECT_INVARIANT_ONE_typeattr_max_dyn_data(I)  /**/
+#define PSIO_REFLECT_INVARIANT_ONE_typeattr_transparent(I)   /**/
+#define PSIO_REFLECT_INVARIANT_ONE_typeattr_invariant(I)     +1
+#define PSIO_REFLECT_INVARIANT_AT_(r, _, I, kt) \
+   BOOST_PP_CAT(PSIO_REFLECT_INVARIANT_AT_, BOOST_PP_TUPLE_ELEM(0, kt))(I)
+#define PSIO_REFLECT_INVARIANT_AT_field(I)                  /**/
+#define PSIO_REFLECT_INVARIANT_AT_attrfield(I)              /**/
+#define PSIO_REFLECT_INVARIANT_AT_method(I)                 /**/
+#define PSIO_REFLECT_INVARIANT_AT_typeattr_dwnc(I)          /**/
+#define PSIO_REFLECT_INVARIANT_AT_typeattr_max_fields(I)    /**/
+#define PSIO_REFLECT_INVARIANT_AT_typeattr_max_dyn_data(I)  /**/
+#define PSIO_REFLECT_INVARIANT_AT_typeattr_transparent(I)   /**/
+#define PSIO_REFLECT_INVARIANT_AT_typeattr_invariant(I)     +(I)
+#define PSIO_REFLECT_INVARIANT_(TYPE, KIND_SEQ)                                            \
+      static constexpr ::std::size_t _psio_invariant_count_ =                              \
+         0 PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_INVARIANT_ONE_, _, KIND_SEQ);              \
+      static constexpr ::std::size_t _psio_invariant_index_ =                              \
+         0 PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_INVARIANT_AT_, _, KIND_SEQ);               \
+      static_assert(_psio_invariant_count_ <= 1,                                           \
+                    "psio: PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)                         \
+                    ") declares invariant(...) twice: a type has one invariant");          \
+      PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_INVARIANT_FN_, TYPE, KIND_SEQ)
 
 // PSIO_REFLECT(TYPE)             — zero-field marker (resource opt-in)
 // PSIO_REFLECT(TYPE, f1, f2, …)  — record / struct
@@ -1077,6 +1169,7 @@ namespace psio {
       PSIO_REFLECT_METHODS_(MSEQ)                                                        \
       PSIO_REFLECT_MEMBER_ANN_(FKSEQ)                                                    \
       PSIO_REFLECT_TYPE_ANN_(TYPE, KIND_SEQ)                                             \
+      PSIO_REFLECT_INVARIANT_(TYPE, KIND_SEQ)                                            \
       static_assert(::psio::detail::reflected_names_distinct(_names_array_, method_names), \
                     "psio: PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)                       \
                     ") lists a name twice (a field and a method may not share a name)"); \

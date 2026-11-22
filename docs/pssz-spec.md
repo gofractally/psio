@@ -1031,6 +1031,55 @@ different key type has a different order. Bytes written as a map are always
 readable as the list of entries; the reverse holds only for sorted lists, so
 `pssz_evolves_from` does not relate a map to its list type. A pair and the
 2-tuple of the same elements are one type for this check.
+### 5.10 Transparent types
+
+A **transparent type** is a named type with exactly one member that *is*
+that member on the wire. Nothing of the wrapper is encoded: no header, no
+offset slot, no selector.
+
+```
+encoding(Wrapper{member}) == encoding(member)
+```
+
+Everything the format derives from a type is the member's:
+
+| property | value for a transparent type `W` over `M` |
+|---|---|
+| fixed / variable, `fixed_size_of` | those of `M` |
+| `min_encoded_size`, so the optional form of `Optional(W)` (§5.5) | that of `M`: no selector iff `min(M) > 0` |
+| `max_encoded_size`, a declared `max-dynamic-data` budget, the width W | those of `M` |
+| element layout in `Vector(W)` / `Array(W, N)` | that of `M` (a list of fixed wrappers is the contiguous list of members) |
+| node depth (§8.3) | the wrapper adds none |
+| validation | that of `M`, then the wrapper's invariant if it has one (§18) |
+| view | the member's view |
+
+A transparent type is therefore **not a record**: a frame that encodes it
+as a one-field record (a header and the member) is a different, and for the
+wrapper invalid, encoding. It has no `definitionWillNotChange`, no
+`max-fields` and no `max-dynamic-data` of its own, its member takes no
+member annotation, and its member is not an `Optional` (presence belongs to
+the record that holds the value: hold an `Optional(Wrapper)`). A record
+member of a transparent type takes the annotations that reach a value
+through any type (the integer text form); a length bound on it is an error,
+as on any member that is not itself a string or a list — bound the member's
+type.
+
+What the wrapper keeps is its **identity**: its name, a text form of its own
+(`docs/json.md`), an invariant (§18) and its Schema IR node — a named alias
+of the member's type, `types: [{name: "W", type: <M>}]`, or
+`Custom{<M>, id}` when it has a text form or an invariant. Schema evolution
+(§7) treats it nominally: a transparent type evolves only from a transparent
+type of the same name whose member evolves; it does not evolve from or into
+its member's type.
+
+C++: `PSIO_REFLECT(W, transparent(), member)` or
+`PSIO_TYPE_ATTRS(W, psio::transparent)`; `psio::is_transparent_v<W>`,
+`psio::transparent_inner_t<W>` (`psio/transparent.hpp`). Rust:
+`#[pssz(transparent)]`.
+
+The formats outside the core set see what is declared, a struct of one
+member: `bin`, `borsh` and `bincode` encode that as the member anyway;
+`ssz`, `frac` and the foreign-schema formats encode the struct.
 
 ## 6. Document — top-level
 
@@ -1775,6 +1824,97 @@ ok = mv.get<6>()[0].value().set(9);                  // mapped value of entry 0 
 auto name = mv.get<6>()[0].key();                    // its key: a read view, no set
 ok = mv.get<7>().get().get<1>().set(5);              // member 1 of the value inside a nested<T>
 ```
+
+## 18. Type invariants
+
+A type may declare one **invariant**: a predicate over a decoded value that
+says whether the value is a value of the type at all — an account name in
+canonical form, a key that is a DER sequence, `lo <= hi`. It is part of the
+type, not of a call: every reader that checks its input and every writer
+enforces it, so a value that violates its invariant has no encoding and
+bytes that decode to such a value are rejected.
+
+```cpp
+struct AccountNumber {
+   std::uint64_t value = 0;
+   static psio::codec_status check(const AccountNumber& a) noexcept;
+   PSIO_REFLECT(AccountNumber, definitionWillNotChange(), invariant(check), value)
+};
+```
+
+C++ (`psio/invariant.hpp`): `invariant(fn)` in `PSIO_REFLECT`, or
+`PSIO_INVARIANT(Type, fn[, "SchemaId"])` at global scope for a type that is
+not a reflected record (an enum, a `std::variant`, a `std::tuple`), with
+`fn(const T&) noexcept -> psio::codec_status`. Queries:
+`psio::has_invariant_v<T>`, `psio::check_invariant(value)`,
+`psio::contains_invariant_v<T>` (T, or any type it holds, has one) and
+`psio::any_has_invariant_v<Ts...>` (one of a path of enclosing types has
+one).
+
+Rules:
+
+1. **One per type.** Declaring a second is an error. Arithmetic types take
+   none. An invariant registered for a `std::variant` or `std::tuple`
+   applies to that exact type wherever it is used; a distinct identity is a
+   transparent wrapper (§5.10).
+2. **After structure.** The check runs on a value only after the structural
+   validation of exactly its bytes succeeded: it never sees a malformed
+   value, and a structural error is reported as such.
+3. **Innermost first.** Nested values are checked where they occur — record
+   members, list and array elements, optional and variant payloads, tuple
+   elements, the member of a transparent wrapper, boxed values — before the
+   value that holds them, so a type's check may rely on those of its
+   members. The first failure in wire order is the one reported.
+4. **The error is the type's own.** The status the check returns
+   (by convention `codec_fail(message, 0, "<type name>")`) is passed through
+   unchanged by every entry point.
+5. **No cost without one.** A type without an invariant is validated without
+   being materialised, exactly as before; a list or array of an enum is
+   checked element by element only when the enum has an invariant.
+
+Where it runs:
+
+| entry point | invariant |
+|---|---|
+| `psio::validate`, `validate_or_throw`, `validate_strict`, `validate_pssz_compatible`, `decode_pssz_checked`, `validated_pssz_view` | **checked**: the value is materialised from its span and checked |
+| `psio::encode` (fail-fast), `encode_pssz_checked` (status) | **checked** before any byte is written; `out` is unchanged on failure |
+| `psio::decode`, `psio::make_boxed` (trusted: the input was validated) | **not checked** |
+| views (`psio::view<T, psio::pssz>`) | **not checked** |
+| `key` encode / `to_key`, key `validate`, `validate_strict`, `decode` (`docs/key-spec.md`) | **checked** |
+| `json` / `ijson` encode, `encode_json_checked`, `validate`, `validate_strict`, `validate_json`, `decode`, `decode_json_checked`, `make_boxed` (`docs/json.md`) | **checked** |
+| formats outside the core set (bin, ssz, frac, borsh, ...) | **not checked** |
+
+The explicit-width profiles (`psio::pssz_<W>`) check exactly as the
+automatic one. With exceptions disabled every checked entry point reports
+the invariant's status; none throws or aborts.
+
+**Through a schema.** A type with an invariant is a *custom type*: its
+Schema IR node is `Custom{<wire type>, id}`, as for a type with a custom
+text form (`docs/json.md`, "Custom types through a schema"). The id is the
+text adapter's `schema_id` if the type has one, else the id given to
+`PSIO_INVARIANT`, else the reflected record or enum name; a type with none
+of these must provide one. A schema cannot carry a predicate, so the
+schema-driven codecs take it as the `check` of the handler registered for
+the id:
+
+| registry | a custom node whose invariant fails |
+|---|---|
+| none | accepted: the node is its wire type, structure only |
+| with the id's handler (`check`) | rejected with the invariant's status, on every entry point, binary and text |
+| strict (`require_all`) without the id's handler | rejected: "no handler registered for a custom type" |
+
+`validate_pssz(schema, root, bytes, has_unknown)` is the structural check;
+`validate_pssz(schema, root, bytes, has_unknown, &handlers)` runs the
+handlers' checks, as do `decode_auto` / `encode_auto` /
+`decode_compatible<W>` / `decode_exact<W>` / `encode<W>` /
+`validate_canonical_for_width<W>` and the text conversions given the
+registry. On reads a check runs after the value's structure is accepted, on
+writes before any byte is returned, nested values first.
+
+The fixture classes `invariant` (`conformance/pssz-vectors.md`), the JSON
+row kind `invariant` and the key row kind `key-invariant` hold structurally
+valid values that violate an invariant, with the outcome for each of the
+three registries above (`conformance/custom-types.md`).
 
 ## Appendix A. Glossary
 

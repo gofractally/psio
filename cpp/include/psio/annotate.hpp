@@ -421,6 +421,18 @@ namespace psio {
       constexpr bool operator==(const definition_will_not_change&) const = default;
    };
 
+   // Type-level only: a reflected struct with exactly one data member that
+   // IS that member in every core format (psio/transparent.hpp). Declared
+   // with the PSIO_REFLECT keyword `transparent()` or
+   // `PSIO_TYPE_ATTRS(T, psio::transparent)`.
+   struct transparent_spec
+   {
+      using spec_category = static_spec_tag;
+
+      constexpr bool operator==(const transparent_spec&) const = default;
+   };
+   inline constexpr transparent_spec transparent{};
+
    // Type-level cap on declared field count.  Lets formats pick a
    // smaller slot index / vtable-width than the (potentially large)
    // member_count would imply.  The schema author asserts the cap;
@@ -844,7 +856,7 @@ namespace psio {
             static_assert(
                specs_disjoint<Carried, Declared>::value,
                "psio: an annotation is declared twice — in PSIO_REFLECT (attr / "
-               "definitionWillNotChange / maxFields / maxDynamicData) and again with "
+               "definitionWillNotChange / maxFields / maxDynamicData / transparent) and again with "
                "PSIO_FIELD_ATTRS / PSIO_TYPE_ATTRS / PSIO_ATTRS");
             return std::tuple_cat(carried, declared);
          }

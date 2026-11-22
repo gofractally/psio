@@ -524,6 +524,16 @@ namespace psio {
       using view<T, Fmt, Store>::view;
    };
 
+   // A transparent type (transparent.hpp) is its member: so is its view.
+   template <typename T, typename Fmt, storage Store>
+      requires (detail::is_pssz_format_v<Fmt> && ::psio::is_transparent_v<T> &&
+                !::psio::format_should_dispatch_adapter_v<Fmt, T>)
+   class view<T, Fmt, Store> : public view<::psio::transparent_inner_t<T>, Fmt, Store>
+   {
+    public:
+      using view<::psio::transparent_inner_t<T>, Fmt, Store>::view;
+   };
+
    // Construction checks the complete frame; getters retain their O(1)
    // prevalidated-input contract and borrow the original payload bytes.
    template <typename T, typename Fmt>

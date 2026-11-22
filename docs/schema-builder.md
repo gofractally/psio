@@ -89,6 +89,21 @@ builder records everything those depend on:
   The validation policy of `psio::nested<T, nested_validation::deferred>` is
   not recorded: both forms produce the same node.
 
+- **Transparent types.** A `transparent()` type is inserted under its
+  reflected name as a named alias of its member's type:
+  `{name: "SubjectPublicKeyInfo", type: <the member's type>}`. Nothing else
+  marks it; a schema-only tool needs nothing more.
+- **Custom types.** A type with a `text_category` adapter, an invariant, or
+  both — of any shape: record, transparent wrapper, enum, `std::variant`,
+  `std::tuple`, list — is `Custom{<its wire type>, id}`
+  (`psio::schema_custom_v<T>`, `psio::schema_custom_id<T>()`): for a
+  transparent wrapper the Custom wraps the member's type. The id is the
+  adapter's `schema_id`, else the id given to `PSIO_INVARIANT`, else the
+  reflected record or enum name; a type with none (a variant, a tuple) must
+  provide one or the builder does not compile. The handler for the id —
+  text form and invariant — is registered with the schema-driven codecs
+  (`docs/json.md`, "Custom types through a schema").
+
 ### The `Nested` node
 
 `Nested { type: AnyType }` (alternative 10 of `AnyType`, between `Float` and
@@ -110,8 +125,9 @@ The alternative was called `FracPack` and had no codec; it keeps its
 position, so the encoding of a Schema IR is unchanged by the rename, and the
 JSON spelling of the alternative is `Nested`.
 
-Not recorded: a member `as<Tag>` override, text / binary adapters, `Box`
-(transparent), and the deferred-validation policy of a nested member. See "Not expressible" in `docs/json.md`.
+Not recorded: a member `as<Tag>` override, binary adapters, `Box`
+(transparent), and the deferred-validation policy of a nested member. See
+"Not expressible" in `docs/json.md`.
 
 ## Serialized forms of a schema
 

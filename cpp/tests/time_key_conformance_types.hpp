@@ -6,6 +6,8 @@
 // Shared by the emitter (time_key_conformance_emit.cpp) and the consumer
 // (time_key_conformance_tests.cpp).
 
+#include "custom_conformance_types.hpp"
+
 #include <psio/json.hpp>
 #include <psio/key.hpp>
 #include <psio/nested.hpp>
@@ -153,6 +155,28 @@ namespace tk_conf
    };
    using SPacked  = std::set<psio::nested<std::uint32_t>, PackedLess>;
 
+   // Transparent wrappers, custom types and invariants
+   // (custom_conformance_types.hpp; conformance/custom-types.md). A key is
+   // the key of the wire type: text forms play no part, invariants do.
+   using custom_conf::Blob;
+   using custom_conf::DerKey;
+   using custom_conf::Endpoint;
+   using custom_conf::Id;
+   using custom_conf::Level;
+   using custom_conf::Name;
+   using custom_conf::Range;
+   using custom_conf::Ratio;
+   using custom_conf::Ref;
+   // A transparent wrapper of a composite key is that composite key.
+   struct ShardKey
+   {
+      KShard      key;
+      friend bool operator==(const ShardKey&, const ShardKey&)  = default;
+      friend auto operator<=>(const ShardKey&, const ShardKey&) = default;
+      PSIO_REFLECT(ShardKey, transparent(), key)
+   };
+   using KGuard = Tup<Name, std::optional<Range>, std::vector<Level>, DerKey>;
+
    // ── Fixture ids ────────────────────────────────────────────────────────
    template <typename T>
    struct type_name;
@@ -206,6 +230,17 @@ namespace tk_conf
    TK_TYPE(SF64, "set<f64>")
    TK_TYPE(KMap, "tuple<map<u16,string>,u8>")
    TK_TYPE(SPacked, "set<nested<u32>>")
+   TK_TYPE(Id, "Id")
+   TK_TYPE(Blob, "Blob")
+   TK_TYPE(Endpoint, "Endpoint")
+   TK_TYPE(Ratio, "Ratio")
+   TK_TYPE(Ref, "Ref")
+   TK_TYPE(Name, "Name")
+   TK_TYPE(DerKey, "DerKey")
+   TK_TYPE(Range, "Range")
+   TK_TYPE(Level, "Level")
+   TK_TYPE(ShardKey, "ShardKey")
+   TK_TYPE(KGuard, "tuple<Name,optional<Range>,list<Level>,DerKey>")
 #undef TK_TYPE
 
    template <typename T>
@@ -228,7 +263,9 @@ namespace tk_conf
                       // Appended (the ids above keep their schema positions).
                       mono_seconds, mono_micros, mono_ms32, Timer, KMono, KPacked,
                       KPair, MStrU32, MTuple, MNested, SU8, SStr, SI64, SF64, KMap,
-                      SPacked>>{});
+                      SPacked,
+                      Id, Blob, Endpoint, Ratio, Ref, Name, DerKey, Range, Level, ShardKey,
+                      KGuard>>{});
    }
 
    // The Schema IR of every fixture type, each under its fixture id. (Also
@@ -260,14 +297,21 @@ namespace tk_conf
    //   key-prefix   prefix = key of the first `count` elements of the value
    //                `pssz`; bound = its exclusive upper bound (null: none)
    //   bound        bound = exclusive upper bound of the raw bytes `prefix`
+   //   key-invariant  `key` is the key, and `pssz` the encoding, of a value
+   //                of the wire type that violates an invariant of `type`
+   //                (message `reason`): both are rejected by the typed
+   //                readers; a reader that knows only the wire type accepts
+   //                them
    struct Row
    {
       std::string                             name, kind, type;
       std::optional<std::string>              pssz, key, json, ijson, text, prefix, bound;
       std::optional<std::uint32_t>            count;
       std::optional<std::vector<std::string>> values;
+      std::optional<std::string>              reason;
    };
-   PSIO_REFLECT(Row, name, kind, type, pssz, key, json, ijson, text, prefix, bound, count, values)
+   PSIO_REFLECT(Row, name, kind, type, pssz, key, json, ijson, text, prefix, bound, count, values,
+                reason)
 
    struct TypeRow
    {
@@ -329,6 +373,9 @@ namespace tk_conf
       auto element = [&]<std::size_t I>(std::integral_constant<std::size_t, I>) -> decltype(auto) {
          if constexpr (psio::detail::key_impl::is_std_tuple<T>::value)
             return std::get<I>(v);
+         else if constexpr (psio::is_transparent_v<T>)
+            // The elements of the composite it wraps (a tuple here).
+            return std::get<I>(psio::transparent_inner(v));
          else
             return v.*(psio::reflect<T>::template member_pointer<I>);
       };

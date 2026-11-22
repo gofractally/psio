@@ -28,6 +28,7 @@ All byte strings are lower-case hex. A value is identified by its PSSZ
 | `key-order-bits` | `type`, `values` | values (pssz) in strictly ascending **key** order where the language's `<` has no answer (NaNs, `docs/key-spec.md` §4): their keys are strictly ascending bytewise, and each key decodes to a value with exactly the same PSSZ bytes |
 | `key-prefix` | `type`, `pssz`, `count`, `prefix`, `bound` | `prefix` is the key of the first `count` elements of the composite value; `bound` is its exclusive upper bound, `null` for none |
 | `bound` | `prefix`, `bound` | the exclusive upper bound of the raw bytes `prefix` (`type` is `"bytes"`) |
+| `key-invariant` | `type`, `key`, `pssz`, `reason` | `key` is the key, and `pssz` the encoding, of a value of `type`'s wire type that violates an invariant of `type` (message `reason`). The typed key readers (validate, decode) and the typed pssz validator reject them with `reason`, and no typed key writer writes the value; a reader that knows only the wire type (a schema with no handler) decodes `key` to the value `pssz` |
 
 Type ids: `time_point<unit>` / `duration<unit>` / `monotonic<unit>` are 64-bit
 signed; `time_point<seconds,u32>`, `duration<60/1,i32>` and
@@ -67,3 +68,11 @@ framing is well formed but whose bytes are not an `Account`, and its order
 row is `key-order-bits`: keys order by the inner bytes, and the type has no
 value order. `string` is a raw string (Schema IR id `string`) and holds UTF-8 in every vector;
 `bytes` is a list of u8.
+
+`Id`, `Blob`, `Endpoint`, `Ratio`, `Ref`, `Name`, `DerKey`, `Range`, `Level`
+are the transparent wrappers and custom types of `custom-types.md`;
+`ShardKey` is a transparent wrapper of `tuple<u32,string>` (a composite key:
+its `key-prefix` rows are the tuple's). A key is the key of the wire type —
+a text form plays no part, an invariant does. The `value` rows of the types
+with a custom text form (`Blob`, `Endpoint`, `Ratio`, `Ref`) carry the typed
+text: a schema-driven codec reproduces it with the type's handler.

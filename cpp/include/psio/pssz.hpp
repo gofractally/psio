@@ -46,6 +46,7 @@
 #include <psio/reflect.hpp>
 #include <psio/stream.hpp>
 #include <psio/time.hpp>
+#include <psio/transparent.hpp>
 #include <psio/validate_strict_walker.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
 
@@ -198,8 +199,9 @@ namespace psio {
       // order; each ladder below dispatches here.
       using ::psio::detail::is_assoc_v;
       struct validate_flags;
+      struct encode_preflight;
       template <typename T>
-      codec_status assoc_check_encode(const T& value, std::size_t depth, bool bounds);
+      codec_status assoc_check_encode(const T& value, std::size_t depth, encode_preflight bounds);
       template <std::size_t W, bool Auto, typename T>
       std::size_t assoc_size(const T& v, size_check* check);
       template <std::size_t W, bool Auto, typename T, typename Sink>
@@ -336,8 +338,11 @@ namespace psio {
             return std::forward<T>(value).*(record_traits<U>::template member_pointer<I>);
       }
 
+      // A transparent type (transparent.hpp) is its member, not a record.
       template <typename T>
-      concept Record = (::psio::Reflected<T> && !std::is_enum_v<T>) || is_std_tuple_v<T>;
+      concept Record = (::psio::Reflected<T> && !std::is_enum_v<T> &&
+                        !::psio::is_transparent_v<T>) ||
+                       is_std_tuple_v<T>;
 
       template <typename T>
       inline constexpr bool is_fixed_v = is_fixed<T>::value;
@@ -378,6 +383,13 @@ namespace psio {
       template <typename T>
          requires(has_binary_adapter_v<T>)
       struct is_fixed<T> : std::false_type
+      {
+      };
+
+      // A transparent type is exactly as fixed as its member.
+      template <typename T>
+         requires(::psio::is_transparent_v<T> && !has_binary_adapter_v<T>)
+      struct is_fixed<T> : is_fixed<::psio::transparent_inner_t<T>>
       {
       };
 
@@ -424,6 +436,8 @@ namespace psio {
       {
          if constexpr (is_psio_box_v<T>)
             return fixed_size_of<typename is_psio_box<T>::elem>();
+         else if constexpr (::psio::is_transparent_v<T>)
+            return fixed_size_of<::psio::transparent_inner_t<T>>();
          else if constexpr (std::is_same_v<T, bool>)
             return 1;
          else if constexpr (std::is_same_v<T, ::psio::uint256>)
@@ -571,6 +585,8 @@ namespace psio {
             return false; // A byte list: the inner encoding may be empty.
          else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::pssz, T>)
             return false; // An adapter without a minimum-size contract may encode empty.
+         else if constexpr (::psio::is_transparent_v<T>)
+            return positive_min_size<::psio::transparent_inner_t<T>>();
          else if constexpr (is_std_optional_v<T>)
             return !positive_min_size<typename T::value_type>();
          else if constexpr (is_std_variant_v<T> || is_bitlist_v<T>)
@@ -694,9 +710,48 @@ namespace psio {
       // length_bound and a bitlist over its capacity, so the encoder never
       // writes a frame its own validator rejects. Tests that need such a
       // frame pass false.
+      //
+      // The preflight also runs the invariant (invariant.hpp) of every value
+      // it walks, innermost first: check_encode_depth_impl is the shape walk
+      // of check_encode_shape followed by the type's own check, and every
+      // nested value goes through it.
+      //
+      // What the preflight checks beyond depth, null Box and UTF-8. It is
+      // passed down the walk unchanged (as `bounds`, and tested as one: it
+      // converts to whether bounds are checked).
+      struct encode_preflight
+      {
+         bool bounds     = true;  // member length_bound, bitlist capacity
+         bool invariants = true;  // type invariants
+         constexpr encode_preflight(bool check_bounds = true,
+                                    bool check_invariants = true) noexcept
+            : bounds(check_bounds), invariants(check_invariants)
+         {
+         }
+         constexpr explicit operator bool() const noexcept { return bounds; }
+      };
+
+      template <typename T>
+      codec_status check_encode_shape(const T& value, std::size_t depth,
+                                      encode_preflight bounds);
+
       template <typename T>
       codec_status check_encode_depth_impl(const T& value, std::size_t depth,
-                                           bool bounds = true)
+                                           encode_preflight bounds = {})
+      {
+         if constexpr (::psio::has_invariant_v<T>)
+         {
+            if (auto status = check_encode_shape(value, depth, bounds); !status.ok())
+               return status;
+            return bounds.invariants ? ::psio::check_invariant(value) : codec_ok();
+         }
+         else
+            return check_encode_shape(value, depth, bounds);
+      }
+
+      template <typename T>
+      codec_status check_encode_shape(const T& value, std::size_t depth,
+                                      encode_preflight bounds)
       {
          if (depth > kMaxValidationDepth)
             return codec_fail("pssz: max depth exceeded", 0, "pssz");
@@ -705,6 +760,9 @@ namespace psio {
             if (!value.value) return codec_fail("pssz: null Box", 0, "pssz");
             return check_encode_depth_impl(*value.value, depth, bounds);
          }
+         else if constexpr (::psio::is_transparent_v<T> &&
+                            !::psio::format_should_dispatch_adapter_v<::psio::pssz, T>)
+            return check_encode_depth_impl(::psio::transparent_inner(value), depth, bounds);
          else if constexpr (is_nested_v<T>)
             return ::psio::detail::nested_impl::pssz_check_encode(value, depth);
          else if constexpr (is_assoc_v<T>)
@@ -727,7 +785,8 @@ namespace psio {
                if constexpr (fixed_size_of<E>() == 0)
                   if (!value.empty())
                      return codec_fail("pssz: nonempty zero-size vector is unsupported", 0, "pssz");
-            if constexpr (std::is_arithmetic_v<E> || std::is_enum_v<E>)
+            if constexpr (std::is_arithmetic_v<E> ||
+                          (std::is_enum_v<E> && !::psio::has_invariant_v<E>))
             {
                // Leaf elements: one depth check covers all of them.
                if (!value.empty() && depth + 1 > kMaxValidationDepth)
@@ -904,6 +963,8 @@ namespace psio {
                         fixed_caps_valid<typename R::template member_type<Is>>()) && ...);
             }(std::make_index_sequence<R::member_count>{});
          }
+         else if constexpr (::psio::is_transparent_v<T>)
+            return fixed_caps_valid<::psio::transparent_inner_t<T>>();
          else if constexpr (is_std_array_v<T>)
          {
             using E = typename T::value_type;
@@ -933,6 +994,8 @@ namespace psio {
          }
          else if constexpr (is_psio_box_v<T>)
             return size_of_v<W, Auto>(*v.value, check);
+         else if constexpr (::psio::is_transparent_v<T>)
+            return size_of_v<W, Auto>(::psio::transparent_inner(v), check);
          else if constexpr (is_nested_v<T>)
             return v.size();
          else if constexpr (is_assoc_v<T>)
@@ -1123,6 +1186,11 @@ namespace psio {
             encode_value<W, Auto>(*v.value, s);
             return;
          }
+         else if constexpr (::psio::is_transparent_v<T>)
+         {
+            encode_value<W, Auto>(::psio::transparent_inner(v), s);
+            return;
+         }
          else if constexpr (is_nested_v<T>)
          {
             // The bytes, as they are: a nested value holds a valid encoding.
@@ -1184,8 +1252,8 @@ namespace psio {
                constexpr bool is_arith =
                   std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
                constexpr bool is_memcpy_record =
-                  Record<E> && std::is_trivially_copyable_v<E> &&
-                  fixed_size_of<E>() == sizeof(E);
+                  (Record<E> || ::psio::is_transparent_v<E>) &&
+                  std::is_trivially_copyable_v<E> && fixed_size_of<E>() == sizeof(E);
                if constexpr (is_arith || is_memcpy_record)
                {
                   if (!v.empty())
@@ -1460,6 +1528,9 @@ namespace psio {
                std::span<const char>(src.data() + pos, end - pos));
             return;
          }
+         else if constexpr (::psio::is_transparent_v<T>)
+            decode_into<W, Auto, ::psio::transparent_inner_t<T>>(
+               src, pos, end, ::psio::transparent_inner(out));
          else if constexpr (std::is_same_v<T, std::string>)
          {
             // pSSZ string: raw bytes from pos to end (no length).
@@ -1473,7 +1544,8 @@ namespace psio {
             constexpr bool is_arith =
                std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
             constexpr bool is_memcpy_record =
-               Record<E> && std::is_trivially_copyable_v<E> &&
+               (Record<E> || ::psio::is_transparent_v<E>) &&
+               std::is_trivially_copyable_v<E> &&
                is_fixed_v<E> && fixed_size_of<E>() == sizeof(E);
             if constexpr (is_arith || is_memcpy_record)
             {
@@ -1580,8 +1652,8 @@ namespace psio {
             constexpr bool is_arith =
                std::is_arithmetic_v<T> && !std::is_same_v<T, bool>;
             constexpr bool is_memcpy_record =
-               Record<T> && std::is_trivially_copyable_v<T> &&
-               fixed_size_of<T>() == sizeof(T);
+               (Record<T> || ::psio::is_transparent_v<T>) &&
+               std::is_trivially_copyable_v<T> && fixed_size_of<T>() == sizeof(T);
             if constexpr (is_arith || is_memcpy_record)
             {
                // Alignment-safe — see detail/unaligned_iter.hpp.
@@ -1755,6 +1827,13 @@ namespace psio {
          {
             using E = typename is_psio_box<T>::elem;
             return T{decode_value<W, Auto, E>(src, pos, end)};
+         }
+         else if constexpr (::psio::is_transparent_v<T>)
+         {
+            T out{};
+            decode_into<W, Auto, ::psio::transparent_inner_t<T>>(
+               src, pos, end, ::psio::transparent_inner(out));
+            return out;
          }
          else if constexpr (is_nested_v<T>)
             return T::unchecked(std::vector<char>(src.data() + pos, src.data() + end));
@@ -1954,6 +2033,10 @@ namespace psio {
                                   std::size_t end,
                                   std::size_t depth = 0,
                                   validate_flags* flags = nullptr) noexcept;
+      template <std::size_t W, bool Auto, typename T>
+      codec_status validate_shape(std::span<const char> src, std::size_t pos,
+                                  std::size_t end, std::size_t depth,
+                                  validate_flags* flags) noexcept;
 
       template <std::size_t W, bool Auto, typename E>
       codec_status validate_vector_payload(std::span<const char> src,
@@ -1980,7 +2063,7 @@ namespace psio {
                                  "element size",
                                  static_cast<std::uint32_t>(pos), "pssz");
             if constexpr ((std::is_arithmetic_v<E> && !std::is_same_v<E, bool>) ||
-                          std::is_enum_v<E>)
+                          (std::is_enum_v<E> && !::psio::has_invariant_v<E>))
             {
                // Leaf elements with no invalid bit patterns: the only check
                // a per-element walk would perform is the node depth.
@@ -2065,7 +2148,7 @@ namespace psio {
                return codec_fail("pssz: array span does not match its fixed size",
                                  static_cast<std::uint32_t>(pos), "pssz");
             if constexpr ((std::is_arithmetic_v<E> && !std::is_same_v<E, bool>) ||
-                          std::is_enum_v<E>)
+                          (std::is_enum_v<E> && !::psio::has_invariant_v<E>))
             {
                if constexpr (N > 0)
                   if (depth + 1 > kMaxValidationDepth)
@@ -2279,8 +2362,31 @@ namespace psio {
          return status;
       }
 
+      // Every value is validated through here: the structural walk of
+      // validate_shape, then — for a type that has one, and only then — its
+      // invariant (invariant.hpp) on the value materialised from exactly
+      // this span. The nested values were validated the same way by the
+      // walk, so invariants run innermost first, for every shape the walk
+      // knows.
       template <std::size_t LegacyW, bool Auto, typename T>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
+                                  std::size_t end,
+                                  std::size_t depth,
+                                  validate_flags* flags) noexcept
+      {
+         if constexpr (::psio::has_invariant_v<T>)
+         {
+            if (auto st = validate_shape<LegacyW, Auto, T>(src, pos, end, depth, flags);
+                !st.ok())
+               return st;
+            return ::psio::check_invariant(decode_value<LegacyW, Auto, T>(src, pos, end));
+         }
+         else
+            return validate_shape<LegacyW, Auto, T>(src, pos, end, depth, flags);
+      }
+
+      template <std::size_t LegacyW, bool Auto, typename T>
+      codec_status validate_shape(std::span<const char> src, std::size_t pos,
                                   std::size_t end,
                                   std::size_t depth,
                                   validate_flags* flags) noexcept
@@ -2313,6 +2419,9 @@ namespace psio {
          }
          else if constexpr (is_psio_box_v<T>)
             return validate_value<W, Auto, typename is_psio_box<T>::elem>(
+               src, pos, end, depth, flags);
+         else if constexpr (::psio::is_transparent_v<T>)
+            return validate_value<W, Auto, ::psio::transparent_inner_t<T>>(
                src, pos, end, depth, flags);
          else if constexpr (is_nested_v<T>)
             return ::psio::detail::nested_impl::pssz_validate<T>(
@@ -2658,6 +2767,17 @@ namespace psio {
       {
          if constexpr (std::is_same_v<Old, New>)
             return true;
+         else if constexpr (::psio::is_transparent_v<Old> || ::psio::is_transparent_v<New>)
+         {
+            // A transparent type keeps its identity: it evolves only from a
+            // transparent type of the same name, as far as the members do.
+            if constexpr (::psio::is_transparent_v<Old> && ::psio::is_transparent_v<New>)
+               return ::psio::reflect<Old>::name == ::psio::reflect<New>::name &&
+                      layout_evolves<::psio::transparent_inner_t<Old>,
+                                     ::psio::transparent_inner_t<New>>();
+            else
+               return false;
+         }
          else if constexpr (::psio::auto_pssz_width<Old>() != ::psio::auto_pssz_width<New>() ||
                             is_fixed_v<Old> != is_fixed_v<New>)
             return false;
@@ -2966,7 +3086,9 @@ namespace psio {
    // Appends the encoding of `value` to `out`, or returns why the value has
    // none and leaves `out` unchanged: node depth, a null Box, a utf8_string
    // that is not UTF-8 or over its bound, a member outside its length_bound,
-   // a bitlist over its capacity, a total over the type's maxDynamicData
+   // a bitlist over its capacity, a value (nested ones included) that
+   // violates its type's invariant — reported with the invariant's own
+   // status —, a total over the type's maxDynamicData
    // cap, a nested record over its own cap, a payload that does not fit the
    // type's static offset width or the 32-bit address space, or a nonempty
    // vector of zero-size elements. It never throws and never aborts on a
@@ -2992,23 +3114,54 @@ namespace psio {
       }
    }  // namespace detail::pssz_impl
 
+   namespace detail::pssz_impl
+   {
+      // The checked encoder, with the preflight it is asked for. One sizing
+      // pass in checked mode; once it succeeds the write repeats exactly the
+      // same arithmetic on the same value and cannot fail.
+      template <typename T, typename Fmt>
+      codec_status encode_checked(Fmt format, const T& value, std::vector<char>& out,
+                                  encode_preflight preflight)
+      {
+         if (auto status = check_encode_depth_impl(value, 0, preflight); !status.ok())
+            return status;
+         std::size_t total = 0;
+         if (auto status = checked_size(format, value, total); !status.ok())
+            return status;
+         if (total > std::numeric_limits<std::size_t>::max() - out.size())
+            return codec_fail("pssz: encoded size overflow", 0, "pssz");
+         constexpr bool        Auto = std::is_same_v<Fmt, ::psio::pssz>;
+         constexpr std::size_t W    = [] {
+            if constexpr (std::is_same_v<Fmt, ::psio::pssz>)
+               return ::psio::auto_pssz_width<T>();
+            else
+               return Fmt::offset_width;
+         }();
+         const std::size_t orig = out.size();
+         out.resize(orig + total);
+         ::psio::fast_buf_stream sink(out.data() + orig, total);
+         encode_value<W, Auto>(value, sink);
+         return codec_ok();
+      }
+
+      // The frame of a value whose invariants (invariant.hpp) are NOT
+      // checked; everything else is. For the two callers that own that
+      // check themselves: a custom handler's from_text, whose `check` runs
+      // next (pssz_ir_json.hpp), and tests that need the frame of a value
+      // that violates an invariant — which every checking reader rejects.
+      template <typename T, typename Fmt>
+      [[nodiscard]] codec_status encode_ignoring_invariants(Fmt format, const T& value,
+                                                            std::vector<char>& out)
+      {
+         return encode_checked(format, value, out, encode_preflight{true, false});
+      }
+   }  // namespace detail::pssz_impl
+
    template <typename T, typename Fmt>
    [[nodiscard]] codec_status encode_pssz_checked(Fmt format, const T& value,
                                                   std::vector<char>& out)
    {
-      if (auto status = detail::pssz_impl::check_encode_depth_impl(value, 0);
-          !status.ok())
-         return status;
-      // The whole sizing pass in checked mode: once it succeeds the encoder
-      // below repeats exactly the same checks on the same value and cannot
-      // fail.
-      std::size_t total = 0;
-      if (auto status = detail::pssz_impl::checked_size(format, value, total); !status.ok())
-         return status;
-      if (total > std::numeric_limits<std::size_t>::max() - out.size())
-         return codec_fail("pssz: encoded size overflow", 0, "pssz");
-      ::psio::encode(format, value, out);
-      return codec_ok();
+      return detail::pssz_impl::encode_checked(format, value, out, {});
    }
 
    template <typename T, typename Fmt>

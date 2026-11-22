@@ -59,7 +59,7 @@ TEST_CASE("nested x map / set: checked readers on mutated frames", "[nested][ass
       REQUIRE_NOTHROW((void)psio::decode_pssz_checked(psio::pssz{}, span, out, unknown));
       rt::Value value;
       REQUIRE_NOTHROW((void)rt::decode_auto(schema, "Ledger", span, value, unknown,
-                                            rt::nested_bytes::opaque));
+                                            nullptr, rt::nested_bytes::opaque));
       std::string text;
       REQUIRE_NOTHROW((void)rt::pssz_to_json(schema, "Ledger", psio::json{}, span, text));
    };

@@ -46,10 +46,19 @@
 //                             with exactly the unit's fraction digits
 //   text adapter              "..." holding the adapter's text
 //                             (PSIO_ADAPTER(T, psio::text_category, ...), or a
-//                             member-level psio::as<Tag>)
+//                             member-level psio::as<Tag>), for a type of any
+//                             shape: the adapter replaces the shape's own text
+//   transparent type          its member's text (transparent.hpp)
 //   psio::nested<T>           the text of the T its bytes hold (nested.hpp);
 //                             read as a T and stored as its canonical PSSZ
 //                             encoding. Bytes that are not a T have no text
+//
+// Invariants (invariant.hpp). A value that violates its type's invariant has
+// no text, and text that reads as such a value is rejected: every writer and
+// every reader runs the check on each value of a type that has one (after a
+// text adapter's own `validate`), innermost first, and reports the
+// invariant's own status unchanged. A reader that only validates
+// materialises those values to check them.
 //
 // Integer form per member: psio::json_number / psio::json_string and
 // psio::ijson_number / psio::ijson_string (annotate.hpp) force a number or a
@@ -112,6 +121,7 @@
 #include <psio/json_cursor.hpp>
 #include <psio/reflect.hpp>
 #include <psio/time.hpp>
+#include <psio/transparent.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for, byte_array, ...
 
 #include <algorithm>
@@ -248,8 +258,10 @@ namespace psio {
       {
       };
 
+      // A transparent type (transparent.hpp) is its member, not a record.
       template <typename T>
-      concept Record = ::psio::Reflected<T> && !std::is_enum_v<T>;
+      concept Record = ::psio::Reflected<T> && !std::is_enum_v<T> &&
+                       !::psio::is_transparent_v<T>;
 
       // An element type whose sequences are byte sequences. signed char /
       // int8_t is a small integer, not a byte.
@@ -377,6 +389,9 @@ namespace psio {
          bool             fail_fast = true;
          std::string_view err{};
          std::size_t      n = s.size();  // bytes of `s` that are text
+         // The status of a violated invariant, reported unchanged.
+         ::psio::codec_error invariant{};
+         bool                has_invariant = false;
 
          // Room for `k` more bytes; returns where they go.
          char* reserve(std::size_t k)
@@ -423,6 +438,21 @@ namespace psio {
             }
             if (err.empty())
                err = what;
+         }
+         // A violated invariant: its own error, not this format's.
+         void fail(const ::psio::codec_error& error)
+         {
+            if (fail_fast)
+            {
+               finish();
+               ::psio::codec_abort(error);
+            }
+            if (err.empty())
+            {
+               err           = error.what;
+               invariant     = error;
+               has_invariant = true;
+            }
          }
 
         private:
@@ -600,6 +630,8 @@ namespace psio {
       {
          if constexpr (dispatch_adapter_v<Fmt, T>)
             return 0;
+         else if constexpr (::psio::is_transparent_v<T>)
+            return text_bound<Fmt, ::psio::transparent_inner_t<T>>();
          else if constexpr (std::is_same_v<T, bool>)
             return 5;
          else if constexpr (std::is_same_v<T, std::byte>)
@@ -678,6 +710,8 @@ namespace psio {
 
       template <typename Fmt, int_mode IM, typename T>
       void encode_value(const T& v, writer& w);
+      template <typename Fmt, int_mode IM, typename T>
+      void encode_shape(const T& v, writer& w);
 
       // Maps and sets (detail/json_assoc.hpp).
       template <typename Fmt, int_mode IM, typename T>
@@ -748,8 +782,20 @@ namespace psio {
          }
       }
 
+      // Every value is written through here: its text (encode_shape), then
+      // — for a type that has one — its invariant, so nested values are
+      // checked innermost first.
       template <typename Fmt, int_mode IM, typename T>
       void encode_value(const T& v, writer& w)
+      {
+         encode_shape<Fmt, IM>(v, w);
+         if constexpr (::psio::has_invariant_v<T>)
+            if (auto st = ::psio::check_invariant(v); !st.ok())
+               w.fail(st.error());
+      }
+
+      template <typename Fmt, int_mode IM, typename T>
+      void encode_shape(const T& v, writer& w)
       {
          // Adapter check — if the type registered a text adapter (and it
          // doesn't delegate back to this format), delegate and write the
@@ -778,6 +824,8 @@ namespace psio {
             }
             encode_value<Fmt, IM>(*v.value, w);
          }
+         else if constexpr (::psio::is_transparent_v<T>)
+            encode_value<Fmt, IM>(::psio::transparent_inner(v), w);
          else if constexpr (::psio::detail::is_nested_v<T>)
          {
             // The inner value's own text. The bytes are validated before
@@ -995,6 +1043,8 @@ namespace psio {
       {
          C&   c;
          bool lenient_missing = false;
+         // The status of a violated invariant, reported unchanged.
+         codec_status invariant{};
       };
 
       // Canonical decimal integer over exactly `text`: 0 | -?[1-9][0-9]*,
@@ -1385,6 +1435,8 @@ namespace psio {
 
       template <typename Fmt, int_mode IM, typename T, typename C>
       bool read_value(typed_reader<C>& r, T* out);
+      template <typename Fmt, int_mode IM, typename T, typename C>
+      bool read_shape(typed_reader<C>& r, T* out);
 
       // Maps and sets (detail/json_assoc.hpp).
       template <typename Fmt, int_mode IM, typename T, typename C>
@@ -1532,8 +1584,33 @@ namespace psio {
          return true;
       }
 
+      // Every value is read through here: its text (read_shape), then — for
+      // a type that has one — its invariant on the value read, which is
+      // materialised for that even when only validating.
       template <typename Fmt, int_mode IM, typename T, typename C>
       bool read_value(typed_reader<C>& r, T* out)
+      {
+         if constexpr (::psio::has_invariant_v<T>)
+         {
+            T        scratch{};
+            T* const dst = out ? out : &scratch;
+            if (!read_shape<Fmt, IM, T>(r, dst))
+               return false;
+            if (auto st = ::psio::check_invariant(*dst); !st.ok())
+            {
+               const std::string_view what = st.error().what;
+               if (r.invariant.ok())
+                  r.invariant = std::move(st);
+               return r.c.fail(what);
+            }
+            return true;
+         }
+         else
+            return read_shape<Fmt, IM, T>(r, out);
+      }
+
+      template <typename Fmt, int_mode IM, typename T, typename C>
+      bool read_shape(typed_reader<C>& r, T* out)
       {
          if constexpr (dispatch_adapter_v<Fmt, T>)
             return read_adapted<Fmt, ::psio::adapter<std::remove_cvref_t<T>,
@@ -1548,6 +1625,9 @@ namespace psio {
                out->value = std::make_unique<E>();
             return read_value<Fmt, IM, E>(r, out->value.get());
          }
+         else if constexpr (::psio::is_transparent_v<T>)
+            return read_value<Fmt, IM, ::psio::transparent_inner_t<T>>(
+               r, out ? &::psio::transparent_inner(*out) : nullptr);
          else if constexpr (::psio::detail::is_nested_v<T>)
          {
             // The inner value's text, stored as its canonical encoding. The
@@ -1847,6 +1927,8 @@ namespace psio {
          typed_reader<C> r{cursor, lenient_missing};
          if (read_value<Fmt, int_mode::natural, T>(r, out))
             (void)cursor.finish();
+         if (!r.invariant.ok())
+            return std::move(r.invariant);
          return cursor.status(Fmt::name);
       }
 
@@ -2069,6 +2151,8 @@ namespace psio {
       if (w.err.empty())
          return codec_ok();
       out.resize(start);
+      if (w.has_invariant)
+         return codec_status{w.invariant};
       return codec_fail(w.err, static_cast<std::uint32_t>(start), Fmt::name);
    }
 

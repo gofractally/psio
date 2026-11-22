@@ -678,9 +678,10 @@ codec_status Codec<W>::decode_assoc(const schema_types::Custom &custom,
 [[nodiscard]] inline codec_status to_key(const schema_types::Schema &schema,
                                          const schema_types::AnyType &root, const Value &value,
                                          std::vector<char> &destination,
+                                         const CustomHandlers *custom = nullptr,
                                          nested_bytes nested = nested_bytes::typed)
 {
-   detail::Codec<0> codec(schema, nested);
+   detail::Codec<0> codec(schema, custom, nested);
    if (auto status = codec.metadata(root); !status.ok())
       return status;
    std::vector<char> scratch;
