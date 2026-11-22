@@ -6,9 +6,13 @@ focused on **what pssz is** while the comparison can change as we
 re-bench, add formats, or refresh threshold judgments without
 churning the spec.
 
-pSSZ is the successor to fracpack. Fracpack is a legacy prototype retained
-in these benchmarks to demonstrate the relative performance of different
-data-layout designs. Its comparison columns record that experimental baseline.
+Fracpack is an experimental format (`psio::experimental::frac32`,
+`psio/frac.hpp`), not a supported wire format. It is in these benchmarks to
+measure one design trade-off against pSSZ: fracpack stores a size with every
+variable-size value (a byte-count prefix on each string and vector, a
+fixed-region size on each extensible record), while pSSZ stores none and
+infers each size from the offsets around the value. Its comparison columns
+record that experiment. It is not byte-compatible with psibase's fracpack in general.
 
 Two complementary views:
 

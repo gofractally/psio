@@ -345,7 +345,7 @@ TEST_CASE("validate [frac32]: rejects record with offset past end",
    //  fixed_region_field0=2). We overwrite the u32 there with a
    //  giant value.
    structural_validate::Mix in{42, {1, 2, 3}, "hi"};
-   auto bytes = psio::encode(psio::frac32{}, in);
+   auto bytes = psio::encode(psio::experimental::frac32{}, in);
    //  Layout: hdr(2) + version(2) + offset_payload(4) +
    //  offset_note(4) + heap. Corrupt the first slot offset to a
    //  giant value.
@@ -353,7 +353,7 @@ TEST_CASE("validate [frac32]: rejects record with offset past end",
    const std::uint32_t evil = 0xFFFF'FFFE;
    std::memcpy(bytes.data() + 4, &evil, 4);
    auto st = psio::validate<structural_validate::Mix>(
-      psio::frac32{}, std::span<const char>{bytes});
+      psio::experimental::frac32{}, std::span<const char>{bytes});
    REQUIRE(!st.ok());
 }
 
@@ -366,7 +366,7 @@ TEST_CASE("validate [frac32]: rejects vector body OOB",
    bad[0] = static_cast<char>(0xE8);  // 1000 LE
    bad[1] = 0x03;
    auto st = psio::validate<std::vector<std::uint32_t>>(
-      psio::frac32{}, std::span<const char>{bad});
+      psio::experimental::frac32{}, std::span<const char>{bad});
    REQUIRE(!st.ok());
 }
 
@@ -379,7 +379,7 @@ TEST_CASE("validate [frac32]: rejects vector<u32> body not multiple of 4",
    bad[0] = 5;          // byte_count = 5
    for (int i = 4; i < 9; ++i) bad[i] = 0;
    auto st = psio::validate<std::vector<std::uint32_t>>(
-      psio::frac32{}, std::span<const char>{bad});
+      psio::experimental::frac32{}, std::span<const char>{bad});
    REQUIRE(!st.ok());
 }
 
@@ -392,7 +392,7 @@ TEST_CASE("validate [frac32]: rejects truncated string length",
    bad[0] = static_cast<char>(0xE8);
    bad[1] = 0x03;
    auto st = psio::validate<std::string>(
-      psio::frac32{}, std::span<const char>{bad});
+      psio::experimental::frac32{}, std::span<const char>{bad});
    REQUIRE(!st.ok());
 }
 
@@ -402,7 +402,7 @@ TEST_CASE("validate [frac32]: rejects truncated record header",
    //  Just one byte — record header needs two.
    std::vector<char> bad(1, 0);
    auto st = psio::validate<structural_validate::Mix>(
-      psio::frac32{}, std::span<const char>{bad});
+      psio::experimental::frac32{}, std::span<const char>{bad});
    REQUIRE(!st.ok());
 }
 
@@ -411,7 +411,7 @@ TEST_CASE("validate [frac32]: rejects bool not 0/1",
 {
    std::vector<char> bad{static_cast<char>(0x42)};
    auto st = psio::validate<bool>(
-      psio::frac32{}, std::span<const char>{bad});
+      psio::experimental::frac32{}, std::span<const char>{bad});
    REQUIRE(!st.ok());
 }
 
@@ -429,7 +429,7 @@ TEST_CASE("validate [frac32]: rejects variant tag past arity",
    bad[0] = 5;          // tag past N=2
    //  size_bytes = 0
    auto st = psio::validate<structural_validate::FracVar>(
-      psio::frac32{}, std::span<const char>{bad});
+      psio::experimental::frac32{}, std::span<const char>{bad});
    REQUIRE(!st.ok());
 }
 
@@ -440,7 +440,7 @@ TEST_CASE("validate [frac32]: rejects variant tag with high bit",
    std::vector<char> bad(5, 0);
    bad[0] = static_cast<char>(0x80);
    auto st = psio::validate<structural_validate::FracVar>(
-      psio::frac32{}, std::span<const char>{bad});
+      psio::experimental::frac32{}, std::span<const char>{bad});
    REQUIRE(!st.ok());
 }
 
@@ -451,9 +451,9 @@ TEST_CASE("validate [frac32]: round-trips records with optional",
    //  structural validator. Mix doesn't have one — define a fresh
    //  shape here so we cover the optional-slot path.
    structural_validate::Mix in{1, {7}, "ok"};
-   auto bytes = psio::encode(psio::frac32{}, in);
+   auto bytes = psio::encode(psio::experimental::frac32{}, in);
    auto st = psio::validate<structural_validate::Mix>(
-      psio::frac32{}, std::span<const char>{bytes});
+      psio::experimental::frac32{}, std::span<const char>{bytes});
    REQUIRE(st.ok());
 }
 
@@ -464,7 +464,7 @@ TEST_CASE("validate [frac32]: corrupted ascending offsets rejected",
    //  payload + note). Swap the two offset slots to make the second
    //  payload appear before the first — non-monotonic, must reject.
    structural_validate::Mix in{1, {2, 3}, "hello world"};
-   auto bytes = psio::encode(psio::frac32{}, in);
+   auto bytes = psio::encode(psio::experimental::frac32{}, in);
    //  fixed_region at offset 2 (after u16 header):
    //    bytes[2..4]   = u16 version (fixed)
    //    bytes[4..8]   = u32 offset slot for payload
@@ -476,7 +476,7 @@ TEST_CASE("validate [frac32]: corrupted ascending offsets rejected",
    std::memcpy(bytes.data() + 4, bytes.data() + 8, 4);
    std::memcpy(bytes.data() + 8, a.data(), 4);
    auto st = psio::validate<structural_validate::Mix>(
-      psio::frac32{}, std::span<const char>{bytes});
+      psio::experimental::frac32{}, std::span<const char>{bytes});
    //  After swap:
    //    payload offset (slot 0) was the note's larger value
    //    note offset (slot 1) was the payload's smaller value
@@ -763,18 +763,18 @@ PSIO_REFLECT(VectorOuter, rows, tail)
 TEST_CASE("frac validation measures nested payloads before siblings", "[frac][validate][nested]")
 {
    using namespace nested_frac_validation;
-   auto bytes = psio::encode(psio::frac32{}, Outer{{"abc"}, "tail"});
-   REQUIRE(psio::validate<Outer>(psio::frac32{}, std::span<const char>{bytes}).ok());
+   auto bytes = psio::encode(psio::experimental::frac32{}, Outer{{"abc"}, "tail"});
+   REQUIRE(psio::validate<Outer>(psio::experimental::frac32{}, std::span<const char>{bytes}).ok());
    // Move the tail into the preceding nested record's string payload.
    std::uint32_t overlap = 14; // slot 6 + 14 = 20, before nested payload end 23
    std::memcpy(bytes.data() + 6, &overlap, sizeof(overlap));
-   REQUIRE_FALSE(psio::validate<Outer>(psio::frac32{}, std::span<const char>{bytes}).ok());
+   REQUIRE_FALSE(psio::validate<Outer>(psio::experimental::frac32{}, std::span<const char>{bytes}).ok());
 
-   auto vector_bytes = psio::encode(psio::frac32{}, VectorOuter{{"hello"}, "tail"});
-   REQUIRE(psio::validate<VectorOuter>(psio::frac32{}, std::span<const char>{vector_bytes}).ok());
+   auto vector_bytes = psio::encode(psio::experimental::frac32{}, VectorOuter{{"hello"}, "tail"});
+   REQUIRE(psio::validate<VectorOuter>(psio::experimental::frac32{}, std::span<const char>{vector_bytes}).ok());
    // Point to the vector's string prefix. A slot-table-only size calculation
    // would allow this alias; measuring the last element must reject it.
    std::uint32_t vector_overlap = 12; // slot 6 + 12 = 18
    std::memcpy(vector_bytes.data() + 6, &vector_overlap, sizeof(vector_overlap));
-   REQUIRE_FALSE(psio::validate<VectorOuter>(psio::frac32{}, std::span<const char>{vector_bytes}).ok());
+   REQUIRE_FALSE(psio::validate<VectorOuter>(psio::experimental::frac32{}, std::span<const char>{vector_bytes}).ok());
 }

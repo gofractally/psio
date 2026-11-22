@@ -87,7 +87,7 @@ namespace fuzz {
 
 FUZZ_FORMAT(ssz,     ::psio::ssz{})
 FUZZ_FORMAT(pssz32,  ::psio::pssz32{})
-FUZZ_FORMAT(frac32,  ::psio::frac32{})
+FUZZ_FORMAT(frac32,  ::psio::experimental::frac32{})
 FUZZ_FORMAT(bin,     ::psio::bin{})
 FUZZ_FORMAT(borsh,   ::psio::borsh{})
 FUZZ_FORMAT(bincode, ::psio::bincode{})

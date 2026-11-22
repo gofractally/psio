@@ -191,9 +191,9 @@ TEST_CASE("format_has_adapter_v follows format preferred category",
       (!psio::format_has_adapter_v<psio::json, Blob>));
 
    STATIC_REQUIRE(
-      (psio::format_has_adapter_v<psio::frac32, Blob>));
+      (psio::format_has_adapter_v<psio::experimental::frac32, Blob>));
    STATIC_REQUIRE(
-      (!psio::format_has_adapter_v<psio::frac32, Widget>));
+      (!psio::format_has_adapter_v<psio::experimental::frac32, Widget>));
 }
 
 TEST_CASE("delegate_adapter<T, bin> routes a record through bin inside frac",
@@ -207,9 +207,9 @@ TEST_CASE("delegate_adapter<T, bin> routes a record through bin inside frac",
    // Encode the full envelope with frac32. The `body` field — whose
    // type is Blob — has a binary adapter that delegates to bin.
    // Frac frames the projected bytes as a heap-slot variable payload.
-   auto bytes = psio::encode(psio::frac32{}, env);
+   auto bytes = psio::encode(psio::experimental::frac32{}, env);
 
-   auto back = psio::decode<Envelope>(psio::frac32{},
+   auto back = psio::decode<Envelope>(psio::experimental::frac32{},
                                         std::span<const char>{bytes});
    REQUIRE(back.version == 7);
    REQUIRE(back.body.label == "hdr");
@@ -557,8 +557,8 @@ TEST_CASE("field-level as<hex_tag> overrides the default adapter",
 TEST_CASE("member-override works for frac32", "[adapter][member-override][frac]")
 {
    Packet p{"hi", Hash32{{0xAB, 0xCD, 0xEF, 0x01}}};
-   auto   bytes = psio::encode(psio::frac32{}, p);
-   auto   back  = psio::decode<Packet>(psio::frac32{},
+   auto   bytes = psio::encode(psio::experimental::frac32{}, p);
+   auto   back  = psio::decode<Packet>(psio::experimental::frac32{},
                                        std::span<const char>{bytes});
    REQUIRE(back.id == "hi");
    REQUIRE(back.checksum.bytes[0] == 0xAB);

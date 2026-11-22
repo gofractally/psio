@@ -854,7 +854,7 @@ namespace {
          //  zero-copy view (per-field accessor on a Reflected
          //  struct) is the follow-up: until that lands, the
          //  fallback below pays the decode-and-reach cost on
-         //  Reflected shapes.  psio::frac32 / psio::bin still
+         //  Reflected shapes.  psio::experimental::frac32 / psio::bin still
          //  await their own traits specialisations.
          //
          //  psio::msgpack, psio::protobuf, psio::borsh,
@@ -1600,8 +1600,8 @@ namespace {
       cell("ssz",      psio::ssz{});
       cell("pssz",     psio::pssz{});
       //  Bench label uses the user-facing name "fracpack" — the C++
-      //  class psio::frac32 is the ABI commitment, kept distinct.
-      cell("fracpack", psio::frac32{});
+      //  class psio::experimental::frac32 is the ABI commitment, kept distinct.
+      cell("fracpack", psio::experimental::frac32{});
       cell("bin",      psio::bin{});
       cell("borsh",    psio::borsh{});
       cell("bincode",  psio::bincode{});

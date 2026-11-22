@@ -25,7 +25,6 @@
 #include <psio/dynamic_value.hpp>
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
-#include <psio/frac.hpp>
 #include <psio/json.hpp>
 #include <psio/mutable_view.hpp>
 #include <psio/nested.hpp>

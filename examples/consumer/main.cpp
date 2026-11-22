@@ -1,5 +1,5 @@
-#include <psio/frac.hpp>
 #include <psio/pjson.hpp>
+#include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
 
 struct Message {
@@ -10,10 +10,10 @@ PSIO_REFLECT(Message, id, text)
 
 int main() {
    const Message input{42, "standalone psio"};
-   auto bytes = psio::encode(psio::frac32{}, input);
-   if (!psio::validate<Message>(psio::frac32{}, std::span<const char>{bytes}).ok())
+   auto bytes = psio::to_pssz(input);
+   if (!psio::validate_pssz<Message>(bytes).ok())
       return 1;
-   auto decoded = psio::decode<Message>(psio::frac32{}, std::span<const char>{bytes});
+   auto decoded = psio::from_pssz<Message>(bytes);
    if (decoded.id != input.id || decoded.text != input.text)
       return 2;
    auto five = psio::pjson::encode(psio::pjson_value{std::int64_t{5}});

@@ -15,7 +15,7 @@
 //   psio::view<T, Fmt>       — schema-aware. Caller knows T at compile
 //                              time; field access is by reflected
 //                              member. Available for every format.
-//                              Schema-required formats (SSZ, fracpack,
+//                              Schema-required formats (SSZ, pSSZ,
 //                              bin) ONLY have this form.
 //
 // The format tag is the second template argument. Code that needs to
@@ -36,7 +36,6 @@ namespace psio {
    struct pjson_format {};         // self-describing binary; pjson.hpp
    struct json_format  {};         // JSON text (self-describing)
    struct ssz_format   {};         // SSZ — schema-required
-   struct fracpack_format {};      // fracpack — schema-required
    struct bin_format   {};         // raw little-endian — schema-required
    struct cbor_format  {};         // future
    struct msgpack_format {};       // future

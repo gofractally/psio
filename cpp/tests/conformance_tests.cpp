@@ -127,7 +127,7 @@ namespace {
    {
       cross_format_blob(from, ::psio::ssz{});
       cross_format_blob(from, ::psio::pssz{});
-      cross_format_blob(from, ::psio::frac32{});
+      cross_format_blob(from, ::psio::experimental::frac32{});
       cross_format_blob(from, ::psio::bin{});
       cross_format_blob(from, ::psio::borsh{});
       cross_format_blob(from, ::psio::bincode{});

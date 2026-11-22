@@ -4,6 +4,7 @@
 // implemented formats (ssz, pssz16, pssz32, json, frac16, frac32, bin).
 
 #include <psio/bin.hpp>
+#include <psio/dynamic_frac.hpp>
 #include <psio/frac.hpp>
 #include <psio/json.hpp>
 #include <psio/pssz.hpp>
@@ -61,9 +62,9 @@ TEST_CASE("transcode<T> frac → pssz preserves the value",
           "[transcode][frac][pssz]")
 {
    XcodePerson pp{"carol", 40, {9, 8, 7}};
-   auto        src = psio::encode(psio::frac32{}, pp);
+   auto        src = psio::encode(psio::experimental::frac32{}, pp);
    auto        dst = psio::transcode<XcodePerson>(
-      psio::frac32{}, std::span<const char>{src}, psio::pssz16{});
+      psio::experimental::frac32{}, std::span<const char>{src}, psio::pssz16{});
 
    auto back =
       psio::decode<XcodePerson>(psio::pssz16{}, std::span<const char>{dst});
@@ -84,9 +85,9 @@ TEST_CASE("transcode<T> through every format pair preserves the record",
    auto bin_bytes = psio::transcode<XcodePerson>(
       psio::ssz{}, std::span<const char>{ssz_src}, psio::bin{});
    auto frac_bytes = psio::transcode<XcodePerson>(
-      psio::bin{}, std::span<const char>{bin_bytes}, psio::frac32{});
+      psio::bin{}, std::span<const char>{bin_bytes}, psio::experimental::frac32{});
    auto pssz_bytes = psio::transcode<XcodePerson>(
-      psio::frac32{}, std::span<const char>{frac_bytes}, psio::pssz32{});
+      psio::experimental::frac32{}, std::span<const char>{frac_bytes}, psio::pssz32{});
    auto json_str = psio::transcode<XcodePerson>(
       psio::pssz32{}, std::span<const char>{pssz_bytes}, psio::json{});
 
@@ -230,16 +231,16 @@ TEST_CASE("generic transcode works for frac32", "[transcode][cpo][dynamic][frac]
    auto        sc = psio::schema_of<XcodePerson>();
 
    // frac32 → json → frac32 round-trip.
-   auto frac_bytes = psio::encode(psio::frac32{}, pp);
-   auto json_str   = psio::transcode(psio::frac32{}, sc,
+   auto frac_bytes = psio::encode(psio::experimental::frac32{}, pp);
+   auto json_str   = psio::transcode(psio::experimental::frac32{}, sc,
                                       std::span<const char>{frac_bytes},
                                       psio::json{});
    auto frac_back  = psio::transcode(psio::json{}, sc,
                                       std::span<const char>{json_str},
-                                      psio::frac32{});
+                                      psio::experimental::frac32{});
 
    auto back = psio::decode<XcodePerson>(
-      psio::frac32{}, std::span<const char>{frac_back});
+      psio::experimental::frac32{}, std::span<const char>{frac_back});
    REQUIRE(back.name == "heidi");
    REQUIRE(back.age == 28);
    REQUIRE(back.scores == std::vector<std::uint32_t>{1, 2});
@@ -261,8 +262,8 @@ TEST_CASE("generic transcode chains every format pair via dynamic",
    auto d = psio::transcode(psio::ssz{}, sc, std::span<const char>{c},
                              psio::bin{});
    auto e = psio::transcode(psio::bin{}, sc, std::span<const char>{d},
-                             psio::frac32{});
-   auto f = psio::transcode(psio::frac32{}, sc, std::span<const char>{e},
+                             psio::experimental::frac32{});
+   auto f = psio::transcode(psio::experimental::frac32{}, sc, std::span<const char>{e},
                              psio::pssz32{});
 
    auto back = psio::decode<XcodePerson>(psio::pssz32{},

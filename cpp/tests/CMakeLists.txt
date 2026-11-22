@@ -285,7 +285,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 add_test(NAME psio_ijson_noexceptions_test COMMAND psio_ijson_noexceptions_test)
 
-# Phase 8: fracpack codec (frac32/frac16).
+# The experimental fracpack codec (psio::experimental::frac32 / frac16).
 psio_add_test(psio_frac_tests frac_tests.cpp)
 
 # Phase 10: bin codec (simplest length-prefixed binary).

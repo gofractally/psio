@@ -31,9 +31,12 @@ annotations that capture text-representation hints, and gets:
   byte-identical pjson on C++ and Rust hosts. The same `User`
   produces byte-identical pSSZ on C++ and Rust hosts. Etc.
 
-pSSZ is the primary schema-driven binary format and the successor to
-fracpack. Fracpack is a legacy prototype retained for benchmarks that
-compare the relative performance of different data-layout designs.
+pSSZ is the primary schema-driven binary format.
+Fracpack is an experimental format (`psio::experimental`, `psio/frac.hpp`),
+not a supported wire format. It is kept to measure one design trade-off against
+pSSZ: fracpack stores a size with every variable-size value, pSSZ stores none
+and infers each size from the offsets around the value. It is not
+byte-compatible with psibase's fracpack in general.
 
 The headline value: **declare the type once, serve it everywhere.**
 
@@ -76,15 +79,16 @@ applicable) `view` operations dispatched by the tag.
 | Format tag | Wire spec | Notes |
 |------------|-----------|-------|
 | `pjson` | `docs/pjson-spec.md` | Primary schemaless binary format; binary peer of JSON |
-| `pssz` | `docs/pssz-spec.md` | Primary schema-driven binary format; successor to fracpack |
+| `pssz` | `docs/pssz-spec.md` | Primary schema-driven binary format |
 | `json` | RFC 8259 | Text serialization for human/JS interop |
 | `ijson` | RFC 7493 (`docs/json.md`) | I-JSON: 64-bit integers as strings, bytes as hex, named variants |
 | `capnp` | Cap'n Proto wire | Cross-language IDL-driven format |
 | `flatbuf` | FlatBuffers wire | IDL-driven, alignment-strict |
 | `ssz` | Eth2 SSZ | Beacon-chain and content-addressed payloads |
 
-The legacy `fracpack` implementation is retained as a benchmark comparison;
-it is outside the required production-format set above.
+The experimental `fracpack` implementation (`psio::experimental::frac32`,
+`frac16`) is kept as a benchmark comparison; it is not a supported wire
+format and is outside the required production-format set above.
 
 A host MAY support additional formats (msgpack, CBOR, protobuf, etc.)
 via the same dispatch mechanism. **Adding a format does not require

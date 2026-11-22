@@ -90,6 +90,10 @@ is `psio::key::to_fresh(v)`, which returns a `std::array` on the stack when
 the size of the key is a compile-time constant. `psio::encode(psio::key{}, v)`
 gives the same bytes in a `std::vector<char>`.
 
+Fracpack is not in the table: it is an experimental format
+(`psio::experimental::frac32`, `psio/frac.hpp`), not a supported wire format,
+and has no helper names.
+
 pjson is not in the table. It has no format tag in the generic layer; its
 entry points are in `psio/pjson.hpp` and `psio/pjson_typed.hpp`.
 

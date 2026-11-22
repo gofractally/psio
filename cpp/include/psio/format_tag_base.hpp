@@ -2,11 +2,11 @@
 //
 // psio/format_tag_base.hpp — CRTP base for format tags.
 //
-// Every format tag (`psio::ssz`, `psio::frac`, ...) inherits from
+// Every format tag (`psio::ssz`, `psio::pssz`, ...) inherits from
 // `psio::format_tag_base<Derived>` to get the scoped-sugar form:
 //
-//     psio::encode(psio::frac{}, v, sink)   // generic CPO form
-//     psio::frac::encode(v, sink)            // scoped sugar — same code
+//     psio::encode(psio::pssz{}, v, sink)   // generic CPO form
+//     psio::pssz::encode(v, sink)            // scoped sugar — same code
 //
 // The scoped statics are one-line delegates to the matching CPO.
 // They exist purely so users with a single known format at a call

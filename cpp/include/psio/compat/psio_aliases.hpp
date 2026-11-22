@@ -3,7 +3,7 @@
 // psio/compat/psio_aliases.hpp — migration-aid header that re-exports
 // psio symbols under the historical `psio1::` namespace. Intended for
 // consumers (psizam, pfs, application code) that currently call
-// `psio1::encode(…)` / `psio1::frac::…` / `psio1::reflect<T>` and want to
+// `psio1::encode(…)` / `psio1::pssz::…` / `psio1::reflect<T>` and want to
 // validate their code against psio before the swap lands in Phase 18.
 //
 // **Status:** transitional. This header is NOT part of the final v2
@@ -23,7 +23,7 @@
 //
 //   #include <psio/compat/psio_aliases.hpp>
 //
-// Once included, `psio1::encode(psio1::frac32{}, value, sink)` calls the
+// Once included, `psio1::encode(psio1::pssz{}, value, sink)` calls the
 // psio encoder. Mixed usage (some `psio1::`, some `psio::`) also
 // works — both refer to the same underlying entities.
 

@@ -5,9 +5,12 @@ The public C++ implementation defines the interoperability contract.
 This checkout is under release preparation; `0.1.0` is a development version.
 See [compatibility](docs/compatibility.md) for the exact tested surface and gaps.
 
-pSSZ is psio's primary schema-driven binary format and the successor to
-fracpack. Fracpack is a legacy prototype retained as a benchmark comparison
-to demonstrate the relative performance of different data-layout designs.
+pSSZ is psio's primary schema-driven binary format.
+Fracpack is an experimental format (`psio::experimental`, `psio/frac.hpp`),
+not a supported wire format. It is kept to measure one design trade-off against
+pSSZ: fracpack stores a size with every variable-size value, pSSZ stores none
+and infers each size from the offsets around the value. It is not
+byte-compatible with psibase's fracpack in general.
 See the [format comparison](docs/format-comparison.md) for the measurements.
 
 ## C++
