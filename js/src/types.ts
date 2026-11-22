@@ -198,6 +198,8 @@ class Builder {
   insert(input: AnyDef): IrAnyType {
     const def = resolve(input);
     const key = keyOf(def);
+    // An equal custom type declared again still states its handler.
+    if (def.shape.k === 'custom') this.bind(def.shape.id, def.shape.handler);
     const known = this.names.get(key);
     if (known !== undefined) {
       if (def.shape.k === 'record' && this.records.get(known) !== def)
@@ -217,6 +219,15 @@ class Builder {
     this.put(name, this.build(def));
     --this.depth;
     return ir('Type', { type: name });
+  }
+
+  // One handler per custom id, whichever declaration brings it.
+  private bind(id: string, handler: PsszCustomHandler | undefined): void {
+    if (!handler) return;
+    const bound = this.handlers.get(id);
+    if (bound && bound !== handler)
+      schemaError(`typed schema: custom id "${id}" is declared with two different handlers`);
+    this.handlers.set(id, handler);
   }
 
   // The type itself, not interned; its children are.
@@ -264,15 +275,9 @@ class Builder {
           members: s.members.map(([name, value]) => ({ name, value: BigInt.asUintN(64, value) })),
         });
       case 'time': return ir('Custom', { type: this.build(resolve(s.tick)), id: s.id });
-      case 'custom': {
-        if (s.handler) {
-          const bound = this.handlers.get(s.id);
-          if (bound && bound !== s.handler)
-            schemaError(`typed schema: custom id "${s.id}" is declared with two different handlers`);
-          this.handlers.set(s.id, s.handler);
-        }
+      case 'custom':
+        this.bind(s.id, s.handler);
         return ir('Custom', { type: this.build(resolve(s.inner)), id: s.id });
-      }
       case 'box': return ir('Custom', { type: this.insert(s.inner), id: 'box' });
       default: return schemaError('typed schema: unresolved definition');
     }

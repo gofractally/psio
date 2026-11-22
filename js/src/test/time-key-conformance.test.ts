@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PsszError, PsszSchema, keyPrefixUpperBound, type JsonFormat, type PsszType } from '../index.js';
+import { TypedFixture, type TypeSource } from './support/typed-from-ir.js';
 
 interface Row {
   name: string;
@@ -51,9 +52,12 @@ function rejects(run: () => unknown, name: string): void {
   assert.fail(`${name}: accepted`);
 }
 
-test('time/key conformance: every vector holds', () => {
+// Replayed through the schema-driven path and through the typed layer
+// (every fixture type declared with the typed definitions).
+for (const path of ['schema-driven', 'typed'] as const) test(`time/key conformance: every vector holds, ${path}`, () => {
   assert.equal(fixture.version, 1);
-  const schema = PsszSchema.decode(fromHex(fixture.schema_ir));
+  const decoded = PsszSchema.decode(fromHex(fixture.schema_ir));
+  const schema: TypeSource = path === 'typed' ? new TypedFixture(decoded.ir) : decoded;
   const types = new Map<string, PsszType>();
   for (const row of fixture.types) types.set(row.id, schema.type(row.id));
   const composite = new Map(fixture.types.map((t) => [t.id, t.composite]));
@@ -176,6 +180,9 @@ test('time/key conformance: every vector holds', () => {
   }
   assert.equal(total, fixture.vectors.length);
   assert.ok(total >= 500);
+  console.log(`time-key-vectors.json (${path}):`, JSON.stringify({ types: fixture.types.length, vectors: total, ...counts }));
+  assert.equal(fixture.types.length, 28);
+  assert.equal(fixture.vectors.length, 762);
   // Every declared type has rows.
   for (const row of fixture.types) assert.ok(seenTypes.has(row.id), `no rows for ${row.id}`);
 });

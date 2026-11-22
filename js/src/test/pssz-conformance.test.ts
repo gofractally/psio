@@ -6,12 +6,20 @@
 //
 // Every vector of both fixtures is visited and accounted for: the totals at
 // the end must add up to the fixture sizes, so nothing is skipped silently.
+//
+// Each fixture is replayed twice: through the schema-driven path (the IR as
+// fetched) and through the typed layer (every fixture type declared with
+// the typed definitions, `support/typed-from-ir.ts`; `typed-ir.test.ts`
+// checks that those declarations generate the fixture's IR).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { IR_VERSION, PsszError, PsszSchema, validatePssz, type JsonFormat, type PsszType, type PsszWidth } from '../index.js';
 import { fixtureHandlers } from './support/custom-handlers.js';
+import { TypedFixture, type TypeSource } from './support/typed-from-ir.js';
+
+const PATHS = ['schema-driven', 'typed'] as const;
 
 const fixture = (name: string) =>
   JSON.parse(readFileSync(new URL(`../../../conformance/${name}`, import.meta.url), 'utf8'));
@@ -78,9 +86,10 @@ function hasSomeNone(value: unknown): boolean {
   return keys.some((key) => hasSomeNone(record[key]));
 }
 
-test('PSSZ fixture: every type and vector through the Schema IR', () => {
+for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, () => {
   const fx: { schema_ir: string; types: PsszTypeRow[]; vectors: PsszRow[] } = fixture('pssz-vectors.json');
   const schema = PsszSchema.decode(fromHex(fx.schema_ir));
+  const source: TypeSource = path === 'typed' ? new TypedFixture(schema.ir) : schema;
   // The IR travels as its own PSSZ encoding and re-encodes to the same bytes.
   assert.equal(toHex(schema.encode()), fx.schema_ir);
 
@@ -91,12 +100,12 @@ test('PSSZ fixture: every type and vector through the Schema IR', () => {
   let widthsChecked = 0;
   for (const row of fx.types) {
     assert.ok(row.auto_width === 1 || row.auto_width === 2 || row.auto_width === 4, row.id);
-    assert.equal(schema.type(row.id).width, row.auto_width, `auto width of ${row.id}`);
+    assert.equal(source.type(row.id).width, row.auto_width, `auto width of ${row.id}`);
     ++widthsChecked;
   }
   assert.equal(widthsChecked, fx.types.length);
   // A box gives its container no inferred bound; an explicit cap still does.
-  const widthOf = (id: string) => schema.type(id).width;
+  const widthOf = (id: string) => source.type(id).width;
   assert.deepEqual(
     ['BDirect', 'BoxRec', 'BoxCapRec', 'BoxVecCapRec', 'box<BLeaf>', 'optional<BoxCapRec>'].map(widthOf),
     [1, 4, 1, 2, 4, 1],
@@ -108,7 +117,7 @@ test('PSSZ fixture: every type and vector through the Schema IR', () => {
     let type = types.get(key);
     if (!type) {
       try {
-        type = schema.type(id, { width });
+        type = source.type(id, { width });
       } catch (e) {
         assert.ok(e instanceof PsszError);
         type = e;
@@ -213,7 +222,7 @@ test('PSSZ fixture: every type and vector through the Schema IR', () => {
     if (cls === 'string-raw-non-utf8') assert.ok(noText, row.name);
   }
 
-  console.log('pssz-vectors.json:', JSON.stringify({ types: fx.types.length, vectors: fx.vectors.length, ...count }));
+  console.log(`pssz-vectors.json (${path}):`, JSON.stringify({ types: fx.types.length, vectors: fx.vectors.length, ...count }));
   const a = count.auto;
   const e = count.explicit;
   assert.equal(a.vectors + e.vectors, fx.vectors.length);
@@ -237,15 +246,21 @@ test('PSSZ fixture: every type and vector through the Schema IR', () => {
   assert.equal(fx.vectors.length, 5267);
 });
 
-test('JSON fixture: every type and vector through the Schema IR', () => {
+for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, () => {
   const fx: { schema_ir: string; types: JsonTypeRow[]; vectors: JsonRow[] } = fixture('json-vectors.json');
-  const schema = PsszSchema.decode(fromHex(fx.schema_ir));
-  assert.equal(toHex(schema.encode()), fx.schema_ir);
+  const decoded = PsszSchema.decode(fromHex(fx.schema_ir));
+  assert.equal(toHex(decoded.encode()), fx.schema_ir);
   const rows = new Map(fx.types.map((t) => [t.id, t]));
-  // The fixture's custom text forms, registered once for the schema; the
-  // same schema with no handler (the fallback) and with handlers required.
-  const withHandlers = schema.withHandlers(fixtureHandlers);
-  const strict = PsszSchema.decode(fromHex(fx.schema_ir), { requireHandlers: true });
+  // The fixture's custom text forms, registered once (schema-driven: for
+  // the schema; typed: declared with the custom types); the same types with
+  // no handler (the fallback) and with handlers required.
+  const typedPlain = new TypedFixture(decoded.ir);
+  const schema: TypeSource = path === 'typed' ? typedPlain : decoded;
+  const withHandlers: TypeSource =
+    path === 'typed' ? new TypedFixture(decoded.ir, fixtureHandlers) : decoded.withHandlers(fixtureHandlers);
+  const strict: TypeSource = path === 'typed'
+    ? { type: (id) => typedPlain.type(id, { requireHandlers: true }) }
+    : PsszSchema.decode(fromHex(fx.schema_ir), { requireHandlers: true });
   const types = new Map<string, PsszType>();
   for (const row of fx.types) if (row.ir) types.set(row.id, withHandlers.type(row.id));
   // Width fidelity: every type the typed PSSZ codec encodes records its
@@ -339,7 +354,7 @@ test('JSON fixture: every type and vector through the Schema IR', () => {
     }
   }
   console.log(
-    'json-vectors.json:',
+    `json-vectors.json (${path}):`,
     JSON.stringify({ types: fx.types.length, vectors: fx.vectors.length, ...count, notExpressible: [...notExpressible] }),
   );
   // Every expressible type is exercised, and every vector is accounted for.
@@ -406,6 +421,36 @@ test('JSON fixture: malformed schemas are refused, their neighbours accepted', (
     assert.equal(toHex(type.jsonToPssz(row.ijson, 'ijson')), row.pssz, `${row.name}: ijson read`);
     assert.equal(toHex(type.encode(type.decode(bytes))), row.pssz, `${row.name}: value`);
   }
+
+  // The accepted schemas through the typed layer, where it can declare the
+  // type; the others are listed with the reason. (A refused schema is
+  // malformed IR: the typed layer cannot write one, so those rows are
+  // schema-driven only.)
+  const typedRan: string[] = [];
+  const notDeclarable: { [name: string]: string } = {};
+  for (const row of fx.schema_accepts) {
+    const typed = new TypedFixture(PsszSchema.decode(fromHex(row.schema_ir)).ir);
+    const def = typed.tryDef(row.root);
+    if (!def) {
+      notDeclarable[row.name] = typed.unsupported.get(row.root)!;
+      continue;
+    }
+    const bytes = fromHex(row.pssz);
+    assert.deepEqual(def.validate(bytes), { ok: true, hasUnknown: false }, row.name);
+    assert.equal(def.psszToJson(bytes, 'json'), row.json, `${row.name}: typed json`);
+    assert.equal(def.psszToJson(bytes, 'ijson'), row.ijson, `${row.name}: typed ijson`);
+    assert.equal(toHex(def.jsonToPssz(row.json, 'json')), row.pssz, `${row.name}: typed json read`);
+    assert.equal(toHex(def.jsonToPssz(row.ijson, 'ijson')), row.pssz, `${row.name}: typed ijson read`);
+    assert.equal(toHex(def.encode(def.decode(bytes))), row.pssz, `${row.name}: typed value`);
+    typedRan.push(row.name);
+  }
+  console.log('json-vectors.json schema rows:', JSON.stringify({
+    schemaRejects: fx.schema_rejects.length, schemaAccepts: fx.schema_accepts.length,
+    schemaAcceptsTyped: typedRan.length, notDeclarable,
+  }));
+  assert.equal(typedRan.length + Object.keys(notDeclarable).length, fx.schema_accepts.length);
+  assert.equal(fx.schema_rejects.length, 52);
+  assert.equal(fx.schema_accepts.length, 15);
 });
 
 // The IR root says which version of the IR it is written in. The field was
