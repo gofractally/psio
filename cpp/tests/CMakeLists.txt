@@ -339,3 +339,22 @@ set_tests_properties(psio_spec_ssz_tests PROPERTIES
 psio_add_test(psio_psch_tests psch_tests.cpp)
 
 psio_add_test(psio_wit_owned_tests wit_owned_tests.cpp)
+
+# psio::key: tuples, composite-key helpers (key_prefix / key_prefix_upper_bound),
+# the order + prefix-free contract of every element kind, and checked reading.
+psio_add_test(psio_key_tests key_tests.cpp)
+# Types with no key form, and ill-typed prefixes, must fail with a clear message.
+function(psio_key_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_key_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/key_unsupported_fail.cpp)
+   set_tests_properties(psio_key_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_key_compile_fail(pair KEY_FAIL_PAIR "std::pair is not a PSIO value")
+psio_key_compile_fail(bitlist KEY_FAIL_BITLIST "bitlist has no key encoding")
+psio_key_compile_fail(steady_clock KEY_FAIL_STEADY_CLOCK "only std::chrono::system_clock time points")
+psio_key_compile_fail(float_rep KEY_FAIL_FLOAT_REP "needs an integer Rep")
+psio_key_compile_fail(prefix_arity KEY_FAIL_PREFIX_ARITY "more elements than the key type has")
+psio_key_compile_fail(prefix_type KEY_FAIL_PREFIX_TYPE "does not convert to the key's")
