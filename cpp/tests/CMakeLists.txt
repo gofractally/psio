@@ -371,3 +371,17 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_time_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_time_noexceptions_test COMMAND psio_time_noexceptions_test)
+
+# Shared cross-language time / key fixture (conformance/time-key-vectors.json):
+# emitted here, consumed by ctest, cargo test
+# (rust/psio/tests/time_key_conformance.rs) and the JS tests
+# (js/src/test/time-key-conformance.test.ts).
+set(PSIO_TIME_KEY_VECTORS ${CMAKE_SOURCE_DIR}/conformance/time-key-vectors.json)
+add_executable(psio_time_key_conformance_emit time_key_conformance_emit.cpp)
+target_link_libraries(psio_time_key_conformance_emit PRIVATE psio)
+target_compile_features(psio_time_key_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_time_key_conformance_regen
+         COMMAND psio_time_key_conformance_emit --check ${PSIO_TIME_KEY_VECTORS})
+psio_add_test(psio_time_key_conformance_tests time_key_conformance_tests.cpp)
+target_compile_definitions(psio_time_key_conformance_tests PRIVATE
+   PSIO_TIME_KEY_VECTORS="${PSIO_TIME_KEY_VECTORS}")
