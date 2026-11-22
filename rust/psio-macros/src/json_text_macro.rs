@@ -152,9 +152,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     slots.push(quote! { let mut #slot: ::core::option::Option<#ty> = ::core::option::Option::None; });
                     arms.push(quote! {
                         #key => {
-                            if r.is_ijson() && #slot.is_some() {
-                                return ::core::result::Result::Err(r.duplicate(__at));
-                            }
                             let __saved = r.member_form(#json, #ijson);
                             #slot = ::core::option::Option::Some(<#ty as #j::JsonText>::read_json(r)?);
                             r.restore_form(__saved);
@@ -182,23 +179,20 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     quote! {
                         r.begin(b'{', "json: expected '{'")?;
                         #(#slots)*
-                        let mut __unknown = #j::UnknownKeys::default();
                         if !r.take(b'}') {
                             loop {
-                                r.ws();
-                                let __at = r.position();
+                                // A repeated key is read again: the last one wins.
                                 let __key = r.key()?;
                                 match &*__key {
                                     #(#arms)*
-                                    _ => r.skip_unknown(&__key, &mut __unknown)?,
+                                    _ => r.skip_unknown()?,
                                 }
-                                let _ = __at;
                                 if r.object_next()? {
                                     break;
                                 }
                             }
                         }
-                        r.end_object(__unknown)?;
+                        r.end_object();
                         ::core::result::Result::Ok(Self { #(#builds),* })
                     },
                 )

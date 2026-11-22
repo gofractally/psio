@@ -608,6 +608,37 @@ namespace psio {
          "meaningless).");
    };
 
+   // ── length_bound on a value ───────────────────────────────────────────
+   //
+   // Whether `value` satisfies a member's length_bound: the byte count of
+   // a string, the element count of a list, the bit count of a bitlist.
+   // The bound looks through std::optional (an absent value satisfies it),
+   // as width inference does; shapes without a length always satisfy it.
+   namespace detail
+   {
+      template <typename T>
+      struct is_optional_wrapper : std::false_type {};
+      template <typename U>
+      struct is_optional_wrapper<std::optional<U>> : std::true_type {};
+
+      template <typename F>
+      constexpr bool length_bound_ok(const F& value, const length_bound& lb) noexcept
+      {
+         if constexpr (is_optional_wrapper<F>::value)
+            return !value.has_value() || length_bound_ok(*value, lb);
+         else if constexpr (requires { value.size(); } &&
+                            !requires { std::tuple_size<F>::value; })
+         {
+            const std::size_t count = value.size();
+            return !((lb.max && count > *lb.max) ||
+                     (lb.exact && count != *lb.exact) ||
+                     (lb.min && count < *lb.min));
+         }
+         else
+            return true;
+      }
+   }  // namespace detail
+
    template <typename FieldType, auto MemberPtr>
    inline constexpr auto effective_annotations_v =
       effective_annotations<FieldType, MemberPtr>::value;

@@ -1490,9 +1490,9 @@ namespace
    {
       // A member length_bound narrows the inferred width and is enforced by
       // validate and validate_strict (and so by the checked decode and view
-      // entry points). The C++ encoder does not check it: these frames are
-      // what it writes for an out-of-bound value, and every reader rejects
-      // them.
+      // entry points) and by the encoder, which refuses an out-of-bound
+      // value. These frames are what a writer that skips the bound check
+      // would produce; every reader rejects them.
       const char* c = "length-bound-overflow";
       static_assert(psio::max_encoded_size<Bounded>() == 20 && psio::auto_pssz_width_v<Bounded> == 1);
       corpus("corpus", "bounded_within", Bounded{"1234", {1, 2}});
@@ -1500,7 +1500,19 @@ namespace
       auto observed = [&]<typename T>(const std::string& vname, const T& value) {
          formats([&]<typename F>() {
             Bytes bytes;
-            if (!try_encode<F>(value, bytes)) return;
+            try
+            {
+               bytes = psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, value);
+            }
+            catch (const psio::codec_exception&)
+            {
+               return;
+            }
+            Bytes refused;
+            if (try_encode<F>(value, refused))
+               die("the encoder accepted a value outside a member length_bound");
+            if (psio::encode_pssz_checked(F{}, value, refused).ok() || !refused.empty())
+               die("encode_pssz_checked accepted a value outside a member length_bound");
             add<F, T>(c, vname, bytes, reject("pssz: member length_bound violated"), vname,
                       type_id<T>());
          });

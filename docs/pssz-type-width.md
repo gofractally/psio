@@ -112,7 +112,11 @@ and metadata APIs; it does not copy a codec into psibase or create a wire family
 - Typed `length_bound` validation is closed for reads: `validate`,
   `validate_strict` and the checked readers reject a string or list member
   outside its declared bound (`cpp/tests/pssz_length_bound_tests.cpp`). The
-  17-byte label above is now rejected. The encoder still does not check it.
+  17-byte label above is now rejected. The encoder checks it too: `encode`
+  raises `codec_exception` (aborts without exceptions) and
+  `encode_pssz_checked` returns a status for a member outside its bound,
+  leaving the sink unchanged. The unchecked `psio::decode` does not check
+  bounds; it is for bytes already validated.
 - Width selection is unchanged: an explicit `maxDynamicData` always rules,
   otherwise the inferred bound applies. Because an appended optional can move
   an inferred bound across a threshold (for example `{array<u8,251>}` is one

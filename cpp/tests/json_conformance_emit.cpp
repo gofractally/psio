@@ -424,11 +424,36 @@ namespace
                                R"({"a":5,"b":"x"})");
       accept_both<AllOptional>("escaped_key", "{\"" + u("0061") + "\":5}", R"({"a":5,"b":null})");
       accept_both<Tree>("unknown_key_only_extra", "{\"children\":[],\"extra\":\"" + u("d83d") + "" + u("de00") + "\"}", R"({"children":[]})");
-      // RFC 8259 allows repeated keys: psio::json keeps the last.
-      accept<AllOptional>("json", "duplicate_key_last_wins", R"({"a":1,"a":2})",
-                          R"({"a":2,"b":null})");
-      accept<AllOptional>("json", "duplicate_unknown_key", R"({"z":1,"z":2})",
-                          R"({"a":null,"b":null})");
+      // A repeated key is not an error in either format: each occurrence is
+      // read as it is seen and the last one wins.
+      accept_both<AllOptional>("duplicate_key_last_wins", R"({"a":1,"a":2})",
+                               R"({"a":2,"b":null})");
+      accept_both<AllOptional>("duplicate_key_same_value", R"({"a":1,"a":1})",
+                               R"({"a":1,"b":null})");
+      accept_both<AllOptional>("duplicate_key_escaped", "{\"a\":1,\"" + u("0061") + "\":3}",
+                               R"({"a":3,"b":null})");
+      accept_both<AllOptional>("duplicate_key_last_null", R"({"a":1,"b":"x","a":null})",
+                               R"({"a":null,"b":"x"})");
+      accept_both<AllOptional>("duplicate_unknown_key", R"({"z":1,"z":2})",
+                               R"({"a":null,"b":null})");
+      accept_both<AllOptional>("duplicate_unknown_key_escaped",
+                               "{\"z\":1,\"" + u("007a") + "\":2}", R"({"a":null,"b":null})");
+      accept_both<AllOptional>("duplicate_key_inside_unknown_value", R"({"z":{"k":1,"k":2}})",
+                               R"({"a":null,"b":null})");
+      accept_both<AllOptional>("duplicate_key_deep_inside_unknown_value",
+                               R"({"z":[1,{"q":[{"k":1,"j":0,"k":2}]}]})",
+                               R"({"a":null,"b":null})");
+      accept<Inner>("ijson", "duplicate_member", R"({"id":"7","label":"x","flag":true,"id":"8"})",
+                    R"({"id":8,"label":"x","flag":true})");
+      accept<Inner>("json", "duplicate_member", R"({"id":7,"label":"x","flag":true,"id":8})",
+                    R"({"id":8,"label":"x","flag":true})");
+      accept<Holder>("ijson", "duplicate_key_in_nested_record",
+                     R"({"choice":{"Inner":{"id":"1","id":"2","label":"","flag":false}},"choices":[]})",
+                     R"({"choice":{"Inner":{"id":2,"label":"","flag":false}},"choices":[]})");
+      // A repeated list member is replaced, not appended to.
+      accept_both<Tree>("duplicate_list_member_replaced",
+                        R"({"children":[{"children":[]},{"children":[]}],"children":[{"children":[]}]})",
+                        R"({"children":[{"children":[]}]})");
       // Unknown key nested to the depth limit: object + 63 arrays.
       accept_both<AllOptional>("unknown_key_depth_63",
                                "{\"x\":" + repeat("[", 63) + repeat("]", 63) + "}",
@@ -672,20 +697,19 @@ namespace
       reject<Choice>("json", "string_index", R"(["0",1])");
       reject<Choice>("json", "wrong_payload_type", R"([0,"1"])");
 
-      // ── Duplicate keys (RFC 7493) ──────────────────────────────────────
-      reject<AllOptional>("ijson", "duplicate_key", R"({"a":1,"a":2})");
-      reject<AllOptional>("ijson", "duplicate_key_same_value", R"({"a":1,"a":1})");
-      reject<AllOptional>("ijson", "duplicate_key_escaped", "{\"a\":1,\"" + u("0061") + "\":1}");
-      reject<AllOptional>("ijson", "duplicate_unknown_key", R"({"z":1,"z":2})");
-      reject<AllOptional>("ijson", "duplicate_unknown_key_escaped", "{\"z\":1,\"" + u("007a") + "\":2}");
-      reject<AllOptional>("ijson", "duplicate_key_inside_unknown_value",
-                          R"({"z":{"k":1,"k":2}})");
-      reject<AllOptional>("ijson", "duplicate_key_deep_inside_unknown_value",
-                          R"({"z":[1,{"q":[{"k":1,"j":0,"k":2}]}]})");
-      reject<Inner>("ijson", "duplicate_member",
-                    R"({"id":"7","label":"x","flag":true,"id":"7"})");
-      reject<Holder>("ijson", "duplicate_key_in_nested_record",
-                     R"({"choice":{"Inner":{"id":"1","id":"1","label":"","flag":false}},"choices":[]})");
+      // ── Repeated keys: every occurrence is decoded as it is seen ────────
+      // The last one wins (see the accepted rows), but an earlier,
+      // overridden occurrence must still be a well-formed value of the
+      // member's type.
+      reject_both<AllOptional>("duplicate_key_earlier_wrong_type", R"({"a":"x","a":2})");
+      reject_both<AllOptional>("duplicate_key_earlier_out_of_range", R"({"a":4294967296,"a":2})");
+      reject_both<AllOptional>("duplicate_key_earlier_malformed", R"({"a":[1,,"a":2})");
+      reject_both<AllOptional>("duplicate_key_later_wrong_type", R"({"a":2,"a":"x"})");
+      reject_both<AllOptional>("duplicate_unknown_key_earlier_malformed", R"({"z":01,"z":2})");
+      reject<Inner>("ijson", "duplicate_member_earlier_wrong_type",
+                    R"({"id":true,"label":"x","flag":true,"id":"7"})");
+      // A variant object has exactly one member, so a second key is an
+      // error even when it repeats the first (see same_key_twice above).
 
       // ── Custom text form ───────────────────────────────────────────────
       reject_both<Version>("not_a_string", "1.2");

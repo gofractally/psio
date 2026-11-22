@@ -628,21 +628,32 @@ namespace psio {
       //
       // A plain std::string is raw bytes and is not checked here; the
       // utf8_string<N> wrapper must be valid UTF-8 to be encoded.
+      //
+      // `bounds`: also reject a record member outside its declared
+      // length_bound and a bitlist over its capacity, so the encoder never
+      // writes a frame its own validator rejects. Tests that need such a
+      // frame pass false.
       template <typename T>
-      codec_status check_encode_depth_impl(const T& value, std::size_t depth)
+      codec_status check_encode_depth_impl(const T& value, std::size_t depth,
+                                           bool bounds = true)
       {
          if (depth > kMaxValidationDepth)
             return codec_fail("pssz: max depth exceeded", 0, "pssz");
          if constexpr (is_psio_box_v<T>)
          {
             if (!value.value) return codec_fail("pssz: null Box", 0, "pssz");
-            return check_encode_depth_impl(*value.value, depth);
+            return check_encode_depth_impl(*value.value, depth, bounds);
+         }
+         else if constexpr (is_bitlist_v<T>)
+         {
+            if (bounds && value.size() > T::max_size_value)
+               return codec_fail("pssz: bitlist bit_count exceeds bound", 0, "pssz");
          }
          else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::pssz, T>)
             return codec_ok();
          else if constexpr (is_std_optional_v<T>)
          {
-            if (value) return check_encode_depth_impl(*value, depth + 1);
+            if (value) return check_encode_depth_impl(*value, depth + 1, bounds);
          }
          else if constexpr (is_std_array_v<T> || is_std_vector_v<T>)
          {
@@ -660,7 +671,7 @@ namespace psio {
             else
                for (const auto& element : value)
                {
-                  auto status = check_encode_depth_impl<E>(element, depth + 1);
+                  auto status = check_encode_depth_impl<E>(element, depth + 1, bounds);
                   if (!status.ok()) return status;
                }
          }
@@ -675,7 +686,7 @@ namespace psio {
          }
          else if constexpr (is_std_variant_v<T>)
             return std::visit([&](const auto& element) {
-               return check_encode_depth_impl(element, depth + 1);
+               return check_encode_depth_impl(element, depth + 1, bounds);
             }, value);
          else if constexpr (Record<T>)
             return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
@@ -683,7 +694,20 @@ namespace psio {
                const auto count = emitted_field_count(value);
                (([&] {
                   if (status.ok() && Is < count)
-                     status = check_encode_depth_impl(record_member<Is>(value), depth + 1);
+                  {
+                     status = check_encode_depth_impl(record_member<Is>(value), depth + 1,
+                                                      bounds);
+                     using eff = typename record_member_annotations<T, Is>::value_t;
+                     if constexpr (::psio::has_spec_v<::psio::length_bound, eff> &&
+                                   !::psio::has_as_override_v<eff>)
+                        if (status.ok() && bounds &&
+                            !::psio::detail::length_bound_ok(
+                               record_member<Is>(value),
+                               std::get<::psio::length_bound>(
+                                  record_member_annotations<T, Is>::value)))
+                           status = codec_fail("pssz: member length_bound violated", 0,
+                                               "pssz");
+                  }
                }()), ...);
                (void)count;
                return status;
@@ -2768,6 +2792,58 @@ namespace psio {
          bytes, 0, bytes.size(), 0, &flags);
       if (status.ok()) has_unknown = flags.has_unknown;
       return status;
+   }
+
+   namespace detail::pssz_impl
+   {
+      // Test support: the frame an encoder that does not check member
+      // length_bounds or bitlist capacity would write. Everything else
+      // (depth, UTF-8 wrappers, caps, offset widths) fails as in encode.
+      // Readers must reject such frames; production code uses encode.
+      template <typename Fmt, typename T>
+      std::vector<char> encode_ignoring_length_bounds(Fmt, const T& value)
+      {
+         if (auto status = check_encode_depth_impl(value, 0, false); !status.ok())
+            status_failure(status);
+         constexpr bool Auto = std::is_same_v<Fmt, ::psio::pssz>;
+         constexpr std::size_t W = [] {
+            if constexpr (std::is_same_v<Fmt, ::psio::pssz>)
+               return ::psio::auto_pssz_width<T>();
+            else
+               return Fmt::offset_width;
+         }();
+         const std::size_t total = size_of_v<W, Auto>(value);
+         enforce_max_dynamic<T>(total);
+         std::vector<char> out(total);
+         ::psio::fast_buf_stream sink(out.data(), total);
+         encode_value<W, Auto>(value, sink);
+         return out;
+      }
+   }  // namespace detail::pssz_impl
+
+   // ── Checked encode ────────────────────────────────────────────────────
+   //
+   // Appends the encoding of `value` to `out`, or returns why the value has
+   // none and leaves `out` unchanged: node depth, a null Box, a utf8_string
+   // that is not UTF-8 or over its bound, a member outside its length_bound,
+   // a bitlist over its capacity, or a total over the type's maxDynamicData
+   // cap. Usable with exceptions disabled. (A value too large for a type's
+   // static offset width is still a fail-fast error of the encoder.)
+   template <typename T, typename Fmt>
+   [[nodiscard]] codec_status encode_pssz_checked(Fmt format, const T& value,
+                                                  std::vector<char>& out)
+   {
+      if (auto status = detail::pssz_impl::check_encode_depth_impl(value, 0);
+          !status.ok())
+         return status;
+      const std::size_t total = ::psio::size_of(format, value);
+      constexpr auto cap = ::psio::max_dynamic_data_v<T>;
+      if constexpr (cap.has_value())
+         if (total > *cap)
+            return codec_fail("pssz: encoded size exceeds maxDynamicData cap",
+                              static_cast<std::uint32_t>(total), "pssz");
+      ::psio::encode(format, value, out);
+      return codec_ok();
    }
 
    template <typename T, typename Fmt>

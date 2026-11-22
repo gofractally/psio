@@ -151,8 +151,11 @@ fn depth_bombs_are_rejected_without_deep_recursion() {
 fn errors_carry_the_offset_and_format() {
     let e = json::from_str::<Json, Point>(r#"{"x":1,"y":true}"#).unwrap_err();
     assert_eq!((e.format, e.offset), ("json", 11));
-    let e = json::from_str::<IJson, Point>(r#"{"x":1,"x":1,"y":2}"#).unwrap_err();
-    assert_eq!((e.what, e.format, e.offset), ("ijson: duplicate object key", "ijson", 7));
+    // A repeated key is not an error in either format: the last one wins.
+    assert_eq!(json::from_str::<IJson, Point>(r#"{"x":1,"x":3,"y":2}"#).unwrap(), Point { x: 3, y: 2 });
+    // Each occurrence is decoded as it is seen, so it must be well-typed.
+    assert!(json::from_str::<IJson, Point>(r#"{"x":true,"x":3,"y":2}"#).is_err());
+    assert!(json::from_str::<Json, Point>(r#"{"x":true,"x":3,"y":2}"#).is_err());
     assert_eq!(json::from_str::<Json, Point>(r#"{"x":1,"x":3,"y":2}"#).unwrap(), Point { x: 3, y: 2 });
     assert_eq!(json::from_str::<Json, Point>("").unwrap_err().what, "json: empty input");
 }

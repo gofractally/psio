@@ -124,13 +124,20 @@ int main()
           "\"pair\":[3,\"three\"],\"unit\":[],\"code\":\"c\",\"ratio\":0.5,\"text\":\"t\xC3\xA9xt\"}"))
       return rc;
 
-   // I-JSON only: non-finite floats and duplicate keys.
+   // I-JSON only: non-finite floats. A repeated key is accepted in both
+   // formats and the last one wins.
    std::string out;
    if (psio::encode_json_checked(psio::ijson{}, std::numeric_limits<double>::infinity(), out).ok())
       return 1;
    if (psio::encode_json_checked(psio::ijson{}, std::nan(""), out).ok()) return 2;
-   const std::string dup = R"({"id":"1","label":"a","id":"1"})";
-   if (psio::validate<GuestInner>(psio::ijson{}, std::span<const char>{dup}).ok()) return 3;
+   const std::string dup = R"({"id":"1","label":"a","id":"2"})";
+   if (!psio::validate<GuestInner>(psio::ijson{}, std::span<const char>{dup}).ok()) return 3;
+   GuestInner last;
+   if (!psio::decode_json_checked(psio::ijson{}, std::span<const char>{dup}, last).ok() ||
+       last.id != 2)
+      return 3;
+   const std::string dup_bad = R"({"id":true,"label":"a","id":"2"})";
+   if (psio::validate<GuestInner>(psio::ijson{}, std::span<const char>{dup_bad}).ok()) return 3;
    const std::string range = R"({"id":"18446744073709551616","label":"a"})";
    GuestInner inner;
    if (psio::decode_json_checked(psio::ijson{}, std::span<const char>{range}, inner).ok()) return 4;

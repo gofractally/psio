@@ -123,9 +123,18 @@ crate-root `psio::decode` / `psio::validate`.
   intended ("unknown keys fall through") but it never advanced past the
   value. **A missing member is an error unless its type is optional**, which
   reads as empty; tuples are positional and have no such rule.
-  **A repeated key** is an error under `ijson`, also among unknown keys and
-  inside skipped values; under `json` the last one wins.
-- Variants: `ijson` needs an object with exactly one known alternative name;
+  **A repeated key is not an error in either format: the last one wins.**
+  JSON (RFC 8259) allows repeated keys, and last-wins lets the reader work
+  in a single pass with no seen-key bookkeeping. Each occurrence is decoded
+  as it is seen, so an earlier occurrence that is later overridden must
+  still be a well-formed value of the member's type (`{"a":"x","a":2}` is
+  rejected for an integer `a`); a repeated list member replaces the earlier
+  list. This holds for known members, unknown keys and keys inside skipped
+  values. RFC 7493 forbids I-JSON *senders* from emitting repeated keys;
+  PSIO's writers never emit one, while its readers accept them. The one
+  object that may not repeat a key is the `ijson` variant form, which has
+  exactly one member.
+- Variants: `ijson` needs an object with exactly one member, named by a known alternative (a second key, repeated or not, is an error);
   `json` a two-element array with an index in range.
 - Depth: more than 64 nested arrays/objects is rejected
   (`kMaxValidationDepth`), on typed and skipped values alike.
@@ -136,10 +145,20 @@ only, it keeps one leniency of the old decoder: a missing non-optional
 member is left value-initialized. `validate` and `decode_json_checked` are
 the entry points for untrusted text.
 
+## Length bounds
+
+A bounded wrapper (C++ `psio::bounded<T, N>`, `utf8_string<N>`; Rust
+`BoundedList`, `BoundedString`, `BoundedRawString`) and a C++ member
+annotated `length_bound{.max/.exact/.min}` (looking through `optional`) are
+enforced on both sides: the reader rejects a string or list outside its
+bound (`validate`, `decode_json_checked`, `decode`), and the writer refuses
+to produce one. The count is bytes for a string and elements for a list.
+
 ## Writing can fail
 
 A value with no JSON text is an error, never lossy or invalid output:
 
+- a string or list outside its length bound (above);
 - a raw string (C++ `std::string`, Rust `RawString`) whose bytes are not
   valid UTF-8, in both formats;
 - under `ijson`, a non-finite float and a string holding a noncharacter.

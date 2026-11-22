@@ -17,9 +17,11 @@
 // `#[repr(int)]` enum is its integer.
 //
 // Reading is strict and typed (see `Reader`): canonical in-range integers,
-// exact arity, valid UTF-8, no duplicate keys under IJson, at most
-// `MAX_DEPTH` nested arrays/objects. Unknown object keys are skipped; a
-// missing member is an error unless it is an `Option`.
+// exact arity, valid UTF-8, at most `MAX_DEPTH` nested arrays/objects.
+// Unknown object keys are skipped; a missing member is an error unless it is
+// an `Option`. A repeated key is read each time it appears and the last one
+// wins, in both formats (single pass, no seen-key bookkeeping); each
+// occurrence must be well-typed.
 
 use crate::pssz::RawString;
 use crate::{Decode, Encode, Format, Validate, ValidationPolicy};
@@ -449,11 +451,6 @@ pub struct Reader<'a> {
     depth: usize,
 }
 
-/// Keys of one object that matched no member, kept to detect duplicates
-/// under IJson.
-#[derive(Default)]
-pub struct UnknownKeys(Vec<String>);
-
 fn hex_digit(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
@@ -461,14 +458,6 @@ fn hex_digit(c: u8) -> Option<u8> {
         b'A'..=b'F' => Some(c - b'A' + 10),
         _ => None,
     }
-}
-
-fn has_duplicates(keys: &mut Vec<String>) -> bool {
-    if keys.len() < 2 {
-        return false;
-    }
-    keys.sort_unstable();
-    keys.windows(2).any(|w| w[0] == w[1])
 }
 
 impl<'a> Reader<'a> {
@@ -702,25 +691,13 @@ impl<'a> Reader<'a> {
     }
 
     /// Skips the value of a key that matched no member.
-    pub fn skip_unknown(&mut self, key: &str, unknown: &mut UnknownKeys) -> Result<()> {
-        if self.ijson {
-            unknown.0.push(key.to_owned());
-        }
+    pub fn skip_unknown(&mut self) -> Result<()> {
         self.skip_value()
     }
 
-    /// Closes an object: duplicate unknown keys are an error under IJson.
-    pub fn end_object(&mut self, mut unknown: UnknownKeys) -> Result<()> {
+    /// Closes an object opened by [`Reader::begin`].
+    pub fn end_object(&mut self) {
         self.end();
-        if self.ijson && has_duplicates(&mut unknown.0) {
-            return Err(self.err("ijson: duplicate object key"));
-        }
-        Ok(())
-    }
-
-    /// The error for a member that appears twice (IJson only).
-    pub fn duplicate(&self, at: usize) -> JsonTextError {
-        self.err_at(at, "ijson: duplicate object key")
     }
 
     fn skip_number(&mut self) -> Result<()> {
@@ -770,18 +747,16 @@ impl<'a> Reader<'a> {
     /// Skips one well-formed JSON value of any shape.
     fn skip_value(&mut self) -> Result<()> {
         self.ws();
+        // Strings inside a skipped value still follow the format's rules
+        // (noncharacters are not I-JSON).
         let unique = self.ijson;
         match self.peek() {
             None => Err(self.err("json: unexpected end of input")),
             Some(b'{') => {
                 self.begin(b'{', "json: expected '{'")?;
-                let mut keys = Vec::new();
                 if !self.take(b'}') {
                     loop {
-                        let key = self.key()?;
-                        if unique {
-                            keys.push(key.into_owned());
-                        }
+                        self.key()?;
                         self.skip_value()?;
                         if self.object_next()? {
                             break;
@@ -789,9 +764,6 @@ impl<'a> Reader<'a> {
                     }
                 }
                 self.end();
-                if unique && has_duplicates(&mut keys) {
-                    return Err(self.err("ijson: duplicate object key"));
-                }
                 Ok(())
             }
             Some(b'[') => {

@@ -1,7 +1,8 @@
 // A member's declared length_bound is enforced by the pssz status validator,
 // and therefore by validate, validate_strict and the checked readers built on
-// it (decode_pssz_checked, validated_pssz_view), under every width. The encoder and the unchecked
-// decode do not check it.
+// it (decode_pssz_checked, validated_pssz_view), under every width. The encoder
+// refuses a value outside the bound (codec_exception from encode, a status from
+// encode_pssz_checked); the unchecked decode does not check it.
 
 #include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
@@ -53,8 +54,26 @@ namespace
    template <typename Fmt>
    bool accepted(const LbRec& value)
    {
-      const auto bytes = psio::encode(Fmt{}, value);
+      // The frame a writer that skips the bound check would produce.
+      const auto bytes = psio::detail::pssz_impl::encode_ignoring_length_bounds(Fmt{}, value);
       const bool ok    = psio::validate<LbRec>(Fmt{}, bytes).ok();
+      // The encoder agrees with the validator: it writes exactly the frames
+      // validate accepts and refuses the rest, leaving the sink untouched.
+      std::vector<char> sink{'x'};
+      CHECK(psio::encode_pssz_checked(Fmt{}, value, sink).ok() == ok);
+      if (ok)
+      {
+         CHECK(std::vector<char>(sink.begin() + 1, sink.end()) == bytes);
+         CHECK(psio::encode(Fmt{}, value) == bytes);
+      }
+      else
+      {
+         CHECK(sink == std::vector<char>{'x'});
+         CHECK_THROWS_AS(psio::encode(Fmt{}, value), psio::codec_exception);
+         std::vector<char> appended{'x'};
+         CHECK_THROWS_AS(psio::encode(Fmt{}, value, appended), psio::codec_exception);
+         CHECK(appended == std::vector<char>{'x'});
+      }
       // Every checked entry point agrees with validate.
       CHECK(psio::validate_strict<LbRec>(Fmt{}, bytes).ok() == ok);
       LbRec out;
@@ -104,8 +123,13 @@ TEST_CASE("pssz length_bound violation reports its own error", "[pssz][length_bo
 {
    auto r = good();
    r.s    = "12345";
-   const auto bytes = psio::encode(psio::pssz32{}, r);
+   const auto bytes =
+      psio::detail::pssz_impl::encode_ignoring_length_bounds(psio::pssz32{}, r);
    const auto st    = psio::validate<LbRec>(psio::pssz32{}, bytes);
+   std::vector<char> out;
+   const auto        enc = psio::encode_pssz_checked(psio::pssz32{}, r, out);
+   REQUIRE(!enc.ok());
+   CHECK(enc.error().what == "pssz: member length_bound violated");
    REQUIRE(!st.ok());
    CHECK(st.error().what == "pssz: member length_bound violated");
    // The unchecked decode is the fail-fast path and does not check bounds.

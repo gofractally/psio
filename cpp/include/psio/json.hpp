@@ -65,7 +65,9 @@
 //   - a record accepts its members in any order. An unknown key is skipped
 //     (its value must still be well-formed JSON). A missing member is an
 //     error unless it is a std::optional, which reads as empty. A repeated
-//     key is an error under ijson (RFC 7493) and last-one-wins under json;
+//     key is not an error in either format: each occurrence is read as it
+//     is seen (so each must be well-typed) and the last one wins. The
+//     writers never emit a repeated key;
 //   - an ijson variant is an object with exactly one known alternative
 //     name; a json variant is a two-element array with an index in range;
 //   - nesting deeper than kMaxValidationDepth arrays/objects is rejected.
@@ -513,10 +515,18 @@ namespace psio {
             write_string(w, std::string_view{v}, Fmt::i_json);
          else if constexpr (is_utf8_string<T>::value)
             write_string(w, std::string_view{v.storage()}, Fmt::i_json);
+         else if constexpr (is_bounded<T>::value)
+         {
+            // The wrapper's storage is reachable unchecked: never write a
+            // list its own reader rejects.
+            if (v.size() > T::max_size_value)
+               w.fail("json: array exceeds its bound");
+            encode_value<Fmt, IM>(v.storage(), w);
+         }
          else if constexpr (Fmt::i_json && byte_seq<T>::value)
             write_hex(s, reinterpret_cast<const unsigned char*>(v.data()),
                       v.size());
-         else if constexpr (is_byte_array<T>::value || is_bounded<T>::value)
+         else if constexpr (is_byte_array<T>::value)
             encode_value<Fmt, IM>(v.storage(), w);
          else if constexpr (is_std_array<T>::value ||
                             is_std_vector<T>::value)
@@ -624,6 +634,13 @@ namespace psio {
                       }
                       else
                       {
+                         // A member outside its declared length_bound has
+                         // no text: the reader would reject it.
+                         if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
+                            if (!::psio::detail::length_bound_ok(
+                                   fref, std::get<::psio::length_bound>(
+                                            eff_for::value)))
+                               w.fail("json: member length_bound violated");
                          constexpr int_mode mode =
                             field_mode<Fmt, eff>(eff_for::value);
                          encode_value<Fmt, mode>(fref, w);
@@ -885,16 +902,9 @@ namespace psio {
          return true;
       }
 
-      inline bool duplicate_keys(std::vector<std::string>& keys)
-      {
-         if (keys.size() < 2)
-            return false;
-         std::sort(keys.begin(), keys.end());
-         return std::adjacent_find(keys.begin(), keys.end()) != keys.end();
-      }
-
       // Skips one well-formed JSON value of any shape (the value of an
-      // unknown key). `unique_keys` enforces RFC 7493 inside it.
+      // unknown key). `unique_keys` applies the I-JSON string rule
+      // (no noncharacters) inside it; repeated keys are not an error.
       inline bool skip_value(reader& r, std::size_t depth, bool unique_keys)
       {
          r.ws();
@@ -909,15 +919,12 @@ namespace psio {
                ++r.p;
                if (r.take('}'))
                   return true;
-               std::vector<std::string> keys;
-               std::string              scratch;
+               std::string scratch;
                while (true)
                {
                   std::string_view key;
                   if (!read_key(r, scratch, key, unique_keys))
                      return false;
-                  if (unique_keys)
-                     keys.emplace_back(key);
                   if (!r.take(':'))
                      return r.fail("json: expected ':' after object key");
                   if (!skip_value(r, depth + 1, unique_keys))
@@ -927,8 +934,6 @@ namespace psio {
                   if (!r.take(','))
                      return r.fail("json: expected ',' or '}' in object");
                }
-               if (unique_keys && duplicate_keys(keys))
-                  return r.fail("ijson: duplicate object key");
                return true;
             }
             case '[':
@@ -1413,15 +1418,15 @@ namespace psio {
                return r.fail("json: expected '{'");
             if (depth >= kMaxValidationDepth)
                return r.fail("json: max depth exceeded");
-            std::array<bool, N + 1>  seen{};
-            std::vector<std::string> unknown;
-            std::string              scratch;
+            // `seen` only records which members were given, to find the
+            // missing ones; a repeated key is simply read again.
+            std::array<bool, N + 1> seen{};
+            std::string             scratch;
             if (!r.take('}'))
             {
                while (true)
                {
                   std::string_view key;
-                  const char*      at = (r.ws(), r.p);
                   if (!read_key(r, scratch, key, Fmt::i_json))
                      return false;
                   if (!r.take(':'))
@@ -1436,13 +1441,6 @@ namespace psio {
                                 key != R::template member_name<Is>)
                                return;
                             matched = true;
-                            if constexpr (Fmt::i_json)
-                               if (seen[Is])
-                               {
-                                  r.p = at;
-                                  ok  = r.fail("ijson: duplicate object key");
-                                  return;
-                               }
                             seen[Is] = true;
                             using F = typename R::template member_type<Is>;
                             F* fptr = out
@@ -1477,8 +1475,33 @@ namespace psio {
                             {
                                constexpr int_mode mode =
                                   field_mode<Fmt, eff>(eff_for::value);
-                               ok = read_value<Fmt, mode, F>(r, fptr,
-                                                             depth + 1);
+                               if constexpr (::psio::has_spec_v<
+                                                ::psio::length_bound, eff>)
+                               {
+                                  // The member's length_bound is part of
+                                  // its type. It is checked on the value
+                                  // read, so the member is materialized
+                                  // even when only validating.
+                                  F  scratch{};
+                                  F* dst = fptr ? fptr : &scratch;
+                                  r.ws();
+                                  const char* value_at = r.p;
+                                  ok = read_value<Fmt, mode, F>(r, dst,
+                                                                depth + 1);
+                                  if (ok &&
+                                      !::psio::detail::length_bound_ok(
+                                         *dst,
+                                         std::get<::psio::length_bound>(
+                                            eff_for::value)))
+                                  {
+                                     r.p = value_at;
+                                     ok  = r.fail("json: member length_bound "
+                                                  "violated");
+                                  }
+                               }
+                               else
+                                  ok = read_value<Fmt, mode, F>(r, fptr,
+                                                                depth + 1);
                             }
                          }()),
                         ...);
@@ -1488,8 +1511,6 @@ namespace psio {
                   if (!matched)
                   {
                      // Unknown key: skip its value.
-                     if constexpr (Fmt::i_json)
-                        unknown.emplace_back(key);
                      if (!skip_value(r, depth + 1, Fmt::i_json))
                         return false;
                   }
@@ -1499,9 +1520,6 @@ namespace psio {
                      return r.fail("json: expected ',' or '}' in object");
                }
             }
-            if constexpr (Fmt::i_json)
-               if (duplicate_keys(unknown))
-                  return r.fail("ijson: duplicate object key");
             // A missing std::optional member is empty; any other missing
             // member is an error.
             bool complete = true;

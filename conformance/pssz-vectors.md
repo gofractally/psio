@@ -122,7 +122,7 @@ exists only for record members.
 | `enum-unknown-value` | 36 | A value that names no enumerator. C++ accepts it in every entry point. |
 | `string` | 308 | UTF-8 and bound rules for `string`, `string<=N`, `raw_string`. |
 | `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`. Recorded as `canonical`; the one exception is C++ `validate_strict`, which checks every plain string and rejects these. |
-| `length-bound-overflow` | 28 | Frames exceeding a member `length_bound`, as the C++ encoder (which does not check the bound) writes them. Every reader rejects them. |
+| `length-bound-overflow` | 28 | Frames exceeding a member `length_bound`, as a writer that skips the bound check would produce them. Every reader rejects them; the C++ and Rust encoders refuse the values. |
 | `bytes` | 88 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. |
 | `zero-fixed` | 100 | Zero-field and all-fixed records and their containers. |
 | `depth` | 28 | Node depth 63 / 64 accepted, 65+ rejected (`kMaxValidationDepth` = 64). |
