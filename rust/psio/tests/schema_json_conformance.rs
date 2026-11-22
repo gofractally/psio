@@ -62,25 +62,25 @@ fn hex(bytes: &[u8]) -> String {
 
 fn from_bytes(ir_hex: &str) -> Schema {
     let bytes = unhex(ir_hex);
-    psio::pssz::pssz_validate::<Pssz, Schema>(&bytes).expect("ir_hex validates");
-    psio::pssz::from_pssz_exact::<Pssz, Schema>(&bytes).expect("ir_hex decodes")
+    psio::pssz::validate::<Pssz, Schema>(&bytes).expect("ir_hex validates");
+    psio::pssz::decode_strict::<Pssz, Schema>(&bytes).expect("ir_hex decodes")
 }
 fn to_hex(schema: &Schema) -> String {
-    hex(&psio::pssz::try_to_pssz::<Pssz, Schema>(schema).expect("schema encodes"))
+    hex(&psio::pssz::try_encode::<Pssz, Schema>(schema).expect("schema encodes"))
 }
 
 /// The schema `text` reads as under `F`, through every reader entry point;
 /// they must agree on whether it is one.
 fn read<F: JsonFormat>(text: &str) -> Option<Schema> {
-    let read = json::from_str::<F, Schema>(text).ok();
-    assert_eq!(json::from_slice::<F, Schema>(text.as_bytes()).ok(), read, "from_slice: {text}");
+    let read = json::decode::<F, Schema>(text).ok();
+    assert_eq!(json::decode::<F, Schema>(text.as_bytes()).ok(), read, "from_slice: {text}");
     assert_eq!(json::validate::<F, Schema>(text.as_bytes()).is_ok(), read.is_some(), "validate: {text}");
     read
 }
 
 fn check_text<F: JsonFormat>(name: &str, schema: &Schema, ir_hex: &str, text: &str) {
-    assert_eq!(json::to_string::<F, _>(schema).expect("schema has text"), text, "{name}: text");
-    assert_eq!(json::to_vec::<F, _>(schema).expect("schema has text"), text.as_bytes(), "{name}: to_vec");
+    assert_eq!(json::try_encode::<F, _>(schema).expect("schema has text"), text, "{name}: text");
+    assert_eq!(json::try_encode::<F, _>(schema).map(String::into_bytes).expect("schema has text"), text.as_bytes(), "{name}: to_vec");
     let back = read::<F>(text).unwrap_or_else(|| panic!("{name}: the text does not read"));
     assert_eq!(&back, schema, "{name}: value read from text");
     assert_eq!(to_hex(&back), ir_hex, "{name}: bytes of the value read from text");
@@ -122,7 +122,7 @@ fn the_hand_built_schema_holds_every_alternative() {
         .types
         .iter()
         .map(|m| {
-            let text = json::to_string::<IJson, _>(&m.r#type.value).unwrap();
+            let text = psio::to_ijson(&m.r#type.value);
             text.split('"').nth(1).unwrap().to_string()
         })
         .collect();
@@ -163,8 +163,8 @@ fn a_box_is_its_value_in_text() {
     use psio::pssz::schema_ir::{AnyType, Int};
     let inner = AnyType::new(AnyValue::Int(Int { bits: 8, isSigned: false }));
     let boxed = Box::new(inner.clone());
-    assert_eq!(json::to_string::<IJson, _>(&boxed).unwrap(), json::to_string::<IJson, _>(&inner).unwrap());
-    assert_eq!(json::to_string::<Json, _>(&boxed).unwrap(), r#"{"value":[8,{"bits":8,"isSigned":false}]}"#);
-    assert_eq!(json::to_string::<IJson, _>(&boxed).unwrap(), r#"{"value":{"Int":{"bits":8,"isSigned":false}}}"#);
-    assert_eq!(json::from_str::<IJson, Box<AnyType>>(r#"{"value":{"Int":{"bits":8,"isSigned":false}}}"#).unwrap(), boxed);
+    assert_eq!(psio::to_ijson(&boxed), psio::to_ijson(&inner));
+    assert_eq!(psio::to_json(&boxed), r#"{"value":[8,{"bits":8,"isSigned":false}]}"#);
+    assert_eq!(psio::to_ijson(&boxed), r#"{"value":{"Int":{"bits":8,"isSigned":false}}}"#);
+    assert_eq!(psio::from_ijson::<Box<AnyType>>(r#"{"value":{"Int":{"bits":8,"isSigned":false}}}"#).unwrap(), boxed);
 }

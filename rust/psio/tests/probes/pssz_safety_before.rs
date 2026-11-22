@@ -74,53 +74,53 @@ impl<F: PsszFormat> PsszValidate<F> for Zero {
 }
 
 fn trait_dispatch<F: PsszFormat>() {
-    assert!(from_pssz::<F, Vec<CheckedByte>>(&[2]).is_err());
+    assert!(decode::<F, Vec<CheckedByte>>(&[2]).is_err());
     assert_eq!(
-        from_pssz::<F, Vec<CheckedByte>>(&[0x81]).unwrap(),
+        decode::<F, Vec<CheckedByte>>(&[0x81]).unwrap(),
         vec![CheckedByte(1)]
     );
     assert_eq!(
-        from_pssz::<F, [CheckedByte; 1]>(&[0x81]).unwrap(),
+        decode::<F, [CheckedByte; 1]>(&[0x81]).unwrap(),
         [CheckedByte(1)]
     );
-    assert_eq!(to_pssz::<F, _>(&vec![CheckedByte(1)]), [0x81]);
-    assert_eq!(to_pssz::<F, _>(&[CheckedByte(1)]), [0x81]);
+    assert_eq!(encode::<F, _>(&vec![CheckedByte(1)]), [0x81]);
+    assert_eq!(encode::<F, _>(&[CheckedByte(1)]), [0x81]);
     assert_eq!(
-        to_pssz::<F, _>(&FixedRecord {
+        encode::<F, _>(&FixedRecord {
             field: CheckedByte(1)
         }),
         [0x81]
     );
     assert_eq!(
-        from_pssz::<F, FixedRecord>(&[0x81]).unwrap().field,
+        decode::<F, FixedRecord>(&[0x81]).unwrap().field,
         CheckedByte(1)
     );
-    assert!(from_pssz::<F, FixedRecord>(&[2]).is_err());
+    assert!(decode::<F, FixedRecord>(&[2]).is_err());
 }
 fn truncated_record<F: PsszFormat>() {
-    let wire = to_pssz::<F, _>(&Action {
+    let wire = encode::<F, _>(&Action {
         id: 7,
         label: "action".into(),
         active: true,
     });
     for n in 0..F::HEADER_BYTES + 4 + F::OFFSET_BYTES + 1 {
-        let result = std::panic::catch_unwind(|| from_pssz::<F, Action>(&wire[..n]));
+        let result = std::panic::catch_unwind(|| decode::<F, Action>(&wire[..n]));
         assert!(result.is_ok(), "safe decoder panicked on truncation {n}");
         assert!(result.unwrap().is_err());
     }
 }
 fn zero_vector<F: PsszFormat>() {
-    assert!(from_pssz::<F, Vec<Zero>>(&[]).unwrap().is_empty());
-    assert!(pssz_validate::<F, Vec<Zero>>(&[]).is_ok());
-    let decoded = std::panic::catch_unwind(|| from_pssz::<F, Vec<Zero>>(&[1]));
+    assert!(decode::<F, Vec<Zero>>(&[]).unwrap().is_empty());
+    assert!(validate::<F, Vec<Zero>>(&[]).is_ok());
+    let decoded = std::panic::catch_unwind(|| decode::<F, Vec<Zero>>(&[1]));
     assert!(decoded.is_ok(), "zero-size vector divided by zero");
     assert!(decoded.unwrap().is_err());
-    let validated = std::panic::catch_unwind(|| pssz_validate::<F, Vec<Zero>>(&[1]));
+    let validated = std::panic::catch_unwind(|| validate::<F, Vec<Zero>>(&[1]));
     assert!(validated.is_ok());
     assert!(validated.unwrap().is_err());
 }
 fn bool_view<F: PsszFormat>() {
-    assert!(std::panic::catch_unwind(|| pssz_view_of::<bool, F>(&[2]).get()).is_err());
+    assert!(std::panic::catch_unwind(|| PsszView::<bool, F>::trusted(&[2]).get()).is_err());
 }
 macro_rules! widths {
     ($name:ident, $function:ident) => {

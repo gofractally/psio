@@ -66,8 +66,8 @@ fn derives_populate_actual_cpp_ir_with_references_bounds_and_layout_attributes()
             value: Some("".into())
         }]
     );
-    let bytes = try_to_pssz::<Pssz32, _>(&schema).unwrap();
-    assert_eq!(from_pssz::<Pssz32, Schema>(&bytes).unwrap(), schema);
+    let bytes = try_encode::<Pssz32, _>(&schema).unwrap();
+    assert_eq!(decode::<Pssz32, Schema>(&bytes).unwrap(), schema);
 }
 
 #[test]
@@ -103,9 +103,9 @@ fn plain_tuples_use_tuple_ir_and_enum_payloads_preserve_extensibility() {
 #[test]
 fn generic_bounds_follow_serialized_associated_fields() {
     let value = Associated::<Provider> { value: 7 };
-    let bytes = try_to_pssz::<Pssz32, _>(&value).unwrap();
+    let bytes = try_encode::<Pssz32, _>(&value).unwrap();
     assert_eq!(
-        from_pssz::<Pssz32, Associated<Provider>>(&bytes)
+        decode::<Pssz32, Associated<Provider>>(&bytes)
             .unwrap()
             .value,
         7
@@ -313,16 +313,16 @@ fn literal_cpp_ir_alternatives_and_envelope_match_bytes_in_both_directions() {
             let json = serde_json::to_value(&value).unwrap();
             assert!(json["interfaces"][0].get("type_names").is_some());
             assert!(json["interfaces"][0].get("typenames").is_none());
-            assert_eq!(try_to_pssz::<Pssz32, _>(&value).unwrap(), bytes);
-            assert_eq!(from_pssz::<Pssz32, Schema>(&bytes).unwrap(), value);
+            assert_eq!(try_encode::<Pssz32, _>(&value).unwrap(), bytes);
+            assert_eq!(decode::<Pssz32, Schema>(&bytes).unwrap(), value);
         } else {
             let value = ir_sample(name);
             assert_eq!(
-                try_to_pssz::<Pssz32, _>(&value).unwrap(),
+                try_encode::<Pssz32, _>(&value).unwrap(),
                 bytes,
                 "IR alternative {name}"
             );
-            assert_eq!(from_pssz::<Pssz32, AnyType>(&bytes).unwrap(), value);
+            assert_eq!(decode::<Pssz32, AnyType>(&bytes).unwrap(), value);
         }
         rows += 1;
     }
@@ -392,14 +392,14 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
         bounded_raw: BoundedRawString(b"bytes".to_vec()),
         level: Level::High,
     };
-    let bytes = try_to_pssz::<Pssz32, _>(&value).unwrap();
+    let bytes = try_encode::<Pssz32, _>(&value).unwrap();
     let dynamic = codec::decode_exact::<Pssz32>(&schema, &root, &bytes).unwrap();
     assert_eq!(codec::encode::<Pssz32>(&schema, &root, &dynamic).unwrap(), bytes);
     // Invalid UTF-8 in the UTF-8 field is rejected by both.
     let mut bad = bytes.clone();
     let at = bad.iter().position(|b| *b == 0xc3).unwrap();
     bad[at] = 0xff;
-    assert!(from_pssz::<Pssz32, StringKinds>(&bad).is_err());
+    assert!(decode::<Pssz32, StringKinds>(&bad).is_err());
     assert!(codec::decode_exact::<Pssz32>(&schema, &root, &bad).is_err());
     // A raw string holding non-UTF-8 bytes is a valid typed value and, the
     // schema describing it as a raw "string", a valid one through the
@@ -411,13 +411,13 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
         bounded_raw: BoundedRawString(vec![0xc0, 0x80]),
         level: Level::High,
     };
-    let raw_bytes = try_to_pssz::<Pssz32, _>(&non_utf8).unwrap();
-    assert_eq!(from_pssz::<Pssz32, StringKinds>(&raw_bytes).unwrap(), non_utf8);
+    let raw_bytes = try_encode::<Pssz32, _>(&non_utf8).unwrap();
+    assert_eq!(decode::<Pssz32, StringKinds>(&raw_bytes).unwrap(), non_utf8);
     let raw_value = codec::decode_exact::<Pssz32>(&schema, &root, &raw_bytes).unwrap();
     assert_eq!(codec::encode::<Pssz32>(&schema, &root, &raw_value).unwrap(), raw_bytes);
     // The automatic (type-derived width) profile gives the typed `Pssz`
     // bytes and reads them back to the same value.
-    let auto_bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+    let auto_bytes = try_to_pssz(&value).unwrap();
     assert_eq!(codec::encode::<Pssz>(&schema, &root, &dynamic).unwrap(), auto_bytes);
     assert_eq!(codec::decode_exact::<Pssz>(&schema, &root, &auto_bytes).unwrap(), dynamic);
     assert_eq!(
@@ -425,8 +425,8 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
         psio::pssz::auto_pssz_width::<StringKinds>()
     );
     // The same under the automatic profile; the text writers refuse it.
-    let raw_auto = try_to_pssz::<Pssz, _>(&non_utf8).unwrap();
-    assert_eq!(from_pssz::<Pssz, StringKinds>(&raw_auto).unwrap(), non_utf8);
+    let raw_auto = try_to_pssz(&non_utf8).unwrap();
+    assert_eq!(from_pssz::<StringKinds>(&raw_auto).unwrap(), non_utf8);
     let raw_value = codec::decode_exact::<Pssz>(&schema, &root, &raw_auto).unwrap();
     assert_eq!(codec::encode::<Pssz>(&schema, &root, &raw_value).unwrap(), raw_auto);
     assert_eq!(codec::validate(&schema, &root, &raw_auto), Ok(false));
@@ -549,7 +549,7 @@ fn derives_record_caps_integer_forms_and_variant_names() {
         e: Uint256 { limb: [1, 0, 0, 0] },
         f: psio::pssz::BoundedList(vec![5]),
     };
-    let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+    let bytes = try_to_pssz(&value).unwrap();
     assert_eq!(codec::auto_width(&schema, &root).unwrap(), auto_pssz_width::<Annotated>());
     assert_eq!(codec::auto_width(&schema, &root).unwrap(), 2);
     let dynamic = codec::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap();
@@ -568,7 +568,7 @@ fn derives_record_caps_integer_forms_and_variant_names() {
         auto_pssz_width::<TypeDefaults>()
     );
     let typed = TypeDefaults { x: 1, y: -2 };
-    let bytes = try_to_pssz::<Pssz, _>(&typed).unwrap();
+    let bytes = try_to_pssz(&typed).unwrap();
     assert_eq!(
         codec::pssz_to_json::<psio::json::Json>(&defaults, &defaults_root, &bytes).unwrap().0,
         r#"{"x":"1","y":-2}"#
@@ -582,7 +582,7 @@ fn derives_record_caps_integer_forms_and_variant_names() {
         (Named::Plain("p".into()), r#"{"Plain":"p"}"#, r#"[1,"p"]"#),
         (Named::Bytes(vec![1, 255]), r#"{"uint8[]":"01FF"}"#, "[2,[1,255]]"),
     ] {
-        let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+        let bytes = try_to_pssz(&value).unwrap();
         assert_eq!(
             codec::pssz_to_json::<psio::json::IJson>(&named, &named_root, &bytes).unwrap().0,
             ijson

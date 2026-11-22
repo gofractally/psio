@@ -119,8 +119,8 @@ fn malformed_optional_suffixes_agree_across_material_views_and_actual_ir() {
     }
     fn check<F: PsszFormat>(bytes: &[u8], schema: &Schema, root: &AnyType) {
         let result = std::panic::catch_unwind(|| {
-            let typed = from_pssz_compatible::<F, Old>(bytes);
-            let view = psio::pssz_view::validated_view_compatible::<Old, F>(bytes);
+            let typed = decode_checked::<F, Old>(bytes);
+            let view = psio::pssz_view::PsszView::<Old, F>::new_checked(bytes);
             let runtime = codec::decode_compatible::<F>(schema, root, bytes);
             assert_eq!(typed.is_ok(), view.is_ok(), "typed/view: {bytes:02x?}");
             assert_eq!(typed.is_ok(), runtime.is_ok(), "typed/IR: {bytes:02x?}");
@@ -136,7 +136,7 @@ fn malformed_optional_suffixes_agree_across_material_views_and_actual_ir() {
                         ("name".into(), Value::String(typed.value.name)),
                     ])
                 );
-                assert_eq!(from_pssz_exact::<F, Old>(bytes).is_ok(), !typed.has_unknown);
+                assert_eq!(decode_strict::<F, Old>(bytes).is_ok(), !typed.has_unknown);
             }
         });
         assert!(result.is_ok(), "malformed input panicked: {bytes:02x?}");
@@ -144,18 +144,18 @@ fn malformed_optional_suffixes_agree_across_material_views_and_actual_ir() {
     fn run<F: PsszFormat>() {
         let (schema, root) = schema_for::<Old>().unwrap();
         let seeds = [
-            try_to_pssz::<F, _>(&Old {
+            try_encode::<F, _>(&Old {
                 flag: true,
                 name: "ab".into(),
             })
             .unwrap(),
-            try_to_pssz::<F, _>(&New {
+            try_encode::<F, _>(&New {
                 flag: false,
                 name: "a".into(),
                 extra: None,
             })
             .unwrap(),
-            try_to_pssz::<F, _>(&New {
+            try_encode::<F, _>(&New {
                 flag: true,
                 name: "a".into(),
                 extra: Some("b".into()),
@@ -431,12 +431,12 @@ fn byte_vectors_traverse_elements_but_strings_are_atomic_at_depth_limit() {
     }
     let (schema, root) = schema_for::<Nest<Vec<u8>>>().unwrap();
     let nonempty = bytes(&[7]);
-    assert!(from_pssz_exact::<Pssz32, Nest<Vec<u8>>>(&nonempty).is_err());
-    assert!(psio::pssz_view::validated_view_exact::<Nest<Vec<u8>>, Pssz32>(&nonempty).is_err());
+    assert!(decode_strict::<Pssz32, Nest<Vec<u8>>>(&nonempty).is_err());
+    assert!(psio::pssz_view::PsszView::<Nest<Vec<u8>>, Pssz32>::new_strict(&nonempty).is_err());
     assert!(codec::decode_exact::<Pssz32>(&schema, &root, &nonempty).is_err());
     assert!(codec::encode::<Pssz32>(&schema, &root, &value(Value::Bytes(vec![7]))).is_err());
     let empty = bytes(&[]);
-    assert!(from_pssz_exact::<Pssz32, Nest<Vec<u8>>>(&empty).is_ok());
+    assert!(decode_strict::<Pssz32, Nest<Vec<u8>>>(&empty).is_ok());
     assert!(codec::decode_exact::<Pssz32>(&schema, &root, &empty).is_ok());
     assert_eq!(
         codec::encode::<Pssz32>(&schema, &root, &value(Value::Bytes(vec![]))).unwrap(),
@@ -444,8 +444,8 @@ fn byte_vectors_traverse_elements_but_strings_are_atomic_at_depth_limit() {
     );
     let (schema, root) = schema_for::<Nest<String>>().unwrap();
     let text = bytes(b"a");
-    assert!(from_pssz_exact::<Pssz32, Nest<String>>(&text).is_ok());
-    assert!(psio::pssz_view::validated_view_exact::<Nest<String>, Pssz32>(&text).is_ok());
+    assert!(decode_strict::<Pssz32, Nest<String>>(&text).is_ok());
+    assert!(psio::pssz_view::PsszView::<Nest<String>, Pssz32>::new_strict(&text).is_ok());
     assert!(codec::decode_exact::<Pssz32>(&schema, &root, &text).is_ok());
     assert_eq!(
         codec::encode::<Pssz32>(&schema, &root, &value(Value::String("a".into()))).unwrap(),
@@ -465,7 +465,7 @@ fn runtime_optional_extensions_report_unknown_and_bound_known_payloads() {
         extra: Option<String>,
     }
     let (schema, root) = schema_for::<Old>().unwrap();
-    let bytes = try_to_pssz::<Pssz32, _>(&New {
+    let bytes = try_encode::<Pssz32, _>(&New {
         name: "a".into(),
         extra: Some("b".into()),
     })
@@ -478,7 +478,7 @@ fn runtime_optional_extensions_report_unknown_and_bound_known_payloads() {
         Value::Record(vec![("name".into(), Value::String("a".into()))])
     );
     let (schema, root) = schema_for::<New>().unwrap();
-    let bytes = try_to_pssz::<Pssz32, _>(&Old { name: "a".into() }).unwrap();
+    let bytes = try_encode::<Pssz32, _>(&Old { name: "a".into() }).unwrap();
     assert_eq!(
         codec::decode_exact::<Pssz32>(&schema, &root, &bytes).unwrap(),
         Value::Record(vec![
@@ -758,7 +758,7 @@ mod automatic {
         assert!(codec::encode::<Pssz>(&schema, &int(256, true), &Value::Bytes(raw.clone())).is_err());
         // The typed codec agrees on the bytes.
         let typed = Uint256 { limb: [1, 2, 3, 4] };
-        let wire = try_to_pssz::<Pssz, _>(&typed).unwrap();
+        let wire = try_to_pssz(&typed).unwrap();
         let (typed_schema, typed_root) = schema_for::<Uint256>().unwrap();
         assert_eq!(schema.resolve(&u256).unwrap(), typed_schema.resolve(&typed_root).unwrap());
         let value = codec::decode_exact::<Pssz>(&typed_schema, &typed_root, &wire).unwrap();

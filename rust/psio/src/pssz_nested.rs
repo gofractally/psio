@@ -3,7 +3,7 @@
 //! `Nested{type}`).
 //!
 //! ```
-//! use psio::pssz::{from_pssz, to_pssz, Nested, Pssz};
+//! use psio::pssz::{from_pssz, to_pssz, Nested};
 //!
 //! #[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 //! struct Transfer { to: String, amount: u64 }
@@ -15,10 +15,10 @@
 //!
 //! let args = Transfer { to: "bob".into(), amount: 5 };
 //! let action = Action { method: 9, args: Nested::new(&args).unwrap() };
-//! let frame = to_pssz::<Pssz, _>(&action);
-//! let raw = from_pssz::<Pssz, RawAction>(&frame).unwrap();
+//! let frame = to_pssz(&action);
+//! let raw = from_pssz::<RawAction>(&frame).unwrap();
 //! assert_eq!(raw.args, action.args.bytes());
-//! assert_eq!(from_pssz::<Pssz, Action>(&frame).unwrap().args.decode().unwrap(), args);
+//! assert_eq!(from_pssz::<Action>(&frame).unwrap().args.decode().unwrap(), args);
 //! ```
 //!
 //! * **Wire.** The bytes of `Vec<u8>` holding `T`'s encoding under the
@@ -87,7 +87,7 @@ impl<T, V, const N: usize> Nested<T, V, N> {
 impl<T: PsszPack<Pssz>, V, const N: usize> Nested<T, V, N> {
     /// The encoding of `value` (which runs its invariants).
     pub fn new(value: &T) -> PsszResult<Self> {
-        let bytes = try_to_pssz::<Pssz, T>(value)?;
+        let bytes = try_encode::<Pssz, T>(value)?;
         if bytes.len() > N {
             return Err(OVERFLOW);
         }
@@ -108,14 +108,14 @@ impl<T: PsszPack<Pssz> + PsszValidate<Pssz>, V: NestedValidation, const N: usize
         if self.bytes.len() > N {
             return Err(OVERFLOW);
         }
-        pssz_validate_compatible::<Pssz, T>(&self.bytes)
+        validate_compatible::<Pssz, T>(&self.bytes)
     }
     /// Validates the bytes as the one canonical encoding of a `T`.
     pub fn validate_exact(&self) -> PsszResult<()> {
         if self.bytes.len() > N {
             return Err(OVERFLOW);
         }
-        pssz_validate_exact::<Pssz, T>(&self.bytes)
+        validate_strict::<Pssz, T>(&self.bytes)
     }
     /// What a reader of the enclosing value does with the bytes: the rule
     /// of the reader in progress (compatible or exact), or nothing for a
@@ -140,11 +140,11 @@ impl<T: PsszPack<Pssz> + PsszUnpack<Pssz>, V, const N: usize> Nested<T, V, N> {
     /// The inner value: validates, then decodes (unknown appended optional
     /// fields are skipped).
     pub fn decode(&self) -> PsszResult<T> {
-        from_pssz::<Pssz, T>(&self.bytes)
+        from_pssz::<T>(&self.bytes)
     }
     /// [`Nested::decode`], reporting whether unknown fields were present.
     pub fn decode_compatible(&self) -> PsszResult<Decoded<T>> {
-        from_pssz_compatible::<Pssz, T>(&self.bytes)
+        decode_checked::<Pssz, T>(&self.bytes)
     }
 }
 
@@ -182,7 +182,7 @@ impl<T, V, const N: usize> std::hash::Hash for Nested<T, V, N> {
 /// The encoding of `T::default()`.
 impl<T: Default + PsszPack<Pssz>, V, const N: usize> Default for Nested<T, V, N> {
     fn default() -> Self {
-        Self::unchecked(to_pssz::<Pssz, T>(&T::default()))
+        Self::unchecked(encode::<Pssz, T>(&T::default()))
     }
 }
 
@@ -278,7 +278,7 @@ where
         if self.bytes.len() > N {
             return Err(w.err("json: member length_bound violated"));
         }
-        match from_pssz::<Pssz, T>(&self.bytes) {
+        match from_pssz::<T>(&self.bytes) {
             Ok(value) => value.write_json(w),
             Err(_) => Err(w.err("json: nested bytes are not a valid encoding of their type")),
         }
@@ -287,7 +287,7 @@ where
         r.ws();
         let at = r.position();
         let value = T::read_json(r)?;
-        match try_to_pssz::<Pssz, T>(&value) {
+        match try_encode::<Pssz, T>(&value) {
             Ok(bytes) if bytes.len() <= N => Ok(Self::unchecked(bytes)),
             Ok(_) => Err(r.err_at(at, "json: member length_bound violated")),
             Err(_) => Err(r.err_at(at, "json: nested value has no encoding")),

@@ -38,6 +38,25 @@ pub use unpack::CapnpUnpack;
 pub use view::CapnpView;
 pub use wire::validate;
 
+// ── The helper names (docs/helpers.md) ──────────────────────────────────────
+
+fn pack_message<T: CapnpPack>(value: &T) -> Vec<u8> {
+    value.capnp_pack()
+}
+/// Structural validation of the message (`validate`), then the typed read.
+fn unpack_message<T: CapnpUnpack>(msg: &[u8]) -> Result<T, &'static str> {
+    if !validate(msg) {
+        return Err("capnp: invalid message");
+    }
+    T::capnp_unpack(msg)
+}
+crate::format::message_format_helpers! {
+    tag Capnp, "capnp", error &'static str,
+    pack CapnpPack => pack_message, unpack CapnpUnpack => unpack_message,
+    names to_capnp to_capnp_into from_capnp from_capnp_trusted validate_capnp capnp_size
+          CapnpBuffer SharedCapnp
+}
+
 #[cfg(test)]
 mod tests {
     use super::layout::*;

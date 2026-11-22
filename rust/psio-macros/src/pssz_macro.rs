@@ -1047,6 +1047,9 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
     let mut declarations = Vec::new();
     let mut methods = Vec::new();
     let mut field_impls = Vec::new();
+    let mut_accessor = format_ident!("{}PsszMutAccessors", name);
+    let mut mut_declarations = Vec::new();
+    let mut mut_methods = Vec::new();
     match &input.data {
         Data::Struct(data) => {
             let info = field_info(&data.fields);
@@ -1081,6 +1084,18 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
                 ));
                 methods.push(quote! { fn #method(&self) -> #k::pssz_view::PsszView<'__pssz_view, #ty, __PsszFormat> { self.field::<#index>() } });
                 methods.push(quote! { fn #try_method(&self) -> #k::pssz::PsszResult<#k::pssz_view::PsszView<'__pssz_view, #ty, __PsszFormat>> { self.try_field::<#index>() } });
+                let bare = method.to_string().trim_start_matches("r#").to_string();
+                let mut_method = format_ident!("{}_mut", bare);
+                let try_mut_method = format_ident!("try_{}_mut", bare);
+                mut_declarations.push(quote!(
+                    /// The field for writing; panics when it is not stored in the frame.
+                    fn #mut_method(&mut self) -> #k::pssz_view::PsszMutView<'_, #ty, __PsszFormat>;
+                    fn #try_mut_method(&mut self) -> #k::pssz::PsszResult<#k::pssz_view::PsszMutView<'_, #ty, __PsszFormat>>;
+                ));
+                mut_methods.push(quote! {
+                    fn #mut_method(&mut self) -> #k::pssz_view::PsszMutView<'_, #ty, __PsszFormat> { self.field_mut::<#index>() }
+                    fn #try_mut_method(&mut self) -> #k::pssz::PsszResult<#k::pssz_view::PsszMutView<'_, #ty, __PsszFormat>> { self.try_field_mut::<#index>() }
+                });
                 let dwnc = opts.dwnc;
                 let transparent = opts.transparent;
                 field_impls.push(quote! {
@@ -1105,7 +1120,7 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
             methods.push(quote!(
                 fn raw_value(&self) -> #repr {
                     let mut buffer = [0u8; ::core::mem::size_of::<#repr>()];
-                    buffer.copy_from_slice(&self.data[..::core::mem::size_of::<#repr>()]);
+                    buffer.copy_from_slice(&self.bytes()[..::core::mem::size_of::<#repr>()]);
                     <#repr>::from_le_bytes(buffer)
                 }
             ));
@@ -1128,7 +1143,7 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
             ));
             methods.push(quote!(
                 fn selector(&self) -> u8 {
-                    self.data[0]
+                    self.bytes()[0]
                 }
             ));
             for (index, variant) in data.variants.iter().enumerate() {
@@ -1147,7 +1162,7 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
                 declarations.push(quote!(fn #method(&self) -> ::core::option::Option<#k::pssz_view::PsszView<'__pssz_view, #payload, __PsszFormat>>;));
                 methods.push(quote! {
                     fn #method(&self) -> ::core::option::Option<#k::pssz_view::PsszView<'__pssz_view, #payload, __PsszFormat>> {
-                        if self.data[0] == #tag { ::core::option::Option::Some(#k::pssz_view::PsszView::new(&self.data[1..])) } else { ::core::option::Option::None }
+                        if self.bytes()[0] == #tag { ::core::option::Option::Some(#k::pssz_view::PsszView::trusted(&self.bytes()[1..])) } else { ::core::option::Option::None }
                     }
                 });
             }
@@ -1165,6 +1180,10 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
         #vis trait #accessor #impl_g #where_c { #(#declarations)* }
         #[allow(non_snake_case)]
         impl #impl_g #accessor #trait_g for #k::pssz_view::PsszView<'__pssz_view, #name #type_g, __PsszFormat> #where_c { #(#methods)* }
+        #[allow(non_snake_case)]
+        #vis trait #mut_accessor #impl_g #where_c { #(#mut_declarations)* }
+        #[allow(non_snake_case)]
+        impl #impl_g #mut_accessor #trait_g for #k::pssz_view::PsszMutView<'__pssz_view, #name #type_g, __PsszFormat> #where_c { #(#mut_methods)* }
     })
 }
 pub fn derive_view(input: TokenStream) -> TokenStream {

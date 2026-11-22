@@ -6,8 +6,8 @@
 use psio::json::{self, IJson, Json};
 use psio::key::{from_key, key_bytes, to_key, try_to_key, ByKey};
 use psio::pssz::schema_ir::{schema_for, AnyValue};
-use psio::pssz::{
-    auto_pssz_width, dynamic, from_pssz, from_pssz_exact, pssz_validate, try_to_pssz, BoundedMap,
+use psio::pssz::{from_pssz, try_to_pssz, 
+    auto_pssz_width, dynamic, decode, decode_strict, validate, try_encode, BoundedMap,
     BoundedSet, Checked, Deferred, Nested, Pssz, Pssz16, RawString,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -94,11 +94,11 @@ fn the_ir_rust_builds_for_maps_sets_and_nested_values() {
         note: Nested::new(&RawString::from("12345678")).unwrap(),
         seen: BoundedSet([3u16, 1, 2].into_iter().collect()),
     };
-    let bytes = try_to_pssz::<Pssz, _>(&small).unwrap();
+    let bytes = try_to_pssz(&small).unwrap();
     // Header (3), id, the two one-byte offsets (3 and 3 + 8), the payloads.
     assert_eq!(hex(&bytes), "0301030b".to_string() + "3132333435363738" + "010002000300");
     assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
-    assert_eq!(from_pssz::<Pssz, Small>(&bytes).unwrap(), small);
+    assert_eq!(from_pssz::<Small>(&bytes).unwrap(), small);
 }
 
 #[test]
@@ -110,31 +110,31 @@ fn the_schema_path_over_the_rust_ir_agrees_with_the_typed_codecs() {
         limits: BoundedMap([(9u8, 1u8), (2, 2)].into_iter().collect()),
     };
     let (schema, root) = schema_for::<Capped>().unwrap();
-    let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+    let bytes = try_to_pssz(&value).unwrap();
     assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
     for (text, schema_text) in [
         (
-            json::to_string::<Json, _>(&value).unwrap(),
+            psio::to_json(&value),
             dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap().0,
         ),
         (
-            json::to_string::<IJson, _>(&value).unwrap(),
+            psio::to_ijson(&value),
             dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes).unwrap().0,
         ),
     ] {
         assert_eq!(text, schema_text);
         assert_eq!(text, r#"{"id":7,"note":"note","seen":[2,513],"limits":[[2,2],[9,1]]}"#);
         assert_eq!(dynamic::json_to_pssz::<Json>(&schema, &root, text.as_bytes()).unwrap(), bytes);
-        assert_eq!(json::from_str::<Json, Capped>(&text).unwrap(), value);
+        assert_eq!(psio::from_json::<Capped>(&text).unwrap(), value);
     }
     // Over a bound: no encoding, typed or through the schema.
     let long = r#"{"id":7,"note":"123456789","seen":[],"limits":[]}"#;
-    assert!(json::from_str::<Json, Capped>(long).is_err());
+    assert!(psio::from_json::<Capped>(long).is_err());
     assert!(dynamic::json_to_pssz::<Json>(&schema, &root, long.as_bytes()).is_err());
     let many = r#"{"id":7,"note":"","seen":[1,2,3,4],"limits":[]}"#;
-    assert!(json::from_str::<Json, Capped>(many).is_err());
+    assert!(psio::from_json::<Capped>(many).is_err());
     assert!(dynamic::json_to_pssz::<Json>(&schema, &root, many.as_bytes()).is_err());
-    assert!(try_to_pssz::<Pssz, _>(&Capped {
+    assert!(try_to_pssz(&Capped {
         note: Nested::unchecked(b"123456789".to_vec()),
         ..value.clone()
     })
@@ -150,13 +150,13 @@ fn the_schema_path_over_the_rust_ir_agrees_with_the_typed_codecs() {
         Nested::new(&Args { to: "bob".into(), amount: 5 }).unwrap(),
     );
     let (schema, root) = schema_for::<Key>().unwrap();
-    let bytes = try_to_pssz::<Pssz, _>(&key).unwrap();
+    let bytes = try_to_pssz(&key).unwrap();
     let value = dynamic::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap();
     assert_eq!(dynamic::to_key(&schema, &root, &value).unwrap(), to_key(&key));
     assert_eq!(from_key::<Key>(&to_key(&key)).unwrap(), key);
     // An explicit width around a nested value: the inner bytes stay in the
     // automatic profile, typed and through the schema.
-    let wide = try_to_pssz::<Pssz16, _>(&key).unwrap();
+    let wide = try_encode::<Pssz16, _>(&key).unwrap();
     assert_eq!(dynamic::decode_exact::<Pssz16>(&schema, &root, &wide).unwrap(), value);
     assert_eq!(dynamic::encode::<Pssz16>(&schema, &root, &value).unwrap(), wide);
 }
@@ -205,36 +205,36 @@ fn by_key_orders_any_key_type_by_its_key_bytes() {
     assert!(values[5].0.is_nan() && values[5].0.is_sign_positive());
     // It is its value in every format.
     assert_eq!(key_bytes(&ByKey(2.5f64)), key_bytes(&2.5f64));
-    assert_eq!(try_to_pssz::<Pssz, _>(&ByKey(7u32)).unwrap(), try_to_pssz::<Pssz, _>(&7u32).unwrap());
-    assert_eq!(json::to_string::<Json, _>(&ByKey(7u32)).unwrap(), "7");
+    assert_eq!(try_to_pssz(&ByKey(7u32)).unwrap(), try_to_pssz(&7u32).unwrap());
+    assert_eq!(psio::to_json(&ByKey(7u32)), "7");
     assert_eq!(schema_for::<ByKey<u32>>().unwrap(), schema_for::<u32>().unwrap());
     let set: BTreeSet<ByKey<f64>> = values.into_iter().collect();
-    let bytes = try_to_pssz::<Pssz, _>(&set).unwrap();
-    assert_eq!(from_pssz::<Pssz, BTreeSet<ByKey<f64>>>(&bytes).unwrap().len(), 6);
+    let bytes = try_to_pssz(&set).unwrap();
+    assert_eq!(decode::<Pssz, BTreeSet<ByKey<f64>>>(&bytes).unwrap().len(), 6);
 }
 
 #[test]
 fn nested_values_keep_their_bytes_and_validate_as_their_type() {
     let args = Args { to: "bob".into(), amount: 5 };
     let nested = Nested::<Args>::new(&args).unwrap();
-    assert_eq!(nested.bytes(), try_to_pssz::<Pssz, _>(&args).unwrap());
+    assert_eq!(nested.bytes(), try_to_pssz(&args).unwrap());
     assert_eq!(nested.decode().unwrap(), args);
     assert_eq!(nested.validate(), Ok(false));
     // The same bytes as the byte list holding them.
     assert_eq!(
-        try_to_pssz::<Pssz, _>(&nested).unwrap(),
-        try_to_pssz::<Pssz, _>(&nested.bytes().to_vec()).unwrap()
+        try_to_pssz(&nested).unwrap(),
+        try_to_pssz(&nested.bytes().to_vec()).unwrap()
     );
     // Adopted bytes are validated; garbage is refused by every reader.
     assert!(Nested::<Args>::checked(vec![1, 2, 3]).is_err());
     let garbage = Nested::<Args>::unchecked(vec![1, 2, 3]);
-    let frame = try_to_pssz::<Pssz, _>(&(7u8, garbage.clone())).unwrap();
-    assert!(pssz_validate::<Pssz, (u8, Nested<Args>)>(&frame).is_err());
-    assert!(from_pssz::<Pssz, (u8, Nested<Args>)>(&frame).is_err());
+    let frame = try_to_pssz(&(7u8, garbage.clone())).unwrap();
+    assert!(validate::<Pssz, (u8, Nested<Args>)>(&frame).is_err());
+    assert!(decode::<Pssz, (u8, Nested<Args>)>(&frame).is_err());
     assert!(from_key::<Nested<Args>>(&to_key(&garbage)).is_err());
     // Deferred: the enclosing reader does not look inside, in any mode; the
     // holder validates before reading through it.
-    let later = from_pssz_exact::<Pssz, (u8, Nested<Args, Deferred>)>(&frame).unwrap().1;
+    let later = decode_strict::<Pssz, (u8, Nested<Args, Deferred>)>(&frame).unwrap().1;
     assert_eq!(later.bytes(), [1, 2, 3]);
     assert!(later.validate().is_err() && later.decode().is_err());
     // Order, equality and key are those of the bytes: 256 before 1.
@@ -269,14 +269,14 @@ struct Even {
 #[test]
 fn transparent_types_and_invariants_in_every_format() {
     let tag = Tag { text: "a".into() };
-    assert_eq!(try_to_pssz::<Pssz, _>(&tag).unwrap(), b"a");
-    assert_eq!(json::to_string::<Json, _>(&tag).unwrap(), r#""a""#);
+    assert_eq!(try_to_pssz(&tag).unwrap(), b"a");
+    assert_eq!(psio::to_json(&tag), r#""a""#);
     assert_eq!(serde_json::to_string(&tag).unwrap(), r#""a""#);
     assert_eq!(to_key(&tag), to_key(&"a".to_string()));
     // A transparent string keys a JSON object.
     let map: BTreeMap<Tag, u32> = [(tag.clone(), 1)].into();
-    assert_eq!(json::to_string::<IJson, _>(&map).unwrap(), r#"{"a":1}"#);
-    assert_eq!(json::from_str::<IJson, BTreeMap<Tag, u32>>(r#"{"a":1}"#).unwrap(), map);
+    assert_eq!(psio::to_ijson(&map), r#"{"a":1}"#);
+    assert_eq!(psio::from_ijson::<BTreeMap<Tag, u32>>(r#"{"a":1}"#).unwrap(), map);
     // A transparent type with neither a text form nor an invariant is a
     // named alias of its member's type.
     let (schema, root) = schema_for::<Tag>().unwrap();
@@ -290,11 +290,11 @@ fn transparent_types_and_invariants_in_every_format() {
     assert_eq!(custom.id, "Even");
     const ODD: &str = "Even: the number is odd";
     let odd = Even { n: 3 };
-    assert_eq!(try_to_pssz::<Pssz, _>(&odd).map_err(|e| e.0), Err(ODD));
-    assert_eq!(from_pssz::<Pssz, Even>(&[3, 0, 0, 0]).map_err(|e| e.0), Err(ODD));
-    assert_eq!(pssz_validate::<Pssz, Vec<Even>>(&[2, 0, 0, 0, 3, 0, 0, 0]).map_err(|e| e.0), Err(ODD));
-    assert_eq!(json::to_string::<Json, _>(&odd).map_err(|e| e.what), Err(ODD));
-    assert_eq!(json::from_str::<Json, Even>("3").map_err(|e| e.what), Err(ODD));
+    assert_eq!(try_to_pssz(&odd).map_err(|e| e.0), Err(ODD));
+    assert_eq!(from_pssz::<Even>(&[3, 0, 0, 0]).map_err(|e| e.0), Err(ODD));
+    assert_eq!(validate::<Pssz, Vec<Even>>(&[2, 0, 0, 0, 3, 0, 0, 0]).map_err(|e| e.0), Err(ODD));
+    assert_eq!(psio::try_to_json(&odd).map_err(|e| e.what), Err(ODD));
+    assert_eq!(psio::from_json::<Even>("3").map_err(|e| e.what), Err(ODD));
     assert_eq!(try_to_key(&odd).map_err(|e| e.0), Err(ODD));
     assert_eq!(from_key::<Even>(&[0, 0, 0, 3]).map_err(|e| e.0), Err(ODD));
     assert_eq!(from_key::<Even>(&[0, 0, 0, 4]), Ok(Even { n: 4 }));

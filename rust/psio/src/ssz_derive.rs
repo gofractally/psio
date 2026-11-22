@@ -337,7 +337,7 @@ macro_rules! ssz_struct {
                     fn $field(&self) -> $crate::ssz_view::SszView<'a, $FTy> {
                         let (beg, end) = [<__ssz_span_of_ $Ty>](
                             self.data, stringify!($field));
-                        $crate::ssz_view::SszView::new(&self.data[beg .. end])
+                        $crate::ssz_view::SszView::trusted(&self.data[beg .. end])
                     }
                 )+
             }
@@ -445,7 +445,7 @@ mod tests {
         use super::tests::PointSszAccessors;
         let p = Point { x: 100, y: 200 };
         let b = to_ssz(&p);
-        let v: crate::ssz_view::SszView<Point> = crate::ssz_view::ssz_view_of(&b);
+        let v: crate::ssz_view::SszView<Point> = crate::ssz_view::SszView::trusted(&b);
         assert_eq!(v.x().get(), 100);
         assert_eq!(v.y().get(), 200);
     }
@@ -455,7 +455,7 @@ mod tests {
         use super::tests::NamedSszAccessors;
         let n = Named { name: "alice".into(), value: 77 };
         let b = to_ssz(&n);
-        let v: crate::ssz_view::SszView<Named> = crate::ssz_view::ssz_view_of(&b);
+        let v: crate::ssz_view::SszView<Named> = crate::ssz_view::SszView::trusted(&b);
         assert_eq!(v.name().view(), "alice");
         assert_eq!(v.value().get(), 77);
     }

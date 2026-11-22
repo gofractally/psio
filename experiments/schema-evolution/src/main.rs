@@ -1,6 +1,6 @@
 use fracpack::{Pack, Unpack};
 use psio::{PsszPack, PsszUnpack};
-use psio::pssz::{try_to_pssz, from_pssz_exact, Pssz32};
+use psio::pssz::{try_encode, decode_strict, Pssz32};
 use serde_json::json;
 
 #[derive(Debug, Pack, Unpack, PsszPack, PsszUnpack)]
@@ -25,13 +25,13 @@ fn result<T: std::fmt::Debug, E: std::fmt::Debug>(read: impl FnOnce() -> Result<
     }
 }
 fn emit<T: Pack + psio::pssz::PsszPack<Pssz32>>(name: &str, value: T) {
-    let frac = value.packed(); let pssz = try_to_pssz::<Pssz32,_>(&value).unwrap();
+    let frac = value.packed(); let pssz = try_encode::<Pssz32,_>(&value).unwrap();
     println!("{}",json!({"case":name,"format":"old-psibase-fracpack","hex":hex(&frac),"size":frac.len(),
         "read_v1":result(||V1::unpacked(&frac)),"read_v2_string":result(||V2String::unpacked(&frac)),
         "read_v2_fixed":result(||V2Fixed::unpacked(&frac)),"read_v2_optional":result(||V2Optional::unpacked(&frac))}));
     println!("{}",json!({"case":name,"format":"maintained-rust-pssz32-exact","hex":hex(&pssz),"size":pssz.len(),
-        "read_v1":result(||from_pssz_exact::<Pssz32,V1>(&pssz)),"read_v2_string":result(||from_pssz_exact::<Pssz32,V2String>(&pssz)),
-        "read_v2_fixed":result(||from_pssz_exact::<Pssz32,V2Fixed>(&pssz)),"read_v2_optional":result(||from_pssz_exact::<Pssz32,V2Optional>(&pssz))}));
+        "read_v1":result(||decode_strict::<Pssz32,V1>(&pssz)),"read_v2_string":result(||decode_strict::<Pssz32,V2String>(&pssz)),
+        "read_v2_fixed":result(||decode_strict::<Pssz32,V2Fixed>(&pssz)),"read_v2_optional":result(||decode_strict::<Pssz32,V2Optional>(&pssz))}));
 }
 fn main() {
     emit("v1",V1{name:"a".into()});

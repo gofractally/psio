@@ -90,7 +90,7 @@ mod tests {
         use super::tests::ValidatorSszAccessors;
         let v = sample_validator();
         let b = to_ssz(&v);
-        let view: crate::ssz_view::SszView<Validator> = crate::ssz_view::ssz_view_of(&b);
+        let view: crate::ssz_view::SszView<Validator> = crate::ssz_view::SszView::trusted(&b);
         assert_eq!(view.effective_balance().get(), 32_000_000_000);
         assert_eq!(view.slashed().get(), true);
         assert_eq!(view.activation_epoch().get(), 20);
@@ -126,7 +126,7 @@ mod tests {
         use crate::beacon_types::{
             BeaconState, BeaconStateSszAccessors, ValidatorSszAccessors,
         };
-        use crate::ssz_view::{ssz_view_of, SszView};
+        use crate::ssz_view::SszView;
 
         // Heap-allocate — by-value BeaconState is ~2.56 MiB on the stack
         // and would overflow immediately. Mirrors the C++ side's
@@ -149,7 +149,7 @@ mod tests {
             "mainnet genesis BeaconState re-encode must be byte-identical");
 
         // Zero-copy view: reach into the bytes without decoding.
-        let v: SszView<BeaconState> = ssz_view_of(&raw);
+        let v: SszView<BeaconState> = SszView::trusted(&raw);
         assert_eq!(v.slot().get(), 0);
         // First validator's pubkey, byte 0 — matches decoded.
         let first_pk_byte0 = v.validators().get(0).pubkey().get(0).get();
@@ -161,8 +161,8 @@ mod tests {
         let path = "/tmp/beacon_data/mainnet-genesis.ssz";
         let Ok(raw) = std::fs::read(path) else { return; };
         use crate::beacon_types::BeaconState;
-        use crate::ssz::ssz_validate;
-        ssz_validate::<BeaconState>(&raw).expect("structural validation must pass");
+        use crate::ssz::validate_ssz;
+        validate_ssz::<BeaconState>(&raw).expect("structural validation must pass");
     }
 
     // ── pSSZ (psiSSZ) round-trip on the same BeaconState ────────────────────
@@ -178,7 +178,7 @@ mod tests {
         let Ok(raw) = std::fs::read(path) else { return; };
 
         use crate::beacon_types::BeaconState;
-        use crate::pssz::{from_pssz, to_pssz, Pssz32};
+        use crate::pssz::{decode, encode, Pssz32};
         use crate::ssz::from_ssz;
 
         // Decode SSZ → produce native BeaconState.
@@ -187,18 +187,18 @@ mod tests {
         // Encode as pSSZ (Pssz32 — same 4-byte offsets as SSZ so sizing
         // is comparable; Pssz8/16 would be smaller but need per-subfield
         // max-size bounds to decide).
-        let pssz_bytes = to_pssz::<Pssz32, _>(&*state);
+        let pssz_bytes = encode::<Pssz32, _>(&*state);
 
         // Decode pSSZ back.
         let decoded = Box::new(
-            from_pssz::<Pssz32, BeaconState>(&pssz_bytes).expect("pssz decode"));
+            decode::<Pssz32, BeaconState>(&pssz_bytes).expect("pssz decode"));
 
         // Assert the decoded state equals the original.
         assert_eq!(*state, *decoded,
             "pSSZ round-trip must reproduce the original BeaconState");
 
         // And encoding again produces identical pSSZ bytes.
-        let pssz2 = to_pssz::<Pssz32, _>(&*decoded);
+        let pssz2 = encode::<Pssz32, _>(&*decoded);
         assert_eq!(pssz_bytes, pssz2,
             "pSSZ encode must be deterministic");
 

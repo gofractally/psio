@@ -33,9 +33,9 @@ psio::pssz_struct_dwnc!(Packed {
 });
 
 fn emit<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(name: &str, value: &T) {
-    let wire = to_pssz::<F, _>(value);
-    let decoded = from_pssz::<F, T>(&wire).unwrap();
-    assert_eq!(to_pssz::<F, _>(&decoded), wire);
+    let wire = encode::<F, _>(value);
+    let decoded = decode::<F, T>(&wire).unwrap();
+    assert_eq!(encode::<F, _>(&decoded), wire);
     let hex: String = wire.iter().map(|b| format!("{b:02x}")).collect();
     println!("\"{name}-{}\":\"{hex}\",", F::OFFSET_BYTES);
 }

@@ -68,10 +68,10 @@ fn mixed() -> Mixed {
 fn round_trips_and_is_deterministic() {
     fn check<F: JsonFormat>(want: &str) {
         let value = mixed();
-        let text = json::to_string::<F, _>(&value).unwrap();
+        let text = json::try_encode::<F, _>(&value).unwrap();
         assert_eq!(text, want);
-        assert_eq!(json::to_string::<F, _>(&value).unwrap(), text);
-        assert_eq!(json::from_str::<F, Mixed>(&text).unwrap(), value);
+        assert_eq!(json::try_encode::<F, _>(&value).unwrap(), text);
+        assert_eq!(json::decode::<F, Mixed>(&text).unwrap(), value);
     }
     check::<Json>(concat!(
         r#"[{"value":18446744073709551615,"type":"Blue"},"#,
@@ -89,87 +89,87 @@ fn round_trips_and_is_deterministic() {
 fn enums_newtypes_and_generics() {
     // A declared enumerator is written as its name, and read from the
     // name or the number.
-    assert_eq!(json::to_string::<IJson, _>(&Color::Blue).unwrap(), "\"Blue\"");
-    assert_eq!(json::to_string::<Json, _>(&Color::Blue).unwrap(), "\"Blue\"");
-    assert_eq!(json::from_str::<Json, Color>("1").unwrap(), Color::Green);
-    assert_eq!(json::from_str::<Json, Color>("\"Red\"").unwrap(), Color::Red);
+    assert_eq!(psio::to_ijson(&Color::Blue), "\"Blue\"");
+    assert_eq!(psio::to_json(&Color::Blue), "\"Blue\"");
+    assert_eq!(psio::from_json::<Color>("1").unwrap(), Color::Green);
+    assert_eq!(psio::from_json::<Color>("\"Red\"").unwrap(), Color::Red);
     // A Rust enum holds only its enumerators: an undeclared value is an error.
-    assert!(json::from_str::<Json, Color>("3").is_err());
-    assert!(json::from_str::<Json, Color>("\"red\"").is_err());
-    assert_eq!(json::to_string::<IJson, _>(&Big::Huge).unwrap(), "\"Huge\"");
-    assert_eq!(json::to_string::<Json, _>(&Big::Huge).unwrap(), "\"Huge\"");
-    assert_eq!(json::from_str::<IJson, Big>("\"18446744073709551615\"").unwrap(), Big::Huge);
-    assert_eq!(json::from_str::<Json, Big>("18446744073709551615").unwrap(), Big::Huge);
-    assert_eq!(json::to_string::<IJson, _>(&Meters(5)).unwrap(), "5");
-    assert_eq!(json::from_str::<IJson, Meters>("\"5\"").unwrap(), Meters(5));
+    assert!(psio::from_json::<Color>("3").is_err());
+    assert!(psio::from_json::<Color>("\"red\"").is_err());
+    assert_eq!(psio::to_ijson(&Big::Huge), "\"Huge\"");
+    assert_eq!(psio::to_json(&Big::Huge), "\"Huge\"");
+    assert_eq!(psio::from_ijson::<Big>("\"18446744073709551615\"").unwrap(), Big::Huge);
+    assert_eq!(psio::from_json::<Big>("18446744073709551615").unwrap(), Big::Huge);
+    assert_eq!(psio::to_ijson(&Meters(5)), "5");
+    assert_eq!(psio::from_ijson::<Meters>("\"5\"").unwrap(), Meters(5));
     let g = Generic { value: vec![1u8, 2], r#type: Color::Red };
-    assert_eq!(json::to_string::<IJson, _>(&g).unwrap(), r#"{"value":"0102","type":"Red"}"#);
-    assert_eq!(json::from_str::<IJson, Generic<Vec<u8>>>(r#"{"type":0,"value":"0102"}"#).unwrap(), g);
+    assert_eq!(psio::to_ijson(&g), r#"{"value":"0102","type":"Red"}"#);
+    assert_eq!(psio::from_ijson::<Generic<Vec<u8>>>(r#"{"type":0,"value":"0102"}"#).unwrap(), g);
 }
 
 #[test]
 fn values_without_a_json_text_fail_to_encode() {
     // A raw string is a JSON string when its bytes are UTF-8 ...
     let ok = RawString::from("t\u{e9}xt");
-    assert_eq!(json::to_string::<Json, _>(&ok).unwrap(), "\"t\u{e9}xt\"");
-    assert_eq!(json::to_string::<IJson, _>(&ok).unwrap(), "\"t\u{e9}xt\"");
+    assert_eq!(psio::to_json(&ok), "\"t\u{e9}xt\"");
+    assert_eq!(psio::to_ijson(&ok), "\"t\u{e9}xt\"");
     // ... and has no JSON text otherwise: an error, never lossy output.
     for raw in [RawString(vec![0xff]), RawString(vec![b'a', 0xc0, 0x80]), RawString(vec![0xed, 0xa0, 0x80])] {
-        let e = json::to_vec::<Json, _>(&raw).unwrap_err();
+        let e = psio::try_to_json(&raw).unwrap_err();
         assert_eq!(e.what, "json: string is not valid UTF-8");
         assert_eq!(e.format, "json");
-        assert_eq!(json::to_vec::<IJson, _>(&raw).unwrap_err().format, "ijson");
+        assert_eq!(psio::try_to_ijson(&raw).unwrap_err().format, "ijson");
         assert!(psio::encode::<IJson, _>(&vec![Some(raw.clone())]).is_err());
     }
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        assert!(json::to_vec::<IJson, _>(&bad).is_err());
-        assert!(json::to_vec::<Json, _>(&bad).is_err());
+        assert!(psio::try_to_ijson(&bad).is_err());
+        assert!(psio::try_to_json(&bad).is_err());
     }
-    assert!(json::to_vec::<IJson, _>(&f32::NAN).is_err());
+    assert!(psio::try_to_ijson(&f32::NAN).is_err());
     // Noncharacters are JSON but not I-JSON.
     let nonchar = String::from("\u{ffff}");
-    assert!(json::to_vec::<Json, _>(&nonchar).is_ok());
-    assert!(json::to_vec::<IJson, _>(&nonchar).is_err());
+    assert!(psio::try_to_json(&nonchar).is_ok());
+    assert!(psio::try_to_ijson(&nonchar).is_err());
 }
 
 #[test]
 fn depth_bombs_are_rejected_without_deep_recursion() {
     let arrays = vec![b'['; 1_000_000];
-    assert!(json::validate::<Json, Tree>(&arrays).is_err());
-    assert!(json::validate::<IJson, Vec<Vec<u8>>>(&arrays).is_err());
+    assert!(psio::validate_json::<Tree>(&arrays).is_err());
+    assert!(psio::validate_ijson::<Vec<Vec<u8>>>(&arrays).is_err());
     let nested = "{\"children\":[".repeat(300_000);
-    assert!(json::from_str::<IJson, Tree>(&nested).is_err());
-    assert!(json::from_str::<Json, Tree>(&nested).is_err());
+    assert!(psio::from_ijson::<Tree>(&nested).is_err());
+    assert!(psio::from_json::<Tree>(&nested).is_err());
     let unknown = format!("{{\"x\":{}", "{\"k\":[".repeat(300_000));
-    assert!(json::from_str::<IJson, Point>(&unknown).is_err());
-    assert!(json::from_str::<Json, Point>(&unknown).is_err());
+    assert!(psio::from_ijson::<Point>(&unknown).is_err());
+    assert!(psio::from_json::<Point>(&unknown).is_err());
     // Exactly the limit: 64 nested containers are accepted, 65 are not.
     type Deep = Vec<Vec<Vec<Vec<u32>>>>;
-    assert!(json::from_str::<Json, Deep>("[[[[1]]]]").is_ok());
+    assert!(psio::from_json::<Deep>("[[[[1]]]]").is_ok());
     let ok = format!("{{\"x\":1,\"y\":2,\"z\":{}{}}}", "[".repeat(63), "]".repeat(63));
     let bad = format!("{{\"x\":1,\"y\":2,\"z\":{}{}}}", "[".repeat(64), "]".repeat(64));
-    assert!(json::from_str::<IJson, Point>(&ok).is_ok());
-    assert_eq!(json::from_str::<IJson, Point>(&bad).unwrap_err().what, "json: max depth exceeded");
+    assert!(psio::from_ijson::<Point>(&ok).is_ok());
+    assert_eq!(psio::from_ijson::<Point>(&bad).unwrap_err().what, "json: max depth exceeded");
 }
 
 #[test]
 fn errors_carry_the_offset_and_format() {
-    let e = json::from_str::<Json, Point>(r#"{"x":1,"y":true}"#).unwrap_err();
+    let e = psio::from_json::<Point>(r#"{"x":1,"y":true}"#).unwrap_err();
     assert_eq!((e.format, e.offset), ("json", 11));
     // A repeated key is not an error in either format: the last one wins.
-    assert_eq!(json::from_str::<IJson, Point>(r#"{"x":1,"x":3,"y":2}"#).unwrap(), Point { x: 3, y: 2 });
+    assert_eq!(psio::from_ijson::<Point>(r#"{"x":1,"x":3,"y":2}"#).unwrap(), Point { x: 3, y: 2 });
     // Each occurrence is decoded as it is seen, so it must be well-typed.
-    assert!(json::from_str::<IJson, Point>(r#"{"x":true,"x":3,"y":2}"#).is_err());
-    assert!(json::from_str::<Json, Point>(r#"{"x":true,"x":3,"y":2}"#).is_err());
-    assert_eq!(json::from_str::<Json, Point>(r#"{"x":1,"x":3,"y":2}"#).unwrap(), Point { x: 3, y: 2 });
-    assert_eq!(json::from_str::<Json, Point>("").unwrap_err().what, "json: empty input");
+    assert!(psio::from_ijson::<Point>(r#"{"x":true,"x":3,"y":2}"#).is_err());
+    assert!(psio::from_json::<Point>(r#"{"x":true,"x":3,"y":2}"#).is_err());
+    assert_eq!(psio::from_json::<Point>(r#"{"x":1,"x":3,"y":2}"#).unwrap(), Point { x: 3, y: 2 });
+    assert_eq!(psio::from_json::<Point>("").unwrap_err().what, "json: empty input");
 }
 
 #[test]
 fn mutated_text_never_panics_and_accepted_text_round_trips() {
     fn run<F: JsonFormat>() {
         let value = mixed();
-        let text = json::to_vec::<F, _>(&value).unwrap();
+        let text = json::try_encode::<F, _>(&value).map(String::into_bytes).unwrap();
         let alphabet: &[u8] = b"0123456789\"\\[]{},:.-+eEaAfFnulrtx \n\x01\x7f\xc3\xff";
         let mut state = 0x2545F4914F6CDD1Du64;
         let mut next = move || {
@@ -196,12 +196,12 @@ fn mutated_text_never_panics_and_accepted_text_round_trips() {
                     bad.push(b'x');
                 }
             }
-            let read = json::from_slice::<F, Mixed>(&bad);
+            let read = json::decode::<F, Mixed>(&bad);
             assert_eq!(read.is_ok(), json::validate::<F, Mixed>(&bad).is_ok());
             if let Ok(v) = read {
                 accepted += 1;
-                let again = json::to_vec::<F, _>(&v).unwrap();
-                assert_eq!(json::from_slice::<F, Mixed>(&again).unwrap(), v);
+                let again = json::try_encode::<F, _>(&v).map(String::into_bytes).unwrap();
+                assert_eq!(json::decode::<F, Mixed>(&again).unwrap(), v);
             }
         }
         assert!(accepted > 0);
@@ -486,15 +486,15 @@ fn wide_text(order: &[usize]) -> String {
 fn wide_record_reads_in_any_member_order() {
     let names = wide_names();
     let declared: Vec<usize> = (0..names.len()).collect();
-    let want: WideRecord = json::from_str::<Json, _>(&wide_text(&declared)).unwrap();
-    assert_eq!(json::to_string::<Json, _>(&want).unwrap(), wide_text(&declared));
+    let want: WideRecord = psio::from_json::<_>(&wide_text(&declared)).unwrap();
+    assert_eq!(psio::to_json(&want), wide_text(&declared));
     assert_eq!(want.member_00, 3);
     assert_eq!(want.member_59_x_x_x, 180);
 
     let mut reversed = declared.clone();
     reversed.reverse();
-    assert_eq!(json::from_str::<Json, WideRecord>(&wide_text(&reversed)).unwrap(), want);
-    assert_eq!(json::from_str::<IJson, WideRecord>(&wide_text(&reversed)).unwrap(), want);
+    assert_eq!(psio::from_json::<WideRecord>(&wide_text(&reversed)).unwrap(), want);
+    assert_eq!(psio::from_ijson::<WideRecord>(&wide_text(&reversed)).unwrap(), want);
 
     // A fixed pseudo-random shuffle, several rounds.
     let mut order = declared.clone();
@@ -504,21 +504,21 @@ fn wide_record_reads_in_any_member_order() {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             order.swap(i, (state >> 33) as usize % (i + 1));
         }
-        assert_eq!(json::from_str::<Json, WideRecord>(&wide_text(&order)).unwrap(), want);
+        assert_eq!(psio::from_json::<WideRecord>(&wide_text(&order)).unwrap(), want);
     }
 
     // A missing member, an unknown key, near-miss names, a repeated key.
     for drop in [0usize, 31, 59] {
         let fewer: Vec<usize> = declared.iter().copied().filter(|i| *i != drop).collect();
-        assert!(json::from_str::<Json, WideRecord>(&wide_text(&fewer)).is_err());
+        assert!(psio::from_json::<WideRecord>(&wide_text(&fewer)).is_err());
     }
     let text = wide_text(&reversed);
     let extra = format!("{{\"member_0\":[1,{{}}],\"member_000\":null,\"\":0,{}", &text[1..]);
-    assert_eq!(json::from_str::<Json, WideRecord>(&extra).unwrap(), want);
+    assert_eq!(psio::from_json::<WideRecord>(&extra).unwrap(), want);
     let repeated = format!("{},\"member_00\":7}}", &text[..text.len() - 1]);
-    assert_eq!(json::from_str::<Json, WideRecord>(&repeated).unwrap().member_00, 7);
+    assert_eq!(psio::from_json::<WideRecord>(&repeated).unwrap().member_00, 7);
     let bad_then_good = format!("{{\"member_00\":\"x\",{}", &wide_text(&declared)[1..]);
-    assert!(json::from_str::<Json, WideRecord>(&bad_then_good).is_err());
+    assert!(psio::from_json::<WideRecord>(&bad_then_good).is_err());
 }
 
 #[test]
@@ -543,21 +543,21 @@ fn small_record_reads_in_every_member_order() {
     for order in orders {
         let text =
             format!("{{{}}}", order.iter().map(|i| members[*i]).collect::<Vec<_>>().join(","));
-        assert_eq!(json::from_str::<Json, OrderProbe>(&text).unwrap(), want, "{text}");
-        assert_eq!(json::from_str::<IJson, OrderProbe>(&text).unwrap(), want, "{text}");
+        assert_eq!(psio::from_json::<OrderProbe>(&text).unwrap(), want, "{text}");
+        assert_eq!(psio::from_ijson::<OrderProbe>(&text).unwrap(), want, "{text}");
     }
     // Optional members left out; repeated keys, the last one wins.
     assert_eq!(
-        json::from_str::<Json, OrderProbe>(r#"{"f":6,"e":[],"c":"x","a":1}"#).unwrap(),
+        psio::from_json::<OrderProbe>(r#"{"f":6,"e":[],"c":"x","a":1}"#).unwrap(),
         OrderProbe { a: 1, c: "x".into(), f: 6, ..Default::default() }
     );
     assert_eq!(
-        json::from_str::<Json, OrderProbe>(r#"{"a":1,"a":2,"c":"x","e":[1],"f":6,"e":[2,3],"c":"y","a":9}"#)
+        psio::from_json::<OrderProbe>(r#"{"a":1,"a":2,"c":"x","e":[1],"f":6,"e":[2,3],"c":"y","a":9}"#)
             .unwrap(),
         OrderProbe { a: 9, c: "y".into(), e: vec![2, 3], f: 6, ..Default::default() }
     );
-    assert!(json::from_str::<Json, OrderProbe>(r#"{"a":"bad","a":2,"c":"x","e":[],"f":6}"#).is_err());
-    assert!(json::from_str::<Json, OrderProbe>(r#"{"c":"x","e":[],"f":6}"#).is_err());
+    assert!(psio::from_json::<OrderProbe>(r#"{"a":"bad","a":2,"c":"x","e":[],"f":6}"#).is_err());
+    assert!(psio::from_json::<OrderProbe>(r#"{"c":"x","e":[],"f":6}"#).is_err());
 }
 
 #[test]
@@ -567,18 +567,18 @@ fn variant_alternatives_resolve_by_name() {
         .enumerate()
     {
         let text = format!("{{\"{name}\":{index}}}");
-        let value: ManyAlternatives = json::from_str::<IJson, _>(&text).unwrap();
-        assert_eq!(json::to_string::<IJson, _>(&value).unwrap(), text);
+        let value: ManyAlternatives = psio::from_ijson::<_>(&text).unwrap();
+        assert_eq!(psio::to_ijson(&value), text);
         let positional = format!("[{index},{index}]");
-        assert_eq!(json::from_str::<Json, ManyAlternatives>(&positional).unwrap(), value);
+        assert_eq!(psio::from_json::<ManyAlternatives>(&positional).unwrap(), value);
     }
     assert_eq!(
-        json::from_str::<IJson, ManyAlternatives>(r#"{"string":"s"}"#).unwrap(),
+        psio::from_ijson::<ManyAlternatives>(r#"{"string":"s"}"#).unwrap(),
         ManyAlternatives::Text("s".into())
     );
     for bad in [r#"{"Alt9":1}"#, r#"{"Alt":1}"#, r#"{"Alt00":1}"#, r#"{"":1}"#, r#"{"Text":"s"}"#, "{}"]
     {
-        assert!(json::from_str::<IJson, ManyAlternatives>(bad).is_err(), "{bad}");
+        assert!(psio::from_ijson::<ManyAlternatives>(bad).is_err(), "{bad}");
     }
-    assert!(json::from_str::<Json, ManyAlternatives>("[10,1]").is_err());
+    assert!(psio::from_json::<ManyAlternatives>("[10,1]").is_err());
 }

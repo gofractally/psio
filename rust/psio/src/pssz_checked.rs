@@ -601,7 +601,7 @@ pub fn encode_record<F: PsszFormat>(
 /// Encode step shared by every generated record: frame at the record's own
 /// width, then the `maxDynamicData` cap. The automatic profile enforces the
 /// cap at every node; explicit profiles only at the top level (see
-/// `pssz::try_to_pssz`), as C++ does.
+/// `pssz::try_encode`), as C++ does.
 pub fn finish_record<F: PsszFormat>(
     w: usize,
     cap: Option<usize>,

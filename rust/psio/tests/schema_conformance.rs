@@ -17,7 +17,7 @@
 use psio::json::{IJson, Json, JsonFormat};
 use psio::pssz::dynamic::{self, Value};
 use psio::pssz::schema_ir::{AnyType, Schema};
-use psio::pssz::{from_pssz, pssz_validate, Pssz, Pssz16, Pssz32, Pssz8, PsszFormat};
+use psio::pssz::{from_pssz, validate, Pssz, Pssz16, Pssz32, Pssz8, PsszFormat};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "custom/text.rs"]
@@ -130,8 +130,8 @@ fn from_hex(hex: &str) -> Vec<u8> {
 /// The IR travels as its own psio::pssz encoding.
 fn schema_of(hex: &str) -> Schema {
     let bytes = from_hex(hex);
-    pssz_validate::<Pssz, Schema>(&bytes).expect("schema_ir validates");
-    from_pssz::<Pssz, Schema>(&bytes).expect("schema_ir decodes")
+    validate::<Pssz, Schema>(&bytes).expect("schema_ir validates");
+    from_pssz::<Schema>(&bytes).expect("schema_ir decodes")
 }
 
 fn input_text(row: &JsonRow) -> Vec<u8> {
@@ -1020,11 +1020,11 @@ fn the_ir_version_marker_is_required_and_backward_compatible() {
     // bytes are a prefix-compatible encoding, and decode with no version.
     let mut old = current.clone();
     old.ir_version = None;
-    let old_bytes = psio::pssz::try_to_pssz::<Pssz, Schema>(&old).unwrap();
+    let old_bytes = psio::pssz::try_encode::<Pssz, Schema>(&old).unwrap();
     let new_bytes = from_hex(&fx.schema_ir);
     assert_ne!(old_bytes, new_bytes);
-    pssz_validate::<Pssz, Schema>(&old_bytes).expect("an unversioned schema is still a Schema");
-    let decoded = from_pssz::<Pssz, Schema>(&old_bytes).unwrap();
+    validate::<Pssz, Schema>(&old_bytes).expect("an unversioned schema is still a Schema");
+    let decoded = from_pssz::<Schema>(&old_bytes).unwrap();
     assert_eq!(decoded.ir_version, None);
     assert_eq!(decoded.types, current.types);
     // JSON without the member reads the same way.

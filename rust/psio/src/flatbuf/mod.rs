@@ -31,6 +31,21 @@ pub use schema::{to_fbs_schema, to_fbs_text, FbFieldSchema, FbSchema, FbTypeSche
 pub use unpack::{FbUnpack, FbUnpackElement, FbUnpackError};
 pub use view::{FbVecView, FbView, FbViewError};
 
+// ── The helper names (docs/helpers.md) ──────────────────────────────────────
+
+fn pack_message<T: FbPack>(value: &T) -> Vec<u8> {
+    value.fb_pack()
+}
+fn unpack_message<T: FbUnpack>(bytes: &[u8]) -> Result<T, FbUnpackError> {
+    T::fb_unpack(bytes)
+}
+crate::format::message_format_helpers! {
+    tag Flatbuf, "flatbuf", error FbUnpackError,
+    pack FbPack => pack_message, unpack FbUnpack => unpack_message,
+    names to_flatbuf to_flatbuf_into from_flatbuf from_flatbuf_trusted validate_flatbuf flatbuf_size
+          FlatbufBuffer SharedFlatbuf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

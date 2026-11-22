@@ -209,8 +209,8 @@ type PrefixFn<T> = fn(&T, usize) -> Vec<u8>;
 
 fn value_of<T: Conf>(pssz: &Option<String>) -> Result<T, String> {
     let bytes = unhex(pssz.as_ref().ok_or("row has no pssz")?);
-    let value = psio::pssz::from_pssz_exact::<Pssz, T>(&bytes).map_err(|e| format!("from_pssz {e:?}"))?;
-    let back = psio::pssz::try_to_pssz::<Pssz, T>(&value).map_err(|e| format!("to_pssz {e:?}"))?;
+    let value = psio::pssz::decode_strict::<Pssz, T>(&bytes).map_err(|e| format!("decode {e:?}"))?;
+    let back = psio::pssz::try_encode::<Pssz, T>(&value).map_err(|e| format!("encode {e:?}"))?;
     if back != bytes {
         return Err(format!("pssz re-encodes as {}", hex(&back)));
     }
@@ -218,11 +218,11 @@ fn value_of<T: Conf>(pssz: &Option<String>) -> Result<T, String> {
 }
 
 fn read_both<T: Conf>(text: &str) -> (Result<T, String>, Result<T, String>) {
-    let a = json::from_str::<Json, T>(text).map_err(|e| e.to_string());
-    let b = json::from_str::<IJson, T>(text).map_err(|e| e.to_string());
+    let a = psio::from_json::<T>(text).map_err(|e| e.to_string());
+    let b = psio::from_ijson::<T>(text).map_err(|e| e.to_string());
     // validate agrees with decode.
-    assert_eq!(json::validate::<Json, T>(text.as_bytes()).is_ok(), a.is_ok(), "json validate: {text}");
-    assert_eq!(json::validate::<IJson, T>(text.as_bytes()).is_ok(), b.is_ok(), "ijson validate: {text}");
+    assert_eq!(psio::validate_json::<T>(text.as_bytes()).is_ok(), a.is_ok(), "json validate: {text}");
+    assert_eq!(psio::validate_ijson::<T>(text.as_bytes()).is_ok(), b.is_ok(), "ijson validate: {text}");
     (a, b)
 }
 
@@ -242,20 +242,20 @@ fn check<T: Conf>(row: &Row, prefix: Option<PrefixFn<T>>) -> Result<(), String> 
             // A NaN is not `==` itself: the value a key gives back is then
             // identified by its bits (the PSSZ bytes).
             if back != value
-                && psio::pssz::try_to_pssz::<Pssz, T>(&back).ok().map(|b| hex(&b)) != row.pssz
+                && psio::pssz::try_encode::<Pssz, T>(&back).ok().map(|b| hex(&b)) != row.pssz
             {
                 return Err(format!("from_key gives {back:?}, want {value:?}"));
             }
-            let j = json::to_string::<Json, T>(&value);
-            let ij = json::to_string::<IJson, T>(&value);
+            let j = json::try_encode::<Json, T>(&value);
+            let ij = json::try_encode::<IJson, T>(&value);
             match (&row.json, &row.ijson) {
                 (Some(want_j), Some(want_ij)) => {
                     let (j, ij) = (j.map_err(|e| e.to_string())?, ij.map_err(|e| e.to_string())?);
                     if &j != want_j || &ij != want_ij {
                         return Err(format!("text is {j} / {ij}"));
                     }
-                    if json::from_str::<Json, T>(&j).ok().as_ref() != Some(&value)
-                        || json::from_str::<IJson, T>(&ij).ok().as_ref() != Some(&value)
+                    if psio::from_json::<T>(&j).ok().as_ref() != Some(&value)
+                        || psio::from_ijson::<T>(&ij).ok().as_ref() != Some(&value)
                     {
                         return Err("text does not read back".into());
                     }
@@ -276,7 +276,7 @@ fn check<T: Conf>(row: &Row, prefix: Option<PrefixFn<T>>) -> Result<(), String> 
             if a.as_ref() != Ok(&want) || b.as_ref() != Ok(&want) {
                 return Err(format!("read {a:?} / {b:?}, want {want:?}"));
             }
-            let canonical = json::to_string::<Json, T>(&want).map_err(|e| e.to_string())?;
+            let canonical = json::try_encode::<Json, T>(&want).map_err(|e| e.to_string())?;
             if Some(&canonical) != row.json.as_ref() {
                 return Err(format!("canonical text is {canonical}"));
             }
@@ -325,7 +325,7 @@ fn check<T: Conf>(row: &Row, prefix: Option<PrefixFn<T>>) -> Result<(), String> 
                 }
                 validate_key::<T>(&key).map_err(|e| format!("validate_key {e}"))?;
                 let back = from_key::<T>(&key).map_err(|e| format!("from_key {e}"))?;
-                let bits = psio::pssz::try_to_pssz::<Pssz, T>(&back).map_err(|e| format!("{e:?}"))?;
+                let bits = psio::pssz::try_encode::<Pssz, T>(&back).map_err(|e| format!("{e:?}"))?;
                 if &hex(&bits) != pssz {
                     return Err(format!("key gives {} back at {i}", hex(&bits)));
                 }
@@ -367,8 +367,8 @@ where
     let rejections = [
         ("validate_key", validate_key::<T>(&key).map_err(|e| e.0)),
         ("from_key", from_key::<T>(&key).map(drop).map_err(|e| e.0)),
-        ("pssz_validate", psio::pssz::from_pssz_exact::<Pssz, T>(&pssz).map(drop).map_err(|e| e.0)),
-        ("from_pssz", psio::pssz::from_pssz::<Pssz, T>(&pssz).map(drop).map_err(|e| e.0)),
+        ("validate", psio::pssz::decode_strict::<Pssz, T>(&pssz).map(drop).map_err(|e| e.0)),
+        ("decode", psio::pssz::from_pssz::<T>(&pssz).map(drop).map_err(|e| e.0)),
     ];
     for (what, outcome) in rejections {
         if outcome != Err(reason) {
@@ -377,7 +377,7 @@ where
     }
     // The wire type: the key decodes to the value `pssz`.
     let wire = from_key::<W>(&key).map_err(|e| format!("wire from_key {e}"))?;
-    let bytes = psio::pssz::try_to_pssz::<Pssz, W>(&wire).map_err(|e| format!("wire to_pssz {e:?}"))?;
+    let bytes = psio::pssz::try_encode::<Pssz, W>(&wire).map_err(|e| format!("wire encode {e:?}"))?;
     if bytes != pssz {
         return Err(format!("the wire type's key decodes to {}", hex(&bytes)));
     }
@@ -388,7 +388,7 @@ where
     let value = into(wire);
     let outcomes = [
         ("try_to_key", try_to_key(&value).map(drop).map_err(|e| e.0)),
-        ("try_to_pssz", psio::pssz::try_to_pssz::<Pssz, T>(&value).map(drop).map_err(|e| e.0)),
+        ("try_encode", psio::pssz::try_encode::<Pssz, T>(&value).map(drop).map_err(|e| e.0)),
     ];
     for (what, outcome) in outcomes {
         if outcome != Err(reason) {
@@ -636,8 +636,8 @@ fn the_schema_ir_drives_pssz_and_text() {
     use psio::pssz::schema_ir::{AnyType, Schema};
     let fx = fixture();
     let ir = unhex(&fx.schema_ir);
-    psio::pssz::pssz_validate::<Pssz, Schema>(&ir).expect("schema_ir validates");
-    let schema = psio::pssz::from_pssz::<Pssz, Schema>(&ir).expect("schema_ir decodes");
+    psio::pssz::validate::<Pssz, Schema>(&ir).expect("schema_ir validates");
+    let schema = psio::pssz::from_pssz::<Schema>(&ir).expect("schema_ir decodes");
     // Every custom id must be handled: the time ids are built in, and the
     // custom types of conformance/custom-types.md have their handlers
     // (written by hand over the wire types' bytes).

@@ -214,6 +214,15 @@ pub fn key_bytes<T: KeyPack + ?Sized>(value: &T) -> Vec<u8> {
     out
 }
 
+/// Appends the key of `value` to `out` (C++ `psio::to_key(v, sink)`), or
+/// reports the invariant it violates, leaving `out` as it was.
+pub fn to_key_into<T: KeyPack + ?Sized>(value: &T, out: &mut Vec<u8>) -> KeyResult<()> {
+    value.key_check()?;
+    out.reserve(value.key_size());
+    value.key_pack(out);
+    Ok(())
+}
+
 /// Size of the key of `value`.
 pub fn key_size<T: KeyPack + ?Sized>(value: &T) -> usize {
     value.key_size()
@@ -227,6 +236,18 @@ pub fn from_key<T: KeyUnpack>(bytes: &[u8]) -> KeyResult<T> {
         return Err(KeyError("key: trailing bytes"));
     }
     Ok(value)
+}
+
+/// Decodes a key the caller vouches for (C++
+/// `psio::from_key<T>(psio::trusted{bytes})`). A safe function: the reader
+/// checks as it reads, nothing is skipped, and bytes that are not a
+/// canonical key of `T` cause a panic.
+#[track_caller]
+pub fn from_key_trusted<T: KeyUnpack>(bytes: &[u8]) -> T {
+    match from_key::<T>(bytes) {
+        Ok(value) => value,
+        Err(e) => panic!("from_key_trusted: the bytes are not valid: {e}"),
+    }
 }
 
 /// Checks that `bytes` is exactly one canonical key of `T`.
@@ -245,6 +266,39 @@ pub fn key_prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
     out[keep - 1] += 1;
     Some(out)
 }
+
+// ── The generic layer and the buffer names ──────────────────────────────────
+
+/// The key format tag (C++ `psio::key`).
+pub struct KeyFormat;
+impl crate::Format for KeyFormat {
+    type Error = KeyError;
+}
+impl<T: KeyPack + ?Sized> crate::Encode<KeyFormat> for T {
+    fn encode_into(&self, out: &mut Vec<u8>) -> KeyResult<usize> {
+        let start = out.len();
+        to_key_into(self, out)?;
+        Ok(out.len() - start)
+    }
+    fn encoded_size(&self) -> KeyResult<usize> {
+        Ok(self.key_size())
+    }
+}
+impl<T: KeyUnpack> crate::Decode<KeyFormat> for T {
+    fn decode(bytes: &[u8]) -> KeyResult<Self> {
+        from_key::<T>(bytes)
+    }
+}
+impl<T: KeyUnpack> crate::Validate<KeyFormat> for T {
+    fn validate<P: crate::ValidationPolicy>(bytes: &[u8], _policy: &P) -> KeyResult<()> {
+        validate_key::<T>(bytes)
+    }
+}
+
+/// The key of one `T`, owned (C++ `psio::key_buffer<T>`).
+pub type KeyBuffer<T> = crate::Buffer<T, KeyFormat>;
+/// The key of one `T`, immutable and shared (C++ `psio::shared_key<T>`).
+pub type SharedKey<T> = crate::Shared<T, KeyFormat>;
 
 // ── Composite keys ──────────────────────────────────────────────────────────
 

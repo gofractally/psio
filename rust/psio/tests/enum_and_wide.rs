@@ -9,11 +9,11 @@ use psio::pssz::dynamic::{self, Value};
 use psio::pssz::schema_ir::{
     schema_for, AnyType, AnyValue, Enum, Enumerator, Float, Int, Member, Object, Schema,
 };
-use psio::pssz::{
-    from_pssz, from_pssz_compatible, from_pssz_exact, pssz_validate, pssz_validate_compatible,
-    pssz_validate_exact, to_pssz, try_to_pssz, Pssz, Pssz16, Pssz32, Pssz8, PsszFormat, Uint256,
+use psio::pssz::{to_pssz, from_pssz, try_to_pssz, 
+    decode, decode_checked, decode_strict, validate, validate_compatible,
+    validate_strict, encode, try_encode, Pssz, Pssz16, Pssz32, Pssz8, PsszFormat, Uint256,
 };
-use psio::pssz_view::{try_pssz_view_of, validated_view_compatible, validated_view_exact};
+use psio::pssz_view::{PsszView};
 
 /// No catch-all: the type holds its three enumerators and nothing else.
 #[derive(
@@ -87,8 +87,8 @@ struct Holder {
 }
 
 fn both<T: JsonText + PartialEq + std::fmt::Debug>(text: &str) -> Result<T, String> {
-    let a = json::from_str::<Json, T>(text);
-    let b = json::from_str::<IJson, T>(text);
+    let a = psio::from_json::<T>(text);
+    let b = psio::from_ijson::<T>(text);
     match (a, b) {
         (Ok(a), Ok(b)) => {
             assert_eq!(a, b, "{text}: the formats read different values");
@@ -110,15 +110,15 @@ where
     T: psio::pssz::PsszPack<F> + psio::pssz::PsszUnpack<F> + psio::pssz::PsszValidate<F>,
 {
     vec![
-        from_pssz::<F, T>(bytes).is_ok(),
-        from_pssz_exact::<F, T>(bytes).is_ok(),
-        from_pssz_compatible::<F, T>(bytes).is_ok(),
-        pssz_validate::<F, T>(bytes).is_ok(),
-        pssz_validate_exact::<F, T>(bytes).is_ok(),
-        pssz_validate_compatible::<F, T>(bytes).is_ok(),
-        try_pssz_view_of::<T, F>(bytes).is_ok(),
-        validated_view_exact::<T, F>(bytes).is_ok(),
-        validated_view_compatible::<T, F>(bytes).is_ok(),
+        decode::<F, T>(bytes).is_ok(),
+        decode_strict::<F, T>(bytes).is_ok(),
+        decode_checked::<F, T>(bytes).is_ok(),
+        validate::<F, T>(bytes).is_ok(),
+        validate_strict::<F, T>(bytes).is_ok(),
+        validate_compatible::<F, T>(bytes).is_ok(),
+        PsszView::<T, F>::new(bytes).is_ok(),
+        PsszView::<T, F>::new_strict(bytes).is_ok(),
+        PsszView::<T, F>::new_checked(bytes).is_ok(),
     ]
 }
 
@@ -134,14 +134,14 @@ fn an_enum_without_the_catch_all_rejects_an_undeclared_value_in_pssz() {
                 "{undeclared}"
             );
             assert_eq!(
-                from_pssz::<F, Strict>(&[undeclared]).unwrap_err().0,
+                decode::<F, Strict>(&[undeclared]).unwrap_err().0,
                 "pssz: value is not an enumerator"
             );
             // In every position.
-            assert!(from_pssz::<F, Vec<Strict>>(&[0, undeclared]).is_err());
-            assert!(pssz_validate::<F, Vec<Strict>>(&[0, undeclared]).is_err());
-            assert!(from_pssz::<F, Option<Strict>>(&[undeclared]).is_err());
-            assert!(from_pssz::<F, [Strict; 2]>(&[undeclared, 1]).is_err());
+            assert!(decode::<F, Vec<Strict>>(&[0, undeclared]).is_err());
+            assert!(validate::<F, Vec<Strict>>(&[0, undeclared]).is_err());
+            assert!(decode::<F, Option<Strict>>(&[undeclared]).is_err());
+            assert!(decode::<F, [Strict; 2]>(&[undeclared, 1]).is_err());
         }
         // Wrong size is an error with or without the catch-all.
         assert!(pssz_accepts::<F, Strict>(&[]).iter().all(|ok| !*ok));
@@ -160,7 +160,7 @@ fn the_catch_all_takes_undeclared_values_and_never_a_declared_one() {
     fn check<F: PsszFormat>() {
         for byte in 0..=255u8 {
             assert!(pssz_accepts::<F, Color>(&[byte]).iter().all(|ok| *ok), "{byte}");
-            let value = from_pssz::<F, Color>(&[byte]).unwrap();
+            let value = decode::<F, Color>(&[byte]).unwrap();
             // A wire value equal to a declared enumerator is that variant.
             let want = match byte {
                 0 => Color::Red,
@@ -169,11 +169,11 @@ fn the_catch_all_takes_undeclared_values_and_never_a_declared_one() {
                 other => Color::Unknown(other),
             };
             assert_eq!(value, want);
-            assert_eq!(from_pssz_exact::<F, Color>(&[byte]).unwrap(), want);
-            assert_eq!(from_pssz_compatible::<F, Color>(&[byte]).unwrap().value, want);
+            assert_eq!(decode_strict::<F, Color>(&[byte]).unwrap(), want);
+            assert_eq!(decode_checked::<F, Color>(&[byte]).unwrap().value, want);
             // The bytes are the underlying integer, unchanged.
-            assert_eq!(try_to_pssz::<F, _>(&value).unwrap(), [byte]);
-            assert_eq!(to_pssz::<F, _>(&value), [byte]);
+            assert_eq!(try_encode::<F, _>(&value).unwrap(), [byte]);
+            assert_eq!(encode::<F, _>(&value), [byte]);
         }
         for (value, wire) in [
             (Status::Pending, -1i32),
@@ -185,8 +185,8 @@ fn the_catch_all_takes_undeclared_values_and_never_a_declared_one() {
             (Status::Other(i32::MAX), i32::MAX),
         ] {
             let bytes = wire.to_le_bytes();
-            assert_eq!(try_to_pssz::<F, _>(&value).unwrap(), bytes);
-            assert_eq!(from_pssz::<F, Status>(&bytes).unwrap(), value);
+            assert_eq!(try_encode::<F, _>(&value).unwrap(), bytes);
+            assert_eq!(decode::<F, Status>(&bytes).unwrap(), value);
             assert!(pssz_accepts::<F, Status>(&bytes).iter().all(|ok| *ok));
         }
     }
@@ -198,8 +198,8 @@ fn the_catch_all_takes_undeclared_values_and_never_a_declared_one() {
     // The view reads the underlying integer whatever it is.
     use ColorPsszAccessors as _;
     use HolderPsszAccessors as _;
-    assert_eq!(try_pssz_view_of::<Color, Pssz>(&[9]).unwrap().raw_value(), 9);
-    assert_eq!(try_pssz_view_of::<Color, Pssz>(&[7]).unwrap().raw_value(), 7);
+    assert_eq!(PsszView::<Color, Pssz>::new(&[9]).unwrap().raw_value(), 9);
+    assert_eq!(PsszView::<Color, Pssz>::new(&[7]).unwrap().raw_value(), 7);
     let holder = Holder {
         color: Color::Unknown(200),
         status: Status::Other(-77),
@@ -207,9 +207,9 @@ fn the_catch_all_takes_undeclared_values_and_never_a_declared_one() {
         list: vec![Color::Unknown(3), Color::Red],
         maybe: Some(Status::Other(5)),
     };
-    let bytes = try_to_pssz::<Pssz, _>(&holder).unwrap();
-    assert_eq!(from_pssz::<Pssz, Holder>(&bytes).unwrap(), holder);
-    let view = validated_view_exact::<Holder, Pssz>(&bytes).unwrap();
+    let bytes = try_to_pssz(&holder).unwrap();
+    assert_eq!(from_pssz::<Holder>(&bytes).unwrap(), holder);
+    let view = PsszView::<Holder, Pssz>::new_strict(&bytes).unwrap();
     assert_eq!(view.color().raw_value(), 200);
     assert_eq!(view.try_status().unwrap().raw_value(), -77);
     assert_eq!(view.quoted().raw_value(), 7);
@@ -220,11 +220,11 @@ fn encoding_the_catch_all_with_a_declared_value_is_an_error() {
     const WHAT: &str = "pssz: catch-all enum variant holds a declared enumerator";
     fn check<F: PsszFormat>() {
         for declared in [0u8, 1, 7] {
-            assert_eq!(try_to_pssz::<F, _>(&Color::Unknown(declared)).unwrap_err().0, WHAT);
+            assert_eq!(try_encode::<F, _>(&Color::Unknown(declared)).unwrap_err().0, WHAT);
             // Nothing is appended by a failed checked pack, in any position.
-            assert!(try_to_pssz::<F, _>(&vec![Color::Red, Color::Unknown(declared)]).is_err());
-            assert!(try_to_pssz::<F, _>(&Some(Color::Unknown(declared))).is_err());
-            assert!(try_to_pssz::<F, _>(&Holder {
+            assert!(try_encode::<F, _>(&vec![Color::Red, Color::Unknown(declared)]).is_err());
+            assert!(try_encode::<F, _>(&Some(Color::Unknown(declared))).is_err());
+            assert!(try_encode::<F, _>(&Holder {
                 color: Color::Red,
                 status: Status::Active,
                 quoted: Color::Unknown(declared),
@@ -234,40 +234,40 @@ fn encoding_the_catch_all_with_a_declared_value_is_an_error() {
             .is_err());
         }
         for declared in [-1, 2, 3] {
-            assert_eq!(try_to_pssz::<F, _>(&Status::Other(declared)).unwrap_err().0, WHAT);
+            assert_eq!(try_encode::<F, _>(&Status::Other(declared)).unwrap_err().0, WHAT);
         }
-        assert!(try_to_pssz::<F, _>(&Color::Unknown(2)).is_ok());
-        assert!(try_to_pssz::<F, _>(&Status::Other(7)).is_ok());
+        assert!(try_encode::<F, _>(&Color::Unknown(2)).is_ok());
+        assert!(try_encode::<F, _>(&Status::Other(7)).is_ok());
     }
     check::<Pssz>();
     check::<Pssz8>();
     check::<Pssz16>();
     check::<Pssz32>();
 
-    // The infallible entry points (`to_pssz`, `pssz_pack`, `pssz_size`) have
+    // The infallible entry points (`encode`, `pssz_pack`, `pssz_size`) have
     // no error to return: they panic, like every other derived type whose
     // value has no encoding. They never write a second representation.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let packed = std::panic::catch_unwind(|| to_pssz::<Pssz, _>(&Color::Unknown(7)));
+    let packed = std::panic::catch_unwind(|| to_pssz(&Color::Unknown(7)));
     let sized = std::panic::catch_unwind(|| {
         <Color as psio::pssz::PsszPack<Pssz>>::pssz_size(&Color::Unknown(0))
     });
-    let nested = std::panic::catch_unwind(|| to_pssz::<Pssz, _>(&vec![Status::Other(2)]));
+    let nested = std::panic::catch_unwind(|| to_pssz(&vec![Status::Other(2)]));
     std::panic::set_hook(hook);
     assert!(packed.is_err() && sized.is_err() && nested.is_err());
 
     // JSON: the same rule, in both formats.
     for declared in [0u8, 1, 7] {
         for what in [
-            json::to_string::<Json, _>(&Color::Unknown(declared)).unwrap_err().what,
-            json::to_string::<IJson, _>(&Color::Unknown(declared)).unwrap_err().what,
-            json::to_string::<Json, _>(&vec![Color::Unknown(declared)]).unwrap_err().what,
+            psio::try_to_json(&Color::Unknown(declared)).unwrap_err().what,
+            psio::try_to_ijson(&Color::Unknown(declared)).unwrap_err().what,
+            psio::try_to_json(&vec![Color::Unknown(declared)]).unwrap_err().what,
         ] {
             assert_eq!(what, "json: catch-all enum variant holds a declared enumerator");
         }
     }
-    assert!(json::to_string::<IJson, _>(&Status::Other(-1)).is_err());
+    assert!(psio::try_to_ijson(&Status::Other(-1)).is_err());
     assert!(psio::encode::<Json, _>(&Status::Other(3)).is_err());
 }
 
@@ -277,27 +277,27 @@ fn encoding_the_catch_all_with_a_declared_value_is_an_error() {
 fn an_enum_is_written_as_its_name_or_as_the_number_of_an_unnamed_value() {
     fn check<F: JsonFormat>() {
         let text = |v: &dyn Fn() -> Result<String, json::JsonTextError>| v().unwrap();
-        assert_eq!(text(&|| json::to_string::<F, _>(&Color::Red)), "\"red\"");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Color::Blue)), "\"blue\"");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Strict::Green)), "\"green\"");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Color::Unknown(2))), "2");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Color::Unknown(255))), "255");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Color::Red)), "\"red\"");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Color::Blue)), "\"blue\"");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Strict::Green)), "\"green\"");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Color::Unknown(2))), "2");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Color::Unknown(255))), "255");
         // Without #[json(name)] the name is the variant identifier.
-        assert_eq!(text(&|| json::to_string::<F, _>(&Status::Pending)), "\"Pending\"");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Status::Closed)), "\"Closed\"");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Status::Other(-5))), "-5");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Status::Other(i32::MIN))), "-2147483648");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Big::Huge)), "\"Huge\"");
-        assert_eq!(text(&|| json::to_string::<F, _>(&Big::Unknown(7))), "7");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Status::Pending)), "\"Pending\"");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Status::Closed)), "\"Closed\"");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Status::Other(-5))), "-5");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Status::Other(i32::MIN))), "-2147483648");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Big::Huge)), "\"Huge\"");
+        assert_eq!(text(&|| json::try_encode::<F, _>(&Big::Unknown(7))), "7");
     }
     check::<Json>();
     check::<IJson>();
     // The number follows the integer rule of the repr and the format ...
-    assert_eq!(json::to_string::<Json, _>(&Big::Unknown(1 << 53)).unwrap(), "9007199254740992");
-    assert_eq!(json::to_string::<IJson, _>(&Big::Unknown(1 << 53)).unwrap(), "\"9007199254740992\"");
-    assert_eq!(json::from_str::<IJson, Big>("\"9007199254740992\"").unwrap(), Big::Unknown(1 << 53));
-    assert!(json::from_str::<IJson, Big>("9007199254740992").is_err());
-    assert_eq!(json::from_str::<Json, Big>("9007199254740992").unwrap(), Big::Unknown(1 << 53));
+    assert_eq!(psio::to_json(&Big::Unknown(1 << 53)), "9007199254740992");
+    assert_eq!(psio::to_ijson(&Big::Unknown(1 << 53)), "\"9007199254740992\"");
+    assert_eq!(psio::from_ijson::<Big>("\"9007199254740992\"").unwrap(), Big::Unknown(1 << 53));
+    assert!(psio::from_ijson::<Big>("9007199254740992").is_err());
+    assert_eq!(psio::from_json::<Big>("9007199254740992").unwrap(), Big::Unknown(1 << 53));
     // ... and a member's forced form; a name is a string in any case.
     let holder = Holder {
         color: Color::Unknown(9),
@@ -307,13 +307,13 @@ fn an_enum_is_written_as_its_name_or_as_the_number_of_an_unnamed_value() {
         maybe: Some(Status::Other(0)),
     };
     let text = r#"{"color":9,"status":"Active","quoted":"9","list":["green",2],"maybe":0}"#;
-    assert_eq!(json::to_string::<Json, _>(&holder).unwrap(), text);
-    assert_eq!(json::to_string::<IJson, _>(&holder).unwrap(), text);
-    assert_eq!(json::from_str::<Json, Holder>(text).unwrap(), holder);
-    assert_eq!(json::from_str::<IJson, Holder>(text).unwrap(), holder);
+    assert_eq!(psio::to_json(&holder), text);
+    assert_eq!(psio::to_ijson(&holder), text);
+    assert_eq!(psio::from_json::<Holder>(text).unwrap(), holder);
+    assert_eq!(psio::from_ijson::<Holder>(text).unwrap(), holder);
     let named = Holder { quoted: Color::Blue, ..holder.clone() };
     assert_eq!(
-        json::to_string::<IJson, _>(&named).unwrap(),
+        psio::to_ijson(&named),
         r#"{"color":9,"status":"Active","quoted":"blue","list":["green",2],"maybe":0}"#
     );
 }
@@ -407,15 +407,15 @@ fn an_enum_is_read_from_its_name_its_number_the_numeric_string_or_both() {
 fn an_enum_without_the_catch_all_rejects_an_undeclared_number_in_json() {
     for text in ["2", "\"2\"", "9", "\"255\"", "255"] {
         assert_eq!(both::<Strict>(text), Err("json: value is not an enumerator".to_string()));
-        assert!(json::validate::<Json, Strict>(text.as_bytes()).is_err());
+        assert!(psio::validate_json::<Strict>(text.as_bytes()).is_err());
         assert!(psio::decode::<IJson, Strict>(text.as_bytes()).is_err());
         // The same text is a value of the type with the catch-all.
         assert!(both::<Color>(text).is_ok());
     }
     // In any position.
-    assert!(json::from_str::<Json, Vec<Strict>>("[\"red\",2]").is_err());
-    assert!(json::from_str::<Json, Option<Strict>>("2").is_err());
-    assert_eq!(json::from_str::<Json, Vec<Strict>>("[\"red\",7]").unwrap(), [Strict::Red, Strict::Blue]);
+    assert!(psio::from_json::<Vec<Strict>>("[\"red\",2]").is_err());
+    assert!(psio::from_json::<Option<Strict>>("2").is_err());
+    assert_eq!(psio::from_json::<Vec<Strict>>("[\"red\",7]").unwrap(), [Strict::Red, Strict::Blue]);
 }
 
 // ── Schema IR ───────────────────────────────────────────────────────────────
@@ -461,26 +461,26 @@ fn the_derive_emits_an_enum_over_the_underlying_integer() {
 #[test]
 fn enum_is_the_last_alternative_of_any_type_and_old_schemas_are_unchanged() {
     let color = enumeration(int(8, false), &[("red", 0), ("blue", 7)]);
-    let bytes = try_to_pssz::<Pssz32, _>(&color).unwrap();
+    let bytes = try_encode::<Pssz32, _>(&color).unwrap();
     // AnyType is a one-member record: header, the member's offset, then the
     // variant, whose first byte is the alternative's index.
     assert_eq!(bytes[8], 14);
-    assert_eq!(from_pssz::<Pssz32, AnyType>(&bytes).unwrap(), color);
-    assert!(pssz_validate::<Pssz32, AnyType>(&bytes).is_ok());
-    let auto = try_to_pssz::<Pssz, _>(&color).unwrap();
-    assert_eq!(from_pssz::<Pssz, AnyType>(&auto).unwrap(), color);
+    assert_eq!(decode::<Pssz32, AnyType>(&bytes).unwrap(), color);
+    assert!(validate::<Pssz32, AnyType>(&bytes).is_ok());
+    let auto = try_to_pssz(&color).unwrap();
+    assert_eq!(from_pssz::<AnyType>(&auto).unwrap(), color);
     // The alternative before it keeps its index, and nothing follows Enum.
-    assert_eq!(try_to_pssz::<Pssz32, _>(&AnyType::named("x")).unwrap()[8], 13);
+    assert_eq!(try_encode::<Pssz32, _>(&AnyType::named("x")).unwrap()[8], 13);
     let mut beyond = bytes.clone();
     beyond[8] = 15;
-    assert!(from_pssz::<Pssz32, AnyType>(&beyond).is_err());
+    assert!(decode::<Pssz32, AnyType>(&beyond).is_err());
     // Bytes of the C++ struct layout: Enum{type, members}, Enumerator{name, value}.
     let one = enumeration(int(8, false), &[("a", 1)]);
     let enum_bytes = match &one.value {
-        AnyValue::Enum(e) => try_to_pssz::<Pssz32, _>(e).unwrap(),
+        AnyValue::Enum(e) => try_encode::<Pssz32, _>(e).unwrap(),
         _ => unreachable!(),
     };
-    let int8 = try_to_pssz::<Pssz32, _>(&int(8, false)).unwrap();
+    let int8 = try_encode::<Pssz32, _>(&int(8, false)).unwrap();
     let mut want = vec![];
     want.extend(8u32.to_le_bytes()); // header: fixed region of two offsets
     want.extend(8u32.to_le_bytes()); // -> type
@@ -561,7 +561,7 @@ fn the_schema_driven_codec_treats_an_enum_as_its_underlying_integer() {
         list: vec![Color::Unknown(3), Color::Red],
         maybe: Some(Status::Closed),
     };
-    let bytes = try_to_pssz::<Pssz, _>(&holder).unwrap();
+    let bytes = try_to_pssz(&holder).unwrap();
     assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
     for (text, unknown) in [
         (dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap(), false),
@@ -572,7 +572,7 @@ fn the_schema_driven_codec_treats_an_enum_as_its_underlying_integer() {
             text.0,
             r#"{"color":200,"status":-77,"quoted":"blue","list":[3,"red"],"maybe":"Closed"}"#
         );
-        assert_eq!(text.0, json::to_string::<Json, _>(&holder).unwrap());
+        assert_eq!(text.0, psio::to_json(&holder));
         assert_eq!(dynamic::json_to_pssz::<Json>(&schema, &root, text.0.as_bytes()).unwrap(), bytes);
     }
 }
@@ -670,7 +670,7 @@ fn adding_enumerators_is_a_compatible_upgrade() {
 // ── 128- and 256-bit integers ───────────────────────────────────────────────
 
 fn u256(text: &str) -> Uint256 {
-    json::from_str::<Json, Uint256>(text).unwrap_or_else(|e| panic!("{text}: {e}"))
+    psio::from_json::<Uint256>(text).unwrap_or_else(|e| panic!("{text}: {e}"))
 }
 
 #[derive(Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
@@ -693,21 +693,21 @@ fn wide_integers_are_decimal_bare_in_json_and_a_string_in_ijson() {
     const U256_MAX: &str =
         "115792089237316195423570985008687907853269984665640564039457584007913129639935";
     let quoted = |text: &str| format!("\"{text}\"");
-    assert_eq!(json::to_string::<Json, _>(&u128::MAX).unwrap(), U128_MAX);
-    assert_eq!(json::to_string::<IJson, _>(&u128::MAX).unwrap(), quoted(U128_MAX));
-    assert_eq!(json::to_string::<Json, _>(&i128::MIN).unwrap(), I128_MIN);
-    assert_eq!(json::to_string::<IJson, _>(&i128::MIN).unwrap(), quoted(I128_MIN));
+    assert_eq!(psio::to_json(&u128::MAX), U128_MAX);
+    assert_eq!(psio::to_ijson(&u128::MAX), quoted(U128_MAX));
+    assert_eq!(psio::to_json(&i128::MIN), I128_MIN);
+    assert_eq!(psio::to_ijson(&i128::MIN), quoted(I128_MIN));
     let max = Uint256 { limb: [u64::MAX; 4] };
-    assert_eq!(json::to_string::<Json, _>(&max).unwrap(), U256_MAX);
-    assert_eq!(json::to_string::<IJson, _>(&max).unwrap(), quoted(U256_MAX));
+    assert_eq!(psio::to_json(&max), U256_MAX);
+    assert_eq!(psio::to_ijson(&max), quoted(U256_MAX));
     // IJson: a string always, small values included.
-    assert_eq!(json::to_string::<IJson, _>(&7u128).unwrap(), "\"7\"");
-    assert_eq!(json::to_string::<IJson, _>(&-7i128).unwrap(), "\"-7\"");
-    assert_eq!(json::to_string::<IJson, _>(&0i128).unwrap(), "\"0\"");
-    assert_eq!(json::to_string::<IJson, _>(&Uint256::from_u64(7)).unwrap(), "\"7\"");
-    assert_eq!(json::to_string::<IJson, _>(&Uint256::ZERO).unwrap(), "\"0\"");
-    assert_eq!(json::to_string::<Json, _>(&Uint256::ZERO).unwrap(), "0");
-    assert_eq!(json::to_string::<Json, _>(&7u128).unwrap(), "7");
+    assert_eq!(psio::to_ijson(&7u128), "\"7\"");
+    assert_eq!(psio::to_ijson(&-7i128), "\"-7\"");
+    assert_eq!(psio::to_ijson(&0i128), "\"0\"");
+    assert_eq!(psio::to_ijson(&Uint256::from_u64(7)), "\"7\"");
+    assert_eq!(psio::to_ijson(&Uint256::ZERO), "\"0\"");
+    assert_eq!(psio::to_json(&Uint256::ZERO), "0");
+    assert_eq!(psio::to_json(&7u128), "7");
     // Limb boundaries of the 256-bit decimal.
     for (limb, text) in [
         ([0, 1, 0, 0], "18446744073709551616"),
@@ -717,9 +717,9 @@ fn wide_integers_are_decimal_bare_in_json_and_a_string_in_ijson() {
         ([u64::MAX, u64::MAX, 0, 0], U128_MAX),
     ] {
         let value = Uint256 { limb };
-        assert_eq!(json::to_string::<Json, _>(&value).unwrap(), text);
+        assert_eq!(psio::to_json(&value), text);
         assert_eq!(u256(text), value);
-        assert_eq!(json::from_str::<IJson, Uint256>(&quoted(text)).unwrap(), value);
+        assert_eq!(psio::from_ijson::<Uint256>(&quoted(text)).unwrap(), value);
     }
 
     // Input, both formats: a decimal string ...
@@ -733,18 +733,18 @@ fn wide_integers_are_decimal_bare_in_json_and_a_string_in_ijson() {
     assert_eq!(both::<Uint256>("12"), Ok(Uint256::from_u64(12)));
     assert_eq!(both::<i128>("0"), Ok(0));
     // ... beyond it only under Json.
-    assert_eq!(json::from_str::<Json, u128>(U128_MAX).unwrap(), u128::MAX);
-    assert_eq!(json::from_str::<Json, i128>(I128_MIN).unwrap(), i128::MIN);
-    assert_eq!(json::from_str::<Json, Uint256>(U256_MAX).unwrap(), max);
+    assert_eq!(psio::from_json::<u128>(U128_MAX).unwrap(), u128::MAX);
+    assert_eq!(psio::from_json::<i128>(I128_MIN).unwrap(), i128::MIN);
+    assert_eq!(psio::from_json::<Uint256>(U256_MAX).unwrap(), max);
     for text in ["9007199254740992", U128_MAX] {
         assert_eq!(
-            json::from_str::<IJson, u128>(text).unwrap_err().what,
+            psio::from_ijson::<u128>(text).unwrap_err().what,
             "ijson: bare integer outside the safe range must be a string"
         );
-        assert!(json::from_str::<IJson, Uint256>(text).is_err());
+        assert!(psio::from_ijson::<Uint256>(text).is_err());
     }
-    assert!(json::from_str::<IJson, i128>("-9007199254740992").is_err());
-    assert!(json::from_str::<IJson, i128>("9007199254740992").is_err());
+    assert!(psio::from_ijson::<i128>("-9007199254740992").is_err());
+    assert!(psio::from_ijson::<i128>("9007199254740992").is_err());
 
     // The legacy "0x" string: read in both formats, never written.
     assert_eq!(both::<u128>("\"0xff\""), Ok(255));
@@ -759,8 +759,8 @@ fn wide_integers_are_decimal_bare_in_json_and_a_string_in_ijson() {
     assert_eq!(both::<i128>("\"0x7fffffffffffffffffffffffffffffff\""), Ok(i128::MAX));
     assert_eq!(both::<Uint256>("\"0x100\""), Ok(Uint256::from_u64(256)));
     assert_eq!(both::<Uint256>(&format!("\"0x{}\"", "f".repeat(64))), Ok(max));
-    assert_eq!(json::to_string::<IJson, _>(&both::<u128>("\"0xff\"").unwrap()).unwrap(), "\"255\"");
-    assert_eq!(json::to_string::<Json, _>(&both::<i128>("\"-0x2a\"").unwrap()).unwrap(), "-42");
+    assert_eq!(psio::to_ijson(&both::<u128>("\"0xff\"").unwrap()), "\"255\"");
+    assert_eq!(psio::to_json(&both::<i128>("\"-0x2a\"").unwrap()), "-42");
 
     // Errors, in both formats.
     for text in [
@@ -789,7 +789,7 @@ fn wide_integers_are_decimal_bare_in_json_and_a_string_in_ijson() {
     ] {
         assert!(both::<Uint256>(&text).is_err(), "{text}");
     }
-    assert!(json::from_str::<Json, Uint256>(over).is_err());
+    assert!(psio::from_json::<Uint256>(over).is_err());
 
     // A forced form is written in and reads exactly that form.
     let forced = Forced {
@@ -801,19 +801,19 @@ fn wide_integers_are_decimal_bare_in_json_and_a_string_in_ijson() {
     };
     let json_text = format!(r#"{{"a":"7","b":{I128_MIN},"c":"9","d":[{U128_MAX},1],"e":-3}}"#);
     let ijson_text = format!(r#"{{"a":"7","b":{I128_MIN},"c":9,"d":[{U128_MAX},1],"e":"-3"}}"#);
-    assert_eq!(json::to_string::<Json, _>(&forced).unwrap(), json_text);
-    assert_eq!(json::to_string::<IJson, _>(&forced).unwrap(), ijson_text);
-    assert_eq!(json::from_str::<Json, Forced>(&json_text).unwrap(), forced);
-    assert_eq!(json::from_str::<IJson, Forced>(&ijson_text).unwrap(), forced);
+    assert_eq!(psio::to_json(&forced), json_text);
+    assert_eq!(psio::to_ijson(&forced), ijson_text);
+    assert_eq!(psio::from_json::<Forced>(&json_text).unwrap(), forced);
+    assert_eq!(psio::from_ijson::<Forced>(&ijson_text).unwrap(), forced);
     // json_string refuses a bare number; ijson_number refuses a string and
     // lifts the 2^53 limit.
-    assert!(json::from_str::<Json, Forced>(r#"{"a":7,"b":0,"c":"9","d":[],"e":null}"#).is_err());
-    assert!(json::from_str::<IJson, Forced>(r#"{"a":"7","b":"0","c":9,"d":[],"e":null}"#).is_err());
-    assert!(json::from_str::<IJson, Forced>(r#"{"a":"7","b":0,"c":"9","d":[],"e":null}"#).is_err());
-    assert!(json::from_str::<IJson, Forced>(r#"{"a":"7","b":0,"c":9,"d":["1"],"e":null}"#).is_err());
+    assert!(psio::from_json::<Forced>(r#"{"a":7,"b":0,"c":"9","d":[],"e":null}"#).is_err());
+    assert!(psio::from_ijson::<Forced>(r#"{"a":"7","b":"0","c":9,"d":[],"e":null}"#).is_err());
+    assert!(psio::from_ijson::<Forced>(r#"{"a":"7","b":0,"c":"9","d":[],"e":null}"#).is_err());
+    assert!(psio::from_ijson::<Forced>(r#"{"a":"7","b":0,"c":9,"d":["1"],"e":null}"#).is_err());
     // The same through the schema the derive emits.
     let (schema, root) = schema_for::<Forced>().unwrap();
-    let bytes = try_to_pssz::<Pssz, _>(&forced).unwrap();
+    let bytes = try_to_pssz(&forced).unwrap();
     assert_eq!(dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap().0, json_text);
     assert_eq!(dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes).unwrap().0, ijson_text);
     assert_eq!(dynamic::json_to_pssz::<Json>(&schema, &root, json_text.as_bytes()).unwrap(), bytes);
@@ -834,11 +834,11 @@ fn the_schema_driven_path_reads_and_writes_wide_integers_like_the_typed_one() {
     let schema = Schema::default();
     fn typed<T: JsonText + psio::pssz::PsszPack<Pssz>>(ijson: bool, text: &str) -> Option<Vec<u8>> {
         let value = if ijson {
-            json::from_str::<IJson, T>(text).ok()?
+            psio::from_ijson::<T>(text).ok()?
         } else {
-            json::from_str::<Json, T>(text).ok()?
+            psio::from_json::<T>(text).ok()?
         };
-        Some(try_to_pssz::<Pssz, _>(&value).unwrap())
+        Some(try_to_pssz(&value).unwrap())
     }
     let texts = [
         "0", "\"0\"", "7", "\"7\"", "-7", "\"-7\"", "9007199254740991", "9007199254740992",
@@ -875,11 +875,11 @@ fn the_schema_driven_path_reads_and_writes_wide_integers_like_the_typed_one() {
         let ty = int(128, false);
         assert_eq!(
             dynamic::pssz_to_json::<Json>(&schema, &ty, &bytes).unwrap().0,
-            json::to_string::<Json, _>(&value).unwrap()
+            psio::to_json(&value)
         );
         assert_eq!(
             dynamic::pssz_to_json::<IJson>(&schema, &ty, &bytes).unwrap().0,
-            json::to_string::<IJson, _>(&value).unwrap()
+            psio::to_ijson(&value)
         );
     }
     for value in [0i128, -1, -7, i128::MIN, i128::MAX] {
@@ -887,24 +887,24 @@ fn the_schema_driven_path_reads_and_writes_wide_integers_like_the_typed_one() {
         let ty = int(128, true);
         assert_eq!(
             dynamic::pssz_to_json::<Json>(&schema, &ty, &bytes).unwrap().0,
-            json::to_string::<Json, _>(&value).unwrap()
+            psio::to_json(&value)
         );
         assert_eq!(
             dynamic::pssz_to_json::<IJson>(&schema, &ty, &bytes).unwrap().0,
-            json::to_string::<IJson, _>(&value).unwrap()
+            psio::to_ijson(&value)
         );
     }
     for limb in [[0; 4], [7, 0, 0, 0], [1, 2, 3, 4], [u64::MAX; 4]] {
         let value = Uint256 { limb };
-        let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+        let bytes = try_to_pssz(&value).unwrap();
         let ty = int(256, false);
         assert_eq!(
             dynamic::pssz_to_json::<Json>(&schema, &ty, &bytes).unwrap().0,
-            json::to_string::<Json, _>(&value).unwrap()
+            psio::to_json(&value)
         );
         assert_eq!(
             dynamic::pssz_to_json::<IJson>(&schema, &ty, &bytes).unwrap().0,
-            json::to_string::<IJson, _>(&value).unwrap()
+            psio::to_ijson(&value)
         );
     }
     // A hand-built value of the wrong shape is an error, not a guess.
@@ -923,12 +923,12 @@ fn non_finite_floats_are_refused_on_output_and_never_read() {
     let f32_type = AnyType::new(AnyValue::Float(Float { exp: 8, mantissa: 24 }));
     for value in [f64::NAN, -f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         // Typed.
-        assert_eq!(json::to_string::<Json, _>(&value).unwrap_err().what, WHAT);
-        assert_eq!(json::to_string::<IJson, _>(&value).unwrap_err().what, WHAT);
+        assert_eq!(psio::try_to_json(&value).unwrap_err().what, WHAT);
+        assert_eq!(psio::try_to_ijson(&value).unwrap_err().what, WHAT);
         assert!(psio::encode::<Json, _>(&value).is_err());
         assert!(psio::encode::<IJson, _>(&value).is_err());
-        assert!(json::to_string::<Json, _>(&vec![1.0, value]).is_err());
-        assert!(json::to_string::<IJson, _>(&Some(value)).is_err());
+        assert!(psio::try_to_json(&vec![1.0, value]).is_err());
+        assert!(psio::try_to_ijson(&Some(value)).is_err());
         // Schema-driven: from bytes and from a value.
         let bytes = value.to_le_bytes();
         assert!(dynamic::validate_pssz(&schema, &f64_type, &bytes).is_ok(), "valid PSSZ");
@@ -942,8 +942,8 @@ fn non_finite_floats_are_refused_on_output_and_never_read() {
         }
     }
     for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-        assert_eq!(json::to_string::<Json, _>(&value).unwrap_err().what, WHAT);
-        assert_eq!(json::to_string::<IJson, _>(&value).unwrap_err().what, WHAT);
+        assert_eq!(psio::try_to_json(&value).unwrap_err().what, WHAT);
+        assert_eq!(psio::try_to_ijson(&value).unwrap_err().what, WHAT);
         let bytes = value.to_le_bytes();
         for error in [
             dynamic::pssz_to_json::<Json>(&schema, &f32_type, &bytes).unwrap_err(),
@@ -999,19 +999,19 @@ fn float_text_is_the_same_typed_and_schema_driven() {
         for ijson in [false, true] {
             let (typed, through) = if ijson {
                 (
-                    json::to_string::<IJson, _>(&value).unwrap(),
+                    psio::to_ijson(&value),
                     dynamic::pssz_to_json::<IJson>(&schema, &f64_type, &value.to_le_bytes()).unwrap().0,
                 )
             } else {
                 (
-                    json::to_string::<Json, _>(&value).unwrap(),
+                    psio::to_json(&value),
                     dynamic::pssz_to_json::<Json>(&schema, &f64_type, &value.to_le_bytes()).unwrap().0,
                 )
             };
             assert_eq!(typed, text);
             assert_eq!(through, text);
         }
-        assert_eq!(json::from_str::<Json, f64>(text).unwrap().to_bits(), value.to_bits());
+        assert_eq!(psio::from_json::<f64>(text).unwrap().to_bits(), value.to_bits());
     }
     for (value, text) in [
         (f32::from_bits(1), "1e-45"),
@@ -1021,8 +1021,8 @@ fn float_text_is_the_same_typed_and_schema_driven() {
         (-0.1f32, "-0.1"),
         (16777216f32, "16777216"),
     ] {
-        assert_eq!(json::to_string::<Json, _>(&value).unwrap(), text);
-        assert_eq!(json::to_string::<IJson, _>(&value).unwrap(), text);
+        assert_eq!(psio::to_json(&value), text);
+        assert_eq!(psio::to_ijson(&value), text);
         assert_eq!(
             dynamic::pssz_to_json::<Json>(&schema, &f32_type, &value.to_le_bytes()).unwrap().0,
             text

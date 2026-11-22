@@ -38,8 +38,8 @@ fn check<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F> + PartialEq + std::fmt::D
     value: T,
     bytes: &[u8],
 ) {
-    assert_eq!(try_to_pssz::<F, _>(&value).unwrap(), bytes);
-    assert_eq!(from_pssz::<F, T>(bytes).unwrap(), value);
+    assert_eq!(try_encode::<F, _>(&value).unwrap(), bytes);
+    assert_eq!(decode::<F, T>(bytes).unwrap(), value);
 }
 fn fixture<F: PsszFormat>(name: &str, value: serde_json::Value, bytes: &[u8]) {
     match name {

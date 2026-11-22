@@ -117,11 +117,11 @@ fn cpp_fracpack_vector_rejection() {
 }
 #[test]
 fn cpp_pssz() {
-    use psio::pssz::{Pssz32, to_pssz, from_pssz};
+    use psio::pssz::{Pssz32, encode, decode};
     for (id, bytes) in fixtures("pssz") {
         let value = record(&id);
-        assert_eq!(from_pssz::<Pssz32, Record>(&bytes).unwrap(), value);
-        assert_eq!(to_pssz::<Pssz32, _>(&value), bytes, "pssz/{id}");
+        assert_eq!(decode::<Pssz32, Record>(&bytes).unwrap(), value);
+        assert_eq!(encode::<Pssz32, _>(&value), bytes, "pssz/{id}");
     }
 }
 #[test]

@@ -699,42 +699,42 @@ fn system_time_conversions_are_exact_or_fail() {
 #[test]
 fn time_json_and_pssz() {
     use psio::json::{self, IJson, Json};
-    use psio::pssz::{from_pssz, to_pssz, Pssz, PsszPack};
+    use psio::pssz::{from_pssz, to_pssz, decode, Pssz, PsszPack};
 
     let t = TimePoint::<Millis>::from_ticks(1795342530123);
-    assert_eq!(json::to_string::<Json, _>(&t).unwrap(), "\"2026-11-22T10:15:30.123Z\"");
-    assert_eq!(json::to_string::<IJson, _>(&t).unwrap(), "\"2026-11-22T10:15:30.123Z\"");
-    assert_eq!(json::from_str::<Json, TimePoint<Millis>>("\"2026-11-22T12:15:30.123+02:00\""), Ok(t));
-    assert_eq!(json::from_str::<IJson, TimePoint<Millis>>(" \"2026-11-22T10:15:30.123000\\u005a\" "), Ok(t));
-    assert!(json::from_str::<Json, TimePoint<Millis>>("1795342530123").is_err());
-    assert!(json::from_str::<Json, TimePoint<Millis>>("\"2026-11-22T10:15:30.1234Z\"").is_err());
+    assert_eq!(psio::to_json(&t), "\"2026-11-22T10:15:30.123Z\"");
+    assert_eq!(psio::to_ijson(&t), "\"2026-11-22T10:15:30.123Z\"");
+    assert_eq!(psio::from_json::<TimePoint<Millis>>("\"2026-11-22T12:15:30.123+02:00\""), Ok(t));
+    assert_eq!(psio::from_ijson::<TimePoint<Millis>>(" \"2026-11-22T10:15:30.123000\\u005a\" "), Ok(t));
+    assert!(psio::from_json::<TimePoint<Millis>>("1795342530123").is_err());
+    assert!(psio::from_json::<TimePoint<Millis>>("\"2026-11-22T10:15:30.1234Z\"").is_err());
     // No text outside years 0000..9999: an error, not a panic.
-    assert!(json::to_string::<Json, _>(&TimePoint::<Seconds>::MAX).is_err());
-    assert!(json::to_string::<IJson, _>(&vec![TimePoint::<Micros>::MIN]).is_err());
+    assert!(psio::try_to_json(&TimePoint::<Seconds>::MAX).is_err());
+    assert!(psio::try_to_ijson(&vec![TimePoint::<Micros>::MIN]).is_err());
 
     // A duration follows the integer rules of the format.
     let d = Duration::<Nanos>::from_ticks(9007199254740993);
-    assert_eq!(json::to_string::<Json, _>(&d).unwrap(), "9007199254740993");
-    assert_eq!(json::to_string::<IJson, _>(&d).unwrap(), "\"9007199254740993\"");
-    assert_eq!(json::from_str::<IJson, Duration<Nanos>>("\"9007199254740993\""), Ok(d));
-    assert!(json::from_str::<IJson, Duration<Nanos>>("9007199254740993").is_err());
-    assert!(json::from_str::<Json, Duration<Nanos>>("\"PT1S\"").is_err());
-    assert_eq!(json::to_string::<Json, _>(&Duration::<Minutes, i32>::from_ticks(-90)).unwrap(), "-90");
+    assert_eq!(psio::to_json(&d), "9007199254740993");
+    assert_eq!(psio::to_ijson(&d), "\"9007199254740993\"");
+    assert_eq!(psio::from_ijson::<Duration<Nanos>>("\"9007199254740993\""), Ok(d));
+    assert!(psio::from_ijson::<Duration<Nanos>>("9007199254740993").is_err());
+    assert!(psio::from_json::<Duration<Nanos>>("\"PT1S\"").is_err());
+    assert_eq!(psio::to_json(&Duration::<Minutes, i32>::from_ticks(-90)), "-90");
     // A list of one-byte tick counts is a list of numbers, not a byte string.
     let bytes = vec![Duration::<Seconds, u8>::from_ticks(1), Duration::from_ticks(255)];
-    assert_eq!(json::to_string::<IJson, _>(&bytes).unwrap(), "[1,255]");
-    assert_eq!(json::from_str::<IJson, Vec<Duration<Seconds, u8>>>("[1,255]"), Ok(bytes));
+    assert_eq!(psio::to_ijson(&bytes), "[1,255]");
+    assert_eq!(psio::from_ijson::<Vec<Duration<Seconds, u8>>>("[1,255]"), Ok(bytes));
 
     // pssz: the tick integer, fixed size.
-    assert_eq!(to_pssz::<Pssz, _>(&TimePoint::<Seconds>::from_ticks(1795342530)), 1795342530i64.to_le_bytes());
-    assert_eq!(to_pssz::<Pssz, _>(&Duration::<Minutes, i32>::from_ticks(-90)), (-90i32).to_le_bytes());
+    assert_eq!(to_pssz(&TimePoint::<Seconds>::from_ticks(1795342530)), 1795342530i64.to_le_bytes());
+    assert_eq!(to_pssz(&Duration::<Minutes, i32>::from_ticks(-90)), (-90i32).to_le_bytes());
     assert!(<TimePoint<Micros> as PsszPack<Pssz>>::IS_FIXED_SIZE);
     assert_eq!(<TimePoint<Seconds, u32> as PsszPack<Pssz>>::FIXED_SIZE, 4);
-    assert_eq!(from_pssz::<Pssz, TimePoint<Micros>>(&(-1i64).to_le_bytes()).unwrap().ticks(), -1);
-    assert!(from_pssz::<Pssz, TimePoint<Micros>>(&[0; 7]).is_err());
+    assert_eq!(from_pssz::<TimePoint<Micros>>(&(-1i64).to_le_bytes()).unwrap().ticks(), -1);
+    assert!(from_pssz::<TimePoint<Micros>>(&[0; 7]).is_err());
     let list = vec![TimePoint::<Seconds>::MIN, TimePoint::epoch(), TimePoint::MAX];
-    assert_eq!(from_pssz::<Pssz, Vec<TimePoint<Seconds>>>(&to_pssz::<Pssz, _>(&list)).unwrap(), list);
-    assert_eq!(to_pssz::<Pssz, _>(&list).len(), 24);
+    assert_eq!(decode::<Pssz, Vec<TimePoint<Seconds>>>(&to_pssz(&list)).unwrap(), list);
+    assert_eq!(to_pssz(&list).len(), 24);
 }
 
 // ── Monotonic time points (a clock other than the system clock) ────────────
@@ -745,8 +745,8 @@ mod monotonic {
     use psio::json::{self, IJson, Json};
     use psio::key::{from_key, to_key, validate_key};
     use psio::pssz::schema_ir::{schema_for, AnyValue, ToPsszSchema};
-    use psio::pssz::{
-        from_pssz_exact, pssz_evolves_from, pssz_validate, try_to_pssz, Pssz, PsszPack,
+    use psio::pssz::{try_to_pssz, 
+        decode_strict, pssz_evolves_from, validate, Pssz, PsszPack,
     };
     use psio::time::{
         parse_time_schema_id, reserved_time_schema_id, time_schema_id, Duration, Micros, Millis,
@@ -816,11 +816,11 @@ mod monotonic {
             TimerInts { expires: 9007199254740993, started: Some(-5), laps: vec![0, 4294967295] };
 
         // Binary and key: the tick integer.
-        let bytes = try_to_pssz::<Pssz, _>(&timer).unwrap();
-        assert_eq!(bytes, try_to_pssz::<Pssz, _>(&ints).unwrap());
+        let bytes = try_to_pssz(&timer).unwrap();
+        assert_eq!(bytes, try_to_pssz(&ints).unwrap());
         assert_eq!(to_key(&timer), to_key(&ints));
-        pssz_validate::<Pssz, Timer>(&bytes).unwrap();
-        assert_eq!(from_pssz_exact::<Pssz, Timer>(&bytes).unwrap(), timer);
+        validate::<Pssz, Timer>(&bytes).unwrap();
+        assert_eq!(decode_strict::<Pssz, Timer>(&bytes).unwrap(), timer);
         let key = to_key(&timer);
         validate_key::<Timer>(&key).unwrap();
         assert_eq!(from_key::<Timer>(&key).unwrap(), timer);
@@ -829,23 +829,23 @@ mod monotonic {
         let after = MonotonicPoint::<Micros>::default();
         assert!(before < after && to_key(&before) < to_key(&after));
         assert_eq!(
-            try_to_pssz::<Pssz, _>(&MonotonicPoint::<Nanos>::from_ticks(7)).unwrap(),
+            try_to_pssz(&MonotonicPoint::<Nanos>::from_ticks(7)).unwrap(),
             7i64.to_le_bytes()
         );
         // Hostile bytes are refused, never read out of bounds.
-        assert!(from_pssz_exact::<Pssz, MonotonicPoint<Micros>>(&[0; 7]).is_err());
-        assert!(from_pssz_exact::<Pssz, MonotonicPoint<Micros>>(&[0; 9]).is_err());
+        assert!(decode_strict::<Pssz, MonotonicPoint<Micros>>(&[0; 7]).is_err());
+        assert!(decode_strict::<Pssz, MonotonicPoint<Micros>>(&[0; 9]).is_err());
         assert!(from_key::<MonotonicPoint<Micros>>(&[0x80; 7]).is_err());
         // Truncations and mutations are decided without a panic, and what
         // the checked reader accepts re-encodes.
         for cut in 0..bytes.len() {
-            let _ = from_pssz_exact::<Pssz, Timer>(&bytes[..cut]);
+            let _ = decode_strict::<Pssz, Timer>(&bytes[..cut]);
             for bit in 0..8 {
                 let mut mutated = bytes.clone();
                 mutated[cut] ^= 1 << bit;
-                if let Ok(value) = from_pssz_exact::<Pssz, Timer>(&mutated) {
-                    assert!(pssz_validate::<Pssz, Timer>(&mutated).is_ok(), "{cut}.{bit}");
-                    try_to_pssz::<Pssz, _>(&value).unwrap();
+                if let Ok(value) = decode_strict::<Pssz, Timer>(&mutated) {
+                    assert!(validate::<Pssz, Timer>(&mutated).is_ok(), "{cut}.{bit}");
+                    try_to_pssz(&value).unwrap();
                 }
                 let mut key = to_key(&timer);
                 if cut < key.len() {
@@ -856,36 +856,36 @@ mod monotonic {
         }
 
         // Text: the tick count under the integer rules, never a date.
-        let text = json::to_string::<Json, _>(&timer).unwrap();
-        let itext = json::to_string::<IJson, _>(&timer).unwrap();
+        let text = psio::to_json(&timer);
+        let itext = psio::to_ijson(&timer);
         assert_eq!(text, r#"{"expires":9007199254740993,"started":-5,"laps":[0,4294967295]}"#);
         assert_eq!(itext, r#"{"expires":"9007199254740993","started":-5,"laps":[0,4294967295]}"#);
-        assert_eq!(text, json::to_string::<Json, _>(&ints).unwrap());
-        assert_eq!(itext, json::to_string::<IJson, _>(&ints).unwrap());
-        assert_eq!(json::from_str::<Json, Timer>(&text), Ok(timer.clone()));
-        assert_eq!(json::from_str::<IJson, Timer>(&itext), Ok(timer.clone()));
+        assert_eq!(text, psio::to_json(&ints));
+        assert_eq!(itext, psio::to_ijson(&ints));
+        assert_eq!(psio::from_json::<Timer>(&text), Ok(timer.clone()));
+        assert_eq!(psio::from_ijson::<Timer>(&itext), Ok(timer.clone()));
         let date = r#"{"expires":"2026-11-22T10:15:30Z","started":null,"laps":[]}"#;
-        assert!(json::from_str::<Json, Timer>(date).is_err());
-        assert!(json::from_str::<IJson, Timer>(date).is_err());
-        assert!(json::validate::<IJson, Timer>(date.as_bytes()).is_err());
+        assert!(psio::from_json::<Timer>(date).is_err());
+        assert!(psio::from_ijson::<Timer>(date).is_err());
+        assert!(psio::validate_ijson::<Timer>(date.as_bytes()).is_err());
         // ijson: a wide tick count beyond 2^53 - 1 is a string, not a number.
-        assert!(json::from_str::<IJson, MonotonicPoint<Micros>>("9007199254740993").is_err());
+        assert!(psio::from_ijson::<MonotonicPoint<Micros>>("9007199254740993").is_err());
 
         let forms =
             Forms { quoted: MonotonicPoint::from_ticks(7), plain: MonotonicPoint::MAX };
         let form_ints = FormsInts { quoted: 7, plain: i64::MAX };
         for ijson in [false, true] {
             let (a, b) = if ijson {
-                (json::to_string::<IJson, _>(&forms), json::to_string::<IJson, _>(&form_ints))
+                (psio::try_to_ijson(&forms), psio::try_to_ijson(&form_ints))
             } else {
-                (json::to_string::<Json, _>(&forms), json::to_string::<Json, _>(&form_ints))
+                (psio::try_to_json(&forms), psio::try_to_json(&form_ints))
             };
             let a = a.unwrap();
             assert_eq!(a, b.unwrap());
             assert_eq!(a, r#"{"quoted":"7","plain":9223372036854775807}"#);
         }
-        let text = json::to_string::<IJson, _>(&forms).unwrap();
-        assert_eq!(json::from_str::<IJson, Forms>(&text), Ok(forms));
+        let text = psio::to_ijson(&forms);
+        assert_eq!(psio::from_ijson::<Forms>(&text), Ok(forms));
     }
 
     /// `monotonic-<unit>` is a built-in presentation: the schema-driven
@@ -899,9 +899,9 @@ mod monotonic {
             started: Some(MonotonicPoint::from_ticks(-5)),
             laps: vec![MonotonicPoint::from_ticks(0), MonotonicPoint::MAX],
         };
-        let bytes = try_to_pssz::<Pssz, _>(&timer).unwrap();
-        let text = json::to_string::<Json, _>(&timer).unwrap();
-        let itext = json::to_string::<IJson, _>(&timer).unwrap();
+        let bytes = try_to_pssz(&timer).unwrap();
+        let text = psio::to_json(&timer);
+        let itext = psio::to_ijson(&timer);
         assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
         assert_eq!(dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap().0, text);
         for strict in [false, true] {
@@ -938,7 +938,7 @@ mod monotonic {
             r#"{"expires":0,"started":null,"laps":[4294967296]}"#,
             r#"{"expires":0.5,"started":null,"laps":[]}"#,
         ] {
-            assert!(json::from_str::<Json, Timer>(bad).is_err(), "{bad}");
+            assert!(psio::from_json::<Timer>(bad).is_err(), "{bad}");
             assert!(dynamic::json_to_pssz::<Json>(&schema, &root, bad.as_bytes()).is_err(), "{bad}");
             assert!(dynamic::json_to_pssz::<IJson>(&schema, &root, bad.as_bytes()).is_err(), "{bad}");
         }
@@ -994,10 +994,10 @@ mod monotonic {
         check::<Minutes, i32>("monotonic-60/1", 32, true);
         // A time point of a unit with no RFC 3339 form still has tick text.
         assert_eq!(
-            json::to_string::<Json, _>(&MonotonicPoint::<Minutes, i32>::default()).unwrap(),
+            psio::to_json(&MonotonicPoint::<Minutes, i32>::default()),
             "0"
         );
-        assert_eq!(json::from_str::<IJson, MonotonicPoint<Minutes, i32>>("-90").unwrap().ticks(), -90);
+        assert_eq!(psio::from_ijson::<MonotonicPoint<Minutes, i32>>("-90").unwrap().ticks(), -90);
 
         for bad in [
             "monotonic", "monotonic-", "monotonic-1/1000", "monotonic-2/4", "monotonic-minutes",

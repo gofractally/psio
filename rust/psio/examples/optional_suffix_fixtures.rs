@@ -49,47 +49,47 @@ struct DepthNode {
 }
 
 fn observe<F: PsszFormat>(case: &str, bytes: &[u8]) -> serde_json::Value {
-    use psio::pssz_view::{validated_view_compatible as compatible, validated_view_exact as exact};
+    use psio::pssz_view::PsszView;
     match case {
         "base" | "extended_some" | "extended_none" => {
-            let old = compatible::<Base, F>(bytes).unwrap();
-            let new = exact::<Extended, F>(bytes).unwrap();
-            json!({"old_name":old.value.name().view().unwrap(),"old_has_unknown":old.has_unknown,"new_extra_some":new.extra().has_value(),"new_extra_raw_hex":hex::encode(new.extra().raw())})
+            let old = PsszView::<Base, F>::new_checked(bytes).unwrap();
+            let new = PsszView::<Extended, F>::new_strict(bytes).unwrap();
+            json!({"old_name":old.value.name().view().unwrap(),"old_has_unknown":old.has_unknown,"new_extra_some":new.extra().has_value(),"new_extra_raw_hex":hex::encode(new.extra().bytes())})
         }
         "twice_empty_middle" | "twice_pruned_last" => {
-            let old = compatible::<Base, F>(bytes).unwrap();
-            let new = exact::<Twice, F>(bytes).unwrap();
+            let old = PsszView::<Base, F>::new_checked(bytes).unwrap();
+            let new = PsszView::<Twice, F>::new_strict(bytes).unwrap();
             json!({"old_name":old.value.name().view().unwrap(),"old_has_unknown":old.has_unknown,"middle_some":new.middle().has_value(),"last_some":new.last().has_value()})
         }
         "odd_base" | "odd_extended_some" | "odd_extended_none" => {
-            let old = compatible::<OddBase, F>(bytes).unwrap();
-            let new = exact::<OddExtended, F>(bytes).unwrap();
+            let old = PsszView::<OddBase, F>::new_checked(bytes).unwrap();
+            let new = PsszView::<OddExtended, F>::new_strict(bytes).unwrap();
             json!({"old_name":old.value.name().view().unwrap(),"old_flag":old.value.flag().get(),"old_has_unknown":old.has_unknown,"new_extra_some":new.extra().has_value()})
         }
         "option_record_none" | "option_record_some" => {
-            let view = exact::<Option<Base>, F>(bytes).unwrap();
+            let view = PsszView::<Option<Base>, F>::new_strict(bytes).unwrap();
             json!({"some":view.has_value(),"name":if view.has_value(){Some(view.unwrap().name().view().unwrap())}else{None}})
         }
         "option_unit_none" | "option_unit_some" => {
-            json!({"some":exact::<Option<Unit>,F>(bytes).unwrap().has_value()})
+            json!({"some":PsszView::<Option<Unit>,F>::new_strict(bytes).unwrap().has_value()})
         }
         "nested_option_none" | "nested_option_some_none" | "nested_option_some_empty" => {
-            let view = exact::<Option<Option<String>>, F>(bytes).unwrap();
+            let view = PsszView::<Option<Option<String>>, F>::new_strict(bytes).unwrap();
             json!({"outer_some":view.has_value(),"inner_some":if view.has_value(){Some(view.unwrap().has_value())}else{None}})
         }
-        "zero_argument_tuple" => json!({"accepted":exact::<(),F>(bytes).is_ok()}),
+        "zero_argument_tuple" => json!({"accepted":PsszView::<(),F>::new_strict(bytes).is_ok()}),
         "positional_tuple" => {
-            let view = exact::<(u32, String), F>(bytes).unwrap();
+            let view = PsszView::<(u32, String), F>::new_strict(bytes).unwrap();
             json!({"first":view.field::<0>().get(),"second":view.field::<1>().view().unwrap()})
         }
         "nested_record_vector" => {
-            let old = compatible::<OldOuter, F>(bytes).unwrap();
+            let old = PsszView::<OldOuter, F>::new_checked(bytes).unwrap();
             json!({"old_has_unknown":old.has_unknown,"inner_name":old.value.inner().name().view().unwrap(),"first_name":old.value.values().get(0).name().view().unwrap()})
         }
         "node_depth_63" | "node_depth_65_reject" => {
-            json!({"accepted":exact::<DepthNode,F>(bytes).is_ok()})
+            json!({"accepted":PsszView::<DepthNode,F>::new_strict(bytes).is_ok()})
         }
-        "node_depth_64" => json!({"accepted":exact::<Option<DepthNode>,F>(bytes).is_ok()}),
+        "node_depth_64" => json!({"accepted":PsszView::<Option<DepthNode>,F>::new_strict(bytes).is_ok()}),
         _ => panic!("unknown observation case"),
     }
 }
@@ -100,10 +100,10 @@ fn emit<F: PsszFormat, T: PsszPack<F> + Serialize + schema_ir::ToPsszSchema>(
     value: T,
 ) {
     let bytes = if case == "node_depth_65_reject" {
-        assert!(try_to_pssz::<F, _>(&value).is_err());
+        assert!(try_encode::<F, _>(&value).is_err());
         invalid_depth_fixture_bytes::<F>(32)
     } else {
-        try_to_pssz::<F, _>(&value).unwrap()
+        try_encode::<F, _>(&value).unwrap()
     };
     let (schema, root_schema) = schema_ir::schema_for::<T>().unwrap();
     let observations = observe::<F>(case, &bytes);
@@ -258,14 +258,14 @@ fn profile<F: PsszFormat>() {
             }],
         },
     );
-    let bytes = try_to_pssz::<F, _>(&node(31)).unwrap();
-    assert!(from_pssz_exact::<F, DepthNode>(&bytes).is_ok());
+    let bytes = try_encode::<F, _>(&node(31)).unwrap();
+    assert!(decode_strict::<F, DepthNode>(&bytes).is_ok());
     emit::<F, _>("node_depth_63", "DepthNode", node(31));
-    let bytes = try_to_pssz::<F, _>(&Some(node(31))).unwrap();
-    assert!(from_pssz_exact::<F, Option<DepthNode>>(&bytes).is_ok());
+    let bytes = try_encode::<F, _>(&Some(node(31))).unwrap();
+    assert!(decode_strict::<F, Option<DepthNode>>(&bytes).is_ok());
     emit::<F, _>("node_depth_64", "Option<DepthNode>", Some(node(31)));
     let bytes = invalid_depth_fixture_bytes::<F>(32);
-    assert!(from_pssz_exact::<F, DepthNode>(&bytes).is_err());
+    assert!(decode_strict::<F, DepthNode>(&bytes).is_err());
     emit::<F, _>("node_depth_65_reject", "DepthNode", node(32));
 }
 fn main() {

@@ -111,12 +111,12 @@ fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
             count
         });
     for (class, count) in [
-        ("nested", 228), ("nested-unknown", 20), ("nested-deferred", 24), ("map-set", 266),
+        ("nested", 252), ("nested-unknown", 20), ("nested-deferred", 24), ("map-set", 266),
         ("map-set-order", 352), ("transparent", 160), ("custom", 116), ("invariant", 128),
     ] {
         assert_eq!(classes.get(class), Some(&count), "{class}");
     }
-    assert_eq!(fixture.vectors.len(), 6565);
+    assert_eq!(fixture.vectors.len(), 6589);
     // Every invariant rejection carries the invariant's own message, and
     // every order rejection the order rule's: compared word for word above.
     let shared: Vec<_> = fixture.vectors.iter().filter(|v| v.reason_is_shared() && v.expect == "reject").collect();
@@ -129,9 +129,9 @@ fn the_enum_ir_rust_builds_is_the_ir_cpp_recorded() {
     use psio::pssz::schema_ir::{schema_for, AnyValue, Schema, ToPsszSchema};
     let fixture = fixture();
     let bytes = unhex(&fixture.schema_ir);
-    let recorded = from_pssz::<Pssz, Schema>(&bytes).expect("schema_ir decodes");
+    let recorded = from_pssz::<Schema>(&bytes).expect("schema_ir decodes");
     // The decoded IR re-encodes to the fixture's bytes: Enum included.
-    assert_eq!(try_to_pssz::<Pssz, _>(&recorded).unwrap(), bytes);
+    assert_eq!(try_to_pssz(&recorded).unwrap(), bytes);
     fn check<T: ToPsszSchema + Conf>(recorded: &Schema) {
         let id = T::id();
         let (built, _) = schema_for::<T>().unwrap();
@@ -141,7 +141,7 @@ fn the_enum_ir_rust_builds_is_the_ir_cpp_recorded() {
         let cpp = recorded.resolve(recorded.get(&id).expect("recorded")).expect("resolves");
         assert!(matches!(cpp.value, AnyValue::Enum(_)), "{id}: C++ recorded an Enum");
         assert_eq!(rust, cpp, "{id}");
-        assert_eq!(try_to_pssz::<Pssz, _>(rust).unwrap(), try_to_pssz::<Pssz, _>(cpp).unwrap(), "{id}");
+        assert_eq!(try_to_pssz(rust).unwrap(), try_to_pssz(cpp).unwrap(), "{id}");
     }
     check::<Color>(&recorded);
     check::<E16>(&recorded);
@@ -333,7 +333,7 @@ fn native_values() -> Vec<(&'static str, (String, Native))> {
         // Nested values: the bytes of the byte list holding the encoding.
         ("args", native(nargs())),
         ("action", native(NAction { method: 9, args: Nested::new(&nargs()).unwrap() })),
-        ("action", native(NActionRaw { method: 9, args: to_pssz::<Pssz, _>(&nargs()) })),
+        ("action", native(NActionRaw { method: 9, args: to_pssz(&nargs()) })),
         ("action", native(NActionLater { method: 9, args: Nested::new(&nargs()).unwrap() })),
         ("scalar", native(Nested::<u32>::new(&0x0102_0304).unwrap())),
         ("record", native(Nested::<NArgs>::new(&nargs()).unwrap())),
@@ -445,11 +445,11 @@ fn a_value_that_violates_an_invariant_has_no_encoding() {
     assert_eq!(Nested::<Range>::new(&bad_range).map_err(|e| e.0), Err(RANGE));
     let adopted = Nested::<Range>::unchecked(vec![8, 9, 0, 0, 0, 3, 0, 0, 0]);
     assert_eq!(adopted.validate().map_err(|e| e.0), Err(RANGE));
-    let frame = try_to_pssz::<Pssz, _>(&adopted).expect("a writer does not look inside");
-    assert_eq!(from_pssz::<Pssz, Nested<Range>>(&frame).map_err(|e| e.0), Err(RANGE));
+    let frame = try_to_pssz(&adopted).expect("a writer does not look inside");
+    assert_eq!(from_pssz::<Nested<Range>>(&frame).map_err(|e| e.0), Err(RANGE));
     assert_eq!(Nested::<Range>::checked(frame).map_err(|e| e.0), Err(RANGE));
     // A value that satisfies its invariants is written.
-    assert!(try_to_pssz::<Pssz, _>(&Name { value: (1 << 60) - 1 }).is_ok());
+    assert!(try_to_pssz(&Name { value: (1 << 60) - 1 }).is_ok());
 }
 
 #[test]
@@ -457,15 +457,15 @@ fn a_map_or_set_is_written_in_key_order_and_refuses_equal_keys() {
     use std::collections::{HashMap, HashSet};
     // Numeric order, not the order of the little-endian wire bytes.
     let set: HashSet<u16> = [513, 2].into_iter().collect();
-    assert_eq!(hex(&try_to_pssz::<Pssz, _>(&set).unwrap()), "02000102");
+    assert_eq!(hex(&try_to_pssz(&set).unwrap()), "02000102");
     let map: HashMap<String, u32> = [("b".to_string(), 2), ("a".to_string(), 1)].into_iter().collect();
-    let bytes = try_to_pssz::<Pssz, _>(&map).unwrap();
-    assert_eq!(bytes, try_to_pssz::<Pssz, _>(&vec![("a".to_string(), 1u32), ("b".to_string(), 2)]).unwrap());
-    assert_eq!(from_pssz::<Pssz, HashMap<String, u32>>(&bytes).unwrap(), map);
+    let bytes = try_to_pssz(&map).unwrap();
+    assert_eq!(bytes, try_to_pssz(&vec![("a".to_string(), 1u32), ("b".to_string(), 2)]).unwrap());
+    assert_eq!(from_pssz::<HashMap<String, u32>>(&bytes).unwrap(), map);
     // The frame with the two entries exchanged is the list, not the map.
-    let swapped = try_to_pssz::<Pssz, _>(&vec![("b".to_string(), 2u32), ("a".to_string(), 1)]).unwrap();
+    let swapped = try_to_pssz(&vec![("b".to_string(), 2u32), ("a".to_string(), 1)]).unwrap();
     assert_eq!(
-        from_pssz::<Pssz, HashMap<String, u32>>(&swapped).map_err(|e| e.0),
+        from_pssz::<HashMap<String, u32>>(&swapped).map_err(|e| e.0),
         Err("pssz: map entries are not in strictly ascending key order")
     );
     // Two entries whose keys have equal key bytes are duplicates, whatever
@@ -473,15 +473,15 @@ fn a_map_or_set_is_written_in_key_order_and_refuses_equal_keys() {
     // computed before, and without, the invariant that refuses the second).
     let twice: BTreeSet<Level> = [Level::Low, Level::Unknown(0)].into_iter().collect();
     assert_eq!(twice.len(), 2);
-    assert_eq!(try_to_pssz::<Pssz, _>(&twice).map_err(|e| e.0), Err("pssz: set has duplicate elements"));
+    assert_eq!(try_to_pssz(&twice).map_err(|e| e.0), Err("pssz: set has duplicate elements"));
     let twice: BTreeMap<Level, u8> = [(Level::Low, 1), (Level::Unknown(0), 2)].into_iter().collect();
-    assert_eq!(try_to_pssz::<Pssz, _>(&twice).map_err(|e| e.0), Err("pssz: map has duplicate keys"));
+    assert_eq!(try_to_pssz(&twice).map_err(|e| e.0), Err("pssz: map has duplicate keys"));
     // -0 and +0 are one key: a set by key order cannot hold both.
     let zeros: BTreeSet<ByKey<f64>> = [ByKey(0.0), ByKey(-0.0)].into_iter().collect();
     assert_eq!(zeros.len(), 1);
     // A bounded map counts entries.
     let three: BoundedMap<u8, u8, 2> = BoundedMap([(1, 1), (2, 2), (3, 3)].into_iter().collect());
-    assert!(try_to_pssz::<Pssz, _>(&three).is_err());
+    assert!(try_to_pssz(&three).is_err());
 }
 
 #[test]
@@ -517,7 +517,7 @@ fn rust_native_encodings_equal_the_cpp_fixture_bytes() {
 fn the_manifest_custom_ids_and_invariants_are_those_of_the_rust_types() {
     use psio::pssz::schema_ir::{schema_for, AnyValue, Schema, ToPsszSchema};
     let fixture = fixture();
-    let recorded = from_pssz::<Pssz, Schema>(&unhex(&fixture.schema_ir)).expect("schema_ir decodes");
+    let recorded = from_pssz::<Schema>(&unhex(&fixture.schema_ir)).expect("schema_ir decodes");
     let info = |id: &str| fixture.types.iter().find(|t| t.id == id).unwrap_or_else(|| panic!("{id}"));
     // `custom_id`: the id of the Custom node Rust builds for the type, which
     // is the node C++ recorded (same id, same kind of wire type). A

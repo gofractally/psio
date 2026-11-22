@@ -13,7 +13,7 @@ use psio::json::{self, IJson, Json};
 use psio::key::{from_key, to_key, validate_key};
 use psio::pssz::dynamic::{self, CustomHandlers};
 use psio::pssz::schema_ir::{schema_for, AnyType, AnyValue, Custom, Int, List, Member, Schema};
-use psio::pssz::{pssz_evolves_from, try_to_pssz, Pssz, RawString};
+use psio::pssz::{try_to_pssz, pssz_evolves_from, try_encode, Pssz, RawString};
 use psio::time::{Duration, Micros, Millis, Seconds, TimePoint};
 
 #[derive(
@@ -66,7 +66,7 @@ fn an_enum_is_its_underlying_integer_in_a_key() {
     for (status, value) in [(Status::Pending, -1i32), (Status::Active, 2), (Status::Closed, 7)] {
         assert_eq!(to_key(&status), to_key(&value));
         assert_eq!(from_key::<Status>(&to_key(&value)).unwrap(), status);
-        assert_eq!(try_to_pssz::<Pssz, _>(&status).unwrap(), try_to_pssz::<Pssz, _>(&value).unwrap());
+        assert_eq!(try_to_pssz(&status).unwrap(), try_to_pssz(&value).unwrap());
     }
     // Key order is the order of the values.
     assert!(to_key(&Status::Pending) < to_key(&Status::Active));
@@ -82,7 +82,7 @@ fn an_enum_is_its_underlying_integer_in_a_key() {
     assert!(to_key(&Open::Red) < to_key(&Open::Unknown(5)));
     assert!(to_key(&Open::Unknown(5)) < to_key(&Open::Blue));
     // The names are text only.
-    assert_eq!(json::to_string::<Json, _>(&Status::Active).unwrap(), "\"Active\"");
+    assert_eq!(psio::to_json(&Status::Active), "\"Active\"");
     // In a record the enum takes the integer's place.
     let order = sample();
     let as_tuple = (2i32, "café".to_string(), RawString(b"plain".to_vec()), order.at, order.ttl);
@@ -95,7 +95,7 @@ fn raw_and_utf8_strings_share_bytes_and_differ_in_validation() {
     let text = "café".to_string();
     let raw = RawString(text.clone().into_bytes());
     assert_eq!(to_key(&text), to_key(&raw));
-    assert_eq!(try_to_pssz::<Pssz, _>(&text).unwrap(), try_to_pssz::<Pssz, _>(&raw).unwrap());
+    assert_eq!(try_to_pssz(&text).unwrap(), try_to_pssz(&raw).unwrap());
     let junk = RawString(vec![b'a', 0, 0xff]);
     let key = to_key(&junk);
     assert_eq!(from_key::<RawString>(&key).unwrap(), junk);
@@ -123,13 +123,13 @@ fn raw_and_utf8_strings_share_bytes_and_differ_in_validation() {
 fn the_schema_driven_codec_presents_time_ids_without_handlers() {
     let (schema, root) = schema_for::<Order>().unwrap();
     let value = sample();
-    let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
-    let text = json::to_string::<Json, _>(&value).unwrap();
+    let bytes = try_to_pssz(&value).unwrap();
+    let text = psio::to_json(&value);
     assert_eq!(
         text,
         r#"{"status":"Active","label":"café","raw":"plain","at":"2026-11-22T10:15:30.123456Z","ttl":-1500}"#
     );
-    assert_eq!(json::to_string::<IJson, _>(&value).unwrap(), text);
+    assert_eq!(psio::to_ijson(&value), text);
     assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
     for strict in [false, true] {
         let mut handlers = CustomHandlers::new();
@@ -162,11 +162,11 @@ fn the_schema_driven_codec_presents_time_ids_without_handlers() {
         r#""2026-11-22t10:15:30.1234560z""#,
         r#""2026-11-22T12:15:30.123456+02:00""#,
     ] {
-        let typed = json::from_str::<Json, Order>(&with_at(good)).unwrap();
+        let typed = psio::from_json::<Order>(&with_at(good)).unwrap();
         assert_eq!(typed.at, value.at, "{good}");
         assert_eq!(
             dynamic::json_to_pssz::<Json>(&schema, &root, with_at(good).as_bytes()).unwrap(),
-            try_to_pssz::<Pssz, _>(&typed).unwrap(),
+            try_to_pssz(&typed).unwrap(),
             "{good}"
         );
     }
@@ -178,16 +178,16 @@ fn the_schema_driven_codec_presents_time_ids_without_handlers() {
         r#""2026-02-29T00:00:00Z""#,
         "null",
     ] {
-        assert!(json::from_str::<Json, Order>(&with_at(bad)).is_err(), "{bad}");
+        assert!(psio::from_json::<Order>(&with_at(bad)).is_err(), "{bad}");
         assert!(dynamic::json_to_pssz::<Json>(&schema, &root, with_at(bad).as_bytes()).is_err(), "{bad}");
         assert!(dynamic::json_to_pssz::<IJson>(&schema, &root, with_at(bad).as_bytes()).is_err(), "{bad}");
     }
 
     // A time point outside years 0000..9999 has bytes and a key, no text.
     let far = Order { at: TimePoint::from_ticks(i64::MAX), ..sample() };
-    let far_bytes = try_to_pssz::<Pssz, _>(&far).unwrap();
+    let far_bytes = try_to_pssz(&far).unwrap();
     assert_eq!(dynamic::validate_pssz(&schema, &root, &far_bytes), Ok(false));
-    assert!(json::to_string::<Json, _>(&far).is_err());
+    assert!(psio::try_to_json(&far).is_err());
     assert!(dynamic::pssz_to_json::<Json>(&schema, &root, &far_bytes).is_err());
     assert_eq!(from_key::<Order>(&to_key(&far)).unwrap(), far);
 }
@@ -304,7 +304,7 @@ const _: () = {
 #[test]
 fn evolution_tells_an_integer_from_a_time_value() {
     // The const block above is the test; the bytes are indeed shared.
-    let a = try_to_pssz::<Pssz, _>(&AsInt { id: 1, at: 5 }).unwrap();
-    let b = try_to_pssz::<Pssz, _>(&AsMicros { id: 1, at: TimePoint::from_ticks(5) }).unwrap();
+    let a = try_to_pssz(&AsInt { id: 1, at: 5 }).unwrap();
+    let b = try_to_pssz(&AsMicros { id: 1, at: TimePoint::from_ticks(5) }).unwrap();
     assert_eq!(a, b);
 }

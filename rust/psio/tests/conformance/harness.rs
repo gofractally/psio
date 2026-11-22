@@ -2,7 +2,7 @@
 // grammar, and the per-vector checks.
 
 use psio::pssz::*;
-use psio::pssz_view::{try_pssz_view_of, validated_view_compatible, validated_view_exact};
+use psio::pssz_view::{PsszView};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -216,15 +216,15 @@ fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Res
     let bytes = &bytes[..];
     let fail = |what: &str, detail: String| Err(format!("{what}: {detail}"));
     // No entry point may panic on any vector.
-    let validate = pssz_validate::<F, T>(bytes);
-    let compatible = pssz_validate_compatible::<F, T>(bytes);
-    let exact = pssz_validate_exact::<F, T>(bytes);
-    let decode = from_pssz::<F, T>(bytes);
-    let decode_compatible = from_pssz_compatible::<F, T>(bytes);
-    let decode_exact = from_pssz_exact::<F, T>(bytes);
-    let view = try_pssz_view_of::<T, F>(bytes).map(|_| ());
-    let view_compatible = validated_view_compatible::<T, F>(bytes).map(|d| d.has_unknown);
-    let view_exact = validated_view_exact::<T, F>(bytes).map(|_| ());
+    let validate = validate::<F, T>(bytes);
+    let compatible = validate_compatible::<F, T>(bytes);
+    let exact = validate_strict::<F, T>(bytes);
+    let decode = decode::<F, T>(bytes);
+    let decode_compatible = decode_checked::<F, T>(bytes);
+    let decode_exact = decode_strict::<F, T>(bytes);
+    let view = PsszView::<T, F>::new(bytes).map(|_| ());
+    let view_compatible = PsszView::<T, F>::new_checked(bytes).map(|d| d.has_unknown);
+    let view_exact = PsszView::<T, F>::new_strict(bytes).map(|_| ());
     match v.expect.as_str() {
         "canonical" | "unknown" => {
             let unknown = v.expect == "unknown";
@@ -237,7 +237,7 @@ fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Res
                 Ok(d) if d.has_unknown == unknown => (),
                 other => return fail("decode_compatible", format!("{:?}", other.map(|d| d.has_unknown))),
             }
-            let reencoded = match try_to_pssz::<F, T>(&value) {
+            let reencoded = match try_encode::<F, T>(&value) {
                 Ok(b) => b,
                 Err(e) => return fail("re-encode failed", e.to_string()),
             };
@@ -361,16 +361,16 @@ fn sweep_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(bytes: &[u8]) -> R
     }
     let count = cases.len();
     for case in cases {
-        let valid = pssz_validate_compatible::<F, T>(&case);
-        let decoded = from_pssz::<F, T>(&case);
+        let valid = validate_compatible::<F, T>(&case);
+        let decoded = decode::<F, T>(&case);
         if valid.is_ok() != decoded.is_ok() {
             return Err(format!("validate {valid:?} but decode ok={} for {}", decoded.is_ok(), hex(&case)));
         }
-        if valid.is_ok() != try_pssz_view_of::<T, F>(&case).is_ok() {
+        if valid.is_ok() != PsszView::<T, F>::new(&case).is_ok() {
             return Err(format!("validated view disagrees for {}", hex(&case)));
         }
         if let (Ok(false), Ok(value)) = (valid, decoded) {
-            match try_to_pssz::<F, T>(&value) {
+            match try_encode::<F, T>(&value) {
                 Ok(again) if again == case => (),
                 other => return Err(format!("accepted non-canonical {} -> {other:?}", hex(&case))),
             }
@@ -403,10 +403,10 @@ pub fn register<T: All>(registry: &mut Registry) {
 /// Encode a native Rust value under the fixture's format name.
 pub fn encode<T: All>(format: &str, value: &T) -> PsszResult<Vec<u8>> {
     match format {
-        "auto" => try_to_pssz::<Pssz, T>(value),
-        "pssz8" => try_to_pssz::<Pssz8, T>(value),
-        "pssz16" => try_to_pssz::<Pssz16, T>(value),
-        "pssz32" => try_to_pssz::<Pssz32, T>(value),
+        "auto" => try_encode::<Pssz, T>(value),
+        "pssz8" => try_encode::<Pssz8, T>(value),
+        "pssz16" => try_encode::<Pssz16, T>(value),
+        "pssz32" => try_encode::<Pssz32, T>(value),
         _ => Err(PsszError("unknown format")),
     }
 }

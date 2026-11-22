@@ -3,8 +3,8 @@
 //!
 //! Serialized forms of a [`Schema`], each identical to the C++ one: PSSZ
 //! (`PsszPack` / `PsszUnpack`) and the two texts of `psio::json`
-//! (`JsonText`: `json::to_string::<IJson, _>(&schema)`,
-//! `json::from_str::<Json, Schema>(text)`), which are what the generic
+//! (`JsonText`: `json::try_encode::<IJson, _>(&schema)`,
+//! `json::decode::<Json, Schema>(text)`), which are what the generic
 //! text codec gives these records (docs/json.md, "The Schema IR as JSON").
 //! The serde derives are a separate, serde-shaped form and not that text.
 #![allow(non_snake_case)]

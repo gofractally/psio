@@ -4,27 +4,27 @@ fn profile<F: PsszFormat>() {
     let mut vector = Bitvector::<9>::default();
     vector.set(0, true);
     vector.set(8, true);
-    let bytes = try_to_pssz::<F, _>(&vector).unwrap();
+    let bytes = try_encode::<F, _>(&vector).unwrap();
     assert_eq!(bytes, [1, 1]);
-    assert_eq!(from_pssz_exact::<F, Bitvector<9>>(&bytes).unwrap(), vector);
+    assert_eq!(decode_strict::<F, Bitvector<9>>(&bytes).unwrap(), vector);
     for invalid in [&[1][..], &[1, 1, 0], &[1, 128]] {
-        assert!(from_pssz_exact::<F, Bitvector<9>>(invalid).is_err());
-        assert!(psio::pssz_view::validated_view_exact::<Bitvector<9>, F>(invalid).is_err());
+        assert!(decode_strict::<F, Bitvector<9>>(invalid).is_err());
+        assert!(psio::pssz_view::PsszView::<Bitvector<9>, F>::new_strict(invalid).is_err());
     }
     vector.bytes[1] = 128;
     let mut out = vec![9, 8];
     assert!(<Bitvector<9> as PsszPack<F>>::pssz_pack_checked(&vector, &mut out).is_err());
     assert_eq!(out, [9, 8]);
     vector.bytes = vec![];
-    assert!(try_to_pssz::<F, _>(&vector).is_err());
+    assert!(try_encode::<F, _>(&vector).is_err());
     let list = Bitlist::<10> {
         bits: vec![true, false, false],
     };
-    assert_eq!(try_to_pssz::<F, _>(&list).unwrap(), [9]);
-    assert_eq!(from_pssz_exact::<F, Bitlist<10>>(&[9]).unwrap(), list);
+    assert_eq!(try_encode::<F, _>(&list).unwrap(), [9]);
+    assert_eq!(decode_strict::<F, Bitlist<10>>(&[9]).unwrap(), list);
     for invalid in [&[][..], &[0], &[1, 0], &[0, 8]] {
-        assert!(from_pssz_exact::<F, Bitlist<10>>(invalid).is_err());
-        assert!(psio::pssz_view::validated_view_exact::<Bitlist<10>, F>(invalid).is_err());
+        assert!(decode_strict::<F, Bitlist<10>>(invalid).is_err());
+        assert!(psio::pssz_view::PsszView::<Bitlist<10>, F>::new_strict(invalid).is_err());
     }
     let too_long = Bitlist::<10> {
         bits: vec![false; 11],
@@ -32,18 +32,18 @@ fn profile<F: PsszFormat>() {
     assert!(<Bitlist<10> as PsszPack<F>>::pssz_pack_checked(&too_long, &mut out).is_err());
     assert_eq!(out, [9, 8]);
     assert_eq!(
-        try_to_pssz::<F, _>(&Some(Bitlist::<10>::default())).unwrap(),
+        try_encode::<F, _>(&Some(Bitlist::<10>::default())).unwrap(),
         [1]
     );
-    assert!(try_to_pssz::<F, _>(&Option::<Bitlist<10>>::None)
+    assert!(try_encode::<F, _>(&Option::<Bitlist<10>>::None)
         .unwrap()
         .is_empty());
     assert_eq!(
-        try_to_pssz::<F, _>(&Some(Bitvector::<0>::default())).unwrap(),
+        try_encode::<F, _>(&Some(Bitvector::<0>::default())).unwrap(),
         [1]
     );
     assert_eq!(
-        try_to_pssz::<F, _>(&Option::<Bitvector<0>>::None).unwrap(),
+        try_encode::<F, _>(&Option::<Bitvector<0>>::None).unwrap(),
         [0]
     );
 }
@@ -134,9 +134,9 @@ fn packed_bits_are_atomic_nodes_at_depth_64() {
     let value = nested(Bitlist::<10> {
         bits: vec![true, false, false],
     });
-    let bytes = try_to_pssz::<Pssz32, _>(&value).unwrap();
-    assert!(from_pssz_exact::<Pssz32, Nest<Bitlist<10>>>(&bytes).is_ok());
-    assert!(psio::pssz_view::validated_view_exact::<Nest<Bitlist<10>>, Pssz32>(&bytes).is_ok());
+    let bytes = try_encode::<Pssz32, _>(&value).unwrap();
+    assert!(decode_strict::<Pssz32, Nest<Bitlist<10>>>(&bytes).is_ok());
+    assert!(psio::pssz_view::PsszView::<Nest<Bitlist<10>>, Pssz32>::new_strict(&bytes).is_ok());
     let (schema, root) = schema_for::<Nest<Bitlist<10>>>().unwrap();
     let decoded = codec::decode_exact::<Pssz32>(&schema, &root, &bytes).unwrap();
     assert_eq!(
@@ -144,8 +144,8 @@ fn packed_bits_are_atomic_nodes_at_depth_64() {
         bytes
     );
     let value = nested(Bitvector::<9> { bytes: vec![1, 1] });
-    let bytes = try_to_pssz::<Pssz32, _>(&value).unwrap();
-    assert!(from_pssz_exact::<Pssz32, Nest<Bitvector<9>>>(&bytes).is_ok());
+    let bytes = try_encode::<Pssz32, _>(&value).unwrap();
+    assert!(decode_strict::<Pssz32, Nest<Bitvector<9>>>(&bytes).is_ok());
     let (schema, root) = schema_for::<Nest<Bitvector<9>>>().unwrap();
     let decoded = codec::decode_exact::<Pssz32>(&schema, &root, &bytes).unwrap();
     assert_eq!(

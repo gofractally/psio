@@ -637,7 +637,7 @@ impl<T: SszUnpack + SszPack, const N: usize> SszUnpack for Box<[T; N]> {
 
 // ── Structural validation ───────────────────────────────────────────────────
 //
-// `ssz_validate::<T>(buf)` walks the same recursive shape as `from_ssz`
+// `validate_ssz::<T>(buf)` walks the same recursive shape as `from_ssz`
 // but never allocates. Returns `Err` on malformed input. Matches the
 // semantics of C++ `ssz_validate<T>(buffer)` from `from_ssz.hpp`.
 
@@ -854,22 +854,89 @@ impl<const MAX_N: usize> SszValidate for Bitlist<MAX_N> {
     }
 }
 
-/// Public entry point matching C++ `ssz_validate<T>(buffer)`.
-pub fn ssz_validate<T: SszValidate>(bytes: &[u8]) -> SszResult<()> {
-    T::ssz_validate(bytes)
-}
+// ── The helper names (docs/helpers.md) ──────────────────────────────────────
 
-// ── Convenience top-level API ───────────────────────────────────────────────
-
-pub fn to_ssz<T: SszPack>(value: &T) -> Vec<u8> {
+/// Encodes `value` into a fresh buffer (C++ `psio::to_ssz(v)`).
+pub fn to_ssz<T: SszPack + ?Sized>(value: &T) -> Vec<u8> {
     let mut out = Vec::with_capacity(value.ssz_size());
     value.ssz_pack(&mut out);
     out
 }
 
+/// Appends the encoding of `value` to `out` (C++ `psio::to_ssz(v, sink)`).
+pub fn to_ssz_into<T: SszPack + ?Sized>(value: &T, out: &mut Vec<u8>) {
+    out.reserve(value.ssz_size());
+    value.ssz_pack(out);
+}
+
+/// The checked decode (C++ `psio::from_ssz<T>(bytes)`). The decoder checks
+/// as it reads.
 pub fn from_ssz<T: SszUnpack>(bytes: &[u8]) -> SszResult<T> {
     <T as SszUnpack>::ssz_unpack(bytes)
 }
+
+/// Decodes bytes the caller vouches for (C++
+/// `psio::from_ssz<T>(psio::trusted{bytes})`). A safe function: nothing is
+/// skipped, and bytes that are not a valid `T` cause a panic, never
+/// undefined behaviour.
+#[track_caller]
+pub fn from_ssz_trusted<T: SszUnpack>(bytes: &[u8]) -> T {
+    match from_ssz::<T>(bytes) {
+        Ok(value) => value,
+        Err(e) => panic!("from_ssz_trusted: the bytes are not valid: {}", e.0),
+    }
+}
+
+/// Whether `bytes` is one `T` (C++ `psio::validate_ssz<T>(bytes)`). Never
+/// panics.
+pub fn validate_ssz<T: SszValidate + ?Sized>(bytes: &[u8]) -> SszResult<()> {
+    T::ssz_validate(bytes)
+}
+
+/// Size of the encoding of `value` (C++ `psio::ssz_size(v)`).
+pub fn ssz_size<T: SszPack + ?Sized>(value: &T) -> usize {
+    value.ssz_size()
+}
+
+// ── The generic layer and the buffer names ──────────────────────────────────
+
+/// The SSZ format tag (C++ `psio::ssz`).
+pub struct Ssz;
+impl crate::Format for Ssz {
+    type Error = SszError;
+}
+impl<T: SszPack + ?Sized> crate::Encode<Ssz> for T {
+    fn encode_into(&self, out: &mut Vec<u8>) -> SszResult<usize> {
+        let start = out.len();
+        self.ssz_pack(out);
+        Ok(out.len() - start)
+    }
+    fn encoded_size(&self) -> SszResult<usize> {
+        Ok(self.ssz_size())
+    }
+}
+impl<T: SszUnpack> crate::Decode<Ssz> for T {
+    fn decode(bytes: &[u8]) -> SszResult<Self> {
+        T::ssz_unpack(bytes)
+    }
+}
+impl<T: SszValidate> crate::Validate<Ssz> for T {
+    fn validate<P: crate::ValidationPolicy>(bytes: &[u8], _policy: &P) -> SszResult<()> {
+        T::ssz_validate(bytes)
+    }
+}
+impl<T: ?Sized> crate::ViewFormat<T> for Ssz {
+    type View<'a> = crate::ssz_view::SszView<'a, T>;
+    fn view(bytes: &[u8]) -> Self::View<'_> {
+        crate::ssz_view::SszView::trusted(bytes)
+    }
+}
+
+/// One `T` encoded as SSZ, owned (C++ `psio::ssz_buffer<T>`).
+pub type SszBuffer<T> = crate::Buffer<T, Ssz>;
+/// One `T` encoded as SSZ, immutable and shared (C++ `psio::shared_ssz<T>`).
+pub type SharedSsz<T> = crate::Shared<T, Ssz>;
+pub use crate::ssz_view::SszView;
 
 // ── Tests ───────────────────────────────────────────────────────────────────
 
@@ -1095,70 +1162,70 @@ mod tests {
     #[test]
     fn validate_passes_on_good_fixtures() {
         // Every C++ fixture must validate.
-        assert!(ssz_validate::<u32>(&hex("efbeadde")).is_ok());
-        assert!(ssz_validate::<String>(&hex("68656c6c6f")).is_ok());
-        assert!(ssz_validate::<Vec<u32>>(&hex("010000000200000003000000")).is_ok());
-        assert!(ssz_validate::<Vec<String>>(&hex("0c0000000d0000000f000000616263646566")).is_ok());
-        assert!(ssz_validate::<Option<u32>>(&hex("012a000000")).is_ok());
-        assert!(ssz_validate::<Option<u32>>(&hex("00")).is_ok());
+        assert!(validate_ssz::<u32>(&hex("efbeadde")).is_ok());
+        assert!(validate_ssz::<String>(&hex("68656c6c6f")).is_ok());
+        assert!(validate_ssz::<Vec<u32>>(&hex("010000000200000003000000")).is_ok());
+        assert!(validate_ssz::<Vec<String>>(&hex("0c0000000d0000000f000000616263646566")).is_ok());
+        assert!(validate_ssz::<Option<u32>>(&hex("012a000000")).is_ok());
+        assert!(validate_ssz::<Option<u32>>(&hex("00")).is_ok());
     }
 
     #[test]
     fn validate_rejects_bad_bool() {
-        assert!(ssz_validate::<bool>(&[2]).is_err());
-        assert!(ssz_validate::<bool>(&[]).is_err());
+        assert!(validate_ssz::<bool>(&[2]).is_err());
+        assert!(validate_ssz::<bool>(&[]).is_err());
     }
 
     #[test]
     fn validate_rejects_bad_optional_selector() {
-        assert!(ssz_validate::<Option<u32>>(&[0, 0, 0, 0, 0]).is_err());  // selector 0 must have empty payload
-        assert!(ssz_validate::<Option<u32>>(&[2]).is_err());              // selector > 1
+        assert!(validate_ssz::<Option<u32>>(&[0, 0, 0, 0, 0]).is_err());  // selector 0 must have empty payload
+        assert!(validate_ssz::<Option<u32>>(&[2]).is_err());              // selector > 1
     }
 
     #[test]
     fn validate_rejects_non_monotone_offsets() {
         // First offset = 12 (correct, 3 elems), second offset = 5 (< 12 = bad)
         let bad = hex("0c0000000500000010000000616263");
-        assert!(ssz_validate::<Vec<String>>(&bad).is_err());
+        assert!(validate_ssz::<Vec<String>>(&bad).is_err());
     }
 
     #[test]
     fn validate_uint256_uint128_extints() {
-        assert!(ssz_validate::<u128>(&hex("ff00ff00ff00ff00ff00ff00ff00ff00")).is_ok());
-        assert!(ssz_validate::<i128>(&hex("d6ffffffffffffffffffffffffffffff")).is_ok());
-        assert!(ssz_validate::<Uint256>(&hex(
+        assert!(validate_ssz::<u128>(&hex("ff00ff00ff00ff00ff00ff00ff00ff00")).is_ok());
+        assert!(validate_ssz::<i128>(&hex("d6ffffffffffffffffffffffffffffff")).is_ok());
+        assert!(validate_ssz::<Uint256>(&hex(
             "0100000000000000020000000000000003000000000000000400000000000000"
         )).is_ok());
         // Underrun cases
-        assert!(ssz_validate::<u128>(&hex("00")).is_err());
-        assert!(ssz_validate::<Uint256>(&hex("00")).is_err());
+        assert!(validate_ssz::<u128>(&hex("00")).is_err());
+        assert!(validate_ssz::<Uint256>(&hex("00")).is_err());
     }
 
     #[test]
     fn validate_bounded_enforces_cap() {
         // 5-char string with bound 16 → ok.
-        assert!(ssz_validate::<BoundedString<16>>(&hex("68656c6c6f")).is_ok());
+        assert!(validate_ssz::<BoundedString<16>>(&hex("68656c6c6f")).is_ok());
         // Same 5 chars with bound 3 → rejected.
-        assert!(ssz_validate::<BoundedString<3>>(&hex("68656c6c6f")).is_err());
+        assert!(validate_ssz::<BoundedString<3>>(&hex("68656c6c6f")).is_err());
     }
 
     #[test]
     fn validate_bitvector_rejects_bits_past_N() {
         // N=12 → bytes 1.byte[1] uses bits 8..11. bits 12..15 must be zero.
         // 0x09 0x08 = bit 0, 3, 11 set — valid.
-        assert!(ssz_validate::<Bitvector<12>>(&hex("0908")).is_ok());
+        assert!(validate_ssz::<Bitvector<12>>(&hex("0908")).is_ok());
         // 0x09 0x18 = bit 12 set too (past N) — invalid.
-        assert!(ssz_validate::<Bitvector<12>>(&hex("0918")).is_err());
+        assert!(validate_ssz::<Bitvector<12>>(&hex("0918")).is_err());
     }
 
     #[test]
     fn validate_bitlist_delimiter_required() {
         // Valid len-5 bitlist: "25"
-        assert!(ssz_validate::<Bitlist<16>>(&hex("25")).is_ok());
+        assert!(validate_ssz::<Bitlist<16>>(&hex("25")).is_ok());
         // Empty bitlist = just delimiter byte 0x01
-        assert!(ssz_validate::<Bitlist<16>>(&hex("01")).is_ok());
+        assert!(validate_ssz::<Bitlist<16>>(&hex("01")).is_ok());
         // All zeros → missing delimiter
-        assert!(ssz_validate::<Bitlist<16>>(&hex("0000")).is_err());
+        assert!(validate_ssz::<Bitlist<16>>(&hex("0000")).is_err());
     }
 
     #[test]

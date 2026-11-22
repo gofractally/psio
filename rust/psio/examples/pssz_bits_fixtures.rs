@@ -12,7 +12,7 @@ fn emit<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F> + ToPsszSchema>(
     value: T,
     expected: codec::Value,
 ) {
-    let bytes = try_to_pssz::<F, _>(&value).unwrap();
+    let bytes = try_encode::<F, _>(&value).unwrap();
     let (schema, root) = schema_for::<T>().unwrap();
     assert_eq!(
         codec::encode::<F>(&schema, &root, &expected).unwrap(),
@@ -29,7 +29,7 @@ fn emit<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F> + ToPsszSchema>(
 }
 fn reject<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F> + ToPsszSchema>(name: &str, bytes: &[u8]) {
     let (schema, root) = schema_for::<T>().unwrap();
-    assert!(from_pssz_exact::<F, T>(bytes).is_err());
+    assert!(decode_strict::<F, T>(bytes).is_err());
     assert!(codec::decode_exact::<F>(&schema, &root, bytes).is_err());
     println!(
         "{}",

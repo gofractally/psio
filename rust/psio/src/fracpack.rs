@@ -52,7 +52,7 @@
 
 use custom_error::custom_error;
 pub use psio_macros::{
-    FracMutView, FracView, FromCanonicalJson, Pack, ToCanonicalJson, ToSchema, Unpack,
+    FracMutView, FracView, Pack, ToSchema, Unpack,
 };
 pub use psio_macros::{CapnpPack, CapnpUnpack, CapnpView, FbPack, FbUnpack, FbView, WitPack, WitUnpack, WitView};
 pub use psio_macros::ToDynamicSchema;
@@ -67,7 +67,6 @@ pub use nested::*;
 mod view;
 pub use view::*;
 
-pub mod json;
 
 custom_error! {pub Error
     ReadPastEnd         = "Read past end",

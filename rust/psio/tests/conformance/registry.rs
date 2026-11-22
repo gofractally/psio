@@ -45,6 +45,7 @@ pub fn registry() -> Registry {
 
     // Nested values.
     reg!(NArgs, NArgs2, NAction, NAction2, NActionRaw, NActionLater, NShapes, NCapped, NChain);
+    reg!(NCapRec, NCapWords);
     reg!(Nested<u32>, Nested<NArgs>, Nested<NArgs, Deferred>, Option<Nested<Raw>>, Vec<Nested<u32>>);
     reg!(V2<u8, Nested<NArgs>>, (Nested<Raw>, u8), Option<NChain>, Option<Option<NChain>>);
     // Pairs, maps and sets, and the lists they are on the wire.

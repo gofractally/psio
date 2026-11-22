@@ -9,6 +9,9 @@
 // is BoundedRawString<N> / BoundedList<T, N>. A field named `in_` is `in`.
 
 use super::harness::*;
+// The harness `encode` takes the format at run time; it
+// shadows the tag-generic `psio::pssz::encode` of the glob import below.
+use super::harness::encode;
 pub use crate::custom_types::*;
 use psio::pssz::*;
 use std::collections::{BTreeMap, BTreeSet};
@@ -214,6 +217,10 @@ rec!(NShapes {
     many: Vec<Nested<NArgs>>,
 });
 rec!(NCapped { id: u8, note: Nested<Raw, Checked, 8> });
+// The bound counts encoded bytes, whatever the inner value is: a record, a
+// list of u16 (half as many elements as bytes).
+rec!(NCapRec { id: u8, args: Nested<NArgs, Checked, 28> });
+rec!(NCapWords { id: u8, words: Nested<Vec<u16>, Checked, 5> });
 // A self-nesting chain: recursive, so the derive in both passes (see
 // DepthNode).
 #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]

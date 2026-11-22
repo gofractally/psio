@@ -478,7 +478,7 @@ impl<F: JsonFormat, T> Val<F> for T where
 
 fn reads<F: JsonFormat, T: Val<F>>(text: &[u8]) -> Result<T, String> {
     json::validate::<F, T>(text).map_err(|e| format!("validate: {e}"))?;
-    let value = json::from_slice::<F, T>(text).map_err(|e| format!("from_slice: {e}"))?;
+    let value = json::decode::<F, T>(text).map_err(|e| format!("from_slice: {e}"))?;
     let root = psio::decode::<F, T>(text).map_err(|e| format!("psio::decode: {e}"))?;
     if root != value {
         return Err("psio::decode differs from from_slice".into());
@@ -488,14 +488,14 @@ fn reads<F: JsonFormat, T: Val<F>>(text: &[u8]) -> Result<T, String> {
 }
 
 fn writes<F: JsonFormat, T: Val<F>>(value: &T, want: &str) -> Result<(), String> {
-    let got = json::to_string::<F, T>(value).map_err(|e| format!("to_string: {e}"))?;
+    let got = json::try_encode::<F, T>(value).map_err(|e| format!("to_string: {e}"))?;
     if got != want {
         return Err(format!("writes {got}, want {want}"));
     }
     if psio::encode::<F, T>(value).map_err(|e| e.to_string())? != want.as_bytes() {
         return Err("psio::encode differs".into());
     }
-    if json::to_vec::<F, T>(value).map_err(|e| e.to_string())? != want.as_bytes() {
+    if json::try_encode::<F, T>(value).map(String::into_bytes).map_err(|e| e.to_string())? != want.as_bytes() {
         return Err("encode is not deterministic".into());
     }
     Ok(())
@@ -506,7 +506,7 @@ fn writes<F: JsonFormat, T: Val<F>>(value: &T, want: &str) -> Result<(), String>
 fn violates<F: JsonFormat, T: Val<F>>(text: &[u8], reason: &str) -> Result<(), String> {
     let results = [
         json::validate::<F, T>(text).err(),
-        json::from_slice::<F, T>(text).err(),
+        json::decode::<F, T>(text).err(),
         psio::decode::<F, T>(text).err(),
         psio::validate::<F, T, _>(text, &psio::DefaultSafe).err(),
     ];
@@ -523,7 +523,7 @@ fn rejects<F: JsonFormat, T: Val<F>>(text: &[u8]) -> Result<(), String> {
     if json::validate::<F, T>(text).is_ok() {
         return Err("validate accepts".into());
     }
-    if let Ok(v) = json::from_slice::<F, T>(text) {
+    if let Ok(v) = json::decode::<F, T>(text) {
         return Err(format!("from_slice accepts as {v:?}"));
     }
     if psio::decode::<F, T>(text).is_ok() {
@@ -595,9 +595,9 @@ fn check_pssz<T: Packed>(row: &Row) -> Result<(), String> {
         let bytes = unhex(row.pssz.as_ref().ok_or("invariant row needs pssz")?);
         let reason = row.reason.as_deref().ok_or("invariant row needs reason")?;
         let outcomes = [
-            psio::pssz::from_pssz::<Pssz, T>(&bytes).map(drop),
-            psio::pssz::from_pssz_exact::<Pssz, T>(&bytes).map(drop),
-            psio::pssz::from_pssz_compatible::<Pssz, T>(&bytes).map(drop),
+            psio::pssz::from_pssz::<T>(&bytes).map(drop),
+            psio::pssz::decode_strict::<Pssz, T>(&bytes).map(drop),
+            psio::pssz::decode_checked::<Pssz, T>(&bytes).map(drop),
         ];
         for outcome in outcomes {
             if outcome.map_err(|e| e.0) != Err(reason) {
@@ -610,18 +610,18 @@ fn check_pssz<T: Packed>(row: &Row) -> Result<(), String> {
         (None, None) => Ok(()),
         (Some(value), Some(hex)) => {
             let want = unhex(hex);
-            let got = psio::pssz::try_to_pssz::<Pssz, T>(value).map_err(|e| format!("pssz {e:?}"))?;
+            let got = psio::pssz::try_encode::<Pssz, T>(value).map_err(|e| format!("pssz {e:?}"))?;
             if got != want {
                 return Err(format!("typed pssz gives {got:02x?}, want {hex}"));
             }
             let back =
-                psio::pssz::from_pssz::<Pssz, T>(&want).map_err(|e| format!("from_pssz {e:?}"))?;
+                psio::pssz::from_pssz::<T>(&want).map_err(|e| format!("decode {e:?}"))?;
             if back != *value {
-                return Err(format!("from_pssz gives {back:?}, want {value:?}"));
+                return Err(format!("decode gives {back:?}, want {value:?}"));
             }
-            psio::pssz::from_pssz_exact::<Pssz, T>(&want)
+            psio::pssz::decode_strict::<Pssz, T>(&want)
                 .map(|_| ())
-                .map_err(|e| format!("from_pssz_exact {e:?}"))
+                .map_err(|e| format!("decode_strict {e:?}"))
         }
         (Some(_), None) => Err("value / accept row of a pssz type has no pssz bytes".into()),
         (None, Some(_)) => Err("reject row carries pssz bytes".into()),
@@ -653,12 +653,12 @@ fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
         let (bytes, value): (Vec<u8>, T) = if ijson {
             (
                 dynamic::json_to_pssz::<IJson>(&schema, &root, text, handlers).map_err(|e| e.to_string())?,
-                json::from_slice::<IJson, T>(text).map_err(|e| e.to_string())?,
+                psio::from_ijson::<T>(text).map_err(|e| e.to_string())?,
             )
         } else {
             (
                 dynamic::json_to_pssz::<Json>(&schema, &root, text, handlers).map_err(|e| e.to_string())?,
-                json::from_slice::<Json, T>(text).map_err(|e| e.to_string())?,
+                psio::from_json::<T>(text).map_err(|e| e.to_string())?,
             )
         };
         if let Some(want) = typed_pssz(&value) {
@@ -677,7 +677,7 @@ fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
                 text
             })
             .map_err(|e| e.what().to_string());
-        let typed = json::to_string::<Json, T>(&value).map_err(|e| e.what.to_string());
+        let typed = json::try_encode::<Json, T>(&value).map_err(|e| e.what.to_string());
         if json_text != typed {
             return Err(format!("schema path writes json {json_text:?}, typed {typed:?}"));
         }
@@ -687,7 +687,7 @@ fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
                 text
             })
             .map_err(|e| e.what().to_string());
-        let typed = json::to_string::<IJson, T>(&value).map_err(|e| e.what.to_string());
+        let typed = json::try_encode::<IJson, T>(&value).map_err(|e| e.what.to_string());
         if ijson_text != typed {
             return Err(format!("schema path writes ijson {ijson_text:?}, typed {typed:?}"));
         }
@@ -788,7 +788,7 @@ struct Entry {
 }
 
 fn rust_ir_with_pssz<T: Packed + ToPsszSchema>(row: &Row) -> Result<(), String> {
-    check_rust_ir::<T>(row, &|value| psio::pssz::try_to_pssz::<Pssz, T>(value).ok())
+    check_rust_ir::<T>(row, &|value| psio::pssz::try_encode::<Pssz, T>(value).ok())
 }
 fn rust_ir_text_only<T: Packed + ToPsszSchema>(row: &Row) -> Result<(), String> {
     // The fixture has no bytes for the type, but Rust has a typed codec.
@@ -1065,9 +1065,9 @@ fn the_enum_and_wide_integer_ir_rust_builds_is_the_ir_cpp_recorded() {
     use psio::pssz::schema_ir::{AnyType, AnyValue, Schema};
     let fixture = fixture();
     let bytes = unhex(&fixture.schema_ir);
-    let recorded = psio::pssz::from_pssz::<Pssz, Schema>(&bytes).expect("schema_ir decodes");
+    let recorded = psio::pssz::from_pssz::<Schema>(&bytes).expect("schema_ir decodes");
     // The decoded IR re-encodes to the fixture's bytes: Enum included.
-    assert_eq!(psio::pssz::try_to_pssz::<Pssz, _>(&recorded).unwrap(), bytes);
+    assert_eq!(psio::pssz::try_to_pssz(&recorded).unwrap(), bytes);
     fn same<T: ToPsszSchema>(recorded: &Schema, id: &str) -> AnyType {
         let (built, _) = schema_for::<T>().unwrap();
         // The fixture lists each type under its id, as an alias of the name
@@ -1076,8 +1076,8 @@ fn the_enum_and_wide_integer_ir_rust_builds_is_the_ir_cpp_recorded() {
         let cpp = recorded.resolve(recorded.get(id).expect("recorded")).expect("resolves");
         assert_eq!(rust, cpp, "{id}");
         assert_eq!(
-            psio::pssz::try_to_pssz::<Pssz, _>(rust).unwrap(),
-            psio::pssz::try_to_pssz::<Pssz, _>(cpp).unwrap(),
+            psio::pssz::try_to_pssz(rust).unwrap(),
+            psio::pssz::try_to_pssz(cpp).unwrap(),
             "{id}"
         );
         cpp.clone()
@@ -1112,7 +1112,7 @@ fn custom_text_forms_go_through_the_handler_registry_or_fall_back_to_the_wire_ty
     use psio::pssz::schema_ir::{AnyType, AnyValue, Schema};
     let fixture = fixture();
     // The IR Rust builds for the custom types is the IR C++ recorded.
-    let recorded = psio::pssz::from_pssz::<Pssz, Schema>(&unhex(&fixture.schema_ir)).unwrap();
+    let recorded = psio::pssz::from_pssz::<Schema>(&unhex(&fixture.schema_ir)).unwrap();
     let named = |schema: &Schema, id: &str| -> AnyType {
         schema.resolve(schema.get(id).expect("listed")).expect("resolves").clone()
     };
@@ -1234,12 +1234,12 @@ fn custom_text_forms_go_through_the_handler_registry_or_fall_back_to_the_wire_ty
         notify: vec![],
         since: Some(Version { major: 1, minor: 2 }),
     };
-    let bytes = psio::pssz::try_to_pssz::<Pssz, _>(&transfer).unwrap();
+    let bytes = psio::pssz::try_to_pssz(&transfer).unwrap();
     let mut all = typed_handlers();
     all.set_strict(true);
     assert_eq!(
         dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &all).unwrap().0,
-        json::to_string::<IJson, _>(&transfer).unwrap()
+        psio::to_ijson(&transfer)
     );
     assert_eq!(
         dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &partial).unwrap_err().what(),
@@ -1262,7 +1262,7 @@ fn custom_text_forms_go_through_the_handler_registry_or_fall_back_to_the_wire_ty
         dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &failing).unwrap_err().what(),
         "json: custom handler has no text for the value"
     );
-    let text = json::to_string::<Json, _>(&transfer).unwrap();
+    let text = psio::to_json(&transfer);
     assert_eq!(
         dynamic::json_to_pssz_with::<Json>(&schema, &root, text.as_bytes(), &failing).unwrap_err().what(),
         "json: custom handler produced bytes that are not the inner type"
@@ -1283,50 +1283,50 @@ fn typed_handlers_of_version_only() -> dynamic::CustomHandlers {
 fn native_values_have_the_fixture_texts() {
     // The same values the C++ emitter builds, written from Rust values.
     let text = |v: &dyn Fn() -> Result<String, json::JsonTextError>| v().unwrap();
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&u64::MAX)), "\"18446744073709551615\"");
-    assert_eq!(text(&|| json::to_string::<Json, _>(&u64::MAX)), "18446744073709551615");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&i64::MIN)), "\"-9223372036854775808\"");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&(1u64 << 53))), "\"9007199254740992\"");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&((1u64 << 53) - 1))), "9007199254740991");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&((1i64 << 53) - 1))), "9007199254740991");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&-((1i64 << 53) - 1))), "-9007199254740991");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&-(1i64 << 53))), "\"-9007199254740992\"");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&0u64)), "0");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&i64::MAX)), "\"9223372036854775807\"");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&((1u64 << 53) + 1))), "\"9007199254740993\"");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&u32::MAX)), "4294967295");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&vec![0x01u8, 0xff])), "\"01FF\"");
-    assert_eq!(text(&|| json::to_string::<Json, _>(&vec![0x01u8, 0xff])), "[1,255]");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&Vec::<u8>::new())), "\"\"");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&[0xdeu8, 0xad, 0xbe, 0xef])), "\"DEADBEEF\"");
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&())), "[]");
-    assert_eq!(text(&|| json::to_string::<Json, _>(&())), "[]");
+    assert_eq!(text(&|| psio::try_to_ijson(&u64::MAX)), "\"18446744073709551615\"");
+    assert_eq!(text(&|| psio::try_to_json(&u64::MAX)), "18446744073709551615");
+    assert_eq!(text(&|| psio::try_to_ijson(&i64::MIN)), "\"-9223372036854775808\"");
+    assert_eq!(text(&|| psio::try_to_ijson(&(1u64 << 53))), "\"9007199254740992\"");
+    assert_eq!(text(&|| psio::try_to_ijson(&((1u64 << 53) - 1))), "9007199254740991");
+    assert_eq!(text(&|| psio::try_to_ijson(&((1i64 << 53) - 1))), "9007199254740991");
+    assert_eq!(text(&|| psio::try_to_ijson(&-((1i64 << 53) - 1))), "-9007199254740991");
+    assert_eq!(text(&|| psio::try_to_ijson(&-(1i64 << 53))), "\"-9007199254740992\"");
+    assert_eq!(text(&|| psio::try_to_ijson(&0u64)), "0");
+    assert_eq!(text(&|| psio::try_to_ijson(&i64::MAX)), "\"9223372036854775807\"");
+    assert_eq!(text(&|| psio::try_to_ijson(&((1u64 << 53) + 1))), "\"9007199254740993\"");
+    assert_eq!(text(&|| psio::try_to_ijson(&u32::MAX)), "4294967295");
+    assert_eq!(text(&|| psio::try_to_ijson(&vec![0x01u8, 0xff])), "\"01FF\"");
+    assert_eq!(text(&|| psio::try_to_json(&vec![0x01u8, 0xff])), "[1,255]");
+    assert_eq!(text(&|| psio::try_to_ijson(&Vec::<u8>::new())), "\"\"");
+    assert_eq!(text(&|| psio::try_to_ijson(&[0xdeu8, 0xad, 0xbe, 0xef])), "\"DEADBEEF\"");
+    assert_eq!(text(&|| psio::try_to_ijson(&())), "[]");
+    assert_eq!(text(&|| psio::try_to_json(&())), "[]");
     assert_eq!(
-        text(&|| json::to_string::<IJson, _>(&(7u32, "t".to_string(), 1u64 << 60))),
+        text(&|| psio::try_to_ijson(&(7u32, "t".to_string(), 1u64 << 60))),
         "[7,\"t\",\"1152921504606846976\"]"
     );
     let inner = Inner { id: 7, label: "seven".into(), flag: true };
     assert_eq!(
-        text(&|| json::to_string::<IJson, _>(&Choice::Inner(inner.clone()))),
+        text(&|| psio::try_to_ijson(&Choice::Inner(inner.clone()))),
         r#"{"Inner":{"id":7,"label":"seven","flag":true}}"#
     );
     assert_eq!(
-        text(&|| json::to_string::<Json, _>(&Choice::Inner(inner.clone()))),
+        text(&|| psio::try_to_json(&Choice::Inner(inner.clone()))),
         r#"[3,{"id":7,"label":"seven","flag":true}]"#
     );
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&Choice::U32(42))), r#"{"uint32":42}"#);
-    assert_eq!(text(&|| json::to_string::<IJson, _>(&Choice::U64(42))), r#"{"uint64":42}"#);
+    assert_eq!(text(&|| psio::try_to_ijson(&Choice::U32(42))), r#"{"uint32":42}"#);
+    assert_eq!(text(&|| psio::try_to_ijson(&Choice::U64(42))), r#"{"uint64":42}"#);
     let overrides = Overrides { a: 1, b: 2, c: 3, d: vec![4, 5], e: Some(-6), f: -7 };
     assert_eq!(
-        text(&|| json::to_string::<Json, _>(&overrides)),
+        text(&|| psio::try_to_json(&overrides)),
         r#"{"a":"1","b":2,"c":"3","d":[4,5],"e":"-6","f":-7}"#
     );
     assert_eq!(
-        text(&|| json::to_string::<IJson, _>(&overrides)),
+        text(&|| psio::try_to_ijson(&overrides)),
         r#"{"a":1,"b":2,"c":"3","d":[4,5],"e":-6,"f":-7}"#
     );
     assert_eq!(
-        text(&|| json::to_string::<IJson, _>(&Version { major: 12, minor: 345 })),
+        text(&|| psio::try_to_ijson(&Version { major: 12, minor: 345 })),
         "\"12.345\""
     );
 }
@@ -1337,8 +1337,8 @@ fn writers_refuse_invariant_violations_and_write_maps_in_key_order() {
     // produces the value's text either, in both formats.
     fn no_text<T: JsonText + Debug>(value: T, reason: &str) {
         for what in [
-            json::to_string::<Json, T>(&value).map_err(|e| e.what),
-            json::to_string::<IJson, T>(&value).map_err(|e| e.what),
+            json::try_encode::<Json, T>(&value).map_err(|e| e.what),
+            json::try_encode::<IJson, T>(&value).map_err(|e| e.what),
         ] {
             assert_eq!(what, Err(reason), "{value:?}");
         }
@@ -1362,9 +1362,9 @@ fn writers_refuse_invariant_violations_and_write_maps_in_key_order() {
     );
     // A nested value that adopted bytes of a violating value has no text.
     let adopted = Nested::<Range>::unchecked(vec![8, 9, 0, 0, 0, 3, 0, 0, 0]);
-    assert!(json::to_string::<Json, _>(&adopted).is_err());
+    assert!(psio::try_to_json(&adopted).is_err());
     assert_eq!(
-        json::from_str::<Json, Nested<Range>>(r#"{"lo":9,"hi":3}"#).map_err(|e| e.what),
+        psio::from_json::<Nested<Range>>(r#"{"lo":9,"hi":3}"#).map_err(|e| e.what),
         Err("Range: lo is greater than hi")
     );
 
@@ -1372,31 +1372,31 @@ fn writers_refuse_invariant_violations_and_write_maps_in_key_order() {
     // container's own order; an object for a key that is a string by type.
     let by_account: HashMap<Account, u64> =
         [("bob", 7), ("alice", 5)].map(|(name, n)| (Account::from_text(name).unwrap(), n)).into();
-    assert_eq!(json::to_string::<IJson, _>(&by_account).unwrap(), r#"{"alice":5,"bob":7}"#);
+    assert_eq!(psio::to_ijson(&by_account), r#"{"alice":5,"bob":7}"#);
     let by_number: HashMap<u64, String> = [(256, "x".to_string()), (1, "one".to_string())].into();
-    assert_eq!(json::to_string::<Json, _>(&by_number).unwrap(), r#"[[1,"one"],[256,"x"]]"#);
+    assert_eq!(psio::to_json(&by_number), r#"[[1,"one"],[256,"x"]]"#);
     // An enumerator name is not a string by type: pairs.
     let by_color: BTreeMap<Color, u8> = [(Color::Blue, 3), (Color::Red, 1)].into();
-    assert_eq!(json::to_string::<IJson, _>(&by_color).unwrap(), r#"[["red",1],["blue",3]]"#);
+    assert_eq!(psio::to_ijson(&by_color), r#"[["red",1],["blue",3]]"#);
     // Nested elements order by their inner bytes: 256 (00 01 ..) before 1.
     let nested: BTreeSet<Nested<u64>> = [1u64, 256].iter().map(|n| Nested::new(n).unwrap()).collect();
-    assert_eq!(json::to_string::<Json, _>(&nested).unwrap(), "[256,1]");
+    assert_eq!(psio::to_json(&nested), "[256,1]");
     // A repeated key or element is refused by readers, by key bytes.
     for (text, what) in [
         (r#"{"a":1,"a":2}"#, "json: duplicate map key"),
     ] {
-        assert_eq!(json::from_str::<Json, BTreeMap<String, u32>>(text).map_err(|e| e.what), Err(what));
+        assert_eq!(psio::from_json::<BTreeMap<String, u32>>(text).map_err(|e| e.what), Err(what));
     }
     assert_eq!(
-        json::from_str::<IJson, BTreeMap<u64, String>>(r#"[["5","a"],[5,"b"]]"#).map_err(|e| e.what),
+        psio::from_ijson::<BTreeMap<u64, String>>(r#"[["5","a"],[5,"b"]]"#).map_err(|e| e.what),
         Err("json: duplicate map key")
     );
     assert_eq!(
-        json::from_str::<Json, BTreeSet<psio::key::ByKey<f64>>>("[0.0,-0.0]").map_err(|e| e.what),
+        psio::from_json::<BTreeSet<psio::key::ByKey<f64>>>("[0.0,-0.0]").map_err(|e| e.what),
         Err("json: duplicate set element")
     );
     // The form of a map is its key type's: an object where pairs are
     // expected, or the reverse, is an error.
-    assert!(json::from_str::<Json, BTreeMap<u64, String>>(r#"{"1":"one"}"#).is_err());
-    assert!(json::from_str::<Json, BTreeMap<String, u32>>(r#"[["a",1]]"#).is_err());
+    assert!(psio::from_json::<BTreeMap<u64, String>>(r#"{"1":"one"}"#).is_err());
+    assert!(psio::from_json::<BTreeMap<String, u32>>(r#"[["a",1]]"#).is_err());
 }

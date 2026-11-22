@@ -28,8 +28,8 @@ struct Node {
 fn roundtrip<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F> + std::fmt::Debug + PartialEq>(
     value: T,
 ) {
-    let bytes = try_to_pssz::<F, _>(&value).unwrap();
-    assert_eq!(from_pssz::<F, T>(&bytes).unwrap(), value);
+    let bytes = try_encode::<F, _>(&value).unwrap();
+    assert_eq!(decode::<F, T>(&bytes).unwrap(), value);
 }
 
 #[test]
@@ -41,10 +41,10 @@ fn generic_records_tuple_structs_transparent_wrappers_and_enums() {
     roundtrip::<Pssz16, _>(Pair(9, "hello".into()));
     roundtrip::<Pssz32, _>(Account(42));
     assert_eq!(
-        try_to_pssz::<Pssz32, _>(&Account(42)).unwrap(),
+        try_encode::<Pssz32, _>(&Account(42)).unwrap(),
         42u64.to_le_bytes()
     );
-    assert_eq!(try_to_pssz::<Pssz32, _>(&Empty).unwrap(), [0, 0, 0, 0]);
+    assert_eq!(try_encode::<Pssz32, _>(&Empty).unwrap(), [0, 0, 0, 0]);
     for value in [
         Message::Unit,
         Message::Value(42u32),
@@ -57,20 +57,20 @@ fn generic_records_tuple_structs_transparent_wrappers_and_enums() {
         roundtrip::<Pssz32, _>(value);
     }
     assert_eq!(
-        try_to_pssz::<Pssz32, _>(&Message::<u32>::Unit).unwrap(),
+        try_encode::<Pssz32, _>(&Message::<u32>::Unit).unwrap(),
         [0]
     );
 }
 
 #[test]
 fn zero_argument_and_positional_tuples_are_extensible_records() {
-    assert_eq!(try_to_pssz::<Pssz8, _>(&()).unwrap(), [0]);
-    assert_eq!(try_to_pssz::<Pssz16, _>(&()).unwrap(), [0, 0]);
-    assert_eq!(try_to_pssz::<Pssz32, _>(&()).unwrap(), [0, 0, 0, 0]);
-    assert!(from_pssz::<Pssz32, ()>(&[]).is_err());
-    assert!(from_pssz::<Pssz32, ()>(&[0, 0, 0, 0, 1]).is_err());
+    assert_eq!(try_encode::<Pssz8, _>(&()).unwrap(), [0]);
+    assert_eq!(try_encode::<Pssz16, _>(&()).unwrap(), [0, 0]);
+    assert_eq!(try_encode::<Pssz32, _>(&()).unwrap(), [0, 0, 0, 0]);
+    assert!(decode::<Pssz32, ()>(&[]).is_err());
+    assert!(decode::<Pssz32, ()>(&[0, 0, 0, 0, 1]).is_err());
     assert_eq!(
-        try_to_pssz::<Pssz32, _>(&(7u32, "hi".to_string())).unwrap(),
+        try_encode::<Pssz32, _>(&(7u32, "hi".to_string())).unwrap(),
         [8, 0, 0, 0, 7, 0, 0, 0, 8, 0, 0, 0, b'h', b'i']
     );
     roundtrip::<Pssz32, _>((7u32, "hi".to_string()));
@@ -78,9 +78,9 @@ fn zero_argument_and_positional_tuples_are_extensible_records() {
 
 #[test]
 fn rejects_invalid_enums_trailing_unit_payload_and_recursive_depth() {
-    assert!(from_pssz::<Pssz32, Message<u32>>(&[0, 1]).is_err());
-    assert!(from_pssz::<Pssz32, Message<u32>>(&[4]).is_err());
-    assert!(from_pssz::<Pssz32, Message<u32>>(&[]).is_err());
+    assert!(decode::<Pssz32, Message<u32>>(&[0, 1]).is_err());
+    assert!(decode::<Pssz32, Message<u32>>(&[4]).is_err());
+    assert!(decode::<Pssz32, Message<u32>>(&[]).is_err());
     let mut chain = Node {
         value: 0,
         next: None,
@@ -91,7 +91,7 @@ fn rejects_invalid_enums_trailing_unit_payload_and_recursive_depth() {
             next: Some(Box::new(chain)),
         };
     }
-    assert!(try_to_pssz::<Pssz32, _>(&chain).is_err());
+    assert!(try_encode::<Pssz32, _>(&chain).is_err());
     let mut destination = vec![9, 8];
     assert!(<Node as PsszPack<Pssz32>>::pssz_pack_checked(&chain, &mut destination).is_err());
     assert_eq!(destination, [9, 8]);
@@ -123,10 +123,10 @@ fn legacy_pack_remains_fracpack_when_both_derives_are_present() {
         value: "abc".into(),
     };
     let legacy = value.packed();
-    let modern = try_to_pssz::<Pssz32, _>(&value).unwrap();
+    let modern = try_encode::<Pssz32, _>(&value).unwrap();
     assert_ne!(legacy, modern);
     assert_eq!(Both::unpacked(&legacy).unwrap(), value);
-    assert_eq!(from_pssz::<Pssz32, Both>(&modern).unwrap(), value);
+    assert_eq!(decode::<Pssz32, Both>(&modern).unwrap(), value);
 }
 
 #[test]
@@ -142,12 +142,12 @@ fn borrowed_action_arguments_pack_like_their_owned_shapes() {
         bytes: Vec<u8>,
     }
     assert_eq!(
-        try_to_pssz::<Pssz32, _>(&Borrowed {
+        try_encode::<Pssz32, _>(&Borrowed {
             name: "hello",
             bytes: &[1, 2, 3]
         })
         .unwrap(),
-        try_to_pssz::<Pssz32, _>(&Owned {
+        try_encode::<Pssz32, _>(&Owned {
             name: "hello".into(),
             bytes: vec![1, 2, 3]
         })
@@ -211,9 +211,9 @@ fn checked_encoding_counts_present_wire_nodes_and_skips_synthesized_defaults() {
         value
     }
     let value = nest(AtLimit { suffix: None });
-    let bytes = try_to_pssz::<Pssz32, _>(&value).unwrap();
-    assert_eq!(from_pssz_exact::<Pssz32, Nest>(&bytes).unwrap(), value);
-    psio::pssz_view::validated_view_exact::<Nest, Pssz32>(&bytes).unwrap();
+    let bytes = try_encode::<Pssz32, _>(&value).unwrap();
+    assert_eq!(decode_strict::<Pssz32, Nest>(&bytes).unwrap(), value);
+    psio::pssz_view::PsszView::<Nest, Pssz32>::new_strict(&bytes).unwrap();
     let (schema, root) = schema_ir::schema_for::<Nest>().unwrap();
     let dynamic = dynamic::decode_exact::<Pssz32>(&schema, &root, &bytes).unwrap();
     assert_eq!(
@@ -221,19 +221,19 @@ fn checked_encoding_counts_present_wire_nodes_and_skips_synthesized_defaults() {
         bytes
     );
     let too_deep = nest(AtLimit { suffix: Some(7) });
-    assert!(try_to_pssz::<Pssz32, _>(&too_deep).is_err());
+    assert!(try_encode::<Pssz32, _>(&too_deep).is_err());
     let mut bytes = vec![0; 63]; // Nest::Next selectors; leaf selector then payload.
     bytes.push(1);
-    bytes.extend(try_to_pssz::<Pssz32, _>(&AtLimit { suffix: Some(7) }).unwrap());
-    assert!(from_pssz_exact::<Pssz32, Nest>(&bytes).is_err());
-    assert!(psio::pssz_view::validated_view_exact::<Nest, Pssz32>(&bytes).is_err());
+    bytes.extend(try_encode::<Pssz32, _>(&AtLimit { suffix: Some(7) }).unwrap());
+    assert!(decode_strict::<Pssz32, Nest>(&bytes).is_err());
+    assert!(psio::pssz_view::PsszView::<Nest, Pssz32>::new_strict(&bytes).is_err());
     assert!(dynamic::decode_exact::<Pssz32>(&schema, &root, &bytes).is_err());
     // A structurally present but unpruned None still traverses its Option
     // node at 65. The equivalent canonical pruned default above does not.
     let mut present_none = vec![0; 63];
     present_none.push(1);
     present_none.extend([4, 0, 0, 0, 4, 0, 0, 0]);
-    assert!(from_pssz_exact::<Pssz32, Nest>(&present_none).is_err());
-    assert!(psio::pssz_view::validated_view_exact::<Nest, Pssz32>(&present_none).is_err());
+    assert!(decode_strict::<Pssz32, Nest>(&present_none).is_err());
+    assert!(psio::pssz_view::PsszView::<Nest, Pssz32>::new_strict(&present_none).is_err());
     assert!(dynamic::decode_exact::<Pssz32>(&schema, &root, &present_none).is_err());
 }

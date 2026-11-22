@@ -173,8 +173,8 @@ macro_rules! pssz_struct {
                         self.[<try_ $field>]().expect("pssz view: malformed record; validate first")
                     }
                     fn [<try_ $field>](&self) -> $crate::pssz::PsszResult<$crate::pssz_view::PsszView<'a, $FTy, F>> {
-                        ::core::result::Result::Ok($crate::pssz_view::PsszView::new(
-                            [<__pssz_field_ $Ty>]::<F, $FTy>(self.data, stringify!($field))?))
+                        ::core::result::Result::Ok($crate::pssz_view::PsszView::trusted(
+                            [<__pssz_field_ $Ty>]::<F, $FTy>(self.bytes(), stringify!($field))?))
                     }
                 )*
             }
@@ -196,7 +196,7 @@ macro_rules! pssz_struct {
 
 #[cfg(test)]
 mod tests {
-    use crate::pssz::{Pssz32, PsszPack, PsszUnpack, from_pssz, to_pssz};
+    use crate::pssz::{Pssz32, PsszPack, PsszUnpack, decode, encode};
 
     #[derive(Debug, PartialEq, Eq)]
     struct Named { name: String, value: u32 }
@@ -205,8 +205,8 @@ mod tests {
     #[test]
     fn named_round_trip() {
         let n = Named { name: "alice".into(), value: 77 };
-        let b = to_pssz::<Pssz32, _>(&n);
-        assert_eq!(from_pssz::<Pssz32, Named>(&b).unwrap(), n);
+        let b = encode::<Pssz32, _>(&n);
+        assert_eq!(decode::<Pssz32, Named>(&b).unwrap(), n);
     }
 
     #[test]
@@ -217,8 +217,8 @@ mod tests {
         // Tail: "alice"
         let expected = hex("08000000080000004d000000616c696365");
         let n = Named { name: "alice".into(), value: 77 };
-        assert_eq!(to_pssz::<Pssz32, _>(&n), expected);
-        assert_eq!(from_pssz::<Pssz32, Named>(&expected).unwrap(), n);
+        assert_eq!(encode::<Pssz32, _>(&n), expected);
+        assert_eq!(decode::<Pssz32, Named>(&expected).unwrap(), n);
     }
 
     fn hex(s: &str) -> Vec<u8> {
@@ -229,9 +229,9 @@ mod tests {
     fn pssz_view_named_accessors() {
         use super::tests::NamedPsszAccessors;
         let n = Named { name: "alice".into(), value: 77 };
-        let b = to_pssz::<Pssz32, _>(&n);
+        let b = encode::<Pssz32, _>(&n);
         let v: crate::pssz_view::PsszView<Named, Pssz32> =
-            crate::pssz_view::pssz_view_of(&b);
+            crate::pssz_view::PsszView::trusted(&b);
         assert_eq!(v.name().view().unwrap(), "alice");
         assert_eq!(v.value().get(), 77);
     }

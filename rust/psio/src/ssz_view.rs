@@ -18,10 +18,22 @@ pub struct SszView<'a, T: ?Sized> {
 }
 
 impl<'a, T: ?Sized> SszView<'a, T> {
-    pub fn new(data: &'a [u8]) -> Self {
+    /// A view of bytes the caller vouches for (C++ `psio::ssz_view<T>{bytes}`);
+    /// does not validate. Access to malformed bytes may panic, never
+    /// undefined behaviour. Use [`SszView::new`] for untrusted input.
+    pub fn trusted(data: &'a [u8]) -> Self {
         SszView { data, _phantom: std::marker::PhantomData }
     }
-    pub fn raw(&self) -> &'a [u8] { self.data }
+    /// The bytes of the viewed value.
+    pub fn bytes(&self) -> &'a [u8] { self.data }
+}
+
+impl<'a, T: crate::ssz::SszValidate + ?Sized> SszView<'a, T> {
+    /// Validate (`validate_ssz`), then borrow.
+    pub fn new(data: &'a [u8]) -> crate::ssz::SszResult<Self> {
+        T::ssz_validate(data)?;
+        Ok(Self::trusted(data))
+    }
 }
 
 // ── Primitive accessors ─────────────────────────────────────────────────────
@@ -59,7 +71,7 @@ impl<'a, T: crate::ssz::SszPack + 'static, const N: usize> SszView<'a, [T; N]> {
     pub fn get(&self, i: usize) -> SszView<'a, T> {
         if T::IS_FIXED_SIZE {
             let elem = T::FIXED_SIZE;
-            SszView::new(&self.data[i * elem .. (i + 1) * elem])
+            SszView::trusted(&self.data[i * elem .. (i + 1) * elem])
         } else {
             // Variable-element arrays use an N-entry offset table just
             // like vectors but with known size.
@@ -75,7 +87,7 @@ impl<'a, T: crate::ssz::SszPack + 'static, const N: usize> SszView<'a, [T; N]> {
             } else {
                 self.data.len()
             };
-            SszView::new(&self.data[off_i .. off_next])
+            SszView::trusted(&self.data[off_i .. off_next])
         }
     }
 }
@@ -89,7 +101,7 @@ impl<'a, T: crate::ssz::SszPack + 'static, const N: usize> SszView<'a, Box<[T; N
     pub fn get(&self, i: usize) -> SszView<'a, T> {
         if T::IS_FIXED_SIZE {
             let elem = T::FIXED_SIZE;
-            SszView::new(&self.data[i * elem .. (i + 1) * elem])
+            SszView::trusted(&self.data[i * elem .. (i + 1) * elem])
         } else {
             let off_i = u32::from_le_bytes([
                 self.data[i * 4], self.data[i * 4 + 1],
@@ -103,7 +115,7 @@ impl<'a, T: crate::ssz::SszPack + 'static, const N: usize> SszView<'a, Box<[T; N
             } else {
                 self.data.len()
             };
-            SszView::new(&self.data[off_i .. off_next])
+            SszView::trusted(&self.data[off_i .. off_next])
         }
     }
 }
@@ -124,7 +136,7 @@ impl<'a, T: crate::ssz::SszPack + 'static> SszView<'a, Vec<T>> {
     pub fn get(&self, i: usize) -> SszView<'a, T> {
         if T::IS_FIXED_SIZE {
             let elem = T::FIXED_SIZE;
-            SszView::new(&self.data[i * elem .. (i + 1) * elem])
+            SszView::trusted(&self.data[i * elem .. (i + 1) * elem])
         } else {
             let n = self.len();
             let off_i = u32::from_le_bytes([
@@ -139,7 +151,7 @@ impl<'a, T: crate::ssz::SszPack + 'static> SszView<'a, Vec<T>> {
             } else {
                 self.data.len()
             };
-            SszView::new(&self.data[off_i .. off_next])
+            SszView::trusted(&self.data[off_i .. off_next])
         }
     }
 }
@@ -151,7 +163,7 @@ impl<'a, T: crate::ssz::SszPack + 'static> SszView<'a, Option<T>> {
         !self.data.is_empty() && self.data[0] == 1
     }
     pub fn unwrap(&self) -> SszView<'a, T> {
-        SszView::new(&self.data[1..])
+        SszView::trusted(&self.data[1..])
     }
 }
 
@@ -170,7 +182,7 @@ impl<'a, T: crate::ssz::SszPack + 'static, const N: usize> SszView<'a, BoundedLi
     pub fn get(&self, i: usize) -> SszView<'a, T> {
         if T::IS_FIXED_SIZE {
             let elem = T::FIXED_SIZE;
-            SszView::new(&self.data[i * elem .. (i + 1) * elem])
+            SszView::trusted(&self.data[i * elem .. (i + 1) * elem])
         } else {
             let n = self.len();
             let off_i = u32::from_le_bytes([
@@ -185,7 +197,7 @@ impl<'a, T: crate::ssz::SszPack + 'static, const N: usize> SszView<'a, BoundedLi
             } else {
                 self.data.len()
             };
-            SszView::new(&self.data[off_i .. off_next])
+            SszView::trusted(&self.data[off_i .. off_next])
         }
     }
 }
@@ -214,12 +226,6 @@ impl<'a, const N: usize> SszView<'a, Bitvector<N>> {
     pub const fn size(&self) -> usize { N }
 }
 
-// ── Top-level entry point ───────────────────────────────────────────────────
-
-pub fn ssz_view_of<T: ?Sized>(buf: &[u8]) -> SszView<'_, T> {
-    SszView::new(buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,14 +234,14 @@ mod tests {
     #[test]
     fn primitive_view() {
         let b = to_ssz(&0xDEADBEEFu32);
-        let v: SszView<u32> = ssz_view_of(&b);
+        let v: SszView<u32> = SszView::trusted(&b);
         assert_eq!(v.get(), 0xDEADBEEF);
     }
 
     #[test]
     fn string_view_no_alloc() {
         let b = to_ssz(&"hello".to_string());
-        let v: SszView<String> = ssz_view_of(&b);
+        let v: SszView<String> = SszView::trusted(&b);
         assert_eq!(v.view(), "hello");
         assert_eq!(v.len(), 5);
     }
@@ -244,7 +250,7 @@ mod tests {
     fn vec_fixed_view() {
         let v = vec![10u32, 20, 30];
         let b = to_ssz(&v);
-        let view: SszView<Vec<u32>> = ssz_view_of(&b);
+        let view: SszView<Vec<u32>> = SszView::trusted(&b);
         assert_eq!(view.len(), 3);
         assert_eq!(view.get(0).get(), 10);
         assert_eq!(view.get(2).get(), 30);
@@ -254,7 +260,7 @@ mod tests {
     fn vec_variable_view() {
         let v: Vec<String> = vec!["a".into(), "bc".into(), "def".into()];
         let b = to_ssz(&v);
-        let view: SszView<Vec<String>> = ssz_view_of(&b);
+        let view: SszView<Vec<String>> = SszView::trusted(&b);
         assert_eq!(view.len(), 3);
         assert_eq!(view.get(0).view(), "a");
         assert_eq!(view.get(1).view(), "bc");
@@ -265,13 +271,13 @@ mod tests {
     fn option_view() {
         let some = Some(42u32);
         let b = to_ssz(&some);
-        let view: SszView<Option<u32>> = ssz_view_of(&b);
+        let view: SszView<Option<u32>> = SszView::trusted(&b);
         assert!(view.has_value());
         assert_eq!(view.unwrap().get(), 42);
 
         let none: Option<u32> = None;
         let b = to_ssz(&none);
-        let view: SszView<Option<u32>> = ssz_view_of(&b);
+        let view: SszView<Option<u32>> = SszView::trusted(&b);
         assert!(!view.has_value());
     }
 }

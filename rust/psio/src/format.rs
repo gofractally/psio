@@ -51,6 +51,13 @@ pub trait Encode<F: Format> {
     /// Append the format-`F` encoding of `self` to `out`. Returns the
     /// number of bytes written.
     fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, F::Error>;
+
+    /// Size of the encoding. Formats that can compute it without encoding
+    /// override this.
+    fn encoded_size(&self) -> Result<usize, F::Error> {
+        let mut out = Vec::new();
+        self.encode_into(&mut out)
+    }
 }
 
 /// `Self` is decodable from a format-`F` byte buffer.
@@ -86,6 +93,12 @@ pub fn encode<F: Format, T: Encode<F> + ?Sized>(value: &T)
     Ok(out)
 }
 
+/// Size in bytes of the format-`F` encoding of `value` (C++
+/// `psio::size_of(fmt, v)`).
+pub fn size_of<F: Format, T: Encode<F> + ?Sized>(value: &T) -> Result<usize, F::Error> {
+    value.encoded_size()
+}
+
 /// Decode a format-`F` byte buffer into a value of type `T`.
 pub fn decode<F: Format, T: Decode<F>>(bytes: &[u8]) -> Result<T, F::Error> {
     T::decode(bytes)
@@ -108,3 +121,71 @@ pub fn validate<F: Format, T: Validate<F>, P: ValidationPolicy>(
 ) -> Result<(), F::Error> {
     T::validate::<P>(bytes, policy)
 }
+
+/// The helper names of a format whose codec is a pair of traits with a
+/// whole-message pack and unpack (capnp, flatbuf, wit): docs/helpers.md.
+macro_rules! message_format_helpers {
+    (
+        tag $tag:ident, $cpp:literal, error $err:ty,
+        pack $pack:path => $pack_fn:ident, unpack $unpack:path => $unpack_fn:ident,
+        names $to:ident $to_into:ident $from:ident $from_trusted:ident $validate:ident $size:ident
+              $buffer:ident $shared:ident
+    ) => {
+        #[doc = concat!("The format tag (C++ `psio::", $cpp, "`).")]
+        pub struct $tag;
+        impl $crate::Format for $tag {
+            type Error = $err;
+        }
+        impl<T: $pack> $crate::Encode<$tag> for T {
+            fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, $err> {
+                let bytes = $pack_fn(self);
+                out.extend_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+        }
+        impl<T: $unpack> $crate::Decode<$tag> for T {
+            fn decode(bytes: &[u8]) -> Result<Self, $err> {
+                $unpack_fn::<T>(bytes)
+            }
+        }
+        impl<T: $unpack> $crate::Validate<$tag> for T {
+            fn validate<P: $crate::ValidationPolicy>(bytes: &[u8], _policy: &P) -> Result<(), $err> {
+                $unpack_fn::<T>(bytes).map(drop)
+            }
+        }
+
+        #[doc = concat!("Encodes `value` into a fresh buffer (C++ `psio::to_", $cpp, "(v)`).")]
+        pub fn $to<T: $pack>(value: &T) -> Vec<u8> {
+            $pack_fn(value)
+        }
+        #[doc = concat!("Replaces the content of `out` with the encoding of `value` (C++ `psio::to_", $cpp, "(v, sink)`; a message is self-contained and cannot be appended to another).")]
+        pub fn $to_into<T: $pack>(value: &T, out: &mut Vec<u8>) {
+            *out = $pack_fn(value);
+        }
+        #[doc = concat!("The checked decode (C++ `psio::from_", $cpp, "<T>(bytes)`).")]
+        pub fn $from<T: $unpack>(bytes: &[u8]) -> Result<T, $err> {
+            $unpack_fn::<T>(bytes)
+        }
+        #[doc = concat!("Decodes bytes the caller vouches for (C++ `psio::from_", $cpp, "<T>(psio::trusted{bytes})`). A safe function: nothing is skipped, and bytes that are not a valid `T` cause a panic.")]
+        #[track_caller]
+        pub fn $from_trusted<T: $unpack>(bytes: &[u8]) -> T {
+            match $unpack_fn::<T>(bytes) {
+                Ok(value) => value,
+                Err(e) => panic!(concat!(stringify!($from_trusted), ": the bytes are not valid: {:?}"), e),
+            }
+        }
+        #[doc = concat!("Whether `bytes` is one `T` (C++ `psio::validate_", $cpp, "<T>(bytes)`). Never panics. Accepts what the checked decode accepts.")]
+        pub fn $validate<T: $unpack>(bytes: &[u8]) -> Result<(), $err> {
+            $unpack_fn::<T>(bytes).map(drop)
+        }
+        #[doc = concat!("Size of the encoding of `value` (C++ `psio::", $cpp, "_size(v)`).")]
+        pub fn $size<T: $pack>(value: &T) -> usize {
+            <T as $crate::Encode<$tag>>::encoded_size(value).unwrap_or(0)
+        }
+        #[doc = concat!("One `T` in this format, owned (C++ `psio::", $cpp, "_buffer<T>`).")]
+        pub type $buffer<T> = $crate::Buffer<T, $tag>;
+        #[doc = concat!("One `T` in this format, immutable and shared (C++ `psio::shared_", $cpp, "<T>`).")]
+        pub type $shared<T> = $crate::Shared<T, $tag>;
+    };
+}
+pub(crate) use message_format_helpers;

@@ -1351,7 +1351,7 @@ impl CustomHandlers {
         self.add(
             id.clone(),
             |bytes: &[u8]| {
-                let value = crate::pssz::from_pssz::<Pssz, T>(bytes)?;
+                let value = crate::pssz::from_pssz::<T>(bytes)?;
                 let mut text = String::new();
                 value.to_text(&mut text);
                 Ok(text)
@@ -1363,10 +1363,10 @@ impl CustomHandlers {
                 // value of the type is the check's to report, with the
                 // invariant's own message.
                 let _unchecked = crate::pssz_checked::WriteUnchecked::enter();
-                crate::pssz::try_to_pssz::<Pssz, T>(&value)
+                crate::pssz::try_encode::<Pssz, T>(&value)
             },
         );
-        self.add_check(id, |bytes: &[u8]| crate::pssz::from_pssz::<Pssz, T>(bytes).map(drop))
+        self.add_check(id, |bytes: &[u8]| crate::pssz::from_pssz::<T>(bytes).map(drop))
     }
     /// [`CustomHandlers::add_type_as`] under the id `T`'s `ToPsszSchema`
     /// writes into the schema (`#[pssz(custom)]` / `#[pssz(custom = "Id")]`).
@@ -1386,7 +1386,7 @@ impl CustomHandlers {
     where
         T: PsszPack<Pssz> + PsszUnpack<Pssz> + 'static,
     {
-        self.add_check(id, |bytes: &[u8]| crate::pssz::from_pssz::<Pssz, T>(bytes).map(drop))
+        self.add_check(id, |bytes: &[u8]| crate::pssz::from_pssz::<T>(bytes).map(drop))
     }
     /// [`CustomHandlers::add_invariant_type_as`] under the id `T`'s
     /// `ToPsszSchema` writes into the schema (`#[pssz(invariant = "...")]`,

@@ -160,7 +160,7 @@ pub trait PsszPack<F: PsszFormat> {
     fn pssz_size(&self) -> usize;
 
     /// Append this value's encoded bytes to `out`. Panics when the value is
-    /// not representable; untrusted or fallible callers use `try_to_pssz`.
+    /// not representable; untrusted or fallible callers use `try_encode`.
     fn pssz_pack(&self, out: &mut Vec<u8>);
 
     /// Fallible append. Containers with offsets or bounds override this to
@@ -955,19 +955,50 @@ pub use assoc::{BoundedMap, BoundedSet};
 pub use crate::key::ByKey;
 
 // ── Top-level API ───────────────────────────────────────────────────────────
+//
+// Two layers, as in C++ (docs/helpers.md):
+//
+//   - The helper names `to_pssz` / `try_to_pssz` / `to_pssz_into` /
+//     `from_pssz` / `from_pssz_trusted` / `validate_pssz` / `pssz_size` use
+//     the automatic profile [`Pssz`] (C++ `psio::to_pssz` ... over the tag
+//     `psio::pssz`). They are what most code calls.
+//   - The tag-generic functions `encode` / `try_encode` / `encode_into` /
+//     `decode` / `decode_strict` / `decode_checked` / `validate` /
+//     `validate_strict` / `validate_compatible` / `size_of` take the format
+//     tag as their first type argument (C++ `psio::encode(fmt, v)` ...), for
+//     the explicit-width tags and for code generic over the tag.
 
-/// Infallible convenience: panics when the value is not representable.
-pub fn to_pssz<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> Vec<u8> {
-    try_to_pssz::<F, T>(value).expect("pssz: encode failed; use try_to_pssz")
+/// `psio::encode(fmt, v)`: the encoding of `value` under `F`. Panics when the
+/// value is not representable (an offset, bound or cap overflow); use
+/// [`try_encode`] where that can depend on data.
+pub fn encode<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> Vec<u8> {
+    try_encode::<F, T>(value).expect("pssz: encode failed; use try_encode / try_to_pssz")
 }
 
 /// Checked encode. Offset-width, bound, cap and depth failures are errors.
-pub fn try_to_pssz<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<Vec<u8>> {
-    checked::format::<F>()?;
+pub fn try_encode<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<Vec<u8>> {
     let mut out = Vec::new();
-    value.pssz_pack_checked(&mut out)?;
-    checked::check_cap(T::MAX_DYNAMIC_DATA, out.len())?;
+    encode_into::<F, T>(value, &mut out)?;
     Ok(out)
+}
+
+/// `psio::encode(fmt, v, sink)`: appends the encoding of `value` to `out`.
+/// On error `out` is left as it was.
+pub fn encode_into<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
+    checked::format::<F>()?;
+    let start = out.len();
+    let result = value
+        .pssz_pack_checked(out)
+        .and_then(|()| checked::check_cap(T::MAX_DYNAMIC_DATA, out.len() - start));
+    if result.is_err() {
+        out.truncate(start);
+    }
+    result
+}
+
+/// `psio::size_of(fmt, v)`: the size of the encoding of `value`.
+pub fn size_of<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> usize {
+    value.pssz_size()
 }
 
 fn enter<F: PsszFormat>(cap: Option<usize>, bytes: &[u8]) -> PsszResult<()> {
@@ -975,11 +1006,12 @@ fn enter<F: PsszFormat>(cap: Option<usize>, bytes: &[u8]) -> PsszResult<()> {
     checked::check_cap(cap, bytes.len())
 }
 
-/// Decode exactly one value from `bytes`. Like C++ `validate` + `decode`:
-/// unknown optional suffix fields written by a newer schema are skipped.
-/// Use `from_pssz_compatible` to learn whether any were present and
-/// `from_pssz_exact` to reject them.
-pub fn from_pssz<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
+/// `psio::validate` + `psio::decode`: decode exactly one value from `bytes`.
+/// Unknown optional suffix fields written by a newer schema are skipped. Use
+/// [`decode_checked`] to learn whether any were present and
+/// [`decode_strict`] to reject them. The decoder checks as it reads, so the
+/// input is read once.
+pub fn decode<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let _session = checked::DecodeSession::enter(true);
     T::pssz_unpack(bytes)
@@ -987,7 +1019,7 @@ pub fn from_pssz<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) ->
 
 /// Exact-schema decode: additionally rejects unknown fields and, like C++
 /// `validate_strict`, non-UTF-8 bytes in raw strings.
-pub fn from_pssz_exact<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
+pub fn decode_strict<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let session = checked::DecodeSession::enter(false);
     let value = T::pssz_unpack(bytes)?;
@@ -1007,7 +1039,7 @@ impl<T> Decoded<T> {
 
 /// Compatible decode that reports whether unknown optional suffix fields were
 /// present anywhere in the tree (C++ `decode_pssz_checked`).
-pub fn from_pssz_compatible<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<Decoded<T>> {
+pub fn decode_checked<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<Decoded<T>> {
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let session = checked::DecodeSession::enter(true);
     let value = T::pssz_unpack(bytes)?;
@@ -1016,32 +1048,142 @@ pub fn from_pssz_compatible<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes
 
 /// Exact schema and bytes identical to the canonical re-encoding.
 pub fn validate_canonical_for_profile<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<()> {
-    let value = from_pssz_exact::<F, T>(bytes)?;
-    if try_to_pssz::<F, T>(&value)? != bytes { return Err(PsszError("pssz: noncanonical encoding")); }
+    let value = decode_strict::<F, T>(bytes)?;
+    if try_encode::<F, T>(&value)? != bytes { return Err(PsszError("pssz: noncanonical encoding")); }
     Ok(())
 }
 
-/// Structural validation (C++ `validate`): accepts unknown optional suffix
-/// fields; rejects everything decode rejects, including unpruned records.
-pub fn pssz_validate<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>>(bytes: &[u8]) -> PsszResult<()> {
-    pssz_validate_compatible::<F, T>(bytes).map(|_| ())
+/// Structural validation (C++ `psio::validate`): accepts unknown optional
+/// suffix fields; rejects everything decode rejects, including unpruned
+/// records.
+pub fn validate<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>(bytes: &[u8]) -> PsszResult<()> {
+    validate_compatible::<F, T>(bytes).map(|_| ())
 }
 /// Structural validation reporting whether unknown fields were present
 /// (C++ `validate_pssz_compatible`).
-pub fn pssz_validate_compatible<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>>(bytes: &[u8]) -> PsszResult<bool> {
+pub fn validate_compatible<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>(bytes: &[u8]) -> PsszResult<bool> {
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let session = checked::DecodeSession::enter(true);
     T::pssz_validate(bytes).map(|_| session.has_unknown())
 }
-/// Exact-schema validation (C++ `validate_strict`): rejects unknown fields
-/// and non-UTF-8 raw strings.
-pub fn pssz_validate_exact<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>>(bytes: &[u8]) -> PsszResult<()> {
+/// Exact-schema validation (C++ `psio::validate_strict`): rejects unknown
+/// fields and non-UTF-8 raw strings.
+pub fn validate_strict<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>(bytes: &[u8]) -> PsszResult<()> {
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let session = checked::DecodeSession::enter(false);
     T::pssz_validate(bytes)?;
     if session.has_unknown() { return Err(PsszError("pssz: unknown fields rejected by exact reader")); }
     Ok(())
 }
+
+// ── The helper names (automatic profile) ────────────────────────────────────
+
+/// Encodes `value` into a fresh buffer (C++ `psio::to_pssz(v)`). Panics when
+/// the value is not representable; [`try_to_pssz`] returns the error.
+pub fn to_pssz<T: PsszPack<Pssz> + ?Sized>(value: &T) -> Vec<u8> {
+    try_encode::<Pssz, T>(value).expect("pssz: encode failed; use try_to_pssz")
+}
+
+/// [`to_pssz`] for values that may not be representable.
+pub fn try_to_pssz<T: PsszPack<Pssz> + ?Sized>(value: &T) -> PsszResult<Vec<u8>> {
+    try_encode::<Pssz, T>(value)
+}
+
+/// Appends the encoding of `value` to `out` (C++ `psio::to_pssz(v, sink)`).
+/// On error `out` is left as it was.
+pub fn to_pssz_into<T: PsszPack<Pssz> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
+    encode_into::<Pssz, T>(value, out)
+}
+
+/// The checked decode (C++ `psio::from_pssz<T>(bytes)`): accepts exactly what
+/// [`validate_pssz`] accepts. A frame with unknown appended optional members
+/// is accepted and the unknown members are dropped.
+pub fn from_pssz<T: PsszPack<Pssz> + PsszUnpack<Pssz>>(bytes: &[u8]) -> PsszResult<T> {
+    decode::<Pssz, T>(bytes)
+}
+
+/// Decodes bytes the caller vouches for (C++
+/// `psio::from_pssz<T>(psio::trusted{bytes})`): they were validated earlier,
+/// or were produced by [`to_pssz`] and kept.
+///
+/// This is a safe function. The Rust decoder checks as it reads, so nothing
+/// is skipped and bytes that are not a valid `T` cause a panic, never
+/// undefined behaviour. A decoder that skipped the checks would have to be
+/// an `unsafe fn`; none is provided.
+#[track_caller]
+pub fn from_pssz_trusted<T: PsszPack<Pssz> + PsszUnpack<Pssz>>(bytes: &[u8]) -> T {
+    match decode::<Pssz, T>(bytes) {
+        Ok(value) => value,
+        Err(e) => panic!("from_pssz_trusted: the bytes are not valid: {e}"),
+    }
+}
+
+/// Whether `bytes` is one `T` (C++ `psio::validate_pssz<T>(bytes)`). Never
+/// panics.
+pub fn validate_pssz<T: PsszPack<Pssz> + PsszValidate<Pssz> + ?Sized>(bytes: &[u8]) -> PsszResult<()> {
+    validate::<Pssz, T>(bytes)
+}
+
+/// Size of the encoding of `value` (C++ `psio::pssz_size(v)`).
+pub fn pssz_size<T: PsszPack<Pssz> + ?Sized>(value: &T) -> usize {
+    value.pssz_size()
+}
+
+// ── The generic layer and the buffer names ──────────────────────────────────
+
+macro_rules! format_impls {
+    ($($tag:ty),*) => {$(
+        impl crate::Format for $tag {
+            type Error = PsszError;
+        }
+        impl<T: PsszPack<$tag> + ?Sized> crate::Encode<$tag> for T {
+            fn encode_into(&self, out: &mut Vec<u8>) -> PsszResult<usize> {
+                let start = out.len();
+                encode_into::<$tag, T>(self, out)?;
+                Ok(out.len() - start)
+            }
+            fn encoded_size(&self) -> PsszResult<usize> {
+                Ok(self.pssz_size())
+            }
+        }
+        impl<T: PsszPack<$tag> + PsszUnpack<$tag>> crate::Decode<$tag> for T {
+            fn decode(bytes: &[u8]) -> PsszResult<Self> {
+                decode::<$tag, T>(bytes)
+            }
+        }
+        /// A policy that verifies canonical form selects the exact reader
+        /// (`validate_strict`); any other the compatible one (`validate`).
+        impl<T: PsszPack<$tag> + PsszValidate<$tag>> crate::Validate<$tag> for T {
+            fn validate<P: crate::ValidationPolicy>(bytes: &[u8], policy: &P) -> PsszResult<()> {
+                if policy.verify_canonical() {
+                    validate_strict::<$tag, T>(bytes)
+                } else {
+                    validate::<$tag, T>(bytes)
+                }
+            }
+        }
+        impl<T: ?Sized> crate::ViewFormat<T> for $tag {
+            type View<'a> = crate::pssz_view::PsszView<'a, T, $tag>;
+            fn view(bytes: &[u8]) -> Self::View<'_> {
+                crate::pssz_view::PsszView::trusted(bytes)
+            }
+        }
+        impl<T: ?Sized> crate::MutViewFormat<T> for $tag {
+            type MutView<'a> = crate::pssz_view::PsszMutView<'a, T, $tag>;
+            fn view_mut(bytes: &mut [u8]) -> Self::MutView<'_> {
+                crate::pssz_view::PsszMutView::trusted(bytes)
+            }
+        }
+    )*};
+}
+format_impls!(Pssz, Pssz8, Pssz16, Pssz32);
+
+/// One `T` encoded as pSSZ, owned (C++ `psio::pssz_buffer<T>`).
+pub type PsszBuffer<T, F = Pssz> = crate::Buffer<T, F>;
+/// One `T` encoded as pSSZ, immutable and shared through an `Arc<[u8]>`
+/// (C++ `psio::shared_pssz<T>`).
+pub type SharedPssz<T, F = Pssz> = crate::Shared<T, F>;
+pub use crate::pssz_view::{PsszMutView, PsszView};
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -1051,70 +1193,70 @@ mod tests {
 
     #[test]
     fn primitives_round_trip() {
-        let b = to_pssz::<Pssz32, _>(&0xDEADBEEFu32);
+        let b = encode::<Pssz32, _>(&0xDEADBEEFu32);
         assert_eq!(b.len(), 4);
-        assert_eq!(from_pssz::<Pssz32, u32>(&b).unwrap(), 0xDEADBEEF);
+        assert_eq!(decode::<Pssz32, u32>(&b).unwrap(), 0xDEADBEEF);
 
-        let b = to_pssz::<Pssz32, _>(&-1_234_567_890i64);
-        assert_eq!(from_pssz::<Pssz32, i64>(&b).unwrap(), -1_234_567_890);
+        let b = encode::<Pssz32, _>(&-1_234_567_890i64);
+        assert_eq!(decode::<Pssz32, i64>(&b).unwrap(), -1_234_567_890);
 
-        let b = to_pssz::<Pssz32, _>(&3.14159f64);
-        assert_eq!(from_pssz::<Pssz32, f64>(&b).unwrap(), 3.14159);
+        let b = encode::<Pssz32, _>(&3.14159f64);
+        assert_eq!(decode::<Pssz32, f64>(&b).unwrap(), 3.14159);
 
-        let b = to_pssz::<Pssz32, _>(&true);
+        let b = encode::<Pssz32, _>(&true);
         assert_eq!(b, vec![1]);
-        assert_eq!(from_pssz::<Pssz32, bool>(&b).unwrap(), true);
+        assert_eq!(decode::<Pssz32, bool>(&b).unwrap(), true);
     }
 
     #[test]
     fn string_no_length_prefix() {
         let s = "hello".to_string();
-        let b = to_pssz::<Pssz32, _>(&s);
+        let b = encode::<Pssz32, _>(&s);
         assert_eq!(b, b"hello");
-        assert_eq!(from_pssz::<Pssz32, String>(&b).unwrap(), s);
+        assert_eq!(decode::<Pssz32, String>(&b).unwrap(), s);
     }
 
     #[test]
     fn vec_fixed_elements_flat() {
         let v: Vec<u32> = vec![1, 2, 3];
-        let b = to_pssz::<Pssz32, _>(&v);
+        let b = encode::<Pssz32, _>(&v);
         assert_eq!(b.len(), 12);  // 3 × 4 bytes, no offsets
-        assert_eq!(from_pssz::<Pssz32, Vec<u32>>(&b).unwrap(), v);
+        assert_eq!(decode::<Pssz32, Vec<u32>>(&b).unwrap(), v);
     }
 
     #[test]
     fn vec_variable_elements_backpatched_offsets() {
         let v: Vec<String> = vec!["a".into(), "bc".into(), "def".into()];
-        let b = to_pssz::<Pssz32, _>(&v);
+        let b = encode::<Pssz32, _>(&v);
         // 3 × 4-byte offsets = 12, then "a"+"bc"+"def" = 6 bytes → total 18.
         assert_eq!(b.len(), 18);
-        assert_eq!(from_pssz::<Pssz32, Vec<String>>(&b).unwrap(), v);
+        assert_eq!(decode::<Pssz32, Vec<String>>(&b).unwrap(), v);
     }
 
     #[test]
     fn option_fixed_inner_no_selector() {
         let some: Option<u32> = Some(42);
-        let b = to_pssz::<Pssz32, _>(&some);
+        let b = encode::<Pssz32, _>(&some);
         assert_eq!(b.len(), 4);
-        assert_eq!(from_pssz::<Pssz32, Option<u32>>(&b).unwrap(), some);
+        assert_eq!(decode::<Pssz32, Option<u32>>(&b).unwrap(), some);
 
         let none: Option<u32> = None;
-        let b = to_pssz::<Pssz32, _>(&none);
+        let b = encode::<Pssz32, _>(&none);
         assert_eq!(b.len(), 0);
-        assert_eq!(from_pssz::<Pssz32, Option<u32>>(&b).unwrap(), None);
+        assert_eq!(decode::<Pssz32, Option<u32>>(&b).unwrap(), None);
     }
 
     #[test]
     fn option_variable_inner_with_selector() {
         let some: Option<String> = Some("x".into());
-        let b = to_pssz::<Pssz32, _>(&some);
+        let b = encode::<Pssz32, _>(&some);
         assert_eq!(b, vec![1, b'x']);
-        assert_eq!(from_pssz::<Pssz32, Option<String>>(&b).unwrap(), some);
+        assert_eq!(decode::<Pssz32, Option<String>>(&b).unwrap(), some);
 
         let none: Option<String> = None;
-        let b = to_pssz::<Pssz32, _>(&none);
+        let b = encode::<Pssz32, _>(&none);
         assert_eq!(b, vec![0]);
-        assert_eq!(from_pssz::<Pssz32, Option<String>>(&b).unwrap(), None);
+        assert_eq!(decode::<Pssz32, Option<String>>(&b).unwrap(), None);
     }
 
     #[test]
@@ -1165,16 +1307,16 @@ mod tests {
     #[test]
     fn pssz16_narrower_offsets() {
         let v: Vec<String> = vec!["a".into(), "bc".into()];
-        let b = to_pssz::<Pssz16, _>(&v);
+        let b = encode::<Pssz16, _>(&v);
         // 2 × 2-byte offsets = 4, then "a"+"bc" = 3 → total 7.
         assert_eq!(b.len(), 7);
-        assert_eq!(from_pssz::<Pssz16, Vec<String>>(&b).unwrap(), v);
+        assert_eq!(decode::<Pssz16, Vec<String>>(&b).unwrap(), v);
     }
 
     // ── Cross-validation with C++ pSSZ (Pssz32) ─────────────────────────────
     //
     // Fixtures below were generated by the C++ encoder
-    // (libraries/psio1/cpp/include/psio/to_pssz.hpp) on 2026-04-23. If either
+    // (libraries/psio1/cpp/include/psio/encode.hpp) on 2026-04-23. If either
     // side's wire format changes, these assertions will fail and the mismatch
     // must be resolved.
 
@@ -1185,70 +1327,70 @@ mod tests {
     #[test]
     fn cpp_pssz32_u32_cross() {
         let b = hex("efbeadde");  // C++ emitted for u32{0xDEADBEEF}
-        assert_eq!(from_pssz::<Pssz32, u32>(&b).unwrap(), 0xDEADBEEF);
-        assert_eq!(to_pssz::<Pssz32, _>(&0xDEADBEEFu32), b);
+        assert_eq!(decode::<Pssz32, u32>(&b).unwrap(), 0xDEADBEEF);
+        assert_eq!(encode::<Pssz32, _>(&0xDEADBEEFu32), b);
     }
 
     #[test]
     fn cpp_pssz32_string_cross() {
         let b = hex("68656c6c6f");  // "hello"
-        assert_eq!(from_pssz::<Pssz32, String>(&b).unwrap(), "hello");
-        assert_eq!(to_pssz::<Pssz32, _>(&"hello".to_string()), b);
+        assert_eq!(decode::<Pssz32, String>(&b).unwrap(), "hello");
+        assert_eq!(encode::<Pssz32, _>(&"hello".to_string()), b);
     }
 
     #[test]
     fn cpp_pssz32_vec_u32_cross() {
         let b = hex("010000000200000003000000");  // vec![1u32, 2, 3]
-        let v = from_pssz::<Pssz32, Vec<u32>>(&b).unwrap();
+        let v = decode::<Pssz32, Vec<u32>>(&b).unwrap();
         assert_eq!(v, vec![1u32, 2, 3]);
-        assert_eq!(to_pssz::<Pssz32, _>(&v), b);
+        assert_eq!(encode::<Pssz32, _>(&v), b);
     }
 
     #[test]
     fn cpp_pssz32_vec_string_cross() {
         // vec!["a","bc","def"] → 3 × u32 offset + "abcdef"
         let b = hex("0c0000000d0000000f000000616263646566");
-        let v = from_pssz::<Pssz32, Vec<String>>(&b).unwrap();
+        let v = decode::<Pssz32, Vec<String>>(&b).unwrap();
         assert_eq!(v, vec!["a", "bc", "def"].into_iter().map(String::from).collect::<Vec<_>>());
-        assert_eq!(to_pssz::<Pssz32, _>(&v), b);
+        assert_eq!(encode::<Pssz32, _>(&v), b);
     }
 
     #[test]
     fn cpp_pssz32_option_u32_cross() {
         // Some(42): 4 bytes, no selector
         let b = hex("2a000000");
-        assert_eq!(from_pssz::<Pssz32, Option<u32>>(&b).unwrap(), Some(42u32));
+        assert_eq!(decode::<Pssz32, Option<u32>>(&b).unwrap(), Some(42u32));
 
         // None: 0 bytes
         let b: Vec<u8> = vec![];
-        assert_eq!(from_pssz::<Pssz32, Option<u32>>(&b).unwrap(), None);
+        assert_eq!(decode::<Pssz32, Option<u32>>(&b).unwrap(), None);
     }
 
     #[test]
     fn validate_primitives_and_containers() {
-        use super::pssz_validate;
-        assert!(pssz_validate::<Pssz32, u32>(&hex("efbeadde")).is_ok());
-        assert!(pssz_validate::<Pssz32, String>(&hex("68656c6c6f")).is_ok());
-        assert!(pssz_validate::<Pssz32, Vec<u32>>(
+        use super::validate;
+        assert!(validate::<Pssz32, u32>(&hex("efbeadde")).is_ok());
+        assert!(validate::<Pssz32, String>(&hex("68656c6c6f")).is_ok());
+        assert!(validate::<Pssz32, Vec<u32>>(
             &hex("010000000200000003000000")).is_ok());
-        assert!(pssz_validate::<Pssz32, Vec<String>>(
+        assert!(validate::<Pssz32, Vec<String>>(
             &hex("0c0000000d0000000f000000616263646566")).is_ok());
         // None pSSZ<fixed inner>: empty span → ok.
-        assert!(pssz_validate::<Pssz32, Option<u32>>(&[]).is_ok());
+        assert!(validate::<Pssz32, Option<u32>>(&[]).is_ok());
         // Some pSSZ<fixed inner>: 4 bytes → ok.
-        assert!(pssz_validate::<Pssz32, Option<u32>>(&hex("2a000000")).is_ok());
+        assert!(validate::<Pssz32, Option<u32>>(&hex("2a000000")).is_ok());
         // Malformed selector on Option<String> (min==0 → needs selector)
-        assert!(pssz_validate::<Pssz32, Option<String>>(&hex("02")).is_err());
+        assert!(validate::<Pssz32, Option<String>>(&hex("02")).is_err());
     }
 
     #[test]
     fn cpp_pssz32_option_string_cross() {
         // Some("x"): 01 + 'x'
         let b = hex("0178");
-        assert_eq!(from_pssz::<Pssz32, Option<String>>(&b).unwrap(), Some("x".into()));
+        assert_eq!(decode::<Pssz32, Option<String>>(&b).unwrap(), Some("x".into()));
 
         // None: just selector 00
         let b = hex("00");
-        assert_eq!(from_pssz::<Pssz32, Option<String>>(&b).unwrap(), None);
+        assert_eq!(decode::<Pssz32, Option<String>>(&b).unwrap(), None);
     }
 }

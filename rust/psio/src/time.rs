@@ -617,7 +617,7 @@ macro_rules! time_value {
             /// The value (the view was validated when it was made).
             pub fn get(&self) -> $name<U, R> {
                 $name::from_ticks(
-                    R::pssz_unpack(&self.data[..(R::BITS / 8) as usize]).unwrap_or_default(),
+                    R::pssz_unpack(&self.bytes()[..(R::BITS / 8) as usize]).unwrap_or_default(),
                 )
             }
         }

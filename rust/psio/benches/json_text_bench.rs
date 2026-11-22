@@ -369,7 +369,7 @@ fn wanted(filter: &Option<String>, shape: &str) -> bool {
 
 fn typed<F: JsonFormat, T: JsonText>(shape: &str, format: &str, text: &str) {
     let ns = measure(|| {
-        black_box(json::from_str::<F, T>(black_box(text)).unwrap());
+        black_box(json::decode::<F, T>(black_box(text)).unwrap());
     });
     report(shape, format, "decode", text.len(), ns);
 }
@@ -378,16 +378,16 @@ fn shape<T: JsonText>(filter: &Option<String>, name: &str, value: &T) {
     if !wanted(filter, name) {
         return;
     }
-    let text = json::to_string::<Json, _>(value).unwrap();
-    let itext = json::to_string::<IJson, _>(value).unwrap();
+    let text = psio::to_json(value);
+    let itext = psio::to_ijson(value);
     typed::<Json, T>(name, "json", &text);
     typed::<IJson, T>(name, "ijson", &itext);
     let ns = measure(|| {
-        black_box(json::to_vec::<Json, _>(black_box(value)).unwrap());
+        black_box(psio::to_json(black_box(value)));
     });
     report(name, "json", "encode", text.len(), ns);
     let ns = measure(|| {
-        black_box(json::to_vec::<IJson, _>(black_box(value)).unwrap());
+        black_box(psio::to_ijson(black_box(value)));
     });
     report(name, "ijson", "encode", itext.len(), ns);
     syntax_layers(name, &text);
@@ -427,7 +427,7 @@ fn main() {
     wide.field_199_jjj = 199;
     shape(&filter, "wide200", &wide);
     if wanted(&filter, "wide200r") {
-        let text = reversed(&json::to_string::<Json, _>(&wide).unwrap());
+        let text = reversed(&psio::to_json(&wide));
         typed::<Json, Wide200>("wide200r", "json", &text);
         typed::<IJson, Wide200>("wide200r", "ijson", &text);
     }

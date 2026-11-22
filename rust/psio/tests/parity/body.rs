@@ -5,7 +5,7 @@
 
 use super::support::*;
 use psio::pssz::*;
-use psio::pssz_view::{pssz_view_of, try_pssz_view_of, validated_view_compatible};
+use psio::pssz_view::{PsszView};
 
 // ── Evolution lineage (pssz_evolution_fixture.hpp) ──────────────────────────
 rec!(R0 { a: u32, s: RawString });
@@ -114,18 +114,18 @@ where
     F: PsszFormat,
     T: PsszPack<F> + PsszUnpack<F> + PsszValidate<F> + PartialEq + std::fmt::Debug,
 {
-    assert_eq!(pssz_validate::<F, T>(wire), Ok(()));
-    assert_eq!(pssz_validate_compatible::<F, T>(wire), Ok(unknown));
-    assert_eq!(&from_pssz::<F, T>(wire).unwrap(), expect);
-    let decoded = from_pssz_compatible::<F, T>(wire).unwrap();
+    assert_eq!(validate::<F, T>(wire), Ok(()));
+    assert_eq!(validate_compatible::<F, T>(wire), Ok(unknown));
+    assert_eq!(&decode::<F, T>(wire).unwrap(), expect);
+    let decoded = decode_checked::<F, T>(wire).unwrap();
     assert_eq!(decoded.has_unknown, unknown);
     assert_eq!(&decoded.value, expect);
-    assert_eq!(pssz_validate_exact::<F, T>(wire).is_ok(), !unknown);
-    assert_eq!(from_pssz_exact::<F, T>(wire).is_ok(), !unknown);
-    assert_eq!(try_pssz_view_of::<T, F>(wire).is_ok(), true);
-    assert_eq!(validated_view_compatible::<T, F>(wire).unwrap().has_unknown, unknown);
+    assert_eq!(validate_strict::<F, T>(wire).is_ok(), !unknown);
+    assert_eq!(decode_strict::<F, T>(wire).is_ok(), !unknown);
+    assert_eq!(PsszView::<T, F>::new(wire).is_ok(), true);
+    assert_eq!(PsszView::<T, F>::new_checked(wire).unwrap().has_unknown, unknown);
     if !unknown {
-        assert_eq!(try_to_pssz::<F, T>(expect).unwrap(), wire);
+        assert_eq!(try_encode::<F, T>(expect).unwrap(), wire);
         assert_eq!(validate_canonical_for_profile::<F, T>(wire), Ok(()));
     }
 }
@@ -135,13 +135,13 @@ where
     F: PsszFormat,
     T: PsszPack<F> + PsszUnpack<F> + PsszValidate<F> + std::fmt::Debug,
 {
-    assert!(pssz_validate::<F, T>(wire).is_err(), "validate accepted {wire:02x?}");
-    assert!(pssz_validate_compatible::<F, T>(wire).is_err());
-    assert!(pssz_validate_exact::<F, T>(wire).is_err());
-    assert!(from_pssz::<F, T>(wire).is_err(), "decode accepted {wire:02x?}");
-    assert!(from_pssz_compatible::<F, T>(wire).is_err());
-    assert!(from_pssz_exact::<F, T>(wire).is_err());
-    assert!(try_pssz_view_of::<T, F>(wire).is_err());
+    assert!(validate::<F, T>(wire).is_err(), "validate accepted {wire:02x?}");
+    assert!(validate_compatible::<F, T>(wire).is_err());
+    assert!(validate_strict::<F, T>(wire).is_err());
+    assert!(decode::<F, T>(wire).is_err(), "decode accepted {wire:02x?}");
+    assert!(decode_checked::<F, T>(wire).is_err());
+    assert!(decode_strict::<F, T>(wire).is_err());
+    assert!(PsszView::<T, F>::new(wire).is_err());
 }
 
 macro_rules! each_format {
@@ -199,7 +199,7 @@ fn automatic_widths_and_bounds_match_the_cpp_static_assertions() {
     assert_eq!(bound::<RawString>(), None);
     assert_eq!(bound::<BoundedRawString<16>>(), Some(16));
     assert_eq!(
-        try_to_pssz::<Pssz, _>(&Label16 { id: 7, label: BoundedString("hi".into()) }).unwrap(),
+        try_to_pssz(&Label16 { id: 7, label: BoundedString("hi".into()) }).unwrap(),
         hex("0507000000056869")
     );
     // Every evolution-corpus type holds an unbounded string: width 4.
@@ -253,22 +253,22 @@ fn automatic_profile_keeps_each_type_at_its_own_width() {
     let value = sample();
     // A width-1 child keeps its width-1 bytes inside the width-4 parent, a
     // vector of them, an optional, an array and a variant.
-    let child = try_to_pssz::<Pssz, _>(&value.checkpoint).unwrap();
+    let child = try_to_pssz(&value.checkpoint).unwrap();
     assert_eq!(child, hex("0507000000056d61696e"));
-    assert_eq!(child, try_to_pssz::<Pssz8, _>(&value.checkpoint).unwrap());
-    let wire = try_to_pssz::<Pssz, _>(&value).unwrap();
+    assert_eq!(child, try_encode::<Pssz8, _>(&value.checkpoint).unwrap());
+    let wire = try_to_pssz(&value).unwrap();
     reads::<Pssz, _>(&wire, &value, false);
     // Parent frame: 4-byte header and slots; each record payload is the
     // width-1 encoding; the vector table is 4 bytes wide, the array's is 2.
-    let entries = try_to_pssz::<Pssz, _>(&value.entries).unwrap();
+    let entries = try_to_pssz(&value.entries).unwrap();
     assert_eq!(&entries[..8], hex("0800000011000000"));
     assert_eq!(&entries[8..17], hex("0508000000056f6e65"));
-    let pair = try_to_pssz::<Pssz, _>(&value.pair).unwrap();
+    let pair = try_to_pssz(&value.pair).unwrap();
     // [WidthCheckpoint; 2] is bounded by 2 * (64 + 4) = 136: one-byte table.
     assert_eq!(auto_pssz_width::<[WidthCheckpoint; 2]>(), 1);
     assert_eq!(pair, goldens["array-1"]);
-    assert_eq!(try_to_pssz::<Pssz, _>(&value.latest).unwrap(), goldens["some-1"]);
-    assert_eq!(try_to_pssz::<Pssz, _>(&value.proof).unwrap(), goldens["variant-record-1"]);
+    assert_eq!(try_to_pssz(&value.latest).unwrap(), goldens["some-1"]);
+    assert_eq!(try_to_pssz(&value.proof).unwrap(), goldens["variant-record-1"]);
     assert_ne!(wire, goldens["relay-4"]);
     let at = |i: usize| u32::from_le_bytes(wire[4 + 4 * i..8 + 4 * i].try_into().unwrap()) as usize + 4;
     assert_eq!(&wire[at(0)..at(1)], child);
@@ -277,11 +277,11 @@ fn automatic_profile_keeps_each_type_at_its_own_width() {
 
     // A width-4 child (large declared budget) inside a width-1 parent.
     let narrow = WidthNarrowEnvelope { child: WidthLargeBudget { value: 42 }, sequence: 17 };
-    let wire = try_to_pssz::<Pssz, _>(&narrow).unwrap();
+    let wire = try_to_pssz(&narrow).unwrap();
     assert_eq!(wire, hex("050511000000010000002a"));
     reads::<Pssz, _>(&wire, &narrow, false);
     // The same value under the explicit tags inherits one width.
-    assert_eq!(try_to_pssz::<Pssz8, _>(&narrow).unwrap(), goldens["narrow-parent-1"]);
+    assert_eq!(try_encode::<Pssz8, _>(&narrow).unwrap(), goldens["narrow-parent-1"]);
 
     // Nested containers: the record is width 1 (cap 200), its vectors keep
     // four-byte tables.
@@ -290,7 +290,7 @@ fn automatic_profile_keeps_each_type_at_its_own_width() {
         nested: vec![vec![cp(1, "a")], vec![cp(2, "b")]],
         optional: vec![Some(cp(3, "c")), None],
     };
-    let wire = try_to_pssz::<Pssz, _>(&nested).unwrap();
+    let wire = try_to_pssz(&nested).unwrap();
     assert_eq!(&wire[..3], [2, 2, 2 + 8 + 2 * (4 + 7)]);
     assert_eq!(&wire[3..11], hex("0800000013000000"));
     reads::<Pssz, _>(&wire, &nested, false);
@@ -300,25 +300,25 @@ fn automatic_profile_keeps_each_type_at_its_own_width() {
 fn caps_and_offset_widths_reject_overflow_without_widening() {
     let big = RawString(vec![b'x'; 260]);
     let oversized = WidthCappedPair { first: big.clone(), second: raw("last") };
-    assert!(try_to_pssz::<Pssz, _>(&oversized).is_err());
+    assert!(try_to_pssz(&oversized).is_err());
     let mut destination = b"pre".to_vec();
     assert!(<WidthCappedPair as PsszPack<Pssz>>::pssz_pack_checked(&oversized, &mut destination).is_err());
     assert_eq!(destination, b"pre");
     // Explicit narrow tag: the stored offset does not fit.
     let explicit = WidthStringPair { first: big.clone(), second: raw("last") };
-    assert!(try_to_pssz::<Pssz8, _>(&explicit).is_err());
-    let wide = try_to_pssz::<Pssz16, _>(&explicit).unwrap();
+    assert!(try_encode::<Pssz8, _>(&explicit).is_err());
+    let wide = try_encode::<Pssz16, _>(&explicit).unwrap();
     reads::<Pssz16, _>(&wide, &explicit, false);
     // The cap is a property of the type: enforced when nested (automatic
     // profile enforces it at every node; explicit tags at the top level only,
     // as C++ does).
     let parent = WidthCappedParent { pair: oversized.clone(), tail: raw("t") };
-    assert!(try_to_pssz::<Pssz, _>(&parent).is_err());
-    let explicit_parent = try_to_pssz::<Pssz32, _>(&parent).unwrap();
-    assert!(from_pssz::<Pssz32, WidthCappedParent>(&explicit_parent).is_ok());
-    assert!(try_to_pssz::<Pssz32, _>(&oversized).is_err());
+    assert!(try_to_pssz(&parent).is_err());
+    let explicit_parent = try_encode::<Pssz32, _>(&parent).unwrap();
+    assert!(decode::<Pssz32, WidthCappedParent>(&explicit_parent).is_ok());
+    assert!(try_encode::<Pssz32, _>(&oversized).is_err());
     // Readers reject a frame over its cap, top level and nested.
-    let child16 = try_to_pssz::<Pssz16, _>(&explicit).unwrap();
+    let child16 = try_encode::<Pssz16, _>(&explicit).unwrap();
     rejects::<Pssz16, WidthCappedPair>(&child16);
     let mut over = Frame::new(1).o(2).o(2).o(2).bytes;
     over.extend(std::iter::repeat(b'x').take(253));
@@ -329,23 +329,23 @@ fn caps_and_offset_widths_reject_overflow_without_widening() {
     nested.push(b't');
     rejects::<Pssz, WidthCappedParent>(&nested);
     over.pop();
-    assert!(from_pssz::<Pssz, WidthCappedPair>(&over).is_ok());
+    assert!(from_pssz::<WidthCappedPair>(&over).is_ok());
 
     // 65535 cap: two-byte offsets, 65536 bytes do not fit.
     let medium = WidthMediumPair { first: RawString(vec![b'x'; 65536]), second: raw("tail") };
-    assert!(try_to_pssz::<Pssz, _>(&medium).is_err());
+    assert!(try_to_pssz(&medium).is_err());
     // A 256-slot table does not fit one-byte offsets.
-    assert!(try_to_pssz::<Pssz8, _>(&vec![RawString::new(); 256]).is_err());
+    assert!(try_encode::<Pssz8, _>(&vec![RawString::new(); 256]).is_err());
     // Explicit profiles constrain stored offsets, not an unstored final end.
     let tail = WidthOnlyTail { payload: RawString(vec![b'x'; 512]) };
-    let wire = try_to_pssz::<Pssz8, _>(&tail).unwrap();
+    let wire = try_encode::<Pssz8, _>(&tail).unwrap();
     reads::<Pssz8, _>(&wire, &tail, false);
 
     // A fixed payload larger than its declared budget can never be encoded
     // or accepted in the automatic profile; an empty vector of it is fine.
     let bad = WidthBadFixedParent { fixed: WidthBadFixed { value: 1 }, tail: raw("tail") };
-    assert!(try_to_pssz::<Pssz, _>(&bad).is_err());
-    assert!(try_to_pssz::<Pssz, _>(&vec![WidthBadFixed { value: 1 }]).is_err());
+    assert!(try_to_pssz(&bad).is_err());
+    assert!(try_to_pssz(&vec![WidthBadFixed { value: 1 }]).is_err());
     rejects::<Pssz, Vec<WidthBadFixed>>(&[0; 8]);
     reads::<Pssz, Vec<WidthBadFixed>>(&[], &vec![], false);
 }
@@ -401,15 +401,15 @@ fn evolution_corpus_matches_cpp_goldens<F: PsszFormat>() {
     reads::<F, _>(&g("r1_some"), &r3(Some(9), None, None), false);
     reads::<F, _>(&g("r2_none_some"), &r3(None, some("yo"), None), false);
     reads::<F, _>(&g("r2_none_empty"), &r3(None, some(""), None), false);
-    let old_vec = try_to_pssz::<F, _>(&vec![R0 { a: 1, s: raw("a") }, R0 { a: 2, s: raw("c") }]).unwrap();
+    let old_vec = try_encode::<F, _>(&vec![R0 { a: 1, s: raw("a") }, R0 { a: 2, s: raw("c") }]).unwrap();
     reads::<F, _>(&old_vec, &vec![r2(1, "a", None, None), r2(2, "c", None, None)], false);
-    let old_opt = try_to_pssz::<F, _>(&Some(R0 { a: 1, s: raw("a") })).unwrap();
+    let old_opt = try_encode::<F, _>(&Some(R0 { a: 1, s: raw("a") })).unwrap();
     reads::<F, _>(&old_opt, &Some(r2(1, "a", None, None)), false);
-    reads::<F, Option<R2>>(&try_to_pssz::<F, Option<R0>>(&None).unwrap(), &None, false);
-    let old_var = try_to_pssz::<F, _>(&VarOld::Record(R0 { a: 1, s: raw("a") })).unwrap();
+    reads::<F, Option<R2>>(&try_encode::<F, Option<R0>>(&None).unwrap(), &None, false);
+    let old_var = try_encode::<F, _>(&VarOld::Record(R0 { a: 1, s: raw("a") })).unwrap();
     reads::<F, _>(&old_var, &VarNew::Record(r2(1, "a", None, None)), false);
-    reads::<F, _>(&try_to_pssz::<F, _>(&VarOld::Number(5)).unwrap(), &VarNew::Number(5), false);
-    let old_parent = try_to_pssz::<F, _>(&Parent0 { child: R0 { a: 1, s: raw("a") }, tail: raw("tail") }).unwrap();
+    reads::<F, _>(&try_encode::<F, _>(&VarOld::Number(5)).unwrap(), &VarNew::Number(5), false);
+    let old_parent = try_encode::<F, _>(&Parent0 { child: R0 { a: 1, s: raw("a") }, tail: raw("tail") }).unwrap();
     reads::<F, _>(&old_parent, &Parent2 { child: r2(1, "a", None, None), tail: raw("tail") }, false);
 
     // New data → older readers: unknown slots are skipped but still delimit
@@ -430,7 +430,7 @@ fn evolution_corpus_matches_cpp_goldens<F: PsszFormat>() {
     reads::<F, _>(&g("opt_new"), &Some(R0 { a: 1, s: raw("a") }), true);
     reads::<F, _>(&g("var_new"), &VarOld::Record(R0 { a: 1, s: raw("a") }), true);
     reads::<F, _>(&g("parent_new"), &Parent0 { child: R0 { a: 1, s: raw("a") }, tail: raw("tail") }, true);
-    let unset = try_to_pssz::<F, _>(&vec![r2(2, "c", None, None)]).unwrap();
+    let unset = try_encode::<F, _>(&vec![r2(2, "c", None, None)]).unwrap();
     reads::<F, _>(&unset, &vec![R0 { a: 2, s: raw("c") }], false);
 }
 each_format!(evolution_corpus_matches_cpp_goldens_in_every_profile, evolution_corpus_matches_cpp_goldens);
@@ -454,7 +454,7 @@ fn unpruned_and_malformed_frames_are_rejected<F: PsszFormat>() {
     rejects::<F, R2>(&all_none);
     rejects::<F, R3>(&all_none);
     assert_eq!(
-        from_pssz::<F, R1>(&fixed_none).unwrap_err(),
+        decode::<F, R1>(&fixed_none).unwrap_err(),
         PsszError("pssz: trailing absent optional field was not pruned")
     );
     // An older reader cannot judge the writer's last slot: accepts, reports.
@@ -507,7 +507,7 @@ fn unpruned_and_malformed_frames_are_rejected<F: PsszFormat>() {
         rejects::<F, Bad1>(&g("r1_some"));
     }
     let bad = Bad1 { a: 7, s: raw("hi"), b: 9 };
-    reads::<F, _>(&try_to_pssz::<F, _>(&bad).unwrap(), &bad, false);
+    reads::<F, _>(&try_encode::<F, _>(&bad).unwrap(), &bad, false);
 
     // Truncations and single-byte corruptions: never a panic; whatever is
     // accepted without unknown fields is canonical.
@@ -520,11 +520,11 @@ fn unpruned_and_malformed_frames_are_rejected<F: PsszFormat>() {
             cases.push(mutated);
         }
         for case in cases {
-            let valid = pssz_validate_compatible::<F, R3>(&case);
-            let decoded = from_pssz::<F, R3>(&case);
+            let valid = validate_compatible::<F, R3>(&case);
+            let decoded = decode::<F, R3>(&case);
             assert_eq!(valid.is_ok(), decoded.is_ok(), "{case:02x?}");
             if valid == Ok(false) {
-                assert_eq!(try_to_pssz::<F, _>(&decoded.unwrap()).unwrap(), case);
+                assert_eq!(try_encode::<F, _>(&decoded.unwrap()).unwrap(), case);
             }
         }
     }
@@ -535,55 +535,55 @@ fn views_read_evolved_records<F: PsszFormat>() {
     let goldens = evolution_goldens();
     let g = |name: &str| goldens[name][column::<F>()].clone();
     let newest = g("r3_all");
-    let old = try_pssz_view_of::<R0, F>(&newest).unwrap();
+    let old = PsszView::<R0, F>::new(&newest).unwrap();
     assert_eq!(old.a().get(), 7);
     assert_eq!(old.s().bytes(), b"hi");
-    let mid = try_pssz_view_of::<R1, F>(&newest).unwrap();
+    let mid = PsszView::<R1, F>::new(&newest).unwrap();
     assert_eq!(mid.s().bytes(), b"hi");
     assert_eq!(mid.x().get().unwrap().get(), 9);
-    let same = try_pssz_view_of::<R3, F>(&newest).unwrap();
+    let same = PsszView::<R3, F>::new(&newest).unwrap();
     assert_eq!(same.y().unwrap().bytes(), b"yo");
     assert_eq!(same.z().unwrap().len(), 2);
     assert_eq!(same.z().unwrap().get(1).get(), 2);
     // Old data, new reader: pruned fields read as absent.
     let oldest = g("r0");
-    let upgraded = try_pssz_view_of::<R3, F>(&oldest).unwrap();
+    let upgraded = PsszView::<R3, F>::new(&oldest).unwrap();
     assert_eq!(upgraded.s().bytes(), b"hi");
     assert!(!upgraded.x().has_value());
     assert!(!upgraded.y().has_value());
     assert!(!upgraded.z().has_value());
-    assert!(!try_pssz_view_of::<N1, F>(&oldest).unwrap().inner().has_value());
+    assert!(!PsszView::<N1, F>::new(&oldest).unwrap().inner().has_value());
     let partial_bytes = g("r2_none_some");
-    let partial = try_pssz_view_of::<R3, F>(&partial_bytes).unwrap();
+    let partial = PsszView::<R3, F>::new(&partial_bytes).unwrap();
     assert!(!partial.x().has_value());
     assert_eq!(partial.y().unwrap().bytes(), b"yo");
     assert!(!partial.z().has_value());
     let empty_bytes = g("r2_none_empty");
-    let present_empty = try_pssz_view_of::<R2, F>(&empty_bytes).unwrap();
+    let present_empty = PsszView::<R2, F>::new(&empty_bytes).unwrap();
     assert!(present_empty.y().has_value());
     assert!(present_empty.y().unwrap().is_empty());
     let nested_bytes = g("n1_some");
-    let nested = try_pssz_view_of::<N1, F>(&nested_bytes).unwrap();
+    let nested = PsszView::<N1, F>::new(&nested_bytes).unwrap();
     assert_eq!(nested.inner().unwrap().k().get(), 3);
     assert_eq!(nested.inner().unwrap().t().bytes(), b"t");
     let vec_bytes = g("vec_new");
-    let elements = try_pssz_view_of::<Vec<R0>, F>(&vec_bytes).unwrap();
+    let elements = PsszView::<Vec<R0>, F>::new(&vec_bytes).unwrap();
     assert_eq!(elements.len(), 2);
     assert_eq!(elements.get(0).s().bytes(), b"a");
     assert_eq!(elements.get(1).s().bytes(), b"c");
     let parent_bytes = g("parent_new");
-    let parent = try_pssz_view_of::<Parent0, F>(&parent_bytes).unwrap();
+    let parent = PsszView::<Parent0, F>::new(&parent_bytes).unwrap();
     assert_eq!(parent.child().a().get(), 1);
     assert_eq!(parent.child().s().bytes(), b"a");
     assert_eq!(parent.tail().bytes(), b"tail");
-    let checked = validated_view_compatible::<R0, F>(&newest).unwrap();
+    let checked = PsszView::<R0, F>::new_checked(&newest).unwrap();
     assert!(checked.has_unknown);
     // A view over unvalidated malformed bytes errors instead of panicking.
     let w = width::<F>();
     let broken = Frame::new(w).o(4 + w).u32(7).o(200).raw("hi").bytes;
-    let view = pssz_view_of::<R0, F>(&broken);
+    let view = PsszView::<R0, F>::trusted(&broken);
     assert!(view.try_s().is_err());
-    assert!(pssz_view_of::<R0, F>(&[]).try_a().is_err());
+    assert!(PsszView::<R0, F>::trusted(&[]).try_a().is_err());
 }
 each_format!(views_read_evolved_records_in_every_profile, views_read_evolved_records);
 
@@ -630,32 +630,32 @@ fn presence_and_zero_size_records<F: PsszFormat>() {
     reads::<F, _>(&[7], &Some(Color::Blue), false);
     // Vectors of zero-size elements cannot carry a count.
     reads::<F, Vec<Unit>>(&[], &vec![], false);
-    assert!(try_to_pssz::<F, _>(&vec![Unit {}]).is_err());
+    assert!(try_encode::<F, _>(&vec![Unit {}]).is_err());
     reads::<F, _>(&[], &[Unit {}, Unit {}], false);
     rejects::<F, [Unit; 2]>(&[0]);
 
     // An optional record in the middle keeps its slot; trailing optionals of
     // every presence class are pruned or kept as values.
     let middle = Middle { a: 1, inner: None, s: raw("s") };
-    let wire = try_to_pssz::<F, _>(&middle).unwrap();
+    let wire = try_encode::<F, _>(&middle).unwrap();
     assert_eq!(wire, Frame::new(w).o(4 + 2 * w).u32(1).o(4 + 2 * w).o(4 + 2 * w).raw("s").bytes);
     reads::<F, _>(&wire, &middle, false);
     let tail = |unit, empty, pair| Tail { a: 7, s: raw("hi"), unit, empty, pair };
-    let base = try_to_pssz::<F, _>(&r0()).unwrap();
-    assert_eq!(try_to_pssz::<F, _>(&tail(None, None, None)).unwrap(), base);
+    let base = try_encode::<F, _>(&r0()).unwrap();
+    assert_eq!(try_encode::<F, _>(&tail(None, None, None)).unwrap(), base);
     for value in [
         tail(Some(Unit {}), None, None),
         tail(None, Some(Empty {}), None),
         tail(None, None, Some(Pair { x: 1, y: 2 })),
         tail(Some(Unit {}), Some(Empty {}), Some(Pair { x: 1, y: 2 })),
     ] {
-        let wire = try_to_pssz::<F, _>(&value).unwrap();
+        let wire = try_encode::<F, _>(&value).unwrap();
         assert_ne!(wire, base);
         reads::<F, _>(&wire, &value, false);
     }
     let k = 4 + 2 * w;
     assert_eq!(
-        try_to_pssz::<F, _>(&tail(Some(Unit {}), None, None)).unwrap(),
+        try_encode::<F, _>(&tail(Some(Unit {}), None, None)).unwrap(),
         Frame::new(w).o(k).u32(7).o(k).o(k + 2).raw("hi").byte(1).bytes
     );
     // Stored None for the unit optional (selector 00) must have been pruned.
@@ -663,7 +663,7 @@ fn presence_and_zero_size_records<F: PsszFormat>() {
 
     // DWNC with a variable field: no header, offset slots, never pruned.
     let dv = DwncVar { a: 9, s: raw("xy"), b: 0x0102 };
-    let wire = try_to_pssz::<F, _>(&dv).unwrap();
+    let wire = try_encode::<F, _>(&dv).unwrap();
     assert_eq!(wire, Frame::new(w).byte(9).o(3 + w).byte(2).byte(1).raw("xy").bytes);
     reads::<F, _>(&wire, &dv, false);
     assert!(!<DwncVar as PsszPack<F>>::IS_FIXED_SIZE);
@@ -691,9 +691,9 @@ fn exact_spans<F: PsszFormat>() {
     let t = (7u32, raw("hi"));
     let wire = Frame::new(w).o(4 + w).u32(7).o(4 + w).raw("hi").bytes;
     reads::<F, _>(&wire, &t, false);
-    assert_eq!(try_to_pssz::<F, _>(&(7u32, raw("hi"), None::<u8>)).unwrap(), wire);
+    assert_eq!(try_encode::<F, _>(&(7u32, raw("hi"), None::<u8>)).unwrap(), wire);
     reads::<F, _>(&wire, &(7u32, raw("hi"), None::<u8>), false);
-    let longer = try_to_pssz::<F, _>(&(7u32, raw("hi"), Some(5u8))).unwrap();
+    let longer = try_encode::<F, _>(&(7u32, raw("hi"), Some(5u8))).unwrap();
     reads::<F, _>(&longer, &t, true);
     let mut trailing = wire.clone();
     trailing.push(0);
@@ -708,8 +708,8 @@ fn string_types<F: PsszFormat>() {
     for good in ["", "hello", "h\u{e9}llo \u{1f600}"] {
         reads::<F, _>(good.as_bytes(), &good.to_string(), false);
         reads::<F, _>(good.as_bytes(), &raw(good), false);
-        assert_eq!(try_to_pssz::<F, _>(good).unwrap(), good.as_bytes());
-        assert_eq!(try_to_pssz::<F, _>(&RawStr(good.as_bytes())).unwrap(), good.as_bytes());
+        assert_eq!(try_encode::<F, _>(good).unwrap(), good.as_bytes());
+        assert_eq!(try_encode::<F, _>(&RawStr(good.as_bytes())).unwrap(), good.as_bytes());
     }
     for bad in [&[0xc0u8, 0x80][..], &[0xff][..]] {
         // UTF-8 types reject; raw strings pass the bytes through.
@@ -717,27 +717,27 @@ fn string_types<F: PsszFormat>() {
         rejects::<F, BoundedString<8>>(bad);
         rejects::<F, Vec<String>>(&[&Frame::new(width::<F>()).o(width::<F>()).bytes[..], bad].concat());
         rejects::<F, Option<String>>(&[&[1u8][..], bad].concat());
-        assert_eq!(from_pssz::<F, RawString>(bad).unwrap(), RawString(bad.to_vec()));
-        assert_eq!(pssz_validate::<F, RawString>(bad), Ok(()));
-        assert_eq!(try_to_pssz::<F, _>(&RawString(bad.to_vec())).unwrap(), bad);
-        assert_eq!(from_pssz::<F, BoundedRawString<8>>(bad).unwrap().0, bad);
+        assert_eq!(decode::<F, RawString>(bad).unwrap(), RawString(bad.to_vec()));
+        assert_eq!(validate::<F, RawString>(bad), Ok(()));
+        assert_eq!(try_encode::<F, _>(&RawString(bad.to_vec())).unwrap(), bad);
+        assert_eq!(decode::<F, BoundedRawString<8>>(bad).unwrap().0, bad);
         // The exact (strict) readers check UTF-8 in raw strings too, as C++
         // validate_strict does.
-        assert!(pssz_validate_exact::<F, RawString>(bad).is_err());
-        assert!(from_pssz_exact::<F, RawString>(bad).is_err());
+        assert!(validate_strict::<F, RawString>(bad).is_err());
+        assert!(decode_strict::<F, RawString>(bad).is_err());
         // Views: a String view errors (never panics); a raw view is bytes.
-        assert!(pssz_view_of::<String, F>(bad).view().is_err());
-        assert_eq!(pssz_view_of::<RawString, F>(bad).bytes(), bad);
-        assert!(try_pssz_view_of::<String, F>(bad).is_err());
-        assert!(try_pssz_view_of::<RawString, F>(bad).is_ok());
+        assert!(PsszView::<String, F>::trusted(bad).view().is_err());
+        assert_eq!(PsszView::<RawString, F>::trusted(bad).bytes(), bad);
+        assert!(PsszView::<String, F>::new(bad).is_err());
+        assert!(PsszView::<RawString, F>::new(bad).is_ok());
     }
     // Bounds: exactly N accepted, N + 1 rejected, on encode and decode.
     reads::<F, _>(b"abcd", &BoundedString::<4>("abcd".into()), false);
     rejects::<F, BoundedString<4>>(b"abcde");
-    assert!(try_to_pssz::<F, _>(&BoundedString::<4>("abcde".into())).is_err());
+    assert!(try_encode::<F, _>(&BoundedString::<4>("abcde".into())).is_err());
     reads::<F, _>(b"abcd", &BoundedRawString::<4>(b"abcd".to_vec()), false);
-    assert!(try_to_pssz::<F, _>(&BoundedRawString::<4>(b"abcde".to_vec())).is_err());
-    assert!(from_pssz::<F, BoundedRawString<4>>(b"abcde").is_err());
+    assert!(try_encode::<F, _>(&BoundedRawString::<4>(b"abcde".to_vec())).is_err());
+    assert!(decode::<F, BoundedRawString<4>>(b"abcde").is_err());
 
     let texts = Texts {
         utf8: "\u{e9}".into(),
@@ -745,10 +745,10 @@ fn string_types<F: PsszFormat>() {
         bounded: BoundedString("ab".into()),
         raw_bounded: BoundedRawString(vec![0xc0, 0x80]),
     };
-    let wire = try_to_pssz::<F, _>(&texts).unwrap();
-    assert_eq!(pssz_validate::<F, Texts>(&wire), Ok(()));
-    assert_eq!(from_pssz::<F, Texts>(&wire).unwrap(), texts);
-    let view = try_pssz_view_of::<Texts, F>(&wire).unwrap();
+    let wire = try_encode::<F, _>(&texts).unwrap();
+    assert_eq!(validate::<F, Texts>(&wire), Ok(()));
+    assert_eq!(decode::<F, Texts>(&wire).unwrap(), texts);
+    let view = PsszView::<Texts, F>::new(&wire).unwrap();
     assert_eq!(view.utf8().view().unwrap(), "\u{e9}");
     assert_eq!(view.rawstr().bytes(), [0xff]);
     assert_eq!(view.bounded().view().unwrap(), "ab");
@@ -776,7 +776,7 @@ fn enums<F: PsszFormat>() {
     // Inline in a record's fixed region; a vector of them is flat.
     let w = width::<F>();
     let painted = Painted { color: Color::Green, name: raw("n"), wide: Some(Wide::A) };
-    let wire = try_to_pssz::<F, _>(&painted).unwrap();
+    let wire = try_encode::<F, _>(&painted).unwrap();
     assert_eq!(wire, Frame::new(w).o(1 + 2 * w).byte(1).o(1 + 2 * w).o(2 + 2 * w).raw("n").byte(1).byte(0).bytes);
     reads::<F, _>(&wire, &painted, false);
     reads::<F, _>(&[0, 7, 1], &vec![Color::Red, Color::Blue, Color::Green], false);
@@ -788,7 +788,7 @@ fn enums<F: PsszFormat>() {
     let point = [&[2u8][..], &Frame::new(w).o(1 + w).byte(5).o(1 + w).raw("p").bytes].concat();
     reads::<F, _>(&point, &Shape3::Point(5, raw("p")), false);
     // Several fields form a positional tuple record, with pruning.
-    assert_eq!(try_to_pssz::<F, _>(&(5u8, raw("p"))).unwrap(), point[1..]);
+    assert_eq!(try_encode::<F, _>(&(5u8, raw("p"))).unwrap(), point[1..]);
     let named = [&[3u8][..], &Frame::new(w).o(2).byte(9).byte(0).bytes].concat();
     reads::<F, _>(&named, &Shape3::Named { a: 9, b: None }, false);
     rejects::<F, Shape3>(&[]);

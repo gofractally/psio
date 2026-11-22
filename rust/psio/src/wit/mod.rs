@@ -44,5 +44,20 @@ pub mod mutation;
 pub mod pack;
 pub mod view;
 
+// ── The helper names (docs/helpers.md) ──────────────────────────────────────
+
+fn pack_message<T: pack::WitPack>(value: &T) -> Vec<u8> {
+    value.wit_pack()
+}
+fn unpack_message<T: view::WitUnpack>(bytes: &[u8]) -> Result<T, view::WitViewError> {
+    T::wit_unpack(bytes)
+}
+crate::format::message_format_helpers! {
+    tag Wit, "wit", error view::WitViewError,
+    pack pack::WitPack => pack_message, unpack view::WitUnpack => unpack_message,
+    names to_wit to_wit_into from_wit from_wit_trusted validate_wit wit_size
+          WitBuffer SharedWit
+}
+
 #[cfg(test)]
 mod conformance_tests;

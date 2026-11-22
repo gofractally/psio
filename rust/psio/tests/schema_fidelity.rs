@@ -11,8 +11,8 @@ use psio::pssz::schema_ir::{
     schema_for, wire_custom_id, AnyType, AnyValue, Attribute, Custom, Int, List, Member, Object,
     Schema, ToPsszSchema,
 };
-use psio::pssz::{
-    auto_pssz_width, from_pssz, try_to_pssz, BoundedList, BoundedString, Pssz, Pssz16, Pssz32,
+use psio::pssz::{try_to_pssz, from_pssz, 
+    auto_pssz_width, decode, try_encode, BoundedList, BoundedString, Pssz, Pssz16, Pssz32,
     Pssz8, PsszError, PsszFormat, PsszPack, PsszUnpack, RawString,
 };
 
@@ -62,7 +62,7 @@ where
     assert_eq!(width, auto_pssz_width::<T>(), "{value:?}: width");
     fn round_trip<F: PsszFormat, T: PsszPack<F>>(schema: &Schema, root: &AnyType, value: &T) {
         // An explicit width may be too narrow for the value: both refuse.
-        let Ok(bytes) = try_to_pssz::<F, T>(value) else { return };
+        let Ok(bytes) = try_encode::<F, T>(value) else { return };
         let decoded = dynamic::decode_exact::<F>(schema, root, &bytes).expect("schema decode");
         assert_eq!(dynamic::encode::<F>(schema, root, &decoded).unwrap(), bytes);
     }
@@ -70,13 +70,13 @@ where
     round_trip::<Pssz8, T>(&schema, &root, value);
     round_trip::<Pssz16, T>(&schema, &root, value);
     round_trip::<Pssz32, T>(&schema, &root, value);
-    let bytes = try_to_pssz::<Pssz, T>(value).unwrap();
+    let bytes = try_encode::<Pssz, T>(value).unwrap();
     assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
     // A box is its inner type in text.
-    let text = json::to_string::<IJson, T>(value).unwrap();
+    let text = json::try_encode::<IJson, T>(value).unwrap();
     assert_eq!(dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes).unwrap().0, text);
     assert_eq!(dynamic::json_to_pssz::<IJson>(&schema, &root, text.as_bytes()).unwrap(), bytes);
-    assert_eq!(&from_pssz::<Pssz, T>(&bytes).unwrap(), value);
+    assert_eq!(&from_pssz::<T>(&bytes).unwrap(), value);
     width
 }
 
@@ -150,10 +150,10 @@ fn a_box_gives_its_container_no_inferred_bound_through_the_schema_either() {
     assert_eq!(dynamic::auto_width(&schema, &root).unwrap(), 4);
     // The boxed bounded string is still bounded and still UTF-8.
     let value = BoxRec { id: 1, leaf: boxed(7, "abcd") };
-    let mut bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+    let mut bytes = try_to_pssz(&value).unwrap();
     let last = bytes.len() - 1;
     bytes[last] = 0xff;
-    assert!(from_pssz::<Pssz, BoxRec>(&bytes).is_err());
+    assert!(from_pssz::<BoxRec>(&bytes).is_err());
     assert!(dynamic::validate_pssz(&schema, &root, &bytes).is_err());
     assert!(dynamic::json_to_pssz::<Json>(&schema, &root, br#"{"id":1,"leaf":{"n":7,"t":"abcde"}}"#).is_err());
 }
@@ -184,7 +184,7 @@ fn a_raw_string_is_any_bytes_through_the_schema_and_a_utf8_string_is_validated()
             list: vec![RawString(b"ok".to_vec()), RawString(vec![0xc0, 0x80])],
             maybe: Some(RawString(vec![0x80])),
         };
-        let bytes = try_to_pssz::<F, _>(&value).unwrap();
+        let bytes = try_encode::<F, _>(&value).unwrap();
         // Valid PSSZ: validate, decode, re-encode unchanged.
         let decoded = dynamic::decode_exact::<F>(schema, root, &bytes).unwrap();
         assert_eq!(dynamic::encode::<F>(schema, root, &decoded).unwrap(), bytes);
@@ -201,7 +201,7 @@ fn a_raw_string_is_any_bytes_through_the_schema_and_a_utf8_string_is_validated()
         let at = bytes.windows(2).position(|pair| pair == [b't', 0xc3]).unwrap();
         let mut bad = bytes.clone();
         bad[at + 1] = 0xff;
-        assert!(from_pssz::<F, Texts>(&bad).is_err());
+        assert!(decode::<F, Texts>(&bad).is_err());
         assert_eq!(
             dynamic::decode_exact::<F>(schema, root, &bad).unwrap_err().0,
             "pssz dynamic: invalid UTF-8"
@@ -228,17 +228,17 @@ fn a_raw_string_is_any_bytes_through_the_schema_and_a_utf8_string_is_validated()
         texts(b"ok".to_vec(), vec![b"ok".to_vec(), vec![0xc3]], None),
         texts(b"ok".to_vec(), vec![], Some(vec![0xed, 0xa0, 0x80])),
     ] {
-        let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+        let bytes = try_to_pssz(&value).unwrap();
         assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
-        let typed = json::to_string::<Json, _>(&value).unwrap_err().what;
+        let typed = psio::try_to_json(&value).unwrap_err().what;
         assert_eq!(typed, "json: string is not valid UTF-8");
         assert_eq!(dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap_err().what(), typed);
         assert_eq!(dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes).unwrap_err().what(), typed);
     }
     // A raw string whose bytes are UTF-8 is text in both directions.
     let value = texts("r\u{e9}".as_bytes().to_vec(), vec![b"a".to_vec()], Some(vec![]));
-    let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
-    let text = json::to_string::<IJson, _>(&value).unwrap();
+    let bytes = try_to_pssz(&value).unwrap();
+    let text = psio::to_ijson(&value);
     assert_eq!(dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes).unwrap().0, text);
     assert_eq!(dynamic::json_to_pssz::<IJson>(&schema, &root, text.as_bytes()).unwrap(), bytes);
 
@@ -293,13 +293,13 @@ fn an_explicit_width_enforces_the_cap_of_the_top_level_type_only() {
         // The schema is accepted under an explicit width.
         let text = serde_json::to_string(&schema).unwrap();
         assert!(text.contains("maxDynamicData"));
-        let typed = try_to_pssz::<F, T>(value);
+        let typed = try_encode::<F, T>(value);
         let Ok(bytes) = &typed else { return false };
         let decoded = dynamic::decode_exact::<F>(&schema, &root, bytes).unwrap_or_else(|e| {
             panic!("{value:?}: typed wrote what the schema refuses: {}", e.0)
         });
         assert_eq!(&dynamic::encode::<F>(&schema, &root, &decoded).unwrap(), bytes);
-        assert!(from_pssz::<F, T>(bytes).is_ok());
+        assert!(decode::<F, T>(bytes).is_ok());
         true
     }
     // Under an explicit width the size of Small's frame is tag + offset +
@@ -314,7 +314,7 @@ fn an_explicit_width_enforces_the_cap_of_the_top_level_type_only() {
         // ... over it: an error on write and on read, typed and through
         // the schema.
         let over = small(at_cap + 1);
-        assert!(try_to_pssz::<F, _>(&over).is_err());
+        assert!(try_encode::<F, _>(&over).is_err());
         let decoded = Value::Record(vec![
             ("tag".into(), Value::Unsigned(1)),
             ("label".into(), Value::String("x".repeat(at_cap + 1))),
@@ -338,7 +338,7 @@ fn an_explicit_width_enforces_the_cap_of_the_top_level_type_only() {
         assert!(dynamic::decode_exact::<F>(&uncapped_schema, &uncapped_root, &frame).is_ok());
         assert!(dynamic::decode_exact::<F>(&schema, &root, &frame).is_err());
         assert!(dynamic::decode_compatible::<F>(&schema, &root, &frame).is_err());
-        assert!(from_pssz::<F, Small>(&frame).is_err());
+        assert!(decode::<F, Small>(&frame).is_err());
     }
     top::<Pssz8>();
     top::<Pssz16>();
@@ -378,8 +378,8 @@ fn an_explicit_width_enforces_the_cap_of_the_top_level_type_only() {
     // The automatic profile enforces every record's cap, nested ones too.
     let (schema, root) = schema_for::<Holder>().unwrap();
     let holder = Holder { first: small(40), items: vec![], maybe: None };
-    assert!(try_to_pssz::<Pssz, _>(&holder).is_err());
-    let wide = try_to_pssz::<Pssz32, _>(&holder).unwrap();
+    assert!(try_to_pssz(&holder).is_err());
+    let wide = try_encode::<Pssz32, _>(&holder).unwrap();
     assert!(dynamic::decode_exact::<Pssz32>(&schema, &root, &wide).is_ok());
     let value = dynamic::decode_exact::<Pssz32>(&schema, &root, &wide).unwrap();
     assert_eq!(
@@ -480,11 +480,11 @@ fn a_custom_text_form_is_its_wire_type_in_binary_and_its_handler_in_text() {
     }
     assert_eq!(dynamic::auto_width(&schema, &AnyType::named("Stamp")).unwrap(), auto_pssz_width::<Stamp>());
     assert_eq!(dynamic::auto_width(&schema, &AnyType::named("Point")).unwrap(), auto_pssz_width::<Point>());
-    let bytes = try_to_pssz::<Pssz, _>(&event).unwrap();
+    let bytes = try_to_pssz(&event).unwrap();
     assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
     let decoded = dynamic::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap();
     assert_eq!(dynamic::encode::<Pssz>(&schema, &root, &decoded).unwrap(), bytes);
-    let wide = try_to_pssz::<Pssz32, _>(&event).unwrap();
+    let wide = try_encode::<Pssz32, _>(&event).unwrap();
     let decoded32 = dynamic::decode_exact::<Pssz32>(&schema, &root, &wide).unwrap();
     assert_eq!(decoded32, decoded);
     assert!(dynamic::validate_pssz(&schema, &root, &bytes[..bytes.len() - 1]).is_err());
@@ -510,8 +510,8 @@ fn a_custom_text_form_is_its_wire_type_in_binary_and_its_handler_in_text() {
     assert!(!handlers.is_strict());
     let json_text = r#"{"at":"7s","place":"-1,2","history":["0s","4294967295s"],"maybe":"3,-4","boxed":"9s","n":18446744073709551615}"#;
     let ijson_text = r#"{"at":"7s","place":"-1,2","history":["0s","4294967295s"],"maybe":"3,-4","boxed":"9s","n":"18446744073709551615"}"#;
-    assert_eq!(json::to_string::<Json, _>(&event).unwrap(), json_text);
-    assert_eq!(json::to_string::<IJson, _>(&event).unwrap(), ijson_text);
+    assert_eq!(psio::to_json(&event), json_text);
+    assert_eq!(psio::to_ijson(&event), ijson_text);
     assert_eq!(dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &handlers).unwrap().0, json_text);
     assert_eq!(dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &handlers).unwrap().0, ijson_text);
     assert_eq!(dynamic::json_to_pssz_with::<Json>(&schema, &root, json_text.as_bytes(), &handlers).unwrap(), bytes);
@@ -547,7 +547,7 @@ fn a_custom_text_form_is_its_wire_type_in_binary_and_its_handler_in_text() {
     // null is still the absent optional, not the handler's business.
     let none = json_text.replace("\"3,-4\"", "null");
     let bytes_none = dynamic::json_to_pssz_with::<Json>(&schema, &root, none.as_bytes(), &handlers).unwrap();
-    assert_eq!(from_pssz::<Pssz, Event>(&bytes_none).unwrap().maybe, None);
+    assert_eq!(from_pssz::<Event>(&bytes_none).unwrap().maybe, None);
 
     // Strict: every custom id needs a handler, in both directions.
     const NO_HANDLER: &str = "pssz dynamic: no handler registered for a custom type";
@@ -567,7 +567,7 @@ fn a_custom_text_form_is_its_wire_type_in_binary_and_its_handler_in_text() {
     assert_eq!(dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &strict).unwrap().0, json_text);
     // A box is never a presentation: strict does not ask for its handler.
     let (boxed_schema, boxed_root) = schema_for::<BoxRec>().unwrap();
-    let boxed_bytes = try_to_pssz::<Pssz, _>(&BoxRec { id: 1, leaf: boxed(2, "ab") }).unwrap();
+    let boxed_bytes = try_to_pssz(&BoxRec { id: 1, leaf: boxed(2, "ab") }).unwrap();
     let mut empty_strict = CustomHandlers::new();
     empty_strict.set_strict(true);
     assert_eq!(
