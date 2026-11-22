@@ -14,6 +14,11 @@
 //!       otherwise 4. Caps and length bounds are enforced on encode and
 //!       decode.
 //!
+//! An `Enum` is its underlying type on the wire, everywhere: width, layout,
+//! validation, encode and decode all go through `Schema::wire`, and any
+//! in-range value of the integer is valid whether or not it is a listed
+//! enumerator. The enumerator names matter to the `json` submodule only.
+//!
 //! Attributes read by the codec:
 //!   Object  definitionWillNotChange    fixed layout (no header)
 //!           maxDynamicData = "N"       explicit cap (automatic profile)
@@ -189,7 +194,7 @@ pub(crate) fn metadata(schema: &Schema, root: &AnyType, caps: bool) -> PsszResul
     let mut pending = vec![root];
     let mut seen = HashSet::new();
     while let Some(ty) = pending.pop() {
-        let ty = schema.resolve(ty)?;
+        let ty = schema.wire(ty)?;
         if !seen.insert(ty as *const AnyType as usize) {
             continue;
         }
@@ -284,7 +289,7 @@ fn float_size(float: &crate::pssz_schema_ir::Float) -> PsszResult<usize> {
     }
 }
 fn unsigned_adapter(schema: &Schema, ty: &AnyType, bits: u32) -> PsszResult<()> {
-    if matches!(schema.resolve(ty)?.value, AnyValue::Int(ref i) if i.bits == bits && !i.isSigned) {
+    if matches!(schema.wire(ty)?.value, AnyValue::Int(ref i) if i.bits == bits && !i.isSigned) {
         Ok(())
     } else {
         Err(failure(
@@ -293,7 +298,7 @@ fn unsigned_adapter(schema: &Schema, ty: &AnyType, bits: u32) -> PsszResult<()> 
     }
 }
 fn bit_shape(schema: &Schema, custom: &crate::pssz_schema_ir::Custom) -> PsszResult<(usize, bool)> {
-    let (element, count, list) = match (&custom.id[..], &schema.resolve(&custom.r#type)?.value) {
+    let (element, count, list) = match (&custom.id[..], &schema.wire(&custom.r#type)?.value) {
         ("bitvector", AnyValue::Array(a)) => (&a.r#type, a.len, false),
         ("bitlist", AnyValue::BoundedList(l)) => (&l.r#type, l.maxCount, true),
         _ => {
@@ -320,7 +325,7 @@ fn layout_of(schema: &Schema, ty: &AnyType) -> PsszResult<Layout> {
 }
 fn layout_at(schema: &Schema, ty: &AnyType, n: usize) -> PsszResult<Layout> {
     depth(n)?;
-    let ty = schema.resolve(ty)?;
+    let ty = schema.wire(ty)?;
     let mut out = Layout {
         fixed: false,
         size: 0,
@@ -393,7 +398,7 @@ fn layout_at(schema: &Schema, ty: &AnyType, n: usize) -> PsszResult<Layout> {
                 "pssz dynamic: resource values require an explicit adapter",
             ))
         }
-        AnyValue::Type(_) => unreachable!("resolved aliases"),
+        AnyValue::Type(_) | AnyValue::Enum(_) => unreachable!("resolved to the wire type"),
     }
     Ok(out)
 }
@@ -425,7 +430,7 @@ fn record_layout(
 }
 fn can_be_empty(schema: &Schema, ty: &AnyType, n: usize) -> PsszResult<bool> {
     depth(n)?;
-    let ty = schema.resolve(ty)?;
+    let ty = schema.wire(ty)?;
     Ok(match &ty.value {
         AnyValue::List(_) | AnyValue::BoundedList(_) => true,
         AnyValue::Option(o) => !can_be_empty(schema, &o.r#type, n + 1)?,
@@ -463,7 +468,7 @@ fn can_be_empty(schema: &Schema, ty: &AnyType, n: usize) -> PsszResult<bool> {
     })
 }
 fn byte_container(schema: &Schema, ty: &AnyType) -> PsszResult<(Option<usize>, bool)> {
-    let (element, bound, exact) = match &schema.resolve(ty)?.value {
+    let (element, bound, exact) = match &schema.wire(ty)?.value {
         AnyValue::List(l) => (&l.r#type, None, false),
         AnyValue::BoundedList(l) => (
             &l.r#type,
@@ -481,7 +486,7 @@ fn byte_container(schema: &Schema, ty: &AnyType) -> PsszResult<(Option<usize>, b
             ))
         }
     };
-    match &schema.resolve(element)?.value {
+    match &schema.wire(element)?.value {
         AnyValue::Custom(c) if c.id == "char" => unsigned_adapter(schema, &c.r#type, 8)?,
         _ => unsigned_adapter(schema, element, 8)?,
     }
@@ -552,7 +557,7 @@ impl<'a> Codec<'a> {
     /// Whether a value is inline bytes with no offset slot in the bound
     /// bookkeeping (C++ `max_size.hpp` `fixed_payload<T>()`).
     fn fixed_payload(&self, input: &AnyType, active: &mut Vec<usize>) -> PsszResult<bool> {
-        let ty = self.schema.resolve(input)?;
+        let ty = self.schema.wire(input)?;
         let key = ty as *const AnyType as usize;
         if active.contains(&key) {
             return Ok(false);
@@ -575,7 +580,7 @@ impl<'a> Codec<'a> {
             AnyValue::Array(a) => self.fixed_payload(&a.r#type, active)?,
             AnyValue::Custom(c) if c.id == "bool" || c.id == "char" => true,
             AnyValue::Custom(c) if c.id == "hex" || c.id == "string" => {
-                let child = self.schema.resolve(&c.r#type)?;
+                let child = self.schema.wire(&c.r#type)?;
                 matches!(child.value, AnyValue::Array(_)) && self.fixed_payload(child, active)?
             }
             AnyValue::Struct(s) => members(&s.members, active)?,
@@ -596,7 +601,7 @@ impl<'a> Codec<'a> {
         reserve_cap: bool,
         active: &mut Vec<usize>,
     ) -> PsszResult<Bound> {
-        let ty = self.schema.resolve(input)?;
+        let ty = self.schema.wire(input)?;
         let key = ty as *const AnyType as usize;
         if active.contains(&key) {
             return Ok(None);
@@ -678,7 +683,7 @@ impl<'a> Codec<'a> {
             )),
             AnyValue::Custom(c) if c.id == "bool" || c.id == "char" => Ok(Some(1)),
             AnyValue::Custom(c) if c.id == "string" || c.id == "hex" => {
-                self.bound_sequence(self.schema.resolve(&c.r#type)?, annotation, active)
+                self.bound_sequence(self.schema.wire(&c.r#type)?, annotation, active)
             }
             AnyValue::Struct(s) => record(&s.members, true, active),
             AnyValue::Object(o) => record(&o.members, dwnc(&o.attributes), active),
@@ -727,7 +732,7 @@ impl<'a> Codec<'a> {
     fn encode_at(&self, ty: &AnyType, value: &Value, n: usize) -> PsszResult<Vec<u8>> {
         depth(n)?;
         let schema = self.schema;
-        let ty = schema.resolve(ty)?;
+        let ty = schema.wire(ty)?;
         let mut out = Vec::new();
         match (&ty.value, value) {
             (AnyValue::Int(i), Value::Bytes(v)) if i.bits == 256 => {
@@ -956,7 +961,7 @@ impl<'a> Codec<'a> {
     fn decode_at(&self, ty: &AnyType, bytes: &[u8], n: usize) -> PsszResult<Value> {
         depth(n)?;
         let schema = self.schema;
-        let ty = schema.resolve(ty)?;
+        let ty = schema.wire(ty)?;
         Ok(match &ty.value {
             AnyValue::Int(i) => {
                 let size = int_size(i)?;
@@ -1297,5 +1302,5 @@ pub fn validate(schema: &Schema, ty: &AnyType, bytes: &[u8]) -> PsszResult<bool>
 pub fn auto_width(schema: &Schema, ty: &AnyType) -> PsszResult<usize> {
     let codec = Codec::new::<Pssz>(schema)?;
     codec.check(ty)?;
-    codec.width_of(schema.resolve(ty)?)
+    codec.width_of(schema.wire(ty)?)
 }

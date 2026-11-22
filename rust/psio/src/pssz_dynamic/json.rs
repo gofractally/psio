@@ -28,10 +28,18 @@
 //!   |v| <= 2^53 - 1, a decimal string beyond (either form is read, bare
 //!   only in that range); a member's `jsonInt` / `ijsonInt` attribute forces
 //!   one form and reaches the integer through option, list and array
+//! * Int of 128 bits and unsigned Int of 256 bits: decimal; a bare number
+//!   under Json, always a string under IJson. Read from a decimal string,
+//!   the legacy "0x<hex>" string, or a bare number (IJson: |v| <= 2^53 - 1)
+//! * Enum: a listed value is its name (the first listed, when two share a
+//!   value), any other its number; read from the name, the number, the
+//!   numeric string or "name:number" (which must agree). A number that
+//!   names no enumerator is accepted: there is no typed enum to refuse it
 //! * bool, Float: true / false; shortest round-trip decimal
 //!
-//! No JSON form (an error, not a guess): integers wider than 64 bits and the
-//! bitvector / bitlist adapters. A non-finite float has no JSON text.
+//! No JSON form (an error, not a guess): the bitvector / bitlist adapters,
+//! and integers of any other width. A non-finite float has no JSON text:
+//! writing one is an error in both formats, and none is read.
 //!
 //! The reader is a type walk over a [`JsonCursor`]: it holds no text
 //! positions and does no tokenizing, so another parser can be put under it.
@@ -42,8 +50,11 @@ use crate::json::{
     write_variant_close, write_variant_open, IntForm, JsonCursor, JsonFormat, JsonKind,
     JsonText, JsonTextError, TextCursor, Writer, MAX_DEPTH,
 };
-use crate::pssz::{Pssz, PsszError};
-use crate::pssz_schema_ir::{AnyType, AnyValue, Attribute, Custom, Int, Member, Schema, Variant};
+use crate::json::{wide_is_safe, wide_parse, wide_to_i128, wide_to_u128, wide_to_u256};
+use crate::pssz::{Pssz, PsszError, Uint256};
+use crate::pssz_schema_ir::{
+    AnyType, AnyValue, Attribute, Custom, Enum, Int, Member, Schema, Variant,
+};
 
 /// Why a schema-driven conversion failed: the schema or the PSSZ bytes
 /// ([`PsszError`]), or the text ([`JsonTextError`]).
@@ -122,6 +133,23 @@ impl ByteShape {
 
 const BYTE: Int = Int { bits: 8, isSigned: false };
 
+const ENUM_UNDERLYING: &str = "pssz dynamic: an enum needs an underlying integer of 8 to 64 bits";
+
+/// The value of an integer of at most 64 bits as 64 two's-complement bits
+/// (sign-extended), or `None` when `value` is not a value of `ty`.
+fn integer_bits(ty: &Int, value: &Value) -> Option<u64> {
+    match (ty.isSigned, value) {
+        (false, Value::Unsigned(v)) if ty.bits <= 64 => {
+            (*v <= (1u128 << ty.bits) - 1).then_some(*v as u64)
+        }
+        (true, Value::Signed(v)) if (1..=64).contains(&ty.bits) => {
+            let half = 1i128 << (ty.bits - 1);
+            (*v >= -half && *v < half).then_some(*v as i64 as u64)
+        }
+        _ => None,
+    }
+}
+
 /// `0 | -?[1-9][0-9]*` within the range of an integer of `bits` (<= 64)
 /// bits: (negative, magnitude).
 fn parse_integer(text: &str, signed: bool, bits: u32) -> Option<(bool, u128)> {
@@ -176,9 +204,121 @@ impl<C: JsonCursor> Reader<'_, C> {
         schema.resolve(ty).map_err(|_| self.c.error("pssz dynamic: unresolved named type"))
     }
 
+    /// A 128- or 256-bit integer: a decimal string (or the legacy "0x"
+    /// string), or a bare decimal number — any in-range value under Json, at
+    /// most 2^53 - 1 in magnitude under IJson. A forced form accepts that
+    /// form only.
+    fn wide_integer(&mut self, ty: &Int, form: IntForm) -> Text<Value> {
+        if ty.bits != 128 && !(ty.bits == 256 && !ty.isSigned) {
+            return self.fail("json: this integer width has no JSON form");
+        }
+        let kind = self.c.kind()?;
+        let quoted = kind == JsonKind::String;
+        let parsed = if quoted {
+            if form == IntForm::Number {
+                return self.fail("json: expected a number, found a string");
+            }
+            let (text, escaped) = self.c.string()?;
+            if escaped { None } else { wide_parse(&text, ty.bits) }
+        } else {
+            if form == IntForm::String {
+                return self.fail("json: expected an integer string");
+            }
+            if kind != JsonKind::Number {
+                return self.fail("json: expected an integer");
+            }
+            wide_parse(self.c.number()?, ty.bits)
+        };
+        let value = parsed.and_then(|(negative, magnitude)| {
+            let value = if ty.bits == 256 {
+                let limbs = wide_to_u256(negative, magnitude)?.limb;
+                Value::Bytes(limbs.iter().flat_map(|limb| limb.to_le_bytes()).collect())
+            } else if ty.isSigned {
+                Value::Signed(wide_to_i128(negative, magnitude)?)
+            } else {
+                Value::Unsigned(wide_to_u128(negative, magnitude)?)
+            };
+            Some((value, magnitude))
+        });
+        let Some((value, magnitude)) = value else {
+            return self.fail(if quoted {
+                "json: integer string is not a canonical in-range decimal"
+            } else {
+                "json: integer is not a canonical in-range decimal"
+            });
+        };
+        // Natural IJson: a bare number only where JavaScript is exact.
+        if !quoted && self.ijson && form == IntForm::Natural && !wide_is_safe(&magnitude) {
+            return self.fail("ijson: bare integer outside the safe range must be a string");
+        }
+        Ok(value)
+    }
+
+    /// An Enum: the enumerator's name ("active"), the number (2 or the
+    /// numeric string "2"), or both ("active:2", which must agree). An
+    /// unknown name is an error; a number that names no enumerator is
+    /// accepted.
+    fn enumeration(&mut self, ty: &Enum, form: IntForm) -> Text<Value> {
+        let schema = self.schema;
+        let int = match &self.resolve(schema, &ty.r#type)?.value {
+            AnyValue::Int(int) if matches!(int.bits, 8 | 16 | 32 | 64) => int,
+            _ => return self.fail(ENUM_UNDERLYING),
+        };
+        if self.c.kind()? != JsonKind::String {
+            return self.integer(int, form);
+        }
+        let text = self.c.string()?.0.into_owned();
+        const BAD_NUMBER: &str = "json: enum number is not a canonical in-range decimal";
+        let (negative, magnitude);
+        if text.bytes().next().is_some_and(|c| c == b'-' || c.is_ascii_digit()) {
+            match parse_integer(&text, int.isSigned, int.bits) {
+                Some(parsed) => (negative, magnitude) = parsed,
+                None => return self.fail(BAD_NUMBER),
+            }
+        } else {
+            let (name, stated) = match text.split_once(':') {
+                Some((name, stated)) => (name, Some(stated)),
+                None => (text.as_str(), None),
+            };
+            let Some(found) = ty.members.iter().find(|member| member.name == name) else {
+                return self.fail("json: unknown enumerator name");
+            };
+            match stated {
+                Some(stated) => {
+                    match parse_integer(stated, int.isSigned, int.bits) {
+                        Some(parsed) => (negative, magnitude) = parsed,
+                        None => return self.fail(BAD_NUMBER),
+                    }
+                    let low = magnitude as u64;
+                    let bits = if negative { 0u64.wrapping_sub(low) } else { low };
+                    if bits != found.value {
+                        return self.fail("json: enumerator name and number disagree");
+                    }
+                }
+                None => {
+                    let raw = found.value as i64;
+                    negative = int.isSigned && raw < 0;
+                    magnitude = if negative {
+                        u128::from(raw.unsigned_abs())
+                    } else {
+                        u128::from(found.value)
+                    };
+                }
+            }
+        }
+        Ok(if int.isSigned {
+            Value::Signed(if negative { -(magnitude as i128) } else { magnitude as i128 })
+        } else {
+            Value::Unsigned(magnitude)
+        })
+    }
+
     fn integer(&mut self, ty: &Int, form: IntForm) -> Text<Value> {
+        if ty.bits > 64 {
+            return self.wide_integer(ty, form);
+        }
         if !matches!(ty.bits, 1 | 8 | 16 | 32 | 64) {
-            return self.fail("json: integers wider than 64 bits have no JSON form");
+            return self.fail("json: this integer width has no JSON form");
         }
         let wide = self.ijson && ty.bits == 64 && form == IntForm::Natural;
         let kind = self.c.kind()?;
@@ -417,6 +557,7 @@ impl<C: JsonCursor> Reader<'_, C> {
         let ty = self.resolve(schema, input)?;
         match &ty.value {
             AnyValue::Int(i) => self.integer(i, form),
+            AnyValue::Enum(e) => self.enumeration(e, form),
             AnyValue::Float(f) => {
                 let token = self.c.number()?;
                 let value = if f.exp == 8 {
@@ -484,10 +625,31 @@ impl ValueWriter<'_> {
 
     /// The form in force is the writer's (set per record member).
     fn integer(&mut self, ty: &Int, value: &Value) -> Text<()> {
-        if ty.bits > 64 {
-            return self.fail("json: integers wider than 64 bits have no JSON form");
-        }
         const MISMATCH: &str = "pssz dynamic: integer value does not match the schema";
+        // 128 and 256 bits: decimal, a string under natural IJson.
+        match (ty.bits, ty.isSigned, value) {
+            (256, false, Value::Bytes(bytes)) => {
+                let mut limb = [0u64; 4];
+                if bytes.len() != 32 {
+                    return self
+                        .fail("pssz dynamic: 256-bit integer needs 32 little-endian bytes");
+                }
+                for (limb, chunk) in limb.iter_mut().zip(bytes.chunks_exact(8)) {
+                    *limb = chunk.iter().rev().fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte));
+                }
+                return Uint256 { limb }.write_json(&mut self.w);
+            }
+            (256, false, _) => {
+                return self.fail("pssz dynamic: 256-bit integer needs 32 little-endian bytes")
+            }
+            (128, false, Value::Unsigned(v)) => return v.write_json(&mut self.w),
+            (128, true, Value::Signed(v)) => return v.write_json(&mut self.w),
+            (128, _, _) => return self.fail(MISMATCH),
+            (bits, _, _) if bits > 64 => {
+                return self.fail("json: this integer width has no JSON form")
+            }
+            _ => (),
+        }
         match (ty.isSigned, value) {
             (false, Value::Unsigned(v)) => {
                 if ty.bits == 64 {
@@ -619,6 +781,20 @@ impl ValueWriter<'_> {
         let ty = self.resolve(schema, input)?;
         match &ty.value {
             AnyValue::Int(i) => self.integer(i, value),
+            AnyValue::Enum(e) => {
+                let int = match &self.resolve(schema, &e.r#type)?.value {
+                    AnyValue::Int(int) if matches!(int.bits, 8 | 16 | 32 | 64) => int,
+                    _ => return self.fail(ENUM_UNDERLYING),
+                };
+                let Some(bits) = integer_bits(int, value) else {
+                    return self.fail("pssz dynamic: integer value does not match the schema");
+                };
+                // A listed value is its (first) name; any other its number.
+                match e.members.iter().find(|member| member.value == bits) {
+                    Some(member) => self.w.string(member.name.as_bytes()),
+                    None => self.integer(int, value),
+                }
+            }
             AnyValue::Float(f) => match value {
                 Value::Float32(v) if f.exp == 8 => v.write_json(&mut self.w),
                 Value::Float64(v) if f.exp == 11 => v.write_json(&mut self.w),

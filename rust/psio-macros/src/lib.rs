@@ -14,6 +14,7 @@ mod dynamic_schema_macro;
 mod fracpack_macro;
 mod json_macro;
 mod json_text_macro;
+mod c_enum;
 mod schema_macro;
 mod capnp_macro;
 mod fb_macro;
@@ -79,7 +80,7 @@ pub fn derive_from_canonical_json(input: TokenStream) -> TokenStream {
 
 /// The Json / IJson text formats (`psio::json::{Json, IJson}`); see
 /// `json_text_macro.rs` for the supported shapes and `#[json(...)]` attributes.
-#[proc_macro_derive(JsonText, attributes(json))]
+#[proc_macro_derive(JsonText, attributes(json, pssz))]
 pub fn derive_json_text(input: TokenStream) -> TokenStream {
     json_text_macro::derive(input)
 }

@@ -29,6 +29,9 @@ serde_json = { version = "1.0.135",
 serde-aux = "4.5"
 psio-macros = { version = "0.1.0", path = "../psio-macros" }
 paste = "1"
+# Shortest round-trip float digits, the algorithm of C++ std::to_chars
+# (already in the tree through serde_json).
+ryu = "1"
 
 # Competitor Rust libraries, gated behind features.  Default build
 # (`cargo build`, `cargo test`) pulls nothing extra; benches opt in.

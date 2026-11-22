@@ -6,7 +6,12 @@
 //!   `{"Name": value}` under IJson, `[index, value]` under Json. The name is
 //!   the variant identifier unless `#[json(name = "...")]` renames it (use it
 //!   to match the C++ alternative's type name, e.g. "uint32", "string").
-//! * A field-less enum with `#[repr(u8 | ... | i64)]` is its integer.
+//! * A field-less enum with `#[repr(u8 | ... | i64)]` is written as the
+//!   variant's name (the identifier, or `#[json(name = "...")]`) and read
+//!   from the name, the number, the numeric string or `"name:number"`. One
+//!   variant may be the catch-all `#[pssz(other)] Unknown(<repr>)`: it holds
+//!   a value that is no declared variant and is written as its number.
+//!   Without it such a number is an error.
 //!
 //! Integer form, on a field or (as the default for every field) on the
 //! struct: `#[json(json_number)]`, `#[json(json_string)]`,
@@ -100,30 +105,6 @@ fn form_tokens(form: Option<bool>) -> TokenStream2 {
         Some(false) => quote!(::psio::json::IntForm::Number),
         Some(true) => quote!(::psio::json::IntForm::String),
     }
-}
-
-fn int_repr(input: &DeriveInput) -> Option<syn::Ident> {
-    for attr in &input.attrs {
-        if !attr.path.is_ident("repr") {
-            continue;
-        }
-        if let Ok(Meta::List(list)) = attr.parse_meta() {
-            for nested in &list.nested {
-                if let NestedMeta::Meta(Meta::Path(path)) = nested {
-                    if let Some(ident) = path.get_ident() {
-                        let name = ident.to_string();
-                        if matches!(
-                            name.as_str(),
-                            "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64"
-                        ) {
-                            return Some(ident.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
 }
 
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -277,26 +258,79 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         },
         Data::Enum(data) => {
-            let fieldless = data.variants.iter().all(|v| matches!(v.fields, Fields::Unit));
-            if fieldless {
-                let Some(repr) = int_repr(input) else {
+            if let Some(shape) = crate::c_enum::analyze(input)? {
+                let Some(repr) = shape.repr.clone() else {
                     return Err(syn::Error::new_spanned(
                         input,
-                        "a field-less JsonText enum is written as its integer: add #[repr(u8)] \
+                        "a field-less JsonText enum needs its integer type: add #[repr(u8)] \
                          (or u16/u32/u64/i8/i16/i32/i64)",
                     ));
                 };
-                let variants: Vec<_> = data.variants.iter().map(|v| &v.ident).collect();
+                let variants: Vec<_> = shape.declared.iter().map(|v| &v.ident).collect();
+                let mut names: Vec<String> = Vec::new();
+                for variant in &shape.declared {
+                    let label = parse_attrs(&variant.attrs)?
+                        .name
+                        .unwrap_or_else(|| variant.ident.to_string());
+                    // A name must be told apart from a number and from the
+                    // "name:number" form.
+                    let first = label.bytes().next();
+                    if first.is_none_or(|c| c == b'-' || c.is_ascii_digit()) || label.contains(':') {
+                        return Err(syn::Error::new_spanned(
+                            variant,
+                            "an enumerator's JSON name is not empty, does not start with a digit \
+                             or '-', and holds no ':'",
+                        ));
+                    }
+                    if names.contains(&label) {
+                        return Err(syn::Error::new_spanned(variant, "duplicate enumerator name"));
+                    }
+                    names.push(label);
+                }
+                let (preamble, values) = shape.values();
+                let signed = shape.signed();
+                let (write_other, read_unknown) = match shape.other {
+                    Some(other) => {
+                        let other = &other.ident;
+                        (
+                            // One representation per value: the catch-all
+                            // never holds a declared enumerator.
+                            quote! {
+                                Self::#other(__n) => {
+                                    #(if *__n == #values {
+                                        return ::core::result::Result::Err(w.err(
+                                            "json: catch-all enum variant holds a declared enumerator"));
+                                    })*
+                                    <#repr as #j::JsonText>::write_json(__n, w)
+                                }
+                            },
+                            quote!(::core::result::Result::Ok(Self::#other(__value))),
+                        )
+                    }
+                    None => (
+                        quote!(),
+                        quote!(::core::result::Result::Err(r.err_at(__at, "json: value is not an enumerator"))),
+                    ),
+                };
                 (
+                    // A declared value is its name; the catch-all's value is
+                    // its number, by the integer rule in force.
                     quote! {
-                        let __value: #repr = match self { #(Self::#variants => Self::#variants as #repr),* };
-                        <#repr as #j::JsonText>::write_json(&__value, w)
+                        #preamble
+                        match self {
+                            #(Self::#variants => w.string(#names.as_bytes()),)*
+                            #write_other
+                        }
                     },
                     quote! {
+                        #preamble
                         let __at = r.position();
-                        let __value = <#repr as #j::JsonText>::read_json(r)?;
-                        #(if __value == Self::#variants as #repr { return ::core::result::Result::Ok(Self::#variants); })*
-                        ::core::result::Result::Err(r.err_at(__at, "json: value is not an enumerator"))
+                        let __value: #repr = #j::read_enum_value::<#repr>(r, #signed, |__name: &str| match __name {
+                            #(#names => ::core::option::Option::Some(#values),)*
+                            _ => ::core::option::Option::None,
+                        })?;
+                        #(if __value == #values { return ::core::result::Result::Ok(Self::#variants); })*
+                        #read_unknown
                     },
                 )
             } else {

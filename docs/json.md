@@ -38,7 +38,7 @@ number; a larger magnitude is written as a decimal string. So `0`, `-1` and
 depends on the value, not only on the type: a consumer must accept both.
 
 **128- and 256-bit integers** (C++ `psio::uint128` / `int128` / `uint256`,
-Rust `u128` / `i128` / `U256`, Schema IR `Int{128}` / `Int{256}`) are
+Rust `u128` / `i128` / `psio::pssz::Uint256`, Schema IR `Int{128}` / `Int{256}`) are
 decimal. `json` writes a bare number (arbitrary precision is legal JSON);
 `ijson` writes a decimal string for every value, small ones included, so a
 currency amount has one form: `"7"`. Both formats read all of:

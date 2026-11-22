@@ -366,8 +366,15 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
     assert_eq!(adapter(1), ("string".to_string(), Some(8)));
     assert_eq!(adapter(2), ("string".to_string(), None));
     assert_eq!(adapter(3), ("string".to_string(), Some(8)));
-    // A field-less enum is its underlying integer, as in C++.
-    let AnyValue::Int(level) = &schema.resolve(&object.members[4].r#type).unwrap().value else {
+    // A field-less enum is an Enum (its names and values) over its
+    // underlying integer, which is what it is on the wire, as in C++ with
+    // PSIO_REFLECT_ENUM.
+    let AnyValue::Enum(named) = &schema.resolve(&object.members[4].r#type).unwrap().value else {
+        panic!("expected Enum")
+    };
+    let names: Vec<_> = named.members.iter().map(|m| (m.name.as_str(), m.value)).collect();
+    assert_eq!(names, [("Low", 1), ("High", 2)]);
+    let AnyValue::Int(level) = &schema.wire(&object.members[4].r#type).unwrap().value else {
         panic!("expected Int")
     };
     assert_eq!((level.bits, level.isSigned), (16, false));
@@ -530,10 +537,15 @@ fn derives_record_caps_integer_forms_and_variant_names() {
     assert_eq!(codec::auto_width(&schema, &root).unwrap(), 2);
     let dynamic = codec::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap();
     assert_eq!(codec::encode::<Pssz>(&schema, &root, &dynamic).unwrap(), bytes);
-    assert!(codec::pssz_to_json::<psio::json::Json>(&schema, &root, &bytes)
-        .unwrap_err()
-        .what()
-        .contains("no JSON form"));
+    // The 256-bit member is decimal: bare under Json, a string under IJson.
+    assert_eq!(
+        codec::pssz_to_json::<psio::json::Json>(&schema, &root, &bytes).unwrap().0,
+        r#"{"a":"1","b":[18446744073709551615],"c":7,"d":[1,255],"e":1,"f":[5]}"#
+    );
+    assert_eq!(
+        codec::pssz_to_json::<psio::json::IJson>(&schema, &root, &bytes).unwrap().0,
+        r#"{"a":1,"b":[18446744073709551615],"c":"7","d":"01FF","e":"1","f":[5]}"#
+    );
     assert_eq!(
         codec::auto_width(&defaults, &defaults_root).unwrap(),
         auto_pssz_width::<TypeDefaults>()

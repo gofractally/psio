@@ -20,6 +20,7 @@ use psio::json::{self, IJson, Json, JsonFormat, JsonText, TextForm};
 use psio::pssz::schema_ir::{schema_for, ToPsszSchema};
 use psio::pssz::{
     dynamic, BoundedList, BoundedRawString, BoundedString, Pssz, PsszPack, PsszUnpack, RawString,
+    Uint256,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
@@ -172,16 +173,54 @@ struct Fixed {
     on: bool,
 }
 
-// C++ `enum class Color : std::uint8_t { red = 0, green = 1, blue = 7 }`. A
-// C++ enum holds every value of its underlying type and the C++ codecs read
-// and write the unnamed ones (fixture row value/Color/unnamed_255); a Rust
-// field-less enum cannot, and its derives reject them. The faithful Rust
-// model is therefore the underlying integer.
+// C++ `enum class Color : std::uint8_t { red = 0, green = 1, blue = 7 }` with
+// PSIO_REFLECT_ENUM: a declared value is written as its name. A C++ enum
+// holds every value of its underlying type and the fixture has rows for
+// unnamed ones (2, 9, 255), so the mirror carries the catch-all.
 #[derive(
     Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
 )]
-#[pssz(transparent)]
-struct Color(u8);
+#[repr(u8)]
+enum Color {
+    #[json(name = "red")]
+    Red = 0,
+    #[json(name = "green")]
+    Green = 1,
+    #[json(name = "blue")]
+    Blue = 7,
+    #[pssz(other)]
+    Unknown(u8),
+}
+
+// C++ `enum class Status : std::int32_t { pending = -1, active = 2, closed = 7 }`:
+// signed and sparse.
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+#[repr(i32)]
+enum Status {
+    #[json(name = "pending")]
+    Pending = -1,
+    #[json(name = "active")]
+    Active = 2,
+    #[json(name = "closed")]
+    Closed = 7,
+    #[pssz(other)]
+    Unknown(i32),
+}
+
+// 128- and 256-bit integers: decimal in both text formats.
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+struct Wide {
+    amount: u128,
+    delta: i128,
+    hash: Uint256,
+    maybe: Option<u128>,
+    list: Vec<i128>,
+    status: Status,
+}
 
 // Explicit maxDynamicData cap: 2-byte offsets whatever the fields hold.
 #[derive(
@@ -563,6 +602,11 @@ fn registry() -> BTreeMap<&'static str, Entry> {
         "Bounds" => Bounds,
         "Fixed" => Fixed,
         "Color" => Color,
+        "Status" => Status,
+        "u128" => u128,
+        "i128" => i128,
+        "u256" => Uint256,
+        "Wide" => Wide,
         "Capped" => Capped,
         "Shapes" => Shapes,
         "string<=4" => BoundedString<4>,
@@ -670,6 +714,53 @@ fn the_rust_generated_ir_gives_the_typed_rust_results() {
     assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), shown.join("\n"));
     assert!(types >= 41, "types with a Rust IR: {types}");
     assert!(rows >= 1000, "rows through the Rust IR: {rows}");
+}
+
+#[test]
+fn the_enum_and_wide_integer_ir_rust_builds_is_the_ir_cpp_recorded() {
+    use psio::pssz::schema_ir::{AnyType, AnyValue, Schema};
+    let fixture = fixture();
+    let bytes = unhex(&fixture.schema_ir);
+    let recorded = psio::pssz::from_pssz::<Pssz, Schema>(&bytes).expect("schema_ir decodes");
+    // The decoded IR re-encodes to the fixture's bytes: Enum included.
+    assert_eq!(psio::pssz::try_to_pssz::<Pssz, _>(&recorded).unwrap(), bytes);
+    fn same<T: ToPsszSchema>(recorded: &Schema, id: &str) -> AnyType {
+        let (built, _) = schema_for::<T>().unwrap();
+        // The fixture lists each type under its id, as an alias of the name
+        // the C++ builder gave it.
+        let rust = built.get(id).expect("built");
+        let cpp = recorded.resolve(recorded.get(id).expect("recorded")).expect("resolves");
+        assert_eq!(rust, cpp, "{id}");
+        assert_eq!(
+            psio::pssz::try_to_pssz::<Pssz, _>(rust).unwrap(),
+            psio::pssz::try_to_pssz::<Pssz, _>(cpp).unwrap(),
+            "{id}"
+        );
+        cpp.clone()
+    }
+    for ty in [same::<Color>(&recorded, "Color"), same::<Status>(&recorded, "Status")] {
+        assert!(matches!(ty.value, AnyValue::Enum(_)));
+    }
+    // The catch-all is not an enumerator: three names each.
+    let named = |id: &str| recorded.resolve(recorded.get(id).unwrap()).unwrap();
+    let AnyValue::Enum(color) = &named("Color").value else { unreachable!() };
+    let names: Vec<_> = color.members.iter().map(|m| (m.name.as_str(), m.value)).collect();
+    assert_eq!(names, [("red", 0), ("green", 1), ("blue", 7)]);
+    let AnyValue::Enum(status) = &named("Status").value else { unreachable!() };
+    let names: Vec<_> = status.members.iter().map(|m| (m.name.as_str(), m.value)).collect();
+    assert_eq!(names, [("pending", u64::MAX), ("active", 2), ("closed", 7)]);
+    // The wide integers resolve to the same types.
+    for (id, built) in [
+        ("u128", schema_for::<u128>().unwrap()),
+        ("i128", schema_for::<i128>().unwrap()),
+        ("u256", schema_for::<Uint256>().unwrap()),
+    ] {
+        assert_eq!(
+            built.0.resolve(&built.1).unwrap(),
+            recorded.resolve(&AnyType::named(id)).unwrap(),
+            "{id}"
+        );
+    }
 }
 
 #[test]

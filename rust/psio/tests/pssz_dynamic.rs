@@ -702,7 +702,7 @@ mod automatic {
     }
 
     #[test]
-    fn wide_integers_are_bytes_on_the_wire_and_have_no_json_form() {
+    fn wide_integers_are_bytes_on_the_wire_and_decimal_in_json() {
         let schema = Schema::default();
         let u256 = int(256, false);
         let raw: Vec<u8> = (1..=32).collect();
@@ -735,9 +735,23 @@ mod automatic {
                 assert!(error.what().contains("no JSON form"), "{error}");
             }
         };
-        no_form(&u256, &raw, b"1");
-        no_form(&int(128, false), &[0; 16], b"1");
-        no_form(&int(128, true), &[0; 16], b"\"1\"");
+        // 128-bit and unsigned 256-bit integers are decimal: a bare number
+        // under Json, a string under IJson. Any other wide width has no form.
+        let decimal = "14528991250861404666834535435384615765856667510756806797353855100662256435713";
+        assert_eq!(codec::pssz_to_json::<Json>(&schema, &u256, &raw).unwrap().0, decimal);
+        assert_eq!(
+            codec::pssz_to_json::<IJson>(&schema, &u256, &raw).unwrap().0,
+            format!("\"{decimal}\"")
+        );
+        assert_eq!(codec::json_to_pssz::<Json>(&schema, &u256, decimal.as_bytes()).unwrap(), raw);
+        let mut one = [0u8; 16];
+        one[0] = 1;
+        assert_eq!(codec::json_to_pssz::<Json>(&schema, &int(128, false), b"1").unwrap(), one);
+        assert_eq!(codec::json_to_pssz::<IJson>(&schema, &int(128, true), b"\"1\"").unwrap(), one);
+        assert_eq!(codec::pssz_to_json::<IJson>(&schema, &int(128, true), &[0xff; 16]).unwrap().0, "\"-1\"");
+        assert_eq!(codec::pssz_to_json::<Json>(&schema, &int(128, true), &[0xff; 16]).unwrap().0, "-1");
+        // A signed 256-bit integer is not a type of the codec at all.
+        assert!(codec::json_to_pssz::<Json>(&schema, &int(256, true), b"1").is_err());
         let bit = || int(1, false);
         let bitvector = adapter(
             "bitvector",

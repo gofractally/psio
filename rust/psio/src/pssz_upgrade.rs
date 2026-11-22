@@ -35,7 +35,7 @@ fn references(schema: &Schema, root: &AnyType) -> PsszResult<()> {
     let mut visited = HashSet::new();
     let mut pending = vec![root];
     while let Some(ty) = pending.pop() {
-        let ty = schema.resolve(ty)?;
+        let ty = schema.wire(ty)?;
         if !visited.insert(ty as *const AnyType as usize) {
             continue;
         }
@@ -87,8 +87,8 @@ impl Checker<'_> {
         if depth > 128 {
             return Err(PsszError("pssz upgrade: schema comparison depth exceeded"));
         }
-        let old = self.old.resolve(old)?;
-        let new = self.new.resolve(new)?;
+        let old = self.old.wire(old)?;
+        let new = self.new.wire(new)?;
         if !self.visited.insert((
             old as *const AnyType as usize,
             new as *const AnyType as usize,
@@ -115,7 +115,7 @@ impl Checker<'_> {
                     self.compare(old, new, &format!("{path}.{i}"), depth + 1)?;
                 }
                 for (i, ty) in b.members.iter().enumerate().skip(a.members.len()) {
-                    if !matches!(self.new.resolve(ty)?.value, AnyValue::Option(_)) {
+                    if !matches!(self.new.wire(ty)?.value, AnyValue::Option(_)) {
                         return Err(PsszError(
                             "pssz upgrade: appended tuple field is not optional",
                         ));
@@ -189,7 +189,7 @@ impl Checker<'_> {
             )?;
         }
         for member in new.iter().skip(old.len()) {
-            if !matches!(self.new.resolve(&member.r#type)?.value, AnyValue::Option(_)) {
+            if !matches!(self.new.wire(&member.r#type)?.value, AnyValue::Option(_)) {
                 return Err(PsszError("pssz upgrade: appended field is not optional"));
             }
             self.added.push(format!("{path}.{}", member.name));

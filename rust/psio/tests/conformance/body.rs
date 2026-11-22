@@ -19,17 +19,13 @@ macro_rules! conf_record {
 include!("types.rs");
 include!("registry.rs");
 
-/// Classes where C++ and Rust are known to differ by type design; see
-/// docs/compatibility.md. The fixture records what C++ does; these are the
-/// outcomes Rust must have instead.
+/// Classes where C++ and Rust are known to differ by type design. The
+/// fixture records what C++ does; an entry here would be the outcome Rust
+/// must have instead. There are none: the one former difference, an enum
+/// value that names no enumerator (`enum-unknown-value`), is taken by the
+/// mirror enums' `#[pssz(other)]` catch-all, as the fixture expects.
 fn rust_expectation(v: &Vector) -> &str {
-    match v.class.as_str() {
-        // C++ accepts any underlying integer for an enum, so that an old
-        // reader keeps accepting data from a writer that added enumerators;
-        // a Rust enum can only hold its enumerators.
-        "enum-unknown-value" => "reject",
-        _ => v.expect.as_str(),
-    }
+    v.expect.as_str()
 }
 
 #[test]
@@ -84,16 +80,20 @@ fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
         shown.join("\n")
     );
     assert!(fixture.vectors.len() >= 1000, "fixture shrank");
-    // The documented divergence is confined to its class. A member
+    // No vector has a Rust outcome that differs from the fixture's. The
+    // undeclared enum values, once a documented difference, are accepted on
+    // every entry point (checked above against `canonical`). A member
     // length_bound is enforced by both languages (`length-bound-overflow`
     // and `width/cap/checkpoint_at_cap` are rejections in the fixture).
-    let allowed = fixture
-        .vectors
-        .iter()
-        .filter(|v| v.class == "enum-unknown-value")
-        .count();
-    assert_eq!(allowed, 36, "the enum difference is exactly the 36 documented vectors");
-    assert_eq!(divergent, allowed, "C++/Rust divergences are exactly the documented ones");
+    assert_eq!(divergent, 0, "there is no documented C++/Rust divergence");
+    let unknown_enum_values: Vec<_> =
+        fixture.vectors.iter().filter(|v| v.class == "enum-unknown-value").collect();
+    assert_eq!(unknown_enum_values.len(), 36, "the class has exactly 36 vectors");
+    assert!(unknown_enum_values.iter().all(|v| v.expect == "canonical"));
+    for v in &unknown_enum_values {
+        let entry = registry.get(&v.ty).expect("mapped above");
+        assert_eq!((entry.check)(v), Ok(()), "{}: not accepted", v.name);
+    }
     let bound_rejections = fixture
         .vectors
         .iter()
@@ -104,6 +104,31 @@ fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
         .collect::<Vec<_>>();
     assert_eq!(bound_rejections.len(), 32);
     assert!(bound_rejections.iter().all(|v| v.expect == "reject"));
+}
+
+#[test]
+fn the_enum_ir_rust_builds_is_the_ir_cpp_recorded() {
+    use psio::pssz::schema_ir::{schema_for, AnyValue, Schema, ToPsszSchema};
+    let fixture = fixture();
+    let bytes = unhex(&fixture.schema_ir);
+    let recorded = from_pssz::<Pssz, Schema>(&bytes).expect("schema_ir decodes");
+    // The decoded IR re-encodes to the fixture's bytes: Enum included.
+    assert_eq!(try_to_pssz::<Pssz, _>(&recorded).unwrap(), bytes);
+    fn check<T: ToPsszSchema + Conf>(recorded: &Schema) {
+        let id = T::id();
+        let (built, _) = schema_for::<T>().unwrap();
+        // The fixture lists each type under its id, as an alias of the name
+        // the C++ builder gave it.
+        let rust = built.get(&id).expect("built");
+        let cpp = recorded.resolve(recorded.get(&id).expect("recorded")).expect("resolves");
+        assert!(matches!(cpp.value, AnyValue::Enum(_)), "{id}: C++ recorded an Enum");
+        assert_eq!(rust, cpp, "{id}");
+        assert_eq!(try_to_pssz::<Pssz, _>(rust).unwrap(), try_to_pssz::<Pssz, _>(cpp).unwrap(), "{id}");
+    }
+    check::<Color>(&recorded);
+    check::<E16>(&recorded);
+    check::<E32>(&recorded);
+    check::<E64>(&recorded);
 }
 
 #[test]

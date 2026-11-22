@@ -13,11 +13,17 @@ use psio::pssz::*;
 
 type Raw = RawString;
 
+// A C++ enum holds every value of its underlying type, so each mirror has
+// the catch-all: an undeclared wire value decodes into `Unknown`.
 macro_rules! c_enum {
     ($name:ident : $repr:ident { $($v:ident = $value:literal),* $(,)? }) => {
-        #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+        #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
         #[repr($repr)]
-        pub enum $name { $($v = $value),* }
+        pub enum $name {
+            $($v = $value,)*
+            #[pssz(other)]
+            Unknown($repr),
+        }
         impl Conf for $name {
             fn id() -> String { stringify!($name).into() }
             fn shape() -> String {

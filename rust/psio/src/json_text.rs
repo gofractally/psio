@@ -7,14 +7,23 @@
 //           numbers, an enum with payloads is `[index, value]`.
 //   IJson   a 64-bit integer is a bare number while its magnitude is at most
 //           2^53 - 1 and a decimal string beyond that (either form is read,
-//           a bare number only within that range), a byte sequence (`Vec<u8>`,
-//           `[u8; N]`) is one UPPERCASE hex string, an enum with payloads is
-//           `{"Name": value}`.
+//           a bare number only within that range), a 128- or 256-bit integer
+//           (`u128`, `i128`, `Uint256`) is always a decimal string, a byte
+//           sequence (`Vec<u8>`, `[u8; N]`) is one UPPERCASE hex string, an
+//           enum with payloads is `{"Name": value}`.
 //
 // Everything else is common: records are objects in declaration order,
 // `Vec` / arrays / tuples are arrays (`()` is `[]`), `Option` is null or the
-// value, `String` and `RawString` are JSON strings, a field-less
-// `#[repr(int)]` enum is its integer.
+// value, `String` and `RawString` are JSON strings. A field-less
+// `#[repr(int)]` enum is its variant's name as a string; it is read from the
+// name, the number, the numeric string, or `"name:number"` (which must
+// agree). A value held by the enum's `#[pssz(other)]` catch-all is written
+// as its number. NaN and the infinities have no text: writing one is an
+// error in both formats.
+//
+// 128- and 256-bit integers are also read from a decimal string in `Json`,
+// from a bare number (`IJson`: within 2^53 - 1) and from the older
+// `"0x<hex>"` string; they are always written in decimal.
 //
 // Reading is strict and typed (see `Reader`): canonical in-range integers,
 // exact arity, valid UTF-8, at most `MAX_DEPTH` nested arrays/objects.
@@ -299,7 +308,8 @@ impl Writer {
         Ok(())
     }
 
-    /// `wide`: a 64-bit integer whose magnitude exceeds 2^53 - 1.
+    /// `wide`: quoted under natural IJson: a 64-bit integer whose magnitude
+    /// exceeds 2^53 - 1, or any 128- / 256-bit integer.
     fn integer(&mut self, digits: std::fmt::Arguments<'_>, wide: bool) {
         use std::io::Write;
         let quote = match self.form {
@@ -369,40 +379,33 @@ impl Writer {
     /// Shortest round-trip decimal in the layout of C++ `std::to_chars`:
     /// fixed or scientific, whichever is shorter (fixed on a tie), with a
     /// signed exponent of at least two digits.
-    fn float(
-        &mut self,
-        shortest: String,
-        precise: impl Fn(usize) -> String,
-        exact_integer: impl FnOnce() -> String,
-    ) {
-        // `shortest` is Rust's `{:e}`: [-]d[.ddd]e[-]x
-        fn split(text: &str) -> (&str, String, i32) {
-            let (mantissa, exponent) = text.split_once('e').expect("{:e} has an exponent");
-            let exponent: i32 = exponent.parse().expect("{:e} exponent");
-            let (sign, mantissa) = match mantissa.strip_prefix('-') {
-                Some(rest) => ("-", rest),
-                None => ("", mantissa),
-            };
-            (sign, mantissa.chars().filter(|c| *c != '.').collect(), exponent)
+    ///
+    /// `shortest` is the Ryu text of the value (`ryu::Buffer`): the digit
+    /// generation `std::to_chars` uses, so the digits — including the
+    /// choice between two equally short candidates — are the same. Rust's
+    /// own `{:e}` picks the other candidate on some ties (2^-24 as f64).
+    /// Only the layout differs, and is redone here.
+    fn float(&mut self, shortest: &str, exact_integer: impl FnOnce() -> String) {
+        let (sign, body) = match shortest.strip_prefix('-') {
+            Some(rest) => ("-", rest),
+            None => ("", shortest),
+        };
+        let (mantissa, written_exponent) = match body.split_once('e') {
+            Some((m, e)) => (m, e.parse::<i32>().expect("ryu exponent")),
+            None => (body, 0),
+        };
+        let point = mantissa.find('.').unwrap_or(mantissa.len()) as i32;
+        let all: String = mantissa.chars().filter(|c| *c != '.').collect();
+        let leading = all.len() - all.trim_start_matches('0').len();
+        let digits = all.trim_start_matches('0').trim_end_matches('0');
+        if digits.is_empty() {
+            // Zero (ryu writes "0.0" / "-0.0").
+            self.out.extend_from_slice(sign.as_bytes());
+            self.out.push(b'0');
+            return;
         }
-        let (sign, mut digits, exponent) = split(&shortest);
-        // When the value lies exactly halfway between two shortest
-        // candidates, std::to_chars (Ryu) keeps the even last digit and
-        // Rust rounds up. That needs one more exact digit, a 5: probe for it
-        // cheaply, then confirm against the exact expansion.
-        let probe_text = precise(digits.len());
-        let probe = split(&probe_text);
-        if probe.2 == exponent && probe.1.len() == digits.len() + 1 && probe.1.ends_with('5') {
-            let exact_text = precise(1100);
-            let exact = split(&exact_text);
-            let trimmed = exact.1.trim_end_matches('0');
-            if exact.2 == exponent && trimmed == probe.1 {
-                let down = &trimmed[..digits.len()];
-                if (down.as_bytes()[down.len() - 1] - b'0') % 2 == 0 {
-                    digits = down.to_owned();
-                }
-            }
-        }
+        // Decimal exponent of the first significant digit.
+        let exponent = point - 1 - leading as i32 + written_exponent;
         let n = digits.len() as i32;
         let exp_digits = if exponent.abs() >= 100 { 3 } else { 2 };
         let scientific_len = n + i32::from(n > 1) + 2 + exp_digits;
@@ -796,6 +799,48 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// The characters between the quotes of an integer string at the cursor
+    /// (which is at the opening quote). An escape is not unescaped: its
+    /// backslash is no digit, so the caller's parse rejects it.
+    fn quoted_integer(&mut self) -> Result<&'a str> {
+        let src = self.src;
+        let begin = self.pos + 1;
+        let mut q = begin;
+        while q < src.len() && src[q] != b'"' {
+            q += 1;
+        }
+        if q >= src.len() {
+            return Err(self.err("json: unterminated string"));
+        }
+        let text = std::str::from_utf8(&src[begin..q])
+            .map_err(|_| self.err("json: integer string is not a canonical in-range decimal"))?;
+        self.pos = q + 1;
+        Ok(text)
+    }
+
+    /// A bare integer token at the cursor: `-?[0-9]+`, with no fraction or
+    /// exponent after it.
+    fn bare_integer(&mut self) -> Result<&'a str> {
+        let src = self.src;
+        let begin = self.pos;
+        let mut q = begin;
+        if src.get(q) == Some(&b'-') {
+            q += 1;
+        }
+        while matches!(src.get(q), Some(b'0'..=b'9')) {
+            q += 1;
+        }
+        if q == begin {
+            return Err(self.err("json: expected an integer"));
+        }
+        if matches!(src.get(q), Some(b'.' | b'e' | b'E')) {
+            return Err(self.err("json: integer has a fraction or exponent"));
+        }
+        self.pos = q;
+        // Only ASCII digits and '-' were accepted.
+        Ok(std::str::from_utf8(&src[begin..q]).expect("ASCII"))
+    }
+
     /// The characters of an integer at the cursor: either the digits between
     /// quotes or a bare number token, per the form in force.
     fn integer_token(&mut self, wide: bool) -> Result<(&'a str, bool)> {
@@ -805,48 +850,40 @@ impl<'a> Reader<'a> {
             IntForm::Number => false,
             IntForm::Natural => self.ijson && wide,
         };
-        let src = self.src;
         match self.peek() {
             None => Err(self.err("json: unexpected end of input")),
             Some(b'"') => {
                 if !as_string {
                     return Err(self.err("json: expected a number, found a string"));
                 }
-                let begin = self.pos + 1;
-                let mut q = begin;
-                while q < src.len() && src[q] != b'"' {
-                    q += 1;
-                }
-                if q >= src.len() {
-                    return Err(self.err("json: unterminated string"));
-                }
-                let text = std::str::from_utf8(&src[begin..q]).map_err(|_| {
-                    self.err("json: integer string is not a canonical in-range decimal")
-                })?;
-                self.pos = q + 1;
-                Ok((text, false))
+                Ok((self.quoted_integer()?, false))
             }
             Some(_) => {
                 if as_string && self.form == IntForm::String {
                     return Err(self.err("json: expected an integer string"));
                 }
-                let begin = self.pos;
-                let mut q = begin;
-                if src.get(q) == Some(&b'-') {
-                    q += 1;
+                Ok((self.bare_integer()?, as_string))
+            }
+        }
+    }
+
+    /// The characters of a 128- or 256-bit integer at the cursor and whether
+    /// they were quoted. Both forms are read unless one is forced.
+    fn wide_integer_token(&mut self) -> Result<(&'a str, bool)> {
+        self.ws();
+        match self.peek() {
+            None => Err(self.err("json: unexpected end of input")),
+            Some(b'"') => {
+                if self.form == IntForm::Number {
+                    return Err(self.err("json: expected a number, found a string"));
                 }
-                while matches!(src.get(q), Some(b'0'..=b'9')) {
-                    q += 1;
+                Ok((self.quoted_integer()?, true))
+            }
+            Some(_) => {
+                if self.form == IntForm::String {
+                    return Err(self.err("json: expected an integer string"));
                 }
-                if q == begin {
-                    return Err(self.err("json: expected an integer"));
-                }
-                if matches!(src.get(q), Some(b'.' | b'e' | b'E')) {
-                    return Err(self.err("json: integer has a fraction or exponent"));
-                }
-                self.pos = q;
-                // Only ASCII digits and '-' were accepted.
-                Ok((std::str::from_utf8(&src[begin..q]).expect("ASCII"), as_string))
+                Ok((self.bare_integer()?, false))
             }
         }
     }
@@ -996,6 +1033,161 @@ impl JsonText for u8 {
     }
 }
 
+// ── 128- and 256-bit integers ───────────────────────────────────────────────
+//
+// Decimal in both formats: a bare number under Json, a string under IJson
+// (always, so an amount has one form whatever its size). Read from a decimal
+// string, from a bare number (IJson: |n| <= 2^53 - 1, the 64-bit rule) and
+// from the older "0x<hex>" string; a forced form accepts that form only.
+
+/// A 256-bit magnitude, least-significant limb first.
+pub(crate) type Wide = [u64; 4];
+
+/// The text of a wide integer of `bits` (128 or 256) bits as sign and
+/// magnitude: decimal `0 | -?[1-9][0-9]*`, or the legacy `[-]0x<hex>` with at
+/// least one and at most `bits / 4` digits of either case. The magnitude is
+/// only known to fit 256 bits; the caller checks the type's range.
+pub(crate) fn wide_parse(text: &str, bits: u32) -> Option<(bool, Wide)> {
+    let (negative, body) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let mut value: Wide = [0; 4];
+    if body.len() > 2 && (body.starts_with("0x") || body.starts_with("0X")) {
+        let digits = &body.as_bytes()[2..];
+        if digits.len() > (bits / 4) as usize {
+            return None;
+        }
+        for &c in digits {
+            let mut carry = u64::from(hex_digit(c)?);
+            for limb in value.iter_mut() {
+                let next = *limb >> 60;
+                *limb = (*limb << 4) | carry;
+                carry = next;
+            }
+        }
+        return Some((negative, value));
+    }
+    if !canonical_integer(text, true) {
+        return None;
+    }
+    for c in body.bytes() {
+        let mut carry = u128::from(c - b'0');
+        for limb in value.iter_mut() {
+            let wide = u128::from(*limb) * 10 + carry;
+            *limb = wide as u64;
+            carry = wide >> 64;
+        }
+        if carry != 0 {
+            return None;
+        }
+    }
+    Some((negative, value))
+}
+
+pub(crate) fn wide_to_u128(negative: bool, value: Wide) -> Option<u128> {
+    if negative || value[2] != 0 || value[3] != 0 {
+        return None;
+    }
+    Some(u128::from(value[0]) | (u128::from(value[1]) << 64))
+}
+
+pub(crate) fn wide_to_i128(negative: bool, value: Wide) -> Option<i128> {
+    let magnitude = wide_to_u128(false, value)?;
+    const HALF: u128 = 1 << 127;
+    if negative {
+        (magnitude <= HALF).then(|| 0u128.wrapping_sub(magnitude) as i128)
+    } else {
+        (magnitude < HALF).then_some(magnitude as i128)
+    }
+}
+
+pub(crate) fn wide_to_u256(negative: bool, value: Wide) -> Option<crate::pssz::Uint256> {
+    (!negative).then_some(crate::pssz::Uint256 { limb: value })
+}
+
+/// |n| <= 2^53 - 1: what a bare I-JSON number may hold.
+pub(crate) fn wide_is_safe(value: &Wide) -> bool {
+    value[1] == 0 && value[2] == 0 && value[3] == 0 && value[0] <= SAFE_INTEGER
+}
+
+/// The decimal digits of a 256-bit value.
+pub(crate) fn wide_decimal(mut value: Wide) -> String {
+    const CHUNK: u128 = 10_000_000_000_000_000_000; // 10^19
+    let mut chunks: Vec<u64> = Vec::new();
+    while value != [0; 4] {
+        let mut remainder = 0u128;
+        for limb in value.iter_mut().rev() {
+            let current = (remainder << 64) | u128::from(*limb);
+            *limb = (current / CHUNK) as u64;
+            remainder = current % CHUNK;
+        }
+        chunks.push(remainder as u64);
+    }
+    let Some(top) = chunks.pop() else { return "0".to_owned() };
+    let mut out = top.to_string();
+    for chunk in chunks.iter().rev() {
+        out.push_str(&format!("{chunk:019}"));
+    }
+    out
+}
+
+fn read_wide<T>(
+    r: &mut Reader<'_>,
+    bits: u32,
+    convert: impl FnOnce(bool, Wide) -> Option<T>,
+) -> Result<T> {
+    let at = r.pos;
+    let (text, quoted) = r.wide_integer_token()?;
+    let bad = if quoted {
+        "json: integer string is not a canonical in-range decimal"
+    } else {
+        "json: integer is not a canonical in-range decimal"
+    };
+    let Some((negative, magnitude)) = wide_parse(text, bits) else {
+        return Err(r.err_at(at, bad));
+    };
+    let Some(value) = convert(negative, magnitude) else {
+        return Err(r.err_at(at, bad));
+    };
+    // Natural IJson: a bare number only where JavaScript is exact.
+    if !quoted && r.ijson && r.form == IntForm::Natural && !wide_is_safe(&magnitude) {
+        return Err(r.err_at(at, "ijson: bare integer outside the safe range must be a string"));
+    }
+    Ok(value)
+}
+
+impl JsonText for u128 {
+    fn write_json(&self, w: &mut Writer) -> Result<()> {
+        w.integer(format_args!("{}", self), true);
+        Ok(())
+    }
+    fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+        read_wide(r, 128, wide_to_u128)
+    }
+}
+
+impl JsonText for i128 {
+    fn write_json(&self, w: &mut Writer) -> Result<()> {
+        w.integer(format_args!("{}", self), true);
+        Ok(())
+    }
+    fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+        read_wide(r, 128, wide_to_i128)
+    }
+}
+
+/// C++ `psio::uint256`: 32 little-endian bytes on the wire, decimal in text.
+impl JsonText for crate::pssz::Uint256 {
+    fn write_json(&self, w: &mut Writer) -> Result<()> {
+        w.integer(format_args!("{}", wide_decimal(self.limb)), true);
+        Ok(())
+    }
+    fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+        read_wide(r, 256, wide_to_u256)
+    }
+}
+
 fn read_hex(r: &mut Reader<'_>, exact: Option<usize>) -> Result<Vec<u8>> {
     r.ws();
     if r.peek() != Some(b'"') {
@@ -1032,16 +1224,15 @@ macro_rules! float {
         impl JsonText for $ty {
             fn write_json(&self, w: &mut Writer) -> Result<()> {
                 if !self.is_finite() {
-                    // C++ psio::json prints "nan" / "inf" here, which is not
-                    // JSON; no reader accepts it. Both Rust formats refuse.
+                    // No JSON text exists for NaN or an infinity: both
+                    // formats refuse, in every language.
                     return Err(w.err("json: non-finite float has no JSON text"));
                 }
                 let value = *self;
-                w.float(
-                    format!("{:e}", value),
-                    |precision| format!("{:.*e}", precision, value),
-                    || format!("{}", value.abs() as f64 as u128),
-                );
+                let mut buffer = ryu::Buffer::new();
+                w.float(buffer.format_finite(value), || {
+                    format!("{}", value.abs() as f64 as u128)
+                });
                 Ok(())
             }
             fn read_json(r: &mut Reader<'_>) -> Result<Self> {
@@ -1233,6 +1424,51 @@ tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10);
 tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10, L 11);
 
 // ── Support for #[derive(JsonText)] on enums ────────────────────────────────
+
+/// Reads a field-less enum as the value of its `#[repr]` type `T`. Accepted
+/// in both formats: the enumerator's name (`"active"`), the number (`2`, by
+/// the integer rule in force), the numeric string (`"2"`) and both
+/// (`"active:2"`, which must agree). A string is a number when it starts
+/// with a digit or `-`. `value_of` maps a name to its value.
+///
+/// The result may be a value no enumerator has; the derive decides whether
+/// the type can hold it.
+pub fn read_enum_value<T>(
+    r: &mut Reader<'_>,
+    signed: bool,
+    value_of: impl Fn(&str) -> Option<T>,
+) -> Result<T>
+where
+    T: JsonText + PartialEq + std::str::FromStr,
+{
+    r.ws();
+    if r.peek() != Some(b'"') {
+        return T::read_json(r);
+    }
+    let at = r.pos;
+    let text = r.string()?;
+    let number = |digits: &str| -> Option<T> {
+        if canonical_integer(digits, signed) { digits.parse::<T>().ok() } else { None }
+    };
+    const BAD_NUMBER: &str = "json: enum number is not a canonical in-range decimal";
+    if text.bytes().next().is_some_and(|c| c == b'-' || c.is_ascii_digit()) {
+        return number(&text).ok_or_else(|| r.err_at(at, BAD_NUMBER));
+    }
+    let (name, stated) = match text.split_once(':') {
+        Some((name, stated)) => (name, Some(stated)),
+        None => (&*text, None),
+    };
+    let Some(value) = value_of(name) else {
+        return Err(r.err_at(at, "json: unknown enumerator name"));
+    };
+    if let Some(stated) = stated {
+        let stated = number(stated).ok_or_else(|| r.err_at(at, BAD_NUMBER))?;
+        if stated != value {
+            return Err(r.err_at(at, "json: enumerator name and number disagree"));
+        }
+    }
+    Ok(value)
+}
 
 /// Opens the IJson form `{"Name":` or the Json form `[index,` of an enum
 /// with payloads; returns the integer form to restore.

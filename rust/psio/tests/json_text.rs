@@ -74,12 +74,12 @@ fn round_trips_and_is_deterministic() {
         assert_eq!(json::from_str::<F, Mixed>(&text).unwrap(), value);
     }
     check::<Json>(concat!(
-        r#"[{"value":18446744073709551615,"type":2},"#,
+        r#"[{"value":18446744073709551615,"type":"Blue"},"#,
         r#"[[0,{"x":1,"y":-2}],[1,"s\n"#, "\u{e9}", r#""],[2,[1,"in"]]],"#,
         r#"[1,2,255],"text \"q\" \"#, "u0001", r#"",-1.25e-07,[],[null,5]]"#
     ));
     check::<IJson>(concat!(
-        r#"[{"value":"18446744073709551615","type":2},"#,
+        r#"[{"value":"18446744073709551615","type":"Blue"},"#,
         r#"[{"Point":{"x":1,"y":-2}},{"string":"s\n"#, "\u{e9}", r#""},{"Boxed":{"string":"in"}}],"#,
         r#""0102FF","text \"q\" \"#, "u0001", r#"","#, r#"-1.25e-07,[],[null,5]]"#
     ));
@@ -87,18 +87,23 @@ fn round_trips_and_is_deterministic() {
 
 #[test]
 fn enums_newtypes_and_generics() {
-    assert_eq!(json::to_string::<IJson, _>(&Color::Blue).unwrap(), "2");
+    // A declared enumerator is written as its name, and read from the
+    // name or the number.
+    assert_eq!(json::to_string::<IJson, _>(&Color::Blue).unwrap(), "\"Blue\"");
+    assert_eq!(json::to_string::<Json, _>(&Color::Blue).unwrap(), "\"Blue\"");
     assert_eq!(json::from_str::<Json, Color>("1").unwrap(), Color::Green);
+    assert_eq!(json::from_str::<Json, Color>("\"Red\"").unwrap(), Color::Red);
     // A Rust enum holds only its enumerators: an undeclared value is an error.
     assert!(json::from_str::<Json, Color>("3").is_err());
-    assert!(json::from_str::<Json, Color>("\"Red\"").is_err());
-    assert_eq!(json::to_string::<IJson, _>(&Big::Huge).unwrap(), "\"18446744073709551615\"");
-    assert_eq!(json::to_string::<Json, _>(&Big::Huge).unwrap(), "18446744073709551615");
+    assert!(json::from_str::<Json, Color>("\"red\"").is_err());
+    assert_eq!(json::to_string::<IJson, _>(&Big::Huge).unwrap(), "\"Huge\"");
+    assert_eq!(json::to_string::<Json, _>(&Big::Huge).unwrap(), "\"Huge\"");
     assert_eq!(json::from_str::<IJson, Big>("\"18446744073709551615\"").unwrap(), Big::Huge);
+    assert_eq!(json::from_str::<Json, Big>("18446744073709551615").unwrap(), Big::Huge);
     assert_eq!(json::to_string::<IJson, _>(&Meters(5)).unwrap(), "5");
     assert_eq!(json::from_str::<IJson, Meters>("\"5\"").unwrap(), Meters(5));
     let g = Generic { value: vec![1u8, 2], r#type: Color::Red };
-    assert_eq!(json::to_string::<IJson, _>(&g).unwrap(), r#"{"value":"0102","type":0}"#);
+    assert_eq!(json::to_string::<IJson, _>(&g).unwrap(), r#"{"value":"0102","type":"Red"}"#);
     assert_eq!(json::from_str::<IJson, Generic<Vec<u8>>>(r#"{"type":0,"value":"0102"}"#).unwrap(), g);
 }
 

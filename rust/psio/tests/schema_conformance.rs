@@ -306,7 +306,7 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
         // Bytes -> text -> bytes, in both text formats.
         let ijson = to_text::<IJson>(&schema, &row.ty, &bytes);
         if ijson.as_ref().is_err_and(|e| e.contains("no JSON")) {
-            no_json += 1; // wide integers, bit types, non-finite floats
+            no_json += 1; // bit types, non-finite floats
             continue;
         }
         let lossy = has_some_none(&value);

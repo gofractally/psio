@@ -17,37 +17,22 @@ struct Options {
     /// `#[pssz(variant)]`: encode a field-less enum as a variant of unit
     /// alternatives instead of as its underlying integer.
     variant: bool,
-    /// `#[repr(u8 | ... | i64)]` on the item, if any.
-    repr: Option<syn::Ident>,
 }
-fn int_repr(input: &DeriveInput) -> Option<syn::Ident> {
-    for attr in &input.attrs {
-        if !attr.path.is_ident("repr") { continue; }
-        if let Ok(Meta::List(list)) = attr.parse_meta() {
-            for item in list.nested {
-                if let NestedMeta::Meta(Meta::Path(path)) = item {
-                    if let Some(id) = path.get_ident() {
-                        if matches!(id.to_string().as_str(), "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64") {
-                            return Some(id.clone());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
+use crate::c_enum::{self, CEnum};
 /// A field-less enum encoded as its underlying integer (C++ plain `enum`).
-fn c_like(input: &DeriveInput, opts: &Options) -> syn::Result<Option<syn::Ident>> {
-    let Data::Enum(data) = &input.data else { return Ok(None) };
-    if opts.variant || data.variants.is_empty() || !data.variants.iter().all(|v| matches!(v.fields, Fields::Unit)) {
+fn c_like<'a>(input: &'a DeriveInput, opts: &Options) -> syn::Result<Option<CEnum<'a>>> {
+    let Some(shape) = c_enum::analyze(input)? else { return Ok(None) };
+    if opts.variant {
+        if let Some(other) = shape.other {
+            return Err(syn::Error::new_spanned(other, "#[pssz(other)] cannot be combined with #[pssz(variant)]"));
+        }
         return Ok(None);
     }
-    match &opts.repr {
-        Some(repr) => Ok(Some(repr.clone())),
-        None => Err(syn::Error::new_spanned(&input.ident,
-            "a field-less PSSZ enum encodes as its underlying integer: add #[repr(u8)] (or u16/u32/u64/i8/i16/i32/i64), or #[pssz(variant)] to encode it as a variant of unit alternatives")),
+    if shape.repr.is_none() {
+        return Err(syn::Error::new_spanned(&input.ident,
+            "a field-less PSSZ enum encodes as its underlying integer: add #[repr(u8)] (or u16/u32/u64/i8/i16/i32/i64), or #[pssz(variant)] to encode it as a variant of unit alternatives"));
     }
+    Ok(Some(shape))
 }
 fn options(input: &DeriveInput) -> syn::Result<Options> {
     for param in &input.generics.params {
@@ -65,7 +50,6 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
         name: None,
         cap: None,
         variant: false,
-        repr: int_repr(input),
     };
     for attr in &input.attrs {
         if !attr.path.is_ident("pssz") {
@@ -131,13 +115,10 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
     let fields: Vec<_> = match &input.data {
         Data::Struct(s) => s.fields.iter().collect(),
         Data::Enum(e) => {
+            // The one variant annotation is #[pssz(other)]; c_like checks
+            // where it may appear.
             for variant in &e.variants {
-                if variant.attrs.iter().any(|a| a.path.is_ident("pssz")) {
-                    return Err(syn::Error::new_spanned(
-                        variant,
-                        "variant PSSZ annotations are unsupported; use explicit payload types",
-                    ));
-                }
+                c_enum::is_other(variant)?;
             }
             e.variants.iter().flat_map(|v| v.fields.iter()).collect()
         }
@@ -307,10 +288,10 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
     }
     let (validation_g, _, validation_where) = validation_generics.split_for_impl();
     let (_, type_g, _) = input.generics.split_for_impl();
-    let repr = c_like(&input, &opts)?;
+    let c_enum = c_like(&input, &opts)?;
     // Wire-transparent items (a transparent newtype, a C-like enum) forward to
     // the inner codec, which owns the single depth node.
-    let forwards = opts.transparent || repr.is_some();
+    let forwards = opts.transparent || c_enum.is_some();
     let validation_body;
     let mut missing_optional = quote!();
     let (body, consts) = match &input.data {
@@ -401,29 +382,64 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 )
             }
         }
-        Data::Enum(data) if repr.is_some() => {
-            // C++ plain enum: the underlying integer, fixed size.
-            let repr = repr.as_ref().unwrap();
+        Data::Enum(_) if c_enum.is_some() => {
+            // C++ plain enum: the underlying integer, fixed size. With a
+            // #[pssz(other)] catch-all every value of the integer decodes;
+            // without one only the declared enumerators do.
+            let shape = c_enum.as_ref().unwrap();
+            let repr = shape.repr.as_ref().unwrap();
             if opts.transparent || opts.dwnc {
                 return Err(syn::Error::new_spanned(input, "PSSZ enums cannot be transparent or DWNC"));
             }
-            let variants: Vec<_> = data.variants.iter().map(|v| &v.ident).collect();
+            let variants: Vec<_> = shape.declared.iter().map(|v| &v.ident).collect();
+            let (preamble, values) = shape.values();
             let shape_name = format!("enum:{}", name);
+            let (unknown_ok, unknown_value, pack_other) = match shape.other {
+                Some(other) => {
+                    let other = &other.ident;
+                    (
+                        quote!(::core::result::Result::Ok(())),
+                        quote!(::core::result::Result::Ok(Self::#other(__value))),
+                        // One representation per value: the catch-all never
+                        // holds a declared enumerator.
+                        quote! {
+                            Self::#other(__n) => {
+                                #(if *__n == #values {
+                                    return ::core::result::Result::Err(#k::pssz::PsszError(
+                                        "pssz: catch-all enum variant holds a declared enumerator"));
+                                })*
+                                *__n
+                            }
+                        },
+                    )
+                }
+                None => (
+                    quote!(::core::result::Result::Err(#k::pssz::PsszError("pssz: value is not an enumerator"))),
+                    quote!(::core::result::Result::Err(#k::pssz::PsszError("pssz: value is not an enumerator"))),
+                    quote!(),
+                ),
+            };
             validation_body = quote! {
+                #preamble
                 let __value = <#repr as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack(bytes)?;
-                #(if __value == Self::#variants as #repr { return ::core::result::Result::Ok(()); })*
-                ::core::result::Result::Err(#k::pssz::PsszError("pssz: value is not an enumerator"))
+                #(if __value == #values { return ::core::result::Result::Ok(()); })*
+                #unknown_ok
             };
             (
                 if unpack {
                     quote! {
+                        #preamble
                         let __value = <#repr as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack(bytes)?;
-                        #(if __value == Self::#variants as #repr { return ::core::result::Result::Ok(Self::#variants); })*
-                        ::core::result::Result::Err(#k::pssz::PsszError("pssz: value is not an enumerator"))
+                        #(if __value == #values { return ::core::result::Result::Ok(Self::#variants); })*
+                        #unknown_value
                     }
                 } else {
                     quote! {
-                        let __value: #repr = match self { #(Self::#variants => Self::#variants as #repr),* };
+                        #preamble
+                        let __value: #repr = match self {
+                            #(Self::#variants => #values,)*
+                            #pack_other
+                        };
                         <#repr as #pack>::pssz_pack_checked(&__value, out)
                     }
                 },
@@ -701,12 +717,30 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
     }
     let (impl_g, _, where_c) = generics.split_for_impl();
     let (_, type_g, _) = input.generics.split_for_impl();
-    let repr = c_like(&input, &opts)?;
+    let c_enum = c_like(&input, &opts)?;
     let body = match &input.data {
-        // A plain enum is its underlying integer type, as in C++.
-        Data::Enum(_) if repr.is_some() => {
-            let repr = repr.as_ref().unwrap();
-            quote! { <#repr as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)? }
+        // An enum is an Enum over its underlying integer: the wire form plus
+        // the enumerator names and values (C++ PSIO_REFLECT_ENUM). The names
+        // are the JSON names; the catch-all is not an enumerator.
+        Data::Enum(_) if c_enum.is_some() => {
+            let shape = c_enum.as_ref().unwrap();
+            let repr = shape.repr.as_ref().unwrap();
+            let (preamble, values) = shape.values();
+            let names = shape
+                .declared
+                .iter()
+                .map(|v| Ok(parse_attrs(&v.attrs)?.name.unwrap_or_else(|| v.ident.to_string())))
+                .collect::<syn::Result<Vec<String>>>()?;
+            quote! {{
+                #preamble
+                #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Enum(#k::pssz::schema_ir::Enum {
+                    r#type: ::std::boxed::Box::new(<#repr as #k::pssz::schema_ir::ToPsszSchema>::build_schema(builder)?),
+                    // The value sign-extended to 64 bits.
+                    members: ::std::vec![#(#k::pssz::schema_ir::Enumerator {
+                        name: #names.into(), value: (#values) as i64 as u64
+                    }),*],
+                }))
+            }}
         }
         Data::Struct(data) if opts.transparent => {
             if data.fields.len() != 1 {
@@ -873,7 +907,7 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
             }
         }
         Data::Enum(_) if c_like(&input, &opts)?.is_some() => {
-            let repr = c_like(&input, &opts)?.unwrap();
+            let repr = c_like(&input, &opts)?.unwrap().repr.unwrap();
             declarations.push(quote!(
                 /// The underlying integer; panics on a malformed unvalidated view.
                 fn raw_value(&self) -> #repr;

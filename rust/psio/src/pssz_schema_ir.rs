@@ -37,6 +37,13 @@ ir_record!(Float {
     mantissa: u32
 });
 ir_record!(Type { r#type: String });
+// An enumerator of an `Enum`: `value` is the enumerator's value as 64
+// two's-complement bits (sign-extended for a signed underlying type).
+ir_record!(Enumerator { name: String, value: u64 });
+// An enum: its underlying integer `type` (all there is on the wire) plus the
+// enumerator names, which exist for text. A value that is no listed
+// enumerator is still a value of the type.
+ir_record!(Enum { r#type: Box<AnyType>, members: Vec<Enumerator> });
 
 /// Order is the C++ AnyType::value variant order. Never reorder these tags.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack)]
@@ -56,6 +63,9 @@ pub enum AnyValue {
     Custom(Custom),
     Resource(Resource),
     Type(Type),
+    // Added after the alternatives above; schemas written before it decode
+    // unchanged.
+    Enum(Enum),
 }
 // The wrapper is essential: C++ AnyType is a reflected one-field record, not
 // a transparent alias for its variant. Its mutable resolution cache is unwired.
@@ -112,6 +122,23 @@ impl Schema {
                         .get(&reference.r#type)
                         .ok_or(PsszError("pssz schema: unresolved named type"))?
                 }
+                _ => return Ok(ty),
+            }
+        }
+        Err(PsszError("pssz schema: cyclic aliases"))
+    }
+    /// The type as it is on the wire: `resolve`, and an `Enum` is its
+    /// underlying type. The binary codecs use this; text needs the `Enum`
+    /// itself (`resolve`).
+    pub fn wire<'a>(&'a self, mut ty: &'a AnyType) -> PsszResult<&'a AnyType> {
+        for _ in 0..=2 * self.types.len() + 2 {
+            match &ty.value {
+                AnyValue::Type(reference) => {
+                    ty = self
+                        .get(&reference.r#type)
+                        .ok_or(PsszError("pssz schema: unresolved named type"))?
+                }
+                AnyValue::Enum(named) => ty = &named.r#type,
                 _ => return Ok(ty),
             }
         }
