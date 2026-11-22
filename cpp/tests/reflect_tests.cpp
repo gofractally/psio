@@ -226,3 +226,72 @@ TEST_CASE("reflect<T> with zero fields", "[reflect]")
    R::for_each_field(m, [&](auto&&...) { ++touches; });
    CHECK(touches == 0);
 }
+
+// ── Traits are well-formed for every type category (G22) ────────────────
+//
+// A constraint on generic code is tried with references, cv-qualified
+// types, void, function types and arrays (partial-specialization matching,
+// overload resolution): asking must be `false`, never a hard error.
+#include <psio/adapter.hpp>
+#include <psio/annotate.hpp>
+#include <psio/invariant.hpp>
+#include <psio/shapes.hpp>
+#include <psio/transparent.hpp>
+
+namespace reflect_sfinae
+{
+   struct Rec
+   {
+      int x;
+   };
+   PSIO_REFLECT(Rec, x)
+   enum class Kind { a };
+   PSIO_REFLECT_ENUM(Kind, a)
+
+   template <typename T>
+   constexpr int pick = 0;
+   template <typename T>
+      requires psio::Reflected<T>
+   constexpr int pick<T> = 1;
+
+#define PSIO_TEST_NOT_REFLECTED(X)                                        \
+   static_assert(!psio::Reflected<X>);                                    \
+   static_assert(!psio::reflect<X>::is_reflected);                        \
+   static_assert(!psio::ReflectedEnum<X>);                                \
+   static_assert(!psio::Record<X>);                                       \
+   static_assert(!psio::is_transparent_v<X>);                             \
+   static_assert(!psio::has_invariant_v<X>);                              \
+   static_assert(!psio::is_dwnc_v<X>);                                    \
+   static_assert(!psio::max_dynamic_data_v<X>.has_value());               \
+   static_assert(!psio::max_fields_v<X>.has_value());                     \
+   static_assert(!psio::has_adapter_v<X, psio::binary_category>);         \
+   static_assert(pick<X> == 0);
+
+   PSIO_TEST_NOT_REFLECTED(Rec&)
+   PSIO_TEST_NOT_REFLECTED(const Rec&)
+   PSIO_TEST_NOT_REFLECTED(Rec&&)
+   PSIO_TEST_NOT_REFLECTED(int&)
+   PSIO_TEST_NOT_REFLECTED(Kind&)
+   PSIO_TEST_NOT_REFLECTED(void)
+   PSIO_TEST_NOT_REFLECTED(const void)
+   PSIO_TEST_NOT_REFLECTED(int(int))
+   PSIO_TEST_NOT_REFLECTED(int(int) const)
+   PSIO_TEST_NOT_REFLECTED(int (&)(int))
+   PSIO_TEST_NOT_REFLECTED(Rec[3])
+   PSIO_TEST_NOT_REFLECTED(Rec[])
+   PSIO_TEST_NOT_REFLECTED(Rec*)
+   PSIO_TEST_NOT_REFLECTED(int Rec::*)
+#undef PSIO_TEST_NOT_REFLECTED
+
+   // cv-qualified: well-formed, and not the registered type.
+   static_assert(!psio::Reflected<const Rec>);
+   static_assert(!psio::Reflected<volatile Rec>);
+   static_assert(!psio::Reflected<const volatile Rec>);
+   static_assert(pick<const Rec> == 0);
+   // The type itself.
+   static_assert(psio::Reflected<Rec>);
+   static_assert(psio::Reflected<std::remove_cvref_t<const Rec&>>);
+   static_assert(pick<Rec> == 1);
+   static_assert(psio::ReflectedEnum<Kind>);
+   static_assert(!psio::ReflectedEnum<const Kind&>);
+}  // namespace reflect_sfinae

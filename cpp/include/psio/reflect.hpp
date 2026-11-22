@@ -223,14 +223,26 @@ namespace psio {
       };
 
       template <typename T, typename = void>
-      struct reflect_base
+      struct reflect_lookup
       {
          using type = decltype(psio_reflect_helper(static_cast<T*>(nullptr)));
       };
       template <typename T>
-      struct reflect_base<T, std::void_t<decltype(psio_reflect_lookup(reflect_slot<T>{}))>>
+      struct reflect_lookup<T, std::void_t<decltype(psio_reflect_lookup(reflect_slot<T>{}))>>
       {
          using type = decltype(psio_reflect_lookup(reflect_slot<T>{}));
+      };
+      // Only an object type can be reflected. A reference, void or a
+      // function type is quietly "not reflected" — `reflect<T&>` and
+      // `Reflected<T&>` are well-formed and false — so a constraint on
+      // generic code can be asked of any type (`T*` does not exist for a
+      // reference, which made the question itself a hard error).
+      template <typename T>
+      struct reflect_base
+          : std::conditional_t<std::is_object_v<T>,
+                               reflect_lookup<T>,
+                               std::type_identity<reflect_default_impl>>
+      {
       };
    }
 
@@ -241,7 +253,10 @@ namespace psio {
    {
    };
 
-   // Concept gate.
+   // Concept gate. Well-formed for every type: false for a reference, void,
+   // a function or an array type, and for a cv-qualified type (the metadata
+   // is registered for T itself; ask `Reflected<std::remove_cvref_t<X>>`
+   // about an expression's type).
    template <typename T>
    concept Reflected = reflect<T>::is_reflected;
 
