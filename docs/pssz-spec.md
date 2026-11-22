@@ -342,13 +342,23 @@ fn auto_pssz_width(T) -> {1, 2, 4}:
   not reduced to the inferred bound when the current fields happen to
   be smaller.
 - Otherwise the **inferred bound**: `max_encoded_size(T)` — a recursive
-  walk that returns Some(n) when every variable-length sub-field of T
-  carries a `length_bound{.max = M}` (or `.exact = M`) annotation,
-  producing a finite upper bound. Returns None when any sub-field is
-  unbounded.
+  walk that returns Some(n) when every variable-length value inside T
+  is bounded, producing a finite upper bound. Returns None when any of
+  them is unbounded. A value is bounded by its type
+  (`BoundedString(N)`, `BoundedList(T, N)`) or by an annotation on the
+  member that holds it, at any depth (§3.5).
 
 The result is None only when T has no explicit cap and its inferred
-bound is None; W is then 4.
+bound is None; W is then 4. The bound is rounded up to the next width:
+1 byte through 255, 2 bytes through 65 535, 4 bytes above.
+
+**Lists are the exception.** A list — `Vector(T)`, `BoundedList(T, N)`,
+`Map`, `Set` — always writes its own offset table (§5.3.2) with
+**W = 4**, bounded or not. A bound on a list narrows the record that
+holds it (the bound is part of that record's `max_encoded_size`); it
+never narrows the list's own table. Every other type that has offsets —
+a record, a tuple, a pair, an array of variable elements — takes its W
+from its own cap or bound as above.
 
 **Evolution and width.** W is fixed for the lifetime of a type. An
 optional field may be appended (§7) only if it does not change W. A
@@ -369,44 +379,59 @@ cap large enough to cover them from the start.
 | `u128 / i128`                    | 16                                            |
 | `u256`                           | 32                                            |
 | enum with underlying U           | sizeof(U)                                     |
-| `Array(T, N)`               | N × max_encoded_size(T) [None if T is None]   |
-| `Bitvector(N)`                   | ⌈N/8⌉                                         |
-| `Bitlist(N)`                     | ⌈N/8⌉ + 1   (delimiter bit, see §5.7)         |
-| `BoundedString(N)`              | N + W                                         |
-| `BoundedList(T, N)`             | N × max_encoded_size(T) + W [None if T None]  |
+| `Array(T, N)`, T fixed      | N × max_encoded_size(T)                       |
+| `Array(T, N)`, T variable   | N × (max_encoded_size(T) + 4): each element has an offset slot (§5.2) [None if T is None] |
+| `Bitvector(N)`, `Bitlist(N)` | None (see below)                             |
+| `BoundedString(N)`              | N                                             |
+| `BoundedList(T, N)`, T fixed    | N × max_encoded_size(T)                       |
+| `BoundedList(T, N)`, T variable | N × (max_encoded_size(T) + 4): each element has an offset slot (§5.3.2) [None if T is None] |
 | `String`                    | None                                          |
 | `Vector(T)`                 | None                                          |
 | `Nested(T)` (§5.8)          | None (a member `length_bound` max N: N)       |
-| `Optional(T)` where min(T)=0 | 1 + max(T)                                   |
-| `Optional(T)` where min(T)>0 | max(T)                                       |
+| `Optional(T)`               | 1 + max_encoded_size(T) [None if T is None]   |
 | `Variant(Ts...)`            | 1 + max(max_encoded_size(T_i)) [None if any T_i is None] |
-| `Tuple(Ts...)`              | W + sum(per-element max contribution): that of the extensible record with those members (§5.1.1) [None if any element is None] |
+| `Tuple(Ts...)`              | 4 + sum(per-element max contribution): that of the extensible record with those members (§5.1.1) [None if any element is None] |
 | `Pair(A, B)`                | that of `Tuple(A, B)`                         |
-| `Map(K, V)`, `Set(K)`       | that of `Vector(Tuple(K, V))`, `Vector(K)` (§5.9) |
-| reflected record (DWNC)          | sum(fixed_size_of(field_i))                   |
-| reflected record (extensible)    | W + sum(per-field max contribution)           |
+| `Map(K, V)`, `Set(K)`       | that of `Vector(Tuple(K, V))`, `Vector(K)`; bounded to N entries: that of `BoundedList(Tuple(K, V), N)`, `BoundedList(K, N)` (§5.9) |
+| boxed T, a member with an alternate presentation | None                     |
+| transparent type (§5.10)         | that of its member                            |
+| reflected record (DWNC)          | sum(per-field max contribution)               |
+| reflected record (extensible)    | 4 + sum(per-field max contribution)           |
 
-Per-field max contribution for an extensible record, and per-element
-contribution for a tuple (a tuple element carries no member annotation,
-so a `String` / `Vector` / `Nested` element is None and so is the tuple;
-a bounded element type — `BoundedString(N)`, a record with a cap or with
-bounded members — contributes its bound):
+Per-field max contribution for a record, and per-element contribution
+for a tuple:
 
 - Fixed field: `fixed_size_of(field)`
-- Variable field: `W + max_encoded_size(field)` (the W is the offset
+- Variable field: `4 + max_encoded_size(field)` (the 4 is the offset
   slot in the fixed region; the rest is the payload in the dynamic
   region; None if field is None)
 
 If any field's contribution is None, the record's
 `max_encoded_size` is None.
 
+A string, a list, a map, a set and a nested value have no bound of
+their own: `String` and `Vector(T)` are None. They are bounded by their
+type — `BoundedString(N)`, `BoundedList(T, N)` — or, with the type left
+as it is, by an annotation on the member that holds them, at any depth
+(§3.5). The two say the same thing and give the same number.
+
 In these formulas every header and offset slot is counted as **4
 bytes**, whatever width the type ends up with: the bound selects W, so
-it cannot depend on W. A child type that carries an explicit cap
+it cannot depend on W. (`BoundedString(N)` is N: a string's payload has
+no bookkeeping of its own, and the slot that locates it is counted by
+whatever holds it.) A child type that carries an explicit cap
 contributes that cap in full (§3.1), not its own inferred bound; an
 `Optional` reserves one selector byte whether or not its payload needs
 one. The result is an upper bound, never the exact maximum, and every
 implementation must compute the same number: a type's W follows from it.
+
+**Bit types.** `Bitvector(N)` is fixed-size (⌈N/8⌉ bytes) and
+`Bitlist(N)` holds at most ⌊N/8⌋ + 1 bytes, but the inferred bound does
+not use either fact: a bit type contributes None, so a record with a bit
+member and no explicit cap has W = 4. Give such a record
+`max-dynamic-data` to narrow it. (Every implementation computes None
+here; counting the bits would change W, and therefore the bytes, of
+records that have a bit member and no cap.)
 
 ### 3.3 fixed_size_of(T)
 
@@ -454,6 +479,36 @@ Used by the optional-encoding rule (§5.5).
 A type with `min_encoded_size(T) > 0` cannot encode to zero bytes,
 so an enclosing optional can disambiguate None ↔ Some by looking at
 the byte-span length alone (§5.5).
+
+### 3.5 Bounds by annotation
+
+A bound does not have to be in the type. A record member (and a method
+parameter) carries annotations that bound the member and any position
+below it, with the member's type left as the plain string / list / map
+it is:
+
+| annotation        | bounds                                                   |
+|-------------------|----------------------------------------------------------|
+| `max N`           | the member: bytes of a string, elements of a list, map or set, bytes of a nested value (`exact N` and `min N` too, on the member itself) |
+| `utf8`            | the member is a UTF-8 string: `String` instead of raw bytes |
+| `element(...)`    | every element of a list, an array or a set               |
+| `keys(...)`       | every key of a map                                       |
+| `values(...)`     | every mapped value of a map                              |
+| `at I (...)`      | element I of a tuple or pair, alternative I of a variant |
+
+An `Optional` is looked through: what is written for an optional member
+or position applies to its payload. The position specs nest to any
+depth, and below the member itself a length bound is `max N`.
+
+An annotated member is exactly the type the annotations describe:
+`Vector(String)` annotated `max 8, element(utf8, max 16)` **is**
+`BoundedList(BoundedString(16), 8)`. It has that type's
+`max_encoded_size`, that type's widths at every depth (a pair, a tuple
+or an array of variable elements below the member takes its W from the
+bounds its position carries; a list's table is 4 wide either way), the
+same bytes, the same schema, and the same checks: an encoder refuses a
+value outside any bound of the tree, and every reader — validating,
+checked and fail-fast — rejects a frame that holds one (§16).
 
 ## 4. Scalar Encodings
 
@@ -666,6 +721,8 @@ A zero-element vector is a zero-byte payload.
 ```
 [ count_offsets × u{W} | T_0_payload | T_1_payload | ... ]
 ```
+
+W is 4 for a list's own offset table, whatever bounds the list (§3.1).
 
 The count is determined by walking the offset slots until they exceed
 the payload's total size. (Implementation hint: the offset table size
@@ -1659,10 +1716,22 @@ explicit cap uses the inferred bound `max_encoded_size(T)`. There is no
 The two are enforced independently. The cap bounds the encoded size of
 the record (above). A member `length_bound` (`max` / `exact` / `min`
 on a string, list, map, set or nested member, §3.2) bounds that
-member: an encoder refuses a value outside it, and every reader —
-validating, checked and fail-fast — rejects a frame that holds one. A
-value can satisfy every member bound and still exceed the cap, or the
+member, and the annotations written for the positions below it —
+its elements, keys, values, tuple elements, at any depth (§3.5) —
+bound those: an encoder refuses a value outside any of them, and every
+reader — validating, checked and fail-fast — rejects a frame that holds
+one. A value can satisfy every bound and still exceed the cap, or the
 reverse; either is an error.
+
+**Method arguments.** The arguments of a method are the tuple of its
+parameters (§3.2 `Tuple`). A method may declare annotations for its
+parameters, which bound the tuple exactly as member annotations bound a
+record, and a `max-dynamic-data: N` for the tuple itself: the cap of the
+encoded arguments and, as for a record, what fixes the tuple's W for
+the method's lifetime. A method that may gain optional trailing
+arguments (§7) declares the cap from the start; without one, an added
+argument that pushes the inferred bound into the next width class
+changes W and is not a compatible change.
 
 When a record is DWNC + all fields are fixed-shape +
 `max-dynamic-data: N` is small enough to drop W to 1 and the value's
