@@ -190,11 +190,11 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
       vectors: 0, validateAccept: 0, validateReject: 0, canonicalReencode: 0, unknownReencode: 0,
       jsonRoundTrip: 0, ijsonRoundTrip: 0, someNoneLossy: 0, noJsonForm: 0,
       ijsonNoncharacter: 0, rawNonUtf8NoText: 0, handlerTextRoundTrip: 0,
-      invariant: 0, nestedUnknown: 0, nestedDeferred: 0,
+      invariant: 0, nestedUnknown: 0, nestedDeferred: 0, lengthBoundReject: 0,
     },
     explicit: {
       vectors: 0, validateAccept: 0, validateReject: 0, canonicalReencode: 0,
-      unknownReencode: 0, invariant: 0, nestedUnknown: 0, nestedDeferred: 0,
+      unknownReencode: 0, invariant: 0, nestedUnknown: 0, nestedDeferred: 0, lengthBoundReject: 0,
     },
   };
   const classes = new Map<string, number>();
@@ -325,6 +325,33 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
       // A map / set out of order is refused for its order.
       if (cls === 'map-set-order' && !result.ok)
         assert.equal(result.error.message.replace(/^pssz IR: /, 'pssz: '), row.reason, row.name);
+      // A member outside its length bound is refused, for that reason, by
+      // every reader that decodes the record: validate, decode (lenient and
+      // exact), bytes -> text, and a view's toValue(). (In the IR the bound
+      // of a utf8_string<N> / bounded<T, N> is the node's own; a max<N>
+      // member bound is the member's attribute. All three messages are the
+      // bound's.) A view is not validated when it is made: it reads only
+      // what it is asked for, so making one of these frames succeeds.
+      if (cls === 'length-bound-overflow') {
+        const BOUND = /^pssz IR: (member length bound violated|byte count bound exceeded|sequence bound exceeded)$/;
+        assert.equal(row.reason, 'pssz: member length_bound violated', row.name);
+        const readers: [string, PsszType][] = [['plain', type], ['handlers', withHandlers]];
+        for (const [label, reader] of readers) {
+          const name = `${row.name}: ${label}`;
+          const refused = reader.validate(bytes);
+          assert.ok(!refused.ok && refused.error.kind === 'bytes', name);
+          assert.match(refused.error.message, BOUND, name);
+          assert.match(rejects(() => reader.decode(bytes), name).message, BOUND, `${name}: decode`);
+          assert.match(rejects(() => reader.decode(bytes, { rejectUnknown: true }), name).message, BOUND, `${name}: exact decode`);
+          for (const format of ['json', 'ijson'] as const)
+            assert.match(rejects(() => reader.psszToJson(bytes, format), name).message, BOUND, `${name}: ${format}`);
+          const view = reader.view(bytes);
+          assert.ok(view instanceof PsszView, `${name}: view`);
+          assert.match(rejects(() => view.toValue(), name).message, BOUND, `${name}: view.toValue`);
+          assert.match(rejects(() => view.toValue({ rejectUnknown: true }), name).message, BOUND, `${name}: view.toValue exact`);
+        }
+        ++c.lengthBoundReject;
+      }
       ++c.validateReject;
       continue;
     }
@@ -407,6 +434,7 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   assert.deepEqual(Object.fromEntries([...classes].sort()), Object.fromEntries(Object.entries(PSSZ_CLASSES).sort()));
   assert.equal(a.invariant + e.invariant, PSSZ_CLASSES.invariant);
   assert.equal(a.nestedDeferred + e.nestedDeferred, PSSZ_CLASSES['nested-deferred']);
+  assert.equal(a.lengthBoundReject + e.lengthBoundReject, PSSZ_CLASSES['length-bound-overflow']);
   assert.equal(a.nestedUnknown + e.nestedUnknown, 16);
   assert.ok(a.rawNonUtf8NoText >= 11);
   // Top-level caps under an explicit width are rejections that were replayed.
