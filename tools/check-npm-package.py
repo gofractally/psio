@@ -16,15 +16,14 @@ with tempfile.TemporaryDirectory(prefix='psio-npm-consumer-') as temp:
                     str(work/archive['filename'])], cwd=work, check=True)
     (work/'consumer.mjs').write_text('''
 import assert from 'node:assert/strict';
-import { struct, u32, str, createPjson, PJSON_WIRE_REVISION } from 'psio';
-const record = struct({id:u32, name:str});
-const value = {id:42, name:'Alice'};
-assert.deepEqual(record.unpack(record.pack(value)), value);
-const codec = await createPjson();
+import { record, u32, utf8, pjsonEncode, pjsonDecode, PJSON_WIRE_REVISION } from 'psio';
+const Row = record('Row', { id: u32, name: utf8 });
+const value = { id: 42, name: 'Alice' };
+assert.deepEqual(Row.decode(Row.encode(value)), value);
 assert.equal(PJSON_WIRE_REVISION, 2);
-assert.equal(Buffer.from(codec.encode(-5n)).toString('hex'),'35');
-assert.equal(Buffer.from(codec.encode(5n)).toString('hex'),'25');
-assert.equal(codec.decode(codec.encode(-1234567890123456789n)), -1234567890123456789n);
+assert.equal(Buffer.from(pjsonEncode(-5n)).toString('hex'), '35');
+assert.equal(Buffer.from(pjsonEncode(5n)).toString('hex'), '25');
+assert.equal(pjsonDecode(pjsonEncode(-1234567890123456789n)), -1234567890123456789n);
 ''')
     subprocess.run(['node','consumer.mjs'],cwd=work,check=True)
 print('npm archive consumer passed')

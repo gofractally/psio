@@ -52,17 +52,16 @@ npm test
 npm pack
 ```
 
-The package exports ESM and TypeScript declarations. Node 20+ is the declared
-runtime floor; local verification used Node 25.9.0. The legacy fracpack
-benchmark API is available at the package root; pSSZ is not yet implemented
-in JS/TS. The pjson codec initializes its XXH3 helper
-once, then provides synchronous operations:
+The package exports ESM and TypeScript declarations and has no runtime
+dependencies. Node 20+ is the declared runtime floor. It implements pSSZ, the
+sort-preserving key format, JSON and I-JSON from a schema or from typed
+declarations, with read views over encoded bytes; see `js/README.md`. The
+pjson codec is synchronous:
 
 ```ts
-import { createPjson, PjsonDecimal } from 'psio';
-const pjson = await createPjson();
-const bytes = pjson.encode({ id: 42n, price: new PjsonDecimal(12345n, -2) });
-const value = pjson.decode(bytes);
+import { pjsonEncode, pjsonDecode, PjsonDecimal } from 'psio';
+const bytes = pjsonEncode({ id: 42n, price: new PjsonDecimal(12345n, -2) });
+const value = pjsonDecode(bytes);
 ```
 
 Integers decode as `bigint`. Objects decode as ordered `PjsonObject` entries to
