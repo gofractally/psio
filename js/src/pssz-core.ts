@@ -987,9 +987,10 @@ export class Codec {
         const id = t.value.id;
         const time = parseTimeSchemaId(id);
         if (time) {
-          // A built-in presentation: a duration / time point is its tick
-          // integer on the wire, bigint ticks as a value, and has the text
-          // form of docs/time.md.
+          // A built-in presentation: a duration / time point / monotonic
+          // time point is its tick integer on the wire, bigint ticks as a
+          // value, and has the text form of docs/time.md (RFC 3339 for a
+          // time point, the tick count for the other two).
           const ticks = this.direct(t.value.type);
           const bits = ticks.type === 'Int' ? ticks.value.bits : 0;
           if (ticks.type !== 'Int' || (bits !== 8 && bits !== 16 && bits !== 32 && bits !== 64))

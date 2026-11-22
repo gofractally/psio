@@ -136,7 +136,7 @@ schema of one definition and what it reaches.
 | `variant({ name: T, ... })` | `{ type: 'name', value: T }` (a discriminated union) | `std::variant<...>` |
 | `record(name, { field: T, ... }, options)` | `{ field: T, ... }` | a `PSIO_REFLECT`ed struct |
 | `enumeration(u8, { red: 0, green: 1 })` | the integer (`number` / `bigint`); the name in text | a reflected `enum class` |
-| `timePoint(unit, tick = i64)`, `duration(unit, tick = i64)` | `bigint` ticks | `std::chrono` time points and durations (`docs/time.md`) |
+| `timePoint(unit, tick = i64)`, `duration(unit, tick = i64)`, `monotonic(unit, tick = i64)` | `bigint` ticks | `std::chrono` time points of `system_clock`, durations, and time points of any other clock (`docs/time.md`) |
 | `custom(id, T, handler)` | `T`; its own text ([custom types](#custom-types)) | a type with `schema_custom` |
 | `box(T)` | `T` | `psio::Box<T>` |
 | `lazy(() => T)` | `T` | (a recursive reference) |
@@ -379,7 +379,7 @@ Release.decode(bytes);                           // { version: { major: 1, minor
 | Compute database keys and scan ranges | `encodeKey`, `encodeKeyPrefix`, `keyPrefixUpperBound` |
 | Present 64-bit values safely | `bigint` values; I-JSON text (numbers up to 2^53 − 1, strings beyond) |
 | Account names | `nameToNumber` / `numberToName`, as the handler of a `custom` type |
-| Timestamps | `timePoint` / `duration` types; `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate` |
+| Timestamps | `timePoint` / `duration` / `monotonic` types; `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate` (time points only: a monotonic time point has no date) |
 
 ## Errors and untrusted input
 
@@ -410,7 +410,7 @@ throw. pjson failures are a `PjsonError`.
 | integers of 8, 16, 32 bits; `char` | `number` |
 | integers of 64, 128, 256 bits | `bigint` (an exact `number` is accepted on encode). A 256-bit integer is 32 little-endian bytes on the wire and one `bigint` here |
 | enum (`Enum`) | the value of its underlying integer: `number` for 8 to 32 bits, `bigint` for 64. Never the name; names exist only in text |
-| duration / time point (`Custom` id `duration-…` / `time-point-…` over the tick `Int`) | `bigint` ticks at every width. JSON: a duration is its tick integer; a time point is an RFC 3339 UTC string with exactly the unit's fraction digits. Built in: no handler is needed or accepted, and `requireHandlers` does not apply |
+| duration / time point / monotonic time point (`Custom` id `duration-…` / `time-point-…` / `monotonic-…` over the tick `Int`) | `bigint` ticks at every width. JSON: a duration is its tick integer; a time point is an RFC 3339 UTC string with exactly the unit's fraction digits; a monotonic time point (a clock other than the system clock: no date) is its tick integer, exactly like a duration, and never a date-time string. Built in: no handler is needed or accepted, and `requireHandlers` does not apply |
 | floats | `number`; a NaN carrying a payload decodes to a `PsszNaN` (its `bits` re-encode exactly) |
 | UTF-8 string (`utf8` adapter: C++ `utf8_string`, Rust `String`) | `string` (validated UTF-8 on the wire; an unpaired surrogate is an error) |
 | raw string (`string` adapter: C++ `std::string`, Rust `RawString`) | `Uint8Array`: any bytes, not validated. `encode` and `valueToJson` also accept a JavaScript `string` (its UTF-8) |
@@ -643,8 +643,8 @@ name into a 64-bit number (C++ `psio::compress_name`); `isCompressedName` /
 |---|---|
 | Schema-driven | `PsszSchema`, `PsszType`, `PsszError`, `PsszNaN`, `IR_VERSION`, `jsonToPssz`, `psszToJson`, `validatePssz`, `keyPrefixUpperBound` |
 | Views | `PsszView`, `RecordView`, `TupleView`, `ListView`, `VariantView` |
-| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `enumeration`, `timePoint`, `duration`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
-| Time | `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate`, `timeSchemaId`, `parseTimeSchemaId`, `timeFractionDigits` |
+| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `enumeration`, `timePoint`, `duration`, `monotonic`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
+| Time | `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate`, `timeSchemaId`, `parseTimeSchemaId`, `reservedTimeId`, `timeFractionDigits` |
 | Other | `emitWit`, `toHex`, `fromHex`, `nameToNumber`, `numberToName`, `hashName`, `isHashName`, `isCompressedName` |
 | pjson | `pjsonEncode`, `pjsonDecode`, `pjsonValidate`, `PJSON_WIRE_REVISION`, `PjsonError`, `PjsonDecimal`, `PjsonFloat`, `PjsonString`, `PjsonTypedArray`, `PjsonRows`, `PjsonObject` |
 | Types | `Infer`, `InferView`, `CustomHandler`, `FieldOptions`, `AltOptions`, `RecordOptions`, `LengthBoundOption`, `IntText`, `TypeDefOptions`, `JsonFormat`, `PsszWidth`, `PsszErrorKind`, `PsszValidation`, `PsszKeyValidation`, `PsszDecodeOptions`, `PsszTypeOptions`, `PsszSchemaOptions`, `PsszCustomHandler`, `PsszCustomHandlers`, `PsszSchemaInput`, `PsszTypeInput`, `CompactType`, `CompactEnumerator`, `Some`, `VariantValue`, `BitsValue`, `TimeKind`, `TimeUnit`, `TickType`, `PjsonValue`, and the IR: `IrSchema`, `IrAnyType`, `IrTypeValue`, `IrMember`, `IrAttribute`, `IrEnum`, `IrEnumerator`, `IrFunc`, `IrResource`, `IrInterface`, `IrWorld`, `IrUse` |

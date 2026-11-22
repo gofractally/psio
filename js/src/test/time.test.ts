@@ -6,6 +6,8 @@ import assert from 'node:assert/strict';
 import {
   PsszError, PsszSchema, parseTimeSchemaId, timeFractionDigits, timePointFromDate, timePointFromIso,
   timePointToDate, timePointToIso, timeSchemaId, type PsszTypeInput, type TimeUnit,
+  custom, duration, field, generateSchema, i32, i64, list, monotonic, optional, record, reservedTimeId, timePoint,
+  u32, u64, u8, type IrAnyType, type ListView, type RecordView, type TypeDef,
 } from '../index.js';
 
 const throwsPssz = (run: () => unknown, what?: RegExp) =>
@@ -303,4 +305,170 @@ test('time: the ids are built-in presentations of the Custom-id mechanism', () =
   throwsPssz(() => schema.type({ Custom: { type: { Custom: { type: { List: int(8, false) }, id: 'utf8' } }, id: 'duration-millis' } }),
     /tick integer/);
   throwsPssz(() => schema.type({ Custom: { type: { Float: { exp: 11, mantissa: 53 } }, id: 'duration-millis' } }), /tick integer/);
+});
+
+// ── Monotonic time points (a clock other than the system clock) ─────────────
+// The facts of cpp/tests/time_tests.cpp "a monotonic time point is its tick
+// count in every format" and "schema marks a monotonic time point with its
+// own id".
+
+test('time: a monotonic time point is its tick count in every format', () => {
+  const Timer = record('Timer', {
+    expires: monotonic('micros'), started: optional(monotonic('seconds')), laps: list(monotonic('millis', u32)),
+  });
+  const TimerInts = record('TimerInts', { expires: i64, started: optional(i64), laps: list(u32) });
+  const timer = { expires: 9007199254740993n, started: -5n, laps: [0n, 4294967295n] };
+  const ints = { expires: 9007199254740993n, started: -5n, laps: [0, 4294967295] };
+
+  // Binary and key: the tick integer.
+  const bytes = Timer.encode(timer);
+  assert.deepEqual(bytes, TimerInts.encode(ints));
+  assert.equal(Timer.validate(bytes).ok, true);
+  assert.deepEqual(Timer.decode(bytes), timer); // strict: bigint ticks, also the u32 laps
+  const key = Timer.encodeKey(timer);
+  assert.deepEqual(key, TimerInts.encodeKey(ints));
+  assert.deepEqual(Timer.validateKey(key), { ok: true });
+  assert.deepEqual(Timer.decodeKey(key), timer);
+  // Key order is tick order (bytes compared unsigned).
+  const micros = monotonic('micros');
+  assert.ok(Buffer.compare(micros.encodeKey(-1n), micros.encodeKey(0n)) < 0);
+  assert.deepEqual(monotonic('nanos').encode(7n), i64.encode(7n));
+  // Views read the same ticks.
+  const view = Timer.view(bytes) as RecordView;
+  assert.equal(view.get('expires'), 9007199254740993n);
+  assert.equal(view.get('started'), -5n);
+  assert.deepEqual([...(view.get('laps') as ListView)], [0n, 4294967295n]);
+
+  // Text: the tick count under the integer rules, never a date.
+  const json = '{"expires":9007199254740993,"started":-5,"laps":[0,4294967295]}';
+  const ijson = '{"expires":"9007199254740993","started":-5,"laps":[0,4294967295]}';
+  assert.equal(Timer.valueToJson(timer, 'json'), json);
+  assert.equal(Timer.valueToJson(timer, 'ijson'), ijson);
+  assert.equal(TimerInts.valueToJson(ints, 'json'), json);
+  assert.equal(TimerInts.valueToJson(ints, 'ijson'), ijson);
+  assert.equal(Timer.psszToJson(bytes, 'json'), json);
+  assert.deepEqual(Timer.jsonToValue(json, 'json'), timer);
+  assert.deepEqual(Timer.jsonToValue(ijson, 'ijson'), timer);
+  assert.deepEqual(Timer.jsonToPssz(ijson, 'ijson'), bytes);
+  const date = '{"expires":"2026-11-22T10:15:30Z","started":null,"laps":[]}';
+  for (const format of ['json', 'ijson'] as const) {
+    throwsPssz(() => Timer.jsonToValue(date, format));
+    throwsPssz(() => Timer.jsonToPssz(date, format));
+    throwsPssz(() => Timer.valueToJson({ ...timer, expires: '2026-11-22T10:15:30Z' as unknown as bigint }, format));
+    throwsPssz(() => Timer.valueToJson({ ...timer, expires: new Date(0) as unknown as bigint }, format));
+  }
+  // Member integer-form annotations apply, as to a duration.
+  const Forced = record('Forced', { at: field(monotonic('seconds'), { jsonInt: 'string', ijsonInt: 'string' }) });
+  assert.equal(Forced.valueToJson({ at: 6n }, 'json'), '{"at":"6"}');
+  assert.deepEqual(Forced.jsonToValue('{"at":"6"}', 'ijson'), { at: 6n });
+
+  // The same through a schema, at every width; the tick type bounds the value.
+  for (const bits of [8, 16, 32, 64])
+    for (const isSigned of [true, false]) {
+      const max = isSigned ? (1n << BigInt(bits - 1)) - 1n : (1n << BigInt(bits)) - 1n;
+      const min = isSigned ? -(1n << BigInt(bits - 1)) : 0n;
+      for (const id of ['monotonic-seconds', 'monotonic-nanos', 'monotonic-60/1', 'monotonic-1/60']) {
+        const type = schema.type(time(id, bits, isSigned));
+        const plain = schema.type(int(bits, isSigned));
+        for (const v of [min, 0n, 1n, max]) {
+          assert.deepEqual(type.encode(v), plain.encode(v));
+          assert.equal(type.decode(type.encode(v)), v); // strict: a bigint, never a number
+          assert.deepEqual(type.encodeKey(v), plain.encodeKey(v));
+          assert.equal(type.decodeKey(type.encodeKey(v)), v);
+          for (const format of ['json', 'ijson'] as const) {
+            const text = type.valueToJson(v, format);
+            assert.equal(text, plain.valueToJson(bits <= 32 ? Number(v) : v, format));
+            assert.equal(type.jsonToValue(text, format), v);
+          }
+        }
+        assert.deepEqual(type.encode(1), type.encode(1n));
+        throwsPssz(() => type.encode(max + 1n));
+        throwsPssz(() => type.encode(min - 1n));
+        throwsPssz(() => type.encode(new Date(0)));
+        throwsPssz(() => type.valueToJson(max + 1n));
+        throwsPssz(() => type.jsonToValue((max + 1n).toString(), 'json'));
+      }
+    }
+  const mono = schema.type(time('monotonic-seconds'));
+  for (const bad of ['"PT1S"', '1.5', '1e3', 'null', '"1970-01-01T00:00:01Z"', '"2026-11-22T10:15:30Z"'])
+    for (const format of ['json', 'ijson'] as const) throwsPssz(() => mono.jsonToValue(bad, format));
+  // No year range: every tick count has text (a time point of this value has none).
+  assert.equal(mono.valueToJson((1n << 63n) - 1n, 'json'), '9223372036854775807');
+  assert.equal(mono.valueToJson(-(1n << 63n), 'ijson'), '"-9223372036854775808"');
+  // A unit with no RFC 3339 form still has tick text.
+  assert.equal(schema.type(time('monotonic-60/1', 32)).valueToJson(0n), '0');
+  assert.equal(monotonic({ num: 60, den: 1 }, i32).valueToJson(0n), '0');
+});
+
+test('time: schema marks a monotonic time point with its own id', () => {
+  const cases: [TypeDef<bigint>, string, number, boolean, bigint, bigint][] = [
+    [monotonic('seconds'), 'monotonic-seconds', 64, true, 1n, 1n],
+    [monotonic('micros'), 'monotonic-micros', 64, true, 1n, 1000000n],
+    [monotonic('millis', u32), 'monotonic-millis', 32, false, 1n, 1000n],
+    [monotonic('nanos'), 'monotonic-nanos', 64, true, 1n, 1000000000n],
+    [monotonic({ num: 60, den: 1 }, i32), 'monotonic-60/1', 32, true, 60n, 1n],
+    [monotonic({ num: 120n, den: 2n }, i32), 'monotonic-60/1', 32, true, 60n, 1n],
+    [monotonic({ num: 1, den: 1000 }, u8), 'monotonic-millis', 8, false, 1n, 1000n],
+  ];
+  for (const [def, id, bits, isSigned, num, den] of cases) {
+    const ir = generateSchema({ T: def }).ir;
+    const byName = new Map(ir.types.map((m) => [m.name, m.type]));
+    const resolved = (t: IrAnyType): IrAnyType['value'] => {
+      let v = t.value;
+      for (let hops = 0; v.type === 'Type' && hops < 8; ++hops) v = byName.get(v.value.type)!.value;
+      return v;
+    };
+    const node = resolved(byName.get('T')!);
+    assert.ok(node.type === 'Custom', id);
+    assert.equal(node.value.id, id);
+    assert.deepEqual(resolved(node.value.type), { type: 'Int', value: { bits, isSigned } }, id);
+    const kind = parseTimeSchemaId(id);
+    assert.deepEqual(kind, { point: false, monotonic: true, num, den }, id);
+    assert.equal(timeSchemaId(kind!), id);
+    assert.equal(reservedTimeId(id), true);
+  }
+  assert.equal(timeSchemaId({ point: false, monotonic: true, num: 2n, den: 2000n }), 'monotonic-millis');
+  throwsPssz(() => timeSchemaId({ point: true, monotonic: true, num: 1n, den: 1n }));
+  for (const bad of ['monotonic', 'monotonic-', 'monotonic-1/1000', 'monotonic-2/4', 'monotonic-minutes', 'Monotonic-seconds',
+    'monotonic-seconds ', 'monotonic-01/7', 'monotonic--1/7', 'monotonically'])
+    assert.equal(parseTimeSchemaId(bad), null, bad);
+  assert.equal(reservedTimeId('monotonic'), true);
+  assert.equal(reservedTimeId('monotonic-anything'), true);
+  assert.equal(reservedTimeId('monotonically'), false);
+  // A time point and a monotonic time point of one unit are different ids.
+  assert.notEqual(timeSchemaId({ point: true, num: 1n, den: 1000000n }), timeSchemaId({ point: false, monotonic: true, num: 1n, den: 1000000n }));
+  // ... and different typed definitions from one another and from the tick integer.
+  const irOf = (def: TypeDef<any, any>) => JSON.stringify(generateSchema({ T: def }).ir);
+  const distinct = new Set([monotonic('micros'), timePoint('micros'), duration('micros'), i64, monotonic('millis'), monotonic('micros', u64)].map(irOf));
+  assert.equal(distinct.size, 6);
+
+  // A reserved spelling that is not a time id, or a time id over anything
+  // but an 8/16/32/64-bit integer, is a malformed schema.
+  for (const id of ['monotonic', 'monotonic-', 'monotonic-1/1000', 'monotonic-2/4', 'monotonic-minutes', 'monotonic-anything'])
+    throwsPssz(() => schema.type(time(id)), /unsupported custom adapter/);
+  throwsPssz(() => schema.type(time('monotonic-seconds', 128)), /tick integer/);
+  throwsPssz(() => schema.type(time('monotonic-seconds', 1, false)));
+  throwsPssz(() => schema.type({ Custom: { type: { List: int(8, false) }, id: 'monotonic-seconds' } }), /tick integer/);
+  throwsPssz(() => schema.type({ Custom: { type: { Float: { exp: 11, mantissa: 53 } }, id: 'monotonic-millis' } }), /tick integer/);
+  throwsPssz(() => schema.type({ Custom: { type: { Custom: { type: { List: int(8, false) }, id: 'utf8' } }, id: 'monotonic-millis' } }), /tick integer/);
+  // "monotonically" is not reserved: an ordinary custom id, its wire type's text.
+  assert.equal(schema.type(time('monotonically')).valueToJson(5n), '5');
+
+  // A built-in presentation: presented under requireHandlers, no handler accepted.
+  const strict = new PsszSchema({}, { requireHandlers: true });
+  const at = strict.type(time('monotonic-micros'));
+  assert.equal(at.valueToJson(-7n), '-7');
+  assert.equal(at.jsonToValue('"9007199254740993"', 'ijson'), 9007199254740993n);
+  throwsPssz(() => strict.type(time('monotonically')).valueToJson(1n), /no handler registered/);
+  const handler = { toText: () => 'x', fromText: () => 0n };
+  for (const id of ['monotonic-micros', 'monotonic-60/1', 'monotonic', 'monotonic-', 'monotonic-minutes'])
+    throwsPssz(() => new PsszSchema({}, { handlers: { [id]: handler } }), /built-in time presentation/);
+  throwsPssz(() => schema.withHandlers({ 'monotonic-nanos': handler }), /built-in time presentation/);
+  throwsPssz(() => custom('monotonic-micros', i64, handler), /built-in id/);
+  // The tick integer may be named or boxed, as for the other time ids.
+  const aliased = new PsszSchema({ Ticks: int(64, true), At: { Custom: { type: 'Ticks', id: 'monotonic-seconds' } } });
+  assert.equal(aliased.type('At').valueToJson(T), String(T));
+  const boxed = schema.type({ Custom: { type: time('monotonic-seconds'), id: 'box' } });
+  assert.equal(boxed.valueToJson(T), String(T));
+  assert.equal(boxed.decode(boxed.encode(T)), T);
 });

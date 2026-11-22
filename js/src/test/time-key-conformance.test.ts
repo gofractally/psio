@@ -181,8 +181,16 @@ for (const path of ['schema-driven', 'typed'] as const) test(`time/key conforman
   assert.equal(total, fixture.vectors.length);
   assert.ok(total >= 500);
   console.log(`time-key-vectors.json (${path}):`, JSON.stringify({ types: fixture.types.length, vectors: total, ...counts }));
-  assert.equal(fixture.types.length, 28);
-  assert.equal(fixture.vectors.length, 762);
+  assert.equal(fixture.types.length, 33);
+  assert.equal(fixture.vectors.length, 844);
+  // The monotonic time points: every row of theirs was replayed above.
+  const monotonicTypes = ['monotonic<seconds>', 'monotonic<micros>', 'monotonic<millis,u32>', 'Timer', 'tuple<monotonic<micros>,string>'];
+  const monotonicRows = fixture.vectors.filter((row) => monotonicTypes.includes(row.type));
+  assert.equal(monotonicRows.length, 82);
+  for (const id of monotonicTypes) assert.ok(seenTypes.has(id), id);
+  const monotonicKinds: Record<string, number> = {};
+  for (const row of monotonicRows) monotonicKinds[row.kind] = (monotonicKinds[row.kind] ?? 0) + 1;
+  assert.deepEqual(monotonicKinds, { value: 32, 'text-accept': 4, 'text-reject': 18, 'key-order': 5, 'key-reject': 8, 'key-prefix': 15 });
   // Every declared type has rows.
   for (const row of fixture.types) assert.ok(seenTypes.has(row.id), `no rows for ${row.id}`);
 });
@@ -204,6 +212,16 @@ test('time/key conformance: the schema marks time values with their ids', () => 
   assert.equal(ids.get('duration<seconds>'), 'duration-seconds');
   assert.equal(ids.get('duration<nanos>'), 'duration-nanos');
   assert.equal(ids.get('duration<60/1,i32>'), 'duration-60/1');
+  assert.equal(ids.get('monotonic<seconds>'), 'monotonic-seconds');
+  assert.equal(ids.get('monotonic<micros>'), 'monotonic-micros');
+  assert.equal(ids.get('monotonic<millis,u32>'), 'monotonic-millis');
+  // A monotonic time point is presented by the codec itself (its tick
+  // count), also when every custom id must have a handler.
+  const strict = PsszSchema.decode(fromHex(fixture.schema_ir), { requireHandlers: true });
+  assert.equal(strict.type('monotonic<millis,u32>').decode(fromHex('01000000')), 1n);
+  assert.equal(strict.type('monotonic<micros>').valueToJson(9007199254740993n, 'ijson'), '"9007199254740993"');
+  assert.equal(strict.type('Timer').psszToJson(strict.type('Timer').jsonToPssz('{"expires":12,"started":-5,"laps":[7]}')),
+    '{"expires":12,"started":-5,"laps":[7]}');
   // Ticks are bigint at every width.
   assert.equal(schema.type('time_point<seconds,u32>').decode(fromHex('01000000')), 1n);
   assert.equal(schema.type('duration<60/1,i32>').decode(fromHex('a6ffffff')), -90n);

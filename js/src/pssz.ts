@@ -16,8 +16,9 @@
 // tuple -> array; variant -> { type, value }; optional -> null or the value
 // (an optional of an optional holds null or { some: inner }); bit types -> { bytes, bitCount }. A NaN
 // with a payload decodes to a PsszNaN so that it re-encodes bit for bit.
-// A time value (duration or time point, docs/time.md) -> bigint ticks at
-// every width; see time.ts for the Date / RFC 3339 conversions.
+// A time value (duration, time point or monotonic time point, docs/time.md)
+// -> bigint ticks at every width; see time.ts for the Date / RFC 3339
+// conversions of a time point.
 //
 // The same values have a `key` encoding (docs/key-spec.md): bytes whose
 // bytewise order is the value's order, for database keys.

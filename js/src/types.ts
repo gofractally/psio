@@ -711,13 +711,14 @@ export function enumeration<T extends number | bigint>(
   return new TypeDef({ k: 'enum', under, members: entries });
 }
 
-function timeDef(point: boolean, unit: TimeUnit, tick: AnyDef): TypeDef<bigint> {
+function timeDef(kind: 'point' | 'duration' | 'monotonic', unit: TimeUnit, tick: AnyDef): TypeDef<bigint> {
   const under = resolve(isDef(tick, 'a tick type'));
   if (under.shape.k !== 'int' || under.shape.bits > 64 || under.shape.bits < 8)
     schemaError('typed schema: a time value needs a tick integer of 8 to 64 bits');
   let id: string;
   try {
-    id = timeSchemaId({ point, ...timeUnitPeriod(unit) });
+    const period = timeUnitPeriod(unit);
+    id = timeSchemaId(kind === 'monotonic' ? { point: false, monotonic: true, ...period } : { point: kind === 'point', ...period });
   } catch (e) {
     return schemaError(e instanceof Error ? e.message : String(e));
   }
@@ -728,9 +729,17 @@ function timeDef(point: boolean, unit: TimeUnit, tick: AnyDef): TypeDef<bigint> 
  * A point in time: ticks of `unit` since 1970-01-01T00:00:00Z, a `bigint`
  * at every tick width; RFC 3339 in text (`docs/time.md`).
  */
-export const timePoint = (unit: TimeUnit, tick: TypeDef<any, any> = i64) => timeDef(true, unit, tick);
+export const timePoint = (unit: TimeUnit, tick: TypeDef<any, any> = i64) => timeDef('point', unit, tick);
 /** A span of time in ticks of `unit`: a `bigint`; its tick count in text. */
-export const duration = (unit: TimeUnit, tick: TypeDef<any, any> = i64) => timeDef(false, unit, tick);
+export const duration = (unit: TimeUnit, tick: TypeDef<any, any> = i64) => timeDef('duration', unit, tick);
+/**
+ * A point in time of a clock other than the system clock (a steady /
+ * boot-relative clock, a simulation clock): ticks of `unit` since that
+ * clock's own epoch, a `bigint`. It has no date: its text is the tick
+ * count, exactly like a duration's, for every unit, and the RFC 3339 /
+ * `Date` helpers do not apply (`docs/time.md`).
+ */
+export const monotonic = (unit: TimeUnit, tick: TypeDef<any, any> = i64) => timeDef('monotonic', unit, tick);
 
 /** The text form of a custom type, typed by the value of its wire type. */
 export interface CustomHandler<T> {

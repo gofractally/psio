@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   ListView, PsszError, PsszSchema, RecordView, TupleView, TypeDef, VariantView, alt, array, bitlist, bool,
-  boundedBytes, boundedList, boundedUtf8, box, bytes, custom, duration, enumeration, f32, f64, field, fixedBytes,
+  boundedBytes, boundedList, boundedUtf8, box, bytes, custom, duration, enumeration, f32, f64, field, fixedBytes, monotonic,
   generateSchema, i128, i16, i32, i64, i8, keyPrefixUpperBound, lazy, list, nameToNumber, numberToName, optional,
   rawString, record, timePoint, tuple, u128, u16, u256, u32, u64, u8, utf8, variant,
   type CustomHandler, type Infer, type IrAnyType, type IrSchema, type Some,
@@ -78,6 +78,9 @@ const Event = record('Event', {
   name: rawString, at: timePoint('millis'), precise: optional(timePoint('nanos')), history: list(timePoint('seconds')),
   elapsed: duration('nanos'), timeout: duration({ num: 60, den: 1 }, i32),
 });
+const Timer = record('Timer', {
+  expires: monotonic('micros'), started: optional(monotonic('seconds')), laps: list(monotonic('millis', u32)),
+});
 
 // A type with every `@N` reference replaced by what it names: the IR up to
 // the numbering, which depends on what else a schema holds. References to
@@ -147,6 +150,7 @@ test('typed layer: hand-written declarations generate the IR C++ records for the
     ['Fixed', Fixed, json], ['Bounds', Bounds, json], ['Capped', Capped, json], ['Shapes', Shapes, json],
     ['Wide', Wide, json], ['Transfer', Transfer, json], ['Overrides', Overrides, json], ['Holder', Holder, json],
     ['Color', Color, json], ['Status', Status, json], ['Choice', Choice, json], ['Event', Event, timeKey],
+    ['Timer', Timer, timeKey],
   ];
   for (const [name, def, cpp] of cases) {
     const mine = generateSchema({ [name]: def }).ir;
@@ -204,6 +208,7 @@ test('typed layer: the decoded value is statically typed', () => {
   const Nested = optional(optional(u8));
   sameType<Infer<typeof Nested>, Some<number | null> | null>(true);
   sameType<Infer<typeof Event>['at'], bigint>(true);
+  sameType<Infer<typeof Timer>, { expires: bigint; started: bigint | null; laps: bigint[] }>(true);
   sameType<Infer<typeof Color>, number>(true);
 
   const value: Infer<typeof Transfer> = { from: 1n, to: 2n, amount: 5n, payer: null, notify: [3n], since: { major: 1, minor: 2 } };
@@ -296,6 +301,12 @@ test('typed layer: malformed declarations are schema errors', () => {
   throwsKind(() => custom('time-point-seconds', i64), 'schema');
   throwsKind(() => timePoint('weeks' as never), 'schema');
   throwsKind(() => timePoint('seconds', f64), 'schema');
+  throwsKind(() => custom('monotonic-seconds', i64), 'schema', /built-in id/);
+  throwsKind(() => custom('monotonic', i64), 'schema', /built-in id/);
+  throwsKind(() => monotonic('weeks' as never), 'schema');
+  throwsKind(() => monotonic('seconds', f64), 'schema');
+  throwsKind(() => monotonic('seconds', u128 as never), 'schema');
+  throwsKind(() => monotonic({ num: 0, den: 1 }), 'schema');
   throwsKind(() => boundedUtf8(-1), 'schema');
   throwsKind(() => array(u8, 1.5), 'schema');
   throwsKind(() => record('R', { a: field(u32, { lengthBound: { max: 3 } }) }).schema, 'schema', /does not apply/);

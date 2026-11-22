@@ -1,16 +1,25 @@
 // time.ts — time values (docs/time.md): schema ids and the RFC 3339 text of
 // a time point, exact in bigint ticks. The counterpart of C++ psio/time.hpp.
 //
-// A time value is a tick count: a duration, or a time point counted from
-// 1970-01-01T00:00:00Z (UTC, no leap seconds). The schema-driven codecs
-// decode both to `bigint` ticks and never convert implicitly — a `Date`
-// holds only milliseconds. The helpers here are the explicit conversions.
+// A time value is a tick count: a duration, a time point counted from
+// 1970-01-01T00:00:00Z (UTC, no leap seconds), or a monotonic time point
+// counted from the epoch of some other clock (no date: its text is the tick
+// count, like a duration's). The schema-driven codecs decode all three to
+// `bigint` ticks and never convert implicitly — a `Date` holds only
+// milliseconds. The helpers here are the explicit conversions; they apply
+// to time points only.
 
 import { PsszError } from './pssz-core.js';
 
-/** Point or duration, and the tick period `num/den` seconds in lowest terms. */
+/**
+ * The kind of a time value and its tick period `num/den` seconds in lowest
+ * terms. `point`: a time point of the Unix epoch (RFC 3339 text).
+ * `monotonic`: a time point of some other clock (tick text); never set
+ * together with `point`. Neither: a duration.
+ */
 export interface TimeKind {
   point: boolean;
+  monotonic?: true;
   num: bigint;
   den: bigint;
 }
@@ -71,23 +80,26 @@ export function timeFractionDigits(num: bigint, den: bigint): number {
   return p === den ? k : -1;
 }
 
-/** The schema id of a time kind: `time-point-micros`, `duration-60/1`, ... */
+/** The schema id of a time kind: `time-point-micros`, `duration-60/1`, `monotonic-nanos`, ... */
 export function timeSchemaId(kind: TimeKind): string {
   const g = gcd(kind.num, kind.den);
   if (kind.num <= 0n || kind.den <= 0n) fail('time: a period needs positive num and den');
+  if (kind.monotonic !== undefined && kind.monotonic !== true) fail('time: monotonic is true or absent');
+  if (kind.point && kind.monotonic) fail('time: a time point is of the Unix epoch or monotonic, not both');
   const num = kind.num / g;
   const den = kind.den / g;
   const named = num === 1n ? NAMED.find(([, d]) => d === den) : undefined;
-  return (kind.point ? 'time-point-' : 'duration-') + (named ? named[0] : `${num}/${den}`);
+  const prefix = kind.point ? 'time-point-' : kind.monotonic ? 'monotonic-' : 'duration-';
+  return prefix + (named ? named[0] : `${num}/${den}`);
 }
 
 /**
- * The ids the time presentations reserve: `time-point` / `duration`, alone
- * or followed by `-`. A reserved id that `parseTimeSchemaId` does not accept
+ * The ids the time presentations reserve: `time-point` / `duration` /
+ * `monotonic`, alone or followed by `-`. A reserved id that `parseTimeSchemaId` does not accept
  * is a malformed schema, never some other custom type.
  */
 export function reservedTimeId(id: string): boolean {
-  return /^(time-point|duration)(-|$)/.test(id);
+  return /^(time-point|duration|monotonic)(-|$)/.test(id);
 }
 
 /**
@@ -96,14 +108,19 @@ export function reservedTimeId(id: string): boolean {
  */
 export function parseTimeSchemaId(id: string): TimeKind | null {
   let point = false;
+  let monotonic = false;
   let rest: string;
   if (id.startsWith('time-point-')) {
     point = true;
     rest = id.slice(11);
   } else if (id.startsWith('duration-')) rest = id.slice(9);
-  else return null;
+  else if (id.startsWith('monotonic-')) {
+    monotonic = true;
+    rest = id.slice(10);
+  } else return null;
+  const kind = (num: bigint, den: bigint): TimeKind => (monotonic ? { point, monotonic, num, den } : { point, num, den });
   const named = NAMED.find(([name]) => name === rest);
-  if (named) return { point, num: 1n, den: named[1] };
+  if (named) return kind(1n, named[1]);
   // Positive decimals without leading zeros, at most 18 digits each.
   const m = /^([1-9][0-9]{0,17})\/([1-9][0-9]{0,17})$/.exec(rest);
   if (!m) return null;
@@ -111,7 +128,7 @@ export function parseTimeSchemaId(id: string): TimeKind | null {
   const den = BigInt(m[2]);
   if (gcd(num, den) !== 1n) return null;
   if (num === 1n && NAMED.some(([, d]) => d === den)) return null;
-  return { point, num, den };
+  return kind(num, den);
 }
 
 // ── RFC 3339 ────────────────────────────────────────────────────────────────

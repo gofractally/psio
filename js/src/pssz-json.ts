@@ -669,8 +669,9 @@ class Reader {
     return bits <= 32 ? Number(value) : value;
   }
 
-  // A time value: bigint ticks. A duration is its tick integer; a time
-  // point is an RFC 3339 string (the JSON string's value, however escaped).
+  // A time value: bigint ticks. A duration and a monotonic time point are
+  // the tick integer; a time point is an RFC 3339 string (the JSON string's
+  // value, however escaped).
   private time(node: Node, form: IntForm): bigint {
     const c = this.c;
     if (!node.time!.point) return BigInt(this.integer(node.bits, node.signed, form));

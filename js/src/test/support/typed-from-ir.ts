@@ -10,7 +10,7 @@
 import {
   PsszSchema, TypeDef, alt, array, bitlist, bitvector, bool, boundedBytes, boundedList, boundedUtf8, box, bytes,
   char, custom, duration, enumeration, f32, f64, field, fixedBytes, generateSchema, i128, i16, i32, i64, i8,
-  lazy, list, optional, parseTimeSchemaId, rawString, record, timePoint, tuple, u128, u16, u256, u32, u64, u8,
+  lazy, list, monotonic, optional, parseTimeSchemaId, rawString, record, timePoint, tuple, u128, u16, u256, u32, u64, u8,
   utf8, variant, type FieldOptions, type IrAnyType, type IrAttribute, type IrMember, type IrSchema,
   type PsszCustomHandler, type PsszType, type PsszWidth, type RecordOptions,
 } from '../../index.js';
@@ -167,7 +167,7 @@ export class TypedFixture implements TypeSource {
         if (time) {
           const unit = { num: time.num, den: time.den };
           const tick = this.of(inner);
-          return time.point ? timePoint(unit, tick) : duration(unit, tick);
+          return time.point ? timePoint(unit, tick) : time.monotonic ? monotonic(unit, tick) : duration(unit, tick);
         }
         // A custom type: its text form over the wire type declared inline.
         return custom(id, this.of(inner, slot), this.handlers[id]);
