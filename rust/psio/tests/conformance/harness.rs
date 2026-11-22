@@ -254,6 +254,13 @@ where
             if reencoded != expected {
                 return fail("re-encode differs", format!("{} != {}", hex(&reencoded), hex(&expected)));
             }
+            // The trusted reader gives the checked reader's value for every
+            // frame the checked one accepts.
+            let trusted = decode_trusted::<F, T>(bytes);
+            match try_encode::<F, T>(&trusted) {
+                Ok(b) if b == expected => (),
+                other => return fail("trusted decode differs", format!("{other:?}")),
+            }
             if unknown {
                 if exact.is_ok() || decode_exact.is_ok() || view_exact.is_ok() {
                     return fail("exact reader accepted unknown fields", String::new());

@@ -228,6 +228,26 @@ pub trait PsszUnpack<F: PsszFormat>: Sized {
     fn pssz_missing_optional() -> PsszResult<Self> {
         Err(PsszError::new("pssz: required record field missing"))
     }
+    /// Reads bytes the caller vouches for: a valid encoding of `Self`
+    /// (see [`from_pssz_trusted`]). An implementation may skip every check
+    /// that is not needed for memory safety. On bytes that are not valid it
+    /// panics or returns some value of the type; it never has undefined
+    /// behaviour. The default reads with every check.
+    #[track_caller]
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        match Self::pssz_unpack(bytes) {
+            Ok(value) => value,
+            Err(error) => trusted_bytes_invalid(error),
+        }
+    }
+}
+
+/// A trusted reader met bytes that are not what the caller vouched for.
+#[doc(hidden)]
+#[cold]
+#[track_caller]
+pub fn trusted_bytes_invalid(error: PsszError) -> ! {
+    panic!("from_pssz_trusted: the bytes are not valid: {error}")
 }
 
 /// Structural validator — walks the tree checking everything decode checks,
@@ -260,6 +280,13 @@ macro_rules! pssz_impl_primitive_le {
                 let mut buf = [0u8; S];
                 buf.copy_from_slice(bytes);
                 Ok(<$ty>::from_le_bytes(buf))
+            }
+            #[inline]
+            fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+                const S: usize = std::mem::size_of::<$ty>();
+                let mut buf = [0u8; S];
+                buf.copy_from_slice(&bytes[..S]);
+                <$ty>::from_le_bytes(buf)
             }
         }
         impl<F: PsszFormat> PsszValidate<F> for $ty {
@@ -334,6 +361,10 @@ impl<F: PsszFormat> PsszUnpack<F> for bool {
             _ => Err(PsszError::new("pssz: bool is not 0/1")),
         }
     }
+    #[inline]
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        bytes[0] != 0
+    }
 }
 impl<F: PsszFormat> PsszValidate<F> for bool {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
@@ -378,6 +409,15 @@ impl<F: PsszFormat> PsszUnpack<F> for String {
         let _depth = checked::DecodeDepth::enter()?;
         utf8(bytes).map(str::to_owned)
     }
+    /// UTF-8 is still verified: a `String` that is not UTF-8 is undefined
+    /// behaviour, which no safe function may produce.
+    #[inline]
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        match std::str::from_utf8(bytes) {
+            Ok(text) => text.to_owned(),
+            Err(_) => trusted_bytes_invalid(PsszError::new("pssz: string is not UTF-8")),
+        }
+    }
 }
 impl<F: PsszFormat> PsszValidate<F> for String {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
@@ -409,6 +449,10 @@ impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedString<N> {
         let _depth = checked::DecodeDepth::enter()?;
         if bytes.len() > N { return Err(PsszError::new("pssz: BoundedString overflow")); }
         Ok(BoundedString(utf8(bytes)?.to_owned()))
+    }
+    #[inline]
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        BoundedString(<String as PsszUnpack<F>>::pssz_unpack_trusted(bytes))
     }
 }
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
@@ -469,6 +513,10 @@ impl<F: PsszFormat> PsszUnpack<F> for RawString {
         out.extend_from_slice(bytes);
         Ok(RawString(out))
     }
+    #[inline]
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        RawString(bytes.to_vec())
+    }
 }
 impl<F: PsszFormat> PsszValidate<F> for RawString {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
@@ -511,6 +559,10 @@ impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedRawString<N> {
         if bytes.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         raw_string(bytes)?;
         Ok(BoundedRawString(bytes.to_vec()))
+    }
+    #[inline]
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        BoundedRawString(bytes.to_vec())
     }
 }
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedRawString<N> {
@@ -675,6 +727,43 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Vec<T> {
         let _depth = checked::DecodeDepth::enter()?;
         checked::decode_sequence::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, None)
     }
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        trusted_sequence::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes)
+    }
+}
+
+/// The elements of a list frame the caller vouches for: no table checks
+/// beyond what slicing does (a bad offset panics).
+fn trusted_sequence<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>>(w: usize, bytes: &[u8]) -> Vec<T> {
+    if T::IS_FIXED_SIZE {
+        let size = T::FIXED_SIZE;
+        if size == 0 {
+            // Zero-size elements: the checked reader knows the rule.
+            return match checked::decode_sequence::<F, T>(w, bytes, None) {
+                Ok(items) => items,
+                Err(error) => trusted_bytes_invalid(error),
+            };
+        }
+        return bytes.chunks_exact(size).map(T::pssz_unpack_trusted).collect();
+    }
+    if bytes.is_empty() {
+        return Vec::new();
+    }
+    let offset = |index: usize| -> usize {
+        let mut raw = [0u8; 8];
+        raw[..w].copy_from_slice(&bytes[index * w..index * w + w]);
+        u64::from_le_bytes(raw) as usize
+    };
+    // The first offset is the size of the table. The count is clamped to
+    // what the frame can hold, so garbage cannot ask for a huge allocation.
+    let count = (offset(0) / w).min(bytes.len() / w);
+    let mut items = Vec::with_capacity(count);
+    for index in 0..count {
+        let start = offset(index);
+        let end = if index + 1 < count { offset(index + 1) } else { bytes.len() };
+        items.push(T::pssz_unpack_trusted(&bytes[start..end]));
+    }
+    items
 }
 impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Vec<T> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
@@ -715,6 +804,9 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F
             return Err(PsszError::new("pssz: BoundedList overflow"));
         }
         Ok(BoundedList(checked::decode_sequence::<F, T>(w, bytes, None)?))
+    }
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        BoundedList(trusted_sequence::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes))
     }
 }
 impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValidate<F> for BoundedList<T, N> {
@@ -871,6 +963,12 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Option<T> 
         match optional_payload::<F, T>(bytes)? {
             Some(payload) => Ok(Some(T::pssz_unpack(payload)?)),
             None => Ok(None),
+        }
+    }
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        match optional_payload::<F, T>(bytes) {
+            Ok(payload) => payload.map(T::pssz_unpack_trusted),
+            Err(error) => trusted_bytes_invalid(error),
         }
     }
 }
@@ -1159,19 +1257,44 @@ pub fn from_pssz<T: PsszPack<Pssz> + PsszUnpack<Pssz>>(bytes: &[u8]) -> PsszResu
 }
 
 /// Decodes bytes the caller vouches for (C++
-/// `psio::from_pssz<T>(psio::trusted{bytes})`): they were validated earlier,
-/// or were produced by [`to_pssz`] and kept.
+/// `psio::from_pssz<T>(psio::trusted{bytes})`): a valid encoding of `T`,
+/// because they were validated earlier or were produced by [`to_pssz`] and
+/// kept — a service's own table rows.
 ///
-/// This is a safe function. The Rust decoder checks as it reads, so nothing
-/// is skipped and bytes that are not a valid `T` cause a panic, never
-/// undefined behaviour. A decoder that skipped the checks would have to be
-/// an `unsafe fn`; none is provided.
+/// **What trusted skips.** The checks that only matter for bytes nobody
+/// vouched for: the depth limit, `max_dynamic_data` caps, length bounds
+/// (the bounded types and `#[psio(max = N)]`), the canonical-form rules,
+/// `#[psio(invariant)]`, and the per-value bookkeeping of the checked
+/// reader. Records, lists, strings, optionals and scalars have such a
+/// reader; any other type (a tuple, a map, an enum with payloads) is read
+/// by the checked one inside the trusted read.
+///
+/// **What it never skips.** Whatever memory safety needs, so this is a safe
+/// function: every slice access is bounds-checked and a `String`'s bytes
+/// are verified to be UTF-8.
+///
+/// **On bytes that are not valid** it panics, or returns some value of `T`
+/// (which then may be outside a bound or an invariant the checked reader
+/// would have enforced); it never has undefined behaviour. Deeply nested
+/// hostile input can exhaust the stack. Use [`from_pssz`] for anything a
+/// caller, a peer or another service supplied.
+///
+/// A reader that also skipped the bounds checks and the UTF-8 check would
+/// have to be an `unsafe fn` (`from_pssz_unchecked`); none is provided.
+/// `cargo run --release -p psio --example trusted_decode_bench` measures
+/// the two readers.
 #[track_caller]
 pub fn from_pssz_trusted<T: PsszPack<Pssz> + PsszUnpack<Pssz>>(bytes: &[u8]) -> T {
-    match decode::<Pssz, T>(bytes) {
-        Ok(value) => value,
-        Err(e) => panic!("from_pssz_trusted: the bytes are not valid: {e}"),
-    }
+    decode_trusted::<Pssz, T>(bytes)
+}
+
+/// [`from_pssz_trusted`] for any profile.
+#[track_caller]
+pub fn decode_trusted<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> T {
+    // Types without a trusted reader fall back to the checked one, which
+    // reads a newer writer's unknown fields as a compatible reader does.
+    let _session = checked::DecodeSession::enter(true);
+    T::pssz_unpack_trusted(bytes)
 }
 
 /// Whether `bytes` is one `T` (C++ `psio::validate_pssz<T>(bytes)`). Never

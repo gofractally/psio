@@ -249,6 +249,82 @@ fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, 
     })
 }
 
+/// How a member is read from bytes the caller vouches for: by the trusted
+/// reader of its own type where its annotation leaves the bytes alone (the
+/// bounds are not checked), else through the described type.
+fn trusted_value(k: &syn::Path, ty: &Type, bound: &Option<attrs::Annotated>, bytes: Tokens) -> Tokens {
+    match bound {
+        Some(attrs::Annotated { own, spec }) => quote! {
+            if <#own as #k::pssz::bounds::Bounds<#spec>>::SAME_BYTES {
+                <#own as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack_trusted(#bytes)
+            } else {
+                <#own as #k::pssz::bounds::Bounds<#spec>>::from_as(
+                    <#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack_trusted(#bytes))
+            }
+        },
+        None => quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack_trusted(#bytes)),
+    }
+}
+
+/// The trusted reader of a record: no depth, cap, bound or invariant
+/// check. A fixed-layout record is read at constant offsets.
+fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, frame: &Frame) -> syn::Result<Tokens> {
+    let info = field_info(k, fields)?;
+    let bounds = field_bounds(k, fields)?;
+    let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
+    let values: Vec<_> = (0..info.len()).map(|i| format_ident!("__pssz_field_{i}")).collect();
+    let initializer =
+        attrs::construct(construct, fields, &values.iter().map(|v| quote!(#v)).collect::<Vec<_>>())?;
+    let fixed_reads: Vec<_> = types
+        .iter()
+        .zip(&bounds)
+        .map(|(ty, bound)| trusted_value(k, ty, bound, quote!(&bytes[__at..__at + __size])))
+        .collect();
+    let span_reads: Vec<_> =
+        types.iter().zip(&bounds).map(|(ty, bound)| trusted_value(k, ty, bound, quote!(&bytes[__span]))).collect();
+    let missing: Vec<_> = types
+        .iter()
+        .zip(&bounds)
+        .map(|(ty, bound)| {
+            let value = decode_value(k, bound, quote!(__missing));
+            quote! {
+                match <#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_missing_optional() {
+                    ::core::result::Result::Ok(__missing) => #value,
+                    ::core::result::Result::Err(error) => #k::pssz::trusted_bytes_invalid(error),
+                }
+            }
+        })
+        .collect();
+    let width = &frame.width;
+    Ok(quote! {
+        if <Self as #k::pssz::PsszPack<__PsszFormat>>::IS_FIXED_SIZE {
+            #[allow(unused_mut)]
+            let mut __at = 0usize;
+            #(let #values = {
+                let __size = <#types as #k::pssz::PsszPack<__PsszFormat>>::FIXED_SIZE;
+                let __value = #fixed_reads;
+                __at += __size;
+                __value
+            };)*
+            let _ = __at;
+            return #initializer;
+        }
+        let __spans = match #k::pssz_checked::record_spans_n(#width, [
+            #(#k::pssz_checked::Layout::of::<__PsszFormat, #types>()),*
+        ], bytes, #dwnc) {
+            ::core::result::Result::Ok(spans) => spans,
+            ::core::result::Result::Err(error) => #k::pssz::trusted_bytes_invalid(error),
+        };
+        #[allow(unused_mut)]
+        let mut __spans = __spans.into_iter();
+        #(let #values = match __spans.next().flatten() {
+            ::core::option::Option::Some(__span) => #span_reads,
+            ::core::option::Option::None => #missing,
+        };)*
+        #initializer
+    })
+}
+
 fn record_validate(k: &syn::Path, fields: &Fields, dwnc: bool, frame: &Frame) -> syn::Result<Tokens> {
     let info = field_info(k, fields)?;
     let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
@@ -302,6 +378,8 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
     let forwards = opts.transparent || c_enum.is_some();
     let validation_body;
     let mut missing_optional = quote!();
+    // The reader of bytes the caller vouches for, where the derive has one.
+    let mut trusted_body: Option<Tokens> = None;
     let (body, consts) = match &input.data {
         Data::Struct(data) => {
             let info = field_info(k, &data.fields)?;
@@ -322,6 +400,10 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 let decoded = construct(quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack(bytes)?))?;
                 let missing = construct(quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_missing_optional()?))?;
                 missing_optional = quote! { fn pssz_missing_optional() -> #k::pssz::PsszResult<Self> { ::core::result::Result::Ok(#missing) } };
+                if unpack {
+                    let inner = trusted_value(k, ty, &bounds[0], quote!(bytes));
+                    trusted_body = Some(attrs::construct(quote!(Self), &data.fields, &[inner])?);
+                }
                 validation_body = quote! { <#ty as #k::pssz::PsszValidate<__PsszFormat>>::pssz_validate(bytes) };
                 (
                     if unpack {
@@ -361,6 +443,9 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     None => quote!(::core::option::Option::None),
                 };
                 validation_body = record_validate(k, &data.fields, dwnc, &frame)?;
+                if unpack {
+                    trusted_body = Some(record_decode_trusted(k, &data.fields, quote!(Self), dwnc, &frame)?);
+                }
                 (
                     if unpack {
                         record_decode(k, &data.fields, quote!(Self), dwnc, &frame)?
@@ -682,6 +767,15 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 }
             }
         };
+        let trusted = match &trusted_body {
+            Some(body) => quote! {
+                #[allow(unused_variables, unreachable_code)]
+                fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+                    #body
+                }
+            },
+            None => quote!(),
+        };
         quote! {
             impl #impl_g #k::pssz::PsszUnpack<__PsszFormat> for #name #type_g #where_c {
                 #missing_optional
@@ -692,6 +786,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     #unpack_check
                     ::core::result::Result::Ok(__value)
                 }
+                #trusted
             }
             #validation
         }
