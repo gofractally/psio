@@ -18,6 +18,13 @@ pub struct TypeInfo {
     /// ../schema_conformance.rs).
     #[serde(default)]
     pub ir: bool,
+    /// The id of a custom type's Schema IR `Custom` node.
+    #[serde(default)]
+    pub custom_id: Option<String>,
+    /// An invariant constrains values of the type (its own, or that of a
+    /// type it holds).
+    #[serde(default)]
+    pub invariant: bool,
 }
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Vector {
@@ -109,6 +116,39 @@ impl<T: Conf> Conf for Option<T> {
 impl<T: Conf> Conf for Box<T> {
     fn id() -> String { format!("box<{}>", T::id()) }
 }
+// A nested value: `nested<T>`, `nested<T,deferred>`, and as a record member
+// with a byte bound `nested<T><=N`.
+impl<T: Conf, V: NestedValidation, const N: usize> Conf for Nested<T, V, N> {
+    fn id() -> String {
+        let policy = if V::DEFERRED { ",deferred" } else { "" };
+        let bound = if N == usize::MAX { String::new() } else { format!("<={N}") };
+        format!("nested<{}{policy}>{bound}", T::id())
+    }
+}
+// The container holding a map or set is not part of its shape.
+impl<K: Conf, V: Conf> Conf for BTreeMap<K, V> {
+    fn id() -> String { format!("map<{},{}>", K::id(), V::id()) }
+}
+impl<K: Conf> Conf for std::collections::BTreeSet<K> {
+    fn id() -> String { format!("set<{}>", K::id()) }
+}
+impl<K: Conf, V: Conf> Conf for std::collections::HashMap<K, V> {
+    fn id() -> String { format!("map<{},{}>", K::id(), V::id()) }
+}
+impl<K: Conf> Conf for std::collections::HashSet<K> {
+    fn id() -> String { format!("set<{}>", K::id()) }
+}
+impl<K: Conf, V: Conf, const N: usize> Conf for BoundedMap<K, V, N> {
+    fn id() -> String { format!("map<{},{}><={N}", K::id(), V::id()) }
+}
+impl<K: Conf, const N: usize> Conf for BoundedSet<K, N> {
+    fn id() -> String { format!("set<{}><={N}", K::id()) }
+}
+// A key type in a container by its key order: the type itself.
+impl<T: Conf> Conf for ByKey<T> {
+    fn id() -> String { T::id() }
+    fn shape() -> String { T::shape() }
+}
 impl<const N: usize> Conf for Bitvector<N> {
     fn id() -> String { format!("bitvector<{N}>") }
 }
@@ -130,6 +170,35 @@ conf_tuple!(A);
 conf_tuple!(A, B);
 conf_tuple!(A, B, C);
 conf_tuple!(A, B, C, D);
+
+// Transparent wrappers, custom types and invariants (../custom/types.rs).
+// A transparent type's shape is `transparent{member:T}`; `Endpoint` and
+// `Ratio` have the structural ids of the variant and the tuple they are.
+macro_rules! conf_custom {
+    ($($ty:ty => $id:literal, $shape:literal;)*) => {$(
+        impl Conf for $ty {
+            fn id() -> String { $id.into() }
+            fn shape() -> String { $shape.into() }
+        }
+    )*};
+}
+use crate::custom_types::*;
+conf_custom! {
+    Id => "Id", "transparent{value:u64}";
+    Tag => "Tag", "transparent{text:raw_string}";
+    Blob => "Blob", "transparent{data:list<u8>}";
+    Ref => "Ref", "transparent{target:variant<u64,raw_string>}";
+    Name => "Name", "dwnc{value:u64}";
+    DerKey => "DerKey", "transparent{data:list<u8>}";
+    Range => "Range", "record{lo:u32,hi:u32}";
+    Level => "Level", "enum<u8>{low=0,mid=1,high=2,top=3}";
+    V4 => "V4", "dwnc{address:array<u8,4>,port:u16}";
+    V6 => "V6", "dwnc{address:array<u8,16>,port:u16}";
+    Endpoint => "variant<V4,V6>", "variant<V4,V6>";
+    Ratio => "tuple<i16,u16>", "tuple<i16,u16>";
+    NameOrRange => "variant<Name,Range>", "variant<Name,Range>";
+    Guarded => "Guarded", "record{owner:Name,delegate:optional<Name>,members:list<Name>,key:DerKey,window:Range,levels:list<Level>,pair:array<Level,2>,either:variant<Name,Range>,ref:Ref,id:Id,blob:optional<Blob>,endpoint:variant<V4,V6>,ratios:list<tuple<i16,u16>>}";
+}
 
 pub trait Codec<F: PsszFormat>: PsszPack<F> + PsszUnpack<F> + PsszValidate<F> {}
 impl<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F> + PsszValidate<F>> Codec<F> for T {}
@@ -195,22 +264,33 @@ fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Res
             Ok(())
         }
         "reject" => {
-            let accepted: Vec<&str> = [
-                ("validate", validate.is_ok()),
-                ("validate_compatible", compatible.is_ok()),
-                ("validate_exact", exact.is_ok()),
-                ("decode", decode.is_ok()),
-                ("decode_compatible", decode_compatible.is_ok()),
-                ("decode_exact", decode_exact.is_ok()),
-                ("view", view.is_ok()),
-                ("view_compatible", view_compatible.is_ok()),
-                ("view_exact", view_exact.is_ok()),
-            ]
-            .iter()
-            .filter(|(_, ok)| *ok)
-            .map(|(name, _)| *name)
-            .collect();
-            if accepted.is_empty() { Ok(()) } else { fail("accepted by", accepted.join(", ")) }
+            let outcomes: [(&str, Option<PsszError>); 9] = [
+                ("validate", validate.err()),
+                ("validate_compatible", compatible.err()),
+                ("validate_exact", exact.err()),
+                ("decode", decode.err()),
+                ("decode_compatible", decode_compatible.err()),
+                ("decode_exact", decode_exact.err()),
+                ("view", view.err()),
+                ("view_compatible", view_compatible.err()),
+                ("view_exact", view_exact.err()),
+            ];
+            let accepted: Vec<&str> =
+                outcomes.iter().filter(|(_, e)| e.is_none()).map(|(name, _)| *name).collect();
+            if !accepted.is_empty() {
+                return fail("accepted by", accepted.join(", "));
+            }
+            // An invariant's message is the type's own, passed through by
+            // every entry point; the order rule of maps and sets has one
+            // message in every language.
+            if v.reason_is_shared() {
+                for (name, error) in &outcomes {
+                    if error.map(|e| e.0) != Some(v.reason.as_str()) {
+                        return fail(name, format!("{error:?}, want {:?}", v.reason));
+                    }
+                }
+            }
+            Ok(())
         }
         other => fail("unknown expectation", other.into()),
     }
@@ -221,6 +301,10 @@ impl Vector {
     /// nevertheless reject: raw strings holding non-UTF-8 bytes.
     pub fn strict_rejects(&self) -> bool {
         self.class == "string-raw-non-utf8"
+    }
+    /// Rejections whose `reason` every language reports word for word.
+    pub fn reason_is_shared(&self) -> bool {
+        self.class == "invariant" || self.class == "map-set-order"
     }
 }
 

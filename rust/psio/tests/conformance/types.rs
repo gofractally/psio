@@ -9,7 +9,9 @@
 // is BoundedRawString<N> / BoundedList<T, N>. A field named `in_` is `in`.
 
 use super::harness::*;
+pub use crate::custom_types::*;
 use psio::pssz::*;
+use std::collections::{BTreeMap, BTreeSet};
 
 type Raw = RawString;
 
@@ -199,3 +201,36 @@ rec!(TupRec { t: TupBS, n: u8 });
 pub type Var5 = V5<u32, Raw, Inner, TupBS, Unit>;
 rec!(T16 { a: u32, s: BoundedString<16> });
 rec!(T300 { a: u32, s: BoundedString<300> });
+
+// Nested values (docs/pssz-spec.md 5.8).
+rec!(NArgs { to: Raw, amount: u64, memo: Option<Raw> });
+rec!(NArgs2 { to: Raw, amount: u64, memo: Option<Raw>, fee: Option<u32> });
+rec!(NAction { method: u32, args: Nested<NArgs> });
+rec!(NAction2 { method: u32, args: Nested<NArgs2> });
+rec!(NActionRaw { method: u32, args: Vec<u8> });
+rec!(NActionLater { method: u32, args: Nested<NArgs, Deferred> });
+rec!(NShapes {
+    scalar: Nested<u32>, twice: Nested<Nested<NArgs>>, maybe: Option<Nested<NArgs>>,
+    many: Vec<Nested<NArgs>>,
+});
+rec!(NCapped { id: u8, note: Nested<Raw, Checked, 8> });
+// A self-nesting chain: recursive, so the derive in both passes (see
+// DepthNode).
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+pub struct NChain { pub next: Option<Nested<NChain>> }
+impl Conf for NChain {
+    fn id() -> String { "NChain".into() }
+    fn shape() -> String { "record{next:optional<nested<NChain>>}".into() }
+}
+
+// Pairs, maps and sets (docs/pssz-spec.md 5.9), and the same record with
+// the lists they are on the wire.
+rec!(AssocRec {
+    counts: BTreeMap<Raw, u32>, ids: BTreeSet<u16>, head: (u16, Raw),
+    names: Option<BTreeMap<u32, Raw>>, limited: BoundedMap<u8, u8, 2>, groups: Vec<BTreeSet<i32>>,
+});
+rec!(AssocLists {
+    counts: Vec<(Raw, u32)>, ids: Vec<u16>, head: (u16, Raw),
+    names: Option<Vec<(u32, Raw)>>, limited: BoundedList<(u8, u8), 2>, groups: Vec<Vec<i32>>,
+});
+

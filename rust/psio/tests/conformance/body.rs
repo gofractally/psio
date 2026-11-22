@@ -102,8 +102,26 @@ fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
                 || v.name.starts_with("width/cap/checkpoint_at_cap/")
         })
         .collect::<Vec<_>>();
-    assert_eq!(bound_rejections.len(), 32);
+    assert_eq!(bound_rejections.len(), 36);
     assert!(bound_rejections.iter().all(|v| v.expect == "reject"));
+    // Every vector of every class was checked above: none is skipped.
+    let classes: std::collections::BTreeMap<&str, usize> =
+        fixture.vectors.iter().fold(Default::default(), |mut count, v| {
+            *count.entry(v.class.as_str()).or_default() += 1;
+            count
+        });
+    for (class, count) in [
+        ("nested", 228), ("nested-unknown", 20), ("nested-deferred", 24), ("map-set", 266),
+        ("map-set-order", 352), ("transparent", 160), ("custom", 116), ("invariant", 128),
+    ] {
+        assert_eq!(classes.get(class), Some(&count), "{class}");
+    }
+    assert_eq!(fixture.vectors.len(), 6565);
+    // Every invariant rejection carries the invariant's own message, and
+    // every order rejection the order rule's: compared word for word above.
+    let shared: Vec<_> = fixture.vectors.iter().filter(|v| v.reason_is_shared() && v.expect == "reject").collect();
+    assert_eq!(shared.len(), 128 + 180);
+    assert!(shared.iter().all(|v| !v.reason.is_empty()));
 }
 
 #[test]
@@ -138,6 +156,8 @@ fn the_fixture_covers_every_required_class_in_every_profile() {
         "corpus", "evolution-forward", "evolution-backward", "pruning", "malformed",
         "optional-presence", "width", "tuple", "variant", "enum", "enum-unknown-value",
         "string", "length-bound-overflow", "bytes", "zero-fixed", "depth",
+        "nested", "nested-unknown", "nested-deferred", "map-set", "map-set-order", "transparent",
+        "custom", "invariant",
     ] {
         let of_class: Vec<_> = fixture.vectors.iter().filter(|v| v.class == class).collect();
         assert!(!of_class.is_empty(), "no vectors of class {class}");
@@ -310,7 +330,158 @@ fn native_values() -> Vec<(&'static str, (String, Native))> {
         ("in_variant", native(V2::<Box<BLeaf>, u8>::A(Box::new(bleaf(1, "v"))))),
         ("in_tuple", native((Box::new(bleaf(1, "t")), 2u8))),
         ("depth_3", native(DepthNode { value: 1, next: Some(Box::new(DepthNode { value: 7, next: None })) })),
+        // Nested values: the bytes of the byte list holding the encoding.
+        ("args", native(nargs())),
+        ("action", native(NAction { method: 9, args: Nested::new(&nargs()).unwrap() })),
+        ("action", native(NActionRaw { method: 9, args: to_pssz::<Pssz, _>(&nargs()) })),
+        ("action", native(NActionLater { method: 9, args: Nested::new(&nargs()).unwrap() })),
+        ("scalar", native(Nested::<u32>::new(&0x0102_0304).unwrap())),
+        ("record", native(Nested::<NArgs>::new(&nargs()).unwrap())),
+        ("list_two", native(vec![Nested::<u32>::new(&1).unwrap(), Nested::new(&2).unwrap()])),
+        ("optional_some", native(Some(Nested::<Raw>::new(&raw("hi")).unwrap()))),
+        ("variant_nested", native(V2::<u8, Nested<NArgs>>::B(Nested::new(&nargs()).unwrap()))),
+        ("capped_at_bound", native(NCapped { id: 1, note: Nested::new(&raw("12345678")).unwrap() })),
+        ("chain_3", native(chain(3))),
+        ("nested_map", native(Nested::<BTreeMap<u32, Raw>>::new(
+            &[(256, raw("x")), (1, raw("one"))].into_iter().collect()).unwrap())),
+        // Pairs, maps and sets: the canonical order whatever the container.
+        ("pair_literal", native((7u16, raw("ab")))),
+        ("map_str_literal", native(
+            [(raw("b"), 2u32), (raw("a"), 1)].into_iter().collect::<std::collections::HashMap<Raw, u32>>())),
+        ("map_str_literal", native(
+            [(raw("b"), 2u32), (raw("a"), 1)].into_iter().collect::<BTreeMap<Raw, u32>>())),
+        ("map_u32_extremes", native(
+            [(u32::MAX, raw("")), (0, raw("zero"))].into_iter().collect::<BTreeMap<u32, Raw>>())),
+        ("set_u16_literal", native([513u16, 2].into_iter().collect::<std::collections::HashSet<u16>>())),
+        ("set_i32_signed", native([1, -1, i32::MAX, 0, i32::MIN].into_iter().collect::<BTreeSet<i32>>())),
+        ("set_f64_nan_order", native(
+            [f64::INFINITY, 0.0, f64::from_bits(0xfff8_0000_0000_0000), 1.0, f64::NEG_INFINITY,
+             f64::from_bits(0x7ff8_0000_0000_0000)].map(ByKey).into_iter().collect::<BTreeSet<_>>())),
+        ("set_record_many", native(
+            [Pair { x: 2, y: 0 }, Pair { x: 1, y: 5 }, Pair { x: 1, y: 4 }].map(ByKey).into_iter()
+                .collect::<BTreeSet<_>>())),
+        ("set_nested_inner_byte_order", native(
+            [1u32, 256, 0].iter().map(|n| Nested::<u32>::new(n).unwrap()).collect::<BTreeSet<_>>())),
+        ("variant_map", native(V2::<BTreeMap<Raw, u32>, u32>::A(
+            [(raw("a"), 1), (raw("b"), 2)].into_iter().collect()))),
+        ("optional_set_some", native(Some([513u16, 2].into_iter().collect::<BTreeSet<u16>>()))),
+        // Transparent wrappers: the member's bytes.
+        ("id/max", native(Id { value: u64::MAX })),
+        ("id/list", native(vec![Id { value: 1 }, Id { value: 2 }, Id { value: u64::MAX }])),
+        ("id/some", native(Some(Id { value: 7 }))),
+        ("blob/bytes", native(Blob { data: vec![1, 2, 3] })),
+        ("ref/name", native(Ref { target: RefTarget::Name(raw("alice")) })),
+        ("ref/number", native(Ref { target: RefTarget::Number(42) })),
+        ("tag/map_keys", native(
+            [(Tag { text: raw("b") }, 2u32), (Tag { text: raw("a") }, 1)].into_iter().collect::<BTreeMap<_, _>>())),
+        // Custom types: the wire type's bytes.
+        ("endpoint/v4", native(Endpoint::V4(V4 { address: [10, 0, 0, 7], port: 1 }))),
+        ("ratio/negative", native(Ratio((-3, 4)))),
+        ("name/largest", native(Name { value: (1 << 60) - 1 })),
+        ("range/ordered", native(Range { lo: 3, hi: 9 })),
+        ("level/array", native([Level::Mid, Level::Top])),
+        ("derkey/some", native(Some(DerKey { data: vec![0x30, 0] }))),
+        ("map_name_range/two", native(
+            [(Name { value: 7 }, Range { lo: 1, hi: 2 }), (Name { value: 3 }, Range { lo: 0, hi: 0 })]
+                .into_iter().collect::<BTreeMap<_, _>>())),
+        ("set_level/two", native([Level::Top, Level::Low].into_iter().collect::<BTreeSet<_>>())),
+        ("nested_range/ordered", native(Nested::<Range>::new(&Range { lo: 3, hi: 9 }).unwrap())),
     ]
+}
+fn nargs() -> NArgs {
+    NArgs { to: raw("bob"), amount: 5, memo: Some(raw("rent")) }
+}
+/// `links` nested levels, the innermost with no next.
+fn chain(links: usize) -> NChain {
+    (0..links).fold(NChain { next: None }, |inner, _| NChain {
+        next: Some(Nested::new(&inner).unwrap()),
+    })
+}
+
+// ── Writers ─────────────────────────────────────────────────────────────────
+//
+// The vectors of class `invariant` are frames "as a writer that does not
+// check would produce them", and those of `map-set-order` frames an encoder
+// cannot produce from a map / set. The Rust writers:
+
+#[test]
+fn a_value_that_violates_an_invariant_has_no_encoding() {
+    fn refused<T: All>(value: T, reason: &str) {
+        for format in ["auto", "pssz8", "pssz16", "pssz32"] {
+            assert_eq!(
+                encode::<T>(format, &value).map_err(|e| e.0),
+                Err(reason),
+                "{} {format}: {value:?}",
+                T::id()
+            );
+        }
+    }
+    const NAME: &str = "Name: value is not a canonical name";
+    const RANGE: &str = "Range: lo is greater than hi";
+    const LEVEL: &str = "Level: not a listed level";
+    const DER_KEY: &str = "DerKey: not a DER sequence";
+    let bad_name = Name { value: 1 << 60 };
+    let bad_range = Range { lo: 9, hi: 3 };
+    refused(bad_name.clone(), NAME);
+    refused(bad_range.clone(), RANGE);
+    refused(Level::Unknown(4), LEVEL);
+    refused(DerKey { data: vec![] }, DER_KEY);
+    refused(DerKey { data: vec![0x31, 0] }, DER_KEY);
+    refused(Ref { target: RefTarget::Name(raw("")) }, "Ref: a name is not empty");
+    // Where the value occurs: list, array, optional, variant, record member,
+    // map key, mapped value, set element.
+    refused(vec![Name { value: 1 }, bad_name.clone()], NAME);
+    refused([Level::Low, Level::Unknown(200)], LEVEL);
+    refused(Some(bad_name.clone()), NAME);
+    refused(NameOrRange::Range(bad_range.clone()), RANGE);
+    refused([(bad_name.clone(), Range { lo: 0, hi: 0 })].into_iter().collect::<BTreeMap<_, _>>(), NAME);
+    refused([(Name { value: 1 }, bad_range.clone())].into_iter().collect::<BTreeMap<_, _>>(), RANGE);
+    // The key's violation is reported before its mapped value's.
+    refused([(bad_name.clone(), bad_range.clone())].into_iter().collect::<BTreeMap<_, _>>(), NAME);
+    refused([Level::Low, Level::Unknown(9)].into_iter().collect::<BTreeSet<_>>(), LEVEL);
+    // A nested value is checked when it is made: there is no Nested<Range>
+    // holding a reversed range except through `unchecked`, whose bytes every
+    // reader then rejects (the vector invariant/nested/range_reversed).
+    assert_eq!(Nested::<Range>::new(&bad_range).map_err(|e| e.0), Err(RANGE));
+    let adopted = Nested::<Range>::unchecked(vec![8, 9, 0, 0, 0, 3, 0, 0, 0]);
+    assert_eq!(adopted.validate().map_err(|e| e.0), Err(RANGE));
+    let frame = try_to_pssz::<Pssz, _>(&adopted).expect("a writer does not look inside");
+    assert_eq!(from_pssz::<Pssz, Nested<Range>>(&frame).map_err(|e| e.0), Err(RANGE));
+    assert_eq!(Nested::<Range>::checked(frame).map_err(|e| e.0), Err(RANGE));
+    // A value that satisfies its invariants is written.
+    assert!(try_to_pssz::<Pssz, _>(&Name { value: (1 << 60) - 1 }).is_ok());
+}
+
+#[test]
+fn a_map_or_set_is_written_in_key_order_and_refuses_equal_keys() {
+    use std::collections::{HashMap, HashSet};
+    // Numeric order, not the order of the little-endian wire bytes.
+    let set: HashSet<u16> = [513, 2].into_iter().collect();
+    assert_eq!(hex(&try_to_pssz::<Pssz, _>(&set).unwrap()), "02000102");
+    let map: HashMap<String, u32> = [("b".to_string(), 2), ("a".to_string(), 1)].into_iter().collect();
+    let bytes = try_to_pssz::<Pssz, _>(&map).unwrap();
+    assert_eq!(bytes, try_to_pssz::<Pssz, _>(&vec![("a".to_string(), 1u32), ("b".to_string(), 2)]).unwrap());
+    assert_eq!(from_pssz::<Pssz, HashMap<String, u32>>(&bytes).unwrap(), map);
+    // The frame with the two entries exchanged is the list, not the map.
+    let swapped = try_to_pssz::<Pssz, _>(&vec![("b".to_string(), 2u32), ("a".to_string(), 1)]).unwrap();
+    assert_eq!(
+        from_pssz::<Pssz, HashMap<String, u32>>(&swapped).map_err(|e| e.0),
+        Err("pssz: map entries are not in strictly ascending key order")
+    );
+    // Two entries whose keys have equal key bytes are duplicates, whatever
+    // the container thinks: `Low` and `Unknown(0)` are one key (the order is
+    // computed before, and without, the invariant that refuses the second).
+    let twice: BTreeSet<Level> = [Level::Low, Level::Unknown(0)].into_iter().collect();
+    assert_eq!(twice.len(), 2);
+    assert_eq!(try_to_pssz::<Pssz, _>(&twice).map_err(|e| e.0), Err("pssz: set has duplicate elements"));
+    let twice: BTreeMap<Level, u8> = [(Level::Low, 1), (Level::Unknown(0), 2)].into_iter().collect();
+    assert_eq!(try_to_pssz::<Pssz, _>(&twice).map_err(|e| e.0), Err("pssz: map has duplicate keys"));
+    // -0 and +0 are one key: a set by key order cannot hold both.
+    let zeros: BTreeSet<ByKey<f64>> = [ByKey(0.0), ByKey(-0.0)].into_iter().collect();
+    assert_eq!(zeros.len(), 1);
+    // A bounded map counts entries.
+    let three: BoundedMap<u8, u8, 2> = BoundedMap([(1, 1), (2, 2), (3, 3)].into_iter().collect());
+    assert!(try_to_pssz::<Pssz, _>(&three).is_err());
 }
 
 #[test]
@@ -338,4 +509,67 @@ fn rust_native_encodings_equal_the_cpp_fixture_bytes() {
     }
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     assert!(compared >= 4 * values.len() - 40, "only {compared} encodings were compared");
+}
+
+// ── The type manifest: custom ids and invariants ────────────────────────────
+
+#[test]
+fn the_manifest_custom_ids_and_invariants_are_those_of_the_rust_types() {
+    use psio::pssz::schema_ir::{schema_for, AnyValue, Schema, ToPsszSchema};
+    let fixture = fixture();
+    let recorded = from_pssz::<Pssz, Schema>(&unhex(&fixture.schema_ir)).expect("schema_ir decodes");
+    let info = |id: &str| fixture.types.iter().find(|t| t.id == id).unwrap_or_else(|| panic!("{id}"));
+    // `custom_id`: the id of the Custom node Rust builds for the type, which
+    // is the node C++ recorded (same id, same kind of wire type). A
+    // transparent type with neither a text form nor an invariant is a named
+    // alias of its member's type: no Custom node.
+    fn check<T: ToPsszSchema + Conf>(recorded: &Schema, info: &TypeInfo) {
+        let id = T::id();
+        assert_eq!(T::custom_id(), info.custom_id, "{id}: custom_id");
+        let (built, root) = schema_for::<T>().unwrap();
+        let rust = built.resolve(&root).unwrap();
+        let cpp = recorded.resolve(recorded.get(&id).expect("recorded")).expect("resolves");
+        match (&rust.value, &cpp.value, &info.custom_id) {
+            (AnyValue::Custom(rust), AnyValue::Custom(cpp), Some(custom_id)) => {
+                assert_eq!(&rust.id, custom_id, "{id}");
+                assert_eq!(&cpp.id, custom_id, "{id}");
+                let wire = |schema: &Schema, ty| std::mem::discriminant(&schema.wire(ty).unwrap().value);
+                assert_eq!(wire(&built, &rust.r#type), wire(recorded, &cpp.r#type), "{id}: wire type");
+            }
+            (rust, cpp, None) => {
+                assert!(!matches!(rust, AnyValue::Custom(c) if c.id == id), "{id}: Rust built a Custom node");
+                assert!(!matches!(cpp, AnyValue::Custom(c) if c.id == id), "{id}: C++ recorded a Custom node");
+                // The same bytes either way.
+                assert_eq!(
+                    std::mem::discriminant(&built.wire(&root).unwrap().value),
+                    std::mem::discriminant(&recorded.wire(recorded.get(&id).unwrap()).unwrap().value),
+                    "{id}: wire type"
+                );
+            }
+            (rust, cpp, Some(_)) => panic!("{id}: not Custom nodes: {rust:?} / {cpp:?}"),
+        }
+    }
+    macro_rules! each { ($($t:ty),*) => { $(check::<$t>(&recorded, info(&<$t as Conf>::id()));)* }; }
+    each!(Id, Tag, Blob, Ref, Name, DerKey, Range, Level, V4, V6, Endpoint, Ratio, Guarded);
+    let with_id: Vec<&str> =
+        fixture.types.iter().filter(|t| t.custom_id.is_some()).map(|t| t.id.as_str()).collect();
+    assert_eq!(
+        with_id,
+        ["Blob", "Ref", "Name", "DerKey", "Range", "Level", "variant<V4,V6>", "tuple<i16,u16>"]
+    );
+    // `invariant`: the types an invariant constrains are exactly those with
+    // vectors of class `invariant`, plus `Ref` (whose violation the fixture
+    // shows inside `Guarded` only is still its own).
+    let marked: BTreeSet<&str> =
+        fixture.types.iter().filter(|t| t.invariant).map(|t| t.id.as_str()).collect();
+    let violated: BTreeSet<&str> =
+        fixture.vectors.iter().filter(|v| v.class == "invariant").map(|v| v.ty.as_str()).collect();
+    assert!(violated.is_subset(&marked), "{:?}", violated.difference(&marked).collect::<Vec<_>>());
+    assert_eq!(marked.len(), 16, "{marked:?}");
+    for id in &marked {
+        assert!(
+            violated.contains(id) || fixture.vectors.iter().any(|v| v.ty == *id && v.class == "custom"),
+            "{id}: marked, with no vector"
+        );
+    }
 }

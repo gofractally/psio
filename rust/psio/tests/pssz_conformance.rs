@@ -14,6 +14,13 @@
 mod harness {
     include!("conformance/harness.rs");
 }
+// The transparent wrappers, custom types and invariants of
+// conformance/custom-types.md: one declaration (the derives), used by both
+// record flavours.
+#[path = "custom/text.rs"]
+mod text;
+#[path = "custom/types.rs"]
+mod custom_types;
 
 mod macro_rules_records {
     macro_rules! rec {
@@ -32,7 +39,7 @@ mod macro_rules_records {
     }
     macro_rules! dwnc {
         ($name:ident { $($f:ident : $t:ty),* $(,)? }) => {
-            #[derive(Debug, Clone, Copy, PartialEq)]
+            #[derive(Debug, Clone, Copy, PartialEq, psio::Key)]
             pub struct $name { $(pub $f: $t),* }
             psio::pssz_struct_dwnc!($name { $($f: $t),* });
             conf_record!("dwnc", ; $name { $($f: $t),* });
@@ -57,7 +64,7 @@ mod derived_records {
     }
     macro_rules! dwnc {
         ($name:ident { $($f:ident : $t:ty),* $(,)? }) => {
-            #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+            #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView, psio::Key)]
             #[pssz(definition_will_not_change)]
             pub struct $name { $(pub $f: $t),* }
             conf_record!("dwnc", ; $name { $($f: $t),* });
