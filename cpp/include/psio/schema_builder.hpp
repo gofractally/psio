@@ -625,8 +625,13 @@ namespace psio::schema_types
          using pkg = typename info::package;
          if constexpr (requires { pkg::name; })
          {
-            package_name_    = std::string{pkg::name};
-            package_version_ = std::string{pkg::version};
+            // An interface with no package (a global tag) leaves the
+            // package captured so far in place.
+            if (!std::string_view{pkg::name}.empty())
+            {
+               package_name_    = std::string{pkg::name};
+               package_version_ = std::string{pkg::version};
+            }
          }
 
          Interface iface;
@@ -701,27 +706,19 @@ namespace psio::schema_types
 
       // ── Function-pointer decomposition + Func construction ────────
 
-      template <typename FnPtr>
-      struct fn_decomp;
-      template <typename R, typename... Args>
-      struct fn_decomp<R (*)(Args...)>
-      {
-         using ret                          = R;
-         using args                         = std::tuple<Args...>;
-         static constexpr std::size_t arity = sizeof...(Args);
-      };
-
+      // A static member (function pointer) or an instance member function:
+      // the implicit object is not a parameter.
       template <typename FnPtr>
       Func build_func(std::string_view                       name,
                       const std::initializer_list<const char*>& pnames)
       {
-         using D = fn_decomp<FnPtr>;
+         using D = ::psio::method_traits<FnPtr>;
          Func f;
          f.name = std::string{name};
          build_params<typename D::args>(
             f.params, pnames, std::make_index_sequence<D::arity>{});
-         if constexpr (!std::is_void_v<typename D::ret>)
-            f.result = Box<AnyType>{insert<std::remove_cvref_t<typename D::ret>>()};
+         if constexpr (!std::is_void_v<typename D::result>)
+            f.result = Box<AnyType>{insert<std::remove_cvref_t<typename D::result>>()};
          return f;
       }
 

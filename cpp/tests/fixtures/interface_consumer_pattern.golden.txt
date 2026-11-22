@@ -1,0 +1,158 @@
+---- generate_wit_text
+package wasi:clocks@0.2.3;
+
+interface wasi-clocks-wall-clock {
+  record wasi-datetime {
+    seconds: u64,
+    nanoseconds: u32,
+  }
+
+  now: func() -> wasi-datetime;
+  resolution: func() -> wasi-datetime;
+}
+
+world wasi-clocks-wall-clock {
+  export wasi-clocks-wall-clock;
+}
+---- constexpr interface_text
+interface wasi-clocks-wall-clock {
+  record wasi-datetime {
+    seconds: u64,
+    nanoseconds: u32,
+  }
+
+  now: func() -> wasi-datetime;
+  resolution: func() -> wasi-datetime;
+}
+---- emit_wit(SchemaBuilder)
+package wasi_clocks@0.2.3;
+
+interface wasi-clocks-wall-clock {
+  record wasi-datetime {
+    seconds: u64,
+    nanoseconds: u32
+  }
+  now: func() -> wasi-datetime;
+  resolution: func() -> wasi-datetime;
+}
+
+---- binary
+0061736d0d0001000019167769742d636f6d706f6e656e742d656e636f64696e67040007a101014102014102014206017202077365636f6e6473770b6e616e6f7365636f6e64737904000d776173692d6461746574696d6503000001400000010400036e6f770102014000000104000a7265736f6c7574696f6e0103040028776173693a636c6f636b732f776173692d636c6f636b732d77616c6c2d636c6f636b40302e322e330500040019776173693a636c6f636b732f696d706f72747340302e322e3304000b0d010007696d706f727473030000002c0970726f647563657273010c70726f6365737365642d6279010c7073696f2d7769742d67656e05312e302e30
+---- names
+wasi_clocks_wall_clock @ wasi_clocks 0.2.3
+now()
+resolution()
+---- generate_wit_text
+package wasi:clocks@0.2.3;
+
+interface wasi-clocks-monotonic-clock {
+  now: func() -> u64;
+  resolution: func() -> u64;
+  subscribe-instant: func(when: u64) -> own<pollable>;
+}
+
+world wasi-clocks-monotonic-clock {
+  export wasi-clocks-monotonic-clock;
+}
+---- constexpr interface_text
+interface wasi-clocks-monotonic-clock {
+  now: func() -> u64;
+  resolution: func() -> u64;
+  subscribe-instant: func(when: u64) -> own<pollable>;
+}
+---- emit_wit(SchemaBuilder)
+package wasi_clocks@0.2.3;
+
+interface wasi-clocks-monotonic-clock {
+  now: func() -> u64;
+  resolution: func() -> u64;
+  subscribe-instant: func(when: u64) -> u32;
+}
+
+---- binary
+0061736d0d0001000019167769742d636f6d706f6e656e742d656e636f64696e670400079c0101410201410201420701400000770400036e6f770100014000007704000a7265736f6c7574696f6e010101014001047768656e7700020400117375627363726962652d696e7374616e74010304002d776173693a636c6f636b732f776173692d636c6f636b732d6d6f6e6f746f6e69632d636c6f636b40302e322e330500040019776173693a636c6f636b732f696d706f72747340302e322e3304000b0d010007696d706f727473030000002c0970726f647563657273010c70726f6365737365642d6279010c7073696f2d7769742d67656e05312e302e30
+---- names
+wasi_clocks_monotonic_clock @ wasi_clocks 0.2.3
+now()
+resolution()
+subscribe_instant(when;)
+---- generate_wit_text
+package wasi:io@0.2.3;
+
+interface wasi-io-poll {
+  resource pollable;
+
+  pollable-ready: func(self: borrow<pollable>) -> bool;
+  pollable-block: func(self: borrow<pollable>);
+  poll: func(in: list<borrow<pollable>>) -> list<u32>;
+}
+
+world wasi-io-poll {
+  export wasi-io-poll;
+}
+---- constexpr interface_text
+interface wasi-io-poll {
+  resource pollable;
+
+  pollable-ready: func(self: borrow<pollable>) -> bool;
+  pollable-block: func(self: borrow<pollable>);
+  poll: func(in: list<borrow<pollable>>) -> list<u32>;
+}
+---- emit_wit(SchemaBuilder)
+package wasi_io@0.2.3;
+
+interface wasi-io-poll {
+  resource pollable {
+  }
+  pollable-ready: func(self: u32) -> bool;
+  pollable-block: func(self: u32);
+  poll: func(in: list<u32>) -> list<u32>;
+}
+
+---- binary
+0061736d0d0001000019167769742d636f6d706f6e656e742d656e636f64696e67040007a60101410201410201420b01040008706f6c6c61626c65030000010140010473656c6602007f04000e706f6c6c61626c652d726561647901030140010473656c6602010004000e706f6c6c61626c652d626c6f636b010401700201707901400102696e050006040004706f6c6c010704001a776173693a696f2f776173692d696f2d706f6c6c40302e322e330500040015776173693a696f2f696d706f72747340302e322e3304000b0d010007696d706f727473030000002c0970726f647563657273010c70726f6365737365642d6279010c7073696f2d7769742d67656e05312e302e30
+---- names
+wasi_io_poll @ wasi_io 0.2.3
+pollable_ready(self;)
+pollable_block(self;)
+poll(in;)
+---- generate_wit_text
+package wasi:io@0.2.3;
+
+interface wasi-io-streams {
+  resource input-stream;
+
+  read: func(self: borrow<input-stream>, len: u64) -> list<u8>;
+  subscribe: func(self: borrow<input-stream>) -> own<pollable>;
+  drop: func(self: own<input-stream>);
+}
+
+world wasi-io-streams {
+  export wasi-io-streams;
+}
+---- constexpr interface_text
+interface wasi-io-streams {
+  resource input-stream;
+
+  read: func(self: borrow<input-stream>, len: u64) -> list<u8>;
+  subscribe: func(self: borrow<input-stream>) -> own<pollable>;
+  drop: func(self: own<input-stream>);
+}
+---- emit_wit(SchemaBuilder)
+package wasi_io@0.2.3;
+
+interface wasi-io-streams {
+  resource input-stream {
+  }
+  read: func(self: u32, len: u64) -> list<u8>;
+  subscribe: func(self: u32) -> u32;
+  drop: func(self: u32);
+}
+
+---- binary
+0061736d0d0001000019167769742d636f6d706f6e656e742d656e636f64696e67040007a40101410201410201420c0104000c696e7075742d73747265616d0300000101707d0140020473656c6602036c656e770003040004726561640104010140010473656c660200050400097375627363726962650106010140010473656c6607010004000464726f70010804001d776173693a696f2f776173692d696f2d73747265616d7340302e322e330500040015776173693a696f2f696d706f72747340302e322e3304000b0d010007696d706f727473030000002c0970726f647563657273010c70726f6365737365642d6279010c7073696f2d7769742d67656e05312e302e30
+---- names
+wasi_io_streams @ wasi_io 0.2.3
+read(self;len;)
+subscribe(self;)
+drop(self;)

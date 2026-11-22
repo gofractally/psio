@@ -30,6 +30,16 @@
 //   psio::borrow<T>                             → borrow<T-record>
 //   PSIO_REFLECT'd struct (data members)        → record
 //   wit_resource-derived (PSIO_INTERFACE'd)     → resource with methods
+//
+// Functions. A static member function is a WIT function over exactly its
+// parameters. An instance member function (const or not) is a WIT function
+// over its parameters with the object implicit: in an interface it is a plain
+// function; on a resource it is a resource method — written
+// `name: func(params)` in the resource block, the canonical ABI's
+// `[method]resource.name` whose first core parameter is the implicit
+// `self: borrow<resource>`. The older pattern for a resource method — a
+// static function whose first parameter is an explicit `borrow<T> self` —
+// keeps producing `name: func(self: borrow<t>, ...)` exactly as before.
 
 #include <psio/reflect.hpp>
 #include <psio/structural.hpp>
@@ -694,6 +704,41 @@ namespace psio
       return ctx.world;
    }
 
+   /// The WIT package id of the package an interface is registered in
+   /// (structural.hpp gives the lookup order): each `::`-separated part of
+   /// the package name in kebab-case, joined with ':', then "@version" when
+   /// the package has one. A namespace-default package `chain::db` is
+   /// "chain:db"; a global tag with no package gives an empty id.
+   template <typename Tag>
+   std::string registered_package_id()
+   {
+      using pkg = typename detail::interface_info<Tag>::package;
+      std::string      out;
+      std::string_view name = pkg::name;
+      while (!name.empty())
+      {
+         const auto sep = name.find("::");
+         out += detail::to_kebab_case(name.substr(0, sep));
+         if (sep == std::string_view::npos)
+            break;
+         out += ':';
+         name.remove_prefix(sep + 2);
+      }
+      if (!std::string_view{pkg::version}.empty())
+      {
+         out += '@';
+         out += std::string_view{pkg::version};
+      }
+      return out;
+   }
+
+   /// Build a wit_world for an interface tag in its registered package.
+   template <typename Tag>
+   wit_world generate_wit()
+   {
+      return generate_wit<Tag>(registered_package_id<Tag>());
+   }
+
    /// Render a wit_world as standards-compliant WIT text.
    inline std::string wit_to_text(const wit_world& w)
    {
@@ -736,6 +781,13 @@ namespace psio
                                  std::string_view   world_name = {})
    {
       return wit_to_text(generate_wit<Tag>(package, world_name));
+   }
+
+   /// WIT text for an interface tag in its registered package.
+   template <typename Tag>
+   std::string generate_wit_text()
+   {
+      return wit_to_text(generate_wit<Tag>());
    }
 
 }  // namespace psio

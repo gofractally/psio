@@ -19,17 +19,70 @@
 //   psio::reflect<T>::for_each_field(obj, fn)        iterate all
 //   psio::reflect<T>::is_reflected                   SFINAE-style check
 //
-// Population: `PSIO_REFLECT(Type, field1, field2, ...)` macro, callable
-// at namespace scope right after the struct definition (no namespace
-// gymnastics needed — macro uses ADL to plug the metadata into the
-// user's namespace).
+// Methods (listed with `method(name, param...)`):
 //
-// Dispatch: `psio::reflect<T>` is a class template whose base is the
-// type returned by an ADL-found helper `psio_reflect_helper(T*)`.
-// Unreflected types fall through to an empty default with
+//   psio::reflect<T>::method_count
+//   psio::reflect<T>::method_pointer<I>              &T::method_I (a value)
+//   psio::reflect<T>::method_type<I>                 its type
+//   psio::reflect<T>::method_name<I> / method_names  "method_I" / std::array of all
+//   psio::reflect<T>::method_param_names<I>          std::array<string_view, K> as written
+//   psio::reflect<T>::method_result<I>               return type
+//   psio::reflect<T>::method_args<I>                 std::tuple<Args...> as declared
+//   psio::reflect<T>::method_params<I>               std::tuple<remove_cvref_t<Args>...>
+//   psio::reflect<T>::method_is_static<I> / method_is_const<I>
+//   psio::reflect<T>::method_traits<I>               psio::method_traits<method_type<I>>
+//   psio::reflect<T>::index_of_method(name)          name → index (optional)
+//   psio::reflect<T>::find_method_index(name)        name → index, method_count if absent
+//   psio::reflect<T>::index_of_method_hash<Hash>(key)  Hash{}(name) == key → index
+//   psio::reflect<T>::for_each_method(fn)            fn(integral_constant<I>, name, pointer)
+//   psio::reflect<T>::invoke_method<I>(obj, tuple)   call method I with a tuple of arguments
+//
+// The proxy:
+//
+//   psio::reflect<T>::proxy<P>   inherits P (`using P::P`, plus construction
+//                                from P and from whatever builds P). Every
+//                                field is a member `name()` that returns
+//                                P::get<I, &T::name>(); every method is a
+//                                member `name(args...)` that returns
+//                                P::call<I, &T::name>(args...). The index and
+//                                the member pointer are template VALUE
+//                                arguments. P needs only the one it is used
+//                                for: a field projection defines `get`, a call
+//                                dispatcher defines
+//                                  template <std::size_t I, auto MemberPtr, typename... Args>
+//                                  auto call(Args&&... args);
+//
+// Population: `PSIO_REFLECT(Type, item...)` — at namespace scope right after
+// the type (in any namespace, with an unqualified type name), or inside the
+// class body:
+//
+//     namespace chain {
+//        class token {
+//           std::uint64_t supply_;                      // private is fine in-class
+//           PSIO_REFLECT(token, supply_, method(transfer, from, to, amount))
+//           void transfer(account from, account to, std::uint64_t amount);
+//        };
+//     }
+//
+// In-class reflection sees private members and members declared after the
+// macro; `attr(...)` and the type-level keywords are not available there
+// (they are explicit specializations, which C++ only allows at namespace
+// scope) — attach those after the class with PSIO_FIELD_ATTRS /
+// PSIO_TYPE_ATTRS. At namespace scope every listed member must be accessible
+// (public).
+//
+// A method is named by `&T::name`, so an overloaded member function cannot
+// be reflected (the address is ambiguous): give the overloads distinct
+// names, or reflect a non-overloaded forwarding member. Member function
+// templates and ref-qualified member functions are likewise not supported.
+// A name may be listed once: a field and a method with one name, or a
+// member named like one of the proxy's own members (`psio_get_proxy`,
+// `_psio_record_proxy`), is a compile error.
+//
+// Dispatch: `psio::reflect<T>` inherits the metadata PSIO_REFLECT bound to
+// T (see detail::reflect_slot), or the result of a hand-written ADL
+// `psio_reflect_helper(T*)`; unreflected types get an empty default with
 // is_reflected = false.
-//
-// Reflection covers public non-static data members only (design § 5.2.5.4).
 //
 // Lookup. `index_of`, `find_index` and `visit_field_by_name` resolve a name
 // through a perfect hash generated at compile time from the member names
@@ -70,19 +123,49 @@ namespace psio {
    }
 
    // Fallback ADL hook: returns the default empty impl for unreflected
-   // types. Users' PSIO_REFLECT macro emits a more-specific overload
-   // in their namespace; ADL picks that one over this fallback.
+   // types. A hand-written `psio_reflect_helper(T*)` overload in T's
+   // namespace is still honoured; PSIO_REFLECT itself registers through
+   // the binding below, which works at namespace scope and in a class body.
    template <typename T>
    constexpr detail::reflect_default_impl psio_reflect_helper(T*) noexcept
    {
       return {};
    }
 
-   // Public facade. Inherits from whatever the ADL dispatch returns —
-   // a detail::reflect_default_impl for unreflected types, or the
-   // user's generated struct for reflected types.
+   namespace detail {
+      // Registration. `reflect_slot<T>` declares a friend function that
+      // `reflect_bind<T, Impl>` defines; instantiating the binding (the
+      // macro does it with a static_assert, legal at namespace and at class
+      // scope, in any namespace) makes `Impl` reachable from T alone. The
+      // lookup does not depend on access, so the macro may sit in a private
+      // section of the class it reflects.
+      template <typename T>
+      struct reflect_slot
+      {
+         friend constexpr auto psio_reflect_lookup(reflect_slot);
+      };
+      template <typename T, typename Impl>
+      struct reflect_bind
+      {
+         friend constexpr auto psio_reflect_lookup(reflect_slot<T>) { return Impl{}; }
+      };
+
+      template <typename T, typename = void>
+      struct reflect_base
+      {
+         using type = decltype(psio_reflect_helper(static_cast<T*>(nullptr)));
+      };
+      template <typename T>
+      struct reflect_base<T, std::void_t<decltype(psio_reflect_lookup(reflect_slot<T>{}))>>
+      {
+         using type = decltype(psio_reflect_lookup(reflect_slot<T>{}));
+      };
+   }
+
+   // Public facade. Inherits from the metadata PSIO_REFLECT registered for
+   // T, or from detail::reflect_default_impl for unreflected types.
    template <typename T>
-   struct reflect : decltype(psio_reflect_helper(static_cast<T*>(nullptr)))
+   struct reflect : detail::reflect_base<T>::type
    {
    };
 
@@ -90,48 +173,199 @@ namespace psio {
    template <typename T>
    concept Reflected = reflect<T>::is_reflected;
 
+   // ── Function-type decomposition ────────────────────────────────────────
+   //
+   // method_traits<F> for a pointer to a member function (const or not,
+   // noexcept or not) or a pointer to a function (a static member):
+   //
+   //   result          the declared return type
+   //   args            std::tuple<Args...> exactly as declared
+   //   params          std::tuple<std::remove_cvref_t<Args>...>
+   //   class_type      the class (void for a static / free function)
+   //   arity, is_static, is_const
+   template <typename F>
+   struct method_traits;
+
+   namespace detail {
+      template <typename R, typename C, bool Static, bool Const, typename... Args>
+      struct method_traits_impl
+      {
+         using result     = R;
+         using args       = std::tuple<Args...>;
+         using params     = std::tuple<std::remove_cvref_t<Args>...>;
+         using class_type = C;
+         static constexpr std::size_t arity     = sizeof...(Args);
+         static constexpr bool        is_static = Static;
+         static constexpr bool        is_const  = Const;
+      };
+   }
+   template <typename R, typename... Args>
+   struct method_traits<R (*)(Args...)> : detail::method_traits_impl<R, void, true, false, Args...> {};
+   template <typename R, typename... Args>
+   struct method_traits<R (*)(Args...) noexcept> : method_traits<R (*)(Args...)> {};
+   template <typename R, typename C, typename... Args>
+   struct method_traits<R (C::*)(Args...)> : detail::method_traits_impl<R, C, false, false, Args...> {};
+   template <typename R, typename C, typename... Args>
+   struct method_traits<R (C::*)(Args...) noexcept> : method_traits<R (C::*)(Args...)> {};
+   template <typename R, typename C, typename... Args>
+   struct method_traits<R (C::*)(Args...) const> : detail::method_traits_impl<R, C, false, true, Args...> {};
+   template <typename R, typename C, typename... Args>
+   struct method_traits<R (C::*)(Args...) const noexcept> : method_traits<R (C::*)(Args...) const> {};
+
+   namespace detail {
+      // Holder::method_names as name_lookup.hpp's tables want it.
+      template <typename Holder>
+      struct method_names_holder
+      {
+         static constexpr auto& _names_array_ = Holder::method_names;
+      };
+
+      template <typename Holder, std::size_t I>
+      constexpr auto method_param_name_array() noexcept
+      {
+         constexpr auto& list = Holder::method_param_name_lists[I];
+         std::array<std::string_view, list.size()> out{};
+         std::size_t                                 at = 0;
+         for (const char* p : list)
+            out[at++] = std::string_view(p);
+         return out;
+      }
+
+      template <typename Holder, typename F, std::size_t... Is>
+      constexpr void for_each_method_impl(F&& fn, std::index_sequence<Is...>)
+      {
+         (std::invoke(fn, std::integral_constant<std::size_t, Is>{}, Holder::method_names[Is],
+                      Holder::template method_pointer<Is>),
+          ...);
+      }
+
+      template <typename Ptr, typename Obj, typename Tuple>
+      constexpr decltype(auto) invoke_reflected(Ptr ptr, Obj&& obj, Tuple&& args)
+      {
+         if constexpr (std::is_member_function_pointer_v<Ptr>)
+            return std::apply(
+               [&](auto&&... a) -> decltype(auto) {
+                  return std::invoke(ptr, std::forward<Obj>(obj),
+                                     std::forward<decltype(a)>(a)...);
+               },
+               std::forward<Tuple>(args));
+         else
+            return std::apply(ptr, std::forward<Tuple>(args));
+      }
+
+      // A projection / dispatcher built from arbitrary arguments: its
+      // constructor when it has a matching one, its aggregate members
+      // otherwise.
+      template <typename P, typename... A>
+      concept projection_from =
+         std::is_constructible_v<P, A...> || requires { P{std::declval<A>()...}; };
+      template <typename P, typename... A>
+      constexpr P make_projection(A&&... a)
+      {
+         if constexpr (std::is_constructible_v<P, A...>)
+            return P(std::forward<A>(a)...);
+         else
+            return P{std::forward<A>(a)...};
+      }
+
+      // No name is listed twice (a field and a method may not share one)
+      // and none is a name the proxy itself declares.
+      template <std::size_t N, std::size_t M>
+      constexpr bool reflected_names_distinct(const std::array<std::string_view, N>& fields,
+                                              const std::array<std::string_view, M>& methods)
+      {
+         for (std::size_t i = 0; i < N + M; ++i)
+            for (std::size_t j = i + 1; j < N + M; ++j)
+               if ((i < N ? fields[i] : methods[i - N]) == (j < N ? fields[j] : methods[j - N]))
+                  return false;
+         return true;
+      }
+      constexpr bool reflected_name_reserved(std::string_view name)
+      {
+         return name == "psio_get_proxy" || name == "_psio_record_proxy";
+      }
+      template <std::size_t N, std::size_t M>
+      constexpr bool reflected_names_unreserved(const std::array<std::string_view, N>& fields,
+                                                const std::array<std::string_view, M>& methods)
+      {
+         for (auto n : fields)
+            if (reflected_name_reserved(n))
+               return false;
+         for (auto n : methods)
+            if (reflected_name_reserved(n))
+               return false;
+         return true;
+      }
+   }
+
 }  // namespace psio
 
 // ── Macro implementation ─────────────────────────────────────────────────
 //
 // Named accessors forward into a format-specific projection; no field storage is copied.
-#define PSIO_REFLECT_PROXY_FIELD_(r, TYPE, I, FIELD) \
-   decltype(auto) FIELD() { return this->psio_get_proxy().template get<I, &TYPE::FIELD>(); } \
-   decltype(auto) FIELD() const { return this->psio_get_proxy().template get<I, &TYPE::FIELD>(); }
+// `psio_T_` is the reflected type: the generated metadata is a class template
+// instantiated with it, so every use below is dependent and is looked up when
+// reflect<T> is first used (the class is complete by then, whichever way round
+// the members and the macro were written).
+#define PSIO_REFLECT_PROXY_FIELD_(r, _, I, FIELD) \
+   decltype(auto) FIELD() { return this->psio_get_proxy().template get<I, &psio_T_::FIELD>(); } \
+   decltype(auto) FIELD() const { return this->psio_get_proxy().template get<I, &psio_T_::FIELD>(); }
 
-#define PSIO_REFLECT_PROXY_(TYPE, SEQ) \
+// A method forwards to Projection::call<I, &T::method>(args...): the index and
+// the member pointer are template VALUE arguments.
+#define PSIO_REFLECT_PROXY_METHOD_(r, _, I, kt) \
+   template <typename... psio_A_> \
+   decltype(auto) BOOST_PP_TUPLE_ELEM(1, kt)(psio_A_&&... psio_a_) { \
+      return static_cast<Projection&>(*this).template call<I, &psio_T_::BOOST_PP_TUPLE_ELEM(1, kt)>( \
+         ::std::forward<psio_A_>(psio_a_)...); \
+   } \
+   template <typename... psio_A_> \
+   decltype(auto) BOOST_PP_TUPLE_ELEM(1, kt)(psio_A_&&... psio_a_) const { \
+      return static_cast<const Projection&>(*this).template call<I, &psio_T_::BOOST_PP_TUPLE_ELEM(1, kt)>( \
+         ::std::forward<psio_A_>(psio_a_)...); \
+   }
+
+// SEQ_FOR_EACH_I that tolerates an empty sequence.
+#define PSIO_PP_NOTHING_(...)
+#define PSIO_PP_SEQ_FOR_EACH_I_(macro, data, seq) \
+   BOOST_PP_IIF(BOOST_PP_CHECK_EMPTY(seq), PSIO_PP_NOTHING_, BOOST_PP_SEQ_FOR_EACH_I)(macro, data, seq)
+
+// ONE proxy per reflected type: every field as `name()` -> get<I, &T::name>()
+// and every method as `name(args...)` -> call<I, &T::name>(args...). The proxy
+// inherits the projection / dispatcher and is constructible from whatever
+// constructs it (its constructors, or its aggregate members).
+#define PSIO_REFLECT_PROXY_(FSEQ, MSEQ) \
    template <typename Projection> \
    struct _psio_record_proxy : Projection { \
       using Projection::Projection; \
+      _psio_record_proxy() = default; \
       explicit _psio_record_proxy(Projection p) : Projection(::std::move(p)) {} \
+      template <typename psio_A0_, typename... psio_A_> \
+         requires(!(sizeof...(psio_A_) == 0 && \
+                    ::std::is_base_of_v<Projection, ::std::remove_cvref_t<psio_A0_>>) && \
+                  ::psio::detail::projection_from<Projection, psio_A0_, psio_A_...>) \
+      explicit(sizeof...(psio_A_) == 0) _psio_record_proxy(psio_A0_&& a0_, psio_A_&&... a_) \
+         : Projection(::psio::detail::make_projection<Projection>( \
+              ::std::forward<psio_A0_>(a0_), ::std::forward<psio_A_>(a_)...)) {} \
       Projection& psio_get_proxy() { return *this; } \
       const Projection& psio_get_proxy() const { return *this; } \
-      BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_PROXY_FIELD_, TYPE, SEQ) \
+      PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_PROXY_FIELD_, _, FSEQ) \
+      PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_PROXY_METHOD_, _, MSEQ) \
    }; \
    template <typename Projection> using proxy = _psio_record_proxy<Projection>;
 
-// PSIO_REFLECT(Type, f1, f2, ...) emits an ADL-found helper function
-// in the enclosing namespace:
-//
-//     inline auto psio_reflect_helper(Type*) noexcept { return … impl … ; }
-//
-// The returned unnamed struct carries all the metadata psio::reflect<T>
-// exposes. Because the helper lives in the same namespace as the struct,
-// users can call PSIO_REFLECT right after the struct definition without
-// leaving the namespace.
-//
 // Each per-field helper takes (r, data, I, FIELD).
 
-#define PSIO_REFLECT_MEMBER_POINTER_CASE_(r, TYPE, I, FIELD) \
-   if constexpr (Idx == (I)) return &TYPE::FIELD;
+#define PSIO_REFLECT_MEMBER_POINTER_CASE_(r, _, I, FIELD) \
+   if constexpr (Idx == (I)) return &psio_T_::FIELD;
 
 #define PSIO_REFLECT_MEMBER_NAME_CASE_(r, _, I, FIELD) \
    if constexpr (Idx == (I)) return ::std::string_view(BOOST_PP_STRINGIZE(FIELD));
 
-#define PSIO_REFLECT_MEMBER_TYPE_CASE_(r, TYPE, I, FIELD)                                    \
+#define PSIO_REFLECT_MEMBER_TYPE_CASE_(r, _, I, FIELD)                                       \
    if constexpr (Idx == (I))                                                                  \
       return ::std::type_identity<                                                            \
-         ::std::remove_reference_t<decltype(::std::declval<TYPE&>().FIELD)>>{};
+         ::std::remove_reference_t<decltype(::std::declval<psio_T_&>().FIELD)>>{};
 
 #define PSIO_REFLECT_NAME_ARRAY_ELEM_(r, _, I, FIELD) \
    BOOST_PP_COMMA_IF(I) ::std::string_view(BOOST_PP_STRINGIZE(FIELD))
@@ -151,6 +385,23 @@ namespace psio {
                  ::std::string_view(BOOST_PP_STRINGIZE(FIELD)),   \
                  obj.FIELD);
 
+// Each per-method helper takes (r, data, I, kt), kt = (method, NAME, params...).
+#define PSIO_REFLECT_METHOD_POINTER_CASE_(r, _, I, kt) \
+   if constexpr (Idx == (I)) return &psio_T_::BOOST_PP_TUPLE_ELEM(1, kt);
+
+#define PSIO_REFLECT_METHOD_NAME_ELEM_(r, _, I, kt) \
+   BOOST_PP_COMMA_IF(I) ::std::string_view(BOOST_PP_STRINGIZE(BOOST_PP_TUPLE_ELEM(1, kt)))
+
+// "p1", "p2", ... (trailing comma; nothing for no parameters).
+#define PSIO_PP_QUOTE_EACH_(...) \
+   __VA_OPT__(PSIO_PP_RESCAN2_(PSIO_PP_QUOTE_STEP_(__VA_ARGS__)))
+#define PSIO_PP_QUOTE_STEP_(a, ...) \
+   BOOST_PP_STRINGIZE(a), __VA_OPT__(PSIO_PP_QUOTE_AGAIN_ PSIO_PP_PARENS_(__VA_ARGS__))
+#define PSIO_PP_QUOTE_AGAIN_() PSIO_PP_QUOTE_STEP_
+#define PSIO_REFLECT_METHOD_PARAMS_(kind, name, ...) PSIO_PP_QUOTE_EACH_(__VA_ARGS__)
+#define PSIO_REFLECT_METHOD_PARAM_LIST_(r, _, I, kt) \
+   ::std::initializer_list<const char*>{PSIO_REFLECT_METHOD_PARAMS_ kt},
+
 // NOTE: this macro takes an *unqualified* type identifier. Invoke
 // PSIO_REFLECT inside the namespace containing the type:
 //
@@ -167,7 +418,7 @@ namespace psio {
 
 // ── Keyword dispatch ──────────────────────────────────────────────────────
 //
-// PSIO_REFLECT accepts five kinds of arguments:
+// PSIO_REFLECT accepts six kinds of arguments:
 //
 //   1. A bare identifier              `pubkey`
 //      → registered as a field, name = identifier
@@ -196,6 +447,12 @@ namespace psio {
 //      `psio::effective_max_dynamic_v<T>`.  Format encode/validate paths
 //      enforce the cap (throw on encode excess, reject on validate).
 //
+//   6. method(name, param1, param2, ...)
+//      → registered as a method: an instance member function (const or
+//      not), or a static member function. The parameter names are optional
+//      metadata (WIT / schema parameter names); list none, or one per
+//      parameter.
+//
 // All type-level keywords (3-5) are aggregated into one
 // `annotate<type<T>{}>` specialization via `std::tuple_cat`, so they
 // compose freely.  Per-keyword paren form (`maxFields(N)`, NOT
@@ -207,9 +464,9 @@ namespace psio {
 // whether the resulting macro is defined.  Bare identifiers fall through
 // to the "field" handler.  Adding a new keyword = one macro definition.
 //
-// `attr`, `definitionWillNotChange`, `maxFields`, `maxDynamicData` are
-// global preprocessor names.  If they collide with a user identifier in
-// the same TU, `#undef` after the REFLECT block.
+// The keywords are recognised by token pasting only: no macro named `attr`,
+// `method`, `definitionWillNotChange`, `maxFields` or `maxDynamicData` is
+// defined, so they do not collide with user identifiers.
 
 #define PSIO_PP_FIRST(a, ...) a
 #define PSIO_PP_APPLY_FIRST(a) PSIO_PP_FIRST(a)
@@ -233,6 +490,8 @@ namespace psio {
 // valid in macro names.
 #define PSIO_REFLECT_KW_maxFields(N) (typeattr_max_fields, N), 1
 #define PSIO_REFLECT_KW_maxDynamicData(N) (typeattr_max_dyn_data, N), 1
+// method(name, param1, param2, ...) → (method, name, param1, param2, ...), 1
+#define PSIO_REFLECT_KW_method(...) (method, __VA_ARGS__), 1
 
 // Classify each item into `(KIND, payload...)`.  Bare ident → (field, ident).
 #define PSIO_REFLECT_CLASSIFY(s, _, item)                                  \
@@ -253,6 +512,9 @@ namespace psio {
 #define PSIO_REFLECT_KIND_typeattr_dwnc          2
 #define PSIO_REFLECT_KIND_typeattr_max_fields    3
 #define PSIO_REFLECT_KIND_typeattr_max_dyn_data  4
+#define PSIO_REFLECT_KIND_method                 5
+#define PSIO_REFLECT_KEEP_METHOD(s, _, kt) \
+   BOOST_PP_EQUAL(5, BOOST_PP_CAT(PSIO_REFLECT_KIND_, BOOST_PP_TUPLE_ELEM(0, kt)))
 
 // Field-name extractor.  For `(field, F)` and `(attrfield, F, ...)`
 // the name is element 1 of the tuple.
@@ -264,6 +526,7 @@ namespace psio {
    BOOST_PP_CAT(PSIO_REFLECT_EMIT_ANN_, BOOST_PP_TUPLE_ELEM(0, kt))(TYPE, kt)
 
 #define PSIO_REFLECT_EMIT_ANN_field(TYPE, kt) /* no-op */
+#define PSIO_REFLECT_EMIT_ANN_method(TYPE, kt) /* no-op */
 
 #define PSIO_REFLECT_EMIT_ANN_attrfield(TYPE, kt)                              \
    template <>                                                                  \
@@ -292,6 +555,7 @@ namespace psio {
    BOOST_PP_CAT(PSIO_REFLECT_TYPEATTR_TUPLE_, BOOST_PP_TUPLE_ELEM(0, kt))(kt)
 #define PSIO_REFLECT_TYPEATTR_TUPLE_field(kt)                                  /**/
 #define PSIO_REFLECT_TYPEATTR_TUPLE_attrfield(kt)                              /**/
+#define PSIO_REFLECT_TYPEATTR_TUPLE_method(kt)                                 /**/
 #define PSIO_REFLECT_TYPEATTR_TUPLE_typeattr_dwnc(kt)                          \
    , ::std::tuple{::psio::definition_will_not_change{}}
 #define PSIO_REFLECT_TYPEATTR_TUPLE_typeattr_max_fields(kt)                    \
@@ -310,6 +574,7 @@ namespace psio {
    BOOST_PP_CAT(PSIO_REFLECT_TYPEATTR_PRESENT_, BOOST_PP_TUPLE_ELEM(0, kt))
 #define PSIO_REFLECT_TYPEATTR_PRESENT_field                                    /**/
 #define PSIO_REFLECT_TYPEATTR_PRESENT_attrfield                                /**/
+#define PSIO_REFLECT_TYPEATTR_PRESENT_method                                   /**/
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_dwnc          1
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_max_fields    1
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_max_dyn_data  1
@@ -367,30 +632,38 @@ namespace psio {
    (a) __VA_OPT__(PSIO_PP_VARIADIC_TO_SEQ_AGAIN_ PSIO_PP_PARENS_(__VA_ARGS__))
 #define PSIO_PP_VARIADIC_TO_SEQ_AGAIN_() PSIO_PP_VARIADIC_TO_SEQ_STEP_
 
-#define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_NO_FIELDS_(TYPE)
+#define PSIO_REFLECT_DISPATCH_0(TYPE, ...) PSIO_REFLECT_IMPL_(TYPE, , )
 #define PSIO_REFLECT_DISPATCH_0_HAS(TYPE, ...)                                         \
    PSIO_REFLECT_DISPATCH_(                                                              \
       TYPE,                                                                             \
       BOOST_PP_SEQ_TRANSFORM(PSIO_REFLECT_CLASSIFY, _,                                  \
                              PSIO_PP_VARIADIC_TO_SEQ(__VA_ARGS__)))
 
-// Zero-field reflection — used for resource markers like
+#define PSIO_REFLECT_FIELD_NAMES_(SEQ) \
+   BOOST_PP_IIF(BOOST_PP_CHECK_EMPTY(SEQ), PSIO_PP_NOTHING_, BOOST_PP_SEQ_TRANSFORM)( \
+      PSIO_REFLECT_NAME_OF, _, SEQ)
+
+#define PSIO_REFLECT_DISPATCH_(TYPE, KIND_SEQ)                                           \
+   PSIO_REFLECT_IMPL_(                                                                   \
+      TYPE,                                                                               \
+      PSIO_REFLECT_FIELD_NAMES_(BOOST_PP_SEQ_FILTER(PSIO_REFLECT_KEEP_FIELD, _, KIND_SEQ)), \
+      BOOST_PP_SEQ_FILTER(PSIO_REFLECT_KEEP_METHOD, _, KIND_SEQ))                         \
+   BOOST_PP_SEQ_FOR_EACH(PSIO_REFLECT_EMIT_ANN, TYPE, KIND_SEQ)                          \
+   PSIO_REFLECT_EMIT_TYPE_AGG(TYPE, KIND_SEQ)
+
+// Field metadata for a type with no reflected fields — a resource marker
 //
 //    struct pollable : psio::wit_resource {};
 //    PSIO_REFLECT(pollable)
 //
-// The reflected metadata reports member_count = 0 and short-circuits
-// the visit / for_each entry points.  No member_pointer / member_name
-// / member_type templates are instantiated (Idx has no valid value),
-// so callers gating on member_count > 0 stay correct.
-#define PSIO_REFLECT_NO_FIELDS_(TYPE)                                                  \
-   struct BOOST_PP_CAT(psio_reflect_impl_, TYPE)                                      \
-   {                                                                                   \
-      using type = TYPE;                                                               \
-      static constexpr bool               is_reflected = true;                         \
-      static constexpr ::std::string_view name         = BOOST_PP_STRINGIZE(TYPE);     \
+// or a class reflected for its methods only. member_count is 0 and the
+// visit / for_each entry points short-circuit; the member_pointer /
+// member_name / member_type templates exist (generic pack-expansion walkers
+// name them) but have no valid index.
+#define PSIO_REFLECT_FIELDS_EMPTY_(SEQ)                                                \
       static constexpr ::std::size_t      member_count = 0;                            \
       static constexpr ::std::array<::std::string_view, 0> _names_array_{};            \
+      static constexpr ::std::array<::std::uint32_t, 0>    numbers{};                  \
       template <::std::size_t Idx>                                                    \
       using member_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
       template <::std::size_t Idx>                                                    \
@@ -428,6 +701,12 @@ namespace psio {
       }                                                                                \
                                                                                        \
       template <typename Obj, typename F>                                              \
+      static constexpr bool visit_field_by_index(Obj&, ::std::size_t, F&&)             \
+      {                                                                                \
+         return false;                                                                 \
+      }                                                                                \
+                                                                                       \
+      template <typename Obj, typename F>                                              \
       static constexpr bool visit_field_by_name(Obj&, ::std::string_view, F&&)         \
       {                                                                                \
          return false;                                                                 \
@@ -442,35 +721,15 @@ namespace psio {
       template <typename Obj, typename F>                                              \
       static constexpr void for_each_field(Obj&, F&&)                                  \
       {                                                                                \
-      }                                                                                \
-   };                                                                                  \
-   inline auto psio_reflect_helper(TYPE*) noexcept                                    \
-   {                                                                                   \
-      return BOOST_PP_CAT(psio_reflect_impl_, TYPE){};                                \
-   }
+      }
 
-#define PSIO_REFLECT_DISPATCH_(TYPE, KIND_SEQ)                                           \
-   PSIO_REFLECT_IMPL_(                                                                   \
-      TYPE,                                                                               \
-      BOOST_PP_SEQ_TRANSFORM(                                                             \
-         PSIO_REFLECT_NAME_OF, _,                                                        \
-         BOOST_PP_SEQ_FILTER(PSIO_REFLECT_KEEP_FIELD, _, KIND_SEQ)))                     \
-   BOOST_PP_SEQ_FOR_EACH(PSIO_REFLECT_EMIT_ANN, TYPE, KIND_SEQ)                          \
-   PSIO_REFLECT_EMIT_TYPE_AGG(TYPE, KIND_SEQ)
-
-#define PSIO_REFLECT_IMPL_(TYPE, SEQ)                                                   \
-   struct BOOST_PP_CAT(psio_reflect_impl_, TYPE)                                        \
-   {                                                                                     \
-      using type = TYPE;                                                                 \
-      PSIO_REFLECT_PROXY_(TYPE, SEQ) \
-      static constexpr bool               is_reflected = true;                           \
-      static constexpr ::std::string_view name         = BOOST_PP_STRINGIZE(TYPE);       \
+#define PSIO_REFLECT_FIELDS_(SEQ)                                                       \
       static constexpr ::std::size_t      member_count = BOOST_PP_SEQ_SIZE(SEQ);         \
                                                                                          \
       template <::std::size_t Idx>                                                       \
       static constexpr auto _member_pointer_impl_() noexcept                             \
       {                                                                                  \
-         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_MEMBER_POINTER_CASE_, TYPE, SEQ)          \
+         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_MEMBER_POINTER_CASE_, _, SEQ)             \
       }                                                                                  \
       template <::std::size_t Idx>                                                       \
       static constexpr auto member_pointer = _member_pointer_impl_<Idx>();               \
@@ -486,7 +745,7 @@ namespace psio {
       template <::std::size_t Idx>                                                       \
       static constexpr auto _member_type_impl_() noexcept                                \
       {                                                                                  \
-         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_MEMBER_TYPE_CASE_, TYPE, SEQ)             \
+         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_MEMBER_TYPE_CASE_, _, SEQ)                \
       }                                                                                  \
       template <::std::size_t Idx>                                                       \
       using member_type = typename decltype(_member_type_impl_<Idx>())::type;            \
@@ -506,8 +765,7 @@ namespace psio {
       /* Index of the member named name_, or member_count. */                            \
       static constexpr ::std::size_t find_index(::std::string_view name_) noexcept       \
       {                                                                                  \
-         return ::psio::detail::name_table_for<BOOST_PP_CAT(psio_reflect_impl_, TYPE)>   \
-            .find(name_);                                                                \
+         return ::psio::detail::name_table_for<_psio_self_>.find(name_);                 \
       }                                                                                  \
                                                                                          \
       static constexpr ::std::optional<::std::size_t>                                    \
@@ -524,7 +782,7 @@ namespace psio {
       index_of_hash(::std::uint64_t key_) noexcept                                       \
       {                                                                                  \
          const ::std::size_t i_ = ::psio::detail::hashed_table_for<                      \
-            BOOST_PP_CAT(psio_reflect_impl_, TYPE), Hash>::table.find(key_);             \
+            _psio_self_, Hash>::table.find(key_);                                        \
          if (i_ == member_count) return ::std::nullopt;                                  \
          return i_;                                                                      \
       }                                                                                  \
@@ -533,7 +791,7 @@ namespace psio {
       index_of_field_number(::std::uint32_t n) noexcept                                  \
       {                                                                                  \
          const ::std::size_t i_ = ::psio::detail::number_table_for<                      \
-            BOOST_PP_CAT(psio_reflect_impl_, TYPE)>.find(n);                             \
+            _psio_self_>.find(n);                                                        \
          if (i_ == member_count) return ::std::nullopt;                                  \
          return i_;                                                                      \
       }                                                                                  \
@@ -563,8 +821,7 @@ namespace psio {
       {                                                                                  \
          return visit_field_by_index(                                                    \
             obj,                                                                         \
-            ::psio::detail::number_table_for<BOOST_PP_CAT(psio_reflect_impl_, TYPE)>     \
-               .find(lookup_num),                                                        \
+            ::psio::detail::number_table_for<_psio_self_>.find(lookup_num),              \
             ::std::forward<F>(fn));                                                      \
       }                                                                                  \
                                                                                          \
@@ -572,9 +829,146 @@ namespace psio {
       static constexpr void for_each_field(Obj& obj, F&& fn)                             \
       {                                                                                  \
          BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_FOR_EACH_CASE_, _, SEQ)                   \
+      }
+
+// Method metadata for a type that lists no method(...).
+#define PSIO_REFLECT_METHODS_EMPTY_(SEQ)                                               \
+      static constexpr ::std::size_t method_count = 0;                                 \
+      static constexpr ::std::array<::std::string_view, 0> method_names{};             \
+      template <::std::size_t Idx>                                                    \
+      using method_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
+      template <::std::size_t Idx>                                                    \
+      static constexpr auto method_pointer                                           \
+         = ::psio::detail::empty_reflected_member<Idx>::pointer;                       \
+      template <::std::size_t Idx>                                                    \
+      static constexpr ::std::string_view method_name                                 \
+         = ::psio::detail::empty_reflected_member<Idx>::name;                          \
+      static constexpr ::std::size_t find_method_index(::std::string_view) noexcept   \
+      {                                                                                \
+         return 0;                                                                     \
+      }                                                                                \
+      static constexpr ::std::optional<::std::size_t>                                  \
+      index_of_method(::std::string_view) noexcept                                     \
+      {                                                                                \
+         return ::std::nullopt;                                                        \
+      }                                                                                \
+      template <typename Hash>                                                         \
+      static constexpr ::std::optional<::std::size_t>                                  \
+      index_of_method_hash(::std::uint64_t) noexcept                                   \
+      {                                                                                \
+         return ::std::nullopt;                                                        \
+      }                                                                                \
+      template <typename F>                                                            \
+      static constexpr void for_each_method(F&&)                                       \
+      {                                                                                \
+      }
+
+#define PSIO_REFLECT_METHODS_(SEQ)                                                      \
+      static constexpr ::std::size_t method_count = BOOST_PP_SEQ_SIZE(SEQ);              \
+                                                                                         \
+      template <::std::size_t Idx>                                                       \
+      static constexpr auto _method_pointer_impl_() noexcept                             \
+      {                                                                                  \
+         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_METHOD_POINTER_CASE_, _, SEQ)             \
       }                                                                                  \
-   };                                                                                    \
-   inline auto psio_reflect_helper(TYPE*) noexcept                                      \
+      /* &T::method — a member function pointer, or a function pointer for a */          \
+      /* static member.                                                      */          \
+      template <::std::size_t Idx>                                                       \
+      static constexpr auto method_pointer = _method_pointer_impl_<Idx>();               \
+      template <::std::size_t Idx>                                                       \
+      using method_type = decltype(_method_pointer_impl_<Idx>());                        \
+                                                                                         \
+      static constexpr ::std::array<::std::string_view, method_count> method_names       \
+         = {BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_METHOD_NAME_ELEM_, _, SEQ)};            \
+      template <::std::size_t Idx>                                                       \
+      static constexpr ::std::string_view method_name = method_names[Idx];               \
+                                                                                         \
+      /* Parameter names as written in method(name, p1, p2, ...); may be */              \
+      /* fewer than the method's parameters (names are optional).        */              \
+      static constexpr ::std::initializer_list<const char*>                              \
+         method_param_name_lists[method_count] = {                                       \
+            BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_METHOD_PARAM_LIST_, _, SEQ)};           \
+      template <::std::size_t Idx>                                                       \
+      static constexpr auto method_param_names                                           \
+         = ::psio::detail::method_param_name_array<_psio_self_, Idx>();                  \
+                                                                                         \
+      template <::std::size_t Idx>                                                       \
+      using method_traits = ::psio::method_traits<method_type<Idx>>;                     \
+      template <::std::size_t Idx>                                                       \
+      using method_result = typename method_traits<Idx>::result;                         \
+      template <::std::size_t Idx>                                                       \
+      using method_args = typename method_traits<Idx>::args;                             \
+      template <::std::size_t Idx>                                                       \
+      using method_params = typename method_traits<Idx>::params;                         \
+      template <::std::size_t Idx>                                                       \
+      static constexpr bool method_is_static = method_traits<Idx>::is_static;            \
+      template <::std::size_t Idx>                                                       \
+      static constexpr bool method_is_const = method_traits<Idx>::is_const;              \
+                                                                                         \
+      /* Index of the method named name_, or method_count. */                            \
+      static constexpr ::std::size_t find_method_index(::std::string_view name_) noexcept \
+      {                                                                                  \
+         return ::psio::detail::name_table_for<                                          \
+            ::psio::detail::method_names_holder<_psio_self_>>.find(name_);               \
+      }                                                                                  \
+      static constexpr ::std::optional<::std::size_t>                                    \
+      index_of_method(::std::string_view name_) noexcept                                 \
+      {                                                                                  \
+         const ::std::size_t i_ = find_method_index(name_);                              \
+         if (i_ == method_count) return ::std::nullopt;                                  \
+         return i_;                                                                      \
+      }                                                                                  \
+      /* Index of the method whose name hashes to key_ under Hash; two */                \
+      /* methods with the same key are a compile error.                */                \
+      template <typename Hash>                                                           \
+      static constexpr ::std::optional<::std::size_t>                                    \
+      index_of_method_hash(::std::uint64_t key_) noexcept                                \
+      {                                                                                  \
+         const ::std::size_t i_ = ::psio::detail::hashed_table_for<                      \
+            ::psio::detail::method_names_holder<_psio_self_>, Hash>::table.find(key_);   \
+         if (i_ == method_count) return ::std::nullopt;                                  \
+         return i_;                                                                      \
+      }                                                                                  \
+      /* fn(std::integral_constant<std::size_t, I>, name, &T::method) per method. */     \
+      template <typename F>                                                              \
+      static constexpr void for_each_method(F&& fn)                                      \
+      {                                                                                  \
+         ::psio::detail::for_each_method_impl<_psio_self_>(                              \
+            fn, ::std::make_index_sequence<method_count>{});                             \
+      }                                                                                  \
+      /* Call method Idx on obj with the arguments in a tuple (obj is ignored */         \
+      /* for a static method).                                                */         \
+      template <::std::size_t Idx, typename Obj, typename Tuple>                         \
+      static constexpr decltype(auto) invoke_method(Obj&& obj, Tuple&& args)             \
+      {                                                                                  \
+         return ::psio::detail::invoke_reflected(                                        \
+            method_pointer<Idx>, ::std::forward<Obj>(obj), ::std::forward<Tuple>(args)); \
+      }
+
+// The metadata is a class template over the reflected type (see
+// PSIO_REFLECT_PROXY_FIELD_), bound to TYPE by instantiating
+// detail::reflect_bind in a static_assert — a declaration that is legal at
+// namespace scope and inside TYPE's own class body.
+#define PSIO_REFLECT_IMPL_(TYPE, FSEQ, MSEQ)                                            \
+   template <typename psio_T_>                                                           \
+   struct BOOST_PP_CAT(psio_reflect_impl_, TYPE)                                        \
    {                                                                                     \
-      return BOOST_PP_CAT(psio_reflect_impl_, TYPE){};                                  \
-   }
+      using type        = psio_T_;                                                       \
+      using _psio_self_ = BOOST_PP_CAT(psio_reflect_impl_, TYPE);                        \
+      PSIO_REFLECT_PROXY_(FSEQ, MSEQ)                                                    \
+      static constexpr bool               is_reflected = true;                           \
+      static constexpr ::std::string_view name         = BOOST_PP_STRINGIZE(TYPE);       \
+      BOOST_PP_IIF(BOOST_PP_CHECK_EMPTY(FSEQ), PSIO_REFLECT_FIELDS_EMPTY_,               \
+                   PSIO_REFLECT_FIELDS_)(FSEQ)                                           \
+      BOOST_PP_IIF(BOOST_PP_CHECK_EMPTY(MSEQ), PSIO_REFLECT_METHODS_EMPTY_,              \
+                   PSIO_REFLECT_METHODS_)(MSEQ)                                          \
+      static_assert(::psio::detail::reflected_names_distinct(_names_array_, method_names), \
+                    "psio: PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)                       \
+                    ") lists a name twice (a field and a method may not share a name)"); \
+      static_assert(::psio::detail::reflected_names_unreserved(_names_array_, method_names), \
+                    "psio: PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)                       \
+                    ") lists a member named like a proxy internal "                      \
+                    "(psio_get_proxy, _psio_record_proxy)");                             \
+   };                                                                                    \
+   static_assert(sizeof(::psio::detail::reflect_bind<                                    \
+                    TYPE, BOOST_PP_CAT(psio_reflect_impl_, TYPE)<TYPE>>) > 0, "");

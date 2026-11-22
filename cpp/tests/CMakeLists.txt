@@ -33,6 +33,27 @@ add_test(NAME psio_name_lookup_collision_compile_fail
 set_tests_properties(psio_name_lookup_collision_compile_fail PROPERTIES
    PASS_REGULAR_EXPRESSION "two names of one type collide under the supplied hash")
 
+# Method reflection, the one proxy, interfaces from a reflected type.
+psio_add_test(psio_reflect_method_tests reflect_method_tests.cpp)
+# A field and a method with one name, or a member named like a proxy
+# internal, must not compile.
+add_test(NAME psio_reflect_duplicate_name_compile_fail
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/reflect_duplicate_name_fail.cpp)
+set_tests_properties(psio_reflect_duplicate_name_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "a field and a method may not share a name")
+add_test(NAME psio_reflect_reserved_name_compile_fail
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/reflect_reserved_name_fail.cpp)
+set_tests_properties(psio_reflect_reserved_name_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "lists a member named like a proxy internal")
+# Consumer declaration patterns (WASI-style) pinned byte for byte.
+psio_add_test(psio_interface_consumer_pattern_tests interface_consumer_pattern_tests.cpp)
+target_compile_definitions(psio_interface_consumer_pattern_tests PRIVATE
+   PSIO_CONSUMER_PATTERN_GOLDEN="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/interface_consumer_pattern.golden.txt")
+
 # Phase 2: shape concepts + annotation system + rich wrappers.
 psio_add_test(psio_shape_tests shape_tests.cpp)
 psio_add_test(psio_annotate_tests annotate_tests.cpp)

@@ -70,7 +70,7 @@ PSIO_REFLECT(NamedFields, proxy, get)
 struct NamedCalls { static uint32_t call(uint32_t x); static uint32_t proxy(uint32_t x); };
 PSIO_INTERFACE(NamedCalls, types(), funcs(func(call, x), func(proxy, x)))
 struct NamedDispatch {
-   template <size_t I, typename Function> uint32_t call(uint32_t x) { return x + I; }
+   template <size_t I, auto Function> uint32_t call(uint32_t x) { return x + I; }
 };
 TEST_CASE("Named projections do not reserve ordinary field or method names") {
    NamedFields value{"view", 42};

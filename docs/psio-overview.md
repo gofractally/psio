@@ -182,6 +182,57 @@ The output of the reflection step is uniform: an iterable list of
 `(name, type, annotations)` tuples per type, plus type-class
 information (struct vs union vs enum).
 
+#### C++: fields, methods and interfaces from one declaration
+
+`PSIO_REFLECT` lists a type's fields and its methods together, and is
+written either after the type (any namespace, unqualified name) or inside
+the class body, where it also sees private members:
+
+```cpp
+namespace chain::svc {
+   class token {
+      std::uint64_t supply_ = 0;
+      PSIO_REFLECT(token, supply_,
+                   method(balance_of, owner),
+                   method(transfer, from, to, amount))
+     public:
+      std::uint64_t balance_of(const std::string& owner) const;
+      void          transfer(std::string from, std::string to, std::uint64_t amount);
+   };
+   PSIO_INTERFACE(token)          // functions come from reflect<token>
+}
+```
+
+`psio::reflect<T>` then exposes, next to the field API, `method_count`,
+`method_pointer<I>`, `method_type<I>`, `method_name<I>` / `method_names`,
+`method_param_names<I>`, `method_result<I>`, `method_args<I>`,
+`method_params<I>`, `index_of_method(name)`,
+`index_of_method_hash<Hash>(key)` (a caller-supplied 64-bit hash; two
+methods with one key do not compile), `for_each_method(fn)` and
+`invoke_method<I>(object, argument_tuple)`. Overloaded member functions
+cannot be listed (their address is ambiguous). `attr(...)` and the
+type-level keywords need namespace scope: with in-class reflection attach
+them after the class (`PSIO_FIELD_ATTRS`, `PSIO_TYPE_ATTRS`).
+
+There is one proxy, `psio::reflect<T>::proxy<P>`. It inherits `P`; each
+field is a member `name()` that returns `P::get<I, &T::name>()` and each
+method a member `name(args...)` that returns
+`P::call<I, &T::name>(args...)` — index and member pointer are template
+value arguments. An interface's `interface_info<Tag>::proxy<P>` uses the
+same call convention.
+
+`PSIO_INTERFACE(Tag, [types(...)], [funcs(...)], [name("...")],
+[package(pkg)])` registers a WIT interface from any namespace. With
+`funcs(...)` omitted the functions are `reflect<Tag>`'s methods. An
+instance member function is a WIT function with the object implicit (a
+resource method — `[method]resource.name` — when the tag is a resource);
+a static member function is a function over exactly its parameters. The
+interface's package is, in order: its `package(pkg)` item; the single
+`PSIO_PACKAGE` of the enclosing namespace (nearest first; a global
+package applies to global interfaces only); the package named by
+`#define PSIO_CURRENT_PACKAGE_` under the same scope rule; otherwise a
+package named after the tag's namespace with no version.
+
 ### 4.2 Annotation channel
 
 A way to attach per-type and per-field metadata, accessible during
