@@ -74,7 +74,19 @@ export type IrTypeValue =
   | { type: 'FracPack'; value: { type: IrAnyType } }
   | { type: 'Custom'; value: { type: IrAnyType; id: string } }
   | { type: 'Resource'; value: unknown }
-  | { type: 'Type'; value: { type: string } };
+  | { type: 'Type'; value: { type: string } }
+  | { type: 'Enum'; value: IrEnum };
+/** `psio::schema_types::Enumerator`. */
+export interface IrEnumerator {
+  name: string;
+  /** The enumerator's value sign-extended to 64 bits, as an unsigned integer. */
+  value: bigint;
+}
+/** `psio::schema_types::Enum`: on the wire exactly `type`, its underlying integer. */
+export interface IrEnum {
+  type: IrAnyType;
+  members: IrEnumerator[];
+}
 export interface IrAnyType {
   value: IrTypeValue;
 }
@@ -102,6 +114,7 @@ export type CompactType =
   | { BoundedList: { type: PsszTypeInput; maxCount: number | bigint } }
   | { Tuple: PsszTypeInput[] }
   | { Custom: { type: PsszTypeInput; id: string } }
+  | { Enum: { type: PsszTypeInput; members: CompactEnumerator[] | { [name: string]: number | bigint } } }
   | { Struct: CompactRecord }
   | { Object: CompactRecord }
   | { Variant: CompactRecord };
@@ -112,6 +125,11 @@ export interface CompactMember {
   name: string;
   type: PsszTypeInput;
   attributes?: CompactAttribute[];
+}
+/** `value` may be negative (it is sign-extended to 64 bits). */
+export interface CompactEnumerator {
+  name: string;
+  value: number | bigint | string;
 }
 export interface CompactAttribute {
   name: string;
@@ -129,7 +147,7 @@ function schemaError(message: string): never {
 
 const IR_KINDS = new Set([
   'Struct', 'Object', 'Array', 'List', 'BoundedList', 'Option', 'Variant', 'Tuple', 'Int',
-  'Float', 'FracPack', 'Custom', 'Resource', 'Type',
+  'Float', 'FracPack', 'Custom', 'Resource', 'Type', 'Enum',
 ]);
 
 function isObject(x: unknown): x is Record<string, unknown> {
@@ -144,6 +162,15 @@ function toU64(x: unknown, what: string): bigint {
   else return schemaError(`pssz IR: ${what} must be an unsigned integer`);
   if (v < 0n || v > U64_MAX) schemaError(`pssz IR: ${what} out of range`);
   return v;
+}
+// An enumerator value: an unsigned 64-bit integer, or a negative one of at
+// least -2^63, stored sign-extended to 64 bits.
+function toEnumValue(x: unknown): bigint {
+  const negative = typeof x === 'bigint' ? x < 0n : typeof x === 'number' && Number.isSafeInteger(x) && x < 0;
+  if (!negative) return toU64(x, 'Enumerator.value');
+  const v = BigInt(x as number | bigint);
+  if (v < -(1n << 63n)) schemaError('pssz IR: Enumerator.value out of range');
+  return BigInt.asUintN(64, v);
 }
 function toU32(x: unknown, what: string): number {
   if (typeof x !== 'number' || !Number.isInteger(x) || x < 0 || x > 0xffffffff)
@@ -254,6 +281,20 @@ export function normalizeType(x: unknown, depth = 0): IrAnyType {
       };
     case 'Custom':
       return { value: { type: kind, value: { type: normalizeType(body.type, d), id: toStr(body.id, 'Custom.id') } } };
+    case 'Enum': {
+      let members: IrEnumerator[];
+      if (Array.isArray(body.members)) {
+        members = body.members.map((m) => {
+          if (!isObject(m)) return schemaError('pssz IR: malformed enumerator');
+          return { name: toStr(m.name, 'Enumerator.name'), value: toEnumValue(m.value) };
+        });
+      } else if (isObject(body.members)) {
+        // Compact: { name: value, ... } in declaration order.
+        const map = body.members;
+        members = Object.keys(map).map((name) => ({ name, value: toEnumValue(map[name]) }));
+      } else return schemaError('pssz IR: malformed enum');
+      return { value: { type: kind, value: { type: normalizeType(body.type, d), members } } };
+    }
     default:
       return { value: { type: 'Type', value: { type: toStr(body.type, 'Type.type') } } };
   }
@@ -442,6 +483,12 @@ export class Node {
   fixedPayloadMemo?: boolean;
   fields?: FieldLayout[];
   byName?: Map<string, number>;
+  /**
+   * An Enum (kind `int`, the underlying integer): the enumerators in
+   * declaration order, `value` as the 64 two's-complement bits the IR holds.
+   * It only affects text.
+   */
+  enumerators?: IrEnumerator[];
 }
 
 interface FieldLayout {
@@ -672,6 +719,18 @@ export class Codec {
         else if (bits === 8 || bits === 16 || bits === 32 || bits === 64 || bits === 128) node.size = bits / 8;
         else if (bits === 256 && !isSigned) node.size = 32;
         else schemaError('pssz IR: unsupported integer width');
+        break;
+      }
+      case 'Enum': {
+        // On the wire an Enum is exactly its underlying integer.
+        const under = this.resolve(t.value.type).value;
+        if (under.type !== 'Int') return schemaError('pssz IR: an enum needs an underlying integer');
+        const integer = this.build(t.value.type, added, d);
+        node.kind = 'int';
+        node.bits = integer.bits;
+        node.signed = integer.signed;
+        node.size = integer.size;
+        node.enumerators = t.value.members;
         break;
       }
       case 'Float': {

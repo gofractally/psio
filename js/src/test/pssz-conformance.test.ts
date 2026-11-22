@@ -166,7 +166,14 @@ test('PSSZ fixture: every type and vector through the Schema IR', () => {
       } catch (e) {
         assert.ok(e instanceof PsszError && e.kind === 'value', `${row.name}: ${String(e)}`);
         if (e.message.includes('no JSON')) {
-          noText = true; // wide integers, bit types, non-finite floats
+          // Only bit types and non-finite floats have no text (128 / 256-bit
+          // integers and enums do).
+          assert.ok(
+            e.message === 'json: bit types have no JSON form' ||
+              e.message === 'json: non-finite float has no JSON text',
+            `${row.name}: ${e.message}`,
+          );
+          noText = true;
           break;
         }
         // A string holding a Unicode noncharacter is JSON but not I-JSON.
@@ -262,6 +269,12 @@ test('JSON fixture: every type and vector through the Schema IR', () => {
   // Every expressible type is exercised, and every vector is accounted for.
   for (const row of fx.types) if (row.ir) assert.ok(covered.has(row.id), row.id);
   assert.equal(count.value + count.accept + count.reject + count.notExpressibleInIr, fx.vectors.length);
-  assert.equal(fx.types.length, 44);
-  assert.equal(fx.vectors.length, 1082);
+  // Enums and 128 / 256-bit integers are replayed, not skipped.
+  for (const id of ['Color', 'Status', 'u128', 'i128', 'u256', 'Wide']) {
+    assert.ok(rows.get(id)?.ir && covered.has(id), id);
+    for (const kind of id === 'Wide' ? ['value'] : ['value', 'accept', 'reject'])
+      assert.ok(fx.vectors.some((v) => v.type === id && v.kind === kind), `${id} ${kind}`);
+  }
+  assert.equal(fx.types.length, 49);
+  assert.equal(fx.vectors.length, 1291);
 });

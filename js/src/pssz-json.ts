@@ -9,12 +9,17 @@
 // escapes; a repeated key is read again and the last one wins; an I-JSON
 // variant object has exactly one member; nesting stops at 64).
 //
+// A 128 / 256-bit integer is decimal (a string under ijson, a bare number
+// under json; the legacy "0x" string is read). An Enum is its enumerator's
+// name when the value is listed and its number otherwise. A non-finite float
+// has no text.
+//
 // This file is internal. The public API is `pssz.ts`.
 
 import {
   MAX_DEPTH, Node, PsszError, PsszNaN, isNoncharacter, memberBoundAdmits, setField, unwrapOption, utf8CodePoint,
   utf8Decode, utf8Encode, utf8Length, utf8Multibyte, wellFormed, wrapSome,
-  type IntForm, type VariantValue,
+  type IntForm, type IrEnumerator, type VariantValue,
 } from './pssz-core.js';
 
 export type JsonFormat = 'json' | 'ijson';
@@ -514,11 +519,32 @@ export class JsonCursor {
 
 // `0 | -?[1-9][0-9]*` within the range of an integer of `bits` bits.
 function parseInteger(text: string, signed: boolean, bits: number): bigint | null {
-  if (!/^(0|-?[1-9][0-9]{0,19})$/.test(text)) return null;
-  const value = BigInt(text);
+  if (text.length > MAX_INTEGER_TEXT || !/^(0|-?[1-9][0-9]*)$/.test(text)) return null;
+  return inRange(BigInt(text), signed, bits);
+}
+// Longest integer text: a 256-bit decimal has 78 digits.
+const MAX_INTEGER_TEXT = 80;
+
+function inRange(value: bigint, signed: boolean, bits: number): bigint | null {
   if (!signed) return value >= 0n && value < 1n << BigInt(bits) ? value : null;
   const half = 1n << BigInt(bits - 1);
   return value >= -half && value < half ? value : null;
+}
+
+// The text of a 128 / 256-bit integer: canonical decimal, or the legacy
+// `[-]0x<hex>` form (input only; at most bits / 4 digits of either case).
+function parseWide(text: string, signed: boolean, bits: number): bigint | null {
+  if (text.length > MAX_INTEGER_TEXT) return null;
+  const hex = /^(-?)0[xX]([0-9a-fA-F]+)$/.exec(text);
+  if (!hex) return parseInteger(text, signed, bits);
+  if (hex[2].length > bits / 4 || (hex[1] && !signed)) return null;
+  const magnitude = BigInt('0x' + hex[2]);
+  return inRange(hex[1] ? -magnitude : magnitude, signed, bits);
+}
+
+// The characters of an unescaped string event (integer and enum text).
+function asciiText(s: StringEvent): string {
+  return String.fromCharCode(...s.bytes.subarray(s.start, s.end));
 }
 
 // The byte container under a string / hex adapter admits `n` bytes.
@@ -530,18 +556,71 @@ function bytesAdmit(container: Node, n: number): boolean {
 class Reader {
   constructor(private readonly c: JsonCursor, private readonly ijson: boolean) {}
 
+  // A 128 / 256-bit integer: a decimal string (or the legacy "0x" string),
+  // or a bare decimal number: any in-range value under json, at most
+  // 2^53 - 1 in magnitude under ijson. A forced form accepts that form only.
+  private wideInteger(bits: number, signed: boolean, form: IntForm): bigint {
+    const c = this.c;
+    const quoted = c.kind() === 'string';
+    let value: bigint | null;
+    if (quoted) {
+      if (form === 'number') c.fail('json: expected a number, found a string');
+      const s = c.string();
+      value = s.escaped || s.end - s.start > MAX_INTEGER_TEXT ? null : parseWide(asciiText(s), signed, bits);
+      if (value === null) return c.fail('json: integer string is not a canonical in-range decimal');
+    } else {
+      if (form === 'string') c.fail('json: expected an integer string');
+      if (c.kind() !== 'number') c.fail('json: expected an integer');
+      value = parseWide(c.number(), signed, bits);
+      if (value === null) return c.fail('json: integer is not a canonical in-range decimal');
+      if (this.ijson && form === 'natural' && (value > SAFE_INTEGER || value < -SAFE_INTEGER))
+        c.fail('ijson: bare integer outside the safe range must be a string');
+    }
+    return value;
+  }
+
+  // An Enum: the enumerator's name ("active"), the number (2 or the numeric
+  // string "2"), or both ("active:2", which must agree). An unknown name is
+  // an error; a number that names no enumerator is accepted.
+  private enumeration(node: Node, form: IntForm): number | bigint {
+    const c = this.c;
+    const { bits, signed } = node;
+    if (bits > 64 || bits < 8) c.fail('pssz IR: an enum needs an underlying integer of 8 to 64 bits');
+    if (c.kind() !== 'string') return this.integer(bits, signed, form);
+    const s = c.string();
+    const first = s.end > s.start ? s.bytes[s.start] : 0;
+    let value: bigint | null;
+    if (first === MINUS || (first >= 48 && first <= 57)) {
+      value = s.end - s.start > MAX_INTEGER_TEXT ? null : parseInteger(asciiText(s), signed, bits);
+      if (value === null) return c.fail('json: enum number is not a canonical in-range decimal');
+    } else {
+      const text = utf8Decode(s.bytes, s.start, s.end);
+      const colon = text.indexOf(':');
+      const name = colon < 0 ? text : text.slice(0, colon);
+      const found = node.enumerators!.find((m) => m.name === name);
+      if (!found) return c.fail('json: unknown enumerator name');
+      if (colon >= 0) {
+        value = parseInteger(text.slice(colon + 1), signed, bits);
+        if (value === null) return c.fail('json: enum number is not a canonical in-range decimal');
+        if (BigInt.asUintN(64, value) !== found.value) c.fail('json: enumerator name and number disagree');
+      } else {
+        value = inRange(signed ? BigInt.asIntN(64, found.value) : found.value, signed, bits);
+        if (value === null) return c.fail('json: enumerator value is outside its underlying integer');
+      }
+    }
+    return bits <= 32 ? Number(value) : value;
+  }
+
   private integer(bits: number, signed: boolean, form: IntForm): number | bigint {
     const c = this.c;
-    if (bits > 64) c.fail('json: integers wider than 64 bits have no JSON form');
+    if (bits > 64) return this.wideInteger(bits, signed, form);
     const wide = this.ijson && bits === 64 && form === 'natural';
     const kind = c.kind();
     let value: bigint | null;
     if (kind === 'string') {
       if (form !== 'string' && !wide) c.fail('json: expected a number, found a string');
       const s = c.string();
-      value = s.escaped || s.end - s.start > 21
-        ? null
-        : parseInteger(String.fromCharCode(...s.bytes.subarray(s.start, s.end)), signed, bits);
+      value = s.escaped || s.end - s.start > 21 ? null : parseInteger(asciiText(s), signed, bits);
       if (value === null) return c.fail('json: integer string is not a canonical in-range decimal');
     } else {
       if (form === 'string') c.fail('json: expected an integer string');
@@ -642,6 +721,7 @@ class Reader {
     if (n > MAX_DEPTH) c.fail('json: max depth exceeded');
     switch (node.kind) {
       case 'int':
+        if (node.enumerators) return this.enumeration(node, form);
         return this.integer(node.bits, node.signed, form);
       case 'float': {
         const token = c.number();
@@ -766,8 +846,9 @@ class Writer {
   readonly out: string[] = [];
   constructor(private readonly ijson: boolean) {}
 
-  private integer(bits: number, signed: boolean, form: IntForm, value: unknown): void {
-    if (bits > 64) fail('json: integers wider than 64 bits have no JSON form');
+  private integer(
+    bits: number, signed: boolean, form: IntForm, value: unknown, enumerators?: IrEnumerator[],
+  ): void {
     let v: bigint;
     if (typeof value === 'bigint') v = value;
     else if (typeof value === 'number' && Number.isSafeInteger(value)) v = BigInt(value);
@@ -775,9 +856,19 @@ class Writer {
     const half = 1n << BigInt(bits - 1);
     if (signed ? v < -half || v >= half : v < 0n || v >= 1n << BigInt(bits))
       fail('pssz IR: integer value does not match the schema');
+    if (enumerators) {
+      if (bits > 64 || bits < 8) fail('pssz IR: an enum needs an underlying integer of 8 to 64 bits');
+      // A listed value is its (first) name; any other its number.
+      const raw = BigInt.asUintN(64, v);
+      const named = enumerators.find((m) => m.value === raw);
+      if (named) return writeString(this.out, named.name, this.ijson);
+    }
+    // 64 bits: a string beyond 2^53 - 1 under ijson. Wider: always a string
+    // under ijson, a bare number under json.
     const quoted =
       form === 'string' ||
-      (form === 'natural' && this.ijson && bits === 64 && (v > SAFE_INTEGER || v < -SAFE_INTEGER));
+      (form === 'natural' && this.ijson &&
+        (bits > 64 || (bits === 64 && (v > SAFE_INTEGER || v < -SAFE_INTEGER))));
     this.out.push(quoted ? `"${v}"` : v.toString());
   }
 
@@ -800,13 +891,17 @@ class Writer {
     const out = this.out;
     switch (node.kind) {
       case 'int':
-        return this.integer(node.bits, node.signed, form, value);
+        return this.integer(node.bits, node.signed, form, value, node.enumerators);
       case 'float':
         if (value instanceof PsszNaN) return fail('json: non-finite float has no JSON text');
         if (typeof value !== 'number') return fail('pssz IR: float value does not match the schema');
-        if (!Number.isFinite(value)) return fail('json: non-finite float has no JSON text');
-        out.push(formatFloat(node.size === 4 ? Math.fround(value) : value, node.size === 4));
+      {
+        // The value as the float holds it: a number beyond binary32 is infinite there.
+        const held = node.size === 4 ? Math.fround(value) : value;
+        if (!Number.isFinite(held)) return fail('json: non-finite float has no JSON text');
+        out.push(formatFloat(held, node.size === 4));
         return;
+      }
       case 'bool':
         if (typeof value !== 'boolean') return fail('pssz IR: bool value required');
         out.push(value ? 'true' : 'false');

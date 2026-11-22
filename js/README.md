@@ -58,7 +58,8 @@ length they claim is trusted before it is checked against the input.
 |---|---|
 | `bool` | `boolean` |
 | integers of 8, 16, 32 bits; `char` | `number` |
-| integers of 64, 128, 256 bits | `bigint` (an exact `number` is accepted on encode) |
+| integers of 64, 128, 256 bits | `bigint` (an exact `number` is accepted on encode). A 256-bit integer is 32 little-endian bytes on the wire and one `bigint` here |
+| enum (`Enum`) | the value of its underlying integer: `number` for 8 to 32 bits, `bigint` for 64. Never the name; names exist only in text |
 | floats | `number`; a NaN carrying a payload decodes to a `PsszNaN` (its `bits` re-encode exactly) |
 | string | `string` (UTF-8 on the wire; an unpaired surrogate is an error) |
 | bytes (`hex` adapter) | `Uint8Array` |
@@ -78,24 +79,67 @@ number while its magnitude is at most 2^53 - 1 and as a decimal string beyond
 attribute `ijsonName` are honoured. A repeated key is read again and the last
 one wins; unknown keys are skipped.
 
+**128- and 256-bit integers** are decimal: `'json'` writes a bare number,
+`'ijson'` a decimal string for every value, small ones included (`"7"`). Both
+formats read a decimal string, a bare number (any in-range value under
+`'json'`; a magnitude of at most 2^53 - 1 under `'ijson'`, a larger bare number
+is an error) and the older `"0x..."` string (`"0xff"`, `"-0x2a"` for a signed
+128-bit integer; hex digits of either case, at least one, in range). The hex
+form is input only. Decimal text is canonical (`0 | -?[1-9][0-9]*`, no `-0`).
+`jsonInt` / `ijsonInt` force a number or a string as for any other integer.
+
+**Enums.** On the wire and in JavaScript an enum is its underlying integer,
+and any in-range value is valid. In text a value equal to a listed enumerator
+is written as its name (`"active"`; the first listed when two share a value),
+any other as its number by the integer rule of its width and format. Both
+formats read all of:
+
+| text | meaning |
+|---|---|
+| `"active"` | the name |
+| `2` | the number |
+| `"2"` | the number as a string (a string starting with a digit or `-`) |
+| `"active:2"` | both; they must agree |
+
+An unknown name, a disagreement, an empty name or number part, a
+non-canonical (`"02"`, `"-0"`, `"+1"`) or out-of-range number and any other
+JSON kind are errors; a number that names no enumerator is accepted.
+
+```typescript
+const Status = schema.type('Status');     // Enum over i32: pending = -1, active = 2
+Status.decode(Status.jsonToPssz('"active"'));   // 2
+Status.valueToJson(2);                           // '"active"'
+Status.valueToJson(5);                           // '5'
+Status.jsonToValue('"pending:-1"');              // -1
+```
+
+**Non-finite floats.** NaN, `Infinity` and `-Infinity` have no text in either
+format: `valueToJson` / `psszToJson` throw a `PsszError` of kind `'value'`
+(a number too large for a 32-bit float counts as infinite there), and no
+spelling of one is read. They remain valid PSSZ values.
+
 Text is read by an exact parser, not `JSON.parse`: integers are converted from
 their token text with `BigInt`, so strict `json` integers beyond 2^53 are
 lossless in both directions, and the rules `JSON.parse` cannot see (`-0`,
 `1.0`, `1e2`, leading zeros, an escaped digit in an integer string, repeated
 keys in a variant object, more than 64 nested containers) are enforced. Floats
-are written as C++ `std::to_chars` writes them (`0.1`, `1e+21`, `1e-07`) and a
-32-bit float is rounded once, from the decimal text.
+are written as C++ `std::to_chars` writes them, byte for byte: the shortest
+decimal that reads back as the same 64-bit (or 32-bit) float, fixed or
+scientific, whichever is shorter (`0.1`, `1e+21`, `1e-07`,
+`5.960464477539063e-08`, `999999999999999868928`). A 32-bit float is rounded
+once, from the decimal text.
 
 ### Schemas written by hand
 
-The compact spelling is the one `generateSchema` produces, plus `BoundedList`
-and member attributes:
+The compact spelling is the one `generateSchema` produces, plus `BoundedList`,
+`Enum` and member attributes:
 
 ```typescript
 const U8 = { Int: { bits: 8, isSigned: false } };
 const schema = new PsszSchema({
   Name: { Custom: { type: { BoundedList: { type: U8, maxCount: 32 } }, id: 'string' } },
   Point: { Struct: { x: { Float: { exp: 11, mantissa: 52 } }, y: { Float: { exp: 11, mantissa: 52 } } } },
+  Color: { Enum: { type: U8, members: { red: 0, green: 1, blue: 7 } } },
   Shape: {
     Object: {
       members: [
@@ -113,6 +157,15 @@ const schema = new PsszSchema({
 `Struct` is a fixed-layout record (no header); `Object` is extensible unless it
 carries the `definitionWillNotChange` attribute. Adapters (`Custom.id`):
 `bool`, `char`, `string`, `hex`, `bitvector`, `bitlist`.
+
+`Enum` is `{ type, members }`: `type` is the underlying integer (8 to 64 bits
+for a text form) and `members` a `{ name: value }` map or a list of
+`{ name, value }`. In the IR (`schema.ir`, and the PSSZ / JSON encoding of a
+schema) an enumerator's `value` is a `bigint`: the value sign-extended to 64
+bits and read as unsigned, so `-1` is `18446744073709551615n`; the compact
+spelling accepts the negative number and converts it. `Enum` is the last
+alternative of the IR's `AnyType` (index 14); a schema encoded before it
+existed decodes unchanged.
 
 ## Install
 

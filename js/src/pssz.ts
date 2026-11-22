@@ -11,8 +11,9 @@
 //
 // Values: bool -> boolean; integers up to 32 bits -> number; 64 / 128 / 256
 // bits -> bigint; floats -> number; string -> string; bytes (hex adapter) ->
-// Uint8Array; record -> object; list / array / tuple -> array; variant ->
-// { type, value }; optional -> null or the value (an optional of an optional
+// Uint8Array; enum -> the number / bigint of its underlying integer (the
+// enumerator name appears only in text); record -> object; list / array /
+// tuple -> array; variant -> { type, value }; optional -> null or the value (an optional of an optional
 // holds null or { some: inner }); bit types -> { bytes, bitCount }. A NaN
 // with a payload decodes to a PsszNaN so that it re-encodes bit for bit.
 
@@ -25,6 +26,7 @@ import { jsonToValue, valueToJson, type JsonFormat } from './pssz-json.js';
 export {
   PsszError, PsszNaN,
   type PsszErrorKind, type IrSchema, type IrAnyType, type IrMember, type IrAttribute, type IrTypeValue,
+  type IrEnum, type IrEnumerator, type CompactEnumerator,
   type CompactType, type PsszSchemaInput, type PsszTypeInput, type Some, type VariantValue, type BitsValue,
 } from './pssz-core.js';
 export { type JsonFormat } from './pssz-json.js';
@@ -236,9 +238,13 @@ const META_SCHEMA: PsszSchemaInput = {
         Custom: object({ type: 'AnyType', id: STRING }),
         Resource: 'Resource',
         Type: object({ type: STRING }),
+        // Added after the original 14 alternatives: a schema written before
+        // it existed decodes unchanged.
+        Enum: object({ type: 'AnyType', members: list('Enumerator') }),
       },
     },
   }),
+  Enumerator: object({ name: STRING, value: U64 }),
   Package: object({ name: STRING, version: STRING, attributes: ATTRIBUTES }),
   UseItem: object({ name: STRING, alias: option(STRING) }),
   Use: object({ package: STRING, interface_name: STRING, version: STRING, items: list('UseItem') }),
