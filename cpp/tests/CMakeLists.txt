@@ -59,6 +59,20 @@ psio_add_test(psio_pssz_zero_tests pssz_zero_tests.cpp)
 psio_add_test(psio_pssz_enum_tests pssz_enum_tests.cpp)
 # String pairing: std::string raw bytes, utf8_string<> / utf8_string<N> UTF-8.
 psio_add_test(psio_pssz_string_tests pssz_string_tests.cpp)
+
+# Shared cross-language conformance fixture (conformance/pssz-vectors.json).
+# The emitter generates it from the implementation; the regen test fails when
+# the checked-in file is not what the implementation produces, and the
+# conformance test checks every vector against every reader entry point.
+set(PSIO_PSSZ_VECTORS ${CMAKE_SOURCE_DIR}/conformance/pssz-vectors.json)
+add_executable(psio_pssz_conformance_emit pssz_conformance_emit.cpp)
+target_link_libraries(psio_pssz_conformance_emit PRIVATE psio)
+target_compile_features(psio_pssz_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_pssz_conformance_regen
+         COMMAND psio_pssz_conformance_emit --check ${PSIO_PSSZ_VECTORS})
+psio_add_test(psio_pssz_conformance_tests pssz_conformance_tests.cpp)
+target_compile_definitions(psio_pssz_conformance_tests PRIVATE
+   PSIO_PSSZ_VECTORS="${PSIO_PSSZ_VECTORS}")
 add_executable(psio_pssz_type_width_consumer pssz_type_width_consumer.cpp)
 target_link_libraries(psio_pssz_type_width_consumer PRIVATE psio::psio)
 add_test(NAME psio_pssz_type_width_consumer COMMAND psio_pssz_type_width_consumer)
