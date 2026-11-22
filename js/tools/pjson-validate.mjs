@@ -1,5 +1,4 @@
 import { createInterface } from 'node:readline';
-import { createPjson } from '../dist/index.js';
-const codec = await createPjson();
+import { pjsonValidate } from '../dist/index.js';
 for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity }))
-  console.log(Number(codec.validate(Buffer.from(line, 'hex'))));
+  console.log(Number(pjsonValidate(Buffer.from(line, 'hex'))));

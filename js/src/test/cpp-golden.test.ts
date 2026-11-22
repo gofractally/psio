@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   PsszSchema, bool, generateSchema, list, rawString, record, u32, type PsszType,
-  PJSON_WIRE_REVISION, createPjson, PjsonDecimal, PjsonFloat,
+  PJSON_WIRE_REVISION, pjsonDecode, pjsonEncode, pjsonValidate, PjsonDecimal, PjsonFloat,
 } from '../index.js';
 
 // The checked-in copy (tools/check-cpp-golden.py keeps it equal to C++) is
@@ -90,7 +90,7 @@ for (const fixture of fixtures.filter((f) => ['pssz', 'key', 'json'].includes(f.
     }
   });
 }
-const pjson = await createPjson();
+const pjson = { encode: pjsonEncode, decode: pjsonDecode, validate: pjsonValidate };
 test('pjson revision 2 explicit integer tags', () => {
   assert.equal(PJSON_WIRE_REVISION, 2);
   for (let n = -15; n <= 15; ++n) {

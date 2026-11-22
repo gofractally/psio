@@ -98,5 +98,5 @@ export {
   isCompressedName,
 } from './compress-name.js';
 
-export { PJSON_WIRE_REVISION, createPjson, PjsonError, PjsonDecimal, PjsonFloat, PjsonString,
+export { PJSON_WIRE_REVISION, pjsonEncode, pjsonDecode, pjsonValidate, PjsonError, PjsonDecimal, PjsonFloat, PjsonString,
          PjsonTypedArray, PjsonRows, PjsonObject, type PjsonValue } from './pjson.js';
