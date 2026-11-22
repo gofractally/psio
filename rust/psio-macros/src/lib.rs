@@ -8,6 +8,7 @@
 //! * FlatBuffers: `FbPack`, `FbUnpack`, `FbView`
 //! * WIT Canonical ABI: `WitPack`, `WitUnpack`, `WitView`
 //! * dynamic views: `ToDynamicSchema`
+//! * methods and interfaces: the attribute `#[psio::interface]` on a trait
 //! * with the feature `experimental-frac`, the derives of
 //!   `psio::experimental::frac`: `Pack`, `Unpack`, `FracView`, `FracMutView`,
 //!   `ToSchema`
@@ -36,6 +37,7 @@ mod fb_macro;
 mod frac_macro;
 #[cfg(feature = "experimental-frac")]
 mod frac_schema_macro;
+mod interface_macro;
 mod json_text_macro;
 mod key_macro;
 mod pssz_macro;
@@ -173,4 +175,17 @@ pub fn derive_wit_view(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(ToDynamicSchema, attributes(psio, serde))]
 pub fn derive_to_dynamic_schema(input: TokenStream) -> TokenStream {
     dynamic_schema_macro::dynamic_schema_derive_impl(input)
+}
+
+// ── Methods and interfaces ─────────────────────────────────────────────
+
+/// A trait's functions as an interface: names, parameter names and types,
+/// the argument record of each method with its pSSZ, dispatch, a call proxy
+/// and the Schema IR `Interface` (C++ `PSIO_REFLECT(T, method(...))` +
+/// `PSIO_INTERFACE(T)`). See `psio::interface`.
+#[proc_macro_attribute]
+pub fn interface(args: TokenStream, item: TokenStream) -> TokenStream {
+    interface_macro::expand(args.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }

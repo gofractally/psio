@@ -363,6 +363,18 @@ impl SchemaBuilder {
         }
         Ok(AnyType::named(name))
     }
+    /// Appends an interface; a package with a name becomes the schema's
+    /// (C++: the builder reports the package of the last interface walked
+    /// that has one).
+    pub(crate) fn push_interface(&mut self, interface: Interface, package: Option<(&str, &str)>) {
+        if let Some((name, version)) = package {
+            if !name.is_empty() {
+                self.schema.package.name = name.into();
+                self.schema.package.version = version.into();
+            }
+        }
+        self.schema.interfaces.push(interface);
+    }
     pub fn finish(self) -> Schema {
         self.schema
     }

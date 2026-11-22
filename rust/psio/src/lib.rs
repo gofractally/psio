@@ -10,6 +10,8 @@
 //!   ([`serde_bridge`]): `#[derive(psio::Serde)]` gives a type
 //!   `Serialize` / `Deserialize` with PSIO's text;
 //! * [`key`]: memcmp-sortable keys;
+//! * [`interface`](mod@interface): methods and interfaces, `#[psio::interface]` on a trait
+//!   (argument records, dispatch, call proxies, the schema's `Interface`);
 //! * [`pjson`]: a self-describing binary JSON;
 //! * [`ssz`], [`capnp`], [`flatbuf`], [`wit`]: interchange with SSZ,
 //!   Cap'n Proto, FlatBuffers and the WIT Canonical ABI.
@@ -163,6 +165,9 @@ pub use psio_macros::{PsszPack, PsszUnpack, PsszView, ToPsszSchema};
 pub use psio_macros::JsonText;
 pub use psio_macros::Serde;
 pub use psio_macros::Key;
+// The attribute `#[psio::interface]`; the module of the same name has the
+// traits it implements.
+pub use psio_macros::interface;
 
 // The helper names, one set per format (docs/helpers.md): `to_F`,
 // `try_to_F`, `to_F_into`, `from_F`, `from_F_trusted`, `validate_F`,
@@ -224,6 +229,7 @@ pub mod pjson_typed;
 pub mod pjson_json;
 pub mod json;
 pub mod key;
+pub mod interface;
 pub mod time;
 pub mod pssz;
 #[doc(hidden)]
