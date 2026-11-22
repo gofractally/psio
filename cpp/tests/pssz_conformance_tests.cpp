@@ -302,7 +302,8 @@ namespace
       "optional-presence", "width", "tuple", "variant", "enum", "enum-unknown-value", "string",
       "string-raw-non-utf8", "length-bound-overflow", "cap-overflow-explicit-nested", "bytes",
       "zero-fixed", "depth", "box", "nested", "nested-unknown", "nested-deferred",
-      "map-set", "map-set-order", "transparent", "custom", "invariant"};
+      "map-set", "map-set-order", "transparent", "custom", "invariant", "annotated-bounds",
+      "method-args"};
 }  // namespace
 
 TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformance]")

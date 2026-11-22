@@ -1532,6 +1532,201 @@ namespace
       observed("s247_with_248_bytes", S247{std::string(248, 's')});
    }
 
+   // ── Bounds below the member ───────────────────────────────────────────
+   //
+   // A value outside a bound stated for a position below the member (an
+   // element, a key, a mapped value, a tuple element, a variant alternative)
+   // is refused by the encoder; the frame a writer that skips the check
+   // would produce is refused by every reader, with `reason`.
+   template <typename T>
+   void outside_tree(const char* c, const std::string& vname, const T& value,
+                     const std::string& reason)
+   {
+      formats([&]<typename F>() {
+         Bytes bytes;
+         try
+         {
+            bytes = psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, value);
+         }
+         catch (const psio::codec_exception&)
+         {
+            return;
+         }
+         Bytes refused;
+         if (try_encode<F>(value, refused))
+            die(vname + ": the encoder accepted a value outside an annotated bound");
+         if (psio::encode_pssz_checked(F{}, value, refused).ok() || !refused.empty())
+            die(vname + ": encode_pssz_checked accepted a value outside an annotated bound");
+         add<F, T>(c, vname, bytes, reject(reason), vname, type_id<T>());
+      });
+   }
+
+   void emit_annotation_trees()
+   {
+      const char* c = "annotated-bounds";
+      const std::string lb = "pssz: member length_bound violated";
+      const std::string s16(16, 'a'), s17(17, 'a');
+      using Text16 = psio::utf8_string<16>;
+
+      // In the bound every header and slot counts 4; a list's table is 4
+      // wide; an array, tuple, pair or map entry takes the width of its own
+      // bound, which the annotations of its position narrow.
+      static_assert(psio::max_encoded_size<AnnTags>() == 168 && psio::auto_pssz_width_v<AnnTags> == 1);
+      static_assert(psio::max_encoded_size<WrapTags>() == 168 && psio::auto_pssz_width_v<WrapTags> == 1);
+      static_assert(psio::max_encoded_size<AnnRawTags>() == 168);
+      static_assert(psio::max_encoded_size<AnnGrid>() == 44 && psio::auto_pssz_width_v<AnnGrid> == 1);
+      static_assert(psio::max_encoded_size<AnnOpt>() == 49 && psio::auto_pssz_width_v<AnnOpt> == 1);
+      static_assert(psio::max_encoded_size<AnnArr>() == 68 && psio::auto_pssz_width_v<AnnArr> == 1);
+      static_assert(psio::max_encoded_size<AnnMap>() == 168 && psio::auto_pssz_width_v<AnnMap> == 1);
+      static_assert(psio::max_encoded_size<AnnSet>() == 88 && psio::auto_pssz_width_v<AnnSet> == 1);
+      static_assert(psio::max_encoded_size<AnnTup>() == 93 && psio::auto_pssz_width_v<AnnTup> == 1);
+      static_assert(psio::max_encoded_size<AnnVar>() == 49 && psio::auto_pssz_width_v<AnnVar> == 1);
+
+      using A = psio::pssz;
+      // ── Pinned automatic-profile bytes ─────────────────────────────────
+      // record: header 01, slot 01; list: a 4-wide table; strings.
+      literal<A, AnnTags>(c, "tags_two", {{"ab", "c"}},
+                          hx("0101" "08000000" "0a000000" "6162" "63"));
+      // the wrapper spelling: the same bytes
+      {
+         WrapTags w;
+         w.tags.push_back(Text16{"ab"});
+         w.tags.push_back(Text16{"c"});
+         literal<A, WrapTags>(c, "tags_two", w, hx("0101" "08000000" "0a000000" "6162" "63"));
+      }
+      // an array of bounded strings: its own offset table is 1 wide
+      literal<A, AnnArr>(c, "array_three", {{"ab", "", "c"}}, hx("0101" "030505" "6162" "63"));
+      // a map entry (the pair of a bounded key and a bounded value) has a
+      // 1-wide header and slots; the map's table is 4 wide
+      literal<A, AnnMap>(c, "map_one", {{{"k", {7}}}},
+                         hx("0101" "04000000" "02" "0203" "6b" "07000000"));
+
+      corpus(c, "tags_empty", AnnTags{});
+      corpus(c, "tags_full", AnnTags{Vec<Raw>(8, s16)});
+      corpus(c, "raw_tags", AnnRawTags{{"ab", s16}});
+      // A raw string element carries any bytes (strict validation, which
+      // checks every plain string, is the one reader that refuses them):
+      // with the other raw non-UTF-8 rows, which have no JSON text.
+      formats([&]<typename F>() {
+         add<F, AnnRawTags>("string-raw-non-utf8", "annotated_raw_tags",
+                            must_encode<F>(AnnRawTags{{"\xff", s16}}, c), nonstrict());
+      });
+      corpus(c, "grid", AnnGrid{{{1, 2, 3, 4}, {}, {5}}});
+      corpus(c, "opt_none", AnnOpt{});
+      corpus(c, "opt_some", AnnOpt{Vec<Raw>{"x", s16}});
+      corpus(c, "array_full", AnnArr{{s16, s16, s16}});
+      corpus(c, "map_full", AnnMap{{{"a", {1, 2}}, {"b", {}}, {"c", {3}}, {s16, {4, 5}}}});
+      corpus(c, "set", AnnSet{{"a", "b", s16}});
+      corpus(c, "tuple_pair", AnnTup{{s16, 7, {1, 2, 3, 4, 5}}, {"p", s16}});
+      corpus(c, "variant_u32", AnnVar{u32{7}});
+      corpus(c, "variant_string", AnnVar{Raw(s16)});
+      corpus(c, "variant_list", AnnVar{Vec<Raw>{"x", s16}});
+
+      // ── One past a bound, at each depth ────────────────────────────────
+      outside_tree(c, "tags_nine", AnnTags{Vec<Raw>(9, "a")}, lb);
+      outside_tree(c, "tags_element_17", AnnTags{{"a", s17}}, lb);
+      outside_tree(c, "tags_element_not_utf8", AnnTags{{"ok", "\xff"}},
+                   "utf8_spec: invalid leading byte");
+      outside_tree(c, "raw_tags_element_17", AnnRawTags{{s17}}, lb);
+      outside_tree(c, "grid_four_rows", AnnGrid{{{1}, {1}, {1}, {1}}}, lb);
+      outside_tree(c, "grid_row_of_five", AnnGrid{{{}, {1, 2, 3, 4, 5}}}, lb);
+      outside_tree(c, "opt_three", AnnOpt{Vec<Raw>{"a", "b", "c"}}, lb);
+      outside_tree(c, "opt_element_17", AnnOpt{Vec<Raw>{s17}}, lb);
+      outside_tree(c, "array_element_17", AnnArr{{"", s17, ""}}, lb);
+      outside_tree(c, "map_five", AnnMap{{{"a", {}}, {"b", {}}, {"c", {}}, {"d", {}}, {"e", {}}}},
+                   lb);
+      outside_tree(c, "map_key_17", AnnMap{{{s17, {}}}}, lb);
+      outside_tree(c, "map_value_three", AnnMap{{{"k", {1, 2, 3}}}}, lb);
+      outside_tree(c, "set_element_17", AnnSet{{s17}}, lb);
+      outside_tree(c, "tuple_element_17", AnnTup{{s17, 1, {}}, {"", ""}}, lb);
+      outside_tree(c, "tuple_bytes_six", AnnTup{{"", 1, {1, 2, 3, 4, 5, 6}}, {"", ""}}, lb);
+      outside_tree(c, "pair_second_17", AnnTup{{"", 1, {}}, {"", s17}}, lb);
+      outside_tree(c, "variant_string_17", AnnVar{Raw(s17)}, lb);
+      outside_tree(c, "variant_list_three", AnnVar{Vec<Raw>{"a", "b", "c"}}, lb);
+      outside_tree(c, "variant_list_element_17", AnnVar{Vec<Raw>{s17}}, lb);
+
+      // The wrapper spelling reads the same frames and refuses the same
+      // ones, with the wrapper's own messages.
+      formats([&]<typename F>() {
+         const auto frame = [](const AnnRawTags& value) {
+            return psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, value);
+         };
+         add<F, WrapTags>(c, "wrap_tags_from_annotated", frame(AnnRawTags{{"ab", s16}}),
+                          canonical());
+         add<F, WrapTags>(c, "wrap_tags_nine", frame(AnnRawTags{Vec<Raw>(9, "a")}),
+                          reject("pssz: bounded list exceeds its bound"));
+         add<F, WrapTags>(c, "wrap_tags_element_17", frame(AnnRawTags{{"a", s17}}),
+                          reject("pssz: utf8_string exceeds its bound"));
+         add<F, WrapTags>(c, "wrap_tags_element_not_utf8", frame(AnnRawTags{{"\xff"}}),
+                          reject("utf8_spec: invalid leading byte"));
+      });
+   }
+
+   // ── Method argument tuples ────────────────────────────────────────────
+   void emit_method_args()
+   {
+      const char* c = "method-args";
+      const std::string lb  = "pssz: member length_bound violated";
+      const std::string cap = "pssz: encoded size exceeds maxDynamicData cap";
+      const std::string s16(16, 'a'), s17(17, 'a'), s80(80, 'm'), s81(81, 'm');
+
+      // An explicit cap rules (256: 2-byte offsets although the parameters
+      // need at most 116 bytes); without one, the inferred bound.
+      static_assert(psio::max_dynamic_data_v<ArgsTransfer> == 256 &&
+                    psio::auto_pssz_width_v<ArgsTransfer> == 2);
+      static_assert(psio::max_encoded_size<ArgsTransferUncapped>() == 116 &&
+                    psio::auto_pssz_width_v<ArgsTransferUncapped> == 1);
+      static_assert(psio::max_encoded_size<ArgsBatch>() == 65 &&
+                    psio::auto_pssz_width_v<ArgsBatch> == 1);
+      static_assert(psio::auto_pssz_width_v<ArgsNote> == 1);
+      static_assert(psio::auto_pssz_width_v<ArgsTransfer2> == 2);
+      static_assert(psio::pssz_evolves_from<ArgsTransfer, ArgsTransfer2>);
+
+      using A = psio::pssz;
+      // ── Pinned automatic-profile bytes ─────────────────────────────────
+      // header, slot(to), u64, slot(memo), payloads: 1-byte and 2-byte.
+      literal<A, ArgsTransferUncapped>(c, "transfer", {"al", 5, "hi"},
+                                       hx("0a" "0a" "0500000000000000" "0c" "616c" "6869"));
+      literal<A, ArgsTransfer>(c, "transfer", {"al", 5, "hi"},
+                               hx("0c00" "0c00" "0500000000000000" "0e00" "616c" "6869"));
+      literal<A, ArgsNote>(c, "note", {"hey"}, hx("01" "01" "686579"));
+
+      corpus(c, "transfer_full", ArgsTransfer{s16, ~u64{0}, s80});
+      corpus(c, "transfer_empty", ArgsTransfer{"", 0, ""});
+      corpus(c, "transfer_uncapped_full", ArgsTransferUncapped{s16, 1, s80});
+      corpus(c, "batch_full", ArgsBatch{Vec<Raw>(4, "12345678"), u32{9}});
+      corpus(c, "batch_no_tip", ArgsBatch{Vec<Raw>{"a"}, std::nullopt});
+      corpus(c, "note_at_cap", ArgsNote{Raw(62, 'n')});
+      corpus(c, "transfer2_fee", ArgsTransfer2{"al", 5, "hi", u32{3}});
+      corpus(c, "transfer2_no_fee", ArgsTransfer2{"al", 5, "hi", std::nullopt});
+
+      // ── A parameter outside its annotation ─────────────────────────────
+      outside_tree(c, "transfer_to_17", ArgsTransfer{s17, 1, ""}, lb);
+      outside_tree(c, "transfer_memo_81", ArgsTransferUncapped{"", 1, s81}, lb);
+      outside_tree(c, "transfer_to_not_utf8", ArgsTransferUncapped{"\xff", 1, ""},
+                   "utf8_spec: invalid leading byte");
+      outside_tree(c, "batch_five_names", ArgsBatch{Vec<Raw>(5, "a"), std::nullopt}, lb);
+      outside_tree(c, "batch_name_of_nine", ArgsBatch{Vec<Raw>{"123456789"}, u32{1}}, lb);
+
+      // ── Over the cap (automatic profile: the cap is the type's) ────────
+      {
+         auto frame = psio::encode(A{}, ArgsNote{Raw(62, 'n')});
+         frame.push_back('n');  // 65 bytes: the 1-byte header still describes it
+         add<A, ArgsNote>(c, "note_over_cap", frame, reject(cap));
+      }
+
+      // ── Evolution under the cap ────────────────────────────────────────
+      formats([&]<typename F>() {
+         // A new writer that omits the argument writes the old bytes; an old
+         // reader skips the argument a new writer sent.
+         const auto old_bytes = must_encode<F>(ArgsTransfer{"al", 5, "hi"}, c);
+         add<F, ArgsTransfer2>(c, "old_writer", old_bytes, canonical());
+         add<F, ArgsTransfer>(c, "new_writer_fee",
+                              must_encode<F>(ArgsTransfer2{"al", 5, "hi", u32{3}}, c),
+                              unknown(old_bytes));
+      });
+   }
+
    void emit_tuples_variants_enums()
    {
       // ── Tuples: positional extensible records ──────────────────────────
@@ -2929,6 +3124,8 @@ int main(int argc, char** argv)
    emit_nested_assoc();
    emit_custom_types();
    emit_custom_assoc();
+   emit_annotation_trees();
+   emit_method_args();
 
    if (!unregistered.empty())
    {

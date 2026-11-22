@@ -110,10 +110,14 @@ u8 u16 u32 u64 i8 i16 i32 i64 u128 i128 u256 f32 f64 bool
 string              unbounded UTF-8            (C++ psio::utf8_string<>, Rust String)
 string<=N           UTF-8, at most N bytes     (C++ psio::utf8_string<N>)
 raw_string          raw bytes                  (C++ std::string, Rust RawString)
-raw_string<=N       std::string member with length_bound max N
+raw_string<=N       raw bytes, at most N       (C++ std::string under max<N>,
+                                                Rust BoundedRawString<N>)
 list<T>             std::vector<T>
-list<T><=N          std::vector<T> member with length_bound max N
+list<T><=N          at most N elements         (C++ std::vector<T> under max<N>, or
+                                                psio::bounded<T, N>; Rust BoundedList<T, N>)
 array<T,N>  optional<T>  variant<A,B,...>  tuple<A,B,...>  box<T>
+tuple<A,B,...>@cap=N  a tuple with an explicit maxDynamicData: a method's argument
+                    tuple (C++ psio::reflect<T>::method_arg_tuple<I>)
 nested<T>           a byte list holding the automatic-profile encoding of a T,
                     validated as T by every checking reader (C++ psio::nested<T>)
 nested<T,deferred>  the same bytes and Schema IR node; enclosing readers do not
@@ -136,14 +140,37 @@ A `std::pair<A,B>` is the tuple and has the tuple's shape and id
 container holding a map or set is not part of its shape.
 
 A nested record, enum or transparent type is referred to by its id; every id referred to is in
-`types`. Field names are part of the shape. `<=N` on a `raw_string`, `list` or `nested`
-exists only for record members. In the Schema IR a nested value is the node
+`types`. Field names are part of the shape. In the Schema IR a nested value is the node
 `Nested{T}` whatever its validation policy, and a nested member's bound is the
 member attribute `lengthBound`.
 
+**A bound follows the type it bounds, at any depth.** `T<=N` is a bounded
+`raw_string`, `string`, `list`, `map` or `set` wherever a type can stand: as a
+record member (`tags:list<raw_string><=8`), as a list element
+(`list<string<=16>><=8`: the inner `<=16` bounds each string, the outer `<=8`
+the list), as a map key or value (`map<string<=16>,list<u32><=2>><=4`), as an
+optional payload, an array element, a tuple element or a variant alternative.
+(`nested<T><=N` exists only for record members.) The shape does not say how
+the bound was declared: a C++ member annotation
+(`attr(tags, max<8> | element(utf8 | max<16>))` on a
+`std::vector<std::string>`) and wrapper types
+(`psio::bounded<psio::utf8_string<16>, 8>`) give the same shape — `AnnTags` and
+`WrapTags` are one type to a reader — and a `std::string` an annotation makes
+UTF-8 is `string`, as `psio::utf8_string` is. Widths: a list's own offset table
+is 4 wide whatever bounds it; an array of variable elements, a tuple, a pair
+and a map entry take their width from their bound, bounds of this kind
+included (`array<string<=16>,3>` has 1-byte offsets).
+
+A method argument tuple (`tuple<...>@cap=N`, or a plain bounded tuple when the
+method declares no cap) is the positional extensible record of the parameters:
+its bytes are those of the tuple. Because the IR's Tuple node has no
+attributes, its Schema IR is the Object of the same members (named by the
+parameter names) carrying `maxDynamicData`; a schema-driven reader derives the
+same width and bytes from it.
+
 ## Classes
 
-308 types, 6589 vectors.
+323 types, 6803 vectors.
 
 | class | vectors | contents |
 |---|---|---|
@@ -160,7 +187,7 @@ member attribute `lengthBound`.
 | `enum` | 76 | Enums as their underlying integer. |
 | `enum-unknown-value` | 36 | A value that names no enumerator: structurally valid (spec §4.5), accepted in every entry point. C++ enums hold it; the Rust mirror types take it in their `#[pssz(other)]` catch-all variant (a Rust enum without one rejects it, which Rust's own tests pin). |
 | `string` | 308 | UTF-8 and bound rules for `string`, `string<=N`, `raw_string`. |
-| `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`: valid PSSZ, recorded as `canonical`, for the typed codecs and for the schema-driven ones alike (the IR tells a raw string, Custom `string`, from a UTF-8 one, Custom `utf8`). The one exception is C++ `validate_strict`, which checks every plain string. Such a value has no JSON / I-JSON text: writing it is an error in every language. |
+| `string-raw-non-utf8` | 48 | Non-UTF-8 bytes in a `raw_string`: valid PSSZ, recorded as `canonical`, for the typed codecs and for the schema-driven ones alike (the IR tells a raw string, Custom `string`, from a UTF-8 one, Custom `utf8`). The one exception is C++ `validate_strict`, which checks every plain string. Such a value has no JSON / I-JSON text: writing it is an error in every language. |
 | `length-bound-overflow` | 32 | Frames exceeding a member `length_bound`, as a writer that skips the bound check would produce them. Every reader rejects them; the C++ and Rust encoders refuse the values. |
 | `box` | 100 | Boxed values (`box<T>`: C++ / Rust `Box<T>`). The bytes are T's; a box gives its container no inferred size bound, so `BoxRec` uses 4-byte offsets where `BDirect` uses 1. The IR records the box (Custom `box`) and a schema-only reader derives the same widths. |
 | `bytes` | 88 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. |
@@ -174,6 +201,8 @@ member attribute `lengthBound`.
 | `transparent` | 160 | Values of transparent types (`Id`, `Blob`, `Ref`, `DerKey`), bare and in lists, arrays, optionals and tuples; every frame is also read as the member's type (`type` is the member's type, `writer` the wrapper): the bytes, the fixedness and the optional form are the member's. Two rejects: `Id` framed as a one-field record, and a short frame. |
 | `custom` | 116 | Values of the custom types (a text form, an invariant, or both: `custom-types.md`) and of `Guarded`, which holds each in every position. The bytes are the wire type's. |
 | `invariant` | 128 | Structurally valid frames of values that violate an invariant, as a writer that does not check would produce them, bare and nested (list, array, optional, variant alternative, record member, two violations in one record). `expect` is `reject` and `reason` the invariant's message: the outcome of the typed codec — every checked entry point rejects, the trusted decode reads the value, no writer writes it back — and of a schema-driven codec given the handlers. A schema-driven codec with no handler accepts every one of these frames; with a strict registry lacking the handler it refuses the type. |
+| `annotated-bounds` | 148 | Bounds below the member (`docs/pssz-spec.md` §3.5), declared in C++ by member annotations (`AnnTags`, `AnnRawTags`, `AnnGrid`, `AnnOpt`, `AnnArr`, `AnnMap`, `AnnSet`, `AnnTup`, `AnnVar`) and by wrapper types (`WrapTags`, the same shape as `AnnTags`). Pinned automatic-profile bytes (`tags_two` for both spellings, `array_three`: an array of bounded strings has a 1-byte offset table, `map_one`: a map entry of a bounded key and value has a 1-byte header inside the map's 4-byte table); canonical values at the bounds; and one-past-a-bound frames at every depth — the list's count, an element's bytes, an element that is not UTF-8, a row of a grid, an optional's payload, an array element, a map's entry count / key / value, a set element, tuple and pair elements, each variant alternative — as a writer that skips the checks would produce them: `reject` (`pssz: member length_bound violated`, or the `utf8_spec:` message), refused by the encoders too. A raw (not UTF-8) bounded element that is not UTF-8 is `canonical`: `annotated_raw_tags` in `string-raw-non-utf8`. `wrap_tags_*` read the annotated type's frames as the wrapper type: `canonical` within the bounds, `reject` with the wrapper's messages (`pssz: bounded list exceeds its bound`, `pssz: utf8_string exceeds its bound`) outside. |
+| `method-args` | 62 | Method argument tuples: annotated parameters and a cap (`docs/pssz-spec.md` §16). `transfer` pinned at 1-byte offsets (no cap: the inferred bound, 116) and at 2-byte offsets (`@cap=256`: an explicit cap rules); `note` under `@cap=64`. A parameter outside its annotation is a `reject` (`transfer_to_17`, `transfer_memo_81`, `transfer_to_not_utf8`, `batch_five_names`, `batch_name_of_nine`); `note_over_cap` (65 bytes, automatic profile) is rejected by the cap. Evolution under the cap: `old_writer` (the 3-argument bytes read as the 4-argument tuple with a trailing optional: `canonical`) and `new_writer_fee` (the 4-argument bytes read by the old tuple: `unknown`, re-encoding to the old bytes). |
 
 Custom types in maps, sets and nested values (`Tag`, `map<Tag,u32>`,
 `map<Name,Range>`, `set<Level>`, `nested<Range>`; `custom-types.md`, "In maps,

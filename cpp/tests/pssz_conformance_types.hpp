@@ -499,6 +499,7 @@ namespace pssz_conf
          std::is_enum_v<T> || (psio::Reflected<T> && !std::is_enum_v<T>);
 
       template <typename T> std::string ref();
+      template <typename T> std::string annotated_tuple_shape();
 
       template <typename T>
       std::string primitive()
@@ -527,6 +528,10 @@ namespace pssz_conf
                                  : std::string("string");
          else if constexpr (impl::is_std_vector_v<T>)
             return "list<" + ref<typename T::value_type>() + ">";
+         else if constexpr (impl::is_bounded_v<T>)
+            // (the bound follows the type it bounds, as a member's does)
+            return "list<" + ref<typename T::value_type>() + "><=" +
+                   std::to_string(T::max_size_value);
          else if constexpr (impl::is_std_array_v<T>)
             return "array<" + ref<typename T::value_type>() + "," +
                    std::to_string(std::tuple_size_v<T>) + ">";
@@ -543,6 +548,8 @@ namespace pssz_conf
                    ref<typename T::mapped_type>() + ">";
          else if constexpr (psio::detail::is_set_v<T>)
             return "set<" + ref<psio::detail::assoc_key_t<T>>() + ">";
+         else if constexpr (requires { typename T::psio_annotated_tuple; })
+            return annotated_tuple_shape<T>();
          else if constexpr (impl::is_std_tuple_v<T>)
             // (a std::pair is the 2-tuple: the same shape, the same id)
             return []<std::size_t... I>(std::index_sequence<I...>) {
@@ -578,27 +585,95 @@ namespace pssz_conf
          else return structural<T>();
       }
 
-      // Member I of record T, with its length_bound annotation if any. Only
-      // std::string and std::vector members may carry one.
+      // The shape of an F at a position carrying `annots` (a member's
+      // annotations, or what element / keys / values / at<I> state for a
+      // position below one). A bound follows the type it bounds: `T<=N`, at
+      // any depth; a std::string the annotations make UTF-8 is `string`,
+      // exactly as psio::utf8_string is. The annotation spelling and the
+      // wrapper spelling of one constraint have one shape.
+      template <typename F, typename Annots>
+      std::string shaped(const Annots& annots)
+      {
+         namespace ann = psio::detail::ann;
+         using A = std::remove_cvref_t<Annots>;
+         if constexpr (!ann::has_tree_specs_v<A>)
+            return ref<F>();
+         else if constexpr (impl::is_std_optional_v<F>)
+            // (looked through: the annotations are the payload's)
+            return "optional<" + shaped<typename F::value_type>(annots) + ">";
+         else
+         {
+            std::string out;
+            if constexpr (std::is_same_v<F, std::string>)
+               out = ann::enforces_utf8(annots) ? "string" : "raw_string";
+            else if constexpr (impl::is_std_vector_v<F>)
+               out = "list<" + shaped<typename F::value_type>(ann::element_specs(annots)) + ">";
+            else if constexpr (impl::is_bounded_v<F>)
+               out = "list<" + shaped<typename F::value_type>(ann::element_specs(annots)) +
+                     "><=" + std::to_string(F::max_size_value);
+            else if constexpr (impl::is_std_array_v<F>)
+               out = "array<" + shaped<typename F::value_type>(ann::element_specs(annots)) + "," +
+                     std::to_string(std::tuple_size_v<F>) + ">";
+            else if constexpr (psio::detail::is_map_v<F>)
+               out = "map<" + shaped<psio::detail::assoc_key_t<F>>(ann::key_specs(annots)) + "," +
+                     shaped<typename F::mapped_type>(ann::value_specs(annots)) + ">";
+            else if constexpr (psio::detail::is_set_v<F>)
+               out = "set<" + shaped<psio::detail::assoc_key_t<F>>(ann::element_specs(annots)) +
+                     ">";
+            else if constexpr (impl::is_std_variant_v<F>)
+               out = [&]<std::size_t... I>(std::index_sequence<I...>) {
+                  std::string v = "variant<";
+                  ((v += (I ? "," : "") +
+                         shaped<std::variant_alternative_t<I, F>>(ann::at_specs<I>(annots))),
+                   ...);
+                  return v + ">";
+               }(std::make_index_sequence<std::variant_size_v<F>>{});
+            else if constexpr (impl::is_std_tuple_v<F>)
+               out = [&]<std::size_t... I>(std::index_sequence<I...>) {
+                  std::string v = "tuple<";
+                  ((v += (I ? "," : "") +
+                         shaped<std::remove_const_t<std::tuple_element_t<I, F>>>(
+                            ann::at_specs<I>(annots))),
+                   ...);
+                  return v + ">";
+               }(std::make_index_sequence<std::tuple_size_v<F>>{});
+            else
+               out = ref<F>();
+            // The position's own bound. (A psio::utf8_string / psio::bounded
+            // states its bound in the type; one written over it is not part
+            // of the shape.)
+            if constexpr (psio::has_spec_v<psio::length_bound, A> &&
+                          !impl::is_utf8_string_v<F> && !impl::is_bounded_v<F>)
+            {
+               static_assert(std::is_same_v<F, std::string> || impl::is_std_vector_v<F> ||
+                                impl::is_nested_v<F> || psio::detail::is_assoc_v<F>,
+                             "pssz_conf: length_bound only on string, vector, nested, map and "
+                             "set positions");
+               out += "<=" + std::to_string(*std::get<psio::length_bound>(annots).max);
+            }
+            return out;
+         }
+      }
+
+      // A tuple carrying element annotations and a cap (a method's argument
+      // tuple): the tuple of its bounded elements, `@cap=N` when capped.
+      template <typename T>
+      std::string annotated_tuple_shape()
+      {
+         std::string out = shaped<typename T::tuple_type>(T::psio_annotations);
+         if (psio::max_dynamic_data_v<T>.has_value())
+            out += "@cap=" + std::to_string(*psio::max_dynamic_data_v<T>);
+         return out;
+      }
+
+      // Member I of record T, with its annotations if any.
       template <typename T, std::size_t I>
       std::string member()
       {
          using R = psio::reflect<T>;
          using F = typename R::template member_type<I>;
-         using Annots = typename psio::effective_annotations_for<
-            T, F, R::template member_pointer<I>>::value_t;
-         std::string out = std::string(R::template member_name<I>) + ":" + ref<F>();
-         if constexpr (psio::has_spec_v<psio::length_bound, Annots> &&
-                       !impl::is_utf8_string_v<F>)
-         {
-            static_assert(std::is_same_v<F, std::string> || impl::is_std_vector_v<F> ||
-                             impl::is_nested_v<F> || psio::detail::is_assoc_v<F>,
-                          "pssz_conf: length_bound only on string, vector, nested, map and set members");
-            const auto bound = std::get<psio::length_bound>(
-               psio::effective_annotations_for<T, F, R::template member_pointer<I>>::value);
-            out += "<=" + std::to_string(*bound.max);
-         }
-         return out;
+         return std::string(R::template member_name<I>) + ":" +
+                shaped<F>(psio::effective_annotations_for<T, F, R::template member_pointer<I>>::value);
       }
 
       // The definition of a type: what `shape` holds in the fixture.
@@ -751,6 +826,71 @@ PSIO_FIELD_ATTRS(pssz_conf::AssocRec, limited, psio::length_bound{.max = 2})
 PSIO_FIELD_ATTRS(pssz_conf::AssocLists, limited, psio::length_bound{.max = 2})
 namespace pssz_conf
 {
+   // ── Bounds below the member ───────────────────────────────────────────
+   //
+   // A member annotation states bounds at any depth of the member's type
+   // (psio/annotate.hpp: element / keys / values / at<I>); a wrapper type
+   // states the same in the type. Both give the same bytes, widths and IR:
+   // AnnTags and WrapTags are one type to a schema reader.
+   struct AnnTags { Vec<Raw> tags; };  // <= 8 UTF-8 strings of <= 16 bytes
+   PSIO_REFLECT(AnnTags, attr(tags, max<8> | element(utf8 | max<16>)))
+   struct WrapTags { psio::bounded<psio::utf8_string<16>, 8> tags; };
+   PSIO_REFLECT(WrapTags, tags)
+   struct AnnRawTags { Vec<Raw> tags; };  // <= 8 raw strings of <= 16 bytes
+   PSIO_REFLECT(AnnRawTags, attr(tags, max<8> | element(max<16>)))
+   struct AnnGrid { Vec<Vec<u16>> rows; };  // <= 3 rows of <= 4 cells
+   PSIO_REFLECT(AnnGrid, attr(rows, max<3> | element(max<4>)))
+   struct AnnOpt { Opt<Vec<Raw>> names; };  // when present: <= 2 strings of <= 16
+   PSIO_REFLECT(AnnOpt, attr(names, max<2> | element(utf8 | max<16>)))
+   struct AnnArr { std::array<Raw, 3> names; };  // each <= 16: the array's table is 1 wide
+   PSIO_REFLECT(AnnArr, attr(names, element(utf8 | max<16>)))
+   struct AnnMap { std::map<Raw, Vec<u32>> m; };  // <= 4 entries, key <= 16, value <= 2
+   PSIO_REFLECT(AnnMap, attr(m, max<4> | keys(utf8 | max<16>) | values(max<2>)))
+   struct AnnSet { std::set<Raw> s; };  // <= 4 strings of <= 16
+   PSIO_REFLECT(AnnSet, attr(s, max<4> | element(utf8 | max<16>)))
+   struct AnnTup  // tuple and pair elements by index
+   {
+      std::tuple<Raw, u32, Vec<u8>> t;
+      std::pair<Raw, Raw>           p;
+   };
+   PSIO_REFLECT(AnnTup, attr(t, at<0>(utf8 | max<16>) | at<2>(max<5>)),
+                attr(p, at<0>(utf8 | max<16>) | at<1>(utf8 | max<16>)))
+   struct AnnVar { std::variant<u32, Raw, Vec<Raw>> v; };  // alternatives by index
+   PSIO_REFLECT(AnnVar, attr(v, at<1>(utf8 | max<16>) | at<2>(max<2> | element(utf8 | max<16>))))
+
+   // ── Method argument tuples ────────────────────────────────────────────
+   //
+   // What `method(name, attr(p, specs)..., maxDynamicData(N))` makes of a
+   // method's arguments: the tuple of the decayed parameters, each bounded
+   // by its annotation, the whole capped (psio::reflect<T>::method_arg_tuple).
+   struct ConfService
+   {
+      void transfer(Raw to, u64 amount, Raw memo);
+      void transfer_uncapped(Raw to, u64 amount, Raw memo);
+      void batch(Vec<Raw> names, Opt<u32> tip);
+      void note(Raw text);
+      PSIO_REFLECT(ConfService,
+                   method(transfer, attr(to, utf8 | max<16>), amount, attr(memo, utf8 | max<80>),
+                          maxDynamicData(256)),
+                   method(transfer_uncapped, attr(to, utf8 | max<16>), amount,
+                          attr(memo, utf8 | max<80>)),
+                   method(batch, attr(names, max<4> | element(max<8>)), tip),
+                   method(note, text, maxDynamicData(64)))
+   };
+   // The next revision of transfer: a trailing optional argument, same cap.
+   struct ConfService2
+   {
+      void transfer(Raw to, u64 amount, Raw memo, Opt<u32> fee);
+      PSIO_REFLECT(ConfService2,
+                   method(transfer, attr(to, utf8 | max<16>), amount, attr(memo, utf8 | max<80>),
+                          fee, maxDynamicData(256)))
+   };
+   using ArgsTransfer         = psio::reflect<ConfService>::method_arg_tuple<0>;
+   using ArgsTransferUncapped = psio::reflect<ConfService>::method_arg_tuple<1>;
+   using ArgsBatch            = psio::reflect<ConfService>::method_arg_tuple<2>;
+   using ArgsNote             = psio::reflect<ConfService>::method_arg_tuple<3>;
+   using ArgsTransfer2        = psio::reflect<ConfService2>::method_arg_tuple<0>;
+
    template <typename T> using TupS = std::tuple<T, Raw>;
    template <typename T> using Arr2 = std::array<T, 2>;
 
@@ -831,7 +971,12 @@ namespace pssz_conf
       types<custom_conf::Tag, std::map<custom_conf::Tag, u32>, std::map<Name, Range>,
             std::set<Level>, Nested<Range>>,
       // nested members whose bound is not their inner value's length (appended)
-      types<NCapRec, NCapWords>>::type;
+      types<NCapRec, NCapWords>,
+      // bounds below the member, by annotation and by wrapper type (appended)
+      types<AnnTags, WrapTags, AnnRawTags, AnnGrid, AnnOpt, AnnArr, AnnMap, AnnSet, AnnTup,
+            AnnVar>,
+      // method argument tuples: annotated parameters and a cap (appended)
+      types<ArgsTransfer, ArgsTransferUncapped, ArgsBatch, ArgsNote, ArgsTransfer2>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)
@@ -939,6 +1084,7 @@ namespace pssz_conf
          "pssz: optional selector not 0/1",
          "pssz: utf8_string exceeds its bound",
          "pssz: member length_bound violated",
+         "pssz: bounded list exceeds its bound",
          "pssz: nonempty zero-size vector is unsupported",
          "pssz: vector span not a multiple of element size",
       };
