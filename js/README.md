@@ -2,11 +2,117 @@
 
 Schema-first binary serialization with full TypeScript type inference, zero-copy views, and cross-language compatibility with C++ and Rust.
 
-The fracpack API documented below implements a legacy prototype retained for
-benchmark comparisons of data-layout designs. pSSZ is its successor and psio's
-primary schema-driven binary format; the JS/TS pSSZ implementation is still
-pending. This package also provides the pjson codec described in the
-[repository README](../README.md#javascript--typescript).
+pSSZ is psio's primary schema-driven binary format; this package implements it
+schema-driven (from a Schema IR, no generated types), together with the JSON
+and I-JSON text forms of the same values: see [PSSZ, JSON and
+I-JSON](#pssz-json-and-i-json) below. The fracpack API documented after it
+implements a legacy prototype retained for benchmark comparisons of
+data-layout designs. This package also provides the pjson codec described in
+the [repository README](../README.md#javascript--typescript).
+
+## PSSZ, JSON and I-JSON
+
+A client that has a Schema IR (`psio::Schema`, normally fetched as its PSSZ
+bytes) converts between JavaScript values, PSSZ bytes, JSON and I-JSON with no
+other knowledge of the types. The results are those of the C++ and Rust codecs
+(`docs/pssz-spec.md`, `docs/json.md`): the test suite replays every vector of
+`conformance/pssz-vectors.json` and `conformance/json-vectors.json`.
+
+```typescript
+import { PsszSchema } from 'psio';
+
+const schema = PsszSchema.decode(schemaBytes);        // or new PsszSchema({...}), PsszSchema.fromJson(text)
+const Transfer = schema.type('Transfer');
+
+const bytes = Transfer.jsonToPssz('{"from":"alice","amount":"18446744073709551615"}');
+Transfer.validate(bytes);                             // { ok: true, hasUnknown: false }
+Transfer.decode(bytes);                               // { from: 'alice', amount: 18446744073709551615n }
+Transfer.psszToJson(bytes);                           // I-JSON: 64-bit beyond 2^53-1 as a string
+Transfer.psszToJson(bytes, 'json');                   // strict JSON: {"from":"alice","amount":18446744073709551615}
+Transfer.encode({ from: 'alice', amount: 5n });       // Uint8Array
+```
+
+### API
+
+| | |
+|---|---|
+| `new PsszSchema(ir)` | From a `psio::Schema` value, or a compact `{ Name: type }` map (below). |
+| `PsszSchema.decode(bytes)` / `.fromJson(text)` | From the PSSZ / I-JSON encoding of `psio::Schema`. `schema.encode()` writes it back; `schema.ir` is the IR. |
+| `schema.type(root, { width })` | A `PsszType` for a type name or an inline type. `width`: `'auto'` (default; type-derived offset widths, the `psio::pssz` format) or `1` / `2` / `4` (one inherited width, `psio::pssz_<W>`). Throws when the type is not expressible. |
+| `type.encode(value)` | Canonical bytes. Trailing absent optionals are pruned; length bounds and caps are enforced. |
+| `type.decode(bytes, { rejectUnknown })` | The value. The bytes are fully validated first. Unknown appended optional fields are dropped unless `rejectUnknown`. |
+| `type.validate(bytes)` | `{ ok: true, hasUnknown }` or `{ ok: false, error }`. Never throws. |
+| `type.jsonToPssz(text, format)` / `type.psszToJson(bytes, format)` | Text to bytes and back; `format` is `'ijson'` (default) or `'json'`. |
+| `type.jsonToValue(text, format)` / `type.valueToJson(value, format)` | Text to value and back. |
+| `jsonToPssz(schema, root, format, text)`, `psszToJson(schema, root, format, bytes)`, `validatePssz(schema, root, bytes)` | The same, under the C++ / Rust names. |
+
+Every failure is a `PsszError` with a `kind`: `'schema'` (the IR), `'value'` (a
+JavaScript value that does not fit the type, or has no text), `'bytes'`
+(rejected PSSZ), `'json'` (rejected text, with a byte `offset`). Untrusted
+bytes and text never raise anything else, nest at most 64 levels, and no
+length they claim is trusted before it is checked against the input.
+
+### Values
+
+| Schema | JavaScript |
+|---|---|
+| `bool` | `boolean` |
+| integers of 8, 16, 32 bits; `char` | `number` |
+| integers of 64, 128, 256 bits | `bigint` (an exact `number` is accepted on encode) |
+| floats | `number`; a NaN carrying a payload decodes to a `PsszNaN` (its `bits` re-encode exactly) |
+| string | `string` (UTF-8 on the wire; an unpaired surrogate is an error) |
+| bytes (`hex` adapter) | `Uint8Array` |
+| record | object, members in declaration order; a missing optional member is `null` |
+| list, bounded list, array, tuple | array |
+| variant | `{ type: 'Name', value }` |
+| optional | `null` or the value; an optional of an optional is `null` or `{ some: inner }` |
+| `bitvector` / `bitlist` | `{ bytes, bitCount }` (no text form) |
+
+### Text
+
+`'json'` writes every integer as a bare number, bytes as an array of numbers
+and a variant as `[index, value]`. `'ijson'` writes a 64-bit integer as a bare
+number while its magnitude is at most 2^53 - 1 and as a decimal string beyond
+(both are read), bytes as uppercase hex (either case is read) and a variant as
+`{"Name": value}`. Member attributes `jsonInt` / `ijsonInt` and the variant
+attribute `ijsonName` are honoured. A repeated key is read again and the last
+one wins; unknown keys are skipped.
+
+Text is read by an exact parser, not `JSON.parse`: integers are converted from
+their token text with `BigInt`, so strict `json` integers beyond 2^53 are
+lossless in both directions, and the rules `JSON.parse` cannot see (`-0`,
+`1.0`, `1e2`, leading zeros, an escaped digit in an integer string, repeated
+keys in a variant object, more than 64 nested containers) are enforced. Floats
+are written as C++ `std::to_chars` writes them (`0.1`, `1e+21`, `1e-07`) and a
+32-bit float is rounded once, from the decimal text.
+
+### Schemas written by hand
+
+The compact spelling is the one `generateSchema` produces, plus `BoundedList`
+and member attributes:
+
+```typescript
+const U8 = { Int: { bits: 8, isSigned: false } };
+const schema = new PsszSchema({
+  Name: { Custom: { type: { BoundedList: { type: U8, maxCount: 32 } }, id: 'string' } },
+  Point: { Struct: { x: { Float: { exp: 11, mantissa: 52 } }, y: { Float: { exp: 11, mantissa: 52 } } } },
+  Shape: {
+    Object: {
+      members: [
+        { name: 'name', type: 'Name' },
+        { name: 'outline', type: { List: 'Point' } },
+        { name: 'id', type: { Int: { bits: 64, isSigned: false } }, attributes: [{ name: 'ijsonInt', value: 'string' }] },
+        { name: 'note', type: { Option: 'Name' } },
+      ],
+      attributes: [{ name: 'maxDynamicData', value: '60000' }],
+    },
+  },
+});
+```
+
+`Struct` is a fixed-layout record (no header); `Object` is extensible unless it
+carries the `definitionWillNotChange` attribute. Adapters (`Custom.id`):
+`bool`, `char`, `string`, `hex`, `bitvector`, `bitlist`.
 
 ## Install
 

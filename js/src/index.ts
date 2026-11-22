@@ -99,3 +99,31 @@ export {
 
 export { PJSON_WIRE_REVISION, createPjson, PjsonError, PjsonDecimal, PjsonFloat, PjsonString,
          PjsonTypedArray, PjsonRows, PjsonObject, type PjsonValue } from './pjson.js';
+
+export {
+  // Schema-driven PSSZ + JSON / I-JSON (the primary binary format)
+  PsszSchema,
+  PsszType,
+  PsszError,
+  PsszNaN,
+  jsonToPssz,
+  psszToJson,
+  validatePssz,
+  type PsszErrorKind,
+  type PsszWidth,
+  type PsszTypeOptions,
+  type PsszDecodeOptions,
+  type PsszValidation,
+  type PsszSchemaInput,
+  type PsszTypeInput,
+  type JsonFormat,
+  type IrSchema,
+  type IrAnyType,
+  type IrMember,
+  type IrAttribute,
+  type IrTypeValue,
+  type CompactType,
+  type Some,
+  type VariantValue,
+  type BitsValue,
+} from './pssz.js';
