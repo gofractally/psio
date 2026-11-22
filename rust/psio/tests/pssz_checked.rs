@@ -39,14 +39,29 @@ fn fixed_custom_types_are_walked_instead_of_memcopied() {
 
 #[test]
 fn variable_optional_record_uses_cpp_selector_rule() {
+    // docs/pssz-spec.md 5.5, as the C++ codec now implements it: an
+    // extensible record always has its header, so Option<Record> needs no
+    // selector. (This previously expected [1, 3, 1, 3, 4, 'a', 'b'] and [0].)
     let record = Record {
         flag: true,
         text: "a".into(),
         other: "b".into(),
     };
     let bytes = try_to_pssz::<Pssz8, _>(&Some(record)).unwrap();
-    assert_eq!(bytes, [1, 3, 1, 3, 4, b'a', b'b']);
-    assert_eq!(try_to_pssz::<Pssz8, Option<Record>>(&None).unwrap(), [0]);
+    assert_eq!(bytes, [3, 1, 3, 4, b'a', b'b']);
+    assert_eq!(try_to_pssz::<Pssz8, Option<Record>>(&None).unwrap(), [] as [u8; 0]);
+    assert_eq!(from_pssz::<Pssz8, Option<Record>>(&bytes).unwrap().unwrap().text, "a");
+    assert!(from_pssz::<Pssz8, Option<Record>>(&[]).unwrap().is_none());
+    // Payloads that can be empty keep the selector; nested options follow
+    // from each level's own minimum.
+    assert_eq!(try_to_pssz::<Pssz8, Option<String>>(&None).unwrap(), [0]);
+    assert_eq!(try_to_pssz::<Pssz8, _>(&Some(String::new())).unwrap(), [1]);
+    assert_eq!(try_to_pssz::<Pssz8, Option<Option<String>>>(&None).unwrap(), [] as [u8; 0]);
+    assert_eq!(try_to_pssz::<Pssz8, Option<Option<String>>>(&Some(None)).unwrap(), [0]);
+    assert_eq!(try_to_pssz::<Pssz8, Option<Option<u32>>>(&None).unwrap(), [0]);
+    assert_eq!(try_to_pssz::<Pssz8, Option<Option<u32>>>(&Some(None)).unwrap(), [1]);
+    assert_eq!(from_pssz::<Pssz8, Option<Option<String>>>(&[0]).unwrap(), Some(None));
+    assert_eq!(from_pssz::<Pssz8, Option<Option<u32>>>(&[1]).unwrap(), Some(None));
 }
 
 #[test]

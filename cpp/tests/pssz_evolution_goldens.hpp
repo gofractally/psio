@@ -6,10 +6,9 @@
 // These are wire bytes. A change here is a wire-format change: do not
 // regenerate to make a test pass.
 //
-// Entries that contain an optional whose payload is variable but can never be
-// empty (n1_some, p1_some_*, opt_new) pin the trunk's "selector for every
-// variable payload" rule; docs/pssz-spec.md 5.5 describes a minimum-size rule
-// that would drop that selector byte. See docs/pssz-optional-evolution.md.
+// Optional presence follows docs/pssz-spec.md 5.5: an optional whose payload
+// cannot be empty (n1_some: optional<record>, opt_new) has no selector byte;
+// one whose payload can be empty (strings, vectors, optional<u32>) has one.
 #include <array>
 #include <string_view>
 
@@ -70,9 +69,9 @@ namespace evo
         "06000700000006006869",
         "0800000007000000080000006869"}},
       {"n1_some",
-       {"0607000000060868690102030274",
-        "08000700000008000a00686901030003030074",
-        "0c000000070000000c0000000e00000068690105000000030500000074"}},
+       {"06070000000608686902030274",
+        "08000700000008000a006869030003030074",
+        "0c000000070000000c0000000e000000686905000000030500000074"}},
       {"p1_none",
        {"0507000000056869",
         "06000700000006006869",
@@ -90,9 +89,9 @@ namespace evo
         "040017000a00010000000a000b000f0061090000000162060002000000060063",
         "080000002300000010000000010000001000000011000000150000006109000000016208000000020000000800000063"}},
       {"opt_new",
-       {"01070100000007080c61090000000162",
-        "010a00010000000a000b000f0061090000000162",
-        "01100000000100000010000000110000001500000061090000000162"}},
+       {"070100000007080c61090000000162",
+        "0a00010000000a000b000f0061090000000162",
+        "100000000100000010000000110000001500000061090000000162"}},
       {"var_new",
        {"01070100000007080c61090000000162",
         "010a00010000000a000b000f0061090000000162",

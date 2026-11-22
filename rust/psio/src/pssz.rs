@@ -305,7 +305,7 @@ macro_rules! pssz_impl_primitive_le {
         impl<F: PsszFormat> PsszUnpack<F> for $ty {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
                 const S: usize = std::mem::size_of::<$ty>();
-                if bytes.len() < S { return Err(PsszError("pssz: primitive underrun")); }
+                if bytes.len() != S { return Err(PsszError("pssz: primitive span mismatch")); }
                 let mut buf = [0u8; S];
                 buf.copy_from_slice(&bytes[..S]);
                 Ok(<$ty>::from_le_bytes(buf))
@@ -331,7 +331,7 @@ impl<F: PsszFormat> PsszPack<F> for Uint256 {
 }
 impl<F: PsszFormat> PsszUnpack<F> for Uint256 {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        if bytes.len() < 32 { return Err(PsszError("pssz: uint256 underrun")); }
+        if bytes.len() != 32 { return Err(PsszError("pssz: uint256 span mismatch")); }
         let mut limb = [0u64; 4];
         for i in 0..4 {
             let mut buf = [0u8; 8];
@@ -354,7 +354,7 @@ impl<F: PsszFormat> PsszPack<F> for bool {
 }
 impl<F: PsszFormat> PsszUnpack<F> for bool {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        if bytes.is_empty() { return Err(PsszError("pssz: bool underrun")); }
+        if bytes.len() != 1 { return Err(PsszError("pssz: bool span mismatch")); }
         match bytes[0] {
             0 => Ok(false),
             1 => Ok(true),
@@ -444,7 +444,7 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for Bitvector<N> {
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for Bitvector<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
         let nb = (N + 7) / 8;
-        if bytes.len() < nb { return Err(PsszError("pssz: bitvector underrun")); }
+        if bytes.len() != nb { return Err(PsszError("pssz: bitvector span mismatch")); }
         Ok(Bitvector { bytes: bytes[..nb].to_vec() })
     }
 }
@@ -566,10 +566,16 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Vec<T> {
 }
 
 // ── Option<T> ───────────────────────────────────────────────────────────────
-// Needs Union selector iff inner type's MIN_ENCODED_SIZE == 0.
+// docs/pssz-spec.md 5.5: a selector byte iff the inner type's minimum
+// encoded size is 0 (it could encode to zero bytes). Otherwise None is zero
+// bytes and Some is the bare inner encoding.
+//
+// The option's own minimum follows from that: with a selector it is never
+// empty (1); without one its None is empty (0). So Option<Option<String>>
+// has no outer selector, and Option<Option<u32>> has one.
 
 impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Option<T> {
-    const MIN_ENCODED_SIZE: usize = 0;
+    const MIN_ENCODED_SIZE: usize = if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 };
     // Option max = (selector_byte iff inner min == 0) + max<T>.
     const MAX_ENCODED_SIZE: Option<usize> = match T::MAX_ENCODED_SIZE {
         Some(m) => Some((if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 }) + m),
@@ -701,8 +707,8 @@ macro_rules! pssz_validate_primitive {
     ($($ty:ty),* $(,)?) => {$(
         impl<F: PsszFormat> PsszValidate<F> for $ty {
             fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-                if bytes.len() < std::mem::size_of::<$ty>() {
-                    return Err(PsszError("pssz validate: primitive underrun"));
+                if bytes.len() != std::mem::size_of::<$ty>() {
+                    return Err(PsszError("pssz validate: primitive span mismatch"));
                 }
                 Ok(())
             }
@@ -713,7 +719,7 @@ pssz_validate_primitive!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, 
 
 impl<F: PsszFormat> PsszValidate<F> for bool {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        if bytes.is_empty() { return Err(PsszError("pssz validate: bool underrun")); }
+        if bytes.len() != 1 { return Err(PsszError("pssz validate: bool span mismatch")); }
         if bytes[0] > 1 { return Err(PsszError("pssz validate: invalid bool")); }
         Ok(())
     }
@@ -721,7 +727,7 @@ impl<F: PsszFormat> PsszValidate<F> for bool {
 
 impl<F: PsszFormat> PsszValidate<F> for Uint256 {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        if bytes.len() < 32 { return Err(PsszError("pssz validate: uint256 underrun")); }
+        if bytes.len() != 32 { return Err(PsszError("pssz validate: uint256 span mismatch")); }
         Ok(())
     }
 }
@@ -774,7 +780,7 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitvector<N> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
         let size = N.checked_add(7).ok_or(PsszError("pssz validate: bitvector size overflow"))? / 8;
-        if bytes.len() < size { return Err(PsszError("pssz validate: bitvector underrun")); }
+        if bytes.len() != size { return Err(PsszError("pssz validate: bitvector span mismatch")); }
         Ok(())
     }
 }

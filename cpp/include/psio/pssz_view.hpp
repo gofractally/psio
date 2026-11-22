@@ -12,12 +12,9 @@
 //   vector<variable T>  — [uW offset_0][uW offset_1]...[payload],
 //                         n = offset_0 / W (offsets are W bytes, not
 //                         u32 like SSZ).
-//   optional<nonzero fixed V> — span is either empty (None) or
-//                         fixed_size<V> bytes (Some). NO selector.
-//                         Length disambiguates.
-//   optional<zero-size fixed or variable V>
-//                       — [u8 selector][payload if selector == 1].
-//                         Same as SSZ.
+//   optional<V>, min(V) > 0  — empty span (None) or the bare encoding
+//                         of V (Some). NO selector; length disambiguates.
+//   optional<V>, min(V) == 0 — [u8 selector][payload if selector == 1].
 //   record              — [uW fixed-region size unless DWNC][fixed region]
 //                         [payloads]. The header is the writer's region
 //                         size: trailing optional fields may be absent
@@ -107,11 +104,10 @@ namespace psio::view_layout {
 
       // ── optional ───────────────────────────────────────────────────────
       //
-      // pssz splits on the payload's fixed/variable status, using the same
+      // pssz splits on the payload's minimum encoded size, using the same
       // predicate as the codec (pssz_impl::optional_uses_selector_v):
-      //   nonzero fixed V — no selector. Empty span = None; fixed_size<V>
-      //                 bytes = Some.
-      //   zero-size fixed or variable V — [u8 selector][payload if selector != 0].
+      //   min(V) > 0  — no selector. Empty span = None; otherwise Some.
+      //   min(V) == 0 — [u8 selector][payload if selector != 0].
       template <typename T>
       bool optional_has_value(std::span<const char> s) noexcept
       {

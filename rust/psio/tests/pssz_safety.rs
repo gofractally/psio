@@ -298,10 +298,14 @@ fn nested<F: PsszFormat>() {
     assert!(!view.list().get(0).flag().get());
     assert_eq!(view.note().unwrap().view(), "note");
     assert_eq!(view.final_value().get(), 72);
-    // Preserve the existing scalar prefix policy. Record walkers above supply
-    // exact child spans rather than relying on a primitive to trim its parent.
-    assert_eq!(from_pssz::<F, u16>(&[1, 0, 99]).unwrap(), 1);
-    assert!(pssz_validate::<F, u16>(&[1, 0, 99]).is_ok());
+    // Canonical encodings carry no trailing data: a bare scalar must occupy
+    // exactly its span. (This previously asserted a lenient prefix policy.)
+    assert!(from_pssz::<F, u16>(&[1, 0, 99]).is_err());
+    assert!(pssz_validate::<F, u16>(&[1, 0, 99]).is_err());
+    assert_eq!(from_pssz::<F, u16>(&[1, 0]).unwrap(), 1);
+    assert!(pssz_validate::<F, u16>(&[1, 0]).is_ok());
+    assert!(from_pssz::<F, bool>(&[1, 0]).is_err());
+    assert!(pssz_validate::<F, bool>(&[1, 0]).is_err());
     assert!(from_pssz::<F, Option<u16>>(&[1, 0, 99]).is_err());
     assert!(pssz_validate::<F, Option<u16>>(&[1, 0, 99]).is_err());
     assert!(try_pssz_view_of::<Option<u16>, F>(&[1, 0, 99]).is_err());

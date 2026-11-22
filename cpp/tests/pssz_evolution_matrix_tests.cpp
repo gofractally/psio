@@ -350,10 +350,8 @@ TEMPLATE_TEST_CASE("pssz rejects unpruned and malformed record frames",
       auto in_vector = Frame{W}.o(W).bytes;
       in_vector.insert(in_vector.end(), unpruned.begin(), unpruned.end());
       rejects<F, std::vector<R1>>(in_vector);
-      // optional<R1>: selector, then the record.
-      std::vector<char> in_optional{1};
-      in_optional.insert(in_optional.end(), unpruned.begin(), unpruned.end());
-      rejects<F, std::optional<R1>>(in_optional);
+      // optional<R1>: a record cannot be empty, so Some is the bare record.
+      rejects<F, std::optional<R1>>(unpruned);
       // variant<u32, R1>: alternative index, then the record.
       std::vector<char> in_variant{1};
       in_variant.insert(in_variant.end(), unpruned.begin(), unpruned.end());
@@ -553,6 +551,176 @@ TEMPLATE_TEST_CASE("pssz views read evolved records in both directions",
             .bytes;
       REQUIRE_FALSE(psio::validated_pssz_view<R1>(F{}, unpruned, refused, unknown).ok());
       REQUIRE_FALSE(refused.has_value());
+   }
+}
+
+// ── Optional presence and its interaction with pruning ───────────────────
+namespace evo_presence
+{
+   struct Unit  // zero-size DWNC record: can encode to zero bytes
+   {
+      friend bool operator==(const Unit&, const Unit&) = default;
+   };
+   PSIO_REFLECT(Unit)
+   struct Empty  // zero-field extensible record: always has its header
+   {
+      friend bool operator==(const Empty&, const Empty&) = default;
+   };
+   PSIO_REFLECT(Empty)
+   struct Pair  // DWNC with fields: fixed, nonzero
+   {
+      std::uint8_t x;
+      std::uint8_t y;
+      friend bool  operator==(const Pair&, const Pair&) = default;
+   };
+   PSIO_REFLECT(Pair, x, y)
+   struct Middle  // an optional record that is NOT the last field
+   {
+      std::uint32_t        a;
+      std::optional<Inner> in;
+      std::string          s;
+      friend bool          operator==(const Middle&, const Middle&) = default;
+   };
+   PSIO_REFLECT(Middle, a, in, s)
+   struct Tail  // trailing optionals of every presence class
+   {
+      std::uint32_t        a;
+      std::string          s;
+      std::optional<Unit>  unit;
+      std::optional<Empty> empty;
+      std::optional<Pair>  pair;
+      friend bool          operator==(const Tail&, const Tail&) = default;
+   };
+   PSIO_REFLECT(Tail, a, s, unit, empty, pair)
+}  // namespace evo_presence
+PSIO_TYPE_ATTRS(evo_presence::Unit, psio::definition_will_not_change{})
+PSIO_TYPE_ATTRS(evo_presence::Pair, psio::definition_will_not_change{})
+
+TEMPLATE_TEST_CASE("pssz optional presence follows the payload's minimum encoded size",
+                   "[pssz][evolution][optional]", EVO_FORMATS)
+{
+   using namespace evo_presence;
+   using F                 = TestType;
+   constexpr std::size_t W = width_of<F>::value;
+   // Empty has no unbounded field, so the automatic profile gives it its own
+   // (inferred, one-byte) header inside the four-byte records around it.
+   constexpr std::size_t EW =
+      std::is_same_v<F, psio::pssz> ? psio::auto_pssz_width_v<Empty> : W;
+   using Bytes             = std::vector<char>;
+   STATIC_REQUIRE(psio::auto_pssz_width_v<Middle> == 4);
+   STATIC_REQUIRE(psio::auto_pssz_width_v<Tail> == 4);
+
+   // min > 0: no selector. None is zero bytes, Some is the bare encoding.
+   REQUIRE(psio::encode(F{}, std::optional<Inner>{}).empty());
+   REQUIRE(psio::encode(F{}, std::optional<Inner>{Inner{3, "t"}}) ==
+           psio::encode(F{}, Inner{3, "t"}));
+   REQUIRE(psio::encode(F{}, std::optional<Empty>{}).empty());
+   REQUIRE(psio::encode(F{}, std::optional<Empty>{Empty{}}) == Bytes(EW, 0));  // header only
+   REQUIRE(psio::encode(F{}, std::optional<Pair>{}).empty());
+   REQUIRE(psio::encode(F{}, std::optional<Pair>{Pair{1, 2}}) == Bytes{1, 2});
+   REQUIRE(psio::encode(F{}, std::optional<std::uint32_t>{}).empty());
+   using Var = std::variant<std::uint8_t, std::string>;
+   REQUIRE(psio::encode(F{}, std::optional<Var>{}).empty());
+   REQUIRE(psio::encode(F{}, std::optional<Var>{Var{std::uint8_t{5}}}) == Bytes{0, 5});
+   using Tup = std::tuple<std::uint8_t>;
+   REQUIRE(psio::encode(F{}, std::optional<Tup>{}).empty());
+   REQUIRE(psio::encode(F{}, std::optional<psio::bitlist<8>>{}).empty());
+   REQUIRE(psio::encode(F{}, std::optional<psio::bitlist<8>>{psio::bitlist<8>{}}) == Bytes{1});
+   // min == 0: one selector byte.
+   REQUIRE(psio::encode(F{}, std::optional<Unit>{}) == Bytes{0});
+   REQUIRE(psio::encode(F{}, std::optional<Unit>{Unit{}}) == Bytes{1});
+   REQUIRE(psio::encode(F{}, std::optional<std::string>{}) == Bytes{0});
+   REQUIRE(psio::encode(F{}, std::optional<std::string>{std::string()}) == Bytes{1});
+   REQUIRE(psio::encode(F{}, std::optional<std::vector<Inner>>{}) == Bytes{0});
+   REQUIRE(psio::encode(F{}, std::optional<std::array<Unit, 3>>{}) == Bytes{0});
+   REQUIRE(psio::encode(F{}, std::optional<std::array<Unit, 3>>{std::array<Unit, 3>{}}) ==
+           Bytes{1});
+   // Nested optionals: the inner optional<u32> can be empty (selector on the
+   // outer one); the inner optional<string> always has its own selector byte
+   // (none on the outer one).
+   using OU = std::optional<std::optional<std::uint32_t>>;
+   REQUIRE(psio::encode(F{}, OU{}) == Bytes{0});
+   REQUIRE(psio::encode(F{}, OU{std::in_place, std::nullopt}) == Bytes{1});
+   using OS = std::optional<std::optional<std::string>>;
+   REQUIRE(psio::encode(F{}, OS{}).empty());
+   REQUIRE(psio::encode(F{}, OS{std::in_place, std::nullopt}) == Bytes{0});
+   REQUIRE(psio::encode(F{}, OS{std::in_place, std::string()}) == Bytes{1});
+   // Every form round-trips and validates; the wrong form is rejected.
+   reads<F, std::optional<Inner>>(Bytes{}, std::optional<Inner>{}, false);
+   reads<F, std::optional<Empty>>(Bytes(EW, 0), std::optional<Empty>{Empty{}}, false);
+   reads<F, std::optional<Pair>>(Bytes{1, 2}, std::optional<Pair>{Pair{1, 2}}, false);
+   reads<F, std::optional<Unit>>(Bytes{1}, std::optional<Unit>{Unit{}}, false);
+   reads<F, OS>(Bytes{0}, OS{std::in_place, std::nullopt}, false);
+   reads<F, OU>(Bytes{1}, OU{std::in_place, std::nullopt}, false);
+   rejects<F, std::optional<Pair>>(Bytes{1, 1, 2});  // selector form of a min>0 payload
+   rejects<F, std::optional<Pair>>(Bytes{0});
+   rejects<F, std::optional<Unit>>(Bytes{});         // min==0 payload needs its selector
+   rejects<F, std::optional<std::string>>(Bytes{});
+   {
+      auto selector_record = Bytes{1};
+      const auto record    = psio::encode(F{}, Inner{3, "t"});
+      selector_record.insert(selector_record.end(), record.begin(), record.end());
+      rejects<F, std::optional<Inner>>(selector_record);
+   }
+
+   // A None optional<record> that is not the last field keeps its slot and
+   // has a zero-length payload delimited by the next offset.
+   const std::size_t K = 4 + 2 * W;
+   const auto middle_none = Frame{W}.o(K).u32(7).o(K).o(K).raw("hi").bytes;
+   REQUIRE(psio::encode(F{}, Middle{7, std::nullopt, "hi"}) == middle_none);
+   reads<F, Middle>(middle_none, Middle{7, std::nullopt, "hi"}, false);
+   auto middle_some = Frame{W}.o(K).u32(7).o(K).o(K + 2 * W + 2).o(1 + W).byte(3).o(1 + W)
+                         .raw("t").raw("hi").bytes;
+   REQUIRE(psio::encode(F{}, Middle{7, Inner{3, "t"}, "hi"}) == middle_some);
+   reads<F, Middle>(middle_some, Middle{7, Inner{3, "t"}, "hi"}, false);
+   {
+      auto view = view_of<Middle, F>(middle_none);
+      REQUIRE_FALSE(view.template get<1>().has_value());
+      REQUIRE(view.template get<2>().view_() == "hi");
+      auto some_view = view_of<Middle, F>(middle_some);
+      REQUIRE(some_view.template get<1>().has_value());
+      REQUIRE((*some_view.template get<1>()).template get<1>().view_() == "t");
+      REQUIRE(some_view.template get<2>().view_() == "hi");
+   }
+
+   // Trailing optionals of each presence class are pruned when None,
+   // whatever form their None would otherwise take.
+   const std::size_t K0 = 4 + W;
+   const auto base = Frame{W}.o(K0).u32(7).o(K0).raw("hi").bytes;
+   REQUIRE(psio::encode(F{}, Tail{7, "hi", std::nullopt, std::nullopt, std::nullopt}) == base);
+   reads<F, Tail>(base, Tail{7, "hi", std::nullopt, std::nullopt, std::nullopt}, false);
+   // Some(Unit) is one selector byte and keeps its slot.
+   const std::size_t K1 = K0 + W;
+   const auto with_unit = Frame{W}.o(K1).u32(7).o(K1).o(K1 + 2).raw("hi").byte(1).bytes;
+   REQUIRE(psio::encode(F{}, Tail{7, "hi", Unit{}, std::nullopt, std::nullopt}) == with_unit);
+   reads<F, Tail>(with_unit, Tail{7, "hi", Unit{}, std::nullopt, std::nullopt}, false);
+   // Stored None: `00` for the selector form, an empty span for the others.
+   rejects<F, Tail>(Frame{W}.o(K1).u32(7).o(K1).o(K1 + 2).raw("hi").byte(0).bytes);
+   const std::size_t K2 = K1 + W;
+   rejects<F, Tail>(Frame{W}.o(K2).u32(7).o(K2).o(K2 + 2).o(K2 + 3).raw("hi").byte(1).bytes);
+   // Some(Empty) is the bare header; the unit before it is a stored `00`
+   // because it is no longer trailing.
+   auto with_empty = Frame{W}.o(K2).u32(7).o(K2).o(K2 + 2).o(K2 + 3).raw("hi").byte(0).bytes;
+   with_empty.insert(with_empty.end(), EW, 0);
+   REQUIRE(psio::encode(F{}, Tail{7, "hi", std::nullopt, Empty{}, std::nullopt}) == with_empty);
+   reads<F, Tail>(with_empty, Tail{7, "hi", std::nullopt, Empty{}, std::nullopt}, false);
+   const std::size_t K3 = K2 + W;
+   const auto with_pair = Frame{W}.o(K3).u32(7).o(K3).o(K3 + 2).o(K3 + 3).o(K3 + 3)
+                             .raw("hi").byte(0).byte(1).byte(2).bytes;
+   REQUIRE(psio::encode(F{}, Tail{7, "hi", std::nullopt, std::nullopt, Pair{1, 2}}) == with_pair);
+   reads<F, Tail>(with_pair, Tail{7, "hi", std::nullopt, std::nullopt, Pair{1, 2}}, false);
+   reads<F, R0>(with_pair, R0{7, "hi"}, true);
+   {
+      auto view = view_of<Tail, F>(base);
+      REQUIRE_FALSE(view.template get<2>().has_value());
+      REQUIRE_FALSE(view.template get<3>().has_value());
+      REQUIRE_FALSE(view.template get<4>().has_value());
+      auto pair_view = view_of<Tail, F>(with_pair);
+      REQUIRE_FALSE(pair_view.template get<2>().has_value());
+      REQUIRE_FALSE(pair_view.template get<3>().has_value());
+      REQUIRE(pair_view.template get<4>().has_value());
+      auto unit_view = view_of<Tail, F>(with_unit);
+      REQUIRE(unit_view.template get<2>().has_value());
    }
 }
 

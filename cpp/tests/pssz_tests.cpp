@@ -373,3 +373,69 @@ TEMPLATE_TEST_CASE("pssz records evolve through trailing optional fields",
    REQUIRE_THROWS_AS(psio::validate_or_throw<PssEvoV2>(F{}, unpruned), psio::codec_exception);
    REQUIRE_THROWS_AS(psio::decode<PssEvoV2>(F{}, unpruned), psio::codec_exception);
 }
+
+// ── Canonical encodings carry no trailing data ──────────────────────────────
+struct PssFixedPair
+{
+   std::uint16_t x;
+   std::uint8_t  y;
+};
+PSIO_REFLECT(PssFixedPair, x, y)
+PSIO_TYPE_ATTRS(PssFixedPair, psio::definition_will_not_change{})
+
+template <typename T, typename F>
+void pss_exact(const std::vector<char>& exact)
+{
+   REQUIRE(psio::validate<T>(F{}, exact).ok());
+   REQUIRE(psio::validate_strict<T>(F{}, exact).ok());
+   REQUIRE_NOTHROW(psio::validate_or_throw<T>(F{}, exact));
+   REQUIRE_NOTHROW(psio::decode<T>(F{}, exact));
+   auto longer = exact;
+   longer.push_back(0);
+   REQUIRE_FALSE(psio::validate<T>(F{}, longer).ok());
+   REQUIRE_FALSE(psio::validate_strict<T>(F{}, longer).ok());
+   REQUIRE_THROWS_AS(psio::validate_or_throw<T>(F{}, longer), psio::codec_exception);
+   REQUIRE_THROWS_AS(psio::decode<T>(F{}, longer), psio::codec_exception);
+   bool unknown = false;
+   REQUIRE_FALSE(psio::validate_pssz_compatible<T>(F{}, longer, unknown).ok());
+   if (!exact.empty())
+   {
+      auto shorter = exact;
+      shorter.pop_back();
+      REQUIRE_FALSE(psio::validate<T>(F{}, shorter).ok());
+      REQUIRE_THROWS_AS(psio::decode<T>(F{}, shorter), psio::codec_exception);
+   }
+}
+
+TEMPLATE_TEST_CASE("pssz rejects input longer than a fixed-size value",
+                   "[pssz][canonical]", psio::pssz8, psio::pssz16, psio::pssz32, psio::pssz)
+{
+   using F = TestType;
+   pss_exact<std::uint8_t, F>({7});
+   pss_exact<std::uint16_t, F>({1, 0});
+   pss_exact<std::uint32_t, F>({1, 0, 0, 0});
+   pss_exact<std::int64_t, F>({1, 0, 0, 0, 0, 0, 0, 0});
+   pss_exact<bool, F>({1});
+   pss_exact<double, F>({0, 0, 0, 0, 0, 0, 0, 0});
+   pss_exact<std::array<std::uint16_t, 2>, F>({1, 0, 2, 0});
+   pss_exact<psio::bitvector<9>, F>({1, 1});
+   pss_exact<PssFixedPair, F>({1, 0, 2});
+   pss_exact<PssUnit, F>({});
+   pss_exact<std::optional<std::uint32_t>, F>({1, 0, 0, 0});
+   // A vector of fixed elements must be a whole number of elements.
+   REQUIRE_FALSE(psio::validate<std::vector<std::uint32_t>>(F{}, std::vector<char>(5, 0)).ok());
+   REQUIRE_THROWS_AS(psio::decode<std::vector<std::uint32_t>>(F{}, std::vector<char>(5, 0)),
+                     psio::codec_exception);
+   // A record with no variable field owns exactly its fixed region.
+   auto empty = psio::encode(F{}, PssEmpty{});
+   empty.push_back(0);
+   REQUIRE_FALSE(psio::validate<PssEmpty>(F{}, empty).ok());
+   REQUIRE_THROWS_AS(psio::decode<PssEmpty>(F{}, empty), psio::codec_exception);
+   // Optional selectors: None carries nothing else, and only 0/1 exist.
+   using OS = std::optional<std::string>;
+   for (const auto& bad : std::vector<std::vector<char>>{{}, {0, 0}, {2}, {2, 'a'}})
+   {
+      REQUIRE_FALSE(psio::validate<OS>(F{}, bad).ok());
+      REQUIRE_THROWS_AS(psio::decode<OS>(F{}, bad), psio::codec_exception);
+   }
+}
