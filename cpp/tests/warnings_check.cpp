@@ -219,7 +219,58 @@ namespace warnings_check
    }
 }  // namespace warnings_check
 
+// The method surface of reflect<T>, for a type with methods and one
+// without, and the proxy.
+namespace warnings_check_methods
+{
+   struct service
+   {
+      std::uint32_t   add(std::uint32_t x, const std::string& tag) const { return x + tag.size(); }
+      static unsigned version() { return 1; }
+   };
+   PSIO_REFLECT(service, method(add, x, tag), method(version))
+
+   template <typename T>
+   struct dispatcher
+   {
+      template <std::size_t I, auto MemberPtr, typename... Args>
+      std::size_t call(Args&&...)
+      {
+         return psio::reflect<T>::template method_name<I>.size() + sizeof...(Args) +
+                psio::method_traits<decltype(MemberPtr)>::arity;
+      }
+   };
+
+   template <typename T>
+   std::size_t walk()
+   {
+      using R       = psio::reflect<T>;
+      std::size_t n = R::method_count + R::method_names.size();
+      R::for_each_method([&](auto index, std::string_view name) {
+         constexpr std::size_t I = decltype(index)::value;
+         n += name.size() + R::template method_param_names<I>.size() +
+              std::tuple_size_v<typename R::template method_params<I>> +
+              std::tuple_size_v<typename R::template method_args<I>> +
+              R::template method_traits<I>::arity + R::template method_is_static<I> +
+              R::template method_is_const<I> + R::template method_name<I>.size() +
+              !std::is_void_v<typename R::template method_result<I>> +
+              (R::template method_pointer<I> != nullptr) + R::find_method_index(name);
+      });
+      return n + R::index_of_method("add").value_or(0);
+   }
+
+   bool exercise()
+   {
+      service object;
+      psio::reflect<service>::proxy<dispatcher<service>> api;
+      static_assert(std::is_same_v<psio::proxied_class<0, &service::add>, service>);
+      return walk<warnings_check::everything>() == 0 && walk<service>() != 0 &&
+             api.add(1u, std::string{"x"}) == 7 && api.version() == 7 &&
+             psio::reflect<service>::invoke_method<0>(object, std::tuple{1u, std::string{"ab"}}) == 3;
+   }
+}  // namespace warnings_check_methods
+
 int main()
 {
-   return warnings_check::exercise() ? 0 : 1;
+   return warnings_check::exercise() && warnings_check_methods::exercise() ? 0 : 1;
 }

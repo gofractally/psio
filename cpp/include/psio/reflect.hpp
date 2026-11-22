@@ -34,8 +34,24 @@
 //   psio::reflect<T>::index_of_method(name)          name → index (optional)
 //   psio::reflect<T>::find_method_index(name)        name → index, method_count if absent
 //   psio::reflect<T>::index_of_method_hash<Hash>(key)  Hash{}(name) == key → index
-//   psio::reflect<T>::for_each_method(fn)            fn(integral_constant<I>, name, pointer)
+//   psio::reflect<T>::for_each_method(fn)            fn(integral_constant<I>, name)
 //   psio::reflect<T>::invoke_method<I>(obj, tuple)   call method I with a tuple of arguments
+//
+// Every reflected type has every member above, a type that lists no method
+// included (method_count == 0, for_each_method calls nothing): generic code
+// may name `reflect<T>::method_param_names<I>` and the rest for any reflected
+// T. Using one with an index that is not below method_count is a compile
+// error ("method index out of range").
+//
+// Metadata does not need the methods' definitions. Only `method_pointer<I>`
+// and `invoke_method<I>` refer to the functions themselves; the count, the
+// names, the parameter names, `method_type<I>` and what is derived from it
+// (traits, result, args, params, is_static, is_const), the lookups and
+// `for_each_method` are computed from the declarations alone. Code that
+// describes a type (its schema, its call encoding) therefore links without
+// the type's implementation: inside a `for_each_method` callback, name
+// `reflect<T>::method_type<I>` and its siblings, and `method_pointer<I>` only
+// where the function is really called.
 //
 // The proxy:
 //
@@ -51,6 +67,32 @@
 //                                dispatcher defines
 //                                  template <std::size_t I, auto MemberPtr, typename... Args>
 //                                  auto call(Args&&... args);
+//
+// Arguments of a proxied call are forwarded as given: `Args&&...` are
+// forwarding references, so `call` sees an lvalue argument as `A&` and an
+// rvalue as `A`, and nothing is copied or moved on the way. There is no
+// by-value mode. A dispatcher that wants owned or decayed types (to pick an
+// encoding by `std::decay_t<Args>`, or to keep the arguments beyond the call)
+// decays them itself.
+//
+// The reflected type of a proxied call. `call` is told the index and the
+// member pointer, not T. `MemberPtr` is `&T::name` as the language types it:
+// for a method T inherits it is `R (Base::*)(...)`, and for a static method a
+// plain function pointer, so the class recovered from the pointer's type is
+// the base (in whose reflection index I means something else, or nothing) or
+// no class at all. A dispatcher that needs T takes it as its own template
+// parameter — whoever writes `reflect<T>::proxy<P>` knows T:
+//
+//     template <typename T> struct recorder {
+//        template <std::size_t I, auto MemberPtr, typename... Args>
+//        void call(Args&&...) { use(psio::reflect<T>::template method_name<I>); }
+//     };
+//     psio::reflect<token>::proxy<recorder<token>> p;
+//
+// A dispatcher that recovers the class from the pointer all the same does it
+// with `psio::proxied_class<I, MemberPtr>`, which is that class when the
+// pointer is method I of its reflection and a compile error otherwise (an
+// inherited or a static method).
 //
 // Population: `PSIO_REFLECT(Type, item...)` — at namespace scope right after
 // the type (in any namespace, with an unqualified type name), or inside the
@@ -121,6 +163,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <optional>
 #include <string_view>
 #include <tuple>
@@ -239,6 +282,39 @@ namespace psio {
    struct method_traits<R (C::*)(Args...) const noexcept> : method_traits<R (C::*)(Args...) const> {};
 
    namespace detail {
+      template <typename C, std::size_t I, auto MemberPtr>
+      concept method_of_reflection =
+         requires { requires reflect<C>::is_reflected; } &&
+         requires { requires I < reflect<C>::method_count; } &&
+         requires {
+            requires std::is_same_v<typename reflect<C>::template method_type<I>,
+                                    decltype(MemberPtr)>;
+         } && requires { requires reflect<C>::template method_pointer<I> == MemberPtr; };
+
+      template <std::size_t I, auto MemberPtr>
+      struct proxied_class_of
+      {
+         using type = typename method_traits<decltype(MemberPtr)>::class_type;
+         static_assert(!std::is_void_v<type>,
+                       "psio::proxied_class: a static method's pointer names no class; give "
+                       "the dispatcher the reflected type as a template parameter");
+         static_assert(method_of_reflection<type, I, MemberPtr>,
+                       "psio::proxied_class: the member pointer is not method I of the "
+                       "reflection of its class (a method the reflected type inherits has "
+                       "its base's class); give the dispatcher the reflected type as a "
+                       "template parameter");
+      };
+   }
+
+   // The reflected type of a proxied call `call<I, MemberPtr>`, recovered
+   // from the member pointer: its class, checked to be the type whose
+   // reflection has MemberPtr as method I. A method the reflected type
+   // inherits, and a static method, do not compile (see "The reflected type
+   // of a proxied call" at the top of this file).
+   template <std::size_t I, auto MemberPtr>
+   using proxied_class = typename detail::proxied_class_of<I, MemberPtr>::type;
+
+   namespace detail {
       // Holder::method_names as name_lookup.hpp's tables want it.
       template <typename Holder>
       struct method_names_holder
@@ -246,9 +322,23 @@ namespace psio {
          static constexpr auto& _names_array_ = Holder::method_names;
       };
 
+// Every per-index method member reports an index that is not a method with
+// this text (a type that lists no method has the members and no index).
+#define PSIO_REFLECT_METHOD_INDEX_MSG_                                              \
+   "psio: method index out of range: psio::reflect<T> has no method with this "    \
+   "index (a type that lists no method(...) has no method index at all)"
+
+      template <typename Holder, std::size_t I>
+      constexpr std::string_view method_name_at() noexcept
+      {
+         static_assert(I < Holder::method_count, PSIO_REFLECT_METHOD_INDEX_MSG_);
+         return Holder::method_names[I];
+      }
+
       template <typename Holder, std::size_t I>
       constexpr auto method_param_name_array() noexcept
       {
+         static_assert(I < Holder::method_count, PSIO_REFLECT_METHOD_INDEX_MSG_);
          constexpr auto& list = Holder::method_param_name_lists[I];
          std::array<std::string_view, list.size()> out{};
          std::size_t                                 at = 0;
@@ -257,11 +347,19 @@ namespace psio {
          return out;
       }
 
+      // The walk hands out the index and the name only. The member pointer
+      // is not passed: as a function argument it would be an odr-use of every
+      // reflected method, and a caller that only describes the type would
+      // need all their definitions at link time.
       template <typename Holder, typename F, std::size_t... Is>
       constexpr void for_each_method_impl(F&& fn, std::index_sequence<Is...>)
       {
-         (std::invoke(fn, std::integral_constant<std::size_t, Is>{}, Holder::method_names[Is],
-                      Holder::template method_pointer<Is>),
+         static_assert(
+            (std::is_invocable_v<F&, std::integral_constant<std::size_t, Is>, std::string_view> &&
+             ...),
+            "psio: for_each_method calls fn(std::integral_constant<std::size_t, I>, name); "
+            "the pointer to method I is psio::reflect<T>::method_pointer<I>");
+         (std::invoke(fn, std::integral_constant<std::size_t, Is>{}, Holder::method_names[Is]),
           ...);
       }
 
@@ -338,7 +436,9 @@ namespace psio {
    decltype(auto) FIELD() const { return this->psio_get_proxy().template get<I, &psio_T_::FIELD>(); }
 
 // A method forwards to Projection::call<I, &T::method>(args...): the index and
-// the member pointer are template VALUE arguments.
+// the member pointer are template VALUE arguments (naming the method as a
+// template argument does not require its definition), and the arguments are
+// forwarding references, passed on as given.
 #define PSIO_REFLECT_PROXY_METHOD_(r, _, I, kt) \
    template <typename... psio_A_> \
    decltype(auto) BOOST_PP_TUPLE_ELEM(1, kt)(psio_A_&&... psio_a_) { \
@@ -414,6 +514,14 @@ namespace psio {
 // Each per-method helper takes (r, data, I, kt), kt = (method, NAME, params...).
 #define PSIO_REFLECT_METHOD_POINTER_CASE_(r, _, I, kt) \
    if constexpr (Idx == (I)) return &psio_T_::BOOST_PP_TUPLE_ELEM(1, kt);
+
+// The type of &T::method, taken in an unevaluated operand: knowing a
+// method's type does not odr-use the method.
+#define PSIO_REFLECT_METHOD_TYPE_CASE_(r, _, I, kt)                                 \
+   if constexpr (Idx == (I))                                                         \
+      return ::std::type_identity<decltype(&psio_T_::BOOST_PP_TUPLE_ELEM(1, kt))>{};
+
+#define PSIO_REFLECT_METHOD_COUNT_ONE_(r, _, I, kt) +1
 
 #define PSIO_REFLECT_METHOD_NAME_ELEM_(r, _, I, kt) \
    BOOST_PP_COMMA_IF(I) ::std::string_view(BOOST_PP_STRINGIZE(BOOST_PP_TUPLE_ELEM(1, kt)))
@@ -853,63 +961,45 @@ namespace psio {
          BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_FOR_EACH_CASE_, _, SEQ)                   \
       }
 
-// Method metadata for a type that lists no method(...).
-#define PSIO_REFLECT_METHODS_EMPTY_(SEQ)                                               \
-      static constexpr ::std::size_t method_count = 0;                                 \
-      static constexpr ::std::array<::std::string_view, 0> method_names{};             \
-      template <::std::size_t Idx>                                                    \
-      using method_type = typename ::psio::detail::empty_reflected_member<Idx>::type; \
-      template <::std::size_t Idx>                                                    \
-      static constexpr auto method_pointer                                           \
-         = ::psio::detail::empty_reflected_member<Idx>::pointer;                       \
-      template <::std::size_t Idx>                                                    \
-      static constexpr ::std::string_view method_name                                 \
-         = ::psio::detail::empty_reflected_member<Idx>::name;                          \
-      static constexpr ::std::size_t find_method_index(::std::string_view) noexcept   \
-      {                                                                                \
-         return 0;                                                                     \
-      }                                                                                \
-      static constexpr ::std::optional<::std::size_t>                                  \
-      index_of_method(::std::string_view) noexcept                                     \
-      {                                                                                \
-         return ::std::nullopt;                                                        \
-      }                                                                                \
-      template <typename Hash>                                                         \
-      static constexpr ::std::optional<::std::size_t>                                  \
-      index_of_method_hash(::std::uint64_t) noexcept                                   \
-      {                                                                                \
-         return ::std::nullopt;                                                        \
-      }                                                                                \
-      template <typename F>                                                            \
-      static constexpr void for_each_method(F&&)                                       \
-      {                                                                                \
-      }
-
+// Method metadata. ONE definition for every reflected type: SEQ is empty for
+// a type that lists no method(...), and then every member below still exists
+// with the same name and kind (method_count is 0, the walk calls nothing, no
+// index is valid).
 #define PSIO_REFLECT_METHODS_(SEQ)                                                      \
-      static constexpr ::std::size_t method_count = BOOST_PP_SEQ_SIZE(SEQ);              \
+      static constexpr ::std::size_t method_count                                        \
+         = 0 PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_METHOD_COUNT_ONE_, _, SEQ);            \
                                                                                          \
+      template <::std::size_t Idx>                                                       \
+      static constexpr auto _method_type_impl_() noexcept                                \
+      {                                                                                  \
+         static_assert(Idx < method_count, PSIO_REFLECT_METHOD_INDEX_MSG_);              \
+         PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_METHOD_TYPE_CASE_, _, SEQ)                 \
+      }                                                                                  \
       template <::std::size_t Idx>                                                       \
       static constexpr auto _method_pointer_impl_() noexcept                             \
       {                                                                                  \
-         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_METHOD_POINTER_CASE_, _, SEQ)             \
+         static_assert(Idx < method_count, PSIO_REFLECT_METHOD_INDEX_MSG_);              \
+         PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_METHOD_POINTER_CASE_, _, SEQ)              \
       }                                                                                  \
-      /* &T::method — a member function pointer, or a function pointer for a */          \
-      /* static member.                                                      */          \
+      /* The type of &T::method — a member function pointer, or a function */            \
+      /* pointer for a static member. Does not need the method's definition. */          \
       template <::std::size_t Idx>                                                       \
-      static constexpr auto method_pointer = _method_pointer_impl_<Idx>();               \
+      using method_type = typename decltype(_method_type_impl_<Idx>())::type;            \
+      /* &T::method itself: the one metadata member that refers to the function. */      \
       template <::std::size_t Idx>                                                       \
-      using method_type = decltype(_method_pointer_impl_<Idx>());                        \
+      static constexpr method_type<Idx> method_pointer = _method_pointer_impl_<Idx>();   \
                                                                                          \
       static constexpr ::std::array<::std::string_view, method_count> method_names       \
-         = {BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_METHOD_NAME_ELEM_, _, SEQ)};            \
+         = {PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_METHOD_NAME_ELEM_, _, SEQ)};            \
       template <::std::size_t Idx>                                                       \
-      static constexpr ::std::string_view method_name = method_names[Idx];               \
+      static constexpr ::std::string_view method_name                                    \
+         = ::psio::detail::method_name_at<_psio_self_, Idx>();                           \
                                                                                          \
       /* Parameter names as written in method(name, p1, p2, ...); may be */              \
       /* fewer than the method's parameters (names are optional).        */              \
-      static constexpr ::std::initializer_list<const char*>                              \
-         method_param_name_lists[method_count] = {                                       \
-            BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_METHOD_PARAM_LIST_, _, SEQ)};           \
+      static constexpr ::std::array<::std::initializer_list<const char*>, method_count>  \
+         method_param_name_lists = {                                                     \
+            PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_METHOD_PARAM_LIST_, _, SEQ)};           \
       template <::std::size_t Idx>                                                       \
       static constexpr auto method_param_names                                           \
          = ::psio::detail::method_param_name_array<_psio_self_, Idx>();                  \
@@ -951,7 +1041,9 @@ namespace psio {
          if (i_ == method_count) return ::std::nullopt;                                  \
          return i_;                                                                      \
       }                                                                                  \
-      /* fn(std::integral_constant<std::size_t, I>, name, &T::method) per method. */     \
+      /* fn(std::integral_constant<std::size_t, I>, name) per method, in order. */       \
+      /* The callback names method_type<I>, method_param_names<I>, ... for the */        \
+      /* rest, and method_pointer<I> only if it calls the method.              */        \
       template <typename F>                                                              \
       static constexpr void for_each_method(F&& fn)                                      \
       {                                                                                  \
@@ -982,8 +1074,7 @@ namespace psio {
       static constexpr ::std::string_view name         = BOOST_PP_STRINGIZE(TYPE);       \
       BOOST_PP_IIF(BOOST_PP_CHECK_EMPTY(FSEQ), PSIO_REFLECT_FIELDS_EMPTY_,               \
                    PSIO_REFLECT_FIELDS_)(FSEQ)                                           \
-      BOOST_PP_IIF(BOOST_PP_CHECK_EMPTY(MSEQ), PSIO_REFLECT_METHODS_EMPTY_,              \
-                   PSIO_REFLECT_METHODS_)(MSEQ)                                          \
+      PSIO_REFLECT_METHODS_(MSEQ)                                                        \
       PSIO_REFLECT_MEMBER_ANN_(FKSEQ)                                                    \
       PSIO_REFLECT_TYPE_ANN_(TYPE, KIND_SEQ)                                             \
       static_assert(::psio::detail::reflected_names_distinct(_names_array_, method_names), \
