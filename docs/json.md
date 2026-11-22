@@ -616,12 +616,20 @@ A consumer that has only a Schema IR (`schema_ir.hpp`, Rust
 `psio::pssz::schema_ir`) — a CLI, an HTTP "pack this action" endpoint, an
 indexer — converts and validates with:
 
-| | C++ (`psio/pssz_ir_json.hpp`, namespace `psio::pssz_ir`) | Rust (`psio::pssz::dynamic`) |
-|---|---|---|
-| text → PSSZ | `json_to_pssz(schema, root, psio::ijson{}, text, bytes)` | `json_to_pssz::<IJson>(&schema, &root, text)` |
-| PSSZ → text | `pssz_to_json(schema, root, psio::ijson{}, bytes, text, &has_unknown)` | `pssz_to_json::<IJson>(&schema, &root, bytes)` |
-| validate PSSZ | `validate_pssz(schema, root, bytes, &has_unknown)` | `validate_pssz(&schema, &root, bytes)` |
-| ... leaving nested bytes unexamined | `validate_pssz(schema, root, bytes, &has_unknown, nullptr, nested_bytes::opaque)` (the registry, then the option) | |
+| | C++ (`psio/pssz_ir_json.hpp`, namespace `psio::pssz_ir`) | Rust (`psio::pssz::dynamic`) | JS (`PsszSchema`) |
+|---|---|---|---|
+| text → PSSZ | `json_to_pssz(schema, root, psio::ijson{}, text, bytes)` | `json_to_pssz::<IJson>(&schema, &root, text)` | `schema.type(root).jsonToPssz(text, 'ijson')` |
+| PSSZ → text | `pssz_to_json(schema, root, psio::ijson{}, bytes, text, &has_unknown)` | `pssz_to_json::<IJson>(&schema, &root, bytes)` | `schema.type(root).psszToJson(bytes, 'ijson')` |
+| validate PSSZ | `validate_pssz(schema, root, bytes, &has_unknown)` | `validate_pssz(&schema, &root, bytes)` | `schema.type(root).validate(bytes)` |
+| ... with a handler registry ("Custom types through a schema" below) | a trailing `const CustomHandlers*` on every entry point: `validate_pssz(schema, root, bytes, &has_unknown, &handlers)`, `pssz_to_json(..., &has_unknown, &handlers)`, `json_to_pssz(..., names, parser, &handlers)`, `decode_auto` / `encode_auto(..., &handlers)` | the `_with` forms: `validate_pssz_with(&schema, &root, bytes, &handlers)`, `pssz_to_json_with`, `json_to_pssz_with`, `json_to_value_with`, `value_to_json_with`; binary: `encode_with` / `decode_exact_with` / `decode_compatible_with` / `validate_with` / `to_key_with(..., Options::handlers(&handlers))` | bound to the schema: `PsszSchema.decode(irBytes, { handlers, requireHandlers })`, `schema.withHandlers(handlers, { requireHandlers })`, or per type `schema.type(root, { handlers })`; every method of the type then uses them |
+| ... leaving nested bytes unexamined | `validate_pssz(schema, root, bytes, &has_unknown, nullptr, nested_bytes::opaque)` (the registry, then the option; the same trailing pair on `decode_auto` / `encode_auto`) | `validate_with(&schema, &root, bytes, Options::opaque_nested())`, or `Options { handlers: Some(&h), nested: NestedBytes::Opaque }` on any `_with` binary entry point | `schema.type(root, { nestedBytes: 'opaque' })` (or the same option on the schema) |
+
+With nested bytes opaque the dynamic value of a `Nested` node is its bytes
+(C++ `Bytes`, Rust `Value::Bytes`, JS `Uint8Array`) instead of the inner
+value, read and written as they are: the behaviour of a typed
+`nested<T, deferred>` member, and what a forwarder that must keep foreign
+bytes exactly uses. The option exists on the binary entry points; the text
+entry points always open a nested value (its text is the inner value's).
 
 The C++ text reader runs on the same syntax layers as the typed readers
 (trailing `json_parser` argument; the default is the same automatic choice).
@@ -752,8 +760,8 @@ it does, so a transparent string with an invariant keys an object with or
 without its handler. A custom presentation with no handler falls back,
 as everywhere, to the plain form of its wire type — and the map's form
 follows it: an account-keyed map is `{"alice":5}` with the account handler
-and `[[235814801429757952,5]]` without. A strict registry
-(`require_all`) makes the missing handler an error instead.
+and `[[235814801429757952,5]]` without. A strict registry makes the
+missing handler an error instead.
 
 Malformed schemas, refused by every schema-driven entry point in every
 language (`schema_rejects` rows of the JSON fixture): `map` anywhere but
@@ -774,29 +782,42 @@ registry. `time-point` / `duration` / `monotonic`, alone or followed by
 anything but an 8/16/32/64-bit integer, is a malformed schema.
 
 What an id adds is code, which a schema cannot carry. The schema-driven
-codecs — the text conversions **and** the binary entry points
-(`validate_pssz`, `decode_auto`, `encode_auto`, the explicit-width forms) —
-take a **handler registry**: id → handler. A handler has up to three
-functions over the PSSZ bytes of the wire type (automatic profile), each
+codecs — the text conversions **and** the binary entry points (validate,
+decode, encode, the explicit-width forms, the key encoding) — take a
+**handler registry**: id → handler. A handler has up to three parts, each
 optional:
 
-| function | role |
+| part | role |
 |---|---|
-| `to_text(pssz) -> text`, `from_text(text) -> pssz` | the text form. The text is carried as ONE JSON string in both formats, the rule of a typed text adapter. Without them the type's text is its wire type's |
-| `check(pssz) -> status` | the invariant: whether structurally valid bytes of the wire type are a value of the type |
+| `to_text` / `from_text` (JS `toText` / `fromText`) | the text form, between a value of the wire type and its text. The text is carried as ONE JSON string in both formats, the rule of a typed text adapter. Without them the type's text is its wire type's |
+| `check` | the invariant: whether a structurally valid value of the wire type is a value of the type |
+
+In C++ and Rust a handler works on the **PSSZ bytes of the wire type**
+(automatic profile: the bytes of the typed codec); in JS on the **decoded JS
+value** of the wire type.
 
 With the registry, `check` runs on **every** value of a custom node that
-has one: on reads after the value's structure (and its text) is accepted,
-on writes before any byte or text is returned; nested values first, and a
-value under several ids innermost first. Its status is passed through
-unchanged. Text that a handler's `from_text` refuses is "json: text is not
-a value of the custom type".
+has one, on the binary and the text entry points alike: on reads after the
+value's structure (and its text) is accepted, on writes before any byte or
+text is returned; nested values first — the bytes of a `Nested` node
+included, unless they are opaque — and a value under several ids innermost
+first. Its status (JS: its message) is passed through unchanged. Text that
+a handler's `from_text` refuses is "json: text is not a value of the custom
+type".
+
+A registry is **strict** when it requires a handler for every custom node
+(C++ `require_all = true`, Rust `set_strict(true)`, JS
+`requireHandlers: true`): a custom node with no handler is then an error,
+"no handler registered for a custom type", **on the binary entry points
+too**, not only where text is produced. The ids PSIO gives a meaning itself
+(the binary-form ids, `box`, the time ids) take no handler and are not
+subject to it.
 
 | | emits the node | registers a handler |
 |---|---|---|
-| C++ | `SchemaBuilder`, for any type with a `text_category` adapter and / or an invariant (`psio::schema_custom_v<T>`). Id (`psio::schema_custom_id<T>()`): the adapter's `static constexpr std::string_view schema_id`, else the id given to `PSIO_INVARIANT`, else the reflected record or enum name. A type with none of these (a `std::variant`, a `std::tuple`) must provide one: a compile error otherwise. An adapter that is not the type's schema presentation says `static constexpr bool schema_custom = false` (the `0x` text of the integers wider than 64 bits). | `psio::pssz_ir::CustomHandlers h; h.add<AccountNumber>();` — `to_text` / `from_text` from the type's text adapter if it has one, `check` from its invariant if it has one (the typed `validate<T>(psio::pssz{}, bytes)`) — or by hand: `h.add("Id", {to_text, from_text})`, `h.add("Id", {.check = fn})`. Passed as the trailing argument of every schema-driven entry point, or bound once per schema with `JsonNames names(schema, h)`. |
-| Rust | `ToPsszSchema` derive with `#[pssz(custom)]` (id: the type name) or `#[pssz(custom = "AccountName")]`; with `#[pssz(transparent)]` the wire type is the inner field's. | `let mut h = psio::pssz::dynamic::CustomHandlers::new(); h.add_type::<Account>()?;` (the type's own `TextForm`), `h.add_type_as::<T>("Id")`, or `h.add("Id", to_text, from_text)` over the wire type's PSSZ bytes; `h.set_strict(true)`; passed to `json_to_pssz_with` / `pssz_to_json_with` / `json_to_value_with` / `value_to_json_with`. Looked up by id per custom value (the Rust dynamic path has no bind step). |
-| JS | (reads the node from the schema) | `PsszSchema.decode(irBytes, { handlers: { Version: versionHandler, AccountName: accountHandler }, requireHandlers })`, `schema.withHandlers(...)` or `schema.type(root, { handlers })`; a handler is `{ toText(value): string, fromText(text): value }` over the decoded JS value of the wire type, bound once when the type is compiled. |
+| C++ | `SchemaBuilder`, for any type with a `text_category` adapter and / or an invariant (`psio::schema_custom_v<T>`). Id (`psio::schema_custom_id<T>()`): the adapter's `static constexpr std::string_view schema_id`, else the id given to `PSIO_INVARIANT`, else the reflected record or enum name. A type with none of these (a `std::variant`, a `std::tuple`) must provide one: a compile error otherwise. An adapter that is not the type's schema presentation says `static constexpr bool schema_custom = false` (the `0x` text of the integers wider than 64 bits). | `psio::pssz_ir::CustomHandlers h;` (`psio/pssz_ir_custom.hpp`). `h.add<AccountNumber>()` — under the type's schema id, or `h.add<T>("Id")`: `to_text` / `from_text` from the type's text adapter if it has one, `check` from its invariant if it has one (the typed `validate<T>(psio::pssz{}, bytes)`, which runs the invariants of its members too). By hand: `h.add("Id", {to_text, from_text})`, `h.add("Id", {.check = fn})`, `h.add("Id", {to_text, from_text, check})`; each is a `std::function` returning `codec_status`, and `add` replaces the whole handler of the id. `h.require_all = true` for a strict registry. Passed as the trailing `const CustomHandlers*` of every schema-driven entry point, binary (`validate_pssz`, `validate_auto`, `decode_auto`, `encode_auto`, `encode<W>` / `decode_exact<W>` / `validate_canonical_for_width<W>`, `to_key`) and text, or bound once per schema with `JsonNames names(schema, h)`. |
+| Rust | `ToPsszSchema` derive with `#[pssz(custom)]` (id: the type name) or `#[pssz(custom = "AccountName")]`; `#[pssz(invariant = "...")]` for a type with an invariant; with `#[pssz(transparent)]` the wire type is the inner field's. | `let mut h = psio::pssz::dynamic::CustomHandlers::new();` then, each keeping what the id already has of the other kind: `h.add("Id", to_text, from_text)` (the text form, over the wire type's PSSZ bytes); `h.add_check("Id", check)` (the invariant: `Fn(&[u8]) -> Result<(), PsszError>`); `h.add_type::<Account>()?` / `h.add_type_as::<T>("Id")` (the type's own `TextForm` **and** its typed validation as the check); `h.add_invariant_type::<Range>()?` / `h.add_invariant_type_as::<T>("Id")` (the typed validation as the check, for a type with an invariant and no text form). `h.set_strict(true)` for a strict registry. Text entry points: `json_to_pssz_with` / `pssz_to_json_with` / `json_to_value_with` / `value_to_json_with(..., &h)`. Binary entry points: `validate_pssz_with(&schema, &root, bytes, &h)`, and `encode_with` / `decode_exact_with` / `decode_compatible_with` / `validate_with` / `to_key_with`, which take a `dynamic::Options { handlers: Option<&CustomHandlers>, nested: NestedBytes }` (`Options::handlers(&h)`, `Options::opaque_nested()`, `NestedBytes::Typed` (default) / `NestedBytes::Opaque`). Looked up by id per custom value (the Rust dynamic path has no bind step). |
+| JS | (reads the node from the schema) | The option `handlers` — `{ [id]: handler }` or a `Map` — of `new PsszSchema(ir, options)`, `PsszSchema.decode(irBytes, options)`, `PsszSchema.fromJson(text, format, options)`, `schema.withHandlers(handlers, { requireHandlers, nestedBytes })` (added to, and replacing by id, the ones the schema has) and `schema.type(root, { handlers, requireHandlers, nestedBytes })`. A handler is `{ toText?(value): string, fromText?(text): value, check?(value): string \| null \| undefined \| void }` over the decoded JS value of the wire type: `check` rejects by returning a message or throwing an `Error` with one, and the message is the error's. `requireHandlers: true` for a strict registry; `nestedBytes: 'typed'` (default) / `'opaque'`. Bound once when the type is compiled; every method of the `PsszType` (`encode`, `decode`, `validate`, the key methods, the text methods) then runs them. A handler cannot be registered for a binary-form id, `box` or a time id. |
 
 **The three registries.** What a schema-driven codec does with a custom
 node depends only on the registry it is given:
@@ -805,7 +826,7 @@ node depends only on the registry it is given:
 |---|---|---|
 | none, or no handler for the id | the wire type's own text: the account as its number, the version as `{"major":1,"minor":2}`, the endpoint as the variant | **not checked**: the node is its wire type, structure only |
 | a handler for the id | the handler's text (exactly: the wire type's text is not also accepted), or the wire type's when the handler has only `check` | checked by `check`, on binary and text entry points alike |
-| strict (C++ `require_all = true`) and no handler for the id | an error, "no handler registered for a custom type" | the same error, on the binary entry points too |
+| strict (C++ `require_all = true`, Rust `set_strict(true)`, JS `requireHandlers: true`) and no handler for the id | an error, "no handler registered for a custom type" | the same error, on the binary entry points too, wherever a value of the type occurs |
 
 Binary is exact in every case; the fallback text reads back to the same
 bytes. A caller that must not accept or produce a value it cannot check and
