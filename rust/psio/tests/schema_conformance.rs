@@ -20,6 +20,12 @@ use psio::pssz::schema_ir::{AnyType, Schema};
 use psio::pssz::{from_pssz, pssz_validate, Pssz, Pssz16, Pssz32, Pssz8, PsszFormat};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "custom/text.rs"]
+#[allow(dead_code)]
+mod text;
+#[path = "custom/handlers.rs"]
+mod custom_handlers;
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct TypeRow {
     id: String,
@@ -31,6 +37,9 @@ struct TypeRow {
     /// JSON fixture: the type holds a custom text form.
     #[serde(default)]
     custom: bool,
+    /// An invariant constrains values of the type.
+    #[serde(default)]
+    invariant: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -49,6 +58,8 @@ struct JsonRow {
     /// Value rows of a `custom` type: the text with no handler registered.
     plain_json: Option<String>,
     plain_ijson: Option<String>,
+    /// `invariant` rows: the invariant's message.
+    reason: Option<String>,
 }
 
 /// A schema every schema-driven entry point refuses, whatever the bytes.
@@ -88,7 +99,11 @@ struct PsszRow {
     hex: String,
     expect: String,
     #[serde(default)]
+    reason: String,
+    #[serde(default)]
     reencoded: String,
+    #[serde(default)]
+    value: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -210,11 +225,32 @@ fn fixture_handlers() -> dynamic::CustomHandlers {
             Ok(bytes)
         },
     );
+    // The custom types of any shape, with their invariants
+    // (conformance/custom-types.md).
+    custom_handlers::fixture_custom_handlers(&mut handlers);
     handlers
 }
 
 thread_local! {
     static HANDLERS: dynamic::CustomHandlers = fixture_handlers();
+}
+
+/// The invariants alone (no text form): what a caller registers to check
+/// values whose text it leaves to the wire type.
+fn check_only_handlers(handlers: &mut dynamic::CustomHandlers) {
+    use psio::pssz::PsszError;
+    let mut all = dynamic::CustomHandlers::new();
+    custom_handlers::fixture_custom_handlers(&mut all);
+    let all = std::sync::Arc::new(all);
+    for id in custom_handlers::CUSTOM_IDS {
+        if all.has_check(id) {
+            let all = all.clone();
+            // Run the fixture handler's check through a one-node schema.
+            handlers.add_check(id, move |bytes: &[u8]| -> Result<(), PsszError> {
+                all.run_check(id, bytes)
+            });
+        }
+    }
 }
 
 /// Text -> bytes through the schema, with the fixture's handlers: the
@@ -254,7 +290,17 @@ fn schema_ir_and_json_text_agree_with_the_typed_json_ijson_and_pssz_codecs() {
     assert!(types.len() >= 40);
 
     let (mut values, mut accepted, mut rejected, mut with_bytes) = (0usize, 0usize, 0usize, 0usize);
-    let mut custom_values = 0usize;
+    let (mut custom_values, mut violated, mut strict_refusals) = (0usize, 0usize, 0usize);
+    const NO_HANDLER: &str = "pssz dynamic: no handler registered for a custom type";
+    // What the registry holds: a text form, an invariant, or both.
+    HANDLERS.with(|handlers| {
+        for id in custom_handlers::CUSTOM_IDS {
+            assert!(handlers.contains(id), "{id}");
+        }
+        assert!(handlers.has_text_form("Endpoint") && !handlers.has_check("Endpoint"));
+        assert!(handlers.has_check("Name") && !handlers.has_text_form("Name"));
+        assert!(handlers.has_check("Ref") && handlers.has_text_form("Ref"));
+    });
     // A strict registry with no handlers: bytes -> I-JSON text.
     let strict = |schema: &Schema, ty: &str, bytes: &[u8]| -> Result<String, String> {
         let mut handlers = dynamic::CustomHandlers::new();
@@ -304,7 +350,16 @@ fn schema_ir_and_json_text_agree_with_the_typed_json_ijson_and_pssz_codecs() {
                 if !ty.custom {
                     // No custom text form: the registry is never consulted.
                     assert_eq!(to_text_plain::<Json>(&schema, &row.ty, &bytes).as_ref(), Ok(json_text), "{name}");
-                    assert_eq!(strict(&schema, &row.ty, &bytes).as_ref(), Ok(ijson_text), "{name}");
+                    // A type with an invariant and no text form is a custom
+                    // node all the same: strict needs its handler wherever a
+                    // value of it occurs.
+                    let strict = strict(&schema, &row.ty, &bytes);
+                    if ty.invariant && strict.is_err() {
+                        assert_eq!(strict, Err(NO_HANDLER.to_string()), "{name}");
+                        strict_refusals += 1;
+                    } else {
+                        assert_eq!(strict.as_ref(), Ok(ijson_text), "{name}");
+                    }
                     continue;
                 }
                 // Without handlers: the wire type's own text, which reads
@@ -316,16 +371,119 @@ fn schema_ir_and_json_text_agree_with_the_typed_json_ijson_and_pssz_codecs() {
                 assert_eq!(to_text_plain::<IJson>(&schema, &row.ty, &bytes).as_ref(), Ok(plain_ijson), "{name}");
                 assert_eq!(to_bytes_plain::<Json>(&schema, &row.ty, plain_json.as_bytes()).as_ref(), Ok(&bytes), "{name}");
                 assert_eq!(to_bytes_plain::<IJson>(&schema, &row.ty, plain_ijson.as_bytes()).as_ref(), Ok(&bytes), "{name}");
-                assert_ne!(plain_json, json_text, "{name}");
-                assert!(to_bytes_plain::<Json>(&schema, &row.ty, json_text.as_bytes()).is_err(), "{name}");
-                // With handlers the plain form is not also accepted.
-                assert!(to_bytes::<Json>(&schema, &row.ty, plain_json.as_bytes()).is_err(), "{name}");
-                assert!(to_bytes::<IJson>(&schema, &row.ty, plain_ijson.as_bytes()).is_err(), "{name}");
-                // Strict, no handlers: an error rather than the fallback.
+                // A value that holds no custom value (an empty list of
+                // them, an absent optional one) has one text.
+                if plain_json != json_text {
+                    assert!(to_bytes_plain::<Json>(&schema, &row.ty, json_text.as_bytes()).is_err(), "{name}");
+                    // With handlers the plain form is not also accepted.
+                    assert!(to_bytes::<Json>(&schema, &row.ty, plain_json.as_bytes()).is_err(), "{name}");
+                    // Under I-JSON the plain form of a byte list is a hex
+                    // string, which may happen to be base64 text of other
+                    // bytes: it is never read as the same value.
+                    assert_ne!(
+                        to_bytes::<IJson>(&schema, &row.ty, plain_ijson.as_bytes()).ok(),
+                        (plain_ijson != ijson_text).then(|| bytes.clone()),
+                        "{name}"
+                    );
+                    // Strict, no handlers: an error rather than the fallback.
+                    assert_eq!(
+                        strict(&schema, &row.ty, &bytes),
+                        Err(NO_HANDLER.to_string()),
+                        "{name}"
+                    );
+                    strict_refusals += 1;
+                }
+            }
+            "invariant" => {
+                // A value that violates an invariant. The schema cannot say
+                // so: with no handler the value is its wire type - valid
+                // bytes, the wire type's text. With the handlers every entry
+                // point reports the invariant's own message; a strict
+                // registry without the handler refuses the type.
+                violated += 1;
+                assert!(ty.invariant, "{name}: the type has no invariant");
+                let reason = row.reason.as_ref().expect("reason");
+                let bytes = from_hex(row.pssz.as_ref().expect("pssz"));
+                let text = input_text(row);
+                let refused = if ijson {
+                    to_bytes::<IJson>(&schema, &row.ty, &text)
+                } else {
+                    to_bytes::<Json>(&schema, &row.ty, &text)
+                };
+                assert_eq!(refused.as_ref(), Err(reason), "{name}: text");
+                assert_eq!(to_text::<Json>(&schema, &row.ty, &bytes).as_ref(), Err(reason), "{name}");
+                assert_eq!(to_text::<IJson>(&schema, &row.ty, &bytes).as_ref(), Err(reason), "{name}");
+                HANDLERS.with(|handlers| {
+                    let options = dynamic::Options::handlers(handlers);
+                    assert_eq!(
+                        dynamic::validate_pssz_with(&schema, &root, &bytes, handlers)
+                            .map_err(|e| e.what().to_string()),
+                        Err(reason.clone()),
+                        "{name}: validate"
+                    );
+                    assert_eq!(
+                        dynamic::decode_compatible_with::<Pssz>(&schema, &root, &bytes, options)
+                            .map_err(|e| e.0.to_string()),
+                        Err(reason.clone()),
+                        "{name}: decode"
+                    );
+                    assert_eq!(
+                        dynamic::json_to_value_with::<Json>(
+                            &schema,
+                            &root,
+                            row.plain_json.as_ref().expect("plain_json").as_bytes(),
+                            &{
+                                // The plain text is not the typed text of a
+                                // type with a text form: check-only handlers.
+                                let mut checks = dynamic::CustomHandlers::new();
+                                check_only_handlers(&mut checks);
+                                checks
+                            },
+                        )
+                        .map_err(|e| e.what().to_string()),
+                        Err(reason.clone()),
+                        "{name}: plain text with the checks"
+                    );
+                });
+                // Without handlers: the wire type.
+                assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false), "{name}");
+                let value = dynamic::decode_compatible::<Pssz>(&schema, &root, &bytes)
+                    .unwrap_or_else(|e| panic!("{name}: decode without handlers: {e:?}"))
+                    .value;
+                let plain_json = row.plain_json.as_ref().expect("plain_json");
+                let plain_ijson = row.plain_ijson.as_ref().expect("plain_ijson");
+                assert_eq!(to_text_plain::<Json>(&schema, &row.ty, &bytes).as_ref(), Ok(plain_json), "{name}");
+                assert_eq!(to_bytes_plain::<Json>(&schema, &row.ty, plain_json.as_bytes()).as_ref(), Ok(&bytes), "{name}");
+                assert_eq!(to_text_plain::<IJson>(&schema, &row.ty, &bytes).as_ref(), Ok(plain_ijson), "{name}");
+                assert_eq!(to_bytes_plain::<IJson>(&schema, &row.ty, plain_ijson.as_bytes()).as_ref(), Ok(&bytes), "{name}");
+                // Writers refuse the value too: binary and text.
+                HANDLERS.with(|handlers| {
+                    assert_eq!(
+                        dynamic::encode_with::<Pssz>(&schema, &root, &value, dynamic::Options::handlers(handlers))
+                            .map_err(|e| e.0.to_string()),
+                        Err(reason.clone()),
+                        "{name}: encode"
+                    );
+                    assert_eq!(
+                        dynamic::value_to_json_with::<IJson>(&schema, &root, &value, handlers)
+                            .map_err(|e| e.what().to_string()),
+                        Err(reason.clone()),
+                        "{name}: value to text"
+                    );
+                    assert_eq!(
+                        dynamic::to_key_with(&schema, &root, &value, dynamic::Options::handlers(handlers))
+                            .map_err(|e| e.0.to_string()),
+                        Err(reason.clone()),
+                        "{name}: key"
+                    );
+                });
+                let mut none = dynamic::CustomHandlers::new();
+                none.set_strict(true);
                 assert_eq!(
-                    strict(&schema, &row.ty, &bytes),
-                    Err("pssz dynamic: no handler registered for a custom type".to_string()),
-                    "{name}"
+                    dynamic::validate_pssz_with(&schema, &root, &bytes, &none)
+                        .map_err(|e| e.what().to_string()),
+                    Err(NO_HANDLER.to_string()),
+                    "{name}: strict"
                 );
             }
             "accept" => {
@@ -365,8 +523,17 @@ fn schema_ir_and_json_text_agree_with_the_typed_json_ijson_and_pssz_codecs() {
     assert!(accepted >= 60);
     assert!(rejected >= 300);
     assert!(with_bytes >= 600);
-    assert!(custom_values >= 15, "custom value rows: {custom_values}");
-    assert_eq!(fx.types.iter().filter(|t| t.custom).count(), 4);
+    assert_eq!(custom_values, 43, "custom value rows");
+    assert_eq!(
+        custom_values,
+        fx.vectors.iter().filter(|row| row.kind == "value" && row.plain_json.is_some()).count()
+    );
+    assert!(strict_refusals >= 50, "strict refusals: {strict_refusals}");
+    assert_eq!(values + accepted + rejected + violated, fx.vectors.len(), "every row was replayed");
+    assert_eq!(violated, 50, "invariant rows");
+    assert_eq!(violated, fx.vectors.iter().filter(|row| row.kind == "invariant").count());
+    assert_eq!(fx.types.iter().filter(|t| t.custom).count(), 14);
+    assert_eq!(fx.types.iter().filter(|t| t.invariant).count(), 12);
     // Every type is expressible, and exercised.
     assert!(fx.types.iter().all(|t| t.ir), "a type has no IR");
     for (id, ty) in &types {
@@ -392,8 +559,9 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
         root: &AnyType,
         bytes: &[u8],
         name: &str,
+        options: dynamic::Options<'_>,
     ) -> Result<bool, String> {
-        let outcome = dynamic::decode_compatible::<F>(schema, root, bytes)
+        let outcome = dynamic::decode_compatible_with::<F>(schema, root, bytes, options)
             .map(|decoded| (decoded.has_unknown, decoded.value))
             .map_err(|e| e.0.to_string());
         assert_ne!(
@@ -405,11 +573,13 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
             // What it accepts with nothing unknown it writes back unchanged
             // (so the top-level cap holds on the way out as well).
             assert_eq!(
-                dynamic::encode::<F>(schema, root, value).map_err(|e| e.0.to_string()).as_deref(),
+                dynamic::encode_with::<F>(schema, root, value, options)
+                    .map_err(|e| e.0.to_string())
+                    .as_deref(),
                 Ok(bytes),
                 "{name}: explicit re-encoding"
             );
-            assert!(dynamic::decode_exact::<F>(schema, root, bytes).is_ok(), "{name}");
+            assert!(dynamic::decode_exact_with::<F>(schema, root, bytes, options).is_ok(), "{name}");
         }
         outcome.map(|(unknown, _)| unknown)
     }
@@ -417,6 +587,15 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
     let (mut canonical, mut unknown, mut rejected, mut raw_non_utf8) = (0usize, 0usize, 0usize, 0usize);
     let (mut json_trips, mut no_json, mut explicit_width) = (0usize, 0usize, 0usize);
     let (mut explicit_nested_caps, mut explicit_top_caps) = (0usize, 0usize);
+    let (mut nested, mut nested_unknown, mut nested_deferred) = (0usize, 0usize, 0usize);
+    let (mut violated, mut violated_explicit) = (0usize, 0usize);
+    // The handlers of the fixture's custom types, and a strict registry
+    // that has none.
+    let mut handlers = dynamic::CustomHandlers::new();
+    custom_handlers::fixture_custom_handlers(&mut handlers);
+    let mut strict = dynamic::CustomHandlers::new();
+    strict.set_strict(true);
+    let by_name: BTreeMap<&str, &PsszRow> = fx.vectors.iter().map(|row| (row.name.as_str(), row)).collect();
     for row in &fx.vectors {
         if !expressible[row.ty.as_str()] {
             continue;
@@ -425,12 +604,55 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
         let root = AnyType::named(row.ty.as_str());
         let bytes = from_hex(&row.hex);
         let class = name.split('/').next().unwrap_or("");
+        // A typed deferred nested value is not looked into; the schema does
+        // not record that policy, so a schema-driven reader gives the
+        // recorded outcome when told the nested bytes are opaque.
+        let options = if class == "nested-deferred" {
+            dynamic::Options::opaque_nested()
+        } else {
+            dynamic::Options::default()
+        };
+        nested += usize::from(class == "nested");
+
+        if class == "invariant" {
+            // A structurally valid frame of a value that violates an
+            // invariant: `reject` is the typed outcome. The schema alone
+            // accepts it; with the handlers it is rejected with the
+            // invariant's message, under every width profile; a strict
+            // registry that lacks the handler refuses the type.
+            assert_eq!(row.expect, "reject", "{name}");
+            let with = |registry: Option<&dynamic::CustomHandlers>| -> Result<(), String> {
+                let options = dynamic::Options { handlers: registry, ..Default::default() };
+                match row.format.as_str() {
+                    "auto" => dynamic::decode_compatible_with::<Pssz>(&schema, &root, &bytes, options),
+                    "pssz8" => dynamic::decode_compatible_with::<Pssz8>(&schema, &root, &bytes, options),
+                    "pssz16" => dynamic::decode_compatible_with::<Pssz16>(&schema, &root, &bytes, options),
+                    "pssz32" => dynamic::decode_compatible_with::<Pssz32>(&schema, &root, &bytes, options),
+                    format => panic!("{name}: unknown format {format}"),
+                }
+                .map(drop)
+                .map_err(|e| e.0.to_string())
+            };
+            assert_eq!(with(None), Ok(()), "{name}: no handler");
+            assert_eq!(with(Some(&handlers)), Err(row.reason.clone()), "{name}: handlers");
+            assert_eq!(
+                with(Some(&strict)),
+                Err("pssz dynamic: no handler registered for a custom type".to_string()),
+                "{name}: strict"
+            );
+            if row.format == "auto" {
+                violated += 1;
+            } else {
+                violated_explicit += 1;
+            }
+            continue;
+        }
 
         if row.format != "auto" {
             let outcome = match row.format.as_str() {
-                "pssz8" => explicit::<Pssz8>(&schema, &root, &bytes, name),
-                "pssz16" => explicit::<Pssz16>(&schema, &root, &bytes, name),
-                "pssz32" => explicit::<Pssz32>(&schema, &root, &bytes, name),
+                "pssz8" => explicit::<Pssz8>(&schema, &root, &bytes, name, options),
+                "pssz16" => explicit::<Pssz16>(&schema, &root, &bytes, name, options),
+                "pssz32" => explicit::<Pssz32>(&schema, &root, &bytes, name, options),
                 format => panic!("{name}: unknown format {format}"),
             };
             explicit_width += 1;
@@ -446,14 +668,88 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
             continue;
         }
 
-        let outcome = dynamic::validate_pssz(&schema, &root, &bytes);
+        let outcome = dynamic::validate_with(&schema, &root, &bytes, options).map_err(|e| e.0);
+        // The handlers change nothing for a value that satisfies its
+        // invariants, or for a type that has none.
+        assert_eq!(
+            dynamic::validate_with(
+                &schema,
+                &root,
+                &bytes,
+                dynamic::Options { handlers: Some(&handlers), ..options }
+            )
+            .map_err(|e| e.0),
+            outcome,
+            "{name}: with handlers"
+        );
         if row.expect == "reject" {
             assert!(outcome.is_err(), "{name}: accepted");
             assert!(dynamic::validate(&schema, &root, &bytes).is_err(), "{name}");
+            // The order of a map / set is the schema's to check: the same
+            // rule, the same message as the typed codec.
+            if class == "map-set-order" {
+                assert_eq!(outcome, Err(row.reason.as_str()), "{name}: reason");
+            }
             rejected += 1;
             continue;
         }
         assert_eq!(outcome, Ok(row.expect == "unknown"), "{name}");
+        if class == "nested-deferred" {
+            // Opaque: the bytes are kept as they are.
+            assert_eq!(row.expect, "canonical", "{name}");
+            let opaque = dynamic::decode_compatible_with::<Pssz>(&schema, &root, &bytes, options)
+                .unwrap_or_else(|e| panic!("{name}: opaque decode: {e:?}"));
+            assert!(!opaque.has_unknown, "{name}");
+            assert_eq!(
+                dynamic::encode_with::<Pssz>(&schema, &root, &opaque.value, options).as_deref(),
+                Ok(&bytes[..]),
+                "{name}: opaque re-encoding"
+            );
+            nested_deferred += 1;
+            continue;
+        }
+        if class == "nested-unknown" && row.expect == "unknown" {
+            // Unknown fields inside nested bytes. The dynamic value is the
+            // inner value, so the default re-encoding is canonical: the
+            // frame of the `nested` vector holding the same logical value
+            // for this reader. With the bytes opaque the frame is kept,
+            // which is what the typed reader's re-encoding (`reencoded`) is.
+            let inner = dynamic::decode_compatible::<Pssz>(&schema, &root, &bytes)
+                .unwrap_or_else(|e| panic!("{name}: decode: {e:?}"));
+            assert!(inner.has_unknown, "{name}");
+            let canonical_again = dynamic::encode::<Pssz>(&schema, &root, &inner.value)
+                .unwrap_or_else(|e| panic!("{name}: encode: {e:?}"));
+            assert_ne!(canonical_again, bytes, "{name}");
+            assert_eq!(dynamic::validate(&schema, &root, &canonical_again), Ok(false), "{name}");
+            let exact = dynamic::decode_exact::<Pssz>(&schema, &root, &canonical_again)
+                .unwrap_or_else(|e| panic!("{name}: exact decode of the canonical frame: {e:?}"));
+            assert_eq!(dynamic::encode::<Pssz>(&schema, &root, &exact).as_ref(), Ok(&canonical_again), "{name}");
+            assert!(dynamic::decode_exact::<Pssz>(&schema, &root, &bytes).is_err(), "{name}");
+            if !row.value.is_empty() {
+                let same = format!("nested/{}/as/{}/auto", row.value, row.ty);
+                let same = by_name.get(same.as_str()).unwrap_or_else(|| panic!("{name}: no {same}"));
+                assert_eq!(canonical_again, from_hex(&same.hex), "{name}: the canonical frame");
+            }
+            let opaque = dynamic::decode_compatible_with::<Pssz>(
+                &schema,
+                &root,
+                &bytes,
+                dynamic::Options::opaque_nested(),
+            )
+            .unwrap_or_else(|e| panic!("{name}: opaque decode: {e:?}"));
+            assert!(!opaque.has_unknown, "{name}");
+            let kept = dynamic::encode_with::<Pssz>(
+                &schema,
+                &root,
+                &opaque.value,
+                dynamic::Options::opaque_nested(),
+            )
+            .unwrap_or_else(|e| panic!("{name}: opaque encode: {e:?}"));
+            assert_eq!(kept, from_hex(&row.reencoded), "{name}: reencoded");
+            assert_eq!(kept, bytes, "{name}");
+            nested_unknown += 1;
+            continue;
+        }
         assert_eq!(dynamic::validate(&schema, &root, &bytes), Ok(row.expect == "unknown"), "{name}");
         let decoded = dynamic::decode_compatible::<Pssz>(&schema, &root, &bytes)
             .unwrap_or_else(|e| panic!("{name}: decode: {e:?}"));
@@ -522,8 +818,21 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
     assert!(no_json >= 1, "no_json {no_json}");
     assert!(explicit_width >= 1000, "explicit_width {explicit_width}");
     // Every explicit-format vector was replayed, the capped types included.
-    assert_eq!(explicit_width, fx.vectors.iter().filter(|row| row.format != "auto").count());
+    assert_eq!(
+        explicit_width + violated_explicit,
+        fx.vectors.iter().filter(|row| row.format != "auto").count()
+    );
     assert_eq!(explicit_nested_caps, 15, "cap-overflow-explicit-nested");
+    // Every vector of the nested / invariant classes, in every profile.
+    let count = |class: &str, auto: bool| {
+        fx.vectors.iter().filter(|row| row.name.starts_with(class) && (row.format == "auto") == auto).count()
+    };
+    assert_eq!(nested, count("nested/", true) + count("nested/", false), "nested");
+    assert_eq!(nested_unknown, 4, "nested-unknown (unknown, automatic profile)");
+    assert_eq!(nested_deferred, count("nested-deferred/", true), "nested-deferred");
+    assert_eq!(violated, count("invariant/", true), "invariant");
+    assert_eq!(violated_explicit, count("invariant/", false), "invariant, explicit");
+    assert_eq!(violated + violated_explicit, 128, "invariant");
     assert_eq!(explicit_top_caps, 12, "explicit top-level cap rejections");
     assert!(fx.types.iter().all(|t| t.ir), "a type has no IR");
 }

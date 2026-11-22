@@ -1406,6 +1406,14 @@ impl CustomHandlers {
     pub fn has_check(&self, id: &str) -> bool {
         self.find(id).is_some_and(|h| h.check.is_some())
     }
+    /// Runs the invariant registered for `id` on the PSSZ bytes of its wire
+    /// type (automatic profile); `Ok` when the id has none.
+    pub fn run_check(&self, id: &str, bytes: &[u8]) -> Result<(), PsszError> {
+        match self.find(id).and_then(|handler| handler.check.as_ref()) {
+            Some(check) => check(bytes),
+            None => Ok(()),
+        }
+    }
     pub(crate) fn find(&self, id: &str) -> Option<&CustomHandler> {
         self.handlers.get(id)
     }
