@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PsszSchema, RecordView, boundedList, boundedUtf8, bytes, custom, emitWit, fixedBytes, fromHex, generateSchema, i32,
+  PsszSchema, RecordView, argumentTuple, field, rawString, boundedList, boundedUtf8, bytes, custom, emitWit, fixedBytes, fromHex, generateSchema, i32,
   i64, keyPrefixUpperBound, lazy, list, nameToNumber, numberToName, optional, pjsonDecode, pjsonEncode, pjsonValidate,
   PjsonObject, PsszError, map, nested, pair, record, set, toHex, transparent, tuple, u16, u32, u64, u8, utf8, timePoint, variant,
   type Infer, type ListView, type PsszCustomHandler, type TypeDef,
@@ -257,4 +257,96 @@ test('README: invariants', () => {
   assert.equal(failure(() => DerKey.encode(new Uint8Array(0))).message, 'DerKey: not a DER sequence');
   assert.equal(toHex(DerKey.encode(fromHex('3000'))), '3000');
   assert.equal(failure(() => DerKey.encodeKey(fromHex('31'))).message, 'DerKey: not a DER sequence');
+});
+
+test('README: bounds at any depth, method arguments', () => {
+  const Post = record('Post', {
+    title: field(rawString, { utf8: true, max: 80 }),
+    tags: field(list(rawString), { max: 8, element: { utf8: true, max: 16 } }),
+    votes: field(map(rawString, list(u32)), { max: 4, keys: { utf8: true, max: 16 }, values: { max: 2 } }),
+    origin: field(tuple(rawString, u32, bytes), { at: { 0: { utf8: true, max: 16 }, 2: { max: 5 } } }),
+    body: field(variant({ Text: rawString, Parts: list(rawString) }),
+      { at: { Text: { utf8: true, max: 280 }, Parts: { max: 4, element: { utf8: true, max: 280 } } } }),
+    reply: field(optional(list(rawString)), { max: 2, element: { max: 32 } }),
+  });
+  type Post = Infer<typeof Post>;
+  const post: Post = {
+    title: 'Hello', tags: ['a', 'b'], votes: new Map([['up', [1, 2]]]), origin: ['web', 7, Uint8Array.of(1)],
+    body: { type: 'Text', value: 'hi' }, reply: null,
+  };
+  const typed: {
+    title: string; tags: string[]; votes: Map<string, number[]>; origin: [string, number, Uint8Array];
+    body: { type: 'Text'; value: string } | { type: 'Parts'; value: string[] }; reply: Uint8Array[] | null;
+  } = post;
+  assert.deepEqual(Post.decode(Post.encode(typed)), post);
+  assert.equal(Post.width, 2);
+  // 4 (header) + title 84 + tags 164 + votes 164 + origin 41 + body 1141 + reply 77
+  assert.equal(4 + (4 + 80) + (4 + 8 * 20) + (4 + 4 * 40) + (4 + 4 + 20 + 4 + 9) + (4 + 1 + 4 * 284) + (4 + 1 + 2 * 36), 1675);
+  // Some at-the-bound values fit; the widest (the four parts) does too.
+  const full: Post = { ...post, body: { type: 'Parts', value: Array(4).fill('x'.repeat(280)) }, tags: Array(8).fill('t'.repeat(16)) };
+  assert.ok(Post.encode(full).length <= 1675);
+
+  const Tags = record('Tags', { tags: field(list(rawString), { max: 8, element: { utf8: true, max: 16 } }) });
+  const Wrapped = record('Tags', { tags: boundedList(boundedUtf8(16), 8) });
+  assert.equal(toHex(Tags.encode({ tags: ['ab', 'c'] })), '0101080000000a000000616263');
+  assert.equal(toHex(Wrapped.encode({ tags: ['ab', 'c'] })), '0101080000000a000000616263');
+  assert.deepEqual(Wrapped.decode(Tags.encode({ tags: ['ab', 'c'] })), { tags: ['ab', 'c'] });
+  // The plain type registered and the bounded type in the member; a registered type of its own.
+  const inPlace = generateSchema({ Tags }).ir.types;
+  assert.equal((inPlace[0].type.value.value as { members: { type: { value: { type: string } } }[] }).members[0].type.value.type, 'BoundedList');
+  const registered = generateSchema({ Tags: Wrapped }).ir.types;
+  assert.equal((registered[0].type.value.value as { members: { type: { value: { type: string } } }[] }).members[0].type.value.type, 'Type');
+
+  // Every writer and reader checks every bound.
+  const refused = (run: () => unknown, kind: string, message: string) =>
+    assert.throws(run, (e: unknown) => e instanceof PsszError && e.kind === kind && e.message === message);
+  const long = { ...post, tags: ['a'.repeat(17)] };
+  refused(() => Post.encode(long), 'value', 'pssz IR: byte count bound exceeded');
+  refused(() => Post.encodeKey(long), 'value', 'key: string exceeds its bound');
+  refused(() => Post.valueToJson(long), 'value', 'json: string exceeds its bound');
+  const Loose = record('Post', {
+    title: utf8, tags: list(utf8), votes: map(utf8, list(u32)), origin: tuple(utf8, u32, bytes),
+    body: variant({ Text: utf8, Parts: list(utf8) }), reply: optional(list(rawString)),
+  });
+  const text = Loose.valueToJson(long);
+  refused(() => Post.jsonToValue(text), 'json', 'json: string exceeds its bound');
+  refused(() => Post.jsonToPssz(text), 'json', 'json: string exceeds its bound');
+  refused(() => Post.decodeKey(Loose.encodeKey(long)), 'bytes', 'key: string exceeds its bound');
+  for (const width of [1, 2, 4] as const) {
+    const frame = Loose.type({ width }).encode(long);
+    const reader = Post.type({ width });
+    assert.equal(reader.validate(frame).ok, false);
+    refused(() => reader.decode(frame), 'bytes', 'pssz IR: byte count bound exceeded');
+    refused(() => reader.psszToJson(frame), 'bytes', 'pssz IR: byte count bound exceeded');
+    refused(() => (reader.view(frame) as RecordView).toValue(), 'bytes', 'pssz IR: byte count bound exceeded');
+  }
+  assert.throws(
+    () => record('R', { a: field(list(u32), { element: { max: 3 } }) }).schema,
+    (e: unknown) => e instanceof PsszError && e.kind === 'schema' && /member "a", element: max bounds/.test(e.message),
+  );
+
+  // Method arguments.
+  const parameters = {
+    to: field(rawString, { utf8: true, max: 16 }), amount: u64, memo: field(rawString, { utf8: true, max: 80 }),
+  };
+  const Transfer = argumentTuple(parameters, { maxDynamicData: 256 });
+  const Transfer2 = argumentTuple({ ...parameters, fee: optional(u32) }, { maxDynamicData: 256 });
+  assert.equal(Transfer.width, 2);
+  assert.equal(argumentTuple(parameters).width, 1);
+  const args = Transfer.encode({ to: 'al', amount: 5n, memo: 'hi' });
+  assert.equal(toHex(args), '0c000c0005000000000000000e00616c6869');
+  assert.deepEqual(Transfer2.decode(args), { to: 'al', amount: 5n, memo: 'hi', fee: null });
+  assert.deepEqual(Transfer.validate(Transfer2.encode({ to: 'al', amount: 5n, memo: 'hi', fee: 3 })), { ok: true, hasUnknown: true });
+  const asTuple = tuple(boundedUtf8(16), u64, boundedUtf8(80));
+  assert.equal(toHex(asTuple.type({ width: 2 }).encode(['al', 5n, 'hi'])), toHex(args));
+  assert.equal(toHex(asTuple.encode(['al', 5n, 'hi'])), toHex(argumentTuple(parameters).encode({ to: 'al', amount: 5n, memo: 'hi' })));
+  assert.equal(toHex(Transfer.encodeKey({ to: 'al', amount: 5n, memo: 'hi' })), toHex(asTuple.encodeKey(['al', 5n, 'hi'])));
+  refused(() => Transfer.encode({ to: 'a'.repeat(17), amount: 5n, memo: '' }), 'value', 'pssz IR: byte count bound exceeded');
+  const Note = argumentTuple({ text: rawString }, { maxDynamicData: 64 });
+  refused(() => Note.encode({ text: new Uint8Array(63) }), 'value', 'pssz IR: encoded size exceeds maxDynamicData cap');
+  assert.equal(Transfer.valueToJson({ to: 'al', amount: 5n, memo: 'hi' }), '{"to":"al","amount":5,"memo":"hi"}');
+  const ir = generateSchema({ transfer: Transfer }).ir.types;
+  assert.deepEqual(ir.map((m) => m.name), ['@0', '@1', '@2', 'transfer']);
+  assert.equal(ir[0].type.value.type, 'Object');
+  assert.deepEqual((ir[0].type.value.value as { attributes: unknown[] }).attributes, [{ name: 'maxDynamicData', value: '256' }]);
 });

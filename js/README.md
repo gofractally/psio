@@ -34,6 +34,7 @@ Firefox and Safari (15.4 or later). TypeScript 5 for the typed layer.
 - [From a schema fetched at run time](#from-a-schema-fetched-at-run-time)
 - [Typed definitions](#typed-definitions)
 - [Pairs, maps, sets, nested values, transparent types](#pairs-maps-sets-nested-values-transparent-types)
+- [Bounds at any depth, method arguments](#bounds-at-any-depth-method-arguments)
 - [Views](#views)
 - [Keys](#keys)
 - [JSON and I-JSON](#json-and-i-json)
@@ -163,10 +164,13 @@ V1.decode(V2.encode({ name: 'Alice', age: 30, email: 'a@b' }));  // { name: 'Ali
 Record options: `{ fixed: true }` (the definition will not change: no header,
 no evolution), `{ maxDynamicData: n }` (a cap on the encoded size) and
 `{ maxFields: n }`. Member options are given with `field(type, options)`:
-`lengthBound: { max, min, exact }` for a string, bytes or list member, the
-entries of a map / set member or the encoded bytes of a nested member
-(through `optional`), and `jsonInt` / `ijsonInt: 'number' | 'string'` for the
-text form of its integers. A variant alternative's I-JSON key is its name, or
+`max` for a string, bytes or list member, the entries of a map / set member
+or the encoded bytes of a nested member (through `optional`), or
+`lengthBound: { max, min, exact }` for a bound with `min` / `exact`;
+`utf8`, `element`, `keys`, `values` and `at` for
+[bounds below the member](#bounds-at-any-depth-method-arguments); and
+`jsonInt` / `ijsonInt: 'number' | 'string'` for the text form of its
+integers. A variant alternative's I-JSON key is its name, or
 `alt(type, { ijsonName })`; a C++ `std::variant` without labels is
 `variant({ 0: alt(u32, { ijsonName: 'uint32' }), 1: ... })`.
 
@@ -308,6 +312,125 @@ C++ type, and several C++ types share a node: `std::pair` and the 2-tuple,
 `pair`, `{ unordered: true }` and `{ deferred: true }` are those second
 identities, so that `generateSchema` of the equivalent declarations is the
 schema `psio::SchemaBuilder` builds. They change nothing on the wire.
+
+## Bounds at any depth, method arguments
+
+A bound does not have to be in the type (`docs/pssz-spec.md` §3.5).
+`field(type, bounds)` bounds a member and any position below it — the
+elements of a list, the keys of a map, one element of a tuple — with the
+member's type written as the plain string / list / map it is:
+
+```typescript
+import { record, field, list, map, tuple, variant, optional, rawString, bytes, u32, type Infer } from 'psio';
+
+const Post = record('Post', {
+  title:  field(rawString, { utf8: true, max: 80 }),                              // text, at most 80 bytes
+  tags:   field(list(rawString), { max: 8, element: { utf8: true, max: 16 } }),   // at most 8, each at most 16
+  votes:  field(map(rawString, list(u32)), { max: 4, keys: { utf8: true, max: 16 }, values: { max: 2 } }),
+  origin: field(tuple(rawString, u32, bytes), { at: { 0: { utf8: true, max: 16 }, 2: { max: 5 } } }),
+  body:   field(variant({ Text: rawString, Parts: list(rawString) }),
+                { at: { Text: { utf8: true, max: 280 }, Parts: { max: 4, element: { utf8: true, max: 280 } } } }),
+  reply:  field(optional(list(rawString)), { max: 2, element: { max: 32 } }),      // when present
+});
+type Post = Infer<typeof Post>;
+// { title: string; tags: string[]; votes: Map<string, number[]>; origin: [string, number, Uint8Array];
+//   body: { type: 'Text'; value: string } | { type: 'Parts'; value: string[] }; reply: Uint8Array[] | null }
+Post.width;                                    // 2: every position is bounded (1675 bytes at most)
+```
+
+| Option | Bounds |
+|---|---|
+| `max: n` | the position: bytes of a `rawString` or `bytes`, elements of a `list`, entries of a `map` or `set` (on the member itself also a `utf8` string and the bytes of a `nested` value) |
+| `utf8: true` | a `rawString` here is UTF-8 text: validated, and a `string` in JavaScript instead of a `Uint8Array` |
+| `element: { ... }` | every element of a `list`, a `boundedList`, an `array` or a `set` |
+| `keys: { ... }`, `values: { ... }` | every key, every mapped value of a `map` |
+| `at: { 0: { ... } }` | one element of a `tuple` / `pair`, by index; one alternative of a `variant`, by name (or index) |
+
+The options nest to any depth, and an `optional` is looked through: what is
+written for it applies to its payload. Below the member itself a length
+bound is `max` (`min` and `exact` are the member's: `lengthBound`). Bounds
+written for a position they cannot apply to are a schema error that names
+the position. The static type follows: `Infer` and the views give `string`
+exactly where `utf8: true` is written.
+
+**The member is the type its bounds describe.** `tags` above is a bounded
+list of bounded UTF-8 strings: it has that type's size bound (so the record
+narrows its offsets), that type's widths at every depth — a tuple, a pair, a
+map entry or an array of variable elements below the member takes its width
+from the bounds of its position; a list's own table is 4 wide either way —
+the same bytes, and the same checks. The wrapper types say the same thing in
+the type, and a reader cannot tell the two apart:
+
+```typescript
+const Tags    = record('Tags', { tags: field(list(rawString), { max: 8, element: { utf8: true, max: 16 } }) });
+const Wrapped = record('Tags', { tags: boundedList(boundedUtf8(16), 8) });
+toHex(Tags.encode({ tags: ['ab', 'c'] }));     // '0101080000000a000000616263'
+toHex(Wrapped.encode({ tags: ['ab', 'c'] }));  // the same bytes
+```
+
+They differ only in a generated schema, as in C++: `field(list(rawString),
+{ ... })` is the C++ member annotation
+`attr(tags, max<8> | element(utf8 | max<16>))` on a
+`std::vector<std::string>` (the member's plain type is registered and the
+bounded type is written in the member), `boundedList(boundedUtf8(16), 8)`
+is `psio::bounded<psio::utf8_string<16>, 8>` (a registered type of its own).
+Use the spelling the C++ type uses when `generateSchema` must reproduce a
+C++ schema byte for byte; otherwise either.
+
+**Every writer and reader checks every bound**, at every depth: `encode`,
+`validate`, `decode`, a view's `toValue()`, bytes to text, text to value and
+to bytes, `valueToJson`, `encodeKey` and `decodeKey`. A value outside a bound
+is an error of kind `value` (a writer) or `bytes` / `json` (a reader).
+(C++ `psio::key` checks these bounds when it reads a key, not when it writes
+one; here both do.)
+
+```typescript
+Post.encode({ ...post, tags: ['a'.repeat(17)] });   // throws PsszError: pssz IR: byte count bound exceeded
+```
+
+**Method arguments** (`docs/pssz-spec.md` §16). The arguments of a method
+are the tuple of its parameters. `argumentTuple(parameters, options)`
+declares it: each parameter bounded by its `field(type, bounds)`, and
+`maxDynamicData` capping the encoded arguments. The cap rules the tuple's
+offset width for the method's lifetime; without one the width follows from
+the parameters' bounds.
+
+```typescript
+import { argumentTuple, field, optional, rawString, u32, u64, toHex } from 'psio';
+
+const parameters = {
+  to: field(rawString, { utf8: true, max: 16 }), amount: u64, memo: field(rawString, { utf8: true, max: 80 }),
+};
+const Transfer  = argumentTuple(parameters, { maxDynamicData: 256 });
+const Transfer2 = argumentTuple({ ...parameters, fee: optional(u32) }, { maxDynamicData: 256 });
+
+Transfer.width;                                 // 2: the cap (256) rules
+argumentTuple(parameters).width;                // 1: no cap, the bounds give 116 bytes at most
+const args = Transfer.encode({ to: 'al', amount: 5n, memo: 'hi' });
+toHex(args);                                    // '0c000c0005000000000000000e00616c6869'
+Transfer2.decode(args);                         // { to: 'al', amount: 5n, memo: 'hi', fee: null }
+```
+
+- In JavaScript the arguments are an object keyed by parameter name. On the
+  wire they are the tuple: the bytes of
+  `tuple(boundedUtf8(16), u64, boundedUtf8(80))` at the tuple's width, and
+  the tuple's key.
+- A method gains optional trailing parameters as a record gains optional
+  fields (`Transfer2` reads `Transfer`'s bytes, and the reverse with
+  `hasUnknown`). Declare the cap from the start on a method that may grow:
+  an added argument that moves the inferred bound into the next width class
+  changes the bytes of every call.
+- Arguments over the cap, or outside a parameter's bounds, are refused by
+  every writer and reader.
+- In the Schema IR a `Tuple` node has no attributes, so the argument tuple is
+  the unnamed `Object` of the parameters carrying `maxDynamicData`, as C++
+  (`psio::reflect<T>::method_arg_tuple<I>`) writes it, and a schema-driven
+  reader derives the same width and bytes. Each `argumentTuple(...)` is a
+  type of its own. A parameter's bound is `max` (no `min` / `exact`), on a
+  type that has a bounded form.
+- In text the arguments are the object of the parameters, which is what the
+  Schema IR describes. (The C++ typed codec writes its `method_arg_tuple`
+  as the tuple, a JSON array.)
 
 ## Views
 
@@ -866,11 +989,11 @@ name into a 64-bit number (C++ `psio::compress_name`); `isCompressedName` /
 |---|---|
 | Schema-driven | `PsszSchema`, `PsszType`, `PsszError`, `PsszNaN`, `PsszNegativeZero`, `IR_VERSION`, `jsonToPssz`, `psszToJson`, `validatePssz`, `keyPrefixUpperBound` |
 | Views | `PsszView`, `RecordView`, `TupleView`, `ListView`, `VariantView` |
-| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `pair`, `map`, `set`, `nested`, `transparent`, `enumeration`, `timePoint`, `duration`, `monotonic`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
+| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `argumentTuple`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `pair`, `map`, `set`, `nested`, `transparent`, `enumeration`, `timePoint`, `duration`, `monotonic`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
 | Time | `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate`, `timeSchemaId`, `parseTimeSchemaId`, `reservedTimeId`, `timeFractionDigits` |
 | Other | `emitWit`, `toHex`, `fromHex`, `nameToNumber`, `numberToName`, `hashName`, `isHashName`, `isCompressedName` |
 | pjson | `pjsonEncode`, `pjsonDecode`, `pjsonValidate`, `PJSON_WIRE_REVISION`, `PjsonError`, `PjsonDecimal`, `PjsonFloat`, `PjsonString`, `PjsonTypedArray`, `PjsonRows`, `PjsonObject` |
-| Types | `Infer`, `InferView`, `CustomHandler`, `AssocOptions`, `FieldOptions`, `AltOptions`, `RecordOptions`, `LengthBoundOption`, `IntText`, `TypeDefOptions`, `JsonFormat`, `PsszWidth`, `PsszErrorKind`, `PsszValidation`, `PsszKeyValidation`, `PsszDecodeOptions`, `PsszTypeOptions`, `PsszSchemaOptions`, `PsszCustomHandler`, `PsszCustomHandlers`, `PsszNestedBytes`, `PsszSchemaInput`, `PsszTypeInput`, `CompactType`, `CompactEnumerator`, `Some`, `VariantValue`, `BitsValue`, `TimeKind`, `TimeUnit`, `TickType`, `PjsonValue`, and the IR: `IrSchema`, `IrAnyType`, `IrTypeValue`, `IrMember`, `IrAttribute`, `IrEnum`, `IrEnumerator`, `IrFunc`, `IrResource`, `IrInterface`, `IrWorld`, `IrUse` |
+| Types | `Infer`, `InferView`, `CustomHandler`, `AssocOptions`, `FieldOptions`, `PositionOptions`, `ArgumentTupleOptions`, `Bounded`, `BoundedView`, `AltOptions`, `RecordOptions`, `LengthBoundOption`, `IntText`, `TypeDefOptions`, `JsonFormat`, `PsszWidth`, `PsszErrorKind`, `PsszValidation`, `PsszKeyValidation`, `PsszDecodeOptions`, `PsszTypeOptions`, `PsszSchemaOptions`, `PsszCustomHandler`, `PsszCustomHandlers`, `PsszNestedBytes`, `PsszSchemaInput`, `PsszTypeInput`, `CompactType`, `CompactEnumerator`, `Some`, `VariantValue`, `BitsValue`, `TimeKind`, `TimeUnit`, `TickType`, `PjsonValue`, and the IR: `IrSchema`, `IrAnyType`, `IrTypeValue`, `IrMember`, `IrAttribute`, `IrEnum`, `IrEnumerator`, `IrFunc`, `IrResource`, `IrInterface`, `IrWorld`, `IrUse` |
 
 ## Performance
 
