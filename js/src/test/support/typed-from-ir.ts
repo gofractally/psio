@@ -8,12 +8,12 @@
 // skipped silently.
 
 import {
-  PsszSchema, TypeDef, alt, array, bitlist, bitvector, bool, boundedBytes, boundedList, boundedUtf8, box, bytes,
+  PsszSchema, TypeDef, alt, argumentTuple, array, bitlist, bitvector, bool, boundedBytes, boundedList, boundedUtf8, box, bytes,
   char, custom, duration, enumeration, f32, f64, field, fixedBytes, generateSchema, i128, i16, i32, i64, i8,
   lazy, list, map, monotonic, nested, optional, pair, parseTimeSchemaId, rawString, record, set, timePoint, transparent,
   tuple, u128, u16, u256, u32, u64, u8,
   utf8, variant, type FieldOptions, type IrAnyType, type IrAttribute, type IrMember, type IrSchema,
-  type PsszCustomHandler, type PsszNestedBytes, type PsszType, type PsszWidth, type RecordOptions,
+  type PositionOptions, type PsszCustomHandler, type PsszNestedBytes, type PsszType, type PsszWidth, type RecordOptions,
 } from '../../index.js';
 
 type Def = TypeDef<any, any>;
@@ -246,6 +246,8 @@ export class TypedFixture implements TypeSource {
         return enumeration(under, members);
       }
       case 'Object':
+        // An interned Object is a method's argument tuple.
+        if (slot !== undefined && slot.startsWith('@')) return this.argumentTuple(t.value.members, t.value.attributes);
         return this.record(slot ?? unsupported('an unnamed record'), t.value.members, t.value.attributes);
       case 'Struct':
         return unsupported('a Struct node (C++ and the typed layer spell a fixed record as Object + definitionWillNotChange)');
@@ -321,16 +323,31 @@ export class TypedFixture implements TypeSource {
       else if (a.name === 'maxFields') options.maxFields = Number(a.value!);
       else return unsupported(`record attribute ${a.name}`);
     }
+    return record(name, this.members(members), options);
+  }
+
+  private argumentTuple(members: IrMember[], attributes: IrAttribute[]): Def {
+    let maxDynamicData: bigint | undefined;
+    for (const a of attributes) {
+      if (a.name === 'maxDynamicData') maxDynamicData = BigInt(a.value!);
+      else return unsupported(`argument tuple attribute ${a.name}`);
+    }
+    for (const m of members) if (m.attributes.length) return unsupported('argument tuple member attributes');
+    return argumentTuple(this.members(members), { maxDynamicData });
+  }
+
+  private members(members: IrMember[]): { [name: string]: Def | ReturnType<typeof field> } {
     const fields: { [name: string]: Def | ReturnType<typeof field> } = {};
     for (const m of members) {
-      const o: FieldOptions = {};
+      let o: FieldOptions = {};
       let def: Def;
-      // A member bound written into the type (C++ length_bound{.max}): the
-      // only member types that are not references.
-      const bounded = m.type.value.type === 'Type' ? null : this.boundedMember(m.type);
+      // A member type that is not a reference is the type its bounds
+      // describe (C++ member annotations): declared as the plain type and
+      // the bounds.
+      const bounded = m.type.value.type === 'Type' ? null : this.bounded(m.type);
       if (bounded) {
         def = bounded.def;
-        o.lengthBound = { max: bounded.max };
+        o = { ...bounded.o };
       } else def = this.of(m.type);
       for (const a of m.attributes) {
         if (a.name === 'jsonInt' || a.name === 'ijsonInt') o[a.name] = a.value as 'number' | 'string';
@@ -346,27 +363,84 @@ export class TypedFixture implements TypeSource {
       }
       fields[m.name] = Object.keys(o).length ? field(def, o) : def;
     }
-    return record(name, fields, options);
+    return fields;
   }
 
-  private boundedMember(type: IrAnyType): { def: Def; max: number } | null {
+  // The plain type and the bounds of a type written in place (the inverse of
+  // C++ `SchemaBuilder::annotated_type`); `o` undefined for a reference,
+  // null when the node is not one the bounds produce.
+  private bounded(type: IrAnyType): { def: Def; o?: PositionOptions } | null {
     const t = type.value;
-    if (t.type === 'Option') {
-      const inner = this.boundedMember(t.value.type);
-      return inner && { def: optional(inner.def), max: inner.max };
+    const below = (inner: IrAnyType, wrap: (def: Def) => Def, key?: 'element', max?: bigint) => {
+      const child = this.bounded(inner);
+      if (!child) return null;
+      const o: { max?: number; element?: PositionOptions } = {};
+      if (max !== undefined) o.max = Number(max);
+      if (key && child.o) o[key] = child.o;
+      return { def: wrap(child.def), o: key ? (Object.keys(o).length ? o : undefined) : child.o };
+    };
+    switch (t.type) {
+      case 'Type': return { def: this.of(type) };
+      case 'Option': return below(t.value.type, optional);
+      case 'List': return below(t.value.type, list, 'element');
+      // (a std::vector under max<N>; a psio::bounded with bounds below it
+      // has the same node)
+      case 'BoundedList': return below(t.value.type, list, 'element', t.value.maxCount);
+      case 'Array': return below(t.value.type, (d) => array(d, t.value.len), 'element');
+      case 'Tuple': {
+        const items = t.value.members.map((m) => this.bounded(m));
+        if (items.some((x) => !x)) return null;
+        const at: { [index: string]: PositionOptions } = {};
+        items.forEach((x, i) => { if (x!.o) at[i] = x!.o; });
+        return { def: tuple(...items.map((x) => x!.def)), o: { at } };
+      }
+      case 'Variant': {
+        if (t.value.attributes.length) return null;
+        const alts: { [name: string]: Def | ReturnType<typeof alt> } = {};
+        const at: { [name: string]: PositionOptions } = {};
+        for (const m of t.value.members) {
+          const names = m.attributes.filter((a) => a.name === 'ijsonName');
+          const x = this.bounded(m.type);
+          if (names.length !== m.attributes.length || !x) return null;
+          alts[m.name] = names.length ? alt(x.def, { ijsonName: names[0].value! }) : x.def;
+          if (x.o) at[m.name] = x.o;
+        }
+        return { def: variant(alts), o: { at } };
+      }
+      case 'Custom': {
+        const w = t.value.type.value;
+        if (w.type !== 'List' && w.type !== 'BoundedList') return null;
+        const max = w.type === 'BoundedList' ? { max: Number(w.value.maxCount) } : {};
+        const id = t.value.id;
+        if (id === 'utf8' || id === 'string' || id === 'hex') {
+          if (w.value.type.value.type !== 'Type' || !this.isU8(w.value.type)) return null;
+          if (id === 'hex') return w.type === 'BoundedList' ? { def: bytes, o: max } : null;
+          if (id === 'string') return w.type === 'BoundedList' ? { def: rawString, o: max } : null;
+          return { def: rawString, o: { utf8: true, ...max } };
+        }
+        if (id === 'set') {
+          const element = this.bounded(w.value.type);
+          return element && { def: set(element.def), o: { ...max, ...(element.o ? { element: element.o } : {}) } };
+        }
+        if (id === 'map') {
+          const entry = w.value.type.value;
+          if (entry.type === 'Type') {
+            if (w.type !== 'BoundedList') return null;
+            return { def: this.assoc('map', w.value.type, false), o: max };
+          }
+          if (entry.type !== 'Tuple' || entry.value.members.length !== 2) return null;
+          const key = this.bounded(entry.value.members[0]);
+          const value = this.bounded(entry.value.members[1]);
+          if (!key || !value) return null;
+          return {
+            def: map(key.def, value.def),
+            o: { ...max, ...(key.o ? { keys: key.o } : {}), ...(value.o ? { values: value.o } : {}) },
+          };
+        }
+        return null;
+      }
+      default: return null;
     }
-    if (t.type === 'BoundedList') return { def: list(this.of(t.value.type)), max: Number(t.value.maxCount) };
-    if (t.type === 'Custom' && (t.value.id === 'map' || t.value.id === 'set')) {
-      const w = t.value.type.value;
-      if (w.type !== 'BoundedList') return null;
-      return { def: this.assoc(t.value.id, w.value.type, false), max: Number(w.value.maxCount) };
-    }
-    if (t.type === 'Custom' && (t.value.id === 'string' || t.value.id === 'hex')) {
-      const w = t.value.type.value;
-      if (w.type === 'BoundedList' && this.isU8(w.value.type))
-        return { def: t.value.id === 'string' ? rawString : bytes, max: Number(w.value.maxCount) };
-    }
-    return null;
   }
 
   /**

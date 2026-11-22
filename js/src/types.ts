@@ -43,10 +43,22 @@ function declared<R>(run: () => R): R {
 
 type AnyDef = TypeDef<any, any>;
 
+// The bounds of one position, as written (`PositionOptions`), checked and
+// with the positions that say nothing dropped.
+interface Position {
+  max?: number;
+  utf8?: boolean;
+  element?: Position;
+  keys?: Position;
+  values?: Position;
+  at?: Map<string, Position>;
+}
 interface FieldShape {
   name: string;
   type: AnyDef;
   lengthBound?: LengthBoundOption;
+  /** What the member says below itself, and `utf8` (never `max`: that is `lengthBound`). */
+  position?: Position;
   jsonInt?: IntText;
   ijsonInt?: IntText;
 }
@@ -76,6 +88,8 @@ type Shape =
   | { k: 'transparent'; name: string; inner: AnyDef }
   | { k: 'variant'; alts: AltShape[] }
   | { k: 'record'; name: string; fields: FieldShape[]; options: RecordOptions }
+  // A method's argument tuple; `uid`: its identity (C++: one type per method).
+  | { k: 'args'; uid: number; fields: FieldShape[]; maxDynamicData?: number | bigint }
   | { k: 'enum'; under: AnyDef; members: [string, bigint][] }
   | { k: 'time'; id: string; tick: AnyDef }
   | { k: 'custom'; id: string; inner: AnyDef; handler?: PsszCustomHandler }
@@ -92,12 +106,51 @@ export interface LengthBoundOption {
   exact?: number;
 }
 
-/** Options of a record member (`field`). */
-export interface FieldOptions {
+/**
+ * The bounds of one position of a member's type (`docs/pssz-spec.md` §3.5):
+ * the member itself, or a position below it — the elements of a list, the
+ * keys of a map, element 2 of a tuple — to any depth. An `optional` is
+ * looked through: what is written for it applies to its payload.
+ *
+ *     field(list(rawString), { max: 8, element: { utf8: true, max: 16 } })
+ *
+ * The member is exactly the type the bounds describe (here a bounded list of
+ * bounded UTF-8 strings): its size bound and offset widths, its bytes, its
+ * Schema IR and its checks are that type's. C++ writes the same as member
+ * annotations: `attr(tags, max<8> | element(utf8 | max<16>))`.
+ */
+export interface PositionOptions {
   /**
-   * Bounds the member's length (bytes of a string, elements of a list),
-   * through `optional`. `{ max }` alone on a raw string, bytes or list makes
-   * the member a bounded type, which narrows the record's offset width.
+   * At most `max` bytes of a `rawString` or `bytes`, elements of a `list`,
+   * entries of a `map` or `set`.
+   */
+  max?: number;
+  /**
+   * A `rawString` here is UTF-8 text: validated, and a `string` in
+   * JavaScript instead of a `Uint8Array`.
+   */
+  utf8?: boolean;
+  /** Every element of a `list`, a `boundedList`, an `array` or a `set`. */
+  element?: PositionOptions;
+  /** Every key of a `map`. */
+  keys?: PositionOptions;
+  /** Every mapped value of a `map`. */
+  values?: PositionOptions;
+  /**
+   * One element of a `tuple` / `pair`, by index, or one alternative of a
+   * `variant`, by name (or index): `{ 0: { max: 16 } }`.
+   */
+  at?: { readonly [index: string]: PositionOptions };
+}
+
+/** Options of a record member or a method parameter (`field`). */
+export interface FieldOptions extends PositionOptions {
+  /**
+   * Bounds the member's own length with `min` / `exact` as well as `max`
+   * (bytes of a string, elements of a list, bytes of a nested value),
+   * through `optional`. `{ lengthBound: { max } }` is `{ max }`: alone on a
+   * raw string, bytes, list, map or set it makes the member a bounded type,
+   * which narrows the record's offset width.
    */
   lengthBound?: LengthBoundOption;
   /** The form of the member's integers in strict JSON. */
@@ -143,6 +196,8 @@ export interface TypeDefOptions {
 const ir = (type: string, value: unknown): IrAnyType => ({ value: { type, value } } as IrAnyType);
 const intIr = (bits: number, isSigned: boolean) => ir('Int', { bits, isSigned });
 const attribute = (name: string, value: string): IrAttribute => ({ name, value });
+const sameRef = (a: IrAnyType, b: IrAnyType) =>
+  a.value.type === 'Type' && b.value.type === 'Type' && a.value.value.type === b.value.value.type;
 
 function resolve(def: AnyDef): AnyDef {
   for (let hops = 0; def.shape.k === 'lazy'; ++hops) {
@@ -182,6 +237,7 @@ function keyOf(def: AnyDef, depth = 0): string {
       out = `V(${s.alts.map((a) => `${JSON.stringify([a.name, a.ijsonName ?? null])}${k(a.type)}`).join(',')})`;
       break;
     case 'record': out = `R(${JSON.stringify(s.name)})`; break;
+    case 'args': out = `G(${s.uid})`; break;
     case 'enum': out = `E(${k(s.under)},${JSON.stringify(s.members.map(([n, v]) => [n, String(v)]))})`; break;
     case 'time': out = `M(${s.id},${k(s.tick)})`; break;
     case 'custom': out = `C(${JSON.stringify(s.id)},${k(s.inner)})`; break;
@@ -190,6 +246,61 @@ function keyOf(def: AnyDef, depth = 0): string {
   }
   def.key = out;
   return out;
+}
+
+// The key of `at` that speaks of alternative `index`: its name, or its index.
+function variantKey(alts: AltShape[], at: Map<string, Position>, index: number): string {
+  if (at.has(alts[index].name)) return alts[index].name;
+  // (an index that is another alternative's name speaks of that one)
+  return alts.some((alt) => alt.name === String(index)) ? '\0' : String(index);
+}
+
+// `ann::tree_ok`: the bounds fit the type at every depth, with one message
+// per misuse. `top`: the position is the member itself, whose own length
+// bound `member()` checks (it may be a nested value, a UTF-8 string, ...).
+function checkPosition(input: AnyDef, a: Position, top: boolean, where: string): void {
+  let def = resolve(input);
+  while (def.shape.k === 'option') def = resolve(def.shape.inner);
+  const s = def.shape;
+  const fail = (what: string): never => schemaError(`typed schema: ${where}: ${what}`);
+  const rawBytes = s.k === 'bytes' && s.bound === 'list' && s.id !== 'utf8';
+  if (a.max !== undefined && !top && !(rawBytes || s.k === 'list' || (s.k === 'assoc' && s.max === null)))
+    fail('max bounds a rawString or bytes (its bytes) or a list, map or set (its elements); this position is none of those');
+  if (a.utf8 && !(s.k === 'bytes' && (s.id === 'utf8' || (s.id === 'string' && s.bound === 'list'))))
+    fail('utf8 applies to a rawString; this position is not one');
+  if (a.element) {
+    if (!(s.k === 'list' || s.k === 'bounded' || s.k === 'array' || (s.k === 'assoc' && s.id === 'set')))
+      fail('element bounds the elements of a list, an array or a set; this position is none of those ' +
+        '(a map takes keys / values, a tuple, pair or variant takes at)');
+    checkPosition((s as { inner?: AnyDef; entry?: AnyDef }).inner ?? (s as { entry: AnyDef }).entry, a.element, false, `${where}, element`);
+  }
+  if (a.keys || a.values) {
+    if (!(s.k === 'assoc' && s.id === 'map'))
+      fail('keys / values bound the keys / mapped values of a map; this position is not a map');
+    const [key, value] = (resolve((s as { entry: AnyDef }).entry).shape as { items: AnyDef[] }).items;
+    if (a.keys) checkPosition(key, a.keys, false, `${where}, keys`);
+    if (a.values) checkPosition(value, a.values, false, `${where}, values`);
+  }
+  if (a.at) {
+    if (s.k === 'tuple') {
+      for (const [key, child] of a.at) {
+        if (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= s.items.length) fail(`at ${key}: not an element of this tuple / pair`);
+        checkPosition(s.items[Number(key)], child, false, `${where}, at ${key}`);
+      }
+    } else if (s.k === 'variant') {
+      const seen = new Set<number>();
+      for (const [key, child] of a.at) {
+        let index = s.alts.findIndex((alt) => alt.name === key);
+        if (index < 0 && /^(0|[1-9][0-9]*)$/.test(key) && Number(key) < s.alts.length) index = Number(key);
+        if (index < 0) fail(`at ${key}: not an alternative of this variant`);
+        if (seen.has(index)) fail(`at ${key}: the alternative is named twice`);
+        seen.add(index);
+        checkPosition(s.alts[index].type, child, false, `${where}, at ${key}`);
+      }
+    } else
+      fail('at bounds an element of a tuple / pair or an alternative of a variant; this position is none of those ' +
+        '(a list, array or set takes element)');
+  }
 }
 
 class Builder {
@@ -280,15 +391,7 @@ class Builder {
       case 'bounded': return ir('BoundedList', { type: this.insert(s.inner), maxCount: s.n });
       case 'array': return ir('Array', { type: this.insert(s.inner), len: s.n });
       case 'tuple': return ir('Tuple', { members: s.items.map((item) => this.insert(item)) });
-      case 'variant':
-        return ir('Variant', {
-          members: s.alts.map((alt): IrMember => ({
-            name: alt.name,
-            type: this.insert(alt.type),
-            attributes: alt.ijsonName === undefined ? [] : [attribute('ijsonName', alt.ijsonName)],
-          })),
-          attributes: [],
-        });
+      case 'variant': return this.variant(s.alts, (alt) => this.insert(alt.type));
       case 'record': {
         const members = s.fields.map((field) => this.member(field));
         const attributes: IrAttribute[] = [];
@@ -298,6 +401,14 @@ class Builder {
           attributes.push(attribute('maxDynamicData', String(s.options.maxDynamicData)));
         return ir('Object', { members, attributes });
       }
+      case 'args':
+        // `SchemaBuilder`, psio_annotated_tuple: a Tuple node has no
+        // attributes, so the tuple is written as the extensible record it is
+        // on the wire, which can carry the cap.
+        return ir('Object', {
+          members: s.fields.map((f) => this.parameter(f)),
+          attributes: s.maxDynamicData === undefined ? [] : [attribute('maxDynamicData', String(s.maxDynamicData))],
+        });
       case 'enum':
         return ir('Enum', {
           type: this.build(resolve(s.under)),
@@ -344,49 +455,129 @@ class Builder {
       : ir('Array', { type, len: n });
   }
 
-  // `bounded_member_type`: the member type a `max` length bound turns into.
-  private boundedMember(def: AnyDef, max: bigint): IrAnyType | null {
-    const s = resolve(def).shape;
+  // `annotated_type`: the type of `input` at a position that carries `a` — a
+  // `max` is the bounded form of a string / list / map / set, `utf8` the
+  // UTF-8 string: the nodes the wrapper types produce. A position with
+  // nothing to say is the interned type. `useBound` false: the position's
+  // own bound is carried elsewhere (the member attribute lengthBound).
+  private annotated(input: AnyDef, a: Position | undefined, useBound = true): IrAnyType {
+    const def = resolve(input);
+    if (!a) return this.insert(def);
+    const s = def.shape;
     if (s.k === 'option') {
-      const inner = this.boundedMember(s.inner, max);
-      return inner && ir('Option', { type: inner });
+      // Looked through: the bounds are the payload's.
+      const inner = this.annotated(s.inner, a, useBound);
+      return sameRef(inner, this.insert(s.inner)) ? this.insert(def) : ir('Option', { type: inner });
     }
-    if (s.k === 'bytes' && s.bound === 'list' && s.id !== 'utf8')
-      return ir('Custom', { type: this.byteContainer('max', max), id: s.id });
-    if (s.k === 'assoc' && s.max === null)
-      return ir('Custom', { type: ir('BoundedList', { type: this.insert(s.entry), maxCount: max }), id: s.id });
-    if (s.k === 'list') return ir('BoundedList', { type: this.insert(s.inner), maxCount: max });
-    return null;
+    const max = useBound && a.max !== undefined ? BigInt(a.max) : null;
+    const listOf = (type: IrAnyType, bound = max) =>
+      bound === null ? ir('List', { type }) : ir('BoundedList', { type, maxCount: bound });
+    switch (s.k) {
+      case 'bytes':
+        if (s.bound !== 'list' || s.id === 'utf8') return this.insert(def);
+        if (s.id === 'string') {
+          if (max === null && !a.utf8) return this.insert(def);
+          return ir('Custom', { type: listOf(this.insert(u8)), id: a.utf8 ? 'utf8' : 'string' });
+        }
+        return max === null ? this.insert(def) : ir('Custom', { type: listOf(this.insert(u8)), id: 'hex' });
+      case 'assoc': {
+        const below = s.id === 'map' ? !!(a.keys || a.values) : !!a.element;
+        if (max === null && !below) return this.insert(def);
+        let entry: IrAnyType;
+        if (s.id === 'set') entry = this.annotated(s.entry, a.element);
+        else if (below) {
+          // (in this order: the key's types are registered first)
+          const [key, value] = (resolve(s.entry).shape as { items: AnyDef[] }).items;
+          const keyType = this.annotated(key, a.keys);
+          entry = ir('Tuple', { members: [keyType, this.annotated(value, a.values)] });
+        } else entry = this.insert(s.entry);
+        return ir('Custom', { type: listOf(entry, max ?? s.max), id: s.id });
+      }
+      case 'list':
+        if (max === null && !a.element) return this.insert(def);
+        return listOf(this.annotated(s.inner, a.element));
+      case 'bounded':
+        // The wrapper's bound / the array's length is in its type.
+        if (!a.element) return this.insert(def);
+        return ir('BoundedList', { type: this.annotated(s.inner, a.element), maxCount: s.n });
+      case 'array':
+        if (!a.element) return this.insert(def);
+        return ir('Array', { type: this.annotated(s.inner, a.element), len: s.n });
+      case 'tuple':
+        if (!a.at) return this.insert(def);
+        return ir('Tuple', { members: s.items.map((item, i) => this.annotated(item, a.at!.get(String(i)))) });
+      case 'variant':
+        if (!a.at) return this.insert(def);
+        return this.variant(s.alts, (alt, i) => this.annotated(alt.type, a.at!.get(variantKey(s.alts, a.at!, i))));
+      default:
+        return this.insert(def);
+    }
   }
 
-  // `build_record_member`.
+  private variant(alts: AltShape[], type: (alt: AltShape, index: number) => IrAnyType): IrAnyType {
+    return ir('Variant', {
+      members: alts.map((alt, i): IrMember => ({
+        name: alt.name,
+        type: type(alt, i),
+        attributes: alt.ijsonName === undefined ? [] : [attribute('ijsonName', alt.ijsonName)],
+      })),
+      attributes: [],
+    });
+  }
+
+  // `build_record_member` / `apply_member_annotations`.
   private member(field: FieldShape): IrMember {
     const member: IrMember = { name: field.name, type: this.insert(field.type), attributes: [] };
     const direct = resolve(field.type).shape;
+    let target = direct;
+    while (target.k === 'option') target = resolve(target.inner).shape;
     // A bounded UTF-8 string states its own bound.
     const bound = field.lengthBound
       ?? (direct.k === 'bytes' && direct.id === 'utf8' && direct.bound === 'max' ? { max: Number(direct.n) } : undefined);
+    let position = field.position;
+    let asAttribute = false;
     if (bound) {
-      let target = direct;
-      while (target.k === 'option') target = resolve(target.inner).shape;
       // Elements of a list, entries of a map / set, bytes of a string or of
       // a nested value's encoding.
       const applies = target.k === 'list' || target.k === 'assoc' || target.k === 'nested' ||
         (target.k === 'bytes' && target.bound !== 'exact' && (target.bound === 'list' || target.id === 'utf8'));
       if (!applies) schemaError(`typed schema: lengthBound does not apply to member "${field.name}"`);
       const onlyMax = bound.max !== undefined && bound.exact === undefined && bound.min === undefined;
-      const bounded = onlyMax ? this.boundedMember(field.type, BigInt(bound.max!)) : null;
-      if (bounded) member.type = bounded;
+      // `has_bounded_form`: the types a `max` turns into a bounded type.
+      const boundedForm = target.k === 'list' || (target.k === 'assoc' && target.max === null) ||
+        (target.k === 'bytes' && target.bound === 'list' && target.id !== 'utf8');
+      if (onlyMax && boundedForm) position = { ...position, max: bound.max };
       else {
+        asAttribute = true;
         const items: string[] = [];
         for (const key of ['exact', 'min', 'max'] as const)
           if (bound[key] !== undefined) items.push(`${key}=${bound[key]}`);
         if (items.length) member.attributes.push(attribute('lengthBound', items.join(',')));
       }
     }
+    if (position) {
+      checkPosition(field.type, position, true, `member "${field.name}"`);
+      member.type = this.annotated(field.type, position, !asAttribute);
+    }
     if (field.jsonInt) member.attributes.push(attribute('jsonInt', field.jsonInt));
     if (field.ijsonInt) member.attributes.push(attribute('ijsonInt', field.ijsonInt));
     return member;
+  }
+
+  // A parameter of an argument tuple: its annotated type (its plain type is
+  // not registered first, and a Tuple element has no attributes).
+  private parameter(field: FieldShape): IrMember {
+    const where = `parameter "${field.name}"`;
+    const bound = field.lengthBound;
+    let position = field.position;
+    if (bound) {
+      if (bound.exact !== undefined || bound.min !== undefined)
+        schemaError(`typed schema: ${where}: a parameter's length bound is max (the Schema IR has no place for exact / min)`);
+      position = { ...position, max: bound.max };
+    }
+    if (field.jsonInt || field.ijsonInt) schemaError(`typed schema: ${where}: jsonInt / ijsonInt belong to record members`);
+    if (position) checkPosition(field.type, position, false, where);
+    return { name: field.name, type: this.annotated(field.type, position), attributes: [] };
   }
 
   schema(requireHandlers?: boolean): PsszSchema {
@@ -744,9 +935,58 @@ export class Field<T, V = T> {
   /** @internal */
   constructor(readonly type: TypeDef<T, V>, readonly options: FieldOptions) {}
 }
-/** A record member with a length bound or an integer text form. */
-export function field<T, V>(type: TypeDef<T, V>, options: FieldOptions): Field<T, V> {
-  return new Field(isDef(type, 'a field type'), options ?? {});
+
+// What bounds change in the JavaScript value: a `rawString` made UTF-8 is a
+// `string`. Everything else keeps its type.
+type Sub<O, K extends string> = O extends { readonly [P in K]: infer S } ? S : {};
+type At<O, I> = O extends { readonly at: infer A }
+  ? I extends keyof A ? A[I]
+    : I extends `${infer N extends number}` ? (N extends keyof A ? A[N] : {})
+    : {}
+  : {};
+type EntryOf<O> = { at: { 0: Sub<O, 'keys'>; 1: Sub<O, 'values'> } };
+
+/**
+ * The decoded value of a member of value type `T` under the bounds `O`
+ * (`field(type, O)`): `T`, with a `Uint8Array` at every position that says
+ * `utf8: true` replaced by `string`.
+ */
+export type Bounded<T, O> =
+  T extends null ? null
+  : T extends Uint8Array ? (O extends { readonly utf8: true } ? string : T)
+  : T extends Map<infer K, infer W> ? Map<Bounded<K, Sub<O, 'keys'>>, Bounded<W, Sub<O, 'values'>>>
+  : T extends Set<infer E> ? Set<Bounded<E, Sub<O, 'element'>>>
+  : T extends readonly unknown[]
+    ? (number extends T['length'] ? Bounded<T[number], Sub<O, 'element'>>[] : { -readonly [I in keyof T]: Bounded<T[I], At<O, I>> })
+  : O extends { readonly at: object }
+    ? (T extends { type: infer N; value: infer X } ? { type: N; value: Bounded<X, At<O, N>> } : T)
+  : T;
+
+/** What a view returns for a member of view type `V` under the bounds `O`. */
+export type BoundedView<V, O> =
+  V extends RecordView<any, any> ? V
+  : V extends ListView<infer T, infer E>
+    ? ListView<Bounded<T, O>, BoundedView<E, T extends Map<any, any> ? EntryOf<O> : Sub<O, 'element'>>>
+  : V extends TupleView<infer T, infer E extends readonly unknown[]>
+    ? TupleView<Bounded<T, O>, { -readonly [I in keyof E]: BoundedView<E[I], At<O, I>> }>
+  : V extends VariantView<infer T, infer K, infer X> ? VariantView<Bounded<T, O>, K, BoundedView<X, At<O, K>>>
+  : Bounded<V, O>;
+
+/**
+ * A record member (or a method parameter) with options: bounds at any depth
+ * of its type (`max`, `utf8`, `element`, `keys`, `values`, `at`), a length
+ * bound with `min` / `exact`, an integer text form.
+ *
+ *     record('Post', {
+ *       title: field(rawString, { utf8: true, max: 80 }),                    // string
+ *       tags:  field(list(rawString), { max: 8, element: { utf8: true, max: 16 } }),  // string[]
+ *       seen:  field(map(rawString, list(u32)), { max: 4, keys: { max: 16 }, values: { max: 2 } }),
+ *     });
+ */
+export function field<T, V, const O extends FieldOptions>(
+  type: TypeDef<T, V>, options: O,
+): Field<Bounded<T, O>, BoundedView<V, O>> {
+  return new Field(isDef(type, 'a field type') as never, options ?? {});
 }
 
 /** A variant alternative with options (`alt`). */
@@ -780,6 +1020,72 @@ function intText(x: unknown, what: string): IntText | undefined {
   return x as IntText | undefined;
 }
 
+const bound32 = (x: unknown) => typeof x === 'number' && Number.isInteger(x) && x >= 0 && x <= 0xffffffff;
+
+// The bounds written for one position; undefined when they say nothing.
+// `top`: the member itself, whose `max` is its length bound.
+function positionOf(o: PositionOptions, where: string, top = false, depth = 0): Position | undefined {
+  if (typeof o !== 'object' || o === null) schemaError(`typed schema: ${where}: bounds must be an object`);
+  if (depth > 64) schemaError(`typed schema: ${where}: bounds nested too deep`);
+  const allowed = top
+    ? ['max', 'utf8', 'element', 'keys', 'values', 'at', 'lengthBound', 'jsonInt', 'ijsonInt']
+    : ['max', 'utf8', 'element', 'keys', 'values', 'at'];
+  for (const key of Object.keys(o))
+    if (!allowed.includes(key))
+      schemaError(`typed schema: ${where}: unknown option "${key}"` +
+        (key === 'lengthBound' ? ' (below the member itself a length bound is max)' : ''));
+  const out: Position = {};
+  if (o.max !== undefined) {
+    if (!bound32(o.max)) schemaError(`typed schema: ${where}: max must be a 32-bit unsigned integer`);
+    if (!top) out.max = o.max;
+  }
+  if (o.utf8 !== undefined) {
+    if (typeof o.utf8 !== 'boolean') schemaError(`typed schema: ${where}: utf8 is true or false`);
+    if (o.utf8) out.utf8 = true;
+  }
+  for (const key of ['element', 'keys', 'values'] as const) {
+    if (o[key] === undefined) continue;
+    const child = positionOf(o[key]!, `${where}, ${key}`, false, depth + 1);
+    if (child) out[key] = child;
+  }
+  if (o.at !== undefined) {
+    if (typeof o.at !== 'object' || o.at === null) schemaError(`typed schema: ${where}: at is an object of bounds by index or name`);
+    const at = new Map<string, Position>();
+    for (const key of Object.keys(o.at)) {
+      const child = positionOf(o.at[key], `${where}, at ${key}`, false, depth + 1);
+      if (child) at.set(key, child);
+    }
+    if (at.size) out.at = at;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+function fieldShapes(fields: { [name: string]: MemberInput }, what: string): FieldShape[] {
+  return memberNames(fields, `${what} name`).map((key): FieldShape => {
+    const f = fields[key];
+    if (f instanceof Field) {
+      const o = f.options;
+      const where = `${what} "${key}"`;
+      const position = positionOf(o, where, true);
+      let b = o.lengthBound;
+      if (b !== undefined) {
+        if (typeof b !== 'object' || b === null) schemaError(`typed schema: lengthBound of "${key}" must be an object`);
+        for (const k of ['max', 'min', 'exact'] as const)
+          if (b[k] !== undefined && !bound32(b[k]))
+            schemaError(`typed schema: lengthBound.${k} of "${key}" must be a 32-bit unsigned integer`);
+        if (o.max !== undefined && b.max !== undefined && o.max !== b.max)
+          schemaError(`typed schema: ${where} states max twice`);
+      }
+      if (o.max !== undefined) b = { ...b, max: o.max };
+      return {
+        name: key, type: f.type, lengthBound: b, position,
+        jsonInt: intText(o.jsonInt, 'jsonInt'), ijsonInt: intText(o.ijsonInt, 'ijsonInt'),
+      };
+    }
+    return { name: key, type: isDef(f, `${what} "${key}"`) };
+  });
+}
+
 /**
  * A record: named fields in declaration order, an object in JavaScript. It
  * can grow by appending optional fields: a reader of the older definition
@@ -792,26 +1098,48 @@ export function record<F extends { [name: string]: TypeDef<any, any> | Field<any
   if (typeof name !== 'string' || name === '' || name.startsWith('@'))
     schemaError('typed schema: a record needs a name (not starting with "@")');
   if (typeof fields !== 'object' || fields === null) schemaError('typed schema: record fields must be an object');
-  const shapes = memberNames(fields, 'field name').map((key): FieldShape => {
-    const f = fields[key] as MemberInput;
-    if (f instanceof Field) {
-      const o = f.options;
-      const b = o.lengthBound;
-      if (b !== undefined)
-        for (const k of ['max', 'min', 'exact'] as const)
-          if (b[k] !== undefined && !(Number.isInteger(b[k]) && b[k]! >= 0 && b[k]! <= 0xffffffff))
-            schemaError(`typed schema: lengthBound.${k} of "${key}" must be a 32-bit unsigned integer`);
-      return {
-        name: key, type: f.type, lengthBound: b,
-        jsonInt: intText(o.jsonInt, 'jsonInt'), ijsonInt: intText(o.ijsonInt, 'ijsonInt'),
-      };
-    }
-    return { name: key, type: isDef(f, `field "${key}"`) };
-  });
+  const shapes = fieldShapes(fields, 'field');
   const { fixed, maxDynamicData, maxFields } = options;
   if (maxDynamicData !== undefined) count(maxDynamicData, 'maxDynamicData');
   if (maxFields !== undefined) count(maxFields, 'maxFields');
   return new TypeDef({ k: 'record', name, fields: shapes, options: { fixed: !!fixed, maxDynamicData, maxFields } });
+}
+
+/** Options of `argumentTuple`. */
+export interface ArgumentTupleOptions {
+  /**
+   * The cap on the encoded arguments (`docs/pssz-spec.md` §16). It fixes the
+   * tuple's offset width for the method's lifetime: declare it from the
+   * start on a method that may gain optional trailing arguments.
+   */
+  maxDynamicData?: number | bigint;
+}
+
+let argumentTuples = 0;
+
+/**
+ * The argument tuple of a method (`docs/pssz-spec.md` §16; C++
+ * `psio::reflect<T>::method_arg_tuple<I>`): the tuple of the parameters,
+ * each bounded by what `field(type, { max, utf8, element, ... })` says of
+ * it, the whole capped by `maxDynamicData`. Its bytes are those of the
+ * `tuple` of the same bounded types; an explicit cap rules its offset
+ * width, and without one the width follows from the parameters' bounds.
+ *
+ * In JavaScript the arguments are an object keyed by parameter name. In the
+ * Schema IR the tuple is the unnamed `Object` of the parameters carrying
+ * `maxDynamicData` (a `Tuple` node has no attributes), as C++ writes it.
+ * Every `argumentTuple(...)` is a type of its own (`@N` in a generated
+ * schema), as every C++ method's is. A method may gain optional trailing
+ * parameters, as a record gains optional fields.
+ */
+export function argumentTuple<P extends { [name: string]: TypeDef<any, any> | Field<any, any> }>(
+  parameters: P, options: ArgumentTupleOptions = {},
+): TypeDef<{ [K in keyof P]: MemberValue<P[K]> }, RecordView<{ [K in keyof P]: MemberValue<P[K]> }, { [K in keyof P]: MemberView<P[K]> }>> {
+  if (typeof parameters !== 'object' || parameters === null) schemaError('typed schema: parameters must be an object');
+  const fields = fieldShapes(parameters, 'parameter');
+  const maxDynamicData = options?.maxDynamicData;
+  if (maxDynamicData !== undefined) count(maxDynamicData, 'maxDynamicData');
+  return new TypeDef({ k: 'args', uid: ++argumentTuples, fields, maxDynamicData });
 }
 
 /**

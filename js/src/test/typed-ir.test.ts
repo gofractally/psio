@@ -16,7 +16,7 @@ const fixture = (name: string) =>
 const fromHex = (hex: string) => Uint8Array.from(Buffer.from(hex, 'hex'));
 const toHex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 
-for (const [file, irTypes] of [['pssz-vectors.json', 562], ['json-vectors.json', 223], ['time-key-vectors.json', 140]] as const) {
+for (const [file, irTypes] of [['pssz-vectors.json', 591], ['json-vectors.json', 223], ['time-key-vectors.json', 140]] as const) {
   test(`${file}: generateSchema of the typed declarations is the C++ Schema IR`, () => {
     const fx: { schema_ir: string; types: { id: string }[] } = fixture(file);
     const schema = PsszSchema.decode(fromHex(fx.schema_ir));

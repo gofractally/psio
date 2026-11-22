@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  IR_VERSION, PsszError, PsszSchema, PsszView, validatePssz, type JsonFormat, type PsszNestedBytes, type PsszType,
+  IR_VERSION, PsszError, PsszSchema, PsszView, validatePssz, type IrSchema, type JsonFormat, type PsszNestedBytes, type PsszType,
   type PsszWidth,
 } from '../index.js';
 import { fixtureHandlers } from './support/custom-handlers.js';
@@ -111,11 +111,50 @@ function hasSomeNone(value: unknown): boolean {
 const PSSZ_CLASSES: { [cls: string]: number } = {
   corpus: 956, 'evolution-forward': 660, 'evolution-backward': 1380, pruning: 212, malformed: 419,
   'optional-presence': 400, width: 309, 'cap-overflow-explicit-nested': 15, tuple: 60, variant: 48, enum: 76,
-  'enum-unknown-value': 36, string: 308, 'string-raw-non-utf8': 44, 'length-bound-overflow': 32, box: 100,
+  'enum-unknown-value': 36, string: 308, 'string-raw-non-utf8': 48, 'length-bound-overflow': 32, box: 100,
   bytes: 88, 'zero-fixed': 100, depth: 28, nested: 252, 'nested-unknown': 20, 'nested-deferred': 24,
   'map-set': 266, 'map-set-order': 352, transparent: 160, custom: 116, invariant: 128,
+  'annotated-bounds': 148, 'method-args': 62,
 };
 const NO_HANDLER = 'pssz IR: no handler registered for a custom type';
+
+// Classes `annotated-bounds` and `method-args`: the C++ reason of a rejected
+// frame, and this codec's message for the same refusal.
+const CAP = 'pssz: encoded size exceeds maxDynamicData cap';
+const TREE_REASONS: { [reason: string]: RegExp } = {
+  'pssz: member length_bound violated': /^pssz IR: (byte count|sequence) bound exceeded$/,
+  'pssz: bounded list exceeds its bound': /^pssz IR: sequence bound exceeded$/,
+  'pssz: utf8_string exceeds its bound': /^pssz IR: byte count bound exceeded$/,
+  'utf8_spec: invalid leading byte': /^pssz IR: string is not valid UTF-8$/,
+  [CAP]: /^pssz IR: encoded size exceeds maxDynamicData cap$/,
+};
+const KEY_BOUND = /^key: (list exceeds its bound|string exceeds its bound|bytes exceed their bound)$/;
+// (a map / set orders its entries by their keys before it writes them, and a
+// codec with handlers settles the value first: either codec may be the one
+// that meets the bound)
+const VALUE_BOUND = new RegExp(`^pssz IR: (byte count|sequence) bound exceeded$|${KEY_BOUND.source}`);
+// (a map with an overlong key is refused when its entries are ordered)
+const TEXT_BOUND = /^json: (array|string) exceeds its bound$|^key: string exceeds its bound$/;
+
+// The schema with every bound taken out (a bounded list is a list, a member
+// length bound is gone), bit types aside: the twin that reads and writes the
+// values a bounded type refuses. `raw`: its UTF-8 strings are raw strings too.
+function withoutBounds(ir: IrSchema, raw: boolean): PsszSchema {
+  const walk = (x: unknown): unknown => {
+    if (Array.isArray(x))
+      return x.filter((item) => !(item && typeof item === 'object' && (item as { name?: string }).name === 'lengthBound' &&
+        typeof (item as { value?: unknown }).value === 'string')).map(walk);
+    if (typeof x !== 'object' || x === null) return x;
+    const node = x as { type?: string; value?: { type?: unknown; id?: string } };
+    if (node.type === 'Custom' && (node.value?.id === 'bitlist' || node.value?.id === 'bitvector')) return x;
+    if (node.type === 'BoundedList') return { type: 'List', value: { type: walk(node.value!.type) } };
+    const out: { [key: string]: unknown } = {};
+    for (const key of Object.keys(x)) out[key] = walk((x as { [key: string]: unknown })[key]);
+    if (raw && node.type === 'Custom' && node.value?.id === 'utf8') (out.value as { id: string }).id = 'string';
+    return out;
+  };
+  return new PsszSchema(walk(ir) as IrSchema);
+}
 
 for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, () => {
   const fx: { schema_ir: string; types: PsszTypeRow[]; vectors: PsszRow[] } = fixture('pssz-vectors.json');
@@ -185,16 +224,20 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     return type;
   };
 
+  const unbounded = withoutBounds(schema.ir, false);
+  const unboundedRaw = withoutBounds(schema.ir, true);
   const count = {
     auto: {
       vectors: 0, validateAccept: 0, validateReject: 0, canonicalReencode: 0, unknownReencode: 0,
       jsonRoundTrip: 0, ijsonRoundTrip: 0, someNoneLossy: 0, noJsonForm: 0,
       ijsonNoncharacter: 0, rawNonUtf8NoText: 0, handlerTextRoundTrip: 0,
       invariant: 0, nestedUnknown: 0, nestedDeferred: 0, lengthBoundReject: 0,
+      treeReject: 0, treeWriterRefused: 0, treeNotUtf8: 0, treeOverCap: 0,
     },
     explicit: {
       vectors: 0, validateAccept: 0, validateReject: 0, canonicalReencode: 0,
       unknownReencode: 0, invariant: 0, nestedUnknown: 0, nestedDeferred: 0, lengthBoundReject: 0,
+      treeReject: 0, treeWriterRefused: 0, treeNotUtf8: 0, treeOverCap: 0,
     },
   };
   const classes = new Map<string, number>();
@@ -332,9 +375,7 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
       // member bound is the member's attribute. All three messages are the
       // bound's.) A view is not validated when it is made: it reads only
       // what it is asked for, so making one of these frames succeeds.
-      if (cls === 'length-bound-overflow') {
-        const BOUND = /^pssz IR: (member length bound violated|byte count bound exceeded|sequence bound exceeded)$/;
-        assert.equal(row.reason, 'pssz: member length_bound violated', row.name);
+      const everyReader = (BOUND: RegExp) => {
         const readers: [string, PsszType][] = [['plain', type], ['handlers', withHandlers]];
         for (const [label, reader] of readers) {
           const name = `${row.name}: ${label}`;
@@ -350,7 +391,67 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
           assert.match(rejects(() => view.toValue(), name).message, BOUND, `${name}: view.toValue`);
           assert.match(rejects(() => view.toValue({ rejectUnknown: true }), name).message, BOUND, `${name}: view.toValue exact`);
         }
+      };
+      if (cls === 'length-bound-overflow') {
+        assert.equal(row.reason, 'pssz: member length_bound violated', row.name);
+        everyReader(/^pssz IR: (member length bound violated|byte count bound exceeded|sequence bound exceeded)$/);
         ++c.lengthBoundReject;
+      }
+      // A value outside a bound stated below the member (an element, a key,
+      // a mapped value, a tuple element, a variant alternative, an optional
+      // payload: docs/pssz-spec.md 3.5), a method argument outside its
+      // parameter's bounds, and arguments over the cap. Every reader refuses
+      // the frame for the reason recorded; then every writer and every text
+      // / key reader refuses the value the frame holds.
+      if (cls === 'annotated-bounds' || cls === 'method-args') {
+        const expected = TREE_REASONS[row.reason];
+        assert.ok(expected, `${row.name}: reason ${row.reason}`);
+        everyReader(expected);
+        ++c.treeReject;
+        const notUtf8 = row.reason.startsWith('utf8_spec:');
+        const wide = rowByName.get(row.name.slice(0, row.name.lastIndexOf('/') + 1) + 'pssz32');
+        if (row.reason === CAP) {
+          // (one frame, in the automatic profile: `argumentTuple` in types.test.ts)
+          assert.equal(row.name, 'method-args/note_over_cap/as/tuple<raw_string>@cap=64/auto');
+          ++c.treeOverCap;
+        } else {
+          // The value, read by the twin that has no bounds (every width is 4
+          // in pssz32, whatever bounds the type).
+          assert.ok(wide && wide.expect === 'reject' && wide.reason === row.reason, `${row.name}: no pssz32 frame`);
+          const loose = (notUtf8 ? unboundedRaw : unbounded).type(row.type, { width: 4 });
+          const outside = loose.decode(fromHex(wide.hex));
+          const keyBytes = (notUtf8 ? unboundedRaw : unbounded).type(row.type).encodeKey(outside);
+          for (const reader of [type, withHandlers]) {
+            // The key reader.
+            const key = reader.validateKey(keyBytes);
+            assert.ok(!key.ok && key.error.kind === 'bytes', `${row.name}: key accepted`);
+            assert.match(key.error.message, notUtf8 ? /^key: string is not valid UTF-8$/ : KEY_BOUND, `${row.name}: key`);
+            assert.equal(rejects(() => reader.decodeKey(keyBytes), row.name).message, key.error.message, `${row.name}: decodeKey`);
+            // A JavaScript string is always text: there is no value of a
+            // UTF-8 position that is not UTF-8 to hand to a writer.
+            if (notUtf8) continue;
+            const written = rejects(() => reader.encode(outside), `${row.name}: encode`);
+            assert.equal(written.kind, 'value', row.name);
+            assert.match(written.message, VALUE_BOUND, `${row.name}: encode`);
+            // The key writer too. (C++ `psio::key` writes such a key and only
+            // its reader refuses it; here both do.)
+            const keyWritten = rejects(() => reader.encodeKey(outside), `${row.name}: encodeKey`);
+            assert.equal(keyWritten.kind, 'value', row.name);
+            assert.match(keyWritten.message, VALUE_BOUND, `${row.name}: encodeKey`);
+            for (const format of ['json', 'ijson'] as const) {
+              const text = loose.valueToJson(outside, format);
+              for (const run of [
+                () => reader.valueToJson(outside, format), () => reader.jsonToValue(text, format),
+                () => reader.jsonToPssz(text, format),
+              ]) {
+                const refused = rejects(run, `${row.name}: ${format}`);
+                assert.ok(refused.kind === 'value' || refused.kind === 'json', `${row.name}: ${format}: ${refused.kind}`);
+                assert.match(refused.message, TEXT_BOUND, `${row.name}: ${format}`);
+              }
+            }
+          }
+          ++c[notUtf8 ? 'treeNotUtf8' : 'treeWriterRefused'];
+        }
       }
       ++c.validateReject;
       continue;
@@ -436,14 +537,23 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   assert.equal(a.nestedDeferred + e.nestedDeferred, PSSZ_CLASSES['nested-deferred']);
   assert.equal(a.lengthBoundReject + e.lengthBoundReject, PSSZ_CLASSES['length-bound-overflow']);
   assert.equal(a.nestedUnknown + e.nestedUnknown, 16);
+  // Every rejected frame of the two classes went through every reader, and
+  // its value (one frame aside: the cap) through every writer.
+  const treeRejects = fx.vectors.filter((v) => (v.class === 'annotated-bounds' || v.class === 'method-args') && v.expect === 'reject');
+  assert.equal(treeRejects.length, 109);
+  assert.equal(a.treeReject + e.treeReject, treeRejects.length);
+  assert.deepEqual(
+    [a.treeWriterRefused + e.treeWriterRefused, a.treeNotUtf8 + e.treeNotUtf8, a.treeOverCap + e.treeOverCap],
+    [96, 12, 1],
+  );
   assert.ok(a.rawNonUtf8NoText >= 11);
   // Top-level caps under an explicit width are rejections that were replayed.
   const explicitCap = fx.vectors.filter(
     (v) => v.format !== 'auto' && v.name.startsWith('width/') && v.name.includes('cap') && v.expect === 'reject',
   );
   assert.equal(explicitCap.length, 12);
-  assert.equal(fx.types.length, 308);
-  assert.equal(fx.vectors.length, 6589);
+  assert.equal(fx.types.length, 323);
+  assert.equal(fx.vectors.length, 6803);
 });
 
 for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, () => {
