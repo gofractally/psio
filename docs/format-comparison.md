@@ -28,9 +28,10 @@ and O(1) random access require an offset table with fixed-width
 slots, and that table is what costs the few bytes that varint
 formats save.** pssz's bet is that the access-pattern properties
 are worth more than those bytes. §2 measures what it costs: the
-varint formats are 3–16× slower to decode, while the fixed-layout
-formats that give up extensibility (ssz, borsh, bincode) are
-currently 10–20% faster than pssz on encode and decode.
+varint formats are 4–16× slower to decode, while the fixed-layout
+formats that give up extensibility (ssz, borsh, bincode) currently
+decode 16–20% faster than pssz and encode into a reused buffer about
+15% faster.
 
 ## 1 Property checklist
 
@@ -176,9 +177,10 @@ prioritizes.
 ## 2 Quantitative comparison: geomean ratio vs pssz
 
 The numbers below are measured: three full runs of
-`psio_bench_vs_externals` on 2026-11-22 at commit `fe42696` (Apple
-M-series, Homebrew clang 22.1, `-O3 -DNDEBUG`), each cell the **median
-over the three runs** of the run's best-of-7 time. For every cell
+`psio_bench_vs_externals` on 2026-11-22, at the commit that made pssz's
+sizing pass check each container once (Apple M-series, Homebrew clang
+22.1, `-O3 -DNDEBUG`), each cell the **median over the three runs** of
+the run's best-of-7 time. For every cell
 (format × shape × operation) the ratio is `format_value / pssz_value`:
 below 1.00 the format beats pssz on that cell, above 1.00 pssz wins.
 Per-format figures are the **geometric mean** of those ratios over the
@@ -191,36 +193,35 @@ columns, not the total.
 
 | Format | size | encode (new buffer) | encode (reused buffer) | decode | validate | view | **Cumulative** |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| ssz | 0.99 | 0.91 | 0.85 | 0.87 | 0.15 | 0.75 | **0.65** |
-| wit | 1.10 | 1.15 | — | 0.99 | 0.34 | 0.94 | **0.83** |
-| bin | 0.94 | 1.02 | 1.00 | 0.99 | 0.33 | — | **0.84** |
-| borsh | 0.96 | 0.89 | 0.83 | 0.82 | 1.04 | — | **0.90** |
-| bincode | 1.04 | 0.88 | 0.83 | 0.81 | 1.03 | — | **0.91** |
+| ssz | 0.99 | 0.98 | 0.84 | 0.84 | 0.15 | 0.75 | **0.65** |
+| wit | 1.10 | 1.22 | — | 0.97 | 0.33 | 0.95 | **0.83** |
+| bin | 0.94 | 1.07 | 1.00 | 0.95 | 0.37 | — | **0.85** |
+| borsh | 0.96 | 0.95 | 0.85 | 0.80 | 1.19 | — | **0.94** |
+| bincode | 1.04 | 0.95 | 0.84 | 0.80 | 1.20 | — | **0.95** |
 | **pssz** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** |
-| fracpack | 1.11 | 0.92 | 0.97 | 1.06 | 4.51 | — | **1.36** |
-| flatbuf | 1.73 | 4.28 | 5.06 | 1.51 | 1.38 | 1.87 | **2.16** |
-| avro | 0.56 | 2.75 | 4.18 | 3.87 | 3.14 | — | **2.39** |
-| msgpack | 0.61 | 3.22 | 2.29 | 16.24 | 4.52 | — | **3.19** |
-| protobuf | 0.65 | 3.35 | 3.34 | 5.89 | 7.48 | — | **3.57** |
-| capnp | 1.59 | 5.92 | — | 5.42 | 0.99 | 38.29 | **3.67** |
-| pjson | 1.45 | 4.61 | 6.67 | 8.38 | 6.81 | 28.80 | **6.33** |
-| bson | 2.29 | 8.51 | 12.08 | 8.22 | 6.01 | — | **6.50** |
-| json | 2.21 | 4.97 | — | 28.93 | 30.96 | — | **9.96** |
+| fracpack | 1.11 | 0.98 | 0.96 | 1.01 | 4.17 | — | **1.34** |
+| flatbuf | 1.73 | 4.83 | 5.57 | 1.42 | 1.28 | 1.91 | **2.17** |
+| avro | 0.56 | 3.01 | 4.22 | 3.68 | 3.61 | — | **2.49** |
+| msgpack | 0.61 | 3.39 | 2.20 | 15.50 | 4.08 | — | **3.10** |
+| capnp | 1.59 | 6.07 | — | 5.07 | 0.86 | 36.78 | **3.45** |
+| protobuf | 0.65 | 3.73 | 3.63 | 5.62 | 6.78 | — | **3.55** |
+| pjson | 1.45 | 5.01 | 6.62 | 8.06 | 6.38 | 27.47 | **6.26** |
+| bson | 2.29 | 9.26 | 11.99 | 8.06 | 5.42 | — | **6.44** |
+| json | 2.21 | 5.17 | — | 27.33 | 27.31 | — | **9.61** |
 
 **Caveats — read these before quoting a number.**
 
 - **Load.** The machine was shared with other builds while the runs
-  were made (1-minute load average 8–30 on a 14-core machine). Between
-  the three runs a pssz or fracpack cell moved by 13% at the median and
-  by 37% at the 90th percentile. Differences under about 15% in this
-  table are not established; rerun on an idle machine before relying on
-  them.
+  were made (1-minute load average 22 at the start of the first run, 17
+  at the second, 6 at the third, on an 18-core machine). Differences under
+  about 15% in this table are not established; rerun on an idle machine
+  before relying on them.
 - **Validators do not check the same things.** pssz and borsh check
   every `bool` byte of every element; `ssz` and `bin` validate a list of
   fixed-size records by its byte count alone (ValidatorList(100): ssz
-  1 ns, bin 12 ns, pssz 288 ns, borsh 561 ns), and so did fracpack until
+  1 ns, bin 13 ns, pssz 267 ns, borsh 678 ns), and so did fracpack until
   `ecb8126`, which is why it no longer looks twice as fast as it is
-  (its per-element walk is now the slow one: 1 851 ns). The `validate`
+  (its per-element walk is now the slow one: 1 756 ns). The `validate`
   column therefore rewards checking less. `bin`'s validator also rejects
   its own encoding of six shapes (DWNC records with variable members,
   "bin: trailing bytes"); those cells are excluded, and the benchmark no
@@ -259,47 +260,70 @@ absolute times:
 
 | shape | size | encode (new) | encode (reused) | decode | validate | pssz ns: enc new / enc reused / dec / val |
 |---|---:|---:|---:|---:|---:|---|
-| Point | 1.00 | 1.04 | 1.58 | 0.91 | 12.88 | 9.2 / 1.6 / 0.5 / 0.4 |
-| NameRecord | 1.00 | 1.00 | 0.99 | 1.00 | 11.50 | 8.9 / 2.6 / 0.5 / 0.4 |
-| FlatRecord | 1.17 | 0.82 | 0.76 | 1.29 | 2.77 | 22.6 / 10.2 / 18.7 / 6.4 |
-| Record | 1.14 | 0.86 | 0.67 | 1.51 | 3.53 | 26.2 / 13.2 / 21.3 / 9.9 |
-| Validator | 1.00 | 0.96 | 1.03 | 1.01 | 7.89 | 10.2 / 3.5 / 1.1 / 2.5 |
-| Order | 1.09 | 0.78 | 1.05 | 1.32 | 2.56 | 38.2 / 28.3 / 51.8 / 35.6 |
-| ValidatorList(100) | 1.00 | 0.96 | 1.09 | 0.92 | 6.44 | 198.5 / 163.6 / 119.7 / 287.7 |
-| FlatRecordBounded | 1.29 | 0.89 | 0.84 | 1.35 | 2.15 | 22.0 / 10.4 / 20.5 / 8.4 |
-| RecordBounded | 1.30 | 0.83 | 0.63 | 1.61 | 2.94 | 24.9 / 16.8 / 20.3 / 11.4 |
-| OrderBounded | 1.29 | 0.55 | 0.66 | 1.39 | 2.17 | 55.1 / 47.0 / 53.0 / 43.0 |
-| ValidatorListBounded(100) | 1.00 | 1.08 | 0.94 | 0.98 | 6.68 | 169.7 / 162.8 / 104.4 / 266.0 |
-| FlatRecordDwnc | 1.25 | 0.91 | 0.78 | 1.38 | 3.47 | 19.8 / 9.4 / 16.3 / 4.8 |
-| RecordDwnc | 1.21 | 1.04 | 1.09 | 1.73 | 4.60 | 19.6 / 8.6 / 16.3 / 6.8 |
-| OrderDwnc | 1.15 | 0.81 | 1.11 | 1.37 | 2.76 | 36.6 / 26.5 / 51.2 / 33.4 |
-| ValidatorListDwnc(100) | 1.00 | 1.05 | 1.11 | 1.02 | 6.78 | 190.8 / 174.1 / 133.7 / 291.7 |
-| Deep4Ext | 1.41 | 0.95 | 1.53 | 0.17 | 2.32 | 11.8 / 2.7 / 6.8 / 18.6 |
-| Deep4Dwnc | 1.00 | 0.95 | 0.93 | 0.93 | 4.43 | 11.7 / 2.9 / 0.7 / 4.2 |
-| MlEmbedding | 1.01 | 0.97 | 1.05 | 0.98 | 12.05 | 23.4 / 8.1 / 16.6 / 0.6 |
-| BlobPayload | 1.01 | 1.06 | 1.04 | 0.89 | 12.68 | 18.6 / 7.4 / 14.9 / 0.5 |
-| WideRecord | 1.00 | 1.04 | 1.01 | 1.05 | 1.48 | 12.3 / 4.8 / 1.8 / 51.9 |
+| Point | 1.00 | 0.99 | 1.51 | 0.94 | 17.10 | 9.7 / 1.6 / 0.5 / 0.3 |
+| NameRecord | 1.00 | 0.91 | 0.99 | 0.92 | 16.91 | 9.5 / 2.5 / 0.5 / 0.3 |
+| FlatRecord | 1.17 | 1.02 | 0.93 | 1.20 | 1.90 | 17.7 / 7.4 / 18.1 / 8.6 |
+| Record | 1.14 | 1.01 | 0.78 | 1.36 | 2.37 | 19.8 / 11.1 / 19.9 / 13.1 |
+| Validator | 1.00 | 1.01 | 0.99 | 1.00 | 7.90 | 9.8 / 3.4 / 1.1 / 2.4 |
+| Order | 1.09 | 1.08 | 1.00 | 1.16 | 2.14 | 26.8 / 29.5 / 59.0 / 43.3 |
+| ValidatorList(100) | 1.00 | 0.92 | 1.06 | 1.01 | 6.57 | 165.2 / 142.8 / 97.1 / 267.1 |
+| FlatRecordBounded | 1.29 | 0.92 | 1.01 | 1.14 | 1.75 | 18.9 / 8.5 / 21.0 / 9.3 |
+| RecordBounded | 1.30 | 0.82 | 0.77 | 1.30 | 2.24 | 22.9 / 12.6 / 22.0 / 13.6 |
+| OrderBounded | 1.29 | 0.83 | 0.78 | 1.00 | 2.04 | 34.9 / 37.8 / 67.0 / 45.6 |
+| ValidatorListBounded(100) | 1.00 | 1.05 | 1.01 | 0.91 | 6.60 | 168.3 / 144.7 / 102.5 / 279.2 |
+| FlatRecordDwnc | 1.25 | 1.04 | 1.03 | 1.36 | 2.49 | 16.3 / 6.9 / 16.0 / 6.7 |
+| RecordDwnc | 1.21 | 1.01 | 0.93 | 1.72 | 2.98 | 19.1 / 9.9 / 15.9 / 9.8 |
+| OrderDwnc | 1.15 | 1.27 | 1.19 | 1.71 | 2.52 | 27.8 / 28.4 / 48.3 / 40.9 |
+| ValidatorListDwnc(100) | 1.00 | 0.87 | 0.93 | 0.94 | 6.52 | 189.1 / 163.6 / 108.0 / 274.1 |
+| Deep4Ext | 1.41 | 0.89 | 0.34 | 0.17 | 2.28 | 11.1 / 11.1 / 6.4 / 16.9 |
+| Deep4Dwnc | 1.00 | 0.99 | 1.43 | 0.97 | 1.27 | 10.5 / 1.8 / 0.7 / 14.1 |
+| MlEmbedding | 1.01 | 1.03 | 1.08 | 0.98 | 1.71 | 18.2 / 7.1 / 14.2 / 4.1 |
+| BlobPayload | 1.01 | 0.95 | 1.07 | 0.89 | 12.12 | 21.1 / 7.2 / 15.5 / 0.5 |
+| WideRecord | 1.00 | 1.00 | 1.00 | 1.06 | 45.68 | 10.2 / 4.8 / 1.5 / 1.4 |
 
-Geomean, fracpack / pssz: size 1.11, encode into a new buffer 0.92,
-encode into a reused buffer 0.97, decode 1.06, validate 4.51. pssz is
-smaller and decodes and validates faster; **fracpack still encodes the
-record-with-strings shapes faster** (Record 0.67, RecordBounded 0.63,
-OrderBounded 0.55–0.66). The cause is known and is not the wire format:
-pssz's sizing pass. `size_of` on Order costs pssz 15 ns and fracpack
-2.4 ns, more than pssz's whole write pass (14 ns); it re-checks offset
-and size overflow per field through a run-time "report or throw"
-pointer. Decode was the other gap (Order 102 ns against fracpack's 68)
-until `fe42696`, which made the typed record-frame parser a
-type-specialised inline and removed a per-list heap allocation (now
-52 ns).
+Geomean, fracpack / pssz: size 1.11, encode into a new buffer 0.98,
+encode into a reused buffer 0.96, decode 1.01, validate 4.17. pssz is
+smaller and validates faster, and the two now encode and decode at the
+same speed on the geomean; fracpack still encodes the bounded
+record-with-strings shapes faster (RecordBounded 0.77–0.82, OrderBounded
+0.78–0.83), and pssz a few of the others.
+
+**The sizing pass.** Until this measurement the gap on those shapes was
+pssz's `size_of`, not the wire format: on Order it cost 15.7 ns against
+fracpack's 2.4 ns, more than pssz's whole write pass, because it
+re-checked offset and size overflow for every field and every element
+through a run-time "report or throw" pointer. The pass now takes the
+failure policy as a template parameter (the fail-fast pass carries no
+pointer), sums each container's payloads without a branch and checks
+overflow and the largest offset once per container, and looks at the
+pruning count only for trailing optional fields. Measured on the same
+machine, before → after (pssz, ns):
+
+| shape | size_of | encode (new) | encode (reused) |
+|---|---:|---:|---:|
+| FlatRecord | 3.4 → 0.8 | 20.8 → 17.7 | 10.0 → 7.4 |
+| Record | 5.0 → 1.3 | 22.5 → 19.8 | 11.3 → 11.1 |
+| Order | 15.7 → 3.0 | 37.7 → 26.8 | 52.7 → 29.5 |
+| OrderBounded | 16.7 → 2.9 | 49.9 → 34.9 | 57.2 → 37.8 |
+| OrderDwnc | 16.7 → 2.8 | 34.6 → 27.8 | 47.5 → 28.4 |
+| RecordBounded | 5.0 → 1.4 | 25.3 → 22.9 | 16.3 → 12.6 |
+
+The bytes and the error of every conformance vector are unchanged. A
+record whose members are all plain numbers written in full is now
+validated by one size compare instead of a walk over its fields
+(WideRecord, 32 `u32` fields: 41.4 → 1.4 ns). Not addressed: decoding
+nested extensible records (Deep4Ext 6.4 ns against fracpack's 1.1) and
+the cost a bounded shape still pays over its unbounded twin on encode
+(OrderBounded 34.9 / 37.8 ns against Order 26.8 / 29.5; its cause has
+not been isolated).
 
 How to read the table:
 
 - **pssz does not win every column.** On the measured cells the
   fixed-layout formats without extensibility — ssz, borsh, bincode —
-  encode 9–17% faster and decode 13–19% faster than pssz, and bin and
-  wit are level with it; pssz's own sizing pass is the encode cost
-  (see the fracpack comparison above). The rows below 1.00 in
+  encode into a reused buffer about 15% faster and decode 16–20% faster
+  than pssz (into a new buffer the allocation dominates and they are
+  within 5%), and bin and wit are level with it. The rows below 1.00 in
   "Cumulative" (ssz, wit, bin, borsh, bincode) get there partly on
   those cells and, for ssz, wit and bin, largely through a `validate`
   that checks less than pssz's. What pssz has that none of those five
@@ -333,13 +357,13 @@ How to read the table:
 
 - **The schema-tooled formats** — capnp and flatbuf. They have
   zero-copy views and extensibility, and pay more size (1.59–1.73×)
-  and more encode time (4–6×) through their canonical libraries, whose
+  and more encode time (5–6×) through their canonical libraries, whose
   builders allocate and copy; capnp's reader set-up makes its
-  single-field view 38× pssz's.
+  single-field view 37× pssz's.
 
 - **The self-describing formats** — pjson, json, bson. A different
   use case (no schema needed at decode); the cost shows in every
-  column: 5–9× on encode, 8–29× on decode. pjson does have zero-copy
+  column: 5–12× on encode, 8–27× on decode. pjson does have zero-copy
   random access (a slot table at the end of each object), unlike json
   and bson.
 

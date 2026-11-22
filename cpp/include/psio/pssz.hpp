@@ -106,15 +106,17 @@ namespace psio {
       {
          const char* failure = nullptr;
       };
-      template <typename T>
-      inline void enforce_max_dynamic(std::size_t total, size_check* check = nullptr)
+      // P is the failure policy of a sizing pass (see size_fail below):
+      // std::nullptr_t fails fast, size_check* records the first failure.
+      template <typename T, typename P = std::nullptr_t>
+      inline void enforce_max_dynamic(std::size_t total, P check = nullptr)
       {
          constexpr auto cap = ::psio::max_dynamic_data_v<T>;
          if constexpr (cap.has_value())
          {
-            if (total > *cap)
+            if (total > *cap) [[unlikely]]
             {
-               if (check)
+               if constexpr (!std::is_same_v<P, std::nullptr_t>)
                {
                   if (!check->failure)
                      check->failure = "pssz: encoded size exceeds maxDynamicData cap";
@@ -202,8 +204,8 @@ namespace psio {
       struct encode_preflight;
       template <typename T>
       codec_status assoc_check_encode(const T& value, std::size_t depth, encode_preflight bounds);
-      template <std::size_t W, bool Auto, typename T, typename A>
-      std::size_t assoc_size(const T& v, size_check* check);
+      template <std::size_t W, bool Auto, typename T, typename A, typename P>
+      std::size_t assoc_size(const T& v, P check);
       template <std::size_t W, bool Auto, typename T, typename Sink, typename A>
       void assoc_encode(const T& v, Sink& s);
       template <std::size_t W, bool Auto, typename T, typename A>
@@ -608,6 +610,15 @@ namespace psio {
       template <typename T>
       inline constexpr bool is_utf8_string_v = is_utf8_string<T>::value;
 
+      // A number whose every byte pattern is a value: validating one checks
+      // its size and nothing else.
+      template <typename T>
+      inline constexpr bool leaf_number_v =
+         (std::is_arithmetic_v<T> && !std::is_same_v<T, bool>) ||
+         (std::is_enum_v<T> && !::psio::has_invariant_v<T>) ||
+         std::is_same_v<T, ::psio::uint128> || std::is_same_v<T, ::psio::int128> ||
+         std::is_same_v<T, ::psio::uint256>;
+
       // psio::bounded<E, N>: a std::vector<E> of at most N elements. On the
       // wire it is the list; N is checked on encode, validate and decode.
       template <typename T>
@@ -680,25 +691,46 @@ namespace psio {
 
       // Number of leading fields the encoder writes: everything up to and
       // including the last field that is not an absent trailing optional.
+      //
+      // Only the trailing run of optional fields can be pruned, so only those
+      // are looked at: `required_field_count` is the compile-time floor (one
+      // past the last field that is always written), and a record that does
+      // not end in an optional has a constant count.
       template <Record T>
-      std::size_t emitted_field_count(const T& value) noexcept
+      consteval std::size_t required_field_count() noexcept
       {
          using R = record_traits<T>;
          if constexpr (::psio::is_dwnc_v<T>)
             return R::member_count;
          else
-            return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
                std::size_t count = 0;
-               (([&] {
-                  if constexpr (omittable_field_v<T, Is>)
-                  {
-                     if (record_member<Is>(value).has_value()) count = Is + 1;
-                  }
-                  else count = Is + 1;
-               }()), ...);
+               ((omittable_field_v<T, Is> ? void() : void(count = Is + 1)), ...);
                return count;
             }(std::make_index_sequence<R::member_count>{});
       }
+      template <Record T>
+      std::size_t emitted_field_count(const T& value) noexcept
+      {
+         constexpr std::size_t N = record_traits<T>::member_count;
+         constexpr std::size_t F = required_field_count<T>();
+         if constexpr (F == N)
+            return N;
+         else
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               // Trailing optionals, last first: the first present one ends
+               // the walk.
+               std::size_t count = F;
+               (void)((record_member<N - 1 - Is>(value).has_value()
+                          ? (count = N - Is, true)
+                          : false) ||
+                      ...);
+               return count;
+            }(std::make_index_sequence<N - F>{});
+      }
+      // The fixed-region bytes of the fields every value writes.
+      template <std::size_t W, Record T>
+      consteval std::size_t required_fixed_region() noexcept;
 
       template <std::size_t W, Record T, std::size_t... Is>
       consteval auto record_layout(std::index_sequence<Is...>)
@@ -964,23 +996,30 @@ namespace psio {
       // carries on — the sizes computed after it are meaningless and the
       // caller discards them — so the checked encoder can report a status
       // without exceptions.
-      inline void size_fail(size_check* check, const char* message)
+      //
+      // The policy is a type, so the fail-fast pass carries no pointer and
+      // tests none: `std::nullptr_t` (the default of every helper below)
+      // raises, `size_check*` records.
+      [[noreturn, gnu::cold]] inline void size_fail(std::nullptr_t, const char* message)
       {
-         if (!check)
-            size_failure(message);
+         size_failure(message);
+      }
+      [[gnu::cold]] inline void size_fail(size_check* check, const char* message)
+      {
          if (!check->failure)
             check->failure = message;
       }
-      inline std::size_t checked_add(std::size_t a, std::size_t b, size_check* check = nullptr)
+      template <typename P = std::nullptr_t>
+      inline std::size_t checked_add(std::size_t a, std::size_t b, P check = nullptr)
       {
-         if (b > std::numeric_limits<std::size_t>::max() - a)
+         if (b > std::numeric_limits<std::size_t>::max() - a) [[unlikely]]
             size_fail(check, "pssz: encoded size overflow");
          return a + b;
       }
-      inline std::size_t checked_multiply(std::size_t a, std::size_t b,
-                                          size_check* check = nullptr)
+      template <typename P = std::nullptr_t>
+      inline std::size_t checked_multiply(std::size_t a, std::size_t b, P check = nullptr)
       {
-         if (a && b > std::numeric_limits<std::size_t>::max() / a)
+         if (a && b > std::numeric_limits<std::size_t>::max() / a) [[unlikely]]
             size_fail(check, "pssz: encoded size overflow");
          return a * b;
       }
@@ -988,19 +1027,47 @@ namespace psio {
       {
          return size <= std::numeric_limits<std::uint32_t>::max();
       }
-      inline void enforce_wire_span(std::size_t size, size_check* check = nullptr)
+      template <typename P = std::nullptr_t>
+      inline void enforce_wire_span(std::size_t size, P check = nullptr)
       {
-         if (!wire_span_fits(size))
+         if (!wire_span_fits(size)) [[unlikely]]
             size_fail(check, "pssz: variable payload exceeds 32-bit address space");
       }
-      template <std::size_t W>
-      typename width_info<W>::offset_t checked_offset(std::size_t value,
-                                                      size_check* check = nullptr)
+      template <std::size_t W, typename P = std::nullptr_t>
+      typename width_info<W>::offset_t checked_offset(std::size_t value, P check = nullptr)
       {
          using O = typename width_info<W>::offset_t;
-         if (value > std::numeric_limits<O>::max())
+         if (value > std::numeric_limits<O>::max()) [[unlikely]]
             size_fail(check, "pssz: value exceeds the static offset width");
          return static_cast<O>(value);
+      }
+      // The payload bytes of one container, summed without a branch per
+      // element: an overflow sets a flag that is tested once, at the end.
+      // (A sum of sizes of values that exist in memory cannot overflow; an
+      // adapter's packsize is the one input that could lie.)
+      struct size_sum
+      {
+         std::size_t total    = 0;
+         bool        overflow = false;
+         void add(std::size_t n) noexcept
+         {
+            overflow |= __builtin_add_overflow(total, n, &total);
+         }
+      };
+      // The checks of one container, once: the sum did not overflow, and
+      // the largest offset it writes — `last_offset`, the start of its last
+      // variable payload; offsets only grow — fits the offset width. With
+      // 4-byte offsets the 32-bit span check of the total covers the latter.
+      template <std::size_t W, typename P>
+      inline void enforce_container(const size_sum& sum, std::size_t last_offset, P check)
+      {
+         if (sum.overflow) [[unlikely]]
+            size_fail(check, "pssz: encoded size overflow");
+         if constexpr (W < 4)
+            (void)checked_offset<W>(last_offset, check);
+         else
+            (void)last_offset;
+         enforce_wire_span(sum.total, check);
       }
       template <typename Sink>
       void skip_bytes(Sink& sink, std::size_t count)
@@ -1039,18 +1106,19 @@ namespace psio {
          }
          else return true;
       }
-      template <typename T>
-      void enforce_fixed_caps(size_check* check = nullptr)
+      template <typename T, typename P = std::nullptr_t>
+      void enforce_fixed_caps(P check = nullptr)
       {
          if constexpr (!fixed_caps_valid<T>())
             size_fail(check, "pssz: fixed payload exceeds a declared maxDynamicData budget");
       }
 
-      template <std::size_t W, bool Auto = false, typename T, typename A = no_ann>
-      std::size_t size_of_v(const T& v, size_check* check = nullptr);
+      template <std::size_t W, bool Auto = false, typename T, typename A = no_ann,
+                typename P = std::nullptr_t>
+      std::size_t size_of_v(const T& v, P check = nullptr);
 
-      template <std::size_t W, bool Auto, typename T, typename A>
-      std::size_t size_of_v_impl(const T& v, size_check* check)
+      template <std::size_t W, bool Auto, typename T, typename A, typename P>
+      std::size_t size_of_v_impl(const T& v, P check)
       {
          if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::pssz, T>)
@@ -1066,27 +1134,24 @@ namespace psio {
          else if constexpr (is_nested_v<T>)
             return v.size();
          else if constexpr (is_assoc_v<T>)
-            return assoc_size<W, Auto, T, A>(v, check);
+            return assoc_size<W, Auto, T, A, P>(v, check);
          else if constexpr (is_bounded_v<T>)
-            return size_of_v_impl<W, Auto, std::vector<typename T::value_type>, A>(
+            return size_of_v_impl<W, Auto, std::vector<typename T::value_type>, A, P>(
                v.storage(), check);
          else if constexpr (is_fixed_v<T>)
             return fixed_size_of<T>();
          else if constexpr (is_std_array_v<T>)
          {
             constexpr std::size_t N = std::tuple_size<T>::value;
-            std::size_t           total = checked_multiply(N, W, check);
-            if constexpr (N > 0) (void)checked_offset<W>(total, check);
+            size_sum    sum{N * W, false};  // the offset table
+            std::size_t last = sum.total;
             for (const auto& x : v)
             {
-               (void)checked_offset<W>(total, check);
-               total = checked_add(
-                  total,
-                  size_of_v<W, Auto, typename T::value_type, ann::element_ann<A>>(x, check),
-                  check);
+               last = sum.total;
+               sum.add(size_of_v<W, Auto, typename T::value_type, ann::element_ann<A>>(x, check));
             }
-            enforce_wire_span(total, check);
-            return total;
+            enforce_container<W>(sum, last, check);
+            return sum.total;
          }
          else if constexpr (is_std_vector_v<T>)
          {
@@ -1101,16 +1166,15 @@ namespace psio {
             }
             else
             {
-               std::size_t total = checked_multiply(v.size(), W, check);
-               if (!v.empty()) (void)checked_offset<W>(total, check);
+               size_sum    sum{checked_multiply(v.size(), W, check), false};  // the table
+               std::size_t last = sum.total;
                for (const auto& x : v)
                {
-                  (void)checked_offset<W>(total, check);
-                  total = checked_add(
-                     total, size_of_v<W, Auto, E, ann::element_ann<A>>(x, check), check);
+                  last = sum.total;
+                  sum.add(size_of_v<W, Auto, E, ann::element_ann<A>>(x, check));
                }
-               enforce_wire_span(total, check);
-               return total;
+               enforce_container<W>(sum, last, check);
+               return sum.total;
             }
          }
          else if constexpr (std::is_same_v<T, std::string> || is_utf8_string_v<T>)
@@ -1152,28 +1216,31 @@ namespace psio {
          {
             using R = record_traits<T>;
             return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-               std::size_t total = 0;
                // Trailing absent optional fields are pruned from the fixed
                // region (never for DWNC), so the region size is a property
                // of the value, bounded above by the type's static layout.
-               const std::size_t count = emitted_field_count(v);
-               std::size_t fixed_region = 0;
-               ((Is < count
+               // The fields before the trailing optionals are always
+               // written: their share of the region is a constant, and only
+               // the trailing ones are tested against the count.
+               constexpr std::size_t required = required_field_count<T>();
+               const std::size_t     count    = emitted_field_count(v);
+               std::size_t fixed_region       = required_fixed_region<W, T>();
+               ((Is >= required && Is < count
                     ? fixed_region += pssz_member_fixed_size_full<W, T, Is>()
                     : std::size_t{0}), ...);
-               std::size_t dynamic_cursor = fixed_region;
                // u{W} fixed_size header — DWNC types skip it.
                if constexpr (!::psio::is_dwnc_v<T>)
-               {
                   (void)checked_offset<W>(fixed_region, check);
-                  total = W;
-               }
+               // The fixed region, then the payloads of the variable
+               // fields; `last` is where the last of them starts.
+               size_sum    sum{fixed_region, false};
+               std::size_t last = fixed_region;
                (
                   ([&]
                    {
-                      if (Is >= count) return;
+                      if constexpr (Is >= required)
+                         if (Is >= count) return;
                       using F = typename R::template member_type<Is>;
-                      const auto& fref = record_member<Is>(v);
                       using eff =
                          typename record_member_annotations<T, Is>::value_t;
                       constexpr bool override_v =
@@ -1181,32 +1248,25 @@ namespace psio {
                       if constexpr (override_v)
                       {
                          // Member-level `as<Tag>` forces the field through
-                         // the named adapter — emit a W-byte offset slot
-                         // plus the adapter's payload.
+                         // the named adapter — a W-byte offset slot (in the
+                         // fixed region) plus the adapter's payload.
                          using Tag = ::psio::adapter_tag_of_t<eff>;
                          using Proj = ::psio::adapter<
                             std::remove_cvref_t<F>, Tag>;
-                         (void)checked_offset<W>(dynamic_cursor, check);
-                         const auto payload = Proj::packsize(fref);
-                         total = checked_add(total, checked_add(W, payload, check), check);
-                         dynamic_cursor = checked_add(dynamic_cursor, payload, check);
+                         last = sum.total;
+                         sum.add(Proj::packsize(record_member<Is>(v)));
                       }
-                      else if constexpr (is_fixed_v<F>)
-                         total = checked_add(total, fixed_size_of<F>(), check);
-                      else
+                      else if constexpr (!is_fixed_v<F>)
                       {
-                         (void)checked_offset<W>(dynamic_cursor, check);
-                         const auto payload =
-                            size_of_v<W, Auto, F, field_ann<T, A, Is>>(fref, check);
-                         total = checked_add(total, checked_add(W, payload, check), check);
-                         dynamic_cursor = checked_add(dynamic_cursor, payload, check);
+                         last = sum.total;
+                         sum.add(size_of_v<W, Auto, F, field_ann<T, A, Is>>(
+                            record_member<Is>(v), check));
                       }
                    }()),
                   ...);
                (void)count;
-               (void)dynamic_cursor;
-               enforce_wire_span(total - (::psio::is_dwnc_v<T> ? 0 : W), check);
-               return total;
+               enforce_container<W>(sum, last, check);
+               return sum.total + (::psio::is_dwnc_v<T> ? 0 : W);
             }(std::make_index_sequence<R::member_count>{});
          }
          else
@@ -1218,15 +1278,23 @@ namespace psio {
          }
       }
 
-      template <std::size_t LegacyW, bool Auto, typename T, typename A>
-      std::size_t size_of_v(const T& value, size_check* check)
+      template <std::size_t W, Record T>
+      consteval std::size_t required_fixed_region() noexcept
+      {
+         return []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (pssz_member_fixed_size_full<W, T, Is>() + ... + std::size_t{0});
+         }(std::make_index_sequence<required_field_count<T>()>{});
+      }
+
+      template <std::size_t LegacyW, bool Auto, typename T, typename A, typename P>
+      std::size_t size_of_v(const T& value, P check)
       {
          constexpr std::size_t W = [] {
             if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
          }();
          if constexpr (Auto) enforce_fixed_caps<T>(check);
-         const auto total = size_of_v_impl<W, Auto, T, A>(value, check);
+         const auto total = size_of_v_impl<W, Auto, T, A, P>(value, check);
          if constexpr (Auto) enforce_max_dynamic<T>(total, check);
          return total;
       }
@@ -1471,9 +1539,11 @@ namespace psio {
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                // Only the leading `count` fields are written; trailing
                // absent optionals are pruned (see emitted_field_count).
-               const std::size_t count = emitted_field_count(v);
-               std::size_t fixed_region = 0;
-               ((Is < count
+               // (Only the trailing optionals are tested: see size_of_v_impl.)
+               constexpr std::size_t required = required_field_count<T>();
+               const std::size_t     count    = emitted_field_count(v);
+               std::size_t fixed_region       = required_fixed_region<W, T>();
+               ((Is >= required && Is < count
                     ? fixed_region += pssz_member_fixed_size_full<W, T, Is>()
                     : std::size_t{0}), ...);
 
@@ -1495,7 +1565,8 @@ namespace psio {
                (
                   ([&]
                    {
-                      if (Is >= count) return;
+                      if constexpr (Is >= required)
+                         if (Is >= count) return;
                       using F = typename R::template member_type<Is>;
                       const auto& fref = record_member<Is>(v);
                       using eff =
@@ -2435,6 +2506,25 @@ namespace psio {
                                    validate_flags* flags) noexcept
       {
          using R = record_traits<T>;
+         // A record of plain numbers (every member an integer, a float or an
+         // enum without an invariant: no byte pattern is invalid) written
+         // in full is valid exactly when its frame has the type's size:
+         // one compare instead of a walk over the fields. Every other frame
+         // of such a type — short, long, with appended slots — takes the
+         // general path below, so the outcomes are the same.
+         if constexpr (((leaf_number_v<typename R::template member_type<Is>> &&
+                         !::psio::has_as_override_v<
+                            typename record_member_annotations<T, Is>::value_t>) &&
+                        ... && (sizeof...(Is) > 0)))
+         {
+            constexpr std::size_t known = (fixed_size_of<typename R::template member_type<Is>>() +
+                                           ... + std::size_t{0});
+            constexpr std::size_t header = ::psio::is_dwnc_v<T> ? 0 : W;
+            if (pos <= end && end <= src.size() && end - pos == header + known &&
+                (header == 0 || read_offset<W>(src, pos) == known) &&
+                depth + 1 <= kMaxValidationDepth)
+               return codec_ok();
+         }
          constexpr auto layout = record_layout<W, T>(seq);
          std::array<::psio::detail::pssz_field_span, R::member_count> spans{};
          bool unknown = false;
@@ -2521,16 +2611,23 @@ namespace psio {
                                   std::size_t depth,
                                   validate_flags* flags) noexcept
       {
-         if (auto st = validate_shape<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
-             !st.ok())
-            return st;
-         if constexpr (!std::is_same_v<A, no_ann>)
-            if (auto st = check_position<LegacyW, Auto, T, A>(src, pos, end); !st.ok())
-               return st;
-         if constexpr (::psio::has_invariant_v<T>)
-            return ::psio::check_invariant(decode_value<LegacyW, Auto, T, A>(src, pos, end));
+         // The common case — no annotation at this position, no invariant —
+         // is the structural walk and nothing after it.
+         if constexpr (std::is_same_v<A, no_ann> && !::psio::has_invariant_v<T>)
+            return validate_shape<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
          else
-            return codec_ok();
+         {
+            if (auto st = validate_shape<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
+                !st.ok())
+               return st;
+            if constexpr (!std::is_same_v<A, no_ann>)
+               if (auto st = check_position<LegacyW, Auto, T, A>(src, pos, end); !st.ok())
+                  return st;
+            if constexpr (::psio::has_invariant_v<T>)
+               return ::psio::check_invariant(decode_value<LegacyW, Auto, T, A>(src, pos, end));
+            else
+               return codec_ok();
+         }
       }
 
       template <std::size_t LegacyW, bool Auto, typename T, typename A>

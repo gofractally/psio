@@ -61,8 +61,8 @@ namespace psio::detail::pssz_impl
 
    // The size of the list of the entries in canonical order (the offsets
    // checked against W are those the encoder writes).
-   template <std::size_t W, bool Auto, typename T, typename A>
-   std::size_t assoc_size(const T& v, size_check* check)
+   template <std::size_t W, bool Auto, typename T, typename A, typename P>
+   std::size_t assoc_size(const T& v, P check)
    {
       using E = ::psio::detail::assoc_entry_t<T>;
       if constexpr (is_fixed_v<E>)
@@ -78,19 +78,15 @@ namespace psio::detail::pssz_impl
       else
       {
          const ::psio::detail::canonical_order<T> order(v);
-         std::size_t total = checked_multiply(v.size(), W, check);
-         if (!v.empty())
-            (void)checked_offset<W>(total, check);
+         size_sum    sum{checked_multiply(v.size(), W, check), false};  // the offset table
+         std::size_t last = sum.total;
          order.for_each([&](const auto& item) {
-            (void)checked_offset<W>(total, check);
-            total = checked_add(
-               total,
-               size_of_v<W, Auto, std::remove_cvref_t<decltype(item)>, ann::entry_ann<T, A>>(
-                  item, check),
-               check);
+            last = sum.total;
+            sum.add(size_of_v<W, Auto, std::remove_cvref_t<decltype(item)>, ann::entry_ann<T, A>>(
+               item, check));
          });
-         enforce_wire_span(total, check);
-         return total;
+         enforce_container<W>(sum, last, check);
+         return sum.total;
       }
    }
 
