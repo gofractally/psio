@@ -57,9 +57,16 @@ namespace psio {
    template <typename T, typename Fmt, storage Store>
    class view;
 
-   // `view` reads. Every specialization instantiates this, so naming the
-   // mutable-borrow storage kind for a view is an error with a pointer to
-   // the type that writes, not a read-only view with a misleading tag.
+   // `view` reads, and it borrows: it is a span of someone else's bytes
+   // (std::string_view to buffer's std::string), valid while they are.
+   // storage::const_borrow is therefore its only storage kind. Every
+   // specialization instantiates this, so naming another kind is an error
+   // with a pointer to the type that has that meaning, not a borrowing
+   // read-only view with a misleading tag:
+   //   mut_borrow → psio::mutable_view<T, Fmt>           (the view that writes)
+   //   owning     → psio::buffer<T, Fmt>                 (F_buffer<T>)
+   //   shared     → psio::buffer<T, Fmt, storage::shared> (shared_F<T>)
+   // A buffer keeps the bytes alive; psio::as_view(buffer) reads them.
    namespace detail {
       template <storage Store>
       struct read_view_store
@@ -67,6 +74,15 @@ namespace psio {
          static_assert(Store != storage::mut_borrow,
                        "psio::view<T, Fmt, storage::mut_borrow>: psio::view is the read-only "
                        "view; the view that writes is psio::mutable_view<T, Fmt>");
+         static_assert(Store != storage::owning,
+                       "psio::view<T, Fmt, storage::owning>: a psio::view borrows its bytes "
+                       "and never owns them; the type that owns encoded bytes is "
+                       "psio::buffer<T, Fmt> (F_buffer<T>), read through psio::as_view(buffer)");
+         static_assert(Store != storage::shared,
+                       "psio::view<T, Fmt, storage::shared>: a psio::view borrows its bytes "
+                       "and never shares ownership of them; the type that does is "
+                       "psio::buffer<T, Fmt, storage::shared> (shared_F<T>), read through "
+                       "psio::as_view(buffer)");
       };
    }  // namespace detail
 

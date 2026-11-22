@@ -88,6 +88,17 @@ int main()
 #elif defined(HELPERS_FAIL_VIEW_MUT_BORROW)
    // The mutable-borrow storage kind does not make a view writable.
    psio::view<Rec, psio::pssz, psio::storage::mut_borrow> v{bytes};
+#elif defined(HELPERS_FAIL_VIEW_OWNING)
+   // A view borrows: the owning storage kind names a buffer, not a view.
+   psio::view<Rec, psio::pssz, psio::storage::owning> v{bytes};
+#elif defined(HELPERS_FAIL_VIEW_SHARED)
+   psio::view<Rec, psio::pssz, psio::storage::shared> v{bytes};
+#elif defined(HELPERS_FAIL_VIEW_OWNING_SCALAR)
+   // The generic (non-record) views too.
+   psio::view<std::uint32_t, psio::ssz, psio::storage::owning> v{bytes};
+#elif defined(HELPERS_FAIL_VIEW_SHARED_CONST)
+   // ...and through the const spelling.
+   psio::view<const Rec, psio::pssz, psio::storage::shared> v{bytes};
 #endif
    return 0;
 }

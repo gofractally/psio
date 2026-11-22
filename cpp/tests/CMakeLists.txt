@@ -189,6 +189,15 @@ psio_helpers_compile_fail(generic_mutable_view_of_const HELPERS_FAIL_GENERIC_MUT
    "a mutable view of a const type is a contradiction")
 psio_helpers_compile_fail(view_mut_borrow HELPERS_FAIL_VIEW_MUT_BORROW
    "psio::view is the read-only view; the view that writes is psio::mutable_view")
+# A view borrows: the owning / shared storage kinds name buffers.
+psio_helpers_compile_fail(view_owning HELPERS_FAIL_VIEW_OWNING
+   "the type that owns encoded bytes is psio::buffer<T, Fmt> .F_buffer<T>.")
+psio_helpers_compile_fail(view_shared HELPERS_FAIL_VIEW_SHARED
+   "psio::buffer<T, Fmt, storage::shared> .shared_F<T>.")
+psio_helpers_compile_fail(view_owning_scalar HELPERS_FAIL_VIEW_OWNING_SCALAR
+   "the type that owns encoded bytes is psio::buffer<T, Fmt> .F_buffer<T>.")
+psio_helpers_compile_fail(view_shared_const HELPERS_FAIL_VIEW_SHARED_CONST
+   "psio::buffer<T, Fmt, storage::shared> .shared_F<T>.")
 
 # native format + view_of concept: zero-cost shim adapting a live const T&
 # to the view<T, Fmt, Store> accessor surface.

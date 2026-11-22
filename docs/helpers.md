@@ -160,6 +160,11 @@ A view only reads. Nothing turns one into a view that writes:
 - `F_mutable_view<const T>` and `psio::mutable_view<const T, F>` do not
   compile, and neither does `psio::view<T, F, storage::mut_borrow>`: the
   error names `psio::mutable_view`.
+- A view borrows; it never owns. `psio::view<T, F, storage::owning>` and
+  `psio::view<T, F, storage::shared>` do not compile: the errors name
+  `psio::buffer<T, F>` (`F_buffer<T>`) and
+  `psio::buffer<T, F, storage::shared>` (`shared_F<T>`), the types that keep
+  the bytes alive, read through `psio::as_view(buffer)`.
 
 `F_buffer<T>` owns a `std::vector<char>`. `shared_F<T>` holds immutable
 bytes with shared ownership: a copy is another owner of the same bytes, made
@@ -198,8 +203,9 @@ operations that have no helper name (`validate_strict`, `make_boxed`,
 `psio::buffer<T, Fmt, Store>` are the generic forms of the view and buffer
 names. For a buffer `Store` is one of `storage::owning`,
 `storage::mut_borrow`, `storage::const_borrow`, `storage::shared`. A view
-borrows read-only (`storage::const_borrow`, the default); the mutable borrow
-is `psio::mutable_view<T, Fmt>`.
+borrows read-only: `storage::const_borrow`, the default, is the only `Store`
+a view accepts (the others are compile errors naming the type to use). The
+mutable borrow is `psio::mutable_view<T, Fmt>`; ownership is a buffer's.
 
 ## Adding the names for a format
 
