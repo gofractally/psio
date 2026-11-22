@@ -308,3 +308,101 @@ fn evolution_tells_an_integer_from_a_time_value() {
     let b = try_to_pssz(&AsMicros { id: 1, at: TimePoint::from_ticks(5) }).unwrap();
     assert_eq!(a, b);
 }
+
+#[derive(
+    Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema, psio::Key,
+)]
+struct Keyed {
+    shard: u32,
+    tags: psio::pssz::BoundedList<u16, 2>,
+    inner: psio::pssz::Nested<(u8, String)>,
+    by_name: std::collections::BTreeMap<String, i8>,
+    octets: std::collections::BTreeSet<i8>,
+    last: Option<f64>,
+}
+
+/// The schema-driven key reader is the typed one on the type the schema
+/// describes: the same values, the same rejections.
+#[test]
+fn the_schema_driven_key_reader_agrees_with_the_typed_one() {
+    use psio::pssz::dynamic::{from_key as dyn_from_key, validate_key as dyn_validate_key};
+    use psio::pssz::dynamic::{from_key_with, key_prefix, Options, Value};
+    let (schema, root) = schema_for::<Keyed>().unwrap();
+    let value = Keyed {
+        shard: 7,
+        tags: psio::pssz::BoundedList(vec![0, 0x0100]),
+        inner: psio::pssz::Nested::new(&(0u8, "a\0b".to_string())).unwrap(),
+        by_name: [("b".to_string(), -1i8), ("".to_string(), 0)].into(),
+        octets: [-128i8, 0, 5].into(),
+        last: Some(-1.5),
+    };
+    let key = to_key(&value);
+    let read = dyn_from_key(&schema, &root, &key).unwrap();
+    assert_eq!(dynamic::encode::<Pssz>(&schema, &root, &read).unwrap(), try_to_pssz(&value).unwrap());
+    assert_eq!(dynamic::to_key(&schema, &root, &read).unwrap(), key);
+
+    // Every one-byte change and every truncation: the two readers agree.
+    let mut candidates: Vec<Vec<u8>> = (0..key.len()).map(|n| key[..n].to_vec()).collect();
+    for at in 0..key.len() {
+        for delta in [1u8, 0x7f, 0x80, 0xff] {
+            let mut changed = key.clone();
+            changed[at] ^= delta;
+            candidates.push(changed);
+        }
+    }
+    candidates.push([&key[..], &[0]].concat());
+    let mut rejected = 0;
+    for candidate in &candidates {
+        let typed = validate_key::<Keyed>(candidate).is_ok();
+        assert_eq!(dyn_validate_key(&schema, &root, candidate).is_ok(), typed, "{candidate:02x?}");
+        assert_eq!(dyn_from_key(&schema, &root, candidate).is_ok(), typed, "{candidate:02x?}");
+        rejected += usize::from(!typed);
+        if typed {
+            let read = dyn_from_key(&schema, &root, candidate).unwrap();
+            let typed = from_key::<Keyed>(candidate).unwrap();
+            assert_eq!(
+                dynamic::encode::<Pssz>(&schema, &root, &read).unwrap(),
+                try_to_pssz(&typed).unwrap(),
+                "{candidate:02x?}"
+            );
+        }
+    }
+    assert!(rejected > candidates.len() / 4, "{rejected} of {}", candidates.len());
+
+    // Opaque nested bytes are not examined: the framing is all a key needs.
+    let nested_root = schema_for::<(u8, psio::pssz::Nested<u32>)>().unwrap();
+    let bad_inner = [&[9u8][..], &[1, 2, 3, 0, 0]].concat();
+    assert!(dyn_from_key(&nested_root.0, &nested_root.1, &bad_inner).is_err());
+    assert_eq!(
+        from_key_with(&nested_root.0, &nested_root.1, &bad_inner, Options::opaque_nested()),
+        Ok(Value::Sequence(vec![Value::Unsigned(9), Value::Bytes(vec![1, 2, 3])]))
+    );
+
+    // A prefix is the key of the leading members, each checked as the
+    // value it is.
+    let Value::Record(fields) = read else { panic!("not a record") };
+    let elements: Vec<Value> = fields.into_iter().map(|(_, value)| value).collect();
+    for count in 0..=elements.len() {
+        let prefix = key_prefix(&schema, &root, &elements[..count]).unwrap();
+        assert!(key.starts_with(&prefix), "{count}");
+        assert_eq!(prefix.len() == key.len(), count == elements.len(), "{count}");
+    }
+    assert_eq!(key_prefix(&schema, &root, &elements[..1]).unwrap(), to_key(&7u32));
+    let too_long = Value::Sequence(vec![Value::Unsigned(1), Value::Unsigned(2), Value::Unsigned(3)]);
+    assert!(key_prefix(&schema, &root, &[Value::Unsigned(7), too_long]).is_err());
+    assert!(key_prefix(&schema, &root, &[Value::Signed(7)]).is_err());
+    let mut more = elements.clone();
+    more.push(Value::Unsigned(0));
+    assert!(key_prefix(&schema, &root, &more).is_err());
+    let (list_schema, list_root) = schema_for::<Vec<u32>>().unwrap();
+    assert!(key_prefix(&list_schema, &list_root, &[]).is_err());
+
+    // An Enum node is its integer: the schema does not say whether the enum
+    // is closed, so a value that names no enumerator is a key here and is
+    // refused by the typed closed enum.
+    let (enum_schema, enum_root) = schema_for::<Status>().unwrap();
+    let unlisted = to_key(&3i32);
+    assert!(validate_key::<Status>(&unlisted).is_err());
+    assert_eq!(dyn_from_key(&enum_schema, &enum_root, &unlisted), Ok(Value::Signed(3)));
+    assert_eq!(dyn_from_key(&enum_schema, &enum_root, &to_key(&Status::Pending)), Ok(Value::Signed(-1)));
+}

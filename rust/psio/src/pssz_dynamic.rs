@@ -34,7 +34,9 @@
 //! (docs/key-spec.md): every read checks it, every write produces it. A
 //! dynamic map value is the `Value::Sequence` of its `[key, value]` entries
 //! (in any order when handed to an encoder), a set the sequence of its
-//! elements. [`to_key`] is the schema-driven key encoder they are ordered by.
+//! elements. [`to_key`] is the schema-driven key encoder they are ordered by;
+//! [`from_key`] / [`validate_key`] read a key back and [`key_prefix`] writes
+//! the key of the leading elements of a composite type.
 //!
 //! `Nested{type}` (docs/pssz-spec.md 5.8) is a byte list holding the PSSZ
 //! encoding of a `type` value, always in the automatic profile. Its dynamic
@@ -72,6 +74,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 pub mod json;
+mod key;
+pub use key::{
+    from_key, from_key_with, key_prefix, key_prefix_with, validate_key, validate_key_with,
+};
 pub use json::{
     json_to_pssz, json_to_pssz_with, json_to_value, json_to_value_with, pssz_to_json,
     pssz_to_json_with, read_json, read_json_with, validate_pssz, validate_pssz_with,

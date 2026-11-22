@@ -626,13 +626,14 @@ fn schema_ids() {
     schema_for::<Event>().expect("Event schema");
 }
 
-/// The same rows through the schema-driven codec (`pssz::dynamic`), using
+/// Every row through the schema-driven codec (`pssz::dynamic`), using
 /// nothing but the Schema IR recorded in the fixture: the binary form of a
 /// time value is its tick integer, its text is the built-in presentation of
-/// its time id.
+/// its time id, and its key is written, read, validated and cut to a prefix
+/// from the IR.
 #[test]
-fn the_schema_ir_drives_pssz_and_text() {
-    use psio::pssz::dynamic;
+fn the_schema_ir_drives_pssz_text_and_keys() {
+    use psio::pssz::dynamic::{self, Value};
     use psio::pssz::schema_ir::{AnyType, Schema};
     let fx = fixture();
     let ir = unhex(&fx.schema_ir);
@@ -645,18 +646,46 @@ fn the_schema_ir_drives_pssz_and_text() {
     custom_handlers::fixture_custom_handlers(&mut strict);
     strict.set_strict(true);
     let checked = dynamic::Options::handlers(&strict);
+    let plain = dynamic::Options::default();
 
-    let (mut values, mut accepted, mut rejected) = (0, 0, 0);
-    let (mut keys, mut violated) = (0, 0);
+    let mut done: BTreeMap<&str, usize> = BTreeMap::new();
     // The key of the value `pssz` through the schema-driven key encoder,
     // from the IR and the bytes alone.
     let key_of = |root: &AnyType, pssz: &[u8]| -> Result<Vec<u8>, String> {
         let value = dynamic::decode_exact::<Pssz>(&schema, root, pssz).map_err(|e| e.0.to_string())?;
         dynamic::to_key(&schema, root, &value).map_err(|e| e.0.to_string())
     };
+    // The bytes of the value the schema-driven key reader gives for `key`,
+    // which the validator accepts too; without and with the registry.
+    let read_key = |root: &AnyType, key: &[u8]| -> Result<Vec<u8>, String> {
+        let mut out = Vec::new();
+        for options in [plain, checked] {
+            dynamic::validate_key_with(&schema, root, key, options).map_err(|e| e.0.to_string())?;
+            let value =
+                dynamic::from_key_with(&schema, root, key, options).map_err(|e| e.0.to_string())?;
+            out.push(
+                dynamic::encode_with::<Pssz>(&schema, root, &value, options)
+                    .map_err(|e| e.0.to_string())?,
+            );
+            // The value read has the key it was read from.
+            if dynamic::to_key_with(&schema, root, &value, options).as_deref() != Ok(key) {
+                return Err("the value read does not have the key it was read from".into());
+            }
+        }
+        if out[0] != out[1] {
+            return Err("the registry changes the value read".into());
+        }
+        Ok(out.remove(0))
+    };
     for row in &fx.vectors {
         let name = &row.name;
+        *done.entry(row.kind.as_str()).or_default() += 1;
         if row.kind == "bound" {
+            // The bound of raw bytes: no type, hence no schema, enters it.
+            // The schema-driven prefixes below take their bounds from the
+            // same function.
+            let prefix = unhex(row.prefix.as_ref().unwrap());
+            assert_eq!(key_prefix_upper_bound(&prefix).map(|b| hex(&b)), row.bound, "{name}");
             continue;
         }
         let root = AnyType::named(row.r#type.clone());
@@ -669,8 +698,9 @@ fn the_schema_ir_drives_pssz_and_text() {
                 let key = unhex(row.key.as_ref().unwrap());
                 assert_eq!(key_of(&root, &bytes), Ok(key.clone()), "{name}: key");
                 let value = dynamic::decode_exact_with::<Pssz>(&schema, &root, &bytes, checked).unwrap();
-                assert_eq!(dynamic::to_key_with(&schema, &root, &value, checked), Ok(key), "{name}: key");
-                keys += 1;
+                assert_eq!(dynamic::to_key_with(&schema, &root, &value, checked), Ok(key.clone()), "{name}: key");
+                // The key reads back as the value.
+                assert_eq!(read_key(&root, &key), Ok(bytes.clone()), "{name}: from_key");
                 let json = dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &strict);
                 let ijson = dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &strict);
                 assert_eq!(json.is_ok(), row.json.is_some(), "{name}: json {json:?}");
@@ -691,7 +721,6 @@ fn the_schema_ir_drives_pssz_and_text() {
                         "{name}: ijson read"
                     );
                 }
-                values += 1;
             }
             "text-accept" => {
                 let text = row.text.as_ref().unwrap().as_bytes();
@@ -703,40 +732,83 @@ fn the_schema_ir_drives_pssz_and_text() {
                     row.json.as_ref().unwrap(),
                     "{name}: canonical"
                 );
-                accepted += 1;
             }
             "text-reject" => {
                 let text = row.text.as_ref().unwrap().as_bytes();
                 assert!(dynamic::json_to_pssz::<Json>(&schema, &root, text).is_err(), "{name}");
                 assert!(dynamic::json_to_pssz::<IJson>(&schema, &root, text).is_err(), "{name}");
-                rejected += 1;
             }
             "key-order" | "key-order-bits" => {
-                // The schema-driven keys ascend bytewise too.
+                // The schema-driven keys ascend bytewise too, and each
+                // reads back: as exactly the bytes it was written from in a
+                // `key-order-bits` row (a `key-order` row may hold `-0`,
+                // whose key is that of `+0`).
                 let mut last: Option<Vec<u8>> = None;
                 for pssz in row.values.as_ref().unwrap() {
                     let bytes = unhex(pssz);
                     assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false), "{name}");
                     let key = key_of(&root, &bytes).unwrap_or_else(|e| panic!("{name}: key: {e}"));
                     assert!(last.as_ref().is_none_or(|last| *last < key), "{name}: keys not ascending");
+                    let back = read_key(&root, &key).unwrap_or_else(|e| panic!("{name}: from_key: {e}"));
+                    if row.kind == "key-order-bits" {
+                        assert_eq!(back, bytes, "{name}: from_key");
+                    }
                     last = Some(key);
                 }
             }
+            "key-reject" => {
+                // Not a key of the type for the reader or the validator,
+                // with or without the registry.
+                let key = unhex(row.key.as_ref().unwrap());
+                for options in [plain, checked] {
+                    assert!(dynamic::validate_key_with(&schema, &root, &key, options).is_err(), "{name}");
+                    assert!(dynamic::from_key_with(&schema, &root, &key, options).is_err(), "{name}");
+                }
+                assert!(dynamic::validate_key(&schema, &root, &key).is_err(), "{name}");
+                assert!(dynamic::from_key(&schema, &root, &key).is_err(), "{name}");
+            }
             "key-prefix" => {
-                // The full key of the value starts with the prefix.
+                // The key of the first `count` elements of the value, its
+                // bound, and the full key that starts with it.
                 let bytes = unhex(row.pssz.as_ref().unwrap());
-                let key = key_of(&root, &bytes).unwrap_or_else(|e| panic!("{name}: key: {e}"));
-                assert!(key.starts_with(&unhex(row.prefix.as_ref().unwrap())), "{name}");
+                let elements = match dynamic::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap() {
+                    Value::Sequence(items) => items,
+                    Value::Record(fields) => fields.into_iter().map(|(_, value)| value).collect(),
+                    other => panic!("{name}: not a composite value: {other:?}"),
+                };
+                let count = row.count.unwrap();
+                assert!(count <= elements.len(), "{name}: count");
+                for options in [plain, checked] {
+                    let prefix = dynamic::key_prefix_with(&schema, &root, &elements[..count], options)
+                        .unwrap_or_else(|e| panic!("{name}: prefix: {e:?}"));
+                    assert_eq!(Some(hex(&prefix)), row.prefix, "{name}: prefix");
+                    assert_eq!(key_prefix_upper_bound(&prefix).map(|b| hex(&b)), row.bound, "{name}: bound");
+                    let key = key_of(&root, &bytes).unwrap_or_else(|e| panic!("{name}: key: {e}"));
+                    assert!(key.starts_with(&prefix), "{name}");
+                    if count == elements.len() {
+                        assert_eq!(key, prefix, "{name}: the whole value");
+                    }
+                }
+                assert_eq!(
+                    dynamic::key_prefix(&schema, &root, &elements[..count]).map(|p| hex(&p)).ok(),
+                    row.prefix,
+                    "{name}"
+                );
             }
             "key-invariant" => {
                 // A schema with no handler reads the wire type: the bytes
-                // validate and their key is the row's. With the handlers the
-                // value is refused, with the invariant's message, by the
-                // readers and by the key encoder.
+                // validate, their key is the row's and the key reads back as
+                // them. With the handlers the value is refused, with the
+                // invariant's message, by the pssz and key readers and by
+                // the key encoder.
                 let bytes = unhex(row.pssz.as_ref().unwrap());
+                let key = unhex(row.key.as_ref().unwrap());
                 let reason = row.reason.as_ref().unwrap();
                 assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false), "{name}");
-                assert_eq!(key_of(&root, &bytes), Ok(unhex(row.key.as_ref().unwrap())), "{name}: key");
+                assert_eq!(key_of(&root, &bytes), Ok(key.clone()), "{name}: key");
+                assert_eq!(dynamic::validate_key(&schema, &root, &key), Ok(()), "{name}: validate_key");
+                let read = dynamic::from_key(&schema, &root, &key).unwrap();
+                assert_eq!(dynamic::encode::<Pssz>(&schema, &root, &read), Ok(bytes.clone()), "{name}: from_key");
                 assert_eq!(
                     dynamic::validate_pssz_with(&schema, &root, &bytes, &strict).map_err(|e| e.what().to_string()),
                     Err(reason.clone()),
@@ -748,14 +820,34 @@ fn the_schema_ir_drives_pssz_and_text() {
                     Err(reason.clone()),
                     "{name}: key with the handlers"
                 );
-                violated += 1;
+                assert_eq!(
+                    dynamic::validate_key_with(&schema, &root, &key, checked).map_err(|e| e.0.to_string()),
+                    Err(reason.clone()),
+                    "{name}: validate_key with the handlers"
+                );
+                assert_eq!(
+                    dynamic::from_key_with(&schema, &root, &key, checked).map(drop).map_err(|e| e.0.to_string()),
+                    Err(reason.clone()),
+                    "{name}: from_key with the handlers"
+                );
             }
-            // The schema-driven codec has a key encoder, not a key reader.
-            "key-reject" => (),
             other => panic!("{name}: unknown kind {other}"),
         }
     }
-    assert!(values > 100 && accepted > 20 && rejected > 40, "{values} {accepted} {rejected}");
-    assert_eq!(keys, fx.vectors.iter().filter(|row| row.kind == "value").count());
-    assert_eq!(violated, 10, "key-invariant rows");
+    // Nothing skipped: every row of every kind went through the schema.
+    let want: BTreeMap<&str, usize> = [
+        ("bound", 17),
+        ("key-invariant", 10),
+        ("key-order", 53),
+        ("key-order-bits", 5),
+        ("key-prefix", 387),
+        ("key-reject", 141),
+        ("text-accept", 56),
+        ("text-reject", 124),
+        ("value", 354),
+    ]
+    .into();
+    assert_eq!(done, want);
+    assert_eq!(done.values().sum::<usize>(), fx.vectors.len());
+    assert_eq!(fx.vectors.len(), 1147);
 }
