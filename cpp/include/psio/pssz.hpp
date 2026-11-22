@@ -32,6 +32,7 @@
 // widths across schema changes; inference cannot predict future fields.
 
 #include <psio/cpo.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/detail/unaligned_iter.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/pssz_record_layout.hpp>
@@ -185,6 +186,11 @@ namespace psio {
       };
       template <typename T>
       inline constexpr bool is_psio_box_v = is_psio_box<T>::value;
+
+      // psio::nested<T> (nested.hpp): a byte list holding the encoding of a
+      // T. Variable-size, unbounded, minimum size 0, like vector<u8>.
+      using ::psio::detail::is_nested;
+      using ::psio::detail::is_nested_v;
 
       // ── Shape classification (same as SSZ) ────────────────────────────────
 
@@ -529,6 +535,8 @@ namespace psio {
       {
          if constexpr (is_psio_box_v<T>)
             return positive_min_size<typename is_psio_box<T>::elem>();
+         else if constexpr (is_nested_v<T>)
+            return false; // A byte list: the inner encoding may be empty.
          else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::pssz, T>)
             return false; // An adapter without a minimum-size contract may encode empty.
          else if constexpr (is_std_optional_v<T>)
@@ -665,6 +673,8 @@ namespace psio {
             if (!value.value) return codec_fail("pssz: null Box", 0, "pssz");
             return check_encode_depth_impl(*value.value, depth, bounds);
          }
+         else if constexpr (is_nested_v<T>)
+            return ::psio::detail::nested_impl::pssz_check_encode(value, depth);
          else if constexpr (is_bitlist_v<T>)
          {
             if (bounds && value.size() > T::max_size_value)
@@ -889,6 +899,8 @@ namespace psio {
          }
          else if constexpr (is_psio_box_v<T>)
             return size_of_v<W, Auto>(*v.value, check);
+         else if constexpr (is_nested_v<T>)
+            return v.size();
          else if constexpr (is_fixed_v<T>)
             return fixed_size_of<T>();
          else if constexpr (is_std_array_v<T>)
@@ -1073,6 +1085,12 @@ namespace psio {
          {
             encode_value<W, Auto>(*v.value, s);
             return;
+         }
+         else if constexpr (is_nested_v<T>)
+         {
+            // The bytes, as they are: a nested value holds a valid encoding.
+            if (v.size() != 0)
+               s.write(v.bytes().data(), v.size());
          }
          else if constexpr (std::is_same_v<T, bool>)
             s.write(v ? '\x01' : '\x00');
@@ -1698,6 +1716,8 @@ namespace psio {
             using E = typename is_psio_box<T>::elem;
             return T{decode_value<W, Auto, E>(src, pos, end)};
          }
+         else if constexpr (is_nested_v<T>)
+            return T::unchecked(std::vector<char>(src.data() + pos, src.data() + end));
          else if constexpr (std::is_same_v<T, bool>)
             return static_cast<unsigned char>(src[pos]) != 0;
          else if constexpr (std::is_same_v<T, ::psio::uint256>)
@@ -1876,10 +1896,14 @@ namespace psio {
       //   strict_strings (in)  strict mode: every plain string must be UTF-8.
       //                  By default a String is Vector(u8) carrying raw bytes
       //                  and passes through unchecked.
+      //   exact          (in)  exact-schema mode (validate_strict): the bytes of
+      //                  a nested value must themselves pass exact validation
+      //                  as their type (nested.hpp).
       struct validate_flags
       {
          bool has_unknown    = false;
          bool strict_strings = false;
+         bool exact          = false;
       };
 
       template <std::size_t W, bool Auto, typename T>
@@ -2104,6 +2128,16 @@ namespace psio {
                return check_member_length_bound<LegacyW, Auto, V>(src, pos + 1, end, lb);
             }
          }
+         else if constexpr (is_nested_v<F>)
+         {
+            // A nested member's length is its byte count.
+            const std::size_t count = end - pos;
+            if ((lb.max && count > *lb.max) || (lb.exact && count != *lb.exact) ||
+                (lb.min && count < *lb.min))
+               return codec_fail("pssz: member length_bound violated",
+                                 static_cast<std::uint32_t>(pos), "pssz");
+            return codec_ok();
+         }
          else if constexpr (std::is_same_v<F, std::string> || is_utf8_string_v<F> ||
                             is_std_vector_v<F>)
          {
@@ -2237,6 +2271,9 @@ namespace psio {
          else if constexpr (is_psio_box_v<T>)
             return validate_value<W, Auto, typename is_psio_box<T>::elem>(
                src, pos, end, depth, flags);
+         else if constexpr (is_nested_v<T>)
+            return ::psio::detail::nested_impl::pssz_validate<T>(
+               src.subspan(pos, end - pos), depth, flags);
          else if constexpr (is_fixed_v<T> && !Record<T>)
          {
             if (end - pos != fixed_size_of<T>())
@@ -2412,13 +2449,16 @@ namespace psio {
       // abort on construction, which a guest cannot catch. They report an
       // explicit unsupported status for types that need semantic work and
       // structural success otherwise (docs/guest-codec-preparation.md).
+      // `depth`: the node depth of the value's root (nonzero for the bytes
+      // of a nested value, which are checked by this same function).
       template <std::size_t W, bool Auto, typename T>
-      codec_status validate_exact_value(std::span<const char> bytes) noexcept
+      codec_status validate_exact_value(std::span<const char> bytes,
+                                        std::size_t depth = 0) noexcept
       {
          if (auto cap = check_max_dynamic<T>(bytes); !cap.ok())
             return cap;
-         validate_flags flags{.has_unknown = false, .strict_strings = true};
-         auto st = validate_value<W, Auto, T>(bytes, 0, bytes.size(), 0, &flags);
+         validate_flags flags{.has_unknown = false, .strict_strings = true, .exact = true};
+         auto st = validate_value<W, Auto, T>(bytes, 0, bytes.size(), depth, &flags);
          if (!st.ok())
             return st;
          if (flags.has_unknown)
@@ -2578,6 +2618,9 @@ namespace psio {
          else if constexpr (is_psio_box_v<Old> && is_psio_box_v<New>)
             return layout_evolves<typename is_psio_box<Old>::elem,
                                   typename is_psio_box<New>::elem>();
+         else if constexpr (is_nested_v<Old> && is_nested_v<New>)
+            return layout_evolves<typename is_nested<Old>::inner,
+                                  typename is_nested<New>::inner>();
          else if constexpr (is_std_optional_v<Old> && is_std_optional_v<New>)
             return optional_uses_selector_v<typename Old::value_type> ==
                       optional_uses_selector_v<typename New::value_type> &&

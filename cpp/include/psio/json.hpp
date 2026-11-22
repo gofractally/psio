@@ -97,6 +97,7 @@
 
 #include <psio/adapter.hpp>
 #include <psio/cpo.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
@@ -727,6 +728,19 @@ namespace psio {
             std::string payload;
             Proj::encode(v, payload);
             write_string(w, std::string_view{payload}, Fmt::i_json);
+         }
+         else if constexpr (::psio::detail::is_nested_v<T>)
+         {
+            // The inner value's own text. The bytes are validated before
+            // they are decoded: bytes that are not a T have no text.
+            typename ::psio::detail::is_nested<T>::inner inner{};
+            if (!v.decode_checked(inner).ok())
+            {
+               w.fail("json: nested bytes are not a valid encoding of their type");
+               w.append("null");
+               return;
+            }
+            encode_value<Fmt, IM>(inner, w);
          }
          else if constexpr (std::is_same_v<T, bool>)
             w.append(v ? std::string_view{"true"} : std::string_view{"false"});
@@ -1468,6 +1482,21 @@ namespace psio {
          if constexpr (dispatch_adapter_v<Fmt, T>)
             return read_adapted<Fmt, ::psio::adapter<std::remove_cvref_t<T>,
                                                      ::psio::text_category>>(r, out);
+         else if constexpr (::psio::detail::is_nested_v<T>)
+         {
+            // The inner value's text, stored as its canonical encoding. The
+            // value is built even when only validating: text describing a
+            // value that has no encoding is not a nested value.
+            typename ::psio::detail::is_nested<T>::inner inner{};
+            if (!read_value<Fmt, IM>(r, &inner))
+               return false;
+            T value = T::unchecked({});
+            if (!T::from_checked(inner, value).ok())
+               return r.c.fail("json: nested value has no encoding");
+            if (out)
+               *out = std::move(value);
+            return true;
+         }
          else if constexpr (std::is_same_v<T, bool>)
          {
             bool v = false;

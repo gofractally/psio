@@ -29,7 +29,7 @@ int main() {
     emit("Tuple",AnyType{Tuple{{Box<AnyType>{integer(16)},Box<AnyType>{integer(32)}}}});
     emit("Int",integer(32));
     emit("Float",AnyType{Float{8,24}});
-    emit("FracPack",AnyType{FracPack{Box<AnyType>{integer(8)}}});
+    emit("Nested",AnyType{Nested{Box<AnyType>{integer(8)}}});
     emit("Custom",AnyType{Custom{Box<AnyType>{integer(64)},"account"}});
     emit("Resource",AnyType{Resource{"handle",{Func{"run",{member("value")},std::nullopt,{}}},{Attribute{"capability",std::nullopt}}}});
     emit("Type",AnyType{Type{"named"}});

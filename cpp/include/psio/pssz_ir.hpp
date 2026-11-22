@@ -22,6 +22,15 @@
 //   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
 //           jsonInt / ijsonInt = "number" | "string"   (pssz_ir_json.hpp)
 //   Variant member  ijsonName = "..."                   (pssz_ir_json.hpp)
+//
+// Nested{type} is a byte list holding the PSSZ encoding of a `type` value,
+// always in the automatic profile whatever the profile around it. Its
+// dynamic value is the inner value itself: decode reads the bytes as `type`
+// (exactly as it reads any member: the same unknown-field rule, the inner
+// root one node level below the Nested node) and encode writes the inner
+// value's canonical encoding. A member lengthBound on a Nested member counts
+// those bytes. With `nested_bytes::opaque` the codec does not look inside:
+// the dynamic value is the Bytes, read and written as they are.
 // The JSON / I-JSON text path over the same IR is pssz_ir_json.hpp.
 #include <psio/detail/pssz_record_layout.hpp>
 #include <psio/detail/validate_depth.hpp>
@@ -45,6 +54,12 @@
 
 namespace psio::pssz_ir
 {
+// What the codec does with the bytes of a Nested node.
+enum class nested_bytes : std::uint8_t
+{
+   typed,   // the inner value: validated, decoded and re-encoded as its type
+   opaque,  // Bytes, not looked at
+};
 struct Value;
 struct Signed
 {
@@ -601,6 +616,13 @@ template <std::size_t W> class Codec
                 }
                 out = total;
              }
+             else if constexpr (std::is_same_v<T, schema_types::Nested>)
+             {
+                // No bound of its own; a member lengthBound bounds its bytes.
+                if (annotation && annotation->count() &&
+                    *annotation->count() <= std::numeric_limits<std::size_t>::max())
+                   out = static_cast<std::size_t>(*annotation->count());
+             }
              // Tuple, Variant: no inferred bound.
              return codec_ok();
           },
@@ -697,6 +719,72 @@ template <std::size_t W> class Codec
       if (auto items = std::get_if<Sequence>(&value.value))
          return bound.admits(items->size());
       return true;
+   }
+   // Whether a (resolved) member type is a Nested, looking through Option:
+   // its lengthBound then counts the bytes of the inner encoding, which only
+   // the wire form has (the dynamic value is the inner value).
+   codec_status nested_member(const schema_types::AnyType &type, bool &out) const
+   {
+      const schema_types::AnyType *at = &type;
+      out = false;
+      for (std::size_t hops = 0; hops <= kMaxValidationDepth; ++hops)
+      {
+         auto option = std::get_if<schema_types::Option>(&at->value);
+         if (!option)
+         {
+            out = std::holds_alternative<schema_types::Nested>(at->value);
+            return codec_ok();
+         }
+         PSIO_PSSZ_IR_TRY(inner(option->type, at));
+      }
+      return codec_ok();
+   }
+   // The lengthBound of a Nested member (through Option) against its
+   // encoded form `wire`. An absent optional has no length.
+   codec_status nested_bound(const schema_types::AnyType &type, std::span<const char> wire,
+                             const LengthBound &bound) const
+   {
+      const schema_types::AnyType *at = &type;
+      while (auto option = std::get_if<schema_types::Option>(&at->value))
+      {
+         PSIO_PSSZ_IR_TRY(inner(option->type, at));
+         bool selector;
+         PSIO_PSSZ_IR_TRY(can_be_empty(*at, selector));
+         if (wire.empty() || (selector && wire[0] == 0))
+            return codec_ok();
+         if (selector)
+            wire = wire.subspan(1);
+      }
+      return bound.admits(wire.size()) ? codec_ok()
+                                       : fail("pssz IR: member length bound violated");
+   }
+   // The inner value of a Nested node: always the automatic profile.
+   codec_status nested_encode(const schema_types::AnyType &type, const Value &value,
+                              std::vector<char> &out, std::size_t n) const
+   {
+      if constexpr (automatic)
+         return encode_at(type, value, out, n);
+      else
+      {
+         Codec<0> codec(schema);
+         codec.opaque_nested = opaque_nested;
+         return codec.encode_at(type, value, out, n);
+      }
+   }
+   codec_status nested_decode(const schema_types::AnyType &type, std::span<const char> bytes,
+                              Value &out, std::size_t n)
+   {
+      if constexpr (automatic)
+         return decode_at(type, bytes, out, n);
+      else
+      {
+         Codec<0> codec(schema);
+         codec.opaque_nested = opaque_nested;
+         codec.allow_unknown = allow_unknown;
+         auto status = codec.decode_at(type, bytes, out, n);
+         has_unknown |= codec.has_unknown;
+         return status;
+      }
    }
    static codec_status spans_for(std::size_t w, std::span<const char> bytes, bool stable,
                                  std::span<const psio::detail::pssz_field_layout> fields,
@@ -1020,9 +1108,10 @@ template <std::size_t W> class Codec
                 }
                 return fail("pssz IR: unsupported custom adapter");
              }
-             else if constexpr (std::is_same_v<T, schema_types::FracPack>)
+             else if constexpr (std::is_same_v<T, schema_types::Nested>)
              {
-                return fail("pssz IR: legacy FracPack marker is unsupported");
+                // A byte list: variable-size.
+                return t.type.get() ? codec_ok() : fail("pssz IR: null schema box");
              }
              else
                 return fail("pssz IR: unsupported resource or schema type");
@@ -1040,7 +1129,8 @@ template <std::size_t W> class Codec
           {
              using T = std::decay_t<decltype(t)>;
              if constexpr (std::is_same_v<T, schema_types::List> ||
-                           std::is_same_v<T, schema_types::BoundedList>)
+                           std::is_same_v<T, schema_types::BoundedList> ||
+                           std::is_same_v<T, schema_types::Nested>)
              {
                 out = true;
                 return codec_ok();
@@ -1214,6 +1304,7 @@ template <std::size_t W> class Codec
       const Value absent = Value::none();
       std::vector<const Value *> ordered;
       std::vector<const schema_types::AnyType *> types;
+      std::vector<std::optional<LengthBound>> bounds;
       std::size_t keep = 0;
       for (const auto &member : members)
       {
@@ -1228,16 +1319,24 @@ template <std::size_t W> class Codec
          const Value *value = found == values.end() ? &absent : &found->second;
          std::optional<LengthBound> bound;
          PSIO_PSSZ_IR_TRY(parse_length_bound(member.attributes, bound));
-         if (bound && !bound_admits(*bound, *value))
+         bool nested = false;
+         PSIO_PSSZ_IR_TRY(nested_member(*type, nested));
+         if (bound && !nested && !bound_admits(*bound, *value))
             return fail("pssz IR: member length bound violated");
          ordered.push_back(value);
          types.push_back(type);
+         // A Nested member's bound counts its encoded bytes: checked below.
+         bounds.push_back(nested ? bound : std::nullopt);
          if (stable || !info.optional || !none(*value))
             keep = ordered.size();
       }
       std::vector<Field> fields(keep);
       for (std::size_t i = 0; i < keep; ++i)
+      {
          PSIO_PSSZ_IR_TRY(encode_field(*types[i], *ordered[i], n + 1, fields[i]));
+         if (bounds[i])
+            PSIO_PSSZ_IR_TRY(nested_bound(*types[i], fields[i].bytes, *bounds[i]));
+      }
       return encode_fields(fields, stable, w, out);
    }
    codec_status encode_sequence(const schema_types::AnyType &type, const Sequence &values,
@@ -1302,7 +1401,17 @@ template <std::size_t W> class Codec
             return fail("pssz IR: trailing absent optional field was not pruned");
          std::optional<LengthBound> bound;
          PSIO_PSSZ_IR_TRY(parse_length_bound(members[i].attributes, bound));
-         if (bound && !bound_admits(*bound, value))
+         bool nested = false;
+         if (bound)
+            PSIO_PSSZ_IR_TRY(nested_member(*types[i], nested));
+         if (nested)
+         {
+            if (spans[i].present)
+               PSIO_PSSZ_IR_TRY(nested_bound(
+                   *types[i], bytes.subspan(spans[i].begin, spans[i].end - spans[i].begin),
+                   *bound));
+         }
+         else if (bound && !bound_admits(*bound, value))
             return fail("pssz IR: member length bound violated");
          out.emplace_back(members[i].name, std::move(value));
       }
@@ -1384,7 +1493,13 @@ template <std::size_t W> class Codec
  public:
    bool has_unknown = false;
    bool allow_unknown = false;
+   // nested_bytes::opaque: a Nested node is read and written as Bytes.
+   bool opaque_nested = false;
    explicit Codec(const schema_types::Schema &schema) : schema(schema) {}
+   Codec(const schema_types::Schema &schema, nested_bytes nested)
+       : schema(schema), opaque_nested(nested == nested_bytes::opaque)
+   {
+   }
 
    // The offset width `root` uses for its own header / slots / table.
    codec_status width(const schema_types::AnyType &root, std::size_t &out) const
@@ -1480,6 +1595,19 @@ template <std::size_t W> class Codec
                    else
                       return fail("pssz IR: unsupported custom adapter");
                    PSIO_PSSZ_IR_TRY(push(t.type));
+                }
+                else if constexpr (std::is_same_v<T, schema_types::Nested>)
+                {
+                   // The inner type is checked under the automatic profile's
+                   // rules, which is the profile of its bytes.
+                   if constexpr (automatic)
+                      PSIO_PSSZ_IR_TRY(push(t.type));
+                   else
+                   {
+                      if (!t.type.get())
+                         return fail("pssz IR: null schema box");
+                      PSIO_PSSZ_IR_TRY(Codec<0>(schema).metadata(*t.type));
+                   }
                 }
                 else if constexpr (std::is_same_v<T, schema_types::Int>)
                 {
@@ -1725,8 +1853,23 @@ template <std::size_t W> class Codec
                 out.push_back(static_cast<char>(v->selector));
                 PSIO_PSSZ_IR_TRY(encode_at(*child, *v->payload, out, n + 1));
              }
-             else if constexpr (std::is_same_v<T, schema_types::FracPack>)
-                return fail("pssz IR: legacy FracPack marker is unsupported");
+             else if constexpr (std::is_same_v<T, schema_types::Nested>)
+             {
+                if (!t.type.get())
+                   return fail("pssz IR: null schema box");
+                if (opaque_nested)
+                {
+                   auto v = std::get_if<Bytes>(&value.value);
+                   if (!v)
+                      return fail("pssz IR: bytes value required for an opaque nested value");
+                   if (!v->empty())
+                      PSIO_PSSZ_IR_TRY(depth(n + 1));
+                   PSIO_PSSZ_IR_TRY(
+                       append(out, {reinterpret_cast<const char *>(v->data()), v->size()}));
+                }
+                else
+                   PSIO_PSSZ_IR_TRY(nested_encode(*t.type, value, out, n + 1));
+             }
              else
                 return fail("pssz IR: unsupported resource or schema type");
              return codec_ok();
@@ -1959,8 +2102,19 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
              PSIO_PSSZ_IR_TRY(decode_at(*child, bytes.subspan(1), value, n + 1));
              out = Value::variant(selector, std::move(value));
           }
-          else if constexpr (std::is_same_v<T, schema_types::FracPack>)
-             return fail("pssz IR: legacy FracPack marker is unsupported");
+          else if constexpr (std::is_same_v<T, schema_types::Nested>)
+          {
+             if (!t.type.get())
+                return fail("pssz IR: null schema box");
+             if (opaque_nested)
+             {
+                if (!bytes.empty())
+                   PSIO_PSSZ_IR_TRY(depth(n + 1));
+                out = Bytes(bytes.begin(), bytes.end());
+             }
+             else
+                PSIO_PSSZ_IR_TRY(nested_decode(*t.type, bytes, out, n + 1));
+          }
           else
              return fail("pssz IR: unsupported resource or schema type");
           return codec_ok();
@@ -1975,9 +2129,10 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
 template <std::size_t W>
 [[nodiscard]] codec_status encode(const schema_types::Schema &schema,
                                   const schema_types::AnyType &root, const Value &value,
-                                  std::vector<char> &destination)
+                                  std::vector<char> &destination,
+                                  nested_bytes nested = nested_bytes::typed)
 {
-   detail::Codec<W> codec(schema);
+   detail::Codec<W> codec(schema, nested);
    std::vector<char> bytes;
    auto status = codec.metadata(root);
    if (!status.ok())
@@ -1992,9 +2147,10 @@ template <std::size_t W>
 template <std::size_t W>
 [[nodiscard]] codec_status
 decode_compatible(const schema_types::Schema &schema, const schema_types::AnyType &root,
-                  std::span<const char> bytes, Value &output, bool &has_unknown)
+                  std::span<const char> bytes, Value &output, bool &has_unknown,
+                  nested_bytes nested = nested_bytes::typed)
 {
-   detail::Codec<W> codec(schema);
+   detail::Codec<W> codec(schema, nested);
    codec.allow_unknown = true;
    Value value;
    auto status = codec.metadata(root);
@@ -2015,9 +2171,10 @@ template <std::size_t W>
 // compatible); validate_canonical_for_width remains the full re-encode check.
 [[nodiscard]] codec_status decode_exact(const schema_types::Schema &schema,
                                         const schema_types::AnyType &root,
-                                        std::span<const char> bytes, Value &output)
+                                        std::span<const char> bytes, Value &output,
+                                        nested_bytes nested = nested_bytes::typed)
 {
-   detail::Codec<W> codec(schema);
+   detail::Codec<W> codec(schema, nested);
    Value value;
    auto status = codec.metadata(root);
    if (!status.ok())
@@ -2037,28 +2194,32 @@ template <std::size_t W>
 // and length bounds are enforced, pruning is mandatory.
 [[nodiscard]] inline codec_status encode_auto(const schema_types::Schema &schema,
                                               const schema_types::AnyType &root,
-                                              const Value &value, std::vector<char> &destination)
+                                              const Value &value, std::vector<char> &destination,
+                                              nested_bytes nested = nested_bytes::typed)
 {
-   return encode<0>(schema, root, value, destination);
+   return encode<0>(schema, root, value, destination, nested);
 }
 // Accepts unknown appended optional fields and reports them (the typed
 // `validate` / decode_pssz_checked rule).
 [[nodiscard]] inline codec_status decode_auto(const schema_types::Schema &schema,
                                               const schema_types::AnyType &root,
                                               std::span<const char> bytes, Value &output,
-                                              bool &has_unknown)
+                                              bool &has_unknown,
+                                              nested_bytes nested = nested_bytes::typed)
 {
-   return decode_compatible<0>(schema, root, bytes, output, has_unknown);
+   return decode_compatible<0>(schema, root, bytes, output, has_unknown, nested);
 }
-// Checks `bytes` against the schema without keeping the value.
+// Checks `bytes` against the schema without keeping the value. The bytes of
+// a Nested node are checked as its inner type unless `nested` is opaque.
 [[nodiscard]] inline codec_status validate_auto(const schema_types::Schema &schema,
                                                 const schema_types::AnyType &root,
                                                 std::span<const char> bytes,
-                                                bool *has_unknown = nullptr)
+                                                bool *has_unknown = nullptr,
+                                                nested_bytes nested = nested_bytes::typed)
 {
    Value value;
    bool unknown = false;
-   auto status = decode_compatible<0>(schema, root, bytes, value, unknown);
+   auto status = decode_compatible<0>(schema, root, bytes, value, unknown, nested);
    if (status.ok() && has_unknown)
       *has_unknown = unknown;
    return status;
@@ -2078,14 +2239,15 @@ template <std::size_t W>
 template <std::size_t W>
 [[nodiscard]] codec_status validate_canonical_for_width(const schema_types::Schema &schema,
                                                         const schema_types::AnyType &root,
-                                                        std::span<const char> bytes)
+                                                        std::span<const char> bytes,
+                                                        nested_bytes nested = nested_bytes::typed)
 {
    Value value;
-   auto status = decode_exact<W>(schema, root, bytes, value);
+   auto status = decode_exact<W>(schema, root, bytes, value, nested);
    if (!status.ok())
       return status;
    std::vector<char> canonical;
-   status = encode<W>(schema, root, value, canonical);
+   status = encode<W>(schema, root, value, canonical, nested);
    if (!status.ok())
       return status;
    if (canonical.size() != bytes.size() ||

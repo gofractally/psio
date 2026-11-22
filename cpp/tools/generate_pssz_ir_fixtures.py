@@ -33,7 +33,7 @@ def any_type(value):
     [(tag, value)] = value["value"].items()
     if tag in ("Object", "Struct", "Variant"):
         args = "{" + ",".join(map(member, value["members"])) + "}," + attributes(value["attributes"])
-    elif tag in ("Option", "List", "FracPack"):
+    elif tag in ("Option", "List", "Nested"):
         args = box(value["type"])
     elif tag == "Array":
         args = box(value["type"]) + "," + str(value["len"])

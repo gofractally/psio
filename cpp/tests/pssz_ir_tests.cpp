@@ -103,9 +103,22 @@ template <std::size_t W> void profile()
    REQUIRE(runtime::encode<W>(schema, text(), std::string(1, char(0xff)), invalid_string).ok());
    REQUIRE(invalid_string == std::vector<char>{char(0xff)});
    invalid_string.clear();
-   REQUIRE_FALSE(
-       runtime::encode<W>(schema, ir::FracPack{integer(8)}, runtime::Unsigned{7}, destination)
-           .ok());
+   // Nested{u8}: a byte list holding the encoding of the inner value, whose
+   // dynamic value is the inner value itself.
+   {
+      const ir::AnyType nested = ir::Nested{integer(8)};
+      std::vector<char> nested_bytes;
+      REQUIRE(runtime::encode<W>(schema, nested, runtime::Unsigned{7}, nested_bytes).ok());
+      REQUIRE(nested_bytes == std::vector<char>{7});
+      runtime::Value inner;
+      REQUIRE(runtime::decode_exact<W>(schema, nested, nested_bytes, inner).ok());
+      REQUIRE(inner == runtime::Value(runtime::Unsigned{7}));
+      REQUIRE_FALSE(
+          runtime::decode_exact<W>(schema, nested, std::vector<char>{7, 7}, inner).ok());
+      REQUIRE_FALSE(
+          runtime::encode<W>(schema, nested, runtime::Unsigned{256}, nested_bytes).ok());
+      REQUIRE(nested_bytes == std::vector<char>{7});
+   }
    REQUIRE_FALSE(
        runtime::decode_exact<W>(schema, ir::Resource{}, std::span<const char>{}, value).ok());
    // Fixed-count arrays may contain zero-sized values; list count cannot
