@@ -28,7 +28,6 @@ psio-macros = {{ path = {json.dumps(str(work/'psio-macros-0.1.0'))} }}
     (consumer/'src/main.rs').write_text('''
 use psio::{Pack, Unpack};
 #[derive(Debug, PartialEq, psio::Pack, psio::Unpack, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-#[fracpack(fracpack_mod = "psio")]
 struct Record { id: u32, name: String }
 psio::pjson_struct!(Record { id: u32, name: String });
 psio::ssz_struct!(Record { id: u32, name: String });

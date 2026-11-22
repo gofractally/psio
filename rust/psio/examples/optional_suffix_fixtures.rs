@@ -40,7 +40,7 @@ struct OldOuter {
     values: Vec<Base>,
 }
 #[derive(Serialize, PsszPack, PsszUnpack, PsszView, ToPsszSchema)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct Unit;
 #[derive(Serialize, PsszPack, PsszUnpack, PsszView, ToPsszSchema)]
 struct DepthNode {

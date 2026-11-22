@@ -17,7 +17,7 @@ use std::{
 pub use indexmap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, Unpack, PartialEq, Eq, ToSchema)]
-#[fracpack(fracpack_mod = "crate")]
+#[psio(crate = "crate")]
 pub struct Schema(IndexMap<String, AnyType>);
 
 impl Schema {
@@ -43,7 +43,7 @@ impl<'a> IntoIterator for &'a Schema {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, Unpack, PartialEq, Eq, ToSchema)]
-#[fracpack(fracpack_mod = "crate")]
+#[psio(crate = "crate")]
 pub enum AnyType {
     Struct(IndexMap<String, AnyType>),
     Object(IndexMap<String, AnyType>),
@@ -93,7 +93,7 @@ impl AnyType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, Unpack, PartialEq, Eq, ToSchema)]
-#[fracpack(fracpack_mod = "crate")]
+#[psio(crate = "crate")]
 pub struct FunctionType {
     pub params: AnyType,
     pub result: Option<AnyType>,

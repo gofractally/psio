@@ -30,7 +30,7 @@ impl<F: PsszFormat> PsszValidate<F> for CheckedByte {
     }
 }
 #[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct FixedRecord {
     field: CheckedByte,
 }

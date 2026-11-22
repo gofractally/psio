@@ -4,10 +4,10 @@ use serde::Deserialize;
 #[derive(Debug, PartialEq, Deserialize, PsszPack, PsszUnpack)]
 struct AbiEmpty;
 #[derive(Debug, PartialEq, Deserialize, PsszPack, PsszUnpack)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct AbiUnit;
 #[derive(Debug, PartialEq, Deserialize, PsszPack, PsszUnpack)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct AbiFixed {
     id: u32,
 }

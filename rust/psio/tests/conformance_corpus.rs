@@ -9,16 +9,13 @@ use psio::wit::pack::WitPack;
 #[derive(Debug, PartialEq, Default, psio::Pack, psio::Unpack,
          psio::CapnpPack, psio::CapnpUnpack, psio::FbPack, psio::FbUnpack,
          psio::WitPack)]
-#[fracpack(fracpack_mod = "psio")]
 #[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Record { id: u32, name: String, values: Vec<u32>, active: bool }
 psio::ssz_struct!(Record { id: u32, name: String, values: Vec<u32>, active: bool });
 
 #[derive(Debug, PartialEq, psio::Pack, psio::Unpack)]
-#[fracpack(fracpack_mod = "psio")]
 enum Choice { Number(u32), Text(String) }
 #[derive(Debug, PartialEq, psio::Pack, psio::Unpack)]
-#[fracpack(fracpack_mod = "psio")]
 struct Envelope { head: Record, rows: Vec<Record>, note: Option<String>, choice: Choice }
 
 psio::pjson_struct!(Record { id: u32, name: String, values: Vec<u32>, active: bool });

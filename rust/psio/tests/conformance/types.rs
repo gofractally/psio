@@ -26,7 +26,7 @@ macro_rules! c_enum {
         #[repr($repr)]
         pub enum $name {
             $($v = $value,)*
-            #[pssz(other)]
+            #[psio(other)]
             Unknown($repr),
         }
         impl Conf for $name {
@@ -125,7 +125,7 @@ dwnc!(Pair { x: u8, y: u8 });
 // A fixed-layout record with a non-Copy field (`dwnc!` declares `Copy`
 // records).
 #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 pub struct DwncVar { pub k: u8, pub s: Raw }
 impl Conf for DwncVar {
     fn id() -> String { "DwncVar".into() }

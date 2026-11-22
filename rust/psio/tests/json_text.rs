@@ -41,7 +41,7 @@ struct Tree {
 #[derive(Debug, Clone, PartialEq, psio::JsonText)]
 enum Shape {
     Point(Point),
-    #[json(name = "string")]
+    #[psio(name = "string")]
     Label(String),
     Boxed(Box<Shape>),
 }
@@ -457,7 +457,7 @@ enum ManyAlternatives {
     Alt6(u32),
     Alt7(u32),
     Alt8(u32),
-    #[json(name = "string")]
+    #[psio(name = "string")]
     Text(String),
 }
 

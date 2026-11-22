@@ -1369,7 +1369,7 @@ impl CustomHandlers {
         self.add_check(id, |bytes: &[u8]| crate::pssz::from_pssz::<T>(bytes).map(drop))
     }
     /// [`CustomHandlers::add_type_as`] under the id `T`'s `ToPsszSchema`
-    /// writes into the schema (`#[pssz(custom)]` / `#[pssz(custom = "Id")]`).
+    /// writes into the schema (`#[psio(custom)]` / `#[psio(custom = "Id")]`).
     /// An error when `T` is not declared custom.
     pub fn add_type<T>(&mut self) -> Result<&mut Self, PsszError>
     where
@@ -1389,8 +1389,8 @@ impl CustomHandlers {
         self.add_check(id, |bytes: &[u8]| crate::pssz::from_pssz::<T>(bytes).map(drop))
     }
     /// [`CustomHandlers::add_invariant_type_as`] under the id `T`'s
-    /// `ToPsszSchema` writes into the schema (`#[pssz(invariant = "...")]`,
-    /// `#[pssz(custom)]`). An error when `T` has no custom schema id.
+    /// `ToPsszSchema` writes into the schema (`#[psio(invariant = "...")]`,
+    /// `#[psio(custom)]`). An error when `T` has no custom schema id.
     pub fn add_invariant_type<T>(&mut self) -> Result<&mut Self, PsszError>
     where
         T: ToPsszSchema + PsszPack<Pssz> + PsszUnpack<Pssz>,

@@ -1,11 +1,11 @@
-//! Explicit PSSZ derives. These never generate legacy fracpack implementations.
+//! The pSSZ derives: `PsszPack`, `PsszUnpack`, `PsszView`, `ToPsszSchema`.
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as Tokens;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, Data, DeriveInput, Fields, Lit, Member, Meta, NestedMeta, Type,
+    parse_macro_input, parse_quote, Data, DeriveInput, Fields, Member, Meta, NestedMeta, Type,
 };
-use crate::json_text_macro::{parse_attrs, Forms};
+use crate::attrs::{self, Forms};
 
 struct Options {
     krate: syn::Path,
@@ -14,14 +14,14 @@ struct Options {
     name: Option<String>,
     /// Explicit maxDynamicData cap: `#[pssz(max_dynamic_data = N)]`.
     cap: Option<u64>,
-    /// `#[pssz(variant)]`: encode a field-less enum as a variant of unit
+    /// `#[psio(variant)]`: encode a field-less enum as a variant of unit
     /// alternatives instead of as its underlying integer.
     variant: bool,
-    /// `#[pssz(custom)]` / `#[pssz(custom = "Id")]`: the type has a custom
+    /// `#[psio(custom)]` / `#[psio(custom = "Id")]`: the type has a custom
     /// text form (`TextForm`). Its schema is `Custom { wire type, id }`; the
     /// id defaults to the schema name. The bytes are unaffected.
     custom: Option<Option<String>>,
-    /// `#[pssz(invariant = "path")]`: the type's invariant, a
+    /// `#[psio(invariant = "path")]`: the type's invariant, a
     /// `fn(&Self) -> Result<(), &'static str>` (docs/pssz-spec.md 18). Every
     /// checking reader and every writer enforces it; the schema node is
     /// `Custom { wire type, id }`.
@@ -29,67 +29,18 @@ struct Options {
 }
 use crate::c_enum::{self, CEnum};
 
-/// What the other derives (`JsonText`, `Key`) read of `#[pssz(...)]`: the
-/// attributes that are properties of the type in every format.
-pub(crate) struct Shared {
-    pub(crate) transparent: bool,
-    pub(crate) invariant: Option<syn::Path>,
-}
-/// `#[serde(transparent)]` says the same thing as `#[pssz(transparent)]`: a
-/// type that is its one member for serde is its one member here.
-fn serde_transparent(attr: &syn::Attribute) -> bool {
-    if !attr.path.is_ident("serde") {
-        return false;
-    }
-    match attr.parse_meta() {
-        Ok(Meta::List(list)) => list.nested.iter().any(
-            |item| matches!(item, NestedMeta::Meta(Meta::Path(path)) if path.is_ident("transparent")),
-        ),
-        _ => false,
-    }
-}
-pub(crate) fn shared(input: &DeriveInput) -> syn::Result<Shared> {
-    let mut out = Shared { transparent: false, invariant: None };
-    for attr in &input.attrs {
-        if serde_transparent(attr) {
-            out.transparent = true;
-        }
-        if !attr.path.is_ident("pssz") {
-            continue;
-        }
-        let Meta::List(list) = attr.parse_meta()? else { continue };
-        for item in list.nested {
-            match item {
-                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("transparent") => {
-                    out.transparent = true
-                }
-                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("invariant") => {
-                    out.invariant = Some(invariant_path(&nv)?);
-                }
-                _ => (),
-            }
-        }
-    }
-    Ok(out)
-}
-fn invariant_path(nv: &syn::MetaNameValue) -> syn::Result<syn::Path> {
-    match &nv.lit {
-        Lit::Str(value) => value.parse(),
-        _ => Err(syn::Error::new_spanned(nv, "invariant must be a path string: invariant = \"path::to::check\"")),
-    }
-}
 /// A field-less enum encoded as its underlying integer (C++ plain `enum`).
 fn c_like<'a>(input: &'a DeriveInput, opts: &Options) -> syn::Result<Option<CEnum<'a>>> {
     let Some(shape) = c_enum::analyze(input)? else { return Ok(None) };
     if opts.variant {
         if let Some(other) = shape.other {
-            return Err(syn::Error::new_spanned(other, "#[pssz(other)] cannot be combined with #[pssz(variant)]"));
+            return Err(syn::Error::new_spanned(other, "#[psio(other)] cannot be combined with #[psio(variant)]"));
         }
         return Ok(None);
     }
     if shape.repr.is_none() {
         return Err(syn::Error::new_spanned(&input.ident,
-            "a field-less PSSZ enum encodes as its underlying integer: add #[repr(u8)] (or u16/u32/u64/i8/i16/i32/i64), or #[pssz(variant)] to encode it as a variant of unit alternatives"));
+            "a field-less PSSZ enum encodes as its underlying integer: add #[repr(u8)] (or u16/u32/u64/i8/i16/i32/i64), or #[psio(variant)] to encode it as a variant of unit alternatives"));
     }
     Ok(Some(shape))
 }
@@ -123,81 +74,17 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
         };
         if reserved { return Err(syn::Error::new_spanned(param, "generic name is reserved by PSSZ derives")); }
     }
-    let mut out = Options {
-        krate: parse_quote!(::psio),
-        dwnc: false,
-        transparent: false,
-        name: None,
-        cap: None,
-        variant: false,
-        custom: None,
-        invariant: None,
+    let item = attrs::item(input)?;
+    let out = Options {
+        krate: item.krate(),
+        dwnc: item.definition_will_not_change,
+        transparent: item.transparent,
+        name: item.name,
+        cap: item.max_dynamic_data,
+        variant: item.variant,
+        custom: item.custom,
+        invariant: item.invariant,
     };
-    for attr in &input.attrs {
-        if serde_transparent(attr) {
-            out.transparent = true;
-        }
-        if !attr.path.is_ident("pssz") {
-            continue;
-        }
-        let list = match attr.parse_meta()? {
-            Meta::List(list) => list,
-            other => return Err(syn::Error::new_spanned(other, "expected #[pssz(...)]")),
-        };
-        for item in list.nested {
-            match item {
-                NestedMeta::Meta(Meta::Path(path))
-                    if path.is_ident("definition_will_not_change") =>
-                {
-                    out.dwnc = true
-                }
-                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("transparent") => {
-                    out.transparent = true
-                }
-                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("variant") => {
-                    out.variant = true
-                }
-                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("custom") => {
-                    out.custom = Some(None)
-                }
-                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("custom") => {
-                    if let Lit::Str(value) = &nv.lit {
-                        out.custom = Some(Some(value.value()));
-                    } else {
-                        return Err(syn::Error::new_spanned(nv, "custom must be a string"));
-                    }
-                }
-                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("invariant") => {
-                    if out.invariant.is_some() {
-                        return Err(syn::Error::new_spanned(nv, "a type has one invariant"));
-                    }
-                    out.invariant = Some(invariant_path(&nv)?);
-                }
-                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("max_dynamic_data") => {
-                    if let Lit::Int(value) = &nv.lit {
-                        out.cap = Some(value.base10_parse()?);
-                    } else {
-                        return Err(syn::Error::new_spanned(nv, "max_dynamic_data must be an integer"));
-                    }
-                }
-                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("crate") => {
-                    if let Lit::Str(value) = nv.lit {
-                        out.krate = value.parse()?;
-                    } else {
-                        return Err(syn::Error::new_spanned(nv, "crate must be a path string"));
-                    }
-                }
-                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("name") => {
-                    if let Lit::Str(value) = nv.lit {
-                        out.name = Some(value.value());
-                    } else {
-                        return Err(syn::Error::new_spanned(nv, "name must be a string"));
-                    }
-                }
-                other => return Err(syn::Error::new_spanned(other, "unsupported PSSZ attribute")),
-            }
-        }
-    }
     if out.cap.is_some() && (out.transparent || !matches!(input.data, Data::Struct(_))) {
         return Err(syn::Error::new_spanned(
             input,
@@ -205,33 +92,13 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
         ));
     }
     if out.variant && !matches!(input.data, Data::Enum(_)) {
-        return Err(syn::Error::new_spanned(input, "#[pssz(variant)] applies to enums only"));
+        return Err(syn::Error::new_spanned(input, "#[psio(variant)] applies to enums only"));
     }
     if out.transparent && out.dwnc {
         return Err(syn::Error::new_spanned(
             input,
             "transparent and definition_will_not_change cannot be combined",
         ));
-    }
-    let fields: Vec<_> = match &input.data {
-        Data::Struct(s) => s.fields.iter().collect(),
-        Data::Enum(e) => {
-            // The one variant annotation is #[pssz(other)]; c_like checks
-            // where it may appear.
-            for variant in &e.variants {
-                c_enum::is_other(variant)?;
-            }
-            e.variants.iter().flat_map(|v| v.fields.iter()).collect()
-        }
-        Data::Union(u) => u.fields.named.iter().collect(),
-    };
-    for field in fields {
-        if field.attrs.iter().any(|a| a.path.is_ident("pssz")) {
-            return Err(syn::Error::new_spanned(
-                field,
-                "field PSSZ annotations are unsupported; use bounded wrapper types",
-            ));
-        }
     }
     Ok(out)
 }
@@ -487,7 +354,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
         }
         Data::Enum(_) if c_enum.is_some() => {
             // C++ plain enum: the underlying integer, fixed size. With a
-            // #[pssz(other)] catch-all every value of the integer decodes;
+            // #[psio(other)] catch-all every value of the integer decodes;
             // without one only the declared enumerators do.
             let shape = c_enum.as_ref().unwrap();
             let repr = shape.repr.as_ref().unwrap();
@@ -821,10 +688,7 @@ fn schema_attribute(k: &syn::Path, name: &str, value: &str) -> Tokens {
 /// The member attributes `jsonInt` / `ijsonInt` for `#[json(json_string)]`
 /// and friends on the field, else on the type (`defaults`).
 fn schema_int_forms(k: &syn::Path, field: &syn::Field, defaults: Forms) -> syn::Result<Vec<Tokens>> {
-    let attrs = parse_attrs(&field.attrs)?;
-    if attrs.name.is_some() {
-        return Err(syn::Error::new_spanned(field, "#[json(name)] applies to enum variants"));
-    }
+    let attrs = attrs::field(field)?;
     let text = |string: bool| if string { "string" } else { "number" };
     let mut out = Vec::new();
     if let Some(form) = attrs.forms.json.or(defaults.json) {
@@ -905,7 +769,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             let names = shape
                 .declared
                 .iter()
-                .map(|v| Ok(parse_attrs(&v.attrs)?.name.unwrap_or_else(|| v.ident.to_string())))
+                .map(|v| Ok(attrs::variant(v)?.name.unwrap_or_else(|| v.ident.to_string())))
                 .collect::<syn::Result<Vec<String>>>()?;
             quote! {{
                 #preamble
@@ -935,7 +799,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             }
         }
         Data::Struct(data) => {
-            schema_record(k, &data.fields, opts.dwnc, opts.cap, parse_attrs(&input.attrs)?.forms)?
+            schema_record(k, &data.fields, opts.dwnc, opts.cap, attrs::item(&input)?.forms)?
         }
         Data::Enum(data) => {
             if opts.dwnc || opts.transparent {
@@ -975,8 +839,8 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                     }
                     _ => schema_record(k, &variant.fields, false, None, Forms::default())?,
                 };
-                // The I-JSON form names an alternative by `#[json(name)]`.
-                let attributes: Vec<_> = parse_attrs(&variant.attrs)?
+                // The I-JSON form names an alternative by `#[psio(name)]`.
+                let attributes: Vec<_> = attrs::variant(variant)?
                     .name
                     .iter()
                     .map(|name| schema_attribute(k, "ijsonName", name))

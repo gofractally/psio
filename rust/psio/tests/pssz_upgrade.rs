@@ -24,12 +24,12 @@ struct Renamed {
     other: String,
 }
 #[derive(ToPsszSchema)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct Frozen {
     name: String,
 }
 #[derive(ToPsszSchema)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct FrozenNew {
     name: String,
     extra: Option<String>,

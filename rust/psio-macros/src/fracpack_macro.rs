@@ -1,36 +1,28 @@
-use darling::{FromDeriveInput, FromField, FromVariant};
 use proc_macro::TokenStream;
 use quote::quote;
-use std::str::FromStr;
 use syn::{
     parse_macro_input, Data, DataEnum, DataStruct, DeriveInput, Field, Fields, FieldsNamed,
-    FieldsUnnamed, LitStr,
+    FieldsUnnamed,
 };
 
-/// Fracpack struct level options
-#[derive(Debug, FromDeriveInput, FromVariant)]
-#[darling(default, attributes(fracpack))]
+/// What the frac derives read of the type's attributes.
 pub(crate) struct Options {
     pub(crate) definition_will_not_change: bool,
-    pub(crate) fracpack_mod: String,
-    pub(crate) custom: Option<LitStr>,
+    /// Where the frac traits live: `<psio crate>`.
+    pub(crate) fracpack_mod: proc_macro2::TokenStream,
+    pub(crate) custom: Option<String>,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            definition_will_not_change: false,
-            fracpack_mod: "psio".into(),
-            custom: None,
-        }
+impl Options {
+    pub(crate) fn new(input: &DeriveInput) -> syn::Result<Self> {
+        let item = crate::attrs::item(input)?;
+        let krate = item.krate();
+        Ok(Options {
+            definition_will_not_change: item.definition_will_not_change,
+            fracpack_mod: quote!(#krate),
+            custom: item.custom.flatten(),
+        })
     }
-}
-
-/// Fracpack field level options
-#[derive(Debug, Default, FromField)]
-#[darling(default, attributes(fracpack))]
-pub(crate) struct FieldOptions {
-    pub(crate) skip: bool,
 }
 
 struct StructField<'a> {
@@ -47,8 +39,9 @@ struct EnumField<'a> {
     unpack: proc_macro2::TokenStream,
 }
 
+/// `#[frac(skip)]`. A malformed attribute is reported by `Options::new`.
 pub(crate) fn skip_field(field: &Field) -> bool {
-    FieldOptions::from_field(field).map_or(false, |attr| attr.skip)
+    crate::attrs::field(field).map_or(false, |attrs| attrs.skip)
 }
 
 fn use_field(field: &&StructField) -> bool {
@@ -280,13 +273,11 @@ fn enum_fields<'a>(
 pub fn fracpack_macro_impl(input: TokenStream, impl_pack: bool, impl_unpack: bool) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
-    let opts = match Options::from_derive_input(&input) {
+    let opts = match Options::new(&input) {
         Ok(val) => val,
-        Err(err) => {
-            return err.write_errors().into();
-        }
+        Err(err) => return err.to_compile_error().into(),
     };
-    let fracpack_mod = proc_macro2::TokenStream::from_str(&opts.fracpack_mod).unwrap();
+    let fracpack_mod = opts.fracpack_mod.clone();
 
     match &input.data {
         Data::Struct(data) => {
@@ -953,13 +944,11 @@ fn process_enum(
 pub fn fracview_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
-    let opts = match Options::from_derive_input(&input) {
+    let opts = match Options::new(&input) {
         Ok(val) => val,
-        Err(err) => {
-            return err.write_errors().into();
-        }
+        Err(err) => return err.to_compile_error().into(),
     };
-    let fracpack_mod = proc_macro2::TokenStream::from_str(&opts.fracpack_mod).unwrap();
+    let fracpack_mod = opts.fracpack_mod.clone();
 
     match &input.data {
         Data::Struct(data) => process_struct_view(&fracpack_mod, &input, data, &opts),
@@ -1294,13 +1283,11 @@ fn process_enum_view(
 pub fn fracmutview_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
-    let opts = match Options::from_derive_input(&input) {
+    let opts = match Options::new(&input) {
         Ok(val) => val,
-        Err(err) => {
-            return err.write_errors().into();
-        }
+        Err(err) => return err.to_compile_error().into(),
     };
-    let fracpack_mod = proc_macro2::TokenStream::from_str(&opts.fracpack_mod).unwrap();
+    let fracpack_mod = opts.fracpack_mod.clone();
 
     match &input.data {
         Data::Struct(data) => process_struct_mutview(&fracpack_mod, &input, data, &opts),

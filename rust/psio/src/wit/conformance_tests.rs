@@ -1742,7 +1742,7 @@ mod tests {
     // ── Derived enum tests ────────────────────────────────────────────────
 
     #[derive(WitPack, WitUnpack, PartialEq, Debug)]
-    #[fracpack(fracpack_mod = "crate")]
+    #[psio(crate = "crate")]
     enum SimpleVariant {
         A(u32),
         B(f64),
@@ -1818,7 +1818,7 @@ mod tests {
 
     // Multi-field tuple variant
     #[derive(WitPack, WitUnpack, PartialEq, Debug)]
-    #[fracpack(fracpack_mod = "crate")]
+    #[psio(crate = "crate")]
     enum MultiField {
         Rect(f64, f64),
         Circle(f32),
@@ -1839,7 +1839,7 @@ mod tests {
 
     // Named (struct) variant
     #[derive(WitPack, WitUnpack, PartialEq, Debug)]
-    #[fracpack(fracpack_mod = "crate")]
+    #[psio(crate = "crate")]
     enum NamedFields {
         Point { x: f32, y: f32 },
         Label { text: String },
@@ -1866,7 +1866,7 @@ mod tests {
 
     // Variant as a struct field
     #[derive(WitPack, WitUnpack, PartialEq, Debug)]
-    #[fracpack(fracpack_mod = "crate")]
+    #[psio(crate = "crate")]
     enum Color {
         Red,
         Green,
@@ -1874,7 +1874,7 @@ mod tests {
     }
 
     #[derive(WitPack, WitUnpack, PartialEq, Debug)]
-    #[fracpack(fracpack_mod = "crate")]
+    #[psio(crate = "crate")]
     struct ShapeWithColor {
         kind: SimpleVariant,
         color: Color,
@@ -1915,7 +1915,7 @@ mod tests {
 
     // Two-case variant (similar to Option but custom)
     #[derive(WitPack, WitUnpack, PartialEq, Debug)]
-    #[fracpack(fracpack_mod = "crate")]
+    #[psio(crate = "crate")]
     enum MaybeInt {
         Nothing,
         Just(u32),

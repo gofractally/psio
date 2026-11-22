@@ -21,7 +21,7 @@ type W = Pssz32;
 // ── Shape definitions ────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq, Eq, Clone, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 pub struct Validator {
     pub pubkey_lo:          u64,
     pub pubkey_hi:          u64,
@@ -35,14 +35,14 @@ pub struct Validator {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Default, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 pub struct Point {
     pub x: i32,
     pub y: i32,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Default, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 pub struct NameRecord {
     pub account: u64,
     pub limit:   u64,

@@ -104,14 +104,14 @@ struct AllOptional {
     Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
 )]
 enum Choice {
-    #[json(name = "uint32")]
+    #[psio(name = "uint32")]
     U32(u32),
-    #[json(name = "uint64")]
+    #[psio(name = "uint64")]
     U64(u64),
-    #[json(name = "string")]
+    #[psio(name = "string")]
     Text(RawString),
     Inner(Inner),
-    #[json(name = "uint8[]")]
+    #[psio(name = "uint8[]")]
     Bytes(Vec<u8>),
 }
 
@@ -130,7 +130,7 @@ struct Holder {
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, psio::PsszPack, psio::PsszUnpack,
     psio::ToPsszSchema, psio::Key,
 )]
-#[pssz(custom)]
+#[psio(custom)]
 struct Version {
     major: u16,
     minor: u16,
@@ -169,7 +169,7 @@ struct Release {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, psio::PsszPack, psio::PsszUnpack,
     psio::ToPsszSchema, psio::Key,
 )]
-#[pssz(transparent, custom = "AccountName")]
+#[psio(transparent, custom = "AccountName")]
 struct Account(u64);
 const ACCOUNT_ALPHABET: &[u8; 32] = b".12345abcdefghijklmnopqrstuvwxyz";
 impl TextForm for Account {
@@ -246,7 +246,7 @@ struct Bounds {
 #[derive(
     Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
 )]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct Fixed {
     x: i32,
     y: i32,
@@ -263,13 +263,13 @@ struct Fixed {
 )]
 #[repr(u8)]
 enum Color {
-    #[json(name = "red")]
+    #[psio(name = "red")]
     Red = 0,
-    #[json(name = "green")]
+    #[psio(name = "green")]
     Green = 1,
-    #[json(name = "blue")]
+    #[psio(name = "blue")]
     Blue = 7,
-    #[pssz(other)]
+    #[psio(other)]
     Unknown(u8),
 }
 
@@ -280,13 +280,13 @@ enum Color {
 )]
 #[repr(i32)]
 enum Status {
-    #[json(name = "pending")]
+    #[psio(name = "pending")]
     Pending = -1,
-    #[json(name = "active")]
+    #[psio(name = "active")]
     Active = 2,
-    #[json(name = "closed")]
+    #[psio(name = "closed")]
     Closed = 7,
-    #[pssz(other)]
+    #[psio(other)]
     Unknown(i32),
 }
 
@@ -356,9 +356,9 @@ struct NestedAction {
     Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
 )]
 enum NestedChoice {
-    #[json(name = "uint32")]
+    #[psio(name = "uint32")]
     U32(u32),
-    #[json(name = "nested_NestedArgs")]
+    #[psio(name = "nested_NestedArgs")]
     Args(Nested<NestedArgs>),
 }
 
@@ -369,11 +369,11 @@ enum NestedChoice {
     Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
 )]
 enum MapChoice {
-    #[json(name = "map_string_uint32")]
+    #[psio(name = "map_string_uint32")]
     Map(BTreeMap<String, u32>),
-    #[json(name = "set_uint32")]
+    #[psio(name = "set_uint32")]
     Set(HashSet<u32>),
-    #[json(name = "tuple_uint32_string")]
+    #[psio(name = "tuple_uint32_string")]
     Pair((u32, String)),
 }
 

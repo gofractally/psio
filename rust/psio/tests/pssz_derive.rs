@@ -3,7 +3,7 @@ use psio::pssz::*;
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, PsszView)]
 struct Empty;
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, PsszView)]
-#[pssz(transparent)]
+#[psio(transparent)]
 struct Account(u64);
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, PsszView)]
 struct Generic<T> {
@@ -115,7 +115,6 @@ fn checked_append_is_transactional_for_failing_enum_payload() {
 fn legacy_pack_remains_fracpack_when_both_derives_are_present() {
     use psio::{Pack, Unpack};
     #[derive(Debug, PartialEq, Pack, Unpack, PsszPack, PsszUnpack, PsszView)]
-    #[fracpack(fracpack_mod = "psio")]
     struct Both {
         value: String,
     }
@@ -170,7 +169,7 @@ fn generated_paths_are_hygienic_with_shadowed_prelude_names() {
         #[derive(
             Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView, psio::ToPsszSchema,
         )]
-        #[pssz(crate = "::psio")]
+        #[psio(crate = "::psio")]
         pub struct Record {
             pub value: u32,
             pub suffix: ::core::option::Option<u8>,
@@ -267,7 +266,7 @@ fn a_record_has_the_bytes_cpp_writes_and_named_view_accessors() {
 // them instead of borrowing.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, PsszPack, PsszUnpack, PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct PackedFixed {
     tag: u8,
     wide: u64,
@@ -282,11 +281,11 @@ struct PackedOpen {
 }
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, PsszPack, PsszUnpack)]
-#[pssz(transparent)]
+#[psio(transparent)]
 struct PackedId(u64);
 
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct UnpackedFixed {
     tag: u8,
     wide: u64,

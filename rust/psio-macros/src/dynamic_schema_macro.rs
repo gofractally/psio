@@ -63,6 +63,11 @@ pub fn dynamic_schema_derive_impl(input: TokenStream) -> TokenStream {
         }
     };
 
+    let k = match crate::attrs::item(&input) {
+        Ok(item) => item.krate(),
+        Err(err) => return err.to_compile_error().into(),
+    };
+
     // Compute offsets using natural alignment (WIT-style).
     // We do this at compile time in the macro.
     let mut field_infos: Vec<(String, TokenStream2, u32, u32)> = Vec::new();
@@ -106,9 +111,9 @@ pub fn dynamic_schema_derive_impl(input: TokenStream) -> TokenStream {
 
         field_adds.push(quote! {
             builder = builder.field({
-                let mut fd = psio1::dynamic_schema::FieldDesc::scalar(
+                let mut fd = #k::dynamic_schema::FieldDesc::scalar(
                     #fname,
-                    psio1::dynamic_schema::DynamicType::#dt,
+                    #k::dynamic_schema::DynamicType::#dt,
                     #field_offset,
                 );
                 fd.byte_size = #byte_size;
@@ -127,9 +132,9 @@ pub fn dynamic_schema_derive_impl(input: TokenStream) -> TokenStream {
     let data_words = ((offset + 7) / 8) as u16;
 
     let expanded = quote! {
-        impl psio1::dynamic_view::ToDynamicSchema for #name {
-            fn dynamic_schema() -> psio1::dynamic_schema::DynamicSchema {
-                let mut builder = psio1::dynamic_schema::SchemaBuilder::new();
+        impl #k::dynamic_view::ToDynamicSchema for #name {
+            fn dynamic_schema() -> #k::dynamic_schema::DynamicSchema {
+                let mut builder = #k::dynamic_schema::SchemaBuilder::new();
                 #(#field_adds)*
                 builder.data_words(#data_words).build()
             }

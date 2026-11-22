@@ -1,9 +1,8 @@
 use crate::fracpack_macro::{skip_field, Options as FracpackOptions};
-use darling::{error::Accumulator, FromDeriveInput, FromVariant};
+use darling::error::Accumulator;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use std::str::FromStr;
 use syn::{
     parse_macro_input, parse_quote, Data, DataEnum, DeriveInput, Fields, FieldsNamed,
     FieldsUnnamed, Type,
@@ -135,15 +134,16 @@ fn visit_enum(
                 );
                 return quote! {};
             }
-            let fracpack_opts = errors
-                .handle(FracpackOptions::from_variant(variant))
-                .unwrap_or_default();
+            // A variant's members are always extensible, as the Pack derive
+            // encodes them.
+            let variant_opts = FracpackOptions {
+                definition_will_not_change: false,
+                fracpack_mod: fracpack_mod.clone(),
+                custom: None,
+            };
             let variant_name = variant.ident.to_string();
-            let variant_type = apply_custom(
-                fracpack_mod,
-                &fracpack_opts,
-                visit_fields(&fracpack_mod, &variant.fields, &fracpack_opts, errors),
-            );
+            let variant_type =
+                visit_fields(&fracpack_mod, &variant.fields, &variant_opts, errors);
             quote! {
                 variants.insert(#variant_name.into(), #variant_type);
             }
@@ -175,10 +175,11 @@ pub fn schema_derive_macro(input: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(input as DeriveInput);
     let mut errors = darling::Error::accumulator();
 
-    let fracpack_opts = errors
-        .handle(FracpackOptions::from_derive_input(&input))
-        .unwrap_or_default();
-    let fracpack_mod = TokenStream2::from_str(&fracpack_opts.fracpack_mod).unwrap();
+    let fracpack_opts = match FracpackOptions::new(&input) {
+        Ok(opts) => opts,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let fracpack_mod = fracpack_opts.fracpack_mod.clone();
 
     let name = &input.ident;
 

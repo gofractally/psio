@@ -48,7 +48,7 @@ macro_rules! record {
 }
 
 record! {
-    #[pssz(definition_will_not_change)]
+    #[psio(definition_will_not_change)]
     struct Stamps {
         created: TimePoint<Seconds>,
         updated: TimePoint<Micros>,
@@ -87,9 +87,9 @@ record! {
     psio::ToPsszSchema, psio::Key,
 )]
 enum U8OrString {
-    #[json(name = "uint8")]
+    #[psio(name = "uint8")]
     U8(u8),
-    #[json(name = "string")]
+    #[psio(name = "string")]
     Text(String),
 }
 
@@ -99,7 +99,7 @@ enum U8OrString {
     Debug, Clone, PartialEq, PartialOrd, psio::JsonText, psio::PsszPack, psio::PsszUnpack,
     psio::ToPsszSchema, psio::Key,
 )]
-#[pssz(transparent)]
+#[psio(transparent)]
 struct ShardKey {
     key: (u32, String),
 }
@@ -108,7 +108,7 @@ struct ShardKey {
 // knows only the wire type (a schema with no handler) reads, and what a
 // writer that does not check would write (`key-invariant` rows).
 #[derive(Debug, Clone, PartialEq, PartialOrd, psio::PsszPack, psio::PsszUnpack, psio::Key)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct NameWire {
     value: u64,
 }
@@ -121,7 +121,7 @@ struct RangeWire {
 #[repr(u8)]
 enum LevelWire {
     Low = 0,
-    #[pssz(other)]
+    #[psio(other)]
     Other(u8),
 }
 impl From<NameWire> for Name {

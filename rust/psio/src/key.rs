@@ -37,7 +37,7 @@
 //! [`ByKey`] makes any key type an `Ord + Hash` container key with exactly
 //! that order (`BTreeSet<ByKey<f64>>`).
 //!
-//! Type invariants (docs/pssz-spec.md §18, `#[pssz(invariant = "path")]`)
+//! Type invariants (docs/pssz-spec.md §18, `#[psio(invariant = "path")]`)
 //! are part of both directions: [`try_to_key`] refuses a value that violates
 //! one ([`to_key`] panics on it) and [`from_key`] / [`validate_key`] reject
 //! its key with the invariant's message.
@@ -75,7 +75,7 @@ pub trait KeyPack {
     /// through [`try_to_key`] / [`to_key`], which check first.
     fn key_pack(&self, out: &mut Vec<u8>);
     /// The invariants of the value and of the values it holds, innermost
-    /// first (`#[pssz(invariant = "path")]`). Containers forward to their
+    /// first (`#[psio(invariant = "path")]`). Containers forward to their
     /// elements; a type without one accepts every value.
     fn key_check(&self) -> KeyResult<()> {
         Ok(())

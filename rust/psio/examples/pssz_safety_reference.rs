@@ -10,14 +10,14 @@ struct Action {
     active: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct Fixed {
     id: u32,
     active: bool,
 }
 #[repr(C, packed)]
 #[derive(Clone, Copy, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct Packed {
     first: bool,
     second: u8,

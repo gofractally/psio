@@ -76,12 +76,12 @@ mod records {
     macro_rules! dwnc {
         (#[cap($cap:literal)] $name:ident { $($f:ident : $t:ty),* $(,)? }) => {
             #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-            #[pssz(definition_will_not_change, max_dynamic_data = $cap)]
+            #[psio(definition_will_not_change)] #[pssz(max_dynamic_data = $cap)]
             pub struct $name { $(pub $f: $t),* }
         };
         ($name:ident { $($f:ident : $t:ty),* $(,)? }) => {
             #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-            #[pssz(definition_will_not_change)]
+            #[psio(definition_will_not_change)]
             pub struct $name { $(pub $f: $t),* }
         };
     }

@@ -4,13 +4,10 @@
 //! computing the Cap'n Proto layout from field types and emitting the
 //! appropriate pack/unpack code.
 
-use darling::FromDeriveInput;
 use proc_macro::TokenStream;
-use quote::quote;
-use std::str::FromStr;
+use quote::{quote, ToTokens};
 use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
 
-use crate::fracpack_macro::Options;
 
 // ── Type classification ─────────────────────────────────────────────────
 
@@ -260,11 +257,10 @@ fn unpack_field_tokens(
 
 pub fn capnp_pack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let opts = match Options::from_derive_input(&input) {
-        Ok(val) => val,
-        Err(err) => return err.write_errors().into(),
+    let mod_path = match crate::attrs::item(&input) {
+        Ok(item) => item.krate().into_token_stream(),
+        Err(err) => return err.to_compile_error().into(),
     };
-    let mod_path = proc_macro2::TokenStream::from_str(&opts.fracpack_mod).unwrap();
 
     match &input.data {
         Data::Struct(data) => {
@@ -280,11 +276,10 @@ pub fn capnp_pack_macro_impl(input: TokenStream) -> TokenStream {
 
 pub fn capnp_unpack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let opts = match Options::from_derive_input(&input) {
-        Ok(val) => val,
-        Err(err) => return err.write_errors().into(),
+    let mod_path = match crate::attrs::item(&input) {
+        Ok(item) => item.krate().into_token_stream(),
+        Err(err) => return err.to_compile_error().into(),
     };
-    let mod_path = proc_macro2::TokenStream::from_str(&opts.fracpack_mod).unwrap();
 
     match &input.data {
         Data::Struct(data) => {
@@ -391,11 +386,10 @@ fn gen_capnp_unpack(
 
 pub fn capnp_view_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let opts = match Options::from_derive_input(&input) {
-        Ok(val) => val,
-        Err(err) => return err.write_errors().into(),
+    let mod_path = match crate::attrs::item(&input) {
+        Ok(item) => item.krate().into_token_stream(),
+        Err(err) => return err.to_compile_error().into(),
     };
-    let mod_path = proc_macro2::TokenStream::from_str(&opts.fracpack_mod).unwrap();
 
     match &input.data {
         Data::Struct(data) => {

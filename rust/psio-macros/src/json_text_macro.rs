@@ -2,19 +2,19 @@
 //!
 //! * A struct with named fields is an object in declaration order.
 //! * A struct with one unnamed field is transparent, and so is a struct of
-//!   one named field marked `#[pssz(transparent)]` (or
+//!   one named field marked `#[psio(transparent)]` (or
 //!   `#[serde(transparent)]`): its text is its member's.
-//! * `#[pssz(invariant = "path")]` (a `fn(&Self) -> Result<(), &'static
+//! * `#[psio(invariant = "path")]` (a `fn(&Self) -> Result<(), &'static
 //!   str>`) is enforced by the writer and the reader: a value that violates
 //!   it has no text, and text that reads as one is rejected with its message.
 //! * An enum whose variants each hold one unnamed field is a variant:
 //!   `{"Name": value}` under IJson, `[index, value]` under Json. The name is
-//!   the variant identifier unless `#[json(name = "...")]` renames it (use it
+//!   the variant identifier unless `#[psio(name = "...")]` renames it (use it
 //!   to match the C++ alternative's type name, e.g. "uint32", "string").
 //! * A field-less enum with `#[repr(u8 | ... | i64)]` is written as the
-//!   variant's name (the identifier, or `#[json(name = "...")]`) and read
+//!   variant's name (the identifier, or `#[psio(name = "...")]`) and read
 //!   from the name, the number, the numeric string or `"name:number"`. One
-//!   variant may be the catch-all `#[pssz(other)] Unknown(<repr>)`: it holds
+//!   variant may be the catch-all `#[psio(other)] Unknown(<repr>)`: it holds
 //!   a value that is no declared variant and is written as its number.
 //!   Without it such a number is an error.
 //!
@@ -22,74 +22,14 @@
 //! struct: `#[json(json_number)]`, `#[json(json_string)]`,
 //! `#[json(ijson_number)]`, `#[json(ijson_string)]`.
 //!
-//! `#[json(crate = "path")]` on the item names the psio crate (default
-//! `::psio`); psio's own types use `#[json(crate = "crate")]`.
+//! `#[psio(crate = "path")]` on the item names the psio crate (default
+//! `::psio`); psio's own types use `#[psio(crate = "crate")]`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Meta, NestedMeta};
-
-#[derive(Clone, Copy, Default)]
-pub(crate) struct Forms {
-    pub(crate) json: Option<bool>,  // Some(true) = string
-    pub(crate) ijson: Option<bool>,
-}
-
-pub(crate) struct Attrs {
-    pub(crate) forms: Forms,
-    pub(crate) name: Option<String>,
-    pub(crate) krate: Option<syn::Path>,
-}
-
-/// The `#[json(...)]` attributes of an item, field or variant.
-pub(crate) fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
-    let mut out = Attrs { forms: Forms::default(), name: None, krate: None };
-    for attr in attrs {
-        if !attr.path.is_ident("json") {
-            continue;
-        }
-        let Meta::List(list) = attr.parse_meta()? else {
-            return Err(syn::Error::new_spanned(attr, "expected #[json(...)]"));
-        };
-        for nested in &list.nested {
-            match nested {
-                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("json_number") => {
-                    out.forms.json = Some(false)
-                }
-                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("json_string") => {
-                    out.forms.json = Some(true)
-                }
-                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("ijson_number") => {
-                    out.forms.ijson = Some(false)
-                }
-                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("ijson_string") => {
-                    out.forms.ijson = Some(true)
-                }
-                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("name") => {
-                    let syn::Lit::Str(lit) = &nv.lit else {
-                        return Err(syn::Error::new_spanned(&nv.lit, "expected a string"));
-                    };
-                    out.name = Some(lit.value());
-                }
-                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("crate") => {
-                    let syn::Lit::Str(lit) = &nv.lit else {
-                        return Err(syn::Error::new_spanned(&nv.lit, "crate must be a path string"));
-                    };
-                    out.krate = Some(lit.parse()?);
-                }
-                other => {
-                    return Err(syn::Error::new_spanned(
-                        other,
-                        "unsupported #[json(...)] attribute: expected json_number, json_string, \
-                         ijson_number, ijson_string, name = \"...\" or crate = \"...\"",
-                    ))
-                }
-            }
-        }
-    }
-    Ok(out)
-}
+use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use crate::attrs;
 
 // ── Member lookup ────────────────────────────────────────────────────────────
 //
@@ -132,17 +72,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let type_attrs = parse_attrs(&input.attrs)?;
-    let j = match &type_attrs.krate {
-        Some(krate) => quote!(#krate::json),
-        None => quote!(::psio::json),
-    };
+    let type_attrs = attrs::item(input)?;
+    let krate = type_attrs.krate();
+    let j = quote!(#krate::json);
     let mut generics = input.generics.clone();
     for param in generics.type_params_mut() {
         param.bounds.push(syn::parse_quote!(#j::JsonText));
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let shared = crate::pssz_macro::shared(input)?;
+    let shared = &type_attrs;
     let mut json_string = quote!();
 
     let (write, read) = match &input.data {
@@ -181,16 +119,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     let key = ident.to_string();
                     let key = key.strip_prefix("r#").unwrap_or(&key).to_string();
                     let ty = &field.ty;
-                    let attrs = parse_attrs(&field.attrs)?;
-                    if attrs.krate.is_some() {
-                        return Err(syn::Error::new_spanned(field, "#[json(crate)] applies to the item"));
-                    }
-                    if attrs.name.is_some() {
-                        return Err(syn::Error::new_spanned(
-                            field,
-                            "#[json(name)] applies to enum variants",
-                        ));
-                    }
+                    let attrs = attrs::field(field)?;
                     let json = form_tokens(&j, attrs.forms.json.or(type_attrs.forms.json));
                     let ijson = form_tokens(&j, attrs.forms.ijson.or(type_attrs.forms.ijson));
                     let first = index == 0;
@@ -315,7 +244,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 let variants: Vec<_> = shape.declared.iter().map(|v| &v.ident).collect();
                 let mut names: Vec<String> = Vec::new();
                 for variant in &shape.declared {
-                    let label = parse_attrs(&variant.attrs)?
+                    let label = attrs::variant(variant)?
                         .name
                         .unwrap_or_else(|| variant.ident.to_string());
                     // A name must be told apart from a number and from the
@@ -398,7 +327,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         ));
                     }
                     let ty = &fields.unnamed[0].ty;
-                    let label = parse_attrs(&variant.attrs)?.name.unwrap_or_else(|| ident.to_string());
+                    let label = attrs::variant(variant)?.name.unwrap_or_else(|| ident.to_string());
                     if names.contains(&label) {
                         return Err(syn::Error::new_spanned(variant, "duplicate variant name"));
                     }

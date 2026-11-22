@@ -39,7 +39,7 @@ mod records {
     macro_rules! dwnc {
         ($name:ident { $($f:ident : $t:ty),* $(,)? }) => {
             #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView, psio::Key)]
-            #[pssz(definition_will_not_change)]
+            #[psio(definition_will_not_change)]
             pub struct $name { $(pub $f: $t),* }
             conf_record!("dwnc", ; $name { $($f: $t),* });
         };

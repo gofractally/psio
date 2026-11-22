@@ -3,14 +3,14 @@
 //! * A struct is a composite key: its fields' keys concatenated in
 //!   declaration order, exactly the key of the tuple of its fields. It also
 //!   implements `CompositeKey`, so `psio::key::key_prefix` accepts it.
-//! * A field-less `#[repr(int)]` enum (optionally with a `#[pssz(other)]`
+//! * A field-less `#[repr(int)]` enum (optionally with a `#[psio(other)]`
 //!   catch-all) is its underlying integer, exactly as in PSSZ and as a C++
 //!   enum: key order is the order of the values. Its names exist in JSON
 //!   only.
-//! * A struct of one member marked `#[pssz(transparent)]` (or
+//! * A struct of one member marked `#[psio(transparent)]` (or
 //!   `#[serde(transparent)]`) is that member: same key, and a composite key
 //!   when the member is a tuple.
-//! * `#[pssz(invariant = "path")]` (a `fn(&Self) -> Result<(), &'static
+//! * `#[psio(invariant = "path")]` (a `fn(&Self) -> Result<(), &'static
 //!   str>`): `try_to_key` / `to_key` refuse a value that violates it and the
 //!   readers reject its key with the invariant's message.
 //! * Any other enum, whose variants each hold one unnamed field, is a
@@ -32,19 +32,20 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let k = quote!(::psio::key);
+    let shared = crate::attrs::item(input)?;
+    let krate = shared.krate();
+    let k = quote!(#krate::key);
     let mut pack_generics = input.generics.clone();
     for param in pack_generics.type_params_mut() {
-        param.bounds.push(syn::parse_quote!(::psio::key::KeyPack));
+        param.bounds.push(syn::parse_quote!(#k::KeyPack));
     }
     let mut unpack_generics = input.generics.clone();
     for param in unpack_generics.type_params_mut() {
-        param.bounds.push(syn::parse_quote!(::psio::key::KeyUnpack));
+        param.bounds.push(syn::parse_quote!(#k::KeyUnpack));
     }
     let (pack_impl, ty_generics, where_clause) = pack_generics.split_for_impl();
     let (unpack_impl, _, _) = unpack_generics.split_for_impl();
     let (plain_impl, _, _) = input.generics.split_for_impl();
-    let shared = crate::pssz_macro::shared(input)?;
     // The type's own invariant, after those of what it holds.
     let own_check = |value: TokenStream2| match &shared.invariant {
         Some(path) => quote! {

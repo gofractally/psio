@@ -52,7 +52,7 @@ pub type BLSSignature   = [u8; 96];
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate", definition_will_not_change)]
+#[psio(crate = "crate", definition_will_not_change)]
 pub struct Fork {
     pub previous_version: Version,
     pub current_version:  Version,
@@ -66,7 +66,7 @@ ssz_struct_dwnc!(Fork {
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate", definition_will_not_change)]
+#[psio(crate = "crate", definition_will_not_change)]
 pub struct ForkData {
     pub current_version:         Version,
     pub genesis_validators_root: Root,
@@ -78,7 +78,7 @@ ssz_struct_dwnc!(ForkData {
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate", definition_will_not_change)]
+#[psio(crate = "crate", definition_will_not_change)]
 pub struct Checkpoint {
     pub epoch: Epoch,
     pub root:  Root,
@@ -93,7 +93,7 @@ ssz_struct_dwnc!(Checkpoint { epoch: Epoch, root: Root });
 // Counterpart of `__attribute__((packed))` on the C++ Validator.
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate", definition_will_not_change)]
+#[psio(crate = "crate", definition_will_not_change)]
 pub struct Validator {
     pub pubkey:                       BLSPubkey,
     pub withdrawal_credentials:       Bytes32,
@@ -117,7 +117,7 @@ ssz_struct_dwnc!(Validator {
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate", definition_will_not_change)]
+#[psio(crate = "crate", definition_will_not_change)]
 pub struct AttestationData {
     pub slot:              Slot,
     pub index:             CommitteeIndex,
@@ -134,7 +134,7 @@ ssz_struct_dwnc!(AttestationData {
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate")]
+#[psio(crate = "crate")]
 pub struct PendingAttestation {
     pub aggregation_bits: crate::ssz::Bitlist<MAX_VALIDATORS_PER_COMMITTEE>,
     pub data:             AttestationData,
@@ -150,7 +150,7 @@ ssz_struct!(PendingAttestation {
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate", definition_will_not_change)]
+#[psio(crate = "crate", definition_will_not_change)]
 pub struct Eth1Data {
     pub deposit_root:  Root,
     pub deposit_count: u64,
@@ -164,7 +164,7 @@ ssz_struct_dwnc!(Eth1Data {
 
 #[repr(C, packed)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate", definition_will_not_change)]
+#[psio(crate = "crate", definition_will_not_change)]
 pub struct BeaconBlockHeader {
     pub slot:            Slot,
     pub proposer_index:  ValidatorIndex,
@@ -192,7 +192,7 @@ ssz_struct_dwnc!(BeaconBlockHeader {
 // by callers to avoid materializing 2.56 MiB on the stack during decode.
 
 #[derive(Debug, Clone, PartialEq, Eq, crate::PsszPack, crate::PsszUnpack, crate::PsszView)]
-#[pssz(crate = "crate")]
+#[psio(crate = "crate")]
 pub struct BeaconState {
     // Versioning
     pub genesis_time:            u64,

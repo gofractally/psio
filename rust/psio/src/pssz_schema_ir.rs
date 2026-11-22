@@ -17,8 +17,8 @@ use std::collections::HashMap;
 macro_rules! ir_record {
     ($name:ident { $($field:ident: $ty:ty),* $(,)? }) => {
         #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack, JsonText)]
-        #[pssz(crate = "crate")]
-        #[json(crate = "crate")]
+        #[psio(crate = "crate")]
+        #[psio(crate = "crate")]
         pub struct $name { $(pub $field: $ty),* }
     };
 }
@@ -57,8 +57,8 @@ ir_record!(Enum { r#type: Box<AnyType>, members: Vec<Enumerator> });
 /// The variant identifiers are the alternatives' names in I-JSON text (C++:
 /// the reflected name of each alternative).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack, JsonText)]
-#[pssz(crate = "crate")]
-#[json(crate = "crate")]
+#[psio(crate = "crate")]
+#[psio(crate = "crate")]
 pub enum AnyValue {
     Struct(Struct),
     Object(Object),
@@ -297,7 +297,7 @@ pub trait ToPsszSchema: 'static {
         None
     }
     /// The Custom id of a type with a custom text form
-    /// (`#[pssz(custom)]` / `#[pssz(custom = "Id")]`): its schema is
+    /// (`#[psio(custom)]` / `#[psio(custom = "Id")]`): its schema is
     /// `Custom { the wire type, id }` and `pssz::dynamic::CustomHandlers`
     /// registers its `TextForm` under this id.
     fn custom_id() -> Option<String> {

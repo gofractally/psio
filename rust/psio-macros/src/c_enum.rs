@@ -6,7 +6,7 @@
 //! enum Status {
 //!     Pending = -1,
 //!     Active = 2,
-//!     #[pssz(other)]
+//!     #[psio(other)]
 //!     Unknown(i32),
 //! }
 //! ```
@@ -45,32 +45,9 @@ pub(crate) fn int_repr(input: &DeriveInput) -> Option<syn::Ident> {
     None
 }
 
-/// Whether the variant carries `#[pssz(other)]`. Any other `#[pssz(...)]`
-/// on a variant is an error.
+/// Whether the variant carries `#[psio(other)]`.
 pub(crate) fn is_other(variant: &syn::Variant) -> syn::Result<bool> {
-    let mut found = false;
-    for attr in &variant.attrs {
-        if !attr.path.is_ident("pssz") {
-            continue;
-        }
-        let ok = match attr.parse_meta()? {
-            Meta::List(list) => {
-                list.nested.len() == 1
-                    && matches!(&list.nested[0],
-                        NestedMeta::Meta(Meta::Path(path)) if path.is_ident("other"))
-            }
-            _ => false,
-        };
-        if !ok {
-            return Err(syn::Error::new_spanned(
-                attr,
-                "the only PSSZ variant annotation is #[pssz(other)], the catch-all of a \
-                 field-less #[repr(int)] enum",
-            ));
-        }
-        found = true;
-    }
-    Ok(found)
+    Ok(crate::attrs::variant(variant)?.other)
 }
 
 pub(crate) struct CEnum<'a> {
@@ -79,7 +56,7 @@ pub(crate) struct CEnum<'a> {
     all: Vec<&'a syn::Variant>,
     /// The field-less variants, in declaration order.
     pub(crate) declared: Vec<&'a syn::Variant>,
-    /// The `#[pssz(other)]` variant.
+    /// The `#[psio(other)]` variant.
     pub(crate) other: Option<&'a syn::Variant>,
 }
 
@@ -96,7 +73,7 @@ pub(crate) fn analyze(input: &DeriveInput) -> syn::Result<Option<CEnum<'_>>> {
             if other.is_some() {
                 return Err(syn::Error::new_spanned(
                     variant,
-                    "an enum has at most one #[pssz(other)] variant",
+                    "an enum has at most one #[psio(other)] variant",
                 ));
             }
             let payload = match &variant.fields {
@@ -104,7 +81,7 @@ pub(crate) fn analyze(input: &DeriveInput) -> syn::Result<Option<CEnum<'_>>> {
                 _ => {
                     return Err(syn::Error::new_spanned(
                         variant,
-                        "the #[pssz(other)] variant holds exactly one unnamed field of the \
+                        "the #[psio(other)] variant holds exactly one unnamed field of the \
                          enum's #[repr] type",
                     ))
                 }
@@ -112,13 +89,13 @@ pub(crate) fn analyze(input: &DeriveInput) -> syn::Result<Option<CEnum<'_>>> {
             let Some(repr) = &repr else {
                 return Err(syn::Error::new_spanned(
                     &input.ident,
-                    "#[pssz(other)] needs #[repr(u8)] (or u16/u32/u64/i8/i16/i32/i64) on the enum",
+                    "#[psio(other)] needs #[repr(u8)] (or u16/u32/u64/i8/i16/i32/i64) on the enum",
                 ));
             };
             if quote!(#payload).to_string() != repr.to_string() {
                 return Err(syn::Error::new_spanned(
                     payload,
-                    "the #[pssz(other)] payload must be the enum's #[repr] type",
+                    "the #[psio(other)] payload must be the enum's #[repr] type",
                 ));
             }
             other = Some(variant);
@@ -132,7 +109,7 @@ pub(crate) fn analyze(input: &DeriveInput) -> syn::Result<Option<CEnum<'_>>> {
         if let Some(other) = other {
             return Err(syn::Error::new_spanned(
                 other,
-                "#[pssz(other)] applies to an otherwise field-less enum",
+                "#[psio(other)] applies to an otherwise field-less enum",
             ));
         }
         return Ok(None);

@@ -1,7 +1,7 @@
 use psio::pssz::*;
 
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct AbiUnit;
 
 #[test]

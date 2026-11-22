@@ -23,7 +23,7 @@ include!("registry.rs");
 /// fixture records what C++ does; an entry here would be the outcome Rust
 /// must have instead. There are none: the one former difference, an enum
 /// value that names no enumerator (`enum-unknown-value`), is taken by the
-/// mirror enums' `#[pssz(other)]` catch-all, as the fixture expects.
+/// mirror enums' `#[psio(other)]` catch-all, as the fixture expects.
 fn rust_expectation(v: &Vector) -> &str {
     v.expect.as_str()
 }

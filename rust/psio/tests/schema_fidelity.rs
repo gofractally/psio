@@ -404,7 +404,7 @@ fn an_explicit_width_enforces_the_cap_of_the_top_level_type_only() {
 /// Seconds since the epoch, written "<seconds>s": a custom text form over a
 /// transparent u32, registered under an explicit id.
 #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
-#[pssz(transparent, custom = "Seconds")]
+#[psio(transparent, custom = "Seconds")]
 struct Stamp(u32);
 impl TextForm for Stamp {
     fn to_text(&self, out: &mut String) {
@@ -422,7 +422,7 @@ psio::json_text_form!(Stamp);
 
 /// A custom text form over a record, under the type's own name: "x,y".
 #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
-#[pssz(definition_will_not_change, custom)]
+#[psio(definition_will_not_change, custom)]
 struct Point {
     x: i16,
     y: i16,
@@ -576,7 +576,7 @@ fn a_custom_text_form_is_its_wire_type_in_binary_and_its_handler_in_text() {
     );
     // A type that is not declared custom has no id to register under.
     #[derive(psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
-    #[pssz(transparent)]
+    #[psio(transparent)]
     struct Plain(u32);
     impl TextForm for Plain {
         fn to_text(&self, out: &mut String) {

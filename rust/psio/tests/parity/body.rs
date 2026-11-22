@@ -72,7 +72,7 @@ dwnc!(Unit {});
 rec!(Empty {});
 dwnc!(Pair { x: u8, y: u8 });
 #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 pub struct DwncVar { pub a: u8, pub s: RawString, pub b: u16 }
 rec!(Middle { a: u32, inner: Option<Inner>, s: RawString });
 rec!(Tail { a: u32, s: RawString, unit: Option<Unit>, empty: Option<Empty>, pair: Option<Pair> });

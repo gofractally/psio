@@ -8,7 +8,7 @@ struct Example<T> {
     next: Option<Box<Example<T>>>,
 }
 #[derive(PsszPack, PsszUnpack, ToPsszSchema)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct Fixed {
     flag: bool,
     id: u32,
@@ -457,7 +457,7 @@ struct Annotated {
     f: psio::pssz::BoundedList<u16, 3>,
 }
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, ToPsszSchema)]
-#[pssz(definition_will_not_change, max_dynamic_data = 16)]
+#[psio(definition_will_not_change)] #[pssz(max_dynamic_data = 16)]
 #[json(json_string, ijson_number)]
 struct TypeDefaults {
     x: u64,
@@ -466,10 +466,10 @@ struct TypeDefaults {
 }
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, ToPsszSchema)]
 enum Named {
-    #[json(name = "uint32")]
+    #[psio(name = "uint32")]
     Number(u32),
     Plain(String),
-    #[json(name = "uint8[]")]
+    #[psio(name = "uint8[]")]
     Bytes(Vec<u8>),
 }
 

@@ -44,9 +44,9 @@ struct Card {
 
 #[derive(psio::JsonText, Clone)]
 enum Payment {
-    #[json(name = "uint32")]
+    #[psio(name = "uint32")]
     Account(u32),
-    #[json(name = "string")]
+    #[psio(name = "string")]
     Token(String),
     Card(Card),
 }

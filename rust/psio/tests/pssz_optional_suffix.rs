@@ -42,7 +42,7 @@ struct NewOuter {
     values: Vec<Extended>,
 }
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, PsszView)]
-#[pssz(transparent)]
+#[psio(transparent)]
 struct OptionalWrapper(Option<String>);
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, PsszView)]
 struct Wrapped {
@@ -50,7 +50,7 @@ struct Wrapped {
     extra: OptionalWrapper,
 }
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, PsszView)]
-#[pssz(definition_will_not_change)]
+#[psio(definition_will_not_change)]
 struct Unit;
 
 fn profiles<F: PsszFormat>() {

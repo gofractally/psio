@@ -19,7 +19,6 @@
 //! use psio::{Pack, Unpack, Result};
 //!
 //! #[derive(Pack, Unpack, PartialEq, Debug)]
-//! #[fracpack(fracpack_mod = "psio")]
 //! struct Example {
 //!     a_string: String,
 //!     a_tuple: (u32, String),
@@ -39,9 +38,6 @@
 //! assert_eq!(orig, unpacked);
 //! # Ok::<(), psio::Error>(())
 //! ```
-//!
-//! Note: `#[fracpack(fracpack_mod = "psio")]` is only needed when using the `psio`
-//! library directly instead of through the [psibase crate](https://docs.rs/psibase).
 //!
 //! # Caution
 //!

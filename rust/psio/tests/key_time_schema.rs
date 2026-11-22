@@ -35,7 +35,7 @@ enum Status {
 enum Open {
     Red = 1,
     Blue = 9,
-    #[pssz(other)]
+    #[psio(other)]
     Unknown(u8),
 }
 

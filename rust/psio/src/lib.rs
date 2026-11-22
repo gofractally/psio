@@ -14,7 +14,6 @@
 //! use psio::{Pack, Unpack, Result};
 //!
 //! #[derive(Pack, Unpack, PartialEq, Debug)]
-//! #[fracpack(fracpack_mod = "psio")]
 //! struct Example {
 //!     a_string: String,
 //!     a_tuple: (u32, String),
@@ -29,6 +28,95 @@
 //! let unpacked = Example::unpacked(&packed)?;
 //! assert_eq!(orig, unpacked);
 //! # Ok::<(), psio::Error>(())
+//! ```
+//!
+//! # Annotations
+//!
+//! `#[psio(...)]` describes the type and is read by every derive. A
+//! format-named attribute holds only what is specific to that format.
+//!
+//! | attribute | key | on | meaning |
+//! |-----------|-----|----|---------|
+//! | `psio` | `crate = "path"` | type | path of the psio crate (default `::psio`) |
+//! | `psio` | `transparent` | type | the type is its one member in every format |
+//! | `psio` | `invariant = "path"` | type | a `fn(&Self) -> Result<(), &'static str>` every reader and writer enforces |
+//! | `psio` | `definition_will_not_change` | type | the record never gains members |
+//! | `psio` | `variant` | type | a field-less enum is a variant of unit alternatives, not its integer |
+//! | `psio` | `custom`, `custom = "id"` | type | the type has a text form of its own; the id defaults to the schema name |
+//! | `psio` | `name = "..."` | type, variant | the type's name in a schema; an enumerator's or alternative's name in a schema and in text |
+//! | `psio` | `other` | variant | the catch-all of a field-less `#[repr(int)]` enum |
+//! | `pssz` | `max_dynamic_data = N` | type | pSSZ cap on the record's variable part |
+//! | `json` | `json_number`, `json_string`, `ijson_number`, `ijson_string` | type, field | integer form in Json / IJson text |
+//!
+//! `#[serde(transparent)]` on the type means `#[psio(transparent)]`.
+//!
+//! ```
+//! use psio::{JsonText, PsszPack, PsszUnpack};
+//!
+//! #[derive(PsszPack, PsszUnpack, JsonText)]
+//! #[psio(definition_will_not_change)]
+//! #[pssz(max_dynamic_data = 64)]
+//! struct Balance {
+//!     #[json(json_string)]
+//!     amount: u64,
+//!     memo: String,
+//! }
+//! ```
+//!
+//! Each key has one home. A key under another attribute is an error that
+//! names the right one:
+//!
+//! ```compile_fail
+//! use psio::{PsszPack, PsszUnpack};
+//!
+//! #[derive(PsszPack, PsszUnpack)]
+//! #[pssz(definition_will_not_change)] // write #[psio(definition_will_not_change)]
+//! struct Point { x: u32, y: u32 }
+//! ```
+//!
+//! ```compile_fail
+//! use psio::JsonText;
+//!
+//! #[derive(JsonText)]
+//! #[psio(json_string)] // write #[json(json_string)]
+//! struct Amount { value: u64 }
+//! ```
+//!
+//! An unknown key is an error:
+//!
+//! ```compile_fail
+//! use psio::{PsszPack, PsszUnpack};
+//!
+//! #[derive(PsszPack, PsszUnpack)]
+//! #[psio(frozen)]
+//! struct Point { x: u32, y: u32 }
+//! ```
+//!
+//! So is a key on something it does not apply to:
+//!
+//! ```compile_fail
+//! use psio::{PsszPack, PsszUnpack};
+//!
+//! #[derive(PsszPack, PsszUnpack)]
+//! struct Point {
+//!     #[psio(transparent)]
+//!     x: u32,
+//!     y: u32,
+//! }
+//! ```
+//!
+//! The same types with the keys in place compile:
+//!
+//! ```
+//! use psio::{JsonText, PsszPack, PsszUnpack};
+//!
+//! #[derive(PsszPack, PsszUnpack)]
+//! #[psio(definition_will_not_change)]
+//! struct Point { x: u32, y: u32 }
+//!
+//! #[derive(JsonText)]
+//! #[json(json_string)]
+//! struct Amount { value: u64 }
 //! ```
 
 // Legacy fracpack benchmark API (re-exported at the crate root)
@@ -64,6 +152,10 @@ pub use ssz::{
     SszBuffer,
 };
 pub use ssz_view::SszView;
+
+// Every derive resolves the psio crate through #[psio(crate = "...")].
+#[cfg(test)]
+mod annotation_tests;
 
 mod buffer;
 pub use buffer::{Buffer, MutViewFormat, Shared, ViewFormat};

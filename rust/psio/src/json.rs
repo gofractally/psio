@@ -17,7 +17,7 @@
 // value, `String` and `RawString` are JSON strings. A field-less
 // `#[repr(int)]` enum is its variant's name as a string; it is read from the
 // name, the number, the numeric string, or `"name:number"` (which must
-// agree). A value held by the enum's `#[pssz(other)]` catch-all is written
+// agree). A value held by the enum's `#[psio(other)]` catch-all is written
 // as its number. NaN and the infinities have no text: writing one is an
 // error in both formats.
 //
@@ -173,7 +173,7 @@ pub trait TextForm: Sized {
 ///
 /// `json_text_form!(Type, invariant = path)` also enforces the type's
 /// invariant (the `fn(&Type) -> Result<(), &'static str>` named by its
-/// `#[pssz(invariant = "path")]`): the text form says what is well-formed
+/// `#[psio(invariant = "path")]`): the text form says what is well-formed
 /// text, the invariant whether the value read is a value of the type.
 #[macro_export]
 macro_rules! json_text_form {

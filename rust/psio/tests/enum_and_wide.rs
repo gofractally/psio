@@ -1,4 +1,4 @@
-//! Enums (names in text, the `#[pssz(other)]` catch-all, the Schema IR
+//! Enums (names in text, the `#[psio(other)]` catch-all, the Schema IR
 //! `Enum`), 128- and 256-bit integers in JSON, and non-finite floats: the
 //! Rust-side rules of docs/json.md "Enums" and docs/pssz-spec.md §4.5. The
 //! cross-language rows are in json_conformance.rs, schema_conformance.rs and
@@ -22,11 +22,11 @@ use psio::pssz_view::{PsszView};
 )]
 #[repr(u8)]
 enum Strict {
-    #[json(name = "red")]
+    #[psio(name = "red")]
     Red = 0,
-    #[json(name = "green")]
+    #[psio(name = "green")]
     Green = 1,
-    #[json(name = "blue")]
+    #[psio(name = "blue")]
     Blue = 7,
 }
 
@@ -37,13 +37,13 @@ enum Strict {
 )]
 #[repr(u8)]
 enum Color {
-    #[json(name = "red")]
+    #[psio(name = "red")]
     Red = 0,
-    #[json(name = "green")]
+    #[psio(name = "green")]
     Green = 1,
-    #[json(name = "blue")]
+    #[psio(name = "blue")]
     Blue = 7,
-    #[pssz(other)]
+    #[psio(other)]
     Unknown(u8),
 }
 
@@ -55,7 +55,7 @@ enum Color {
 )]
 #[repr(i32)]
 enum Status {
-    #[pssz(other)]
+    #[psio(other)]
     Other(i32) = 1000,
     Pending = -1,
     Active = 2,
@@ -68,7 +68,7 @@ enum Status {
 #[derive(Debug, Clone, Copy, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack)]
 #[repr(u64)]
 enum Big {
-    #[pssz(other)]
+    #[psio(other)]
     Unknown(u64),
     Huge = u64::MAX,
 }
@@ -282,7 +282,7 @@ fn an_enum_is_written_as_its_name_or_as_the_number_of_an_unnamed_value() {
         assert_eq!(text(&|| json::try_encode::<F, _>(&Strict::Green)), "\"green\"");
         assert_eq!(text(&|| json::try_encode::<F, _>(&Color::Unknown(2))), "2");
         assert_eq!(text(&|| json::try_encode::<F, _>(&Color::Unknown(255))), "255");
-        // Without #[json(name)] the name is the variant identifier.
+        // Without #[psio(name)] the name is the variant identifier.
         assert_eq!(text(&|| json::try_encode::<F, _>(&Status::Pending)), "\"Pending\"");
         assert_eq!(text(&|| json::try_encode::<F, _>(&Status::Closed)), "\"Closed\"");
         assert_eq!(text(&|| json::try_encode::<F, _>(&Status::Other(-5))), "-5");

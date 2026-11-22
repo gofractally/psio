@@ -3,10 +3,10 @@
 // declared the way a Rust program declares them. Shared by
 // pssz_conformance.rs, json_conformance.rs and time_key_conformance.rs.
 //
-//   #[pssz(transparent)]            the type is its one member on the wire,
+//   #[psio(transparent)]            the type is its one member on the wire,
 //                                   in a key and in text
-//   #[pssz(custom)] + TextForm      a text form of its own (one JSON string)
-//   #[pssz(invariant = "path")]     a predicate every reader and writer
+//   #[psio(custom)] + TextForm      a text form of its own (one JSON string)
+//   #[psio(invariant = "path")]     a predicate every reader and writer
 //                                   enforces, in every format
 
 use super::text::*;
@@ -36,17 +36,17 @@ macro_rules! derives_text {
 }
 
 derives! {
-    #[pssz(transparent)]
+    #[psio(transparent)]
     pub struct Id { pub value: u64 }
 }
 derives! {
-    #[pssz(transparent)]
+    #[psio(transparent)]
     pub struct Tag { pub text: RawString }
 }
 
 // Bytes as base64.
 derives_text! {
-    #[pssz(transparent, custom)]
+    #[psio(transparent, custom)]
     pub struct Blob { pub data: Vec<u8> }
 }
 impl TextForm for Blob {
@@ -60,17 +60,17 @@ impl TextForm for Blob {
 psio::json_text_form!(Blob);
 
 derives! {
-    #[pssz(definition_will_not_change)]
+    #[psio(definition_will_not_change)]
     pub struct V4 { pub address: [u8; 4], pub port: u16 }
 }
 derives! {
-    #[pssz(definition_will_not_change)]
+    #[psio(definition_will_not_change)]
     pub struct V6 { pub address: [u8; 16], pub port: u16 }
 }
 // C++ registers the text form for the std::variant itself; a Rust enum is a
 // named type and carries it directly.
 derives_text! {
-    #[pssz(custom)]
+    #[psio(custom)]
     pub enum Endpoint { V4(V4), V6(V6) }
 }
 impl TextForm for Endpoint {
@@ -92,7 +92,7 @@ psio::json_text_form!(Endpoint);
 // C++ registers the text form for the std::tuple itself; Rust wraps the
 // tuple (a foreign type) transparently.
 derives_text! {
-    #[pssz(transparent, custom)]
+    #[psio(transparent, custom)]
     pub struct Ratio(pub (i16, u16));
 }
 impl TextForm for Ratio {
@@ -110,15 +110,15 @@ psio::json_text_form!(Ratio);
     psio::JsonText, psio::ToPsszSchema, psio::Key,
 )]
 pub enum RefTarget {
-    #[json(name = "uint64")]
+    #[psio(name = "uint64")]
     Number(u64),
-    #[json(name = "string")]
+    #[psio(name = "string")]
     Name(RawString),
 }
 // A text form and an invariant: `"@"` is well-formed text of a value the
 // invariant refuses.
 derives_text! {
-    #[pssz(transparent, custom, invariant = "ref_check")]
+    #[psio(transparent, custom, invariant = "ref_check")]
     pub struct Ref { pub target: RefTarget }
 }
 pub fn ref_check(value: &Ref) -> Result<(), &'static str> {
@@ -149,7 +149,7 @@ impl TextForm for Ref {
 psio::json_text_form!(Ref, invariant = ref_check);
 
 derives! {
-    #[pssz(definition_will_not_change, invariant = "name_check")]
+    #[psio(definition_will_not_change, invariant = "name_check")]
     pub struct Name { pub value: u64 }
 }
 pub fn name_check(name: &Name) -> Result<(), &'static str> {
@@ -157,7 +157,7 @@ pub fn name_check(name: &Name) -> Result<(), &'static str> {
 }
 
 derives! {
-    #[pssz(transparent, invariant = "der_key_check")]
+    #[psio(transparent, invariant = "der_key_check")]
     pub struct DerKey { pub data: Vec<u8> }
 }
 pub fn der_key_check(key: &DerKey) -> Result<(), &'static str> {
@@ -165,7 +165,7 @@ pub fn der_key_check(key: &DerKey) -> Result<(), &'static str> {
 }
 
 derives! {
-    #[pssz(invariant = "range_check")]
+    #[psio(invariant = "range_check")]
     pub struct Range { pub lo: u32, pub hi: u32 }
 }
 pub fn range_check(range: &Range) -> Result<(), &'static str> {
@@ -180,17 +180,17 @@ pub fn range_check(range: &Range) -> Result<(), &'static str> {
     psio::JsonText, psio::ToPsszSchema, psio::Key,
 )]
 #[repr(u8)]
-#[pssz(invariant = "level_check")]
+#[psio(invariant = "level_check")]
 pub enum Level {
-    #[json(name = "low")]
+    #[psio(name = "low")]
     Low = 0,
-    #[json(name = "mid")]
+    #[psio(name = "mid")]
     Mid = 1,
-    #[json(name = "high")]
+    #[psio(name = "high")]
     High = 2,
-    #[json(name = "top")]
+    #[psio(name = "top")]
     Top = 3,
-    #[pssz(other)]
+    #[psio(other)]
     Unknown(u8),
 }
 pub fn level_check(level: &Level) -> Result<(), &'static str> {

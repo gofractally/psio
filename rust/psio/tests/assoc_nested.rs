@@ -244,7 +244,7 @@ fn nested_values_keep_their_bytes_and_validate_as_their_type() {
     assert_eq!(Nested::<u32>::default().decode().unwrap(), 0);
 }
 
-// `#[serde(transparent)]` says what `#[pssz(transparent)]` says.
+// `#[serde(transparent)]` says what `#[psio(transparent)]` says.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
     psio::PsszPack, psio::PsszUnpack, psio::JsonText, psio::ToPsszSchema, psio::Key,
@@ -261,7 +261,7 @@ fn even(value: &Even) -> Result<(), &'static str> {
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, psio::PsszPack, psio::PsszUnpack, psio::JsonText,
     psio::ToPsszSchema, psio::Key,
 )]
-#[pssz(transparent, invariant = "even")]
+#[psio(transparent, invariant = "even")]
 struct Even {
     n: u32,
 }
@@ -458,7 +458,7 @@ mod views {
     use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
     #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
-    #[pssz(definition_will_not_change)]
+    #[psio(definition_will_not_change)]
     struct Point {
         x: u32,
         y: u32,
