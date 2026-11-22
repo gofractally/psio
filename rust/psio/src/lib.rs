@@ -12,6 +12,7 @@
 //! * [`key`]: memcmp-sortable keys;
 //! * [`interface`](mod@interface): methods and interfaces, `#[psio::interface]` on a trait
 //!   (argument records, dispatch, call proxies, the schema's `Interface`);
+//! * [`compress_name`]: method and identifier names as 64-bit numbers;
 //! * [`pjson`]: a self-describing binary JSON;
 //! * [`ssz`], [`capnp`], [`flatbuf`], [`wit`]: interchange with SSZ,
 //!   Cap'n Proto, FlatBuffers and the WIT Canonical ABI.
@@ -229,6 +230,7 @@ pub mod pjson_typed;
 pub mod pjson_json;
 pub mod json;
 pub mod key;
+pub mod compress_name;
 pub mod interface;
 pub mod time;
 pub mod pssz;

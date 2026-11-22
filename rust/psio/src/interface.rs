@@ -304,9 +304,10 @@ impl std::error::Error for DispatchError {}
 /// use psio::interface::MethodTable;
 ///
 /// fn main() {
-///     let key = |name: &str| psio::xxh3_64::hash_64_seeded(name.as_bytes(), 0);
-///     let table = MethodTable::of::<counter::Tag, _>(|method| key(method.name)).unwrap();
-///     assert_eq!(table.index_of(&key("reset")), Some(1));
+///     // By compressed method name (C++ `psio::detail::method_to_number`).
+///     use psio::compress_name::method_to_number;
+///     let table = MethodTable::of::<counter::Tag, _>(|method| method_to_number(method.name)).unwrap();
+///     assert_eq!(table.index_of(&method_to_number("reset")), Some(1));
 ///     assert_eq!(table.index_of(&0), None);
 /// }
 /// ```
