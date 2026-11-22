@@ -314,3 +314,136 @@ fn transparent_types_and_invariants_in_every_format() {
         Err(ODD)
     );
 }
+
+// ── pssz_evolves_from over maps, sets and nested values ─────────────────────
+
+mod evolution {
+    use psio::pssz::{
+        from_pssz, pssz_evolves_from, to_pssz, BoundedMap, BoundedSet, Checked, Deferred, Nested,
+    };
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    struct V1 {
+        a: u32,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    struct V2 {
+        a: u32,
+        b: Option<u8>,
+    }
+    // Not an evolution of V1: the appended field cannot be absent.
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    struct Bad {
+        a: u32,
+        b: u8,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    struct Holder1 {
+        id: u8,
+        by_name: BTreeMap<String, V1>,
+        tags: BTreeSet<u16>,
+        args: Nested<V1>,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    struct Holder2 {
+        id: u8,
+        by_name: BTreeMap<String, V2>,
+        tags: BTreeSet<u16>,
+        args: Nested<V2>,
+        more: Option<BTreeMap<u8, Nested<V2>>>,
+    }
+
+    const _: () = {
+        assert!(pssz_evolves_from::<V1, V2>());
+        assert!(!pssz_evolves_from::<V2, V1>());
+        assert!(!pssz_evolves_from::<V1, Bad>());
+
+        // A map evolves when its value type does; the container is not on
+        // the wire.
+        assert!(pssz_evolves_from::<BTreeMap<String, V1>, BTreeMap<String, V1>>());
+        assert!(pssz_evolves_from::<BTreeMap<String, V1>, BTreeMap<String, V2>>());
+        assert!(pssz_evolves_from::<BTreeMap<u32, V1>, HashMap<u32, V2>>());
+        assert!(pssz_evolves_from::<BTreeMap<u8, BTreeMap<u8, V1>>, BTreeMap<u8, BTreeMap<u8, V2>>>());
+        assert!(pssz_evolves_from::<BTreeMap<u8, Vec<Nested<V1>>>, BTreeMap<u8, Vec<Nested<V2>>>>());
+        assert!(pssz_evolves_from::<BoundedMap<u32, V1, 4>, BoundedMap<u32, V2, 4>>());
+        assert!(!pssz_evolves_from::<BTreeMap<String, V2>, BTreeMap<String, V1>>());
+        assert!(!pssz_evolves_from::<BTreeMap<String, V1>, BTreeMap<String, Bad>>());
+        assert!(!pssz_evolves_from::<BTreeMap<u32, u8>, BTreeMap<u32, u16>>());
+        // The key type cannot change, not even into a type it evolves into.
+        assert!(!pssz_evolves_from::<BTreeMap<u32, V1>, BTreeMap<u64, V1>>());
+        assert!(!pssz_evolves_from::<BTreeMap<u32, V1>, BTreeMap<i32, V1>>());
+        assert!(!pssz_evolves_from::<BTreeMap<(u8,), u8>, BTreeMap<(u8, Option<u8>), u8>>());
+        assert!(pssz_evolves_from::<BTreeMap<(u8, String), u8>, BTreeMap<(u8, String), u8>>());
+        // The maximum is part of the type.
+        assert!(!pssz_evolves_from::<BoundedMap<u32, V1, 4>, BoundedMap<u32, V1, 8>>());
+        assert!(!pssz_evolves_from::<BoundedMap<u32, V1, 4>, BTreeMap<u32, V1>>());
+        assert!(!pssz_evolves_from::<BTreeMap<u32, V1>, BoundedMap<u32, V1, 4>>());
+        // A map is not its list of entries, in either direction.
+        assert!(!pssz_evolves_from::<BTreeMap<u32, V1>, Vec<(u32, V1)>>());
+        assert!(!pssz_evolves_from::<Vec<(u32, V1)>, BTreeMap<u32, V1>>());
+        assert!(!pssz_evolves_from::<BTreeMap<u32, u8>, BTreeSet<(u32, u8)>>());
+
+        // A set evolves only from a set of the same element type.
+        assert!(pssz_evolves_from::<BTreeSet<u32>, BTreeSet<u32>>());
+        assert!(pssz_evolves_from::<BTreeSet<String>, HashSet<String>>());
+        assert!(pssz_evolves_from::<BoundedSet<u32, 4>, BoundedSet<u32, 4>>());
+        assert!(pssz_evolves_from::<BTreeSet<Nested<u32>>, BTreeSet<Nested<u32>>>());
+        assert!(!pssz_evolves_from::<BTreeSet<u32>, BTreeSet<u64>>());
+        assert!(!pssz_evolves_from::<BTreeSet<(u8,)>, BTreeSet<(u8, Option<u8>)>>());
+        assert!(!pssz_evolves_from::<BTreeSet<Nested<u32>>, BTreeSet<Nested<u64>>>());
+        assert!(!pssz_evolves_from::<BoundedSet<u32, 4>, BoundedSet<u32, 8>>());
+        assert!(!pssz_evolves_from::<BoundedSet<u32, 4>, BTreeSet<u32>>());
+        assert!(!pssz_evolves_from::<BTreeSet<u32>, Vec<u32>>());
+        assert!(!pssz_evolves_from::<Vec<u32>, BTreeSet<u32>>());
+
+        // A nested value evolves as its inner type does, as a top-level type.
+        assert!(pssz_evolves_from::<Nested<V1>, Nested<V1>>());
+        assert!(pssz_evolves_from::<Nested<V1>, Nested<V2>>());
+        assert!(pssz_evolves_from::<Nested<V1, Checked>, Nested<V2, Deferred>>());
+        assert!(pssz_evolves_from::<Option<Nested<V1>>, Option<Nested<V2>>>());
+        assert!(pssz_evolves_from::<Nested<Nested<V1>>, Nested<Nested<V2>>>());
+        assert!(pssz_evolves_from::<Nested<BTreeMap<u8, V1>>, Nested<BTreeMap<u8, V2>>>());
+        assert!(pssz_evolves_from::<Nested<V1, Checked, 64>, Nested<V2, Checked, 64>>());
+        assert!(!pssz_evolves_from::<Nested<V2>, Nested<V1>>());
+        assert!(!pssz_evolves_from::<Nested<V1>, Nested<Bad>>());
+        assert!(!pssz_evolves_from::<Nested<u32>, Nested<u64>>());
+        // The byte bound is part of the type.
+        assert!(!pssz_evolves_from::<Nested<V1, Checked, 64>, Nested<V1, Checked, 128>>());
+        assert!(!pssz_evolves_from::<Nested<V1>, Nested<V1, Checked, 64>>());
+        // A nested value is not a byte list.
+        assert!(!pssz_evolves_from::<Nested<V1>, Vec<u8>>());
+        assert!(!pssz_evolves_from::<Vec<u8>, Nested<V1>>());
+        assert!(!pssz_evolves_from::<Nested<V1>, V1>());
+
+        // Members of a record.
+        assert!(pssz_evolves_from::<Holder1, Holder2>());
+        assert!(!pssz_evolves_from::<Holder2, Holder1>());
+    };
+
+    #[test]
+    fn an_accepted_evolution_reads_in_both_directions() {
+        let old = Holder1 {
+            id: 3,
+            by_name: [("a".to_string(), V1 { a: 1 }), ("b".to_string(), V1 { a: 2 })].into(),
+            tags: [7, 9].into(),
+            args: Nested::new(&V1 { a: 5 }).unwrap(),
+        };
+        let as_new = from_pssz::<Holder2>(&to_pssz(&old)).unwrap();
+        assert_eq!(as_new.by_name["b"], V2 { a: 2, b: None });
+        assert_eq!(as_new.args.decode().unwrap(), V2 { a: 5, b: None });
+        assert_eq!(as_new.more, None);
+
+        let new = Holder2 {
+            id: 3,
+            by_name: [("a".to_string(), V2 { a: 1, b: Some(8) })].into(),
+            tags: [7].into(),
+            args: Nested::new(&V2 { a: 5, b: Some(6) }).unwrap(),
+            more: Some([(1u8, Nested::new(&V2 { a: 0, b: None }).unwrap())].into()),
+        };
+        let as_old = from_pssz::<Holder1>(&to_pssz(&new)).unwrap();
+        assert_eq!(as_old.by_name["a"], V1 { a: 1 });
+        assert_eq!(as_old.tags, [7].into());
+        assert_eq!(as_old.args.decode().unwrap(), V1 { a: 5 });
+    }
+}

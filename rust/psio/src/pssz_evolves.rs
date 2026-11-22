@@ -19,6 +19,24 @@
 //! A prefix field may itself have evolved (a nested record, or a vector /
 //! array / optional / variant / tuple of one) under the same rules.
 //!
+//! Maps, sets and nested values (docs/pssz-spec.md 5.9.4, 5.8, 7.5):
+//!   - a map evolves when its value type does: the entry is a 2-tuple whose
+//!     key type is the same and whose value type evolves. The key type
+//!     cannot change (it defines the entry order);
+//!   - a set evolves only from a set of the same element type;
+//!   - `Nested<A>` evolves into `Nested<B>` exactly when `A` evolves into `B`
+//!     as a top-level type. The validation mode (`Checked` / `Deferred`) is
+//!     not part of the wire and may differ;
+//!   - a map is not its list of entries, a set is not its list of elements
+//!     and a nested value is not a byte list: none evolves from or into the
+//!     other, although the bytes agree;
+//!   - the maximum of a `BoundedMap` / `BoundedSet` and the byte bound of a
+//!     `Nested<T, V, N>` are part of the type, like the bound of a
+//!     `BoundedList`: a value one side accepts and the other refuses is not
+//!     readable as both.
+//! `BTreeMap`, `HashMap` and `BoundedMap` are all maps (likewise the sets):
+//! the container is not on the wire.
+//!
 //! The check is a `const fn` over [`Shape`] descriptors that every
 //! `PsszPack` implementation carries (`PsszPack::SHAPE`). Hand-written
 //! `PsszPack` impls default to an opaque shape, which evolves from nothing.
@@ -38,6 +56,13 @@ pub enum ShapeKind {
     Variant,
     Record,
     Tuple,
+    /// Child: the entry 2-tuple `(K, V)`. `param`: the maximum entry count.
+    Map,
+    /// Child: the element. `param`: the maximum element count.
+    Set,
+    /// Child: the inner type under the automatic profile. `param`: the
+    /// maximum byte count.
+    Nested,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -123,6 +148,46 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
+/// The two shapes describe one type: nothing differs, at any depth. What a
+/// map key or set element must be, since its key encoding orders the entries.
+/// An opaque shape is not known to be the same as anything.
+pub const fn shape_same(a: &Shape, b: &Shape) -> bool {
+    if a.kind as u8 != b.kind as u8
+        || matches!(a.kind, ShapeKind::Opaque)
+        || !str_eq(a.name, b.name)
+        || a.param != b.param
+        || a.width != b.width
+        || a.fixed != b.fixed
+        || a.optional != b.optional
+        || a.selector != b.selector
+        || a.dwnc != b.dwnc
+        || a.children.len() != b.children.len()
+    {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.children.len() {
+        if !shape_same(&a.children[i], &b.children[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// A map entry `(K, V)`: the same key, a value that evolves, and like any
+/// tuple the same width.
+const fn entry_evolves(old: &Shape, new: &Shape) -> bool {
+    matches!(old.kind, ShapeKind::Tuple)
+        && matches!(new.kind, ShapeKind::Tuple)
+        && old.children.len() == 2
+        && new.children.len() == 2
+        && old.width == new.width
+        && old.fixed == new.fixed
+        && shape_same(&old.children[0], &new.children[0])
+        && shape_evolves(&old.children[1], &new.children[1])
+}
+
 const fn all_evolve(old: &[Shape], new: &[Shape], count: usize) -> bool {
     let mut i = 0;
     while i < count {
@@ -154,6 +219,13 @@ pub const fn shape_evolves(old: &Shape, new: &Shape) -> bool {
         }
         ShapeKind::List => old.param == new.param && all_evolve(old.children, new.children, 1),
         ShapeKind::Array => old.param == new.param && all_evolve(old.children, new.children, 1),
+        ShapeKind::Map => {
+            old.param == new.param && entry_evolves(&old.children[0], &new.children[0])
+        }
+        ShapeKind::Set => old.param == new.param && shape_same(&old.children[0], &new.children[0]),
+        // The inner value is a frame of its own: it evolves as a top-level
+        // type does.
+        ShapeKind::Nested => old.param == new.param && all_evolve(old.children, new.children, 1),
         ShapeKind::Variant => {
             old.children.len() == new.children.len()
                 && all_evolve(old.children, new.children, old.children.len())

@@ -173,7 +173,17 @@ where
 }
 
 macro_rules! assoc_consts {
-    ($list:ty, $bound:expr) => {
+    ($kind:ident, $list:ty, $bound:expr) => {
+        const SHAPE: crate::pssz::Shape = crate::pssz::Shape::node(
+            crate::pssz::ShapeKind::$kind,
+            match $bound {
+                Some(n) => n,
+                None => usize::MAX,
+            },
+            <Self as PsszPack<F>>::OFFSET_WIDTH,
+            false,
+            &[<$list as PsszPack<F>>::SHAPE],
+        );
         const MIN_ENCODED_SIZE: usize = 0;
         const MAX_ENCODED_SIZE: Option<usize> = <Self as PsszPack<F>>::AUTO_BOUND;
         const IS_FIXED_SIZE: bool = false;
@@ -200,7 +210,7 @@ macro_rules! assoc_consts {
 macro_rules! pssz_map {
     ([$($kb:tt)*], [$($cg:tt)*], $ty:ty, $bound:expr, |$s:ident| $inner:expr, |$items:ident| $build:expr) => {
         impl<F: PsszFormat, K: PsszPack<F> + KeyPack + $($kb)*, V: PsszPack<F>, $($cg)*> PsszPack<F> for $ty {
-            assoc_consts!((K, V), $bound);
+            assoc_consts!(Map, (K, V), $bound);
             fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
                 let $s = self;
                 let bound: Option<usize> = $bound;
@@ -251,7 +261,7 @@ macro_rules! pssz_map {
 macro_rules! pssz_set {
     ([$($kb:tt)*], [$($cg:tt)*], $ty:ty, $bound:expr, |$s:ident| $inner:expr, |$items:ident| $build:expr) => {
         impl<F: PsszFormat, K: PsszPack<F> + KeyPack + $($kb)*, $($cg)*> PsszPack<F> for $ty {
-            assoc_consts!(K, $bound);
+            assoc_consts!(Set, K, $bound);
             fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
                 let $s = self;
                 let bound: Option<usize> = $bound;

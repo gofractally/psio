@@ -36,7 +36,7 @@
 //!   - [`BoundedRawString<N>`] ⇔ C++ `std::string` with `length_bound{.max=N}`.
 
 pub use crate::pssz_dynamic as dynamic;
-pub use crate::pssz_evolves::{pssz_evolves_from, shape_evolves, Shape, ShapeKind};
+pub use crate::pssz_evolves::{pssz_evolves_from, shape_evolves, shape_same, Shape, ShapeKind};
 pub use crate::pssz_schema_ir as schema_ir;
 pub use crate::pssz_upgrade as upgrade;
 pub use psio_macros::{PsszPack, PsszUnpack, PsszView, ToPsszSchema};

@@ -190,12 +190,22 @@ const fn nested_bound(n: usize) -> Option<usize> {
     if n == usize::MAX { None } else { Some(n) }
 }
 
-impl<F: PsszFormat, T, V: NestedValidation, const N: usize> PsszPack<F> for Nested<T, V, N> {
+impl<F: PsszFormat, T: PsszPack<Pssz>, V: NestedValidation, const N: usize> PsszPack<F>
+    for Nested<T, V, N>
+{
     const MIN_ENCODED_SIZE: usize = 0;
     const MAX_ENCODED_SIZE: Option<usize> = nested_bound(N);
     const IS_FIXED_SIZE: bool = false;
     const FIXED_SIZE: usize = 0;
     const AUTO_BOUND: Option<usize> = nested_bound(N);
+    // The inner value is always in the automatic profile, whatever `F` is.
+    const SHAPE: crate::pssz::Shape = crate::pssz::Shape::node(
+        crate::pssz::ShapeKind::Nested,
+        N,
+        <Self as PsszPack<F>>::OFFSET_WIDTH,
+        false,
+        &[<T as PsszPack<Pssz>>::SHAPE],
+    );
     fn pssz_size(&self) -> usize {
         self.bytes.len()
     }
