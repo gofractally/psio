@@ -888,6 +888,20 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
         (None, Some(_)) => Some(None),
         (None, None) => None,
     };
+    // The id defaults to the schema name: a type whose name is a reserved
+    // id needs an id of its own.
+    if let Some(None) = &custom {
+        let implied = opts.name.clone().unwrap_or_else(|| name.to_string());
+        if input.generics.params.is_empty() && attrs::reserved_custom_id(&implied) {
+            return Err(syn::Error::new_spanned(
+                name,
+                format!(
+                    "the custom id of this type would be its schema name, \"{implied}\", which is an id \
+                     PSIO's own types have in a schema; give it one of its own: #[psio(custom = \"Id\")]"
+                ),
+            ));
+        }
+    }
     let (body, custom_id) = match &custom {
         None => (body, quote!()),
         Some(id) => {

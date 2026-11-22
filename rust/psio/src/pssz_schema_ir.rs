@@ -291,6 +291,58 @@ pub fn wire_custom_id(id: &str) -> bool {
         || assoc_id(id)
 }
 
+/// An id reserved for PSIO's own types: one with a binary meaning
+/// ([`wire_custom_id`]), `box`, or a time id (`time-point`, `duration`,
+/// `monotonic`, alone or followed by `-`). The schema-driven codecs read a
+/// meaning into each, so a custom type cannot have one: the derives refuse
+/// `#[psio(custom = "time-point-seconds")]` at compile time and
+/// [`SchemaBuilder::insert`] refuses a hand-written
+/// [`ToPsszSchema::custom_id`] that returns one.
+///
+/// ```compile_fail
+/// use psio::{PsszPack, PsszUnpack, ToPsszSchema};
+///
+/// #[derive(PsszPack, PsszUnpack, ToPsszSchema)]
+/// #[psio(definition_will_not_change, custom = "time-point-seconds")] // reserved
+/// struct T { seconds: i64 }
+/// ```
+///
+/// ```compile_fail
+/// use psio::{PsszPack, PsszUnpack};
+///
+/// #[derive(PsszPack, PsszUnpack)]
+/// #[psio(custom = "hex")] // reserved, on every derive
+/// struct Blob { bytes: Vec<u8> }
+/// ```
+///
+/// ```compile_fail
+/// use psio::{PsszPack, PsszUnpack, ToPsszSchema};
+///
+/// // The id defaults to the schema name, and `duration` is reserved.
+/// #[allow(non_camel_case_types)]
+/// #[derive(PsszPack, PsszUnpack, ToPsszSchema)]
+/// #[psio(custom)]
+/// struct duration { ticks: i64 }
+/// ```
+///
+/// With an id of its own the same type is fine:
+///
+/// ```
+/// use psio::{PsszPack, PsszUnpack, ToPsszSchema};
+///
+/// #[derive(PsszPack, PsszUnpack, ToPsszSchema)]
+/// #[psio(definition_will_not_change, custom = "TimePointSec")]
+/// struct T { seconds: i64 }
+///
+/// #[allow(non_camel_case_types)]
+/// #[derive(PsszPack, PsszUnpack, ToPsszSchema)]
+/// #[psio(custom = "Span")]
+/// struct duration { ticks: i64 }
+/// ```
+pub fn reserved_custom_id(id: &str) -> bool {
+    wire_custom_id(id) || id == "box" || crate::time::reserved_time_schema_id(id)
+}
+
 pub trait ToPsszSchema: 'static {
     fn schema_name() -> Option<String> {
         None
@@ -331,6 +383,11 @@ impl SchemaBuilder {
         let id = TypeId::of::<T>();
         if let Some(name) = self.names.get(&id) {
             return Ok(AnyType::named(name.clone()));
+        }
+        if T::custom_id().is_some_and(|id| reserved_custom_id(&id)) {
+            return Err(PsszError::new(
+                "pssz schema: a custom type claims an id reserved for PSIO's own types",
+            ));
         }
         let name = T::schema_name().unwrap_or_else(|| format!("@{}", self.names.len()));
         if self.owners.contains_key(&name) {

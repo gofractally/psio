@@ -134,6 +134,19 @@ pub(crate) struct Attrs {
     pub(crate) skip_default: Option<syn::Path>,
 }
 
+/// An id the Schema IR reserves for PSIO's own types (`psio::pssz::
+/// schema_ir::reserved_custom_id`): the ids with a binary meaning, `box`,
+/// and the time ids (`time-point`, `duration`, `monotonic`, alone or
+/// followed by `-`).
+pub(crate) fn reserved_custom_id(id: &str) -> bool {
+    matches!(
+        id,
+        "bool" | "char" | "string" | "utf8" | "hex" | "bitvector" | "bitlist" | "map" | "set" | "unknown" | "box"
+    ) || ["time-point", "duration", "monotonic"]
+        .iter()
+        .any(|kind| id.strip_prefix(kind).is_some_and(|rest| rest.is_empty() || rest.starts_with('-')))
+}
+
 impl Attrs {
     /// The psio crate: `#[psio(crate = "path")]`, else `::psio`.
     pub(crate) fn krate(&self) -> syn::Path {
@@ -222,7 +235,20 @@ fn store(out: &mut Attrs, key: &Key, meta: &Meta) -> syn::Result<()> {
         "custom" => {
             out.custom = Some(match meta {
                 Meta::Path(_) => None,
-                Meta::NameValue(nv) => Some(string(nv, "custom is a string")?.value()),
+                Meta::NameValue(nv) => {
+                    let id = string(nv, "custom is a string")?;
+                    if reserved_custom_id(&id.value()) {
+                        return Err(syn::Error::new_spanned(
+                            &id,
+                            format!(
+                                "\"{}\" is an id PSIO's own types have in a schema (the codecs read a \
+                                 meaning into it); a custom type takes an id of its own",
+                                id.value()
+                            ),
+                        ));
+                    }
+                    Some(id.value())
+                }
                 _ => return Err(syn::Error::new_spanned(meta, "expected custom or custom = \"id\"")),
             })
         }
