@@ -70,6 +70,57 @@ psio_add_test(psio_wrapper_tests wrapper_tests.cpp)
 # Phase 3: buffer / view / mutable_view + access-surface rule.
 psio_add_test(psio_view_access_tests view_access_tests.cpp)
 
+# psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
+# values in a PSSZ frame; the frame stays valid and canonical.
+psio_add_test(psio_mutable_view_tests mutable_view_tests.cpp)
+# The same surface with exceptions and RTTI disabled.
+add_executable(psio_mutable_view_noexceptions_test mutable_view_noexceptions.cpp)
+target_include_directories(psio_mutable_view_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_mutable_view_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_mutable_view_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_mutable_view_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_mutable_view_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_mutable_view_noexceptions_test COMMAND psio_mutable_view_noexceptions_test)
+# Mutations that cannot preserve the frame must not compile, each with a
+# message naming the reason. The control (no case selected) must compile.
+add_test(NAME psio_mutable_view_control_compiles
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/mutable_view_fail.cpp)
+function(psio_mutable_view_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_mutable_view_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/mutable_view_fail.cpp)
+   set_tests_properties(psio_mutable_view_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_MV_FIXED_ONLY "only a fixed-size value can be overwritten in place")
+psio_mutable_view_compile_fail(string MV_FAIL_STRING "${PSIO_MV_FIXED_ONLY}")
+psio_mutable_view_compile_fail(vector MV_FAIL_VECTOR "${PSIO_MV_FIXED_ONLY}")
+psio_mutable_view_compile_fail(bitlist MV_FAIL_BITLIST "${PSIO_MV_FIXED_ONLY}")
+psio_mutable_view_compile_fail(extensible_record MV_FAIL_EXTENSIBLE_RECORD "${PSIO_MV_FIXED_ONLY}")
+psio_mutable_view_compile_fail(optional MV_FAIL_OPTIONAL
+   "an optional's presence cannot change in place")
+psio_mutable_view_compile_fail(variant MV_FAIL_VARIANT
+   "a variant's alternative cannot change in place")
+psio_mutable_view_compile_fail(blocked_type MV_FAIL_BLOCKED_TYPE
+   "in-place mutation is blocked for this type")
+psio_mutable_view_compile_fail(blocked_root MV_FAIL_BLOCKED_ROOT
+   "in-place mutation is blocked for this type")
+psio_mutable_view_compile_fail(blocked_nested MV_FAIL_BLOCKED_NESTED
+   "the value contains a type whose in-place mutation is blocked")
+psio_mutable_view_compile_fail(as_override MV_FAIL_AS_OVERRIDE
+   "a member with an as<Tag> override is not addressable in place")
+psio_mutable_view_compile_fail(sorted_member MV_FAIL_SORTED_MEMBER
+   "a member whose annotations constrain its content is not addressable in place")
+psio_mutable_view_compile_fail(validated_member MV_FAIL_VALIDATED_MEMBER
+   "a member whose annotations constrain its content is not addressable in place")
+psio_mutable_view_compile_fail(format MV_FAIL_FORMAT
+   "in-place mutation is defined for PSSZ formats only")
+
 # native format + view_of concept: zero-cost shim adapting a live const T&
 # to the view<T, Fmt, Store> accessor surface.
 psio_add_test(psio_native_view_tests native_view_tests.cpp)
