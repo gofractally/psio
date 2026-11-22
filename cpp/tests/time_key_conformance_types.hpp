@@ -42,6 +42,11 @@ namespace tk_conf
    using seconds32  = duration<std::uint32_t>;
    using sys_sec32  = sys_time<seconds32>;
    using minutes32  = duration<std::int32_t, std::ratio<60>>;
+   // Monotonic time points (a clock other than system_clock): ticks since the
+   // clock's own epoch, with tick text, never a date.
+   using mono_seconds = time_point<steady_clock, seconds>;
+   using mono_micros  = time_point<steady_clock, microseconds>;
+   using mono_ms32    = time_point<steady_clock, duration<std::uint32_t, std::milli>>;
    using Stamps     = ::TkStamps;
 
    // An extensible record mixing time values with variable members.
@@ -57,6 +62,17 @@ namespace tk_conf
       friend auto operator<=>(const Event&, const Event&) = default;
    };
    PSIO_REFLECT(Event, name, at, precise, history, elapsed, timeout)
+
+   // Monotonic time points as record members, in a list and in an optional.
+   struct Timer
+   {
+      mono_micros                expires;
+      std::optional<mono_seconds> started;
+      std::vector<mono_ms32>     laps;
+      friend bool operator==(const Timer&, const Timer&)  = default;
+      friend auto operator<=>(const Timer&, const Timer&) = default;
+   };
+   PSIO_REFLECT(Timer, expires, started, laps)
 
    // A record used as a composite key: its key is that of
    // tuple<u32, string, optional<i64>>.
@@ -87,6 +103,7 @@ namespace tk_conf
                         std::uint16_t, std::uint32_t, std::uint64_t>;
    using KFloats  = Tup<float, double>;
    using KTime    = Tup<sys_micros, std::string, seconds>;
+   using KMono    = Tup<mono_micros, std::string>;
    using KArray   = Tup<std::array<std::uint16_t, 2>, std::string>;
    using KVariant = Tup<std::variant<std::uint8_t, std::string>, std::uint8_t>;
    using KNested  = Tup<Tup<std::string, std::uint8_t>, std::string>;
@@ -110,6 +127,11 @@ namespace tk_conf
    TK_TYPE(microseconds, "duration<micros>")
    TK_TYPE(nanoseconds, "duration<nanos>")
    TK_TYPE(minutes32, "duration<60/1,i32>")
+   TK_TYPE(mono_seconds, "monotonic<seconds>")
+   TK_TYPE(mono_micros, "monotonic<micros>")
+   TK_TYPE(mono_ms32, "monotonic<millis,u32>")
+   TK_TYPE(Timer, "Timer")
+   TK_TYPE(KMono, "tuple<monotonic<micros>,string>")
    TK_TYPE(Stamps, "Stamps")
    TK_TYPE(Event, "Event")
    TK_TYPE(Account, "Account")
@@ -146,7 +168,9 @@ namespace tk_conf
            std::tuple<sys_seconds, sys_millis, sys_micros, sys_nanos, sys_sec32, seconds,
                       milliseconds, microseconds, nanoseconds, minutes32, Stamps, Event, Account,
                       KEmpty, KShard, KAccount, KStrU8, KStrStr, KBytes, KList, KOptStr, KStrList,
-                      KInts, KFloats, KTime, KArray, KVariant, KNested>>{});
+                      KInts, KFloats, KTime, KArray, KVariant, KNested,
+                      // Appended (the ids above keep their schema positions).
+                      mono_seconds, mono_micros, mono_ms32, Timer, KMono>>{});
    }
 
    // Composite key types: the ones with key-prefix rows.

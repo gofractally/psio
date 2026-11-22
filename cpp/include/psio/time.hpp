@@ -2,16 +2,22 @@
 //
 // psio/time.hpp — time as a first-class PSIO value (docs/time.md).
 //
-// Two C++ type families are time values:
+// Three C++ type families are time values:
 //
 //   std::chrono::duration<Rep, Period>                      a duration
 //   std::chrono::time_point<std::chrono::system_clock, D>   a time point:
 //                                                           D since the Unix
 //                                                           epoch, UTC, no
 //                                                           leap seconds
+//   std::chrono::time_point<any other clock, D>             a monotonic time
+//                                                           point: D since
+//                                                           that clock's own
+//                                                           epoch
 //
-// Rep must be an integer of at most 64 bits (not bool). A time_point on any
-// other clock has no portable epoch and is rejected at compile time.
+// Rep must be an integer of at most 64 bits (not bool). A clock other than
+// system_clock (steady_clock, a user clock, ...) has no epoch another
+// process can interpret: its time points are values, but they are ticks, not
+// dates. They order and subtract; they have no calendar form.
 //
 // Every format sees a time value as its tick count, an integer of type Rep:
 //
@@ -20,11 +26,12 @@
 //   psio::key        the Rep integer's key form (sign-flipped big-endian), so
 //                    byte order is chronological order
 //   schema           Custom{Int{bits, signed}, id}; `id` is time_schema_id
-//   json / ijson     duration: the tick count under the format's integer
-//                    rules. time point: an RFC 3339 UTC string (below)
+//   json / ijson     duration, monotonic time point: the tick count under
+//                    the format's integer rules. time point: an RFC 3339 UTC
+//                    string (below)
 //
-// Schema id:  ("time-point" | "duration") "-" unit, where unit is
-// "seconds" | "millis" | "micros" | "nanos" for periods 1, 1/10^3, 1/10^6,
+// Schema id:  ("time-point" | "duration" | "monotonic") "-" unit, where unit
+// is "seconds" | "millis" | "micros" | "nanos" for periods 1, 1/10^3, 1/10^6,
 // 1/10^9 and "<num>/<den>" (lowest terms, e.g. "60/1", "1/60") for any other
 // std::ratio. The four names are the only spelling of their periods.
 //
@@ -82,8 +89,9 @@ namespace psio {
                     "most 64 bits");
       using value_type = std::chrono::duration<Rep, Period>;
       using rep        = Rep;
-      static constexpr bool          is_time  = true;
-      static constexpr bool          is_point = false;
+      static constexpr bool          is_time      = true;
+      static constexpr bool          is_point     = false;
+      static constexpr bool          is_monotonic = false;
       static constexpr std::intmax_t num      = Period::num;
       static constexpr std::intmax_t den      = Period::den;
 
@@ -91,17 +99,17 @@ namespace psio {
       static constexpr value_type from_ticks(rep r) noexcept { return value_type{r}; }
    };
 
+   // is_point: a system_clock time point (Unix epoch, UTC: it has a date).
+   // is_monotonic: a time point of any other clock (ticks since that clock's
+   // own epoch: it has no date).
    template <typename Clock, typename Duration>
    struct time_traits<std::chrono::time_point<Clock, Duration>>
    {
-      static_assert(std::is_same_v<Clock, std::chrono::system_clock>,
-                    "psio: only std::chrono::system_clock time points are "
-                    "values (Unix epoch, UTC); other clocks have no portable "
-                    "epoch");
       using value_type = std::chrono::time_point<Clock, Duration>;
       using rep        = typename time_traits<Duration>::rep;
-      static constexpr bool          is_time  = true;
-      static constexpr bool          is_point = true;
+      static constexpr bool is_time      = true;
+      static constexpr bool is_point     = std::is_same_v<Clock, std::chrono::system_clock>;
+      static constexpr bool is_monotonic = !is_point;
       static constexpr std::intmax_t num      = time_traits<Duration>::num;
       static constexpr std::intmax_t den      = time_traits<Duration>::den;
 
@@ -117,10 +125,19 @@ namespace psio {
 
    template <typename T>
    concept TimeValue = time_traits<std::remove_cvref_t<T>>::is_time;
+   // A system_clock time point: RFC 3339 text.
    template <typename T>
    concept TimePointValue = TimeValue<T> && time_traits<std::remove_cvref_t<T>>::is_point;
+   // A time point of another clock: its text is the tick count.
    template <typename T>
-   concept DurationValue = TimeValue<T> && !time_traits<std::remove_cvref_t<T>>::is_point;
+   concept MonotonicValue = TimeValue<T> && time_traits<std::remove_cvref_t<T>>::is_monotonic;
+   template <typename T>
+   concept DurationValue = TimeValue<T> && !time_traits<std::remove_cvref_t<T>>::is_point &&
+                           !time_traits<std::remove_cvref_t<T>>::is_monotonic;
+   // The time values whose text is the tick count under the format's
+   // integer rules: durations and monotonic time points.
+   template <typename T>
+   concept TickTextValue = DurationValue<T> || MonotonicValue<T>;
 
    // The integer a time value is in every binary format.
    template <TimeValue T>
@@ -139,11 +156,14 @@ namespace psio {
 
    // ── Schema id ─────────────────────────────────────────────────────────
 
+   // point: a UTC time point (RFC 3339 text). monotonic: a time point of a
+   // clock with its own epoch (tick text). Neither: a duration (tick text).
    struct time_kind
    {
-      bool          point = false;
-      std::intmax_t num   = 1;  // period = num/den seconds, lowest terms
-      std::intmax_t den   = 1;
+      bool          point     = false;
+      std::intmax_t num       = 1;  // period = num/den seconds, lowest terms
+      std::intmax_t den       = 1;
+      bool          monotonic = false;
 
       friend bool operator==(const time_kind&, const time_kind&) = default;
    };
@@ -166,7 +186,7 @@ namespace psio {
 
    inline std::string time_schema_id(const time_kind& k)
    {
-      std::string out = k.point ? "time-point-" : "duration-";
+      std::string out = k.point ? "time-point-" : k.monotonic ? "monotonic-" : "duration-";
       if (k.num == 1 && k.den == 1)
          out += "seconds";
       else if (k.num == 1 && k.den == 1000)
@@ -188,18 +208,21 @@ namespace psio {
    std::string time_schema_id()
    {
       using Tr = time_traits<std::remove_cvref_t<T>>;
-      return time_schema_id(time_kind{Tr::is_point, Tr::num, Tr::den});
+      return time_schema_id(time_kind{Tr::is_point, Tr::num, Tr::den, Tr::is_monotonic});
    }
 
-   // The ids the time presentations reserve: "time-point" / "duration", alone
-   // or followed by "-". A reserved id that parse_time_schema_id does not
-   // accept is a malformed schema, never some other custom type.
+   // The ids the time presentations reserve: "time-point" / "duration" /
+   // "monotonic", alone or followed by "-". A reserved id that
+   // parse_time_schema_id does not accept is a malformed schema, never some
+   // other custom type.
    constexpr bool reserved_time_schema_id(std::string_view id) noexcept
    {
-      constexpr std::string_view point = "time-point", duration = "duration";
-      return id == point || id == duration ||
-             (id.starts_with(point) && id[point.size()] == '-') ||
-             (id.starts_with(duration) && id[duration.size()] == '-');
+      for (const std::string_view word : {std::string_view{"time-point"},
+                                          std::string_view{"duration"},
+                                          std::string_view{"monotonic"}})
+         if (id == word || (id.starts_with(word) && id[word.size()] == '-'))
+            return true;
+      return false;
    }
 
    // The inverse of time_schema_id; nullopt for any other id, including a
@@ -207,11 +230,17 @@ namespace psio {
    inline std::optional<time_kind> parse_time_schema_id(std::string_view id) noexcept
    {
       time_kind k;
-      constexpr std::string_view point = "time-point-", duration = "duration-";
+      constexpr std::string_view point = "time-point-", duration = "duration-",
+                                 monotonic = "monotonic-";
       if (id.starts_with(point))
       {
          k.point = true;
          id.remove_prefix(point.size());
+      }
+      else if (id.starts_with(monotonic))
+      {
+         k.monotonic = true;
+         id.remove_prefix(monotonic.size());
       }
       else if (id.starts_with(duration))
          id.remove_prefix(duration.size());

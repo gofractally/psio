@@ -326,12 +326,12 @@ namespace
          (*this)(r);
          v = duration<Rep, Period>{r};
       }
-      template <typename D>
-      void operator()(sys_time<D>& v)
+      template <typename C, typename D>
+      void operator()(time_point<C, D>& v)
       {
          D d;
          (*this)(d);
-         v = sys_time<D>{d};
+         v = time_point<C, D>{d};
       }
       template <typename... Ts>
       void operator()(std::variant<Ts...>& v)
@@ -359,6 +359,12 @@ namespace
          (*this)(v.updated);
          (*this)(v.ttl);
          (*this)(v.legacy);
+      }
+      void operator()(Timer& v)
+      {
+         (*this)(v.expires);
+         (*this)(v.started);
+         (*this)(v.laps);
       }
    };
 
@@ -415,30 +421,36 @@ namespace
       order<TP>("random", random_values<TP>(40));
    }
 
-   template <typename D>
+   // The time values whose text is the tick count: durations and monotonic
+   // time points.
+   template <psio::TickTextValue D>
    void emit_duration()
    {
-      using Rep = typename D::rep;
-      value<D>("zero", D{0});
-      value<D>("one", D{1});
-      value<D>("minus_one", D{-1});
-      value<D>("day_of_seconds", D{86400});
+      using Rep = psio::time_rep_t<D>;
+      auto at   = [](Rep ticks) { return psio::time_from_ticks<D>(ticks); };
+      value<D>("zero", at(0));
+      value<D>("one", at(1));
+      if constexpr (std::is_signed_v<Rep>)
+         value<D>("minus_one", at(-1));
+      value<D>("day_of_seconds", at(86400));
       value<D>("rep_max", D::max());
       value<D>("rep_min", D::min());
       if constexpr (sizeof(Rep) == 8)
       {
          // The I-JSON number / string boundary of a 64-bit count.
-         value<D>("safe_max", D{9007199254740991});
-         value<D>("safe_max_plus_one", D{9007199254740992});
-         value<D>("safe_min", D{-9007199254740991});
-         value<D>("safe_min_minus_one", D{-9007199254740992});
+         value<D>("safe_max", at(9007199254740991));
+         value<D>("safe_max_plus_one", at(9007199254740992));
+         value<D>("safe_min", at(-9007199254740991));
+         value<D>("safe_min_minus_one", at(-9007199254740992));
       }
-      accept<D>("number", "86400", D{86400});
+      accept<D>("number", "86400", at(86400));
       reject<D>("iso_8601_duration", "\"PT1S\"");
       reject<D>("fraction", "1.5");
       reject<D>("exponent", "1e3");
       reject<D>("null", "null");
       reject<D>("date_time", "\"1970-01-01T00:00:01Z\"");
+      if constexpr (!std::is_signed_v<Rep>)
+         reject<D>("negative", "-1");
       order<D>("random", random_values<D>(40));
       key_reject<D>("short", std::string(2 * sizeof(Rep) - 2, '0'));
       key_reject<D>("long", std::string(2 * sizeof(Rep) + 2, '0'));
@@ -455,6 +467,10 @@ namespace
       emit_duration<microseconds>();
       emit_duration<nanoseconds>();
       emit_duration<minutes32>();
+      // Monotonic time points: the tick count in every format.
+      emit_duration<mono_seconds>();
+      emit_duration<mono_micros>();
+      emit_duration<mono_ms32>();
 
       // An unsigned 32-bit seconds stamp.
       value<sys_sec32>("epoch", sys_sec32{});
@@ -594,6 +610,21 @@ namespace
       reject<Event>("element_finer_than_unit",
                     R"({"name":"x","at":"2026-11-22T10:15:30Z","precise":null,)"
                     R"("history":["2026-11-22T10:15:30.5Z"],"elapsed":0,"timeout":0})");
+
+      // Monotonic time points as members: tick counts, never dates.
+      using lap = mono_ms32::duration;
+      const Timer timer{mono_micros{microseconds{9007199254740993}},
+                        mono_seconds{seconds{-5}},
+                        {mono_ms32{lap{0}}, mono_ms32{lap{1500}}, mono_ms32::max()}};
+      value<Timer>("full", timer);
+      value<Timer>("empty", Timer{});
+      accept<Timer>("ticks",
+                    R"({"laps":[7],"expires":12,"started":null})",
+                    Timer{mono_micros{microseconds{12}}, std::nullopt, {mono_ms32{lap{7}}}});
+      reject<Timer>("date_for_ticks",
+                    R"({"expires":"2026-11-22T10:15:30Z","started":null,"laps":[]})");
+      reject<Timer>("lap_out_of_range", R"({"expires":0,"started":null,"laps":[4294967296]})");
+      order<Timer>("random", random_values<Timer>(40));
    }
 
    // ── Keys ───────────────────────────────────────────────────────────────
@@ -665,6 +696,11 @@ namespace
                        {sys_micros{microseconds{-1}}, "a", seconds{-1}},
                        {sys_micros{microseconds{1795342530123456}}, "deploy", seconds{3600}},
                        {sys_micros{microseconds{253402300799999999}}, "", seconds::max()}});
+      key_type<KMono>({{mono_micros{}, ""},
+                       {mono_micros{microseconds{-1}}, "a"},
+                       {mono_micros{microseconds{1795342530123456}}, "timer"},
+                       {mono_micros::max(), ""},
+                       {mono_micros::min(), "z"}});
       key_type<KArray>({{{0, 0}, ""}, {{1, 2}, "a"}, {{0xffff, 0xffff}, ""}, {{0, 0xffff}, "z"}});
       key_type<KVariant>({{std::uint8_t{0}, 0}, {std::uint8_t{255}, 255}, {""s, 0}, {"a"s, 1},
                           {nul, 2}});

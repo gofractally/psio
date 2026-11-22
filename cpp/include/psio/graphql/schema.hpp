@@ -569,26 +569,31 @@ namespace psio::graphql
             return out;
          }
       };
+      // The scalar of a time value whose text is its tick count: a duration
+      // (`Seconds`, `Duration_60_1`) or a monotonic time point
+      // (`MonotonicSeconds`, `Monotonic_60_1`).
       template <typename T>
       struct duration_namer
       {
          static constexpr name_buf make()
          {
-            using P = typename T::period;
+            using Tr = time_traits<T>;
             name_buf out;
-            if (P::num == 1 && P::den == 1)
+            if constexpr (Tr::is_monotonic)
+               out.add("Monotonic");
+            if (Tr::num == 1 && Tr::den == 1)
                out.add("Seconds");
-            else if (P::num == 1 && P::den == 1000)
+            else if (Tr::num == 1 && Tr::den == 1000)
                out.add("Milliseconds");
-            else if (P::num == 1 && P::den == 1000000)
+            else if (Tr::num == 1 && Tr::den == 1000000)
                out.add("Microseconds");
-            else if (P::num == 1 && P::den == 1000000000)
+            else if (Tr::num == 1 && Tr::den == 1000000000)
                out.add("Nanoseconds");
             else
-               out.add("Duration_")
-                  .add(static_cast<std::uintmax_t>(P::num))
+               out.add(Tr::is_monotonic ? "_" : "Duration_")
+                  .add(static_cast<std::uintmax_t>(Tr::num))
                   .add("_")
-                  .add(static_cast<std::uintmax_t>(P::den));
+                  .add(static_cast<std::uintmax_t>(Tr::den));
             return out;
          }
       };
@@ -688,7 +693,7 @@ namespace psio::graphql
             return {"Float", scalar_class::floating, true};
          else if constexpr (TimePointValue<T>)
             return {"DateTime", scalar_class::custom, true};
-         else if constexpr (DurationValue<T>)
+         else if constexpr (TickTextValue<T>)
             return {stored_name<duration_namer<T>>::value, scalar_class::custom, true};
          else if constexpr (is_string_v<T>)
             return {"String", scalar_class::string, true};

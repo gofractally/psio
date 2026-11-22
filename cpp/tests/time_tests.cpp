@@ -483,3 +483,148 @@ TEST_CASE("time: schema marks the tick integer with a time id", "[time][schema]"
    REQUIRE(psio::time_fraction_digits(1, 60) == -1);
    REQUIRE(psio::time_fraction_digits(60, 1) == -1);
 }
+
+// ── Monotonic time points (a clock other than system_clock) ────────────────
+namespace
+{
+   using mono_seconds = time_point<steady_clock, seconds>;
+   using mono_micros  = time_point<steady_clock, microseconds>;
+   using mono_ms32    = time_point<steady_clock, duration<std::uint32_t, std::milli>>;
+   // A user clock: any clock that is not system_clock is monotonic to PSIO.
+   struct boot_clock
+   {
+      using rep        = std::int64_t;
+      using period     = std::nano;
+      using duration   = std::chrono::duration<rep, period>;
+      using time_point = std::chrono::time_point<boot_clock>;
+      static constexpr bool is_steady = true;
+   };
+
+   struct Timer
+   {
+      mono_micros                 expires;
+      std::optional<mono_seconds> started;
+      std::vector<mono_ms32>      laps;
+      friend bool operator==(const Timer&, const Timer&) = default;
+   };
+   PSIO_REFLECT(Timer, expires, started, laps)
+   struct TimerInts
+   {
+      std::int64_t                expires = 0;
+      std::optional<std::int64_t> started;
+      std::vector<std::uint32_t>  laps;
+   };
+   PSIO_REFLECT(TimerInts, expires, started, laps)
+}  // namespace
+
+static_assert(psio::TimeValue<mono_micros> && psio::MonotonicValue<mono_micros>);
+static_assert(psio::MonotonicValue<steady_clock::time_point> &&
+              psio::MonotonicValue<boot_clock::time_point>);
+static_assert(!psio::TimePointValue<mono_micros> && !psio::DurationValue<mono_micros>);
+static_assert(!psio::MonotonicValue<sys_micros> && !psio::MonotonicValue<microseconds>);
+static_assert(psio::TickTextValue<mono_micros> && psio::TickTextValue<seconds> &&
+              !psio::TickTextValue<sys_seconds>);
+static_assert(!psio::TextTimePoint<mono_micros>);  // no RFC 3339 form, whatever the unit
+static_assert(psio::detail::pssz_impl::is_fixed_v<mono_ms32> &&
+              psio::detail::pssz_impl::fixed_size_of<mono_ms32>() == 4);
+// A time value is its own type in an evolution check.
+static_assert(!psio::pssz_evolves_from<mono_micros, sys_micros> &&
+              !psio::pssz_evolves_from<mono_micros, microseconds> &&
+              !psio::pssz_evolves_from<mono_micros, std::int64_t>);
+
+TEST_CASE("time: a monotonic time point is its tick count in every format", "[time][monotonic]")
+{
+   const Timer timer{mono_micros{microseconds{9007199254740993}},
+                     mono_seconds{seconds{-5}},
+                     {mono_ms32{mono_ms32::duration{0}}, mono_ms32::max()}};
+   const TimerInts ints{9007199254740993, -5, {0, 4294967295u}};
+
+   // Binary and key: the tick integer.
+   REQUIRE(psio::encode(psio::pssz{}, timer) == psio::encode(psio::pssz{}, ints));
+   REQUIRE(psio::encode(psio::bin{}, timer) == psio::encode(psio::bin{}, ints));
+   REQUIRE(psio::encode(psio::ssz{}, timer) == psio::encode(psio::ssz{}, ints));
+   REQUIRE(psio::encode(psio::key{}, timer) == psio::encode(psio::key{}, ints));
+   const auto bytes = psio::encode(psio::pssz{}, timer);
+   REQUIRE(psio::validate<Timer>(psio::pssz{}, std::span<const char>{bytes}).ok());
+   REQUIRE(psio::decode<Timer>(psio::pssz{}, std::span<const char>{bytes}) == timer);
+   const auto key = psio::encode(psio::key{}, timer);
+   REQUIRE(psio::decode<Timer>(psio::key{}, std::span<const char>{key}) == timer);
+   {
+      // Key order is tick order (bytes compared unsigned).
+      const auto before = psio::to_key(mono_micros{microseconds{-1}});
+      const auto after  = psio::to_key(mono_micros{});
+      REQUIRE(std::memcmp(before.data(), after.data(), before.size()) < 0);
+   }
+   REQUIRE(psio::encode(psio::pssz{}, boot_clock::time_point{boot_clock::duration{7}}) ==
+           psio::encode(psio::pssz{}, std::int64_t{7}));
+
+   // Text: the tick count under the integer rules, never a date.
+   REQUIRE(psio::encode(psio::json{}, timer) ==
+           R"({"expires":9007199254740993,"started":-5,"laps":[0,4294967295]})");
+   REQUIRE(psio::encode(psio::ijson{}, timer) ==
+           R"({"expires":"9007199254740993","started":-5,"laps":[0,4294967295]})");
+   REQUIRE(psio::encode(psio::json{}, timer) == psio::encode(psio::json{}, ints));
+   REQUIRE(psio::encode(psio::ijson{}, timer) == psio::encode(psio::ijson{}, ints));
+   for (const std::string text : {psio::encode(psio::json{}, timer)})
+   {
+      Timer back;
+      REQUIRE(psio::decode_json_checked(psio::json{}, std::span<const char>{text}, back).ok());
+      REQUIRE(back == timer);
+   }
+   {
+      const std::string text = psio::encode(psio::ijson{}, timer);
+      Timer             back;
+      REQUIRE(psio::decode_json_checked(psio::ijson{}, std::span<const char>{text}, back).ok());
+      REQUIRE(back == timer);
+   }
+   Timer             out;
+   const std::string date = R"({"expires":"2026-11-22T10:15:30Z","started":null,"laps":[]})";
+   REQUIRE_FALSE(psio::decode_json_checked(psio::ijson{}, std::span<const char>{date}, out).ok());
+   REQUIRE_FALSE(psio::decode_json_checked(psio::json{}, std::span<const char>{date}, out).ok());
+}
+
+TEST_CASE("time: schema marks a monotonic time point with its own id", "[time][monotonic][schema]")
+{
+   namespace ir = psio::schema_types;
+   psio::SchemaBuilder builder;
+   auto check = [&]<typename T>(std::type_identity<T>, std::string_view id, std::uint32_t bits,
+                                bool is_signed) {
+      auto        type   = builder.insert<T>();
+      const auto& custom = std::get<ir::Custom>(type.resolve(builder.peek())->value);
+      INFO(id);
+      REQUIRE(custom.id == id);
+      const auto& integer = std::get<ir::Int>(custom.type->resolve(builder.peek())->value);
+      REQUIRE(integer.bits == bits);
+      REQUIRE(integer.isSigned == is_signed);
+      const auto kind = psio::parse_time_schema_id(id);
+      REQUIRE(kind.has_value());
+      REQUIRE(kind->monotonic);
+      REQUIRE_FALSE(kind->point);
+      REQUIRE(kind->num == psio::time_traits<T>::num);
+      REQUIRE(kind->den == psio::time_traits<T>::den);
+      REQUIRE(psio::time_schema_id(*kind) == id);
+      REQUIRE(psio::reserved_time_schema_id(id));
+   };
+   check(std::type_identity<mono_seconds>{}, "monotonic-seconds", 64, true);
+   check(std::type_identity<mono_micros>{}, "monotonic-micros", 64, true);
+   check(std::type_identity<mono_ms32>{}, "monotonic-millis", 32, false);
+   check(std::type_identity<steady_clock::time_point>{}, "monotonic-nanos", 64, true);
+   check(std::type_identity<boot_clock::time_point>{}, "monotonic-nanos", 64, true);
+   check(std::type_identity<time_point<steady_clock, duration<std::int32_t, std::ratio<60>>>>{},
+         "monotonic-60/1", 32, true);
+   // A time point of a unit with no RFC 3339 form still has tick text.
+   REQUIRE(psio::encode(psio::json{},
+                        time_point<steady_clock, duration<std::int32_t, std::ratio<60>>>{}) == "0");
+
+   for (std::string_view bad : {"monotonic", "monotonic-", "monotonic-1/1000", "monotonic-2/4",
+                                "monotonic-minutes", "Monotonic-seconds"})
+   {
+      INFO(bad);
+      REQUIRE_FALSE(psio::parse_time_schema_id(bad).has_value());
+   }
+   REQUIRE(psio::reserved_time_schema_id("monotonic"));
+   REQUIRE(psio::reserved_time_schema_id("monotonic-anything"));
+   REQUIRE_FALSE(psio::reserved_time_schema_id("monotonically"));
+   // A time point and a monotonic time point of one unit are different ids.
+   REQUIRE(psio::time_schema_id<sys_micros>() != psio::time_schema_id<mono_micros>());
+}

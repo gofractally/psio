@@ -585,7 +585,7 @@ namespace psio {
          }
          else if constexpr (is_wide_int_v<T>)
             return 0;
-         else if constexpr (::psio::DurationValue<T>)
+         else if constexpr (::psio::TickTextValue<T>)
             return text_bound<Fmt, ::psio::time_rep_t<T>>();
          else if constexpr (::psio::TimePointValue<T>)
             return ::psio::max_time_text_size + 2;
@@ -768,7 +768,7 @@ namespace psio {
             encode_integer<Fmt, IM>(static_cast<unsigned char>(v), w);
          else if constexpr (std::is_integral_v<T>)
             encode_integer<Fmt, IM>(v, w);
-         else if constexpr (::psio::DurationValue<T>)
+         else if constexpr (::psio::TickTextValue<T>)
             encode_integer<Fmt, IM>(::psio::time_ticks(v), w);
          else if constexpr (::psio::TimePointValue<T>)
          {
@@ -1501,7 +1501,7 @@ namespace psio {
             return read_wide_integer<Fmt, IM, T>(r, out);
          else if constexpr (std::is_integral_v<T>)
             return read_integer<Fmt, IM, T>(r, out);
-         else if constexpr (::psio::DurationValue<T>)
+         else if constexpr (::psio::TickTextValue<T>)
          {
             ::psio::time_rep_t<T> v{};
             if (!read_integer<Fmt, IM, ::psio::time_rep_t<T>>(r, &v))

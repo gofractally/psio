@@ -111,6 +111,7 @@ shape.
 | byte sequences (`vector`/`array` of `char`/`unsigned char`/`std::byte`, `byte_array<N>`) | `Bytes` — hex string |
 | `system_clock` time point | `DateTime` — RFC 3339 UTC |
 | `std::chrono::duration` | `Seconds`, `Milliseconds`, `Microseconds`, `Nanoseconds`, or `Duration_<num>_<den>` — the tick count |
+| time point of another clock (monotonic) | `MonotonicSeconds`, `MonotonicMilliseconds`, `MonotonicMicroseconds`, `MonotonicNanoseconds`, or `Monotonic_<num>_<den>` — the tick count |
 | type with a text adapter (`PSIO_ADAPTER(T, psio::text_category, …)`) | scalar named after the type (the adapter's `schema_id`, else the reflected name) — a string holding the adapter's text |
 | `psio::view<T, Fmt, Store>`, `psio::buffer<T, Fmt, Store>`, `std::reference_wrapper<T>` | `T` (see [Views](#views)). The same record reached through different sources is one GraphQL type |
 | `psio::graphql::connection<Node>` | `<Node>Connection`, `<Node>Edge`, `PageInfo` (see [Connections](#connections)) |

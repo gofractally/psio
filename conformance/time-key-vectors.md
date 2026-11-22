@@ -29,8 +29,12 @@ All byte strings are lower-case hex. A value is identified by its PSSZ
 | `key-prefix` | `type`, `pssz`, `count`, `prefix`, `bound` | `prefix` is the key of the first `count` elements of the composite value; `bound` is its exclusive upper bound, `null` for none |
 | `bound` | `prefix`, `bound` | the exclusive upper bound of the raw bytes `prefix` (`type` is `"bytes"`) |
 
-Type ids: `time_point<unit>` / `duration<unit>` are 64-bit signed;
-`time_point<seconds,u32>` and `duration<60/1,i32>` name their tick type.
+Type ids: `time_point<unit>` / `duration<unit>` / `monotonic<unit>` are 64-bit
+signed; `time_point<seconds,u32>`, `duration<60/1,i32>` and
+`monotonic<millis,u32>` name their tick type. `monotonic<...>` is a monotonic
+time point (Schema IR id `monotonic-<unit>`): its text is the tick count.
+`Timer` is `{expires: monotonic<micros>, started:
+optional<monotonic<seconds>>, laps: list<monotonic<millis,u32>>}`.
 `Stamps` is a fixed-layout record `{created: time_point<seconds>, updated:
 time_point<micros>, ttl: duration<millis>, legacy: time_point<seconds,u32>}`;
 `Event` is `{name: string, at: time_point<millis>, precise:

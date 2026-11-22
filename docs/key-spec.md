@@ -28,7 +28,7 @@ concatenation of the elements, compared lexicographically.
 | enum without payload (C++ `enum`, with or without `PSIO_REFLECT_ENUM`; Rust field-less `#[repr(int)]` enum, including its `#[pssz(other)]` catch-all; Schema IR `Enum`) | its underlying integer. Enumerator names exist in JSON only; key order is the order of the values |
 | char, byte | the byte itself (unsigned order) |
 | f32 / f64 | IEEE bits; `-0` is first replaced by `+0`; then if the sign bit is set flip **every** bit, otherwise flip the sign bit; big-endian |
-| duration, time point | the tick count as its integer type (`docs/time.md`) — chronological order |
+| duration, time point, monotonic time point | the tick count as its integer type (`docs/time.md`) — chronological order |
 | string (raw — Schema IR `string` — or UTF-8 — `utf8`; bounded or not) | the bytes with each `00` written as `00 01`, then the terminator `00 00`. The two kinds have one key form; a UTF-8 string is validated when read, a raw string holds any bytes (JS: `string` for UTF-8, `Uint8Array` for raw) |
 | list of octets (u8, i8, char, byte; bounded or not) | each element's one key byte (i8: sign-flipped), escaped and terminated exactly like a string |
 | list of any other `T` (bounded or not) | for each element `01` + key(element); then `00` |

@@ -12,7 +12,9 @@ int main()
 #elif defined(KEY_FAIL_BITLIST)
    auto k = psio::encode(psio::key{}, psio::bitlist<8>{});
 #elif defined(KEY_FAIL_STEADY_CLOCK)
-   auto k = psio::encode(psio::key{}, std::chrono::steady_clock::time_point{});
+   // A monotonic time point is a value (its key is its tick count) but has
+   // no date: the RFC 3339 codec does not accept it.
+   auto k = psio::to_rfc3339(std::chrono::steady_clock::time_point{});
 #elif defined(KEY_FAIL_FLOAT_REP)
    auto k = psio::encode(psio::key{}, std::chrono::duration<double>{1.5});
 #elif defined(KEY_FAIL_PREFIX_ARITY)
