@@ -58,11 +58,13 @@
 #  include "adapters/capnp_adapter.hpp"
 #endif
 
+#include <concepts>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <set>
 #include <span>
 #include <vector>
@@ -587,6 +589,43 @@ namespace {
       asm volatile("" : "+r,m"(v) : : "memory");
    }
 
+   //  ── every cell does observed work ────────────────────────────────
+   //
+   //  XOR-ing the byte count and the first byte of an encoded buffer
+   //  (or one scalar of a decoded value) into a volatile sink observes
+   //  only those: the optimiser is free to drop every store that
+   //  feeds nothing else, and did — fixed-shape encodes and decodes
+   //  measured under 1 ns. Each timed body now hands what it produced
+   //  to one of these barriers. The compiler must assume the asm
+   //  statement reads all memory reachable from the pointer it is
+   //  given (the "memory" clobber), so every byte of the encoded
+   //  buffer, and every member and heap block of the decoded value,
+   //  has to be written before it. The barrier itself costs nothing
+   //  at run time (no checksum pass that would dilute the ratios).
+
+   //  The bytes [p, p + n) are read by something the compiler cannot
+   //  see.
+   inline void observe_bytes(const void* p, std::size_t n)
+   {
+      asm volatile("" : : "r"(p), "r"(n) : "memory");
+   }
+   //  The object `v` (and whatever it points to) is read by something
+   //  the compiler cannot see.
+   template <typename T>
+   inline void observe_value(const T& v)
+   {
+      const void* p = std::addressof(v);
+      asm volatile("" : : "r"(p) : "memory");
+   }
+   //  The object `v` may have been changed by something the compiler
+   //  cannot see: its contents are not known constants afterwards.
+   template <typename T>
+   inline void launder_inputs(T& v)
+   {
+      void* p = std::addressof(v);
+      asm volatile("" : "+r"(p) : : "memory");
+   }
+
    //  vary(v, i) — produce one of K perturbed copies of v.  For each
    //  shape we pick a scalar field and XOR it with i.  The chosen field
    //  is large enough that XOR-with-i (i ∈ [0, 15]) does not change the
@@ -757,6 +796,34 @@ namespace {
       }
       const std::size_t wire = bufs[0].size();
 
+      // What is timed below is the real operation: before any timing,
+      // every rotated input must decode back to the value it encodes
+      // (where the shape is comparable) and validate as OK — a cell
+      // that timed a failing or wrong path would be meaningless.
+      bool validate_accepts = true;
+      for (std::size_t i = 0; i < kAntiDceK; ++i) {
+         if constexpr (std::equality_comparable<T>) {
+            if (!(psio::decode<T>(fmt, spans[i]) == vals[i]))
+               std::fprintf(stderr,
+                            "bench self-check: %s/%s decode != input\n",
+                            shape_name.c_str(), fmt_name.c_str());
+         }
+         if constexpr (requires { psio::validate<T>(fmt, spans[i]); }) {
+            if (!psio::validate<T>(fmt, spans[i])) {
+               if (validate_accepts)
+                  std::fprintf(stderr,
+                               "bench self-check: %s/%s validate rejects "
+                               "its own encoding; no validate cell\n",
+                               shape_name.c_str(), fmt_name.c_str());
+               validate_accepts = false;
+            }
+         }
+      }
+      // The inputs are not compile-time knowledge.
+      launder_inputs(vals);
+      launder_inputs(bufs);
+      launder_inputs(spans);
+
       auto record = [&](std::string op, double ns, double ns_med,
                          double cv, std::size_t wire_b, std::size_t iters,
                          int trials, std::string notes = "") {
@@ -794,6 +861,7 @@ namespace {
       volatile std::uint64_t sink_enc = 0;
       auto t_enc = ns_per_iter(0u, [&](std::size_t i) {
          auto b = psio::encode(fmt, vals[i & (kAntiDceK - 1)]);
+         observe_bytes(b.data(), b.size());
          sink_enc ^= b.size();
          if (!b.empty()) sink_enc ^= static_cast<unsigned char>(b[0]);
       });
@@ -812,6 +880,7 @@ namespace {
          auto t_sink = ns_per_iter(0u, [&](std::size_t i) {
             sink_buf.clear();
             psio::encode(fmt, vals[i & (kAntiDceK - 1)], sink_buf);
+            observe_bytes(sink_buf.data(), sink_buf.size());
             sink_sk ^= sink_buf.size();
             if (!sink_buf.empty())
                sink_sk ^= static_cast<unsigned char>(sink_buf[0]);
@@ -825,6 +894,7 @@ namespace {
       volatile std::uint64_t sink_dec = 0;
       auto t_dec = ns_per_iter(0u, [&](std::size_t i) {
          auto p = psio::decode<T>(fmt, spans[i & (kAntiDceK - 1)]);
+         observe_value(p);
          sink_dec ^= bench_view_target(p);
       });
       record("decode", t_dec.min_ns, t_dec.median_ns, cv(t_dec),
@@ -960,6 +1030,7 @@ namespace {
                auto t_view = ns_per_iter(0u, [&](std::size_t i) {
                   auto decoded =
                      psio::decode<T>(fmt, spans[i & (kAntiDceK - 1)]);
+                  observe_value(decoded);
                   sink_v ^= bench_view_target(decoded);
                });
                record("decode_then_view", t_view.min_ns, t_view.median_ns,
@@ -972,6 +1043,11 @@ namespace {
       // validate — rotated input + bool-cast result XOR'd into a
       // volatile sink.  Without rotation, the validate result for
       // a constant span constant-folds and the call gets hoisted.
+      //
+      // A validator that rejects the format's own encoding (the
+      // self-check above) would be timed on its way to an early
+      // failure: no cell is recorded for it.
+      if (validate_accepts)
       try
       {
          volatile std::uint64_t sink_val = 0;
@@ -1005,6 +1081,8 @@ namespace {
          bufs[i] = mp_bench::encode(vals[i]);
       }
       const std::size_t wire = bufs[0].size();
+      launder_inputs(vals);
+      launder_inputs(bufs);
 
       auto record = [&](std::string op, double ns, double ns_med,
                          double cv, std::size_t wire_b, std::size_t iters,
@@ -1043,6 +1121,7 @@ namespace {
       volatile std::uint64_t sink_enc = 0;
       auto t_enc = ns_per_iter(0u, [&](std::size_t i) {
          auto b = mp_bench::encode(vals[i & (kAntiDceK - 1)]);
+         observe_bytes(b.data(), b.size());
          sink_enc ^= b.size();
          if (!b.empty()) sink_enc ^= static_cast<unsigned char>(b[0]);
       });
@@ -1054,6 +1133,7 @@ namespace {
       volatile std::uint64_t sink_sk = 0;
       auto t_sink = ns_per_iter(0u, [&](std::size_t i) {
          mp_bench::encode_into(vals[i & (kAntiDceK - 1)], sbuf);
+         observe_bytes(sbuf.data(), sbuf.size());
          sink_sk ^= sbuf.size();
       });
       record("encode_sink", t_sink.min_ns, t_sink.median_ns, cv(t_sink),
@@ -1066,6 +1146,7 @@ namespace {
       auto t_dec = ns_per_iter(0u, [&](std::size_t i) {
          auto& b = bufs[i & (kAntiDceK - 1)];
          auto p  = mp_bench::decode<T>(b.data(), b.size());
+         observe_value(p);
          sink_dec ^= bench_view_target(p);
       });
       record("decode", t_dec.min_ns, t_dec.median_ns, cv(t_dec),
@@ -1083,6 +1164,7 @@ namespace {
          auto t_view = ns_per_iter(0u, [&](std::size_t i) {
             auto& b = bufs[i & (kAntiDceK - 1)];
             auto p  = mp_bench::decode<T>(b.data(), b.size());
+            observe_value(p);
             sink_v ^= bench_view_target(p);
          });
          record("decode_then_view", t_view.min_ns, t_view.median_ns,
@@ -1117,6 +1199,7 @@ namespace {
          (void)seeds[i].SerializeToString(&pres[i]);
       }
       const std::size_t wire = pres[0].size();
+      launder_inputs(vals);
 
       auto record = [&](std::string op, double ns, double ns_med,
                          double cv, std::size_t wire_b, std::size_t iters,
@@ -1157,6 +1240,7 @@ namespace {
          pb_bench::build(pb, vals[i & (kAntiDceK - 1)]);
          std::string out_;
          (void)pb.SerializeToString(&out_);
+         observe_bytes(out_.data(), out_.size());
          sink_enc ^= out_.size();
          if (!out_.empty()) sink_enc ^= static_cast<unsigned char>(out_[0]);
       });
@@ -1176,6 +1260,7 @@ namespace {
          pb_bench::build(reused, vals[i & (kAntiDceK - 1)]);
          out_buf.clear();
          (void)reused.SerializeToString(&out_buf);
+         observe_bytes(out_buf.data(), out_buf.size());
          sink_sk ^= out_buf.size();
       });
       record("encode_sink", t_sink.min_ns, t_sink.median_ns,
@@ -1188,6 +1273,7 @@ namespace {
       auto t_dec = ns_per_iter(0u, [&](std::size_t i) {
          dec.Clear();
          (void)dec.ParseFromString(pres[i & (kAntiDceK - 1)]);
+         observe_value(dec);
          sink_dec ^= dec.ByteSizeLong();
       });
       record("decode", t_dec.min_ns, t_dec.median_ns, cv(t_dec),
@@ -1241,6 +1327,7 @@ namespace {
          buf_ptrs[i] = seeds[i].GetBufferPointer();
       }
       const std::size_t wire = seeds[0].GetSize();
+      launder_inputs(vals);
 
       auto record = [&](std::string op, double ns, double ns_med,
                          double cv, std::size_t wire_b, std::size_t iters,
@@ -1285,6 +1372,7 @@ namespace {
          fbb.Finish(
             fb_bench_adapter::build(fbb, vals[i & (kAntiDceK - 1)]));
          auto buf = fbb.Release();
+         observe_bytes(buf.data(), buf.size());
          sink_enc ^= buf.size();
          if (buf.size()) sink_enc ^= buf.data()[0];
       });
@@ -1299,6 +1387,7 @@ namespace {
          fbb_reused.Clear();
          fbb_reused.Finish(
             fb_bench_adapter::build(fbb_reused, vals[i & (kAntiDceK - 1)]));
+         observe_bytes(fbb_reused.GetBufferPointer(), fbb_reused.GetSize());
          sink_sk ^= fbb_reused.GetSize();
       });
       record("encode_sink", t_sink.min_ns, t_sink.median_ns,
@@ -1314,6 +1403,7 @@ namespace {
       auto t_dec = ns_per_iter(0u, [&](std::size_t i) {
          auto root = flatbuffers::GetRoot<FB>(buf_ptrs[i & (kAntiDceK - 1)]);
          T native = fb_bench_adapter::to_native<T>(root);
+         observe_value(native);
          sink_dec ^= bench_view_target(native);
       });
       record("decode", t_dec.min_ns, t_dec.median_ns, cv(t_dec),
@@ -1356,6 +1446,7 @@ namespace {
          word_arrs[i] = seed_arrs[i].asPtr();
       }
       const std::size_t wire = seed_arrs[0].asBytes().size();
+      launder_inputs(vals);
 
       auto record = [&](std::string op, double ns, double ns_med,
                          double cv, std::size_t wire_b, std::size_t iters,
@@ -1397,6 +1488,7 @@ namespace {
          capnp::MallocMessageBuilder b;
          cp_bench::build(b.initRoot<CP>(), vals[i & (kAntiDceK - 1)]);
          auto out_arr = capnp::messageToFlatArray(b);
+         observe_bytes(out_arr.asBytes().begin(), out_arr.asBytes().size());
          sink_enc ^= out_arr.asBytes().size();
       });
       record("encode_rvalue", t_enc.min_ns, t_enc.median_ns, cv(t_enc),
@@ -1413,6 +1505,7 @@ namespace {
          capnp::FlatArrayMessageReader reader(word_arrs[i & (kAntiDceK - 1)]);
          auto root = reader.getRoot<CP>();
          T native = cp_bench::to_native<T>(root);
+         observe_value(native);
          sink_dec ^= bench_view_target(native);
       });
       record("decode", t_dec.min_ns, t_dec.median_ns, cv(t_dec),
@@ -1453,6 +1546,8 @@ namespace {
                                                   bufs[i].size()};
       }
       const std::size_t wire = bufs[0].size();
+      launder_inputs(vals);
+      launder_inputs(bufs);
 
       auto record = [&](std::string op, double ns, double ns_med,
                          double cv, std::size_t wire_b,
@@ -1494,6 +1589,7 @@ namespace {
       volatile std::uint64_t sink_enc = 0;
       auto t_enc = ns_per_iter(0u, [&](std::size_t i) {
          auto b = ::psio::from_struct(vals[i & (kAntiDceK - 1)]);
+         observe_bytes(b.data(), b.size());
          sink_enc ^= b.size();
          if (!b.empty()) sink_enc ^= b[0];
       });
@@ -1507,6 +1603,7 @@ namespace {
       auto t_sink = ns_per_iter(0u, [&](std::size_t i) {
          sink_buf.clear();
          ::psio::to_pjson(vals[i & (kAntiDceK - 1)], sink_buf);
+         observe_bytes(sink_buf.data(), sink_buf.size());
          sink_sk ^= sink_buf.size();
       });
       record("encode_sink", t_sink.min_ns, t_sink.median_ns,
@@ -1531,6 +1628,7 @@ namespace {
                auto tv  =
                   ::psio::view<T, ::psio::pjson_format>::from_pjson(raw);
                T native = tv.to_struct();
+               observe_value(native);
                sink_dec ^= bench_view_target(native);
             } catch (...) {
                had_throw = true;
@@ -1585,6 +1683,33 @@ namespace {
       }
    }
 
+   //  PSIO_BENCH_FORMATS / PSIO_BENCH_SHAPES: comma-separated names to
+   //  run (default: all). With either set, the compression block is
+   //  skipped — a focused run for comparing two formats on a few shapes.
+   inline bool bench_selected(const char* env_name, const std::string& name)
+   {
+      const char* env = std::getenv(env_name);
+      if (!env || !*env)
+         return true;
+      std::string_view list{env};
+      while (!list.empty())
+      {
+         const auto comma = list.find(',');
+         if (list.substr(0, comma) == name)
+            return true;
+         if (comma == std::string_view::npos)
+            break;
+         list.remove_prefix(comma + 1);
+      }
+      return false;
+   }
+   inline bool bench_filtered()
+   {
+      const char* f = std::getenv("PSIO_BENCH_FORMATS");
+      const char* s = std::getenv("PSIO_BENCH_SHAPES");
+      return (f && *f) || (s && *s);
+   }
+
    //  Run all psio formats against one shape value.  Each cell is
    //  gated by fmt_supports<Fmt, T> so unsupported pairs are skipped
    //  rather than triggering a static_assert at compile time.
@@ -1593,9 +1718,12 @@ namespace {
                   const std::string&         shape_name,
                   const T&                   v)
    {
+      if (!bench_selected("PSIO_BENCH_SHAPES", shape_name))
+         return;
       auto cell = [&]<typename Fmt>(const std::string& fmt_name, Fmt fmt) {
          if constexpr (fmt_supports<Fmt, T>::value)
-            bench_psio_cell(out, shape_name, fmt_name, fmt, v);
+            if (bench_selected("PSIO_BENCH_FORMATS", fmt_name))
+               bench_psio_cell(out, shape_name, fmt_name, fmt, v);
       };
       cell("ssz",      psio::ssz{});
       cell("pssz",     psio::pssz{});
@@ -1622,7 +1750,11 @@ namespace {
       // pjson — psio's tagged-binary self-describing format.  Has its
       // own from_struct / to_struct API (NOT the encode/decode CPO),
       // so it gets a dedicated cell rather than going through `cell()`.
-      bench_pjson_cell(out, shape_name, v);
+      if (bench_selected("PSIO_BENCH_FORMATS", "pjson"))
+         bench_pjson_cell(out, shape_name, v);
+      // The canonical external libraries run in a full run only.
+      if (std::getenv("PSIO_BENCH_FORMATS") && *std::getenv("PSIO_BENCH_FORMATS"))
+         return;
 
 #ifdef PSIO_HAVE_MSGPACK
       bench_msgpack_cxx_cell(out, shape_name, v);
@@ -1718,7 +1850,8 @@ int main(int argc, char** argv)
    // two decompress timings (lz4, zstd) per format.  Driven from
    // compress_bench.hpp so the existing per-format cells above stay
    // unmodified.
-   psio_bench::compress::run_compress_block(rows);
+   if (!bench_filtered())
+      psio_bench::compress::run_compress_block(rows);
 
    // Where to write the snapshot.  Default: bench_snapshots/.  Caller
    // can override via PSIO_BENCH_SNAPSHOT_DIR or argv[1].

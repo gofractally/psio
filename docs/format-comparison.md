@@ -27,9 +27,10 @@ The single sentence summary across both views: **zero-copy views
 and O(1) random access require an offset table with fixed-width
 slots, and that table is what costs the few bytes that varint
 formats save.** pssz's bet is that the access-pattern properties
-are worth more than those bytes — and the geomean confirms that
-bet across every dimension we measure (no format below 1.00
-cumulative).
+are worth more than those bytes. §2 measures what it costs: the
+varint formats are 3–16× slower to decode, while the fixed-layout
+formats that give up extensibility (ssz, borsh, bincode) are
+currently 10–20% faster than pssz on encode and decode.
 
 ## 1 Property checklist
 
@@ -174,76 +175,136 @@ prioritizes.
 
 ## 2 Quantitative comparison: geomean ratio vs pssz
 
-The numbers below come from the `psio_bench_vs_externals` snapshot
-(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`). For every cell
-(format × shape × operation), the ratio is computed as
-`format_value / pssz_value`. Cells smaller than 1.00 mean the format
-beats pssz on that cell; cells larger than 1.00 mean pssz wins.
-Per-format aggregates use the **geometric mean** of those ratios —
-magnitude-aware (a 100× outlier counts as 100×, not as one rank
-position) and scale-invariant (combining nanosecond cells with byte
-cells in the same pool is well-defined because every entry is a
-dimensionless ratio).
+The numbers below are measured: three full runs of
+`psio_bench_vs_externals` on 2026-11-22 at commit `fe42696` (Apple
+M-series, Homebrew clang 22.1, `-O3 -DNDEBUG`), each cell the **median
+over the three runs** of the run's best-of-7 time. For every cell
+(format × shape × operation) the ratio is `format_value / pssz_value`:
+below 1.00 the format beats pssz on that cell, above 1.00 pssz wins.
+Per-format figures are the **geometric mean** of those ratios over the
+20 shapes.
 
-The "Cumulative" column is the geomean across **all** (size, encode,
-decode, validate, view) cells — the single number that summarizes
-"how much work does this format ask for relative to pssz, on
-average". Lower is better; **1.00 means tied with pssz**.
+The "Cumulative" column is the geomean across all cells of the row. It
+mixes bytes and nanoseconds and weighs a validator that checks little
+the same as one that checks everything (see the caveats): read the
+columns, not the total.
 
-| Format    | size  | encode | decode | validate | view  | **Cumulative** |
-|-----------|------:|-------:|-------:|---------:|------:|---------------:|
-| **pssz**  |**1.00**| **1.00** | **1.00** | **1.00** | **1.00** | **1.00**     |
-| ssz       |  0.99 |   1.68 |   1.02 |   1.02   |  0.95 |  **1.10**      |
-| fracpack  |  1.08 |   2.33 |   0.94 |   1.99   |  —    |  **1.48**      |
-| wit       |  1.10 |   7.02 |   1.09 |   2.15   |  1.11 |  **1.82**      |
-| borsh     |  0.96 |   2.39 |   0.96 |   6.52   |  —    |  **1.95**      |
-| bincode   |  1.04 |   2.38 |   0.95 |   6.56   |  —    |  **1.98**      |
-| bin       |  0.94 |   5.35 |   1.15 |   4.00   |  —    |  **2.19**      |
-| flatbuf   |  1.73 |  57.28 |   1.23 |   8.45   |  2.29 |  **5.13**      |
-| avro      |  0.56 |  29.06 |   4.10 |  20.03   |  —    |  **6.05**      |
-| msgpack   |  0.61 |  33.38 |  18.67 |  28.76   |  —    | **10.23**      |
-| capnp     |  1.59 |  81.96 |   5.38 |   6.12   | 47.57 | **10.55**      |
-| protobuf  |  0.65 |  43.40 |   6.36 |  48.01   |  —    | **12.64**      |
-| bson      |  2.29 |  34.94 |   9.42 |  37.94   |  —    | **13.00**      |
-| pjson     |  1.45 |  48.33 |   8.18 |  42.08   | 32.80 | **15.40**      |
-| json      |  2.21 | 218.56 |  52.90 | 117.45   |  —    | **41.61**      |
+| Format | size | encode (new buffer) | encode (reused buffer) | decode | validate | view | **Cumulative** |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| ssz | 0.99 | 0.91 | 0.85 | 0.87 | 0.15 | 0.75 | **0.65** |
+| wit | 1.10 | 1.15 | — | 0.99 | 0.34 | 0.94 | **0.83** |
+| bin | 0.94 | 1.02 | 1.00 | 0.99 | 0.33 | — | **0.84** |
+| borsh | 0.96 | 0.89 | 0.83 | 0.82 | 1.04 | — | **0.90** |
+| bincode | 1.04 | 0.88 | 0.83 | 0.81 | 1.03 | — | **0.91** |
+| **pssz** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** | **1.00** |
+| fracpack | 1.11 | 0.92 | 0.97 | 1.06 | 4.51 | — | **1.36** |
+| flatbuf | 1.73 | 4.28 | 5.06 | 1.51 | 1.38 | 1.87 | **2.16** |
+| avro | 0.56 | 2.75 | 4.18 | 3.87 | 3.14 | — | **2.39** |
+| msgpack | 0.61 | 3.22 | 2.29 | 16.24 | 4.52 | — | **3.19** |
+| protobuf | 0.65 | 3.35 | 3.34 | 5.89 | 7.48 | — | **3.57** |
+| capnp | 1.59 | 5.92 | — | 5.42 | 0.99 | 38.29 | **3.67** |
+| pjson | 1.45 | 4.61 | 6.67 | 8.38 | 6.81 | 28.80 | **6.33** |
+| bson | 2.29 | 8.51 | 12.08 | 8.22 | 6.01 | — | **6.50** |
+| json | 2.21 | 4.97 | — | 28.93 | 30.96 | — | **9.96** |
 
-Anchor: `/tmp/psio_bench_snap_xx/perf_20260501T081915Z_4b7ae98.csv`
-(Apple M-series, llvm-clang 22.1, `-O3 -DNDEBUG`). fracpack now
-covers all bench shapes — the previously-gated `vector<variable-
-element>` shapes (Order, OrderBounded, OrderDwnc, plus the realistic
-shapes in §3) now encode via the ported psio1 offset-table walker.
+**Caveats — read these before quoting a number.**
 
-For the four formats with canonical external libraries
-(`msgpack-cxx`, `libcapnp`, `libflatbuffers`, `libprotobuf`) the
-table reports the canonical-library numbers for size / encode /
-decode / view — that's the honest "what does this format cost in
-the real world" framing, since production callers link the
-canonical library, not psio's in-tree implementation. The
-validate column always reports psio's impl because the canonical
-libraries don't expose a comparable structural-validate entry
-point. The remaining rows (ssz / fracpack / wit / borsh / bincode
-/ bin / avro / bson / pjson / json) are psio's implementations
-because no widely-used canonical C++ library exists for them.
+- **Load.** The machine was shared with other builds while the runs
+  were made (1-minute load average 8–30 on a 14-core machine). Between
+  the three runs a pssz or fracpack cell moved by 13% at the median and
+  by 37% at the 90th percentile. Differences under about 15% in this
+  table are not established; rerun on an idle machine before relying on
+  them.
+- **Validators do not check the same things.** pssz and borsh check
+  every `bool` byte of every element; `ssz` and `bin` validate a list of
+  fixed-size records by its byte count alone (ValidatorList(100): ssz
+  1 ns, bin 12 ns, pssz 288 ns, borsh 561 ns), and so did fracpack until
+  `ecb8126`, which is why it no longer looks twice as fast as it is
+  (its per-element walk is now the slow one: 1 851 ns). The `validate`
+  column therefore rewards checking less. `bin`'s validator also rejects
+  its own encoding of six shapes (DWNC records with variable members,
+  "bin: trailing bytes"); those cells are excluded, and the benchmark no
+  longer records a validate cell whose validator rejects the input.
+- **What a cell observes.** Before `fe42696`'s companion change to the
+  benchmark, an encode cell observed only the size and first byte of its
+  output and a decode cell one scalar of the decoded value, and the
+  compiler elided the rest: fixed-shape cells measured under 1 ns for
+  work they did not do. Every timed body now hands its whole output —
+  the encoded buffer, the decoded value and everything it points to — to
+  a barrier the optimiser must assume reads it, and every input is
+  laundered so it is not a compile-time constant; before timing, each
+  input is decoded and compared with the value it encodes. Cells under
+  1 ns remain, and are real: decoding an 8- or 16-byte fixed record is
+  one load and one store (0.5 ns), validating one is a length compare,
+  and `size_of` of a fixed-size type is a constant.
+- **Canonical libraries.** For msgpack, protobuf, flatbuf and capnp the
+  size / encode / decode / view figures are those of the canonical C++
+  library (msgpack-cxx, libprotobuf, libflatbuffers, libcapnp), which is
+  what a production user links; `validate` is always psio's
+  implementation. `—` means the format has no such operation here (no
+  reusable-buffer encoder, no zero-copy view).
+- **Encode has two columns.** "new buffer" returns a fresh
+  `std::vector` per call (allocation included); "reused buffer" appends
+  to one the caller keeps. The earlier table had one encode column.
+- The numbers that this table replaces (fracpack: encode 2.33, decode
+  0.94, validate 1.99; every other row likewise) came from the old
+  harness and are not reproducible. §1's per-cell prose still quotes
+  ratios from that snapshot; where it disagrees with this table, this
+  table is the measurement.
 
-Anti-DCE: 16-buffer rotation, `volatile` sink, `do_not_optimize`
-clobber, and the bench's `vary()` perturbation reads the same
-scalar `bench_view_target()` reads (see fix in commit `30d62b2`,
-cherry-picked to main as `d620ba2`). Per-shape cells either scale
-with input size or — for `size_of` / `view_one` on fully-fixed
-types — land at loop-overhead floor (~0.23–0.34 ns), which is
-the architecturally honest answer for a constexpr-foldable op.
+### pssz and fracpack, shape by shape
 
-(— in the view column means the format has no zero-copy view path
-and thus no view_one cell to compare; it doesn't help or hurt the
-cumulative, which only averages cells the format participates in.)
+fracpack time / pssz time (above 1.00 pssz is faster), and pssz's
+absolute times:
+
+| shape | size | encode (new) | encode (reused) | decode | validate | pssz ns: enc new / enc reused / dec / val |
+|---|---:|---:|---:|---:|---:|---|
+| Point | 1.00 | 1.04 | 1.58 | 0.91 | 12.88 | 9.2 / 1.6 / 0.5 / 0.4 |
+| NameRecord | 1.00 | 1.00 | 0.99 | 1.00 | 11.50 | 8.9 / 2.6 / 0.5 / 0.4 |
+| FlatRecord | 1.17 | 0.82 | 0.76 | 1.29 | 2.77 | 22.6 / 10.2 / 18.7 / 6.4 |
+| Record | 1.14 | 0.86 | 0.67 | 1.51 | 3.53 | 26.2 / 13.2 / 21.3 / 9.9 |
+| Validator | 1.00 | 0.96 | 1.03 | 1.01 | 7.89 | 10.2 / 3.5 / 1.1 / 2.5 |
+| Order | 1.09 | 0.78 | 1.05 | 1.32 | 2.56 | 38.2 / 28.3 / 51.8 / 35.6 |
+| ValidatorList(100) | 1.00 | 0.96 | 1.09 | 0.92 | 6.44 | 198.5 / 163.6 / 119.7 / 287.7 |
+| FlatRecordBounded | 1.29 | 0.89 | 0.84 | 1.35 | 2.15 | 22.0 / 10.4 / 20.5 / 8.4 |
+| RecordBounded | 1.30 | 0.83 | 0.63 | 1.61 | 2.94 | 24.9 / 16.8 / 20.3 / 11.4 |
+| OrderBounded | 1.29 | 0.55 | 0.66 | 1.39 | 2.17 | 55.1 / 47.0 / 53.0 / 43.0 |
+| ValidatorListBounded(100) | 1.00 | 1.08 | 0.94 | 0.98 | 6.68 | 169.7 / 162.8 / 104.4 / 266.0 |
+| FlatRecordDwnc | 1.25 | 0.91 | 0.78 | 1.38 | 3.47 | 19.8 / 9.4 / 16.3 / 4.8 |
+| RecordDwnc | 1.21 | 1.04 | 1.09 | 1.73 | 4.60 | 19.6 / 8.6 / 16.3 / 6.8 |
+| OrderDwnc | 1.15 | 0.81 | 1.11 | 1.37 | 2.76 | 36.6 / 26.5 / 51.2 / 33.4 |
+| ValidatorListDwnc(100) | 1.00 | 1.05 | 1.11 | 1.02 | 6.78 | 190.8 / 174.1 / 133.7 / 291.7 |
+| Deep4Ext | 1.41 | 0.95 | 1.53 | 0.17 | 2.32 | 11.8 / 2.7 / 6.8 / 18.6 |
+| Deep4Dwnc | 1.00 | 0.95 | 0.93 | 0.93 | 4.43 | 11.7 / 2.9 / 0.7 / 4.2 |
+| MlEmbedding | 1.01 | 0.97 | 1.05 | 0.98 | 12.05 | 23.4 / 8.1 / 16.6 / 0.6 |
+| BlobPayload | 1.01 | 1.06 | 1.04 | 0.89 | 12.68 | 18.6 / 7.4 / 14.9 / 0.5 |
+| WideRecord | 1.00 | 1.04 | 1.01 | 1.05 | 1.48 | 12.3 / 4.8 / 1.8 / 51.9 |
+
+Geomean, fracpack / pssz: size 1.11, encode into a new buffer 0.92,
+encode into a reused buffer 0.97, decode 1.06, validate 4.51. pssz is
+smaller and decodes and validates faster; **fracpack still encodes the
+record-with-strings shapes faster** (Record 0.67, RecordBounded 0.63,
+OrderBounded 0.55–0.66). The cause is known and is not the wire format:
+pssz's sizing pass. `size_of` on Order costs pssz 15 ns and fracpack
+2.4 ns, more than pssz's whole write pass (14 ns); it re-checks offset
+and size overflow per field through a run-time "report or throw"
+pointer. Decode was the other gap (Order 102 ns against fracpack's 68)
+until `fe42696`, which made the typed record-frame parser a
+type-specialised inline and removed a per-list heap allocation (now
+52 ns).
 
 How to read the table:
 
-- **pssz wins cumulative.** No format is below 1.00 in the
-  Cumulative column. ssz comes closest (1.13) but pays 76% extra
-  on encode. Every format that beats pssz on size pays 30×–222×
-  on encode and 4×–53× on decode.
+- **pssz does not win every column.** On the measured cells the
+  fixed-layout formats without extensibility — ssz, borsh, bincode —
+  encode 9–17% faster and decode 13–19% faster than pssz, and bin and
+  wit are level with it; pssz's own sizing pass is the encode cost
+  (see the fracpack comparison above). The rows below 1.00 in
+  "Cumulative" (ssz, wit, bin, borsh, bincode) get there partly on
+  those cells and, for ssz, wit and bin, largely through a `validate`
+  that checks less than pssz's. What pssz has that none of those five
+  have together is in §1: extensibility with pruning, per-type offset
+  widths, zero-copy views and full validation.
 
 - **Size wins are architecturally bought from access-pattern
   losses.** The varint cluster (avro 0.56, msgpack 0.61, protobuf
@@ -263,23 +324,24 @@ How to read the table:
   cost via adaptive width per type.
 
 - **The "size cluster with pssz"** — ssz, bin, borsh, bincode,
-  fracpack, wit. All within ±10% of pssz on size; differentiator is
-  encode latency where pssz's single-pass-with-backpatching wins.
-  ssz lacks extensibility + trailing-pruning + DWNC fast path; bin/
-  borsh/bincode lack random access.
+  fracpack, wit. All within about ±10% of pssz on size, and within
+  about ±20% of it on encode and decode: at this distance the order
+  among them is decided by implementation detail (and, on this run, by
+  machine load), not by the format. ssz lacks extensibility,
+  trailing-pruning and the DWNC fast path; bin / borsh / bincode lack
+  random access.
 
-- **The schema-tooled formats** — capnp and flatbuf. Have zero-copy
-  views and extensibility, BUT pay both more size (1.59–1.73×) and
-  much more encode time (56–78×) for the cross-language IDL+codegen
-  tooling that pssz today doesn't match (capnp/flatbuf have decades
-  of compiler pipelines in many languages).
+- **The schema-tooled formats** — capnp and flatbuf. They have
+  zero-copy views and extensibility, and pay more size (1.59–1.73×)
+  and more encode time (4–6×) through their canonical libraries, whose
+  builders allocate and copy; capnp's reader set-up makes its
+  single-field view 38× pssz's.
 
-- **The self-describing formats** — pjson, json, bson. Different
-  use case (no schema needed at decode); cost shows in the
-  cumulative. The pjson row is interesting because pjson DOES have
-  zero-copy random access (slot table at the end of each object),
-  unlike json/bson — but it's still ~16× pssz cumulatively because
-  self-describing data carries the schema in the bytes.
+- **The self-describing formats** — pjson, json, bson. A different
+  use case (no schema needed at decode); the cost shows in every
+  column: 5–9× on encode, 8–29× on decode. pjson does have zero-copy
+  random access (a slot table at the end of each object), unlike json
+  and bson.
 
 ## 3 Compressed wire size
 
