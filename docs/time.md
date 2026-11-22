@@ -45,7 +45,7 @@ refuses to register one), and it is presented also when every custom id is
 required to have a handler. The spellings `time-point` and `duration`, alone
 or followed by `-`, are reserved: a reserved id that is not a time id as
 defined above, or a time id over anything but an 8, 16, 32 or 64-bit `Int`
-(looked up through aliases and `box`), is a malformed schema and is refused
+(directly, or through named aliases), is a malformed schema and is refused
 by every schema-driven entry point.
 
 In an evolution check a time value is its own type: an integer and a time

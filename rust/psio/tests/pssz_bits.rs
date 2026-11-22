@@ -158,7 +158,14 @@ fn packed_bits_are_atomic_nodes_at_depth_64() {
 fn exact_shared_bits_fixture_values_roundtrip_with_actual_ir() {
     use psio::pssz::{dynamic as codec, schema_ir::*};
     fn case<F: PsszFormat>(row: serde_json::Value) {
-        let schema: Schema = serde_json::from_value(row["schema"].clone()).unwrap();
+        let mut schema: Schema = serde_json::from_value(row["schema"].clone()).unwrap();
+        // The fixture was recorded before the IR was versioned: its schemas
+        // carry no marker and are refused as they are. They hold bit types
+        // only, whose meaning version 1 did not change, so the reader states
+        // the version itself.
+        assert_eq!(schema.ir_version, None, "{}", row["name"]);
+        assert!(codec::auto_width(&schema, &AnyType::named("@0")).is_err(), "{}", row["name"]);
+        schema.ir_version = Some(IR_VERSION);
         let root: AnyType = serde_json::from_value(row["root_schema"].clone()).unwrap();
         let bytes = hex::decode(row["hex"].as_str().unwrap()).unwrap();
         let decoded = codec::decode_exact::<F>(&schema, &root, &bytes);

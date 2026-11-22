@@ -719,6 +719,69 @@ template <std::size_t W> class Codec
    // The type `input` is on the wire: named aliases followed, and the nodes
    // that add nothing to the bytes (Enum, Custom ids that are not part of
    // the binary form) looked through. `boxed` reports a "box" on the way.
+   // The schema says which version of the IR it is written in, and it is
+   // the one this codec reads (schema_ir.hpp, schema_ir_version).
+   codec_status ir_version() const
+   {
+      if (!schema.ir_version)
+         return fail("pssz IR: schema has no ir_version marker (it predates the box / utf8 "
+                     "markers and would derive different widths); regenerate it");
+      if (*schema.ir_version != schema_types::schema_ir_version)
+         return fail("pssz IR: schema ir_version is newer than this library");
+      return codec_ok();
+   }
+   // `input` with named aliases followed, and nothing else.
+   codec_status alias(const schema_types::AnyType &input, const schema_types::AnyType *&out) const
+   {
+      out = &input;
+      for (std::size_t hops = 0; hops <= schema.types.size(); ++hops)
+      {
+         auto ref = std::get_if<schema_types::Type>(&out->value);
+         if (!ref)
+            return codec_ok();
+         const schema_types::AnyType *found = nullptr;
+         for (const auto &member : schema.types)
+            if (member.name == ref->type)
+            {
+               if (found)
+                  return fail("pssz IR: duplicate named type");
+               found = member.type.get();
+            }
+         if (!found)
+            return fail("pssz IR: unresolved named type");
+         out = found;
+      }
+      return fail("pssz IR: cyclic named aliases");
+   }
+   // The type an adapter (a Custom id with a binary meaning, a time id) or
+   // an Enum sits on: found through named aliases only. A wrapper in that
+   // place (an Enum, a "box", a text presentation) is a malformed schema in
+   // every language, not something to look through.
+   codec_status direct(const schema_types::AnyType &input, const schema_types::AnyType *&out) const
+   {
+      PSIO_PSSZ_IR_TRY(alias(input, out));
+      auto custom = std::get_if<schema_types::Custom>(&out->value);
+      if (std::holds_alternative<schema_types::Enum>(out->value) ||
+          (custom && !wire_custom_id(custom->id)))
+         return fail("pssz IR: an adapter or enum must sit directly on its wire type");
+      return codec_ok();
+   }
+   codec_status direct(const schema_types::Box<schema_types::AnyType> &box,
+                       const schema_types::AnyType *&out) const
+   {
+      if (!box.get())
+         return fail("pssz IR: null schema box");
+      return direct(*box, out);
+   }
+   codec_status enum_underlying(const schema_types::Enum &named) const
+   {
+      const schema_types::AnyType *under;
+      PSIO_PSSZ_IR_TRY(direct(named.type, under));
+      // Any integer the codec has; text needs 8 to 64 bits (pssz_ir_json.hpp).
+      if (!std::holds_alternative<schema_types::Int>(under->value))
+         return fail("pssz IR: an enum needs an underlying integer");
+      return codec_ok();
+   }
    codec_status resolve(const schema_types::AnyType &input, const schema_types::AnyType *&out,
                         bool *boxed = nullptr) const
    {
@@ -730,8 +793,7 @@ template <std::size_t W> class Codec
          // An Enum is its underlying integer on the wire.
          if (auto named = std::get_if<schema_types::Enum>(&out->value))
          {
-            if (!named->type.get())
-               return fail("pssz IR: null schema box");
+            PSIO_PSSZ_IR_TRY(enum_underlying(*named));
             out = named->type.get();
             continue;
          }
@@ -772,7 +834,7 @@ template <std::size_t W> class Codec
    codec_status time_ticks(const schema_types::AnyType &inner_type) const
    {
       const schema_types::AnyType *ticks;
-      PSIO_PSSZ_IR_TRY(resolve(inner_type, ticks));
+      PSIO_PSSZ_IR_TRY(direct(inner_type, ticks));
       auto integer = std::get_if<schema_types::Int>(&ticks->value);
       if (!integer || (integer->bits != 8 && integer->bits != 16 && integer->bits != 32 &&
                        integer->bits != 64))
@@ -841,7 +903,7 @@ template <std::size_t W> class Codec
    codec_status primitive_adapter(const schema_types::Custom &custom, std::uint32_t bits) const
    {
       const schema_types::AnyType *type;
-      PSIO_PSSZ_IR_TRY(inner(custom.type, type));
+      PSIO_PSSZ_IR_TRY(direct(custom.type, type));
       auto integer = std::get_if<schema_types::Int>(&type->value);
       return integer && integer->bits == bits && !integer->isSigned
                  ? codec_ok()
@@ -850,7 +912,7 @@ template <std::size_t W> class Codec
    codec_status bit_shape(const schema_types::Custom &custom, std::size_t &count, bool &list) const
    {
       const schema_types::AnyType *container;
-      PSIO_PSSZ_IR_TRY(inner(custom.type, container));
+      PSIO_PSSZ_IR_TRY(direct(custom.type, container));
       const schema_types::AnyType *element;
       std::uint64_t bound;
       if (custom.id == "bitvector")
@@ -858,7 +920,7 @@ template <std::size_t W> class Codec
          auto array = std::get_if<schema_types::Array>(&container->value);
          if (!array)
             return fail("pssz IR: bitvector requires array bit metadata");
-         PSIO_PSSZ_IR_TRY(inner(array->type, element));
+         PSIO_PSSZ_IR_TRY(direct(array->type, element));
          bound = array->len;
          list = false;
       }
@@ -867,7 +929,7 @@ template <std::size_t W> class Codec
          auto bounded = std::get_if<schema_types::BoundedList>(&container->value);
          if (custom.id != "bitlist" || !bounded)
             return fail("pssz IR: bitlist requires bounded bit metadata");
-         PSIO_PSSZ_IR_TRY(inner(bounded->type, element));
+         PSIO_PSSZ_IR_TRY(direct(bounded->type, element));
          bound = bounded->maxCount;
          list = true;
       }
@@ -1070,21 +1132,21 @@ template <std::size_t W> class Codec
                             bool check_count = true) const
    {
       const schema_types::AnyType *type;
-      PSIO_PSSZ_IR_TRY(resolve(input, type));
+      PSIO_PSSZ_IR_TRY(direct(input, type));
       const schema_types::AnyType *element = nullptr;
       if (auto list = std::get_if<schema_types::List>(&type->value))
-         PSIO_PSSZ_IR_TRY(inner(list->type, element));
+         PSIO_PSSZ_IR_TRY(direct(list->type, element));
       else if (auto list = std::get_if<schema_types::BoundedList>(&type->value))
       {
          if (check_count && count > list->maxCount)
             return fail("pssz IR: byte count bound exceeded");
-         PSIO_PSSZ_IR_TRY(inner(list->type, element));
+         PSIO_PSSZ_IR_TRY(direct(list->type, element));
       }
       else if (auto array = std::get_if<schema_types::Array>(&type->value))
       {
          if (check_count && count != array->len)
             return fail("pssz IR: byte array count mismatch");
-         PSIO_PSSZ_IR_TRY(inner(array->type, element));
+         PSIO_PSSZ_IR_TRY(direct(array->type, element));
       }
       else
          return fail("pssz IR: byte adapter requires byte container");
@@ -1343,6 +1405,7 @@ template <std::size_t W> class Codec
 
    codec_status metadata(const schema_types::AnyType &root) const
    {
+      PSIO_PSSZ_IR_TRY(ir_version());
       std::vector<const schema_types::AnyType *> pending{&root}, seen;
       while (!pending.empty())
       {
@@ -1410,9 +1473,9 @@ template <std::size_t W> class Codec
                    }
                    else if (byte_adapter_id(t.id))
                    {
-                      const schema_types::AnyType *child;
-                      PSIO_PSSZ_IR_TRY(inner(t.type, child));
-                      PSIO_PSSZ_IR_TRY(bound_bytes(*child, 0, false));
+                      if (!t.type.get())
+                         return fail("pssz IR: null schema box");
+                      PSIO_PSSZ_IR_TRY(bound_bytes(*t.type, 0, false));
                    }
                    else
                       return fail("pssz IR: unsupported custom adapter");

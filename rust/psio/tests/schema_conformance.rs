@@ -51,12 +51,32 @@ struct JsonRow {
     plain_ijson: Option<String>,
 }
 
+/// A schema every schema-driven entry point refuses, whatever the bytes.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SchemaRejectRow {
+    name: String,
+    schema_ir: String,
+    root: String,
+}
+/// A well-formed neighbour of the rejected schemas, with one value.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct SchemaAcceptRow {
+    name: String,
+    schema_ir: String,
+    root: String,
+    pssz: String,
+    json: String,
+    ijson: String,
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct JsonFixture {
     version: u32,
     schema_ir: String,
     types: Vec<TypeRow>,
     vectors: Vec<JsonRow>,
+    schema_rejects: Vec<SchemaRejectRow>,
+    schema_accepts: Vec<SchemaAcceptRow>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -627,4 +647,102 @@ fn the_schema_driven_entry_points_are_checked() {
     let shallow = format!("{}{}", "{\"children\":[".repeat(20), "]}".repeat(20));
     let bytes = dynamic::json_to_pssz::<Json>(&schema, &tree, shallow.as_bytes()).unwrap();
     assert_eq!(dynamic::pssz_to_json::<Json>(&schema, &tree, &bytes).unwrap().0, shallow);
+}
+
+/// Malformed schemas: all three languages refuse the same ones, with an
+/// error, at every schema-driven entry point; their well-formed neighbours
+/// work. (C++ schema_conformance_tests.cpp, JS pssz-conformance.test.ts.)
+#[test]
+fn malformed_schemas_are_refused_and_their_neighbours_accepted() {
+    let fx: JsonFixture = load("json-vectors.json");
+    assert!(fx.schema_rejects.len() >= 25, "{}", fx.schema_rejects.len());
+    assert!(fx.schema_accepts.len() >= 8, "{}", fx.schema_accepts.len());
+    let mut names = BTreeSet::new();
+    for row in &fx.schema_rejects {
+        let name = &row.name;
+        assert!(names.insert(name.clone()), "{name}: duplicate");
+        // The IR itself is a valid `Schema` value: it is its meaning that is refused.
+        let schema = schema_of(&row.schema_ir);
+        let root = AnyType::named(row.root.clone());
+        assert!(dynamic::auto_width(&schema, &root).is_err(), "{name}: auto_width");
+        for bytes in [&[][..], &[0u8][..], &[0u8; 4][..], &[0u8; 8][..]] {
+            assert!(dynamic::validate_pssz(&schema, &root, bytes).is_err(), "{name}: validate");
+            assert!(dynamic::decode_exact::<Pssz32>(&schema, &root, bytes).is_err(), "{name}: pssz32");
+            assert!(dynamic::pssz_to_json::<Json>(&schema, &root, bytes).is_err(), "{name}: to json");
+        }
+        for text in ["0", "\"\"", "null", "[]", "{}", "false"] {
+            assert!(dynamic::json_to_pssz::<Json>(&schema, &root, text.as_bytes()).is_err(), "{name}: {text}");
+            assert!(dynamic::json_to_pssz::<IJson>(&schema, &root, text.as_bytes()).is_err(), "{name}: {text}");
+            assert!(dynamic::json_to_value::<IJson>(&schema, &root, text.as_bytes()).is_err(), "{name}: {text}");
+        }
+        assert!(
+            psio::pssz::upgrade::validate_optional_upgrade(&schema, &root, &schema, &root).is_err(),
+            "{name}: upgrade"
+        );
+    }
+    for row in &fx.schema_accepts {
+        let name = &row.name;
+        assert!(names.insert(name.clone()), "{name}: duplicate");
+        let schema = schema_of(&row.schema_ir);
+        let root = AnyType::named(row.root.clone());
+        let bytes = from_hex(&row.pssz);
+        assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false), "{name}");
+        assert_eq!(dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap().0, row.json, "{name}");
+        assert_eq!(dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes).unwrap().0, row.ijson, "{name}");
+        assert_eq!(dynamic::json_to_pssz::<Json>(&schema, &root, row.json.as_bytes()).unwrap(), bytes, "{name}");
+        assert_eq!(dynamic::json_to_pssz::<IJson>(&schema, &root, row.ijson.as_bytes()).unwrap(), bytes, "{name}");
+        assert!(dynamic::auto_width(&schema, &root).is_ok(), "{name}");
+    }
+}
+
+/// The IR root says which version of the IR it is written in; a schema
+/// without the marker still decodes (the field was appended) and is refused
+/// by the codecs with an error that says why.
+#[test]
+fn the_ir_version_marker_is_required_and_backward_compatible() {
+    use psio::pssz::schema_ir::IR_VERSION;
+    let fx: JsonFixture = load("json-vectors.json");
+    let current = schema_of(&fx.schema_ir);
+    assert_eq!(current.ir_version, Some(IR_VERSION));
+    assert_eq!(Schema::default().ir_version, Some(IR_VERSION));
+
+    // The same schema as it was written before the marker existed: the
+    // bytes are a prefix-compatible encoding, and decode with no version.
+    let mut old = current.clone();
+    old.ir_version = None;
+    let old_bytes = psio::pssz::try_to_pssz::<Pssz, Schema>(&old).unwrap();
+    let new_bytes = from_hex(&fx.schema_ir);
+    assert_ne!(old_bytes, new_bytes);
+    pssz_validate::<Pssz, Schema>(&old_bytes).expect("an unversioned schema is still a Schema");
+    let decoded = from_pssz::<Pssz, Schema>(&old_bytes).unwrap();
+    assert_eq!(decoded.ir_version, None);
+    assert_eq!(decoded.types, current.types);
+    // JSON without the member reads the same way.
+    let text = serde_json::to_string(&old).unwrap().replace(",\"ir_version\":null", "");
+    assert!(!text.contains("ir_version"));
+    assert_eq!(serde_json::from_str::<Schema>(&text).unwrap().ir_version, None);
+
+    let some_type = fx.types.iter().find(|t| t.ir && t.pssz == Some(true)).expect("a type");
+    let root = AnyType::named(some_type.id.clone());
+    assert!(dynamic::auto_width(&current, &root).is_ok());
+    for (schema, what) in [
+        (decoded, "no ir_version marker"),
+        (Schema { ir_version: Some(IR_VERSION + 1), ..current.clone() }, "newer than this library"),
+        (Schema { ir_version: Some(0), ..current.clone() }, "newer than this library"),
+    ] {
+        let failures = [
+            dynamic::auto_width(&schema, &root).err(),
+            dynamic::validate(&schema, &root, &[]).err(),
+            dynamic::encode::<Pssz>(&schema, &root, &dynamic::Value::Bool(true)).err(),
+            dynamic::decode_exact::<Pssz8>(&schema, &root, &[]).err(),
+            dynamic::layout::<Pssz>(&schema, &root).err(),
+            psio::pssz::upgrade::validate_optional_upgrade(&schema, &root, &schema, &root).err(),
+        ];
+        for failure in failures {
+            let failure = failure.expect("refused");
+            assert!(failure.0.contains(what), "{} / {what}", failure.0);
+        }
+        let text = dynamic::json_to_pssz::<Json>(&schema, &root, b"0").unwrap_err();
+        assert!(text.to_string().contains(what), "{text}");
+    }
 }

@@ -99,12 +99,42 @@ export interface IrSchema {
   worlds: unknown[];
   uses: unknown[];
   types: IrMember[];
+  /**
+   * The version of the IR's meaning the schema was written in
+   * (`IR_VERSION`), or `null` for a schema written before the marker
+   * existed. The field was appended to the record: older schemas decode.
+   */
+  ir_version: number | null;
 }
 
 /**
- * The compact spelling of a type (the shape `schema.ts` `AnyType` uses, plus
- * `BoundedList` and attributes). Accepted wherever a type is expected and
+ * The version of the IR's meaning that this library writes and reads (C++
+ * `psio::schema_ir_version`, Rust `IR_VERSION`).
+ *
+ * - 1: a boxed value is marked `Custom{.., "box"}`, a UTF-8 string is
+ *   `"utf8"` and `"string"` is a raw string.
+ *
+ * A schema with no `ir_version` predates those markers: read as version 1 it
+ * would silently derive other offset widths and return bytes for text, so
+ * `PsszSchema.type` refuses it instead of guessing.
+ */
+export const IR_VERSION = 1;
+
+/** What a schema-driven codec checks before it compiles a type. */
+export function checkIrVersion(schema: IrSchema): void {
+  if (schema.ir_version === IR_VERSION) return;
+  if (schema.ir_version === null)
+    schemaError('pssz IR: schema has no ir_version marker (it predates the box / utf8 markers and would derive different widths); regenerate it');
+  schemaError('pssz IR: schema ir_version is newer than this library');
+}
+
+/**
+ * The compact spelling of a type (`schema.ts` `AnyType` is this type, and
+ * `generateSchema` emits it). Accepted wherever a type is expected and
  * normalized to `IrAnyType`.
+ *
+ * Byte containers: `Custom` id `"utf8"` is text (a JavaScript `string`),
+ * `"string"` is a raw string and `"hex"` is bytes (both a `Uint8Array`).
  */
 export type CompactType =
   | string
@@ -138,9 +168,14 @@ export interface CompactAttribute {
   value?: string | null;
 }
 export type PsszTypeInput = IrAnyType | CompactType;
+/**
+ * A schema: the full IR (as decoded from its PSSZ / JSON form), the full
+ * form written by hand (`types` and the `ir_version` it is written in), or
+ * a map of named types, which is always in the current IR version.
+ */
 export type PsszSchemaInput =
   | IrSchema
-  | { types: CompactMember[] }
+  | { types: CompactMember[]; ir_version?: number | null }
   | { [name: string]: PsszTypeInput };
 
 function schemaError(message: string): never {
@@ -306,12 +341,20 @@ export function normalizeType(x: unknown, depth = 0): IrAnyType {
 export function normalizeSchema(x: unknown): IrSchema {
   if (!isObject(x)) return schemaError('pssz IR: malformed schema');
   let types: IrMember[];
+  // A map of named types is written here and now, in the current IR. The
+  // full form says for itself which version it is (absent: none).
+  let version: number | null = IR_VERSION;
   let pkg = { name: '', version: '', attributes: [] as IrAttribute[] };
   let rest: { interfaces: unknown[]; worlds: unknown[]; uses: unknown[] } = {
     interfaces: [], worlds: [], uses: [],
   };
   if (Array.isArray(x.types)) {
     types = x.types.map((m) => normalizeMember(m, 0));
+    const v = x.ir_version;
+    if (v === undefined || v === null) version = null;
+    else if (typeof v === 'number' && Number.isInteger(v) && v >= 0 && v <= 0xffffffff) version = v;
+    else if (typeof v === 'bigint' && v >= 0n && v <= 0xffffffffn) version = Number(v);
+    else schemaError('pssz IR: ir_version must be a 32-bit unsigned integer');
     if (isObject(x.package)) {
       pkg = {
         name: toStr(x.package.name ?? '', 'package name'),
@@ -327,7 +370,7 @@ export function normalizeSchema(x: unknown): IrSchema {
   } else {
     types = Object.keys(x).map((name) => ({ name, type: normalizeType(x[name]), attributes: [] }));
   }
-  return { package: pkg, ...rest, types };
+  return { package: pkg, ...rest, types, ir_version: version };
 }
 
 // ── UTF-8 ───────────────────────────────────────────────────────────────────
@@ -771,18 +814,15 @@ export class Codec {
     return schemaError('pssz IR: cyclic named aliases');
   }
 
-  // The type `input` is on the wire: aliases followed, and the nodes that
-  // add nothing to the bytes (Enum, "box", text presentations) looked through.
-  private wire(input: IrAnyType): IrTypeValue {
-    let out = input;
-    for (let hops = 0; hops <= 4 * this.schema.types.length + 64; ++hops) {
-      out = this.resolve(out);
-      const t = out.value;
-      if (t.type === 'Enum') out = t.value.type;
-      else if (t.type === 'Custom' && !WIRE_CUSTOM_IDS.has(t.value.id)) out = t.value.type;
-      else return t;
-    }
-    return schemaError('pssz IR: cyclic named aliases');
+  // The type an adapter (a Custom id with a binary meaning, a time id) or an
+  // Enum sits on: found through named aliases only. A wrapper in that place
+  // (an Enum, a "box", a text presentation) is a malformed schema in every
+  // language, not something to look through.
+  private direct(input: IrAnyType): IrTypeValue {
+    const t = this.resolve(input).value;
+    if (t.type === 'Enum' || (t.type === 'Custom' && !WIRE_CUSTOM_IDS.has(t.value.id)))
+      return schemaError('pssz IR: an adapter or enum must sit directly on its wire type');
+    return t;
   }
 
   /** `ref` on the wire, and whether it is a boxed value. */
@@ -831,11 +871,12 @@ export class Codec {
         // On the wire an Enum is exactly its underlying integer.
         let under: IrTypeValue | undefined;
         try {
-          under = this.wire(t.value.type);
+          under = this.direct(t.value.type);
         } catch (e) {
-          // An enum over itself has no integer under it.
-          if (!(e instanceof PsszError) || !e.message.includes('cyclic')) throw e;
+          // An enum over itself, or over a wrapper, has no integer under it.
+          if (!(e instanceof PsszError) || e.kind !== 'schema') throw e;
         }
+        // Any integer the codec has; text needs 8 to 64 bits.
         if (under?.type !== 'Int') return schemaError('pssz IR: an enum needs an underlying integer');
         const integer = strip(this.build(t.value.type, added, d)).node;
         node.kind = 'int';
@@ -913,7 +954,7 @@ export class Codec {
           // A built-in presentation: a duration / time point is its tick
           // integer on the wire, bigint ticks as a value, and has the text
           // form of docs/time.md.
-          const ticks = this.wire(t.value.type);
+          const ticks = this.direct(t.value.type);
           const bits = ticks.type === 'Int' ? ticks.value.bits : 0;
           if (ticks.type !== 'Int' || (bits !== 8 && bits !== 16 && bits !== 32 && bits !== 64))
             return schemaError('pssz IR: time value requires an 8/16/32/64-bit tick integer');
@@ -935,7 +976,7 @@ export class Codec {
           node.inner = this.build(t.value.type, added, d);
           break;
         }
-        const inner = this.wire(t.value.type);
+        const inner = this.direct(t.value.type);
         const unsignedInt = (x: IrTypeValue, bits: number) =>
           x.type === 'Int' && x.value.bits === bits && !x.value.isSigned;
         if (id === 'bool' || id === 'char') {
@@ -956,7 +997,7 @@ export class Codec {
             element = inner.value.type;
             bound = inner.value.maxCount;
           }
-          if (!unsignedInt(this.wire(element), 1))
+          if (!unsignedInt(this.direct(element), 1))
             schemaError('pssz IR: packed bit element must be unsigned one-bit integer');
           if (bound > BigInt(Number.MAX_SAFE_INTEGER))
             schemaError('pssz IR: bit count exceeds platform capacity');
@@ -965,9 +1006,9 @@ export class Codec {
         } else if (id === 'string' || id === 'utf8' || id === 'hex') {
           if (inner.type !== 'List' && inner.type !== 'BoundedList' && inner.type !== 'Array')
             return schemaError('pssz IR: byte adapter requires byte container');
-          const element = this.wire(inner.value.type);
+          const element = this.direct(inner.value.type);
           if (element.type === 'Custom' && element.value.id === 'char') {
-            if (!unsignedInt(this.wire(element.value.type), 8))
+            if (!unsignedInt(this.direct(element.value.type), 8))
               schemaError('pssz IR: primitive adapter has incompatible inner schema');
           } else if (!unsignedInt(element, 8)) schemaError('pssz IR: byte adapter requires unsigned bytes');
           // "string" is raw bytes; "utf8" is validated on every read and write.

@@ -295,6 +295,9 @@ fn schema_sample() -> Schema {
                 value: Some("named type".into()),
             }],
         }],
+        // The recorded C++ bytes were written before `ir_version` existed:
+        // the appended field is absent, and they still decode.
+        ir_version: None,
     }
 }
 

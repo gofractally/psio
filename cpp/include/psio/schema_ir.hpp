@@ -475,6 +475,23 @@ namespace psio::schema_types
    //   3. The map invariants (uniqueness, lookup) are restated as
    //      Schema::insert / Schema::get; insertion deduplicates by
    //      name so the visible behaviour matches v1.
+   //
+   // ir_version. The version of the IR's MEANING the schema is written in:
+   //
+   //   1   a boxed value is marked Custom{.., "box"}, a UTF-8 string is
+   //       "utf8" and "string" is a raw string.
+   //
+   // The field was appended to the record, so the IR's own encoding is
+   // backward compatible: a schema written before it existed decodes with
+   // no version. Such a schema predates the markers above — read as
+   // version 1 it would silently derive other offset widths and skip UTF-8
+   // validation — so every schema-driven codec (pssz_ir.hpp,
+   // pssz_ir_json.hpp, and the Rust / JS ones) refuses it with an error
+   // instead of guessing, as it refuses a version newer than its own. A
+   // Schema built in code (default-constructed, SchemaBuilder) is in the
+   // current version.
+   inline constexpr std::uint32_t schema_ir_version = 1;
+
    struct Schema
    {
       Package                package;
@@ -482,6 +499,7 @@ namespace psio::schema_types
       std::vector<World>     worlds;
       std::vector<Use>       uses;
       std::vector<Member>    types;
+      std::optional<std::uint32_t> ir_version = schema_ir_version;
 
       friend bool operator==(const Schema&, const Schema&) = default;
 
@@ -509,7 +527,7 @@ namespace psio::schema_types
                                 {}});
       }
    };
-   PSIO_REFLECT(Schema, package, interfaces, worlds, uses, types)
+   PSIO_REFLECT(Schema, package, interfaces, worlds, uses, types, ir_version)
 
    // AnyType::resolve definition lands here, after Schema is complete.
    inline const AnyType* AnyType::resolve(const Schema& schema) const
@@ -551,4 +569,5 @@ namespace psio
    // `psio::schema` (Phase-14a runtime walker) lives in psio/schema.hpp
    // — distinct artifact, distinct name.
    using schema_types::Schema;
+   using schema_types::schema_ir_version;
 }  // namespace psio

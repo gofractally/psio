@@ -71,8 +71,17 @@ fn value(
     }
 }
 fn profile<F: PsszFormat>(row: &serde_json::Value) {
-    let schema: Schema = serde_json::from_value(row["schema"].clone()).unwrap();
+    let mut schema: Schema = serde_json::from_value(row["schema"].clone()).unwrap();
     let root: AnyType = serde_json::from_value(row["root_schema"].clone()).unwrap();
+    // The fixture was recorded before the IR was versioned: its schemas
+    // carry no marker and are refused as they are. They are read under
+    // explicit widths (nothing is derived) and their only string is the raw
+    // "string" of C++ std::string, as in version 1, so the reader states the
+    // version itself.
+    assert_eq!(schema.ir_version, None, "{}", row["name"]);
+    assert!(codec::decode_exact::<F>(&schema, &root, &[])
+        .is_err_and(|e| e.0.contains("no ir_version marker")));
+    schema.ir_version = Some(psio::pssz::schema_ir::IR_VERSION);
     let bytes = hex::decode(row["hex"].as_str().unwrap()).unwrap();
     let explicit = (!row["option_value"].is_null()).then_some(&row["option_value"]);
     let expected = value(&schema, &root, &row["value"], explicit);

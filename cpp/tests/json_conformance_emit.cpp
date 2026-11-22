@@ -1202,6 +1202,202 @@ namespace
 
    std::string quoted(const std::string& s) { return psio::encode(psio::json{}, s); }
 
+   // ── Malformed schemas and their well-formed neighbours ─────────────────
+   //
+   // What is wrong with a rejected schema is its meaning, not its encoding:
+   // each is a valid psio::Schema value. All three languages refuse the same
+   // ones at every schema-driven entry point.
+   namespace st = psio::schema_types;
+   std::vector<SchemaRejectRow> schema_rejects;
+   std::vector<SchemaAcceptRow> schema_accepts;
+
+   st::Box<st::AnyType> box_of(st::AnyType type) { return st::Box<st::AnyType>{std::move(type)}; }
+   st::AnyType          sint(std::uint32_t bits, bool is_signed) { return st::Int{bits, is_signed}; }
+   st::AnyType          named(std::string name) { return st::Type{std::move(name)}; }
+   st::AnyType custom(st::AnyType inner, std::string id)
+   {
+      return st::Custom{box_of(std::move(inner)), std::move(id)};
+   }
+   st::AnyType list(st::AnyType element) { return st::List{box_of(std::move(element))}; }
+   st::AnyType enumeration(st::AnyType under)
+   {
+      return st::Enum{box_of(std::move(under)),
+                      {st::Enumerator{"pending", static_cast<std::uint64_t>(-1)},
+                       st::Enumerator{"active", 2}}};
+   }
+   using Named = std::vector<std::pair<std::string, st::AnyType>>;
+   psio::Schema schema_with(Named types)
+   {
+      psio::Schema schema;
+      for (auto& [name, type] : types)
+         schema.insert(name, std::move(type));
+      return schema;
+   }
+
+   void schema_reject(const std::string& name, psio::Schema schema, const std::string& root = "T")
+   {
+      namespace ir = psio::pssz_ir;
+      const st::AnyType type{st::Type{root}};
+      std::size_t       width = 0;
+      if (ir::auto_width(schema, type, width).ok())
+         die("schema_rejects/" + name + ": a width was derived");
+      for (std::size_t n : {0u, 1u, 4u, 8u})
+      {
+         const std::vector<char> bytes(n, '\0');
+         std::string             text;
+         if (ir::validate_pssz(schema, type, std::span<const char>{bytes}).ok() ||
+             ir::pssz_to_json(schema, type, psio::json{}, std::span<const char>{bytes}, text).ok())
+            die("schema_rejects/" + name + ": bytes were accepted");
+      }
+      for (const std::string text : {"0", "\"\"", "null", "[]", "{}", "false"})
+      {
+         std::vector<char> out;
+         if (ir::json_to_pssz(schema, type, psio::json{}, std::span<const char>{text}, out).ok() ||
+             ir::json_to_pssz(schema, type, psio::ijson{}, std::span<const char>{text}, out).ok())
+            die("schema_rejects/" + name + ": text was accepted");
+      }
+      schema_rejects.push_back({name, lower_hex(psio::encode(psio::pssz{}, schema)), root});
+   }
+   // `ijson`: the I-JSON text of the row's value.
+   void schema_accept(const std::string& name, psio::Schema schema, const std::string& ijson,
+                      const std::string& root = "T")
+   {
+      namespace ir = psio::pssz_ir;
+      const st::AnyType type{st::Type{root}};
+      std::vector<char> bytes, again;
+      std::string       back, json;
+      if (!ir::json_to_pssz(schema, type, psio::ijson{}, std::span<const char>{ijson}, bytes).ok() ||
+          !ir::validate_pssz(schema, type, std::span<const char>{bytes}).ok() ||
+          !ir::pssz_to_json(schema, type, psio::ijson{}, std::span<const char>{bytes}, back).ok() ||
+          back != ijson ||
+          !ir::pssz_to_json(schema, type, psio::json{}, std::span<const char>{bytes}, json).ok() ||
+          !ir::json_to_pssz(schema, type, psio::json{}, std::span<const char>{json}, again).ok() ||
+          again != bytes)
+         die("schema_accepts/" + name + ": does not round-trip (ijson " + back + ", json " + json +
+             ")");
+      schema_accepts.push_back({name, lower_hex(psio::encode(psio::pssz{}, schema)), root,
+                                lower_hex(bytes), json, ijson});
+   }
+
+   void emit_schema_rows()
+   {
+      const auto u8 = [&] { return sint(8, false); };
+      const auto i32 = [&] { return sint(32, true); };
+      const auto i64 = [&] { return sint(64, true); };
+      const auto bytes = [&] { return list(u8()); };
+
+      // An Enum sits directly on an integer (8 to 64 bits to have text).
+      schema_accept("enum", schema_with({{"T", enumeration(i32())}}), "\"active\"");
+      schema_accept("enum_over_alias",
+                    schema_with({{"I", i32()}, {"J", named("I")}, {"T", enumeration(named("J"))}}),
+                    "\"pending\"");
+      schema_accept("enum_unnamed_value", schema_with({{"T", enumeration(sint(8, true))}}), "7");
+      schema_reject("enum_over_enum", schema_with({{"T", enumeration(enumeration(i32()))}}));
+      schema_reject("enum_over_alias_to_enum",
+                    schema_with({{"E", enumeration(i32())}, {"T", enumeration(named("E"))}}));
+      schema_reject("enum_over_box", schema_with({{"T", enumeration(custom(i32(), "box"))}}));
+      schema_reject("enum_over_presentation",
+                    schema_with({{"T", enumeration(custom(i32(), "AccountNumber"))}}));
+      schema_reject("enum_over_time",
+                    schema_with({{"T", enumeration(custom(i64(), "duration-millis"))}}));
+      schema_reject("enum_over_bool",
+                    schema_with({{"T", enumeration(custom(sint(1, false), "bool"))}}));
+      schema_reject("enum_over_char", schema_with({{"T", enumeration(custom(u8(), "char"))}}));
+      schema_reject("enum_over_float", schema_with({{"T", enumeration(st::Float{11, 53})}}));
+      schema_reject("enum_over_string",
+                    schema_with({{"T", enumeration(custom(bytes(), "utf8"))}}));
+      schema_reject("enum_over_list", schema_with({{"T", enumeration(list(i32()))}}));
+      schema_reject("enum_over_itself", schema_with({{"T", enumeration(named("T"))}}));
+
+      // A byte adapter sits directly on a byte container of plain bytes.
+      schema_accept("utf8", schema_with({{"T", custom(bytes(), "utf8")}}), "\"h\xc3\xa9\"");
+      schema_accept("utf8_over_alias",
+                    schema_with({{"B", bytes()}, {"T", custom(named("B"), "utf8")}}), "\"hi\"");
+      schema_accept("string_over_aliased_element",
+                    schema_with({{"U", u8()}, {"T", custom(list(named("U")), "string")}}),
+                    "\"raw\"");
+      schema_accept("hex", schema_with({{"T", custom(bytes(), "hex")}}), "\"00FF\"");
+      for (const char* id : {"string", "utf8", "hex"})
+      {
+         const std::string n = id;
+         schema_reject(n + "_over_box", schema_with({{"T", custom(custom(bytes(), "box"), id)}}));
+         schema_reject(n + "_over_presentation",
+                       schema_with({{"T", custom(custom(bytes(), "Name"), id)}}));
+         schema_reject(n + "_over_alias_to_box",
+                       schema_with({{"B", custom(bytes(), "box")}, {"T", custom(named("B"), id)}}));
+         schema_reject(n + "_over_boxed_elements",
+                       schema_with({{"T", custom(list(custom(u8(), "box")), id)}}));
+         schema_reject(n + "_over_enum_elements",
+                       schema_with({{"T", custom(list(enumeration(u8())), id)}}));
+         schema_reject(n + "_over_integer", schema_with({{"T", custom(i32(), id)}}));
+      }
+      schema_reject("utf8_over_utf8",
+                    schema_with({{"T", custom(custom(bytes(), "utf8"), "utf8")}}));
+      schema_reject("bool_over_box",
+                    schema_with({{"T", custom(custom(sint(1, false), "box"), "bool")}}));
+      schema_reject("char_over_enum", schema_with({{"T", custom(enumeration(u8()), "char")}}));
+      schema_reject("bitvector_over_box",
+                    schema_with({{"T", custom(custom(st::Array{box_of(sint(1, false)), 8}, "box"),
+                                              "bitvector")}}));
+
+      // A wrapper around a well-formed type is fine: these are looked through.
+      schema_accept("box_over_enum", schema_with({{"T", custom(enumeration(i32()), "box")}}),
+                    "\"active\"");
+      schema_accept("presentation_over_utf8",
+                    schema_with({{"T", custom(custom(bytes(), "utf8"), "Name")}}), "\"n\"");
+      schema_accept("box_over_box_over_hex",
+                    schema_with({{"T", custom(custom(custom(bytes(), "hex"), "box"), "box")}}),
+                    "\"AB\"");
+      schema_accept("list_of_enum", schema_with({{"T", list(enumeration(i32()))}}),
+                    "[\"active\",5]");
+
+      // A time id sits directly on its tick integer; its spellings are reserved.
+      schema_accept("time_point", schema_with({{"T", custom(i64(), "time-point-millis")}}),
+                    "\"2026-11-22T10:15:30.123Z\"");
+      schema_accept("duration_over_alias",
+                    schema_with({{"I", i64()}, {"T", custom(named("I"), "duration-60/1")}}), "-5");
+      schema_accept("box_over_time",
+                    schema_with({{"T", custom(custom(i64(), "time-point-seconds"), "box")}}),
+                    "\"1970-01-01T00:00:00Z\"");
+      schema_reject("time_over_box",
+                    schema_with({{"T", custom(custom(i64(), "box"), "time-point-micros")}}));
+      schema_reject("time_over_enum",
+                    schema_with({{"T", custom(enumeration(i64()), "duration-millis")}}));
+      schema_reject("time_over_time",
+                    schema_with({{"T", custom(custom(i64(), "duration-millis"), "duration-millis")}}));
+      schema_reject("time_over_int128",
+                    schema_with({{"T", custom(sint(128, true), "duration-millis")}}));
+      schema_reject("time_over_float",
+                    schema_with({{"T", custom(st::Float{11, 53}, "time-point-seconds")}}));
+      for (const char* id : {"time-point", "duration", "time-point-", "duration-",
+                             "duration-minutes", "duration-1/1000", "duration-2/4",
+                             "time-point-01/7", "duration-0/1"})
+         schema_reject(std::string("reserved_time_id/") + id, schema_with({{"T", custom(i64(), id)}}));
+
+      // The malformed node is refused wherever the root reaches it.
+      schema_reject("member_enum_over_enum",
+                    schema_with({{"T", st::Object{{st::Member{"ok", box_of(i32()), {}},
+                                                   st::Member{"bad",
+                                                              box_of(enumeration(enumeration(i32()))),
+                                                              {}}},
+                                                  {}}}}));
+      schema_reject("optional_list_string_over_box",
+                    schema_with({{"T", st::Option{box_of(
+                                          list(custom(custom(bytes(), "box"), "string")))}}}));
+
+      // The IR version marker (schema_ir.hpp): absent or unknown is refused.
+      {
+         auto old = schema_with({{"T", i32()}});
+         schema_accept("ir_version_current", old, "-7");
+         old.ir_version.reset();
+         schema_reject("ir_version_absent", old);
+         old.ir_version = psio::schema_ir_version + 1;
+         schema_reject("ir_version_newer", old);
+         old.ir_version = 0;
+         schema_reject("ir_version_zero", old);
+      }
+   }
+
    std::string render()
    {
       std::string types;
@@ -1241,6 +1437,22 @@ namespace
          field("plain_ijson", r.plain_ijson);
          out += i + 1 < rows.size() ? "},\n" : "}\n";
       }
+      out += "],\"schema_rejects\":[\n";
+      for (std::size_t i = 0; i < schema_rejects.size(); ++i)
+      {
+         const auto& r = schema_rejects[i];
+         out += "{\"name\":" + quoted(r.name) + ",\"schema_ir\":" + quoted(r.schema_ir) +
+                ",\"root\":" + quoted(r.root) + (i + 1 < schema_rejects.size() ? "},\n" : "}\n");
+      }
+      out += "],\"schema_accepts\":[\n";
+      for (std::size_t i = 0; i < schema_accepts.size(); ++i)
+      {
+         const auto& r = schema_accepts[i];
+         out += "{\"name\":" + quoted(r.name) + ",\"schema_ir\":" + quoted(r.schema_ir) +
+                ",\"root\":" + quoted(r.root) + ",\"pssz\":" + quoted(r.pssz) + ",\"json\":" +
+                quoted(r.json) + ",\"ijson\":" + quoted(r.ijson) +
+                (i + 1 < schema_accepts.size() ? "},\n" : "}\n");
+      }
       out += "]}\n";
       return out;
    }
@@ -1262,12 +1474,15 @@ int main(int argc, char** argv)
    emit_bounds_layout_caps();
    emit_accepted();
    emit_rejected();
+   emit_schema_rows();
 
    const std::string text = render();
    // The fixture is itself read back with the codec under test.
    Fixture parsed;
    if (!psio::decode_json_checked(psio::json{}, std::span<const char>{text}, parsed).ok() ||
-       parsed.vectors.size() != rows.size())
+       parsed.vectors.size() != rows.size() ||
+       parsed.schema_rejects.size() != schema_rejects.size() ||
+       parsed.schema_accepts.size() != schema_accepts.size())
       die("the rendered fixture does not read back");
 
    if (check)

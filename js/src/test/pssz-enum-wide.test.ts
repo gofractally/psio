@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PsszError, PsszNaN, PsszSchema, type IrSchema, type JsonFormat } from '../index.js';
+import { IR_VERSION, PsszError, PsszNaN, PsszSchema, type IrSchema, type JsonFormat } from '../index.js';
 
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const fromHex = (text: string) => Uint8Array.from(Buffer.from(text, 'hex'));
@@ -307,9 +307,15 @@ test('enum schema: IR form, PSSZ and JSON round trips, malformed declarations', 
 });
 
 test('a schema written before the Enum alternative existed still decodes', () => {
-  // The meta schema as it was: no Enum alternative, no Enumerator type.
+  // The meta schema as it was: no Enum alternative, no Enumerator type, and
+  // no ir_version member on Schema.
   const metaIr: IrSchema = structuredClone(PsszSchema.meta().ir);
   metaIr.types = metaIr.types.filter((m) => m.name !== 'Enumerator');
+  const schemaRecord = metaIr.types.find((m) => m.name === 'Schema')!.type.value;
+  assert.equal(schemaRecord.type, 'Object');
+  const schemaMembers = (schemaRecord.value as { members: { name: string }[] }).members;
+  assert.equal(schemaMembers.pop()!.name, 'ir_version');
+  assert.deepEqual(schemaMembers.map((m) => m.name), ['package', 'interfaces', 'worlds', 'uses', 'types']);
   const anyType = metaIr.types.find((m) => m.name === 'AnyType')!.type.value;
   assert.equal(anyType.type, 'Object');
   const alternatives = (anyType.value as { members: { name: string; type: { value: { value: { members: { name: string }[] } } } }[] })
@@ -328,22 +334,31 @@ test('a schema written before the Enum alternative existed still decodes', () =>
     Shape: { Variant: { Dot: 'Point', Label: { Custom: { type: { List: U8 }, id: 'string' } } } },
     Row: { Object: { id: U64, shapes: { List: 'Shape' }, wide: { Option: U128 }, pair: { Tuple: [U8, 'Point'] } } },
   });
-  const bytes = oldMeta.encode(old.ir);
+  const { ir_version: _version, ...unversioned } = old.ir;
+  const bytes = oldMeta.encode(unversioned);
   // The current reader takes the old bytes unchanged and writes them back.
+  // What it reads has no IR version: the bytes predate the marker.
   const decoded = PsszSchema.decode(bytes);
-  assert.deepEqual(decoded.ir, old.ir);
+  assert.deepEqual(decoded.ir, { ...old.ir, ir_version: null });
   assert.equal(hex(decoded.encode()), hex(bytes));
-  assert.equal(hex(old.encode()), hex(bytes));
+  assert.equal(old.ir.ir_version, IR_VERSION);
+  assert.equal(hex(new PsszSchema({ ...old.ir, ir_version: null }).encode()), hex(bytes));
+  assert.notEqual(hex(old.encode()), hex(bytes));
+  // ... and so no codec is derived from it (the widths and the meaning of
+  // "string" could differ) until the caller states the version it is in.
+  rejects(() => decoded.type('Row'), 'schema', /no ir_version marker/);
+  const stated = new PsszSchema({ ...decoded.ir, ir_version: IR_VERSION });
   const row = { id: 7n, shapes: [{ type: 'Dot', value: { x: 1, y: -2 } }], wide: 5n, pair: [1, { x: 0, y: 0 }] };
-  assert.deepEqual(decoded.type('Row').decode(old.type('Row').encode(row)), row);
+  assert.deepEqual(stated.type('Row').decode(old.type('Row').encode(row)), row);
   // An old reader refuses a schema that uses the new alternative.
   rejects(() => oldMeta.decode(schema.encode()), 'bytes', /variant selector out of range/);
 
   // Pinned bytes of a schema as the previous format wrote it.
   const pinned = new PsszSchema({ P: { Struct: { x: I32 } } });
-  const pinnedHex = hex(oldMeta.encode(pinned.ir));
+  const { ir_version: _pinnedVersion, ...pinnedIr } = pinned.ir;
+  const pinnedHex = hex(oldMeta.encode(pinnedIr));
   assert.equal(pinnedHex, OLD_FORMAT_SCHEMA);
-  assert.deepEqual(PsszSchema.decode(fromHex(OLD_FORMAT_SCHEMA)).ir, pinned.ir);
+  assert.deepEqual(PsszSchema.decode(fromHex(OLD_FORMAT_SCHEMA)).ir, { ...pinned.ir, ir_version: null });
 });
 
 const OLD_FORMAT_SCHEMA =

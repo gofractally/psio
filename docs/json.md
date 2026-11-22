@@ -515,6 +515,38 @@ languages re-derive every vector from the IR alone
 status-returning; it builds with exceptions disabled
 (`cpp/tests/pssz_ir_noexceptions.cpp`).
 
+**IR version.** The IR root (`Schema`) carries `ir_version`, the version
+of the IR's meaning the schema is written in (C++ `psio::schema_ir_version`,
+Rust `IR_VERSION`, JS `IR_VERSION`; currently 1: boxes are marked `box`,
+UTF-8 strings `utf8`, and `string` is a raw string). The field was appended
+to the record, so the IR's own encoding is backward compatible: a schema
+written before it existed still decodes, with no version. Such a schema
+predates the markers — read as version 1 it would derive other offset
+widths and skip UTF-8 validation — so every schema-driven codec in all
+three languages refuses it ("no ir_version marker ... regenerate it"), as it
+refuses a version newer than its own, instead of guessing. A schema built
+in code (`SchemaBuilder`, a default-constructed `Schema`, Rust
+`Schema::default()`, a JS map of named types) is in the current version; a
+caller that knows what an unversioned schema means states it by setting the
+field.
+
+**Malformed schemas.** A schema is checked before anything is read or
+written with it, and all three languages refuse the same ones with an
+error (fixture rows `schema_rejects`; their well-formed neighbours are
+`schema_accepts`):
+
+- an adapter — a `Custom` id with a binary meaning (`bool`, `char`,
+  `string`, `utf8`, `hex`, `bitvector`, `bitlist`) or a time id — sits
+  **directly** on its wire type, and an `Enum` directly on an integer:
+  named aliases are followed, but an `Enum`, a `box` or a text presentation
+  in that place (an enum over an enum, a boxed byte container under a string
+  adapter, a string of boxed or enumerated bytes) is malformed. The reverse
+  is fine: a `box`, a presentation or an alias around any well-formed type;
+- a reserved time spelling that is not a time id, and a time id over
+  anything but an 8/16/32/64-bit integer (`docs/time.md`);
+- unresolved or cyclic aliases, duplicate members, unknown attributes, and
+  types with no PSSZ form, as before.
+
 The IR carries what that needs (the C++ `SchemaBuilder` and the Rust
 `ToPsszSchema` derive write it):
 

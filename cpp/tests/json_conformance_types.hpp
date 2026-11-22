@@ -542,14 +542,37 @@ namespace json_conf
    };
    PSIO_REFLECT(TypeRow, id, ir, pssz)
 
+   // A schema (hex of its pssz encoding) every schema-driven entry point
+   // refuses for `root`, whatever the bytes or text.
+   struct SchemaRejectRow
+   {
+      std::string name;
+      std::string schema_ir;
+      std::string root;
+   };
+   PSIO_REFLECT(SchemaRejectRow, name, schema_ir, root)
+   // A well-formed neighbour of the rejected schemas, with one value.
+   struct SchemaAcceptRow
+   {
+      std::string name;
+      std::string schema_ir;
+      std::string root;
+      std::string pssz;
+      std::string json;
+      std::string ijson;
+   };
+   PSIO_REFLECT(SchemaAcceptRow, name, schema_ir, root, pssz, json, ijson)
+
    struct Fixture
    {
-      std::uint32_t        version = 0;
-      std::string          schema_ir;
-      std::vector<TypeRow> types;
-      std::vector<Row>     vectors;
+      std::uint32_t                version = 0;
+      std::string                  schema_ir;
+      std::vector<TypeRow>         types;
+      std::vector<Row>             vectors;
+      std::vector<SchemaRejectRow> schema_rejects;
+      std::vector<SchemaAcceptRow> schema_accepts;
    };
-   PSIO_REFLECT(Fixture, version, schema_ir, types, vectors)
+   PSIO_REFLECT(Fixture, version, schema_ir, types, vectors, schema_rejects, schema_accepts)
 
    inline std::string input_text(const Row& row)
    {

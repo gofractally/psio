@@ -15,6 +15,7 @@
 #include <psio/pssz.hpp>
 #include <psio/pssz_ir_json.hpp>
 #include <psio/reflect.hpp>
+#include <psio/schema_builder.hpp>
 
 #include <catch.hpp>
 
@@ -61,14 +62,45 @@ namespace schema_conf
    PSIO_REFLECT(JsonRow, name, type, kind, format, json, ijson, text, text_hex, canonical, pssz,
                 plain_json, plain_ijson)
 
+   struct SchemaRejectRow
+   {
+      std::string name;
+      std::string schema_ir;
+      std::string root;
+   };
+   PSIO_REFLECT(SchemaRejectRow, name, schema_ir, root)
+   struct SchemaAcceptRow
+   {
+      std::string name;
+      std::string schema_ir;
+      std::string root;
+      std::string pssz;
+      std::string json;
+      std::string ijson;
+   };
+   PSIO_REFLECT(SchemaAcceptRow, name, schema_ir, root, pssz, json, ijson)
+
    struct JsonFixture
    {
-      std::uint32_t        version = 0;
-      std::string          schema_ir;
-      std::vector<TypeRow> types;
-      std::vector<JsonRow> vectors;
+      std::uint32_t                version = 0;
+      std::string                  schema_ir;
+      std::vector<TypeRow>         types;
+      std::vector<JsonRow>         vectors;
+      std::vector<SchemaRejectRow> schema_rejects;
+      std::vector<SchemaAcceptRow> schema_accepts;
    };
-   PSIO_REFLECT(JsonFixture, version, schema_ir, types, vectors)
+   PSIO_REFLECT(JsonFixture, version, schema_ir, types, vectors, schema_rejects, schema_accepts)
+
+   // psio::Schema as it was before `ir_version` was appended.
+   struct OldSchema
+   {
+      psio::schema_types::Package                package;
+      std::vector<psio::schema_types::Interface> interfaces;
+      std::vector<psio::schema_types::World>     worlds;
+      std::vector<psio::schema_types::Use>       uses;
+      std::vector<psio::schema_types::Member>    types;
+      PSIO_REFLECT(OldSchema, package, interfaces, worlds, uses, types)
+   };
 
    struct PsszRow
    {
@@ -585,4 +617,161 @@ TEST_CASE("the schema-driven entry points are checked", "[schema][conformance]")
    REQUIRE_FALSE(ir::json_to_pssz(schema, "AllOptional", psio::ijson{},
                                   std::span<const char>{unknown}, bytes)
                     .ok());
+}
+
+// Malformed schemas: all three languages refuse the same ones, with an
+// error, at every schema-driven entry point; their well-formed neighbours
+// work. (Rust schema_conformance.rs, JS pssz-conformance.test.ts.)
+TEST_CASE("schema fixture: malformed schemas are refused, their neighbours accepted",
+          "[schema][conformance]")
+{
+   namespace ir = psio::pssz_ir;
+   const auto fx = load<JsonFixture>(PSIO_JSON_VECTORS);
+   REQUIRE(fx.schema_rejects.size() >= 25);
+   REQUIRE(fx.schema_accepts.size() >= 8);
+   std::set<std::string> names;
+   for (const auto& row : fx.schema_rejects)
+   {
+      INFO(row.name);
+      CHECK(names.insert(row.name).second);
+      // The IR itself is a valid Schema value: it is its meaning that is refused.
+      const psio::Schema                schema = schema_of(row.schema_ir);
+      const psio::schema_types::AnyType root{psio::schema_types::Type{row.root}};
+      std::size_t                       width = 0;
+      const auto                        why   = ir::auto_width(schema, root, width);
+      REQUIRE_FALSE(why.ok());
+      CHECK(!why.error().what.empty());
+      for (std::size_t n : {0u, 1u, 4u, 8u})
+      {
+         const std::vector<char> bytes(n, '\0');
+         ir::Value               value;
+         std::string             text;
+         CHECK_FALSE(ir::validate_pssz(schema, root, std::span<const char>{bytes}).ok());
+         CHECK_FALSE(ir::decode_exact<4>(schema, root, std::span<const char>{bytes}, value).ok());
+         CHECK_FALSE(
+            ir::pssz_to_json(schema, root, psio::json{}, std::span<const char>{bytes}, text).ok());
+      }
+      for (const std::string text : {"0", "\"\"", "null", "[]", "{}", "false"})
+      {
+         std::vector<char> out;
+         ir::Value         value;
+         CHECK_FALSE(
+            ir::json_to_pssz(schema, root, psio::json{}, std::span<const char>{text}, out).ok());
+         CHECK_FALSE(
+            ir::json_to_pssz(schema, root, psio::ijson{}, std::span<const char>{text}, out).ok());
+         CHECK_FALSE(
+            ir::json_to_value(schema, root, psio::ijson{}, std::span<const char>{text}, value).ok());
+      }
+      std::vector<char> sink;
+      CHECK_FALSE(ir::encode_auto(schema, root, ir::Value{true}, sink).ok());
+   }
+   for (const auto& row : fx.schema_accepts)
+   {
+      INFO(row.name);
+      CHECK(names.insert(row.name).second);
+      const psio::Schema                schema = schema_of(row.schema_ir);
+      const psio::schema_types::AnyType root{psio::schema_types::Type{row.root}};
+      const auto                        bytes = from_hex(row.pssz);
+      CHECK(ir::validate_pssz(schema, root, std::span<const char>{bytes}).ok());
+      std::string json, ijson;
+      REQUIRE(ir::pssz_to_json(schema, root, psio::json{}, std::span<const char>{bytes}, json).ok());
+      REQUIRE(
+         ir::pssz_to_json(schema, root, psio::ijson{}, std::span<const char>{bytes}, ijson).ok());
+      CHECK(json == row.json);
+      CHECK(ijson == row.ijson);
+      std::vector<char> a, b;
+      REQUIRE(ir::json_to_pssz(schema, root, psio::json{}, std::span<const char>{row.json}, a).ok());
+      REQUIRE(
+         ir::json_to_pssz(schema, root, psio::ijson{}, std::span<const char>{row.ijson}, b).ok());
+      CHECK(a == bytes);
+      CHECK(b == bytes);
+   }
+}
+
+// The IR root says which version of the IR it is written in. The field was
+// appended: a schema without it still decodes, and the codecs refuse it
+// with an error that says why.
+TEST_CASE("schema IR: the ir_version marker is required and backward compatible",
+          "[schema][conformance]")
+{
+   namespace ir = psio::pssz_ir;
+   const auto         fx      = load<JsonFixture>(PSIO_JSON_VECTORS);
+   const psio::Schema current = schema_of(fx.schema_ir);
+   REQUIRE(current.ir_version == std::optional<std::uint32_t>{psio::schema_ir_version});
+   CHECK(psio::Schema{}.ir_version == std::optional<std::uint32_t>{psio::schema_ir_version});
+   {
+      psio::SchemaBuilder builder;
+      builder.insert<std::uint32_t>("U");
+      CHECK(std::move(builder).build().ir_version ==
+            std::optional<std::uint32_t>{psio::schema_ir_version});
+   }
+
+   // The record as it was before the field existed.
+   using schema_conf::OldSchema;
+   STATIC_REQUIRE(psio::pssz_evolves_from<OldSchema, psio::Schema>);
+   const OldSchema old{current.package, current.interfaces, current.worlds, current.uses,
+                       current.types};
+   const auto      old_bytes = psio::encode(psio::pssz{}, old);
+   const auto      new_bytes = from_hex(fx.schema_ir);
+   CHECK(old_bytes != new_bytes);
+   // An unversioned schema is still a Schema: it decodes, with no version,
+   // and re-encodes to the bytes it had.
+   REQUIRE(psio::validate<psio::Schema>(psio::pssz{}, std::span<const char>{old_bytes}).ok());
+   const auto decoded = psio::decode<psio::Schema>(psio::pssz{}, std::span<const char>{old_bytes});
+   CHECK_FALSE(decoded.ir_version.has_value());
+   CHECK(decoded.types == current.types);
+   CHECK(psio::encode(psio::pssz{}, decoded) == old_bytes);
+   // And a reader that predates the field reads a versioned schema.
+   {
+      OldSchema reader;
+      bool      unknown = false;
+      REQUIRE(psio::decode_pssz_checked(psio::pssz{}, std::span<const char>{new_bytes}, reader,
+                                        unknown)
+                 .ok());
+      CHECK(unknown);
+      CHECK(reader.types == current.types);
+   }
+
+   std::string                        id;
+   for (const auto& t : fx.types)
+      if (t.ir && t.pssz.value_or(false))
+      {
+         id = t.id;
+         break;
+      }
+   REQUIRE(!id.empty());
+   const psio::schema_types::AnyType root{psio::schema_types::Type{id}};
+   std::size_t                       width = 0;
+   CHECK(ir::auto_width(current, root, width).ok());
+
+   auto newer = current;
+   newer.ir_version = psio::schema_ir_version + 1;
+   auto zero = current;
+   zero.ir_version = 0;
+   const std::pair<const psio::Schema*, std::string_view> cases[] = {
+      {&decoded, "no ir_version marker"},
+      {&newer, "newer than this library"},
+      {&zero, "newer than this library"}};
+   for (const auto& [schema, what] : cases)
+   {
+      INFO(what);
+      ir::Value         value;
+      std::vector<char> out;
+      std::string       text;
+      const std::string zero_text = "0";
+      const psio::codec_status failures[] = {
+         ir::auto_width(*schema, root, width),
+         ir::validate_pssz(*schema, root, std::span<const char>{}),
+         ir::encode_auto(*schema, root, ir::Value{true}, out),
+         ir::decode_exact<1>(*schema, root, std::span<const char>{}, value),
+         ir::json_to_pssz(*schema, root, psio::json{}, std::span<const char>{zero_text}, out),
+         ir::json_to_value(*schema, root, psio::ijson{}, std::span<const char>{zero_text}, value),
+         ir::value_to_json(*schema, root, psio::json{}, ir::Value{true}, text),
+         ir::pssz_to_json(*schema, root, psio::ijson{}, std::span<const char>{}, text)};
+      for (const auto& failure : failures)
+      {
+         REQUIRE_FALSE(failure.ok());
+         CHECK(failure.error().what.find(what) != std::string_view::npos);
+      }
+   }
 }

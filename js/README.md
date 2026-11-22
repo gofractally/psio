@@ -213,6 +213,19 @@ type on the wire and in text, with no inferred size bound: under `'auto'` a
 record holding one uses 4-byte offsets unless it carries an explicit cap, and
 a box as the root type reports width 4.
 
+### IR version
+
+A schema carries `ir_version` (`schema.ir.ir_version`), the version of the
+IR's meaning it is written in; this library reads and writes `IR_VERSION`
+(1). A schema encoded before the marker existed still decodes — the field
+was appended — with `ir_version: null`, and `schema.type(...)` then throws a
+`'schema'` error ("no ir_version marker"): such a schema predates the `box`
+and `utf8` markers and would silently give other widths and other values. A
+caller that knows what it means states so:
+`new PsszSchema({ ...old.ir, ir_version: IR_VERSION })`. A map of named
+types written in JavaScript is always in the current version; the full form
+(`{ types: [...], ir_version }`) says for itself.
+
 ### Schemas written by hand
 
 The compact spelling is the one `generateSchema` produces, plus `BoundedList`,
@@ -542,23 +555,33 @@ switch (result.status) {
 
 ## Schema Generation
 
-### AnyType Format (Rust-Compatible)
+### Schema IR
 
-Generate JSON schema descriptions compatible with Rust's fracpack library:
+`generateSchema` turns named type combinators into the Schema IR of C++
+`psio::SchemaBuilder` and Rust `ToPsszSchema`, in its compact spelling. The
+result is a `PsszSchema` input:
 
 ```typescript
-import { generateSchema, typeToAnyType } from 'psio';
+import { generateSchema, typeToAnyType, PsszSchema, struct, str, bytes, u32 } from 'psio';
 
-const Person = struct({ name: str, age: u32 });
+const Person = struct({ name: str, avatar: bytes, age: u32 });
 
-// Single type
-const anyType = typeToAnyType(Person);
-// { Object: { name: { Custom: { type: { List: ... }, id: 'string' } }, age: { Int: { bits: 32, isSigned: false } } } }
+typeToAnyType(Person);
+// { Object: { name:   { Custom: { type: { List: <u8> }, id: 'utf8' } },
+//             avatar: { Custom: { type: { List: <u8> }, id: 'hex' } },
+//             age:    { Int: { bits: 32, isSigned: false } } } }
 
-// Registry of named types
-const schema = generateSchema({ Person });
-// { Person: { Object: { ... } } }
+const schema = generateSchema({ Person });          // { Person: { Object: { ... } } }
+const type = new PsszSchema(schema).type('Person'); // PSSZ, JSON, I-JSON, key
 ```
+
+Text and bytes are explicit, here and in every schema-driven codec:
+
+| IR node | from | JavaScript value |
+|---|---|---|
+| `Custom { List<u8>, "utf8" }` | `str`; C++ `utf8_string`; Rust `String` | `string`, validated UTF-8 |
+| `Custom { List<u8>, "string" }` | C++ `std::string`; Rust `RawString` (no JS combinator) | `Uint8Array`: any bytes (`encode` also accepts a `string`, as its UTF-8) |
+| `Custom { List<u8>, "hex" }` | `bytes`; C++ / Rust byte vectors | `Uint8Array` |
 
 ### WIT Generation (WebAssembly Interface Types)
 
@@ -741,10 +764,10 @@ The binary format is byte-identical across JavaScript, C++ (`psio`), and Rust (`
 
 | Export | Description |
 |--------|-------------|
-| `typeToAnyType(type)` | FracType → AnyType JSON (Rust-compatible) |
+| `typeToAnyType(type)` | type combinator → Schema IR node (compact spelling) |
 | `generateSchema(types)` | Named types → Schema registry |
-| `AnyType` | JSON-serializable type description |
-| `Schema` | `Record<string, AnyType>` |
+| `AnyType` | a Schema IR type in the compact spelling (`CompactType`) |
+| `Schema` | `{ [name]: AnyType }`: a `PsszSchema` input |
 
 ### WIT
 

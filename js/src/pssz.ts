@@ -27,7 +27,7 @@
 //   const to   = keyPrefixUpperBound(from);         // ... lies in [from, to)
 
 import {
-  Codec, Node, PsszError, normalizeSchema, normalizeType, reservedCustomId,
+  Codec, IR_VERSION, Node, PsszError, checkIrVersion, normalizeSchema, normalizeType, reservedCustomId,
   type DecodeContext, type IrAnyType, type IrSchema, type PsszCustomHandler, type PsszSchemaInput,
   type PsszTypeInput,
 } from './pssz-core.js';
@@ -36,7 +36,7 @@ import { reservedTimeId } from './time.js';
 import { decodeKey, encodeKey, encodeKeyPrefix, keyPrefixUpperBound as upperBound } from './pssz-key.js';
 
 export {
-  PsszError, PsszNaN,
+  PsszError, PsszNaN, IR_VERSION,
   type PsszErrorKind, type IrSchema, type IrAnyType, type IrMember, type IrAttribute, type IrTypeValue,
   type IrEnum, type IrEnumerator, type CompactEnumerator, type PsszCustomHandler,
   type CompactType, type PsszSchemaInput, type PsszTypeInput, type Some, type VariantValue, type BitsValue,
@@ -267,10 +267,14 @@ export class PsszSchema {
 
   /**
    * The codec for a named type or an inline type. Throws a `schema` error
-   * when the type, or anything it reaches, is not expressible in PSSZ.
+   * when the type, or anything it reaches, is not expressible in PSSZ, and
+   * when the schema carries no `ir_version` (or one newer than `IR_VERSION`).
    */
   type(root: string | PsszTypeInput, options?: PsszTypeOptions): PsszType {
     return guarded(() => {
+      // A schema written before the IR was versioned would give other
+      // widths and other values: refused, not guessed at.
+      checkIrVersion(this.ir);
       const width = options?.width ?? 'auto';
       if (width !== 'auto' && width !== 1 && width !== 2 && width !== 4)
         throw new PsszError('schema', 'pssz: width must be "auto", 1, 2 or 4');
@@ -377,5 +381,7 @@ const META_SCHEMA: PsszSchemaInput = {
     worlds: list('World'),
     uses: list('Use'),
     types: list('Member'),
+    // Appended to the record: a schema written before it has none.
+    ir_version: option(U32),
   }),
 };

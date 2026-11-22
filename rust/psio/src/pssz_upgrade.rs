@@ -17,8 +17,13 @@ pub fn validate_optional_upgrade(
     new: &Schema,
     new_type: &AnyType,
 ) -> PsszResult<UpgradeReport> {
+    old.check_ir_version()?;
+    new.check_ir_version()?;
     references(old, old_type)?;
     references(new, new_type)?;
+    // Both sides are well-formed schemas for the codecs they describe.
+    crate::pssz_dynamic::metadata(old, old_type, true)?;
+    crate::pssz_dynamic::metadata(new, new_type, true)?;
     let mut checker = Checker {
         old,
         new,

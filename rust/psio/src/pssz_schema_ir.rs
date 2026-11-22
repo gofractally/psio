@@ -80,7 +80,30 @@ ir_record!(UseRef {
 });
 ir_record!(Interface { name: String, type_names: Vec<String>, funcs: Vec<Func>, attributes: Vec<Attribute> });
 ir_record!(World { name: String, imports: Vec<UseRef>, exports: Vec<String>, attributes: Vec<Attribute> });
-ir_record!(Schema { package: Package, interfaces: Vec<Interface>, worlds: Vec<World>, uses: Vec<Use>, types: Vec<Member> });
+// `ir_version` was appended to the record: a schema written before it
+// decodes with `None`, and the schema-driven codecs refuse it (see
+// [`IR_VERSION`]).
+ir_record!(Schema {
+    package: Package,
+    interfaces: Vec<Interface>,
+    worlds: Vec<World>,
+    uses: Vec<Use>,
+    types: Vec<Member>,
+    ir_version: Option<u32>
+});
+
+/// The version of the IR's meaning that this library writes and reads
+/// (C++ `psio::schema_ir_version`).
+///
+/// * 1 — a boxed value is marked `Custom{.., "box"}`, a UTF-8 string is
+///   `"utf8"` and `"string"` is a raw string.
+///
+/// A schema with no `ir_version` predates those markers: read as version 1
+/// it would silently derive other offset widths and skip UTF-8 validation,
+/// so every schema-driven codec refuses it instead of guessing. `Schema::
+/// default()` and `SchemaBuilder` write the current version.
+pub const IR_VERSION: u32 = 1;
+
 
 impl AnyType {
     pub fn new(value: AnyValue) -> Self {
@@ -104,10 +127,24 @@ impl Default for Schema {
             worlds: vec![],
             uses: vec![],
             types: vec![],
+            ir_version: Some(IR_VERSION),
         }
     }
 }
 impl Schema {
+    /// What every schema-driven codec checks first: the schema says which
+    /// version of the IR it was written in, and it is the one this library
+    /// reads.
+    pub fn check_ir_version(&self) -> PsszResult<()> {
+        match self.ir_version {
+            Some(IR_VERSION) => Ok(()),
+            None => Err(PsszError(
+                "pssz schema: no ir_version marker (the schema predates the box / utf8 markers and \
+                 would derive different widths); regenerate it",
+            )),
+            Some(_) => Err(PsszError("pssz schema: ir_version is newer than this library")),
+        }
+    }
     pub fn get(&self, name: &str) -> Option<&AnyType> {
         self.types
             .iter()
@@ -147,7 +184,10 @@ impl Schema {
                         .get(&reference.r#type)
                         .ok_or(PsszError("pssz schema: unresolved named type"))?
                 }
-                AnyValue::Enum(named) => ty = &named.r#type,
+                AnyValue::Enum(named) => {
+                    self.enum_underlying(&named.r#type)?;
+                    ty = &named.r#type
+                }
                 AnyValue::Custom(custom) if !wire_custom_id(&custom.id) => {
                     boxed |= custom.id == "box";
                     if crate::time::parse_time_schema_id(&custom.id).is_some() {
@@ -165,11 +205,33 @@ impl Schema {
 }
 
 impl Schema {
+    /// The type an adapter — a `Custom` id with a binary meaning, a time id —
+    /// or an `Enum` sits on: found through named aliases only. A wrapper in
+    /// that place (an `Enum`, a `box`, a text presentation) is a malformed
+    /// schema in every language, not something to look through.
+    pub fn direct<'a>(&'a self, ty: &'a AnyType) -> PsszResult<&'a AnyType> {
+        const WRAPPED: PsszError =
+            PsszError("pssz schema: an adapter or enum must sit directly on its wire type");
+        let ty = self.resolve(ty)?;
+        match &ty.value {
+            AnyValue::Enum(_) => Err(WRAPPED),
+            AnyValue::Custom(custom) if !wire_custom_id(&custom.id) => Err(WRAPPED),
+            _ => Ok(ty),
+        }
+    }
+    /// The integer under an `Enum`, directly: any integer the codec has
+    /// (text needs 8 to 64 bits).
+    pub fn enum_underlying<'a>(&'a self, inner: &'a AnyType) -> PsszResult<&'a Int> {
+        match &self.direct(inner)?.value {
+            AnyValue::Int(int) => Ok(int),
+            _ => Err(PsszError("pssz schema: an enum needs an underlying integer")),
+        }
+    }
     /// The tick integer under a time id (`time-point-<unit>` /
     /// `duration-<unit>`, docs/time.md): 8, 16, 32 or 64 bits. Anything
     /// else under a time id is a malformed schema.
     pub fn time_ticks<'a>(&'a self, inner: &'a AnyType) -> PsszResult<&'a Int> {
-        match &self.wire(inner)?.value {
+        match &self.direct(inner)?.value {
             AnyValue::Int(ticks) if matches!(ticks.bits, 8 | 16 | 32 | 64) => Ok(ticks),
             _ => Err(PsszError("pssz schema: time value requires an 8/16/32/64-bit tick integer")),
         }

@@ -407,7 +407,10 @@ namespace psio::schema_types
             {
                using R = ::psio::reflect_enum<U>;
                Enum e;
-               e.type = Box<AnyType>{build_anytype<std::underlying_type_t<U>>()};
+               // The integer itself, whatever the underlying type is
+               // spelled as (char, bool): an Enum sits directly on an Int.
+               e.type = Box<AnyType>{Int{static_cast<std::uint32_t>(8 * sizeof(U)),
+                                         std::is_signed_v<std::underlying_type_t<U>>}};
                for (std::size_t i = 0; i < R::count; ++i)
                   e.members.push_back(Enumerator{
                       std::string{R::names[i]},

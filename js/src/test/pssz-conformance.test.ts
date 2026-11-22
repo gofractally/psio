@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PsszError, PsszSchema, type JsonFormat, type PsszType, type PsszWidth } from '../index.js';
+import { IR_VERSION, PsszError, PsszSchema, validatePssz, type JsonFormat, type PsszType, type PsszWidth } from '../index.js';
 import { fixtureHandlers } from './support/custom-handlers.js';
 
 const fixture = (name: string) =>
@@ -362,4 +362,106 @@ test('JSON fixture: every type and vector through the Schema IR', () => {
   }
   assert.equal(fx.types.length, 51);
   assert.equal(fx.vectors.length, 1325);
+});
+
+// Malformed schemas: all three languages refuse the same ones, with an
+// error, at every schema-driven entry point; their well-formed neighbours
+// work. (C++ schema_conformance_tests.cpp, Rust schema_conformance.rs.)
+test('JSON fixture: malformed schemas are refused, their neighbours accepted', () => {
+  const fx: {
+    schema_rejects: { name: string; schema_ir: string; root: string }[];
+    schema_accepts: { name: string; schema_ir: string; root: string; pssz: string; json: string; ijson: string }[];
+  } = fixture('json-vectors.json');
+  assert.ok(fx.schema_rejects.length >= 25);
+  assert.ok(fx.schema_accepts.length >= 8);
+  const names = new Set<string>();
+  for (const row of fx.schema_rejects) {
+    assert.ok(!names.has(row.name), `${row.name}: duplicate`);
+    names.add(row.name);
+    // The IR itself is a valid Schema value (it decodes, and re-encodes to
+    // the same bytes): it is its meaning that is refused.
+    const schema = PsszSchema.decode(fromHex(row.schema_ir));
+    assert.equal(toHex(schema.encode()), row.schema_ir, row.name);
+    for (const width of ['auto', 1, 2, 4] as PsszWidth[]) {
+      const error = rejects(() => schema.type(row.root, { width }), `${row.name}: type(${width})`);
+      assert.equal(error.kind, 'schema', `${row.name}: ${error.message}`);
+    }
+    for (const bytes of [new Uint8Array(0), new Uint8Array(1), new Uint8Array(8)]) {
+      const result = validatePssz(schema, row.root, bytes);
+      assert.equal(result.ok, false, row.name);
+      if (!result.ok) assert.equal(result.error.kind, 'schema', row.name);
+    }
+    // Also when the malformed type is reached through a handler-carrying copy.
+    rejects(() => schema.withHandlers({}, { requireHandlers: true }).type(row.root), `${row.name}: strict`);
+  }
+  for (const row of fx.schema_accepts) {
+    assert.ok(!names.has(row.name), `${row.name}: duplicate`);
+    names.add(row.name);
+    const type = PsszSchema.decode(fromHex(row.schema_ir)).type(row.root);
+    const bytes = fromHex(row.pssz);
+    assert.deepEqual(type.validate(bytes), { ok: true, hasUnknown: false }, row.name);
+    assert.equal(type.psszToJson(bytes, 'json'), row.json, `${row.name}: json`);
+    assert.equal(type.psszToJson(bytes, 'ijson'), row.ijson, `${row.name}: ijson`);
+    assert.equal(toHex(type.jsonToPssz(row.json, 'json')), row.pssz, `${row.name}: json read`);
+    assert.equal(toHex(type.jsonToPssz(row.ijson, 'ijson')), row.pssz, `${row.name}: ijson read`);
+    assert.equal(toHex(type.encode(type.decode(bytes))), row.pssz, `${row.name}: value`);
+  }
+});
+
+// The IR root says which version of the IR it is written in. The field was
+// appended, so a schema without it still decodes; no codec is derived from
+// it, with an error that says why.
+test('schema IR: the ir_version marker is required and backward compatible', () => {
+  const fx: { schema_ir: string; types: { id: string; ir: boolean; pssz?: boolean }[] } = fixture('json-vectors.json');
+  const current = PsszSchema.decode(fromHex(fx.schema_ir));
+  assert.equal(current.ir.ir_version, IR_VERSION);
+  assert.equal(IR_VERSION, 1);
+  const id = fx.types.find((t) => t.ir && t.pssz)!.id;
+  current.type(id);
+
+  // A map of named types is written here and now: the current version.
+  assert.equal(new PsszSchema({ T: { Int: { bits: 8, isSigned: false } } }).ir.ir_version, IR_VERSION);
+  // The full form states its version; without one it has none.
+  const members = [{ name: 'T', type: { Int: { bits: 8, isSigned: false } } }];
+  assert.equal(new PsszSchema({ types: members, ir_version: 1 }).ir.ir_version, 1);
+  assert.equal(new PsszSchema({ types: members }).ir.ir_version, null);
+  assert.equal(new PsszSchema({ types: members, ir_version: null }).ir.ir_version, null);
+  rejects(() => new PsszSchema({ types: members, ir_version: -1 }), 'negative');
+  rejects(() => new PsszSchema({ types: members, ir_version: 1.5 }), 'fraction');
+  rejects(() => new PsszSchema({ types: members, ir_version: '1' as unknown as number }), 'string');
+
+  // The same schema as it was written before the marker existed.
+  const old = new PsszSchema({ ...current.ir, ir_version: null });
+  const oldBytes = old.encode();
+  assert.notEqual(toHex(oldBytes), fx.schema_ir);
+  const decoded = PsszSchema.decode(oldBytes);
+  assert.equal(decoded.ir.ir_version, null);
+  assert.deepEqual(decoded.ir.types, current.ir.types);
+  assert.equal(toHex(decoded.encode()), toHex(oldBytes));
+  // Through JSON as well: a document without the member has no version.
+  const withNull = PsszSchema.meta().type('Schema').valueToJson(old.ir, 'json');
+  assert.ok(withNull.endsWith(',"ir_version":null}'));
+  assert.equal(PsszSchema.fromJson(withNull, 'json').ir.ir_version, null);
+  const text = withNull.replace(',"ir_version":null}', '}');
+  assert.ok(!text.includes('ir_version'));
+  assert.equal(PsszSchema.fromJson(text, 'json').ir.ir_version, null);
+  assert.equal(PsszSchema.fromJson(PsszSchema.meta().type('Schema').valueToJson(current.ir, 'ijson'), 'ijson').ir.ir_version, IR_VERSION);
+
+  const refused: [PsszSchema, RegExp][] = [
+    [decoded, /no ir_version marker/],
+    [new PsszSchema({ ...current.ir, ir_version: IR_VERSION + 1 }), /newer than this library/],
+    [new PsszSchema({ ...current.ir, ir_version: 0 }), /newer than this library/],
+  ];
+  for (const [schema, what] of refused) {
+    for (const width of ['auto', 1, 2, 4] as PsszWidth[]) {
+      const error = rejects(() => schema.type(id, { width }), String(what));
+      assert.equal(error.kind, 'schema');
+      assert.match(error.message, what);
+    }
+    const result = validatePssz(schema, id, new Uint8Array(0));
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error.message, what);
+    rejects(() => schema.withHandlers({}).type(id), 'withHandlers');
+    rejects(() => schema.type({ Int: { bits: 8, isSigned: false } }), 'inline type');
+  }
 });

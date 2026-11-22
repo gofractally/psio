@@ -211,6 +211,7 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
 }
 /// Checks every type reachable from `root`. `caps` is the automatic profile.
 pub(crate) fn metadata(schema: &Schema, root: &AnyType, caps: bool) -> PsszResult<()> {
+    schema.check_ir_version()?;
     let mut pending = vec![root];
     let mut seen = HashSet::new();
     while let Some(ty) = pending.pop() {
@@ -309,7 +310,7 @@ fn float_size(float: &crate::pssz_schema_ir::Float) -> PsszResult<usize> {
     }
 }
 fn unsigned_adapter(schema: &Schema, ty: &AnyType, bits: u32) -> PsszResult<()> {
-    if matches!(schema.wire(ty)?.value, AnyValue::Int(ref i) if i.bits == bits && !i.isSigned) {
+    if matches!(schema.direct(ty)?.value, AnyValue::Int(ref i) if i.bits == bits && !i.isSigned) {
         Ok(())
     } else {
         Err(failure(
@@ -318,7 +319,7 @@ fn unsigned_adapter(schema: &Schema, ty: &AnyType, bits: u32) -> PsszResult<()> 
     }
 }
 fn bit_shape(schema: &Schema, custom: &crate::pssz_schema_ir::Custom) -> PsszResult<(usize, bool)> {
-    let (element, count, list) = match (&custom.id[..], &schema.wire(&custom.r#type)?.value) {
+    let (element, count, list) = match (&custom.id[..], &schema.direct(&custom.r#type)?.value) {
         ("bitvector", AnyValue::Array(a)) => (&a.r#type, a.len, false),
         ("bitlist", AnyValue::BoundedList(l)) => (&l.r#type, l.maxCount, true),
         _ => {
@@ -338,6 +339,7 @@ fn bit_shape(schema: &Schema, custom: &crate::pssz_schema_ir::Custom) -> PsszRes
 /// How a value of `ty` sits in a record's fixed region. The same under every
 /// profile: no width enters it.
 pub fn layout<F: PsszFormat>(schema: &Schema, ty: &AnyType) -> PsszResult<Layout> {
+    schema.check_ir_version()?;
     layout_at(schema, ty, 0)
 }
 fn layout_of(schema: &Schema, ty: &AnyType) -> PsszResult<Layout> {
@@ -488,7 +490,7 @@ fn can_be_empty(schema: &Schema, ty: &AnyType, n: usize) -> PsszResult<bool> {
     })
 }
 fn byte_container(schema: &Schema, ty: &AnyType) -> PsszResult<(Option<usize>, bool)> {
-    let (element, bound, exact) = match &schema.wire(ty)?.value {
+    let (element, bound, exact) = match &schema.direct(ty)?.value {
         AnyValue::List(l) => (&l.r#type, None, false),
         AnyValue::BoundedList(l) => (
             &l.r#type,
@@ -506,7 +508,7 @@ fn byte_container(schema: &Schema, ty: &AnyType) -> PsszResult<(Option<usize>, b
             ))
         }
     };
-    match &schema.wire(element)?.value {
+    match &schema.direct(element)?.value {
         AnyValue::Custom(c) if c.id == "char" => unsigned_adapter(schema, &c.r#type, 8)?,
         _ => unsigned_adapter(schema, element, 8)?,
     }
@@ -554,6 +556,7 @@ struct Codec<'a> {
 
 impl<'a> Codec<'a> {
     fn new<F: PsszFormat>(schema: &'a Schema) -> PsszResult<Self> {
+        schema.check_ir_version()?;
         checked::format::<F>()?;
         Ok(Self {
             schema,

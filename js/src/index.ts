@@ -106,6 +106,7 @@ export {
   PsszType,
   PsszError,
   PsszNaN,
+  IR_VERSION,
   jsonToPssz,
   psszToJson,
   validatePssz,
