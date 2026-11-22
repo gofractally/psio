@@ -1526,8 +1526,33 @@ export class Codec {
         // No bound of its own; a member lengthBound bounds its bytes.
         out = annotation ? annotation.exact ?? annotation.max : null;
         break;
+      case 'tuple': {
+        // The extensible positional record of its elements (an element has
+        // no member annotation): the header, then per element its reserved
+        // payload and, when it is not an inline fixed payload, a slot.
+        let total: bigint | null = 4n;
+        for (const member of node.members) {
+          let payload = member.boxed ? null : this.boundOf(member.node, null, true, active);
+          if (!this.fixedPayload(member.node, [])) payload = boundAdd(payload, 4n);
+          total = boundAdd(total, payload);
+        }
+        out = total;
+        break;
+      }
+      case 'variant': {
+        // One selector byte, then the widest alternative's payload;
+        // unbounded when any alternative is.
+        let widest: bigint | null = 0n;
+        for (const member of node.members) {
+          const payload = member.boxed ? null : this.boundOf(member.node, null, true, active);
+          if (payload === null || widest === null) widest = null;
+          else if (payload > widest) widest = payload;
+        }
+        out = boundAdd(widest, 1n);
+        break;
+      }
       default:
-        break; // tuple, variant, bit types: no inferred bound
+        break; // bit types: no inferred bound
     }
     active.pop();
     if (annotation === null) node.boundMemo[slot] = out;

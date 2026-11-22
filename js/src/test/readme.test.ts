@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   PsszSchema, RecordView, boundedList, boundedUtf8, bytes, custom, emitWit, fixedBytes, fromHex, generateSchema, i32,
   i64, keyPrefixUpperBound, lazy, list, nameToNumber, numberToName, optional, pjsonDecode, pjsonEncode, pjsonValidate,
-  PjsonObject, PsszError, map, nested, pair, record, set, toHex, transparent, tuple, u16, u32, u64, u8, utf8, timePoint,
+  PjsonObject, PsszError, map, nested, pair, record, set, toHex, transparent, tuple, u16, u32, u64, u8, utf8, timePoint, variant,
   type Infer, type ListView, type PsszCustomHandler, type TypeDef,
 } from '../index.js';
 
@@ -50,6 +50,9 @@ test('README: typed definitions', () => {
   assert.equal(Small.width, 1);
   assert.equal(record('Note', { text: utf8 }, { maxDynamicData: 200 }).width, 1);
   assert.equal(record('Open', { text: utf8 }).width, 4);
+  assert.equal(tuple(u64, boundedUtf8(32), u8).width, 1);
+  assert.equal(record('Event', { at: u64, what: variant({ tick: u8, point: tuple(u32, u32) }) }).width, 1);
+  assert.equal(tuple(u32, utf8).width, 4);
   assert.equal(Small.type({ width: 2 }).width, 2);
 
   interface Tree { label: string; children: Tree[] }

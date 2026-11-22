@@ -171,15 +171,26 @@ text form of its integers. A variant alternative's I-JSON key is its name, or
 `variant({ 0: alt(u32, { ijsonName: 'uint32' }), 1: ... })`.
 
 **Widths, caps and bounds.** Offset widths are derived from the type: a
-record whose size is bounded (fixed-size members, bounded strings and lists,
-or an explicit `maxDynamicData`) uses 1- or 2-byte offsets, otherwise 4.
-Bounds and caps are enforced on encode and on decode.
+record or tuple whose size is bounded uses 1- or 2-byte offsets, otherwise 4.
+The bound is inferred (`docs/pssz-spec.md` §3.2): fixed-size members,
+bounded strings and lists, a member `lengthBound`, a variant (one selector
+byte plus its widest alternative) and a tuple or pair (the record of its
+elements: a 4-byte header, each element's payload, 4 more for each variable
+element) are bounded when everything they hold is; a plain string or list
+without a bound is not, and neither is anything holding one. An explicit
+`maxDynamicData` always rules: the width follows from the cap alone, whether
+the inferred bound is smaller, larger or absent. A list's offset table is
+always 4 bytes wide. Bounds and caps are enforced on encode and on every
+decode (`decode`, `validate`, bytes to text, a view's `toValue()`).
 
 ```typescript
 const Small = record('Small', { tag: boundedUtf8(8), ids: boundedList(u16, 4), key: fixedBytes(4) });
 Small.width;                                    // 1
 record('Note', { text: utf8 }, { maxDynamicData: 200 }).width;   // 1
 record('Open', { text: utf8 }).width;           // 4
+tuple(u64, boundedUtf8(32), u8).width;          // 1   (4 + 8 + 36 + 1 = 49 bytes at most)
+record('Event', { at: u64, what: variant({ tick: u8, point: tuple(u32, u32) }) }).width;   // 1
+tuple(u32, utf8).width;                         // 4   (an unbounded element)
 Small.type({ width: 2 });                       // the explicit psio::pssz_<2> profile, a PsszType
 ```
 
