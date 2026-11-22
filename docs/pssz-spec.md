@@ -791,19 +791,29 @@ The default depends on the field's type:
 
 ### 7.2 Trailing-default pruning (encoder)
 
-When the trailing K fields of a record are all at their default
-values, the encoder MAY drop them entirely:
+Pruning is **mandatory**: a value has exactly one encoding.
 
-- Skip writing their fixed-region contribution.
-- Write a smaller `fixed_size` header reflecting only the unpruned
+Any field added after a type is first published must be `Optional(T)`.
+It therefore always owns an offset slot, and the only field state that
+can be omitted is an absent optional. When the trailing K fields of an
+extensible record are all absent optionals, the encoder MUST drop them:
+
+- Skip writing their offset slots.
+- Write the smaller `fixed_size` header reflecting only the unpruned
   prefix.
 
-Decoders must accept pruned records (the synthesis path in §7.1
-covers this case). The encoder's choice to prune is informational —
-two pssz encodings of the same value differing only in pruning are
-both valid and both must round-trip.
+Readers MUST honor the header's fixed-region size rather than assuming
+their own schema's, and MUST reject a record whose last written slot is
+an absent optional (it should have been pruned). A reader cannot make
+that judgement when the writer's last slot is one the reader does not
+know; it then accepts the frame and can report that unknown fields were
+present. A present-but-empty value (`Some("")`, `Some([])`,
+`Some(None)`) is a value, not a default, and is never pruned. A header
+that is smaller than the required (non-optional) prefix, that cuts a
+field, that exceeds the frame, or whose unknown suffix is not a whole
+number of W-byte slots is invalid.
 
-A canonical encoding (§15) requires pruning to maximum extent.
+DWNC records carry no header: they are never pruned and never extended.
 
 ### 7.3 Backward compatibility (old decoder, new encoder)
 
@@ -842,7 +852,10 @@ not change.
 
 ### 7.5 What you can change without breaking old decoders
 
-✓ Append a new field at the end (any type).
+✓ Append a new **optional** field at the end. (A non-optional appended
+  field has no way to be absent: old data is rejected by the new reader.
+  The wire carries no schema, so this rule is enforced by schema-upgrade
+  checks, not by readers.)
 ✓ Change a field's `length_bound{.max}` annotation to a tighter or
   looser value, provided W doesn't change. (If W changes, callers
   must rebuild against the new schema; the wire format is incompatible.)
@@ -1224,8 +1237,9 @@ The conformance corpus must include:
 
 A pssz encoding is **canonical** when:
 
-1. Trailing-default pruning is applied to its maximum extent: any
-   trailing field at its default value is dropped from the encoding.
+1. Trailing pruning is applied to its maximum extent: every trailing
+   absent optional field is dropped from the encoding (§7.2). This is
+   mandatory, so every valid encoding is canonical in this respect.
 2. Variable-field offsets in the fixed region are in field-declaration
    order. (Implementations are technically free to permute payloads
    if they emit consistent offsets, but canonical pssz requires
