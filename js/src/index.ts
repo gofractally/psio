@@ -1,111 +1,20 @@
-// psio — JavaScript/TypeScript serialization library
+// psio — PSIO serialization for JavaScript and TypeScript.
 //
-// Schema-first fracpack binary format with full TypeScript type inference,
-// zero-copy views, and cross-language compatibility with C++ and Rust.
+// PSSZ (binary), key (order-preserving binary), JSON / I-JSON (text) and
+// pjson, from a Schema IR fetched at run time or from types declared in
+// TypeScript. See README.md.
 
 export {
-  // Core types
-  FracType,
-  StructType,
-  RawFieldResult,
-  Infer,
-  SchemaNode,
-  FracpackError,
-
-  // Scalar types
-  bool,
-  u8, u16, u32, u64,
-  i8, i16, i32, i64,
-  f32, f64,
-
-  // Variable-size types
-  str,
-  bytes,
-
-  // Container constructors
-  optional,
-  vec,
-  array,
-  tuple,
-  variant,
-  map,
-
-  // Struct constructors
-  struct,
-  fixedStruct,
-} from './fracpack.js';
-
-export {
-  // Varint encoding
-  encodeVaruint32,
-  decodeVaruint32,
-  encodeVarint32,
-  decodeVarint32,
-  packVaruint32,
-  unpackVaruint32,
-  packVarint32,
-  unpackVarint32,
-} from './varint.js';
-
-export {
-  // Name compression
-  nameToNumber,
-  numberToName,
-  hashName,
-  isHashName,
-  isCompressedName,
-} from './compress-name.js';
-
-export {
-  // Schema generation (AnyType format, compatible with Rust)
-  type AnyType,
-  type Schema,
-  typeToAnyType,
-  generateSchema,
-} from './schema.js';
-
-export {
-  // WIT generation
-  type WitFunc,
-  type WitOptions,
-  generateWit,
-  typeToWitExpr,
-  toKebabCase,
-} from './wit.js';
-
-export {
-  // JSON conversion
-  fracToJson,
-  jsonToFrac,
-  valueToJson,
-  jsonToValue,
-  toHex,
-  fromHex,
-} from './json.js';
-
-export {
-  // Validation
-  type ValidationResult,
-  validate,
-} from './validate.js';
-
-export {
-  // In-place mutation
-  spliceBuffer,
-  patchOffset,
-  MutView,
-  type MutViewOptions,
-} from './mutation.js';
-
-export { PJSON_WIRE_REVISION, createPjson, PjsonError, PjsonDecimal, PjsonFloat, PjsonString,
-         PjsonTypedArray, PjsonRows, PjsonObject, type PjsonValue } from './pjson.js';
-
-export {
-  // Schema-driven PSSZ + JSON / I-JSON (the primary binary format)
+  // Schema-driven codec: PSSZ, key, JSON / I-JSON and views from a Schema IR
   PsszSchema,
   PsszType,
   PsszError,
   PsszNaN,
+  PsszView,
+  RecordView,
+  TupleView,
+  ListView,
+  VariantView,
   IR_VERSION,
   jsonToPssz,
   psszToJson,
@@ -138,6 +47,33 @@ export {
 } from './pssz.js';
 
 export {
+  // Typed definitions: declare a type, get its Schema IR and a typed codec
+  TypeDef,
+  Field,
+  Alt,
+  generateSchema,
+  bool, char,
+  u8, u16, u32, u64, u128, u256,
+  i8, i16, i32, i64, i128,
+  f32, f64,
+  utf8, boundedUtf8, rawString,
+  bytes, boundedBytes, fixedBytes,
+  bitvector, bitlist,
+  optional, list, boundedList, array, tuple,
+  record, field, variant, alt,
+  enumeration, timePoint, duration, custom, box, lazy,
+  type Infer,
+  type InferView,
+  type CustomHandler,
+  type FieldOptions,
+  type AltOptions,
+  type RecordOptions,
+  type LengthBoundOption,
+  type IntText,
+  type TypeDefOptions,
+} from './types.js';
+
+export {
   // Time values (docs/time.md): bigint ticks, exact Date / RFC 3339 conversions
   timePointToIso,
   timePointFromIso,
@@ -150,3 +86,17 @@ export {
   type TimeUnit,
   type TickType,
 } from './time.js';
+
+export { toHex, fromHex } from './hex.js';
+
+export {
+  // Account-name compression (a 64-bit number <-> a short name)
+  nameToNumber,
+  numberToName,
+  hashName,
+  isHashName,
+  isCompressedName,
+} from './compress-name.js';
+
+export { PJSON_WIRE_REVISION, createPjson, PjsonError, PjsonDecimal, PjsonFloat, PjsonString,
+         PjsonTypedArray, PjsonRows, PjsonObject, type PjsonValue } from './pjson.js';
