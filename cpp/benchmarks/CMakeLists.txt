@@ -254,11 +254,12 @@ target_compile_options(psio_bench_json_text PRIVATE -O3 -DNDEBUG)
 # and allocations. The old engine is built, in its own translation unit, when
 # its sources are found (psio1 headers + rapidjson; override the two paths
 # below); otherwise the bench reports the new engine alone.
-set(PSIO_BENCH_OLD_GRAPHQL_INCLUDE "/Users/dlarimer/psibase-claude-pssz/libraries/psio1/include"
-   CACHE PATH "Include root of the previous engine (psio1/graphql.hpp)")
-set(PSIO_BENCH_OLD_GRAPHQL_RAPIDJSON "/Users/dlarimer/psibase-claude-pssz/external/rapidjson/include"
-   CACHE PATH "rapidjson include root for the previous engine")
-if(EXISTS "${PSIO_BENCH_OLD_GRAPHQL_INCLUDE}/psio1/graphql.hpp" AND
+set(PSIO_BENCH_OLD_GRAPHQL_INCLUDE ""
+   CACHE PATH "Include root of the previous engine (psio1/graphql.hpp); empty: new engine only")
+set(PSIO_BENCH_OLD_GRAPHQL_RAPIDJSON ""
+   CACHE PATH "rapidjson include root for the previous engine; empty: new engine only")
+if(PSIO_BENCH_OLD_GRAPHQL_INCLUDE AND PSIO_BENCH_OLD_GRAPHQL_RAPIDJSON AND
+   EXISTS "${PSIO_BENCH_OLD_GRAPHQL_INCLUDE}/psio1/graphql.hpp" AND
    EXISTS "${PSIO_BENCH_OLD_GRAPHQL_RAPIDJSON}/rapidjson/encodings.h")
    # psio1's float-to-text routine is the one compiled unit the engine needs.
    add_library(psio_bench_graphql_old OBJECT bench_graphql_old.cpp
