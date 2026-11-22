@@ -782,17 +782,14 @@ namespace
 
    std::string render()
    {
-      psio::SchemaBuilder builder;
-      std::string         types;
+      std::string types;
       for_each_type([&]<typename T>(std::type_identity<T>) {
-         builder.insert<T>(type_id<T>());
          types += std::string(types.empty() ? "" : ",\n") + "{\"id\":" + quoted(type_id<T>()) +
                   ",\"composite\":" + (is_composite_v<T> ? "true" : "false") + "}";
       });
-      const psio::Schema schema = std::move(builder).build();
-      std::string        out    = "{\"version\":1,\"schema_ir\":\"" +
-                                  to_hex(psio::encode(psio::pssz{}, schema)) + "\",\"types\":[\n" +
-                                  types + "\n],\"vectors\":[\n";
+      std::string out = "{\"version\":1,\"schema_ir\":\"" +
+                        to_hex(psio::encode(psio::pssz{}, fixture_schema())) + "\",\"types\":[\n" +
+                        types + "\n],\"vectors\":[\n";
       for (std::size_t i = 0; i < rows.size(); ++i)
       {
          const Row& r = rows[i];

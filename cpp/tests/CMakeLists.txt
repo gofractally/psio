@@ -462,6 +462,31 @@ psio_add_test(psio_time_key_conformance_tests time_key_conformance_tests.cpp)
 target_compile_definitions(psio_time_key_conformance_tests PRIVATE
    PSIO_TIME_KEY_VECTORS="${PSIO_TIME_KEY_VECTORS}")
 
+# Shared cross-language Schema IR text fixture
+# (conformance/schema-json-vectors.json): psio::Schema as PSSZ bytes, json
+# and ijson. Emitted here, consumed by ctest, cargo test
+# (rust/psio/tests/schema_json_conformance.rs) and the JS tests
+# (js/src/test/schema-json-conformance.test.ts).
+set(PSIO_SCHEMA_JSON_VECTORS ${CMAKE_SOURCE_DIR}/conformance/schema-json-vectors.json)
+add_executable(psio_schema_json_conformance_emit schema_json_conformance_emit.cpp)
+target_link_libraries(psio_schema_json_conformance_emit PRIVATE psio)
+target_compile_features(psio_schema_json_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_schema_json_conformance_regen
+         COMMAND psio_schema_json_conformance_emit --check ${PSIO_SCHEMA_JSON_VECTORS})
+psio_add_test(psio_schema_json_conformance_tests schema_json_conformance_tests.cpp)
+target_compile_definitions(psio_schema_json_conformance_tests PRIVATE
+   PSIO_SCHEMA_JSON_VECTORS="${PSIO_SCHEMA_JSON_VECTORS}")
+# psio::Schema through psio::json / psio::ijson with exceptions and RTTI off.
+add_executable(psio_schema_json_noexceptions_test schema_json_noexceptions.cpp)
+target_include_directories(psio_schema_json_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_schema_json_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_schema_json_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_schema_json_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_schema_json_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_schema_json_noexceptions_test COMMAND psio_schema_json_noexceptions_test)
+
 # Key / time and schema fidelity together: time ids as built-in custom
 # presentations, enums and raw / UTF-8 strings in keys, member bounds in keys.
 psio_add_test(psio_key_time_schema_tests key_time_schema_tests.cpp)

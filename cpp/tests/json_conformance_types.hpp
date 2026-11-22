@@ -26,6 +26,7 @@
 #include <psio/json.hpp>
 #include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
+#include <psio/schema_builder.hpp>
 
 #include <array>
 #include <cstdint>
@@ -503,6 +504,20 @@ namespace json_conf
            std::type_identity<psio::uint128>{}, std::type_identity<psio::int128>{},
            std::type_identity<psio::uint256>{}, std::type_identity<Wide>{},
            std::type_identity<Account>{}, std::type_identity<Transfer>{});
+   }
+
+   // One Schema holding every type under its fixture id. (Also recorded, as
+   // text, by conformance/schema-json-vectors.json.)
+   inline const psio::Schema& fixture_schema()
+   {
+      static const psio::Schema schema = [] {
+         psio::SchemaBuilder builder;
+         for_each_type([&]<typename T>(std::type_identity<T>) {
+            if constexpr (has_ir<T>) builder.insert<T>(type_id<T>());
+         });
+         return std::move(builder).build();
+      }();
+      return schema;
    }
 
    // ── Fixture rows ──────────────────────────────────────────────────────

@@ -50,18 +50,6 @@ namespace
       return out;
    }
 
-   // One Schema holding every type under its fixture id.
-   const psio::Schema& fixture_schema()
-   {
-      static const psio::Schema schema = [] {
-         psio::SchemaBuilder builder;
-         for_each_type([&]<typename T>(std::type_identity<T>) {
-            if constexpr (has_ir<T>) builder.insert<T>(type_id<T>());
-         });
-         return std::move(builder).build();
-      }();
-      return schema;
-   }
    // The fixture's custom text forms, each taken from the type's adapter.
    const psio::pssz_ir::CustomHandlers& fixture_handlers()
    {

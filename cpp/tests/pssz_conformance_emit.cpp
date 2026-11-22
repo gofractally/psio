@@ -2029,17 +2029,6 @@ namespace
       }
       return out + "\"";
    }
-   // The Schema IR of every fixture type, each under its fixture id, so a
-   // consumer holding only this file can run the schema-driven codec.
-   const psio::Schema& fixture_schema()
-   {
-      static const psio::Schema schema = [] {
-         psio::SchemaBuilder builder;
-         for_each_type([&]<typename T>(std::type_identity<T>) { builder.insert<T>(type_id<T>()); });
-         return std::move(builder).build();
-      }();
-      return schema;
-   }
    // Whether the IR describes T well enough for the schema-driven codec to
    // agree with the typed one. See pssz_conf::ir_expressible.
    template <typename T>

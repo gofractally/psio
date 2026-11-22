@@ -16,6 +16,7 @@
 
 #include <psio/pssz.hpp>
 #include <psio/pssz_view.hpp>
+#include <psio/schema_builder.hpp>
 #include <psio/schema_ir.hpp>
 
 #include <array>
@@ -647,6 +648,19 @@ namespace pssz_conf
    void for_each_type(F&& f)
    {
       each_type(registry{}, std::forward<F>(f));
+   }
+
+   // The Schema IR of every fixture type, each under its fixture id, so a
+   // consumer holding only the fixture can run the schema-driven codec.
+   // (Also recorded, as text, by conformance/schema-json-vectors.json.)
+   inline const psio::Schema& fixture_schema()
+   {
+      static const psio::Schema schema = [] {
+         psio::SchemaBuilder builder;
+         for_each_type([&]<typename T>(std::type_identity<T>) { builder.insert<T>(type_id<T>()); });
+         return std::move(builder).build();
+      }();
+      return schema;
    }
 
    // ── Schema IR coverage ────────────────────────────────────────────────

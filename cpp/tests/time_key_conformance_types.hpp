@@ -10,6 +10,7 @@
 #include <psio/key.hpp>
 #include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
+#include <psio/schema_builder.hpp>
 #include <psio/time.hpp>
 
 #include <chrono>
@@ -171,6 +172,18 @@ namespace tk_conf
                       KInts, KFloats, KTime, KArray, KVariant, KNested,
                       // Appended (the ids above keep their schema positions).
                       mono_seconds, mono_micros, mono_ms32, Timer, KMono>>{});
+   }
+
+   // The Schema IR of every fixture type, each under its fixture id. (Also
+   // recorded, as text, by conformance/schema-json-vectors.json.)
+   inline const psio::Schema& fixture_schema()
+   {
+      static const psio::Schema schema = [] {
+         psio::SchemaBuilder builder;
+         for_each_type([&]<typename T>(std::type_identity<T>) { builder.insert<T>(type_id<T>()); });
+         return std::move(builder).build();
+      }();
+      return schema;
    }
 
    // Composite key types: the ones with key-prefix rows.
