@@ -2321,6 +2321,117 @@ namespace psio {
    template <typename T>
    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
 
+   // ── Evolution check ───────────────────────────────────────────────────
+   //
+   // `pssz_evolves_from<Old, New>` is true iff data written for `Old` is
+   // readable as `New` and data written for `New` is readable as `Old` under
+   // the automatic (type-derived width) profile:
+   //
+   //   - New's fields are Old's fields, in order, followed only by plain
+   //     optional fields (an appended field must own an offset slot and be
+   //     able to be absent);
+   //   - the two have the same offset width. An optional field may not be
+   //     added if it would change the type's width: an explicit
+   //     maxDynamicData always rules, and without one the width falls back to
+   //     the bound inferred from the fields, which an appended field can
+   //     move. Reserve room with an explicit maxDynamicData to evolve;
+   //   - DWNC status is unchanged, and a DWNC record does not gain fields.
+   //
+   // A prefix field may itself have evolved (a nested record, or a vector /
+   // array / optional / variant of one) provided it meets the same rules and
+   // keeps its own width and presence form. The wire carries no schema, so
+   // this is a compile-time schema-upgrade check, e.g.
+   //
+   //   static_assert(psio::pssz_evolves_from<AccountV1, AccountV2>);
+   namespace detail::pssz_impl
+   {
+      template <typename Old, typename New>
+      consteval bool layout_evolves() noexcept;
+
+      template <Record Old, Record New>
+      consteval bool record_evolves() noexcept
+      {
+         using RO = record_traits<Old>;
+         using RN = record_traits<New>;
+         constexpr std::size_t NO = RO::member_count;
+         constexpr std::size_t NN = RN::member_count;
+         if constexpr (is_std_tuple_v<Old> != is_std_tuple_v<New> ||
+                       ::psio::is_dwnc_v<Old> != ::psio::is_dwnc_v<New> ||
+                       has_binary_adapter_v<Old> || has_binary_adapter_v<New> || NN < NO)
+            return false;
+         else if constexpr (::psio::is_dwnc_v<Old> && NN != NO)
+            return false;
+         else
+         {
+            constexpr bool prefix = []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return ((::psio::has_as_override_v<
+                           typename record_member_annotations<Old, Is>::value_t> ==
+                           ::psio::has_as_override_v<
+                              typename record_member_annotations<New, Is>::value_t> &&
+                        (::psio::has_as_override_v<
+                            typename record_member_annotations<Old, Is>::value_t>
+                            ? std::is_same_v<typename RO::template member_type<Is>,
+                                             typename RN::template member_type<Is>>
+                            : layout_evolves<typename RO::template member_type<Is>,
+                                             typename RN::template member_type<Is>>())) &&
+                       ...);
+            }(std::make_index_sequence<NO>{});
+            constexpr bool suffix = []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (omittable_field_v<New, NO + Is> && ...);
+            }(std::make_index_sequence<NN - NO>{});
+            return prefix && suffix;
+         }
+      }
+
+      template <typename Old, typename New>
+      consteval bool layout_evolves() noexcept
+      {
+         if constexpr (std::is_same_v<Old, New>)
+            return true;
+         else if constexpr (::psio::auto_pssz_width<Old>() != ::psio::auto_pssz_width<New>() ||
+                            is_fixed_v<Old> != is_fixed_v<New>)
+            return false;
+         else if constexpr (is_psio_box_v<Old> && is_psio_box_v<New>)
+            return layout_evolves<typename is_psio_box<Old>::elem,
+                                  typename is_psio_box<New>::elem>();
+         else if constexpr (is_std_optional_v<Old> && is_std_optional_v<New>)
+            return optional_uses_selector_v<typename Old::value_type> ==
+                      optional_uses_selector_v<typename New::value_type> &&
+                   layout_evolves<typename Old::value_type, typename New::value_type>();
+         else if constexpr (is_std_vector_v<Old> && is_std_vector_v<New>)
+            return layout_evolves<typename Old::value_type, typename New::value_type>();
+         else if constexpr (is_std_array_v<Old> && is_std_array_v<New>)
+         {
+            if constexpr (std::tuple_size_v<Old> != std::tuple_size_v<New>)
+               return false;
+            else
+               return layout_evolves<typename Old::value_type, typename New::value_type>();
+         }
+         else if constexpr (is_std_variant_v<Old> && is_std_variant_v<New>)
+         {
+            if constexpr (std::variant_size_v<Old> != std::variant_size_v<New>)
+               return false;
+            else
+               return []<std::size_t... Is>(std::index_sequence<Is...>) {
+                  return (layout_evolves<std::variant_alternative_t<Is, Old>,
+                                         std::variant_alternative_t<Is, New>>() &&
+                          ...);
+               }(std::make_index_sequence<std::variant_size_v<Old>>{});
+         }
+         else if constexpr (Record<Old> && Record<New>)
+            return record_evolves<Old, New>();
+         else
+            return false;
+      }
+   }  // namespace detail::pssz_impl
+
+   template <typename Old, typename New>
+   inline constexpr bool pssz_evolves_from_v =
+      detail::pssz_impl::layout_evolves<Old, New>();
+
+   template <typename Old, typename New>
+   concept pssz_evolves_from = pssz_evolves_from_v<Old, New>;
+
    // Explicit-width tag — `psio::pssz_<1|2|4>`. Not on the public
    // surface; retained so byte-parity regressions vs. v1's
    // `frac_format_pssz{8,16,32}` can name the exact width at the call

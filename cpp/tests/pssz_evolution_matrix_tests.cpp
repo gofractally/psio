@@ -1118,3 +1118,128 @@ TEST_CASE("automatic pssz without a budget can change width when a field is appe
    REQUIRE(psio::encode(psio::pssz16{}, old_value) == psio::encode(psio::pssz16{}, new_value));
    REQUIRE(psio::validate<U1>(psio::pssz16{}, psio::encode(psio::pssz16{}, old_value)).ok());
 }
+
+// ── Compile-time evolution check ─────────────────────────────────────────
+namespace evo_check
+{
+   struct Reordered
+   {
+      std::string   s;
+      std::uint32_t a;
+   };
+   PSIO_REFLECT(Reordered, s, a)
+   struct Retyped
+   {
+      std::uint64_t a;
+      std::string   s;
+   };
+   PSIO_REFLECT(Retyped, a, s)
+   struct PairPlus  // DWNC record with an appended optional
+   {
+      std::uint8_t                x;
+      std::uint8_t                y;
+      std::optional<std::uint8_t> z;
+   };
+   PSIO_REFLECT(PairPlus, x, y, z)
+   struct PairSame  // a different DWNC type with identical fields
+   {
+      std::uint8_t x;
+      std::uint8_t y;
+   };
+   PSIO_REFLECT(PairSame, x, y)
+   struct R0Dwnc  // R0's fields, but DWNC
+   {
+      std::uint32_t a;
+      std::string   s;
+   };
+   PSIO_REFLECT(R0Dwnc, a, s)
+   // The unbudgeted width-crossing lineage, with room reserved explicitly.
+   struct B0
+   {
+      std::array<std::uint8_t, 251> blob;
+   };
+   PSIO_REFLECT(B0, blob)
+   struct B1
+   {
+      std::array<std::uint8_t, 251> blob;
+      std::optional<std::uint8_t>   extra;
+   };
+   PSIO_REFLECT(B1, blob, extra)
+}  // namespace evo_check
+PSIO_TYPE_ATTRS(evo_check::PairPlus, psio::definition_will_not_change{})
+PSIO_TYPE_ATTRS(evo_check::PairSame, psio::definition_will_not_change{})
+PSIO_TYPE_ATTRS(evo_check::R0Dwnc, psio::definition_will_not_change{})
+PSIO_TYPE_ATTRS(evo_check::B0, psio::max_dynamic_data_spec{.value = 1024})
+PSIO_TYPE_ATTRS(evo_check::B1, psio::max_dynamic_data_spec{.value = 1024})
+
+// Usable directly in static_assert.
+static_assert(psio::pssz_evolves_from<evo::R0, evo::R3>);
+static_assert(!psio::pssz_evolves_from<evo::R0, evo::Bad1>);
+
+TEST_CASE("pssz_evolves_from accepts only optional suffixes at an unchanged width",
+          "[pssz][evolution][check]")
+{
+   using namespace evo;
+   using namespace evo_check;
+   // Optional suffixes, one or several steps, and identity.
+   STATIC_REQUIRE(psio::pssz_evolves_from<R0, R0>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<R0, R1>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<R0, R2>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<R1, R3>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<R0, N1>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<R0, P1>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<R0, evo_presence::Tail>);
+   // Not: removing fields, a required appended field, reordering, retyping.
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R1, R0>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R3, R2>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0, Bad1>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0, Reordered>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0, Retyped>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R1, N1>);  // suffix field type differs
+   // A prefix field may itself have evolved, directly or inside a container.
+   STATIC_REQUIRE(psio::pssz_evolves_from<Parent0, Parent2>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Parent2, Parent0>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<VecOld, VecNew>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<OptOld, OptNew>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<VarOld, VarNew>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<VecNew, VecOld>);
+   STATIC_REQUIRE_FALSE((psio::pssz_evolves_from<std::array<R0, 2>, std::array<R1, 3>>));
+   // DWNC types cannot evolve, and DWNC status cannot change.
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<evo_presence::Pair, PairPlus>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<evo_presence::Pair, PairSame>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0, R0Dwnc>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0Dwnc, R0>);
+
+   // Width. Without an explicit budget the width falls back to the inferred
+   // bound, and this appended optional moves it from one byte to two: the
+   // step is not a legal evolution.
+   STATIC_REQUIRE(psio::auto_pssz_width_v<evo_unbudgeted::U0> == 1);
+   STATIC_REQUIRE(psio::auto_pssz_width_v<evo_unbudgeted::U1> == 2);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<evo_unbudgeted::U0, evo_unbudgeted::U1>);
+   // The same fields with an explicit budget reserving room: legal.
+   STATIC_REQUIRE(psio::auto_pssz_width_v<B0> == 2);
+   STATIC_REQUIRE(psio::auto_pssz_width_v<B1> == 2);
+   STATIC_REQUIRE(psio::pssz_evolves_from<B0, B1>);
+   // The explicit cap always rules, so a budgeted lineage evolves at every
+   // width class, and changing the cap across a class does not.
+   STATIC_REQUIRE(psio::pssz_evolves_from<evo_w1::V1, evo_w1::V3>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<evo_w2::V1, evo_w2::V2>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<evo_w4::V2, evo_w4::V3>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<evo_w1::V1, evo_w2::V2>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<evo_unbudgeted::U0, B1>);
+   // Mixed parent/child widths: evolving either side keeps both widths.
+   STATIC_REQUIRE(psio::pssz_evolves_from<evo_auto::Wide0, evo_auto::Wide1>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<evo_mixed::Narrow0, evo_mixed::NarrowChild1>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<evo_mixed::Narrow0, evo_mixed::NarrowParent1>);
+
+   // The trait agrees with the bytes: a legal step interoperates...
+   B0 old_value{};
+   old_value.blob[3] = 4;
+   const auto old_bytes = psio::encode(psio::pssz{}, old_value);
+   REQUIRE(psio::encode(psio::pssz{}, B1{old_value.blob, std::nullopt}) == old_bytes);
+   REQUIRE(psio::validate<B1>(psio::pssz{}, old_bytes).ok());
+   REQUIRE(psio::validate<B0>(psio::pssz{},
+                              psio::encode(psio::pssz{}, B1{old_value.blob, std::uint8_t{1}}))
+              .ok());
+   // ...and the illegal one does not (pinned in the unbudgeted test above).
+}
