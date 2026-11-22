@@ -129,7 +129,15 @@ namespace
             if (!v) return "pssz does not decode";
             auto key = psio::encode(psio::key{}, *v);
             if (i && !bytes_less(last, key)) return "keys not ascending at " + std::to_string(i);
-            if (i && !(*last_value < *v)) return "values not ascending at " + std::to_string(i);
+            // (A type without a value order, such as one holding a nested
+            // value, has key-order-bits rows instead.)
+            if constexpr (requires(const T& a, const T& b) { a < b; })
+            {
+               if (i && !(*last_value < *v))
+                  return "values not ascending at " + std::to_string(i);
+            }
+            else
+               return "key-order row for a type without a value order";
             last       = std::move(key);
             last_value = v;
          }

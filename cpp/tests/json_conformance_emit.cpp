@@ -1234,6 +1234,105 @@ namespace
       return schema;
    }
 
+   // ── Nested values ─────────────────────────────────────────────────────
+   //
+   // The text of a nested<T> is the text of the T its bytes hold, in both
+   // formats; reading stores the canonical encoding of the T read.
+   void emit_nested()
+   {
+      const NestedArgs args{text("bob"), 5, text("rent")};
+      const NestedArgs plain{text(""), 0, std::nullopt};
+      const NestedArgs big{text("é"), std::numeric_limits<u64>::max(), text("")};
+      {
+         // The bytes are those of the byte list holding the inner encoding.
+         const auto inner = psio::encode(psio::pssz{}, args);
+         if (psio::encode(psio::pssz{}, NestedRecord::from(args)) !=
+             psio::encode(psio::pssz{}, Bytes(inner.begin(), inner.end())))
+            die("a nested value does not encode as the byte list of its inner encoding");
+      }
+      value<NestedArgs>("some", args);
+      value<NestedU64>("zero", NestedU64::from(0));
+      value<NestedU64>("safe_integer", NestedU64::from((u64{1} << 53) - 1));
+      // Beyond 2^53 - 1 the inner u64 is an I-JSON string, as it is bare.
+      value<NestedU64>("wide", NestedU64::from(std::numeric_limits<u64>::max()));
+      value<NestedRecord>("some", NestedRecord::from(args));
+      value<NestedRecord>("plain", NestedRecord::from(plain));
+      value<NestedRecord>("wide", NestedRecord::from(big));
+      value<NestedLater>("some", NestedLater::from(args));
+      value<Opt<NestedU64>>("none", std::nullopt);
+      value<Opt<NestedU64>>("some", NestedU64::from(7));
+      value<Vec<NestedRecord>>("empty", {});
+      value<Vec<NestedRecord>>("two", {NestedRecord::from(args), NestedRecord::from(plain)});
+      value<NestedChoice>("scalar", NestedChoice{std::in_place_index<0>, 3u});
+      value<NestedChoice>("nested", NestedChoice{std::in_place_index<1>, NestedRecord::from(args)});
+      value<NestedAction>(
+         "full", NestedAction{9, NestedRecord::from(args),
+                              psio::nested<NestedU64>::from(NestedU64::from(u64{1} << 60)),
+                              NestedRecord::from(plain),
+                              {NestedU64::from(1), NestedU64::from(u64{1} << 60)}});
+      value<NestedAction>("sparse",
+                          NestedAction{0, NestedRecord::from(plain),
+                                       psio::nested<NestedU64>::from(NestedU64::from(0)),
+                                       std::nullopt,
+                                       {}});
+
+      // Accepted texts that are not canonical: the inner value is read by
+      // the inner type's own rules (any member order, unknown keys skipped,
+      // a missing optional member, the last of a repeated key), and what is
+      // stored is its canonical encoding.
+      const std::string canonical = R"({"to":"bob","amount":5,"memo":"rent"})";
+      accept_both<NestedRecord>("members_out_of_order", R"({"memo":"rent","amount":5,"to":"bob"})",
+                                canonical);
+      accept_both<NestedRecord>("unknown_member_skipped",
+                                R"({"to":"bob","fee":[1,{"x":null}],"amount":5,"memo":"rent"})",
+                                canonical);
+      accept_both<NestedRecord>("repeated_member_last_wins",
+                                R"({"to":"alice","amount":5,"memo":"rent","to":"bob"})", canonical);
+      accept_both<NestedRecord>("missing_optional_member", R"({"to":"","amount":0})",
+                                R"({"to":"","amount":0,"memo":null})");
+      accept_both<NestedRecord>("whitespace", " { \"to\" : \"bob\" , \"amount\" : 5 , \"memo\" : \"rent\" } ",
+                                canonical);
+      accept<NestedU64>("ijson", "string_form_of_a_small_integer", R"("5")", "5");
+      accept<NestedRecord>("ijson", "inner_integer_as_string", R"({"to":"bob","amount":"5","memo":"rent"})",
+                           canonical);
+      accept_both<NestedAction>(
+         "inner_values_normalised",
+         R"({"many":[],"twice":0,"args":{"amount":0,"to":""},"method":0,"extra":true})",
+         R"({"method":0,"args":{"to":"","amount":0,"memo":null},"twice":0,"maybe":null,"many":[]})");
+
+      // Rejected: the text is not the inner type's text.
+      reject_both<NestedU64>("null", "null");
+      reject_both<NestedU64>("negative", "-1");
+      reject_both<NestedU64>("fraction", "1.5");
+      reject_both<NestedU64>("out_of_range", "18446744073709551616");
+      reject_both<NestedU64>("hex_bytes", R"("0500000000000000")");
+      reject_both<NestedU64>("array_of_bytes", "[5,0,0,0,0,0,0,0]");
+      reject<NestedU64>("json", "string_form_under_json", R"("5")");
+      reject<NestedU64>("ijson", "bare_integer_beyond_2_53", "9007199254740992");
+      reject_both<NestedRecord>("null", "null");
+      reject_both<NestedRecord>("hex_bytes", R"("0A0B")");
+      reject_both<NestedRecord>("array", "[]");
+      reject_both<NestedRecord>("missing_required_member", R"({"to":"bob","memo":null})");
+      reject_both<NestedRecord>("member_of_the_wrong_type", R"({"to":5,"amount":5,"memo":null})");
+      reject_both<NestedRecord>("inner_integer_out_of_range",
+                                R"({"to":"bob","amount":-1,"memo":null})");
+      reject_both<NestedRecord>("truncated", R"({"to":"bob","amount":5)");
+      reject_both<Opt<NestedU64>>("string", R"("x")");
+      reject_both<Vec<NestedRecord>>("element_not_a_record", R"([{"to":"a","amount":1},7])");
+      reject_both<NestedAction>("missing_nested_member",
+                                R"({"method":0,"twice":0,"maybe":null,"many":[]})");
+      reject_both<NestedAction>("nested_member_as_hex",
+                                R"({"method":0,"args":"00","twice":0,"maybe":null,"many":[]})");
+      reject_both<NestedAction>(
+         "inner_of_inner_invalid",
+         R"({"method":0,"args":{"to":"","amount":0},"twice":"x","maybe":null,"many":[]})");
+      reject<NestedChoice>("ijson", "unknown_alternative_name",
+                           R"({"nested":{"to":"","amount":0}})");
+      reject<NestedChoice>("ijson", "alternative_payload_invalid",
+                           R"({"nested_NestedArgs":{"to":""}})");
+      reject<NestedChoice>("json", "alternative_payload_invalid", R"([1,{"to":""}])");
+   }
+
    void schema_reject(const std::string& name, psio::Schema schema, const std::string& root = "T")
    {
       namespace ir = psio::pssz_ir;
@@ -1474,6 +1573,7 @@ int main(int argc, char** argv)
    emit_bounds_layout_caps();
    emit_accepted();
    emit_rejected();
+   emit_nested();
    emit_schema_rows();
 
    const std::string text = render();

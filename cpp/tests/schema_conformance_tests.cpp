@@ -110,8 +110,9 @@ namespace schema_conf
       std::string hex;
       std::string expect;
       std::string reencoded;
+      std::string value;
    };
-   PSIO_REFLECT(PsszRow, name, type, format, hex, expect, reencoded)
+   PSIO_REFLECT(PsszRow, name, type, format, hex, expect, reencoded, value)
 
    struct PsszFixture
    {
@@ -431,7 +432,10 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
    REQUIRE(widths == fx.types.size());
 
    std::size_t canonical = 0, unknown = 0, rejected = 0, raw_non_utf8 = 0, json_trips = 0,
-               no_json = 0, explicit_width = 0, explicit_capped = 0, explicit_top_cap = 0;
+               no_json = 0, explicit_width = 0, explicit_capped = 0, explicit_top_cap = 0,
+               nested = 0, nested_unknown = 0, nested_deferred = 0;
+   std::map<std::string, const PsszRow*> by_name;
+   for (const auto& row : fx.vectors) by_name[row.name] = &row;
    for (const auto& row : fx.vectors)
    {
       if (!expressible.at(row.type)) continue;
@@ -439,6 +443,12 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
       const psio::schema_types::AnyType root = psio::schema_types::Type{row.type};
       const Bytes                       bytes = from_hex(row.hex);
       const std::string                 cls   = row.name.substr(0, row.name.find('/'));
+      // A typed nested<T,deferred> does not look inside its bytes; the
+      // schema does not record that policy, so a schema-driven reader gives
+      // the recorded outcome when told the nested bytes are opaque.
+      const ir::nested_bytes nested_mode =
+         cls == "nested-deferred" ? ir::nested_bytes::opaque : ir::nested_bytes::typed;
+      nested += cls == "nested";
 
       if (row.format != "auto")
       {
@@ -449,7 +459,7 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
          bool      has_unknown = false;
          auto      run = [&]<std::size_t W>(std::integral_constant<std::size_t, W>) {
             return ir::decode_compatible<W>(schema, root, std::span<const char>{bytes}, value,
-                                            has_unknown);
+                                            has_unknown, nested_mode);
          };
          const auto st = row.format == "pssz8"
                             ? run(std::integral_constant<std::size_t, 1>{})
@@ -473,7 +483,61 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
       }
 
       bool       has_unknown = false;
-      const auto st = ir::validate_pssz(schema, root, std::span<const char>{bytes}, &has_unknown);
+      const auto st = ir::validate_pssz(schema, root, std::span<const char>{bytes}, &has_unknown,
+                                        nested_mode);
+      if (cls == "nested-deferred")
+      {
+         // Opaque: the bytes are kept as they are.
+         REQUIRE(row.expect == "canonical");
+         REQUIRE(st.ok());
+         REQUIRE_FALSE(has_unknown);
+         ir::Value opaque;
+         REQUIRE(ir::decode_auto(schema, root, std::span<const char>{bytes}, opaque, has_unknown,
+                                 nested_mode)
+                    .ok());
+         Bytes opaque_again;
+         REQUIRE(ir::encode_auto(schema, root, opaque, opaque_again, nested_mode).ok());
+         REQUIRE(opaque_again == bytes);
+         ++nested_deferred;
+         continue;
+      }
+      if (cls == "nested-unknown" && row.expect == "unknown")
+      {
+         // Unknown fields inside nested bytes. The dynamic value is the
+         // inner value, so the default re-encoding is canonical: the frame
+         // of the `nested` vector holding the same logical value for this
+         // reader. With the bytes opaque the frame is kept, which is what
+         // the typed reader's re-encoding (`reencoded`) is.
+         REQUIRE(st.ok());
+         REQUIRE(has_unknown);
+         ir::Value inner;
+         REQUIRE(
+            ir::decode_auto(schema, root, std::span<const char>{bytes}, inner, has_unknown).ok());
+         REQUIRE(has_unknown);
+         Bytes canonical_again;
+         REQUIRE(ir::encode_auto(schema, root, inner, canonical_again).ok());
+         REQUIRE(canonical_again != bytes);
+         REQUIRE(ir::validate_canonical_for_width<0>(schema, root, canonical_again).ok());
+         REQUIRE_FALSE(ir::validate_canonical_for_width<0>(schema, root, bytes).ok());
+         if (!row.value.empty())
+         {
+            const auto same = by_name.find("nested/" + row.value + "/as/" + row.type + "/auto");
+            REQUIRE(same != by_name.end());
+            REQUIRE(canonical_again == from_hex(same->second->hex));
+         }
+         ir::Value opaque;
+         bool      opaque_unknown = true;
+         REQUIRE(ir::decode_auto(schema, root, std::span<const char>{bytes}, opaque,
+                                 opaque_unknown, ir::nested_bytes::opaque)
+                    .ok());
+         REQUIRE_FALSE(opaque_unknown);
+         Bytes kept;
+         REQUIRE(ir::encode_auto(schema, root, opaque, kept, ir::nested_bytes::opaque).ok());
+         REQUIRE(kept == from_hex(row.reencoded));
+         REQUIRE(kept == bytes);
+         ++nested_unknown;
+         continue;
+      }
       if (cls == "string-raw-non-utf8")
       {
          // The IR tells a raw string ("string") from a UTF-8 one ("utf8"):
@@ -550,6 +614,9 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
    REQUIRE(explicit_width >= 1000);
    REQUIRE(explicit_capped == 15);
    REQUIRE(explicit_top_cap >= 12);
+   REQUIRE(nested >= 150);
+   REQUIRE(nested_unknown == 4);
+   REQUIRE(nested_deferred == 6);
 }
 
 TEST_CASE("the schema-driven entry points are checked", "[schema][conformance]")

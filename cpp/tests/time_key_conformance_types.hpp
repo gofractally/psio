@@ -8,6 +8,7 @@
 
 #include <psio/json.hpp>
 #include <psio/key.hpp>
+#include <psio/nested.hpp>
 #include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
 #include <psio/time.hpp>
@@ -107,6 +108,9 @@ namespace tk_conf
    using KArray   = Tup<std::array<std::uint16_t, 2>, std::string>;
    using KVariant = Tup<std::variant<std::uint8_t, std::string>, std::uint8_t>;
    using KNested  = Tup<Tup<std::string, std::uint8_t>, std::string>;
+   // A nested value in a key (psio/nested.hpp): the key of the byte list
+   // holding the PSSZ encoding of the inner value.
+   using KPacked  = Tup<std::uint32_t, psio::nested<Account>>;
 
    // ── Fixture ids ────────────────────────────────────────────────────────
    template <typename T>
@@ -150,6 +154,7 @@ namespace tk_conf
    TK_TYPE(KArray, "tuple<array<u16,2>,string>")
    TK_TYPE(KVariant, "tuple<variant<u8,string>,u8>")
    TK_TYPE(KNested, "tuple<tuple<string,u8>,string>")
+   TK_TYPE(KPacked, "tuple<u32,nested<Account>>")
 #undef TK_TYPE
 
    template <typename T>
@@ -170,7 +175,7 @@ namespace tk_conf
                       KEmpty, KShard, KAccount, KStrU8, KStrStr, KBytes, KList, KOptStr, KStrList,
                       KInts, KFloats, KTime, KArray, KVariant, KNested,
                       // Appended (the ids above keep their schema positions).
-                      mono_seconds, mono_micros, mono_ms32, Timer, KMono>>{});
+                      mono_seconds, mono_micros, mono_ms32, Timer, KMono, KPacked>>{});
    }
 
    // Composite key types: the ones with key-prefix rows.

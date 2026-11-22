@@ -40,5 +40,12 @@ time_point<micros>, ttl: duration<millis>, legacy: time_point<seconds,u32>}`;
 `Event` is `{name: string, at: time_point<millis>, precise:
 optional<time_point<nanos>>, history: list<time_point<seconds>>, elapsed:
 duration<nanos>, timeout: duration<60/1,i32>}`; `Account` is `{shard: u32,
-owner: string, seq: optional<i64>}`. `string` is a raw string (Schema IR id `string`) and holds UTF-8 in every vector;
+owner: string, seq: optional<i64>}`. `nested<Account>` is a nested value
+(`docs/pssz-spec.md` §5.8, Schema IR `Nested`): a byte list holding the PSSZ
+encoding of an `Account`. Its key is the key of that byte list, so
+`tuple<u32,nested<Account>>` has `value`, `key-prefix`, `text-accept` /
+`text-reject` rows (the text is the inner value's own), `key-reject` rows whose
+framing is well formed but whose bytes are not an `Account`, and its order
+row is `key-order-bits`: keys order by the inner bytes, and the type has no
+value order. `string` is a raw string (Schema IR id `string`) and holds UTF-8 in every vector;
 `bytes` is a list of u8.
