@@ -43,6 +43,7 @@
 #include <psio/max_size.hpp>
 #include <psio/reflect.hpp>
 #include <psio/stream.hpp>
+#include <psio/time.hpp>
 #include <psio/validate_strict_walker.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
 
@@ -196,6 +197,12 @@ namespace psio {
       template <typename T>
          requires(std::is_enum_v<T> &&
                   !::psio::has_adapter_v<T, ::psio::binary_category>)
+      struct is_fixed<T> : std::true_type
+      {
+      };
+      // A duration / time point is its tick count: the Rep integer
+      // (time.hpp), fixed width, little-endian.
+      template <::psio::TimeValue T>
       struct is_fixed<T> : std::true_type
       {
       };
@@ -376,6 +383,8 @@ namespace psio {
             return 16;
          else if constexpr (std::is_enum_v<T>)
             return sizeof(std::underlying_type_t<T>);
+         else if constexpr (::psio::TimeValue<T>)
+            return sizeof(::psio::time_rep_t<T>);
          else if constexpr (std::is_arithmetic_v<T>)
             return sizeof(T);
          else if constexpr (requires { T::bytes_value; T::size_value; })
@@ -1051,6 +1060,12 @@ namespace psio {
             const auto raw = static_cast<std::underlying_type_t<T>>(v);
             s.write(&raw, sizeof(raw));
          }
+         else if constexpr (::psio::TimeValue<T>)
+         {
+            // The tick count, little-endian.
+            const auto raw = ::psio::time_ticks(v);
+            s.write(&raw, sizeof(raw));
+         }
          else if constexpr (std::is_arithmetic_v<T>)
             s.put(v);
          else if constexpr (is_std_array_v<T>)
@@ -1680,6 +1695,13 @@ namespace psio {
             std::underlying_type_t<T> raw{};
             std::memcpy(&raw, src.data() + pos, sizeof(raw));
             return static_cast<T>(raw);
+         }
+         else if constexpr (::psio::TimeValue<T>)
+         {
+            // Every tick count is a value.
+            ::psio::time_rep_t<T> raw{};
+            std::memcpy(&raw, src.data() + pos, sizeof(raw));
+            return ::psio::time_from_ticks<T>(raw);
          }
          else if constexpr (std::is_arithmetic_v<T>)
             return decode_arith<W, T>(src, pos);

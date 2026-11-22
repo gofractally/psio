@@ -34,6 +34,7 @@
 #include <psio/ext_int.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/adapter.hpp>
+#include <psio/time.hpp>
 #include <psio/reflect.hpp>
 #include <psio/stream.hpp>
 #include <psio/validate_strict_walker.hpp>
@@ -76,6 +77,13 @@ namespace psio {
 
       template <typename T>
          requires(std::is_arithmetic_v<T> && !std::is_same_v<T, bool>)
+      struct is_fixed<T> : std::true_type
+      {
+      };
+
+      // A duration / time point is its tick count: an SSZ uintN / the
+      // two's-complement bytes of a signed Rep (time.hpp).
+      template <::psio::TimeValue T>
       struct is_fixed<T> : std::true_type
       {
       };
@@ -219,6 +227,8 @@ namespace psio {
          else if constexpr (std::is_same_v<T, ::psio::uint128> ||
                             std::is_same_v<T, ::psio::int128>)
             return 16;
+         else if constexpr (::psio::TimeValue<T>)
+            return sizeof(::psio::time_rep_t<T>);
          else if constexpr (std::is_arithmetic_v<T>)
             return sizeof(T);
          else if constexpr (is_bitvector_v<T>)
@@ -458,6 +468,10 @@ namespace psio {
                             std::is_same_v<T, ::psio::int128>)
          {
             s.write(&v, 16);
+         }
+         else if constexpr (::psio::TimeValue<T>)
+         {
+            s.put(::psio::time_ticks(v));
          }
          else if constexpr (std::is_arithmetic_v<T>)
          {
@@ -1117,6 +1131,9 @@ namespace psio {
             std::memcpy(&out, src.data() + pos, 16);
             return out;
          }
+         else if constexpr (::psio::TimeValue<T>)
+            return ::psio::time_from_ticks<T>(
+               decode_arith<::psio::time_rep_t<T>>(src, pos));
          else if constexpr (std::is_arithmetic_v<T>)
             return decode_arith<T>(src, pos);
          else if constexpr (std::is_same_v<T, std::string>)

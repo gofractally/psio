@@ -29,6 +29,8 @@
 //                       up from interface_info<T>)
 //   Records             PSIO_REFLECT'd structs (Object form)
 //   Wide integers       uint128 / int128 (Int 128), uint256 (Int 256)
+//   Time                std::chrono::duration / system_clock time_point
+//                       (Custom over the tick-count Int; id from time.hpp)
 //
 // What a schema-driven codec (pssz_ir.hpp, pssz_ir_json.hpp) needs beyond
 // the shape is recorded too:
@@ -49,7 +51,7 @@
 //
 // Out of scope for now (lands as v3 ports the supporting types):
 //   std::bitset,
-//   uint128 / int128 / uint256, chrono::duration / time_point,
+//   uint128 / int128 / uint256,
 //   FracPack-nested wrappers, PackableWrapper unwraps, and the
 //   full custom-handler chain.  These are extensions to the same
 //   if-constexpr ladder when their types land in v3.
@@ -60,6 +62,7 @@
 #include <psio/reflect.hpp>
 #include <psio/schema_ir.hpp>
 #include <psio/structural.hpp>
+#include <psio/time.hpp>
 #include <psio/wit_resource.hpp>
 #include <psio/wrappers.hpp>
 
@@ -374,6 +377,13 @@ namespace psio::schema_types
             // A plain C++ enum is its underlying integer type in the schema,
             // matching its wire form. Enumerator names are not recorded.
             return build_anytype<std::underlying_type_t<U>>();
+         else if constexpr (::psio::TimeValue<U>)
+            // A duration / time point is its tick-count integer carrying the
+            // time marker: "time-point-micros", "duration-seconds", ...
+            return Custom{Box<AnyType>{Int{
+                             static_cast<std::uint32_t>(8 * sizeof(::psio::time_rep_t<U>)),
+                             std::is_signed_v<::psio::time_rep_t<U>>}},
+                          ::psio::time_schema_id<U>()};
          else if constexpr (std::is_same_v<U, std::string> ||
                             std::is_same_v<U, std::string_view>)
             return Custom{Box<AnyType>{List{Box<AnyType>{insert<std::uint8_t>()}}},

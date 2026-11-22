@@ -358,3 +358,16 @@ psio_key_compile_fail(steady_clock KEY_FAIL_STEADY_CLOCK "only std::chrono::syst
 psio_key_compile_fail(float_rep KEY_FAIL_FLOAT_REP "needs an integer Rep")
 psio_key_compile_fail(prefix_arity KEY_FAIL_PREFIX_ARITY "more elements than the key type has")
 psio_key_compile_fail(prefix_type KEY_FAIL_PREFIX_TYPE "does not convert to the key's")
+
+# Time values (std::chrono durations / system_clock time points) in every
+# format: tick count in binary and key, RFC 3339 text, schema time ids.
+psio_add_test(psio_time_tests time_tests.cpp)
+add_executable(psio_time_noexceptions_test time_noexceptions.cpp)
+target_include_directories(psio_time_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_time_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_time_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_time_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_time_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_time_noexceptions_test COMMAND psio_time_noexceptions_test)

@@ -302,9 +302,10 @@ namespace psio {
             rem += 86400;
             --days;
          }
-         // civil_from_days; the text range keeps every term non-negative.
+         // civil_from_days. Only January and February of year 0000 lie
+         // before the 0000-03-01 origin of the era arithmetic.
          const std::int64_t z   = days + 719468;
-         const std::int64_t era = z / 146097;
+         const std::int64_t era = (z >= 0 ? z : z - 146096) / 146097;
          const auto         doe = static_cast<unsigned>(z - era * 146097);
          const unsigned     yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
          const unsigned     doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
