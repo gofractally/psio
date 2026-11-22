@@ -248,8 +248,8 @@ fn malformed<F: PsszFormat>() {
     assert_eq!(from_pssz::<F, Vec<String>>(&wire).unwrap(), value);
     assert!(pssz_validate::<F, Vec<String>>(&wire).is_ok());
     let view = try_pssz_view_of::<Vec<String>, F>(&wire).unwrap();
-    assert_eq!(view.get(0).view(), "");
-    assert_eq!(view.get(2).view(), "world");
+    assert_eq!(view.get(0).view().unwrap(), "");
+    assert_eq!(view.get(2).view().unwrap(), "world");
     for slot in 0..3 {
         let mut bad = wire.clone();
         bad[slot * width..(slot + 1) * width].fill(0);
@@ -296,7 +296,7 @@ fn nested<F: PsszFormat>() {
     let view = pssz_view_of::<Nested, F>(&wire);
     assert_eq!(view.leaf().id().get(), 42);
     assert!(!view.list().get(0).flag().get());
-    assert_eq!(view.note().unwrap().view(), "note");
+    assert_eq!(view.note().unwrap().view().unwrap(), "note");
     assert_eq!(view.final_value().get(), 72);
     // Canonical encodings carry no trailing data: a bare scalar must occupy
     // exactly its span. (This previously asserted a lenient prefix policy.)
@@ -482,7 +482,8 @@ fn mutated_view<F: PsszFormat + std::panic::RefUnwindSafe>() {
     let mut view = try_pssz_view_of::<bool, F>(&[1]).unwrap();
     view.data = &[2]; // pub data remains compatible, and cannot establish unsafe invariants
     assert!(std::panic::catch_unwind(|| view.get()).is_err());
-    assert!(std::panic::catch_unwind(|| pssz_view_of::<String, F>(&[0xff]).view()).is_err());
+    // The string view reports invalid UTF-8 as an error; it does not panic.
+    assert!(std::panic::catch_unwind(|| pssz_view_of::<String, F>(&[0xff]).view().is_err()).unwrap());
     assert!(
         std::panic::catch_unwind(|| pssz_view_of::<Option<String>, F>(&[0, 1]).has_value())
             .is_err()

@@ -1,0 +1,12 @@
+[package]
+name = "schema-evolution-repro"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+fracpack = { path = "/Users/dlarimer/psibase-foundation/rust/fracpack" }
+psio = { path = "../../rust/psio" }
+serde_json = "1"

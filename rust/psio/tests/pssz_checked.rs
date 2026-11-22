@@ -76,7 +76,10 @@ fn checked_encode_reports_nested_offset_and_bound_overflow() {
         &[(
             Layout {
                 fixed: true,
-                size: usize::MAX
+                size: usize::MAX,
+                optional: false,
+                selector: false,
+                omit: false,
             },
             vec![]
         )],

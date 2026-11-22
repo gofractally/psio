@@ -1,213 +1,194 @@
-//! Declarative macro generating `PsszPack` / `PsszUnpack` for user structs.
-//! Counterpart of C++'s `PSIO1_REFLECT(Struct, fields...)` on the pSSZ side.
+//! Declarative macros generating the PSSZ codec for user structs: the
+//! hand-written counterpart of `#[derive(PsszPack, PsszUnpack, PsszView)]`
+//! and of C++ `PSIO_REFLECT(Struct, fields...)` on the pSSZ side. Both paths
+//! share the helpers in `pssz_checked`, so they cannot drift apart.
 //!
-//! Unlike SSZ, pSSZ emits an extensibility header (`F::HEADER_BYTES` bytes
-//! holding the fixed-region size) before the fixed region. A DWNC variant
-//! skips the header. Both variants use typed field codecs, not Rust memory
-//! layout assumptions; safe trait implementations do not establish POD validity.
+//! ```ignore
+//! pssz_struct!(Account { id: u32, name: String, memo: Option<String> });
+//! pssz_struct!(#[pssz(max_dynamic_data = 200)] Small { tag: u8, label: RawString });
+//! pssz_struct_dwnc!(Point { x: u32, y: u32 });
+//! ```
+//!
+//! `pssz_struct!` is an extensible record: a header holding the size of the
+//! fixed region the writer emitted, then the fixed region, then variable
+//! payloads. Trailing `None` fields are always pruned; readers honor the
+//! writer's header (older data → missing trailing optionals are None, newer
+//! data → unknown trailing slots are skipped) and reject a stored trailing
+//! None. Fields appended after publication must be `Option<T>`.
+//!
+//! `pssz_struct_dwnc!` is a fixed-layout ("definition will not change")
+//! record: no header, never pruned, cannot evolve.
+//!
+//! `#[pssz(max_dynamic_data = N)]` is the type's explicit cap (C++
+//! `maxDynamicData(N)`): under the automatic `Pssz` profile it selects the
+//! record's offset width and bounds its encoded size. Without it the width
+//! follows the bound inferred from the fields.
+//!
+//! All field access goes through typed field codecs, never Rust memory
+//! layout. A `PsszValidate` impl is generated whenever every field type has
+//! one; fields with only Pack/Unpack codecs remain usable.
 
-/// DWNC variant for pSSZ: all-fixed struct, skips the extensibility
-/// header entirely. Mirrors C++'s `definitionWillNotChange()` on pSSZ.
+/// Fixed-layout (DWNC) pSSZ record.
 #[macro_export]
 macro_rules! pssz_struct_dwnc {
-    ($Ty:ident { $($field:ident : $FTy:ty),+ $(,)? }) => {
-        $crate::pssz_struct!(@view_dwnc $Ty { $($field : $FTy),+ });
-
-        impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszPack<F> for $Ty {
-            const MIN_ENCODED_SIZE: usize = { 0 $( + <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE )+ };
-            const MAX_ENCODED_SIZE: ::core::option::Option<usize> = Some({ 0 $( + <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE )+ });
-            const IS_FIXED_SIZE: bool  = true;
-            const FIXED_SIZE:    usize = { 0 $( + <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE )+ };
-            fn pssz_size(&self) -> usize {
-                <Self as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-            }
-            fn pssz_pack(&self, out: &mut Vec<u8>) {
-                // See ssz_struct_dwnc! for the rationale behind the
-                // by-value copy — lets this compile under `#[repr(C,
-                // packed)]`. DWNC fields are Copy by construction.
-                $(
-                    {
-                        let __f: $FTy = self.$field;
-                        <$FTy as $crate::pssz::PsszPack<F>>::pssz_pack(&__f, out);
-                    }
-                )+
-            }
-        }
-        impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszUnpack<F> for $Ty {
-            fn pssz_unpack(bytes: &[u8]) -> $crate::pssz::PsszResult<Self> {
-                let spans = $crate::pssz::input::record_spans::<F, _>(bytes, [$(
-                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        Some(<$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)
-                    } else { None },
-                )+], true)?;
-                let mut fields = spans.into_iter();
-                $(
-                    let $field = <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(
-                        &bytes[fields.next().expect("generated field span")])?;
-                )+
-                Ok($Ty { $($field),+ })
-            }
-        }
+    (#[pssz(max_dynamic_data = $cap:expr)] $Ty:ident { $($field:ident : $FTy:ty),* $(,)? }) => {
+        $crate::pssz_struct!(@all $Ty { $($field : $FTy),* }; true; ::core::option::Option::Some($cap));
+    };
+    ($Ty:ident { $($field:ident : $FTy:ty),* $(,)? }) => {
+        $crate::pssz_struct!(@all $Ty { $($field : $FTy),* }; true; ::core::option::Option::None);
     };
 }
 
-/// Variant: extensible pSSZ struct (writes header + fixed region + tail).
+/// Extensible pSSZ record.
 #[macro_export]
 macro_rules! pssz_struct {
-    ($Ty:ident { $($field:ident : $FTy:ty),+ $(,)? }) => {
-        $crate::pssz_struct!(@view $Ty { $($field : $FTy),+ });
+    (#[pssz(max_dynamic_data = $cap:expr)] $Ty:ident { $($field:ident : $FTy:ty),* $(,)? }) => {
+        $crate::pssz_struct!(@all $Ty { $($field : $FTy),* }; false; ::core::option::Option::Some($cap));
+    };
+    ($Ty:ident { $($field:ident : $FTy:ty),* $(,)? }) => {
+        $crate::pssz_struct!(@all $Ty { $($field : $FTy),* }; false; ::core::option::Option::None);
+    };
 
+    (@all $Ty:ident { $($field:ident : $FTy:ty),* }; $dwnc:tt; $cap:expr) => {
+        $crate::pssz_struct!(@view $Ty { $($field : $FTy),* }; $dwnc);
+        $crate::pssz_struct!(@impl $Ty { $($field : $FTy),* }; $dwnc; $cap);
+    };
+
+    // DWNC fields are copied by value so the macro also works on
+    // `#[repr(packed)]` structs; a DWNC record never prunes.
+    (@omit $value:expr, $FTy:ty; true) => { false };
+    (@omit $value:expr, $FTy:ty; false) => {
+        <$FTy as $crate::pssz::PsszPack<F>>::IS_OPTIONAL
+            && <$FTy as $crate::pssz::PsszPack<F>>::pssz_is_none(&$value)
+    };
+    (@field $value:expr, $FTy:ty, $kept:expr; true) => {{
+        let value: $FTy = $value;
+        $crate::pssz_checked::field_if_kept::<F, $FTy>(&value, $kept)
+    }};
+    (@field $value:expr, $FTy:ty, $kept:expr; false) => {
+        $crate::pssz_checked::field_if_kept::<F, $FTy>(&$value, $kept)
+    };
+
+    (@impl $Ty:ident { $($field:ident : $FTy:ty),* }; $dwnc:tt; $cap:expr) => {
         impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszPack<F> for $Ty {
-            const MIN_ENCODED_SIZE: usize = F::HEADER_BYTES;  // header ≥ 1
-            const MAX_ENCODED_SIZE: ::core::option::Option<usize> = None;
-            const IS_FIXED_SIZE: bool  = false;
-            const FIXED_SIZE:    usize = 0;
+            // An extensible record always has its header. A DWNC record is
+            // as small as its fixed region (zero for a zero-size record).
+            const MIN_ENCODED_SIZE: usize = if $dwnc {
+                $crate::pssz_checked::fixed_region(1, &[$($crate::pssz_checked::Layout::of::<F, $FTy>()),*])
+            } else { 1 };
+            const IS_FIXED_SIZE: bool = $dwnc $(&& <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE)*;
+            const FIXED_SIZE: usize = if <Self as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
+                0 $(+ <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)*
+            } else { 0 };
+            const MAX_DYNAMIC_DATA: ::core::option::Option<usize> = $cap;
+            const AUTO_BOUND: ::core::option::Option<usize> = match <Self as $crate::pssz::PsszPack<F>>::MAX_DYNAMIC_DATA {
+                ::core::option::Option::Some(cap) => ::core::option::Option::Some(cap),
+                ::core::option::Option::None => $crate::pssz_checked::record_bound(&[
+                    $((<$FTy as $crate::pssz::PsszPack<F>>::AUTO_BOUND, <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE)),*
+                ], $dwnc),
+            };
+            const MAX_ENCODED_SIZE: ::core::option::Option<usize> = <Self as $crate::pssz::PsszPack<F>>::AUTO_BOUND;
+            const SHAPE: $crate::pssz::Shape = $crate::pssz::Shape::record(
+                false, $dwnc,
+                <Self as $crate::pssz::PsszPack<F>>::OFFSET_WIDTH,
+                <Self as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE,
+                &[$(<$FTy as $crate::pssz::PsszPack<F>>::SHAPE),*]);
             fn pssz_size(&self) -> usize {
-                let mut total: usize = F::HEADER_BYTES;
-                $(
-                    total = total.checked_add(if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                    } else { F::OFFSET_BYTES }).expect("pssz: record size overflow");
-                )+
-                $(
-                    if !<$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        total = total.checked_add(<$FTy as $crate::pssz::PsszPack<F>>::pssz_size(&self.$field)).expect("pssz: record size overflow");
-                    }
-                )+
-                total
+                let mut out = ::std::vec::Vec::new();
+                <Self as $crate::pssz::PsszPack<F>>::pssz_pack_checked(self, &mut out)
+                    .expect("pssz: record encode failed; use try_to_pssz");
+                out.len()
             }
-            fn pssz_pack(&self, out: &mut Vec<u8>) {
-                // Extensibility header (size of fixed region).
-                let mut fixed_region_bytes: usize = 0;
-                $(
-                    fixed_region_bytes = fixed_region_bytes.checked_add(if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        <$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE
-                    } else { F::OFFSET_BYTES }).expect("pssz: fixed region overflow");
-                )+
-                // Share checked explicit-width storage with sequence offsets.
-                let header_start = out.len();
-                out.resize(header_start.checked_add(F::HEADER_BYTES).expect("pssz: header size overflow"), 0);
-                $crate::pssz::write_offset::<F>(&mut out[header_start..], fixed_region_bytes);
-                let fixed_start = out.len();
-
-                // Fixed region with offset placeholders.
-                let mut slots: Vec<usize> = Vec::new();
-                $(
-                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        <$FTy as $crate::pssz::PsszPack<F>>::pssz_pack(&self.$field, out);
-                    } else {
-                        slots.push(out.len());
-                        out.resize(out.len().checked_add(F::OFFSET_BYTES).expect("pssz: record slot overflow"), 0);
-                    }
-                )+
-
-                // Emit variable payloads + backpatch offsets.
-                let mut var_idx: usize = 0;
-                $(
-                    if !<$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        let rel = out.len() - fixed_start;
-                        let slot_pos = slots[var_idx];
-                        $crate::pssz::write_offset::<F>(&mut out[slot_pos..slot_pos + F::OFFSET_BYTES], rel);
-                        <$FTy as $crate::pssz::PsszPack<F>>::pssz_pack(&self.$field, out);
-                        var_idx += 1;
-                    }
-                )+
-                let _ = var_idx;
+            fn pssz_pack(&self, out: &mut ::std::vec::Vec<u8>) {
+                <Self as $crate::pssz::PsszPack<F>>::pssz_pack_checked(self, out)
+                    .expect("pssz: record encode failed; use try_to_pssz");
+            }
+            #[allow(unused_mut, unused_variables, unused_assignments)]
+            fn pssz_pack_checked(&self, out: &mut ::std::vec::Vec<u8>) -> $crate::pssz::PsszResult<()> {
+                let _depth = $crate::pssz_checked::EncodeDepth::enter()?;
+                let omitted: &[bool] = &[$($crate::pssz_struct!(@omit self.$field, $FTy; $dwnc)),*];
+                let keep = $crate::pssz_checked::record_kept_fields(omitted, $dwnc);
+                let mut index = 0usize;
+                $crate::pssz_checked::finish_record::<F>(
+                    <Self as $crate::pssz::PsszPack<F>>::OFFSET_WIDTH,
+                    <Self as $crate::pssz::PsszPack<F>>::MAX_DYNAMIC_DATA,
+                    &[$({
+                        let kept = index < keep;
+                        index += 1;
+                        $crate::pssz_struct!(@field self.$field, $FTy, kept; $dwnc)?
+                    }),*], $dwnc, out)
             }
         }
-
         impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszUnpack<F> for $Ty {
+            #[allow(unused_mut, unused_variables)]
             fn pssz_unpack(bytes: &[u8]) -> $crate::pssz::PsszResult<Self> {
-                let spans = $crate::pssz::input::record_spans::<F, _>(bytes, [$(
-                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        Some(<$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)
-                    } else { None },
-                )+], false)?;
-                let mut fields = spans.into_iter();
-                $(
-                    let $field = <$FTy as $crate::pssz::PsszUnpack<F>>::pssz_unpack(
-                        &bytes[fields.next().expect("generated field span")])?;
-                )+
-                Ok($Ty { $($field),+ })
+                let _depth = $crate::pssz_checked::DecodeDepth::enter()?;
+                $crate::pssz_checked::enter_record::<F>(<Self as $crate::pssz::PsszPack<F>>::MAX_DYNAMIC_DATA, bytes)?;
+                let spans = $crate::pssz_checked::record_spans_n(
+                    <Self as $crate::pssz::PsszPack<F>>::OFFSET_WIDTH,
+                    [$($crate::pssz_checked::Layout::of::<F, $FTy>()),*], bytes, $dwnc)?;
+                let mut spans = spans.into_iter();
+                ::core::result::Result::Ok($Ty {
+                    $($field: $crate::pssz_checked::decode_field::<F, $FTy>(bytes, spans.next().flatten())?),*
+                })
+            }
+        }
+        impl<F: $crate::pssz::PsszFormat> $crate::pssz::PsszValidate<F> for $Ty
+        where $($FTy: $crate::pssz::PsszValidate<F>),*
+        {
+            #[allow(unused_mut, unused_variables)]
+            fn pssz_validate(bytes: &[u8]) -> $crate::pssz::PsszResult<()> {
+                let _depth = $crate::pssz_checked::DecodeDepth::enter()?;
+                $crate::pssz_checked::enter_record::<F>(<Self as $crate::pssz::PsszPack<F>>::MAX_DYNAMIC_DATA, bytes)?;
+                let spans = $crate::pssz_checked::record_spans_n(
+                    <Self as $crate::pssz::PsszPack<F>>::OFFSET_WIDTH,
+                    [$($crate::pssz_checked::Layout::of::<F, $FTy>()),*], bytes, $dwnc)?;
+                let mut spans = spans.into_iter();
+                $(if let ::core::option::Option::Some(span) = spans.next().flatten() {
+                    <$FTy as $crate::pssz::PsszValidate<F>>::pssz_validate(&bytes[span])?;
+                })*
+                ::core::result::Result::Ok(())
             }
         }
     };
 
-    // DWNC view accessors via a generated trait (same orphan-rule
-    // workaround as ssz_struct!). Users `use ${Ty}PsszAccessors;`.
-    (@view_dwnc $Ty:ident { $($field:ident : $FTy:ty),+ }) => {
+    // Named view accessors via a generated trait (orphan-rule workaround).
+    // Users `use ${Ty}PsszAccessors;`. Field access is O(1) and honors the
+    // writer's header: a pruned trailing optional reads as None, and unknown
+    // appended slots delimit the last known variable field.
+    (@view $Ty:ident { $($field:ident : $FTy:ty),* }; $dwnc:tt) => {
         $crate::__paste::paste! {
             pub trait [<$Ty PsszAccessors>]<'a, F: $crate::pssz::PsszFormat> {
-                $( fn $field(&self) -> $crate::pssz_view::PsszView<'a, $FTy, F>; )+
+                $(
+                    fn $field(&self) -> $crate::pssz_view::PsszView<'a, $FTy, F>;
+                    /// Fallible form for unvalidated buffers.
+                    fn [<try_ $field>](&self) -> $crate::pssz::PsszResult<$crate::pssz_view::PsszView<'a, $FTy, F>>;
+                )*
             }
             impl<'a, F: $crate::pssz::PsszFormat> [<$Ty PsszAccessors>]<'a, F>
                 for $crate::pssz_view::PsszView<'a, $Ty, F>
             {
                 $(
                     fn $field(&self) -> $crate::pssz_view::PsszView<'a, $FTy, F> {
-                        let (beg, end) = [<__pssz_dwnc_span_ $Ty>]::<F>(
-                            self.data, stringify!($field));
-                        $crate::pssz_view::PsszView::new(&self.data[beg .. end])
+                        self.[<try_ $field>]().expect("pssz view: malformed record; validate first")
                     }
-                )+
-            }
-
-            fn [<__pssz_dwnc_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
-                data: &[u8], target: &str) -> (usize, usize)
-            {
-                let spans = $crate::pssz::input::record_spans::<F, _>(data, [$(
-                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        Some(<$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)
-                    } else { None },
-                )+], true).expect("pssz dwnc view: malformed record");
-                let mut spans = spans.into_iter();
-                $(
-                    {
-                        let span = spans.next().expect("generated field span");
-                        if stringify!($field) == target { return (span.start, span.end); }
+                    fn [<try_ $field>](&self) -> $crate::pssz::PsszResult<$crate::pssz_view::PsszView<'a, $FTy, F>> {
+                        ::core::result::Result::Ok($crate::pssz_view::PsszView::new(
+                            [<__pssz_field_ $Ty>]::<F, $FTy>(self.data, stringify!($field))?))
                     }
-                )+
-                panic!("pssz dwnc view: field {} not found in {}",
-                        target, stringify!($Ty));
+                )*
             }
-        }
-    };
-
-    // Extensible-struct view accessors via generated trait.
-    (@view $Ty:ident { $($field:ident : $FTy:ty),+ }) => {
-        $crate::__paste::paste! {
-            pub trait [<$Ty PsszAccessors>]<'a, F: $crate::pssz::PsszFormat> {
-                $( fn $field(&self) -> $crate::pssz_view::PsszView<'a, $FTy, F>; )+
-            }
-            impl<'a, F: $crate::pssz::PsszFormat> [<$Ty PsszAccessors>]<'a, F>
-                for $crate::pssz_view::PsszView<'a, $Ty, F>
-            {
-                $(
-                    fn $field(&self) -> $crate::pssz_view::PsszView<'a, $FTy, F> {
-                        let (beg, end) = [<__pssz_ext_span_ $Ty>]::<F>(
-                            self.data, stringify!($field));
-                        $crate::pssz_view::PsszView::new(&self.data[beg .. end])
-                    }
-                )+
-            }
-
-            fn [<__pssz_ext_span_ $Ty>]<F: $crate::pssz::PsszFormat>(
-                data: &[u8], target: &str) -> (usize, usize)
-            {
-                let spans = $crate::pssz::input::record_spans::<F, _>(data, [$(
-                    if <$FTy as $crate::pssz::PsszPack<F>>::IS_FIXED_SIZE {
-                        Some(<$FTy as $crate::pssz::PsszPack<F>>::FIXED_SIZE)
-                    } else { None },
-                )+], false).expect("pssz view: malformed record");
-                let mut spans = spans.into_iter();
-                $(
-                    {
-                        let span = spans.next().expect("generated field span");
-                        if stringify!($field) == target { return (span.start, span.end); }
-                    }
-                )+
-                panic!("pssz view: field {} not found in {}",
-                        target, stringify!($Ty));
+            #[allow(non_snake_case, dead_code)]
+            fn [<__pssz_field_ $Ty>]<'a, F: $crate::pssz::PsszFormat, T: $crate::pssz::PsszPack<F>>(
+                data: &'a [u8], target: &str,
+            ) -> $crate::pssz::PsszResult<&'a [u8]> {
+                let names: &[&str] = &[$(stringify!($field)),*];
+                let index = names.iter().position(|name| *name == target)
+                    .ok_or($crate::pssz::PsszError("pssz view: unknown field"))?;
+                let location = $crate::pssz_checked::record_location(
+                    <$Ty as $crate::pssz::PsszPack<F>>::OFFSET_WIDTH,
+                    &[$($crate::pssz_checked::Layout::of::<F, $FTy>()),*], index);
+                $crate::pssz_checked::field_bytes::<F, T>(data, location, $dwnc)
             }
         }
     };
@@ -251,7 +232,7 @@ mod tests {
         let b = to_pssz::<Pssz32, _>(&n);
         let v: crate::pssz_view::PsszView<Named, Pssz32> =
             crate::pssz_view::pssz_view_of(&b);
-        assert_eq!(v.name().view(), "alice");
+        assert_eq!(v.name().view().unwrap(), "alice");
         assert_eq!(v.value().get(), 77);
     }
 }
