@@ -181,6 +181,54 @@ TEST_CASE("AnyType::resolve walks Type-by-name references",
    CHECK(self == &direct);
 }
 
+TEST_CASE("AnyType resolution follows the supplied schema after copies moves and mutation",
+          "[schema_ir][resolve][lifetime]")
+{
+   Schema original;
+   original.insert("target",AnyType{Int{32,false}});
+   original.insert("alias",AnyType{Type{"target"}});
+   const auto* alias=original.get("alias");
+   REQUIRE(alias->resolve(original)==original.get("target"));
+   Schema copy=original;
+   CHECK(copy.get("alias")->resolve(copy)==copy.get("target"));
+   CHECK(copy.get("alias")->resolve(copy)!=original.get("target"));
+   AnyType root{Type{"alias"}};
+   REQUIRE(root.resolve(original)==original.get("target"));
+   CHECK(root.resolve(copy)==copy.get("target"));
+   original.insert("new-target",AnyType{Int{64,false}});
+   original.insert("alias",AnyType{Type{"new-target"}});
+   CHECK(root.resolve(original)==original.get("new-target"));
+   AnyType direct{Int{8,false}};
+   REQUIRE(direct.resolve(original)==&direct);
+   AnyType moved=std::move(direct);
+   CHECK(moved.resolve(original)==&moved);
+   AnyType copied=moved;
+   CHECK(copied.resolve(original)==&copied);
+   AnyType assigned;assigned=copied;
+   CHECK(assigned.resolve(original)==&assigned);
+   assigned=std::move(copied);
+   CHECK(assigned.resolve(original)==&assigned);
+   // The copied schema is independent of the original's storage/lifetime.
+   original=Schema{};
+   const auto* target=copy.get("alias")->resolve(copy);
+   REQUIRE(target==copy.get("target"));
+   CHECK(std::get<Int>(target->value).bits==32);
+}
+
+TEST_CASE("AnyType resolution terminates cyclic aliases", "[schema_ir][resolve][cycle]")
+{
+   Schema schema;
+   schema.insert("self",AnyType{Type{"self"}});
+   CHECK(schema.get("self")->resolve(schema)==nullptr);
+   schema.insert("a",AnyType{Type{"b"}});
+   schema.insert("b",AnyType{Type{"a"}});
+   CHECK(schema.get("a")->resolve(schema)==nullptr);
+   schema.insert("b",AnyType{Int{16,false}});
+   const auto* result=schema.get("a")->resolve(schema);
+   REQUIRE(result);
+   CHECK(std::get<Int>(result->value).bits==16);
+}
+
 // ─── Envelope (Package, Use, Interface, World) ───────────────────────
 
 TEST_CASE("Envelope types: Package / Use / Interface / World",

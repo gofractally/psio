@@ -138,12 +138,13 @@ namespace psio {
 
    struct fixed_buf_stream
    {
+      static inline char empty_storage{};
       char* begin;
       char* pos;
       char* end;
 
       fixed_buf_stream(char* p, std::size_t size) noexcept
-         : begin(p), pos(p), end(p + size)
+         : begin(p ? p : &empty_storage), pos(begin), end(begin + size)
       {
       }
 
@@ -160,12 +161,17 @@ namespace psio {
       {
          if (n > remaining())
             overrun();
+         if (n == 0) return;
          std::memcpy(pos, src, n);
          pos += n;
       }
 
       void rewrite(std::size_t offset, const void* src, std::size_t n)
       {
+         const auto capacity = static_cast<std::size_t>(end - begin);
+         if (offset > capacity || n > capacity - offset)
+            overrun();
+         if (n == 0) return;
          std::memcpy(begin + offset, src, n);
       }
 
@@ -217,12 +223,13 @@ namespace psio {
 
    struct fast_buf_stream
    {
+      static inline char empty_storage{};
       char* begin;
       char* pos;
       char* end;
 
       fast_buf_stream(char* p, std::size_t size) noexcept
-         : begin(p), pos(p), end(p + size)
+         : begin(p ? p : &empty_storage), pos(begin), end(begin + size)
       {
       }
 
@@ -232,12 +239,14 @@ namespace psio {
 
       void write(const void* src, std::size_t n) noexcept
       {
+         if (n == 0) return;
          std::memcpy(pos, src, n);
          pos += n;
       }
 
       void rewrite(std::size_t offset, const void* src, std::size_t n) noexcept
       {
+         if (n == 0) return;
          std::memcpy(begin + offset, src, n);
       }
 

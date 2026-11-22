@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+"""Translate exact shared JSONL schema/value fixtures into C++ literals.
+
+No wire bytes or schemas are inferred from equivalent native types. Both are
+read literally from the Rust/C++ shared corpus, with its input hash embedded.
+The generated test header avoids adding a JSON parser dependency to psio.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+
+
+def string(value):
+    return "std::string(" + json.dumps(value, ensure_ascii=True) + ")"
+
+
+def attributes(values):
+    return "{" + ",".join("ir::Attribute{" + string(v["name"]) + "," + (
+        "std::nullopt" if v["value"] is None else string(v["value"])) + "}" for v in values) + "}"
+
+
+def member(value):
+    return "ir::Member{" + string(value["name"]) + "," + box(value["type"]) + "," + attributes(value["attributes"]) + "}"
+
+
+def box(value):
+    return "ir::Box<ir::AnyType>{" + any_type(value) + "}"
+
+
+def any_type(value):
+    assert set(value) == {"value"}, value
+    [(tag, value)] = value["value"].items()
+    if tag in ("Object", "Struct", "Variant"):
+        args = "{" + ",".join(map(member, value["members"])) + "}," + attributes(value["attributes"])
+    elif tag in ("Option", "List", "FracPack"):
+        args = box(value["type"])
+    elif tag == "Array":
+        args = box(value["type"]) + "," + str(value["len"])
+    elif tag == "BoundedList":
+        args = box(value["type"]) + "," + str(value["maxCount"])
+    elif tag == "Tuple":
+        args = "{" + ",".join(map(box, value["members"])) + "}"
+    elif tag == "Int":
+        args = str(value["bits"]) + "," + str(value["isSigned"]).lower()
+    elif tag == "Float":
+        args = str(value["exp"]) + "," + str(value["mantissa"])
+    elif tag == "Type":
+        args = string(value["type"])
+    elif tag == "Custom":
+        args = box(value["type"]) + "," + string(value["id"])
+    else:
+        raise ValueError("unsupported shared fixture IR " + tag)
+    return "ir::AnyType{ir::" + tag + "{" + args + "}}"
+
+
+def schema(value):
+    assert set(value) == {"package", "interfaces", "worlds", "uses", "types"}
+    assert not value["interfaces"] and not value["worlds"] and not value["uses"], "implement envelope literals before extending fixtures"
+    package = value["package"]
+    return "ir::Schema{ir::Package{" + string(package["name"]) + "," + string(package["version"]) + "," + attributes(package["attributes"]) + "},{},{},{},{" + ",".join(map(member, value["types"])) + "}}"
+
+
+def resolve(schema, root):
+    for _ in range(len(schema["types"]) + 1):
+        [(tag, fields)] = root["value"].items()
+        if tag != "Type":
+            return tag, fields
+        root = next(m["type"] for m in schema["types"] if m["name"] == fields["type"])
+    raise ValueError("recursive alias in fixture")
+
+
+def typed_value(schema, root, value, explicit=None):
+    tag, fields = resolve(schema, root)
+    if tag == "Int":
+        return "runtime::" + ("Signed" if fields["isSigned"] else "Unsigned") + "{" + str(value) + "}"
+    if tag == "Custom":
+        if fields["id"] == "bool":
+            return "runtime::Value{" + str(value).lower() + "}"
+        if fields["id"] == "string":
+            return string(value)
+        if fields["id"] == "hex":
+            return "runtime::Bytes{" + ",".join(str(v) for v in value) + "}"
+        raise ValueError("unsupported fixture adapter " + fields["id"])
+    if tag == "Option":
+        if explicit is not None:
+            if "None" in explicit:
+                return "runtime::Value::none()"
+            payload = explicit["Some"]
+            inner_tag, _ = resolve(schema, fields["type"])
+            return "runtime::Value::some(" + typed_value(schema, fields["type"], payload, payload if inner_tag == "Option" else None) + ")"
+        if value is None:
+            return "runtime::Value::none()"
+        return "runtime::Value::some(" + typed_value(schema, fields["type"], value) + ")"
+    if tag in ("Struct", "Object"):
+        return "runtime::Record{" + ",".join("{" + string(m["name"]) + "," + typed_value(schema, m["type"], value[m["name"]]) + "}" for m in fields["members"]) + "}"
+    if tag == "Tuple":
+        assert len(fields["members"]) == len(value)
+        return "runtime::Sequence{" + ",".join(typed_value(schema, t, v) for t, v in zip(fields["members"], value)) + "}"
+    if tag in ("List", "BoundedList", "Array"):
+        return "runtime::Sequence{" + ",".join(typed_value(schema, fields["type"], v) for v in value) + "}"
+    raise ValueError("unsupported fixture value " + tag)
+
+
+def explicit_value(value):
+    [(tag, payload)] = value.items()
+    if tag == "Bits":
+        return "runtime::Bits{runtime::Bytes{" + ",".join(map(str,payload["bytes"])) + "}," + str(payload["bit_count"]) + "}"
+    if tag == "Optional":
+        return "runtime::Value::none()" if payload is None else "runtime::Value::some(" + explicit_value(payload) + ")"
+    if tag == "Unsigned" or tag == "Signed":
+        return "runtime::" + tag + "{" + str(payload) + "}"
+    if tag == "Bool":
+        return "runtime::Value{" + str(payload).lower() + "}"
+    if tag == "String":
+        return string(payload)
+    if tag == "Bytes":
+        return "runtime::Bytes{" + ",".join(map(str,payload)) + "}"
+    if tag == "Sequence":
+        return "runtime::Sequence{" + ",".join(map(explicit_value,payload)) + "}"
+    if tag == "Record":
+        return "runtime::Record{" + ",".join("{"+string(k)+","+explicit_value(v)+"}" for k,v in payload) + "}"
+    if tag == "Variant":
+        return "runtime::Value::variant(" + str(payload["selector"]) + "," + explicit_value(payload["value"]) + ")"
+    raise ValueError("unsupported explicit typed fixture value " + tag)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--namespace", default="shared_pssz_ir_fixtures")
+    parser.add_argument("--count",type=int)
+    args = parser.parse_args()
+    data = args.input.read_bytes()
+    rows = [json.loads(line) for line in data.splitlines()]
+    assert rows and args.namespace.isidentifier()
+    if args.count is not None: assert len(rows)==args.count
+    result = ["// Generated by cpp/tools/generate_pssz_ir_fixtures.py; do not hand-edit.",
+              "// Source SHA256 " + hashlib.sha256(data).hexdigest(), "#pragma once",
+              "namespace " + args.namespace + " {",
+              "struct Case { const char* name; std::size_t width; ir::Schema schema; ir::AnyType root; runtime::Value value; std::vector<char> bytes; bool accept; bool encode_check; };",
+              "inline std::vector<Case> cases() { return {"]
+    for row in rows:
+        raw = bytes.fromhex(row["hex"])
+        values = ",".join("char(" + str(byte) + ")" for byte in raw)
+        encode_check=True
+        if "typed_value" in row:
+            if row["typed_value"] is None: logical="runtime::Value::none()";encode_check=False
+            else: logical=explicit_value(row["typed_value"])
+        else: logical=typed_value(row["schema"], row["root_schema"], row["value"], row.get("option_value"))
+        result.append("Case{" + json.dumps(row["name"]) + "," + str(int(row["profile"][4:]) // 8) + "," +
+                      schema(row["schema"]) + "," + any_type(row["root_schema"]) + "," +
+                      logical + ",std::vector<char>{" + values + "}," + str(row["expected_accept"]).lower() + "," + str(encode_check).lower() + "},")
+    result += ["}; }", "} // namespace " + args.namespace, ""]
+    args.output.write_text("\n".join(result))
+
+
+if __name__ == "__main__":
+    main()

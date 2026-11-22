@@ -26,6 +26,11 @@ use std::convert::TryFrom;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PsszError(pub &'static str);
 
+impl std::fmt::Display for PsszError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
+}
+impl std::error::Error for PsszError {}
+
 pub type PsszResult<T> = Result<T, PsszError>;
 
 /// A pSSZ format variant. Offset and header widths come from this trait.
@@ -81,6 +86,15 @@ pub trait PsszPack<F: PsszFormat> {
 
     /// Append this value's encoded bytes to `out`.
     fn pssz_pack(&self, out: &mut Vec<u8>);
+
+    /// Fallible append used by untrusted protocol entry points. Containers
+    /// with offsets or bounds override this to report an unrepresentable
+    /// value instead of panicking; on error nothing is appended to `out`.
+    /// Decoding is unaffected and stays on the safety-reviewed typed path.
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        self.pssz_pack(out);
+        Ok(())
+    }
 }
 
 /// Compile-time helper: pick the narrowest pssz format that fits max size.
@@ -403,6 +417,9 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for [T; N] {
             }
         }
     }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        crate::pssz_checked::encode_sequence::<F, T>(self, out)
+    }
 }
 
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F> for [T; N] {
@@ -463,6 +480,10 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for BoundedList<
     const FIXED_SIZE:       usize = 0;
     fn pssz_size(&self) -> usize { self.0.pssz_size() }
     fn pssz_pack(&self, out: &mut Vec<u8>) { self.0.pssz_pack(out) }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        if self.0.len() > N { return Err(PsszError("pssz: BoundedList overflow")); }
+        self.0.pssz_pack_checked(out)
+    }
 }
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F>
     for BoundedList<T, N>
@@ -483,6 +504,11 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedString<N> {
     const FIXED_SIZE:       usize = 0;
     fn pssz_size(&self) -> usize { self.0.len() }
     fn pssz_pack(&self, out: &mut Vec<u8>) { out.extend_from_slice(self.0.as_bytes()); }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        if self.0.len() > N { return Err(PsszError("pssz: BoundedString overflow")); }
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(())
+    }
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedString<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -528,6 +554,9 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Vec<T> {
             }
         }
     }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        crate::pssz_checked::encode_sequence::<F, T>(self, out)
+    }
 }
 
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Vec<T> {
@@ -560,6 +589,14 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Option<T> {
             v.pssz_pack(out);
         }
     }
+    // Same presence rule as pssz_pack above; only the failure mode differs.
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let mut result = Vec::new();
+        if T::MIN_ENCODED_SIZE == 0 { result.push(if self.is_some() { 1 } else { 0 }); }
+        if let Some(v) = self { v.pssz_pack_checked(&mut result)?; }
+        out.extend_from_slice(&result);
+        Ok(())
+    }
 }
 
 // ── Box<[T; N]> — heap-allocated fixed array (stack-safe for big N) ────────
@@ -575,6 +612,9 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for Box<[T; N]> 
     const FIXED_SIZE:       usize         = <[T; N] as PsszPack<F>>::FIXED_SIZE;
     fn pssz_size(&self) -> usize { (**self).pssz_size() }
     fn pssz_pack(&self, out: &mut Vec<u8>) { (**self).pssz_pack(out) }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        (**self).pssz_pack_checked(out)
+    }
 }
 
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F>
@@ -635,6 +675,15 @@ pub fn to_pssz<F: PsszFormat, T: PsszPack<F>>(value: &T) -> Vec<u8> {
     let mut out = Vec::with_capacity(value.pssz_size());
     value.pssz_pack(&mut out);
     out
+}
+
+/// Checked encode. Offset-width and bound overflows are returned as errors
+/// instead of panicking as the infallible `to_pssz` convenience does.
+pub fn try_to_pssz<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<Vec<u8>> {
+    input::format::<F>()?;
+    let mut out = Vec::new();
+    value.pssz_pack_checked(&mut out)?;
+    Ok(out)
 }
 
 pub fn from_pssz<F: PsszFormat, T: PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {

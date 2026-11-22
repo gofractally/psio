@@ -12,11 +12,17 @@
 //   vector<variable T>  — [uW offset_0][uW offset_1]...[payload],
 //                         n = offset_0 / W (offsets are W bytes, not
 //                         u32 like SSZ).
-//   optional<fixed V>   — span is either empty (None) or
+//   optional<nonzero fixed V> — span is either empty (None) or
 //                         fixed_size<V> bytes (Some). NO selector.
 //                         Length disambiguates.
-//   optional<variable V>— [u8 selector][payload if selector == 1].
+//   optional<zero-size fixed or variable V>
+//                       — [u8 selector][payload if selector == 1].
 //                         Same as SSZ.
+//   record              — [uW fixed-region size unless DWNC][fixed region]
+//                         [payloads]. The header is the writer's region
+//                         size: trailing optional fields may be absent
+//                         (pruned None) and unknown appended optional slots
+//                         may follow the reader's known fields.
 //   variant<Ts...>      — [u8 selector][payload]. Same as SSZ.
 //
 // All three composite view templates from psio/view.hpp are written
@@ -101,7 +107,8 @@ namespace psio::view_layout {
 
       // ── optional ───────────────────────────────────────────────────────
       //
-      // pssz splits on the payload's fixed/variable status:
+      // pssz splits on the payload's fixed/variable status, using the same
+      // predicate as the codec (pssz_impl::optional_uses_selector_v):
       //   nonzero fixed V — no selector. Empty span = None; fixed_size<V>
       //                 bytes = Some.
       //   zero-size fixed or variable V — [u8 selector][payload if selector != 0].
@@ -130,6 +137,78 @@ namespace psio::view_layout {
             return s.empty() ? std::span<const char>{} : s.subspan(1);
       }
 
+      // ── record ─────────────────────────────────────────────────────────
+      //
+      // Field N of record T at offset width W. Reads the writer's header so
+      // a known trailing optional the writer pruned yields the canonical
+      // None payload, and unknown appended slots bound the last known
+      // variable field. Getters keep their O(1) prevalidated-input contract.
+      template <std::size_t W, typename T, std::size_t N>
+      std::span<const char> record_field_span(std::span<const char> bytes) noexcept
+      {
+         using namespace ::psio::detail::pssz_impl;
+         constexpr auto fields = record_layout<W, T>(
+            std::make_index_sequence<record_traits<T>::member_count>{});
+         constexpr auto fixed_off = [&] {
+            std::size_t n = 0;
+            for (std::size_t i = 0; i < N; ++i) n += fields[i].fixed_size;
+            return n;
+         }();
+         constexpr auto known_size = [&] {
+            std::size_t n = 0;
+            for (auto field : fields) n += field.fixed_size;
+            return n;
+         }();
+         constexpr auto next_slot = [&] {
+            std::size_t pos = fixed_off + fields[N].fixed_size;
+            for (std::size_t i = N + 1; i < fields.size(); ++i)
+            {
+               if (fields[i].variable) return pos;
+               pos += fields[i].fixed_size;
+            }
+            return known_size;
+         }();
+         std::size_t fixed_size = known_size;
+         if constexpr (!::psio::is_dwnc_v<T>)
+         {
+            if (bytes.size() < W) return {};
+            fixed_size = read_offset<W>(bytes, 0);
+            bytes = bytes.subspan(W);
+         }
+         if (fixed_size > bytes.size()) return {};
+         if (fixed_off > fixed_size || fields[N].fixed_size > fixed_size - fixed_off)
+         {
+            if constexpr (omittable_field_v<T, N>)
+            {
+               using F = typename record_traits<T>::template member_type<N>;
+               // A selector-carrying optional has a one-byte None; a
+               // length-disambiguated optional's None is the empty span.
+               if constexpr (optional_uses_selector_v<typename F::value_type>)
+               {
+                  static constexpr char none = 0;
+                  return {&none, 1};
+               }
+            }
+            return {};
+         }
+         if constexpr (!fields[N].variable)
+            return bytes.subspan(fixed_off, fields[N].fixed_size);
+         else
+         {
+            const auto start = read_offset<W>(bytes, fixed_off);
+            std::size_t stop = bytes.size();
+            // A known next slot can have been pruned; an unknown optional
+            // suffix begins exactly at the reader's known fixed size.
+            if (next_slot < fixed_size)
+            {
+               if (W > fixed_size - next_slot) return {};
+               stop = read_offset<W>(bytes, next_slot);
+            }
+            if (start < fixed_size || start > stop || stop > bytes.size()) return {};
+            return bytes.subspan(start, stop - start);
+         }
+      }
+
       // ── variant ────────────────────────────────────────────────────────
       inline std::size_t variant_index(std::span<const char> s) noexcept
       {
@@ -151,6 +230,13 @@ namespace psio::view_layout {
    template <std::size_t W>
    struct traits<::psio::pssz_<W>>
    {
+      template <typename T, std::size_t N>
+         requires (::psio::detail::pssz_impl::Record<T> &&
+                   N < ::psio::detail::pssz_impl::record_traits<T>::member_count)
+      static std::span<const char> record_field_span(
+         std::span<const char> s, std::span<const char> = {}) noexcept
+      { return detail_pssz::record_field_span<W, T, N>(s); }
+
       template <typename T>
       static std::size_t vector_count(std::span<const char> s) noexcept
       {
@@ -202,9 +288,22 @@ namespace psio::view_layout {
    // The view knows the outer shape it represents (std::vector<T> /
    // std::optional<T> / std::variant<Ts...>) and picks W to match what
    // the encoder picked for that shape via auto_pssz_width_v.
+   //
+   // Automatic widths belong to each logical type (docs/pssz-type-width.md),
+   // so child views stay in the automatic profile and re-select their own
+   // width. This trait therefore deliberately defines no `nested_format`:
+   // a parent's width is never inherited by its children.
    template <>
    struct traits<::psio::pssz>
    {
+
+      template <typename T, std::size_t N>
+         requires (::psio::detail::pssz_impl::Record<T> &&
+                   N < ::psio::detail::pssz_impl::record_traits<T>::member_count)
+      static std::span<const char> record_field_span(
+         std::span<const char> s, std::span<const char> = {}) noexcept
+      { return detail_pssz::record_field_span<::psio::auto_pssz_width_v<T>, T, N>(s); }
+
       template <typename T>
       static std::size_t vector_count(std::span<const char> s) noexcept
       {
@@ -222,6 +321,8 @@ namespace psio::view_layout {
          return detail_pssz::vector_element_span<W, T>(s, i);
       }
 
+      // A fixed-count array owns its own logical width, which can differ
+      // from a vector of the same element type.
       template <typename T, std::size_t N>
       static std::span<const char> array_element_span(std::span<const char> s, std::size_t i) noexcept
       {
@@ -255,120 +356,63 @@ namespace psio::view_layout {
          return detail_pssz::variant_payload_span(s);
       }
 
-      // ── Reflected struct field access ──────────────────────────────────
-      //
-      // For DWNC records: layout matches ssz (no header); offsets and
-      // slot sizes are prefix-sum from byte 0.
-      //
-      // For non-DWNC records: pssz prepends a `W`-byte fixed_size header
-      // (forward-compat slot — newer decoder reads this to know how many
-      // bytes of fixed region were actually written by the writer).  We
-      // strip this header at the start so all subsequent offsets are
-      // relative to container_start (matching encode's convention).
-      //
-      // Variable-field offset slots are `W` bytes (matches the format's
-      // pssz_<W> width or auto-width).
-     private:
-      template <std::size_t W, typename T, std::size_t I>
-      static consteval std::size_t pssz_slot_size_of_field()
-      {
-         using R   = ::psio::reflect<T>;
-         using F_I = std::remove_cvref_t<typename R::template member_type<I>>;
-         if constexpr (::psio::detail::pssz_impl::is_fixed_v<F_I>)
-            return ::psio::detail::pssz_impl::fixed_size_of<F_I>();
-         else
-            return W;
-      }
-
-      template <std::size_t W, typename T, std::size_t N>
-      static consteval std::size_t pssz_fixed_region_offset_of_field()
-      {
-         std::size_t off = 0;
-         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            ((off += pssz_slot_size_of_field<W, T, Is>()), ...);
-         }(std::make_index_sequence<N>{});
-         return off;
-      }
-
-      template <std::size_t W, typename T, std::size_t N,
-                std::size_t I = N + 1>
-      static consteval std::size_t pssz_next_var_slot_after()
-      {
-         using R = ::psio::reflect<T>;
-         if constexpr (I >= R::member_count)
-            return 0;
-         else
-         {
-            using F_I = std::remove_cvref_t<
-               typename R::template member_type<I>>;
-            if constexpr (!::psio::detail::pssz_impl::is_fixed_v<F_I>)
-               return pssz_fixed_region_offset_of_field<W, T, I>();
-            else
-               return pssz_next_var_slot_after<W, T, N, I + 1>();
-         }
-      }
-
-     public:
-      template <typename T, std::size_t N>
-         requires ::psio::Reflected<T>
-                  && (N < ::psio::reflect<T>::member_count)
-      static std::span<const char>
-      record_field_span(std::span<const char> s,
-                        std::span<const char> /*root*/ = {}) noexcept
-      {
-         constexpr std::size_t W = ::psio::auto_pssz_width_v<T>;
-         using R      = ::psio::reflect<T>;
-         using FieldT = std::remove_cvref_t<typename R::template member_type<N>>;
-
-         // Non-DWNC: strip the W-byte fixed_size header so subsequent
-         // offsets are relative to container_start.
-         if constexpr (!::psio::is_dwnc_v<T>)
-         {
-            if (s.size() < W)
-               return {};
-            s = s.subspan(W);
-         }
-
-         constexpr std::size_t fixed_off =
-            pssz_fixed_region_offset_of_field<W, T, N>();
-
-         if constexpr (::psio::detail::pssz_impl::is_fixed_v<FieldT>)
-         {
-            constexpr std::size_t sz =
-               ::psio::detail::pssz_impl::fixed_size_of<FieldT>();
-            if (s.size() < fixed_off + sz)
-               return {};
-            return s.subspan(fixed_off, sz);
-         }
-         else
-         {
-            if (s.size() < fixed_off + W)
-               return {};
-            using O = typename
-               ::psio::detail::pssz_impl::width_info<W>::offset_t;
-            O this_off_o{};
-            std::memcpy(&this_off_o, s.data() + fixed_off, W);
-            std::uint32_t this_off =
-               static_cast<std::uint32_t>(this_off_o);
-
-            constexpr std::size_t next_var_slot =
-               pssz_next_var_slot_after<W, T, N>();
-            std::uint32_t end_off;
-            if constexpr (next_var_slot == 0)
-               end_off = static_cast<std::uint32_t>(s.size());
-            else
-            {
-               if (s.size() < next_var_slot + W)
-                  return {};
-               O next_o{};
-               std::memcpy(&next_o, s.data() + next_var_slot, W);
-               end_off = static_cast<std::uint32_t>(next_o);
-            }
-            if (this_off > end_off || end_off > s.size())
-               return {};
-            return s.subspan(this_off, end_off - this_off);
-         }
-      }
    };
 
 }  // namespace psio::view_layout
+
+namespace psio {
+   namespace detail {
+      template <typename F> inline constexpr bool is_pssz_format_v = false;
+      template <> inline constexpr bool is_pssz_format_v<pssz> = true;
+      template <std::size_t W> inline constexpr bool is_pssz_format_v<pssz_<W>> = true;
+   }
+
+   template <typename... Ts, typename Fmt, storage Store>
+      requires (detail::is_pssz_format_v<Fmt> &&
+                !::psio::format_should_dispatch_adapter_v<Fmt, std::tuple<Ts...>>)
+   class view<std::tuple<Ts...>, Fmt, Store>
+   {
+      std::span<const char> data_;
+    public:
+      using element_type = std::tuple<Ts...>;
+      using format_type = Fmt;
+      static constexpr storage storage_kind = Store;
+      view() = default;
+      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      std::span<const char> _psio_data() const noexcept { return data_; }
+      template <std::size_t N> auto get() const noexcept
+      {
+         using F = std::tuple_element_t<N, element_type>;
+         auto span = view_layout::traits<Fmt>::template record_field_span<element_type, N>(data_);
+         if constexpr (std::is_arithmetic_v<F>)
+         {
+            F out{};
+            if (span.size() == sizeof(F)) std::memcpy(&out, span.data(), sizeof(F));
+            return out;
+         }
+         else return view<F, view_layout::nested_format_t<Fmt, element_type>, Store>{span};
+      }
+   };
+
+   template <typename T, typename Fmt, storage Store>
+      requires detail::is_pssz_format_v<Fmt>
+   class view<schema_types::Box<T>, Fmt, Store> : public view<T, Fmt, Store>
+   {
+    public:
+      using view<T, Fmt, Store>::view;
+   };
+
+   // Construction checks the complete frame; getters retain their O(1)
+   // prevalidated-input contract and borrow the original payload bytes.
+   template <typename T, typename Fmt>
+      requires detail::is_pssz_format_v<Fmt>
+   [[nodiscard]] codec_status validated_pssz_view(
+      Fmt fmt, std::span<const char> bytes,
+      std::optional<view<T, Fmt, storage::const_borrow>>& result, bool& has_unknown)
+   {
+      auto status = validate_pssz_compatible<T>(fmt, bytes, has_unknown);
+      if (status.ok()) result.emplace(bytes);
+      return status;
+   }
+}

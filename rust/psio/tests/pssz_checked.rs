@@ -1,0 +1,96 @@
+use psio::pssz::*;
+
+#[derive(Debug, PartialEq)]
+struct Record {
+    flag: bool,
+    text: String,
+    other: String,
+}
+psio::pssz_struct!(Record {
+    flag: bool,
+    text: String,
+    other: String
+});
+
+#[derive(Debug, PartialEq)]
+struct Fixed {
+    value: u32,
+}
+psio::pssz_struct_dwnc!(Fixed { value: u32 });
+
+#[test]
+fn exact_scalar_spans_and_valid_bool_values() {
+    assert!(from_pssz::<Pssz32, u32>(&[0; 5]).is_err());
+    assert!(from_pssz::<Pssz32, bool>(&[0, 0]).is_err());
+    for bytes in [&[2][..], &[255][..]] {
+        assert!(from_pssz::<Pssz32, Vec<bool>>(bytes).is_err());
+        assert!(from_pssz::<Pssz32, [bool; 1]>(bytes).is_err());
+        assert!(from_pssz::<Pssz32, Box<[bool; 1]>>(bytes).is_err());
+    }
+}
+
+#[test]
+fn fixed_custom_types_are_walked_instead_of_memcopied() {
+    let values = vec![Fixed { value: 0x12345678 }];
+    let bytes = try_to_pssz::<Pssz32, _>(&values).unwrap();
+    assert_eq!(bytes, [0x78, 0x56, 0x34, 0x12]);
+    assert_eq!(from_pssz::<Pssz32, Vec<Fixed>>(&bytes).unwrap(), values);
+}
+
+#[test]
+fn variable_optional_record_uses_cpp_selector_rule() {
+    let record = Record {
+        flag: true,
+        text: "a".into(),
+        other: "b".into(),
+    };
+    let bytes = try_to_pssz::<Pssz8, _>(&Some(record)).unwrap();
+    assert_eq!(bytes, [1, 3, 1, 3, 4, b'a', b'b']);
+    assert_eq!(try_to_pssz::<Pssz8, Option<Record>>(&None).unwrap(), [0]);
+}
+
+#[test]
+fn checked_encode_reports_nested_offset_and_bound_overflow() {
+    let values = vec!["x".repeat(255), "last".into()];
+    assert!(try_to_pssz::<Pssz8, _>(&values).is_err());
+    assert!(try_to_pssz::<Pssz8, _>(&Some(values)).is_err());
+    assert!(try_to_pssz::<Pssz32, _>(&BoundedString::<2>("long".into())).is_err());
+    assert!(try_to_pssz::<Pssz32, _>(&BoundedList::<u8, 1>(vec![1, 2])).is_err());
+    use psio::pssz_checked::{encode_record, Layout};
+    assert!(encode_record::<Pssz32>(
+        &[(
+            Layout {
+                fixed: true,
+                size: usize::MAX
+            },
+            vec![]
+        )],
+        false,
+        &mut vec![]
+    )
+    .is_err());
+}
+
+#[test]
+fn canonical_tables_reject_gaps_zero_offsets_and_trailing_bytes() {
+    assert!(from_pssz::<Pssz8, Vec<String>>(&[0, 1]).is_err());
+    assert!(from_pssz::<Pssz8, [String; 1]>(&[2, 0, b'x']).is_err());
+    assert!(from_pssz::<Pssz8, [String; 0]>(&[0]).is_err());
+    assert!(from_pssz::<Pssz8, Fixed>(&[1, 0, 0, 0, 9]).is_err());
+    assert!(from_pssz::<Pssz8, Record>(&[3, 1, 4, 4, 0]).is_err());
+    assert!(from_pssz::<Pssz8, Record>(&[2, 1, 3, 3]).is_err());
+}
+
+#[test]
+fn arbitrary_small_buffers_return_errors_without_panics() {
+    for size in 0..24 {
+        for seed in 0u8..=255 {
+            let bytes: Vec<_> = (0..size).map(|i| seed.wrapping_add(i as u8 * 7)).collect();
+            assert!(std::panic::catch_unwind(|| from_pssz::<Pssz8, Record>(&bytes)).is_ok());
+            assert!(
+                std::panic::catch_unwind(|| from_pssz::<Pssz8, Vec<Vec<bool>>>(&bytes)).is_ok()
+            );
+            assert!(std::panic::catch_unwind(|| from_pssz::<Pssz16, [String; 2]>(&bytes)).is_ok());
+        }
+    }
+}

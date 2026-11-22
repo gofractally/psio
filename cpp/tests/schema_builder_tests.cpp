@@ -1,6 +1,8 @@
 // Tests for psio/schema_builder.hpp — C++ reflection → Schema IR.
 
 #include <psio/schema_builder.hpp>
+#include <psio/pssz_ir.hpp>
+#include <psio/pssz.hpp>
 
 #include <catch.hpp>
 
@@ -30,6 +32,81 @@ namespace test_sb
 
 using test_sb::Bag;
 using test_sb::Point;
+
+using LabeledSchemaVariant=std::variant<std::uint16_t,bool>;
+template<> struct psio::schema_variant_labels<LabeledSchemaVariant>
+{
+   static constexpr std::array<std::string_view,2> names{"Code","Ready"};
+};
+
+namespace recursive_schema
+{
+   struct Node
+   {
+      std::uint8_t value=0;
+      std::optional<psio::schema_types::Box<Node>> next;
+   };
+   PSIO_REFLECT(Node,value,next)
+}
+
+TEST_CASE("SchemaBuilder emits actual tuple and ordered variant IR", "[schema_builder][pssz]")
+{
+   namespace ir=psio::schema_types;namespace codec=psio::pssz_ir;
+   psio::SchemaBuilder builder;
+   auto zero=builder.insert<std::tuple<>>();
+   auto pair=builder.insert<std::tuple<std::uint32_t,std::string>>();
+   auto choice=builder.insert<std::variant<std::uint32_t,std::string>>();
+   auto named=builder.insert<LabeledSchemaVariant>();
+   auto schema=std::move(builder).build();
+   REQUIRE(std::get<ir::Tuple>(zero.resolve(schema)->value).members.empty());
+   REQUIRE(std::get<ir::Tuple>(pair.resolve(schema)->value).members.size()==2);
+   const auto& variants=std::get<ir::Variant>(choice.resolve(schema)->value);
+   REQUIRE(variants.members[0].name=="0");REQUIRE(variants.members[1].name=="1");
+   const auto& labeled=std::get<ir::Variant>(named.resolve(schema)->value);
+   REQUIRE(labeled.members[0].name=="Code");REQUIRE(labeled.members[1].name=="Ready");
+   std::vector<char> bytes;codec::Value decoded;
+   REQUIRE(codec::encode<4>(schema,zero,codec::Sequence{},bytes).ok());
+   REQUIRE(bytes==psio::encode(psio::pssz32{},std::tuple{}));bytes.clear();
+   REQUIRE(codec::encode<4>(schema,pair,codec::Sequence{codec::Unsigned{7},std::string("hi")},bytes).ok());
+   REQUIRE(bytes==psio::encode(psio::pssz32{},std::tuple{std::uint32_t{7},std::string("hi")}));
+   bytes.clear();auto value=codec::Value::variant(1,std::string("hello"));
+   REQUIRE(codec::encode<4>(schema,choice,value,bytes).ok());
+   REQUIRE(bytes==psio::encode(psio::pssz32{},std::variant<std::uint32_t,std::string>{std::in_place_index<1>,"hello"}));
+   REQUIRE(codec::decode_exact<4>(schema,choice,bytes,decoded).ok());REQUIRE(decoded==value);
+}
+
+TEST_CASE("SchemaBuilder emits count bounds and packed bit metadata", "[schema_builder][bounds]")
+{
+   namespace ir=psio::schema_types;
+   psio::SchemaBuilder builder;
+   auto list=builder.insert<psio::bounded<std::uint16_t,5>>();
+   auto text=builder.insert<psio::utf8_string<8>>();
+   auto bits=builder.insert<psio::bitvector<9>>();
+   auto bitlist=builder.insert<psio::bitlist<17>>();
+   auto schema=std::move(builder).build();
+   REQUIRE(std::get<ir::BoundedList>(list.resolve(schema)->value).maxCount==5);
+   const auto& string=std::get<ir::Custom>(text.resolve(schema)->value);
+   REQUIRE(string.id=="string");REQUIRE(std::get<ir::BoundedList>(string.type->value).maxCount==8);
+   const auto& vector=std::get<ir::Custom>(bits.resolve(schema)->value);
+   REQUIRE(vector.id=="bitvector");const auto& array=std::get<ir::Array>(vector.type->value);
+   REQUIRE(array.len==9);REQUIRE(std::get<ir::Int>(array.type->value).bits==1);
+   const auto& list_bits=std::get<ir::Custom>(bitlist.resolve(schema)->value);
+   REQUIRE(list_bits.id=="bitlist");REQUIRE(std::get<ir::BoundedList>(list_bits.type->value).maxCount==17);
+}
+
+TEST_CASE("SchemaBuilder preserves recursive graphs through transparent boxes", "[schema_builder][recursive]")
+{
+   namespace ir=psio::schema_types;namespace codec=psio::pssz_ir;
+   psio::SchemaBuilder builder;auto root=builder.insert<recursive_schema::Node>();
+   auto schema=std::move(builder).build();
+   const auto& object=std::get<ir::Object>(root.resolve(schema)->value);
+   const auto& next=std::get<ir::Option>(object.members[1].type->resolve(schema)->value);
+   REQUIRE(next.type->resolve(schema)==root.resolve(schema));
+   recursive_schema::Node value{1,ir::Box<recursive_schema::Node>{recursive_schema::Node{2,std::nullopt}}};
+   auto bytes=psio::encode(psio::pssz32{},value);codec::Value decoded;
+   REQUIRE(codec::decode_exact<4>(schema,root,bytes,decoded).ok());
+   std::vector<char> actual;REQUIRE(codec::encode<4>(schema,root,decoded,actual).ok());REQUIRE(actual==bytes);
+}
 
 // ─── Primitives + records ────────────────────────────────────────────
 

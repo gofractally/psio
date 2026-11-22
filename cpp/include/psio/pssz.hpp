@@ -34,6 +34,7 @@
 #include <psio/cpo.hpp>
 #include <psio/detail/unaligned_iter.hpp>
 #include <psio/detail/validate_depth.hpp>
+#include <psio/detail/pssz_record_layout.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -45,6 +46,7 @@
 #include <psio/validate_strict_walker.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
@@ -55,6 +57,7 @@
 #include <variant>
 #include <span>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <vector>
 
@@ -218,8 +221,52 @@ namespace psio {
       {
       };
 
+      // Positional tuples are encoded as extensible records: the same
+      // header, offset slots and optional-suffix rules as a reflected
+      // struct, addressed by index instead of by member pointer.
       template <typename T>
-      concept Record = ::psio::Reflected<T>;
+      struct is_std_tuple : std::false_type {};
+      template <typename... Ts>
+      struct is_std_tuple<std::tuple<Ts...>> : std::true_type {};
+      template <typename T>
+      inline constexpr bool is_std_tuple_v = is_std_tuple<T>::value;
+
+      template <typename T>
+      struct record_traits : ::psio::reflect<T> {};
+      template <typename... Ts>
+      struct record_traits<std::tuple<Ts...>>
+      {
+         static constexpr std::size_t member_count = sizeof...(Ts);
+         template <std::size_t I>
+         using member_type = std::tuple_element_t<I, std::tuple<Ts...>>;
+      };
+
+      template <typename T, std::size_t I, bool = is_std_tuple_v<T>>
+      struct record_member_annotations
+      {
+         using R = record_traits<T>;
+         using F = typename R::template member_type<I>;
+         using value_t = typename ::psio::effective_annotations_for<
+            T, F, R::template member_pointer<I>>::value_t;
+      };
+      template <typename T, std::size_t I>
+      struct record_member_annotations<T, I, true>
+      {
+         using value_t = std::tuple<>;
+      };
+
+      template <std::size_t I, typename T>
+      decltype(auto) record_member(T&& value) noexcept
+      {
+         using U = std::remove_cvref_t<T>;
+         if constexpr (is_std_tuple_v<U>)
+            return std::get<I>(std::forward<T>(value));
+         else
+            return std::forward<T>(value).*(record_traits<U>::template member_pointer<I>);
+      }
+
+      template <typename T>
+      concept Record = ::psio::Reflected<T> || is_std_tuple_v<T>;
 
       template <typename T>
       inline constexpr bool is_fixed_v = is_fixed<T>::value;
@@ -227,14 +274,15 @@ namespace psio {
       template <Record T, std::size_t... Is>
       consteval bool record_fields_all_fixed(std::index_sequence<Is...>)
       {
-         using R = ::psio::reflect<T>;
-         return (is_fixed_v<typename R::template member_type<Is>> && ...);
+         using R = record_traits<T>;
+         return ((is_fixed_v<typename R::template member_type<Is>> &&
+                  !::psio::has_as_override_v<typename record_member_annotations<T, Is>::value_t>) && ...);
       }
 
       template <Record T>
       consteval bool record_all_fixed()
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          return record_fields_all_fixed<T>(
             std::make_index_sequence<R::member_count>{});
       }
@@ -269,7 +317,7 @@ namespace psio {
       template <Record T, std::size_t... Is>
       consteval std::size_t sum_record_fields(std::index_sequence<Is...>)
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          return (fixed_size_of<typename R::template member_type<Is>>() + ... + 0);
       }
 
@@ -281,7 +329,7 @@ namespace psio {
       template <std::size_t W, Record T, std::size_t I>
       consteval std::size_t pssz_member_fixed_size_simple()
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          using F = typename R::template member_type<I>;
          if constexpr (is_fixed_v<F>) return fixed_size_of<F>();
          else                          return W;
@@ -290,10 +338,9 @@ namespace psio {
       template <std::size_t W, Record T, std::size_t I>
       consteval std::size_t pssz_member_fixed_size_full()
       {
-         using R = ::psio::reflect<T>;
+         using R = record_traits<T>;
          using F = typename R::template member_type<I>;
-         using eff = typename ::psio::effective_annotations_for<
-            T, F, R::template member_pointer<I>>::value_t;
+         using eff = typename record_member_annotations<T, I>::value_t;
          constexpr bool override_v = ::psio::has_as_override_v<eff>;
          if constexpr (!override_v && is_fixed_v<F>)
             return fixed_size_of<F>();
@@ -329,7 +376,7 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return sum_record_fields<T>(
                std::make_index_sequence<R::member_count>{});
          }
@@ -341,6 +388,11 @@ namespace psio {
 
       // A fixed payload of zero bytes cannot distinguish None from Some by
       // length. Use the existing optional selector in that case as well.
+      //
+      // This is the single optional-presence predicate for sizing, encoding,
+      // decoding, validation and views. The published explicit-profile bytes
+      // carry a selector for every variable payload (including extensible
+      // records and variants), so that rule is kept here unchanged.
       template <typename T>
       inline constexpr bool is_zero_fixed_v = is_fixed_v<T> && fixed_size_of<T>() == 0;
       template <typename T>
@@ -410,6 +462,203 @@ namespace psio {
       template <typename T>
       inline constexpr bool is_bitlist_v = is_bitlist<T>::value;
 
+      // ── Optional-suffix evolution ─────────────────────────────────────────
+      //
+      // A compatible record revision appends only optional fields. Each one
+      // occupies a W-byte offset slot, so the writer's fixed-region header
+      // tells a reader how many slots were actually written: an older reader
+      // skips unknown trailing slots, a newer reader synthesizes None for
+      // slots the writer did not emit, and the encoder prunes trailing None
+      // fields. DWNC records have no header and are never pruned or extended.
+      // See docs/pssz-optional-evolution.md.
+
+      // Whether an encoded value has a positive minimum length. This is
+      // deliberately independent of fixed-size classification: extensible
+      // records always have a header, while a zero-sized DWNC unit does not.
+      //
+      // NOTE: the evolution line used this as the optional selector predicate
+      // (no selector when the payload cannot be empty). The trunk publishes
+      // explicit-profile bytes with a selector for every variable payload, so
+      // the codec keeps `optional_uses_selector_v` above; this trait is
+      // retained for the schema tools and for whoever settles that question.
+      template <std::size_t W, typename T>
+      consteval bool positive_min_size()
+      {
+         if constexpr (is_psio_box_v<T>)
+            return positive_min_size<W, typename is_psio_box<T>::elem>();
+         else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::pssz, T>)
+            return false; // An adapter without a minimum-size contract may encode empty.
+         else if constexpr (is_std_optional_v<T>)
+            return !positive_min_size<W, typename T::value_type>();
+         else if constexpr (is_std_variant_v<T> || is_bitlist_v<T>)
+            return true;
+         else if constexpr (is_fixed_v<T>)
+            return fixed_size_of<T>() != 0;
+         else if constexpr (is_std_array_v<T>)
+            return std::tuple_size_v<T> != 0;
+         else if constexpr (Record<T>)
+            return !::psio::is_dwnc_v<T> || record_traits<T>::member_count != 0;
+         else
+            return false;
+      }
+
+      // A field may be omitted from the fixed region only when it is a plain
+      // std::optional (an `as<Tag>` override owns its own representation).
+      template <Record T, std::size_t I>
+      inline constexpr bool omittable_field_v =
+         is_std_optional_v<typename record_traits<T>::template member_type<I>> &&
+         !::psio::has_as_override_v<typename record_member_annotations<T, I>::value_t>;
+
+      // Number of leading fields the encoder writes: everything up to and
+      // including the last field that is not an absent trailing optional.
+      template <Record T>
+      std::size_t emitted_field_count(const T& value) noexcept
+      {
+         using R = record_traits<T>;
+         if constexpr (::psio::is_dwnc_v<T>)
+            return R::member_count;
+         else
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               std::size_t count = 0;
+               (([&] {
+                  if constexpr (omittable_field_v<T, Is>)
+                  {
+                     if (record_member<Is>(value).has_value()) count = Is + 1;
+                  }
+                  else count = Is + 1;
+               }()), ...);
+               return count;
+            }(std::make_index_sequence<R::member_count>{});
+      }
+
+      template <std::size_t W, Record T, std::size_t... Is>
+      consteval auto record_layout(std::index_sequence<Is...>)
+      {
+         return std::array<::psio::detail::pssz_field_layout, sizeof...(Is)>{
+            ::psio::detail::pssz_field_layout{
+               pssz_member_fixed_size_full<W, T, Is>(),
+               ::psio::has_as_override_v<typename record_member_annotations<T, Is>::value_t> ||
+                  !is_fixed_v<typename record_traits<T>::template member_type<Is>>,
+               omittable_field_v<T, Is>}...};
+      }
+
+      // Whether the payload span of an optional<V> field encodes None.
+      template <typename V>
+      bool optional_span_is_none(std::span<const char> src, std::size_t begin,
+                                 std::size_t end) noexcept
+      {
+         if constexpr (optional_uses_selector_v<V>)
+            return begin >= end || src[begin] == 0;
+         else
+            return begin >= end;
+      }
+
+      // Pruning is mandatory: a value has exactly one encoding. A record
+      // whose last written slot is an absent optional should have had that
+      // slot pruned, so every reader rejects it. When the writer appended
+      // slots this reader does not know, the reader's own trailing optional
+      // is no longer the last slot and the rule cannot be evaluated for the
+      // unknown types; such frames are accepted and reported as unknown.
+      // DWNC records carry no header, are never pruned, and are exempt.
+      template <Record T, std::size_t... Is>
+      bool record_has_unpruned_tail(
+         std::span<const char> src,
+         const std::array<::psio::detail::pssz_field_span, sizeof...(Is)>& spans,
+         bool has_unknown, std::index_sequence<Is...>) noexcept
+      {
+         if constexpr (::psio::is_dwnc_v<T>)
+            return false;
+         else
+         {
+            if (has_unknown) return false;
+            bool unpruned = false;
+            (([&] {
+               if constexpr (omittable_field_v<T, Is>)
+               {
+                  using F = typename record_traits<T>::template member_type<Is>;
+                  const bool last_written =
+                     spans[Is].present &&
+                     (Is + 1 >= sizeof...(Is) ||
+                      !spans[(Is + 1) % sizeof...(Is)].present);
+                  if (last_written &&
+                      optional_span_is_none<typename F::value_type>(
+                         src, spans[Is].begin, spans[Is].end))
+                     unpruned = true;
+               }
+            }()), ...);
+            return unpruned;
+         }
+      }
+
+      // Encoder preflight: node depth, null Box and zero-stride lists are
+      // reported before any byte is sized or appended. Depth counting matches
+      // the validator: root 0, each present field / element / Some payload /
+      // variant payload adds one, a transparent Box adds none.
+      //
+      // Unlike the evolution line this does not reject non-UTF-8 std::string
+      // payloads: the trunk's structural codec treats a plain string as bytes
+      // and leaves UTF-8 to the utf8_spec annotation (validate_strict).
+      template <typename T>
+      codec_status check_encode_depth_impl(const T& value, std::size_t depth)
+      {
+         if (depth > kMaxValidationDepth)
+            return codec_fail("pssz: max depth exceeded", 0, "pssz");
+         if constexpr (is_psio_box_v<T>)
+         {
+            if (!value.value) return codec_fail("pssz: null Box", 0, "pssz");
+            return check_encode_depth_impl(*value.value, depth);
+         }
+         else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::pssz, T>)
+            return codec_ok();
+         else if constexpr (is_std_optional_v<T>)
+         {
+            if (value) return check_encode_depth_impl(*value, depth + 1);
+         }
+         else if constexpr (is_std_array_v<T> || is_std_vector_v<T>)
+         {
+            using E = typename T::value_type;
+            if constexpr (is_std_vector_v<T> && is_fixed_v<E>)
+               if constexpr (fixed_size_of<E>() == 0)
+                  if (!value.empty())
+                     return codec_fail("pssz: nonempty zero-size vector is unsupported", 0, "pssz");
+            if constexpr (std::is_arithmetic_v<E>)
+            {
+               // Leaf elements: one depth check covers all of them.
+               if (!value.empty() && depth + 1 > kMaxValidationDepth)
+                  return codec_fail("pssz: max depth exceeded", 0, "pssz");
+            }
+            else
+               for (const auto& element : value)
+               {
+                  auto status = check_encode_depth_impl<E>(element, depth + 1);
+                  if (!status.ok()) return status;
+               }
+         }
+         else if constexpr (is_std_variant_v<T>)
+            return std::visit([&](const auto& element) {
+               return check_encode_depth_impl(element, depth + 1);
+            }, value);
+         else if constexpr (Record<T>)
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               codec_status status;
+               const auto count = emitted_field_count(value);
+               (([&] {
+                  if (status.ok() && Is < count)
+                     status = check_encode_depth_impl(record_member<Is>(value), depth + 1);
+               }()), ...);
+               (void)count;
+               return status;
+            }(std::make_index_sequence<record_traits<T>::member_count>{});
+         return codec_ok();
+      }
+
+      // The width parameter is kept for source compatibility with callers of
+      // the evolution line; the walk itself is width-independent.
+      template <std::size_t W, typename T>
+      codec_status check_encode_depth(const T& value, std::size_t depth = 0)
+      {
+         return check_encode_depth_impl(value, depth);
+      }
       // ── Sizing ────────────────────────────────────────────────────────────
       //
       // For pSSZ, offsets cost W bytes. The shape remains the same as SSZ.
@@ -422,6 +671,25 @@ namespace psio {
          (void)message;
          std::abort();
 #endif
+      }
+      // Raise a status produced by a checked helper on a fail-fast path:
+      // codec_exception natively, abort when exceptions are disabled.
+      [[noreturn]] inline void status_failure(const codec_status& status)
+      {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
+         throw codec_exception{status.error()};
+#else
+         (void)status;
+         std::abort();
+#endif
+      }
+      // Encoder preflight (see check_encode_depth). Runs before sizing so a
+      // rejected value never resizes or appends to the destination.
+      template <typename T>
+      void enforce_encodable(const T& value)
+      {
+         if (auto status = check_encode_depth_impl(value, 0); !status.ok())
+            status_failure(status);
       }
       inline std::size_t checked_add(std::size_t a, std::size_t b)
       {
@@ -474,7 +742,7 @@ namespace psio {
                   return false;
          if constexpr (Record<T>)
          {
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return []<std::size_t... Is>(std::index_sequence<Is...>) {
                return ((!is_fixed_v<typename R::template member_type<Is>> ||
                         fixed_caps_valid<typename R::template member_type<Is>>()) && ...);
@@ -572,11 +840,17 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                std::size_t total = 0;
-               constexpr auto fixed_region =
-                  (pssz_member_fixed_size_full<W, T, Is>() + ... + std::size_t{0});
+               // Trailing absent optional fields are pruned from the fixed
+               // region (never for DWNC), so the region size is a property
+               // of the value, bounded above by the type's static layout.
+               const std::size_t count = emitted_field_count(v);
+               std::size_t fixed_region = 0;
+               ((Is < count
+                    ? fixed_region += pssz_member_fixed_size_full<W, T, Is>()
+                    : std::size_t{0}), ...);
                std::size_t dynamic_cursor = fixed_region;
                // u{W} fixed_size header — DWNC types skip it.
                if constexpr (!::psio::is_dwnc_v<T>)
@@ -587,12 +861,11 @@ namespace psio {
                (
                   ([&]
                    {
+                      if (Is >= count) return;
                       using F = typename R::template member_type<Is>;
-                      const auto& fref = v.*(R::template member_pointer<Is>);
+                      const auto& fref = record_member<Is>(v);
                       using eff =
-                         typename ::psio::effective_annotations_for<
-                            T, F,
-                            R::template member_pointer<Is>>::value_t;
+                         typename record_member_annotations<T, Is>::value_t;
                       constexpr bool override_v =
                          ::psio::has_as_override_v<eff>;
                       if constexpr (override_v)
@@ -619,6 +892,8 @@ namespace psio {
                       }
                    }()),
                   ...);
+               (void)count;
+               (void)dynamic_cursor;
                enforce_wire_span(total - (::psio::is_dwnc_v<T> ? 0 : W));
                return total;
             }(std::make_index_sequence<R::member_count>{});
@@ -842,17 +1117,20 @@ namespace psio {
                s.write(&v, sizeof(T));
                return;
             }
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-               constexpr std::size_t fixed_region =
-                  (pssz_member_fixed_size_full<W, T, Is>() + ... + std::size_t{0});
+               // Only the leading `count` fields are written; trailing
+               // absent optionals are pruned (see emitted_field_count).
+               const std::size_t count = emitted_field_count(v);
+               std::size_t fixed_region = 0;
+               ((Is < count
+                    ? fixed_region += pssz_member_fixed_size_full<W, T, Is>()
+                    : std::size_t{0}), ...);
 
-               // u{W} fixed_size header — fracpack's forward-compat
-               // slot. DWNC types skip it (matches v1 pssz: the header
-               // width is header_bytes == W). Non-DWNC records always
-               // carry the header so a newer decoder with more fields
-               // knows how many bytes of fixed region were actually
-               // written.
+               // u{W} fixed_size header — the forward-compat slot. DWNC
+               // types skip it. Non-DWNC records always carry the header
+               // so a reader with a different number of trailing optional
+               // fields knows how many bytes of fixed region were written.
                if constexpr (!::psio::is_dwnc_v<T>)
                {
                   using O = typename width_info<W>::offset_t;
@@ -867,13 +1145,11 @@ namespace psio {
                (
                   ([&]
                    {
+                      if (Is >= count) return;
                       using F = typename R::template member_type<Is>;
-                      const auto& fref =
-                         v.*(R::template member_pointer<Is>);
+                      const auto& fref = record_member<Is>(v);
                       using eff =
-                         typename ::psio::effective_annotations_for<
-                            T, F,
-                            R::template member_pointer<Is>>::value_t;
+                         typename record_member_annotations<T, Is>::value_t;
                       constexpr bool override_v =
                          ::psio::has_as_override_v<eff>;
 
@@ -937,6 +1213,8 @@ namespace psio {
                       }
                    }()),
                   ...);
+               (void)count;
+               (void)fixed_cursor;
             }(std::make_index_sequence<R::member_count>{});
          }
          else
@@ -1038,7 +1316,7 @@ namespace psio {
                std::memcpy(&out, src.data() + pos, sizeof(T));
                return;
             }
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             record_decode_into<W, Auto, T>(
                src, pos, end, out,
                std::make_index_sequence<R::member_count>{});
@@ -1128,7 +1406,7 @@ namespace psio {
                // In-place decode — single bulk zero-init via resize, then
                // write directly into each slot. Mirrors the ssz path.
                out.resize(n);
-               using R = ::psio::reflect<T>;
+               using R = record_traits<T>;
                for (std::size_t i = 0; i < n; ++i)
                   record_decode_into<W, Auto, T>(
                      src, pos + i * esz, pos + (i + 1) * esz, out[i],
@@ -1156,7 +1434,7 @@ namespace psio {
                // In-place: resize then walk each element directly into
                // its slot, avoiding push_back's move-construct.
                out.resize(n);
-               using R = ::psio::reflect<T>;
+               using R = record_traits<T>;
                for (std::size_t i = 0; i < n; ++i)
                {
                   const std::size_t beg = pos + offsets[i];
@@ -1185,10 +1463,15 @@ namespace psio {
       // Decode in-place: write fields directly into `out`. Used by
       // decode_vector to avoid the per-element `T tmp{}` + move-construct
       // when filling a pre-resized destination.
+      //
+      // The record frame is resolved by the shared span parser, which reads
+      // the writer's fixed-region header: known trailing optional fields the
+      // writer pruned decode as None, and unknown appended slots are skipped
+      // while still delimiting the last known variable payload.
       template <std::size_t LegacyW, bool Auto, Record T, std::size_t... Is>
       void record_decode_into(std::span<const char> src, std::size_t pos,
                               std::size_t end, T& out,
-                              std::index_sequence<Is...>)
+                              std::index_sequence<Is...> seq)
       {
          constexpr std::size_t W = [] {
             if constexpr (Auto) return ::psio::auto_pssz_width<T>();
@@ -1202,98 +1485,46 @@ namespace psio {
             enforce_max_dynamic<T>(end - pos);
             enforce_fixed_caps<T>();
          }
-         using R = ::psio::reflect<T>;
-
-         // Non-DWNC records carry a u{W} fixed_size header; skip it
-         // before reading the fixed region. Offsets inside the record
-         // are relative to the container_start — the byte after the
-         // header — so the rest of the walker uses that.
-         const std::size_t container_start =
-            ::psio::is_dwnc_v<T> ? pos : pos + W;
-
-         constexpr auto fixed_region =
-            (pssz_member_fixed_size_full<W, T, Is>() + ... + std::size_t{0});
-         if (container_start > end || fixed_region > end - container_start)
-            size_failure("pssz: record fixed region truncated");
+         using R = record_traits<T>;
+         constexpr auto layout = record_layout<W, T>(seq);
+         std::array<::psio::detail::pssz_field_span, R::member_count> spans{};
+         bool unknown = false;
+         if (auto st = ::psio::detail::pssz_record_spans<W>(
+                src, pos, end, ::psio::is_dwnc_v<T>, layout, spans, unknown);
+             !st.ok())
+            status_failure(st);
+         if (record_has_unpruned_tail<T>(src, spans, unknown, seq))
+            size_failure("pssz: trailing absent optional field was not pruned");
          if constexpr (!is_fixed_v<T>)
-         {
-            (void)checked_offset<W>(fixed_region);
-            enforce_wire_span(end - container_start);
-         }
+            enforce_wire_span(end - pos - (::psio::is_dwnc_v<T> ? 0 : W));
 
-         std::array<std::uint32_t, R::member_count> var_offsets{};
-         std::array<bool, R::member_count>          is_var{};
-         std::size_t                                 cursor = container_start;
          (
             ([&]
              {
                 using F = typename R::template member_type<Is>;
-                using eff =
-                   typename ::psio::effective_annotations_for<
-                      T, F, R::template member_pointer<Is>>::value_t;
-                constexpr bool override_v =
-                   ::psio::has_as_override_v<eff>;
-                if constexpr (!override_v && is_fixed_v<F>)
+                auto& fref = record_member<Is>(out);
+                if (!spans[Is].present)
                 {
-                   is_var[Is] = false;
-                   cursor    += fixed_size_of<F>();
+                   // Only an omittable optional can be absent; the span
+                   // parser rejects a missing required field.
+                   if constexpr (omittable_field_v<T, Is>) fref.reset();
+                   return;
+                }
+                using eff =
+                   typename record_member_annotations<T, Is>::value_t;
+                if constexpr (::psio::has_as_override_v<eff>)
+                {
+                   using Tag = ::psio::adapter_tag_of_t<eff>;
+                   using Proj = ::psio::adapter<
+                      std::remove_cvref_t<F>, Tag>;
+                   fref = Proj::decode(std::span<const char>(
+                      src.data() + spans[Is].begin,
+                      spans[Is].end - spans[Is].begin));
                 }
                 else
                 {
-                   is_var[Is]      = true;
-                   var_offsets[Is] = read_offset<W>(src, cursor);
-                   cursor         += W;
-                }
-             }()),
-            ...);
-
-         std::array<std::size_t, R::member_count> var_end{};
-         {
-            std::size_t last_end = end;
-            for (std::size_t i = R::member_count; i-- > 0;)
-            {
-               if (is_var[i])
-               {
-                  var_end[i] = last_end;
-                  last_end   = container_start + var_offsets[i];
-               }
-            }
-         }
-
-         std::size_t fixed_cursor = container_start;
-         (
-            ([&]
-             {
-                using F = typename R::template member_type<Is>;
-                auto& fref = out.*(R::template member_pointer<Is>);
-                using eff =
-                   typename ::psio::effective_annotations_for<
-                      T, F, R::template member_pointer<Is>>::value_t;
-                constexpr bool override_v =
-                   ::psio::has_as_override_v<eff>;
-
-                if constexpr (!override_v && is_fixed_v<F>)
-                {
-                   fref = decode_value<W, Auto, F>(src, fixed_cursor,
-                                              fixed_cursor + fixed_size_of<F>());
-                   fixed_cursor += fixed_size_of<F>();
-                }
-                else
-                {
-                   const std::size_t beg = container_start + var_offsets[Is];
-                   if constexpr (override_v)
-                   {
-                      using Tag = ::psio::adapter_tag_of_t<eff>;
-                      using Proj = ::psio::adapter<
-                         std::remove_cvref_t<F>, Tag>;
-                      fref = Proj::decode(std::span<const char>(
-                         src.data() + beg, var_end[Is] - beg));
-                   }
-                   else
-                   {
-                      decode_into<W, Auto, F>(src, beg, var_end[Is], fref);
-                   }
-                   fixed_cursor += W;
+                   decode_into<W, Auto, F>(src, spans[Is].begin,
+                                           spans[Is].end, fref);
                 }
              }()),
             ...);
@@ -1461,7 +1692,7 @@ namespace psio {
                std::memcpy(&out, src.data() + pos, sizeof(T));
                return out;
             }
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return record_decode<W, Auto, T>(
                src, pos, end, std::make_index_sequence<R::member_count>{});
          }
@@ -1476,17 +1707,29 @@ namespace psio {
       //
       // Full byte-level walker. Mirrors the SSZ shape but with W-byte
       // offsets and the u{W} fixed_region header on non-DWNC records.
+      //
+      // Node depth: the root is depth 0; every present record field,
+      // sequence element, Some payload and variant payload is one deeper.
+      // A transparent Box adds none. Nodes through kMaxValidationDepth are
+      // accepted.
+      //
+      // `has_unknown`, when supplied, is set if any record in the frame
+      // carries optional suffix slots this reader's layout does not know.
+      // Such frames are structurally valid (compatible read); exact-schema
+      // callers reject them.
 
       template <std::size_t W, bool Auto, typename T>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
                                   std::size_t end,
-                                  std::size_t depth = 0) noexcept;
+                                  std::size_t depth = 0,
+                                  bool* has_unknown = nullptr) noexcept;
 
       template <std::size_t W, bool Auto, typename E>
       codec_status validate_vector_payload(std::span<const char> src,
                                            std::size_t            pos,
                                            std::size_t            end,
-                                           std::size_t            depth) noexcept
+                                           std::size_t            depth,
+                                           bool* has_unknown) noexcept
       {
          if (pos > end || end > src.size())
             return codec_fail("pssz: vector span out of bounds",
@@ -1505,19 +1748,22 @@ namespace psio {
                return codec_fail("pssz: vector span not a multiple of "
                                  "element size",
                                  static_cast<std::uint32_t>(pos), "pssz");
-            // Memcpy-layout records: wire bytes == memory bytes, no
-            // offsets to check. Skip per-element recursion.
-            constexpr bool memcpy_layout =
-               Record<E> && std::is_trivially_copyable_v<E> &&
-               fixed_size_of<E>() == sizeof(E);
-            if constexpr (Record<E> && !memcpy_layout)
+            if constexpr (std::is_arithmetic_v<E> && !std::is_same_v<E, bool>)
+            {
+               // Leaf elements with no invalid bit patterns: the only check
+               // a per-element walk would perform is the node depth.
+               if (depth + 1 > kMaxValidationDepth)
+                  return codec_fail("pssz: max depth exceeded",
+                                    static_cast<std::uint32_t>(pos), "pssz");
+            }
+            else
             {
                const std::size_t n = (end - pos) / esz;
                for (std::size_t i = 0; i < n; ++i)
                {
                   auto st = validate_value<W, Auto, E>(src, pos + i * esz,
                                                   pos + (i + 1) * esz,
-                                                  depth + 1);
+                                                  depth + 1, has_unknown);
                   if (!st.ok()) return st;
                }
             }
@@ -1534,7 +1780,9 @@ namespace psio {
             const std::uint32_t span =
                static_cast<std::uint32_t>(end - pos);
             const std::uint32_t first = read_offset<W>(src, pos);
-            if (first % W != 0 || first > span)
+            // A nonempty list has at least one slot, so its first offset
+            // (the table size) is a positive multiple of W.
+            if (first == 0 || first % W != 0 || first > span)
                return codec_fail("pssz: invalid first list offset",
                                  static_cast<std::uint32_t>(pos), "pssz");
             const std::size_t n = first / W;
@@ -1558,7 +1806,7 @@ namespace psio {
                                         ? read_offset<W>(src, pos + (i + 1) * W)
                                         : span;
                auto st = validate_value<W, Auto, E>(src, pos + off_i, pos + stop,
-                                               depth + 1);
+                                               depth + 1, has_unknown);
                if (!st.ok()) return st;
             }
             return codec_ok();
@@ -1569,27 +1817,35 @@ namespace psio {
       codec_status validate_array_payload(std::span<const char> src,
                                           std::size_t            pos,
                                           std::size_t            end,
-                                          std::size_t            depth) noexcept
+                                          std::size_t            depth,
+                                          bool* has_unknown) noexcept
       {
+         if (pos > end || end > src.size())
+            return codec_fail("pssz: array span out of bounds",
+                              static_cast<std::uint32_t>(pos), "pssz");
          if constexpr (N == 0)
             if (pos != end)
                return codec_fail("pssz: zero-count array payload must be empty", 0, "pssz");
          if constexpr (is_fixed_v<E>)
          {
             constexpr std::size_t esz = fixed_size_of<E>();
-            if (end - pos < N * esz)
-               return codec_fail("pssz: array buffer too small",
+            if (end - pos != N * esz)
+               return codec_fail("pssz: array span does not match its fixed size",
                                  static_cast<std::uint32_t>(pos), "pssz");
-            constexpr bool memcpy_layout =
-               Record<E> && std::is_trivially_copyable_v<E> &&
-               fixed_size_of<E>() == sizeof(E);
-            if constexpr (Record<E> && !memcpy_layout)
+            if constexpr (std::is_arithmetic_v<E> && !std::is_same_v<E, bool>)
+            {
+               if constexpr (N > 0)
+                  if (depth + 1 > kMaxValidationDepth)
+                     return codec_fail("pssz: max depth exceeded",
+                                       static_cast<std::uint32_t>(pos), "pssz");
+            }
+            else
             {
                for (std::size_t i = 0; i < N; ++i)
                {
                   auto st = validate_value<W, Auto, E>(src, pos + i * esz,
                                                   pos + (i + 1) * esz,
-                                                  depth + 1);
+                                                  depth + 1, has_unknown);
                   if (!st.ok()) return st;
                }
             }
@@ -1627,7 +1883,7 @@ namespace psio {
                                         ? read_offset<W>(src, pos + (i + 1) * W)
                                         : span;
                auto st = validate_value<W, Auto, E>(src, pos + off_i, pos + stop,
-                                               depth + 1);
+                                               depth + 1, has_unknown);
                if (!st.ok()) return st;
             }
             return codec_ok();
@@ -1642,18 +1898,16 @@ namespace psio {
          if (pos >= end || end > src.size())
             return codec_fail("pssz: bitlist span out of bounds",
                               static_cast<std::uint32_t>(pos), "pssz");
-         std::size_t span = end - pos;
-         std::size_t last = span;
-         while (last > 0 &&
-                static_cast<std::uint8_t>(src[pos + last - 1]) == 0)
-            --last;
-         if (last == 0)
+         // The delimiter bit lives in the final byte, so that byte is never
+         // zero in a canonical bitlist; trailing zero bytes are rejected.
+         const std::size_t span = end - pos;
+         const std::uint8_t lb = static_cast<std::uint8_t>(src[end - 1]);
+         if (lb == 0)
             return codec_fail("pssz: bitlist missing delimiter",
                               static_cast<std::uint32_t>(pos), "pssz");
-         std::uint8_t lb = static_cast<std::uint8_t>(src[pos + last - 1]);
          int hi = 31 - __builtin_clz(static_cast<unsigned int>(lb));
          std::size_t bits =
-            (last - 1) * 8 + static_cast<std::size_t>(hi);
+            (span - 1) * 8 + static_cast<std::size_t>(hi);
          if (bits > MaxN)
             return codec_fail("pssz: bitlist bit_count exceeds bound",
                               static_cast<std::uint32_t>(pos), "pssz");
@@ -1664,557 +1918,74 @@ namespace psio {
       codec_status validate_record(std::span<const char> src,
                                    std::size_t            pos,
                                    std::size_t            end,
-                                   std::index_sequence<Is...>,
-                                   std::size_t            depth) noexcept
+                                   std::index_sequence<Is...> seq,
+                                   std::size_t            depth,
+                                   bool* has_unknown) noexcept
       {
-         using R = ::psio::reflect<T>;
-         constexpr std::size_t NF = R::member_count;
-
-         constexpr std::size_t fixed_region = (
-            pssz_member_fixed_size_simple<W, T, Is>() + ... + std::size_t{0});
-
-         // Non-DWNC records carry a u{W} fixed_region header. Skip it
-         // and re-anchor pos at the first fixed-region byte.
+         using R = record_traits<T>;
+         constexpr auto layout = record_layout<W, T>(seq);
+         std::array<::psio::detail::pssz_field_span, R::member_count> spans{};
+         bool unknown = false;
+         // Resolves the frame from the writer's header: rejects a header
+         // that exceeds the frame, cuts a known slot or omits a required
+         // field; checks offsets are monotone, in bounds and start at the
+         // fixed region; accepts pruned trailing optionals and unknown
+         // appended optional slots.
+         auto status = ::psio::detail::pssz_record_spans<W>(
+            src, pos, end, ::psio::is_dwnc_v<T>, layout, spans, unknown);
+         if (!status.ok()) return status;
          if constexpr (!is_fixed_v<T>)
-            if (fixed_region > std::numeric_limits<typename width_info<W>::offset_t>::max())
-               return codec_fail("pssz: fixed region exceeds the static offset width", 0, "pssz");
-         std::size_t cstart;
-         if constexpr (::psio::is_dwnc_v<T>)
-         {
-            cstart = pos;
-         }
-         else
-         {
-            if (end - pos < W)
-               return codec_fail("pssz: record header truncated",
-                                 static_cast<std::uint32_t>(pos), "pssz");
-            // header value is informational for forward-compat; we
-            // don't yet enforce it. Skip.
-            cstart = pos + W;
-         }
-
-         if (end - cstart < fixed_region)
-            return codec_fail("pssz: record fixed region truncated",
-                              static_cast<std::uint32_t>(pos), "pssz");
-
-         if constexpr (is_fixed_v<T>)
-         {
-            // Outer check proves every field's bytes fit; per-field
-            // re-checks would just rederive the same bound. Skip.
-            return codec_ok();
-         }
-         else
-         {
-            std::array<std::uint32_t, NF> offsets{};
-            std::array<bool, NF>          is_var{};
-            std::size_t                   fp = cstart;
-            (
-               ([&]
-                {
-                   using F = typename R::template member_type<Is>;
-                   if constexpr (is_fixed_v<F>)
-                   {
-                      is_var[Is] = false;
-                      fp        += fixed_size_of<F>();
-                   }
-                   else
-                   {
-                      is_var[Is] = true;
-                      offsets[Is] = read_offset<W>(src, fp);
-                      fp += W;
-                   }
-                }()),
-               ...);
-            if (!wire_span_fits(end - cstart))
+            if (!wire_span_fits(end - pos - (::psio::is_dwnc_v<T> ? 0 : W)))
                return codec_fail("pssz: variable payload exceeds32-bit address space", 0, "pssz");
-            const std::uint32_t span =
-               static_cast<std::uint32_t>(end - cstart);
-            std::uint32_t prev = static_cast<std::uint32_t>(fixed_region);
-            for (std::size_t i = 0; i < NF; ++i)
-            {
-               if (!is_var[i]) continue;
-               if (offsets[i] < prev || offsets[i] > span)
-                  return codec_fail("pssz: record variable offset out of range",
-                                    static_cast<std::uint32_t>(pos), "pssz");
-               prev = offsets[i];
-            }
-
-            std::array<std::uint32_t, NF> var_end{};
-            {
-               std::uint32_t last_end = span;
-               for (std::size_t i = NF; i-- > 0;)
-               {
-                  if (is_var[i])
-                  {
-                     var_end[i] = last_end;
-                     last_end   = offsets[i];
-                  }
-               }
-            }
-
-            // First-variable offset must equal fixed_region.
-            for (std::size_t i = 0; i < NF; ++i)
-            {
-               if (is_var[i])
-               {
-                  if (offsets[i] != fixed_region)
-                     return codec_fail(
-                        "pssz: record first variable offset != fixed_region",
-                        static_cast<std::uint32_t>(pos), "pssz");
-                  break;
-               }
-            }
-
-            codec_status err = codec_ok();
-            (
-               ([&]
+         if (record_has_unpruned_tail<T>(src, spans, unknown, seq))
+            return codec_fail("pssz: trailing absent optional field was not pruned",
+                              static_cast<std::uint32_t>(pos), "pssz");
+         if (has_unknown) *has_unknown |= unknown;
+         (
+            ([&]
+             {
+                if (!status.ok() || !spans[Is].present) return;
+                using F = typename R::template member_type<Is>;
+                using eff =
+                   typename record_member_annotations<T, Is>::value_t;
+                if constexpr (::psio::has_as_override_v<eff>)
                 {
-                   if (!err.ok()) return;
-                   using F = typename R::template member_type<Is>;
-                   if constexpr (is_fixed_v<F>) return;
-                   const std::size_t beg = cstart + offsets[Is];
-                   const std::size_t fin = cstart + var_end[Is];
-                   auto st = validate_value<W, Auto, F>(src, beg, fin,
-                                                   depth + 1);
-                   if (!st.ok()) err = std::move(st);
-                }()),
-               ...);
-            return err;
-         }
-      }
-
-      // ── Throwing walker (native, exceptions enabled) ──────────────────────
-
-      [[noreturn, gnu::cold]] inline void
-      pssz_throw_fail(std::string_view msg, std::uint32_t off)
-      {
-#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
-         throw codec_exception{codec_error{msg, off, "pssz"}};
-#else
-         (void)msg;
-         (void)off;
-         std::abort();
-#endif
-      }
-
-      template <std::size_t W, bool Auto, typename T>
-      void validate_or_throw_value(std::span<const char> src,
-                                   std::size_t pos, std::size_t end);
-
-      template <std::size_t W, bool Auto, typename E>
-      void validate_or_throw_vector_payload(std::span<const char> src,
-                                            std::size_t            pos,
-                                            std::size_t            end)
-      {
-         if (pos > end || end > src.size()) [[unlikely]]
-            pssz_throw_fail("pssz: vector span out of bounds",
-                            static_cast<std::uint32_t>(pos));
-         if (pos == end) return;
-         if constexpr (is_zero_fixed_v<E>)
-            pssz_throw_fail("pssz: nonempty zero-size vector is unsupported", static_cast<std::uint32_t>(pos));
-         else if constexpr (is_fixed_v<E>)
-         {
-            if constexpr (Auto) enforce_fixed_caps<E>();
-            const std::size_t esz = fixed_size_of<E>();
-            if ((end - pos) % esz != 0) [[unlikely]]
-               pssz_throw_fail("pssz: vector span not a multiple of "
-                               "element size",
-                               static_cast<std::uint32_t>(pos));
-            constexpr bool memcpy_layout =
-               Record<E> && std::is_trivially_copyable_v<E> &&
-               fixed_size_of<E>() == sizeof(E);
-            if constexpr (Record<E> && !memcpy_layout)
-            {
-               const std::size_t n = (end - pos) / esz;
-               for (std::size_t i = 0; i < n; ++i)
-                  validate_or_throw_value<W, Auto, E>(src, pos + i * esz,
-                                                 pos + (i + 1) * esz);
-            }
-         }
-         else
-         {
-            if (end - pos < W) [[unlikely]]
-               pssz_throw_fail("pssz: variable list missing offset table",
-                               static_cast<std::uint32_t>(pos));
-            enforce_wire_span(end - pos);
-            const std::uint32_t span =
-               static_cast<std::uint32_t>(end - pos);
-            const std::uint32_t first = read_offset<W>(src, pos);
-            if (first % W != 0 || first > span) [[unlikely]]
-               pssz_throw_fail("pssz: invalid first list offset",
-                               static_cast<std::uint32_t>(pos));
-            const std::size_t n = first / W;
-            if (span < n * W) [[unlikely]]
-               pssz_throw_fail("pssz: list offset table truncated",
-                               static_cast<std::uint32_t>(pos));
-            std::uint32_t prev = first;
-            for (std::size_t i = 1; i < n; ++i)
-            {
-               std::uint32_t off_i = read_offset<W>(src, pos + i * W);
-               if (off_i < prev || off_i > span) [[unlikely]]
-                  pssz_throw_fail("pssz: list offset out of range",
-                                  static_cast<std::uint32_t>(pos + i * W));
-               prev = off_i;
-            }
-            for (std::size_t i = 0; i < n; ++i)
-            {
-               std::uint32_t off_i = read_offset<W>(src, pos + i * W);
-               std::uint32_t stop  = (i + 1 < n)
-                                        ? read_offset<W>(src, pos + (i + 1) * W)
-                                        : span;
-               validate_or_throw_value<W, Auto, E>(src, pos + off_i,
-                                              pos + stop);
-            }
-         }
-      }
-
-      template <std::size_t W, bool Auto, typename E, std::size_t N>
-      void validate_or_throw_array_payload(std::span<const char> src,
-                                           std::size_t            pos,
-                                           std::size_t            end)
-      {
-         if constexpr (N == 0)
-            if (pos != end) size_failure("pssz: zero-count array payload must be empty");
-         if constexpr (is_fixed_v<E>)
-         {
-            constexpr std::size_t esz = fixed_size_of<E>();
-            if (end - pos < N * esz) [[unlikely]]
-               pssz_throw_fail("pssz: array buffer too small",
-                               static_cast<std::uint32_t>(pos));
-            constexpr bool memcpy_layout =
-               Record<E> && std::is_trivially_copyable_v<E> &&
-               fixed_size_of<E>() == sizeof(E);
-            if constexpr (Record<E> && !memcpy_layout)
-            {
-               for (std::size_t i = 0; i < N; ++i)
-                  validate_or_throw_value<W, Auto, E>(src, pos + i * esz,
-                                                 pos + (i + 1) * esz);
-            }
-         }
-         else
-         {
-            if constexpr (N == 0) return;
-            if (end - pos < N * W) [[unlikely]]
-               pssz_throw_fail("pssz: array offset table truncated",
-                               static_cast<std::uint32_t>(pos));
-            enforce_wire_span(end - pos);
-            const std::uint32_t span =
-               static_cast<std::uint32_t>(end - pos);
-            const std::uint32_t first = read_offset<W>(src, pos);
-            if (first != N * W || first > span) [[unlikely]]
-               pssz_throw_fail("pssz: invalid array first offset",
-                               static_cast<std::uint32_t>(pos));
-            std::uint32_t prev = first;
-            for (std::size_t i = 1; i < N; ++i)
-            {
-               std::uint32_t off_i = read_offset<W>(src, pos + i * W);
-               if (off_i < prev || off_i > span) [[unlikely]]
-                  pssz_throw_fail("pssz: array offset out of range",
-                                  static_cast<std::uint32_t>(pos + i * W));
-               prev = off_i;
-            }
-            for (std::size_t i = 0; i < N; ++i)
-            {
-               std::uint32_t off_i = read_offset<W>(src, pos + i * W);
-               std::uint32_t stop  = (i + 1 < N)
-                                        ? read_offset<W>(src, pos + (i + 1) * W)
-                                        : span;
-               validate_or_throw_value<W, Auto, E>(src, pos + off_i,
-                                              pos + stop);
-            }
-         }
-      }
-
-      template <std::size_t W, std::size_t MaxN>
-      void validate_or_throw_bitlist_payload(std::span<const char> src,
-                                             std::size_t            pos,
-                                             std::size_t            end)
-      {
-         if (pos >= end || end > src.size()) [[unlikely]]
-            pssz_throw_fail("pssz: bitlist span out of bounds",
-                            static_cast<std::uint32_t>(pos));
-         std::size_t span = end - pos;
-         std::size_t last = span;
-         while (last > 0 &&
-                static_cast<std::uint8_t>(src[pos + last - 1]) == 0)
-            --last;
-         if (last == 0) [[unlikely]]
-            pssz_throw_fail("pssz: bitlist missing delimiter",
-                            static_cast<std::uint32_t>(pos));
-         std::uint8_t lb = static_cast<std::uint8_t>(src[pos + last - 1]);
-         int hi = 31 - __builtin_clz(static_cast<unsigned int>(lb));
-         std::size_t bits =
-            (last - 1) * 8 + static_cast<std::size_t>(hi);
-         if (bits > MaxN) [[unlikely]]
-            pssz_throw_fail("pssz: bitlist bit_count exceeds bound",
-                            static_cast<std::uint32_t>(pos));
-      }
-
-      template <std::size_t W, bool Auto, Record T, std::size_t... Is>
-      void validate_or_throw_record(std::span<const char> src,
-                                    std::size_t            pos,
-                                    std::size_t            end,
-                                    std::index_sequence<Is...>)
-      {
-         using R = ::psio::reflect<T>;
-         constexpr std::size_t NF = R::member_count;
-
-         constexpr std::size_t fixed_region = (
-            pssz_member_fixed_size_simple<W, T, Is>() + ... + std::size_t{0});
-
-         if constexpr (!is_fixed_v<T>) (void)checked_offset<W>(fixed_region);
-         std::size_t cstart;
-         if constexpr (::psio::is_dwnc_v<T>)
-            cstart = pos;
-         else
-         {
-            if (end - pos < W) [[unlikely]]
-               pssz_throw_fail("pssz: record header truncated",
-                               static_cast<std::uint32_t>(pos));
-            cstart = pos + W;
-         }
-
-         if (end - cstart < fixed_region) [[unlikely]]
-            pssz_throw_fail("pssz: record fixed region truncated",
-                            static_cast<std::uint32_t>(pos));
-
-         if constexpr (is_fixed_v<T>)
-         {
-            // Outer check covers all bytes; per-field would re-check.
-            return;
-         }
-         else
-         {
-            std::array<std::uint32_t, NF> offsets{};
-            std::array<bool, NF>          is_var{};
-            std::size_t                   fp = cstart;
-            (
-               ([&]
-                {
-                   using F = typename R::template member_type<Is>;
-                   if constexpr (is_fixed_v<F>)
-                   {
-                      is_var[Is] = false;
-                      fp        += fixed_size_of<F>();
-                   }
+                   if (depth >= kMaxValidationDepth)
+                      status = codec_fail("pssz: max depth exceeded", 0, "pssz");
                    else
                    {
-                      is_var[Is] = true;
-                      offsets[Is] = read_offset<W>(src, fp);
-                      fp += W;
+                      using Proj = ::psio::adapter<
+                         std::remove_cvref_t<F>, ::psio::adapter_tag_of_t<eff>>;
+                      status = Proj::validate(std::span<const char>(
+                         src.data() + spans[Is].begin,
+                         spans[Is].end - spans[Is].begin));
                    }
-                }()),
-               ...);
-            enforce_wire_span(end - cstart);
-            const std::uint32_t span =
-               static_cast<std::uint32_t>(end - cstart);
-            std::uint32_t prev = static_cast<std::uint32_t>(fixed_region);
-            for (std::size_t i = 0; i < NF; ++i)
-            {
-               if (!is_var[i]) continue;
-               if (offsets[i] < prev || offsets[i] > span) [[unlikely]]
-                  pssz_throw_fail("pssz: record variable offset out of range",
-                                  static_cast<std::uint32_t>(pos));
-               prev = offsets[i];
-            }
-
-            std::array<std::uint32_t, NF> var_end{};
-            {
-               std::uint32_t last_end = span;
-               for (std::size_t i = NF; i-- > 0;)
-               {
-                  if (is_var[i])
-                  {
-                     var_end[i] = last_end;
-                     last_end   = offsets[i];
-                  }
-               }
-            }
-
-            for (std::size_t i = 0; i < NF; ++i)
-            {
-               if (is_var[i])
-               {
-                  if (offsets[i] != fixed_region) [[unlikely]]
-                     pssz_throw_fail(
-                        "pssz: record first variable offset != fixed_region",
-                        static_cast<std::uint32_t>(pos));
-                  break;
-               }
-            }
-
-            (
-               ([&]
-                {
-                   using F = typename R::template member_type<Is>;
-                   if constexpr (!is_fixed_v<F>)
-                   {
-                      const std::size_t beg = cstart + offsets[Is];
-                      const std::size_t fin = cstart + var_end[Is];
-                      validate_or_throw_value<W, Auto, F>(src, beg, fin);
-                   }
-                }()),
-               ...);
-         }
-      }
-
-      template <std::size_t LegacyW, bool Auto, typename T>
-      void validate_or_throw_value(std::span<const char> src,
-                                   std::size_t pos, std::size_t end)
-      {
-         constexpr std::size_t W = [] {
-            if constexpr (Auto) return ::psio::auto_pssz_width<T>();
-            else return LegacyW;
-         }();
-         if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
-            size_failure("pssz: zero-size fixed payload must be empty");
-         if constexpr (Auto)
-         {
-            if (pos > end || end > src.size())
-               size_failure("pssz: value span out of bounds");
-            enforce_max_dynamic<T>(end - pos);
-            enforce_fixed_caps<T>();
-         }
-         if constexpr (::psio::format_should_dispatch_adapter_v<
-                          ::psio::pssz, T>)
-         {
-            using Proj = ::psio::adapter<std::remove_cvref_t<T>,
-                                          ::psio::binary_category>;
-            auto st = Proj::validate(std::span<const char>(
-               src.data() + pos,
-               (end > pos) ? (end - pos) : 0));
-            if (!st.ok()) [[unlikely]]
-            {
-#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
-               throw codec_exception{st.error()};
-#else
-               std::abort();
-#endif
-            }
-         }
-         else if constexpr (is_fixed_v<T> && !Record<T>)
-         {
-            if (end - pos < fixed_size_of<T>()) [[unlikely]]
-               pssz_throw_fail("pssz: buffer too small for fixed primitive",
-                               static_cast<std::uint32_t>(pos));
-            if constexpr (is_std_array_v<T>)
-            {
-               using E = typename T::value_type;
-               if constexpr (Record<E>)
-               {
-                  constexpr std::size_t N   = std::tuple_size<T>::value;
-                  constexpr std::size_t esz = fixed_size_of<E>();
-                  for (std::size_t i = 0; i < N; ++i)
-                     validate_or_throw_value<W, Auto, E>(src, pos + i * esz,
-                                                    pos + (i + 1) * esz);
-               }
-            }
-         }
-         else if constexpr (is_bitlist_v<T>)
-            validate_or_throw_bitlist_payload<W, T::max_size_value>(
-               src, pos, end);
-         else if constexpr (std::is_same_v<T, std::string>)
-         {
-            if (pos > end || end > src.size()) [[unlikely]]
-               pssz_throw_fail("pssz: string span out of bounds",
-                               static_cast<std::uint32_t>(pos));
-         }
-         else if constexpr (is_std_array_v<T>)
-         {
-            using E                 = typename T::value_type;
-            constexpr std::size_t N = std::tuple_size<T>::value;
-            validate_or_throw_array_payload<W, Auto, E, N>(src, pos, end);
-         }
-         else if constexpr (is_std_vector_v<T>)
-         {
-            using E = typename T::value_type;
-            validate_or_throw_vector_payload<W, Auto, E>(src, pos, end);
-         }
-         else if constexpr (is_std_optional_v<T>)
-         {
-            using V = typename T::value_type;
-            if (pos > end || end > src.size()) [[unlikely]]
-               pssz_throw_fail("pssz: optional span out of bounds",
-                               static_cast<std::uint32_t>(pos));
-            if constexpr (!optional_uses_selector_v<V>)
-            {
-               const std::size_t span = end - pos;
-               if (span == 0) return;
-               if (span != fixed_size_of<V>()) [[unlikely]]
-                  pssz_throw_fail("pssz: optional<fixed> span mismatch",
-                                  static_cast<std::uint32_t>(pos));
-               validate_or_throw_value<W, Auto, V>(src, pos, end);
-            }
-            else
-            {
-               if (pos == end) [[unlikely]]
-                  pssz_throw_fail("pssz: optional<var> missing selector",
-                                  static_cast<std::uint32_t>(pos));
-               const std::uint8_t sel =
-                  static_cast<std::uint8_t>(src[pos]);
-               if (sel == 0)
-               {
-                  if (end - pos != 1) [[unlikely]]
-                     pssz_throw_fail("pssz: None has trailing bytes",
-                                     static_cast<std::uint32_t>(pos));
-                  return;
-               }
-               if (sel != 1) [[unlikely]]
-                  pssz_throw_fail("pssz: optional selector not 0/1",
-                                  static_cast<std::uint32_t>(pos));
-               validate_or_throw_value<W, Auto, V>(src, pos + 1, end);
-            }
-         }
-         else if constexpr (is_std_variant_v<T>)
-         {
-            if (pos >= end || end > src.size()) [[unlikely]]
-               pssz_throw_fail("pssz: variant span out of bounds",
-                               static_cast<std::uint32_t>(pos));
-            const std::uint8_t sel =
-               static_cast<std::uint8_t>(src[pos]);
-            constexpr std::size_t NA = std::variant_size_v<T>;
-            if (sel >= NA) [[unlikely]]
-               pssz_throw_fail("pssz: variant selector out of range",
-                               static_cast<std::uint32_t>(pos));
-            [&]<std::size_t... Js>(std::index_sequence<Js...>) {
-               const bool dispatched = (((sel == Js)
-                    ? (validate_or_throw_value<W, Auto,
-                          std::variant_alternative_t<Js, T>>(
-                          src, pos + 1, end),
-                       true)
-                    : false) ||
-                ...);
-               (void)dispatched;
-            }(std::make_index_sequence<NA>{});
-         }
-         else if constexpr (Record<T>)
-         {
-            using R = ::psio::reflect<T>;
-            validate_or_throw_record<W, Auto, T>(
-               src, pos, end, std::make_index_sequence<R::member_count>{});
-         }
-         else
-         {
-            pssz_throw_fail("pssz: unsupported type in validate",
-                            static_cast<std::uint32_t>(pos));
-         }
+                }
+                else
+                   status = validate_value<W, Auto, F>(
+                      src, spans[Is].begin, spans[Is].end, depth + 1,
+                      has_unknown);
+             }()),
+            ...);
+         return status;
       }
 
       template <std::size_t LegacyW, bool Auto, typename T>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
                                   std::size_t end,
-                                  std::size_t depth) noexcept
+                                  std::size_t depth,
+                                  bool* has_unknown) noexcept
       {
          constexpr std::size_t W = [] {
             if constexpr (Auto) return ::psio::auto_pssz_width<T>();
             else return LegacyW;
          }();
+         if (pos > end || end > src.size())
+            return codec_fail("pssz: value span out of bounds", 0, "pssz");
          if (auto st = check_zero_fixed_span<T>(src, pos, end); !st.ok())
             return st;
          if constexpr (Auto)
          {
-            if (pos > end || end > src.size())
-               return codec_fail("pssz: value span out of bounds", 0, "pssz");
             if (auto cap = check_max_dynamic<T>(src.subspan(pos, end - pos)); !cap.ok())
                return cap;
             if constexpr (!fixed_caps_valid<T>())
@@ -2229,29 +2000,33 @@ namespace psio {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
                                           ::psio::binary_category>;
             return Proj::validate(std::span<const char>(
-               src.data() + pos,
-               (end > pos) ? (end - pos) : 0));
+               src.data() + pos, end - pos));
          }
+         else if constexpr (is_psio_box_v<T>)
+            return validate_value<W, Auto, typename is_psio_box<T>::elem>(
+               src, pos, end, depth, has_unknown);
          else if constexpr (is_fixed_v<T> && !Record<T>)
          {
-            if (end - pos < fixed_size_of<T>())
-               return codec_fail("pssz: buffer too small for fixed primitive",
+            if (end - pos != fixed_size_of<T>())
+               return codec_fail("pssz: fixed primitive span mismatch",
                                  static_cast<std::uint32_t>(pos), "pssz");
-            if constexpr (is_std_array_v<T>)
+            if constexpr (std::is_same_v<T, bool>)
             {
-               using E = typename T::value_type;
-               if constexpr (Record<E>)
-               {
-                  constexpr std::size_t N   = std::tuple_size<T>::value;
-                  constexpr std::size_t esz = fixed_size_of<E>();
-                  for (std::size_t i = 0; i < N; ++i)
-                  {
-                     auto st = validate_value<W, Auto, E>(src, pos + i * esz,
-                                                     pos + (i + 1) * esz,
-                                                     depth + 1);
-                     if (!st.ok()) return st;
-                  }
-               }
+               if (static_cast<unsigned char>(src[pos]) > 1)
+                  return codec_fail("pssz: bool is not 0/1",
+                                    static_cast<std::uint32_t>(pos), "pssz");
+            }
+            else if constexpr (is_std_array_v<T>)
+               return validate_array_payload<W, Auto, typename T::value_type,
+                                             std::tuple_size_v<T>>(
+                  src, pos, end, depth, has_unknown);
+            else if constexpr (is_bitvector_v<T>)
+            {
+               if constexpr (T::size_value % 8 != 0)
+                  if ((static_cast<unsigned char>(src[end - 1]) >>
+                       (T::size_value % 8)) != 0)
+                     return codec_fail("pssz: nonzero unused bitvector bits",
+                                       static_cast<std::uint32_t>(pos), "pssz");
             }
             return codec_ok();
          }
@@ -2259,9 +2034,9 @@ namespace psio {
             return validate_bitlist_payload<W, T::max_size_value>(src, pos, end);
          else if constexpr (std::is_same_v<T, std::string>)
          {
-            if (pos > end || end > src.size())
-               return codec_fail("pssz: string span out of bounds",
-                                 static_cast<std::uint32_t>(pos), "pssz");
+            // A plain std::string is an opaque byte payload to the
+            // structural validator. UTF-8 is a semantic constraint carried
+            // by utf8_spec and enforced by validate_strict.
             return codec_ok();
          }
          else if constexpr (is_std_array_v<T>)
@@ -2269,23 +2044,20 @@ namespace psio {
             using E                 = typename T::value_type;
             constexpr std::size_t N = std::tuple_size<T>::value;
             return validate_array_payload<W, Auto, E, N>(src, pos, end,
-                                                    depth + 1);
+                                                    depth, has_unknown);
          }
          else if constexpr (is_std_vector_v<T>)
          {
             using E = typename T::value_type;
             return validate_vector_payload<W, Auto, E>(src, pos, end,
-                                                  depth + 1);
+                                                  depth, has_unknown);
          }
          else if constexpr (is_std_optional_v<T>)
          {
             using V = typename T::value_type;
-            if (pos > end || end > src.size())
-               return codec_fail("pssz: optional span out of bounds",
-                                 static_cast<std::uint32_t>(pos), "pssz");
             if constexpr (!optional_uses_selector_v<V>)
             {
-               // pSSZ optional<fixed V>: span is 0 (None) or
+               // pSSZ optional<nonzero fixed V>: span is 0 (None) or
                // fixed_size_of<V> (Some).
                const std::size_t span = end - pos;
                if (span == 0)
@@ -2293,11 +2065,12 @@ namespace psio {
                if (span != fixed_size_of<V>())
                   return codec_fail("pssz: optional<fixed> span mismatch",
                                     static_cast<std::uint32_t>(pos), "pssz");
-               return validate_value<W, Auto, V>(src, pos, end, depth + 1);
+               return validate_value<W, Auto, V>(src, pos, end, depth + 1,
+                                            has_unknown);
             }
             else
             {
-               // pSSZ optional<variable V>: 1-byte selector + payload.
+               // Zero-size fixed or variable V: 1-byte selector + payload.
                if (pos == end)
                   return codec_fail("pssz: optional<var> missing selector",
                                     static_cast<std::uint32_t>(pos), "pssz");
@@ -2313,12 +2086,13 @@ namespace psio {
                if (sel != 1)
                   return codec_fail("pssz: optional selector not 0/1",
                                     static_cast<std::uint32_t>(pos), "pssz");
-               return validate_value<W, Auto, V>(src, pos + 1, end, depth + 1);
+               return validate_value<W, Auto, V>(src, pos + 1, end, depth + 1,
+                                            has_unknown);
             }
          }
          else if constexpr (is_std_variant_v<T>)
          {
-            if (pos >= end || end > src.size())
+            if (pos >= end)
                return codec_fail("pssz: variant span out of bounds",
                                  static_cast<std::uint32_t>(pos), "pssz");
             const std::uint8_t sel =
@@ -2332,7 +2106,7 @@ namespace psio {
                const bool dispatched = (((sel == Js)
                     ? (err = validate_value<W, Auto,
                                 std::variant_alternative_t<Js, T>>(
-                          src, pos + 1, end, depth + 1),
+                          src, pos + 1, end, depth + 1, has_unknown),
                        true)
                     : false) ||
                 ...);
@@ -2342,16 +2116,97 @@ namespace psio {
          }
          else if constexpr (Record<T>)
          {
-            using R = ::psio::reflect<T>;
+            using R = record_traits<T>;
             return validate_record<W, Auto, T>(
                src, pos, end, std::make_index_sequence<R::member_count>{},
-               depth + 1);
+               depth, has_unknown);
          }
          else
          {
             return codec_fail("pssz: unsupported type in validate",
                               static_cast<std::uint32_t>(pos), "pssz");
          }
+      }
+
+      // ── Throwing validation (native) / aborting (exception-disabled) ──────
+      //
+      // One walker defines the accepted set: the fail-fast entry point runs
+      // the status validator and raises its error, so `validate` and
+      // `validate_or_throw` cannot disagree about a frame.
+
+      [[noreturn, gnu::cold]] inline void
+      pssz_throw_fail(std::string_view msg, std::uint32_t off)
+      {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
+         throw codec_exception{codec_error{msg, off, "pssz"}};
+#else
+         (void)msg;
+         (void)off;
+         std::abort();
+#endif
+      }
+
+      template <std::size_t W, bool Auto, typename T>
+      void validate_or_throw_value(std::span<const char> src,
+                                   std::size_t pos, std::size_t end)
+      {
+         if (auto st = validate_value<W, Auto, T>(src, pos, end); !st.ok())
+            [[unlikely]] status_failure(st);
+      }
+
+      // ── Exact-schema (strict) validation ──────────────────────────────────
+      //
+      // Structural validation that additionally rejects unknown optional
+      // suffix fields. Native builds then materialize the value to run its
+      // semantic specs and to require the canonical encoding (which rejects
+      // an explicitly stored trailing None the encoder would have pruned).
+      //
+      // Exception-disabled guests never materialize: a wrapper or adapter may
+      // abort on construction, which a guest cannot catch. They report an
+      // explicit unsupported status for types that need semantic work and
+      // structural success otherwise (docs/guest-codec-preparation.md).
+      template <std::size_t W, bool Auto, typename T>
+      codec_status validate_exact_value(std::span<const char> bytes) noexcept
+      {
+         if (auto cap = check_max_dynamic<T>(bytes); !cap.ok())
+            return cap;
+         bool unknown = false;
+         auto st = validate_value<W, Auto, T>(bytes, 0, bytes.size(), 0, &unknown);
+         if (!st.ok())
+            return st;
+         if (unknown)
+            return codec_fail("pssz: unknown fields in exact validation", 0, "pssz");
+#if defined(__cpp_exceptions)
+         try
+         {
+            T decoded = decode_value<W, Auto, T>(bytes, 0, bytes.size());
+            if constexpr (::psio::Reflected<T>)
+            {
+               auto specs = ::psio::validate_specs_on_value(decoded);
+               if (!specs.ok())
+                  return specs;
+            }
+            const std::size_t size = size_of_v<W, Auto>(decoded);
+            if (size != bytes.size())
+               return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+            std::vector<char> canonical(size);
+            ::psio::fast_buf_stream sink(canonical.data(), canonical.size());
+            encode_value<W, Auto>(decoded, sink);
+            if (!std::equal(canonical.begin(), canonical.end(), bytes.begin()))
+               return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+            return st;
+         }
+         catch (...)
+         {
+            return codec_fail(
+               "pssz: decode failed during validate_strict", 0,
+               "pssz");
+         }
+#else
+         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
+            return codec_fail("pssz: guest strict semantic validation unsupported", 0, "pssz");
+         return st;
+#endif
       }
 
    }  // namespace detail::pssz_impl
@@ -2418,6 +2273,7 @@ namespace psio {
       friend void tag_invoke(decltype(::psio::encode), pssz_<W>,
                              const T& v, std::vector<char>& sink)
       {
+         detail::pssz_impl::enforce_encodable(v);
          const std::size_t total = detail::pssz_impl::size_of_v<W>(v);
          detail::pssz_impl::enforce_max_dynamic<T>(total);
          const std::size_t orig = sink.size();
@@ -2430,6 +2286,7 @@ namespace psio {
       friend std::vector<char> tag_invoke(decltype(::psio::encode),
                                           pssz_<W>, const T& v)
       {
+         detail::pssz_impl::enforce_encodable(v);
          const std::size_t total = detail::pssz_impl::size_of_v<W>(v);
          detail::pssz_impl::enforce_max_dynamic<T>(total);
          std::vector<char> out(total);
@@ -2452,6 +2309,9 @@ namespace psio {
          return detail::pssz_impl::size_of_v<W>(v);
       }
 
+      // Compatible structural validation: frames carrying unknown optional
+      // suffix fields are accepted (use validate_pssz_compatible to learn
+      // whether any were present, validate_strict to reject them).
       template <typename T>
       friend codec_status tag_invoke(decltype(::psio::validate<T>),
                                      pssz_<W>, T*,
@@ -2479,31 +2339,7 @@ namespace psio {
                                      pssz_<W>, T*,
                                      std::span<const char> bytes) noexcept
       {
-         auto st = detail::pssz_impl::validate_value<W, false, T>(bytes, 0,
-                                                            bytes.size());
-         if (!st.ok())
-            return st;
-#if defined(__cpp_exceptions)
-         if constexpr (::psio::Reflected<T>)
-         {
-            try
-            {
-               T decoded = detail::pssz_impl::decode_value<W, false, T>(
-                  bytes, 0, bytes.size());
-               return ::psio::validate_specs_on_value(decoded);
-            }
-            catch (...)
-            {
-               return codec_fail(
-                  "pssz: decode failed during validate_strict", 0,
-                  "pssz");
-            }
-         }
-#else
-         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
-            return codec_fail("pssz: guest strict semantic validation unsupported", 0, "pssz");
-#endif
-         return st;
+         return detail::pssz_impl::validate_exact_value<W, false, T>(bytes);
       }
 
       template <typename T>
@@ -2531,6 +2367,7 @@ namespace psio {
                              const T& v, std::vector<char>& sink)
       {
          constexpr std::size_t W = auto_pssz_width_v<T>;
+         detail::pssz_impl::enforce_encodable(v);
          const std::size_t total = detail::pssz_impl::size_of_v<W, true>(v);
          detail::pssz_impl::enforce_max_dynamic<T>(total);
          const std::size_t orig = sink.size();
@@ -2544,6 +2381,7 @@ namespace psio {
                                           pssz, const T& v)
       {
          constexpr std::size_t W = auto_pssz_width_v<T>;
+         detail::pssz_impl::enforce_encodable(v);
          const std::size_t total = detail::pssz_impl::size_of_v<W, true>(v);
          detail::pssz_impl::enforce_max_dynamic<T>(total);
          std::vector<char> out(total);
@@ -2596,31 +2434,7 @@ namespace psio {
                                      std::span<const char> bytes) noexcept
       {
          constexpr std::size_t W = auto_pssz_width_v<T>;
-         auto st = detail::pssz_impl::validate_value<W, true, T>(bytes, 0,
-                                                            bytes.size());
-         if (!st.ok())
-            return st;
-#if defined(__cpp_exceptions)
-         if constexpr (::psio::Reflected<T>)
-         {
-            try
-            {
-               T decoded = detail::pssz_impl::decode_value<W, true, T>(
-                  bytes, 0, bytes.size());
-               return ::psio::validate_specs_on_value(decoded);
-            }
-            catch (...)
-            {
-               return codec_fail(
-                  "pssz: decode failed during validate_strict", 0,
-                  "pssz");
-            }
-         }
-#else
-         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
-            return codec_fail("pssz: guest strict semantic validation unsupported", 0, "pssz");
-#endif
-         return st;
+         return detail::pssz_impl::validate_exact_value<W, true, T>(bytes);
       }
 
       template <typename T>
@@ -2633,5 +2447,52 @@ namespace psio {
             detail::pssz_impl::decode_value<W, true, T>(bytes, 0, bytes.size()));
       }
    };
+
+   // ── Checked compatible reads ──────────────────────────────────────────
+   //
+   // Validate the whole known frame, accept unknown optional suffix fields
+   // and report whether any were present (including inside nested records
+   // and containers). A caller that intends to rewrite the value must
+   // reject `has_unknown`: re-encoding the older typed value drops them.
+
+   template <typename T, std::size_t W>
+   [[nodiscard]] codec_status validate_pssz_compatible(
+      pssz_<W>, std::span<const char> bytes, bool& has_unknown) noexcept
+   {
+      has_unknown = false;
+      auto status = detail::pssz_impl::check_max_dynamic<T>(bytes);
+      if (!status.ok()) return status;
+      bool unknown = false;
+      status = detail::pssz_impl::validate_value<W, false, T>(
+         bytes, 0, bytes.size(), 0, &unknown);
+      if (status.ok()) has_unknown = unknown;
+      return status;
+   }
+
+   // Automatic profile: every logical type keeps its own width, exactly as
+   // the automatic encoder and validator do.
+   template <typename T>
+   [[nodiscard]] codec_status validate_pssz_compatible(
+      pssz, std::span<const char> bytes, bool& has_unknown) noexcept
+   {
+      has_unknown = false;
+      auto status = detail::pssz_impl::check_max_dynamic<T>(bytes);
+      if (!status.ok()) return status;
+      bool unknown = false;
+      status = detail::pssz_impl::validate_value<auto_pssz_width_v<T>, true, T>(
+         bytes, 0, bytes.size(), 0, &unknown);
+      if (status.ok()) has_unknown = unknown;
+      return status;
+   }
+
+   template <typename T, typename Fmt>
+   [[nodiscard]] codec_status decode_pssz_checked(
+      Fmt format, std::span<const char> bytes, T& out, bool& has_unknown)
+   {
+      auto status = validate_pssz_compatible<T>(format, bytes, has_unknown);
+      if (!status.ok()) return status;
+      out = ::psio::decode<T>(format, bytes);
+      return codec_ok();
+   }
 
 }  // namespace psio

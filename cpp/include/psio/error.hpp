@@ -2,9 +2,10 @@
 //
 // psio/error.hpp — error model (design doc § 5.4).
 //
-// `psio::validate` is the only operation that can report an error.
-// Every other operation (encode, decode, size, make_boxed, view
-// accessors) is `noexcept` and assumes its input has been validated.
+// Checked validation/read APIs report codec_status. Fast decode, size and
+// view accessors assume prevalidated input. Explicit fail-fast helpers throw
+// codec_exception in native exception-enabled builds and abort in guests
+// compiled without exceptions.
 //
 // Return type: `[[nodiscard]] psio::codec_status` — a single-pointer
 // move-only handle. Null pointer = OK; non-null = points to a heap-
@@ -31,6 +32,7 @@
 // the "did you check the status?" invariant.
 
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -71,6 +73,16 @@ namespace psio {
       const codec_error& error() const noexcept { return err_; }
    };
 #endif
+
+   [[noreturn]] inline void codec_abort(codec_error error)
+   {
+#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
+      throw codec_exception{error};
+#else
+      (void)error;
+      std::abort();
+#endif
+   }
 
    // ── codec_status ──────────────────────────────────────────────────────
    //

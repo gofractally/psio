@@ -23,6 +23,7 @@
 // in later phases where needed.
 
 #include <psio/annotate.hpp>
+#include <psio/error.hpp>
 #include <psio/shapes.hpp>
 
 // shape_tag_of<T> lives in shapes.hpp
@@ -45,9 +46,15 @@
 namespace psio {
 
    namespace detail {
+      // Unchecked wrapper mutation past its bound. Native exception-enabled
+      // builds keep throwing std::length_error (also when the build does not
+      // define PSIO_EXCEPTIONS_ENABLED at all); builds compiled without
+      // exceptions, or with the helpers explicitly disabled, abort. Checked
+      // wire boundaries report codec_status before constructing a wrapper.
       [[noreturn]] inline void wrapper_bound_failure(const char* message)
       {
-#if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
+#if defined(__cpp_exceptions) && \
+    (!defined(PSIO_EXCEPTIONS_ENABLED) || PSIO_EXCEPTIONS_ENABLED)
          throw std::length_error(message);
 #else
          (void)message;

@@ -61,6 +61,32 @@ add_test(NAME psio_pssz_type_width_consumer COMMAND psio_pssz_type_width_consume
 add_executable(psio_empty_action_consumer empty_action_consumer.cpp)
 target_link_libraries(psio_empty_action_consumer PRIVATE psio::psio)
 add_test(NAME psio_empty_action_consumer COMMAND psio_empty_action_consumer)
+psio_add_test(psio_pssz_record_layout_tests pssz_record_layout_tests.cpp)
+psio_add_test(psio_pssz_ir_tests pssz_ir_tests.cpp)
+add_executable(psio_pssz_ir_noexceptions_test pssz_ir_noexceptions.cpp)
+target_include_directories(psio_pssz_ir_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_ir_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_ir_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_ir_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_ir_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_ir_noexceptions_test COMMAND psio_pssz_ir_noexceptions_test)
+psio_add_test(psio_pssz_optional_contract_tests pssz_optional_contract_tests.cpp)
+# Cross-version matrix: field evolution, mandatory pruning, golden bytes.
+psio_add_test(psio_pssz_evolution_matrix_tests pssz_evolution_matrix_tests.cpp)
+
+# PSSZ guest profile must compile independently of the native library's
+# exception-enabled interface definitions.
+add_executable(psio_pssz_noexceptions_test pssz_noexceptions.cpp)
+target_include_directories(psio_pssz_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_noexceptions_test PRIVATE -fno-exceptions)
+endif()
+add_test(NAME psio_pssz_noexceptions_test COMMAND psio_pssz_noexceptions_test)
 
 # Cross-format parity: maxFields / maxDynamicData enforcement.
 psio_add_test(psio_caps_parity_tests caps_parity_tests.cpp)
@@ -145,6 +171,15 @@ psio_add_test(psio_schema_ir_tests schema_ir_tests.cpp)
 
 # SchemaBuilder (schema_builder.hpp) — C++ reflection → Schema IR.
 psio_add_test(psio_schema_builder_tests schema_builder_tests.cpp)
+add_executable(psio_schema_builder_identity_test schema_builder_identity_main.cpp schema_builder_identity_other.cpp)
+target_include_directories(psio_schema_builder_identity_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_schema_builder_identity_test PRIVATE cxx_std_23)
+target_link_libraries(psio_schema_builder_identity_test PRIVATE Boost::headers)
+target_compile_definitions(psio_schema_builder_identity_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_schema_builder_identity_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_schema_builder_identity_test COMMAND psio_schema_builder_identity_test)
 
 # emit_wit (emit_wit.hpp) — Schema IR → WIT text emitter.
 psio_add_test(psio_emit_wit_tests emit_wit_tests.cpp)
