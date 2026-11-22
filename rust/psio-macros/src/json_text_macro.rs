@@ -7,10 +7,18 @@
 //! * `#[psio(invariant = "path")]` (a `fn(&Self) -> Result<(), E>` with
 //!   `E: Into<Cow<'static, str>>`) is enforced by the writer and the reader: a value that violates
 //!   it has no text, and text that reads as one is rejected with its message.
-//! * An enum whose variants each hold one unnamed field is a variant:
+//! * An enum with a variant that holds fields is a variant:
 //!   `{"Name": value}` under IJson, `[index, value]` under Json. The name is
 //!   the variant identifier unless `#[psio(name = "...")]` renames it (use it
 //!   to match the C++ alternative's type name, e.g. "uint32", "string").
+//!   The value is the alternative's payload, the one `PsszPack` encodes and
+//!   `ToPsszSchema` describes: one unnamed field is that field's text; no
+//!   field is the empty record `{}`; named fields are a record (an object,
+//!   under `#[serde(rename_all)]` on the variant or `rename_all_fields` on
+//!   the enum);
+//!   two or more unnamed fields are their tuple (an array). In C++ these
+//!   are `std::variant` over `T`, an empty reflected record, a reflected
+//!   record and `std::tuple<...>`.
 //! * A field-less enum with `#[repr(u8 | ... | i64)]` is written as the
 //!   variant's name (the identifier, or `#[psio(name = "...")]`) and read
 //!   from the name, the number, the numeric string or `"name:number"`. One
@@ -60,6 +68,136 @@ fn form_tokens(j: &TokenStream2, form: Option<bool>) -> TokenStream2 {
         Some(false) => quote!(#j::IntForm::Number),
         Some(true) => quote!(#j::IntForm::String),
     }
+}
+
+/// A record of named members as a JSON object: the statements that write
+/// it and the expression that reads it. `access` gives the expression of a
+/// member's reference, `path` what is constructed (`Self`, `Self::Variant`).
+fn record_tokens(
+    j: &TokenStream2,
+    fields: &Fields,
+    path: TokenStream2,
+    access: &dyn Fn(&syn::Ident) -> TokenStream2,
+    forms: attrs::Forms,
+    case: Option<attrs::Case>,
+) -> syn::Result<(TokenStream2, TokenStream2)> {
+    let members = attrs::members(fields)?;
+        let mut writes = Vec::new();
+        let mut slots = Vec::new();
+        let mut arms = Vec::new();
+        let mut builds = Vec::new();
+        let mut keys = Vec::new();
+        let mut index_arms = Vec::new();
+        for (index, member) in members.iter().enumerate() {
+            let field = member.field;
+            let ident = field.ident.as_ref().unwrap();
+            let attrs = &member.attrs;
+            let access = access(ident);
+            // The member's name: its identifier, `#[psio(name)]` /
+            // `#[serde(rename)]`, or the identifier under the
+            // type's `rename_all` convention.
+            let key = attrs::member_name(field, attrs, case);
+            if keys.contains(&key) {
+                return Err(syn::Error::new_spanned(field, "duplicate member name"));
+            }
+            let ty = &field.ty;
+            let json = form_tokens(&j, attrs.forms.json.or(forms.json));
+            let ijson = form_tokens(&j, attrs.forms.ijson.or(forms.ijson));
+            let first = index == 0;
+            let slot = syn::Ident::new(&format!("__f{index}"), proc_macro2::Span::call_site());
+            writes.push(quote! {
+                w.key(#key, #first)?;
+                let __saved = w.member_form(#json, #ijson);
+                <#ty as #j::JsonText>::write_json(#access, w)?;
+                w.restore_form(__saved);
+            });
+            slots.push(quote! { let mut #slot: ::core::option::Option<#ty> = ::core::option::Option::None; });
+            keys.push(key.clone());
+            let read = quote! {
+                {
+                    let __saved = r.member_form(#json, #ijson);
+                    #slot = ::core::option::Option::Some(<#ty as #j::JsonText>::read_json(r)?);
+                    r.restore_form(__saved);
+                }
+            };
+            arms.push(quote! { #key => #read });
+            index_arms.push(quote! { #index => #read });
+            builds.push(quote! {
+                match #slot {
+                    ::core::option::Option::Some(v) => v,
+                    ::core::option::Option::None => match <#ty as #j::JsonText>::json_missing() {
+                        ::core::option::Option::Some(v) => v,
+                        ::core::option::Option::None => {
+                            return ::core::result::Result::Err(r.err("json: missing required member"))
+                        }
+                    },
+                }
+            });
+        }
+        // A skipped field is its default.
+        let built = attrs::construct(path.clone(), fields, &builds)?;
+        let count = keys.len();
+        let members = if count > EXPECTED_ORDER_MIN {
+            let lookup = lookup_tokens(&keys, quote!(__key));
+            quote! {
+                const __NAMES: [&str; #count] = [#(#keys),*];
+                // The member after the last one read: writers emit
+                // declaration order, so it is tried first, with one
+                // compare, before the match.
+                let mut __expected: usize = 0;
+                loop {
+                    // A repeated key is read again: the last one wins.
+                    let __key = r.key()?;
+                    let __key: &str = &__key;
+                    let __index: usize =
+                        if __expected < #count && __NAMES[__expected] == __key {
+                            __expected
+                        } else {
+                            #lookup
+                        };
+                    match __index {
+                        #(#index_arms)*
+                        _ => r.skip_unknown()?,
+                    }
+                    if __index < #count {
+                        __expected = __index + 1;
+                    }
+                    if r.object_next()? {
+                        break;
+                    }
+                }
+            }
+        } else {
+            quote! {
+                loop {
+                    // A repeated key is read again: the last one wins.
+                    let __key = r.key()?;
+                    match &*__key {
+                        #(#arms)*
+                        _ => r.skip_unknown()?,
+                    }
+                    if r.object_next()? {
+                        break;
+                    }
+                }
+            }
+        };
+        Ok((
+            quote! {
+                w.raw("{");
+                #(#writes)*
+                w.raw("}");
+            },
+            quote! {{
+                r.begin(b'{', "json: expected '{'")?;
+                #(#slots)*
+                if !r.take(b'}') {
+                    #members
+                }
+                r.end_object();
+                #built
+            }},
+        ))
 }
 
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -114,124 +252,21 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             ))
         }
         Data::Struct(data) => match &data.fields {
-            Fields::Named(fields) => {
-                let mut writes = Vec::new();
-                let mut slots = Vec::new();
-                let mut arms = Vec::new();
-                let mut builds = Vec::new();
-                let mut keys = Vec::new();
-                let mut index_arms = Vec::new();
-                let _ = fields;
-                for (index, member) in members.iter().enumerate() {
-                    let field = member.field;
-                    let ident = field.ident.as_ref().unwrap();
-                    let attrs = &member.attrs;
-                    // The member's name: its identifier, `#[psio(name)]` /
-                    // `#[serde(rename)]`, or the identifier under the
-                    // type's `rename_all` convention.
-                    let key = attrs::member_name(field, attrs, type_attrs.rename_all);
-                    if keys.contains(&key) {
-                        return Err(syn::Error::new_spanned(field, "duplicate member name"));
-                    }
-                    let ty = &field.ty;
-                    let json = form_tokens(&j, attrs.forms.json.or(type_attrs.forms.json));
-                    let ijson = form_tokens(&j, attrs.forms.ijson.or(type_attrs.forms.ijson));
-                    let first = index == 0;
-                    let slot = syn::Ident::new(&format!("__f{index}"), proc_macro2::Span::call_site());
-                    writes.push(quote! {
-                        w.key(#key, #first)?;
-                        let __saved = w.member_form(#json, #ijson);
-                        <#ty as #j::JsonText>::write_json(&self.#ident, w)?;
-                        w.restore_form(__saved);
-                    });
-                    slots.push(quote! { let mut #slot: ::core::option::Option<#ty> = ::core::option::Option::None; });
-                    keys.push(key.clone());
-                    let read = quote! {
-                        {
-                            let __saved = r.member_form(#json, #ijson);
-                            #slot = ::core::option::Option::Some(<#ty as #j::JsonText>::read_json(r)?);
-                            r.restore_form(__saved);
-                        }
-                    };
-                    arms.push(quote! { #key => #read });
-                    index_arms.push(quote! { #index => #read });
-                    let _ = ident;
-                    builds.push(quote! {
-                        match #slot {
-                            ::core::option::Option::Some(v) => v,
-                            ::core::option::Option::None => match <#ty as #j::JsonText>::json_missing() {
-                                ::core::option::Option::Some(v) => v,
-                                ::core::option::Option::None => {
-                                    return ::core::result::Result::Err(r.err("json: missing required member"))
-                                }
-                            },
-                        }
-                    });
-                }
-                // A skipped field is its default.
-                let built = attrs::construct(quote!(Self), &data.fields, &builds)?;
-                let count = keys.len();
-                let members = if count > EXPECTED_ORDER_MIN {
-                    let lookup = lookup_tokens(&keys, quote!(__key));
-                    quote! {
-                        const __NAMES: [&str; #count] = [#(#keys),*];
-                        // The member after the last one read: writers emit
-                        // declaration order, so it is tried first, with one
-                        // compare, before the match.
-                        let mut __expected: usize = 0;
-                        loop {
-                            // A repeated key is read again: the last one wins.
-                            let __key = r.key()?;
-                            let __key: &str = &__key;
-                            let __index: usize =
-                                if __expected < #count && __NAMES[__expected] == __key {
-                                    __expected
-                                } else {
-                                    #lookup
-                                };
-                            match __index {
-                                #(#index_arms)*
-                                _ => r.skip_unknown()?,
-                            }
-                            if __index < #count {
-                                __expected = __index + 1;
-                            }
-                            if r.object_next()? {
-                                break;
-                            }
-                        }
-                    }
-                } else {
-                    quote! {
-                        loop {
-                            // A repeated key is read again: the last one wins.
-                            let __key = r.key()?;
-                            match &*__key {
-                                #(#arms)*
-                                _ => r.skip_unknown()?,
-                            }
-                            if r.object_next()? {
-                                break;
-                            }
-                        }
-                    }
-                };
+            Fields::Named(_) => {
+                let (write, read) = record_tokens(
+                    &j,
+                    &data.fields,
+                    quote!(Self),
+                    &|ident| quote!(&self.#ident),
+                    type_attrs.forms,
+                    type_attrs.rename_all,
+                )?;
                 (
                     quote! {
-                        w.raw("{");
-                        #(#writes)*
-                        w.raw("}");
+                        #write
                         ::core::result::Result::Ok(())
                     },
-                    quote! {
-                        r.begin(b'{', "json: expected '{'")?;
-                        #(#slots)*
-                        if !r.take(b'}') {
-                            #members
-                        }
-                        r.end_object();
-                        ::core::result::Result::Ok(#built)
-                    },
+                    quote! { ::core::result::Result::Ok(#read) },
                 )
             }
             _ => {
@@ -325,34 +360,94 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 let mut read_arms = Vec::new();
                 for (index, variant) in data.variants.iter().enumerate() {
                     let ident = &variant.ident;
-                    let Fields::Unnamed(fields) = &variant.fields else {
-                        return Err(syn::Error::new_spanned(
-                            variant,
-                            "a JsonText variant holds exactly one unnamed field",
-                        ));
-                    };
-                    if fields.unnamed.len() != 1 {
-                        return Err(syn::Error::new_spanned(
-                            variant,
-                            "a JsonText variant holds exactly one unnamed field",
-                        ));
-                    }
-                    let ty = &fields.unnamed[0].ty;
-                    let label =
-                        attrs::variant_name(variant, &attrs::variant(variant)?, type_attrs.rename_all);
+                    let variant_attrs = attrs::variant(variant)?;
+                    let label = attrs::variant_name(variant, &variant_attrs, type_attrs.rename_all);
                     if names.contains(&label) {
                         return Err(syn::Error::new_spanned(variant, "duplicate variant name"));
                     }
                     let index_u32 = index as u32;
+                    // The payload, as PsszPack and ToPsszSchema have it: one
+                    // unnamed field is that value; no field is the empty
+                    // record; named fields are a record; any other number
+                    // of unnamed fields is their tuple.
+                    let (pattern, write, read) = match &variant.fields {
+                        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                            let ty = &fields.unnamed[0].ty;
+                            (
+                                quote!(Self::#ident(__v)),
+                                quote!(<#ty as #j::JsonText>::write_json(__v, w)?;),
+                                quote!(Self::#ident(<#ty as #j::JsonText>::read_json(r)?)),
+                            )
+                        }
+                        Fields::Unnamed(fields) => {
+                            let types: Vec<_> = fields.unnamed.iter().map(|f| &f.ty).collect();
+                            let bindings: Vec<_> = (0..types.len())
+                                .map(|i| syn::Ident::new(&format!("__m{i}"), proc_macro2::Span::call_site()))
+                                .collect();
+                            let positions = 0..types.len();
+                            let commas = (0..types.len()).map(|i| if i > 0 { quote!(w.raw(",");) } else { quote!() });
+                            (
+                                quote!(Self::#ident(#(#bindings),*)),
+                                quote! {
+                                    let __tuple = w.member_form(#j::IntForm::Natural, #j::IntForm::Natural);
+                                    w.raw("[");
+                                    #(#commas <#types as #j::JsonText>::write_json(#bindings, w)?;)*
+                                    w.raw("]");
+                                    w.restore_form(__tuple);
+                                },
+                                quote! {{
+                                    let __tuple = r.member_form(#j::IntForm::Natural, #j::IntForm::Natural);
+                                    r.begin(b'[', "json: expected '['")?;
+                                    let __value = Self::#ident(#({
+                                        r.element(#positions)?;
+                                        <#types as #j::JsonText>::read_json(r)?
+                                    }),*);
+                                    r.close_array()?;
+                                    r.restore_form(__tuple);
+                                    __value
+                                }},
+                            )
+                        }
+                        Fields::Named(_) | Fields::Unit => {
+                            let binding = |field: &syn::Ident| {
+                                let text = field.to_string();
+                                syn::Ident::new(
+                                    &format!("__m_{}", text.trim_start_matches("r#")),
+                                    proc_macro2::Span::call_site(),
+                                )
+                            };
+                            let (write, read) = record_tokens(
+                                &j,
+                                &variant.fields,
+                                quote!(Self::#ident),
+                                &|field| {
+                                    let binding = binding(field);
+                                    quote!(#binding)
+                                },
+                                attrs::Forms::default(),
+                                variant_attrs.rename_all.or(type_attrs.rename_all_fields),
+                            )?;
+                            let pattern = match &variant.fields {
+                                Fields::Unit => quote!(Self::#ident),
+                                fields => {
+                                    let members = attrs::members(fields)?;
+                                    let fields = members.iter().map(|m| m.field.ident.as_ref().unwrap());
+                                    let bindings = members.iter().map(|m| binding(m.field.ident.as_ref().unwrap()));
+                                    quote!(Self::#ident { #(#fields: #bindings,)* .. })
+                                }
+                            };
+                            (pattern, write, read)
+                        }
+                    };
                     write_arms.push(quote! {
-                        Self::#ident(__v) => {
+                        #pattern => {
                             let __saved = #j::write_variant_open(w, #label, #index_u32)?;
-                            <#ty as #j::JsonText>::write_json(__v, w)?;
+                            #write
                             #j::write_variant_close(w, __saved);
                         }
                     });
                     read_arms.push(quote! {
-                        #index => Self::#ident(<#ty as #j::JsonText>::read_json(r)?),
+                        #index => #read,
                     });
                     names.push(label);
                 }
