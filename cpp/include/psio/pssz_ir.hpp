@@ -26,6 +26,7 @@
 #include <psio/detail/pssz_record_layout.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/schema_ir.hpp>
+#include <psio/time.hpp>
 
 #include <algorithm>
 #include <bit>
@@ -344,9 +345,11 @@ inline codec_status bitlist_count(std::span<const char> wire, std::size_t bound,
 //                          one gets the same offset width from the schema
 //
 // "unknown" marks a C++ type the schema builder could not describe and has
-// no codec. Every other id names a text presentation only (a custom text
-// form registered with the text codecs, pssz_ir_json.hpp): on the wire it
-// is exactly its inner type.
+// no codec. Every other id names a text presentation only: on the wire it
+// is exactly its inner type. The time ids ("time-point-<unit>",
+// "duration-<unit>", time.hpp) are built-in presentations over a tick
+// integer; any other id is a custom text form registered with the text
+// codecs (pssz_ir_json.hpp CustomHandlers).
 inline bool byte_adapter_id(std::string_view id) noexcept
 {
    return id == "string" || id == "utf8" || id == "hex";
@@ -739,6 +742,10 @@ template <std::size_t W> class Codec
                return fail("pssz IR: null schema box");
             if (boxed && custom->id == "box")
                *boxed = true;
+            if (::psio::parse_time_schema_id(custom->id))
+               PSIO_PSSZ_IR_TRY(time_ticks(*custom->type));
+            else if (::psio::reserved_time_schema_id(custom->id))
+               return fail("pssz IR: unsupported custom adapter");
             out = custom->type.get();
             continue;
          }
@@ -758,6 +765,19 @@ template <std::size_t W> class Codec
          out = found;
       }
       return fail("pssz IR: cyclic named aliases");
+   }
+   // A time id (time.hpp: "time-point-..." / "duration-...") is a built-in
+   // presentation over the tick integer: anything else under it is a
+   // malformed schema.
+   codec_status time_ticks(const schema_types::AnyType &inner_type) const
+   {
+      const schema_types::AnyType *ticks;
+      PSIO_PSSZ_IR_TRY(resolve(inner_type, ticks));
+      auto integer = std::get_if<schema_types::Int>(&ticks->value);
+      if (!integer || (integer->bits != 8 && integer->bits != 16 && integer->bits != 32 &&
+                       integer->bits != 64))
+         return fail("pssz IR: time value requires an 8/16/32/64-bit tick integer");
+      return codec_ok();
    }
    codec_status inner(const schema_types::Box<schema_types::AnyType> &box,
                       const schema_types::AnyType *&out) const

@@ -364,3 +364,53 @@ set_tests_properties(psio_spec_ssz_tests PROPERTIES
 psio_add_test(psio_psch_tests psch_tests.cpp)
 
 psio_add_test(psio_wit_owned_tests wit_owned_tests.cpp)
+
+# psio::key: tuples, composite-key helpers (key_prefix / key_prefix_upper_bound),
+# the order + prefix-free contract of every element kind, and checked reading.
+psio_add_test(psio_key_tests key_tests.cpp)
+# Types with no key form, and ill-typed prefixes, must fail with a clear message.
+function(psio_key_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_key_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/key_unsupported_fail.cpp)
+   set_tests_properties(psio_key_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_key_compile_fail(pair KEY_FAIL_PAIR "std::pair is not a PSIO value")
+psio_key_compile_fail(bitlist KEY_FAIL_BITLIST "bitlist has no key encoding")
+psio_key_compile_fail(steady_clock KEY_FAIL_STEADY_CLOCK "only std::chrono::system_clock time points")
+psio_key_compile_fail(float_rep KEY_FAIL_FLOAT_REP "needs an integer Rep")
+psio_key_compile_fail(prefix_arity KEY_FAIL_PREFIX_ARITY "more elements than the key type has")
+psio_key_compile_fail(prefix_type KEY_FAIL_PREFIX_TYPE "does not convert to the key's")
+
+# Time values (std::chrono durations / system_clock time points) in every
+# format: tick count in binary and key, RFC 3339 text, schema time ids.
+psio_add_test(psio_time_tests time_tests.cpp)
+add_executable(psio_time_noexceptions_test time_noexceptions.cpp)
+target_include_directories(psio_time_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_time_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_time_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_time_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_time_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_time_noexceptions_test COMMAND psio_time_noexceptions_test)
+
+# Shared cross-language time / key fixture (conformance/time-key-vectors.json):
+# emitted here, consumed by ctest, cargo test
+# (rust/psio/tests/time_key_conformance.rs) and the JS tests
+# (js/src/test/time-key-conformance.test.ts).
+set(PSIO_TIME_KEY_VECTORS ${CMAKE_SOURCE_DIR}/conformance/time-key-vectors.json)
+add_executable(psio_time_key_conformance_emit time_key_conformance_emit.cpp)
+target_link_libraries(psio_time_key_conformance_emit PRIVATE psio)
+target_compile_features(psio_time_key_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_time_key_conformance_regen
+         COMMAND psio_time_key_conformance_emit --check ${PSIO_TIME_KEY_VECTORS})
+psio_add_test(psio_time_key_conformance_tests time_key_conformance_tests.cpp)
+target_compile_definitions(psio_time_key_conformance_tests PRIVATE
+   PSIO_TIME_KEY_VECTORS="${PSIO_TIME_KEY_VECTORS}")
+
+# Key / time and schema fidelity together: time ids as built-in custom
+# presentations, enums and raw / UTF-8 strings in keys, member bounds in keys.
+psio_add_test(psio_key_time_schema_tests key_time_schema_tests.cpp)

@@ -699,14 +699,20 @@ template <JsonCursor C> class Reader
       return true;
    }
 
-   // A Custom id that is not part of the binary form ("box", or a text
-   // presentation with no handler here): the inner type's text.
+   // A Custom id that is not part of the binary form: "box" is the inner
+   // type's text; a time id is a built-in presentation (time.hpp); any other
+   // id is presented by its registered handler, or, with none, as the inner
+   // type's text.
    bool transparent(const Custom &type, int_form form, std::size_t n, Value &out)
    {
       if (!type.type.get())
          return c.fail("pssz IR: null schema box");
       if (type.id != "box")
       {
+         if (auto kind = ::psio::parse_time_schema_id(type.id))
+            return time(type, *kind, form, out);
+         if (::psio::reserved_time_schema_id(type.id))
+            return c.fail("pssz IR: unsupported custom adapter");
          if (auto handler = customs.find(type))
             return presented(type, *handler, out);
          if (customs.required())
@@ -734,6 +740,39 @@ template <JsonCursor C> class Reader
       if (!decode_auto(schema, *type.type, std::span<const char>{bytes}, out, unknown).ok() ||
           unknown)
          return c.fail("json: custom handler produced bytes that are not the inner type");
+      return true;
+   }
+   // The built-in presentation of the time ids: a duration is its tick
+   // integer; a time point is RFC 3339 text (time.hpp).
+   bool time(const Custom &type, const ::psio::time_kind &kind, int_form form, Value &out)
+   {
+      const AnyType *inner = shape_of(schema, *type.type);
+      const Int *ticks = inner ? std::get_if<Int>(&inner->value) : nullptr;
+      if (!ticks || (ticks->bits != 8 && ticks->bits != 16 && ticks->bits != 32 &&
+                     ticks->bits != 64))
+         return c.fail("pssz IR: time value requires an 8/16/32/64-bit tick integer");
+      if (!kind.point)
+         return integer(*ticks, form, out);
+      const int digits = ::psio::time_fraction_digits(kind.num, kind.den);
+      if (digits < 0)
+         return c.fail("json: a time point of this unit has no text form");
+      json_kind json;
+      if (!c.kind(json))
+         return false;
+      if (json != json_kind::string)
+         return c.fail("json: expected a string (RFC 3339 time point)");
+      std::string_view text;
+      bool escaped;
+      if (!c.string(text, escaped))
+         return false;
+      __int128 value;
+      if (const char *err =
+              ::psio::parse_time_text(text, digits, ticks->bits, ticks->isSigned, value))
+         return c.fail(err);
+      if (ticks->isSigned)
+         out = Signed{value};
+      else
+         out = Unsigned{static_cast<unsigned __int128>(value)};
       return true;
    }
 
@@ -1116,6 +1155,32 @@ class Writer
       auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
       w.append(buffer, result.ptr);
    }
+   void time(const Custom &type, const ::psio::time_kind &kind, const Value &value, int_form form)
+   {
+      const AnyType *inner = shape_of(schema, *type.type);
+      const Int *ticks = inner ? std::get_if<Int>(&inner->value) : nullptr;
+      bool negative;
+      unsigned __int128 magnitude;
+      if (!ticks || (ticks->bits != 8 && ticks->bits != 16 && ticks->bits != 32 &&
+                     ticks->bits != 64))
+         return w.fail("pssz IR: time value requires an 8/16/32/64-bit tick integer");
+      if (!integer_value(*ticks, value, negative, magnitude))
+         return w.fail("pssz IR: integer value required for a time value");
+      if (!kind.point)
+         return integer(*ticks, form, negative, magnitude);
+      const int digits = ::psio::time_fraction_digits(kind.num, kind.den);
+      if (digits < 0)
+         return w.fail("json: a time point of this unit has no text form");
+      char buffer[::psio::max_time_text_size + 2];
+      buffer[0] = '"';
+      char *end = ::psio::write_time_text(
+          negative ? -static_cast<__int128>(magnitude) : static_cast<__int128>(magnitude), digits,
+          buffer + 1);
+      if (!end)
+         return w.fail("json: time point outside years 0000..9999 has no text");
+      *end++ = '"';
+      w.append(buffer, end);
+   }
    void custom(const Custom &type, const Value &value, int_form form)
    {
       if (type.id == "bool")
@@ -1141,6 +1206,10 @@ class Writer
             return w.fail("pssz IR: null schema box");
          if (type.id != "box")
          {
+            if (auto kind = ::psio::parse_time_schema_id(type.id))
+               return time(type, *kind, value, form);
+            if (::psio::reserved_time_schema_id(type.id))
+               return w.fail("pssz IR: unsupported custom adapter");
             if (auto handler = customs.find(type))
             {
                // The inner value as PSSZ bytes, then the handler's text as

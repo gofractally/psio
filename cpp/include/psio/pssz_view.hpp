@@ -437,6 +437,29 @@ namespace psio {
       }
    };
 
+   // A duration / time point is its tick count on the wire (time.hpp); the
+   // view reads it by value.
+   template <::psio::TimeValue T, typename Fmt, storage Store>
+      requires detail::is_pssz_format_v<Fmt>
+   class view<T, Fmt, Store>
+   {
+      std::span<const char> data_;
+    public:
+      using element_type = T;
+      using format_type = Fmt;
+      static constexpr storage storage_kind = Store;
+      view() = default;
+      explicit view(std::span<const char> s) noexcept : data_(s) {}
+      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
+      [[nodiscard]] T get() const noexcept
+      {
+         ::psio::time_rep_t<T> raw{};
+         if (data_.size() >= sizeof(raw)) std::memcpy(&raw, data_.data(), sizeof(raw));
+         return ::psio::time_from_ticks<T>(raw);
+      }
+   };
+
    template <typename T, typename Fmt, storage Store>
       requires detail::is_pssz_format_v<Fmt>
    class view<schema_types::Box<T>, Fmt, Store> : public view<T, Fmt, Store>

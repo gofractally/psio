@@ -141,7 +141,14 @@ pub const fn shape_evolves(old: &Shape, new: &Shape) -> bool {
     }
     match old.kind {
         ShapeKind::Opaque => false,
-        ShapeKind::Leaf => str_eq(old.name, new.name) && old.param == new.param,
+        // A leaf with children is a marked scalar (a time value): the same
+        // marker over the same parts.
+        ShapeKind::Leaf => {
+            str_eq(old.name, new.name)
+                && old.param == new.param
+                && old.children.len() == new.children.len()
+                && all_evolve(old.children, new.children, old.children.len())
+        }
         ShapeKind::Optional => {
             old.selector == new.selector && all_evolve(old.children, new.children, 1)
         }

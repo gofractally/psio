@@ -73,6 +73,9 @@ Common to both formats:
 - enum without payload: the enumerator's **name** as a string (`"active"`)
   when the value is a declared enumerator, the **number** otherwise (see
   "Enums" below);
+- time values (`docs/time.md`): a duration is its tick count (follows the
+  integer rule); a time point is an RFC 3339 UTC string with exactly its
+  unit's fraction digits, `"2026-11-22T10:15:30.123Z"`;
 - floats: shortest round-trip decimal as `std::to_chars` writes it
   (`0.1`, `1e+21`, `1e-07`, `-0`, `5.960464477539063e-08`); NaN and the
   infinities have no text (writing one is an error in both formats);
@@ -566,6 +569,14 @@ reads as text. (The ids PSIO itself gives a binary meaning to — `bool`,
 `char`, `string`, `utf8`, `hex`, `bitvector`, `bitlist`, `box` — are fixed;
 every other id is a text presentation and never changes the bytes, the
 widths or validation.)
+
+**Built-in presentations.** The time ids (`time-point-<unit>`,
+`duration-<unit>`, `docs/time.md`) are presentations PSIO supplies itself in
+every language: a duration is its tick integer, a time point an RFC 3339
+string. They need no handler, cannot be given one, and are presented also
+under a strict registry. `time-point` / `duration`, alone or followed by
+`-`, are reserved: a reserved id that is not a time id, or a time id over
+anything but an 8/16/32/64-bit integer, is a malformed schema.
 
 The schema-driven text codecs take a **handler registry**: id → a pair of
 functions between the PSSZ bytes of the wire type and the presentation text.

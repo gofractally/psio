@@ -150,12 +150,29 @@ impl Schema {
                 AnyValue::Enum(named) => ty = &named.r#type,
                 AnyValue::Custom(custom) if !wire_custom_id(&custom.id) => {
                     boxed |= custom.id == "box";
+                    if crate::time::parse_time_schema_id(&custom.id).is_some() {
+                        self.time_ticks(&custom.r#type)?;
+                    } else if crate::time::reserved_time_schema_id(&custom.id) {
+                        return Err(PsszError("pssz schema: unsupported custom adapter"));
+                    }
                     ty = &custom.r#type;
                 }
                 _ => return Ok((ty, boxed)),
             }
         }
         Err(PsszError("pssz schema: cyclic aliases"))
+    }
+}
+
+impl Schema {
+    /// The tick integer under a time id (`time-point-<unit>` /
+    /// `duration-<unit>`, docs/time.md): 8, 16, 32 or 64 bits. Anything
+    /// else under a time id is a malformed schema.
+    pub fn time_ticks<'a>(&'a self, inner: &'a AnyType) -> PsszResult<&'a Int> {
+        match &self.wire(inner)?.value {
+            AnyValue::Int(ticks) if matches!(ticks.bits, 8 | 16 | 32 | 64) => Ok(ticks),
+            _ => Err(PsszError("pssz schema: time value requires an 8/16/32/64-bit tick integer")),
+        }
     }
 }
 

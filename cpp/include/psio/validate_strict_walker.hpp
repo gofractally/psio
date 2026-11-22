@@ -44,6 +44,7 @@
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
+#include <psio/time.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
 
 #include <cstddef>
@@ -108,6 +109,7 @@ namespace psio {
             ::psio::has_adapter_v<U, ::psio::binary_category>)
             return false;
          else if constexpr (std::is_arithmetic_v<U> || std::is_enum_v<U> ||
+                            ::psio::TimeValue<U> ||
                             std::is_same_v<U, std::string> ||
                             std::is_same_v<U, ::psio::uint128> ||
                             std::is_same_v<U, ::psio::int128> ||

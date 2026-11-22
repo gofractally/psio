@@ -17,6 +17,7 @@
 #include <psio/ext_int.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/adapter.hpp>
+#include <psio/time.hpp>
 #include <psio/reflect.hpp>
 #include <psio/stream.hpp>
 #include <psio/wrappers.hpp>
@@ -88,6 +89,7 @@ namespace psio {
       consteval bool fully_fixed()
       {
          if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T> ||
+                       ::psio::TimeValue<T> ||
                        std::is_same_v<T, ::psio::uint128> ||
                        std::is_same_v<T, ::psio::int128> ||
                        std::is_same_v<T, ::psio::uint256>)
@@ -127,6 +129,8 @@ namespace psio {
          else if constexpr (std::is_same_v<T, ::psio::uint128> ||
                             std::is_same_v<T, ::psio::int128>)
             return 16;
+         else if constexpr (::psio::TimeValue<T>)
+            return sizeof(::psio::time_rep_t<T>);
          else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>)
             return sizeof(T);
          else if constexpr (is_std_array<T>::value)
@@ -252,6 +256,8 @@ namespace psio {
          else if constexpr (std::is_same_v<T, ::psio::uint128> ||
                             std::is_same_v<T, ::psio::int128>)
             s.write(&v, 16);
+         else if constexpr (::psio::TimeValue<T>)
+            s.put(::psio::time_ticks(v));  // the tick count
          else if constexpr (std::is_arithmetic_v<T>)
             s.put(v);
          else if constexpr (is_std_array<T>::value)
@@ -421,6 +427,9 @@ namespace psio {
             pos += 16;
             return out;
          }
+         else if constexpr (::psio::TimeValue<T>)
+            return ::psio::time_from_ticks<T>(
+               decode_value<::psio::time_rep_t<T>>(src, pos));
          else if constexpr (std::is_arithmetic_v<T>)
          {
             T out{};
@@ -622,8 +631,10 @@ namespace psio {
             pos += 16;
             return codec_ok();
          }
-         else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T>)
+         else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T> ||
+                            ::psio::TimeValue<T>)
          {
+            static_assert(!::psio::TimeValue<T> || sizeof(T) == fixed_contrib<T>());
             if (avail < sizeof(T))
                return codec_fail("borsh: truncated arithmetic",
                                  static_cast<std::uint32_t>(pos), "borsh");

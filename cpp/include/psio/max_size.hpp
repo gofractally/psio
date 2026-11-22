@@ -28,6 +28,7 @@
 #include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
 #include <psio/shapes.hpp>
+#include <psio/time.hpp>
 #include <psio/wrappers.hpp>
 
 #include <array>
@@ -120,6 +121,7 @@ namespace psio {
          if constexpr (::psio::has_adapter_v<U, ::psio::binary_category>)
             return false;
          else if constexpr (std::is_arithmetic_v<U> || std::is_enum_v<U> ||
+                            ::psio::TimeValue<U> ||
                             std::is_same_v<U, ::psio::uint128> ||
                             std::is_same_v<U, ::psio::int128> ||
                             std::is_same_v<U, ::psio::uint256>)
@@ -198,6 +200,7 @@ namespace psio {
          else if constexpr (std::is_same_v<U, ::psio::uint128> ||
                             std::is_same_v<U, ::psio::int128>) return 16;
          else if constexpr (std::is_enum_v<U>) return sizeof(std::underlying_type_t<U>);
+         else if constexpr (::psio::TimeValue<U>) return sizeof(::psio::time_rep_t<U>);
          else if constexpr (std::is_arithmetic_v<U>) return sizeof(U);
          else if constexpr (is_utf8_string<U>::value)
          {

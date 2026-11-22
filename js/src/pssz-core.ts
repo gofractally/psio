@@ -6,6 +6,8 @@
 //
 // This file is internal. The public API is `pssz.ts`.
 
+import { parseTimeSchemaId, reservedTimeId, timeFractionDigits, type TimeKind } from './time.js';
+
 // ── Errors ──────────────────────────────────────────────────────────────────
 
 /**
@@ -441,9 +443,12 @@ export interface PsszCustomHandler {
 // Custom ids that are part of the binary form (pssz_ir.hpp "Custom ids").
 // Any other id is "box" or a text presentation: its inner type on the wire.
 const WIRE_CUSTOM_IDS = new Set(['bool', 'char', 'string', 'utf8', 'hex', 'bitvector', 'bitlist', 'unknown']);
-/** Ids a handler cannot be registered for. */
+/**
+ * Ids a handler cannot be registered for: the binary-form ids, "box", and
+ * the built-in presentations (the time ids of docs/time.md).
+ */
 export function reservedCustomId(id: string): boolean {
-  return id === 'box' || WIRE_CUSTOM_IDS.has(id);
+  return id === 'box' || WIRE_CUSTOM_IDS.has(id) || reservedTimeId(id);
 }
 
 // The node a reference is on the wire: wrappers ("box", text presentations)
@@ -541,6 +546,13 @@ export class Node {
   stable = false;
   /** record: explicit maxDynamicData. */
   cap: bigint | null = null;
+  /**
+   * int: a time value (Custom time id over the tick integer, docs/time.md).
+   * Its value is always a bigint tick count.
+   */
+  time: TimeKind | null = null;
+  /** time point: fraction digits of its RFC 3339 text; -1 for no text form. */
+  timeDigits = -1;
 
   layoutMemo?: Memo<Layout>;
   emptyMemo?: Memo<boolean>;
@@ -896,6 +908,24 @@ export class Codec {
       }
       case 'Custom': {
         const id = t.value.id;
+        const time = parseTimeSchemaId(id);
+        if (time) {
+          // A built-in presentation: a duration / time point is its tick
+          // integer on the wire, bigint ticks as a value, and has the text
+          // form of docs/time.md.
+          const ticks = this.wire(t.value.type);
+          const bits = ticks.type === 'Int' ? ticks.value.bits : 0;
+          if (ticks.type !== 'Int' || (bits !== 8 && bits !== 16 && bits !== 32 && bits !== 64))
+            return schemaError('pssz IR: time value requires an 8/16/32/64-bit tick integer');
+          node.kind = 'int';
+          node.bits = bits;
+          node.signed = ticks.value.isSigned;
+          node.size = bits / 8;
+          node.time = time;
+          node.timeDigits = time.point ? timeFractionDigits(time.num, time.den) : -1;
+          break;
+        }
+        if (reservedTimeId(id)) return schemaError('pssz IR: unsupported custom adapter');
         if (!WIRE_CUSTOM_IDS.has(id)) {
           // "box" or a text presentation: the inner type on the wire.
           node.kind = 'custom';
@@ -1596,7 +1626,7 @@ export class Codec {
           if (node.bits === 1 && raw !== 0 && raw !== (node.signed ? 0xff : 1))
             bytesError('pssz IR: one-bit integer overflow');
           if (node.signed && bytes[end - 1] & 0x80) raw -= 2 ** (node.size * 8);
-          return raw;
+          return node.time ? BigInt(raw) : raw;
         }
         let raw = 0n;
         for (let i = node.size - 1; i >= 0; --i) raw = (raw << 8n) | BigInt(bytes[start + i]);

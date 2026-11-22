@@ -40,6 +40,9 @@
 //   std::optional             null or the value
 //   std::tuple                [ e0, e1, ... ] in order; tuple<> is []
 //   reflected record          {"field": value, ...} in declaration order
+//   chrono duration           its tick count, as an integer (time.hpp)
+//   system_clock time_point   an RFC 3339 UTC string, "2026-11-22T10:15:30Z",
+//                             with exactly the unit's fraction digits
 //   text adapter              "..." holding the adapter's text
 //                             (PSIO_ADAPTER(T, psio::text_category, ...), or a
 //                             member-level psio::as<Tag>)
@@ -102,6 +105,7 @@
 #include <psio/get_type_name.hpp>
 #include <psio/json_cursor.hpp>
 #include <psio/reflect.hpp>
+#include <psio/time.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for, byte_array, ...
 
 #include <algorithm>
@@ -581,6 +585,10 @@ namespace psio {
          }
          else if constexpr (is_wide_int_v<T>)
             return 0;
+         else if constexpr (::psio::DurationValue<T>)
+            return text_bound<Fmt, ::psio::time_rep_t<T>>();
+         else if constexpr (::psio::TimePointValue<T>)
+            return ::psio::max_time_text_size + 2;
          else if constexpr (std::is_integral_v<T>)
             // digits, sign, and the quotes of a string form
             return sizeof(T) <= 8
@@ -760,6 +768,25 @@ namespace psio {
             encode_integer<Fmt, IM>(static_cast<unsigned char>(v), w);
          else if constexpr (std::is_integral_v<T>)
             encode_integer<Fmt, IM>(v, w);
+         else if constexpr (::psio::DurationValue<T>)
+            encode_integer<Fmt, IM>(::psio::time_ticks(v), w);
+         else if constexpr (::psio::TimePointValue<T>)
+         {
+            static_assert(::psio::TextTimePoint<T>,
+                          "psio::json: a time point has RFC 3339 text only for a "
+                          "period of 1/10^k seconds, k = 0..9");
+            char* const out = w.reserve(::psio::max_time_text_size + 2);
+            *out            = '"';
+            char* end       = ::psio::write_time_text(v, out + 1);
+            if (!end)
+            {
+               w.fail("json: time point outside years 0000..9999 has no text");
+               w.append("null");
+               return;
+            }
+            *end++ = '"';
+            w.commit(end);
+         }
          else if constexpr (std::is_floating_point_v<T>)
          {
             // NaN and the infinities have no JSON text, in either format.
@@ -1474,6 +1501,29 @@ namespace psio {
             return read_wide_integer<Fmt, IM, T>(r, out);
          else if constexpr (std::is_integral_v<T>)
             return read_integer<Fmt, IM, T>(r, out);
+         else if constexpr (::psio::DurationValue<T>)
+         {
+            ::psio::time_rep_t<T> v{};
+            if (!read_integer<Fmt, IM, ::psio::time_rep_t<T>>(r, &v))
+               return false;
+            if (out) *out = ::psio::time_from_ticks<T>(v);
+            return true;
+         }
+         else if constexpr (::psio::TimePointValue<T>)
+         {
+            static_assert(::psio::TextTimePoint<T>,
+                          "psio::json: a time point has RFC 3339 text only for a "
+                          "period of 1/10^k seconds, k = 0..9");
+            std::string_view text;
+            bool             escaped = false;
+            if (!r.c.string(text, escaped))
+               return false;
+            T v{};
+            if (const char* err = ::psio::parse_time_text(text, v))
+               return r.c.fail(err);
+            if (out) *out = v;
+            return true;
+         }
          else if constexpr (std::is_floating_point_v<T>)
             return read_float<T>(r, out);
          else if constexpr (std::is_same_v<T, std::string>)

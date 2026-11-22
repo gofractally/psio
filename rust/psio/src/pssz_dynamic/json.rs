@@ -417,6 +417,12 @@ impl<C: JsonCursor> Reader<'_, C> {
     /// strict.
     fn transparent(&mut self, ty: &Custom, form: IntForm, n: usize) -> Text<Value> {
         if ty.id != "box" {
+            if let Some(kind) = crate::time::parse_time_schema_id(&ty.id) {
+                return self.time(ty, kind, form);
+            }
+            if crate::time::reserved_time_schema_id(&ty.id) {
+                return self.fail("pssz dynamic: unsupported custom adapter");
+            }
             if let Some(handler) = self.handlers.and_then(|all| all.find(&ty.id)) {
                 if self.c.kind()? != JsonKind::String {
                     return self.fail("json: expected a string (custom text form)");
@@ -436,6 +442,30 @@ impl<C: JsonCursor> Reader<'_, C> {
             }
         }
         self.read(&ty.r#type, form, n + 1)
+    }
+
+    /// The built-in presentation of the time ids (docs/time.md): a duration
+    /// is its tick integer; a time point is RFC 3339 text.
+    fn time(&mut self, ty: &Custom, kind: crate::time::TimeKind, form: IntForm) -> Text<Value> {
+        let ticks = match self.schema.time_ticks(&ty.r#type) {
+            Ok(ticks) => Int { bits: ticks.bits, isSigned: ticks.isSigned },
+            Err(error) => return self.fail(error.0),
+        };
+        if !kind.point {
+            return self.integer(&ticks, form);
+        }
+        let Some(digits) = crate::time::time_fraction_digits(kind.num, kind.den) else {
+            return self.fail("json: a time point of this unit has no text form");
+        };
+        if self.c.kind()? != JsonKind::String {
+            return self.fail("json: expected a string (RFC 3339 time point)");
+        }
+        let text = self.c.string()?.0.into_owned();
+        match crate::time::time_ticks_of_text(&text, digits, ticks.bits, ticks.isSigned) {
+            Ok(value) if ticks.isSigned => Ok(Value::Signed(value)),
+            Ok(value) => Ok(Value::Unsigned(value as u128)),
+            Err(error) => self.fail(error.0),
+        }
     }
 
     fn custom(&mut self, ty: &Custom, form: IntForm, n: usize) -> Text<Value> {
@@ -717,9 +747,43 @@ impl ValueWriter<'_> {
         }
     }
 
+    /// The built-in presentation of the time ids (docs/time.md).
+    fn time(&mut self, ty: &Custom, kind: crate::time::TimeKind, value: &Value) -> Text<()> {
+        const MISMATCH: &str = "pssz dynamic: integer value does not match the schema";
+        let ticks = match self.schema.time_ticks(&ty.r#type) {
+            Ok(ticks) => Int { bits: ticks.bits, isSigned: ticks.isSigned },
+            Err(error) => return self.fail(error.0),
+        };
+        if !kind.point {
+            return self.integer(&ticks, value);
+        }
+        let Some(digits) = crate::time::time_fraction_digits(kind.num, kind.den) else {
+            return self.fail("json: a time point of this unit has no text form");
+        };
+        let count = match (ticks.isSigned, value) {
+            (true, Value::Signed(v))
+                if *v >= -(1i128 << (ticks.bits - 1)) && *v < (1i128 << (ticks.bits - 1)) =>
+            {
+                *v
+            }
+            (false, Value::Unsigned(v)) if *v < (1u128 << ticks.bits) => *v as i128,
+            _ => return self.fail(MISMATCH),
+        };
+        match crate::time::time_text_of_ticks(count, digits) {
+            Ok(text) => self.w.string(text.as_bytes()),
+            Err(_) => self.fail("json: time point outside years 0000..9999 has no text"),
+        }
+    }
+
     fn custom(&mut self, ty: &Custom, value: &Value, n: usize) -> Text<()> {
         if !wire_custom_id(&ty.id) {
             if ty.id != "box" {
+                if let Some(kind) = crate::time::parse_time_schema_id(&ty.id) {
+                    return self.time(ty, kind, value);
+                }
+                if crate::time::reserved_time_schema_id(&ty.id) {
+                    return self.fail("pssz dynamic: unsupported custom adapter");
+                }
                 if let Some(handler) = self.handlers.and_then(|all| all.find(&ty.id)) {
                     // The inner value as PSSZ bytes, then the handler's
                     // text as one JSON string.
