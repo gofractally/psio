@@ -15,6 +15,10 @@
 //   list<T><=N    at most N elements       (C++ psio::bounded<T,N>, Rust BoundedList<T,N>)
 //   bytes<=N      at most N bytes          (C++ psio::bounded<uint8_t,N>, Rust BoundedList<u8,N>)
 //   a record, variant or enum by its name
+//   Id Blob Endpoint Ratio Ref Name DerKey Range Level Guarded and
+//   list<Level> optional<Name> list<Endpoint>: transparent wrappers, custom
+//   text forms of any shape and type invariants
+//   (custom_conformance_types.hpp, conformance/custom-types.md)
 //
 // The fixture also records the Schema IR of every type (`schema_ir`, the
 // psio::pssz encoding of one psio::Schema holding each type under its id)
@@ -22,6 +26,8 @@
 // schema-driven tests (cpp/tests/schema_conformance_tests.cpp,
 // rust/psio/tests/schema_conformance.rs) use only those: IR + text must give
 // the same bytes, and IR + bytes the same texts, as the typed codecs.
+
+#include "custom_conformance_types.hpp"
 
 #include <psio/json.hpp>
 #include <psio/pssz.hpp>
@@ -371,6 +377,18 @@ namespace json_conf
    using Tuple3  = std::tuple<std::uint32_t, Text, std::uint64_t>;
    using TupleN  = std::tuple<std::tuple<std::uint8_t, std::int64_t>, std::tuple<>,
                               std::vector<Bytes>>;
+
+   // Transparent wrappers, custom text of any shape, invariants.
+   using custom_conf::Blob;
+   using custom_conf::DerKey;
+   using custom_conf::Endpoint;
+   using custom_conf::Guarded;
+   using custom_conf::Id;
+   using custom_conf::Level;
+   using custom_conf::Name;
+   using custom_conf::Range;
+   using custom_conf::Ratio;
+   using custom_conf::Ref;
 }  // namespace json_conf
 
 PSIO_FIELD_ATTRS(json_conf::Overrides, a, psio::json_string)
@@ -450,6 +468,19 @@ namespace json_conf
    JSON_CONF_TYPE(Text4, "string<=4")
    JSON_CONF_TYPE(ListU16Max3, "list<u16><=3")
    JSON_CONF_TYPE(BytesMax2, "bytes<=2")
+   JSON_CONF_TYPE(Id, "Id")
+   JSON_CONF_TYPE(Blob, "Blob")
+   JSON_CONF_TYPE(Endpoint, "Endpoint")
+   JSON_CONF_TYPE(Ratio, "Ratio")
+   JSON_CONF_TYPE(Ref, "Ref")
+   JSON_CONF_TYPE(Name, "Name")
+   JSON_CONF_TYPE(DerKey, "DerKey")
+   JSON_CONF_TYPE(Range, "Range")
+   JSON_CONF_TYPE(Level, "Level")
+   JSON_CONF_TYPE(Guarded, "Guarded")
+   JSON_CONF_TYPE(std::vector<Level>, "list<Level>")
+   JSON_CONF_TYPE(std::optional<Name>, "optional<Name>")
+   JSON_CONF_TYPE(std::vector<Endpoint>, "list<Endpoint>")
 #undef JSON_CONF_TYPE
 
    // Every fixture type is expressible in the Schema IR: a type with a
@@ -465,8 +496,16 @@ namespace json_conf
    // The type holds a custom text form somewhere: its rows also carry the
    // text a schema-driven codec writes WITHOUT a handler (the wire type's).
    template <typename T>
-   inline constexpr bool has_custom = std::is_same_v<T, Version> || std::is_same_v<T, Release> ||
-                                      std::is_same_v<T, Account> || std::is_same_v<T, Transfer>;
+   inline constexpr bool has_custom =
+      std::is_same_v<T, Version> || std::is_same_v<T, Release> || std::is_same_v<T, Account> ||
+      std::is_same_v<T, Transfer> || std::is_same_v<T, Blob> || std::is_same_v<T, Endpoint> ||
+      std::is_same_v<T, Ratio> || std::is_same_v<T, Ref> || std::is_same_v<T, Guarded> ||
+      std::is_same_v<T, std::vector<Endpoint>>;
+   // The type holds a type with an invariant somewhere: "invariant" rows
+   // exist for it, and a schema-driven codec needs the handlers' `check` to
+   // reject what the typed codec rejects.
+   template <typename T>
+   inline constexpr bool has_invariant = psio::contains_invariant_v<T>;
 
    template <typename T>
    std::string type_id() { return std::string(type_name<T>::id); }
@@ -502,7 +541,14 @@ namespace json_conf
            std::type_identity<BytesMax2>{}, std::type_identity<Status>{},
            std::type_identity<psio::uint128>{}, std::type_identity<psio::int128>{},
            std::type_identity<psio::uint256>{}, std::type_identity<Wide>{},
-           std::type_identity<Account>{}, std::type_identity<Transfer>{});
+           std::type_identity<Account>{}, std::type_identity<Transfer>{},
+           std::type_identity<Id>{}, std::type_identity<Blob>{},
+           std::type_identity<Endpoint>{}, std::type_identity<Ratio>{},
+           std::type_identity<Ref>{}, std::type_identity<Name>{},
+           std::type_identity<DerKey>{}, std::type_identity<Range>{},
+           std::type_identity<Level>{}, std::type_identity<Guarded>{},
+           std::type_identity<std::vector<Level>>{}, std::type_identity<std::optional<Name>>{},
+           std::type_identity<std::vector<Endpoint>>{});
    }
 
    // ── Fixture rows ──────────────────────────────────────────────────────
@@ -510,6 +556,13 @@ namespace json_conf
    // kind "value":  `json` and `ijson` are the two texts of one value.
    // kind "accept": `text` is read by `format` and re-written as `canonical`.
    // kind "reject": `text` is rejected by `format`.
+   // kind "invariant": `text` is well-formed text of the type under `format`
+   //   and is rejected because the value violates an invariant, with the
+   //   message `reason`. `pssz` holds the bytes of that value: structurally
+   //   valid, rejected by the typed validator for the same reason. A
+   //   schema-driven codec with NO handler accepts them (`plain_json` /
+   //   `plain_ijson` are their texts, which read back to `pssz`); with the
+   //   handlers it rejects `text` and `pssz` alike.
    // A text that is not valid UTF-8 is carried as `text_hex`.
    struct Row
    {
@@ -530,9 +583,11 @@ namespace json_conf
       // custom id (the wire type's own text).
       std::optional<std::string> plain_json;
       std::optional<std::string> plain_ijson;
+      // For an invariant row: the message of the invariant that fails.
+      std::optional<std::string> reason;
    };
    PSIO_REFLECT(Row, name, type, kind, format, json, ijson, text, text_hex, canonical, pssz,
-                plain_json, plain_ijson)
+                plain_json, plain_ijson, reason)
 
    struct TypeRow
    {
@@ -669,6 +724,40 @@ namespace json_conf
       return "";
    }
 
+   // The bytes of a value that violates an invariant: every checked pssz
+   // reader rejects them with the invariant's message; the trusted decode
+   // reads them, and no writer writes the value back.
+   template <typename T>
+   std::string check_invariant_bytes(const std::string& hex, const std::string& reason)
+   {
+      std::vector<char> bytes;
+      for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+         bytes.push_back(static_cast<char>(std::stoi(hex.substr(i, 2), nullptr, 16)));
+      const std::span<const char> in{bytes};
+      auto st = psio::validate<T>(psio::pssz{}, in);
+      if (st.ok() || st.error().what != reason) return "pssz validate does not report the invariant";
+      if (psio::validate_strict<T>(psio::pssz{}, in).ok()) return "pssz validate_strict accepts";
+      bool unknown = false;
+      if (psio::validate_pssz_compatible<T>(psio::pssz{}, in, unknown).ok())
+         return "validate_pssz_compatible accepts";
+      T value{};
+      if (psio::decode_pssz_checked(psio::pssz{}, in, value, unknown).ok())
+         return "decode_pssz_checked accepts";
+      // The trusted decode does not run invariants; the writers do.
+      value = psio::decode<T>(psio::pssz{}, in);
+      std::vector<char> out;
+      auto              enc = psio::encode_pssz_checked(psio::pssz{}, value, out);
+      if (enc.ok() || enc.error().what != reason || !out.empty())
+         return "encode_pssz_checked writes a value that violates its invariant";
+      std::string text;
+      auto        js = psio::encode_json_checked(psio::json{}, value, text);
+      if (js.ok() || js.error().what != reason || !text.empty())
+         return "encode_json_checked writes a value that violates its invariant";
+      if (psio::encode_json_checked(psio::ijson{}, value, text).ok())
+         return "encode_json_checked (ijson) writes a value that violates its invariant";
+      return "";
+   }
+
    template <typename T>
    std::string check_row(const Row& row)
    {
@@ -702,6 +791,26 @@ namespace json_conf
       }
       if (row.kind == "reject")
          return with([&]<typename Fmt>(Fmt) { return check_rejects<Fmt, T>(input_text(row)); });
+      if (row.kind == "invariant")
+      {
+         if (!row.reason || !row.pssz) return "invariant row needs reason and pssz";
+         return with([&]<typename Fmt>(Fmt) -> std::string {
+            const std::string text = input_text(row);
+            if (auto e = check_rejects<Fmt, T>(text); !e.empty()) return e;
+            // Every reader gives the invariant's own status.
+            T value{};
+            auto st = psio::decode_json_checked(Fmt{}, std::span<const char>{text}, value);
+            if (st.ok() || st.error().what != *row.reason)
+               return "the text is not rejected with the invariant's message";
+            if (auto v = psio::validate<T>(Fmt{}, std::span<const char>{text});
+                v.ok() || v.error().what != *row.reason)
+               return "validate does not report the invariant";
+            if constexpr (has_pssz<T>)
+               return check_invariant_bytes<T>(*row.pssz, *row.reason);
+            else
+               return "invariant row of a type without pssz";
+         });
+      }
       return "unknown kind " + row.kind;
    }
 }  // namespace json_conf

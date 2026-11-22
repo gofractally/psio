@@ -300,7 +300,7 @@ namespace
       "corpus", "evolution-forward", "evolution-backward", "pruning", "malformed",
       "optional-presence", "width", "tuple", "variant", "enum", "enum-unknown-value", "string",
       "string-raw-non-utf8", "length-bound-overflow", "cap-overflow-explicit-nested", "bytes",
-      "zero-fixed", "depth", "box"};
+      "zero-fixed", "depth", "box", "transparent", "custom", "invariant"};
 }  // namespace
 
 TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformance]")
@@ -312,8 +312,17 @@ TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformanc
       REQUIRE(index < fx.types.size());
       const auto& entry = fx.types[index++];
       INFO(type_id<T>());
-      // The seven typed properties plus "ir" (Schema IR coverage).
-      CHECK(entry.size() == 8);
+      // The seven typed properties plus "ir" (Schema IR coverage); a custom
+      // type also carries the id of its schema node, and a type an
+      // invariant constrains is marked.
+      CHECK(entry.size() == 8 + std::size_t{psio::schema_custom_v<T>} +
+                               std::size_t{psio::contains_invariant_v<T>});
+      CHECK(entry.count("custom_id") == std::size_t{psio::schema_custom_v<T>});
+      if constexpr (psio::schema_custom_v<T>)
+         CHECK(str(entry, "custom_id") == psio::schema_custom_id<T>());
+      CHECK(entry.count("invariant") == std::size_t{psio::contains_invariant_v<T>});
+      if constexpr (psio::contains_invariant_v<T>)
+         CHECK(entry.at("invariant").flag);
       CHECK(entry.at("ir").kind == Value::boolean);
       CHECK(entry.at("ir").flag == ir_expressible<T>());
       CHECK(str(entry, "id") == type_id<T>());

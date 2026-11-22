@@ -38,6 +38,62 @@ namespace warnings_check
       PSIO_REFLECT(inner, id, attr(name, max<32>), note)
    };
 
+   // A transparent wrapper, a text form on a variant, invariants.
+   struct handle
+   {
+      std::uint64_t value = 0;
+      PSIO_REFLECT(handle, transparent(), value)
+   };
+   struct span_of
+   {
+      std::uint32_t lo = 0;
+      std::uint32_t hi = 0;
+      static psio::codec_status check(const span_of& s) noexcept
+      {
+         return s.lo <= s.hi ? psio::codec_ok() : psio::codec_fail("span_of: reversed", 0, "span_of");
+      }
+      PSIO_REFLECT(span_of, lo, hi, invariant(check))
+   };
+   struct der
+   {
+      std::vector<std::uint8_t> data{0x30};
+      PSIO_REFLECT(der, transparent(), data,
+                   invariant([](const der& d) noexcept {
+                      return !d.data.empty() ? psio::codec_ok()
+                                             : psio::codec_fail("der: empty", 0, "der");
+                   }))
+   };
+   using either = std::variant<std::uint8_t, std::uint16_t>;
+   struct either_text
+   {
+      static constexpr std::string_view schema_id = "either";
+      static std::size_t                packsize(const either& v) { return v.index() ? 2 : 1; }
+      static void encode(const either& v, std::string& s) { s += v.index() ? "w0" : "n"; }
+      static either decode(std::span<const char> in)
+      {
+         return in.size() == 2 ? either{std::uint16_t{0}} : either{std::uint8_t{0}};
+      }
+      static psio::codec_status validate(std::span<const char> in) noexcept
+      {
+         return in.size() == 1 || in.size() == 2 ? psio::codec_ok()
+                                                 : psio::codec_fail("either", 0, "either");
+      }
+      static psio::codec_status validate_strict(std::span<const char> in) noexcept
+      {
+         return validate(in);
+      }
+   };
+   enum class grade : std::uint8_t { a, b };
+   inline psio::codec_status check_grade(const grade& g) noexcept
+   {
+      return static_cast<unsigned>(g) < 2 ? psio::codec_ok()
+                                          : psio::codec_fail("grade: unlisted", 0, "grade");
+   }
+}  // namespace warnings_check
+PSIO_ADAPTER(warnings_check::either, psio::text_category, warnings_check::either_text)
+PSIO_INVARIANT(warnings_check::grade, warnings_check::check_grade, "grade")
+namespace warnings_check
+{
    struct everything
    {
       bool                                    flag = false;
@@ -61,9 +117,17 @@ namespace warnings_check
       std::optional<inner>                    maybe_record;
       std::chrono::seconds                    elapsed{};
       std::chrono::sys_time<std::chrono::microseconds> at{};
+      handle                                  owner;
+      std::optional<handle>                   maybe_owner;
+      span_of                                 window;
+      der                                     certificate;
+      either                                  either_one;
+      std::vector<grade>                      grades;
+      std::array<grade, 2>                    two_grades{};
       PSIO_REFLECT(everything, flag, u8, i32, u64, f64, wide, shade, raw, text, bounded_text,
                    bytes, digest, numbers, records, pair_of_fixed, tuple, choice,
-                   maybe_number, maybe_record, elapsed, at)
+                   maybe_number, maybe_record, elapsed, at, owner, maybe_owner, window,
+                   certificate, either_one, grades, two_grades)
    };
 
    struct key_type
@@ -71,7 +135,10 @@ namespace warnings_check
       std::uint32_t              table = 0;
       std::string                name;
       std::optional<std::int64_t> rank;
-      PSIO_REFLECT(key_type, table, name, rank)
+      handle                     owner;
+      span_of                    window;
+      std::vector<grade>         grades;
+      PSIO_REFLECT(key_type, table, name, rank, owner, window, grades)
    };
 
    template <typename Fmt>
@@ -107,7 +174,7 @@ namespace warnings_check
       (void)psio::max_encoded_size<everything>();
 
       // key
-      const key_type key{1, "a", 2};
+      const key_type key{1, "a", 2, handle{3}, span_of{1, 2}, {grade::a}};
       const auto     key_bytes = psio::to_key(key);
       ok &= psio::validate<key_type>(psio::key{}, std::span<const char>{key_bytes}).ok();
       ok &= psio::decode<key_type>(psio::key{}, std::span<const char>{key_bytes}).table == 1;
@@ -130,6 +197,30 @@ namespace warnings_check
                                         std::span<const char>{bytes}, text, nullptr)
                .ok();
       ok &= psio::pssz_ir::json_to_pssz(schema, "everything", psio::ijson{}, text, again).ok();
+
+      // Custom types: the registry on the binary and the text entry points.
+      static_assert(psio::is_transparent_v<handle> && psio::contains_invariant_v<everything>);
+      static_assert(psio::any_has_invariant_v<everything, span_of>);
+      psio::pssz_ir::CustomHandlers handlers;
+      handlers.add<span_of>().add<der>().add<either>().add<grade>();
+      handlers.require_all = true;
+      text.clear();
+      again.clear();
+      ok &= psio::pssz_ir::validate_pssz(schema, "everything", std::span<const char>{bytes},
+                                         nullptr, &handlers)
+               .ok();
+      ok &= psio::pssz_ir::pssz_to_json(schema, "everything", psio::ijson{},
+                                        std::span<const char>{bytes}, text, nullptr, &handlers)
+               .ok();
+      ok &= psio::pssz_ir::json_to_pssz(schema, "everything", psio::ijson{}, text, again, nullptr,
+                                        psio::json_parser::automatic, &handlers)
+               .ok();
+      ok &= again == bytes;
+      ok &= psio::check_invariant(value.window).ok();
+      std::vector<char> unchecked;
+      ok &= psio::detail::pssz_impl::encode_ignoring_invariants(psio::pssz{}, value, unchecked)
+               .ok();
+      (void)psio::view<handle, psio::pssz, psio::storage::const_borrow>{}.get();
       return ok;
    }
 }  // namespace warnings_check

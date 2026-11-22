@@ -149,6 +149,30 @@ The form reaches the member's integer through optional, vector and array;
 it does not reach into nested records, tuples or variants. It applies to
 integers of any width.
 
+### Transparent types, custom text, invariants
+
+- A **transparent type** (`docs/pssz-spec.md` §5.8) is its member's text:
+  `Id{42}` is `42`, a wrapped byte list is the array / hex string. A record
+  member of a transparent integer type takes the member's integer form.
+  Under ijson a variant names a transparent alternative by the wrapper's own
+  type name.
+- A **text adapter** (C++ `PSIO_ADAPTER(T, psio::text_category, Impl)`)
+  gives a type of any shape — record, transparent wrapper, enum,
+  `std::variant`, `std::tuple`, list — one JSON string as its text, in both
+  formats; the adapter replaces the text the shape would have, and the
+  shape's own text is then rejected. An adapter on a `std::variant` or
+  `std::tuple` applies to that exact type wherever it is used; a distinct
+  identity is a transparent wrapper around it.
+- A **type invariant** (`docs/pssz-spec.md` §17) is enforced by every
+  writer (`encode`, `encode_json_checked`) and every reader (`validate`,
+  `validate_strict`, `validate_json`, `decode`, `decode_json_checked`,
+  `make_boxed`): a value that violates it has no text, and text that reads
+  as such a value is rejected with the invariant's own status. A text
+  adapter's `validate` runs on the text first; the invariant then runs on
+  the value read. A reader that only validates materialises the values of
+  types that have an invariant, and only those. Every syntax layer behaves
+  identically. Unknown keys are skipped without being read as any type.
+
 ## Reading
 
 One typed reader per language defines the accepted set. In C++ it backs
@@ -594,14 +618,23 @@ boxed type inline and derives the narrower width: re-export it.
 
 ### Custom types through a schema
 
-A type with a custom text form — an account name over a `u64`, a time
-point, `major.minor` over a record — is, in the Schema IR, the existing
-`Custom` node: `Custom { type: <the wire type>, id: "<presentation>" }`.
-The wire type says exactly what the bytes are; the id names how the value
-reads as text. (The ids PSIO itself gives a binary meaning to — `bool`,
-`char`, `string`, `utf8`, `hex`, `bitvector`, `bitlist`, `box` — are fixed;
-every other id is a text presentation and never changes the bytes, the
-widths or validation.)
+A **custom type** is a type with an identity of its own beyond its wire
+form: a custom text form (an account name over a `u64`, `major.minor` over
+a record, `"127.0.0.1:8080"` over a variant), an invariant
+(`docs/pssz-spec.md` §17), or both. In the Schema IR it is the `Custom`
+node, **whatever the type's shape** — record, transparent wrapper, enum,
+variant, tuple, list:
+
+```
+Custom { type: <the wire type>, id: "<the type's id>" }
+```
+
+The wire type says exactly what the bytes are; the id names the type.
+(The ids PSIO itself gives a binary meaning to — `bool`, `char`, `string`,
+`utf8`, `hex`, `bitvector`, `bitlist`, `box` — are fixed; every other id
+never changes the bytes or the widths.) A transparent type with neither a
+text form nor an invariant is not custom: it is a named alias of its
+member's type.
 
 **Built-in presentations.** The time ids (`time-point-<unit>`,
 `duration-<unit>`, `monotonic-<unit>`, `docs/time.md`) are presentations
@@ -612,30 +645,50 @@ registry. `time-point` / `duration` / `monotonic`, alone or followed by
 `-`, are reserved: a reserved id that is not a time id, or a time id over
 anything but an 8/16/32/64-bit integer, is a malformed schema.
 
-The schema-driven text codecs take a **handler registry**: id → a pair of
-functions between the PSSZ bytes of the wire type and the presentation text.
-The text is carried as one JSON string in both formats, the rule of a typed
-text adapter.
+What an id adds is code, which a schema cannot carry. The schema-driven
+codecs — the text conversions **and** the binary entry points
+(`validate_pssz`, `decode_auto`, `encode_auto`, the explicit-width forms) —
+take a **handler registry**: id → handler. A handler has up to three
+functions over the PSSZ bytes of the wire type (automatic profile), each
+optional:
+
+| function | role |
+|---|---|
+| `to_text(pssz) -> text`, `from_text(text) -> pssz` | the text form. The text is carried as ONE JSON string in both formats, the rule of a typed text adapter. Without them the type's text is its wire type's |
+| `check(pssz) -> status` | the invariant: whether structurally valid bytes of the wire type are a value of the type |
+
+With the registry, `check` runs on **every** value of a custom node that
+has one: on reads after the value's structure (and its text) is accepted,
+on writes before any byte or text is returned; nested values first, and a
+value under several ids innermost first. Its status is passed through
+unchanged. Text that a handler's `from_text` refuses is "json: text is not
+a value of the custom type".
 
 | | emits the node | registers a handler |
 |---|---|---|
-| C++ | `SchemaBuilder`, for a type with a `text_category` adapter that is a reflected record or an enum (a strong integer typedef). Id: the adapter's `static constexpr std::string_view schema_id`, else the reflected name. | `psio::pssz_ir::CustomHandlers h; h.add<AccountNumber>();` (the type's own text adapter, registered once) or `h.add("Id", {to_text, from_text})`; passed as the trailing argument of `json_to_pssz` / `pssz_to_json` / `json_to_value` / `value_to_json`, or bound once per schema with `JsonNames names(schema, h)`. |
+| C++ | `SchemaBuilder`, for any type with a `text_category` adapter and / or an invariant (`psio::schema_custom_v<T>`). Id (`psio::schema_custom_id<T>()`): the adapter's `static constexpr std::string_view schema_id`, else the id given to `PSIO_INVARIANT`, else the reflected record or enum name. A type with none of these (a `std::variant`, a `std::tuple`) must provide one: a compile error otherwise. An adapter that is not the type's schema presentation says `static constexpr bool schema_custom = false` (the `0x` text of the integers wider than 64 bits). | `psio::pssz_ir::CustomHandlers h; h.add<AccountNumber>();` — `to_text` / `from_text` from the type's text adapter if it has one, `check` from its invariant if it has one (the typed `validate<T>(psio::pssz{}, bytes)`) — or by hand: `h.add("Id", {to_text, from_text})`, `h.add("Id", {.check = fn})`. Passed as the trailing argument of every schema-driven entry point, or bound once per schema with `JsonNames names(schema, h)`. |
 | Rust | `ToPsszSchema` derive with `#[pssz(custom)]` (id: the type name) or `#[pssz(custom = "AccountName")]`; with `#[pssz(transparent)]` the wire type is the inner field's. | `let mut h = psio::pssz::dynamic::CustomHandlers::new(); h.add_type::<Account>()?;` (the type's own `TextForm`), `h.add_type_as::<T>("Id")`, or `h.add("Id", to_text, from_text)` over the wire type's PSSZ bytes; `h.set_strict(true)`; passed to `json_to_pssz_with` / `pssz_to_json_with` / `json_to_value_with` / `value_to_json_with`. Looked up by id per custom value (the Rust dynamic path has no bind step). |
 | JS | (reads the node from the schema) | `PsszSchema.decode(irBytes, { handlers: { Version: versionHandler, AccountName: accountHandler }, requireHandlers })`, `schema.withHandlers(...)` or `schema.type(root, { handlers })`; a handler is `{ toText(value): string, fromText(text): value }` over the decoded JS value of the wire type, bound once when the type is compiled. |
 
-**Fallback.** An id with no registered handler reads and writes as its wire
-type: the account as its number, the version as `{"major":1,"minor":2}`.
-Binary is exact either way; only the text is plainer, and the plain text
-reads back to the same bytes. A caller that must produce the exact
-presentation sets the registry to strict (C++ `require_all = true`): a
-missing handler is then an error ("no handler registered for a custom
-type") instead of the fallback. With a handler registered the presentation
-is exactly its text: the plain form is not also accepted.
+**The three registries.** What a schema-driven codec does with a custom
+node depends only on the registry it is given:
 
-The JSON fixture records, for every value of a type holding a custom form
-(`Version`, `Release`, `Account`, `Transfer`), the typed text (`json`,
-`ijson`) and the fallback text (`plain_json`, `plain_ijson`); all three
-languages reproduce both from the bytes, and the bytes from both.
+| registry | text | invariant |
+|---|---|---|
+| none, or no handler for the id | the wire type's own text: the account as its number, the version as `{"major":1,"minor":2}`, the endpoint as the variant | **not checked**: the node is its wire type, structure only |
+| a handler for the id | the handler's text (exactly: the wire type's text is not also accepted), or the wire type's when the handler has only `check` | checked by `check`, on binary and text entry points alike |
+| strict (C++ `require_all = true`) and no handler for the id | an error, "no handler registered for a custom type" | the same error, on the binary entry points too |
+
+Binary is exact in every case; the fallback text reads back to the same
+bytes. A caller that must not accept or produce a value it cannot check and
+present exactly uses a strict registry.
+
+The JSON fixture records, for every value of a type holding a custom text
+form, the typed text (`json`, `ijson`) and the fallback text (`plain_json`,
+`plain_ijson`); all three languages reproduce both from the bytes, and the
+bytes from both. Its `invariant` rows hold values that violate an invariant
+— the typed text, the bytes, the fallback texts and the invariant's message
+— for the three registries above (`conformance/custom-types.md`).
 
 A handler cannot express a presentation that is not a single JSON string
 (an object, a bare number, a different shape per format), one that depends

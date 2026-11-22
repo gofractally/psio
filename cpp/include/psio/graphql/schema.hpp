@@ -372,11 +372,22 @@ namespace psio::graphql
       template <typename T>
       inline constexpr bool is_text_adapter_v = ji::dispatch_adapter_v<ijson, T>;
 
+      // A transparent type (transparent.hpp) over a leaf is a leaf: a custom
+      // scalar with the type's own name and its member's text.
       template <typename T>
-      inline constexpr bool is_leaf_v =
-         is_text_adapter_v<T> || std::is_arithmetic_v<T> || std::is_enum_v<T> ||
-         ji::is_wide_int_v<T> || TimeValue<T> || is_string_v<T> || is_bytes_v<T> ||
-         std::is_same_v<T, page_cursor>;
+      constexpr bool leaf_shaped() noexcept
+      {
+         if constexpr (is_text_adapter_v<T> || std::is_arithmetic_v<T> || std::is_enum_v<T> ||
+                       ji::is_wide_int_v<T> || TimeValue<T> || is_string_v<T> ||
+                       is_bytes_v<T> || std::is_same_v<T, page_cursor>)
+            return true;
+         else if constexpr (is_transparent_v<T>)
+            return leaf_shaped<transparent_inner_t<T>>();
+         else
+            return false;
+      }
+      template <typename T>
+      inline constexpr bool is_leaf_v = leaf_shaped<T>();
 
       template <typename T>
       struct nullable_inner
@@ -666,7 +677,7 @@ namespace psio::graphql
       {
          if constexpr (std::is_same_v<T, page_cursor>)
             return {"String", scalar_class::string, true};
-         else if constexpr (is_text_adapter_v<T>)
+         else if constexpr (is_text_adapter_v<T> || is_transparent_v<T>)
             return {declared_name<T>(), scalar_class::custom, false};
          else if constexpr (std::is_same_v<T, bool>)
             return {"Boolean", scalar_class::boolean, true, false, true};
@@ -885,6 +896,10 @@ namespace psio::graphql
       template <typename T>
       struct object_def
       {
+         static_assert(!is_transparent_v<T>,
+                       "psio::graphql: a transparent type over a record, a list or a variant "
+                       "has no GraphQL mapping: expose its member, or give the type a text "
+                       "adapter (a custom scalar)");
          using R = reflect<T>;
          static constexpr std::size_t field_slots = R::member_count;
          static constexpr std::size_t slot_count  = R::member_count + R::method_count;

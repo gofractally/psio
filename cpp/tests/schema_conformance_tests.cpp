@@ -58,9 +58,10 @@ namespace schema_conf
       std::optional<std::string> pssz;
       std::optional<std::string> plain_json;
       std::optional<std::string> plain_ijson;
+      std::optional<std::string> reason;
    };
    PSIO_REFLECT(JsonRow, name, type, kind, format, json, ijson, text, text_hex, canonical, pssz,
-                plain_json, plain_ijson)
+                plain_json, plain_ijson, reason)
 
    struct SchemaRejectRow
    {
@@ -109,9 +110,10 @@ namespace schema_conf
       std::string format;
       std::string hex;
       std::string expect;
+      std::string reason;
       std::string reencoded;
    };
-   PSIO_REFLECT(PsszRow, name, type, format, hex, expect, reencoded)
+   PSIO_REFLECT(PsszRow, name, type, format, hex, expect, reason, reencoded)
 
    struct PsszFixture
    {
@@ -266,8 +268,19 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
    // registered under the id its schema node carries.
    ir::CustomHandlers handlers;
    handlers.add<json_conf::Version>().add<json_conf::Account>();
+   // ... and the custom types of any shape, with their invariants.
+   custom_conf::for_each_custom(
+      [&]<typename T>(std::type_identity<T>) { handlers.template add<T>(); });
    REQUIRE(handlers.find("Version"));
    REQUIRE(handlers.find("AccountName"));
+   for (const char* id : {"Blob", "Endpoint", "Ratio", "Ref", "Name", "DerKey", "Range", "Level"})
+      REQUIRE(handlers.find(id));
+   REQUIRE(handlers.find("Endpoint")->to_text);
+   REQUIRE_FALSE(handlers.find("Endpoint")->check);   // a text form, no invariant
+   REQUIRE(handlers.find("Name")->check);
+   REQUIRE_FALSE(handlers.find("Name")->to_text);     // an invariant, no text form
+   REQUIRE(handlers.find("Ref")->check);
+   REQUIRE(handlers.find("Ref")->from_text);          // both
    const use_handlers  scope(&handlers);
    const ir::JsonNames names(schema, handlers);
    std::map<std::string, TypeRow> types;
@@ -287,7 +300,7 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
    }
    REQUIRE(widths >= 40);
 
-   std::size_t values = 0, accepted = 0, rejected = 0, with_bytes = 0, plain = 0;
+   std::size_t values = 0, accepted = 0, rejected = 0, with_bytes = 0, plain = 0, violated = 0;
    std::set<std::string> covered;
    for (const auto& row : fx.vectors)
    {
@@ -357,6 +370,62 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
                      : to_text<psio::json>(schema, row.type, bytes, text)) == "");
          REQUIRE(text == *row.canonical);
       }
+      else if (row.kind == "invariant")
+      {
+         // A value that violates an invariant. The schema cannot say so:
+         // with no handler the value is its wire type — valid bytes, the
+         // wire type's text. With the handlers every entry point reports
+         // the invariant's own message; a strict registry without the
+         // handler refuses the type.
+         ++violated;
+         const bool                        ij   = row.format == "ijson";
+         const psio::schema_types::AnyType root = psio::schema_types::Type{row.type};
+         bytes                                  = from_hex(*row.pssz);
+         const std::span<const char> in{bytes};
+         REQUIRE((ij ? to_bytes<psio::ijson>(schema, row.type, input_text(row), again)
+                     : to_bytes<psio::json>(schema, row.type, input_text(row), again)) ==
+                 *row.reason);
+         REQUIRE(to_text<psio::json>(schema, row.type, bytes, text) == *row.reason);
+         REQUIRE(to_text<psio::ijson>(schema, row.type, bytes, text) == *row.reason);
+         auto status = ir::validate_pssz(schema, root, in, nullptr, &handlers);
+         REQUIRE_FALSE(status.ok());
+         REQUIRE(status.error().what == *row.reason);
+         ir::Value value;
+         bool      unknown = false;
+         status            = ir::decode_auto(schema, root, in, value, unknown, &handlers);
+         REQUIRE_FALSE(status.ok());
+         REQUIRE(status.error().what == *row.reason);
+         {
+            const use_handlers without(nullptr);
+            REQUIRE(ir::validate_pssz(schema, root, in).ok());
+            REQUIRE(ir::decode_auto(schema, root, in, value, unknown).ok());
+            REQUIRE(to_text<psio::json>(schema, row.type, bytes, text) == "");
+            REQUIRE(text == *row.plain_json);
+            REQUIRE(to_bytes<psio::json>(schema, row.type, text, again) == "");
+            REQUIRE(again == bytes);
+            REQUIRE(to_text<psio::ijson>(schema, row.type, bytes, text) == "");
+            REQUIRE(text == *row.plain_ijson);
+            REQUIRE(to_bytes<psio::ijson>(schema, row.type, text, again) == "");
+            REQUIRE(again == bytes);
+         }
+         // Writers refuse the value too: binary and text.
+         again.clear();
+         status = ir::encode_auto(schema, root, value, again, &handlers);
+         REQUIRE_FALSE(status.ok());
+         REQUIRE(status.error().what == *row.reason);
+         REQUIRE(again.empty());
+         text   = "keep";
+         status = ir::value_to_json(schema, root, psio::ijson{}, value, text, &handlers);
+         REQUIRE_FALSE(status.ok());
+         REQUIRE(status.error().what == *row.reason);
+         REQUIRE(text == "keep");
+         ir::CustomHandlers strict;
+         strict.require_all = true;
+         status             = ir::validate_pssz(schema, root, in, nullptr, &strict);
+         REQUIRE_FALSE(status.ok());
+         REQUIRE(status.error().what ==
+                 std::string_view{"pssz IR: no handler registered for a custom type"});
+      }
       else
       {
          REQUIRE(row.kind == "reject");
@@ -401,6 +470,7 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
    REQUIRE(rejected >= 300);
    REQUIRE(with_bytes >= 600);
    REQUIRE(plain >= 15);
+   REQUIRE(violated >= 40);
    // Every expressible type is exercised.
    for (const auto& [id, t] : types)
       if (t.ir) REQUIRE(covered.count(id));
@@ -430,8 +500,16 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
    }
    REQUIRE(widths == fx.types.size());
 
+   // The handlers of the fixture's custom types (custom_conformance_types.hpp).
+   ir::CustomHandlers handlers;
+   custom_conf::for_each_custom(
+      [&]<typename T>(std::type_identity<T>) { handlers.template add<T>(); });
+   ir::CustomHandlers strict;
+   strict.require_all = true;
+
    std::size_t canonical = 0, unknown = 0, rejected = 0, raw_non_utf8 = 0, json_trips = 0,
-               no_json = 0, explicit_width = 0, explicit_capped = 0, explicit_top_cap = 0;
+               no_json = 0, explicit_width = 0, explicit_capped = 0, explicit_top_cap = 0,
+               violated = 0, violated_explicit = 0;
    for (const auto& row : fx.vectors)
    {
       if (!expressible.at(row.type)) continue;
@@ -439,6 +517,41 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
       const psio::schema_types::AnyType root = psio::schema_types::Type{row.type};
       const Bytes                       bytes = from_hex(row.hex);
       const std::string                 cls   = row.name.substr(0, row.name.find('/'));
+
+      if (cls == "invariant")
+      {
+         // A structurally valid frame of a value that violates an
+         // invariant: `reject` is the typed outcome. The schema alone
+         // accepts it; with the handlers it is rejected with the
+         // invariant's message, under every width profile.
+         REQUIRE(row.expect == "reject");
+         auto run = [&]<std::size_t W>(std::integral_constant<std::size_t, W>,
+                                       const ir::CustomHandlers* registry) {
+            ir::Value value;
+            bool      has_unknown = false;
+            return ir::decode_compatible<W>(schema, root, std::span<const char>{bytes}, value,
+                                            has_unknown, registry);
+         };
+         auto with = [&](const ir::CustomHandlers* registry) {
+            return row.format == "auto"
+                      ? run(std::integral_constant<std::size_t, 0>{}, registry)
+                      : row.format == "pssz8"
+                           ? run(std::integral_constant<std::size_t, 1>{}, registry)
+                           : row.format == "pssz16"
+                                ? run(std::integral_constant<std::size_t, 2>{}, registry)
+                                : run(std::integral_constant<std::size_t, 4>{}, registry);
+         };
+         REQUIRE(with(nullptr).ok());
+         auto status = with(&handlers);
+         REQUIRE_FALSE(status.ok());
+         REQUIRE(status.error().what == row.reason);
+         status = with(&strict);
+         REQUIRE_FALSE(status.ok());
+         REQUIRE(status.error().what ==
+                 std::string_view{"pssz IR: no handler registered for a custom type"});
+         ++(row.format == "auto" ? violated : violated_explicit);
+         continue;
+      }
 
       if (row.format != "auto")
       {
@@ -474,6 +587,10 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
 
       bool       has_unknown = false;
       const auto st = ir::validate_pssz(schema, root, std::span<const char>{bytes}, &has_unknown);
+      // The handlers change nothing for a value that satisfies its
+      // invariants, or for a type that has none.
+      REQUIRE(ir::validate_pssz(schema, root, std::span<const char>{bytes}, nullptr, &handlers)
+                 .ok() == st.ok());
       if (cls == "string-raw-non-utf8")
       {
          // The IR tells a raw string ("string") from a UTF-8 one ("utf8"):
@@ -550,6 +667,8 @@ TEST_CASE("schema IR + PSSZ bytes agrees with the typed pssz validator",
    REQUIRE(explicit_width >= 1000);
    REQUIRE(explicit_capped == 15);
    REQUIRE(explicit_top_cap >= 12);
+   REQUIRE(violated >= 25);
+   REQUIRE(violated_explicit >= 75);
 }
 
 TEST_CASE("the schema-driven entry points are checked", "[schema][conformance]")

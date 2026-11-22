@@ -674,25 +674,43 @@ namespace psio {
       // it walks, innermost first: check_encode_depth_impl is the shape walk
       // of check_encode_shape followed by the type's own check, and every
       // nested value goes through it.
+      //
+      // What the preflight checks beyond depth, null Box and UTF-8. It is
+      // passed down the walk unchanged (as `bounds`, and tested as one: it
+      // converts to whether bounds are checked).
+      struct encode_preflight
+      {
+         bool bounds     = true;  // member length_bound, bitlist capacity
+         bool invariants = true;  // type invariants
+         constexpr encode_preflight(bool check_bounds = true,
+                                    bool check_invariants = true) noexcept
+            : bounds(check_bounds), invariants(check_invariants)
+         {
+         }
+         constexpr explicit operator bool() const noexcept { return bounds; }
+      };
+
       template <typename T>
-      codec_status check_encode_shape(const T& value, std::size_t depth, bool bounds);
+      codec_status check_encode_shape(const T& value, std::size_t depth,
+                                      encode_preflight bounds);
 
       template <typename T>
       codec_status check_encode_depth_impl(const T& value, std::size_t depth,
-                                           bool bounds = true)
+                                           encode_preflight bounds = {})
       {
          if constexpr (::psio::has_invariant_v<T>)
          {
             if (auto status = check_encode_shape(value, depth, bounds); !status.ok())
                return status;
-            return ::psio::check_invariant(value);
+            return bounds.invariants ? ::psio::check_invariant(value) : codec_ok();
          }
          else
             return check_encode_shape(value, depth, bounds);
       }
 
       template <typename T>
-      codec_status check_encode_shape(const T& value, std::size_t depth, bool bounds)
+      codec_status check_encode_shape(const T& value, std::size_t depth,
+                                      encode_preflight bounds)
       {
          if (depth > kMaxValidationDepth)
             return codec_fail("pssz: max depth exceeded", 0, "pssz");
@@ -2969,27 +2987,6 @@ namespace psio {
          encode_value<W, Auto>(value, sink);
          return out;
       }
-
-      // Test support: the frame an encoder that runs no preflight would
-      // write — in particular for a value that violates an invariant
-      // (invariant.hpp). The value must otherwise be encodable. Readers
-      // must reject such frames; production code uses encode.
-      template <typename Fmt, typename T>
-      std::vector<char> encode_ignoring_invariants(Fmt, const T& value)
-      {
-         constexpr bool Auto = std::is_same_v<Fmt, ::psio::pssz>;
-         constexpr std::size_t W = [] {
-            if constexpr (std::is_same_v<Fmt, ::psio::pssz>)
-               return ::psio::auto_pssz_width<T>();
-            else
-               return Fmt::offset_width;
-         }();
-         const std::size_t total = size_of_v<W, Auto>(value);
-         std::vector<char> out(total);
-         ::psio::fast_buf_stream sink(out.data(), total);
-         encode_value<W, Auto>(value, sink);
-         return out;
-      }
    }  // namespace detail::pssz_impl
 
    // ── Checked encode ────────────────────────────────────────────────────
@@ -3025,23 +3022,54 @@ namespace psio {
       }
    }  // namespace detail::pssz_impl
 
+   namespace detail::pssz_impl
+   {
+      // The checked encoder, with the preflight it is asked for. One sizing
+      // pass in checked mode; once it succeeds the write repeats exactly the
+      // same arithmetic on the same value and cannot fail.
+      template <typename T, typename Fmt>
+      codec_status encode_checked(Fmt format, const T& value, std::vector<char>& out,
+                                  encode_preflight preflight)
+      {
+         if (auto status = check_encode_depth_impl(value, 0, preflight); !status.ok())
+            return status;
+         std::size_t total = 0;
+         if (auto status = checked_size(format, value, total); !status.ok())
+            return status;
+         if (total > std::numeric_limits<std::size_t>::max() - out.size())
+            return codec_fail("pssz: encoded size overflow", 0, "pssz");
+         constexpr bool        Auto = std::is_same_v<Fmt, ::psio::pssz>;
+         constexpr std::size_t W    = [] {
+            if constexpr (std::is_same_v<Fmt, ::psio::pssz>)
+               return ::psio::auto_pssz_width<T>();
+            else
+               return Fmt::offset_width;
+         }();
+         const std::size_t orig = out.size();
+         out.resize(orig + total);
+         ::psio::fast_buf_stream sink(out.data() + orig, total);
+         encode_value<W, Auto>(value, sink);
+         return codec_ok();
+      }
+
+      // The frame of a value whose invariants (invariant.hpp) are NOT
+      // checked; everything else is. For the two callers that own that
+      // check themselves: a custom handler's from_text, whose `check` runs
+      // next (pssz_ir_json.hpp), and tests that need the frame of a value
+      // that violates an invariant — which every checking reader rejects.
+      template <typename T, typename Fmt>
+      [[nodiscard]] codec_status encode_ignoring_invariants(Fmt format, const T& value,
+                                                            std::vector<char>& out)
+      {
+         return encode_checked(format, value, out, encode_preflight{true, false});
+      }
+   }  // namespace detail::pssz_impl
+
    template <typename T, typename Fmt>
    [[nodiscard]] codec_status encode_pssz_checked(Fmt format, const T& value,
                                                   std::vector<char>& out)
    {
-      if (auto status = detail::pssz_impl::check_encode_depth_impl(value, 0);
-          !status.ok())
-         return status;
-      // The whole sizing pass in checked mode: once it succeeds the encoder
-      // below repeats exactly the same checks on the same value and cannot
-      // fail.
-      std::size_t total = 0;
-      if (auto status = detail::pssz_impl::checked_size(format, value, total); !status.ok())
-         return status;
-      if (total > std::numeric_limits<std::size_t>::max() - out.size())
-         return codec_fail("pssz: encoded size overflow", 0, "pssz");
-      ::psio::encode(format, value, out);
-      return codec_ok();
+      return detail::pssz_impl::encode_checked(format, value, out, {});
    }
 
    template <typename T, typename Fmt>

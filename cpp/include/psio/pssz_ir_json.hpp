@@ -122,8 +122,12 @@ template <typename T> struct typed_custom_handler
             const std::span<const char> in{text.data(), text.size()};
             if (auto status = A::validate(in); !status.ok())
                return status;
+            // The bytes of the value the text denotes. Whether that value
+            // satisfies T's invariant is `check`'s to say, which the codecs
+            // run on these bytes next.
             const T value = A::decode(in);
-            return ::psio::encode_pssz_checked(::psio::pssz{}, value, pssz);
+            return ::psio::detail::pssz_impl::encode_ignoring_invariants(::psio::pssz{}, value,
+                                                                         pssz);
          };
       }
       if constexpr (::psio::has_invariant_v<T>)

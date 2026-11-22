@@ -778,6 +778,178 @@ namespace
       bound("ff00ff", "ff00ff", O{"ff01"});
    }
 
+   // ── Transparent wrappers, custom types, invariants ────────────────────
+   // Range's wire type, without its invariant.
+   struct AnyRange
+   {
+      std::uint32_t lo = 0;
+      std::uint32_t hi = 0;
+   };
+   PSIO_REFLECT(AnyRange, lo, hi)
+
+   // The key of a wrapper is the key of the value it wraps.
+   template <typename T, typename Inner>
+   void same_key(const std::string& name, const T& v, const Inner& inner)
+   {
+      if (psio::encode(psio::key{}, v) != psio::encode(psio::key{}, inner))
+         die(type_id<T>() + "/" + name + ": the key is not the key of the wire type");
+      if (psio::encode(psio::pssz{}, v) != psio::encode(psio::pssz{}, inner))
+         die(type_id<T>() + "/" + name + ": the bytes are not those of the wire type");
+      const auto a = psio::to_key(v);
+      const auto b = psio::to_key(inner);
+      if (a.size() != b.size() || !std::equal(a.begin(), a.end(), b.begin()))
+         die(type_id<T>() + "/" + name + ": to_key differs from the wire type's");
+   }
+   template <typename T>
+   void custom_values(const std::vector<T>& values)
+   {
+      for (std::size_t i = 0; i < values.size(); ++i)
+         value<T>("v" + std::to_string(i), values[i]);
+      order<T>("ascending", values);
+      const auto k = key_of(values.back());
+      key_reject<T>("trailing_byte", to_hex(k) + "00");
+      if (!k.empty())
+         key_reject<T>("truncated", to_hex(std::span<const char>{k.data(), k.size() - 1}));
+   }
+   // `plain` is a value of T's wire type that violates an invariant: its
+   // key and its bytes are well-formed, and no typed reader of T takes them.
+   template <typename T, typename Plain>
+   void key_invariant(const std::string& name, const Plain& plain, const std::string& reason)
+   {
+      Row&       r     = add("key-invariant", type_id<T>(), name);
+      const auto key   = psio::encode(psio::key{}, plain);
+      const auto bytes = psio::encode(psio::pssz{}, plain);
+      auto       k     = psio::validate<T>(psio::key{}, std::span<const char>{key});
+      if (k.ok() || k.error().what != reason)
+         die(r.name + ": key validate does not report '" + reason + "'");
+      if (psio::validate_strict<T>(psio::key{}, std::span<const char>{key}).ok())
+         die(r.name + ": key validate_strict accepts");
+      bool threw = false;
+      try
+      {
+         (void)psio::decode<T>(psio::key{}, std::span<const char>{key});
+      }
+      catch (const psio::codec_exception& e)
+      {
+         threw = e.error().what == reason;
+      }
+      if (!threw) die(r.name + ": key decode does not fail with the invariant");
+      auto p = psio::validate<T>(psio::pssz{}, std::span<const char>{bytes});
+      if (p.ok() || p.error().what != reason)
+         die(r.name + ": pssz validate does not report '" + reason + "'");
+      // The trusted pssz decode yields the value; no key writer takes it.
+      const T value = psio::decode<T>(psio::pssz{}, std::span<const char>{bytes});
+      threw         = false;
+      try
+      {
+         (void)psio::encode(psio::key{}, value);
+      }
+      catch (const psio::codec_exception& e)
+      {
+         threw = e.error().what == reason;
+      }
+      if (!threw) die(r.name + ": key encode writes a value that violates its invariant");
+      threw = false;
+      try
+      {
+         (void)psio::to_key(value);
+      }
+      catch (const psio::codec_exception&)
+      {
+         threw = true;
+      }
+      if (!threw) die(r.name + ": to_key writes a value that violates its invariant");
+      r.key    = to_hex(key);
+      r.pssz   = to_hex(bytes);
+      r.reason = reason;
+   }
+
+   void emit_custom_types()
+   {
+      using namespace custom_conf;
+      using namespace std::string_literals;
+      using u64 = std::uint64_t;
+      using u32 = std::uint32_t;
+      using u8  = std::uint8_t;
+      const u64 top = ~u64{0};
+
+      same_key<Id, u64>("zero", Id{0}, 0);
+      same_key<Id, u64>("max", Id{top}, top);
+      custom_values<Id>({Id{0}, Id{1}, Id{256}, Id{top}});
+      static_assert(std::tuple_size_v<decltype(psio::to_key(Id{}))> == 8);  // a fixed-width key
+
+      same_key<Blob, Bytes>("bytes", Blob{{0, 1, 0}}, Bytes{0, 1, 0});
+      custom_values<Blob>({Blob{}, Blob{{0}}, Blob{{0, 0}}, Blob{{0, 1}}, Blob{{1}}, Blob{{255}}});
+
+      V6 loopback;
+      loopback.address[15] = 1;
+      loopback.port        = 443;
+      custom_values<Endpoint>({Endpoint{V4{}}, Endpoint{V4{{10, 0, 0, 7}, 1}},
+                               Endpoint{V4{{127, 0, 0, 1}, 8080}}, Endpoint{V6{}},
+                               Endpoint{loopback}});
+      custom_values<Ratio>({Ratio{-32768, 0}, Ratio{-3, 4}, Ratio{0, 0}, Ratio{0, 1},
+                            Ratio{32767, 65535}});
+
+      same_key<Ref, std::variant<u64, std::string>>("name", Ref{"alice"s}, "alice"s);
+      custom_values<Ref>({Ref{u64{0}}, Ref{u64{7}}, Ref{top}, Ref{"a"s}, Ref{"alice"s},
+                          Ref{"b c"s}});
+
+      const u64 name60 = u64{1} << 60;
+      same_key<Name, u64>("largest", Name{name60 - 1}, name60 - 1);
+      custom_values<Name>({Name{0}, Name{5}, Name{name60 - 1}});
+      static_assert(std::tuple_size_v<decltype(psio::to_key(Name{}))> == 8);
+      key_invariant<Name, u64>("first_non_canonical", name60,
+                               "Name: value is not a canonical name");
+      key_invariant<Name, u64>("all_ones", top, "Name: value is not a canonical name");
+
+      same_key<DerKey, Bytes>("sequence", DerKey{{0x30, 0, 1}}, Bytes{0x30, 0, 1});
+      custom_values<DerKey>({DerKey{{0x30}}, DerKey{{0x30, 0}}, DerKey{{0x30, 0, 0}},
+                             DerKey{{0x30, 1}}});
+      key_invariant<DerKey, Bytes>("empty", Bytes{}, "DerKey: not a DER sequence");
+      key_invariant<DerKey, Bytes>("wrong_tag", Bytes{0x31, 0}, "DerKey: not a DER sequence");
+
+      custom_values<Range>({Range{0, 0}, Range{0, 9}, Range{3, 3}, Range{3, 9}});
+      key_invariant<Range, AnyRange>("reversed", AnyRange{9, 3},
+                                          "Range: lo is greater than hi");
+
+      custom_values<Level>({Level::low, Level::mid, Level::high, Level::top});
+      key_invariant<Level, u8>("unlisted", u8{4}, "Level: not a listed level");
+
+      const ShardKey shard{KShard{7, "alice"}};
+      same_key<ShardKey, KShard>("shard", shard, shard.key);
+      custom_values<ShardKey>({ShardKey{KShard{0, ""}}, ShardKey{KShard{7, "alice"}},
+                               ShardKey{KShard{7, "bob"}}, ShardKey{KShard{8, ""}}});
+      // key_prefix<ShardKey>(7) is key_prefix<tuple<u32, string>>(7).
+      prefixes<ShardKey>("shard", shard);
+      if (psio::key_prefix<ShardKey>(7u) != psio::key_prefix<KShard>(7u))
+         die("ShardKey: the prefix is not that of the tuple it wraps");
+
+      // Invariants inside a composite key: each element where it occurs.
+      // The wire type, spelled without the custom types (an enum without an
+      // invariant stands for Level: a list of enums is not a byte string).
+      enum class AnyLevel : u8 {};
+      const auto L = [](unsigned v) { return static_cast<AnyLevel>(v); };
+      using Plain = Tup<u64, std::optional<AnyRange>, std::vector<AnyLevel>, Bytes>;
+      const KGuard good{Name{5}, Range{1, 2}, {Level::low, Level::top}, DerKey{{0x30, 9}}};
+      value<KGuard>("v0", good);
+      value<KGuard>("v1", KGuard{Name{0}, std::nullopt, {}, DerKey{{0x30}}});
+      prefixes<KGuard>("v0", good);
+      same_key<KGuard, Plain>("v0", good,
+                              Plain{5, AnyRange{1, 2}, {L(0), L(3)}, Bytes{0x30, 9}});
+      key_invariant<KGuard, Plain>("name", Plain{name60, AnyRange{1, 2}, {L(0), L(3)},
+                                                 Bytes{0x30, 9}},
+                                   "Name: value is not a canonical name");
+      key_invariant<KGuard, Plain>("optional_range", Plain{5, AnyRange{2, 1}, {L(0), L(3)},
+                                                           Bytes{0x30, 9}},
+                                   "Range: lo is greater than hi");
+      key_invariant<KGuard, Plain>("level_in_list", Plain{5, AnyRange{1, 2}, {L(0), L(7)},
+                                                          Bytes{0x30, 9}},
+                                   "Level: not a listed level");
+      key_invariant<KGuard, Plain>("derkey", Plain{5, AnyRange{1, 2}, {L(0), L(3)},
+                                                   Bytes{9}},
+                                   "DerKey: not a DER sequence");
+   }
+
    std::string quoted(const std::string& s) { return psio::encode(psio::json{}, s); }
 
    std::string render()
@@ -808,6 +980,7 @@ namespace
          field("ijson", r.ijson);
          field("text", r.text);
          field("prefix", r.prefix);
+         field("reason", r.reason);
          if (r.kind == "key-prefix" || r.kind == "bound")
             out += ",\"bound\":" + (r.bound ? quoted(*r.bound) : std::string("null"));
          if (r.count)
@@ -836,6 +1009,7 @@ int main(int argc, char** argv)
    }
    emit_time();
    emit_keys();
+   emit_custom_types();
 
    const std::string text = render();
    Fixture           parsed;

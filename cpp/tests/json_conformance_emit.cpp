@@ -69,6 +69,8 @@ namespace
          psio::pssz_ir::CustomHandlers h;
          h.add<Version>();
          h.add<Account>();
+         custom_conf::for_each_custom(
+            [&]<typename T>(std::type_identity<T>) { h.template add<T>(); });
          return h;
       }();
       return handlers;
@@ -105,6 +107,11 @@ namespace
       if (bytes_of(psio::json{}, *row.json, with) != bytes ||
           bytes_of(psio::ijson{}, *row.ijson, with) != bytes)
          die(row.name + ": schema path with handlers reads different bytes");
+      // A type with an invariant and no text form of its own: the schema
+      // path is checked against the typed codec, and there is no fallback
+      // text to record.
+      if constexpr (!has_custom<T>)
+         return;
       row.plain_json  = text_of(psio::json{}, nullptr);
       row.plain_ijson = text_of(psio::ijson{}, nullptr);
       if (*row.plain_json == *row.json)
@@ -132,7 +139,7 @@ namespace
       if (auto e = check_row<T>(row); !e.empty()) die(row.name + ": " + e);
       // The typed psio::pssz bytes of the row's value.
       if constexpr (has_pssz<T>)
-         if (row.kind != "reject")
+         if (row.kind != "reject" && row.kind != "invariant")
          {
             T                 v{};
             const std::string text = row.kind == "value" ? *row.json : input_text(row);
@@ -170,7 +177,7 @@ namespace
       if (!psio::decode_json_checked(psio::json{}, std::span<const char>{*row.json}, back).ok() ||
           !(back == v))
          die(name + ": json round trip");
-      if constexpr (has_custom<T>)
+      if constexpr (has_custom<T> || has_invariant<T>)
          custom_texts<T>(row, v);
       push<T>(std::move(row));
    }
@@ -232,6 +239,91 @@ namespace
    {
       reject<T>("json", name, text);
       reject<T>("ijson", name, text);
+   }
+
+   // A value that violates an invariant, given as the text of its wire type
+   // (`plain`: what a schema-driven codec with no handler reads) and, when
+   // the typed text differs from that — a custom text form on the way — the
+   // typed text in each format. Two rows: one per text format.
+   template <typename T>
+   void invariant(const std::string& name, const std::string& reason, const std::string& plain,
+                  const std::string& typed_json = "", const std::string& typed_ijson = "")
+   {
+      namespace ir = psio::pssz_ir;
+      const auto&                       schema = fixture_schema();
+      const psio::schema_types::AnyType root   = psio::schema_types::Type{type_id<T>()};
+      const auto*                       with   = &fixture_handlers();
+      // Without a handler the value is its wire type: read, written, valid.
+      std::vector<char> bytes;
+      if (!ir::json_to_pssz(schema, root, psio::json{}, std::span<const char>{plain}, bytes).ok())
+         die(name + ": the schema path with no handler does not read " + plain);
+      if (!ir::validate_pssz(schema, root, std::span<const char>{bytes}).ok())
+         die(name + ": the bytes are not structurally valid");
+      auto text_of = [&](auto fmt) {
+         std::string out;
+         if (!ir::pssz_to_json(schema, root, fmt, std::span<const char>{bytes}, out).ok())
+            die(name + ": the schema path with no handler cannot write the value");
+         std::vector<char> back;
+         if (!ir::json_to_pssz(schema, root, fmt, std::span<const char>{out}, back).ok() ||
+             back != bytes)
+            die(name + ": the fallback text does not read back");
+         return out;
+      };
+      const std::string plain_json  = text_of(psio::json{});
+      const std::string plain_ijson = text_of(psio::ijson{});
+      // With the handlers every schema-driven entry point reports the
+      // invariant; a strict registry with no handler refuses the type.
+      auto must_fail = [&](psio::codec_status st, const char* what) {
+         if (st.ok() || st.error().what != reason)
+            die(name + ": " + what + " does not report '" + reason + "'" +
+                (st.ok() ? "" : " but '" + std::string(st.error().what) + "'"));
+      };
+      must_fail(ir::validate_pssz(schema, root, std::span<const char>{bytes}, nullptr, with),
+                "validate_pssz with handlers");
+      {
+         ir::Value value;
+         bool      unknown = false;
+         must_fail(ir::decode_auto(schema, root, std::span<const char>{bytes}, value, unknown,
+                                   with),
+                   "decode_auto with handlers");
+         if (!ir::decode_auto(schema, root, std::span<const char>{bytes}, value, unknown).ok())
+            die(name + ": decode_auto with no handler");
+         std::vector<char> out;
+         must_fail(ir::encode_auto(schema, root, value, out, with), "encode_auto with handlers");
+         std::string text;
+         must_fail(ir::value_to_json(schema, root, psio::json{}, value, text, with),
+                   "value_to_json with handlers");
+         must_fail(ir::pssz_to_json(schema, root, psio::ijson{}, std::span<const char>{bytes},
+                                    text, nullptr, with),
+                   "pssz_to_json with handlers");
+         ir::CustomHandlers strict;
+         strict.require_all = true;
+         auto st = ir::validate_pssz(schema, root, std::span<const char>{bytes}, nullptr, &strict);
+         if (st.ok() || st.error().what != "pssz IR: no handler registered for a custom type")
+            die(name + ": a strict registry accepted a type it has no handler for");
+      }
+      auto row_for = [&](const char* format, const std::string& text, auto fmt) {
+         std::vector<char> out;
+         must_fail(ir::json_to_pssz(schema, root, fmt, std::span<const char>{text}, out, nullptr,
+                                    psio::json_parser::automatic, with),
+                   "json_to_pssz with handlers");
+         ir::Value value;
+         must_fail(ir::json_to_value(schema, root, fmt, std::span<const char>{text}, value,
+                                     nullptr, psio::json_parser::automatic, with),
+                   "json_to_value with handlers");
+         Row row;
+         row.name        = name;
+         row.kind        = "invariant";
+         row.format      = format;
+         row.pssz        = lower_hex(bytes);
+         row.plain_json  = plain_json;
+         row.plain_ijson = plain_ijson;
+         row.reason      = reason;
+         set_text(row, text);
+         push<T>(std::move(row));
+      };
+      row_for("json", typed_json.empty() ? plain_json : typed_json, psio::json{});
+      row_for("ijson", typed_ijson.empty() ? plain_ijson : typed_ijson, psio::ijson{});
    }
 
    // A JSON unicode escape: backslash, 'u', four hex digits.
@@ -1398,6 +1490,217 @@ namespace
       }
    }
 
+   // Transparent wrappers, custom text forms of any shape, invariants
+   // (custom_conformance_types.hpp; conformance/custom-types.md).
+   void emit_custom_types()
+   {
+      using namespace custom_conf;
+      const auto name60 = (std::uint64_t{1} << 60);
+
+      // ── Transparent: the member's text ──────────────────────────────────
+      value<Id>("zero", Id{0});
+      value<Id>("small", Id{42});
+      value<Id>("max", Id{~std::uint64_t{0}});
+      reject_both<Id>("as_record", R"({"value":7})");
+      reject_both<Id>("string_name", R"("seven")");
+      reject_both<Id>("negative", "-1");
+      accept<Id>("ijson", "string_form", R"("42")", "42");
+
+      // ── A transparent wrapper with a text form: base64 ──────────────────
+      value<Blob>("empty", Blob{});
+      value<Blob>("one", Blob{{0x00}});
+      value<Blob>("two", Blob{{0xff, 0xfe}});
+      value<Blob>("three", Blob{{'M', 'a', 'n'}});
+      value<Blob>("many", Blob{{0xfb, 0xff, 0xbf, 0x00, 0x10, 0x83, 0x10}});
+      reject_both<Blob>("not_a_string", "[1,2]");
+      reject_both<Blob>("bad_length", R"("TQ")");
+      reject_both<Blob>("bad_character", R"("TW_u")");
+      reject_both<Blob>("padding_inside", R"("T=Fu")");
+      reject_both<Blob>("three_padding", R"("T===")");
+      reject_both<Blob>("unused_bits_one_pad", R"("TWF=")");
+      reject_both<Blob>("unused_bits_two_pad", R"("TR==")");
+      reject_both<Blob>("whitespace", R"("TWFu ")");
+
+      // ── A variant with a text form ──────────────────────────────────────
+      V6 loopback;
+      loopback.address[15] = 1;
+      loopback.port        = 443;
+      V6 mixed{{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0xff, 0x00, 0, 0x42, 0x83, 0x29}, 65535};
+      value<Endpoint>("v4_zero", Endpoint{V4{}});
+      value<Endpoint>("v4_local", Endpoint{V4{{127, 0, 0, 1}, 8080}});
+      value<Endpoint>("v4_max", Endpoint{V4{{255, 255, 255, 255}, 65535}});
+      value<Endpoint>("v6_zero", Endpoint{V6{}});
+      value<Endpoint>("v6_loopback", Endpoint{loopback});
+      value<Endpoint>("v6_mixed", Endpoint{mixed});
+      value<std::vector<Endpoint>>("both", std::vector<Endpoint>{V4{{10, 0, 0, 7}, 1}, loopback});
+      reject_both<Endpoint>("no_port", R"("127.0.0.1")");
+      reject_both<Endpoint>("port_too_large", R"("127.0.0.1:65536")");
+      reject_both<Endpoint>("port_leading_zero", R"("127.0.0.1:080")");
+      reject_both<Endpoint>("octet_too_large", R"("256.0.0.1:80")");
+      reject_both<Endpoint>("octet_leading_zero", R"("127.00.0.1:80")");
+      reject_both<Endpoint>("three_octets", R"("127.0.1:80")");
+      reject_both<Endpoint>("v6_shorthand", R"("[::1]:443")");
+      reject_both<Endpoint>("v6_upper_case",
+                            R"("[0000:0000:0000:0000:0000:0000:0000:000A]:443")");
+      reject_both<Endpoint>("v6_seven_groups", R"("[0000:0000:0000:0000:0000:0000:0001]:443")");
+      reject_both<Endpoint>("v6_no_brackets",
+                            R"("0000:0000:0000:0000:0000:0000:0000:0001:443")");
+      reject_both<Endpoint>("empty", R"("")");
+      reject_both<Endpoint>("trailing", R"("127.0.0.1:80 ")");
+      // The variant's own forms are not the type's text.
+      reject_both<Endpoint>("variant_array_form", R"([0,{"address":[127,0,0,1],"port":80}])");
+      reject_both<Endpoint>("variant_object_form", R"({"V4":{"address":"7F000001","port":80}})");
+
+      // ── A tuple with a text form ────────────────────────────────────────
+      value<Ratio>("zero", Ratio{0, 0});
+      value<Ratio>("negative", Ratio{-3, 4});
+      value<Ratio>("extremes_low", Ratio{-32768, 65535});
+      value<Ratio>("extremes_high", Ratio{32767, 1});
+      reject_both<Ratio>("tuple_form", "[-3,4]");
+      reject_both<Ratio>("no_denominator", R"("3")");
+      reject_both<Ratio>("negative_zero", R"("-0/1")");
+      reject_both<Ratio>("numerator_too_large", R"("32768/1")");
+      reject_both<Ratio>("numerator_too_small", R"("-32769/1")");
+      reject_both<Ratio>("denominator_too_large", R"("1/65536")");
+      reject_both<Ratio>("negative_denominator", R"("1/-2")");
+      reject_both<Ratio>("leading_zero", R"("03/4")");
+      reject_both<Ratio>("plus_sign", R"("+3/4")");
+      reject_both<Ratio>("spaces", R"("3 / 4")");
+
+      // ── A transparent variant wrapper: text form and invariant ──────────
+      value<Ref>("number_zero", Ref{std::uint64_t{0}});
+      value<Ref>("number_max", Ref{~std::uint64_t{0}});
+      value<Ref>("name", Ref{std::string{"alice"}});
+      value<Ref>("name_with_marks", Ref{std::string{"#@ x"}});
+      reject_both<Ref>("empty", R"("")");
+      reject_both<Ref>("no_marker", R"("alice")");
+      reject_both<Ref>("number_leading_zero", R"("#07")");
+      reject_both<Ref>("number_too_large", R"("#18446744073709551616")");
+      reject_both<Ref>("number_empty", R"("#")");
+      reject_both<Ref>("variant_form", R"([1,"alice"])");
+      // "@" is well-formed text: the empty name, which the invariant refuses.
+      invariant<Ref>("empty_name", "Ref: a name is not empty", R"([1,""])", R"("@")", R"("@")");
+
+      // ── Invariants ──────────────────────────────────────────────────────
+      value<Name>("zero", Name{0});
+      value<Name>("largest", Name{name60 - 1});
+      invariant<Name>("first_non_canonical", "Name: value is not a canonical name",
+                      R"({"value":1152921504606846976})");
+      invariant<Name>("all_ones", "Name: value is not a canonical name",
+                      R"({"value":18446744073709551615})");
+      reject_both<Name>("bare_number", "7");
+
+      value<DerKey>("minimal", DerKey{{0x30}});
+      value<DerKey>("sequence", DerKey{{0x30, 0x03, 0x02, 0x01, 0x05}});
+      invariant<DerKey>("empty", "DerKey: not a DER sequence", "[]");
+      invariant<DerKey>("wrong_tag", "DerKey: not a DER sequence", "[49,0]");
+      reject_both<DerKey>("as_record", R"({"data":[48]})");
+
+      value<Range>("empty_range", Range{0, 0});
+      value<Range>("ordered", Range{3, 9});
+      value<Range>("widest", Range{0, 4294967295u});
+      invariant<Range>("reversed", "Range: lo is greater than hi", R"({"lo":9,"hi":3})");
+      invariant<Range>("off_by_one", "Range: lo is greater than hi", R"({"lo":1,"hi":0})");
+
+      value<Level>("low", Level::low);
+      value<Level>("top", Level::top);
+      invariant<Level>("unlisted", "Level: not a listed level", "4");
+      invariant<Level>("largest", "Level: not a listed level", "255");
+      reject_both<Level>("unknown_name", R"("extreme")");
+      value<std::vector<Level>>("empty", std::vector<Level>{});
+      value<std::vector<Level>>("all", std::vector<Level>{Level::low, Level::mid, Level::high,
+                                                          Level::top});
+      invariant<std::vector<Level>>("second_unlisted", "Level: not a listed level",
+                                    R"(["low",9,"top"])");
+      value<std::optional<Name>>("none", std::optional<Name>{});
+      value<std::optional<Name>>("some", std::optional<Name>{Name{9}});
+      invariant<std::optional<Name>>("some_non_canonical",
+                                     "Name: value is not a canonical name",
+                                     R"({"value":1152921504606846977})");
+
+      // ── Everything, in every position ───────────────────────────────────
+      const Guarded good = guarded_sample();
+      value<Guarded>("sample", good);
+      const std::string plain_json  = *rows.back().plain_json;
+      const std::string typed_json  = *rows.back().json;
+      const std::string typed_ijson = *rows.back().ijson;
+      {
+         Guarded g = good;
+         g.delegate.reset();
+         g.members.clear();
+         g.levels.clear();
+         g.either = Name{1};
+         g.ref    = Ref{std::uint64_t{7}};
+         g.blob.reset();
+         g.endpoint = loopback;
+         g.ratios.clear();
+         value<Guarded>("other_alternatives", g);
+      }
+      // One member at a time made to violate its invariant: the texts of
+      // `sample` with that member's text replaced — in the wire-type text
+      // (what a codec with no handler reads), and in the typed json and
+      // ijson texts.
+      struct Swap
+      {
+         std::string from, to;
+      };
+      auto swapped = [&](std::string text, const Swap& swap) {
+         const auto at = text.find(swap.from);
+         if (at == std::string::npos || text.find(swap.from, at + 1) != std::string::npos)
+            die("guarded: '" + swap.from + "' does not occur exactly once in " + text);
+         text.replace(at, swap.from.size(), swap.to);
+         return text;
+      };
+      auto guarded = [&](const std::string& name, const std::string& reason, const Swap& plain,
+                         const Swap& json, const Swap& ijson) {
+         invariant<Guarded>(name, reason, swapped(plain_json, plain), swapped(typed_json, json),
+                            swapped(typed_ijson, ijson));
+      };
+      const char* canonical = "Name: value is not a canonical name";
+      {
+         const Swap json{R"("owner":{"value":5})", R"("owner":{"value":1152921504606846976})"};
+         guarded("owner", canonical, json, json,
+                 {R"("owner":{"value":5})", R"("owner":{"value":"1152921504606846976"})"});
+      }
+      {
+         const Swap json{R"("delegate":{"value":1152921504606846975})",
+                         R"("delegate":{"value":1152921504606846976})"};
+         guarded("delegate", canonical, json, json,
+                 {R"("delegate":{"value":"1152921504606846975"})",
+                  R"("delegate":{"value":"1152921504606846976"})"});
+      }
+      {
+         const Swap json{R"({"value":77}])", R"({"value":2305843009213693952}])"};
+         guarded("member", canonical, json, json,
+                 {R"({"value":77}])", R"({"value":"2305843009213693952"}])"});
+      }
+      {
+         const Swap json{R"("key":[48,3,1,2,3])", R"("key":[4,3,1,2,3])"};
+         guarded("key", "DerKey: not a DER sequence", json, json,
+                 {R"("key":"3003010203")", R"("key":"0403010203")"});
+      }
+      {
+         const Swap any{R"("window":{"lo":3,"hi":9})", R"("window":{"lo":10,"hi":9})"};
+         guarded("window", "Range: lo is greater than hi", any, any, any);
+      }
+      {
+         const Swap any{R"("levels":["low","top"])", R"("levels":["low",200])"};
+         guarded("level_in_list", "Level: not a listed level", any, any, any);
+      }
+      {
+         const Swap any{R"("pair":["mid","high"])", R"("pair":[4,"high"])"};
+         guarded("level_in_array", "Level: not a listed level", any, any, any);
+      }
+      {
+         const Swap json{R"("either":[1,{"lo":1,"hi":1}])", R"("either":[1,{"lo":2,"hi":1}])"};
+         guarded("variant_alternative", "Range: lo is greater than hi", json, json,
+                 {R"("either":{"Range":{"lo":1,"hi":1}})", R"("either":{"Range":{"lo":2,"hi":1}})"});
+      }
+      // The member with a text form: its wire-type text and its typed text.
+      guarded("ref", "Ref: a name is not empty", {R"("ref":[1,"alice"])", R"("ref":[1,""])"},
+              {R"("ref":"@alice")", R"("ref":"@")"}, {R"("ref":"@alice")", R"("ref":"@")"});
+   }
+
    std::string render()
    {
       std::string types;
@@ -1412,6 +1715,9 @@ namespace
          // Rows of this type also carry plain_json / plain_ijson.
          if constexpr (has_custom<T>)
             types += ",\"custom\":true";
+         // The type holds an invariant somewhere: "invariant" rows exist.
+         if constexpr (has_invariant<T>)
+            types += ",\"invariant\":true";
          types += "}";
       });
       const psio::Schema& schema = fixture_schema();
@@ -1435,6 +1741,7 @@ namespace
          field("pssz", r.pssz);
          field("plain_json", r.plain_json);
          field("plain_ijson", r.plain_ijson);
+         field("reason", r.reason);
          out += i + 1 < rows.size() ? "},\n" : "}\n";
       }
       out += "],\"schema_rejects\":[\n";
@@ -1475,6 +1782,7 @@ int main(int argc, char** argv)
    emit_accepted();
    emit_rejected();
    emit_schema_rows();
+   emit_custom_types();
 
    const std::string text = render();
    // The fixture is itself read back with the codec under test.

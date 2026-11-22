@@ -112,9 +112,14 @@ shape.
 | `system_clock` time point | `DateTime` — RFC 3339 UTC |
 | `std::chrono::duration` | `Seconds`, `Milliseconds`, `Microseconds`, `Nanoseconds`, or `Duration_<num>_<den>` — the tick count |
 | time point of another clock (monotonic) | `MonotonicSeconds`, `MonotonicMilliseconds`, `MonotonicMicroseconds`, `MonotonicNanoseconds`, or `Monotonic_<num>_<den>` — the tick count |
-| type with a text adapter (`PSIO_ADAPTER(T, psio::text_category, …)`) | scalar named after the type (the adapter's `schema_id`, else the reflected name) — a string holding the adapter's text |
+| type with a text adapter (`PSIO_ADAPTER(T, psio::text_category, …)`), of any shape — record, enum, transparent wrapper, `std::variant`, `std::tuple` | scalar named after the type (the adapter's `schema_id`, else the reflected name) — a string holding the adapter's text |
+| transparent type (`PSIO_REFLECT(T, transparent(), member)`) over a scalar | scalar named after the type (its reflected name), with the member's text: `Id` over a 64-bit integer reads and writes as `UInt64` does, a wrapped byte list as `Bytes` does. A transparent type over a record, a list or a variant has no mapping without a text adapter (a compile error): expose its member |
 | `psio::view<T, Fmt, Store>`, `psio::buffer<T, Fmt, Store>`, `std::reference_wrapper<T>` | `T` (see [Views](#views)). The same record reached through different sources is one GraphQL type |
 | `psio::graphql::connection<Node>` | `<Node>Connection`, `<Node>Edge`, `PageInfo` (see [Connections](#connections)) |
+
+A type invariant (`docs/pssz-spec.md` §17) holds here as in `psio::ijson`: an
+argument or variable that violates it is a validation error, a result that
+violates it a field error ("Cannot represent value: ...").
 
 Scalars are written by `psio::ijson`'s writer and arguments and variables
 are read by its typed reader, including the custom scalars: `UInt64` accepts

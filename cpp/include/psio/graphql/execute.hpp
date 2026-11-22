@@ -300,7 +300,8 @@ namespace psio::graphql
          if (const auto colon = what.find(": "); colon != std::string_view::npos && colon < 8)
             what.remove_prefix(colon + 2);
          std::string message = cat("Cannot represent value: ", what);
-         e.w.err = {};
+         e.w.err           = {};
+         e.w.has_invariant = false;
          e.w.n   = mark;
          e.fail_field(f, std::move(message));
          return true;

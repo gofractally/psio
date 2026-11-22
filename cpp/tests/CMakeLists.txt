@@ -529,3 +529,84 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
    target_compile_options(psio_warnings_check PRIVATE -Wall -Wextra -Werror)
    add_test(NAME psio_warnings_check COMMAND psio_warnings_check)
 endif()
+
+# ── Transparent types, custom types of any shape, invariants ──────────────
+# docs/pssz-spec.md "Transparent types" / "Type invariants", docs/json.md
+# "Custom types through a schema"; the fixture types are
+# custom_conformance_types.hpp (conformance/custom-types.md).
+psio_add_test(psio_custom_types_tests custom_types_tests.cpp)
+
+# The same with exceptions disabled: every checked path reports a violated
+# invariant through its status.
+add_executable(psio_custom_noexceptions_test custom_noexceptions.cpp)
+target_include_directories(psio_custom_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_custom_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_custom_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_custom_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_custom_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_custom_noexceptions_test COMMAND psio_custom_noexceptions_test)
+
+# Misuse that must not compile, each with a message naming the reason. The
+# file compiles without any CT_FAIL_* (control).
+function(psio_custom_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_custom_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/custom_types_fail.cpp)
+   set_tests_properties(psio_custom_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+add_test(NAME psio_custom_types_control_compiles
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/custom_types_fail.cpp)
+psio_custom_compile_fail(transparent_two_members CT_FAIL_TRANSPARENT_TWO_MEMBERS
+   "a transparent\\(\\) type has exactly one data member")
+psio_custom_compile_fail(transparent_no_member CT_FAIL_TRANSPARENT_NO_MEMBER
+   "a transparent\\(\\) type has exactly one data member")
+psio_custom_compile_fail(transparent_dwnc CT_FAIL_TRANSPARENT_DWNC
+   "cannot be combined with definitionWillNotChange / maxFields / maxDynamicData")
+psio_custom_compile_fail(transparent_max_fields CT_FAIL_TRANSPARENT_MAX_FIELDS
+   "cannot be combined with definitionWillNotChange / maxFields / maxDynamicData")
+psio_custom_compile_fail(transparent_max_dynamic_data CT_FAIL_TRANSPARENT_MAX_DYNAMIC_DATA
+   "cannot be combined with definitionWillNotChange / maxFields / maxDynamicData")
+psio_custom_compile_fail(transparent_type_attrs_dwnc CT_FAIL_TRANSPARENT_TYPE_ATTRS_DWNC
+   "cannot be combined with definitionWillNotChange / maxFields / maxDynamicData")
+psio_custom_compile_fail(transparent_member_attr CT_FAIL_TRANSPARENT_MEMBER_ATTR
+   "the member of a transparent\\(\\) type takes no annotation")
+psio_custom_compile_fail(transparent_field_attrs CT_FAIL_TRANSPARENT_FIELD_ATTRS
+   "the member of a transparent\\(\\) type takes no annotation")
+psio_custom_compile_fail(transparent_twice CT_FAIL_TRANSPARENT_TWICE
+   "lists a type-level attribute twice")
+psio_custom_compile_fail(transparent_and_type_attrs CT_FAIL_TRANSPARENT_AND_TYPE_ATTRS
+   "an annotation is declared twice")
+psio_custom_compile_fail(transparent_optional CT_FAIL_TRANSPARENT_OPTIONAL
+   "the member of a transparent\\(\\) type is not a std::optional")
+psio_custom_compile_fail(transparent_length_bound CT_FAIL_TRANSPARENT_LENGTH_BOUND
+   "attached to a field whose shape is not in the spec's applies_to set")
+psio_custom_compile_fail(transparent_graphql_record CT_FAIL_TRANSPARENT_GRAPHQL_RECORD
+   "a transparent type over a record, a list or a variant has no GraphQL mapping")
+psio_custom_compile_fail(invariant_twice CT_FAIL_INVARIANT_TWICE
+   "declares invariant\\(...\\) twice: a type has one invariant")
+psio_custom_compile_fail(invariant_not_noexcept CT_FAIL_INVARIANT_NOT_NOEXCEPT
+   "needs fn callable as fn\\(const T&\\), declared noexcept and returning psio::codec_status")
+psio_custom_compile_fail(invariant_return_type CT_FAIL_INVARIANT_RETURN_TYPE
+   "needs fn callable as fn\\(const T&\\), declared noexcept and returning psio::codec_status")
+psio_custom_compile_fail(invariant_argument CT_FAIL_INVARIANT_ARGUMENT
+   "needs fn callable as fn\\(const T&\\), declared noexcept and returning psio::codec_status")
+psio_custom_compile_fail(invariant_reflect_and_macro CT_FAIL_INVARIANT_REFLECT_AND_MACRO
+   "the invariant of this type is declared twice")
+psio_custom_compile_fail(invariant_macro_twice CT_FAIL_INVARIANT_MACRO_TWICE
+   "redefinition of 'invariant_of<")
+psio_custom_compile_fail(invariant_macro_not_noexcept CT_FAIL_INVARIANT_MACRO_NOT_NOEXCEPT
+   "needs fn callable as fn\\(const Type&\\), declared noexcept and returning psio::codec_status")
+psio_custom_compile_fail(invariant_arithmetic CT_FAIL_INVARIANT_ARITHMETIC
+   "PSIO_INVARIANT takes a class or an enum type")
+psio_custom_compile_fail(invariant_after_use CT_FAIL_INVARIANT_AFTER_USE
+   "explicit specialization of 'psio::invariant_of<")
+psio_custom_compile_fail(invariant_no_schema_id CT_FAIL_INVARIANT_NO_SCHEMA_ID
+   "needs a schema id")
+psio_custom_compile_fail(text_no_schema_id CT_FAIL_TEXT_NO_SCHEMA_ID
+   "needs a schema id")

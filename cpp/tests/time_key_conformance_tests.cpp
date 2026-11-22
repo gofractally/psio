@@ -119,6 +119,42 @@ namespace
          }
          return threw ? "" : "decode did not fail";
       }
+      if (row.kind == "key-invariant")
+      {
+         // A key and an encoding of the wire type that no typed reader
+         // takes: the value violates an invariant.
+         const auto key   = from_hex(*row.key);
+         const auto bytes = from_hex(*row.pssz);
+         if (!key || !bytes || !row.reason) return "hex";
+         auto st = psio::validate<T>(psio::key{}, std::span<const char>{*key});
+         if (st.ok() || st.error().what != *row.reason) return "key validate";
+         st = psio::validate_strict<T>(psio::key{}, std::span<const char>{*key});
+         if (st.ok() || st.error().what != *row.reason) return "key validate_strict";
+         bool threw = false;
+         try
+         {
+            (void)psio::decode<T>(psio::key{}, std::span<const char>{*key});
+         }
+         catch (const psio::codec_exception& e)
+         {
+            threw = e.error().what == *row.reason;
+         }
+         if (!threw) return "key decode did not fail with the invariant";
+         st = psio::validate<T>(psio::pssz{}, std::span<const char>{*bytes});
+         if (st.ok() || st.error().what != *row.reason) return "pssz validate";
+         // The trusted decode yields the value; its key is not written.
+         const T value = psio::decode<T>(psio::pssz{}, std::span<const char>{*bytes});
+         threw         = false;
+         try
+         {
+            (void)psio::encode(psio::key{}, value);
+         }
+         catch (const psio::codec_exception& e)
+         {
+            threw = e.error().what == *row.reason;
+         }
+         return threw ? "" : "key encode wrote the value";
+      }
       if (row.kind == "key-order")
       {
          std::vector<char> last;
@@ -223,12 +259,12 @@ TEST_CASE("time/key conformance: every vector holds", "[time][key][conformance]"
    }
    for (const char* kind :
         {"value", "text-accept", "text-reject", "key-reject", "key-order", "key-order-bits",
-         "key-prefix", "bound"})
+         "key-prefix", "bound", "key-invariant"})
    {
       INFO(kind);
       CHECK(kinds[kind] > 0);
    }
-   CHECK(kinds.size() == 8);
+   CHECK(kinds.size() == 9);
    // Every declared type has rows, and the fixture lists exactly our types.
    std::size_t declared = 0;
    for_each_type([&]<typename T>(std::type_identity<T>) {
@@ -251,17 +287,39 @@ TEST_CASE("time/key conformance: the Schema IR drives pssz and text", "[time][sc
    REQUIRE(psio::validate<psio::Schema>(psio::pssz{}, std::span<const char>{*ir_bytes}).ok());
    const auto schema = psio::decode<psio::Schema>(psio::pssz{}, std::span<const char>{*ir_bytes});
 
-   std::size_t values = 0, accepted = 0, rejected = 0;
+   // The handlers of the fixture's custom types: their text forms and
+   // invariants are not in the schema.
+   ir::CustomHandlers handlers;
+   custom_conf::for_each_custom(
+      [&]<typename T>(std::type_identity<T>) { handlers.template add<T>(); });
+
+   std::size_t values = 0, accepted = 0, rejected = 0, violated = 0;
    for (const auto& row : fx.vectors)
    {
       INFO(row.name);
       const psio::schema_types::AnyType root{psio::schema_types::Type{row.type}};
       auto to_text = [&](auto fmt, const std::vector<char>& bytes, std::string& out) {
-         return ir::pssz_to_json(schema, root, fmt, std::span<const char>{bytes}, out).ok();
+         return ir::pssz_to_json(schema, root, fmt, std::span<const char>{bytes}, out, nullptr,
+                                 &handlers)
+            .ok();
       };
       auto to_pssz = [&](auto fmt, const std::string& text, std::vector<char>& out) {
-         return ir::json_to_pssz(schema, root, fmt, std::span<const char>{text}, out).ok();
+         return ir::json_to_pssz(schema, root, fmt, std::span<const char>{text}, out, nullptr,
+                                 psio::json_parser::automatic, &handlers)
+            .ok();
       };
+      if (row.kind == "key-invariant")
+      {
+         // The value's bytes: valid by the schema alone, refused with the
+         // handlers.
+         const auto bytes = *from_hex(*row.pssz);
+         CHECK(ir::validate_pssz(schema, root, std::span<const char>{bytes}).ok());
+         const auto st =
+            ir::validate_pssz(schema, root, std::span<const char>{bytes}, nullptr, &handlers);
+         CHECK_FALSE(st.ok());
+         if (!st.ok()) CHECK(st.error().what == *row.reason);
+         ++violated;
+      }
       if (row.kind == "value")
       {
          const auto bytes = *from_hex(*row.pssz);
@@ -302,4 +360,5 @@ TEST_CASE("time/key conformance: the Schema IR drives pssz and text", "[time][sc
    CHECK(values > 150);
    CHECK(accepted > 30);
    CHECK(rejected > 60);
+   CHECK(violated >= 10);
 }

@@ -234,6 +234,41 @@ namespace chain::state {
 }
 ```
 
+The type-level keywords:
+
+| keyword | meaning | query |
+|---|---|---|
+| `definitionWillNotChange()` | fixed layout: no extensibility header, no appended fields | `psio::is_dwnc_v<T>` |
+| `maxFields(N)` | cap on the field count | `psio::max_fields_v<T>` |
+| `maxDynamicData(N)` | cap on the encoded size; selects the offset width | `psio::max_dynamic_data_v<T>` |
+| `transparent()` | the type has exactly one data member and **is** that member in every core format (pssz, key, json, ijson, Schema IR), while staying its own type for a text adapter, an invariant, its schema node and its names (`psio/transparent.hpp`; `docs/pssz-spec.md` §5.8) | `psio::is_transparent_v<T>`, `psio::transparent_inner_t<T>` |
+| `invariant(fn)` | the type's semantic invariant: `fn(const T&) noexcept -> psio::codec_status`, run by every checking reader and every writer of the core formats (`psio/invariant.hpp`; `docs/pssz-spec.md` §17) | `psio::has_invariant_v<T>`, `psio::check_invariant(value)` |
+
+```cpp
+struct SubjectPublicKeyInfo {
+   std::vector<unsigned char> data;
+   static psio::codec_status check(const SubjectPublicKeyInfo& k) noexcept {
+      return !k.data.empty() && k.data[0] == 0x30
+                ? psio::codec_ok()
+                : psio::codec_fail("SubjectPublicKeyInfo: not a DER sequence", 0,
+                                   "SubjectPublicKeyInfo");
+   }
+   PSIO_REFLECT(SubjectPublicKeyInfo, transparent(), invariant(check), data)
+};
+```
+
+`transparent()` is also `PSIO_TYPE_ATTRS(T, psio::transparent)`. It does not
+compile with zero or several data members, with `definitionWillNotChange` /
+`maxFields` / `maxDynamicData` (a transparent type has no record layout),
+with an annotation on its member, or over a `std::optional`. `invariant(fn)`
+takes any expression callable as `fn(const T&)`: in a class body a static
+member declared anywhere in the class, at namespace scope a name looked up
+where the macro is written, or a lambda. It must be `noexcept` and return
+`psio::codec_status`; a type has at most one. A type that is not a reflected
+record (an enum, a `std::variant`, a `std::tuple`) registers its invariant
+with `PSIO_INVARIANT(Type, fn)` or `PSIO_INVARIANT(Type, fn, "SchemaId")` at
+global scope.
+
 `attr(field, spec)` lists the field and annotates it; its spec expression is
 evaluated with `using namespace psio` in effect. The annotations are members
 of the reflection metadata, and `psio::annotate<&T::field>` /

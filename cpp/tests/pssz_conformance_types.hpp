@@ -14,6 +14,8 @@
 // The shape grammar is described in conformance/pssz-vectors.md. Shapes are
 // derived from the C++ types here, never written by hand.
 
+#include "custom_conformance_types.hpp"
+
 #include <psio/pssz.hpp>
 #include <psio/pssz_view.hpp>
 #include <psio/schema_ir.hpp>
@@ -374,6 +376,21 @@ PSIO_FIELD_ATTRS(pssz_conf::Bounded, v, psio::length_bound{.max = 2})
 
 namespace pssz_conf
 {
+   // ── Transparent wrappers, custom types, invariants ────────────────────
+   // custom_conformance_types.hpp; conformance/custom-types.md.
+   using custom_conf::Blob;
+   using custom_conf::DerKey;
+   using custom_conf::Endpoint;
+   using custom_conf::Guarded;
+   using custom_conf::Id;
+   using custom_conf::Level;
+   using custom_conf::Name;
+   using custom_conf::Range;
+   using custom_conf::Ratio;
+   using custom_conf::Ref;
+   using custom_conf::V4;
+   using custom_conf::V6;
+
    // ── Enum metadata (names are part of the shape) ───────────────────────
    struct Enumerator
    {
@@ -405,6 +422,13 @@ namespace pssz_conf
    {
       static constexpr std::string_view id = "E64";
       static constexpr Enumerator       items[]{{"Zero", 0}, {"Big", 72623859790382856ll}};
+   };
+
+   template <>
+   struct enum_info<Level>
+   {
+      static constexpr std::string_view id = "Level";
+      static constexpr Enumerator       items[]{{"low", 0}, {"mid", 1}, {"high", 2}, {"top", 3}};
    };
 
    // ── Shape strings ─────────────────────────────────────────────────────
@@ -532,6 +556,9 @@ namespace pssz_conf
             }
             return out + "}";
          }
+         else if constexpr (psio::is_transparent_v<T>)
+            // A transparent type: a name for its member's type.
+            return "transparent{" + member<T, 0>() + "}";
          else if constexpr (psio::Reflected<T>)
          {
             return []<std::size_t... I>(std::index_sequence<I...>) {
@@ -635,7 +662,13 @@ namespace pssz_conf
       types<std::tuple<>, std::tuple<u32>, std::tuple<Raw>, TupBS,
             std::tuple<u32, Raw, std::optional<u16>>,
             std::tuple<u8, std::optional<u32>, std::optional<Raw>>, TupRec, Vec<TupBS>,
-            std::variant<std::tuple<u8, std::optional<u16>>, u32>, VarUS, Var5>>::type;
+            std::variant<std::tuple<u8, std::optional<u16>>, u32>, VarUS, Var5>,
+      // transparent wrappers, custom types, invariants
+      types<Id, Blob, Ref, Name, DerKey, Range, Level, V4, V6, Endpoint, Ratio, Guarded,
+            Vec<Id>, Opt<Id>, Arr2<Id>, Vec<Blob>, Opt<Blob>, std::tuple<Id, Blob>,
+            Vec<u64>, Opt<u64>, Arr2<u64>, Vec<Vec<u8>>, Opt<Vec<u8>>, std::tuple<u64, Vec<u8>>,
+            std::variant<u64, Raw>, Vec<Name>, Opt<Name>, Vec<Level>, Arr2<Level>, Vec<DerKey>,
+            Opt<DerKey>, std::variant<Name, Range>, Vec<Endpoint>>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)
