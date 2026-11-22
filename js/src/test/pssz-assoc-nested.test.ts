@@ -290,6 +290,61 @@ test('nested value: a member length bound counts the bytes of the encoding; keys
   rejects(() => numbers.decode(short), 'bytes', /integer span mismatch/);
 });
 
+test('nested value: the member length bound counts encoded bytes behind a named alias', () => {
+  // A schema generator writes the member's type as an alias of the Nested
+  // node (C++ SchemaBuilder does). The bound is still the byte count of the
+  // inner encoding: a record has no length of its own, and a list of u16 has
+  // half as many elements as bytes.
+  const schema = new PsszSchema({
+    types: [
+      { name: 'Args', type: { Object: { to: UTF8, amount: U64, memo: { Option: UTF8 } } } },
+      { name: 'ArgsBytes', type: { Nested: 'Args' } },
+      { name: 'Words', type: { Nested: { List: U16 } } },
+      { name: 'MaybeWords', type: { Option: 'Words' } },
+      { name: 'Rec', type: { Object: { members: [
+        { name: 'id', type: U8 },
+        { name: 'args', type: 'ArgsBytes', attributes: [{ name: 'lengthBound', value: 'max=28' }] },
+      ] } } },
+      { name: 'Held', type: { Object: { members: [
+        { name: 'id', type: U8 },
+        { name: 'words', type: 'Words', attributes: [{ name: 'lengthBound', value: 'max=5' }] },
+        { name: 'maybe', type: 'MaybeWords', attributes: [{ name: 'lengthBound', value: 'min=4' }] },
+      ] } } },
+    ],
+    ir_version: 1,
+  });
+  const unbounded = new PsszSchema({
+    Args: { Object: { to: UTF8, amount: U64, memo: { Option: UTF8 } } },
+    Rec: { Object: { id: U8, args: { Nested: 'Args' } } },
+    Held: { Object: { id: U8, words: { Nested: { List: U16 } }, maybe: { Option: { Nested: { List: U16 } } } } },
+  });
+  const violated = /member length bound violated/;
+  for (const w of [1, 2, 4] as const) {
+    const rec = schema.type('Rec', { width: w });
+    const args = { to: 'bob', amount: 5n, memo: 'rent' }; // 28 bytes of encoding
+    assert.equal(schema.type('Args').encode(args).length, 28);
+    assert.deepEqual(rec.validate(rec.encode({ id: 1, args })), { ok: true, hasUnknown: false });
+    const over = { id: 1, args: { ...args, to: 'bobs' } }; // 29 bytes
+    rejects(() => rec.encode(over), 'value', violated);
+    const overBytes = unbounded.type('Rec', { width: w }).encode(over);
+    assert.equal(rec.validate(overBytes).ok, false);
+    rejects(() => rec.decode(overBytes), 'bytes', violated);
+
+    const held = schema.type('Held', { width: w });
+    const plain = unbounded.type('Held', { width: w });
+    assert.deepEqual(held.validate(held.encode({ id: 1, words: [1, 2], maybe: [1, 2] })), { ok: true, hasUnknown: false });
+    assert.deepEqual(held.validate(held.encode({ id: 1, words: [], maybe: null })), { ok: true, hasUnknown: false });
+    // Three u16: 3 elements <= 5, 6 bytes > 5.
+    rejects(() => held.encode({ id: 1, words: [1, 2, 3], maybe: null }), 'value', violated);
+    rejects(() => held.decode(plain.encode({ id: 1, words: [1, 2, 3], maybe: null })), 'bytes', violated);
+    // One u16 through the optional alias: 2 bytes < 4. An absent one has no length.
+    rejects(() => held.encode({ id: 1, words: [], maybe: [1] }), 'value', violated);
+    rejects(() => held.decode(plain.encode({ id: 1, words: [], maybe: [1] })), 'bytes', violated);
+  }
+  rejects(() => schema.type('Rec').jsonToPssz('{"id":1,"args":{"to":"bobs","amount":5,"memo":"rent"}}'), 'value', violated);
+  rejects(() => schema.type('Held').jsonToPssz('{"id":1,"words":[1,2,3]}'), 'value', violated);
+});
+
 // ── Invariants and handlers ─────────────────────────────────────────────────
 
 const even: PsszCustomHandler = { check: (v) => ((v as number) % 2 === 0 ? undefined : 'Even: odd value') };

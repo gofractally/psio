@@ -112,7 +112,7 @@ const PSSZ_CLASSES: { [cls: string]: number } = {
   corpus: 956, 'evolution-forward': 660, 'evolution-backward': 1380, pruning: 212, malformed: 419,
   'optional-presence': 400, width: 309, 'cap-overflow-explicit-nested': 15, tuple: 60, variant: 48, enum: 76,
   'enum-unknown-value': 36, string: 308, 'string-raw-non-utf8': 44, 'length-bound-overflow': 32, box: 100,
-  bytes: 88, 'zero-fixed': 100, depth: 28, nested: 228, 'nested-unknown': 20, 'nested-deferred': 24,
+  bytes: 88, 'zero-fixed': 100, depth: 28, nested: 252, 'nested-unknown': 20, 'nested-deferred': 24,
   'map-set': 266, 'map-set-order': 352, transparent: 160, custom: 116, invariant: 128,
 };
 const NO_HANDLER = 'pssz IR: no handler registered for a custom type';
@@ -414,8 +414,8 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     (v) => v.format !== 'auto' && v.name.startsWith('width/') && v.name.includes('cap') && v.expect === 'reject',
   );
   assert.equal(explicitCap.length, 12);
-  assert.equal(fx.types.length, 306);
-  assert.equal(fx.vectors.length, 6565);
+  assert.equal(fx.types.length, 308);
+  assert.equal(fx.vectors.length, 6589);
 });
 
 for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, () => {
