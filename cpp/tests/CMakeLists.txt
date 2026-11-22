@@ -126,6 +126,10 @@ psio_mutable_view_compile_fail(sorted_member MV_FAIL_SORTED_MEMBER
    "a member whose annotations constrain its content is not addressable in place")
 psio_mutable_view_compile_fail(validated_member MV_FAIL_VALIDATED_MEMBER
    "a member whose annotations constrain its content is not addressable in place")
+psio_mutable_view_compile_fail(element_member MV_FAIL_ELEMENT_MEMBER
+   "a member whose annotations constrain its content is not addressable in place")
+psio_mutable_view_compile_fail(at_member MV_FAIL_AT_MEMBER
+   "a member whose annotations constrain its content is not addressable in place")
 psio_mutable_view_compile_fail(format MV_FAIL_FORMAT
    "in-place mutation is defined for PSSZ formats only")
 

@@ -10,6 +10,7 @@
 //     without a cap, outgrowing the inferred width is a compile-time fact;
 //   - the interface schema: bounded parameter / result types, Func.attributes.
 
+#include <psio/emit_wit.hpp>
 #include <psio/json.hpp>
 #include <psio/max_size.hpp>
 #include <psio/pssz.hpp>
@@ -326,6 +327,12 @@ TEST_CASE("method annotations: the interface schema carries them", "[method_anno
    CHECK(funcs[3].attributes.empty());
    CHECK(std::holds_alternative<Type>(funcs[3].params[1].type->value));
    CHECK(funcs[5].attributes == std::vector<Attribute>{{"maxDynamicData", "64"}});
+
+   // WIT: the cap as an @-attribute above the function.
+   const std::string wit = psio::emit_wit(schema);
+   CHECK(wit.find("@maxDynamicData(256)\n") != std::string::npos);
+   CHECK(wit.find("@maxDynamicData(64)\n") != std::string::npos);
+   CHECK(wit.find("transfer: func(") != std::string::npos);
 }
 
 TEST_CASE("method annotations: the argument tuple in JSON", "[method_annotations][json]")
