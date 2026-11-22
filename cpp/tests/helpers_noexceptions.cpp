@@ -50,9 +50,9 @@ int main(int argc, char** argv)
    if (st.error().what.empty()) return 6;
 
    auto copy = bytes;
-   psio::pssz_view<Rec> mv{copy};
+   psio::pssz_mutable_view<Rec> mv{copy};
    if (!mv.get<0>().set(9u)) return 7;
-   if (psio::pssz_view<const Rec>{copy}.get<0>() != 9u) return 8;
+   if (psio::pssz_view<Rec>{copy}.get<0>() != 9u) return 8;
 
    psio::shared_pssz<Rec> shared{std::move(copy)};
    psio::shared_pssz<Rec> other = shared;

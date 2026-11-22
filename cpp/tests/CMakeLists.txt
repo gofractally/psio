@@ -156,17 +156,39 @@ endfunction()
 psio_helpers_compile_fail(json_view HELPERS_FAIL_JSON_VIEW
    "constraints not satisfied for alias template 'json_view'")
 psio_helpers_compile_fail(ssz_mutable_view HELPERS_FAIL_SSZ_MUTABLE_VIEW
-   "constraints not satisfied for alias template 'ssz_view'")
+   "constraints not satisfied for alias template 'ssz_mutable_view'")
 psio_helpers_compile_fail(wit_sink HELPERS_FAIL_WIT_SINK
    "no matching function for call to 'to_wit'")
 psio_helpers_compile_fail(json_vector_sink HELPERS_FAIL_JSON_VECTOR_SINK
    "no matching function for call to 'to_json'")
 psio_helpers_compile_fail(unchecked_bytes HELPERS_FAIL_UNCHECKED_BYTES
    "no viable conversion from 'std::span<const char>' to 'psio::trusted'")
-psio_helpers_compile_fail(const_view_set HELPERS_FAIL_CONST_VIEW_SET
+# Const safety: a view never writes, and a mutable view is made from mutable
+# bytes only — not from const bytes, a const or shared buffer, or a view.
+psio_helpers_compile_fail(view_set HELPERS_FAIL_VIEW_SET
    "member reference base type")
+psio_helpers_compile_fail(const_view_set HELPERS_FAIL_CONST_VIEW_SET
+   "no member named 'set' in 'psio::view<const Rec, psio::pssz>'")
 psio_helpers_compile_fail(shared_mutable HELPERS_FAIL_SHARED_MUTABLE
    "no matching function for call to 'as_mutable_view'")
+psio_helpers_compile_fail(mutable_from_const_bytes HELPERS_FAIL_MUTABLE_FROM_CONST_BYTES
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<Rec>'")
+psio_helpers_compile_fail(mutable_from_const_span HELPERS_FAIL_MUTABLE_FROM_CONST_SPAN
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<Rec>'")
+psio_helpers_compile_fail(mutable_from_const_buffer HELPERS_FAIL_MUTABLE_FROM_CONST_BUFFER
+   "no matching function for call to 'as_mutable_view'")
+psio_helpers_compile_fail(mutable_from_view HELPERS_FAIL_MUTABLE_FROM_VIEW
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<Rec>'")
+psio_helpers_compile_fail(mutable_from_view_bytes HELPERS_FAIL_MUTABLE_FROM_VIEW_BYTES
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<Rec>'")
+psio_helpers_compile_fail(view_assigned_to_mutable HELPERS_FAIL_VIEW_ASSIGNED_TO_MUTABLE
+   "no viable conversion from 'psio::pssz_view<Rec>'")
+psio_helpers_compile_fail(mutable_view_of_const HELPERS_FAIL_MUTABLE_VIEW_OF_CONST
+   "constraints not satisfied for alias template 'pssz_mutable_view' .with X = const Rec.")
+psio_helpers_compile_fail(generic_mutable_view_of_const HELPERS_FAIL_GENERIC_MUTABLE_VIEW_OF_CONST
+   "a mutable view of a const type is a contradiction")
+psio_helpers_compile_fail(view_mut_borrow HELPERS_FAIL_VIEW_MUT_BORROW
+   "psio::view is the read-only view; the view that writes is psio::mutable_view")
 
 # native format + view_of concept: zero-cost shim adapting a live const T&
 # to the view<T, Fmt, Store> accessor surface.

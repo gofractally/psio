@@ -205,9 +205,9 @@ static_assert(!has_toy_size<int>, "the toy format has no size_of");
 
 #define VIEW_CONCEPTS(F)                                                 \
    template <typename T>                                                 \
-   concept F##_reads = requires { typename psio::F##_view<const T>; };   \
+   concept F##_reads = requires { typename psio::F##_view<T>; };         \
    template <typename T>                                                 \
-   concept F##_writes = requires { typename psio::F##_view<T>; };
+   concept F##_writes = requires { typename psio::F##_mutable_view<T>; };
 VIEW_CONCEPTS(pssz)
 VIEW_CONCEPTS(ssz)
 VIEW_CONCEPTS(wit)
@@ -223,9 +223,64 @@ static_assert(!json_reads<Rec> && !json_writes<Rec>);
 static_assert(!key_reads<Rec> && !key_writes<Rec>);
 static_assert(!protobuf_reads<Rec> && !protobuf_writes<Rec>);
 
-static_assert(std::is_same_v<psio::pssz_view<const Rec>,
+// F_view<T> is the read-only view, the same type as the generic
+// view<T, F>; spelling T const names that same type. Writing has its own
+// name.
+static_assert(std::is_same_v<psio::pssz_view<Rec>, psio::view<Rec, psio::pssz>>);
+static_assert(std::is_same_v<psio::pssz_view<Rec>,
                              psio::view<Rec, psio::pssz, psio::storage::const_borrow>>);
-static_assert(std::is_same_v<psio::pssz_view<Rec>, psio::mutable_view<Rec, psio::pssz>>);
+static_assert(std::is_same_v<psio::pssz_view<const Rec>, psio::pssz_view<Rec>>);
+static_assert(std::is_same_v<psio::ssz_view<const Rec>, psio::view<Rec, psio::ssz>>);
+static_assert(std::is_same_v<psio::pssz_mutable_view<Rec>, psio::mutable_view<Rec, psio::pssz>>);
+
+// The generic spelling view<const T, F> is a distinct class that is a
+// view<T, F> and converts implicitly both ways.
+static_assert(std::is_base_of_v<psio::view<Rec, psio::pssz>, psio::view<const Rec, psio::pssz>>);
+static_assert(std::is_convertible_v<psio::view<const Rec, psio::pssz>, psio::view<Rec, psio::pssz>>);
+static_assert(std::is_convertible_v<psio::view<Rec, psio::pssz>, psio::view<const Rec, psio::pssz>>);
+static_assert(sizeof(psio::view<const Rec, psio::pssz>) == sizeof(psio::view<Rec, psio::pssz>));
+
+// ── Const safety ────────────────────────────────────────────────────────
+//
+// No read-only view has a write, under any spelling.
+template <typename V>
+concept has_set = requires(V v) { v.set(std::uint32_t{1}); } ||
+                  requires(V v) { v.set(Point{}); } ||
+                  requires(V v) { v.template get<0>().set(std::int32_t{1}); };
+static_assert(has_set<psio::pssz_mutable_view<Point>>);
+static_assert(has_set<psio::pssz_mutable_view<std::uint32_t>>);
+static_assert(!has_set<psio::pssz_view<Point>>);
+static_assert(!has_set<psio::pssz_view<const Point>>);
+static_assert(!has_set<psio::view<Point, psio::pssz>>);
+static_assert(!has_set<psio::view<const Point, psio::pssz>>);
+static_assert(!has_set<psio::pssz_view<std::uint32_t>>);
+static_assert(!has_set<psio::view<const std::uint32_t, psio::pssz>>);
+static_assert(!has_set<psio::ssz_view<Point>>);
+
+// A mutable view is made from mutable bytes only: not from const bytes, a
+// read-only view, a const buffer or a shared buffer, and no read-only view
+// converts to one.
+using MutPoint = psio::pssz_mutable_view<Point>;
+static_assert(std::is_constructible_v<MutPoint, std::vector<char>&>);
+static_assert(std::is_constructible_v<MutPoint, std::span<char>>);
+static_assert(!std::is_constructible_v<MutPoint, const std::vector<char>&>);
+static_assert(!std::is_constructible_v<MutPoint, std::span<const char>>);
+static_assert(!std::is_constructible_v<MutPoint, std::string_view>);
+static_assert(!std::is_constructible_v<MutPoint, psio::pssz_view<Point>>);
+static_assert(!std::is_constructible_v<MutPoint, psio::view<const Point, psio::pssz>>);
+static_assert(!std::is_constructible_v<MutPoint, psio::pssz_buffer<Point>&>);
+static_assert(!std::is_constructible_v<MutPoint, psio::shared_pssz<Point>&>);
+template <typename B>
+concept gives_mutable_view = requires(B b) { psio::as_mutable_view(b); };
+template <typename B>
+concept gives_mutable_bytes = requires(B b) { psio::mutable_bytes(b); };
+static_assert(gives_mutable_view<psio::pssz_buffer<Point>&>);
+static_assert(!gives_mutable_view<const psio::pssz_buffer<Point>&>);
+static_assert(!gives_mutable_view<psio::shared_pssz<Point>&>);
+static_assert(!gives_mutable_view<psio::buffer<Point, psio::pssz, psio::storage::const_borrow>&>);
+static_assert(!gives_mutable_bytes<const psio::pssz_buffer<Point>&>);
+static_assert(!gives_mutable_bytes<psio::shared_pssz<Point>&>);
+
 static_assert(std::is_same_v<psio::pssz_buffer<Rec>, psio::buffer<Rec, psio::pssz>>);
 static_assert(std::is_same_v<psio::shared_pssz<Rec>,
                              psio::buffer<Rec, psio::pssz, psio::storage::shared>>);
@@ -236,42 +291,72 @@ static_assert(std::is_same_v<decltype(psio::to_key(std::string{})), std::vector<
 
 // ── Views ───────────────────────────────────────────────────────────────
 
-TEST_CASE("helpers: const views read", "[helpers]")
+TEST_CASE("helpers: views read", "[helpers]")
 {
    const auto pssz = psio::to_pssz(sample);
-   psio::pssz_view<const Rec> pv{pssz};
+   psio::pssz_view<Rec> pv{pssz};
    CHECK(pv.get<0>() == 7u);
    CHECK(pv.get<1>().view_() == "alice");
    CHECK(pv.get<2>().size() == 3);
    CHECK(pv.get<2>()[2].get() == 3u);
 
    const auto ssz = psio::to_ssz(sample);
-   psio::ssz_view<const Rec> sv{ssz};
+   psio::ssz_view<Rec> sv{ssz};
    CHECK(sv.get<0>() == 7u);
    CHECK(sv.get<1>().view_() == "alice");
 
    const auto wit = psio::to_wit(sample);
-   psio::wit_view<const Rec> wv{wit};
+   psio::wit_view<Rec> wv{wit};
    CHECK(wv.get<0>() == 7u);
    CHECK(wv.get<1>().view_() == "alice");
+}
+
+TEST_CASE("helpers: view<const T, F> and view<T, F> are one read-only view", "[helpers]")
+{
+   const auto bytes = psio::to_pssz(sample);  // const bytes: a view needs no more
+
+   psio::view<const Rec, psio::pssz> c{bytes};
+   psio::view<Rec, psio::pssz>       v{bytes};
+   CHECK(c.get<0>() == 7u);
+   CHECK(c.get<1>().view_() == v.get<1>().view_());
+   CHECK(psio::bytes(c).data() == psio::bytes(v).data());
+   CHECK(psio::size(c) == bytes.size());
+
+   // Each converts to the other, so either can be passed for either.
+   psio::view<Rec, psio::pssz>       from_const = c;
+   psio::view<const Rec, psio::pssz> from_plain = v;
+   CHECK(from_const.get<2>()[2].get() == 3u);
+   CHECK(from_plain.get<2>()[2].get() == 3u);
+   const auto takes_plain = [](psio::pssz_view<Rec> x) { return x.get<0>(); };
+   const auto takes_const = [](psio::view<const Rec, psio::pssz> x) { return x.get<0>(); };
+   CHECK(takes_plain(c) == 7u);
+   CHECK(takes_const(v) == 7u);
+
+   // The named alias with const is the plain type itself.
+   psio::pssz_view<const Rec> named{bytes};
+   CHECK(takes_plain(named) == 7u);
+
+   const auto five = psio::to_pssz(std::uint32_t{5});
+   psio::view<const std::uint32_t, psio::pssz> scalar{five};
+   CHECK(scalar.get() == 5u);
 }
 
 TEST_CASE("helpers: a mutable view writes into the borrowed bytes", "[helpers]")
 {
    auto bytes = psio::to_pssz(Point{1, 2});
-   psio::pssz_view<Point> mv{bytes};
+   psio::pssz_mutable_view<Point> mv{bytes};
    CHECK(mv.get<0>().get() == 1);
    REQUIRE(mv.get<1>().set(40));
    CHECK(bytes == psio::to_pssz(Point{1, 40}));
    CHECK(psio::from_pssz<Point>(bytes) == Point{1, 40});
 
    // The read view over the same bytes sees the write.
-   psio::pssz_view<const Point> cv{bytes};
+   psio::pssz_view<Point> cv{bytes};
    CHECK(cv.get<1>() == 40);
 
    // A member of a record with variable-size members is writable too.
    auto rec = psio::to_pssz(sample);
-   psio::pssz_view<Rec> rv{rec};
+   psio::pssz_mutable_view<Rec> rv{rec};
    REQUIRE(rv.get<0>().set(9u));
    REQUIRE(rv.get<2>()[1].set(20u));
    CHECK(psio::from_pssz<Rec>(rec) == Rec{9, "alice", {1, 20, 3}});

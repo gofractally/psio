@@ -126,7 +126,7 @@ Each is a per-format implementation that walks the type's fields
 In C++ these are the generic layer, called with the format tag as an
 argument. Code that names its format uses the per-format helper names built
 on them — `to_pssz(v)`, `from_pssz<T>(bytes)` (validate, then decode),
-`validate_pssz<T>(bytes)`, `pssz_view<const T>` — listed for every format
+`validate_pssz<T>(bytes)`, `pssz_view<T>` — listed for every format
 in `docs/helpers.md`.
 
 ### 2.5 Annotation channel

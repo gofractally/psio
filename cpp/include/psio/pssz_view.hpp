@@ -373,6 +373,7 @@ namespace psio {
       using element_type = std::tuple<Ts...>;
       using format_type = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
       view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
@@ -436,6 +437,7 @@ namespace psio {
       using element_type = utf8_string<N>;
       using format_type = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
       view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
@@ -458,6 +460,7 @@ namespace psio {
       using element_type = T;
       using format_type = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
       view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
@@ -481,6 +484,7 @@ namespace psio {
       using element_type = T;
       using format_type = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
       view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
@@ -504,6 +508,7 @@ namespace psio {
       using element_type = uint256;
       using format_type = Fmt;
       static constexpr storage storage_kind = Store;
+      static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
       explicit view(std::span<const char> s) noexcept : data_(s) {}
       view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}

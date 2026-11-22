@@ -25,10 +25,10 @@ Views and typed buffers (`#include <psio/pssz_view.hpp>` for the read view,
 `<psio/mutable_view.hpp>` for the mutable one, or `<psio/psio.hpp>` for both):
 
 ```cpp
-psio::pssz_view<const Account> r{bytes};   // reads borrowed bytes
+psio::pssz_view<Account> r{bytes};           // reads borrowed bytes
 std::string_view owner = r.get<1>().view_();
 
-psio::pssz_view<Account> w{bytes};         // writes into borrowed bytes
+psio::pssz_mutable_view<Account> w{bytes};   // writes into borrowed bytes
 w.get<0>().set(std::uint64_t{42});
 
 psio::pssz_buffer<Account> owned{psio::to_pssz(account)};   // owns its bytes
@@ -49,8 +49,9 @@ For a format `F`:
 | `from_F<T>(psio::trusted{bytes})` | decode without the validation pass | `psio::decode<T>(psio::F{}, bytes)` |
 | `validate_F<T>(bytes)` | `psio::codec_status`; never throws or aborts | `psio::validate<T>(psio::F{}, bytes)` |
 | `F_size(v)` | size of the encoding of `v` | `psio::size_of(psio::F{}, v)` |
-| `F_view<const T>` | read-only view over borrowed bytes | `psio::view<T, psio::F, psio::storage::const_borrow>` |
-| `F_view<T>` | mutable view over borrowed bytes | `psio::mutable_view<T, psio::F>` |
+| `F_view<T>` | read-only view over borrowed bytes | `psio::view<T, psio::F>` |
+| `F_view<const T>` | the same type as `F_view<T>` | `psio::view<T, psio::F>` |
+| `F_mutable_view<T>` | view that writes into borrowed bytes | `psio::mutable_view<T, psio::F>` |
 | `F_buffer<T>` | typed bytes, owned | `psio::buffer<T, psio::F, psio::storage::owning>` |
 | `shared_F<T>` | typed bytes, reference-counted and immutable | `psio::buffer<T, psio::F, psio::storage::shared>` |
 
@@ -64,7 +65,7 @@ is a constraint failure that names it, for example
 
 ### Per format
 
-| `F` | header | `to_F(v)` returns | `to_F(v, sink)` | `from_F`, `validate_F`, `F_size` | `F_view<const T>` | `F_view<T>` |
+| `F` | header | `to_F(v)` returns | `to_F(v, sink)` | `from_F`, `validate_F`, `F_size` | `F_view<T>` | `F_mutable_view<T>` |
 |-----|--------|-------------------|-----------------|----------------------------------|-------------------|-------------|
 | `pssz` | `psio/pssz.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | yes (`psio/pssz_view.hpp`) | yes (`psio/mutable_view.hpp`) |
 | `ssz` | `psio/ssz.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | yes (`psio/ssz_view.hpp`) | no |
@@ -139,10 +140,26 @@ The checked decode accepts exactly what `validate_F<T>` accepts:
 
 ## Views and buffers
 
-`F_view<const T>` and `F_view<T>` borrow: the bytes must outlive the view.
+`F_view<T>` and `F_mutable_view<T>` borrow: the bytes must outlive the view.
 Like every psio view they assume validated bytes and do not validate.
-`F_view<T>` exists for pssz only and has one write, the overwrite of a
-fixed-size value (`docs/pssz-spec.md` §17).
+
+A view only reads. Nothing turns one into a view that writes:
+
+- `F_view<T>` is `psio::view<T, F>`, whose storage kind defaults to
+  `storage::const_borrow`. `F_view<const T>` is that same type.
+- `psio::view<const T, F>` is accepted as another spelling of the read-only
+  view. It is a distinct class derived from `psio::view<T, F>` that adds
+  nothing and converts implicitly both ways, so either can be passed where
+  the other is expected.
+- Writing is always spelled out: `F_mutable_view<T>`, which is
+  `psio::mutable_view<T, F>`. It exists for pssz only and has one write, the
+  overwrite of a fixed-size value (`docs/pssz-spec.md` §17). It is made from
+  mutable bytes (`std::span<char>`, a `std::vector<char>&`, or
+  `psio::as_mutable_view` of a non-const owning buffer). It cannot be made
+  from const bytes, a const buffer, a shared buffer or a read-only view.
+- `F_mutable_view<const T>` and `psio::mutable_view<const T, F>` do not
+  compile, and neither does `psio::view<T, F, storage::mut_borrow>`: the
+  error names `psio::mutable_view`.
 
 `F_buffer<T>` owns a `std::vector<char>`. `shared_F<T>` holds immutable
 bytes with shared ownership: a copy is another owner of the same bytes, made
@@ -179,8 +196,10 @@ Use them in code that takes the format as a template parameter, and for the
 operations that have no helper name (`validate_strict`, `make_boxed`,
 `validate_or_throw`). `psio::view<T, Fmt, Store>` and
 `psio::buffer<T, Fmt, Store>` are the generic forms of the view and buffer
-names; `Store` is one of `storage::owning`, `storage::mut_borrow`,
-`storage::const_borrow`, `storage::shared`.
+names. For a buffer `Store` is one of `storage::owning`,
+`storage::mut_borrow`, `storage::const_borrow`, `storage::shared`. A view
+borrows read-only (`storage::const_borrow`, the default); the mutable borrow
+is `psio::mutable_view<T, Fmt>`.
 
 ## Adding the names for a format
 

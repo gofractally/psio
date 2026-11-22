@@ -37,12 +37,13 @@ PSIO_REFLECT(Account, balance, owner)
 
 std::vector<char> bytes = psio::to_pssz(account);        // encode
 Account back = psio::from_pssz<Account>(bytes);          // validate, then decode
-psio::pssz_view<const Account> view{bytes};              // read without decoding
+psio::pssz_view<Account> view{bytes};                    // read without decoding
 psio::shared_pssz<Account> shared{std::move(bytes)};     // bytes with several owners
 ```
 
 The same names exist for the other formats (`to_json`, `from_key<T>`,
-`ssz_view<const T>`, …). `from_F<T>(bytes)` validates before it decodes;
+`ssz_view<T>`, …). A view only reads; the view that writes is spelled
+`pssz_mutable_view<T>`. `from_F<T>(bytes)` validates before it decodes;
 `from_F<T>(psio::trusted{bytes})` skips the validation for bytes already known
 to be valid, and `validate_F<T>(bytes)` returns a status without decoding.
 [The helper names](docs/helpers.md) lists them for every format, with the

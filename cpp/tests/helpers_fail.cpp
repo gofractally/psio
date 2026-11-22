@@ -26,17 +26,20 @@ int main()
 {
    Rec               rec{1, "a"};
    std::vector<char> bytes = psio::to_pssz(rec);
-   psio::pssz_view<const Rec> read{bytes};
-   psio::pssz_view<Rec>       write{bytes};
-   (void)read;
+   psio::pssz_view<Rec>         read{bytes};
+   psio::pssz_view<const Rec>   also_read{bytes};
+   psio::pssz_mutable_view<Rec> write{bytes};
+   psio::view<const Rec, psio::pssz> generic = read;
+   (void)also_read;
    (void)write;
+   (void)generic;
 
 #if defined(HELPERS_FAIL_JSON_VIEW)
    // JSON has no view.
-   psio::json_view<const Rec> v{bytes};
+   psio::json_view<Rec> v{bytes};
 #elif defined(HELPERS_FAIL_SSZ_MUTABLE_VIEW)
    // SSZ has a read view only.
-   psio::ssz_view<Rec> v{bytes};
+   psio::ssz_mutable_view<Rec> v{bytes};
 #elif defined(HELPERS_FAIL_WIT_SINK)
    // wit encodes into a fresh buffer only.
    psio::to_wit(rec, bytes);
@@ -47,13 +50,44 @@ int main()
    // Skipping validation is spelled psio::trusted{bytes}, never implied.
    std::span<const char> in{bytes};
    psio::trusted         t = in;
-#elif defined(HELPERS_FAIL_CONST_VIEW_SET)
-   // A const view has no write.
+#elif defined(HELPERS_FAIL_VIEW_SET)
+   // A view has no write.
    read.get<0>().set(2u);
+#elif defined(HELPERS_FAIL_CONST_VIEW_SET)
+   // Nor under its const spelling.
+   generic.set(rec);
 #elif defined(HELPERS_FAIL_SHARED_MUTABLE)
    // Shared bytes are immutable: no mutable view of them.
    psio::shared_pssz<Rec> shared{std::move(bytes)};
    auto                   mv = psio::as_mutable_view(shared);
+#elif defined(HELPERS_FAIL_MUTABLE_FROM_CONST_BYTES)
+   // A mutable view needs mutable bytes.
+   const std::vector<char>      frozen = bytes;
+   psio::pssz_mutable_view<Rec> mv{frozen};
+#elif defined(HELPERS_FAIL_MUTABLE_FROM_CONST_SPAN)
+   std::span<const char>        frozen{bytes};
+   psio::pssz_mutable_view<Rec> mv{frozen};
+#elif defined(HELPERS_FAIL_MUTABLE_FROM_CONST_BUFFER)
+   // A const buffer gives no mutable view.
+   const psio::pssz_buffer<Rec> frozen{std::move(bytes)};
+   auto                         mv = psio::as_mutable_view(frozen);
+#elif defined(HELPERS_FAIL_MUTABLE_FROM_VIEW)
+   // A read-only view does not turn into a mutable one.
+   psio::pssz_mutable_view<Rec> mv{read};
+#elif defined(HELPERS_FAIL_MUTABLE_FROM_VIEW_BYTES)
+   // Nor do the bytes it hands out.
+   psio::pssz_mutable_view<Rec> mv{psio::bytes(read)};
+#elif defined(HELPERS_FAIL_VIEW_ASSIGNED_TO_MUTABLE)
+   psio::pssz_mutable_view<Rec> mv = read;
+#elif defined(HELPERS_FAIL_MUTABLE_VIEW_OF_CONST)
+   // The named mutable view of a const type.
+   psio::pssz_mutable_view<const Rec> mv{bytes};
+#elif defined(HELPERS_FAIL_GENERIC_MUTABLE_VIEW_OF_CONST)
+   // The generic one.
+   psio::mutable_view<const Rec, psio::pssz> mv{bytes};
+#elif defined(HELPERS_FAIL_VIEW_MUT_BORROW)
+   // The mutable-borrow storage kind does not make a view writable.
+   psio::view<Rec, psio::pssz, psio::storage::mut_borrow> v{bytes};
 #endif
    return 0;
 }

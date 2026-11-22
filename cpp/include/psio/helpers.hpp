@@ -17,8 +17,9 @@
 //    from_F<T>(trusted{bytes})  decode without the validation pass
 //    validate_F<T>(bytes)       codec_status, never throws or aborts
 //    F_size(v)                  size of the encoding of v
-//    F_view<const T>            read-only view over borrowed bytes
-//    F_view<T>                  mutable view over borrowed bytes
+//    F_view<T>                  read-only view over borrowed bytes;
+//                               F_view<const T> is the same type
+//    F_mutable_view<T>          view that writes into borrowed bytes
 //    F_buffer<T>                owning typed bytes
 //    shared_F<T>                reference-counted typed bytes; copies share them
 //
@@ -124,21 +125,15 @@ namespace psio {
       template <typename Fmt>
       concept mutable_view_format = mutable_view_format_v<Fmt>;
 
-      // `F_view<const T>` reads, `F_view<T>` writes.
+      // `F_view<T>`: the format has a read view. X only defers the check to
+      // the use of the alias, when the format's view header has been seen.
       template <typename X, typename Fmt>
-      concept viewable = (std::is_const_v<X> && read_view_format<Fmt>) ||
-                         (!std::is_const_v<X> && mutable_view_format<Fmt>);
+      concept read_viewable = read_view_format<Fmt>;
 
+      // `F_mutable_view<T>`: the format has a mutable view and T is not
+      // const. Writing is never the meaning of a name that does not say so.
       template <typename X, typename Fmt>
-      struct view_for
-      {
-         using type = mutable_view<X, Fmt>;
-      };
-      template <typename X, typename Fmt>
-      struct view_for<const X, Fmt>
-      {
-         using type = view<X, Fmt, storage::const_borrow>;
-      };
+      concept mutable_viewable = !std::is_const_v<X> && mutable_view_format<Fmt>;
 
       // ── Optional hooks on a format tag ────────────────────────────────
       //
@@ -247,8 +242,12 @@ namespace psio {
       return ::psio::size_of(TAG{}, v);                                                   \
    }                                                                                      \
    template <typename X>                                                                  \
-      requires ::psio::detail::helpers::viewable<X, TAG>                                  \
-   using NAME##_view = typename ::psio::detail::helpers::view_for<X, TAG>::type;          \
+      requires ::psio::detail::helpers::read_viewable<X, TAG>                             \
+   using NAME##_view =                                                                    \
+      ::psio::view<std::remove_const_t<X>, TAG, ::psio::storage::const_borrow>;           \
+   template <typename X>                                                                  \
+      requires ::psio::detail::helpers::mutable_viewable<X, TAG>                          \
+   using NAME##_mutable_view = ::psio::mutable_view<X, TAG>;                              \
    template <typename T>                                                                  \
    using NAME##_buffer = ::psio::buffer<T, TAG, ::psio::storage::owning>;                 \
    template <typename T>                                                                  \
