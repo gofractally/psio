@@ -92,9 +92,15 @@ zero-sized fixed values, bounds, recursion, output atomicity and canonicality.
 
 `js/src/pssz-core.ts` is a port of this codec (both profiles) for browser
 clients, with the JSON / I-JSON walk in `js/src/pssz-json.ts`; the public API
-is `PsszSchema` / `PsszType` (`js/README.md`). It is checked against every
-vector of `conformance/pssz-vectors.json` (all four formats) and
-`conformance/json-vectors.json` through the recorded IR alone. Differences from
+is `PsszSchema` / `PsszType` (`js/README.md`). It is the package's only
+codec: the typed definitions of `js/src/types.ts` (`record`, `list`, ...)
+generate the Schema IR `SchemaBuilder` produces for the equivalent C++ types
+and run on it, and `type.view(bytes)` (`js/src/pssz-view.ts`) reads records,
+lists, tuples and variants in place with the same frame checks. It is checked
+against every vector of `conformance/pssz-vectors.json` (all four formats),
+`conformance/json-vectors.json` and `conformance/time-key-vectors.json`,
+through the recorded IR alone and again through typed definitions of every
+fixture type, whose generated IR must equal the fixture's byte for byte. Differences from
 the C++ value model: 64/128/256-bit integers are `bigint`, a NaN with a payload
 is a `PsszNaN` (bit-exact re-encode), `Some` of a nested optional is
 `{ some }`, and a fixed-count array of zero-size elements is limited to 2^20

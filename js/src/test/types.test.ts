@@ -307,6 +307,10 @@ test('typed layer: malformed declarations are schema errors', () => {
   throwsKind(() => generateSchema({ Fixed: u8, x: Fixed }), 'schema', /used twice/);
   const loop: TypeDef<unknown> = lazy(() => loop);
   throwsKind(() => loop.schema, 'schema');
+  const endless: TypeDef<unknown[]> = list(lazy(() => endless)) as never;
+  throwsKind(() => endless.schema, 'schema');
+  throwsKind(() => lazy<number>(() => { throw new TypeError('boom'); }).encode(1), 'schema', /boom/);
+  throwsKind(() => generateSchema({ a: lazy<number>(() => null as never) }), 'schema');
   // A definition that cannot be compiled reports through validate, too.
   const bad = record('R', { a: field(u32, { lengthBound: { max: 3 } }) });
   const result = bad.validate(new Uint8Array(4));

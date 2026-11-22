@@ -27,6 +27,16 @@ import { timeSchemaId, timeUnitPeriod, type TimeUnit } from './time.js';
 function schemaError(message: string): never {
   throw new PsszError('schema', message);
 }
+// A declaration fails with a PsszError of kind `schema`, whatever went wrong
+// inside it (a `lazy` callback that throws, unbounded structural recursion).
+function declared<R>(run: () => R): R {
+  try {
+    return run();
+  } catch (e) {
+    if (e instanceof PsszError) throw e;
+    throw new PsszError('schema', `typed schema: ${e instanceof Error ? `${e.name}: ${e.message}` : String(e)}`);
+  }
+}
 
 // ── Shapes ──────────────────────────────────────────────────────────────────
 
@@ -350,12 +360,14 @@ class Builder {
  * IR, `schema.encode()` its PSSZ bytes, `schema.type(name)` a codec.
  */
 export function generateSchema(types: { [name: string]: TypeDef<any, any> }, options?: { requireHandlers?: boolean }): PsszSchema {
-  const builder = new Builder();
-  for (const name of Object.keys(types)) {
-    if (!(types[name] instanceof TypeDef)) schemaError(`typed schema: "${name}" is not a type definition`);
-    builder.insertNamed(name, types[name]);
-  }
-  return builder.schema(options?.requireHandlers);
+  return declared(() => {
+    const builder = new Builder();
+    for (const name of Object.keys(types)) {
+      if (!(types[name] instanceof TypeDef)) schemaError(`typed schema: "${name}" is not a type definition`);
+      builder.insertNamed(name, types[name]);
+    }
+    return builder.schema(options?.requireHandlers);
+  });
 }
 
 // ── TypeDef ─────────────────────────────────────────────────────────────────
@@ -377,12 +389,11 @@ export class TypeDef<T, V = T> {
 
   /** The Schema IR of this type and everything it reaches. */
   get schema(): PsszSchema {
-    if (!this.own) {
+    return (this.own ??= declared(() => {
       const builder = new Builder();
       this.root = builder.insert(this);
-      this.own = builder.schema();
-    }
-    return this.own;
+      return builder.schema();
+    }));
   }
 
   /** The name this type has in `schema` (a record's own name, or `@N`). */

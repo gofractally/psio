@@ -21,7 +21,10 @@ supported encodings. Pjson now adopts the audited tag numbering as wire revision
   PSSZ is done for Rust: `conformance/pssz-vectors.json` is generated from the
   C++ codec and run by both ctest and cargo test (encode, decode, validation,
   views, evolution in both directions, pruning, type-derived widths, malformed
-  input). TypeScript has no PSSZ implementation.
+  input). TypeScript: the three shared fixtures (`pssz-vectors.json`,
+  `json-vectors.json`, `time-key-vectors.json`) run schema-driven and through
+  typed definitions, with views and mutation fuzzing; fracpack is removed from
+  the package.
 - [x] Bring Rust PSSZ to parity with C++: record evolution through the
   writer's header, mandatory pruning, type-derived offset widths (`Pssz`,
   `max_dynamic_data`), UTF-8 vs raw strings, enums as integers, variants and
