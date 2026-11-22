@@ -1,0 +1,324 @@
+// Shared machinery for ../pssz_conformance.rs: fixture loading, the shape
+// grammar, and the per-vector checks.
+
+use psio::pssz::*;
+use psio::pssz_view::{try_pssz_view_of, validated_view_compatible, validated_view_exact};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct TypeInfo {
+    pub id: String,
+    pub shape: String,
+    pub auto_width: usize,
+    pub max_encoded_size: Option<u64>,
+    pub max_dynamic_data: Option<u64>,
+    pub fixed: bool,
+    pub fixed_size: usize,
+}
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Vector {
+    pub name: String,
+    pub class: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub format: String,
+    pub hex: String,
+    pub expect: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub reencoded: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub writer: String,
+}
+#[derive(Debug, serde::Deserialize)]
+pub struct Fixture {
+    pub version: u32,
+    pub types: Vec<TypeInfo>,
+    pub vectors: Vec<Vector>,
+}
+
+pub fn fixture() -> Fixture {
+    let path = format!(
+        "{}/../../conformance/pssz-vectors.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+    let fixture: Fixture = serde_json::from_str(&text).expect("fixture JSON");
+    assert_eq!(fixture.version, 1);
+    fixture
+}
+
+pub fn unhex(s: &str) -> Vec<u8> {
+    assert!(s.len() % 2 == 0, "odd hex");
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The fixture's shape grammar (conformance/pssz-vectors.md). `id()` is how a
+/// type is referred to from another shape: its name for records and enums,
+/// its structural shape otherwise. `shape()` is its own definition.
+pub trait Conf {
+    fn id() -> String;
+    fn shape() -> String {
+        Self::id()
+    }
+}
+macro_rules! conf_leaf {
+    ($($ty:ty => $name:literal),* $(,)?) => {$(
+        impl Conf for $ty { fn id() -> String { $name.into() } }
+    )*};
+}
+conf_leaf!(u8 => "u8", u16 => "u16", u32 => "u32", u64 => "u64", u128 => "u128",
+           i8 => "i8", i16 => "i16", i32 => "i32", i64 => "i64", i128 => "i128",
+           f32 => "f32", f64 => "f64", bool => "bool", Uint256 => "u256",
+           String => "string", RawString => "raw_string");
+impl<const N: usize> Conf for BoundedString<N> {
+    fn id() -> String { format!("string<={N}") }
+}
+impl<const N: usize> Conf for BoundedRawString<N> {
+    fn id() -> String { format!("raw_string<={N}") }
+}
+impl<T: Conf> Conf for Vec<T> {
+    fn id() -> String { format!("list<{}>", T::id()) }
+}
+impl<T: Conf, const N: usize> Conf for BoundedList<T, N> {
+    fn id() -> String { format!("list<{}><={N}", T::id()) }
+}
+impl<T: Conf, const N: usize> Conf for [T; N] {
+    fn id() -> String { format!("array<{},{N}>", T::id()) }
+}
+impl<T: Conf> Conf for Option<T> {
+    fn id() -> String { format!("optional<{}>", T::id()) }
+}
+impl<T: Conf> Conf for Box<T> {
+    fn id() -> String { format!("box<{}>", T::id()) }
+}
+impl<const N: usize> Conf for Bitvector<N> {
+    fn id() -> String { format!("bitvector<{N}>") }
+}
+impl<const N: usize> Conf for Bitlist<N> {
+    fn id() -> String { format!("bitlist<{N}>") }
+}
+macro_rules! conf_tuple {
+    ($($ty:ident),*) => {
+        impl<$($ty: Conf),*> Conf for ($($ty,)*) {
+            fn id() -> String {
+                let parts: Vec<String> = vec![$($ty::id()),*];
+                format!("tuple<{}>", parts.join(","))
+            }
+        }
+    };
+}
+conf_tuple!();
+conf_tuple!(A);
+conf_tuple!(A, B);
+conf_tuple!(A, B, C);
+conf_tuple!(A, B, C, D);
+
+pub trait Codec<F: PsszFormat>: PsszPack<F> + PsszUnpack<F> + PsszValidate<F> {}
+impl<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F> + PsszValidate<F>> Codec<F> for T {}
+pub trait All:
+    Codec<Pssz> + Codec<Pssz8> + Codec<Pssz16> + Codec<Pssz32> + Conf + std::fmt::Debug + 'static
+{
+}
+impl<T> All for T where
+    T: Codec<Pssz> + Codec<Pssz8> + Codec<Pssz16> + Codec<Pssz32> + Conf + std::fmt::Debug + 'static
+{
+}
+
+fn check_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(v: &Vector) -> Result<(), String> {
+    let bytes = unhex(&v.hex);
+    let bytes = &bytes[..];
+    let fail = |what: &str, detail: String| Err(format!("{what}: {detail}"));
+    // No entry point may panic on any vector.
+    let validate = pssz_validate::<F, T>(bytes);
+    let compatible = pssz_validate_compatible::<F, T>(bytes);
+    let exact = pssz_validate_exact::<F, T>(bytes);
+    let decode = from_pssz::<F, T>(bytes);
+    let decode_compatible = from_pssz_compatible::<F, T>(bytes);
+    let decode_exact = from_pssz_exact::<F, T>(bytes);
+    let view = try_pssz_view_of::<T, F>(bytes).map(|_| ());
+    let view_compatible = validated_view_compatible::<T, F>(bytes).map(|d| d.has_unknown);
+    let view_exact = validated_view_exact::<T, F>(bytes).map(|_| ());
+    match v.expect.as_str() {
+        "canonical" | "unknown" => {
+            let unknown = v.expect == "unknown";
+            if let Err(e) = &validate { return fail("validate rejected", e.to_string()); }
+            if compatible != Ok(unknown) { return fail("validate_compatible", format!("{compatible:?}")); }
+            if view.is_err() { return fail("view rejected", format!("{view:?}")); }
+            if view_compatible != Ok(unknown) { return fail("view_compatible", format!("{view_compatible:?}")); }
+            let value = match decode { Ok(v) => v, Err(e) => return fail("decode rejected", e.to_string()) };
+            match decode_compatible {
+                Ok(d) if d.has_unknown == unknown => (),
+                other => return fail("decode_compatible", format!("{:?}", other.map(|d| d.has_unknown))),
+            }
+            let reencoded = match try_to_pssz::<F, T>(&value) {
+                Ok(b) => b,
+                Err(e) => return fail("re-encode failed", e.to_string()),
+            };
+            let expected = if unknown { unhex(&v.reencoded) } else { bytes.to_vec() };
+            if reencoded != expected {
+                return fail("re-encode differs", format!("{} != {}", hex(&reencoded), hex(&expected)));
+            }
+            if unknown {
+                if exact.is_ok() || decode_exact.is_ok() || view_exact.is_ok() {
+                    return fail("exact reader accepted unknown fields", String::new());
+                }
+            } else if v.strict_rejects() {
+                if exact.is_ok() || decode_exact.is_ok() || view_exact.is_ok() {
+                    return fail("exact reader accepted what C++ validate_strict rejects", String::new());
+                }
+            } else {
+                if let Err(e) = &exact { return fail("validate_exact rejected", e.to_string()); }
+                if let Err(e) = &decode_exact { return fail("decode_exact rejected", e.to_string()); }
+                if let Err(e) = &view_exact { return fail("view_exact rejected", e.to_string()); }
+                if let Err(e) = validate_canonical_for_profile::<F, T>(bytes) {
+                    return fail("canonical check rejected", e.to_string());
+                }
+            }
+            Ok(())
+        }
+        "reject" => {
+            let accepted: Vec<&str> = [
+                ("validate", validate.is_ok()),
+                ("validate_compatible", compatible.is_ok()),
+                ("validate_exact", exact.is_ok()),
+                ("decode", decode.is_ok()),
+                ("decode_compatible", decode_compatible.is_ok()),
+                ("decode_exact", decode_exact.is_ok()),
+                ("view", view.is_ok()),
+                ("view_compatible", view_compatible.is_ok()),
+                ("view_exact", view_exact.is_ok()),
+            ]
+            .iter()
+            .filter(|(_, ok)| *ok)
+            .map(|(name, _)| *name)
+            .collect();
+            if accepted.is_empty() { Ok(()) } else { fail("accepted by", accepted.join(", ")) }
+        }
+        other => fail("unknown expectation", other.into()),
+    }
+}
+
+impl Vector {
+    /// Valid frames that C++ `validate_strict` (and the Rust exact readers)
+    /// nevertheless reject: raw strings holding non-UTF-8 bytes.
+    pub fn strict_rejects(&self) -> bool {
+        self.class == "string-raw-non-utf8"
+    }
+}
+
+pub fn check<T: All>(v: &Vector) -> Result<(), String> {
+    match v.format.as_str() {
+        "auto" => check_format::<Pssz, T>(v),
+        "pssz8" => check_format::<Pssz8, T>(v),
+        "pssz16" => check_format::<Pssz16, T>(v),
+        "pssz32" => check_format::<Pssz32, T>(v),
+        other => Err(format!("unknown format {other}")),
+    }
+}
+
+pub fn manifest<T: All>(info: &TypeInfo) -> Result<(), String> {
+    let mut problems = vec![];
+    if T::shape() != info.shape {
+        problems.push(format!("shape {} != {}", T::shape(), info.shape));
+    }
+    let width = <T as PsszPack<Pssz>>::OFFSET_WIDTH;
+    if width != info.auto_width {
+        problems.push(format!("auto width {width} != {}", info.auto_width));
+    }
+    let cap = <T as PsszPack<Pssz>>::MAX_DYNAMIC_DATA.map(|c| c as u64);
+    if cap != info.max_dynamic_data {
+        problems.push(format!("cap {cap:?} != {:?}", info.max_dynamic_data));
+    }
+    // C++ reports the inferred bound separately from the cap; the cap rules.
+    let bound = <T as PsszPack<Pssz>>::AUTO_BOUND.map(|c| c as u64);
+    let expected = info.max_dynamic_data.or(info.max_encoded_size);
+    if bound != expected {
+        problems.push(format!("bound {bound:?} != {expected:?}"));
+    }
+    let fixed = <T as PsszPack<Pssz>>::IS_FIXED_SIZE;
+    if fixed != info.fixed || (fixed && <T as PsszPack<Pssz>>::FIXED_SIZE != info.fixed_size) {
+        problems.push(format!(
+            "fixed {fixed}/{} != {}/{}",
+            <T as PsszPack<Pssz>>::FIXED_SIZE, info.fixed, info.fixed_size
+        ));
+    }
+    if problems.is_empty() { Ok(()) } else { Err(problems.join("; ")) }
+}
+
+fn sweep_format<F: PsszFormat, T: Codec<F> + std::fmt::Debug>(bytes: &[u8]) -> Result<usize, String> {
+    // Every truncation and every single-byte corruption of a valid frame:
+    // no entry point may panic, validate and decode must agree, and whatever
+    // is accepted without unknown fields must be canonical.
+    let mut cases: Vec<Vec<u8>> = (0..bytes.len()).map(|n| bytes[..n].to_vec()).collect();
+    for i in 0..bytes.len() {
+        for flip in [0x01u8, 0x5a, 0x80, 0xff] {
+            let mut mutated = bytes.to_vec();
+            mutated[i] ^= flip;
+            cases.push(mutated);
+        }
+    }
+    let count = cases.len();
+    for case in cases {
+        let valid = pssz_validate_compatible::<F, T>(&case);
+        let decoded = from_pssz::<F, T>(&case);
+        if valid.is_ok() != decoded.is_ok() {
+            return Err(format!("validate {valid:?} but decode ok={} for {}", decoded.is_ok(), hex(&case)));
+        }
+        if valid.is_ok() != try_pssz_view_of::<T, F>(&case).is_ok() {
+            return Err(format!("validated view disagrees for {}", hex(&case)));
+        }
+        if let (Ok(false), Ok(value)) = (valid, decoded) {
+            match try_to_pssz::<F, T>(&value) {
+                Ok(again) if again == case => (),
+                other => return Err(format!("accepted non-canonical {} -> {other:?}", hex(&case))),
+            }
+        }
+    }
+    Ok(count)
+}
+pub fn sweep<T: All>(v: &Vector) -> Result<usize, String> {
+    let bytes = unhex(&v.hex);
+    match v.format.as_str() {
+        "auto" => sweep_format::<Pssz, T>(&bytes),
+        "pssz8" => sweep_format::<Pssz8, T>(&bytes),
+        "pssz16" => sweep_format::<Pssz16, T>(&bytes),
+        "pssz32" => sweep_format::<Pssz32, T>(&bytes),
+        other => Err(format!("unknown format {other}")),
+    }
+}
+
+pub struct Entry {
+    pub sweep: fn(&Vector) -> Result<usize, String>,
+    pub check: fn(&Vector) -> Result<(), String>,
+    pub manifest: fn(&TypeInfo) -> Result<(), String>,
+}
+pub type Registry = BTreeMap<String, Entry>;
+pub fn register<T: All>(registry: &mut Registry) {
+    let previous = registry.insert(T::id(), Entry { sweep: sweep::<T>, check: check::<T>, manifest: manifest::<T> });
+    assert!(previous.is_none(), "duplicate type id {}", T::id());
+}
+
+/// Encode a native Rust value under the fixture's format name.
+pub fn encode<T: All>(format: &str, value: &T) -> PsszResult<Vec<u8>> {
+    match format {
+        "auto" => try_to_pssz::<Pssz, T>(value),
+        "pssz8" => try_to_pssz::<Pssz8, T>(value),
+        "pssz16" => try_to_pssz::<Pssz16, T>(value),
+        "pssz32" => try_to_pssz::<Pssz32, T>(value),
+        _ => Err(PsszError("unknown format")),
+    }
+}
+pub type Native = Box<dyn Fn(&str) -> PsszResult<Vec<u8>>>;
+pub fn native<T: All>(value: T) -> (String, Native) {
+    (T::id(), Box::new(move |format| encode::<T>(format, &value)))
+}

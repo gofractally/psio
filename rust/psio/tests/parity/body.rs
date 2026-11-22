@@ -61,6 +61,12 @@ rec!(#[cap(200)] WidthNestedContainers {
     optional: Vec<Option<WidthCheckpoint>>,
 });
 
+// A bounded UTF-8 string feeds width inference; an unbounded one does not.
+rec!(Label16 { id: u32, label: BoundedString<16> });
+rec!(Label300 { id: u32, label: BoundedString<300> });
+rec!(LabelAny { id: u32, label: String });
+rec!(LabelMaybe { id: u32, label: Option<BoundedString<16>> });
+
 // ── Presence classes, zero-size and fixed-layout records ────────────────────
 dwnc!(Unit {});
 rec!(Empty {});
@@ -180,6 +186,22 @@ fn automatic_widths_and_bounds_match_the_cpp_static_assertions() {
     assert_eq!(auto_pssz_width::<WidthMediumPair>(), 2);
     assert_eq!(auto_pssz_width::<WidthCappedPair>(), 1);
     assert_eq!(auto_pssz_width::<WidthStringPair>(), 4);
+    // cpp/tests/pssz_string_tests.cpp: header 4 + u32 4 + (N + slot 4).
+    assert_eq!(bound::<BoundedString<16>>(), Some(16));
+    assert_eq!(bound::<Label16>(), Some(28));
+    assert_eq!(auto_pssz_width::<Label16>(), 1);
+    assert_eq!(bound::<Label300>(), Some(312));
+    assert_eq!(auto_pssz_width::<Label300>(), 2);
+    assert_eq!(bound::<LabelAny>(), None);
+    assert_eq!(auto_pssz_width::<LabelAny>(), 4);
+    assert_eq!(bound::<LabelMaybe>(), Some(29));
+    assert_eq!(bound::<String>(), None);
+    assert_eq!(bound::<RawString>(), None);
+    assert_eq!(bound::<BoundedRawString<16>>(), Some(16));
+    assert_eq!(
+        try_to_pssz::<Pssz, _>(&Label16 { id: 7, label: BoundedString("hi".into()) }).unwrap(),
+        hex("0507000000056869")
+    );
     // Every evolution-corpus type holds an unbounded string: width 4.
     assert_eq!(auto_pssz_width::<R0>(), 4);
     assert_eq!(auto_pssz_width::<R3>(), 4);

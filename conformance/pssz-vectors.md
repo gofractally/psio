@@ -3,7 +3,13 @@
 `pssz-vectors.json` is one fixture consumed by both implementations:
 
 - C++: `cpp/tests/pssz_conformance_tests.cpp` (ctest `psio_pssz_conformance_tests`)
-- Rust: the test in `rust/` that reads the same file
+- Rust: `rust/psio/tests/pssz_conformance.rs` (`cargo test --test pssz_conformance`),
+  run once against `pssz_struct!` records and once against the proc-macro
+  derives. It checks the type manifest (shape, automatic width, bound, cap,
+  fixedness), every vector on every reader entry point, a truncation /
+  corruption sweep over the valid frames, and that values written natively
+  in Rust encode to the fixture bytes. Its type mapping is
+  `rust/psio/tests/conformance/types.rs`.
 
 It is generated from the C++ implementation by
 `cpp/tests/pssz_conformance_emit.cpp`. The fixture types live in
