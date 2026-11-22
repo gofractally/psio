@@ -97,14 +97,26 @@ namespace psio {
       // total > cap implies dynamic > cap - fixed_overhead, and the
       // fixed overhead for pssz is small).  Refine to a strictly
       // dynamic-only check if the fixed-region delta becomes material.
+      // The first failure of a sizing pass run in checked mode (see
+      // size_fail below).
+      struct size_check
+      {
+         const char* failure = nullptr;
+      };
       template <typename T>
-      inline void enforce_max_dynamic(std::size_t total)
+      inline void enforce_max_dynamic(std::size_t total, size_check* check = nullptr)
       {
          constexpr auto cap = ::psio::max_dynamic_data_v<T>;
          if constexpr (cap.has_value())
          {
             if (total > *cap)
             {
+               if (check)
+               {
+                  if (!check->failure)
+                     check->failure = "pssz: encoded size exceeds maxDynamicData cap";
+                  return;
+               }
 #if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
                throw codec_exception{codec_error{
                   "pssz: encoded size exceeds maxDynamicData cap",
@@ -775,33 +787,49 @@ namespace psio {
          if (auto status = check_encode_depth_impl(value, 0); !status.ok())
             status_failure(status);
       }
-      inline std::size_t checked_add(std::size_t a, std::size_t b)
+      // What the sizing pass does when a value has no encoding (a size that
+      // overflows, a payload past the static offset width, a nested record
+      // over its maxDynamicData cap, ...). With no `size_check` it fails
+      // fast: the plain encoder. With one it records the first failure and
+      // carries on — the sizes computed after it are meaningless and the
+      // caller discards them — so the checked encoder can report a status
+      // without exceptions.
+      inline void size_fail(size_check* check, const char* message)
+      {
+         if (!check)
+            size_failure(message);
+         if (!check->failure)
+            check->failure = message;
+      }
+      inline std::size_t checked_add(std::size_t a, std::size_t b, size_check* check = nullptr)
       {
          if (b > std::numeric_limits<std::size_t>::max() - a)
-            size_failure("pssz: encoded size overflow");
+            size_fail(check, "pssz: encoded size overflow");
          return a + b;
       }
-      inline std::size_t checked_multiply(std::size_t a, std::size_t b)
+      inline std::size_t checked_multiply(std::size_t a, std::size_t b,
+                                          size_check* check = nullptr)
       {
          if (a && b > std::numeric_limits<std::size_t>::max() / a)
-            size_failure("pssz: encoded size overflow");
+            size_fail(check, "pssz: encoded size overflow");
          return a * b;
       }
       inline bool wire_span_fits(std::size_t size) noexcept
       {
          return size <= std::numeric_limits<std::uint32_t>::max();
       }
-      inline void enforce_wire_span(std::size_t size)
+      inline void enforce_wire_span(std::size_t size, size_check* check = nullptr)
       {
          if (!wire_span_fits(size))
-            size_failure("pssz: variable payload exceeds 32-bit address space");
+            size_fail(check, "pssz: variable payload exceeds 32-bit address space");
       }
       template <std::size_t W>
-      typename width_info<W>::offset_t checked_offset(std::size_t value)
+      typename width_info<W>::offset_t checked_offset(std::size_t value,
+                                                      size_check* check = nullptr)
       {
          using O = typename width_info<W>::offset_t;
          if (value > std::numeric_limits<O>::max())
-            size_failure("pssz: value exceeds the static offset width");
+            size_fail(check, "pssz: value exceeds the static offset width");
          return static_cast<O>(value);
       }
       template <typename Sink>
@@ -840,17 +868,17 @@ namespace psio {
          else return true;
       }
       template <typename T>
-      void enforce_fixed_caps()
+      void enforce_fixed_caps(size_check* check = nullptr)
       {
          if constexpr (!fixed_caps_valid<T>())
-            size_failure("pssz: fixed payload exceeds a declared maxDynamicData budget");
+            size_fail(check, "pssz: fixed payload exceeds a declared maxDynamicData budget");
       }
 
       template <std::size_t W, bool Auto = false, typename T>
-      std::size_t size_of_v(const T& v);
+      std::size_t size_of_v(const T& v, size_check* check = nullptr);
 
       template <std::size_t W, bool Auto, typename T>
-      std::size_t size_of_v_impl(const T& v)
+      std::size_t size_of_v_impl(const T& v, size_check* check)
       {
          if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::pssz, T>)
@@ -860,21 +888,21 @@ namespace psio {
             return Proj::packsize(v);
          }
          else if constexpr (is_psio_box_v<T>)
-            return size_of_v<W, Auto>(*v.value);
+            return size_of_v<W, Auto>(*v.value, check);
          else if constexpr (is_fixed_v<T>)
             return fixed_size_of<T>();
          else if constexpr (is_std_array_v<T>)
          {
             using E                 = typename T::value_type;
             constexpr std::size_t N = std::tuple_size<T>::value;
-            std::size_t           total = checked_multiply(N, W);
-            if constexpr (N > 0) (void)checked_offset<W>(total);
+            std::size_t           total = checked_multiply(N, W, check);
+            if constexpr (N > 0) (void)checked_offset<W>(total, check);
             for (const auto& x : v)
             {
-               (void)checked_offset<W>(total);
-               total = checked_add(total, size_of_v<W, Auto>(x));
+               (void)checked_offset<W>(total, check);
+               total = checked_add(total, size_of_v<W, Auto>(x, check), check);
             }
-            enforce_wire_span(total);
+            enforce_wire_span(total, check);
             return total;
          }
          else if constexpr (is_std_vector_v<T>)
@@ -883,21 +911,21 @@ namespace psio {
             if constexpr (is_fixed_v<E>)
             {
                if constexpr (is_zero_fixed_v<E>)
-                  if (!v.empty()) size_failure("pssz: nonempty zero-size vector is unsupported");
+                  if (!v.empty()) size_fail(check, "pssz: nonempty zero-size vector is unsupported");
                if constexpr (Auto)
-                  if (!v.empty()) enforce_fixed_caps<E>();
-               return checked_multiply(v.size(), fixed_size_of<E>());
+                  if (!v.empty()) enforce_fixed_caps<E>(check);
+               return checked_multiply(v.size(), fixed_size_of<E>(), check);
             }
             else
             {
-               std::size_t total = checked_multiply(v.size(), W);
-               if (!v.empty()) (void)checked_offset<W>(total);
+               std::size_t total = checked_multiply(v.size(), W, check);
+               if (!v.empty()) (void)checked_offset<W>(total, check);
                for (const auto& x : v)
                {
-                  (void)checked_offset<W>(total);
-                  total = checked_add(total, size_of_v<W, Auto>(x));
+                  (void)checked_offset<W>(total, check);
+                  total = checked_add(total, size_of_v<W, Auto>(x, check), check);
                }
-               enforce_wire_span(total);
+               enforce_wire_span(total, check);
                return total;
             }
          }
@@ -909,16 +937,16 @@ namespace psio {
             // Positive-minimum V needs no selector; a V that can encode to
             // zero bytes uses the 1-byte selector plus its payload.
             if constexpr (!optional_uses_selector_v<V>)
-               return v.has_value() ? size_of_v<W, Auto>(*v) : 0;
+               return v.has_value() ? size_of_v<W, Auto>(*v, check) : 0;
             else
-               return checked_add(1, v.has_value() ? size_of_v<W, Auto>(*v) : 0);
+               return checked_add(1, v.has_value() ? size_of_v<W, Auto>(*v, check) : 0, check);
          }
          else if constexpr (is_bitlist_v<T>)
             return (v.size() + 8) / 8;
          else if constexpr (is_std_variant_v<T>)
          {
             std::size_t total = 1;
-            std::visit([&](const auto& alt) { total = checked_add(total, size_of_v<W, Auto>(alt)); },
+            std::visit([&](const auto& alt) { total = checked_add(total, size_of_v<W, Auto>(alt, check), check); },
                        v);
             return total;
          }
@@ -939,7 +967,7 @@ namespace psio {
                // u{W} fixed_size header — DWNC types skip it.
                if constexpr (!::psio::is_dwnc_v<T>)
                {
-                  (void)checked_offset<W>(fixed_region);
+                  (void)checked_offset<W>(fixed_region, check);
                   total = W;
                }
                (
@@ -960,25 +988,25 @@ namespace psio {
                          using Tag = ::psio::adapter_tag_of_t<eff>;
                          using Proj = ::psio::adapter<
                             std::remove_cvref_t<F>, Tag>;
-                         (void)checked_offset<W>(dynamic_cursor);
+                         (void)checked_offset<W>(dynamic_cursor, check);
                          const auto payload = Proj::packsize(fref);
-                         total = checked_add(total, checked_add(W, payload));
-                         dynamic_cursor = checked_add(dynamic_cursor, payload);
+                         total = checked_add(total, checked_add(W, payload, check), check);
+                         dynamic_cursor = checked_add(dynamic_cursor, payload, check);
                       }
                       else if constexpr (is_fixed_v<F>)
-                         total = checked_add(total, fixed_size_of<F>());
+                         total = checked_add(total, fixed_size_of<F>(), check);
                       else
                       {
-                         (void)checked_offset<W>(dynamic_cursor);
-                         const auto payload = size_of_v<W, Auto>(fref);
-                         total = checked_add(total, checked_add(W, payload));
-                         dynamic_cursor = checked_add(dynamic_cursor, payload);
+                         (void)checked_offset<W>(dynamic_cursor, check);
+                         const auto payload = size_of_v<W, Auto>(fref, check);
+                         total = checked_add(total, checked_add(W, payload, check), check);
+                         dynamic_cursor = checked_add(dynamic_cursor, payload, check);
                       }
                    }()),
                   ...);
                (void)count;
                (void)dynamic_cursor;
-               enforce_wire_span(total - (::psio::is_dwnc_v<T> ? 0 : W));
+               enforce_wire_span(total - (::psio::is_dwnc_v<T> ? 0 : W), check);
                return total;
             }(std::make_index_sequence<R::member_count>{});
          }
@@ -991,15 +1019,15 @@ namespace psio {
       }
 
       template <std::size_t LegacyW, bool Auto, typename T>
-      std::size_t size_of_v(const T& value)
+      std::size_t size_of_v(const T& value, size_check* check)
       {
          constexpr std::size_t W = [] {
             if constexpr (Auto) return ::psio::auto_pssz_width<T>();
             else return LegacyW;
          }();
-         if constexpr (Auto) enforce_fixed_caps<T>();
-         const auto total = size_of_v_impl<W, Auto>(value);
-         if constexpr (Auto) enforce_max_dynamic<T>(total);
+         if constexpr (Auto) enforce_fixed_caps<T>(check);
+         const auto total = size_of_v_impl<W, Auto>(value, check);
+         if constexpr (Auto) enforce_max_dynamic<T>(total, check);
          return total;
       }
 
@@ -2848,9 +2876,32 @@ namespace psio {
    // Appends the encoding of `value` to `out`, or returns why the value has
    // none and leaves `out` unchanged: node depth, a null Box, a utf8_string
    // that is not UTF-8 or over its bound, a member outside its length_bound,
-   // a bitlist over its capacity, or a total over the type's maxDynamicData
-   // cap. Usable with exceptions disabled. (A value too large for a type's
-   // static offset width is still a fail-fast error of the encoder.)
+   // a bitlist over its capacity, a total over the type's maxDynamicData
+   // cap, a nested record over its own cap, a payload that does not fit the
+   // type's static offset width or the 32-bit address space, or a nonempty
+   // vector of zero-size elements. It never throws and never aborts on a
+   // value: usable with exceptions disabled. (Allocation failure and a
+   // user-written binary adapter that throws are outside its control.)
+   namespace detail::pssz_impl
+   {
+      template <typename T, std::size_t W>
+      codec_status checked_size(pssz_<W>, const T& value, std::size_t& total)
+      {
+         size_check check;
+         total = size_of_v<W, false>(value, &check);
+         enforce_max_dynamic<T>(total, &check);
+         return check.failure ? codec_fail(check.failure, 0, "pssz") : codec_ok();
+      }
+      template <typename T>
+      codec_status checked_size(pssz, const T& value, std::size_t& total)
+      {
+         size_check check;
+         total = size_of_v<auto_pssz_width_v<T>, true>(value, &check);
+         enforce_max_dynamic<T>(total, &check);
+         return check.failure ? codec_fail(check.failure, 0, "pssz") : codec_ok();
+      }
+   }  // namespace detail::pssz_impl
+
    template <typename T, typename Fmt>
    [[nodiscard]] codec_status encode_pssz_checked(Fmt format, const T& value,
                                                   std::vector<char>& out)
@@ -2858,12 +2909,14 @@ namespace psio {
       if (auto status = detail::pssz_impl::check_encode_depth_impl(value, 0);
           !status.ok())
          return status;
-      const std::size_t total = ::psio::size_of(format, value);
-      constexpr auto cap = ::psio::max_dynamic_data_v<T>;
-      if constexpr (cap.has_value())
-         if (total > *cap)
-            return codec_fail("pssz: encoded size exceeds maxDynamicData cap",
-                              static_cast<std::uint32_t>(total), "pssz");
+      // The whole sizing pass in checked mode: once it succeeds the encoder
+      // below repeats exactly the same checks on the same value and cannot
+      // fail.
+      std::size_t total = 0;
+      if (auto status = detail::pssz_impl::checked_size(format, value, total); !status.ok())
+         return status;
+      if (total > std::numeric_limits<std::size_t>::max() - out.size())
+         return codec_fail("pssz: encoded size overflow", 0, "pssz");
       ::psio::encode(format, value, out);
       return codec_ok();
    }

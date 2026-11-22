@@ -446,3 +446,16 @@ psio_annotate_compile_fail(field_attrs_after_use ANN_FAIL_FIELD_ATTRS_AFTER_USE
    "comes after the first use of the field's annotations")
 psio_annotate_compile_fail(type_attrs_after_use ANN_FAIL_TYPE_ATTRS_AFTER_USE
    "comes after the first use of the type's annotations")
+
+# Every *_checked / status-returning entry point reports through its status:
+# with exceptions enabled nothing is thrown, with them disabled nothing aborts.
+psio_add_test(psio_checked_never_throws_tests checked_never_throws_tests.cpp)
+add_executable(psio_checked_noexceptions_test checked_noexceptions.cpp)
+target_include_directories(psio_checked_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_checked_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_checked_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_checked_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_checked_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_checked_noexceptions_test COMMAND psio_checked_noexceptions_test)
