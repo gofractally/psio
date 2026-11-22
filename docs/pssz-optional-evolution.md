@@ -72,7 +72,7 @@ Old plus optional fields at an unchanged automatic width and DWNC status.
 
 **Rust.** `rust/psio` implements the same rules through one frame parser
 (`pssz_checked::record_spans_into`, a port of `pssz_record_spans` and
-`record_has_unpruned_tail`) shared by the `pssz_struct!` macros, the derives,
+`record_has_unpruned_tail`) shared by the derives,
 tuples, variant payloads, views and the schema-driven codec: readers honor the
 writer's header, the encoder always prunes, and every reader rejects a stored
 trailing None. `pssz::pssz_evolves_from::<Old, New>()` is the `const fn`

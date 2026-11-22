@@ -25,7 +25,7 @@ concatenation of the elements, compared lexicographically.
 | unsigned integer, N bytes | big-endian |
 | signed integer, N bytes | two's complement with the sign bit flipped, big-endian |
 | u128 / u256, i128 | as above at 16 / 32 bytes |
-| enum without payload (C++ `enum`, with or without `PSIO_REFLECT_ENUM`; Rust field-less `#[repr(int)]` enum, including its `#[pssz(other)]` catch-all; Schema IR `Enum`) | its underlying integer. Enumerator names exist in JSON only; key order is the order of the values |
+| enum without payload (C++ `enum`, with or without `PSIO_REFLECT_ENUM`; Rust field-less `#[repr(int)]` enum, including its `#[psio(other)]` catch-all; Schema IR `Enum`) | its underlying integer. Enumerator names exist in JSON only; key order is the order of the values |
 | char, byte | the byte itself (unsigned order) |
 | f32 / f64 | IEEE bits; `-0` is first replaced by `+0`; then if the sign bit is set flip **every** bit, otherwise flip the sign bit; big-endian |
 | duration, time point, monotonic time point | the tick count as its integer type (`docs/time.md`) — chronological order |

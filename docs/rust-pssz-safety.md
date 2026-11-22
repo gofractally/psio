@@ -127,7 +127,7 @@ work. What changed, and what still holds:
   `pssz_evolves.rs` and the generated derive code decode only through typed
   field codecs.
 - There is one set of layout helpers, `pssz_checked`, used by the built-in
-  codecs, the `pssz_struct!` macros, the derives, tuples, variants and views.
+  codecs, the derives, tuples, variants and views.
   The former `pssz::input` module is gone. Record frames are still resolved
   into stack arrays (`record_spans_n`); only the schema-driven codec uses the
   heap variant. Offset widths are passed explicitly because they belong to
@@ -162,3 +162,49 @@ work. What changed, and what still holds:
 - Not done: Miri, fuzzing beyond the small-buffer sweeps in
   `tests/pssz_safety.rs` and the truncation/corruption sweeps in
   `tests/pssz_parity.rs`, and an input-size policy for network endpoints.
+
+## Trusted decode
+
+`psio::from_pssz_trusted::<T>(bytes)` (`pssz::decode_trusted::<F, T>`) reads
+bytes the caller vouches for: a valid encoding of `T`, validated earlier or
+written by `to_pssz` and kept (a service's own table rows). It goes through
+`PsszUnpack::pssz_unpack_trusted`.
+
+What "trusted" may do in safe Rust is skip checks whose failure is a wrong
+value, and nothing whose failure is undefined behaviour:
+
+| skipped | kept |
+|---|---|
+| the depth limit and its thread-local guard per value | bounds checks on every slice access (a bad offset or a short frame panics) |
+| `max_dynamic_data` caps, length bounds (bounded types and `#[psio(max = N)]`) | UTF-8 verification of every `String` (a `String` that is not UTF-8 is undefined behaviour) |
+| canonical-form rules, `#[psio(invariant)]` | a `bool` is still `true` or `false` (any non-zero byte reads as `true`) |
+| a fixed-layout record's frame parsing (read at constant offsets) | allocation is bounded by the frame (a list's count is clamped to what the frame can hold) |
+
+Records (derived), lists, strings, optionals, scalars and the bounded types
+have a trusted reader; a tuple, a map, an array or an enum with payloads is
+read by the checked reader inside the trusted read.
+
+It is a safe function and needs no `unsafe`. On bytes that are not valid it
+panics, or returns some value of `T` — possibly one outside a bound or an
+invariant the checked reader enforces — and never has undefined behaviour;
+deeply nested hostile input can exhaust the stack (an abort). It must not
+be given bytes from a caller, a peer or another service: those go through
+`from_pssz`. A reader that also dropped the slice bounds checks and the
+UTF-8 check would have to be an `unsafe fn` (`from_pssz_unchecked`); it is
+not provided — after the skips above what remains is dominated by
+allocation, and those two checks are what keep the function safe.
+
+`rust/psio/tests/pssz_trusted.rs` checks the value against the checked
+reader, what is skipped, and 6000 truncated, corrupted and random frames
+(each a panic or a value); the conformance harness asserts the trusted
+reader's value for every canonical and unknown-field vector of
+`conformance/pssz-vectors.json` in all four profiles. Measured with
+`cargo run --release -p psio --example trusted_decode_bench` (Apple
+silicon, best of five):
+
+| input | `validate_pssz` | `from_pssz` | `from_pssz_trusted` | trusted / checked |
+|---|---:|---:|---:|---:|
+| one Order (strings, 4 lines, 2 tags; 204 B) | 174 ns | 253 ns | 187 ns | 0.74 |
+| 1000 Orders | 175 µs | 273 µs | 213 µs | 0.78 |
+| 1000 fixed-layout records of 20 B | 15.5 µs | 15.7 µs | 0.41 µs | 0.03 |
+

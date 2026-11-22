@@ -140,7 +140,7 @@ format); the names exist for text.
 | | declaration |
 |---|---|
 | C++ | `enum class Status : std::int32_t { pending = -1, active = 2 };` then `PSIO_REFLECT_ENUM(Status, pending, active)` — one line, any namespace or in a class body. Without it the enum has no names and is written and read as its number. |
-| Rust | the derive takes the variant identifiers; `#[json(name = "active")]` renames one. |
+| Rust | the derive takes the variant identifiers; `#[psio(name = "active")]` (or `#[serde(rename = "active")]`) renames one; `#[psio(rename_all = "...")]` renames all. |
 | Schema IR | `Enum { type, members: [{name, value}] }` over the underlying `Int`. |
 
 Output: `"active"` for a declared value; the number (by the integer rule of
@@ -159,7 +159,7 @@ An unknown name, a name whose stated number disagrees (`"active:3"`), and a
 non-canonical or out-of-range number are errors. A number that names no
 enumerator is accepted where the reader's type can hold it: always in C++
 and through a schema; in Rust only when the enum has a catch-all variant
-(`#[pssz(other)] Unknown(i32)`), otherwise it is an error. When two
+(`#[psio(other)] Unknown(i32)`), otherwise it is an error. When two
 enumerators share a value, the first declared name is written.
 
 ### Maps and sets
@@ -220,7 +220,7 @@ string` for primitives, `T[]` for a vector, `T[N]` for an array, `T?` for an
 optional, `tuple_A_B` (also for a `std::pair<A, B>`), `map_K_V` for a map and
 `set_K` for a set (whatever container holds them). Alternatives must have distinct names (checked at
 compile time). In Rust the name is the enum variant's identifier unless
-`#[json(name = "uint32")]` renames it; use that to pair with a C++ variant.
+`#[psio(name = "uint32")]` renames it; use that to pair with a C++ variant.
 
 ### Integer form per member
 
@@ -291,8 +291,8 @@ integers of any width.
 
 One typed reader per language defines the accepted set. In C++ it backs
 `validate`, `validate_strict`, `decode`, `make_boxed` and
-`decode_json_checked`; in Rust `from_slice` / `from_str` / `validate` and the
-crate-root `psio::decode` / `psio::validate`.
+`decode_json_checked`; in Rust `psio::from_json` / `from_ijson`, `validate_json` /
+`validate_ijson` and the tag-generic `psio::json::decode` / `validate`.
 
 - Exactly one value of the type's shape, JSON whitespace between tokens,
   nothing after it.
@@ -626,6 +626,53 @@ not through the trait, and `simd-json` needs a mutable, owned input buffer.
 `simd-json` is a dev-dependency of the bench only; the library's
 dependencies are unchanged.
 
+#### Rust: derive attributes, variants, serde
+
+`#[derive(psio::JsonText)]` reads `#[psio(...)]` (what describes the type
+for every format: `name`, `rename_all`, `transparent`, `invariant`, `skip`,
+`other`, and the bounds `max` / `element` / `keys` / `values` / `at`, which
+the writer and the reader enforce) and `#[json(...)]` (the integer forms
+`json_number`, `json_string`, `ijson_number`, `ijson_string`, on a field or
+as the type's default).
+
+An enum with a variant that holds fields is a variant; the text of an
+alternative is the text of its payload, the payload `PsszPack` encodes and
+`ToPsszSchema` describes:
+
+| Rust variant | payload | IJson | Json | C++ alternative |
+|---|---|---|---|---|
+| `One(u32)` | that value | `{"One":7}` | `[1,7]` | `T` |
+| `Empty` | the empty record | `{"Empty":{}}` | `[0,{}]` | an empty reflected record |
+| `Rect { width: u32, height: u32 }` | a record | `{"Rect":{"width":3,"height":4}}` | `[3,{...}]` | a reflected record |
+| `Pair(u64, String)` | their tuple | `{"Pair":["1","p"]}` | `[2,[1,"p"]]` | `std::tuple<...>` |
+
+A field-less enum needs `#[repr(int)]` (it is its enumerator's name) or
+`#[psio(variant)]`; a union is a compile error.
+
+**serde.** `#[derive(psio::Serde)]` gives a `JsonText` type
+`serde::Serialize` / `Deserialize` whose behaviour is this document's IJson
+rules (`psio::serde_bridge`): reading with `serde_json` accepts and rejects
+exactly what `from_ijson` does, and writing gives the IJson text except for
+two spellings serde's data model does not carry (a non-integer float and
+the escapes of U+0008 / U+000C). The PSIO derives also read `#[serde(...)]`
+on the type they describe (`psio::serde_attrs` has every attribute):
+
+| serde attribute | the PSIO derives |
+|---|---|
+| `transparent`, `rename`, `rename_all`, `rename_all_fields`, `skip` | honoured, as the `#[psio(...)]` key of the same meaning |
+| `default` on an `Option` member, `skip_serializing_if = "Option::is_none"` | accepted: PSIO's own rule (a missing optional member is `None`; `None` is written `null`) |
+| `default` elsewhere, `default = "path"`, `flatten`, `alias`, `deny_unknown_fields`, `tag` / `content` / `untagged`, `with` / `serialize_with` / `deserialize_with`, `from` / `try_from` / `into`, one-directional `rename` or `skip_*` | a compile error on the derives that describe text (`JsonText`, `Serde`, `ToPsszSchema`): PSIO's text has one form, defined by the member's type |
+| `bound`, `borrow`, `crate`, `getter`, `expecting` | ignored |
+
+`psio` enables one `serde_json` feature, `raw_value`, which adds a type and
+changes nothing else: a program that links `psio` has the `serde_json` it
+would have without it (no `arbitrary_precision`, `preserve_order` or
+`float_roundtrip`; `rust/psio-serde-json-stock` asserts it). The
+consequence is confined to reading a PSIO type out of a `serde_json::Value`
+or through the buffer serde's derive puts in front of untagged /
+internally tagged enums and `flatten`: there a number arrives as the
+`u64` / `i64` / `f64` `serde_json` parsed, as from any other format.
+
 ## Schema-driven path (no C++ / Rust type)
 
 A consumer that has only a Schema IR (`schema_ir.hpp`, Rust
@@ -832,7 +879,7 @@ subject to it.
 | | emits the node | registers a handler |
 |---|---|---|
 | C++ | `SchemaBuilder`, for any type with a `text_category` adapter and / or an invariant (`psio::schema_custom_v<T>`). Id (`psio::schema_custom_id<T>()`): the adapter's `static constexpr std::string_view schema_id`, else the id given to `PSIO_INVARIANT`, else the reflected record or enum name. A type with none of these (a `std::variant`, a `std::tuple`) must provide one: a compile error otherwise. An adapter that is not the type's schema presentation says `static constexpr bool schema_custom = false` (the `0x` text of the integers wider than 64 bits). | `psio::pssz_ir::CustomHandlers h;` (`psio/pssz_ir_custom.hpp`). `h.add<AccountNumber>()` — under the type's schema id, or `h.add<T>("Id")`: `to_text` / `from_text` from the type's text adapter if it has one, `check` from its invariant if it has one (the typed `validate<T>(psio::pssz{}, bytes)`, which runs the invariants of its members too). By hand: `h.add("Id", {to_text, from_text})`, `h.add("Id", {.check = fn})`, `h.add("Id", {to_text, from_text, check})`; each is a `std::function` returning `codec_status`, and `add` replaces the whole handler of the id. `h.require_all = true` for a strict registry. Passed as the trailing `const CustomHandlers*` of every schema-driven entry point, binary (`validate_pssz`, `validate_auto`, `decode_auto`, `encode_auto`, `encode<W>` / `decode_exact<W>` / `validate_canonical_for_width<W>`, `to_key`) and text, or bound once per schema with `JsonNames names(schema, h)`. |
-| Rust | `ToPsszSchema` derive with `#[pssz(custom)]` (id: the type name) or `#[pssz(custom = "AccountName")]`; `#[pssz(invariant = "...")]` for a type with an invariant; with `#[pssz(transparent)]` the wire type is the inner field's. | `let mut h = psio::pssz::dynamic::CustomHandlers::new();` then, each keeping what the id already has of the other kind: `h.add("Id", to_text, from_text)` (the text form, over the wire type's PSSZ bytes); `h.add_check("Id", check)` (the invariant: `Fn(&[u8]) -> Result<(), PsszError>`); `h.add_type::<Account>()?` / `h.add_type_as::<T>("Id")` (the type's own `TextForm` **and** its typed validation as the check); `h.add_invariant_type::<Range>()?` / `h.add_invariant_type_as::<T>("Id")` (the typed validation as the check, for a type with an invariant and no text form). `h.set_strict(true)` for a strict registry. Text entry points: `json_to_pssz_with` / `pssz_to_json_with` / `json_to_value_with` / `value_to_json_with(..., &h)`. Binary entry points: `validate_pssz_with(&schema, &root, bytes, &h)`, and `encode_with` / `decode_exact_with` / `decode_compatible_with` / `validate_with` / `to_key_with`, which take a `dynamic::Options { handlers: Option<&CustomHandlers>, nested: NestedBytes }` (`Options::handlers(&h)`, `Options::opaque_nested()`, `NestedBytes::Typed` (default) / `NestedBytes::Opaque`). Looked up by id per custom value (the Rust dynamic path has no bind step). |
+| Rust | `ToPsszSchema` derive with `#[psio(custom)]` (id: the type name) or `#[psio(custom = "AccountName")]` (an id reserved for PSIO's own types is a compile error); `#[psio(invariant = "...")]` for a type with an invariant; with `#[psio(transparent)]` the wire type is the inner field's. | `let mut h = psio::pssz::dynamic::CustomHandlers::new();` then, each keeping what the id already has of the other kind: `h.add("Id", to_text, from_text)` (the text form, over the wire type's PSSZ bytes); `h.add_check("Id", check)` (the invariant: `Fn(&[u8]) -> Result<(), PsszError>`); `h.add_type::<Account>()?` / `h.add_type_as::<T>("Id")` (the type's own `TextForm` **and** its typed validation as the check); `h.add_invariant_type::<Range>()?` / `h.add_invariant_type_as::<T>("Id")` (the typed validation as the check, for a type with an invariant and no text form). `h.set_strict(true)` for a strict registry. Text entry points: `json_to_pssz_with` / `pssz_to_json_with` / `json_to_value_with` / `value_to_json_with(..., &h)`. Binary entry points: `validate_pssz_with(&schema, &root, bytes, &h)`, and `encode_with` / `decode_exact_with` / `decode_compatible_with` / `validate_with` / `to_key_with`, which take a `dynamic::Options { handlers: Option<&CustomHandlers>, nested: NestedBytes }` (`Options::handlers(&h)`, `Options::opaque_nested()`, `NestedBytes::Typed` (default) / `NestedBytes::Opaque`). Looked up by id per custom value (the Rust dynamic path has no bind step). |
 | JS | (reads the node from the schema) | The option `handlers` — `{ [id]: handler }` or a `Map` — of `new PsszSchema(ir, options)`, `PsszSchema.decode(irBytes, options)`, `PsszSchema.fromJson(text, format, options)`, `schema.withHandlers(handlers, { requireHandlers, nestedBytes })` (added to, and replacing by id, the ones the schema has) and `schema.type(root, { handlers, requireHandlers, nestedBytes })`. A handler is `{ toText?(value): string, fromText?(text): value, check?(value): string \| null \| undefined \| void }` over the decoded JS value of the wire type: `check` rejects by returning a message or throwing an `Error` with one, and the message is the error's. `requireHandlers: true` for a strict registry; `nestedBytes: 'typed'` (default) / `'opaque'`. Bound once when the type is compiled; every method of the `PsszType` (`encode`, `decode`, `validate`, the key methods, the text methods) then runs them. A handler cannot be registered for a binary-form id, `box` or a time id. |
 
 **The three registries.** What a schema-driven codec does with a custom
@@ -954,7 +1001,7 @@ and under `json`, where only the variants differ:
 | | schema → text | text → schema |
 |---|---|---|
 | C++ | `psio::encode(psio::ijson{}, schema)`, `psio::encode_json_checked(psio::ijson{}, schema, out)` | `psio::decode_json_checked(psio::ijson{}, text, schema)` (any `json_parser`), `psio::validate<psio::Schema>(psio::ijson{}, text)`, `psio::decode<psio::Schema>(psio::ijson{}, text)` |
-| Rust | `psio::json::to_string::<IJson, _>(&schema)` (`Schema: JsonText`) | `psio::json::from_str::<IJson, Schema>(text)`, `json::validate::<IJson, Schema>(bytes)` |
+| Rust | `psio::to_ijson(&schema)` (`Schema: JsonText`; it is also `ToPsszSchema`, so a schema is a member or an argument: `schema_for::<Schema>()` is the fixture's `schema-of-schema`) | `psio::from_ijson::<Schema>(text)`, `psio::validate_ijson::<Schema>(text)` |
 | JS | `schema.toJson('ijson')` on a `PsszSchema` | `PsszSchema.fromJson(text, 'ijson', options)` |
 
 `psio::json{}` / `Json` / `'json'` give the other text. The typed C++ and

@@ -22,7 +22,7 @@ describe benchmark implementation coverage.
 | frac32 / fracpack | records, nesting, variants, empty values, scalar/string/vector/optional | encode/decode | removed: the JS package implements the current formats only |
 | pjson | scalars, 274 doubles, typed containers, keys, rejection cases | encode/decode/validate | encode/decode/validate |
 | SSZ | two records | encode/decode | implementation absent |
-| pSSZ | two records in the public corpus; `conformance/pssz-vectors.json` (generated from the C++ codec, checked by ctest) | encode/decode/validate/views against the whole PSSZ fixture, for `pssz_struct!` records and derives | encode/decode/validate/views against the whole PSSZ fixture, schema-driven and through typed definitions (`js/README.md`) |
+| pSSZ | two records in the public corpus; `conformance/pssz-vectors.json` (generated from the C++ codec, checked by ctest) | encode/decode/validate/views against the whole PSSZ fixture, for derived records, the annotation and the wrapper spellings of bounds, and `#[psio::interface]` argument records | encode/decode/validate/views against the whole PSSZ fixture, schema-driven and through typed definitions (`js/README.md`) |
 | Cap'n Proto | two records | encode/decode | implementation absent |
 | FlatBuffers | two records | encode/decode | implementation absent |
 | WIT binary | two records | encode only in shared fixture test | implementation absent; WIT text from a Schema IR is `emitWit` |
@@ -102,8 +102,7 @@ languages can represent.
 - **Strict validation.** C++ `validate_strict` also materializes the value,
   runs member annotation specs and compares the canonical re-encoding. The
   Rust exact readers reject unknown fields and non-UTF-8 raw strings;
-  canonical comparison is `validate_canonical_for_profile`; Rust has no
-  member annotations.
+  canonical comparison is `validate_canonical_for_profile`.
 - **Schema for raw strings.** A raw string is `"string"` in the schema in
   both languages: C++ `std::string` and Rust `RawString` /
   `BoundedRawString<N>` emit the same `"string"` adapter over a byte list as
@@ -113,13 +112,15 @@ languages can represent.
   every `"string"`: they reject a raw string holding non-UTF-8 bytes that
   the typed codecs pass through. Whether the schema should mark raw strings
   is open.
-- **Schema-driven codec.** Rust `pssz::dynamic` supports only the
-  explicit-width tags; it rejects the automatic profile with an error.
-- **Rust-only restrictions.** No member-level annotations or `as<Tag>`
-  adapters; tuples up to 12 elements; `pssz_struct_dwnc!` requires `Copy`
-  fields and a directly recursive `pssz_struct!` record has no validator (use
-  the derives for both); a directly recursive type has no const `SHAPE`, so
-  `pssz_evolves_from` cannot be evaluated for it.
+- **Schema-driven codec.** Rust `pssz::dynamic` reads and writes the
+  automatic profile and the explicit-width tags.
+- **Rust-only restrictions.** No `as<Tag>` adapters; tuples up to 12
+  elements; bounds by annotation (`#[psio(max = N, element(...), keys(...),
+  values(...), at(I, ...))]`) cover `String`, `RawString`, `Vec`, arrays,
+  `BTreeMap`, `BTreeSet`, tuples of up to 8 elements and `Option`, and a
+  variant's alternatives are annotated in the enum; a directly recursive
+  type has no const `SHAPE`, so `pssz_evolves_from` cannot be evaluated for
+  it.
 - **Explicit tags and nested caps.** Under `pssz8/16/32` both languages check
   only the top-level type's cap, so a nested value over its own cap is
   accepted (fixture class `cap-overflow-explicit-nested`); the automatic

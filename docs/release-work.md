@@ -28,7 +28,7 @@ supported encodings. Pjson now adopts the audited tag numbering as wire revision
 - [x] Bring Rust PSSZ to parity with C++: record evolution through the
   writer's header, mandatory pruning, type-derived offset widths (`Pssz`,
   `max_dynamic_data`), UTF-8 vs raw strings, enums as integers, variants and
-  tuples, proc-macro derives and `pssz_struct!` macros over one checked
+  tuples, proc-macro derives over one checked
   codec, and a `const fn pssz_evolves_from`. Remaining differences are listed
   in `compatibility.md` ("PSSZ: Rust and C++").
 - [x] Schema identifier for raw byte strings: `"string"` in both languages
