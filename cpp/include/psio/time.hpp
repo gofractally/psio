@@ -15,8 +15,8 @@
 //
 // Every format sees a time value as its tick count, an integer of type Rep:
 //
-//   binary formats   the Rep integer (fixed width, little-endian where the
-//                    format's integers are)
+//   binary formats   the Rep integer, exactly as the format writes that
+//                    integer type: pssz, bin, ssz, borsh, bincode
 //   psio::key        the Rep integer's key form (sign-flipped big-endian), so
 //                    byte order is chronological order
 //   schema           Custom{Int{bits, signed}, id}; `id` is time_schema_id
@@ -507,6 +507,49 @@ namespace psio {
       if (!detail::time_impl::join_ticks(secs, sub, time_text_digits_v<T>, ticks))
          return "time: outside the range of the tick type";
       out = time_from_ticks<T>(ticks);
+      return nullptr;
+   }
+
+   // ── Runtime-typed forms, for schema-driven codecs ─────────────────────
+   //
+   // The tick type is known only as (bits, signed) and the unit as its
+   // fraction digit count; ticks travel as a 128-bit integer.
+
+   // As write_time_text: nullptr when the value has no text.
+   inline char* write_time_text(__int128 ticks, int digits, char* out) noexcept
+   {
+      const __int128 scale = detail::time_impl::pow10[digits];
+      __int128       q     = ticks / scale;
+      __int128       r     = ticks % scale;
+      if (r < 0)
+      {
+         r += scale;
+         --q;
+      }
+      if (q < detail::time_impl::min_text_seconds || q > detail::time_impl::max_text_seconds)
+         return nullptr;
+      return detail::time_impl::write_civil(out, static_cast<std::int64_t>(q),
+                                            static_cast<std::uint32_t>(r), digits);
+   }
+
+   // As parse_time_text, for a tick integer of `bits` bits (at most 64).
+   inline const char* parse_time_text(std::string_view text,
+                                      int              digits,
+                                      std::uint32_t    bits,
+                                      bool             is_signed,
+                                      __int128&        ticks) noexcept
+   {
+      std::int64_t  secs = 0;
+      std::uint32_t sub  = 0;
+      if (const char* err = detail::time_impl::parse_civil(text, digits, secs, sub))
+         return err;
+      const __int128 v    = static_cast<__int128>(secs) * detail::time_impl::pow10[digits] + sub;
+      const __int128 one  = 1;
+      const __int128 low  = is_signed ? -(one << (bits - 1)) : 0;
+      const __int128 high = is_signed ? (one << (bits - 1)) - 1 : (one << bits) - 1;
+      if (bits == 0 || bits > 64 || v < low || v > high)
+         return "time: outside the range of the tick type";
+      ticks = v;
       return nullptr;
    }
 

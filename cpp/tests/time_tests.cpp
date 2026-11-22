@@ -1,7 +1,10 @@
 // Time as a first-class value (docs/time.md): std::chrono durations and
-// system_clock time points in pssz / bin / ssz / key / json / ijson / schema.
+// system_clock time points in pssz / bin / ssz / borsh / bincode / key / json /
+// ijson / schema.
 
 #include <psio/bin.hpp>
+#include <psio/bincode.hpp>
+#include <psio/borsh.hpp>
 #include <psio/json.hpp>
 #include <psio/key.hpp>
 #include <psio/pssz.hpp>
@@ -285,6 +288,10 @@ TEST_CASE("time: binary formats carry the tick count", "[time][pssz][bin][ssz]")
    REQUIRE(psio::encode(psio::pssz{}, event) == psio::encode(psio::pssz{}, event_ints));
    REQUIRE(psio::encode(psio::bin{}, event) == psio::encode(psio::bin{}, event_ints));
    REQUIRE(psio::encode(psio::ssz{}, event) == psio::encode(psio::ssz{}, event_ints));
+   REQUIRE(psio::encode(psio::borsh{}, stamps) == psio::encode(psio::borsh{}, stamp_ints));
+   REQUIRE(psio::encode(psio::borsh{}, event) == psio::encode(psio::borsh{}, event_ints));
+   REQUIRE(psio::encode(psio::bincode{}, stamps) == psio::encode(psio::bincode{}, stamp_ints));
+   REQUIRE(psio::encode(psio::bincode{}, event) == psio::encode(psio::bincode{}, event_ints));
 
    auto round = [](auto fmt, const auto& v) {
       using T          = std::remove_cvref_t<decltype(v)>;
@@ -299,6 +306,10 @@ TEST_CASE("time: binary formats carry the tick count", "[time][pssz][bin][ssz]")
    round(psio::bin{}, event);
    round(psio::ssz{}, stamps);
    round(psio::ssz{}, event);
+   round(psio::borsh{}, stamps);
+   round(psio::borsh{}, event);
+   round(psio::bincode{}, stamps);
+   round(psio::bincode{}, event);
    round(psio::key{}, stamps);
    round(psio::key{}, event);
 

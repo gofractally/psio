@@ -5,6 +5,9 @@
 
 #include "time_key_conformance_types.hpp"
 
+#include <psio/pssz_ir_json.hpp>
+#include <psio/schema_ir.hpp>
+
 #include <catch.hpp>
 
 #include <fstream>
@@ -211,4 +214,69 @@ TEST_CASE("time/key conformance: every vector holds", "[time][key][conformance]"
       ++declared;
    });
    CHECK(fx.types.size() == declared);
+}
+
+// The same rows through the schema-driven C++ codecs (pssz_ir.hpp /
+// pssz_ir_json.hpp), using nothing but the Schema IR recorded in the fixture
+// — what a reader in another language has to work from.
+TEST_CASE("time/key conformance: the Schema IR drives pssz and text", "[time][schema][conformance]")
+{
+   namespace ir   = psio::pssz_ir;
+   const auto& fx = fixture();
+   const auto  ir_bytes = from_hex(fx.schema_ir);
+   REQUIRE(ir_bytes.has_value());
+   REQUIRE(psio::validate<psio::Schema>(psio::pssz{}, std::span<const char>{*ir_bytes}).ok());
+   const auto schema = psio::decode<psio::Schema>(psio::pssz{}, std::span<const char>{*ir_bytes});
+
+   std::size_t values = 0, accepted = 0, rejected = 0;
+   for (const auto& row : fx.vectors)
+   {
+      INFO(row.name);
+      const psio::schema_types::AnyType root{psio::schema_types::Type{row.type}};
+      auto to_text = [&](auto fmt, const std::vector<char>& bytes, std::string& out) {
+         return ir::pssz_to_json(schema, root, fmt, std::span<const char>{bytes}, out).ok();
+      };
+      auto to_pssz = [&](auto fmt, const std::string& text, std::vector<char>& out) {
+         return ir::json_to_pssz(schema, root, fmt, std::span<const char>{text}, out).ok();
+      };
+      if (row.kind == "value")
+      {
+         const auto bytes = *from_hex(*row.pssz);
+         CHECK(ir::validate_pssz(schema, root, std::span<const char>{bytes}).ok());
+         std::string json, ijson;
+         CHECK(to_text(psio::json{}, bytes, json) == row.json.has_value());
+         CHECK(to_text(psio::ijson{}, bytes, ijson) == row.ijson.has_value());
+         if (row.json)
+         {
+            CHECK(json == *row.json);
+            CHECK(ijson == *row.ijson);
+            std::vector<char> back;
+            CHECK(to_pssz(psio::json{}, json, back));
+            CHECK(to_hex(back) == *row.pssz);
+            back.clear();
+            CHECK(to_pssz(psio::ijson{}, ijson, back));
+            CHECK(to_hex(back) == *row.pssz);
+         }
+         ++values;
+      }
+      else if (row.kind == "text-accept")
+      {
+         std::vector<char> a, b;
+         CHECK(to_pssz(psio::json{}, *row.text, a));
+         CHECK(to_pssz(psio::ijson{}, *row.text, b));
+         CHECK(to_hex(a) == *row.pssz);
+         CHECK(to_hex(b) == *row.pssz);
+         ++accepted;
+      }
+      else if (row.kind == "text-reject")
+      {
+         std::vector<char> out;
+         CHECK_FALSE(to_pssz(psio::json{}, *row.text, out));
+         CHECK_FALSE(to_pssz(psio::ijson{}, *row.text, out));
+         ++rejected;
+      }
+   }
+   CHECK(values > 150);
+   CHECK(accepted > 30);
+   CHECK(rejected > 60);
 }
