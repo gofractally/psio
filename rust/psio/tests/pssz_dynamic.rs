@@ -219,11 +219,21 @@ fn runtime_codec_handles_integer_bounds_and_rejects_legacy_markers() {
         codec::decode_exact::<Pssz32>(&schema, &u128_ty, &bytes).unwrap(),
         Value::Unsigned(u128::MAX)
     );
-    let legacy = AnyType::new(AnyValue::Nested(Nested {
+    // A Nested node is a byte list holding the encoding of its inner type:
+    // its dynamic value is the inner value.
+    let nested = AnyType::new(AnyValue::Nested(psio::pssz::schema_ir::Nested {
         r#type: Box::new(u8_ty),
     }));
-    assert!(codec::encode::<Pssz32>(&schema, &legacy, &Value::Unsigned(1)).is_err());
-    assert!(codec::decode_exact::<Pssz32>(&schema, &legacy, &[1]).is_err());
+    assert_eq!(codec::encode::<Pssz32>(&schema, &nested, &Value::Unsigned(1)).unwrap(), [1]);
+    assert_eq!(codec::decode_exact::<Pssz32>(&schema, &nested, &[1]).unwrap(), Value::Unsigned(1));
+    assert!(codec::decode_exact::<Pssz32>(&schema, &nested, &[1, 2]).is_err());
+    assert!(codec::decode_exact::<Pssz32>(&schema, &nested, &[]).is_err());
+    // Opaque: the bytes, not looked at.
+    assert_eq!(
+        codec::decode_exact_with::<Pssz32>(&schema, &nested, &[1, 2], codec::Options::opaque_nested())
+            .unwrap(),
+        Value::Bytes(vec![1, 2])
+    );
 
     // Aliases through a recursive optional are not a finite minimum-size
     // definition. Schema analysis has its own monotone recursion budget.

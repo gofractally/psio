@@ -54,11 +54,7 @@ fn references(schema: &Schema, root: &AnyType) -> PsszResult<()> {
             AnyValue::BoundedList(l) => pending.push(&l.r#type),
             AnyValue::Option(o) => pending.push(&o.r#type),
             AnyValue::Custom(c) => pending.push(&c.r#type),
-            AnyValue::Nested(_) => {
-                return Err(PsszError(
-                    "pssz upgrade: Nested values are not implemented",
-                ))
-            }
+            AnyValue::Nested(n) => pending.push(&n.r#type),
             AnyValue::Resource(_) => {
                 return Err(PsszError(
                     "pssz upgrade: resource values require a registered adapter",
@@ -142,6 +138,10 @@ impl Checker<'_> {
                 self.compare(&a.r#type, &b.r#type, path, depth + 1)
             }
             (AnyValue::Custom(a), AnyValue::Custom(b)) if a.id == b.id => {
+                self.compare(&a.r#type, &b.r#type, path, depth + 1)
+            }
+            // Nested(A) -> Nested(B) is compatible exactly when A -> B is.
+            (AnyValue::Nested(a), AnyValue::Nested(b)) => {
                 self.compare(&a.r#type, &b.r#type, path, depth + 1)
             }
             (AnyValue::Variant(a), AnyValue::Variant(b))

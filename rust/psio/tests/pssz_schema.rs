@@ -219,7 +219,7 @@ fn ir_sample(name: &str) -> AnyType {
             exp: 8,
             mantissa: 24,
         }),
-        "Nested" => AnyValue::Nested(Nested {
+        "Nested" => AnyValue::Nested(psio::pssz::schema_ir::Nested {
             r#type: Box::new(integer(8)),
         }),
         "Custom" => AnyValue::Custom(Custom {

@@ -261,24 +261,35 @@ impl Schema {
 //                        a byte container: validated on every read and write
 //   hex                  bytes over a byte container
 //   bitvector, bitlist   packed bits
+//   map, set             a list whose entries are in strictly ascending key
+//                        order (docs/pssz-spec.md 5.9): `map` directly on a
+//                        List / BoundedList of two-member tuples (key,
+//                        value), `set` directly on a List / BoundedList
 //   box                  the inner type on the wire, with no inferred size
 //                        bound (Box<T>): the typed codecs give a boxed value
 //                        no bound, so a type holding one gets the same
 //                        offset width from the schema
 //
 // "unknown" marks a C++ type the schema builder could not describe and has
-// no codec. Every other id names a text presentation only (a custom text
-// form, `pssz::dynamic::CustomHandlers`): on the wire it is exactly its
-// inner type.
+// no codec. Every other id adds nothing to the bytes: on the wire the node is
+// exactly its inner type. The time ids are built-in presentations; any other
+// id names a custom type (a text form, an invariant, or both) whose handler
+// is registered with the codecs (`pssz::dynamic::CustomHandlers`).
 
 /// `string`, `utf8` or `hex`: an adapter over a byte container.
 pub fn byte_adapter_id(id: &str) -> bool {
     matches!(id, "string" | "utf8" | "hex")
 }
-/// An id with a binary meaning of its own. Any other id — `box`, or a text
-/// presentation — is its inner type on the wire.
+/// `map` or `set`: a list whose entries are in ascending key order.
+pub fn assoc_id(id: &str) -> bool {
+    matches!(id, "map" | "set")
+}
+/// An id with a binary meaning of its own. Any other id — `box`, a time id
+/// or a custom type — is its inner type on the wire.
 pub fn wire_custom_id(id: &str) -> bool {
-    matches!(id, "bool" | "char" | "bitvector" | "bitlist" | "unknown") || byte_adapter_id(id)
+    matches!(id, "bool" | "char" | "bitvector" | "bitlist" | "unknown")
+        || byte_adapter_id(id)
+        || assoc_id(id)
 }
 
 pub trait ToPsszSchema: 'static {
@@ -291,6 +302,12 @@ pub trait ToPsszSchema: 'static {
     /// registers its `TextForm` under this id.
     fn custom_id() -> Option<String> {
         None
+    }
+    /// Attributes a record member of this type carries: a bound that the IR
+    /// records on the member rather than in the type (`lengthBound` of a
+    /// bounded nested value).
+    fn member_attributes() -> Vec<Attribute> {
+        Vec::new()
     }
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType>;
     fn schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType>
