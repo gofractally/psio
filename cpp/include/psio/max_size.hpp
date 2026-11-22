@@ -68,6 +68,16 @@ namespace psio {
          using inner_type = U;
       };
 
+      // utf8_string<N> carries its byte bound in the type; utf8_string<> is
+      // unbounded, exactly like std::string.
+      template <typename T>
+      struct is_utf8_string : std::false_type {};
+      template <std::size_t N>
+      struct is_utf8_string<::psio::utf8_string<N>> : std::true_type
+      {
+         static constexpr std::size_t limit = N;
+      };
+
       // Extract the effective count cap from a length_bound: exact wins,
       // then max. min alone does not bound the upper side.
       constexpr std::optional<std::uint32_t>
@@ -189,6 +199,14 @@ namespace psio {
                             std::is_same_v<U, ::psio::int128>) return 16;
          else if constexpr (std::is_enum_v<U>) return sizeof(std::underlying_type_t<U>);
          else if constexpr (std::is_arithmetic_v<U>) return sizeof(U);
+         else if constexpr (is_utf8_string<U>::value)
+         {
+            // A variable payload of at most N bytes, wherever it appears
+            // (bare, member, element, optional payload). No member-level
+            // length_bound is needed; the unbounded form has no bound.
+            if constexpr (U::is_bounded) return is_utf8_string<U>::limit;
+            else return std::nullopt;
+         }
          else if constexpr (is_std_array<U>::value)
          {
             using E = typename is_std_array<U>::element_type;

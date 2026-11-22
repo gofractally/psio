@@ -43,7 +43,6 @@ namespace string_fixture
       std::uint8_t                       k;
       S                                  s;
       std::vector<S>                     v;
-      std::array<S, 1>                   a;
       std::variant<std::uint8_t, S>      alt;
       std::tuple<S>                      t;
       std::optional<S>                   o;
@@ -52,9 +51,9 @@ namespace string_fixture
    using TextRec   = Holder<Text>;
    using Text4Rec  = Holder<Text4>;
    using RawHolder = Holder<std::string>;
-   PSIO_REFLECT(TextRec, k, s, v, a, alt, t, o)
-   PSIO_REFLECT(Text4Rec, k, s, v, a, alt, t, o)
-   PSIO_REFLECT(RawHolder, k, s, v, a, alt, t, o)
+   PSIO_REFLECT(TextRec, k, s, v, alt, t, o)
+   PSIO_REFLECT(Text4Rec, k, s, v, alt, t, o)
+   PSIO_REFLECT(RawHolder, k, s, v, alt, t, o)
 
    // Only bounded members: the automatic width is inferred, not defaulted.
    struct OnlyText4
@@ -63,7 +62,27 @@ namespace string_fixture
       friend bool operator==(const OnlyText4&, const OnlyText4&) = default;
    };
    PSIO_REFLECT(OnlyText4, s)
+   template <typename S>
+   struct WithU32
+   {
+      std::uint32_t a;
+      S             s;
+      friend bool   operator==(const WithU32&, const WithU32&) = default;
+   };
+   using U32Text16  = WithU32<psio::utf8_string<16>>;
+   using U32Text300 = WithU32<psio::utf8_string<300>>;
+   using U32Text    = WithU32<Text>;
+   PSIO_REFLECT(U32Text16, a, s)
+   PSIO_REFLECT(U32Text300, a, s)
+   PSIO_REFLECT(U32Text, a, s)
+   struct TextMembers
+   {
+      std::optional<psio::utf8_string<16>>   o;
+      std::vector<psio::utf8_string<16>>     v;
+   };
+   PSIO_REFLECT(TextMembers, o, v)
 }  // namespace string_fixture
+PSIO_FIELD_ATTRS(string_fixture::TextMembers, v, psio::length_bound{.max = 2})
 
 namespace
 {
@@ -82,12 +101,24 @@ namespace
    static_assert(psio::auto_pssz_width_v<std::string> == 4 && psio::auto_pssz_width_v<Text> == 4);
    static_assert(!psio::max_encoded_size<TextRec>().has_value() &&
                  psio::auto_pssz_width_v<TextRec> == 4);
-   // The bounded wrapper does not feed bound inference today (only a
-   // length_bound member annotation on std::string / std::vector does), so a
-   // record of bounded UTF-8 strings still selects four-byte offsets.
-   static_assert(!psio::max_encoded_size<Text4>().has_value());
-   static_assert(!psio::max_encoded_size<OnlyText4>().has_value() &&
-                 psio::auto_pssz_width_v<OnlyText4> == 4);
+   // The bounded wrapper carries its bound in the type, so it feeds bound
+   // inference and the automatic width without a member annotation: N bytes
+   // bare, N + 4 as a variable member or element, N + 1 in an optional.
+   static_assert(psio::max_encoded_size<Text4>() == 4);
+   static_assert(psio::max_encoded_size<psio::utf8_string<16>>() == 16);
+   static_assert(psio::max_encoded_size<std::optional<psio::utf8_string<16>>>() == 17);
+   static_assert(psio::max_encoded_size<std::array<psio::utf8_string<16>, 2>>() == 40);
+   static_assert(!psio::max_encoded_size<std::vector<psio::utf8_string<16>>>().has_value());
+   static_assert(psio::max_encoded_size<OnlyText4>() == 12 &&
+                 psio::auto_pssz_width_v<OnlyText4> == 1);
+   static_assert(psio::max_encoded_size<U32Text16>() == 28 &&
+                 psio::auto_pssz_width_v<U32Text16> == 1);
+   static_assert(psio::max_encoded_size<U32Text300>() == 312 &&
+                 psio::auto_pssz_width_v<U32Text300> == 2);
+   static_assert(!psio::max_encoded_size<U32Text>().has_value() &&
+                 psio::auto_pssz_width_v<U32Text> == 4);
+   // optional member: slot 4 + N + 1; bounded vector member: 4 + count * (N + 4).
+   static_assert(psio::max_encoded_size<TextMembers>() == 4 + (4 + 17) + (4 + 2 * 20));
 
    // Inherent annotations: UTF-8 always; a length bound only when bounded.
    static_assert(std::tuple_size_v<decltype(psio::inherent_annotations<Text>::value)> == 1);
@@ -137,16 +168,15 @@ namespace
    std::vector<char> holder_frame(std::size_t slot, const std::string& text)
    {
       // Mirror Holder<S> with std::string members: identical layout.
-      Holder<std::string> value{1, "ok", {"ok"}, {{"ok"}}, std::string("ok"),
+      Holder<std::string> value{1, "ok", {"ok"}, std::string("ok"),
                                 std::tuple<std::string>{"ok"}, std::string("ok")};
       switch (slot)
       {
          case 0: value.s = text; break;
          case 1: value.v[0] = text; break;
-         case 2: value.a[0] = text; break;
-         case 3: value.alt = text; break;
-         case 4: std::get<0>(value.t) = text; break;
-         case 5: value.o = text; break;
+         case 2: value.alt = text; break;
+         case 3: std::get<0>(value.t) = text; break;
+         case 4: value.o = text; break;
       }
       return psio::encode(F{}, value);
    }
@@ -154,7 +184,7 @@ namespace
    template <typename S>
    Holder<S> good_holder()
    {
-      return {1, S{"ok"}, {S{"ok"}}, {{S{"ok"}}}, S{"ok"}, std::tuple<S>{S{"ok"}}, S{"ok"}};
+      return {1, S{"ok"}, {S{"ok"}}, S{"ok"}, std::tuple<S>{S{"ok"}}, S{"ok"}};
    }
    template <typename S>
    void poison(Holder<S>& value, std::size_t slot, const std::string& text)
@@ -163,10 +193,9 @@ namespace
       {
          case 0: value.s = S{text}; break;
          case 1: value.v[0] = S{text}; break;
-         case 2: value.a[0] = S{text}; break;
-         case 3: value.alt = S{text}; break;
-         case 4: std::get<0>(value.t) = S{text}; break;
-         case 5: value.o = S{text}; break;
+         case 2: value.alt = S{text}; break;
+         case 3: std::get<0>(value.t) = S{text}; break;
+         case 4: value.o = S{text}; break;
       }
    }
 }  // namespace
@@ -233,9 +262,27 @@ namespace
          some.insert(some.end(), text.begin(), text.end());
          rejected<F, std::optional<S>>(some);
 
-         // Every nesting position: field, vector element, array element,
-         // variant alternative, tuple member, optional payload.
-         for (std::size_t slot = 0; slot < 6; ++slot)
+         // An array element. The array's offset table uses the array's own
+         // width, which in the automatic profile follows the element bound.
+         {
+            using A = std::array<S, 1>;
+            const std::size_t W = [] {
+               if constexpr (requires { F::offset_width; }) return std::size_t{F::offset_width};
+               else return psio::auto_pssz_width_v<A>;
+            }();
+            std::vector<char> in_array(W, 0);
+            in_array[0] = static_cast<char>(W);
+            in_array.insert(in_array.end(), text.begin(), text.end());
+            REQUIRE_THROWS_AS(psio::encode(F{}, A{value}), psio::codec_exception);
+            rejected<F, A>(in_array);
+            std::vector<char> good(W, 0);
+            good[0] = static_cast<char>(W);
+            good.push_back('o');
+            accepted<F, A>(A{S{"o"}}, good);
+         }
+         // Every other nesting position: field, vector element, variant
+         // alternative, tuple member, optional payload.
+         for (std::size_t slot = 0; slot < 5; ++slot)
          {
             INFO("slot " << slot);
             auto bad = good_holder<S>();
@@ -251,7 +298,7 @@ namespace
       auto       view = psio::view<Holder<S>, F, psio::storage::const_borrow>{wire};
       REQUIRE(view.template get<1>().view_() == "ok");
       REQUIRE(view.template get<2>()[0].view_() == "ok");
-      REQUIRE(view.template get<6>().get().view_() == "ok");
+      REQUIRE(view.template get<5>().get().view_() == "ok");
       const auto multi = raw(kMulti);
       REQUIRE(psio::view<S, F, psio::storage::const_borrow>{multi}.view_() == kMulti);
    }
@@ -279,7 +326,7 @@ TEMPLATE_TEST_CASE("pssz utf8_string<N> enforces its byte bound", "[pssz][string
    REQUIRE_THROWS(Text4{"abcde"});
    rejected<F, Text4>(raw("abcde"));
    rejected<F, std::optional<Text4>>(raw("\x01" "abcde"));
-   for (std::size_t slot = 0; slot < 6; ++slot)
+   for (std::size_t slot = 0; slot < 5; ++slot)
    {
       INFO("slot " << slot);
       REQUIRE(psio::validate<Text4Rec>(F{}, holder_frame<F, Text4>(slot, "abcd")).ok());
@@ -290,6 +337,23 @@ TEMPLATE_TEST_CASE("pssz utf8_string<N> enforces its byte bound", "[pssz][string
    if constexpr (std::is_same_v<F, psio::pssz> || std::is_same_v<F, psio::pssz32>)
       accepted<F, Text>(Text{big}, raw(big));
    accepted<F, Text>(Text{"abcde"}, raw("abcde"));
+}
+
+TEST_CASE("pssz bounded utf8_string members select the automatic width", "[pssz][string][width]")
+{
+   // header 1 | a | slot 1 | "hi"
+   const std::vector<char> narrow{5, 7, 0, 0, 0, 5, 'h', 'i'};
+   REQUIRE(psio::encode(psio::pssz{}, U32Text16{7, psio::utf8_string<16>{"hi"}}) == narrow);
+   REQUIRE(psio::decode<U32Text16>(psio::pssz{}, narrow).s.storage() == "hi");
+   const std::vector<char> medium{6, 0, 7, 0, 0, 0, 6, 0, 'h', 'i'};
+   REQUIRE(psio::encode(psio::pssz{}, U32Text300{7, psio::utf8_string<300>{"hi"}}) == medium);
+   const std::vector<char> wide{8, 0, 0, 0, 7, 0, 0, 0, 8, 0, 0, 0, 'h', 'i'};
+   REQUIRE(psio::encode(psio::pssz{}, U32Text{7, Text{"hi"}}) == wide);
+   // The bound is enforced, so a narrow frame cannot exceed it.
+   std::vector<char> over{5, 7, 0, 0, 0, 5};
+   over.insert(over.end(), 17, 'a');
+   REQUIRE_FALSE(psio::validate<U32Text16>(psio::pssz{}, over).ok());
+   REQUIRE_THROWS_AS(psio::decode<U32Text16>(psio::pssz{}, over), psio::codec_exception);
 }
 
 TEST_CASE("SchemaBuilder: string types", "[pssz][string][schema]")

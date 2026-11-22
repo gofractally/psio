@@ -59,9 +59,10 @@ encode, decode and both validation modes). `utf8_string<>` is the unbounded
 UTF-8 string. The user type encodes the restriction, and pairs across
 languages as: C++ `std::string` = Rust `RawString` (raw bytes), C++
 `utf8_string<>` = Rust `String` (UTF-8), `utf8_string<N>` = UTF-8 of at most N
-bytes. The bounded wrapper does not currently contribute to the inferred width
-bound; only a `length_bound` member annotation does (and that annotation is not
-itself enforced by any codec path).
+bytes. A bounded `utf8_string<N>` contributes N bytes to the inferred width
+bound wherever it appears (its bound is enforced), like a `length_bound` member
+annotation on a `std::string` (which narrows the width but is not itself
+enforced by any codec path). `utf8_string<>` is unbounded.
 
 **Trailing data.** A buffer holds exactly one value. Fixed-size values must
 occupy exactly their span in decode as well as validate.
