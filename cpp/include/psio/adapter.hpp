@@ -43,9 +43,11 @@
 #include <psio/annotate.hpp>  // as_spec, presentation tags
 #include <psio/cpo.hpp>
 #include <psio/error.hpp>
+#include <psio/invariant.hpp>
 
 #include <cstddef>
 #include <span>
+#include <string_view>
 #include <type_traits>
 
 namespace psio {
@@ -218,24 +220,47 @@ namespace psio {
       !adapter_delegates_to_format_v<
          adapter<std::remove_cvref_t<T>, preferred_category_t<Fmt>>, Fmt>;
 
-   // ── Custom text presentation in the Schema IR ───────────────────────
+   // ── Custom types in the Schema IR ───────────────────────────────────
    //
-   // A type with a text_category adapter and a wire form of its own (a
-   // reflected record, or an enum used as a strong integer typedef) is, in
-   // the Schema IR, `Custom{type: its wire type, id}`: the wire type says
-   // what the bytes are, the id names the presentation, and a schema-driven
-   // text codec with a handler registered for the id (pssz_ir_json.hpp
-   // CustomHandlers) writes the adapter's text. Without a handler the text
-   // is the wire type's own.
+   // A type with an identity of its own beyond its wire form — a custom
+   // text presentation (a text_category adapter), an invariant
+   // (invariant.hpp), or both — is, in the Schema IR, `Custom{type: its wire
+   // type, id}`, whatever its shape: a reflected record, a transparent
+   // wrapper, an enum, a std::variant, a std::tuple, a list. The wire type
+   // says what the bytes are; the id names the type to the schema-driven
+   // codecs, which present and check it through the handler registered for
+   // the id (pssz_ir_custom.hpp CustomHandlers). Without a handler the node
+   // is its wire type: the wire type's text, structure checked only.
    //
-   // The id is, in order: the adapter implementation's
+   // The id is, in order: the text adapter implementation's
    //     static constexpr std::string_view schema_id = "AccountNumber";
-   // (set it so that C++ and Rust use one string), else the type's
-   // PSIO_REFLECT name, else its PSIO_REFLECT_ENUM name.
+   // (set it so that C++ and Rust use one string), else the id given to
+   // PSIO_INVARIANT, else the type's PSIO_REFLECT name, else its
+   // PSIO_REFLECT_ENUM name. A type with none of these (a std::variant, a
+   // std::tuple) must provide one: a compile error otherwise.
+   //
+   // A text adapter that is not the type's presentation in the Schema IR —
+   // the "0x" text of the integers wider than 64 bits, which are decimal
+   // in JSON and plain integers in the schema (ext_int.hpp) — says so:
+   //     static constexpr bool schema_custom = false;
+   namespace detail
+   {
+      template <typename T>
+      constexpr bool text_adapter_is_custom() noexcept
+      {
+         using A = adapter<T, text_category>;
+         if constexpr (!A::has_value)
+            return false;
+         else if constexpr (requires { requires !A::schema_custom; })
+            return false;
+         else
+            return true;
+      }
+   }  // namespace detail
+
    template <typename T>
    inline constexpr bool schema_custom_v =
-      has_adapter_v<std::remove_cvref_t<T>, text_category> &&
-      (Reflected<std::remove_cvref_t<T>> || std::is_enum_v<std::remove_cvref_t<T>>);
+      detail::text_adapter_is_custom<std::remove_cvref_t<T>>() || has_invariant_v<T>;
 
    template <typename T>
    constexpr std::string_view schema_custom_id() noexcept
@@ -244,13 +269,17 @@ namespace psio {
       using A = adapter<U, text_category>;
       if constexpr (requires { std::string_view{A::schema_id}; })
          return std::string_view{A::schema_id};
-      else if constexpr (Reflected<U>)
+      else if constexpr (!invariant_schema_id<U>().empty())
+         return invariant_schema_id<U>();
+      else if constexpr (std::is_class_v<U> && Reflected<U>)
          return reflect<U>::name;
       else
       {
          static_assert(ReflectedEnum<U>,
-                       "psio: give the text adapter of this enum a `static constexpr "
-                       "std::string_view schema_id` (or PSIO_REFLECT_ENUM names)");
+                       "psio: a custom type that is not a reflected record or enum (a "
+                       "std::variant, a std::tuple, ...) needs a schema id: give its text "
+                       "adapter a `static constexpr std::string_view schema_id`, or pass "
+                       "the id to PSIO_INVARIANT(Type, fn, \"Id\")");
          return reflect_enum<U>::name;
       }
    }

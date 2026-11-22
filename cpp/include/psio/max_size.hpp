@@ -29,6 +29,7 @@
 #include <psio/reflect.hpp>
 #include <psio/shapes.hpp>
 #include <psio/time.hpp>
+#include <psio/transparent.hpp>
 #include <psio/wrappers.hpp>
 
 #include <array>
@@ -128,6 +129,8 @@ namespace psio {
             return true;
          else if constexpr (is_std_array<U>::value)
             return fixed_payload<typename is_std_array<U>::element_type>();
+         else if constexpr (::psio::is_transparent_v<U>)
+            return fixed_payload<::psio::transparent_inner_t<U>>();
          else if constexpr (::psio::Record<U>)
          {
             if constexpr (!::psio::is_dwnc_v<U>) return false;
@@ -217,6 +220,9 @@ namespace psio {
             if constexpr (!fixed_payload<E>()) element = add(element, 4);
             return multiply(is_std_array<U>::n, element);
          }
+         else if constexpr (::psio::is_transparent_v<U>)
+            // The member's bound, its declared budget included.
+            return child_payload<::psio::transparent_inner_t<U>>();
          else if constexpr (::psio::Record<U>)
          {
             using R = ::psio::reflect<U>;

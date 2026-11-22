@@ -48,10 +48,13 @@
 //     container;
 //   - Box<T> is the Custom "box" over T: T on the wire, with no inferred
 //     size bound, exactly as the typed codecs treat it.
-//   - a type with a text_category adapter and a wire form of its own (a
-//     reflected record, an enum) is Custom{wire type, id} (adapter.hpp
-//     schema_custom_id): a custom text presentation, for which the
-//     schema-driven text codecs take a handler (pssz_ir_json.hpp).
+//   - a transparent type (transparent.hpp) is a named alias: its reflected
+//     name, defined as its member's type;
+//   - a custom type — one with a text_category adapter, an invariant
+//     (invariant.hpp), or both, of ANY shape: record, transparent wrapper,
+//     enum, variant, tuple, list — is Custom{wire type, id} (adapter.hpp
+//     schema_custom_id), for which the schema-driven codecs take a handler
+//     (pssz_ir_custom.hpp).
 // Not expressible: a member `as<Tag>` override or a binary adapter (the IR
 // has the member's declared type).
 //   Envelope            PSIO_INTERFACE → Interface,
@@ -73,6 +76,7 @@
 #include <psio/schema_ir.hpp>
 #include <psio/structural.hpp>
 #include <psio/time.hpp>
+#include <psio/transparent.hpp>
 #include <psio/wit_resource.hpp>
 #include <psio/wrappers.hpp>
 
@@ -355,9 +359,9 @@ namespace psio::schema_types
 
       // ── Build an AnyType for T ─────────────────────────────────────
       //
-      // A type with a custom text presentation (adapter.hpp
-      // schema_custom_v) is Custom{its wire type, id}; everything else is
-      // its wire type.
+      // A custom type (adapter.hpp schema_custom_v: a text presentation,
+      // an invariant, or both) is Custom{its wire type, id}, whatever its
+      // shape; everything else is its wire type.
       template <typename U>
       AnyType build_anytype()
       {
@@ -524,6 +528,10 @@ namespace psio::schema_types
                return Custom{Box<AnyType>{std::move(arr)}, "hex"};
             return arr;
          }
+         else if constexpr (::psio::is_transparent_v<U>)
+            // A transparent type is its member: a named alias of the
+            // member's type.
+            return insert<::psio::transparent_inner_t<U>>();
          else if constexpr (is_wit_resource_v<U>)
          {
             // Resource: opaque handle — methods come from

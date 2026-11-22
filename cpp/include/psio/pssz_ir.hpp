@@ -23,8 +23,17 @@
 //           jsonInt / ijsonInt = "number" | "string"   (pssz_ir_json.hpp)
 //   Variant member  ijsonName = "..."                   (pssz_ir_json.hpp)
 // The JSON / I-JSON text path over the same IR is pssz_ir_json.hpp.
+//
+// Custom types (pssz_ir_custom.hpp). Every entry point takes an optional
+// CustomHandlers registry. With one, each value of a custom node whose
+// handler has a `check` is checked — on decode / validate after its
+// structure is accepted, on encode before any byte is returned, nested
+// values first — and, when the registry says `require_all`, a custom node
+// with no handler is an error. Without a registry a custom node is its wire
+// type: structure only.
 #include <psio/detail/pssz_record_layout.hpp>
 #include <psio/detail/validate_depth.hpp>
+#include <psio/pssz_ir_custom.hpp>
 #include <psio/schema_ir.hpp>
 #include <psio/time.hpp>
 
@@ -345,11 +354,12 @@ inline codec_status bitlist_count(std::span<const char> wire, std::size_t bound,
 //                          one gets the same offset width from the schema
 //
 // "unknown" marks a C++ type the schema builder could not describe and has
-// no codec. Every other id names a text presentation only: on the wire it
+// no codec. Every other id adds nothing to the bytes: on the wire the node
 // is exactly its inner type. The time ids ("time-point-<unit>",
-// "duration-<unit>", time.hpp) are built-in presentations over a tick
-// integer; any other id is a custom text form registered with the text
-// codecs (pssz_ir_json.hpp CustomHandlers).
+// "duration-<unit>", "monotonic-<unit>", time.hpp) are built-in
+// presentations over a tick integer; any other id names a custom type — a
+// text presentation, an invariant, or both — whose handler is registered
+// with the codecs (pssz_ir_custom.hpp CustomHandlers).
 inline bool byte_adapter_id(std::string_view id) noexcept
 {
    return id == "string" || id == "utf8" || id == "hex";
@@ -848,6 +858,80 @@ template <std::size_t W> class Codec
          return fail("pssz IR: null schema box");
       return resolve(*box, out);
    }
+   // The type in `box`, as written: the value codecs resolve it themselves,
+   // and see the custom nodes on the way.
+   static codec_status child_of(const schema_types::Box<schema_types::AnyType> &box,
+                                const schema_types::AnyType *&out)
+   {
+      if (!box.get())
+         return fail("pssz IR: null schema box");
+      out = box.get();
+      return codec_ok();
+   }
+   // The `check` handlers of the custom nodes `input` passes through on the
+   // way to its wire type, outermost first. A strict registry makes a custom
+   // node with no handler an error. The schema was validated by metadata().
+   codec_status custom_checks(const schema_types::AnyType &input,
+                              std::vector<const CustomHandlers::Handler *> &out) const
+   {
+      const schema_types::AnyType *at = &input;
+      for (std::size_t hops = 0; hops <= 4 * schema.types.size() + 64; ++hops)
+      {
+         if (auto custom = std::get_if<schema_types::Custom>(&at->value))
+         {
+            if (wire_custom_id(custom->id) || !custom->type.get())
+               return codec_ok();
+            if (custom->id != "box" && !::psio::parse_time_schema_id(custom->id) &&
+                !::psio::reserved_time_schema_id(custom->id))
+            {
+               const auto *handler = customs->find(custom->id);
+               if (!handler && customs->require_all)
+                  return fail("pssz IR: no handler registered for a custom type");
+               if (handler && handler->check)
+                  out.push_back(handler);
+            }
+            at = custom->type.get();
+            continue;
+         }
+         auto ref = std::get_if<schema_types::Type>(&at->value);
+         if (!ref)
+            return codec_ok();
+         const schema_types::AnyType *found = nullptr;
+         for (const auto &member : schema.types)
+            if (member.name == ref->type)
+               found = member.type.get();
+         if (!found)
+            return codec_ok();
+         at = found;
+      }
+      return codec_ok();
+   }
+   // Runs `checks` innermost first on the automatic-profile bytes of the
+   // value; `bytes` are those bytes when this codec is the automatic one.
+   codec_status run_checks(const std::vector<const CustomHandlers::Handler *> &checks,
+                           const schema_types::AnyType &input, const Value &value,
+                           std::span<const char> bytes) const
+   {
+      if (checks.empty())
+         return codec_ok();
+      std::vector<char> canonical;
+      if constexpr (!automatic)
+      {
+         Codec<0> codec(schema);
+         PSIO_PSSZ_IR_TRY(codec.encode_at(input, value, canonical));
+         bytes = std::span<const char>{canonical};
+      }
+      else
+         (void)value, (void)input;
+      for (auto at = checks.rbegin(); at != checks.rend(); ++at)
+         if (auto status = (*at)->check(bytes); !status.ok())
+         {
+            check_failed = true;
+            return status;
+         }
+      return codec_ok();
+   }
+
    static codec_status int_size(const schema_types::Int &type, std::size_t &size)
    {
       switch (type.bits)
@@ -1218,7 +1302,7 @@ template <std::size_t W> class Codec
       for (const auto &member : members)
       {
          const schema_types::AnyType *type;
-         PSIO_PSSZ_IR_TRY(inner(member.type, type));
+         PSIO_PSSZ_IR_TRY(child_of(member.type, type));
          Layout info;
          PSIO_PSSZ_IR_TRY(layout(*type, info));
          auto found = std::find_if(values.begin(), values.end(),
@@ -1279,7 +1363,7 @@ template <std::size_t W> class Codec
       for (const auto &member : members)
       {
          const schema_types::AnyType *type;
-         PSIO_PSSZ_IR_TRY(inner(member.type, type));
+         PSIO_PSSZ_IR_TRY(child_of(member.type, type));
          Layout info;
          PSIO_PSSZ_IR_TRY(layout(*type, info));
          types.push_back(type);
@@ -1384,7 +1468,15 @@ template <std::size_t W> class Codec
  public:
    bool has_unknown = false;
    bool allow_unknown = false;
-   explicit Codec(const schema_types::Schema &schema) : schema(schema) {}
+   // The registry of custom handlers, or null: structure only.
+   const CustomHandlers *customs = nullptr;
+   // The status returned is a handler's (a violated invariant), not a
+   // structural error of this codec.
+   mutable bool check_failed = false;
+   explicit Codec(const schema_types::Schema &schema, const CustomHandlers *customs = nullptr)
+       : schema(schema), customs(customs && customs->checks_values() ? customs : nullptr)
+   {
+   }
 
    // The offset width `root` uses for its own header / slots / table.
    codec_status width(const schema_types::AnyType &root, std::size_t &out) const
@@ -1502,8 +1594,23 @@ template <std::size_t W> class Codec
       return codec_ok();
    }
 
+   // Every value is encoded through here: its bytes (encode_shape), then
+   // the checks of the custom nodes it is a value of.
    codec_status encode_at(const schema_types::AnyType &input, const Value &value,
                           std::vector<char> &out, std::size_t n = 0) const
+   {
+      if (!customs)
+         return encode_shape(input, value, out, n);
+      PSIO_PSSZ_IR_TRY(depth(n));
+      std::vector<const CustomHandlers::Handler *> checks;
+      PSIO_PSSZ_IR_TRY(custom_checks(input, checks));
+      const std::size_t start = out.size();
+      PSIO_PSSZ_IR_TRY(encode_shape(input, value, out, n));
+      return run_checks(checks, input, value,
+                        std::span<const char>{out}.subspan(start));
+   }
+   codec_status encode_shape(const schema_types::AnyType &input, const Value &value,
+                             std::vector<char> &out, std::size_t n) const
    {
       PSIO_PSSZ_IR_TRY(depth(n));
       const schema_types::AnyType *type;
@@ -1648,7 +1755,7 @@ template <std::size_t W> class Codec
                 if (!v)
                    return fail("pssz IR: explicit optional value required");
                 const schema_types::AnyType *child;
-                PSIO_PSSZ_IR_TRY(inner(t.type, child));
+                PSIO_PSSZ_IR_TRY(child_of(t.type, child));
                 bool selector;
                 PSIO_PSSZ_IR_TRY(can_be_empty(*child, selector));
                 if (selector)
@@ -1681,7 +1788,7 @@ template <std::size_t W> class Codec
                 for (std::size_t i = 0; i < v->size(); ++i)
                 {
                    const schema_types::AnyType *child;
-                   PSIO_PSSZ_IR_TRY(inner(t.members[i], child));
+                   PSIO_PSSZ_IR_TRY(child_of(t.members[i], child));
                    types.push_back(child);
                    Layout info;
                    PSIO_PSSZ_IR_TRY(layout(*child, info));
@@ -1703,7 +1810,7 @@ template <std::size_t W> class Codec
                 if (!v)
                    return fail("pssz IR: sequence value required");
                 const schema_types::AnyType *child;
-                PSIO_PSSZ_IR_TRY(inner(t.type, child));
+                PSIO_PSSZ_IR_TRY(child_of(t.type, child));
                 std::size_t w;
                 PSIO_PSSZ_IR_TRY(width_of(*type, w));
                 if constexpr (std::is_same_v<T, schema_types::List>)
@@ -1721,7 +1828,7 @@ template <std::size_t W> class Codec
                     v->selector >= t.members.size())
                    return fail("pssz IR: invalid explicit variant");
                 const schema_types::AnyType *child;
-                PSIO_PSSZ_IR_TRY(inner(t.members[v->selector].type, child));
+                PSIO_PSSZ_IR_TRY(child_of(t.members[v->selector].type, child));
                 out.push_back(static_cast<char>(v->selector));
                 PSIO_PSSZ_IR_TRY(encode_at(*child, *v->payload, out, n + 1));
              }
@@ -1734,13 +1841,26 @@ template <std::size_t W> class Codec
           type->value);
    }
 
+   // Every value is decoded through here: its structure (decode_shape), then
+   // the checks of the custom nodes it is a value of.
    codec_status decode_at(const schema_types::AnyType &input, std::span<const char> bytes,
-                          Value &out, std::size_t n = 0);
+                          Value &out, std::size_t n = 0)
+   {
+      if (!customs)
+         return decode_shape(input, bytes, out, n);
+      PSIO_PSSZ_IR_TRY(depth(n));
+      std::vector<const CustomHandlers::Handler *> checks;
+      PSIO_PSSZ_IR_TRY(custom_checks(input, checks));
+      PSIO_PSSZ_IR_TRY(decode_shape(input, bytes, out, n));
+      return run_checks(checks, input, out, bytes);
+   }
+   codec_status decode_shape(const schema_types::AnyType &input, std::span<const char> bytes,
+                             Value &out, std::size_t n);
 };
 
 template <std::size_t W>
-codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<const char> bytes,
-                                 Value &out, std::size_t n)
+codec_status Codec<W>::decode_shape(const schema_types::AnyType &input,
+                                    std::span<const char> bytes, Value &out, std::size_t n)
 {
    PSIO_PSSZ_IR_TRY(depth(n));
    const schema_types::AnyType *type;
@@ -1853,7 +1973,7 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
           else if constexpr (std::is_same_v<T, schema_types::Option>)
           {
              const schema_types::AnyType *child;
-             PSIO_PSSZ_IR_TRY(inner(t.type, child));
+             PSIO_PSSZ_IR_TRY(child_of(t.type, child));
              bool selector;
              PSIO_PSSZ_IR_TRY(can_be_empty(*child, selector));
              if (selector)
@@ -1902,7 +2022,7 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
              for (const auto &member : t.members)
              {
                 const schema_types::AnyType *child;
-                PSIO_PSSZ_IR_TRY(inner(member, child));
+                PSIO_PSSZ_IR_TRY(child_of(member, child));
                 Layout info;
                 PSIO_PSSZ_IR_TRY(layout(*child, info));
                 types.push_back(child);
@@ -1933,7 +2053,7 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
                              std::is_same_v<T, schema_types::Array>)
           {
              const schema_types::AnyType *child;
-             PSIO_PSSZ_IR_TRY(inner(t.type, child));
+             PSIO_PSSZ_IR_TRY(child_of(t.type, child));
              std::size_t w;
              PSIO_PSSZ_IR_TRY(width_of(*type, w));
              Sequence values;
@@ -1954,7 +2074,7 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
              if (selector >= t.members.size())
                 return fail("pssz IR: variant selector out of range");
              const schema_types::AnyType *child;
-             PSIO_PSSZ_IR_TRY(inner(t.members[selector].type, child));
+             PSIO_PSSZ_IR_TRY(child_of(t.members[selector].type, child));
              Value value;
              PSIO_PSSZ_IR_TRY(decode_at(*child, bytes.subspan(1), value, n + 1));
              out = Value::variant(selector, std::move(value));
@@ -1975,9 +2095,10 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
 template <std::size_t W>
 [[nodiscard]] codec_status encode(const schema_types::Schema &schema,
                                   const schema_types::AnyType &root, const Value &value,
-                                  std::vector<char> &destination)
+                                  std::vector<char> &destination,
+                                  const CustomHandlers *custom = nullptr)
 {
-   detail::Codec<W> codec(schema);
+   detail::Codec<W> codec(schema, custom);
    std::vector<char> bytes;
    auto status = codec.metadata(root);
    if (!status.ok())
@@ -1992,9 +2113,10 @@ template <std::size_t W>
 template <std::size_t W>
 [[nodiscard]] codec_status
 decode_compatible(const schema_types::Schema &schema, const schema_types::AnyType &root,
-                  std::span<const char> bytes, Value &output, bool &has_unknown)
+                  std::span<const char> bytes, Value &output, bool &has_unknown,
+                  const CustomHandlers *custom = nullptr)
 {
-   detail::Codec<W> codec(schema);
+   detail::Codec<W> codec(schema, custom);
    codec.allow_unknown = true;
    Value value;
    auto status = codec.metadata(root);
@@ -2015,9 +2137,10 @@ template <std::size_t W>
 // compatible); validate_canonical_for_width remains the full re-encode check.
 [[nodiscard]] codec_status decode_exact(const schema_types::Schema &schema,
                                         const schema_types::AnyType &root,
-                                        std::span<const char> bytes, Value &output)
+                                        std::span<const char> bytes, Value &output,
+                                        const CustomHandlers *custom = nullptr)
 {
-   detail::Codec<W> codec(schema);
+   detail::Codec<W> codec(schema, custom);
    Value value;
    auto status = codec.metadata(root);
    if (!status.ok())
@@ -2037,28 +2160,32 @@ template <std::size_t W>
 // and length bounds are enforced, pruning is mandatory.
 [[nodiscard]] inline codec_status encode_auto(const schema_types::Schema &schema,
                                               const schema_types::AnyType &root,
-                                              const Value &value, std::vector<char> &destination)
+                                              const Value &value, std::vector<char> &destination,
+                                              const CustomHandlers *custom = nullptr)
 {
-   return encode<0>(schema, root, value, destination);
+   return encode<0>(schema, root, value, destination, custom);
 }
 // Accepts unknown appended optional fields and reports them (the typed
 // `validate` / decode_pssz_checked rule).
 [[nodiscard]] inline codec_status decode_auto(const schema_types::Schema &schema,
                                               const schema_types::AnyType &root,
                                               std::span<const char> bytes, Value &output,
-                                              bool &has_unknown)
+                                              bool &has_unknown,
+                                              const CustomHandlers *custom = nullptr)
 {
-   return decode_compatible<0>(schema, root, bytes, output, has_unknown);
+   return decode_compatible<0>(schema, root, bytes, output, has_unknown, custom);
 }
-// Checks `bytes` against the schema without keeping the value.
+// Checks `bytes` against the schema without keeping the value: structure,
+// and with a registry the invariants of its custom types.
 [[nodiscard]] inline codec_status validate_auto(const schema_types::Schema &schema,
                                                 const schema_types::AnyType &root,
                                                 std::span<const char> bytes,
-                                                bool *has_unknown = nullptr)
+                                                bool *has_unknown = nullptr,
+                                                const CustomHandlers *custom = nullptr)
 {
    Value value;
    bool unknown = false;
-   auto status = decode_compatible<0>(schema, root, bytes, value, unknown);
+   auto status = decode_compatible<0>(schema, root, bytes, value, unknown, custom);
    if (status.ok() && has_unknown)
       *has_unknown = unknown;
    return status;
@@ -2078,10 +2205,11 @@ template <std::size_t W>
 template <std::size_t W>
 [[nodiscard]] codec_status validate_canonical_for_width(const schema_types::Schema &schema,
                                                         const schema_types::AnyType &root,
-                                                        std::span<const char> bytes)
+                                                        std::span<const char> bytes,
+                                                        const CustomHandlers *custom = nullptr)
 {
    Value value;
-   auto status = decode_exact<W>(schema, root, bytes, value);
+   auto status = decode_exact<W>(schema, root, bytes, value, custom);
    if (!status.ok())
       return status;
    std::vector<char> canonical;

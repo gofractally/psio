@@ -35,6 +35,7 @@
 //   std::variant          1-byte alternative index + the alternative
 //   std::tuple, record    elements / reflected fields concatenated in
 //                         order; tuple<> and an empty record are zero bytes
+//   transparent type      its member (transparent.hpp)
 //
 // std::pair is not a PSIO value in any format, and bitlist has no key
 // form; both are compile errors.
@@ -45,6 +46,12 @@
 // properties above: its bytes must sort like the value and be prefix-free
 // (fixed width, or self-terminating). This is a separate slot from
 // `binary_category`: wire and sort encodings usually differ.
+//
+// Invariants (invariant.hpp). A value that violates its type's invariant has
+// no key: `encode` / `to_key` fail on it (codec_exception, or
+// abort without exceptions) and `validate` / `decode` reject its bytes with
+// the invariant's own status. Nested values are checked where they occur,
+// innermost first.
 //
 // Reading is checked. `validate` accepts exactly the canonical encodings:
 // the whole buffer is one value, booleans and presence bytes are 00 / 01,
@@ -71,6 +78,7 @@
 #include <psio/reflect.hpp>
 #include <psio/stream.hpp>
 #include <psio/time.hpp>
+#include <psio/transparent.hpp>
 #include <psio/wrappers.hpp>
 
 #include <array>
@@ -95,8 +103,10 @@ namespace psio {
 
    namespace detail::key_impl {
 
+      // A transparent type (transparent.hpp) is its member, not a record.
       template <typename T>
-      concept Record = ::psio::Reflected<T> && !std::is_enum_v<T>;
+      concept Record = ::psio::Reflected<T> && !std::is_enum_v<T> &&
+                       !::psio::is_transparent_v<T>;
 
       template <typename T>
       struct is_std_vector : std::false_type {};
@@ -324,6 +334,8 @@ namespace psio {
 
       template <typename T, typename S>
       void encode_value(const T& v, S& s);
+      template <typename T, typename S>
+      void encode_shape(const T& v, S& s);
 
       // 01 + element per element, then 00; octets share the string framing.
       template <typename V, typename S>
@@ -359,8 +371,21 @@ namespace psio {
          }
       }
 
+      // Every value is encoded through here: its bytes (encode_shape), then
+      // — for a type that has one — its invariant, so nested values are
+      // checked innermost first. A sizing pass (size_stream) writes nothing
+      // and checks nothing; the write that follows it does.
       template <typename T, typename S>
       void encode_value(const T& v, S& s)
+      {
+         encode_shape(v, s);
+         if constexpr (::psio::has_invariant_v<T> && !std::is_same_v<S, ::psio::size_stream>)
+            if (auto st = ::psio::check_invariant(v); !st.ok())
+               ::psio::codec_abort(st.error());
+      }
+
+      template <typename T, typename S>
+      void encode_shape(const T& v, S& s)
       {
          static_assert(!is_std_pair<T>::value,
                        "psio::key: std::pair is not a PSIO value; use std::tuple");
@@ -395,6 +420,8 @@ namespace psio {
                s.write(tmp.data(), tmp.size());
             }
          }
+         else if constexpr (::psio::is_transparent_v<T>)
+            encode_value(::psio::transparent_inner(v), s);
          else if constexpr (std::is_same_v<T, std::string>)
             append_escaped(s, v.data(), v.size());
          else if constexpr (is_utf8_string<T>::value)
@@ -471,6 +498,8 @@ namespace psio {
          using U = std::remove_cvref_t<T>;
          if constexpr (::psio::format_should_dispatch_adapter_v<::psio::key, U>)
             return std::nullopt;  // adapter bytes aren't known until encode
+         else if constexpr (::psio::is_transparent_v<U>)
+            return key_fixed_size<::psio::transparent_inner_t<U>>();
          else if constexpr (std::is_same_v<U, bool>)
             return std::size_t{1};
          else if constexpr (std::is_same_v<U, ::psio::uint256>)
@@ -556,6 +585,8 @@ namespace psio {
          const char* p     = nullptr;
          const char* end   = nullptr;
          const char* error = nullptr;
+         // An invariant's own status, reported unchanged.
+         codec_status invariant{};
 
          std::size_t left() const noexcept { return static_cast<std::size_t>(end - p); }
          bool        fail(const char* what) noexcept
@@ -709,6 +740,8 @@ namespace psio {
 
       template <typename T>
       bool read_value(reader& r, T* out);
+      template <typename T>
+      bool read_shape(reader& r, T* out);
 
       // `limit` is the element bound of a psio::bounded (SIZE_MAX: none).
       template <typename E, typename A>
@@ -751,8 +784,31 @@ namespace psio {
          return true;
       }
 
+      // Every value is read through here: its bytes (read_shape), then — for
+      // a type that has one — its invariant on the value read, which is
+      // materialised for that even when only validating.
       template <typename T>
       bool read_value(reader& r, T* out)
+      {
+         if constexpr (::psio::has_invariant_v<T>)
+         {
+            T        scratch{};
+            T* const dst = out ? out : &scratch;
+            if (!read_shape<T>(r, dst))
+               return false;
+            if (auto st = ::psio::check_invariant(*dst); !st.ok())
+            {
+               r.invariant = std::move(st);
+               return r.fail("key: invariant violated");
+            }
+            return true;
+         }
+         else
+            return read_shape<T>(r, out);
+      }
+
+      template <typename T>
+      bool read_shape(reader& r, T* out)
       {
          static_assert(!is_std_pair<T>::value,
                        "psio::key: std::pair is not a PSIO value; use std::tuple");
@@ -778,6 +834,9 @@ namespace psio {
                *out = std::move(v);
             return true;
          }
+         else if constexpr (::psio::is_transparent_v<T>)
+            return read_value<::psio::transparent_inner_t<T>>(
+               r, out ? &::psio::transparent_inner(*out) : nullptr);
          else if constexpr (std::is_same_v<T, std::string>)
          {
             return read_escaped(r, [&](const char* data, std::size_t n) {
@@ -942,8 +1001,12 @@ namespace psio {
       {
          reader r{bytes.data(), bytes.data(), bytes.data() + bytes.size()};
          if (!read_value<T>(r, out))
+         {
+            if (!r.invariant.ok())
+               return std::move(r.invariant);
             return codec_fail(r.error ? r.error : "key: malformed",
                               static_cast<std::uint32_t>(r.p - r.begin), "key");
+         }
          if (r.p != r.end)
             return codec_fail("key: trailing bytes",
                               static_cast<std::uint32_t>(r.p - r.begin), "key");
@@ -968,6 +1031,14 @@ namespace psio {
          static constexpr std::size_t count = ::psio::reflect<K>::member_count;
          template <std::size_t I>
          using type = std::remove_cvref_t<typename ::psio::reflect<K>::template member_type<I>>;
+      };
+
+      // A transparent wrapper of a composite is that composite.
+      template <typename K>
+         requires(::psio::is_transparent_v<K> &&
+                  requires { key_elements<::psio::transparent_inner_t<K>>::count; })
+      struct key_elements<K> : key_elements<::psio::transparent_inner_t<K>>
+      {
       };
 
       template <typename K>

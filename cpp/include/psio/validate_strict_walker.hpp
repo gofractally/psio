@@ -76,6 +76,7 @@ namespace psio {
       {
          return []<typename... S>(std::tuple<S...>*) {
             return ((std::is_same_v<S, ::psio::definition_will_not_change> ||
+                     std::is_same_v<S, ::psio::transparent_spec> ||
                      std::is_same_v<S, ::psio::field_num_spec>) && ...);
          }(static_cast<std::remove_cvref_t<Tuple>*>(nullptr));
       }

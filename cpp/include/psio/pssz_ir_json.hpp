@@ -80,93 +80,59 @@ using namespace schema_types;
 inline std::string_view variant_name(const Member &member);
 } // namespace json_detail
 
-// ── Custom text presentations ──────────────────────────────────────────────
+// ── Custom types ───────────────────────────────────────────────────────────
 //
-// A Custom node whose id is not part of the binary form (pssz_ir.hpp lists
-// those: bool, char, string, utf8, hex, bitvector, bitlist, box) names a
-// text presentation of its inner type: `Custom{type: Int{64}, id:
-// "AccountNumber"}` is a u64 on the wire that reads and writes as the
-// account's name. A handler registered for the id converts between the
-// PSSZ bytes of the inner type (automatic profile: the typed psio::pssz
-// bytes) and the presentation text, which is carried as ONE JSON string in
-// both text formats — the rule of a typed text adapter.
+// pssz_ir_custom.hpp defines the registry (CustomHandlers) and the rules:
+// a custom node is presented and checked by the handler registered for its
+// id; with no handler it is its wire type (the wire type's text, structure
+// only), or an error under `require_all`.
 //
-//   psio::pssz_ir::CustomHandlers handlers;
-//   handlers.add<AccountNumber>();              // from the type's text adapter
-//   handlers.add("Version", {to_text, from_text});   // or by hand
-//   pssz_to_json(schema, root, psio::ijson{}, bytes, text, nullptr, &handlers);
-//
-// An id with no handler falls back to the inner type's own text (the u64 as
-// a number, a record as an object): the binary side is always exact, only
-// the presentation is plainer. Set `require_all` to make it an error
-// instead, for a caller that must produce the exact presentation.
-//
-// Built-in presentations. The time ids ("time-point-<unit>", "duration-
-// <unit>", time.hpp) are presentations this codec supplies itself, at the
-// same place a registered handler is consulted: a duration is its tick
-// integer, a time point RFC 3339 text. They take no handler (one registered
-// under a time id is never consulted) and are presented under `require_all`
-// as well.
-//
-// A handler cannot express a presentation that is not a single JSON string
-// (an object, a bare number), or one that depends on the text format or on
-// the surrounding value.
-class CustomHandlers
+// In text, a handler with `to_text` / `from_text` reads and writes the value
+// as ONE JSON string; a handler with only `check` leaves the wire type's
+// text. Either way `check` runs on every value read (after the text was
+// accepted) and written (before any text is returned), and its status is
+// passed through unchanged. Text a handler's `from_text` refuses is
+// "json: text is not a value of the custom type".
+namespace detail
 {
- public:
-   struct Handler
+// The handler CustomHandlers::add<T>() registers.
+template <typename T> struct typed_custom_handler
+{
+   static CustomHandlers::Handler make()
    {
-      // PSSZ bytes of the inner type -> the text (appended, unquoted).
-      std::function<codec_status(std::span<const char> pssz, std::string &text)> to_text;
-      // The text -> PSSZ bytes of the inner type (appended). An error for
-      // text that is not this presentation.
-      std::function<codec_status(std::string_view text, std::vector<char> &pssz)> from_text;
-   };
-
-   // An id with no handler is an error rather than the inner type's text.
-   bool require_all = false;
-
-   CustomHandlers &add(std::string id, Handler handler)
-   {
-      handlers_.insert_or_assign(std::move(id), std::move(handler));
-      return *this;
+      static_assert(::psio::schema_custom_v<T>,
+                    "psio: CustomHandlers::add<T>() takes a custom type: one with a "
+                    "text_category adapter, an invariant, or both");
+      CustomHandlers::Handler handler;
+      if constexpr (::psio::detail::text_adapter_is_custom<T>())
+      {
+         using A = ::psio::adapter<T, ::psio::text_category>;
+         handler.to_text = [](std::span<const char> pssz, std::string &text) -> codec_status
+         {
+            T value{};
+            bool unknown = false;
+            if (auto status = ::psio::decode_pssz_checked(::psio::pssz{}, pssz, value, unknown);
+                !status.ok())
+               return status;
+            A::encode(value, text);
+            return codec_ok();
+         };
+         handler.from_text = [](std::string_view text, std::vector<char> &pssz) -> codec_status
+         {
+            const std::span<const char> in{text.data(), text.size()};
+            if (auto status = A::validate(in); !status.ok())
+               return status;
+            const T value = A::decode(in);
+            return ::psio::encode_pssz_checked(::psio::pssz{}, value, pssz);
+         };
+      }
+      if constexpr (::psio::has_invariant_v<T>)
+         handler.check = [](std::span<const char> pssz) -> codec_status
+         { return ::psio::validate<T>(::psio::pssz{}, pssz); };
+      return handler;
    }
-   // T's text_category adapter as the handler of `id` (default: the id the
-   // schema builder gives T, adapter.hpp schema_custom_id). T's typed
-   // psio::pssz encoding is the inner type's bytes by construction.
-   template <typename T> CustomHandlers &add(std::string id = std::string{schema_custom_id<T>()})
-   {
-      using A = ::psio::adapter<T, ::psio::text_category>;
-      return add(std::move(id),
-                 Handler{[](std::span<const char> pssz, std::string &text) -> codec_status
-                         {
-                            T value{};
-                            bool unknown = false;
-                            if (auto status = ::psio::decode_pssz_checked(::psio::pssz{}, pssz,
-                                                                          value, unknown);
-                                !status.ok())
-                               return status;
-                            A::encode(value, text);
-                            return codec_ok();
-                         },
-                         [](std::string_view text, std::vector<char> &pssz) -> codec_status
-                         {
-                            const std::span<const char> in{text.data(), text.size()};
-                            if (auto status = A::validate(in); !status.ok())
-                               return status;
-                            const T value = A::decode(in);
-                            return ::psio::encode_pssz_checked(::psio::pssz{}, value, pssz);
-                         }});
-   }
-   const Handler *find(std::string_view id) const
-   {
-      auto at = handlers_.find(std::string(id));
-      return at == handlers_.end() ? nullptr : &at->second;
-   }
-
- private:
-   std::unordered_map<std::string, Handler> handlers_;
 };
+} // namespace detail
 
 // Name -> member index for every record and variant of a schema: the
 // run-time counterpart of the tables psio::reflect<T> gets at compile time.
@@ -720,12 +686,37 @@ template <JsonCursor C> class Reader
             return time(type, *kind, form, out);
          if (::psio::reserved_time_schema_id(type.id))
             return c.fail("pssz IR: unsupported custom adapter");
-         if (auto handler = customs.find(type))
-            return presented(type, *handler, out);
-         if (customs.required())
+         auto handler = customs.find(type);
+         if (!handler && customs.required())
             return c.fail("pssz IR: no handler registered for a custom type");
+         if (handler && handler->from_text)
+            return presented(type, *handler, out);
+         if (handler && handler->check)
+         {
+            // The wire type's text; the custom values nested in it are
+            // checked as they are read, then this one on its bytes.
+            if (!read(*type.type, form, n + 1, out))
+               return false;
+            std::vector<char> bytes;
+            if (!encode_auto(schema, *type.type, out, bytes).ok())
+               return c.fail("pssz IR: custom value does not match its inner type");
+            return checked(*handler, bytes);
+         }
       }
       return read(*type.type, form, n + 1, out);
+   }
+   // The handler's invariant on the bytes of a value just read.
+   bool checked(const CustomHandlers::Handler &handler, const std::vector<char> &bytes)
+   {
+      if (!handler.check)
+         return true;
+      auto status = handler.check(std::span<const char>{bytes});
+      if (status.ok())
+         return true;
+      const std::string_view what = status.error().what;
+      if (failure.ok())
+         failure = std::move(status);
+      return c.fail(what.empty() ? std::string_view{"json: invariant violated"} : what);
    }
    // A custom presentation: one JSON string, turned by its handler into the
    // PSSZ bytes of the inner type, which are then read as a value of it.
@@ -743,11 +734,23 @@ template <JsonCursor C> class Reader
       std::vector<char> bytes;
       if (!handler.from_text || !handler.from_text(text, bytes).ok())
          return c.fail("json: text is not a value of the custom type");
-      bool unknown = false;
-      if (!decode_auto(schema, *type.type, std::span<const char>{bytes}, out, unknown).ok() ||
-          unknown)
+      // The bytes are read as the wire type, which checks the custom values
+      // nested in it; then this one.
+      detail::Codec<0> codec(schema, customs.registry());
+      codec.allow_unknown = true;
+      auto status = codec.decode_at(*type.type, std::span<const char>{bytes}, out);
+      if (!status.ok() || codec.has_unknown)
+      {
+         if (codec.check_failed)
+         {
+            const std::string_view what = status.error().what;
+            if (failure.ok())
+               failure = std::move(status);
+            return c.fail(what.empty() ? std::string_view{"json: invariant violated"} : what);
+         }
          return c.fail("json: custom handler produced bytes that are not the inner type");
-      return true;
+      }
+      return checked(handler, bytes);
    }
    // The built-in presentation of the time ids: a duration is its tick
    // integer; a time point is RFC 3339 text (time.hpp).
@@ -982,6 +985,10 @@ template <JsonCursor C> class Reader
    }
 
  public:
+   // The status of a violated invariant (a handler's `check`), reported
+   // unchanged in place of the cursor's.
+   codec_status failure{};
+
    Reader(const Schema &schema, C &cursor, bool ijson, const JsonNames *names = nullptr,
           const CustomHandlers *handlers = nullptr)
        : schema(schema), c(cursor), ijson(ijson), names(names), customs{handlers, names}
@@ -1217,23 +1224,42 @@ class Writer
                return time(type, *kind, value, form);
             if (::psio::reserved_time_schema_id(type.id))
                return w.fail("pssz IR: unsupported custom adapter");
-            if (auto handler = customs.find(type))
-            {
-               // The inner value as PSSZ bytes, then the handler's text as
-               // one JSON string.
-               std::vector<char> bytes;
-               std::string text;
-               if (!encode_auto(schema, *type.type, value, bytes).ok())
-                  return w.fail("pssz IR: custom value does not match its inner type");
-               if (!handler->to_text ||
-                   !handler->to_text(std::span<const char>{bytes}, text).ok())
-                  return w.fail("json: custom handler has no text for the value");
-               return psio::detail::json_impl::write_string(w, text, ijson);
-            }
-            if (customs.required())
+            auto handler = customs.find(type);
+            if (!handler && customs.required())
                return w.fail("pssz IR: no handler registered for a custom type");
+            const bool check = handler && handler->check && checks;
+            if (handler && (handler->to_text || check))
+            {
+               // The inner value as PSSZ bytes — which checks the custom
+               // values nested in it — then this one's check, then the
+               // handler's text as one JSON string.
+               std::vector<char> bytes;
+               const detail::Codec<0> codec(schema, checks ? customs.registry() : nullptr);
+               if (auto status = codec.encode_at(*type.type, value, bytes); !status.ok())
+               {
+                  if (codec.check_failed)
+                     return w.fail(status.error());
+                  return w.fail("pssz IR: custom value does not match its inner type");
+               }
+               if (check)
+                  if (auto st = handler->check(std::span<const char>{bytes}); !st.ok())
+                     return w.fail(st.error());
+               if (handler->to_text)
+               {
+                  std::string text;
+                  if (!handler->to_text(std::span<const char>{bytes}, text).ok())
+                     return w.fail("json: custom handler has no text for the value");
+                  return psio::detail::json_impl::write_string(w, text, ijson);
+               }
+               // The wire type's text; everything under it is checked.
+               const bool outer = checks;
+               checks           = false;
+               write(*type.type, value, form, 0);
+               checks = outer;
+               return;
+            }
          }
-         // "box", or a text presentation with no handler: the inner type.
+         // "box", or a custom type with no handler: the inner type.
          return write(*type.type, value, form, 0);
       }
       if (!detail::byte_adapter_id(type.id))
@@ -1287,6 +1313,10 @@ class Writer
    }
 
  public:
+   // Whether the handlers' `check` runs on the values written (false for a
+   // value that was just decoded with the same registry).
+   bool checks = true;
+
    Writer(const Schema &schema, psio::detail::json_impl::writer &w, bool ijson,
           const CustomHandlers *handlers = nullptr, const JsonNames *names = nullptr)
        : schema(schema), w(w), ijson(ijson), customs{handlers, names}
@@ -1480,12 +1510,18 @@ template <JsonCursor C>
 [[nodiscard]] bool read_json(const schema_types::Schema &schema,
                              const schema_types::AnyType &root, bool ijson, C &cursor,
                              Value &output, const JsonNames *names = nullptr,
-                             const CustomHandlers *custom = nullptr)
+                             const CustomHandlers *custom = nullptr,
+                             codec_status *invariant = nullptr)
 {
    Value value;
    json_detail::Reader<C> reader(schema, cursor, ijson, names, custom);
    if (!reader.read(root, json_detail::int_form::natural, 0, value) || !cursor.finish())
+   {
+      // A violated invariant is reported with its own status.
+      if (invariant && !reader.failure.ok())
+         *invariant = std::move(reader.failure);
       return false;
+   }
    output = std::move(value);
    return true;
 }
@@ -1504,28 +1540,31 @@ template <psio::detail::json_impl::json_family Fmt>
    if (auto status = codec.metadata(root); !status.ok())
       return status;
    // The same choice of syntax layer as the typed readers (json.hpp).
+   codec_status invariant;
+   auto run = [&](auto &cursor) -> codec_status
+   {
+      if (read_json(schema, root, Fmt::i_json, cursor, output, names, custom, &invariant))
+         return codec_ok();
+      if (!invariant.ok())
+         return std::move(invariant);
+      return cursor.status(Fmt::name);
+   };
 #if PSIO_HAVE_SIMDJSON
    if (psio::detail::json_impl::use_simdjson(text, parser))
    {
       if (parser == json_parser::simdjson)
       {
          simdjson_cursor cursor(text, Fmt::i_json);
-         if (!read_json(schema, root, Fmt::i_json, cursor, output, names, custom))
-            return cursor.status(Fmt::name);
-         return codec_ok();
+         return run(cursor);
       }
       simdjson_index_cursor cursor(text, Fmt::i_json);
-      if (!read_json(schema, root, Fmt::i_json, cursor, output, names, custom))
-         return cursor.status(Fmt::name);
-      return codec_ok();
+      return run(cursor);
    }
 #else
    (void)parser;
 #endif
    json_text_cursor cursor(text, Fmt::i_json);
-   if (!read_json(schema, root, Fmt::i_json, cursor, output, names, custom))
-      return cursor.status(Fmt::name);
-   return codec_ok();
+   return run(cursor);
 }
 
 // Appends the text of `value`; `out` is unchanged on failure.
@@ -1534,19 +1573,23 @@ template <psio::detail::json_impl::json_family Fmt>
                                          const schema_types::AnyType &root, Fmt,
                                          const Value &value, std::string &out,
                                          const CustomHandlers *custom = nullptr,
-                                         const JsonNames *names = nullptr)
+                                         const JsonNames *names = nullptr,
+                                         bool run_checks = true)
 {
    detail::Codec<0> codec(schema);
    if (auto status = codec.metadata(root); !status.ok())
       return status;
    const std::size_t start = out.size();
    psio::detail::json_impl::writer w{out, Fmt::name, false};
-   json_detail::Writer(schema, w, Fmt::i_json, custom, names)
-       .write(root, value, json_detail::int_form::natural, 0);
+   json_detail::Writer writer(schema, w, Fmt::i_json, custom, names);
+   writer.checks = run_checks;
+   writer.write(root, value, json_detail::int_form::natural, 0);
    w.finish();
    if (w.err.empty())
       return codec_ok();
    out.resize(start);
+   if (w.has_invariant)
+      return codec_status{w.invariant};
    return codec_fail(w.err, static_cast<std::uint32_t>(start), Fmt::name);
 }
 
@@ -1581,11 +1624,13 @@ template <psio::detail::json_impl::json_family Fmt>
                                         const CustomHandlers *custom = nullptr,
                                         const JsonNames *names = nullptr)
 {
+   // The decode runs the handlers' checks; the writer need not repeat them.
+   const CustomHandlers *registry = names && names->handlers() ? names->handlers() : custom;
    Value value;
    bool unknown = false;
-   if (auto status = decode_auto(schema, root, bytes, value, unknown); !status.ok())
+   if (auto status = decode_auto(schema, root, bytes, value, unknown, registry); !status.ok())
       return status;
-   if (auto status = value_to_json(schema, root, format, value, out, custom, names);
+   if (auto status = value_to_json(schema, root, format, value, out, custom, names, false);
        !status.ok())
       return status;
    if (has_unknown)
@@ -1594,12 +1639,16 @@ template <psio::detail::json_impl::json_family Fmt>
 }
 
 // Validates PSSZ bytes against `root` (the typed `validate` rule: unknown
-// appended optional fields are accepted and reported).
+// appended optional fields are accepted and reported). Without `custom` the
+// check is structural: a custom type is its wire type. With it, every value
+// of a custom type whose handler has a `check` is checked too, and under
+// `require_all` a custom type with no handler is an error.
 [[nodiscard]] inline codec_status validate_pssz(const schema_types::Schema &schema,
                                                 const schema_types::AnyType &root,
                                                 std::span<const char> bytes,
-                                                bool *has_unknown = nullptr)
+                                                bool *has_unknown = nullptr,
+                                                const CustomHandlers *custom = nullptr)
 {
-   return validate_auto(schema, root, bytes, has_unknown);
+   return validate_auto(schema, root, bytes, has_unknown, custom);
 }
 } // namespace psio::pssz_ir

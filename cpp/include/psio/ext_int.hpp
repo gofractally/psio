@@ -281,6 +281,9 @@ namespace psio {
 
    struct uint128_text_codec
    {
+      // Not the type's Schema IR presentation (adapter.hpp schema_custom_v).
+      static constexpr bool schema_custom = false;
+
       static std::size_t packsize(const uint128& v) noexcept
       {
          std::string tmp;
@@ -328,6 +331,9 @@ namespace psio {
 
    struct int128_text_codec
    {
+      // Not the type's Schema IR presentation (adapter.hpp schema_custom_v).
+      static constexpr bool schema_custom = false;
+
       static std::size_t packsize(const int128& v) noexcept
       {
          std::string tmp;
@@ -385,6 +391,9 @@ namespace psio {
 
    struct uint256_text_codec
    {
+      // Not the type's Schema IR presentation (adapter.hpp schema_custom_v).
+      static constexpr bool schema_custom = false;
+
       static std::size_t packsize(const uint256& v) noexcept
       {
          std::string tmp;
@@ -538,6 +547,9 @@ namespace psio {
 
    struct float128_text_codec
    {
+      // Not the type's Schema IR presentation (adapter.hpp schema_custom_v).
+      static constexpr bool schema_custom = false;
+
       static std::size_t packsize(const float128&) noexcept
       {
          // "0x" + 32 hex chars.
