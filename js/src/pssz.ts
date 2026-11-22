@@ -13,7 +13,10 @@
 // bits -> bigint; floats -> number; UTF-8 string ("utf8") -> string; raw
 // string ("string": any bytes) and bytes (hex adapter) -> Uint8Array; enum -> the number / bigint of its underlying integer (the
 // enumerator name appears only in text); record -> object; list / array /
-// tuple -> array; variant -> { type, value }; optional -> null or the value
+// tuple / pair -> array; map -> Map and set -> Set, in canonical (key) order
+// (any iterable of entries / elements is encoded); nested value -> the inner
+// value (its bytes, a Uint8Array, when nested bytes are opaque);
+// variant -> { type, value }; optional -> null or the value
 // (an optional of an optional holds null or { some: inner }); bit types -> { bytes, bitCount }. A NaN
 // with a payload decodes to a PsszNaN so that it re-encodes bit for bit.
 // A time value (duration, time point or monotonic time point, docs/time.md)
@@ -38,7 +41,7 @@ import { decodeKey, encodeKey, encodeKeyPrefix, keyPrefixUpperBound as upperBoun
 import { viewAt } from './pssz-view.js';
 
 export {
-  PsszError, PsszNaN, IR_VERSION,
+  PsszError, PsszNaN, PsszNegativeZero, IR_VERSION,
   type PsszErrorKind, type IrSchema, type IrAnyType, type IrMember, type IrAttribute, type IrTypeValue,
   type IrEnum, type IrEnumerator, type IrFunc, type IrResource, type IrInterface, type IrWorld, type IrUse,
   type CompactEnumerator, type PsszCustomHandler,
@@ -50,21 +53,38 @@ export { PsszView, RecordView, TupleView, ListView, VariantView } from './pssz-v
 /** `auto`: type-derived offset widths (`psio::pssz`). 1 / 2 / 4: one inherited width (`psio::pssz_<W>`). */
 export type PsszWidth = 'auto' | 1 | 2 | 4;
 
-/** Custom id -> the handler of its text form. */
+/** Custom id -> its handler: the text form and / or the invariant of the type. */
 export type PsszCustomHandlers = { [id: string]: PsszCustomHandler } | ReadonlyMap<string, PsszCustomHandler>;
+
+/**
+ * What a codec does with the bytes of a nested value (`Nested{type}`).
+ * `typed`: they are validated as the inner type by every reader, and the
+ * value is the inner value. `opaque`: they are not looked at, and the value
+ * is the bytes (a `Uint8Array`) — the behaviour of a C++
+ * `nested<T, nested_validation::deferred>` member, and of a reader that must
+ * keep foreign bytes exactly.
+ */
+export type PsszNestedBytes = 'typed' | 'opaque';
 
 export interface PsszSchemaOptions {
   /**
-   * Text handlers of custom types (`Custom` ids that are not part of the
-   * binary form), by id. A handler is bound when a type is compiled
-   * (`schema.type`), not looked up per value.
+   * Handlers of custom types (`Custom` ids that are not part of the binary
+   * form), by id: the type's text form (`toText` / `fromText`) and / or its
+   * invariant (`check`). A handler is bound when a type is compiled
+   * (`schema.type`), not looked up per value. `check` runs on every entry
+   * point, binary and text.
    */
   handlers?: PsszCustomHandlers;
   /**
-   * A custom id with no handler is an error when text is read or written
-   * (default: it reads and writes as its wire type's own text).
+   * A strict registry: a custom id with no handler is an error on every
+   * entry point, binary and text (default: such a type is its wire type —
+   * the wire type's text, its invariant not checked).
    */
   requireHandlers?: boolean;
+  /** Nested bytes; default `typed`. */
+  nestedBytes?: PsszNestedBytes;
+  /** @internal Named types whose Nested node is opaque (typed deferred members). */
+  deferredNested?: Iterable<string>;
 }
 export interface PsszTypeOptions extends PsszSchemaOptions {
   /** Offset-width profile; default `auto`. */
@@ -123,7 +143,7 @@ export class PsszType<T = unknown, V = unknown> {
 
   /** The canonical PSSZ bytes of `value`. */
   encode(value: T): Uint8Array {
-    return guarded(() => this.codec.encodeTop(this.node, value));
+    return guarded(() => this.codec.encodeTop(this.ref, value));
   }
 
   /** Decodes fully validated PSSZ bytes. */
@@ -131,7 +151,7 @@ export class PsszType<T = unknown, V = unknown> {
     return guarded(() => {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false };
-      return this.codec.decodeTop(this.node, input, ctx) as T;
+      return this.codec.decodeTop(this.ref, input, ctx) as T;
     });
   }
 
@@ -149,7 +169,7 @@ export class PsszType<T = unknown, V = unknown> {
       this.codec.checkTopCap(this.node, input.length, (m) => {
         throw new PsszError('bytes', m);
       });
-      return viewAt(this.codec, this.node, input, 0, input.length, 0) as V;
+      return viewAt(this.codec, this.ref, input, 0, input.length, 0) as V;
     });
   }
 
@@ -158,16 +178,23 @@ export class PsszType<T = unknown, V = unknown> {
     try {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: true, hasUnknown: false };
-      guarded(() => this.codec.decodeTop(this.node, input, ctx));
+      guarded(() => this.codec.decodeTop(this.ref, input, ctx));
       return { ok: true, hasUnknown: ctx.hasUnknown };
     } catch (e) {
       return { ok: false, error: e as PsszError };
     }
   }
 
-  /** The `key` bytes of `value`: bytewise order is value order. */
+  /**
+   * The `key` bytes of `value`: bytewise order is value order. The entries
+   * of a map / set are written in ascending key order; a value that
+   * violates an invariant of a registered handler has no key.
+   */
   encodeKey(value: T): Uint8Array {
-    return guarded(() => encodeKey(this.node, value));
+    return guarded(() => {
+      this.codec.checkValue(this.ref, value, 'value');
+      return encodeKey(this.codec, this.node, value);
+    });
   }
 
   /**
@@ -175,7 +202,7 @@ export class PsszType<T = unknown, V = unknown> {
    * whole input, or a PsszError.
    */
   decodeKey(bytes: Uint8Array): T {
-    return guarded(() => decodeKey(this.node, asBytes(bytes))) as T;
+    return guarded(() => decodeKey(this.codec, this.ref, asBytes(bytes))) as T;
   }
 
   /** Checks key bytes against the type. Never throws. */
@@ -194,7 +221,7 @@ export class PsszType<T = unknown, V = unknown> {
    * the prefix every full key with those leading elements starts with.
    */
   encodeKeyPrefix(elements: unknown[]): Uint8Array {
-    return guarded(() => encodeKeyPrefix(this.node, elements));
+    return guarded(() => encodeKeyPrefix(this.codec, this.ref, elements));
   }
 
   /** JSON / I-JSON text -> value. */
@@ -209,12 +236,13 @@ export class PsszType<T = unknown, V = unknown> {
 
   /** JSON / I-JSON text -> canonical PSSZ bytes. */
   jsonToPssz(text: string | Uint8Array, format: JsonFormat = 'ijson'): Uint8Array {
-    return guarded(() => this.codec.encodeTop(this.node, jsonToValue(this.codec, this.ref, format, text)));
+    return guarded(() => this.codec.encodeTop(this.ref, jsonToValue(this.codec, this.ref, format, text)));
   }
 
   /** PSSZ bytes (fully validated) -> JSON / I-JSON text. */
   psszToJson(bytes: Uint8Array, format: JsonFormat = 'ijson', options?: PsszDecodeOptions): string {
-    return guarded(() => valueToJson(this.codec, this.ref, format, this.decode(bytes, options)));
+    // The decode runs the handlers' checks; the writer need not repeat them.
+    return guarded(() => valueToJson(this.codec, this.ref, format, this.decode(bytes, options), false));
   }
 }
 
@@ -228,8 +256,11 @@ function handlerMap(input: PsszCustomHandlers | undefined): Map<string, PsszCust
       throw new PsszError('schema', `pssz: custom id "${id}" is a built-in time presentation and takes no handler`);
     if (reservedCustomId(id))
       throw new PsszError('schema', `pssz: custom id "${id}" is part of the binary form and takes no handler`);
-    if (!handler || typeof handler.toText !== 'function' || typeof handler.fromText !== 'function')
-      throw new PsszError('schema', `pssz: the handler of custom id "${id}" needs toText and fromText`);
+    if (typeof handler !== 'object' || handler === null)
+      throw new PsszError('schema', `pssz: the handler of custom id "${id}" must be an object`);
+    for (const member of ['toText', 'fromText', 'check'] as const)
+      if (handler[member] !== undefined && typeof handler[member] !== 'function')
+        throw new PsszError('schema', `pssz: ${member} of the handler of custom id "${id}" must be a function`);
     out.set(id, handler);
   }
   return out;
@@ -244,6 +275,8 @@ export class PsszSchema {
   private readonly codecs = new Map<number, Codec>();
   private readonly handlers: ReadonlyMap<string, PsszCustomHandler>;
   private readonly requireHandlers: boolean;
+  private readonly nestedBytes: PsszNestedBytes;
+  private readonly deferred: ReadonlySet<string>;
 
   /**
    * `input` is a `psio::Schema` value (as `PsszSchema.decode` produces), or
@@ -254,6 +287,39 @@ export class PsszSchema {
     this.ir = guarded(() => normalizeSchema(input));
     this.handlers = guarded(() => handlerMap(options?.handlers));
     this.requireHandlers = options?.requireHandlers ?? false;
+    const nested = options?.nestedBytes ?? 'typed';
+    if (nested !== 'typed' && nested !== 'opaque')
+      throw new PsszError('schema', 'pssz: nestedBytes must be "typed" or "opaque"');
+    this.nestedBytes = nested;
+    this.deferred = new Set(options?.deferredNested ?? []);
+  }
+
+  // The same schema under other options (absent: this schema's).
+  private derive(options: PsszSchemaOptions): PsszSchema {
+    return guarded(() => {
+      const merged = new Map(this.handlers);
+      for (const [id, handler] of handlerMap(options.handlers)) merged.set(id, handler);
+      return new PsszSchema(this.ir, {
+        handlers: merged,
+        requireHandlers: options.requireHandlers ?? this.requireHandlers,
+        nestedBytes: options.nestedBytes ?? this.nestedBytes,
+        deferredNested: this.deferred,
+      });
+    });
+  }
+
+  private codec(w: 0 | 1 | 2 | 4): Codec {
+    let codec = this.codecs.get(w);
+    if (!codec) {
+      const options = {
+        opaqueNested: this.nestedBytes === 'opaque',
+        deferred: this.deferred,
+        // The bytes inside a nested value are always the automatic profile.
+        auto: w === 0 ? undefined : this.codec(0),
+      };
+      this.codecs.set(w, (codec = new Codec(this.ir, w, this.handlers, this.requireHandlers, options)));
+    }
+    return codec;
   }
 
   /** From the PSSZ encoding of `psio::Schema` (how a schema travels). */
@@ -279,18 +345,13 @@ export class PsszSchema {
   }
 
   /**
-   * The same schema with these custom text handlers (added to, and
-   * replacing by id, the ones it has) and this `requireHandlers`.
+   * The same schema with these custom handlers (added to, and replacing by
+   * id, the ones it has), this `requireHandlers` and this `nestedBytes`.
    */
-  withHandlers(handlers: PsszCustomHandlers, options?: { requireHandlers?: boolean }): PsszSchema {
-    return guarded(() => {
-      const merged = new Map(this.handlers);
-      for (const [id, handler] of handlerMap(handlers)) merged.set(id, handler);
-      return new PsszSchema(this.ir, {
-        handlers: merged,
-        requireHandlers: options?.requireHandlers ?? this.requireHandlers,
-      });
-    });
+  withHandlers(
+    handlers: PsszCustomHandlers, options?: { requireHandlers?: boolean; nestedBytes?: PsszNestedBytes },
+  ): PsszSchema {
+    return this.derive({ handlers, requireHandlers: options?.requireHandlers, nestedBytes: options?.nestedBytes });
   }
 
   /** The PSSZ encoding of this schema. */
@@ -317,11 +378,14 @@ export class PsszSchema {
       if (width !== 'auto' && width !== 1 && width !== 2 && width !== 4)
         throw new PsszError('schema', 'pssz: width must be "auto", 1, 2 or 4');
       const w = width === 'auto' ? 0 : width;
-      // Handlers given for this type alone: its own compilation.
-      if (options?.handlers !== undefined || options?.requireHandlers !== undefined)
-        return this.withHandlers(options.handlers ?? {}, { requireHandlers: options.requireHandlers }).type<T, V>(root, { width });
-      let codec = this.codecs.get(w);
-      if (!codec) this.codecs.set(w, (codec = new Codec(this.ir, w, this.handlers, this.requireHandlers)));
+      // Handlers / options given for this type alone: its own compilation.
+      if (
+        options?.handlers !== undefined ||
+        (options?.requireHandlers !== undefined && options.requireHandlers !== this.requireHandlers) ||
+        (options?.nestedBytes !== undefined && options.nestedBytes !== this.nestedBytes)
+      )
+        return this.derive(options).type<T, V>(root, { width });
+      const codec = this.codec(w);
       const ir: IrAnyType = normalizeType(root);
       return new PsszType<T, V>(codec, codec.node(ir));
     });

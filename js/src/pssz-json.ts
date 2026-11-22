@@ -19,9 +19,9 @@
 // This file is internal. The public API is `pssz.ts`.
 
 import {
-  Codec, MAX_DEPTH, Node, PsszError, PsszNaN, isNoncharacter, memberBoundAdmits, setField, unwrapOption, utf8CodePoint, utf8Valid,
-  utf8Decode, utf8Encode, utf8Length, utf8Multibyte, wellFormed, wrapSome,
-  type IntForm, type IrEnumerator, type VariantValue,
+  Codec, MAX_DEPTH, Node, PsszError, PsszNaN, PsszNegativeZero, assocItems, isNoncharacter, memberBoundAdmits, setField, settleMember,
+  unwrapOption, utf8CodePoint, utf8Valid, utf8Decode, utf8Encode, utf8Length, utf8Multibyte, wellFormed, wrapSome,
+  type IntForm, type IrEnumerator, type PsszCustomHandler, type VariantValue,
 } from './pssz-core.js';
 
 import { tickTypeAdmits, timeTextOf, timeTicksOf } from './time.js';
@@ -557,37 +557,150 @@ function bytesAdmit(container: Node, n: number): boolean {
   return !container.bounded || n <= container.countNum;
 }
 
-// The value a custom handler deals in: checked against the wire type and
-// returned as `decode` would give it. Throws PsszError when it does not fit.
-function canonical(codec: Codec, node: Node, value: unknown): unknown {
-  const bytes = codec.encodeAt(node, value, 0);
-  return codec.decodeAt(node, bytes, 0, bytes.length, 0, { allowUnknown: false, hasUnknown: false });
+// How the key type of a map appears in text (docs/json.md, "Maps and sets").
+interface MapKeyText {
+  /**
+   * `pairs`: not a string by type, the map is an array of [k, v]. `string`:
+   * a "string" / "utf8" node. `handler`: a custom type whose registered
+   * handler has a text form.
+   */
+  form: 'pairs' | 'string' | 'handler';
+  /** The string node, or the presented custom node. */
+  node?: Node;
+  handler?: PsszCustomHandler;
+  /** A strict registry, and the key's id has no handler. */
+  missing: boolean;
 }
+
+function keyTextOf(codec: Codec, key: Node): MapKeyText {
+  let at = key;
+  for (let hops = 0; hops <= 4096; ++hops) {
+    if (at.kind === 'string') return { form: 'string', node: at, missing: false };
+    if (at.kind !== 'custom') break;
+    if (!at.boxed) {
+      // A handler that presents the type decides the key's text. One that
+      // only checks it (an invariant, no text form) leaves the text to the
+      // wire type, like no handler at all.
+      const handler = at.handler;
+      if (handler && (handler.toText || handler.fromText)) return { form: 'handler', node: at, handler, missing: false };
+      if (!handler && codec.requireHandlers) return { form: 'pairs', missing: true };
+    }
+    at = at.inner!;
+  }
+  return { form: 'pairs', missing: false };
+}
+
+const NO_HANDLER = 'pssz IR: no handler registered for a custom type';
 
 class Reader {
   constructor(
     private readonly c: JsonCursor,
     private readonly ijson: boolean,
-    private readonly codec: Codec,
+    // The codec of the values being read: the automatic one inside a
+    // nested value.
+    private codec: Codec,
   ) {}
 
-  // A custom presentation: one JSON string, turned by its handler into a
-  // value of the inner type.
-  private presented(node: Node): unknown {
+  // An invariant refused the value read: the error is the type's own.
+  private violated(message: string): never {
+    throw new PsszError('json', message, this.c.p, true);
+  }
+
+  // The handler's invariant on a value just read (as `decode` gives it).
+  private checked(node: Node, value: unknown): void {
+    this.codec.checkCustom(node, value, (message, invariant) =>
+      invariant ? this.violated(message) : this.c.fail(message));
+  }
+
+  // The text of a custom type as its handler reads it: a value of the wire
+  // type, as `decode` gives it.
+  private fromText(node: Node, handler: PsszCustomHandler, text: string): unknown {
     const c = this.c;
-    if (c.kind() !== 'string') c.fail('json: expected a string (custom text form)');
-    const s = c.string();
     let value: unknown;
     try {
-      value = node.handler!.fromText(utf8Decode(s.bytes, s.start, s.end));
+      if (!handler.fromText) throw new Error('no text form to read');
+      value = handler.fromText(text);
     } catch {
       return c.fail('json: text is not a value of the custom type');
     }
     try {
-      return canonical(this.codec, this.codec.wireOf(node).node, value);
+      return this.codec.canonical(this.codec.wireOf(node).node, value);
     } catch {
       return c.fail('json: custom handler produced a value that is not the inner type');
     }
+  }
+
+  // The checks of the custom types inside a value that did not pass through
+  // `read` (a handler's value, a key read from a member name).
+  private checkedInside(ref: Node, value: unknown): void {
+    if (!this.codec.checksValues) return;
+    try {
+      this.codec.encodeAt(ref, value, 0);
+    } catch (e) {
+      if (!(e instanceof PsszError)) throw e;
+      if (e.invariant) this.violated(e.message);
+      this.c.fail(e.message);
+    }
+  }
+
+  // A custom presentation: one JSON string, turned by its handler into a
+  // value of the inner type, whose own custom values are checked, then this
+  // one.
+  private presented(node: Node): unknown {
+    const c = this.c;
+    if (c.kind() !== 'string') c.fail('json: expected a string (custom text form)');
+    const s = c.string();
+    const value = this.fromText(node, node.handler!, utf8Decode(s.bytes, s.start, s.end));
+    this.checkedInside(node.inner!, value);
+    this.checked(node, value);
+    return value;
+  }
+
+  // A map / set: any order, no repeated key or element; the value is in
+  // canonical order.
+  private assoc(node: Node, form: IntForm): unknown {
+    const c = this.c;
+    const map = node.assoc === 'map';
+    const limit = node.bounded ? node.countNum : null;
+    const items: unknown[] = [];
+    const key: MapKeyText = map ? keyTextOf(this.codec, node.keyRef) : { form: 'pairs', missing: false };
+    if (key.missing) c.fail(NO_HANDLER);
+    if (key.form === 'pairs') {
+      // A set's elements take the member's integer form; a map entry is a
+      // tuple, whose elements take the natural one.
+      this.arrayItems(limit, false, () => {
+        items.push(this.read(node.textChild, map ? 'natural' : form, 0));
+      });
+    } else {
+      if (c.kind() !== 'object') c.fail('json: expected an object (a map with a string key)');
+      c.beginObject();
+      const keyRef = node.keyRef;
+      const valueRef = node.valueRef;
+      while (true) {
+        const name = c.nextField();
+        if (name === null) break;
+        if (limit !== null && items.length >= limit) c.fail('json: array exceeds its bound');
+        // A member name is a key value: what `read` makes of the same text
+        // as a JSON string of the key type, invariants included.
+        let k: unknown;
+        if (key.form === 'string') {
+          const bytes = utf8Encode(name);
+          if (!bytesAdmit(key.node!.child, bytes.length)) c.fail('json: string exceeds its bound');
+          k = key.node!.raw ? bytes : name;
+        } else k = this.fromText(key.node!, key.handler!, name);
+        this.checkedInside(keyRef, k);
+        items.push([k, this.read(valueRef, 'natural', 0)]);
+      }
+    }
+    let order: number[] | null;
+    try {
+      order = this.codec.assocOrder(node, items);
+    } catch (e) {
+      if (!(e instanceof PsszError)) throw e;
+      return c.fail(e.message);
+    }
+    if (!order) return c.fail(map ? 'json: duplicate map key' : 'json: duplicate set element');
+    return this.codec.assocValue(node, order.map((index) => items[index]));
   }
 
   // A 128 / 256-bit integer: a decimal string (or the legacy "0x" string),
@@ -722,6 +835,8 @@ class Reader {
       }
       const member = node.members[index];
       const value = this.read(member.text, this.ijson ? member.ijsonInt : member.jsonInt, 0);
+      // (A nested member's bound counts encoded bytes: checked by the
+      // encoder, where they exist.)
       if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
         c.fail('json: member length_bound violated');
       slots[index] = value;
@@ -826,6 +941,7 @@ class Reader {
         return wrapSome(node, this.read(node.textChild, form, n + 1));
       case 'list':
       case 'array':
+        if (node.assoc) return this.assoc(node, form);
         return this.sequence(node, form);
       case 'tuple': {
         const items: unknown[] = [];
@@ -838,13 +954,50 @@ class Reader {
         return this.record(node);
       case 'variant':
         return this.variant(node);
-      case 'custom':
-        // "box", or a text presentation with no handler: the inner type.
-        if (!node.boxed) {
-          if (node.handler) return this.presented(node);
-          if (this.codec.requireHandlers) c.fail('pssz IR: no handler registered for a custom type');
+      case 'nested': {
+        // The inner value's own text. Its values are those of the
+        // automatic profile, whatever profile the value around it has.
+        const outer = this.codec;
+        this.codec = outer.auto;
+        let inner: unknown;
+        try {
+          inner = this.read(node.textChild, form, n + 1);
+        } finally {
+          this.codec = outer;
         }
-        return this.read(node.inner!, form, n + 1);
+        if (!outer.isOpaque(node)) return inner;
+        // An opaque nested value is its bytes: the canonical encoding of
+        // what was read.
+        try {
+          return outer.auto.quietly(() => outer.auto.encodeAt(node.textChild, inner, 0));
+        } catch (e) {
+          if (!(e instanceof PsszError)) throw e;
+          return c.fail('json: nested value has no encoding');
+        }
+      }
+      case 'custom': {
+        // "box" is the inner type's text. A custom type is presented and
+        // checked by its handler; with none it is its wire type (or, under
+        // a strict registry, an error).
+        if (node.boxed) return this.read(node.inner!, form, n + 1);
+        const handler = node.handler;
+        if (!handler && this.codec.requireHandlers) c.fail(NO_HANDLER);
+        if (handler?.fromText) return this.presented(node);
+        const value = this.read(node.inner!, form, n + 1);
+        if (handler?.check) {
+          // The wire type's text; the custom values inside it were checked
+          // as they were read, then this one as `decode` gives it.
+          let held: unknown;
+          try {
+            held = this.codec.canonical(this.codec.wireOf(node).node, value);
+          } catch (e) {
+            if (!(e instanceof PsszError)) throw e;
+            return c.fail('pssz IR: custom value does not match its inner type');
+          }
+          this.checked(node, held);
+        }
+        return value;
+      }
     }
   }
 }
@@ -904,7 +1057,86 @@ function writeString(out: string[], s: string, nonchar: boolean): void {
 
 class Writer {
   readonly out: string[] = [];
-  constructor(private readonly ijson: boolean, private readonly codec: Codec) {}
+  /**
+   * Whether the handlers' `check` runs on the values written (false for a
+   * value that was just decoded with the same registry).
+   */
+  checks = true;
+  // The codec of the values being written: the automatic one inside a
+  // nested value.
+  constructor(private readonly ijson: boolean, private codec: Codec) {}
+
+  // The value of a custom node as `decode` gives it, the custom values
+  // inside it checked on the way (when checks run).
+  private held(ref: Node, value: unknown): unknown {
+    const codec = this.codec;
+    try {
+      const bytes = this.checks ? codec.encodeAt(ref, value, 0) : codec.quietly(() => codec.encodeAt(ref, value, 0));
+      return codec.quietly(() =>
+        codec.decodeAt(ref, bytes, 0, bytes.length, 0, { allowUnknown: false, hasUnknown: false }));
+    } catch (e) {
+      if (!(e instanceof PsszError) || e.invariant || e.message === NO_HANDLER) throw e;
+      return fail('pssz IR: custom value does not match its inner type');
+    }
+  }
+
+  private presentedText(handler: PsszCustomHandler, inner: unknown): void {
+    let text: unknown;
+    try {
+      if (!handler.toText) throw new Error('no text form to write');
+      text = handler.toText(inner);
+    } catch {
+      return fail('json: custom handler has no text for the value');
+    }
+    if (typeof text !== 'string') return fail('json: custom handler has no text for the value');
+    writeString(this.out, text, this.ijson);
+  }
+
+  // A map / set: canonical order; an object when the key is a string by
+  // type, an array of [k, v] pairs / of elements otherwise.
+  private assoc(node: Node, value: unknown, form: IntForm, n: number): void {
+    const out = this.out;
+    const map = node.assoc === 'map';
+    const items = assocItems(value);
+    if (!items) return fail('pssz IR: sequence value required');
+    if (node.bounded && items.length > node.countNum) fail('json: array exceeds its bound');
+    const order = this.codec.assocOrder(node, items);
+    if (!order) return fail(map ? 'json: map has duplicate keys' : 'json: set has duplicate elements');
+    const key: MapKeyText = map ? keyTextOf(this.codec, node.keyRef) : { form: 'pairs', missing: false };
+    if (key.missing) fail(NO_HANDLER);
+    const object = key.form !== 'pairs';
+    out.push(object ? '{' : '[');
+    let first = true;
+    for (const index of order) {
+      if (!first) out.push(',');
+      first = false;
+      const item = items[index];
+      if (!object) {
+        // A set element, or a map entry as the [k, v] tuple it is.
+        this.write(node.textChild, item, map ? 'natural' : form, n + 1);
+        continue;
+      }
+      const entry = item as [unknown, unknown];
+      // The key is written from its value, not through `write`: the checks
+      // of its type's custom nodes run here.
+      if (this.checks && this.codec.checksValues) this.codec.encodeAt(node.keyRef, entry[0], 0);
+      if (key.form === 'string') this.write(key.node!, entry[0], 'natural', n + 1);
+      else {
+        const codec = this.codec;
+        let inner: unknown;
+        try {
+          inner = codec.canonical(codec.wireOf(key.node!).node, entry[0]);
+        } catch (e) {
+          if (!(e instanceof PsszError)) throw e;
+          return fail('pssz IR: custom value does not match its inner type');
+        }
+        this.presentedText(key.handler!, inner);
+      }
+      out.push(':');
+      this.write(node.valueRef, entry[1], 'natural', n + 1);
+    }
+    out.push(object ? '}' : ']');
+  }
 
   private integer(
     bits: number, signed: boolean, form: IntForm, value: unknown, enumerators?: IrEnumerator[],
@@ -965,6 +1197,7 @@ class Writer {
         }
         return this.integer(node.bits, node.signed, form, value, node.enumerators);
       case 'float':
+        if (value instanceof PsszNegativeZero) value = -0;
         if (value instanceof PsszNaN) return fail(`${this.ijson ? 'ijson' : 'json'}: non-finite float has no JSON text`);
         if (typeof value !== 'number') return fail('pssz IR: float value does not match the schema');
       {
@@ -1019,7 +1252,29 @@ class Writer {
       }
       case 'list':
       case 'array':
+        if (node.assoc) return this.assoc(node, value, form, n);
         return this.sequence(node, value, form, n);
+      case 'nested': {
+        // The inner value's own text. An opaque nested value holds bytes:
+        // they are validated as the inner type (the compatible rule) first.
+        const outer = this.codec;
+        let inner = value;
+        if (outer.isOpaque(node)) {
+          if (!(value instanceof Uint8Array)) return fail('pssz IR: bytes value required for an opaque nested value');
+          try {
+            inner = outer.auto.decodeAt(node.textChild, value, 0, value.length, 0, { allowUnknown: true, hasUnknown: false });
+          } catch (e) {
+            if (!(e instanceof PsszError) || e.invariant) throw e;
+            return fail('json: nested bytes are not a valid encoding of their type');
+          }
+        }
+        this.codec = outer.auto;
+        try {
+          return this.write(node.textChild, inner, form, n + 1);
+        } finally {
+          this.codec = outer;
+        }
+      }
       case 'tuple':
         if (!Array.isArray(value) || value.length !== node.members.length)
           return fail('pssz IR: tuple value count mismatch');
@@ -1040,9 +1295,11 @@ class Writer {
           const own = Object.prototype.hasOwnProperty.call(fields, member.name) ? fields[member.name] : undefined;
           if (own === undefined && member.node.kind !== 'option')
             fail(`pssz IR: missing required record value "${member.name}"`);
-          const field = own === undefined ? null : own;
-          if (member.bound && !memberBoundAdmits(member.bound, member.node, field))
-            fail('json: member length_bound violated');
+          let field: unknown = own === undefined ? null : own;
+          if (member.bound) {
+            field = settleMember(member.node, field);
+            if (!memberBoundAdmits(member.bound, member.node, field)) fail('json: member length_bound violated');
+          }
           if (!first) out.push(',');
           first = false;
           writeString(out, member.name, false);
@@ -1074,37 +1331,44 @@ class Writer {
       }
       case 'custom': {
         if (!node.boxed) {
-          if (node.handler) {
-            // The inner value as `decode` gives it, then the handler's text
-            // as one JSON string.
-            let inner: unknown;
+          const handler = node.handler;
+          if (!handler && this.codec.requireHandlers) fail(NO_HANDLER);
+          const check = this.checks && typeof handler?.check === 'function';
+          if (handler && (handler.toText || check)) {
+            // The inner value as `decode` gives it — which checks the
+            // custom values inside it — then this one's check, then the
+            // handler's text as one JSON string.
+            const inner = this.held(node.inner!, value);
+            if (check)
+              this.codec.checkCustom(node, inner, (message, invariant) => {
+                throw new PsszError('value', message, undefined, invariant);
+              });
+            if (handler.toText) return this.presentedText(handler, inner);
+            // The wire type's text; everything under it is checked.
+            const outer = this.checks;
+            this.checks = false;
             try {
-              inner = canonical(this.codec, this.codec.wireOf(node).node, value);
-            } catch (e) {
-              if (!(e instanceof PsszError)) throw e;
-              return fail('pssz IR: custom value does not match its inner type');
+              return this.write(node.inner!, value, form, n + 1);
+            } finally {
+              this.checks = outer;
             }
-            let text: unknown;
-            try {
-              text = node.handler.toText(inner);
-            } catch {
-              return fail('json: custom handler has no text for the value');
-            }
-            if (typeof text !== 'string') return fail('json: custom handler has no text for the value');
-            return writeString(out, text, this.ijson);
           }
-          if (this.codec.requireHandlers) fail('pssz IR: no handler registered for a custom type');
         }
-        // "box", or a text presentation with no handler: the inner type.
+        // "box", or a custom type with no handler: the inner type.
         return this.write(node.inner!, value, form, n + 1);
       }
     }
   }
 }
 
-/** The JSON / I-JSON text of `value`. */
-export function valueToJson(codec: Codec, node: Node, format: JsonFormat, value: unknown): string {
+/**
+ * The JSON / I-JSON text of `value`. The handlers' checks run on the
+ * value's custom types before any text is returned (`checks` false: the
+ * value was just decoded with the same registry).
+ */
+export function valueToJson(codec: Codec, node: Node, format: JsonFormat, value: unknown, checks = true): string {
   const writer = new Writer(format === 'ijson', codec);
+  writer.checks = checks;
   writer.write(node, value, 'natural', 0);
   return writer.out.join('');
 }

@@ -4,7 +4,11 @@
 // record's header and slots, a list view one element from its offset table,
 // and nothing else is touched or allocated. Scalars and text are returned as
 // values; bytes and raw strings as subarrays of the input (no copy); records,
-// tuples, lists and variants as further views.
+// tuples, lists and variants as further views. A pair is a tuple; a map is
+// the list of its [key, value] entries and a set the list of its elements
+// (`ListView`, in wire order: ascending by key); a nested value is the view
+// of its inner value over the inner bytes; a transparent or custom type is
+// its member's / wire type's view.
 //
 // A view checks what it reads and nothing more: every frame on the path to
 // an accessed value (header, slot, offset, selector, span) and the value
@@ -12,6 +16,9 @@
 // not asked for, so rules that need the whole value (trailing optionals
 // pruned, member length bounds, unknown-field policy) are those of
 // `validate` / `decode`; `toValue()` applies them to the subtree it decodes.
+// The same goes for the order of a map / set and for the invariants of
+// custom types (the `check` of a handler): a view does not run them,
+// `toValue()` does.
 //
 // PSSZ has no in-place mutation: an encoding is canonical, offset widths are
 // derived from the type, and trailing absent optionals are pruned, so
@@ -38,6 +45,7 @@ export abstract class PsszView<T = unknown> {
     /** @internal */ protected readonly start: number,
     /** @internal */ protected readonly end: number,
     /** @internal */ protected readonly depth: number,
+    /** @internal The type as written: `node` under its custom wrappers. */ protected readonly ref: Node = node,
   ) {}
 
   /** The encoding of this value: a subarray of the input, not a copy. */
@@ -51,7 +59,7 @@ export abstract class PsszView<T = unknown> {
    */
   toValue(options?: { rejectUnknown?: boolean }): T {
     const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false };
-    return guarded(() => this.codec.decodeAt(this.node, this.input, this.start, this.end, this.depth, ctx)) as T;
+    return guarded(() => this.codec.decodeAt(this.ref, this.input, this.start, this.end, this.depth, ctx)) as T;
   }
 }
 
@@ -88,7 +96,7 @@ abstract class MembersView<T> extends PsszView<T> {
   protected member(i: number): unknown {
     const spans = this.frame();
     if (!spans.present[i]) return null;
-    return viewAt(this.codec, this.node.members[i].node, this.input, spans.begins[i], spans.ends[i], this.depth + 1);
+    return viewAt(this.codec, this.node.members[i].text, this.input, spans.begins[i], spans.ends[i], this.depth + 1);
   }
 }
 
@@ -180,7 +188,7 @@ export class ListView<T = unknown, E = unknown> extends PsszView<T> {
       return valueError('pssz view: list index out of range');
     return guarded(() => {
       const { codec, input, start, w } = this;
-      const element = this.node.child;
+      const element = this.node.textChild;
       if (this.elementSize >= 0) {
         const at = start + index * this.elementSize;
         return viewAt(codec, element, input, at, at + this.elementSize, this.depth + 1) as E;
@@ -222,24 +230,37 @@ export class VariantView<T = unknown, K extends string = string, V = unknown> ex
 
   get value(): V {
     const member = this.node.members[this.selector()];
-    return viewAt(this.codec, member.node, this.input, this.start + 1, this.end, this.depth + 1) as V;
+    return viewAt(this.codec, member.text, this.input, this.start + 1, this.end, this.depth + 1) as V;
   }
 }
 
-/** What a view returns for the value of `node` at `[start, end)`. */
-export function viewAt(codec: Codec, node: Node, bytes: Uint8Array, start: number, end: number, n: number): unknown {
+/**
+ * What a view returns for the value of `ref` (a type as written) at
+ * `[start, end)`.
+ */
+export function viewAt(codec: Codec, ref: Node, bytes: Uint8Array, start: number, end: number, n: number): unknown {
   return guarded(() => {
     codec.checkDepth(n, bytesError);
+    // A custom type, a box: the view of the wire type.
+    const node = codec.wireOf(ref).node;
     switch (node.kind) {
       case 'record':
-        return new RecordView(codec, node, bytes, start, end, n);
+        return new RecordView(codec, node, bytes, start, end, n, ref);
       case 'tuple':
-        return new TupleView(codec, node, bytes, start, end, n);
+        return new TupleView(codec, node, bytes, start, end, n, ref);
       case 'list':
       case 'array':
-        return new ListView(codec, node, bytes, start, end, n);
+        return new ListView(codec, node, bytes, start, end, n, ref);
       case 'variant':
-        return new VariantView(codec, node, bytes, start, end, n);
+        return new VariantView(codec, node, bytes, start, end, n, ref);
+      case 'nested':
+        // The view of the inner value over the inner bytes (the automatic
+        // profile, one node level below); opaque: the bytes.
+        if (codec.isOpaque(node)) {
+          if (end > start) codec.checkDepth(n + 1, bytesError);
+          return bytes.subarray(start, end);
+        }
+        return viewAt(codec.auto, node.textChild, bytes, start, end, n + 1);
       case 'option': {
         const size = end - start;
         if (codec.canBeEmpty(node.child)) {
@@ -251,7 +272,7 @@ export function viewAt(codec: Codec, node: Node, bytes: Uint8Array, start: numbe
           if (bytes[start] !== 1) bytesError('pssz IR: invalid optional selector');
           ++start;
         } else if (size === 0) return null;
-        return wrapSome(node, viewAt(codec, node.child, bytes, start, end, n + 1));
+        return wrapSome(node, viewAt(codec, node.textChild, bytes, start, end, n + 1));
       }
       case 'hex':
         codec.boundBytes(node.child, end - start, bytesError);
@@ -263,12 +284,10 @@ export function viewAt(codec: Codec, node: Node, bytes: Uint8Array, start: numbe
           return bytes.subarray(start, end);
         }
         break;
-      case 'custom':
-        return viewAt(codec, codec.wireOf(node).node, bytes, start, end, n);
       default:
         break;
     }
-    // Scalars, text and bit types: the value itself.
-    return codec.decodeAt(node, bytes, start, end, n, { allowUnknown: true, hasUnknown: false });
+    // Scalars, text and bit types: the value itself (no handler runs).
+    return codec.quietly(() => codec.decodeAt(node, bytes, start, end, n, { allowUnknown: true, hasUnknown: false }));
   });
 }

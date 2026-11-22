@@ -6,9 +6,9 @@
 // This file is internal. The public API is `pssz.ts`.
 
 import {
-  MAX_DEPTH, Node, PsszError, PsszNaN, memberBoundAdmits, setField, unwrapOption, utf8Decode, utf8Encode,
-  utf8Valid, wellFormed, wrapSome,
-  type BitsValue, type VariantValue,
+  MAX_DEPTH, Node, PsszError, PsszNaN, PsszNegativeZero, assocItems, compareBytes, memberBoundAdmits, setField, settleMember,
+  unwrapOption, utf8Decode, utf8Encode, utf8Valid, wellFormed, wrapSome,
+  type BitsValue, type Codec, type VariantValue,
 } from './pssz-core.js';
 
 function valueError(message: string): never {
@@ -24,9 +24,14 @@ function schemaError(message: string): never {
 const QUIET_NAN_32 = 0x7fc00000n;
 const QUIET_NAN_64 = 0x7ff8000000000000n;
 
-// A list whose elements are single key bytes shares the string framing.
-function octetList(element: Node): boolean {
-  return element.kind === 'char' || (element.kind === 'int' && element.bits === 8 && !element.time);
+// A list whose elements are single key bytes shares the string framing: u8,
+// i8 or char as written (through named aliases only). An enum over a byte,
+// a time value or a custom type over one is not an octet: its list has the
+// element framing. `list`: the list node.
+function octetList(list: Node): boolean {
+  const element = list.textChild;
+  return element.kind === 'char' ||
+    (element.kind === 'int' && element.bits === 8 && !element.time && !element.enumerators);
 }
 
 // The byte container under a string / hex adapter admits `n` bytes.
@@ -81,7 +86,31 @@ class Sink {
   }
 }
 
-function writeKey(node: Node, value: unknown, out: Sink, n: number): void {
+// The elements of a list / map / set in the order given: the octet framing
+// for single-byte elements, `01` + key(element) per element then `00`
+// otherwise.
+function writeList(codec: Codec, node: Node, value: unknown[], out: Sink, n: number): void {
+  if (node.bounded && value.length > node.countNum) valueError('key: list exceeds its bound');
+  const element = node.child;
+  if (octetList(node)) {
+    const signed = element.kind === 'int' && element.signed;
+    const bytes = new Uint8Array(value.length);
+    for (let i = 0; i < value.length; ++i) {
+      const v: unknown = value[i];
+      if (typeof v !== 'number' || !Number.isInteger(v) || (signed ? v < -128 || v > 127 : v < 0 || v > 255))
+        return valueError('key: byte value out of range');
+      bytes[i] = v & 0xff;
+    }
+    return out.escaped(bytes, signed ? 0x80 : 0);
+  }
+  for (const item of value) {
+    out.byte(1);
+    writeKey(codec, element, item, out, n + 1);
+  }
+  return out.byte(0);
+}
+
+function writeKey(codec: Codec, node: Node, value: unknown, out: Sink, n: number): void {
   // A decoded value is at most MAX_DEPTH nodes deep; far beyond is a cycle.
   if (n > 4 * MAX_DEPTH) valueError('key: node depth limit exceeded');
   switch (node.kind) {
@@ -103,6 +132,7 @@ function writeKey(node: Node, value: unknown, out: Sink, n: number): void {
       const size = node.size;
       const scratch = new DataView(new ArrayBuffer(8));
       let bits: bigint;
+      if (value instanceof PsszNegativeZero) value = -0;
       if (value instanceof PsszNaN) {
         if (value.size !== size) return valueError('key: NaN bits of the wrong float width');
         bits = value.bits;
@@ -160,44 +190,46 @@ function writeKey(node: Node, value: unknown, out: Sink, n: number): void {
       const [some, inner] = unwrapOption(node, value, valueError);
       if (!some) return out.byte(0);
       out.byte(1);
-      return writeKey(node.child, inner, out, n + 1);
+      return writeKey(codec, node.child, inner, out, n + 1);
     }
     case 'list': {
-      if (!Array.isArray(value)) return valueError('key: sequence value required');
-      if (node.bounded && value.length > node.countNum) valueError('key: list exceeds its bound');
-      const element = node.child;
-      if (octetList(element)) {
-        const signed = element.kind === 'int' && element.signed;
-        const bytes = new Uint8Array(value.length);
-        for (let i = 0; i < value.length; ++i) {
-          const v: unknown = value[i];
-          if (typeof v !== 'number' || !Number.isInteger(v) || (signed ? v < -128 || v > 127 : v < 0 || v > 255))
-            return valueError('key: byte value out of range');
-          bytes[i] = v & 0xff;
-        }
-        return out.escaped(bytes, signed ? 0x80 : 0);
+      if (!node.assoc) {
+        if (!Array.isArray(value)) return valueError('key: sequence value required');
+        return writeList(codec, node, value, out, n);
       }
-      for (const item of value) {
-        out.byte(1);
-        writeKey(element, item, out, n + 1);
-      }
-      return out.byte(0);
+      // A map / set: the key of the list of its entries in ascending key
+      // order, whatever order the value holds them in.
+      const items = assocItems(value);
+      if (!items) return valueError('key: sequence value required');
+      const order = codec.assocOrder(node, items);
+      if (!order) return valueError(node.assoc === 'map' ? 'key: map has duplicate keys' : 'key: set has duplicate elements');
+      return writeList(codec, node, order.map((index) => items[index]), out, n);
+    }
+    case 'nested': {
+      // The key of the byte list holding the inner value's canonical
+      // encoding (the octet framing): not the key of the inner value.
+      let bytes: Uint8Array;
+      if (codec.isOpaque(node)) {
+        if (!(value instanceof Uint8Array)) return valueError('key: bytes value required for an opaque nested value');
+        bytes = value;
+      } else bytes = codec.auto.encodeAt(node.textChild, value, n + 1);
+      return out.escaped(bytes);
     }
     case 'array':
       if (!Array.isArray(value)) return valueError('key: sequence value required');
       if (value.length !== node.countNum) valueError('key: array length does not match the schema');
-      for (const item of value) writeKey(node.child, item, out, n + 1);
+      for (const item of value) writeKey(codec, node.child, item, out, n + 1);
       return;
     case 'tuple':
       if (!Array.isArray(value) || value.length !== node.members.length)
         return valueError('key: tuple value of the declared arity required');
-      for (let i = 0; i < node.members.length; ++i) writeKey(node.members[i].node, value[i], out, n + 1);
+      for (let i = 0; i < node.members.length; ++i) writeKey(codec, node.members[i].node, value[i], out, n + 1);
       return;
     case 'record': {
       if (typeof value !== 'object' || value === null || Array.isArray(value))
         return valueError('key: record value required');
       const record = value as Record<string, unknown>;
-      for (const member of node.members) writeMember(node, member.name, record[member.name], out, n);
+      for (const member of node.members) writeMember(codec, node, member.name, record[member.name], out, n);
       return;
     }
     case 'variant': {
@@ -207,37 +239,55 @@ function writeKey(node: Node, value: unknown, out: Sink, n: number): void {
       const index = node.byName!.get(v.type);
       if (index === undefined) return valueError(`key: unknown variant alternative "${v.type}"`);
       out.byte(index);
-      return writeKey(node.members[index].node, v.value, out, n + 1);
+      return writeKey(codec, node.members[index].node, v.value, out, n + 1);
     }
+    case 'custom':
+      // A wrapper has the key of its inner type: a text form plays no part.
+      return writeKey(codec, codec.wireOf(node).node, value, out, n);
   }
 }
 
-function writeMember(node: Node, name: string, value: unknown, out: Sink, n: number): void {
+function writeMember(codec: Codec, node: Node, name: string, value: unknown, out: Sink, n: number): void {
   const member = node.members[node.byName!.get(name)!];
   // An absent optional member may be omitted from the object.
-  const v = value === undefined && member.node.kind === 'option' ? null : value;
-  if (member.bound && !memberBoundAdmits(member.bound, member.node, v))
-    valueError('key: member length bound violated');
-  writeKey(member.node, v, out, n + 1);
+  let v = value === undefined && member.node.kind === 'option' ? null : value;
+  if (member.bound) {
+    v = settleMember(member.node, v);
+    if (!memberBoundAdmits(member.bound, member.node, v)) valueError('key: member length bound violated');
+  }
+  writeKey(codec, member.node, v, out, n + 1);
 }
 
-/** The key bytes of `value`. */
-export function encodeKey(node: Node, value: unknown): Uint8Array {
+/**
+ * The key bytes of `value`, a value of the wire type `node`. No handler is
+ * consulted: the caller checks the value where it is a value of its type.
+ */
+export function encodeKey(codec: Codec, node: Node, value: unknown): Uint8Array {
   const out = new Sink();
-  writeKey(node, value, out, 0);
+  writeKey(codec, node, value, out, 0);
   return out.finish();
 }
 
-/** The key of the first `elements.length` elements / fields of a composite type. */
-export function encodeKeyPrefix(node: Node, elements: unknown): Uint8Array {
+/**
+ * The key of the first `elements.length` elements / fields of a composite
+ * type (`ref`: the type as written). Each element is checked as the value
+ * it is; the composite as a whole is not (a prefix is not a value of it).
+ */
+export function encodeKeyPrefix(codec: Codec, ref: Node, elements: unknown): Uint8Array {
+  const node = codec.wireOf(ref).node;
   if (node.kind !== 'tuple' && node.kind !== 'record')
     schemaError('key: a prefix key needs a tuple or record type');
   if (!Array.isArray(elements)) return valueError('key: prefix elements must be an array');
   if (elements.length > node.members.length) valueError('key: more prefix elements than the key type has');
   const out = new Sink();
   for (let i = 0; i < elements.length; ++i) {
-    if (node.kind === 'record') writeMember(node, node.members[i].name, elements[i], out, 0);
-    else writeKey(node.members[i].node, elements[i], out, 1);
+    const member = node.members[i];
+    if (codec.checksValues) {
+      const absent = elements[i] === undefined && member.node.kind === 'option';
+      codec.checkValue(member.text, absent ? null : elements[i], 'value');
+    }
+    if (node.kind === 'record') writeMember(codec, node, member.name, elements[i], out, 0);
+    else writeKey(codec, member.node, elements[i], out, 1);
   }
   return out.finish();
 }
@@ -306,7 +356,56 @@ class Source {
   }
 }
 
-function readKey(node: Node, src: Source, n: number): unknown {
+const mapOrder = 'key: map entries are not in strictly ascending key order';
+const setOrder = 'key: set elements are not in strictly ascending order';
+
+// A map / set: the list framing, with the entries strictly ascending by the
+// key bytes of their keys, as read.
+function readAssoc(codec: Codec, node: Node, src: Source, n: number): unknown {
+  const map = node.assoc === 'map';
+  const element = node.child;
+  const items: unknown[] = [];
+  if (!map && octetList(node)) {
+    const signed = element.kind === 'int' && element.signed;
+    const raw = src.escaped();
+    if (node.bounded && raw.length > node.countNum) bytesError('key: list exceeds its bound');
+    for (let i = 0; i < raw.length; ++i) {
+      if (i && raw[i - 1] >= raw[i]) bytesError(setOrder);
+      const byte = raw[i] ^ (signed ? 0x80 : 0);
+      items.push(signed ? (byte << 24) >> 24 : byte);
+    }
+  } else {
+    let previous: Uint8Array | null = null;
+    for (;;) {
+      const tag = src.byte();
+      if (tag === 0) break;
+      if (tag !== 1) bytesError('key: invalid list element marker');
+      if (node.bounded && items.length >= node.countNum) bytesError('key: list exceeds its bound');
+      const begin = src.p;
+      let item: unknown;
+      let key: Uint8Array;
+      if (map) {
+        // The entry is the tuple (key, value): no framing of its own.
+        if (n + 1 > MAX_DEPTH) bytesError('key: node depth limit exceeded');
+        const k = readKey(codec, element.members[0].node, src, n + 2);
+        key = src.b.subarray(begin, src.p);
+        item = [k, readKey(codec, element.members[1].node, src, n + 2)];
+      } else {
+        item = readKey(codec, element, src, n + 1);
+        key = src.b.subarray(begin, src.p);
+      }
+      if (previous && compareBytes(previous, key) >= 0) bytesError(map ? mapOrder : setOrder);
+      previous = key;
+      items.push(item);
+    }
+  }
+  const out = codec.assocValue(node, items);
+  if (out.size !== items.length)
+    bytesError(map ? 'key: map container merged distinct keys' : 'key: set container merged distinct elements');
+  return out;
+}
+
+function readKey(codec: Codec, node: Node, src: Source, n: number): unknown {
   if (n > MAX_DEPTH) bytesError('key: node depth limit exceeded');
   switch (node.kind) {
     case 'int': {
@@ -382,11 +481,19 @@ function readKey(node: Node, src: Source, n: number): unknown {
       const tag = src.byte();
       if (tag === 0) return null;
       if (tag !== 1) bytesError('key: invalid optional marker');
-      return wrapSome(node, readKey(node.child, src, n + 1));
+      return wrapSome(node, readKey(codec, node.child, src, n + 1));
+    }
+    case 'nested': {
+      // The byte list framing; the bytes are a valid encoding of the inner
+      // type (the compatible rule) unless the node is opaque.
+      const bytes = src.escaped();
+      if (codec.isOpaque(node)) return bytes;
+      return codec.auto.decodeAt(node.textChild, bytes, 0, bytes.length, n + 1, { allowUnknown: true, hasUnknown: false });
     }
     case 'list': {
+      if (node.assoc) return readAssoc(codec, node, src, n);
       const element = node.child;
-      if (octetList(element)) {
+      if (octetList(node)) {
         const signed = element.kind === 'int' && element.signed;
         const bytes = src.escaped(signed ? 0x80 : 0);
         if (node.bounded && bytes.length > node.countNum) bytesError('key: list exceeds its bound');
@@ -400,7 +507,7 @@ function readKey(node: Node, src: Source, n: number): unknown {
         if (tag === 0) return out;
         if (tag !== 1) bytesError('key: invalid list element marker');
         if (node.bounded && out.length >= node.countNum) bytesError('key: list exceeds its bound');
-        out.push(readKey(element, src, n + 1));
+        out.push(readKey(codec, element, src, n + 1));
       }
     }
     case 'array': {
@@ -409,18 +516,18 @@ function readKey(node: Node, src: Source, n: number): unknown {
       const out: unknown[] = [];
       for (let i = 0; i < node.countNum; ++i) {
         const before = src.p;
-        out.push(readKey(node.child, src, n + 1));
+        out.push(readKey(codec, node.child, src, n + 1));
         if (src.p === before && node.countNum - i > 1 << 20)
           bytesError('key: zero-size array count exceeds the supported limit');
       }
       return out;
     }
     case 'tuple':
-      return node.members.map((member) => readKey(member.node, src, n + 1));
+      return node.members.map((member) => readKey(codec, member.node, src, n + 1));
     case 'record': {
       const out: Record<string, unknown> = {};
       for (const member of node.members) {
-        const value = readKey(member.node, src, n + 1);
+        const value = readKey(codec, member.node, src, n + 1);
         if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
           bytesError('key: member length bound violated');
         setField(out, member.name, value);
@@ -431,16 +538,23 @@ function readKey(node: Node, src: Source, n: number): unknown {
       const index = src.byte();
       if (index >= node.members.length) bytesError('key: variant index out of range');
       const member = node.members[index];
-      const value: VariantValue = { type: member.name, value: readKey(member.node, src, n + 1) };
+      const value: VariantValue = { type: member.name, value: readKey(codec, member.node, src, n + 1) };
       return value;
     }
+    case 'custom':
+      return readKey(codec, codec.wireOf(node).node, src, n);
   }
 }
 
-/** Reads exactly one value spanning the whole buffer; canonical bytes only. */
-export function decodeKey(node: Node, bytes: Uint8Array): unknown {
+/**
+ * Reads exactly one value spanning the whole buffer; canonical bytes only.
+ * `ref` is the type as written: after the bytes are read, the invariants of
+ * its custom types are checked on the value.
+ */
+export function decodeKey(codec: Codec, ref: Node, bytes: Uint8Array): unknown {
   const src = new Source(bytes);
-  const value = readKey(node, src, 0);
+  const value = readKey(codec, codec.wireOf(ref).node, src, 0);
   if (src.p !== bytes.length) bytesError('key: trailing bytes');
+  codec.checkValue(ref, value, 'bytes');
   return value;
 }

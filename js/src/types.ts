@@ -19,7 +19,8 @@ import {
 } from './pssz-core.js';
 import type { JsonFormat } from './pssz-json.js';
 import {
-  PsszSchema, type PsszDecodeOptions, type PsszKeyValidation, type PsszType, type PsszValidation, type PsszWidth,
+  PsszSchema, type PsszDecodeOptions, type PsszKeyValidation, type PsszNestedBytes, type PsszType, type PsszValidation,
+  type PsszWidth,
 } from './pssz.js';
 import type { ListView, RecordView, TupleView, VariantView } from './pssz-view.js';
 import { timeSchemaId, timeUnitPeriod, type TimeUnit } from './time.js';
@@ -66,7 +67,13 @@ type Shape =
   | { k: 'list'; inner: AnyDef }
   | { k: 'bounded'; inner: AnyDef; n: bigint }
   | { k: 'array'; inner: AnyDef; n: bigint }
-  | { k: 'tuple'; items: AnyDef[] }
+  // `pair`: a C++ std::pair, the same node as the 2-tuple under an identity of its own.
+  | { k: 'tuple'; items: AnyDef[]; pair: boolean }
+  // `entry`: the tuple (key, value) of a map, the element of a set. `unordered`:
+  // a C++ unordered container, the same node under an identity of its own.
+  | { k: 'assoc'; id: 'map' | 'set'; entry: AnyDef; unordered: boolean; max: bigint | null }
+  | { k: 'nested'; inner: AnyDef; deferred: boolean }
+  | { k: 'transparent'; name: string; inner: AnyDef }
   | { k: 'variant'; alts: AltShape[] }
   | { k: 'record'; name: string; fields: FieldShape[]; options: RecordOptions }
   | { k: 'enum'; under: AnyDef; members: [string, bigint][] }
@@ -122,8 +129,13 @@ export interface RecordOptions {
 export interface TypeDefOptions {
   /** Offset-width profile; default `auto`. */
   width?: PsszWidth;
-  /** A custom type declared without a handler is an error in text. */
+  /** A custom type declared without a handler is an error (binary and text). */
   requireHandlers?: boolean;
+  /**
+   * `opaque`: every nested value is its bytes (a `Uint8Array`), not looked
+   * at — whatever the declaration says. Default `typed`.
+   */
+  nestedBytes?: PsszNestedBytes;
 }
 
 // ── Schema IR generation (cpp/include/psio/schema_builder.hpp) ──────────────
@@ -162,7 +174,10 @@ function keyOf(def: AnyDef, depth = 0): string {
     case 'list': out = `L(${k(s.inner)})`; break;
     case 'bounded': out = `B(${k(s.inner)},${s.n})`; break;
     case 'array': out = `A(${k(s.inner)},${s.n})`; break;
-    case 'tuple': out = `T(${s.items.map(k).join(',')})`; break;
+    case 'tuple': out = `${s.pair ? 'P' : 'T'}(${s.items.map(k).join(',')})`; break;
+    case 'assoc': out = `${s.unordered ? 'U' : ''}${s.id}(${k(s.entry)}${s.max === null ? '' : `,${s.max}`})`; break;
+    case 'nested': out = `N${s.deferred ? 'D' : ''}(${k(s.inner)})`; break;
+    case 'transparent': out = `W(${JSON.stringify(s.name)})`; break;
     case 'variant':
       out = `V(${s.alts.map((a) => `${JSON.stringify([a.name, a.ijsonName ?? null])}${k(a.type)}`).join(',')})`;
       break;
@@ -180,6 +195,8 @@ function keyOf(def: AnyDef, depth = 0): string {
 class Builder {
   readonly types: IrMember[] = [];
   readonly handlers = new Map<string, PsszCustomHandler>();
+  /** The names of the deferred nested types: their bytes are opaque. */
+  readonly deferred = new Set<string>();
   private readonly names = new Map<string, string>();
   private readonly slots = new Map<string, IrMember>();
   private readonly records = new Map<string, AnyDef>();
@@ -212,21 +229,22 @@ class Builder {
     if (def.shape.k === 'custom') this.bind(def.shape.id, def.shape.handler);
     const known = this.names.get(key);
     if (known !== undefined) {
-      if (def.shape.k === 'record' && this.records.get(known) !== def)
-        schemaError(`typed schema: two different records are named "${known}"`);
+      if ((def.shape.k === 'record' || def.shape.k === 'transparent') && this.records.get(known) !== def)
+        schemaError(`typed schema: two different ${def.shape.k === 'record' ? 'records' : 'types'} are named "${known}"`);
       return ir('Type', { type: known });
     }
-    // A record is its name; so is a custom type declared over a record.
+    // A record and a transparent type are their names; so is a custom type
+    // declared over one.
     let named: AnyDef = def;
     while (named.shape.k === 'custom') named = resolve(named.shape.inner);
-    const name = named.shape.k === 'record' ? named.shape.name : `@${this.names.size}`;
+    const name = named.shape.k === 'record' || named.shape.k === 'transparent' ? named.shape.name : `@${this.names.size}`;
     if (this.slots.has(name)) schemaError(`typed schema: the name "${name}" is used twice`);
     this.names.set(key, name);
-    if (def.shape.k === 'record') this.records.set(name, def);
+    if (def.shape.k === 'record' || def.shape.k === 'transparent') this.records.set(name, def);
     // The slot is taken before the children are visited (declaration order).
     this.put(name, ir('Type', { type: name }));
     if (++this.depth > 256) schemaError('typed schema: type nesting too deep');
-    this.put(name, this.build(def));
+    this.put(name, this.build(def, name));
     --this.depth;
     return ir('Type', { type: name });
   }
@@ -240,8 +258,9 @@ class Builder {
     this.handlers.set(id, handler);
   }
 
-  // The type itself, not interned; its children are.
-  private build(def: AnyDef): IrAnyType {
+  // The type itself, not interned; its children are. `name`: the name it is
+  // interned under (absent: it is written inline in another type).
+  private build(def: AnyDef, name?: string): IrAnyType {
     const s = def.shape;
     switch (s.k) {
       case 'int': return intIr(s.bits, s.signed);
@@ -285,9 +304,34 @@ class Builder {
           members: s.members.map(([name, value]) => ({ name, value: BigInt.asUintN(64, value) })),
         });
       case 'time': return ir('Custom', { type: this.build(resolve(s.tick)), id: s.id });
-      case 'custom':
+      case 'assoc': {
+        const type = this.insert(s.entry);
+        return ir('Custom', {
+          type: s.max === null ? ir('List', { type }) : ir('BoundedList', { type, maxCount: s.max }),
+          id: s.id,
+        });
+      }
+      case 'nested':
+        // The validation policy is not part of the schema: the codec is
+        // told which named nodes are opaque.
+        if (s.deferred) {
+          if (name === undefined)
+            schemaError('typed schema: a deferred nested value cannot be the wire type of a custom type; wrap it in a transparent type');
+          this.deferred.add(name!);
+        }
+        return ir('Nested', { type: this.insert(s.inner) });
+      case 'transparent':
+        // A named alias of the member's type.
+        return this.insert(s.inner);
+      case 'custom': {
         this.bind(s.id, s.handler);
-        return ir('Custom', { type: this.build(resolve(s.inner)), id: s.id });
+        // Over a transparent type: the Custom wraps the member's type.
+        const wire = resolve(s.inner);
+        return ir('Custom', {
+          type: wire.shape.k === 'transparent' ? this.insert(wire.shape.inner) : this.build(wire),
+          id: s.id,
+        });
+      }
       case 'box': return ir('Custom', { type: this.insert(s.inner), id: 'box' });
       default: return schemaError('typed schema: unresolved definition');
     }
@@ -309,6 +353,8 @@ class Builder {
     }
     if (s.k === 'bytes' && s.bound === 'list' && s.id !== 'utf8')
       return ir('Custom', { type: this.byteContainer('max', max), id: s.id });
+    if (s.k === 'assoc' && s.max === null)
+      return ir('Custom', { type: ir('BoundedList', { type: this.insert(s.entry), maxCount: max }), id: s.id });
     if (s.k === 'list') return ir('BoundedList', { type: this.insert(s.inner), maxCount: max });
     return null;
   }
@@ -323,8 +369,10 @@ class Builder {
     if (bound) {
       let target = direct;
       while (target.k === 'option') target = resolve(target.inner).shape;
-      const applies = target.k === 'list' || (target.k === 'bytes' && target.bound !== 'exact' &&
-        (target.bound === 'list' || target.id === 'utf8'));
+      // Elements of a list, entries of a map / set, bytes of a string or of
+      // a nested value's encoding.
+      const applies = target.k === 'list' || target.k === 'assoc' || target.k === 'nested' ||
+        (target.k === 'bytes' && target.bound !== 'exact' && (target.bound === 'list' || target.id === 'utf8'));
       if (!applies) schemaError(`typed schema: lengthBound does not apply to member "${field.name}"`);
       const onlyMax = bound.max !== undefined && bound.exact === undefined && bound.min === undefined;
       const bounded = onlyMax ? this.boundedMember(field.type, BigInt(bound.max!)) : null;
@@ -348,7 +396,7 @@ class Builder {
       types: this.types,
       ir_version: IR_VERSION,
     };
-    return new PsszSchema(schema, { handlers: this.handlers, requireHandlers });
+    return new PsszSchema(schema, { handlers: this.handlers, requireHandlers, deferredNested: this.deferred });
   }
 }
 
@@ -404,7 +452,7 @@ export class TypeDef<T, V = T> {
 
   /** The codec of this type under a width profile / handler policy. */
   type(options?: TypeDefOptions): PsszType<T, V> {
-    if (!options || (options.width === undefined && options.requireHandlers === undefined))
+    if (!options || (options.width === undefined && options.requireHandlers === undefined && options.nestedBytes === undefined))
       return (this.auto ??= this.schema.type<T, V>(this.name));
     return this.schema.type<T, V>(this.name, options);
   }
@@ -564,7 +612,112 @@ type ViewsOf<D extends readonly AnyDef[]> = { -readonly [I in keyof D]: InferVie
 
 /** Positional elements of different types. Trailing optionals may be absent on the wire. */
 export function tuple<D extends readonly AnyDef[]>(...elements: D): TypeDef<ValuesOf<D>, TupleView<ValuesOf<D>, ViewsOf<D>>> {
-  return new TypeDef({ k: 'tuple', items: elements.map((e) => isDef(e, 'a tuple element')) });
+  return new TypeDef({ k: 'tuple', items: elements.map((e) => isDef(e, 'a tuple element')), pair: false });
+}
+
+/**
+ * A pair (C++ `std::pair`): the 2-tuple `[first, second]`, with the tuple's
+ * bytes, key, text and view. It is the tuple's Schema IR node; declared with
+ * `pair` it is a type of its own in a generated schema, as in C++.
+ */
+export function pair<A, VA, B, VB>(
+  first: TypeDef<A, VA>, second: TypeDef<B, VB>,
+): TypeDef<[A, B], TupleView<[A, B], [VA, VB]>> {
+  return new TypeDef({ k: 'tuple', items: [isDef(first, 'a pair element'), isDef(second, 'a pair element')], pair: true });
+}
+
+/** Options of `map` and `set`. */
+export interface AssocOptions {
+  /**
+   * The Schema IR identity of a C++ unordered container
+   * (`std::unordered_map` / `std::unordered_set`): the same node, bytes and
+   * values, but a type of its own in a generated schema, as in C++. Only
+   * for reproducing a C++ schema byte for byte.
+   */
+  unordered?: boolean;
+  /**
+   * At most `max` entries / elements: the map / set over a bounded list
+   * (the node a `field(..., { lengthBound: { max } })` gives a member).
+   */
+  max?: number | bigint;
+}
+
+function assocMax(options: AssocOptions | undefined): bigint | null {
+  return options?.max === undefined ? null : count(options.max, 'a bound');
+}
+
+/**
+ * A map (`docs/pssz-spec.md` §5.9): on the wire the list of its
+ * `[key, value]` entries in strictly ascending order of the key bytes of the
+ * key (`encodeKey`), with no repeated key. Decodes to a `Map` whose
+ * iteration order is that order; encodes a `Map` — or, at run time, any
+ * iterable of `[key, value]` entries — in any order. Keys that are not
+ * primitives (tuples, records, raw strings) are distinct objects: a `Map`
+ * finds them by identity, so look such an entry up by iterating.
+ *
+ * In text a map is an object when its key is a string by type (`utf8`,
+ * `rawString`, a custom type with a text form) and an array of `[key, value]`
+ * pairs otherwise. A view of a map is the `ListView` of its entries.
+ */
+export function map<K, VK, T, VT>(
+  key: TypeDef<K, VK>, value: TypeDef<T, VT>, options: AssocOptions = {},
+): TypeDef<Map<K, T>, ListView<Map<K, T>, TupleView<[K, T], [VK, VT]>>> {
+  const entry = tuple(isDef(key, 'a map key'), isDef(value, 'a mapped type'));
+  return new TypeDef({ k: 'assoc', id: 'map', entry, unordered: !!options?.unordered, max: assocMax(options) });
+}
+
+/**
+ * A set (`docs/pssz-spec.md` §5.9): on the wire the list of its elements in
+ * strictly ascending order of their key bytes, with no repeated element.
+ * Decodes to a `Set` in that order; encodes a `Set` — or, at run time, any
+ * iterable — in any order. In text it is an array. A view of a set is the
+ * `ListView` of its elements.
+ */
+export function set<K, VK>(element: TypeDef<K, VK>, options: AssocOptions = {}): TypeDef<Set<K>, ListView<Set<K>, VK>> {
+  return new TypeDef({
+    k: 'assoc', id: 'set', entry: isDef(element, 'a set element'), unordered: !!options?.unordered, max: assocMax(options),
+  });
+}
+
+/**
+ * A nested value (`docs/pssz-spec.md` §5.8): on the wire a byte list holding
+ * the PSSZ encoding of an `inner` value (always in the automatic profile),
+ * so a record with a `nested(T)` member and the same record with a `bytes`
+ * member are byte-identical.
+ *
+ * `nested(T)`: the value is the inner value, and every reader validates the
+ * bytes as a `T`; a view of it is the inner value's view. Encoding writes
+ * the canonical encoding of the value: fields a newer writer appended to an
+ * inner record are not carried through a decode / encode round trip.
+ *
+ * `nested(T, { deferred: true })` (C++ `nested<T, nested_validation::deferred>`):
+ * the value is the bytes (a `Uint8Array`), which an enclosing reader does
+ * not look at and a writer writes as they are; decode them with `T` where
+ * the value is needed. Same wire, key and Schema IR node.
+ *
+ * Its text is the inner value's own text in both cases; its key is the key
+ * of the byte list (nested values order by their inner bytes).
+ */
+export function nested<T, V>(inner: TypeDef<T, V>, options?: { deferred?: false }): TypeDef<T, V>;
+export function nested<T, V>(inner: TypeDef<T, V>, options: { deferred: true }): TypeDef<Uint8Array, Uint8Array>;
+export function nested(inner: AnyDef, options?: { deferred?: boolean }): AnyDef {
+  return new TypeDef({ k: 'nested', inner: isDef(inner, 'a nested type'), deferred: !!options?.deferred });
+}
+
+/**
+ * A transparent type (`docs/pssz-spec.md` §5.10): a named type that IS its
+ * one member on the wire, in keys, in text and as a JavaScript value — no
+ * header, no slot. What it keeps is its name: in the Schema IR it is the
+ * named alias `name` of the member's type. Give it a text form or an
+ * invariant with `custom(id, transparent(name, member), handler)`.
+ */
+export function transparent<T, V>(name: string, member: TypeDef<T, V>): TypeDef<T, V> {
+  if (typeof name !== 'string' || name === '' || name.startsWith('@'))
+    schemaError('typed schema: a transparent type needs a name (not starting with "@")');
+  const inner = isDef(member, 'a transparent member');
+  // Presence belongs to the record that holds the value.
+  if (inner.shape.k === 'option') schemaError('typed schema: the member of a transparent type is not an optional');
+  return new TypeDef({ k: 'transparent', name, inner });
 }
 
 /** A value that does not count toward its container's size bound (C++ / Rust `Box<T>`). */
@@ -741,21 +894,39 @@ export const duration = (unit: TimeUnit, tick: TypeDef<any, any> = i64) => timeD
  */
 export const monotonic = (unit: TimeUnit, tick: TypeDef<any, any> = i64) => timeDef('monotonic', unit, tick);
 
-/** The text form of a custom type, typed by the value of its wire type. */
+/**
+ * What a custom type adds to its wire type, typed by the value of the wire
+ * type. Every member is optional.
+ */
 export interface CustomHandler<T> {
-  toText(value: T): string;
-  fromText(text: string): T;
+  /** The text form: one JSON string in both text formats. */
+  toText?(value: T): string;
+  fromText?(text: string): T;
+  /**
+   * The invariant: returns a message (or throws an `Error` with one) when a
+   * structurally valid value of the wire type is not a value of the type.
+   * It runs on every read and write, binary and text; the message is the
+   * error's.
+   */
+  check?(value: T): string | null | undefined | void;
 }
 
 /**
- * A type with its own text form: on the wire and as a JavaScript value
- * exactly `wire`; in JSON and I-JSON one string, written and read by
- * `handler`. Without a handler its text is the wire type's.
+ * A custom type: a type with an identity of its own over its wire type, of
+ * any shape (a record, a transparent type, an enum, a variant, a tuple, a
+ * list). On the wire and as a JavaScript value it is exactly `wire`; the
+ * handler gives it a text form (one JSON string, `toText` / `fromText`), an
+ * invariant (`check`), or both. Without a handler it is its wire type.
  */
 export function custom<T, V>(id: string, wire: TypeDef<T, V>, handler?: CustomHandler<T>): TypeDef<T, V> {
   if (typeof id !== 'string' || id === '') schemaError('typed schema: a custom type needs an id');
   if (reservedCustomId(id)) schemaError(`typed schema: "${id}" is a built-in id, not a custom type`);
-  if (handler !== undefined && (typeof handler?.toText !== 'function' || typeof handler?.fromText !== 'function'))
-    schemaError(`typed schema: the handler of custom id "${id}" needs toText and fromText`);
+  if (handler !== undefined) {
+    if (typeof handler !== 'object' || handler === null)
+      schemaError(`typed schema: the handler of custom id "${id}" must be an object`);
+    for (const member of ['toText', 'fromText', 'check'] as const)
+      if (handler[member] !== undefined && typeof handler[member] !== 'function')
+        schemaError(`typed schema: ${member} of the handler of custom id "${id}" must be a function`);
+  }
   return new TypeDef({ k: 'custom', id, inner: isDef(wire, 'a wire type'), handler: handler as PsszCustomHandler | undefined });
 }

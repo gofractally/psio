@@ -176,8 +176,11 @@ class Emitter {
         return '/* TODO: inline variant not supported */';
       case 'Array':
         return '/* TODO: fixed-size array */';
+      case 'Nested':
+        // The PSSZ bytes of the inner value.
+        return 'list<u8>';
       default:
-        return '/* TODO: fracpack wrapper */';
+        return '/* TODO: unsupported type */';
     }
   }
 }

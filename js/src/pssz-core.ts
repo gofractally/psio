@@ -7,6 +7,7 @@
 // This file is internal. The public API is `pssz.ts`.
 
 import { parseTimeSchemaId, reservedTimeId, timeFractionDigits, type TimeKind } from './time.js';
+import { encodeKey } from './pssz-key.js';
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,12 @@ export class PsszError extends Error {
     message: string,
     /** Byte offset in the text for `json` errors. */
     readonly offset?: number,
+    /**
+     * The error is a type's own: the invariant of a custom type (the `check`
+     * of its handler) refused a structurally valid value. `message` is the
+     * invariant's message, unchanged.
+     */
+    readonly invariant = false,
   ) {
     super(message);
     this.name = 'PsszError';
@@ -178,6 +185,7 @@ export type CompactType =
   | { Float: { exp: number; mantissa: number } }
   | { List: PsszTypeInput }
   | { Option: PsszTypeInput }
+  | { Nested: PsszTypeInput }
   | { Array: { type: PsszTypeInput; len: number | bigint } }
   | { BoundedList: { type: PsszTypeInput; maxCount: number | bigint } }
   | { Tuple: PsszTypeInput[] }
@@ -510,18 +518,31 @@ function boundAdmits(bound: LengthBound, n: number): boolean {
 export type IntForm = 'natural' | 'number' | 'string';
 
 /**
- * The text form of a custom type (a `Custom` id that is not part of the
- * binary form): `toText` gets the decoded value of the wire type, `fromText`
- * returns one. Either may throw for a value / text it does not accept.
+ * What a custom type (a `Custom` id that is not part of the binary form)
+ * adds to its wire type. Every member is optional.
+ *
+ * - `toText` / `fromText`: the text form, ONE JSON string in both text
+ *   formats. `toText` gets the decoded value of the wire type, `fromText`
+ *   returns one; either may throw for a value / text it does not accept.
+ *   Without them the type's text is its wire type's.
+ * - `check`: the invariant. It gets the decoded value of the wire type
+ *   (structurally valid, as `decode` gives it) and returns a message — or
+ *   throws an `Error` with one — when the value is not a value of the type;
+ *   anything else accepts it. It runs on every value of the type, on the
+ *   binary and the text entry points, values inside it first, and the
+ *   message is the error's, unchanged.
  */
 export interface PsszCustomHandler {
-  toText(value: unknown): string;
-  fromText(text: string): unknown;
+  toText?(value: unknown): string;
+  fromText?(text: string): unknown;
+  check?(value: unknown): string | null | undefined | void;
 }
 
 // Custom ids that are part of the binary form (pssz_ir.hpp "Custom ids").
-// Any other id is "box" or a text presentation: its inner type on the wire.
-const WIRE_CUSTOM_IDS = new Set(['bool', 'char', 'string', 'utf8', 'hex', 'bitvector', 'bitlist', 'unknown']);
+// Any other id is "box" or a custom type: its inner type on the wire.
+const WIRE_CUSTOM_IDS = new Set([
+  'bool', 'char', 'string', 'utf8', 'hex', 'bitvector', 'bitlist', 'map', 'set', 'unknown',
+]);
 /**
  * Ids a handler cannot be registered for: the binary-form ids, "box", and
  * the built-in presentations (the time ids of docs/time.md).
@@ -568,6 +589,8 @@ export class MemberInfo {
 export type NodeKind =
   | 'int' | 'float' | 'bool' | 'char' | 'string' | 'hex' | 'bitvector' | 'bitlist'
   | 'option' | 'list' | 'array' | 'tuple' | 'record' | 'variant'
+  // A byte list holding the automatic-profile encoding of `textChild`.
+  | 'nested'
   // A wrapper that adds nothing to the bytes: "box" or a text presentation.
   // Only the text walk and `strip` see it; the binary codec works on `child`
   // / `MemberInfo.node`, which look through it.
@@ -608,6 +631,23 @@ export class Node {
   }
   /** string: raw bytes (Custom "string"), not validated as UTF-8 ("utf8"). */
   raw = false;
+  /**
+   * list: a map (`textChild` is the entry tuple [key, value]) or a set: the
+   * entries are in strictly ascending order of the key bytes of the key.
+   */
+  assoc?: 'map' | 'set';
+  /** nested: this node's bytes are not looked at (a typed deferred member). */
+  opaque = false;
+  /** map / set: the key type as written (map: the entry's first member). */
+  get keyRef(): Node {
+    return this.assoc === 'map' ? strip(this.textChild).node.members[0].text : this.textChild;
+  }
+  /** map: the mapped type as written. */
+  get valueRef(): Node {
+    return strip(this.textChild).node.members[1].text;
+  }
+  /** map / set: a Nested node occurs in the key type. */
+  keyNestedMemo?: boolean;
   /** custom wrapper: the wrapped type, the Custom id, "box", the handler. */
   inner?: Node;
   id = '';
@@ -764,6 +804,21 @@ export class PsszNaN {
   }
 }
 
+/**
+ * The float −0 as an element of a set or a key of a map. A JavaScript `Set`
+ * / `Map` cannot hold −0 (it stores +0), and PSSZ keeps the sign bit, so a
+ * decoded set element or map key that is exactly the float −0 is
+ * `PsszNegativeZero.value`; anywhere else −0 is the plain number. Every
+ * encoder accepts it wherever a float is expected. `Number(x)` is −0.
+ */
+export class PsszNegativeZero {
+  static readonly value = new PsszNegativeZero();
+  private constructor() {}
+  valueOf(): number {
+    return -0;
+  }
+}
+
 /** Some(x) of an optional whose payload is itself optional. */
 export interface Some<T = unknown> {
   some: T;
@@ -801,10 +856,65 @@ export function memberBoundAdmits(bound: LengthBound, node: Node, value: unknown
     }
     node = node.child;
   }
+  // A nested member's bound counts the bytes of its encoding: checked where
+  // the bytes exist (`nestedBoundAdmits`), not on the inner value.
+  if (node.kind === 'nested') return true;
   if (typeof value === 'string') return boundAdmits(bound, utf8Length(value));
   if (value instanceof Uint8Array) return boundAdmits(bound, value.length);
   if (Array.isArray(value)) return boundAdmits(bound, value.length);
+  if (value instanceof Map || value instanceof Set) return boundAdmits(bound, value.size);
   return true;
+}
+
+/** Whether a member type is a nested value, looking through Option. */
+export function nestedMember(node: Node): boolean {
+  for (let hops = 0; node.kind === 'option' && hops <= MAX_DEPTH; ++hops) node = node.child;
+  return node.kind === 'nested';
+}
+
+/**
+ * The entries of a map / the elements of a set value, as an array: a `Map`,
+ * a `Set`, an array or any other iterable (iterated once). Null: not one.
+ */
+export function assocItems(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) return value;
+  if (value === null || typeof value !== 'object' || value instanceof Uint8Array) return null;
+  if (typeof (value as Iterable<unknown>)[Symbol.iterator] !== 'function') return null;
+  return Array.from(value as Iterable<unknown>);
+}
+
+/**
+ * A member value about to be checked against its length bound and written:
+ * a map / set given as an iterable that cannot be counted without being
+ * consumed (not an array, `Map` or `Set`) is turned into an array, once.
+ */
+export function settleMember(node: Node, value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  if (value instanceof Map || value instanceof Set || value instanceof Uint8Array) return value;
+  if (node.kind === 'option') {
+    if (node.child.kind !== 'option') return settleMember(node.child, value);
+    if (!('some' in value)) return value;
+    return { some: settleMember(node.child, (value as Some).some) };
+  }
+  if (node.kind === 'list' && node.assoc) return assocItems(value) ?? value;
+  return value;
+}
+
+/** Bytewise (unsigned, lexicographic) order; a prefix sorts first. */
+export function compareBytes(a: Uint8Array, b: Uint8Array): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; ++i) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  return a.length - b.length;
+}
+
+/** What a codec does with the bytes of a Nested node. */
+export interface CodecOptions {
+  /** Every Nested node is read and written as its bytes, unexamined. */
+  opaqueNested?: boolean;
+  /** Named types whose Nested node is opaque (typed deferred members). */
+  deferred?: ReadonlySet<string>;
+  /** The automatic-profile codec of the same schema (explicit profiles). */
+  auto?: Codec;
 }
 
 export function setField(target: Record<string, unknown>, name: string, value: unknown): void {
@@ -821,30 +931,79 @@ export function setField(target: Record<string, unknown>, name: string, value: u
 export class Codec {
   private readonly named = new Map<string, IrMember | null>();
   private readonly nodes = new Map<IrAnyType, Node>();
+  /**
+   * The codec of the bytes inside a Nested node: always the automatic
+   * profile, with the same handlers and options.
+   */
+  readonly auto: Codec;
+  /** Every Nested node is opaque. */
+  readonly opaqueNested: boolean;
+  private readonly deferred: ReadonlySet<string>;
+  /** A handler has a `check`, or every custom id needs a handler. */
+  readonly checksValues: boolean;
+  // Scoped switches, shared with `auto`: `quiet` > 0 runs no handler (the
+  // structure only); `opaque` > 0 treats every Nested node as opaque.
+  private readonly state: { quiet: number; opaque: number };
 
   constructor(
     readonly schema: IrSchema,
     readonly W: 0 | 1 | 2 | 4,
-    /** Custom id -> text handler, bound to the nodes as they are built. */
+    /** Custom id -> handler, bound to the nodes as they are built. */
     readonly handlers: ReadonlyMap<string, PsszCustomHandler> = new Map(),
-    /** A custom id with no handler is an error in text, not the inner type's text. */
+    /** A custom id with no handler is an error, not its wire type. */
     readonly requireHandlers = false,
+    options: CodecOptions = {},
   ) {
     for (const member of schema.types)
       this.named.set(member.name, this.named.has(member.name) ? null : member);
+    this.opaqueNested = options.opaqueNested ?? false;
+    this.deferred = options.deferred ?? new Set();
+    this.auto = W === 0 ? this : options.auto ?? new Codec(schema, 0, handlers, requireHandlers, options);
+    this.state = W === 0 ? { quiet: 0, opaque: 0 } : this.auto.state;
+    let checks = requireHandlers;
+    for (const handler of handlers.values()) checks = checks || typeof handler.check === 'function';
+    this.checksValues = checks;
+  }
+
+  /** Runs `run` with no handler consulted: the structure only. */
+  quietly<R>(run: () => R): R {
+    ++this.state.quiet;
+    try {
+      return run();
+    } finally {
+      --this.state.quiet;
+    }
+  }
+  // Runs `run` with no handler consulted and every Nested node opaque.
+  private rawly<R>(run: () => R): R {
+    ++this.state.quiet;
+    ++this.state.opaque;
+    try {
+      return run();
+    } finally {
+      --this.state.quiet;
+      --this.state.opaque;
+    }
+  }
+  /** Whether the bytes of the Nested node are not looked at. */
+  isOpaque(node: Node): boolean {
+    return node.opaque || this.opaqueNested || this.state.opaque > 0;
   }
 
   private get automatic(): boolean {
     return this.W === 0;
   }
 
-  private resolve(input: IrAnyType): IrAnyType {
+  // `input` with named aliases followed, and nothing else. `via`: the last
+  // name on the way.
+  private resolve(input: IrAnyType, via?: { name?: string }): IrAnyType {
     let out = input;
     for (let hops = 0; hops <= this.schema.types.length; ++hops) {
       if (out.value.type !== 'Type') return out;
       const found = this.named.get(out.value.value.type);
       if (found === null) schemaError('pssz IR: duplicate named type');
       if (found === undefined) return schemaError(`pssz IR: unresolved named type "${out.value.value.type}"`);
+      if (via) via.name = found!.name;
       out = found!.type;
     }
     return schemaError('pssz IR: cyclic named aliases');
@@ -873,7 +1032,14 @@ export class Codec {
   node(root: IrAnyType): Node {
     const added: IrAnyType[] = [];
     try {
-      return this.build(root, added, 0);
+      const out = this.build(root, added, 0);
+      // The key type of a map / set has a key encoding: checked once the
+      // graph is complete (a key type may be recursive).
+      for (const key of added) {
+        const node = this.nodes.get(key)!;
+        if (node.assoc) this.hasKey(node.keyRef, []);
+      }
+      return out;
     } catch (e) {
       for (const key of added) this.nodes.delete(key);
       if (e instanceof RangeError) schemaError('pssz IR: schema nesting too deep');
@@ -883,7 +1049,8 @@ export class Codec {
 
   private build(input: IrAnyType, added: IrAnyType[], depth: number): Node {
     if (depth > 512) schemaError('pssz IR: schema nesting too deep');
-    const type = this.resolve(input);
+    const via: { name?: string } = {};
+    const type = this.resolve(input, via);
     const known = this.nodes.get(type);
     if (known) return known;
     const node = new Node();
@@ -1004,8 +1171,32 @@ export class Codec {
           break;
         }
         if (reservedTimeId(id)) return schemaError('pssz IR: unsupported custom adapter');
+        if (id === 'map' || id === 'set') {
+          // A list whose entries are in strictly ascending key order. It
+          // sits directly on its list (named aliases only), and a map's
+          // element is (an alias of) a tuple of exactly two members.
+          const map = id === 'map';
+          const shape = map
+            ? 'pssz IR: a map must sit directly on a list of two-member tuples'
+            : 'pssz IR: a set must sit directly on a list';
+          const list = this.direct(t.value.type);
+          if (list.type !== 'List' && list.type !== 'BoundedList') return schemaError(shape);
+          if (map) {
+            const entry = this.resolve(list.value.type).value;
+            if (entry.type !== 'Tuple' || entry.value.members.length !== 2) return schemaError(shape);
+          }
+          node.kind = 'list';
+          node.assoc = id;
+          if (list.type === 'BoundedList') {
+            node.bounded = true;
+            node.count = list.value.maxCount;
+            node.countNum = node.count > BigInt(Number.MAX_SAFE_INTEGER) ? Infinity : Number(node.count);
+          }
+          node.textChild = this.build(list.value.type, added, d);
+          break;
+        }
         if (!WIRE_CUSTOM_IDS.has(id)) {
-          // "box" or a text presentation: the inner type on the wire.
+          // "box" or a custom type: the inner type on the wire.
           node.kind = 'custom';
           node.id = id;
           node.boxed = id === 'box';
@@ -1056,11 +1247,79 @@ export class Codec {
         break;
       }
       case 'Nested':
-        return schemaError('pssz IR: Nested values are not implemented');
+        // A byte list holding the encoding of the inner type, which is
+        // always in the automatic profile: its nodes are that codec's.
+        node.kind = 'nested';
+        node.opaque = via.name !== undefined && this.deferred.has(via.name);
+        node.textChild = this.automatic ? this.build(t.value.type, added, d) : this.auto.node(t.value.type);
+        break;
       default:
         return schemaError('pssz IR: unsupported schema type');
     }
     return node;
+  }
+
+  // Whether `ref` has a `key` encoding (docs/key-spec.md): the key type of
+  // a map / the element type of a set. A schema error otherwise.
+  private hasKey(ref: Node, active: Node[]): void {
+    const none = 'pssz IR: the key type of a map / set has no key encoding';
+    const { node, boxed } = strip(ref);
+    if (boxed) schemaError(none);
+    if (active.includes(node)) return;
+    if (active.length > MAX_DEPTH) schemaError('pssz IR: node depth limit exceeded');
+    active.push(node);
+    switch (node.kind) {
+      case 'int':
+        if (node.bits === 1) schemaError(none);
+        break;
+      case 'bitlist':
+        schemaError(none);
+        break;
+      case 'option':
+      case 'array':
+        this.hasKey(node.textChild, active);
+        break;
+      case 'list':
+        // A map / set as (part of) a key: its own key type is checked as
+        // that node's; here, what it maps to.
+        if (!node.assoc) this.hasKey(node.textChild, active);
+        else if (node.assoc === 'map') this.hasKey(node.valueRef, active);
+        break;
+      case 'tuple':
+      case 'record':
+      case 'variant':
+        for (const member of node.members) this.hasKey(member.text, active);
+        break;
+      default:
+        break; // float, bool, char, string, hex, bitvector; nested: the key of a byte list
+    }
+    active.pop();
+  }
+
+  /** Whether a Nested node occurs in (a part of) the key type of a map / set. */
+  keyHasNested(node: Node): boolean {
+    if (node.keyNestedMemo !== undefined) return node.keyNestedMemo;
+    const seen = new Set<Node>();
+    const walk = (ref: Node): boolean => {
+      const at = strip(ref).node;
+      if (seen.has(at)) return false;
+      seen.add(at);
+      switch (at.kind) {
+        case 'nested':
+          return true;
+        case 'option':
+        case 'list':
+        case 'array':
+          return walk(at.textChild);
+        case 'tuple':
+        case 'record':
+        case 'variant':
+          return at.members.some((member) => walk(member.text));
+        default:
+          return false;
+      }
+    };
+    return (node.keyNestedMemo = walk(node.keyRef));
   }
 
   // ── Layout ────────────────────────────────────────────────────────────────
@@ -1147,6 +1406,7 @@ export class Codec {
     return this.memoized(node, 'emptyMemo', () => {
       switch (node.kind) {
         case 'list':
+        case 'nested':
           return { value: true, height: 0 };
         case 'option': {
           const value = !this.canBeEmpty(node.child);
@@ -1262,6 +1522,10 @@ export class Codec {
         out = total;
         break;
       }
+      case 'nested':
+        // No bound of its own; a member lengthBound bounds its bytes.
+        out = annotation ? annotation.exact ?? annotation.max : null;
+        break;
       default:
         break; // tuple, variant, bit types: no inferred bound
     }
@@ -1300,16 +1564,163 @@ export class Codec {
     if (!this.automatic && root.cap !== null && BigInt(size) > root.cap)
       fail('pssz IR: encoded size exceeds maxDynamicData cap');
   }
-  /** `encodeAt` of a top-level value, with the explicit profiles' cap check. */
+  /**
+   * `encodeAt` of a top-level value, with the explicit profiles' cap check.
+   * `root` is the type as written: its custom nodes are checked.
+   */
   encodeTop(root: Node, value: unknown): Uint8Array {
     const out = this.encodeAt(root, value, 0);
-    this.checkTopCap(root, out.length, valueError);
+    this.checkTopCap(strip(root).node, out.length, valueError);
     return out;
   }
   /** `decodeAt` of a whole top-level frame, with the explicit profiles' cap check. */
   decodeTop(root: Node, bytes: Uint8Array, ctx: DecodeContext): unknown {
-    this.checkTopCap(root, bytes.length, bytesError);
+    this.checkTopCap(strip(root).node, bytes.length, bytesError);
     return this.decodeAt(root, bytes, 0, bytes.length, 0, ctx);
+  }
+
+  // ── Custom types: handlers on the binary entry points ─────────────────────
+
+  /**
+   * The handler of a custom node on a value of it: a strict registry needs
+   * one, and its `check` (the invariant) runs. `value` is the decoded value
+   * of the wire type. `fail` gets the invariant's own message.
+   */
+  checkCustom(node: Node, value: unknown, fail: (message: string, invariant: boolean) => never): void {
+    if (node.boxed || this.state.quiet > 0) return;
+    const handler = node.handler;
+    if (!handler) {
+      if (this.requireHandlers) fail('pssz IR: no handler registered for a custom type', false);
+      return;
+    }
+    if (typeof handler.check !== 'function') return;
+    let verdict: unknown;
+    try {
+      verdict = handler.check(value);
+    } catch (e) {
+      verdict = e instanceof Error && e.message !== '' ? e.message : 'pssz IR: invariant violated';
+    }
+    if (typeof verdict === 'string') fail(verdict === '' ? 'pssz IR: invariant violated' : verdict, true);
+  }
+
+  /**
+   * `value` as `decode` gives it: encoded and read back with no handler
+   * consulted. Throws when it is not a value of the type.
+   */
+  canonical(node: Node, value: unknown): unknown {
+    return this.quietly(() => {
+      const bytes = this.encodeAt(node, value, 0);
+      return this.decodeAt(node, bytes, 0, bytes.length, 0, { allowUnknown: false, hasUnknown: false });
+    });
+  }
+
+  /**
+   * Runs the checks of the custom nodes `value` is a value of (it was read
+   * by a walk that does not: a key). An error of kind `kind`.
+   */
+  checkValue(ref: Node, value: unknown, kind: PsszErrorKind): void {
+    if (!this.checksValues) return;
+    try {
+      this.encodeAt(ref, value, 0);
+    } catch (e) {
+      if (!(e instanceof PsszError) || e.kind === kind) throw e;
+      throw new PsszError(kind, e.message, undefined, e.invariant);
+    }
+  }
+
+  // ── Maps and sets ─────────────────────────────────────────────────────────
+
+  /**
+   * The canonical order of a map / set value's entries: indices into
+   * `items`, ascending by the key bytes of their keys. Null: two entries
+   * have equal key bytes. Computing the order runs no handler.
+   */
+  assocOrder(node: Node, items: unknown[]): number[] | null {
+    const keys = this.assocKeys(node, items);
+    const order = items.map((_, i) => i);
+    order.sort((a, b) => compareBytes(keys[a], keys[b]));
+    for (let i = 1; i < order.length; ++i)
+      if (compareBytes(keys[order[i - 1]], keys[order[i]]) === 0) return null;
+    return order;
+  }
+
+  // The key bytes of every entry's key, in `items` order.
+  private assocKeys(node: Node, items: unknown[]): Uint8Array[] {
+    const key = strip(node.keyRef).node;
+    return this.quietly(() => items.map((item) => {
+      if (node.assoc !== 'map') return encodeKey(this, key, item);
+      if (!Array.isArray(item) || item.length !== 2) return valueError('pssz IR: a map entry is a [key, value] pair');
+      return encodeKey(this, key, item[0]);
+    }));
+  }
+
+  private encodeAssoc(node: Node, value: unknown, n: number): Uint8Array {
+    let items = assocItems(value);
+    if (!items) return valueError('pssz IR: sequence value required');
+    const order = this.assocOrder(node, items);
+    if (!order)
+      return valueError(node.assoc === 'map' ? 'pssz IR: map has duplicate keys' : 'pssz IR: set has duplicate elements');
+    // A value already in canonical order (anything a decoder or a text
+    // reader produced) is encoded as it is.
+    if (order.some((index, i) => index !== i)) {
+      const given = items;
+      items = order.map((index) => given[index]);
+    }
+    return this.encodeSequence(node, items, n);
+  }
+
+  private decodeAssoc(
+    node: Node, bytes: Uint8Array, start: number, end: number, n: number, ctx: DecodeContext,
+  ): unknown {
+    const items = this.decodeSequence(node, bytes, start, end, n, ctx);
+    // The order is that of the bytes read. A decoded Nested value stands
+    // for its canonical encoding, which is not what a compatible read saw
+    // when the inner bytes carry unknown fields: keys holding a Nested node
+    // are taken from the bytes as they are.
+    let keys: Uint8Array[];
+    if (this.keyHasNested(node) && !this.opaqueNested && this.state.opaque === 0) {
+      keys = this.rawly(() => {
+        const raw: DecodeContext = { allowUnknown: ctx.allowUnknown, hasUnknown: false };
+        return this.assocKeys(node, this.decodeSequence(node, bytes, start, end, n, raw));
+      });
+    } else keys = this.assocKeys(node, items);
+    for (let i = 1; i < keys.length; ++i)
+      if (compareBytes(keys[i - 1], keys[i]) >= 0)
+        bytesError(node.assoc === 'map'
+          ? 'pssz IR: map entries are not in strictly ascending key order'
+          : 'pssz IR: set elements are not in strictly ascending order');
+    const out = this.assocValue(node, items);
+    // Distinct key bytes are distinct JavaScript keys; never a silent loss.
+    if (out.size !== items.length)
+      bytesError(node.assoc === 'map' ? 'pssz IR: map container merged distinct keys' : 'pssz IR: set container merged distinct elements');
+    return out;
+  }
+
+  /**
+   * The `Map` / `Set` of a map / set node from its entries / elements in
+   * canonical order. A float key that is −0 is held as `PsszNegativeZero`
+   * (a `Map` / `Set` would store +0 and lose the sign bit).
+   */
+  assocValue(node: Node, items: unknown[]): Map<unknown, unknown> | Set<unknown> {
+    const float = strip(node.keyRef).node.kind === 'float';
+    const key = (k: unknown) => (float && Object.is(k, -0) ? PsszNegativeZero.value : k);
+    if (node.assoc === 'map') return new Map((items as [unknown, unknown][]).map(([k, v]) => [key(k), v]));
+    return new Set(float ? items.map(key) : items);
+  }
+
+  /**
+   * A nested member's `lengthBound` (through Option) against its encoded
+   * form `[start, end)`: it counts the bytes of the inner encoding. An
+   * absent optional has no length.
+   */
+  nestedBoundAdmits(bound: LengthBound, node: Node, bytes: Uint8Array, start: number, end: number): boolean {
+    while (node.kind === 'option') {
+      node = node.child;
+      const selector = this.canBeEmpty(node);
+      if (start === end || (selector && bytes[start] === 0)) return true;
+      if (selector) ++start;
+    }
+    return boundAdmits(bound, end - start);
   }
 
   fieldLayouts(node: Node, w: number): FieldLayout[] {
@@ -1389,6 +1800,7 @@ export class Codec {
       case 'float': {
         const out = new Uint8Array(node.size);
         const view = new DataView(out.buffer);
+        if (value instanceof PsszNegativeZero) value = -0;
         if (value instanceof PsszNaN) {
           if (value.size !== node.size) return valueError('pssz IR: NaN bits of the wrong float width');
           if (node.size === 4) view.setUint32(0, Number(value.bits), true);
@@ -1448,7 +1860,7 @@ export class Codec {
         const [some, payload] = unwrapOption(node, value, valueError);
         const selector = this.canBeEmpty(node.child);
         if (!some) return selector ? Uint8Array.of(0) : new Uint8Array(0);
-        const inner = this.encodeAt(node.child, payload, n + 1);
+        const inner = this.encodeAt(node.textChild, payload, n + 1);
         if (!selector) return inner;
         const out = new Uint8Array(inner.length + 1);
         out[0] = 1;
@@ -1472,15 +1884,28 @@ export class Codec {
             : undefined;
           if (own === undefined && !info.optional)
             valueError(`pssz IR: missing required record value "${member.name}"`);
-          const field = own === undefined ? null : own;
-          if (member.bound && !memberBoundAdmits(member.bound, member.node, field))
-            valueError('pssz IR: member length bound violated');
+          let field: unknown = own === undefined ? null : own;
+          if (member.bound) {
+            field = settleMember(member.node, field);
+            if (!memberBoundAdmits(member.bound, member.node, field))
+              valueError('pssz IR: member length bound violated');
+          }
           values.push(field);
           layouts.push(info);
           if (node.stable || !info.optional || field !== null) keep = values.length;
         }
         const parts: Uint8Array[] = [];
-        for (let i = 0; i < keep; ++i) parts.push(this.encodeAt(node.members[i].node, values[i], n + 1));
+        for (let i = 0; i < keep; ++i) {
+          const member = node.members[i];
+          const part = this.encodeAt(member.text, values[i], n + 1);
+          // A nested member's bound counts its encoded bytes.
+          if (
+            member.bound && nestedMember(member.node) &&
+            !this.nestedBoundAdmits(member.bound, member.node, part, 0, part.length)
+          )
+            valueError('pssz IR: member length bound violated');
+          parts.push(part);
+        }
         layouts.length = keep;
         const out = this.encodeFields(layouts, parts, node.stable, w);
         if (this.overCap(node, out.length)) valueError('pssz IR: encoded size exceeds maxDynamicData cap');
@@ -1497,42 +1922,70 @@ export class Codec {
           if (!info.optional || (value[i] !== null && value[i] !== undefined)) keep = i + 1;
         }
         const parts: Uint8Array[] = [];
-        for (let i = 0; i < keep; ++i) parts.push(this.encodeAt(node.members[i].node, value[i], n + 1));
+        for (let i = 0; i < keep; ++i) parts.push(this.encodeAt(node.members[i].text, value[i], n + 1));
         layouts.length = keep;
         return this.encodeFields(layouts, parts, false, this.widthOf(node));
       }
       case 'list':
-      case 'array': {
+      case 'array':
+        if (node.assoc) return this.encodeAssoc(node, value, n);
         if (!Array.isArray(value)) return valueError('pssz IR: sequence value required');
-        if (node.bounded && (node.exact ? value.length !== node.countNum : value.length > node.countNum))
-          valueError('pssz IR: sequence bound exceeded');
-        const w = this.widthOf(node);
-        const info = this.layout(node.child);
-        if (!node.exact && info.fixed && !info.size && value.length)
-          valueError('pssz IR: ambiguous zero-size list');
-        const parts: Uint8Array[] = [];
-        const layouts: Layout[] = [];
-        for (let i = 0; i < value.length; ++i) {
-          parts.push(this.encodeAt(node.child, value[i], n + 1));
-          layouts.push(info);
-        }
-        return this.encodeFields(layouts, parts, true, w);
-      }
+        return this.encodeSequence(node, value, n);
       case 'variant': {
         if (!isObject(value) || typeof value.type !== 'string')
           return valueError('pssz IR: a variant value is { type, value }');
         const selector = node.byName!.get(value.type);
         if (selector === undefined) return valueError(`pssz IR: unknown variant alternative "${value.type}"`);
-        const inner = this.encodeAt(node.members[selector].node, value.value, n + 1);
+        const inner = this.encodeAt(node.members[selector].text, value.value, n + 1);
         const out = new Uint8Array(inner.length + 1);
         out[0] = selector;
         out.set(inner, 1);
         return out;
       }
-      case 'custom':
-        // A wrapper adds nothing to the bytes.
-        return this.encodeAt(strip(node).node, value, n);
+      case 'nested': {
+        if (this.isOpaque(node)) {
+          if (!(value instanceof Uint8Array))
+            return valueError('pssz IR: bytes value required for an opaque nested value');
+          if (value.length) this.checkDepth(n + 1, valueError);
+          return new Uint8Array(value);
+        }
+        // The inner value's canonical encoding, always in the automatic
+        // profile; its root is one node level below the nested node.
+        return this.auto.encodeAt(node.textChild, value, n + 1);
+      }
+      case 'custom': {
+        // A wrapper adds nothing to the bytes. The values inside it were
+        // checked as they were written; then this one, as `decode` gives it.
+        const out = this.encodeAt(node.inner!, value, n);
+        if (!node.boxed && this.state.quiet === 0 && (node.handler?.check || (!node.handler && this.requireHandlers))) {
+          const inner = node.inner!;
+          const held = node.handler?.check
+            ? this.quietly(() => this.decodeAt(inner, out, 0, out.length, n, { allowUnknown: false, hasUnknown: false }))
+            : undefined;
+          this.checkCustom(node, held, (message, invariant) => {
+            throw new PsszError('value', message, undefined, invariant);
+          });
+        }
+        return out;
+      }
     }
+  }
+
+  // The elements of a list / array / map / set, in the order given.
+  private encodeSequence(node: Node, value: unknown[], n: number): Uint8Array {
+    if (node.bounded && (node.exact ? value.length !== node.countNum : value.length > node.countNum))
+      valueError('pssz IR: sequence bound exceeded');
+    const w = this.widthOf(node);
+    const info = this.layout(node.child);
+    if (!node.exact && info.fixed && !info.size && value.length)
+      valueError('pssz IR: ambiguous zero-size list');
+    const parts: Uint8Array[] = [];
+    const layouts: Layout[] = [];
+    for (let i = 0; i < value.length; ++i) {
+      parts.push(this.encodeAt(node.textChild, value[i], n + 1));
+      layouts.push(info);
+    }
+    return this.encodeFields(layouts, parts, true, w);
   }
 
   // The byte container under a string / hex adapter admits `count` bytes.
@@ -1629,7 +2082,7 @@ export class Codec {
     for (let i = 0; i < fields.length; ++i) {
       const member = node.members[i];
       // A field the writer did not store is an absent optional.
-      const value = present[i] ? this.decodeAt(member.node, bytes, begins[i], ends[i], n + 1, ctx) : null;
+      const value = present[i] ? this.decodeAt(member.text, bytes, begins[i], ends[i], n + 1, ctx) : null;
       // Pruning is mandatory: the last slot a writer emits is never an
       // absent optional. A frame with unknown appended slots is not judged.
       if (
@@ -1638,6 +2091,12 @@ export class Codec {
       )
         bytesError('pssz IR: trailing absent optional field was not pruned');
       if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
+        bytesError('pssz IR: member length bound violated');
+      // A nested member's bound counts its encoded bytes.
+      if (
+        member.bound && present[i] && nestedMember(member.node) &&
+        !this.nestedBoundAdmits(member.bound, member.node, bytes, begins[i], ends[i])
+      )
         bytesError('pssz IR: member length bound violated');
       values.push(value);
     }
@@ -1675,7 +2134,7 @@ export class Codec {
         bytesError('pssz IR: zero-size array count exceeds the implementation limit');
       for (let i = 0; i < count; ++i) {
         const at = start + i * info.size;
-        out.push(this.decodeAt(element, bytes, at, at + info.size, n + 1, ctx));
+        out.push(this.decodeAt(node.textChild, bytes, at, at + info.size, n + 1, ctx));
       }
     } else {
       if (count > Math.floor(size / w) || (!count && size)) bytesError('pssz IR: list table span mismatch');
@@ -1686,7 +2145,7 @@ export class Codec {
         const stop = i + 1 < count ? this.readOffset(bytes, start + (i + 1) * w, w) : size;
         if ((!i && begin !== table) || begin < previous || begin > stop || stop > size)
           bytesError('pssz IR: invalid list offsets');
-        out.push(this.decodeAt(element, bytes, start + begin, start + stop, n + 1, ctx));
+        out.push(this.decodeAt(node.textChild, bytes, start + begin, start + stop, n + 1, ctx));
         previous = begin;
       }
     }
@@ -1765,7 +2224,7 @@ export class Codec {
           if (bytes[start] !== 1) bytesError('pssz IR: invalid optional selector');
           ++start;
         } else if (size === 0) return null;
-        return wrapSome(node, this.decodeAt(node.child, bytes, start, end, n + 1, ctx));
+        return wrapSome(node, this.decodeAt(node.textChild, bytes, start, end, n + 1, ctx));
       }
       case 'record': {
         if (this.overCap(node, size)) bytesError('pssz IR: encoded size exceeds maxDynamicData cap');
@@ -1778,6 +2237,7 @@ export class Codec {
         return this.decodeMembers(node, bytes, start, end, false, n, ctx);
       case 'list':
       case 'array':
+        if (node.assoc) return this.decodeAssoc(node, bytes, start, end, n, ctx);
         return this.decodeSequence(node, bytes, start, end, n, ctx);
       case 'variant': {
         if (size === 0) bytesError('pssz IR: variant selector missing');
@@ -1786,12 +2246,26 @@ export class Codec {
         const member = node.members[selector];
         const value: VariantValue = {
           type: member.name,
-          value: this.decodeAt(member.node, bytes, start + 1, end, n + 1, ctx),
+          value: this.decodeAt(member.text, bytes, start + 1, end, n + 1, ctx),
         };
         return value;
       }
-      case 'custom':
-        return this.decodeAt(strip(node).node, bytes, start, end, n, ctx);
+      case 'nested':
+        if (this.isOpaque(node)) {
+          if (size) this.checkDepth(n + 1, bytesError);
+          return bytes.slice(start, end);
+        }
+        // The bytes are read as the inner type, in the automatic profile,
+        // under the same unknown-field rule; its root is one level below.
+        return this.auto.decodeAt(node.textChild, bytes, start, end, n + 1, ctx);
+      case 'custom': {
+        // The values inside were checked as they were read; then this one.
+        const value = this.decodeAt(node.inner!, bytes, start, end, n, ctx);
+        this.checkCustom(node, value, (message, invariant) => {
+          throw new PsszError('bytes', message, undefined, invariant);
+        });
+        return value;
+      }
     }
   }
 }
