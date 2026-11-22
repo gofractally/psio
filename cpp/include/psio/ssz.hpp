@@ -1588,7 +1588,9 @@ namespace psio {
       [[noreturn, gnu::cold]] inline void
       ssz_throw_fail(std::string_view msg, std::uint32_t off)
       {
-         throw codec_exception{codec_error{msg, off, "ssz"}};
+         // codec_exception where exceptions are enabled, abort otherwise
+         // (error.hpp): the header compiles either way.
+         ::psio::codec_abort(codec_error{msg, off, "ssz"});
       }
 
       template <typename T>
@@ -1861,7 +1863,7 @@ namespace psio {
                src.data() + pos,
                (end > pos) ? (end - pos) : 0));
             if (!st.ok()) [[unlikely]]
-               throw codec_exception{st.error()};
+               ::psio::codec_abort(st.error());
          }
          else if constexpr (is_fixed_v<T> && !Record<T>)
          {
@@ -2204,6 +2206,7 @@ namespace psio {
             detail::ssz_impl::validate_value<T>(bytes, 0, bytes.size());
          if (!st.ok())
             return st;
+#if defined(__cpp_exceptions)
          if constexpr (::psio::Reflected<T>)
          {
             try
@@ -2218,10 +2221,13 @@ namespace psio {
                   "ssz: decode failed during validate_strict", 0, "ssz");
             }
          }
-         else
-         {
-            return st;
-         }
+#else
+         // No exceptions: the semantic walk cannot materialise the value
+         // (a failed decode would abort). As in frac.hpp / pssz.hpp.
+         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
+            return codec_fail("ssz: guest strict semantic validation unsupported", 0, "ssz");
+#endif
+         return st;
       }
 
       // ── make_boxed — default decode + std::make_unique ─────────────────
