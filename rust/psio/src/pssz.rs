@@ -276,7 +276,7 @@ macro_rules! pssz_impl_primitive_le {
 pssz_impl_primitive_le!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, f64);
 
 // Uint256 — re-exported from ssz module since it's the same on-wire shape.
-pub use crate::ssz::Uint256;
+pub use crate::value_types::Uint256;
 
 impl<F: PsszFormat> PsszPack<F> for Uint256 {
     const MIN_ENCODED_SIZE: usize         = 32;
@@ -385,7 +385,7 @@ impl<F: PsszFormat> PsszValidate<F> for String {
     }
 }
 
-pub use crate::ssz::{Bitlist, Bitvector, BoundedBytes, BoundedList, BoundedString};
+pub use crate::value_types::{Bitlist, Bitvector, BoundError, BoundedBytes, BoundedList, BoundedString};
 
 /// C++ `psio::utf8_string<N>`: UTF-8, at most N bytes.
 impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedString<N> {
@@ -775,8 +775,7 @@ impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
         let _depth = checked::EncodeDepth::enter()?;
         if self.bits.len() > MAX_N { return Err(PsszError::new("pssz: bitlist count exceeds bound")); }
         out.try_reserve(self.bits.len() / 8 + 1).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
-        use crate::ssz::SszPack;
-        <Self as SszPack>::ssz_pack(self, out);  // wire-identical
+        self.pack_bits(out); // wire-identical with SSZ
         Ok(())
     }
 }
@@ -784,8 +783,7 @@ impl<F: PsszFormat, const MAX_N: usize> PsszUnpack<F> for Bitlist<MAX_N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
         let _depth = checked::DecodeDepth::enter()?;
         crate::pssz_bits::list_count(bytes, MAX_N)?;
-        use crate::ssz::SszUnpack;
-        <Self as SszUnpack>::ssz_unpack(bytes).map_err(|e| PsszError::new(e.0))
+        Self::unpack_bits(bytes).map_err(PsszError::new)
     }
 }
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitlist<N> {

@@ -419,8 +419,13 @@ pub(crate) enum Derive {
     Pssz,
     Key,
     /// The derives of `psio::experimental::frac`.
+    // Constructed only with the feature `experimental-frac`.
+    #[allow(dead_code)]
     Frac,
     /// `Capnp*`, `Fb*`, `Wit*`, `ToDynamicSchema`: every field is a member.
+    // Constructed only with the features `capnp`, `flatbuf`, `wit`,
+    // `dynamic-view`.
+    #[allow(dead_code)]
     Interchange(&'static str),
 }
 

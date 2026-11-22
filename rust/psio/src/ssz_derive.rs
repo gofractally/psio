@@ -233,6 +233,7 @@ macro_rules! ssz_struct {
                     }
                     let _: &str = stringify!($field);
                 )+
+                let _ = field_pos;
                 let mut field_pos: usize = 0;
                 let mut var_i: usize = 0;
                 $(

@@ -13,7 +13,6 @@
 //! `std::make_unique<eth::BeaconState>()` pattern for the outer state.
 
 use crate::ssz::{Bitvector, BoundedList};
-use crate::{ssz_struct, ssz_struct_dwnc};
 
 // ── Constants (mainnet preset) ──────────────────────────────────────────────
 

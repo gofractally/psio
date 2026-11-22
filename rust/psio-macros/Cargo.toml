@@ -10,6 +10,11 @@ proc-macro = true
 
 [features]
 default = []
+# The derives of the formats psio compiles by feature.
+capnp = []
+flatbuf = []
+wit = []
+dynamic-view = []
 # The derives of psio::experimental::frac, a format kept for benchmarks.
 experimental-frac = ["dep:darling", "dep:proc-macro-error"]
 

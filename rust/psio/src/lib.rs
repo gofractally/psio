@@ -13,9 +13,32 @@
 //! * [`interface`](mod@interface): methods and interfaces, `#[psio::interface]` on a trait
 //!   (argument records, dispatch, call proxies, the schema's `Interface`);
 //! * [`compress_name`]: method and identifier names as 64-bit numbers;
-//! * [`pjson`]: a self-describing binary JSON;
-//! * [`ssz`], [`capnp`], [`flatbuf`], [`wit`]: interchange with SSZ,
-//!   Cap'n Proto, FlatBuffers and the WIT Canonical ABI.
+//! * [`time`]: durations and time points;
+//! * with a cargo feature each: [`pjson`] (`pjson`), a self-describing
+//!   binary JSON; [`ssz`] (`ssz`; the beacon-chain records with `beacon`);
+//!   [`capnp`] (`capnp`), [`flatbuf`] (`flatbuf`) and [`wit`] (`wit`), for
+//!   interchange with Cap'n Proto, FlatBuffers and the WIT Canonical ABI;
+//!   [`dynamic_view`] (`dynamic-view`). `all-formats` is all of them.
+//!
+//! # Cargo features
+//!
+//! With no feature a dependent compiles pSSZ, keys, Json / IJson text and
+//! the serde bridge, the Schema IR, time, names and interfaces, and nothing
+//! of the other formats.
+//!
+//! | feature | adds |
+//! |---------|------|
+//! | `ssz`, `beacon` | [`ssz`], `ssz_struct!`, [`struct@SszView`]; [`beacon_types`] |
+//! | `pjson` | [`pjson`], `pjson_struct!` |
+//! | `capnp`, `flatbuf`, `wit` | the module and the `Capnp*` / `Fb*` / `Wit*` derives |
+//! | `dynamic-view` | [`dynamic_view`], [`dynamic_schema`], schema import and export (implies the three above) |
+//! | `all-formats` | every format above |
+//! | `chrono` | `TryFrom` between [`time`] values and `chrono` |
+//! | `async-graphql` | `psio::graphql_scalars`: PSIO values as `async-graphql` scalars |
+//! | `experimental-frac` | [`experimental`] |
+//!
+//! No feature changes what `serde_json` does for the rest of a program
+//! ([`serde_bridge`]).
 //!
 //! # Helpers
 //!
@@ -158,9 +181,13 @@ pub mod serde_bridge;
 
 // The derives. A derive and the trait it implements share a name; the trait
 // lives in its format's module.
+#[cfg(feature = "capnp")]
 pub use psio_macros::{CapnpPack, CapnpUnpack, CapnpView};
+#[cfg(feature = "flatbuf")]
 pub use psio_macros::{FbPack, FbUnpack, FbView};
+#[cfg(feature = "dynamic-view")]
 pub use psio_macros::ToDynamicSchema;
+#[cfg(feature = "wit")]
 pub use psio_macros::{WitPack, WitUnpack, WitView};
 pub use psio_macros::{PsszPack, PsszUnpack, PsszView, ToPsszSchema};
 pub use psio_macros::JsonText;
@@ -173,10 +200,13 @@ pub use psio_macros::interface;
 // The helper names, one set per format (docs/helpers.md): `to_F`,
 // `try_to_F`, `to_F_into`, `from_F`, `from_F_trusted`, `validate_F`,
 // `F_size`, and the view / buffer types.
+#[cfg(feature = "capnp")]
 pub use capnp::{capnp_size, from_capnp, from_capnp_trusted, to_capnp, to_capnp_into, validate_capnp};
+#[cfg(feature = "flatbuf")]
 pub use flatbuf::{
     flatbuf_size, from_flatbuf, from_flatbuf_trusted, to_flatbuf, to_flatbuf_into, validate_flatbuf,
 };
+#[cfg(feature = "wit")]
 pub use wit::{from_wit, from_wit_trusted, to_wit, to_wit_into, validate_wit, wit_size};
 pub use json::{
     from_ijson, from_ijson_trusted, from_json, from_json_trusted, ijson_size, json_size, to_ijson,
@@ -189,14 +219,16 @@ pub use pssz::{
     Pssz, PsszBuffer, SharedPssz,
 };
 pub use pssz_view::{PsszMapEntry, PsszMutMapEntry, PsszMutView, PsszView};
+#[cfg(feature = "ssz")]
 pub use ssz::{
     from_ssz, from_ssz_trusted, ssz_size, to_ssz, to_ssz_into, validate_ssz, SharedSsz, Ssz,
     SszBuffer,
 };
+#[cfg(feature = "ssz")]
 pub use ssz_view::SszView;
 
 // Every derive resolves the psio crate through #[psio(crate = "...")].
-#[cfg(test)]
+#[cfg(all(test, feature = "capnp", feature = "flatbuf", feature = "wit", feature = "dynamic-view"))]
 mod annotation_tests;
 
 mod buffer;
@@ -215,19 +247,32 @@ pub use policy::{ValidationPolicy, DefaultSafe, StrictCanonical,
 mod format;
 pub use format::{Format, Encode, Decode, Validate, encode, decode, validate, size_of};
 
+#[cfg(feature = "dynamic-view")]
 pub mod xxh64;
+#[cfg(feature = "pjson")]
 pub mod xxh3_64;
+#[cfg(feature = "dynamic-view")]
 pub mod dynamic_schema;
 
-// Multi-format wire formats
+// The formats a dependent asks for by cargo feature.
+#[cfg(feature = "capnp")]
 pub mod capnp;
+#[cfg(feature = "flatbuf")]
 pub mod flatbuf;
+#[cfg(feature = "pjson")]
 pub mod pjson;
+#[cfg(feature = "pjson")]
 #[macro_use]
 pub mod pjson_derive;
+#[cfg(feature = "pjson")]
 pub mod pjson_view;
+#[cfg(feature = "pjson")]
 pub mod pjson_typed;
+#[cfg(feature = "pjson")]
 pub mod pjson_json;
+// Always compiled: pSSZ, keys, Json / IJson text, the Schema IR, time,
+// names, interfaces.
+mod value_types;
 pub mod json;
 #[cfg(feature = "async-graphql")]
 pub mod graphql_scalars;
@@ -245,30 +290,38 @@ pub mod pssz_dynamic;
 pub mod pssz_upgrade;
 pub mod pssz_evolves;
 pub mod pssz_view;
+#[cfg(feature = "ssz")]
 pub mod ssz;
+#[cfg(feature = "ssz")]
 #[macro_use]
 pub mod ssz_derive;
+#[cfg(feature = "ssz")]
 pub mod ssz_view;
+#[cfg(feature = "wit")]
 pub mod wit;
 
 // pjson cross-validation: round-trip self-checks + #[ignore]-marked
 // byte-identity comparisons against C++ output (placeholders until
 // the sibling pjson-impl-conformance branch lands).
-#[cfg(test)]
+#[cfg(all(test, feature = "pjson"))]
 mod pjson_cross_validation_tests;
 
 // Ethereum Phase-0 BeaconState types (Rust port of beacon_types.hpp)
+#[cfg(feature = "beacon")]
 pub mod beacon_types;
 
 // BeaconState Phase-0 Validator cross-val (Phase J of parity plan)
-#[cfg(test)]
+#[cfg(all(test, feature = "beacon"))]
 mod beacon_state_tests;
 
 // Dynamic dispatch (runtime field access by name)
+#[cfg(feature = "dynamic-view")]
 pub mod dynamic_view;
 
 // Schema tooling
+#[cfg(feature = "dynamic-view")]
 pub mod schema_export;
+#[cfg(feature = "dynamic-view")]
 pub mod schema_import;
 
 // Macro dependencies are resolved through this crate for downstream consumers.

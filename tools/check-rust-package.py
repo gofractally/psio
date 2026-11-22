@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build an unrelated consumer of both extracted Cargo archives."""
+"""Build unrelated consumers of both extracted Cargo archives.
+
+One takes psio with its default features (pSSZ, keys, Json / IJson, the
+Schema IR, time, names, interfaces) and one with every format.
+"""
 import argparse
 import json
 import os
@@ -21,7 +25,7 @@ name = "psio-package-consumer"
 version = "0.0.0"
 edition = "2021"
 [dependencies]
-psio = {{ path = {json.dumps(str(work/'psio-0.1.0'))} }}
+psio = {{ path = {json.dumps(str(work/'psio-0.1.0'))}, features = ["all-formats"] }}
 [patch.crates-io]
 psio-macros = {{ path = {json.dumps(str(work/'psio-macros-0.1.0'))} }}
 ''')
@@ -90,4 +94,81 @@ fn main() {
     for line in serde_json:
         for feature in ['arbitrary_precision', 'preserve_order', 'float_roundtrip', 'unbounded_depth']:
             assert feature not in line, f'psio imposes serde_json/{feature} on its dependents: {line}'
-print('Rust archive consumer passed')
+    # The default feature set: what a dependent that names no feature
+    # compiles and can use.
+    default = work/'default-consumer'; (default/'src').mkdir(parents=True)
+    (default/'Cargo.toml').write_text(f'''[package]
+name = "psio-default-consumer"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+psio = {{ path = {json.dumps(str(work/'psio-0.1.0'))} }}
+[patch.crates-io]
+psio-macros = {{ path = {json.dumps(str(work/'psio-macros-0.1.0'))} }}
+''')
+    (default/'src/main.rs').write_text('''
+use psio::time::{Duration, Seconds, TimePoint};
+use psio::{JsonText, Key, PsszPack, PsszUnpack, PsszView, ToPsszSchema};
+
+#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView, ToPsszSchema, JsonText, Key, psio::Serde)]
+pub struct Record {
+    pub id: u32,
+    pub name: String,
+    pub at: TimePoint<Seconds>,
+}
+
+#[psio::interface(name = "store")]
+pub trait Store {
+    fn put(&mut self, record: Record) -> u32;
+    fn count(&self) -> u32;
+}
+
+struct Rows(Vec<Record>);
+impl Store for Rows {
+    fn put(&mut self, record: Record) -> u32 {
+        self.0.push(record);
+        self.0.len() as u32
+    }
+    fn count(&self) -> u32 {
+        self.0.len() as u32
+    }
+}
+
+fn main() {
+    let at = "2026-11-22T10:15:30Z".parse::<TimePoint<Seconds>>().unwrap() + Duration::from_ticks(30);
+    let value = Record { id: 42, name: "Alice".into(), at };
+    let bytes = psio::to_pssz(&value);
+    assert_eq!(psio::from_pssz::<Record>(&bytes).unwrap(), value);
+    assert_eq!(psio::PsszView::<Record>::new(&bytes).unwrap().id().get(), 42);
+    let text = psio::to_ijson(&value);
+    assert_eq!(text, r#"{"id":42,"name":"Alice","at":"2026-11-22T10:16:00Z"}"#);
+    assert_eq!(psio::from_ijson::<Record>(&text).unwrap(), value);
+    assert_eq!(psio::from_key::<Record>(&psio::to_key(&value)).unwrap(), value);
+
+    let (schema, root) = psio::pssz::schema_ir::schema_for::<Record>().unwrap();
+    assert!(psio::pssz::dynamic::validate(&schema, &root, &bytes).is_ok());
+    let mut builder = psio::pssz::schema_ir::SchemaBuilder::new();
+    builder.insert_interface::<store::Tag>().unwrap();
+    assert_eq!(builder.finish().interfaces[0].funcs.len(), 2);
+
+    let mut rows = Rows(Vec::new());
+    let reply = store::dispatch_name(&mut rows, "put", &psio::to_pssz(&store::args::put { record: value })).unwrap();
+    assert_eq!(psio::from_pssz::<u32>(&reply).unwrap(), 1);
+    assert_eq!(psio::compress_name::number_to_method(psio::compress_name::method_to_number("put")), "put");
+}
+''')
+    built = subprocess.run(['cargo','run','--offline','--manifest-path',str(default/'Cargo.toml')],
+                           capture_output=True, text=True)
+    if built.returncode != 0:
+        raise SystemExit(built.stderr)
+    # A dependent sees no warning from psio's own code, and the formats it
+    # did not ask for are not in its build.
+    assert 'warning' not in built.stderr, built.stderr
+    tree = subprocess.run(['cargo','tree','--offline','--manifest-path',str(default/'Cargo.toml'),
+                           '-e','features,normal,build','--prefix','none','--format','{p} [{f}]'],
+                          check=True, capture_output=True, text=True).stdout
+    psio_line = next(line for line in tree.splitlines() if line.startswith('psio v'))
+    for feature in ['ssz', 'pjson', 'capnp', 'flatbuf', 'wit', 'dynamic-view', 'beacon', 'experimental-frac']:
+        assert feature not in psio_line, psio_line
+    assert not any(line.startswith('xxhash-rust ') for line in tree.splitlines()), tree
+print('Rust archive consumers passed')

@@ -23,6 +23,8 @@
 //! Reflected-struct support via a derive macro is deferred (same TODO
 //! as pSSZ's Rust port).
 
+pub use crate::value_types::{Bitlist, Bitvector, BoundError, BoundedBytes, BoundedList, BoundedString, Uint256};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SszError(pub &'static str);
 
@@ -75,20 +77,6 @@ macro_rules! ssz_impl_primitive_le {
 }
 
 ssz_impl_primitive_le!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128, f32, f64);
-
-// ── Uint256 (C++ psio1::uint256) — 32-byte LE, 4 × u64 limbs ────────────────
-// Wire layout: limb[0] (lsb 64 bits) LE, then limb[1], [2], [3] (msb).
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Uint256 {
-    /// `limb[0]` = least-significant 64 bits; `limb[3]` = most-significant.
-    pub limb: [u64; 4],
-}
-
-impl Uint256 {
-    pub const ZERO: Uint256 = Uint256 { limb: [0; 4] };
-    pub const fn from_u64(v: u64) -> Self { Uint256 { limb: [v, 0, 0, 0] } }
-}
 
 impl SszPack for Uint256 {
     const IS_FIXED_SIZE: bool = true;
@@ -150,34 +138,6 @@ impl SszUnpack for String {
     }
 }
 
-// ── Bitvector<N> — C++ psio1::bitvector<N> ──────────────────────────────────
-// Packed bits, LSB-first, (N + 7) / 8 bytes, no delimiter.
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Bitvector<const N: usize> {
-    pub bytes: Vec<u8>,  // length = (N + 7) / 8
-}
-
-impl<const N: usize> Default for Bitvector<N> {
-    fn default() -> Self {
-        Bitvector { bytes: vec![0u8; (N + 7) / 8] }
-    }
-}
-
-impl<const N: usize> Bitvector<N> {
-    pub fn new() -> Self { Self::default() }
-    pub const BYTE_COUNT: usize = (N + 7) / 8;
-    pub const SIZE: usize = N;
-
-    pub fn test(&self, i: usize) -> bool {
-        (self.bytes[i >> 3] >> (i & 7)) & 1 != 0
-    }
-    pub fn set(&mut self, i: usize, v: bool) {
-        if v { self.bytes[i >> 3] |= 1u8 << (i & 7); }
-        else { self.bytes[i >> 3] &= !(1u8 << (i & 7)); }
-    }
-}
-
 impl<const N: usize> SszPack for Bitvector<N> {
     const IS_FIXED_SIZE: bool  = true;
     const FIXED_SIZE:    usize = (N + 7) / 8;
@@ -194,58 +154,16 @@ impl<const N: usize> SszUnpack for Bitvector<N> {
     }
 }
 
-// ── Bitlist<N> — C++ psio1::bitlist<N> ──────────────────────────────────────
-// Packed bits + a single delimiter bit at position = len (always ≥ 1 byte).
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Bitlist<const MAX_N: usize> {
-    pub bits: Vec<bool>,  // logical length — not what gets encoded directly
-}
-
-impl<const MAX_N: usize> Bitlist<MAX_N> {
-    pub fn new() -> Self { Bitlist { bits: Vec::new() } }
-    pub fn with_len(n: usize) -> Self { Bitlist { bits: vec![false; n] } }
-    pub fn len(&self) -> usize { self.bits.len() }
-    pub fn test(&self, i: usize) -> bool { self.bits[i] }
-    pub fn set(&mut self, i: usize, v: bool) { self.bits[i] = v; }
-    pub fn push(&mut self, v: bool) { self.bits.push(v); }
-}
-
 impl<const MAX_N: usize> SszPack for Bitlist<MAX_N> {
     const IS_FIXED_SIZE: bool  = false;
     const FIXED_SIZE:    usize = 0;
     fn ssz_size(&self) -> usize { (self.bits.len() / 8) + 1 }
-    fn ssz_pack(&self, out: &mut Vec<u8>) {
-        let n = self.bits.len();
-        let total_bytes = (n / 8) + 1;
-        let start = out.len();
-        out.resize(start + total_bytes, 0);
-        for (i, &b) in self.bits.iter().enumerate() {
-            if b { out[start + (i >> 3)] |= 1u8 << (i & 7); }
-        }
-        // delimiter bit
-        out[start + (n >> 3)] |= 1u8 << (n & 7);
-    }
+    fn ssz_pack(&self, out: &mut Vec<u8>) { self.pack_bits(out) }
 }
 
 impl<const MAX_N: usize> SszUnpack for Bitlist<MAX_N> {
     fn ssz_unpack(bytes: &[u8]) -> SszResult<Self> {
-        if bytes.is_empty() { return Err(SszError("ssz: bitlist empty span")); }
-        // Find the last non-zero byte → contains the delimiter.
-        let mut last = bytes.len() as isize - 1;
-        while last >= 0 && bytes[last as usize] == 0 { last -= 1; }
-        if last < 0 { return Err(SszError("ssz: bitlist missing delimiter")); }
-        let last_byte = bytes[last as usize];
-        // Highest set bit position within last_byte.
-        let hi = 7 - last_byte.leading_zeros() as usize;
-        let len = (last as usize) * 8 + hi;
-        if len > MAX_N { return Err(SszError("ssz: bitlist overflow on decode")); }
-
-        let mut bits = vec![false; len];
-        for i in 0..len {
-            bits[i] = (bytes[i >> 3] >> (i & 7)) & 1 != 0;
-        }
-        Ok(Bitlist { bits })
+        Self::unpack_bits(bytes).map_err(SszError)
     }
 }
 
@@ -473,26 +391,6 @@ impl<T: SszUnpack + SszPack> SszUnpack for Vec<T> {
     }
 }
 
-// ── BoundedList<T, N> / BoundedString<N> — C++ bounded_list / bounded_string
-//
-// Wire format is byte-identical to `Vec<T>` / `String` — the bound is a
-// Rust-side schema invariant, enforced on decode.
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct BoundedList<T, const N: usize>(pub Vec<T>);
-
-impl<T, const N: usize> BoundedList<T, N> {
-    pub fn new() -> Self { BoundedList(Vec::new()) }
-    pub fn try_from_vec(v: Vec<T>) -> Result<Self, SszError> {
-        if v.len() > N { return Err(SszError("BoundedList overflow")); }
-        Ok(BoundedList(v))
-    }
-    pub fn inner(&self) -> &Vec<T> { &self.0 }
-    pub fn into_inner(self) -> Vec<T> { self.0 }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn is_empty(&self) -> bool { self.0.is_empty() }
-}
-
 impl<T: SszPack, const N: usize> SszPack for BoundedList<T, N> {
     const IS_FIXED_SIZE: bool  = false;
     const FIXED_SIZE:    usize = 0;
@@ -507,20 +405,6 @@ impl<T: SszUnpack + SszPack, const N: usize> SszUnpack for BoundedList<T, N> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct BoundedString<const N: usize>(pub String);
-
-impl<const N: usize> BoundedString<N> {
-    pub fn new() -> Self { BoundedString(String::new()) }
-    pub fn try_from_string(s: String) -> Result<Self, SszError> {
-        if s.len() > N { return Err(SszError("BoundedString overflow")); }
-        Ok(BoundedString(s))
-    }
-    pub fn as_str(&self) -> &str { &self.0 }
-    pub fn into_inner(self) -> String { self.0 }
-    pub fn len(&self) -> usize { self.0.len() }
-}
-
 impl<const N: usize> SszPack for BoundedString<N> {
     const IS_FIXED_SIZE: bool  = false;
     const FIXED_SIZE:    usize = 0;
@@ -533,9 +417,6 @@ impl<const N: usize> SszUnpack for BoundedString<N> {
         Ok(BoundedString(String::ssz_unpack(bytes)?))
     }
 }
-
-// `BoundedBytes<N>` — convenience alias.
-pub type BoundedBytes<const N: usize> = BoundedList<u8, N>;
 
 // ── Option<T> = Union[null, T] ──────────────────────────────────────────────
 //

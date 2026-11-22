@@ -30,8 +30,11 @@ use proc_macro::TokenStream;
 
 mod attrs;
 mod c_enum;
+#[cfg(feature = "capnp")]
 mod capnp_macro;
+#[cfg(feature = "dynamic-view")]
 mod dynamic_schema_macro;
+#[cfg(feature = "flatbuf")]
 mod fb_macro;
 #[cfg(feature = "experimental-frac")]
 mod frac_macro;
@@ -42,6 +45,7 @@ mod json_text_macro;
 mod key_macro;
 mod pssz_macro;
 mod serde_macro;
+#[cfg(feature = "wit")]
 mod wit_macro;
 
 #[proc_macro_derive(PsszPack, attributes(psio, pssz, serde))]
@@ -121,16 +125,19 @@ pub fn derive_key(input: TokenStream) -> TokenStream {
 
 // ── Cap'n Proto derive macros ───────────────────────────────────────────
 
+#[cfg(feature = "capnp")]
 #[proc_macro_derive(CapnpPack, attributes(psio, serde))]
 pub fn derive_capnp_pack(input: TokenStream) -> TokenStream {
     capnp_macro::capnp_pack_macro_impl(input)
 }
 
+#[cfg(feature = "capnp")]
 #[proc_macro_derive(CapnpUnpack, attributes(psio, serde))]
 pub fn derive_capnp_unpack(input: TokenStream) -> TokenStream {
     capnp_macro::capnp_unpack_macro_impl(input)
 }
 
+#[cfg(feature = "capnp")]
 #[proc_macro_derive(CapnpView, attributes(psio, serde))]
 pub fn derive_capnp_view(input: TokenStream) -> TokenStream {
     capnp_macro::capnp_view_macro_impl(input)
@@ -138,16 +145,19 @@ pub fn derive_capnp_view(input: TokenStream) -> TokenStream {
 
 // ── FlatBuffers derive macros ───────────────────────────────────────────
 
+#[cfg(feature = "flatbuf")]
 #[proc_macro_derive(FbPack, attributes(psio, serde))]
 pub fn derive_fb_pack(input: TokenStream) -> TokenStream {
     fb_macro::fb_pack_macro_impl(input)
 }
 
+#[cfg(feature = "flatbuf")]
 #[proc_macro_derive(FbUnpack, attributes(psio, serde))]
 pub fn derive_fb_unpack(input: TokenStream) -> TokenStream {
     fb_macro::fb_unpack_macro_impl(input)
 }
 
+#[cfg(feature = "flatbuf")]
 #[proc_macro_derive(FbView, attributes(psio, serde))]
 pub fn derive_fb_view(input: TokenStream) -> TokenStream {
     fb_macro::fb_view_macro_impl(input)
@@ -155,16 +165,19 @@ pub fn derive_fb_view(input: TokenStream) -> TokenStream {
 
 // ── WIT Canonical ABI derive macros ─────────────────────────────────────
 
+#[cfg(feature = "wit")]
 #[proc_macro_derive(WitPack, attributes(psio, serde))]
 pub fn derive_wit_pack(input: TokenStream) -> TokenStream {
     wit_macro::wit_pack_macro_impl(input)
 }
 
+#[cfg(feature = "wit")]
 #[proc_macro_derive(WitUnpack, attributes(psio, serde))]
 pub fn derive_wit_unpack(input: TokenStream) -> TokenStream {
     wit_macro::wit_unpack_macro_impl(input)
 }
 
+#[cfg(feature = "wit")]
 #[proc_macro_derive(WitView, attributes(psio, serde))]
 pub fn derive_wit_view(input: TokenStream) -> TokenStream {
     wit_macro::wit_view_macro_impl(input)
@@ -172,6 +185,7 @@ pub fn derive_wit_view(input: TokenStream) -> TokenStream {
 
 // ── Dynamic schema derive macro ────────────────────────────────────────
 
+#[cfg(feature = "dynamic-view")]
 #[proc_macro_derive(ToDynamicSchema, attributes(psio, serde))]
 pub fn derive_to_dynamic_schema(input: TokenStream) -> TokenStream {
     dynamic_schema_macro::dynamic_schema_derive_impl(input)

@@ -727,15 +727,6 @@ fn parse_row_array(value: &[u8], depth: usize) -> PjsonResult<Value<'_>> {
     } else { Ok(Value::RowArray(records)) }
 }
 
-// ── Validator ───────────────────────────────────────────────────────────────
-
-fn validate_value(buf: &[u8], size: usize) -> PjsonResult<()> {
-    // Re-parse-and-discard. The cost is the same; the validator becomes
-    // a thin wrapper. If a faster validator is needed later, this can
-    // walk without materializing — for now correctness >> speed.
-    validate_value_depth(buf, size, 0)
-}
-
 // Depth is checked before parsing each child, not after materializing the tree.
 fn validate_value_depth(buf: &[u8], size: usize, depth: usize) -> PjsonResult<()> {
     parse_value_depth(buf, size, depth).map(|_| ())

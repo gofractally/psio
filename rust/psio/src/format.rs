@@ -124,6 +124,7 @@ pub fn validate<F: Format, T: Validate<F>, P: ValidationPolicy>(
 
 /// The helper names of a format whose codec is a pair of traits with a
 /// whole-message pack and unpack (capnp, flatbuf, wit): docs/helpers.md.
+#[cfg(any(feature = "capnp", feature = "flatbuf", feature = "wit"))]
 macro_rules! message_format_helpers {
     (
         tag $tag:ident, $cpp:literal, error $err:ty,
@@ -188,4 +189,5 @@ macro_rules! message_format_helpers {
         pub type $shared<T> = $crate::Shared<T, $tag>;
     };
 }
+#[cfg(any(feature = "capnp", feature = "flatbuf", feature = "wit"))]
 pub(crate) use message_format_helpers;

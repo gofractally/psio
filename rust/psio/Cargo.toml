@@ -42,14 +42,37 @@ ethereum_ssz_derive = { version = "0.7",  optional = true }
 ssz_types           = { version = "0.8",  optional = true }
 typenum             = { version = "1",    optional = true }
 ssz_rs              = { version = "0.9",  optional = true }
-xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+# The hash of pjson's object index (feature `pjson`).
+xxhash-rust = { version = "0.8.15", features = ["xxh3"], optional = true }
 # Conversions between psio::time and chrono (feature `chrono`).
 chrono = { version = "0.4.38", default-features = false, optional = true }
 # psio's leaf types as async-graphql scalars (feature `async-graphql`).
 async-graphql = { version = "7.0.17", default-features = false, optional = true }
 
 [features]
+# Always compiled, with no feature: pSSZ (views, the Schema IR, the
+# schema-driven codec), memcmp-sortable keys, Json / IJson text and the serde
+# bridge, time, name compression, interfaces. Every other format is a feature,
+# so a dependent compiles only what it uses.
 default = []
+# psio::ssz: Ethereum SSZ (`ssz_struct!`, `SszView`).
+ssz = []
+# psio::beacon_types: the Ethereum Phase-0 beacon-chain records, in SSZ.
+beacon = ["ssz"]
+# psio::pjson: the self-describing binary JSON (`pjson_struct!`, views, the
+# JSON transcoder).
+pjson = ["dep:xxhash-rust"]
+# psio::capnp and the Capnp* derives.
+capnp = ["psio-macros/capnp"]
+# psio::flatbuf and the Fb* derives.
+flatbuf = ["psio-macros/flatbuf"]
+# psio::wit and the Wit* derives: the WIT Canonical ABI.
+wit = ["psio-macros/wit"]
+# psio::dynamic_view / dynamic_schema, schema import and export over the
+# Cap'n Proto, FlatBuffers and WIT formats, and the ToDynamicSchema derive.
+dynamic-view = ["capnp", "flatbuf", "wit", "psio-macros/dynamic-view"]
+# Every format.
+all-formats = ["ssz", "beacon", "pjson", "capnp", "flatbuf", "wit", "dynamic-view"]
 # `TryFrom` between psio::time values and chrono::DateTime / chrono::TimeDelta.
 chrono = ["dep:chrono"]
 # psio::graphql_scalars: psio::time values, RawString, the bounded strings and
@@ -61,16 +84,17 @@ async-graphql = ["dep:async-graphql"]
 # supported wire format.
 experimental-frac = ["psio-macros/experimental-frac", "dep:custom_error", "dep:hex",
                      "dep:indexmap", "dep:serde-aux"]
-historical-draft-reference = []
+historical-draft-reference = ["pjson"]
 bench_ethereum_ssz = ["dep:ethereum_ssz", "dep:ethereum_ssz_derive",
                        "dep:ssz_types", "dep:typenum"]
 bench_ssz_rs       = ["dep:ssz_rs"]
 
 [dev-dependencies]
-# Tests, benches and examples build the crate with the experimental formats,
-# so `cargo test` covers them while a plain dependency on psio does not
-# compile them.
-psio = { path = ".", features = ["experimental-frac"] }
+# Tests, benches and examples build the crate with every format and the
+# experimental ones, so `cargo test` covers them while a plain dependency on
+# psio does not compile them. (`cargo check -p psio --lib` and
+# psio-serde-json-stock build the default feature set.)
+psio = { path = ".", features = ["all-formats", "experimental-frac"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 hex = "0.3.1"
 bincode = "1"
