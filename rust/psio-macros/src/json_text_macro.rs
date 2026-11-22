@@ -16,6 +16,9 @@
 //! Integer form, on a field or (as the default for every field) on the
 //! struct: `#[json(json_number)]`, `#[json(json_string)]`,
 //! `#[json(ijson_number)]`, `#[json(ijson_string)]`.
+//!
+//! `#[json(crate = "path")]` on the item names the psio crate (default
+//! `::psio`); psio's own types use `#[json(crate = "crate")]`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -31,11 +34,12 @@ pub(crate) struct Forms {
 pub(crate) struct Attrs {
     pub(crate) forms: Forms,
     pub(crate) name: Option<String>,
+    pub(crate) krate: Option<syn::Path>,
 }
 
 /// The `#[json(...)]` attributes of an item, field or variant.
 pub(crate) fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
-    let mut out = Attrs { forms: Forms::default(), name: None };
+    let mut out = Attrs { forms: Forms::default(), name: None, krate: None };
     for attr in attrs {
         if !attr.path.is_ident("json") {
             continue;
@@ -63,11 +67,17 @@ pub(crate) fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
                     };
                     out.name = Some(lit.value());
                 }
+                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("crate") => {
+                    let syn::Lit::Str(lit) = &nv.lit else {
+                        return Err(syn::Error::new_spanned(&nv.lit, "crate must be a path string"));
+                    };
+                    out.krate = Some(lit.parse()?);
+                }
                 other => {
                     return Err(syn::Error::new_spanned(
                         other,
                         "unsupported #[json(...)] attribute: expected json_number, json_string, \
-                         ijson_number, ijson_string or name = \"...\"",
+                         ijson_number, ijson_string, name = \"...\" or crate = \"...\"",
                     ))
                 }
             }
@@ -99,11 +109,11 @@ fn lookup_tokens(names: &[String], key: TokenStream2) -> TokenStream2 {
     }
 }
 
-fn form_tokens(form: Option<bool>) -> TokenStream2 {
+fn form_tokens(j: &TokenStream2, form: Option<bool>) -> TokenStream2 {
     match form {
-        None => quote!(::psio::json::IntForm::Natural),
-        Some(false) => quote!(::psio::json::IntForm::Number),
-        Some(true) => quote!(::psio::json::IntForm::String),
+        None => quote!(#j::IntForm::Natural),
+        Some(false) => quote!(#j::IntForm::Number),
+        Some(true) => quote!(#j::IntForm::String),
     }
 }
 
@@ -118,12 +128,15 @@ pub fn derive(input: TokenStream) -> TokenStream {
 fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let type_attrs = parse_attrs(&input.attrs)?;
+    let j = match &type_attrs.krate {
+        Some(krate) => quote!(#krate::json),
+        None => quote!(::psio::json),
+    };
     let mut generics = input.generics.clone();
     for param in generics.type_params_mut() {
-        param.bounds.push(syn::parse_quote!(::psio::json::JsonText));
+        param.bounds.push(syn::parse_quote!(#j::JsonText));
     }
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    let j = quote!(::psio::json);
 
     let (write, read) = match &input.data {
         Data::Struct(data) => match &data.fields {
@@ -140,14 +153,17 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     let key = key.strip_prefix("r#").unwrap_or(&key).to_string();
                     let ty = &field.ty;
                     let attrs = parse_attrs(&field.attrs)?;
+                    if attrs.krate.is_some() {
+                        return Err(syn::Error::new_spanned(field, "#[json(crate)] applies to the item"));
+                    }
                     if attrs.name.is_some() {
                         return Err(syn::Error::new_spanned(
                             field,
                             "#[json(name)] applies to enum variants",
                         ));
                     }
-                    let json = form_tokens(attrs.forms.json.or(type_attrs.forms.json));
-                    let ijson = form_tokens(attrs.forms.ijson.or(type_attrs.forms.ijson));
+                    let json = form_tokens(&j, attrs.forms.json.or(type_attrs.forms.json));
+                    let ijson = form_tokens(&j, attrs.forms.ijson.or(type_attrs.forms.ijson));
                     let first = index == 0;
                     let slot = syn::Ident::new(&format!("__f{index}"), proc_macro2::Span::call_site());
                     writes.push(quote! {

@@ -1,16 +1,24 @@
 //! Literal structural mirror of C++ `psio/schema_ir.hpp`.
 //! This is distinct from the crate-root legacy fracpack schema.
+//!
+//! Serialized forms of a [`Schema`], each identical to the C++ one: PSSZ
+//! (`PsszPack` / `PsszUnpack`) and the two texts of `psio::json`
+//! (`JsonText`: `json::to_string::<IJson, _>(&schema)`,
+//! `json::from_str::<Json, Schema>(text)`), which are what the generic
+//! text codec gives these records (docs/json.md, "The Schema IR as JSON").
+//! The serde derives are a separate, serde-shaped form and not that text.
 #![allow(non_snake_case)]
 use crate::pssz::{PsszError, PsszResult};
-use crate::{PsszPack, PsszUnpack};
+use crate::{JsonText, PsszPack, PsszUnpack};
 use serde::{Deserialize, Serialize};
 use std::any::TypeId;
 use std::collections::HashMap;
 
 macro_rules! ir_record {
     ($name:ident { $($field:ident: $ty:ty),* $(,)? }) => {
-        #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack)]
+        #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack, JsonText)]
         #[pssz(crate = "crate")]
+        #[json(crate = "crate")]
         pub struct $name { $(pub $field: $ty),* }
     };
 }
@@ -46,8 +54,11 @@ ir_record!(Enumerator { name: String, value: u64 });
 ir_record!(Enum { r#type: Box<AnyType>, members: Vec<Enumerator> });
 
 /// Order is the C++ AnyType::value variant order. Never reorder these tags.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack)]
+/// The variant identifiers are the alternatives' names in I-JSON text (C++:
+/// the reflected name of each alternative).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, PsszPack, PsszUnpack, JsonText)]
 #[pssz(crate = "crate")]
+#[json(crate = "crate")]
 pub enum AnyValue {
     Struct(Struct),
     Object(Object),
