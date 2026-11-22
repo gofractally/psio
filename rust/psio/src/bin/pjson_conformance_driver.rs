@@ -189,18 +189,76 @@ fn parse_canonical_json_number_string(s: &str) -> Option<Value> {
 /// JSON-source path. Native typed callers go through the `Value`
 /// constructors directly.
 fn from_json(text: &str) -> Result<Value, String> {
-    let v: serde_json::Value = serde_json::from_str(text)
+    use psio::json::{JsonCursor, TextCursor};
+    let mut cursor = TextCursor::new(text.as_bytes(), false)
         .map_err(|e| format!("from_json parse: {}", e))?;
-    Ok(from_serde_json(&v))
+    let v = SourceJson::read(&mut cursor).map_err(|e| format!("from_json parse: {}", e))?;
+    cursor.finish().map_err(|e| format!("from_json parse: {}", e))?;
+    Ok(from_source_json(&v))
 }
 
-fn from_serde_json(v: &serde_json::Value) -> Value {
+/// A JSON text as parsed by psio's own cursor: a number keeps its source
+/// token and an object its members in document order (a repeated key keeps
+/// its first position and its last value). serde_json gives neither
+/// without its `arbitrary_precision` and `preserve_order` features, which
+/// psio does not enable.
+enum SourceJson {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<SourceJson>),
+    Object(Vec<(String, SourceJson)>),
+}
+
+impl SourceJson {
+    fn read(c: &mut psio::json::TextCursor<'_>) -> Result<SourceJson, psio::json::JsonTextError> {
+        use psio::json::{JsonCursor, JsonKind};
+        Ok(match c.kind()? {
+            JsonKind::Null => {
+                c.null()?;
+                SourceJson::Null
+            }
+            JsonKind::Bool => SourceJson::Bool(c.boolean()?),
+            JsonKind::Number => SourceJson::Number(c.number()?.to_string()),
+            JsonKind::String => SourceJson::String(c.string()?.0.into_owned()),
+            JsonKind::Array => {
+                c.begin_array()?;
+                let mut items = Vec::new();
+                while c.next_element()? {
+                    items.push(SourceJson::read(c)?);
+                }
+                SourceJson::Array(items)
+            }
+            JsonKind::Object => {
+                c.begin_object()?;
+                let mut members: Vec<(String, SourceJson)> = Vec::new();
+                loop {
+                    let Some(name) = c.next_field()?.map(|n| n.into_owned()) else { break };
+                    let value = SourceJson::read(c)?;
+                    match members.iter_mut().find(|(k, _)| *k == name) {
+                        Some(slot) => slot.1 = value,
+                        None => members.push((name, value)),
+                    }
+                }
+                SourceJson::Object(members)
+            }
+        })
+    }
+    fn get(&self, key: &str) -> Option<&SourceJson> {
+        match self {
+            SourceJson::Object(members) => members.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+}
+
+fn from_source_json(v: &SourceJson) -> Value {
     match v {
-        serde_json::Value::Null => Value::Null,
-        serde_json::Value::Bool(b) => Value::Bool(*b),
-        serde_json::Value::Number(n) => {
+        SourceJson::Null => Value::Null,
+        SourceJson::Bool(b) => Value::Bool(*b),
+        SourceJson::Number(token) => {
             // Use the source token string to preserve "1.5" vs "1" exactly.
-            let token: &str = n.as_str();
             if let Some(val) = parse_canonical_json_number_string(token) {
                 // D-007: for a fractional (Decimal) result, apply the
                 // §4.7.2 picker to choose between decimal and ieee_float.
@@ -210,7 +268,7 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
                 return val;
             }
             // Fall back: sci-notation, "1.0", "-0", or out-of-range.
-            if let Some(f) = n.as_f64() {
+            if let Some(f) = token.parse::<f64>().ok().filter(|f| f.is_finite()) {
                 // No exact decimal source token — encode through the
                 // ieee path with width minimization (C-002).
                 let (w, b) = canonical_float_width(3, f.to_bits() as u128);
@@ -219,7 +277,7 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
                 Value::Decimal { mantissa: 0, scale: 0 }
             }
         }
-        serde_json::Value::String(s) => {
+        SourceJson::String(s) => {
             // Numeric_string lift: §4.8 rule.
             if let Some(num) = parse_canonical_json_number_string(s) {
                 Value::NumericString(Box::new(num))
@@ -227,8 +285,8 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
                 Value::String { encoding_flag: 0, content: s.as_bytes().to_vec() }
             }
         }
-        serde_json::Value::Array(arr) => {
-            let children: Vec<Value> = arr.iter().map(from_serde_json).collect();
+        SourceJson::Array(arr) => {
+            let children: Vec<Value> = arr.iter().map(from_source_json).collect();
             // §5.2.1.5 / RA-003: detect homogeneous array-of-object.
             // If every child is an Object and all share the same keys
             // in the same order, lift to row_array — the shared key
@@ -241,7 +299,7 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
                 Err(children)    => Value::Array(children),
             }
         }
-        serde_json::Value::Object(obj) => {
+        SourceJson::Object(obj) => {
             // §4.11 envelope round-trip: an object of the exact shape
             // `{"__pjson_ext": {"subtype": N, "bytes_b64": "..."}}` is
             // an unknown-extension envelope that should reconstruct
@@ -249,17 +307,21 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
             // sensitive (single key, sub-object with exact keys) to
             // avoid hijacking arbitrary user data.
             if obj.len() == 1 {
-                if let Some(inner) = obj.get("__pjson_ext") {
-                    if let serde_json::Value::Object(ext) = inner {
-                        let sub = ext.get("subtype").and_then(|x| x.as_u64());
-                        let b64 = ext.get("bytes_b64").and_then(|x| x.as_str());
-                        if let (Some(s), Some(b64)) = (sub, b64) {
-                            if s <= 15 && ext.len() == 2 {
-                                if let Some(bytes) = b64_decode(b64) {
-                                    return Value::Extension {
-                                        subtype: s as u8, bytes,
-                                    };
-                                }
+                if let Some(inner @ SourceJson::Object(ext)) = v.get("__pjson_ext") {
+                    let sub = match inner.get("subtype") {
+                        Some(SourceJson::Number(token)) => token.parse::<u64>().ok(),
+                        _ => None,
+                    };
+                    let b64 = match inner.get("bytes_b64") {
+                        Some(SourceJson::String(text)) => Some(text.as_str()),
+                        _ => None,
+                    };
+                    if let (Some(s), Some(b64)) = (sub, b64) {
+                        if s <= 15 && ext.len() == 2 {
+                            if let Some(bytes) = b64_decode(b64) {
+                                return Value::Extension {
+                                    subtype: s as u8, bytes,
+                                };
                             }
                         }
                     }
@@ -273,7 +335,7 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
                         // as opaque binary with the matching encoding hint.
                         // The literal suffix is preserved on the key.
                         if let Some(hint) = bytes_hint_for_key_suffix(k) {
-                            if let serde_json::Value::String(s) = v {
+                            if let SourceJson::String(s) = v {
                                 if let Some(content) = decode_bytes_by_hint(hint, s) {
                                     return (k.clone(), Value::Bytes {
                                         encoding_hint: hint, content,
@@ -281,7 +343,7 @@ fn from_serde_json(v: &serde_json::Value) -> Value {
                                 }
                             }
                         }
-                        (k.clone(), from_serde_json(v))
+                        (k.clone(), from_source_json(v))
                     })
                     .collect()
             )
