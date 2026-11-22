@@ -120,6 +120,7 @@
 #include <boost/preprocessor.hpp>
 
 #include <array>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -446,7 +447,7 @@ namespace psio {
 
 // ── Keyword dispatch ──────────────────────────────────────────────────────
 //
-// PSIO_REFLECT accepts six kinds of arguments:
+// PSIO_REFLECT accepts eight kinds of arguments:
 //
 //   1. A bare identifier              `pubkey`
 //      → registered as a field, name = identifier

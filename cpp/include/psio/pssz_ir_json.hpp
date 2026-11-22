@@ -1571,7 +1571,9 @@ template <psio::detail::json_impl::json_family Fmt>
    return run(cursor);
 }
 
-// Appends the text of `value`; `out` is unchanged on failure.
+// Appends the text of `value`; `out` is unchanged on failure. The handlers'
+// checks run on the value's custom types before any text is returned
+// (`run_checks = false`: the value was just decoded with the same registry).
 template <psio::detail::json_impl::json_family Fmt>
 [[nodiscard]] codec_status value_to_json(const schema_types::Schema &schema,
                                          const schema_types::AnyType &root, Fmt,

@@ -22,6 +22,19 @@ of all its types and `cpp/tests/schema_conformance_tests.cpp` checks every
 vector through the IR alone. The JSON / I-JSON text path over the same IR is
 `<psio/pssz_ir_json.hpp>` (`docs/json.md`).
 
+**Custom types.** Every entry point takes an optional trailing
+`const CustomHandlers*` (`<psio/pssz_ir_custom.hpp>`). A `Custom` node whose
+id is not part of the binary form names a type with a text form and / or an
+invariant; the schema cannot carry either, so they are a handler registered
+for the id. Without a registry the codec is structural: a custom node is its
+wire type. With one, the `check` of each custom node's handler runs on every
+value of the node — on decode / validate after its structure is accepted, on
+encode before any byte is returned, nested values first, the status passed
+through unchanged — and a strict registry (`require_all`) makes a custom node
+with no handler an error. `check` sees the automatic-profile bytes of the
+node's wire type under either width profile. `docs/json.md` ("Custom types
+through a schema") and `docs/pssz-spec.md` §17 give the rules.
+
 The explicit profile still rejects `maxFields` / `maxDynamicData`, which it does
 not enforce. A deployed compatible lineage must keep its width; the codec never
 automatically widens it.
