@@ -1,6 +1,8 @@
 // psio::mutable_view with exceptions and RTTI disabled (how a WebAssembly
 // guest builds it): validated construction, navigation and every refused
 // write report through return values.
+#include "mutable_view_assoc_cases.hpp"
+
 #include <psio/mutable_view.hpp>
 #include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
@@ -76,5 +78,9 @@ int main()
    if (int status = run<psio::pssz16>()) return 20 + status;
    if (int status = run<psio::pssz32>()) return 40 + status;
    if (int status = run<psio::pssz>()) return 60 + status;
+   // Map values and nested inner values (mutable_view_assoc_cases.hpp).
+   if (mv_assoc_cases::run<psio::pssz8>() || mv_assoc_cases::run<psio::pssz16>() ||
+       mv_assoc_cases::run<psio::pssz32>() || mv_assoc_cases::run<psio::pssz>())
+      return 80;
    return 0;
 }

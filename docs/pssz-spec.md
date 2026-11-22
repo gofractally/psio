@@ -1660,6 +1660,34 @@ written as `00` or `01` (§4.1) and the unused high bits of a
 `Bitvector(N)` are zero (§5.4.1). A writer MUST produce the encoding of a value (never copy
 arbitrary bytes into the span) and MUST refuse a value that has none.
 
+#### 17.2.1 Maps, sets and nested values
+
+Three kinds of value carry a constraint on their **content** in addition
+to their structure, so the argument above has to be made again for each:
+
+- **`Map(K, V)` — mapped values only.** The constraint is the order of
+  the entries, and the order is a function of the keys' bytes alone
+  (§5.9.1). The bytes of a mapped value take no part in it, and an entry
+  is a tuple, so a fixed-size leaf of a mapped value is as writable as a
+  leaf of a tuple member. The bytes of a **key** are the constraint
+  itself: a key is read-only, whatever its type.
+- **`Set(K)` — nothing.** Every byte of every element decides the order.
+  A set has no mutable position.
+- **`Nested(T)` — the inner value.** The constraint is that the bytes
+  are the canonical automatic-profile encoding of a T (§5.8). They are a
+  frame of their own, so §17.2 applies to them directly: after a
+  fixed-size overwrite inside, they are the canonical encoding of the
+  modified T, and their count — the only thing the enclosing frame
+  derives from them — is unchanged. The exception is a nested value
+  whose validation was deferred by its reader (C++ `nested<T,
+  nested_validation::deferred>`): no reader of the frame has established
+  that its bytes are a T, so it has no mutable position.
+
+A write that changes the bytes of a nested value changes that value's
+`key` encoding (`docs/key-spec.md`). Inside a pssz frame this matters
+only where an order is derived from it — a map key or a set element —
+and those positions are not writable.
+
 ### 17.3 The permitted operation
 
 `set(v)` on a position holding a fixed-size value of type T, where the
@@ -1673,7 +1701,10 @@ position is any that exists in the frame:
 | Element `i` of `Vector(T)` | `i < count` |
 | Payload of `Optional(T)` | the optional is present (Some → Some only) |
 | Payload of a variant's active alternative | that alternative is fixed-size |
-| Any of the above reached through any chain of members, elements, present optionals and active alternatives | every step exists |
+| Member of a `Tuple` or `Pair` | as for an extensible record |
+| Mapped value of entry `i` of `Map(K, V)` | `i < count` |
+| Inner value of `Nested(T)` (validated as T) | always; the inner frame is navigated under the automatic profile |
+| Any of the above reached through any chain of members, elements, present optionals, active alternatives, mapped values and nested values | every step exists |
 
 Navigation may pass through variable-size values (it only reads
 offsets); only the value written must be fixed-size. A fixed-size
@@ -1702,6 +1733,12 @@ The reference implementation rejects each of these at compile time:
   is rejected as well. The extension point is
   `psio::detail::mutation_blocked_v<T>`, specialized to `true` for a
   type or an annotation spec;
+- any write to the **key** of a map entry or to an element of a
+  **set**, and navigation into a set at all (§17.2.1): a set has no
+  mutable view, and an entry of a mutable map exposes its key for
+  reading and only its mapped value for writing;
+- navigation into a nested value whose validation is deferred, and
+  `set` of a whole nested value (it is variable-size);
 - navigation into a member with an `as<Tag>` override: its bytes are
   the adapter's, not the member type's;
 - any format other than pssz. The argument above is specific to this
@@ -1727,6 +1764,9 @@ psio::mutable_view<Account, psio::pssz> mv{bytes};   // or span<char>, psio::buf
 bool ok = mv.get<1>().set(std::uint64_t{42});        // member 1, a fixed-size u64
 ok = mv.get<3>()[2].get<0>().set(true);              // member 0 of element 2 of member 3
 ok = (*mv.get<5>()).set(7);                          // payload of a present optional
+ok = mv.get<6>()[0].value().set(9);                  // mapped value of entry 0 of a map
+auto name = mv.get<6>()[0].key();                    // its key: a read view, no set
+ok = mv.get<7>().get().get<1>().set(5);              // member 1 of the value inside a nested<T>
 ```
 
 ## Appendix A. Glossary

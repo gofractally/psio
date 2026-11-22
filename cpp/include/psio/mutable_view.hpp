@@ -24,8 +24,11 @@
 // / uint256, bitvector<N>, std::array of those, and a DWNC record whose
 // members are all fixed-size (overwritten as a whole or member by member).
 // Where it can be written: anywhere the read view can reach it — a record
-// member (extensible or DWNC), an array or vector element, the payload of
-// a present optional, the active alternative of a variant.
+// member (extensible or DWNC), a tuple or pair member, an array or vector
+// element, the payload of a present optional, the active alternative of a
+// variant, the mapped value of a map entry, and the inner value of a
+// psio::nested<T> (a write there leaves the nested bytes the canonical
+// encoding of the modified inner value, by the same argument).
 //
 // What is rejected at compile time, with a static_assert naming the reason:
 //   - `set` on anything variable-size: strings, vectors, optionals
@@ -33,6 +36,12 @@
 //     extensible records, bitlists, adapter-encoded values;
 //   - a view of a type whose in-place mutation is blocked
 //     (`detail::mutation_blocked_v`), or `set` of a value that contains one;
+//   - a view of a set, and any write access to the key of a map entry: the
+//     elements / keys are in strictly ascending order of their key bytes,
+//     which an overwrite could break (a map's keys are readable, and its
+//     mapped values are views);
+//   - a view of a psio::nested<T, nested_validation::deferred>: no reader
+//     of the frame has checked that its bytes are a T;
 //   - navigation into a record member carrying an `as<Tag>` override or an
 //     annotation that constrains its content (sorted_spec, element_spec,
 //     unique_keys_spec, any spec with a validator);
@@ -46,6 +55,8 @@
 //    bool written = mv.get<1>().set(std::uint64_t{42});   // member 1
 
 #include <psio/buffer.hpp>
+#include <psio/detail/assoc.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/pssz_view.hpp>
 #include <psio/storage.hpp>
 
@@ -65,6 +76,8 @@ namespace psio {
 
    template <typename T, typename Fmt>
    class mutable_view;
+   template <typename K, typename V, typename Fmt>
+   class mutable_map_entry;
 
    namespace detail {
 
@@ -129,6 +142,24 @@ namespace psio {
          template <typename... Specs>
          inline constexpr bool blocked_annotations_v<std::tuple<Specs...>> =
             ((mutation_blocked_v<Specs> || vstrict::has_span_validate_v<Specs>) || ... || false);
+
+         // Whether the annotations of a record member of type `Member` keep
+         // it from being navigated into. A map / set member carries the
+         // order and uniqueness of its keys as annotations (sorted_spec,
+         // unique_keys_spec): those say what the type itself is, and the
+         // view of the type upholds them — a map's keys are read-only, a
+         // set has no mutable view.
+         template <typename Member, typename Spec>
+         inline constexpr bool blocked_spec_v =
+            (mutation_blocked_v<Spec> || vstrict::has_span_validate_v<Spec>) &&
+            !(::psio::detail::is_assoc_v<Member> &&
+              (std::is_same_v<Spec, ::psio::sorted_spec> ||
+               std::is_same_v<Spec, ::psio::unique_keys_spec>));
+         template <typename Member, typename Annotations>
+         inline constexpr bool blocked_member_v = false;
+         template <typename Member, typename... Specs>
+         inline constexpr bool blocked_member_v<Member, std::tuple<Specs...>> =
+            (blocked_spec_v<Member, Specs> || ... || false);
 
          // Whether a fixed-size value, or anything nested in it (a nested
          // type, or a record member through its annotations), is blocked.
@@ -200,12 +231,17 @@ namespace psio {
    // One template for every shape; the members available depend on T, as
    // they do across the read view's specializations:
    //
-   //   record          get<N>()                       → mutable_view of member N
+   //   record, tuple   get<N>()                       → mutable_view of member N
+   //   pair            get<N>(), first(), second()    → mutable_view of the member
    //   vector / array  size(), empty(), [i], at(i),
    //                   begin(), end()                 → mutable_view of an element
    //   optional        has_value(), operator bool,
    //                   operator*, get()               → mutable_view of the payload
    //   variant         index(), visit(fn)             → fn(mutable_view of the alternative)
+   //   map             size(), empty(), [i], at(i),
+   //                   begin(), end()                 → mutable_map_entry: key() is read-only,
+   //                                                    value() a mutable_view
+   //   nested<T>       get(), operator*               → mutable_view<T, pssz> of the inner value
    //   scalar          get()                          → the value
    //   fixed-size T    set(value)                     → overwrite, see below
    //
@@ -232,6 +268,24 @@ namespace psio {
       static constexpr bool optional_v = detail::pssz_impl::is_std_optional_v<T> && !adapter_v;
       static constexpr bool variant_v  = detail::pssz_impl::is_std_variant_v<T> && !adapter_v;
       static constexpr bool fixed_v    = detail::pssz_impl::is_fixed_v<T> && !adapter_v;
+      static constexpr bool pair_v     = detail::is_std_pair_v<T> && record_v;
+      static constexpr bool map_v      = detail::is_map_v<T> && !adapter_v;
+      static constexpr bool set_v      = detail::is_set_v<T> && !adapter_v;
+      static constexpr bool nested_v   = detail::is_nested_v<T>;
+      static constexpr bool deferred_v = [] {
+         if constexpr (detail::is_nested_v<T>)
+            return !detail::is_nested<T>::descends;
+         else
+            return false;
+      }();
+
+      static_assert(!set_v,
+                    "psio::mutable_view: a set has no mutable view: its elements are in strictly "
+                    "ascending order of their key bytes, which an in-place overwrite could break "
+                    "(decode, modify and encode the set)");
+      static_assert(!deferred_v,
+                    "psio::mutable_view: a nested value with deferred validation has no mutable "
+                    "view: no reader of the frame has checked that its bytes are the inner type");
 
       std::span<char> data_;
 
@@ -308,7 +362,7 @@ namespace psio {
 
       // ── Scalar: read by value, as the read view does ───────────────────
       [[nodiscard]] auto get() const noexcept
-         requires (!optional_v && requires(const read_view& v) { v.get(); })
+         requires (!optional_v && !nested_v && requires(const read_view& v) { v.get(); })
       {
          return read_view{const_data()}.get();
       }
@@ -327,27 +381,65 @@ namespace psio {
                           typename detail::pssz_impl::record_member_annotations<T, N>::value_t>,
                        "psio::mutable_view: a member with an as<Tag> override is not "
                        "addressable in place");
-         static_assert(!detail::mutable_view_impl::blocked_annotations_v<std::remove_cvref_t<
-                          typename detail::pssz_impl::record_member_annotations<T, N>::value_t>>,
-                       "psio::mutable_view: a member whose annotations constrain its content is "
-                       "not addressable in place (psio::detail::mutation_blocked_v)");
          using Member = std::remove_cvref_t<
             typename detail::pssz_impl::record_traits<T>::template member_type<N>>;
+         static_assert(!detail::mutable_view_impl::blocked_member_v<
+                          Member,
+                          std::remove_cvref_t<typename detail::pssz_impl::record_member_annotations<
+                             T, N>::value_t>>,
+                       "psio::mutable_view: a member whose annotations constrain its content is "
+                       "not addressable in place (psio::detail::mutation_blocked_v)");
          return child<Member>(layout::template record_field_span<T, N>(const_data()));
       }
 
-      // ── Vector / array: elements ───────────────────────────────────────
+      // ── Pair: the record of its two members, also by name ──────────────
+      [[nodiscard]] auto first() const noexcept
+         requires pair_v
+      {
+         return this->template get<0>();
+      }
+      [[nodiscard]] auto second() const noexcept
+         requires pair_v
+      {
+         return this->template get<1>();
+      }
+
+      // ── Nested value: the inner value, in place ────────────────────────
+      //
+      // The bytes are the automatic-profile encoding of the inner value
+      // whatever the enclosing profile is. An overwrite beneath leaves them
+      // the canonical encoding of the modified inner value, and their count
+      // unchanged, so the enclosing frame stays canonical too.
+      [[nodiscard]] auto get() const noexcept
+         requires nested_v
+      {
+         return mutable_view<typename detail::is_nested<T>::inner, ::psio::pssz>{data_};
+      }
+      [[nodiscard]] auto operator*() const noexcept
+         requires nested_v
+      {
+         return get();
+      }
+
+      // ── Vector / array: elements. Map: entries ─────────────────────────
+      //
+      // A map is the list of its entries in ascending key order. An entry
+      // is handed out as a mutable_map_entry: its key can be read, never
+      // written (the order depends on it); its mapped value is a view like
+      // any other.
       [[nodiscard]] std::size_t size() const noexcept
-         requires (vector_v || array_v)
+         requires (vector_v || array_v || map_v)
       {
          if constexpr (array_v)
             return std::tuple_size_v<T>;
+         else if constexpr (map_v)
+            return layout::template vector_count<detail::assoc_entry_t<T>>(const_data());
          else
             return layout::template vector_count<typename T::value_type>(const_data());
       }
 
       [[nodiscard]] bool empty() const noexcept
-         requires (vector_v || array_v)
+         requires (vector_v || array_v || map_v)
       {
          return size() == 0;
       }
@@ -355,7 +447,24 @@ namespace psio {
       // Precondition: i < size(). `at` checks and returns an empty view
       // (whose `set` returns false) instead.
       [[nodiscard]] auto operator[](std::size_t i) const noexcept
-         requires (vector_v || array_v)
+         requires (vector_v || array_v || map_v)
+      {
+         if constexpr (map_v)
+         {
+            using List = detail::assoc_list_t<T>;
+            using Entry = detail::assoc_entry_t<T>;
+            using EntryFormat = view_layout::nested_format_t<Fmt, List>;
+            return mutable_map_entry<detail::assoc_key_t<T>, typename T::mapped_type,
+                                     EntryFormat>{mutable_view<Entry, EntryFormat>{
+               detail::mutable_view_impl::rebase(
+                  data_, layout::template vector_element_span<Entry>(const_data(), i))}};
+         }
+         else
+            return element(i);
+      }
+
+     private:
+      [[nodiscard]] auto element(std::size_t i) const noexcept
       {
          using Element = typename T::value_type;
          if constexpr (array_v)
@@ -366,8 +475,9 @@ namespace psio {
             return child<Element>(layout::template vector_element_span<Element>(const_data(), i));
       }
 
+     public:
       [[nodiscard]] auto at(std::size_t i) const noexcept
-         requires (vector_v || array_v)
+         requires (vector_v || array_v || map_v)
       {
          return i < size() ? (*this)[i] : decltype((*this)[i]){};
       }
@@ -406,12 +516,12 @@ namespace psio {
       };
 
       [[nodiscard]] auto begin() const noexcept
-         requires (vector_v || array_v)
+         requires (vector_v || array_v || map_v)
       {
          return iterator{*this, 0};
       }
       [[nodiscard]] auto end() const noexcept
-         requires (vector_v || array_v)
+         requires (vector_v || array_v || map_v)
       {
          return iterator{*this, size()};
       }
@@ -496,6 +606,37 @@ namespace psio {
    {
     public:
       using mutable_view<T, Fmt>::mutable_view;
+   };
+
+   // ── One entry of a map ────────────────────────────────────────────────
+   //
+   // The entry (K, V) at one position of a mutable_view of a map. The key
+   // decides the entry's position, so it is read-only: `key()` is what the
+   // read view of the entry gives for it. `value()` is the mutable_view of
+   // the mapped value.
+   template <typename K, typename V, typename Fmt>
+   class mutable_map_entry
+   {
+      mutable_view<std::tuple<K, V>, Fmt> entry_;
+
+     public:
+      using key_type    = K;
+      using mapped_type = V;
+
+      mutable_map_entry() = default;
+      explicit mutable_map_entry(mutable_view<std::tuple<K, V>, Fmt> entry) noexcept
+         : entry_(entry)
+      {
+      }
+
+      [[nodiscard]] auto key() const noexcept
+      {
+         const auto data = entry_._psio_data();
+         return view<std::tuple<K, V>, Fmt, storage::const_borrow>{
+            std::span<const char>{data.data(), data.size()}}
+            .template get<0>();
+      }
+      [[nodiscard]] auto value() const noexcept { return entry_.template get<1>(); }
    };
 
    // ── Free-function storage API, as for buffer and view ─────────────────

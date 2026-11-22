@@ -669,3 +669,37 @@ psio_assoc_compile_fail(json_bitlist_key ASSOC_FAIL_JSON_BITLIST_KEY "psio::json
 psio_assoc_compile_fail(key_nested_key ASSOC_FAIL_KEY_NESTED_KEY "psio::key: the key type of a map")
 psio_assoc_compile_fail(pssz_adapter_key ASSOC_FAIL_PSSZ_ADAPTER_KEY "psio::pssz: the key type of a map")
 psio_assoc_compile_fail(json_adapter_key ASSOC_FAIL_JSON_ADAPTER_KEY "psio::json: the key type of a map")
+# psio::mutable_view over pairs, maps and nested values (docs/pssz-spec.md
+# §17): mapped values and the inner value of a nested<T> are writable in
+# place; sets, map keys and deferred nested values are not (the
+# exception-disabled run is part of psio_mutable_view_noexceptions_test).
+psio_add_test(psio_mutable_view_assoc_tests mutable_view_assoc_tests.cpp)
+add_test(NAME psio_mutable_view_assoc_control_compiles
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/mutable_view_assoc_fail.cpp)
+function(psio_mutable_view_assoc_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_mutable_view_assoc_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/mutable_view_assoc_fail.cpp)
+   set_tests_properties(psio_mutable_view_assoc_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_MV_NO_SET "a set has no mutable view")
+psio_mutable_view_assoc_compile_fail(set MV_FAIL_SET "${PSIO_MV_NO_SET}")
+psio_mutable_view_assoc_compile_fail(set_root MV_FAIL_SET_ROOT "${PSIO_MV_NO_SET}")
+psio_mutable_view_assoc_compile_fail(set_value MV_FAIL_SET_VALUE "${PSIO_MV_NO_SET}")
+psio_mutable_view_assoc_compile_fail(set_nested MV_FAIL_SET_NESTED "${PSIO_MV_NO_SET}")
+psio_mutable_view_assoc_compile_fail(map_key MV_FAIL_MAP_KEY "no member named 'set'")
+psio_mutable_view_assoc_compile_fail(map_entry MV_FAIL_MAP_ENTRY "no member named 'get'")
+psio_mutable_view_assoc_compile_fail(map_whole MV_FAIL_MAP_WHOLE "${PSIO_MV_FIXED_ONLY}")
+psio_mutable_view_assoc_compile_fail(map_value_variable MV_FAIL_MAP_VALUE_VARIABLE
+   "${PSIO_MV_FIXED_ONLY}")
+psio_mutable_view_assoc_compile_fail(map_value_blocked MV_FAIL_MAP_VALUE_BLOCKED
+   "in-place mutation is blocked for this type")
+psio_mutable_view_assoc_compile_fail(nested_whole MV_FAIL_NESTED_WHOLE "${PSIO_MV_FIXED_ONLY}")
+psio_mutable_view_assoc_compile_fail(nested_deferred MV_FAIL_NESTED_DEFERRED
+   "a nested value with deferred validation has no mutable view")
+psio_mutable_view_assoc_compile_fail(nested_blocked MV_FAIL_NESTED_BLOCKED
+   "in-place mutation is blocked for this type")

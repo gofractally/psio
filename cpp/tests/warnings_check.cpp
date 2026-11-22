@@ -217,6 +217,16 @@ namespace warnings_check
          std::span<const char>{bytes}};
       ok &= view.get<26>().size() == 2;
       ok &= view.get<25>().first() == 0;
+
+      // In place: a mapped value, a pair member, the inner value of a nested
+      // member.
+      auto                                             writable = bytes;
+      const psio::mutable_view<everything, psio::pssz> mutable_view{writable};
+      ok &= mutable_view.get<26>().size() == 2 && mutable_view.get<26>()[0].value().set(5);
+      ok &= !mutable_view.get<26>()[0].key().view_().empty();
+      ok &= mutable_view.get<25>().first().set(1);
+      ok &= mutable_view.get<21>().get().get<0>().set(7) && (*mutable_view.get<21>()).get<0>().get() == 7;
+      ok &= psio::validate<everything>(psio::pssz{}, std::span<const char>{writable}).ok();
       return ok;
    }
 }  // namespace warnings_check
