@@ -634,7 +634,7 @@ fn time_schema_ids() {
         Duration::<Millis>::KIND,
         Duration::<Minutes>::KIND,
         TimePoint::<Thirds>::KIND,
-        TimeKind { point: false, num: 86400, den: 1 },
+        TimeKind { point: false, num: 86400, den: 1, monotonic: false },
     ] {
         assert_eq!(parse_time_schema_id(&time_schema_id(kind)), Some(kind));
     }
@@ -735,4 +735,282 @@ fn time_json_and_pssz() {
     let list = vec![TimePoint::<Seconds>::MIN, TimePoint::epoch(), TimePoint::MAX];
     assert_eq!(from_pssz::<Pssz, Vec<TimePoint<Seconds>>>(&to_pssz::<Pssz, _>(&list)).unwrap(), list);
     assert_eq!(to_pssz::<Pssz, _>(&list).len(), 24);
+}
+
+// ── Monotonic time points (a clock other than the system clock) ────────────
+// The Rust side of the two monotonic test cases of cpp/tests/time_tests.cpp.
+
+mod monotonic {
+    use super::Minutes;
+    use psio::json::{self, IJson, Json};
+    use psio::key::{from_key, to_key, validate_key};
+    use psio::pssz::schema_ir::{schema_for, AnyValue, ToPsszSchema};
+    use psio::pssz::{
+        from_pssz_exact, pssz_evolves_from, pssz_validate, try_to_pssz, Pssz, PsszPack,
+    };
+    use psio::time::{
+        parse_time_schema_id, reserved_time_schema_id, time_schema_id, Duration, Micros, Millis,
+        MonotonicPoint, Nanos, Seconds, TimePoint, Unit,
+    };
+
+    #[derive(
+        Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack,
+        psio::ToPsszSchema, psio::Key,
+    )]
+    struct Timer {
+        expires: MonotonicPoint<Micros>,
+        started: Option<MonotonicPoint<Seconds>>,
+        laps: Vec<MonotonicPoint<Millis, u32>>,
+    }
+    #[derive(
+        Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack,
+        psio::ToPsszSchema, psio::Key,
+    )]
+    struct TimerInts {
+        expires: i64,
+        started: Option<i64>,
+        laps: Vec<u32>,
+    }
+
+    // Member integer-form attributes apply to the tick count.
+    #[derive(Debug, Clone, PartialEq, psio::JsonText)]
+    struct Forms {
+        #[json(json_string, ijson_string)]
+        quoted: MonotonicPoint<Seconds>,
+        #[json(json_number, ijson_number)]
+        plain: MonotonicPoint<Nanos>,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::JsonText)]
+    struct FormsInts {
+        #[json(json_string, ijson_string)]
+        quoted: i64,
+        #[json(json_number, ijson_number)]
+        plain: i64,
+    }
+
+    // A time value is its own type in an evolution check.
+    const _: () = {
+        assert!(<MonotonicPoint<Millis, u32> as PsszPack<Pssz>>::IS_FIXED_SIZE);
+        assert!(<MonotonicPoint<Millis, u32> as PsszPack<Pssz>>::FIXED_SIZE == 4);
+        assert!(pssz_evolves_from::<MonotonicPoint<Micros>, MonotonicPoint<Micros>>());
+        assert!(!pssz_evolves_from::<MonotonicPoint<Micros>, TimePoint<Micros>>());
+        assert!(!pssz_evolves_from::<TimePoint<Micros>, MonotonicPoint<Micros>>());
+        assert!(!pssz_evolves_from::<MonotonicPoint<Micros>, Duration<Micros>>());
+        assert!(!pssz_evolves_from::<Duration<Micros>, MonotonicPoint<Micros>>());
+        assert!(!pssz_evolves_from::<MonotonicPoint<Micros>, i64>());
+        assert!(!pssz_evolves_from::<i64, MonotonicPoint<Micros>>());
+        assert!(!pssz_evolves_from::<MonotonicPoint<Micros>, MonotonicPoint<Millis>>());
+        assert!(!pssz_evolves_from::<MonotonicPoint<Seconds>, MonotonicPoint<Seconds, u64>>());
+        assert!(!pssz_evolves_from::<TimerInts, Timer>());
+        assert!(pssz_evolves_from::<Timer, Timer>());
+    };
+
+    #[test]
+    fn a_monotonic_time_point_is_its_tick_count_in_every_format() {
+        let timer = Timer {
+            expires: MonotonicPoint::from_ticks(9007199254740993),
+            started: Some(MonotonicPoint::from_ticks(-5)),
+            laps: vec![MonotonicPoint::from_ticks(0), MonotonicPoint::MAX],
+        };
+        let ints =
+            TimerInts { expires: 9007199254740993, started: Some(-5), laps: vec![0, 4294967295] };
+
+        // Binary and key: the tick integer.
+        let bytes = try_to_pssz::<Pssz, _>(&timer).unwrap();
+        assert_eq!(bytes, try_to_pssz::<Pssz, _>(&ints).unwrap());
+        assert_eq!(to_key(&timer), to_key(&ints));
+        pssz_validate::<Pssz, Timer>(&bytes).unwrap();
+        assert_eq!(from_pssz_exact::<Pssz, Timer>(&bytes).unwrap(), timer);
+        let key = to_key(&timer);
+        validate_key::<Timer>(&key).unwrap();
+        assert_eq!(from_key::<Timer>(&key).unwrap(), timer);
+        // Key order is tick order.
+        let before = MonotonicPoint::<Micros>::from_ticks(-1);
+        let after = MonotonicPoint::<Micros>::default();
+        assert!(before < after && to_key(&before) < to_key(&after));
+        assert_eq!(
+            try_to_pssz::<Pssz, _>(&MonotonicPoint::<Nanos>::from_ticks(7)).unwrap(),
+            7i64.to_le_bytes()
+        );
+        // Hostile bytes are refused, never read out of bounds.
+        assert!(from_pssz_exact::<Pssz, MonotonicPoint<Micros>>(&[0; 7]).is_err());
+        assert!(from_pssz_exact::<Pssz, MonotonicPoint<Micros>>(&[0; 9]).is_err());
+        assert!(from_key::<MonotonicPoint<Micros>>(&[0x80; 7]).is_err());
+        // Truncations and mutations are decided without a panic, and what
+        // the checked reader accepts re-encodes.
+        for cut in 0..bytes.len() {
+            let _ = from_pssz_exact::<Pssz, Timer>(&bytes[..cut]);
+            for bit in 0..8 {
+                let mut mutated = bytes.clone();
+                mutated[cut] ^= 1 << bit;
+                if let Ok(value) = from_pssz_exact::<Pssz, Timer>(&mutated) {
+                    assert!(pssz_validate::<Pssz, Timer>(&mutated).is_ok(), "{cut}.{bit}");
+                    try_to_pssz::<Pssz, _>(&value).unwrap();
+                }
+                let mut key = to_key(&timer);
+                if cut < key.len() {
+                    key[cut] ^= 1 << bit;
+                    assert_eq!(validate_key::<Timer>(&key).is_ok(), from_key::<Timer>(&key).is_ok());
+                }
+            }
+        }
+
+        // Text: the tick count under the integer rules, never a date.
+        let text = json::to_string::<Json, _>(&timer).unwrap();
+        let itext = json::to_string::<IJson, _>(&timer).unwrap();
+        assert_eq!(text, r#"{"expires":9007199254740993,"started":-5,"laps":[0,4294967295]}"#);
+        assert_eq!(itext, r#"{"expires":"9007199254740993","started":-5,"laps":[0,4294967295]}"#);
+        assert_eq!(text, json::to_string::<Json, _>(&ints).unwrap());
+        assert_eq!(itext, json::to_string::<IJson, _>(&ints).unwrap());
+        assert_eq!(json::from_str::<Json, Timer>(&text), Ok(timer.clone()));
+        assert_eq!(json::from_str::<IJson, Timer>(&itext), Ok(timer.clone()));
+        let date = r#"{"expires":"2026-11-22T10:15:30Z","started":null,"laps":[]}"#;
+        assert!(json::from_str::<Json, Timer>(date).is_err());
+        assert!(json::from_str::<IJson, Timer>(date).is_err());
+        assert!(json::validate::<IJson, Timer>(date.as_bytes()).is_err());
+        // ijson: a wide tick count beyond 2^53 - 1 is a string, not a number.
+        assert!(json::from_str::<IJson, MonotonicPoint<Micros>>("9007199254740993").is_err());
+
+        let forms =
+            Forms { quoted: MonotonicPoint::from_ticks(7), plain: MonotonicPoint::MAX };
+        let form_ints = FormsInts { quoted: 7, plain: i64::MAX };
+        for ijson in [false, true] {
+            let (a, b) = if ijson {
+                (json::to_string::<IJson, _>(&forms), json::to_string::<IJson, _>(&form_ints))
+            } else {
+                (json::to_string::<Json, _>(&forms), json::to_string::<Json, _>(&form_ints))
+            };
+            let a = a.unwrap();
+            assert_eq!(a, b.unwrap());
+            assert_eq!(a, r#"{"quoted":"7","plain":9223372036854775807}"#);
+        }
+        let text = json::to_string::<IJson, _>(&forms).unwrap();
+        assert_eq!(json::from_str::<IJson, Forms>(&text), Ok(forms));
+    }
+
+    /// `monotonic-<unit>` is a built-in presentation: the schema-driven
+    /// codec presents the ticks, with no handler and under a strict registry.
+    #[test]
+    fn the_schema_driven_codec_presents_ticks() {
+        use psio::pssz::dynamic::{self, CustomHandlers};
+        let (schema, root) = schema_for::<Timer>().unwrap();
+        let timer = Timer {
+            expires: MonotonicPoint::from_ticks(9007199254740993),
+            started: Some(MonotonicPoint::from_ticks(-5)),
+            laps: vec![MonotonicPoint::from_ticks(0), MonotonicPoint::MAX],
+        };
+        let bytes = try_to_pssz::<Pssz, _>(&timer).unwrap();
+        let text = json::to_string::<Json, _>(&timer).unwrap();
+        let itext = json::to_string::<IJson, _>(&timer).unwrap();
+        assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false));
+        assert_eq!(dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap().0, text);
+        for strict in [false, true] {
+            let mut handlers = CustomHandlers::new();
+            handlers.set_strict(strict);
+            // A handler under a time id is never consulted.
+            handlers.add(
+                "monotonic-micros",
+                |_: &[u8]| Ok("hijacked".to_string()),
+                |_: &str| Ok(vec![0u8; 8]),
+            );
+            assert_eq!(
+                dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &handlers).unwrap().0,
+                text
+            );
+            assert_eq!(
+                dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &handlers).unwrap().0,
+                itext
+            );
+            assert_eq!(
+                dynamic::json_to_pssz_with::<Json>(&schema, &root, text.as_bytes(), &handlers)
+                    .unwrap(),
+                bytes
+            );
+            assert_eq!(
+                dynamic::json_to_pssz_with::<IJson>(&schema, &root, itext.as_bytes(), &handlers)
+                    .unwrap(),
+                bytes
+            );
+        }
+        for bad in [
+            r#"{"expires":"2026-11-22T10:15:30Z","started":null,"laps":[]}"#,
+            r#"{"expires":0,"started":"1970-01-01T00:00:00Z","laps":[]}"#,
+            r#"{"expires":0,"started":null,"laps":[4294967296]}"#,
+            r#"{"expires":0.5,"started":null,"laps":[]}"#,
+        ] {
+            assert!(json::from_str::<Json, Timer>(bad).is_err(), "{bad}");
+            assert!(dynamic::json_to_pssz::<Json>(&schema, &root, bad.as_bytes()).is_err(), "{bad}");
+            assert!(dynamic::json_to_pssz::<IJson>(&schema, &root, bad.as_bytes()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn ordering_and_arithmetic_with_durations() {
+        type Point = MonotonicPoint<Millis, u32>;
+        let (a, b) = (Point::from_ticks(10), Point::from_ticks(25));
+        assert!(a < b && Point::MIN < a && b < Point::MAX);
+        assert_eq!(Point::default().ticks(), 0);
+        assert_eq!(a.checked_add(Duration::from_ticks(15)), Some(b));
+        assert_eq!(b.checked_sub(Duration::from_ticks(15)), Some(a));
+        assert_eq!(b.checked_duration_since(a), Some(Duration::from_ticks(15)));
+        // Exact or nothing: the result must fit the tick type.
+        assert_eq!(a.checked_duration_since(b), None);
+        assert_eq!(Point::MAX.checked_add(Duration::from_ticks(1)), None);
+        assert_eq!(a.checked_sub(Duration::from_ticks(11)), None);
+        let (c, d) = (MonotonicPoint::<Nanos>::MIN, MonotonicPoint::<Nanos>::MAX);
+        assert_eq!(d.checked_duration_since(c), None);
+        assert_eq!(c.checked_duration_since(c), Some(Duration::from_ticks(0)));
+        assert_eq!(c.checked_add(Duration::MAX), Some(MonotonicPoint::from_ticks(-1)));
+        // A time point subtracts the same way.
+        let (t0, t1) = (TimePoint::<Seconds>::from_ticks(-5), TimePoint::<Seconds>::from_ticks(5));
+        assert_eq!(t1.checked_duration_since(t0), Some(Duration::from_ticks(10)));
+        assert_eq!(t0.checked_add(Duration::from_ticks(10)), Some(t1));
+        assert_eq!(t1.checked_sub(Duration::from_ticks(10)), Some(t0));
+        assert_eq!(TimePoint::<Seconds>::MIN.checked_sub(Duration::from_ticks(1)), None);
+    }
+
+    #[test]
+    fn the_schema_marks_a_monotonic_time_point_with_its_own_id() {
+        fn check<U: Unit, R: psio::time::Tick>(id: &str, bits: u32, signed: bool) {
+            let (schema, root) = schema_for::<MonotonicPoint<U, R>>().expect("schema");
+            let root = schema.resolve(&root).expect("resolve");
+            let AnyValue::Custom(custom) = &root.value else { panic!("not Custom: {root:?}") };
+            assert_eq!(custom.id, id);
+            assert_eq!(MonotonicPoint::<U, R>::schema_id(), id);
+            let inner = schema.resolve(&custom.r#type).expect("resolve");
+            let AnyValue::Int(int) = &inner.value else { panic!("not Int") };
+            assert_eq!((int.bits, int.isSigned), (bits, signed), "{id}");
+            let kind = parse_time_schema_id(id).expect(id);
+            assert!(kind.monotonic && !kind.point, "{id}");
+            assert_eq!((kind.num, kind.den), (U::NUM, U::DEN), "{id}");
+            assert_eq!(kind, MonotonicPoint::<U, R>::KIND);
+            assert_eq!(time_schema_id(kind), id);
+            assert!(reserved_time_schema_id(id));
+        }
+        check::<Seconds, i64>("monotonic-seconds", 64, true);
+        check::<Micros, i64>("monotonic-micros", 64, true);
+        check::<Millis, u32>("monotonic-millis", 32, false);
+        check::<Nanos, i64>("monotonic-nanos", 64, true);
+        check::<Minutes, i32>("monotonic-60/1", 32, true);
+        // A time point of a unit with no RFC 3339 form still has tick text.
+        assert_eq!(
+            json::to_string::<Json, _>(&MonotonicPoint::<Minutes, i32>::default()).unwrap(),
+            "0"
+        );
+        assert_eq!(json::from_str::<IJson, MonotonicPoint<Minutes, i32>>("-90").unwrap().ticks(), -90);
+
+        for bad in [
+            "monotonic", "monotonic-", "monotonic-1/1000", "monotonic-2/4", "monotonic-minutes",
+            "Monotonic-seconds",
+        ] {
+            assert_eq!(parse_time_schema_id(bad), None, "{bad}");
+        }
+        assert!(reserved_time_schema_id("monotonic"));
+        assert!(reserved_time_schema_id("monotonic-anything"));
+        assert!(!reserved_time_schema_id("monotonically"));
+        // A time point and a monotonic time point of one unit are different ids.
+        assert_ne!(TimePoint::<Micros>::schema_id(), MonotonicPoint::<Micros>::schema_id());
+        fn _is_schema<T: ToPsszSchema>() {}
+        _is_schema::<Timer>();
+    }
 }

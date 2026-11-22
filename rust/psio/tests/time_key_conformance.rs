@@ -10,7 +10,7 @@ use psio::key::{from_key, key_prefix, key_prefix_upper_bound, key_size, to_key, 
 use psio::key::{KeyPack, KeyUnpack};
 use psio::pssz::schema_ir::{schema_for, AnyValue, ToPsszSchema};
 use psio::pssz::{Pssz, PsszPack, PsszUnpack};
-use psio::time::{Duration, Micros, Millis, Nanos, Seconds, TimePoint, Unit};
+use psio::time::{Duration, Micros, Millis, MonotonicPoint, Nanos, Seconds, TimePoint, Unit};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
@@ -50,6 +50,13 @@ record! {
         history: Vec<TimePoint<Seconds>>,
         elapsed: Duration<Nanos>,
         timeout: Duration<Minutes, i32>,
+    }
+}
+record! {
+    struct Timer {
+        expires: MonotonicPoint<Micros>,
+        started: Option<MonotonicPoint<Seconds>>,
+        laps: Vec<MonotonicPoint<Millis, u32>>,
     }
 }
 record! {
@@ -321,6 +328,13 @@ fn dispatch(row: &Row) -> Result<(), String> {
         "duration<micros>" => check::<Duration<Micros>>(row, None),
         "duration<nanos>" => check::<Duration<Nanos>>(row, None),
         "duration<60/1,i32>" => check::<Duration<Minutes, i32>>(row, None),
+        "monotonic<seconds>" => check::<MonotonicPoint<Seconds>>(row, None),
+        "monotonic<micros>" => check::<MonotonicPoint<Micros>>(row, None),
+        "monotonic<millis,u32>" => check::<MonotonicPoint<Millis, u32>>(row, None),
+        "Timer" => composite!(row, Timer; expires started laps),
+        "tuple<monotonic<micros>,string>" => {
+            composite!(row, (MonotonicPoint<Micros>, String); 0 1)
+        }
         "Stamps" => composite!(row, Stamps; created updated ttl legacy),
         "Event" => composite!(row, Event; name at precise history elapsed timeout),
         "Account" => composite!(row, Account; shard owner seq),
@@ -412,6 +426,11 @@ fn schema_ids() {
     assert_eq!(id_of::<Duration<Nanos>>(), ("duration-nanos".into(), 64, true));
     assert_eq!(id_of::<Duration<Minutes, i32>>(), ("duration-60/1".into(), 32, true));
     assert_eq!(id_of::<TimePoint<Minutes, i16>>(), ("time-point-60/1".into(), 16, true));
+    assert_eq!(id_of::<MonotonicPoint<Seconds>>(), ("monotonic-seconds".into(), 64, true));
+    assert_eq!(id_of::<MonotonicPoint<Micros>>(), ("monotonic-micros".into(), 64, true));
+    assert_eq!(id_of::<MonotonicPoint<Millis, u32>>(), ("monotonic-millis".into(), 32, false));
+    assert_eq!(id_of::<MonotonicPoint<Minutes, i16>>(), ("monotonic-60/1".into(), 16, true));
+    schema_for::<Timer>().expect("Timer schema");
     // Records of time values derive their schema like any other record.
     schema_for::<Stamps>().expect("Stamps schema");
     schema_for::<Event>().expect("Event schema");

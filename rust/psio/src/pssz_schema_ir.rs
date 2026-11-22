@@ -239,7 +239,7 @@ impl Schema {
         }
     }
     /// The tick integer under a time id (`time-point-<unit>` /
-    /// `duration-<unit>`, docs/time.md): 8, 16, 32 or 64 bits. Anything
+    /// `duration-<unit>` / `monotonic-<unit>`, docs/time.md): 8, 16, 32 or 64 bits. Anything
     /// else under a time id is a malformed schema.
     pub fn time_ticks<'a>(&'a self, inner: &'a AnyType) -> PsszResult<&'a Int> {
         match &self.direct(inner)?.value {

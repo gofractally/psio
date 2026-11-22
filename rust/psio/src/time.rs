@@ -5,6 +5,10 @@
 //!
 //! * [`Duration<U, R>`] — a count of ticks of unit `U` held in integer `R`.
 //! * [`TimePoint<U, R>`] — ticks since the Unix epoch, UTC, no leap seconds.
+//! * [`MonotonicPoint<U, R>`] — ticks since the epoch of some other clock
+//!   (steady / boot-relative, simulation): it orders and subtracts like a
+//!   time point but has no date. C++ `std::chrono::time_point<Clock, ...>`
+//!   for any clock other than `system_clock`.
 //!
 //! `U` is a [`Unit`] ([`Seconds`], [`Millis`], [`Micros`], [`Nanos`], or any
 //! type declaring `NUM / DEN` seconds per tick); `R` is the tick integer
@@ -12,10 +16,12 @@
 //!
 //! Every format sees the tick count: pssz writes `R` (fixed size, so records
 //! of time values stay fixed-layout), `key` writes `R`'s key form
-//! (chronological order), the schema is `Custom{Int, "time-point-micros"}`.
+//! (chronological order), the schema is `Custom{Int, "time-point-micros"}`
+//! (`duration-micros`, `monotonic-micros`).
 //! In json / ijson a duration is the tick integer and a time point is an
 //! RFC 3339 UTC string with exactly the unit's fraction digits
-//! (`2026-11-22T10:15:30.123456Z`), years 0000..9999.
+//! (`2026-11-22T10:15:30.123456Z`), years 0000..9999. A monotonic time
+//! point is the tick integer, exactly as a duration: never a date.
 //!
 //! ```
 //! use psio::time::{Micros, Seconds, TimePoint};
@@ -114,13 +120,18 @@ tick! {
 
 // ── Schema id ───────────────────────────────────────────────────────────────
 
-/// What a time schema id says: point or duration, and the period.
+/// What a time schema id says: time point, monotonic time point or
+/// duration, and the period.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeKind {
+    /// A time point of the Unix epoch (`time-point-<unit>`).
     pub point: bool,
     /// Period = `num / den` seconds, lowest terms.
     pub num: u64,
     pub den: u64,
+    /// A time point of some other clock (`monotonic-<unit>`). Neither
+    /// `point` nor `monotonic`: a duration.
+    pub monotonic: bool,
 }
 
 /// Fraction digits of a period of 10^-k seconds (k = 0..9); `None` for any
@@ -142,7 +153,7 @@ pub const fn time_fraction_digits(num: u64, den: u64) -> Option<u32> {
     }
 }
 
-/// `("time-point" | "duration") "-" unit`; unit is `seconds`, `millis`,
+/// `("time-point" | "duration" | "monotonic") "-" unit`; unit is `seconds`, `millis`,
 /// `micros`, `nanos`, or `num/den` for any other period.
 pub fn time_schema_id(kind: TimeKind) -> String {
     let unit = match (kind.num, kind.den) {
@@ -152,14 +163,21 @@ pub fn time_schema_id(kind: TimeKind) -> String {
         (1, 1_000_000_000) => "nanos".to_string(),
         (num, den) => format!("{num}/{den}"),
     };
-    format!("{}-{unit}", if kind.point { "time-point" } else { "duration" })
+    let word = if kind.point {
+        "time-point"
+    } else if kind.monotonic {
+        "monotonic"
+    } else {
+        "duration"
+    };
+    format!("{word}-{unit}")
 }
 
-/// The ids the time presentations reserve: `time-point` / `duration`, alone
-/// or followed by `-`. A reserved id that [`parse_time_schema_id`] does not
+/// The ids the time presentations reserve: `time-point` / `duration` /
+/// `monotonic`, alone or followed by `-`. A reserved id that [`parse_time_schema_id`] does not
 /// accept is a malformed schema, never some other custom type.
 pub fn reserved_time_schema_id(id: &str) -> bool {
-    ["time-point", "duration"]
+    ["time-point", "duration", "monotonic"]
         .iter()
         .any(|kind| id.strip_prefix(kind).is_some_and(|rest| rest.is_empty() || rest.starts_with('-')))
 }
@@ -167,10 +185,12 @@ pub fn reserved_time_schema_id(id: &str) -> bool {
 /// The inverse of [`time_schema_id`]; `None` for any other id, including a
 /// non-canonical spelling (`1/1000` for millis, `2/4`, leading zeros).
 pub fn parse_time_schema_id(id: &str) -> Option<TimeKind> {
-    let (point, unit) = if let Some(unit) = id.strip_prefix("time-point-") {
-        (true, unit)
+    let (point, monotonic, unit) = if let Some(unit) = id.strip_prefix("time-point-") {
+        (true, false, unit)
+    } else if let Some(unit) = id.strip_prefix("monotonic-") {
+        (false, true, unit)
     } else {
-        (false, id.strip_prefix("duration-")?)
+        (false, false, id.strip_prefix("duration-")?)
     };
     let (num, den) = match unit {
         "seconds" => (1, 1),
@@ -201,7 +221,7 @@ pub fn parse_time_schema_id(id: &str) -> Option<TimeKind> {
             (num, den)
         }
     };
-    Some(TimeKind { point, num, den })
+    Some(TimeKind { point, num, den, monotonic })
 }
 
 // ── RFC 3339 text ───────────────────────────────────────────────────────────
@@ -429,11 +449,28 @@ impl<U: Unit> TextDigits<U> {
     };
 }
 
-// ── The two value types ─────────────────────────────────────────────────────
+// ── The value types ─────────────────────────────────────────────────────────
 
 /// Ticks of unit `U` since 1970-01-01T00:00:00Z (UTC, no leap seconds).
 /// C++ `std::chrono::sys_time<duration<R, U>>`.
 pub struct TimePoint<U, R = i64> {
+    ticks: R,
+    unit: PhantomData<fn() -> U>,
+}
+
+/// Ticks of unit `U` since the epoch of a clock other than the system
+/// clock (steady / boot-relative, simulation). The epoch is the clock's own
+/// business, so the value orders and subtracts like a [`TimePoint`] but has
+/// no date: no calendar or RFC 3339 form, and its text is the tick count.
+/// C++ `std::chrono::time_point<Clock, duration<R, U>>` for any `Clock`
+/// other than `system_clock`. Two monotonic time points of one unit and
+/// tick type are one schema type; keeping clocks apart is up to the caller.
+///
+/// ```compile_fail
+/// use psio::time::{MonotonicPoint, Seconds};
+/// let _ = MonotonicPoint::<Seconds>::from_ticks(1).to_rfc3339();
+/// ```
+pub struct MonotonicPoint<U, R = i64> {
     ticks: R,
     unit: PhantomData<fn() -> U>,
 }
@@ -477,7 +514,7 @@ fn std_duration(nanos: i128) -> Result<std::time::Duration, TimeError> {
 }
 
 macro_rules! time_value {
-    ($name:ident, $label:literal, $point:expr) => {
+    ($name:ident, $label:literal, $point:expr, $monotonic:expr) => {
         impl<U, R> $name<U, R> {
             pub const fn from_ticks(ticks: R) -> Self {
                 Self { ticks, unit: PhantomData }
@@ -492,8 +529,9 @@ macro_rules! time_value {
         impl<U: Unit, R: Tick> $name<U, R> {
             pub const MIN: Self = Self::from_ticks(R::MIN);
             pub const MAX: Self = Self::from_ticks(R::MAX);
-            /// Point or duration, and the period.
-            pub const KIND: TimeKind = TimeKind { point: $point, num: U::NUM, den: U::DEN };
+            /// Time point, monotonic time point or duration, and the period.
+            pub const KIND: TimeKind =
+                TimeKind { point: $point, num: U::NUM, den: U::DEN, monotonic: $monotonic };
             /// The Schema IR `Custom` id of this type.
             pub fn schema_id() -> String {
                 time_schema_id(Self::KIND)
@@ -614,8 +652,33 @@ macro_rules! time_value {
         }
     };
 }
-time_value!(TimePoint, "TimePoint", true);
-time_value!(Duration, "Duration", false);
+time_value!(TimePoint, "TimePoint", true, false);
+time_value!(MonotonicPoint, "MonotonicPoint", false, true);
+time_value!(Duration, "Duration", false, false);
+
+// A point moved by a duration, and the duration between two points of one
+// clock: exact, `None` when the result does not fit the tick type.
+macro_rules! point_arithmetic {
+    ($name:ident) => {
+        impl<U: Unit, R: Tick> $name<U, R> {
+            /// The point `by` later; `None` on overflow of the tick type.
+            pub fn checked_add(self, by: Duration<U, R>) -> Option<Self> {
+                R::from_i128(self.ticks.to_i128() + by.ticks.to_i128()).map(Self::from_ticks)
+            }
+            /// The point `by` earlier; `None` on overflow of the tick type.
+            pub fn checked_sub(self, by: Duration<U, R>) -> Option<Self> {
+                R::from_i128(self.ticks.to_i128() - by.ticks.to_i128()).map(Self::from_ticks)
+            }
+            /// `self - earlier`; `None` when it does not fit the tick type.
+            pub fn checked_duration_since(self, earlier: Self) -> Option<Duration<U, R>> {
+                R::from_i128(self.ticks.to_i128() - earlier.ticks.to_i128())
+                    .map(Duration::from_ticks)
+            }
+        }
+    };
+}
+point_arithmetic!(TimePoint);
+point_arithmetic!(MonotonicPoint);
 
 impl<U: Unit, R: Tick> TimePoint<U, R> {
     /// The Unix epoch.
@@ -687,16 +750,23 @@ impl<U: Unit, R: Tick> TryFrom<Duration<U, R>> for std::time::Duration {
 // ── json / ijson ────────────────────────────────────────────────────────────
 
 /// The tick count under the format's integer rules (member integer-form
-/// attributes apply).
-impl<U: Unit, R: Tick + JsonText> JsonText for Duration<U, R> {
-    fn write_json(&self, w: &mut Writer) -> Result<(), JsonTextError> {
-        self.ticks.write_json(w)
-    }
-    fn read_json(r: &mut Reader<'_>) -> Result<Self, JsonTextError> {
-        // A lone u8 reads as an integer; R::read_json is that reader.
-        R::read_json(r).map(Self::from_ticks)
-    }
+/// attributes apply): a duration, and a monotonic time point, which is
+/// never an RFC 3339 string in either direction.
+macro_rules! tick_text {
+    ($name:ident) => {
+        impl<U: Unit, R: Tick + JsonText> JsonText for $name<U, R> {
+            fn write_json(&self, w: &mut Writer) -> Result<(), JsonTextError> {
+                self.ticks.write_json(w)
+            }
+            fn read_json(r: &mut Reader<'_>) -> Result<Self, JsonTextError> {
+                // A lone u8 reads as an integer; R::read_json is that reader.
+                R::read_json(r).map(Self::from_ticks)
+            }
+        }
+    };
 }
+tick_text!(Duration);
+tick_text!(MonotonicPoint);
 
 /// An RFC 3339 UTC string.
 impl<U: Unit, R: Tick> JsonText for TimePoint<U, R> {

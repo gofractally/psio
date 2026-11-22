@@ -219,6 +219,17 @@ fn time_ids_are_reserved() {
     assert!(accepts("duration-millis", int(64, true)));
     assert!(accepts("duration-60/1", int(64, false)));
     assert!(accepts("time-point-seconds", int(64, true)));
+    assert!(accepts("monotonic-micros", int(64, true)));
+    assert!(accepts("monotonic-60/1", int(64, false)));
+    for id in [
+        "monotonic", "monotonic-", "monotonic-minutes", "monotonic-1/1000", "monotonic-2/4",
+        "monotonic-01/7",
+    ] {
+        assert!(!accepts(id, int(64, true)), "{id}");
+    }
+    assert!(!accepts("monotonic-millis", int(128, true)));
+    // Not reserved: an ordinary custom id.
+    assert!(accepts("monotonically", int(64, true)));
     // An ordinary custom id is its inner type.
     assert!(accepts("AccountNumber", int(64, false)));
     for id in [

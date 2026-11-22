@@ -445,7 +445,8 @@ impl<C: JsonCursor> Reader<'_, C> {
     }
 
     /// The built-in presentation of the time ids (docs/time.md): a duration
-    /// is its tick integer; a time point is RFC 3339 text.
+    /// or a monotonic time point is its tick integer; a time point is
+    /// RFC 3339 text.
     fn time(&mut self, ty: &Custom, kind: crate::time::TimeKind, form: IntForm) -> Text<Value> {
         let ticks = match self.schema.time_ticks(&ty.r#type) {
             Ok(ticks) => Int { bits: ticks.bits, isSigned: ticks.isSigned },
