@@ -1,35 +1,40 @@
-// schema.ts — AnyType schema generation compatible with Rust fracpack
+// schema.ts — Schema IR generation from the type combinators
 //
-// Converts FracType schema nodes into the AnyType JSON format used by
-// the Rust psio library for cross-language schema exchange.
+// Converts the schema nodes of the type combinators (`struct`, `str`, `vec`,
+// ...) into the Schema IR that C++ `psio::SchemaBuilder` and Rust
+// `ToPsszSchema` produce, in its compact spelling. The result is exactly a
+// `PsszSchema` input: `new PsszSchema(generateSchema({ Person }))`.
+//
+// Text and bytes, as everywhere in the IR:
+//
+//   combinator   IR node                          JavaScript value
+//   str          Custom{List<u8>, "utf8"}         string (validated UTF-8)
+//   bytes        Custom{List<u8>, "hex"}          Uint8Array
+//
+// The IR's third byte-container id, "string", is a RAW string (C++
+// std::string, Rust RawString): any bytes, a Uint8Array as a value. No
+// combinator produces it — `str` is text — and the PSSZ codec reads it from
+// schemas written elsewhere.
 
 import type { FracType, SchemaNode } from './fracpack.js';
+import type { CompactType } from './pssz-core.js';
 
-// ========================= AnyType (matches Rust serde output) =========================
+// ========================= AnyType (the Schema IR, compact spelling) =========================
 
-/** JSON-serializable type description, matching Rust's AnyType enum. */
-export type AnyType =
-  | { Struct: Record<string, AnyType> }
-  | { Object: Record<string, AnyType> }
-  | { Array: { type: AnyType; len: number } }
-  | { List: AnyType }
-  | { Option: AnyType }
-  | { Variant: Record<string, AnyType> }
-  | { Tuple: AnyType[] }
-  | { Int: { bits: number; isSigned: boolean } }
-  | { Float: { exp: number; mantissa: number } }
-  | { FracPack: AnyType }
-  | { Custom: { type: AnyType; id: string } }
-  | string; // Type reference (e.g. "@0" or named type)
+/** A type of the Schema IR in its compact spelling (`CompactType`). */
+export type AnyType = CompactType;
 
-/** A schema registry mapping type names to their AnyType definitions. */
-export type Schema = Record<string, AnyType>;
+/** Named types: a `PsszSchema` input. */
+export type Schema = { [name: string]: AnyType };
 
 // ========================= Cached leaf constants =========================
 
+const U8_SCHEMA: AnyType = { Int: { bits: 8, isSigned: false } };
 const BOOL_SCHEMA: AnyType = { Custom: { type: { Int: { bits: 1, isSigned: false } }, id: 'bool' } };
-const STRING_SCHEMA: AnyType = { Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'string' } };
-const BYTES_SCHEMA: AnyType = { Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'hex' } };
+/** Text: UTF-8 on the wire, a `string` in JavaScript. */
+const STRING_SCHEMA: AnyType = { Custom: { type: { List: U8_SCHEMA }, id: 'utf8' } };
+/** Bytes: a `Uint8Array` in JavaScript (hex in I-JSON, an array of numbers in JSON). */
+const BYTES_SCHEMA: AnyType = { Custom: { type: { List: U8_SCHEMA }, id: 'hex' } };
 
 // ========================= Conversion =========================
 
@@ -117,7 +122,8 @@ function nodeToAnyType(node: SchemaNode): AnyType {
  * @example
  * const Person = struct({ name: str, age: u32 });
  * const schema = generateSchema({ Person });
- * // { "Person": { "Object": { "name": { "Custom": ... }, "age": { "Int": ... } } } }
+ * // { "Person": { "Object": { "name": { "Custom": { ..., "id": "utf8" } }, "age": { "Int": ... } } } }
+ * const pssz = new PsszSchema(schema).type('Person');
  */
 export function generateSchema(types: Record<string, FracType<any>>): Schema {
   const schema: Schema = {};

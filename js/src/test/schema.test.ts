@@ -4,7 +4,7 @@ import {
   bool, u8, u16, u32, u64, i8, i16, i32, i64, f32, f64,
   str, bytes, optional, vec, array, tuple, variant,
   struct, fixedStruct,
-  typeToAnyType, generateSchema,
+  typeToAnyType, generateSchema, PsszSchema, PsszError,
   type AnyType,
 } from '../index.js';
 
@@ -40,9 +40,10 @@ describe('typeToAnyType', () => {
     });
   });
 
-  it('str → Custom(List(u8), "string")', () => {
+  // Text is the IR's "utf8"; "string" is the raw string no combinator emits.
+  it('str → Custom(List(u8), "utf8")', () => {
     assert.deepStrictEqual(typeToAnyType(str), {
-      Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'string' },
+      Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'utf8' },
     });
   });
 
@@ -75,7 +76,7 @@ describe('typeToAnyType', () => {
     assert.deepStrictEqual(a, {
       Tuple: [
         { Int: { bits: 32, isSigned: false } },
-        { Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'string' } },
+        { Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'utf8' } },
       ],
     });
   });
@@ -110,7 +111,7 @@ describe('typeToAnyType', () => {
     assert.deepStrictEqual(a, {
       Option: {
         List: {
-          Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'string' },
+          Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'utf8' },
         },
       },
     });
@@ -135,5 +136,48 @@ describe('generateSchema', () => {
     const json = JSON.stringify(schema);
     const parsed = JSON.parse(json);
     assert.deepStrictEqual(parsed, schema);
+  });
+});
+
+describe('generateSchema is the Schema IR of the PSSZ codecs', () => {
+  const Person = struct({ name: str, avatar: bytes, age: u32, tags: vec(str), nick: optional(str) });
+  const Point = fixedStruct({ x: f64, y: f64 });
+  const schema = generateSchema({ Person, Point });
+  const pssz = new PsszSchema(schema);
+
+  it('text is a string, bytes are a Uint8Array', () => {
+    const type = pssz.type('Person');
+    const value = { name: 'Zoë', avatar: Uint8Array.of(0xff, 0, 1), age: 30, tags: ['a', 'é'], nick: null };
+    const encoded = type.encode(value);
+    const decoded = type.decode(encoded) as typeof value;
+    assert.deepStrictEqual(decoded, value);
+    assert.strictEqual(typeof decoded.name, 'string');
+    assert.ok(decoded.avatar instanceof Uint8Array);
+    // Bytes are an array of numbers in JSON and a hex string in I-JSON.
+    assert.strictEqual(type.valueToJson(value, 'json'), '{"name":"Zoë","avatar":[255,0,1],"age":30,"tags":["a","é"],"nick":null}');
+    assert.strictEqual(type.valueToJson(value, 'ijson'), '{"name":"Zoë","avatar":"FF0001","age":30,"tags":["a","é"],"nick":null}');
+    assert.deepStrictEqual(type.jsonToValue(type.valueToJson(value, 'json'), 'json'), value);
+    assert.deepStrictEqual(type.jsonToValue(type.valueToJson(value, 'ijson'), 'ijson'), value);
+    // Text is validated: bytes are not a text value, and text is not bytes.
+    assert.throws(() => type.encode({ ...value, name: Uint8Array.of(0x61) }), PsszError);
+    assert.throws(() => type.encode({ ...value, name: '\ud800' }), PsszError);
+    assert.throws(() => type.encode({ ...value, avatar: 'ff0001' }), PsszError);
+    // Bytes that are not UTF-8 are not a `str`.
+    const Name = new PsszSchema(generateSchema({ Name: str })).type('Name');
+    assert.strictEqual(Name.decode(Uint8Array.of(0xc3, 0xa9)), 'é');
+    assert.throws(() => Name.decode(Uint8Array.of(0xff)), PsszError);
+  });
+
+  it('a fixedStruct is a Struct, a struct an Object', () => {
+    const point = pssz.type('Point');
+    assert.strictEqual(point.encode({ x: 1.5, y: -2 }).length, 16);
+    assert.deepStrictEqual(point.decode(point.encode({ x: 1.5, y: -2 })), { x: 1.5, y: -2 });
+  });
+
+  it('the raw string of the IR is bytes, and no combinator produces it', () => {
+    assert.ok(!JSON.stringify(schema).includes('"string"'));
+    const raw = new PsszSchema({ Raw: { Custom: { type: { List: { Int: { bits: 8, isSigned: false } } }, id: 'string' } } }).type('Raw');
+    assert.deepStrictEqual(raw.decode(Uint8Array.of(0xff, 0x61)), Uint8Array.of(0xff, 0x61));
+    assert.deepStrictEqual(raw.encode('a'), Uint8Array.of(0x61));
   });
 });
