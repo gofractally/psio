@@ -636,6 +636,16 @@ pub fn variant_from_json(v: &Value) -> Result<(&str, &Value), JsonError> {
     }
 }
 
+// ============================================================
+// Json / IJson text formats (the counterpart of C++ psio::json and
+// psio::ijson). The items above are the older serde_json-based canonical
+// JSON of the fracpack API and are unchanged.
+// ============================================================
+
+#[path = "json_text.rs"]
+mod text;
+pub use text::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;

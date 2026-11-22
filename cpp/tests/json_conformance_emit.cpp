@@ -12,8 +12,10 @@
 
 #include "json_conformance_types.hpp"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -201,6 +203,11 @@ namespace
       value<float>("2^24", 16777216.0f);
       value<float>("1e10", 1e10f);
       value<float>("1e-5", 1e-5f);
+      // Exactly halfway between two shortest candidates: the even one wins.
+      value<float>("tie_to_even", -271183.625f);
+      value<float>("tie_to_even_2", 271183.375f);
+      value<double>("tie_to_even", 4503599627370497.5);
+      value<double>("tie_to_even_2", 9007199254740993.0 * 2);
       value<double>("zero", 0.0);
       value<double>("minus_zero", -0.0);
       value<double>("one", 1.0);
@@ -223,6 +230,47 @@ namespace
       value<double>("minus_pi", -3.141592653589793);
       value<double>("1e100", 1e100);
       value<double>("1.25e-100", 1.25e-100);
+   }
+
+   // Floats whose text must agree digit for digit across languages: random
+   // bit patterns, and short decimals across the fixed / scientific boundary.
+   void emit_float_sweep()
+   {
+      std::uint64_t state = 0x9E3779B97F4A7C15ull;
+      auto next = [&] {
+         std::uint64_t z = (state += 0x9E3779B97F4A7C15ull);
+         z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+         z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+         return z ^ (z >> 31);
+      };
+      for (int i = 0; i < 150; ++i)
+      {
+         const std::uint64_t bits = next();
+         double              d;
+         std::memcpy(&d, &bits, sizeof d);
+         if (std::isfinite(d)) value<double>("bits_" + std::to_string(i), d);
+      }
+      for (int i = 0; i < 100; ++i)
+      {
+         const std::uint32_t bits = static_cast<std::uint32_t>(next());
+         float               f;
+         std::memcpy(&f, &bits, sizeof f);
+         if (std::isfinite(f)) value<float>("bits_" + std::to_string(i), f);
+      }
+      for (int i = 0; i < 160; ++i)
+      {
+         const std::uint64_t r        = next();
+         const int           digits   = 1 + static_cast<int>(r % 6);
+         std::uint64_t       mantissa = (r >> 8) % 1000000;
+         for (int k = digits; k < 6; ++k) mantissa /= 10;
+         const int         exponent = static_cast<int>((r >> 40) % 49) - 24;
+         const std::string token =
+            std::string((r >> 60) & 1 ? "-" : "") + std::to_string(mantissa) + "e" +
+            std::to_string(exponent);
+         value<double>("decimal_" + std::to_string(i), std::strtod(token.c_str(), nullptr));
+         if (i % 2 == 0)
+            value<float>("decimal_" + std::to_string(i), std::strtof(token.c_str(), nullptr));
+      }
    }
 
    void emit_strings_and_bytes()
@@ -678,6 +726,7 @@ int main(int argc, char** argv)
       return 2;
    }
    emit_scalars();
+   emit_float_sweep();
    emit_strings_and_bytes();
    emit_containers();
    emit_records();

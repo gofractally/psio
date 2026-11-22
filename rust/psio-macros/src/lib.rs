@@ -13,6 +13,7 @@ use schema_macro::schema_derive_macro;
 mod dynamic_schema_macro;
 mod fracpack_macro;
 mod json_macro;
+mod json_text_macro;
 mod schema_macro;
 mod capnp_macro;
 mod fb_macro;
@@ -72,6 +73,13 @@ pub fn derive_to_canonical_json(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(FromCanonicalJson, attributes(fracpack))]
 pub fn derive_from_canonical_json(input: TokenStream) -> TokenStream {
     from_canonical_json_macro_impl(input)
+}
+
+/// The Json / IJson text formats (`psio::json::{Json, IJson}`); see
+/// `json_text_macro.rs` for the supported shapes and `#[json(...)]` attributes.
+#[proc_macro_derive(JsonText, attributes(json))]
+pub fn derive_json_text(input: TokenStream) -> TokenStream {
+    json_text_macro::derive(input)
 }
 
 // ── Cap'n Proto derive macros ───────────────────────────────────────────
