@@ -259,11 +259,14 @@ namespace psio {
          using F = typename R::template member_type<I>;
          using value_t = typename ::psio::effective_annotations_for<
             T, F, R::template member_pointer<I>>::value_t;
+         static constexpr value_t value = ::psio::effective_annotations_for<
+            T, F, R::template member_pointer<I>>::value;
       };
       template <typename T, std::size_t I>
       struct record_member_annotations<T, I, true>
       {
          using value_t = std::tuple<>;
+         static constexpr value_t value{};
       };
 
       template <std::size_t I, typename T>
@@ -2004,6 +2007,62 @@ namespace psio {
          return codec_ok();
       }
 
+      // Length (bytes of a string, elements of a list) of an already
+      // validated member payload, checked against the member's
+      // length_bound. The bound looks through std::optional, as width
+      // inference does (max_size.hpp); it constrains strings and lists
+      // only, every other shape has no length to check.
+      template <std::size_t LegacyW, bool Auto, typename F>
+      codec_status check_member_length_bound(std::span<const char> src,
+                                             std::size_t pos, std::size_t end,
+                                             const ::psio::length_bound& lb) noexcept
+      {
+         if constexpr (is_std_optional_v<F>)
+         {
+            using V = typename F::value_type;
+            if constexpr (!optional_uses_selector_v<V>)
+            {
+               if (pos == end) return codec_ok();
+               return check_member_length_bound<LegacyW, Auto, V>(src, pos, end, lb);
+            }
+            else
+            {
+               if (pos == end || src[pos] == 0) return codec_ok();
+               return check_member_length_bound<LegacyW, Auto, V>(src, pos + 1, end, lb);
+            }
+         }
+         else if constexpr (std::is_same_v<F, std::string> || is_utf8_string_v<F> ||
+                            is_std_vector_v<F>)
+         {
+            std::size_t count = 0;
+            if constexpr (std::is_same_v<F, std::string> || is_utf8_string_v<F>)
+               count = end - pos;
+            else
+            {
+               using E = typename F::value_type;
+               if constexpr (is_zero_fixed_v<E>)
+                  count = 0;
+               else if constexpr (is_fixed_v<E>)
+                  count = (end - pos) / fixed_size_of<E>();
+               else
+               {
+                  constexpr std::size_t W = [] {
+                     if constexpr (Auto) return ::psio::auto_pssz_width<F>();
+                     else return LegacyW;
+                  }();
+                  count = pos == end ? 0 : read_offset<W>(src, pos) / W;
+               }
+            }
+            if ((lb.max && count > *lb.max) || (lb.exact && count != *lb.exact) ||
+                (lb.min && count < *lb.min))
+               return codec_fail("pssz: member length_bound violated",
+                                 static_cast<std::uint32_t>(pos), "pssz");
+            return codec_ok();
+         }
+         else
+            return codec_ok();
+      }
+
       template <std::size_t W, bool Auto, Record T, std::size_t... Is>
       codec_status validate_record(std::span<const char> src,
                                    std::size_t            pos,
@@ -2052,9 +2111,19 @@ namespace psio {
                    }
                 }
                 else
+                {
                    status = validate_value<W, Auto, F>(
                       src, spans[Is].begin, spans[Is].end, depth + 1,
                       flags);
+                   // A member's declared length_bound is part of its type:
+                   // a string or list outside the bound is rejected.
+                   if constexpr (::psio::has_spec_v<::psio::length_bound, eff>)
+                      if (status.ok())
+                         status = check_member_length_bound<W, Auto, F>(
+                            src, spans[Is].begin, spans[Is].end,
+                            std::get<::psio::length_bound>(
+                               record_member_annotations<T, Is>::value));
+                }
              }()),
             ...);
          return status;

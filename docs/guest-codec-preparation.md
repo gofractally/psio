@@ -43,7 +43,11 @@ status walker; plain `validate` passes strings through as raw bytes. It still
 does not materialize, so the native canonical re-encode comparison is not run
 in a guest.
 
+The status validator also enforces a member's declared `length_bound` on
+strings and lists, so a guest rejects an out-of-bound member in `validate`.
+Guest `validate_strict` still reports the explicit unsupported status for a
+type that carries length bounds, as described above.
+
 Independent activation gates remain open: schema and language parity (Rust has
-no evolution or pruning), typed length-bound enforcement, and all other format
-headers. Passing the guest preparation consumer does not qualify the entire
+no evolution or pruning) and all other format headers. Passing the guest preparation consumer does not qualify the entire
 SDK.

@@ -1445,8 +1445,11 @@ namespace
          add<F, C1a>(c, "cap/over_cap", over, reject(cap));
          add<F, C1b>(c, "cap/over_cap", over, reject(cap));
          const std::size_t WC = wof<F, WidthCheckpoint>();
+         // Within the 64-byte cap, but the label exceeds its member
+         // length_bound of 16: the member bound rejects it.
          add<F, WidthCheckpoint>(c, "cap/checkpoint_at_cap",
-                                 rec_as(WC, 7, std::string(64 - 4 - 2 * WC, 'a')), canonical());
+                                 rec_as(WC, 7, std::string(64 - 4 - 2 * WC, 'a')),
+                                 reject("pssz: member length_bound violated"));
          add<F, WidthCheckpoint>(c, "cap/checkpoint_over_cap",
                                  rec_as(WC, 7, std::string(65 - 4 - 2 * WC, 'a')), reject(cap));
 
@@ -1485,9 +1488,11 @@ namespace
 
    void emit_length_bound_overflow()
    {
-      // Known open gate: a member length_bound narrows the inferred width but
-      // is not enforced by encode, decode, validate or validate_strict. These
-      // vectors record what the implementation does today.
+      // A member length_bound narrows the inferred width and is enforced by
+      // validate and validate_strict (and so by the checked decode and view
+      // entry points). The C++ encoder does not check it: these frames are
+      // what it writes for an out-of-bound value, and every reader rejects
+      // them.
       const char* c = "length-bound-overflow";
       static_assert(psio::max_encoded_size<Bounded>() == 20 && psio::auto_pssz_width_v<Bounded> == 1);
       corpus("corpus", "bounded_within", Bounded{"1234", {1, 2}});
@@ -1496,7 +1501,8 @@ namespace
          formats([&]<typename F>() {
             Bytes bytes;
             if (!try_encode<F>(value, bytes)) return;
-            add<F, T>(c, vname, bytes, record_only(), vname, type_id<T>());
+            add<F, T>(c, vname, bytes, reject("pssz: member length_bound violated"), vname,
+                      type_id<T>());
          });
       };
       observed("string_one_over", Bounded{"12345", {}});

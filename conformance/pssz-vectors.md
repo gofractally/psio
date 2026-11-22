@@ -32,7 +32,7 @@ intended wire-format change, never to make a test pass.
 Outcomes are computed from the implementation. Every hand-made frame and every
 evolution pair also carries the outcome expected from the format rules (and,
 for hand-made rejections, the expected error); the emitter aborts when the
-implementation disagrees. The two classes marked OBSERVED ONLY are exempt.
+implementation disagrees. The class marked OBSERVED ONLY is exempt.
 
 ## File format
 
@@ -122,7 +122,7 @@ exists only for record members.
 | `enum-unknown-value` | 36 | A value that names no enumerator. C++ accepts it in every entry point. |
 | `string` | 308 | UTF-8 and bound rules for `string`, `string<=N`, `raw_string`. |
 | `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`. Recorded as `canonical`; the one exception is C++ `validate_strict`, which checks every plain string and rejects these. |
-| `length-bound-overflow` | 28 | OBSERVED ONLY, no expectation. Frames exceeding a member `length_bound`: C++ accepts them everywhere (known open gate). |
+| `length-bound-overflow` | 28 | Frames exceeding a member `length_bound`, as the C++ encoder (which does not check the bound) writes them. Every reader rejects them. |
 | `bytes` | 88 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. |
 | `zero-fixed` | 100 | Zero-field and all-fixed records and their containers. |
 | `depth` | 28 | Node depth 63 / 64 accepted, 65+ rejected (`kMaxValidationDepth` = 64). |

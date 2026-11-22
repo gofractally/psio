@@ -24,16 +24,10 @@ include!("registry.rs");
 /// outcomes Rust must have instead.
 fn rust_expectation(v: &Vector) -> &str {
     match v.class.as_str() {
-        // C++ does not enforce a member length_bound; the Rust bounded types
-        // do. Rust rejects what exceeds the bound.
-        "length-bound-overflow" => "reject",
-        // C++ accepts any underlying integer for an enum; a Rust enum can
-        // only hold its enumerators.
+        // C++ accepts any underlying integer for an enum, so that an old
+        // reader keeps accepting data from a writer that added enumerators;
+        // a Rust enum can only hold its enumerators.
         "enum-unknown-value" => "reject",
-        // The same length_bound difference inside the `width` class: a
-        // WidthCheckpoint filled to its 64-byte cap by a 58-byte label whose
-        // member bound is 16. C++ checks only the cap.
-        "width" if v.name.starts_with("width/cap/checkpoint_at_cap/") => "reject",
         _ => v.expect.as_str(),
     }
 }
@@ -90,13 +84,26 @@ fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
         shown.join("\n")
     );
     assert!(fixture.vectors.len() >= 1000, "fixture shrank");
-    // The documented divergences are confined to their two classes.
+    // The documented divergence is confined to its class. A member
+    // length_bound is enforced by both languages (`length-bound-overflow`
+    // and `width/cap/checkpoint_at_cap` are rejections in the fixture).
     let allowed = fixture
         .vectors
         .iter()
-        .filter(|v| matches!(v.class.as_str(), "length-bound-overflow" | "enum-unknown-value"))
+        .filter(|v| v.class == "enum-unknown-value")
         .count();
-    assert_eq!(divergent, allowed + 4, "C++/Rust divergences are exactly the documented ones");
+    assert_eq!(allowed, 36, "the enum difference is exactly the 36 documented vectors");
+    assert_eq!(divergent, allowed, "C++/Rust divergences are exactly the documented ones");
+    let bound_rejections = fixture
+        .vectors
+        .iter()
+        .filter(|v| {
+            v.class == "length-bound-overflow"
+                || v.name.starts_with("width/cap/checkpoint_at_cap/")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(bound_rejections.len(), 32);
+    assert!(bound_rejections.iter().all(|v| v.expect == "reject"));
 }
 
 #[test]

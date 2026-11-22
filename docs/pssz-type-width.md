@@ -107,8 +107,12 @@ and metadata APIs; it does not copy a codec into psibase or create a wire family
 - Of the open gates listed above, zero-size optionals/vectors, appended-field
   compatibility and record-header validation are now closed in C++: readers
   honor the writer's fixed-region header, pruning is mandatory, and the
-  cross-version matrix is `cpp/tests/pssz_evolution_matrix_tests.cpp`. Typed
-  `length_bound` validation and Rust/browser parity remain open.
+  cross-version matrix is `cpp/tests/pssz_evolution_matrix_tests.cpp`.
+  Rust/browser parity remains open.
+- Typed `length_bound` validation is closed for reads: `validate`,
+  `validate_strict` and the checked readers reject a string or list member
+  outside its declared bound (`cpp/tests/pssz_length_bound_tests.cpp`). The
+  17-byte label above is now rejected. The encoder still does not check it.
 - Width selection is unchanged: an explicit `maxDynamicData` always rules,
   otherwise the inferred bound applies. Because an appended optional can move
   an inferred bound across a threshold (for example `{array<u8,251>}` is one
