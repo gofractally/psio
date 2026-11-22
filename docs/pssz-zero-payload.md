@@ -60,3 +60,22 @@ independent activation gates. Ordinary boolean reads remain permissive under the
 documented specification; normalization of memcpy-decoded boolean fields is a
 separate safety repair.
 These focused checks are not global strict PSSZ or SDK cutover qualification.
+
+## Superseded: optional presence now follows the minimum encoded size
+
+The selector predicate described above ("variable or fixed with size zero")
+was replaced when the evolution line was merged. Per `docs/pssz-spec.md` 5.5
+an optional carries the one-byte selector exactly when its payload can encode
+to zero bytes. Everything this document set out to protect still holds, with
+the same bytes: `optional<Unit>` for a zero-size DWNC record is `00` / `01`,
+zero-size fixed-count arrays and zero-count arrays use the selector, zero-size
+payloads must have empty spans, and nonempty vectors of zero-size elements are
+rejected. What changed is the other direction: a variable payload that can
+never be empty (an extensible record with its header, a variant, a bitlist, a
+non-empty array of variable elements, an optional that itself has a selector)
+no longer carries a selector. `optional<EmptyExtensible>` is therefore empty
+for None and the bare header for Some.
+
+Fail-fast `decode` now also rejects, for every optional in selector form, a
+missing selector, a selector other than 0 or 1, and bytes after a None
+selector, and requires every fixed-size value to occupy exactly its span.

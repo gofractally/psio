@@ -45,25 +45,27 @@ is a value and is kept. Two limits follow from the wire carrying no schema:
 - DWNC records have no header, are never pruned and never extended; every
   field is always present, so the rule does not apply to them.
 
-**Optional presence byte: unresolved.** This document's rule above (selector
-only when the payload's minimum encoded size is zero, as in
-`docs/pssz-spec.md` 5.5) is *not* what the merged codec does. The trunk's
-published explicit-profile bytes (`pssz_type_width_explicit_goldens.hpp`) and
-`docs/pssz-zero-payload.md` use a selector for every variable payload,
-including extensible records, variants, bitlists and nested optionals, and the
-merged typed codec keeps that. The schema-IR runtime codec and the shared Rust
-fixture corpus still use the minimum-size rule, so the two disagree for
-`Option<extensible record>`, `Option<variant>`, `Option<bitlist>`,
-`Option<Option<T>>` and `Option<[variable; N>0]`. Tests on both sides are kept
-and the minimum-size ones currently fail; see the merge commit message. The
-slot-based evolution mechanism itself does not depend on this choice.
+**Optional presence.** Resolved in favour of `docs/pssz-spec.md` 5.5 and the
+rule at the top of this document: a selector only when the payload's minimum
+encoded size is zero. The typed codec, the schema-IR runtime codec, the shared
+fixtures and Rust agree. The trunk's explicit-profile goldens that pinned a
+selector for `optional<record>` were regenerated.
 
-**Strings.** Structural validation treats a plain string as bytes; UTF-8 is a
-semantic constraint (`utf8_spec`) checked by `validate_strict`, as on the
-trunk. The evolution line validated UTF-8 structurally and at encode time.
+**Strings.** A plain string is `Vector(u8)` carrying raw bytes: encode, decode,
+default validation and views do not check UTF-8. Strict validation checks every
+string, the `utf8_spec` annotation is checked by strict validation, and the
+`utf8_string<N>` wrapper carries the constraint in its type (enforced by
+encode, decode and both validation modes).
 
-**Rust.** `rust/psio` does not implement optional-suffix evolution or pruning:
-its record decoder requires the reader's own fixed-region size and its encoder
-always writes every slot. A C++ value whose trailing optional is absent is
-therefore not readable by Rust, and Rust's encoding of such a value is rejected
-by C++ as unpruned.
+**Trailing data.** A buffer holds exactly one value. Fixed-size values must
+occupy exactly their span in decode as well as validate.
+
+**Compile-time check.** `psio::pssz_evolves_from<Old, New>` is true iff New is
+Old plus optional fields at an unchanged automatic width and DWNC status.
+
+**Rust.** `rust/psio` implements the presence rule and exact spans but not
+optional-suffix evolution or pruning: its record decoder requires the reader's
+own fixed-region size and its encoder always writes every slot. A C++ value
+whose trailing optional is absent is therefore not readable by Rust, and Rust's
+encoding of such a value is rejected by C++ as unpruned. Rust `String` also
+rejects non-UTF-8 bytes that C++ passes through.

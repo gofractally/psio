@@ -48,9 +48,12 @@ borrowed access still needs no heap allocation. Bounded lists check their count
 before allocating decoded elements. Fixed Option payloads are bounded to the
 child's complete size before primitive decoding or validation.
 
-The existing primitive scalar prefix policy remains: a standalone fixed primitive
-may accept trailing bytes. This repair bounds internal container/record child
-windows rather than changing that policy globally. The record decoder accepts
+Canonical encodings carry no trailing data. A standalone fixed primitive
+(integers, floats, bool, Uint256, Bitvector) must occupy exactly its span in both
+decode and validate; the earlier lenient "scalar prefix policy", under which
+`u16` decoded from `[1, 0, 99]`, was removed when the evolution line was merged.
+Nothing in the repository relied on it, so there is no prefix-decoding entry
+point. The record decoder accepts
 the current same-schema fixed-region header and rejects unknown or malformed
 header layouts explicitly. Appended-field evolution remains a separate gate.
 

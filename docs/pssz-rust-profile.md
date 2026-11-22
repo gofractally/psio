@@ -31,12 +31,17 @@ an extension-aware schema policy. Fixed records reject trailing bytes. Variable
 payload lengths belong to their field codecs; appended text bytes, for example,
 are part of that text value.
 
-Optionals follow the public C++ implementation: fixed inner types use zero bytes
-for None and the inner encoding for Some; variable inner types use selector 0
-for None and selector 1 followed by the payload for Some. This includes
-extensible records even when their minimum encoding length is nonzero. A Some
-value with a zero-byte fixed encoding cannot be distinguished from None and is
-rejected by checked encoding.
+Optionals follow `docs/pssz-spec.md` 5.5, as the C++ codec does: when the inner
+type's minimum encoded size is positive (`MIN_ENCODED_SIZE > 0`: scalars,
+extensible records, which always have their header, and an option that itself
+uses a selector) None is zero bytes and Some is the bare inner encoding; when it
+is zero (strings, vectors, zero-size records, an option of a positive-minimum
+type) selector 0 is None and selector 1 precedes the payload.
+
+Not yet in Rust: optional-suffix evolution and mandatory pruning (the record
+decoder requires the reader's own fixed-region size and the encoder writes every
+slot), type-derived automatic width, and raw-byte strings (`String` decoding and
+validation reject non-UTF-8, where C++ passes a plain string through).
 
 This checked surface is a prerequisite for explicit derives and a mirror of the
 new C++ schema IR. The old fracpack `AnyType`/`CompiledSchema` do not describe the

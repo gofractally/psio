@@ -97,3 +97,21 @@ existing-codec gates before PSSZ activation include:
 
 Canonical user sources remain untouched. This branch consumes the existing codec
 and metadata APIs; it does not copy a codec into psibase or create a wire family.
+
+## Changes at the evolution merge
+
+- The explicit-profile reference encodings are no longer all the 552ca bytes:
+  `some-*`, `none-*` and `relay-*` in `pssz_type_width_explicit_goldens.hpp`
+  were regenerated because `optional<record>` lost its selector byte
+  (`docs/pssz-spec.md` 5.5). The other entries are unchanged.
+- Of the open gates listed above, zero-size optionals/vectors, appended-field
+  compatibility and record-header validation are now closed in C++: readers
+  honor the writer's fixed-region header, pruning is mandatory, and the
+  cross-version matrix is `cpp/tests/pssz_evolution_matrix_tests.cpp`. Typed
+  `length_bound` validation and Rust/browser parity remain open.
+- Width selection is unchanged: an explicit `maxDynamicData` always rules,
+  otherwise the inferred bound applies. Because an appended optional can move
+  an inferred bound across a threshold (for example `{array<u8,251>}` is one
+  byte and becomes two with an appended `optional<u8>`), such a step is not a
+  legal evolution. `psio::pssz_evolves_from<Old, New>` checks this at compile
+  time; reserve room with an explicit `maxDynamicData` to evolve.

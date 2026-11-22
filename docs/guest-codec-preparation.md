@@ -34,10 +34,16 @@ Its argument selectors 1–5 intentionally exercise unchecked wrapper, size-cap,
 and throwing-validator failure paths. They are expected exceptions natively and
 aborts in a guest; ordinary status validation must return normally.
 
-Independent activation gates remain open: appended optional fields, schema and
-language parity, complete malformed/canonical validation, typed length-bound
-enforcement, zero-size containers/options, and all other format headers. In
-particular, the existing PSSZ record validator treats the writer header as
-informational and accepts a header larger than its frame; the failed audit
-probe is retained outside this change. Passing the guest preparation consumer
-does not qualify that behavior or the entire SDK.
+Since the evolution merge the PSSZ status validator, which is what a guest
+uses, resolves every record from the writer's fixed-region header (a header
+larger than its frame is rejected), accepts pruned and unknown optional suffix
+fields, and rejects a stored trailing None. Guest `validate_strict` additionally
+rejects unknown fields and checks every plain string for UTF-8 through the same
+status walker; plain `validate` passes strings through as raw bytes. It still
+does not materialize, so the native canonical re-encode comparison is not run
+in a guest.
+
+Independent activation gates remain open: schema and language parity (Rust has
+no evolution or pruning), typed length-bound enforcement, and all other format
+headers. Passing the guest preparation consumer does not qualify the entire
+SDK.

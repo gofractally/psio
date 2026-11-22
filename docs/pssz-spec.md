@@ -419,15 +419,19 @@ Used by the optional-encoding rule (§5.5).
 | T                                | min_encoded_size(T)                  |
 |----------------------------------|--------------------------------------|
 | arithmetic, enum, ext_int, bool  | sizeof(T)                            |
-| `Array(T, N)` (N ≥ 1)       | N × min(T)                           |
+| `Array(T, N)` of fixed T    | N × fixed_size_of(T) (0 when N = 0)  |
+| `Array(T, N)` of variable T, N ≥ 1 | N × W (the offset table)       |
 | `Bitvector(N)`                   | ⌈N/8⌉                                |
 | `Bitlist(N)`                     | 1                                    |
 | `String`                    | 0                                    |
 | `Vector(T)`                 | 0                                    |
 | `BoundedString(N)`              | 0                                    |
 | `BoundedList(T, N)`             | 0                                    |
-| `Optional(T)`               | 0                                    |
-| reflected record (DWNC)          | fixed_size_of(T)                     |
+| `Optional(T)`, min(T) > 0   | 0 (None is zero bytes)               |
+| `Optional(T)`, min(T) = 0   | 1 (the selector byte)                |
+| `Variant(...)`              | 1 (the alternative index)            |
+| reflected record (DWNC, all fixed) | fixed_size_of(T) (may be 0)        |
+| reflected record (DWNC, a variable field) | > 0 (its offset slots)      |
 | reflected record (extensible)    | W (the empty header alone)           |
 
 A type with `min_encoded_size(T) > 0` cannot encode to zero bytes,
@@ -691,8 +695,10 @@ zero bytes means None, any nonzero size means Some. This works
 because T cannot encode to zero bytes when min(T) > 0.
 
 This is the no-overhead form and applies to: arithmetic primitives,
-enums, fixed-size arrays of arithmetic, bitvectors, DWNC records,
-extensible records (whose minimum is the W-byte header).
+enums, non-empty fixed-size arrays, bitvectors, bitlists, variants,
+DWNC records of nonzero size, extensible records and tuples (whose
+minimum is the W-byte header), and an optional whose own payload uses
+the selector form (it is never empty, e.g. `Optional(Optional(String))`).
 
 #### 5.5.2 1-byte selector form (min(T) == 0)
 
@@ -702,8 +708,11 @@ Some  → [0x01, encoding(T)]
 ```
 
 Used when T can encode to zero bytes — strings, vectors, bounded
-lists, bounded strings, nested optionals — because the size-only
-disambiguation would conflate `None` with `Some(empty)`.
+lists, bounded strings, zero-size DWNC records, zero-count arrays, and
+an optional whose own payload uses the no-selector form (its None is
+empty, e.g. `Optional(Optional(u32))`) — because the size-only
+disambiguation would conflate `None` with `Some(empty)`. Only selector
+values 0 and 1 exist, and nothing follows a `0x00`.
 
 The selector byte is part of the payload, not a separate field. An
 optional inside a record contributes a single offset slot pointing
@@ -762,8 +771,13 @@ A pssz buffer is a sequence of bytes whose interpretation requires:
 2. Both encoder and decoder agree on the width tag W derived from T
    per §3.
 
-Given those, encoding is deterministic (modulo trailing-default
-pruning, see §7.2) and decoding is total.
+Given those, encoding is deterministic: pruning is mandatory (§7.2),
+so each value has exactly one encoding.
+
+A buffer contains exactly one value and **no trailing data**. Decoding
+or validating a fixed-size type (including a bare scalar) from a buffer
+longer or shorter than the value is an error; variable-size types own
+the whole buffer by definition.
 
 ### 6.2 Buffer self-delimiting
 
@@ -864,7 +878,9 @@ not change.
 ✓ Append a new **optional** field at the end. (A non-optional appended
   field has no way to be absent: old data is rejected by the new reader.
   The wire carries no schema, so this rule is enforced by schema-upgrade
-  checks, not by readers.)
+  checks, not by readers. In C++:
+  `static_assert(psio::pssz_evolves_from<Old, New>)`, which also
+  requires an unchanged width and DWNC status.)
 ✓ Change a field's `length_bound{.max}` annotation to a tighter or
   looser value, provided W doesn't change. (If W changes, callers
   must rebuild against the new schema; the wire format is incompatible.)
