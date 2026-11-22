@@ -65,6 +65,11 @@ add_library(psio_annotate_header_check OBJECT annotate_header_check.cpp)
 target_link_libraries(psio_annotate_header_check PRIVATE psio)
 target_compile_features(psio_annotate_header_check PRIVATE cxx_std_23)
 target_compile_definitions(psio_annotate_header_check PRIVATE _LIBCPP_REMOVE_TRANSITIVE_INCLUDES)
+# <psio/reflect.hpp> alone is enough for every keyword PSIO_REFLECT accepts.
+add_library(psio_reflect_header_check OBJECT reflect_header_check.cpp)
+target_link_libraries(psio_reflect_header_check PRIVATE psio)
+target_compile_features(psio_reflect_header_check PRIVATE cxx_std_23)
+target_compile_definitions(psio_reflect_header_check PRIVATE _LIBCPP_REMOVE_TRANSITIVE_INCLUDES)
 psio_add_test(psio_wrapper_tests wrapper_tests.cpp)
 
 # Phase 3: buffer / view / mutable_view + access-surface rule.

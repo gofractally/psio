@@ -1318,3 +1318,12 @@ namespace psio
    static_assert(::std::is_enum_v<ENUM>, "psio: PSIO_REFLECT_ENUM takes an enum");      \
    static_assert(sizeof(::psio::detail::enum_bind<                                       \
                     ENUM, BOOST_PP_CAT(psio_enum_impl_, ENUM)>) > 0, "");
+
+// The spec types the in-macro keywords name — definitionWillNotChange(),
+// maxFields(N), maxDynamicData(N), transparent(), and the specs written in
+// attr(field, spec) (max<N>, json_string, ...) — live in annotate.hpp, which
+// is built on this header. It is included here, last, so that every keyword
+// PSIO_REFLECT accepts works with <psio/reflect.hpp> alone. (annotate.hpp
+// includes this header first; whichever is named first, both are complete
+// before any PSIO_REFLECT can be written.)
+#include <psio/annotate.hpp>
