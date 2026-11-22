@@ -33,6 +33,7 @@ Firefox and Safari (15.4 or later). TypeScript 5 for the typed layer.
 
 - [From a schema fetched at run time](#from-a-schema-fetched-at-run-time)
 - [Typed definitions](#typed-definitions)
+- [Pairs, maps, sets, nested values, transparent types](#pairs-maps-sets-nested-values-transparent-types)
 - [Views](#views)
 - [Keys](#keys)
 - [JSON and I-JSON](#json-and-i-json)
@@ -67,10 +68,10 @@ Transfer.view(bytes).get('amount');                   // 18446744073709551615n, 
 
 | | |
 |---|---|
-| `new PsszSchema(ir, options)` | From a `psio::Schema` value, or a compact `{ Name: type }` map ([below](#schemas-written-by-hand)). `options`: `{ handlers, requireHandlers }` ([custom types](#custom-types)). |
+| `new PsszSchema(ir, options)` | From a `psio::Schema` value, or a compact `{ Name: type }` map ([below](#schemas-written-by-hand)). `options`: `{ handlers, requireHandlers, nestedBytes }` ([custom types](#custom-types), [nested values](#pairs-maps-sets-nested-values-transparent-types)). |
 | `PsszSchema.decode(bytes, options)` / `.fromJson(text, format, options)` | From the PSSZ bytes / the JSON or I-JSON text of `psio::Schema`. `schema.encode()` / `schema.toJson(format)` write them back ([the schema as JSON](#the-schema-as-json)); `schema.ir` is the IR. |
-| `schema.withHandlers(handlers, { requireHandlers })` | The same schema with these custom text handlers added. |
-| `schema.type(root, { width, handlers, requireHandlers })` | A `PsszType` for a type name or an inline type. `width`: `'auto'` (default; type-derived offset widths, the `psio::pssz` format) or `1` / `2` / `4` (one inherited width, `psio::pssz_<W>`; see [explicit widths](#explicit-widths)). Throws when the type is not expressible. |
+| `schema.withHandlers(handlers, { requireHandlers, nestedBytes })` | The same schema with these custom handlers (text forms, invariants) added. |
+| `schema.type(root, { width, handlers, requireHandlers, nestedBytes })` | A `PsszType` for a type name or an inline type. `nestedBytes: 'opaque'` reads and writes every nested value as its bytes, unexamined (default `'typed'`: validated as the inner type). `width`: `'auto'` (default; type-derived offset widths, the `psio::pssz` format) or `1` / `2` / `4` (one inherited width, `psio::pssz_<W>`; see [explicit widths](#explicit-widths)). Throws when the type is not expressible. |
 | `type.encode(value)` | Canonical bytes. Trailing absent optionals are pruned; length bounds and caps are enforced. |
 | `type.decode(bytes, { rejectUnknown })` | The value. The bytes are fully validated first. Unknown appended optional fields are dropped unless `rejectUnknown`. |
 | `type.validate(bytes)` | `{ ok: true, hasUnknown }` or `{ ok: false, error }`. Never throws. |
@@ -133,11 +134,17 @@ schema of one definition and what it reaches.
 | `optional(T)` | `T \| null` (of an optional: `{ some: T } \| null`) | `std::optional<T>` |
 | `list(T)`, `boundedList(T, max)`, `array(T, n)` | `T[]` | `std::vector<T>`, `psio::bounded<T, N>`, `std::array<T, N>` |
 | `tuple(A, B, ...)` | `[A, B, ...]` | `std::tuple<A, B, ...>` |
+| `pair(A, B)` | `[A, B]` | `std::pair<A, B>` (the 2-tuple) |
+| `map(K, V)` | `Map<K, V>`, in key order | `std::map<K, V>`; `std::unordered_map` with `{ unordered: true }` |
+| `set(K)` | `Set<K>`, in key order | `std::set<K>`; `std::unordered_set` with `{ unordered: true }` |
+| `nested(T)` | `T` (on the wire: a byte list holding the encoding of a `T`) | `psio::nested<T>` |
+| `nested(T, { deferred: true })` | `Uint8Array` (the bytes, not looked at) | `psio::nested<T, psio::nested_validation::deferred>` |
+| `transparent(name, T)` | `T` | a `transparent()` type: a named type that is its one member |
 | `variant({ name: T, ... })` | `{ type: 'name', value: T }` (a discriminated union) | `std::variant<...>` |
 | `record(name, { field: T, ... }, options)` | `{ field: T, ... }` | a `PSIO_REFLECT`ed struct |
 | `enumeration(u8, { red: 0, green: 1 })` | the integer (`number` / `bigint`); the name in text | a reflected `enum class` |
 | `timePoint(unit, tick = i64)`, `duration(unit, tick = i64)`, `monotonic(unit, tick = i64)` | `bigint` ticks | `std::chrono` time points of `system_clock`, durations, and time points of any other clock (`docs/time.md`) |
-| `custom(id, T, handler)` | `T`; its own text ([custom types](#custom-types)) | a type with `schema_custom` |
+| `custom(id, T, handler)` | `T`; its own text and / or invariant ([custom types](#custom-types)) | a type with a text adapter and / or an invariant |
 | `box(T)` | `T` | `psio::Box<T>` |
 | `lazy(() => T)` | `T` | (a recursive reference) |
 
@@ -156,7 +163,8 @@ V1.decode(V2.encode({ name: 'Alice', age: 30, email: 'a@b' }));  // { name: 'Ali
 Record options: `{ fixed: true }` (the definition will not change: no header,
 no evolution), `{ maxDynamicData: n }` (a cap on the encoded size) and
 `{ maxFields: n }`. Member options are given with `field(type, options)`:
-`lengthBound: { max, min, exact }` for a string, bytes or list member
+`lengthBound: { max, min, exact }` for a string, bytes or list member, the
+entries of a map / set member or the encoded bytes of a nested member
 (through `optional`), and `jsonInt` / `ijsonInt: 'number' | 'string'` for the
 text form of its integers. A variant alternative's I-JSON key is its name, or
 `alt(type, { ijsonName })`; a C++ `std::variant` without labels is
@@ -182,6 +190,114 @@ interface Tree { label: string; children: Tree[] }
 const Tree: TypeDef<Tree, RecordView<Tree>> = record('Tree', { label: utf8, children: list(lazy(() => Tree)) });
 ```
 
+## Pairs, maps, sets, nested values, transparent types
+
+```typescript
+import { map, set, pair, nested, transparent, record, tuple, u8, u16, u32, u64, utf8, type Infer } from 'psio';
+
+const Args = record('Args', { to: utf8, amount: u64 });
+const Id = transparent('Id', u64);              // a named type that IS a u64: bytes, key, text, value
+const Book = record('Book', {
+  owner: Id,
+  head: pair(u16, utf8),                        // [number, string]: the 2-tuple
+  counts: map(utf8, u32),                       // Map<string, number>
+  ids: set(u16),                                // Set<number>
+  byPoint: map(tuple(u8, u8), utf8),            // Map<[number, number], string>
+  call: nested(Args),                           // { to, amount }: on the wire, the bytes of an Args
+});
+type Book = Infer<typeof Book>;
+
+const bytes = Book.encode({
+  owner: 7n, head: [513, 'x'],
+  counts: new Map([['b', 2], ['a', 1]]),        // any order
+  ids: new Set([513, 2]),
+  byPoint: new Map([[[1, 2], 'p']]),
+  call: { to: 'bob', amount: 5n },
+});
+const book = Book.decode(bytes);
+[...book.counts];                               // [['a', 1], ['b', 2]]   canonical order
+[...book.ids];                                  // [2, 513]
+Book.psszToJson(bytes);
+// {"owner":7,"head":[513,"x"],"counts":{"a":1,"b":2},"ids":[2,513],
+//  "byPoint":[[[1,2],"p"]],"call":{"to":"bob","amount":5}}
+```
+
+**Maps and sets** (`docs/pssz-spec.md` §5.9) add no wire shape: a map is the
+list of its `[key, value]` entries and a set the list of its elements, with
+one rule — the entries are in **strictly ascending order of the key bytes of
+the key** (`encodeKey`: numeric for integers, bytewise for strings,
+lexicographic for tuples and records), and no key occurs twice. That is the
+same order in C++, Rust and JavaScript.
+
+- `decode` returns a `Map` / `Set` whose iteration order is that order.
+  `encode` takes a `Map` / `Set` — at run time any iterable of entries /
+  elements — in any order, writes the canonical order, and refuses two
+  entries with equal key bytes (`map has duplicate keys`). Every reader
+  (`validate`, `decode`, `view(...).toValue()`, `decodeKey`, `jsonToValue`)
+  refuses a frame that is out of order or repeats a key.
+- **Composite keys are objects.** A `Map` finds a key by identity, so
+  `map.get([1, 2])` finds nothing for a tuple, record or raw-string key:
+  look such an entry up by iterating. Primitive keys (numbers, bigints,
+  strings, booleans) work as usual.
+- **The float −0.** A `Set` / `Map` stores +0 for −0 and PSSZ keeps the sign
+  bit, so a set element or map key that is exactly the float −0 decodes to
+  `PsszNegativeZero.value` (`Number(x)` is −0); every encoder accepts it
+  wherever a float is expected. −0 and +0 are one key: a set holds one of
+  them.
+- **Text.** A set is an array. A map is an object when its key is a string
+  *by type* (`utf8`, `rawString`, a transparent type over one, a custom type
+  whose handler has a text form) and an array of `[key, value]` pairs
+  otherwise — an integer key is not an object key even where I-JSON writes
+  it as a string. Readers take the entries in any order and refuse a
+  repeated key (`json: duplicate map key`); writers emit the canonical
+  order.
+- In the Schema IR they are `Custom{ List{ Tuple{[K, V]} }, "map" }` and
+  `Custom{ List{ K }, "set" }`; `map` and `set` are part of the binary form
+  and take no handler. A key type must have a key encoding (not `bitlist`,
+  a one-bit integer or a boxed type): a schema error otherwise.
+
+**Nested values** (`docs/pssz-spec.md` §5.8). A `nested(T)` member is, on
+the wire, a byte list holding the PSSZ encoding of a `T` — always in the
+automatic width profile, whatever the profile around it — so a record with a
+`nested(T)` member and the same record with a `bytes` member are
+byte-identical: a router declares bytes, the service that owns the arguments
+declares them typed.
+
+- The value is the inner value. Every reader validates the inner bytes as a
+  `T` (unknown appended fields inside are accepted and reported through
+  `hasUnknown`, like any others), and `encode` writes the canonical encoding
+  of the value: fields a newer writer appended to the inner record do not
+  survive decode → encode.
+- `nested(T, { deferred: true })`, or the option `nestedBytes: 'opaque'` on
+  `schema.type(root, ...)` / `definition.type(...)` for every nested node of
+  a type: the value is the bytes (a `Uint8Array`), which the enclosing
+  reader does not look at and the writer writes as they are — for a relay
+  that must keep foreign bytes exactly. Validate them with `T.validate`
+  where they are read.
+- Text is the inner value's own text in both formats, never hex. The key of
+  a nested value is the key of its byte list: nested values order by their
+  inner **bytes** (a `nested(u32)` holding 256 sorts before the one holding
+  1), which is also their order as map keys and set elements.
+- A member `lengthBound` on a nested member counts the bytes of the inner
+  encoding. In the Schema IR the node is `Nested{type}`, whatever the policy.
+
+**Transparent types** (`docs/pssz-spec.md` §5.10). `transparent(name, T)` is
+a named type that is exactly its member on the wire, in keys, in text, in
+views and as a JavaScript value: no header, no slot. It keeps its name — in
+the Schema IR it is the named alias `name` of the member's type — and is
+where a text form or an invariant is attached:
+`custom('DerKey', transparent('DerKey', bytes), { check })`. Its member is
+not an `optional` (hold an `optional(Wrapper)` instead).
+
+**Pairs.** `pair(A, B)` is `tuple(A, B)`: same bytes, key, text and view.
+
+*Reproducing a C++ schema byte for byte.* C++ interns one schema entry per
+C++ type, and several C++ types share a node: `std::pair` and the 2-tuple,
+`std::map` and `std::unordered_map`, a nested value and its deferred form.
+`pair`, `{ unordered: true }` and `{ deferred: true }` are those second
+identities, so that `generateSchema` of the equivalent declarations is the
+schema `psio::SchemaBuilder` builds. They change nothing on the wire.
+
 ## Views
 
 `type.view(bytes)` reads a value in place. A record view finds one field
@@ -205,13 +321,15 @@ lines.at(0).toValue();                      // the element decoded in full: { sk
 | | |
 |---|---|
 | `RecordView` | `get(name)`, `fields`, `hasUnknown` |
-| `TupleView` | `at(index)`, `length` |
-| `ListView` (lists and arrays) | `length`, `at(index)`, iteration |
+| `TupleView` (tuples and pairs) | `at(index)`, `length` |
+| `ListView` (lists and arrays; a map is the list of its `[key, value]` entries and a set the list of its elements, in wire order) | `length`, `at(index)`, iteration |
 | `VariantView` | `type`, `index`, `value` |
 | all of them | `toValue({ rejectUnknown })` (full, checked decode of that value), `bytes` (its encoding, a subarray) |
 
 A scalar, text, optional (`null`) or bit value is returned as its value;
-bytes and raw strings alias the input. From a fetched schema the views are
+bytes and raw strings alias the input. A nested value is the view of its
+inner value over the inner bytes (the bytes themselves when deferred /
+opaque); a transparent or custom type is its member's / wire type's view. From a fetched schema the views are
 the same objects, untyped (`schema.type('Order').view(bytes) as RecordView`).
 
 **What a view checks.** Every frame on the path to what is read (header,
@@ -219,8 +337,9 @@ slot, offset, selector, span, cap) and the value read, with the errors
 `decode` gives: corrupt bytes are a `PsszError` when they are reached, never
 a wrong value from outside the frame. A view does not look at what it is not
 asked for, so the whole-value rules — trailing optionals pruned, member
-length bounds, text validity of unread fields — are those of `validate` /
-`decode`. For bytes from an untrusted source whose canonical form matters
+length bounds, text validity of unread fields, the order of a map / set, the
+invariants of custom types (a handler's `check`) — are those of `validate` /
+`decode` (and of `toValue()` for the value it decodes). For bytes from an untrusted source whose canonical form matters
 (anything that is hashed or signed), call `validate` first.
 
 **No in-place mutation.** A PSSZ encoding is canonical: offset widths follow
@@ -254,6 +373,15 @@ const to = keyPrefixUpperBound(from);        // ... lies in [from, to); null: no
 
 A record is a key as well, its fields in order. `schema.type(...)` of a
 fetched schema has the same methods.
+
+The key of a map / set is the key of the list of its entries / elements in
+ascending key order (so maps order lexicographically by their sorted
+entries); `decodeKey` refuses a key whose entries are out of order or
+repeat. The key of a nested value is the key of the byte list holding its
+inner encoding, not of the inner value. A transparent or custom type has the
+key of its member / wire type — a text form plays no part, an invariant
+does: with the type's handler registered, a value that violates its
+invariant has no key and its key is refused.
 
 ## JSON and I-JSON
 
@@ -289,11 +417,14 @@ for one field. The full rules are under [Text](#text).
 
 ## Custom types
 
-A type with its own text form — an account name over a `u64`, `major.minor`
-over a record — is `custom(id, wire, handler)`: on the wire and as a
-JavaScript value it is exactly its wire type; in JSON and I-JSON it is one
-string, written and read by the handler. In the Schema IR it is
-`Custom { type: <wire type>, id }`.
+A custom type is a type with an identity of its own over its wire type, of
+any shape — a record, a transparent type, an enum, a variant, a tuple, a
+list: a **text form** (an account name over a `u64`, `major.minor` over a
+record), an **invariant** (a key that must be a DER sequence, `lo <= hi`),
+or both. It is `custom(id, wire, handler)`: on the wire and as a JavaScript
+value it is exactly its wire type; the handler supplies the text form
+(`toText` / `fromText`: one JSON string in both formats) and / or the
+invariant (`check`). In the Schema IR it is `Custom { type: <wire type>, id }`.
 
 ```typescript
 import { custom, record, u64, nameToNumber, numberToName } from 'psio';
@@ -308,16 +439,55 @@ Balance.psszToJson(bytes);        // '{"owner":"alice","amount":5}'
 Balance.jsonToValue('{"owner":"alice","amount":5}');
 ```
 
-- A handler works on the **decoded value of the wire type**: `toText(value)`
-  returns the text, `fromText(text)` returns a value, which is checked
-  against the wire type. Either may throw; that is an ordinary `PsszError`
-  (`'json'` on read, `'value'` on write).
-- With a handler the presentation is exactly its text: the plain form is not
-  also accepted. Without one (`custom(id, wire)`) the type reads and writes
-  as its wire type; `type({ requireHandlers: true })` makes that an error in
-  text. Binary encode / decode / validate never depend on handlers.
+- A handler works on the **decoded value of the wire type**; every member is
+  optional. `toText(value)` returns the text, `fromText(text)` returns a
+  value, which is checked against the wire type. Either may throw; that is
+  an ordinary `PsszError` (`'json'` on read, `'value'` on write).
+- With a text form the presentation is exactly its text: the plain form is
+  not also accepted. Without one the type reads and writes as its wire type.
 - One handler per id: declaring the same id with two different handlers in
   one schema is a `'schema'` error.
+
+**Invariants** (`docs/pssz-spec.md` §18). `check(value)` says whether a
+structurally valid value of the wire type is a value of the type: it returns
+a message (or throws an `Error` with one) when it is not.
+
+```typescript
+import { custom, transparent, record, bytes, u32 } from 'psio';
+
+const DerKey = custom('DerKey', transparent('DerKey', bytes), {
+  check: (b) => (b.length > 0 && b[0] === 0x30 ? undefined : 'DerKey: not a DER sequence'),
+});
+const Range = custom('Range', record('Range', { lo: u32, hi: u32 }), {
+  check: (r) => (r.lo <= r.hi ? undefined : 'Range: lo is greater than hi'),
+});
+
+Range.encode({ lo: 1, hi: 5 });                 // the bytes of the record
+Range.encode({ lo: 5, hi: 1 });                 // throws: 'Range: lo is greater than hi' (kind 'value')
+Range.validate(reversedBytes);                  // { ok: false, error }: the same message (kind 'bytes')
+Range.jsonToValue('{"lo":5,"hi":1}');           // throws the same (kind 'json')
+```
+
+- The check is part of the type: with the handler, **every** entry point
+  runs it — `encode`, `decode`, `validate`, `view(...).toValue()`,
+  `encodeKey` / `decodeKey`, `jsonToValue` / `valueToJson` / `jsonToPssz` /
+  `psszToJson`, under every width profile. A value that violates it has no
+  encoding, no key and no text, and bytes or text of such a value are
+  rejected. A view reads in place and runs no check.
+- It runs after the structure of exactly that value was accepted (it never
+  sees a malformed value), values inside it first: record members, list
+  elements, optional and variant payloads, the keys and values of a map (the
+  key's failure is reported before its value's), the value inside nested
+  bytes, a key read from a JSON object member name. The first failure in
+  wire order is the one reported.
+- The error is the type's own: `error.message` is the message unchanged and
+  `error.invariant` is `true`.
+- The order of a map / set is defined for every key and computing it runs no
+  check: an entry whose key violates its invariant and is in its place is
+  refused for the invariant, not for the order.
+- A handler that only checks leaves the text to the wire type. In
+  particular it does not decide the text form of a map keyed by the type:
+  the type under it does.
 
 ### Handlers for a fetched schema
 
@@ -344,12 +514,14 @@ Release.jsonToPssz('{"version":"1.2","name":"first"}');
 Release.decode(bytes);                           // { version: { major: 1, minor: 2 }, name: 'first' }
 ```
 
-- A handler works on the **decoded value of the wire type** (what `decode`
-  returns for it), not on its bytes: `toText(value)` returns the text,
-  `fromText(text)` returns a value. The value `fromText` returns is checked
-  against the wire type (and normalized as `decode` would give it); either
-  function may throw, which is an ordinary `PsszError` (`'json'` on read,
-  `'value'` on write).
+- A handler is `{ toText?, fromText?, check? }` and works on the **decoded
+  value of the wire type** (what `decode` returns for it), not on its
+  bytes: `toText(value)` returns the text, `fromText(text)` returns a value,
+  `check(value)` returns a message when the value violates the type's
+  invariant. The value `fromText` returns is checked against the wire type
+  (and normalized as `decode` would give it); either text function may
+  throw, which is an ordinary `PsszError` (`'json'` on read, `'value'` on
+  write). A handler with no member just declares the id known.
 - The text is carried as one JSON string in both formats. With a handler
   registered the presentation is exactly its text: the plain form is not also
   accepted.
@@ -358,13 +530,19 @@ Release.decode(bytes);                           // { version: { major: 1, minor
   `schema.withHandlers(...)`, or for one type with `schema.type(root, {
   handlers })`. A handler is bound to the type when it is compiled
   (`schema.type`), not looked up per value.
-- **Fallback.** An id with no handler reads and writes as its wire type (the
-  account as its number, the version as `{"major":1,"minor":2}`); the plain
-  text reads back to the same bytes. `requireHandlers: true` makes a missing
-  handler an error when text is read or written ("no handler registered for a
-  custom type"); binary encode / decode / validate are unaffected.
+- **The three registries.** What the codec does with a custom node depends
+  only on the registry it is given:
+
+  | registry | text | invariant |
+  |---|---|---|
+  | no handler for the id | the wire type's own text (the account as its number, the version as `{"major":1,"minor":2}`), which reads back to the same bytes | **not checked**: the node is its wire type, structure only |
+  | a handler for the id | the handler's text, or the wire type's when it has only `check` | checked, on the binary and the text entry points alike |
+  | strict (`requireHandlers: true`) and no handler for the id | an error, "no handler registered for a custom type" | the same error, on the binary entry points too (`encode`, `decode`, `validate`, keys), wherever a value of the type occurs |
+
+  A caller that must not accept or produce a value it cannot check and
+  present exactly uses a strict registry.
 - The ids of the binary form (`bool`, `char`, `string`, `utf8`, `hex`,
-  `bitvector`, `bitlist`, `box`, `unknown`) take no handler.
+  `bitvector`, `bitlist`, `map`, `set`, `box`, `unknown`) take no handler.
 
 
 ## What a blockchain client needs
@@ -389,10 +567,15 @@ with a `kind`:
 | kind | meaning |
 |---|---|
 | `'schema'` | the Schema IR or a typed declaration is malformed, or uses something PSSZ cannot carry |
-| `'value'` | a JavaScript value does not fit the type, or has no text |
+| `'value'` | a JavaScript value does not fit the type, violates its invariant, or has no text |
 | `'bytes'` | PSSZ or key bytes were rejected |
 | `'json'` | JSON / I-JSON text was rejected (with a byte `offset`) |
 | `'internal'` | a defect in this library; never expected |
+
+When the invariant of a custom type (a handler's `check`) refused a
+structurally valid value, `error.invariant` is `true` and `error.message` is
+the invariant's own message, under whichever of `'value'` / `'bytes'` /
+`'json'` the entry point reports.
 
 Untrusted bytes and text never raise anything else, never loop on a length
 they claim, and no claimed length is trusted before it is checked against
@@ -415,17 +598,23 @@ throw. pjson failures are a `PjsonError`.
 | UTF-8 string (`utf8` adapter: C++ `utf8_string`, Rust `String`) | `string` (validated UTF-8 on the wire; an unpaired surrogate is an error) |
 | raw string (`string` adapter: C++ `std::string`, Rust `RawString`) | `Uint8Array`: any bytes, not validated. `encode` and `valueToJson` also accept a JavaScript `string` (its UTF-8) |
 | boxed value (`box`) | the value of the boxed type |
-| custom type (any other `Custom` id) | the value of its wire type; a handler changes only its text |
+| custom type (any other `Custom` id) | the value of its wire type; a handler gives it a text form and / or an invariant |
+| map (`Custom` id `map` over a list of 2-tuples) | `Map`, iterating in canonical (key) order; `encode` takes a `Map` or any iterable of `[key, value]` entries. A float key that is −0 is `PsszNegativeZero.value` |
+| set (`Custom` id `set` over a list) | `Set`, in the same order; `encode` takes a `Set` or any iterable |
+| nested value (`Nested`) | the inner value; with `nestedBytes: 'opaque'` its bytes, a `Uint8Array` |
+| named alias (a transparent type) | the value of the type it names |
 | bytes (`hex` adapter) | `Uint8Array` |
 | record | object, members in declaration order; a missing optional member is `null` |
-| list, bounded list, array, tuple | array |
+| list, bounded list, array, tuple (a pair is the 2-tuple) | array |
 | variant | `{ type: 'Name', value }` |
 | optional | `null` or the value; an optional of an optional is `null` or `{ some: inner }` |
 | `bitvector` / `bitlist` | `{ bytes, bitCount }` (no text form) |
 
 A view (`type.view(bytes)`) returns the same values for scalars and text, a
 subarray of the input for bytes and raw strings, and `RecordView` /
-`TupleView` / `ListView` / `VariantView` for the composites.
+`TupleView` / `ListView` / `VariantView` for the composites (a map / set is
+the `ListView` of its entries / elements; a nested value the view of its
+inner value).
 
 ### Text
 
@@ -436,6 +625,22 @@ number while its magnitude is at most 2^53 - 1 and as a decimal string beyond
 `{"Name": value}`. Member attributes `jsonInt` / `ijsonInt` and the variant
 attribute `ijsonName` are honoured. A repeated key is read again and the last
 one wins; unknown keys are skipped.
+
+**Maps, sets and nested values.** A set is an array of its elements. A map
+is an object `{"key": value, ...}` when its key type is a string by type — a
+`utf8` / raw `string` node, reached through named aliases, boxes and custom
+nodes whose handler has no text form, or a custom node whose registered
+handler has one (the member name is then the handler's text) — and an array
+of `[key, value]` pairs otherwise; a custom key type with no handler falls
+back, as everywhere, to the form of its wire type. A member's `jsonInt` /
+`ijsonInt` reaches the elements of a set; a map entry is a tuple, whose
+elements take the natural form. Entries are read in any order and written
+in canonical order; a repeated key or element is an error on read (two keys
+are the same when their key bytes are: `[["5","a"],[5,"b"]]` under
+`'ijson'`), and a member name is read exactly as the same text would be read
+as a string of the key type, the key type's invariant included. A nested
+value is the inner value's own text; reading it stores the canonical
+encoding of what was read.
 
 **128- and 256-bit integers** are decimal: `'json'` writes a bare number,
 `'ijson'` a decimal string for every value, small ones included (`"7"`). Both
@@ -507,6 +712,8 @@ type bounds the whole encoding (over it: an error from `encode`, `decode` and
 record attribute is an unsupported constraint under an explicit width (a
 `'schema'` error from `schema.type`), as in C++. The automatic profile
 derives widths from caps and enforces every record's.
+The bytes inside a nested value are the automatic profile under every width
+(and so are checked by its rules, `maxFields` included).
 
 A boxed value (`Custom { type, id: "box" }`: C++ / Rust `Box<T>`) is its inner
 type on the wire and in text, with no inferred size bound: under `'auto'` a
@@ -591,8 +798,13 @@ const schema = new PsszSchema({
 `Struct` is a fixed-layout record (no header); `Object` is extensible unless it
 carries the `definitionWillNotChange` attribute. Adapters (`Custom.id`):
 `bool`, `char`, `utf8` (a UTF-8 string), `string` (a raw string: any bytes),
-`hex`, `bitvector`, `bitlist`, `box`. Any other id is a custom text form over
-its inner type ([custom types](#custom-types)).
+`hex`, `bitvector`, `bitlist`, `box`, and `map` / `set`
+(`{ Custom: { type: { List: { Tuple: [K, V] } }, id: 'map' } }`,
+`{ Custom: { type: { List: K }, id: 'set' } }`; a `BoundedList` for a maximum
+count), which sit directly on their list. Any other id is a custom type over
+its inner type ([custom types](#custom-types)). A nested value is
+`{ Nested: T }`; a transparent type is a named alias (`Id: 'u64-type-name'`
+or `Id: U64`).
 
 `Enum` is `{ type, members }`: `type` is the underlying integer (8 to 64 bits
 for a text form) and `members` a `{ name: value }` map or a list of
@@ -641,13 +853,13 @@ name into a 64-bit number (C++ `psio::compress_name`); `isCompressedName` /
 
 | | |
 |---|---|
-| Schema-driven | `PsszSchema`, `PsszType`, `PsszError`, `PsszNaN`, `IR_VERSION`, `jsonToPssz`, `psszToJson`, `validatePssz`, `keyPrefixUpperBound` |
+| Schema-driven | `PsszSchema`, `PsszType`, `PsszError`, `PsszNaN`, `PsszNegativeZero`, `IR_VERSION`, `jsonToPssz`, `psszToJson`, `validatePssz`, `keyPrefixUpperBound` |
 | Views | `PsszView`, `RecordView`, `TupleView`, `ListView`, `VariantView` |
-| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `enumeration`, `timePoint`, `duration`, `monotonic`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
+| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `pair`, `map`, `set`, `nested`, `transparent`, `enumeration`, `timePoint`, `duration`, `monotonic`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
 | Time | `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate`, `timeSchemaId`, `parseTimeSchemaId`, `reservedTimeId`, `timeFractionDigits` |
 | Other | `emitWit`, `toHex`, `fromHex`, `nameToNumber`, `numberToName`, `hashName`, `isHashName`, `isCompressedName` |
 | pjson | `pjsonEncode`, `pjsonDecode`, `pjsonValidate`, `PJSON_WIRE_REVISION`, `PjsonError`, `PjsonDecimal`, `PjsonFloat`, `PjsonString`, `PjsonTypedArray`, `PjsonRows`, `PjsonObject` |
-| Types | `Infer`, `InferView`, `CustomHandler`, `FieldOptions`, `AltOptions`, `RecordOptions`, `LengthBoundOption`, `IntText`, `TypeDefOptions`, `JsonFormat`, `PsszWidth`, `PsszErrorKind`, `PsszValidation`, `PsszKeyValidation`, `PsszDecodeOptions`, `PsszTypeOptions`, `PsszSchemaOptions`, `PsszCustomHandler`, `PsszCustomHandlers`, `PsszSchemaInput`, `PsszTypeInput`, `CompactType`, `CompactEnumerator`, `Some`, `VariantValue`, `BitsValue`, `TimeKind`, `TimeUnit`, `TickType`, `PjsonValue`, and the IR: `IrSchema`, `IrAnyType`, `IrTypeValue`, `IrMember`, `IrAttribute`, `IrEnum`, `IrEnumerator`, `IrFunc`, `IrResource`, `IrInterface`, `IrWorld`, `IrUse` |
+| Types | `Infer`, `InferView`, `CustomHandler`, `AssocOptions`, `FieldOptions`, `AltOptions`, `RecordOptions`, `LengthBoundOption`, `IntText`, `TypeDefOptions`, `JsonFormat`, `PsszWidth`, `PsszErrorKind`, `PsszValidation`, `PsszKeyValidation`, `PsszDecodeOptions`, `PsszTypeOptions`, `PsszSchemaOptions`, `PsszCustomHandler`, `PsszCustomHandlers`, `PsszNestedBytes`, `PsszSchemaInput`, `PsszTypeInput`, `CompactType`, `CompactEnumerator`, `Some`, `VariantValue`, `BitsValue`, `TimeKind`, `TimeUnit`, `TickType`, `PjsonValue`, and the IR: `IrSchema`, `IrAnyType`, `IrTypeValue`, `IrMember`, `IrAttribute`, `IrEnum`, `IrEnumerator`, `IrFunc`, `IrResource`, `IrInterface`, `IrWorld`, `IrUse` |
 
 ## Performance
 
