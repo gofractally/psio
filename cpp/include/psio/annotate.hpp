@@ -526,6 +526,48 @@ namespace psio {
       constexpr bool operator==(const deprecated_spec&) const = default;
    };
 
+   // ── Integer text form in JSON / I-JSON ─────────────────────────────────
+   //
+   // Forces how an integer member is written by one text format, whatever
+   // its width: a JSON number or a decimal JSON string. The two formats are
+   // controlled independently by two spec types, so they compose:
+   //
+   //   PSIO_FIELD_ATTRS(T, id,    psio::json_string)        // psio::json only
+   //   PSIO_FIELD_ATTRS(T, count, psio::ijson_number)       // psio::ijson only
+   //   PSIO_FIELD_ATTRS(T, both,  psio::json_string | psio::ijson_number)
+   //   PSIO_TYPE_ATTRS(T, psio::ijson_number)   // every integer member of T
+   //
+   // The form applies to the member's integer and looks through
+   // std::optional, std::vector and std::array of integers; it does not
+   // reach into nested records, tuples or variants. A reader accepts
+   // exactly the forced form. Without an annotation psio::json writes every
+   // integer as a number and psio::ijson writes integers of 64 bits and
+   // wider as strings.
+   enum class int_text : std::uint8_t
+   {
+      number,
+      string,
+   };
+
+   struct json_int_spec
+   {
+      using spec_category = static_spec_tag;
+      int_text form = int_text::number;
+      constexpr bool operator==(const json_int_spec&) const = default;
+   };
+
+   struct ijson_int_spec
+   {
+      using spec_category = static_spec_tag;
+      int_text form = int_text::string;
+      constexpr bool operator==(const ijson_int_spec&) const = default;
+   };
+
+   inline constexpr json_int_spec  json_number{int_text::number};
+   inline constexpr json_int_spec  json_string{int_text::string};
+   inline constexpr ijson_int_spec ijson_number{int_text::number};
+   inline constexpr ijson_int_spec ijson_string{int_text::string};
+
    // ── Presentation tag types (§5.3.7) ────────────────────────────────────
    //
    // Nominal tag structs used by `as_spec<Tag>` annotations and as the

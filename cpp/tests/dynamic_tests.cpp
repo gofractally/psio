@@ -97,3 +97,48 @@ TEST_CASE("dynamic JSON round-trip preserves nested types",
    REQUIRE(back.scores == std::vector<std::uint32_t>{10, 20});
    REQUIRE(!back.note.has_value());
 }
+
+// ── psio::ijson through a runtime schema ────────────────────────────────
+
+struct DynWide
+{
+   std::uint64_t              big;
+   std::int64_t               neg;
+   std::uint32_t              small;
+   std::vector<std::uint8_t>  blob;
+   std::optional<std::uint64_t> maybe;
+   std::vector<std::int64_t>  list;
+   DynPoint                   point;
+   std::string                text;
+};
+PSIO_REFLECT(DynWide, big, neg, small, blob, maybe, list, point, text)
+
+TEST_CASE("ijson_encode_dynamic matches the static ijson codec",
+          "[dynamic][ijson]")
+{
+   DynWide v{18446744073709551615ull, -9223372036854775807ll - 1, 7, {0x01, 0xff},
+             std::uint64_t{5}, {-1, 2}, {3, 4}, "t"};
+   auto sc = psio::schema_of<DynWide>();
+   auto dv = psio::to_dynamic(v);
+
+   const std::string typed = psio::encode(psio::ijson{}, v);
+   REQUIRE(typed ==
+           R"({"big":"18446744073709551615","neg":"-9223372036854775808","small":7,)"
+           R"("blob":"01FF","maybe":"5","list":["-1","2"],"point":{"x":3,"y":4},"text":"t"})");
+   REQUIRE(psio::ijson_encode_dynamic(sc, dv) == typed);
+   REQUIRE(psio::encode_dynamic(psio::ijson{}, sc, dv) == typed);
+   // The json form through the same schema is unchanged.
+   REQUIRE(psio::json_encode_dynamic(sc, dv) == psio::encode(psio::json{}, v));
+
+   auto dv2  = psio::decode_dynamic(psio::ijson{}, sc, std::span<const char>{typed});
+   auto back = psio::from_dynamic<DynWide>(dv2);
+   REQUIRE(back.big == v.big);
+   REQUIRE(back.neg == v.neg);
+   REQUIRE(back.small == 7);
+   REQUIRE(back.blob == v.blob);
+   REQUIRE(back.maybe == v.maybe);
+   REQUIRE(back.list == v.list);
+   REQUIRE(back.point.y == 4);
+   REQUIRE(back.text == "t");
+   REQUIRE(psio::ijson_encode_dynamic(sc, dv2) == typed);
+}

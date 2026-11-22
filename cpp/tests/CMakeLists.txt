@@ -113,6 +113,30 @@ psio_add_test(psio_caps_parity_tests caps_parity_tests.cpp)
 
 # Phase 9: JSON codec.
 psio_add_test(psio_json_tests json_tests.cpp)
+# I-JSON (psio::ijson), tuples, integer-form annotations, typed validation.
+psio_add_test(psio_ijson_tests ijson_tests.cpp)
+# Shared cross-language JSON / I-JSON fixture (conformance/json-vectors.json):
+# emitted from the implementation, checked for drift, and consumed here and
+# by cargo test (rust/psio/tests/json_conformance.rs).
+set(PSIO_JSON_VECTORS ${CMAKE_SOURCE_DIR}/conformance/json-vectors.json)
+add_executable(psio_json_conformance_emit json_conformance_emit.cpp)
+target_link_libraries(psio_json_conformance_emit PRIVATE psio)
+target_compile_features(psio_json_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_json_conformance_regen
+         COMMAND psio_json_conformance_emit --check ${PSIO_JSON_VECTORS})
+psio_add_test(psio_json_conformance_tests json_conformance_tests.cpp)
+target_compile_definitions(psio_json_conformance_tests PRIVATE
+   PSIO_JSON_VECTORS="${PSIO_JSON_VECTORS}")
+# The json / ijson status paths with exceptions (and RTTI) disabled.
+add_executable(psio_ijson_noexceptions_test ijson_noexceptions.cpp)
+target_include_directories(psio_ijson_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_ijson_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_ijson_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_ijson_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_ijson_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_ijson_noexceptions_test COMMAND psio_ijson_noexceptions_test)
 
 # Phase 8: fracpack codec (frac32/frac16).
 psio_add_test(psio_frac_tests frac_tests.cpp)

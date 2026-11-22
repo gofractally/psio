@@ -57,13 +57,45 @@ namespace psio {
          s.append(buf, r.ptr);
       }
 
+      // `ij` selects the psio::ijson rules the runtime schema can
+      // express: 64-bit integers as decimal strings and Bytes as an
+      // uppercase hex string. (psio::schema has no variant or tuple.)
       inline void encode_dv(const schema& sc, const dynamic_value& dv,
-                            std::string& s);
+                            std::string& s, bool ij = false);
+
+      template <typename I>
+      void write_int_string(I v, std::string& s)
+      {
+         s.push_back('"');
+         write_int(v, s);
+         s.push_back('"');
+      }
+
+      inline void write_hex_string(std::string_view bytes, std::string& s)
+      {
+         static constexpr char hex[] = "0123456789ABCDEF";
+         s.push_back('"');
+         for (unsigned char c : bytes)
+         {
+            s.push_back(hex[c >> 4]);
+            s.push_back(hex[c & 0xF]);
+         }
+         s.push_back('"');
+      }
 
       inline void encode_dv_primitive(primitive_kind k,
                                       const dynamic_value& dv,
-                                      std::string& s)
+                                      std::string& s, bool ij = false)
       {
+         if (ij)
+         {
+            if (k == primitive_kind::Int64)
+               return write_int_string(dv.as<std::int64_t>(), s);
+            if (k == primitive_kind::Uint64)
+               return write_int_string(dv.as<std::uint64_t>(), s);
+            if (k == primitive_kind::Bytes)
+               return write_hex_string(dv.as<std::string>(), s);
+         }
          switch (k)
          {
             case primitive_kind::Bool:
@@ -104,16 +136,26 @@ namespace psio {
       }
 
       inline void encode_dv(const schema& sc, const dynamic_value& dv,
-                            std::string& s)
+                            std::string& s, bool ij)
       {
          if (sc.is_primitive())
          {
-            encode_dv_primitive(sc.as_primitive(), dv, s);
+            encode_dv_primitive(sc.as_primitive(), dv, s, ij);
          }
          else if (sc.is_sequence())
          {
             const auto& seq     = dv.as<dynamic_sequence>();
             const auto& element = *sc.as_sequence().element;
+            if (ij && element.is_primitive() &&
+                element.as_primitive() == primitive_kind::Uint8)
+            {
+               // A byte sequence is one hex string under ijson.
+               std::string bytes;
+               for (const auto& el : seq.elements)
+                  bytes.push_back(static_cast<char>(el.as<std::uint8_t>()));
+               write_hex_string(bytes, s);
+               return;
+            }
             s.push_back('[');
             bool first = true;
             for (const auto& el : seq.elements)
@@ -121,7 +163,7 @@ namespace psio {
                if (!first)
                   s.push_back(',');
                first = false;
-               encode_dv(element, el, s);
+               encode_dv(element, el, s, ij);
             }
             s.push_back(']');
          }
@@ -132,7 +174,7 @@ namespace psio {
             if (!opt.value)
                s += "null";
             else
-               encode_dv(*od.value_type, *opt.value, s);
+               encode_dv(*od.value_type, *opt.value, s, ij);
          }
          else if (sc.is_projected())
          {
@@ -164,7 +206,7 @@ namespace psio {
                      break;
                   }
                if (found)
-                  encode_dv(*fd.type, *found, s);
+                  encode_dv(*fd.type, *found, s, ij);
                else
                   s += "null";  // missing field → null
             }
@@ -241,12 +283,49 @@ namespace psio {
          return out;
       }
 
-      inline dynamic_value decode_dv(const schema& sc, parser& pr);
+      inline dynamic_value decode_dv(const schema& sc, parser& pr,
+                                     bool ij = false);
 
       inline dynamic_value decode_dv_primitive(primitive_kind k,
-                                               parser& pr)
+                                               parser& pr, bool ij = false)
       {
          pr.skip_ws();
+         if (ij && k == primitive_kind::Bytes)
+         {
+            // Hex string of either case; a stray character ends the bytes.
+            const std::string hex = parse_string(pr);
+            auto digit = [](char c) {
+               return c >= '0' && c <= '9'   ? c - '0'
+                      : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                      : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                             : -1;
+            };
+            std::string bytes;
+            for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+            {
+               const int hi = digit(hex[i]), lo = digit(hex[i + 1]);
+               if (hi < 0 || lo < 0)
+                  break;
+               bytes.push_back(static_cast<char>((hi << 4) | lo));
+            }
+            return dynamic_value{std::move(bytes)};
+         }
+         // An integer written as a string (ijson 64-bit) reads as its digits.
+         const bool quoted =
+            ij && (k == primitive_kind::Int64 || k == primitive_kind::Uint64) &&
+            pr.p < pr.end && *pr.p == '"';
+         if (quoted)
+            ++pr.p;
+         struct close_quote
+         {
+            parser& pr;
+            bool    on;
+            ~close_quote()
+            {
+               if (on && pr.p < pr.end && *pr.p == '"')
+                  ++pr.p;
+            }
+         } closer{pr, quoted};
          switch (k)
          {
             case primitive_kind::Bool:
@@ -304,10 +383,10 @@ namespace psio {
          }
       }
 
-      inline dynamic_value decode_dv(const schema& sc, parser& pr)
+      inline dynamic_value decode_dv(const schema& sc, parser& pr, bool ij)
       {
          if (sc.is_primitive())
-            return decode_dv_primitive(sc.as_primitive(), pr);
+            return decode_dv_primitive(sc.as_primitive(), pr, ij);
          if (sc.is_projected())
          {
             // Dynamic adapters read the JSON string; the payload
@@ -319,6 +398,16 @@ namespace psio {
          if (sc.is_sequence())
          {
             dynamic_sequence seq;
+            if (ij && sc.as_sequence().element->is_primitive() &&
+                sc.as_sequence().element->as_primitive() ==
+                   primitive_kind::Uint8)
+            {
+               const dynamic_value bytes =
+                  decode_dv_primitive(primitive_kind::Bytes, pr, true);
+               for (unsigned char c : bytes.as<std::string>())
+                  seq.elements.push_back(dynamic_value{std::uint8_t{c}});
+               return dynamic_value{std::move(seq)};
+            }
             pr.consume('[');
             pr.skip_ws();
             bool first = true;
@@ -327,7 +416,7 @@ namespace psio {
                if (!first)
                   pr.consume(',');
                first = false;
-               seq.elements.push_back(decode_dv(*sc.as_sequence().element, pr));
+               seq.elements.push_back(decode_dv(*sc.as_sequence().element, pr, ij));
                pr.skip_ws();
             }
             pr.consume(']');
@@ -339,7 +428,7 @@ namespace psio {
             if (pr.consume_null())
                return dynamic_value{std::move(o)};
             o.value = std::make_unique<dynamic_value>(
-               decode_dv(*sc.as_optional().value_type, pr));
+               decode_dv(*sc.as_optional().value_type, pr, ij));
             return dynamic_value{std::move(o)};
          }
          // record
@@ -363,7 +452,7 @@ namespace psio {
                   break;
                }
             if (fd)
-               rec.fields.push_back({key, decode_dv(*fd->type, pr)});
+               rec.fields.push_back({key, decode_dv(*fd->type, pr, ij)});
             else
             {
                // Unknown field — skip via a no-op parse.
@@ -394,6 +483,28 @@ namespace psio {
       return detail::dyn_json_impl::decode_dv(sc, pr);
    }
 
+   // psio::ijson through a runtime schema: 64-bit integers are decimal
+   // strings and Bytes is an uppercase hex string; everything else is as
+   // json_encode_dynamic. psio::schema has no variant or tuple shape, so
+   // those ijson rules have no dynamic counterpart. Like
+   // json_decode_dynamic, the reader assumes well-formed text: it is not a
+   // validator (use the typed psio::validate<T>(psio::ijson{}, ...)).
+   inline std::string ijson_encode_dynamic(const schema&        sc,
+                                           const dynamic_value& dv)
+   {
+      std::string out;
+      detail::dyn_json_impl::encode_dv(sc, dv, out, true);
+      return out;
+   }
+
+   inline dynamic_value ijson_decode_dynamic(const schema&         sc,
+                                             std::span<const char> bytes)
+   {
+      detail::dyn_json_impl::parser pr{bytes.data(),
+                                        bytes.data() + bytes.size()};
+      return detail::dyn_json_impl::decode_dv(sc, pr, true);
+   }
+
    // ── CPO hidden-friend overloads ────────────────────────────────────────
    //
    // Defined at namespace scope (ADL finds them on the `json` tag) so
@@ -417,6 +528,26 @@ namespace psio {
                                    std::span<const char> bytes)
    {
       return json_decode_dynamic(sc, bytes);
+   }
+
+   inline std::string tag_invoke(decltype(::psio::encode_dynamic), ijson,
+                                 const schema& sc, const dynamic_value& dv)
+   {
+      return ijson_encode_dynamic(sc, dv);
+   }
+
+   inline void tag_invoke(decltype(::psio::encode_dynamic), ijson,
+                          const schema& sc, const dynamic_value& dv,
+                          std::string& sink)
+   {
+      detail::dyn_json_impl::encode_dv(sc, dv, sink, true);
+   }
+
+   inline dynamic_value tag_invoke(decltype(::psio::decode_dynamic), ijson,
+                                   const schema&         sc,
+                                   std::span<const char> bytes)
+   {
+      return ijson_decode_dynamic(sc, bytes);
    }
 
 }  // namespace psio
