@@ -1403,6 +1403,47 @@ namespace
    //
    // The text of a nested<T> is the text of the T its bytes hold, in both
    // formats; reading stores the canonical encoding of the T read.
+   // Nested values in maps and sets: the inner value's own text inside the
+   // map's / set's form, in the order of the inner BYTES; a map inside nested
+   // bytes: the map's text.
+   void emit_nested_assoc()
+   {
+      const NestedArgs args{text("bob"), 5, text("rent")};
+      const NestedArgs plain{text(""), 0, std::nullopt};
+      const auto       n = [](u64 v) { return NestedU64::from(v); };
+      const std::string args_text  = psio::encode(psio::ijson{}, args);
+      const std::string plain_text = psio::encode(psio::ijson{}, plain);
+
+      value<MapStrNested>("empty", {});
+      value<MapStrNested>("two", {{text("b"), NestedRecord::from(args)},
+                                  {text("a"), NestedRecord::from(plain)}});
+      accept_both<MapStrNested>("any_order",
+                                "{\"b\":" + args_text + ",\"a\":" + plain_text + "}",
+                                "{\"a\":" + plain_text + ",\"b\":" + args_text + "}");
+      reject_both<MapStrNested>("duplicate_key",
+                                "{\"a\":" + plain_text + ",\"a\":" + args_text + "}");
+      reject_both<MapStrNested>("value_as_hex", R"({"a":"00"})");
+      reject_both<MapStrNested>("value_missing_member", R"({"a":{"to":"bob"}})");
+
+      // The order of the inner bytes: 256 (00 01 ..) before 1 (01 00 ..).
+      value<SetNestedU64>("inner_byte_order", {n(1), n(256), n(0)});
+      accept_both<SetNestedU64>("any_order", "[1,0,256]", "[0,256,1]");
+      reject_both<SetNestedU64>("duplicate_element", "[1,256,1]");
+      reject_both<SetNestedU64>("element_out_of_range", "[-1]");
+
+      // A nested key is not a string by type: the pairs form.
+      value<MapNestedKey>("two", {{n(1), 7}, {n(256), 9}});
+      accept_both<MapNestedKey>("any_order", "[[1,7],[256,9]]", "[[256,9],[1,7]]");
+      reject_both<MapNestedKey>("duplicate_key", "[[1,7],[1,9]]");
+      reject_both<MapNestedKey>("object_form", R"({"1":7})");
+
+      value<NestedMap>("empty", NestedMap{});
+      value<NestedMap>("two", NestedMap::from({{text("b"), 2}, {text("a"), 1}}));
+      accept_both<NestedMap>("any_order", R"({"b":2,"a":1})", R"({"a":1,"b":2})");
+      reject_both<NestedMap>("duplicate_key", R"({"a":1,"a":2})");
+      reject_both<NestedMap>("pairs_form", R"([["a",1]])");
+   }
+
    void emit_nested()
    {
       const NestedArgs args{text("bob"), 5, text("rent")};
@@ -1845,6 +1886,7 @@ int main(int argc, char** argv)
    emit_rejected();
    emit_nested();
    emit_assoc();
+   emit_nested_assoc();
    emit_schema_rows();
 
    const std::string text = render();

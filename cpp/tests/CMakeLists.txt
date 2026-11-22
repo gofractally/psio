@@ -669,6 +669,10 @@ psio_assoc_compile_fail(json_bitlist_key ASSOC_FAIL_JSON_BITLIST_KEY "psio::json
 psio_assoc_compile_fail(key_nested_key ASSOC_FAIL_KEY_NESTED_KEY "psio::key: the key type of a map")
 psio_assoc_compile_fail(pssz_adapter_key ASSOC_FAIL_PSSZ_ADAPTER_KEY "psio::pssz: the key type of a map")
 psio_assoc_compile_fail(json_adapter_key ASSOC_FAIL_JSON_ADAPTER_KEY "psio::json: the key type of a map")
+# psio::nested<T> with maps and sets: a nested value as a map value, a set
+# element and a map key, a map inside nested bytes; typed and schema-driven
+# (the exception-disabled run is part of psio_nested_noexceptions_test).
+psio_add_test(psio_nested_assoc_tests nested_assoc_tests.cpp)
 # psio::mutable_view over pairs, maps and nested values (docs/pssz-spec.md
 # §17): mapped values and the inner value of a nested<T> are writable in
 # place; sets, map keys and deferred nested values are not (the

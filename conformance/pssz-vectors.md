@@ -133,7 +133,7 @@ member attribute `lengthBound`.
 
 ## Classes
 
-262 types, 6057 vectors.
+268 types, 6161 vectors.
 
 | class | vectors | contents |
 |---|---|---|
@@ -156,11 +156,23 @@ member attribute `lengthBound`.
 | `bytes` | 88 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. |
 | `zero-fixed` | 100 | Zero-field and all-fixed records and their containers. |
 | `depth` | 28 | Node depth 63 / 64 accepted, 65+ rejected (`kMaxValidationDepth` = 64). |
-| `nested` | 196 | Nested values (`docs/pssz-spec.md` §5.8). Canonical values in every position (top level, record member, nested of nested, optional, list element, variant alternative, tuple element, bounded member, self-nesting chain); the same frame read as the byte-list record (`NActionRaw`) and the byte-list frame read typed; rejections because the inner bytes are not the inner type (not a record, empty, header past the frame, a stored trailing None, a fixed-size inner value with a trailing or missing byte, each position of `NShapes`), a nested member over its `length_bound`, and node depth across the nesting boundary (`depth_63` / `depth_64` accepted, `depth_65` / `depth_66` rejected: the inner root is one level below the nested member). |
+| `nested` | 228 | Nested values (`docs/pssz-spec.md` §5.8). Canonical values in every position (top level, record member, nested of nested, optional, list element, variant alternative, tuple element, bounded member, self-nesting chain); the same frame read as the byte-list record (`NActionRaw`) and the byte-list frame read typed; rejections because the inner bytes are not the inner type (not a record, empty, header past the frame, a stored trailing None, a fixed-size inner value with a trailing or missing byte, each position of `NShapes`), a nested member over its `length_bound`, and node depth across the nesting boundary (`depth_63` / `depth_64` accepted, `depth_65` / `depth_66` rejected: the inner root is one level below the nested member). |
 | `nested-unknown` | 20 | Frames whose nested bytes were written by a newer inner type (`NArgs2` read as `NArgs`). `unknown` for the typed readers; `reencoded` equals `hex`, because a typed nested value keeps its bytes. A schema-driven reader decodes the inner value, so its default re-encoding is the canonical frame instead: the `hex` of the vector `nested/<value>/as/<type>/<format>` when `value` is set (and in every case a frame that validates as canonical and differs from `hex`); with its "nested bytes are opaque" option it reproduces `reencoded`. `action_as_bytes` is the same frame read by the byte-list record: `canonical`. |
 | `nested-deferred` | 24 | `nested<T,deferred>` readers: any inner bytes (valid, garbage, empty, unknown fields) are `canonical`, strict validation included. The Schema IR does not record the policy, so a schema-driven reader gives these outcomes with its "nested bytes are opaque" option (the consumers run this class that way). |
-| `map-set` | 234 | Pairs, maps and sets (`docs/pssz-spec.md` §5.9), all `canonical`. Every map / set value appears twice with the same bytes: read as the map / set (`type` = `writer`) and read as the list it is (`type` = the list, `writer` = the map / set), so each language checks that its encoder writes the bytes of the sorted list. Keys: strings, integers (numeric order, not wire-byte order), signed integers, tuples, records, floats including NaNs and `-0`; values: scalars, lists, records, nested maps and sets; an optional set, a map as a variant alternative, maps / sets / a pair as record members (`AssocRec`, whose list spelling is `AssocLists`). |
-| `map-set-order` | 312 | Lists that are **not** strictly ascending by key — swapped entries, a repeated key, a repeated key with another value, `+0` with `-0`, a NaN out of place, at the top level and nested in records, optionals, lists, variants and maps. Each appears twice: `reject` as the map / set (`reason`: `pssz: map entries are not in strictly ascending key order` or `pssz: set elements are not in strictly ascending order`) and `canonical` as the list type (`writer`). Encoders cannot produce these frames from a map / set. |
+| `map-set` | 266 | Pairs, maps and sets (`docs/pssz-spec.md` §5.9), all `canonical`. Every map / set value appears twice with the same bytes: read as the map / set (`type` = `writer`) and read as the list it is (`type` = the list, `writer` = the map / set), so each language checks that its encoder writes the bytes of the sorted list. Keys: strings, integers (numeric order, not wire-byte order), signed integers, tuples, records, floats including NaNs and `-0`; values: scalars, lists, records, nested maps and sets; an optional set, a map as a variant alternative, maps / sets / a pair as record members (`AssocRec`, whose list spelling is `AssocLists`). |
+| `map-set-order` | 352 | Lists that are **not** strictly ascending by key — swapped entries, a repeated key, a repeated key with another value, `+0` with `-0`, a NaN out of place, at the top level and nested in records, optionals, lists, variants and maps. Each appears twice: `reject` as the map / set (`reason`: `pssz: map entries are not in strictly ascending key order` or `pssz: set elements are not in strictly ascending order`) and `canonical` as the list type (`writer`). Encoders cannot produce these frames from a map / set. |
+
+Nested values in maps and sets — `map<raw_string,nested<NArgs>>`,
+`set<nested<u32>>`, `map<nested<u32>,u8>` — and a map inside nested bytes,
+`nested<map<u32,raw_string>>`, have rows in the classes of both features. In
+`map-set` / `map-set-order`: the order of a nested key or element is that of
+the **bytes of its inner encoding** (`nested<u32>` holding 256, bytes
+`00 01 00 00`, precedes the one holding 1), read as the map / set and as the
+list of nested values it is. In `nested`: the inner bytes of an entry are
+validated as their type (`map_value_inner_not_a_record`,
+`set_element_inner_short`, `map_key_inner_trailing_byte`), and a map held in
+nested bytes is checked for its order by every reader of the nested value
+(`nested_map_by_hand`, `nested_map_unsorted`, `nested_map_duplicate`).
 
 Evolution vector names carry the lineage and its automatic width
 (`w4-fixed-string-vector`, `w1-capped`, `w2-capped`, `w1-inferred`, ...) and

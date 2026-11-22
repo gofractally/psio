@@ -89,18 +89,11 @@ namespace warnings_check
       std::string                name;
       std::optional<std::int64_t> rank;
       psio::nested<fixed>        packed;
-      PSIO_REFLECT(key_type, table, name, rank, packed)
-   };
-
-   struct assoc_key_type
-   {
-      std::uint32_t              table = 0;
-      std::string                name;
-      std::optional<std::int64_t> rank;
       std::pair<std::uint8_t, bool>         pair;
       std::set<std::uint8_t>                flags;
       std::map<std::string, std::set<double>> series;
-      PSIO_REFLECT(assoc_key_type, table, name, rank, pair, flags, series)
+      std::map<std::string, psio::nested<inner>> packed_by_name;
+      PSIO_REFLECT(key_type, table, name, rank, packed, pair, flags, series, packed_by_name)
    };
 
    template <typename Fmt>
@@ -154,16 +147,12 @@ namespace warnings_check
       static_assert(psio::pssz_evolves_from<psio::nested<inner>, psio::nested<inner>>);
 
       // key
-      const key_type packed_key{1, "a", 2, psio::nested<fixed>::from(fixed{3, 4})};
-      const auto     packed_key_bytes = psio::to_key(packed_key);
-      ok &= psio::validate<key_type>(psio::key{}, std::span<const char>{packed_key_bytes}).ok();
-      ok &= psio::decode<key_type>(psio::key{}, std::span<const char>{packed_key_bytes}).table == 1;
+      const key_type key{1, "a", 2, psio::nested<fixed>::from(fixed{3, 4}), {3, true}, {2, 1},
+                         {{"s", {1.5, -1.5}}}, {{"n", psio::nested<inner>{}}}};
+      const auto     key_bytes = psio::to_key(key);
+      ok &= psio::validate<key_type>(psio::key{}, std::span<const char>{key_bytes}).ok();
+      ok &= psio::decode<key_type>(psio::key{}, std::span<const char>{key_bytes}).table == 1;
       ok &= !psio::key_prefix<key_type>(1u).empty();
-      const assoc_key_type key{1, "a", 2, {3, true}, {2, 1}, {{"s", {1.5, -1.5}}}};
-      const auto           key_bytes = psio::to_key(key);
-      ok &= psio::validate<assoc_key_type>(psio::key{}, std::span<const char>{key_bytes}).ok();
-      ok &= psio::decode<assoc_key_type>(psio::key{}, std::span<const char>{key_bytes}).table == 1;
-      ok &= !psio::key_prefix<assoc_key_type>(1u).empty();
 
       // json / ijson
       ok &= text_round_trip<psio::json>(value);
@@ -201,8 +190,7 @@ namespace warnings_check
                .ok();
 
       // The schema-driven key encoder.
-      const auto             key_schema =
-         psio::SchemaBuilder{}.insert<assoc_key_type>("key_type").build();
+      const auto             key_schema = psio::SchemaBuilder{}.insert<key_type>("key_type").build();
       psio::pssz_ir::Value   dynamic;
       std::vector<char>      dynamic_key;
       const auto             key_frame = psio::encode(psio::pssz{}, key);

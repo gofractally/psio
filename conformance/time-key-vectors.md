@@ -49,6 +49,10 @@ otherwise; `text-accept` rows give the entries in another order;
 (for `set<f64>`: `+0` with `-0`, a NaN out of place); `key-order` rows order
 whole maps / sets (lexicographically by sorted entries); the `set<f64>` NaN
 rows are `key-order-bits` and text-less `value` rows.
+`set<nested<u32>>` is a set of nested values: its key is the key of the list
+of the byte lists holding the inner encodings, ascending by those bytes (256
+before 1); `key-reject` rows give the numeric order, a repeated element and
+inner bytes that are not a `u32`; its text is the array of the inner values.
 `Stamps` is a fixed-layout record `{created: time_point<seconds>, updated:
 time_point<micros>, ttl: duration<millis>, legacy: time_point<seconds,u32>}`;
 `Event` is `{name: string, at: time_point<millis>, precise:

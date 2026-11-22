@@ -710,6 +710,48 @@ namespace
       key_type<T>(std::move(picked), random);
    }
 
+   // A set of nested values: the key of the list of the byte lists holding
+   // the inner encodings, ascending by those bytes (256, bytes 00 01 00 00,
+   // before 1, bytes 01 00 00 00); every reader validates each as its type.
+   void emit_nested_assoc()
+   {
+      using N    = psio::nested<std::uint32_t>;
+      using Raw  = std::vector<std::vector<std::uint8_t>>;
+      const auto n = [](std::uint32_t v) { return N::from(v); };
+      const auto raw = [](std::initializer_list<std::uint32_t> values) {
+         Raw out;
+         for (std::uint32_t v : values)
+         {
+            const auto bytes = psio::encode(psio::pssz{}, v);
+            out.emplace_back(bytes.begin(), bytes.end());
+         }
+         return out;
+      };
+      const std::vector<SPacked> picked{{}, {n(0)}, {n(1), n(256), n(0)}, {n(0xffffffffu), n(255)}};
+      const std::vector<Raw>     lists{raw({}), raw({0}), raw({0, 256, 1}), raw({255, 0xffffffffu})};
+      for (std::size_t i = 0; i < picked.size(); ++i)
+      {
+         if (key_of(picked[i]) != psio::encode(psio::key{}, lists[i]) ||
+             psio::encode(psio::pssz{}, picked[i]) != psio::encode(psio::pssz{}, lists[i]))
+            die("a set of nested values is not the sorted list of their byte lists");
+         value<SPacked>("v" + std::to_string(i), picked[i]);
+      }
+      accept<SPacked>("any_order", "[1,0,256]", SPacked{n(0), n(256), n(1)});
+      reject<SPacked>("duplicate_element", "[1,256,1]");
+      reject<SPacked>("element_as_hex", R"(["00000000"])");
+      const auto key_hex = [](const Raw& list) {
+         const auto key = psio::encode(psio::key{}, list);
+         return to_hex(std::span<const char>{key.data(), key.size()});
+      };
+      key_reject<SPacked>("numeric_order", key_hex(raw({1, 256})));
+      key_reject<SPacked>("duplicate_element", key_hex(raw({7, 7})));
+      key_reject<SPacked>("inner_short", key_hex(Raw{{1, 0, 0}}));
+      key_reject<SPacked>("inner_trailing_byte", key_hex(Raw{{1, 0, 0, 0, 0}}));
+      const auto full = key_of(picked[2]);
+      key_reject<SPacked>("truncated",
+                          to_hex(std::span<const char>{full.data(), full.size() - 1}));
+   }
+
    void emit_assoc()
    {
       using namespace std::string_literals;
@@ -971,6 +1013,7 @@ namespace
          key_reject<KPacked>("invalid_escape", "00000007" "0c0002" "0000");
       }
       emit_assoc();
+      emit_nested_assoc();
 
       // Non-canonical or malformed encodings.
       key_reject<KShard>("escape_02", "00000007" "610002" "0000");

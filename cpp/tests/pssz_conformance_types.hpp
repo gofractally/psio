@@ -668,6 +668,27 @@ namespace pssz_conf
    using SetF64    = std::set<double, F64KeyOrder>;
    using SetPair   = std::set<Pair, PairOrder>;
    using VarMap    = std::variant<MapRawU32, u32>;
+   // Nested values in maps and sets, and a map inside nested bytes. A nested
+   // value orders by the bytes of its inner encoding (psio::nested has no <).
+   struct NestedBytesOrder
+   {
+      template <typename N>
+      bool operator()(const N& a, const N& b) const
+      {
+         const auto x = psio::to_key(a);
+         const auto y = psio::to_key(b);
+         return std::lexicographical_compare(
+            x.begin(), x.end(), y.begin(), y.end(), [](char p, char q) {
+               return static_cast<unsigned char>(p) < static_cast<unsigned char>(q);
+            });
+      }
+   };
+   using MapNArgs  = std::map<Raw, Nested<NArgs>>;
+   using ListNArgs = Vec<std::tuple<Raw, Nested<NArgs>>>;
+   using SetNU32   = std::set<Nested<u32>, NestedBytesOrder>;
+   using MapNKey   = std::map<Nested<u32>, u8, NestedBytesOrder>;
+   using ListNKey  = Vec<std::tuple<Nested<u32>, u8>>;
+   using NestedMap = Nested<std::map<u32, Raw>>;
    struct AssocRec
    {
       MapRawU32          counts;
@@ -761,7 +782,9 @@ namespace pssz_conf
       types<PairT, MapRawU32, Vec<std::tuple<Raw, u32>>, MapU32Raw, Vec<std::tuple<u32, Raw>>,
             MapTup, Vec<std::tuple<TupBS, Vec<u16>>>, MapInner, Vec<std::tuple<u16, Inner>>,
             MapNest, ListNest, SetU16, Vec<u16>, SetRaw, SetI32, Vec<std::int32_t>, SetTup,
-            SetF64, Vec<double>, SetPair, AssocRec, AssocLists, Opt<SetU16>, VarMap>>::type;
+            SetF64, Vec<double>, SetPair, AssocRec, AssocLists, Opt<SetU16>, VarMap>,
+      // nested values in maps and sets, a map inside nested bytes (appended)
+      types<MapNArgs, ListNArgs, SetNU32, MapNKey, ListNKey, NestedMap>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)

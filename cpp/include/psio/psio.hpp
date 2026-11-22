@@ -28,6 +28,7 @@
 #include <psio/frac.hpp>
 #include <psio/json.hpp>
 #include <psio/mutable_view.hpp>
+#include <psio/nested.hpp>
 #include <psio/adapter.hpp>
 #include <psio/pssz.hpp>
 #include <psio/reflect.hpp>

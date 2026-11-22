@@ -24,6 +24,9 @@
 // for the type the schema describes (a type with a sortable_binary_category
 // adapter excepted: its key bytes are not in the schema). Public form:
 // psio::pssz_ir::to_key.
+// A Nested node has the key of the byte list holding its inner value's
+// canonical encoding, so it can be the key type of a map / the element type
+// of a set whatever its inner type is.
 
 #include <algorithm>
 #include <bit>
@@ -185,6 +188,54 @@ codec_status Codec<W>::has_key(const schema_types::AnyType &input,
              return t.type.get() ? codec_ok() : fail("pssz IR: null schema box");
           else
              return fail(none);
+       },
+       type->value);
+   active.pop_back();
+   return status;
+}
+
+template <std::size_t W>
+codec_status Codec<W>::key_has_nested(const schema_types::AnyType &input,
+                                      std::vector<const schema_types::AnyType *> &active,
+                                      bool &out) const
+{
+   const schema_types::AnyType *type;
+   PSIO_PSSZ_IR_TRY(resolve(input, type));
+   if (out || std::find(active.begin(), active.end(), type) != active.end())
+      return codec_ok();
+   PSIO_PSSZ_IR_TRY(depth(active.size()));
+   active.push_back(type);
+   auto child = [&](const schema_types::Box<schema_types::AnyType> &box) -> codec_status
+   {
+      if (!box.get())
+         return fail("pssz IR: null schema box");
+      return key_has_nested(*box, active, out);
+   };
+   auto status = std::visit(
+       [&](const auto &t) -> codec_status
+       {
+          using T = std::decay_t<decltype(t)>;
+          if constexpr (std::is_same_v<T, schema_types::Nested>)
+             out = true;
+          else if constexpr (std::is_same_v<T, schema_types::Option> ||
+                             std::is_same_v<T, schema_types::List> ||
+                             std::is_same_v<T, schema_types::BoundedList> ||
+                             std::is_same_v<T, schema_types::Array> ||
+                             std::is_same_v<T, schema_types::Custom>)
+             return child(t.type);
+          else if constexpr (std::is_same_v<T, schema_types::Tuple>)
+          {
+             for (const auto &member : t.members)
+                PSIO_PSSZ_IR_TRY(child(member));
+          }
+          else if constexpr (std::is_same_v<T, schema_types::Struct> ||
+                             std::is_same_v<T, schema_types::Object> ||
+                             std::is_same_v<T, schema_types::Variant>)
+          {
+             for (const auto &member : t.members)
+                PSIO_PSSZ_IR_TRY(child(member.type));
+          }
+          return codec_ok();
        },
        type->value);
    active.pop_back();
@@ -575,7 +626,28 @@ codec_status Codec<W>::decode_assoc(const schema_types::Custom &custom,
    PSIO_PSSZ_IR_TRY(decode_sequence(*element, bytes, false, shape.max ? *shape.max : 0,
                                     shape.max.has_value(), w, items, n));
    std::vector<std::vector<char>> keys;
-   PSIO_PSSZ_IR_TRY(assoc_keys(shape, items, keys));
+   // The order is that of the bytes read. A decoded Nested value stands for
+   // its canonical encoding, which is not what a compatible read saw when
+   // the inner bytes carry unknown fields: keys holding a Nested node are
+   // taken from the bytes as they are.
+   bool wire_keys = false;
+   if (!opaque_nested)
+   {
+      std::vector<const schema_types::AnyType *> active;
+      PSIO_PSSZ_IR_TRY(key_has_nested(*shape.key, active, wire_keys));
+   }
+   if (wire_keys)
+   {
+      Codec raw(schema);
+      raw.opaque_nested = true;
+      raw.allow_unknown = allow_unknown;
+      Sequence wire;
+      PSIO_PSSZ_IR_TRY(raw.decode_sequence(*element, bytes, false, shape.max ? *shape.max : 0,
+                                           shape.max.has_value(), w, wire, n));
+      PSIO_PSSZ_IR_TRY(raw.assoc_keys(shape, wire, keys));
+   }
+   else
+      PSIO_PSSZ_IR_TRY(assoc_keys(shape, items, keys));
    for (std::size_t i = 1; i < keys.size(); ++i)
       if (!key_bytes_less(keys[i - 1], keys[i]))
          return fail(shape.map ? "pssz IR: map entries are not in strictly ascending key order"
@@ -596,14 +668,19 @@ codec_status Codec<W>::decode_assoc(const schema_types::Custom &custom,
 // map / set are written in canonical order whatever order `value` holds
 // them in. `destination` is unchanged on failure.
 //
+// The key of a Nested node is the key of the byte list holding its inner
+// value's canonical encoding; with nested_bytes::opaque the value holds
+// those bytes (Bytes) and they are written as they are.
+//
 // A type that has a sortable_binary_category adapter in C++ is described by
 // its wire type in the schema: its key here is the wire type's, not the
 // adapter's.
 [[nodiscard]] inline codec_status to_key(const schema_types::Schema &schema,
                                          const schema_types::AnyType &root, const Value &value,
-                                         std::vector<char> &destination)
+                                         std::vector<char> &destination,
+                                         nested_bytes nested = nested_bytes::typed)
 {
-   detail::Codec<0> codec(schema);
+   detail::Codec<0> codec(schema, nested);
    if (auto status = codec.metadata(root); !status.ok())
       return status;
    std::vector<char> scratch;

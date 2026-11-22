@@ -2290,6 +2290,80 @@ namespace
       return must_encode<psio::pssz>(value, "nested inner value");
    }
 
+   // ── Nested values in maps and sets; a map inside nested bytes ──────────
+   //
+   // The rows join the classes of the two features: `map-set` /
+   // `map-set-order` for the order (a nested key or element orders by the
+   // bytes of its inner encoding), `nested` for the descent into the inner
+   // bytes of an entry and for a map held in nested bytes.
+   void emit_nested_assoc()
+   {
+      const std::string map_reason = "pssz: map entries are not in strictly ascending key order";
+      const std::string set_reason = "pssz: set elements are not in strictly ascending order";
+      const NArgs       args{"bob", 5, Raw{"rent"}};
+      const NArgs       plain{"", 0, std::nullopt};
+      const auto        n = [](u32 v) { return Nested<u32>::from(v); };
+
+      // Nested mapped values.
+      same<MapNArgs, ListNArgs>("map_nested_values_empty", {}, {});
+      same<MapNArgs, ListNArgs>(
+         "map_nested_values",
+         {{"b", Nested<NArgs>::from(args)}, {"a", Nested<NArgs>::from(plain)}},
+         {{"a", Nested<NArgs>::from(plain)}, {"b", Nested<NArgs>::from(args)}});
+      unordered<MapNArgs, ListNArgs>(
+         "map_nested_values_unsorted",
+         {{"b", Nested<NArgs>::from(args)}, {"a", Nested<NArgs>::from(plain)}}, map_reason);
+
+      // Nested elements and keys: the order of the inner bytes, so 256
+      // (00 01 00 00) sorts before 1 (01 00 00 00).
+      same<SetNU32, Vec<Nested<u32>>>("set_nested_inner_byte_order", {n(1), n(256), n(0)},
+                                      {n(0), n(256), n(1)});
+      unordered<SetNU32, Vec<Nested<u32>>>("set_nested_numeric_order", {n(1), n(256)},
+                                           set_reason);
+      unordered<SetNU32, Vec<Nested<u32>>>("set_nested_duplicate", {n(7), n(7)}, set_reason);
+      same<MapNKey, ListNKey>("map_nested_keys", {{n(1), 7}, {n(256), 9}},
+                              {{n(256), 9}, {n(1), 7}});
+      unordered<MapNKey, ListNKey>("map_nested_keys_numeric_order", {{n(1), 7}, {n(256), 9}},
+                                   map_reason);
+      unordered<MapNKey, ListNKey>("map_nested_keys_duplicate", {{n(1), 7}, {n(1), 9}},
+                                   map_reason);
+
+      // The inner bytes of an entry are validated as their type.
+      const char* c = "nested";
+      formats([&]<typename F>() {
+         const Bytes bad_value = must_encode<F>(
+            Vec<std::tuple<Raw, Vec<u8>>>{{"a", octets(inner_of(args))}, {"b", {1, 2, 3}}},
+            "map of byte lists");
+         add<F, MapNArgs>(c, "map_value_inner_not_a_record", bad_value,
+                          reject("pssz: record header truncated"));
+         const Bytes bad_element =
+            must_encode<F>(Vec<Vec<u8>>{{0, 0, 0, 0}, {1, 0, 0}}, "list of byte lists");
+         add<F, SetNU32>(c, "set_element_inner_short", bad_element,
+                         reject("pssz: fixed primitive span mismatch"));
+         const Bytes bad_key = must_encode<F>(
+            Vec<std::tuple<Vec<u8>, u8>>{{{1, 0, 0, 0, 0}, 7}}, "list of byte-list keys");
+         add<F, MapNKey>(c, "map_key_inner_trailing_byte", bad_key,
+                         reject("pssz: fixed primitive span mismatch"));
+      });
+
+      // A map inside nested bytes: the automatic-profile encoding of the
+      // map, whose order every checking reader of the nested value checks.
+      corpus<NestedMap>(c, "nested_map_empty", NestedMap{});
+      corpus<NestedMap>(c, "nested_map", NestedMap::from({{256, "x"}, {1, "one"}}));
+      formats([&]<typename F>() {
+         using L = Vec<std::tuple<u32, Raw>>;
+         add<F, NestedMap>(c, "nested_map_by_hand",
+                           must_encode<psio::pssz>(L{{1, "one"}, {256, "x"}}, "inner map"),
+                           canonical());
+         add<F, NestedMap>(c, "nested_map_unsorted",
+                           must_encode<psio::pssz>(L{{256, "x"}, {1, "one"}}, "inner map"),
+                           reject(map_reason));
+         add<F, NestedMap>(c, "nested_map_duplicate",
+                           must_encode<psio::pssz>(L{{1, "a"}, {1, "b"}}, "inner map"),
+                           reject(map_reason));
+      });
+   }
+
    void emit_nested()
    {
       // A nested<T> member is exactly a list<u8> holding the automatic-profile
@@ -2614,6 +2688,7 @@ int main(int argc, char** argv)
    emit_depth();
    emit_nested();
    emit_assoc();
+   emit_nested_assoc();
 
    if (!unregistered.empty())
    {

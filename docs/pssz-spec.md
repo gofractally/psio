@@ -945,6 +945,13 @@ Why this order and not the language's own:
 | optional | none first |
 | lists, arrays, variants | lexicographic by element; by alternative index, then value |
 | floats | key-spec §4: `-0` and `+0` are one key (they cannot both be in a set); NaNs are ordered by their bits, sign-bit-set NaNs below `-inf`, the others above `+inf` |
+| nested values (§5.8) | bytewise by the **inner encoding as stored** — not the order of the inner values (a `Nested(u32)` holding 256, bytes `00 01 00 00`, sorts before the one holding 1), and two encodings that differ only in fields the reader does not know are two keys |
+
+A nested value is a key type whatever its inner type is (its key is that of
+a byte list); as K it is checked like any nested value — each key's bytes
+are validated as the inner type — and ordered by those bytes as they are.
+(C++ `psio::nested<T>` has no `<` and no hash: a `std::map` / `std::set`
+keyed by it names a comparator, which the codec does not rely on.)
 
 K must have a key encoding (`bitlist` has none), and the order must be
 visible in the schema: a C++ type that supplies its own key bytes through a

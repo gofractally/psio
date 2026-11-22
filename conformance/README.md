@@ -190,6 +190,10 @@ of 64 allows).
 | `optional<nested<u64>>`, `list<nested<NestedArgs>>` | in an optional, as list elements |
 | `NestedChoice` | `variant<u32, nested<NestedArgs>>`: the ijson alternative name is `nested_NestedArgs` |
 | `NestedAction` | `record{method: u32, args: nested<NestedArgs>, twice: nested<nested<u64>>, maybe: optional<nested<NestedArgs>>, many: list<nested<u64>>}` |
+| `map<string,nested<NestedArgs>>` | nested mapped values: an object whose members are the inner records' objects |
+| `set<nested<u64>>` | nested elements: the array of the inner integers, in the order of their inner **bytes** (256 before 1) |
+| `map<nested<u64>,u8>` | a nested key is not a string by type: the array of `[k, v]` pairs, in the same order |
+| `nested<map<string,u32>>` | a map inside nested bytes: the map's own object |
 
 Their rows are the ordinary kinds: `value` (both texts and the `pssz` bytes,
 which are those of the byte list holding the inner encoding), `accept` (a
@@ -197,4 +201,6 @@ non-canonical inner text — member order, unknown or repeated members, a
 missing optional member, an integer in its other form — reads as the value
 whose canonical text is `canonical`) and `reject` (the text is not the inner
 type's: hex or byte arrays, `null`, a missing or mistyped inner member, an
-inner integer out of range).
+inner integer out of range). For the map / set types: `accept` rows give
+the entries in another order, `reject` rows repeat a key or an element (two
+equal inner values are equal bytes).

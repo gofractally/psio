@@ -63,6 +63,17 @@ a `map` / `set` node of the wrong shape or with a key type that has no key
 encoding. `to_key(schema, root, value, out)` is the key encoder over dynamic
 values that this uses, exposed for callers (`docs/key-spec.md` §6).
 
+A `Nested` node has the key of the byte list holding its inner value's
+canonical encoding, so it may be (part of) the key type of a map or the
+element type of a set, whatever its inner type. `to_key` and `encode` take the
+inner dynamic value and frame its encoding (with `nested_bytes::opaque`: the
+`Bytes` as they are). The readers check the order on the **bytes read**, not
+on the decoded inner values: a compatible read drops unknown fields of an
+inner record, so two keys that differ only there are distinct, ordered
+entries of the frame whose decoded values are equal — `has_unknown` is set,
+and re-encoding that dynamic value fails with the duplicate-key error rather
+than silently merging them.
+
 The node budget matches Rust: root 0, node 64 accepted, node 65 rejected;
 present record/tuple fields, sequence items, Some payloads and variant payloads
 add one. Pruned/synthesized trailing None adds no child. String is atomic;

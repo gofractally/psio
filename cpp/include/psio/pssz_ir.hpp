@@ -1940,6 +1940,10 @@ template <std::size_t W> class Codec
  private:
    codec_status has_key(const schema_types::AnyType &input,
                         std::vector<const schema_types::AnyType *> &active) const;
+   // Whether a Nested node occurs in (a part of) a key type.
+   codec_status key_has_nested(const schema_types::AnyType &input,
+                               std::vector<const schema_types::AnyType *> &active,
+                               bool &out) const;
    codec_status key_octet(const schema_types::AnyType &element, bool &octet,
                           bool &is_signed) const;
    codec_status assoc_keys(const AssocShape &shape, const Sequence &items,

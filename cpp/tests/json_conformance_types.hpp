@@ -443,6 +443,23 @@ namespace json_conf
    using MapChoice    = std::variant<std::map<std::string, std::uint32_t>, std::set<std::uint32_t>,
                                      std::pair<std::uint32_t, std::string>>;
 
+   // Nested values in maps and sets, and a map inside nested bytes. A nested
+   // value has no <: any strict order does for the container.
+   struct NestedLess
+   {
+      template <typename N>
+      bool operator()(const N& a, const N& b) const
+      {
+         const auto x = a.bytes();
+         const auto y = b.bytes();
+         return std::lexicographical_compare(x.begin(), x.end(), y.begin(), y.end());
+      }
+   };
+   using MapStrNested = std::map<Text, NestedRecord, TextLess>;
+   using SetNestedU64 = std::set<NestedU64, NestedLess>;
+   using MapNestedKey = std::map<NestedU64, std::uint8_t, NestedLess>;
+   using NestedMap    = psio::nested<MapStrU32>;
+
    // Maps, sets and pairs as record members: optional, bounded, with an
    // integer form override (it reaches a set's elements as it does a
    // list's; a map entry is a tuple, whose members take the natural form).
@@ -562,6 +579,10 @@ namespace json_conf
    JSON_CONF_TYPE(MapNested, "map<string,map<u32,set<string>>>")
    JSON_CONF_TYPE(MapChoice, "MapChoice")
    JSON_CONF_TYPE(Registry, "Registry")
+   JSON_CONF_TYPE(MapStrNested, "map<string,nested<NestedArgs>>")
+   JSON_CONF_TYPE(SetNestedU64, "set<nested<u64>>")
+   JSON_CONF_TYPE(MapNestedKey, "map<nested<u64>,u8>")
+   JSON_CONF_TYPE(NestedMap, "nested<map<string,u32>>")
 #undef JSON_CONF_TYPE
 
    // Every fixture type is expressible in the Schema IR: a type with a
@@ -631,7 +652,10 @@ namespace json_conf
            std::type_identity<MapColor>{}, std::type_identity<MapStrInner>{},
            std::type_identity<SetStr>{}, std::type_identity<SetU32>{},
            std::type_identity<SetTuple>{}, std::type_identity<MapNested>{},
-           std::type_identity<MapChoice>{}, std::type_identity<Registry>{});
+           std::type_identity<MapChoice>{}, std::type_identity<Registry>{},
+           // Appended: nested values in maps and sets, a map in nested bytes.
+           std::type_identity<MapStrNested>{}, std::type_identity<SetNestedU64>{},
+           std::type_identity<MapNestedKey>{}, std::type_identity<NestedMap>{});
    }
 
    // One Schema holding every type under its fixture id. (Also recorded, as

@@ -139,6 +139,19 @@ namespace tk_conf
    };
    using SF64     = std::set<double, F64KeyOrder>;
    using KMap     = Tup<std::map<std::uint16_t, std::string>, std::uint8_t>;
+   // A set of nested values: ordered by the bytes of the inner encodings
+   // (psio::nested has no <: any strict order does for the container).
+   struct PackedLess
+   {
+      template <typename N>
+      bool operator()(const N& a, const N& b) const
+      {
+         const auto x = a.bytes();
+         const auto y = b.bytes();
+         return std::lexicographical_compare(x.begin(), x.end(), y.begin(), y.end());
+      }
+   };
+   using SPacked  = std::set<psio::nested<std::uint32_t>, PackedLess>;
 
    // ── Fixture ids ────────────────────────────────────────────────────────
    template <typename T>
@@ -192,6 +205,7 @@ namespace tk_conf
    TK_TYPE(SI64, "set<i64>")
    TK_TYPE(SF64, "set<f64>")
    TK_TYPE(KMap, "tuple<map<u16,string>,u8>")
+   TK_TYPE(SPacked, "set<nested<u32>>")
 #undef TK_TYPE
 
    template <typename T>
@@ -213,7 +227,8 @@ namespace tk_conf
                       KInts, KFloats, KTime, KArray, KVariant, KNested,
                       // Appended (the ids above keep their schema positions).
                       mono_seconds, mono_micros, mono_ms32, Timer, KMono, KPacked,
-                      KPair, MStrU32, MTuple, MNested, SU8, SStr, SI64, SF64, KMap>>{});
+                      KPair, MStrU32, MTuple, MNested, SU8, SStr, SI64, SF64, KMap,
+                      SPacked>>{});
    }
 
    // The Schema IR of every fixture type, each under its fixture id. (Also
