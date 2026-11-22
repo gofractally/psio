@@ -219,7 +219,7 @@ fn runtime_codec_handles_integer_bounds_and_rejects_legacy_markers() {
         codec::decode_exact::<Pssz32>(&schema, &u128_ty, &bytes).unwrap(),
         Value::Unsigned(u128::MAX)
     );
-    let legacy = AnyType::new(AnyValue::FracPack(FracPack {
+    let legacy = AnyType::new(AnyValue::Nested(Nested {
         r#type: Box::new(u8_ty),
     }));
     assert!(codec::encode::<Pssz32>(&schema, &legacy, &Value::Unsigned(1)).is_err());

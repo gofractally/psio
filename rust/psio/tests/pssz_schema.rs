@@ -219,7 +219,7 @@ fn ir_sample(name: &str) -> AnyType {
             exp: 8,
             mantissa: 24,
         }),
-        "FracPack" => AnyValue::FracPack(FracPack {
+        "Nested" => AnyValue::Nested(Nested {
             r#type: Box::new(integer(8)),
         }),
         "Custom" => AnyValue::Custom(Custom {

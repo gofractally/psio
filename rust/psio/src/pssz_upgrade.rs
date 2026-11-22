@@ -54,9 +54,9 @@ fn references(schema: &Schema, root: &AnyType) -> PsszResult<()> {
             AnyValue::BoundedList(l) => pending.push(&l.r#type),
             AnyValue::Option(o) => pending.push(&o.r#type),
             AnyValue::Custom(c) => pending.push(&c.r#type),
-            AnyValue::FracPack(_) => {
+            AnyValue::Nested(_) => {
                 return Err(PsszError(
-                    "pssz upgrade: legacy FracPack marker is unsupported",
+                    "pssz upgrade: Nested values are not implemented",
                 ))
             }
             AnyValue::Resource(_) => {

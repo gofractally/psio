@@ -73,7 +73,7 @@ export type IrTypeValue =
   | { type: 'Tuple'; value: { members: IrAnyType[] } }
   | { type: 'Int'; value: { bits: number; isSigned: boolean } }
   | { type: 'Float'; value: { exp: number; mantissa: number } }
-  | { type: 'FracPack'; value: { type: IrAnyType } }
+  | { type: 'Nested'; value: { type: IrAnyType } }
   | { type: 'Custom'; value: { type: IrAnyType; id: string } }
   | { type: 'Resource'; value: IrResource }
   | { type: 'Type'; value: { type: string } }
@@ -220,7 +220,7 @@ function schemaError(message: string): never {
 
 const IR_KINDS = new Set([
   'Struct', 'Object', 'Array', 'List', 'BoundedList', 'Option', 'Variant', 'Tuple', 'Int',
-  'Float', 'FracPack', 'Custom', 'Resource', 'Type', 'Enum',
+  'Float', 'Nested', 'Custom', 'Resource', 'Type', 'Enum',
 ]);
 
 function isObject(x: unknown): x is Record<string, unknown> {
@@ -307,7 +307,7 @@ export function normalizeType(x: unknown, depth = 0): IrAnyType {
     kind = keys[0];
     body = x[kind];
     // Compact single-child forms: { List: T }, { Option: T }, { Tuple: [T] }.
-    if (kind === 'List' || kind === 'Option' || kind === 'FracPack') body = { type: body };
+    if (kind === 'List' || kind === 'Option' || kind === 'Nested') body = { type: body };
     else if (kind === 'Tuple') body = { members: body };
   }
   if (!IR_KINDS.has(kind)) return schemaError(`pssz IR: unknown type kind "${kind}"`);
@@ -337,7 +337,7 @@ export function normalizeType(x: unknown, depth = 0): IrAnyType {
       };
     case 'List':
     case 'Option':
-    case 'FracPack':
+    case 'Nested':
       return { value: { type: kind, value: { type: normalizeType(body.type, d) } } };
     case 'Tuple':
       if (!Array.isArray(body.members)) return schemaError('pssz IR: malformed tuple');
@@ -1054,8 +1054,8 @@ export class Codec {
         node.textChild = this.build(t.value.type, added, d);
         break;
       }
-      case 'FracPack':
-        return schemaError('pssz IR: legacy FracPack marker is unsupported');
+      case 'Nested':
+        return schemaError('pssz IR: Nested values are not implemented');
       default:
         return schemaError('pssz IR: unsupported schema type');
     }

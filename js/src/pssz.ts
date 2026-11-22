@@ -383,7 +383,7 @@ const META_SCHEMA: PsszSchemaInput = {
         Tuple: object({ members: list('AnyType') }),
         Int: object({ bits: U32, isSigned: BOOL }),
         Float: object({ exp: U32, mantissa: U32 }),
-        FracPack: BOXED,
+        Nested: BOXED,
         Custom: object({ type: 'AnyType', id: STRING }),
         Resource: 'Resource',
         Type: object({ type: STRING }),
