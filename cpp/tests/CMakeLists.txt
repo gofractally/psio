@@ -21,6 +21,9 @@ psio_add_test(psio_scaffold_test scaffold_test.cpp)
 
 # Phase 1: reflection core — psio::reflect<T>.
 psio_add_test(psio_reflect_tests reflect_tests.cpp)
+# psio::fixed_string: a structural compile-time string (template argument,
+# constexpr concatenation), and reflect<T>::fixed_name.
+psio_add_test(psio_fixed_string_tests fixed_string_tests.cpp)
 
 # Compile-time name / number / hashed-key lookup tables (name_lookup.hpp).
 psio_add_test(psio_name_lookup_tests name_lookup_tests.cpp)

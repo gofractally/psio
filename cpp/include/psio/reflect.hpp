@@ -5,6 +5,8 @@
 // Exposes per-type metadata through psio::reflect<T>:
 //
 //   psio::reflect<T>::name                           struct name (string_view)
+//   psio::reflect<T>::fixed_name                     the same as a psio::fixed_string<N>:
+//                                                    a template argument, `+` concatenates
 //   psio::reflect<T>::member_count                   number of fields
 //   psio::reflect<T>::member_pointer<I>              &T::field_I
 //   psio::reflect<T>::member_name<I>                 "field_I"
@@ -163,6 +165,7 @@
 // tables are instantiated only for types that are actually looked up.
 
 #include <psio/error.hpp>
+#include <psio/fixed_string.hpp>
 #include <psio/name_lookup.hpp>
 
 #include <boost/preprocessor.hpp>
@@ -285,9 +288,14 @@ namespace psio {
             return false;
       }
       template <typename Impl>
-         requires requires { Impl::member_count; Impl::method_count; }
+         requires requires { Impl::member_count; Impl::method_count; Impl::name; }
       struct reflect_extras<Impl, true>
       {
+         // The reflected name as a psio::fixed_string (fixed_string.hpp):
+         // usable as a template argument, and `fixed_name + "Edge"` is a
+         // constant.
+         static constexpr ::psio::fixed_string<Impl::name.size()> fixed_name{Impl::name};
+
          // std::tuple<member_type<0>, ..., member_type<member_count - 1>>.
          using member_types =
             typename reflect_member_types<Impl, std::make_index_sequence<Impl::member_count>>::type;
@@ -1431,6 +1439,8 @@ namespace psio
       using type = ENUM;                                                                 \
       static constexpr bool               is_reflected = true;                           \
       static constexpr ::std::string_view name         = BOOST_PP_STRINGIZE(ENUM);       \
+      static constexpr ::psio::fixed_string<sizeof(BOOST_PP_STRINGIZE(ENUM)) - 1>        \
+         fixed_name{BOOST_PP_STRINGIZE(ENUM)};                                           \
       static constexpr ::std::size_t      count        = BOOST_PP_SEQ_SIZE(SEQ);         \
       static constexpr ::std::array<::std::string_view, count> names                     \
          = {BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_ENUM_NAME_, _, SEQ)};                   \
