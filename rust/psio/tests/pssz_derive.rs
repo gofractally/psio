@@ -111,9 +111,10 @@ fn checked_append_is_transactional_for_failing_enum_payload() {
     assert_eq!(output, [9, 8]);
 }
 
+#[cfg(feature = "experimental-frac")]
 #[test]
-fn legacy_pack_remains_fracpack_when_both_derives_are_present() {
-    use psio::{Pack, Unpack};
+fn frac_and_pssz_derives_coexist_on_one_type() {
+    use psio::experimental::frac::{Pack, Unpack};
     #[derive(Debug, PartialEq, Pack, Unpack, PsszPack, PsszUnpack, PsszView)]
     struct Both {
         value: String,
@@ -121,11 +122,11 @@ fn legacy_pack_remains_fracpack_when_both_derives_are_present() {
     let value = Both {
         value: "abc".into(),
     };
-    let legacy = value.packed();
-    let modern = try_encode::<Pssz32, _>(&value).unwrap();
-    assert_ne!(legacy, modern);
-    assert_eq!(Both::unpacked(&legacy).unwrap(), value);
-    assert_eq!(decode::<Pssz32, Both>(&modern).unwrap(), value);
+    let frac = value.packed();
+    let pssz = try_encode::<Pssz32, _>(&value).unwrap();
+    assert_ne!(frac, pssz);
+    assert_eq!(Both::unpacked(&frac).unwrap(), value);
+    assert_eq!(decode::<Pssz32, Both>(&pssz).unwrap(), value);
 }
 
 #[test]

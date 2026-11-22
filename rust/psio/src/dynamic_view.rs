@@ -6,7 +6,7 @@
 //! # Supported formats
 //!
 //! - **WIT Canonical ABI** -- fully implemented
-//! - **Fracpack** -- fully implemented
+//! - **frac** (`psio::experimental::frac`) -- with the feature `experimental-frac`
 //! - **Cap'n Proto / FlatBuffers** -- stubbed with `todo!()`
 //!
 //! # Example
@@ -47,8 +47,9 @@ use crate::flatbuf::view as fb_view_mod;
 /// Wire format discriminator for dynamic dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WireFormat {
-    /// Fracpack format (variable-length header + offset table).
-    Fracpack,
+    /// The experimental frac format (fixed header + offset pointers).
+    #[cfg(feature = "experimental-frac")]
+    Frac,
     /// Cap'n Proto format (data + pointer sections).
     Capnp,
     /// FlatBuffers format (vtable-based).
@@ -499,7 +500,8 @@ impl<'a> DynamicView<'a> {
     fn read_field(&self, desc: &'a FieldDesc) -> DynamicValue<'a> {
         match self.format {
             WireFormat::Wit => self.read_field_wit(desc),
-            WireFormat::Fracpack => self.read_field_fracpack(desc),
+            #[cfg(feature = "experimental-frac")]
+            WireFormat::Frac => self.read_field_frac(desc),
             WireFormat::Capnp => self.read_field_capnp(desc),
             WireFormat::Flatbuf => self.read_field_flatbuf(desc),
         }
@@ -584,11 +586,11 @@ impl<'a> DynamicView<'a> {
         }
     }
 
-    // ── Fracpack reader ────────────────────────────────────────────────
+    // ── frac reader ────────────────────────────────────────────────────
 
-    /// Read a field from fracpack-encoded bytes.
+    /// Read a field from frac-encoded bytes.
     ///
-    /// Fracpack uses a fixed-size header followed by a variable-length offset
+    /// frac uses a fixed-size header followed by a variable-length offset
     /// table. `FieldDesc.offset` holds the byte offset within the fixed header
     /// for inline scalars, or a pointer-table index for variable-length fields.
     ///
@@ -596,9 +598,10 @@ impl<'a> DynamicView<'a> {
     /// - `is_ptr == false, offset == byte_offset` for inline scalars
     /// - `is_ptr == true, offset == byte_offset_of_u32_pointer` for strings/data/structs/vectors
     ///
-    /// Fracpack encodes variable-length data with a 4-byte relative offset at the
+    /// frac encodes variable-length data with a 4-byte relative offset at the
     /// pointer location. The actual data starts at `pointer_location + offset_value`.
-    fn read_field_fracpack(&self, desc: &'a FieldDesc) -> DynamicValue<'a> {
+    #[cfg(feature = "experimental-frac")]
+    fn read_field_frac(&self, desc: &'a FieldDesc) -> DynamicValue<'a> {
         let base = self.rec_offset + desc.offset;
 
         if !desc.is_ptr {
@@ -626,7 +629,7 @@ impl<'a> DynamicView<'a> {
             }
         } else {
             // Pointer field: read the offset, then read the pointed-to data.
-            // Fracpack stores a u32 relative offset. If the offset is 0 the
+            // frac stores a u32 relative offset. If the offset is 0 the
             // field is absent/empty.
             let rel_offset = self.read_le_u32(base);
             if rel_offset == 0 {
@@ -636,7 +639,7 @@ impl<'a> DynamicView<'a> {
 
             match desc.ty {
                 DynamicType::Text => {
-                    // Fracpack strings: the offset points to a u32 length prefix
+                    // frac strings: the offset points to a u32 length prefix
                     // followed by the string data.
                     if abs as usize + 4 > self.data.len() {
                         return DynamicValue::Void;
@@ -664,14 +667,14 @@ impl<'a> DynamicView<'a> {
                 }
                 DynamicType::Struct => {
                     if let Some(ref nested) = desc.nested {
-                        // Fracpack structs: the offset points to a u16 fixed_size
+                        // frac structs: the offset points to a u16 fixed_size
                         // header, followed by the fixed data. For dynamic views we
                         // treat `abs` as the start of the nested record (after the
                         // caller has set up the schema offsets relative to that).
                         DynamicValue::Struct(DynamicView {
                             data: self.data,
                             schema: nested,
-                            format: WireFormat::Fracpack,
+                            format: WireFormat::Frac,
                             rec_offset: abs,
                         })
                     } else {
@@ -679,7 +682,7 @@ impl<'a> DynamicView<'a> {
                     }
                 }
                 DynamicType::Vector => {
-                    // Fracpack vectors: offset points to a u32 length prefix
+                    // frac vectors: offset points to a u32 length prefix
                     // (count of elements), then the element data.
                     if abs as usize + 4 > self.data.len() {
                         return DynamicValue::Void;
@@ -688,7 +691,7 @@ impl<'a> DynamicView<'a> {
                     let arr_start = abs + 4;
                     DynamicValue::List(DynamicListView {
                         data: self.data,
-                        format: WireFormat::Fracpack,
+                        format: WireFormat::Frac,
                         arr_offset: arr_start,
                         count,
                         elem_desc: desc,
@@ -1599,6 +1602,9 @@ impl<'a> DynamicView<'a> {
 pub trait ToDynamicSchema {
     fn dynamic_schema() -> DynamicSchema;
 }
+
+/// The derive of [`ToDynamicSchema`].
+pub use psio_macros::ToDynamicSchema;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -2966,5 +2972,28 @@ mod tests {
         let schema = wit_schema(&[("x", DynamicType::U32)]);
         let cp = CompiledPath::compile("", &schema).unwrap();
         assert!(cp.is_empty());
+    }
+
+    #[cfg(feature = "experimental-frac")]
+    #[test]
+    fn frac_fields_by_name() {
+        use crate::experimental::frac::Pack;
+
+        #[derive(Pack)]
+        #[psio(crate = "crate")]
+        struct Row {
+            id: u32,
+            name: String,
+        }
+        // An extensible frac record: u16 size of the fixed part, then the
+        // fixed part (id, then the offset pointer of name).
+        let bytes = Row { id: 42, name: "alice".into() }.packed();
+        let schema = SchemaBuilder::new()
+            .field_scalar("id", DynamicType::U32, 2)
+            .field_pointer("name", DynamicType::Text, 6)
+            .build();
+        let view = DynamicView::new(&bytes, &schema, WireFormat::Frac);
+        assert_eq!(view.field("id").as_u32(), Some(42));
+        assert_eq!(view.field("name").as_str(), Some("alice"));
     }
 }

@@ -38,6 +38,9 @@ pub use unpack::CapnpUnpack;
 pub use view::CapnpView;
 pub use wire::validate;
 
+// The derives, beside the traits they implement.
+pub use psio_macros::{CapnpPack, CapnpUnpack, CapnpView};
+
 // ── The helper names (docs/helpers.md) ──────────────────────────────────────
 
 fn pack_message<T: CapnpPack>(value: &T) -> Vec<u8> {

@@ -23,7 +23,7 @@ mod tests {
     use crate::wit::pack::WitPack;
     use crate::wit::view::{WitUnpack, WitView, WitViewError};
     use crate::wit::mutation::WitMut;
-    // WitPack/WitUnpack derive macros (re-exported from psio-macros through fracpack.rs)
+    // The derive macros of the same names.
     use crate::WitPack as WitPack;
     use crate::WitUnpack as WitUnpack;
 

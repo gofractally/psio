@@ -44,6 +44,13 @@ pub mod mutation;
 pub mod pack;
 pub mod view;
 
+pub use layout::WitLayout;
+pub use pack::WitPack;
+pub use view::{WitUnpack, WitView, WitViewError};
+
+// The derives, beside the traits they implement.
+pub use psio_macros::{WitPack, WitUnpack, WitView};
+
 // ── The helper names (docs/helpers.md) ──────────────────────────────────────
 
 fn pack_message<T: pack::WitPack>(value: &T) -> Vec<u8> {

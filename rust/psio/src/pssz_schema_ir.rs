@@ -1,5 +1,4 @@
 //! Literal structural mirror of C++ `psio/schema_ir.hpp`.
-//! This is distinct from the crate-root legacy fracpack schema.
 //!
 //! Serialized forms of a [`Schema`], each identical to the C++ one: PSSZ
 //! (`PsszPack` / `PsszUnpack`) and the two texts of `psio::json`

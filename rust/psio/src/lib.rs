@@ -1,33 +1,49 @@
-//! PSIO — Multi-format serialization library.
+//! PSIO: annotate a type once, use it with every format.
 //!
-//! Supports pSSZ, pjson, Cap'n Proto, FlatBuffers, WIT Canonical ABI, JSON,
-//! and more from a single set of derive macros.
+//! One set of derives and one attribute, `#[psio(...)]`, describe a type;
+//! each format reads that description. The formats:
 //!
-//! pSSZ is the primary schema-driven binary format and the successor to
-//! fracpack. Fracpack is a legacy prototype retained for benchmark comparisons
-//! of different data-layout designs. Its `Pack` / `Unpack` API remains
-//! re-exported at the crate root.
+//! * [`pssz`]: pSSZ, the primary schema-driven binary format, with views
+//!   ([`struct@PsszView`], [`PsszMutView`]), a Schema IR ([`pssz_schema_ir`]) and
+//!   schema-driven dynamic access ([`pssz_dynamic`]);
+//! * [`json`]: Json and IJson text;
+//! * [`key`]: memcmp-sortable keys;
+//! * [`pjson`]: a self-describing binary JSON;
+//! * [`ssz`], [`capnp`], [`flatbuf`], [`wit`]: interchange with SSZ,
+//!   Cap'n Proto, FlatBuffers and the WIT Canonical ABI.
 //!
-//! # Legacy fracpack benchmark API
+//! # Helpers
+//!
+//! Every format `F` has the same helper names at the crate root: `to_F`,
+//! `try_to_F`, `to_F_into`, `from_F`, `from_F_trusted`, `validate_F` and
+//! `F_size`. The tag-generic layer is [`encode`], [`decode`], [`validate`]
+//! and [`size_of`] over a [`Format`] tag, and [`Buffer`] / [`Shared`] own
+//! validated bytes.
 //!
 //! ```
-//! use psio::{Pack, Unpack, Result};
+//! use psio::{JsonText, Key, PsszPack, PsszUnpack, PsszView};
 //!
-//! #[derive(Pack, Unpack, PartialEq, Debug)]
-//! struct Example {
-//!     a_string: String,
-//!     a_tuple: (u32, String),
+//! #[derive(Debug, PartialEq, PsszPack, PsszUnpack, PsszView, JsonText, Key)]
+//! struct Account {
+//!     id: u32,
+//!     name: String,
 //! }
 //!
-//! let orig = Example {
-//!     a_string: "content".into(),
-//!     a_tuple: (1234, "5678".into()),
-//! };
+//! let account = Account { id: 7, name: "alice".into() };
 //!
-//! let packed: Vec<u8> = orig.packed();
-//! let unpacked = Example::unpacked(&packed)?;
-//! assert_eq!(orig, unpacked);
-//! # Ok::<(), psio::Error>(())
+//! // pSSZ: encode, validate, decode, or read a member in place.
+//! let bytes = psio::to_pssz(&account);
+//! psio::validate_pssz::<Account>(&bytes)?;
+//! assert_eq!(psio::from_pssz::<Account>(&bytes)?, account);
+//! assert_eq!(psio::PsszView::<Account>::new(&bytes)?.id().get(), 7);
+//!
+//! // The same type as JSON text and as a sortable key.
+//! let text = psio::to_json(&account);
+//! assert_eq!(text, r#"{"id":7,"name":"alice"}"#);
+//! assert_eq!(psio::from_json::<Account>(&text)?, account);
+//! let key = psio::to_key(&account);
+//! assert_eq!(psio::from_key::<Account>(&key)?, account);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! # Annotations
@@ -118,12 +134,21 @@
 //! #[json(json_string)]
 //! struct Amount { value: u64 }
 //! ```
+//!
+//! # Experimental formats
+//!
+//! [`experimental`] holds formats kept to measure design trade-offs. They are
+//! not supported wire formats, have no helper names, and are compiled only
+//! with their cargo feature.
 
-// Legacy fracpack benchmark API (re-exported at the crate root)
-#[path = "fracpack.rs"]
-mod fracpack_impl;
+pub mod experimental;
 
-pub use fracpack_impl::*;
+// The derives. A derive and the trait it implements share a name; the trait
+// lives in its format's module.
+pub use psio_macros::{CapnpPack, CapnpUnpack, CapnpView};
+pub use psio_macros::{FbPack, FbUnpack, FbView};
+pub use psio_macros::ToDynamicSchema;
+pub use psio_macros::{WitPack, WitUnpack, WitView};
 pub use psio_macros::{PsszPack, PsszUnpack, PsszView, ToPsszSchema};
 pub use psio_macros::JsonText;
 pub use psio_macros::Key;
@@ -173,7 +198,6 @@ pub use policy::{ValidationPolicy, DefaultSafe, StrictCanonical,
 mod format;
 pub use format::{Format, Encode, Decode, Validate, encode, decode, validate, size_of};
 
-// New modules (populated in subsequent phases)
 pub mod xxh64;
 pub mod xxh3_64;
 pub mod dynamic_schema;
@@ -205,10 +229,6 @@ pub mod ssz;
 pub mod ssz_derive;
 pub mod ssz_view;
 pub mod wit;
-
-// Cross-validation tests against C++ encoder fixtures
-#[cfg(test)]
-mod cross_validation_tests;
 
 // pjson cross-validation: round-trip self-checks + #[ignore]-marked
 // byte-identity comparisons against C++ output (placeholders until

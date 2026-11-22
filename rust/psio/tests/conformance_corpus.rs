@@ -1,21 +1,25 @@
 //! Public-library interoperability with cpp/conformance/cpp_golden.cpp.
 //! The incompatible draft-spec harness is retained in conformance/history.
-use psio::{Pack, Unpack, FracViewType};
+#[cfg(feature = "experimental-frac")]
+use psio::experimental::frac::{FracViewType, Pack, Unpack};
 use psio::ssz::{SszPack, SszUnpack};
 use psio::capnp::{CapnpPack, CapnpUnpack};
 use psio::flatbuf::{FbPack, FbUnpack};
 use psio::wit::pack::WitPack;
 
-#[derive(Debug, PartialEq, Default, psio::Pack, psio::Unpack,
+#[derive(Debug, PartialEq, Default,
          psio::CapnpPack, psio::CapnpUnpack, psio::FbPack, psio::FbUnpack,
          psio::WitPack)]
+#[cfg_attr(feature = "experimental-frac", derive(Pack, Unpack))]
 #[derive(psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
 struct Record { id: u32, name: String, values: Vec<u32>, active: bool }
 psio::ssz_struct!(Record { id: u32, name: String, values: Vec<u32>, active: bool });
 
-#[derive(Debug, PartialEq, psio::Pack, psio::Unpack)]
+#[cfg(feature = "experimental-frac")]
+#[derive(Debug, PartialEq, Pack, Unpack)]
 enum Choice { Number(u32), Text(String) }
-#[derive(Debug, PartialEq, psio::Pack, psio::Unpack)]
+#[cfg(feature = "experimental-frac")]
+#[derive(Debug, PartialEq, Pack, Unpack)]
 struct Envelope { head: Record, rows: Vec<Record>, note: Option<String>, choice: Choice }
 
 psio::pjson_struct!(Record { id: u32, name: String, values: Vec<u32>, active: bool });
@@ -42,8 +46,9 @@ fn record(id: &str) -> Record {
         _ => panic!("Unknown C++ record fixture {id}"),
     }
 }
+#[cfg(feature = "experimental-frac")]
 #[test]
-fn cpp_fracpack() {
+fn cpp_frac32() {
     for (id, bytes) in fixtures("frac32") {
         let encoded = match id.as_str() {
             "record" | "empty_record" => {
@@ -85,7 +90,7 @@ fn cpp_fracpack() {
                 let value = if id == "optional_empty_vector" { Some(Vec::<u32>::new()) } else { None };
                 assert_eq!(Option::<Vec<u32>>::unpacked(&bytes).unwrap(), value); value.packed()
             },
-            _ => panic!("Unknown C++ fracpack fixture {id}"),
+            _ => panic!("Unknown C++ frac32 fixture {id}"),
         };
         assert_eq!(encoded, bytes, "frac32/{id}");
     }
@@ -99,8 +104,9 @@ fn cpp_ssz() {
         assert_eq!(encoded, bytes, "ssz/{id}");
     }
 }
+#[cfg(feature = "experimental-frac")]
 #[test]
-fn cpp_fracpack_vector_rejection() {
+fn cpp_frac32_vector_rejection() {
     for (_, bytes) in fixtures("frac32_invalid_strings") {
         assert!(Vec::<String>::unpacked(&bytes).is_err());
         assert!(Vec::<String>::verify_no_extra(&bytes).is_err());

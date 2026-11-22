@@ -1764,6 +1764,7 @@ dependencies = [
  "indexmap",
  "paste",
  "postcard",
+ "psio",
  "psio-macros",
  "rkyv",
  "rmp-serde",

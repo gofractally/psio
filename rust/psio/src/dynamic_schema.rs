@@ -31,7 +31,7 @@ pub enum DynamicType {
     U64,
     F32,
     F64,
-    /// UTF-8 text (Cap'n Proto `Text`, fracpack `String`, etc.)
+    /// UTF-8 text (Cap'n Proto `Text`, WIT `string`, etc.)
     Text,
     /// Raw byte blob
     Data,

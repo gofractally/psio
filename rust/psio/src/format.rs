@@ -3,7 +3,7 @@
 //! `docs/psio-overview.md` §2.4.
 //!
 //! A `Format` type is a type-level tag for a particular wire format
-//! (`Pjson`, `Pssz`, `Fracpack`, …). The actual encode / decode /
+//! (`Pjson`, `Pssz`, `Json`, …). The actual encode / decode /
 //! validate logic lives in three per-type traits parameterized by
 //! `F: Format`:
 //!

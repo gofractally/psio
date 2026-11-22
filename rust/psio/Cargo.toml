@@ -2,7 +2,7 @@
 name = "psio"
 version = "0.1.0"
 edition = "2021"
-description = "Multi-format serialization: pssz, pjson, fracpack, Cap'n Proto, FlatBuffers, WIT, JSON, and more"
+description = "Multi-format serialization: pSSZ, pjson, JSON, memcmp-sortable keys, SSZ, Cap'n Proto, FlatBuffers, WIT"
 license = "MIT"
 
 [lib]
@@ -16,9 +16,11 @@ path = "src/bin/pjson_conformance_driver.rs"
 required-features = ["historical-draft-reference"]
 
 [dependencies]
-custom_error = "1.9.2"
-hex = "0.3.1"
-indexmap = { version = "2.2.6", features = ["serde"] }
+# Used by psio::experimental::frac only.
+custom_error = { version = "1.9.2", optional = true }
+hex = { version = "0.3.1", optional = true }
+indexmap = { version = "2.2.6", features = ["serde"], optional = true }
+serde-aux = { version = "4.5", optional = true }
 serde = { version = "1.0", features = ["derive", "rc"] }
 # `arbitrary_precision` exposes Number::as_str() so the pjson_json
 # transcoder can detect sci-source notation (e/E) in the original JSON
@@ -26,7 +28,6 @@ serde = { version = "1.0", features = ["derive", "rc"] }
 # allocation; the exchange is the §7.1 sci-source hint.
 serde_json = { version = "1.0.135",
                 features = ["preserve_order", "arbitrary_precision"] }
-serde-aux = "4.5"
 psio-macros = { version = "0.1.0", path = "../psio-macros" }
 paste = "1"
 # Shortest round-trip float digits, the algorithm of C++ std::to_chars
@@ -44,13 +45,22 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [features]
 default = []
+# psio::experimental::frac: a format kept to benchmark pSSZ against. Not a
+# supported wire format.
+experimental-frac = ["psio-macros/experimental-frac", "dep:custom_error", "dep:hex",
+                     "dep:indexmap", "dep:serde-aux"]
 historical-draft-reference = []
 bench_ethereum_ssz = ["dep:ethereum_ssz", "dep:ethereum_ssz_derive",
                        "dep:ssz_types", "dep:typenum"]
 bench_ssz_rs       = ["dep:ssz_rs"]
 
 [dev-dependencies]
+# Tests, benches and examples build the crate with the experimental formats,
+# so `cargo test` covers them while a plain dependency on psio does not
+# compile them.
+psio = { path = ".", features = ["experimental-frac"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+hex = "0.3.1"
 bincode = "1"
 borsh = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }

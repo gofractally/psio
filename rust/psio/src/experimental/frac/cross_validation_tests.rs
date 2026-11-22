@@ -1,15 +1,9 @@
-//! Cross-format validation: verify the Rust encoders produce byte-identical
-//! output to the C++ encoders on canonical shapes. Hex fixtures were emitted
-//! by `/tmp/xval/emit_fixtures.cpp` on 2026-04-23 (see
-//! `.issues/pssz-overnight-completion-report.md` and the cross-format
-//! audit report in `.issues/format-parity-audit.md`).
-//!
-//! For formats that don't have a Rust implementation yet, the fixture is
-//! recorded as documentation — no `#[test]` runs it.
+//! The Rust frac encoder produces the bytes the C++ `frac32` encoder does on
+//! canonical shapes. The expected bytes are C++ output.
 
 #[cfg(test)]
 mod tests {
-    use crate::*;
+    use crate::experimental::frac::*;
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len())
@@ -18,11 +12,8 @@ mod tests {
             .collect()
     }
 
-    // ── Fracpack (C++ frac_format_32) ────────────────────────────────────────
-    // C++ and Rust must produce byte-identical fracpack output for these.
-
     #[test]
-    fn fracpack_u32_cross() {
+    fn frac_u32_matches_cpp() {
         // C++: psio1::to_frac(std::uint32_t{0xDEADBEEF}) → "efbeadde"
         let expected = hex("efbeadde");
         assert_eq!(0xDEADBEEFu32.packed(), expected);
@@ -30,7 +21,7 @@ mod tests {
     }
 
     #[test]
-    fn fracpack_string_cross() {
+    fn frac_string_matches_cpp() {
         // C++: psio1::to_frac(std::string("hello")) → "0500000068656c6c6f"
         // (4-byte LE length prefix + raw bytes).
         let expected = hex("0500000068656c6c6f");
@@ -40,7 +31,7 @@ mod tests {
     }
 
     #[test]
-    fn fracpack_vec_u32_cross() {
+    fn frac_vec_u32_matches_cpp() {
         // C++: psio1::to_frac(std::vector<uint32_t>{1,2,3})
         //       → "0c000000010000000200000003000000"
         let expected = hex("0c000000010000000200000003000000");
@@ -50,7 +41,7 @@ mod tests {
     }
 
     #[test]
-    fn fracpack_vec_string_cross() {
+    fn frac_vec_string_matches_cpp() {
         // C++: psio1::to_frac(std::vector<std::string>{"a","bc","def"}) →
         //   0c000000 — length in bytes of fixed region (3 × 4-byte offsets)
         //   0c000000 0d000000 0f000000 — pointer-relative offsets to each
@@ -66,7 +57,7 @@ mod tests {
     }
 
     #[test]
-    fn fracpack_option_u32_some_cross() {
+    fn frac_option_u32_some_matches_cpp() {
         // C++: psio1::to_frac(std::optional<uint32_t>{42}) → "040000002a000000"
         // Pointer-relative offset 4 + u32 value 42.
         let expected = hex("040000002a000000");
@@ -76,7 +67,7 @@ mod tests {
     }
 
     #[test]
-    fn fracpack_option_u32_none_cross() {
+    fn frac_option_u32_none_matches_cpp() {
         // C++: psio1::to_frac(std::optional<uint32_t>{}) → "01000000"
         // Sentinel value 1 (< sizeof(offset)) indicates None.
         let expected = hex("01000000");
@@ -84,22 +75,4 @@ mod tests {
         assert_eq!(v.packed(), expected);
         assert_eq!(<Option<u32>>::unpacked(&expected).unwrap(), None);
     }
-
-    // ── Documentation-only: formats without Rust impls ───────────────────────
-    //
-    // The following fixtures are recorded for reference. They prove the C++
-    // encoder output for each format on the shared shapes; they will become
-    // live Rust cross-validation tests when the corresponding Rust impls
-    // are added.
-    //
-    // str_hello.bincode    = "050000000000000068656c6c6f"  (u64 length)
-    // str_hello.borsh      = "0500000068656c6c6f"           (u32 length)
-    // str_hello.ssz        = "68656c6c6f"                    (no prefix)
-    // vec_u32_123.bincode  = "0300000000000000010000000200000003000000"
-    // vec_u32_123.borsh    = "03000000010000000200000003000000"
-    // vec_u32_123.ssz      = "010000000200000003000000"
-    // opt_u32_42.bincode   = "012a000000" (selector + payload)
-    // opt_u32_42.borsh     = "012a000000"
-    // opt_u32_42.ssz       = "012a000000" (Union[null, T])
-    // opt_u32_42.pssz32    = "2a000000"   (no selector — fixed inner)
 }

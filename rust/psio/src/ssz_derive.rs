@@ -389,7 +389,7 @@ mod tests {
     use crate::ssz::{SszPack, SszUnpack, from_ssz, to_ssz};
 
     // Reflected struct with mixed fixed + variable fields — matches the
-    // C++ `Named` test struct from bench_fracpack emit_fixtures.
+    // C++ `Named` test struct from the C++ benchmark fixtures.
     #[derive(Debug, PartialEq, Eq)]
     struct Named {
         name: String,

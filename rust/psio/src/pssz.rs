@@ -1,6 +1,5 @@
-//! pSSZ (PsiSSZ) — successor to the legacy fracpack benchmark prototype.
-//! Combines SSZ's implicit sizing and fracpack's extensibility. The
-//! specification is `docs/pssz-spec.md`; this module is the Rust counterpart
+//! pSSZ (PsiSSZ): SSZ's implicit sizing with records that can gain
+//! members. The specification is `docs/pssz-spec.md`; this module is the Rust counterpart
 //! of C++ `psio/pssz.hpp` and must produce and accept byte-identical
 //! encodings (see `conformance/pssz-vectors.json`).
 //!

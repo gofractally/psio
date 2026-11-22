@@ -1,4 +1,4 @@
-//! Zero-copy view types for fracpack data.
+//! Zero-copy view types for frac data.
 //!
 //! View types read directly from the underlying bytes without deserialization
 //! or allocation. Like C++ `frac_ref`, [`FracViewType::view`] is zero-cost
@@ -8,7 +8,7 @@
 //! # Example
 //!
 //! ```
-//! use psio::{Pack, Unpack, FracViewType};
+//! use psio::experimental::frac::{FracViewType, Pack, Unpack};
 //!
 //! // Zero-cost view (caller must ensure data is valid)
 //! let data = "hello".to_string().packed();
@@ -25,7 +25,7 @@
 //! assert_eq!(view, "hello");
 //! ```
 
-use crate::Unpack;
+use super::Unpack;
 use std::marker::PhantomData;
 
 #[inline(always)]
@@ -33,7 +33,7 @@ fn read_u32_at(data: &[u8], pos: usize) -> u32 {
     u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap())
 }
 
-/// Maps a fracpack type to its zero-copy view representation.
+/// Maps a frac type to its zero-copy view representation.
 ///
 /// View types read directly from bytes without copying or allocating.
 /// Like C++ `frac_ref`, [`FracViewType::view`] is zero-cost and does **not**
@@ -46,7 +46,7 @@ pub trait FracViewType<'a>: Unpack<'a> {
     /// Read a view from packed data starting at absolute position `pos`.
     ///
     /// # Safety contract
-    /// Caller must ensure data is valid fracpack (e.g., via prior `verify_no_extra`).
+    /// Caller must ensure data is valid frac (e.g., via prior `verify_no_extra`).
     /// Panics on out-of-bounds access if data is malformed.
     fn view_at(data: &'a [u8], pos: u32) -> Self::View;
 
@@ -55,7 +55,7 @@ pub trait FracViewType<'a>: Unpack<'a> {
     /// of this field's fixed-size slot (advanced past it on return).
     ///
     /// # Safety contract
-    /// Caller must ensure data is valid fracpack. Panics if data is malformed.
+    /// Caller must ensure data is valid frac. Panics if data is malformed.
     fn view_embedded(data: &'a [u8], fixed_pos: &mut u32) -> Self::View;
 
     /// View of an empty container (e.g., `""` for `String`, empty for `Vec<T>`).
@@ -83,7 +83,7 @@ pub trait FracViewType<'a>: Unpack<'a> {
     /// Validate, then create a zero-copy view of top-level packed data.
     ///
     /// Equivalent to calling [`Unpack::verify_no_extra`] followed by [`view`](Self::view).
-    fn view_validated(data: &'a [u8]) -> crate::Result<Self::View> {
+    fn view_validated(data: &'a [u8]) -> super::Result<Self::View> {
         Self::verify_no_extra(data)?;
         Ok(Self::view_at(data, 0))
     }
@@ -522,7 +522,7 @@ pub fn patch_offset(data: &mut [u8], offset_pos: u32, after_old: u32, delta: i32
 /// Provides [`packed_size_at`](FracMutViewType::packed_size_at) to measure an existing
 /// packed value's size and [`replace_at`](FracMutViewType::replace_at) to splice a new
 /// value at the same position.
-pub trait FracMutViewType: crate::Pack + for<'a> Unpack<'a> {
+pub trait FracMutViewType: super::Pack + for<'a> Unpack<'a> {
     /// Total packed byte count of the value at position `pos`.
     fn packed_size_at(data: &[u8], pos: u32) -> u32;
 
@@ -531,7 +531,7 @@ pub trait FracMutViewType: crate::Pack + for<'a> Unpack<'a> {
     /// past the old data (before the splice) and `delta` is the size change.
     fn replace_at(data: &mut Vec<u8>, pos: u32, value: &Self) -> (u32, i32) {
         let old_size = Self::packed_size_at(data, pos);
-        let new_packed = crate::Pack::packed(value);
+        let new_packed = super::Pack::packed(value);
         let after_old = pos + old_size;
         let delta = splice_buffer(data, pos, old_size, &new_packed);
         (after_old, delta)
@@ -543,8 +543,8 @@ pub trait FracMutViewType: crate::Pack + for<'a> Unpack<'a> {
     /// `Option<T>` the heap data is the inner `T`'s packed data.
     #[doc(hidden)]
     fn embedded_data_end(data: &[u8], fixed_pos: u32) -> u32 {
-        if !<Self as crate::Pack>::VARIABLE_SIZE {
-            fixed_pos + <Self as crate::Pack>::FIXED_SIZE
+        if !<Self as super::Pack>::VARIABLE_SIZE {
+            fixed_pos + <Self as super::Pack>::FIXED_SIZE
         } else {
             let offset = read_u32_at(data, fixed_pos as usize);
             if offset <= 1 {
@@ -561,11 +561,11 @@ pub trait FracMutViewType: crate::Pack + for<'a> Unpack<'a> {
     /// Returns `(after_old, delta)` for the caller to patch sibling offsets.
     #[doc(hidden)]
     fn embedded_replace(data: &mut Vec<u8>, fixed_pos: u32, value: &Self) -> (u32, i32) {
-        if !<Self as crate::Pack>::VARIABLE_SIZE {
-            let packed = crate::Pack::packed(value);
+        if !<Self as super::Pack>::VARIABLE_SIZE {
+            let packed = super::Pack::packed(value);
             let p = fixed_pos as usize;
             data[p..p + packed.len()].copy_from_slice(&packed);
-            (fixed_pos + <Self as crate::Pack>::FIXED_SIZE, 0)
+            (fixed_pos + <Self as super::Pack>::FIXED_SIZE, 0)
         } else {
             let p = fixed_pos as usize;
             let offset = read_u32_at(data, p);
@@ -585,8 +585,8 @@ pub trait FracMutViewType: crate::Pack + for<'a> Unpack<'a> {
     /// call `compact()` to restore canonical form after all edits.
     #[doc(hidden)]
     fn embedded_replace_fast(data: &mut Vec<u8>, fixed_pos: u32, value: &Self) {
-        if !<Self as crate::Pack>::VARIABLE_SIZE {
-            let packed = crate::Pack::packed(value);
+        if !<Self as super::Pack>::VARIABLE_SIZE {
+            let packed = super::Pack::packed(value);
             let p = fixed_pos as usize;
             data[p..p + packed.len()].copy_from_slice(&packed);
             return;
@@ -594,7 +594,7 @@ pub trait FracMutViewType: crate::Pack + for<'a> Unpack<'a> {
 
         let p = fixed_pos as usize;
         let offset = read_u32_at(data, p);
-        let new_packed = crate::Pack::packed(value);
+        let new_packed = super::Pack::packed(value);
 
         if offset > 1 {
             let target = fixed_pos + offset;
@@ -732,7 +732,7 @@ impl<T: FracMutViewType> FracMutViewType for Option<T> {
                 // Some → Some: overwrite or append
                 let target = fixed_pos + old_offset;
                 let old_size = T::packed_size_at(data, target);
-                let new_packed = crate::Pack::packed(v);
+                let new_packed = super::Pack::packed(v);
 
                 if new_packed.len() as u32 <= old_size {
                     let t = target as usize;
@@ -755,7 +755,7 @@ impl<T: FracMutViewType> FracMutViewType for Option<T> {
             }
             (false, Some(v)) => {
                 // None → Some: append T's packed data to end
-                let new_packed = crate::Pack::packed(v);
+                let new_packed = super::Pack::packed(v);
                 let new_pos = data.len() as u32;
                 data.extend_from_slice(&new_packed);
                 write_u32_at(data, p, new_pos - fixed_pos);
@@ -766,12 +766,12 @@ impl<T: FracMutViewType> FracMutViewType for Option<T> {
 
 impl<T: FracMutViewType, const N: usize> FracMutViewType for [T; N] {
     fn packed_size_at(data: &[u8], pos: u32) -> u32 {
-        if !<T as crate::Pack>::VARIABLE_SIZE {
-            <T as crate::Pack>::FIXED_SIZE * N as u32
+        if !<T as super::Pack>::VARIABLE_SIZE {
+            <T as super::Pack>::FIXED_SIZE * N as u32
         } else {
-            let mut end = pos + <T as crate::Pack>::FIXED_SIZE * N as u32;
+            let mut end = pos + <T as super::Pack>::FIXED_SIZE * N as u32;
             for i in 0..N {
-                let elem_fixed = pos + (i as u32) * <T as crate::Pack>::FIXED_SIZE;
+                let elem_fixed = pos + (i as u32) * <T as super::Pack>::FIXED_SIZE;
                 let offset = read_u32_at(data, elem_fixed as usize);
                 if offset > 1 {
                     let target = elem_fixed + offset;
@@ -789,7 +789,7 @@ impl<T: FracMutViewType, const N: usize> FracMutViewType for [T; N] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Pack;
+    use crate::experimental::frac::Pack;
 
     #[test]
     fn scalar_views() {

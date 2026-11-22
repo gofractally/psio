@@ -1,4 +1,4 @@
-use crate::{AnyType, FracInputStream, Pack, Result, SchemaBuilder, ToSchema, Unpack, UnpackOwned};
+use super::{AnyType, FracInputStream, Pack, Result, SchemaBuilder, ToSchema, Unpack, UnpackOwned};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::marker::PhantomData;
 

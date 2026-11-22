@@ -1,4 +1,4 @@
-use crate::fracpack_macro::{skip_field, Options as FracpackOptions};
+use crate::frac_macro::{skip_field, Options as FracOptions};
 use darling::error::Accumulator;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -24,12 +24,12 @@ fn visit_type(ty: &Type) -> TokenStream2 {
 }
 
 fn visit_fields_named(
-    fracpack_mod: &TokenStream2,
+    frac_mod: &TokenStream2,
     fields: &FieldsNamed,
-    fracpack_opts: &FracpackOptions,
+    frac_opts: &FracOptions,
     _errors: &mut Accumulator,
 ) -> TokenStream2 {
-    let ty = if fracpack_opts.definition_will_not_change {
+    let ty = if frac_opts.definition_will_not_change {
         quote! { Struct }
     } else {
         quote! { Object }
@@ -48,20 +48,20 @@ fn visit_fields_named(
 
     quote! {
         {
-            let mut fields = #fracpack_mod::indexmap::IndexMap::new();
+            let mut fields = #frac_mod::indexmap::IndexMap::new();
             #visit_fields
-            #fracpack_mod::AnyType::#ty(fields)
+            #frac_mod::AnyType::#ty(fields)
         }
     }
 }
 
 fn visit_fields_unnamed(
-    fracpack_mod: &TokenStream2,
+    frac_mod: &TokenStream2,
     unnamed: &FieldsUnnamed,
-    fracpack_opts: &FracpackOptions,
+    frac_opts: &FracOptions,
     errors: &mut Accumulator,
 ) -> TokenStream2 {
-    if fracpack_opts.definition_will_not_change {
+    if frac_opts.definition_will_not_change {
         errors.push(darling::Error::custom(
             "definition_will_not_change only supported on structs with named fields",
         ));
@@ -87,22 +87,22 @@ fn visit_fields_unnamed(
             {
                 let mut fields = Vec::new();
                 #visit_fields
-                #fracpack_mod::AnyType::Tuple(fields)
+                #frac_mod::AnyType::Tuple(fields)
             }
         }
     }
 }
 
 fn visit_fields(
-    fracpack_mod: &TokenStream2,
+    frac_mod: &TokenStream2,
     fields: &Fields,
-    fracpack_opts: &FracpackOptions,
+    frac_opts: &FracOptions,
     errors: &mut Accumulator,
 ) -> TokenStream2 {
     match fields {
-        Fields::Named(named) => visit_fields_named(&fracpack_mod, named, &fracpack_opts, errors),
+        Fields::Named(named) => visit_fields_named(&frac_mod, named, &frac_opts, errors),
         Fields::Unnamed(unnamed) => {
-            visit_fields_unnamed(&fracpack_mod, unnamed, &fracpack_opts, errors)
+            visit_fields_unnamed(&frac_mod, unnamed, &frac_opts, errors)
         }
         Fields::Unit => {
             errors.push(
@@ -114,12 +114,12 @@ fn visit_fields(
 }
 
 fn visit_enum(
-    fracpack_mod: &TokenStream2,
+    frac_mod: &TokenStream2,
     data: &DataEnum,
-    fracpack_opts: &FracpackOptions,
+    frac_opts: &FracOptions,
     errors: &mut Accumulator,
 ) -> TokenStream2 {
-    if fracpack_opts.definition_will_not_change {
+    if frac_opts.definition_will_not_change {
         errors.push(darling::Error::custom(
             "definition_will_not_change only supported on structs",
         ));
@@ -136,14 +136,14 @@ fn visit_enum(
             }
             // A variant's members are always extensible, as the Pack derive
             // encodes them.
-            let variant_opts = FracpackOptions {
+            let variant_opts = FracOptions {
                 definition_will_not_change: false,
-                fracpack_mod: fracpack_mod.clone(),
+                frac_mod: frac_mod.clone(),
                 custom: None,
             };
             let variant_name = variant.ident.to_string();
             let variant_type =
-                visit_fields(&fracpack_mod, &variant.fields, &variant_opts, errors);
+                visit_fields(&frac_mod, &variant.fields, &variant_opts, errors);
             quote! {
                 variants.insert(#variant_name.into(), #variant_type);
             }
@@ -152,20 +152,20 @@ fn visit_enum(
 
     quote! {
         {
-            let mut variants = #fracpack_mod::indexmap::IndexMap::new();
+            let mut variants = #frac_mod::indexmap::IndexMap::new();
             #visit_variants
-            #fracpack_mod::AnyType::Variant(variants)
+            #frac_mod::AnyType::Variant(variants)
         }
     }
 }
 
 fn apply_custom(
-    fracpack_mod: &TokenStream2,
-    opts: &FracpackOptions,
+    frac_mod: &TokenStream2,
+    opts: &FracOptions,
     result: TokenStream2,
 ) -> TokenStream2 {
     if let Some(id) = &opts.custom {
-        quote! { #fracpack_mod::AnyType::Custom{type_: Box::new(#result), id: #id.into() } }
+        quote! { #frac_mod::AnyType::Custom{type_: Box::new(#result), id: #id.into() } }
     } else {
         result
     }
@@ -175,11 +175,11 @@ pub fn schema_derive_macro(input: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(input as DeriveInput);
     let mut errors = darling::Error::accumulator();
 
-    let fracpack_opts = match FracpackOptions::new(&input) {
+    let frac_opts = match FracOptions::new(&input) {
         Ok(opts) => opts,
         Err(err) => return err.to_compile_error().into(),
     };
-    let fracpack_mod = fracpack_opts.fracpack_mod.clone();
+    let frac_mod = frac_opts.frac_mod.clone();
 
     let name = &input.ident;
 
@@ -187,7 +187,7 @@ pub fn schema_derive_macro(input: TokenStream) -> TokenStream {
     for param in &input.generics.params {
         if let syn::GenericParam::Type(t) = param {
             let t = &t.ident;
-            extra_predicates.push(parse_quote! { #t: #fracpack_mod::ToSchema + 'static });
+            extra_predicates.push(parse_quote! { #t: #frac_mod::ToSchema + 'static });
         }
     }
     if !extra_predicates.is_empty() {
@@ -201,13 +201,13 @@ pub fn schema_derive_macro(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     let result = apply_custom(
-        &fracpack_mod,
-        &fracpack_opts,
+        &frac_mod,
+        &frac_opts,
         match &input.data {
             Data::Struct(data) => {
-                visit_fields(&fracpack_mod, &data.fields, &fracpack_opts, &mut errors)
+                visit_fields(&frac_mod, &data.fields, &frac_opts, &mut errors)
             }
-            Data::Enum(data) => visit_enum(&fracpack_mod, &data, &fracpack_opts, &mut errors),
+            Data::Enum(data) => visit_enum(&frac_mod, &data, &frac_opts, &mut errors),
             Data::Union(data) => {
                 errors.push(
                     darling::Error::custom("schema does not support union")
@@ -223,8 +223,8 @@ pub fn schema_derive_macro(input: TokenStream) -> TokenStream {
     }
 
     quote! {
-        impl #impl_generics #fracpack_mod::ToSchema for #name #ty_generics #where_clause {
-            fn schema(builder: &mut #fracpack_mod::SchemaBuilder) -> #fracpack_mod::AnyType {
+        impl #impl_generics #frac_mod::ToSchema for #name #ty_generics #where_clause {
+            fn schema(builder: &mut #frac_mod::SchemaBuilder) -> #frac_mod::AnyType {
                 #result
             }
         }

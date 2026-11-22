@@ -8,8 +8,8 @@ use syn::{
 /// What the frac derives read of the type's attributes.
 pub(crate) struct Options {
     pub(crate) definition_will_not_change: bool,
-    /// Where the frac traits live: `<psio crate>`.
-    pub(crate) fracpack_mod: proc_macro2::TokenStream,
+    /// Where the frac traits live: `<psio crate>::experimental::frac`.
+    pub(crate) frac_mod: proc_macro2::TokenStream,
     pub(crate) custom: Option<String>,
 }
 
@@ -19,7 +19,7 @@ impl Options {
         let krate = item.krate();
         Ok(Options {
             definition_will_not_change: item.definition_will_not_change,
-            fracpack_mod: quote!(#krate),
+            frac_mod: quote!(#krate::experimental::frac),
             custom: item.custom.flatten(),
         })
     }
@@ -60,12 +60,12 @@ fn struct_fields(data: &DataStruct) -> Vec<StructField<'_>> {
             })
             .collect(),
         Fields::Unnamed(_) => unimplemented!(),
-        Fields::Unit => unimplemented!("fracpack does not support unit struct"),
+        Fields::Unit => unimplemented!("frac does not support unit struct"),
     }
 }
 
 fn enum_named<'a>(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     enum_name: &proc_macro2::Ident,
     field_name: &'a proc_macro2::Ident,
     field: &FieldsNamed,
@@ -123,7 +123,7 @@ fn enum_named<'a>(
                     quote! {#f,}
                 })
                 .fold(quote! {}, |acc, new| quote! {#acc #new});
-            quote! {<#as_tuple_of_ref as #fracpack_mod::Pack>::pack(&(#numbered), dest)}
+            quote! {<#as_tuple_of_ref as #frac_mod::Pack>::pack(&(#numbered), dest)}
         },
         unpack: {
             let init = field
@@ -138,7 +138,7 @@ fn enum_named<'a>(
                 .fold(quote! {}, |acc, new| quote! {#acc #new});
             quote! {
                 {
-                    let data = <#as_type as #fracpack_mod::Unpack>::unpack(src)?;
+                    let data = <#as_type as #frac_mod::Unpack>::unpack(src)?;
                     #enum_name::#field_name{#init}
                 }
             }
@@ -147,7 +147,7 @@ fn enum_named<'a>(
 }
 
 fn enum_single<'a>(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     enum_name: &proc_macro2::Ident,
     field_name: &'a proc_macro2::Ident,
     field: &FieldsUnnamed,
@@ -159,15 +159,15 @@ fn enum_single<'a>(
             quote! {#ty}
         },
         selector: quote! {(field_0)},
-        pack: quote! {<#ty as #fracpack_mod::Pack>::pack(field_0, dest)},
+        pack: quote! {<#ty as #frac_mod::Pack>::pack(field_0, dest)},
         unpack: quote! {
-            #enum_name::#field_name(<#ty as #fracpack_mod::Unpack>::unpack(src)?)
+            #enum_name::#field_name(<#ty as #frac_mod::Unpack>::unpack(src)?)
         },
     }
 }
 
 fn enum_tuple<'a>(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     enum_name: &proc_macro2::Ident,
     field_name: &'a proc_macro2::Ident,
     field: &FieldsUnnamed,
@@ -222,7 +222,7 @@ fn enum_tuple<'a>(
                     quote! {#f,}
                 })
                 .fold(quote! {}, |acc, new| quote! {#acc #new});
-            quote! {<#as_tuple_of_ref as #fracpack_mod::Pack>::pack(&(#numbered), dest)}
+            quote! {<#as_tuple_of_ref as #frac_mod::Pack>::pack(&(#numbered), dest)}
         },
         unpack: {
             let numbered = field
@@ -236,7 +236,7 @@ fn enum_tuple<'a>(
                 .fold(quote! {}, |acc, new| quote! {#acc #new});
             quote! {
                 {
-                    let data = <#as_type as #fracpack_mod::Unpack>::unpack(src)?;
+                    let data = <#as_type as #frac_mod::Unpack>::unpack(src)?;
                     #enum_name::#field_name(#numbered)
                 }
             }
@@ -245,7 +245,7 @@ fn enum_tuple<'a>(
 }
 
 fn enum_fields<'a>(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     enum_name: &proc_macro2::Ident,
     data: &'a DataEnum,
 ) -> Vec<EnumField<'a>> {
@@ -255,13 +255,13 @@ fn enum_fields<'a>(
             let field_name = &var.ident;
 
             match &var.fields {
-                Fields::Named(field) => enum_named(fracpack_mod, enum_name, field_name, field),
+                Fields::Named(field) => enum_named(frac_mod, enum_name, field_name, field),
 
                 Fields::Unnamed(field) => {
                     if field.unnamed.len() == 1 {
-                        enum_single(fracpack_mod, enum_name, field_name, field)
+                        enum_single(frac_mod, enum_name, field_name, field)
                     } else {
-                        enum_tuple(fracpack_mod, enum_name, field_name, field)
+                        enum_tuple(frac_mod, enum_name, field_name, field)
                     }
                 }
                 Fields::Unit => unimplemented!("variants must have fields"), // TODO
@@ -270,28 +270,28 @@ fn enum_fields<'a>(
         .collect()
 }
 
-pub fn fracpack_macro_impl(input: TokenStream, impl_pack: bool, impl_unpack: bool) -> TokenStream {
+pub fn frac_macro_impl(input: TokenStream, impl_pack: bool, impl_unpack: bool) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
 
     let opts = match Options::new(&input) {
         Ok(val) => val,
         Err(err) => return err.to_compile_error().into(),
     };
-    let fracpack_mod = opts.fracpack_mod.clone();
+    let frac_mod = opts.frac_mod.clone();
 
     match &input.data {
         Data::Struct(data) => {
-            process_struct(&fracpack_mod, &input, impl_pack, impl_unpack, data, &opts)
+            process_struct(&frac_mod, &input, impl_pack, impl_unpack, data, &opts)
         }
-        Data::Enum(data) => process_enum(&fracpack_mod, &input, impl_pack, impl_unpack, data),
-        Data::Union(_) => unimplemented!("fracpack does not support union"),
+        Data::Enum(data) => process_enum(&frac_mod, &input, impl_pack, impl_unpack, data),
+        Data::Union(_) => unimplemented!("frac does not support union"),
     }
 }
 
 // TODO: compile time: verify no non-optionals are after an optional
 // TODO: unpack: check optionals not in heap
 fn process_struct(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     input: &DeriveInput,
     impl_pack: bool,
     impl_unpack: bool,
@@ -299,7 +299,7 @@ fn process_struct(
     opts: &Options,
 ) -> TokenStream {
     if let Fields::Unnamed(unnamed) = &data.fields {
-        return process_struct_unnamed(fracpack_mod, input, impl_pack, impl_unpack, unnamed, opts);
+        return process_struct_unnamed(frac_mod, input, impl_pack, impl_unpack, unnamed, opts);
     }
     let name = &input.ident;
     let generics = &input.generics;
@@ -312,7 +312,7 @@ fn process_struct(
 
     let optional_fields = fields.iter().filter(use_field).map(|field| {
         let ty = &field.ty;
-        quote! {<#ty as #fracpack_mod::Pack>::IS_OPTIONAL}
+        quote! {<#ty as #frac_mod::Pack>::IS_OPTIONAL}
     });
 
     let check_optional_fields: Vec<_> = fields.iter().filter(use_field).map(|field| {
@@ -321,7 +321,7 @@ fn process_struct(
         if opts.definition_will_not_change {
             quote! {true}
         } else {
-            quote! {!<#ty as #fracpack_mod::Pack>::is_empty_optional(&self.#name)}
+            quote! {!<#ty as #frac_mod::Pack>::is_empty_optional(&self.#name)}
         }
     }).collect();
 
@@ -333,7 +333,7 @@ fn process_struct(
             .filter(use_field)
             .map(|field| {
                 let ty = &field.ty;
-                quote! {<#ty as #fracpack_mod::Pack>::VARIABLE_SIZE}
+                quote! {<#ty as #frac_mod::Pack>::VARIABLE_SIZE}
             })
             .fold(quote! {false}, |acc, new| quote! {#acc || #new})
     };
@@ -343,7 +343,7 @@ fn process_struct(
         .filter(use_field)
         .map(|field| {
             let ty = &field.ty;
-            quote! {<#ty as #fracpack_mod::Pack>::FIXED_SIZE}
+            quote! {<#ty as #frac_mod::Pack>::FIXED_SIZE}
         })
         .fold(quote! {0}, |acc, new| quote! {#acc + #new});
 
@@ -353,7 +353,7 @@ fn process_struct(
         .enumerate()
         .map(|(i, field)| {
             let ty = &field.ty;
-            quote! { if trailing_empty_index > #i { <#ty as #fracpack_mod::Pack>::FIXED_SIZE } else { 0 } }
+            quote! { if trailing_empty_index > #i { <#ty as #frac_mod::Pack>::FIXED_SIZE } else { 0 } }
         })
         .fold(quote! {0}, |acc, new| quote! {#acc + #new});
 
@@ -367,13 +367,13 @@ fn process_struct(
         })
         .collect();
     let pack_heap = if !opts.definition_will_not_change {
-        quote! { <u16 as #fracpack_mod::Pack>::pack(&(heap as u16), dest); }
+        quote! { <u16 as #frac_mod::Pack>::pack(&(heap as u16), dest); }
     } else {
         quote! {}
     };
     let unpack_heap_size = if !opts.definition_will_not_change {
         quote! {
-            let fixed_size = <u16 as #fracpack_mod::Unpack>::unpack(src)?;
+            let fixed_size = <u16 as #frac_mod::Unpack>::unpack(src)?;
             let mut last_empty = false;
         }
     } else {
@@ -395,13 +395,13 @@ fn process_struct(
             if opts.definition_will_not_change {
                 quote! {
                     #pos_quote
-                    <#ty as #fracpack_mod::Pack>::embedded_fixed_pack(&self.#name, dest);
+                    <#ty as #frac_mod::Pack>::embedded_fixed_pack(&self.#name, dest);
                 }
             } else {
                 quote! {
                     #pos_quote
                     if trailing_empty_index > #i {
-                        <#ty as #fracpack_mod::Pack>::embedded_fixed_pack(&self.#name, dest);
+                        <#ty as #frac_mod::Pack>::embedded_fixed_pack(&self.#name, dest);
                     }
                 }
             }
@@ -418,14 +418,14 @@ fn process_struct(
             let pos = &positions[i];
             if opts.definition_will_not_change {
                 quote! {
-                    <#ty as #fracpack_mod::Pack>::embedded_fixed_repack(&self.#name, #pos, dest.len() as u32, dest);
-                    <#ty as #fracpack_mod::Pack>::embedded_variable_pack(&self.#name, dest);
+                    <#ty as #frac_mod::Pack>::embedded_fixed_repack(&self.#name, #pos, dest.len() as u32, dest);
+                    <#ty as #frac_mod::Pack>::embedded_variable_pack(&self.#name, dest);
                 }
             } else {
                 quote! {
                     if trailing_empty_index > #i {
-                        <#ty as #fracpack_mod::Pack>::embedded_fixed_repack(&self.#name, #pos, dest.len() as u32, dest);
-                        <#ty as #fracpack_mod::Pack>::embedded_variable_pack(&self.#name, dest);
+                        <#ty as #frac_mod::Pack>::embedded_fixed_repack(&self.#name, #pos, dest.len() as u32, dest);
+                        <#ty as #frac_mod::Pack>::embedded_variable_pack(&self.#name, dest);
                     }
                 }
             }
@@ -442,15 +442,15 @@ fn process_struct(
             if !opts.definition_will_not_change {
                 quote! {
                     let #name = if #i < trailing_optional_index || fixed_pos < heap_pos {
-                        last_empty = <#ty as #fracpack_mod::Unpack>::is_empty_optional(src, &mut fixed_pos.clone())?;
-                        <#ty as #fracpack_mod::Unpack>::embedded_unpack(src, &mut fixed_pos)?
+                        last_empty = <#ty as #frac_mod::Unpack>::is_empty_optional(src, &mut fixed_pos.clone())?;
+                        <#ty as #frac_mod::Unpack>::embedded_unpack(src, &mut fixed_pos)?
                     } else {
-                        <#ty as #fracpack_mod::Unpack>::new_empty_optional()?
+                        <#ty as #frac_mod::Unpack>::new_empty_optional()?
                     };
                 }
             } else {
                 quote! {
-                    let #name = <#ty as #fracpack_mod::Unpack>::embedded_unpack(src, &mut fixed_pos)?;
+                    let #name = <#ty as #frac_mod::Unpack>::embedded_unpack(src, &mut fixed_pos)?;
                 }
             }
         })
@@ -482,13 +482,13 @@ fn process_struct(
             if !opts.definition_will_not_change {
                 quote! {
                     if #i < trailing_optional_index || fixed_pos < heap_pos as u32 {
-                        last_empty = <#ty as #fracpack_mod::Unpack>::is_empty_optional(src, &mut fixed_pos.clone())?;
-                        <#ty as #fracpack_mod::Unpack>::embedded_verify(src, &mut fixed_pos)?;
+                        last_empty = <#ty as #frac_mod::Unpack>::is_empty_optional(src, &mut fixed_pos.clone())?;
+                        <#ty as #frac_mod::Unpack>::embedded_verify(src, &mut fixed_pos)?;
                     }
                 }
             } else {
                 quote! {
-                    <#ty as #fracpack_mod::Unpack>::embedded_verify(src, &mut fixed_pos)?;
+                    <#ty as #frac_mod::Unpack>::embedded_verify(src, &mut fixed_pos)?;
                 }
             }
         })
@@ -505,17 +505,17 @@ fn process_struct(
                     let name = &field.name;
                     let ty = &field.ty;
                     quote! {
-                        + <#ty as #fracpack_mod::Pack>::FIXED_SIZE as usize
-                        + <#ty as #fracpack_mod::Pack>::embedded_variable_packed_size(&self.#name)
+                        + <#ty as #frac_mod::Pack>::FIXED_SIZE as usize
+                        + <#ty as #frac_mod::Pack>::embedded_variable_packed_size(&self.#name)
                     }
                 })
                 .fold(quote! { 0usize }, |acc, new| quote! { #acc #new });
 
             quote! {
-                impl #impl_generics #fracpack_mod::Pack for #name #ty_generics #where_clause {
+                impl #impl_generics #frac_mod::Pack for #name #ty_generics #where_clause {
                     const VARIABLE_SIZE: bool = #use_heap;
                     const FIXED_SIZE: u32 =
-                        if <Self as #fracpack_mod::Pack>::VARIABLE_SIZE { 4 } else { #fixed_size };
+                        if <Self as #frac_mod::Pack>::VARIABLE_SIZE { 4 } else { #fixed_size };
                     fn pack(&self, dest: &mut Vec<u8>) {
                         #pack_fixed_members
                         #pack_variable_members
@@ -536,8 +536,8 @@ fn process_struct(
                     let ty = &field.ty;
                     quote! {
                         + if trailing_empty_index > #i {
-                            <#ty as #fracpack_mod::Pack>::FIXED_SIZE as usize
-                            + <#ty as #fracpack_mod::Pack>::embedded_variable_packed_size(&self.#name)
+                            <#ty as #frac_mod::Pack>::FIXED_SIZE as usize
+                            + <#ty as #frac_mod::Pack>::embedded_variable_packed_size(&self.#name)
                         } else { 0 }
                     }
                 })
@@ -551,12 +551,12 @@ fn process_struct(
             let num = num_used_fields;
 
             quote! {
-                impl #impl_generics #fracpack_mod::Pack for #name #ty_generics #where_clause {
+                impl #impl_generics #frac_mod::Pack for #name #ty_generics #where_clause {
                     const VARIABLE_SIZE: bool = #use_heap;
                     const FIXED_SIZE: u32 =
-                        if <Self as #fracpack_mod::Pack>::VARIABLE_SIZE { 4 } else { #fixed_size };
+                        if <Self as #frac_mod::Pack>::VARIABLE_SIZE { 4 } else { #fixed_size };
                     fn pack(&self, dest: &mut Vec<u8>) {
-                        let trailing_empty_index = if <#last_ty as #fracpack_mod::Pack>::IS_OPTIONAL {
+                        let trailing_empty_index = if <#last_ty as #frac_mod::Pack>::IS_OPTIONAL {
                             [
                                 #(#check_optional_fields),*
                             ].iter().rposition(|&is_non_empty| is_non_empty).map_or(0, |idx| idx + 1)
@@ -572,7 +572,7 @@ fn process_struct(
                         #pack_variable_members
                     }
                     fn packed_size(&self) -> usize {
-                        let trailing_empty_index = if <#last_ty as #fracpack_mod::Pack>::IS_OPTIONAL {
+                        let trailing_empty_index = if <#last_ty as #frac_mod::Pack>::IS_OPTIONAL {
                             [
                                 #(#check_optional_fields),*
                             ].iter().rposition(|&is_non_empty| is_non_empty).map_or(0, |idx| idx + 1)
@@ -604,11 +604,11 @@ fn process_struct(
             quote! {}
         };
         quote! {
-            impl<'a> #fracpack_mod::Unpack<'a> for #name #generics {
+            impl<'a> #frac_mod::Unpack<'a> for #name #generics {
                 const VARIABLE_SIZE: bool = #use_heap;
                 const FIXED_SIZE: u32 =
-                    if <Self as #fracpack_mod::Unpack>::VARIABLE_SIZE { 4 } else { #fixed_size };
-                fn unpack(src: &mut #fracpack_mod::FracInputStream<'a>) -> #fracpack_mod::Result<Self> {
+                    if <Self as #frac_mod::Unpack>::VARIABLE_SIZE { 4 } else { #fixed_size };
+                fn unpack(src: &mut #frac_mod::FracInputStream<'a>) -> #frac_mod::Result<Self> {
                     #unpack_heap_size
 
                     #unpack_last_non_optional_index
@@ -622,7 +622,7 @@ fn process_struct(
                     };
                     Ok(result)
                 }
-                fn verify(src: &mut #fracpack_mod::FracInputStream) -> #fracpack_mod::Result<()> {
+                fn verify(src: &mut #frac_mod::FracInputStream) -> #frac_mod::Result<()> {
                     #unpack_heap_size
 
                     #unpack_last_non_optional_index
@@ -647,7 +647,7 @@ fn process_struct(
 } // process_struct
 
 fn process_struct_unnamed(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     input: &DeriveInput,
     impl_pack: bool,
     impl_unpack: bool,
@@ -671,7 +671,7 @@ fn process_struct_unnamed(
         });
         quote! {(#ty)}
     };
-    let ty = quote! {<#ty as #fracpack_mod::Unpack>};
+    let ty = quote! {<#ty as #frac_mod::Unpack>};
 
     let ref_ty = if unnamed.unnamed.len() == 1 {
         let ty = &unnamed.unnamed[0].ty;
@@ -683,7 +683,7 @@ fn process_struct_unnamed(
         });
         quote! {(#ty)}
     };
-    let ref_ty = quote! {<#ref_ty as #fracpack_mod::Pack>};
+    let ref_ty = quote! {<#ref_ty as #frac_mod::Pack>};
 
     let to_value = if unnamed.unnamed.len() == 1 {
         quote! {let value = &self.0;}
@@ -721,10 +721,10 @@ fn process_struct_unnamed(
                 }
             },
             quote! {
-                fn new_empty_container() -> #fracpack_mod::Result<Self> {
+                fn new_empty_container() -> #frac_mod::Result<Self> {
                     Ok(Self(#ty::new_empty_container()?))
                 }
-                fn new_empty_optional() -> #fracpack_mod::Result<Self> {
+                fn new_empty_optional() -> #frac_mod::Result<Self> {
                     Ok(Self(#ty::new_empty_optional()?))
                 }
             },
@@ -735,7 +735,7 @@ fn process_struct_unnamed(
 
     let pack_impl = if impl_pack {
         quote! {
-            impl #impl_generics #fracpack_mod::Pack for #name #ty_generics #where_clause {
+            impl #impl_generics #frac_mod::Pack for #name #ty_generics #where_clause {
                 const FIXED_SIZE: u32 = #ty::FIXED_SIZE;
                 const VARIABLE_SIZE: bool = #ty::VARIABLE_SIZE;
                 const IS_OPTIONAL: bool = #ty::IS_OPTIONAL;
@@ -769,43 +769,43 @@ fn process_struct_unnamed(
 
     let unpack_impl = if impl_unpack {
         quote! {
-            impl<'a> #fracpack_mod::Unpack<'a> for #name #generics {
+            impl<'a> #frac_mod::Unpack<'a> for #name #generics {
                 const FIXED_SIZE: u32 = #ty::FIXED_SIZE;
                 const VARIABLE_SIZE: bool = #ty::VARIABLE_SIZE;
                 const IS_OPTIONAL: bool = #ty::IS_OPTIONAL;
 
-                fn unpack(src: &mut #fracpack_mod::FracInputStream<'a>) -> #fracpack_mod::Result<Self> {
+                fn unpack(src: &mut #frac_mod::FracInputStream<'a>) -> #frac_mod::Result<Self> {
                     let value = #ty::unpack(src)?;
                     Ok(#from_value)
                 }
 
-                fn verify(src: &mut #fracpack_mod::FracInputStream) -> #fracpack_mod::Result<()> {
+                fn verify(src: &mut #frac_mod::FracInputStream) -> #frac_mod::Result<()> {
                     #ty::verify(src)
                 }
 
                 #new_empty_container
 
                 fn embedded_variable_unpack(
-                    src: &mut #fracpack_mod::FracInputStream<'a>,
+                    src: &mut #frac_mod::FracInputStream<'a>,
                     fixed_pos: &mut u32,
-                ) -> #fracpack_mod::Result<Self> {
+                ) -> #frac_mod::Result<Self> {
                     let value = #ty::embedded_variable_unpack(src, fixed_pos)?;
                     Ok(#from_value)
                 }
 
-                fn embedded_unpack(src: &mut #fracpack_mod::FracInputStream<'a>, fixed_pos: &mut u32) -> #fracpack_mod::Result<Self> {
+                fn embedded_unpack(src: &mut #frac_mod::FracInputStream<'a>, fixed_pos: &mut u32) -> #frac_mod::Result<Self> {
                     let value = #ty::embedded_unpack(src, fixed_pos)?;
                     Ok(#from_value)
                 }
 
                 fn embedded_variable_verify(
-                    src: &mut #fracpack_mod::FracInputStream,
+                    src: &mut #frac_mod::FracInputStream,
                     fixed_pos: &mut u32,
-                ) -> #fracpack_mod::Result<()> {
+                ) -> #frac_mod::Result<()> {
                     #ty::embedded_variable_verify(src, fixed_pos)
                 }
 
-                fn embedded_verify(src: &mut #fracpack_mod::FracInputStream, fixed_pos: &mut u32) -> #fracpack_mod::Result<()> {
+                fn embedded_verify(src: &mut #frac_mod::FracInputStream, fixed_pos: &mut u32) -> #frac_mod::Result<()> {
                     #ty::embedded_verify(src, fixed_pos)
                 }
             }
@@ -821,7 +821,7 @@ fn process_struct_unnamed(
 }
 
 fn process_enum(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     input: &DeriveInput,
     impl_pack: bool,
     impl_unpack: bool,
@@ -830,7 +830,7 @@ fn process_enum(
     let name = &input.ident;
     let generics = &input.generics;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let fields = enum_fields(fracpack_mod, name, data);
+    let fields = enum_fields(frac_mod, name, data);
     // TODO: 128? also check during verify and unpack
     assert!(fields.len() < 256);
     let pack_items = fields
@@ -867,14 +867,14 @@ fn process_enum(
             let index = i as u8;
             let as_type = &field.as_type;
             quote! {
-                #index => <#as_type as #fracpack_mod::Unpack>::verify(src)?,
+                #index => <#as_type as #frac_mod::Unpack>::verify(src)?,
             }
         })
         .fold(quote! {}, |acc, new| quote! {#acc #new});
 
     let pack_impl = if impl_pack {
         quote! {
-            impl #impl_generics #fracpack_mod::Pack for #name #ty_generics #where_clause {
+            impl #impl_generics #frac_mod::Pack for #name #ty_generics #where_clause {
                 const FIXED_SIZE: u32 = 4;
                 const VARIABLE_SIZE: bool = true;
                 fn pack(&self, dest: &mut Vec<u8>) {
@@ -893,17 +893,17 @@ fn process_enum(
 
     let unpack_impl = if impl_unpack {
         quote! {
-            impl<'a> #fracpack_mod::Unpack<'a> for #name #generics {
+            impl<'a> #frac_mod::Unpack<'a> for #name #generics {
                 const FIXED_SIZE: u32 = 4;
                 const VARIABLE_SIZE: bool = true;
-                fn unpack(outer: &mut #fracpack_mod::FracInputStream<'a>) -> #fracpack_mod::Result<Self> {
-                    let index = <u8 as #fracpack_mod::Unpack>::unpack(outer)?;
-                    let size = <u32 as #fracpack_mod::Unpack>::unpack(outer)?;
+                fn unpack(outer: &mut #frac_mod::FracInputStream<'a>) -> #frac_mod::Result<Self> {
+                    let index = <u8 as #frac_mod::Unpack>::unpack(outer)?;
+                    let size = <u32 as #frac_mod::Unpack>::unpack(outer)?;
                     let mut inner = outer.read_fixed(size)?;
                     let src = &mut inner;
                     let result = match index {
                         #unpack_items
-                        _ => return Err(#fracpack_mod::Error::BadEnumIndex),
+                        _ => return Err(#frac_mod::Error::BadEnumIndex),
                     };
                     if src.has_unknown {
                         outer.has_unknown = true;
@@ -912,14 +912,14 @@ fn process_enum(
                     Ok(result)
                 }
                 // TODO: option to error on unknown index
-                fn verify(outer: &mut #fracpack_mod::FracInputStream) -> #fracpack_mod::Result<()> {
-                    let index = <u8 as #fracpack_mod::Unpack>::unpack(outer)?;
-                    let size = <u32 as #fracpack_mod::Unpack>::unpack(outer)?;
+                fn verify(outer: &mut #frac_mod::FracInputStream) -> #frac_mod::Result<()> {
+                    let index = <u8 as #frac_mod::Unpack>::unpack(outer)?;
+                    let size = <u32 as #frac_mod::Unpack>::unpack(outer)?;
                     let mut inner = outer.read_fixed(size)?;
                     let src = &mut inner;
                     match index {
                         #verify_items
-                        _ => return Err(#fracpack_mod::Error::BadEnumIndex),
+                        _ => return Err(#frac_mod::Error::BadEnumIndex),
                     }
                     if src.has_unknown {
                         outer.has_unknown = true;
@@ -948,17 +948,17 @@ pub fn fracview_macro_impl(input: TokenStream) -> TokenStream {
         Ok(val) => val,
         Err(err) => return err.to_compile_error().into(),
     };
-    let fracpack_mod = opts.fracpack_mod.clone();
+    let frac_mod = opts.frac_mod.clone();
 
     match &input.data {
-        Data::Struct(data) => process_struct_view(&fracpack_mod, &input, data, &opts),
-        Data::Enum(data) => process_enum_view(&fracpack_mod, &input, data),
-        Data::Union(_) => unimplemented!("fracpack view does not support union"),
+        Data::Struct(data) => process_struct_view(&frac_mod, &input, data, &opts),
+        Data::Enum(data) => process_enum_view(&frac_mod, &input, data),
+        Data::Union(_) => unimplemented!("frac view does not support union"),
     }
 }
 
 fn process_struct_view(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     input: &DeriveInput,
     data: &DataStruct,
     opts: &Options,
@@ -982,7 +982,7 @@ fn process_struct_view(
             quote! { #field_name: <#field_ty as Default>::default() }
         } else {
             quote! {
-                #field_name: <#field_ty as #fracpack_mod::FracViewType>::view_to_owned(view.#field_name())
+                #field_name: <#field_ty as #frac_mod::FracViewType>::view_to_owned(view.#field_name())
             }
         }
     }).collect();
@@ -997,7 +997,7 @@ fn process_struct_view(
             .iter()
             .map(|f| {
                 let ty = &f.ty;
-                quote! { <#ty as #fracpack_mod::Pack>::FIXED_SIZE }
+                quote! { <#ty as #frac_mod::Pack>::FIXED_SIZE }
             })
             .collect();
 
@@ -1010,20 +1010,20 @@ fn process_struct_view(
         if opts.definition_will_not_change {
             // No trailing optional elision possible
             quote! {
-                pub fn #field_name(&self) -> <#field_ty as #fracpack_mod::FracViewType<'a>>::View {
+                pub fn #field_name(&self) -> <#field_ty as #frac_mod::FracViewType<'a>>::View {
                     let mut pos = self.base + #offset_expr;
-                    <#field_ty as #fracpack_mod::FracViewType<'a>>::view_embedded(self.data, &mut pos)
+                    <#field_ty as #frac_mod::FracViewType<'a>>::view_embedded(self.data, &mut pos)
                 }
             }
         } else {
             // Need trailing optional elision check
             let all_is_optional = active_fields.iter().map(|f| {
                 let ty = &f.ty;
-                quote! { <#ty as #fracpack_mod::Pack>::IS_OPTIONAL }
+                quote! { <#ty as #frac_mod::Pack>::IS_OPTIONAL }
             });
 
             quote! {
-                pub fn #field_name(&self) -> <#field_ty as #fracpack_mod::FracViewType<'a>>::View {
+                pub fn #field_name(&self) -> <#field_ty as #frac_mod::FracViewType<'a>>::View {
                     let field_offset: u32 = #offset_expr;
                     const TRAILING_OPT_IDX: usize = {
                         let flags: &[bool] = &[#(#all_is_optional),*];
@@ -1035,10 +1035,10 @@ fn process_struct_view(
                         }
                     };
                     if #i >= TRAILING_OPT_IDX && field_offset >= self.heap_size as u32 {
-                        return <#field_ty as #fracpack_mod::FracViewType<'a>>::view_empty();
+                        return <#field_ty as #frac_mod::FracViewType<'a>>::view_empty();
                     }
                     let mut pos = self.base + field_offset;
-                    <#field_ty as #fracpack_mod::FracViewType<'a>>::view_embedded(self.data, &mut pos)
+                    <#field_ty as #frac_mod::FracViewType<'a>>::view_embedded(self.data, &mut pos)
                 }
             }
         }
@@ -1059,7 +1059,7 @@ fn process_struct_view(
             .iter()
             .map(|f| {
                 let ty = &f.ty;
-                quote! { <#ty as #fracpack_mod::Pack>::VARIABLE_SIZE }
+                quote! { <#ty as #frac_mod::Pack>::VARIABLE_SIZE }
             })
             .fold(quote! { false }, |acc, new| quote! { #acc || #new });
 
@@ -1067,7 +1067,7 @@ fn process_struct_view(
             .iter()
             .map(|f| {
                 let ty = &f.ty;
-                quote! { <#ty as #fracpack_mod::Pack>::FIXED_SIZE }
+                quote! { <#ty as #frac_mod::Pack>::FIXED_SIZE }
             })
             .fold(quote! { 0u32 }, |acc, new| quote! { #acc + #new });
 
@@ -1090,7 +1090,7 @@ fn process_struct_view(
                 }
             }
 
-            impl<'a> #fracpack_mod::FracViewType<'a> for #name {
+            impl<'a> #frac_mod::FracViewType<'a> for #name {
                 type View = #view_name<'a>;
 
                 fn view_at(data: &'a [u8], pos: u32) -> #view_name<'a> {
@@ -1143,7 +1143,7 @@ fn process_struct_view(
                 }
             }
 
-            impl<'a> #fracpack_mod::FracViewType<'a> for #name {
+            impl<'a> #frac_mod::FracViewType<'a> for #name {
                 type View = #view_name<'a>;
 
                 fn view_at(data: &'a [u8], pos: u32) -> #view_name<'a> {
@@ -1174,7 +1174,7 @@ fn process_struct_view(
 }
 
 fn process_enum_view(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     input: &DeriveInput,
     data: &DataEnum,
 ) -> TokenStream {
@@ -1204,14 +1204,14 @@ fn process_enum_view(
 
     // Generate view enum variants
     let view_variants = variants.iter().map(|(var_name, ty, _)| {
-        quote! { #var_name(<#ty as #fracpack_mod::FracViewType<'a>>::View) }
+        quote! { #var_name(<#ty as #frac_mod::FracViewType<'a>>::View) }
     });
 
     // Generate match arms for view_at
     let view_at_arms = variants.iter().map(|(var_name, ty, index)| {
         quote! {
             #index => #view_name::#var_name(
-                <#ty as #fracpack_mod::FracViewType<'a>>::view_at(data, data_pos)
+                <#ty as #frac_mod::FracViewType<'a>>::view_at(data, data_pos)
             )
         }
     });
@@ -1228,7 +1228,7 @@ fn process_enum_view(
     let to_owned_arms = variants.iter().map(|(var_name, ty, _)| {
         quote! {
             #view_name::#var_name(v) => #name::#var_name(
-                <#ty as #fracpack_mod::FracViewType>::view_to_owned(v)
+                <#ty as #frac_mod::FracViewType>::view_to_owned(v)
             )
         }
     });
@@ -1247,7 +1247,7 @@ fn process_enum_view(
             }
         }
 
-        impl<'a> #fracpack_mod::FracViewType<'a> for #name {
+        impl<'a> #frac_mod::FracViewType<'a> for #name {
             type View = #view_name<'a>;
 
             fn view_at(data: &'a [u8], pos: u32) -> #view_name<'a> {
@@ -1287,17 +1287,17 @@ pub fn fracmutview_macro_impl(input: TokenStream) -> TokenStream {
         Ok(val) => val,
         Err(err) => return err.to_compile_error().into(),
     };
-    let fracpack_mod = opts.fracpack_mod.clone();
+    let frac_mod = opts.frac_mod.clone();
 
     match &input.data {
-        Data::Struct(data) => process_struct_mutview(&fracpack_mod, &input, data, &opts),
-        Data::Enum(data) => process_enum_mutview(&fracpack_mod, &input, data),
+        Data::Struct(data) => process_struct_mutview(&frac_mod, &input, data, &opts),
+        Data::Enum(data) => process_enum_mutview(&frac_mod, &input, data),
         Data::Union(_) => unimplemented!("FracMutView does not support union"),
     }
 }
 
 fn field_offset_expr(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     active_fields: &[&StructField],
     field_index: usize,
 ) -> proc_macro2::TokenStream {
@@ -1305,7 +1305,7 @@ fn field_offset_expr(
         .iter()
         .map(|f| {
             let ty = &f.ty;
-            quote! { <#ty as #fracpack_mod::Pack>::FIXED_SIZE }
+            quote! { <#ty as #frac_mod::Pack>::FIXED_SIZE }
         })
         .collect();
     if preceding.is_empty() {
@@ -1316,7 +1316,7 @@ fn field_offset_expr(
 }
 
 fn process_struct_mutview(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     input: &DeriveInput,
     data: &DataStruct,
     opts: &Options,
@@ -1339,32 +1339,32 @@ fn process_struct_mutview(
     let getters = active_fields.iter().enumerate().map(|(i, field)| {
         let field_name = &field.name;
         let field_ty = &field.ty;
-        let offset_expr = field_offset_expr(fracpack_mod, &active_fields, i);
+        let offset_expr = field_offset_expr(frac_mod, &active_fields, i);
 
         if is_extensible {
             let all_is_optional = active_fields.iter().map(|f| {
                 let ty = &f.ty;
-                quote! { <#ty as #fracpack_mod::Pack>::IS_OPTIONAL }
+                quote! { <#ty as #frac_mod::Pack>::IS_OPTIONAL }
             });
             quote! {
-                pub fn #field_name<'a>(&self, data: &'a [u8]) -> <#field_ty as #fracpack_mod::FracViewType<'a>>::View {
+                pub fn #field_name<'a>(&self, data: &'a [u8]) -> <#field_ty as #frac_mod::FracViewType<'a>>::View {
                     let field_offset: u32 = #offset_expr;
                     let trailing_opt_idx = [#(#all_is_optional),*]
                         .iter()
                         .rposition(|&x| !x)
                         .map_or(0, |idx| idx + 1);
                     if #i >= trailing_opt_idx && field_offset >= self.heap_size as u32 {
-                        return <#field_ty as #fracpack_mod::FracViewType<'a>>::view_empty();
+                        return <#field_ty as #frac_mod::FracViewType<'a>>::view_empty();
                     }
                     let mut pos = self.data_base + field_offset;
-                    <#field_ty as #fracpack_mod::FracViewType<'a>>::view_embedded(data, &mut pos)
+                    <#field_ty as #frac_mod::FracViewType<'a>>::view_embedded(data, &mut pos)
                 }
             }
         } else {
             quote! {
-                pub fn #field_name<'a>(&self, data: &'a [u8]) -> <#field_ty as #fracpack_mod::FracViewType<'a>>::View {
+                pub fn #field_name<'a>(&self, data: &'a [u8]) -> <#field_ty as #frac_mod::FracViewType<'a>>::View {
                     let mut pos = self.data_base + #offset_expr;
-                    <#field_ty as #fracpack_mod::FracViewType<'a>>::view_embedded(data, &mut pos)
+                    <#field_ty as #frac_mod::FracViewType<'a>>::view_embedded(data, &mut pos)
                 }
             }
         }
@@ -1375,7 +1375,7 @@ fn process_struct_mutview(
         let field_name = &field.name;
         let set_name = syn::Ident::new(&format!("set_{}", field_name), field_name.span());
         let field_ty = &field.ty;
-        let offset_expr = field_offset_expr(fracpack_mod, &active_fields, i);
+        let offset_expr = field_offset_expr(frac_mod, &active_fields, i);
 
         // Canonical-mode patch calls for all variable-size field offsets
         let patch_calls: Vec<_> = active_fields
@@ -1383,22 +1383,22 @@ fn process_struct_mutview(
             .enumerate()
             .map(|(j, f)| {
                 let ty = &f.ty;
-                let f_offset = field_offset_expr(fracpack_mod, &active_fields, j);
+                let f_offset = field_offset_expr(frac_mod, &active_fields, j);
                 if is_extensible {
                     quote! {
                         {
                             let fo: u32 = #f_offset;
-                            if <#ty as #fracpack_mod::Pack>::VARIABLE_SIZE
-                                && fo + <#ty as #fracpack_mod::Pack>::FIXED_SIZE <= self.heap_size as u32
+                            if <#ty as #frac_mod::Pack>::VARIABLE_SIZE
+                                && fo + <#ty as #frac_mod::Pack>::FIXED_SIZE <= self.heap_size as u32
                             {
-                                #fracpack_mod::patch_offset(data, self.data_base + fo, after_old, delta);
+                                #frac_mod::patch_offset(data, self.data_base + fo, after_old, delta);
                             }
                         }
                     }
                 } else {
                     quote! {
-                        if <#ty as #fracpack_mod::Pack>::VARIABLE_SIZE {
-                            #fracpack_mod::patch_offset(data, self.data_base + #f_offset, after_old, delta);
+                        if <#ty as #frac_mod::Pack>::VARIABLE_SIZE {
+                            #frac_mod::patch_offset(data, self.data_base + #f_offset, after_old, delta);
                         }
                     }
                 }
@@ -1408,7 +1408,7 @@ fn process_struct_mutview(
         let elision_check = if is_extensible {
             quote! {
                 assert!(
-                    #offset_expr + <#field_ty as #fracpack_mod::Pack>::FIXED_SIZE <= self.heap_size as u32,
+                    #offset_expr + <#field_ty as #frac_mod::Pack>::FIXED_SIZE <= self.heap_size as u32,
                     "FracMutView: cannot set elided trailing optional field"
                 );
             }
@@ -1421,9 +1421,9 @@ fn process_struct_mutview(
                 #elision_check
                 let field_pos = self.data_base + #offset_expr;
                 if FAST {
-                    <#field_ty as #fracpack_mod::FracMutViewType>::embedded_replace_fast(data, field_pos, value);
+                    <#field_ty as #frac_mod::FracMutViewType>::embedded_replace_fast(data, field_pos, value);
                 } else {
-                    let (after_old, delta) = <#field_ty as #fracpack_mod::FracMutViewType>::embedded_replace(data, field_pos, value);
+                    let (after_old, delta) = <#field_ty as #frac_mod::FracMutViewType>::embedded_replace(data, field_pos, value);
                     if delta != 0 {
                         #(#patch_calls)*
                     }
@@ -1440,7 +1440,7 @@ fn process_struct_mutview(
             quote! { #field_name: <#field_ty as Default>::default() }
         } else {
             quote! {
-                #field_name: <#field_ty as #fracpack_mod::FracViewType>::view_to_owned(m.#field_name(data))
+                #field_name: <#field_ty as #frac_mod::FracViewType>::view_to_owned(m.#field_name(data))
             }
         }
     }).collect();
@@ -1451,24 +1451,24 @@ fn process_struct_mutview(
         .enumerate()
         .map(|(j, f)| {
             let ty = &f.ty;
-            let f_offset = field_offset_expr(fracpack_mod, &active_fields, j);
+            let f_offset = field_offset_expr(frac_mod, &active_fields, j);
             if is_extensible {
                 quote! {
                     {
                         let fo: u32 = #f_offset;
-                        if <#ty as #fracpack_mod::Pack>::VARIABLE_SIZE
-                            && fo + <#ty as #fracpack_mod::Pack>::FIXED_SIZE <= heap_size
+                        if <#ty as #frac_mod::Pack>::VARIABLE_SIZE
+                            && fo + <#ty as #frac_mod::Pack>::FIXED_SIZE <= heap_size
                         {
-                            let field_end = <#ty as #fracpack_mod::FracMutViewType>::embedded_data_end(data, data_base + fo);
+                            let field_end = <#ty as #frac_mod::FracMutViewType>::embedded_data_end(data, data_base + fo);
                             if field_end > end { end = field_end; }
                         }
                     }
                 }
             } else {
                 quote! {
-                    if <#ty as #fracpack_mod::Pack>::VARIABLE_SIZE {
+                    if <#ty as #frac_mod::Pack>::VARIABLE_SIZE {
                         let fo: u32 = #f_offset;
-                        let field_end = <#ty as #fracpack_mod::FracMutViewType>::embedded_data_end(data, data_base + fo);
+                        let field_end = <#ty as #frac_mod::FracMutViewType>::embedded_data_end(data, data_base + fo);
                         if field_end > end { end = field_end; }
                     }
                 }
@@ -1480,7 +1480,7 @@ fn process_struct_mutview(
         .iter()
         .map(|f| {
             let ty = &f.ty;
-            quote! { <#ty as #fracpack_mod::Pack>::FIXED_SIZE }
+            quote! { <#ty as #frac_mod::Pack>::FIXED_SIZE }
         })
         .fold(quote! { 0u32 }, |acc, new| quote! { #acc + #new });
 
@@ -1502,8 +1502,8 @@ fn process_struct_mutview(
 
             impl<const FAST: bool> #mut_base_name<FAST> {
                 /// Create a mutable view of top-level packed data. Validates first.
-                pub fn new(data: &[u8]) -> #fracpack_mod::Result<Self> {
-                    <#name as #fracpack_mod::Unpack>::verify_no_extra(data)?;
+                pub fn new(data: &[u8]) -> #frac_mod::Result<Self> {
+                    <#name as #frac_mod::Unpack>::verify_no_extra(data)?;
                     let heap_size = u16::from_le_bytes(data[0..2].try_into().unwrap());
                     Ok(Self { data_base: 2, heap_size })
                 }
@@ -1525,11 +1525,11 @@ fn process_struct_mutview(
                     let val = #name {
                         #(#compact_fields),*
                     };
-                    *data = <#name as #fracpack_mod::Pack>::packed(&val);
+                    *data = <#name as #frac_mod::Pack>::packed(&val);
                 }
             }
 
-            impl #fracpack_mod::FracMutViewType for #name {
+            impl #frac_mod::FracMutViewType for #name {
                 fn packed_size_at(data: &[u8], pos: u32) -> u32 {
                     let p = pos as usize;
                     let heap_size = u16::from_le_bytes(data[p..p + 2].try_into().unwrap()) as u32;
@@ -1546,7 +1546,7 @@ fn process_struct_mutview(
             .iter()
             .map(|f| {
                 let ty = &f.ty;
-                quote! { <#ty as #fracpack_mod::Pack>::VARIABLE_SIZE }
+                quote! { <#ty as #frac_mod::Pack>::VARIABLE_SIZE }
             })
             .fold(quote! { false }, |acc, new| quote! { #acc || #new });
 
@@ -1566,8 +1566,8 @@ fn process_struct_mutview(
 
             impl<const FAST: bool> #mut_base_name<FAST> {
                 /// Create a mutable view of top-level packed data. Validates first.
-                pub fn new(data: &[u8]) -> #fracpack_mod::Result<Self> {
-                    <#name as #fracpack_mod::Unpack>::verify_no_extra(data)?;
+                pub fn new(data: &[u8]) -> #frac_mod::Result<Self> {
+                    <#name as #frac_mod::Unpack>::verify_no_extra(data)?;
                     Ok(Self { data_base: 0 })
                 }
 
@@ -1585,11 +1585,11 @@ fn process_struct_mutview(
                     let val = #name {
                         #(#compact_fields),*
                     };
-                    *data = <#name as #fracpack_mod::Pack>::packed(&val);
+                    *data = <#name as #frac_mod::Pack>::packed(&val);
                 }
             }
 
-            impl #fracpack_mod::FracMutViewType for #name {
+            impl #frac_mod::FracMutViewType for #name {
                 fn packed_size_at(data: &[u8], pos: u32) -> u32 {
                     let data_base = pos;
                     let fixed_total: u32 = #fixed_size_total;
@@ -1606,14 +1606,14 @@ fn process_struct_mutview(
 }
 
 fn process_enum_mutview(
-    fracpack_mod: &proc_macro2::TokenStream,
+    frac_mod: &proc_macro2::TokenStream,
     input: &DeriveInput,
     _data: &DataEnum,
 ) -> TokenStream {
     let name = &input.ident;
 
     TokenStream::from(quote! {
-        impl #fracpack_mod::FracMutViewType for #name {
+        impl #frac_mod::FracMutViewType for #name {
             fn packed_size_at(data: &[u8], pos: u32) -> u32 {
                 let p = pos as usize;
                 let size = u32::from_le_bytes(data[p + 1..p + 5].try_into().unwrap());

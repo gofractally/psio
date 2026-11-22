@@ -1,22 +1,20 @@
-// TODO: fix reading structs and tuples which have unknown fields
-// TODO: option to allow/disallow unknown fields during verify and unpack
-// TODO: replace 'a with 'de; change macro to look for 'de specifically instead of assuming
-
-//! Rust support for the legacy fracpack prototype.
+//! `frac`: a binary format kept to measure design trade-offs against pSSZ.
 //!
-//! Retained for benchmark comparisons of data-layout designs. pSSZ is its
-//! successor. The prototype explored the following goals:
+//! Nothing uses this format. It exists so benchmarks can compare it with
+//! pSSZ, chiefly on one question: whether an encoding stores a size per
+//! field, or stores offset pointers and infers each size from the difference
+//! between neighbouring offsets. It is not a supported wire format, has no
+//! stability guarantee and no helper names (`to_frac` and friends do not
+//! exist); use [`crate::pssz`] for data that is stored or exchanged.
 //!
-//! - Quickly pack and unpack data, making it suitable for service-to-service communication, node-to-node communication, blockchain-to-outside communication, and database storage.
-//! - Forwards and backwards compatibility; it supports adding new optional fields to the end of structs and tuples, even when they are embedded in variable-length vectors, fixed-length arrays, optional, and other structs and tuples.
-//! - Option to read without unpacking (almost zero-copy); helps to efficiently handle large data. TODO: this library doesn't implement this feature yet.
-//! - Doesn't require a code generator to support either C++ or Rust; macros and metaprogramming handle it.
-//! - Efficient compression when combined with the compression algorithm from Cap 'n' Proto.
-//!
-//! # Example use
+//! The module holds the codec ([`Pack`], [`Unpack`]), views over packed bytes
+//! ([`FracViewType`], [`FracMutViewType`]), [`Nested`], the format's own
+//! schema model ([`AnyType`], [`SchemaBuilder`], [`ToSchema`],
+//! [`CompiledSchema`]) and its derives. It is compiled only with the cargo
+//! feature `experimental-frac`.
 //!
 //! ```
-//! use psio::{Pack, Unpack, Result};
+//! use psio::experimental::frac::{Pack, Unpack};
 //!
 //! #[derive(Pack, Unpack, PartialEq, Debug)]
 //! struct Example {
@@ -28,30 +26,23 @@
 //!     a_string: "content".into(),
 //!     a_tuple: (1234, "5678".into()),
 //! };
-//!
-//! // Convert to fracpack format
 //! let packed: Vec<u8> = orig.packed();
-//!
-//! // Convert from fracpack format
 //! let unpacked = Example::unpacked(&packed)?;
-//!
 //! assert_eq!(orig, unpacked);
-//! # Ok::<(), psio::Error>(())
+//! # Ok::<(), psio::experimental::frac::Error>(())
 //! ```
 //!
-//! # Caution
+//! The derives read `#[psio(crate = "path")]` and
+//! `#[psio(definition_will_not_change)]` like every PSIO derive, and
+//! `#[frac(skip)]` on a field to leave it out.
 //!
-//! It's easy to accidentally convert from a fixed-size
-//! array reference (`&[T;7]`) to a slice (`&[T]`). This matters
-//! to fracpack, which has different, and incompatible, encodings
-//! for the two types.
+//! A fixed-size array reference (`&[T; 7]`) converts silently to a slice
+//! (`&[T]`), and the two have different, incompatible encodings.
 
 use custom_error::custom_error;
 pub use psio_macros::{
     FracMutView, FracView, Pack, ToSchema, Unpack,
 };
-pub use psio_macros::{CapnpPack, CapnpUnpack, CapnpView, FbPack, FbUnpack, FbView, WitPack, WitUnpack, WitView};
-pub use psio_macros::ToDynamicSchema;
 use std::{cell::RefCell, hash::Hash, mem, rc::Rc, sync::Arc};
 
 mod schema;
@@ -62,6 +53,9 @@ pub use nested::*;
 
 mod view;
 pub use view::*;
+
+#[cfg(test)]
+mod cross_validation_tests;
 
 
 custom_error! {pub Error
@@ -218,7 +212,7 @@ pub(crate) fn consume_trailing_optional(
 /// the source.
 ///
 /// ```
-/// use psio::{UnpackOwned, Error};
+/// use psio::experimental::frac::{UnpackOwned, Error};
 ///
 /// pub fn get_unpacked<T: UnpackOwned>(packed: &[u8]) -> Result<T, Error> {
 ///     T::unpacked(packed)
@@ -229,7 +223,7 @@ impl<T> UnpackOwned for T where T: for<'a> Unpack<'a> {}
 
 /// Convert to fracpack format
 ///
-/// Use [`#[derive(Pack)]`](psibase_macros::Pack) to implement
+/// Use [`#[derive(Pack)]`](macro@Pack) to implement
 /// this trait; manually implementing it is unsupported.
 pub trait Pack {
     #[doc(hidden)]
@@ -248,7 +242,7 @@ pub trait Pack {
     /// Example:
     ///
     /// ```rust
-    /// use psio::Pack;
+    /// use psio::experimental::frac::Pack;
     ///
     /// fn convert(src: &(u32, String)) -> Vec<u8> {
     ///     let mut bytes = Vec::new();
@@ -267,7 +261,7 @@ pub trait Pack {
     /// Example:
     ///
     /// ```rust
-    /// use psio::Pack;
+    /// use psio::experimental::frac::Pack;
     ///
     /// fn packSomething(a: u32, b: &str) -> Vec<u8> {
     ///     (a, b).packed()
@@ -331,7 +325,7 @@ pub trait Pack {
 
 /// Unpack fracpack data
 ///
-/// Use [`#[derive(Unpack)]`](psibase_macros::Unpack) to implement
+/// Use [`#[derive(Unpack)]`](macro@Unpack) to implement
 /// this trait; manually implementing it is unsupported.
 pub trait Unpack<'a>: Sized {
     #[doc(hidden)]
@@ -350,14 +344,14 @@ pub trait Unpack<'a>: Sized {
     /// Example:
     ///
     /// ```rust
-    /// use psio::Unpack;
+    /// use psio::experimental::frac::Unpack;
     ///
     /// fn unpackSomething(src: &[u8]) -> String {
     ///     String::unpacked(src).unwrap()
     /// }
     /// ```
     ///
-    /// See [Pack::unpacked], which is often more convenient.
+    /// See [Unpack::unpacked], which is often more convenient.
     fn unpack(src: &mut FracInputStream<'a>) -> Result<Self>;
 
     /// Convert from fracpack format. Also verifies the integrity of the data.
@@ -367,7 +361,7 @@ pub trait Unpack<'a>: Sized {
     /// Example:
     ///
     /// ```rust
-    /// use psio::Unpack;
+    /// use psio::experimental::frac::Unpack;
     ///
     /// fn unpackSomething(src: &[u8]) -> (String, String) {
     ///     <(String, String)>::unpacked(src).unwrap()
@@ -381,7 +375,7 @@ pub trait Unpack<'a>: Sized {
     }
 
     /// Verify the integrity of fracpack data. You don't need to call this if
-    /// using [Pack::unpack] since it verifies integrity during unpack.
+    /// using [Unpack::unpack] since it verifies integrity during unpack.
     fn verify(src: &mut FracInputStream) -> Result<()>;
 
     /// Verify the integrity of fracpack data, plus make sure there is no

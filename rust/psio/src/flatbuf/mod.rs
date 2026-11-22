@@ -4,7 +4,7 @@
 //! C++ implementation in `psio/flatbuf.hpp`. Key types:
 //!
 //! - [`FbBuilder`] — back-to-front buffer builder
-//! - [`FbView`] — zero-copy field access via vtable lookup
+//! - [`struct@FbView`] — zero-copy field access via vtable lookup
 //! - [`FbPack`] — trait for serializing to FlatBuffer format
 //! - [`FbUnpack`] — trait for deserializing from FlatBuffer format
 //! - [`FbLayout`] — vtable slot computation
@@ -30,6 +30,9 @@ pub use layout::{FbFieldLoc, FbLayout};
 pub use schema::{to_fbs_schema, to_fbs_text, FbFieldSchema, FbSchema, FbTypeSchema};
 pub use unpack::{FbUnpack, FbUnpackElement, FbUnpackError};
 pub use view::{FbVecView, FbView, FbViewError};
+
+// The derives, beside the traits they implement.
+pub use psio_macros::{FbPack, FbUnpack, FbView};
 
 // ── The helper names (docs/helpers.md) ──────────────────────────────────────
 

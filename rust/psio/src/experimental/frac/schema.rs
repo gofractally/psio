@@ -1,4 +1,4 @@
-use crate::{consume_trailing_optional, Error, FracInputStream, Pack, Unpack};
+use super::{consume_trailing_optional, Error, FracInputStream, Pack, Unpack};
 use indexmap::IndexMap;
 use psio_macros::ToSchema;
 use serde::de::Error as _;

@@ -1,5 +1,16 @@
 //! Derive macros for the [psio crate](https://docs.rs/psio).
 //!
+//! * pSSZ: `PsszPack`, `PsszUnpack`, `PsszView`, `ToPsszSchema`
+//! * Json / IJson text: `JsonText`
+//! * memcmp-sortable keys: `Key`
+//! * Cap'n Proto: `CapnpPack`, `CapnpUnpack`, `CapnpView`
+//! * FlatBuffers: `FbPack`, `FbUnpack`, `FbView`
+//! * WIT Canonical ABI: `WitPack`, `WitUnpack`, `WitView`
+//! * dynamic views: `ToDynamicSchema`
+//! * with the feature `experimental-frac`, the derives of
+//!   `psio::experimental::frac`: `Pack`, `Unpack`, `FracView`, `FracMutView`,
+//!   `ToSchema`
+//!
 //! Every derive reads `#[psio(...)]`, the annotations that describe the type
 //! for all formats (`crate`, `transparent`, `invariant`,
 //! `definition_will_not_change`, `variant`, `custom`, `name`, `other`). A
@@ -8,22 +19,21 @@
 //! `#[frac(...)]` (`skip`). The table is in `attrs.rs`; a key under the wrong
 //! attribute or an unknown key is a compile error.
 
-use fracpack_macro::{fracmutview_macro_impl, fracpack_macro_impl, fracview_macro_impl};
 use proc_macro::TokenStream;
-use proc_macro_error::proc_macro_error;
-use schema_macro::schema_derive_macro;
 
 mod attrs;
-mod dynamic_schema_macro;
-mod fracpack_macro;
-mod json_text_macro;
 mod c_enum;
-mod key_macro;
-mod schema_macro;
 mod capnp_macro;
+mod dynamic_schema_macro;
 mod fb_macro;
-mod wit_macro;
+#[cfg(feature = "experimental-frac")]
+mod frac_macro;
+#[cfg(feature = "experimental-frac")]
+mod frac_schema_macro;
+mod json_text_macro;
+mod key_macro;
 mod pssz_macro;
+mod wit_macro;
 
 #[proc_macro_derive(PsszPack, attributes(psio, pssz))]
 pub fn derive_pssz_pack(input: TokenStream) -> TokenStream { pssz_macro::derive(input, false) }
@@ -40,37 +50,38 @@ pub fn derive_to_pssz_schema(input: TokenStream) -> TokenStream { pssz_macro::de
 #[proc_macro_derive(PsszView, attributes(psio, pssz))]
 pub fn derive_pssz_view(input: TokenStream) -> TokenStream { pssz_macro::derive_view(input) }
 
-// TODO: remove
-#[proc_macro_derive(Fracpack, attributes(psio, frac))]
-pub fn derive_fracpack(input: TokenStream) -> TokenStream {
-    fracpack_macro_impl(input, true, true)
-}
+// ── psio::experimental::frac derive macros ──────────────────────────────
 
+#[cfg(feature = "experimental-frac")]
 #[proc_macro_derive(Pack, attributes(psio, frac))]
 pub fn derive_pack(input: TokenStream) -> TokenStream {
-    fracpack_macro_impl(input, true, false)
+    frac_macro::frac_macro_impl(input, true, false)
 }
 
+#[cfg(feature = "experimental-frac")]
 #[proc_macro_derive(Unpack, attributes(psio, frac))]
 pub fn derive_unpack(input: TokenStream) -> TokenStream {
-    fracpack_macro_impl(input, false, true)
+    frac_macro::frac_macro_impl(input, false, true)
 }
 
-#[proc_macro_error]
+#[cfg(feature = "experimental-frac")]
+#[proc_macro_error::proc_macro_error]
 #[proc_macro_derive(FracView, attributes(psio, frac))]
 pub fn derive_frac_view(input: TokenStream) -> TokenStream {
-    fracview_macro_impl(input)
+    frac_macro::fracview_macro_impl(input)
 }
 
-#[proc_macro_error]
+#[cfg(feature = "experimental-frac")]
+#[proc_macro_error::proc_macro_error]
 #[proc_macro_derive(FracMutView, attributes(psio, frac))]
 pub fn derive_frac_mut_view(input: TokenStream) -> TokenStream {
-    fracmutview_macro_impl(input)
+    frac_macro::fracmutview_macro_impl(input)
 }
 
+#[cfg(feature = "experimental-frac")]
 #[proc_macro_derive(ToSchema, attributes(psio, frac))]
 pub fn to_schema(input: TokenStream) -> TokenStream {
-    schema_derive_macro(input)
+    frac_schema_macro::schema_derive_macro(input)
 }
 
 /// The Json / IJson text formats (`psio::json::{Json, IJson}`); see
