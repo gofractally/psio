@@ -7,8 +7,8 @@
 //!   applies it. Each has a neutral spelling under `#[psio(...)]`.
 //! * **Error.** PSIO's text, or what PSIO accepts, would differ from what
 //!   the attribute says. The derives that describe text reject it:
-//!   `JsonText` and `ToPsszSchema` (its schema drives the schema-based JSON
-//!   codec). PSIO has one text per type, the same in every
+//!   `JsonText`, `ToPsszSchema` (its schema drives the schema-based JSON
+//!   codec) and `Serde` ([`serde_bridge`](crate::serde_bridge)). PSIO has one text per type, the same in every
 //!   language, so a different text is never produced silently.
 //! * **Ignored.** It only steers the code serde generates, or it concerns
 //!   text and the derive is a binary one (`PsszPack`, `PsszUnpack`,
@@ -31,7 +31,7 @@
 //! | `default`, `default = "path"` | Error on the text derives: a missing member is an error unless it is an `Option` |
 //! | `remote = "..."` | Ignored: the derives describe the type they are written on |
 //! | `transparent` | Honoured by every derive, as `#[psio(transparent)]`: the type is its one member |
-//! | `from = "T"`, `try_from = "T"`, `into = "T"` | Error on `JsonText`, and on `ToPsszSchema` unless the type is `#[psio(custom)]`: the text would be the conversion type's. A type with a text of its own has a [`TextForm`](crate::json::TextForm) |
+//! | `from = "T"`, `try_from = "T"`, `into = "T"` | Error on `JsonText` and `Serde`, and on `ToPsszSchema` unless the type is `#[psio(custom)]`: the text would be the conversion type's. A type with a text of its own has a [`TextForm`](crate::json::TextForm) |
 //! | `crate = "..."`, `expecting = "..."` | Ignored |
 //! | `variant_identifier`, `field_identifier` | Error on the text derives: PSIO reads an enumerator from its name, its number, the numeric string or `"name:number"` |
 //!
@@ -217,6 +217,30 @@
 //!     #[serde(untagged)]
 //!     Square(u64),
 //! }
+//! ```
+//!
+//! `Serde` gives the type PSIO's text through serde, so it rejects what
+//! `JsonText` rejects:
+//!
+//! ```compile_fail
+//! #[derive(psio::Serde)]
+//! #[serde(deny_unknown_fields)]
+//! struct Id(u32);
+//! impl psio::json::TextForm for Id {
+//!     fn to_text(&self, out: &mut String) { out.push_str(&self.0.to_string()) }
+//!     fn from_text(text: &str) -> Option<Self> { text.parse().ok().map(Id) }
+//! }
+//! psio::json_text_form!(Id);
+//! ```
+//! ```
+//! #[derive(psio::Serde)]
+//! struct Id(u32);
+//! impl psio::json::TextForm for Id {
+//!     fn to_text(&self, out: &mut String) { out.push_str(&self.0.to_string()) }
+//!     fn from_text(text: &str) -> Option<Self> { text.parse().ok().map(Id) }
+//! }
+//! psio::json_text_form!(Id);
+//! assert_eq!(serde_json::to_string(&Id(7)).unwrap(), "\"7\"");
 //! ```
 //!
 //! Defaults:

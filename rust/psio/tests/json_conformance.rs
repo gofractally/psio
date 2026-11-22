@@ -532,6 +532,107 @@ fn rejects<F: JsonFormat, T: Val<F>>(text: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+// ── serde ───────────────────────────────────────────────────────────────────
+//
+// `psio::serde_bridge` gives a `JsonText` type serde impls that read and
+// write its IJson text. Every IJson text of the fixture is run through it
+// with `serde_json`: it accepts and rejects what the typed reader does, with
+// the same value and the same invariant message, and writes the same text.
+
+thread_local! {
+    /// Value rows whose `serde_json` text differs from the IJson text.
+    static SERDE_SPELLING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// IJson texts read through serde, by row kind.
+    static SERDE_ROWS: std::cell::RefCell<BTreeMap<String, usize>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+/// Whether two JSON texts differ only in how a number that is not a 64-bit
+/// integer, or a string escape, is spelled.
+fn same_but_spelling(a: &str, b: &str) -> bool {
+    use serde_json::Value;
+    fn same(a: &Value, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Number(a), Value::Number(b)) => {
+                // Two integers are the same token. (serde_json::Value reads
+                // "-0" as 0, so the sign of a zero is not compared here; the
+                // caller re-reads the text and compares the values.)
+                let (a, b) = (a.as_str(), b.as_str());
+                let integer = |t: &str| t.parse::<i128>().is_ok();
+                a == b
+                    || (!(integer(a) && integer(b))
+                        && a.parse::<f64>().unwrap() == b.parse::<f64>().unwrap())
+            }
+            (Value::Array(a), Value::Array(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same(a, b))
+            }
+            (Value::Object(a), Value::Object(b)) => {
+                a.len() == b.len()
+                    && a.iter().zip(b).all(|((ka, a), (kb, b))| ka == kb && same(a, b))
+            }
+            (a, b) => a == b,
+        }
+    }
+    match (serde_json::from_str::<Value>(a), serde_json::from_str::<Value>(b)) {
+        (Ok(a), Ok(b)) => same(&a, &b),
+        _ => false,
+    }
+}
+
+/// Rows of the fixture whose value holds such a number or escape.
+const SERDE_SPELLING_ROWS: usize = 82;
+
+fn serde_reads<T: JsonText>(text: &[u8]) -> Result<T, String> {
+    let mut reader = serde_json::Deserializer::from_slice(text);
+    let value = psio::serde_bridge::deserialize::<T, _>(&mut reader).map_err(|e| e.to_string())?;
+    reader.end().map_err(|e| e.to_string())?;
+    Ok(value)
+}
+
+fn serde_writes<T: JsonText>(value: &T) -> Result<String, String> {
+    let mut out = Vec::new();
+    psio::serde_bridge::serialize(value, &mut serde_json::Serializer::new(&mut out))
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(out).map_err(|e| e.to_string())
+}
+
+/// What serde does with the IJson text of one row, against the typed
+/// outcome `typed` (the value, or `None` for a rejection).
+fn serde_agrees<T: Val<IJson>>(row: &Row, text: &[u8], typed: Option<&T>) -> Result<(), String> {
+    SERDE_ROWS.with(|rows| *rows.borrow_mut().entry(row.kind.clone()).or_default() += 1);
+    let read = serde_reads::<T>(text);
+    match (typed, &read) {
+        (Some(value), Ok(read)) if read == value => {}
+        (Some(_), other) => return Err(format!("serde reads {other:?}")),
+        (None, Ok(read)) => return Err(format!("serde accepts as {read:?}")),
+        (None, Err(error)) => {
+            if let Some(reason) = &row.reason {
+                if !error.contains(reason.as_str()) {
+                    return Err(format!("serde: {error}, want {reason:?}"));
+                }
+            }
+        }
+    }
+    let Some(value) = typed else { return Ok(()) };
+    let canonical = json::try_encode::<IJson, T>(value).map_err(|e| format!("to_string: {e}"))?;
+    let written = serde_writes(value).map_err(|e| format!("serde writes: {e}"))?;
+    if written != canonical {
+        // serde's data model carries an f64 and a str, not their spelling:
+        // serde_json spells a float that is not a 64-bit integer, and the
+        // escapes of U+0008 and U+000C, its own way. It is the same value;
+        // the rows are pinned by the caller.
+        if !same_but_spelling(&canonical, &written) {
+            return Err(format!("serde writes {written}, want {canonical}"));
+        }
+        let again: T = reads::<IJson, T>(written.as_bytes()).map_err(|e| format!("serde text {e}"))?;
+        // NaN never has a text, so the values compare.
+        if &again != value {
+            return Err(format!("serde text {written} is a different value"));
+        }
+        SERDE_SPELLING.with(|rows| rows.borrow_mut().push(row.name.clone()));
+    }
+    Ok(())
+}
+
 /// The text checks of one row; the value it holds (`None` for a reject row).
 fn check_row<T: Val<Json> + Val<IJson>>(row: &Row) -> Result<Option<T>, String> {
     fn accept<F: JsonFormat, T: Val<F>>(row: &Row) -> Result<Option<T>, String> {
@@ -555,16 +656,26 @@ fn check_row<T: Val<Json> + Val<IJson>>(row: &Row) -> Result<Option<T>, String> 
             }
             writes::<Json, T>(&a, json_text).map_err(|e| format!("json {e}"))?;
             writes::<IJson, T>(&a, ijson_text).map_err(|e| format!("ijson {e}"))?;
+            serde_agrees::<T>(row, ijson_text.as_bytes(), Some(&a))?;
             Ok(Some(a))
         }
         ("accept", Some("json")) => accept::<Json, T>(row),
-        ("accept", Some("ijson")) => accept::<IJson, T>(row),
+        ("accept", Some("ijson")) => {
+            let value = accept::<IJson, T>(row)?;
+            serde_agrees::<T>(row, &input(row), value.as_ref())?;
+            Ok(value)
+        }
         ("reject", Some("json")) => rejects::<Json, T>(&input(row)).map(|_| None),
-        ("reject", Some("ijson")) => rejects::<IJson, T>(&input(row)).map(|_| None),
+        ("reject", Some("ijson")) => {
+            rejects::<IJson, T>(&input(row))?;
+            serde_agrees::<T>(row, &input(row), None)?;
+            Ok(None)
+        }
         ("invariant", Some(format)) => {
             let reason = row.reason.as_ref().ok_or("invariant row needs reason")?;
             if format == "ijson" {
-                violates::<IJson, T>(&input(row), reason).map(|_| None)
+                violates::<IJson, T>(&input(row), reason)?;
+                serde_agrees::<T>(row, &input(row), None).map(|_| None)
             } else {
                 violates::<Json, T>(&input(row), reason).map(|_| None)
             }
@@ -960,6 +1071,29 @@ fn every_vector_holds_on_every_entry_point() {
     );
     assert!(fixture.vectors.len() >= 900, "fixture shrank");
     assert_eq!(fixture.vectors.len(), 1759, "every row of the fixture was checked");
+    // Every IJson text went through serde: each value row and each accept,
+    // reject and invariant row of the ijson format.
+    let ijson_rows = |kind: &str| {
+        fixture
+            .vectors
+            .iter()
+            .filter(|r| r.kind == kind && (kind == "value" || r.format.as_deref() == Some("ijson")))
+            .count()
+    };
+    SERDE_ROWS.with(|rows| {
+        let rows = rows.borrow();
+        for kind in ["value", "accept", "reject", "invariant"] {
+            assert_eq!(rows.get(kind).copied().unwrap_or(0), ijson_rows(kind), "serde: {kind}");
+        }
+        assert_eq!(rows.values().sum::<usize>(), 1327);
+    });
+    // What serde_json writes is the IJson text byte for byte, except these:
+    // a float beyond the 64-bit integers, and the escapes of U+0008 / U+000C.
+    SERDE_SPELLING.with(|rows| {
+        let rows = rows.borrow();
+        println!("serde_json spelling differs on {} rows: {rows:?}", rows.len());
+        assert_eq!(rows.len(), SERDE_SPELLING_ROWS);
+    });
 }
 
 #[test]

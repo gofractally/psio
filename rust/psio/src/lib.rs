@@ -6,7 +6,9 @@
 //! * [`pssz`]: pSSZ, the primary schema-driven binary format, with views
 //!   ([`struct@PsszView`], [`PsszMutView`]), a Schema IR ([`pssz_schema_ir`]) and
 //!   schema-driven dynamic access ([`pssz_dynamic`]);
-//! * [`json`]: Json and IJson text;
+//! * [`json`]: Json and IJson text, and through it serde
+//!   ([`serde_bridge`]): `#[derive(psio::Serde)]` gives a type
+//!   `Serialize` / `Deserialize` with PSIO's text;
 //! * [`key`]: memcmp-sortable keys;
 //! * [`pjson`]: a self-describing binary JSON;
 //! * [`ssz`], [`capnp`], [`flatbuf`], [`wit`]: interchange with SSZ,
@@ -149,6 +151,7 @@
 
 pub mod experimental;
 pub mod serde_attrs;
+pub mod serde_bridge;
 
 // The derives. A derive and the trait it implements share a name; the trait
 // lives in its format's module.
@@ -158,6 +161,7 @@ pub use psio_macros::ToDynamicSchema;
 pub use psio_macros::{WitPack, WitUnpack, WitView};
 pub use psio_macros::{PsszPack, PsszUnpack, PsszView, ToPsszSchema};
 pub use psio_macros::JsonText;
+pub use psio_macros::Serde;
 pub use psio_macros::Key;
 
 // The helper names, one set per format (docs/helpers.md): `to_F`,
@@ -260,3 +264,5 @@ pub mod schema_import;
 // Macro dependencies are resolved through this crate for downstream consumers.
 #[doc(hidden)]
 pub use paste as __paste;
+#[doc(hidden)]
+pub use serde as __serde;

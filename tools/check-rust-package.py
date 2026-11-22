@@ -28,6 +28,8 @@ psio-macros = {{ path = {json.dumps(str(work/'psio-macros-0.1.0'))} }}
     (consumer/'src/main.rs').write_text('''
 use psio::{JsonText, Key, PsszPack, PsszUnpack, PsszView, ToPsszSchema};
 #[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView, ToPsszSchema, JsonText, Key)]
+// The serde impls come through psio: the consumer has no serde dependency.
+#[derive(psio::Serde)]
 #[derive(psio::CapnpPack, psio::CapnpUnpack, psio::FbPack, psio::FbUnpack, psio::WitPack, psio::WitUnpack)]
 #[pssz(max_dynamic_data = 4096)]
 struct Record {

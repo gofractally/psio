@@ -28,7 +28,8 @@
 //! is described once. An attribute with a PSIO meaning is honoured; one that
 //! would make PSIO's text, or what PSIO accepts, differ from what the
 //! attribute says is an error on the derives that describe text (`JsonText`,
-//! `ToPsszSchema`); one that only steers serde's generated code is ignored. The binary derives ignore an attribute that concerns text only.
+//! `ToPsszSchema`, `Serde`); one that only steers serde's generated code is
+//! ignored. The binary derives ignore an attribute that concerns text only.
 //! The rules are in [`serde_key`]; the table for users is in the psio crate
 //! docs.
 
@@ -386,6 +387,8 @@ pub(crate) enum Derive {
     /// `ToPsszSchema`: the schema describes the text the schema-driven
     /// codecs read and write.
     Schema,
+    /// `Serde`: serde impls that read and write PSIO's text.
+    Serde,
     /// `PsszPack`, `PsszUnpack`, `PsszView`.
     Pssz,
     Key,
@@ -397,12 +400,13 @@ pub(crate) enum Derive {
 
 impl Derive {
     fn text(self) -> bool {
-        matches!(self, Self::JsonText | Self::Schema)
+        matches!(self, Self::JsonText | Self::Schema | Self::Serde)
     }
     fn name(self) -> &'static str {
         match self {
             Self::JsonText => "JsonText",
             Self::Schema => "ToPsszSchema",
+            Self::Serde => "Serde",
             Self::Pssz => "PsszPack / PsszUnpack / PsszView",
             Self::Key => "Key",
             Self::Frac => "the frac derives",

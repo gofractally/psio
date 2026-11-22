@@ -2,6 +2,7 @@
 //!
 //! * pSSZ: `PsszPack`, `PsszUnpack`, `PsszView`, `ToPsszSchema`
 //! * Json / IJson text: `JsonText`
+//! * serde impls with PSIO's text: `Serde`
 //! * memcmp-sortable keys: `Key`
 //! * Cap'n Proto: `CapnpPack`, `CapnpUnpack`, `CapnpView`
 //! * FlatBuffers: `FbPack`, `FbUnpack`, `FbView`
@@ -38,6 +39,7 @@ mod frac_schema_macro;
 mod json_text_macro;
 mod key_macro;
 mod pssz_macro;
+mod serde_macro;
 mod wit_macro;
 
 #[proc_macro_derive(PsszPack, attributes(psio, pssz, serde))]
@@ -94,6 +96,14 @@ pub fn to_schema(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(JsonText, attributes(psio, json, serde))]
 pub fn derive_json_text(input: TokenStream) -> TokenStream {
     json_text_macro::derive(input)
+}
+
+/// `serde::Serialize` and `serde::Deserialize` for a type that is `JsonText`
+/// (`psio::serde_bridge`): the serde impls read and write the type's IJson
+/// text. Named `Serde` so it can be imported next to serde's own derives.
+#[proc_macro_derive(Serde, attributes(psio, json, serde))]
+pub fn derive_serde(input: TokenStream) -> TokenStream {
+    serde_macro::derive(input)
 }
 
 /// The memcmp-sortable `key` format (`psio::key`): a struct is the
