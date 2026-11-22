@@ -447,3 +447,196 @@ mod evolution {
         assert_eq!(as_old.args.decode().unwrap(), V1 { a: 5 });
     }
 }
+
+// ── Views of maps, sets, nested values and tuples ───────────────────────────
+
+mod views {
+    use psio::pssz::{
+        decode, encode, from_pssz, to_pssz, validate_pssz, BoundedMap, BoundedSet, Checked,
+        Deferred, Nested, Pssz, Pssz16, PsszMutView, PsszView,
+    };
+    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+    #[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+    #[pssz(definition_will_not_change)]
+    struct Point {
+        x: u32,
+        y: u32,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+    struct Args {
+        to: String,
+        amount: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+    struct Holder {
+        id: u8,
+        by_name: BTreeMap<String, Point>,
+        tags: BTreeSet<u16>,
+        args: Nested<Args>,
+        limits: BoundedMap<u8, u8, 2>,
+        seen: BoundedSet<u16, 3>,
+        totals: HashMap<u32, u64>,
+        names: HashSet<String>,
+        raw: Nested<Args, Deferred>,
+        pair: (u8, String),
+        deep: BTreeMap<u8, Nested<Vec<Point>, Checked, 64>>,
+    }
+
+    fn holder() -> Holder {
+        Holder {
+            id: 3,
+            by_name: [
+                ("b".to_string(), Point { x: 3, y: 4 }),
+                ("".to_string(), Point { x: 1, y: 2 }),
+                ("ab".to_string(), Point { x: 5, y: 6 }),
+            ]
+            .into(),
+            // Key order is not the order of the little-endian bytes: 2
+            // (00 02 as a key) is before 513 (02 01).
+            tags: [513, 2].into(),
+            args: Nested::new(&Args { to: "bob".into(), amount: 7 }).unwrap(),
+            limits: BoundedMap([(9u8, 1u8), (4, 2)].into()),
+            seen: BoundedSet([7u16, 5].into()),
+            totals: [(1u32, 10u64), (0x0100, 20), (2, 30)].into(),
+            names: ["z".to_string(), "a".to_string()].into(),
+            raw: Nested::new(&Args { to: "eve".into(), amount: 1 }).unwrap(),
+            pair: (8, "p".into()),
+            deep: [(1u8, Nested::new(&vec![Point { x: 1, y: 1 }, Point { x: 2, y: 2 }]).unwrap())]
+                .into(),
+        }
+    }
+
+    #[test]
+    fn read_views_reach_entries_elements_and_inner_values() {
+        let value = holder();
+        let bytes = to_pssz(&value);
+        let view = PsszView::<Holder>::new(&bytes).unwrap();
+
+        // A map: its entries in ascending key order.
+        let by_name = view.by_name();
+        assert_eq!((by_name.len(), by_name.is_empty()), (3, false));
+        let read: Vec<(String, u32, u32)> = (0..by_name.len())
+            .map(|i| {
+                let entry = by_name.get(i);
+                (
+                    entry.key().view().unwrap().to_string(),
+                    entry.value().x().get(),
+                    entry.value().y().get(),
+                )
+            })
+            .collect();
+        assert_eq!(read, [("".into(), 1, 2), ("ab".into(), 5, 6), ("b".into(), 3, 4)]);
+        assert_eq!(decode::<Pssz, (String, Point)>(by_name.get(2).bytes()).unwrap().0, "b");
+        assert!(by_name.try_get(3).is_err());
+
+        let totals = view.totals();
+        let read: Vec<(u32, u64)> =
+            (0..totals.len()).map(|i| (totals.get(i).key().get(), totals.get(i).value().get())).collect();
+        assert_eq!(read, [(1, 10), (2, 30), (0x0100, 20)]);
+        let limits = view.limits();
+        assert_eq!(limits.len(), 2);
+        assert_eq!((limits.get(0).key().get(), limits.get(0).value().get()), (4, 2));
+        assert_eq!((limits.get(1).key().get(), limits.get(1).value().get()), (9, 1));
+
+        // A set: its elements in ascending key order.
+        let tags = view.tags();
+        assert_eq!((tags.len(), tags.get(0).get(), tags.get(1).get()), (2, 2, 513));
+        assert!(tags.try_get(2).is_err());
+        let seen = view.seen();
+        assert_eq!((seen.len(), seen.get(0).get(), seen.get(1).get()), (2, 5, 7));
+        let names = view.names();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names.get(0).view().unwrap(), "a");
+        assert_eq!(names.get(1).view().unwrap(), "z");
+
+        // A nested value: the view of the inner value.
+        let args = view.args();
+        assert_eq!(args.len(), value.args.bytes().len());
+        assert_eq!(args.get().to().view().unwrap(), "bob");
+        assert_eq!(args.get().amount().get(), 7);
+        assert_eq!(args.try_get().unwrap().amount().get(), 7);
+        assert_eq!(view.raw().try_get().unwrap().to().view().unwrap(), "eve");
+        let inner = view.deep().get(0).value().get();
+        assert_eq!((inner.len(), inner.get(1).x().get()), (2, 2));
+
+        // A tuple: its members by position.
+        assert_eq!(view.pair().field::<0>().get(), 8);
+        assert_eq!(view.pair().field::<1>().view().unwrap(), "p");
+
+        // Empty containers.
+        let empty = to_pssz(&BTreeMap::<u8, u8>::new());
+        let empty_view = PsszView::<BTreeMap<u8, u8>>::new(&empty).unwrap();
+        assert!(empty_view.is_empty() && empty_view.try_get(0).is_err());
+        assert!(PsszView::<BTreeSet<u8>>::new(&to_pssz(&BTreeSet::<u8>::new())).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_inner_value_of_a_nested_view_is_in_the_automatic_profile() {
+        let value = holder();
+        let bytes = encode::<Pssz16, _>(&value);
+        assert_ne!(bytes, to_pssz(&value));
+        let view = PsszView::<Holder, Pssz16>::new(&bytes).unwrap();
+        let inner: PsszView<Args, Pssz> = view.args().get();
+        assert_eq!(inner.bytes(), to_pssz(&Args { to: "bob".into(), amount: 7 }));
+        assert_eq!(inner.amount().get(), 7);
+        assert_eq!(view.by_name().get(1).key().view().unwrap(), "ab");
+        assert_eq!(view.tags().get(1).get(), 513);
+    }
+
+    #[test]
+    fn a_deferred_nested_view_validates_on_request() {
+        // The bytes of a deferred nested value are not examined with the
+        // enclosing value: three bytes that are not an Args.
+        let bytes = to_pssz(&Nested::<Args, Deferred>::unchecked(vec![1, 2, 3]));
+        let view = PsszView::<Nested<Args, Deferred>>::new(&bytes).unwrap();
+        assert_eq!(view.len(), 3);
+        assert!(view.try_get().is_err());
+        assert!(PsszView::<Nested<Args>>::new(&bytes).is_err());
+    }
+
+    #[test]
+    fn mutable_views_write_mapped_values_and_inner_values_in_place() {
+        let mut value = holder();
+        let mut bytes = to_pssz(&value);
+        let before = bytes.len();
+        {
+            let mut writer = PsszMutView::<Holder>::new(&mut bytes).unwrap();
+
+            // The mapped value of an entry; its key is read-only.
+            let mut by_name = writer.by_name_mut();
+            assert_eq!(by_name.len(), 3);
+            let mut entry = by_name.get_mut(1);
+            assert_eq!(entry.key().view().unwrap(), "ab");
+            assert_eq!(entry.value().x().get(), 5);
+            entry.value_mut().x_mut().set(&50).unwrap();
+            entry.value_mut().set(&Point { x: 51, y: 60 }).unwrap();
+            assert!(by_name.try_get_mut(3).is_err());
+
+            let mut totals = writer.totals_mut();
+            let mut last = totals.get_mut(2);
+            assert_eq!(last.key().get(), 0x0100);
+            last.value_mut().set(&21).unwrap();
+            writer.limits_mut().get_mut(0).value_mut().set(&200).unwrap();
+
+            // The inner value of a nested value, and of one inside a map.
+            writer.args_mut().get_mut().amount_mut().set(&70).unwrap();
+            let mut deep = writer.deep_mut();
+            deep.get_mut(0).value_mut().get_mut().get_mut(1).y_mut().set(&22).unwrap();
+
+            // A tuple member.
+            writer.pair_mut().field_mut::<0>().set(&80).unwrap();
+        }
+        value.by_name.insert("ab".into(), Point { x: 51, y: 60 });
+        value.totals.insert(0x0100, 21);
+        value.limits.0.insert(4, 200);
+        value.args = Nested::new(&Args { to: "bob".into(), amount: 70 }).unwrap();
+        value.deep.insert(1, Nested::new(&vec![Point { x: 1, y: 1 }, Point { x: 2, y: 22 }]).unwrap());
+        value.pair.0 = 80;
+        // The frame is the canonical encoding of the modified value.
+        assert_eq!(bytes.len(), before);
+        validate_pssz::<Holder>(&bytes).unwrap();
+        assert_eq!(from_pssz::<Holder>(&bytes).unwrap(), value);
+        assert_eq!(bytes, to_pssz(&value));
+    }
+}

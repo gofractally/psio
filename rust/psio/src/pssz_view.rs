@@ -24,13 +24,20 @@
 //! at its own width. Record views honor the writer's header: a pruned
 //! trailing optional reads as None and unknown appended slots delimit the
 //! last known field.
+//!
+//! By type: a record has named accessors (`#[derive(PsszView)]`) and
+//! `field::<N>()`, which a tuple has too; `Vec` / `BoundedList` / arrays
+//! have `len()` / `get(i)`; a map has `len()` / `get(i)` giving a
+//! [`PsszMapEntry`] (`key()`, `value()`) and a set `len()` / `get(i)`, both
+//! in ascending key order; `Option` has `get()`; `Nested<T>` has `get()`,
+//! the view of its inner value.
 
-use crate::pssz::{Bitvector, Bitlist, BoundedList, BoundedRawString, BoundedString, Decoded, Pssz, PsszError, PsszFormat, PsszPack, PsszResult, PsszValidate, RawStr, RawString, Uint256};
+use crate::pssz::{Bitvector, Bitlist, BoundedList, BoundedMap, BoundedRawString, BoundedSet, BoundedString, Decoded, Nested, Pssz, PsszError, PsszFormat, PsszPack, PsszResult, PsszValidate, RawStr, RawString, Uint256};
 use crate::pssz_checked as checked;
 
 #[path = "pssz_mut_view.rs"]
 mod mut_view;
-pub use mut_view::PsszMutView;
+pub use mut_view::{PsszMutMapEntry, PsszMutView};
 
 /// Field `INDEX` of a record type, for `PsszView::field`.
 pub trait PsszField<F: PsszFormat, const INDEX: usize> {
@@ -261,6 +268,121 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Option<T>, F> {
 
 impl<'a, T: ?Sized, F: PsszFormat> PsszView<'a, Box<T>, F> {
     pub fn deref(&self) -> PsszView<'a, T, F> { PsszView::trusted(self.data) }
+}
+
+// ── Maps and sets ───────────────────────────────────────────────────────────
+//
+// A map is the list of its entries `(K, V)` in ascending key order, a set
+// the list of its elements (docs/pssz-spec.md 5.9): the views index that
+// list. Position `i` is the i-th entry in key order. The order is checked by
+// the validator, not here.
+
+/// One entry of a map view: the key and the mapped value (C++: the view of
+/// the entry tuple).
+#[derive(Debug)]
+pub struct PsszMapEntry<'a, K, V, F: PsszFormat = Pssz> {
+    entry: PsszView<'a, (K, V), F>,
+}
+impl<'a, K, V, F: PsszFormat> Clone for PsszMapEntry<'a, K, V, F> {
+    fn clone(&self) -> Self { *self }
+}
+impl<'a, K, V, F: PsszFormat> Copy for PsszMapEntry<'a, K, V, F> {}
+
+impl<'a, K: PsszPack<F>, V: PsszPack<F>, F: PsszFormat> PsszMapEntry<'a, K, V, F> {
+    pub fn try_key(&self) -> PsszResult<PsszView<'a, K, F>> { self.entry.try_field::<0>() }
+    pub fn try_value(&self) -> PsszResult<PsszView<'a, V, F>> { self.entry.try_field::<1>() }
+    pub fn key(&self) -> PsszView<'a, K, F> {
+        self.try_key().expect("pssz view: malformed map entry; validate first")
+    }
+    pub fn value(&self) -> PsszView<'a, V, F> {
+        self.try_value().expect("pssz view: malformed map entry; validate first")
+    }
+    /// The bytes of the entry: the encoding of the tuple `(K, V)`.
+    pub fn bytes(&self) -> &'a [u8] { self.entry.bytes() }
+}
+
+/// `try_len` of a list of `T` holding at most `max` elements.
+fn bounded_len<F: PsszFormat, T: PsszPack<F>>(data: &[u8], max: usize) -> PsszResult<usize> {
+    let n = checked::sequence_len::<F, T>(<Vec<T> as PsszPack<F>>::OFFSET_WIDTH, data, None)?;
+    if n > max {
+        return Err(PsszError("pssz view: map / set exceeds its bound"));
+    }
+    Ok(n)
+}
+/// The bytes of element `i` of a list of `T` holding at most `max` elements.
+pub(crate) fn bounded_element<F: PsszFormat, T: PsszPack<F>>(
+    data: &[u8],
+    max: usize,
+    i: usize,
+) -> PsszResult<std::ops::Range<usize>> {
+    let n = bounded_len::<F, T>(data, max)?;
+    checked::sequence_span::<F, T>(<Vec<T> as PsszPack<F>>::OFFSET_WIDTH, data, n, i)
+}
+
+macro_rules! pssz_map_view {
+    ([$($cg:tt)*], $ty:ty, $max:expr) => {
+        impl<'a, K: PsszPack<F>, V: PsszPack<F>, F: PsszFormat, $($cg)*> PsszView<'a, $ty, F> {
+            /// The number of entries.
+            pub fn try_len(&self) -> PsszResult<usize> { bounded_len::<F, (K, V)>(self.data, $max) }
+            /// Entry `i` in ascending key order.
+            pub fn try_get(&self, i: usize) -> PsszResult<PsszMapEntry<'a, K, V, F>> {
+                let span = bounded_element::<F, (K, V)>(self.data, $max, i)?;
+                Ok(PsszMapEntry { entry: PsszView::trusted(&self.data[span]) })
+            }
+            pub fn len(&self) -> usize { self.try_len().expect("pssz view: malformed map") }
+            pub fn is_empty(&self) -> bool { self.len() == 0 }
+            pub fn get(&self, i: usize) -> PsszMapEntry<'a, K, V, F> {
+                self.try_get(i).expect("pssz view: invalid map entry")
+            }
+        }
+    };
+}
+macro_rules! pssz_set_view {
+    ([$($cg:tt)*], $ty:ty, $max:expr) => {
+        impl<'a, K: PsszPack<F>, F: PsszFormat, $($cg)*> PsszView<'a, $ty, F> {
+            /// The number of elements.
+            pub fn try_len(&self) -> PsszResult<usize> { bounded_len::<F, K>(self.data, $max) }
+            /// Element `i` in ascending key order.
+            pub fn try_get(&self, i: usize) -> PsszResult<PsszView<'a, K, F>> {
+                let span = bounded_element::<F, K>(self.data, $max, i)?;
+                Ok(PsszView::trusted(&self.data[span]))
+            }
+            pub fn len(&self) -> usize { self.try_len().expect("pssz view: malformed set") }
+            pub fn is_empty(&self) -> bool { self.len() == 0 }
+            pub fn get(&self, i: usize) -> PsszView<'a, K, F> {
+                self.try_get(i).expect("pssz view: invalid set element")
+            }
+        }
+    };
+}
+pssz_map_view!([], std::collections::BTreeMap<K, V>, usize::MAX);
+pssz_map_view!([S], std::collections::HashMap<K, V, S>, usize::MAX);
+pssz_map_view!([const N: usize], BoundedMap<K, V, N>, N);
+pssz_set_view!([], std::collections::BTreeSet<K>, usize::MAX);
+pssz_set_view!([S], std::collections::HashSet<K, S>, usize::MAX);
+pssz_set_view!([const N: usize], BoundedSet<K, N>, N);
+
+// ── Nested values ───────────────────────────────────────────────────────────
+//
+// The bytes of a nested value are the encoding of its inner value, always
+// under the automatic profile, whatever profile the enclosing view reads
+// (docs/pssz-spec.md 5.8).
+
+impl<'a, T, V, F: PsszFormat, const N: usize> PsszView<'a, Nested<T, V, N>, F> {
+    /// The view of the inner value. The bytes were validated as a `T` with
+    /// the enclosing value when the nested value is `Checked`; a `Deferred`
+    /// one was not looked at, so this is then a view of unexamined bytes
+    /// (as from [`PsszView::trusted`]): use [`Self::try_get`].
+    pub fn get(&self) -> PsszView<'a, T, Pssz> { PsszView::trusted(self.data) }
+    /// The number of bytes of the inner encoding.
+    pub fn len(&self) -> usize { self.data.len() }
+    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+}
+impl<'a, T: PsszPack<Pssz> + PsszValidate<Pssz>, V, F: PsszFormat, const N: usize>
+    PsszView<'a, Nested<T, V, N>, F>
+{
+    /// Validates the bytes as a `T`, then gives the view of the inner value.
+    pub fn try_get(&self) -> PsszResult<PsszView<'a, T, Pssz>> { PsszView::new(self.data) }
 }
 
 // ── Bit types ───────────────────────────────────────────────────────────────

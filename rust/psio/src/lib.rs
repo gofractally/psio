@@ -58,7 +58,7 @@ pub use pssz::{
     from_pssz, from_pssz_trusted, pssz_size, to_pssz, to_pssz_into, try_to_pssz, validate_pssz,
     Pssz, PsszBuffer, SharedPssz,
 };
-pub use pssz_view::{PsszMutView, PsszView};
+pub use pssz_view::{PsszMapEntry, PsszMutMapEntry, PsszMutView, PsszView};
 pub use ssz::{
     from_ssz, from_ssz_trusted, ssz_size, to_ssz, to_ssz_into, validate_ssz, SharedSsz, Ssz,
     SszBuffer,

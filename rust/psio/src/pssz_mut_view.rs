@@ -11,6 +11,13 @@
 //! the presence of an optional is a decode → modify → encode (§17.1); `set`
 //! on a variable-size type does not compile.
 //!
+//! Navigation reaches every position §17.3 lists: record and tuple members
+//! (`field_mut::<N>()`, the derived `<field>_mut()`), list and array
+//! elements, a present optional's payload, the mapped value of a map entry
+//! ([`PsszMutMapEntry`]; its key is read-only) and the inner value of a
+//! checked `Nested<T>`. A set, and a nested value whose validation is
+//! deferred, have no writable position and no accessor.
+//!
 //! ```
 //! use psio::{PsszBuffer, PsszMutView, PsszView};
 //!
@@ -50,9 +57,47 @@
 //! let mut writer = psio::PsszMutView::<String>::trusted(&mut bytes);
 //! writer.set(&String::from("b"));                          // not a fixed-size type
 //! ```
+//!
+//! Maps, sets and nested values: the mapped value and the checked inner
+//! value are writable, a key, a set element and a deferred inner value are
+//! not.
+//!
+//! ```
+//! use psio::pssz::{Nested, PsszMutView};
+//! use std::collections::BTreeMap;
+//!
+//! let mut bytes = psio::to_pssz(&BTreeMap::from([(1u8, 10u32), (2, 20)]));
+//! let mut map = PsszMutView::<BTreeMap<u8, u32>>::new(&mut bytes)?;
+//! let mut entry = map.get_mut(1);
+//! assert_eq!(entry.key().get(), 2);
+//! entry.value_mut().set(&21)?;
+//!
+//! let mut bytes = psio::to_pssz(&Nested::<[u16; 2]>::new(&[1, 2])?);
+//! let mut nested = PsszMutView::<Nested<[u16; 2]>>::new(&mut bytes)?;
+//! nested.get_mut().get_mut(0).set(&9)?;
+//! # Ok::<(), psio::pssz::PsszError>(())
+//! ```
+//! ```compile_fail
+//! use std::collections::BTreeMap;
+//! let mut bytes = psio::to_pssz(&BTreeMap::from([(1u8, 10u32)]));
+//! let mut map = psio::PsszMutView::<BTreeMap<u8, u32>>::trusted(&mut bytes);
+//! map.get_mut(0).key().set(&2);                            // a key is a read view
+//! ```
+//! ```compile_fail
+//! use std::collections::BTreeSet;
+//! let mut bytes = psio::to_pssz(&BTreeSet::from([1u8]));
+//! let mut set = psio::PsszMutView::<BTreeSet<u8>>::trusted(&mut bytes);
+//! set.get_mut(0);                                          // a set has no writable position
+//! ```
+//! ```compile_fail
+//! use psio::pssz::{Deferred, Nested};
+//! let mut bytes = psio::to_pssz(&Nested::<[u16; 2], Deferred>::new(&[1, 2]).unwrap());
+//! let mut nested = psio::PsszMutView::<Nested<[u16; 2], Deferred>>::trusted(&mut bytes);
+//! nested.get_mut();                                        // deferred: not known to be a value
+//! ```
 
 use super::{PsszField, PsszView};
-use crate::pssz::{BoundedList, Pssz, PsszError, PsszFormat, PsszPack, PsszResult, PsszValidate};
+use crate::pssz::{BoundedList, BoundedMap, Checked, Nested, Pssz, PsszError, PsszFormat, PsszPack, PsszResult, PsszValidate};
 use crate::pssz_checked as checked;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -211,6 +256,77 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat, const N: usize> PsszMutView<'a
     pub fn get_mut(&mut self, i: usize) -> PsszMutView<'_, T, F> {
         self.try_get_mut(i).expect("pssz mutable view: invalid array element")
     }
+}
+
+// ── Maps ────────────────────────────────────────────────────────────────────
+//
+// The order of the entries is a function of the bytes of the keys alone
+// (§17.2): a mapped value is writable where a tuple member is, a key is
+// never writable. A set has no writable position at all — every byte of
+// every element decides the order — so a mutable view of a set has no
+// element accessor.
+
+/// One entry of a mutable map view (C++ `psio::mutable_map_entry`): the key
+/// can be read, the mapped value can be written in place.
+#[derive(Debug)]
+pub struct PsszMutMapEntry<'a, K, V, F: PsszFormat = Pssz> {
+    entry: PsszMutView<'a, (K, V), F>,
+}
+impl<'a, K: PsszPack<F>, V: PsszPack<F>, F: PsszFormat> PsszMutMapEntry<'a, K, V, F> {
+    /// The key, read-only.
+    pub fn try_key(&self) -> PsszResult<PsszView<'_, K, F>> { self.entry.as_view().try_field::<0>() }
+    pub fn key(&self) -> PsszView<'_, K, F> {
+        self.try_key().expect("pssz mutable view: malformed map entry")
+    }
+    /// The read-only view of the mapped value.
+    pub fn value(&self) -> PsszView<'_, V, F> {
+        self.entry.as_view().try_field::<1>().expect("pssz mutable view: malformed map entry")
+    }
+    /// The mapped value, writable in place.
+    pub fn try_value_mut(&mut self) -> PsszResult<PsszMutView<'_, V, F>> {
+        self.entry.try_field_mut::<1>()
+    }
+    pub fn value_mut(&mut self) -> PsszMutView<'_, V, F> {
+        self.try_value_mut().expect("pssz mutable view: mapped value not writable in place")
+    }
+    /// The mapped value, consuming the entry (keeps its lifetime).
+    pub fn try_into_value(self) -> PsszResult<PsszMutView<'a, V, F>> {
+        self.entry.try_into_field::<1>()
+    }
+}
+
+macro_rules! pssz_map_mut_view {
+    ([$($cg:tt)*], $ty:ty, $max:expr) => {
+        impl<'a, K: PsszPack<F>, V: PsszPack<F>, F: PsszFormat, $($cg)*> PsszMutView<'a, $ty, F> {
+            pub fn len(&self) -> usize { self.as_view().len() }
+            pub fn is_empty(&self) -> bool { self.len() == 0 }
+            /// Entry `i` in ascending key order; an error when out of range
+            /// or malformed.
+            pub fn try_get_mut(&mut self, i: usize) -> PsszResult<PsszMutMapEntry<'_, K, V, F>> {
+                let range = super::bounded_element::<F, (K, V)>(self.data, $max, i);
+                Ok(PsszMutMapEntry { entry: self.reborrow().narrow(range)? })
+            }
+            pub fn get_mut(&mut self, i: usize) -> PsszMutMapEntry<'_, K, V, F> {
+                self.try_get_mut(i).expect("pssz mutable view: invalid map entry")
+            }
+        }
+    };
+}
+pssz_map_mut_view!([], std::collections::BTreeMap<K, V>, usize::MAX);
+pssz_map_mut_view!([S], std::collections::HashMap<K, V, S>, usize::MAX);
+pssz_map_mut_view!([const N: usize], BoundedMap<K, V, N>, N);
+
+// ── Nested values ───────────────────────────────────────────────────────────
+
+impl<'a, T, F: PsszFormat, const N: usize> PsszMutView<'a, Nested<T, Checked, N>, F> {
+    /// The inner value, writable in place: its bytes are a frame of their
+    /// own under the automatic profile, and a fixed-size overwrite inside
+    /// leaves them the canonical encoding of the modified value, with the
+    /// same count (§17.2). A `Deferred` nested value has no such accessor:
+    /// no reader has established that its bytes are a `T`.
+    pub fn get_mut(&mut self) -> PsszMutView<'_, T, Pssz> { PsszMutView::trusted(self.data) }
+    /// [`Self::get_mut`], consuming the view (keeps its lifetime).
+    pub fn into_inner(self) -> PsszMutView<'a, T, Pssz> { PsszMutView::trusted(self.data) }
 }
 
 // ── Option / Box ────────────────────────────────────────────────────────────

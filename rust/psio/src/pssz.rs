@@ -1183,7 +1183,7 @@ pub type PsszBuffer<T, F = Pssz> = crate::Buffer<T, F>;
 /// One `T` encoded as pSSZ, immutable and shared through an `Arc<[u8]>`
 /// (C++ `psio::shared_pssz<T>`).
 pub type SharedPssz<T, F = Pssz> = crate::Shared<T, F>;
-pub use crate::pssz_view::{PsszMutView, PsszView};
+pub use crate::pssz_view::{PsszMapEntry, PsszMutMapEntry, PsszMutView, PsszView};
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
