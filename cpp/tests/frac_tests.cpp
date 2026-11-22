@@ -363,3 +363,78 @@ TEST_CASE("frac32 keeps extensible fixed-field records variable in parents", "[f
    CHECK(older.child.id == 7);
    CHECK(older.sibling == "sibling");
 }
+
+// A bool inside a run of fixed-size elements is 0 or 1, as it is anywhere
+// else: a memcpy-equivalent element layout does not exempt its bytes.
+struct FracFlag
+{
+   std::uint8_t tag;
+   bool         on;
+   std::uint16_t n;
+};
+PSIO_REFLECT(FracFlag, tag, on, n, definitionWillNotChange())
+struct FracNoBool
+{
+   std::uint16_t a;
+   std::uint16_t b;
+};
+PSIO_REFLECT(FracNoBool, a, b, definitionWillNotChange())
+struct FracFlags
+{
+   std::vector<FracFlag>          flags;
+   std::array<FracFlag, 2>        pair;
+   std::vector<std::array<bool, 2>> grid;
+   std::array<bool, 3>            bits;
+   std::vector<FracNoBool>        plain;
+};
+PSIO_REFLECT(FracFlags, flags, pair, grid, bits, plain)
+
+TEST_CASE("frac validate checks bools inside runs of fixed-size elements", "[frac][validate]")
+{
+   using frac32 = psio::experimental::frac32;
+   const FracFlags value{{{1, true, 2}, {3, false, 4}, {5, true, 6}},
+                         {{{7, true, 8}, {9, false, 10}}},
+                         {{true, false}, {false, true}},
+                         {true, false, true},
+                         {{0x0101, 0x0101}, {0x0202, 0x0202}}};
+   const auto good = psio::encode(frac32{}, value);
+   REQUIRE(psio::validate<FracFlags>(frac32{}, std::span<const char>{good}).ok());
+
+   // Each bool byte in turn becomes 2; every other byte equal to 1 is left
+   // alone (tags, counts, the plain records).
+   const auto bools_of = [&](const FracFlags& v) {
+      // The positions where flipping the value's bools changes the bytes.
+      FracFlags flipped = v;
+      for (auto& f : flipped.flags) f.on = !f.on;
+      for (auto& f : flipped.pair) f.on = !f.on;
+      for (auto& g : flipped.grid) for (auto& b : g) b = !b;
+      for (auto& b : flipped.bits) b = !b;
+      const auto other = psio::encode(frac32{}, flipped);
+      REQUIRE(other.size() == good.size());
+      std::vector<std::size_t> at;
+      for (std::size_t i = 0; i < good.size(); ++i)
+         if (good[i] != other[i])
+            at.push_back(i);
+      return at;
+   };
+   const auto positions = bools_of(value);
+   REQUIRE(positions.size() == 3 + 2 + 4 + 3);
+   for (const auto at : positions)
+   {
+      auto bad = good;
+      bad[at] = 2;
+      INFO("bool byte at " << at);
+      CHECK_FALSE(psio::validate<FracFlags>(frac32{}, std::span<const char>{bad}).ok());
+      CHECK_FALSE(psio::validate_strict<FracFlags>(frac32{}, std::span<const char>{bad}).ok());
+   }
+   // The same, with the vector of records at the top level.
+   const std::vector<FracFlag> list{{1, true, 2}, {3, true, 4}};
+   auto                        bytes = psio::encode(frac32{}, list);
+   REQUIRE(psio::validate<std::vector<FracFlag>>(frac32{}, std::span<const char>{bytes}).ok());
+   bytes[bytes.size() - 3] = 2;   // the last element's bool
+   CHECK_FALSE(psio::validate<std::vector<FracFlag>>(frac32{}, std::span<const char>{bytes}).ok());
+   // Elements with no bool keep the byte-count check: any bytes are values.
+   std::vector<FracNoBool> plain{{2, 2}, {0xffff, 0xffff}};
+   const auto              plain_bytes = psio::encode(frac32{}, plain);
+   CHECK(psio::validate<std::vector<FracNoBool>>(frac32{}, std::span<const char>{plain_bytes}).ok());
+}

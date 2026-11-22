@@ -1697,6 +1697,73 @@ namespace psio {
       codec_status validate_value(std::span<const char> src, std::size_t pos,
                                   std::size_t end, std::size_t depth, bool strict = false) noexcept;
 
+      // Whether every bit pattern of the fixed bytes of T is a valid T: then
+      // a run of them needs only its byte count checked. False for anything
+      // that holds a bool (0 / 1 only), and for any type not listed
+      // (conservative: such an element is walked).
+      template <typename T>
+      consteval bool fixed_bytes_always_valid()
+      {
+         if constexpr (std::is_same_v<T, bool>)
+            return false;
+         else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T> ||
+                            std::is_same_v<T, ::psio::uint256> ||
+                            std::is_same_v<T, ::psio::uint128> ||
+                            std::is_same_v<T, ::psio::int128> || is_bitvector<T>::value)
+            return true;
+         else if constexpr (is_std_array_v<T>)
+            return fixed_bytes_always_valid<typename T::value_type>();
+         else if constexpr (Record<T>)
+         {
+            if constexpr (::psio::format_should_dispatch_adapter_v<
+                             ::psio::experimental::frac_<4>, T>)
+               return false;
+            else
+            {
+               using R = ::psio::reflect<T>;
+               return []<std::size_t... Is>(std::index_sequence<Is...>) {
+                  return (fixed_bytes_always_valid<
+                             std::remove_cvref_t<typename R::template member_type<Is>>>() &&
+                          ...);
+               }(std::make_index_sequence<R::member_count>{});
+            }
+         }
+         else
+            return false;
+      }
+      template <std::size_t W, Record T>
+      codec_status validate_record_fixed_inline(std::span<const char> src,
+                                                std::size_t&          cursor,
+                                                std::size_t           end,
+                                                std::size_t depth, bool strict) noexcept;
+
+      // The elements of a run of `n` fixed-size E at `cursor`, one by one.
+      template <std::size_t W, typename E>
+      codec_status validate_fixed_run(std::span<const char> src, std::size_t cursor,
+                                      std::size_t n, std::size_t run_end, std::size_t depth,
+                                      bool strict) noexcept
+      {
+         constexpr std::size_t esz = fixed_size_of<E>();
+         for (std::size_t i = 0; i < n; ++i)
+         {
+            if constexpr (Record<E>)
+            {
+               auto st = validate_record_fixed_inline<W, E>(src, cursor, run_end, depth + 1,
+                                                            strict);
+               if (!st.ok())
+                  return st;
+            }
+            else
+            {
+               auto st = validate_value<W, E>(src, cursor, cursor + esz, depth + 1, strict);
+               if (!st.ok())
+                  return st;
+               cursor += esz;
+            }
+         }
+         return codec_ok();
+      }
+
       // Forward decl — payload_end is used inside validate_value's record
       // walker to track monotonic offsets across heap entries.
       template <std::size_t W, typename T>
@@ -1707,7 +1774,7 @@ namespace psio {
       codec_status validate_record_fixed_inline(std::span<const char> src,
                                                 std::size_t&          cursor,
                                                 std::size_t           end,
-                                                std::size_t depth, bool strict = false) noexcept
+                                                std::size_t depth, bool strict) noexcept
       {
          if (depth > ::psio::kMaxValidationDepth)
             return codec_fail("frac: max depth exceeded",
@@ -1864,25 +1931,13 @@ namespace psio {
                if (avail < total)
                   return codec_fail("frac: truncated fixed array",
                                     static_cast<std::uint32_t>(pos), "frac");
-               // For non-record fixed Es the byte-count check above is
-               // sufficient (no internal validity beyond fitting).
-               // For record Es, walk each one — UNLESS its layout is
-               // memcpy-equivalent, in which case the bytes-fit check
-               // is the whole structural validation.
-               constexpr bool memcpy_layout =
-                  Record<E> && std::is_trivially_copyable_v<E> &&
-                  fixed_size_of<E>() == sizeof(E);
-               if constexpr (Record<E> && !memcpy_layout)
-               {
-                  std::size_t cursor = pos;
-                  for (std::size_t i = 0; i < N; ++i)
-                  {
-                     auto st = validate_record_fixed_inline<W, E>(
-                        src, cursor, pos + total, depth + 1, strict);
-                     if (!st.ok())
-                        return st;
-                  }
-               }
+               // The byte-count check above is the whole validation when
+               // every bit pattern of E is a value (integers, floats and
+               // records / arrays of them). Anything else — a bool, or
+               // an element holding one — is walked: a memcpy-equivalent
+               // layout does not make its bytes valid.
+               if constexpr (!fixed_bytes_always_valid<E>())
+                  return validate_fixed_run<W, E>(src, pos, N, pos + total, depth, strict);
                return codec_ok();
             }
             else
@@ -1960,26 +2015,15 @@ namespace psio {
                      "element size",
                      static_cast<std::uint32_t>(pos), "frac");
                const std::size_t n = byte_count / esz;
-               // Memcpy-layout fast path: trivially-copyable +
-               // sized-equal records have wire bytes == memory bytes,
-               // so the byte-count + multiple-of-esz check above is
-               // sufficient. Mirrors pssz's same shortcut
-               // (pssz.hpp:1250). Without this, vector<DWNC record>
-               // walks every element and pays N× the per-element cost.
-               constexpr bool memcpy_layout =
-                  Record<E> && std::is_trivially_copyable_v<E> &&
-                  fixed_size_of<E>() == sizeof(E);
-               if constexpr (Record<E> && !memcpy_layout)
-               {
-                  std::size_t cursor = body_pos;
-                  for (std::size_t i = 0; i < n; ++i)
-                  {
-                     auto st = validate_record_fixed_inline<W, E>(
-                        src, cursor, body_pos + byte_count, depth + 1, strict);
-                     if (!st.ok())
-                        return st;
-                  }
-               }
+               // Fast path: when every bit pattern of E is a value
+               // (integers, floats, records / arrays of them) the
+               // byte-count + multiple-of-esz check above is the whole
+               // validation. An element that holds a bool is walked,
+               // memcpy-equivalent layout or not: its bool bytes must
+               // be 0 / 1, as they must outside a vector.
+               if constexpr (!fixed_bytes_always_valid<E>())
+                  return validate_fixed_run<W, E>(src, body_pos, n, body_pos + byte_count,
+                                                  depth, strict);
                return codec_ok();
             }
             else
