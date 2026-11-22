@@ -741,6 +741,63 @@ namespace
                           {{f32(0xffc00000u), dinf}, {-finf, f64(0x7ff8000000000000ull)},
                            {finf, f64(0xfff8000000000000ull)}, {f32(0x7fc00000u), -dinf}});
 
+      // A nested value: the key of the byte list holding its PSSZ encoding
+      // (the string framing), so keys order by the inner BYTES, not by the
+      // inner value; the reader validates the bytes as the inner type.
+      {
+         using N = psio::nested<Account>;
+         const Account     bob{7, "bob", 5};
+         const KPacked     packed{7, N::from(bob)};
+         const auto        inner = psio::encode(psio::pssz{}, bob);
+         const auto        key   = key_of(packed);
+         // Exactly the key of the same tuple holding the bytes.
+         if (key != psio::encode(psio::key{},
+                                 std::tuple<std::uint32_t, std::vector<std::uint8_t>>{
+                                    7, {inner.begin(), inner.end()}}))
+            die("a nested value does not have the key of its byte list");
+         const std::vector<KPacked> picked{packed, {0, N::from(Account{})},
+                                           {0xffffffffu, N::from(Account{1, "", std::nullopt})}};
+         for (std::size_t i = 0; i < picked.size(); ++i)
+         {
+            value<KPacked>("v" + std::to_string(i), picked[i]);
+            prefixes<KPacked>("v" + std::to_string(i), picked[i]);
+         }
+         // Inner bytes: the record header comes first (08 00 00 00 without
+         // seq, 0c 00 00 00 with it), then the little-endian shard, so
+         // shard 256 (00 01 00 00) sorts before shard 1 (01 00 00 00) and
+         // every record that stores seq sorts after every one that does not.
+         order_bits<KPacked>("inner_bytes",
+                             {{1, N::from(Account{256, "", std::nullopt})},
+                              {1, N::from(Account{1, "", std::nullopt})},
+                              {1, N::from(Account{1, "a", std::nullopt})},
+                              {1, N::from(Account{2, "", std::nullopt})},
+                              {1, N::from(Account{1, "", 0})},
+                              {2, N::from(Account{0, "", std::nullopt})}});
+         accept<KPacked>("inner_members_out_of_order",
+                         R"([7,{"seq":5,"owner":"bob","shard":7}])", packed);
+         reject<KPacked>("inner_as_hex", R"([7,"00"])");
+         reject<KPacked>("inner_missing_member", R"([7,{"shard":7,"seq":null}])");
+
+         auto framed = [](std::span<const char> bytes) {
+            // 00 -> 00 01, then the terminator 00 00.
+            std::string out = "00000007";
+            for (unsigned char c : bytes)
+               out += to_hex(std::span<const char>{reinterpret_cast<const char*>(&c), 1}) +
+                      (c == 0 ? "01" : "");
+            return out + "0000";
+         };
+         if (framed(inner) != to_hex(key))
+            die("nested key framing is not the string framing");
+         key_reject<KPacked>("truncated", to_hex(std::span<const char>{key.data(), key.size() - 1}));
+         key_reject<KPacked>("trailing_byte", to_hex(key) + "00");
+         key_reject<KPacked>("inner_not_the_type", framed(std::string_view{"\x01\x02\x03", 3}));
+         key_reject<KPacked>("inner_empty", framed({}));
+         const std::string short_inner(inner.begin(), inner.end() - 1);
+         // (seq is the last member: one byte short cuts its payload.)
+         key_reject<KPacked>("inner_truncated", framed(short_inner));
+         key_reject<KPacked>("invalid_escape", "00000007" "0c0002" "0000");
+      }
+
       // Non-canonical or malformed encodings.
       key_reject<KShard>("escape_02", "00000007" "610002" "0000");
       key_reject<KShard>("unterminated_string", "00000007" "6100");

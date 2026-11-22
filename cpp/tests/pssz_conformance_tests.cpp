@@ -240,7 +240,8 @@ namespace
          CHECK_FALSE(psio::decode_pssz_checked(F{}, wire, out, reported).ok());
          // The unchecked decode is asserted only where it shares the check
          // (see decode_also_rejects): it is not a validating entry point.
-         if (decode_also_rejects<F>(v.reason)) CHECK_FALSE(decodes<T, F>(wire));
+         if (unchecked_decode_reads_all(v.cls) && decode_also_rejects<F>(v.reason))
+            CHECK_FALSE(decodes<T, F>(wire));
          return;
       }
       const bool unknown = v.expect == "unknown";
@@ -300,7 +301,7 @@ namespace
       "corpus", "evolution-forward", "evolution-backward", "pruning", "malformed",
       "optional-presence", "width", "tuple", "variant", "enum", "enum-unknown-value", "string",
       "string-raw-non-utf8", "length-bound-overflow", "cap-overflow-explicit-nested", "bytes",
-      "zero-fixed", "depth", "box"};
+      "zero-fixed", "depth", "box", "nested", "nested-unknown", "nested-deferred"};
 }  // namespace
 
 TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformance]")

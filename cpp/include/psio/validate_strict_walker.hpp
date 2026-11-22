@@ -41,6 +41,7 @@
 
 #include <psio/annotate.hpp>   // element_spec
 #include <psio/adapter.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
@@ -115,6 +116,15 @@ namespace psio {
                             std::is_same_v<U, ::psio::int128> ||
                             std::is_same_v<U, ::psio::uint256>)
             return true;
+         else if constexpr (::psio::detail::is_nested_v<U>)
+         {
+            // The bytes are checked as the inner type (opaque when deferred).
+            if constexpr (::psio::detail::is_nested<U>::descends)
+               return can_validate_without_materialization<
+                  typename ::psio::detail::is_nested<U>::inner, Seen..., U>();
+            else
+               return true;
+         }
          else if constexpr (semantic_free_sequence<U>::value)
             return can_validate_without_materialization<
                typename semantic_free_sequence<U>::element_type, Seen..., U>();

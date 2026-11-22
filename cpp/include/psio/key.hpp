@@ -35,6 +35,10 @@
 //   std::variant          1-byte alternative index + the alternative
 //   std::tuple, record    elements / reflected fields concatenated in
 //                         order; tuple<> and an empty record are zero bytes
+//   psio::nested<T>       the key of the byte list holding the PSSZ encoding
+//                         of the T (nested.hpp): string framing, bytes order.
+//                         The reader validates the bytes as T unless the
+//                         member is declared deferred
 //
 // std::pair is not a PSIO value in any format, and bitlist has no key
 // form; both are compile errors.
@@ -63,6 +67,7 @@
 //   psio::decode<Key>(psio::key{}, bytes)  a full key back to its tuple
 
 #include <psio/cpo.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
@@ -395,6 +400,9 @@ namespace psio {
                s.write(tmp.data(), tmp.size());
             }
          }
+         else if constexpr (::psio::detail::is_nested_v<T>)
+            // The key of the byte list holding the inner encoding.
+            append_escaped(s, v.bytes().data(), v.size());
          else if constexpr (std::is_same_v<T, std::string>)
             append_escaped(s, v.data(), v.size());
          else if constexpr (is_utf8_string<T>::value)
@@ -556,6 +564,9 @@ namespace psio {
          const char* p     = nullptr;
          const char* end   = nullptr;
          const char* error = nullptr;
+         // validate_strict: the bytes of a nested value are checked in
+         // exact-schema mode (nested.hpp).
+         bool strict = false;
 
          std::size_t left() const noexcept { return static_cast<std::size_t>(end - p); }
          bool        fail(const char* what) noexcept
@@ -778,6 +789,23 @@ namespace psio {
                *out = std::move(v);
             return true;
          }
+         else if constexpr (::psio::detail::is_nested_v<T>)
+         {
+            // A byte list whose bytes are the PSSZ encoding of the inner
+            // type: validated as that type unless the member is deferred.
+            std::vector<char> bytes;
+            if (!read_escaped(r, [&](const char* data, std::size_t n) {
+                   bytes.insert(bytes.end(), data, data + n);
+                }))
+               return false;
+            T value = T::unchecked(std::move(bytes));
+            if constexpr (::psio::detail::is_nested<T>::descends)
+               if (!(r.strict ? value.validate_strict() : value.validate()).ok())
+                  return r.fail("key: nested bytes are not a valid encoding of their type");
+            if (out)
+               *out = std::move(value);
+            return true;
+         }
          else if constexpr (std::is_same_v<T, std::string>)
          {
             return read_escaped(r, [&](const char* data, std::size_t n) {
@@ -938,9 +966,10 @@ namespace psio {
 
       // Reads exactly one T spanning the whole buffer.
       template <typename T>
-      codec_status read_document(std::span<const char> bytes, T* out)
+      codec_status read_document(std::span<const char> bytes, T* out, bool strict = false)
       {
          reader r{bytes.data(), bytes.data(), bytes.data() + bytes.size()};
+         r.strict = strict;
          if (!read_value<T>(r, out))
             return codec_fail(r.error ? r.error : "key: malformed",
                               static_cast<std::uint32_t>(r.p - r.begin), "key");
@@ -1075,7 +1104,7 @@ namespace psio {
                                      T*,
                                      std::span<const char> bytes) noexcept
       {
-         return detail::key_impl::read_document<T>(bytes, nullptr);
+         return detail::key_impl::read_document<T>(bytes, nullptr, true);
       }
 
       template <typename T>

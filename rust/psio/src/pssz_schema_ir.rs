@@ -35,7 +35,7 @@ ir_record!(Optional { r#type: Box<AnyType> });
 ir_record!(Variant { members: Vec<Member>, attributes: Vec<Attribute> });
 ir_record!(Tuple { members: Vec<Box<AnyType>> });
 ir_record!(Custom { r#type: Box<AnyType>, id: String });
-ir_record!(FracPack { r#type: Box<AnyType> });
+ir_record!(Nested { r#type: Box<AnyType> });
 ir_record!(Int {
     bits: u32,
     isSigned: bool
@@ -70,7 +70,7 @@ pub enum AnyValue {
     Tuple(Tuple),
     Int(Int),
     Float(Float),
-    FracPack(FracPack),
+    Nested(Nested),
     Custom(Custom),
     Resource(Resource),
     Type(Type),

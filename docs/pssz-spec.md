@@ -376,6 +376,7 @@ cap large enough to cover them from the start.
 | `BoundedList(T, N)`             | N × max_encoded_size(T) + W [None if T None]  |
 | `String`                    | None                                          |
 | `Vector(T)`                 | None                                          |
+| `Nested(T)` (§5.8)          | None (a member `length_bound` max N: N)       |
 | `Optional(T)` where min(T)=0 | 1 + max(T)                                   |
 | `Optional(T)` where min(T)>0 | max(T)                                       |
 | `Variant(Ts...)`            | 1 + max(max_encoded_size(T_i))                |
@@ -425,6 +426,7 @@ Used by the optional-encoding rule (§5.5).
 | `Bitlist(N)`                     | 1                                    |
 | `String`                    | 0                                    |
 | `Vector(T)`                 | 0                                    |
+| `Nested(T)` (§5.8)          | 0 (whatever min(T) is)               |
 | `BoundedString(N)`              | 0                                    |
 | `BoundedList(T, N)`             | 0                                    |
 | `Optional(T)`, min(T) > 0   | 0 (None is zero bytes)               |
@@ -780,6 +782,113 @@ There is no version byte, no magic number, no document framing — the
 schema fully describes the bytes. (Compare pjson, which has a magic
 byte, version, and flags header at the document level.)
 
+### 5.8 Nested values — `Nested(T)`
+
+A `Nested(T)` value **is the pssz encoding of a T, carried as a byte
+list**. (C++ `psio::nested<T>`, `#include <psio/nested.hpp>`; Schema IR
+`Nested{type}`.)
+
+```
+[ encoding(T) ]        exactly the payload of Vector(u8) holding those bytes
+```
+
+- **Wire.** `encode(Nested(T) holding v) == encode(Vector(u8) holding
+  encode(T, v))`. A record with a `Nested(T)` member and the same record
+  with a `Vector(u8)` member are byte-identical, so one side of a protocol
+  may declare the member typed and the other as bytes (a router forwards
+  action arguments it does not interpret; the service that owns them reads
+  them typed).
+- **Inner profile.** The inner bytes are always T's encoding under the
+  automatic profile (§3: every type its own width), whatever profile the
+  enclosing value uses.
+- **Shape.** Variable-size; `min_encoded_size` 0 (the inner encoding may be
+  empty, and the rule does not depend on T); no `max_encoded_size` and
+  width contribution of its own. `Optional(Nested(T))` therefore always
+  uses the selector form (§5.5.2), like `Optional(Vector(u8))`. A member
+  `length_bound` on a nested member bounds the **byte count** of the inner
+  encoding, exactly as on a `Vector(u8)` member, and enters width selection
+  the same way.
+- **Validation descends.** Every reader that checks its input validates the
+  inner bytes as a T, with the reader's own rule:
+
+  | reader of the enclosing value | inner bytes must be |
+  |---|---|
+  | compatible (`validate`, `validate_or_throw`, `validate_pssz_compatible`, `decode_pssz_checked`, checked views) | a valid T; unknown appended optional fields inside it are accepted and reported with the enclosing value's |
+  | exact (`validate_strict`) | the one canonical encoding of a T: no unknown fields, strict strings, every type-level rule of T |
+
+  Bytes that are not a T, a fixed-size T followed by a trailing byte, an
+  inner record that stores a trailing `None` (§7.2) — all are rejections of
+  the enclosing value, with the inner value's error. The trusted
+  `psio::decode` copies the bytes without reading them, like every other
+  check it leaves to `validate`.
+- **Depth** (§8.3). The nested member is a node; the root of the inner value
+  is **one level below it**, and the inner value's own levels count on from
+  there. The limit of 64 applies to the sum.
+- **Deferred validation.** A member may instead be declared *deferred* (C++
+  `psio::nested<T, psio::nested_validation::deferred>`). Wire, key, text
+  and schema are unchanged, but a reader of the enclosing value treats the
+  bytes as opaque in every mode — any bytes are valid — and the holder
+  validates explicitly (`member.validate()`) before reading through it. The
+  policy is a property of the reading program, not of the data: it is not
+  recorded in the Schema IR. A schema-driven reader validates the inner
+  bytes by default and takes an option to treat them as opaque
+  (`psio::pssz_ir::nested_bytes::opaque`).
+- **Encoding does not re-validate.** A nested value holds bytes that were
+  produced by the encoder or checked when they were adopted, so encoding an
+  enclosing value writes them as they are. Two consequences: bytes adopted
+  unchecked (`nested<T>::unchecked`) that are not a T produce a frame every
+  reader rejects; and the encoder's depth check covers the nested member
+  (which must leave one level for the inner root) but not the levels inside
+  the bytes, so a value that only exceeds the depth limit *inside* a nested
+  member is written and then rejected by readers.
+- **Evolution.** `Nested(A)` → `Nested(B)` is a compatible change exactly
+  when A → B is (§7); `Nested(T)` and `Vector(u8)` are different types to
+  the schema-upgrade check even though their bytes agree. A typed reader
+  keeps the member's bytes: decoding a frame whose inner value carries
+  fields it does not know and re-encoding it reproduces the frame, unknown
+  inner fields included. A schema-driven reader, whose dynamic value is the
+  inner value, re-encodes the canonical encoding of what it read (the
+  unknown fields are dropped, as for any typed read) unless it was asked to
+  treat nested bytes as opaque.
+- **Key.** The key of the byte list (`docs/key-spec.md`): nested values
+  order by their inner **bytes**.
+- **Text.** JSON and I-JSON carry the inner value's own text, not hex
+  (`docs/json.md`, "Nested values").
+
+**Text round trips are value round trips.** Text holds the inner *value*;
+reading it stores the canonical encoding of that value. Fields that a newer
+writer appended to the inner record, and that this reader's T does not
+know, are therefore not carried through text. A holder that must preserve
+foreign bytes exactly — a relay, a store of signed payloads, anything that
+hashes the bytes — declares a byte list (`Vector(u8)`: hex in I-JSON)
+instead of `Nested(T)`, and decodes the bytes where it needs the value.
+
+C++ surface (`psio/nested.hpp`):
+
+```cpp
+struct Action {
+   AccountNumber              sender;
+   MethodNumber               method;
+   psio::nested<TransferArgs> args;
+   PSIO_REFLECT(Action, sender, method, args)
+};
+
+auto n = psio::nested<TransferArgs>::from(args);          // encode (fail-fast)
+psio::nested<TransferArgs>::from_checked(args, n);        // encode -> codec_status
+psio::nested<TransferArgs>::checked(bytes, n);            // adopt after validate -> codec_status
+auto u = psio::nested<TransferArgs>::unchecked(std::move(bytes));  // adopt, caller vouches
+n.bytes(); n.size(); std::move(n).release();              // the encoding
+n.view();                                                 // psio::view<TransferArgs, psio::pssz>
+n.decode();                                               // TransferArgs (trusted)
+n.decode_checked(out, &has_unknown);                      // validate, then decode
+n.validate(); n.validate(has_unknown); n.validate_strict();
+psio::view<Action, psio::pssz>{frame}.get<2>().get();     // view<TransferArgs> over the inner bytes
+```
+
+A default-constructed `nested<T>` is the encoding of `T{}`; `==` compares
+bytes. The other C++ formats (bin, ssz, frac, ...) have no nested value: it
+is an unsupported type there.
+
 ## 6. Document — top-level
 
 ### 6.1 Buffer interpretation
@@ -905,6 +1014,8 @@ not change.
   must rebuild against the new schema; the wire format is incompatible.)
 ✓ Add a new alternative to a variant (provided the new alt is at the
   end of the variant's alternative list).
+✓ Evolve the inner type of a `Nested(T)` member by these same rules
+  (§5.8). The member itself stays a byte list.
 
 ### 7.6 What you CANNOT change without breaking old decoders
 
@@ -953,6 +1064,10 @@ before the buffer is consumed. Implementations enforce the cap by
 threading a `depth` counter through the walker and returning a
 `max_depth_exceeded` error (one of the §9 categories) when the
 counter exceeds 64 at any container/record entry.
+
+The bytes of a `Nested(T)` value (§5.8) are part of the same walk: the
+inner value's root is one level below the nested member, and the cap
+applies across the boundary.
 
 Decoders are NOT bound by the cap — they MAY accept deeper trust
 when fed pre-validated input, since a successful `validate()` is a
@@ -1276,6 +1391,9 @@ The conformance corpus must include:
 - Indirection wrappers used as cycle-breakers (recursive types
   that bottom out through a heap-allocated owning pointer)
   passing through transparently.
+- Nested values (§5.8): byte equality with the byte-list form, inner
+  bytes that are not the inner type, unknown fields inside the inner
+  bytes, deferred validation, depth across the nesting boundary.
 
 ## 15. Canonical Encoding
 

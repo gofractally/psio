@@ -172,3 +172,29 @@ hand: all 15 alternatives, attributes, a package, interfaces, worlds, uses,
 the IR's codecs, not a schema to encode values with) and
 `lists-nested-to-the-limit` (the deepest inline nesting the readers' limit
 of 64 allows).
+
+## Nested values in the shared codec fixtures
+
+`pssz-vectors.json` and `time-key-vectors.json` are described in
+`pssz-vectors.md` and `time-key-vectors.md`. `json-vectors.json` (emitted by
+`cpp/tests/json_conformance_emit.cpp`; type ids and row kinds in
+`cpp/tests/json_conformance_types.hpp`) holds these nested-value types
+(`docs/json.md`, "Nested values"; Schema IR node `Nested`):
+
+| type id | type |
+|---|---|
+| `NestedArgs` | `record{to: string, amount: u64, memo: optional<string>}` — the inner record |
+| `nested<u64>` | a nested `u64`: its text is the integer's (a string beyond 2^53 − 1 under ijson) |
+| `nested<NestedArgs>` | a nested record: its text is the record's object |
+| `nested<NestedArgs,deferred>` | the same with deferred validation: same text, bytes and IR |
+| `optional<nested<u64>>`, `list<nested<NestedArgs>>` | in an optional, as list elements |
+| `NestedChoice` | `variant<u32, nested<NestedArgs>>`: the ijson alternative name is `nested_NestedArgs` |
+| `NestedAction` | `record{method: u32, args: nested<NestedArgs>, twice: nested<nested<u64>>, maybe: optional<nested<NestedArgs>>, many: list<nested<u64>>}` |
+
+Their rows are the ordinary kinds: `value` (both texts and the `pssz` bytes,
+which are those of the byte list holding the inner encoding), `accept` (a
+non-canonical inner text — member order, unknown or repeated members, a
+missing optional member, an integer in its other form — reads as the value
+whose canonical text is `canonical`) and `reject` (the text is not the inner
+type's: hex or byte arrays, `null`, a missing or mistyped inner member, an
+inner integer out of range).

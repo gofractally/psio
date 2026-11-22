@@ -14,6 +14,7 @@
 // The shape grammar is described in conformance/pssz-vectors.md. Shapes are
 // derived from the C++ types here, never written by hand.
 
+#include <psio/nested.hpp>
 #include <psio/pssz.hpp>
 #include <psio/pssz_view.hpp>
 #include <psio/schema_builder.hpp>
@@ -185,6 +186,39 @@ namespace pssz_conf
    PSIO_REFLECT(BoxFixedRec, id, word, pair)
    struct BoxOuter { u8 k; BoxCapRec capped; BoxRec open; std::optional<BDirect> direct; };
    PSIO_REFLECT(BoxOuter, k, capped, open, direct)
+
+   // ── Nested values ─────────────────────────────────────────────────────
+   // A nested<T> is a byte list holding the automatic-profile encoding of a
+   // T (psio/nested.hpp): on the wire exactly list<u8>, and every checking
+   // reader also validates the bytes as T. The deferred form has the same
+   // bytes and schema, and its bytes are opaque to an enclosing reader.
+   template <typename T> using Nested = psio::nested<T>;
+   template <typename T>
+   using NestedLater = psio::nested<T, psio::nested_validation::deferred>;
+   struct NArgs { Raw to; u64 amount; std::optional<Raw> memo; };
+   PSIO_REFLECT(NArgs, to, amount, memo)
+   struct NArgs2 { Raw to; u64 amount; std::optional<Raw> memo; std::optional<u32> fee; };
+   PSIO_REFLECT(NArgs2, to, amount, memo, fee)  // what a newer writer of NArgs sends
+   struct NAction { u32 method; Nested<NArgs> args; };
+   PSIO_REFLECT(NAction, method, args)
+   struct NAction2 { u32 method; Nested<NArgs2> args; };  // the newer writer of NAction
+   PSIO_REFLECT(NAction2, method, args)
+   struct NActionRaw { u32 method; std::vector<u8> args; };  // what a forwarder declares
+   PSIO_REFLECT(NActionRaw, method, args)
+   struct NActionLater { u32 method; NestedLater<NArgs> args; };
+   PSIO_REFLECT(NActionLater, method, args)
+   struct NShapes
+   {
+      Nested<u32>                  scalar;
+      Nested<Nested<NArgs>>        twice;
+      std::optional<Nested<NArgs>> maybe;
+      std::vector<Nested<NArgs>>   many;
+   };
+   PSIO_REFLECT(NShapes, scalar, twice, maybe, many)
+   struct NCapped { u8 id; Nested<Raw> note; };  // note <= 8 bytes of encoding
+   PSIO_REFLECT(NCapped, id, note)
+   struct NChain { std::optional<Nested<NChain>> next; };  // depth across the boundary
+   PSIO_REFLECT(NChain, next)
 
    // ── Zero-size and fixed records ───────────────────────────────────────
    struct Unit {};  // zero-field DWNC: encodes to zero bytes
@@ -372,6 +406,7 @@ PSIO_TYPE_ATTRS(pssz_conf::Mix2x2, psio::max_dynamic_data_spec{60000})
 PSIO_TYPE_ATTRS(pssz_conf::Mix2x4, psio::max_dynamic_data_spec{60000})
 PSIO_FIELD_ATTRS(pssz_conf::Bounded, s, psio::length_bound{.max = 4})
 PSIO_FIELD_ATTRS(pssz_conf::Bounded, v, psio::length_bound{.max = 2})
+PSIO_FIELD_ATTRS(pssz_conf::NCapped, note, psio::length_bound{.max = 8})
 
 namespace pssz_conf
 {
@@ -476,6 +511,9 @@ namespace pssz_conf
             return "bitlist<" + std::to_string(is_bitlist<T>::n) + ">";
          else if constexpr (impl::is_psio_box_v<T>)
             return "box<" + ref<typename impl::is_psio_box<T>::elem>() + ">";
+         else if constexpr (impl::is_nested_v<T>)
+            return "nested<" + ref<typename impl::is_nested<T>::inner>() +
+                   (impl::is_nested<T>::descends ? "" : ",deferred") + ">";
          else
             return primitive<T>();
       }
@@ -508,8 +546,9 @@ namespace pssz_conf
          if constexpr (psio::has_spec_v<psio::length_bound, Annots> &&
                        !impl::is_utf8_string_v<F>)
          {
-            static_assert(std::is_same_v<F, std::string> || impl::is_std_vector_v<F>,
-                          "pssz_conf: length_bound only on string and vector members");
+            static_assert(std::is_same_v<F, std::string> || impl::is_std_vector_v<F> ||
+                             impl::is_nested_v<F>,
+                          "pssz_conf: length_bound only on string, vector and nested members");
             const auto bound = std::get<psio::length_bound>(
                psio::effective_annotations_for<T, F, R::template member_pointer<I>>::value);
             out += "<=" + std::to_string(*bound.max);
@@ -636,7 +675,12 @@ namespace pssz_conf
       types<std::tuple<>, std::tuple<u32>, std::tuple<Raw>, TupBS,
             std::tuple<u32, Raw, std::optional<u16>>,
             std::tuple<u8, std::optional<u32>, std::optional<Raw>>, TupRec, Vec<TupBS>,
-            std::variant<std::tuple<u8, std::optional<u16>>, u32>, VarUS, Var5>>::type;
+            std::variant<std::tuple<u8, std::optional<u16>>, u32>, VarUS, Var5>,
+      // nested values (appended: the ids above keep their positions)
+      types<NArgs, NArgs2, NAction, NAction2, NActionRaw, NActionLater, NShapes, NCapped, NChain,
+            Nested<u32>, Nested<NArgs>, NestedLater<NArgs>, Opt<Nested<Raw>>, Vec<Nested<u32>>,
+            std::variant<u8, Nested<NArgs>>, std::tuple<Nested<Raw>, u8>, Opt<NChain>,
+            Opt<Opt<NChain>>>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)
@@ -708,6 +752,14 @@ namespace pssz_conf
       else if constexpr (std::is_same_v<F, psio::pssz8>) return "pssz8";
       else if constexpr (std::is_same_v<F, psio::pssz16>) return "pssz16";
       else return "pssz32";
+   }
+
+   // The unchecked `psio::decode` adopts the bytes of a nested value without
+   // reading them, so for the nested classes it is asserted to throw for no
+   // rejection at all.
+   inline bool unchecked_decode_reads_all(std::string_view cls)
+   {
+      return !cls.starts_with("nested");
    }
 
    // Validation errors that the unchecked fail-fast `psio::decode` is also

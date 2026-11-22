@@ -71,9 +71,36 @@ builder records everything those depend on:
   `Int{256, unsigned}`.
 - **Floats** are `Float{8, 24}` and `Float{11, 53}` (the exponent width was
   one short before; the Rust builder and the codec use these values).
+- **Nested values.** `psio::nested<T>` (`psio/nested.hpp`) is the node
+  `Nested{type: T}`, described below. A member `length_bound` on a nested
+  member, which counts the bytes of the inner encoding, is always the member
+  attribute `lengthBound` (`"max=64"`): there is no bounded `Nested` node.
+  The validation policy of `psio::nested<T, nested_validation::deferred>` is
+  not recorded: both forms produce the same node.
 
-Not recorded: a member `as<Tag>` override, text / binary adapters, and `Box`
-(transparent). See "Not expressible" in `docs/json.md`.
+### The `Nested` node
+
+`Nested { type: AnyType }` (alternative 10 of `AnyType`, between `Float` and
+`Custom`; C++ `psio::schema_types::Nested`) means: **a byte list holding the
+PSSZ encoding of a `type` value**.
+
+| aspect | rule for a schema-driven codec |
+|---|---|
+| wire | exactly `List{Int{8}}`: variable-size, minimum size 0 (an `Option` of it uses the selector form), no inferred size bound; the offset width of a type holding it is derived as for a byte list. A member `lengthBound` bounds the byte count |
+| inner bytes | `type` encoded in the **automatic** profile, also inside an explicit-width frame |
+| validation | the inner bytes are validated as `type` by the rule in force (compatible: unknown appended optional fields are accepted and reported; exact: rejected), with the inner root one node level below the `Nested` node. Option: treat the bytes as opaque (C++ `nested_bytes::opaque` on `validate_pssz`, `validate_auto`, `decode_auto`, `decode_compatible<W>`, `decode_exact<W>`, `encode<W>`, `encode_auto`, `validate_canonical_for_width<W>`) |
+| dynamic value | the inner value (C++ `pssz_ir::Value` of `type`); encoding writes its canonical encoding. Under the opaque option: `Bytes`, read and written as they are |
+| text (JSON / I-JSON) | the inner value's text (`docs/json.md`, "Nested values") |
+| key | the key of the byte list (`docs/key-spec.md`) |
+| malformed schema | a null `type`; a `type` that is not itself a well-formed type under the automatic profile's rules |
+| foreign IDLs | bytes: WIT `list<u8>`, Cap'n Proto `Data`, FlatBuffers `[ubyte]`, protobuf `bytes` |
+
+The alternative was called `FracPack` and had no codec; it keeps its
+position, so the encoding of a Schema IR is unchanged by the rename, and the
+JSON spelling of the alternative is `Nested`.
+
+Not recorded: a member `as<Tag>` override, text / binary adapters, `Box`
+(transparent), and the deferred-validation policy of a nested member. See "Not expressible" in `docs/json.md`.
 
 ## Serialized forms of a schema
 

@@ -47,6 +47,9 @@
 //   text adapter              "..." holding the adapter's text
 //                             (PSIO_ADAPTER(T, psio::text_category, ...), or a
 //                             member-level psio::as<Tag>)
+//   psio::nested<T>           the text of the T its bytes hold (nested.hpp);
+//                             read as a T and stored as its canonical PSSZ
+//                             encoding. Bytes that are not a T have no text
 //
 // Integer form per member: psio::json_number / psio::json_string and
 // psio::ijson_number / psio::ijson_string (annotate.hpp) force a number or a
@@ -98,6 +101,7 @@
 
 #include <psio/adapter.hpp>
 #include <psio/cpo.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
@@ -763,6 +767,19 @@ namespace psio {
                return;
             }
             encode_value<Fmt, IM>(*v.value, w);
+         }
+         else if constexpr (::psio::detail::is_nested_v<T>)
+         {
+            // The inner value's own text. The bytes are validated before
+            // they are decoded: bytes that are not a T have no text.
+            typename ::psio::detail::is_nested<T>::inner inner{};
+            if (!v.decode_checked(inner).ok())
+            {
+               w.fail("json: nested bytes are not a valid encoding of their type");
+               w.append("null");
+               return;
+            }
+            encode_value<Fmt, IM>(inner, w);
          }
          else if constexpr (std::is_same_v<T, bool>)
             w.append(v ? std::string_view{"true"} : std::string_view{"false"});
@@ -1513,6 +1530,21 @@ namespace psio {
             if (!out->value)
                out->value = std::make_unique<E>();
             return read_value<Fmt, IM, E>(r, out->value.get());
+         }
+         else if constexpr (::psio::detail::is_nested_v<T>)
+         {
+            // The inner value's text, stored as its canonical encoding. The
+            // value is built even when only validating: text describing a
+            // value that has no encoding is not a nested value.
+            typename ::psio::detail::is_nested<T>::inner inner{};
+            if (!read_value<Fmt, IM>(r, &inner))
+               return false;
+            T value = T::unchecked({});
+            if (!T::from_checked(inner, value).ok())
+               return r.c.fail("json: nested value has no encoding");
+            if (out)
+               *out = std::move(value);
+            return true;
          }
          else if constexpr (std::is_same_v<T, bool>)
          {

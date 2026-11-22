@@ -116,7 +116,7 @@ namespace
          if (psio::decode_pssz_checked(F{}, bytes, out, reported).ok())
             die(where + ": decode_pssz_checked accepts a frame validate rejects");
          const std::string reason(status.error().what);
-         if (decode_also_rejects<F>(reason))
+         if (unchecked_decode_reads_all(where) && decode_also_rejects<F>(reason))
          {
             bool decoded = true;
             try
@@ -2017,6 +2017,249 @@ namespace
       });
    }
 
+   // ── Nested values ─────────────────────────────────────────────────────
+   NChain nchain(std::size_t links)
+   {
+      NChain out;
+      for (std::size_t i = 0; i < links; ++i)
+      {
+         NChain outer;
+         outer.next = Nested<NChain>::from(out);
+         out        = std::move(outer);
+      }
+      return out;
+   }
+   std::vector<u8> octets(const Bytes& bytes) { return {bytes.begin(), bytes.end()}; }
+   template <typename T>
+   Bytes inner_of(const T& value)
+   {
+      return must_encode<psio::pssz>(value, "nested inner value");
+   }
+
+   void emit_nested()
+   {
+      // A nested<T> member is exactly a list<u8> holding the automatic-profile
+      // encoding of a T, whatever the profile of the enclosing value; every
+      // checking reader also validates those bytes as T, in its own mode, the
+      // inner root one node level below the member.
+      const char* c = "nested";
+      static_assert(psio::auto_pssz_width_v<Nested<u32>> == 4 &&
+                    !psio::max_encoded_size<Nested<u32>>().has_value());
+      static_assert(!psio::max_encoded_size<NAction>().has_value());
+      static_assert(psio::max_encoded_size<NCapped>() == 17 &&
+                    psio::auto_pssz_width_v<NCapped> == 1);
+      static_assert(psio::pssz_evolves_from<NAction, NAction2> &&
+                    psio::pssz_evolves_from<NAction, NActionLater> &&
+                    !psio::pssz_evolves_from<NAction, NActionRaw>);
+
+      const NArgs  args{"bob", 5, Raw{"rent"}};
+      const NArgs  plain{"", 0, std::nullopt};
+      const NArgs2 newer{"bob", 5, Raw{"rent"}, 7u};
+      const Bytes  args_bytes  = inner_of(args);
+      const Bytes  plain_bytes = inner_of(plain);
+      const Bytes  newer_bytes = inner_of(newer);
+      // A stored trailing None: not a canonical NArgs.
+      const Bytes unpruned =
+         Fr{4}.o(16).o(16).ow(8, 5).o(19).raw("bob");
+      const Bytes garbage = hx("010203");
+
+      // ── Values, and the byte-list form of the same bytes ────────────────
+      corpus<NArgs>(c, "args", args);
+      corpus<NArgs>(c, "args_plain", plain);
+      corpus<NArgs2>(c, "args", newer);
+      corpus<Nested<u32>>(c, "scalar", Nested<u32>::from(0x01020304u));
+      literal_all<Nested<u32>>(c, "scalar_bytes", Nested<u32>::from(0x01020304u), hx("04030201"));
+      corpus<Nested<NArgs>>(c, "record", Nested<NArgs>::from(args));
+      literal_all<Nested<NArgs>>(c, "record_bytes", Nested<NArgs>::from(args), args_bytes);
+      corpus<NAction>(c, "action", NAction{9, Nested<NArgs>::from(args)});
+      corpus<NAction>(c, "action_plain", NAction{0, Nested<NArgs>::from(plain)});
+      corpus<NAction2>(c, "action", NAction2{9, Nested<NArgs2>::from(newer)});
+      corpus<NActionRaw>(c, "action", NActionRaw{9, octets(args_bytes)});
+      corpus<NActionRaw>(c, "action_plain", NActionRaw{0, octets(plain_bytes)});
+      corpus<NActionLater>(c, "action", NActionLater{9, NestedLater<NArgs>::from(args)});
+      formats([&]<typename F>() {
+         // The typed member and the byte list are the same frame.
+         Bytes typed, raw, later;
+         if (!try_encode<F>(NAction{9, Nested<NArgs>::from(args)}, typed)) return;
+         if (!try_encode<F>(NActionRaw{9, octets(args_bytes)}, raw) || typed != raw)
+            die("a nested member does not encode as the byte list of its inner encoding");
+         if (!try_encode<F>(NActionLater{9, NestedLater<NArgs>::from(args)}, later) ||
+             later != typed)
+            die("a deferred nested member does not encode as the eager one");
+         // ...and each reads the other's frame.
+         add<F, NActionRaw>(c, "action_written_typed", typed, canonical(), "action",
+                            type_id<NAction>());
+         add<F, NAction>(c, "action_written_as_bytes", raw, canonical(), "action",
+                         type_id<NActionRaw>());
+      });
+      {
+         NShapes shapes{Nested<u32>::from(7u), Nested<Nested<NArgs>>::from(Nested<NArgs>::from(args)),
+                        Nested<NArgs>::from(plain),
+                        {Nested<NArgs>::from(args), Nested<NArgs>::from(plain)}};
+         corpus<NShapes>(c, "shapes", shapes);
+         shapes.maybe.reset();
+         shapes.many.clear();
+         corpus<NShapes>(c, "shapes_empty", shapes);
+      }
+      // The optional of a nested value carries a selector, as the optional
+      // of a byte list does: the inner encoding may be empty.
+      literal_all<Opt<Nested<Raw>>>(c, "optional_none", std::nullopt, hx("00"));
+      literal_all<Opt<Nested<Raw>>>(c, "optional_some_empty", Nested<Raw>::from(""), hx("01"));
+      literal_all<Opt<Nested<Raw>>>(c, "optional_some", Nested<Raw>::from("hi"), hx("016869"));
+      corpus<Vec<Nested<u32>>>(c, "list_empty", {});
+      corpus<Vec<Nested<u32>>>(c, "list_two", {Nested<u32>::from(1u), Nested<u32>::from(2u)});
+      corpus<std::variant<u8, Nested<NArgs>>>(c, "variant_scalar",
+                                              std::variant<u8, Nested<NArgs>>{u8{3}});
+      corpus<std::variant<u8, Nested<NArgs>>>(
+         c, "variant_nested", std::variant<u8, Nested<NArgs>>{Nested<NArgs>::from(args)});
+      corpus<std::tuple<Nested<Raw>, u8>>(
+         c, "tuple", std::tuple<Nested<Raw>, u8>{Nested<Raw>::from("abc"), 2});
+      // A member length_bound counts the bytes of the inner encoding.
+      corpus<NCapped>(c, "capped_at_bound", NCapped{1, Nested<Raw>::from("12345678")});
+      corpus<NCapped>(c, "capped_empty", NCapped{1, Nested<Raw>::from("")});
+      corpus<NChain>(c, "chain_3", nchain(3));
+
+      // ── Rejections: the inner bytes are not the inner type ──────────────
+      formats([&]<typename F>() {
+         auto action = [](const Bytes& inner) {
+            return must_encode<F>(NActionRaw{9, octets(inner)}, "nested action frame");
+         };
+         add<F, NAction>(c, "inner_not_a_record", action(garbage),
+                         reject("pssz: record header truncated"));
+         add<F, NAction>(c, "inner_empty", action({}), reject("pssz: record header truncated"));
+         add<F, NAction>(c, "inner_header_past_frame", action(hx("ff000000")),
+                         reject("pssz: record fixed region truncated"));
+         add<F, NAction>(c, "inner_unpruned_tail", action(unpruned),
+                         reject("pssz: trailing absent optional field was not pruned"));
+         // The byte-list reader accepts all of them: they are bytes.
+         add<F, NActionRaw>(c, "inner_not_a_record", action(garbage), canonical());
+         add<F, NActionRaw>(c, "inner_unpruned_tail", action(unpruned), canonical());
+
+         // A fixed-size inner value owns exactly its bytes.
+         add<F, Nested<u32>>(c, "inner_trailing_byte", hx("0403020100"),
+                             reject("pssz: fixed primitive span mismatch"));
+         add<F, Nested<u32>>(c, "inner_short", hx("040302"),
+                             reject("pssz: fixed primitive span mismatch"));
+         add<F, Nested<u32>>(c, "inner_empty", {}, reject("pssz: fixed primitive span mismatch"));
+         add<F, Nested<NArgs>>(c, "inner_not_a_record", garbage,
+                               reject("pssz: record header truncated"));
+
+         // Every position.
+         auto shapes = [](const Bytes& scalar, const Bytes& twice, std::optional<Bytes> maybe,
+                          std::vector<Bytes> many) {
+            struct RawShapes
+            {
+               std::vector<u8>                scalar;
+               std::vector<u8>                twice;
+               std::optional<std::vector<u8>> maybe;
+               std::vector<std::vector<u8>>   many;
+            };
+            // Field by field through the tuple form: the same record layout.
+            std::tuple<std::vector<u8>, std::vector<u8>, std::optional<std::vector<u8>>,
+                       std::vector<std::vector<u8>>>
+               raw{octets(scalar), octets(twice), std::nullopt, {}};
+            if (maybe) std::get<2>(raw) = octets(*maybe);
+            for (const auto& m : many) std::get<3>(raw).push_back(octets(m));
+            return must_encode<F>(raw, "nested shapes frame");
+         };
+         const Bytes seven = hx("07000000");
+         const Bytes twice = args_bytes;  // nested<nested<NArgs>>: the bytes of the bytes
+         add<F, NShapes>(c, "shapes_by_hand", shapes(seven, twice, plain_bytes, {args_bytes}),
+                         canonical());
+         add<F, NShapes>(c, "scalar_invalid", shapes(hx("0700"), twice, std::nullopt, {}),
+                         reject("pssz: fixed primitive span mismatch"));
+         add<F, NShapes>(c, "twice_invalid", shapes(seven, garbage, std::nullopt, {}),
+                         reject("pssz: record header truncated"));
+         add<F, NShapes>(c, "optional_invalid", shapes(seven, twice, garbage, {}),
+                         reject("pssz: record header truncated"));
+         add<F, NShapes>(c, "element_invalid", shapes(seven, twice, std::nullopt, {args_bytes, garbage}),
+                         reject("pssz: record header truncated"));
+         add<F, std::variant<u8, Nested<NArgs>>>(c, "variant_invalid", hx("01010203"),
+                                                 reject("pssz: record header truncated"));
+      });
+      // Over a member length_bound: a frame only a writer that skips the
+      // check produces.
+      formats([&]<typename F>() {
+         const NCapped over{1, Nested<Raw>::from("123456789")};
+         Bytes         refused;
+         if (try_encode<F>(over, refused) ||
+             psio::encode_pssz_checked(F{}, over, refused).ok() || !refused.empty())
+            die("the encoder accepted a nested member outside its length_bound");
+         add<F, NCapped>(c, "capped_one_over",
+                         psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, over),
+                         reject("pssz: member length_bound violated"));
+      });
+
+      // ── Node depth across the nesting boundary ──────────────────────────
+      // An NChain record at depth d has its optional member at d + 1, the
+      // nested value (the Some payload) at d + 2 and the inner record at
+      // d + 3: 21 links put the innermost record at depth 63. The encoder
+      // does not walk the bytes a nested value holds, so it writes all of
+      // these; the readers count the levels.
+      static_assert(psio::kMaxValidationDepth == 64);
+      formats([&]<typename F>() {
+         const NChain chain = nchain(21);
+         const Bytes  bytes = must_encode<F>(chain, "nested chain");
+         add<F, NChain>(c, "depth_63", bytes, canonical());
+         // optional<NChain> has no selector (a record is never empty): the
+         // same bytes, one level deeper.
+         add<F, Opt<NChain>>(c, "depth_64", bytes, canonical());
+         add<F, Opt<Opt<NChain>>>(c, "depth_65", join({hx("01"), bytes}),
+                                  reject("pssz: max depth exceeded"));
+         add<F, NChain>(c, "depth_66", must_encode<F>(nchain(22), "nested chain"),
+                        reject("pssz: max depth exceeded"));
+      });
+
+      // ── Unknown fields inside the nested bytes ──────────────────────────
+      // A newer writer's inner record: valid, reported as unknown, rejected
+      // by the exact validation. The typed reader keeps the member's bytes,
+      // so its re-encoding is the frame itself (`reencoded` == `hex`). A
+      // schema-driven reader, whose value is the inner value, re-encodes the
+      // canonical frame: the `nested` vector named `nested/<value>/as/...`
+      // for the same reader type and format.
+      const char* u = "nested-unknown";
+      formats([&]<typename F>() {
+         Bytes frame;
+         if (!try_encode<F>(NAction2{9, Nested<NArgs2>::from(newer)}, frame)) return;
+         add<F, NAction>(u, "action", frame, unknown(frame), "action", type_id<NAction2>());
+         add<F, NActionRaw>(u, "action_as_bytes", frame, canonical(), "action",
+                            type_id<NAction2>());
+      });
+      formats([&]<typename F>() {
+         add<F, Nested<NArgs>>(u, "record", newer_bytes, unknown(newer_bytes), "record");
+         // Two levels down, and in a list element.
+         auto frame = [](const Bytes& twice, std::vector<Bytes> many) {
+            std::tuple<std::vector<u8>, std::vector<u8>, std::optional<std::vector<u8>>,
+                       std::vector<std::vector<u8>>>
+               raw{octets(hx("07000000")), octets(twice), std::nullopt, {}};
+            for (const auto& m : many) std::get<3>(raw).push_back(octets(m));
+            return must_encode<F>(raw, "nested shapes frame");
+         };
+         const Bytes deep = frame(newer_bytes, {});
+         add<F, NShapes>(u, "twice", deep, unknown(deep));
+         const Bytes element = frame(args_bytes, {args_bytes, newer_bytes});
+         add<F, NShapes>(u, "element", element, unknown(element));
+      });
+
+      // ── Deferred validation ─────────────────────────────────────────────
+      // nested<T,deferred>: the same bytes and the same schema node; an
+      // enclosing reader does not look inside, in any mode. (A schema-driven
+      // reader gives these outcomes with its "nested bytes are opaque"
+      // option; by default it validates the bytes as T.)
+      const char* d = "nested-deferred";
+      formats([&]<typename F>() {
+         auto action = [](const Bytes& inner) {
+            return must_encode<F>(NActionRaw{9, octets(inner)}, "nested action frame");
+         };
+         add<F, NActionLater>(d, "inner_valid", action(args_bytes), canonical());
+         add<F, NActionLater>(d, "inner_not_a_record", action(garbage), canonical());
+         add<F, NActionLater>(d, "inner_empty", action({}), canonical());
+         add<F, NActionLater>(d, "inner_unknown_fields", action(newer_bytes), canonical());
+         add<F, NestedLater<NArgs>>(d, "top_level_garbage", garbage, canonical());
+         add<F, NestedLater<NArgs>>(d, "top_level_empty", {}, canonical());
+      });
+   }
+
    // ── JSON ──────────────────────────────────────────────────────────────
    std::string jq(std::string_view s)
    {
@@ -2115,6 +2358,7 @@ int main(int argc, char** argv)
    emit_bytes_and_scalars();
    emit_zero_fixed();
    emit_depth();
+   emit_nested();
 
    if (!unregistered.empty())
    {

@@ -38,6 +38,7 @@ concatenation of the elements, compared lexicographically.
 | variant | one byte: the alternative's index; then key(alternative) |
 | tuple, record | the element / field keys concatenated in order. `tuple<>` and an empty record are zero bytes |
 | boxed value, custom-presented value (Schema IR `Custom` ids that are not part of the binary form) | the key of the inner type |
+| nested value (C++ `psio::nested<T>`, Schema IR `Nested`; `docs/pssz-spec.md` §5.8) | the key of the byte list holding the PSSZ encoding of the inner value: the octet-list framing above (`00` → `00 01`, terminator `00 00`). **Not** the key of the inner value |
 
 Not key types (compile errors in C++): `std::pair` (not a PSIO value in any
 format — use a tuple), `bitlist`. A variant has at most 256 alternatives.
@@ -92,6 +93,13 @@ A database layer needs three operations; each implementation provides them:
   platform's `char` signedness. `int8_t` lists order as signed numbers.
 * **Strings** order by their bytes (for UTF-8, code point order), not by any
   collation.
+* **Nested values** order by the bytes of their inner PSSZ encoding, which
+  is not the order of the inner values: integers are little-endian there
+  (`nested<u32>` holding 256, bytes `00 01 00 00`, sorts before the one
+  holding 1, bytes `01 00 00 00`) and a record starts with its header. A
+  nested value is an equality / grouping key element; where the inner
+  value's order matters, make the inner fields key elements themselves.
+  (C++ `psio::nested<T>` has `==` and no `<`.)
 
 ## 5. Reading
 
@@ -101,6 +109,10 @@ are `00 01`, strings and lists are terminated, bounded types are within
 bounds (a bounded type's own bound, and a record member's declared length
 bound — C++ `length_bound`, Schema IR `lengthBound` — exactly as in PSSZ),
 UTF-8 string types hold UTF-8, a variant index is in range, unused
-bitvector bits are zero, a float is not the image of `-0`, and nothing
+bitvector bits are zero, a float is not the image of `-0`, the bytes of a
+nested value are a valid PSSZ encoding of its inner type (the compatible
+rule for `validate` and `decode`, the exact rule — no unknown fields,
+canonical — for `validate_strict`; not checked for a C++ member declared
+`nested<T, nested_validation::deferred>`), and nothing
 trails. `decode` runs the same checks and fails on anything `validate`
 rejects; it never reads out of bounds.

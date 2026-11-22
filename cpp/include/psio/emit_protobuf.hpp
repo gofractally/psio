@@ -480,10 +480,11 @@ namespace psio::schema_types
          {
             return to_pascal(r.name);
          }
-         std::string inline_type(const FracPack&,
+         std::string inline_type(const Nested&,
                                  const std::vector<Attribute>&)
          {
-            return "/* TODO: fracpack wrapper */";
+            // The PSSZ bytes of the inner value.
+            return "bytes";
          }
          std::string inline_type(const Custom& c,
                                  const std::vector<Attribute>& attrs)

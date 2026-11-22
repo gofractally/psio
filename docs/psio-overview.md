@@ -132,6 +132,31 @@ Every host MUST support a uniform annotation taxonomy. Format
 implementations consult the annotation channel during dispatch; the
 binding is **annotation determines wire form**, not the value.
 
+### 2.6 Nested value
+
+A value that **is the pssz encoding of another value**, carried as a byte
+list: the member of a message that holds a typed payload (action
+arguments, a reply body) which other parties see, forward and store as
+bytes.
+
+| | |
+|---|---|
+| pssz, key | exactly the byte list holding `encode(pssz, inner)`; checking readers also validate the bytes as the inner type (`docs/pssz-spec.md` §5.8, `docs/key-spec.md` §2) |
+| json, ijson | the inner value's own text, not hex (`docs/json.md`, "Nested values"). Text round trips are value round trips: a holder that must keep foreign bytes exactly uses a byte list |
+| Schema IR | `Nested{type}` (`docs/schema-builder.md`) |
+| view | the bytes, and the view of the inner type over them |
+| validation policy | by default every checking reader of the enclosing value descends into the bytes; a member may be declared *deferred*, in which case the bytes are opaque to enclosing readers and the holder validates them itself |
+
+**Per-host:**
+- C++: `psio::nested<T>`, `psio::nested<T, psio::nested_validation::deferred>`
+  (`#include <psio/nested.hpp>`)
+- Rust: `psio::Nested<T>` (a second type parameter / marker for deferred)
+- JS/TS: typed `nested(T)`, `nested(T, {validate: 'deferred'})`; the
+  schema-driven `PsszSchema` reads the IR node
+
+It is a value kind of the core formats only (pssz, key, json, ijson, the
+Schema IR and the schema-driven codecs); the other formats do not have it.
+
 ---
 
 ## 3. Cross-language consistency

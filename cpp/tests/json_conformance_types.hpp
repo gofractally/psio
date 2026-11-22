@@ -15,6 +15,9 @@
 //   list<T><=N    at most N elements       (C++ psio::bounded<T,N>, Rust BoundedList<T,N>)
 //   bytes<=N      at most N bytes          (C++ psio::bounded<uint8_t,N>, Rust BoundedList<u8,N>)
 //   a record, variant or enum by its name
+//   nested<T>     a byte list holding the PSSZ encoding of a T, whose text is
+//                 T's own text (C++ psio::nested<T>); nested<T,deferred> is
+//                 the same with deferred validation
 //
 // The fixture also records the Schema IR of every type (`schema_ir`, the
 // psio::pssz encoding of one psio::Schema holding each type under its id)
@@ -24,6 +27,7 @@
 // the same bytes, and IR + bytes the same texts, as the typed codecs.
 
 #include <psio/json.hpp>
+#include <psio/nested.hpp>
 #include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
 #include <psio/schema_builder.hpp>
@@ -273,6 +277,32 @@ namespace json_conf
    };
    PSIO_REFLECT(Tree, children)
 
+   // ── Nested values ─────────────────────────────────────────────────────
+   // The text of a nested<T> is the text of the T its bytes hold.
+   struct NestedArgs
+   {
+      Text                to;
+      std::uint64_t       amount = 0;
+      std::optional<Text> memo;
+      friend bool         operator==(const NestedArgs&, const NestedArgs&) = default;
+   };
+   PSIO_REFLECT(NestedArgs, to, amount, memo)
+   using NestedU64    = psio::nested<std::uint64_t>;
+   using NestedRecord = psio::nested<NestedArgs>;
+   using NestedLater  = psio::nested<NestedArgs, psio::nested_validation::deferred>;
+   struct NestedAction
+   {
+      std::uint32_t               method = 0;
+      NestedRecord                args;
+      psio::nested<NestedU64>     twice;
+      std::optional<NestedRecord> maybe;
+      std::vector<NestedU64>      many;
+      friend bool operator==(const NestedAction&, const NestedAction&) = default;
+   };
+   PSIO_REFLECT(NestedAction, method, args, twice, maybe, many)
+   // I-JSON names the alternative "nested_NestedArgs".
+   using NestedChoice = std::variant<std::uint32_t, NestedRecord>;
+
    // ── Length bounds, fixed layout, caps, enums ──────────────────────────
    // Rust: name BoundedString<8>, tags BoundedList<u32,3>, memo
    // BoundedRawString<4>, blob BoundedList<u8,2>, note
@@ -451,6 +481,14 @@ namespace json_conf
    JSON_CONF_TYPE(Text4, "string<=4")
    JSON_CONF_TYPE(ListU16Max3, "list<u16><=3")
    JSON_CONF_TYPE(BytesMax2, "bytes<=2")
+   JSON_CONF_TYPE(NestedArgs, "NestedArgs")
+   JSON_CONF_TYPE(NestedAction, "NestedAction")
+   JSON_CONF_TYPE(NestedU64, "nested<u64>")
+   JSON_CONF_TYPE(NestedRecord, "nested<NestedArgs>")
+   JSON_CONF_TYPE(NestedLater, "nested<NestedArgs,deferred>")
+   JSON_CONF_TYPE(std::optional<NestedU64>, "optional<nested<u64>>")
+   JSON_CONF_TYPE(std::vector<NestedRecord>, "list<nested<NestedArgs>>")
+   JSON_CONF_TYPE(NestedChoice, "NestedChoice")
 #undef JSON_CONF_TYPE
 
    // Every fixture type is expressible in the Schema IR: a type with a
@@ -503,7 +541,13 @@ namespace json_conf
            std::type_identity<BytesMax2>{}, std::type_identity<Status>{},
            std::type_identity<psio::uint128>{}, std::type_identity<psio::int128>{},
            std::type_identity<psio::uint256>{}, std::type_identity<Wide>{},
-           std::type_identity<Account>{}, std::type_identity<Transfer>{});
+           std::type_identity<Account>{}, std::type_identity<Transfer>{},
+           // Appended (the ids above keep their positions): nested values.
+           std::type_identity<NestedArgs>{}, std::type_identity<NestedAction>{},
+           std::type_identity<NestedU64>{}, std::type_identity<NestedRecord>{},
+           std::type_identity<NestedLater>{}, std::type_identity<std::optional<NestedU64>>{},
+           std::type_identity<std::vector<NestedRecord>>{},
+           std::type_identity<NestedChoice>{});
    }
 
    // One Schema holding every type under its fixture id. (Also recorded, as

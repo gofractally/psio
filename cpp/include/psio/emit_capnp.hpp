@@ -425,9 +425,10 @@ namespace psio::schema_types
             return "List(" + inline_any(*a.type) + ")  # @psio:array=" +
                    std::to_string(a.len);
          }
-         std::string inline_type(const FracPack&)
+         std::string inline_type(const Nested&)
          {
-            return "/* TODO: fracpack wrapper */";
+            // The PSSZ bytes of the inner value.
+            return "Data";
          }
          std::string inline_type(const Custom& c)
          {

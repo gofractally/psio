@@ -25,6 +25,7 @@
 
 #include <psio/adapter.hpp>
 #include <psio/annotate.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/reflect.hpp>
 #include <psio/shapes.hpp>
@@ -163,6 +164,15 @@ namespace psio {
             return ::psio::max_dynamic_data_v<F>;
          else if constexpr (std::is_same_v<F, std::string>)
          {
+            auto lb = ::psio::find_spec<::psio::length_bound>(annots);
+            if (!lb) return std::nullopt;
+            auto count = bound_max(*lb);
+            return count ? bound{*count} : bound{};
+         }
+         else if constexpr (::psio::detail::is_nested_v<F>)
+         {
+            // A nested value has no bound of its own; a member length_bound
+            // bounds its byte count, as it does a byte list's.
             auto lb = ::psio::find_spec<::psio::length_bound>(annots);
             if (!lb) return std::nullopt;
             auto count = bound_max(*lb);

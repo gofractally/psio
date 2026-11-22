@@ -21,7 +21,7 @@
 //
 //   Lossy on the wire today (rendered with a /* @psio:* */ hint when
 //   no native WIT spelling exists): BoundedList (max-bound on a
-//   list<T>), Array (fixed-size), FracPack wrappers.  Custom
+//   list<T>), Array (fixed-size).  Nested is its bytes (list<u8>).  Custom
 //   annotations surface as their canonical built-in name when one
 //   exists ("bool", "string", "char"); otherwise the underlying
 //   shape passes through.
@@ -443,9 +443,10 @@ namespace psio::schema_types
          {
             return "/* TODO: fixed-size array */";
          }
-         std::string inline_type(const FracPack&)
+         std::string inline_type(const Nested&)
          {
-            return "/* TODO: fracpack wrapper */";
+            // The PSSZ bytes of the inner value.
+            return "list<u8>";
          }
          std::string inline_type(const Custom& c)
          {

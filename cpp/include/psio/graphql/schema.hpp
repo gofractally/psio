@@ -42,6 +42,7 @@
 
 #include <psio/adapter.hpp>
 #include <psio/annotate.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/json.hpp>
 #include <psio/name_lookup.hpp>
@@ -346,6 +347,26 @@ namespace psio::graphql
       {
          using type = std::remove_cv_t<T>;
       };
+      // psio::nested<T> (nested.hpp) is the T its bytes hold, read through
+      // the view over them. A deferred one has no mapping: an enclosing
+      // reader has not checked that its bytes are a T.
+      template <typename T>
+      struct logical<nested<T, nested_validation::eager>>
+      {
+         using type = T;
+      };
+      template <typename T, typename F, storage St>
+      struct logical<view<nested<T, nested_validation::eager>, F, St>>
+      {
+         using type = T;
+      };
+      template <typename S>
+      inline constexpr bool is_nested_source_v = false;
+      template <typename T>
+      inline constexpr bool is_nested_source_v<nested<T, nested_validation::eager>> = true;
+      template <typename T, typename F, storage St>
+      inline constexpr bool
+         is_nested_source_v<view<nested<T, nested_validation::eager>, F, St>> = true;
       template <typename S>
       using logical_t = typename logical<std::remove_cvref_t<S>>::type;
       template <typename S>

@@ -410,9 +410,9 @@ fn layout_at(schema: &Schema, ty: &AnyType, n: usize) -> PsszResult<Layout> {
             return layout_at(schema, &c.r#type, n + 1)
         }
         AnyValue::Custom(_) => return Err(failure("pssz dynamic: unsupported custom adapter")),
-        AnyValue::FracPack(_) => {
+        AnyValue::Nested(_) => {
             return Err(failure(
-                "pssz dynamic: legacy FracPack marker is unsupported",
+                "pssz dynamic: Nested values are not implemented",
             ))
         }
         AnyValue::Resource(_) => {
@@ -913,9 +913,9 @@ impl<'a> Codec<'a> {
                 out.push(*selector as u8);
                 out.extend(self.encode_at(&v.members[*selector].r#type, value, n + 1)?);
             }
-            (AnyValue::FracPack(_), _) => {
+            (AnyValue::Nested(_), _) => {
                 return Err(failure(
-                    "pssz dynamic: legacy FracPack marker is unsupported",
+                    "pssz dynamic: Nested values are not implemented",
                 ))
             }
             _ => {

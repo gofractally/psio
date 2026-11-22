@@ -61,9 +61,14 @@ namespace warnings_check
       std::optional<inner>                    maybe_record;
       std::chrono::seconds                    elapsed{};
       std::chrono::sys_time<std::chrono::microseconds> at{};
+      psio::nested<inner>                     packed;
+      psio::nested<std::uint32_t, psio::nested_validation::deferred> packed_later;
+      std::optional<psio::nested<fixed>>      maybe_packed;
+      std::vector<psio::nested<std::string>>  packed_list;
       PSIO_REFLECT(everything, flag, u8, i32, u64, f64, wide, shade, raw, text, bounded_text,
                    bytes, digest, numbers, records, pair_of_fixed, tuple, choice,
-                   maybe_number, maybe_record, elapsed, at)
+                   maybe_number, maybe_record, elapsed, at, packed,
+                   attr(packed_later, max<4>), maybe_packed, packed_list)
    };
 
    struct key_type
@@ -71,7 +76,8 @@ namespace warnings_check
       std::uint32_t              table = 0;
       std::string                name;
       std::optional<std::int64_t> rank;
-      PSIO_REFLECT(key_type, table, name, rank)
+      psio::nested<fixed>        packed;
+      PSIO_REFLECT(key_type, table, name, rank, packed)
    };
 
    template <typename Fmt>
@@ -106,8 +112,21 @@ namespace warnings_check
       (void)psio::auto_pssz_width_v<everything>;
       (void)psio::max_encoded_size<everything>();
 
+      // nested: the value type and its view.
+      psio::nested<inner> packed;
+      ok &= psio::nested<inner>::from_checked(inner{1, "n", {}}, packed).ok();
+      ok &= psio::nested<inner>::checked(packed.bytes(), packed).ok();
+      ok &= packed.validate().ok() && packed.validate_strict().ok();
+      ok &= packed.decode().id == 1 && packed.view().get<0>() == 1;
+      inner unpacked;
+      ok &= packed.decode_checked(unpacked, &unknown).ok();
+      ok &= psio::nested<inner>::unchecked(std::move(packed).release()).size() != 0;
+      const psio::view<everything, psio::pssz> viewed{std::span<const char>{bytes}};
+      ok &= viewed.get<21>().get().get<0>() == 0 && !viewed.get<21>().bytes().empty();
+      static_assert(psio::pssz_evolves_from<psio::nested<inner>, psio::nested<inner>>);
+
       // key
-      const key_type key{1, "a", 2};
+      const key_type key{1, "a", 2, psio::nested<fixed>::from(fixed{3, 4})};
       const auto     key_bytes = psio::to_key(key);
       ok &= psio::validate<key_type>(psio::key{}, std::span<const char>{key_bytes}).ok();
       ok &= psio::decode<key_type>(psio::key{}, std::span<const char>{key_bytes}).table == 1;
@@ -130,6 +149,22 @@ namespace warnings_check
                                         std::span<const char>{bytes}, text, nullptr)
                .ok();
       ok &= psio::pssz_ir::json_to_pssz(schema, "everything", psio::ijson{}, text, again).ok();
+
+      // An explicit-width frame around nested values, whose bytes stay in
+      // the automatic profile, and the opaque option.
+      const auto           wide = psio::encode(psio::pssz_<4>{}, value);
+      psio::pssz_ir::Value dynamic;
+      std::vector<char>    wide_again;
+      ok &= psio::validate<everything>(psio::pssz_<4>{}, std::span<const char>{wide}).ok();
+      ok &= psio::validate_strict<everything>(psio::pssz_<4>{}, std::span<const char>{wide}).ok();
+      ok &= psio::pssz_ir::decode_exact<4>(schema, "everything", std::span<const char>{wide},
+                                           dynamic)
+               .ok();
+      ok &= psio::pssz_ir::encode<4>(schema, "everything", dynamic, wide_again).ok();
+      ok &= wide_again == wide;
+      ok &= psio::pssz_ir::validate_pssz(schema, "everything", std::span<const char>{bytes},
+                                         nullptr, psio::pssz_ir::nested_bytes::opaque)
+               .ok();
       return ok;
    }
 }  // namespace warnings_check

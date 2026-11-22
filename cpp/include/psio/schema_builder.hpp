@@ -48,6 +48,9 @@
 //     container;
 //   - Box<T> is the Custom "box" over T: T on the wire, with no inferred
 //     size bound, exactly as the typed codecs treat it.
+//   - psio::nested<T> (nested.hpp) is Nested{T}: a byte list holding the
+//     PSSZ encoding of a T. A member length_bound on it (its byte count) is
+//     always the member attribute lengthBound: there is no bounded Nested.
 //   - a type with a text_category adapter and a wire form of its own (a
 //     reflected record, an enum) is Custom{wire type, id} (adapter.hpp
 //     schema_custom_id): a custom text presentation, for which the
@@ -61,12 +64,13 @@
 // Out of scope for now (lands as v3 ports the supporting types):
 //   std::bitset,
 //   uint128 / int128 / uint256,
-//   FracPack-nested wrappers, PackableWrapper unwraps, and the
+//   PackableWrapper unwraps, and the
 //   full custom-handler chain.  These are extensions to the same
 //   if-constexpr ladder when their types land in v3.
 
 #include <psio/adapter.hpp>
 #include <psio/annotate.hpp>
+#include <psio/detail/nested_fwd.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/get_type_name.hpp>
 #include <psio/reflect.hpp>
@@ -437,6 +441,10 @@ namespace psio::schema_types
             // inferred size bound in the typed codecs, and a schema reader
             // must derive the same offset widths.
             return Custom{Box<AnyType>{insert<typename sb_detail::sb_is_box<U>::elem>()}, "box"};
+         else if constexpr (::psio::detail::is_nested_v<U>)
+            // A byte list holding the PSSZ encoding of the inner type. The
+            // validation policy (eager / deferred) is not part of the schema.
+            return Nested{Box<AnyType>{insert<typename ::psio::detail::is_nested<U>::inner>()}};
          else if constexpr (sb_detail::sb_is_tuple<U>::value)
             return [&]<std::size_t... I>(std::index_sequence<I...>)
             {
@@ -611,7 +619,7 @@ namespace psio::schema_types
             return length_bound_applies<typename sb_detail::sb_is_optional<F>::elem>();
          else
             return std::is_same_v<F, std::string> || sb_detail::sb_is_vector<F>::value ||
-                   sb_detail::sb_is_utf8<F>::value;
+                   sb_detail::sb_is_utf8<F>::value || ::psio::detail::is_nested_v<F>;
       }
 
       template <typename U, std::size_t I>

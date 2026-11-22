@@ -60,10 +60,25 @@ the unsafe legacy raw-pointer resolution cache.
 
 Supported IR shapes are integers (1/8/16/32/64/128, and unsigned 256 carried as
 its 32 little-endian bytes), IEEE32/64, records, DWNC,
-tuple, option, variant, list, bounded list, fixed array and bool/char/string/hex
-adapters. String/hex adapters require unsigned-byte or char-byte containers.
-Resource, FracPack, unknown adapters, unsupported primitive shapes and duplicate
-schema member names return explicit errors. Reachable schema metadata is checked
+tuple, option, variant, list, bounded list, fixed array, bool/char/string/hex
+adapters and Nested. String/hex adapters require unsigned-byte or char-byte
+containers.
+Resource, unknown adapters, unsupported primitive shapes and duplicate
+schema member names return explicit errors.
+
+`Nested{type}` is a byte list holding the PSSZ encoding of a `type` value,
+always in the automatic profile, whatever the profile of the frame around it.
+Its dynamic value is the inner value: decoding reads the bytes as `type`
+under the same unknown-field rule as the rest of the frame (and reports
+unknown fields found inside), with the inner root one node level below the
+Nested node; encoding writes the inner value's canonical encoding. So a
+decode / encode round trip of a frame whose nested bytes carry unknown
+fields yields the canonical frame, not the input. A member `lengthBound` on
+a Nested member (through Option) counts those bytes. Every entry point takes
+a trailing `nested_bytes` argument: `nested_bytes::opaque` makes the dynamic
+value of a Nested node its `Bytes`, read and written without being examined
+— the behaviour of a typed `nested<T, nested_validation::deferred>` member,
+and of a typed reader that keeps the member's bytes. Reachable schema metadata is checked
 before encoding/decoding; constraints are never bypassed by an omitted Option.
 DWNC and collection count bounds are implemented, as are the member attributes
 `lengthBound` (enforced), `jsonInt` / `ijsonInt` and the variant-member

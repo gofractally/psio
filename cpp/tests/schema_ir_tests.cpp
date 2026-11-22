@@ -35,7 +35,7 @@ using psio::schema_types::BoundedList;
 using psio::schema_types::Box;
 using psio::schema_types::Custom;
 using psio::schema_types::Float;
-using psio::schema_types::FracPack;
+using psio::schema_types::Nested;
 using psio::schema_types::FunctionType;
 using psio::schema_types::Int;
 using psio::schema_types::List;
@@ -101,7 +101,7 @@ TEST_CASE("AnyType: every alternative constructs cleanly",
    AnyType a_bounded{BoundedList{Box<AnyType>{Int{8, false}}, 255}};
    AnyType a_tuple{Tuple{}};
    AnyType a_variant{Variant{}};
-   AnyType a_fracpack{FracPack{Box<AnyType>{Int{8, false}}}};
+   AnyType a_nested{Nested{Box<AnyType>{Int{8, false}}}};
    AnyType a_custom{Custom{Box<AnyType>{Int{32, false}}, "name-id"}};
    AnyType a_resource{Resource{"cursor", {}, {}}};
    AnyType a_type{Type{"my-record"}};
@@ -302,7 +302,7 @@ TEST_CASE("Every IR struct is PSIO_REFLECT'd", "[schema_ir][reflect]")
    STATIC_REQUIRE(psio::Reflected<Variant>);
    STATIC_REQUIRE(psio::Reflected<Tuple>);
    STATIC_REQUIRE(psio::Reflected<Custom>);
-   STATIC_REQUIRE(psio::Reflected<FracPack>);
+   STATIC_REQUIRE(psio::Reflected<Nested>);
    STATIC_REQUIRE(psio::Reflected<Int>);
    STATIC_REQUIRE(psio::Reflected<Float>);
    STATIC_REQUIRE(psio::Reflected<Type>);

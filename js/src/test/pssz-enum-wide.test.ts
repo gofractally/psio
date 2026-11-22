@@ -324,7 +324,7 @@ test('a schema written before the Enum alternative existed still decodes', () =>
   assert.equal(alternatives.members.pop()!.name, 'Enum');
   assert.deepEqual(
     alternatives.members.map((m) => m.name),
-    ['Struct', 'Object', 'Array', 'List', 'BoundedList', 'Option', 'Variant', 'Tuple', 'Int', 'Float', 'FracPack',
+    ['Struct', 'Object', 'Array', 'List', 'BoundedList', 'Option', 'Variant', 'Tuple', 'Int', 'Float', 'Nested',
       'Custom', 'Resource', 'Type'],
   );
   const oldMeta = new PsszSchema(metaIr).type('Schema');

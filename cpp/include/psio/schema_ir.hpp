@@ -49,7 +49,7 @@ namespace psio::schema_types
    //
    // Smart-pointer wrapper used to break the cycle in `AnyType`'s
    // recursive variant alternatives (List, Option, Array, BoundedList,
-   // Custom, FracPack — all hold an inner AnyType).  unique_ptr-backed
+   // Custom, Nested — all hold an inner AnyType).  unique_ptr-backed
    // for value semantics; copy is deep so Schema instances are
    // value-typed all the way down.
    template <typename T>
@@ -234,15 +234,18 @@ namespace psio::schema_types
    };
    PSIO_REFLECT(Custom, type, id)
 
-   // FracPack: marks an inner schema that should round-trip through
-   // the FracPack format specifically (vs. the outer envelope's
-   // format).  Useful for nested schemas-within-schemas.
-   struct FracPack
+   // Nested: a byte list holding the PSSZ encoding (automatic profile) of
+   // a value of `type` (C++ psio::nested<T>, nested.hpp). On the wire it is
+   // exactly a list of u8; a checking reader also validates the bytes as
+   // `type`; its text is the text of the inner value. A member
+   // `lengthBound` attribute bounds the byte count. (Variant position 10,
+   // formerly the unused `FracPack` marker: same IR bytes.)
+   struct Nested
    {
       Box<AnyType> type;
-      friend bool  operator==(const FracPack&, const FracPack&) = default;
+      friend bool  operator==(const Nested&, const Nested&) = default;
    };
-   PSIO_REFLECT(FracPack, type)
+   PSIO_REFLECT(Nested, type)
 
    // ── Primitives ──────────────────────────────────────────────────────
 
@@ -321,7 +324,7 @@ namespace psio::schema_types
                    Tuple,
                    Int,
                    Float,
-                   FracPack,
+                   Nested,
                    Custom,
                    Resource,
                    Type,
@@ -359,7 +362,7 @@ namespace psio::schema_types
       AnyType(Array v) : value(std::move(v)) {}
       AnyType(Variant v) : value(std::move(v)) {}
       AnyType(Tuple v) : value(std::move(v)) {}
-      AnyType(FracPack v) : value(std::move(v)) {}
+      AnyType(Nested v) : value(std::move(v)) {}
       AnyType(Custom v) : value(std::move(v)) {}
       AnyType(Resource v) : value(std::move(v)) {}
       AnyType(Type v) : value(std::move(v)) {}

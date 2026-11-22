@@ -24,6 +24,10 @@
 //                     UTF-8 by type; a raw "string" whose bytes are not
 //                     UTF-8 is valid PSSZ but has no text (an error)
 //   box               the inner type's text
+//   Nested            the inner value's text (its dynamic value is the inner
+//                     value; the bytes are its canonical encoding). A member
+//                     lengthBound on it counts encoded bytes and is checked
+//                     where the bytes exist: json_to_pssz / pssz_to_json
 //   hex adapter       ijson: one hex string (UPPERCASE on output);
 //                     json: array of numbers
 //   Int               number; a 64-bit integer under ijson is a bare number
@@ -334,6 +338,26 @@ inline const AnyType *shape_of(const Schema &schema, const AnyType &type)
       at = custom->type.get();
    }
    return nullptr;
+}
+
+// Whether a member type is a Nested (through Option): its lengthBound counts
+// the bytes of the inner encoding, which a dynamic value does not have.
+inline bool nested_member(const Schema &schema, const AnyType &type)
+{
+   const AnyType *at = &type;
+   for (std::size_t hops = 0; hops <= kMaxValidationDepth; ++hops)
+   {
+      at = shape_of(schema, *at);
+      if (!at)
+         return false;
+      auto option = std::get_if<Option>(&at->value);
+      if (!option)
+         return std::holds_alternative<Nested>(at->value);
+      if (!option->type.get())
+         return false;
+      at = option->type.get();
+   }
+   return false;
 }
 
 // The handler of a Custom node, and whether a missing one is an error.
@@ -895,7 +919,7 @@ template <JsonCursor C> class Reader
          std::optional<detail::LengthBound> bound;
          if (!detail::parse_length_bound(member.attributes, bound).ok())
             return c.fail("pssz IR: malformed lengthBound attribute");
-         if (bound && !admits(*bound, value))
+         if (bound && !nested_member(schema, *member.type) && !admits(*bound, value))
             return c.fail("json: member length_bound violated");
          slots[index] = std::move(value);
       }
@@ -1091,6 +1115,13 @@ template <JsonCursor C> class Reader
                 return record(t.members, n, out);
              else if constexpr (std::is_same_v<T, schema_types::Variant>)
                 return variant(t, n, out);
+             else if constexpr (std::is_same_v<T, Nested>)
+             {
+                // The inner value's own text.
+                if (!t.type.get())
+                   return c.fail("pssz IR: null schema box");
+                return read(*t.type, form, n + 1, out);
+             }
              else
                 return c.fail("pssz IR: unsupported schema type");
           },
@@ -1425,7 +1456,8 @@ class Writer
                    std::optional<detail::LengthBound> bound;
                    if (!detail::parse_length_bound(member.attributes, bound).ok())
                       return w.fail("pssz IR: malformed lengthBound attribute");
-                   if (bound && !Reader<json_text_cursor>::admits(*bound, *field))
+                   if (bound && !nested_member(schema, *member_type) &&
+                       !Reader<json_text_cursor>::admits(*bound, *field))
                       return w.fail("json: member length_bound violated");
                    if (!first)
                       w.put(',');
@@ -1462,6 +1494,13 @@ class Writer
                    write(*member.type, *v->payload, int_form::natural, n + 1);
                    w.put(']');
                 }
+             }
+             else if constexpr (std::is_same_v<T, Nested>)
+             {
+                // The inner value's own text.
+                if (!t.type.get())
+                   return w.fail("pssz IR: null schema box");
+                write(*t.type, value, form, n + 1);
              }
              else
                 w.fail("pssz IR: unsupported schema type");
@@ -1594,12 +1633,15 @@ template <psio::detail::json_impl::json_family Fmt>
 }
 
 // Validates PSSZ bytes against `root` (the typed `validate` rule: unknown
-// appended optional fields are accepted and reported).
+// appended optional fields are accepted and reported). The bytes of a Nested
+// node are validated as its inner type; `nested_bytes::opaque` leaves them
+// unexamined (the rule of a typed nested<T, nested_validation::deferred>).
 [[nodiscard]] inline codec_status validate_pssz(const schema_types::Schema &schema,
                                                 const schema_types::AnyType &root,
                                                 std::span<const char> bytes,
-                                                bool *has_unknown = nullptr)
+                                                bool *has_unknown = nullptr,
+                                                nested_bytes nested = nested_bytes::typed)
 {
-   return validate_auto(schema, root, bytes, has_unknown);
+   return validate_auto(schema, root, bytes, has_unknown, nested);
 }
 } // namespace psio::pssz_ir
