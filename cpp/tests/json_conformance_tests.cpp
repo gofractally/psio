@@ -94,7 +94,7 @@ TEST_CASE("json conformance: the two formats differ exactly where the rules say"
    const std::set<std::string> same{"bool", "u8", "i8", "u16", "i16", "u32", "i32", "f32", "f64",
                                     "string", "raw_string", "list<u32>", "array<u16,3>",
                                     "optional<string>", "tuple<>", "AllOptional", "Version",
-                                    "Release", "Tree"};
+                                    "Release", "Tree", "Account"};
    for (const auto& row : fixture().vectors)
    {
       if (row.kind != "value") continue;

@@ -12,6 +12,7 @@
 
 #include "json_conformance_types.hpp"
 
+#include <psio/pssz_ir_json.hpp>
 #include <psio/schema_builder.hpp>
 
 #include <cmath>
@@ -47,6 +48,78 @@ namespace
          out.push_back(digits[static_cast<unsigned char>(c) & 15]);
       }
       return out;
+   }
+
+   // One Schema holding every type under its fixture id.
+   const psio::Schema& fixture_schema()
+   {
+      static const psio::Schema schema = [] {
+         psio::SchemaBuilder builder;
+         for_each_type([&]<typename T>(std::type_identity<T>) {
+            if constexpr (has_ir<T>) builder.insert<T>(type_id<T>());
+         });
+         return std::move(builder).build();
+      }();
+      return schema;
+   }
+   // The fixture's custom text forms, each taken from the type's adapter.
+   const psio::pssz_ir::CustomHandlers& fixture_handlers()
+   {
+      static const psio::pssz_ir::CustomHandlers handlers = [] {
+         psio::pssz_ir::CustomHandlers h;
+         h.add<Version>();
+         h.add<Account>();
+         return h;
+      }();
+      return handlers;
+   }
+
+   // A value row of a type holding a custom text form: the text of the
+   // schema path without a handler, and the checks that the schema path
+   // with the handlers is the typed codec.
+   template <typename T>
+   void custom_texts(Row& row, const T& v)
+   {
+      namespace ir = psio::pssz_ir;
+      const auto&                       schema = fixture_schema();
+      const psio::schema_types::AnyType root   = psio::schema_types::Type{type_id<T>()};
+      const std::vector<char>           bytes  = psio::encode(psio::pssz{}, v);
+      auto text_of = [&](auto fmt, const ir::CustomHandlers* h) {
+         std::string out;
+         if (!ir::pssz_to_json(schema, root, fmt, std::span<const char>{bytes}, out, nullptr, h)
+                 .ok())
+            die(row.name + ": schema path cannot write the value");
+         return out;
+      };
+      auto bytes_of = [&](auto fmt, const std::string& text, const ir::CustomHandlers* h) {
+         std::vector<char> out;
+         if (!ir::json_to_pssz(schema, root, fmt, std::span<const char>{text}, out, nullptr,
+                               psio::json_parser::automatic, h)
+                 .ok())
+            die(row.name + ": schema path cannot read " + text);
+         return out;
+      };
+      const auto* with = &fixture_handlers();
+      if (text_of(psio::json{}, with) != *row.json || text_of(psio::ijson{}, with) != *row.ijson)
+         die(row.name + ": schema path with handlers differs from the typed text");
+      if (bytes_of(psio::json{}, *row.json, with) != bytes ||
+          bytes_of(psio::ijson{}, *row.ijson, with) != bytes)
+         die(row.name + ": schema path with handlers reads different bytes");
+      row.plain_json  = text_of(psio::json{}, nullptr);
+      row.plain_ijson = text_of(psio::ijson{}, nullptr);
+      if (*row.plain_json == *row.json)
+         die(row.name + ": the fallback text does not differ from the custom text");
+      if (bytes_of(psio::json{}, *row.plain_json, nullptr) != bytes ||
+          bytes_of(psio::ijson{}, *row.plain_ijson, nullptr) != bytes)
+         die(row.name + ": the fallback text does not read back");
+      // With require_all, a missing handler is an error, not the fallback.
+      ir::CustomHandlers strict;
+      strict.require_all = true;
+      std::string        out;
+      if (ir::pssz_to_json(schema, root, psio::json{}, std::span<const char>{bytes}, out, nullptr,
+                           &strict)
+             .ok())
+         die(row.name + ": require_all accepted a missing handler");
    }
 
    template <typename T>
@@ -97,6 +170,8 @@ namespace
       if (!psio::decode_json_checked(psio::json{}, std::span<const char>{*row.json}, back).ok() ||
           !(back == v))
          die(name + ": json round trip");
+      if constexpr (has_custom<T>)
+         custom_texts<T>(row, v);
       push<T>(std::move(row));
    }
 
@@ -267,6 +342,49 @@ namespace
       value<double>("minus_pi", -3.141592653589793);
       value<double>("1e100", 1e100);
       value<double>("1.25e-100", 1.25e-100);
+   }
+
+   // Custom text forms over a 64-bit integer (Account) and over a record
+   // (Version), in every position.
+   void emit_custom()
+   {
+      auto account = [](std::string_view name) {
+         Account a{};
+         if (!AccountText::parse(std::span<const char>{name.data(), name.size()}, a))
+            die("bad account literal");
+         return a;
+      };
+      value<Account>("empty", account(""));
+      value<Account>("a", account("a"));
+      value<Account>("alice", account("alice"));
+      value<Account>("dotted", account("bob.token"));
+      value<Account>("digits", account("a1b2c3d4e5"));
+      value<Account>("twelve", account("zzzzzzzzzzzz"));
+      value<Account>("leading_dot", account(".a"));
+      value<Version>("max", Version{65535, 65535});
+      value<Transfer>("zero", Transfer{});
+      value<Transfer>("some", Transfer{account("alice"), account("bob"), 18446744073709551615ull,
+                                       account("carol"), {account("dave"), account("")},
+                                       Version{1, 2}});
+      value<Transfer>("no_optionals", Transfer{account("a"), account("b"), 7, std::nullopt,
+                                               {account("zzzzzzzzzzzz")}, std::nullopt});
+
+      accept_both<Transfer>("missing_optionals",
+                            R"({"from":"a","to":"b","amount":7,"notify":[]})",
+                            R"({"from":"a","to":"b","amount":7,"payer":null,"notify":[],"since":null})");
+      reject_both<Account>("number", "7");
+      reject_both<Account>("upper_case", R"("Alice")");
+      reject_both<Account>("thirteen_characters", R"("aaaaaaaaaaaaa")");
+      reject_both<Account>("trailing_dot", R"("alice.")");
+      reject_both<Account>("bad_digit", R"("a6")");
+      reject_both<Account>("null", "null");
+      reject_both<Account>("object", R"({"value":7})");
+      reject_both<Transfer>("account_as_number",
+                            R"({"from":1,"to":"b","amount":7,"payer":null,"notify":[],"since":null})");
+      reject_both<Transfer>("bad_account_in_list",
+                            R"({"from":"a","to":"b","amount":7,"payer":null,"notify":["B"],"since":null})");
+      reject_both<Transfer>("version_as_object",
+                            R"({"from":"a","to":"b","amount":7,"payer":null,"notify":[],"since":{"major":1,"minor":2}})");
    }
 
    // Enums with enumerator names: a listed value is its name, any other
@@ -605,6 +723,8 @@ namespace
       value<Version>("zero", Version{0, 0});
       value<Version>("some", Version{12, 345});
       value<Release>("some", Release{{1, 2}, text("first"), {{0, 9}, {1, 0}}});
+      value<Release>("empty", Release{});
+      emit_custom();
 
       value<Tree>("leaf", tree_value(0));
       value<Tree>("three_levels", tree_value(3));
@@ -1084,11 +1204,8 @@ namespace
 
    std::string render()
    {
-      // One Schema holding every expressible type under its fixture id.
-      psio::SchemaBuilder builder;
-      std::string         types;
+      std::string types;
       for_each_type([&]<typename T>(std::type_identity<T>) {
-         if constexpr (has_ir<T>) builder.insert<T>(type_id<T>());
          types += std::string(types.empty() ? "" : ",\n") + "{\"id\":" + quoted(type_id<T>()) +
                   ",\"ir\":" + (has_ir<T> ? "true" : "false") + ",\"pssz\":" +
                   (has_pssz<T> ? "true" : "false");
@@ -1096,9 +1213,12 @@ namespace
          // schema-only reader must derive from the IR.
          if constexpr (has_pssz<T>)
             types += ",\"auto_width\":" + std::to_string(psio::auto_pssz_width_v<T>);
+         // Rows of this type also carry plain_json / plain_ijson.
+         if constexpr (has_custom<T>)
+            types += ",\"custom\":true";
          types += "}";
       });
-      const psio::Schema schema = std::move(builder).build();
+      const psio::Schema& schema = fixture_schema();
       std::string out = "{\"version\":1,\"schema_ir\":\"" +
                         lower_hex(psio::encode(psio::pssz{}, schema)) + "\",\"types\":[\n" +
                         types + "\n],\"vectors\":[\n";
@@ -1117,6 +1237,8 @@ namespace
          field("text_hex", r.text_hex);
          field("canonical", r.canonical);
          field("pssz", r.pssz);
+         field("plain_json", r.plain_json);
+         field("plain_ijson", r.plain_ijson);
          out += i + 1 < rows.size() ? "},\n" : "}\n";
       }
       out += "]}\n";

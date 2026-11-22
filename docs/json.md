@@ -78,7 +78,8 @@ Common to both formats:
   infinities have no text (writing one is an error in both formats);
 - a type with a custom text form is a JSON string holding that text: C++
   `PSIO_ADAPTER(T, psio::text_category, ...)` or a member `psio::as<Tag>`;
-  Rust `TextForm` + `psio::json_text_form!(T)`.
+  Rust `TextForm` + `psio::json_text_form!(T)`. Through a schema it is a
+  `Custom` node with a handler ("Custom types through a schema" below).
 
 ### Enums
 
@@ -554,6 +555,47 @@ so that the schema derives the same: `record{id: u32, leaf: box<Leaf>}`
 uses 4-byte offsets where the same record without the box uses 1, unless it
 carries an explicit cap. A schema written before the marker existed has the
 boxed type inline and derives the narrower width: re-export it.
+
+### Custom types through a schema
+
+A type with a custom text form — an account name over a `u64`, a time
+point, `major.minor` over a record — is, in the Schema IR, the existing
+`Custom` node: `Custom { type: <the wire type>, id: "<presentation>" }`.
+The wire type says exactly what the bytes are; the id names how the value
+reads as text. (The ids PSIO itself gives a binary meaning to — `bool`,
+`char`, `string`, `utf8`, `hex`, `bitvector`, `bitlist`, `box` — are fixed;
+every other id is a text presentation and never changes the bytes, the
+widths or validation.)
+
+The schema-driven text codecs take a **handler registry**: id → a pair of
+functions between the PSSZ bytes of the wire type and the presentation text.
+The text is carried as one JSON string in both formats, the rule of a typed
+text adapter.
+
+| | emits the node | registers a handler |
+|---|---|---|
+| C++ | `SchemaBuilder`, for a type with a `text_category` adapter that is a reflected record or an enum (a strong integer typedef). Id: the adapter's `static constexpr std::string_view schema_id`, else the reflected name. | `psio::pssz_ir::CustomHandlers h; h.add<AccountNumber>();` (the type's own text adapter, registered once) or `h.add("Id", {to_text, from_text})`; passed as the trailing argument of `json_to_pssz` / `pssz_to_json` / `json_to_value` / `value_to_json`, or bound once per schema with `JsonNames names(schema, h)`. |
+| Rust | see `rust/psio/src/pssz_dynamic` (CustomHandlers) | |
+| JS | see `js/README.md` (custom handlers) | |
+
+**Fallback.** An id with no registered handler reads and writes as its wire
+type: the account as its number, the version as `{"major":1,"minor":2}`.
+Binary is exact either way; only the text is plainer, and the plain text
+reads back to the same bytes. A caller that must produce the exact
+presentation sets the registry to strict (C++ `require_all = true`): a
+missing handler is then an error ("no handler registered for a custom
+type") instead of the fallback. With a handler registered the presentation
+is exactly its text: the plain form is not also accepted.
+
+The JSON fixture records, for every value of a type holding a custom form
+(`Version`, `Release`, `Account`, `Transfer`), the typed text (`json`,
+`ijson`) and the fallback text (`plain_json`, `plain_ijson`); all three
+languages reproduce both from the bytes, and the bytes from both.
+
+A handler cannot express a presentation that is not a single JSON string
+(an object, a bare number, a different shape per format), one that depends
+on the surrounding value, or a different binary form — the wire type is
+fixed by the schema.
 
 Not expressible in the IR, so not available through a schema:
 

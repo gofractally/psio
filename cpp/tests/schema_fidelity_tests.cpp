@@ -15,7 +15,9 @@
 
 #include <catch.hpp>
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
@@ -378,4 +380,276 @@ TEST_CASE("explicit widths enforce maxDynamicData on the top-level type only",
       REQUIRE_FALSE(st.ok());
       CHECK(std::string(st.error().what) == "pssz IR: encoded size exceeds maxDynamicData cap");
    }
+}
+
+// ── Custom text presentations ──────────────────────────────────────────────
+
+namespace fidelity
+{
+   // A u64 with a text form (an enum is the strong typedef): "#<hex>".
+   enum class Tag : std::uint64_t
+   {
+   };
+   struct TagText
+   {
+      static constexpr std::string_view schema_id = "HexTag";
+      static bool parse(std::span<const char> in, Tag& out) noexcept
+      {
+         if (in.size() < 2 || in.size() > 17 || in[0] != '#') return false;
+         std::uint64_t v = 0;
+         for (std::size_t i = 1; i < in.size(); ++i)
+         {
+            const char c = in[i];
+            if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+            v = (v << 4) | static_cast<std::uint64_t>(c <= '9' ? c - '0' : c - 'a' + 10);
+         }
+         if (in.size() > 2 && in[1] == '0') return false;  // one text per value
+         out = static_cast<Tag>(v);
+         return true;
+      }
+      static std::size_t packsize(const Tag& v)
+      {
+         std::string s;
+         encode(v, s);
+         return s.size();
+      }
+      static void encode(const Tag& t, std::string& s)
+      {
+         static const char digits[] = "0123456789abcdef";
+         auto              v        = static_cast<std::uint64_t>(t);
+         std::string       hex;
+         do
+         {
+            hex.insert(hex.begin(), digits[v & 15]);
+            v >>= 4;
+         } while (v);
+         s += '#';
+         s += hex;
+      }
+      static Tag decode(std::span<const char> in)
+      {
+         Tag t{};
+         (void)parse(in, t);
+         return t;
+      }
+      static psio::codec_status validate(std::span<const char> in) noexcept
+      {
+         Tag t{};
+         return parse(in, t) ? psio::codec_ok() : psio::codec_fail("HexTag: expected #hex", 0, "HexTag");
+      }
+      static psio::codec_status validate_strict(std::span<const char> in) noexcept
+      {
+         return validate(in);
+      }
+   };
+
+   // A record with a text form: "x,y". No schema_id: the id is the
+   // reflected name.
+   struct Point
+   {
+      std::int32_t x = 0;
+      std::int32_t y = 0;
+      friend bool  operator==(const Point&, const Point&) = default;
+   };
+   PSIO_REFLECT(Point, x, y)
+   struct PointText
+   {
+      static bool parse(std::span<const char> in, Point& out) noexcept
+      {
+         const std::string_view text{in.data(), in.size()};
+         const auto             comma = text.find(',');
+         if (comma == std::string_view::npos) return false;
+         auto number = [](std::string_view part, std::int32_t& v) {
+            return psio::detail::json_impl::parse_integer(part, v);
+         };
+         return number(text.substr(0, comma), out.x) && number(text.substr(comma + 1), out.y);
+      }
+      static std::size_t packsize(const Point& v)
+      {
+         std::string s;
+         encode(v, s);
+         return s.size();
+      }
+      static void encode(const Point& p, std::string& s)
+      {
+         s += std::to_string(p.x) + "," + std::to_string(p.y);
+      }
+      static Point decode(std::span<const char> in)
+      {
+         Point p;
+         (void)parse(in, p);
+         return p;
+      }
+      static psio::codec_status validate(std::span<const char> in) noexcept
+      {
+         Point p;
+         return parse(in, p) ? psio::codec_ok() : psio::codec_fail("Point: expected x,y", 0, "Point");
+      }
+      static psio::codec_status validate_strict(std::span<const char> in) noexcept
+      {
+         return validate(in);
+      }
+   };
+
+   struct Shape
+   {
+      Tag                  tag{};
+      Point                at;
+      std::vector<Point>   path;
+      std::optional<Tag>   parent;
+      std::string          label;
+   };
+   PSIO_REFLECT(Shape, tag, at, path, parent, label)
+}  // namespace fidelity
+
+PSIO_ADAPTER(fidelity::Tag, psio::text_category, fidelity::TagText)
+PSIO_ADAPTER(fidelity::Point, psio::text_category, fidelity::PointText)
+
+TEST_CASE("a custom text form is Custom{wire type, id} and a registered handler writes it",
+          "[schema][fidelity][custom]")
+{
+   static_assert(psio::schema_custom_v<Tag>);
+   static_assert(psio::schema_custom_v<Point>);
+   static_assert(!psio::schema_custom_v<Shape>);
+   static_assert(!psio::schema_custom_v<psio::uint128>);  // decimal in JSON, not a custom
+   static_assert(psio::schema_custom_id<Tag>() == "HexTag");
+   static_assert(psio::schema_custom_id<Point>() == "Point");
+
+   const auto  schema = schema_of<Shape>();
+   const auto& object = std::get<psio::schema_types::Object>(root.resolve(schema)->value);
+   {
+      // The IR: the id over the wire type.
+      const auto& tag = std::get<psio::schema_types::Custom>(
+         object.members[0].type->resolve(schema)->value);
+      CHECK(tag.id == "HexTag");
+      const auto& integer = std::get<psio::schema_types::Int>(tag.type->resolve(schema)->value);
+      CHECK(integer.bits == 64);
+      CHECK_FALSE(integer.isSigned);
+      const auto& point = std::get<psio::schema_types::Custom>(
+         object.members[1].type->resolve(schema)->value);
+      CHECK(point.id == "Point");
+      CHECK(std::holds_alternative<psio::schema_types::Object>(
+         point.type->resolve(schema)->value));
+   }
+
+   const Shape value{static_cast<Tag>(0xbeef), Point{-1, 2}, {Point{3, 4}, Point{0, 0}},
+                     static_cast<Tag>(0), "label"};
+   const std::string typed_json  = psio::encode(psio::json{}, value);
+   const std::string typed_ijson = psio::encode(psio::ijson{}, value);
+   CHECK(typed_ijson ==
+         R"({"tag":"#beef","at":"-1,2","path":["3,4","0,0"],"parent":"#0","label":"label"})");
+   Bytes bytes;
+   REQUIRE(psio::encode_pssz_checked(psio::pssz{}, value, bytes).ok());
+   // The width and the bytes never depend on the presentation.
+   std::size_t width = 0;
+   REQUIRE(ir::auto_width(schema, root, width).ok());
+   CHECK(width == psio::auto_pssz_width_v<Shape>);
+   REQUIRE(ir::validate_pssz(schema, root, std::span<const char>{bytes}).ok());
+
+   // One registration call per type: its text adapter is the handler.
+   ir::CustomHandlers handlers;
+   handlers.add<Tag>().add<Point>();
+
+   auto text_of = [&](bool i_json, const ir::CustomHandlers* h, const ir::JsonNames* names) {
+      std::string out;
+      const auto  st = i_json ? ir::pssz_to_json(schema, root, psio::ijson{},
+                                                 std::span<const char>{bytes}, out, nullptr, h,
+                                                 names)
+                              : ir::pssz_to_json(schema, root, psio::json{},
+                                                 std::span<const char>{bytes}, out, nullptr, h,
+                                                 names);
+      return st.ok() ? out : std::string("error: ") + std::string(st.error().what);
+   };
+   auto bytes_of = [&](const std::string& text, const ir::CustomHandlers* h,
+                       const ir::JsonNames* names) {
+      Bytes out;
+      const auto st = ir::json_to_pssz(schema, root, psio::ijson{}, std::span<const char>{text},
+                                       out, names, psio::json_parser::automatic, h);
+      return st.ok() ? out : Bytes{'!'};
+   };
+
+   // With the handlers: the typed text, both ways.
+   CHECK(text_of(false, &handlers, nullptr) == typed_json);
+   CHECK(text_of(true, &handlers, nullptr) == typed_ijson);
+   CHECK(bytes_of(typed_ijson, &handlers, nullptr) == bytes);
+   // Bound once per schema through JsonNames: the same.
+   const ir::JsonNames names(schema, handlers);
+   CHECK(text_of(true, nullptr, &names) == typed_ijson);
+   CHECK(bytes_of(typed_ijson, nullptr, &names) == bytes);
+
+   // Without a handler: the wire type's own text, which reads back to the
+   // same bytes.
+   const std::string plain =
+      R"({"tag":48879,"at":{"x":-1,"y":2},"path":[{"x":3,"y":4},{"x":0,"y":0}],"parent":0,"label":"label"})";
+   CHECK(text_of(true, nullptr, nullptr) == plain);
+   CHECK(bytes_of(plain, nullptr, nullptr) == bytes);
+   // One id registered, the other not: each is decided on its own.
+   ir::CustomHandlers only_tag;
+   only_tag.add<Tag>();
+   CHECK(text_of(true, &only_tag, nullptr) ==
+         R"({"tag":"#beef","at":{"x":-1,"y":2},"path":[{"x":3,"y":4},{"x":0,"y":0}],"parent":"#0","label":"label"})");
+   // A caller that needs the exact presentation makes a missing handler an
+   // error.
+   only_tag.require_all = true;
+   CHECK(text_of(true, &only_tag, nullptr) ==
+         "error: pssz IR: no handler registered for a custom type");
+   CHECK(bytes_of(typed_ijson, &only_tag, nullptr) == Bytes{'!'});
+
+   // With a handler the presentation is exactly its text: the plain form
+   // and a malformed text are rejected.
+   CHECK(bytes_of(plain, &handlers, nullptr) == Bytes{'!'});
+   CHECK(bytes_of(R"({"tag":"beef","at":"-1,2","path":[],"parent":null,"label":""})", &handlers,
+                  nullptr) == Bytes{'!'});
+   CHECK(bytes_of(R"({"tag":"#beef","at":"1;2","path":[],"parent":null,"label":""})", &handlers,
+                  nullptr) == Bytes{'!'});
+
+   // A handler written by hand, for an id no C++ type declares.
+   psio::Schema hand;
+   hand.insert("Root", psio::schema_types::Custom{
+                          psio::schema_types::AnyType{psio::schema_types::Int{32, false}},
+                          "Percent"});
+   ir::CustomHandlers percent;
+   percent.add("Percent",
+               {[](std::span<const char> pssz, std::string& text) -> psio::codec_status {
+                   if (pssz.size() != 4) return psio::codec_fail("Percent: 4 bytes", 0, "Percent");
+                   std::uint32_t v;
+                   std::memcpy(&v, pssz.data(), 4);
+                   if (v > 100) return psio::codec_fail("Percent: over 100", 0, "Percent");
+                   text += std::to_string(v) + "%";
+                   return psio::codec_ok();
+                },
+                [](std::string_view text, std::vector<char>& pssz) -> psio::codec_status {
+                   std::uint32_t v = 0;
+                   if (text.empty() || text.back() != '%' ||
+                       !psio::detail::json_impl::parse_integer(text.substr(0, text.size() - 1), v) ||
+                       v > 100)
+                      return psio::codec_fail("Percent: expected N%", 0, "Percent");
+                   pssz.resize(4);
+                   std::memcpy(pssz.data(), &v, 4);
+                   return psio::codec_ok();
+                }});
+   const Bytes  forty_two{42, 0, 0, 0};
+   std::string  out;
+   REQUIRE(ir::pssz_to_json(hand, root, psio::json{}, std::span<const char>{forty_two}, out,
+                            nullptr, &percent)
+              .ok());
+   CHECK(out == R"("42%")");
+   Bytes back;
+   REQUIRE(ir::json_to_pssz(hand, root, psio::json{}, std::span<const char>{out}, back, nullptr,
+                            psio::json_parser::automatic, &percent)
+              .ok());
+   CHECK(back == forty_two);
+   // The handler validates in both directions.
+   const Bytes two_hundred{static_cast<char>(200), 0, 0, 0};
+   out.clear();
+   CHECK_FALSE(ir::pssz_to_json(hand, root, psio::json{}, std::span<const char>{two_hundred}, out,
+                                nullptr, &percent)
+                  .ok());
+   CHECK(out.empty());
+   CHECK_FALSE(ir::json_to_pssz(hand, root, psio::json{},
+                                std::span<const char>{std::string_view{R"("200%")"}}, back,
+                                nullptr, psio::json_parser::automatic, &percent)
+                  .ok());
+   // The bytes themselves stay valid whatever the handler thinks of them.
+   CHECK(ir::validate_pssz(hand, root, std::span<const char>{two_hundred}).ok());
 }

@@ -26,6 +26,11 @@
 #include <string>
 #include <vector>
 
+// The C++ fixture types: only for their text adapters, which are registered
+// as the handlers of the fixture's custom ids. Everything else in this file
+// works from the recorded Schema IR alone.
+#include "json_conformance_types.hpp"
+
 namespace schema_conf
 {
    struct TypeRow
@@ -34,8 +39,9 @@ namespace schema_conf
       bool                ir = false;
       std::optional<bool> pssz;
       std::optional<std::uint32_t> auto_width;
+      std::optional<bool>          custom;
    };
-   PSIO_REFLECT(TypeRow, id, ir, pssz, auto_width)
+   PSIO_REFLECT(TypeRow, id, ir, pssz, auto_width, custom)
 
    struct JsonRow
    {
@@ -49,8 +55,11 @@ namespace schema_conf
       std::optional<std::string> text_hex;
       std::optional<std::string> canonical;
       std::optional<std::string> pssz;
+      std::optional<std::string> plain_json;
+      std::optional<std::string> plain_ijson;
    };
-   PSIO_REFLECT(JsonRow, name, type, kind, format, json, ijson, text, text_hex, canonical, pssz)
+   PSIO_REFLECT(JsonRow, name, type, kind, format, json, ijson, text, text_hex, canonical, pssz,
+                plain_json, plain_ijson)
 
    struct JsonFixture
    {
@@ -87,6 +96,19 @@ namespace
    using namespace schema_conf;
    namespace ir = psio::pssz_ir;
    using Bytes  = std::vector<char>;
+
+   // The custom text handlers the helpers below pass to the schema path
+   // (null: none registered).
+   const ir::CustomHandlers* active_handlers = nullptr;
+   struct use_handlers
+   {
+      const ir::CustomHandlers* previous;
+      explicit use_handlers(const ir::CustomHandlers* h) : previous(active_handlers)
+      {
+         active_handlers = h;
+      }
+      ~use_handlers() { active_handlers = previous; }
+   };
 
    template <typename F>
    F load(const char* path)
@@ -153,10 +175,14 @@ namespace
    {
       out.clear();
       auto st = ir::json_to_pssz(schema, psio::schema_types::Type{type}, Fmt{},
-                                 std::span<const char>{text}, out);
+                                 std::span<const char>{text}, out, nullptr,
+                                 psio::json_parser::automatic, active_handlers);
       // The same decode with the schema's names compiled once (hash lookup
-      // instead of a member scan) gives the same bytes or the same error.
-      const ir::JsonNames names(schema);
+      // instead of a member scan; the custom handlers bound to their nodes
+      // once instead of looked up by id) gives the same bytes or the same
+      // error.
+      const ir::CustomHandlers none;
+      const ir::JsonNames names(schema, active_handlers ? *active_handlers : none);
       Bytes               indexed;
       auto st2 = ir::json_to_pssz(schema, psio::schema_types::Type{type}, Fmt{},
                                   std::span<const char>{text}, indexed, &names);
@@ -184,7 +210,17 @@ namespace
    {
       out.clear();
       auto st = ir::pssz_to_json(schema, psio::schema_types::Type{type}, Fmt{},
-                                 std::span<const char>{bytes}, out);
+                                 std::span<const char>{bytes}, out, nullptr, active_handlers);
+      if (st.ok() && active_handlers)
+      {
+         // Bound once through JsonNames: the same text.
+         const ir::JsonNames names(schema, *active_handlers);
+         std::string         bound;
+         REQUIRE(ir::pssz_to_json(schema, psio::schema_types::Type{type}, Fmt{},
+                                  std::span<const char>{bytes}, bound, nullptr, nullptr, &names)
+                    .ok());
+         REQUIRE(bound == out);
+      }
       return st.ok() ? "" : std::string(st.error().what);
    }
 }  // namespace
@@ -194,7 +230,14 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
 {
    const auto         fx     = load<JsonFixture>(PSIO_JSON_VECTORS);
    const psio::Schema schema = schema_of(fx.schema_ir);
-   const ir::JsonNames names(schema);
+   // The fixture's custom text forms: each type's own text adapter,
+   // registered under the id its schema node carries.
+   ir::CustomHandlers handlers;
+   handlers.add<json_conf::Version>().add<json_conf::Account>();
+   REQUIRE(handlers.find("Version"));
+   REQUIRE(handlers.find("AccountName"));
+   const use_handlers  scope(&handlers);
+   const ir::JsonNames names(schema, handlers);
    std::map<std::string, TypeRow> types;
    for (const auto& t : fx.types) types[t.id] = t;
    REQUIRE(types.size() >= 40);
@@ -212,7 +255,7 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
    }
    REQUIRE(widths >= 40);
 
-   std::size_t values = 0, accepted = 0, rejected = 0, with_bytes = 0;
+   std::size_t values = 0, accepted = 0, rejected = 0, with_bytes = 0, plain = 0;
    std::set<std::string> covered;
    for (const auto& row : fx.vectors)
    {
@@ -242,6 +285,34 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
          REQUIRE(text == *row.json);
          REQUIRE(to_text<psio::ijson>(schema, row.type, bytes, text) == "");
          REQUIRE(text == *row.ijson);
+         // A type holding a custom text form: with NO handler the schema
+         // path writes the wire type's own text (the row's plain_*), reads
+         // it back to the same bytes, and the bytes never depended on it.
+         REQUIRE(row.plain_json.has_value() == type.custom.value_or(false));
+         REQUIRE(row.plain_ijson.has_value() == type.custom.value_or(false));
+         if (row.plain_json)
+         {
+            ++plain;
+            const use_handlers without(nullptr);
+            Bytes              plain_bytes;
+            REQUIRE(to_text<psio::json>(schema, row.type, bytes, text) == "");
+            REQUIRE(text == *row.plain_json);
+            REQUIRE(to_bytes<psio::json>(schema, row.type, text, plain_bytes) == "");
+            REQUIRE(plain_bytes == bytes);
+            REQUIRE(to_text<psio::ijson>(schema, row.type, bytes, text) == "");
+            REQUIRE(text == *row.plain_ijson);
+            REQUIRE(to_bytes<psio::ijson>(schema, row.type, text, plain_bytes) == "");
+            REQUIRE(plain_bytes == bytes);
+            // A caller that requires the exact presentation gets an error
+            // instead of the fallback.
+            ir::CustomHandlers strict;
+            strict.require_all = true;
+            const use_handlers required(&strict);
+            REQUIRE(to_text<psio::json>(schema, row.type, bytes, text) ==
+                    "pssz IR: no handler registered for a custom type");
+            REQUIRE(to_bytes<psio::json>(schema, row.type, *row.json, plain_bytes) ==
+                    "pssz IR: no handler registered for a custom type");
+         }
       }
       else if (row.kind == "accept")
       {
@@ -261,9 +332,11 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
          const bool ij = row.format == "ijson";
          bytes         = {'x'};
          auto st = ij ? ir::json_to_pssz(schema, psio::schema_types::Type{row.type}, psio::ijson{},
-                                         std::span<const char>{input_text(row)}, bytes)
+                                         std::span<const char>{input_text(row)}, bytes, nullptr,
+                                         psio::json_parser::automatic, &handlers)
                       : ir::json_to_pssz(schema, psio::schema_types::Type{row.type}, psio::json{},
-                                         std::span<const char>{input_text(row)}, bytes);
+                                         std::span<const char>{input_text(row)}, bytes, nullptr,
+                                         psio::json_parser::automatic, &handlers);
          REQUIRE_FALSE(st.ok());
          REQUIRE(bytes == Bytes{'x'});
          auto st2 = ij ? ir::json_to_pssz(schema, psio::schema_types::Type{row.type},
@@ -295,6 +368,7 @@ TEST_CASE("schema IR + JSON text agrees with the typed json, ijson and pssz code
    REQUIRE(accepted >= 60);
    REQUIRE(rejected >= 300);
    REQUIRE(with_bytes >= 600);
+   REQUIRE(plain >= 15);
    // Every expressible type is exercised.
    for (const auto& [id, t] : types)
       if (t.ir) REQUIRE(covered.count(id));

@@ -46,8 +46,12 @@
 //     container;
 //   - Box<T> is the Custom "box" over T: T on the wire, with no inferred
 //     size bound, exactly as the typed codecs treat it.
-// Not expressible: a member `as<Tag>` override or a text / binary adapter
-// (the IR has the member's declared type).
+//   - a type with a text_category adapter and a wire form of its own (a
+//     reflected record, an enum) is Custom{wire type, id} (adapter.hpp
+//     schema_custom_id): a custom text presentation, for which the
+//     schema-driven text codecs take a handler (pssz_ir_json.hpp).
+// Not expressible: a member `as<Tag>` override or a binary adapter (the IR
+// has the member's declared type).
 //   Envelope            PSIO_INTERFACE → Interface,
 //                       PSIO_WORLD     → World (with imports/exports),
 //                       PSIO_USE       → Use
@@ -59,6 +63,7 @@
 //   full custom-handler chain.  These are extensions to the same
 //   if-constexpr ladder when their types land in v3.
 
+#include <psio/adapter.hpp>
 #include <psio/annotate.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/get_type_name.hpp>
@@ -345,9 +350,24 @@ namespace psio::schema_types
       std::string                              package_name_;
       std::string                              package_version_;
 
-      // ── Build an AnyType for T, for the if-constexpr ladder ────────
+      // ── Build an AnyType for T ─────────────────────────────────────
+      //
+      // A type with a custom text presentation (adapter.hpp
+      // schema_custom_v) is Custom{its wire type, id}; everything else is
+      // its wire type.
       template <typename U>
       AnyType build_anytype()
+      {
+         if constexpr (::psio::schema_custom_v<U>)
+            return Custom{Box<AnyType>{build_plain<U>()},
+                          std::string{::psio::schema_custom_id<U>()}};
+         else
+            return build_plain<U>();
+      }
+
+      // The wire type of T: the if-constexpr ladder.
+      template <typename U>
+      AnyType build_plain()
       {
          if constexpr (std::is_same_v<U, bool>)
             return Custom{Box<AnyType>{Int{1, false}}, "bool"};

@@ -172,6 +172,77 @@ namespace json_conf
       }
    };
 
+   // On the wire Version is a record of two u16; its text is "major.minor".
+   // The Schema IR records Custom{that record, "Version"}.
+   PSIO_REFLECT(Version, major, minor)
+
+   // A custom text form over a 64-bit integer: an account name of up to 12
+   // characters of [a-z1-5.] packed 5 bits each (an enum is the strong
+   // typedef; on the wire it is its u64). The Schema IR records
+   // Custom{Int{64}, "AccountName"}.
+   enum class Account : std::uint64_t
+   {
+   };
+   struct AccountText
+   {
+      // Explicit id: the string C++, Rust and JS handlers are registered under.
+      static constexpr std::string_view schema_id = "AccountName";
+      static constexpr std::string_view alphabet  = ".12345abcdefghijklmnopqrstuvwxyz";
+
+      static bool parse(std::span<const char> in, Account& out) noexcept
+      {
+         if (in.size() > 12) return false;
+         // No trailing dots: one text per value.
+         if (!in.empty() && in.back() == '.') return false;
+         std::uint64_t v = 0;
+         for (std::size_t i = 0; i < 12; ++i)
+         {
+            std::uint64_t digit = 0;
+            if (i < in.size())
+            {
+               const auto at = alphabet.find(in[i]);
+               if (at == std::string_view::npos) return false;
+               digit = at;
+            }
+            v = (v << 5) | digit;
+         }
+         out = static_cast<Account>(v);
+         return true;
+      }
+      static std::size_t packsize(const Account& v)
+      {
+         std::string s;
+         encode(v, s);
+         return s.size();
+      }
+      static void encode(const Account& a, std::string& s)
+      {
+         const auto  v = static_cast<std::uint64_t>(a);
+         std::string text;
+         for (int i = 0; i < 12; ++i)
+            text.push_back(alphabet[(v >> (5 * (11 - i))) & 31]);
+         while (!text.empty() && text.back() == '.') text.pop_back();
+         s += text;
+      }
+      static Account decode(std::span<const char> in)
+      {
+         Account v{};
+         (void)parse(in, v);
+         return v;
+      }
+      static psio::codec_status validate(std::span<const char> in) noexcept
+      {
+         Account v{};
+         return parse(in, v) ? psio::codec_ok()
+                             : psio::codec_fail("AccountName: expected up to 12 of [a-z1-5.]", 0,
+                                                "AccountName");
+      }
+      static psio::codec_status validate_strict(std::span<const char> in) noexcept
+      {
+         return validate(in);
+      }
+   };
+
    struct Release
    {
       Version              version;
@@ -180,6 +251,19 @@ namespace json_conf
       friend bool operator==(const Release&, const Release&) = default;
    };
    PSIO_REFLECT(Release, version, name, history)
+
+   // Custom types in every position.
+   struct Transfer
+   {
+      Account                from{};
+      Account                to{};
+      std::uint64_t          amount = 0;
+      std::optional<Account> payer;
+      std::vector<Account>   notify;
+      std::optional<Version> since;
+      friend bool operator==(const Transfer&, const Transfer&) = default;
+   };
+   PSIO_REFLECT(Transfer, from, to, amount, payer, notify, since)
 
    struct Tree
    {
@@ -296,6 +380,7 @@ PSIO_FIELD_ATTRS(json_conf::Overrides, d, psio::ijson_number)
 PSIO_FIELD_ATTRS(json_conf::Overrides, e, psio::json_string)
 PSIO_TYPE_ATTRS(json_conf::TypeLevel, psio::json_string | psio::ijson_number)
 PSIO_ADAPTER(json_conf::Version, psio::text_category, json_conf::VersionText)
+PSIO_ADAPTER(json_conf::Account, psio::text_category, json_conf::AccountText)
 PSIO_FIELD_ATTRS(json_conf::Bounds, tags, psio::length_bound{.max = 3})
 PSIO_FIELD_ATTRS(json_conf::Bounds, memo, psio::length_bound{.max = 4})
 PSIO_FIELD_ATTRS(json_conf::Bounds, blob, psio::length_bound{.max = 2})
@@ -349,6 +434,8 @@ namespace json_conf
    JSON_CONF_TYPE(Holder, "Holder")
    JSON_CONF_TYPE(Version, "Version")
    JSON_CONF_TYPE(Release, "Release")
+   JSON_CONF_TYPE(Account, "Account")
+   JSON_CONF_TYPE(Transfer, "Transfer")
    JSON_CONF_TYPE(Tree, "Tree")
    JSON_CONF_TYPE(Bounds, "Bounds")
    JSON_CONF_TYPE(Fixed, "Fixed")
@@ -365,16 +452,21 @@ namespace json_conf
    JSON_CONF_TYPE(BytesMax2, "bytes<=2")
 #undef JSON_CONF_TYPE
 
-   // The Schema IR has the declared type of a member, not a custom text
-   // form: a type with a text adapter (and a record holding one) is not
-   // expressible. The fixture records "ir": false for these.
+   // Every fixture type is expressible in the Schema IR: a type with a
+   // custom text form is Custom{wire type, id} (Version, Account), and the
+   // schema-driven text codec reproduces its text with a handler for the id.
    template <typename T>
-   inline constexpr bool has_ir = !std::is_same_v<T, Version> && !std::is_same_v<T, Release>;
+   inline constexpr bool has_ir = true;
    // psio::pssz has no encoding for the psio::bounded wrapper (C++ bounds a
-   // pssz list with a member length_bound) nor for a text-adapter type.
+   // pssz list with a member length_bound).
    template <typename T>
-   inline constexpr bool has_pssz = has_ir<T> && !std::is_same_v<T, ListU16Max3> &&
+   inline constexpr bool has_pssz = !std::is_same_v<T, ListU16Max3> &&
                                     !std::is_same_v<T, BytesMax2>;
+   // The type holds a custom text form somewhere: its rows also carry the
+   // text a schema-driven codec writes WITHOUT a handler (the wire type's).
+   template <typename T>
+   inline constexpr bool has_custom = std::is_same_v<T, Version> || std::is_same_v<T, Release> ||
+                                      std::is_same_v<T, Account> || std::is_same_v<T, Transfer>;
 
    template <typename T>
    std::string type_id() { return std::string(type_name<T>::id); }
@@ -409,7 +501,8 @@ namespace json_conf
            std::type_identity<Text4>{}, std::type_identity<ListU16Max3>{},
            std::type_identity<BytesMax2>{}, std::type_identity<Status>{},
            std::type_identity<psio::uint128>{}, std::type_identity<psio::int128>{},
-           std::type_identity<psio::uint256>{}, std::type_identity<Wide>{});
+           std::type_identity<psio::uint256>{}, std::type_identity<Wide>{},
+           std::type_identity<Account>{}, std::type_identity<Transfer>{});
    }
 
    // ── Fixture rows ──────────────────────────────────────────────────────
@@ -432,8 +525,14 @@ namespace json_conf
       // Typed psio::pssz bytes of the row's value (lowercase hex), for
       // value and accept rows of a type psio::pssz encodes.
       std::optional<std::string> pssz;
+      // For a value row of a type holding a custom text form: the text a
+      // schema-driven codec writes with NO handler registered for the
+      // custom id (the wire type's own text).
+      std::optional<std::string> plain_json;
+      std::optional<std::string> plain_ijson;
    };
-   PSIO_REFLECT(Row, name, type, kind, format, json, ijson, text, text_hex, canonical, pssz)
+   PSIO_REFLECT(Row, name, type, kind, format, json, ijson, text, text_hex, canonical, pssz,
+                plain_json, plain_ijson)
 
    struct TypeRow
    {

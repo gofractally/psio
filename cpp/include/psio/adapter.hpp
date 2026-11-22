@@ -218,6 +218,43 @@ namespace psio {
       !adapter_delegates_to_format_v<
          adapter<std::remove_cvref_t<T>, preferred_category_t<Fmt>>, Fmt>;
 
+   // ── Custom text presentation in the Schema IR ───────────────────────
+   //
+   // A type with a text_category adapter and a wire form of its own (a
+   // reflected record, or an enum used as a strong integer typedef) is, in
+   // the Schema IR, `Custom{type: its wire type, id}`: the wire type says
+   // what the bytes are, the id names the presentation, and a schema-driven
+   // text codec with a handler registered for the id (pssz_ir_json.hpp
+   // CustomHandlers) writes the adapter's text. Without a handler the text
+   // is the wire type's own.
+   //
+   // The id is, in order: the adapter implementation's
+   //     static constexpr std::string_view schema_id = "AccountNumber";
+   // (set it so that C++ and Rust use one string), else the type's
+   // PSIO_REFLECT name, else its PSIO_REFLECT_ENUM name.
+   template <typename T>
+   inline constexpr bool schema_custom_v =
+      has_adapter_v<std::remove_cvref_t<T>, text_category> &&
+      (Reflected<std::remove_cvref_t<T>> || std::is_enum_v<std::remove_cvref_t<T>>);
+
+   template <typename T>
+   constexpr std::string_view schema_custom_id() noexcept
+   {
+      using U = std::remove_cvref_t<T>;
+      using A = adapter<U, text_category>;
+      if constexpr (requires { std::string_view{A::schema_id}; })
+         return std::string_view{A::schema_id};
+      else if constexpr (Reflected<U>)
+         return reflect<U>::name;
+      else
+      {
+         static_assert(ReflectedEnum<U>,
+                       "psio: give the text adapter of this enum a `static constexpr "
+                       "std::string_view schema_id` (or PSIO_REFLECT_ENUM names)");
+         return reflect_enum<U>::name;
+      }
+   }
+
    // ── Member-level adapter override (§5.3.7) ──────────────────────────
    //
    // Scans a tuple of spec values for an `as_spec<Tag>` entry and
