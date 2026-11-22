@@ -685,16 +685,23 @@ namespace psio {
    // psio::reflect uses (reflect.hpp, detail::reflect_slot):
    //
    //   - annotations listed in PSIO_REFLECT are members of the metadata the
-   //     macro binds to the type (`reflect<T>::type_annotations`,
-   //     `reflect<T>::member_annotations<I>`), so they work at namespace
-   //     scope and in a class body, for private members and for members
-   //     declared after the macro;
+   //     macro binds to the type (`reflect<T>::type_annotations`, and one
+   //     overload of `reflect<T>::_psio_member_annotations_` per attr), so
+   //     they work at namespace scope and in a class body, for private
+   //     members and for members declared after the macro;
    //   - a separate PSIO_FIELD_ATTRS / PSIO_TYPE_ATTRS statement defines a
    //     friend function of `detail::annotation_slot<X>`, which ADL finds
    //     from X whatever namespace the statement is in.
    //
    // Nothing here is an explicit specialization, which C++ allows only in
-   // the global namespace or in namespace psio.
+   // the global namespace or in namespace psio. A hand-written explicit
+   // specialization of `annotate<X>` is still honoured and replaces both.
+   //
+   // Cost. A type with no annotations pays, per member, one instantiation
+   // of `annotate` and of its lookup function: whether any separate
+   // statement names a member of the class is asked once per class
+   // (detail::member_attrs_slot), and the per-member friend lookup runs only
+   // for classes where one does.
 
    namespace detail
    {
@@ -705,24 +712,20 @@ namespace psio {
       struct annotation_slot
       {
          friend constexpr auto psio_annotation_lookup(annotation_slot);
+         // Defined by a read that found no statement (annotation_read_mark),
+         // so that a statement written after it is an error and not a
+         // silent no-op.
+         friend constexpr auto psio_annotation_was_read(annotation_slot);
       };
       template <auto X, typename Holder>
       struct annotation_bind
       {
          friend constexpr auto psio_annotation_lookup(annotation_slot<X>) { return Holder{}(); }
       };
-
-      // A read that found no separate statement records the fact, so that
-      // a statement written after it is an error and not a silent no-op.
-      template <auto X>
-      struct annotation_read_slot
-      {
-         friend constexpr auto psio_annotation_was_read(annotation_read_slot);
-      };
       template <auto X>
       struct annotation_read_mark
       {
-         friend constexpr auto psio_annotation_was_read(annotation_read_slot<X>) { return true; }
+         friend constexpr auto psio_annotation_was_read(annotation_slot<X>) { return true; }
       };
       template <auto X, typename = void>
       struct annotation_was_read : std::false_type
@@ -730,7 +733,7 @@ namespace psio {
       };
       template <auto X>
       struct annotation_was_read<
-         X, std::void_t<decltype(psio_annotation_was_read(annotation_read_slot<X>{}))>>
+         X, std::void_t<decltype(psio_annotation_was_read(annotation_slot<X>{}))>>
          : std::true_type
       {
       };
@@ -747,52 +750,66 @@ namespace psio {
          static constexpr auto value = psio_annotation_lookup(annotation_slot<X>{});
       };
 
-      // Annotations carried by the reflection metadata.
-      template <typename T>
-      constexpr auto carried_type_annotations() noexcept
+      // The same pair once per class: "a separate statement annotates some
+      // member of C", and "C's member annotations were read while none did".
+      template <typename C>
+      struct member_attrs_slot
       {
-         if constexpr (std::is_class_v<T>)
-         {
-            if constexpr (requires { ::psio::reflect<T>::type_annotations; })
-               return ::psio::reflect<T>::type_annotations;
-            else
-               return std::tuple<>{};
-         }
-         else
-            return std::tuple<>{};
-      }
+         friend constexpr auto psio_member_attrs_declared(member_attrs_slot);
+         friend constexpr auto psio_member_attrs_read(member_attrs_slot);
+      };
+      template <typename C>
+      struct member_attrs_mark
+      {
+         friend constexpr auto psio_member_attrs_declared(member_attrs_slot<C>) { return true; }
+      };
+      template <typename C>
+      struct member_attrs_read_mark
+      {
+         friend constexpr auto psio_member_attrs_read(member_attrs_slot<C>) { return true; }
+      };
+      template <typename C, typename = void>
+      struct has_declared_member_attrs : std::false_type, member_attrs_read_mark<C>
+      {
+      };
+      template <typename C>
+      struct has_declared_member_attrs<
+         C, std::void_t<decltype(psio_member_attrs_declared(member_attrs_slot<C>{}))>>
+         : std::true_type
+      {
+      };
+      template <typename C, typename = void>
+      struct member_attrs_were_read : std::false_type
+      {
+      };
+      template <typename C>
+      struct member_attrs_were_read<
+         C, std::void_t<decltype(psio_member_attrs_read(member_attrs_slot<C>{}))>>
+         : std::true_type
+      {
+      };
 
-      template <typename A, typename B>
-      constexpr bool same_member(A a, B b) noexcept
+      template <typename M>
+      struct member_pointer_class
       {
-         if constexpr (std::is_same_v<A, B>)
-            return a == b;
-         else
-            return false;
-      }
-      // The annotations `E`'s PSIO_REFLECT gives the member X of E.
-      template <typename E, auto X>
-      constexpr auto carried_member_annotations() noexcept
+      };
+      template <typename M, typename C>
+      struct member_pointer_class<M C::*>
       {
-         using R = ::psio::reflect<E>;
-         if constexpr (requires { requires R::has_member_annotations; })
-         {
-            constexpr std::size_t index = []<std::size_t... Is>(std::index_sequence<Is...>)
-            {
-               std::size_t found = sizeof...(Is);
-               (void)((same_member(R::template member_pointer<Is>, X) ? (found = Is, true)
-                                                                      : false) ||
-                      ...);
-               return found;
-            }(std::make_index_sequence<R::member_count>{});
-            if constexpr (index < R::member_count)
-               return R::template member_annotations<index>;
-            else
-               return std::tuple<>{};
-         }
-         else
-            return std::tuple<>{};
-      }
+         using type = C;
+      };
+
+      // What PSIO_FIELD_ATTRS instantiates.
+      template <auto X>
+      inline constexpr bool member_annotation_was_read =
+         member_attrs_were_read<typename member_pointer_class<decltype(X)>::type>::value ||
+         annotation_was_read<X>::value;
+      template <auto X, typename Holder>
+      struct member_annotation_bind
+         : annotation_bind<X, Holder>,
+           member_attrs_mark<typename member_pointer_class<decltype(X)>::type>
+      {
+      };
 
       template <typename A, typename... Bs>
       inline constexpr std::size_t spec_count = (std::size_t{std::is_same_v<A, Bs>} + ... + 0);
@@ -831,39 +848,79 @@ namespace psio {
          }
       }
 
-      template <typename M>
-      struct member_pointer_class
+      // Annotations carried by the reflection metadata of T.
+      template <typename T>
+      constexpr auto carried_type_annotations() noexcept
       {
-      };
-      template <typename M, typename C>
-      struct member_pointer_class<M C::*>
+         if constexpr (std::is_class_v<T>)
+         {
+            if constexpr (requires { ::psio::reflect<T>::type_annotations; })
+            {
+               static_assert(specs_distinct<std::remove_cvref_t<
+                                decltype(::psio::reflect<T>::type_annotations)>>::value,
+                             "psio: PSIO_REFLECT lists a type-level attribute twice");
+               return ::psio::reflect<T>::type_annotations;
+            }
+            else
+               return std::tuple<>{};
+         }
+         else
+            return std::tuple<>{};
+      }
+      // The annotations E's PSIO_REFLECT gives the member X: the overload
+      // the macro generated for `attr(X, ...)`, if there is one.
+      template <typename E, auto X>
+      constexpr auto carried_member_annotations() noexcept
       {
-         using type = C;
+         using R = ::psio::reflect<E>;
+         if constexpr (requires { requires R::has_member_annotations; })
+         {
+            if constexpr (requires { R::_psio_member_annotations_(member_key<X>{}); })
+               return R::_psio_member_annotations_(member_key<X>{});
+            else
+               return std::tuple<>{};
+         }
+         else
+            return std::tuple<>{};
+      }
+
+      template <typename K>
+      inline constexpr bool is_type_key = false;
+      template <typename T>
+      inline constexpr bool is_type_key<::psio::type<T>> = true;
+      template <typename K>
+      struct type_key_type;
+      template <typename T>
+      struct type_key_type<::psio::type<T>>
+      {
+         using type = T;
       };
 
-      // Dispatch on what X is.
-      template <auto X, typename K = std::remove_const_t<decltype(X)>>
-      struct annotations_of
+      // Everything declared for X.
+      template <auto X>
+      constexpr auto lookup_annotations() noexcept
       {
-         static constexpr auto value = declared_annotations<X>::value;
-      };
-      template <auto X, typename T>
-      struct annotations_of<X, ::psio::type<T>>
-      {
-         static constexpr auto value =
-            merge_annotations(carried_type_annotations<T>(), declared_annotations<X>::value);
-      };
-      template <auto X, typename M, typename C>
-      struct annotations_of<X, M C::*>
-      {
-         static constexpr auto value = merge_annotations(carried_member_annotations<C, X>(),
-                                                         declared_annotations<X>::value);
-      };
-
+         using K = std::remove_const_t<decltype(X)>;
+         if constexpr (is_type_key<K>)
+            return merge_annotations(
+               carried_type_annotations<typename type_key_type<K>::type>(),
+               declared_annotations<X>::value);
+         else if constexpr (std::is_member_pointer_v<K>)
+         {
+            using C = typename member_pointer_class<K>::type;
+            if constexpr (has_declared_member_attrs<C>::value)
+               return merge_annotations(carried_member_annotations<C, X>(),
+                                        declared_annotations<X>::value);
+            else
+               return carried_member_annotations<C, X>();
+         }
+         else
+            return declared_annotations<X>::value;
+      }
    }  // namespace detail
 
    template <auto X>
-   inline constexpr auto annotate = detail::annotations_of<X>::value;
+   inline constexpr auto annotate = detail::lookup_annotations<X>();
 
    namespace detail
    {
@@ -1272,11 +1329,11 @@ namespace psio {
 // statement may be in TYPE's namespace, an enclosing one, or the global one.
 // The spec expression is evaluated where the statement is written.
 #define PSIO_FIELD_ATTRS(TYPE, FIELD, ...)                                                   \
-   static_assert(!::psio::detail::annotation_was_read<&TYPE::FIELD>::value,                   \
+   static_assert(!::psio::detail::member_annotation_was_read<&TYPE::FIELD>,                   \
                  "psio: PSIO_FIELD_ATTRS(" BOOST_PP_STRINGIZE(TYPE) ", "                      \
                  BOOST_PP_STRINGIZE(FIELD)                                                    \
                  ") comes after the first use of the field's annotations");                   \
-   static_assert(sizeof(::psio::detail::annotation_bind<                                      \
+   static_assert(sizeof(::psio::detail::member_annotation_bind<                               \
                     &TYPE::FIELD,                                                             \
                     decltype([] { return ::psio::to_spec_tuple(__VA_ARGS__); })>) > 0,        \
                  "");

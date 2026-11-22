@@ -236,9 +236,9 @@ namespace chain::state {
 
 `attr(field, spec)` lists the field and annotates it; its spec expression is
 evaluated with `using namespace psio` in effect. The annotations are members
-of the reflection metadata (`reflect<T>::member_annotations<I>`,
-`reflect<T>::type_annotations`) and `psio::annotate<X>` — what every format
-reads — finds them there. `PSIO_FIELD_ATTRS(T, field, spec)`,
+of the reflection metadata, and `psio::annotate<&T::field>` /
+`psio::annotate<psio::type<T>{}>` — what every format reads — find them
+there. `PSIO_FIELD_ATTRS(T, field, spec)`,
 `PSIO_TYPE_ATTRS(T, spec)` and `PSIO_ATTRS(T, (field, (spec)), ...)` remain
 as separate statements, legal at any namespace scope (the type's own, an
 enclosing one, the global one). The two forms compose; the same spec type

@@ -70,10 +70,10 @@
 // `attr(field, spec)` and the type-level keywords (definitionWillNotChange(),
 // maxFields(N), maxDynamicData(N)) work in every PSIO_REFLECT: at namespace
 // scope and in a class body, for a type in any (nested) namespace. The
-// annotations are members of the metadata the macro binds to the type
-// (`type_annotations`, `member_annotations<I>`), and `psio::annotate` reads
-// them from there (annotate.hpp), so everything about a type is stated
-// once, next to it:
+// annotations are members of the metadata the macro binds to the type, and
+// `psio::annotate<&T::field>` / `psio::annotate<psio::type<T>{}>` read them
+// from there (annotate.hpp), so everything about a type is stated once,
+// next to it:
 //
 //     namespace chain::state {
 //        struct account {
@@ -132,6 +132,13 @@ namespace psio {
    namespace detail {
       struct reflect_default_impl {
          static constexpr bool is_reflected = false;
+      };
+
+      // Names a member in an overload set: PSIO_REFLECT generates one
+      // `_psio_member_annotations_(member_key<&T::field>)` per `attr`.
+      template <auto MemberPtr>
+      struct member_key
+      {
       };
 
       // Empty records still expose the metadata template names so generic
@@ -549,16 +556,20 @@ namespace psio {
 #define PSIO_PP_REST2_(a, b, ...) __VA_ARGS__
 
 // Field-level. FKSEQ is the classified field list — `(field, F)` and
-// `(attrfield, F, spec...)` in declaration order, so the position in it is
-// the member index. One `if constexpr` arm per attrfield; plain fields emit
-// nothing and fall through to the empty tuple.
-#define PSIO_REFLECT_MEMBER_ANN_CASE_(r, _, I, kt) \
-   BOOST_PP_CAT(PSIO_REFLECT_MEMBER_ANN_CASE_, BOOST_PP_TUPLE_ELEM(0, kt))(I, kt)
-#define PSIO_REFLECT_MEMBER_ANN_CASE_field(I, kt) /**/
-#define PSIO_REFLECT_MEMBER_ANN_CASE_attrfield(I, kt) \
-   if constexpr (Idx == I)                             \
-      return ::psio::to_spec_tuple(PSIO_PP_REST2_ kt); \
-   else
+// `(attrfield, F, spec...)`. Each attrfield becomes one overload of
+// `_psio_member_annotations_`, selected by the member pointer through
+// detail::member_key; plain fields emit nothing, and a type with no attr
+// has no such function at all (has_member_annotations says which).
+#define PSIO_REFLECT_MEMBER_ANN_FN_(r, _, kt) \
+   BOOST_PP_CAT(PSIO_REFLECT_MEMBER_ANN_FN_, BOOST_PP_TUPLE_ELEM(0, kt))(kt)
+#define PSIO_REFLECT_MEMBER_ANN_FN_field(kt) /**/
+#define PSIO_REFLECT_MEMBER_ANN_FN_attrfield(kt)                                          \
+      static constexpr auto _psio_member_annotations_(                                    \
+         ::psio::detail::member_key<&psio_T_::BOOST_PP_TUPLE_ELEM(1, kt)>) noexcept       \
+      {                                                                                   \
+         using namespace ::psio;                                                          \
+         return ::psio::to_spec_tuple(PSIO_PP_REST2_ kt);                                 \
+      }
 
 // Presence markers: a token per attrfield / per type-level keyword, so
 // CHECK_EMPTY tells whether the list has any.
@@ -575,15 +586,7 @@ namespace psio {
       static constexpr bool has_member_annotations = false;
 #define PSIO_REFLECT_MEMBER_ANN_SOME_(FKSEQ)                                               \
       static constexpr bool has_member_annotations = true;                                 \
-      template <::std::size_t Idx>                                                         \
-      static constexpr auto _member_annotations_impl_() noexcept                           \
-      {                                                                                    \
-         using namespace ::psio;                                                           \
-         BOOST_PP_SEQ_FOR_EACH_I(PSIO_REFLECT_MEMBER_ANN_CASE_, _, FKSEQ)                  \
-            return ::std::tuple<>{};                                                       \
-      }                                                                                    \
-      template <::std::size_t Idx>                                                         \
-      static constexpr auto member_annotations = _member_annotations_impl_<Idx>();
+      BOOST_PP_SEQ_FOR_EACH(PSIO_REFLECT_MEMBER_ANN_FN_, _, FKSEQ)
 
 // Type-level: `, std::tuple{spec}` per keyword, concatenated into one tuple
 // so `definitionWillNotChange(), maxFields(5), maxDynamicData(4096)` compose.
@@ -616,11 +619,7 @@ namespace psio {
       static constexpr ::std::tuple<> type_annotations{};
 #define PSIO_REFLECT_TYPE_ANN_SOME_(TYPE, KIND_SEQ)                                        \
       static constexpr auto type_annotations = ::std::tuple_cat(                           \
-         ::std::tuple<>{} BOOST_PP_SEQ_FOR_EACH(PSIO_REFLECT_TYPEATTR_TUPLE, _, KIND_SEQ)); \
-      static_assert(::psio::detail::specs_distinct<                                        \
-                       ::std::remove_cvref_t<decltype(type_annotations)>>::value,          \
-                    "psio: PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)                         \
-                    ") lists a type-level attribute twice");
+         ::std::tuple<>{} BOOST_PP_SEQ_FOR_EACH(PSIO_REFLECT_TYPEATTR_TUPLE, _, KIND_SEQ));
 
 // PSIO_REFLECT(TYPE)             — zero-field marker (resource opt-in)
 // PSIO_REFLECT(TYPE, f1, f2, …)  — record / struct
@@ -665,14 +664,14 @@ namespace psio {
 
 // FSEQ: the field names. MSEQ: the method tuples. FKSEQ: the classified
 // field tuples (for member annotations). KIND_SEQ: every classified item
-// (for the type-level keywords).
+// (for the type-level keywords). The field list is filtered once.
 #define PSIO_REFLECT_DISPATCH_(TYPE, KIND_SEQ)                                           \
-   PSIO_REFLECT_IMPL_(                                                                   \
-      TYPE,                                                                               \
-      PSIO_REFLECT_FIELD_NAMES_(BOOST_PP_SEQ_FILTER(PSIO_REFLECT_KEEP_FIELD, _, KIND_SEQ)), \
-      BOOST_PP_SEQ_FILTER(PSIO_REFLECT_KEEP_METHOD, _, KIND_SEQ),                         \
-      BOOST_PP_SEQ_FILTER(PSIO_REFLECT_KEEP_FIELD, _, KIND_SEQ),                          \
-      KIND_SEQ)
+   PSIO_REFLECT_DISPATCH_FIELDS_(                                                        \
+      TYPE, BOOST_PP_SEQ_FILTER(PSIO_REFLECT_KEEP_FIELD, _, KIND_SEQ), KIND_SEQ)
+#define PSIO_REFLECT_DISPATCH_FIELDS_(TYPE, FKSEQ, KIND_SEQ)                             \
+   PSIO_REFLECT_IMPL_(TYPE, PSIO_REFLECT_FIELD_NAMES_(FKSEQ),                            \
+                      BOOST_PP_SEQ_FILTER(PSIO_REFLECT_KEEP_METHOD, _, KIND_SEQ), FKSEQ,  \
+                      KIND_SEQ)
 
 // Field metadata for a type with no reflected fields — a resource marker
 //
