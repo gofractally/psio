@@ -1359,6 +1359,10 @@ impl CustomHandlers {
             |text: &str| {
                 let value = T::from_text(text)
                     .ok_or(PsszError("json: text is not a value of the custom type"))?;
+                // The wire bytes of what the text says. Whether they are a
+                // value of the type is the check's to report, with the
+                // invariant's own message.
+                let _unchecked = crate::pssz_checked::WriteUnchecked::enter();
                 crate::pssz::try_to_pssz::<Pssz, T>(&value)
             },
         );

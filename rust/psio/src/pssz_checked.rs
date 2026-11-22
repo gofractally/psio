@@ -109,6 +109,31 @@ impl Drop for EncodeDepth {
     }
 }
 
+// ── Invariants ──────────────────────────────────────────────────────────────
+
+thread_local! { static WRITE_UNCHECKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Scope in which the generated writers do not run type invariants: the
+/// bytes of a value whose invariant is someone else's to report (a custom
+/// handler's `from_text` produces the wire bytes; its `check` then says
+/// whether they are a value of the type, with the invariant's own message).
+/// Readers are unaffected.
+pub struct WriteUnchecked(bool);
+impl WriteUnchecked {
+    pub fn enter() -> Self {
+        Self(WRITE_UNCHECKED.with(|flag| flag.replace(true)))
+    }
+}
+impl Drop for WriteUnchecked {
+    fn drop(&mut self) {
+        WRITE_UNCHECKED.with(|flag| flag.set(self.0));
+    }
+}
+/// Whether a writer runs the invariant of the value it is writing.
+pub fn writer_checks_invariants() -> bool {
+    !WRITE_UNCHECKED.with(|flag| flag.get())
+}
+
 // ── Formats and offsets ─────────────────────────────────────────────────────
 
 pub fn format<F: PsszFormat>() -> PsszResult<()> {

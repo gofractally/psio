@@ -10,6 +10,9 @@
 //! * `reject` rows must be rejected.
 //! * rows with `pssz` carry the typed C++ `psio::pssz` bytes of the value:
 //!   the typed Rust `Pssz` codec must produce and read the same bytes.
+//! * `invariant` rows are well-formed text (and the bytes) of a value that
+//!   violates a type invariant: the typed readers reject both with the
+//!   invariant's own message (`reason`).
 //!
 //! The types also derive `ToPsszSchema`: the IR Rust generates for them must
 //! drive the schema path (`psio::pssz::dynamic`) to the bytes and texts of
@@ -19,11 +22,19 @@
 use psio::json::{self, IJson, Json, JsonFormat, JsonText, TextForm};
 use psio::pssz::schema_ir::{schema_for, ToPsszSchema};
 use psio::pssz::{
-    dynamic, BoundedList, BoundedRawString, BoundedString, Pssz, PsszPack, PsszUnpack, RawString,
-    Uint256,
+    dynamic, BoundedList, BoundedMap, BoundedRawString, BoundedString, Deferred, Nested, Pssz,
+    PsszPack, PsszUnpack, RawString, Uint256,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
+
+// The transparent wrappers, custom types and invariants of
+// conformance/custom-types.md.
+#[path = "custom/text.rs"]
+mod text;
+#[path = "custom/types.rs"]
+mod custom_types;
+use custom_types::*;
 
 #[derive(
     Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
@@ -112,7 +123,11 @@ struct Holder {
 
 // A custom text form: "major.minor". On the wire it is the record of its two
 // members; the Schema IR records Custom { that record, "Version" }.
-#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
+// (A map key: `Key` gives it the key order maps are written in.)
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, psio::PsszPack, psio::PsszUnpack,
+    psio::ToPsszSchema, psio::Key,
+)]
 #[pssz(custom)]
 struct Version {
     major: u16,
@@ -148,7 +163,10 @@ struct Release {
 // characters of [a-z1-5.], 5 bits each, most significant first. On the wire
 // it is its u64; the Schema IR records Custom { Int{64}, "AccountName" } (the
 // id C++, Rust and JS register the handler under, not the type's name).
-#[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, psio::PsszPack, psio::PsszUnpack,
+    psio::ToPsszSchema, psio::Key,
+)]
 #[pssz(transparent, custom = "AccountName")]
 struct Account(u64);
 const ACCOUNT_ALPHABET: &[u8; 32] = b".12345abcdefghijklmnopqrstuvwxyz";
@@ -196,6 +214,7 @@ struct Transfer {
 fn typed_handlers() -> dynamic::CustomHandlers {
     let mut handlers = dynamic::CustomHandlers::new();
     handlers.add_type::<Version>().unwrap().add_type::<Account>().unwrap();
+    typed_custom_handlers(&mut handlers);
     handlers
 }
 
@@ -237,7 +256,8 @@ struct Fixed {
 // holds every value of its underlying type and the fixture has rows for
 // unnamed ones (2, 9, 255), so the mirror carries the catch-all.
 #[derive(
-    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, psio::JsonText, psio::PsszPack, psio::PsszUnpack,
+    psio::ToPsszSchema, psio::Key,
 )]
 #[repr(u8)]
 enum Color {
@@ -307,6 +327,71 @@ struct Shapes {
     bounds: Option<Bounds>,
 }
 
+// ── Nested values (docs/json.md, "Nested values") ───────────────────────────
+
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+struct NestedArgs {
+    to: String,
+    amount: u64,
+    memo: Option<String>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+struct NestedAction {
+    method: u32,
+    args: Nested<NestedArgs>,
+    twice: Nested<Nested<u64>>,
+    maybe: Option<Nested<NestedArgs>>,
+    many: Vec<Nested<u64>>,
+}
+
+// C++ std::variant<uint32_t, nested<NestedArgs>>.
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+enum NestedChoice {
+    #[json(name = "uint32")]
+    U32(u32),
+    #[json(name = "nested_NestedArgs")]
+    Args(Nested<NestedArgs>),
+}
+
+// ── Pairs, maps and sets (docs/json.md, "Maps and sets") ────────────────────
+
+// C++ std::variant<map<Text, u32>, unordered_set<u32>, pair<u32, Text>>.
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+enum MapChoice {
+    #[json(name = "map_string_uint32")]
+    Map(BTreeMap<String, u32>),
+    #[json(name = "set_uint32")]
+    Set(HashSet<u32>),
+    #[json(name = "tuple_uint32_string")]
+    Pair((u32, String)),
+}
+
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+struct Registry {
+    counts: BTreeMap<String, u32>,
+    // A member's integer form reaches the elements of a set ...
+    #[json(json_string, ijson_number)]
+    ids: BTreeSet<u64>,
+    // ... but not the key and value of a map entry: an entry is a tuple.
+    #[json(json_string)]
+    balances: BTreeMap<Account, u64>,
+    head: (u32, String),
+    names: Option<BTreeMap<u64, String>>,
+    limited: BoundedMap<u8, u8, 2>,
+    groups: Vec<HashSet<u32>>,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 struct Row {
     name: String,
@@ -325,6 +410,8 @@ struct Row {
     /// reader writes with no handler registered (the wire type's own text).
     plain_json: Option<String>,
     plain_ijson: Option<String>,
+    /// `invariant` rows: the message of the invariant the value violates.
+    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -340,6 +427,9 @@ struct TypeRow {
     /// `plain_json` / `plain_ijson`.
     #[serde(default)]
     custom: bool,
+    /// An invariant constrains values of the type: it has `invariant` rows.
+    #[serde(default)]
+    invariant: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -409,6 +499,24 @@ fn writes<F: JsonFormat, T: Val<F>>(value: &T, want: &str) -> Result<(), String>
     Ok(())
 }
 
+/// Well-formed text of a value that violates an invariant: every typed
+/// reader rejects it, with the invariant's own message.
+fn violates<F: JsonFormat, T: Val<F>>(text: &[u8], reason: &str) -> Result<(), String> {
+    let results = [
+        json::validate::<F, T>(text).err(),
+        json::from_slice::<F, T>(text).err(),
+        psio::decode::<F, T>(text).err(),
+        psio::validate::<F, T, _>(text, &psio::DefaultSafe).err(),
+    ];
+    for error in results {
+        match error {
+            Some(error) if error.what == reason => (),
+            other => return Err(format!("text: {other:?}, want {reason:?}")),
+        }
+    }
+    Ok(())
+}
+
 fn rejects<F: JsonFormat, T: Val<F>>(text: &[u8]) -> Result<(), String> {
     if json::validate::<F, T>(text).is_ok() {
         return Err("validate accepts".into());
@@ -451,6 +559,14 @@ fn check_row<T: Val<Json> + Val<IJson>>(row: &Row) -> Result<Option<T>, String> 
         ("accept", Some("ijson")) => accept::<IJson, T>(row),
         ("reject", Some("json")) => rejects::<Json, T>(&input(row)).map(|_| None),
         ("reject", Some("ijson")) => rejects::<IJson, T>(&input(row)).map(|_| None),
+        ("invariant", Some(format)) => {
+            let reason = row.reason.as_ref().ok_or("invariant row needs reason")?;
+            if format == "ijson" {
+                violates::<IJson, T>(&input(row), reason).map(|_| None)
+            } else {
+                violates::<Json, T>(&input(row), reason).map(|_| None)
+            }
+        }
         (kind, format) => Err(format!("unknown kind/format {kind} {format:?}")),
     }
 }
@@ -471,6 +587,23 @@ impl<T: Val<Json> + Val<IJson> + PsszPack<Pssz> + PsszUnpack<Pssz>> Packed for T
 /// row's `pssz` (the bytes of the typed C++ codec).
 fn check_pssz<T: Packed>(row: &Row) -> Result<(), String> {
     let value = check_row::<T>(row)?;
+    if row.kind == "invariant" {
+        // The bytes of the value: every typed pssz reader rejects them with
+        // the invariant's message too.
+        let bytes = unhex(row.pssz.as_ref().ok_or("invariant row needs pssz")?);
+        let reason = row.reason.as_deref().ok_or("invariant row needs reason")?;
+        let outcomes = [
+            psio::pssz::from_pssz::<Pssz, T>(&bytes).map(drop),
+            psio::pssz::from_pssz_exact::<Pssz, T>(&bytes).map(drop),
+            psio::pssz::from_pssz_compatible::<Pssz, T>(&bytes).map(drop),
+        ];
+        for outcome in outcomes {
+            if outcome.map_err(|e| e.0) != Err(reason) {
+                return Err(format!("typed pssz: {outcome:?}, want {reason:?}"));
+            }
+        }
+        return Ok(());
+    }
     match (&value, &row.pssz) {
         (None, None) => Ok(()),
         (Some(value), Some(hex)) => {
@@ -577,6 +710,59 @@ fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
                 Ok(_) => Err("schema path accepts".into()),
                 Err(_) => Ok(()),
             }
+        }
+        ("invariant", Some(format)) => {
+            // The three registries over the Rust-built IR: the handlers
+            // reject the text and the bytes with the invariant's message;
+            // with none the value is its wire type; a strict registry that
+            // lacks the handler refuses the type.
+            let reason = row.reason.as_ref().ok_or("no reason")?;
+            let bytes = unhex(row.pssz.as_ref().ok_or("no pssz")?);
+            let text = input(row);
+            let refused = if format == "ijson" {
+                dynamic::json_to_pssz::<IJson>(&schema, &root, &text, handlers)
+            } else {
+                dynamic::json_to_pssz::<Json>(&schema, &root, &text, handlers)
+            };
+            if refused.as_ref().map_err(|e| e.what()) != Err(reason.as_str()) {
+                return Err(format!("schema path, text: {refused:?}"));
+            }
+            let checked = psio::pssz::dynamic::validate_pssz_with(&schema, &root, &bytes, handlers);
+            if checked.as_ref().map_err(|e| e.what()) != Err(reason.as_str()) {
+                return Err(format!("schema path, bytes: {checked:?}"));
+            }
+            if dynamic::validate_pssz(&schema, &root, &bytes) != Ok(false) {
+                return Err("schema path with no handler rejects the wire value".into());
+            }
+            for (ijson, plain) in [(false, &row.plain_json), (true, &row.plain_ijson)] {
+                let plain = plain.as_ref().ok_or("no plain text")?;
+                let (written, read) = if ijson {
+                    (
+                        psio::pssz::dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes),
+                        psio::pssz::dynamic::json_to_pssz::<IJson>(&schema, &root, plain.as_bytes()),
+                    )
+                } else {
+                    (
+                        psio::pssz::dynamic::pssz_to_json::<Json>(&schema, &root, &bytes),
+                        psio::pssz::dynamic::json_to_pssz::<Json>(&schema, &root, plain.as_bytes()),
+                    )
+                };
+                if written.as_ref().map(|(text, _)| text) != Ok(plain) {
+                    return Err(format!("schema path with no handler writes {written:?}, want {plain}"));
+                }
+                if read.as_ref() != Ok(&bytes) {
+                    return Err(format!("schema path with no handler reads {plain} as {read:?}"));
+                }
+            }
+            let mut strict = psio::pssz::dynamic::CustomHandlers::new();
+            strict.set_strict(true);
+            let strict = psio::pssz::dynamic::validate_pssz_with(&schema, &root, &bytes, &strict);
+            if strict.as_ref().map_err(|e| e.what())
+                != Err("pssz dynamic: no handler registered for a custom type")
+            {
+                return Err(format!("strict: {strict:?}"));
+            }
+            Ok(())
         }
         (kind, format) => Err(format!("unknown kind/format {kind} {format:?}")),
     }
@@ -688,6 +874,55 @@ fn registry() -> BTreeMap<&'static str, Entry> {
         "Account" => Account,
         "Transfer" => Transfer,
         "string<=4" => BoundedString<4>,
+        // Nested values: the inner value's own text.
+        "NestedArgs" => NestedArgs,
+        "NestedAction" => NestedAction,
+        "nested<u64>" => Nested<u64>,
+        "nested<NestedArgs>" => Nested<NestedArgs>,
+        "nested<NestedArgs,deferred>" => Nested<NestedArgs, Deferred>,
+        "optional<nested<u64>>" => Option<Nested<u64>>,
+        "list<nested<NestedArgs>>" => Vec<Nested<NestedArgs>>,
+        "NestedChoice" => NestedChoice,
+        // Pairs, maps and sets: an object for a key that is a string by
+        // type, an array of pairs otherwise; whatever container holds them.
+        "pair<u32,string>" => (u32, String),
+        "map<string,u32>" => BTreeMap<String, u32>,
+        "map<raw_string,u32>" => HashMap<RawString, u32>,
+        "map<u64,string>" => BTreeMap<u64, String>,
+        "map<Account,u64>" => BTreeMap<Account, u64>,
+        "map<Version,string>" => BTreeMap<Version, String>,
+        "map<Color,u8>" => BTreeMap<Color, u8>,
+        "map<string,Inner>" => BTreeMap<String, Inner>,
+        "set<string>" => BTreeSet<String>,
+        "set<u32>" => HashSet<u32>,
+        "set<tuple<u8,raw_string>>" => BTreeSet<(u8, RawString)>,
+        "map<string,map<u32,set<string>>>" => BTreeMap<String, BTreeMap<u32, BTreeSet<String>>>,
+        "MapChoice" => MapChoice,
+        "Registry" => Registry,
+        "map<string,nested<NestedArgs>>" => BTreeMap<String, Nested<NestedArgs>>,
+        "set<nested<u64>>" => BTreeSet<Nested<u64>>,
+        "map<nested<u64>,u8>" => BTreeMap<Nested<u64>, u8>,
+        "nested<map<string,u32>>" => Nested<BTreeMap<String, u32>>,
+        // Transparent wrappers, custom text of any shape, invariants.
+        "Id" => Id,
+        "Tag" => Tag,
+        "Blob" => Blob,
+        "Endpoint" => Endpoint,
+        "Ratio" => Ratio,
+        "Ref" => Ref,
+        "Name" => Name,
+        "DerKey" => DerKey,
+        "Range" => Range,
+        "Level" => Level,
+        "Guarded" => Guarded,
+        "list<Level>" => Vec<Level>,
+        "optional<Name>" => Option<Name>,
+        "list<Endpoint>" => Vec<Endpoint>,
+        "map<Tag,u32>" => BTreeMap<Tag, u32>,
+        "map<Name,Range>" => BTreeMap<Name, Range>,
+        "set<Level>" => BTreeSet<Level>,
+        "map<Ref,u8>" => BTreeMap<Ref, u8>,
+        "nested<Range>" => Nested<Range>,
     }
     // `BoundedList<u8, N>` is a byte payload: nothing on the wire has an
     // offset width. The typed codec nominally reports the list rule (4, a
@@ -722,6 +957,7 @@ fn every_vector_holds_on_every_entry_point() {
         shown.join("\n")
     );
     assert!(fixture.vectors.len() >= 900, "fixture shrank");
+    assert_eq!(fixture.vectors.len(), 1759, "every row of the fixture was checked");
 }
 
 #[test]
@@ -754,10 +990,23 @@ fn the_fixture_covers_every_type_kind_and_format() {
         // The typed width the fixture records is the typed Rust width.
         assert_eq!(ty.auto_width.is_some(), ty.pssz, "{}: auto_width", ty.id);
         assert_eq!(entry.typed_width.map(|width| width()), ty.auto_width, "{}: width", ty.id);
+        // The types holding a custom text form (theirs, or one they hold).
         assert_eq!(
             ty.custom,
-            matches!(ty.id.as_str(), "Version" | "Release" | "Account" | "Transfer"),
+            matches!(
+                ty.id.as_str(),
+                "Version" | "Release" | "Account" | "Transfer" | "map<Account,u64>"
+                    | "map<Version,string>" | "Registry" | "Blob" | "Endpoint" | "Ratio" | "Ref"
+                    | "Guarded" | "list<Endpoint>" | "map<Ref,u8>"
+            ),
             "{}: custom",
+            ty.id
+        );
+        // A type an invariant constrains has rows that violate it.
+        assert_eq!(
+            ty.invariant,
+            fixture.vectors.iter().any(|row| row.ty == ty.id && row.kind == "invariant"),
+            "{}: invariant",
             ty.id
         );
         assert_eq!(entry.pssz, ty.pssz, "{}: pssz", ty.id);
@@ -767,10 +1016,13 @@ fn the_fixture_covers_every_type_kind_and_format() {
     for row in &fixture.vectors {
         let ty = fixture.types.iter().find(|t| t.id == row.ty).expect("listed type");
         assert_eq!(row.pssz.is_some(), ty.pssz && row.kind != "reject", "{}: pssz", row.name);
-        let plain = ty.custom && row.kind == "value";
+        let plain = (ty.custom && row.kind == "value") || row.kind == "invariant";
         assert_eq!(row.plain_json.is_some(), plain, "{}: plain_json", row.name);
         assert_eq!(row.plain_ijson.is_some(), plain, "{}: plain_ijson", row.name);
+        assert_eq!(row.reason.is_some(), row.kind == "invariant", "{}: reason", row.name);
     }
+    assert_eq!(count["invariant:json"], 25);
+    assert_eq!(count["invariant:ijson"], 25);
     assert!(!fixture.schema_ir.is_empty() && fixture.schema_ir.len() % 2 == 0);
     assert!(fixture.vectors.iter().filter(|r| r.pssz.is_some()).count() >= 600);
     assert!(count["value:both"] >= 100);
@@ -1075,4 +1327,74 @@ fn native_values_have_the_fixture_texts() {
         text(&|| json::to_string::<IJson, _>(&Version { major: 12, minor: 345 })),
         "\"12.345\""
     );
+}
+
+#[test]
+fn writers_refuse_invariant_violations_and_write_maps_in_key_order() {
+    // The `invariant` rows are text a reader must reject; a writer never
+    // produces the value's text either, in both formats.
+    fn no_text<T: JsonText + Debug>(value: T, reason: &str) {
+        for what in [
+            json::to_string::<Json, T>(&value).map_err(|e| e.what),
+            json::to_string::<IJson, T>(&value).map_err(|e| e.what),
+        ] {
+            assert_eq!(what, Err(reason), "{value:?}");
+        }
+    }
+    let bad_name = Name { value: 1 << 60 };
+    let bad_range = Range { lo: 9, hi: 3 };
+    no_text(bad_name.clone(), "Name: value is not a canonical name");
+    no_text(bad_range.clone(), "Range: lo is greater than hi");
+    no_text(Level::Unknown(4), "Level: not a listed level");
+    no_text(DerKey { data: vec![] }, "DerKey: not a DER sequence");
+    no_text(Ref { target: RefTarget::Name(RawString(vec![])) }, "Ref: a name is not empty");
+    no_text(vec![Level::Low, Level::Unknown(9)], "Level: not a listed level");
+    no_text(Some(bad_name.clone()), "Name: value is not a canonical name");
+    // A key written as an object member name is checked like any value.
+    let by_ref: BTreeMap<Ref, u8> =
+        [(Ref { target: RefTarget::Name(RawString(vec![])) }, 1)].into_iter().collect();
+    no_text(by_ref, "Ref: a name is not empty");
+    no_text(
+        [(bad_name, Range { lo: 0, hi: 0 })].into_iter().collect::<BTreeMap<_, _>>(),
+        "Name: value is not a canonical name",
+    );
+    // A nested value that adopted bytes of a violating value has no text.
+    let adopted = Nested::<Range>::unchecked(vec![8, 9, 0, 0, 0, 3, 0, 0, 0]);
+    assert!(json::to_string::<Json, _>(&adopted).is_err());
+    assert_eq!(
+        json::from_str::<Json, Nested<Range>>(r#"{"lo":9,"hi":3}"#).map_err(|e| e.what),
+        Err("Range: lo is greater than hi")
+    );
+
+    // Maps and sets: the canonical order (ascending key bytes) whatever the
+    // container's own order; an object for a key that is a string by type.
+    let by_account: HashMap<Account, u64> =
+        [("bob", 7), ("alice", 5)].map(|(name, n)| (Account::from_text(name).unwrap(), n)).into();
+    assert_eq!(json::to_string::<IJson, _>(&by_account).unwrap(), r#"{"alice":5,"bob":7}"#);
+    let by_number: HashMap<u64, String> = [(256, "x".to_string()), (1, "one".to_string())].into();
+    assert_eq!(json::to_string::<Json, _>(&by_number).unwrap(), r#"[[1,"one"],[256,"x"]]"#);
+    // An enumerator name is not a string by type: pairs.
+    let by_color: BTreeMap<Color, u8> = [(Color::Blue, 3), (Color::Red, 1)].into();
+    assert_eq!(json::to_string::<IJson, _>(&by_color).unwrap(), r#"[["red",1],["blue",3]]"#);
+    // Nested elements order by their inner bytes: 256 (00 01 ..) before 1.
+    let nested: BTreeSet<Nested<u64>> = [1u64, 256].iter().map(|n| Nested::new(n).unwrap()).collect();
+    assert_eq!(json::to_string::<Json, _>(&nested).unwrap(), "[256,1]");
+    // A repeated key or element is refused by readers, by key bytes.
+    for (text, what) in [
+        (r#"{"a":1,"a":2}"#, "json: duplicate map key"),
+    ] {
+        assert_eq!(json::from_str::<Json, BTreeMap<String, u32>>(text).map_err(|e| e.what), Err(what));
+    }
+    assert_eq!(
+        json::from_str::<IJson, BTreeMap<u64, String>>(r#"[["5","a"],[5,"b"]]"#).map_err(|e| e.what),
+        Err("json: duplicate map key")
+    );
+    assert_eq!(
+        json::from_str::<Json, BTreeSet<psio::key::ByKey<f64>>>("[0.0,-0.0]").map_err(|e| e.what),
+        Err("json: duplicate set element")
+    );
+    // The form of a map is its key type's: an object where pairs are
+    // expected, or the reverse, is an error.
+    assert!(json::from_str::<Json, BTreeMap<u64, String>>(r#"{"1":"one"}"#).is_err());
+    assert!(json::from_str::<Json, BTreeMap<String, u32>>(r#"[["a",1]]"#).is_err());
 }

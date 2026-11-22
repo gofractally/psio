@@ -709,7 +709,16 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
         }
     }
     let unpack_check = check(quote!(&__value));
-    let pack_check = check(quote!(self));
+    let pack_check = match &opts.invariant {
+        Some(path) => quote! {
+            if #k::pssz_checked::writer_checks_invariants() {
+                if let ::core::result::Result::Err(__why) = #path(self) {
+                    return ::core::result::Result::Err(#k::pssz::PsszError(__why));
+                }
+            }
+        },
+        None => quote!(),
+    };
     Ok(if unpack {
         // With an invariant, validation materialises the value: the decoder
         // is the validator (same structure checks, then the invariant).
