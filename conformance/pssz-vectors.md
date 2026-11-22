@@ -38,14 +38,24 @@ implementation disagrees. The class marked OBSERVED ONLY is exempt.
 
 ```
 { "version": 1,
-  "types":   [ { "id", "shape", "auto_width", "max_encoded_size",
+  "schema_ir": "<hex>",
+  "types":   [ { "id", "ir", "shape", "auto_width", "max_encoded_size",
                  "max_dynamic_data", "fixed", "fixed_size" } ... ],
   "vectors": [ { "name", "class", "type", "format", "hex", "expect",
                  "reason", "reencoded", "value", "writer" } ... ] }
 ```
 
+`schema_ir` is the `psio::pssz` encoding (lowercase hex) of one Schema IR
+(`psio::Schema`) that holds every fixture type under its id. The schema-driven
+tests (`cpp/tests/schema_conformance_tests.cpp`,
+`rust/psio/tests/schema_conformance.rs`) use it and nothing else: IR + bytes
+must give the outcome recorded for the typed codec (see `string-raw-non-utf8`
+for the one documented difference).
+
 Types:
 
+- `ir` - whether the Schema IR describes the type faithfully (the emitter
+  aborts if an `ir: true` type's IR-derived width differs from `auto_width`).
 - `id` - stable type id. A record or enum is a named type and its id is its
   name. Every other type is structural and its id is its shape string.
 - `shape` - the logical type (grammar below).
@@ -121,7 +131,7 @@ exists only for record members.
 | `enum` | 76 | Enums as their underlying integer. |
 | `enum-unknown-value` | 36 | A value that names no enumerator. C++ accepts it in every entry point. |
 | `string` | 308 | UTF-8 and bound rules for `string`, `string<=N`, `raw_string`. |
-| `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`. Recorded as `canonical`; the one exception is C++ `validate_strict`, which checks every plain string and rejects these. |
+| `string-raw-non-utf8` | 44 | Non-UTF-8 bytes in a `raw_string`. Recorded as `canonical`; the exceptions are C++ `validate_strict`, which checks every plain string, and the schema-driven codec (the IR has one `string` for raw and UTF-8 strings and treats it as UTF-8): both reject these. |
 | `length-bound-overflow` | 28 | Frames exceeding a member `length_bound`, as a writer that skips the bound check would produce them. Every reader rejects them; the C++ and Rust encoders refuse the values. |
 | `bytes` | 88 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. |
 | `zero-fixed` | 100 | Zero-field and all-fixed records and their containers. |

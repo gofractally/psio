@@ -26,7 +26,9 @@ pub fn derive_pssz_pack(input: TokenStream) -> TokenStream { pssz_macro::derive(
 #[proc_macro_derive(PsszUnpack, attributes(pssz))]
 pub fn derive_pssz_unpack(input: TokenStream) -> TokenStream { pssz_macro::derive(input, true) }
 
-#[proc_macro_derive(ToPsszSchema, attributes(pssz))]
+/// Also reads `#[json(...)]` (see `JsonText`): integer forms become the member
+/// attributes `jsonInt` / `ijsonInt`, a variant's `name` its `ijsonName`.
+#[proc_macro_derive(ToPsszSchema, attributes(pssz, json))]
 pub fn derive_to_pssz_schema(input: TokenStream) -> TokenStream { pssz_macro::derive_schema(input) }
 
 #[proc_macro_derive(PsszView, attributes(pssz))]

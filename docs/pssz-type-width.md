@@ -127,5 +127,5 @@ and metadata APIs; it does not copy a codec into psibase or create a wire family
   automatic tag `Pssz` with the same width selection (`PsszPack::AUTO_BOUND`
   mirrors `max_encoded_size`, `#[pssz(max_dynamic_data = N)]` is the explicit
   budget), checked against the shared fixture `conformance/pssz-vectors.json`.
-  The Rust schema-driven codec (`pssz::dynamic`) still supports only the
-  explicit-width tags.
+  The schema-driven codecs (C++ `pssz_ir.hpp`, Rust `pssz::dynamic`) implement
+  the automatic profile from the Schema IR (`docs/pssz-ir-runtime.md`).

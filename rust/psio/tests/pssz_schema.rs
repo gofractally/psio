@@ -403,7 +403,175 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
     let raw_bytes = try_to_pssz::<Pssz32, _>(&non_utf8).unwrap();
     assert_eq!(from_pssz::<Pssz32, StringKinds>(&raw_bytes).unwrap(), non_utf8);
     assert!(codec::decode_exact::<Pssz32>(&schema, &root, &raw_bytes).is_err());
-    // The schema-driven codec has no type-derived width profile yet.
-    assert!(codec::encode::<Pssz>(&schema, &root, &dynamic).is_err());
-    assert!(codec::decode_exact::<Pssz>(&schema, &root, &bytes).is_err());
+    // The automatic (type-derived width) profile gives the typed `Pssz`
+    // bytes and reads them back to the same value.
+    let auto_bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+    assert_eq!(codec::encode::<Pssz>(&schema, &root, &dynamic).unwrap(), auto_bytes);
+    assert_eq!(codec::decode_exact::<Pssz>(&schema, &root, &auto_bytes).unwrap(), dynamic);
+    assert_eq!(
+        codec::auto_width(&schema, &root).unwrap(),
+        psio::pssz::auto_pssz_width::<StringKinds>()
+    );
+    // It applies the same UTF-8 rule to every "string".
+    let raw_auto = try_to_pssz::<Pssz, _>(&non_utf8).unwrap();
+    assert_eq!(from_pssz::<Pssz, StringKinds>(&raw_auto).unwrap(), non_utf8);
+    assert!(codec::decode_exact::<Pssz>(&schema, &root, &raw_auto).is_err());
+    assert!(codec::validate(&schema, &root, &raw_auto).is_err());
+}
+
+#[derive(Debug, PartialEq, PsszPack, PsszUnpack, ToPsszSchema)]
+#[pssz(max_dynamic_data = 300)]
+struct Annotated {
+    #[json(json_string)]
+    a: u64,
+    #[json(ijson_number)]
+    b: Vec<u64>,
+    #[json(json_number, ijson_string)]
+    c: Option<u32>,
+    d: psio::pssz::BoundedList<u8, 2>,
+    e: Uint256,
+    f: psio::pssz::BoundedList<u16, 3>,
+}
+#[derive(Debug, PartialEq, PsszPack, PsszUnpack, ToPsszSchema)]
+#[pssz(definition_will_not_change, max_dynamic_data = 16)]
+#[json(json_string, ijson_number)]
+struct TypeDefaults {
+    x: u64,
+    #[json(json_number)]
+    y: i64,
+}
+#[derive(Debug, PartialEq, PsszPack, PsszUnpack, ToPsszSchema)]
+enum Named {
+    #[json(name = "uint32")]
+    Number(u32),
+    Plain(String),
+    #[json(name = "uint8[]")]
+    Bytes(Vec<u8>),
+}
+
+#[test]
+fn derives_record_caps_integer_forms_and_variant_names() {
+    use psio::pssz::dynamic as codec;
+    let attribute = |name: &str, value: &str| Attribute {
+        name: name.into(),
+        value: Some(value.into()),
+    };
+    let (schema, root) = schema_for::<Annotated>().unwrap();
+    let AnyValue::Object(object) = &schema.resolve(&root).unwrap().value else {
+        panic!("expected Object IR")
+    };
+    // C++ SchemaBuilder: Attribute{"maxDynamicData", "300"}.
+    assert_eq!(object.attributes, [attribute("maxDynamicData", "300")]);
+    let attributes: Vec<_> = object.members.iter().map(|m| m.attributes.clone()).collect();
+    assert_eq!(attributes[0], [attribute("jsonInt", "string")]);
+    assert_eq!(attributes[1], [attribute("ijsonInt", "number")]);
+    assert_eq!(attributes[2], [attribute("jsonInt", "number"), attribute("ijsonInt", "string")]);
+    assert!(attributes[3..].iter().all(Vec::is_empty));
+    // Bounded bytes are "hex" over the bounded list, like Vec<u8>; any other
+    // bounded list is the list itself.
+    let resolved = |index: usize| &schema.resolve(&object.members[index].r#type).unwrap().value;
+    let AnyValue::Custom(bytes) = resolved(3) else {
+        panic!("expected the hex adapter")
+    };
+    assert_eq!(bytes.id, "hex");
+    assert!(matches!(
+        &schema.resolve(&bytes.r#type).unwrap().value,
+        AnyValue::BoundedList(l) if l.maxCount == 2
+    ));
+    assert!(matches!(resolved(5), AnyValue::BoundedList(l) if l.maxCount == 3));
+    let wide = schema.resolve(&object.members[4].r#type).unwrap();
+    assert!(matches!(&wide.value, AnyValue::Int(i) if i.bits == 256 && !i.isSigned));
+
+    let (defaults, defaults_root) = schema_for::<TypeDefaults>().unwrap();
+    let AnyValue::Object(object) = &defaults.resolve(&defaults_root).unwrap().value else {
+        panic!("expected Object IR")
+    };
+    // The order C++ emits: definitionWillNotChange (value ""), then the cap.
+    assert_eq!(
+        object.attributes,
+        [attribute("definitionWillNotChange", ""), attribute("maxDynamicData", "16")]
+    );
+    assert_eq!(
+        object.members[0].attributes,
+        [attribute("jsonInt", "string"), attribute("ijsonInt", "number")]
+    );
+    assert_eq!(
+        object.members[1].attributes,
+        [attribute("jsonInt", "number"), attribute("ijsonInt", "number")]
+    );
+
+    let (named, named_root) = schema_for::<Named>().unwrap();
+    let AnyValue::Variant(variant) = &named.resolve(&named_root).unwrap().value else {
+        panic!("expected Variant IR")
+    };
+    let members: Vec<_> =
+        variant.members.iter().map(|m| (m.name.as_str(), m.attributes.clone())).collect();
+    assert_eq!(
+        members,
+        [
+            ("Number", vec![attribute("ijsonName", "uint32")]),
+            ("Plain", vec![]),
+            ("Bytes", vec![attribute("ijsonName", "uint8[]")]),
+        ]
+    );
+
+    // The generated IR drives the schema path to the typed bytes, and the
+    // text follows the recorded forms and names.
+    let value = Annotated {
+        a: 1,
+        b: vec![u64::MAX],
+        c: Some(7),
+        d: psio::pssz::BoundedList(vec![1, 255]),
+        e: Uint256 { limb: [1, 0, 0, 0] },
+        f: psio::pssz::BoundedList(vec![5]),
+    };
+    let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+    assert_eq!(codec::auto_width(&schema, &root).unwrap(), auto_pssz_width::<Annotated>());
+    assert_eq!(codec::auto_width(&schema, &root).unwrap(), 2);
+    let dynamic = codec::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap();
+    assert_eq!(codec::encode::<Pssz>(&schema, &root, &dynamic).unwrap(), bytes);
+    assert!(codec::pssz_to_json::<psio::json::Json>(&schema, &root, &bytes)
+        .unwrap_err()
+        .what()
+        .contains("no JSON form"));
+    assert_eq!(
+        codec::auto_width(&defaults, &defaults_root).unwrap(),
+        auto_pssz_width::<TypeDefaults>()
+    );
+    let typed = TypeDefaults { x: 1, y: -2 };
+    let bytes = try_to_pssz::<Pssz, _>(&typed).unwrap();
+    assert_eq!(
+        codec::pssz_to_json::<psio::json::Json>(&defaults, &defaults_root, &bytes).unwrap().0,
+        r#"{"x":"1","y":-2}"#
+    );
+    assert_eq!(
+        codec::pssz_to_json::<psio::json::IJson>(&defaults, &defaults_root, &bytes).unwrap().0,
+        r#"{"x":1,"y":-2}"#
+    );
+    for (value, ijson, json) in [
+        (Named::Number(7), r#"{"uint32":7}"#, "[0,7]"),
+        (Named::Plain("p".into()), r#"{"Plain":"p"}"#, r#"[1,"p"]"#),
+        (Named::Bytes(vec![1, 255]), r#"{"uint8[]":"01FF"}"#, "[2,[1,255]]"),
+    ] {
+        let bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
+        assert_eq!(
+            codec::pssz_to_json::<psio::json::IJson>(&named, &named_root, &bytes).unwrap().0,
+            ijson
+        );
+        assert_eq!(
+            codec::pssz_to_json::<psio::json::Json>(&named, &named_root, &bytes).unwrap().0,
+            json
+        );
+        assert_eq!(
+            codec::json_to_pssz::<psio::json::IJson>(&named, &named_root, ijson.as_bytes()).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            codec::json_to_pssz::<psio::json::Json>(&named, &named_root, json.as_bytes()).unwrap(),
+            bytes
+        );
+    }
+    // The member name is not an I-JSON name once one is given.
+    assert!(codec::json_to_pssz::<psio::json::IJson>(&named, &named_root, br#"{"Number":7}"#)
+        .is_err());
 }

@@ -11,9 +11,20 @@
 //   bytes         byte list          (C++ vector<uint8_t>, Rust Vec<u8>)
 //   bytes4        four bytes         (C++ array<uint8_t,4>, Rust [u8; 4])
 //   list<T> array<T,N> optional<T> tuple<...>
-//   a record or variant by its name
+//   string<=N     UTF-8, at most N bytes   (C++ utf8_string<N>, Rust BoundedString<N>)
+//   list<T><=N    at most N elements       (C++ psio::bounded<T,N>, Rust BoundedList<T,N>)
+//   bytes<=N      at most N bytes          (C++ psio::bounded<uint8_t,N>, Rust BoundedList<u8,N>)
+//   a record, variant or enum by its name
+//
+// The fixture also records the Schema IR of every type (`schema_ir`, the
+// psio::pssz encoding of one psio::Schema holding each type under its id)
+// and, per row, the typed psio::pssz bytes of the value (`pssz`). The
+// schema-driven tests (cpp/tests/schema_conformance_tests.cpp,
+// rust/psio/tests/schema_conformance.rs) use only those: IR + text must give
+// the same bytes, and IR + bytes the same texts, as the typed codecs.
 
 #include <psio/json.hpp>
+#include <psio/pssz.hpp>
 #include <psio/reflect.hpp>
 
 #include <array>
@@ -177,6 +188,75 @@ namespace json_conf
    };
    PSIO_REFLECT(Tree, children)
 
+   // ── Length bounds, fixed layout, caps, enums ──────────────────────────
+   // Rust: name BoundedString<8>, tags BoundedList<u32,3>, memo
+   // BoundedRawString<4>, blob BoundedList<u8,2>, note
+   // Option<BoundedRawString<3>>. Its inferred bound selects 1-byte offsets.
+   struct Bounds
+   {
+      psio::utf8_string<8>       name;
+      std::vector<std::uint32_t> tags;  // max 3 elements
+      std::string                memo;  // max 4 bytes
+      Bytes                      blob;  // max 2 bytes
+      std::optional<std::string> note;  // max 3 bytes when present
+      friend bool operator==(const Bounds&, const Bounds&) = default;
+   };
+   PSIO_REFLECT(Bounds, name, tags, memo, blob, note)
+
+   // Fixed layout (definition_will_not_change): no header.
+   struct Fixed
+   {
+      std::int32_t x  = 0;
+      std::int32_t y  = 0;
+      bool         on = false;
+      friend bool  operator==(const Fixed&, const Fixed&) = default;
+   };
+   PSIO_REFLECT(Fixed, x, y, on)
+
+   enum class Color : std::uint8_t
+   {
+      red   = 0,
+      green = 1,
+      blue  = 7,
+   };
+
+   // Explicit maxDynamicData cap: 2-byte offsets whatever the fields hold.
+   struct Capped
+   {
+      std::uint16_t        id = 0;
+      std::string          memo;
+      std::optional<Fixed> at;
+      std::vector<Fixed>   path;
+      friend bool operator==(const Capped&, const Capped&) = default;
+   };
+   PSIO_REFLECT(Capped, id, memo, at, path)
+
+   struct Shapes
+   {
+      Color                       color = Color::red;
+      std::array<Fixed, 2>        corners{};
+      float                       scale = 0;
+      std::int16_t                delta = 0;
+      std::optional<Text>         label;
+      std::optional<std::uint8_t> small;
+      Capped                      capped;
+      std::optional<Bounds>       bounds;
+      friend bool operator==(const Shapes&, const Shapes&) = default;
+   };
+   PSIO_REFLECT(Shapes, color, corners, scale, delta, label, small, capped, bounds)
+
+   using Text4       = psio::utf8_string<4>;
+   using ListU16Max3 = psio::bounded<std::uint16_t, 3>;
+   using BytesMax2   = psio::bounded<std::uint8_t, 2>;
+   inline bool operator==(const ListU16Max3& a, const ListU16Max3& b)
+   {
+      return a.storage() == b.storage();
+   }
+   inline bool operator==(const BytesMax2& a, const BytesMax2& b)
+   {
+      return a.storage() == b.storage();
+   }
+
    using Array3  = std::array<std::uint16_t, 3>;
    using Tuple0  = std::tuple<>;
    using Tuple3  = std::tuple<std::uint32_t, Text, std::uint64_t>;
@@ -191,6 +271,12 @@ PSIO_FIELD_ATTRS(json_conf::Overrides, d, psio::ijson_number)
 PSIO_FIELD_ATTRS(json_conf::Overrides, e, psio::json_string)
 PSIO_TYPE_ATTRS(json_conf::TypeLevel, psio::json_string | psio::ijson_number)
 PSIO_ADAPTER(json_conf::Version, psio::text_category, json_conf::VersionText)
+PSIO_FIELD_ATTRS(json_conf::Bounds, tags, psio::length_bound{.max = 3})
+PSIO_FIELD_ATTRS(json_conf::Bounds, memo, psio::length_bound{.max = 4})
+PSIO_FIELD_ATTRS(json_conf::Bounds, blob, psio::length_bound{.max = 2})
+PSIO_FIELD_ATTRS(json_conf::Bounds, note, psio::length_bound{.max = 3})
+PSIO_TYPE_ATTRS(json_conf::Fixed, psio::definition_will_not_change{})
+PSIO_TYPE_ATTRS(json_conf::Capped, psio::max_dynamic_data_spec{300})
 
 namespace json_conf
 {
@@ -239,7 +325,26 @@ namespace json_conf
    JSON_CONF_TYPE(Version, "Version")
    JSON_CONF_TYPE(Release, "Release")
    JSON_CONF_TYPE(Tree, "Tree")
+   JSON_CONF_TYPE(Bounds, "Bounds")
+   JSON_CONF_TYPE(Fixed, "Fixed")
+   JSON_CONF_TYPE(Color, "Color")
+   JSON_CONF_TYPE(Capped, "Capped")
+   JSON_CONF_TYPE(Shapes, "Shapes")
+   JSON_CONF_TYPE(Text4, "string<=4")
+   JSON_CONF_TYPE(ListU16Max3, "list<u16><=3")
+   JSON_CONF_TYPE(BytesMax2, "bytes<=2")
 #undef JSON_CONF_TYPE
+
+   // The Schema IR has the declared type of a member, not a custom text
+   // form: a type with a text adapter (and a record holding one) is not
+   // expressible. The fixture records "ir": false for these.
+   template <typename T>
+   inline constexpr bool has_ir = !std::is_same_v<T, Version> && !std::is_same_v<T, Release>;
+   // psio::pssz has no encoding for the psio::bounded wrapper (C++ bounds a
+   // pssz list with a member length_bound) nor for a text-adapter type.
+   template <typename T>
+   inline constexpr bool has_pssz = has_ir<T> && !std::is_same_v<T, ListU16Max3> &&
+                                    !std::is_same_v<T, BytesMax2>;
 
    template <typename T>
    std::string type_id() { return std::string(type_name<T>::id); }
@@ -268,7 +373,11 @@ namespace json_conf
            std::type_identity<TypeLevel>{}, std::type_identity<AllOptional>{},
            std::type_identity<Choice>{}, std::type_identity<Holder>{},
            std::type_identity<Version>{}, std::type_identity<Release>{},
-           std::type_identity<Tree>{});
+           std::type_identity<Tree>{}, std::type_identity<Bounds>{},
+           std::type_identity<Fixed>{}, std::type_identity<Color>{},
+           std::type_identity<Capped>{}, std::type_identity<Shapes>{},
+           std::type_identity<Text4>{}, std::type_identity<ListU16Max3>{},
+           std::type_identity<BytesMax2>{});
    }
 
    // ── Fixture rows ──────────────────────────────────────────────────────
@@ -288,15 +397,28 @@ namespace json_conf
       std::optional<std::string> text;
       std::optional<std::string> text_hex;
       std::optional<std::string> canonical;
+      // Typed psio::pssz bytes of the row's value (lowercase hex), for
+      // value and accept rows of a type psio::pssz encodes.
+      std::optional<std::string> pssz;
    };
-   PSIO_REFLECT(Row, name, type, kind, format, json, ijson, text, text_hex, canonical)
+   PSIO_REFLECT(Row, name, type, kind, format, json, ijson, text, text_hex, canonical, pssz)
+
+   struct TypeRow
+   {
+      std::string id;
+      bool        ir   = false;  // the Schema IR describes it
+      bool        pssz = false;  // rows of this type carry `pssz`
+   };
+   PSIO_REFLECT(TypeRow, id, ir, pssz)
 
    struct Fixture
    {
-      std::uint32_t    version = 0;
-      std::vector<Row> vectors;
+      std::uint32_t        version = 0;
+      std::string          schema_ir;
+      std::vector<TypeRow> types;
+      std::vector<Row>     vectors;
    };
-   PSIO_REFLECT(Fixture, version, vectors)
+   PSIO_REFLECT(Fixture, version, schema_ir, types, vectors)
 
    inline std::string input_text(const Row& row)
    {

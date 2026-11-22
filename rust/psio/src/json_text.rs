@@ -260,8 +260,13 @@ fn is_noncharacter(cp: u32) -> bool {
 }
 
 impl Writer {
-    fn new(ijson: bool) -> Self {
+    /// An empty sink for `IJson` (`ijson`) or `Json` text.
+    pub fn new(ijson: bool) -> Self {
         Self { out: Vec::new(), ijson, form: IntForm::Natural }
+    }
+    /// The text written so far (UTF-8).
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.out
     }
     pub fn is_ijson(&self) -> bool {
         self.ijson
@@ -1078,6 +1083,64 @@ impl JsonText for RawString {
     }
 }
 
+// Bounded types: the text of the unbounded type, with the bound enforced on
+// both sides. They pair with C++ `psio::utf8_string<N>`, a `std::string` /
+// `std::vector` member annotated `length_bound{.max = N}`, and
+// `psio::bounded<T, N>`.
+impl<const N: usize> JsonText for crate::pssz::BoundedString<N> {
+    fn write_json(&self, w: &mut Writer) -> Result<()> {
+        if self.0.len() > N {
+            return Err(w.err("json: string exceeds its bound"));
+        }
+        w.string(self.0.as_bytes())
+    }
+    fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+        r.ws();
+        let at = r.pos;
+        let text = r.string()?;
+        if text.len() > N {
+            return Err(r.err_at(at, "json: string exceeds its bound"));
+        }
+        Ok(Self(text.into_owned()))
+    }
+}
+
+impl<const N: usize> JsonText for crate::pssz::BoundedRawString<N> {
+    fn write_json(&self, w: &mut Writer) -> Result<()> {
+        if self.0.len() > N {
+            return Err(w.err("json: string exceeds its bound"));
+        }
+        w.string(&self.0)
+    }
+    fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+        r.ws();
+        let at = r.pos;
+        let text = r.string()?;
+        if text.len() > N {
+            return Err(r.err_at(at, "json: string exceeds its bound"));
+        }
+        Ok(Self(text.into_owned().into_bytes()))
+    }
+}
+
+impl<T: JsonText, const N: usize> JsonText for crate::pssz::BoundedList<T, N> {
+    fn write_json(&self, w: &mut Writer) -> Result<()> {
+        if self.0.len() > N {
+            return Err(w.err("json: array exceeds its bound"));
+        }
+        T::write_json_slice(&self.0, w)
+    }
+    fn read_json(r: &mut Reader<'_>) -> Result<Self> {
+        r.ws();
+        let at = r.pos;
+        let items = T::read_json_vec(r)?;
+        if items.len() > N {
+            return Err(r.err_at(at, "json: array exceeds its bound"));
+        }
+        Ok(Self(items))
+    }
+}
+
 impl<T: JsonText> JsonText for Vec<T> {
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         T::write_json_slice(self, w)
@@ -1228,4 +1291,182 @@ pub fn read_variant_close(r: &mut Reader<'_>, saved: IntForm) -> Result<()> {
     r.end();
     r.restore_form(saved);
     Ok(())
+}
+
+// ── The syntax layer behind a cursor ────────────────────────────────────────
+//
+// JSON text handling is two layers (C++ `psio/json_cursor.hpp`):
+//
+//   1. Syntax. A cursor owns everything about the text: whitespace,
+//      punctuation, string escapes and UTF-8, the RFC 8259 number grammar,
+//      nesting depth, skipping a value. It hands out events.
+//   2. Types. A walk that checks the cursor's events against the type being
+//      read (`psio::pssz::dynamic::json` for the Schema IR): member names,
+//      arity, integer ranges and forms, hex digits, variant names, length
+//      bounds. It never looks at the text itself.
+//
+// A cursor is forward-only and single-pass: values are consumed in document
+// order, exactly once, and a string is valid only until the next call. That
+// is the contract of a streaming parser, so another parser can be put under
+// a type walk by implementing `JsonCursor`.
+
+/// The type of the next value, as [`JsonCursor::kind`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonKind {
+    Object,
+    Array,
+    String,
+    Number,
+    Bool,
+    Null,
+}
+
+/// A forward-only JSON event source. Every method consumes input in document
+/// order and returns an error, never panics, on malformed text.
+pub trait JsonCursor {
+    /// The type of the next value; nothing is consumed.
+    fn kind(&mut self) -> Result<JsonKind>;
+    /// `{`: one nesting level deeper.
+    fn begin_object(&mut self) -> Result<()>;
+    /// The next member's key (unescaped), or `None` once the object is
+    /// closed.
+    fn next_field(&mut self) -> Result<Option<Cow<'_, str>>>;
+    /// `[`: one nesting level deeper.
+    fn begin_array(&mut self) -> Result<()>;
+    /// Positions at the next element; `false` once the array is closed.
+    fn next_element(&mut self) -> Result<bool>;
+    /// A string value, unescaped, and whether the text between the quotes
+    /// differed from the value (it was written with escapes).
+    fn string(&mut self) -> Result<(Cow<'_, str>, bool)>;
+    /// A number as its RFC 8259 token text.
+    fn number(&mut self) -> Result<&str>;
+    fn boolean(&mut self) -> Result<bool>;
+    fn null(&mut self) -> Result<()>;
+    /// Skips one value of any shape.
+    fn skip(&mut self) -> Result<()>;
+    /// Nothing but whitespace remains.
+    fn finish(&mut self) -> Result<()>;
+    /// A type-layer error at the current position.
+    fn error(&self, what: &'static str) -> JsonTextError;
+}
+
+/// The hand-written [`Reader`] as a cursor. `ijson` applies the I-JSON
+/// string rule (no Unicode noncharacters), also to keys and inside skipped
+/// values. Nesting deeper than [`MAX_DEPTH`] is an error.
+pub struct TextCursor<'a> {
+    r: Reader<'a>,
+    /// Per open container: whether it has produced an item yet. At most
+    /// `MAX_DEPTH` entries.
+    fresh: Vec<bool>,
+}
+
+impl<'a> TextCursor<'a> {
+    pub fn new(text: &'a [u8], ijson: bool) -> Result<Self> {
+        let r = Reader::new(text, ijson);
+        if text.is_empty() {
+            return Err(r.err("json: empty input"));
+        }
+        Ok(Self { r, fresh: Vec::new() })
+    }
+    fn open(&mut self, c: u8, expected: &'static str) -> Result<()> {
+        self.r.begin(c, expected)?;
+        self.fresh.push(true);
+        Ok(())
+    }
+    /// Advances past the separator before the next item, or closes the
+    /// container (`false`).
+    fn advance(&mut self, close: u8, expected: &'static str) -> Result<bool> {
+        let Some(fresh) = self.fresh.last_mut() else {
+            return Err(self.r.err("json: cursor is not inside a container"));
+        };
+        let first = std::mem::replace(fresh, false);
+        if self.r.take(close) {
+            self.fresh.pop();
+            self.r.end();
+            return Ok(false);
+        }
+        if !first && !self.r.take(b',') {
+            return Err(self.r.err(expected));
+        }
+        Ok(true)
+    }
+}
+
+impl JsonCursor for TextCursor<'_> {
+    fn kind(&mut self) -> Result<JsonKind> {
+        self.r.ws();
+        match self.r.peek() {
+            None => Err(self.r.err("json: unexpected end of input")),
+            Some(b'{') => Ok(JsonKind::Object),
+            Some(b'[') => Ok(JsonKind::Array),
+            Some(b'"') => Ok(JsonKind::String),
+            Some(b't' | b'f') => Ok(JsonKind::Bool),
+            Some(b'n') => Ok(JsonKind::Null),
+            Some(b'-' | b'0'..=b'9') => Ok(JsonKind::Number),
+            Some(_) => Err(self.r.err("json: unexpected character at value start")),
+        }
+    }
+    fn begin_object(&mut self) -> Result<()> {
+        self.open(b'{', "json: expected '{'")
+    }
+    fn next_field(&mut self) -> Result<Option<Cow<'_, str>>> {
+        if !self.advance(b'}', "json: expected ',' or '}' in object")? {
+            return Ok(None);
+        }
+        self.r.key().map(Some)
+    }
+    fn begin_array(&mut self) -> Result<()> {
+        self.open(b'[', "json: expected '['")
+    }
+    fn next_element(&mut self) -> Result<bool> {
+        self.advance(b']', "json: expected ',' or ']' in array")
+    }
+    fn string(&mut self) -> Result<(Cow<'_, str>, bool)> {
+        // The reader borrows the input unless the string carried escapes.
+        let text = self.r.string()?;
+        let escaped = matches!(text, Cow::Owned(_));
+        Ok((text, escaped))
+    }
+    fn number(&mut self) -> Result<&str> {
+        self.r.ws();
+        let begin = self.r.pos;
+        if !matches!(self.r.peek(), Some(b'-' | b'0'..=b'9')) {
+            return Err(self.r.err("json: expected a number"));
+        }
+        self.r.skip_number()?;
+        // The number grammar admits ASCII only.
+        std::str::from_utf8(&self.r.src[begin..self.r.pos])
+            .map_err(|_| self.r.err_at(begin, "json: expected a number"))
+    }
+    fn boolean(&mut self) -> Result<bool> {
+        self.r.ws();
+        if self.r.keyword("true") {
+            Ok(true)
+        } else if self.r.keyword("false") {
+            Ok(false)
+        } else {
+            Err(self.r.err("json: expected true or false"))
+        }
+    }
+    fn null(&mut self) -> Result<()> {
+        self.r.ws();
+        if self.r.keyword("null") {
+            Ok(())
+        } else {
+            Err(self.r.err("json: malformed keyword"))
+        }
+    }
+    fn skip(&mut self) -> Result<()> {
+        self.r.skip_value()
+    }
+    fn finish(&mut self) -> Result<()> {
+        self.r.ws();
+        if self.r.pos != self.r.src.len() {
+            return Err(self.r.err("json: trailing bytes after value"));
+        }
+        Ok(())
+    }
+    fn error(&self, what: &'static str) -> JsonTextError {
+        self.r.err(what)
+    }
 }

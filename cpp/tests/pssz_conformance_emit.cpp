@@ -11,6 +11,9 @@
 #include "pssz_conformance_types.hpp"
 #include "pssz_evolution_goldens.hpp"
 
+#include <psio/pssz_ir_json.hpp>
+#include <psio/schema_builder.hpp>
+
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -1954,11 +1957,39 @@ namespace
       }
       return out + "\"";
    }
+   // The Schema IR of every fixture type, each under its fixture id, so a
+   // consumer holding only this file can run the schema-driven codec.
+   const psio::Schema& fixture_schema()
+   {
+      static const psio::Schema schema = [] {
+         psio::SchemaBuilder builder;
+         for_each_type([&]<typename T>(std::type_identity<T>) { builder.insert<T>(type_id<T>()); });
+         return std::move(builder).build();
+      }();
+      return schema;
+   }
+   // Whether the IR describes T well enough for the schema-driven codec to
+   // agree with the typed one. See pssz_conf::ir_expressible.
+   template <typename T>
+   bool ir_flag()
+   {
+      const bool expressible = ir_expressible<T>();
+      std::size_t width = 0;
+      const auto  status =
+         psio::pssz_ir::auto_width(fixture_schema(), psio::schema_types::Type{type_id<T>()}, width);
+      const bool agrees = status.ok() && width == psio::auto_pssz_width_v<T>;
+      if (expressible && !agrees)
+         die("the Schema IR of " + type_id<T>() + " derives width " + std::to_string(width) +
+             (status.ok() ? "" : " (" + std::string(status.error().what) + ")") + ", the type has " +
+             std::to_string(psio::auto_pssz_width_v<T>));
+      return expressible;
+   }
    template <typename T>
    std::string type_json()
    {
       std::ostringstream out;
-      out << "{\"id\": " << jq(type_id<T>()) << ", \"shape\": " << jq(type_shape<T>())
+      out << "{\"id\": " << jq(type_id<T>()) << ", \"ir\": " << (ir_flag<T>() ? "true" : "false")
+          << ", \"shape\": " << jq(type_shape<T>())
           << ", \"auto_width\": " << psio::auto_pssz_width_v<T> << ", \"max_encoded_size\": ";
       if (constexpr auto m = psio::max_encoded_size<T>(); m) out << *m;
       else out << "null";
@@ -1972,7 +2003,9 @@ namespace
 
    std::string render()
    {
-      std::string out = "{\n\"version\": 1,\n\"types\": [\n";
+      std::string out = "{\n\"version\": 1,\n\"schema_ir\": " +
+                        jq(to_hex(psio::encode(psio::pssz{}, fixture_schema()))) +
+                        ",\n\"types\": [\n";
       bool        first = true;
       for_each_type([&]<typename T>(std::type_identity<T>) {
          out += (first ? "" : ",\n") + type_json<T>();

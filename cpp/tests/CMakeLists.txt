@@ -127,6 +127,12 @@ add_test(NAME psio_json_conformance_regen
 psio_add_test(psio_json_conformance_tests json_conformance_tests.cpp)
 target_compile_definitions(psio_json_conformance_tests PRIVATE
    PSIO_JSON_VECTORS="${PSIO_JSON_VECTORS}")
+# Schema-driven conformance: both shared fixtures re-derived from the Schema
+# IR recorded in them, with no C++ type (pssz_ir.hpp, pssz_ir_json.hpp).
+psio_add_test(psio_schema_conformance_tests schema_conformance_tests.cpp)
+target_compile_definitions(psio_schema_conformance_tests PRIVATE
+   PSIO_JSON_VECTORS="${PSIO_JSON_VECTORS}"
+   PSIO_PSSZ_VECTORS="${PSIO_PSSZ_VECTORS}")
 # The json / ijson status paths with exceptions (and RTTI) disabled.
 add_executable(psio_ijson_noexceptions_test ijson_noexceptions.cpp)
 target_include_directories(psio_ijson_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)

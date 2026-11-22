@@ -8,20 +8,34 @@
 //! * `accept` rows are non-canonical text Rust must read and re-write as
 //!   `canonical`.
 //! * `reject` rows must be rejected.
+//! * rows with `pssz` carry the typed C++ `psio::pssz` bytes of the value:
+//!   the typed Rust `Pssz` codec must produce and read the same bytes.
+//!
+//! The types also derive `ToPsszSchema`: the IR Rust generates for them must
+//! drive the schema path (`psio::pssz::dynamic`) to the bytes and texts of
+//! the typed Rust codecs. (The IR C++ recorded in the fixture is exercised by
+//! schema_conformance.rs.)
 
 use psio::json::{self, IJson, Json, JsonFormat, JsonText, TextForm};
-use psio::pssz::RawString;
+use psio::pssz::schema_ir::{schema_for, ToPsszSchema};
+use psio::pssz::{
+    dynamic, BoundedList, BoundedRawString, BoundedString, Pssz, PsszPack, PsszUnpack, RawString,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 struct Inner {
     id: u64,
     label: String,
     flag: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 struct Outer {
     inner: Inner,
     items: Vec<Inner>,
@@ -34,7 +48,9 @@ struct Outer {
 }
 
 // Member-level integer form overrides, in each direction.
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 struct Overrides {
     #[json(json_string)]
     a: u64,
@@ -50,7 +66,9 @@ struct Overrides {
 }
 
 // Type-level override: applies to every integer member.
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 #[json(json_string, ijson_number)]
 struct TypeLevel {
     x: u64,
@@ -58,7 +76,9 @@ struct TypeLevel {
     z: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 struct AllOptional {
     a: Option<u32>,
     b: Option<String>,
@@ -66,7 +86,9 @@ struct AllOptional {
 
 // The C++ type is std::variant<uint32_t, uint64_t, std::string, Inner,
 // std::vector<uint8_t>>; its I-JSON names are the alternatives' type names.
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 enum Choice {
     #[json(name = "uint32")]
     U32(u32),
@@ -79,7 +101,9 @@ enum Choice {
     Bytes(Vec<u8>),
 }
 
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 struct Holder {
     choice: Choice,
     choices: Vec<Choice>,
@@ -115,9 +139,74 @@ struct Release {
     history: Vec<Version>,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 struct Tree {
     children: Vec<Tree>,
+}
+
+// ── Length bounds, fixed layout, caps, enums ────────────────────────────────
+
+// C++: utf8_string<8>, and std::vector / std::string / std::optional members
+// with a length_bound. The inferred bound selects 1-byte offsets.
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+struct Bounds {
+    name: BoundedString<8>,
+    tags: BoundedList<u32, 3>,
+    memo: BoundedRawString<4>,
+    blob: BoundedList<u8, 2>,
+    note: Option<BoundedRawString<3>>,
+}
+
+// Fixed layout: no header.
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+#[pssz(definition_will_not_change)]
+struct Fixed {
+    x: i32,
+    y: i32,
+    on: bool,
+}
+
+// C++ `enum class Color : std::uint8_t { red = 0, green = 1, blue = 7 }`. A
+// C++ enum holds every value of its underlying type and the C++ codecs read
+// and write the unnamed ones (fixture row value/Color/unnamed_255); a Rust
+// field-less enum cannot, and its derives reject them. The faithful Rust
+// model is therefore the underlying integer.
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+#[pssz(transparent)]
+struct Color(u8);
+
+// Explicit maxDynamicData cap: 2-byte offsets whatever the fields hold.
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+#[pssz(max_dynamic_data = 300)]
+struct Capped {
+    id: u16,
+    memo: RawString,
+    at: Option<Fixed>,
+    path: Vec<Fixed>,
+}
+
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+struct Shapes {
+    color: Color,
+    corners: [Fixed; 2],
+    scale: f32,
+    delta: i16,
+    label: Option<String>,
+    small: Option<u8>,
+    capped: Capped,
+    bounds: Option<Bounds>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -132,12 +221,31 @@ struct Row {
     text: Option<String>,
     text_hex: Option<String>,
     canonical: Option<String>,
+    /// Typed C++ `psio::pssz` bytes of the row's value (lowercase hex).
+    pssz: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct TypeRow {
+    id: String,
+    /// The Schema IR describes the type.
+    ir: bool,
+    /// Value and accept rows of the type carry `pssz`.
+    pssz: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
 struct Fixture {
     version: u32,
+    /// The C++ Schema IR of every `ir` type (see schema_conformance.rs).
+    schema_ir: String,
+    types: Vec<TypeRow>,
     vectors: Vec<Row>,
+}
+
+fn unhex(hex: &str) -> Vec<u8> {
+    assert!(hex.len() % 2 == 0, "odd hex");
+    (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
 }
 
 fn fixture() -> Fixture {
@@ -206,8 +314,9 @@ fn rejects<F: JsonFormat, T: Val<F>>(text: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn check_row<T: Val<Json> + Val<IJson>>(row: &Row) -> Result<(), String> {
-    fn accept<F: JsonFormat, T: Val<F>>(row: &Row) -> Result<(), String> {
+/// The text checks of one row; the value it holds (`None` for a reject row).
+fn check_row<T: Val<Json> + Val<IJson>>(row: &Row) -> Result<Option<T>, String> {
+    fn accept<F: JsonFormat, T: Val<F>>(row: &Row) -> Result<Option<T>, String> {
         let canonical = row.canonical.as_ref().ok_or("accept row needs canonical")?;
         let a: T = reads::<F, T>(&input(row))?;
         writes::<F, T>(&a, canonical)?;
@@ -215,7 +324,7 @@ fn check_row<T: Val<Json> + Val<IJson>>(row: &Row) -> Result<(), String> {
         if a != b {
             return Err("canonical text is a different value".into());
         }
-        Ok(())
+        Ok(Some(a))
     }
     match (row.kind.as_str(), row.format.as_deref()) {
         ("value", None) => {
@@ -227,22 +336,201 @@ fn check_row<T: Val<Json> + Val<IJson>>(row: &Row) -> Result<(), String> {
                 return Err(format!("json and ijson texts are different values: {a:?} / {b:?}"));
             }
             writes::<Json, T>(&a, json_text).map_err(|e| format!("json {e}"))?;
-            writes::<IJson, T>(&a, ijson_text).map_err(|e| format!("ijson {e}"))
+            writes::<IJson, T>(&a, ijson_text).map_err(|e| format!("ijson {e}"))?;
+            Ok(Some(a))
         }
         ("accept", Some("json")) => accept::<Json, T>(row),
         ("accept", Some("ijson")) => accept::<IJson, T>(row),
-        ("reject", Some("json")) => rejects::<Json, T>(&input(row)),
-        ("reject", Some("ijson")) => rejects::<IJson, T>(&input(row)),
+        ("reject", Some("json")) => rejects::<Json, T>(&input(row)).map(|_| None),
+        ("reject", Some("ijson")) => rejects::<IJson, T>(&input(row)).map(|_| None),
+        (kind, format) => Err(format!("unknown kind/format {kind} {format:?}")),
+    }
+}
+
+/// A type without typed PSSZ bytes in the fixture: the text checks only.
+fn check_text<T: Val<Json> + Val<IJson>>(row: &Row) -> Result<(), String> {
+    if row.pssz.is_some() {
+        return Err("row carries pssz bytes but its type is registered as text-only".into());
+    }
+    check_row::<T>(row).map(|_| ())
+}
+
+/// A fixture type the typed `Pssz` codec encodes.
+trait Packed: Val<Json> + Val<IJson> + PsszPack<Pssz> + PsszUnpack<Pssz> {}
+impl<T: Val<Json> + Val<IJson> + PsszPack<Pssz> + PsszUnpack<Pssz>> Packed for T {}
+
+/// The text checks, and the typed `Pssz` bytes of the value against the
+/// row's `pssz` (the bytes of the typed C++ codec).
+fn check_pssz<T: Packed>(row: &Row) -> Result<(), String> {
+    let value = check_row::<T>(row)?;
+    match (&value, &row.pssz) {
+        (None, None) => Ok(()),
+        (Some(value), Some(hex)) => {
+            let want = unhex(hex);
+            let got = psio::pssz::try_to_pssz::<Pssz, T>(value).map_err(|e| format!("pssz {e:?}"))?;
+            if got != want {
+                return Err(format!("typed pssz gives {got:02x?}, want {hex}"));
+            }
+            let back =
+                psio::pssz::from_pssz::<Pssz, T>(&want).map_err(|e| format!("from_pssz {e:?}"))?;
+            if back != *value {
+                return Err(format!("from_pssz gives {back:?}, want {value:?}"));
+            }
+            psio::pssz::from_pssz_exact::<Pssz, T>(&want)
+                .map(|_| ())
+                .map_err(|e| format!("from_pssz_exact {e:?}"))
+        }
+        (Some(_), None) => Err("value / accept row of a pssz type has no pssz bytes".into()),
+        (None, Some(_)) => Err("reject row carries pssz bytes".into()),
+    }
+}
+
+/// The IR Rust generates for `T` must drive the schema path to the results
+/// of the typed Rust codecs: same bytes, same texts, same accept / reject.
+fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
+    row: &Row,
+    typed_pssz: &dyn Fn(&T) -> Option<Vec<u8>>,
+) -> Result<(), String> {
+    let (schema, root) = schema_for::<T>().map_err(|e| format!("schema_for {e:?}"))?;
+    // One text read through the schema: the bytes it gives, which must turn
+    // back into the typed texts of the typed value.
+    let convert = |ijson: bool, text: &[u8]| -> Result<Vec<u8>, String> {
+        let (bytes, value): (Vec<u8>, T) = if ijson {
+            (
+                dynamic::json_to_pssz::<IJson>(&schema, &root, text).map_err(|e| e.to_string())?,
+                json::from_slice::<IJson, T>(text).map_err(|e| e.to_string())?,
+            )
+        } else {
+            (
+                dynamic::json_to_pssz::<Json>(&schema, &root, text).map_err(|e| e.to_string())?,
+                json::from_slice::<Json, T>(text).map_err(|e| e.to_string())?,
+            )
+        };
+        if let Some(want) = typed_pssz(&value) {
+            if bytes != want {
+                return Err(format!("schema path gives {bytes:02x?}, typed pssz {want:02x?}"));
+            }
+        }
+        if dynamic::validate_pssz(&schema, &root, &bytes).map_err(|e| e.to_string())? {
+            return Err("schema path reports unknown fields in its own bytes".into());
+        }
+        // Same text, or the same refusal (a string holding a Unicode
+        // noncharacter is JSON but has no I-JSON text).
+        let json_text = dynamic::pssz_to_json::<Json>(&schema, &root, &bytes)
+            .map(|(text, unknown)| {
+                assert!(!unknown);
+                text
+            })
+            .map_err(|e| e.what().to_string());
+        let typed = json::to_string::<Json, T>(&value).map_err(|e| e.what.to_string());
+        if json_text != typed {
+            return Err(format!("schema path writes json {json_text:?}, typed {typed:?}"));
+        }
+        let ijson_text = dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes)
+            .map(|(text, unknown)| {
+                assert!(!unknown);
+                text
+            })
+            .map_err(|e| e.what().to_string());
+        let typed = json::to_string::<IJson, T>(&value).map_err(|e| e.what.to_string());
+        if ijson_text != typed {
+            return Err(format!("schema path writes ijson {ijson_text:?}, typed {typed:?}"));
+        }
+        Ok(bytes)
+    };
+    match (row.kind.as_str(), row.format.as_deref()) {
+        ("value", None) => {
+            let a = convert(false, row.json.as_ref().ok_or("no json")?.as_bytes())?;
+            let b = convert(true, row.ijson.as_ref().ok_or("no ijson")?.as_bytes())?;
+            if a != b {
+                return Err("json and ijson texts give different bytes".into());
+            }
+            Ok(())
+        }
+        ("accept", Some(format)) => convert(format == "ijson", &input(row)).map(|_| ()),
+        ("reject", Some("json")) => match dynamic::json_to_pssz::<Json>(&schema, &root, &input(row)) {
+            Ok(_) => Err("schema path accepts".into()),
+            Err(_) => Ok(()),
+        },
+        ("reject", Some("ijson")) => {
+            match dynamic::json_to_pssz::<IJson>(&schema, &root, &input(row)) {
+                Ok(_) => Err("schema path accepts".into()),
+                Err(_) => Ok(()),
+            }
+        }
         (kind, format) => Err(format!("unknown kind/format {kind} {format:?}")),
     }
 }
 
 type Check = fn(&Row) -> Result<(), String>;
 
-fn registry() -> BTreeMap<&'static str, Check> {
-    let mut map: BTreeMap<&'static str, Check> = BTreeMap::new();
+/// How a fixture type id is checked.
+#[derive(Clone, Copy)]
+struct Entry {
+    /// Typed text checks, plus the typed `Pssz` bytes when `pssz`.
+    check: Check,
+    /// The fixture carries typed pssz bytes for the type.
+    pssz: bool,
+    /// Schema path over the Rust-generated IR (`None`: no `ToPsszSchema`).
+    rust_ir: Option<Check>,
+    /// `dynamic::auto_width` of the Rust IR against `auto_pssz_width::<T>()`.
+    width: Option<fn() -> Result<(), String>>,
+}
+
+fn rust_ir_with_pssz<T: Packed + ToPsszSchema>(row: &Row) -> Result<(), String> {
+    check_rust_ir::<T>(row, &|value| psio::pssz::try_to_pssz::<Pssz, T>(value).ok())
+}
+fn rust_ir_text_only<T: Packed + ToPsszSchema>(row: &Row) -> Result<(), String> {
+    // The fixture has no bytes for the type, but Rust has a typed codec.
+    rust_ir_with_pssz::<T>(row)
+}
+fn width_agrees<T: PsszPack<Pssz> + ToPsszSchema>() -> Result<(), String> {
+    let (schema, root) = schema_for::<T>().map_err(|e| format!("schema_for {e:?}"))?;
+    let got = dynamic::auto_width(&schema, &root).map_err(|e| format!("auto_width {e:?}"))?;
+    let want = psio::pssz::auto_pssz_width::<T>();
+    if got != want {
+        return Err(format!("auto_width from the Rust IR is {got}, auto_pssz_width {want}"));
+    }
+    Ok(())
+}
+
+fn registry() -> BTreeMap<&'static str, Entry> {
+    let mut map: BTreeMap<&'static str, Entry> = BTreeMap::new();
+    // `types!`: typed pssz bytes in the fixture and a Rust-generated IR.
+    // `bounded!`: no pssz bytes in the fixture (C++ `psio::bounded` has no
+    // pssz encoding); Rust still has a typed codec and an IR for them.
+    // `text_only!`: a custom text form; no IR, no pssz.
     macro_rules! types {
-        ($($id:literal => $ty:ty,)*) => {$( map.insert($id, check_row::<$ty>); )*};
+        ($($id:literal => $ty:ty,)*) => {$( map.insert($id, Entry {
+            check: check_pssz::<$ty>,
+            pssz: true,
+            rust_ir: Some(rust_ir_with_pssz::<$ty>),
+            width: Some(width_agrees::<$ty>),
+        }); )*};
+    }
+    macro_rules! bounded {
+        ($($id:literal => $ty:ty,)*) => {$( map.insert($id, Entry {
+            check: check_text::<$ty>,
+            pssz: false,
+            rust_ir: Some(rust_ir_text_only::<$ty>),
+            width: Some(width_agrees::<$ty>),
+        }); )*};
+    }
+    macro_rules! text_only {
+        ($($id:literal => $ty:ty,)*) => {$( map.insert($id, Entry {
+            check: check_text::<$ty>,
+            pssz: false,
+            rust_ir: None,
+            width: None,
+        }); )*};
+    }
+    text_only! {
+        "Version" => Version,
+        "Release" => Release,
+    }
+    bounded! {
+        "list<u16><=3" => BoundedList<u16, 3>,
+        "bytes<=2" => BoundedList<u8, 2>,
     }
     types! {
         "bool" => bool,
@@ -271,10 +559,20 @@ fn registry() -> BTreeMap<&'static str, Check> {
         "AllOptional" => AllOptional,
         "Choice" => Choice,
         "Holder" => Holder,
-        "Version" => Version,
-        "Release" => Release,
         "Tree" => Tree,
+        "Bounds" => Bounds,
+        "Fixed" => Fixed,
+        "Color" => Color,
+        "Capped" => Capped,
+        "Shapes" => Shapes,
+        "string<=4" => BoundedString<4>,
     }
+    // `BoundedList<u8, N>` is a byte payload: nothing on the wire has an
+    // offset width. The typed codec nominally reports the list rule (4, a
+    // bounded list keeps the Vec's width) while the IR root is the "hex"
+    // adapter, for which `auto_width` (like C++ `auto_width`) reports the
+    // width class of the byte bound (1). Neither is ever written.
+    map.get_mut("bytes<=2").expect("registered").width = None;
     map
 }
 
@@ -285,11 +583,11 @@ fn every_vector_holds_on_every_entry_point() {
     let registry = registry();
     let mut failures = vec![];
     for row in &fixture.vectors {
-        let Some(check) = registry.get(row.ty.as_str()) else {
+        let Some(entry) = registry.get(row.ty.as_str()) else {
             failures.push(format!("{}: unmapped type id {}", row.name, row.ty));
             continue;
         };
-        if let Err(e) = check(row) {
+        if let Err(e) = (entry.check)(row) {
             failures.push(format!("{}: {e}", row.name));
         }
     }
@@ -319,12 +617,59 @@ fn the_fixture_covers_every_type_kind_and_format() {
             .entry(format!("{}:{}", row.kind, row.format.as_deref().unwrap_or("both")))
             .or_default() += 1;
     }
-    for id in registry().keys() {
+    let registry = registry();
+    for id in registry.keys() {
         assert!(valued.contains(*id), "no value vector for {id}");
     }
+    // The fixture's type table and the registry name the same ids, and agree
+    // on which types carry pssz bytes and which the IR describes.
+    let listed: BTreeSet<&str> = fixture.types.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(listed.len(), fixture.types.len(), "duplicate type id");
+    assert_eq!(listed, registry.keys().copied().collect::<BTreeSet<_>>());
+    assert!(registry.len() >= 44);
+    for ty in &fixture.types {
+        let entry = &registry[ty.id.as_str()];
+        assert_eq!(entry.pssz, ty.pssz, "{}: pssz", ty.id);
+        assert_eq!(entry.rust_ir.is_some(), ty.ir, "{}: ir", ty.id);
+        assert!(valued.contains(&ty.id), "no value vector for {}", ty.id);
+    }
+    for row in &fixture.vectors {
+        let ty = fixture.types.iter().find(|t| t.id == row.ty).expect("listed type");
+        assert_eq!(row.pssz.is_some(), ty.pssz && row.kind != "reject", "{}: pssz", row.name);
+    }
+    assert!(!fixture.schema_ir.is_empty() && fixture.schema_ir.len() % 2 == 0);
+    assert!(fixture.vectors.iter().filter(|r| r.pssz.is_some()).count() >= 600);
     assert!(count["value:both"] >= 100);
     assert!(count["accept:json"] >= 10 && count["accept:ijson"] >= 10);
     assert!(count["reject:json"] >= 100 && count["reject:ijson"] >= 150);
+}
+
+#[test]
+fn the_rust_generated_ir_gives_the_typed_rust_results() {
+    let fixture = fixture();
+    let registry = registry();
+    let mut failures = vec![];
+    let (mut rows, mut types) = (0usize, 0usize);
+    for (id, entry) in &registry {
+        let Some(width) = entry.width else { continue };
+        types += 1;
+        if let Err(e) = width() {
+            failures.push(format!("{id}: {e}"));
+        }
+    }
+    for row in &fixture.vectors {
+        let Some(check) = registry.get(row.ty.as_str()).and_then(|entry| entry.rust_ir) else {
+            continue;
+        };
+        rows += 1;
+        if let Err(e) = check(row) {
+            failures.push(format!("{}: {e}", row.name));
+        }
+    }
+    let shown: Vec<_> = failures.iter().take(40).cloned().collect();
+    assert!(failures.is_empty(), "{} failed:\n{}", failures.len(), shown.join("\n"));
+    assert!(types >= 41, "types with a Rust IR: {types}");
+    assert!(rows >= 1000, "rows through the Rust IR: {rows}");
 }
 
 #[test]

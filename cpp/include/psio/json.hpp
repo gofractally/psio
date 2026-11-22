@@ -179,6 +179,17 @@ namespace psio {
       using ::psio::detail::is_std_variant;
 
       template <typename T>
+      struct is_bounded_bytes : std::false_type
+      {
+      };
+      template <typename E, std::size_t N>
+         requires(std::is_same_v<E, char> || std::is_same_v<E, unsigned char> ||
+                  std::is_same_v<E, std::byte>)
+      struct is_bounded_bytes<::psio::bounded<E, N>> : std::true_type
+      {
+      };
+
+      template <typename T>
       concept Record = ::psio::Reflected<T> && !std::is_enum_v<T>;
 
       // An element type whose sequences are byte sequences. signed char /
@@ -1252,6 +1263,23 @@ namespace psio {
                   return read_value<Fmt, IM, E>(r, out ? &(*out)[i] : nullptr,
                                                 depth + 1);
                });
+         }
+         else if constexpr (Fmt::i_json && is_bounded_bytes<T>::value)
+         {
+            // Written as one hex string (its storage is a byte sequence),
+            // so it is read as one.
+            std::vector<typename T::value_type> bytes;
+            r.ws();
+            const char* at = r.p;
+            if (!read_hex(r, &bytes))
+               return false;
+            if (bytes.size() > T::max_size_value)
+            {
+               r.p = at;
+               return r.fail("json: array exceeds its bound");
+            }
+            if (out) out->storage() = std::move(bytes);
+            return true;
          }
          else if constexpr (is_std_vector<T>::value || is_bounded<T>::value)
          {

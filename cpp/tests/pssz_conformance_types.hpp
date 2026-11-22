@@ -611,6 +611,20 @@ namespace pssz_conf
       each_type(registry{}, std::forward<F>(f));
    }
 
+   // ── Schema IR coverage ────────────────────────────────────────────────
+   //
+   // Types the Schema IR cannot describe faithfully; the fixture records
+   // "ir": false for them and the schema-driven tests skip them.
+   template <typename T>
+   struct ir_inexpressible : std::false_type
+   {
+   };
+   template <typename T>
+   constexpr bool ir_expressible()
+   {
+      return !ir_inexpressible<T>::value;
+   }
+
    // ── Shared helpers for the emitter and the consuming test ─────────────
    inline std::string to_hex(std::span<const char> bytes)
    {

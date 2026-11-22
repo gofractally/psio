@@ -28,6 +28,21 @@
 //                       references, with the resource definition picked
 //                       up from interface_info<T>)
 //   Records             PSIO_REFLECT'd structs (Object form)
+//   Wide integers       uint128 / int128 (Int 128), uint256 (Int 256)
+//
+// What a schema-driven codec (pssz_ir.hpp, pssz_ir_json.hpp) needs beyond
+// the shape is recorded too:
+//   - a member `length_bound{.max = N}` on a std::string / std::vector
+//     (through std::optional) becomes the bounded form of the member's type
+//     (BoundedList, or the string / hex adapter over one), the same IR a
+//     Rust BoundedList / BoundedRawString produces. A bound with `exact` or
+//     `min`, or on a utf8_string, is the member attribute
+//     lengthBound = "exact=N" / "min=A,max=B";
+//   - member integer forms: jsonInt / ijsonInt = "number" | "string";
+//   - a variant alternative's I-JSON name: ijsonName (get_type_name);
+//   - type-level definitionWillNotChange / maxDynamicData / maxFields.
+// Not expressible: a member `as<Tag>` override or a text / binary adapter
+// (the IR has the member's declared type), and Box<T> is transparent.
 //   Envelope            PSIO_INTERFACE → Interface,
 //                       PSIO_WORLD     → World (with imports/exports),
 //                       PSIO_USE       → Use
@@ -40,6 +55,8 @@
 //   if-constexpr ladder when their types land in v3.
 
 #include <psio/annotate.hpp>
+#include <psio/ext_int.hpp>
+#include <psio/get_type_name.hpp>
 #include <psio/reflect.hpp>
 #include <psio/schema_ir.hpp>
 #include <psio/structural.hpp>
@@ -143,6 +160,10 @@ namespace psio::schema_types
          static constexpr auto limit = N;
          static constexpr bool unbounded = N == ::psio::utf8_unbounded;
       };
+      // Element types whose sequences are byte sequences (hex in I-JSON).
+      template <typename E>
+      inline constexpr bool sb_is_byte_v =
+          std::is_same_v<E, char> || std::is_same_v<E, unsigned char> || std::is_same_v<E, std::byte>;
       template <typename T> struct sb_is_bitvector : std::false_type
       {
       };
@@ -330,11 +351,19 @@ namespace psio::schema_types
          else if constexpr (std::is_integral_v<U>)
             return Int{static_cast<std::uint32_t>(8 * sizeof(U)),
                        std::is_signed_v<U>};
+         else if constexpr (std::is_same_v<U, ::psio::uint128>)
+            return Int{128, false};
+         else if constexpr (std::is_same_v<U, ::psio::int128>)
+            return Int{128, true};
+         else if constexpr (std::is_same_v<U, ::psio::uint256>)
+            return Int{256, false};
          else if constexpr (std::is_floating_point_v<U> &&
                             std::numeric_limits<U>::is_iec559)
          {
-            // exponent bits = ceil(log2(max_exponent))
-            std::uint32_t exp = 0;
+            // Exponent field width: max_exponent is 2^(bits-1), so
+            // 8 for binary32 and 11 for binary64 (the Rust builder's
+            // {8, 24} / {11, 53}).
+            std::uint32_t exp = 1;
             for (auto e = std::numeric_limits<U>::max_exponent; e > 1;
                  e >>= 1)
                ++exp;
@@ -374,14 +403,30 @@ namespace psio::schema_types
                   else
                      return std::to_string(i);
                };
+               // The I-JSON form names an alternative by its type name.
+               auto attributes = []<typename A>(std::type_identity<A>)
+               {
+                  std::vector<Attribute> out;
+                  if constexpr (requires { get_type_name(static_cast<const A *>(nullptr)); })
+                     out.push_back(Attribute{
+                         "ijsonName",
+                         std::string(std::string_view{get_type_name(static_cast<const A *>(nullptr))})});
+                  return out;
+               };
                return Variant{
-                   {Member{name(I), Box<AnyType>{insert<std::variant_alternative_t<I, U>>()}, {}}...},
+                   {Member{name(I), Box<AnyType>{insert<std::variant_alternative_t<I, U>>()},
+                           attributes(std::type_identity<std::variant_alternative_t<I, U>>{})}...},
                    {}};
             }(std::make_index_sequence<count>{});
          }
          else if constexpr (sb_detail::sb_is_bounded<U>::value)
-            return BoundedList{Box<AnyType>{insert<typename sb_detail::sb_is_bounded<U>::elem>()},
-                               sb_detail::sb_is_bounded<U>::limit};
+         {
+            using E = typename sb_detail::sb_is_bounded<U>::elem;
+            AnyType list = BoundedList{Box<AnyType>{insert<E>()}, sb_detail::sb_is_bounded<U>::limit};
+            if constexpr (sb_detail::sb_is_byte_v<E>)
+               return Custom{Box<AnyType>{std::move(list)}, "hex"};
+            return list;
+         }
          else if constexpr (sb_detail::sb_is_utf8<U>::unbounded)
             // Unbounded UTF-8: the string adapter over an unbounded byte
             // list, with no fabricated maximum.
@@ -404,9 +449,8 @@ namespace psio::schema_types
          else if constexpr (sb_detail::sb_is_vector<U>::value)
          {
             using E = typename sb_detail::sb_is_vector<U>::elem;
-            // vector<char>/vector<unsigned char> → Custom hex
-            if constexpr (std::is_same_v<E, char> ||
-                          std::is_same_v<E, unsigned char>)
+            // vector<char>/vector<unsigned char>/vector<std::byte> → Custom hex
+            if constexpr (sb_detail::sb_is_byte_v<E>)
                return Custom{Box<AnyType>{List{Box<AnyType>{insert<E>()}}},
                              "hex"};
             else
@@ -417,8 +461,7 @@ namespace psio::schema_types
             using E = typename sb_detail::sb_is_array<U>::elem;
             AnyType arr = Array{Box<AnyType>{insert<E>()},
                                 sb_detail::sb_is_array<U>::len};
-            if constexpr (std::is_same_v<E, char> ||
-                          std::is_same_v<E, unsigned char>)
+            if constexpr (sb_detail::sb_is_byte_v<E>)
                return Custom{Box<AnyType>{std::move(arr)}, "hex"};
             return arr;
          }
@@ -462,15 +505,111 @@ namespace psio::schema_types
          }
       }
 
+      // The bounded form of a std::string / std::vector member type (looking
+      // through std::optional) for `length_bound{.max = N}`; false when F
+      // has no such form.
+      template <typename F>
+      bool bounded_member_type(std::uint64_t max, AnyType& out)
+      {
+         if constexpr (sb_detail::sb_is_optional<F>::value)
+         {
+            AnyType inner;
+            if (!bounded_member_type<typename sb_detail::sb_is_optional<F>::elem>(max, inner))
+               return false;
+            out = Option{Box<AnyType>{std::move(inner)}};
+            return true;
+         }
+         else if constexpr (std::is_same_v<F, std::string>)
+         {
+            out = Custom{Box<AnyType>{AnyType{BoundedList{Box<AnyType>{insert<std::uint8_t>()}, max}}},
+                         "string"};
+            return true;
+         }
+         else if constexpr (sb_detail::sb_is_vector<F>::value)
+         {
+            using E = typename sb_detail::sb_is_vector<F>::elem;
+            AnyType list = BoundedList{Box<AnyType>{insert<E>()}, max};
+            if constexpr (sb_detail::sb_is_byte_v<E>)
+               out = Custom{Box<AnyType>{std::move(list)}, "hex"};
+            else
+               out = std::move(list);
+            return true;
+         }
+         else
+         {
+            (void)max;
+            (void)out;
+            return false;
+         }
+      }
+
+      // Whether a member length_bound constrains F at all (the typed codecs
+      // apply it to strings and lists, through std::optional).
+      template <typename F>
+      static constexpr bool length_bound_applies()
+      {
+         if constexpr (sb_detail::sb_is_optional<F>::value)
+            return length_bound_applies<typename sb_detail::sb_is_optional<F>::elem>();
+         else
+            return std::is_same_v<F, std::string> || sb_detail::sb_is_vector<F>::value ||
+                   sb_detail::sb_is_utf8<F>::value;
+      }
+
+      template <typename U, std::size_t I>
+      Member build_record_member()
+      {
+         using R   = reflect<U>;
+         using F   = typename R::template member_type<I>;
+         using eff = ::psio::effective_annotations_for<U, F, R::template member_pointer<I>>;
+         using eff_t = typename eff::value_t;
+         Member member{std::string{R::template member_name<I>}, Box<AnyType>{insert<F>()}, {}};
+         if constexpr (::psio::has_spec_v<::psio::length_bound, eff_t> &&
+                       !::psio::has_as_override_v<eff_t>)
+         {
+            if constexpr (length_bound_applies<F>())
+            {
+               const ::psio::length_bound lb = std::get<::psio::length_bound>(eff::value);
+               AnyType bounded;
+               if (lb.max && !lb.exact && !lb.min && bounded_member_type<F>(*lb.max, bounded))
+                  *member.type = std::move(bounded);
+               else
+               {
+                  std::string text;
+                  auto item = [&](const char* key, const std::optional<std::uint32_t>& v) {
+                     if (!v) return;
+                     if (!text.empty()) text += ',';
+                     text += key;
+                     text += '=';
+                     text += std::to_string(*v);
+                  };
+                  item("exact", lb.exact);
+                  item("min", lb.min);
+                  item("max", lb.max);
+                  if (!text.empty())
+                     member.attributes.push_back(Attribute{"lengthBound", std::move(text)});
+               }
+            }
+         }
+         if constexpr (::psio::has_spec_v<::psio::json_int_spec, eff_t>)
+            member.attributes.push_back(Attribute{
+                "jsonInt", std::get<::psio::json_int_spec>(eff::value).form ==
+                                 ::psio::int_text::string
+                              ? "string"
+                              : "number"});
+         if constexpr (::psio::has_spec_v<::psio::ijson_int_spec, eff_t>)
+            member.attributes.push_back(Attribute{
+                "ijsonInt", std::get<::psio::ijson_int_spec>(eff::value).form ==
+                                  ::psio::int_text::string
+                               ? "string"
+                               : "number"});
+         return member;
+      }
+
       template <typename U, std::size_t... Is>
       void build_record_members(std::vector<Member>& out,
                                 std::index_sequence<Is...>)
       {
-         ((out.push_back(Member{
-              std::string{reflect<U>::template member_name<Is>},
-              Box<AnyType>{insert<typename reflect<U>::template member_type<Is>>()},
-              {}})),
-          ...);
+         (out.push_back(build_record_member<U, Is>()), ...);
       }
 
       // ── interface_info<Tag> walk → Interface ──────────────────────

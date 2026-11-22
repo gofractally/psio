@@ -12,6 +12,8 @@
 
 #include "json_conformance_types.hpp"
 
+#include <psio/schema_builder.hpp>
+
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -35,6 +37,18 @@ namespace
       std::exit(1);
    }
 
+   std::string lower_hex(std::span<const char> bytes)
+   {
+      static const char digits[] = "0123456789abcdef";
+      std::string       out;
+      for (char c : bytes)
+      {
+         out.push_back(digits[static_cast<unsigned char>(c) >> 4]);
+         out.push_back(digits[static_cast<unsigned char>(c) & 15]);
+      }
+      return out;
+   }
+
    template <typename T>
    void push(Row row)
    {
@@ -43,6 +57,27 @@ namespace
       if (row.format) row.name += "/" + *row.format;
       if (!names.insert(row.name).second) die("duplicate row " + row.name);
       if (auto e = check_row<T>(row); !e.empty()) die(row.name + ": " + e);
+      // The typed psio::pssz bytes of the row's value.
+      if constexpr (has_pssz<T>)
+         if (row.kind != "reject")
+         {
+            T                 v{};
+            const std::string text = row.kind == "value" ? *row.json : input_text(row);
+            const bool ok = row.kind == "value" || row.format == "json"
+                               ? psio::decode_json_checked(psio::json{},
+                                                           std::span<const char>{text}, v)
+                                    .ok()
+                               : psio::decode_json_checked(psio::ijson{},
+                                                           std::span<const char>{text}, v)
+                                    .ok();
+            if (!ok) die(row.name + ": the row's text does not decode");
+            std::vector<char> bytes;
+            if (!psio::encode_pssz_checked(psio::pssz{}, v, bytes).ok())
+               die(row.name + ": the value has no pssz encoding");
+            if (!psio::validate<T>(psio::pssz{}, std::span<const char>{bytes}).ok())
+               die(row.name + ": the pssz encoding does not validate");
+            row.pssz = lower_hex(bytes);
+         }
       rows.push_back(std::move(row));
    }
 
@@ -368,6 +403,113 @@ namespace
       value<Tree>("three_levels", tree_value(3));
       // Deepest tree within kMaxValidationDepth = 64 nested containers.
       value<Tree>("depth_limit_31_levels", tree_value(31));
+   }
+
+   void emit_bounds_layout_caps()
+   {
+      const Bounds full{psio::utf8_string<8>{"12345678"}, {1, 2, 3}, "memo", {0xab, 0xcd},
+                        std::string("abc")};
+      value<Bounds>("empty", Bounds{});
+      value<Bounds>("at_every_bound", full);
+      value<Bounds>("some", Bounds{psio::utf8_string<8>{"n"}, {4294967295u}, "", {7}, std::string("")});
+      value<Fixed>("zero", Fixed{});
+      value<Fixed>("some", Fixed{-1, std::numeric_limits<std::int32_t>::max(), true});
+      value<Color>("red", Color::red);
+      value<Color>("blue", Color::blue);
+      value<Color>("unnamed_255", static_cast<Color>(255));
+      value<Capped>("empty", Capped{});
+      value<Capped>("some", Capped{9, "memo", Fixed{1, 2, true}, {Fixed{3, 4, false}, Fixed{}}});
+      value<Capped>("trailing_none", Capped{1, "", std::nullopt, {}});
+      value<Shapes>("zero", Shapes{});
+      value<Shapes>("full", Shapes{Color::green, {{Fixed{1, 2, true}, Fixed{-3, -4, false}}}, 1.5f,
+                                   -32768, text("label"), std::uint8_t{255},
+                                   Capped{2, "m", Fixed{5, 6, true}, {Fixed{7, 8, true}}}, full});
+      value<Text4>("empty", Text4{""});
+      value<Text4>("at_bound", Text4{"abcd"});
+      value<Text4>("two_byte_at_bound", Text4{"\xC3\xA9\xC3\xA9"});
+      value<ListU16Max3>("empty", ListU16Max3{});
+      value<ListU16Max3>("at_bound", ListU16Max3{1, 2, 65535});
+      value<BytesMax2>("empty", BytesMax2{});
+      value<BytesMax2>("at_bound", BytesMax2{0x01, 0xff});
+
+      // ── Over a bound: rejected on read ─────────────────────────────────
+      reject_both<Text4>("five_bytes", R"("abcde")");
+      reject_both<Text4>("three_two_byte_characters", "\"\xC3\xA9\xC3\xA9\xC3\xA9\"");
+      reject_both<Text4>("five_bytes_by_escape", "\"abcd" + u("0041") + "\"");
+      reject_both<ListU16Max3>("four_elements", "[1,2,3,4]");
+      reject<BytesMax2>("json", "three_bytes", "[1,2,3]");
+      reject<BytesMax2>("ijson", "three_bytes", "\"010203\"");
+      reject<BytesMax2>("ijson", "number_array", "[1,2]");
+      reject<BytesMax2>("json", "hex_string", "\"0102\"");
+      const std::string b_json  = R"({"name":"n","tags":[1],"memo":"m","blob":[7],"note":"abc"})";
+      const std::string b_ijson = R"({"name":"n","tags":[1],"memo":"m","blob":"07","note":"abc"})";
+      const Bounds      b{psio::utf8_string<8>{"n"}, {1}, "m", {7}, std::string("abc")};
+      if (psio::encode(psio::json{}, b) != b_json || psio::encode(psio::ijson{}, b) != b_ijson)
+         die("Bounds texts are stale");
+      auto swap = [](std::string text, const std::string& from, const std::string& to) {
+         const auto at = text.find(from);
+         if (at == std::string::npos) die("Bounds reject row is stale: " + from);
+         return text.replace(at, from.size(), to);
+      };
+      for (const bool ij : {false, true})
+      {
+         const char*        f    = ij ? "ijson" : "json";
+         const std::string& base = ij ? b_ijson : b_json;
+         reject<Bounds>(f, "name_over_wrapper_bound", swap(base, R"("name":"n")", R"("name":"123456789")"));
+         reject<Bounds>(f, "tags_over_member_bound", swap(base, R"("tags":[1])", R"("tags":[1,2,3,4])"));
+         reject<Bounds>(f, "memo_over_member_bound", swap(base, R"("memo":"m")", R"("memo":"12345")"));
+         reject<Bounds>(f, "note_over_member_bound", swap(base, R"("note":"abc")", R"("note":"abcd")"));
+         accept<Bounds>(f, "note_null", swap(base, R"("note":"abc")", R"("note":null)"),
+                        swap(base, R"("note":"abc")", R"("note":null)"));
+      }
+      reject<Bounds>("json", "blob_over_member_bound", swap(b_json, R"("blob":[7])", R"("blob":[7,8,9])"));
+      reject<Bounds>("ijson", "blob_over_member_bound", swap(b_ijson, R"("blob":"07")", R"("blob":"070809")"));
+      // A repeated key is decoded each time: an over-bound earlier
+      // occurrence is an error even though a later one replaces it.
+      reject<Bounds>("json", "tags_over_bound_then_replaced",
+                     R"({"name":"n","tags":[1,2,3,4],"tags":[1],"memo":"m","blob":[7],"note":null})");
+
+      // The writers refuse a value outside a bound.
+      auto refuses = [&](const std::string& what, const auto& v) {
+         std::string       out = "x";
+         std::vector<char> bytes{'x'};
+         if (psio::encode_json_checked(psio::json{}, v, out).ok() || out != "x" ||
+             psio::encode_json_checked(psio::ijson{}, v, out).ok() || out != "x")
+            die("the JSON writer accepted " + what);
+         if constexpr (has_pssz<std::remove_cvref_t<decltype(v)>>)
+            if (psio::encode_pssz_checked(psio::pssz{}, v, bytes).ok() ||
+                bytes != std::vector<char>{'x'})
+               die("the pssz writer accepted " + what);
+      };
+      {
+         Bounds over = b;
+         over.tags   = {1, 2, 3, 4};
+         refuses("tags over the member bound", over);
+         over      = b;
+         over.memo = "12345";
+         refuses("memo over the member bound", over);
+         over      = b;
+         over.blob = {1, 2, 3};
+         refuses("blob over the member bound", over);
+         over      = b;
+         over.note = "abcd";
+         refuses("note over the member bound", over);
+         ListU16Max3 list;
+         list.storage() = {1, 2, 3, 4};
+         refuses("a bounded list over its bound", list);
+      }
+
+      // Fixed layout, enum and nested shapes: wrong arity / range / form.
+      reject_both<Fixed>("missing_member", R"({"x":1,"y":2})");
+      reject_both<Fixed>("out_of_range", R"({"x":2147483648,"y":2,"on":true})");
+      reject_both<Color>("out_of_range", "256");
+      reject_both<Color>("string", R"("red")");
+      reject_both<Color>("negative", "-1");
+      accept_both<Capped>("missing_optional_member", R"({"id":1,"memo":"","path":[]})",
+                          R"({"id":1,"memo":"","at":null,"path":[]})");
+      reject_both<Capped>("missing_required_member", R"({"id":1,"memo":""})");
+      reject_both<Shapes>("corner_array_too_short",
+                          R"({"color":0,"corners":[{"x":0,"y":0,"on":false}],"scale":0,"delta":0,"label":null,"small":null,"capped":{"id":0,"memo":"","at":null,"path":[]},"bounds":null})");
    }
 
    void emit_accepted()
@@ -733,7 +875,19 @@ namespace
 
    std::string render()
    {
-      std::string out = "{\"version\":1,\"vectors\":[\n";
+      // One Schema holding every expressible type under its fixture id.
+      psio::SchemaBuilder builder;
+      std::string         types;
+      for_each_type([&]<typename T>(std::type_identity<T>) {
+         if constexpr (has_ir<T>) builder.insert<T>(type_id<T>());
+         types += std::string(types.empty() ? "" : ",\n") + "{\"id\":" + quoted(type_id<T>()) +
+                  ",\"ir\":" + (has_ir<T> ? "true" : "false") + ",\"pssz\":" +
+                  (has_pssz<T> ? "true" : "false") + "}";
+      });
+      const psio::Schema schema = std::move(builder).build();
+      std::string out = "{\"version\":1,\"schema_ir\":\"" +
+                        lower_hex(psio::encode(psio::pssz{}, schema)) + "\",\"types\":[\n" +
+                        types + "\n],\"vectors\":[\n";
       for (std::size_t i = 0; i < rows.size(); ++i)
       {
          const Row& r = rows[i];
@@ -748,6 +902,7 @@ namespace
          field("text", r.text);
          field("text_hex", r.text_hex);
          field("canonical", r.canonical);
+         field("pssz", r.pssz);
          out += i + 1 < rows.size() ? "},\n" : "}\n";
       }
       out += "]}\n";
@@ -768,6 +923,7 @@ int main(int argc, char** argv)
    emit_strings_and_bytes();
    emit_containers();
    emit_records();
+   emit_bounds_layout_caps();
    emit_accepted();
    emit_rejected();
 

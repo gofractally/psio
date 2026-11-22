@@ -1,7 +1,27 @@
 #pragma once
 
-// Checked explicit-width PSSZ runtime codec for the actual schema_ir.hpp IR.
+// Checked PSSZ runtime codec for the actual schema_ir.hpp IR.
 // This does not reinterpret the older lowercase psio::schema artifact.
+//
+// Two width profiles:
+//   encode<W> / decode_exact<W> / decode_compatible<W>, W = 1, 2 or 4: the
+//     explicit profile (psio::pssz_<W>), one width inherited by every type.
+//   encode_auto / decode_auto / validate_auto (W = 0 internally): the
+//     automatic profile (psio::pssz). Every record, array and list uses its
+//     own type-derived width, computed from the IR exactly as
+//     auto_pssz_width<T>() computes it from the C++ type: an explicit
+//     "maxDynamicData" attribute rules, otherwise the bound inferred from
+//     bounded lists / strings and member "lengthBound" attributes
+//     (max_size.hpp bookkeeping), otherwise 4. Caps and length bounds are
+//     enforced on encode and decode.
+//
+// Attributes read by the codec (schema_builder.hpp writes them):
+//   Object  definitionWillNotChange    fixed layout (no header)
+//           maxDynamicData = "N"       explicit cap (automatic profile)
+//   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
+//           jsonInt / ijsonInt = "number" | "string"   (pssz_ir_json.hpp)
+//   Variant member  ijsonName = "..."                   (pssz_ir_json.hpp)
+// The JSON / I-JSON text path over the same IR is pssz_ir_json.hpp.
 #include <psio/detail/pssz_record_layout.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/schema_ir.hpp>
@@ -12,7 +32,9 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string_view>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -107,15 +129,131 @@ inline bool none(const Value &value)
    auto p = std::get_if<Optional>(&value.value);
    return p && !p->some;
 }
-inline codec_status attributes(const std::vector<schema_types::Attribute> &values, bool layout)
+// A member's length_bound annotation: bytes of a string, elements of a list.
+struct LengthBound
+{
+   std::optional<std::uint64_t> exact, max, min;
+   // The count that bounds the encoded size: exact, else max.
+   std::optional<std::uint64_t> count() const { return exact ? exact : max; }
+   bool admits(std::uint64_t n) const
+   {
+      return !((max && n > *max) || (exact && n != *exact) || (min && n < *min));
+   }
+};
+inline bool parse_u64(std::string_view text, std::uint64_t &out)
+{
+   if (text.empty() || text.size() > 20 || (text.size() > 1 && text[0] == '0'))
+      return false;
+   unsigned __int128 value = 0;
+   for (char c : text)
+   {
+      if (c < '0' || c > '9')
+         return false;
+      value = value * 10 + static_cast<unsigned>(c - '0');
+   }
+   if (value > std::numeric_limits<std::uint64_t>::max())
+      return false;
+   out = static_cast<std::uint64_t>(value);
+   return true;
+}
+inline const schema_types::Attribute *find_attribute(
+    const std::vector<schema_types::Attribute> &values, std::string_view name)
+{
+   for (const auto &value : values)
+      if (value.name == name)
+         return &value;
+   return nullptr;
+}
+// "max=N", "exact=N", "min=N", comma-separated, each at most once.
+inline codec_status parse_length_bound(const std::vector<schema_types::Attribute> &values,
+                                       std::optional<LengthBound> &out)
+{
+   out.reset();
+   const auto *attribute = find_attribute(values, "lengthBound");
+   if (!attribute)
+      return codec_ok();
+   if (!attribute->value || attribute->value->empty())
+      return fail("pssz IR: malformed lengthBound attribute");
+   LengthBound bound;
+   std::string_view rest = *attribute->value;
+   while (true)
+   {
+      const auto comma = rest.find(',');
+      const auto item = rest.substr(0, comma);
+      const auto equals = item.find('=');
+      std::uint64_t n;
+      if (equals == std::string_view::npos || !parse_u64(item.substr(equals + 1), n))
+         return fail("pssz IR: malformed lengthBound attribute");
+      const auto key = item.substr(0, equals);
+      auto *slot = key == "max" ? &bound.max : key == "exact" ? &bound.exact
+                                           : key == "min"     ? &bound.min
+                                                              : nullptr;
+      if (!slot || *slot)
+         return fail("pssz IR: malformed lengthBound attribute");
+      *slot = n;
+      if (comma == std::string_view::npos)
+         break;
+      rest = rest.substr(comma + 1);
+   }
+   out = bound;
+   return codec_ok();
+}
+inline codec_status parse_cap(const std::vector<schema_types::Attribute> &values,
+                              std::optional<std::uint64_t> &out)
+{
+   out.reset();
+   const auto *attribute = find_attribute(values, "maxDynamicData");
+   if (!attribute)
+      return codec_ok();
+   std::uint64_t n;
+   if (!attribute->value || !parse_u64(*attribute->value, n))
+      return fail("pssz IR: malformed maxDynamicData attribute");
+   out = n;
+   return codec_ok();
+}
+enum class attribute_site
+{
+   record,          // Object / Struct
+   record_member,
+   variant,
+   variant_member,
+};
+// `caps`: the automatic profile, which implements maxDynamicData. The
+// explicit profile rejects the constraints it does not enforce.
+inline codec_status attributes(const std::vector<schema_types::Attribute> &values,
+                               attribute_site site, bool caps)
 {
    for (const auto &value : values)
    {
-      if (value.name == "doc" || value.name == "description" || value.name == "visible")
+      const auto &name = value.name;
+      if (name == "doc" || name == "description" || name == "visible")
          continue;
-      if (layout && value.name == "definitionWillNotChange")
+      if (site == attribute_site::record && name == "definitionWillNotChange")
+         continue;
+      if (site == attribute_site::record && caps &&
+          (name == "maxDynamicData" || name == "maxFields"))
+         continue;
+      if (site == attribute_site::record_member &&
+          (name == "lengthBound" || name == "jsonInt" || name == "ijsonInt"))
+      {
+         if (name != "lengthBound" && (!value.value || (*value.value != "number" &&
+                                                        *value.value != "string")))
+            return fail("pssz IR: malformed integer form attribute");
+         continue;
+      }
+      if (site == attribute_site::variant_member && name == "ijsonName" && value.value)
          continue;
       return fail("pssz IR: unsupported schema constraint or annotation");
+   }
+   if (site == attribute_site::record_member)
+   {
+      std::optional<LengthBound> bound;
+      return parse_length_bound(values, bound);
+   }
+   if (site == attribute_site::record && caps)
+   {
+      std::optional<std::uint64_t> cap;
+      return parse_cap(values, cap);
    }
    return codec_ok();
 }
@@ -181,11 +319,324 @@ inline codec_status bitlist_count(std::span<const char> wire, std::size_t bound,
          return psio_ir_status_;                                                                   \
    } while (false)
 
+// W = 1, 2, 4: the explicit profile. W = 0: the automatic profile.
 template <std::size_t W> class Codec
 {
-   static_assert(W == 1 || W == 2 || W == 4);
+   static_assert(W == 0 || W == 1 || W == 2 || W == 4);
+   static constexpr bool automatic = W == 0;
    const schema_types::Schema &schema;
-   static constexpr std::uint64_t max_offset = (std::uint64_t{1} << (W * 8)) - 1;
+   using Bound = std::optional<std::size_t>;
+   // Widths already derived for a container type (automatic profile).
+   mutable std::vector<std::pair<const schema_types::AnyType *, std::size_t>> widths;
+
+   static Bound bound_add(Bound a, Bound b)
+   {
+      if (!a || !b || *b > std::numeric_limits<std::size_t>::max() - *a)
+         return std::nullopt;
+      return *a + *b;
+   }
+   static Bound bound_multiply(std::uint64_t count, Bound value)
+   {
+      if (count == 0)
+         return 0;
+      if (!value || count > std::numeric_limits<std::size_t>::max() ||
+          *value > std::numeric_limits<std::size_t>::max() / count)
+         return std::nullopt;
+      return static_cast<std::size_t>(count) * *value;
+   }
+   static std::size_t width_class(Bound bound)
+   {
+      return bound && *bound <= 0xff ? 1 : bound && *bound <= 0xffff ? 2 : 4;
+   }
+   static const std::vector<schema_types::Attribute> *
+   record_attributes(const schema_types::AnyType &type)
+   {
+      if (auto object = std::get_if<schema_types::Object>(&type.value))
+         return &object->attributes;
+      if (auto record = std::get_if<schema_types::Struct>(&type.value))
+         return &record->attributes;
+      return nullptr;
+   }
+   // Explicit cap of a resolved record type (automatic profile only).
+   static codec_status cap_of(const schema_types::AnyType &type, std::optional<std::uint64_t> &out)
+   {
+      out.reset();
+      if constexpr (automatic)
+         if (auto values = record_attributes(type))
+            return parse_cap(*values, out);
+      return codec_ok();
+   }
+   // max_size.hpp fixed_payload<T>(): inline bytes, no offset slot in the
+   // bound bookkeeping.
+   codec_status fixed_payload(const schema_types::AnyType &input, bool &out,
+                              std::vector<const schema_types::AnyType *> &active) const
+   {
+      const schema_types::AnyType *type;
+      PSIO_PSSZ_IR_TRY(resolve(input, type));
+      out = false;
+      if (std::find(active.begin(), active.end(), type) != active.end())
+         return codec_ok();
+      active.push_back(type);
+      auto status = std::visit(
+          [&](const auto &t) -> codec_status
+          {
+             using T = std::decay_t<decltype(t)>;
+             if constexpr (std::is_same_v<T, schema_types::Int> ||
+                           std::is_same_v<T, schema_types::Float>)
+                out = true;
+             else if constexpr (std::is_same_v<T, schema_types::Array>)
+             {
+                const schema_types::AnyType *child;
+                PSIO_PSSZ_IR_TRY(inner(t.type, child));
+                return fixed_payload(*child, out, active);
+             }
+             else if constexpr (std::is_same_v<T, schema_types::Custom>)
+             {
+                if (t.id == "bool" || t.id == "char")
+                   out = true;
+                else if (t.id == "hex" || t.id == "string")
+                {
+                   const schema_types::AnyType *child;
+                   PSIO_PSSZ_IR_TRY(inner(t.type, child));
+                   if (std::holds_alternative<schema_types::Array>(child->value))
+                      return fixed_payload(*child, out, active);
+                }
+             }
+             else if constexpr (std::is_same_v<T, schema_types::Struct> ||
+                                std::is_same_v<T, schema_types::Object>)
+             {
+                if constexpr (std::is_same_v<T, schema_types::Object>)
+                   if (!dwnc(t.attributes))
+                      return codec_ok();
+                out = true;
+                for (const auto &member : t.members)
+                {
+                   const schema_types::AnyType *child;
+                   PSIO_PSSZ_IR_TRY(inner(member.type, child));
+                   bool fixed;
+                   PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, active));
+                   out = out && fixed;
+                }
+             }
+             return codec_ok();
+          },
+          type->value);
+      active.pop_back();
+      return status;
+   }
+   // The bound max_size.hpp infers: max_field_with_annots<T>(annots) when
+   // `reserve_cap` (a child reserves its declared cap in full), max_bare<T>()
+   // for the type's own width. `annotation` is the member's lengthBound; it
+   // reaches a string or list through Option. A recursive type is unbounded.
+   codec_status bound_of(const schema_types::AnyType &input, const LengthBound *annotation,
+                         bool reserve_cap, Bound &out,
+                         std::vector<const schema_types::AnyType *> &active) const
+   {
+      const schema_types::AnyType *type;
+      PSIO_PSSZ_IR_TRY(resolve(input, type));
+      out.reset();
+      if (std::find(active.begin(), active.end(), type) != active.end())
+         return codec_ok();
+      if (reserve_cap)
+      {
+         std::optional<std::uint64_t> cap;
+         PSIO_PSSZ_IR_TRY(cap_of(*type, cap));
+         if (cap)
+         {
+            if (*cap <= std::numeric_limits<std::size_t>::max())
+               out = static_cast<std::size_t>(*cap);
+            return codec_ok();
+         }
+      }
+      active.push_back(type);
+      // N elements, each its reserved payload plus an offset slot when it
+      // is not an inline fixed payload.
+      auto elements = [&](const schema_types::Box<schema_types::AnyType> &box,
+                          std::uint64_t count) -> codec_status
+      {
+         if (count == 0)
+         {
+            out = 0;
+            return codec_ok();
+         }
+         const schema_types::AnyType *child;
+         PSIO_PSSZ_IR_TRY(inner(box, child));
+         Bound element;
+         PSIO_PSSZ_IR_TRY(bound_of(*child, nullptr, true, element, active));
+         bool fixed;
+         std::vector<const schema_types::AnyType *> fresh;
+         PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, fresh));
+         if (!fixed)
+            element = bound_add(element, 4);
+         out = bound_multiply(count, element);
+         return codec_ok();
+      };
+      auto sequence = [&](const schema_types::AnyType &container) -> codec_status
+      {
+         if (auto list = std::get_if<schema_types::List>(&container.value))
+         {
+            if (annotation && annotation->count())
+               return elements(list->type, *annotation->count());
+            return codec_ok();
+         }
+         if (auto list = std::get_if<schema_types::BoundedList>(&container.value))
+            return elements(list->type, list->maxCount);
+         if (auto array = std::get_if<schema_types::Array>(&container.value))
+            return elements(array->type, array->len);
+         return codec_ok();
+      };
+      auto status = std::visit(
+          [&](const auto &t) -> codec_status
+          {
+             using T = std::decay_t<decltype(t)>;
+             if constexpr (std::is_same_v<T, schema_types::Int>)
+             {
+                std::size_t size;
+                PSIO_PSSZ_IR_TRY(int_size(t, size));
+                out = size;
+             }
+             else if constexpr (std::is_same_v<T, schema_types::Float>)
+             {
+                std::size_t size;
+                PSIO_PSSZ_IR_TRY(float_size(t, size));
+                out = size;
+             }
+             else if constexpr (std::is_same_v<T, schema_types::List> ||
+                                std::is_same_v<T, schema_types::BoundedList> ||
+                                std::is_same_v<T, schema_types::Array>)
+                return sequence(*type);
+             else if constexpr (std::is_same_v<T, schema_types::Option>)
+             {
+                // One selector byte is reserved for every optional.
+                const schema_types::AnyType *child;
+                PSIO_PSSZ_IR_TRY(inner(t.type, child));
+                PSIO_PSSZ_IR_TRY(bound_of(*child, annotation, true, out, active));
+                out = bound_add(out, 1);
+             }
+             else if constexpr (std::is_same_v<T, schema_types::Custom>)
+             {
+                if (t.id == "bool" || t.id == "char")
+                   out = 1;
+                else if (t.id == "string" || t.id == "hex")
+                {
+                   const schema_types::AnyType *child;
+                   PSIO_PSSZ_IR_TRY(inner(t.type, child));
+                   return sequence(*child);
+                }
+                // Bit types have no inferred bound.
+             }
+             else if constexpr (std::is_same_v<T, schema_types::Struct> ||
+                                std::is_same_v<T, schema_types::Object>)
+             {
+                bool stable = true;
+                if constexpr (std::is_same_v<T, schema_types::Object>)
+                   stable = dwnc(t.attributes);
+                Bound total = stable ? 0 : 4;
+                for (const auto &member : t.members)
+                {
+                   const schema_types::AnyType *child;
+                   PSIO_PSSZ_IR_TRY(inner(member.type, child));
+                   std::optional<LengthBound> bound;
+                   PSIO_PSSZ_IR_TRY(parse_length_bound(member.attributes, bound));
+                   Bound payload;
+                   PSIO_PSSZ_IR_TRY(
+                       bound_of(*child, bound ? &*bound : nullptr, true, payload, active));
+                   bool fixed;
+                   std::vector<const schema_types::AnyType *> fresh;
+                   PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, fresh));
+                   if (!fixed)
+                      payload = bound_add(payload, 4);
+                   total = bound_add(total, payload);
+                }
+                out = total;
+             }
+             // Tuple, Variant: no inferred bound.
+             return codec_ok();
+          },
+          type->value);
+      active.pop_back();
+      return status;
+   }
+   // The width of a record's header and slots, or of a list / array offset
+   // table. Explicit profile: W. Automatic: the type's own (see the header).
+   codec_status width_of(const schema_types::AnyType &type, std::size_t &out) const
+   {
+      if constexpr (!automatic)
+      {
+         (void)type;
+         out = W;
+         return codec_ok();
+      }
+      else
+      {
+         for (const auto &[known, width] : widths)
+            if (known == &type)
+            {
+               out = width;
+               return codec_ok();
+            }
+         out = 4;
+         // A list's offset table is always 4 wide (a std::vector has no
+         // bound of its own; a bounded list keeps the vector's width).
+         if (!std::holds_alternative<schema_types::List>(type.value) &&
+             !std::holds_alternative<schema_types::BoundedList>(type.value))
+         {
+            std::optional<std::uint64_t> cap;
+            PSIO_PSSZ_IR_TRY(cap_of(type, cap));
+            if (cap)
+               out = *cap <= 0xff ? 1 : *cap <= 0xffff ? 2 : 4;
+            else
+            {
+               Bound bound;
+               std::vector<const schema_types::AnyType *> active;
+               PSIO_PSSZ_IR_TRY(bound_of(type, nullptr, false, bound, active));
+               out = width_class(bound);
+            }
+         }
+         // Tuples and variants have no inferred bound: 4.
+         widths.emplace_back(&type, out);
+         return codec_ok();
+      }
+   }
+   // A record over its explicit cap is not a value of its type.
+   static codec_status check_cap(const schema_types::AnyType &type, std::size_t size)
+   {
+      std::optional<std::uint64_t> cap;
+      PSIO_PSSZ_IR_TRY(cap_of(type, cap));
+      if (cap && size > *cap)
+         return fail("pssz IR: encoded size exceeds maxDynamicData cap");
+      return codec_ok();
+   }
+   // The length a member lengthBound constrains, looking through Option.
+   static bool bound_admits(const LengthBound &bound, const Value &value)
+   {
+      if (auto optional = std::get_if<Optional>(&value.value))
+         return !optional->some || bound_admits(bound, *optional->some);
+      if (auto text = std::get_if<std::string>(&value.value))
+         return bound.admits(text->size());
+      if (auto bytes = std::get_if<Bytes>(&value.value))
+         return bound.admits(bytes->size());
+      if (auto items = std::get_if<Sequence>(&value.value))
+         return bound.admits(items->size());
+      return true;
+   }
+   static codec_status spans_for(std::size_t w, std::span<const char> bytes, bool stable,
+                                 std::span<const psio::detail::pssz_field_layout> fields,
+                                 std::span<psio::detail::pssz_field_span> spans, bool &unknown)
+   {
+      switch (w)
+      {
+      case 1:
+         return psio::detail::pssz_record_spans<1>(bytes, 0, bytes.size(), stable, fields, spans,
+                                                   unknown);
+      case 2:
+         return psio::detail::pssz_record_spans<2>(bytes, 0, bytes.size(), stable, fields, spans,
+                                                   unknown);
+      default:
+         return psio::detail::pssz_record_spans<4>(bytes, 0, bytes.size(), stable, fields, spans,
+                                                   unknown);
+      }
+   }
 
    codec_status resolve(const schema_types::AnyType &input, const schema_types::AnyType *&out) const
    {
@@ -229,6 +680,13 @@ template <std::size_t W> class Codec
       case 64:
       case 128:
          size = type.bits / 8;
+         return codec_ok();
+      case 256:
+         // An unsigned 256-bit integer is carried as its 32 little-endian
+         // bytes (Value Bytes).
+         if (type.isSigned)
+            return fail("pssz IR: unsupported integer width");
+         size = 32;
          return codec_ok();
       default:
          return fail("pssz IR: unsupported integer width");
@@ -469,20 +927,23 @@ template <std::size_t W> class Codec
           },
           type->value);
    }
-   static codec_status read_offset(std::span<const char> bytes, std::size_t at, std::size_t &out)
+   static codec_status read_offset(std::span<const char> bytes, std::size_t at, std::size_t w,
+                                   std::size_t &out)
    {
-      if (at > bytes.size() || W > bytes.size() - at)
+      if (at > bytes.size() || w > bytes.size() - at)
          return fail("pssz IR: offset underrun");
       out = 0;
-      for (std::size_t i = 0; i < W; ++i)
+      for (std::size_t i = 0; i < w; ++i)
          out |= std::size_t(static_cast<unsigned char>(bytes[at + i])) << (8 * i);
       return codec_ok();
    }
-   static codec_status write_offset(std::vector<char> &bytes, std::size_t at, std::size_t value)
+   static codec_status write_offset(std::vector<char> &bytes, std::size_t at, std::size_t value,
+                                    std::size_t w)
    {
-      if (value > max_offset || at > bytes.size() || W > bytes.size() - at)
+      const std::uint64_t max_offset = (std::uint64_t{1} << (w * 8)) - 1;
+      if (value > max_offset || at > bytes.size() || w > bytes.size() - at)
          return fail("pssz IR: offset width overflow");
-      for (std::size_t i = 0; i < W; ++i)
+      for (std::size_t i = 0; i < w; ++i)
          bytes[at + i] = static_cast<char>(value >> (8 * i));
       return codec_ok();
    }
@@ -517,19 +978,19 @@ template <std::size_t W> class Codec
                  : fail("pssz IR: byte adapter requires unsigned bytes");
    }
    static codec_status encode_fields(const std::vector<Field> &fields, bool stable,
-                                     std::vector<char> &out)
+                                     std::size_t w, std::vector<char> &out)
    {
       std::size_t fixed = 0;
       for (const auto &field : fields)
-         PSIO_PSSZ_IR_TRY(add(fixed, field.layout.fixed ? field.layout.size : W));
-      const std::size_t header = stable ? 0 : W;
+         PSIO_PSSZ_IR_TRY(add(fixed, field.layout.fixed ? field.layout.size : w));
+      const std::size_t header = stable ? 0 : w;
       std::size_t total = fixed;
       PSIO_PSSZ_IR_TRY(add(total, header));
       if (total > out.max_size())
          return fail("pssz IR: record size overflow");
       std::vector<char> bytes(total, 0);
       if (!stable)
-         PSIO_PSSZ_IR_TRY(write_offset(bytes, 0, fixed));
+         PSIO_PSSZ_IR_TRY(write_offset(bytes, 0, fixed, w));
       std::size_t cursor = header;
       for (const auto &field : fields)
       {
@@ -542,9 +1003,9 @@ template <std::size_t W> class Codec
          }
          else
          {
-            PSIO_PSSZ_IR_TRY(write_offset(bytes, cursor, bytes.size() - header));
+            PSIO_PSSZ_IR_TRY(write_offset(bytes, cursor, bytes.size() - header, w));
             PSIO_PSSZ_IR_TRY(append(bytes, field.bytes));
-            cursor += W;
+            cursor += w;
          }
       }
       return append(out, bytes);
@@ -557,8 +1018,8 @@ template <std::size_t W> class Codec
       return encode_at(type, value, out.bytes, n);
    }
    codec_status encode_members(const std::vector<schema_types::Member> &members,
-                               const Record &values, bool stable, std::vector<char> &out,
-                               std::size_t n) const
+                               const Record &values, bool stable, std::size_t w,
+                               std::vector<char> &out, std::size_t n) const
    {
       for (const auto &[name, value] : values)
       {
@@ -584,6 +1045,10 @@ template <std::size_t W> class Codec
          if (found == values.end() && !info.optional)
             return fail("pssz IR: missing required record value");
          const Value *value = found == values.end() ? &absent : &found->second;
+         std::optional<LengthBound> bound;
+         PSIO_PSSZ_IR_TRY(parse_length_bound(member.attributes, bound));
+         if (bound && !bound_admits(*bound, *value))
+            return fail("pssz IR: member length bound violated");
          ordered.push_back(value);
          types.push_back(type);
          if (stable || !info.optional || !none(*value))
@@ -592,10 +1057,10 @@ template <std::size_t W> class Codec
       std::vector<Field> fields(keep);
       for (std::size_t i = 0; i < keep; ++i)
          PSIO_PSSZ_IR_TRY(encode_field(*types[i], *ordered[i], n + 1, fields[i]));
-      return encode_fields(fields, stable, out);
+      return encode_fields(fields, stable, w, out);
    }
    codec_status encode_sequence(const schema_types::AnyType &type, const Sequence &values,
-                                bool exact, std::uint64_t bound, bool bounded,
+                                bool exact, std::uint64_t bound, bool bounded, std::size_t w,
                                 std::vector<char> &out, std::size_t n) const
    {
       if (bounded && (exact ? values.size() != bound : values.size() > bound))
@@ -607,7 +1072,7 @@ template <std::size_t W> class Codec
       std::vector<Field> fields(values.size());
       for (std::size_t i = 0; i < values.size(); ++i)
          PSIO_PSSZ_IR_TRY(encode_field(type, values[i], n + 1, fields[i]));
-      return encode_fields(fields, true, out);
+      return encode_fields(fields, true, w, out);
    }
    // Pruning is mandatory: the last slot a writer emits is never an absent
    // optional. Matches the typed codec (pssz.hpp record_has_unpruned_tail):
@@ -625,7 +1090,8 @@ template <std::size_t W> class Codec
       return optional && !optional->some;
    }
    codec_status decode_members(const std::vector<schema_types::Member> &members,
-                               std::span<const char> bytes, bool stable, Record &out, std::size_t n)
+                               std::span<const char> bytes, bool stable, std::size_t w,
+                               Record &out, std::size_t n)
    {
       std::vector<const schema_types::AnyType *> types;
       std::vector<psio::detail::pssz_field_layout> fields;
@@ -636,12 +1102,11 @@ template <std::size_t W> class Codec
          Layout info;
          PSIO_PSSZ_IR_TRY(layout(*type, info));
          types.push_back(type);
-         fields.push_back({info.fixed ? info.size : W, !info.fixed, info.optional});
+         fields.push_back({info.fixed ? info.size : w, !info.fixed, info.optional});
       }
       std::vector<psio::detail::pssz_field_span> spans(fields.size());
       bool unknown = false;
-      PSIO_PSSZ_IR_TRY(psio::detail::pssz_record_spans<W>(bytes, 0, bytes.size(), stable, fields,
-                                                          spans, unknown));
+      PSIO_PSSZ_IR_TRY(spans_for(w, bytes, stable, fields, spans, unknown));
       if (unknown && !allow_unknown)
          return fail("pssz IR: unknown fields in exact decode");
       has_unknown |= unknown;
@@ -654,13 +1119,17 @@ template <std::size_t W> class Codec
                                        value, n + 1));
          if (unpruned_tail(fields, spans, i, stable, unknown, value))
             return fail("pssz IR: trailing absent optional field was not pruned");
+         std::optional<LengthBound> bound;
+         PSIO_PSSZ_IR_TRY(parse_length_bound(members[i].attributes, bound));
+         if (bound && !bound_admits(*bound, value))
+            return fail("pssz IR: member length bound violated");
          out.emplace_back(members[i].name, std::move(value));
       }
       return codec_ok();
    }
    codec_status decode_sequence(const schema_types::AnyType &type, std::span<const char> bytes,
-                                bool exact, std::uint64_t bound, bool bounded, Sequence &out,
-                                std::size_t n)
+                                bool exact, std::uint64_t bound, bool bounded, std::size_t w,
+                                Sequence &out, std::size_t n)
    {
       Layout info;
       PSIO_PSSZ_IR_TRY(layout(type, info));
@@ -682,10 +1151,10 @@ template <std::size_t W> class Codec
       else
       {
          std::size_t first;
-         PSIO_PSSZ_IR_TRY(read_offset(bytes, 0, first));
-         if (!first || first % W || first > bytes.size())
+         PSIO_PSSZ_IR_TRY(read_offset(bytes, 0, w, first));
+         if (!first || first % w || first > bytes.size())
             return fail("pssz IR: invalid list offset table");
-         count = first / W;
+         count = first / w;
       }
       if (bounded && (exact ? count != bound : count > bound))
          return fail("pssz IR: sequence bound exceeded");
@@ -697,7 +1166,8 @@ template <std::size_t W> class Codec
             return fail("pssz IR: fixed sequence size overflow");
          if (count * info.size != bytes.size())
             return fail("pssz IR: fixed sequence span mismatch");
-         out.reserve(count);
+         // Zero-size elements carry no bytes: never reserve for them.
+         out.reserve(info.size ? count : 0);
          for (std::size_t i = 0; i < count; ++i)
          {
             Value value;
@@ -708,17 +1178,17 @@ template <std::size_t W> class Codec
       }
       else
       {
-         if (count > bytes.size() / W || (!count && !bytes.empty()))
+         if (count > bytes.size() / w || (!count && !bytes.empty()))
             return fail("pssz IR: list table span mismatch");
-         const std::size_t table = count * W;
+         const std::size_t table = count * w;
          std::size_t previous = table;
          out.reserve(count);
          for (std::size_t i = 0; i < count; ++i)
          {
             std::size_t begin, end = bytes.size();
-            PSIO_PSSZ_IR_TRY(read_offset(bytes, i * W, begin));
+            PSIO_PSSZ_IR_TRY(read_offset(bytes, i * w, w, begin));
             if (i + 1 < count)
-               PSIO_PSSZ_IR_TRY(read_offset(bytes, (i + 1) * W, end));
+               PSIO_PSSZ_IR_TRY(read_offset(bytes, (i + 1) * w, w, end));
             if ((!i && begin != table) || begin < previous || begin > end || end > bytes.size())
                return fail("pssz IR: invalid list offsets");
             Value value;
@@ -734,6 +1204,14 @@ template <std::size_t W> class Codec
    bool has_unknown = false;
    bool allow_unknown = false;
    explicit Codec(const schema_types::Schema &schema) : schema(schema) {}
+
+   // The offset width `root` uses for its own header / slots / table.
+   codec_status width(const schema_types::AnyType &root, std::size_t &out) const
+   {
+      const schema_types::AnyType *type;
+      PSIO_PSSZ_IR_TRY(resolve(root, type));
+      return width_of(*type, out);
+   }
 
    codec_status metadata(const schema_types::AnyType &root) const
    {
@@ -762,7 +1240,9 @@ template <std::size_t W> class Codec
                               std::is_same_v<T, schema_types::Variant>)
                 {
                    constexpr bool record = !std::is_same_v<T, schema_types::Variant>;
-                   PSIO_PSSZ_IR_TRY(attributes(t.attributes, record));
+                   PSIO_PSSZ_IR_TRY(attributes(
+                       t.attributes, record ? attribute_site::record : attribute_site::variant,
+                       automatic));
                    if constexpr (!record)
                       if (t.members.empty() || t.members.size() > 256)
                          return fail("pssz IR: invalid variant schema");
@@ -771,7 +1251,10 @@ template <std::size_t W> class Codec
                       if (std::count_if(t.members.begin(), t.members.end(),
                                         [&](const auto &m) { return m.name == member.name; }) != 1)
                          return fail("pssz IR: duplicate schema member");
-                      PSIO_PSSZ_IR_TRY(attributes(member.attributes, false));
+                      PSIO_PSSZ_IR_TRY(attributes(member.attributes,
+                                                  record ? attribute_site::record_member
+                                                         : attribute_site::variant_member,
+                                                  automatic));
                       PSIO_PSSZ_IR_TRY(push(member.type));
                    }
                 }
@@ -842,6 +1325,13 @@ template <std::size_t W> class Codec
              {
                 std::size_t size;
                 PSIO_PSSZ_IR_TRY(int_size(t, size));
+                if (t.bits == 256)
+                {
+                   auto v = std::get_if<Bytes>(&value.value);
+                   if (!v || v->size() != 32)
+                      return fail("pssz IR: 256-bit integer needs 32 little-endian bytes");
+                   return append(out, {reinterpret_cast<const char *>(v->data()), v->size()});
+                }
                 unsigned __int128 raw;
                 if (t.isSigned)
                 {
@@ -982,7 +1472,11 @@ template <std::size_t W> class Codec
                 bool stable = true;
                 if constexpr (std::is_same_v<T, schema_types::Object>)
                    stable = dwnc(t.attributes);
-                PSIO_PSSZ_IR_TRY(encode_members(t.members, *v, stable, out, n));
+                std::size_t w;
+                PSIO_PSSZ_IR_TRY(width_of(*type, w));
+                const std::size_t start = out.size();
+                PSIO_PSSZ_IR_TRY(encode_members(t.members, *v, stable, w, out, n));
+                PSIO_PSSZ_IR_TRY(check_cap(*type, out.size() - start));
              }
              else if constexpr (std::is_same_v<T, schema_types::Tuple>)
              {
@@ -1004,7 +1498,9 @@ template <std::size_t W> class Codec
                 std::vector<Field> fields(keep);
                 for (std::size_t i = 0; i < keep; ++i)
                    PSIO_PSSZ_IR_TRY(encode_field(*types[i], (*v)[i], n + 1, fields[i]));
-                PSIO_PSSZ_IR_TRY(encode_fields(fields, false, out));
+                std::size_t w;
+                PSIO_PSSZ_IR_TRY(width_of(*type, w));
+                PSIO_PSSZ_IR_TRY(encode_fields(fields, false, w, out));
              }
              else if constexpr (std::is_same_v<T, schema_types::List> ||
                                 std::is_same_v<T, schema_types::BoundedList> ||
@@ -1015,12 +1511,15 @@ template <std::size_t W> class Codec
                    return fail("pssz IR: sequence value required");
                 const schema_types::AnyType *child;
                 PSIO_PSSZ_IR_TRY(inner(t.type, child));
+                std::size_t w;
+                PSIO_PSSZ_IR_TRY(width_of(*type, w));
                 if constexpr (std::is_same_v<T, schema_types::List>)
-                   PSIO_PSSZ_IR_TRY(encode_sequence(*child, *v, false, 0, false, out, n));
+                   PSIO_PSSZ_IR_TRY(encode_sequence(*child, *v, false, 0, false, w, out, n));
                 else if constexpr (std::is_same_v<T, schema_types::BoundedList>)
-                   PSIO_PSSZ_IR_TRY(encode_sequence(*child, *v, false, t.maxCount, true, out, n));
+                   PSIO_PSSZ_IR_TRY(
+                       encode_sequence(*child, *v, false, t.maxCount, true, w, out, n));
                 else
-                   PSIO_PSSZ_IR_TRY(encode_sequence(*child, *v, true, t.len, true, out, n));
+                   PSIO_PSSZ_IR_TRY(encode_sequence(*child, *v, true, t.len, true, w, out, n));
              }
              else if constexpr (std::is_same_v<T, schema_types::Variant>)
              {
@@ -1063,6 +1562,11 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
              PSIO_PSSZ_IR_TRY(int_size(t, size));
              if (bytes.size() != size)
                 return fail("pssz IR: integer span mismatch");
+             if (t.bits == 256)
+             {
+                out = Bytes(bytes.begin(), bytes.end());
+                return codec_ok();
+             }
              unsigned __int128 raw = 0;
              for (std::size_t i = 0; i < size; ++i)
                 raw |= static_cast<unsigned __int128>(static_cast<unsigned char>(bytes[i]))
@@ -1188,14 +1692,19 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
              bool stable = true;
              if constexpr (std::is_same_v<T, schema_types::Object>)
                 stable = dwnc(t.attributes);
+             PSIO_PSSZ_IR_TRY(check_cap(*type, bytes.size()));
+             std::size_t w;
+             PSIO_PSSZ_IR_TRY(width_of(*type, w));
              Record values;
-             PSIO_PSSZ_IR_TRY(decode_members(t.members, bytes, stable, values, n));
+             PSIO_PSSZ_IR_TRY(decode_members(t.members, bytes, stable, w, values, n));
              out = std::move(values);
           }
           else if constexpr (std::is_same_v<T, schema_types::Tuple>)
           {
              std::vector<psio::detail::pssz_field_layout> fields;
              std::vector<const schema_types::AnyType *> types;
+             std::size_t w;
+             PSIO_PSSZ_IR_TRY(width_of(*type, w));
              for (const auto &member : t.members)
              {
                 const schema_types::AnyType *child;
@@ -1203,12 +1712,11 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
                 Layout info;
                 PSIO_PSSZ_IR_TRY(layout(*child, info));
                 types.push_back(child);
-                fields.push_back({info.fixed ? info.size : W, !info.fixed, info.optional});
+                fields.push_back({info.fixed ? info.size : w, !info.fixed, info.optional});
              }
              std::vector<psio::detail::pssz_field_span> spans(fields.size());
              bool unknown = false;
-             PSIO_PSSZ_IR_TRY(psio::detail::pssz_record_spans<W>(bytes, 0, bytes.size(), false,
-                                                                 fields, spans, unknown));
+             PSIO_PSSZ_IR_TRY(spans_for(w, bytes, false, fields, spans, unknown));
              if (unknown && !allow_unknown)
                 return fail("pssz IR: unknown tuple fields in exact decode");
              has_unknown |= unknown;
@@ -1232,14 +1740,16 @@ codec_status Codec<W>::decode_at(const schema_types::AnyType &input, std::span<c
           {
              const schema_types::AnyType *child;
              PSIO_PSSZ_IR_TRY(inner(t.type, child));
+             std::size_t w;
+             PSIO_PSSZ_IR_TRY(width_of(*type, w));
              Sequence values;
              if constexpr (std::is_same_v<T, schema_types::List>)
-                PSIO_PSSZ_IR_TRY(decode_sequence(*child, bytes, false, 0, false, values, n));
+                PSIO_PSSZ_IR_TRY(decode_sequence(*child, bytes, false, 0, false, w, values, n));
              else if constexpr (std::is_same_v<T, schema_types::BoundedList>)
                 PSIO_PSSZ_IR_TRY(
-                    decode_sequence(*child, bytes, false, t.maxCount, true, values, n));
+                    decode_sequence(*child, bytes, false, t.maxCount, true, w, values, n));
              else
-                PSIO_PSSZ_IR_TRY(decode_sequence(*child, bytes, true, t.len, true, values, n));
+                PSIO_PSSZ_IR_TRY(decode_sequence(*child, bytes, true, t.len, true, w, values, n));
              out = std::move(values);
           }
           else if constexpr (std::is_same_v<T, schema_types::Variant>)
@@ -1320,6 +1830,51 @@ template <std::size_t W>
    output = std::move(value);
    return codec_ok();
 }
+// ── Automatic profile (psio::pssz): type-derived widths ────────────────────
+//
+// Byte-compatible with the typed psio::pssz codec for the type the IR
+// describes: every record / array / list uses its own width, explicit caps
+// and length bounds are enforced, pruning is mandatory.
+[[nodiscard]] inline codec_status encode_auto(const schema_types::Schema &schema,
+                                              const schema_types::AnyType &root,
+                                              const Value &value, std::vector<char> &destination)
+{
+   return encode<0>(schema, root, value, destination);
+}
+// Accepts unknown appended optional fields and reports them (the typed
+// `validate` / decode_pssz_checked rule).
+[[nodiscard]] inline codec_status decode_auto(const schema_types::Schema &schema,
+                                              const schema_types::AnyType &root,
+                                              std::span<const char> bytes, Value &output,
+                                              bool &has_unknown)
+{
+   return decode_compatible<0>(schema, root, bytes, output, has_unknown);
+}
+// Checks `bytes` against the schema without keeping the value.
+[[nodiscard]] inline codec_status validate_auto(const schema_types::Schema &schema,
+                                                const schema_types::AnyType &root,
+                                                std::span<const char> bytes,
+                                                bool *has_unknown = nullptr)
+{
+   Value value;
+   bool unknown = false;
+   auto status = decode_compatible<0>(schema, root, bytes, value, unknown);
+   if (status.ok() && has_unknown)
+      *has_unknown = unknown;
+   return status;
+}
+
+// The offset width the automatic profile derives for `root`'s own header,
+// slots or offset table: what auto_pssz_width_v<T> is for the typed codec.
+[[nodiscard]] inline codec_status auto_width(const schema_types::Schema &schema,
+                                             const schema_types::AnyType &root, std::size_t &width)
+{
+   detail::Codec<0> codec(schema);
+   if (auto status = codec.metadata(root); !status.ok())
+      return status;
+   return codec.width(root, width);
+}
+
 template <std::size_t W>
 [[nodiscard]] codec_status validate_canonical_for_width(const schema_types::Schema &schema,
                                                         const schema_types::AnyType &root,

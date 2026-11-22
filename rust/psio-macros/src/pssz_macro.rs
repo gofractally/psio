@@ -5,6 +5,7 @@ use quote::{format_ident, quote};
 use syn::{
     parse_macro_input, parse_quote, Data, DeriveInput, Fields, Lit, Member, Meta, NestedMeta, Type,
 };
+use crate::json_text_macro::{parse_attrs, Forms};
 
 struct Options {
     krate: syn::Path,
@@ -627,7 +628,29 @@ pub fn derive(input: TokenStream, unpack: bool) -> TokenStream {
         .into()
 }
 
-fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool) -> Tokens {
+fn schema_attribute(k: &syn::Path, name: &str, value: &str) -> Tokens {
+    quote! { #k::pssz::schema_ir::Attribute { name: #name.into(), value: ::core::option::Option::Some(#value.into()) } }
+}
+
+/// The member attributes `jsonInt` / `ijsonInt` for `#[json(json_string)]`
+/// and friends on the field, else on the type (`defaults`).
+fn schema_int_forms(k: &syn::Path, field: &syn::Field, defaults: Forms) -> syn::Result<Vec<Tokens>> {
+    let attrs = parse_attrs(&field.attrs)?;
+    if attrs.name.is_some() {
+        return Err(syn::Error::new_spanned(field, "#[json(name)] applies to enum variants"));
+    }
+    let text = |string: bool| if string { "string" } else { "number" };
+    let mut out = Vec::new();
+    if let Some(form) = attrs.forms.json.or(defaults.json) {
+        out.push(schema_attribute(k, "jsonInt", text(form)));
+    }
+    if let Some(form) = attrs.forms.ijson.or(defaults.ijson) {
+        out.push(schema_attribute(k, "ijsonInt", text(form)));
+    }
+    Ok(out)
+}
+
+fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool, cap: Option<u64>, forms: Forms) -> syn::Result<Tokens> {
     let info = field_info(fields);
     let names: Vec<_> = info
         .iter()
@@ -637,18 +660,25 @@ fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool) -> Tokens {
         })
         .collect();
     let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
-    let attributes = if dwnc {
-        quote! { ::std::vec![#k::pssz::schema_ir::Attribute { name: "definitionWillNotChange".into(), value: ::core::option::Option::Some(::std::string::String::new()) }] }
-    } else {
-        quote!(::std::vec![])
-    };
-    quote! {
+    let member_attributes = fields
+        .iter()
+        .map(|field| schema_int_forms(k, field, forms))
+        .collect::<syn::Result<Vec<_>>>()?;
+    // The order C++ SchemaBuilder emits.
+    let mut attributes = Vec::new();
+    if dwnc {
+        attributes.push(schema_attribute(k, "definitionWillNotChange", ""));
+    }
+    if let Some(cap) = cap {
+        attributes.push(schema_attribute(k, "maxDynamicData", &cap.to_string()));
+    }
+    Ok(quote! {
         #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Object(#k::pssz::schema_ir::Object {
             members: ::std::vec![#(#k::pssz::schema_ir::Member {
-                name: #names.into(), r#type: ::std::boxed::Box::new(<#types as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?), attributes: ::std::vec![]
-            }),*], attributes: #attributes
+                name: #names.into(), r#type: ::std::boxed::Box::new(<#types as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?), attributes: ::std::vec![#(#member_attributes),*]
+            }),*], attributes: ::std::vec![#(#attributes),*]
         }))
-    }
+    })
 }
 
 fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
@@ -688,7 +718,9 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             let ty = &data.fields.iter().next().unwrap().ty;
             quote! { <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)? }
         }
-        Data::Struct(data) => schema_record(k, &data.fields, opts.dwnc),
+        Data::Struct(data) => {
+            schema_record(k, &data.fields, opts.dwnc, opts.cap, parse_attrs(&input.attrs)?.forms)?
+        }
         Data::Enum(data) => {
             if opts.dwnc || opts.transparent {
                 return Err(syn::Error::new_spanned(
@@ -725,9 +757,15 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                             #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Tuple(#k::pssz::schema_ir::Tuple { members: ::std::vec![#(::std::boxed::Box::new(<#types as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?)),*] }))
                         }
                     }
-                    _ => schema_record(k, &variant.fields, false),
+                    _ => schema_record(k, &variant.fields, false, None, Forms::default())?,
                 };
-                members.push(quote! { #k::pssz::schema_ir::Member { name: #variant_name.into(), r#type: ::std::boxed::Box::new(#ty), attributes: ::std::vec![] } });
+                // The I-JSON form names an alternative by `#[json(name)]`.
+                let attributes: Vec<_> = parse_attrs(&variant.attrs)?
+                    .name
+                    .iter()
+                    .map(|name| schema_attribute(k, "ijsonName", name))
+                    .collect();
+                members.push(quote! { #k::pssz::schema_ir::Member { name: #variant_name.into(), r#type: ::std::boxed::Box::new(#ty), attributes: ::std::vec![#(#attributes),*] } });
             }
             quote! { #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Variant(#k::pssz::schema_ir::Variant { members: ::std::vec![#(#members),*], attributes: ::std::vec![] })) }
         }

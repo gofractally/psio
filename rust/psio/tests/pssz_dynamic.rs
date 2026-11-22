@@ -448,3 +448,409 @@ fn runtime_optional_extensions_report_unknown_and_bound_known_payloads() {
         ])
     );
 }
+
+// ── The automatic profile and the JSON path, on hand-built IR ───────────────
+
+mod automatic {
+    use super::*;
+    use psio::json::{IJson, Json};
+
+    fn attribute(name: &str, value: &str) -> Attribute {
+        Attribute { name: name.into(), value: Some(value.into()) }
+    }
+    fn int(bits: u32, signed: bool) -> AnyType {
+        AnyType::new(AnyValue::Int(Int { bits, isSigned: signed }))
+    }
+    fn list(element: AnyType) -> AnyType {
+        AnyType::new(AnyValue::List(List { r#type: Box::new(element) }))
+    }
+    fn adapter(id: &str, inner: AnyType) -> AnyType {
+        AnyType::new(AnyValue::Custom(Custom { r#type: Box::new(inner), id: id.into() }))
+    }
+    fn option(inner: AnyType) -> AnyType {
+        AnyType::new(AnyValue::Option(Optional { r#type: Box::new(inner) }))
+    }
+    fn member(name: &str, ty: AnyType, attributes: Vec<Attribute>) -> Member {
+        Member { name: name.into(), r#type: Box::new(ty), attributes }
+    }
+    fn object(members: Vec<Member>, attributes: Vec<Attribute>) -> AnyType {
+        AnyType::new(AnyValue::Object(Object { members, attributes }))
+    }
+    fn string() -> AnyType {
+        adapter("string", list(int(8, false)))
+    }
+    fn record(fields: Vec<(&str, Value)>) -> Value {
+        Value::Record(fields.into_iter().map(|(n, v)| (n.to_string(), v)).collect())
+    }
+    fn some(value: Value) -> Value {
+        Value::Optional(Some(Box::new(value)))
+    }
+    fn numbers(values: &[u128]) -> Value {
+        Value::Sequence(values.iter().map(|v| Value::Unsigned(*v)).collect())
+    }
+
+    #[test]
+    fn member_length_bounds_are_enforced_and_select_the_width() {
+        let schema = Schema::default();
+        // text: 2..=4 bytes; ids: exactly 2 u16; tag: at most 3 bytes when
+        // present; blob: at most 2 bytes.
+        let root = object(
+            vec![
+                member("text", string(), vec![attribute("lengthBound", "min=2,max=4")]),
+                member("ids", list(int(16, false)), vec![attribute("lengthBound", "exact=2")]),
+                member("blob", adapter("hex", list(int(8, false))), vec![attribute("lengthBound", "max=2")]),
+                member("tag", option(string()), vec![attribute("lengthBound", "max=3")]),
+            ],
+            vec![],
+        );
+        let value = |text: &str, ids: &[u128], blob: &[u8], tag: Option<&str>| {
+            record(vec![
+                ("text", Value::String(text.into())),
+                ("ids", numbers(ids)),
+                ("blob", Value::Bytes(blob.to_vec())),
+                ("tag", match tag {
+                    Some(tag) => some(Value::String(tag.into())),
+                    None => Value::Optional(None),
+                }),
+            ])
+        };
+        // Bound: header 4 + (4+4) + (2*2+4) + (2+4) + (3+1+4) = 34: 1-byte
+        // offsets.
+        assert_eq!(codec::auto_width(&schema, &root).unwrap(), 1);
+        let good = value("abcd", &[1, 2], &[9, 8], Some("xyz"));
+        let bytes = codec::encode::<Pssz>(&schema, &root, &good).unwrap();
+        assert_eq!(
+            bytes,
+            // The optional string can be empty: it carries a selector byte.
+            [4, 4, 8, 12, 14, b'a', b'b', b'c', b'd', 1, 0, 2, 0, 9, 8, 1, b'x', b'y', b'z']
+        );
+        assert_eq!(codec::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap(), good);
+        assert_eq!(codec::validate(&schema, &root, &bytes), Ok(false));
+        let text = r#"{"text":"abcd","ids":[1,2],"blob":"0908","tag":"xyz"}"#;
+        assert_eq!(codec::pssz_to_json::<IJson>(&schema, &root, &bytes).unwrap().0, text);
+        assert_eq!(codec::json_to_pssz::<IJson>(&schema, &root, text.as_bytes()).unwrap(), bytes);
+        assert_eq!(
+            codec::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap().0,
+            r#"{"text":"abcd","ids":[1,2],"blob":[9,8],"tag":"xyz"}"#
+        );
+        // An absent optional satisfies its bound.
+        let absent = value("ab", &[1, 2], &[], None);
+        let pruned = codec::encode::<Pssz>(&schema, &root, &absent).unwrap();
+        assert_eq!(pruned, [3, 3, 5, 9, b'a', b'b', 1, 0, 2, 0]);
+        assert_eq!(codec::decode_exact::<Pssz>(&schema, &root, &pruned).unwrap(), absent);
+
+        // Each bound, on every path. The wide profile encodes the frames
+        // the automatic one must refuse to read.
+        let wide = |members: Vec<Member>| object(members, vec![attribute("maxDynamicData", "255")]);
+        let AnyValue::Object(bounded) = &root.value else { unreachable!() };
+        let unbounded = wide(
+            bounded
+                .members
+                .iter()
+                .map(|m| member(&m.name, (*m.r#type).clone(), vec![]))
+                .collect(),
+        );
+        for (bad, json) in [
+            (value("a", &[1, 2], &[], None), r#"{"text":"a","ids":[1,2],"blob":""}"#),
+            (value("abcde", &[1, 2], &[], None), r#"{"text":"abcde","ids":[1,2],"blob":""}"#),
+            (value("ab", &[1], &[], None), r#"{"text":"ab","ids":[1],"blob":""}"#),
+            (value("ab", &[1, 2, 3], &[], None), r#"{"text":"ab","ids":[1,2,3],"blob":""}"#),
+            (value("ab", &[1, 2], &[1, 2, 3], None), r#"{"text":"ab","ids":[1,2],"blob":"010203"}"#),
+            (
+                value("ab", &[1, 2], &[], Some("wxyz")),
+                r#"{"text":"ab","ids":[1,2],"blob":"","tag":"wxyz"}"#,
+            ),
+        ] {
+            assert!(codec::encode::<Pssz>(&schema, &root, &bad).is_err(), "{json}");
+            assert!(codec::encode::<Pssz8>(&schema, &root, &bad).is_err(), "{json}");
+            assert!(codec::value_to_json::<IJson>(&schema, &root, &bad).is_err(), "{json}");
+            assert!(codec::json_to_pssz::<IJson>(&schema, &root, json.as_bytes()).is_err(), "{json}");
+            // The same frame without the bounds is fine; with them it is
+            // not a value of the type.
+            let frame = codec::encode::<Pssz>(&schema, &unbounded, &bad).unwrap();
+            assert!(codec::json_to_pssz::<IJson>(&schema, &unbounded, json.as_bytes()).is_ok());
+            assert!(codec::decode_compatible::<Pssz>(&schema, &root, &frame).is_err(), "{json}");
+            assert!(codec::validate(&schema, &root, &frame).is_err(), "{json}");
+            assert!(codec::pssz_to_json::<Json>(&schema, &root, &frame).is_err(), "{json}");
+        }
+        // The explicit profiles enforce the bounds too.
+        let narrow = codec::encode::<Pssz8>(&schema, &root, &good).unwrap();
+        assert_eq!(narrow, bytes);
+        assert_eq!(codec::decode_exact::<Pssz16>(&schema, &root, &codec::encode::<Pssz16>(&schema, &root, &good).unwrap()).unwrap(), good);
+    }
+
+    #[test]
+    fn malformed_attributes_are_schema_errors_on_every_entry_point() {
+        let schema = Schema::default();
+        let rejected = |root: &AnyType| {
+            assert!(codec::encode::<Pssz>(&schema, root, &record(vec![])).is_err());
+            assert!(codec::decode_compatible::<Pssz>(&schema, root, &[0; 4]).is_err());
+            assert!(codec::validate(&schema, root, &[0; 4]).is_err());
+            assert!(codec::auto_width(&schema, root).is_err());
+            assert!(codec::json_to_pssz::<Json>(&schema, root, b"{}").is_err());
+            assert!(codec::json_to_value::<IJson>(&schema, root, b"{}").is_err());
+            assert!(codec::pssz_to_json::<IJson>(&schema, root, &[0; 4]).is_err());
+            assert!(codec::value_to_json::<Json>(&schema, root, &record(vec![])).is_err());
+        };
+        for bound in ["", "max", "max=", "max=x", "max=01", "max=-1", "max=1,max=2", "most=1",
+                      "max=1,", "max=99999999999999999999999", " max=1"] {
+            rejected(&object(
+                vec![member("m", option(string()), vec![attribute("lengthBound", bound)])],
+                vec![],
+            ));
+        }
+        rejected(&object(
+            vec![member("m", option(string()), vec![Attribute { name: "lengthBound".into(), value: None }])],
+            vec![],
+        ));
+        for cap in ["", "x", "01", "-1", "1.5", "18446744073709551616"] {
+            rejected(&object(vec![], vec![attribute("maxDynamicData", cap)]));
+        }
+        for form in ["", "Number", "hex"] {
+            for name in ["jsonInt", "ijsonInt"] {
+                rejected(&object(
+                    vec![member("m", option(int(64, false)), vec![attribute(name, form)])],
+                    vec![],
+                ));
+            }
+        }
+        // Attributes on the wrong site, and unknown ones.
+        rejected(&object(vec![], vec![attribute("lengthBound", "max=1")]));
+        rejected(&object(vec![], vec![attribute("ijsonName", "x")]));
+        rejected(&object(
+            vec![member("m", option(string()), vec![attribute("maxDynamicData", "8")])],
+            vec![],
+        ));
+        rejected(&object(
+            vec![member("m", option(string()), vec![attribute("ijsonName", "x")])],
+            vec![],
+        ));
+        rejected(&object(
+            vec![member("m", option(string()), vec![attribute("definitionWillNotChange", "")])],
+            vec![],
+        ));
+
+        // What each profile accepts.
+        let annotated = object(
+            vec![member(
+                "m",
+                option(int(64, false)),
+                vec![
+                    attribute("lengthBound", "max=1"),
+                    attribute("jsonInt", "string"),
+                    attribute("ijsonInt", "number"),
+                    attribute("doc", "text"),
+                ],
+            )],
+            vec![],
+        );
+        assert_eq!(codec::encode::<Pssz32>(&schema, &annotated, &record(vec![])).unwrap(), [0; 4]);
+        assert_eq!(codec::encode::<Pssz>(&schema, &annotated, &record(vec![])).unwrap(), [0]);
+        let capped = object(vec![], vec![attribute("maxDynamicData", "300"), attribute("maxFields", "4")]);
+        assert_eq!(codec::encode::<Pssz>(&schema, &capped, &record(vec![])).unwrap(), [0, 0]);
+        assert_eq!(codec::auto_width(&schema, &capped).unwrap(), 2);
+        for explicit in [
+            codec::encode::<Pssz8>(&schema, &capped, &record(vec![])),
+            codec::encode::<Pssz16>(&schema, &capped, &record(vec![])),
+            codec::encode::<Pssz32>(&schema, &capped, &record(vec![])),
+        ] {
+            assert_eq!(explicit.unwrap_err().0, codec::UNSUPPORTED_CONSTRAINT);
+        }
+    }
+
+    #[test]
+    fn caps_rule_the_width_and_are_enforced_at_every_record() {
+        let mut schema = Schema::default();
+        // Inner: cap 10 (1-byte offsets). Outer holds two: 4 + 2 * (10 + 4)
+        // = 32, 1-byte offsets as well.
+        schema.types.push(member(
+            "Inner",
+            object(vec![member("text", string(), vec![])], vec![attribute("maxDynamicData", "10")]),
+            vec![],
+        ));
+        let outer = object(
+            vec![
+                member("a", AnyType::named("Inner"), vec![]),
+                member("b", AnyType::named("Inner"), vec![]),
+            ],
+            vec![],
+        );
+        let inner = AnyType::named("Inner");
+        assert_eq!(codec::auto_width(&schema, &inner).unwrap(), 1);
+        assert_eq!(codec::auto_width(&schema, &outer).unwrap(), 1);
+        let text = |s: &str| record(vec![("text", Value::String(s.into()))]);
+        // Header, slot and 8 bytes: exactly the cap.
+        let at_cap = codec::encode::<Pssz>(&schema, &inner, &text("12345678")).unwrap();
+        assert_eq!(at_cap.len(), 10);
+        assert_eq!(codec::validate(&schema, &inner, &at_cap), Ok(false));
+        assert!(codec::encode::<Pssz>(&schema, &inner, &text("123456789")).is_err());
+        assert!(codec::json_to_pssz::<Json>(&schema, &inner, br#"{"text":"123456789"}"#).is_err());
+        let mut over = at_cap.clone();
+        over.push(b'9');
+        assert!(codec::decode_compatible::<Pssz>(&schema, &inner, &over).is_err());
+        assert!(codec::validate(&schema, &inner, &over).is_err());
+        // Nested: the child's cap applies inside the parent.
+        let both = record(vec![("a", text("12345678")), ("b", text(""))]);
+        let bytes = codec::encode::<Pssz>(&schema, &outer, &both).unwrap();
+        assert_eq!(&bytes[..3], [2, 2, 12]);
+        assert_eq!(codec::decode_exact::<Pssz>(&schema, &outer, &bytes).unwrap(), both);
+        let bad = record(vec![("a", text("")), ("b", text("123456789"))]);
+        assert!(codec::encode::<Pssz>(&schema, &outer, &bad).is_err());
+        let mut tail = bytes.clone();
+        tail.extend_from_slice(b"..........");
+        assert!(codec::decode_compatible::<Pssz>(&schema, &outer, &tail).is_err());
+    }
+
+    #[test]
+    fn wide_integers_are_bytes_on_the_wire_and_have_no_json_form() {
+        let schema = Schema::default();
+        let u256 = int(256, false);
+        let raw: Vec<u8> = (1..=32).collect();
+        for bytes in [
+            codec::encode::<Pssz>(&schema, &u256, &Value::Bytes(raw.clone())).unwrap(),
+            codec::encode::<Pssz8>(&schema, &u256, &Value::Bytes(raw.clone())).unwrap(),
+        ] {
+            assert_eq!(bytes, raw);
+        }
+        assert_eq!(codec::decode_exact::<Pssz>(&schema, &u256, &raw).unwrap(), Value::Bytes(raw.clone()));
+        assert!(codec::decode_exact::<Pssz>(&schema, &u256, &raw[..31]).is_err());
+        assert!(codec::encode::<Pssz>(&schema, &u256, &Value::Bytes(raw[..31].to_vec())).is_err());
+        assert!(codec::encode::<Pssz>(&schema, &u256, &Value::Unsigned(1)).is_err());
+        assert!(codec::encode::<Pssz>(&schema, &int(256, true), &Value::Bytes(raw.clone())).is_err());
+        // The typed codec agrees on the bytes.
+        let typed = Uint256 { limb: [1, 2, 3, 4] };
+        let wire = try_to_pssz::<Pssz, _>(&typed).unwrap();
+        let (typed_schema, typed_root) = schema_for::<Uint256>().unwrap();
+        assert_eq!(schema.resolve(&u256).unwrap(), typed_schema.resolve(&typed_root).unwrap());
+        let value = codec::decode_exact::<Pssz>(&typed_schema, &typed_root, &wire).unwrap();
+        assert_eq!(codec::encode::<Pssz>(&typed_schema, &typed_root, &value).unwrap(), wire);
+
+        let no_form = |root: &AnyType, bytes: &[u8], text: &[u8]| {
+            for error in [
+                codec::pssz_to_json::<Json>(&schema, root, bytes).unwrap_err(),
+                codec::pssz_to_json::<IJson>(&schema, root, bytes).unwrap_err(),
+                codec::json_to_pssz::<Json>(&schema, root, text).unwrap_err(),
+                codec::json_to_pssz::<IJson>(&schema, root, text).unwrap_err(),
+            ] {
+                assert!(error.what().contains("no JSON form"), "{error}");
+            }
+        };
+        no_form(&u256, &raw, b"1");
+        no_form(&int(128, false), &[0; 16], b"1");
+        no_form(&int(128, true), &[0; 16], b"\"1\"");
+        let bit = || int(1, false);
+        let bitvector = adapter(
+            "bitvector",
+            AnyType::new(AnyValue::Array(Array { r#type: Box::new(bit()), len: 4 })),
+        );
+        no_form(&bitvector, &[5], b"[1,0,1,0]");
+        let bitlist = adapter(
+            "bitlist",
+            AnyType::new(AnyValue::BoundedList(psio::pssz::schema_ir::BoundedList {
+                r#type: Box::new(bit()),
+                maxCount: 4,
+            })),
+        );
+        no_form(&bitlist, &[1], b"[]");
+        // A non-finite float has no JSON text in either format.
+        let f64_type = AnyType::new(AnyValue::Float(Float { exp: 11, mantissa: 53 }));
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let bytes = value.to_le_bytes();
+            assert!(codec::validate(&schema, &f64_type, &bytes).is_ok());
+            assert!(codec::pssz_to_json::<Json>(&schema, &f64_type, &bytes).is_err());
+            assert!(codec::pssz_to_json::<IJson>(&schema, &f64_type, &bytes).is_err());
+        }
+        assert!(codec::json_to_pssz::<Json>(&schema, &f64_type, b"1e999").is_err());
+        assert_eq!(codec::json_to_pssz::<Json>(&schema, &f64_type, b"1e-999").unwrap(), [0; 8]);
+    }
+
+    #[test]
+    fn integer_forms_reach_through_containers_and_reset_inside_records() {
+        let schema = Schema::default();
+        let u64_type = || int(64, false);
+        let inner = object(vec![member("n", u64_type(), vec![])], vec![]);
+        let root = object(
+            vec![
+                member("a", list(option(u64_type())), vec![attribute("jsonInt", "string")]),
+                member("b", inner.clone(), vec![attribute("jsonInt", "string")]),
+                member(
+                    "c",
+                    AnyType::new(AnyValue::Tuple(Tuple { members: vec![Box::new(u64_type())] })),
+                    vec![attribute("jsonInt", "string"), attribute("ijsonInt", "string")],
+                ),
+                member("d", u64_type(), vec![attribute("ijsonInt", "number")]),
+                member("e", adapter("hex", list(int(8, false))), vec![attribute("jsonInt", "string")]),
+            ],
+            vec![],
+        );
+        let big = u64::MAX as u128;
+        let value = record(vec![
+            ("a", Value::Sequence(vec![some(Value::Unsigned(big)), Value::Optional(None)])),
+            ("b", record(vec![("n", Value::Unsigned(big))])),
+            ("c", numbers(&[big])),
+            ("d", Value::Unsigned(big)),
+            ("e", Value::Bytes(vec![7, 255])),
+        ]);
+        let json = r#"{"a":["18446744073709551615",null],"b":{"n":18446744073709551615},"c":[18446744073709551615],"d":18446744073709551615,"e":["7","255"]}"#;
+        let ijson = r#"{"a":["18446744073709551615",null],"b":{"n":"18446744073709551615"},"c":["18446744073709551615"],"d":18446744073709551615,"e":"07FF"}"#;
+        assert_eq!(codec::value_to_json::<Json>(&schema, &root, &value).unwrap(), json);
+        assert_eq!(codec::value_to_json::<IJson>(&schema, &root, &value).unwrap(), ijson);
+        assert_eq!(codec::json_to_value::<Json>(&schema, &root, json.as_bytes()).unwrap(), value);
+        assert_eq!(codec::json_to_value::<IJson>(&schema, &root, ijson.as_bytes()).unwrap(), value);
+        // The other form is refused where one is forced.
+        let reject = |text: &str| {
+            assert!(codec::json_to_value::<Json>(&schema, &root, text.as_bytes()).is_err(), "{text}");
+        };
+        reject(&json.replace(r#"["18446744073709551615",null]"#, "[18446744073709551615,null]"));
+        reject(&json.replace(r#"{"n":18446744073709551615}"#, r#"{"n":"18446744073709551615"}"#));
+        reject(&json.replace(r#""c":[18446744073709551615]"#, r#""c":["18446744073709551615"]"#));
+        reject(&json.replace(r#"["7","255"]"#, "[7,255]"));
+        assert!(codec::json_to_value::<IJson>(
+            &schema,
+            &root,
+            ijson.replace(r#""d":18446744073709551615"#, r#""d":"18446744073709551615""#).as_bytes()
+        )
+        .is_err());
+        // Integer strings are written literally: no escapes, canonical.
+        let one = object(vec![member("n", u64_type(), vec![attribute("jsonInt", "string")])], vec![]);
+        for text in [r#"{"n":"\u0031"}"#, r#"{"n":"01"}"#, r#"{"n":"-0"}"#, r#"{"n":"1.0"}"#,
+                     r#"{"n":""}"#, r#"{"n":"18446744073709551616"}"#, r#"{"n":" 1"}"#] {
+            assert!(codec::json_to_value::<Json>(&schema, &one, text.as_bytes()).is_err(), "{text}");
+        }
+        assert_eq!(
+            codec::json_to_value::<Json>(&schema, &one, br#"{"n":"1","n":"2","zz":[{}]}"#).unwrap(),
+            record(vec![("n", Value::Unsigned(2))])
+        );
+    }
+
+    #[test]
+    fn schema_recursion_without_text_is_limited() {
+        // Option<Option<...<u8>>>, deeper than the node limit: each level is
+        // a schema step that consumes no text.
+        let mut schema = Schema::default();
+        let mut ty = int(8, false);
+        for _ in 0..200 {
+            ty = option(ty);
+        }
+        schema.types.push(member("Deep", ty, vec![]));
+        let deep = AnyType::named("Deep");
+        assert!(codec::json_to_value::<Json>(&schema, &deep, b"1").is_err());
+        assert!(codec::json_to_pssz::<IJson>(&schema, &deep, b"1").is_err());
+        assert_eq!(
+            codec::json_to_value::<Json>(&schema, &deep, b"null").unwrap(),
+            Value::Optional(None)
+        );
+        // A type that is only itself.
+        schema.types.push(member("Loop", option(AnyType::named("Loop")), vec![]));
+        let looped = AnyType::named("Loop");
+        assert!(codec::json_to_pssz::<Json>(&schema, &looped, b"1").is_err());
+        assert!(codec::json_to_pssz::<Json>(&schema, &looped, b"[[[[").is_err());
+        assert!(codec::validate(&schema, &looped, &[1; 300]).is_err());
+        // A hand-built value deeper than anything decodable.
+        let mut value = Value::Unsigned(1);
+        for _ in 0..200 {
+            value = some(value);
+        }
+        assert!(codec::encode::<Pssz>(&schema, &deep, &value).is_err());
+    }
+}

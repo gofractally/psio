@@ -176,17 +176,126 @@ and exercises `validate`, `validate_strict`, `decode_json_checked` and
 `encode_json_checked` for both formats on valid, truncated, mutated and
 depth-bomb input.
 
-## Runtime-schema path
+## Two layers: syntax and types
 
-`dynamic_json.hpp` has `ijson_encode_dynamic` / `ijson_decode_dynamic` and
-the `encode_dynamic` / `decode_dynamic` CPOs for `psio::ijson`: 64-bit
-integers by the rule above, `Bytes` and sequences of `Uint8` as uppercase hex. The
-runtime `psio::schema` has no variant or tuple shape, so those rules have no
-dynamic form, and the dynamic reader (like the `json` one) assumes
-well-formed text and reports no errors. `view_to_json.hpp` renders a
-schemaless pjson view and has no type information to apply the ijson rules;
-it is unchanged. The PSSZ schema-IR runtime (`pssz_ir.hpp`, Rust
-`pssz::dynamic`) has no JSON path.
+Reading JSON is split in two, so the parser can be replaced without touching
+any type rule:
+
+1. **Syntax** — a *cursor* that owns the text: whitespace, punctuation,
+   string escapes and UTF-8, the RFC 8259 number grammar, the nesting limit,
+   skipping a value. C++ `psio::JsonCursor` (`json_cursor.hpp`), Rust
+   `psio::json::JsonCursor`. Events: `kind` (peek), `begin_object` /
+   `next_field`, `begin_array` / `next_element`, `string` (unescaped, with an
+   `escaped` flag), `number` (as its token text), `boolean`, `null`, `skip`,
+   `finish`.
+2. **Types** — a walk that checks the cursor's events against the type:
+   member names, arity, integer range and form, hex digits, variant names,
+   length bounds, missing members. It holds no text positions and does no
+   tokenizing.
+
+A cursor is forward-only and single-pass (values consumed once, in document
+order; a string view is valid until the next call), which is the contract of
+simdjson's on-demand API. The walks need no random access and no second
+pass: record members are stored as they arrive (a repeated key is read again
+and replaces the earlier value), and a variant's selector precedes its value
+in both text forms (`[index, value]`, `{"Name": value}`).
+
+Today the only cursor is the hand-written reader (`psio::json_text_cursor`,
+Rust `Reader`), and the schema-driven walk below is the only walk written
+against the cursor. The typed readers (`json.hpp` `read_value`, Rust
+`JsonText::read_json`) still read the text directly; moving them onto the
+cursor is a mechanical follow-up.
+
+What the hand-written syntax layer does that a replacement must also do (or
+that the walk would have to take over):
+
+- reports, for a string, whether it was written with escapes (integer and
+  hex strings must be written literally);
+- rejects Unicode noncharacters in `ijson` strings and keys, also inside
+  skipped values; rejects raw control characters, unpaired surrogate
+  escapes and invalid UTF-8;
+- hands a number over as text (integers are parsed exactly, including the
+  full `u64` range and the "bare only up to 2^53 - 1" rule; `-0`, leading
+  zeros, fractions and exponents are told apart);
+- limits nesting to `kMaxValidationDepth` (64), on skipped values too;
+- never throws or aborts, needs no padding or copy of the input, and builds
+  for a WASI guest with exceptions and RTTI disabled.
+
+Repeated keys need nothing from the syntax layer (last one wins).
+
+## Schema-driven path (no C++ / Rust type)
+
+A consumer that has only a Schema IR (`schema_ir.hpp`, Rust
+`psio::pssz::schema_ir`) — a CLI, an HTTP "pack this action" endpoint, an
+indexer — converts and validates with:
+
+| | C++ (`psio/pssz_ir_json.hpp`, namespace `psio::pssz_ir`) | Rust (`psio::pssz::dynamic`) |
+|---|---|---|
+| text → PSSZ | `json_to_pssz(schema, root, psio::ijson{}, text, bytes)` | `json_to_pssz::<IJson>(&schema, &root, text)` |
+| PSSZ → text | `pssz_to_json(schema, root, psio::ijson{}, bytes, text, &has_unknown)` | `pssz_to_json::<IJson>(&schema, &root, bytes)` |
+| validate PSSZ | `validate_pssz(schema, root, bytes, &has_unknown)` | `validate_pssz(&schema, &root, bytes)` |
+
+`root` is an `AnyType`; a named type is `Type{"Name"}` (C++ also accepts the
+name itself: `json_to_pssz(schema, "Transfer", ...)`). Use `psio::json{}` /
+`Json` for the other text format.
+
+The result is the typed codecs' result for the type the IR describes: the
+same PSSZ bytes as `psio::pssz` (type-derived offset widths, mandatory
+pruning, caps and length bounds enforced) and the same text as `psio::json`
+/ `psio::ijson`. Both shared fixtures record the IR of their types and both
+languages re-derive every vector from the IR alone
+(`cpp/tests/schema_conformance_tests.cpp`,
+`rust/psio/tests/schema_conformance.rs`). Everything is checked and
+status-returning; it builds with exceptions disabled
+(`cpp/tests/pssz_ir_noexceptions.cpp`).
+
+The IR carries what that needs (the C++ `SchemaBuilder` and the Rust
+`ToPsszSchema` derive write it):
+
+- shape: records (`definitionWillNotChange` for fixed layout), tuples,
+  variants, options, lists, arrays, bounded lists, the `string` / `hex` /
+  `bool` / `char` / `bitvector` / `bitlist` adapters, integers of 8-256 bits
+  (an enum is its underlying integer), floats;
+- width inputs: the record attribute `maxDynamicData`; bounded lists and
+  strings; a member `length_bound{.max = N}` on a string or list is the
+  bounded form of the member's type, any other bound the member attribute
+  `lengthBound = "exact=N"` / `"min=A,max=B"`;
+- text forms: member attributes `jsonInt` / `ijsonInt` (`"number"` /
+  `"string"`), and the variant-member attribute `ijsonName` (the alternative's
+  I-JSON name; without it the member name is used).
+
+Not expressible in the IR, so not available through a schema:
+
+- a custom text form (`PSIO_ADAPTER(..., text_category, ...)`, a member
+  `as<Tag>`, Rust `TextForm`) and binary adapters: the IR has the declared
+  type;
+- `Box<T>` is transparent in the IR, while the typed codecs give a boxed
+  member no inferred bound. A record whose bound would be finite but for a
+  non-recursive `Box` member gets a narrower width from the IR than from the
+  type. (Recursive types are unbounded both ways.) Do not box a member of a
+  type that relies on an inferred width; give it an explicit cap;
+- C++ `char` elements are bytes 0..255 in the IR; the typed `json` writer
+  prints a `std::vector<char>` element with the platform's `char` sign.
+
+No JSON form through a schema (an error, not a guess), because the typed
+text codecs have none to agree with: integers wider than 64 bits (their text
+form is undecided), `bitvector` / `bitlist`.
+
+**Raw strings.** The IR has one `string` adapter for a UTF-8 string (C++
+`utf8_string`, Rust `String`) and a raw string (C++ `std::string`, Rust
+`RawString`), and the schema-driven codec treats it as UTF-8. A raw string
+holding bytes that are not UTF-8 is therefore **rejected** by
+`validate_pssz` and by `pssz_to_json` (a status; no text is produced),
+although the typed `validate` accepts it. The typed text writers refuse the
+same value ("string is not valid UTF-8"), so no text is lost, but schema
+validation is stricter than the type here. The fixture class
+`string-raw-non-utf8` pins this.
+
+`dynamic_json.hpp` (`ijson_encode_dynamic` / `ijson_decode_dynamic`, over
+the older runtime `psio::schema`) is unchanged apart from the 64-bit integer
+rule; it has no variant or tuple and its reader is unchecked. New code
+should use the Schema IR path above. `view_to_json.hpp` renders a schemaless
+pjson view and has no type information.
 
 ## Open
 
@@ -196,6 +305,7 @@ it is unchanged. The PSSZ schema-IR runtime (`pssz_ir.hpp`, Rust
   writing wide integers as decimal strings; the adapter form stands in both
   formats until decided. Rust has no JSON form for `u128` / `i128` /
   `Uint256`.
-- Rust `BoundedString` / `BoundedRawString` / `BoundedList`, bit types and
-  `psio::bitvector` / `bitlist` have no JSON form.
+- Bit types (`psio::bitvector` / `bitlist`, Rust `Bitvector` / `Bitlist`)
+  have no JSON form in either language; one has to be chosen before either
+  can implement it.
 - Rust `validate` materializes the value and drops it.

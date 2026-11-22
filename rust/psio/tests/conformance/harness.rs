@@ -14,6 +14,10 @@ pub struct TypeInfo {
     pub max_dynamic_data: Option<u64>,
     pub fixed: bool,
     pub fixed_size: usize,
+    /// The Schema IR in `Fixture::schema_ir` describes the type (used by
+    /// ../schema_conformance.rs).
+    #[serde(default)]
+    pub ir: bool,
 }
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Vector {
@@ -36,6 +40,10 @@ pub struct Vector {
 #[derive(Debug, serde::Deserialize)]
 pub struct Fixture {
     pub version: u32,
+    /// psio::pssz encoding of one Schema holding every `ir` type under its
+    /// id (lowercase hex); consumed by ../schema_conformance.rs.
+    #[serde(default)]
+    pub schema_ir: String,
     pub types: Vec<TypeInfo>,
     pub vectors: Vec<Vector>,
 }

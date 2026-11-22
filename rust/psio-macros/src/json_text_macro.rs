@@ -18,17 +18,18 @@ use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields, Meta, NestedMeta};
 
 #[derive(Clone, Copy, Default)]
-struct Forms {
-    json: Option<bool>,  // Some(true) = string
-    ijson: Option<bool>,
+pub(crate) struct Forms {
+    pub(crate) json: Option<bool>,  // Some(true) = string
+    pub(crate) ijson: Option<bool>,
 }
 
-struct Attrs {
-    forms: Forms,
-    name: Option<String>,
+pub(crate) struct Attrs {
+    pub(crate) forms: Forms,
+    pub(crate) name: Option<String>,
 }
 
-fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
+/// The `#[json(...)]` attributes of an item, field or variant.
+pub(crate) fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
     let mut out = Attrs { forms: Forms::default(), name: None };
     for attr in attrs {
         if !attr.path.is_ident("json") {

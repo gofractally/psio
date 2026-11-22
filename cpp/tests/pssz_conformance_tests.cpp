@@ -166,6 +166,9 @@ namespace
             if (key == "version") out.version = r.value().num;
             else if (key == "types") out.types = r.objects();
             else if (key == "vectors") out.vectors = r.objects();
+            // The Schema IR of the fixture types: consumed by
+            // schema_conformance_tests.cpp.
+            else if (key == "schema_ir") (void)r.value();
             else r.fail("unknown top-level key " + key);
          } while (r.take(','));
          r.expect('}');
@@ -309,7 +312,10 @@ TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformanc
       REQUIRE(index < fx.types.size());
       const auto& entry = fx.types[index++];
       INFO(type_id<T>());
-      CHECK(entry.size() == 7);
+      // The seven typed properties plus "ir" (Schema IR coverage).
+      CHECK(entry.size() == 8);
+      CHECK(entry.at("ir").kind == Value::boolean);
+      CHECK(entry.at("ir").flag == ir_expressible<T>());
       CHECK(str(entry, "id") == type_id<T>());
       CHECK(str(entry, "shape") == type_shape<T>());
       CHECK(entry.at("auto_width").num == psio::auto_pssz_width_v<T>);

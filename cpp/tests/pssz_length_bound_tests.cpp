@@ -5,7 +5,9 @@
 // encode_pssz_checked); the unchecked decode does not check it.
 
 #include <psio/pssz.hpp>
+#include <psio/pssz_ir_json.hpp>
 #include <psio/reflect.hpp>
+#include <psio/schema_builder.hpp>
 
 #include <catch.hpp>
 
@@ -79,6 +81,27 @@ namespace
       LbRec out;
       bool  unknown = false;
       CHECK(psio::decode_pssz_checked(Fmt{}, bytes, out, unknown).ok() == ok);
+      // The schema-driven codec, given only the IR (max bounds as bounded
+      // types, exact / min bounds as the lengthBound attribute), agrees.
+      if constexpr (std::is_same_v<Fmt, psio::pssz>)
+      {
+         static const psio::Schema schema = psio::SchemaBuilder{}.insert<LbRec>("LbRec").build();
+         std::size_t               width  = 0;
+         CHECK(psio::pssz_ir::auto_width(schema, "LbRec", width).ok());
+         CHECK(width == psio::auto_pssz_width_v<LbRec>);
+         CHECK(psio::pssz_ir::validate_pssz(schema, "LbRec", bytes).ok() == ok);
+         std::string text;
+         CHECK(psio::pssz_ir::pssz_to_json(schema, "LbRec", psio::ijson{}, bytes, text).ok() == ok);
+         if (ok)
+         {
+            CHECK(text == psio::encode(psio::ijson{}, value));
+            std::vector<char> again;
+            CHECK(psio::pssz_ir::json_to_pssz(schema, "LbRec", psio::ijson{},
+                                              std::span<const char>{text}, again)
+                     .ok());
+            CHECK(again == bytes);
+         }
+      }
       return ok;
    }
 

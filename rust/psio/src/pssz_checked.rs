@@ -430,12 +430,23 @@ pub fn record_spans<F: PsszFormat>(
     dwnc: bool,
 ) -> PsszResult<Vec<Option<Range<usize>>>> {
     format::<F>()?;
+    record_spans_w(F::OFFSET_BYTES, layouts, bytes, dwnc)
+}
+
+/// Heap variant at the record's own width `w` (the schema-driven codec's
+/// automatic profile). Reports unknown fields to the active session.
+pub fn record_spans_w(
+    w: usize,
+    layouts: &[Layout],
+    bytes: &[u8],
+    dwnc: bool,
+) -> PsszResult<Vec<Option<Range<usize>>>> {
     let mut spans = Vec::new();
     spans
         .try_reserve(layouts.len())
         .map_err(|_| PsszError("pssz: record allocation overflow"))?;
     spans.resize(layouts.len(), None);
-    if record_spans_into(F::OFFSET_BYTES, layouts, bytes, dwnc, &mut spans)? {
+    if record_spans_into(w, layouts, bytes, dwnc, &mut spans)? {
         unknown_fields()?;
     }
     Ok(spans)

@@ -204,3 +204,150 @@ fn mutated_text_never_panics_and_accepted_text_round_trips() {
     run::<Json>();
     run::<IJson>();
 }
+
+// ── The syntax layer as a cursor ────────────────────────────────────────────
+
+mod cursor {
+    use psio::json::{JsonCursor, JsonKind, TextCursor, MAX_DEPTH};
+
+    #[test]
+    fn hands_out_the_events_of_a_document_in_order() {
+        let text = br#" { "a" : [ 1 , -2.5e3 , "x\ny" , true , null ] , "b" : { } , "c" : "plain" } "#;
+        let mut c = TextCursor::new(text, false).unwrap();
+        assert_eq!(c.kind().unwrap(), JsonKind::Object);
+        c.begin_object().unwrap();
+        assert_eq!(c.next_field().unwrap().as_deref(), Some("a"));
+        assert_eq!(c.kind().unwrap(), JsonKind::Array);
+        c.begin_array().unwrap();
+        assert!(c.next_element().unwrap());
+        assert_eq!(c.kind().unwrap(), JsonKind::Number);
+        assert_eq!(c.number().unwrap(), "1");
+        assert!(c.next_element().unwrap());
+        assert_eq!(c.number().unwrap(), "-2.5e3");
+        assert!(c.next_element().unwrap());
+        assert_eq!(c.kind().unwrap(), JsonKind::String);
+        let (text, escaped) = c.string().unwrap();
+        assert_eq!((&*text, escaped), ("x\ny", true));
+        assert!(c.next_element().unwrap());
+        assert_eq!(c.kind().unwrap(), JsonKind::Bool);
+        assert!(c.boolean().unwrap());
+        assert!(c.next_element().unwrap());
+        assert_eq!(c.kind().unwrap(), JsonKind::Null);
+        c.null().unwrap();
+        assert!(!c.next_element().unwrap());
+        assert_eq!(c.next_field().unwrap().as_deref(), Some("b"));
+        c.begin_object().unwrap();
+        assert_eq!(c.next_field().unwrap(), None);
+        assert_eq!(c.next_field().unwrap().as_deref(), Some("c"));
+        let (text, escaped) = c.string().unwrap();
+        assert_eq!((&*text, escaped), ("plain", false));
+        assert_eq!(c.next_field().unwrap(), None);
+        c.finish().unwrap();
+        // Closed: there is no container to advance in.
+        assert!(c.next_element().is_err());
+        assert!(c.next_field().is_err());
+    }
+
+    #[test]
+    fn skips_values_and_reports_syntax_errors() {
+        let mut c = TextCursor::new(br#"{"skip":{"x":[1,{"y":"z"}],"w":1e9},"keep":7}"#, true).unwrap();
+        c.begin_object().unwrap();
+        assert_eq!(c.next_field().unwrap().as_deref(), Some("skip"));
+        c.skip().unwrap();
+        assert_eq!(c.next_field().unwrap().as_deref(), Some("keep"));
+        assert_eq!(c.number().unwrap(), "7");
+        assert_eq!(c.next_field().unwrap(), None);
+        c.finish().unwrap();
+
+        assert_eq!(TextCursor::new(b"", false).err().unwrap().what, "json: empty input");
+        let rejects = |text: &[u8], run: &dyn Fn(&mut TextCursor<'_>) -> bool| {
+            let mut c = TextCursor::new(text, true).unwrap();
+            assert!(!run(&mut c), "{}", String::from_utf8_lossy(text));
+        };
+        // A missing comma, a trailing comma, a missing colon.
+        rejects(b"[1 2]", &|c| {
+            c.begin_array().is_ok()
+                && c.next_element().is_ok()
+                && c.number().is_ok()
+                && c.next_element().is_ok()
+        });
+        rejects(b"[1,]", &|c| {
+            c.begin_array().is_ok()
+                && c.next_element().is_ok()
+                && c.number().is_ok()
+                && c.next_element().is_ok()
+                && c.kind().is_ok()
+        });
+        rejects(br#"{"a" 1}"#, &|c| c.begin_object().is_ok() && c.next_field().is_ok());
+        rejects(br#"{"a":1,}"#, &|c| {
+            c.begin_object().is_ok()
+                && c.next_field().is_ok()
+                && c.number().is_ok()
+                && c.next_field().is_ok()
+        });
+        // Wrong event for the text, bad numbers, bad strings, trailing bytes.
+        rejects(b"[", &|c| c.begin_object().is_ok());
+        rejects(b"x", &|c| c.kind().is_ok());
+        rejects(b" ", &|c| c.kind().is_ok());
+        rejects(b"\"1\"", &|c| c.number().is_ok());
+        rejects(b"01", &|c| c.number().is_ok() && c.finish().is_ok());
+        rejects(b"1.", &|c| c.number().is_ok());
+        rejects(b"-", &|c| c.number().is_ok());
+        rejects(b"tru", &|c| c.boolean().is_ok());
+        rejects(b"nul", &|c| c.null().is_ok());
+        rejects(b"\"abc", &|c| c.string().is_ok());
+        rejects(b"\"\\ud800\"", &|c| c.string().is_ok());
+        rejects(b"\"\xff\"", &|c| c.string().is_ok());
+        rejects(b"1 1", &|c| c.number().is_ok() && c.finish().is_ok());
+        rejects(b"[1", &|c| {
+            c.begin_array().is_ok()
+                && c.next_element().is_ok()
+                && c.number().is_ok()
+                && c.next_element().is_ok()
+        });
+        rejects(b"{\"a\":[1,", &|c| {
+            c.begin_object().is_ok() && c.next_field().is_ok() && c.skip().is_ok()
+        });
+        // The I-JSON string rule: values, keys and skipped values.
+        let nonchar = "\"\u{fffe}\"".as_bytes().to_vec();
+        rejects(&nonchar, &|c| c.string().is_ok());
+        rejects(&nonchar, &|c| c.skip().is_ok());
+        let key = "{\"\u{fffe}\":1}".as_bytes().to_vec();
+        rejects(&key, &|c| c.begin_object().is_ok() && c.next_field().is_ok());
+        assert!(TextCursor::new(&nonchar, false).unwrap().string().is_ok());
+        // A type-layer error carries the position.
+        let mut c = TextCursor::new(b"[1]", false).unwrap();
+        c.begin_array().unwrap();
+        let error = c.error("walk: wrong shape");
+        assert_eq!((error.what, error.offset, error.format), ("walk: wrong shape", 1, "json"));
+    }
+
+    #[test]
+    fn nesting_is_limited_for_opened_and_skipped_containers() {
+        let open = |depth: usize| {
+            let text = "[".repeat(depth);
+            let mut c = TextCursor::new(text.as_bytes(), false).unwrap();
+            (0..depth).try_for_each(|_| {
+                c.begin_array()?;
+                c.next_element().map(|_| ())
+            })
+        };
+        assert!(open(MAX_DEPTH - 1).is_ok());
+        assert_eq!(open(MAX_DEPTH + 1).unwrap_err().what, "json: max depth exceeded");
+        assert!(open(100_000).is_err());
+
+        let nested = |depth: usize| format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let text = nested(MAX_DEPTH);
+        assert!(TextCursor::new(text.as_bytes(), false).unwrap().skip().is_ok());
+        let text = nested(MAX_DEPTH + 1);
+        assert!(TextCursor::new(text.as_bytes(), false).unwrap().skip().is_err());
+        // Skipping counts from the cursor's own depth.
+        let text = format!("[{}]", nested(MAX_DEPTH));
+        let mut c = TextCursor::new(text.as_bytes(), false).unwrap();
+        c.begin_array().unwrap();
+        assert!(c.next_element().unwrap());
+        assert!(c.skip().is_err());
+        let bomb = "{\"a\":".repeat(100_000);
+        assert!(TextCursor::new(bomb.as_bytes(), true).unwrap().skip().is_err());
+    }
+}

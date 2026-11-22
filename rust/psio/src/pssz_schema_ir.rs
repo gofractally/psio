@@ -294,9 +294,27 @@ impl<T: ToPsszSchema, const N: usize> ToPsszSchema for [T; N] {
 }
 impl<T: ToPsszSchema, const N: usize> ToPsszSchema for crate::pssz::BoundedList<T, N> {
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
-        Ok(AnyType::new(AnyValue::BoundedList(BoundedList {
+        let list = AnyType::new(AnyValue::BoundedList(BoundedList {
             r#type: Box::new(T::schema(builder)?),
             maxCount: N as u64,
+        }));
+        // Bytes, like Vec<u8>: one hex string in IJson.
+        Ok(if TypeId::of::<T>() == TypeId::of::<u8>() {
+            AnyType::new(AnyValue::Custom(Custom {
+                r#type: Box::new(list),
+                id: "hex".into(),
+            }))
+        } else {
+            list
+        })
+    }
+}
+// 32 little-endian bytes; C++ psio::uint256.
+impl ToPsszSchema for crate::pssz::Uint256 {
+    fn build_schema(_: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Ok(AnyType::new(AnyValue::Int(Int {
+            bits: 256,
+            isSigned: false,
         })))
     }
 }
