@@ -300,7 +300,7 @@ namespace
       "corpus", "evolution-forward", "evolution-backward", "pruning", "malformed",
       "optional-presence", "width", "tuple", "variant", "enum", "enum-unknown-value", "string",
       "string-raw-non-utf8", "length-bound-overflow", "cap-overflow-explicit-nested", "bytes",
-      "zero-fixed", "depth", "box"};
+      "zero-fixed", "depth", "box", "map-set", "map-set-order"};
 }  // namespace
 
 TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformance]")

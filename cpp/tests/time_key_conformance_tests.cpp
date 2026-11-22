@@ -266,6 +266,16 @@ TEST_CASE("time/key conformance: the Schema IR drives pssz and text", "[time][sc
       {
          const auto bytes = *from_hex(*row.pssz);
          CHECK(ir::validate_pssz(schema, root, std::span<const char>{bytes}).ok());
+         // The schema-driven key encoder writes the typed key.
+         {
+            ir::Value         dynamic;
+            bool              unknown = false;
+            std::vector<char> key;
+            CHECK(ir::decode_auto(schema, root, std::span<const char>{bytes}, dynamic, unknown)
+                     .ok());
+            CHECK(ir::to_key(schema, root, dynamic, key).ok());
+            CHECK(to_hex(key) == *row.key);
+         }
          std::string json, ijson;
          CHECK(to_text(psio::json{}, bytes, json) == row.json.has_value());
          CHECK(to_text(psio::ijson{}, bytes, ijson) == row.ijson.has_value());

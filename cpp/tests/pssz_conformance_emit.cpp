@@ -1974,6 +1974,260 @@ namespace
       });
    }
 
+   // ── std::pair, maps and sets ───────────────────────────────────────────
+   //
+   // A map / set is the list of its entries / elements in strictly
+   // ascending order of the key encoding of the key. `map-set`: values, read
+   // as the map / set and as the list they are. `map-set-order`: lists that
+   // are not strictly ascending (valid as lists) are rejected as maps / sets.
+   // `value` and the list `sorted` of its entries: the same bytes, read as
+   // the map / set and as the list.
+   template <typename M, typename L>
+   void same(const std::string& vname, const M& value, const L& sorted)
+   {
+      const char* c = "map-set";
+      formats([&]<typename F>() {
+         Bytes bytes;
+         if (!try_encode<F>(value, bytes))
+         {
+            if (std::is_same_v<F, psio::pssz>)
+               die(std::string(c) + "/" + vname + ": the automatic profile cannot encode it");
+            return;
+         }
+         if (bytes != must_encode<F>(sorted, vname))
+            die(std::string(c) + "/" + vname + " as " + type_id<M>() +
+                ": not the bytes of the sorted list");
+         add<F, M>(c, vname, bytes, canonical(), vname, type_id<M>());
+         add<F, L>(c, vname, bytes, canonical(), vname, type_id<M>());
+      });
+   }
+   // `list` is a valid list and not a valid M.
+   template <typename M, typename L>
+   void unordered(const std::string& vname, const L& list, const std::string& reason)
+   {
+      const char* o = "map-set-order";
+      formats([&]<typename F>() {
+         Bytes bytes;
+         if (!try_encode<F>(list, bytes))
+            return;
+         add<F, M>(o, vname, bytes, reject(reason), vname, type_id<L>());
+         add<F, L>(o, vname, bytes, canonical(), vname, type_id<L>());
+      });
+   }
+
+   void emit_assoc()
+   {
+      const char*       c          = "map-set";
+      const char*       o          = "map-set-order";
+      const std::string map_reason = "pssz: map entries are not in strictly ascending key order";
+      const std::string set_reason = "pssz: set elements are not in strictly ascending order";
+
+      const Raw nul("\0", 1);
+
+      // A pair is the tuple.
+      for (const PairT& p : {PairT{0, ""}, PairT{513, "pair"}})
+         formats([&]<typename F>() {
+            if (must_encode<F>(p, "pair") != must_encode<F>(std::tuple<u16, Raw>{p.first, p.second},
+                                                            "pair"))
+               die("a pair is not the 2-tuple");
+         });
+      corpus(c, "pair_zero", PairT{0, ""});
+      corpus(c, "pair_some", PairT{513, "pair"});
+      literal<psio::pssz, PairT>(c, "pair_literal", PairT{7, "ab"},
+                                 hx("06000000" "0700" "06000000" "6162"));
+
+      // map<raw_string, u32>
+      {
+         using M = MapRawU32;
+         using L = Vec<std::tuple<Raw, u32>>;
+         same<M, L>("map_str_empty", {}, {});
+         same<M, L>("map_str_one", {{"a", 1}}, {{"a", 1}});
+         same<M, L>("map_str_many", {{"pear", 3}, {"apple", 1}, {"", 9}, {"apple pie", 2}},
+                    {{"", 9}, {"apple", 1}, {"apple pie", 2}, {"pear", 3}});
+         same<M, L>("map_str_nul_keys", {{"a", 2}, {"a" + nul, 1}, {nul, 0}, {"\x01", 4}},
+                    {{nul, 0}, {"\x01", 4}, {"a", 2}, {"a" + nul, 1}});
+         literal<psio::pssz, M>(c, "map_str_literal", {{"b", 2}, {"a", 1}},
+                                hx("08000000" "15000000"
+                                   "08000000" "08000000" "01000000" "61"
+                                   "08000000" "08000000" "02000000" "62"));
+         unordered<M, L>("map_str_swapped", {{"b", 2}, {"a", 1}}, map_reason);
+         unordered<M, L>("map_str_duplicate", {{"a", 1}, {"a", 1}}, map_reason);
+         unordered<M, L>("map_str_duplicate_key_other_value", {{"a", 1}, {"a", 2}}, map_reason);
+         unordered<M, L>("map_str_last_out_of_place", {{"a", 1}, {"c", 3}, {"b", 2}}, map_reason);
+         unordered<M, L>("map_str_prefix_after", {{"ab", 1}, {"a", 2}}, map_reason);
+      }
+      // map<u32, raw_string>: numeric order, not the order of the wire bytes.
+      {
+         using M = MapU32Raw;
+         using L = Vec<std::tuple<u32, Raw>>;
+         same<M, L>("map_u32_empty", {}, {});
+         same<M, L>("map_u32_many", {{70000, "big"}, {1, "one"}, {256, "x"}, {255, "ff"}},
+                    {{1, "one"}, {255, "ff"}, {256, "x"}, {70000, "big"}});
+         same<M, L>("map_u32_extremes", {{0xffffffffu, ""}, {0, "zero"}},
+                    {{0, "zero"}, {0xffffffffu, ""}});
+         unordered<M, L>("map_u32_little_endian_order", {{256, "x"}, {255, "ff"}}, map_reason);
+         unordered<M, L>("map_u32_duplicate", {{7, "a"}, {7, "b"}}, map_reason);
+      }
+      // A tuple key; a list value.
+      {
+         using M = MapTup;
+         using L = Vec<std::tuple<TupBS, Vec<u16>>>;
+         same<M, L>("map_tuple_many", {{{2, "b"}, {1}}, {{1, "z"}, {}}, {{1, "a"}, {513, 2}}},
+                    {{{1, "a"}, {513, 2}}, {{1, "z"}, {}}, {{2, "b"}, {1}}});
+         unordered<M, L>("map_tuple_second_element", {{{1, "z"}, {}}, {{1, "a"}, {}}}, map_reason);
+         unordered<M, L>("map_tuple_first_element", {{{2, "a"}, {}}, {{1, "a"}, {}}}, map_reason);
+      }
+      // Record values.
+      {
+         using M = MapInner;
+         using L = Vec<std::tuple<u16, Inner>>;
+         same<M, L>("map_record_values", {{513, Inner{2, "two"}}, {2, Inner{1, ""}}},
+                    {{2, Inner{1, ""}}, {513, Inner{2, "two"}}});
+         unordered<M, L>("map_record_values_unsorted", {{513, Inner{2, "two"}}, {2, Inner{1, ""}}},
+                         map_reason);
+      }
+      // Nested maps and sets: each level is checked.
+      {
+         using M = MapNest;
+         using L = ListNest;
+         same<M, L>("map_nested_empty", {}, {});
+         same<M, L>("map_nested", {{"k", {{7, {"z", "y"}}, {1, {}}}}, {"", {{255, {""}}}}, {"e", {}}},
+                    {{"", {{255, {""}}}}, {"e", {}}, {"k", {{1, {}}, {7, {"y", "z"}}}}});
+         unordered<M, L>("map_nested_outer", {{"k", {}}, {"e", {}}}, map_reason);
+         unordered<M, L>("map_nested_inner_map", {{"k", {{7, {}}, {1, {}}}}}, map_reason);
+         unordered<M, L>("map_nested_inner_set", {{"k", {{1, {"z", "y"}}}}}, set_reason);
+         unordered<M, L>("map_nested_inner_set_duplicate", {{"k", {{1, {"y", "y"}}}}}, set_reason);
+      }
+      // Sets of fixed-size elements (no offset table) and of variable ones.
+      {
+         using L = Vec<u16>;
+         same<SetU16, L>("set_u16_empty", {}, {});
+         same<SetU16, L>("set_u16_one", {7}, {7});
+         same<SetU16, L>("set_u16_many", {513, 2, 65535, 0, 256}, {0, 2, 256, 513, 65535});
+         literal_all<SetU16>(c, "set_u16_literal", {513, 2}, hx("0200" "0102"));
+         unordered<SetU16, L>("set_u16_swapped", {513, 2}, set_reason);
+         unordered<SetU16, L>("set_u16_duplicate", {2, 2}, set_reason);
+         unordered<SetU16, L>("set_u16_duplicate_at_end", {1, 2, 3, 3}, set_reason);
+      }
+      {
+         using L = Vec<Raw>;
+         same<SetRaw, L>("set_str_empty", {}, {});
+         same<SetRaw, L>("set_str_many", {"b", "", "a", "ab", "a" + nul}, {"", "a", "a" + nul, "ab", "b"});
+         unordered<SetRaw, L>("set_str_swapped", {"b", "a"}, set_reason);
+         unordered<SetRaw, L>("set_str_duplicate", {"a", "a"}, set_reason);
+         unordered<SetRaw, L>("set_str_duplicate_empty", {"", ""}, set_reason);
+      }
+      {
+         using L = Vec<std::int32_t>;
+         const auto lo = std::numeric_limits<std::int32_t>::min();
+         const auto hi = std::numeric_limits<std::int32_t>::max();
+         same<SetI32, L>("set_i32_signed", {1, -1, 0, lo, hi}, {lo, -1, 0, 1, hi});
+         unordered<SetI32, L>("set_i32_negative_after_positive", {1, -1}, set_reason);
+         unordered<SetI32, L>("set_i32_duplicate", {-5, -5}, set_reason);
+      }
+      {
+         using L = Vec<TupBS>;
+         same<SetTup, L>("set_tuple_many", {{2, "a"}, {1, "b"}, {1, "a"}, {1, ""}},
+                         {{1, ""}, {1, "a"}, {1, "b"}, {2, "a"}});
+         unordered<SetTup, L>("set_tuple_swapped", {{1, "b"}, {1, "a"}}, set_reason);
+         unordered<SetTup, L>("set_tuple_duplicate", {{1, "a"}, {1, "a"}}, set_reason);
+      }
+      // Floats: key-spec order. Negative NaN first, -0 and +0 one key,
+      // positive NaN last.
+      {
+         using L          = Vec<double>;
+         const double inf = std::numeric_limits<double>::infinity();
+         const auto   f64 = [](std::uint64_t bits) { return std::bit_cast<double>(bits); };
+         const double nan = f64(0x7ff8000000000000ull), neg_nan = f64(0xfff8000000000000ull);
+         same<SetF64, L>("set_f64_finite", {1.5, -2.0, 0.0}, {-2.0, 0.0, 1.5});
+         same<SetF64, L>("set_f64_negative_zero", {-0.0}, {-0.0});
+         same<SetF64, L>("set_f64_nan_order", {nan, 1.0, -inf, neg_nan, inf, 0.0},
+                         {neg_nan, -inf, 0.0, 1.0, inf, nan});
+         same<SetF64, L>("set_f64_nan_payloads", {f64(0x7ff8000000000001ull), nan,
+                                                  f64(0x7ff0000000000001ull)},
+                         {f64(0x7ff0000000000001ull), nan, f64(0x7ff8000000000001ull)});
+         unordered<SetF64, L>("set_f64_swapped", {1.0, 0.0}, set_reason);
+         unordered<SetF64, L>("set_f64_both_zeros", {0.0, -0.0}, set_reason);
+         unordered<SetF64, L>("set_f64_both_zeros_reversed", {-0.0, 0.0}, set_reason);
+         unordered<SetF64, L>("set_f64_nan_before_number", {nan, 1.0}, set_reason);
+         unordered<SetF64, L>("set_f64_number_before_negative_nan", {1.0, neg_nan}, set_reason);
+         unordered<SetF64, L>("set_f64_same_nan_twice", {nan, nan}, set_reason);
+      }
+      // A fixed-size record as the element: ordered by its key (x, then y).
+      {
+         using L = Vec<Pair>;
+         same<SetPair, L>("set_record_many", {Pair{2, 0}, Pair{1, 5}, Pair{1, 4}},
+                          L{Pair{1, 4}, Pair{1, 5}, Pair{2, 0}});
+         unordered<SetPair, L>("set_record_swapped", L{Pair{1, 5}, Pair{1, 4}}, set_reason);
+         unordered<SetPair, L>("set_record_duplicate", L{Pair{1, 4}, Pair{1, 4}}, set_reason);
+      }
+      // An optional set carries a selector, as an optional list does.
+      corpus(c, "optional_set_none", Opt<SetU16>{});
+      corpus(c, "optional_set_empty", Opt<SetU16>{SetU16{}});
+      corpus(c, "optional_set_some", Opt<SetU16>{SetU16{513, 2}});
+      formats([&]<typename F>() {
+         add<F, Opt<SetU16>>(o, "optional_set_swapped", join({hx("01"), hx("0102" "0200")}),
+                             reject(set_reason));
+      });
+      // A map as a variant alternative.
+      corpus(c, "variant_map", VarMap{MapRawU32{{"b", 2}, {"a", 1}}});
+      corpus(c, "variant_other", VarMap{u32{7}});
+      formats([&]<typename F>() {
+         Bytes list;
+         if (!try_encode<F>(Vec<std::tuple<Raw, u32>>{{"b", 2}, {"a", 1}}, list))
+            return;
+         add<F, VarMap>(o, "variant_map_swapped", join({hx("00"), list}), reject(map_reason));
+      });
+
+      // As record members: every member is checked where it occurs.
+      {
+         const AssocLists full{{{"a", 1}, {"b", 2}},
+                               {2, 513},
+                               {7, "head"},
+                               Vec<std::tuple<u32, Raw>>{{1, "one"}, {256, "x"}},
+                               {{2, 2}, {9, 1}},
+                               {{-1, 1}, {}, {5}}};
+         same<AssocRec, AssocLists>("record_empty", AssocRec{}, AssocLists{});
+         same<AssocRec, AssocLists>(
+            "record_full",
+            AssocRec{{{"b", 2}, {"a", 1}},
+                     {513, 2},
+                     {7, "head"},
+                     MapU32Raw{{256, "x"}, {1, "one"}},
+                     {{9, 1}, {2, 2}},
+                     {{1, -1}, {}, {5}}},
+            full);
+         auto broken = [&](const std::string& vname, const std::string& reason, auto&& change) {
+            AssocLists bad = full;
+            change(bad);
+            unordered<AssocRec, AssocLists>(vname, bad, reason);
+         };
+         broken("record_map_member", map_reason, [](AssocLists& b) { std::swap(b.counts[0], b.counts[1]); });
+         broken("record_set_member", set_reason, [](AssocLists& b) { std::swap(b.ids[0], b.ids[1]); });
+         broken("record_optional_map_member", map_reason,
+                [](AssocLists& b) { std::swap((*b.names)[0], (*b.names)[1]); });
+         broken("record_bounded_map_member", map_reason,
+                [](AssocLists& b) { std::swap(b.limited[0], b.limited[1]); });
+         broken("record_set_in_list_member", set_reason,
+                [](AssocLists& b) { std::swap(b.groups[0][0], b.groups[0][1]); });
+         broken("record_duplicate_in_set_member", set_reason, [](AssocLists& b) { b.ids = {2, 2}; });
+
+         // A member length_bound counts entries, as for a list.
+         AssocRec over;
+         over.limited = {{1, 1}, {2, 2}, {3, 3}};
+         formats([&]<typename F>() {
+            Bytes bytes, refused;
+            bytes = psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, over);
+            if (try_encode<F>(over, refused) ||
+                psio::encode_pssz_checked(F{}, over, refused).ok() || !refused.empty())
+               die("the encoder accepted a map outside its member length_bound");
+            add<F, AssocRec>("length-bound-overflow", "map_three_entries", bytes,
+                             reject("pssz: member length_bound violated"), "map_three_entries",
+                             type_id<AssocRec>());
+         });
+      }
+   }
+
    // ── Depth ─────────────────────────────────────────────────────────────
    DepthNode chain(std::size_t links)
    {
@@ -2126,6 +2380,7 @@ int main(int argc, char** argv)
    emit_bytes_and_scalars();
    emit_zero_fixed();
    emit_depth();
+   emit_assoc();
 
    if (!unregistered.empty())
    {
