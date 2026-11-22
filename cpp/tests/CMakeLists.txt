@@ -269,6 +269,9 @@ psio_add_test(psio_pssz_enum_tests pssz_enum_tests.cpp)
 psio_add_test(psio_pssz_string_tests pssz_string_tests.cpp)
 # A member length_bound is enforced by validate and the checked readers.
 psio_add_test(psio_pssz_length_bound_tests pssz_length_bound_tests.cpp)
+# The inferred size bound of variants, tuples and pairs, and the widths
+# that follow from it (typed and schema-driven).
+psio_add_test(psio_pssz_inferred_bound_tests pssz_inferred_bound_tests.cpp)
 
 # Shared cross-language conformance fixture (conformance/pssz-vectors.json).
 # The emitter generates it from the implementation; the regen test fails when

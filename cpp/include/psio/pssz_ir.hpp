@@ -648,7 +648,44 @@ template <std::size_t W> class Codec
                     *annotation->count() <= std::numeric_limits<std::size_t>::max())
                    out = static_cast<std::size_t>(*annotation->count());
              }
-             // Tuple, Variant: no inferred bound.
+             else if constexpr (std::is_same_v<T, schema_types::Tuple>)
+             {
+                // The extensible positional record of its members: the
+                // header, then per member its reserved payload and, when
+                // it is not an inline fixed payload, an offset slot.
+                Bound total = 4;
+                for (const auto &member : t.members)
+                {
+                   const schema_types::AnyType *child;
+                   PSIO_PSSZ_IR_TRY(inner(member, child));
+                   Bound payload;
+                   PSIO_PSSZ_IR_TRY(bound_of(*member.get(), nullptr, true, payload, active));
+                   bool fixed;
+                   std::vector<const schema_types::AnyType *> fresh;
+                   PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, fresh));
+                   if (!fixed)
+                      payload = bound_add(payload, 4);
+                   total = bound_add(total, payload);
+                }
+                out = total;
+             }
+             else if constexpr (std::is_same_v<T, schema_types::Variant>)
+             {
+                // One selector byte, then the widest alternative's payload.
+                Bound widest = 0;
+                for (const auto &member : t.members)
+                {
+                   const schema_types::AnyType *alternative;
+                   PSIO_PSSZ_IR_TRY(inner(member.type, alternative));
+                   Bound payload;
+                   PSIO_PSSZ_IR_TRY(bound_of(*member.type.get(), nullptr, true, payload, active));
+                   if (!payload || !widest)
+                      widest.reset();
+                   else if (*payload > *widest)
+                      widest = payload;
+                }
+                out = bound_add(widest, 1);
+             }
              return codec_ok();
           },
           type->value);
@@ -693,7 +730,6 @@ template <std::size_t W> class Codec
                out = width_class(bound);
             }
          }
-         // Tuples and variants have no inferred bound: 4.
          widths.emplace_back(&type, out);
          return codec_ok();
       }

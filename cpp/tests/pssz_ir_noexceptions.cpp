@@ -108,8 +108,8 @@ static int schema_driven()
                             {}});
    auto span = [](std::string_view text) { return std::span<const char>{text}; };
    std::size_t width = 0;
-   if (!runtime::auto_width(schema, "Action", width).ok() || width != 4)
-      return 20;  // the variant member has no bound
+   if (!runtime::auto_width(schema, "Action", width).ok() || width != 1)
+      return 20;  // the variant member is bounded by its widest alternative: 1 + 4
    std::vector<char> bytes;
    const std::string_view text =
        R"({"id":"18446744073709551615","name":"abc","tags":[1,2],"kind":{"string":"hi"},"extra":null})";

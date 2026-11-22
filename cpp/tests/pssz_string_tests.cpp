@@ -55,6 +55,34 @@ namespace string_fixture
    PSIO_REFLECT(Text4Rec, k, s, v, alt, t, o)
    PSIO_REFLECT(RawHolder, k, s, v, alt, t, o)
 
+   // The raw-string twin of Holder<Text4>. std::tuple<Text4> is bounded (12
+   // bytes: header + slot + 4), so in the automatic profile it has one-byte
+   // offsets, where std::tuple<std::string> has four. A tuple is the
+   // extensible positional record: a one-member record with the same cap
+   // has the same bytes, and holds any string.
+   struct RawTuple4
+   {
+      std::string s;
+      friend bool operator==(const RawTuple4&, const RawTuple4&) = default;
+   };
+   PSIO_REFLECT(RawTuple4, s, maxDynamicData(12))
+   static_assert(psio::max_encoded_size<std::tuple<Text4>>() == 12 &&
+                 psio::auto_pssz_width_v<std::tuple<Text4>> == 1 &&
+                 psio::auto_pssz_width_v<RawTuple4> == 1 &&
+                 psio::auto_pssz_width_v<std::tuple<std::string>> == 4 &&
+                 psio::auto_pssz_width_v<std::tuple<Text>> == 4);
+   struct RawHolder4
+   {
+      std::uint8_t                            k;
+      std::string                             s;
+      std::vector<std::string>                v;
+      std::variant<std::uint8_t, std::string> alt;
+      RawTuple4                               t;
+      std::optional<std::string>              o;
+   };
+   PSIO_REFLECT(RawHolder4, k, s, v, alt, t, o)
+   static_assert(psio::auto_pssz_width_v<RawHolder4> == psio::auto_pssz_width_v<Text4Rec>);
+
    // Only bounded members: the automatic width is inferred, not defaulted.
    struct OnlyText4
    {
@@ -164,18 +192,23 @@ namespace
 
    // The same logical value with every string replaced by `text`, as a raw
    // record frame: built by the raw-string codec, which never checks UTF-8.
+   // The raw-string record with the layout of Holder<S>.
+   template <typename S>
+   using raw_holder_of = std::conditional_t<S::is_bounded, RawHolder4, RawHolder>;
+   inline std::string& tuple_text(RawHolder& value) { return std::get<0>(value.t); }
+   inline std::string& tuple_text(RawHolder4& value) { return value.t.s; }
+
    template <typename F, typename S>
    std::vector<char> holder_frame(std::size_t slot, const std::string& text)
    {
       // Mirror Holder<S> with std::string members: identical layout.
-      Holder<std::string> value{1, "ok", {"ok"}, std::string("ok"),
-                                std::tuple<std::string>{"ok"}, std::string("ok")};
+      raw_holder_of<S> value{1, "ok", {"ok"}, std::string("ok"), {"ok"}, std::string("ok")};
       switch (slot)
       {
          case 0: value.s = text; break;
          case 1: value.v[0] = text; break;
          case 2: value.alt = text; break;
-         case 3: std::get<0>(value.t) = text; break;
+         case 3: tuple_text(value) = text; break;
          case 4: value.o = text; break;
       }
       return psio::encode(F{}, value);
@@ -291,7 +324,7 @@ namespace
             const auto frame = holder_frame<F, S>(slot, text);
             rejected<F, Holder<S>>(frame);
             // The same bytes are a valid record of raw strings.
-            REQUIRE(psio::validate<RawHolder>(F{}, frame).ok());
+            REQUIRE(psio::validate<raw_holder_of<S>>(F{}, frame).ok());
          }
       }
       const auto wire = psio::encode(F{}, good_holder<S>());

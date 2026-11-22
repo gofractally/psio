@@ -918,9 +918,11 @@ namespace
          add<F, T>("pruning", "tuple/stored_none_selector",
                    Fr{W}.o(1 + 2 * W).byte(1).o(1 + 2 * W).o(1 + 2 * W + 4).u32(9).byte(0),
                    reject(unpruned));
+         // (std::tuple<u32> is bounded, so its automatic width is its own.)
+         const std::size_t W1 = wof<F, std::tuple<u32>>();
          add<F, std::tuple<u32>>("pruning", "tuple/unknown_slot",
-                                 Fr{W}.o(4 + W).u32(9).o(4 + W).raw("x"),
-                                 unknown(Fr{wof<F, std::tuple<u32>>()}.o(4).u32(9)));
+                                 Fr{W1}.o(4 + W1).u32(9).o(4 + W1).raw("x"),
+                                 unknown(Fr{W1}.o(4).u32(9)));
       });
    }
 

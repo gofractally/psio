@@ -42,6 +42,8 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace psio {
@@ -71,6 +73,19 @@ namespace psio {
       {
          using inner_type = U;
       };
+
+      template <typename T>
+      struct is_std_variant : std::false_type {};
+      template <typename... Ts>
+      struct is_std_variant<std::variant<Ts...>> : std::true_type {};
+
+      // std::tuple and std::pair: the positional record.
+      template <typename T>
+      struct is_tuple_like : std::false_type {};
+      template <typename... Ts>
+      struct is_tuple_like<std::tuple<Ts...>> : std::true_type {};
+      template <typename A, typename B>
+      struct is_tuple_like<std::pair<A, B>> : std::true_type {};
 
       // utf8_string<N> carries its byte bound in the type; utf8_string<> is
       // unbounded, exactly like std::string.
@@ -148,6 +163,42 @@ namespace psio {
             }
          }
          else return false;
+      }
+
+      template <typename T>
+      consteval bound child_payload() noexcept;
+
+      template <typename... Ts>
+      consteval bound variant_bound(std::type_identity<std::variant<Ts...>>) noexcept
+      {
+         bound widest = 0;
+         auto  alternative = [&](bound payload) {
+            if (!payload || !widest)
+               widest = std::nullopt;
+            else if (*payload > *widest)
+               widest = payload;
+         };
+         (alternative(child_payload<Ts>()), ...);
+         return add(widest, 1);
+      }
+      template <typename T, std::size_t... Is>
+      consteval bound tuple_bound_impl(std::index_sequence<Is...>) noexcept
+      {
+         bound total   = 4;
+         auto  element = [&](bound payload, bool fixed) {
+            if (!fixed)
+               payload = add(payload, 4);
+            total = add(total, payload);
+         };
+         (element(child_payload<std::remove_const_t<std::tuple_element_t<Is, T>>>(),
+                  fixed_payload<std::remove_const_t<std::tuple_element_t<Is, T>>>()),
+          ...);
+         return total;
+      }
+      template <typename T>
+      consteval bound tuple_bound(std::type_identity<T>) noexcept
+      {
+         return tuple_bound_impl<T>(std::make_index_sequence<std::tuple_size_v<T>>{});
       }
 
       template <typename T>
@@ -259,6 +310,17 @@ namespace psio {
          else if constexpr (std::is_same_v<U, std::string> || ::psio::detail::is_assoc_v<U> ||
                             is_std_vector<U>::value || is_std_optional<U>::value)
             return max_field_with_annots<U>(::psio::effective_annotations<U, ::psio::type<U>{}>::value);
+         else if constexpr (is_std_variant<U>::value)
+            // One selector byte, then the widest alternative's payload
+            // (docs/pssz-spec.md 3.2). Unbounded if any alternative is.
+            return variant_bound(std::type_identity<U>{});
+         else if constexpr (is_tuple_like<U>::value)
+            // A tuple (a pair is the 2-tuple) is the extensible positional
+            // record of its elements: the header, then per element its
+            // payload and, when it is not an inline fixed payload, an
+            // offset slot. An element has no member annotation, so a
+            // string or list element is unbounded and so is the tuple.
+            return tuple_bound(std::type_identity<U>{});
          else return std::nullopt;
       }
 

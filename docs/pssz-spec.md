@@ -379,13 +379,18 @@ cap large enough to cover them from the start.
 | `Nested(T)` (§5.8)          | None (a member `length_bound` max N: N)       |
 | `Optional(T)` where min(T)=0 | 1 + max(T)                                   |
 | `Optional(T)` where min(T)>0 | max(T)                                       |
-| `Variant(Ts...)`            | 1 + max(max_encoded_size(T_i))                |
+| `Variant(Ts...)`            | 1 + max(max_encoded_size(T_i)) [None if any T_i is None] |
+| `Tuple(Ts...)`              | W + sum(per-element max contribution): that of the extensible record with those members (§5.1.1) [None if any element is None] |
 | `Pair(A, B)`                | that of `Tuple(A, B)`                         |
 | `Map(K, V)`, `Set(K)`       | that of `Vector(Tuple(K, V))`, `Vector(K)` (§5.9) |
 | reflected record (DWNC)          | sum(fixed_size_of(field_i))                   |
 | reflected record (extensible)    | W + sum(per-field max contribution)           |
 
-Per-field max contribution for an extensible record:
+Per-field max contribution for an extensible record, and per-element
+contribution for a tuple (a tuple element carries no member annotation,
+so a `String` / `Vector` / `Nested` element is None and so is the tuple;
+a bounded element type — `BoundedString(N)`, a record with a cap or with
+bounded members — contributes its bound):
 
 - Fixed field: `fixed_size_of(field)`
 - Variable field: `W + max_encoded_size(field)` (the W is the offset
@@ -394,6 +399,14 @@ Per-field max contribution for an extensible record:
 
 If any field's contribution is None, the record's
 `max_encoded_size` is None.
+
+In these formulas every header and offset slot is counted as **4
+bytes**, whatever width the type ends up with: the bound selects W, so
+it cannot depend on W. A child type that carries an explicit cap
+contributes that cap in full (§3.1), not its own inferred bound; an
+`Optional` reserves one selector byte whether or not its payload needs
+one. The result is an upper bound, never the exact maximum, and every
+implementation must compute the same number: a type's W follows from it.
 
 ### 3.3 fixed_size_of(T)
 
