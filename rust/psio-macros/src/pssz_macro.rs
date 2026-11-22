@@ -17,6 +17,10 @@ struct Options {
     /// `#[pssz(variant)]`: encode a field-less enum as a variant of unit
     /// alternatives instead of as its underlying integer.
     variant: bool,
+    /// `#[pssz(custom)]` / `#[pssz(custom = "Id")]`: the type has a custom
+    /// text form (`TextForm`). Its schema is `Custom { wire type, id }`; the
+    /// id defaults to the schema name. The bytes are unaffected.
+    custom: Option<Option<String>>,
 }
 use crate::c_enum::{self, CEnum};
 /// A field-less enum encoded as its underlying integer (C++ plain `enum`).
@@ -50,6 +54,7 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
         name: None,
         cap: None,
         variant: false,
+        custom: None,
     };
     for attr in &input.attrs {
         if !attr.path.is_ident("pssz") {
@@ -71,6 +76,16 @@ fn options(input: &DeriveInput) -> syn::Result<Options> {
                 }
                 NestedMeta::Meta(Meta::Path(path)) if path.is_ident("variant") => {
                     out.variant = true
+                }
+                NestedMeta::Meta(Meta::Path(path)) if path.is_ident("custom") => {
+                    out.custom = Some(None)
+                }
+                NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("custom") => {
+                    if let Lit::Str(value) = &nv.lit {
+                        out.custom = Some(Some(value.value()));
+                    } else {
+                        return Err(syn::Error::new_spanned(nv, "custom must be a string"));
+                    }
                 }
                 NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("max_dynamic_data") => {
                     if let Lit::Int(value) = &nv.lit {
@@ -750,7 +765,13 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                 ));
             }
             let ty = &data.fields.iter().next().unwrap().ty;
-            quote! { <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)? }
+            if opts.custom.is_some() {
+                // The wire type inline under the Custom node, as the C++
+                // builder writes a strong typedef.
+                quote! { <#ty as #k::pssz::schema_ir::ToPsszSchema>::build_schema(builder)? }
+            } else {
+                quote! { <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)? }
+            }
         }
         Data::Struct(data) => {
             schema_record(k, &data.fields, opts.dwnc, opts.cap, parse_attrs(&input.attrs)?.forms)?
@@ -820,9 +841,34 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             ::std::any::type_name::<Self>().into()
         ))
     };
+    // A custom text form: Custom { the wire type, id }.
+    let (body, custom_id) = match &opts.custom {
+        None => (body, quote!()),
+        Some(id) => {
+            let id = match id {
+                Some(id) => quote!(::std::string::String::from(#id)),
+                None => quote!(<Self as #k::pssz::schema_ir::ToPsszSchema>::schema_name()
+                    .expect("a derived type has a schema name")),
+            };
+            (
+                quote! {
+                    #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Custom(#k::pssz::schema_ir::Custom {
+                        r#type: ::std::boxed::Box::new(#body),
+                        id: #id,
+                    }))
+                },
+                quote! {
+                    fn custom_id() -> ::core::option::Option<::std::string::String> {
+                        ::core::option::Option::Some(#id)
+                    }
+                },
+            )
+        }
+    };
     Ok(quote! {
         impl #impl_g #k::pssz::schema_ir::ToPsszSchema for #name #type_g #where_c {
             fn schema_name() -> ::core::option::Option<::std::string::String> { #schema_name }
+            #custom_id
             fn build_schema(builder: &mut #k::pssz::schema_ir::SchemaBuilder) -> #k::pssz::PsszResult<#k::pssz::schema_ir::AnyType> { ::core::result::Result::Ok(#body) }
         }
     })

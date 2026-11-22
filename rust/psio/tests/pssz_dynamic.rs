@@ -333,7 +333,27 @@ fn cpp_char_adapter_and_hex_byte_containers_preserve_all_byte_values() {
 #[test]
 fn runtime_schema_constraints_are_enforced_or_explicitly_rejected() {
     let schema = Schema::default();
-    for name in ["maxFields", "maxDynamicData", "unknownConstraint"] {
+    // An explicit width takes maxDynamicData as the typed Pssz8/16/32 do:
+    // the type is accepted and the cap of the top-level type is enforced.
+    let capped = |cap: &str| {
+        AnyType::new(AnyValue::Object(Object {
+            members: vec![],
+            attributes: vec![Attribute { name: "maxDynamicData".into(), value: Some(cap.into()) }],
+        }))
+    };
+    let (zero, four) = (capped("0"), capped("4"));
+    assert!(codec::encode::<Pssz32>(&schema, &zero, &Value::Record(vec![])).is_err());
+    assert!(codec::decode_exact::<Pssz32>(&schema, &zero, &[0; 4]).is_err());
+    assert!(codec::decode_compatible::<Pssz32>(&schema, &zero, &[0; 4]).is_err());
+    assert_eq!(codec::encode::<Pssz32>(&schema, &four, &Value::Record(vec![])).unwrap(), [0; 4]);
+    assert!(codec::decode_exact::<Pssz32>(&schema, &four, &[0; 4]).is_ok());
+    // A nested cap is not looked up; a malformed one is still an error.
+    let nested = AnyType::new(AnyValue::Option(Optional { r#type: Box::new(zero) }));
+    let some = Value::Optional(Some(Box::new(Value::Record(vec![]))));
+    assert_eq!(codec::encode::<Pssz32>(&schema, &nested, &some).unwrap(), [0; 4]);
+    assert!(codec::encode::<Pssz>(&schema, &nested, &some).is_err());
+    assert!(codec::encode::<Pssz32>(&schema, &capped("x"), &Value::Record(vec![])).is_err());
+    for name in ["maxFields", "unknownConstraint"] {
         let root = AnyType::new(AnyValue::Object(Object {
             members: vec![],
             attributes: vec![Attribute {

@@ -49,7 +49,8 @@ fn derives_populate_actual_cpp_ir_with_references_bounds_and_layout_attributes()
     let AnyValue::Custom(text) = &schema.resolve(&object.members[1].r#type).unwrap().value else {
         panic!("expected string adapter")
     };
-    assert_eq!(text.id, "string");
+    // A bounded UTF-8 string: the "utf8" adapter over bounded bytes.
+    assert_eq!(text.id, "utf8");
     let AnyValue::BoundedList(bound) = &text.r#type.value else {
         panic!("expected bounded bytes")
     };
@@ -359,11 +360,11 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
         };
         (custom.id.clone(), bound)
     };
-    // UTF-8 strings and raw strings both use the "string" adapter, exactly
-    // as C++ utf8_string and std::string do: the schema carries no marker
-    // that tells them apart. Byte lists stay "hex".
-    assert_eq!(adapter(0), ("string".to_string(), None));
-    assert_eq!(adapter(1), ("string".to_string(), Some(8)));
+    // The schema tells them apart, as C++ utf8_string and std::string do:
+    // a UTF-8 string is the "utf8" adapter, a raw string is "string". Byte
+    // lists stay "hex".
+    assert_eq!(adapter(0), ("utf8".to_string(), None));
+    assert_eq!(adapter(1), ("utf8".to_string(), Some(8)));
     assert_eq!(adapter(2), ("string".to_string(), None));
     assert_eq!(adapter(3), ("string".to_string(), Some(8)));
     // A field-less enum is an Enum (its names and values) over its
@@ -397,9 +398,9 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
     bad[at] = 0xff;
     assert!(from_pssz::<Pssz32, StringKinds>(&bad).is_err());
     assert!(codec::decode_exact::<Pssz32>(&schema, &root, &bad).is_err());
-    // A raw string holding non-UTF-8 bytes is a valid typed value, but the
-    // schema describes it as "string" and the schema-driven codec, like the
-    // C++ one, UTF-8-checks every "string": it rejects these bytes.
+    // A raw string holding non-UTF-8 bytes is a valid typed value and, the
+    // schema describing it as a raw "string", a valid one through the
+    // schema too: it decodes and re-encodes unchanged. It has no JSON text.
     let non_utf8 = StringKinds {
         text: "t".into(),
         bounded_text: BoundedString("ab".into()),
@@ -409,7 +410,8 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
     };
     let raw_bytes = try_to_pssz::<Pssz32, _>(&non_utf8).unwrap();
     assert_eq!(from_pssz::<Pssz32, StringKinds>(&raw_bytes).unwrap(), non_utf8);
-    assert!(codec::decode_exact::<Pssz32>(&schema, &root, &raw_bytes).is_err());
+    let raw_value = codec::decode_exact::<Pssz32>(&schema, &root, &raw_bytes).unwrap();
+    assert_eq!(codec::encode::<Pssz32>(&schema, &root, &raw_value).unwrap(), raw_bytes);
     // The automatic (type-derived width) profile gives the typed `Pssz`
     // bytes and reads them back to the same value.
     let auto_bytes = try_to_pssz::<Pssz, _>(&value).unwrap();
@@ -419,11 +421,23 @@ fn schema_distinguishes_utf8_strings_from_raw_strings_and_enums_are_integers() {
         codec::auto_width(&schema, &root).unwrap(),
         psio::pssz::auto_pssz_width::<StringKinds>()
     );
-    // It applies the same UTF-8 rule to every "string".
+    // The same under the automatic profile; the text writers refuse it.
     let raw_auto = try_to_pssz::<Pssz, _>(&non_utf8).unwrap();
     assert_eq!(from_pssz::<Pssz, StringKinds>(&raw_auto).unwrap(), non_utf8);
-    assert!(codec::decode_exact::<Pssz>(&schema, &root, &raw_auto).is_err());
-    assert!(codec::validate(&schema, &root, &raw_auto).is_err());
+    let raw_value = codec::decode_exact::<Pssz>(&schema, &root, &raw_auto).unwrap();
+    assert_eq!(codec::encode::<Pssz>(&schema, &root, &raw_value).unwrap(), raw_auto);
+    assert_eq!(codec::validate(&schema, &root, &raw_auto), Ok(false));
+    for error in [
+        codec::pssz_to_json::<psio::json::Json>(&schema, &root, &raw_auto).unwrap_err(),
+        codec::pssz_to_json::<psio::json::IJson>(&schema, &root, &raw_auto).unwrap_err(),
+    ] {
+        assert_eq!(error.what(), "json: string is not valid UTF-8");
+    }
+    // Invalid UTF-8 in a "utf8" member stays an error under this profile.
+    let mut bad_auto = auto_bytes.clone();
+    let at = bad_auto.iter().position(|b| *b == 0xc3).unwrap();
+    bad_auto[at] = 0xff;
+    assert!(codec::validate(&schema, &root, &bad_auto).is_err());
 }
 
 #[derive(Debug, PartialEq, PsszPack, PsszUnpack, ToPsszSchema)]

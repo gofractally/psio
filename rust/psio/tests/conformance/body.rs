@@ -186,6 +186,7 @@ fn truncated_and_corrupted_fixture_frames_never_panic_or_decode_unvalidated() {
 // and Rust's encoding must equal the fixture bytes in every profile.
 
 fn raw(s: &str) -> Raw { RawString::from(s) }
+fn bleaf(n: u16, t: &str) -> BLeaf { BLeaf { n, t: BoundedString(t.into()) } }
 fn native_values() -> Vec<(&'static str, (String, Native))> {
     let cp = |height, label: &str| WidthCheckpoint { height, label: BoundedRawString(label.as_bytes().to_vec()) };
     let r2 = |x, y| R2 { a: 7, s: raw("hi"), x, y };
@@ -284,6 +285,30 @@ fn native_values() -> Vec<(&'static str, (String, Native))> {
         ("three_optional_none", native((7u32, raw("hi"), None::<u16>))),
         ("dwnc_with_variable_field", native(DwncVar { k: 7, s: raw("hi") })),
         ("vector_of_dwnc_variable", native(vec![DwncVar { k: 7, s: raw("hi") }, DwncVar { k: 8, s: raw("") }])),
+        // Boxed values.
+        ("leaf", native(bleaf(7, "abcd"))),
+        ("direct", native(BDirect { id: 1, leaf: bleaf(2, "ab") })),
+        ("record", native(BoxRec { id: 1, leaf: Box::new(bleaf(2, "ab")) })),
+        ("record_capped", native(BoxCapRec { id: 1, leaf: Box::new(bleaf(2, "ab")) })),
+        ("optional_some", native(BoxOptRec { id: 3, leaf: Some(Box::new(bleaf(4, "xyz"))), tail: 9 })),
+        ("optional_none", native(BoxOptRec { id: 3, leaf: None, tail: 9 })),
+        ("vector_three", native(BoxVecRec {
+            id: 5,
+            leaves: BoundedList(vec![Box::new(bleaf(1, "a")), Box::new(bleaf(2, "")), Box::new(bleaf(3, "abcd"))]),
+        })),
+        ("vector_capped", native(BoxVecCapRec { id: 5, leaves: vec![Box::new(bleaf(1, "a")), Box::new(bleaf(2, "bc"))] })),
+        ("fixed", native(BoxFixedRec { id: 1, word: Box::new(0x0102_0304), pair: Box::new([5, 6]) })),
+        ("outer", native(BoxOuter {
+            k: 1,
+            capped: BoxCapRec { id: 2, leaf: Box::new(bleaf(3, "c")) },
+            open: BoxRec { id: 4, leaf: Box::new(bleaf(5, "open")) },
+            direct: Some(BDirect { id: 6, leaf: bleaf(7, "d") }),
+        })),
+        ("top_level", native(Box::new(bleaf(9, "top")))),
+        ("in_vector", native(vec![Box::new(bleaf(1, "a")), Box::new(bleaf(2, "bb"))])),
+        ("in_optional", native(Some(Box::new(bleaf(1, "a"))))),
+        ("in_variant", native(V2::<Box<BLeaf>, u8>::A(Box::new(bleaf(1, "v"))))),
+        ("in_tuple", native((Box::new(bleaf(1, "t")), 2u8))),
         ("depth_3", native(DepthNode { value: 1, next: Some(Box::new(DepthNode { value: 7, next: None })) })),
     ]
 }

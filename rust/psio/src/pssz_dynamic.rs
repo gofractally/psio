@@ -19,6 +19,20 @@
 //! in-range value of the integer is valid whether or not it is a listed
 //! enumerator. The enumerator names matter to the `json` submodule only.
 //!
+//! Custom ids (`schema_ir::wire_custom_id`): `bool`, `char`, `hex`,
+//! `bitvector`, `bitlist` as before; `utf8` is a UTF-8 string, validated on
+//! every read and write (`Value::String`); `string` is a RAW string, any
+//! bytes (`Value::String` when they are UTF-8, `Value::Bytes` otherwise);
+//! `box` is its inner type with no inferred size bound, so a record holding
+//! a boxed bounded value derives 4-byte offsets unless it has a cap. Any
+//! other id is a text presentation (`json::CustomHandlers`): on the wire it
+//! is exactly its inner type. `unknown` has no codec.
+//!
+//! `maxDynamicData` under an explicit width (`Pssz8/16/32`): the type is
+//! accepted, the one inherited width is kept, and the cap of the top-level
+//! type bounds the whole encoding (encode and decode). Nested caps are not
+//! looked up. `maxFields` under an explicit width is refused.
+//!
 //! Attributes read by the codec:
 //!   Object  definitionWillNotChange    fixed layout (no header)
 //!           maxDynamicData = "N"       explicit cap (automatic profile)
@@ -28,15 +42,16 @@
 //! The JSON / I-JSON text path over the same IR is the `json` submodule.
 use crate::pssz::{Decoded, Pssz, PsszError, PsszFormat, PsszResult};
 use crate::pssz_checked::{self as checked, Layout};
-use crate::pssz_schema_ir::{AnyType, AnyValue, Attribute, Member, Schema};
+use crate::pssz_schema_ir::{byte_adapter_id, AnyType, AnyValue, Attribute, Member, Schema};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 pub mod json;
 pub use json::{
-    json_to_pssz, json_to_value, pssz_to_json, read_json, validate_pssz, value_to_json,
-    SchemaJsonError,
+    json_to_pssz, json_to_pssz_with, json_to_value, json_to_value_with, pssz_to_json,
+    pssz_to_json_with, read_json, read_json_with, validate_pssz, value_to_json,
+    value_to_json_with, CustomHandlers, SchemaJsonError,
 };
 
 /// Typed values preserve distinctions lost by plain JSON, especially
@@ -160,17 +175,22 @@ enum Site {
     Variant,
     VariantMember,
 }
-/// What the explicit profile says about a constraint it does not enforce.
+/// What a profile says about a constraint it does not enforce (`maxFields`
+/// under an explicit width).
 pub const UNSUPPORTED_CONSTRAINT: &str =
     "pssz dynamic: unsupported schema constraint or annotation";
-/// `caps`: the automatic profile, which implements maxDynamicData. The
-/// explicit profile rejects the constraints it does not enforce.
+/// `caps`: the automatic profile, which derives widths from maxDynamicData
+/// and enforces every record's. The explicit profile accepts the attribute
+/// and enforces the top-level type's only, like the typed `Pssz8/16/32`.
 fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
     for value in values {
         match value.name.as_str() {
             "doc" | "description" | "visible" => (),
             "definitionWillNotChange" if site == Site::Record => (),
-            "maxDynamicData" | "maxFields" if site == Site::Record && caps => (),
+            // The explicit profile takes a cap too: it enforces the
+            // top-level type's (`Codec::check_top_cap`).
+            "maxDynamicData" if site == Site::Record => (),
+            "maxFields" if site == Site::Record && caps => (),
             "lengthBound" if site == Site::RecordMember => (),
             "jsonInt" | "ijsonInt" if site == Site::RecordMember => {
                 if !matches!(value.value.as_deref(), Some("number" | "string")) {
@@ -184,7 +204,7 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
     if site == Site::RecordMember {
         parse_length_bound(values)?;
     }
-    if site == Site::Record && caps {
+    if site == Site::Record {
         parse_cap(values)?;
     }
     Ok(())
@@ -238,7 +258,7 @@ pub(crate) fn metadata(schema: &Schema, root: &AnyType, caps: bool) -> PsszResul
                 match c.id.as_str() {
                     "bool" => unsigned_adapter(schema, &c.r#type, 1)?,
                     "char" => unsigned_adapter(schema, &c.r#type, 8)?,
-                    "string" | "hex" => {
+                    "string" | "utf8" | "hex" => {
                         byte_container(schema, &c.r#type)?;
                     }
                     "bitvector" | "bitlist" => {
@@ -384,7 +404,7 @@ fn layout_at(schema: &Schema, ty: &AnyType, n: usize) -> PsszResult<Layout> {
                 out.size = crate::pssz_bits::byte_count(count);
             }
         }
-        AnyValue::Custom(c) if c.id == "string" || c.id == "hex" => {
+        AnyValue::Custom(c) if byte_adapter_id(&c.id) => {
             return layout_at(schema, &c.r#type, n + 1)
         }
         AnyValue::Custom(_) => return Err(failure("pssz dynamic: unsupported custom adapter")),
@@ -448,7 +468,7 @@ fn can_be_empty(schema: &Schema, ty: &AnyType, n: usize) -> PsszResult<bool> {
             let layout = record_layout(schema, &o.members, true, n)?;
             layout.fixed && layout.size == 0
         }
-        AnyValue::Custom(c) if c.id == "string" || c.id == "hex" => {
+        AnyValue::Custom(c) if byte_adapter_id(&c.id) => {
             can_be_empty(schema, &c.r#type, n + 1)?
         }
         AnyValue::Int(_)
@@ -579,7 +599,7 @@ impl<'a> Codec<'a> {
             AnyValue::Int(_) | AnyValue::Float(_) => true,
             AnyValue::Array(a) => self.fixed_payload(&a.r#type, active)?,
             AnyValue::Custom(c) if c.id == "bool" || c.id == "char" => true,
-            AnyValue::Custom(c) if c.id == "hex" || c.id == "string" => {
+            AnyValue::Custom(c) if byte_adapter_id(&c.id) => {
                 let child = self.schema.wire(&c.r#type)?;
                 matches!(child.value, AnyValue::Array(_)) && self.fixed_payload(child, active)?
             }
@@ -601,7 +621,11 @@ impl<'a> Codec<'a> {
         reserve_cap: bool,
         active: &mut Vec<usize>,
     ) -> PsszResult<Bound> {
-        let ty = self.schema.wire(input)?;
+        let (ty, boxed) = self.schema.wire_boxed(input)?;
+        // A boxed value has no inferred bound (the typed `Box<T>` has none).
+        if boxed {
+            return Ok(None);
+        }
         let key = ty as *const AnyType as usize;
         if active.contains(&key) {
             return Ok(None);
@@ -682,7 +706,7 @@ impl<'a> Codec<'a> {
                 1,
             )),
             AnyValue::Custom(c) if c.id == "bool" || c.id == "char" => Ok(Some(1)),
-            AnyValue::Custom(c) if c.id == "string" || c.id == "hex" => {
+            AnyValue::Custom(c) if byte_adapter_id(&c.id) => {
                 self.bound_sequence(self.schema.wire(&c.r#type)?, annotation, active)
             }
             AnyValue::Struct(s) => record(&s.members, true, active),
@@ -716,6 +740,22 @@ impl<'a> Codec<'a> {
         };
         self.widths.borrow_mut().insert(key, width);
         Ok(width)
+    }
+    /// Explicit profile: the cap of the top-level type bounds the whole
+    /// encoding, as in the typed `Pssz8` / `Pssz16` / `Pssz32` codecs. Nested
+    /// caps are not looked up. Nothing to do under the automatic profile,
+    /// which checks every record where it is read or written.
+    fn check_top_cap(&self, root: &AnyType, size: usize) -> PsszResult<()> {
+        if self.automatic() {
+            return Ok(());
+        }
+        let ty = self.schema.wire(root)?;
+        match record_attributes(ty).map(parse_cap).transpose()?.flatten() {
+            Some(cap) if size as u128 > cap as u128 => Err(failure(
+                "pssz dynamic: encoded size exceeds maxDynamicData cap",
+            )),
+            _ => Ok(()),
+        }
     }
     /// A record over its explicit cap is not a value of its type.
     fn check_cap(&self, ty: &AnyType, size: usize) -> PsszResult<()> {
@@ -780,9 +820,15 @@ impl<'a> Codec<'a> {
                     u8::try_from(*v).map_err(|_| failure("pssz dynamic: char byte overflow"))?,
                 );
             }
-            (AnyValue::Custom(c), Value::String(v)) if c.id == "string" => {
+            (AnyValue::Custom(c), Value::String(v)) if c.id == "string" || c.id == "utf8" => {
                 bound_bytes(schema, &c.r#type, v.len())?;
                 out.extend_from_slice(v.as_bytes());
+            }
+            // A raw string is any bytes: one that is not UTF-8 is carried
+            // as `Value::Bytes`.
+            (AnyValue::Custom(c), Value::Bytes(v)) if c.id == "string" => {
+                bound_bytes(schema, &c.r#type, v.len())?;
+                out.extend_from_slice(v);
             }
             (AnyValue::Custom(c), Value::Bytes(v)) if c.id == "hex" => {
                 bound_bytes(schema, &c.r#type, v.len())?;
@@ -1018,13 +1064,22 @@ impl<'a> Codec<'a> {
                     _ => return Err(failure("pssz dynamic: char span mismatch")),
                 }
             }
-            AnyValue::Custom(c) if c.id == "string" => {
+            AnyValue::Custom(c) if c.id == "utf8" => {
                 bound_bytes(schema, &c.r#type, bytes.len())?;
                 Value::String(
                     std::str::from_utf8(bytes)
                         .map_err(|_| failure("pssz dynamic: invalid UTF-8"))?
                         .into(),
                 )
+            }
+            // A raw string: any bytes are valid. Text when they are UTF-8,
+            // the bytes themselves otherwise.
+            AnyValue::Custom(c) if c.id == "string" => {
+                bound_bytes(schema, &c.r#type, bytes.len())?;
+                match std::str::from_utf8(bytes) {
+                    Ok(text) => Value::String(text.into()),
+                    Err(_) => Value::Bytes(bytes.into()),
+                }
             }
             AnyValue::Custom(c) if c.id == "hex" => {
                 bound_bytes(schema, &c.r#type, bytes.len())?;
@@ -1256,7 +1311,9 @@ impl<'a> Codec<'a> {
 pub fn encode<F: PsszFormat>(schema: &Schema, ty: &AnyType, value: &Value) -> PsszResult<Vec<u8>> {
     let codec = Codec::new::<F>(schema)?;
     codec.check(ty)?;
-    codec.encode_at(ty, value, 0)
+    let bytes = codec.encode_at(ty, value, 0)?;
+    codec.check_top_cap(ty, bytes.len())?;
+    Ok(bytes)
 }
 /// Rejects unknown appended optional fields.
 pub fn decode_exact<F: PsszFormat>(
@@ -1266,6 +1323,7 @@ pub fn decode_exact<F: PsszFormat>(
 ) -> PsszResult<Value> {
     let codec = Codec::new::<F>(schema)?;
     codec.check(ty)?;
+    codec.check_top_cap(ty, bytes.len())?;
     let session = checked::DecodeSession::enter(false);
     let value = codec.decode_at(ty, bytes, 0)?;
     if session.has_unknown() {
@@ -1281,6 +1339,7 @@ pub fn decode_compatible<F: PsszFormat>(
 ) -> PsszResult<Decoded<Value>> {
     let codec = Codec::new::<F>(schema)?;
     codec.check(ty)?;
+    codec.check_top_cap(ty, bytes.len())?;
     let session = checked::DecodeSession::enter(true);
     let value = codec.decode_at(ty, bytes, 0)?;
     Ok(Decoded {
@@ -1302,5 +1361,11 @@ pub fn validate(schema: &Schema, ty: &AnyType, bytes: &[u8]) -> PsszResult<bool>
 pub fn auto_width(schema: &Schema, ty: &AnyType) -> PsszResult<usize> {
     let codec = Codec::new::<Pssz>(schema)?;
     codec.check(ty)?;
-    codec.width_of(schema.wire(ty)?)
+    // A box has no header of its own: the boxed type is encoded at its own
+    // width. As a root, the typed trait reports the unbounded width.
+    let (wire, boxed) = schema.wire_boxed(ty)?;
+    if boxed {
+        return Ok(4);
+    }
+    codec.width_of(wire)
 }

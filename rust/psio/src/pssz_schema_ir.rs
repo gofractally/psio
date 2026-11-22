@@ -127,11 +127,20 @@ impl Schema {
         }
         Err(PsszError("pssz schema: cyclic aliases"))
     }
-    /// The type as it is on the wire: `resolve`, and an `Enum` is its
-    /// underlying type. The binary codecs use this; text needs the `Enum`
-    /// itself (`resolve`).
-    pub fn wire<'a>(&'a self, mut ty: &'a AnyType) -> PsszResult<&'a AnyType> {
-        for _ in 0..=2 * self.types.len() + 2 {
+    /// The type as it is on the wire: `resolve`, looking through the nodes
+    /// that add nothing to the bytes — an `Enum` (its underlying integer)
+    /// and a `Custom` whose id is not part of the binary form (`box`, or a
+    /// text presentation; see [`wire_custom_id`]). The binary codecs use
+    /// this; text needs the nodes themselves (`resolve`).
+    pub fn wire<'a>(&'a self, ty: &'a AnyType) -> PsszResult<&'a AnyType> {
+        self.wire_boxed(ty).map(|(ty, _)| ty)
+    }
+    /// [`Schema::wire`], and whether a `box` was looked through on the way.
+    pub fn wire_boxed<'a>(&'a self, mut ty: &'a AnyType) -> PsszResult<(&'a AnyType, bool)> {
+        let mut boxed = false;
+        // Wrappers between two aliases are finite in a valid schema; the
+        // limit only stops a malformed one.
+        for _ in 0..=4 * self.types.len() + 64 {
             match &ty.value {
                 AnyValue::Type(reference) => {
                     ty = self
@@ -139,15 +148,58 @@ impl Schema {
                         .ok_or(PsszError("pssz schema: unresolved named type"))?
                 }
                 AnyValue::Enum(named) => ty = &named.r#type,
-                _ => return Ok(ty),
+                AnyValue::Custom(custom) if !wire_custom_id(&custom.id) => {
+                    boxed |= custom.id == "box";
+                    ty = &custom.r#type;
+                }
+                _ => return Ok((ty, boxed)),
             }
         }
         Err(PsszError("pssz schema: cyclic aliases"))
     }
 }
 
+// ── Custom ids ──────────────────────────────────────────────────────────────
+//
+// A Custom node is `type` (what is on the wire) plus an `id`. These ids are
+// part of the binary form:
+//
+//   bool, char           a one-byte primitive over Int{1} / Int{8}
+//   string               a RAW string: any bytes (Rust RawString, C++
+//                        std::string) over a byte container
+//   utf8                 a UTF-8 string (Rust String, C++ utf8_string) over
+//                        a byte container: validated on every read and write
+//   hex                  bytes over a byte container
+//   bitvector, bitlist   packed bits
+//   box                  the inner type on the wire, with no inferred size
+//                        bound (Box<T>): the typed codecs give a boxed value
+//                        no bound, so a type holding one gets the same
+//                        offset width from the schema
+//
+// "unknown" marks a C++ type the schema builder could not describe and has
+// no codec. Every other id names a text presentation only (a custom text
+// form, `pssz::dynamic::CustomHandlers`): on the wire it is exactly its
+// inner type.
+
+/// `string`, `utf8` or `hex`: an adapter over a byte container.
+pub fn byte_adapter_id(id: &str) -> bool {
+    matches!(id, "string" | "utf8" | "hex")
+}
+/// An id with a binary meaning of its own. Any other id — `box`, or a text
+/// presentation — is its inner type on the wire.
+pub fn wire_custom_id(id: &str) -> bool {
+    matches!(id, "bool" | "char" | "bitvector" | "bitlist" | "unknown") || byte_adapter_id(id)
+}
+
 pub trait ToPsszSchema: 'static {
     fn schema_name() -> Option<String> {
+        None
+    }
+    /// The Custom id of a type with a custom text form
+    /// (`#[pssz(custom)]` / `#[pssz(custom = "Id")]`): its schema is
+    /// `Custom { the wire type, id }` and `pssz::dynamic::CustomHandlers`
+    /// registers its `TextForm` under this id.
+    fn custom_id() -> Option<String> {
         None
     }
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType>;
@@ -263,22 +315,26 @@ impl ToPsszSchema for bool {
         })))
     }
 }
+// A UTF-8 string: validated on every read and write (C++ utf8_string).
 impl ToPsszSchema for String {
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
         Ok(AnyType::new(AnyValue::Custom(Custom {
             r#type: Box::new(AnyType::new(AnyValue::List(List {
                 r#type: Box::new(u8::schema(builder)?),
             }))),
-            id: "string".into(),
+            id: "utf8".into(),
         })))
     }
 }
+// A box is its inner type on the wire, but the typed codec infers no size
+// bound through it (`AUTO_BOUND` is `None`). The marker lets a schema-only
+// reader derive the same offset widths.
 impl<T: ToPsszSchema> ToPsszSchema for Box<T> {
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
-        T::build_schema(builder)
-    }
-    fn schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
-        T::schema(builder)
+        Ok(AnyType::new(AnyValue::Custom(Custom {
+            r#type: Box::new(T::schema(builder)?),
+            id: "box".into(),
+        })))
     }
 }
 impl<T: ToPsszSchema> ToPsszSchema for Option<T> {
@@ -352,17 +408,13 @@ impl<const N: usize> ToPsszSchema for crate::pssz::BoundedString<N> {
                 r#type: Box::new(u8::schema(builder)?),
                 maxCount: N as u64,
             }))),
-            id: "string".into(),
+            id: "utf8".into(),
         })))
     }
 }
-// Raw byte strings (C++ std::string) carry no UTF-8 requirement. They use
-// the same "string" identifier C++ emits for std::string: "hex" would limit
-// the JSON form to hex digits, while a raw string is text-shaped bytes. The
-// emitted schema therefore does not distinguish a raw string from a UTF-8
-// string (C++ utf8_string / Rust String); the schema-driven codecs treat
-// every "string" as UTF-8, so they reject a raw string holding non-UTF-8
-// bytes that the typed codec accepts. Byte lists and arrays stay "hex".
+// Raw byte strings (C++ std::string) carry no UTF-8 requirement: the
+// "string" adapter, any bytes. A UTF-8 string (Rust String, C++ utf8_string)
+// is "utf8". Byte lists and arrays are "hex".
 impl ToPsszSchema for crate::pssz::RawString {
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
         Ok(AnyType::new(AnyValue::Custom(Custom {

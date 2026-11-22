@@ -26,6 +26,9 @@ pub fn registry() -> Registry {
     macro_rules! list_and_optional { ($($t:ty),*) => { $(reg!(Vec<$t>, Option<$t>);)* }; }
     list_and_optional!(N1, N2, P1, E1, E2, E3, C1a, C1b, C1c, C2a, C2b, C2c, I0, I1);
     reg!(Option<DepthNode>);
+    reg!(BLeaf, BDirect, BoxRec, BoxCapRec, BoxOptRec, BoxVecRec, BoxVecCapRec, BoxFixedRec, BoxOuter);
+    reg!(Box<BLeaf>, Vec<Box<BLeaf>>, Option<Box<BLeaf>>, V2<Box<BLeaf>, u8>, (Box<BLeaf>, u8));
+    reg!(Vec<BoxRec>, Option<BoxCapRec>);
     macro_rules! containers { ($($t:ty),*) => { $(reg!(Vec<$t>, [$t; 2], Option<$t>);)* }; }
     containers!(Unit, Empty, Pair, DwncVar);
     reg!(Option<Inner>, Option<Raw>, Option<Vec<u16>>, VarBS, Option<VarBS>, Option<Bits12>);

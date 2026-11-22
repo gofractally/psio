@@ -21,7 +21,13 @@
 //!   attribute, else its name); Json `[index, value]`
 //! * option: null or the value
 //! * list / array: array (exact count for an array, at most N bounded)
-//! * string adapter: JSON string (UTF-8; IJson: no noncharacters)
+//! * string / utf8 adapter: JSON string (UTF-8; IJson: no noncharacters). A
+//!   raw `string` holding bytes that are not UTF-8 has no text: an error
+//! * box: the inner type's text
+//! * any other Custom id (a text presentation): through its handler in a
+//!   [`CustomHandlers`] (the `*_with` entry points) one JSON string; with
+//!   no handler the inner type's text, or an error when the registry is
+//!   strict
 //! * hex adapter: IJson one hex string (UPPERCASE on output); Json an array
 //!   of numbers
 //! * Int: number; a 64-bit integer under IJson is a bare number while
@@ -50,11 +56,13 @@ use crate::json::{
     write_variant_close, write_variant_open, IntForm, JsonCursor, JsonFormat, JsonKind,
     JsonText, JsonTextError, TextCursor, Writer, MAX_DEPTH,
 };
-use crate::json::{wide_is_safe, wide_parse, wide_to_i128, wide_to_u128, wide_to_u256};
-use crate::pssz::{Pssz, PsszError, Uint256};
+use crate::json::{wide_is_safe, wide_parse, wide_to_i128, wide_to_u128, wide_to_u256, TextForm};
+use crate::pssz::{Pssz, PsszError, PsszPack, PsszUnpack, Uint256};
 use crate::pssz_schema_ir::{
-    AnyType, AnyValue, Attribute, Custom, Enum, Int, Member, Schema, Variant,
+    wire_custom_id, AnyType, AnyValue, Attribute, Custom, Enum, Int, Member, Schema, ToPsszSchema,
+    Variant,
 };
+use std::collections::HashMap;
 
 /// Why a schema-driven conversion failed: the schema or the PSSZ bytes
 /// ([`PsszError`]), or the text ([`JsonTextError`]).
@@ -194,6 +202,7 @@ struct Reader<'a, C: JsonCursor> {
     schema: &'a Schema,
     c: &'a mut C,
     ijson: bool,
+    handlers: Option<&'a CustomHandlers>,
 }
 
 impl<C: JsonCursor> Reader<'_, C> {
@@ -400,18 +409,48 @@ impl<C: JsonCursor> Reader<'_, C> {
         Ok(Value::Sequence(items))
     }
 
-    fn custom(&mut self, ty: &Custom, form: IntForm) -> Text<Value> {
+    /// A Custom id that is not part of the binary form. A `box` reads as
+    /// its inner type. A text presentation reads through its handler: one
+    /// JSON string, turned into the PSSZ bytes of the inner type, which are
+    /// then read as a value of it; the plain form is then not accepted.
+    /// With no handler it reads as the inner type, unless the registry is
+    /// strict.
+    fn transparent(&mut self, ty: &Custom, form: IntForm, n: usize) -> Text<Value> {
+        if ty.id != "box" {
+            if let Some(handler) = self.handlers.and_then(|all| all.find(&ty.id)) {
+                if self.c.kind()? != JsonKind::String {
+                    return self.fail("json: expected a string (custom text form)");
+                }
+                let text = self.c.string()?.0.into_owned();
+                let Ok(bytes) = (handler.from_text)(&text) else {
+                    return self.fail("json: text is not a value of the custom type");
+                };
+                return match super::decode_compatible::<Pssz>(self.schema, &ty.r#type, &bytes) {
+                    Ok(decoded) if !decoded.has_unknown => Ok(decoded.value),
+                    _ => self
+                        .fail("json: custom handler produced bytes that are not the inner type"),
+                };
+            }
+            if self.handlers.is_some_and(|all| all.strict) {
+                return self.fail(NO_HANDLER);
+            }
+        }
+        self.read(&ty.r#type, form, n + 1)
+    }
+
+    fn custom(&mut self, ty: &Custom, form: IntForm, n: usize) -> Text<Value> {
         match ty.id.as_str() {
             "bool" => return Ok(Value::Bool(self.c.boolean()?)),
             "char" => return self.integer(&BYTE, form),
             "bitvector" | "bitlist" => return self.fail("json: bit types have no JSON form"),
-            "string" | "hex" => (),
-            _ => return self.fail("pssz dynamic: unsupported custom adapter"),
+            "string" | "utf8" | "hex" => (),
+            "unknown" => return self.fail("pssz dynamic: unsupported custom adapter"),
+            _ => return self.transparent(ty, form, n),
         }
         let Some(shape) = ByteShape::of(self.schema, ty) else {
             return self.fail("pssz dynamic: byte adapter requires byte container");
         };
-        if ty.id == "string" {
+        if ty.id != "hex" {
             if self.c.kind()? != JsonKind::String {
                 return self.fail("json: expected a string");
             }
@@ -570,7 +609,7 @@ impl<C: JsonCursor> Reader<'_, C> {
                     None => self.fail("json: number out of range"),
                 }
             }
-            AnyValue::Custom(c) => self.custom(c, form),
+            AnyValue::Custom(c) => self.custom(c, form, n),
             AnyValue::Option(o) => {
                 if self.c.kind()? == JsonKind::Null {
                     self.c.null()?;
@@ -613,6 +652,7 @@ const MAX_VALUE_DEPTH: usize = MAX_DEPTH * (MAX_DEPTH + 2);
 struct ValueWriter<'a> {
     schema: &'a Schema,
     w: Writer,
+    handlers: Option<&'a CustomHandlers>,
 }
 
 impl ValueWriter<'_> {
@@ -677,7 +717,28 @@ impl ValueWriter<'_> {
         }
     }
 
-    fn custom(&mut self, ty: &Custom, value: &Value) -> Text<()> {
+    fn custom(&mut self, ty: &Custom, value: &Value, n: usize) -> Text<()> {
+        if !wire_custom_id(&ty.id) {
+            if ty.id != "box" {
+                if let Some(handler) = self.handlers.and_then(|all| all.find(&ty.id)) {
+                    // The inner value as PSSZ bytes, then the handler's
+                    // text as one JSON string.
+                    let Ok(bytes) = super::encode::<Pssz>(self.schema, &ty.r#type, value) else {
+                        return self
+                            .fail("pssz dynamic: custom value does not match its inner type");
+                    };
+                    let Ok(text) = (handler.to_text)(&bytes) else {
+                        return self.fail("json: custom handler has no text for the value");
+                    };
+                    return self.w.string(text.as_bytes());
+                }
+                if self.handlers.is_some_and(|all| all.strict) {
+                    return self.fail(NO_HANDLER);
+                }
+            }
+            // A box, or a text presentation with no handler: the inner type.
+            return self.write(&ty.r#type, value, n + 1);
+        }
         match (ty.id.as_str(), value) {
             ("bool", Value::Bool(v)) => return v.write_json(&mut self.w),
             ("bool", _) => return self.fail("pssz dynamic: bool value required"),
@@ -688,20 +749,24 @@ impl ValueWriter<'_> {
             ("bitvector" | "bitlist", _) => {
                 return self.fail("json: bit types have no JSON form")
             }
-            ("string" | "hex", _) => (),
+            ("string" | "utf8" | "hex", _) => (),
             _ => return self.fail("pssz dynamic: unsupported custom adapter"),
         }
         let Some(shape) = ByteShape::of(self.schema, ty) else {
             return self.fail("pssz dynamic: byte adapter requires byte container");
         };
-        if ty.id == "string" {
-            let Value::String(text) = value else {
-                return self.fail("pssz dynamic: string value required");
+        if ty.id != "hex" {
+            let text = match value {
+                Value::String(text) => text.as_bytes(),
+                // A raw string holding bytes that are not UTF-8 has no JSON
+                // text: `Writer::string` reports it.
+                Value::Bytes(bytes) if ty.id == "string" => bytes,
+                _ => return self.fail("pssz dynamic: string value required"),
             };
             if !shape.admits(text.len()) {
                 return self.fail("json: string exceeds its bound");
             }
-            return self.w.string(text.as_bytes());
+            return self.w.string(text);
         }
         let Value::Bytes(bytes) = value else {
             return self.fail("pssz dynamic: bytes value required");
@@ -800,7 +865,7 @@ impl ValueWriter<'_> {
                 Value::Float64(v) if f.exp == 11 => v.write_json(&mut self.w),
                 _ => self.fail("pssz dynamic: float value does not match the schema"),
             },
-            AnyValue::Custom(c) => self.custom(c, value),
+            AnyValue::Custom(c) => self.custom(c, value, n),
             AnyValue::Option(o) => match value {
                 Value::Optional(None) => {
                     self.w.raw("null");
@@ -854,6 +919,128 @@ impl ValueWriter<'_> {
     }
 }
 
+// ── Custom text presentations ───────────────────────────────────────────────
+//
+// A Custom node whose id is not part of the binary form
+// (`schema_ir::wire_custom_id` lists those) names a text presentation of its
+// inner type: `Custom { type: Int{64}, id: "AccountName" }` is a u64 on the
+// wire that reads and writes as the account's name. A handler registered
+// for the id converts between the PSSZ bytes of the inner type (automatic
+// profile: the typed `Pssz` bytes) and the presentation text, which is
+// carried as ONE JSON string in both text formats — the rule of a typed
+// `TextForm`.
+//
+// An id with no handler falls back to the inner type's own text (the u64 as
+// a number, a record as an object): the binary side is always exact, only
+// the presentation is plainer, and the plain text reads back to the same
+// bytes. A strict registry makes a missing handler an error instead. With a
+// handler registered the presentation is exactly its text: the plain form
+// is not also accepted.
+//
+// A handler cannot express a presentation that is not a single JSON string
+// (an object, a bare number), or one that depends on the text format or on
+// the surrounding value.
+
+const NO_HANDLER: &str = "pssz dynamic: no handler registered for a custom type";
+
+type ToText = dyn Fn(&[u8]) -> Result<String, PsszError> + Send + Sync;
+type FromText = dyn Fn(&str) -> Result<Vec<u8>, PsszError> + Send + Sync;
+
+struct CustomHandler {
+    /// PSSZ bytes of the inner type -> the text (unquoted).
+    to_text: Box<ToText>,
+    /// The text -> PSSZ bytes of the inner type; an error for text that is
+    /// not this presentation.
+    from_text: Box<FromText>,
+}
+
+/// The handlers of the custom text presentations of a schema, by Custom id.
+///
+/// ```text
+/// let mut handlers = CustomHandlers::new();
+/// handlers.add_type::<Account>()?;                 // the type's own TextForm
+/// handlers.add("Version", version_to_text, version_from_text);   // by hand
+/// pssz_to_json_with::<IJson>(&schema, &root, bytes, &handlers)?;
+/// ```
+///
+/// There is no bind step in this module (a schema is walked as it is
+/// used): a handler is looked up by id, one hash lookup, each time a custom
+/// node is read or written.
+#[derive(Default)]
+pub struct CustomHandlers {
+    handlers: HashMap<String, CustomHandler>,
+    strict: bool,
+}
+
+impl CustomHandlers {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Whether an id with no handler is an error ("no handler registered
+    /// for a custom type") rather than the inner type's own text.
+    pub fn set_strict(&mut self, strict: bool) -> &mut Self {
+        self.strict = strict;
+        self
+    }
+    pub fn is_strict(&self) -> bool {
+        self.strict
+    }
+    /// Registers (or replaces) the handler of `id`: `to_text` turns the PSSZ
+    /// bytes of the inner type into the presentation text, `from_text` the
+    /// text into those bytes. Both may fail.
+    pub fn add(
+        &mut self,
+        id: impl Into<String>,
+        to_text: impl Fn(&[u8]) -> Result<String, PsszError> + Send + Sync + 'static,
+        from_text: impl Fn(&str) -> Result<Vec<u8>, PsszError> + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.handlers.insert(
+            id.into(),
+            CustomHandler { to_text: Box::new(to_text), from_text: Box::new(from_text) },
+        );
+        self
+    }
+    /// Registers `T`'s own [`TextForm`] as the handler of `id`. `T`'s typed
+    /// `Pssz` encoding is the inner type's bytes by construction.
+    pub fn add_type_as<T>(&mut self, id: impl Into<String>) -> &mut Self
+    where
+        T: TextForm + PsszPack<Pssz> + PsszUnpack<Pssz> + 'static,
+    {
+        self.add(
+            id,
+            |bytes: &[u8]| {
+                let value = crate::pssz::from_pssz::<Pssz, T>(bytes)?;
+                let mut text = String::new();
+                value.to_text(&mut text);
+                Ok(text)
+            },
+            |text: &str| {
+                let value = T::from_text(text)
+                    .ok_or(PsszError("json: text is not a value of the custom type"))?;
+                crate::pssz::try_to_pssz::<Pssz, T>(&value)
+            },
+        )
+    }
+    /// [`CustomHandlers::add_type_as`] under the id `T`'s `ToPsszSchema`
+    /// writes into the schema (`#[pssz(custom)]` / `#[pssz(custom = "Id")]`).
+    /// An error when `T` is not declared custom.
+    pub fn add_type<T>(&mut self) -> Result<&mut Self, PsszError>
+    where
+        T: TextForm + ToPsszSchema + PsszPack<Pssz> + PsszUnpack<Pssz>,
+    {
+        let id = T::custom_id()
+            .ok_or(PsszError("pssz dynamic: the type has no custom schema id"))?;
+        Ok(self.add_type_as::<T>(id))
+    }
+    /// Whether `id` has a handler.
+    pub fn contains(&self, id: &str) -> bool {
+        self.handlers.contains_key(id)
+    }
+    fn find(&self, id: &str) -> Option<&CustomHandler> {
+        self.handlers.get(id)
+    }
+}
+
 // ── The type walk over any cursor ───────────────────────────────────────────
 
 /// Reads one value of `root` from `cursor` (which must be positioned at it)
@@ -866,38 +1053,100 @@ pub fn read_json<C: JsonCursor>(
     ijson: bool,
     cursor: &mut C,
 ) -> Result<Value, JsonTextError> {
-    let value = Reader { schema, c: &mut *cursor, ijson }.read(root, IntForm::Natural, 0)?;
+    read_with(schema, root, ijson, cursor, None)
+}
+
+/// [`read_json`] with the handlers of the schema's custom text forms.
+pub fn read_json_with<C: JsonCursor>(
+    schema: &Schema,
+    root: &AnyType,
+    ijson: bool,
+    cursor: &mut C,
+    handlers: &CustomHandlers,
+) -> Result<Value, JsonTextError> {
+    read_with(schema, root, ijson, cursor, Some(handlers))
+}
+
+fn read_with<C: JsonCursor>(
+    schema: &Schema,
+    root: &AnyType,
+    ijson: bool,
+    cursor: &mut C,
+    handlers: Option<&CustomHandlers>,
+) -> Result<Value, JsonTextError> {
+    let value =
+        Reader { schema, c: &mut *cursor, ijson, handlers }.read(root, IntForm::Natural, 0)?;
     cursor.finish()?;
     Ok(value)
 }
 
 // ── Text <-> Value ──────────────────────────────────────────────────────────
 
-/// `text` (exactly one `root` value) as a [`Value`].
-pub fn json_to_value<F: JsonFormat>(
+fn to_value<F: JsonFormat>(
     schema: &Schema,
     root: &AnyType,
     text: &[u8],
+    handlers: Option<&CustomHandlers>,
 ) -> Result<Value, SchemaJsonError> {
     // Schema errors (unsupported shapes, bad attributes) come first.
     metadata(schema, root, true)?;
     let mut cursor = TextCursor::new(text, F::IJSON)?;
-    Ok(read_json(schema, root, F::IJSON, &mut cursor)?)
+    Ok(read_with(schema, root, F::IJSON, &mut cursor, handlers)?)
 }
 
-/// The text of `value`, a value of `root`.
-pub fn value_to_json<F: JsonFormat>(
+fn from_value<F: JsonFormat>(
     schema: &Schema,
     root: &AnyType,
     value: &Value,
+    handlers: Option<&CustomHandlers>,
 ) -> Result<String, SchemaJsonError> {
     metadata(schema, root, true)?;
-    let mut writer = ValueWriter { schema, w: Writer::new(F::IJSON) };
+    let mut writer = ValueWriter { schema, w: Writer::new(F::IJSON), handlers };
     writer.write(root, value, 0)?;
     // The writer only emits validated UTF-8.
     String::from_utf8(writer.w.into_bytes()).map_err(|_| {
         JsonTextError { what: "json: string is not valid UTF-8", offset: 0, format: F::NAME }.into()
     })
+}
+
+/// `text` (exactly one `root` value) as a [`Value`]. A custom text form
+/// reads as its inner type's own text; see [`json_to_value_with`].
+pub fn json_to_value<F: JsonFormat>(
+    schema: &Schema,
+    root: &AnyType,
+    text: &[u8],
+) -> Result<Value, SchemaJsonError> {
+    to_value::<F>(schema, root, text, None)
+}
+
+/// [`json_to_value`] with the handlers of the schema's custom text forms.
+pub fn json_to_value_with<F: JsonFormat>(
+    schema: &Schema,
+    root: &AnyType,
+    text: &[u8],
+    handlers: &CustomHandlers,
+) -> Result<Value, SchemaJsonError> {
+    to_value::<F>(schema, root, text, Some(handlers))
+}
+
+/// The text of `value`, a value of `root`. A custom text form is written as
+/// its inner type's own text; see [`value_to_json_with`].
+pub fn value_to_json<F: JsonFormat>(
+    schema: &Schema,
+    root: &AnyType,
+    value: &Value,
+) -> Result<String, SchemaJsonError> {
+    from_value::<F>(schema, root, value, None)
+}
+
+/// [`value_to_json`] with the handlers of the schema's custom text forms.
+pub fn value_to_json_with<F: JsonFormat>(
+    schema: &Schema,
+    root: &AnyType,
+    value: &Value,
+    handlers: &CustomHandlers,
+) -> Result<String, SchemaJsonError> {
+    from_value::<F>(schema, root, value, Some(handlers))
 }
 
 // ── What a schema-only consumer calls ───────────────────────────────────────
@@ -909,21 +1158,45 @@ pub fn json_to_pssz<F: JsonFormat>(
     root: &AnyType,
     text: &[u8],
 ) -> Result<Vec<u8>, SchemaJsonError> {
-    let value = json_to_value::<F>(schema, root, text)?;
+    let value = to_value::<F>(schema, root, text, None)?;
+    Ok(super::encode::<Pssz>(schema, root, &value)?)
+}
+
+/// [`json_to_pssz`] with the handlers of the schema's custom text forms.
+pub fn json_to_pssz_with<F: JsonFormat>(
+    schema: &Schema,
+    root: &AnyType,
+    text: &[u8],
+    handlers: &CustomHandlers,
+) -> Result<Vec<u8>, SchemaJsonError> {
+    let value = to_value::<F>(schema, root, text, Some(handlers))?;
     Ok(super::encode::<Pssz>(schema, root, &value)?)
 }
 
 /// PSSZ bytes of a `root` value -> its JSON / I-JSON text. The bytes are
 /// fully validated. Unknown appended optional fields are accepted, dropped
 /// from the text and reported in the second result (a caller that must not
-/// lose them rejects when it is set).
+/// lose them rejects when it is set). A raw string holding bytes that are
+/// not UTF-8 is valid PSSZ but has no text: an error.
 pub fn pssz_to_json<F: JsonFormat>(
     schema: &Schema,
     root: &AnyType,
     bytes: &[u8],
 ) -> Result<(String, bool), SchemaJsonError> {
     let decoded = super::decode_compatible::<Pssz>(schema, root, bytes)?;
-    let text = value_to_json::<F>(schema, root, &decoded.value)?;
+    let text = from_value::<F>(schema, root, &decoded.value, None)?;
+    Ok((text, decoded.has_unknown))
+}
+
+/// [`pssz_to_json`] with the handlers of the schema's custom text forms.
+pub fn pssz_to_json_with<F: JsonFormat>(
+    schema: &Schema,
+    root: &AnyType,
+    bytes: &[u8],
+    handlers: &CustomHandlers,
+) -> Result<(String, bool), SchemaJsonError> {
+    let decoded = super::decode_compatible::<Pssz>(schema, root, bytes)?;
+    let text = from_value::<F>(schema, root, &decoded.value, Some(handlers))?;
     Ok((text, decoded.has_unknown))
 }
 

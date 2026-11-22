@@ -531,7 +531,9 @@ impl<F: PsszFormat, T: PsszPack<F> + ?Sized> PsszPack<F> for Box<T> {
     const FIXED_SIZE: usize = <T as PsszPack<F>>::FIXED_SIZE;
     const MAX_DYNAMIC_DATA: Option<usize> = <T as PsszPack<F>>::MAX_DYNAMIC_DATA;
     const AUTO_BOUND: Option<usize> = None;
-    const OFFSET_WIDTH: usize = <T as PsszPack<F>>::OFFSET_WIDTH;
+    // A box has no header or table of its own (the boxed value is encoded
+    // at its own width); the width it reports is the unbounded one, as the
+    // C++ trait does for `Box<T>`.
     const SHAPE: Shape = Shape { optional: false, ..<T as PsszPack<F>>::SHAPE };
     fn pssz_size(&self) -> usize { <T as PsszPack<F>>::pssz_size(self) }
     fn pssz_pack(&self, out: &mut Vec<u8>) { <T as PsszPack<F>>::pssz_pack(self, out) }

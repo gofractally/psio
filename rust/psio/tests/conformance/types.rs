@@ -81,6 +81,18 @@ rec!(#[cap(200)] C1c { a: u32, s: Raw, x: Option<u32>, y: Option<Raw> });
 rec!(#[cap(1000)] C2a { a: u32, s: Raw });
 rec!(#[cap(1000)] C2b { a: u32, s: Raw, x: Option<u32> });
 rec!(#[cap(1000)] C2c { a: u32, s: Raw, x: Option<u32>, y: Option<Raw> });
+// Boxed values. A Box<T> is T on the wire, and the typed codecs infer no
+// size bound through it: a record holding a boxed bounded value uses 4-byte
+// offsets unless it carries an explicit cap.
+rec!(BLeaf { n: u16, t: BoundedString<4> });
+rec!(BDirect { id: u32, leaf: BLeaf });
+rec!(BoxRec { id: u32, leaf: Box<BLeaf> });
+rec!(#[cap(200)] BoxCapRec { id: u32, leaf: Box<BLeaf> });
+rec!(BoxOptRec { id: u32, leaf: Option<Box<BLeaf>>, tail: u8 });
+rec!(BoxVecRec { id: u8, leaves: BoundedList<Box<BLeaf>, 3> });
+rec!(#[cap(60000)] BoxVecCapRec { id: u8, leaves: Vec<Box<BLeaf>> });
+rec!(BoxFixedRec { id: u8, word: Box<u32>, pair: Box<[u8; 2]> });
+rec!(BoxOuter { k: u8, capped: BoxCapRec, open: BoxRec, direct: Option<BDirect> });
 rec!(I0 { a: u32, b: u8 });
 rec!(I1 { a: u32, b: u8, x: Option<u16> });
 

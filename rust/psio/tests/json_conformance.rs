@@ -110,8 +110,10 @@ struct Holder {
     choices: Vec<Choice>,
 }
 
-// A custom text form: "major.minor".
-#[derive(Debug, Clone, PartialEq)]
+// A custom text form: "major.minor". On the wire it is the record of its two
+// members; the Schema IR records Custom { that record, "Version" }.
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
+#[pssz(custom)]
 struct Version {
     major: u16,
     minor: u16,
@@ -133,11 +135,68 @@ impl TextForm for Version {
 }
 psio::json_text_form!(Version);
 
-#[derive(Debug, Clone, PartialEq, psio::JsonText)]
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
 struct Release {
     version: Version,
     name: String,
     history: Vec<Version>,
+}
+
+// A custom text form over a 64-bit integer: an account name of up to 12
+// characters of [a-z1-5.], 5 bits each, most significant first. On the wire
+// it is its u64; the Schema IR records Custom { Int{64}, "AccountName" } (the
+// id C++, Rust and JS register the handler under, not the type's name).
+#[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
+#[pssz(transparent, custom = "AccountName")]
+struct Account(u64);
+const ACCOUNT_ALPHABET: &[u8; 32] = b".12345abcdefghijklmnopqrstuvwxyz";
+impl TextForm for Account {
+    fn to_text(&self, out: &mut String) {
+        let mut text: Vec<u8> =
+            (0..12).map(|i| ACCOUNT_ALPHABET[((self.0 >> (5 * (11 - i))) & 31) as usize]).collect();
+        while text.last() == Some(&b'.') {
+            text.pop();
+        }
+        out.push_str(std::str::from_utf8(&text).expect("ASCII"));
+    }
+    fn from_text(text: &str) -> Option<Self> {
+        // No trailing dot: one text per value.
+        if text.len() > 12 || text.ends_with('.') {
+            return None;
+        }
+        let mut value = 0u64;
+        for i in 0..12 {
+            let digit = match text.as_bytes().get(i) {
+                Some(c) => ACCOUNT_ALPHABET.iter().position(|a| a == c)? as u64,
+                None => 0,
+            };
+            value = (value << 5) | digit;
+        }
+        Some(Account(value))
+    }
+}
+psio::json_text_form!(Account);
+
+#[derive(
+    Debug, Clone, PartialEq, psio::JsonText, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema,
+)]
+struct Transfer {
+    from: Account,
+    to: Account,
+    amount: u64,
+    payer: Option<Account>,
+    notify: Vec<Account>,
+    since: Option<Version>,
+}
+
+/// The handlers of the fixture's custom text forms, from the types' own
+/// `TextForm`: one call each, under the id their schema carries.
+fn typed_handlers() -> dynamic::CustomHandlers {
+    let mut handlers = dynamic::CustomHandlers::new();
+    handlers.add_type::<Version>().unwrap().add_type::<Account>().unwrap();
+    handlers
 }
 
 #[derive(
@@ -262,6 +321,10 @@ struct Row {
     canonical: Option<String>,
     /// Typed C++ `psio::pssz` bytes of the row's value (lowercase hex).
     pssz: Option<String>,
+    /// Value rows of a type holding a custom text form: the text a schema
+    /// reader writes with no handler registered (the wire type's own text).
+    plain_json: Option<String>,
+    plain_ijson: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -271,6 +334,12 @@ struct TypeRow {
     ir: bool,
     /// Value and accept rows of the type carry `pssz`.
     pssz: bool,
+    /// The typed `auto_pssz_width_v<T>` (present when `pssz`).
+    auto_width: Option<usize>,
+    /// The type holds a custom text form: its value rows carry
+    /// `plain_json` / `plain_ijson`.
+    #[serde(default)]
+    custom: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -430,18 +499,30 @@ fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
     row: &Row,
     typed_pssz: &dyn Fn(&T) -> Option<Vec<u8>>,
 ) -> Result<(), String> {
+    // The handlers are the types' own text forms; a type without a custom
+    // form never looks one up.
+    let handlers = typed_handlers();
+    let handlers = &handlers;
+    // Shadow the plain entry points: every call below goes through the
+    // registry.
+    mod dynamic {
+        pub use psio::pssz::dynamic::{auto_width, validate_pssz};
+        pub use psio::pssz::dynamic::{
+            json_to_pssz_with as json_to_pssz, pssz_to_json_with as pssz_to_json,
+        };
+    }
     let (schema, root) = schema_for::<T>().map_err(|e| format!("schema_for {e:?}"))?;
     // One text read through the schema: the bytes it gives, which must turn
     // back into the typed texts of the typed value.
     let convert = |ijson: bool, text: &[u8]| -> Result<Vec<u8>, String> {
         let (bytes, value): (Vec<u8>, T) = if ijson {
             (
-                dynamic::json_to_pssz::<IJson>(&schema, &root, text).map_err(|e| e.to_string())?,
+                dynamic::json_to_pssz::<IJson>(&schema, &root, text, handlers).map_err(|e| e.to_string())?,
                 json::from_slice::<IJson, T>(text).map_err(|e| e.to_string())?,
             )
         } else {
             (
-                dynamic::json_to_pssz::<Json>(&schema, &root, text).map_err(|e| e.to_string())?,
+                dynamic::json_to_pssz::<Json>(&schema, &root, text, handlers).map_err(|e| e.to_string())?,
                 json::from_slice::<Json, T>(text).map_err(|e| e.to_string())?,
             )
         };
@@ -455,7 +536,7 @@ fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
         }
         // Same text, or the same refusal (a string holding a Unicode
         // noncharacter is JSON but has no I-JSON text).
-        let json_text = dynamic::pssz_to_json::<Json>(&schema, &root, &bytes)
+        let json_text = dynamic::pssz_to_json::<Json>(&schema, &root, &bytes, handlers)
             .map(|(text, unknown)| {
                 assert!(!unknown);
                 text
@@ -465,7 +546,7 @@ fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
         if json_text != typed {
             return Err(format!("schema path writes json {json_text:?}, typed {typed:?}"));
         }
-        let ijson_text = dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes)
+        let ijson_text = dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes, handlers)
             .map(|(text, unknown)| {
                 assert!(!unknown);
                 text
@@ -487,12 +568,12 @@ fn check_rust_ir<T: Val<Json> + Val<IJson> + ToPsszSchema>(
             Ok(())
         }
         ("accept", Some(format)) => convert(format == "ijson", &input(row)).map(|_| ()),
-        ("reject", Some("json")) => match dynamic::json_to_pssz::<Json>(&schema, &root, &input(row)) {
+        ("reject", Some("json")) => match dynamic::json_to_pssz::<Json>(&schema, &root, &input(row), handlers) {
             Ok(_) => Err("schema path accepts".into()),
             Err(_) => Ok(()),
         },
         ("reject", Some("ijson")) => {
-            match dynamic::json_to_pssz::<IJson>(&schema, &root, &input(row)) {
+            match dynamic::json_to_pssz::<IJson>(&schema, &root, &input(row), handlers) {
                 Ok(_) => Err("schema path accepts".into()),
                 Err(_) => Ok(()),
             }
@@ -514,6 +595,8 @@ struct Entry {
     rust_ir: Option<Check>,
     /// `dynamic::auto_width` of the Rust IR against `auto_pssz_width::<T>()`.
     width: Option<fn() -> Result<(), String>>,
+    /// `auto_pssz_width::<T>()`, for the fixture's recorded `auto_width`.
+    typed_width: Option<fn() -> usize>,
 }
 
 fn rust_ir_with_pssz<T: Packed + ToPsszSchema>(row: &Row) -> Result<(), String> {
@@ -538,13 +621,13 @@ fn registry() -> BTreeMap<&'static str, Entry> {
     // `types!`: typed pssz bytes in the fixture and a Rust-generated IR.
     // `bounded!`: no pssz bytes in the fixture (C++ `psio::bounded` has no
     // pssz encoding); Rust still has a typed codec and an IR for them.
-    // `text_only!`: a custom text form; no IR, no pssz.
     macro_rules! types {
         ($($id:literal => $ty:ty,)*) => {$( map.insert($id, Entry {
             check: check_pssz::<$ty>,
             pssz: true,
             rust_ir: Some(rust_ir_with_pssz::<$ty>),
             width: Some(width_agrees::<$ty>),
+            typed_width: Some(psio::pssz::auto_pssz_width::<$ty>),
         }); )*};
     }
     macro_rules! bounded {
@@ -553,19 +636,8 @@ fn registry() -> BTreeMap<&'static str, Entry> {
             pssz: false,
             rust_ir: Some(rust_ir_text_only::<$ty>),
             width: Some(width_agrees::<$ty>),
+            typed_width: None,
         }); )*};
-    }
-    macro_rules! text_only {
-        ($($id:literal => $ty:ty,)*) => {$( map.insert($id, Entry {
-            check: check_text::<$ty>,
-            pssz: false,
-            rust_ir: None,
-            width: None,
-        }); )*};
-    }
-    text_only! {
-        "Version" => Version,
-        "Release" => Release,
     }
     bounded! {
         "list<u16><=3" => BoundedList<u16, 3>,
@@ -609,6 +681,12 @@ fn registry() -> BTreeMap<&'static str, Entry> {
         "Wide" => Wide,
         "Capped" => Capped,
         "Shapes" => Shapes,
+        // Custom text forms: Custom nodes in the IR, read and written
+        // through the handler registry on the schema path.
+        "Version" => Version,
+        "Release" => Release,
+        "Account" => Account,
+        "Transfer" => Transfer,
         "string<=4" => BoundedString<4>,
     }
     // `BoundedList<u8, N>` is a byte payload: nothing on the wire has an
@@ -673,6 +751,15 @@ fn the_fixture_covers_every_type_kind_and_format() {
     assert!(registry.len() >= 44);
     for ty in &fixture.types {
         let entry = &registry[ty.id.as_str()];
+        // The typed width the fixture records is the typed Rust width.
+        assert_eq!(ty.auto_width.is_some(), ty.pssz, "{}: auto_width", ty.id);
+        assert_eq!(entry.typed_width.map(|width| width()), ty.auto_width, "{}: width", ty.id);
+        assert_eq!(
+            ty.custom,
+            matches!(ty.id.as_str(), "Version" | "Release" | "Account" | "Transfer"),
+            "{}: custom",
+            ty.id
+        );
         assert_eq!(entry.pssz, ty.pssz, "{}: pssz", ty.id);
         assert_eq!(entry.rust_ir.is_some(), ty.ir, "{}: ir", ty.id);
         assert!(valued.contains(&ty.id), "no value vector for {}", ty.id);
@@ -680,6 +767,9 @@ fn the_fixture_covers_every_type_kind_and_format() {
     for row in &fixture.vectors {
         let ty = fixture.types.iter().find(|t| t.id == row.ty).expect("listed type");
         assert_eq!(row.pssz.is_some(), ty.pssz && row.kind != "reject", "{}: pssz", row.name);
+        let plain = ty.custom && row.kind == "value";
+        assert_eq!(row.plain_json.is_some(), plain, "{}: plain_json", row.name);
+        assert_eq!(row.plain_ijson.is_some(), plain, "{}: plain_ijson", row.name);
     }
     assert!(!fixture.schema_ir.is_empty() && fixture.schema_ir.len() % 2 == 0);
     assert!(fixture.vectors.iter().filter(|r| r.pssz.is_some()).count() >= 600);
@@ -761,6 +851,178 @@ fn the_enum_and_wide_integer_ir_rust_builds_is_the_ir_cpp_recorded() {
             "{id}"
         );
     }
+}
+
+#[test]
+fn custom_text_forms_go_through_the_handler_registry_or_fall_back_to_the_wire_type() {
+    use psio::pssz::schema_ir::{AnyType, AnyValue, Schema};
+    let fixture = fixture();
+    // The IR Rust builds for the custom types is the IR C++ recorded.
+    let recorded = psio::pssz::from_pssz::<Pssz, Schema>(&unhex(&fixture.schema_ir)).unwrap();
+    let named = |schema: &Schema, id: &str| -> AnyType {
+        schema.resolve(schema.get(id).expect("listed")).expect("resolves").clone()
+    };
+    // (Anonymous member types have builder-assigned names, so the record is
+    // compared member by member.)
+    let (version, _) = schema_for::<Version>().unwrap();
+    for schema in [&version, &recorded] {
+        let AnyValue::Custom(custom) = &named(schema, "Version").value else { panic!("Custom") };
+        assert_eq!(custom.id, "Version");
+        let AnyValue::Object(record) = &custom.r#type.value else { panic!("Object") };
+        let members: Vec<_> = record
+            .members
+            .iter()
+            .map(|m| (m.name.as_str(), schema.resolve(&m.r#type).unwrap().clone(), m.attributes.len()))
+            .collect();
+        let u16_type = AnyType::new(AnyValue::Int(psio::pssz::schema_ir::Int { bits: 16, isSigned: false }));
+        assert_eq!(members, [("major", u16_type.clone(), 0), ("minor", u16_type, 0)]);
+        assert!(record.attributes.is_empty());
+    }
+    let (account, _) = schema_for::<Account>().unwrap();
+    assert_eq!(named(&account, "Account"), named(&recorded, "Account"));
+    let AnyValue::Custom(custom) = &named(&account, "Account").value else { panic!("Custom") };
+    assert_eq!(custom.id, "AccountName");
+    assert_eq!(Version::custom_id().as_deref(), Some("Version"));
+    assert_eq!(Account::custom_id().as_deref(), Some("AccountName"));
+    assert_eq!(Release::custom_id(), None);
+
+    let handlers = typed_handlers();
+    let mut strict = dynamic::CustomHandlers::new();
+    strict.set_strict(true);
+    let mut partial = typed_handlers_of_version_only();
+    partial.set_strict(true);
+    const NO_HANDLER: &str = "pssz dynamic: no handler registered for a custom type";
+
+    fn check<T: Packed + ToPsszSchema>(
+        row: &Row,
+        handlers: &dynamic::CustomHandlers,
+        strict: &dynamic::CustomHandlers,
+    ) -> usize {
+        let name = &row.name;
+        let (schema, root) = schema_for::<T>().unwrap();
+        let (Some(json_text), Some(ijson_text), Some(pssz)) = (&row.json, &row.ijson, &row.pssz)
+        else {
+            panic!("{name}: value row")
+        };
+        let bytes = unhex(pssz);
+        let plain_json = row.plain_json.as_ref().expect("plain_json");
+        let plain_ijson = row.plain_ijson.as_ref().expect("plain_ijson");
+        // With handlers: the typed text from the bytes, the bytes from it.
+        assert_eq!(
+            dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, handlers).unwrap().0,
+            *json_text,
+            "{name}"
+        );
+        assert_eq!(
+            dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, handlers).unwrap().0,
+            *ijson_text,
+            "{name}"
+        );
+        assert_eq!(
+            dynamic::json_to_pssz_with::<Json>(&schema, &root, json_text.as_bytes(), handlers).unwrap(),
+            bytes,
+            "{name}"
+        );
+        assert_eq!(
+            dynamic::json_to_pssz_with::<IJson>(&schema, &root, ijson_text.as_bytes(), handlers).unwrap(),
+            bytes,
+            "{name}"
+        );
+        // Without: the wire type's own text, which reads back to the bytes.
+        assert_eq!(dynamic::pssz_to_json::<Json>(&schema, &root, &bytes).unwrap().0, *plain_json, "{name}");
+        assert_eq!(dynamic::pssz_to_json::<IJson>(&schema, &root, &bytes).unwrap().0, *plain_ijson, "{name}");
+        assert_eq!(dynamic::json_to_pssz::<Json>(&schema, &root, plain_json.as_bytes()).unwrap(), bytes, "{name}");
+        assert_eq!(dynamic::json_to_pssz::<IJson>(&schema, &root, plain_ijson.as_bytes()).unwrap(), bytes, "{name}");
+        // An empty registry is the same fallback.
+        let empty = dynamic::CustomHandlers::new();
+        assert_eq!(
+            dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &empty).unwrap().0,
+            *plain_json
+        );
+        // With a handler the plain form is not also accepted (unless the two
+        // are the same text, which no row of these types is).
+        assert_ne!(plain_json, json_text, "{name}");
+        assert!(dynamic::json_to_pssz_with::<Json>(&schema, &root, plain_json.as_bytes(), handlers).is_err(), "{name}");
+        assert!(dynamic::json_to_pssz_with::<IJson>(&schema, &root, plain_ijson.as_bytes(), handlers).is_err(), "{name}");
+        // Strict: a missing handler is an error in both directions.
+        for error in [
+            dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, strict).unwrap_err(),
+            dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, strict).unwrap_err(),
+            dynamic::json_to_pssz_with::<Json>(&schema, &root, json_text.as_bytes(), strict).unwrap_err(),
+            dynamic::json_to_pssz_with::<IJson>(&schema, &root, plain_ijson.as_bytes(), strict).unwrap_err(),
+        ] {
+            assert_eq!(error.what(), NO_HANDLER, "{name}");
+        }
+        // The binary side never needs a handler.
+        assert_eq!(dynamic::validate_pssz(&schema, &root, &bytes), Ok(false), "{name}");
+        1
+    }
+    let mut rows = 0usize;
+    for row in fixture.vectors.iter().filter(|row| row.kind == "value") {
+        rows += match row.ty.as_str() {
+            "Version" => check::<Version>(row, &handlers, &strict),
+            "Release" => check::<Release>(row, &handlers, &strict),
+            "Account" => check::<Account>(row, &handlers, &strict),
+            "Transfer" => check::<Transfer>(row, &handlers, &strict),
+            _ => 0,
+        };
+    }
+    assert!(rows >= 15, "custom value rows: {rows}");
+
+    // A strict registry that has every handler the type needs is satisfied;
+    // one that lacks any of them is not.
+    let (schema, root) = schema_for::<Transfer>().unwrap();
+    let transfer = Transfer {
+        from: Account::from_text("alice").unwrap(),
+        to: Account::from_text("bob").unwrap(),
+        amount: 7,
+        payer: None,
+        notify: vec![],
+        since: Some(Version { major: 1, minor: 2 }),
+    };
+    let bytes = psio::pssz::try_to_pssz::<Pssz, _>(&transfer).unwrap();
+    let mut all = typed_handlers();
+    all.set_strict(true);
+    assert_eq!(
+        dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &all).unwrap().0,
+        json::to_string::<IJson, _>(&transfer).unwrap()
+    );
+    assert_eq!(
+        dynamic::pssz_to_json_with::<IJson>(&schema, &root, &bytes, &partial).unwrap_err().what(),
+        NO_HANDLER
+    );
+    // Not strict: the handled ids are presented, the others plain.
+    partial.set_strict(false);
+    assert_eq!(
+        dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &partial).unwrap().0,
+        r#"{"from":235814801429757952,"to":274965867874222080,"amount":7,"payer":null,"notify":[],"since":"1.2"}"#
+    );
+    // A handler's errors are errors of the conversion.
+    let mut failing = dynamic::CustomHandlers::new();
+    failing.add(
+        "AccountName",
+        |_bytes: &[u8]| Err(psio::pssz::PsszError("no text")),
+        |_text: &str| Ok(vec![1, 2, 3]), // not a u64
+    );
+    assert_eq!(
+        dynamic::pssz_to_json_with::<Json>(&schema, &root, &bytes, &failing).unwrap_err().what(),
+        "json: custom handler has no text for the value"
+    );
+    let text = json::to_string::<Json, _>(&transfer).unwrap();
+    assert_eq!(
+        dynamic::json_to_pssz_with::<Json>(&schema, &root, text.as_bytes(), &failing).unwrap_err().what(),
+        "json: custom handler produced bytes that are not the inner type"
+    );
+    // A type that is not declared custom has no id to register under.
+    assert!(dynamic::CustomHandlers::new().add_type::<Version>().is_ok());
+    assert!(dynamic::CustomHandlers::new().contains("Version") == false);
+    assert!(typed_handlers().contains("AccountName") && !typed_handlers().contains("Account"));
+}
+
+fn typed_handlers_of_version_only() -> dynamic::CustomHandlers {
+    let mut handlers = dynamic::CustomHandlers::new();
+    handlers.add_type::<Version>().unwrap();
+    handlers
 }
 
 #[test]
