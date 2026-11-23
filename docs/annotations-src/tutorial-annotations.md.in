@@ -166,6 +166,12 @@ child records their own cap or bounds
   adding an optional field must not change the width.
 - When unsure, go one size up. A width that is too small cannot be changed
   after publication; one that is too large costs a byte or two per offset.
+- The cap counts **bytes**. A cap on the **number of fields** is a separate
+  keyword, `maxFields(N)` (N ≤ 255): it changes no byte, and once published
+  it can be neither exceeded, raised nor dropped
+  ([annotations.md §5.6](annotations.md#56-maxfieldsn)).
+- Member bounds need the same foresight: after publication a bound may only
+  widen (Step 4).
 
 ## Step 4 — Add a field compatibly
 
@@ -198,14 +204,29 @@ has 68 bytes of slack. The `email` field of `AccountV2` (slot 1 + selector
 `Account` from 8-bit to 16-bit. Whether a future field fits should not
 depend on such arithmetic: declare the cap.
 
-**What the check does not see** (`tut-4c`):
+**A published bound may only widen** (`tut-4c`). The check compares the
+annotations too:
 
 @@SEC tut-4c@@
 
-`pssz_evolves_from` compares layouts and widths. A tightened bound, an
-added `utf8`, a changed invariant keep the layout and still make a reader
-reject stored records. Treat those as frozen once published
-([annotations.md §8](annotations.md#8-evolution-what-may-change-after-publication)).
+- A **wider** bound is compatible, in one direction: the new reader reads
+  everything the old writer produced. Old readers reject the new, longer
+  values — upgrade readers before writers.
+- A **tighter** bound, an added or dropped `utf8`, an added or dropped
+  `sorted` / `unique`, a lowered cap are refused: one side would reject
+  what the other wrote.
+- A wider bound that moves an offset width (here the table of `tags`) is
+  refused too: it changes the bytes.
+
+On bytes (`tut-4c-run`):
+
+@@RUN tut-4c-run@@
+
+The exact rule is in
+[annotations.md §8.3](annotations.md#83-annotations-bounds-may-only-widen)
+and [pssz-optional-evolution.md](pssz-optional-evolution.md). What the
+check still cannot see — a changed invariant, the meaning of an enumerator
+— stays frozen by convention.
 
 ## Step 5 — Raw bytes or UTF-8 text
 
@@ -221,8 +242,9 @@ languages: C++ `std::string` = Rust `RawString`; C++ `std::string` + `utf8`
 
 @@RUN tut-5-run@@
 
-`utf8` is always enforced — by every pssz and JSON writer and reader, and
-by the key readers. There is no weaker form.
+`utf8` is always enforced — by every pssz, JSON and key writer and reader.
+There is no weaker form, and no stricter reading of a raw string either:
+`validate_strict` accepts any bytes in one.
 
 Use `utf8` for anything a person reads (names, memos, URLs) and plain
 bytes for hashes, signatures and packed data. For byte data proper,
@@ -268,9 +290,10 @@ whose bytewise order is the value's order ([key-spec.md](key-spec.md)).
 @@RUN tut-7-run@@
 
 - Annotations do not change key bytes, and a key has no offset width.
-- **Limit:** the C++ key encoder does not check member bounds or `utf8`;
-  the key readers do. Validate keys that arrive from outside. (The Rust,
-  TypeScript and Python key writers check bounds.)
+- The key writer checks what the pssz writer checks: `to_key` throws for a
+  value outside a member bound or with a `utf8` member that is not UTF-8,
+  and `psio::encode_key_checked(value, out)` returns a status instead.
+  Validate keys that arrive from outside (`validate_key` / `from_key`).
 
 ## Step 8 — Transparent wrappers and invariants
 
@@ -292,6 +315,20 @@ and depends only on the value. It runs in every writer and every checking
 reader of pssz, key and JSON — not in the trusted decode and not in views
 (Step 11).
 
+**Write** a first-class bounded type when a bounded string has a name of
+its own. The member of a transparent type may carry `utf8`, `max<N>` and
+the position specs; the wrapper then *is* that bounded type (`tut-8c`):
+
+@@SEC tut-8c@@
+
+**Get / check** (`tut-8c-run`):
+
+@@RUN tut-8c-run@@
+
+`Memo` keeps `std::string` as its member and is, in bytes, width, key, text
+and schema, `psio::utf8_string<80>`. Every record and every argument list
+that holds a `Memo` gets the bound without repeating it.
+
 ## Step 9 — Methods with capped arguments
 
 **Write** the service's methods in the same `PSIO_REFLECT`. The arguments
@@ -306,17 +343,37 @@ record's members take (`tut-9a`):
   record's cap it also narrows the lists and maps among the arguments.
 - `returns(specs)` annotates the return value.
 - A method has at most 255 parameters: an argument list is a tuple, and a
-  tuple has at most 255 elements.
+  tuple has at most 255 elements. `maxFields(N)` in `method(...)` promises
+  a lower number for the method's lifetime.
 
 **Get.** `psio::reflect<Bank>::method_arg_tuple<I>` is the type to encode,
 decode and validate arguments as:
 
 @@RUN tut-9-run@@
 
+In text, an argument list whose parameters are all named is written as a
+JSON object and read as that object or as the positional array
+(`tut-9-json`); binary is always the positional tuple:
+
+@@RUN tut-9-json@@
+
 A method evolves like a record: append `std::optional` parameters, under a
 cap declared from the first version (`tut-9b`):
 
 @@SEC tut-9b@@
+
+A parameter of a first-class type brings its bound with it. With the `Memo`
+of Step 8 the capped transfer needs no `attr` and is the same argument
+list, byte for byte (`tut-9c`):
+
+@@SEC tut-9c@@
+
+@@RUN tut-9c-run@@
+
+A result is encoded as the type its `returns(...)` describes, with
+`psio::encode_method_result<T, I>(value, out)` /
+`psio::decode_method_result<T, I>(bytes, out)`
+([annotations.md §5.11](annotations.md#511-methodname-)).
 
 **Check.** The assertions above; and the schema of the interface carries
 the same types (`psio::SchemaBuilder{}.insert_interface<Bank>()`,
@@ -441,12 +498,16 @@ class Bank(Protocol):
     def symbol(self, token: u32) -> Annotated[str, psio.max(8)]: ...
 ```
 
-Differences to know: Rust has no `exact` / `min` / `maxFields`; TypeScript
-and Python have no compile-time `pssz_evolves_from` (compare the widths
-and test old bytes against the new type); TypeScript has no return-value
-annotation; Rust, TypeScript and Python check member bounds when they
-*write* a key, C++ only when it reads one. The full table is in
-[annotations.md §4](annotations.md#4-master-table).
+Differences to know: Rust has no `exact` / `min`; TypeScript and Python
+have no `pssz_evolves_from` (compare the widths and test old bytes against
+the new type), and Rust's refuses every change of a bound where C++ allows
+widening; TypeScript has no return-value annotation. The C++ behaviour of
+the latest consistency round — enforced `maxFields`, `sorted` / `unique`,
+the array form of JSON arguments, the round-trip rule of the name coders —
+is marked "not yet available" per language in
+[annotations.md §4](annotations.md#4-master-table) and
+[§4.1](annotations.md#41-tooling-per-language) until its mirror is
+committed.
 
 ## Step 11 — Reading: views, validated and trusted
 

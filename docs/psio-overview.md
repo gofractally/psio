@@ -144,26 +144,32 @@ spellings are in the [master table](annotations.md#4-master-table)):
 | annotation | states | read by |
 |---|---|---|
 | `max<N>`, `exact<N>`, `min<N>` | the length of a string, list, map, set or nested value | pssz (offset widths, enforced), json / ijson and key (enforced), the Schema IR, WIT |
-| `utf8` | a string is UTF-8 text, not raw bytes; always enforced | pssz, json / ijson, key readers, the Schema IR |
+| `utf8` | a string is UTF-8 text, not raw bytes; always enforced | pssz, json / ijson, key (writers and readers), the Schema IR |
 | `element(...)`, `keys(...)`, `values(...)`, `at<I>(...)` | the same, for the positions below a member | as the two rows above |
 | `maxDynamicData(N)` | the limit of a record's (or an argument list's) encoded size; its offset width for its lifetime; the bound that selects the widths of the lists, maps and tuples beneath it | pssz, the Schema IR, WIT |
 | `definitionWillNotChange()` | the record never gains a field: no header | pssz, bin / borsh / bincode fast paths |
-| `maxFields(N)` | a declared field-count cap | the Schema IR and WIT only |
-| `transparent()` | the type is its one member | pssz, key, json / ijson, views, schema, GraphQL |
+| `maxFields(N)` | a cap on the number of fields of a record, or of parameters of a method (N ≤ 255); no byte, no width | enforced at compile time, by `pssz_evolves_from` and by the schema-driven codecs; the Schema IR, WIT |
+| `sorted`, `unique`, `unique_keys` | the elements of a list or array are in order / pairwise different (order of their key bytes) | pssz, json / ijson, key writers and checking readers; **not** in the Schema IR |
+| `transparent()` | the type is its one member; the member may carry `utf8`, `max<N>` and position specs, and the type is then that bounded type | pssz, key, json / ijson, views, schema, GraphQL |
 | `invariant(fn)` | a predicate every value of the type satisfies | pssz, key, json / ijson writers and checking readers |
 | `json_string`, `json_number`, `ijson_string`, `ijson_number` | the text form of an integer member | json, ijson |
-| `PSIO_ADAPTER(T, psio::text_category, Impl)`, `as<Tag>` | a custom text form | json, ijson, GraphQL |
+| `PSIO_ADAPTER(T, psio::text_category, Impl)`, `as<Tag>` | a custom text form (a text-only adapter leaves every binary format unchanged) | json, ijson, GraphQL |
 | `PSIO_REFLECT_ENUM(E, …)` | the names of an enum's values | json, ijson, GraphQL |
 | `field<N>` | a protobuf field number | protobuf |
 
 What does **not** exist: there is no `@bytes_encoding`, `@numeric_string`,
-`@key_suffix`, `@as_decimal`, `@sorted_keys` or `@is_sorted` annotation in
-any language. A byte list is hex in I-JSON and a number array in JSON by
-its type; a 64-bit integer is a string in I-JSON by the format's rule or by
-`ijson_string`; `sorted` / `unique` can be attached in C++ but no codec
-checks them ([annotations.md §5.13](annotations.md#513-sorted-unique-unique_keys)).
-The starter taxonomy of [§6](#6-annotation-taxonomy-initial) is an early
-design sketch, not a description of the code.
+`@key_suffix`, `@as_decimal`, `@sorted_keys`, `@is_sorted`, `since_version`
+or `extension_subtype` annotation in any language. A byte list is hex in
+I-JSON and a number array in JSON by its type; a 64-bit integer is a string
+in I-JSON by the format's rule or by `ijson_string`; an ordered list says
+`sorted` / `unique`
+([annotations.md §5.13](annotations.md#513-sorted-unique-unique_keys)), and
+a map or set is ordered by its type. A handful of spec names are declared
+in C++ and **reserved** — nothing reads them
+([annotations.md §5.14](annotations.md#514-reserved-vocabulary)). One rule
+holds for all of them: an annotation is enforced by every codec that has a
+use for it, or it is reserved; none is checked by a "strict" mode only.
+[§6](#6-annotation-taxonomy-initial) groups the annotations by what they do.
 
 ### 2.6 Nested value
 
@@ -448,7 +454,8 @@ refuses a value outside the tree on encode (`encode` throws,
 `encode_pssz_checked` reports) and a frame that holds one on `validate`,
 `validate_strict`, the checked decode and the fail-fast decode; `psio::json`
 / `psio::ijson` refuse it when writing and reading; `psio::key` refuses it
-when reading a key; the schema-driven codecs enforce the bounded nodes the
+when writing a key (`to_key` throws, `encode_key_checked` reports) and when
+reading one; the schema-driven codecs enforce the bounded nodes the
 schema carries. A record, a tuple, a pair, a map entry, an array of variable
 elements and a list, map or set of variable elements each take their offset
 width from their own bound, and the annotations of their position narrow it
@@ -466,8 +473,10 @@ addressable through a mutable view.
 
 ### Method parameters and the argument cap
 
-`method(name, ...)` takes the same annotations for its parameters, a cap for
-its argument tuple, and annotations for its return value, in one flat list:
+`method(name, ...)` takes the same annotations for its parameters, a byte
+cap (`maxDynamicData(N)`) and a parameter-count cap (`maxFields(N)`, N ≤ 255)
+for its argument tuple, and annotations for its return value, in one flat
+list ([annotations.md §5.11](annotations.md#511-methodname-)):
 
 ```cpp
 struct token {
@@ -507,13 +516,24 @@ declarations are unchanged.
   `psio::pssz_evolves_from<OldArgs, NewArgs>` is true. Without a cap the width
   is the inferred bound's; an added argument that crosses 255 or 65 535 bytes
   changes it, and `pssz_evolves_from` is false at compile time.
-- `psio::check_method_result<T, I>(value)` checks a return value against
-  `returns(...)`. (A bare string or list has no width of its own, so its
-  bytes do not depend on the bound.)
+- A result is encoded as the type `returns(...)` makes of it:
+  `psio::encode_method_result<T, I>(value, out)`,
+  `validate_method_result<T, I>(bytes)`, `decode_method_result<T, I>(bytes, out)`;
+  `psio::check_method_result<T, I>(value)` only checks. A bare string has no
+  width of its own, so its bytes do not depend on the bound; a bounded list
+  of variable-size elements has the narrow offset table of the bounded type.
+- `psio::max_encoded_size<Args>()` is the bound inferred from the
+  parameters, as for a record; the cap is `psio::max_dynamic_data_v<Args>`.
+- In JSON an argument list whose parameters are all named is written as an
+  object keyed by parameter name and read as that object or as the
+  positional array; an unnamed list is the array. Binary is always the
+  positional tuple (`docs/json.md`, "Method arguments").
 - In the Schema IR of a `PSIO_INTERFACE` whose functions come from
   `reflect<T>`, the parameters and the result are the bounded types and the
-  cap is the function's `maxDynamicData` attribute; `emit_wit` writes it as
-  `@maxDynamicData(N)` above the function.
+  caps are the function's `maxDynamicData` and `maxFields` attributes;
+  `emit_wit` writes `@maxDynamicData(N)` above the function. An argument
+  list as a type is an `Object` with the attribute `tuple = "named"` or
+  `"positional"`. The shared rows are `conformance/interface-vectors.json`.
 
 There is one proxy, `psio::reflect<T>::proxy<P>`. It inherits `P`; each
 field is a member `name()` that returns `P::get<I, &T::name>()` and each
@@ -647,49 +667,65 @@ than silently doing the wrong thing.
 
 ## 6. Annotation taxonomy (initial)
 
-The annotation channel carries metadata that's meaningful across
-formats. Below is the **starter taxonomy** every host MUST recognize.
-Format implementations MAY honor more, but these are the cross-format
-baseline:
+The annotation channel carries metadata that is part of the type and
+meaningful across formats. This section groups what exists by what it
+does; the reference for every spelling, format and language is
+[annotations.md](annotations.md) and its
+[master table](annotations.md#4-master-table). (An earlier revision of this
+section listed a pjson-era vocabulary — `bytes_encoding`,
+`as_numeric_string`, `as_decimal`, `escape_form`, `sorted_keys`,
+`is_sorted`, `key_suffix`, `since_version`, `extension_subtype`. None of
+those exists in any language.)
 
-### 6.1 Bytes-presentation hints
+### 6.1 Size: bounds and caps
 
-- `bytes_encoding = base64` (default) | `hex` | `base58` | `base64url`
-  — controls JSON-text rendering of byte fields. Wire format MAY
-  carry this hint inline (pjson §4.10); other formats encode raw
-  bytes and rely on the schema annotation alone.
+- `max<N>`, `exact<N>`, `min<N>` (and `min<A> | max<B>`, one range) — the
+  length of a string, list, map, set or nested value. Enforced by pssz,
+  json / ijson and key writers and readers; `max` / `exact` select pssz
+  offset widths.
+- `element(...)`, `keys(...)`, `values(...)`, `at<I>(...)` — the same for
+  the positions below a member, to any depth.
+- `maxDynamicData(N)` — the byte cap of a record or argument list, and its
+  offset width for its lifetime.
+- `maxFields(N)` — the cap on the number of fields or parameters (N ≤ 255);
+  every record and tuple has at most 255 regardless.
 
-### 6.2 Integer-presentation hints
+### 6.2 What a value is
 
-- `as_numeric_string` — emit as quoted JSON string in JSON-text
-  formats; in binary formats, may use a wrapper type (pjson
-  `numeric_string`, §4.8) or just behave normally.
-- `as_decimal` — for float-valued fields: encode as exact decimal
-  (mantissa + scale). pjson uses `decimal` (§4.7), other formats
-  may use a string representation.
+- `utf8` — a string is UTF-8 text; a plain `std::string` is raw bytes
+  (Rust `String` / `RawString`). Bytes are a byte list by type: hex in
+  I-JSON, a number array in JSON. There is no bytes-presentation hint.
+- `sorted`, `unique`, `unique_keys` — the order or uniqueness of a list's
+  elements, by their key bytes. Enforced by the typed codecs; not in the
+  Schema IR. A map or set is ordered and unique by its type.
+- `transparent()` — the type is its one member (which may be bounded).
+- `invariant(fn)` — a predicate every value satisfies.
+- `definitionWillNotChange()` — the record never gains a field.
 
-### 6.3 String-presentation hints
+### 6.3 Text presentation
 
-- `escape_form` — text is already JSON-escape-encoded; emitter
-  doesn't re-escape. (pjson §4.9 flag 1)
-- `raw_text` (default) — text is unescaped Unicode; emitter runs the
-  escape pass.
+- `json_string`, `json_number`, `ijson_string`, `ijson_number` — the text
+  form of an integer member; without them `ijson` writes a 64-bit integer
+  beyond 2^53 − 1 as a decimal string.
+- `PSIO_ADAPTER(T, psio::text_category, Impl)` and `as<Tag>` on a member — a
+  custom text form; the binary form is unchanged.
+- `PSIO_REFLECT_ENUM` — enumerator names for text; the wire is the integer.
 
-### 6.4 Container-shape hints
+### 6.4 One format only
 
-- `sorted_keys` (object) — keys are in lex-sorted byte order.
-  Enables binary-search lookups (pjson §E-001).
-- `is_sorted` (array) — element values are sorted. Enables binary
-  search in array views.
-- `key_suffix = ".tag"` — object key carries this suffix for the
-  text-format projection.
+- `field<N>` — a protobuf field number.
+- `deprecated_spec` and the `psio::graphql` annotations — GraphQL.
 
-### 6.5 Format-version hints (future)
+### 6.5 Reserved
 
-- `since_version = 2` — field added in spec version 2; older
-  decoders must skip-with-default.
-- `extension_subtype = N` — value is a pjson `extension` (§4.11)
-  with sub-type id N.
+Declared in C++, read by nothing: `hex_spec`, `skip_spec`,
+`default_value_spec`, `default_factory_spec`, `since_spec`, `unstable_spec`,
+`final_v`, `canonical`, `flags`, `padding`
+([annotations.md §5.14](annotations.md#514-reserved-vocabulary)). There is
+no versioning annotation: a type evolves by appending optional fields
+under an unchanged width, and an existing bound may only widen
+([annotations.md §8](annotations.md#8-evolution-what-may-change-after-publication),
+[pssz-optional-evolution.md](pssz-optional-evolution.md)).
 
 ---
 

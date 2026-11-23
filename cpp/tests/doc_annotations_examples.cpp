@@ -9,15 +9,20 @@
 //
 // What is checked: offset widths and inferred bounds (static_assert), round
 // trips, a rejection at bound + 1, the JSON / I-JSON text, key bytes, the
-// Schema IR the annotations produce, and the evolution check.
+// Schema IR the annotations produce, the evolution check, the JSON forms of an
+// argument list, result encoding and the name coders.
 
+#include <psio/compress_name.hpp>
 #include <psio/emit_wit.hpp>
+#include <psio/ext_int.hpp>
+#include <psio/get_type_name.hpp>
 #include <psio/helpers.hpp>
 #include <psio/invariant.hpp>
 #include <psio/json.hpp>
 #include <psio/key.hpp>
 #include <psio/max_size.hpp>
 #include <psio/mutable_view.hpp>
+#include <psio/name.hpp>
 #include <psio/nested.hpp>
 #include <psio/protobuf.hpp>
 #include <psio/pssz.hpp>
@@ -89,6 +94,17 @@ namespace
    bool contains(std::string_view text, std::string_view part)
    {
       return text.find(part) != std::string_view::npos;
+   }
+   // The schema of T with T's own name blanked: equal for two types that are
+   // one type but for the name.
+   template <typename T>
+   std::string shape_text()
+   {
+      std::string            text{schema_text<T>("T")};
+      const std::string      quoted = '"' + std::string{psio::reflect<T>::name} + '"';
+      for (auto at = text.find(quoted); at != std::string::npos; at = text.find(quoted, at + 3))
+         text.replace(at, quoted.size(), "\"_\"");
+      return text;
    }
 }  // namespace
 
@@ -180,6 +196,10 @@ struct AccountV1
 // The cap rules: 16-bit offsets, although today's fields need at most 187 bytes.
 static_assert(psio::max_dynamic_data_v<AccountV1> == 1024);
 static_assert(psio::auto_pssz_width_v<AccountV1> == 2);
+// max_encoded_size stays the bound inferred from the fields; the cap is what rules.
+static_assert(psio::max_encoded_size<AccountV1>() == 187);
+static_assert(psio::effective_max_dynamic_v<AccountV1> == 1024);   // the cap, when one is declared
+static_assert(psio::effective_max_dynamic_v<Account> == 187);      // else the inferred bound
 
 // ── tut-4a: a compatible revision ──────────────────────────────────────────
 struct AccountV2
@@ -292,9 +312,26 @@ struct AccountRecapped
 };
 static_assert(!psio::pssz_evolves_from<AccountV1, AccountRecapped>);
 
-// ── tut-4c: what the check does not see ────────────────────────────────────
-// A changed bound that keeps the width is accepted by pssz_evolves_from, but
-// a reader with the tighter bound rejects records the old writer produced.
+// ── tut-4c: a published bound may only widen ───────────────────────────────
+// The check compares the annotations too. A wider bound is compatible in one
+// direction: the new reader reads every record the old writer produced.
+struct AccountWider
+{
+   std::uint64_t            id = 0;
+   std::string              owner;
+   std::vector<std::string> tags;
+   std::uint64_t            balance = 0;
+   PSIO_REFLECT(AccountWider,
+                id,
+                attr(owner, utf8 | max<64>),   // was max<32>
+                attr(tags, max<8> | element(utf8 | max<16>)),
+                balance,
+                maxDynamicData(1024))
+};
+static_assert(psio::pssz_evolves_from<AccountV1, AccountWider>);
+static_assert(!psio::pssz_evolves_from<AccountWider, AccountV1>);    // never back
+
+// A tighter bound is refused: the new reader would reject stored records.
 struct AccountTighter
 {
    std::uint64_t            id = 0;
@@ -308,7 +345,58 @@ struct AccountTighter
                 balance,
                 maxDynamicData(1024))
 };
-static_assert(psio::pssz_evolves_from<AccountV1, AccountTighter>);   // not a proof of compatibility
+static_assert(!psio::pssz_evolves_from<AccountV1, AccountTighter>);
+
+// So is a wider bound that moves an offset width: 8 tags of <= 40 bytes are
+// 8 + 320 > 255, and the list's table would go from 1 byte to 2.
+struct AccountWideTags
+{
+   std::uint64_t            id = 0;
+   std::string              owner;
+   std::vector<std::string> tags;
+   std::uint64_t            balance = 0;
+   PSIO_REFLECT(AccountWideTags,
+                id,
+                attr(owner, utf8 | max<32>),
+                attr(tags, max<8> | element(utf8 | max<40>)),   // was max<16>
+                balance,
+                maxDynamicData(1024))
+};
+static_assert(!psio::pssz_evolves_from<AccountV1, AccountWideTags>);
+
+// utf8 or raw is what the member is: it cannot be added or dropped.
+struct AccountRawOwner
+{
+   std::uint64_t            id = 0;
+   std::string              owner;
+   std::vector<std::string> tags;
+   std::uint64_t            balance = 0;
+   PSIO_REFLECT(AccountRawOwner,
+                id,
+                attr(owner, max<32>),          // was utf8 | max<32>
+                attr(tags, max<8> | element(utf8 | max<16>)),
+                balance,
+                maxDynamicData(1024))
+};
+static_assert(!psio::pssz_evolves_from<AccountV1, AccountRawOwner>);
+static_assert(!psio::pssz_evolves_from<AccountRawOwner, AccountV1>);
+
+// The cap may grow inside its width class, and may not shrink.
+struct AccountCapRaised
+{
+   std::uint64_t            id = 0;
+   std::string              owner;
+   std::vector<std::string> tags;
+   std::uint64_t            balance = 0;
+   PSIO_REFLECT(AccountCapRaised,
+                id,
+                attr(owner, utf8 | max<32>),
+                attr(tags, max<8> | element(utf8 | max<16>)),
+                balance,
+                maxDynamicData(4096))          // was 1024
+};
+static_assert(psio::pssz_evolves_from<AccountV1, AccountCapRaised>);
+static_assert(!psio::pssz_evolves_from<AccountCapRaised, AccountV1>);
 
 // ── tut-5: raw bytes or UTF-8 text ─────────────────────────────────────────
 struct Note
@@ -372,6 +460,35 @@ struct Symbol
 };
 static_assert(psio::has_invariant_v<Symbol>);
 
+// ── tut-8c: a first-class bounded string ───────────────────────────────────
+struct Memo
+{
+   friend auto operator<=>(const Memo&, const Memo&) = default;
+   std::string contents;
+   PSIO_REFLECT(Memo, transparent(), attr(contents, utf8 | max<80>))
+};
+// Memo is the bounded type its member's annotations describe: on the wire it
+// is psio::utf8_string<80>.
+static_assert(psio::is_transparent_v<Memo>);
+static_assert(psio::max_encoded_size<Memo>() == 80);
+static_assert(psio::max_encoded_size<Memo>() == psio::max_encoded_size<psio::utf8_string<80>>());
+
+struct MemoInType   // the same type with the bound in the member's type
+{
+   psio::utf8_string<80> contents;
+   PSIO_REFLECT(MemoInType, transparent(), contents)
+};
+
+struct Receipt   // a record that holds one: header 1 + id 8 + slot 1 + memo 80
+{
+   friend bool operator==(const Receipt&, const Receipt&) = default;
+   std::uint64_t id = 0;
+   Memo          memo;
+   PSIO_REFLECT(Receipt, id, memo)
+};
+static_assert(psio::max_encoded_size<Receipt>() == 1 + 8 + 1 + 80);
+static_assert(psio::auto_pssz_width_v<Receipt> == 1);
+
 // ── tut-9a: methods ────────────────────────────────────────────────────────
 struct Bank
 {
@@ -395,6 +512,9 @@ static_assert(psio::auto_pssz_width_v<OpenArgs> == 1);
 // transfer is capped: 16-bit for its lifetime.
 static_assert(psio::max_dynamic_data_v<TransferArgs> == 1024);
 static_assert(psio::auto_pssz_width_v<TransferArgs> == 2);
+// max_encoded_size is the bound inferred from the parameters, not the cap:
+// header 1 + slot 1 + from 8 + to 8 + amount 8 + memo 80.
+static_assert(psio::max_encoded_size<TransferArgs>() == 2 + 8 + 8 + 8 + 80);
 
 // ── tut-9b: a method gains an argument ─────────────────────────────────────
 struct BankV2
@@ -407,6 +527,19 @@ struct BankV2
 };
 using TransferArgsV2 = psio::reflect<BankV2>::method_arg_tuple<0>;
 static_assert(psio::pssz_evolves_from<TransferArgs, TransferArgsV2>);
+
+// ── tut-9c: a first-class type as a parameter ──────────────────────────────
+struct Payments
+{
+   void pay(AccountId from, AccountId to, std::uint64_t amount, Memo memo);
+   PSIO_REFLECT(Payments, method(pay, from, to, amount, memo, maxDynamicData(1024)))
+};
+using PayArgs = psio::reflect<Payments>::method_arg_tuple<0>;
+// The bound travels with the type: no attr on the parameter, and the argument
+// list is the one of Bank::transfer.
+static_assert(psio::max_encoded_size<PayArgs>() == psio::max_encoded_size<TransferArgs>());
+static_assert(psio::max_dynamic_data_v<PayArgs> == 1024);
+static_assert(psio::auto_pssz_width_v<PayArgs> == 2);
 }  // namespace tut
 
 // ══ Reference ══════════════════════════════════════════════════════════════
@@ -451,13 +584,16 @@ struct Limits
    std::vector<std::uint32_t> ids;
    PSIO_REFLECT(Limits,
                 attr(digest, exact<32>),                                   // exactly 32 bytes
-                attr(code, psio::length_bound{.max = 8, .min = 2}),        // 2..8 bytes
+                attr(code, min<2> | max<8>),                               // 2..8 bytes
                 attr(ids, max<4>))                                         // <= 4 elements
 };
 // max<N> and exact<N> give the inferred bound its N; min<N> alone bounds nothing.
 // (header + 3 slots) x 1 byte + digest 32 + code 8 + ids 4 x 4
 static_assert(psio::max_encoded_size<Limits>() == 4 + 32 + 8 + 4 * 4);
 static_assert(psio::auto_pssz_width_v<Limits> == 1);
+// min<A> | max<B> is one spec, the range psio::length_bound{.max = B, .min = A}.
+static_assert(std::get<psio::length_bound>(psio::min<2> | psio::max<8>) ==
+              psio::length_bound{.max = 8, .min = 2});
 
 struct AtLeast
 {
@@ -499,12 +635,28 @@ struct Blob
 };
 static_assert(psio::max_encoded_size<Blob>() == 2 + 64 + 4);   // header + slot, data, tag
 
-// ── ref-sorted: declared, not enforced ─────────────────────────────────────
+// ── ref-sorted: order constraints ──────────────────────────────────────────
 struct Ranked
 {
-   std::vector<std::uint32_t> scores;
-   PSIO_REFLECT(Ranked, attr(scores, sorted | max<4>))
+   friend bool operator==(const Ranked&, const Ranked&) = default;
+   std::vector<std::uint32_t>                         scores;    // non-descending
+   std::vector<std::string>                           names;     // strictly ascending: no duplicate
+   std::vector<std::pair<std::string, std::uint32_t>> entries;   // no two with the same .first
+   PSIO_REFLECT(Ranked,
+                attr(scores, sorted | max<4>),
+                attr(names, unique),
+                attr(entries, unique_keys))
 };
+struct Unranked   // the same members without the constraints
+{
+   std::vector<std::uint32_t>                         scores;
+   std::vector<std::string>                           names;
+   std::vector<std::pair<std::string, std::uint32_t>> entries;
+   PSIO_REFLECT(Unranked, attr(scores, max<4>), names, entries)
+};
+// An order constraint is part of the type: it cannot be added or dropped later.
+static_assert(!psio::pssz_evolves_from<Unranked, Ranked>);
+static_assert(!psio::pssz_evolves_from<Ranked, Unranked>);
 
 // ── ref-positions: element, keys, values, at<I> ────────────────────────────
 struct Post
@@ -616,16 +768,16 @@ static_assert(psio::max_encoded_size<Book>() == 3 + (4 + 4 * 18) + 4 * 4);
 static_assert(psio::auto_pssz_width_v<Book> == 1);
 
 // ── ref-nested: nested values ──────────────────────────────────────────────
-struct Memo
+struct Payload
 {
-   friend bool operator==(const Memo&, const Memo&) = default;
+   friend bool operator==(const Payload&, const Payload&) = default;
    std::string text;
-   PSIO_REFLECT(Memo, attr(text, utf8 | max<32>))
+   PSIO_REFLECT(Payload, attr(text, utf8 | max<32>))
 };
 struct Action
 {
-   std::uint64_t      sender = 0;
-   psio::nested<Memo> args;          // on the wire: a byte list holding a Memo
+   std::uint64_t         sender = 0;
+   psio::nested<Payload> args;       // on the wire: a byte list holding a Payload
    PSIO_REFLECT(Action, sender, attr(args, max<64>))
 };
 // header 1 + sender 8 + args (slot 1 + 64)
@@ -672,6 +824,55 @@ struct CappedHolder
    Capped inner;
    PSIO_REFLECT(CappedHolder, inner)
 };
+
+// ── ref-max-fields: a cap on the number of fields ──────────────────────────
+struct Settings
+{
+   std::uint32_t                volume = 0;
+   std::optional<std::uint32_t> balance;
+   PSIO_REFLECT(Settings, volume, balance, maxFields(3), maxDynamicData(64))
+};
+static_assert(psio::max_fields_v<Settings> == 3);
+static_assert(psio::effective_max_fields_v<Settings> == 3);   // the cap; without one, today's count
+static_assert(psio::effective_max_fields_v<Point> == 2);
+static_assert(psio::max_record_fields == 255);                // every record; N of maxFields(N) too
+
+struct SettingsGrown   // a third field: within the cap
+{
+   std::uint32_t                volume = 0;
+   std::optional<std::uint32_t> balance;
+   std::optional<std::uint32_t> treble;
+   PSIO_REFLECT(SettingsGrown, volume, balance, treble, maxFields(3), maxDynamicData(64))
+};
+static_assert(psio::pssz_evolves_from<Settings, SettingsGrown>);
+
+struct SettingsRaised   // a revision may not raise the cap ...
+{
+   std::uint32_t                volume = 0;
+   std::optional<std::uint32_t> balance;
+   std::optional<std::uint32_t> treble;
+   PSIO_REFLECT(SettingsRaised, volume, balance, treble, maxFields(8), maxDynamicData(64))
+};
+static_assert(!psio::pssz_evolves_from<Settings, SettingsRaised>);
+
+struct SettingsDropped   // ... or drop it
+{
+   std::uint32_t                volume = 0;
+   std::optional<std::uint32_t> balance;
+   std::optional<std::uint32_t> treble;
+   PSIO_REFLECT(SettingsDropped, volume, balance, treble, maxDynamicData(64))
+};
+static_assert(!psio::pssz_evolves_from<Settings, SettingsDropped>);
+
+// A method's argument list takes the same cap.
+struct Mixer
+{
+   void set(std::uint32_t channel, std::uint32_t level);
+   PSIO_REFLECT(Mixer, method(set, channel, level, maxFields(4), maxDynamicData(64)))
+};
+using SetArgs = psio::reflect<Mixer>::method_arg_tuple<0>;
+static_assert(psio::reflect<Mixer>::method_max_fields<0> == 4);
+static_assert(psio::max_fields_v<SetArgs> == 4);
 
 // ── ref-thresholds: where the width changes ────────────────────────────────
 struct Raw253   // header 1 + slot 1 + 253 = 255: the last 1-byte record of this shape
@@ -853,6 +1054,46 @@ struct Pixel
    PSIO_REFLECT(Pixel, x, color)
 };
 
+// ── ref-as: a text presentation for one member ─────────────────────────────
+struct Wide
+{
+   friend bool operator==(const Wide&, const Wide&) = default;
+   std::uint32_t id = 0;
+   psio::uint128 amount{};
+   PSIO_REFLECT(Wide, id, attr(amount, as<hex_tag>))   // "0x..." in JSON and I-JSON
+};
+struct WidePlain   // the same record without the presentation
+{
+   std::uint32_t id = 0;
+   psio::uint128 amount{};
+   PSIO_REFLECT(WidePlain, id, amount)
+};
+// A text-only adapter does not reach the binary formats: the same bound and width.
+static_assert(psio::max_encoded_size<Wide>() == 1 + 4 + 16);
+static_assert(psio::max_encoded_size<Wide>() == psio::max_encoded_size<WidePlain>());
+static_assert(psio::auto_pssz_width_v<Wide> == 1);
+
+// ── ref-result: a result is encoded as its returns(...) type ───────────────
+struct Directory
+{
+   std::vector<std::string> names(std::uint32_t limit) const;
+   PSIO_REFLECT(Directory, method(names, limit, returns(max<4> | element(utf8 | max<16>))))
+};
+
+// ── ref-names: names as numbers ────────────────────────────────────────────
+// An account name: a number is given only to text it decodes back to.
+static_assert(psio::name_to_number("alice") == 6697231);
+static_assert(psio::name_to_number("x--b") == 0);    // no number decodes to it: not a name
+static_assert(psio::name_to_number("Alice") == 0);   // outside the alphabet
+// A method name: compressed when the number decodes to the case-folded name ...
+static_assert(psio::detail::method_to_number("transfer") == psio::detail::method_to_number("Transfer"));
+static_assert(!psio::detail::is_hash_name(psio::detail::method_to_number("transfer")));
+// ... and a hash of the name as written otherwise (here the code needs more than 64 bits).
+static_assert(psio::detail::method_to_number("getSymbolType") == 0xd55df3070b8758ebull);
+static_assert(psio::detail::is_hash_name(psio::detail::method_to_number("getSymbolType")));
+static_assert(psio::hash_name("getSymbolType") == 0xd55df3070b8758ebull);
+static_assert(psio::detail::method_to_number("#abc") == 0);   // malformed hash text: not a name
+
 // ── ref-time: time values ──────────────────────────────────────────────────
 struct Event
 {
@@ -986,9 +1227,16 @@ TEST_CASE("tutorial 4: an appended optional field is compatible both ways", "[do
                   .ok());
    // ── /tut-4-run ──
 
-   // tut-4c: the old writer's record is refused by the tightened reader.
+   // ── tut-4c-run ──
+   // What the check promises, on bytes: an old record at its bound is a record
+   // of the widened type, and is not one of the tightened type.
    const AccountV1 wide_owner{7, std::string(32, 'o'), {}, 0};
+   CHECK(psio::validate_pssz<AccountWider>(psio::to_pssz(wide_owner)).ok());
    CHECK_FALSE(psio::validate_pssz<AccountTighter>(psio::to_pssz(wide_owner)).ok());
+   // One direction only: a new writer can produce what an old reader refuses.
+   const AccountWider wider{7, std::string(33, 'o'), {}, 0};
+   CHECK_FALSE(psio::validate_pssz<AccountV1>(psio::to_pssz(wider)).ok());
+   // ── /tut-4c-run ──
 }
 
 TEST_CASE("tutorial 5: raw bytes and UTF-8 text", "[doc][tut-5]")
@@ -1005,11 +1253,9 @@ TEST_CASE("tutorial 5: raw bytes and UTF-8 text", "[doc][tut-5]")
    // ── /tut-5-run ──
    const auto frame = unchecked(Note{"", "\xff"});
    CHECK_FALSE(psio::validate_pssz<Note>(frame).ok());
-   // The exact-schema check is stricter than the type: it refuses a raw string
-   // that is not UTF-8, which validate_pssz accepts.
+   // A raw string is any bytes for every reader, the exact-schema check included.
    CHECK(psio::validate_pssz<Note>(psio::to_pssz(binary)).ok());
-   CHECK_FALSE(
-      psio::validate_strict<Note>(psio::pssz{}, std::span<const char>(psio::to_pssz(binary))).ok());
+   CHECK(psio::validate_strict<Note>(psio::pssz{}, std::span<const char>(psio::to_pssz(binary))).ok());
 }
 
 TEST_CASE("tutorial 6: JSON presentation", "[doc][tut-6]")
@@ -1056,12 +1302,22 @@ TEST_CASE("tutorial 7: keys", "[doc][tut-7]")
    // bytes as the tuple: annotations do not change a key.
    CHECK(psio::to_key(OwnerKey{"bob", 7}) == psio::to_key(ByOwner{"bob", 7}));
 
-   // Limit: the key ENCODER does not check member bounds; the key READER does.
-   const auto too_long = psio::to_key(OwnerKey{std::string(33, 'x'), 7});   // no error
-   CHECK_FALSE(psio::validate_key<OwnerKey>(too_long).ok());
-   CHECK_THROWS_AS(psio::from_key<OwnerKey>(too_long), psio::codec_exception);
+   // The key writer checks what the pssz writer checks: a value outside a
+   // bound, or a utf8 member that is not UTF-8, has no key.
+   const OwnerKey too_long{std::string(33, 'x'), 7};                 // one byte past max<32>
+   CHECK_THROWS_AS(psio::to_key(too_long), psio::codec_exception);
+   std::vector<char> out;
+   CHECK_FALSE(psio::encode_key_checked(too_long, out).ok());        // the status form
+   CHECK(out.empty());
+   CHECK_THROWS_AS(psio::to_key(OwnerKey{"\xff", 7}), psio::codec_exception);
+   // The readers refuse the key bytes a writer without the bound produces.
+   const auto unbounded = psio::to_key(ByOwner{std::string(33, 'x'), 7});
+   CHECK_FALSE(psio::validate_key<OwnerKey>(unbounded).ok());
+   CHECK_THROWS_AS(psio::from_key<OwnerKey>(unbounded), psio::codec_exception);
    // ── /tut-7-run ──
-   const auto bad_utf8 = psio::to_key(OwnerKey{"\xff", 7});
+   const auto status = psio::encode_key_checked(too_long, out);
+   CHECK(status.error().what == std::string_view{"key: member length_bound violated"});
+   const auto bad_utf8 = psio::to_key(ByOwner{"\xff", 7});
    CHECK_FALSE(psio::validate_key<OwnerKey>(bad_utf8).ok());
 }
 
@@ -1084,6 +1340,40 @@ TEST_CASE("tutorial 8: transparent wrappers and invariants", "[doc][tut-8]")
    CHECK(status.error().what == std::string_view{"symbol is not upper case"});
    CHECK_FALSE(psio::validate_json<Symbol>(R"({"code":"usd"})").ok());
    // ── /tut-8-run ──
+}
+
+TEST_CASE("tutorial 8: a transparent type with a bounded member", "[doc][tut-8]")
+{
+   // ── tut-8c-run ──
+   // Memo has the bytes, the key and the text of psio::utf8_string<80>.
+   const Memo memo{"rent"};
+   CHECK(psio::to_pssz(memo) == psio::to_pssz(psio::utf8_string<80>{"rent"}));
+   CHECK(psio::to_key(memo) == psio::to_key(psio::utf8_string<80>{"rent"}));
+   CHECK(psio::to_json(memo) == R"("rent")");
+   CHECK(psio::from_pssz<Memo>(psio::to_pssz(memo)) == memo);
+
+   // Its bound and its UTF-8 rule hold wherever a Memo appears.
+   CHECK_THROWS_AS(psio::to_pssz(Memo{std::string(81, 'm')}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz(Memo{"\xff"}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key(Memo{std::string(81, 'm')}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz(Receipt{1, Memo{std::string(81, 'm')}}), psio::codec_exception);
+   CHECK_FALSE(psio::validate_pssz<Memo>(std::vector<char>(81, 'm')).ok());
+   CHECK_FALSE(psio::validate_json<Memo>('"' + std::string(81, 'm') + '"').ok());
+
+   // Inside a record it costs one 1-byte slot: 1 + 8 + 1 + 4.
+   const Receipt receipt{1, memo};
+   CHECK(psio::to_pssz(receipt).size() == 14);
+   CHECK(psio::to_json(receipt) == R"({"id":1,"memo":"rent"})");
+   CHECK(psio::from_pssz<Receipt>(psio::to_pssz(receipt)) == receipt);
+
+   // The Schema IR is the wrapper-type spelling's: a named alias of the
+   // bounded UTF-8 string.
+   CHECK(shape_text<Memo>() == shape_text<MemoInType>());
+   CHECK(contains(schema_text<Memo>("Memo"), R"("maxCount":80}}},"id":"utf8")"));
+   // ── /tut-8c-run ──
+   CHECK_FALSE(psio::validate_pssz<Receipt>(unchecked(Receipt{1, Memo{std::string(81, 'm')}})).ok());
+   // Evolution: the bound of a transparent member may only widen, like any other.
+   static_assert(psio::pssz_evolves_from<Memo, Memo>);
 }
 
 TEST_CASE("tutorial 9: method arguments", "[doc][tut-9]")
@@ -1109,6 +1399,40 @@ TEST_CASE("tutorial 9: method arguments", "[doc][tut-9]")
    CHECK(psio::to_pssz(TransferArgsV2{AccountId{1}, AccountId{2}, 500, "rent", std::nullopt}) == bytes);
    CHECK(std::get<4>(psio::from_pssz<TransferArgsV2>(bytes)) == std::nullopt);
    // ── /tut-9-run ──
+
+   // ── tut-9-json ──
+   // In text a named argument list is written as an object keyed by parameter
+   // name; binary stays the positional tuple.
+   CHECK(psio::to_json(args) == R"({"from":1,"to":2,"amount":500,"memo":"rent"})");
+   // It is read as that object (members in any order) or as the positional array.
+   CHECK(std::get<3>(psio::from_json<TransferArgs>(R"({"memo":"rent","amount":500,"to":2,"from":1})")) == "rent");
+   CHECK(std::get<3>(psio::from_json<TransferArgs>(R"([1,2,500,"rent"])")) == "rent");
+   // The bounds hold in both forms; a missing required argument is an error.
+   CHECK_FALSE(psio::validate_json<TransferArgs>(R"({"from":1,"to":2,"amount":500})").ok());
+   CHECK_FALSE(psio::validate_json<TransferArgs>(R"([1,2,500])").ok());
+   // A missing optional argument is None.
+   CHECK(std::get<4>(psio::from_json<TransferArgsV2>(R"({"from":1,"to":2,"amount":500,"memo":"rent"})")) ==
+         std::nullopt);
+   // ── /tut-9-json ──
+   CHECK_FALSE(psio::validate_json<TransferArgs>(
+                  (R"([1,2,500,")" + std::string(81, 'm') + R"("])").c_str())
+                  .ok());
+
+   // ── tut-9c-run ──
+   // A Memo parameter: the same bytes and the same text as Bank::transfer.
+   const PayArgs pay{AccountId{1}, AccountId{2}, 500, Memo{"rent"}};
+   CHECK(psio::to_pssz(pay) == bytes);
+   CHECK(psio::to_json(pay) == psio::to_json(args));
+   CHECK_THROWS_AS(psio::to_pssz(PayArgs{AccountId{1}, AccountId{2}, 500, Memo{std::string(81, 'm')}}),
+                   psio::codec_exception);
+   // ── /tut-9c-run ──
+   {
+      // The interface schema names the type; its node is the bounded string.
+      const std::string pay_schema =
+         psio::to_ijson(psio::SchemaBuilder{}.insert<PayArgs>("PayArgs").build());
+      CHECK(contains(pay_schema, R"("maxCount":80}}},"id":"utf8")"));
+      CHECK(contains(pay_schema, R"({"name":"tuple","value":"named"})"));
+   }
 
    CHECK_FALSE(psio::validate_pssz<TransferArgs>(
                   unchecked(TransferArgs{AccountId{1}, AccountId{2}, 500, std::string(81, 'm')}))
@@ -1277,16 +1601,45 @@ TEST_CASE("reference: bytes", "[doc][ref-bytes]")
    CHECK(contains(schema_text<Blob>("Blob"), R"("id":"hex")"));
 }
 
-TEST_CASE("reference: sorted is declared, not enforced", "[doc][ref-sorted]")
+TEST_CASE("reference: sorted / unique / unique_keys are enforced", "[doc][ref-sorted]")
 {
    using namespace ref;
    // ── ref-sorted-run ──
-   const Ranked unsorted{{3, 1, 2}};
-   const auto   bytes = psio::to_pssz(unsorted);                                  // accepted
-   CHECK(psio::validate_pssz<Ranked>(bytes).ok());                                // accepted
-   CHECK(psio::validate_strict<Ranked>(psio::pssz{}, std::span<const char>(bytes)).ok());
+   const Ranked ok{{1, 1, 2}, {"a", "ab", "b"}, {{"x", 1}, {"a", 1}}};
+   CHECK(psio::from_pssz<Ranked>(psio::to_pssz(ok)) == ok);
+   // The constraints change no byte: the frame is the unconstrained record's.
+   CHECK(psio::to_pssz(ok) == psio::to_pssz(Unranked{ok.scores, ok.names, ok.entries}));
+
+   // A value out of order has no encoding, in pssz, JSON and key alike.
+   const Ranked descending{{3, 1, 2}, {}, {}};
+   CHECK_THROWS_AS(psio::to_pssz(descending), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_json(descending), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key(descending), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz(Ranked{{}, {"a", "a"}, {}}), psio::codec_exception);            // a duplicate
+   CHECK_THROWS_AS(psio::to_pssz(Ranked{{}, {}, {{"a", 1}, {"a", 2}}}), psio::codec_exception);  // a key twice
+
+   // Every checking reader rejects what a writer without the constraint produces.
+   const auto bytes = psio::to_pssz(Unranked{{3, 1, 2}, {}, {}});
+   CHECK_FALSE(psio::validate_pssz<Ranked>(bytes).ok());
+   CHECK_THROWS_AS(psio::from_pssz<Ranked>(bytes), psio::codec_exception);
+   CHECK_FALSE(psio::validate_json<Ranked>(R"({"scores":[3,1,2],"names":[],"entries":[]})").ok());
    // ── /ref-sorted-run ──
-   CHECK_FALSE(encodes(Ranked{{1, 2, 3, 4, 5}}));
+   CHECK(psio::validate_pssz<Ranked>(bytes).error().what ==
+         std::string_view{"sorted: elements are not in order"});
+   CHECK_FALSE(psio::validate_strict<Ranked>(psio::pssz{}, std::span<const char>(bytes)).ok());
+   CHECK_FALSE(psio::validate_key<Ranked>(psio::to_key(Unranked{{3, 1, 2}, {}, {}})).ok());
+   {
+      std::vector<char> out;
+      const auto        status = psio::encode_pssz_checked(psio::pssz{}, Ranked{{}, {"a", "a"}, {}}, out);
+      CHECK(status.error().what ==
+            std::string_view{"sorted: elements are not in strictly ascending order"});
+      const auto twice =
+         psio::encode_pssz_checked(psio::pssz{}, Ranked{{}, {}, {{"a", 1}, {"a", 2}}}, out);
+      CHECK(twice.error().what == std::string_view{"unique_keys: two elements have the same key"});
+   }
+   CHECK_FALSE(encodes(Ranked{{1, 2, 3, 4, 5}, {}, {}}));
+   // Not in the Schema IR: the schema of the two records is the same.
+   CHECK(shape_text<Ranked>() == shape_text<Unranked>());
 }
 
 TEST_CASE("reference: position specs", "[doc][ref-positions]")
@@ -1395,12 +1748,12 @@ TEST_CASE("reference: nested values", "[doc][ref-nested]")
 {
    using namespace ref;
    // ── ref-nested-run ──
-   const Action a{5, psio::nested<Memo>::from(Memo{"hi"})};
-   // The member is a byte list holding the Memo's own encoding (01 01 68 69).
+   const Action a{5, psio::nested<Payload>::from(Payload{"hi"})};
+   // The member is a byte list holding the Payload's own encoding (01 01 68 69).
    CHECK(hex(psio::to_pssz(a)) == "09 05 00 00 00 00 00 00 00 09 01 01 68 69");
    // In text it is the inner value, not hex.
    CHECK(psio::to_ijson(a) == R"({"sender":5,"args":{"text":"hi"}})");
-   CHECK(psio::from_pssz<Action>(psio::to_pssz(a)).args.decode() == Memo{"hi"});
+   CHECK(psio::from_pssz<Action>(psio::to_pssz(a)).args.decode() == Payload{"hi"});
    // ── /ref-nested-run ──
    const std::string text = schema_text<Action>("Action");
    CHECK(contains(text, R"("attributes":[{"name":"lengthBound","value":"max=64"}])"));
@@ -1426,27 +1779,58 @@ TEST_CASE("reference: record keywords", "[doc][ref-records]")
    CHECK(contains(wit, "@maxFields(8)"));
 }
 
+TEST_CASE("reference: maxFields is a cap on the number of fields", "[doc][ref-max-fields]")
+{
+   using namespace ref;
+   // ── ref-max-fields-run ──
+   // The cap is in the schema: the record's, and the argument list's.
+   CHECK(contains(schema_text<Settings>("Settings"), R"({"name":"maxFields","value":"3"})"));
+   CHECK(contains(schema_text<SetArgs>("SetArgs"), R"({"name":"maxFields","value":"4"})"));
+
+   // A schema-driven reader refuses a schema whose record has more members
+   // than its maxFields, or a maxFields above 255, before reading any value.
+   using namespace psio::schema_types;
+   const auto reads = [](std::size_t members, const char* max_fields) {
+      Object record;
+      for (std::size_t i = 0; i < members; ++i)
+         record.members.push_back(Member{"m" + std::to_string(i), Box<AnyType>{AnyType{Int{8, false}}}, {}});
+      record.attributes.push_back(Attribute{"maxFields", max_fields});
+      std::size_t width = 0;
+      return psio::pssz_ir::auto_width(Schema{}, AnyType{std::move(record)}, width).ok();
+   };
+   CHECK(reads(3, "3"));
+   CHECK_FALSE(reads(4, "3"));
+   CHECK_FALSE(reads(3, "256"));
+   // ── /ref-max-fields-run ──
+   // maxFields changes no byte and no width.
+   CHECK(psio::to_pssz(Settings{7, 9}).size() == 1 + 4 + 1 + 4);
+   CHECK(psio::to_pssz(SettingsGrown{7, 9, std::nullopt}) == psio::to_pssz(Settings{7, 9}));
+   const std::string wit = psio::emit_wit(psio::SchemaBuilder{}.insert<Settings>("Settings").build());
+   CHECK(contains(wit, "@maxFields(3)"));
+}
+
 TEST_CASE("reference: the cap and the text formats", "[doc][ref-cap-text]")
 {
    using namespace ref;
    // ── ref-cap-text-run ──
-   // maxDynamicData(16): every format's validate applies the cap to the size
-   // of ITS input. The pssz encoding of this value is 16 bytes and valid; its
-   // JSON text is 22 bytes, which the JSON reader refuses.
+   // maxDynamicData(16) limits the pssz encoding. It is not a limit on the
+   // length of the JSON text: this value is 16 bytes of pssz and 22 of text.
    const Capped value{std::string(14, 'x')};
-   CHECK(psio::validate_pssz<Capped>(psio::to_pssz(value)).ok());
-   const std::string text = psio::to_json(value);              // the writer does not apply the cap
+   CHECK(psio::to_pssz(value).size() == 16);
+   const std::string text = psio::to_json(value);
    CHECK(text == R"({"s":"xxxxxxxxxxxxxx"})");
-   CHECK_FALSE(psio::validate_json<Capped>(text).ok());        // 22 > 16
-   CHECK(psio::validate_json<Capped>(R"({"s":"xxxxxxxx"})").ok());   // 16 bytes of text
+   CHECK(psio::validate_json<Capped>(text).ok());
+   CHECK(psio::from_json<Capped>(text).s.size() == 14);
+   // The text codecs do not apply the cap at all: a text can hold a value
+   // that has no pssz encoding. The cap is met when the value is written as pssz.
+   const Capped over = psio::from_json<Capped>(R"({"s":"xxxxxxxxxxxxxxx"})");   // 15: 17 bytes of pssz
+   CHECK_THROWS_AS(psio::to_pssz(over), psio::codec_exception);
    // ── /ref-cap-text-run ──
-   const auto status = psio::validate_json<Capped>(text);
-   CHECK(status.error().what == std::string_view{"encoded size exceeds maxDynamicData cap"});
-   // A capped member of an uncapped root is not limited in text ...
-   CHECK(psio::validate_json<CappedHolder>(R"({"inner":{"s":"xxxxxxxxxxxxxx"}})").ok());
-   CHECK(psio::validate_json<CappedHolder>(R"({"inner":{"s":"xxxxxxxxxxxxxxx"}})").ok());
-   // ... but is in pssz, wherever it is nested.
+   CHECK(psio::validate_json<Capped>(R"({"s":"xxxxxxxxxxxxxxx"})").ok());
+   CHECK(psio::to_json(over) == R"({"s":"xxxxxxxxxxxxxxx"})");
+   // The cap of a nested record is applied in pssz wherever it is nested.
    CHECK_FALSE(encodes(CappedHolder{Capped{std::string(15, 'x')}}));
+   CHECK(psio::validate_json<CappedHolder>(R"({"inner":{"s":"xxxxxxxxxxxxxxx"}})").ok());
 }
 
 TEST_CASE("reference: transparent wrappers", "[doc][ref-transparent]")
@@ -1474,6 +1858,68 @@ TEST_CASE("reference: custom text", "[doc][ref-adapter]")
    CHECK(psio::to_pssz(Color{255, 0, 16}).size() == 3);
    // ── /ref-adapter-run ──
    CHECK(contains(schema_text<Pixel>("Pixel"), R"("id":"Color")"));
+}
+
+TEST_CASE("reference: as<hex_tag> is a text presentation", "[doc][ref-as]")
+{
+   using namespace ref;
+   // ── ref-as-run ──
+   const Wide w{7, psio::uint128{255}};
+   CHECK(psio::to_json(w) == R"({"id":7,"amount":"0xff"})");
+   CHECK(psio::to_ijson(w) == R"({"id":7,"amount":"0xff"})");
+   CHECK(psio::to_json(WidePlain{7, psio::uint128{255}}) == R"({"id":7,"amount":255})");
+   CHECK(psio::from_json<Wide>(psio::to_json(w)) == w);
+   // Binary and key: exactly the record without the annotation.
+   CHECK(psio::to_pssz(w) == psio::to_pssz(WidePlain{7, psio::uint128{255}}));
+   CHECK(psio::to_key(w) == psio::to_key(WidePlain{7, psio::uint128{255}}));
+   CHECK(psio::from_pssz<Wide>(psio::to_pssz(w)) == w);
+   // ── /ref-as-run ──
+   // The Schema IR does not carry it either.
+   CHECK(shape_text<Wide>() == shape_text<WidePlain>());
+}
+
+TEST_CASE("reference: a method result has the bytes of its returns(...) type", "[doc][ref-result]")
+{
+   using namespace ref;
+   // ── ref-result-run ──
+   const std::vector<std::string> two{"alice", "bob"};
+   std::vector<char>              bytes;
+   REQUIRE(psio::encode_method_result<Directory, 0>(two, bytes).ok());
+   // returns(max<4> | element(utf8 | max<16>)): a 1-byte offset table (02 07) ...
+   CHECK(hex(bytes) == "02 07 61 6c 69 63 65 62 6f 62");
+   // ... where the plain std::vector<std::string> has a 4-byte one.
+   CHECK(psio::to_pssz(two).size() == 2 * 4 + 8);
+   CHECK(psio::validate_method_result<Directory, 0>(bytes).ok());
+   std::vector<std::string> back;
+   REQUIRE(psio::decode_method_result<Directory, 0>(bytes, back).ok());
+   CHECK(back == two);
+   // A result outside returns(...) has no encoding.
+   std::vector<char> none;
+   CHECK_FALSE(psio::encode_method_result<Directory, 0>(std::vector<std::string>(5, "a"), none).ok());
+   CHECK_FALSE(psio::encode_method_result<Directory, 0>(std::vector<std::string>{"\xff"}, none).ok());
+   CHECK(none.empty());
+   // ── /ref-result-run ──
+   // The same bytes as the wrapper-type spelling of the result.
+   psio::bounded<psio::utf8_string<16>, 4> same;
+   same.push_back(psio::utf8_string<16>{"alice"});
+   same.push_back(psio::utf8_string<16>{"bob"});
+   CHECK(psio::to_pssz(same) == bytes);
+   // A string result has no width of its own: tut::Bank::symbol.
+   std::vector<char> symbol;
+   REQUIRE(psio::encode_method_result<Bank, 2>(std::string("USD"), symbol).ok());
+   CHECK(hex(symbol) == "55 53 44");
+   CHECK_FALSE(psio::encode_method_result<Bank, 2>(std::string(9, 'X'), symbol).ok());
+}
+
+TEST_CASE("reference: names as numbers", "[doc][ref-names]")
+{
+   // ── ref-names-run ──
+   CHECK(psio::number_to_name(6697231) == "alice");
+   CHECK(psio::detail::number_to_method(psio::detail::method_to_number("Transfer")) == "transfer");
+   // A hash number is shown as '#' and 16 letters, and reads back.
+   CHECK(psio::detail::number_to_method(0xd55df3070b8758ebull) == "#hmlnslheseoypnnp");
+   CHECK(psio::detail::method_to_number("#hmlnslheseoypnnp") == 0xd55df3070b8758ebull);
+   // ── /ref-names-run ──
 }
 
 TEST_CASE("reference: time", "[doc][ref-time]")
