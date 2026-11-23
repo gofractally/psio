@@ -94,11 +94,13 @@ class InterfaceFixture(unittest.TestCase):
             self.assertEqual({
                 "name": m.name, "params": m.params, "named": m.named, "args": f"token.{m.name}",
                 "result": m.result is not None, "max_dynamic_data": m.max_dynamic_data, "max_fields": m.max_fields,
-                "width": m.args.width, "max_encoded_size": m.args.max_encoded_size}, row)
+                "width": m.args.width, "inferred_bound": m.args.inferred_bound,
+                "max_encoded_size": m.args.max_encoded_size}, row)
             self.assertEqual(m.args.max_dynamic_data, row["max_dynamic_data"])
             for args in (recorded.type(row["args"]), recorded.method("token", row["name"]).args):
-                self.assertEqual((args.width, args.max_encoded_size, args.max_dynamic_data),
-                                 (row["width"], row["max_encoded_size"], row["max_dynamic_data"]), row["name"])
+                self.assertEqual((args.width, args.inferred_bound, args.max_encoded_size, args.max_dynamic_data),
+                                 (row["width"], row["inferred_bound"], row["max_encoded_size"],
+                                  row["max_dynamic_data"]), row["name"])
             looked_up = recorded.method("token", row["name"])
             self.assertEqual((looked_up.params, looked_up.named, looked_up.result is not None,
                               looked_up.max_dynamic_data, looked_up.max_fields),

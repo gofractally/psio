@@ -11,7 +11,7 @@ import dataclasses
 import enum
 import unittest
 from dataclasses import dataclass
-from typing import Annotated, Any, Dict, List, Optional, Tuple
+from typing import Annotated, Any, Dict, List, Optional, Tuple, Union
 
 from support import BOUND_REASONS, fixture, same_reason
 
@@ -132,7 +132,7 @@ class OrderConstraints(unittest.TestCase):
         self.assertEqual(psio.from_key(Ranked, key), ok)
         # The constraints change no byte, no width and no schema.
         self.assertEqual(frame, psio.to_pssz(loose(ok)))
-        self.assertEqual(psio.codec(Ranked).max_encoded_size, psio.codec(Loose).max_encoded_size)
+        self.assertEqual(psio.codec(Ranked).inferred_bound, psio.codec(Loose).inferred_bound)
         self.assertEqual(psio.schema_of(names={"R": Ranked}).ir["types"][-2]["type"],
                          psio.schema_of(names={"R": Loose}).ir["types"][-2]["type"])
         self.assertEqual([m["name"] for m in psio.schema_of(Ranked).ir["types"]][1:],
@@ -249,6 +249,153 @@ def fields3(name: str, count: int, **options: Any) -> Any:
 
 
 class Evolution(unittest.TestCase):
+    def test_a_variant_may_gain_alternatives_at_the_end(self) -> None:
+        """The variant cases of cpp/tests/pssz_evolution_matrix_tests.cpp (spec 7.5): alternatives may be
+        appended; a larger new alternative is refused exactly when it moves an enclosing width."""
+        counter = iter(range(1 << 20))
+
+        def both(old: Any, new: Any, ok: bool, why: str = "") -> None:
+            status = psio.evolves_from(old, new)
+            self.assertEqual(bool(status), ok, f"{old} -> {new}: {status.reason}")
+            if why:
+                self.assertIn(why, status.reason)
+            # The same over two fetched Schema IRs.
+            a = psio.Schema.from_pssz(psio.schema_of(names={"Root": old}).to_pssz()).type("Root")
+            b = psio.Schema.from_pssz(psio.schema_of(names={"Root": new}).to_pssz()).type("Root")
+            fetched = psio.evolves_from(a, b)
+            self.assertEqual((bool(fetched), fetched.reason), (ok, status.reason), f"{old} -> {new} (IR)")
+
+        def record(name: str, fields: List[Any], **options: Any) -> Any:
+            cls = dataclasses.make_dataclass(f"{name}{next(counter)}", fields)
+            return psio.record(cls, **options) if options else cls
+
+        Alt0 = record("Alt", [("a", u32)], max_dynamic_data=64)
+        Alt1 = record("Alt", [("a", u32), ("b", Optional[u32], None)], max_dynamic_data=64)
+        AltOther = record("Alt", [("z", u64)], max_dynamic_data=64)
+
+        def alt(t: Any, name: str) -> Any:
+            return Annotated[t, psio.alt(name)]
+
+        Var1 = Union[u32, str]
+        Var2 = Union[u32, str, u64]
+        Var3 = Union[u32, str, u64, alt(Alt0, "alt")]
+        # Appended, once and twice; the relation is transitive.
+        both(Var1, Var2, True)
+        both(Var2, Var3, True)
+        both(Var1, Var3, True)
+        both(Var1, Var1, True)
+        # Removed, reordered, inserted, retyped: not compatible.
+        both(Var2, Var1, False, "an alternative was removed")
+        both(Var1, Union[str, u32, u64], False)
+        both(Var1, Union[u32, u64, str], False)
+        both(Var1, Union[u64, u32, str], False)
+        both(Var1, Union[u64, str, u32], False)
+        both(Var1, Union[i32, str, u64], False)
+        # An existing alternative evolves by the rules of its own type, with or
+        # without new alternatives after it.
+        both(Union[u32, alt(Alt0, "alt")], Union[u32, alt(Alt1, "alt")], True)
+        both(Union[u32, alt(Alt0, "alt")], Union[u32, alt(Alt1, "alt"), u64], True)
+        both(Union[u32, alt(Alt1, "alt")], Union[u32, alt(Alt0, "alt"), u64], False, "a field was removed")
+        both(Union[u32, alt(Alt0, "alt")], Union[u32, alt(AltOther, "alt"), u64], False)
+        # Wherever a variant is: an optional, a list, a map, a variant, a record.
+        both(Optional[Var1], Optional[Var2], True)
+        both(List[Var1], List[Var2], True)
+        both(Dict[u32, Var1], Dict[u32, Var2], True)
+        both(Union[u8, alt(Var1, "v")], Union[u8, alt(Var2, "v"), i16], True)
+        both(List[Var2], List[Var1], False, "an alternative was removed")
+
+        # A larger new alternative.  The variant alone writes no offsets:
+        # appending is compatible whatever the size of the new alternative.
+        Small = Union[u8, psio.u16]
+        Same = Union[u8, psio.u16, alt(u8, "c")]      # no larger than the others
+        Larger = Union[u8, psio.u16, u32]             # raises the bound by 2
+        Pad = Annotated[bytes, psio.array(249)]
+        both(Small, Same, True)
+        both(Small, Larger, True)
+        both(Union[u8, i16], Union[u8, i16, Annotated[bytes, psio.array(300), psio.alt("big")]], True)
+        # A record with no cap: header 1 + slot 1 + (1 + 2) + 249 = 254, one
+        # byte wide.  Refused exactly when its width moves, as for an appended field.
+
+        def tight(v: Any) -> Any:
+            return record("Tight", [("v", v), ("pad", Pad)])
+
+        def capped(v: Any) -> Any:
+            return record("Capped", [("v", v), ("pad", Pad)], max_dynamic_data=1000)
+
+        self.assertEqual([(psio.codec(tight(v)).inferred_bound, psio.codec(tight(v)).width) for v in (Small, Same, Larger)],
+                         [(254, 1), (254, 1), (258, 2)])
+        self.assertEqual((psio.codec(capped(Small)).width, psio.codec(capped(Larger)).width), (2, 2))
+        both(tight(Small), tight(Same), True)
+        both(tight(Small), tight(Larger), False, "the offset width changed (1 -> 2)")
+        # A cap reserves the room: the same change is compatible.
+        both(capped(Small), capped(Larger), True)
+        both(capped(Small), capped(Same), True)
+        # A tuple and an array take their width from their own bound.
+        both(Tuple[Small, Pad], Tuple[Same, Pad], True)
+        both(Tuple[Small, Pad], Tuple[Larger, Pad], False, "the offset width changed (1 -> 2)")
+        both(Annotated[List[Small], psio.array(60)], Annotated[List[Same], psio.array(60)], True)
+        both(Annotated[List[Small], psio.array(60)], Annotated[List[Larger], psio.array(60)], False,
+             "the offset width changed (1 -> 2)")
+        both(Annotated[List[Small], psio.bounded(60)], Annotated[List[Larger], psio.bounded(60)], False,
+             "the offset width changed (1 -> 2)")
+        both(Annotated[Dict[u8, Small], psio.bounded(30)], Annotated[Dict[u8, Same], psio.bounded(30)], True)
+        both(Annotated[Dict[u8, Small], psio.bounded(30)], Annotated[Dict[u8, Larger], psio.bounded(30)], False,
+             "the offset width changed (1 -> 2)")
+        # A bounded list inside a capped record: the record's width stays, the
+        # list's table does not (60 x (1 + 3) = 240; 60 x (2 + 5) = 420).
+
+        def listed(v: Any) -> Any:
+            return record("Listed", [("items", Annotated[List[v], psio.max(60)])], max_dynamic_data=60000)
+
+        self.assertEqual((psio.codec(listed(Small)).width, psio.codec(listed(Larger)).width), (2, 2))
+        both(listed(Small), listed(Same), True)
+        both(listed(Small), listed(Larger), False, "the offset width changed (1 -> 2)")
+        # ... and one level further down: a tuple holding the variant, in a list.
+
+        def rows(v: Any) -> Any:
+            return record("Rows", [("rows", Annotated[List[Tuple[v, Pad]], psio.max(2)])], max_dynamic_data=60000)
+
+        both(rows(Small), rows(Same), True)
+        both(rows(Small), rows(Larger), False, "the offset width changed (1 -> 2)")
+
+        # Bounds on the alternatives (C++ at<I>(...)).
+        def ann(v: Any, *at: Any) -> Any:
+            return record("Ann", [("v", Annotated[tuple([v] + list(at))])], max_dynamic_data=200)  # type: ignore[misc]
+
+        two = Union[u32, RawString]
+        three = Union[u32, RawString, alt(RawString, "c")]
+        Ann0 = ann(two, psio.at(1, psio.max(8)))
+        Ann1 = ann(three, psio.at(1, psio.max(8)), psio.at(2, psio.max(4)))
+        AnnTighter = ann(three, psio.at(1, psio.max(4)), psio.at(2, psio.max(4)))
+        AnnWider = ann(three, psio.at(1, psio.max(16)), psio.at(2, psio.max(4)))
+        both(Ann0, Ann1, True)
+        both(Ann0, AnnWider, True)
+        both(Ann0, AnnTighter, False, "tightened")
+        both(Ann1, Ann0, False, "an alternative was removed")
+
+        # The bytes agree with the check: New reads everything Old wrote, to the
+        # same value and the same bytes; Old rejects the alternative it does not know.
+        for value in (7, "hello", ""):
+            data = psio.to_pssz(value, Var1)
+            self.assertTrue(psio.validate_pssz(Var2, data).ok)
+            as_new = psio.from_pssz(Var2, data)
+            self.assertEqual(psio.to_pssz(as_new, Var2), data)
+            self.assertTrue(psio.validate_pssz(Var1, psio.to_pssz(as_new, Var2)).ok)
+        added = psio.to_pssz(psio.Variant("u64", 9), Var2)
+        self.assertTrue(psio.validate_pssz(Var2, added).ok)
+        self.assertFalse(psio.validate_pssz(Var1, added).ok)
+        refused(self, lambda: psio.from_pssz(Var1, added), psio.DecodeError)
+        # Inside a record, with the alternative itself evolved.
+        Old = capped(Union[u8, alt(Alt0, "alt")])
+        New = capped(Union[u8, alt(Alt1, "alt"), u64])
+        both(Old, New, True)
+        record_bytes = psio.to_pssz(Old(Alt0(5), bytes(249)))
+        self.assertTrue(psio.validate_pssz(New, record_bytes).ok)
+        new_record = psio.from_pssz(New, record_bytes)
+        self.assertEqual(new_record.v, Alt1(5, None))
+        self.assertEqual(psio.to_pssz(new_record), record_bytes)
+        self.assertFalse(psio.validate_pssz(Old, psio.to_pssz(New(psio.Variant("u64", 1), bytes(249)))).ok)
+
     def test_member_annotations_and_caps(self) -> None:
         # (cpp/tests/consistency_tests.cpp "pssz_evolves_from: member annotations and caps")
         utf8, mx, el = psio.utf8, psio.max, psio.element
@@ -278,7 +425,7 @@ class Evolution(unittest.TestCase):
         Fields3Raised = fields3("Fields3Raised", 4, max_fields=8)
         Fields3Dropped = fields3("Fields3Dropped", 3)
         Fields3Lowered = fields3("Fields3Lowered", 2, max_fields=2)
-        self.assertTrue(400 < psio.codec(Open).max_encoded_size <= 600)
+        self.assertTrue(400 < psio.codec(Open).inferred_bound <= 600)
         self.assertEqual(psio.codec(Open).width, psio.codec(OpenWideList).width)
         expected = (
             (V1, Same, True),
@@ -564,7 +711,7 @@ class TransparentBounds(unittest.TestCase):
         bounded = psio.codec(Annotated[str, psio.bounded(80)])
         for cls in (Memo, WrapMemo):
             t = psio.codec(cls)
-            self.assertEqual((t.max_encoded_size, t.width), (80, bounded.width))
+            self.assertEqual((t.inferred_bound, t.width), (80, bounded.width))
             self.assertEqual(t.to_pssz(cls("hi")), b"hi")
             self.assertEqual(t.to_json(cls("hi")), '"hi"')
             self.assertEqual(t.to_key(cls("hi")), bounded.to_key("hi"))
@@ -586,10 +733,10 @@ class TransparentBounds(unittest.TestCase):
         @dataclass
         class Small:
             a: Memo
-        self.assertEqual((psio.codec(Small).max_encoded_size, psio.codec(Small).width), (82, 1))
+        self.assertEqual((psio.codec(Small).inferred_bound, psio.codec(Small).width), (82, 1))
         # Bounds below the member.
         t = psio.codec(Tags)
-        self.assertEqual(t.max_encoded_size, 4 * 1 + 4 * 8)
+        self.assertEqual(t.inferred_bound, 4 * 1 + 4 * 8)
         self.assertEqual(t.to_pssz(Tags(["a", "bc"])).hex(), "020361" + "6263")
         refused(self, lambda: t.to_pssz(Tags(["a"] * 5)), psio.EncodeError)
         refused(self, lambda: t.to_pssz(Tags(["x" * 9])), psio.EncodeError)
@@ -835,6 +982,45 @@ class Verified(unittest.TestCase):
         for row in rows:
             st = schema.type(row["type"], width=widths[row["format"]]).validate_pssz(bytes.fromhex(row["hex"]), strict=True)
             self.assertTrue(st.ok and not st.has_unknown, row["name"])
+
+
+class ByteLists(unittest.TestCase):
+    def test_the_former_char_element_node_is_still_read_as_bytes(self) -> None:
+        """C++ ``std::vector<char>`` now builds ``Custom{List<u8>, "hex"}``, the node every byte list has
+        (cpp/tests/schema_byte_list_tests.cpp).  A published schema may still hold the former node,
+        ``Custom{List<Custom{u8, "char"}>, "hex"}``: it is the same bytes, text, key, width and bounds."""
+        char = ir.custom_of(ir.U8, "char")
+        data = bytes([0, 128, 255])
+        for shape in (ir.list_of, lambda t: ir.array_of(t, 3), lambda t: ir.bounded_list_of(t, 8)):
+            former, now = ir.custom_of(shape(char), "hex"), ir.custom_of(shape(ir.U8), "hex")
+            declared = psio.Schema({
+                "Former": former, "Now": now,
+                "FormerRec": {"Object": {"id": ir.U32, "data": former, "tail": ir.option_of(former)}},
+                "NowRec": {"Object": {"id": ir.U32, "data": now, "tail": ir.option_of(now)}}})
+            # The schema with the former node survives its own PSSZ encoding.
+            for schema in (declared, psio.Schema.from_pssz(declared.to_pssz())):
+                a, b = schema.type("Former"), schema.type("Now")
+                status = a.validate_pssz(data)
+                self.assertTrue(status.ok and not status.has_unknown)
+                self.assertEqual(a.from_pssz(data), data)
+                self.assertEqual(a.from_pssz(data), b.from_pssz(data))
+                self.assertEqual(a.to_pssz(data), b.to_pssz(data))
+                for format in ("json", "ijson"):
+                    text = b.pssz_to_json(data, format)
+                    self.assertEqual(text, '"0080FF"' if format == "ijson" else "[0,128,255]")
+                    self.assertEqual(a.pssz_to_json(data, format), text)
+                    self.assertEqual(a.json_to_pssz(text, format), data)
+                self.assertEqual(a.to_key(data), b.to_key(data))
+                self.assertEqual((a.width, a.inferred_bound, a.max_encoded_size),
+                                 (b.width, b.inferred_bound, b.max_encoded_size))
+                ra, rb = schema.type("FormerRec"), schema.type("NowRec")
+                frame = rb.to_pssz({"id": 7, "data": data, "tail": data})
+                self.assertEqual(ra.to_pssz({"id": 7, "data": data, "tail": data}), frame)
+                self.assertEqual(ra.from_pssz(frame), rb.from_pssz(frame))
+                self.assertEqual(ra.pssz_to_json(frame), rb.pssz_to_json(frame))
+                self.assertEqual((ra.width, ra.inferred_bound, ra.max_encoded_size),
+                                 (rb.width, rb.inferred_bound, rb.max_encoded_size))
+                self.assertTrue(psio.evolves_from(ra, rb) and psio.evolves_from(rb, ra))
 
 
 if __name__ == "__main__":

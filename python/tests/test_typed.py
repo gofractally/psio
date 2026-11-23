@@ -215,7 +215,7 @@ class Typed(unittest.TestCase):
             names: Annotated[Set[str], psio.max(2), psio.element(psio.max(3))]
 
         t = psio.codec(Book)
-        self.assertIsNotNone(t.max_encoded_size)
+        self.assertIsNotNone(t.inferred_bound)
         ok = Book({"ab": [1, 2]}, ("abc", b"xy"), {"a", "b"})
         self.assertEqual(psio.from_pssz(Book, psio.to_pssz(ok)), ok)
         loose = psio.codec(dataclasses.make_dataclass("Book", [
@@ -248,7 +248,7 @@ class Typed(unittest.TestCase):
 
         self.assertEqual(psio.to_json(Row(1, ["a"], 2)), '{"class":1,"tags":["a"],"odd name":2}')
         self.assertEqual(psio.from_json(Row, '{"class":1,"tags":["a"],"odd name":2}'), Row(1, ["a"], 2))
-        self.assertIsNotNone(psio.codec(Row).max_encoded_size)
+        self.assertIsNotNone(psio.codec(Row).inferred_bound)
         self.rejects(lambda: psio.to_pssz(Row(1, ["a", "b", "c"])), psio.EncodeError)
 
     def test_custom_by_annotation(self) -> None:

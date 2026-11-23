@@ -1083,7 +1083,7 @@ class Codec:
 
     def bound_of(self, node: Node, annotation: Optional[LengthBound], reserve_cap: bool,
                  active: List[Node]) -> Optional[int]:
-        """``max_encoded_size`` (spec 3.2); ``None`` when unbounded."""
+        """``inferred_bound`` (spec 3.2): what widths are chosen from; ``None`` when unbounded."""
         if any(node is a for a in active):
             return None
         if reserve_cap and node.cap is not None:
@@ -1151,6 +1151,81 @@ class Codec:
         active.pop()
         if annotation is None:
             node.bound_memo[slot] = out
+        return out
+
+    def max_of(self, node: Node, annotation: Optional[LengthBound], cap: int, active: List[Node]) -> Optional[int]:
+        """``max_encoded_size`` (spec 3.7) of a value of ``node`` at a position whose cap has the width class
+        ``cap`` (4: none); ``None`` when there is no finite maximum.
+
+        The walk of ``bound_of`` with three differences: a type's header,
+        slots and offset table are counted at the width it really has
+        (``width_of``); what it holds counts as its own maximum; and a
+        capped record is the smaller of its cap and that sum, the cap when
+        something inside is unbounded.  The two conservatisms of the
+        inferred bound stay: one selector byte for every optional,
+        ceil(N / 8) + 1 for a bitlist.
+        """
+        if any(node is a for a in active):
+            return None
+        active.append(node)
+
+        def elements(container: Node, count: int, own: Optional[int]) -> Optional[int]:
+            if count == 0:
+                return 0
+            element = None if container.child_boxed else self.max_of(container.child, None, cap, active)
+            total = _bound_multiply(count, element)
+            if self._fixed_payload(container.child, []):
+                return total
+            return _bound_add(total, count * self.width_of(container, (cap, own, False)))
+
+        def sequence(container: Node) -> Optional[int]:
+            if container.kind == "list" and not container.bounded:
+                count = annotation.limit if annotation is not None else None
+                return elements(container, count, count) if count is not None else None
+            return elements(container, container.count, None)
+
+        def members(slots: int, width: int, beneath: int, annotated: bool) -> Optional[int]:
+            total: Optional[int] = 0
+            for m in node.members:
+                payload = None if m.boxed else self.max_of(m.node, m.bound if annotated else None, beneath, active)
+                if not self._fixed_payload(m.node, []):
+                    slots += 1
+                total = _bound_add(total, payload)
+            return _bound_add(total, slots * width)
+
+        out: Optional[int] = None
+        k = node.kind
+        if k in ("int", "float", "bool", "char"):
+            out = node.size
+        elif k in ("bitvector", "bitlist"):
+            out = packed_byte_count(node.size) + (1 if k == "bitlist" else 0)
+        elif k in ("list", "array"):
+            out = sequence(node)
+        elif k == "option":
+            out = None if node.child_boxed else _bound_add(self.max_of(node.child, annotation, cap, active), 1)
+        elif k in ("string", "hex"):
+            out = None if node.child_boxed else sequence(node.child)
+        elif k == "record":
+            # A record is a boundary for the position cap: its members are
+            # beneath its own cap, or beneath none.
+            beneath = width_class(node.cap) if node.cap is not None else 4
+            out = members(0 if node.stable else 1, self.width_of(node), beneath, True)
+            if node.cap is not None and (out is None or out > node.cap):
+                out = node.cap
+        elif k == "tuple":
+            out = members(1, self.width_of(node, (cap, None, False)), cap, False)
+        elif k == "nested":
+            out = annotation.limit if annotation is not None else None
+        elif k == "variant":
+            widest: Optional[int] = 0
+            for m in node.members:
+                payload = None if m.boxed else self.max_of(m.node, None, cap, active)
+                if payload is None or widest is None:
+                    widest = None
+                elif payload > widest:
+                    widest = payload
+            out = _bound_add(widest, 1)
+        active.pop()
         return out
 
     def width_of(self, node: Node, pos: Pos = ROOT) -> int:

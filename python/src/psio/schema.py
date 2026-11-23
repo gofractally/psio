@@ -127,12 +127,40 @@ class SchemaType:
             return 4
         return self._codec.width_of(self._node, self._pos)
 
+    def _count(self) -> Optional[LengthBound]:
+        # The count a member-like bound gives a plain list (a method result under ``returns``).
+        if self._pos[1] is None or not (self._node.kind == "list" and not self._node.bounded):
+            return None
+        annotation = LengthBound()
+        annotation.max = self._pos[1]
+        return annotation
+
     @property
-    def max_encoded_size(self) -> Optional[int]:
-        """The inferred size bound (spec 3.2), whatever cap the type declares; ``None`` when unbounded."""
+    def inferred_bound(self) -> Optional[int]:
+        """The inferred bound (spec 3.2): the number offset widths are chosen from; ``None`` when unbounded.
+
+        It never reads the type's own cap (a capped record inside counts as
+        its cap).  It is not the largest encoding of a capped type: that is
+        ``max_encoded_size``.
+        """
         if self._boxed:
             return None
-        return self._codec.auto.bound_of(self._node, None, False, [])
+        return self._codec.auto.bound_of(self._node, self._count(), False, [])
+
+    @property
+    def max_encoded_size(self) -> Optional[int]:
+        """The largest encoding (spec 3.7): no automatic-profile encoding of a value of the type is longer;
+        ``None`` when there is no finite maximum.
+
+        Every header, slot and offset table is counted at the width that is
+        written, what the type holds at its own maximum, and a capped record
+        is the smaller of its cap and that sum - the cap alone when
+        something inside is unbounded.  Conservative by one selector byte
+        per optional and by ceil(N / 8) + 1 for a bitlist.
+        """
+        if self._boxed:
+            return None
+        return self._codec.auto.max_of(self._node, self._count(), 4, [])
 
     @property
     def max_dynamic_data(self) -> Optional[int]:
