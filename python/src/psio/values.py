@@ -56,7 +56,7 @@ class Bits:
                 out[i >> 3] |= 1 << (i & 7)
         return cls(bytes(out), len(bits))
 
-    def to_bools(self) -> list:
+    def to_bools(self) -> "list[bool]":
         d = self.data
         return [bool(d[i >> 3] >> (i & 7) & 1) for i in range(self.bit_count)]
 

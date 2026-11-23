@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "psio"
+version = "0.1.0"
+description = "PSIO serialization for Python: PSSZ, key and JSON / I-JSON from dataclasses and type hints, or from a Schema IR"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["serialization", "pssz", "psio", "schema"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+psio = ["py.typed"]
+
+[tool.mypy]
+strict = true
+files = ["src/psio"]
+
+# The public surface (psio, psio.api, psio.annotations, psio.errors,
+# psio.values, psio.ir, psio._time) is checked with every strict flag.  The
+# codec internals are dynamic by nature (values of any schema type, closures
+# compiled per node, type-hint reflection): there every function is still
+# annotated, but values flow as Any.
+[[tool.mypy.overrides]]
+module = ["psio._core", "psio._json", "psio._key", "psio.view", "psio.typed", "psio.interface", "psio.schema"]
+warn_return_any = false
+disable_error_code = ["union-attr", "arg-type", "index", "assignment", "return-value", "misc", "operator",
+                      "comparison-overlap", "type-arg", "no-any-return"]
+
+[tool.pyright]
+include = ["src/psio"]

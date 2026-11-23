@@ -17,7 +17,7 @@ replace the callables of the node kinds it implements and leave the rest.
 from __future__ import annotations
 
 import struct
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import NoReturn, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from ._time import TimeKind, fraction_digits, parse_schema_id, reserved_time_id
 from .errors import DecodeError, EncodeError, PsioError, SchemaError, error_of
@@ -57,15 +57,15 @@ def reserved_custom_id(id: str) -> bool:
     return id == "box" or id in WIRE_CUSTOM_IDS or reserved_time_id(id)
 
 
-def _schema(message: str) -> Any:
+def _schema(message: str) -> NoReturn:
     raise SchemaError(message)
 
 
-def _bytes(message: str) -> Any:
+def _bytes(message: str) -> NoReturn:
     raise DecodeError(message)
 
 
-def _value(message: str) -> Any:
+def _value(message: str) -> NoReturn:
     raise EncodeError(message)
 
 
@@ -119,7 +119,7 @@ def strip(ref: "Node") -> Tuple["Node", bool]:
         if ref.inner is None or hops > 4096:
             _schema("pssz IR: cyclic named aliases")
         boxed = boxed or ref.boxed
-        ref = ref.inner  # type: ignore[assignment]
+        ref = ref.inner
         hops += 1
     return ref, boxed
 
@@ -173,7 +173,7 @@ class Node:
         self.signed = False
         self.size = 0
         # option payload; list / array element; string / hex byte container, as written.
-        self.text_child: Node = None  # type: ignore[assignment]
+        self.text_child: Node = None
         self._wire_child: Optional[Tuple[Node, bool]] = None
         self.raw = False
         self.assoc: Optional[str] = None
@@ -459,7 +459,7 @@ def _hashable(ref: Node, seen: List[Node]) -> bool:
     while node.kind == "custom":
         if node.bind is not None and node.bind.post is not None:
             return True  # a typed value: the typed layer vouches for it
-        node = node.inner  # type: ignore[assignment]
+        node = node.inner
     if node.bind is not None and (node.bind.post is not None or node.bind.make is not None
                                  or node.bind.join is not None or node.bind.assoc is not None):
         return True
@@ -886,7 +886,7 @@ class Codec:
         def compute() -> Tuple[Tuple[bool, int, bool], int]:
             def child(n: Node) -> Tuple[Tuple[bool, int, bool], int]:
                 value = self.layout(n)
-                return value, n.layout_memo[2] + 1  # type: ignore[index]
+                return value, n.layout_memo[2] + 1
 
             k = node.kind
             if k in ("int", "float", "bool", "char"):
@@ -923,22 +923,22 @@ class Codec:
                 return True, 0
             if k == "option":
                 value = not self.can_be_empty(node.child)
-                return value, node.child.empty_memo[2] + 1  # type: ignore[index]
+                return value, node.child.empty_memo[2] + 1
             if k == "array":
                 if node.count == 0:
                     return True, 0
                 info = self.layout(node.child)
-                return info[0] and info[1] == 0, node.child.layout_memo[2] + 1  # type: ignore[index]
+                return info[0] and info[1] == 0, node.child.layout_memo[2] + 1
             if k == "record":
                 if not node.stable:
                     return False, 0
                 info = self.layout(node)
-                return info[0] and info[1] == 0, node.layout_memo[2]  # type: ignore[index]
+                return info[0] and info[1] == 0, node.layout_memo[2]
             if k == "bitvector":
                 return node.size == 0, 0
             if k in ("string", "hex"):
                 value = self.can_be_empty(node.child)
-                return value, node.child.empty_memo[2] + 1  # type: ignore[index]
+                return value, node.child.empty_memo[2] + 1
             return False, 0
 
         return self._memoized(node, "empty_memo", compute)
@@ -1160,10 +1160,10 @@ class Codec:
         items = assoc_items(value)
         if items is None:
             fail(f"{prefix}: sequence value required")
-        order = self.assoc_order(node, items)  # type: ignore[arg-type]
+        order = self.assoc_order(node, items)
         if order is None:
             fail(f"{prefix}: map has duplicate keys" if node.assoc == "map" else f"{prefix}: set has duplicate elements")
-        return [items[i] for i in order]  # type: ignore[index, union-attr]
+        return [items[i] for i in order]
 
     def assoc_value(self, node: Node, items: list) -> Any:
         """The map / set value of a node from its entries / elements in canonical order."""
@@ -1215,7 +1215,7 @@ class Codec:
             return f
         if "enc_busy" in node.extra:
             # A recursive type: forward to the closure once it exists.
-            return lambda value, n: node.enc(value, n)  # type: ignore[misc]
+            return lambda value, n: node.enc(value, n)
         node.extra["enc_busy"] = True
         try:
             f = self._compile_encoder(node)
@@ -1414,19 +1414,19 @@ class Codec:
         get = node.extra.get("get")
         if get is None:
             get = node.extra["get"] = self._record_getter(node)
-        return get  # type: ignore[no-any-return]
+        return get
 
     def variant_splitter(self, node: Node) -> Callable[[Any], Tuple[int, Any]]:
         """``(index, payload)`` of a variant value."""
         split = node.extra.get("split")
         if split is None:
             split = node.extra["split"] = self._variant_splitter(node)
-        return split  # type: ignore[no-any-return]
+        return split
 
     def _record_getter(self, node: Node) -> Callable[[Any], Sequence[Any]]:
         bind = node.bind
         if bind is not None and bind.get is not None:
-            return bind.get  # type: ignore[no-any-return]
+            return bind.get
         names = [m.name for m in node.members]
         optional = [self.layout(m.node)[2] for m in node.members]
         by_name = node.by_name
@@ -1609,7 +1609,7 @@ class Codec:
     def _variant_splitter(self, node: Node) -> Callable[[Any], Tuple[int, Any]]:
         bind = node.bind
         if bind is not None and bind.split is not None:
-            return bind.split  # type: ignore[no-any-return]
+            return bind.split
         by_name = node.by_name
 
         def split(value: Any) -> Tuple[int, Any]:
@@ -1653,7 +1653,7 @@ class Codec:
         return enc
 
     def _enc_custom(self, node: Node) -> Callable[[Any, int], bytes]:
-        inner_node: Node = node.inner  # type: ignore[assignment]
+        inner_node: Node = node.inner
         inner = self.encoder(inner_node)
         handler = node.handler
         checks = not node.boxed and ((handler is not None and handler.check is not None)
@@ -1797,7 +1797,7 @@ class Codec:
         if f is not None:
             return f
         if "dec_busy" in node.extra:
-            return lambda data, start, end, n, ctx: node.dec(data, start, end, n, ctx)  # type: ignore[misc]
+            return lambda data, start, end, n, ctx: node.dec(data, start, end, n, ctx)
         node.extra["dec_busy"] = True
         try:
             f = getattr(self, "_dec_" + node.kind)(node)
@@ -1808,7 +1808,7 @@ class Codec:
             node.dec = f
         finally:
             del node.extra["dec_busy"]
-        return f  # type: ignore[return-value]
+        return f
 
     def _dec_int(self, node: Node) -> Callable[..., Any]:
         size, signed, bits = node.size, node.signed, node.bits
@@ -2130,7 +2130,7 @@ class Codec:
         return dec
 
     def _dec_custom(self, node: Node) -> Callable[..., Any]:
-        inner = self.decoder(node.inner)  # type: ignore[arg-type]
+        inner = self.decoder(node.inner)
         handler = node.handler
         if node.boxed or (handler is None and not self.require_handlers) or (
                 handler is not None and handler.check is None):

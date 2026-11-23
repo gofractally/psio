@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 import struct
-from typing import Any, Callable, List, Optional, Tuple
+from typing import NoReturn, Any, Callable, List, Optional, Tuple
 
 from ._core import MAX_DEPTH, NO_HANDLER, Codec, Ctx, Handler, Node, member_bound_admits, strip
 from ._time import text_of, tick_type_admits, ticks_of
@@ -42,7 +42,7 @@ F32_MAX = 3.4028234663852886e38
 def fround(x: float) -> float:
     """``x`` rounded to binary32 (an infinity when out of range)."""
     try:
-        return _F32.unpack(_F32.pack(x))[0]  # type: ignore[no-any-return]
+        return _F32.unpack(_F32.pack(x))[0]
     except OverflowError:
         return float("inf") if x > 0 else float("-inf")
 
@@ -246,7 +246,7 @@ class Cursor:
         raise JsonError(what, offset=self.p)
 
     def _ws(self) -> None:
-        self.p = _WS.match(self.s, self.p).end()  # type: ignore[union-attr]
+        self.p = _WS.match(self.s, self.p).end()
 
     def _take(self, c: str) -> bool:
         self._ws()
@@ -272,7 +272,7 @@ class Cursor:
             return "null"
         if c == "-" or "0" <= c <= "9":
             return "number"
-        return self.fail("json: unexpected character at value start")  # type: ignore[no-any-return]
+        return self.fail("json: unexpected character at value start")
 
     def _open(self, c: str, expected: str) -> None:
         if not self._take(c):
@@ -321,7 +321,7 @@ class Cursor:
         if m is None:
             self.fail("json: bad hex digit in \\uXXXX")
         self.p += 4
-        return int(m.group(), 16)  # type: ignore[union-attr]
+        return int(m.group(), 16)
 
     def string(self) -> Tuple[str, bool]:
         """A string value, unescaped, and whether the text between the quotes differed from it."""
@@ -340,7 +340,7 @@ class Cursor:
             if m2 is None:
                 self.p = self.end
                 self.fail("json: unterminated string")
-            at = m2.start()  # type: ignore[union-attr]
+            at = m2.start()
             out.append(s[self.p:at])
             self.p = at
             c = s[at]
@@ -384,12 +384,12 @@ class Cursor:
             if not (c == "-" or "0" <= c <= "9") or c == "":
                 self.fail("json: expected a number")
             self.fail("json: number missing integer part")
-        self.p = m.end()  # type: ignore[union-attr]
+        self.p = m.end()
         # `1.` and `1e` are not numbers: the grammar needs digits there.
         nxt = self.s[self.p:self.p + 1]
         if nxt == "." or nxt in ("e", "E"):
             self.fail("json: number missing fractional digits" if nxt == "." else "json: number missing exponent digits")
-        return m.group()  # type: ignore[union-attr]
+        return m.group()
 
     def boolean(self) -> bool:
         self._ws()
@@ -399,7 +399,7 @@ class Cursor:
         if self.s.startswith("false", self.p):
             self.p += 5
             return False
-        return self.fail("json: expected true or false")  # type: ignore[no-any-return]
+        return self.fail("json: expected true or false")
 
     def null(self) -> None:
         self._ws()
@@ -559,7 +559,7 @@ def _key_text_of(codec: Codec, key: Node) -> _KeyText:
             if handler is None and codec.require_handlers:
                 return _KeyText("pairs", missing=True)
         outer.append(at)
-        at = at.inner  # type: ignore[assignment]
+        at = at.inner
     return _KeyText("pairs")
 
 
@@ -595,7 +595,7 @@ class Reader:
         except Exception:
             return c.fail("json: text is not a value of the custom type")
         try:
-            return self.codec.canonical(node.inner, value)  # type: ignore[arg-type]
+            return self.codec.canonical(node.inner, value)
         except PsioError:
             return c.fail("json: custom handler produced a value that is not the inner type")
         except Exception:
@@ -617,8 +617,8 @@ class Reader:
         c = self.c
         if c.kind() != "string":
             c.fail("json: expected a string (custom text form)")
-        value = self._from_text(node, node.handler, c.string()[0])  # type: ignore[arg-type]
-        self._checked_inside(node.inner, value)  # type: ignore[arg-type]
+        value = self._from_text(node, node.handler, c.string()[0])
+        self._checked_inside(node.inner, value)
         self._checked(node, value)
         return value
 
@@ -641,7 +641,7 @@ class Reader:
                 c.fail("json: expected an object (a map with a string key)")
             c.begin_object()
             key_ref, value_ref = node.key_ref, node.value_ref
-            target: Node = key.node  # type: ignore[assignment]
+            target: Node = key.node
             while True:
                 name = c.next_field()
                 if name is None:
@@ -656,7 +656,7 @@ class Reader:
                         c.fail("json: string exceeds its bound")
                     k: Any = data if target.raw else name
                 else:
-                    k = self._from_text(target, key.handler, name)  # type: ignore[arg-type]
+                    k = self._from_text(target, key.handler, name)
                 if target.bind is not None and target.bind.post is not None:
                     k = target.bind.post(k)
                 k = key.lift(k)
@@ -681,7 +681,7 @@ class Reader:
             text, escaped = c.string()
             value = None if escaped else _parse_wide(text, signed, bits)
             if value is None:
-                return c.fail("json: integer string is not a canonical in-range decimal")  # type: ignore[no-any-return]
+                return c.fail("json: integer string is not a canonical in-range decimal")
             return value
         if form == "string":
             c.fail("json: expected an integer string")
@@ -689,7 +689,7 @@ class Reader:
             c.fail("json: expected an integer")
         value = _parse_wide(c.number(), signed, bits)
         if value is None:
-            return c.fail("json: integer is not a canonical in-range decimal")  # type: ignore[no-any-return]
+            return c.fail("json: integer is not a canonical in-range decimal")
         if self.ijson and form == "natural" and not -SAFE_INTEGER <= value <= SAFE_INTEGER:
             c.fail("ijson: bare integer outside the safe range must be a string")
         return value
@@ -708,7 +708,7 @@ class Reader:
         if first == "-" or "0" <= first <= "9":
             value = _parse_integer(text, signed, bits)
             if value is None:
-                return c.fail("json: enum number is not a canonical in-range decimal")  # type: ignore[no-any-return]
+                return c.fail("json: enum number is not a canonical in-range decimal")
             return value
         name, colon, number = text.partition(":")
         found = None
@@ -717,18 +717,18 @@ class Reader:
                 found = m
                 break
         if found is None:
-            return c.fail("json: unknown enumerator name")  # type: ignore[no-any-return]
+            return c.fail("json: unknown enumerator name")
         if colon:
             value = _parse_integer(number, signed, bits)
             if value is None:
-                return c.fail("json: enum number is not a canonical in-range decimal")  # type: ignore[no-any-return]
+                return c.fail("json: enum number is not a canonical in-range decimal")
             if value & U64_MASK != found["value"]:
                 c.fail("json: enumerator name and number disagree")
             return value
         raw = found["value"]
         value = _in_range(raw - (1 << 64) if signed and raw >> 63 else raw, signed, bits)
         if value is None:
-            return c.fail("json: enumerator value is outside its underlying integer")  # type: ignore[no-any-return]
+            return c.fail("json: enumerator value is outside its underlying integer")
         return value
 
     def _integer(self, bits: int, signed: bool, form: str) -> int:
@@ -743,7 +743,7 @@ class Reader:
             text, escaped = c.string()
             value = None if escaped or len(text) > 21 else _parse_integer(text, signed, bits)
             if value is None:
-                return c.fail("json: integer string is not a canonical in-range decimal")  # type: ignore[no-any-return]
+                return c.fail("json: integer string is not a canonical in-range decimal")
             return value
         if form == "string":
             c.fail("json: expected an integer string")
@@ -752,7 +752,7 @@ class Reader:
         token = c.number()
         value = None if len(token) > 21 else _parse_integer(token, signed, bits)
         if value is None:
-            return c.fail("json: integer is not a canonical in-range decimal")  # type: ignore[no-any-return]
+            return c.fail("json: integer is not a canonical in-range decimal")
         # Natural ijson: a bare number only where a double is exact.
         if wide and not -SAFE_INTEGER <= value <= SAFE_INTEGER:
             c.fail("ijson: bare integer outside the safe range must be a string")
@@ -760,7 +760,7 @@ class Reader:
 
     def _time(self, node: Node, form: str) -> int:
         c = self.c
-        if not node.time.point:  # type: ignore[union-attr]
+        if not node.time.point:
             return self._integer(node.bits, node.signed, form)
         if node.time_digits < 0:
             c.fail("json: this time point unit has no RFC 3339 text form")
@@ -772,7 +772,7 @@ class Reader:
             text = ""
         out = ticks_of(text, node.time_digits, node.bits, node.signed)
         if isinstance(out, str):
-            return c.fail(out)  # type: ignore[no-any-return]
+            return c.fail(out)
         return out[0]
 
     def _array_items(self, limit: Optional[int], exact: bool, item: Callable[[], Any]) -> None:
@@ -967,18 +967,18 @@ class Reader:
             # checked by its handler; with none it is its wire type (or, under
             # a strict registry, an error).
             if node.boxed:
-                return self.read(node.inner, form, n + 1)  # type: ignore[arg-type]
+                return self.read(node.inner, form, n + 1)
             handler = node.handler
             if handler is None and self.codec.require_handlers:
                 c.fail(NO_HANDLER)
             if handler is not None and handler.from_text is not None:
                 return self._presented(node)
-            value = self.read(node.inner, form, n + 1)  # type: ignore[arg-type]
+            value = self.read(node.inner, form, n + 1)
             if handler is not None and handler.check is not None:
                 # The wire type's text; the custom values inside it were
                 # checked as they were read, then this one as `decode` gives it.
                 try:
-                    held = self.codec.canonical(node.inner, value)  # type: ignore[arg-type]
+                    held = self.codec.canonical(node.inner, value)
                 except PsioError:
                     return c.fail("pssz IR: custom value does not match its inner type")
                 self._checked(node, held)
@@ -1014,7 +1014,7 @@ def json_to_value(codec: Codec, node: Node, format: str, text: Any) -> Any:
 
 # ── Types: writing ──────────────────────────────────────────────────────────
 
-def _fail(message: str) -> Any:
+def _fail(message: str) -> NoReturn:
     raise EncodeError(message)
 
 
@@ -1068,9 +1068,9 @@ class Writer:
                 raise ValueError("no text form to write")
             text = handler.to_text(inner)
         except Exception:
-            return _fail("json: custom handler has no text for the value")  # type: ignore[no-any-return]
+            return _fail("json: custom handler has no text for the value")
         if type(text) is not str:
-            return _fail("json: custom handler has no text for the value")  # type: ignore[no-any-return]
+            return _fail("json: custom handler has no text for the value")
         self.out.append(quote(text, self.ijson))
 
     def _assoc(self, node: Node, value: Any, form: str, n: int) -> None:
@@ -1100,17 +1100,17 @@ class Writer:
             if self.checks and codec.checks_values:
                 codec.encoder(node.key_ref)(item[0], 0)
             k = key.lower(item[0])
-            target: Node = key.node  # type: ignore[assignment]
+            target: Node = key.node
             if key.form == "string":
                 self.write(target, k, "natural", n + 1)
             else:
                 if target.bind is not None and target.bind.pre is not None:
                     k = target.bind.pre(k)
                 try:
-                    inner = codec.canonical(target.inner, k)  # type: ignore[arg-type]
+                    inner = codec.canonical(target.inner, k)
                 except PsioError:
-                    return _fail("pssz IR: custom value does not match its inner type")  # type: ignore[no-any-return]
-                self._presented_text(key.handler, inner)  # type: ignore[arg-type]
+                    return _fail("pssz IR: custom value does not match its inner type")
+                self._presented_text(key.handler, inner)
             out.append(":")
             self.write(node.value_ref, item[1], "natural", n + 1)
         out.append("}" if is_object else "]")
@@ -1149,12 +1149,12 @@ class Writer:
         if k == "int":
             if node.time is not None and node.time.point:
                 if type(value) is not int or not tick_type_admits(node.bits, node.signed, value):
-                    return _fail("pssz IR: integer value does not match the schema")  # type: ignore[no-any-return]
+                    return _fail("pssz IR: integer value does not match the schema")
                 if node.time_digits < 0:
-                    return _fail("json: this time point unit has no RFC 3339 text form")  # type: ignore[no-any-return]
+                    return _fail("json: this time point unit has no RFC 3339 text form")
                 text = text_of(value, node.time_digits)
                 if isinstance(text, str):
-                    return _fail(text)  # type: ignore[no-any-return]
+                    return _fail(text)
                 out.append('"' + text[0] + '"')
                 return
             return self._integer(node.bits, node.signed, form, value, node.enumerators)
@@ -1165,7 +1165,7 @@ class Writer:
                     try:
                         size = len(value.encode("utf-8"))
                     except UnicodeEncodeError:
-                        return _fail("json: string is not valid UTF-8")  # type: ignore[no-any-return]
+                        return _fail("json: string is not valid UTF-8")
                     if not _bytes_admit(container, size):
                         _fail("json: string exceeds its bound")
                 out.append(quote(value, self.ijson))
@@ -1180,7 +1180,7 @@ class Writer:
                 except UnicodeDecodeError:
                     _fail("json: string is not valid UTF-8")
                 return
-            return _fail("pssz IR: string value required")  # type: ignore[no-any-return]
+            return _fail("pssz IR: string value required")
         if k == "record":
             values = self.codec.record_getter(node)(value)
             out.append("{")
@@ -1198,7 +1198,7 @@ class Writer:
             if node.assoc:
                 return self._assoc(node, value, form, n)
             if not isinstance(value, (list, tuple)):
-                return _fail("pssz IR: sequence value required")  # type: ignore[no-any-return]
+                return _fail("pssz IR: sequence value required")
             if node.bounded and (len(value) != node.count if node.exact else len(value) > node.count):
                 _fail("json: array exceeds its bound")
             out.append("[")
@@ -1222,28 +1222,28 @@ class Writer:
             return self.write(node.text_child, value, form, n + 1)
         if k == "bool":
             if value is not True and value is not False:
-                return _fail("pssz IR: bool value required")  # type: ignore[no-any-return]
+                return _fail("pssz IR: bool value required")
             out.append("true" if value else "false")
             return
         if k == "float":
             name = "ijson" if self.ijson else "json"
             if type(value) is NaN:
-                return _fail(f"{name}: non-finite float has no JSON text")  # type: ignore[no-any-return]
+                return _fail(f"{name}: non-finite float has no JSON text")
             if not isinstance(value, (float, int)) or isinstance(value, bool):
-                return _fail("pssz IR: float value does not match the schema")  # type: ignore[no-any-return]
+                return _fail("pssz IR: float value does not match the schema")
             # The value as the float holds it: a number beyond binary32 is infinite there.
             held = fround(value) if node.size == 4 else float(value)
             if held != held or held in (float("inf"), float("-inf")):
-                return _fail(f"{name}: non-finite float has no JSON text")  # type: ignore[no-any-return]
+                return _fail(f"{name}: non-finite float has no JSON text")
             out.append(format_float(held, node.size == 4))
             return
         if k == "char":
             return self._integer(8, False, form, value)
         if k in ("bitvector", "bitlist"):
-            return _fail("json: bit types have no JSON form")  # type: ignore[no-any-return]
+            return _fail("json: bit types have no JSON form")
         if k == "hex":
             if not isinstance(value, (bytes, bytearray, memoryview)):
-                return _fail("pssz IR: bytes value required")  # type: ignore[no-any-return]
+                return _fail("pssz IR: bytes value required")
             data = bytes(value)
             if not _bytes_admit(node.child, len(data)):
                 _fail("json: array exceeds its bound")
@@ -1261,14 +1261,14 @@ class Writer:
             inner = value
             if outer.is_opaque(node):
                 if not isinstance(value, (bytes, bytearray, memoryview)):
-                    return _fail("pssz IR: bytes value required for an opaque nested value")  # type: ignore[no-any-return]
+                    return _fail("pssz IR: bytes value required for an opaque nested value")
                 data = bytes(value)
                 try:
                     inner = outer.auto.decoder(node.text_child)(data, 0, len(data), 0, Ctx(True))
                 except PsioError as e:
                     if e.invariant:
                         raise
-                    return _fail("json: nested bytes are not a valid encoding of their type")  # type: ignore[no-any-return]
+                    return _fail("json: nested bytes are not a valid encoding of their type")
             self.codec = outer.auto
             try:
                 return self.write(node.text_child, inner, form, n + 1)
@@ -1277,7 +1277,7 @@ class Writer:
         if k == "tuple":
             members = node.members
             if not isinstance(value, (list, tuple)) or len(value) != len(members):
-                return _fail("pssz IR: tuple value count mismatch")  # type: ignore[no-any-return]
+                return _fail("pssz IR: tuple value count mismatch")
             out.append("[")
             for i, m in enumerate(members):
                 if i:
@@ -1298,7 +1298,7 @@ class Writer:
                 out.append("]")
             return
         if k == "custom":
-            inner_node: Node = node.inner  # type: ignore[assignment]
+            inner_node: Node = node.inner
             if not node.boxed:
                 handler = node.handler
                 if handler is None and self.codec.require_handlers:

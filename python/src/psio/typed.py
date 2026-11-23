@@ -28,7 +28,9 @@ import operator
 import sys
 import types
 import typing
-from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import (
+    Annotated, Any, Callable, Dict, List, NoReturn, Optional, Sequence, Tuple, TypeVar, Union, cast, overload,
+)
 
 from . import annotations as A
 from . import ir as _ir
@@ -43,12 +45,15 @@ __all__ = [
     "shape_of",
 ]
 
+_C = TypeVar("_C")
+_F = TypeVar("_F")
+
 UTC = datetime.timezone.utc
 EPOCH = datetime.datetime(1970, 1, 1, tzinfo=UTC)
 NoneType = type(None)
 
 
-def _fail(message: str) -> Any:
+def _fail(message: str) -> NoReturn:
     raise SchemaError(message)
 
 
@@ -66,6 +71,9 @@ class Shape:
         #: The Python class of a value (variant discrimination), or None.
         self.py: Any = None
         self.__dict__.update(fields)
+
+    def __getattr__(self, name: str) -> Any:  # the fields of each kind are set by keyword
+        raise AttributeError(name)
 
     def copy(self, **changes: Any) -> "Shape":
         out = Shape(self.k)
@@ -174,7 +182,7 @@ def key_of(shape: Shape, depth: int = 0) -> str:
     elif k == "box":
         out = f"X({key_of(s.inner, d)})"
     else:
-        return _fail("typed schema: unresolved definition")  # type: ignore[no-any-return]
+        return _fail("typed schema: unresolved definition")
     if s.ident:
         out += "~" + s.ident
     s.key = out
@@ -183,6 +191,16 @@ def key_of(shape: Shape, depth: int = 0) -> str:
 
 # ── Class-level declarations ────────────────────────────────────────────────
 
+@overload
+def record(cls: _C) -> _C: ...
+@overload
+def record(cls: _C, *, name: Optional[str] = ..., max_dynamic_data: Optional[int] = ...,
+           definition_will_not_change: bool = ..., max_fields: Optional[int] = ...,
+           transparent: bool = ..., custom: Optional[str] = ...) -> _C: ...
+@overload
+def record(*, name: Optional[str] = ..., max_dynamic_data: Optional[int] = ...,
+           definition_will_not_change: bool = ..., max_fields: Optional[int] = ...,
+           transparent: bool = ..., custom: Optional[str] = ...) -> Callable[[_C], _C]: ...
 def record(cls: Any = None, *, name: Optional[str] = None, max_dynamic_data: Optional[int] = None,
            definition_will_not_change: bool = False, max_fields: Optional[int] = None,
            transparent: bool = False, custom: Optional[str] = None) -> Any:
@@ -220,7 +238,7 @@ def record(cls: Any = None, *, name: Optional[str] = None, max_dynamic_data: Opt
     return apply if cls is None else apply(cls)
 
 
-def transparent(cls: Any) -> Any:
+def transparent(cls: _C) -> _C:
     """``@psio.transparent``: the class has one field and is that field on the wire (spec 5.10)."""
     return record(cls, transparent=True)
 
@@ -236,7 +254,7 @@ def _options_of(cls: Any, create: bool = False) -> A.RecordOptions:
             except (AttributeError, TypeError):
                 _OPTIONS[cls] = options
         options = _OPTIONS.get(cls, options)
-    return options  # type: ignore[no-any-return]
+    return options
 
 
 _OPTIONS: Dict[Any, A.RecordOptions] = {}
@@ -261,7 +279,7 @@ class _Marked:
             options.from_text = fn
 
 
-def invariant(fn: Any) -> Any:
+def invariant(fn: _F) -> _F:
     """Marks a method as the type's invariant (spec 18).
 
     It returns ``None`` / ``True`` when the value is a value of the type, and
@@ -272,21 +290,22 @@ def invariant(fn: Any) -> Any:
         def _ordered(self) -> Optional[str]:
             return None if self.lo <= self.hi else "Range: lo is greater than hi"
     """
-    return _Marked("invariant", fn)
+    return cast(_F, _Marked("invariant", fn))
 
 
-def to_text(fn: Any) -> Any:
+def to_text(fn: _F) -> _F:
     """Marks a method as the type's text form: one JSON string in both text formats."""
-    return _Marked("to_text", fn)
+    return cast(_F, _Marked("to_text", fn))
 
 
-def from_text(fn: Any) -> Any:
+def from_text(fn: _F) -> _F:
     """Marks a ``classmethod`` / ``staticmethod`` as the reader of the type's text form."""
-    return _Marked("from_text", fn)
+    return cast(_F, _Marked("from_text", fn))
 
 
 def enum_type(underlying: Any, *, other: bool = False, name: Optional[str] = None,
-              invariant: Optional[Callable[[Any], Any]] = None, custom: Optional[str] = None) -> Any:
+              invariant: Optional[Callable[[Any], Any]] = None,
+              custom: Optional[str] = None) -> Callable[[_C], _C]:
     """``@psio.enum(u8)``: the underlying integer of an ``enum.Enum`` (the wire is that integer).
 
     ``other``: a wire value that names no member decodes to the plain ``int``
@@ -295,7 +314,7 @@ def enum_type(underlying: Any, *, other: bool = False, name: Optional[str] = Non
     def apply(cls: Any) -> Any:
         if not (isinstance(cls, type) and issubclass(cls, enum.Enum)):
             _fail("psio.enum decorates an enum.Enum subclass")
-        cls.__psio_enum__ = (underlying, other, name, invariant, custom)
+        setattr(cls, "__psio_enum__", (underlying, other, name, invariant, custom))
         return cls
     return apply
 
@@ -474,7 +493,7 @@ def _tick_binding(py: Any, kind: str, num: int, den: int) -> Optional[Binding]:
             except OverflowError:
                 raise DecodeError("time: duration outside the range of timedelta (declare int ticks)") from None
         return Binding(pre=pre_duration, post=post_duration)
-    return _fail("psio: a time value is a datetime, a timedelta or int ticks")  # type: ignore[no-any-return]
+    return _fail("psio: a time value is a datetime, a timedelta or int ticks")
 
 
 def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
@@ -497,7 +516,7 @@ def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
             return shape if shape is not None else _fail(f"psio: no {spec.bits}-bit integer")
         if _find(markers, A.CharSpec) is not None:
             return _CHAR
-        return _fail("psio: int needs a width: use psio.u8 ... psio.u64, psio.i8 ... psio.i64, psio.u128, "  # type: ignore[no-any-return]
+        return _fail("psio: int needs a width: use psio.u8 ... psio.u64, psio.i8 ... psio.i64, psio.u128, "
                      "psio.i128 or psio.u256 (they are ints to a type checker)")
     if base is bool:
         return _BOOL
@@ -526,7 +545,7 @@ def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
             _fail("psio: Bits needs psio.bitvector(N) or psio.bitlist(N)")
         return Shape("bits", id=bits.id, n=bits.count, py=Bits)
     if base is datetime.datetime or base is datetime.timedelta:
-        return _fail(f"psio: {base.__name__} needs its unit: Annotated[{base.__name__}, "  # type: ignore[no-any-return]
+        return _fail(f"psio: {base.__name__} needs its unit: Annotated[{base.__name__}, "
                      f"psio.{'time_point' if base is datetime.datetime else 'duration'}(\"micros\")]")
     origin = typing.get_origin(base)
     args = typing.get_args(base)
@@ -603,8 +622,8 @@ def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
             _KEEP.append(base)
         return known
     if isinstance(base, (str, typing.ForwardRef)):
-        return _fail(f"psio: unresolved forward reference {base!r}")  # type: ignore[no-any-return]
-    return _fail(f"psio: no wire type for {hint!r}")  # type: ignore[no-any-return]
+        return _fail(f"psio: unresolved forward reference {base!r}")
+    return _fail(f"psio: no wire type for {hint!r}")
 
 
 def _variant(members: Sequence[Any]) -> Shape:
@@ -625,10 +644,10 @@ def _variant(members: Sequence[Any]) -> Shape:
 
 def _default_alt_name(base: Any, shape: Shape) -> str:
     if shape.k in ("record", "transparent"):
-        return shape.name  # type: ignore[no-any-return]
+        return shape.name
     if shape.k == "custom":
         inner = shape.inner
-        return inner.name if inner.k in ("record", "transparent") else shape.id  # type: ignore[no-any-return]
+        return inner.name if inner.k in ("record", "transparent") else shape.id
     if isinstance(base, type) and issubclass(base, enum.Enum):
         return base.__name__
     if shape.k == "int":
@@ -639,7 +658,7 @@ def _default_alt_name(base: Any, shape: Shape) -> str:
         return {"utf8": "string", "string": "raw_string", "hex": "bytes"}[shape.id]
     if shape.k == "bool":
         return "bool"
-    return _fail(f"psio: name this alternative of the union: Annotated[{base!r}, psio.alt(\"name\")]")  # type: ignore[no-any-return]
+    return _fail(f"psio: name this alternative of the union: Annotated[{base!r}, psio.alt(\"name\")]")
 
 
 def _runtime_class(shape: Shape) -> Any:
@@ -716,13 +735,13 @@ def _enum_shape(cls: Any) -> Shape:
 
     def pre(value: Any) -> int:
         if type(value) is cls:
-            return value._value_  # type: ignore[no-any-return]
+            return value._value_
         if other and type(value) is int:
             if value in by_value:
                 raise EncodeError(f"pssz: {value} is a declared enumerator of {cls.__name__}: write the member")
             return value
         if isinstance(value, cls):
-            return value._value_  # type: ignore[no-any-return]
+            return value._value_
         raise EncodeError(f"pssz: {cls.__name__} value required")
 
     def post(value: int) -> Any:
@@ -733,7 +752,6 @@ def _enum_shape(cls: Any) -> Shape:
             raise DecodeError(f"pssz: enum value is not a declared enumerator of {cls.__name__}")
         return member
     out.bind = Binding(pre=pre, post=post)
-    out.enum_name = name or cls.__name__
     if check is not None or custom_id is not None:
         id = custom_id or name or cls.__name__
         out = Shape("custom", id=id, inner=out, py=cls,
@@ -752,9 +770,9 @@ def _hints_of(cls: Any) -> Dict[str, Any]:
     try:
         return typing.get_type_hints(cls, include_extras=True)
     except NameError as e:
-        return _fail(f"psio: {cls.__name__}: {e} (declare it at module level, or pass it to psio.schema_of first)")  # type: ignore[no-any-return]
+        return _fail(f"psio: {cls.__name__}: {e} (declare it at module level, or pass it to psio.schema_of first)")
     except Exception as e:
-        return _fail(f"psio: {cls.__name__}: cannot read its type hints: {type(e).__name__}: {e}")  # type: ignore[no-any-return]
+        return _fail(f"psio: {cls.__name__}: cannot read its type hints: {type(e).__name__}: {e}")
 
 
 def _class_shape(cls: Any) -> Shape:
@@ -802,7 +820,7 @@ def _class_shape(cls: Any) -> Shape:
         if reserved_custom_id(id):
             _fail(f'psio: custom id "{id}" is reserved')
         outer = Shape("custom", id=id, inner=shape, py=cls, cls=cls)
-        outer.handler = _class_handler(cls, options, shape)
+        setattr(outer, "handler", _class_handler(cls, options, shape))
         if shape.k == "transparent":
             # The Custom node wraps the member's type: the class binds there.
             outer.bind, shape.bind = shape.bind, None
@@ -883,8 +901,8 @@ def _class_handler(cls: Any, options: A.RecordOptions, wire: Shape) -> Optional[
         return None
     if wire.k == "transparent":
         # The handler sees the member's value; the methods want the instance.
-        post = wire.bind.post  # type: ignore[union-attr]
-        pre = wire.bind.pre  # type: ignore[union-attr]
+        post = wire.bind.post
+        pre = wire.bind.pre
         return Handler(
             to_text=(lambda v: text(post(v))) if text is not None else None,
             from_text=(lambda s: pre(parse(s))) if parse is not None else None,
@@ -895,7 +913,7 @@ def _class_handler(cls: Any, options: A.RecordOptions, wire: Shape) -> Optional[
 def _fields_of(shape: Shape) -> List[FieldShape]:
     """The members of a record shape (resolved on first use: a class may refer to itself)."""
     if shape.fields is not None:
-        return shape.fields  # type: ignore[no-any-return]
+        return shape.fields
     cls = shape.cls
     hints = _hints_of(cls)
     out: List[FieldShape] = []
@@ -905,7 +923,7 @@ def _fields_of(shape: Shape) -> List[FieldShape]:
         out.append(_field(attr, hints[attr], shape.extra.get(attr, ()), f"{cls.__name__}.{attr}"))
     if len({f.name for f in out}) != len(out):
         _fail(f"psio: {cls.__name__}: two members have the same name")
-    shape.fields = out
+    setattr(shape, "fields", out)
     return out
 
 
@@ -923,7 +941,7 @@ def _field(attr: str, hint: Any, extra: Sequence[Any], where: str) -> FieldShape
             member_specs.append(m)
         else:
             type_specs.append(m)
-    plain = Annotated[tuple([base] + type_specs)] if type_specs else base  # type: ignore[misc]
+    plain = Annotated[tuple([base] + type_specs)] if type_specs else base
     field = FieldShape(name, attr, shape_of(plain))
     bound: Dict[str, int] = {}
     rest = []
@@ -959,12 +977,12 @@ def _inner_of(shape: Shape) -> Shape:
         field = dataclasses.fields(cls) if dataclasses.is_dataclass(cls) else ()
         extra = tuple(m for f in field for m in f.metadata.get("psio", ()))
         if extra:
-            hint = Annotated[tuple([hint] + list(extra))]  # type: ignore[misc]
-        shape.inner = shape_of(hint)
-        if shape.inner.k == "option":
+            hint = Annotated[tuple([hint] + list(extra))]
+        setattr(shape, "inner", shape_of(hint))
+        if shape_of(hint).k == "option":
             _fail(f"psio: the member of transparent type {shape.name} is not an Optional "
                   "(hold an Optional of the wrapper)")
-    return shape.inner  # type: ignore[no-any-return]
+    return shape.inner
 
 
 def _own(shape: Shape, a: Position, where: str) -> Shape:
@@ -1023,7 +1041,7 @@ def _own(shape: Shape, a: Position, where: str) -> Shape:
             index = _alt_index(alts, key, where)
             alts[index] = AltShape(alts[index].name, _own(alts[index].type, child, where), alts[index].ijson_name)
         return s.copy(alts=alts)
-    return _fail(f"psio: {where}: this type takes no bounds")  # type: ignore[no-any-return]
+    return _fail(f"psio: {where}: this type takes no bounds")
 
 
 def _alt_index(alts: Sequence[AltShape], key: str, where: str) -> int:
@@ -1032,7 +1050,7 @@ def _alt_index(alts: Sequence[AltShape], key: str, where: str) -> int:
             return i
     if key.isdigit() and int(key) < len(alts):
         return int(key)
-    return _fail(f"psio: {where}: at({key}): not an alternative of this union")  # type: ignore[no-any-return]
+    return _fail(f"psio: {where}: at({key}): not an alternative of this union")
 
 
 # ── Schema IR generation (cpp/include/psio/schema_builder.hpp) ──────────────
@@ -1220,7 +1238,7 @@ class Builder:
                 "id": s.id})
         if k == "box":
             return _node("Custom", {"type": self.insert(s.inner), "id": "box"})
-        return _fail("typed schema: unresolved definition")  # type: ignore[no-any-return]
+        return _fail("typed schema: unresolved definition")
 
     def _byte_container(self, bound: str, n: int) -> Dict[str, Any]:
         t = self.insert(_U8)
@@ -1391,7 +1409,7 @@ class Builder:
               "types": self.types, "ir_version": _ir.IR_VERSION}
         out = Schema(ir, handlers=self.handlers, _deferred=self.deferred, _bindings=self.bindings,
                      _normalized=True, **options)
-        out._builder = self  # type: ignore[attr-defined]
+        out._builder = self
         return out
 
 
@@ -1471,7 +1489,7 @@ def arguments(params: Any, *, max_dynamic_data: Optional[int] = None) -> Shape:
             return list(value) + [None] * (count - len(value)) if len(value) < count else value
         out.bind = Binding(get=get, make=tuple)
         return out
-    return _declared(run)  # type: ignore[no-any-return]
+    return _declared(run)
 
 
 # ── Public entry points ─────────────────────────────────────────────────────
@@ -1510,7 +1528,7 @@ def _root(tp: Any) -> Tuple[Schema, str]:
         _SCHEMAS[tp] = out
     except TypeError:
         pass
-    return out  # type: ignore[no-any-return]
+    return out
 
 
 def schema_of(*types: Any, names: Optional[Dict[str, Any]] = None, **options: Any) -> Schema:
@@ -1531,7 +1549,7 @@ def schema_of(*types: Any, names: Optional[Dict[str, Any]] = None, **options: An
         return builder.schema(**options)
     if len(types) == 1 and not names and not options:
         return _root(types[0])[0]
-    return _declared(run)  # type: ignore[no-any-return]
+    return _declared(run)
 
 
 def codec(tp: Any, *, width: Any = "auto", require_handlers: Optional[bool] = None,

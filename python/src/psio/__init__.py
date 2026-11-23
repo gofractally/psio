@@ -17,7 +17,8 @@
     text = psio.to_ijson(account)
     schema = psio.schema_of(Account)                 # the Schema IR C++ / Rust / JS agree on
 
-See ``python/README.md``.
+See ``python/README.md``.  (Import the names you use: ``from psio import *`` would shadow the builtins
+``max`` and ``min``.)
 """
 
 from . import ir
@@ -33,6 +34,7 @@ from .api import (  # noqa: F401
     validate_key, validate_pssz,
 )
 from .errors import DecodeError, EncodeError, InternalError, JsonError, PsioError, SchemaError  # noqa: F401
+from .interface import Interface, Method, interface, interface_of, method  # noqa: F401
 from .ir import IR_VERSION  # noqa: F401
 from .schema import Handler, Schema, SchemaType, Status, key_prefix_upper_bound, trusted  # noqa: F401
 from ._time import time_point_from_iso, time_point_to_iso  # noqa: F401
@@ -42,3 +44,18 @@ from .values import NaN, Bits, Some, Variant  # noqa: F401
 from .view import ListView, RecordView, TupleView, VariantView, View  # noqa: F401
 
 __version__ = "0.1.0"
+
+__all__ = [
+    "ir", "interface", "Annotated", "Bits", "DecodeError", "DurationMs", "DurationNs", "DurationSec", "DurationUs",
+    "EncodeError", "Handler", "IR_VERSION", "Interface", "InternalError", "JsonError", "ListView", "Method", "NaN",
+    "PsioError", "RawString", "RecordView", "Schema", "SchemaError", "SchemaType", "Some", "Status", "TimePointMs",
+    "TimePointNs", "TimePointSec", "TimePointUs", "TupleView", "Variant", "VariantView", "View", "alt",
+    "arguments", "array", "at", "bitlist", "bitvector", "bounded", "boxed", "char", "codec", "custom", "duration",
+    "element", "enum", "exact", "f32", "f64", "from_ijson", "from_json", "from_key", "from_pssz",
+    "from_pssz_trusted", "from_text", "i128", "i16", "i32", "i64", "i8", "identity", "ijson_number",
+    "ijson_string", "interface_of", "invariant", "json_number", "json_string", "json_to_pssz", "key_prefix",
+    "key_prefix_upper_bound", "key_size", "keys", "length", "max", "method", "min", "monotonic", "name", "nested",
+    "pssz_size", "pssz_to_json", "pssz_view", "record", "schema_of", "time_point", "time_point_from_iso",
+    "time_point_to_iso", "to_ijson", "to_json", "to_key", "to_pssz", "to_text", "transparent", "trusted", "u128",
+    "u16", "u256", "u32", "u64", "u8", "utf8", "validate_ijson", "validate_json", "validate_key", "validate_pssz",
+]

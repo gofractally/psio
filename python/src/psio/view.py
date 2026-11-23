@@ -13,7 +13,7 @@ there is no mutable view in this package (decode, change, encode).
 
 from __future__ import annotations
 
-from typing import Any, Iterator, List, Optional, Tuple
+from typing import NoReturn, Any, Iterator, List, Optional, Tuple
 
 from ._core import CAP, DEPTH, LIST_BOUND, MAX_DEPTH, Codec, Ctx, Node, strip
 from .errors import DecodeError, PsioError
@@ -22,7 +22,7 @@ from .values import Some
 __all__ = ["View", "RecordView", "TupleView", "ListView", "VariantView"]
 
 
-def _bytes(message: str) -> Any:
+def _bytes(message: str) -> NoReturn:
     raise DecodeError(message)
 
 
@@ -65,7 +65,7 @@ class View:
                 _bytes(CAP)
             self._spans = codec.record_spans(self._data, self._start, self._end, codec.width_of(node),
                                              record and node.stable, codec.field_layouts(node))
-        return self._spans  # type: ignore[no-any-return]
+        return self._spans
 
     def _member(self, i: int) -> Any:
         begins, ends, present, _ = self._frame()
@@ -134,7 +134,7 @@ class ListView(View):
     def _measure(self) -> Tuple[int, int, int]:
         m = self._spans
         if m is not None:
-            return m  # type: ignore[no-any-return]
+            return m
         codec, node = self._codec, self._node
         size = self._end - self._start
         w = codec.width_of(node)
@@ -164,7 +164,7 @@ class ListView(View):
         elif count > size // w or (not count and size):
             _bytes("pssz: array offset table truncated")
         self._spans = (count, esize if fixed else -1, w)
-        return self._spans  # type: ignore[no-any-return]
+        return self._spans
 
     def __len__(self) -> int:
         return self._measure()[0]

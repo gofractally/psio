@@ -17,6 +17,7 @@ from . import ir as _ir
 from ._core import Binding, Codec, Ctx, Handler, Node, reserved_custom_id, strip
 from ._key import decode_key, encode_key, encode_key_prefix
 from ._time import reserved_time_id
+from .values import Variant
 from .errors import DecodeError, EncodeError, InternalError, JsonError, PsioError, SchemaError
 
 __all__ = ["Schema", "SchemaType", "Status", "trusted", "Handler"]
@@ -142,8 +143,8 @@ class SchemaType:
         codec, node = self._codec, self._node
         if codec.W == 0 or node.cap is None:
             enc = self._enc
-            return _writing(lambda: enc(value, 0))  # type: ignore[no-any-return]
-        return _writing(lambda: codec.encode_top(self._ref, value))  # type: ignore[no-any-return]
+            return _writing(lambda: enc(value, 0))
+        return _writing(lambda: codec.encode_top(self._ref, value))
 
     def pssz_size(self, value: Any) -> int:
         """The size of the encoding of ``value``."""
@@ -195,7 +196,7 @@ class SchemaType:
         def run() -> bytes:
             self._codec.check_value(self._ref, value, "value")
             return encode_key(self._codec, self._ref, value)
-        return _writing(run)  # type: ignore[no-any-return]
+        return _writing(run)
 
     def from_key(self, data: Any) -> Any:
         """Decodes key bytes: exactly one canonical key spanning the whole input."""
@@ -211,7 +212,7 @@ class SchemaType:
 
     def key_prefix(self, elements: Any) -> bytes:
         """The key of the leading ``elements`` of a tuple / record type: what every full key with them starts with."""
-        return _writing(lambda: encode_key_prefix(self._codec, self._ref, elements))  # type: ignore[no-any-return]
+        return _writing(lambda: encode_key_prefix(self._codec, self._ref, elements))
 
     def key_size(self, value: Any) -> int:
         return len(self.to_key(value))
@@ -220,7 +221,7 @@ class SchemaType:
 
     def to_json(self, value: Any, format: str = "json") -> str:
         from ._json import value_to_json
-        return _writing(lambda: value_to_json(self._codec, self._ref, format, value))  # type: ignore[no-any-return]
+        return _writing(lambda: value_to_json(self._codec, self._ref, format, value))
 
     def to_ijson(self, value: Any) -> str:
         return self.to_json(value, "ijson")
@@ -248,14 +249,14 @@ class SchemaType:
         """JSON / I-JSON text -> canonical PSSZ bytes."""
         from ._json import json_to_value
         value = _reading(lambda: json_to_value(self._codec, self._ref, format, text), JsonError)
-        return _writing(lambda: self._codec.encode_top(self._ref, value))  # type: ignore[no-any-return]
+        return _writing(lambda: self._codec.encode_top(self._ref, value))
 
     def pssz_to_json(self, data: Any, format: str = "ijson", *, reject_unknown: bool = False) -> str:
         """PSSZ bytes (fully validated) -> JSON / I-JSON text."""
         from ._json import value_to_json
         value = self.from_pssz(data, reject_unknown=reject_unknown)
         # The decode ran the handlers' checks; the writer need not repeat them.
-        return _writing(lambda: value_to_json(self._codec, self._ref, format, value, False))  # type: ignore[no-any-return]
+        return _writing(lambda: value_to_json(self._codec, self._ref, format, value, False))
 
 
 def _handler_map(handlers: Optional[Mapping[str, Any]]) -> Dict[str, Handler]:
@@ -297,6 +298,7 @@ class Schema:
         self._bindings = _bindings
         self._codecs: Dict[int, Codec] = {}
         self._types: Dict[Any, SchemaType] = {}
+        self._builder: Any = None
 
     def _codec(self, w: int) -> Codec:
         codec = self._codecs.get(w)
@@ -337,11 +339,11 @@ class Schema:
         return cls(Schema.meta().type("Schema").from_json(text, format), _normalized=True, **options)
 
     def to_pssz(self) -> bytes:
-        return Schema.meta().type("Schema").to_pssz(self.ir)  # type: ignore[no-any-return]
+        return Schema.meta().type("Schema").to_pssz(self.ir)
 
     def to_json(self, format: str = "ijson") -> str:
         """The JSON / I-JSON text of this schema, byte for byte the C++ and Rust text."""
-        return Schema.meta().type("Schema").to_json(self.ir, format)  # type: ignore[no-any-return]
+        return Schema.meta().type("Schema").to_json(self.ir, format)
 
     def names(self) -> list:
         return [m["name"] for m in self.ir["types"]]
@@ -368,7 +370,7 @@ class Schema:
         _ir.check_ir_version(self.ir)
         codec = self._codec(w)
         try:
-            node = codec.node(root if isinstance(root, dict) and isinstance(root.get("value"), _ir.Variant)
+            node = codec.node(root if isinstance(root, dict) and isinstance(root.get("value"), Variant)
                               else _ir.normalize_type(root))
             out = SchemaType(codec, node)
         except PsioError:

@@ -15,6 +15,7 @@ C++ / Rust / TypeScript vocabulary (docs/annotations.md, "Master table").
 
 from __future__ import annotations
 
+import datetime
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple, Union
@@ -341,19 +342,14 @@ def monotonic(unit: Any = "nanos", ticks: Any = None) -> TimeSpec:
     return TimeSpec("monotonic", unit, ticks)
 
 
-def _dt() -> Any:
-    import datetime
-    return datetime
-
-
-TimePointSec = Annotated[_dt().datetime, time_point("seconds")]
-TimePointMs = Annotated[_dt().datetime, time_point("millis")]
-TimePointUs = Annotated[_dt().datetime, time_point("micros")]
+TimePointSec = Annotated[datetime.datetime, time_point("seconds")]
+TimePointMs = Annotated[datetime.datetime, time_point("millis")]
+TimePointUs = Annotated[datetime.datetime, time_point("micros")]
 #: Nanosecond ticks: an ``int`` (``datetime`` holds microseconds).
 TimePointNs = Annotated[int, time_point("nanos")]
-DurationSec = Annotated[_dt().timedelta, duration("seconds")]
-DurationMs = Annotated[_dt().timedelta, duration("millis")]
-DurationUs = Annotated[_dt().timedelta, duration("micros")]
+DurationSec = Annotated[datetime.timedelta, duration("seconds")]
+DurationMs = Annotated[datetime.timedelta, duration("millis")]
+DurationUs = Annotated[datetime.timedelta, duration("micros")]
 DurationNs = Annotated[int, duration("nanos")]
 
 

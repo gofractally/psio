@@ -12,7 +12,7 @@ a :class:`psio.SchemaType` from a schema.  The short name is the safe one:
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Type, TypeVar, overload
 
 from .schema import SchemaType, Status, trusted
 from .typed import _CODECS, codec
@@ -23,6 +23,9 @@ __all__ = [
     "to_json", "from_json", "validate_json", "to_ijson", "from_ijson", "validate_ijson",
     "json_to_pssz", "pssz_to_json",
 ]
+
+
+_T = TypeVar("_T")
 
 
 def _of(value: Any, T: Any) -> SchemaType:
@@ -42,6 +45,10 @@ def to_pssz(value: Any, T: Any = None) -> bytes:
     return _of(value, T).to_pssz(value)
 
 
+@overload
+def from_pssz(T: Type[_T], data: Any, *, reject_unknown: bool = False) -> _T: ...
+@overload
+def from_pssz(T: Any, data: Any, *, reject_unknown: bool = False) -> Any: ...
 def from_pssz(T: Any, data: Any, *, reject_unknown: bool = False) -> Any:
     """Validates ``data`` as a ``T``, then decodes it.
 
@@ -53,6 +60,10 @@ def from_pssz(T: Any, data: Any, *, reject_unknown: bool = False) -> Any:
     return _of(None, T).from_pssz(data, reject_unknown=reject_unknown)
 
 
+@overload
+def from_pssz_trusted(T: Type[_T], data: Any) -> _T: ...
+@overload
+def from_pssz_trusted(T: Any, data: Any) -> Any: ...
 def from_pssz_trusted(T: Any, data: Any) -> Any:
     """``from_pssz(T, trusted(data))``."""
     return _of(None, T).from_pssz(trusted(data))
@@ -83,6 +94,10 @@ def to_key(value: Any, T: Any = None) -> bytes:
     return _of(value, T).to_key(value)
 
 
+@overload
+def from_key(T: Type[_T], data: Any) -> _T: ...
+@overload
+def from_key(T: Any, data: Any) -> Any: ...
 def from_key(T: Any, data: Any) -> Any:
     """Decodes key bytes: exactly one canonical key spanning the whole input."""
     return _of(None, T).from_key(data)
@@ -112,10 +127,18 @@ def to_ijson(value: Any, T: Any = None) -> str:
     return _of(value, T).to_json(value, "ijson")
 
 
+@overload
+def from_json(T: Type[_T], text: Any) -> _T: ...
+@overload
+def from_json(T: Any, text: Any) -> Any: ...
 def from_json(T: Any, text: Any) -> Any:
     return _of(None, T).from_json(text, "json")
 
 
+@overload
+def from_ijson(T: Type[_T], text: Any) -> _T: ...
+@overload
+def from_ijson(T: Any, text: Any) -> Any: ...
 def from_ijson(T: Any, text: Any) -> Any:
     return _of(None, T).from_json(text, "ijson")
 

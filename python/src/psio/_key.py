@@ -8,7 +8,7 @@ codec.  This module is internal.
 from __future__ import annotations
 
 import struct
-from typing import Any, List, Optional, Sequence
+from typing import NoReturn, Any, List, Optional, Sequence
 
 from ._core import (
     MAX_DEPTH, QUIET_NAN_32, QUIET_NAN_64, Codec, Ctx, Node, member_bound_admits, packed_byte_count, strip,
@@ -20,15 +20,15 @@ MAP_ORDER = "key: map entries are not in strictly ascending key order"
 SET_ORDER = "key: set elements are not in strictly ascending order"
 
 
-def _value(message: str) -> Any:
+def _value(message: str) -> NoReturn:
     raise EncodeError(message)
 
 
-def _bytes(message: str) -> Any:
+def _bytes(message: str) -> NoReturn:
     raise DecodeError(message)
 
 
-def _schema(message: str) -> Any:
+def _schema(message: str) -> NoReturn:
     raise SchemaError(message)
 
 
@@ -201,7 +201,7 @@ def write_key(codec: Codec, node: Node, value: Any, out: List[bytes], n: int) ->
         write_key(codec, node.members[index].text, payload, out, n + 1)
     elif k == "custom":
         # A wrapper has the key of its inner type: a text form plays no part.
-        write_key(codec, node.inner, value, out, n)  # type: ignore[arg-type]
+        write_key(codec, node.inner, value, out, n)
 
 
 def _write_member(codec: Codec, m: Any, value: Any, out: List[bytes], n: int) -> None:
@@ -478,7 +478,7 @@ def _read_key(codec: Codec, node: Node, src: _Source, n: int) -> Any:
             return bind.join(index, payload)
         return Variant(m.name, payload)
     if k == "custom":
-        return read_key(codec, node.inner, src, n)  # type: ignore[arg-type]
+        return read_key(codec, node.inner, src, n)
     return _schema("key: unsupported type")
 
 

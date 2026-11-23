@@ -18,7 +18,7 @@ A compact spelling is accepted wherever a type is expected and normalized:
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional
+from typing import NoReturn, Any, Dict, List, Mapping, Optional
 
 from .errors import SchemaError
 from .values import Variant
@@ -44,7 +44,7 @@ IrType = Dict[str, Any]
 IrSchema = Dict[str, Any]
 
 
-def _fail(message: str) -> Any:
+def _fail(message: str) -> NoReturn:
     raise SchemaError(message)
 
 
