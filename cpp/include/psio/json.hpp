@@ -40,6 +40,8 @@
 //                             non-owning reader)
 //   std::span<T>              for writers only: the list of its elements; a
 //                             span of bytes is the byte sequence it views
+//   psio::view<T, F, S>       for writers only: the text of the value it
+//                             views (view.hpp; psio::pssz_view<T>)
 //   std::vector, std::array,
 //   psio::bounded             [ ... ]
 //   std::optional             null or the value
@@ -124,6 +126,7 @@
 #include <psio/detail/variant_util.hpp>
 #include <psio/error.hpp>
 #include <psio/ext_int.hpp>
+#include <psio/format.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/get_type_name.hpp>
 #include <psio/json_cursor.hpp>
@@ -192,6 +195,16 @@ namespace psio {
       };
       template <typename T, typename A>
       struct is_std_vector<std::vector<T, A>> : std::true_type
+      {
+      };
+
+      // A psio::view (view.hpp) is written as the value it views.
+      template <typename T>
+      struct is_psio_view : std::false_type
+      {
+      };
+      template <typename X, typename F, ::psio::storage S>
+      struct is_psio_view<::psio::view<X, F, S>> : std::true_type
       {
       };
 
@@ -435,6 +448,8 @@ namespace psio {
       {
          if constexpr (dispatch_adapter_v<Fmt, T>)
             return kind_string;
+         else if constexpr (is_psio_view<T>::value)
+            return json_kinds<Fmt, std::remove_cvref_t<decltype(std::declval<const T&>().unpack())>>();
          else if constexpr (std::is_same_v<T, ::psio::json_value>)
             return kind_any;
          else if constexpr (is_box<T>::value)
@@ -1073,7 +1088,7 @@ namespace psio {
             case json_kind::number:
                if (!c.number(text))
                   return false;
-               out->value = ::psio::json_number{std::string{text}};
+               out->value = ::psio::json_numeral{std::string{text}};
                return true;
             case json_kind::string:
                if (!c.string(text, flag))
@@ -1156,6 +1171,13 @@ namespace psio {
             std::string payload;
             Proj::encode(v, payload);
             write_string(w, std::string_view{payload}, Fmt::i_json);
+         }
+         else if constexpr (is_psio_view<T>::value)
+         {
+            // A view (of validated bytes) is the text of the value it
+            // views: the same text as the owning type's. Written only.
+            const auto value = v.unpack();
+            encode_value<Fmt, IM>(value, w);
          }
          else if constexpr (std::is_same_v<T, ::psio::json_value>)
             write_any(v, w, Fmt::i_json);

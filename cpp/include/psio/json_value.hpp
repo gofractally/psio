@@ -14,7 +14,7 @@
 //
 //   null      std::monostate
 //   boolean   bool
-//   number    psio::json_number: the RFC 8259 token as it was written.
+//   number    psio::json_numeral: the RFC 8259 token as it was written.
 //             Nothing is rounded or renormalised: 1.50, 1e3 and
 //             18446744073709551616 are written back as they were read;
 //             as_int64 / as_uint64 / as_double convert on request
@@ -60,22 +60,22 @@
 namespace psio
 {
    // A JSON number: the token, kept as written.
-   struct json_number
+   struct json_numeral
    {
       std::string text = "0";
 
-      json_number() = default;
+      json_numeral() = default;
       // The token itself ("1.50", "-0", "1e3"). A text that is not an RFC
       // 8259 number is not written: the writer reports it.
-      explicit json_number(std::string token) : text(std::move(token)) {}
+      explicit json_numeral(std::string token) : text(std::move(token)) {}
       template <std::integral I>
          requires(!std::same_as<I, bool>)
-      json_number(I v) : text(std::to_string(v))
+      json_numeral(I v) : text(std::to_string(v))
       {
       }
       // The shortest text that reads back as `v`. A non-finite value has
       // no JSON text (the writer reports it).
-      json_number(double v)
+      json_numeral(double v)
       {
          char       buffer[64];
          const auto end = std::to_chars(buffer, buffer + sizeof buffer, v).ptr;
@@ -89,7 +89,7 @@ namespace psio
       // The nearest double (any token).
       double as_double() const noexcept { return std::strtod(text.c_str(), nullptr); }
 
-      friend bool operator==(const json_number&, const json_number&) = default;
+      friend bool operator==(const json_numeral&, const json_numeral&) = default;
 
      private:
       template <typename I>
@@ -110,7 +110,7 @@ namespace psio
       using array   = std::vector<json_value>;
       using member  = std::pair<std::string, json_value>;
       using object  = std::vector<member>;
-      using storage = std::variant<std::monostate, bool, json_number, std::string, array, object>;
+      using storage = std::variant<std::monostate, bool, json_numeral, std::string, array, object>;
 
       storage value;
 
@@ -122,11 +122,11 @@ namespace psio
       }
       template <std::integral I>
          requires(!std::same_as<I, bool>)
-      json_value(I v) : value(json_number{v})
+      json_value(I v) : value(json_numeral{v})
       {
       }
-      json_value(double v) : value(json_number{v}) {}
-      json_value(json_number n) : value(std::move(n)) {}
+      json_value(double v) : value(json_numeral{v}) {}
+      json_value(json_numeral n) : value(std::move(n)) {}
       json_value(std::string s) : value(std::move(s)) {}
       json_value(std::string_view s) : value(std::string{s}) {}
       json_value(const char* s) : value(std::string{s}) {}
@@ -135,19 +135,19 @@ namespace psio
 
       bool is_null() const noexcept { return std::holds_alternative<std::monostate>(value); }
       bool is_bool() const noexcept { return std::holds_alternative<bool>(value); }
-      bool is_number() const noexcept { return std::holds_alternative<json_number>(value); }
+      bool is_number() const noexcept { return std::holds_alternative<json_numeral>(value); }
       bool is_string() const noexcept { return std::holds_alternative<std::string>(value); }
       bool is_array() const noexcept { return std::holds_alternative<array>(value); }
       bool is_object() const noexcept { return std::holds_alternative<object>(value); }
 
       // The value as one kind, or null when it is another.
       const bool*        as_bool() const noexcept { return std::get_if<bool>(&value); }
-      const json_number* as_number() const noexcept { return std::get_if<json_number>(&value); }
+      const json_numeral* as_number() const noexcept { return std::get_if<json_numeral>(&value); }
       const std::string* as_string() const noexcept { return std::get_if<std::string>(&value); }
       const array*       as_array() const noexcept { return std::get_if<array>(&value); }
       const object*      as_object() const noexcept { return std::get_if<object>(&value); }
       bool*              as_bool() noexcept { return std::get_if<bool>(&value); }
-      json_number*       as_number() noexcept { return std::get_if<json_number>(&value); }
+      json_numeral*       as_number() noexcept { return std::get_if<json_numeral>(&value); }
       std::string*       as_string() noexcept { return std::get_if<std::string>(&value); }
       array*             as_array() noexcept { return std::get_if<array>(&value); }
       object*            as_object() noexcept { return std::get_if<object>(&value); }

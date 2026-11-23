@@ -467,10 +467,16 @@ psio::to_ijson(std::string_view{"x"}, out);        // "x"
 psio::to_ijson("literal");                         // "literal"
 psio::to_ijson(std::tuple{name_view, "n", 3});     // ["...","n",3]
 psio::to_ijson(std::span<const unsigned char>{b}); // "01AB"
+psio::to_ijson(psio::pssz_view<Row>{bytes});       // the Row's text
 ```
 
-They are for writers only: text has no non-owning reader, so a record with
-such a member can be written and not read.
+| `psio::view<T, F, S>` (`psio::pssz_view<T>`, and the member views it hands out) | the text of the value it views: exactly the text of the owning `T` |
+| `psio::shared_pssz<T>`, `psio::pssz_buffer<T>` | the text of the `T` they hold, as `psio::nested<T>` (these are also read) |
+
+They are for writers only (the last row excepted): text has no non-owning
+reader, so a record with such a member can be written and not read. A reply
+built from views of packed rows is written without first copying each row
+into an owning record of its own type.
 
 ### Untagged variants
 
@@ -556,7 +562,7 @@ PSIO_REFLECT(PrettyAction, service, method, data)   // "any JSON here"
 | JSON | held as | |
 |---|---|---|
 | `null`, `true` / `false` | `std::monostate`, `bool` | |
-| number | `psio::json_number{text}` | the token **as it was written**: `1.50`, `1e3`, `-0` and `18446744073709551616` are written back unchanged. `as_int64()` / `as_uint64()` (an in-range integer written without fraction or exponent) and `as_double()` convert on request |
+| number | `psio::json_numeral{text}` | the token **as it was written**: `1.50`, `1e3`, `-0` and `18446744073709551616` are written back unchanged. `as_int64()` / `as_uint64()` (an in-range integer written without fraction or exponent) and `as_double()` convert on request |
 | string | `std::string` | UTF-8 |
 | array | `std::vector<json_value>` | |
 | object | `std::vector<std::pair<std::string, json_value>>` | members **in the order written**. Reading keeps the last value of a repeated key, at the position of the first (one pass); writing a hand-built object that holds a key twice writes its last value once |
@@ -576,7 +582,7 @@ Rules:
   that a number is a 64-bit integer, so it cannot give it `ijson`'s string
   form — a document that came in as I-JSON goes out as I-JSON.
 - A value with no JSON text is an error on writing, as always: a
-  `json_number` whose text is not an RFC 8259 number (also what a
+  `json_numeral` whose text is not an RFC 8259 number (also what a
   non-finite `double` makes), a string that is not UTF-8, nesting deeper
   than a reader accepts.
 - As a record member a missing `json_value` is an error (`null` is a value

@@ -9,7 +9,10 @@
 #include <catch.hpp>
 
 #include <psio/invariant.hpp>
+#include <psio/buffer.hpp>
+#include <psio/nested.hpp>
 #include <psio/pssz.hpp>
+#include <psio/pssz_view.hpp>
 #include <psio/pssz_ir.hpp>
 #include <psio/pssz_ir_compare.hpp>
 #include <psio/pssz_ir_json.hpp>
@@ -64,6 +67,31 @@ namespace japi
       const char*           note = nullptr;
       std::span<const char> raw;
       PSIO_REFLECT(Views, name, note, raw)
+   };
+
+   // Records that are only written, from where the data already is: a
+   // view of packed bytes, a packed value held by reference count.
+   struct Tx
+   {
+      std::uint32_t                exp = 0;
+      std::string                  memo;
+      std::vector<std::string>     tags;
+      std::optional<std::uint64_t> big;
+      PSIO_REFLECT(Tx, exp, memo, tags, big)
+   };
+   struct Reply
+   {
+      std::string_view      name;
+      psio::pssz_view<Tx>   tx;
+      psio::shared_pssz<Tx> shared;
+      PSIO_REFLECT(Reply, name, tx, shared)
+   };
+   struct OwningReply
+   {
+      std::string      name;
+      Tx               tx;
+      psio::nested<Tx> shared;
+      PSIO_REFLECT(OwningReply, name, tx, shared)
    };
 
    // A row a hand-written reader fills: {"rowid":"7", <members of T>...}.
@@ -450,13 +478,13 @@ TEST_CASE("json_value: built and edited in code", "[json][ijson][json_value]")
    // writes it as it is.
    CHECK(psio::to_ijson(psio::json_value{std::uint64_t{18446744073709551615ull}}) ==
          "18446744073709551615");
-   CHECK(psio::json_number{std::int64_t{-7}}.as_int64() == -7);
-   CHECK_FALSE(psio::json_number{std::int64_t{-7}}.as_uint64());
+   CHECK(psio::json_numeral{std::int64_t{-7}}.as_int64() == -7);
+   CHECK_FALSE(psio::json_numeral{std::int64_t{-7}}.as_uint64());
 
    // A value with no JSON text is an error, not output.
    std::string out = "kept";
    auto        st  = psio::encode_json_checked(psio::ijson{},
-                                               psio::json_value{psio::json_number{"0x10"}}, out);
+                                               psio::json_value{psio::json_numeral{"0x10"}}, out);
    REQUIRE_FALSE(st.ok());
    CHECK(st.error().what == "json: a json_value number is not a JSON number");
    CHECK(out == "kept");
@@ -550,7 +578,7 @@ TEST_CASE("json_value: a member of a reflected record, in text and in PSSZ",
    REQUIRE(ir::pssz_to_json(schema, "Pretty", psio::ijson{}, std::span<const char>{loose_bytes},
                             out)
               .ok());
-   CHECK(out == text);
+   CHECK(out == R"({"service":"tokens","data":{"amount":"5"},"more":7,"list":[true,"x",{}]})");
    // No handler may claim the id.
    ir::CustomHandlers handlers;
    CHECK_FALSE(handlers.try_add("json", {}).ok());
@@ -858,10 +886,11 @@ TEST_CASE("json: untagged variants in a record, in PSSZ and through the schema",
          "json: the alternatives of an untagged variant are not told apart by the kind of JSON "
          "value");
    // Whether a variant is untagged is part of its text contract.
-   const auto tagged = psio::SchemaBuilder{}
-                          .insert<std::variant<std::string, std::vector<std::string>>>("E")
-                          .build();
-   const auto bare = psio::SchemaBuilder{}.insert<japi::Extra>("E").build();
+   const auto bare   = psio::SchemaBuilder{}.insert<japi::Extra>("E").build();
+   auto       tagged = bare;
+   for (auto& named : tagged.types)
+      if (auto v = std::get_if<psio::schema_types::Variant>(&named.type->value))
+         v->attributes.clear();
    CHECK(ir::equivalent(tagged, "E", bare, "E", ir::compare::wire));
    CHECK(ir::equivalent(tagged, "E", bare, "E").code == "text-form-changed");
 }
@@ -972,4 +1001,33 @@ TEST_CASE("json: a missing required member is named", "[json][ijson][errors]")
    st = ir::json_to_pssz(schema, "Ev", psio::ijson{}, R"({"inviteId":3})", bytes);
    REQUIRE_FALSE(st.ok());
    CHECK(st.error().what == R"(json: missing required member "event")");
+}
+
+// ── Views and shared packed values as members ──────────────────────────────
+TEST_CASE("json: a view is written as the value it views; a shared_pssz as a nested value",
+          "[json][ijson][views]")
+{
+   const japi::Tx tx{1, "m", {"a", "b"}, 18446744073709551615ull};
+   const auto     bytes = psio::to_pssz(tx);
+   const psio::pssz_view<japi::Tx> view{bytes};
+   CHECK(psio::to_ijson(view) == psio::to_ijson(tx));
+   CHECK(psio::to_json(view) == psio::to_json(tx));
+   CHECK(psio::to_ijson(view) ==
+         R"({"exp":1,"memo":"m","tags":["a","b"],"big":"18446744073709551615"})");
+   // Member views: a string, a list, an optional.
+   CHECK(psio::to_ijson(view.memo()) == R"("m")");
+   CHECK(psio::to_ijson(view.tags()) == R"(["a","b"])");
+   CHECK(psio::to_json(view.big()) == "18446744073709551615");
+
+   // A record of non-owning members has the text of the owning record.
+   const japi::Reply       reply{"n", view, psio::shared_pssz<japi::Tx>{tx}};
+   const japi::OwningReply owning{"n", tx, psio::nested<japi::Tx>{tx}};
+   CHECK(psio::to_ijson(reply) == psio::to_ijson(owning));
+   CHECK(psio::to_json(reply) == psio::to_json(owning));
+   CHECK(psio::to_json(reply) ==
+         R"({"name":"n","tx":{"exp":1,"memo":"m","tags":["a","b"],"big":18446744073709551615},)"
+         R"("shared":{"exp":1,"memo":"m","tags":["a","b"],"big":18446744073709551615}})");
+   std::vector<char> body;
+   psio::to_ijson(reply, body);
+   CHECK(std::string(body.begin(), body.end()) == psio::to_ijson(owning));
 }

@@ -37,7 +37,7 @@ int main()
    psio::json_value v;
    if (psio::decode_json_checked(psio::json{}, R"({"a":)", v).ok())
       return 5;
-   if (psio::encode_json_checked(psio::json{}, psio::json_value{psio::json_number{"1."}}, out).ok())
+   if (psio::encode_json_checked(psio::json{}, psio::json_value{psio::json_numeral{"1."}}, out).ok())
       return 6;
    // PSSZ: a UTF-8 string holding the compact text.
    std::vector<char> bytes;

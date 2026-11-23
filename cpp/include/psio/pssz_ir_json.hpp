@@ -545,7 +545,7 @@ inline unsigned json_kinds_of(const Schema &schema, const AnyType &input,
                 all |= inner(member.type);
              return all;
           }
-          else if constexpr (std::is_same_v<T, Enum>)
+          else if constexpr (std::is_same_v<T, schema_types::Enum>)
              return kind_string | kind_number;
           else if constexpr (std::is_same_v<T, Nested>)
              return inner(t.type);
