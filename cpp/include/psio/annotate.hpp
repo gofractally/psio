@@ -457,8 +457,9 @@ namespace psio {
       constexpr bool operator==(const default_factory_spec&) const = default;
    };
 
-   // A protobuf field number: read by psio::protobuf (protobuf.hpp) and by
-   // nothing else. RESERVED for every other format.
+   // A member's field number (psio/detail/field_number.hpp): the protobuf
+   // field number; Cap'n Proto ordinals and FlatBuffers field ids are
+   // assigned in ascending order of it. RESERVED for every other format.
    struct field_num_spec
    {
       using spec_category = static_spec_tag;
@@ -543,7 +544,7 @@ namespace psio {
    // not carry them). Attaching one to a type or member changes nothing; the
    // names are kept so that a later implementation does not collide with
    // user code. The exceptions are stated at the spec: unique_keys_spec
-   // (enforced) and deprecated_spec (read by psio::graphql only).
+   // (enforced) and deprecated_spec (read by psio::graphql and psio::flatbuf).
 
    // RESERVED — not implemented. (A record that will never change says
    // definitionWillNotChange(); a reader that must refuse unknown fields
@@ -606,9 +607,10 @@ namespace psio {
       constexpr bool operator==(const unstable_spec&) const = default;
    };
 
-   // Read by psio::graphql only (a deprecated field of the GraphQL schema,
-   // `version` as the reason). RESERVED for every other format and schema
-   // output.
+   // Read by psio::graphql (a deprecated field of the GraphQL schema,
+   // `version` as the reason) and by psio::flatbuf (the member keeps its
+   // field id and is neither written nor read). RESERVED for every other
+   // format and schema output.
    struct deprecated_spec
    {
       using spec_category = runtime_spec_tag;

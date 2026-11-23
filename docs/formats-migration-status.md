@@ -6,6 +6,143 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 ## Handover (newest first)
 
+### After F2 (FlatBuffers) — tip of this note
+
+State: F2 committed on top of main `66abb1b` (fast-forwarded; the branch
+had nothing main lacked). Commits: `38b1a30` (codec, verifier, views,
+in-place writes, tests, Rust byte alignment), `012dbf3` (conformance
+vectors), `9866800` (benchmark cells, two write-path savings), `fa590bd`
+(`fbs_layout`, parser fixes), and the commit that carries this note (docs,
+annotation text). User documentation: `docs/flatbuffers.md`.
+
+**What exists now** (`cpp/include/psio/flatbuf.hpp`, `flatbuf_view.hpp`,
+`fbs_layout.hpp`):
+
+* codec: tables, structs (`definitionWillNotChange()` records of fixed
+  members), enums, strings, vectors of scalars / structs / strings /
+  tables, fixed arrays, optional scalars, unions (`std::variant`), sorted
+  vectors (`std::set`, `std::map`), member initialisers as defaults,
+  `field<N>` ids, `deprecated`, file identifier, size prefix;
+* `validate_flatbuf<T>`: typed verifier, safe on arbitrary bytes, stricter
+  than the official one;
+* `flatbuf_view<T>` (safe), `flatbuf_trusted_view<T>` (trusted,
+  `validated_view`), `flatbuf_mutable_view<T>` (fixed-size fields that are
+  stored); the helper family through `PSIO_FORMAT_HELPERS(flatbuf)` plus
+  `to_flatbuf(v, options)`, `validate_flatbuf<T>(bytes, options | limits)`,
+  `flatbuf_identifier`, `flatbuf_has_identifier`, `flatbuf_size_prefixed`;
+* `psio::fbs_layout(schema)`: slots and struct layouts from the Schema IR.
+
+**Evidence.** ctest targets `psio_flatbuf_tests` (1,809 assertions),
+`psio_flatbuf_interop_tests` (560,199; libflatbuffers 25.12.19 from
+Homebrew, `flatc` at build time), `psio_flatbuf_fuzz_tests` and
+`psio_flatbuf_fuzz_tests_sanitized` (565,283 each; ASan + UBSan),
+`psio_flatbuf_conformance_regen`; Rust `tests/flatbuf_conformance.rs`.
+Byte identity with the official object API holds for every value the
+interop test builds. The differential fuzz found one real disagreement on
+the way (a map entry without its string key, which the official schema
+makes `required`); psio now refuses it.
+
+**Measured** (`~/psio-formats-logs/f2-flatbuf-run{1,2}.txt`; table and
+reading in `docs/flatbuffers.md` "Performance"). Against the official
+library on the same 888 bytes: encode 1.3–1.45× faster; trusted-view reads
+5–30 % SLOWER (parity on scalar iteration, slowest where strings are read);
+safe view 1.6–2.9× slower; verifier 1.7× slower. The first generation's
+claim "pack at parity / 1.3×, faster reads" is therefore: pack yes (1.3×,
+now with the official bytes rather than a 12 % larger buffer), reads no —
+they were at parity in g1 (F0 table below) and are slightly behind now.
+
+**Decisions that change behaviour** (flag for review).
+
+1. A `definitionWillNotChange()` record whose members are all fixed is a
+   FlatBuffers `struct` (what `emit_fbs` already emitted for it, and what
+   the first generation did). It is inline wherever it is a member, and it
+   **cannot be the root of a buffer** — `to_flatbuf` does not exist for it.
+   The earlier MVP wrote every record as a table. `bench_psio_vs_externals`
+   was adjusted: `ValidatorList` is a vector of structs on both sides, and
+   the `Point` / `NameRecord` / `Validator` rows have no psio flatbuf cell.
+2. psio's bytes changed to the official builder's: fields ordered as
+   `flatc` orders them (by size, then descending id) instead of reverse
+   declaration order; an empty non-optional string is not written;
+   `cpp-golden.json` regenerated (2 flatbuf rows). Rust follows.
+3. `deprecated_spec` and `field<N>` are now read by flatbuf
+   (`docs/annotations.md` updated; it had also not said that capnp reads
+   `field<N>`).
+4. No size-changing in-place edit was ported (v1's `fb_mut` splice, `fb_doc`).
+
+**Ported from the first generation / new / not ported.**
+
+* Ported (adapted to the reflection and frame of this library): the
+  back-to-front builder and its alignment rules, the slot map with
+  two-slot unions, the struct layout, the sorted set / map views and the
+  `{key, value}` entry-table encoding of a map, identifier and size-prefix
+  finishing, the layout computation of `fbs_parser.hpp` (now
+  `fbs_layout.hpp` over the Schema IR), the benchmark shapes.
+* New: the verifier (v1's `fb_verify` formed pointers before checking them,
+  did not check alignment, string terminators, field offsets against the
+  table, or the type of a union's table, and had no table budget); the safe
+  view; the trusted / safe split; `flatc`'s field order and shared vtables
+  by default (v1: by ascending alignment, sharing opt-in), hence byte
+  identity; defaults from member initialisers in views; field ids from
+  `field<N>`; `deprecated`; `std::vector<bool>`; arrays of structs; the
+  union rules (`NONE`, a variant without `std::monostate`); the interop,
+  fuzz and conformance tests.
+* Not ported: `fb_mut` / `fb_doc` size-changing mutation (unsound around
+  optionals — decision 4); `fb_nested<T>` (`nested_flatbuffer`);
+  `std::flat_set` / `std::flat_map` members (not in libstdc++ everywhere);
+  `to_fbs_schema<T>()` (the Schema IR + `emit_fbs` path replaces it — see
+  F3); v1's `fbs_parser` front end (the IR parser stays; only its layout
+  step was ported); the dynamic FlatBuffers view over a parsed schema (F4);
+  the `bench_flatbuf` / `bench_reflect_flatbuf` / `bench_standalone_flatbuf`
+  programs (their comparison is the `flatbuf` group of
+  `psio_bench_view_generations`).
+
+**Open, found on the way.**
+
+* The Rust crate has no FlatBuffers verifier; `fb_unpack` on an invalid
+  buffer returns `Err`, panics on a slice index, or accepts it
+  (`rust/psio/tests/flatbuf_conformance.rs` pins 5 of 12 rejected rows as
+  accepted). Its derive lacks structs, unions, optional scalars, sorted
+  lookup, non-zero defaults and field ids.
+* `validate_flatbuf` does not prove objects disjoint, so an in-place write
+  into a hostile (validated) buffer can alias another field
+  (`docs/flatbuffers.md` "Writing in place"). A `limits` switch that
+  collects and sorts the object ranges would close it; not built.
+* A scalar's default in a view is a constant when `T{}` is a constant
+  expression; for a record with a member that is not (e.g. `std::map`) it
+  is a function-local static, i.e. one guard test per read. Same in the
+  capnp views. Not measured.
+* The trusted view does not convert to the safe view (it is one pointer).
+* `psio_bench_vs_externals` was built, not re-run.
+
+**What remains.**
+
+* **F3 — schemas with layouts.** `fbs_layout` exists and agrees with the
+  codec and with `flatc` for a parsed `.fbs`. Not done: `parse_fbs` drops
+  default values, enum values (`= N`), `required`, `force_align`,
+  `nested_flatbuffer`, struct-level metadata, includes; a hand-written
+  `union` is kept as a `Variant` but a union-typed field is only recognised
+  by the layout, not folded into the IR the way `emit_fbs` writes one.
+  `emit_fbs` has NOT been checked against the codec's mapping and, from its
+  own description, does not match it in at least three places: it wraps a
+  variant in a table, marks an optional with a comment, and writes every
+  enum as `ubyte`. Defaults, fixed arrays, `(key)` entry tables for maps,
+  `(id: N)` from `field<N>` and `deprecated` were not looked at. The same
+  audit is still owed for `emit_capnp` (F1 note). Target: for every
+  reflected T, `flatc` / `capnp compile` accept the emitted schema and
+  compute the codec's layout.
+* **F4 — dynamic_view + psio-tool.** A view over a parsed schema
+  (`fbs_layout` / the capnp layout as its input), and the tool.
+* **F5 — protobuf / Avro / WIT → IR.** Not started.
+* **F6 — benchmarks and claims.** Copy the F1 and F2 tables into
+  `docs/format-comparison.md` after a quiet-machine run; re-run
+  `psio_bench_vs_externals`; correct the old "faster reads than
+  FlatBuffers" claim wherever it is still written.
+* **Rust needs the official capnp union layout** (still open from F1: the
+  Rust crate gives every alternative its own slot and puts the
+  discriminant last; C++ uses the official allocator. Records without
+  variants agree). And, from this stage, a Rust FlatBuffers verifier and
+  the shapes its derive lacks.
+
 ### After the trusted-view pass (safe / trusted read views) — tip of this note
 
 State: the opt-in trusted view is implemented for PSSZ, SSZ and the

@@ -84,7 +84,7 @@ is a constraint failure that names it, for example
 | `bson` | `psio/bson.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `protobuf` | `psio/protobuf.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `capnp` | `psio/capnp.hpp` | `std::vector<char>` | **replaces** the content of a `std::vector<char>` | yes | no | no |
-| `flatbuf` | `psio/flatbuf.hpp` | `std::vector<char>` | **replaces** the content of a `std::vector<char>` | yes | no | no |
+| `flatbuf` | `psio/flatbuf.hpp` | `std::vector<char>` | **replaces** the content of a `std::vector<char>` | yes | yes, safe and trusted (`psio/flatbuf_view.hpp`) | yes: fixed-size fields that are stored (`psio/flatbuf_view.hpp`) |
 | `flatbuf_lib` | `psio/flatbuf_lib.hpp` | `std::vector<char>` | no | yes | no | no |
 | `wit` | `psio/wit.hpp` | `std::vector<char>` | no | yes | yes (`psio/wit_view.hpp`) | no |
 
@@ -364,6 +364,14 @@ fixed-size values at fixed positions. The Cap'n Proto view
 (`psio::capnp_view<T>`, `docs/capnp.md`) is a cursor view with a single kind
 that relies on `psio::validate_capnp`; there is no `capnp_trusted_view`
 name, and it has not been split into a safe and a trusted kind yet.
+The FlatBuffers views (`docs/flatbuffers.md`) are cursor views too and have
+both kinds: `psio::flatbuf_view<T>` compares every offset, vtable entry and
+length with the buffer before it reads and may be constructed over any
+bytes; `psio::flatbuf_trusted_view<T>` (from `psio::validated_view`, or
+`psio::trusted{bytes}`) compares nothing. The trusted one is a single
+pointer and does not carry the buffer's bounds, so — unlike the PSSZ / SSZ /
+WIT trusted views — it does not convert to the safe view.
+`psio::flatbuf_mutable_view<T>` navigates as the safe view does.
 
 A view only reads. Nothing turns one into a view that writes:
 
