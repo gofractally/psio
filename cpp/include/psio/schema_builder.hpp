@@ -472,9 +472,14 @@ namespace psio::schema_types
             // argument tuple). A Tuple node has no attributes, so it is
             // written as what a tuple is on the wire — the extensible record
             // of its elements (docs/pssz-spec.md 3.2) — which can carry the
-            // cap: an Object whose members are the elements, named by the
-            // parameter names where the Meta has them and by position
-            // otherwise.
+            // cap: an Object whose members are the elements. Its `tuple`
+            // attribute says what it is — positional on the wire like any
+            // record, and in text an argument list (docs/json.md "Method
+            // arguments"): "named" when the method names every parameter
+            // (the members carry the names; the text is an object, and a
+            // reader also takes the positional array), "positional"
+            // otherwise (the members are named "0", "1", ...; the text is
+            // the array).
             using Tuple = typename U::tuple_type;
             PSIO_REQUIRE_TUPLE_SIZE(std::tuple_size_v<Tuple>);
             Object o;
@@ -482,10 +487,10 @@ namespace psio::schema_types
             {
                auto name = [](std::size_t i) -> std::string
                {
-                  if constexpr (requires { U::meta_type::names; })
-                     if (i < U::meta_type::names.size())
-                        return std::string{U::meta_type::names[i]};
-                  return std::to_string(i);
+                  if constexpr (::psio::annotated_tuple_named_v<U>)
+                     return std::string{U::meta_type::names[i]};
+                  else
+                     return std::to_string(i);
                };
                (o.members.push_back(
                    Member{name(I),
@@ -494,6 +499,8 @@ namespace psio::schema_types
                           {}}),
                 ...);
             }(std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+            o.attributes.push_back(Attribute{
+               "tuple", ::psio::annotated_tuple_named_v<U> ? "named" : "positional"});
             if constexpr (::psio::max_fields_v<U>.has_value())
                o.attributes.push_back(
                   Attribute{"maxFields", std::to_string(::psio::max_fields_v<U>.value())});

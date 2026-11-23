@@ -1009,7 +1009,22 @@ namespace psio {
                    v.tuple(), T::psio_annotations, "json: member length_bound violated", "json");
                 !st.ok())
                w.fail(st.error());
-            encode_value<Fmt, int_mode::natural>(v.tuple(), w);
+            // A method's arguments (docs/json.md "Method arguments"): an
+            // object keyed by parameter name, in declaration order, when the
+            // method names its parameters; the positional array otherwise.
+            if constexpr (::psio::annotated_tuple_named_v<T>)
+            {
+               w.put('{');
+               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                  (((Is ? w.put(',') : void()),
+                    write_string(w, T::meta_type::names[Is], Fmt::i_json), w.put(':'),
+                    encode_value<Fmt, int_mode::natural>(std::get<Is>(v.tuple()), w)),
+                   ...);
+               }(std::make_index_sequence<std::tuple_size_v<typename T::tuple_type>>{});
+               w.put('}');
+            }
+            else
+               encode_value<Fmt, int_mode::natural>(v.tuple(), w);
          }
          else if constexpr (is_std_tuple<T>::value)
          {
@@ -1939,7 +1954,67 @@ namespace psio {
             using Tuple = typename T::tuple_type;
             Tuple        scratch{};
             Tuple* const dst = out ? &out->tuple() : &scratch;
-            if (!read_value<Fmt, int_mode::natural, Tuple>(r, dst))
+            // A named argument list reads from either form: the object
+            // keyed by parameter name (any member order, the last of a
+            // repeated key, unknown keys skipped, a missing optional
+            // argument empty — the record rule) or the positional array.
+            bool as_object = false;
+            if constexpr (::psio::annotated_tuple_named_v<T>)
+            {
+               json_kind kind;
+               if (!r.c.kind(kind))
+                  return false;
+               as_object = kind == json_kind::object;
+            }
+            if (as_object)
+            {
+               if constexpr (::psio::annotated_tuple_named_v<T>)
+               {
+                  constexpr std::size_t N = std::tuple_size_v<Tuple>;
+                  if (!r.c.begin_object())
+                     return false;
+                  std::array<bool, N + 1> seen{};
+                  std::string_view        key;
+                  bool                    more = false;
+                  if (!r.c.next_field(more, key))
+                     return false;
+                  while (more)
+                  {
+                     bool found = false, ok = true;
+                     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                        (void)((key == T::meta_type::names[Is]
+                                   ? (found = true, seen[Is] = true,
+                                      ok = read_value<Fmt, int_mode::natural,
+                                                      std::tuple_element_t<Is, Tuple>>(
+                                         r, &std::get<Is>(*dst)),
+                                      true)
+                                   : false) ||
+                               ...);
+                     }(std::make_index_sequence<N>{});
+                     if (!ok)
+                        return false;
+                     if (!found && !r.c.skip())
+                        return false;
+                     if (!r.c.next_field(more, key))
+                        return false;
+                  }
+                  bool complete = true;
+                  [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                     (([&] {
+                         if (seen[Is])
+                            return;
+                         if constexpr (is_std_optional<std::tuple_element_t<Is, Tuple>>::value)
+                            std::get<Is>(*dst).reset();
+                         else
+                            complete = false;
+                      }()),
+                      ...);
+                  }(std::make_index_sequence<N>{});
+                  if (!complete)
+                     return r.c.fail("json: missing required member");
+               }
+            }
+            else if (!read_value<Fmt, int_mode::natural, Tuple>(r, dst))
                return false;
             if (auto st = ::psio::detail::ann::check_value(
                    *dst, T::psio_annotations, "json: member length_bound violated", "json");

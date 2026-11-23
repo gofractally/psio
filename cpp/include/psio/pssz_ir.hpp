@@ -18,7 +18,13 @@
 //     decode.
 //
 // Attributes read by the codec (schema_builder.hpp writes them):
-//   Object  definitionWillNotChange    fixed layout (no header)
+//   Object  tuple = "named" | "positional"   an argument list: a record on
+//                                      the wire; in text an object keyed by
+//                                      the member names (a reader also takes
+//                                      the positional array) / the array
+//                                      (pssz_ir_json.hpp)
+//           maxFields = "N"            at most N members, N <= 255
+//           definitionWillNotChange    fixed layout (no header)
 //           maxDynamicData = "N"       explicit cap (automatic profile: every
 //                                      record; explicit: the top-level type)
 //   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
@@ -281,6 +287,14 @@ inline codec_status attributes(const std::vector<schema_types::Attribute> &value
       if (site == attribute_site::record &&
           (name == "maxDynamicData" || (caps && name == "maxFields")))
          continue;
+      // An argument list (schema_builder.hpp): the same bytes as any
+      // record; its text form is pssz_ir_json.hpp's business.
+      if (site == attribute_site::record && name == "tuple")
+      {
+         if (!value.value || (*value.value != "named" && *value.value != "positional"))
+            return fail("pssz IR: malformed tuple attribute");
+         continue;
+      }
       if (site == attribute_site::record_member &&
           (name == "lengthBound" || name == "jsonInt" || name == "ijsonInt"))
       {

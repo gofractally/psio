@@ -342,7 +342,9 @@ TEST_CASE("method annotations: the argument tuple in JSON", "[method_annotations
 {
    const TransferUncapped args{"alice", 5, "thanks"};
    const std::string      text = psio::encode(psio::json{}, args);
-   CHECK(text == R"(["alice",5,"thanks"])");
+   // A method that names its parameters: an object keyed by the names; a
+   // reader also takes the positional array (docs/json.md "Method arguments").
+   CHECK(text == R"({"to":"alice","amount":5,"memo":"thanks"})");
    CHECK(psio::decode<TransferUncapped>(psio::json{}, std::span<const char>{text}).tuple() ==
          args.tuple());
    CHECK_THROWS_AS(psio::encode(psio::json{}, TransferUncapped{std::string(17, 'a'), 1, ""}),

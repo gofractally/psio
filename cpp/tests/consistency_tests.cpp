@@ -7,6 +7,7 @@
 #include <psio/ext_int.hpp>
 #include <psio/frac.hpp>
 #include <psio/ssz.hpp>
+#include <psio/to_hex.hpp>
 #include <psio/compress_name.hpp>
 #include <psio/get_type_name.hpp>
 #include <psio/name.hpp>
@@ -1185,4 +1186,139 @@ TEST_CASE("max_encoded_size of a capped argument tuple is its inferred bound", "
    // Held by another type, a capped tuple reserves its cap.
    STATIC_REQUIRE(psio::max_encoded_size<std::tuple<PutArgs>>() ==
                   std::optional<std::size_t>{1 + 1 + 64});
+}
+
+// ── The JSON form of a method's arguments ────────────────────────────────
+namespace cons_args
+{
+   struct Token
+   {
+      void transfer(std::string to, std::uint64_t amount, std::optional<std::string> memo);
+      void add(std::uint32_t a, std::uint32_t b);   // no parameter names
+      void ping();
+      void half(std::uint32_t a, std::uint32_t b);  // one name of two: not named
+      PSIO_REFLECT(Token,
+                   method(transfer, attr(to, utf8 | max<16>), amount, attr(memo, utf8 | max<80>),
+                          maxDynamicData(256)),
+                   method(add),
+                   method(ping),
+                   method(half, a))
+   };
+   using Transfer = psio::reflect<Token>::method_arg_tuple<0>;
+   using Add      = psio::reflect<Token>::method_arg_tuple<1>;
+   using Ping     = psio::reflect<Token>::method_arg_tuple<2>;
+   using Half     = psio::reflect<Token>::method_arg_tuple<3>;
+}  // namespace cons_args
+
+TEST_CASE("method arguments in JSON: named object or positional array", "[consistency][args]")
+{
+   using namespace cons_args;
+   STATIC_REQUIRE(psio::annotated_tuple_named_v<Transfer>);
+   STATIC_REQUIRE(!psio::annotated_tuple_named_v<Add>);
+   STATIC_REQUIRE(!psio::annotated_tuple_named_v<Half>);
+   STATIC_REQUIRE(psio::annotated_tuple_named_v<Ping>);
+
+   const Transfer args{std::tuple{std::string{"bob"}, std::uint64_t{5},
+                                  std::optional<std::string>{"hi"}}};
+   const auto     frame = psio::to_pssz(args);
+   // The writer: an object keyed by parameter name, in declaration order ...
+   CHECK(psio::to_json(args) == R"({"to":"bob","amount":5,"memo":"hi"})");
+   CHECK(psio::to_ijson(args) == R"({"to":"bob","amount":5,"memo":"hi"})");
+   CHECK(psio::to_json(Transfer{std::tuple{std::string{"bob"}, ~std::uint64_t{0},
+                                          std::optional<std::string>{}}}) ==
+         R"({"to":"bob","amount":18446744073709551615,"memo":null})");
+   CHECK(psio::to_ijson(Transfer{std::tuple{std::string{"bob"}, ~std::uint64_t{0},
+                                           std::optional<std::string>{}}}) ==
+         R"({"to":"bob","amount":"18446744073709551615","memo":null})");
+   // ... and the array when the method has no parameter names.
+   CHECK(psio::to_json(Add{std::tuple{std::uint32_t{1}, std::uint32_t{2}}}) == "[1,2]");
+   CHECK(psio::to_json(Half{std::tuple{std::uint32_t{1}, std::uint32_t{2}}}) == "[1,2]");
+   CHECK(psio::to_json(Ping{}) == "{}");
+   // Binary stays the positional tuple (2-byte offsets: the cap is 256).
+   CHECK(psio::to_hex(std::span<const char>{frame.data(), frame.size()}) ==
+         "0C00" "0C00" "0500000000000000" "0F00" "626F62" "01" "6869");
+
+   // The readers: either form for a named list.
+   auto reads = [&](const char* text, const Transfer& expect) {
+      INFO(text);
+      for (int ij = 0; ij < 2; ++ij)
+      {
+         Transfer got;
+         const auto status = ij ? psio::decode_json_checked(psio::ijson{}, text, got)
+                                : psio::decode_json_checked(psio::json{}, text, got);
+         REQUIRE(status.ok());
+         CHECK(got.tuple() == expect.tuple());
+         CHECK((ij ? psio::validate_json<Transfer>(psio::ijson{}, text)
+                   : psio::validate_json<Transfer>(psio::json{}, text))
+                  .ok());
+      }
+   };
+   const Transfer none{std::tuple{std::string{"bob"}, std::uint64_t{5},
+                                  std::optional<std::string>{}}};
+   reads(R"({"to":"bob","amount":5,"memo":"hi"})", args);
+   reads(R"({"memo":"hi","amount":5,"to":"bob"})", args);              // any order
+   reads(R"({"to":"x","to":"bob","amount":5,"memo":"hi"})", args);    // the last of a repeated key
+   reads(R"({"to":"bob","extra":[1,{}],"amount":5,"memo":"hi"})", args); // unknown keys skipped
+   reads(R"({"to":"bob","amount":5})", none);                          // a missing optional is None
+   reads(R"({"to":"bob","amount":5,"memo":null})", none);
+   reads(R"(["bob",5,"hi"])", args);                                   // the positional array
+   reads(R"(["bob",5,null])", none);
+   auto rejects = [&](const char* text) {
+      INFO(text);
+      Transfer got;
+      CHECK(!psio::decode_json_checked(psio::json{}, text, got).ok());
+      CHECK(!psio::decode_json_checked(psio::ijson{}, text, got).ok());
+      CHECK(!psio::validate_json<Transfer>(psio::json{}, text).ok());
+   };
+   rejects(R"({"amount":5,"memo":"hi"})");                 // a missing required argument
+   rejects(R"(["bob",5])");                                // an array has every element
+   rejects(R"(["bob",5,"hi",1])");
+   rejects(R"({"to":"12345678901234567","amount":5})");    // a parameter outside its bound
+   rejects(R"(["12345678901234567",5,null])");
+   rejects(R"({"to":5,"amount":5})");
+   rejects(R"("bob")");
+   // A list without names is the array only.
+   Add sum;
+   CHECK(psio::decode_json_checked(psio::json{}, "[1,2]", sum).ok());
+   CHECK(std::get<1>(sum) == 2);
+   CHECK(!psio::decode_json_checked(psio::json{}, R"({"0":1,"1":2})", sum).ok());
+   Ping ping;
+   CHECK(psio::decode_json_checked(psio::json{}, "{}", ping).ok());
+   CHECK(psio::decode_json_checked(psio::json{}, "[]", ping).ok());
+
+   // The schema-driven codec agrees, from the schema alone.
+   psio::SchemaBuilder builder;
+   const auto          transfer_type = builder.insert<Transfer>();
+   const auto          add_type      = builder.insert<Add>();
+   const auto          schema        = std::move(builder).build();
+   REQUIRE(psio::pssz_ir::validate_schema(schema).ok());
+   auto dynamic = [&](const auto& root, const char* text, std::span<const char> expect) {
+      INFO(text);
+      std::vector<char> out;
+      const bool        ok =
+         psio::pssz_ir::json_to_pssz(schema, root, psio::json{}, text, out).ok() &&
+         psio::pssz_ir::json_to_pssz(schema, root, psio::ijson{}, text, out).ok();
+      if (expect.data() == nullptr)
+         return !ok;
+      return ok && out.size() == 2 * expect.size() &&
+             std::equal(expect.begin(), expect.end(), out.begin());
+   };
+   CHECK(dynamic(transfer_type, R"({"to":"bob","amount":5,"memo":"hi"})", frame));
+   CHECK(dynamic(transfer_type, R"({"memo":"hi","amount":5,"to":"bob"})", frame));
+   CHECK(dynamic(transfer_type, R"(["bob",5,"hi"])", frame));
+   CHECK(dynamic(transfer_type, R"(["bob",5])", {}));
+   CHECK(dynamic(transfer_type, R"({"amount":5})", {}));
+   CHECK(dynamic(transfer_type, R"(["12345678901234567",5,null])", {}));
+   const auto add_frame = psio::to_pssz(Add{std::tuple{std::uint32_t{1}, std::uint32_t{2}}});
+   CHECK(dynamic(add_type, "[1,2]", add_frame));
+   CHECK(dynamic(add_type, R"({"0":1,"1":2})", {}));
+   std::string text;
+   bool        unknown = false;
+   REQUIRE(psio::pssz_ir::pssz_to_json(schema, transfer_type, psio::json{}, frame, text, &unknown)
+              .ok());
+   CHECK(text == R"({"to":"bob","amount":5,"memo":"hi"})");
+   text.clear();
+   REQUIRE(psio::pssz_ir::pssz_to_json(schema, add_type, psio::json{}, add_frame, text, &unknown)
+              .ok());
+   CHECK(text == "[1,2]");
 }

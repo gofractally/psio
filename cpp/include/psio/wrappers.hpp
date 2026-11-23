@@ -793,6 +793,18 @@ namespace psio {
                     PSIO_LENGTH_BOUND_CONFLICT_MSG);
    };
 
+   // Whether an annotated tuple has a name for every element: a method that
+   // lists all of its parameters in method(...). Its text is then an object
+   // keyed by those names (docs/json.md "Method arguments"); otherwise it is
+   // the positional array any tuple is.
+   template <typename T>
+   inline constexpr bool annotated_tuple_named_v = [] {
+      if constexpr (requires { T::meta_type::names; })
+         return T::meta_type::names.size() == std::tuple_size_v<typename T::tuple_type>;
+      else
+         return false;
+   }();
+
    namespace detail
    {
       // (specs0, specs1, ...) -> the at_spec<I, specsI> of every annotated I.

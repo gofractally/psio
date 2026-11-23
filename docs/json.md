@@ -216,6 +216,36 @@ values.
   distinguishes cannot hold what was read: `decode` reports `json: map
   container merged distinct keys`.
 
+### Method arguments
+
+The arguments of a method are, in binary, the tuple of its parameters
+(`docs/pssz-spec.md` §16): positional, and that does not change. In text an
+argument list has two forms, and which one is *written* depends on whether
+the declaration has parameter names:
+
+| the method declares | written | read |
+|---|---|---|
+| a name for every parameter | an **object** keyed by parameter name, members in declaration order: `{"to":"bob","amount":5,"memo":null}` | that object by the record rule — members in any order, the last of a repeated key, unknown keys skipped, a missing optional argument is None, any other missing argument an error — **or** the positional array `["bob",5,null]` with exactly one element per parameter |
+| no names (or not for every parameter) | the positional **array**: `[1,2]` | the array only |
+
+Named arguments are for people and for tools; the array is what a
+dispatcher that only knows positions writes. Neither is how a call is
+dispatched (calls are PSSZ), so a reader takes both. A method with no
+parameters is `{}` (and reads `[]` too).
+
+In the Schema IR an argument list is the `Object` of its parameters with the
+attribute `tuple`: `"named"` (the members carry the parameter names) or
+`"positional"` (the members are named `"0"`, `"1"`, …). The attribute
+changes no byte — an `Object` is positional on the wire like every record —
+and tells a schema-driven codec which of the two rows above applies. An
+`Object` without it is a record: an object in text, never an array.
+
+C++: `psio::reflect<T>::method_arg_tuple<I>` (a `psio::annotated_tuple`) is
+the argument list, named when `method(name, p1, p2, ...)` lists every
+parameter. Rust: `args::<method>` (parameters always have names).
+JavaScript: `argumentTuple({...})`. Python: `psio.arguments(...)`. The
+shared rows are `conformance/interface-vectors.json`.
+
 ### Variant alternative names
 
 C++ uses `get_type_name` of the alternative: a record's reflected name, and
