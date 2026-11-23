@@ -1,52 +1,81 @@
 #pragma once
 //
-// psio/capnp.hpp — Cap'n Proto format tag (single-segment, unpacked).
+// psio/capnp.hpp — Cap'n Proto, the native wire format.
 //
-// Byte-identical to psio2's `capnp_pack` / `capnp_unpack` on the shape
-// set both support. Single-segment flat-array messages only, no packed
-// encoding, no far pointers — matching capnp's messageToFlatArray output.
+// `psio::capnp` reads and writes the encoding the official implementation
+// uses (https://capnproto.org/encoding.html): a framed message (segment
+// table, then segments), structs with a data section and a pointer section,
+// lists, Text / Data, unions laid out exactly as `capnp compile` lays them
+// out, default values XORed into the data section, far pointers. A message
+// written here is read by libcapnp against the schema `psio::emit_capnp`
+// exports for the same type, and the reverse (tests/capnp_interop_tests.cpp).
 //
-// Supported shapes:
-//   - primitives (arithmetic + bool), enums
-//   - std::string (capnp Text: u8 list with trailing NUL)
-//   - std::vector / std::array of: arithmetic / bool / enum / string /
-//     nested tables
-//   - std::optional<T> as a record field (null ptr = None,
-//     list<T> length-1 = Some)
-//   - std::variant<Ts...> as a record field — pointer slot to a
-//     sub-struct {u16 tag, ptr per alt}; live alt is encoded into
-//     its slot via the same length-1-list wrapper used for optional
-//   - reflected records (root or nested, recursive)
+//   auto bytes = psio::to_capnp(order);                 // std::vector<char>
+//   auto back  = psio::from_capnp<Order>(bytes);        // validates, then decodes
+//   auto st    = psio::validate_capnp<Order>(bytes);    // codec_status
+//   psio::capnp_view<Order> v{bytes};                   // psio/capnp_view.hpp
 //
-// Wire reference: https://capnproto.org/encoding.html. Field layout
-// allocates sequentially in PSIO_REFLECT order using capnp's slot
-// allocator (smaller-before-larger into bit-holes left by earlier
-// slots), which produces the same offsets the upstream capnp compiler
-// emits for sequentially-numbered ordinals.
+// How a C++ type maps (docs/capnp.md has the table and the reasons):
 //
-// Not yet supported: std::tuple (no native capnp counterpart),
-// per-field binary_format adapter overrides, top-level adapter
-// dispatch. variant uses the length-1-list wrapper convention rather
-// than capnp's native union encoding (which would require slot-allocator
-// awareness of the discriminant + shared per-alt storage); native
-// unions are a follow-up.
+//   bool, integers, float, double        Bool, IntN / UIntN, Float32 / Float64
+//   enum                                 its underlying integer
+//   std::string                          Text
+//   std::vector<T>, std::array<T, N>     List(T); a list of bytes is Data
+//   reflected record                     struct
+//   std::optional<P>, P a pointer type   the pointer; null is "no value"
+//   std::optional<S>, S a scalar         union { none @n :Void; some @n+1 :S; }
+//   std::variant<A, B, ...>              union, one member per alternative;
+//                                        std::monostate is Void
+//
+// Ordinals. The members of a record take ordinals in ascending order of
+// their field numbers (declaration position unless `attr(member, field<N>)`
+// says otherwise — psio/detail/field_number.hpp); a variant member takes
+// one ordinal per alternative, an optional scalar two. The layout is the
+// one the official compiler computes for those ordinals, so adding a member
+// with a higher field number is the same compatible change it is in a
+// .capnp file.
+//
+// Defaults. A scalar member's default is its member initialiser: the wire
+// holds `value XOR default`, an absent or truncated struct reads as the
+// defaults. A pointer member's default is empty, a union's is its first
+// alternative, an optional's is "no value".
+//
+// Writing produces one segment. Reading follows far pointers, so a
+// multi-segment message from another implementation reads the same.
+//
+// Validation is typed: `validate_capnp<T>` checks every pointer T can reach
+// — kind, element size, bounds within its segment, NUL-terminated Text,
+// union discriminants — under the official reader's limits (64 levels of
+// nesting, a traversal budget of 8 Mi words). Views and `decode` are
+// trusted operations over validated bytes, as everywhere in PSIO; on bytes
+// that were never validated they are the caller's risk.
+//
+// Not supported: packed encoding, capabilities / interfaces, AnyPointer,
+// groups other than the unions above, generics, a List(struct) written as a
+// list of primitives (the pre-0.5 upgrade path), std::map / std::set /
+// std::tuple members (Cap'n Proto has no counterpart).
 
+#include <psio/adapter.hpp>
+#include <psio/annotate.hpp>
 #include <psio/cpo.hpp>
+#include <psio/detail/field_number.hpp>
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
-#include <psio/adapter.hpp>
 #include <psio/reflect.hpp>
 #include <psio/validate_strict_walker.hpp>
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -56,1116 +85,1542 @@ namespace psio {
 
    namespace detail::capnp_impl {
 
-      // ── Shape classifiers ─────────────────────────────────────────────────
+      static_assert(std::endian::native == std::endian::little,
+                    "psio::capnp reads and writes little-endian words in place");
+
+      // ── Shapes ────────────────────────────────────────────────────────
 
       template <typename T>
-      struct is_vector : std::false_type {};
+      inline constexpr bool is_vector_v = false;
       template <typename E, typename A>
-      struct is_vector<std::vector<E, A>> : std::true_type
-      {
-         using element_type = E;
-      };
+      inline constexpr bool is_vector_v<std::vector<E, A>> = true;
 
-      // std::array<T, N> encodes as a capnp fixed-count List (or Data for
-      // byte arrays). We materialize via std::vector on the wire — no
-      // distinct capnp shape exists for fixed-size arrays, so the list
-      // pointer carries the count as data.
       template <typename T>
-      struct is_array : std::false_type {};
+      inline constexpr bool is_array_v = false;
       template <typename E, std::size_t N>
-      struct is_array<std::array<E, N>> : std::true_type
-      {
-         using element_type             = E;
-         static constexpr std::size_t n = N;
-      };
+      inline constexpr bool is_array_v<std::array<E, N>> = true;
 
       template <typename T>
-      struct is_optional : std::false_type {};
+      inline constexpr bool is_optional_v = false;
       template <typename E>
-      struct is_optional<std::optional<E>> : std::true_type
+      inline constexpr bool is_optional_v<std::optional<E>> = true;
+
+      template <typename T>
+      inline constexpr bool is_variant_v = false;
+      template <typename... Ts>
+      inline constexpr bool is_variant_v<std::variant<Ts...>> = true;
+
+      template <typename T>
+      concept Record = ::psio::Reflected<T> && std::is_class_v<T>;
+
+      // A value of the data section: 1 bit (bool) or 1, 2, 4, 8 bytes.
+      template <typename T>
+      concept Scalar = (std::is_arithmetic_v<T> || std::is_enum_v<T>) && sizeof(T) <= 8;
+
+      template <typename T>
+      struct is_pointer_type : std::bool_constant<Record<T>>
       {
-         using element_type = E;
+      };
+      template <>
+      struct is_pointer_type<std::string> : std::true_type
+      {
+      };
+      template <typename E, typename A>
+      struct is_pointer_type<std::vector<E, A>> : std::true_type
+      {
+      };
+      template <typename E, std::size_t N>
+      struct is_pointer_type<std::array<E, N>> : std::true_type
+      {
+      };
+      // An optional pointer is that pointer; null is "no value". (An
+      // optional of an optional has no second null to use.)
+      template <typename E>
+      struct is_pointer_type<std::optional<E>>
+         : std::bool_constant<is_pointer_type<E>::value && !is_optional_v<E>>
+      {
       };
 
+      // A value held behind one pointer.
       template <typename T>
-      struct is_variant : std::false_type {};
+      concept Pointer = is_pointer_type<T>::value;
+
+      // A record member laid out as a union: a variant, or an optional scalar.
+      template <typename T>
+      inline constexpr bool is_union_v = false;
       template <typename... Ts>
-      struct is_variant<std::variant<Ts...>> : std::true_type {};
+      inline constexpr bool is_union_v<std::variant<Ts...>> = true;
+      template <Scalar S>
+      inline constexpr bool is_union_v<std::optional<S>> = true;
 
-      template <typename T>
-      concept Record = ::psio::Reflected<T> && !std::is_enum_v<T>;
-
-      template <typename F>
-      consteval bool is_data_type()
+      // log2 of a scalar's size in bits: Bool 0, then 3 (byte) … 6 (word).
+      template <Scalar S>
+      consteval std::uint8_t lg_bits()
       {
-         return std::is_arithmetic_v<F> || std::is_enum_v<F>;
-      }
-
-      // Byte size for a data-section field. bool is 0 (sentinel = 1 bit).
-      template <typename F>
-      consteval uint32_t data_byte_size()
-      {
-         if constexpr (std::is_same_v<F, bool>)
+         if constexpr (std::is_same_v<S, bool>)
             return 0;
-         else if constexpr (std::is_enum_v<F>)
-            return sizeof(std::underlying_type_t<F>);
-         else if constexpr (std::is_arithmetic_v<F>)
-            return sizeof(F);
          else
-            return 0;
+            return sizeof(S) == 1 ? 3 : sizeof(S) == 2 ? 4 : sizeof(S) == 4 ? 5 : 6;
       }
 
-      // ── Wire helpers ──────────────────────────────────────────────────────
-
-      inline uint64_t read_u64(const uint8_t* p)
+      // The element-size code of a list of scalars.
+      template <Scalar S>
+      consteval std::uint8_t list_code()
       {
-         uint64_t v;
+         return std::is_same_v<S, bool> ? 1 : static_cast<std::uint8_t>(lg_bits<S>() - 1);
+      }
+
+      // ── Struct layout: the official compiler's allocator ──────────────
+      //
+      // This is `StructLayout` of capnp's node-translator: fields are
+      // placed in ordinal order; a data field takes the smallest hole that
+      // fits or a new word; the members of a union share space, each
+      // reusing (and if possible growing) the locations earlier members
+      // claimed; the 16-bit discriminant is allocated when the union's
+      // second member is. tests/capnp_layout_tests.cpp checks the result
+      // against `capnp compile` on unions of every size mix.
+
+      enum class slot_kind : std::uint8_t
+      {
+         none,     // Void
+         data,
+         pointer
+      };
+
+      struct slot
+      {
+         slot_kind     kind   = slot_kind::none;
+         std::uint8_t  lg     = 0;  // data: log2 bits
+         std::uint32_t offset = 0;  // data: in units of the field's size; pointer: index
+
+         // data: the byte that holds the field (the first of them)
+         constexpr std::uint32_t byte() const noexcept
+         {
+            return lg == 0 ? offset >> 3 : offset << (lg - 3);
+         }
+         constexpr std::uint32_t bit() const noexcept { return offset & 7; }
+      };
+
+      struct hole_set
+      {
+         // holes[lg]: offset (in units of 2^lg bits) of the one hole of
+         // that size; 0 = none (offset 0 is never a hole).
+         std::uint32_t holes[6] = {};
+
+         constexpr std::optional<std::uint32_t> try_allocate(std::uint32_t lg)
+         {
+            if (lg >= 6)
+               return std::nullopt;
+            if (holes[lg] != 0)
+            {
+               const auto r = holes[lg];
+               holes[lg]    = 0;
+               return r;
+            }
+            if (auto next = try_allocate(lg + 1))
+            {
+               const auto r = *next * 2;
+               holes[lg]    = r + 1;
+               return r;
+            }
+            return std::nullopt;
+         }
+         constexpr void add_holes_at_end(std::uint32_t lg, std::uint32_t offset,
+                                         std::uint32_t limit = 6)
+         {
+            while (lg < limit)
+            {
+               holes[lg] = offset;
+               ++lg;
+               offset = (offset + 1) / 2;
+            }
+         }
+         constexpr bool try_expand(std::uint32_t old_lg, std::uint32_t old_offset,
+                                   std::uint32_t factor)
+         {
+            if (factor == 0)
+               return true;
+            if (old_lg >= 6)
+               return false;
+            if (holes[old_lg] != old_offset + 1)
+               return false;
+            if (try_expand(old_lg + 1, old_offset >> 1, factor - 1))
+            {
+               holes[old_lg] = 0;
+               return true;
+            }
+            return false;
+         }
+         constexpr std::optional<std::uint32_t> smallest_at_least(std::uint32_t lg) const
+         {
+            for (std::uint32_t i = lg; i < 6; ++i)
+               if (holes[i] != 0)
+                  return i;
+            return std::nullopt;
+         }
+      };
+
+      struct layout_top
+      {
+         std::uint32_t data_words = 0;
+         std::uint32_t ptr_count  = 0;
+         hole_set      holes;
+
+         constexpr std::uint32_t add_data(std::uint32_t lg)
+         {
+            if (auto hole = holes.try_allocate(lg))
+               return *hole;
+            const std::uint32_t offset = data_words++ << (6 - lg);
+            holes.add_holes_at_end(lg, offset + 1);
+            return offset;
+         }
+         constexpr std::uint32_t add_pointer() { return ptr_count++; }
+         constexpr bool try_expand_data(std::uint32_t old_lg, std::uint32_t old_offset,
+                                        std::uint32_t factor)
+         {
+            return holes.try_expand(old_lg, old_offset, factor);
+         }
+      };
+
+      struct layout_union
+      {
+         struct data_location
+         {
+            std::uint32_t lg;
+            std::uint32_t offset;
+
+            constexpr bool try_expand_to(layout_top& top, std::uint32_t new_lg)
+            {
+               if (new_lg <= lg)
+                  return true;
+               if (top.try_expand_data(lg, offset, new_lg - lg))
+               {
+                  offset >>= (new_lg - lg);
+                  lg = new_lg;
+                  return true;
+               }
+               return false;
+            }
+         };
+
+         layout_top&                  top;
+         std::uint32_t                groups = 0;
+         std::optional<std::uint32_t> discriminant;  // offset in 16-bit units
+         std::vector<data_location>   data;
+         std::vector<std::uint32_t>   pointers;
+
+         constexpr explicit layout_union(layout_top& t) : top(t) {}
+
+         constexpr bool add_discriminant()
+         {
+            if (discriminant)
+               return false;
+            discriminant = top.add_data(4);
+            return true;
+         }
+         constexpr void new_group_adding_first_member()
+         {
+            if (++groups == 2)
+               add_discriminant();
+         }
+      };
+
+      // One member of a union (the "group" the compiler makes for it).
+      struct layout_group
+      {
+         struct usage
+         {
+            bool          used    = false;
+            std::uint32_t lg_used = 0;
+            hole_set      holes;
+
+            constexpr std::optional<std::uint32_t> smallest_hole_at_least(
+               const layout_union::data_location& loc, std::uint32_t lg) const
+            {
+               if (!used)
+                  return lg <= loc.lg ? std::optional<std::uint32_t>{loc.lg} : std::nullopt;
+               if (lg >= lg_used)
+                  return lg < loc.lg ? std::optional<std::uint32_t>{lg} : std::nullopt;
+               if (auto r = holes.smallest_at_least(lg))
+                  return r;
+               return lg_used < loc.lg ? std::optional<std::uint32_t>{lg_used} : std::nullopt;
+            }
+            constexpr std::uint32_t allocate_from_hole(const layout_union::data_location& loc,
+                                                       std::uint32_t                      lg)
+            {
+               std::uint32_t result = 0;
+               if (!used)
+               {
+                  used    = true;
+                  lg_used = lg;
+               }
+               else if (lg >= lg_used)
+               {
+                  holes.add_holes_at_end(lg_used, 1, lg);
+                  lg_used = lg + 1;
+                  result  = 1;
+               }
+               else if (auto hole = holes.try_allocate(lg))
+                  result = *hole;
+               else
+               {
+                  result = std::uint32_t{1} << (lg_used - lg);
+                  holes.add_holes_at_end(lg, result + 1, lg_used);
+                  lg_used += 1;
+               }
+               return (loc.offset << (loc.lg - lg)) + result;
+            }
+            constexpr std::optional<std::uint32_t> try_allocate_by_expanding(
+               layout_top& top, layout_union::data_location& loc, std::uint32_t lg)
+            {
+               if (!used)
+               {
+                  if (!loc.try_expand_to(top, lg))
+                     return std::nullopt;
+                  used    = true;
+                  lg_used = lg;
+                  return loc.offset << (loc.lg - lg);
+               }
+               const std::uint32_t desired = std::max(lg_used, lg) + 1;
+               if (desired > loc.lg && !loc.try_expand_to(top, desired))
+                  return std::nullopt;
+               holes.add_holes_at_end(lg_used, 1, desired);
+               lg_used = desired;
+               const auto hole = holes.try_allocate(lg);
+               return (loc.offset << (loc.lg - lg)) + *hole;
+            }
+         };
+
+         layout_union&      parent;
+         std::vector<usage> data_usage;
+         std::uint32_t      pointer_usage = 0;
+         bool               has_members   = false;
+
+         constexpr explicit layout_group(layout_union& u) : parent(u) {}
+
+         constexpr void add_member()
+         {
+            if (!has_members)
+            {
+               has_members = true;
+               parent.new_group_adding_first_member();
+            }
+         }
+         constexpr void add_void() { add_member(); }
+         constexpr std::uint32_t add_data(std::uint32_t lg)
+         {
+            add_member();
+            std::uint32_t              best_size = ~std::uint32_t{0};
+            std::optional<std::size_t> best;
+            for (std::size_t i = 0; i < parent.data.size(); ++i)
+            {
+               if (data_usage.size() == i)
+                  data_usage.emplace_back();
+               if (auto hole = data_usage[i].smallest_hole_at_least(parent.data[i], lg))
+                  if (*hole < best_size)
+                  {
+                     best_size = *hole;
+                     best      = i;
+                  }
+            }
+            if (best)
+               return data_usage[*best].allocate_from_hole(parent.data[*best], lg);
+            for (std::size_t i = 0; i < parent.data.size(); ++i)
+               if (auto r =
+                      data_usage[i].try_allocate_by_expanding(parent.top, parent.data[i], lg))
+                  return *r;
+            const std::uint32_t offset = parent.top.add_data(lg);
+            parent.data.push_back({lg, offset});
+            usage u;
+            u.used    = true;
+            u.lg_used = lg;
+            data_usage.push_back(u);
+            return offset;
+         }
+         constexpr std::uint32_t add_pointer()
+         {
+            add_member();
+            if (pointer_usage < parent.pointers.size())
+               return parent.pointers[pointer_usage++];
+            ++pointer_usage;
+            parent.pointers.push_back(parent.top.add_pointer());
+            return parent.pointers.back();
+         }
+      };
+
+      // What one ordinal needs.
+      template <typename A>
+      consteval slot slot_shape()
+      {
+         if constexpr (std::is_same_v<A, std::monostate>)
+            return {slot_kind::none, 0, 0};
+         else if constexpr (Scalar<A>)
+            return {slot_kind::data, lg_bits<A>(), 0};
+         else
+         {
+            static_assert(Pointer<A>,
+                          "psio::capnp: this type has no Cap'n Proto counterpart (supported: "
+                          "bool, integers up to 64 bits, float, double, enums, std::string, "
+                          "std::vector, std::array, reflected records, std::optional and "
+                          "std::variant of those as record members)");
+            return {slot_kind::pointer, 0, 0};
+         }
+      }
+
+      // A plain member's shape; nothing for a union member (its slot is the
+      // discriminant, placed by the allocator).
+      template <typename F>
+      consteval slot plain_shape()
+      {
+         if constexpr (is_union_v<F>)
+            return {};
+         else
+            return slot_shape<F>();
+      }
+
+      // The alternatives of a union member, as slot shapes.
+      template <typename F>
+      struct union_alts
+      {
+         static constexpr std::size_t count = 0;
+         static consteval void        fill(slot*) {}
+      };
+      template <typename... Ts>
+      struct union_alts<std::variant<Ts...>>
+      {
+         static_assert(sizeof...(Ts) >= 2,
+                       "psio::capnp: a Cap'n Proto union has at least two members; a "
+                       "std::variant with one alternative has no counterpart");
+         static constexpr std::size_t count = sizeof...(Ts);
+         static consteval void        fill(slot* out)
+         {
+            std::size_t i = 0;
+            ((out[i++] = slot_shape<Ts>()), ...);
+         }
+      };
+      template <Scalar S>
+      struct union_alts<std::optional<S>>
+      {
+         static constexpr std::size_t count = 2;  // none :Void, some :S
+         static consteval void        fill(slot* out)
+         {
+            out[0] = {slot_kind::none, 0, 0};
+            out[1] = slot_shape<S>();
+         }
+      };
+
+      template <Record T>
+      struct layout
+      {
+         using R = ::psio::reflect<T>;
+         static constexpr std::size_t members = R::member_count;
+
+         template <std::size_t I>
+         using member = std::remove_cvref_t<typename R::template member_type<I>>;
+
+         static constexpr std::size_t alt_total = []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (std::size_t{0} + ... + union_alts<member<Is>>::count);
+         }(std::make_index_sequence<members>{});
+
+         struct result
+         {
+            // A plain member: its slot. A union member: its discriminant.
+            std::array<slot, members> field{};
+            // A union member: the index of its first alternative in `alt`.
+            std::array<std::uint16_t, members>               alt_first{};
+            std::array<slot, alt_total == 0 ? 1 : alt_total> alt{};
+            std::uint16_t                                    data_words = 0;
+            std::uint16_t                                    ptr_count  = 0;
+            bool                                             too_large  = false;
+         };
+
+         static consteval result compute()
+         {
+            result r{};
+            // Shapes.
+            std::array<bool, members>        is_union{};
+            std::array<std::size_t, members> alt_count{};
+            {
+               std::size_t next = 0;
+               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                  ((is_union[Is]     = is_union_v<member<Is>>,
+                    alt_count[Is]    = union_alts<member<Is>>::count,
+                    r.alt_first[Is]  = static_cast<std::uint16_t>(next),
+                    union_alts<member<Is>>::fill(r.alt.data() + next),
+                    next            += alt_count[Is],
+                    r.field[Is]      = plain_shape<member<Is>>()),
+                   ...);
+               }(std::make_index_sequence<members>{});
+            }
+            // Ordinal order: ascending field number, declaration order among equals.
+            const auto& order = ::psio::detail::members_by_field_number<T>;
+
+            layout_top top;
+            for (std::size_t k = 0; k < members; ++k)
+            {
+               const std::size_t i = order[k];
+               if (!is_union[i])
+               {
+                  auto& s = r.field[i];
+                  if (s.kind == slot_kind::data)
+                     s.offset = top.add_data(s.lg);
+                  else if (s.kind == slot_kind::pointer)
+                     s.offset = top.add_pointer();
+                  continue;
+               }
+               layout_union u{top};
+               for (std::size_t a = 0; a < alt_count[i]; ++a)
+               {
+                  auto&        s = r.alt[r.alt_first[i] + a];
+                  layout_group g{u};
+                  if (s.kind == slot_kind::none)
+                     g.add_void();
+                  else if (s.kind == slot_kind::data)
+                     s.offset = g.add_data(s.lg);
+                  else
+                     s.offset = g.add_pointer();
+               }
+               u.add_discriminant();
+               r.field[i] = {slot_kind::data, 4, *u.discriminant};
+            }
+            r.too_large = top.data_words > 0xffff || top.ptr_count > 0xffff;
+            r.data_words = static_cast<std::uint16_t>(top.data_words);
+            r.ptr_count  = static_cast<std::uint16_t>(top.ptr_count);
+            return r;
+         }
+
+         static constexpr result        value      = compute();
+         static_assert(!value.too_large,
+                       "psio::capnp: a struct section holds at most 65535 words");
+         static constexpr std::uint16_t data_words = value.data_words;
+         static constexpr std::uint16_t ptr_count  = value.ptr_count;
+         static constexpr std::uint32_t words =
+            std::uint32_t{value.data_words} + value.ptr_count;
+
+         static constexpr slot field(std::size_t i) noexcept { return value.field[i]; }
+         static constexpr slot alt(std::size_t i, std::size_t a) noexcept
+         {
+            return value.alt[value.alt_first[i] + a];
+         }
+      };
+
+      // ── Defaults ──────────────────────────────────────────────────────
+
+      template <typename T, std::size_t I>
+      constexpr auto member_default_constexpr()
+      {
+         T obj{};
+         return obj.*(::psio::reflect<T>::template member_pointer<I>);
+      }
+      template <typename T, std::size_t I>
+      concept constexpr_default =
+         requires { typename std::bool_constant<(member_default_constexpr<T, I>(), true)>; };
+
+      // The member initialiser of scalar member I: a constant where T{} is
+      // a constant expression (the usual case — the XOR then folds away
+      // when it is zero), else computed once.
+      template <typename T, std::size_t I>
+      [[gnu::always_inline]] inline auto member_default() noexcept
+      {
+         using F = std::remove_cvref_t<typename ::psio::reflect<T>::template member_type<I>>;
+         if constexpr (constexpr_default<T, I>)
+         {
+            constexpr F value = member_default_constexpr<T, I>();
+            return value;
+         }
+         else
+         {
+            static const F value = [] {
+               T obj{};
+               return obj.*(::psio::reflect<T>::template member_pointer<I>);
+            }();
+            return value;
+         }
+      }
+
+      template <Scalar S>
+      using bits_t = std::conditional_t<
+         sizeof(S) == 1, std::uint8_t,
+         std::conditional_t<sizeof(S) == 2, std::uint16_t,
+                            std::conditional_t<sizeof(S) == 4, std::uint32_t, std::uint64_t>>>;
+
+      template <Scalar S>
+      [[gnu::always_inline]] constexpr bits_t<S> to_bits(S v) noexcept
+      {
+         if constexpr (std::is_floating_point_v<S>)
+            return std::bit_cast<bits_t<S>>(v);
+         else
+            return static_cast<bits_t<S>>(v);
+      }
+      template <Scalar S>
+      [[gnu::always_inline]] constexpr S from_bits(bits_t<S> b) noexcept
+      {
+         if constexpr (std::is_floating_point_v<S>)
+            return std::bit_cast<S>(b);
+         else
+            return static_cast<S>(b);
+      }
+
+      // ── Wire primitives ───────────────────────────────────────────────
+
+      [[gnu::always_inline]] inline std::uint64_t load64(const std::uint8_t* p) noexcept
+      {
+         std::uint64_t v;
          std::memcpy(&v, p, 8);
          return v;
       }
-
-      inline uint32_t read_u32(const uint8_t* p)
+      [[gnu::always_inline]] inline std::uint32_t load32(const std::uint8_t* p) noexcept
       {
-         uint32_t v;
+         std::uint32_t v;
          std::memcpy(&v, p, 4);
          return v;
       }
 
-      // Bits [2:31] of a pointer word = signed 30-bit offset in words.
-      inline int32_t ptr_offset(uint64_t word)
+      // Bits 2..31 of a struct / list pointer: the signed offset in words
+      // from the end of the pointer to the object.
+      [[gnu::always_inline]] constexpr std::int32_t pointer_offset(std::uint64_t w) noexcept
       {
-         return static_cast<int32_t>(static_cast<uint32_t>(word) & ~3u) >> 2;
+         return static_cast<std::int32_t>(static_cast<std::uint32_t>(w)) >> 2;
       }
 
-      struct capnp_ptr
+      inline constexpr std::uint32_t max_segments = 512;  // the official reader's limit
+
+      // Bytes of the segment table of a message with `n` segments.
+      constexpr std::size_t table_bytes(std::size_t n) noexcept
       {
-         const uint8_t* data       = nullptr;
-         uint16_t       data_words = 0;
-         uint16_t       ptr_count  = 0;
-         bool operator==(std::nullptr_t) const { return data == nullptr; }
+         return (4 + 4 * n + 7) & ~std::size_t{7};
+      }
+
+      // Segment `id` of a validated message: its first byte and its size.
+      inline std::span<const std::uint8_t> segment_of(const std::uint8_t* msg,
+                                                      std::uint32_t       id) noexcept
+      {
+         const std::size_t   n = std::size_t{load32(msg)} + 1;
+         const std::uint8_t* p = msg + table_bytes(n);
+         for (std::uint32_t i = 0; i < id; ++i)
+            p += std::size_t{load32(msg + 4 + 4 * i)} * 8;
+         return {p, std::size_t{load32(msg + 4 + 4 * id)} * 8};
+      }
+
+      // A pointer followed to its object: the word that describes the
+      // object (the pointer itself, or the landing pad's) and the object.
+      struct resolved
+      {
+         std::uint64_t       word;
+         const std::uint8_t* target;
       };
 
-      inline capnp_ptr resolve_struct_ptr(const uint8_t* ptr_loc)
+      [[gnu::noinline]] inline resolved resolve_far(const std::uint8_t* msg,
+                                                    std::uint64_t       w) noexcept
       {
-         uint64_t word = read_u64(ptr_loc);
-         if (word == 0)
-            return {};
-         int32_t  off = ptr_offset(word);
-         uint16_t dw  = static_cast<uint16_t>((word >> 32) & 0xFFFF);
-         uint16_t pc  = static_cast<uint16_t>((word >> 48) & 0xFFFF);
-         return {ptr_loc + 8 + static_cast<int64_t>(off) * 8, dw, pc};
-      }
-
-      struct list_info
-      {
-         const uint8_t* data            = nullptr;
-         uint32_t       count           = 0;
-         uint32_t       elem_stride     = 0;
-         uint16_t       elem_data_words = 0;
-         uint16_t       elem_ptr_count  = 0;
-      };
-
-      inline list_info resolve_list_ptr(const uint8_t* ptr_loc)
-      {
-         uint64_t word = read_u64(ptr_loc);
-         if (word == 0)
-            return {};
-
-         int32_t  off            = ptr_offset(word);
-         uint8_t  elem_sz_tag    = static_cast<uint8_t>((word >> 32) & 7);
-         uint32_t count_or_words = static_cast<uint32_t>(word >> 35);
-
-         const uint8_t* list_start =
-            ptr_loc + 8 + static_cast<int64_t>(off) * 8;
-
-         if (elem_sz_tag == 7)
+         const auto          seg = segment_of(msg, static_cast<std::uint32_t>(w >> 32));
+         const std::uint8_t* pad = seg.data() + std::size_t{(static_cast<std::uint32_t>(w) >> 3)} * 8;
+         if ((w & 4) == 0)
          {
-            // Composite list: first word is element-layout tag.
-            uint64_t tag   = read_u64(list_start);
-            uint32_t count = static_cast<uint32_t>(tag) >> 2;
-            uint16_t dw    = static_cast<uint16_t>((tag >> 32) & 0xFFFF);
-            uint16_t pc    = static_cast<uint16_t>((tag >> 48) & 0xFFFF);
-            return {list_start + 8, count, (dw + pc) * 8u, dw, pc};
+            const std::uint64_t w2 = load64(pad);
+            return {w2, pad + 8 + std::int64_t{pointer_offset(w2)} * 8};
          }
-
-         // 0=void 1=bit 2=byte 3=2B 4=4B 5=8B 6=ptr
-         static constexpr uint32_t elem_sizes[] = {0, 0, 1, 2, 4, 8, 8, 0};
-         return {list_start, count_or_words, elem_sizes[elem_sz_tag], 0, 0};
+         // Double-far: the pad is a far pointer to the object and a tag word.
+         const std::uint64_t far = load64(pad);
+         const auto          seg2 = segment_of(msg, static_cast<std::uint32_t>(far >> 32));
+         return {load64(pad + 8),
+                 seg2.data() + std::size_t{(static_cast<std::uint32_t>(far) >> 3)} * 8};
       }
 
-      inline const uint8_t* ptr_section(capnp_ptr p)
+      // The pointer at `slot` (non-null), followed. Trusted.
+      [[gnu::always_inline]] inline resolved resolve(const std::uint8_t* msg,
+                                                     const std::uint8_t* slot,
+                                                     std::uint64_t       w) noexcept
       {
-         return p.data + static_cast<uint32_t>(p.data_words) * 8;
+         if ((w & 3) == 2) [[unlikely]]
+            return resolve_far(msg, w);
+         return {w, slot + 8 + std::int64_t{pointer_offset(w)} * 8};
       }
 
-      inline const uint8_t* ptr_slot(capnp_ptr p, uint32_t idx)
+      // A struct: its data section, the sizes of both sections, and the
+      // message (for far pointers below it). A null struct is all zero and
+      // reads as every member's default.
+      struct struct_ref
       {
-         return ptr_section(p) + idx * 8;
-      }
+         const std::uint8_t* data       = nullptr;
+         const std::uint8_t* msg        = nullptr;
+         std::uint32_t       data_bytes = 0;
+         std::uint16_t       ptr_count  = 0;
 
-      inline std::string_view read_text(const uint8_t* ptr_loc)
-      {
-         uint64_t word = read_u64(ptr_loc);
-         if (word == 0)
-            return {};
-         int32_t  off   = ptr_offset(word);
-         uint32_t count = static_cast<uint32_t>(word >> 35);
-         auto*    data  = ptr_loc + 8 + static_cast<int64_t>(off) * 8;
-         if (count == 0)
-            return {};
-         return {reinterpret_cast<const char*>(data), count - 1};
-      }
-
-      // ── Layout computation (data section slot allocator) ──────────────────
-      //
-      // Matches capnp's ordinal allocator: larger slots first, then smaller
-      // ones fill bit-holes left behind. Our input is PSIO_REFLECT order
-      // (already monotonic), so the resulting slots match what the official
-      // compiler emits for sequential ordinals.
-
-      template <typename T>
-      struct capnp_layout
-      {
-         struct field_loc
+         [[gnu::always_inline]] const std::uint8_t* pointer(std::uint32_t i) const noexcept
          {
-            bool     is_ptr    = false;
-            uint32_t offset    = 0;
-            uint8_t  bit_index = 0;
-         };
-
-         struct layout_result
-         {
-            field_loc fields[64] = {};
-            uint16_t  data_words = 0;
-            uint16_t  ptr_count  = 0;
-         };
-
-         static consteval uint32_t alloc_bits(layout_result& r,
-                                              bool (&occupied)[2048],
-                                              uint32_t bit_count,
-                                              uint32_t bit_align)
-         {
-            for (uint32_t bit = 0;; bit += bit_align)
-            {
-               uint32_t end_bit      = bit + bit_count;
-               uint32_t words_needed = (end_bit + 63) / 64;
-               if (words_needed > r.data_words)
-                  r.data_words = words_needed;
-
-               bool ok = true;
-               for (uint32_t b = bit; b < end_bit; ++b)
-               {
-                  if (occupied[b])
-                  {
-                     ok = false;
-                     break;
-                  }
-               }
-               if (ok)
-               {
-                  for (uint32_t b = bit; b < end_bit; ++b)
-                     occupied[b] = true;
-                  return bit;
-               }
-            }
-         }
-
-         template <typename F>
-         static consteval field_loc alloc_type_slot(layout_result& r,
-                                                    bool (&occupied)[2048])
-         {
-            if constexpr (!is_data_type<F>())
-            {
-               return {true, r.ptr_count++, 0};
-            }
-            else if constexpr (std::is_same_v<F, bool>)
-            {
-               uint32_t bit = alloc_bits(r, occupied, 1, 1);
-               return {false, bit / 8,
-                       static_cast<uint8_t>(bit % 8)};
-            }
-            else
-            {
-               uint32_t sz  = data_byte_size<F>();
-               uint32_t bit = alloc_bits(r, occupied, sz * 8, sz * 8);
-               return {false, bit / 8, 0};
-            }
-         }
-
-         static consteval layout_result compute()
-         {
-            using R                 = ::psio::reflect<T>;
-            constexpr std::size_t N = R::member_count;
-            layout_result         r{};
-            bool                  occupied[2048] = {};
-
-            [&]<std::size_t... Is>(std::index_sequence<Is...>)
-            {
-               ((r.fields[Is] = alloc_type_slot<typename R::template member_type<Is>>(
-                    r, occupied)),
-                ...);
-            }(std::make_index_sequence<N>{});
-
-            return r;
-         }
-
-         static constexpr auto      result     = compute();
-         static constexpr uint16_t  data_words = result.data_words;
-         static constexpr uint16_t  ptr_count  = result.ptr_count;
-         static consteval field_loc loc(std::size_t i)
-         {
-            return result.fields[i];
+            return data + data_bytes + std::size_t{i} * 8;
          }
       };
 
-      // ── Default value extraction (C++ member initializers) ────────────────
-
-      template <typename T, std::size_t I>
-      auto field_default()
+      // A list: its elements, their count and stride, and for a list of
+      // structs the element's section sizes.
+      struct list_ref
       {
-         using R      = ::psio::reflect<T>;
-         using F      = typename R::template member_type<I>;
-         static const F val = [] {
-            T obj{};
-            return obj.*(R::template member_pointer<I>);
-         }();
-         return val;
+         const std::uint8_t* data            = nullptr;
+         const std::uint8_t* msg             = nullptr;
+         std::uint32_t       count           = 0;
+         std::uint32_t       step            = 0;  // bytes per element; 0 for bits
+         std::uint32_t       elem_data_bytes = 0;
+         std::uint16_t       elem_ptr_count  = 0;
+      };
+
+      [[gnu::always_inline]] inline struct_ref struct_at(const std::uint8_t* msg,
+                                                         const std::uint8_t* slot) noexcept
+      {
+         const std::uint64_t w = load64(slot);
+         if (w == 0)
+            return {};
+         const auto r = resolve(msg, slot, w);
+         return {r.target, msg, static_cast<std::uint32_t>((r.word >> 32) & 0xffff) * 8,
+                 static_cast<std::uint16_t>(r.word >> 48)};
       }
 
-      template <typename F>
-      F xor_default(F wire, F def)
+      inline constexpr std::uint32_t list_step[8] = {0, 0, 1, 2, 4, 8, 8, 0};
+
+      [[gnu::always_inline]] inline list_ref list_at(const std::uint8_t* msg,
+                                                     const std::uint8_t* slot) noexcept
       {
-         if constexpr (std::is_same_v<F, bool>)
+         const std::uint64_t w = load64(slot);
+         if (w == 0)
+            return {};
+         const auto          r    = resolve(msg, slot, w);
+         const std::uint32_t code = static_cast<std::uint32_t>(r.word >> 32) & 7;
+         if (code == 7)
          {
+            const std::uint64_t tag = load64(r.target);
+            const std::uint32_t dw  = static_cast<std::uint32_t>(tag >> 32) & 0xffff;
+            const std::uint16_t pc  = static_cast<std::uint16_t>(tag >> 48);
+            return {r.target + 8, msg, static_cast<std::uint32_t>(tag) >> 2, (dw + pc) * 8,
+                    dw * 8,       pc};
+         }
+         return {r.target, msg, static_cast<std::uint32_t>(r.word >> 35), list_step[code], 0, 0};
+      }
+
+      // Text without its NUL. A null pointer is the empty string.
+      [[gnu::always_inline]] inline std::string_view text_at(const std::uint8_t* msg,
+                                                             const std::uint8_t* slot) noexcept
+      {
+         const std::uint64_t w = load64(slot);
+         if (w == 0)
+            return {};
+         const auto r = resolve(msg, slot, w);
+         return {reinterpret_cast<const char*>(r.target),
+                 static_cast<std::uint32_t>(r.word >> 35) - 1};
+      }
+
+      // The root struct of a framed message.
+      inline struct_ref root_of(std::span<const char> bytes) noexcept
+      {
+         const auto* msg = reinterpret_cast<const std::uint8_t*>(bytes.data());
+         return struct_at(msg, msg + table_bytes(std::size_t{load32(msg)} + 1));
+      }
+
+      // Scalar at `loc` of struct `s`: zero bits beyond the data section
+      // the writer wrote (an older schema), XOR the default.
+      template <Scalar S>
+      [[gnu::always_inline]] inline S read_scalar(const struct_ref& s, slot loc, S def) noexcept
+      {
+         if constexpr (std::is_same_v<S, bool>)
+         {
+            const std::uint32_t byte = loc.byte();
+            const bool          wire =
+               byte < s.data_bytes ? ((s.data[byte] >> loc.bit()) & 1) != 0 : false;
             return wire != def;
          }
-         else if constexpr (std::is_same_v<F, float>)
-         {
-            uint32_t w, d;
-            std::memcpy(&w, &wire, 4);
-            std::memcpy(&d, &def, 4);
-            w ^= d;
-            float r;
-            std::memcpy(&r, &w, 4);
-            return r;
-         }
-         else if constexpr (std::is_same_v<F, double>)
-         {
-            uint64_t w, d;
-            std::memcpy(&w, &wire, 8);
-            std::memcpy(&d, &def, 8);
-            w ^= d;
-            double r;
-            std::memcpy(&r, &w, 8);
-            return r;
-         }
-         else if constexpr (std::is_enum_v<F>)
-         {
-            using U = std::underlying_type_t<F>;
-            return static_cast<F>(static_cast<U>(wire) ^
-                                  static_cast<U>(def));
-         }
          else
          {
-            return static_cast<F>(wire ^ def);
+            const std::uint32_t byte = loc.byte();
+            bits_t<S>           wire = 0;
+            if (byte + sizeof(S) <= s.data_bytes) [[likely]]
+               std::memcpy(&wire, s.data + byte, sizeof(S));
+            return from_bits<S>(static_cast<bits_t<S>>(wire ^ to_bits(def)));
          }
       }
 
-      // ── Word buffer (back-to-front flat builder) ──────────────────────────
-
-      class capnp_word_buf
+      // The pointer slot `loc` of `s`, or nullptr when the writer's struct
+      // has no such slot.
+      [[gnu::always_inline]] inline const std::uint8_t* pointer_slot(const struct_ref& s,
+                                                                     slot loc) noexcept
       {
-         std::vector<uint64_t> words_;
+         return loc.offset < s.ptr_count ? s.pointer(loc.offset) : nullptr;
+      }
 
-        public:
-         explicit capnp_word_buf(uint32_t reserve_words = 0)
-         {
-            if (reserve_words)
-               words_.reserve(reserve_words);
-         }
+      // ── Decode (trusted) ──────────────────────────────────────────────
 
-         uint32_t alloc(uint32_t n)
-         {
-            uint32_t off = static_cast<uint32_t>(words_.size());
-            words_.resize(off + n, 0);
-            return off;
-         }
-
-         uint8_t* byte_ptr(uint32_t word_idx)
-         {
-            return reinterpret_cast<uint8_t*>(&words_[word_idx]);
-         }
-
-         void write_struct_ptr(uint32_t at, uint32_t target,
-                               uint16_t dw, uint16_t pc)
-         {
-            int32_t  off  = static_cast<int32_t>(target) -
-                           static_cast<int32_t>(at) - 1;
-            uint64_t word = (uint64_t(pc) << 48) |
-                            (uint64_t(dw) << 32) |
-                            (static_cast<uint32_t>(off << 2) & 0xFFFFFFFFu);
-            words_[at] = word;
-         }
-
-         void write_list_ptr(uint32_t at, uint32_t target, uint8_t elem_sz,
-                             uint32_t count)
-         {
-            int32_t  off  = static_cast<int32_t>(target) -
-                           static_cast<int32_t>(at) - 1;
-            uint64_t word = (uint64_t(count) << 35) |
-                            (uint64_t(elem_sz) << 32) |
-                            (static_cast<uint32_t>(off << 2) & 0xFFFFFFFFu) |
-                            1u;
-            words_[at] = word;
-         }
-
-         void write_composite_tag(uint32_t at, uint32_t count,
-                                  uint16_t dw, uint16_t pc)
-         {
-            words_[at] = (uint64_t(pc) << 48) | (uint64_t(dw) << 32) |
-                         (static_cast<uint32_t>(count) << 2);
-         }
-
-         template <typename V>
-         void write_field(uint32_t struct_start, uint32_t byte_offset, V val)
-         {
-            std::memcpy(byte_ptr(struct_start) + byte_offset, &val,
-                        sizeof(val));
-         }
-
-         void write_bool(uint32_t struct_start, uint32_t byte_offset,
-                         uint8_t bit, bool val)
-         {
-            auto* p = byte_ptr(struct_start) + byte_offset;
-            if (val)
-               *p |= (1u << bit);
-         }
-
-         void write_text(uint32_t ptr_word, std::string_view text)
-         {
-            uint32_t len     = static_cast<uint32_t>(text.size());
-            uint32_t total   = len + 1;
-            uint32_t n_words = (total + 7) / 8;
-            uint32_t target  = alloc(n_words);
-            write_list_ptr(ptr_word, target, 2, total);
-            std::memcpy(byte_ptr(target), text.data(), len);
-            byte_ptr(target)[len] = 0;
-         }
-
-         std::vector<char> finish()
-         {
-            std::vector<char> out;
-            finish_into(out);
-            return out;
-         }
-
-         //  Sink form — write the finished segmented-frame bytes into
-         //  a caller-supplied vector, reusing its capacity.  Used by
-         //  the encode-into-sink CPO so a hot-loop caller keeps one
-         //  output vector across iterations.
-         void finish_into(std::vector<char>& sink)
-         {
-            uint32_t seg_size = static_cast<uint32_t>(words_.size());
-            sink.resize(8 + static_cast<std::size_t>(seg_size) * 8);
-            uint32_t zero = 0;
-            std::memcpy(sink.data(), &zero, 4);
-            std::memcpy(sink.data() + 4, &seg_size, 4);
-            std::memcpy(sink.data() + 8, words_.data(),
-                        static_cast<std::size_t>(seg_size) * 8);
-         }
-      };
-
-      // Counting builder for size_of / pre-sizing capnp_word_buf.
-      class capnp_word_counter
-      {
-         uint32_t words_ = 0;
-
-        public:
-         static constexpr bool counts_only = true;
-
-         uint32_t alloc(uint32_t n)
-         {
-            uint32_t off = words_;
-            words_ += n;
-            return off;
-         }
-
-         uint8_t* byte_ptr(uint32_t) { return nullptr; }
-         void     write_struct_ptr(uint32_t, uint32_t, uint16_t, uint16_t) {}
-         void     write_list_ptr(uint32_t, uint32_t, uint8_t, uint32_t) {}
-         void     write_composite_tag(uint32_t, uint32_t, uint16_t, uint16_t)
-         {
-         }
-         template <typename V>
-         void write_field(uint32_t, uint32_t, V)
-         {
-         }
-         void write_bool(uint32_t, uint32_t, uint8_t, bool) {}
-
-         void write_text(uint32_t, std::string_view text)
-         {
-            uint32_t total = static_cast<uint32_t>(text.size()) + 1;
-            alloc((total + 7) / 8);
-         }
-
-         uint32_t finish_size() const { return 8u + words_ * 8u; }
-         uint32_t word_count() const { return words_; }
-      };
-
-      template <typename Builder, typename = void>
-      struct is_counts_only_builder : std::false_type {};
-      template <typename Builder>
-      struct is_counts_only_builder<Builder,
-                                    std::void_t<decltype(Builder::counts_only)>>
-         : std::bool_constant<Builder::counts_only> {};
-      template <typename Builder>
-      inline constexpr bool counts_only_builder_v =
-         is_counts_only_builder<Builder>::value;
-
-      // ── Scalar list element-size tag ──────────────────────────────────────
+      template <Record T>
+      void decode_struct(const struct_ref& s, T& out);
 
       template <typename E>
-      consteval uint8_t scalar_elem_tag()
+      void decode_list(const list_ref& l, E* out, std::size_t n);
+
+      template <Pointer P>
+      void decode_pointer(const std::uint8_t* msg, const std::uint8_t* slot, P& out)
+      {
+         if constexpr (std::is_same_v<P, std::string>)
+            out = std::string(text_at(msg, slot));
+         else if constexpr (is_vector_v<P>)
+         {
+            const auto l = list_at(msg, slot);
+            out.resize(l.count);
+            if constexpr (std::is_same_v<typename P::value_type, bool>)
+            {
+               for (std::uint32_t i = 0; i < l.count; ++i)
+                  out[i] = ((l.data[i >> 3] >> (i & 7)) & 1) != 0;
+            }
+            else if (l.count != 0)
+               decode_list<typename P::value_type>(l, out.data(), l.count);
+         }
+         else if constexpr (is_array_v<P>)
+         {
+            const auto l = list_at(msg, slot);
+            out          = P{};
+            decode_list<typename P::value_type>(l, out.data(),
+                                                std::min<std::size_t>(l.count, out.size()));
+         }
+         else if constexpr (is_optional_v<P>)
+         {
+            if (load64(slot) == 0)
+               out.reset();
+            else
+               decode_pointer(msg, slot, out.emplace());
+         }
+         else
+         {
+            out = P{};
+            decode_struct(struct_at(msg, slot), out);
+         }
+      }
+
+      template <typename E>
+      void decode_list(const list_ref& l, E* out, std::size_t n)
       {
          if constexpr (std::is_same_v<E, bool>)
-            return 1;
-         else if constexpr (sizeof(E) == 1)
-            return 2;
-         else if constexpr (sizeof(E) == 2)
-            return 3;
-         else if constexpr (sizeof(E) == 4)
-            return 4;
-         else if constexpr (sizeof(E) == 8)
-            return 5;
-         else
-            static_assert(!sizeof(E*), "capnp: unsupported scalar size");
-      }
-
-      // ── Packer ────────────────────────────────────────────────────────────
-
-      template <typename T, typename Builder>
-         requires Record<T>
-      void pack_struct(Builder& buf, uint32_t data_start, uint32_t ptrs_start,
-                       const T& obj);
-
-      // Pack any contiguous sequence (std::vector or std::array) as a
-      // capnp list. Factored out so std::array and std::vector share
-      // every list-layout branch.
-      template <typename E, typename Builder>
-      void pack_sequence(Builder& buf, uint32_t ptr_word, const E* data,
-                         uint32_t count)
-      {
-         if (count == 0)
-            return;
-
-         if constexpr (is_vector<E>::value)
          {
-            uint32_t outer = buf.alloc(count);
-            buf.write_list_ptr(ptr_word, outer, 6, count);
-            for (uint32_t i = 0; i < count; ++i)
-               pack_sequence<typename is_vector<E>::element_type>(
-                  buf, outer + i,
-                  data[i].empty() ? nullptr : data[i].data(),
-                  static_cast<uint32_t>(data[i].size()));
+            for (std::size_t i = 0; i < n; ++i)
+               out[i] = ((l.data[i >> 3] >> (i & 7)) & 1) != 0;
          }
-         else if constexpr (std::is_same_v<E, std::string>)
+         else if constexpr (Scalar<E>)
          {
-            uint32_t outer = buf.alloc(count);
-            buf.write_list_ptr(ptr_word, outer, 6, count);
-            for (uint32_t i = 0; i < count; ++i)
-               buf.write_text(outer + i, data[i]);
+            if (n != 0)
+               std::memcpy(static_cast<void*>(out), l.data, n * sizeof(E));
          }
          else if constexpr (Record<E>)
          {
-            using EL           = capnp_layout<E>;
-            uint32_t words_per = EL::data_words + EL::ptr_count;
-            uint32_t tag       = buf.alloc(1);
-            buf.write_composite_tag(tag, count, EL::data_words,
-                                    EL::ptr_count);
-            uint32_t first_elem = buf.alloc(count * words_per);
-            buf.write_list_ptr(ptr_word, tag, 7, count * words_per);
-            for (uint32_t i = 0; i < count; ++i)
-            {
-               uint32_t elem_start = first_elem + i * words_per;
-               pack_struct(buf, elem_start, elem_start + EL::data_words,
-                           data[i]);
-            }
+            for (std::size_t i = 0; i < n; ++i)
+               decode_struct(struct_ref{l.data + i * std::size_t{l.step}, l.msg,
+                                        l.elem_data_bytes, l.elem_ptr_count},
+                             out[i]);
          }
-         else if constexpr (std::is_same_v<E, bool>)
+         else
          {
-            uint32_t n_words = (count + 7) / 8;
-            uint32_t target  = buf.alloc(n_words);
-            buf.write_list_ptr(ptr_word, target, 1, count);
-            if constexpr (!counts_only_builder_v<Builder>)
+            static_assert(Pointer<E>, "psio::capnp: unsupported list element type");
+            for (std::size_t i = 0; i < n; ++i)
+               decode_pointer(l.msg, l.data + i * 8, out[i]);
+         }
+      }
+
+      // Alternative `Alt` of a union member whose slot is `loc`.
+      template <typename Alt>
+      void decode_alt(const struct_ref& s, slot loc, Alt& out)
+      {
+         if constexpr (std::is_same_v<Alt, std::monostate>)
+            ;
+         else if constexpr (Scalar<Alt>)
+            out = read_scalar<Alt>(s, loc, Alt{});
+         else if (const auto* p = pointer_slot(s, loc))
+            decode_pointer(s.msg, p, out);
+      }
+
+      template <Record T, std::size_t I>
+      void decode_member(const struct_ref& s, T& out)
+      {
+         using L = layout<T>;
+         using F = typename L::template member<I>;
+         F& f    = out.*(::psio::reflect<T>::template member_pointer<I>);
+         constexpr slot loc = L::field(I);
+         if constexpr (is_variant_v<F>)
+         {
+            const std::uint16_t which = read_scalar<std::uint16_t>(s, loc, 0);
+            [&]<std::size_t... As>(std::index_sequence<As...>) {
+               (void)((which == As
+                          ? (decode_alt(s, L::alt(I, As), f.template emplace<As>()), true)
+                          : false) ||
+                      ...);
+            }(std::make_index_sequence<std::variant_size_v<F>>{});
+         }
+         else if constexpr (is_union_v<F>)  // optional scalar
+         {
+            if (read_scalar<std::uint16_t>(s, loc, 0) == 0)
+               f.reset();
+            else
+               f = read_scalar<typename F::value_type>(s, L::alt(I, 1), typename F::value_type{});
+         }
+         else if constexpr (Scalar<F>)
+            f = read_scalar<F>(s, loc, member_default<T, I>());
+         else if (const auto* p = pointer_slot(s, loc))
+            decode_pointer(s.msg, p, f);
+      }
+
+      template <Record T>
+      void decode_struct(const struct_ref& s, T& out)
+      {
+         if (s.data == nullptr)
+            return;  // a null struct is the default-constructed T
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            (decode_member<T, Is>(s, out), ...);
+         }(std::make_index_sequence<layout<T>::members>{});
+      }
+
+      // ── Encode ────────────────────────────────────────────────────────
+      //
+      // One segment, objects in the order libcapnp's builders allocate them
+      // when a message is filled in member order: a struct, then for each
+      // pointer member in turn the object it points to and everything below
+      // that object.
+
+      class builder
+      {
+         std::vector<char>& out_;
+
+       public:
+         static constexpr bool counts_only = false;
+
+         explicit builder(std::vector<char>& out, std::size_t reserve_bytes) : out_(out)
+         {
+            out_.clear();
+            out_.reserve(reserve_bytes);
+            out_.resize(8);
+         }
+         // Allocates n zeroed words; their index.
+         std::uint32_t alloc(std::uint32_t n)
+         {
+            const std::size_t at = (out_.size() - 8) / 8;
+            out_.resize(out_.size() + std::size_t{n} * 8);
+            return static_cast<std::uint32_t>(at);
+         }
+         std::uint8_t* bytes(std::uint32_t word) noexcept
+         {
+            return reinterpret_cast<std::uint8_t*>(out_.data()) + 8 + std::size_t{word} * 8;
+         }
+         void put(std::uint32_t word, std::uint64_t v) noexcept
+         {
+            std::memcpy(bytes(word), &v, 8);
+         }
+         void finish() noexcept
+         {
+            // One segment: [segment count - 1 = 0][its size in words].
+            const std::uint32_t words = static_cast<std::uint32_t>((out_.size() - 8) / 8);
+            std::memcpy(out_.data() + 4, &words, 4);
+         }
+         std::size_t size_bytes() const noexcept { return out_.size(); }
+      };
+
+      // The same walk, counting words.
+      class counter
+      {
+         std::uint64_t words_ = 0;
+
+       public:
+         static constexpr bool counts_only = true;
+         std::uint32_t         alloc(std::uint32_t n)
+         {
+            const auto at = words_;
+            words_ += n;
+            return static_cast<std::uint32_t>(at);
+         }
+         std::uint8_t* bytes(std::uint32_t) noexcept { return nullptr; }
+         void          put(std::uint32_t, std::uint64_t) noexcept {}
+         std::uint64_t words() const noexcept { return words_; }
+      };
+
+      inline constexpr std::uint32_t max_list_count = (std::uint32_t{1} << 29) - 1;
+
+      [[noreturn]] inline void encode_too_large()
+      {
+         ::psio::codec_abort(codec_error{
+            "capnp: value does not fit one segment (a list holds at most 2^29-1 elements or "
+            "words; a segment at most 2^29 words)",
+            0, "capnp"});
+      }
+
+      constexpr std::uint64_t struct_pointer(std::uint32_t at, std::uint32_t target, std::uint16_t dw,
+                                             std::uint16_t pc) noexcept
+      {
+         const std::int32_t off = static_cast<std::int32_t>(target) - static_cast<std::int32_t>(at) - 1;
+         return (std::uint64_t{pc} << 48) | (std::uint64_t{dw} << 32) |
+                (static_cast<std::uint32_t>(off) << 2);
+      }
+      constexpr std::uint64_t list_pointer(std::uint32_t at, std::uint32_t target, std::uint8_t code,
+                                           std::uint32_t count) noexcept
+      {
+         const std::int32_t off = static_cast<std::int32_t>(target) - static_cast<std::int32_t>(at) - 1;
+         return (std::uint64_t{count} << 35) | (std::uint64_t{code} << 32) |
+                (static_cast<std::uint32_t>(off) << 2) | 1u;
+      }
+
+      template <Record T, typename B>
+      void encode_struct(B& b, std::uint32_t data_at, const T& v);
+
+      // Writes the object `v` and the pointer to it at word `at`. An empty
+      // string or list is a null pointer unless `keep_empty` (the payload
+      // of an optional, where null means "no value").
+      template <Pointer P, typename B>
+      void encode_pointer(B& b, std::uint32_t at, const P& v, bool keep_empty = false);
+
+      template <typename E, typename B>
+      void encode_list(B& b, std::uint32_t at, const E* data, std::size_t n, bool keep_empty)
+      {
+         if (n == 0 && !keep_empty)
+            return;
+         if (n > max_list_count)
+            encode_too_large();
+         const std::uint32_t count = static_cast<std::uint32_t>(n);
+         if constexpr (std::is_same_v<E, bool>)
+         {
+            const std::uint32_t target = b.alloc((count + 63) / 64);
+            b.put(at, list_pointer(at, target, 1, count));
+            if constexpr (!B::counts_only)
             {
-               for (uint32_t i = 0; i < count; ++i)
+               std::uint8_t* p = b.bytes(target);
+               for (std::uint32_t i = 0; i < count; ++i)
                   if (data[i])
-                     buf.byte_ptr(target)[i / 8] |= (1u << (i % 8));
+                     p[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
             }
          }
-         else
+         else if constexpr (Scalar<E>)
          {
-            constexpr uint32_t elem_sz     = sizeof(E);
-            uint32_t           total_bytes = count * elem_sz;
-            uint32_t           n_words     = (total_bytes + 7) / 8;
-            uint32_t           target      = buf.alloc(n_words);
-
-            if constexpr (std::is_enum_v<E>)
-            {
-               using U = std::underlying_type_t<E>;
-               buf.write_list_ptr(ptr_word, target, scalar_elem_tag<U>(),
-                                  count);
-               if constexpr (!counts_only_builder_v<Builder>)
-                  for (uint32_t i = 0; i < count; ++i)
-                  {
-                     U val = static_cast<U>(data[i]);
-                     std::memcpy(buf.byte_ptr(target) + i * sizeof(U),
-                                 &val, sizeof(U));
-                  }
-            }
-            else
-            {
-               buf.write_list_ptr(ptr_word, target, scalar_elem_tag<E>(),
-                                  count);
-               if constexpr (!counts_only_builder_v<Builder>)
-                  std::memcpy(buf.byte_ptr(target), data, total_bytes);
-            }
-         }
-      }
-
-      template <typename E, typename Builder>
-      void pack_vec(Builder& buf, uint32_t ptr_word,
-                    const std::vector<E>& vec)
-      {
-         pack_sequence<E>(buf, ptr_word,
-                          vec.empty() ? nullptr : vec.data(),
-                          static_cast<uint32_t>(vec.size()));
-      }
-
-      template <typename E, std::size_t N, typename Builder>
-      void pack_arr(Builder& buf, uint32_t ptr_word,
-                    const std::array<E, N>& arr)
-      {
-         pack_sequence<E>(buf, ptr_word,
-                          N == 0 ? nullptr : arr.data(),
-                          static_cast<uint32_t>(N));
-      }
-
-      template <typename T, std::size_t I, typename Builder>
-      void pack_one_field(Builder& buf, uint32_t data_start,
-                          uint32_t ptrs_start, const T& obj)
-      {
-         using R                  = ::psio::reflect<T>;
-         using F                  = typename R::template member_type<I>;
-         constexpr auto loc       = capnp_layout<T>::loc(I);
-         const F&       field_val = obj.*(R::template member_pointer<I>);
-
-         if constexpr (loc.is_ptr)
-         {
-            if constexpr (std::is_same_v<F, std::string>)
-            {
-               if (!field_val.empty())
-                  buf.write_text(ptrs_start + loc.offset, field_val);
-            }
-            else if constexpr (is_vector<F>::value)
-            {
-               pack_vec(buf, ptrs_start + loc.offset, field_val);
-            }
-            else if constexpr (is_array<F>::value)
-            {
-               pack_arr(buf, ptrs_start + loc.offset, field_val);
-            }
-            else if constexpr (is_optional<F>::value)
-            {
-               // None → null pointer (slot left zero by alloc()).
-               // Some(x) → list<T> with one element. Reuses the
-               // pack_sequence<T> machinery; works uniformly across
-               // primitives, strings, lists, and nested records.
-               if (field_val.has_value())
-               {
-                  using E = typename is_optional<F>::element_type;
-                  pack_sequence<E>(buf, ptrs_start + loc.offset,
-                                    &(*field_val), 1);
-               }
-            }
-            else if constexpr (is_variant<F>::value)
-            {
-               // variant<T0, T1, ..., TN-1> → pointer to a sub-struct
-               // with 1 data word (u16 tag at byte 0) and N pointer
-               // slots. Each alt is encoded into its slot via the
-               // pack_sequence<A>(..., 1) wrapper, so primitives are
-               // wrapped in a length-1 list and pointer types
-               // (string/vec/record) get a direct pointer.
-               constexpr std::size_t N    = std::variant_size_v<F>;
-               constexpr uint16_t    dw   = 1;
-               constexpr uint16_t    pc   = static_cast<uint16_t>(N);
-               uint32_t sub_data = buf.alloc(dw + pc);
-               uint32_t sub_ptrs = sub_data + dw;
-               buf.write_struct_ptr(ptrs_start + loc.offset, sub_data,
-                                     dw, pc);
-               // Tag at byte 0 of sub-struct's data word.
-               uint16_t tag = static_cast<uint16_t>(field_val.index());
-               buf.write_field(sub_data, 0, tag);
-               // Live alt → pack_sequence<A>(sub_ptrs[idx], &alt, 1).
-               std::visit(
-                  [&](const auto& alt) {
-                     using A = std::remove_cvref_t<decltype(alt)>;
-                     pack_sequence<A>(buf,
-                                       sub_ptrs +
-                                          static_cast<uint32_t>(
-                                             field_val.index()),
-                                       &alt, 1);
-                  },
-                  field_val);
-            }
-            else if constexpr (Record<F>)
-            {
-               using FL = capnp_layout<F>;
-               uint32_t cd =
-                  buf.alloc(FL::data_words + FL::ptr_count);
-               uint32_t cp_ = cd + FL::data_words;
-               buf.write_struct_ptr(ptrs_start + loc.offset, cd,
-                                    FL::data_words, FL::ptr_count);
-               pack_struct(buf, cd, cp_, field_val);
-            }
-            else
-            {
-               static_assert(!sizeof(F*),
-                             "capnp: unsupported pointer field type");
-            }
-         }
-         else
-         {
-            if constexpr (std::is_same_v<F, bool>)
-            {
-               F def = field_default<T, I>();
-               buf.write_bool(data_start, loc.offset, loc.bit_index,
-                              xor_default(field_val, def));
-            }
-            else if constexpr (std::is_enum_v<F>)
-            {
-               using U    = std::underlying_type_t<F>;
-               F     def  = field_default<T, I>();
-               U     wire = xor_default(static_cast<U>(field_val),
-                                    static_cast<U>(def));
-               buf.write_field(data_start, loc.offset, wire);
-            }
-            else if constexpr (std::is_arithmetic_v<F>)
-            {
-               F def = field_default<T, I>();
-               buf.write_field(data_start, loc.offset,
-                               xor_default(field_val, def));
-            }
-            else
-            {
-               static_assert(!sizeof(F*),
-                             "capnp: unsupported data field type");
-            }
-         }
-      }
-
-      template <typename T, typename Builder>
-         requires Record<T>
-      void pack_struct(Builder& buf, uint32_t data_start, uint32_t ptrs_start,
-                       const T& obj)
-      {
-         using R                 = ::psio::reflect<T>;
-         constexpr std::size_t N = R::member_count;
-         [&]<std::size_t... Is>(std::index_sequence<Is...>)
-         {
-            (pack_one_field<T, Is>(buf, data_start, ptrs_start, obj), ...);
-         }(std::make_index_sequence<N>{});
-      }
-
-      // ── Unpacker ──────────────────────────────────────────────────────────
-
-      template <typename T>
-         requires Record<T>
-      void unpack_struct(capnp_ptr p, T& obj);
-
-      // Unpack a capnp list body into a contiguous C++ sequence (vector
-      // or array). `out_data` is the storage, `out_n` its element count.
-      template <typename E>
-      void unpack_sequence(list_info info, E* out_data, uint32_t out_n)
-      {
-         if (!info.data || info.count == 0 || out_n == 0)
-            return;
-         uint32_t n = std::min(info.count, out_n);
-
-         if constexpr (is_vector<E>::value)
-         {
-            using Inner = typename is_vector<E>::element_type;
-            for (uint32_t i = 0; i < n; ++i)
-            {
-               auto inner = resolve_list_ptr(info.data + i * 8);
-               out_data[i].resize(inner.count);
-               unpack_sequence<Inner>(inner,
-                                      inner.count == 0 ? nullptr
-                                                       : out_data[i].data(),
-                                      inner.count);
-            }
-         }
-         else if constexpr (std::is_same_v<E, std::string>)
-         {
-            for (uint32_t i = 0; i < n; ++i)
-            {
-               auto sv     = read_text(info.data + i * 8);
-               out_data[i] = std::string(sv);
-            }
+            const std::uint64_t bytes = std::uint64_t{count} * sizeof(E);
+            const std::uint32_t target = b.alloc(static_cast<std::uint32_t>((bytes + 7) / 8));
+            b.put(at, list_pointer(at, target, list_code<E>(), count));
+            if constexpr (!B::counts_only)
+               if (count != 0)
+                  std::memcpy(b.bytes(target), static_cast<const void*>(data), bytes);
          }
          else if constexpr (Record<E>)
          {
-            for (uint32_t i = 0; i < n; ++i)
-            {
-               capnp_ptr elem{info.data + i * info.elem_stride,
-                              info.elem_data_words, info.elem_ptr_count};
-               unpack_struct<E>(elem, out_data[i]);
-            }
-         }
-         else if constexpr (std::is_same_v<E, bool>)
-         {
-            for (uint32_t i = 0; i < n; ++i)
-               out_data[i] = (info.data[i / 8] >> (i % 8)) & 1;
-         }
-         else if constexpr (std::is_enum_v<E>)
-         {
-            using U = std::underlying_type_t<E>;
-            for (uint32_t i = 0; i < n; ++i)
-            {
-               U v;
-               std::memcpy(&v, info.data + i * sizeof(U), sizeof(U));
-               out_data[i] = static_cast<E>(v);
-            }
+            using L = layout<E>;
+            const std::uint64_t words = std::uint64_t{count} * L::words;
+            if (words > max_list_count)
+               encode_too_large();
+            const std::uint32_t tag = b.alloc(1 + static_cast<std::uint32_t>(words));
+            b.put(at, list_pointer(at, tag, 7, static_cast<std::uint32_t>(words)));
+            b.put(tag, (std::uint64_t{L::ptr_count} << 48) | (std::uint64_t{L::data_words} << 32) |
+                          (std::uint64_t{count} << 2));
+            for (std::uint32_t i = 0; i < count; ++i)
+               encode_struct(b, tag + 1 + i * L::words, data[i]);
          }
          else
          {
-            std::memcpy(out_data, info.data,
-                        static_cast<std::size_t>(n) * sizeof(E));
+            static_assert(Pointer<E>, "psio::capnp: unsupported list element type");
+            const std::uint32_t target = b.alloc(count);
+            b.put(at, list_pointer(at, target, 6, count));
+            for (std::uint32_t i = 0; i < count; ++i)
+               encode_pointer(b, target + i, data[i]);
+         }
+      }
+
+      template <Pointer P, typename B>
+      void encode_pointer(B& b, std::uint32_t at, const P& v, bool keep_empty)
+      {
+         if constexpr (std::is_same_v<P, std::string>)
+         {
+            if (v.empty() && !keep_empty)
+               return;
+            if (v.size() >= max_list_count)
+               encode_too_large();
+            const std::uint32_t count  = static_cast<std::uint32_t>(v.size()) + 1;  // + NUL
+            const std::uint32_t target = b.alloc((count + 7) / 8);
+            b.put(at, list_pointer(at, target, 2, count));
+            if constexpr (!B::counts_only)
+               std::memcpy(b.bytes(target), v.data(), v.size());
+         }
+         else if constexpr (is_vector_v<P>)
+         {
+            if constexpr (std::is_same_v<typename P::value_type, bool>)
+            {
+               // std::vector<bool> has no contiguous bools.
+               if (v.empty() && !keep_empty)
+                  return;
+               if (v.size() > max_list_count)
+                  encode_too_large();
+               const std::uint32_t count  = static_cast<std::uint32_t>(v.size());
+               const std::uint32_t target = b.alloc((count + 63) / 64);
+               b.put(at, list_pointer(at, target, 1, count));
+               if constexpr (!B::counts_only)
+               {
+                  std::uint8_t* p = b.bytes(target);
+                  for (std::uint32_t i = 0; i < count; ++i)
+                     if (v[i])
+                        p[i >> 3] |= static_cast<std::uint8_t>(1u << (i & 7));
+               }
+            }
+            else
+               encode_list<typename P::value_type>(b, at, v.data(), v.size(), keep_empty);
+         }
+         else if constexpr (is_array_v<P>)
+            encode_list<typename P::value_type>(b, at, v.data(), v.size(), keep_empty);
+         else if constexpr (is_optional_v<P>)
+         {
+            if (v.has_value())
+               encode_pointer(b, at, *v, true);
+         }
+         else
+         {
+            using L = layout<P>;
+            if constexpr (L::words == 0)
+               b.put(at, 0xfffffffcull);  // a zero-sized struct: offset -1
+            else
+            {
+               const std::uint32_t data_at = b.alloc(L::words);
+               b.put(at, struct_pointer(at, data_at, L::data_words, L::ptr_count));
+               encode_struct(b, data_at, v);
+            }
+         }
+      }
+
+      template <Scalar S, typename B>
+      [[gnu::always_inline]] inline void write_scalar(B& b, std::uint32_t data_at, slot loc, S v,
+                                                      S def) noexcept
+      {
+         if constexpr (!B::counts_only)
+         {
+            if constexpr (std::is_same_v<S, bool>)
+            {
+               if (v != def)
+                  b.bytes(data_at)[loc.byte()] |= static_cast<std::uint8_t>(1u << loc.bit());
+            }
+            else
+            {
+               const bits_t<S> wire = static_cast<bits_t<S>>(to_bits(v) ^ to_bits(def));
+               std::memcpy(b.bytes(data_at) + loc.byte(), &wire, sizeof(S));
+            }
+         }
+      }
+
+      template <typename Alt, typename B>
+      void encode_alt(B& b, std::uint32_t data_at, std::uint32_t ptrs_at, slot loc, const Alt& v)
+      {
+         if constexpr (std::is_same_v<Alt, std::monostate>)
+            ;
+         else if constexpr (Scalar<Alt>)
+            write_scalar<Alt>(b, data_at, loc, v, Alt{});
+         else
+            encode_pointer(b, ptrs_at + loc.offset, v);
+      }
+
+      template <Record T, std::size_t I, typename B>
+      void encode_member(B& b, std::uint32_t data_at, const T& v)
+      {
+         using L = layout<T>;
+         using F = typename L::template member<I>;
+         const F& f = v.*(::psio::reflect<T>::template member_pointer<I>);
+         constexpr slot      loc     = L::field(I);
+         const std::uint32_t ptrs_at = data_at + L::data_words;
+         if constexpr (is_variant_v<F>)
+         {
+            if (f.valueless_by_exception())
+               return;
+            write_scalar<std::uint16_t>(b, data_at, loc, static_cast<std::uint16_t>(f.index()), 0);
+            [&]<std::size_t... As>(std::index_sequence<As...>) {
+               (void)((f.index() == As
+                          ? (encode_alt(b, data_at, ptrs_at, L::alt(I, As), *std::get_if<As>(&f)),
+                             true)
+                          : false) ||
+                      ...);
+            }(std::make_index_sequence<std::variant_size_v<F>>{});
+         }
+         else if constexpr (is_union_v<F>)  // optional scalar
+         {
+            if (f.has_value())
+            {
+               write_scalar<std::uint16_t>(b, data_at, loc, 1, 0);
+               write_scalar<typename F::value_type>(b, data_at, L::alt(I, 1), *f,
+                                                    typename F::value_type{});
+            }
+         }
+         else if constexpr (Scalar<F>)
+            write_scalar<F>(b, data_at, loc, f, member_default<T, I>());
+         else
+            encode_pointer(b, ptrs_at + loc.offset, f);
+      }
+
+      template <Record T, typename B>
+      void encode_struct(B& b, std::uint32_t data_at, const T& v)
+      {
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            (encode_member<T, Is>(b, data_at, v), ...);
+         }(std::make_index_sequence<layout<T>::members>{});
+      }
+
+      // Root pointer, root struct, everything below it.
+      template <Record T, typename B>
+      void encode_message(B& b, const T& v)
+      {
+         using L = layout<T>;
+         const std::uint32_t root = b.alloc(1);
+         if constexpr (L::words == 0)
+            b.put(root, 0xfffffffcull);
+         else
+         {
+            const std::uint32_t data_at = b.alloc(L::words);
+            b.put(root, struct_pointer(root, data_at, L::data_words, L::ptr_count));
+            encode_struct(b, data_at, v);
+         }
+      }
+
+      template <Record T>
+      std::uint64_t message_words(const T& v)
+      {
+         counter c;
+         encode_message(c, v);
+         return c.words();
+      }
+
+      template <Record T>
+      void encode_into(const T& v, std::vector<char>& out)
+      {
+         const std::uint64_t words = message_words(v);
+         if (words > (std::uint64_t{1} << 29))
+            encode_too_large();
+         builder b{out, 8 + static_cast<std::size_t>(words) * 8};
+         encode_message(b, v);
+         b.finish();
+      }
+
+      // ── Validation (typed) ────────────────────────────────────────────
+
+      struct limits
+      {
+         std::uint64_t traversal_words = 8ull * 1024 * 1024;  // the official default (64 MiB)
+         std::uint32_t nesting         = 64;                  // the official default
+      };
+
+      struct checker
+      {
+         const std::uint8_t* msg;
+         std::size_t         len;
+         std::uint32_t       segments;
+         std::uint64_t       budget;
+         std::uint32_t       max_depth;
+         const char*         error = nullptr;
+         std::size_t         at    = 0;
+
+         bool fail(const char* what, const std::uint8_t* where) noexcept
+         {
+            if (!error)
+            {
+               error = what;
+               at    = static_cast<std::size_t>(where - msg);
+            }
+            return false;
+         }
+         bool spend(std::uint64_t words, const std::uint8_t* where) noexcept
+         {
+            if (words > budget)
+               return fail("capnp: message exceeds the traversal limit", where);
+            budget -= words;
+            return true;
+         }
+      };
+
+      // A pointer followed with every step checked: the describing word,
+      // the object's first byte, and the segment the object must lie in.
+      struct checked_target
+      {
+         std::uint64_t                 word   = 0;
+         const std::uint8_t*           target = nullptr;
+         std::span<const std::uint8_t> seg;
+      };
+
+      inline bool follow(checker& c, std::span<const std::uint8_t> seg, const std::uint8_t* slot,
+                         std::uint64_t w, checked_target& out) noexcept
+      {
+         const std::uint32_t kind = static_cast<std::uint32_t>(w) & 3;
+         if (kind == 3)
+            return c.fail("capnp: capability pointers are not supported", slot);
+         if (kind != 2)
+         {
+            // target = slot + 8 + offset words, within [seg.begin, seg.end].
+            const std::int64_t at = (slot - seg.data()) / 8 + 1 + std::int64_t{pointer_offset(w)};
+            if (at < 0 || static_cast<std::uint64_t>(at) > seg.size() / 8)
+               return c.fail("capnp: pointer target outside its segment", slot);
+            out = {w, seg.data() + at * 8, seg};
+            return true;
+         }
+         const std::uint32_t id = static_cast<std::uint32_t>(w >> 32);
+         if (id >= c.segments)
+            return c.fail("capnp: far pointer to a segment the message does not have", slot);
+         const auto          far_seg   = segment_of(c.msg, id);
+         const std::uint64_t pad_word  = static_cast<std::uint32_t>(w) >> 3;
+         const bool          two_words = (w & 4) != 0;
+         if (pad_word + (two_words ? 2 : 1) > far_seg.size() / 8)
+            return c.fail("capnp: far pointer landing pad outside its segment", slot);
+         const std::uint8_t* pad = far_seg.data() + pad_word * 8;
+         const std::uint64_t w2  = load64(pad);
+         if (!two_words)
+         {
+            if ((w2 & 3) >= 2)
+               return c.fail("capnp: far pointer landing pad is not a struct or list pointer", pad);
+            if (w2 == 0)
+            {
+               out = {0, nullptr, far_seg};
+               return true;
+            }
+            const std::int64_t at = static_cast<std::int64_t>(pad_word) + 1 + pointer_offset(w2);
+            if (at < 0 || static_cast<std::uint64_t>(at) > far_seg.size() / 8)
+               return c.fail("capnp: pointer target outside its segment", pad);
+            out = {w2, far_seg.data() + at * 8, far_seg};
+            return true;
+         }
+         // Double-far: [far pointer to the object][tag with offset 0].
+         if ((w2 & 7) != 2)
+            return c.fail("capnp: double-far landing pad does not start with a far pointer", pad);
+         const std::uint32_t id2 = static_cast<std::uint32_t>(w2 >> 32);
+         if (id2 >= c.segments)
+            return c.fail("capnp: far pointer to a segment the message does not have", pad);
+         const auto          seg2 = segment_of(c.msg, id2);
+         const std::uint64_t at   = static_cast<std::uint32_t>(w2) >> 3;
+         if (at > seg2.size() / 8)
+            return c.fail("capnp: pointer target outside its segment", pad);
+         const std::uint64_t tag = load64(pad + 8);
+         if ((tag & 3) >= 2 || pointer_offset(tag) != 0)
+            return c.fail("capnp: double-far landing pad tag is not a struct or list tag", pad + 8);
+         out = {tag, seg2.data() + at * 8, seg2};
+         return true;
+      }
+
+      inline bool fits(const checked_target& t, std::uint64_t bytes) noexcept
+      {
+         return bytes <= static_cast<std::uint64_t>(t.seg.data() + t.seg.size() - t.target);
+      }
+
+      template <Record T>
+      bool check_struct(checker& c, std::span<const std::uint8_t> seg, const struct_ref& s,
+                        std::uint32_t depth) noexcept;
+
+      template <typename E>
+      bool check_list(checker& c, const checked_target& t, const std::uint8_t* slot,
+                      std::optional<std::size_t> exact_count, std::uint32_t depth) noexcept;
+
+      template <Pointer P>
+      bool check_pointer(checker& c, std::span<const std::uint8_t> seg, const std::uint8_t* slot,
+                         std::uint32_t depth) noexcept
+      {
+         const std::uint64_t w = load64(slot);
+         if (w == 0)
+            return true;
+         if constexpr (is_optional_v<P>)
+            return check_pointer<typename P::value_type>(c, seg, slot, depth);
+         else
+         {
+            if (depth >= c.max_depth)
+               return c.fail("capnp: message is nested too deeply", slot);
+            checked_target t;
+            if (!follow(c, seg, slot, w, t))
+               return false;
+            if (t.target == nullptr)
+               return true;  // a far pointer to a null pointer
+            const std::uint32_t kind = static_cast<std::uint32_t>(t.word) & 3;
+            if constexpr (std::is_same_v<P, std::string>)
+            {
+               const std::uint32_t n = static_cast<std::uint32_t>(t.word >> 35);
+               if (kind != 1 || ((t.word >> 32) & 7) != 2)
+                  return c.fail("capnp: expected Text (a list of bytes)", slot);
+               if (n == 0 || !fits(t, n))
+                  return c.fail("capnp: Text outside its segment or empty", slot);
+               if (t.target[n - 1] != 0)
+                  return c.fail("capnp: Text is not NUL-terminated", slot);
+               return c.spend((std::uint64_t{n} + 7) / 8, slot);
+            }
+            else if constexpr (is_vector_v<P>)
+            {
+               if (kind != 1)
+                  return c.fail("capnp: expected a list pointer", slot);
+               return check_list<typename P::value_type>(c, t, slot, std::nullopt, depth);
+            }
+            else if constexpr (is_array_v<P>)
+            {
+               if (kind != 1)
+                  return c.fail("capnp: expected a list pointer", slot);
+               return check_list<typename P::value_type>(c, t, slot, std::tuple_size_v<P>, depth);
+            }
+            else
+            {
+               if (kind != 0)
+                  return c.fail("capnp: expected a struct pointer", slot);
+               const std::uint32_t dw = static_cast<std::uint32_t>(t.word >> 32) & 0xffff;
+               const std::uint32_t pc = static_cast<std::uint32_t>(t.word >> 48);
+               if (!fits(t, (std::uint64_t{dw} + pc) * 8))
+                  return c.fail("capnp: struct outside its segment", slot);
+               if (!c.spend(std::max<std::uint64_t>(std::uint64_t{dw} + pc, 1), slot))
+                  return false;
+               return check_struct<P>(
+                  c, t.seg, struct_ref{t.target, c.msg, dw * 8, static_cast<std::uint16_t>(pc)},
+                  depth + 1);
+            }
          }
       }
 
       template <typename E>
-      std::vector<E> unpack_vec(list_info info)
+      bool check_list(checker& c, const checked_target& t, const std::uint8_t* slot,
+                      std::optional<std::size_t> exact_count, std::uint32_t depth) noexcept
       {
-         std::vector<E> result;
-         if (!info.data || info.count == 0)
-            return result;
-         result.resize(info.count);
-         unpack_sequence<E>(info, result.data(), info.count);
-         return result;
-      }
-
-      template <typename E, std::size_t N>
-      std::array<E, N> unpack_arr(list_info info)
-      {
-         std::array<E, N> result{};
-         if (!info.data || info.count == 0)
-            return result;
-         unpack_sequence<E>(info, result.data(), static_cast<uint32_t>(N));
-         return result;
-      }
-
-      template <typename T, std::size_t I>
-      void unpack_one_field(capnp_ptr p, T& obj)
-      {
-         using R                  = ::psio::reflect<T>;
-         using F                  = typename R::template member_type<I>;
-         constexpr auto loc       = capnp_layout<T>::loc(I);
-         F&             field_ref = obj.*(R::template member_pointer<I>);
-
-         if constexpr (loc.is_ptr)
+         const std::uint32_t code = static_cast<std::uint32_t>(t.word >> 32) & 7;
+         const std::uint32_t n    = static_cast<std::uint32_t>(t.word >> 35);
+         if constexpr (Record<E>)
          {
-            const uint8_t* slot = ptr_slot(p, loc.offset);
-            if constexpr (std::is_same_v<F, std::string>)
-            {
-               auto sv   = read_text(slot);
-               field_ref = std::string(sv);
-            }
-            else if constexpr (is_vector<F>::value)
-            {
-               using E   = typename is_vector<F>::element_type;
-               field_ref = unpack_vec<E>(resolve_list_ptr(slot));
-            }
-            else if constexpr (is_array<F>::value)
-            {
-               using E    = typename is_array<F>::element_type;
-               constexpr std::size_t N = is_array<F>::n;
-               field_ref = unpack_arr<E, N>(resolve_list_ptr(slot));
-            }
-            else if constexpr (is_optional<F>::value)
-            {
-               // Wire form: null pointer = None; non-null = list<E> of
-               // length 1. Anything other than count 0 or 1 is treated
-               // as None to keep the codec total — strict validation
-               // can flag the malformed case separately.
-               using E = typename is_optional<F>::element_type;
-               auto info = resolve_list_ptr(slot);
-               if (!info.data || info.count == 0)
-                  field_ref = std::nullopt;
-               else
-               {
-                  E tmp{};
-                  unpack_sequence<E>(info, &tmp, 1);
-                  field_ref = std::move(tmp);
-               }
-            }
-            else if constexpr (is_variant<F>::value)
-            {
-               // Resolve the sub-struct, read u16 tag from data word,
-               // then unpack_sequence<A>(slot, &tmp, 1) the active
-               // alt.
-               constexpr std::size_t N = std::variant_size_v<F>;
-               auto sub = resolve_struct_ptr(slot);
-               if (sub == nullptr)
-               {
-                  field_ref = F{};  // default-init: alt 0
-                  return;
-               }
-               uint16_t tag = 0;
-               std::memcpy(&tag, sub.data, 2);
-               const uint32_t idx = static_cast<uint32_t>(tag);
-               if (idx >= N)
-               {
-                  field_ref = F{};
-                  return;
-               }
-               const uint8_t* alt_slot =
-                  ptr_section(sub) + idx * 8;
-               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-                  ((idx == Is
-                       ? (field_ref =
-                             F{std::in_place_index<Is>,
-                                ([&] {
-                                   using A =
-                                      std::variant_alternative_t<Is, F>;
-                                   A    tmp{};
-                                   auto info =
-                                      resolve_list_ptr(alt_slot);
-                                   unpack_sequence<A>(info, &tmp, 1);
-                                   return tmp;
-                                }())},
-                          true)
-                       : false) ||
-                   ...);
-               }(std::make_index_sequence<N>{});
-            }
-            else if constexpr (Record<F>)
-            {
-               unpack_struct<F>(resolve_struct_ptr(slot), field_ref);
-            }
-            else
-            {
-               static_assert(!sizeof(F*),
-                             "capnp: unsupported pointer field type");
-            }
-         }
-         else
-         {
-            F def = field_default<T, I>();
-            if constexpr (std::is_same_v<F, bool>)
-            {
-               bool wire = (p.data[loc.offset] >> loc.bit_index) & 1;
-               field_ref = xor_default(wire, def);
-            }
-            else if constexpr (std::is_enum_v<F>)
-            {
-               using U = std::underlying_type_t<F>;
-               U wire;
-               std::memcpy(&wire, p.data + loc.offset, sizeof(U));
-               field_ref = xor_default(static_cast<F>(wire), def);
-            }
-            else if constexpr (std::is_arithmetic_v<F>)
-            {
-               F wire;
-               std::memcpy(&wire, p.data + loc.offset, sizeof(F));
-               field_ref = xor_default(wire, def);
-            }
-            else
-            {
-               static_assert(!sizeof(F*),
-                             "capnp: unsupported data field type");
-            }
-         }
-      }
-
-      template <typename T>
-         requires Record<T>
-      void unpack_struct(capnp_ptr p, T& obj)
-      {
-         if (p == nullptr)
-            return;
-         using R                 = ::psio::reflect<T>;
-         constexpr std::size_t N = R::member_count;
-         [&]<std::size_t... Is>(std::index_sequence<Is...>)
-         {
-            (unpack_one_field<T, Is>(p, obj), ...);
-         }(std::make_index_sequence<N>{});
-      }
-
-      // ── Message-level helpers ─────────────────────────────────────────────
-
-      template <typename T>
-         requires Record<T>
-      capnp_ptr root_of(const void* buf)
-      {
-         auto*    msg          = static_cast<const uint8_t*>(buf);
-         uint32_t seg_count_m1 = read_u32(msg);
-         uint32_t table_bytes  = 4 + (seg_count_m1 + 1) * 4;
-         table_bytes           = (table_bytes + 7) & ~7u;
-         auto* segment         = msg + table_bytes;
-         return resolve_struct_ptr(segment);
-      }
-
-      // Validate segment-table + traversal-budget for flat-array messages.
-      // Budget = 8 × segment words, matching the official capnp default.
-      inline bool validate_struct(const uint8_t* seg_start,
-                                  const uint8_t* seg_end, capnp_ptr p,
-                                  int64_t& words_left, int depth = 0)
-      {
-         if (p == nullptr)
-            return true;
-         if (depth > 64)
-            return false;
-
-         uint32_t struct_words =
-            static_cast<uint32_t>(p.data_words) + p.ptr_count;
-         words_left -= struct_words;
-         if (words_left < 0)
-            return false;
-
-         const uint8_t* data_end = p.data + static_cast<uint32_t>(p.data_words) * 8;
-         if (p.data < seg_start || data_end > seg_end)
-            return false;
-
-         const uint8_t* ps     = ptr_section(p);
-         const uint8_t* ps_end = ps + static_cast<uint32_t>(p.ptr_count) * 8;
-         if (ps < seg_start || ps_end > seg_end)
-            return false;
-
-         for (uint32_t i = 0; i < p.ptr_count; ++i)
-         {
-            const uint8_t* slot = ps + i * 8;
-            uint64_t       word = read_u64(slot);
-            if (word == 0)
-               continue;
-
-            uint8_t tag = word & 3;
-            if (tag == 0)
-            {
-               auto child = resolve_struct_ptr(slot);
-               if (!validate_struct(seg_start, seg_end, child, words_left,
+            if (code != 7)
+               return c.fail("capnp: expected a list of structs (inline composite)", slot);
+            if (!fits(t, (std::uint64_t{n} + 1) * 8))
+               return c.fail("capnp: list outside its segment", slot);
+            const std::uint64_t tag = load64(t.target);
+            if ((tag & 3) != 0)
+               return c.fail("capnp: composite list tag is not a struct tag", t.target);
+            const std::uint32_t count = static_cast<std::uint32_t>(tag) >> 2;
+            const std::uint32_t dw    = static_cast<std::uint32_t>(tag >> 32) & 0xffff;
+            const std::uint32_t pc    = static_cast<std::uint32_t>(tag >> 48);
+            if (std::uint64_t{count} * (dw + pc) > n)
+               return c.fail("capnp: composite list elements overrun the list", t.target);
+            if (exact_count && *exact_count != count)
+               return c.fail("capnp: list length differs from the fixed length of the array", slot);
+            // A list of zero-sized structs still costs a word per element.
+            if (!c.spend(std::uint64_t{n} + 1 + (dw + pc == 0 ? count : 0), slot))
+               return false;
+            for (std::uint32_t i = 0; i < count; ++i)
+               if (!check_struct<E>(c, t.seg,
+                                    struct_ref{t.target + 8 + std::size_t{i} * (dw + pc) * 8, c.msg,
+                                               dw * 8, static_cast<std::uint16_t>(pc)},
                                     depth + 1))
                   return false;
-            }
-            else if (tag == 1)
+            return true;
+         }
+         else
+         {
+            if (exact_count && *exact_count != n)
+               return c.fail("capnp: list length differs from the fixed length of the array", slot);
+            if constexpr (Scalar<E>)
             {
-               auto info = resolve_list_ptr(slot);
-               if (!info.data)
-                  continue;
-
-               uint32_t       total_bytes = info.count * info.elem_stride;
-               const uint8_t* list_end    = info.data + total_bytes;
-               if (info.data < seg_start || list_end > seg_end)
-                  return false;
-
-               uint32_t list_words = (total_bytes + 7) / 8;
-               words_left -= list_words;
-               if (words_left < 0)
-                  return false;
-
-               if (info.elem_data_words > 0 || info.elem_ptr_count > 0)
-               {
-                  for (uint32_t j = 0; j < info.count; ++j)
-                  {
-                     capnp_ptr elem{info.data + j * info.elem_stride,
-                                    info.elem_data_words,
-                                    info.elem_ptr_count};
-                     if (!validate_struct(seg_start, seg_end, elem,
-                                          words_left, depth + 1))
-                        return false;
-                  }
-               }
-               else if (info.elem_stride == 8)
-               {
-                  for (uint32_t j = 0; j < info.count; ++j)
-                  {
-                     const uint8_t* entry = info.data + j * 8;
-                     uint64_t       w     = read_u64(entry);
-                     if (w == 0)
-                        continue;
-                     uint8_t t = w & 3;
-                     if (t == 0)
-                     {
-                        auto child = resolve_struct_ptr(entry);
-                        if (!validate_struct(seg_start, seg_end, child,
-                                             words_left, depth + 1))
-                           return false;
-                     }
-                     else if (t == 1)
-                     {
-                        auto inner = resolve_list_ptr(entry);
-                        if (inner.data)
-                        {
-                           uint32_t ib = inner.count * inner.elem_stride;
-                           if (inner.data < seg_start ||
-                               inner.data + ib > seg_end)
-                              return false;
-                           uint32_t iw = (ib + 7) / 8;
-                           words_left -= iw;
-                           if (words_left < 0)
-                              return false;
-                        }
-                     }
-                  }
-               }
+               if (code != list_code<E>())
+                  return c.fail("capnp: list element size differs from the element type", slot);
+               const std::uint64_t bytes =
+                  std::is_same_v<E, bool> ? (std::uint64_t{n} + 7) / 8 : std::uint64_t{n} * sizeof(E);
+               if (!fits(t, bytes))
+                  return c.fail("capnp: list outside its segment", slot);
+               return c.spend((bytes + 7) / 8, slot);
             }
             else
             {
-               return false;  // far / reserved pointers rejected
+               static_assert(Pointer<E>, "psio::capnp: unsupported list element type");
+               if (code != 6)
+                  return c.fail("capnp: expected a list of pointers", slot);
+               if (!fits(t, std::uint64_t{n} * 8))
+                  return c.fail("capnp: list outside its segment", slot);
+               if (!c.spend(n, slot))
+                  return false;
+               for (std::uint32_t i = 0; i < n; ++i)
+                  if (!check_pointer<E>(c, t.seg, t.target + std::size_t{i} * 8, depth + 1))
+                     return false;
+               return true;
             }
+         }
+      }
+
+      template <typename Alt>
+      bool check_alt(checker& c, std::span<const std::uint8_t> seg, const struct_ref& s, slot loc,
+                     std::uint32_t depth) noexcept
+      {
+         if constexpr (Pointer<Alt>)
+         {
+            if (const auto* p = pointer_slot(s, loc))
+               return check_pointer<Alt>(c, seg, p, depth);
          }
          return true;
       }
 
-      inline bool validate_message(const void* buf, std::size_t len)
+      template <Record T, std::size_t I>
+      bool check_member(checker& c, std::span<const std::uint8_t> seg, const struct_ref& s,
+                        std::uint32_t depth) noexcept
       {
-         auto* msg = static_cast<const uint8_t*>(buf);
-         if (len < 8)
-            return false;
-
-         uint32_t seg_count_m1 = read_u32(msg);
-         if (seg_count_m1 != 0)
-            return false;  // single-segment only
-
-         uint32_t seg_words   = read_u32(msg + 4);
-         uint32_t table_bytes = 8;
-
-         if (len < table_bytes + static_cast<std::size_t>(seg_words) * 8)
-            return false;
-         if (seg_words == 0)
-            return false;
-
-         const uint8_t* seg_start = msg + table_bytes;
-         const uint8_t* seg_end   = seg_start + static_cast<std::size_t>(seg_words) * 8;
-
-         int64_t words_left = static_cast<int64_t>(seg_words) * 8;
-
-         auto root = resolve_struct_ptr(seg_start);
-         return validate_struct(seg_start, seg_end, root, words_left);
+         using L = layout<T>;
+         using F = typename L::template member<I>;
+         constexpr slot loc = L::field(I);
+         if constexpr (is_variant_v<F>)
+         {
+            const std::uint16_t which = read_scalar<std::uint16_t>(s, loc, 0);
+            if (which >= std::variant_size_v<F>)
+               return c.fail("capnp: union discriminant names a member this type does not have",
+                             s.data);
+            bool ok = true;
+            [&]<std::size_t... As>(std::index_sequence<As...>) {
+               (void)((which == As ? (ok = check_alt<std::variant_alternative_t<As, F>>(
+                                         c, seg, s, L::alt(I, As), depth),
+                                      true)
+                                   : false) ||
+                      ...);
+            }(std::make_index_sequence<std::variant_size_v<F>>{});
+            return ok;
+         }
+         else if constexpr (is_union_v<F>)
+         {
+            if (read_scalar<std::uint16_t>(s, loc, 0) > 1)
+               return c.fail("capnp: union discriminant names a member this type does not have",
+                             s.data);
+            return true;
+         }
+         else if constexpr (Scalar<F>)
+            return true;
+         else
+         {
+            if (const auto* p = pointer_slot(s, loc))
+               return check_pointer<F>(c, seg, p, depth);
+            return true;
+         }
       }
 
-      template <typename T>
-         requires Record<T>
-      std::uint32_t word_count_of(const T& v)
+      template <Record T>
+      bool check_struct(checker& c, std::span<const std::uint8_t> seg, const struct_ref& s,
+                        std::uint32_t depth) noexcept
       {
-         using L = capnp_layout<T>;
-         capnp_word_counter buf;
-         uint32_t root = buf.alloc(1);
-         uint32_t ds   = buf.alloc(L::data_words + L::ptr_count);
-         uint32_t ps   = ds + L::data_words;
-         buf.write_struct_ptr(root, ds, L::data_words, L::ptr_count);
-         pack_struct(buf, ds, ps, v);
-         return buf.word_count();
+         return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (check_member<T, Is>(c, seg, s, depth) && ...);
+         }(std::make_index_sequence<layout<T>::members>{});
+      }
+
+      // The size in bytes of the framed message at the start of `bytes`
+      // (segment table and segments), or 0 if the table is malformed or
+      // the bytes are shorter than it says.
+      inline std::size_t framed_size(std::span<const char> bytes) noexcept
+      {
+         const auto* msg = reinterpret_cast<const std::uint8_t*>(bytes.data());
+         if (bytes.size() < 8)
+            return 0;
+         const std::uint64_t n = std::uint64_t{load32(msg)} + 1;
+         if (n > max_segments || table_bytes(n) > bytes.size())
+            return 0;
+         std::uint64_t total = table_bytes(n);
+         for (std::uint64_t i = 0; i < n; ++i)
+            total += std::uint64_t{load32(msg + 4 + 4 * i)} * 8;
+         return total <= bytes.size() ? static_cast<std::size_t>(total) : 0;
+      }
+
+      template <Record T>
+      codec_status validate_message(std::span<const char> bytes, limits lim = {}) noexcept
+      {
+         const std::size_t size = framed_size(bytes);
+         if (size == 0)
+            return codec_fail("capnp: malformed or truncated segment table", 0, "capnp");
+         if (size != bytes.size())
+            return codec_fail("capnp: bytes after the end of the message",
+                              static_cast<std::uint32_t>(size), "capnp");
+         const auto* msg = reinterpret_cast<const std::uint8_t*>(bytes.data());
+         checker     c{msg, bytes.size(), load32(msg) + 1, lim.traversal_words, lim.nesting};
+         const auto  seg0 = segment_of(msg, 0);
+         if (seg0.size() < 8)
+            return codec_fail("capnp: message has no root pointer", 0, "capnp");
+         if (!check_pointer<T>(c, seg0, seg0.data(), 0))
+            return codec_fail(c.error, static_cast<std::uint32_t>(c.at), "capnp");
+         return codec_ok();
       }
 
    }  // namespace detail::capnp_impl
@@ -1176,125 +1631,98 @@ namespace psio {
    {
       using preferred_presentation_category = ::psio::binary_category;
 
+      // The limits `validate` applies; the official reader's defaults.
+      using limits = detail::capnp_impl::limits;
+
+      // The struct layout of T: `layout<T>::data_words`, `::ptr_count`, and
+      // the slot of each member — what `capnp compile` computes for the
+      // schema of T.
+      template <typename T>
+      using layout = detail::capnp_impl::layout<T>;
+
       template <typename T>
          requires detail::capnp_impl::Record<T>
-      friend std::vector<char> tag_invoke(decltype(::psio::encode), capnp,
-                                          const T& v)
+      friend std::vector<char> tag_invoke(decltype(::psio::encode), capnp, const T& v)
       {
-         using namespace detail::capnp_impl;
-         using L = capnp_layout<T>;
-
-         capnp_word_buf buf(word_count_of(v));
-         uint32_t       root = buf.alloc(1);
-         uint32_t       ds   = buf.alloc(L::data_words + L::ptr_count);
-         uint32_t       ps   = ds + L::data_words;
-         buf.write_struct_ptr(root, ds, L::data_words, L::ptr_count);
-         pack_struct(buf, ds, ps, v);
-         return buf.finish();
+         std::vector<char> out;
+         detail::capnp_impl::encode_into(v, out);
+         return out;
       }
 
-      //  Sink-form encode — caller-supplied vector<char> reused across
-      //  iterations.  Builder still allocates its words_ buffer per
-      //  call; only the output bytes vector is reused.
+      // Sink form: replaces the contents of `sink`, reusing its capacity.
       template <typename T>
          requires detail::capnp_impl::Record<T>
-      friend void tag_invoke(decltype(::psio::encode), capnp,
-                             const T&            v,
-                             std::vector<char>&  sink)
+      friend void tag_invoke(decltype(::psio::encode), capnp, const T& v, std::vector<char>& sink)
       {
-         using namespace detail::capnp_impl;
-         using L = capnp_layout<T>;
-
-         capnp_word_buf buf(word_count_of(v));
-         uint32_t       root = buf.alloc(1);
-         uint32_t       ds   = buf.alloc(L::data_words + L::ptr_count);
-         uint32_t       ps   = ds + L::data_words;
-         buf.write_struct_ptr(root, ds, L::data_words, L::ptr_count);
-         pack_struct(buf, ds, ps, v);
-         buf.finish_into(sink);
+         detail::capnp_impl::encode_into(v, sink);
       }
 
       template <typename T>
          requires detail::capnp_impl::Record<T>
-      friend T tag_invoke(decltype(::psio::decode<T>), capnp, T*,
-                          std::span<const char> bytes)
+      friend T tag_invoke(decltype(::psio::decode<T>), capnp, T*, std::span<const char> bytes)
       {
-         using namespace detail::capnp_impl;
-         T    out{};
-         auto p = root_of<T>(bytes.data());
-         unpack_struct<T>(p, out);
+         T out{};
+         detail::capnp_impl::decode_struct(detail::capnp_impl::root_of(bytes), out);
          return out;
       }
 
       template <typename T>
          requires detail::capnp_impl::Record<T>
-      friend std::size_t tag_invoke(decltype(::psio::size_of), capnp,
-                                    const T& v)
+      friend std::size_t tag_invoke(decltype(::psio::size_of), capnp, const T& v)
       {
-         using namespace detail::capnp_impl;
-         capnp_word_counter buf;
-         using L = capnp_layout<T>;
-         uint32_t root = buf.alloc(1);
-         uint32_t ds   = buf.alloc(L::data_words + L::ptr_count);
-         uint32_t ps   = ds + L::data_words;
-         buf.write_struct_ptr(root, ds, L::data_words, L::ptr_count);
-         pack_struct(buf, ds, ps, v);
-         return buf.finish_size();
+         return 8 + static_cast<std::size_t>(detail::capnp_impl::message_words(v)) * 8;
       }
 
       template <typename T>
          requires detail::capnp_impl::Record<T>
-      friend codec_status tag_invoke(decltype(::psio::validate<T>), capnp,
-                                     T*,
+      friend codec_status tag_invoke(decltype(::psio::validate<T>), capnp, T*,
                                      std::span<const char> bytes) noexcept
       {
-         if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(),
-                                                         "capnp");
-             !st.ok())
+         if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "capnp"); !st.ok())
             return st;
-         if (!detail::capnp_impl::validate_message(bytes.data(),
-                                                   bytes.size()))
-            return codec_fail("capnp: invalid message", 0, "capnp");
-         return codec_ok();
+         return detail::capnp_impl::validate_message<T>(bytes);
+      }
+
+      // `validate`, then the annotations of T (bounds, utf8, sorted, …)
+      // checked on the decoded value.
+      template <typename T>
+         requires detail::capnp_impl::Record<T>
+      friend codec_status tag_invoke(decltype(::psio::validate_strict<T>), capnp, T*,
+                                     std::span<const char> bytes) noexcept
+      {
+         if (auto st = detail::capnp_impl::validate_message<T>(bytes); !st.ok())
+            return st;
+         T out{};
+         detail::capnp_impl::decode_struct(detail::capnp_impl::root_of(bytes), out);
+         return ::psio::validate_specs_on_value(out);
       }
 
       template <typename T>
          requires detail::capnp_impl::Record<T>
-      friend codec_status
-      tag_invoke(decltype(::psio::validate_strict<T>), capnp, T*,
-                 std::span<const char> bytes) noexcept
+      friend std::unique_ptr<T> tag_invoke(decltype(::psio::make_boxed<T>), capnp, T*,
+                                           std::span<const char> bytes) noexcept
       {
-         if (!detail::capnp_impl::validate_message(bytes.data(),
-                                                   bytes.size()))
-            return codec_fail("capnp: invalid message", 0, "capnp");
-         try
-         {
-            using namespace detail::capnp_impl;
-            T    out{};
-            auto p = root_of<T>(bytes.data());
-            unpack_struct<T>(p, out);
-            return ::psio::validate_specs_on_value(out);
-         }
-         catch (...)
-         {
-            return codec_fail(
-               "capnp: decode failed during validate_strict", 0, "capnp");
-         }
-      }
-
-      template <typename T>
-         requires detail::capnp_impl::Record<T>
-      friend std::unique_ptr<T>
-      tag_invoke(decltype(::psio::make_boxed<T>), capnp, T*,
-                 std::span<const char> bytes) noexcept
-      {
-         using namespace detail::capnp_impl;
          auto v = std::make_unique<T>();
-         auto p = root_of<T>(bytes.data());
-         unpack_struct<T>(p, *v);
+         detail::capnp_impl::decode_struct(detail::capnp_impl::root_of(bytes), *v);
          return v;
       }
    };
+
+   // `validate_capnp<T>(bytes, limits)`: the typed check under limits other
+   // than the official defaults.
+   template <typename T>
+      requires detail::capnp_impl::Record<T>
+   [[nodiscard]] codec_status validate_capnp(std::span<const char> bytes, capnp::limits lim) noexcept
+   {
+      return detail::capnp_impl::validate_message<T>(bytes, lim);
+   }
+
+   // The size of the framed message at the start of `bytes` (0: malformed
+   // or truncated): where the next message of a stream begins.
+   [[nodiscard]] inline std::size_t capnp_message_size(std::span<const char> bytes) noexcept
+   {
+      return detail::capnp_impl::framed_size(bytes);
+   }
 
    PSIO_FORMAT_HELPERS(capnp)
 
