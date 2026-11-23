@@ -17,6 +17,7 @@
 //! | `psio` | `max = N`, `element(...)`, `keys(...)`, `values(...)`, `at(I, ...)` | field | length bounds of the member and of the positions below it (`psio::pssz::bounds`) |
 //! | `psio` | `sorted`, `unique` (`sorted_unique`), `unique_keys` | field | the elements of a list or an array are in non-descending / strictly ascending key order, or have pairwise different keys; also inside `element(...)` and friends |
 //! | `psio` | `other` | variant | the catch-all of a field-less `#[repr(int)]` enum |
+//! | `psio` | `untagged` | item | an enum whose variants hold values is, in text, the bare value of its alternative; C++ `psio_is_untagged` |
 //! | `psio` | `max_fields = N` | item | the record has, and will ever have, at most N fields (N ≤ 255); C++ `maxFields(N)` |
 //! | `psio` | `arguments = "named" \| "positional"` | item | the record is a method's argument list (written by `#[psio::interface]`): its text is an object that also reads as the positional array, or the array |
 //! | `pssz` | `max_dynamic_data = N` | item | pSSZ cap on the record's variable part |
@@ -102,6 +103,8 @@ const KEYS: &[Key] = &[
           because: "constrains the member's elements for every format", usage: "unique_keys" },
     Key { name: "other", namespace: "psio", sites: &[Site::Variant],
           because: "describes the enum for every format", usage: "other" },
+    Key { name: "untagged", namespace: "psio", sites: &[Site::Item],
+          because: "describes the enum's text for every format", usage: "untagged" },
     Key { name: "max_fields", namespace: "psio", sites: &[Site::Item],
           because: "caps the number of fields for every format", usage: "max_fields = N" },
     Key { name: "arguments", namespace: "psio", sites: &[Site::Item],
@@ -153,6 +156,9 @@ pub(crate) struct Attrs {
     pub(crate) rename_all_fields: Option<Case>,
     /// `#[psio(other)]`.
     pub(crate) other: bool,
+    /// `#[psio(untagged)]` or `#[serde(untagged)]` on an enum whose variants
+    /// hold values: in text the bare value of the alternative.
+    pub(crate) untagged: bool,
     /// `#[pssz(max_dynamic_data = N)]`.
     pub(crate) max_dynamic_data: Option<u64>,
     /// `#[psio(max_fields = N)]`.
@@ -173,12 +179,13 @@ pub(crate) struct Attrs {
 
 /// An id the Schema IR reserves for PSIO's own types (`psio::pssz::
 /// schema_ir::reserved_custom_id`): the ids with a binary meaning, `box`,
-/// and the time ids (`time-point`, `duration`, `monotonic`, alone or
+/// `json`, and the time ids (`time-point`, `duration`, `monotonic`, alone or
 /// followed by `-`).
 pub(crate) fn reserved_custom_id(id: &str) -> bool {
     matches!(
         id,
         "bool" | "char" | "string" | "utf8" | "hex" | "bitvector" | "bitlist" | "map" | "set" | "unknown" | "box"
+            | "json"
     ) || ["time-point", "duration", "monotonic"]
         .iter()
         .any(|kind| id.strip_prefix(kind).is_some_and(|rest| rest.is_empty() || rest.starts_with('-')))
@@ -556,6 +563,7 @@ fn store(out: &mut Attrs, key: &Key, meta: &Meta) -> syn::Result<()> {
             out.rename_all = Some(Case::parse(&text)?);
         }
         "other" => set_flag(&mut out.other, meta)?,
+        "untagged" => set_flag(&mut out.untagged, meta)?,
         "max" | "element" | "keys" | "values" | "at" | "sorted" | "unique" | "sorted_unique" | "unique_keys" => {
             out.bound.get_or_insert_with(Bound::default).store(meta)?
         }
@@ -858,7 +866,8 @@ struct Serde {
 /// | `default`, `default = "path"` | another field, item | error | ignored |
 /// | `default = "path"` | skipped field | what a reader fills the field with | the same |
 /// | `flatten` | field | error | ignored |
-/// | `tag`, `content`, `untagged` | item, variant | error | ignored |
+/// | `untagged` | item (an enum) | `#[psio(untagged)]`: the bare value of the alternative, picked by JSON kind | ignored |
+/// | `tag`, `content` | item, variant; `untagged` on a variant | error | ignored |
 /// | `deny_unknown_fields` | item | error | ignored |
 /// | `alias` | variant, field | error | ignored |
 /// | `with`, `serialize_with`, `deserialize_with` | variant, field | error | ignored |
@@ -946,9 +955,13 @@ fn serde_key(out: &mut Attrs, seen: &mut Serde, meta: &Meta, ctx: Context) -> sy
             "PSIO text and the Schema IR have no flattened members: a member is one key of its \
              record",
         )?,
+        // The bare value of the alternative, which a reader picks by the
+        // kind of JSON value it finds (docs/json.md "Untagged variants").
+        ("untagged", Site::Item) => out.untagged = true,
         ("tag" | "content" | "untagged", _) => reject(
-            "PSIO has one text for a variant: {\"Name\": value} under IJson (serde's default, \
-             externally tagged) and [index, value] under Json",
+            "PSIO has two texts for a variant: {\"Name\": value} under IJson (serde's default, \
+             externally tagged) and [index, value] under Json, or with #[serde(untagged)] on \
+             the enum the bare value of the alternative",
         )?,
         ("deny_unknown_fields", _) => reject(
             "PSIO readers skip unknown members, which is what lets a record gain members",
@@ -1167,6 +1180,12 @@ pub(crate) fn item(input: &DeriveInput, derive: Derive) -> syn::Result<Attrs> {
             Context { site: Site::Field, derive, optional: is_option(&f.ty), in_variant },
         )
     };
+    if out.untagged && derive.is_some_and(Derive::text) && !matches!(input.data, syn::Data::Enum(_)) {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "untagged applies to enums whose variants hold values",
+        ));
+    }
     if (out.max_fields.is_some() || out.arguments.is_some())
         && (out.transparent || !matches!(input.data, syn::Data::Struct(_)))
     {

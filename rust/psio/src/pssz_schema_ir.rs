@@ -284,7 +284,9 @@ impl Schema {
                 }
                 AnyValue::Custom(custom) if !wire_custom_id(&custom.id) => {
                     boxed |= custom.id == "box";
-                    if crate::time::parse_time_schema_id(&custom.id).is_some() {
+                    if custom.id == "json" {
+                        self.json_text(&custom.r#type)?;
+                    } else if crate::time::parse_time_schema_id(&custom.id).is_some() {
                         self.time_ticks(&custom.r#type)?;
                     } else if crate::time::reserved_time_schema_id(&custom.id) {
                         return Err(PsszError::new("pssz schema: unsupported custom adapter"));
@@ -321,6 +323,14 @@ impl Schema {
             _ => Err(PsszError::new("pssz schema: an enum needs an underlying integer")),
         }
     }
+    /// What the id `json` sits on, directly: a UTF-8 string (`Custom{.., "utf8"}`),
+    /// which holds the JSON text of the value.
+    pub fn json_text<'a>(&'a self, inner: &'a AnyType) -> PsszResult<&'a Custom> {
+        match &self.resolve(inner)?.value {
+            AnyValue::Custom(text) if text.id == "utf8" => Ok(text),
+            _ => Err(PsszError::new("pssz schema: a json value must sit directly on a UTF-8 string")),
+        }
+    }
     /// The tick integer under a time id (`time-point-<unit>` /
     /// `duration-<unit>` / `monotonic-<unit>`, docs/time.md): 8, 16, 32 or 64 bits. Anything
     /// else under a time id is a malformed schema.
@@ -352,6 +362,10 @@ impl Schema {
 //                        bound (Box<T>): the typed codecs give a boxed value
 //                        no bound, so a type holding one gets the same
 //                        offset width from the schema
+//   json                 any JSON value (`psio::JsonValue`, C++
+//                        `psio::json_value`) directly on a UTF-8 string that
+//                        holds its JSON text: on the wire that string, in
+//                        text the value itself, inline
 //
 // "unknown" marks a C++ type the schema builder could not describe and has
 // no codec. Every other id adds nothing to the bytes: on the wire the node is
@@ -376,7 +390,7 @@ pub fn wire_custom_id(id: &str) -> bool {
 }
 
 /// An id reserved for PSIO's own types: one with a binary meaning
-/// ([`wire_custom_id`]), `box`, or a time id (`time-point`, `duration`,
+/// ([`wire_custom_id`]), `box`, `json`, or a time id (`time-point`, `duration`,
 /// `monotonic`, alone or followed by `-`). The schema-driven codecs read a
 /// meaning into each, so a custom type cannot have one: the derives refuse
 /// `#[psio(custom = "time-point-seconds")]` at compile time and
@@ -424,7 +438,7 @@ pub fn wire_custom_id(id: &str) -> bool {
 /// struct duration { ticks: i64 }
 /// ```
 pub fn reserved_custom_id(id: &str) -> bool {
-    wire_custom_id(id) || id == "box" || crate::time::reserved_time_schema_id(id)
+    wire_custom_id(id) || id == "box" || id == "json" || crate::time::reserved_time_schema_id(id)
 }
 
 /// The schema of a type. A type that borrows (`struct S<'a> { b: &'a [u8] }`)

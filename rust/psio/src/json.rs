@@ -111,6 +111,18 @@ pub trait JsonText: Sized {
     /// string (an enumerator name, a time point, hex bytes) is not.
     const JSON_STRING: bool = false;
 
+    /// The kinds of JSON value the type may be written as, in either format
+    /// (a bit set of [`kinds`]; docs/json.md "Untagged variants"): what lets
+    /// a reader pick the alternative of an untagged enum
+    /// (`#[psio(untagged)]`) without trying each. A hand-written impl that
+    /// does not say is taken to be written as any kind, so it cannot be told
+    /// apart from another alternative.
+    const JSON_KINDS: u8 = kinds::ANY;
+    /// [`JSON_KINDS`](Self::JSON_KINDS) of a sequence of `Self`: an array,
+    /// and for bytes also a string.
+    #[doc(hidden)]
+    const JSON_SEQUENCE_KINDS: u8 = kinds::ARRAY;
+
     fn write_json(&self, w: &mut Writer) -> Result<()>;
     fn read_json(r: &mut Reader<'_>) -> Result<Self>;
 
@@ -182,6 +194,7 @@ macro_rules! json_text_form {
     ($ty:ty, invariant = $check:path) => {
         impl $crate::json::JsonText for $ty {
             const JSON_STRING: bool = true;
+            const JSON_KINDS: u8 = $crate::json::kinds::STRING;
             fn write_json(
                 &self,
                 w: &mut $crate::json::Writer,
@@ -213,6 +226,7 @@ macro_rules! json_text_form {
     ($ty:ty) => {
         impl $crate::json::JsonText for $ty {
             const JSON_STRING: bool = true;
+            const JSON_KINDS: u8 = $crate::json::kinds::STRING;
             fn write_json(
                 &self,
                 w: &mut $crate::json::Writer,
@@ -373,6 +387,149 @@ macro_rules! format_impls {
 }
 format_impls!(Json);
 format_impls!(IJson);
+
+mod value;
+pub use value::{JsonNumber, JsonValue};
+
+/// The kinds of JSON value a type may be written as, in either format, as a
+/// bit set ([`JsonText::JSON_KINDS`]; docs/json.md "Untagged variants").
+pub mod kinds {
+    pub const NULL: u8 = 1;
+    pub const BOOLEAN: u8 = 2;
+    pub const NUMBER: u8 = 4;
+    pub const STRING: u8 = 8;
+    pub const ARRAY: u8 = 16;
+    pub const OBJECT: u8 = 32;
+    /// Every kind: also what a type that does not say is taken to be.
+    pub const ANY: u8 = 63;
+}
+
+/// The bit of a kind in a [`JsonText::JSON_KINDS`] set.
+pub const fn kind_bit(kind: JsonKind) -> u8 {
+    match kind {
+        JsonKind::Object => kinds::OBJECT,
+        JsonKind::Array => kinds::ARRAY,
+        JsonKind::String => kinds::STRING,
+        JsonKind::Number => kinds::NUMBER,
+        JsonKind::Bool => kinds::BOOLEAN,
+        JsonKind::Null => kinds::NULL,
+    }
+}
+/// The kinds an untagged enum is written as: its alternatives', which must
+/// not overlap (used by the `JsonText` derive; evaluated when the type is
+/// compiled).
+///
+/// ```
+/// use psio::JsonText;
+///
+/// #[derive(Debug, PartialEq, JsonText)]
+/// #[psio(untagged)] // or #[serde(untagged)]
+/// enum Extra { One(String), Many(Vec<String>) }
+///
+/// assert_eq!(psio::to_ijson(&Extra::Many(vec!["a".into()])), r#"["a"]"#);
+/// assert_eq!(psio::from_ijson::<Extra>(r#""s""#).unwrap(), Extra::One("s".into()));
+/// ```
+///
+/// Two alternatives written as the same kind of JSON value do not compile:
+///
+/// ```compile_fail
+/// #[derive(psio::JsonText)]
+/// #[psio(untagged)]
+/// enum Ambiguous { Int(i32), Float(f64) }
+/// ```
+///
+/// (a 64-bit integer may be a string; bytes may be a string)
+///
+/// ```compile_fail
+/// #[derive(psio::JsonText)]
+/// #[serde(untagged)]
+/// enum Ambiguous { Wide(u64), Text(String) }
+/// ```
+///
+/// A field-less enum has no alternatives to leave bare:
+///
+/// ```compile_fail
+/// #[derive(psio::JsonText)]
+/// #[psio(untagged)]
+/// #[repr(u8)]
+/// enum Color { Red, Green }
+/// ```
+pub const fn untagged_kinds(alternatives: &[u8]) -> u8 {
+    let mut all = 0;
+    let mut i = 0;
+    while i < alternatives.len() {
+        if all & alternatives[i] != 0 {
+            panic!(
+                "the alternatives of an untagged enum must be told apart by the kind of JSON value each is written as"
+            );
+        }
+        all |= alternatives[i];
+        i += 1;
+    }
+    all
+}
+
+/// Reads one value of any shape from `c` and writes its compact text to `w`
+/// (C++ `psio::detail::json_impl::capture_value`): no whitespace, strings
+/// re-escaped by the writer's rule, a number as its token, members in order
+/// (a repeated key repeated). The value is checked exactly as a skipped one
+/// is, and `w`'s format decides whether a Unicode noncharacter is written.
+pub fn capture_value<C: JsonCursor>(c: &mut C, w: &mut Writer) -> Result<()> {
+    match c.kind()? {
+        JsonKind::Object => {
+            c.begin_object()?;
+            w.raw("{");
+            let mut first = true;
+            loop {
+                match c.next_field()? {
+                    None => break,
+                    Some(key) => w.key(&key, first)?,
+                }
+                first = false;
+                capture_value(c, w)?;
+            }
+            w.raw("}");
+        }
+        JsonKind::Array => {
+            c.begin_array()?;
+            w.raw("[");
+            let mut first = true;
+            while c.next_element()? {
+                if !first {
+                    w.raw(",");
+                }
+                first = false;
+                capture_value(c, w)?;
+            }
+            w.raw("]");
+        }
+        JsonKind::String => {
+            let (text, _) = c.string()?;
+            w.string(text.as_bytes())?;
+        }
+        JsonKind::Number => {
+            let token = c.number()?;
+            w.raw(token);
+        }
+        JsonKind::Bool => w.raw(if c.boolean()? { "true" } else { "false" }),
+        JsonKind::Null => {
+            c.null()?;
+            w.raw("null");
+        }
+    }
+    Ok(())
+}
+
+/// The compact `Json` text of the one JSON value `text` holds (under the
+/// string rule of `ijson`), or why it is not one.
+pub fn compact_json(text: &[u8], ijson: bool) -> Result<String> {
+    let mut cursor = TextCursor::new(text, ijson)?;
+    let mut w = Writer::new(ijson);
+    capture_value(&mut cursor, &mut w)?;
+    cursor.finish()?;
+    // The writer only emits validated UTF-8.
+    String::from_utf8(w.into_bytes()).map_err(|_| cursor.error("json: string is not valid UTF-8"))
+}
 
 // ── Writer ──────────────────────────────────────────────────────────────────
 
@@ -608,6 +765,20 @@ impl<'a> Reader<'a> {
     }
     fn peek(&self) -> Option<u8> {
         self.src.get(self.pos).copied()
+    }
+    /// The kind of the next value; nothing but whitespace is consumed.
+    pub fn kind(&mut self) -> Result<JsonKind> {
+        self.ws();
+        match self.peek() {
+            None => Err(self.err("json: unexpected end of input")),
+            Some(b'{') => Ok(JsonKind::Object),
+            Some(b'[') => Ok(JsonKind::Array),
+            Some(b'"') => Ok(JsonKind::String),
+            Some(b't' | b'f') => Ok(JsonKind::Bool),
+            Some(b'n') => Ok(JsonKind::Null),
+            Some(b'-' | b'0'..=b'9') => Ok(JsonKind::Number),
+            Some(_) => Err(self.err("json: unexpected character at value start")),
+        }
     }
     pub fn ws(&mut self) {
         while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.peek() {
@@ -1039,6 +1210,7 @@ fn canonical_integer(text: &str, signed: bool) -> bool {
 // ── Primitive implementations ───────────────────────────────────────────────
 
 impl JsonText for bool {
+    const JSON_KINDS: u8 = kinds::BOOLEAN;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.raw(if *self { "true" } else { "false" });
         Ok(())
@@ -1058,6 +1230,8 @@ impl JsonText for bool {
 macro_rules! integer {
     ($($ty:ty, $signed:expr;)*) => {$(
         impl JsonText for $ty {
+            const JSON_KINDS: u8 =
+                if ::core::mem::size_of::<$ty>() >= 8 { kinds::NUMBER | kinds::STRING } else { kinds::NUMBER };
             fn write_json(&self, w: &mut Writer) -> Result<()> {
                 // A 64-bit integer is quoted under IJson only beyond the
                 // range JavaScript holds exactly.
@@ -1094,6 +1268,9 @@ integer! {
 
 // u8 is an integer on its own and a byte inside a sequence.
 impl JsonText for u8 {
+    const JSON_KINDS: u8 = kinds::NUMBER;
+    // Bytes: an array of numbers under Json, a hex string under IJson.
+    const JSON_SEQUENCE_KINDS: u8 = kinds::ARRAY | kinds::STRING;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.integer(format_args!("{}", self), false);
         Ok(())
@@ -1285,6 +1462,7 @@ fn read_wide<T>(
 }
 
 impl JsonText for u128 {
+    const JSON_KINDS: u8 = kinds::NUMBER | kinds::STRING;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.integer(format_args!("{}", self), true);
         Ok(())
@@ -1295,6 +1473,7 @@ impl JsonText for u128 {
 }
 
 impl JsonText for i128 {
+    const JSON_KINDS: u8 = kinds::NUMBER | kinds::STRING;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.integer(format_args!("{}", self), true);
         Ok(())
@@ -1306,6 +1485,7 @@ impl JsonText for i128 {
 
 /// C++ `psio::uint256`: 32 little-endian bytes on the wire, decimal in text.
 impl JsonText for crate::pssz::Uint256 {
+    const JSON_KINDS: u8 = kinds::NUMBER | kinds::STRING;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.integer(format_args!("{}", wide_decimal(self.limb)), true);
         Ok(())
@@ -1349,6 +1529,7 @@ fn read_hex(r: &mut Reader<'_>, exact: Option<usize>) -> Result<Vec<u8>> {
 macro_rules! float {
     ($($ty:ty)*) => {$(
         impl JsonText for $ty {
+            const JSON_KINDS: u8 = kinds::NUMBER;
             fn write_json(&self, w: &mut Writer) -> Result<()> {
                 if !self.is_finite() {
                     // No JSON text exists for NaN or an infinity: both
@@ -1381,6 +1562,7 @@ macro_rules! float {
 float!(f32 f64);
 
 impl JsonText for String {
+    const JSON_KINDS: u8 = kinds::STRING;
     const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.string(self.as_bytes())
@@ -1394,6 +1576,7 @@ impl JsonText for String {
 /// UTF-8, and an error to write otherwise (hex would hide the text, and
 /// invalid UTF-8 is not JSON).
 impl JsonText for RawString {
+    const JSON_KINDS: u8 = kinds::STRING;
     const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         w.string(&self.0)
@@ -1408,6 +1591,7 @@ impl JsonText for RawString {
 // `std::vector` member annotated `length_bound{.max = N}`, and
 // `psio::bounded<T, N>`.
 impl<const N: usize> JsonText for crate::pssz::BoundedString<N> {
+    const JSON_KINDS: u8 = kinds::STRING;
     const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         if self.0.len() > N {
@@ -1427,6 +1611,7 @@ impl<const N: usize> JsonText for crate::pssz::BoundedString<N> {
 }
 
 impl<const N: usize> JsonText for crate::pssz::BoundedRawString<N> {
+    const JSON_KINDS: u8 = kinds::STRING;
     const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         if self.0.len() > N {
@@ -1446,6 +1631,7 @@ impl<const N: usize> JsonText for crate::pssz::BoundedRawString<N> {
 }
 
 impl<T: JsonText, const N: usize> JsonText for crate::pssz::BoundedList<T, N> {
+    const JSON_KINDS: u8 = T::JSON_SEQUENCE_KINDS;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         if self.0.len() > N {
             return Err(w.err("json: array exceeds its bound"));
@@ -1464,6 +1650,7 @@ impl<T: JsonText, const N: usize> JsonText for crate::pssz::BoundedList<T, N> {
 }
 
 impl<T: JsonText> JsonText for Vec<T> {
+    const JSON_KINDS: u8 = T::JSON_SEQUENCE_KINDS;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         T::write_json_slice(self, w)
     }
@@ -1473,6 +1660,7 @@ impl<T: JsonText> JsonText for Vec<T> {
 }
 
 impl<T: JsonText, const N: usize> JsonText for [T; N] {
+    const JSON_KINDS: u8 = T::JSON_SEQUENCE_KINDS;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         T::write_json_slice(self, w)
     }
@@ -1482,6 +1670,7 @@ impl<T: JsonText, const N: usize> JsonText for [T; N] {
 }
 
 impl<T: JsonText> JsonText for Option<T> {
+    const JSON_KINDS: u8 = kinds::NULL | T::JSON_KINDS;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         match self {
             Some(v) => v.write_json(w),
@@ -1500,6 +1689,7 @@ impl<T: JsonText> JsonText for Option<T> {
 }
 
 impl<T: JsonText> JsonText for Box<T> {
+    const JSON_KINDS: u8 = T::JSON_KINDS;
     const JSON_STRING: bool = T::JSON_STRING;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         (**self).write_json(w)
@@ -1514,6 +1704,7 @@ impl<T: JsonText> JsonText for Box<T> {
 macro_rules! tuple {
     ($($name:ident $index:tt),*) => {
         impl<$($name: JsonText),*> JsonText for ($($name,)*) {
+            const JSON_KINDS: u8 = kinds::ARRAY;
             #[allow(unused_variables, unused_mut)]
             fn write_json(&self, w: &mut Writer) -> Result<()> {
                 let saved = w.member_form(IntForm::Natural, IntForm::Natural);
@@ -1702,6 +1893,7 @@ fn read_set<K: JsonText + KeyPack>(r: &mut Reader<'_>, bound: usize) -> Result<V
 macro_rules! json_map {
     ([$($kb:tt)*], [$($cg:tt)*], $ty:ty, $bound:expr, |$s:ident| $inner:expr, |$items:ident| $build:expr) => {
         impl<K: JsonText + KeyPack + $($kb)*, V: JsonText, $($cg)*> JsonText for $ty {
+            const JSON_KINDS: u8 = kinds::OBJECT | kinds::ARRAY;
             fn write_json(&self, w: &mut Writer) -> Result<()> {
                 let $s = self;
                 write_map($inner.iter(), $bound, w)
@@ -1724,6 +1916,7 @@ macro_rules! json_map {
 macro_rules! json_set {
     ([$($kb:tt)*], [$($cg:tt)*], $ty:ty, $bound:expr, |$s:ident| $inner:expr, |$items:ident| $build:expr) => {
         impl<K: JsonText + KeyPack + $($kb)*, $($cg)*> JsonText for $ty {
+            const JSON_KINDS: u8 = kinds::ARRAY;
             fn write_json(&self, w: &mut Writer) -> Result<()> {
                 let $s = self;
                 write_set($inner.iter(), $bound, w)
@@ -1756,6 +1949,7 @@ json_set!([Ord], [const N: usize], BoundedSet<K, N>, N, |s| s.0,
           |items| BoundedSet(items.into_iter().collect()));
 
 impl<T: JsonText> JsonText for ByKey<T> {
+    const JSON_KINDS: u8 = T::JSON_KINDS;
     const JSON_STRING: bool = T::JSON_STRING;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
         self.0.write_json(w)
@@ -1989,17 +2183,7 @@ impl<'a> TextCursor<'a> {
 
 impl JsonCursor for TextCursor<'_> {
     fn kind(&mut self) -> Result<JsonKind> {
-        self.r.ws();
-        match self.r.peek() {
-            None => Err(self.r.err("json: unexpected end of input")),
-            Some(b'{') => Ok(JsonKind::Object),
-            Some(b'[') => Ok(JsonKind::Array),
-            Some(b'"') => Ok(JsonKind::String),
-            Some(b't' | b'f') => Ok(JsonKind::Bool),
-            Some(b'n') => Ok(JsonKind::Null),
-            Some(b'-' | b'0'..=b'9') => Ok(JsonKind::Number),
-            Some(_) => Err(self.r.err("json: unexpected character at value start")),
-        }
+        self.r.kind()
     }
     fn begin_object(&mut self) -> Result<()> {
         self.open(b'{', "json: expected '{'")

@@ -12,7 +12,7 @@ use psio::{PsszPack, PsszUnpack};
 #[test]
 fn the_reserved_ids() {
     for id in [
-        "bool", "char", "string", "utf8", "hex", "bitvector", "bitlist", "map", "set", "unknown", "box",
+        "bool", "char", "string", "utf8", "hex", "bitvector", "bitlist", "map", "set", "unknown", "box", "json",
         "time-point", "time-point-seconds", "time-point-micros", "time-point-1/60", "time-point-anything",
         "duration", "duration-nanos", "monotonic", "monotonic-millis",
     ] {

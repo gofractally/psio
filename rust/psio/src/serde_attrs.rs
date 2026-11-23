@@ -26,7 +26,8 @@
 //! | `rename_all = "case"` | Honoured, as `#[psio(rename_all = "case")]`: the member names of a struct, or the variant names of an enum, in text and in a schema. Every serde convention, applied as serde applies it. Different conventions for the two directions are an error on the text derives |
 //! | `rename_all_fields = "case"` | Honoured by `ToPsszSchema`: the member names of every struct variant. (`JsonText` has no struct variants) |
 //! | `deny_unknown_fields` | Error on the text derives: a PSIO reader skips unknown members |
-//! | `tag = "t"`, `tag = "t", content = "c"`, `untagged` | Error on the text derives: a variant is `{"Name": value}` under IJson, which is serde's default externally tagged form, and `[index, value]` under Json |
+//! | `untagged` (on an enum whose variants hold values) | Honoured, as `#[psio(untagged)]`: the text is the bare value of the alternative in both formats, the schema's `Variant` carries the attribute `untagged`, and a reader picks the alternative by the kind of JSON value it finds (docs/json.md "Untagged variants"), not by trying each as serde does. Two alternatives written as the same kind are a compile error |
+//! | `tag = "t"`, `tag = "t", content = "c"` | Error on the text derives: a variant is `{"Name": value}` under IJson, which is serde's default externally tagged form, and `[index, value]` under Json, or untagged |
 //! | `bound = "..."` | Ignored |
 //! | `default`, `default = "path"` | Error on the text derives: a missing member is an error unless it is an `Option` |
 //! | `remote = "..."` | Ignored: the derives describe the type they are written on |
@@ -47,7 +48,7 @@
 //! | `serialize_with`, `deserialize_with`, `with` | Error on the text derives: the text is defined by the payload's type |
 //! | `bound`, `borrow` | Ignored |
 //! | `other` | Error on the text derives: serde's catch-all drops the tag. PSIO's is `#[psio(other)] Unknown(<repr>)`, which keeps the number |
-//! | `untagged` | Error on the text derives |
+//! | `untagged` (on one variant) | Error on the text derives: a type is untagged as a whole |
 //!
 //! # Field attributes
 //!
@@ -183,9 +184,18 @@
 //! enum Shape { Circle(u32), Square(u32) }
 //! ```
 //! ```compile_fail
+//! // Untagged, and both alternatives are written as a number.
 //! #[derive(psio::JsonText)]
 //! #[serde(untagged)]
 //! enum Shape { Circle(u32), Square(u64) }
+//! ```
+//! ```
+//! // Untagged: the alternatives are told apart by the kind of JSON value.
+//! #[derive(Debug, PartialEq, psio::JsonText, psio::ToPsszSchema, psio::PsszPack, psio::PsszUnpack)]
+//! #[serde(untagged)]
+//! enum Extra { One(String), Many(Vec<String>) }
+//! assert_eq!(psio::to_ijson(&Extra::One("s".into())), r#""s""#);
+//! assert_eq!(psio::from_json::<Extra>(r#"["a"]"#).unwrap(), Extra::Many(vec!["a".into()]));
 //! ```
 //! ```compile_fail
 //! #[derive(psio::JsonText)]

@@ -212,7 +212,7 @@ pub use wit::{from_wit, from_wit_trusted, to_wit, to_wit_into, validate_wit, wit
 pub use json::{
     from_ijson, from_ijson_trusted, from_json, from_json_trusted, ijson_size, json_size, to_ijson,
     to_ijson_into, to_json, to_json_into, try_to_ijson, try_to_json, validate_ijson, validate_json,
-    IJson, Json,
+    IJson, Json, JsonNumber, JsonValue,
 };
 pub use key::{from_key, from_key_trusted, key_size, to_key, to_key_into, try_to_key, validate_key};
 pub use pssz::{

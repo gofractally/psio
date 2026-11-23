@@ -26,6 +26,12 @@
 //!   a value that is no declared variant and is written as its number.
 //!   Without it such a number is an error.
 //!
+//! * `#[psio(untagged)]` (or `#[serde(untagged)]`) on such an enum: its
+//!   text is the bare value of the alternative, the same in both formats,
+//!   and a reader picks the alternative by the kind of JSON value it finds
+//!   (docs/json.md "Untagged variants"). Two alternatives written as the
+//!   same kind are a compile error.
+//!
 //! Integer form, on a field or (as the default for every field) on the
 //! struct: `#[json(json_number)]`, `#[json(json_string)]`,
 //! `#[json(ijson_number)]`, `#[json(ijson_string)]`.
@@ -85,6 +91,8 @@ fn record_tokens(
     // `Some(true)` writes the object and also reads the positional array,
     // `Some(false)` writes and reads the array only.
     arguments: Option<bool>,
+    // The record's name in "missing required member ... of <owner>".
+    owner: &str,
 ) -> syn::Result<(TokenStream2, TokenStream2)> {
     let members = attrs::members(fields)?;
         let positional = arguments == Some(false);
@@ -143,13 +151,14 @@ fn record_tokens(
             arms.push(quote! { #key => #read });
             index_arms.push(quote! { #index => #read });
             element_reads.push(quote! { r.element(#index)?; #read });
+            let missing = format!("json: missing required member \"{key}\" of {owner}");
             builds.push(quote! {
                 match #slot {
                     ::core::option::Option::Some(v) => v,
                     ::core::option::Option::None => match <#ty as #j::JsonText>::json_missing() {
                         ::core::option::Option::Some(v) => v,
                         ::core::option::Option::None => {
-                            return ::core::result::Result::Err(r.err("json: missing required member"))
+                            return ::core::result::Result::Err(r.err(#missing))
                         }
                     },
                 }
@@ -288,6 +297,15 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     let shared = &type_attrs;
     let mut json_string = quote!();
+    // The kinds of JSON value the type is written as (`JsonText::JSON_KINDS`).
+    let json_kinds;
+    if type_attrs.untagged && crate::c_enum::analyze(input).ok().flatten().is_some() {
+        return Err(syn::Error::new_spanned(
+            input,
+            "untagged applies to enums whose variants hold values; a field-less enum is \
+             written as its enumerator's name",
+        ));
+    }
 
     // A struct's members: its fields without the skipped ones.
     let members = match &input.data {
@@ -305,6 +323,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let ty = &members[0].field.ty;
             let construct = attrs::construct(quote!(Self), &data.fields, &[quote!(__inner)])?;
             json_string = quote!(const JSON_STRING: bool = <#ty as #j::JsonText>::JSON_STRING;);
+            json_kinds = quote!(<#ty as #j::JsonText>::JSON_KINDS);
             let (check_write, check_read) = bound_checks(&krate, members[0].field, &members[0].attrs)?;
             (
                 quote! {
@@ -337,7 +356,13 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     type_attrs.forms,
                     type_attrs.rename_all,
                     type_attrs.arguments,
+                    &name.to_string(),
                 )?;
+                json_kinds = match type_attrs.arguments {
+                    None => quote!(#j::kinds::OBJECT),
+                    Some(true) => quote!(#j::kinds::OBJECT | #j::kinds::ARRAY),
+                    Some(false) => quote!(#j::kinds::ARRAY),
+                };
                 (
                     quote! {
                         #write
@@ -387,6 +412,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 }
                 let (preamble, values) = shape.values();
                 let signed = shape.signed();
+                json_kinds = quote!(#j::kinds::STRING | #j::kinds::NUMBER);
                 let (write_other, read_unknown) = match shape.other {
                     Some(other) => {
                         let other = &other.ident;
@@ -435,6 +461,9 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 let mut names = Vec::new();
                 let mut write_arms = Vec::new();
                 let mut read_arms = Vec::new();
+                let untagged = type_attrs.untagged;
+                let mut alternative_kinds = Vec::new();
+                let mut bare_reads = Vec::new();
                 for (index, variant) in data.variants.iter().enumerate() {
                     let ident = &variant.ident;
                     let variant_attrs = attrs::variant(variant)?;
@@ -528,6 +557,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                 attrs::Forms::default(),
                                 variant_attrs.rename_all.or(type_attrs.rename_all_fields),
                                 None,
+                                &format!("{name}::{ident}"),
                             )?;
                             let pattern = match &variant.fields {
                                 Fields::Unit => quote!(Self::#ident),
@@ -541,13 +571,35 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             (pattern, write, read)
                         }
                     };
-                    write_arms.push(quote! {
-                        #pattern => {
-                            let __saved = #j::write_variant_open(w, #label, #index_u32)?;
-                            #write
-                            #j::write_variant_close(w, __saved);
+                    // The kinds of JSON value the alternative's payload is
+                    // written as.
+                    alternative_kinds.push(match &variant.fields {
+                        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                            let ty = &fields.unnamed[0].ty;
+                            quote!(<#ty as #j::JsonText>::JSON_KINDS)
                         }
+                        Fields::Unnamed(_) => quote!(#j::kinds::ARRAY),
+                        Fields::Named(_) | Fields::Unit => quote!(#j::kinds::OBJECT),
                     });
+                    if untagged {
+                        // Untagged: the bare value of the alternative.
+                        write_arms.push(quote! {
+                            #pattern => {
+                                let __saved = w.member_form(#j::IntForm::Natural, #j::IntForm::Natural);
+                                #write
+                                w.restore_form(__saved);
+                            }
+                        });
+                        bare_reads.push(read.clone());
+                    } else {
+                        write_arms.push(quote! {
+                            #pattern => {
+                                let __saved = #j::write_variant_open(w, #label, #index_u32)?;
+                                #write
+                                #j::write_variant_close(w, __saved);
+                            }
+                        });
+                    }
                     read_arms.push(quote! {
                         #index => #read,
                     });
@@ -555,6 +607,31 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 }
                 let variant_count = names.len();
                 let variant_lookup = lookup_tokens(&names, quote!(__key));
+                if untagged {
+                    // The alternatives are told apart by the kind of JSON
+                    // value each is written as: checked when the type is
+                    // compiled (`untagged_kinds`).
+                    json_kinds = quote!(#j::untagged_kinds(&[#(#alternative_kinds),*]));
+                    (
+                        quote! {
+                            let _ = <Self as #j::JsonText>::JSON_KINDS;
+                            match self { #(#write_arms)* }
+                            ::core::result::Result::Ok(())
+                        },
+                        quote! {
+                            let _ = <Self as #j::JsonText>::JSON_KINDS;
+                            let __bit = #j::kind_bit(r.kind()?);
+                            let __saved = r.member_form(#j::IntForm::Natural, #j::IntForm::Natural);
+                            let __value = #(if (#alternative_kinds) & __bit != 0 { #bare_reads } else)* {
+                                return ::core::result::Result::Err(r.err(
+                                    "json: the value is none of the untagged variant's alternatives"));
+                            };
+                            r.restore_form(__saved);
+                            ::core::result::Result::Ok(__value)
+                        },
+                    )
+                } else {
+                json_kinds = quote!(#j::kinds::ARRAY | #j::kinds::OBJECT);
                 (
                     quote! {
                         match self { #(#write_arms)* }
@@ -571,6 +648,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         ::core::result::Result::Ok(__value)
                     },
                 )
+                }
             }
         }
         Data::Union(_) => {
@@ -602,9 +680,18 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             },
         ),
     };
+    // An untagged enum without type parameters: its alternatives are
+    // checked where the type is declared, used or not.
+    let checked = if type_attrs.untagged && input.generics.params.is_empty() {
+        quote! { const _: u8 = <#name as #j::JsonText>::JSON_KINDS; }
+    } else {
+        quote!()
+    };
     Ok(quote! {
+        #checked
         impl #impl_generics #j::JsonText for #name #ty_generics #where_clause {
             #json_string
+            const JSON_KINDS: u8 = #json_kinds;
             fn write_json(&self, w: &mut #j::Writer) -> ::core::result::Result<(), #j::JsonTextError> {
                 #write
             }

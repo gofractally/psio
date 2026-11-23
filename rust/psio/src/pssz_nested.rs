@@ -305,6 +305,7 @@ impl<T, V, const N: usize> crate::json::JsonText for Nested<T, V, N>
 where
     T: crate::json::JsonText + PsszPack<Pssz> + PsszUnpack<Pssz>,
 {
+    const JSON_KINDS: u8 = T::JSON_KINDS;
     fn write_json(&self, w: &mut crate::json::Writer) -> Result<(), crate::json::JsonTextError> {
         if self.bytes.len() > N {
             return Err(w.err("json: member length_bound violated"));

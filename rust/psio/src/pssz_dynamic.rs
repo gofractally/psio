@@ -23,6 +23,9 @@
 //! `bitvector`, `bitlist` as before; `utf8` is a UTF-8 string, validated on
 //! every read and write (`Value::String`); `string` is a RAW string, any
 //! bytes (`Value::String` when they are UTF-8, `Value::Bytes` otherwise);
+//! `json` is any JSON value: on the wire the UTF-8 string it sits on, which
+//! holds its JSON text (`Value::String`; every read and write checks that it
+//! is one JSON value), and in text that value, inline.
 //! `box` is its inner type with no inferred size bound, so a record holding
 //! a boxed bounded value derives 4-byte offsets unless it has a cap. Any
 //! other id is a custom type (`json::CustomHandlers`): on the wire it is
@@ -283,6 +286,38 @@ pub enum Value {
     Record(Vec<(String, Value)>),
     Optional(Option<Box<Value>>),
     Variant { selector: usize, value: Box<Value> },
+}
+
+/// Whether `input` is a `json` node (`Custom{utf8 string, "json"}`), looking
+/// through named aliases and the other nodes that add nothing to the bytes.
+fn json_node(schema: &Schema, input: &AnyType) -> bool {
+    let mut at = input;
+    for _ in 0..=4 * schema.types.len() + 64 {
+        match &at.value {
+            AnyValue::Custom(c) if c.id == "json" => return true,
+            AnyValue::Custom(c) if !wire_custom_id(&c.id) => at = &c.r#type,
+            AnyValue::Type(reference) => match schema.get(&reference.r#type) {
+                Some(found) => at = found,
+                None => return false,
+            },
+            _ => return false,
+        }
+    }
+    false
+}
+/// The string of a `json` node holds one JSON value (any well-formed JSON
+/// text; the compact text is what a writer produces).
+fn json_text(value: &Value) -> PsszResult<()> {
+    let text = match value {
+        Value::String(text) => text,
+        // An absent optional json value has no text.
+        Value::Optional(None) => return Ok(()),
+        Value::Optional(Some(inner)) => return json_text(inner),
+        _ => return Err(failure("pssz dynamic: string value required")),
+    };
+    crate::json::compact_json(text.as_bytes(), false)
+        .map(|_| ())
+        .map_err(|_| failure("pssz dynamic: the text of a json value is not JSON"))
 }
 
 fn failure(message: &'static str) -> PsszError {
@@ -964,6 +999,7 @@ impl<'a> Codec<'a> {
             match &at.value {
                 AnyValue::Custom(c) if !wire_custom_id(&c.id) => {
                     if c.id != "box"
+                        && c.id != "json"
                         && crate::time::parse_time_schema_id(&c.id).is_none()
                         && !crate::time::reserved_time_schema_id(&c.id)
                     {
@@ -1298,6 +1334,9 @@ impl<'a> Codec<'a> {
     /// Every value is encoded through here: its bytes (`encode_shape`),
     /// then the checks of the custom nodes it is a value of.
     fn encode_at(&self, ty: &AnyType, value: &Value, n: usize) -> PsszResult<Vec<u8>> {
+        if json_node(self.schema, ty) {
+            json_text(value)?;
+        }
         if self.handlers.is_none() {
             return self.encode_shape(ty, value, n);
         }
@@ -1905,12 +1944,20 @@ impl<'a> Codec<'a> {
     /// Every value is decoded through here: its structure (`decode_shape`),
     /// then the checks of the custom nodes it is a value of.
     fn decode_at(&self, ty: &AnyType, bytes: &[u8], n: usize) -> PsszResult<Value> {
+        let json = json_node(self.schema, ty);
         if self.handlers.is_none() {
-            return self.decode_shape(ty, bytes, n);
+            let value = self.decode_shape(ty, bytes, n)?;
+            if json {
+                json_text(&value)?;
+            }
+            return Ok(value);
         }
         depth(n)?;
         let checks = self.custom_checks(ty)?;
         let value = self.decode_shape(ty, bytes, n)?;
+        if json {
+            json_text(&value)?;
+        }
         self.run_checks(&checks, ty, &value, bytes)?;
         Ok(value)
     }

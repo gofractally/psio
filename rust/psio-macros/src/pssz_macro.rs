@@ -38,6 +38,9 @@ struct Options {
     /// (an enum), and that of the members of struct variants.
     rename_all: Option<Case>,
     rename_all_fields: Option<Case>,
+    /// `#[psio(untagged)]` / `#[serde(untagged)]`: the Variant node carries
+    /// the attribute `untagged`.
+    untagged: bool,
 }
 use crate::c_enum::{self, CEnum};
 
@@ -101,6 +104,7 @@ fn options(input: &DeriveInput, derive: Derive) -> syn::Result<Options> {
         forms: item.forms,
         rename_all: item.rename_all,
         rename_all_fields: item.rename_all_fields,
+        untagged: item.untagged,
     };
     if out.cap.is_some() && (out.transparent || !matches!(input.data, Data::Struct(_))) {
         return Err(syn::Error::new_spanned(
@@ -1562,7 +1566,10 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                     .collect();
                 members.push(quote! { #k::pssz::schema_ir::Member { name: #variant_name.into(), r#type: ::std::boxed::Box::new(#ty), attributes: ::std::vec![#(#attributes),*] } });
             }
-            quote! { #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Variant(#k::pssz::schema_ir::Variant { members: ::std::vec![#(#members),*], attributes: ::std::vec![] })) }
+            // An untagged variant: in text the bare value of the alternative.
+            let untagged: Vec<_> =
+                opts.untagged.then(|| schema_attribute(k, "untagged", "")).into_iter().collect();
+            quote! { #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Variant(#k::pssz::schema_ir::Variant { members: ::std::vec![#(#members),*], attributes: ::std::vec![#(#untagged),*] })) }
         }
         Data::Union(data) => {
             return Err(syn::Error::new_spanned(

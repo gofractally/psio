@@ -64,7 +64,7 @@ use super::{
     NO_HANDLER, SET_DUPLICATE,
 };
 use crate::json::{
-    write_variant_close, write_variant_open, IntForm, JsonCursor, JsonFormat, JsonKind,
+    capture_value, write_variant_close, write_variant_open, IntForm, JsonCursor, JsonFormat, JsonKind,
     JsonText, JsonTextError, TextCursor, Writer, MAX_DEPTH,
 };
 use crate::json::{wide_is_safe, wide_parse, wide_to_i128, wide_to_u128, wide_to_u256, TextForm};
@@ -125,6 +125,93 @@ fn member_form(attributes: &[Attribute], ijson: bool) -> IntForm {
         None => IntForm::Natural,
     }
 }
+fn untagged(ty: &Variant) -> bool {
+    ty.attributes.iter().any(|a| a.name == "untagged")
+}
+
+// ── Untagged variants ───────────────────────────────────────────────────────
+//
+// A Variant with the attribute `untagged` is, in text, the bare value of its
+// alternative. A reader picks the alternative by the kind of JSON value it
+// finds; the kinds a type may be written as, in either format, are
+// (docs/json.md "Untagged variants"; the typed twin is
+// `JsonText::JSON_KINDS`):
+//
+//   bool                                          boolean
+//   integers below 64 bits, floats, "char"        number
+//   integers of 64 bits and more, durations       number or string
+//   strings, time points, an id with a text handler      string
+//   bytes ("hex")                                 array or string
+//   lists, arrays, tuples, sets                   array
+//   maps                                          object or array
+//   records                          object (an argument list: object or array)
+//   enums                                         string or number
+//   option                                        null, or its payload's
+//   a tagged variant              array or object; untagged: its alternatives'
+//   box, nested, an id with no text handler       the inner type's
+//   "json"                                        any
+//
+// The sets of two alternatives must not overlap; a schema whose do is
+// refused where a value of the variant is read.
+use crate::json::kinds::{ANY, ARRAY, BOOLEAN, NULL, NUMBER, OBJECT, STRING};
+use crate::json::kind_bit;
+fn json_kinds_of(schema: &Schema, input: &AnyType, handlers: Option<&CustomHandlers>, depth: usize) -> u8 {
+    if depth > MAX_DEPTH {
+        return ANY;
+    }
+    let Ok(ty) = schema.resolve(input) else { return ANY };
+    let inner = |ty: &AnyType| json_kinds_of(schema, ty, handlers, depth + 1);
+    match &ty.value {
+        AnyValue::Int(i) => {
+            if i.bits >= 64 {
+                NUMBER | STRING
+            } else {
+                NUMBER
+            }
+        }
+        AnyValue::Float(_) => NUMBER,
+        AnyValue::Struct(_) => OBJECT,
+        AnyValue::Object(o) => {
+            if o.attributes.iter().any(|a| a.name == "tuple") {
+                OBJECT | ARRAY
+            } else {
+                OBJECT
+            }
+        }
+        AnyValue::Tuple(_) | AnyValue::List(_) | AnyValue::BoundedList(_) | AnyValue::Array(_) => ARRAY,
+        AnyValue::Option(o) => NULL | inner(&o.r#type),
+        AnyValue::Variant(v) => {
+            if untagged(v) {
+                v.members.iter().fold(0, |all, member| all | inner(&member.r#type))
+            } else {
+                ARRAY | OBJECT
+            }
+        }
+        AnyValue::Enum(_) => STRING | NUMBER,
+        AnyValue::Nested(n) => inner(&n.r#type),
+        AnyValue::Custom(c) => match c.id.as_str() {
+            "bool" => BOOLEAN,
+            "char" => NUMBER,
+            "string" | "utf8" => STRING,
+            "hex" => ARRAY | STRING,
+            "map" => OBJECT | ARRAY,
+            "set" => ARRAY,
+            "box" => inner(&c.r#type),
+            "json" => ANY,
+            id if wire_custom_id(id) => ANY,
+            id => match crate::time::parse_time_schema_id(id) {
+                Some(kind) if kind.point => STRING,
+                Some(_) => NUMBER | STRING,
+                None => match handlers.and_then(|all| all.find(id)) {
+                    Some(handler) if handler.to_text.is_some() || handler.from_text.is_some() => STRING,
+                    _ => inner(&c.r#type),
+                },
+            },
+        },
+        _ => ANY,
+    }
+}
+
 fn variant_name(member: &Member) -> &str {
     find(&member.attributes, "ijsonName").unwrap_or(&member.name)
 }
@@ -475,6 +562,16 @@ impl<C: JsonCursor> Reader<'_, C> {
     /// With no handler it reads as the inner type, unless the registry is
     /// strict.
     fn transparent(&mut self, ty: &Custom, form: IntForm, n: usize) -> Text<Value> {
+        if ty.id == "json" {
+            // Any JSON value: its compact text is the value of the UTF-8
+            // string underneath.
+            let mut w = Writer::new(false);
+            capture_value(self.c, &mut w)?;
+            return match String::from_utf8(w.into_bytes()) {
+                Ok(text) => Ok(Value::String(text)),
+                Err(_) => self.fail("json: string is not valid UTF-8"),
+            };
+        }
         if ty.id != "box" {
             if let Some(kind) = crate::time::parse_time_schema_id(&ty.id) {
                 return self.time(ty, kind, form);
@@ -747,7 +844,9 @@ impl<C: JsonCursor> Reader<'_, C> {
                 // A missing Option member is empty; any other is an error.
                 None => match self.resolve(self.schema, &member.r#type)?.value {
                     AnyValue::Option(_) => Value::Optional(None),
-                    _ => return self.fail("json: missing required member"),
+                    _ => {
+                        return self.fail(format!("json: missing required member \"{}\"", member.name))
+                    }
                 },
             };
             values.push((member.name.clone(), value));
@@ -755,7 +854,33 @@ impl<C: JsonCursor> Reader<'_, C> {
         Ok(Value::Record(values))
     }
 
+    /// An untagged variant: the alternative whose values are written as the
+    /// kind of value found.
+    fn untagged(&mut self, ty: &Variant) -> Text<Value> {
+        let bit = kind_bit(self.c.kind()?);
+        let mut index = None;
+        for (i, member) in ty.members.iter().enumerate() {
+            if json_kinds_of(self.schema, &member.r#type, self.handlers, 0) & bit == 0 {
+                continue;
+            }
+            if index.is_some() {
+                return self.fail(
+                    "json: the alternatives of an untagged variant are not told apart by the kind of JSON value",
+                );
+            }
+            index = Some(i);
+        }
+        let Some(index) = index else {
+            return self.fail("json: the value is none of the untagged variant's alternatives");
+        };
+        let payload = self.read(&ty.members[index].r#type, IntForm::Natural, 0)?;
+        Ok(Value::Variant { selector: index, value: Box::new(payload) })
+    }
+
     fn variant(&mut self, ty: &Variant) -> Text<Value> {
+        if untagged(ty) {
+            return self.untagged(ty);
+        }
         let (index, payload);
         if self.ijson {
             if self.c.kind()? != JsonKind::Object {
@@ -964,6 +1089,21 @@ impl ValueWriter<'_> {
     }
 
     fn custom(&mut self, ty: &Custom, value: &Value, n: usize) -> Text<()> {
+        if ty.id == "json" {
+            // Any JSON value: the text the string holds, inline and compact.
+            let Value::String(text) = value else {
+                return self.fail("pssz dynamic: string value required");
+            };
+            let ijson = self.w.is_ijson();
+            let captured = TextCursor::new(text.as_bytes(), ijson).and_then(|mut cursor| {
+                capture_value(&mut cursor, &mut self.w)?;
+                cursor.finish()
+            });
+            return match captured {
+                Ok(()) => Ok(()),
+                Err(_) => self.fail("json: the text of a json value is not JSON"),
+            };
+        }
         if !wire_custom_id(&ty.id) {
             if ty.id != "box" {
                 if let Some(kind) = crate::time::parse_time_schema_id(&ty.id) {
@@ -1259,6 +1399,13 @@ impl ValueWriter<'_> {
                 let Ok(index) = u32::try_from(selector) else {
                     return self.fail("pssz dynamic: invalid explicit variant");
                 };
+                if untagged(v) {
+                    // Untagged: the bare value of the alternative.
+                    let saved = self.w.member_form(IntForm::Natural, IntForm::Natural);
+                    self.write(&member.r#type, payload, n + 1)?;
+                    self.w.restore_form(saved);
+                    return Ok(());
+                }
                 let saved = write_variant_open(&mut self.w, variant_name(member), index)?;
                 self.write(&member.r#type, payload, n + 1)?;
                 write_variant_close(&mut self.w, saved);
