@@ -1167,3 +1167,22 @@ TEST_CASE("transparent: a bounded member makes the wrapper that bounded type",
    STATIC_REQUIRE(!psio::pssz_evolves_from<wider::Memo, ann::Memo>);
    STATIC_REQUIRE(!psio::pssz_evolves_from<ann::Memo, raw::Memo>);
 }
+
+// ── max_encoded_size is the inferred bound, for an argument tuple too ─────
+TEST_CASE("max_encoded_size of a capped argument tuple is its inferred bound", "[consistency][caps]")
+{
+   // docs/pssz-spec.md 3.2: the cap is not part of max_encoded_size, for a
+   // record and for a method's argument tuple alike. The cap rules the width
+   // (3.1) and is what the type contributes to one that holds it.
+   using cons_fields::PutArgs;   // (u32, string max 8), maxDynamicData(64)
+   STATIC_REQUIRE(psio::max_dynamic_data_v<PutArgs> == std::optional<std::size_t>{64});
+   STATIC_REQUIRE(psio::max_encoded_size<PutArgs>() == std::optional<std::size_t>{1 + 4 + 1 + 8});
+   STATIC_REQUIRE(psio::effective_max_dynamic_v<PutArgs> == std::optional<std::size_t>{64});
+   STATIC_REQUIRE(psio::auto_pssz_width_v<PutArgs> == 1);
+   // The same for a record with the same members and cap.
+   STATIC_REQUIRE(psio::max_dynamic_data_v<cons_cap::Capped> == std::optional<std::size_t>{16});
+   STATIC_REQUIRE(psio::max_encoded_size<cons_cap::Capped>() == std::optional<std::size_t>{16});
+   // Held by another type, a capped tuple reserves its cap.
+   STATIC_REQUIRE(psio::max_encoded_size<std::tuple<PutArgs>>() ==
+                  std::optional<std::size_t>{1 + 1 + 64});
+}

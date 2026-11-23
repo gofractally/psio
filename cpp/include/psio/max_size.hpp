@@ -410,6 +410,16 @@ namespace psio {
             }(std::make_index_sequence<R::member_count>{});
             return record_fit(slots, rest);
          }
+         else if constexpr (requires { typename U::psio_annotated_tuple; })
+            // An annotated tuple (a method's argument tuple): the bound of
+            // its elements under their annotations. Its cap is not in it —
+            // max_encoded_size is the INFERRED bound (docs/pssz-spec.md 3.2),
+            // as for a capped record; the cap rules the width and is what
+            // the tuple contributes to a type that holds it
+            // (max_field_with_annots).
+            return tuple_bound<typename U::tuple_type>(
+               U::psio_annotations,
+               std::make_index_sequence<std::tuple_size_v<typename U::tuple_type>>{});
          else if constexpr (std::is_same_v<U, std::string> || ::psio::detail::is_assoc_v<U> ||
                             is_std_vector<U>::value || is_std_optional<U>::value ||
                             is_utf8_string<U>::value || is_std_array<U>::value ||

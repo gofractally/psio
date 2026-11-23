@@ -106,7 +106,10 @@ static_assert(std::is_same_v<std::tuple_element_t<2, Transfer>, std::string>);
 // An explicit cap rules: 256 selects 2-byte offsets although the fields
 // need at most 1 + (1 + 16) + 8 + (1 + 80) = 107 bytes.
 static_assert(psio::max_dynamic_data_v<Transfer> == 256);
-static_assert(psio::max_encoded_size<Transfer>() == 256);
+// (max_encoded_size is the inferred bound, as for a capped record: the cap
+// is not in it. docs/pssz-spec.md 3.2.)
+static_assert(psio::max_encoded_size<Transfer>() == 1 + (1 + 16) + 8 + (1 + 80));
+static_assert(psio::effective_max_dynamic_v<Transfer> == 256);
 static_assert(psio::auto_pssz_width_v<Transfer> == 2);
 // Without a cap: the inferred bound, rounded up to the next width.
 static_assert(!psio::max_dynamic_data_v<TransferUncapped>.has_value());
