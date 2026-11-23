@@ -140,6 +140,24 @@ psio_method_arg_convert_compile_fail(too_few MAC_FAIL_TOO_FEW
 psio_method_arg_convert_compile_fail(too_many MAC_FAIL_TOO_MANY
    "too many arguments passed to the method")
 
+# psio::packs_as<U, T>: "a U packs as a T" at compile time; to_pssz_as and
+# method arguments constrained by it.
+psio_add_test(psio_pssz_packs_as_tests pssz_packs_as_tests.cpp)
+add_test(NAME psio_pssz_packs_as_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_packs_as_fail.cpp)
+function(psio_packs_as_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_pssz_packs_as_${NAME}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/pssz_packs_as_fail.cpp)
+   set_tests_properties(psio_pssz_packs_as_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_packs_as_compile_fail(put PA_FAIL_PUT "psio::packs_as<Wrong, Rec>")
+psio_packs_as_compile_fail(to_pssz_as PA_FAIL_TO_PSSZ_AS "pssz_source_of<Wrong, Rec>")
+psio_packs_as_compile_fail(size_as PA_FAIL_SIZE_AS "pssz_source_of<unsigned long long, Rec>")
+psio_packs_as_compile_fail(method_arg PA_FAIL_METHOD_ARG
+   "no viable conversion from returned value of type 'Wrong'")
+
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.
 psio_add_test(psio_mutable_view_tests mutable_view_tests.cpp)

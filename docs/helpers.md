@@ -562,6 +562,43 @@ first ("too few" / "too many arguments passed to the method").
 `psio::method_arguments<T, I, Args...>` is the same test as a concept, for
 constraining a proxy's call operator.
 
+### "A `U` packs as a `T`": `psio::packs_as`
+
+`psio::packs_as<U, T>` is the compile-time relation behind all of the above:
+it is true exactly when `psio::to_pssz(const U&)` yields the bytes of a `T`,
+so that they validate, decode and view as a `T`.
+
+| `U` | packs as `T` when |
+|-----|-------------------|
+| `T`, or a source of it: `psio::pssz_view<T>`, `std::cref(t)`, `std::string_view` for `std::string`, `std::span<const E>` for `std::vector<E>`, `std::tie(a, b)` for the tuple of values | always (`psio::wire_type_t<U>` is `T`) |
+| a reflected record | its members, in order, pack as the members of `T` (views, string views, spans, references standing for owning members, nested to any depth), with the same `definitionWillNotChange`, the same offset widths and caps class, and the same member bounds. Member names do not matter |
+| `std::vector` / `std::optional` / `std::array` / `std::variant` / tuple of such | element by element |
+| `psio::shared_pssz<X>`, `psio::pssz_buffer<X>`, `psio::nested<X>` | as a whole value: when `X` packs as `T` (its bytes are the bytes of the `X`). As a *member*, a packed `X` is a byte list and packs as a packed `X` only |
+
+Everything else is false: another member count, order or integer size, a
+tuple against a record, other bounds, a type with a binary adapter against
+anything but itself. The relation is symmetric.
+
+```cpp
+struct TxSuccessView { Checksum256 id; BlockNum blockNum; psio::pssz_view<const TransactionTrace> trace; };
+PSIO_REFLECT(TxSuccessView, id, blockNum, trace)
+static_assert(psio::packs_as<TxSuccessView, TxSuccessRecord>);
+
+template <typename U> requires psio::packs_as<U, T>      // Table<T>::put
+void put(const U& row) { store(psio::to_pssz(row)); }
+```
+
+A mismatch is one short error that names both types:
+`because 'psio::packs_as<Wrong, Rec>' evaluated to false`.
+
+`psio::to_pssz_as<T>(source)` and `psio::pssz_size_as<T>(source)` are
+constrained by `psio::pssz_source_of<Source, T>` — `packs_as<Source, T>`,
+or, for a method's argument tuple `T`, `packs_as` of the tuple of its
+elements — and each argument of `psio::method_args_to_pssz` is written as it
+stands when `psio::packs_as<Argument, Parameter>` and converted implicitly
+otherwise. So a record of views is an argument for a parameter of the owning
+record type.
+
 ## Sinks and sources
 
 `psio::to_pssz(v, sink)` (and `psio::encode(psio::pssz{}, v, sink)`) writes

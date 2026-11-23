@@ -3875,6 +3875,67 @@ namespace psio {
    template <typename Old, typename New>
    concept pssz_evolves_from = pssz_evolves_from_v<Old, New>;
 
+   // ── "A U packs as a T" ────────────────────────────────────────────────
+   //
+   // `psio::packs_as<U, T>`: `psio::to_pssz(const U&)` yields the bytes of
+   // a T — every value of U is written exactly as the T it stands for is
+   // written, so the bytes validate, decode and view as a T. It holds for
+   //
+   //   - T itself, and every source of T (wire_type.hpp): a view of a T, a
+   //     std::string_view for a std::string, a span for a list, a
+   //     std::reference_wrapper, std::tie(...) for the tuple of values;
+   //   - a reflected record whose members, in order, pack as the members of
+   //     T (views, string views, spans, references standing for the owning
+   //     members; nested to any depth, and through std::optional,
+   //     std::vector, std::array, std::variant, tuples), with the same
+   //     definitionWillNotChange, the same offset widths and the same
+   //     member bounds — what the layout of T is made of. Member names do
+   //     not matter: the wire has none;
+   //   - a packed value, as a whole value: psio::shared_pssz<X>,
+   //     psio::pssz_buffer<X> and psio::nested<X> pack as whatever X packs
+   //     as (their bytes are the bytes of the X), and an X packs as them.
+   //     (As a MEMBER a packed X is a byte list, and packs as a packed X
+   //     only.)
+   //
+   // It is false for everything else: another member type, count or order,
+   // an integer of another size, a record against a tuple, a type with a
+   // binary adapter against anything but itself.
+   //
+   // The relation is symmetric and is about bytes only. It is built from
+   // `psio::wire_type_t` and the layout rules of `psio::pssz_evolves_from`
+   // (U and T evolve from each other).
+   namespace detail::pssz_impl
+   {
+      // A packed value at the root of an encoding is its inner value.
+      template <typename T>
+      struct packed_root
+      {
+         using type = T;
+      };
+      template <typename T>
+         requires(is_nested_v<T> && is_nested<T>::descends)
+      struct packed_root<T> : packed_root<::psio::wire_type_t<typename is_nested<T>::inner>>
+      {
+      };
+      template <typename T>
+      using packed_root_t = typename packed_root<::psio::wire_type_t<T>>::type;
+
+      template <typename U, typename T>
+      consteval bool same_layout() noexcept
+      {
+         if constexpr (std::is_same_v<U, T>)
+            return true;
+         else
+            return layout_evolves<U, T>() && layout_evolves<T, U>();
+      }
+      template <typename U, typename T>
+      inline constexpr bool packs_as_v = same_layout<packed_root_t<U>, packed_root_t<T>>();
+   }  // namespace detail::pssz_impl
+
+   template <typename U, typename T>
+   concept packs_as =
+      detail::pssz_impl::packs_as_v<std::remove_cvref_t<U>, std::remove_cvref_t<T>>;
+
    // Explicit-width tag — `psio::pssz_<1|2|4>`. Not on the public
    // surface; retained so byte-parity regressions vs. v1's
    // `frac_format_pssz{8,16,32}` can name the exact width at the call
@@ -4374,11 +4435,14 @@ namespace psio {
    // (the bytes of a std::uint32_t are not those of a std::uint64_t).
    namespace detail::pssz_impl
    {
+      // A source of T for to_pssz_as<T>: something that packs as T, or —
+      // for an annotated tuple, whose cap and element annotations the
+      // source cannot spell — as the tuple of its elements.
       template <typename T, typename S>
-      inline constexpr bool source_of_v = std::is_same_v<::psio::wire_type_t<S>, T>;
+      inline constexpr bool source_of_v = packs_as_v<S, T>;
       template <typename Meta, typename... Ts, typename S>
       inline constexpr bool source_of_v<::psio::annotated_tuple<Meta, Ts...>, S> =
-         std::is_same_v<::psio::wire_type_t<S>, std::tuple<Ts...>> ||
+         packs_as_v<S, std::tuple<Ts...>> ||
          std::is_same_v<::psio::wire_type_t<S>, ::psio::annotated_tuple<Meta, Ts...>>;
 
       // An argument of a call through its packed form, for parameter wire
@@ -4393,8 +4457,7 @@ namespace psio {
       //     conversion operator that is not const, or is &&-qualified, is
       //     usable because the argument is forwarded as it was given.
       template <typename P, typename Arg>
-      inline constexpr bool arg_is_source_v =
-         std::is_same_v<::psio::wire_type_t<Arg>, P>;
+      inline constexpr bool arg_is_source_v = packs_as_v<std::remove_cvref_t<Arg>, P>;
       template <typename P, typename Arg>
       using arg_source_t = std::conditional_t<arg_is_source_v<P, Arg>,
                                               const std::remove_cvref_t<Arg>&, P>;
@@ -4420,23 +4483,42 @@ namespace psio {
          }(std::index_sequence_for<Args...>{});
    }  // namespace detail::pssz_impl
 
+   // `to_pssz_as<T>(source)` writes a T: the source packs as T
+   // (`psio::packs_as`), or T is an annotated tuple (a method's argument
+   // tuple) and the source packs as the tuple of its elements.
+   template <typename S, typename T>
+   concept pssz_source_of =
+      detail::pssz_impl::source_of_v<std::remove_cvref_t<T>, std::remove_cvref_t<S>>;
+
+   namespace detail::pssz_impl
+   {
+      // The type the walk lays `S` out as when it is written as T: T
+      // itself when the source spells it (or cannot: an annotated tuple),
+      // else the source's own wire type, whose bytes are T's (packs_as).
+      template <typename T, typename S>
+      using encode_as_t = std::conditional_t<
+         std::is_same_v<::psio::wire_type_t<S>, T> || requires { typename T::psio_annotated_tuple; },
+         T, ::psio::wire_type_t<S>>;
+   }  // namespace detail::pssz_impl
+
    template <typename T, typename S>
-      requires detail::pssz_impl::source_of_v<T, S>
+      requires pssz_source_of<S, T>
    void to_pssz_as(const S& source, std::vector<char>& out)
    {
       namespace pz = detail::pssz_impl;
-      constexpr std::size_t W = auto_pssz_width_v<T>;
-      if (auto status = pz::check_encode_as<T>(source, 0); !status.ok())
+      using E      = pz::encode_as_t<T, S>;
+      constexpr std::size_t W = auto_pssz_width_v<E>;
+      if (auto status = pz::check_encode_as<E>(source, 0); !status.ok())
          pz::status_failure(status);
       const std::size_t total =
-         pz::size_of_as<W, true, T, pz::no_ann, std::nullptr_t>(source, nullptr);
+         pz::size_of_as<W, true, E, pz::no_ann, std::nullptr_t>(source, nullptr);
       const std::size_t orig = out.size();
       out.resize(pz::checked_add(orig, total));
       ::psio::fast_buf_stream sink(out.data() + orig, total);
-      pz::encode_as<W, true, T, ::psio::fast_buf_stream, pz::no_ann>(source, sink);
+      pz::encode_as<W, true, E, ::psio::fast_buf_stream, pz::no_ann>(source, sink);
    }
    template <typename T, typename S>
-      requires detail::pssz_impl::source_of_v<T, S>
+      requires pssz_source_of<S, T>
    [[nodiscard]] std::vector<char> to_pssz_as(const S& source)
    {
       std::vector<char> out;
@@ -4444,11 +4526,12 @@ namespace psio {
       return out;
    }
    template <typename T, typename S>
-      requires detail::pssz_impl::source_of_v<T, S>
+      requires pssz_source_of<S, T>
    [[nodiscard]] std::size_t pssz_size_as(const S& source)
    {
       namespace pz = detail::pssz_impl;
-      return pz::size_of_as<auto_pssz_width_v<T>, true, T, pz::no_ann, std::nullptr_t>(source,
+      using E      = pz::encode_as_t<T, S>;
+      return pz::size_of_as<auto_pssz_width_v<E>, true, E, pz::no_ann, std::nullptr_t>(source,
                                                                                     nullptr);
    }
 
