@@ -6,6 +6,246 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 ## Handover (newest first)
 
+### After the trusted-view pass (safe / trusted read views) — tip of this note
+
+State: the opt-in trusted view is implemented for PSSZ, SSZ and the
+canonical ABI. Commits (on top of `996ab60`): `16258d6` (safe-view
+fixes, see "Found" 1), `533d7ab` (the trusted view, tests), `307ae9c`
+(benchmark), and the commit that carries this note (docs).
+419/419 ctest in both simdjson configurations on the final tree (393 before;
+26 new: `psio_view_trusted_tests`, the same without per-record state and
+with `PSIO_DEBUG_VIEWS`, 14 compile-fail cases with their control, 9
+debug-abort cases). The intermediate commit `16258d6` was not put through
+a full ctest on its own (its two changes were, as part of the final tree).
+
+**What was built** (user documentation: `docs/helpers.md` "Safe and trusted
+views"; design notes: `cpp/include/psio/view.hpp` "Safe and trusted views").
+
+* A new storage kind, `storage::trusted_borrow`. `psio::view<T, Fmt,
+  storage::trusted_borrow>` is the trusted view; `PSIO_FORMAT_HELPERS`
+  generates one alias for it, `F_trusted_view<T>` (`psio::pssz_trusted_view`,
+  `ssz_trusted_view`, `wit_trusted_view`; the alias does not exist for a
+  format whose traits do not say `trusted_views`, e.g. capnp).
+  `psio::pssz_view<T>` is unchanged: same type, same layout (40 bytes for a
+  record view), same behaviour — with the two fixes listed under "Found".
+* The same shape templates serve both kinds. A view is constructed from
+  `detail::view_source<Store>`: a span for the safe kind, `psio::trusted`
+  (whose constructor is explicit) for the trusted kind — so a trusted view
+  cannot be made from a span, a vector, a mutable span, or a span plus a
+  root, and parents hand their kind to children (`detail::view_src<Store>`).
+  The shape templates call `view_layout::count_of / element_of / field_of /
+  optional_has / …`, which pick the format's unchecked overload (trailing
+  `view_layout::unchecked_t`) for a trusted view. PSSZ records keep a
+  `trusted_record_state` (the header, read without comparing it).
+* Trusted to safe converts implicitly (`PSIO_VIEW_TO_SAFE_` in every view
+  class, carrying the root span); there is no conversion the other way.
+* Validating entry points: `psio::validated_view<T>(fmt, bytes)` returns
+  `psio::checked_view<T, Fmt>` (status + trusted view, never throws);
+  `psio::validated_pssz_view<T>(bytes)` is that for `psio::pssz`. The existing
+  `validated_pssz_view(fmt, bytes, std::optional<view>&, has_unknown)` is
+  kept and now accepts an optional of either kind.
+* Buffers: `pssz_buffer<T>` / `shared_pssz<T>` (and the ssz / wit ones) hand
+  out the trusted view from `view()`, `*b`, `b->`, `b.get()`. No existing
+  test needed changing (the trusted view converts to the safe one).
+  `psio::as_view(buffer)` still returns the safe view. A buffer built with
+  `psio::trusted{bytes}` / `unchecked()` takes the caller's word, as before;
+  reading invalid bytes through it is now undefined for navigation too (it
+  always was for `unpack()`).
+* A method parameter may be declared `psio::pssz_trusted_view<X>`
+  (`invoke_method_pssz` validates the argument tuple first).
+* `PSIO_DEBUG_VIEWS` re-enables every skipped compare in the trusted view and
+  aborts with a message on violation.
+* Sub-view ends are not computed unless used. The representation is still a
+  span, but the unchecked code never reads a span's size unless the answer
+  depends on it (null tests instead of size tests), so after inlining the
+  load of the next offset is dead code: "nested scalar" compiles to one null
+  test and two loads, a list element to two loads. This relies on inlining;
+  a trusted view passed through a non-inlined call does compute its end
+  (one load and a subtraction).
+
+**One deliberate departure from the proposal.** The proposal kept the PSSZ
+header compare on every member. The trusted view keeps it only where valid
+bytes can differ: for trailing `std::optional` members and for the end of
+the last variable member (unknown appended slots). A member every writer
+must write (index below `required_field_count<T>()`; validation refuses a
+header that omits one) is read without consulting the header. Measured
+before / after this change, quick runs: all-fields 1.9 → 0.69, nested 0.45
+→ 0.24, iterate 4.3 → 2.5 ns. Consequence, documented in helpers.md: a row
+written before a NON-optional member was appended is not a valid encoding
+of the new type (validation refuses it, the safe view reads zero) and the
+trusted view reads past it. `PSIO_DEBUG_VIEWS` catches it.
+
+**Measured.** ns/op, minimum of 11 interleaved trials, run 1 / run 2
+(`~/psio-formats-logs/trusted-run{1,2}.txt`), 1-minute load 4.4–7.2. The
+spread within a run was larger than in earlier passes (10–40 % on most
+cells, worse on the first group measured, SSZ, in run 1), so read
+differences under ~10 % as noise.
+
+| Operation | old (g1) | safe (`F_view`) | trusted (`F_trusted_view`) |
+|---|---:|---:|---:|
+| PSSZ one field | 0.23 / 0.23 | 0.31 / 0.31 | 0.23 / 0.23 |
+| PSSZ all 5 fields of a nested record | 0.63 / 0.67 | 2.44 / 2.52 | 0.74 / 0.70 |
+| PSSZ nested scalar | 0.24 / 0.24 | 0.94 / 0.94 | 0.24 / 0.24 |
+| PSSZ nested string | 0.25 / 0.24 | 1.35 / 1.38 | 0.26 / 0.26 |
+| PSSZ string field | 0.24 / 0.24 | 0.69 / 0.67 | 0.33 / 0.33 |
+| PSSZ iterate 16 records | 2.71 / 2.75 | 10.6 / 10.6 | 2.71 / 2.80 |
+| PSSZ range-for (g1: fracpack) | 2.84 / 3.06 | 10.6 / 10.6 | 2.72 / 2.72 |
+| PSSZ iterate, all fields | 10.6 / 10.4 | 19.7 / 19.5 | 10.0 / 10.1 |
+| PSSZ iterate, all fields (g1: fracpack) | 7.15 / 6.99 | 19.7 / 19.5 | 10.0 / 10.1 |
+| table row, 1 field | 0.23 / 0.23 | 0.31 / 0.31 | 0.25 / 0.25 |
+| table row, 2 fields | 0.41 / 0.41 | 0.52 / 0.49 | 0.47 / 0.47 |
+| table row, all 4 fields | 0.59 / 0.59 | 0.95 / 0.94 | 0.60 / 0.60 |
+| set of 64 ints, hit (g1: fracpack) | 1.44 / 1.41 | 3.07 / 3.06 | 2.16 / 2.25 |
+| set of 64 ints, miss | 2.11 / 2.14 | 3.08 / 3.09 | 2.27 / 2.45 |
+| map of 32 strings, hit | 7.83 / 8.21 | 18.8 / 20.8 | 14.0 / 13.9 |
+| map of 32 strings, miss | 9.07 / 8.57 | 16.6 / 16.7 | 14.3 / 14.8 |
+| SSZ one field | 0.23 / 0.25 | 0.34 / 0.25 | 0.24 / 0.23 |
+| SSZ all 5 fields | 1.00 / 0.67 | 1.81 / 1.31 | 0.88 / 0.62 |
+| SSZ nested scalar | 0.40 / 0.33 | 0.58 / 0.43 | 0.30 / 0.24 |
+| SSZ nested string | 0.36 / 0.31 | 0.82 / 0.70 | 0.28 / 0.24 |
+| SSZ string field | 0.25 / 0.24 | 0.26 / 0.24 | 0.25 / 0.23 |
+| SSZ iterate 16 records | 3.01 / 2.97 | 7.23 / 7.17 | 2.83 / 2.72 |
+| SSZ range-for | — | 10.1 / 8.90 | 2.97 / 2.65 |
+| SSZ iterate, all fields | — | 12.6 / 12.0 | 8.90 / 8.51 |
+| WIT one field | 0.23 / 0.23 | 0.25 / 0.25 | 0.23 / 0.23 |
+| WIT all 5 fields | 0.53 / 0.53 | 0.67 / 0.63 | 0.57 / 0.53 |
+| WIT nested scalar | 0.24 / 0.23 | 0.33 / 0.24 | 0.29 / 0.23 |
+| WIT nested string | 0.23 / 0.23 | 0.30 / 0.30 | 0.24 / 0.24 |
+| WIT string field | 0.23 / 0.28 | 0.31 / 0.30 | 0.24 / 0.23 |
+| WIT iterate 16 records | 3.07 / 3.12 | 4.71 / 4.71 | 2.15 / 2.11 |
+| WIT range-for | 2.94 / 2.96 | 4.70 / 4.69 | 2.13 / 2.12 |
+| WIT iterate, all fields | 4.76 / 4.67 | 6.24 / 6.43 | 4.60 / 4.66 |
+
+The trusted view is at the first generation's speed on every record and
+list operation. What it does not close: map lookup by string (14 against
+8 ns: not checks — the probe's string compare and the tuple entry; not
+investigated further) and "iterate, all fields" against g1's fracpack
+(PSSZ g1 is slower than fracpack there too).
+
+**Found on the way** (all four contradict what earlier notes assumed).
+
+1. The SAFE view was not safe for two shapes, on the baseline `996ab60`:
+   (a) an element of fixed size was taken with `subspan(i * size, size)`
+   unchecked, so `list[i]` past the end, and `array.at(i)` on a short or
+   empty span — including a default-constructed record's array member —
+   produced a span outside the bytes (`pssz_view<R>{}.corners().at(1).x()`
+   crashed); (b) a list of variable-size elements reported `first offset /
+   width` elements without comparing the first offset with the list's
+   size, so a corrupted count made `list[i]` read its offset table outside
+   the bytes for a valid `i < size()`. The earlier unvalidated-bytes test
+   capped its walk at 64 elements and had no array, so neither showed.
+   Both are fixed for PSSZ and SSZ in a separate commit (two compares:
+   element index against the span for fixed-size elements; first offset
+   against the list's size), with tests (`view_unvalidated_tests.cpp`, and
+   a walk of every PSSZ shape under every truncation / single-byte
+   corruption in `view_trusted_tests.cpp`). Cost, A/B on the same machine
+   (`~/psio-formats-logs/trusted-safe-hardening-ab.txt`): set of 64 ints,
+   hit 2.6 → 3.1–3.3 ns; map lookups +5–10 % (within noise); record and
+   list-of-records operations unchanged. Drop the commit to get the old
+   numbers and the old hole back.
+2. `psio::validate_ssz` accepts a non-empty list whose first offset is 0
+   (the list then reads as empty in the view and in decode, and its bytes
+   are ignored). Not canonical SSZ; not fixed (ssz.hpp is outside this
+   pass). It does not make either view read out of bounds.
+3. The SSZ and canonical-ABI traits have no `unpack`, so `v.unpack()` and
+   comparison of a composite view with a value do not compile for those
+   formats (either kind). Not added.
+4. `psio::nested<T>::view()` (nested.hpp) returns the safe view; it was
+   left alone. Through a trusted enclosing view a `nested<T>` member's inner
+   view is trusted (eager validation) and a `nested<T, deferred>` member's
+   is the safe view.
+
+**Not done.**
+
+* Cap'n Proto: `capnp_view` is unchanged — one kind, which relies on
+  validation (in the terms above it is a trusted view constructible from a
+  bare span). It should gain the same split; `capnp_trusted_view` does not
+  exist as a name.
+* A trusted `mutable_view`: not built. `mutable_view` already requires
+  validated bytes and its own reads are of fixed-size values at fixed
+  positions; `as_view(mutable_view)` returns the safe view.
+* `psio::as_view(buffer)` and `nested<T>::view()` still return the safe view.
+* The optional / variant / map shapes of SSZ and the canonical ABI under
+  corruption are covered only as far as the shared Order shape goes
+  (records, lists, strings); the full-shape corruption walks are PSSZ only.
+* The benchmark numbers have not been copied into
+  `docs/format-comparison.md`.
+
+**Mirror note: Rust, JS, Python** (read only; none of those trees was
+changed).
+
+* Rust (`rust/psio/src/pssz_view.rs`). One type, `PsszView<'a, T, F>`.
+  `PsszView::new` / `new_strict` / `new_checked` validate first — they are
+  the counterpart of `psio::validated_pssz_view` (`new_checked` is the
+  out-parameter form with `has_unknown`). `PsszView::trusted(bytes)` does
+  not validate. But both return the SAME type, and every accessor checks
+  what it reads (`pssz_checked`): on malformed bytes it panics with a
+  message, or returns `Err` from the `try_*` forms; it never reads outside
+  the buffer. So Rust's `trusted()` shares its name with C++
+  `psio::trusted{}` and its meaning ("the caller vouches, skip validation")
+  but what it returns is, in C++ terms, the SAFE view — with a panic where
+  C++ reads zero / empty — not the C++ trusted view. There is no unchecked
+  fast path in Rust today and no type-level record of trust. To line up: a
+  second view kind returned by `new*`, whose accessors skip the checks
+  (which needs `unsafe` slicing inside), and whose caller-vouched
+  constructor would have to be an `unsafe fn` (violating it is undefined
+  behaviour, which a safe Rust function may not expose). The existing safe
+  `trusted()` would keep its checked meaning or be renamed. Not measured:
+  what the split would buy in Rust.
+* JS (`js/src/pssz-view.ts`) and Python (`python/src/psio/view.py`). One
+  view kind each; it "checks the frames and values it reads" and throws a
+  PSSZ error. Neither has a trusted or validating constructor. Out-of-bounds
+  reads are not possible in either language, so a trusted kind would only
+  skip the explicit frame checks; whether that is measurable next to
+  interpreter overhead is unverified.
+
+### After F1 (Cap'n Proto)
+
+State: F1 committed (`babc96a`), main `2c17312` merged (`4ec83a4`);
+393/393 ctest in both simdjson configurations (the two new targets are
+`psio_capnp_tests`, 823 assertions, and `psio_capnp_interop_tests`, 3,621
+assertions against libcapnp 1.3.0). `capnp.hpp` + `capnp_view.hpp` compile
+with `-fno-exceptions -fno-rtti` (syntax check of a view / edit program;
+not wired into ctest). User documentation: `docs/capnp.md`.
+
+Measured with the new view doing what the official reader does (struct
+size bounds, far pointers, native unions, bit lists); message written by
+libcapnp; one run, load 7.4, min of 11 trials, ns/op
+(`~/psio-formats-logs/f1-capnp-run1.txt`):
+
+| Operation | g1 view | g2 `capnp_view` | libcapnp, reader per op | libcapnp, held root |
+|---|---:|---:|---:|---:|
+| one field of the root | 0.38 | 0.54 | 17.6 | 0.25 |
+| all 5 fields of a nested struct | 1.67 | 2.40 | 29.8 | 12.4 |
+| nested scalar | 0.70 | 0.99 | 21.6 | 3.59 |
+| nested string | 1.07 | 1.65 | 25.3 | 7.58 |
+| string field | 0.75 | 1.01 | 21.7 | 3.84 |
+| iterate 16 structs (range-for) | 3.10 | 3.55 | 49.5 | 31.8 |
+| iterate, all fields | 8.20 | 8.83 | 115 | 97.6 |
+| decode to a C++ struct | 96 | 92 | 203 | |
+| validate | 58 | 55 (typed) | | |
+| encode | 229 | 121 | 461 | |
+
+So, today: against a reader constructed per message psio is 12–33× faster
+on reads; against a held root 3.5–11×, EXCEPT a single scalar of the root
+struct where libcapnp's held root is 2× faster (the psio view resolves the
+root pointer each time it is constructed; libcapnp did that when the
+reader was made). Encode 3.8×, decode 2.2× faster. The new view is 1.1–1.5×
+slower than the first generation's, which is the price of the checks g1
+skipped. Needs a second run for spread before the numbers go into
+`docs/format-comparison.md` (F6).
+
+Not done in F1 (carry to later stages): the safe / trusted split for the
+capnp views (they are "trusted" in the sense of the proposal below: they
+rely on validation); switching a union member through `capnp_document`;
+`std::map` / `std::set` / `std::tuple` / wrapper types; packed encoding;
+porting the first generation's 74 view tests one by one (the new tests
+cover the same surface on the native layout, but it is not a port — g1's
+union tests assert the non-native layout); a `-fno-exceptions` ctest
+target; the existing `emit_capnp` has not been checked against the new
+mapping (F3: it must emit unions for variants / optional scalars and
+defaults for initialisers).
+
 ### After the frame pass (PSSZ / SSZ / WIT views, requested after F0)
 
 State: main line merged (`50092a4`, G46–G51). Two frame commits on top;
@@ -84,7 +324,7 @@ cannot remove:
   the writer's header covers it. One compare per member; g1's pssz32 did
   not implement pruned trailing optionals at all.
 
-### Proposal (NOT implemented): views of bytes already validated
+### Proposal (now implemented — see the top of this list): views of bytes already validated
 
 The remaining gap is the price of the guarantee, so closing it is a
 semantic choice: let the caller say the bytes are validated.
@@ -293,16 +533,7 @@ Reads are at parity with Google's accessors (both are a vtable lookup);
 "faster than their native API" holds for FlatBuffers **encode** only (g1:
 2.2×, with a 12 % larger buffer), not for reads or verification.
 
-## F1 work in progress (not committed)
-
-In `~/psio-formats-scratch/f1-wip/`: `capnp.hpp` (rewrite: native layout,
-far pointers, typed validation, unions, optionals, bit lists) and
-`capnp_view.hpp` (views, in-place scalar writes, `capnp_document`
-append-and-repoint editor; not yet compiled). In the tree, untracked:
-`cpp/include/psio/detail/field_number.hpp` (one field number for protobuf /
-capnp / flatbuf) and `cpp/tests/capnp/layout_fuzz.py`.
-
-Established so far for F1:
+## F1 findings
 
 * `psio::capnp::layout<T>` is a constexpr port of the official compiler's
   `StructLayout` (holes, union members sharing and growing locations,

@@ -54,6 +54,7 @@ For a format `F`:
 | `F_size(v)` | size of the encoding of `v` | `psio::size_of(psio::F{}, v)` |
 | `F_view<T>` | read-only view over borrowed bytes | `psio::view<T, psio::F>` |
 | `F_view<const T>` | the same type as `F_view<T>` | `psio::view<T, psio::F>` |
+| `F_trusted_view<T>` | read-only view over bytes the caller vouches for: no per-access checks (pssz, ssz, wit) | `psio::view<T, psio::F, psio::storage::trusted_borrow>` |
 | `F_mutable_view<T>` | view that writes into borrowed bytes | `psio::mutable_view<T, psio::F>` |
 | `F_buffer<T>` | typed bytes, owned | `psio::buffer<T, psio::F, psio::storage::owning>` |
 | `shared_F<T>` | typed bytes, reference-counted and immutable | `psio::buffer<T, psio::F, psio::storage::shared>` |
@@ -210,13 +211,131 @@ bytes), so it costs about a validate, a decode and an encode.
 
 ## Views and buffers
 
-`F_view<T>` and `F_mutable_view<T>` borrow: the bytes must outlive the view.
-Like every psio view they assume validated bytes and do not validate.
+`F_view<T>`, `F_trusted_view<T>` and `F_mutable_view<T>` borrow: the bytes
+must outlive the view. None of them validates.
+
+### Safe and trusted views
+
+There are two read views of the same bytes. They have the same members
+(they are the same templates) and read the same values from a valid
+encoding. They differ in what happens when the bytes are *not* a valid
+encoding of `T`.
+
+| | `psio::pssz_view<T>` — safe | `psio::pssz_trusted_view<T>` — trusted |
+|---|---|---|
+| Made from | any bytes: `psio::pssz_view<T>{bytes}` | `psio::pssz_trusted_view<T>{psio::trusted{bytes}}`, `psio::validated_pssz_view<T>(bytes)`, `buffer.view()` |
+| Every offset read from the bytes | compared with the size of what it points into before it is used | used as it is |
+| Bytes that are not a valid `T` | navigation never leaves the bytes; what is not there reads as zero / empty | **undefined behaviour** |
+| Cost (PSSZ, ns: all 5 members of a nested record / iterate 16 records) | 2.5 / 10.6 | 0.7 / 2.7 |
+| `unpack()` | a trusted decode in both: undefined on bytes that are not valid | |
+
+**Which one.**
+
+- The bytes are a row your own service wrote, or you just produced them
+  with `to_pssz`: the trusted view.
+- The bytes come from outside (an action's arguments, a row another service
+  wrote, a message off the network) and you will read most of them:
+  validate once, and read through the trusted view the validating helper
+  returns.
+- The bytes come from outside and you will read one or two members of a
+  large value, or you cannot afford the validation pass: the safe view. Its
+  navigation is safe on anything; do not call `unpack()` on it (or on any
+  view of bytes that were not validated).
+- You do not know: the safe view. It is the default name for that reason.
+
+```cpp
+// 1. A row this service wrote: trusted.
+std::span<const char> bytes = kv_get(account_key);          // our own table
+psio::pssz_trusted_view<Account> row{psio::trusted{bytes}};
+if (row.balance() < amount) abort_message("overdrawn");
+auto memo = row.memo();                                     // std::string_view-like, borrowed
+
+// 2. An action argument: validate once, then the trusted view.
+auto args = psio::validated_pssz_view<Transfer>(action_data);
+if (!args)                                                  // psio::checked_view<Transfer, psio::pssz>
+   abort_message(args.error().what);
+credit(args->to(), args->amount());                         // psio::pssz_trusted_view<Transfer>
+
+// 3. A row another service wrote: the safe view, or validate first.
+psio::pssz_view<TheirRow> theirs{foreign_bytes};            // safe: reads inside the bytes whatever they are
+auto owner = theirs.owner();
+auto checked = psio::validated_pssz_view<TheirRow>(foreign_bytes);   // or: check, then trust
+```
+
+**What the caller of a trusted view guarantees.** The bytes
+
+1. were accepted by `psio::validate_F<T>` **for this `T`** (that is what
+   `psio::validated_view` / `psio::validated_pssz_view` do), or were produced
+   by `psio::to_F` of a `T`, or are a row this program itself wrote as a `T`;
+   and
+2. are not modified while the view, or any view obtained from it, is in use.
+
+If either does not hold the behaviour is undefined — reads outside the
+bytes — exactly as for `psio::from_F<T>(psio::trusted{bytes})`.
+
+"For this `T`" matters when a type evolves. PSSZ lets a record grow by
+appending `std::optional` members, and both views read a row written before
+the member existed correctly (the member reads as absent). A row written
+before a **non-optional** member was appended is not a valid encoding of the
+new type: `validate_pssz` refuses it, the safe view reads the member as
+zero, and the trusted view reads past the row. Append optionals only.
+
+**Trust is in the type.**
+
+- It is only obtained by saying so. A trusted view has no constructor from
+  a span, a vector or a string: `psio::pssz_trusted_view<T>{bytes}` does not
+  compile; `psio::pssz_trusted_view<T>{psio::trusted{bytes}}` does.
+  (`psio::pssz_view<T>{psio::trusted{bytes}}` does not compile either: the
+  safe view's name never yields a trusted view.)
+- Every sub-view of a trusted view is trusted: `row.customer()`,
+  `row.items()[i]`, `*row.maybe()`, the alternative handed to `visit`, a map
+  entry. One exception: the inner view of a
+  `psio::nested<T, psio::nested_validation::deferred>` member is the safe
+  view, because validating the enclosing value never looked at those bytes.
+- A trusted view converts implicitly to the safe view of the same bytes, so
+  it can be passed to any function that takes `psio::pssz_view<T>`. There is
+  no conversion from safe to trusted; a function that takes
+  `psio::pssz_trusted_view<T>` cannot be handed unvalidated bytes by
+  accident.
+
+**What a trusted view still does.** `list.at(i)` is bounds-checked and
+returns an empty view past the end (`list[i]` is not: its precondition is
+`i < list.size()`). A default-constructed trusted view reads as zero / empty.
+What is wire meaning rather than a check stays: a trailing optional the
+writer did not write reads as absent, fields a newer writer appended are
+skipped, an empty list is zero bytes. It is read-only, like every view.
+
+**Validating helpers.**
+
+| | Returns |
+|---|---|
+| `psio::validated_view<T>(psio::F{}, bytes)` | `psio::checked_view<T, psio::F>`: `ok()` / `explicit operator bool`, `error()`, and `*r` / `r->member()` / `r.view()` — the trusted view (an empty view, reading as zero, when `!ok()`); `r.value()` is the view or `psio::codec_abort`. Never throws or aborts itself. For pssz, pssz8/16/32, ssz, wit |
+| `psio::validated_pssz_view<T>(bytes)` | the same for `psio::pssz` |
+| `psio::validated_pssz_view(fmt, bytes, result, has_unknown)` | a `codec_status`; fills `std::optional<psio::pssz_trusted_view<T>>` (or `std::optional<psio::pssz_view<T>>`) and reports whether the bytes carry fields this `T` does not know |
+| `F_buffer<T>` / `shared_F<T>`: `b.view()`, `*b`, `b->member()`, `b.get()` | the trusted view: the buffer validated on construction (see below for the constructors that take the caller's word instead) |
+| `psio::as_view(b)` | the safe view of a buffer's bytes |
+
+**Debugging.** Compile with `-DPSIO_DEBUG_VIEWS` (the whole program: it
+changes inline functions) and a trusted view makes every compare it
+otherwise skips, and calls `psio::detail::view_trust_violation` — a message
+on stderr, then `std::abort` — when one fails:
+
+```
+psio: trusted view over bytes that are not a valid encoding: a record's header announces more than the record holds
+```
+
+**Other views.** `psio::mutable_view` has no trusted form: it already
+requires validated bytes for writing, and the reads it offers are of
+fixed-size values at fixed positions. The Cap'n Proto view
+(`psio::capnp_view<T>`, `docs/capnp.md`) is a cursor view with a single kind
+that relies on `psio::validate_capnp`; there is no `capnp_trusted_view`
+name, and it has not been split into a safe and a trusted kind yet.
 
 A view only reads. Nothing turns one into a view that writes:
 
 - `F_view<T>` is `psio::view<T, F>`, whose storage kind defaults to
   `storage::const_borrow`. `F_view<const T>` is that same type.
+  `F_trusted_view<T>` is `psio::view<T, F, storage::trusted_borrow>`.
 - `psio::view<const T, F>` is accepted as another spelling of the read-only
   view. It is a distinct class derived from `psio::view<T, F>` that adds
   nothing and converts implicitly both ways, so either can be passed where
@@ -248,7 +367,7 @@ Free functions, for every buffer kind:
 | `psio::bytes(b)` | the bytes, `std::span<const char>` |
 | `psio::mutable_bytes(b)` | `std::span<char>`; owning and mutably borrowing buffers only |
 | `psio::size(b)` | number of bytes |
-| `psio::as_view(b)` | the read view, `psio::view<T, F, storage::const_borrow>` |
+| `psio::as_view(b)` | the safe read view, `psio::view<T, F, storage::const_borrow>` (an owning or shared buffer's own `b.view()` is the trusted view) |
 | `psio::as_mutable_view(b)` | the mutable view; owning and mutably borrowing buffers only |
 | `psio::to_buffer(b)` | an owning copy |
 | `psio::to_shared(b)` | a shared buffer: takes the bytes of an owning rvalue, shares a shared buffer, copies otherwise |
@@ -263,11 +382,11 @@ packed. It always holds a valid encoding:
 | `B{}` | the encoding of `T{}`. No allocation: all default-constructed buffers of one type read one process-wide constant, built on first use |
 | `B{value}`, `B::from(value)` | encodes. (`B{value}` is left out for a `T` that could be mistaken for bytes, such as `std::vector<char>`: use `from`.) |
 | `B{bytes}` | **validates**, then holds the bytes; `psio::codec_abort` (an exception where enabled) if they are not a `T`. A `std::vector<char>&&` is adopted without a copy; a span is copied once |
-| `B{psio::trusted{bytes}}` | holds bytes the caller vouches for, unchecked |
-| `B::unchecked(vector)` | adopts a vector the caller vouches for, without a copy |
+| `B{psio::trusted{bytes}}` | holds bytes the caller vouches for, unchecked. The buffer's views are trusted views, so bytes that are not a valid `T` are undefined behaviour to read (`psio::as_view(b)` is the safe view) |
+| `B::unchecked(vector)` | adopts a vector the caller vouches for, without a copy; as above |
 | `B::checked(bytes, out)` | validates into `out`; returns a `codec_status` and leaves `out` unchanged on failure |
 | `B::from_checked(value, out)` | encodes into `out`; returns a `codec_status` |
-| `b.view()`, `*b`, `b.get()` | the read-only view of the `T`; `b->member()` |
+| `b.view()`, `*b`, `b.get()` | the read-only view of the `T`; `b->member()`. It is the **trusted** view, `F_trusted_view<T>` (pssz, ssz, wit): the buffer holds a valid encoding, so no access checks it again. It converts implicitly to `F_view<T>` |
 | `b.unpack()` (also `decode()`) | the `T` |
 | `b.decode_checked(out)` | validate, then decode |
 | `b.validate()`, `b.validate_strict()` | |
@@ -315,8 +434,11 @@ whose bytes a reader of the enclosing value does not look at.
 
 ## Reading through a view
 
-`#include <psio/pssz_view.hpp>`. A view is a pair of pointers into bytes that
-have been validated; nothing is decoded until it is asked for.
+`#include <psio/pssz_view.hpp>`. A view is a pair of pointers into bytes;
+nothing is decoded until it is asked for. Everything in this section holds
+for the safe view (`psio::pssz_view<T>`) and for the trusted view
+(`psio::pssz_trusted_view<T>`) alike — see "Safe and trusted views" above
+for which to use.
 
 ### Members by name
 

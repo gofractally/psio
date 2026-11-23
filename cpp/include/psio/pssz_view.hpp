@@ -24,6 +24,16 @@
 //
 // All three composite view templates from psio/view.hpp are written
 // once and reused here; this header only plugs in the wire policy.
+//
+// Each function has two forms (view.hpp "Safe and trusted views"): the
+// checked one, which the safe view (`psio::pssz_view<T>`) calls and which
+// compares every offset it reads before using it, and the unchecked one
+// (trailing `view_layout::unchecked_t`, or the trusted per-record state),
+// which the trusted view (`psio::pssz_trusted_view<T>`) calls on bytes that
+// are a valid encoding. The unchecked forms never consult the size of a
+// span unless the answer depends on it (a list's count, the end of the last
+// variable member, a length-disambiguated optional), so the end of a
+// sub-view that is only navigated through is never worked out.
 
 #include <psio/pssz.hpp>
 #include <psio/view.hpp>
@@ -122,6 +132,11 @@ namespace psio::view_layout {
             using O = typename ::psio::detail::pssz_impl::width_info<W>::offset_t;
             O first{};
             std::memcpy(&first, s.data(), W);
+            // The offset table lies inside the list: a first offset nobody
+            // validated must not announce more elements than that (every
+            // index below the count then has its offsets in the bytes).
+            if (static_cast<std::size_t>(first) > s.size())
+               return 0;
             return static_cast<std::size_t>(first) / W;
          }
       }
@@ -134,6 +149,12 @@ namespace psio::view_layout {
          {
             constexpr std::size_t esz =
                ::psio::detail::pssz_impl::fixed_size_of<T>();
+            // An element the bytes do not hold (an index past the end, an
+            // array whose span is short) is an empty view, never a span
+            // outside the bytes.
+            if constexpr (esz != 0)
+               if (i >= s.size() / esz)
+                  return {};
             return s.subspan(i * esz, esz);
          }
          else
@@ -160,6 +181,52 @@ namespace psio::view_layout {
                return {};
             return s.subspan(static_cast<std::uint32_t>(off_i),
                               off_next - static_cast<std::uint32_t>(off_i));
+         }
+      }
+
+      // The unchecked forms (trusted view).
+      template <std::size_t W, typename T>
+      [[gnu::always_inline]] inline std::size_t vector_count(std::span<const char> s,
+                                                             unchecked_t) noexcept
+      {
+         if constexpr (::psio::detail::pssz_impl::is_fixed_v<T>)
+            return vector_count<W, T>(s);
+         else
+         {
+            // An empty list is zero bytes (and so is a view of nothing).
+            if (s.empty())
+               return 0;
+            PSIO_VIEW_TRUST(s.size() >= W, "a list is shorter than its first offset");
+            const std::uint32_t first = ::psio::detail::pssz_impl::read_offset<W>(s, 0);
+            PSIO_VIEW_TRUST(first <= s.size(), "the offset table of a list is cut short");
+            return first / W;
+         }
+      }
+
+      template <std::size_t W, typename T>
+      [[gnu::always_inline]] inline std::span<const char> vector_element_span(
+         std::span<const char> s, std::size_t i, unchecked_t) noexcept
+      {
+         if constexpr (::psio::detail::pssz_impl::is_fixed_v<T>)
+         {
+            constexpr std::size_t esz = ::psio::detail::pssz_impl::fixed_size_of<T>();
+            PSIO_VIEW_TRUST(i * esz + esz <= s.size(), "a list element lies past the list");
+            return {s.data() + i * esz, esz};
+         }
+         else
+         {
+            using ::psio::detail::pssz_impl::read_offset;
+            PSIO_VIEW_TRUST(s.size() >= W, "a list is shorter than its first offset");
+            // The offset table ends where the first element begins.
+            const std::size_t table = read_offset<W>(s, 0);
+            PSIO_VIEW_TRUST(table <= s.size() && (i + 1) * W <= table,
+                            "a list element lies past the offset table");
+            const std::size_t start = read_offset<W>(s, i * W);
+            const std::size_t stop =
+               (i + 1) * W < table ? std::size_t{read_offset<W>(s, (i + 1) * W)} : s.size();
+            PSIO_VIEW_TRUST(start <= stop && stop <= s.size(),
+                            "the offsets of a list element are out of order or out of range");
+            return {s.data() + start, stop - start};
          }
       }
 
@@ -192,6 +259,40 @@ namespace psio::view_layout {
             return s;
          else
             return s.empty() ? std::span<const char>{} : s.subspan(1);
+      }
+
+      // The unchecked forms (trusted view). A view of nothing (default-
+      // constructed, `at(i)` past the end) has a null span.
+      template <typename T>
+      [[gnu::always_inline]] inline bool optional_has_value(std::span<const char> s,
+                                                            unchecked_t) noexcept
+      {
+         using V = typename T::value_type;
+         if constexpr (!::psio::detail::pssz_impl::optional_uses_selector_v<V>)
+            return !s.empty();
+         else
+         {
+            if (s.data() == nullptr)
+               return false;
+            PSIO_VIEW_TRUST(!s.empty(), "an optional has no selector byte");
+            return static_cast<unsigned char>(s[0]) != 0;
+         }
+      }
+
+      template <typename T>
+      [[gnu::always_inline]] inline std::span<const char> optional_payload_span(
+         std::span<const char> s, unchecked_t) noexcept
+      {
+         using V = typename T::value_type;
+         if constexpr (!::psio::detail::pssz_impl::optional_uses_selector_v<V>)
+            return s;
+         else
+         {
+            if (s.data() == nullptr)
+               return {};
+            PSIO_VIEW_TRUST(!s.empty(), "an optional has no selector byte");
+            return {s.data() + 1, s.size() - 1};
+         }
       }
 
       // ── record ─────────────────────────────────────────────────────────
@@ -322,6 +423,151 @@ namespace psio::view_layout {
          }
       }
 
+      // The unchecked forms (trusted view).
+      //
+      // The state is the size of the fixed region the writer wrote, read
+      // from the header without comparing it with the record's size; 0 for
+      // a view of nothing (one null test, when the view is constructed), so
+      // that every member of such a view reads as absent through the
+      // compare below.
+      template <std::size_t W, typename T>
+      struct trusted_record_state
+      {
+         std::size_t fixed = 0;
+
+         constexpr trusted_record_state() noexcept = default;
+         [[gnu::always_inline]] explicit trusted_record_state(std::span<const char> bytes) noexcept
+         {
+            using namespace ::psio::detail::pssz_impl;
+            if (bytes.data() == nullptr)
+               return;
+            if constexpr (::psio::is_dwnc_v<T>)
+            {
+               constexpr auto fields = record_layout<W, T>(
+                  std::make_index_sequence<record_traits<T>::member_count>{});
+               constexpr auto known_size = [&] {
+                  std::size_t n = 0;
+                  for (auto field : fields) n += field.fixed_size;
+                  return n;
+               }();
+               PSIO_VIEW_TRUST(bytes.size() >= known_size, "a record is cut short");
+               fixed = known_size;
+            }
+            else
+            {
+               PSIO_VIEW_TRUST(bytes.size() >= W, "a record has no header");
+               fixed = read_offset<W>(bytes, 0);
+               PSIO_VIEW_TRUST(fixed <= bytes.size() - W,
+                               "a record's header announces more than the record holds");
+            }
+         }
+      };
+
+      // Member N of a record on valid bytes. What stays is the wire's
+      // meaning, where valid bytes can differ: a trailing optional member
+      // (or the offset slot after a member) that the writer's header does
+      // not cover was not written, and offset slots this reader does not
+      // know end its last variable member. Validation refuses a header that
+      // omits a member every writer writes (all up to the last one that is
+      // not a plain std::optional — required_field_count), so such a member
+      // is read without consulting the header at all: one null test tells a
+      // view of nothing.
+      template <std::size_t W, typename T, std::size_t N>
+      [[gnu::always_inline]] inline std::span<const char> record_field_span(
+         std::span<const char> bytes, const trusted_record_state<W, T>& state) noexcept
+      {
+         using namespace ::psio::detail::pssz_impl;
+         constexpr auto fields = record_layout<W, T>(
+            std::make_index_sequence<record_traits<T>::member_count>{});
+         constexpr auto fixed_off = [&] {
+            std::size_t n = 0;
+            for (std::size_t i = 0; i < N; ++i) n += fields[i].fixed_size;
+            return n;
+         }();
+         constexpr auto known_size = [&] {
+            std::size_t n = 0;
+            for (auto field : fields) n += field.fixed_size;
+            return n;
+         }();
+         constexpr auto next_slot = [&] {
+            std::size_t pos = fixed_off + fields[N].fixed_size;
+            for (std::size_t i = N + 1; i < fields.size(); ++i)
+            {
+               if (fields[i].variable) return pos;
+               pos += fields[i].fixed_size;
+            }
+            return known_size;
+         }();
+         // The first later member with an offset slot, if any.
+         constexpr std::size_t next_variable = [&] {
+            for (std::size_t i = N + 1; i < fields.size(); ++i)
+               if (fields[i].variable) return i;
+            return fields.size();
+         }();
+         // Members every valid encoding of T has.
+         constexpr std::size_t written = required_field_count<T>();
+         constexpr std::size_t header  = ::psio::is_dwnc_v<T> ? 0 : W;
+         const std::size_t     fixed_size = state.fixed;
+         if constexpr (N < written)
+         {
+            if (bytes.data() == nullptr)
+               return {};
+            PSIO_VIEW_TRUST(fixed_off + fields[N].fixed_size <= fixed_size,
+                            "a record's header omits a required member");
+         }
+         else if (fixed_off + fields[N].fixed_size > fixed_size)
+         {
+            if constexpr (omittable_field_v<T, N>)
+            {
+               using F = typename record_traits<T>::template member_type<N>;
+               if constexpr (optional_uses_selector_v<typename F::value_type>)
+               {
+                  static constexpr char none = 0;
+                  return {&none, 1};
+               }
+            }
+            return {};
+         }
+         if constexpr (!fields[N].variable)
+         {
+            if constexpr (fields[N].fixed_size == 0)
+               return {};
+            else
+               return {bytes.data() + header + fixed_off, fields[N].fixed_size};
+         }
+         else
+         {
+            const std::size_t start = read_offset<W>(bytes, header + fixed_off);
+            std::size_t       stop  = bytes.size() - header;
+            if constexpr (next_variable < written)
+            {
+               // The next offset slot is always written.
+               PSIO_VIEW_TRUST(next_slot + W <= fixed_size, "a record's header cuts an offset slot");
+               stop = read_offset<W>(bytes, header + next_slot);
+            }
+            else if constexpr (next_variable == fields.size() && ::psio::is_dwnc_v<T>)
+            {
+               // The last variable member of a record that cannot grow ends
+               // where the record ends.
+            }
+            else if (next_slot < fixed_size)
+            {
+               PSIO_VIEW_TRUST(W <= fixed_size - next_slot, "a record's header cuts an offset slot");
+               stop = read_offset<W>(bytes, header + next_slot);
+            }
+            PSIO_VIEW_TRUST(start >= fixed_size && start <= stop && stop <= bytes.size() - header,
+                            "the offsets of a record member are out of order or out of range");
+            return {bytes.data() + header + start, stop - start};
+         }
+      }
+
+      template <std::size_t W, typename T, std::size_t N>
+      [[gnu::always_inline]] inline std::span<const char> record_field_span(
+         std::span<const char> bytes, unchecked_t) noexcept
+      {
+         return record_field_span<W, T, N>(bytes, trusted_record_state<W, T>{bytes});
+      }
+
       // ── variant ────────────────────────────────────────────────────────
       inline std::size_t variant_index(std::span<const char> s) noexcept
       {
@@ -337,7 +583,91 @@ namespace psio::view_layout {
          return s.empty() ? std::span<const char>{} : s.subspan(1);
       }
 
+      // The unchecked forms (trusted view).
+      [[gnu::always_inline]] inline std::size_t variant_index(std::span<const char> s,
+                                                              unchecked_t) noexcept
+      {
+         if (s.data() == nullptr)
+            return 0;
+         PSIO_VIEW_TRUST(!s.empty(), "a variant has no selector byte");
+         return static_cast<std::size_t>(static_cast<unsigned char>(s[0]));
+      }
+
+      [[gnu::always_inline]] inline std::span<const char> variant_payload_span(
+         std::span<const char> s, unchecked_t) noexcept
+      {
+         if (s.data() == nullptr)
+            return {};
+         PSIO_VIEW_TRUST(!s.empty(), "a variant has no selector byte");
+         return {s.data() + 1, s.size() - 1};
+      }
+
    }  // namespace detail_pssz
+
+// The unchecked forms of a PSSZ traits class (view.hpp "Safe and trusted
+// views"). PSIO_W(type...) is the offset width the class selects for a type.
+#define PSIO_PSSZ_VIEW_UNCHECKED_FORMS_                                                    \
+   static constexpr bool trusted_views = true;                                             \
+   template <typename T>                                                                   \
+      requires ::psio::detail::pssz_impl::Record<T>                                        \
+   using trusted_record_state = detail_pssz::trusted_record_state<PSIO_W(T), T>;           \
+   template <typename T, std::size_t N>                                                    \
+   static std::span<const char> record_field_span(                                         \
+      std::span<const char> s, std::span<const char>,                                      \
+      const trusted_record_state<T>& state) noexcept                                       \
+   {                                                                                       \
+      return detail_pssz::record_field_span<PSIO_W(T), T, N>(s, state);                    \
+   }                                                                                       \
+   template <typename T, std::size_t N>                                                    \
+      requires (::psio::detail::pssz_impl::Record<T> &&                                    \
+                N < ::psio::detail::pssz_impl::record_traits<T>::member_count)             \
+   static std::span<const char> record_field_span(                                         \
+      std::span<const char> s, std::span<const char>, unchecked_t) noexcept                \
+   {                                                                                       \
+      return detail_pssz::record_field_span<PSIO_W(T), T, N>(s, unchecked);                \
+   }                                                                                       \
+   template <typename T>                                                                   \
+   static std::size_t vector_count(std::span<const char> s, unchecked_t) noexcept          \
+   {                                                                                       \
+      return detail_pssz::vector_count<PSIO_W(std::vector<T>), T>(s, unchecked);           \
+   }                                                                                       \
+   template <typename T>                                                                   \
+   static std::span<const char> vector_element_span(std::span<const char> s, std::size_t i, \
+                                                    unchecked_t) noexcept                  \
+   {                                                                                       \
+      return detail_pssz::vector_element_span<PSIO_W(std::vector<T>), T>(s, i, unchecked); \
+   }                                                                                       \
+   template <typename T, std::size_t N>                                                    \
+   static std::span<const char> array_element_span(std::span<const char> s, std::size_t i, \
+                                                   unchecked_t) noexcept                   \
+   {                                                                                       \
+      /* (An array always has N elements: a view of nothing has N empty ones.) */          \
+      if (s.data() == nullptr)                                                             \
+         return {};                                                                        \
+      return detail_pssz::vector_element_span<PSIO_W(std::array<T, N>), T>(s, i, unchecked); \
+   }                                                                                       \
+   template <typename T>                                                                   \
+   static bool optional_has_value(std::span<const char> s, unchecked_t) noexcept           \
+   {                                                                                       \
+      return detail_pssz::optional_has_value<std::optional<T>>(s, unchecked);              \
+   }                                                                                       \
+   template <typename T>                                                                   \
+   static std::span<const char> optional_payload_span(std::span<const char> s,             \
+                                                      unchecked_t) noexcept                \
+   {                                                                                       \
+      return detail_pssz::optional_payload_span<std::optional<T>>(s, unchecked);           \
+   }                                                                                       \
+   template <typename... Ts>                                                               \
+   static std::size_t variant_index(std::span<const char> s, unchecked_t) noexcept         \
+   {                                                                                       \
+      return detail_pssz::variant_index(s, unchecked);                                     \
+   }                                                                                       \
+   template <typename... Ts>                                                               \
+   static std::span<const char> variant_payload_span(std::span<const char> s,              \
+                                                     unchecked_t) noexcept                 \
+   {                                                                                       \
+      return detail_pssz::variant_payload_span(s, unchecked);                              \
+   }
 
    // ── pssz_<W> — explicit width ─────────────────────────────────────────
    template <std::size_t W>
@@ -408,6 +738,10 @@ namespace psio::view_layout {
       {
          return detail_pssz::variant_payload_span(s);
       }
+
+#define PSIO_W(...) W
+      PSIO_PSSZ_VIEW_UNCHECKED_FORMS_
+#undef PSIO_W
    };
 
    // ── pssz — auto-W (W chosen from ViewedType) ──────────────────────────
@@ -512,6 +846,9 @@ namespace psio::view_layout {
          return detail_pssz::variant_payload_span(s);
       }
 
+#define PSIO_W(...) ::psio::auto_pssz_width_v<__VA_ARGS__>
+      PSIO_PSSZ_VIEW_UNCHECKED_FORMS_
+#undef PSIO_W
    };
 
    // ── pssz_at<A> — the automatic profile under annotations A ────────────
@@ -638,7 +975,12 @@ namespace psio::view_layout {
       {
          return detail_pssz::variant_payload_span(s);
       }
+
+#define PSIO_W(...) width<__VA_ARGS__>
+      PSIO_PSSZ_VIEW_UNCHECKED_FORMS_
+#undef PSIO_W
    };
+#undef PSIO_PSSZ_VIEW_UNCHECKED_FORMS_
 
 }  // namespace psio::view_layout
 
@@ -689,22 +1031,33 @@ namespace psio {
          static constexpr storage storage_kind = Store;
          static_assert(sizeof(detail::read_view_store<Store>) > 0);
          tuple_view() = default;
-         explicit tuple_view(std::span<const char> s) noexcept : data_(s) {}
-         tuple_view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+         explicit tuple_view(view_source<Store> s) noexcept : data_(view_source_bytes(s)) {}
+         tuple_view(view_source<Store> s, std::span<const char>) noexcept
+            : data_(view_source_bytes(s))
+         {
+         }
          std::span<const char> _psio_data() const noexcept { return data_; }
          // Element N: its value for an arithmetic element, its view
          // otherwise. Structured bindings work: `auto [a, b] = tuple_view;`.
          template <std::size_t N> auto get() const noexcept
          {
             using F = std::remove_cvref_t<std::tuple_element_t<N, Tuple>>;
-            auto span = view_layout::traits<Fmt>::template record_field_span<Tuple, N>(data_);
+            auto span = view_layout::field_of<Fmt, Store, Tuple, N>(data_, {});
             if constexpr (std::is_arithmetic_v<F>)
             {
                F out{};
-               if (span.size() == sizeof(F)) std::memcpy(&out, span.data(), sizeof(F));
+               if constexpr (trusted_store_v<Store>)
+               {
+                  if (view_has_scalar<Store, sizeof(F)>(span))
+                     std::memcpy(&out, span.data(), sizeof(F));
+               }
+               else if (span.size() == sizeof(F))
+                  std::memcpy(&out, span.data(), sizeof(F));
                return out;
             }
-            else return view<F, view_layout::member_format_t<Fmt, Tuple, N>, Store>{span};
+            else
+               return view<F, view_layout::member_format_t<Fmt, Tuple, N>, Store>{
+                  view_src<Store>(span)};
          }
          PSIO_VIEW_UNPACK_
       };
@@ -718,6 +1071,10 @@ namespace psio {
    {
     public:
       using detail::tuple_view<std::tuple<Ts...>, Fmt, Store>::tuple_view;
+      using element_type = std::tuple<Ts...>;
+      using format_type  = Fmt;
+      static constexpr storage storage_kind = Store;
+      PSIO_VIEW_TO_SAFE_(this->_psio_data())
    };
 
    // The view of an annotated tuple: `psio::pssz_view<
@@ -732,6 +1089,10 @@ namespace psio {
    {
     public:
       using detail::tuple_view<annotated_tuple<Meta, Ts...>, Fmt, Store>::tuple_view;
+      using element_type = annotated_tuple<Meta, Ts...>;
+      using format_type  = Fmt;
+      static constexpr storage storage_kind = Store;
+      PSIO_VIEW_TO_SAFE_(this->_psio_data())
    };
 
    // A std::pair is the 2-tuple of its members: the tuple's view, with the
@@ -751,7 +1112,9 @@ namespace psio {
       auto first() const noexcept { return this->template get<0>(); }
       auto second() const noexcept { return this->template get<1>(); }
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      static constexpr storage storage_kind = Store;
       PSIO_VIEW_UNPACK_
+      PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
    // A map / set is the list of its entries / elements in canonical order:
@@ -895,7 +1258,9 @@ namespace psio {
          return Mapped(::psio::value_of((*this)[i].template get<1>()));
       }
 
+      static constexpr storage storage_kind = Store;
       PSIO_VIEW_UNPACK_
+      PSIO_VIEW_TO_SAFE_(this->_psio_root())
    };
 
    // utf8_string<N> is a String on the wire: the view borrows its bytes. As
@@ -912,8 +1277,11 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
-      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>) noexcept
+         : data_(detail::view_source_bytes(s))
+      {
+      }
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
       [[nodiscard]] std::string_view view_() const noexcept
       {
@@ -923,6 +1291,7 @@ namespace psio {
       [[nodiscard]] std::size_t size() const noexcept { return data_.size(); }
       [[nodiscard]] bool        empty() const noexcept { return data_.empty(); }
       PSIO_VIEW_UNPACK_
+      PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
    // A plain enum is its underlying integer on the wire; the view reads it
@@ -939,17 +1308,22 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
-      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>) noexcept
+         : data_(detail::view_source_bytes(s))
+      {
+      }
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
       [[nodiscard]] T get() const noexcept
       {
          std::underlying_type_t<T> raw{};
-         if (data_.size() >= sizeof(raw)) std::memcpy(&raw, data_.data(), sizeof(raw));
+         if (detail::view_has_scalar<Store, sizeof(raw)>(data_))
+            std::memcpy(&raw, data_.data(), sizeof(raw));
          return static_cast<T>(raw);
       }
       [[nodiscard]] T unpack() const noexcept { return get(); }
       operator T() const noexcept { return get(); }
+      PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
    // A duration / time point is its tick count on the wire (time.hpp); the
@@ -965,17 +1339,22 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
-      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>) noexcept
+         : data_(detail::view_source_bytes(s))
+      {
+      }
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
       [[nodiscard]] T get() const noexcept
       {
          ::psio::time_rep_t<T> raw{};
-         if (data_.size() >= sizeof(raw)) std::memcpy(&raw, data_.data(), sizeof(raw));
+         if (detail::view_has_scalar<Store, sizeof(raw)>(data_))
+            std::memcpy(&raw, data_.data(), sizeof(raw));
          return ::psio::time_from_ticks<T>(raw);
       }
       [[nodiscard]] T unpack() const noexcept { return get(); }
       operator T() const noexcept { return get(); }
+      PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
    // uint256 is its 32 little-endian bytes on the wire; the view reads it by
@@ -991,17 +1370,22 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
-      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>) noexcept
+         : data_(detail::view_source_bytes(s))
+      {
+      }
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
       [[nodiscard]] uint256 get() const noexcept
       {
          uint256 out{};
-         if (data_.size() >= sizeof(out.limb)) std::memcpy(out.limb, data_.data(), sizeof(out.limb));
+         if (detail::view_has_scalar<Store, sizeof(out.limb)>(data_))
+            std::memcpy(out.limb, data_.data(), sizeof(out.limb));
          return out;
       }
       [[nodiscard]] uint256 unpack() const noexcept { return get(); }
       operator uint256() const noexcept { return get(); }
+      PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
    template <typename T, typename Fmt, storage Store>
@@ -1010,6 +1394,9 @@ namespace psio {
    {
     public:
       using view<T, Fmt, Store>::view;
+      using format_type                     = Fmt;
+      static constexpr storage storage_kind = Store;
+      PSIO_VIEW_TO_SAFE_AS_(schema_types::Box<T>, this->_psio_data())
    };
 
    // A transparent type (transparent.hpp) is its member: so is its view.
@@ -1028,19 +1415,41 @@ namespace psio {
       view() = default;
       view(const base& inner) noexcept : base(inner) {}
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      static constexpr storage storage_kind = Store;
       PSIO_VIEW_UNPACK_
+      PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
-   // Construction checks the complete frame; getters retain their O(1)
-   // prevalidated-input contract and borrow the original payload bytes.
-   template <typename T, typename Fmt>
+   // ── Validate once, then view ──────────────────────────────────────────
+   //
+   //   auto row = psio::validated_pssz_view<Row>(bytes);   // psio::checked_view<Row, psio::pssz>
+   //   if (!row) return report(row.error());
+   //   use(row->owner(), row->balance());                  // psio::pssz_trusted_view<Row>
+   //
+   // `validated_pssz_view<T>(bytes)` checks the complete frame as
+   // `psio::validate_pssz<T>` does (unknown appended optional fields are
+   // accepted) and hands back the TRUSTED view of it, in a
+   // psio::checked_view (view.hpp): no later access compares an offset
+   // again. `psio::validated_view<T>(fmt, bytes)` is the same for an
+   // explicit-width profile.
+   template <typename T>
+   [[nodiscard]] checked_view<T, pssz> validated_pssz_view(std::span<const char> bytes) noexcept
+   {
+      return ::psio::validated_view<T>(pssz{}, bytes);
+   }
+
+   // The same with an out-parameter, reporting whether the frame carries
+   // fields this T does not know. `result` is either kind of view: a
+   // std::optional<psio::pssz_trusted_view<T>> receives the trusted view, a
+   // std::optional<psio::pssz_view<T>> the safe one.
+   template <typename T, typename Fmt, storage Store>
       requires detail::is_pssz_format_v<Fmt>
    [[nodiscard]] codec_status validated_pssz_view(
-      Fmt fmt, std::span<const char> bytes,
-      std::optional<view<T, Fmt, storage::const_borrow>>& result, bool& has_unknown)
+      Fmt fmt, std::span<const char> bytes, std::optional<view<T, Fmt, Store>>& result,
+      bool& has_unknown)
    {
       auto status = validate_pssz_compatible<T>(fmt, bytes, has_unknown);
-      if (status.ok()) result.emplace(bytes);
+      if (status.ok()) result.emplace(detail::view_src<Store>(bytes));
       return status;
    }
 
@@ -1118,7 +1527,10 @@ namespace psio {
                           "of its encoding, so its bytes are not a standalone encoding of its "
                           "type. Take it by value, or state the bound in the type "
                           "(psio::bounded, a record with its own maxDynamicData)");
-            return P{part};
+            // (A parameter declared psio::pssz_trusted_view<X> is handed the
+            // trusted view: the argument tuple has been validated, or the
+            // caller vouched for it.)
+            return P{view_src<P::storage_kind>(part)};
          }
          else if constexpr (std::is_same_v<P, std::string_view>)
             return std::string_view{part.data(), part.size()};

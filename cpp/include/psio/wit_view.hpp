@@ -20,6 +20,11 @@
 //
 // vector_count / vector_element_span operate on the already-resolved
 // heap span, so they don't need root.
+//
+// Each function that compares something with a size has a checked form (the
+// safe view, `psio::wit_view<T>`) and an unchecked one with a trailing
+// `unchecked_t` (the trusted view, `psio::wit_trusted_view<T>`, over bytes
+// `psio::validate_wit<T>` accepted): view.hpp "Safe and trusted views".
 
 #include <psio/view.hpp>
 #include <psio/wit.hpp>
@@ -56,6 +61,8 @@ namespace psio::view_layout {
    template <>
    struct traits<::psio::wit>
    {
+      static constexpr bool trusted_views = true;
+
       // ── vector ─────────────────────────────────────────────────────────
       //
       // After record_field_span has followed the (ptr, len) pair to the
@@ -84,6 +91,16 @@ namespace psio::view_layout {
          return s.subspan(i * esz, esz);
       }
 
+      // The unchecked form (trusted view).
+      template <typename T>
+      [[gnu::always_inline]] static std::span<const char> vector_element_span(
+         std::span<const char> s, std::size_t i, unchecked_t) noexcept
+      {
+         constexpr std::size_t esz = ::psio::detail::wit_impl::canonical_size<T>();
+         PSIO_VIEW_TRUST(i * esz + esz <= s.size(), "a list element lies past the list");
+         return {s.data() + i * esz, esz};
+      }
+
       // ── optional ───────────────────────────────────────────────────────
       //
       // Canonical-ABI option<T>: [u8 discriminator][padding to align<T>]
@@ -106,6 +123,28 @@ namespace psio::view_layout {
          if (s.size() < payload_off)
             return {};
          return s.subspan(payload_off);
+      }
+
+      // The unchecked forms (trusted view). A view of nothing (default-
+      // constructed, `at(i)` past the end) has a null span.
+      template <typename T>
+      static bool optional_has_value(std::span<const char> s, unchecked_t) noexcept
+      {
+         if (s.data() == nullptr)
+            return false;
+         PSIO_VIEW_TRUST(!s.empty(), "an option has no discriminant");
+         return static_cast<unsigned char>(s[0]) != 0;
+      }
+      template <typename T>
+      static std::span<const char> optional_payload_span(std::span<const char> s,
+                                                         unchecked_t) noexcept
+      {
+         constexpr std::size_t align = ::psio::detail::wit_impl::canonical_align<T>();
+         constexpr std::size_t payload_off = align == 0 ? 1 : align;
+         if (s.data() == nullptr)
+            return {};
+         PSIO_VIEW_TRUST(s.size() >= payload_off, "an option is cut short");
+         return {s.data() + payload_off, s.size() - payload_off};
       }
 
       // ── Reflected struct field access ──────────────────────────────────
@@ -160,6 +199,46 @@ namespace psio::view_layout {
             if (s.size() < off + sz)
                return {};
             return s.subspan(off, sz);
+         }
+      }
+
+      // The unchecked form (trusted view): one null test for a view of
+      // nothing; a (ptr, len) pair is followed without comparing it with
+      // the buffer.
+      template <typename T, std::size_t N>
+         requires ::psio::Reflected<T>
+                  && (N < ::psio::reflect<T>::member_count)
+      [[gnu::always_inline]] static std::span<const char> record_field_span(
+         std::span<const char> s, std::span<const char> root, unchecked_t) noexcept
+      {
+         using R      = ::psio::reflect<T>;
+         using FieldT = std::remove_cvref_t<typename R::template member_type<N>>;
+         constexpr std::size_t off = ::psio::wit_abi_field_offset_v<T, N>;
+         if (s.data() == nullptr)
+            return {};
+         if constexpr (detail_wit_view::is_std_string_v<FieldT> ||
+                       detail_wit_view::is_std_vector_v<FieldT>)
+         {
+            PSIO_VIEW_TRUST(s.size() >= off + 8, "a record is cut short");
+            std::uint32_t ptr, len;
+            std::memcpy(&ptr, s.data() + off, 4);
+            std::memcpy(&len, s.data() + off + 4, 4);
+            constexpr std::size_t esz = [] {
+               if constexpr (detail_wit_view::is_std_vector_v<FieldT>)
+                  return ::psio::detail::wit_impl::canonical_size<typename FieldT::value_type>();
+               else
+                  return std::size_t{1};
+            }();
+            const std::size_t total = std::size_t{len} * esz;
+            PSIO_VIEW_TRUST(!root.empty() && std::size_t{ptr} + total <= root.size(),
+                            "a (pointer, length) pair points outside the buffer");
+            return {root.data() + ptr, total};
+         }
+         else
+         {
+            constexpr std::size_t sz = ::psio::detail::wit_impl::canonical_size<FieldT>();
+            PSIO_VIEW_TRUST(s.size() >= off + sz, "a record is cut short");
+            return {s.data() + off, sz};
          }
       }
    };
