@@ -1058,3 +1058,12 @@ endfunction()
 set(PSIO_CONS_BOUNDS "contradictory length bounds on one member or position")
 psio_consistency_compile_fail(max_twice CONS_FAIL_MAX_TWICE "${PSIO_CONS_BOUNDS}")
 psio_consistency_compile_fail(min_above_max CONS_FAIL_MIN_ABOVE_MAX "${PSIO_CONS_BOUNDS}")
+
+# Shared vectors of the two name coders (conformance/name-vectors.json):
+# psio/name.hpp identifier names and psio/compress_name.hpp method names.
+set(PSIO_NAME_VECTORS ${CMAKE_SOURCE_DIR}/conformance/name-vectors.json)
+add_executable(psio_name_conformance_emit name_conformance_emit.cpp)
+target_link_libraries(psio_name_conformance_emit PRIVATE psio)
+target_compile_features(psio_name_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_name_conformance_regen
+         COMMAND psio_name_conformance_emit --check ${PSIO_NAME_VECTORS})

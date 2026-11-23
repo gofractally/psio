@@ -5,7 +5,17 @@
 // Encodes short human-readable strings (a-z, 0-9, hyphen, up to 18
 // chars) into a 64-bit integer using arithmetic coding with a
 // context-dependent probability model. The encoding is bijective:
-// every valid name maps to a unique u64 and back.
+// every valid name maps to a unique u64 and back:
+//
+//    name_to_number(s) == n != 0   implies   number_to_name(n) == s
+//
+// name_to_number enforces it by decoding what it encoded. A text whose
+// code does not read back as the text is not a name and gets 0: one with
+// a doubled hyphen ("x--b": the model has no frequency for '-' after
+// '-'), one that starts with a digit or '-', and one whose code needs
+// more than 64 bits (most texts of 12 or more characters, some shorter
+// ones made of rare characters). To know whether a NUMBER is a name's,
+// compare name_to_number(number_to_name(n)) == n.
 //
 // Used as the universal key type throughout the stack:
 //   psio:     schema/reflection metadata keys
@@ -14,7 +24,8 @@
 //   psiserve: process/service names
 //   WIT:      passed as a single i64 flat_val (scalar fast path)
 //
-// Names that don't compress (too long, invalid chars) produce 0.
+// Names that don't compress (too long, invalid chars, no exact code)
+// produce 0.
 // The caller can fall back to a hash for those cases.
 //
 // Derived from psibase::name (Mark Thomas Nelson's arithmetic coding,
@@ -191,6 +202,11 @@ private:
 
 } // namespace detail_name
 
+namespace detail_name
+{
+constexpr bool decodes_to(uint64_t number, std::string_view text);
+}
+
 inline constexpr uint64_t name_to_number(std::string_view m_input)
 {
    if (m_input.size() == 0 || m_input.size() > 18)
@@ -305,13 +321,26 @@ inline constexpr uint64_t name_to_number(std::string_view m_input)
    if (m_in_itr != m_input.end() || c != '\0')
       return 0;
 
+   // The coding is a bijection between names and their numbers: a number
+   // is a name's only if it decodes to exactly that name. The arithmetic
+   // code of some texts does not — a pair of characters the model gives no
+   // frequency ("--"), or a code whose last bits run past 64 — and such a
+   // text has no number.
+   if (m_output != 0 && !detail_name::decodes_to(m_output, m_input))
+      return 0;
+
    return m_output;
 }
 
-inline std::string number_to_name(uint64_t input)
+namespace detail_name
+{
+// The decoder: calls emit(char) for every character of the text `input`
+// decodes to. False for a number the coder cannot have produced.
+template <typename Emit>
+constexpr bool decode_name(uint64_t input, Emit&& emit)
 {
    if (not input)
-      return std::string();
+      return true;
    typedef typename detail_name::name_model::code_value code_value;
    typedef typename detail_name::name_model::prob       prob;
 
@@ -334,9 +363,6 @@ inline std::string number_to_name(uint64_t input)
       return (current_byte & last_mask) != 0;
    };
 
-   std::string out;
-   out.reserve(15);
-
    code_value high  = detail_name::name_model::MAX_CODE;
    code_value low   = 0;
    code_value value = 0;
@@ -350,7 +376,7 @@ inline std::string number_to_name(uint64_t input)
       code_value range = high - low + 1;
 
       if (range == 0)
-         return "RUNTIME LOGIC ERROR";
+         return false;
 
       code_value scaled_value = ((value - low + 1) * m_model.getCount() - 1) / range;
       int        c;
@@ -358,10 +384,10 @@ inline std::string number_to_name(uint64_t input)
       if (c == '\0')
          break;
 
-      out += m_model.symbol_to_char[(unsigned char)(c)];
+      emit(m_model.symbol_to_char[(unsigned char)(c)]);
 
       if (p.count == 0)
-         return "RUNTIME LOGIC ERROR";
+         return false;
 
       high = low + (range * p.high) / p.count - 1;
       low  = low + (range * p.low) / p.count;
@@ -392,6 +418,28 @@ inline std::string number_to_name(uint64_t input)
          value += get_bit() ? 1 : 0;
       }
    }
+   return true;
+}
+
+// Whether `number` decodes to exactly `text`.
+constexpr bool decodes_to(uint64_t number, std::string_view text)
+{
+   std::size_t at = 0;
+   bool        same = true;
+   const bool  ok = decode_name(number, [&](char c) {
+      same = same && at < text.size() && text[at] == c;
+      ++at;
+   });
+   return ok && same && at == text.size();
+}
+}  // namespace detail_name
+
+inline std::string number_to_name(uint64_t input)
+{
+   std::string out;
+   out.reserve(18);
+   if (!detail_name::decode_name(input, [&](char c) { out += c; }))
+      return "RUNTIME LOGIC ERROR";
    return out;
 }
 

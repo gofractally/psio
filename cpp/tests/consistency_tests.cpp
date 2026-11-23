@@ -3,6 +3,9 @@
 #include <catch.hpp>
 
 #include <psio/annotate.hpp>
+#include <psio/compress_name.hpp>
+#include <psio/get_type_name.hpp>
+#include <psio/name.hpp>
 #include <psio/json.hpp>
 #include <psio/key.hpp>
 #include <psio/max_size.hpp>
@@ -132,4 +135,108 @@ TEST_CASE("a type's cap is not applied to the length of its text", "[consistency
    // Padding does not matter either: the text is not what is capped.
    const std::string padded = "   " + text + std::string(64, ' ');
    CHECK(psio::validate<Capped>(psio::json{}, sp(padded)).ok());
+}
+
+// ── A name's number decodes back to the name ─────────────────────────────
+TEST_CASE("name_to_number: a number is given only to a name it decodes to", "[consistency][name]")
+{
+   using psio::name_to_number;
+   using psio::number_to_name;
+   static_assert(name_to_number("alice") == 6697231);
+   static_assert(name_to_number("a-b") == 15765525);
+   CHECK(number_to_name(6697231) == "alice");
+   // A doubled hyphen has no frequency in the model: the code it used to get
+   // (690109440766) decodes to other text, so it is not a name.
+   static_assert(name_to_number("x--b") == 0);
+   static_assert(name_to_number("a--b") == 0);
+   CHECK(number_to_name(690109440766ull) == "x-wqulitcebeu");
+   // A code whose last bits run past 64 was cut, and two texts shared it.
+   static_assert(name_to_number("grryhn4d3x0") == 0);
+   static_assert(name_to_number("sqhwqzfkinp") == 0);
+   // Unchanged: not a name at all.
+   static_assert(name_to_number("") == 0 && name_to_number("1abc") == 0 &&
+                 name_to_number("-abc") == 0 && name_to_number("Abc") == 0 &&
+                 name_to_number("abcdefghijklmnopqrs") == 0);
+   static_assert(psio::name_id{"x--b"}.value == 0);
+   // Every accepted text of a pseudo-random corpus reads back.
+   std::uint64_t     state = 0x9e3779b97f4a7c15ull;
+   const std::string alphabet = "abcdefghijklmnopqrstuvwxyz0123456789-";
+   std::size_t       accepted = 0;
+   for (int i = 0; i < 200000; ++i)
+   {
+      std::string text;
+      state ^= state << 13, state ^= state >> 7, state ^= state << 17;
+      const std::size_t len = 1 + state % 18;
+      for (std::size_t j = 0; j < len; ++j)
+      {
+         state ^= state << 13, state ^= state >> 7, state ^= state << 17;
+         text += alphabet[state % alphabet.size()];
+      }
+      if (const auto number = name_to_number(text))
+      {
+         ++accepted;
+         if (number_to_name(number) != text)
+            FAIL("name_to_number(" << text << ") = " << number << " decodes to "
+                                   << number_to_name(number));
+      }
+   }
+   CHECK(accepted > 1000);
+}
+
+TEST_CASE("method_to_number: compressed only when the number decodes to the name",
+          "[consistency][name]")
+{
+   using namespace psio::detail;
+   static_assert(method_to_number("spiderman") == 311625498215ull);
+   static_assert(method_to_number("transfer") == method_to_number("Transfer"));
+   CHECK(number_to_method(method_to_number("Transfer")) == "transfer");
+   // The code of "getSymbolType" overflows 64 bits; the cut-off code decoded
+   // to "getsymboltyp". It is a hash now, like any name that does not fit.
+   static_assert(method_to_number("getSymbolType") == 0xd55df3070b8758ebull);
+   static_assert(is_hash_name(method_to_number("getSymbolType")));
+   CHECK(number_to_method(0x7ea96086faa7f7c0ull) == "getsymboltyp");   // the old, cut-off code
+   static_assert(method_to_number("getsymboltyp") != 0x7ea96086faa7f7c0ull);
+   CHECK(number_to_method(0xd55df3070b8758ebull) == "#hmlnslheseoypnnp");
+   static_assert(method_to_number("#hmlnslheseoypnnp") == 0xd55df3070b8758ebull);
+   // The hash is of the bytes as written: case matters there.
+   static_assert(method_to_number("getSymbolType") != method_to_number("getsymboltype"));
+   static_assert(is_hash_name(method_to_number("getsymboltype")));
+   // Malformed hash text is not a name: 0 (it was 2^64 - 1).
+   static_assert(method_to_number("#") == 0 && method_to_number("#abc") == 0 &&
+                 method_to_number("#hmlnslheseoypnnpe") == 0 &&
+                 method_to_number("#hmlnslheseoypnnz") == 0);
+   // ... nor is well-formed hash text of a number that is not a hash number.
+   static_assert(method_to_number("#eeeeeeeeeeeeeeee") == 0);
+   // Outside the alphabet, empty: 0, as before.
+   static_assert(method_to_number("") == 0 && method_to_number("a-b") == 0);
+   // psio::hash_name / is_compressed_name are the same function.
+   static_assert(psio::hash_name("getSymbolType") == 0xd55df3070b8758ebull);
+   static_assert(!psio::is_compressed_name(psio::hash_name("getSymbolType")));
+
+   std::uint64_t     state = 0x2545f4914f6cdd1dull;
+   const std::string alphabet = "abcdefghijklmnopqrstuvwxyzABCXYZ_019";
+   for (int i = 0; i < 200000; ++i)
+   {
+      std::string text;
+      state ^= state << 13, state ^= state >> 7, state ^= state << 17;
+      const std::size_t len = 1 + state % 16;
+      for (std::size_t j = 0; j < len; ++j)
+      {
+         state ^= state << 13, state ^= state >> 7, state ^= state << 17;
+         text += alphabet[state % alphabet.size()];
+      }
+      const auto number = method_to_number(text);
+      REQUIRE(number != 0);
+      if (method_to_number(number_to_method(number)) != number)
+         FAIL("method_to_number(" << text << ") = " << number << " is not the number of "
+                                  << number_to_method(number));
+      if (!is_hash_name(number))
+      {
+         std::string canonical;
+         for (unsigned char c : text)
+            canonical += func_model::symbol_to_char[func_model::char_to_symbol[c]];
+         if (number_to_method(number) != canonical)
+            FAIL("method_to_number(" << text << ") decodes to " << number_to_method(number));
+      }
+   }
 }
