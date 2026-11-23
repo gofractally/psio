@@ -71,6 +71,16 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let member = &members[0].member;
             let construct =
                 crate::attrs::construct(quote!(Self), &data.fields, &[quote!(__inner)])?;
+            // The member's bounds are the type's: checked by the writers
+            // and the reader, as for a record member.
+            let bound_check = match crate::attrs::annotated(members[0].field, &members[0].attrs, &krate)? {
+                Some(crate::attrs::Annotated { own, spec }) => quote! {
+                    if #krate::pssz::bounds::check::<#own, #spec>(&__bounded.#member).is_err() {
+                        return ::core::result::Result::Err(#k::KeyError::new("key: member length_bound violated"));
+                    }
+                },
+                None => quote!(),
+            };
             // A transparent wrapper of a composite key is that composite key.
             let composite = match ty {
                 syn::Type::Tuple(_) => quote! {
@@ -91,6 +101,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     }
                     fn key_check(&self) -> #k::KeyResult<()> {
                         #k::KeyPack::key_check(&self.#member)?;
+                        { let __bounded = self; #bound_check }
                         #check_self
                         ::core::result::Result::Ok(())
                     }
@@ -99,6 +110,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     fn key_unpack(r: &mut #k::KeyReader<'_>) -> #k::KeyResult<Self> {
                         let __inner = <#ty as #k::KeyUnpack>::key_unpack(r)?;
                         let __value = #construct;
+                        { let __bounded = &__value; #bound_check }
                         #check_value
                         ::core::result::Result::Ok(__value)
                     }
@@ -234,12 +246,24 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             let mut idents = Vec::new();
             let mut types = Vec::new();
             let mut indexes = Vec::new();
+            // An alternative's bounds, written on its field.
+            let mut bounds = Vec::new();
             for (index, variant) in data.variants.iter().enumerate() {
                 match &variant.fields {
                     Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                         idents.push(&variant.ident);
                         types.push(&fields.unnamed[0].ty);
                         indexes.push(index as u8);
+                        let field = &fields.unnamed[0];
+                        bounds.push(match crate::attrs::annotated(field, &crate::attrs::field(field)?, &krate)? {
+                            Some(crate::attrs::Annotated { own, spec }) => quote! {
+                                if #krate::pssz::bounds::check::<#own, #spec>(value).is_err() {
+                                    return ::core::result::Result::Err(
+                                        #k::KeyError::new("key: member length_bound violated"));
+                                }
+                            },
+                            None => quote!(),
+                        });
                     }
                     _ => {
                         return Err(syn::Error::new_spanned(
@@ -266,7 +290,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     }
                     fn key_check(&self) -> #k::KeyResult<()> {
                         match self {
-                            #(Self::#idents(value) => #k::KeyPack::key_check(value)?,)*
+                            #(Self::#idents(value) => {
+                                #k::KeyPack::key_check(value)?;
+                                #bounds
+                            })*
                         }
                         #check_self
                         ::core::result::Result::Ok(())
@@ -279,6 +306,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             _ => return ::core::result::Result::Err(
                                 #k::KeyError::new("key: variant index out of range")),
                         };
+                        #[allow(unused_variables)]
+                        match &__value {
+                            #(Self::#idents(value) => { #bounds })*
+                        }
                         #check_value
                         ::core::result::Result::Ok(__value)
                     }
