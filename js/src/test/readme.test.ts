@@ -52,8 +52,13 @@ test('README: typed definitions', () => {
   assert.equal(record('Note', { text: utf8 }, { maxDynamicData: 200 }).width, 1);
   assert.equal(record('Open', { text: utf8 }).width, 4);
   assert.equal(tuple(u64, boundedUtf8(32), u8).width, 1);
+  assert.equal(tuple(u64, boundedUtf8(32), u8).inferredBound, 43n);
   assert.equal(tuple(u64, boundedUtf8(32), u8).maxEncodedSize, 43n);
-  assert.equal(record('Open', { text: utf8 }).maxEncodedSize, null);
+  assert.equal(record('Note', { text: utf8 }, { maxDynamicData: 200 }).inferredBound, null);
+  assert.equal(record('Note', { text: utf8 }, { maxDynamicData: 200 }).maxEncodedSize, 200n);
+  assert.equal(record('Row', { id: u64, memo: boundedUtf8(80) }, { maxDynamicData: 1024 }).inferredBound, 90n);
+  assert.equal(record('Row', { id: u64, memo: boundedUtf8(80) }, { maxDynamicData: 1024 }).maxEncodedSize, 92n);
+  assert.equal(record('Open', { text: utf8 }).inferredBound, null);
   assert.equal(boundedList(boundedUtf8(16), 15).width, 1);
   assert.equal(boundedList(boundedUtf8(17), 15).width, 2);
   assert.equal(list(boundedUtf8(16)).width, 4);
@@ -302,7 +307,7 @@ test('README: bounds at any depth, method arguments', () => {
   // 28; body 1 + 4 * (2 + 280) = 1129; reply 1 + 2 * (1 + 32) = 67; and the
   // record's own header and six slots at 2 bytes.
   assert.equal(2 * 7 + 80 + 136 + 112 + 28 + 1129 + 67, 1566);
-  assert.equal(Post.maxEncodedSize, 1566n);
+  assert.equal(Post.inferredBound, 1566n);
   // Some at-the-bound values fit; the widest (the four parts) does too.
   const full: Post = { ...post, body: { type: 'Parts', value: Array(4).fill('x'.repeat(280)) }, tags: Array(8).fill('t'.repeat(16)) };
   assert.ok(Post.encode(full).length <= 1566);
@@ -354,7 +359,11 @@ test('README: bounds at any depth, method arguments', () => {
   const Transfer2 = argumentTuple({ ...parameters, fee: optional(u32) }, { maxDynamicData: 256 });
   assert.equal(Transfer.width, 2);
   assert.equal(argumentTuple(parameters).width, 1);
-  assert.equal(argumentTuple(parameters).maxEncodedSize, 107n);
+  assert.equal(argumentTuple(parameters).inferredBound, 107n);
+  // The largest argument list: under the cap the header and the two slots
+  // are 2 bytes wide.
+  assert.equal(Transfer.inferredBound, 107n);
+  assert.equal(Transfer.maxEncodedSize, 110n);
   const args = Transfer.encode({ to: 'al', amount: 5n, memo: 'hi' });
   assert.equal(toHex(args), '0c000c0005000000000000000e00616c6869');
   assert.deepEqual(Transfer2.decode(args), { to: 'al', amount: 5n, memo: 'hi', fee: null });
@@ -386,12 +395,12 @@ test('README: bounds at any depth, method arguments', () => {
 
 test('README: a transparent type with a bounded member', () => {
   const Memo = transparent('Memo', field(rawString, { utf8: true, max: 80 }));
-  assert.equal(Memo.maxEncodedSize, 80n);
+  assert.equal(Memo.inferredBound, 80n);
   assert.equal(toHex(Memo.encode('hi')), '6869');
   assert.throws(() => Memo.encode('x'.repeat(81)), (e: unknown) => e instanceof PsszError && e.message === 'pssz IR: byte count bound exceeded');
   const Wrapped = transparent('Memo', boundedUtf8(80));
   assert.equal(toHex(Wrapped.encode('hi')), '6869');
-  assert.equal(Wrapped.maxEncodedSize, 80n);
+  assert.equal(Wrapped.inferredBound, 80n);
   assert.deepEqual(generateSchema({ Memo }).ir, generateSchema({ Memo: Wrapped }).ir);
 });
 

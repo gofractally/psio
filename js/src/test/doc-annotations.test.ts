@@ -40,9 +40,14 @@ test('doc: widths', () => {
   // 1 byte, 8 + 32 + 136 + 8), so it has 255 - 187 = 68 bytes of slack. A new
   // field that needs more (slot 1 + selector 1 + 100) moves the width from 1
   // to 2: not a compatible change. (C++ tut-4b `AccountGrown`.)
+  assert.equal(Account.inferredBound, 187n);
   assert.equal(Account.maxEncodedSize, 187n);
+  // Under the cap of 1024 the header and the two slots are 2 bytes wide:
+  // the bound the fields infer stays 187, the largest AccountV1 is 190.
+  assert.equal(AccountV1.inferredBound, 187n);
+  assert.equal(AccountV1.maxEncodedSize, 190n);
   const AccountGrown = record('AccountGrown', { ...accountFields, bio: field(optional(rawString), { utf8: true, max: 100 }) });
-  assert.equal(AccountGrown.maxEncodedSize, BigInt(2 * 4 + 8 + 32 + 136 + 8 + (1 + 100)));
+  assert.equal(AccountGrown.inferredBound, BigInt(2 * 4 + 8 + 32 + 136 + 8 + (1 + 100)));
   assert.equal(AccountGrown.width, 2);
   // The 64-byte email of AccountV2 would have fit the slack (253).
   assert.equal(record('AccountEmail', { ...accountFields, email: field(optional(rawString), { utf8: true, max: 64 }) }).width, 1);

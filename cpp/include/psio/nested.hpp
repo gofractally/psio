@@ -217,52 +217,16 @@ namespace psio
    {
       return detail::nested_impl::type_name<T>.data();
    }
-
-   // ── pssz ───────────────────────────────────────────────────────────────
-   namespace detail::nested_impl
+   template <typename T, storage S>
+      requires (S == storage::owning || S == storage::shared)
+   constexpr const char* get_type_name(const buffer<T, ::psio::pssz, S>*)
    {
-      // Depth counting matches the validator: the member is a node at
-      // `depth` and the inner value's root is the node below it. The inner
-      // bytes are not walked (a nested value holds a valid encoding), so
-      // only the boundary is checked here; a reader counts the levels of
-      // the inner value as well.
-      template <typename N>
-      codec_status pssz_check_encode(const N& value, std::size_t depth)
-      {
-         if constexpr (is_nested<N>::descends)
-         {
-            if (depth + 1 > kMaxValidationDepth)
-               return codec_fail("pssz: max depth exceeded", 0, "pssz");
-         }
-         else if (value.size() != 0 && depth + 1 > kMaxValidationDepth)
-            return codec_fail("pssz: max depth exceeded", 0, "pssz");
-         return codec_ok();
-      }
+      return detail::nested_impl::type_name<T>.data();
+   }
 
-      template <typename N, typename Flags>
-      codec_status pssz_validate(std::span<const char> bytes, std::size_t depth,
-                                 Flags* flags) noexcept
-      {
-         namespace pi = ::psio::detail::pssz_impl;
-         if constexpr (!is_nested<N>::descends)
-         {
-            // Opaque: a list of bytes.
-            if (!bytes.empty() && depth + 1 > kMaxValidationDepth)
-               return codec_fail("pssz: max depth exceeded", 0, "pssz");
-            return codec_ok();
-         }
-         else
-         {
-            using T               = typename is_nested<N>::inner;
-            constexpr std::size_t W = ::psio::auto_pssz_width<T>();
-            // Exact-schema mode: the bytes must be the one canonical
-            // encoding of a T, with no unknown fields.
-            if (flags && flags->exact)
-               return pi::validate_exact_value<W, true, T>(bytes, depth + 1);
-            return pi::validate_value<W, true, T>(bytes, 0, bytes.size(), depth + 1, flags);
-         }
-      }
-   }  // namespace detail::nested_impl
+   // (The pssz walks of a nested value — detail::nested_impl — are defined
+   // at the end of pssz.hpp: a pssz_buffer / shared_pssz member needs them
+   // without this header.)
 
    // ── View ───────────────────────────────────────────────────────────────
    //
@@ -289,6 +253,32 @@ namespace psio
          return view<T, ::psio::pssz, Store>{data_};
       }
       [[nodiscard]] view<T, ::psio::pssz, Store> operator*() const noexcept { return get(); }
+      // `member->field()`: the inner value's view.
+      [[nodiscard]] detail::arrow_proxy<view<T, ::psio::pssz, Store>> operator->() const noexcept
+      {
+         return {get()};
+      }
+      [[nodiscard]] std::size_t size() const noexcept { return data_.size(); }
+      // The nested<T> (a copy of the bytes); the inner value is get().unpack().
+      PSIO_VIEW_UNPACK_
+   };
+
+   // The view of a pssz_buffer<T> / shared_pssz<T> member is the view of
+   // the nested<T> it is on the wire; unpack() gives the member's own type.
+   template <typename T, storage Held, typename Fmt, storage Store>
+      requires (detail::is_pssz_format_v<Fmt> &&
+                (Held == storage::owning || Held == storage::shared))
+   class view<buffer<T, ::psio::pssz, Held>, Fmt, Store> : public view<nested<T>, Fmt, Store>
+   {
+      using base = view<nested<T>, Fmt, Store>;
+
+    public:
+      using element_type = buffer<T, ::psio::pssz, Held>;
+      using format_type  = Fmt;
+      using base::base;
+      view() = default;
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      PSIO_VIEW_UNPACK_
    };
 
 }  // namespace psio

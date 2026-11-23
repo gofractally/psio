@@ -165,12 +165,29 @@ TEST_CASE("view<T, Fmt> exposes NO storage / format methods on . surface",
    STATIC_REQUIRE(!detect::has_format_method<V>::value);
 }
 
-TEST_CASE("buffer<T, Fmt> exposes NO storage / format methods on . surface",
+TEST_CASE("borrowing buffers expose NO storage / format methods on . surface",
           "[buffer][access-surface]")
 {
-   using B = psio::buffer<std::uint32_t, toy_fmt>;
+   // A borrowing buffer is a typed span and nothing else: its operations
+   // are the free functions.
+   using C = psio::buffer<std::uint32_t, toy_fmt, psio::storage::const_borrow>;
+   using M = psio::buffer<std::uint32_t, toy_fmt, psio::storage::mut_borrow>;
+   STATIC_REQUIRE(!detect::has_data_method<C>::value);
+   STATIC_REQUIRE(!detect::has_size_method<C>::value);
+   STATIC_REQUIRE(!detect::has_format_method<C>::value);
+   STATIC_REQUIRE(!detect::has_data_method<M>::value);
+   STATIC_REQUIRE(!detect::has_size_method<M>::value);
+   STATIC_REQUIRE(!detect::has_format_method<M>::value);
 
-   STATIC_REQUIRE(!detect::has_data_method<B>::value);
-   STATIC_REQUIRE(!detect::has_size_method<B>::value);
+   // An owning or shared buffer is a packed value (F_buffer<T>,
+   // shared_F<T>): it has a value's members — data(), size(), bytes(),
+   // view(), unpack() — and still no format().
+   using B = psio::buffer<std::uint32_t, toy_fmt>;
+   using S = psio::buffer<std::uint32_t, toy_fmt, psio::storage::shared>;
+   STATIC_REQUIRE(detect::has_data_method<B>::value);
+   STATIC_REQUIRE(detect::has_size_method<B>::value);
+   STATIC_REQUIRE(detect::has_data_method<S>::value);
+   STATIC_REQUIRE(detect::has_size_method<S>::value);
    STATIC_REQUIRE(!detect::has_format_method<B>::value);
+   STATIC_REQUIRE(!detect::has_format_method<S>::value);
 }

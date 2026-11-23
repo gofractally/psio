@@ -305,9 +305,9 @@ and is `k + r` if that is ≤ 255, else `2k + r` if that is ≤ 65535, else
 - A bound larger than the enclosing cap is accepted silently.
 - `psio::pssz_child_wider_than_cap_v` is a query; nothing fails by itself
   when a child record is wider than its parent's cap.
-- Rust has no `exact` / `min`; Rust's `pssz_evolves_from` refuses every
-  change of a bound; TypeScript has no `pssz_evolves_from` (Python:
-  `psio.evolves_from`);
+- Rust has no `exact` / `min`. The compatibility check is Rust
+  `pssz_evolves_from`, TypeScript `psszEvolvesFrom`, Python
+  `psio.evolves_from`;
   TypeScript has no return-value annotation. Everything else marked "not
   yet available" in the [master table](annotations.md#4-master-table) and
   in [4.1](annotations.md#41-tooling-per-language) is C++-only for now.

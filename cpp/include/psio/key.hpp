@@ -22,6 +22,14 @@
 //   duration, time_point  the tick count's integer form (time.hpp)
 //   std::string,
 //   utf8_string<N>        bytes with 00 → 00 01, then the terminator 00 00
+//   std::string_view,
+//   const char*           the key of the std::string with those characters
+//                         (write-only: a key is decoded as std::string)
+//   std::reference_wrapper,
+//   psio::view<T, Fmt>    the key of the value referred to (write-only)
+//   psio::raw_key         its bytes, verbatim: bytes that already are a
+//                         key (a stored prefix), spliced into a tuple.
+//                         Write-only; see "Raw keys" at the bottom
 //   std::vector<octet>,
 //   bounded<octet, N>     each element's key byte, escaped and terminated
 //                         like a string (octet: uint8_t, int8_t, char,
@@ -96,6 +104,7 @@
 #include <psio/stream.hpp>
 #include <psio/time.hpp>
 #include <psio/transparent.hpp>
+#include <psio/wire_type.hpp>
 #include <psio/wrappers.hpp>
 
 #include <array>
@@ -118,6 +127,32 @@
 namespace psio {
 
    struct key;
+
+   // ── Raw keys ────────────────────────────────────────────────────────────────
+   //
+   // Bytes that are ALREADY a key, written as they are. As a tuple element
+   // (or a record member) a raw_key contributes exactly its bytes, so a
+   // stored or received key prefix is extended without re-encoding it:
+   //
+   //    std::vector<char> prefix = psio::encode(psio::key{}, std::tuple{table, index});
+   //    auto k = psio::to_key(std::tuple{psio::raw_key{prefix}, account, std::string_view{name}});
+   //    // == to_key(std::tuple{table, index, account, std::string{name}})
+   //
+   // psio::key_prefix<Key>(...) takes one where Key has a raw_key element,
+   // and psio::key_prefix_upper_bound works on the result as on any prefix.
+   //
+   // The caller vouches for the bytes: they must be whole keys of whatever
+   // they stand for (that is what keeps the composite prefix-free and
+   // ordered). A raw_key borrows; it is write-only — a run of key bytes
+   // does not say where it ends, so a type holding one cannot be decoded
+   // or validated (a compile error says so).
+   struct raw_key
+   {
+      std::span<const char> bytes;
+
+      raw_key() = default;
+      explicit raw_key(std::span<const char> b) noexcept : bytes(b) {}
+   };
 
    namespace detail::key_impl {
 
@@ -182,6 +217,27 @@ namespace psio {
       inline constexpr bool is_raw_byte_v =
          std::is_same_v<T, std::uint8_t> || std::is_same_v<T, char> ||
          std::is_same_v<T, std::byte>;
+
+      template <typename T>
+      inline constexpr bool is_ref_wrapper_v = false;
+      template <typename X>
+      inline constexpr bool is_ref_wrapper_v<std::reference_wrapper<X>> = true;
+      template <typename T>
+      inline constexpr bool is_c_string_v =
+         std::is_same_v<T, const char*> || std::is_same_v<T, char*> ||
+         (std::is_array_v<T> && std::is_same_v<std::remove_extent_t<T>, char>);
+      // A view given as a key element: the key of the value it designates.
+      template <typename T>
+      concept view_source = ::psio::is_source_v<T> && requires(const T& v) {
+         typename T::format_type;
+         v._psio_data();
+         v.unpack();
+      };
+      // Types that only write (no reader can produce them).
+      template <typename T>
+      inline constexpr bool write_only_v =
+         std::is_same_v<T, ::psio::raw_key> || std::is_same_v<T, std::string_view> ||
+         is_c_string_v<T> || is_ref_wrapper_v<T> || view_source<T>;
 
       // No key form at all: a clear error instead of a deep one.
       template <typename T>
@@ -426,6 +482,23 @@ namespace psio {
          if constexpr (unsupported_v<T>)
          {
          }
+         else if constexpr (std::is_same_v<T, ::psio::raw_key>)
+         {
+            // Already a key: verbatim.
+            if (!v.bytes.empty())
+               s.write(v.bytes.data(), v.bytes.size());
+         }
+         else if constexpr (std::is_same_v<T, std::string_view>)
+            append_escaped(s, v.data(), v.size());
+         else if constexpr (is_c_string_v<T>)
+         {
+            const std::string_view text = ::psio::detail::c_string_view(v);
+            append_escaped(s, text.data(), text.size());
+         }
+         else if constexpr (is_ref_wrapper_v<T>)
+            encode_value(v.get(), s);
+         else if constexpr (view_source<T>)
+            encode_value(v.unpack(), s);
          else if constexpr (::psio::format_should_dispatch_adapter_v<
                            ::psio::key, T>)
          {
@@ -538,6 +611,11 @@ namespace psio {
             return false;  // a type that holds itself: already being inspected
          else if constexpr (unsupported_v<U> ||
                             ::psio::format_should_dispatch_adapter_v<::psio::key, U>)
+            return false;
+         else if constexpr (is_ref_wrapper_v<U> || view_source<U>)
+            // (Checked as the value it refers to, when that is written.)
+            return has_writer_checks<::psio::wire_type_t<U>, Invariants, Seen..., U>();
+         else if constexpr (write_only_v<U>)
             return false;
          else if constexpr (Invariants && ::psio::has_invariant_v<U>)
             return true;
@@ -718,7 +796,11 @@ namespace psio {
       consteval std::optional<std::size_t> key_fixed_size()
       {
          using U = std::remove_cvref_t<T>;
-         if constexpr (::psio::format_should_dispatch_adapter_v<::psio::key, U>)
+         if constexpr (is_ref_wrapper_v<U> || view_source<U>)
+            return key_fixed_size<::psio::wire_type_t<U>>();
+         else if constexpr (write_only_v<U>)
+            return std::nullopt;  // a string's or a raw key's length is its value's
+         else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::key, U>)
             return std::nullopt;  // adapter bytes aren't known until encode
          else if constexpr (::psio::is_transparent_v<U>)
             return key_fixed_size<::psio::transparent_inner_t<U>>();
@@ -1040,6 +1122,11 @@ namespace psio {
       bool read_shape(reader& r, T* out)
       {
          static_assert(!is_bitlist<T>::value, "psio::key: bitlist has no key encoding");
+         static_assert(!write_only_v<T>,
+                       "psio::key: psio::raw_key, std::string_view, a C string, a "
+                       "std::reference_wrapper and a view are write-only key elements: decode or "
+                       "validate the key as the owning types (std::string for a string_view; a "
+                       "raw key's bytes do not say where they end)");
          PSIO_REJECT_MULTI_ASSOC("psio::key", T);
          if constexpr (unsupported_v<T>)
             return false;

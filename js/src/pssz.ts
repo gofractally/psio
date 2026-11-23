@@ -192,16 +192,33 @@ export class PsszType<T = unknown, V = unknown> {
   }
 
   /**
-   * The inferred size bound of the type (`max_encoded_size`,
-   * `docs/pssz-spec.md` §3.2): the largest encoding in the automatic
-   * profile, each header, slot and offset table counted at its own width;
-   * `null` when unbounded (a plain string or list, a boxed value, anything
-   * holding one). The type's own `maxDynamicData` is not looked at — it
-   * rules the width whatever this is — while a capped record inside
-   * contributes its cap.
+   * The inferred bound of the type (`inferred_bound`, `docs/pssz-spec.md`
+   * §3.2): the number offset widths are chosen from, each header, slot and
+   * offset table counted at the width the bound itself selects; `null`
+   * when unbounded (a plain string or list, a boxed value, anything holding
+   * one). The type's own `maxDynamicData` is not looked at — it rules the
+   * width whatever this is — while a capped record inside contributes its
+   * cap. It is not the largest encoding of a capped type: that is
+   * `maxEncodedSize`.
+   */
+  get inferredBound(): bigint | null {
+    return guarded(() => (this.boxed ? null : this.codec.inferredBound(this.node, this.count)));
+  }
+
+  /**
+   * The maximum encoded size of the type (`max_encoded_size`,
+   * `docs/pssz-spec.md` §3.7): no automatic-profile encoding of a value of
+   * it is longer; `null` when there is no finite maximum. Every header,
+   * slot and offset table is counted at the width that is written (the
+   * class of the cap for a capped record, of min(bound, cap) for a list or
+   * tuple beneath one), what the type holds at its own maximum, and a
+   * capped record is the smaller of its cap and that sum — the cap alone
+   * when something inside is unbounded. Conservative by one selector byte
+   * per optional and by ceil(N / 8) + 1 for a bitlist. No width is chosen
+   * from it.
    */
   get maxEncodedSize(): bigint | null {
-    return guarded(() => (this.boxed ? null : this.codec.inferredBound(this.node, this.count)));
+    return guarded(() => (this.boxed ? null : this.codec.maxEncodedSize(this.node, this.count)));
   }
 
   /**

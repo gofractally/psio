@@ -3,12 +3,16 @@
 // psio/to_hex.hpp — hex string conversion utilities.  Direct port of
 // psio/to_hex.hpp.
 
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <iterator>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace psio {
@@ -76,12 +80,53 @@ namespace psio {
             return false;
          return true;
       };
+      if (h.size() % 2 != 0)
+         return false;  // (and never read a second digit past the end)
       while (begin != end)
       {
          std::uint8_t h, l;
          if (!get_digit(h) || !get_digit(l))
             return false;
          *dest++ = (h << 4) | l;
+      }
+      return true;
+   }
+
+   // Into a destination of fixed size — a std::array<unsigned char, 32>, a
+   // std::span<char>, a char[N] — which the text must fill exactly:
+   // 2 * size hex digits, no more and no fewer. Nothing is allocated; on
+   // failure the destination holds the bytes read so far.
+   template <typename Dest>
+      requires (!std::is_same_v<Dest, std::vector<char>> &&
+                requires(Dest& d) {
+                   { std::data(d) };
+                   { std::size(d) } -> std::convertible_to<std::size_t>;
+                } &&
+                sizeof(*std::data(std::declval<Dest&>())) == 1 &&
+                !std::is_const_v<std::remove_reference_t<decltype(*std::data(std::declval<Dest&>()))>>)
+   bool from_hex(std::string_view text, Dest&& dest)
+   {
+      const std::size_t size = std::size(dest);
+      if (text.size() != 2 * size)
+         return false;
+      auto digit = [](char c, std::uint8_t& nibble) {
+         if (c >= '0' && c <= '9')
+            nibble = static_cast<std::uint8_t>(c - '0');
+         else if (c >= 'a' && c <= 'f')
+            nibble = static_cast<std::uint8_t>(c - 'a' + 10);
+         else if (c >= 'A' && c <= 'F')
+            nibble = static_cast<std::uint8_t>(c - 'A' + 10);
+         else
+            return false;
+         return true;
+      };
+      auto* out = std::data(dest);
+      for (std::size_t i = 0; i < size; ++i)
+      {
+         std::uint8_t high = 0, low = 0;
+         if (!digit(text[2 * i], high) || !digit(text[2 * i + 1], low))
+            return false;
+         out[i] = static_cast<std::remove_reference_t<decltype(*out)>>((high << 4) | low);
       }
       return true;
    }

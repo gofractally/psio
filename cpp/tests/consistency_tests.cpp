@@ -2,6 +2,8 @@
 // or the inconsistent side of. Each section names the rule it pins.
 #include <catch.hpp>
 
+#include "evolves_parity.hpp"
+
 #include <psio/annotate.hpp>
 #include <psio/bin.hpp>
 #include <psio/ext_int.hpp>
@@ -604,40 +606,67 @@ TEST_CASE("pssz_evolves_from: member annotations and caps", "[consistency][evolv
    using namespace cons_evo;
    using psio::pssz_evolves_from;
    STATIC_REQUIRE(pssz_evolves_from<V1, Same>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, Same);
    // A bound may only widen (the new reader must read every old record),
    // and only while every width stays the same.
    STATIC_REQUIRE(pssz_evolves_from<V1, Wider>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, Wider);
    STATIC_REQUIRE(!pssz_evolves_from<V1, Tighter>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, Tighter);
    STATIC_REQUIRE(!pssz_evolves_from<Wider, V1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Wider, V1);
    STATIC_REQUIRE(pssz_evolves_from<V1, ElemWider>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, ElemWider);
    STATIC_REQUIRE(!pssz_evolves_from<V1, ElemTighter>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, ElemTighter);
    STATIC_REQUIRE(pssz_evolves_from<V1, CountWider>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, CountWider);
    STATIC_REQUIRE(!pssz_evolves_from<CountWider, V1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(CountWider, V1);
    STATIC_REQUIRE(pssz_evolves_from<V1, Unbounded>);      // under the cap the widths are the cap's
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, Unbounded);
    STATIC_REQUIRE(!pssz_evolves_from<Unbounded, V1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Unbounded, V1);
    STATIC_REQUIRE(!pssz_evolves_from<V1, WithMin>);       // a new lower bound refuses old values
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, WithMin);
    STATIC_REQUIRE(pssz_evolves_from<WithMin, V1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(WithMin, V1);
    // utf8 / raw and sorted are the member's type.
    STATIC_REQUIRE(!pssz_evolves_from<V1, Raw>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, Raw);
    STATIC_REQUIRE(!pssz_evolves_from<Raw, V1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Raw, V1);
    STATIC_REQUIRE(!pssz_evolves_from<V1, ElemUtf8>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, ElemUtf8);
    STATIC_REQUIRE(!pssz_evolves_from<V1, Sorted>);
+   // (sorted is not recorded in the Schema IR: the run-time check cannot see it)
+   CHECK(psio_test::runtime_evolves<V1, Sorted>().ok);
    STATIC_REQUIRE(!pssz_evolves_from<Sorted, V1>);
+   // (sorted is not recorded in the Schema IR: the run-time check cannot see it)
+   CHECK(psio_test::runtime_evolves<Sorted, V1>().ok);
    // The cap may grow within its width class and may not shrink.
    STATIC_REQUIRE(pssz_evolves_from<V1, CapWider>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, CapWider);
    STATIC_REQUIRE(!pssz_evolves_from<V1, CapTighter>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, CapTighter);
    STATIC_REQUIRE(!pssz_evolves_from<V1, CapOtherWidth>);
+   PSIO_RUNTIME_EVOLVES_PARITY(V1, CapOtherWidth);
    // Adding a cap: only one the old type's inferred bound fits.
    STATIC_REQUIRE(*psio::inferred_bound<Open>() <= 600);
    STATIC_REQUIRE(*psio::inferred_bound<Open>() > 400);
    STATIC_REQUIRE(pssz_evolves_from<Open, OpenCapped>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Open, OpenCapped);
    STATIC_REQUIRE(!pssz_evolves_from<Open, OpenCappedLow>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Open, OpenCappedLow);
    STATIC_REQUIRE(pssz_evolves_from<OpenCapped, Open>);   // dropping it: nothing old is refused
+   PSIO_RUNTIME_EVOLVES_PARITY(OpenCapped, Open);
    // Without a cap, a widened bound that moves a nested list's offset table
    // into another width class changes the bytes.
    STATIC_REQUIRE(psio::auto_pssz_width_v<Open> == psio::auto_pssz_width_v<OpenWideList>);
    STATIC_REQUIRE(!pssz_evolves_from<Open, OpenWideList>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Open, OpenWideList);
    STATIC_REQUIRE(pssz_evolves_from<Open, OpenWider>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Open, OpenWider);
 
    // What the check promises, on bytes: every record of V1 is a record of
    // Wider, and a V1 record at its bound is not a record of Tighter.
@@ -653,10 +682,15 @@ TEST_CASE("pssz_evolves_from: member annotations and caps", "[consistency][evolv
    // maxFields: a revision has no more fields than the original's cap and
    // does not raise or drop it.
    STATIC_REQUIRE(pssz_evolves_from<Fields3, Fields3Grown>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Fields3, Fields3Grown);
    STATIC_REQUIRE(!pssz_evolves_from<Fields3, Fields3Raised>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Fields3, Fields3Raised);
    STATIC_REQUIRE(!pssz_evolves_from<Fields3, Fields3Dropped>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Fields3, Fields3Dropped);
    STATIC_REQUIRE(pssz_evolves_from<Fields3, Fields3Lowered>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Fields3, Fields3Lowered);
    STATIC_REQUIRE(!pssz_evolves_from<Fields3Lowered, Fields3Grown>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Fields3Lowered, Fields3Grown);
 }
 
 // ── sorted / unique / unique_keys are enforced by every codec ────────────
@@ -1164,9 +1198,13 @@ TEST_CASE("transparent: a bounded member makes the wrapper that bounded type",
 
    // Evolution: the wrapper keeps its identity, and its bound may only widen.
    STATIC_REQUIRE(psio::pssz_evolves_from<ann::Memo, ann::Memo>);
+   PSIO_RUNTIME_EVOLVES_PARITY(ann::Memo, ann::Memo);
    STATIC_REQUIRE(psio::pssz_evolves_from<ann::Memo, wider::Memo>);
+   PSIO_RUNTIME_EVOLVES_PARITY(ann::Memo, wider::Memo);
    STATIC_REQUIRE(!psio::pssz_evolves_from<wider::Memo, ann::Memo>);
+   PSIO_RUNTIME_EVOLVES_PARITY(wider::Memo, ann::Memo);
    STATIC_REQUIRE(!psio::pssz_evolves_from<ann::Memo, raw::Memo>);
+   PSIO_RUNTIME_EVOLVES_PARITY(ann::Memo, raw::Memo);
 }
 
 // ── The inferred bound has no cap in it, for an argument tuple too ────────

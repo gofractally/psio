@@ -374,8 +374,11 @@ TEST_CASE("helpers: shared bytes are owned by every copy", "[helpers]")
    CHECK(psio::bytes(tx).data() == address);
    CHECK(psio::size(tx) == psio::pssz_size(sample));
 
+   // A default-constructed buffer holds the encoding of Rec{} (one
+   // process-wide constant: no allocation).
    psio::shared_pssz<Rec> held;
-   CHECK(psio::size(held) == 0);
+   CHECK(psio::size(held) == psio::pssz_size(Rec{}));
+   CHECK(psio::bytes(held).data() == psio::bytes(psio::shared_pssz<Rec>{}).data());
    {
       psio::shared_pssz<Rec> copy = tx;
       CHECK(psio::bytes(copy).data() == address);

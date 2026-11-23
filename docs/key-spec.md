@@ -95,6 +95,29 @@ A database layer needs three operations; each implementation provides them:
   `keyPrefixUpperBound(bytes)` → `Uint8Array | null`.
 * **Decode** a full key back to its tuple: the ordinary `decode`.
 
+**Extending a key that is already bytes (C++).** A stored or received
+prefix — the key of a table and index, say — is extended without decoding
+or re-encoding it: `psio::raw_key{bytes}` is an element whose key is its
+bytes verbatim.
+
+```cpp
+std::vector<char> prefix = psio::encode(psio::key{}, std::tuple{table, index});
+auto k = psio::to_key(std::tuple{psio::raw_key{prefix}, account, std::string_view{name}});
+// the bytes of to_key(std::tuple{table, index, account, std::string{name}})
+auto p = psio::key_prefix<std::tuple<psio::raw_key, Account, std::string>>(psio::raw_key{prefix}, account);
+```
+
+The caller vouches that the bytes are whole keys of whatever they stand for;
+that is what keeps the composite prefix-free and ordered. A `raw_key` is
+write-only (its bytes do not say where they end, so a type holding one has
+no `decode` / `validate`: a compile error), and it is not a schema type: the
+schema of such a key is that of the elements the bytes stand for.
+
+`psio::to_key` also takes values that do not own their data and writes the
+key of what they refer to: a `std::string_view` or C string (the key of the
+`std::string`), a `std::reference_wrapper`, a tuple of references
+(`std::tie`), a `psio::view`. These too are write-only.
+
 ## 4. Where byte order is not the language's `<`
 
 * **Float NaN.** `<` is unordered for NaN; the key is not: a NaN with the sign

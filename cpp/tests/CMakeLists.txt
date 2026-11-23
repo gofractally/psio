@@ -77,6 +77,42 @@ psio_add_test(psio_wrapper_tests wrapper_tests.cpp)
 
 # Phase 3: buffer / view / mutable_view + access-surface rule.
 psio_add_test(psio_view_access_tests view_access_tests.cpp)
+# Named accessors on record views (reflect<T>::proxy): read views, mutable
+# views, members under caps, and the psiserve view tests adapted to PSSZ.
+psio_add_test(psio_view_named_tests view_named_tests.cpp)
+# From a view to its value: unpack(), psio::value_of, from_pssz(view) —
+# including members under a maxDynamicData cap and bounded members.
+psio_add_test(psio_view_unpack_tests view_unpack_tests.cpp)
+# The view surface beyond member access: list / optional / variant views,
+# comparison, structured bindings, borrowing conversions.
+psio_add_test(psio_view_surface_tests view_surface_tests.cpp)
+# Packing from non-owning sources (std::tie, string_view, span,
+# reference_wrapper, C strings, views as values) and to_pssz_as.
+psio_add_test(psio_pssz_source_tests pssz_source_tests.cpp)
+# psio::shared_pssz<T> / pssz_buffer<T>: a packed value as a type of its own
+# and as a record member that is psio::nested<T> on the wire.
+psio_add_test(psio_shared_pssz_tests shared_pssz_tests.cpp)
+# to_pssz into any psio stream, psio::input_stream with typed and LEB128
+# readers, from_hex into a fixed destination.
+psio_add_test(psio_stream_sink_tests stream_sink_tests.cpp)
+# View-typed method parameters: the argument tuple's wire type, and calling a
+# reflected method with packed arguments (psio::invoke_method_pssz).
+psio_add_test(psio_method_view_param_tests method_view_param_tests.cpp)
+set(PSIO_MVP_FAIL_COMMAND
+    ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -DPSIO_EXCEPTIONS_ENABLED=1
+    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES})
+add_test(NAME psio_method_view_param_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+add_test(NAME psio_method_view_param_narrowed_compile_fail
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} -DMVP_FAIL_NARROWED_VIEW_PARAM
+                 ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+set_tests_properties(psio_method_view_param_narrowed_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "this parameter cannot be taken as a psio::pssz_view")
+add_test(NAME psio_method_view_param_decode_into_view_compile_fail
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} -DMVP_FAIL_DECODE_INTO_VIEW
+                 ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+set_tests_properties(psio_method_view_param_decode_into_view_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "cannot be decoded into")
 
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.
@@ -151,6 +187,43 @@ add_test(NAME psio_helpers_noexceptions_test COMMAND psio_helpers_noexceptions_t
 add_test(NAME psio_helpers_noexceptions_checked_decode_aborts
          COMMAND sh -c "\"$1\" abort; test $? -eq 134" sh
                  $<TARGET_FILE:psio_helpers_noexceptions_test>)
+# The abort handler: without exceptions a fail-fast operation hands its error
+# to the embedder before std::abort() — through psio::set_codec_abort_handler
+# (run time) or -DPSIO_CODEC_ABORT_HANDLER=fn (build time, no registration).
+function(psio_add_abort_handler_check TARGET)
+   add_executable(${TARGET} codec_abort_handler_check.cpp)
+   target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+   target_compile_features(${TARGET} PRIVATE cxx_std_23)
+   target_link_libraries(${TARGET} PRIVATE Boost::headers)
+   target_compile_definitions(${TARGET} PRIVATE PSIO_EXCEPTIONS_ENABLED=0 ${ARGN})
+   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+      target_compile_options(${TARGET} PRIVATE -fno-exceptions -fno-rtti)
+   endif()
+endfunction()
+psio_add_abort_handler_check(psio_codec_abort_handler_check)
+psio_add_abort_handler_check(psio_codec_abort_handler_linktime_check
+                             PSIO_CODEC_ABORT_HANDLER=psio_test_abort)
+function(psio_abort_handler_case NAME MESSAGE)
+   foreach(kind "" "_linktime")
+      add_test(NAME psio_codec_abort_handler${kind}_${NAME}
+               COMMAND sh -c "\"$1\" \"$2\"; echo \" rc=$?\"" sh
+                       $<TARGET_FILE:psio_codec_abort_handler${kind}_check> ${NAME})
+      set_tests_properties(psio_codec_abort_handler${kind}_${NAME} PROPERTIES
+         PASS_REGULAR_EXPRESSION "psio-abort: ${MESSAGE} rc=7")
+   endforeach()
+endfunction()
+psio_abort_handler_case(pssz "pssz: record header truncated .pssz.")
+psio_abort_handler_case(json "json: [^[]* .i?json.")
+psio_abort_handler_case(key "key: [^[]* .key.")
+psio_abort_handler_case(encode "pssz: encoded size exceeds maxDynamicData cap .pssz.")
+psio_abort_handler_case(overrun "stream overrun .fixed_buf_stream.")
+psio_abort_handler_case(cursor "stream overrun .input_stream.")
+psio_abort_handler_case(absent "psio::view<std::optional<T>>::value..: no value .view.")
+# With no handler installed the failure is still an abort (SIGABRT, 134).
+add_test(NAME psio_codec_abort_handler_none_aborts
+         COMMAND sh -c "\"$1\" pssz nohandler; test $? -eq 134" sh
+                 $<TARGET_FILE:psio_codec_abort_handler_check>)
+
 # A helper its format does not have must not compile, and the diagnostic
 # names the helper. The control (no case selected) must compile.
 set(PSIO_HELPERS_FAIL_COMMAND
@@ -210,6 +283,21 @@ psio_helpers_compile_fail(view_owning_scalar HELPERS_FAIL_VIEW_OWNING_SCALAR
    "the type that owns encoded bytes is psio::buffer<T, Fmt> .F_buffer<T>.")
 psio_helpers_compile_fail(view_shared_const HELPERS_FAIL_VIEW_SHARED_CONST
    "psio::buffer<T, Fmt, storage::shared> .shared_F<T>.")
+# The named accessors of a read view are as read-only as get<N>().
+psio_helpers_compile_fail(named_assign_scalar HELPERS_FAIL_NAMED_ASSIGN_SCALAR
+   "expression is not assignable")
+psio_helpers_compile_fail(named_assign_string HELPERS_FAIL_NAMED_ASSIGN_STRING
+   "no viable overloaded '='")
+psio_helpers_compile_fail(named_set HELPERS_FAIL_NAMED_SET
+   "no member named 'set' in 'psio::view<std::string, psio::pssz")
+psio_helpers_compile_fail(named_view_to_mutable HELPERS_FAIL_NAMED_VIEW_TO_MUTABLE
+   "no viable conversion from 'view<")
+psio_helpers_compile_fail(named_mutable_from_read_member HELPERS_FAIL_NAMED_MUTABLE_FROM_READ_MEMBER
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<std::string>'")
+psio_helpers_compile_fail(mutable_assign_variable HELPERS_FAIL_MUTABLE_ASSIGN_VARIABLE
+   "no viable overloaded '='")
+psio_helpers_compile_fail(view_calls_method HELPERS_FAIL_VIEW_CALLS_METHOD
+   "no member named 'call' in")
 
 # native format + view_of concept: zero-cost shim adapting a live const T&
 # to the view<T, Fmt, Store> accessor surface.
@@ -370,6 +458,31 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_pssz_ir_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_pssz_ir_noexceptions_test COMMAND psio_pssz_ir_noexceptions_test)
+# Run-time schema comparison (pssz_ir_compare.hpp): equivalent / evolves_from
+# over the Schema IR, the twin of the compile-time psio::pssz_evolves_from.
+psio_add_test(psio_pssz_ir_compare_tests pssz_ir_compare_tests.cpp)
+add_executable(psio_pssz_ir_compare_noexceptions_test pssz_ir_compare_noexceptions.cpp)
+target_include_directories(psio_pssz_ir_compare_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_ir_compare_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_ir_compare_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_ir_compare_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_ir_compare_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_ir_compare_noexceptions_test COMMAND psio_pssz_ir_compare_noexceptions_test)
+# Shared cross-language evolution fixture (conformance/evolution-vectors.json):
+# pairs of schemas with the verdicts of evolves_from / equivalent. Emitted
+# here (and checked against the compile-time psio::pssz_evolves_from), for
+# the run-time checkers of the other languages.
+set(PSIO_EVOLUTION_VECTORS ${CMAKE_SOURCE_DIR}/conformance/evolution-vectors.json)
+add_executable(psio_evolution_conformance_emit evolution_conformance_emit.cpp)
+target_link_libraries(psio_evolution_conformance_emit PRIVATE psio)
+target_compile_features(psio_evolution_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_evolution_conformance_regen
+         COMMAND psio_evolution_conformance_emit --check ${PSIO_EVOLUTION_VECTORS})
+psio_add_test(psio_evolution_conformance_tests evolution_conformance_tests.cpp)
+target_compile_definitions(psio_evolution_conformance_tests PRIVATE
+   PSIO_EVOLUTION_VECTORS="${PSIO_EVOLUTION_VECTORS}")
 psio_add_test(psio_pssz_optional_contract_tests pssz_optional_contract_tests.cpp)
 # Cross-version matrix: field evolution, mandatory pruning, golden bytes.
 psio_add_test(psio_pssz_evolution_matrix_tests pssz_evolution_matrix_tests.cpp)
@@ -616,6 +729,9 @@ psio_add_test(psio_wit_owned_tests wit_owned_tests.cpp)
 # psio::key: tuples, composite-key helpers (key_prefix / key_prefix_upper_bound),
 # the order + prefix-free contract of every element kind, and checked reading.
 psio_add_test(psio_key_tests key_tests.cpp)
+# Keys from non-owning values (string_view, references, views) and
+# psio::raw_key, bytes that already are a key.
+psio_add_test(psio_key_source_tests key_source_tests.cpp)
 # Types with no key form, and ill-typed prefixes, must fail with a clear message.
 function(psio_key_compile_fail NAME DEFINE MESSAGE)
    add_test(NAME psio_key_${NAME}_compile_fail
@@ -630,6 +746,8 @@ psio_key_compile_fail(bitlist KEY_FAIL_BITLIST "bitlist has no key encoding")
 psio_key_compile_fail(steady_clock KEY_FAIL_STEADY_CLOCK "no matching function for call to 'to_rfc3339'")
 psio_key_compile_fail(float_rep KEY_FAIL_FLOAT_REP "needs an integer Rep")
 psio_key_compile_fail(prefix_arity KEY_FAIL_PREFIX_ARITY "more elements than the key type has")
+psio_key_compile_fail(decode_raw_key KEY_FAIL_DECODE_RAW_KEY "are write-only key elements")
+psio_key_compile_fail(decode_string_view KEY_FAIL_DECODE_STRING_VIEW "are write-only key elements")
 psio_key_compile_fail(prefix_type KEY_FAIL_PREFIX_TYPE "does not convert to the key's")
 
 # Time values (std::chrono durations / system_clock time points) in every

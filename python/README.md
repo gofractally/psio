@@ -63,7 +63,7 @@ class AccountPlain:
     balance: u64
 
 # owner and tags may be any size: there is no bound, so offsets are 32-bit.
-assert psio.codec(AccountPlain).max_encoded_size is None
+assert psio.codec(AccountPlain).inferred_bound is None
 assert psio.codec(AccountPlain).width == 4
 ```
 
@@ -73,9 +73,11 @@ needs a width, so the hints are `psio.u64`, `psio.u32`, … — they are
 `Annotated[int, ...]` aliases: the field is an `int` to Python and to a type
 checker.
 
-`psio.codec(T)` is the compiled codec of a type; `max_encoded_size` is the
-largest encoding the type allows (here none), and `width` the size of the
-record's offsets: 4 bytes, because nothing bounds it.
+`psio.codec(T)` is the compiled codec of a type; `inferred_bound` is the
+bound its fields add up to (here none), which is what `width`, the size of
+the record's offsets, is chosen from: 4 bytes, because nothing bounds it.
+`max_encoded_size` is the largest encoding the type allows (here none
+either); the two differ only under a `max_dynamic_data` cap (step 4).
 
 ### Step 2 — Add bounds until the width drops
 
@@ -92,9 +94,9 @@ class Account2:
 t = psio.codec(Account2)
 # The list: 8 one-byte slots and 8 strings of 16 bytes.
 tags = psio.codec(Annotated[list[Annotated[str, psio.max(16)]], psio.bounded(8)])
-assert tags.max_encoded_size == 8 * 1 + 8 * 16 == 136 and tags.width == 1
+assert tags.inferred_bound == 8 * 1 + 8 * 16 == 136 and tags.width == 1
 # The record: a header and two slots of one byte each, then what the members hold.
-assert t.max_encoded_size == (1 + 2) * 1 + 8 + 32 + 136 + 8 == 187               # <= 255: 8-bit offsets
+assert t.inferred_bound == (1 + 2) * 1 + 8 + 32 + 136 + 8 == 187               # <= 255: 8-bit offsets
 assert t.width == 1
 ```
 
@@ -126,7 +128,7 @@ class AccountCountOnly:
     tags: Annotated[list[str], psio.max(8)]       # 8 strings of any size
     balance: u64
 
-assert psio.codec(AccountCountOnly).max_encoded_size is None
+assert psio.codec(AccountCountOnly).inferred_bound is None
 assert psio.codec(AccountCountOnly).width == 4
 ```
 
@@ -176,7 +178,7 @@ class Account2b:
     balance: u64
 
 assert psio.to_pssz(Account2b(7, "alice", ["vip", "beta"], 100)) == data
-assert psio.codec(Account2b).max_encoded_size == 187
+assert psio.codec(Account2b).inferred_bound == 187
 ```
 
 ### Step 3 — Reserve room for growth
@@ -243,7 +245,8 @@ class MemoFree:
 assert psio.codec(Memo).width == 1
 assert psio.to_pssz(Memo(["ab", "c"], [["x"]])).hex(" ") == "02 02 07 02 04 61 62 63 01 01 78"
 assert len(psio.to_pssz(MemoFree(["ab", "c"], [["x"]]))) == 12 + 11 + 9
-assert psio.codec(Memo).max_encoded_size is None  # the cap changes widths, not bounds: lines is still list[str]
+assert psio.codec(Memo).inferred_bound is None  # the cap changes widths, not bounds: lines is still list[str]
+assert psio.codec(Memo).max_encoded_size == psio.codec(Memo).max_dynamic_data   # ... and no Memo is longer than its cap
 ```
 
 `@psio.record(definition_will_not_change=True)` is for values closed forever
@@ -416,7 +419,7 @@ assert psio.codec(AccountId).fixed_size == 8 and psio.codec(Money).fixed_size ==
 The member of a transparent class may carry the bounds that make a plain type
 a bounded one — `psio.max`, `psio.utf8` on a raw string, and the position
 specs below it. The wrapper then **is** that bounded type wherever it is
-held: its bytes, its width, its `max_encoded_size`, its schema node and its
+held: its bytes, its width, its bounds, its schema node and its
 checks in every format (`docs/pssz-spec.md` §5.10).
 
 ```python
@@ -426,7 +429,7 @@ class Memo:                                       # is BoundedString(80)
     text: Annotated[str, psio.max(80)]
 
 memo = psio.codec(Memo)
-assert memo.max_encoded_size == 80 and memo.to_pssz(Memo("hi")) == b"hi"
+assert memo.inferred_bound == 80 and memo.to_pssz(Memo("hi")) == b"hi"
 assert psio.to_json(Memo("hi")) == '"hi"'
 for write in (psio.to_pssz, psio.to_key, psio.to_json):
     refused(lambda: write(Memo("m" * 81)))        # every writer
@@ -437,7 +440,7 @@ assert not psio.validate_pssz(Memo, b"\xff")      # ... and it is UTF-8
 class Receipt:
     id: u32
     memo: Memo                                    # 80 bytes at most, here too
-assert psio.codec(Receipt).max_encoded_size == (1 + 1) * 1 + 4 + 80 and psio.codec(Receipt).width == 1
+assert psio.codec(Receipt).inferred_bound == (1 + 1) * 1 + 4 + 80 and psio.codec(Receipt).width == 1
 ```
 
 What a type cannot say is not allowed on that member — `psio.min` /
@@ -531,7 +534,7 @@ bank = psio.interface_of(Bank)
 assert [m.name for m in bank] == ["open", "transfer", "symbol"]
 assert bank["transfer"].params == ["from", "to", "amount", "memo"]   # from_ is `from` on the wire
 # open has no cap: header 1 + owner (1 + 32) + tags (1 + 8 x (1 + 16)) = 171, 8-bit.
-assert bank["open"].args.max_encoded_size == 1 + (1 + 32) + (1 + 8 * (1 + 16)) == 171
+assert bank["open"].args.inferred_bound == 1 + (1 + 32) + (1 + 8 * (1 + 16)) == 171
 assert bank["open"].args.width == 1
 # transfer is capped: 16-bit for its lifetime.
 assert bank["transfer"].args.max_dynamic_data == 1024 and bank["transfer"].args.width == 2
@@ -915,7 +918,7 @@ For a format `F` in `pssz`, `key`, `json`, `ijson` (the names of
 | `psio.evolves_from(Old, New)` | the schema-upgrade check: a `Status` |
 | `psio.interface_of(C)`, `schema.method(interface, name)` | methods: `args`, `result`, `named`, `max_fields`, `max_dynamic_data` |
 | `psio.method_to_number(s)`, `number_to_method(n)`, `is_hash_name(n)`, `name_to_number(s)`, `number_to_name(n)` | the name coders |
-| `psio.codec(T, width=…)` | the compiled codec: every operation as a method, plus `width`, `max_encoded_size`, `max_dynamic_data`, `fixed_size` |
+| `psio.codec(T, width=…)` | the compiled codec: every operation as a method, plus `width`, `inferred_bound` (what the width is chosen from), `max_encoded_size` (the largest encoding), `max_dynamic_data`, `fixed_size` |
 
 ## Without Python classes: the schema-driven codec
 
