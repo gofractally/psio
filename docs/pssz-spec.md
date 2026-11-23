@@ -138,8 +138,9 @@ give "decode the one field I asked for" semantics.
 encoded size (via per-field length bounds, a type-level `max-
 dynamic-data` cap, or container-relative encoding plus type
 analysis), pssz picks 1-, 2-, or 4-byte offsets accordingly. A bound
-of ≤ 256 bytes turns every offset slot from 4 bytes to 1 byte —
-saving 3 × N bytes for an N-field record. SSZ is fixed at 4-byte
+of ≤ 255 bytes turns every offset slot from 4 bytes to 1 byte —
+saving 3 × N bytes for an N-field record, and as much per element in
+the offset table of a bounded list. SSZ is fixed at 4-byte
 offsets; fracpack has a per-format-tag choice (16-bit vs 32-bit
 offsets) but not per-type adaptation.
 
@@ -255,11 +256,15 @@ encoder always writes little-endian regardless of the host.
 Every pssz container is encoded under a **width tag** W ∈ {1, 2, 4}:
 
 - W = 1: offsets and the extensibility header are 1 byte each (u8).
-  Container's total encoded size must fit in 256 bytes.
+  The container's total encoded size is at most 255 bytes.
 - W = 2: offsets and the extensibility header are 2 bytes each (u16).
-  Container's total must fit in 65 536 bytes.
+  The container's total is at most 65 535 bytes.
 - W = 4: offsets and the extensibility header are 4 bytes each (u32).
-  Container's total must fit in 4 GiB.
+  The container's total is below 4 GiB.
+
+A container is anything that writes offsets: a record, tuple or pair
+(header and field slots), and an array, list, map or set of variable
+elements (the offset table). Each has its own W.
 
 The width tag is **a property of T** (the container type), not of the
 encoded buffer — it is derived from the schema, not stored on the
@@ -352,13 +357,23 @@ The result is None only when T has no explicit cap and its inferred
 bound is None; W is then 4. The bound is rounded up to the next width:
 1 byte through 255, 2 bytes through 65 535, 4 bytes above.
 
-**Lists are the exception.** A list — `Vector(T)`, `BoundedList(T, N)`,
-`Map`, `Set` — always writes its own offset table (§5.3.2) with
-**W = 4**, bounded or not. A bound on a list narrows the record that
-holds it (the bound is part of that record's `max_encoded_size`); it
-never narrows the list's own table. Every other type that has offsets —
-a record, a tuple, a pair, an array of variable elements — takes its W
-from its own cap or bound as above.
+**Every type that has offsets follows this rule, each for itself.** A
+record, a tuple and a pair write a header and one offset slot per
+variable member (§5.1); an array, a list (`Vector(T)`,
+`BoundedList(T, N)`), a map and a set of variable elements write an
+offset table of one slot per element (§5.2, §5.3.2). Each takes its W
+from its **own** cap or bound: a list of at most 8 strings of at most 16
+bytes has a 1-byte table whatever record holds it, and that record has
+its own W. A list has no cap of its own, so its W is the width class of
+its inferred bound: 4 for an unbounded list (`Vector(T)`, or a bounded
+list of unbounded elements), and 1 or 2 when both its count and its
+elements are bounded (by type or by annotation, §3.5) and the bound is
+small enough.
+
+**One width per type, known from the schema.** W is never chosen from
+the size of a value: a value of a 2-byte list that happens to fit in 200
+bytes is still written with 2-byte offsets. Every value has exactly one
+encoding.
 
 **Evolution and width.** W is fixed for the lifetime of a type. An
 optional field may be appended (§7) only if it does not change W. A
@@ -380,34 +395,110 @@ cap large enough to cover them from the start.
 | `u256`                           | 32                                            |
 | enum with underlying U           | sizeof(U)                                     |
 | `Array(T, N)`, T fixed      | N × max_encoded_size(T)                       |
-| `Array(T, N)`, T variable   | N × (max_encoded_size(T) + 4): each element has an offset slot (§5.2) [None if T is None] |
-| `Bitvector(N)`, `Bitlist(N)` | None (see below)                             |
+| `Array(T, N)`, T variable   | fit(N, N × max_encoded_size(T)): the offset table of N slots (§5.2), then the elements [None if T is None] |
+| `Bitvector(N)`                   | ⌈N/8⌉ (fixed size)                            |
+| `Bitlist(N)`                     | ⌈N/8⌉ + 1   (the bits and the delimiter bit, §5.4.2) |
 | `BoundedString(N)`              | N                                             |
 | `BoundedList(T, N)`, T fixed    | N × max_encoded_size(T)                       |
-| `BoundedList(T, N)`, T variable | N × (max_encoded_size(T) + 4): each element has an offset slot (§5.3.2) [None if T is None] |
+| `BoundedList(T, N)`, T variable | fit(N, N × max_encoded_size(T)): the offset table of N slots (§5.3.2), then the elements [None if T is None] |
 | `String`                    | None                                          |
 | `Vector(T)`                 | None                                          |
 | `Nested(T)` (§5.8)          | None (a member `length_bound` max N: N)       |
 | `Optional(T)`               | 1 + max_encoded_size(T) [None if T is None]   |
 | `Variant(Ts...)`            | 1 + max(max_encoded_size(T_i)) [None if any T_i is None] |
-| `Tuple(Ts...)`              | 4 + sum(per-element max contribution): that of the extensible record with those members (§5.1.1) [None if any element is None] |
-| `Pair(A, B)`                | that of `Tuple(A, B)`                         |
+| `Tuple(Ts...)`              | that of the extensible record with those members (§5.1.1): fit(1 + v, sum(max_encoded_size(T_i))), v = the number of variable elements [None if any element is None] |
+| `Pair(A, B)`                | that of `Tuple(A, B)`. (A tuple has at most 255 elements, §8.4.) |
 | `Map(K, V)`, `Set(K)`       | that of `Vector(Tuple(K, V))`, `Vector(K)`; bounded to N entries: that of `BoundedList(Tuple(K, V), N)`, `BoundedList(K, N)` (§5.9) |
 | boxed T, a member with an alternate presentation | None                     |
 | transparent type (§5.10)         | that of its member                            |
-| reflected record (DWNC)          | sum(per-field max contribution)               |
-| reflected record (extensible)    | 4 + sum(per-field max contribution)           |
+| reflected record (DWNC)          | fit(v, sum(max_encoded_size(field_i))), v = the number of variable fields |
+| reflected record (extensible)    | fit(1 + v, sum(max_encoded_size(field_i))): the header and v offset slots |
 
-Per-field max contribution for a record, and per-element contribution
-for a tuple:
-
-- Fixed field: `fixed_size_of(field)`
-- Variable field: `4 + max_encoded_size(field)` (the 4 is the offset
-  slot in the fixed region; the rest is the payload in the dynamic
-  region; None if field is None)
-
-If any field's contribution is None, the record's
+For a record and a tuple, a fixed field contributes
+`fixed_size_of(field)` (which is its `max_encoded_size`) and no slot; a
+variable field contributes one offset slot — counted in v — and its
+payload, `max_encoded_size(field)`. If any field is None, the record's
 `max_encoded_size` is None.
+
+**`fit`: the bound of a type that has offsets.** Such a type consists of
+k words that are each W bytes wide (its header, its offset slots, its
+offset table) and of other bytes whose total is at most r (inline fixed
+fields and the payloads). `fit(k, r)` is the bound for the narrowest W
+that can address the whole value:
+
+```
+fn fit(k, r) -> Option<n>:
+    if r is None:                  return None
+    if k * 1 + r <= 0xFF:          return k * 1 + r     // W = 1
+    if k * 2 + r <= 0xFFFF:        return k * 2 + r     // W = 2
+    return k * 4 + r                                    // W = 4
+```
+
+(An arithmetic overflow anywhere in these formulas — in `N × ...`, a
+sum, or `k * W + r` — gives None.) The W on the right is the type's own
+width: the width class of `fit`'s result is exactly the W of the branch
+that returned it, so "W is the width class of the bound" (§3) and "W is
+the least width whose worst case fits" are the same statement.
+
+Examples: `BoundedList(BoundedString(16), 8)` is fit(8, 8 × 16) = 136
+with W = 1. `BoundedList(BoundedString(16), 15)` is fit(15, 240) = 255,
+still W = 1; one more byte per string, `BoundedList(BoundedString(17),
+15)`, fails the first test (15 + 255 = 270) and is 15 × 2 + 255 = 285
+with W = 2. `BoundedList(BoundedString(255), 255)` is 255 × 2 + 65 025 =
+65 535 with W = 2, and with 256 elements it is 256 × 4 + 65 280 =
+66 304 with W = 4. A record `{ id: u32, tags: BoundedList(BoundedString(16), 8) }`
+is fit(1 + 1, 4 + 136) = 142 with W = 1: its header and its one slot are
+1 byte each, and so are the 8 slots of the list inside it.
+
+**The definition is bottom-up and terminates.** `max_encoded_size(T)`
+is defined by structural recursion on T's type description:
+
+1. *It only looks down.* Every row of the table is a formula over
+   constants of T (N, k, fixed sizes) and `max_encoded_size` of the
+   types T holds — its fields, elements, alternatives, payload. T's own
+   W is not an input: `fit` evaluates at most two inequalities whose
+   terms (k and r) are already known, and returns a number. There is
+   nothing to iterate, no search, and no fixed point.
+2. *It ends.* A type description is a finite tree except where a type
+   contains itself, which it can only do through a box (`None`, without
+   looking inside, §3.2 row "boxed T") or through an unbounded list
+   (`None`). A schema-driven implementation that meets, while measuring
+   a named type, a reference to that same type treats the reference as
+   `None`. So every chain of "the types T holds" is finite.
+3. *The chosen W is sufficient.* By induction a field's encoding never
+   exceeds its `max_encoded_size` (or its explicit cap, which encoders
+   and readers enforce, §16), so a value of T written with W-byte words
+   occupies at most k × W + r bytes; `fit` returned that number only if
+   it is at most 2^(8W) − 1 (or W = 4). Every offset, and the header, is
+   at most the size of the value and therefore fits in W bytes.
+4. *It is the narrowest.* k × W + r only grows with W, so the first W
+   that passes is the least one, and for every narrower W′ the
+   worst-case value needs k × W′ + r > 2^(8W′) − 1 bytes: an offset in
+   it could not be written.
+
+**How a bound feeds the enclosing type.** A type holding T uses T's
+finished number — `max_encoded_size(T)`, which already contains T's own
+bookkeeping at T's own W — or T's explicit cap in full when T has one
+(§3.1). It adds its own k words at its own W through its own `fit`. The
+two widths are independent: narrowing T can narrow what holds T (the
+bound gets smaller), never the other way round.
+
+- **Optional.** `Optional(T)` has no offsets of its own; it reserves one
+  selector byte, and its payload is T with T's W. A bound written on an
+  optional member applies to the payload (§3.5).
+- **Nested lists.** `BoundedList(BoundedList(T, M), N)`: the inner list
+  takes its W from fit(M, M × max(T)); the outer list is fit(N, N ×
+  that) and may have a different W. Each row of a grid uses the inner
+  W, the grid's table the outer W.
+- **Variant.** One selector byte, then the alternative, which keeps its
+  own W. The bound is 1 + the largest alternative.
+- **Tuple, pair.** The extensible record of the elements: fit(1 + v, …).
+- **Map, set.** The list of the entries / elements (§5.9). A map's
+  table has the W of fit(N, N × max(Tuple(K, V))); each entry is a
+  tuple with its own header and slots at the tuple's own W.
+- **A capped record.** W is the width class of the cap; whatever holds
+  the record reserves the cap. The cap also bounds the positions beneath
+  the record for the purpose of their widths (§3.6).
 
 A string, a list, a map, a set and a nested value have no bound of
 their own: `String` and `Vector(T)` are None. They are bounded by their
@@ -415,23 +506,28 @@ type — `BoundedString(N)`, `BoundedList(T, N)` — or, with the type left
 as it is, by an annotation on the member that holds them, at any depth
 (§3.5). The two say the same thing and give the same number.
 
-In these formulas every header and offset slot is counted as **4
-bytes**, whatever width the type ends up with: the bound selects W, so
-it cannot depend on W. (`BoundedString(N)` is N: a string's payload has
-no bookkeeping of its own, and the slot that locates it is counted by
-whatever holds it.) A child type that carries an explicit cap
-contributes that cap in full (§3.1), not its own inferred bound; an
-`Optional` reserves one selector byte whether or not its payload needs
-one. The result is an upper bound, never the exact maximum, and every
-implementation must compute the same number: a type's W follows from it.
+`BoundedString(N)` is N: a string's payload has no bookkeeping of its
+own, and the slot that locates it is counted by whatever holds it. A
+child type that carries an explicit cap contributes that cap in full
+(§3.1), not its own inferred bound; an `Optional` reserves one selector
+byte whether or not its payload needs one. The result is an upper bound,
+not always the exact maximum, and every implementation must compute the
+same number: a type's W follows from it.
 
-**Bit types.** `Bitvector(N)` is fixed-size (⌈N/8⌉ bytes) and
-`Bitlist(N)` holds at most ⌊N/8⌋ + 1 bytes, but the inferred bound does
-not use either fact: a bit type contributes None, so a record with a bit
-member and no explicit cap has W = 4. Give such a record
-`max-dynamic-data` to narrow it. (Every implementation computes None
-here; counting the bits would change W, and therefore the bytes, of
-records that have a bit member and no cap.)
+**Explicit-width profiles.** The profiles `pssz8`, `pssz16` and `pssz32`
+(one W for a whole frame, used for byte-parity tests) do not use any of
+this: every header, slot and offset table in the frame — a list's table
+included — is W bytes wide, whatever is bounded. A value that does not
+fit is refused by the encoder. Their bytes are unaffected by how the
+automatic profile infers widths.
+
+**Bit types.** `Bitvector(N)` is a fixed-size field of ⌈N/8⌉ bytes: it
+is inline in a record and takes no offset slot. `Bitlist(N)` is variable
+(one slot) and contributes ⌈N/8⌉ + 1: at most N bits and the delimiter
+bit. (The exact largest encoding is ⌊N/8⌋ + 1 bytes, one less when N is
+not a multiple of 8; the table's value is the bound every implementation
+uses.) A record whose only variable-size members are bit types is
+therefore bounded, and narrow, without an explicit cap.
 
 ### 3.3 fixed_size_of(T)
 
@@ -503,12 +599,110 @@ depth, and below the member itself a length bound is `max N`.
 An annotated member is exactly the type the annotations describe:
 `Vector(String)` annotated `max 8, element(utf8, max 16)` **is**
 `BoundedList(BoundedString(16), 8)`. It has that type's
-`max_encoded_size`, that type's widths at every depth (a pair, a tuple
-or an array of variable elements below the member takes its W from the
-bounds its position carries; a list's table is 4 wide either way), the
+`max_encoded_size`, that type's widths at every depth (a list, a map, a
+set, an array of variable elements, a pair or a tuple at or below the
+member takes its W from the bounds its position carries: the annotated
+list above has a 1-byte offset table), the
 same bytes, the same schema, and the same checks: an encoder refuses a
 value outside any bound of the tree, and every reader — validating,
 checked and fail-fast — rejects a frame that holds one (§16).
+
+### 3.6 A record's cap bounds what lies beneath it
+
+A record with an explicit cap N (`max-dynamic-data: N`; a method's
+argument list with a cap is such a record, §16) never encodes to more
+than N bytes, so nothing inside it does either. The cap is therefore an
+**implicit bound of every position beneath the record**, and the widths
+there use it:
+
+> **Position cap.** The position cap of a value is the explicit cap of
+> the nearest enclosing record, if that record has one; otherwise there
+> is none. "Nearest enclosing record" is found by walking up from the
+> value through lists, arrays, maps, sets, optionals, variants, tuples,
+> pairs, boxes and transparent types; the walk stops at the first
+> record (a reflected record, or a method argument tuple) and takes
+> that record's cap or nothing. It also stops, with nothing, at the
+> root and at a `Nested(T)` boundary (the inner value of a nested
+> member is a root of its own, §5.8).
+>
+> **Width under a position cap.** A type that has offsets and is **not
+> a record** — an array, list, map or set of variable elements, a tuple,
+> a pair — at a position whose cap is C has
+>
+> ```
+> W = width class of min(max_encoded_size at that position, C)
+> ```
+>
+> where a `max_encoded_size` of None counts as infinite. Without a
+> position cap the rule is §3 unchanged.
+
+So in
+
+```
+Record Transfer @cap=255 {
+    token:  u32
+    memo:   String
+    tags:   Vector(String)
+    rows:   Vector(Vector(String))
+}
+```
+
+the record has W = 1 (its cap), `tags` has a 1-byte offset table, and so
+have `rows` and every row in it, although `Vector(String)` on its own is
+unbounded and 4 bytes wide. With `@cap=256` all of them are 2 bytes wide,
+and with no cap the lists are 4.
+
+What the rule does and does not touch:
+
+- **It only selects widths.** The position cap is not a `max` in the
+  sense of §3.5: it adds no check of its own (the record's cap check,
+  §8.2, already covers every byte beneath it), it does not change any
+  `max_encoded_size` (a capped record contributes its cap to what holds
+  it, whatever is inside), and it does not change the schema: the member
+  is still `Vector(String)`.
+- **A tighter bound of the position's own wins**; a looser one is
+  clamped. `tags: BoundedList(BoundedString(16), 8)` under `@cap=60000`
+  has a 1-byte table (its own bound, 136); `BoundedList(BoundedString(1000),
+  1000)` under `@cap=255` has a 1-byte table too (the cap). A bound
+  larger than the cap is legal — it still limits the count and the
+  element size where the cap does not — it just cannot widen anything.
+- **Strings, byte lists and lists of fixed-size elements have nothing to
+  narrow.** Their payload is the raw bytes, with no length prefix and no
+  table (§5.3.1, §5.3.3): the only bookkeeping they cost is the one
+  offset slot in the record that holds them, which is as wide as that
+  record. A `String` member of a record with W = 1 costs exactly one
+  byte beyond its characters, whether or not the string is bounded.
+- **A record keeps its own width.** The width of a record is part of the
+  record type: its bytes are the same wherever it appears (that is what
+  lets a view of the record, and a `Nested` value of it, be read without
+  knowing what holds it). A record beneath a capped record is not
+  narrowed by the outer cap, and the positions beneath the inner record
+  take the *inner* record's cap, or none. A child record that should be
+  narrow declares its own cap or bounds.
+- **Explicit-width profiles** ignore it, like every other inference.
+
+**It is well defined and terminates.** The position cap is an inherited
+attribute: it is computed top-down, by one step per level, from a value
+that is known before the walk begins (the enclosing record's cap is
+written in the schema; it is not derived from anything beneath it). The
+bound of §3.2 is a synthesized attribute, computed bottom-up, and it
+never reads a position cap: caps only enter the final `min`, after the
+bound of the position is finished. The two passes do not feed each
+other, so there is no cycle, and each ends because the type tree is
+finite (§3.2). The chosen W is sufficient: every offset inside the value
+is at most the size of the value, which is at most C (the enclosing
+record's encoder and readers enforce C), and at most its own bound; so
+it is at most the smaller of the two, which fits in W bytes by the
+definition of the width class. And the rule is monotone: a smaller cap
+or a smaller bound never gives a larger W.
+
+**From a schema alone.** A schema-driven implementation needs nothing
+beyond what the schema already holds: the record's `maxDynamicData`
+attribute. While it walks a value it keeps the cap in effect — set to
+the record's cap (or to none) on entering a record's members, cleared on
+entering the inner value of a `Nested` node, restored on leaving, and
+left alone by every other node — and takes the `min` above when it
+derives the width of a list, array, map, set or tuple.
 
 ## 4. Scalar Encodings
 
@@ -722,14 +916,24 @@ A zero-element vector is a zero-byte payload.
 [ count_offsets × u{W} | T_0_payload | T_1_payload | ... ]
 ```
 
-W is 4 for a list's own offset table, whatever bounds the list (§3.1).
+W is the list's own width (§3.1): 4 for an unbounded list, and the
+width class of its bound — 1, 2 or 4 — for a list whose count and
+elements are bounded, by its type or by the annotations of its position
+(§3.5). It does not depend on the record that holds the list, nor on
+the value.
 
-The count is determined by walking the offset slots until they exceed
-the payload's total size. (Implementation hint: the offset table size
-is `count × W`, and `offsets[0]` is always equal to that table size,
-so count = offsets[0] / W.)
+A zero-element list is a zero-byte payload. Otherwise the offset table
+size is `count × W` and `offsets[0]` is always equal to that table
+size, so `count = offsets[0] / W`.
 
 Offsets are container-relative within the vector payload.
+
+**Indexed access is O(1) at every W.** W is known from the schema before
+any byte is read, and all slots of one table have that one width:
+element i's offset is the u{W} at byte `i × W` of the payload, and its
+end is the next slot (or the end of the payload for the last element).
+A reader, a view and an in-place writer (§17) index a 1-, 2- or 4-byte
+table the same way.
 
 #### 5.3.3 String
 
@@ -820,7 +1024,7 @@ locality.
 
 ### 5.6 Variants — `Variant(T_0, T_1, ..., T_{n-1})`
 
-A tagged union with up to 256 alternatives.
+A tagged union with up to 256 alternatives (§8.4).
 
 ```
 [ u8 selector | encoding(T_selector) ]
@@ -833,9 +1037,9 @@ For a variant inside a record field, the entire variant (selector +
 payload) lives in the dynamic region; the fixed region holds an
 offset slot pointing at the selector byte.
 
-(If a variant has > 256 alternatives, it must be widened to u16.
-This is an open extension; today implementations should
-static-assert against > 256.)
+(A variant with more than 256 alternatives is not a PSSZ type, §8.4:
+implementations refuse it at compile time or when the schema is
+checked.)
 
 ### 5.7 Top-level encoding
 
@@ -979,7 +1183,9 @@ encode(Set(K))    = encode(Vector(K))             of the elements, sorted
 ```
 
 Everything that is derived from the encoding is the list's: the offset width
-(§3; a list's table is 4 wide under the automatic profile), `max_encoded_size`
+(§3: 4 for an unbounded map or set; a bounded one — entries counted by a
+member bound, keys and values bounded — takes the width class of its bound,
+as a bounded list does, and each entry tuple its own), `max_encoded_size`
 (None unless a member bound makes it finite, as for a vector),
 `min_encoded_size` = 0 (so `Optional(Map)` and `Optional(Set)` take the
 selector form, §5.5.2), the element rules of §5.3 (fixed elements are packed
@@ -1306,10 +1512,15 @@ not change.
 
 For a container with width tag W:
 
-- W = 1: total encoded size ≤ 256 bytes.
-- W = 2: total encoded size ≤ 65 536 bytes.
-- W = 4: total encoded size ≤ 4 GiB. (4 294 967 296 bytes — practical
-  limit for in-memory single-buffer parse.)
+- W = 1: total encoded size ≤ 255 bytes.
+- W = 2: total encoded size ≤ 65 535 bytes.
+- W = 4: total encoded size < 4 GiB (at most 4 294 967 295 bytes — the
+  practical limit for an in-memory single-buffer parse).
+
+These are the limits of the offsets a W-byte slot can hold. In the
+automatic profile a type's W is chosen so that its largest value meets
+them (§3.2); an encoder never widens W for a large value, it refuses the
+value.
 
 ### 8.2 Cap-imposed limits
 
@@ -1345,11 +1556,25 @@ The reference psio implementation exposes the cap as a single
 checks against that constant so the value is grep-able from one
 place.
 
-### 8.4 Variant alternatives
+### 8.4 Element counts
 
-Variant alternative count limited to 256 (selector is u8). Schemas
-exceeding 256 must split into multiple variants or use a different
-encoding.
+| what | limit | why |
+|---|---|---|
+| elements of a `Tuple` (a `Pair` is 2; a method's argument list is a tuple) | **255** | a count that fits in 8 bits, and what language tooling can reasonably instantiate |
+| alternatives of a `Variant` | **256** | the selector is one byte: indexes 0..255 |
+| fields of a record | no limit in the format | an implementation may have one (C++ reflection lists at most 255 members and keywords per record); `max-fields` (§16) is a schema-level discipline |
+
+A tuple of more than 255 elements is not a PSSZ type: a typed
+implementation refuses it when the type is built (C++: a compile-time
+error), and a schema that holds a `Tuple` of more than 255 members is
+invalid — a schema-driven implementation rejects it before reading or
+writing any value. A variant with more than 256 alternatives is refused
+the same way; split it or use a different encoding.
+
+The limit does not change any byte. A tuple's header is the byte size
+of its fixed region (§5.1.1), not its element count, and a fixed region
+of 255 members can be far larger than 255 bytes; nothing on the wire
+counts tuple elements, record fields or list elements.
 
 ## 9. Errors
 

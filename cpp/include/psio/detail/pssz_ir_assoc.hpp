@@ -587,7 +587,8 @@ codec_status Codec<W>::assoc_order(const schema_types::Custom &custom, const Seq
 
 template <std::size_t W>
 codec_status Codec<W>::encode_assoc(const schema_types::Custom &custom, const Value &value,
-                                    std::vector<char> &out, std::size_t n) const
+                                    std::vector<char> &out, std::size_t n,
+                                    std::optional<std::uint64_t> count) const
 {
    auto items = std::get_if<Sequence>(&value.value);
    if (!items)
@@ -600,7 +601,7 @@ codec_status Codec<W>::encode_assoc(const schema_types::Custom &custom, const Va
    // As written: the element codec sees the custom nodes on the way.
    PSIO_PSSZ_IR_TRY(child_of(*shape.element, element));
    std::size_t w;
-   PSIO_PSSZ_IR_TRY(width_of(*shape.list, w));
+   PSIO_PSSZ_IR_TRY(width_of(*shape.list, w, count));
    const std::uint64_t bound = shape.max ? *shape.max : 0;
    // Values that are already in canonical order (anything a decoder or a
    // text reader produced) are encoded as they are.
@@ -615,7 +616,8 @@ codec_status Codec<W>::encode_assoc(const schema_types::Custom &custom, const Va
 
 template <std::size_t W>
 codec_status Codec<W>::decode_assoc(const schema_types::Custom &custom,
-                                    std::span<const char> bytes, Value &out, std::size_t n)
+                                    std::span<const char> bytes, Value &out, std::size_t n,
+                                    std::optional<std::uint64_t> count)
 {
    AssocShape shape;
    PSIO_PSSZ_IR_TRY(assoc_shape(custom, shape));
@@ -623,7 +625,7 @@ codec_status Codec<W>::decode_assoc(const schema_types::Custom &custom,
    // As written: the element codec sees the custom nodes on the way.
    PSIO_PSSZ_IR_TRY(child_of(*shape.element, element));
    std::size_t w;
-   PSIO_PSSZ_IR_TRY(width_of(*shape.list, w));
+   PSIO_PSSZ_IR_TRY(width_of(*shape.list, w, count));
    Sequence items;
    PSIO_PSSZ_IR_TRY(decode_sequence(*element, bytes, false, shape.max ? *shape.max : 0,
                                     shape.max.has_value(), w, items, n));
@@ -643,6 +645,7 @@ codec_status Codec<W>::decode_assoc(const schema_types::Custom &custom,
       Codec raw(schema);
       raw.opaque_nested = true;
       raw.allow_unknown = allow_unknown;
+      raw.active_cap = active_cap;
       Sequence wire;
       PSIO_PSSZ_IR_TRY(raw.decode_sequence(*element, bytes, false, shape.max ? *shape.max : 0,
                                            shape.max.has_value(), w, wire, n));

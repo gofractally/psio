@@ -22,7 +22,7 @@ struct Control
    PSIO_REFLECT(Control, attr(tags, max<8> | element(utf8 | max<16>)),
                 attr(m, max<4> | keys(max<16>)), attr(t, at<0>(max<8>)))
 };
-static_assert(psio::auto_pssz_width_v<Control> == 2);
+static_assert(psio::auto_pssz_width_v<Control> == 1);
 
 #if defined(AT_FAIL_ELEMENT_ON_STRING)
 struct Bad
@@ -102,20 +102,29 @@ struct Bad
 static_assert(psio::auto_pssz_width_v<Bad> != 0);
 #endif
 
-// A view addresses a member whose annotations leave every nested width as
-// its type gives it (a list of bounded strings: the list's table is 4 wide
-// either way); one whose annotations narrow a nested value is refused.
+// A view addresses every member, also one whose annotations narrow an offset
+// width in it (a bounded list's own table, a map entry with a bounded key, a
+// tuple with a bounded element): its view carries the annotations. The one
+// exception is a variant whose alternatives are narrowed by at<I>(...).
 inline std::size_t view_tags(std::span<const char> bytes)
 {
    psio::view<Control, psio::pssz> v{bytes};
    return v.get<0>().size();
 }
-#if defined(AT_FAIL_VIEW_NARROWED)
 inline std::size_t view_map(std::span<const char> bytes)
 {
    psio::view<Control, psio::pssz> v{bytes};
-   return v.get<1>().size();  // map entries: a pair whose bounded key narrows it
+   return v.get<1>().size() + v.get<2>().get<0>().view_().size();
+}
+#if defined(AT_FAIL_VIEW_NARROWED)
+struct Narrowed
+{
+   std::variant<std::uint32_t, std::vector<std::string>> v;
+   PSIO_REFLECT(Narrowed, attr(v, at<1>(max<2> | element(max<16>))))
+};
+inline std::size_t view_variant(std::span<const char> bytes)
+{
+   psio::view<Narrowed, psio::pssz> v{bytes};
+   return v.get<0>().index();
 }
 #endif
-
-int main() {}

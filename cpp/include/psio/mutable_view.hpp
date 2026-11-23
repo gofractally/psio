@@ -237,6 +237,8 @@ namespace psio {
 
          template <typename Fmt>
          inline constexpr bool is_auto_v = std::is_same_v<Fmt, ::psio::pssz>;
+         template <typename A>
+         inline constexpr bool is_auto_v<::psio::pssz_at<A>> = true;
 
          template <typename Fmt>
          inline constexpr std::size_t explicit_width_v = 4;
@@ -282,6 +284,9 @@ namespace psio {
       template <typename Child>
       using child_format = view_layout::nested_format_t<Fmt, Child>;
       using layout       = view_layout::traits<Fmt>;
+      // A map is addressed as the list of its entries (pssz_view.hpp).
+      using list_format  = view_layout::detail_pssz::assoc_list_format_t<T, Fmt>;
+      using list_layout  = view_layout::traits<list_format>;
       using read_view    = view<T, Fmt, storage::const_borrow>;
 
       static constexpr bool adapter_v = ::psio::format_should_dispatch_adapter_v<Fmt, T>;
@@ -412,7 +417,9 @@ namespace psio {
                              T, N>::value_t>>,
                        "psio::mutable_view: a member whose annotations constrain its content is "
                        "not addressable in place (psio::detail::mutation_blocked_v)");
-         return child<Member>(layout::template record_field_span<T, N>(const_data()));
+         return mutable_view<Member, view_layout::member_format_t<Fmt, T, N>>{
+            detail::mutable_view_impl::rebase(
+               data_, layout::template record_field_span<T, N>(const_data()))};
       }
 
       // ── Pair: the record of its two members, also by name ──────────────
@@ -456,7 +463,7 @@ namespace psio {
          if constexpr (array_v)
             return std::tuple_size_v<T>;
          else if constexpr (map_v)
-            return layout::template vector_count<detail::assoc_entry_t<T>>(const_data());
+            return list_layout::template vector_count<detail::assoc_entry_t<T>>(const_data());
          else
             return layout::template vector_count<typename T::value_type>(const_data());
       }
@@ -476,11 +483,11 @@ namespace psio {
          {
             using List = detail::assoc_list_t<T>;
             using Entry = detail::assoc_entry_t<T>;
-            using EntryFormat = view_layout::nested_format_t<Fmt, List>;
+            using EntryFormat = view_layout::nested_format_t<list_format, List>;
             return mutable_map_entry<detail::assoc_key_t<T>, typename T::mapped_type,
                                      EntryFormat>{mutable_view<Entry, EntryFormat>{
                detail::mutable_view_impl::rebase(
-                  data_, layout::template vector_element_span<Entry>(const_data(), i))}};
+                  data_, list_layout::template vector_element_span<Entry>(const_data(), i))}};
          }
          else
             return element(i);
@@ -491,7 +498,7 @@ namespace psio {
       {
          using Element = typename T::value_type;
          if constexpr (array_v)
-            return mutable_view<Element, Fmt>{detail::mutable_view_impl::rebase(
+            return mutable_view<Element, child_format<T>>{detail::mutable_view_impl::rebase(
                data_, layout::template array_element_span<Element, std::tuple_size_v<T>>(
                          const_data(), i))};
          else

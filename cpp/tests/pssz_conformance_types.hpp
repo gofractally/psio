@@ -298,10 +298,17 @@ namespace pssz_conf
    PSIO_REFLECT(WidthGrowParentV1, child)
    struct WidthGrowParentV2 { WidthGrowV2 child; };
    PSIO_REFLECT(WidthGrowParentV2, child)
-   struct WidthThreshold251 { std::array<u8, 251> value; };  // bound 255
+   // (The bound is the header at the record's own width plus the array:
+   // 1 + 251 and 1 + 252. They were the 255 / 256 threshold when the header
+   // was counted as 4 bytes; WidthThreshold254 / 255 are the threshold now.)
+   struct WidthThreshold251 { std::array<u8, 251> value; };  // bound 252
    PSIO_REFLECT(WidthThreshold251, value)
-   struct WidthThreshold252 { std::array<u8, 252> value; };  // bound 256
+   struct WidthThreshold252 { std::array<u8, 252> value; };  // bound 253
    PSIO_REFLECT(WidthThreshold252, value)
+   struct WidthThreshold254 { std::array<u8, 254> value; };  // bound 1 + 254 = 255
+   PSIO_REFLECT(WidthThreshold254, value)
+   struct WidthThreshold255 { std::array<u8, 255> value; };  // 1 + 255 > 255: 2 + 255 = 257
+   PSIO_REFLECT(WidthThreshold255, value)
    struct WidthBoundedBatch { std::vector<WidthCheckpoint> entries; };  // entries <= 4
    PSIO_REFLECT(WidthBoundedBatch, entries)
    struct WidthStringPair { Raw first; Raw second; };
@@ -310,19 +317,31 @@ namespace pssz_conf
    PSIO_REFLECT(WidthCappedPair, first, second)
 
    // Inferred-bound thresholds driven by a bounded string (small values).
-   struct S247 { Raw s; };  // bound 4 + 4 + 247 = 255
+   // The bound of record{s: raw_string<=N} is its header and its one slot at
+   // the record's own width, plus N: 2 * W + N. S253 / S254 and S65531 /
+   // S65532 sit on the two thresholds. (S247 / S248 and S65527 / S65528 did
+   // when the header and the slot were counted as 4 bytes each.)
+   struct S247 { Raw s; };  // bound 1 + 1 + 247 = 249
    PSIO_REFLECT(S247, s)
-   struct S248 { Raw s; };  // 256
+   struct S248 { Raw s; };  // 250
    PSIO_REFLECT(S248, s)
-   struct S65527 { Raw s; };  // 65535
+   struct S65527 { Raw s; };  // 2 + 2 + 65527 = 65531
    PSIO_REFLECT(S65527, s)
-   struct S65528 { Raw s; };  // 65536
+   struct S65528 { Raw s; };  // 65532
    PSIO_REFLECT(S65528, s)
+   struct S253 { Raw s; };  // 1 + 1 + 253 = 255
+   PSIO_REFLECT(S253, s)
+   struct S254 { Raw s; };  // 1 + 1 + 254 > 255: 2 + 2 + 254 = 258
+   PSIO_REFLECT(S254, s)
+   struct S65531 { Raw s; };  // 2 + 2 + 65531 = 65535
+   PSIO_REFLECT(S65531, s)
+   struct S65532 { Raw s; };  // 2 + 2 + 65532 > 65535: 4 + 4 + 65532 = 65540
+   PSIO_REFLECT(S65532, s)
 
    // A bounded UTF-8 string member is what bounds these records.
-   struct T16 { u32 a; psio::utf8_string<16> s; };  // bound 4 + 4 + 4 + 16 = 28
+   struct T16 { u32 a; psio::utf8_string<16> s; };  // bound 1 + 4 + 1 + 16 = 22
    PSIO_REFLECT(T16, a, s)
-   struct T300 { u32 a; psio::utf8_string<300> s; };  // bound 312
+   struct T300 { u32 a; psio::utf8_string<300> s; };  // bound 2 + 4 + 2 + 300 = 308
    PSIO_REFLECT(T300, a, s)
 
    // A bounded vector of variable elements inside a narrow parent.
@@ -411,6 +430,10 @@ PSIO_FIELD_ATTRS(pssz_conf::S247, s, psio::length_bound{.max = 247})
 PSIO_FIELD_ATTRS(pssz_conf::S248, s, psio::length_bound{.max = 248})
 PSIO_FIELD_ATTRS(pssz_conf::S65527, s, psio::length_bound{.max = 65527})
 PSIO_FIELD_ATTRS(pssz_conf::S65528, s, psio::length_bound{.max = 65528})
+PSIO_FIELD_ATTRS(pssz_conf::S253, s, psio::length_bound{.max = 253})
+PSIO_FIELD_ATTRS(pssz_conf::S254, s, psio::length_bound{.max = 254})
+PSIO_FIELD_ATTRS(pssz_conf::S65531, s, psio::length_bound{.max = 65531})
+PSIO_FIELD_ATTRS(pssz_conf::S65532, s, psio::length_bound{.max = 65532})
 PSIO_TYPE_ATTRS(pssz_conf::Tiny, psio::max_dynamic_data_spec{16})
 PSIO_FIELD_ATTRS(pssz_conf::NarrowBatch, entries, psio::length_bound{.max = 2})
 PSIO_TYPE_ATTRS(pssz_conf::Mix1x1, psio::max_dynamic_data_spec{250})
@@ -858,6 +881,99 @@ namespace pssz_conf
    struct AnnVar { std::variant<u32, Raw, Vec<Raw>> v; };  // alternatives by index
    PSIO_REFLECT(AnnVar, attr(v, at<1>(utf8 | max<16>) | at<2>(max<2> | element(utf8 | max<16>))))
 
+   // ── A list's own offset-table width (docs/pssz-spec.md 3.2) ───────────
+   //
+   // A list / map / set of variable elements writes one offset slot per
+   // element, W bytes wide, W being the list's own: with at most N elements
+   // of at most M bytes it is the least of 1, 2, 4 with N * (W + M) <=
+   // 2^(8W) - 1. An unbounded list (no count, or unbounded elements) is 4.
+   //
+   // By wrapper type, as roots:
+   using BList1    = psio::bounded<psio::utf8_string<16>, 15>;    // 15 * (1 + 16)  = 255   : 1
+   using BList2    = psio::bounded<psio::utf8_string<17>, 15>;    // 15 * (2 + 17)  = 285   : 2
+   using BList2Top = psio::bounded<psio::utf8_string<255>, 255>;  // 255 * (2 + 255) = 65535 : 2
+   using BList4    = psio::bounded<psio::utf8_string<255>, 256>;  // 256 * (4 + 255) = 66304 : 4
+   using BListFree = psio::bounded<Text, 8>;                      // unbounded elements      : 4
+   // By annotation, as members (the record has its own width):
+   struct ListW1 { Vec<Raw> items; };  // list 255: 1; record 2 + 2 + 255 = 259: 2
+   PSIO_REFLECT(ListW1, attr(items, max<15> | element(max<16>)))
+   struct ListW2 { Vec<Raw> items; };  // list 285: 2; record 289: 2
+   PSIO_REFLECT(ListW2, attr(items, max<15> | element(max<17>)))
+   struct ListW2Top { Vec<Raw> items; };  // list 65535: 2; record 4 + 4 + 65535: 4
+   PSIO_REFLECT(ListW2Top, attr(items, max<255> | element(max<255>)))
+   struct ListW4 { Vec<Raw> items; };  // list 66304: 4; record 4
+   PSIO_REFLECT(ListW4, attr(items, max<256> | element(max<255>)))
+   struct ListFree { Vec<Raw> items; };  // counted, elements unbounded: 4; record 4
+   PSIO_REFLECT(ListFree, attr(items, max<8>))
+   // Nested: a row is <= 15 strings of <= 16 bytes (255: a 1-byte table);
+   // <= 20 rows are 20 * (2 + 255) = 5140: a 2-byte table.
+   struct ListNested { Vec<Vec<Raw>> rows; };
+   PSIO_REFLECT(ListNested, attr(rows, max<20> | element(max<15> | element(max<16>))))
+   // Maps: the table of the entries, and each entry tuple's own header and
+   // slot. MapW1: an entry is 1 + 1 + 8 + 4 = 14, <= 4 entries are 4 * (1 +
+   // 14) = 60: 1. MapW2: an entry is 1 + 4 + 1 + 16 = 22, <= 100 entries are
+   // 100 * (2 + 22) = 2400: 2.
+   struct MapW1 { std::map<Raw, u32> m; };
+   PSIO_REFLECT(MapW1, attr(m, max<4> | keys(max<8>)))
+   struct MapW2 { std::map<u32, Raw> m; };
+   PSIO_REFLECT(MapW2, attr(m, max<100> | values(max<16>)))
+   // A set of <= 15 strings of <= 16 bytes: the list, 255: 1.
+   struct SetW1 { std::set<Raw> s; };
+   PSIO_REFLECT(SetW1, attr(s, max<15> | element(max<16>)))
+
+   // ── Bit types have a size bound (docs/pssz-spec.md 3.2) ────────────────
+   //
+   // Bitvector(N) is ceil(N / 8) inline bytes; Bitlist(N) contributes
+   // ceil(N / 8) + 1. A record whose variable members are bit types is
+   // bounded without a cap.
+   struct BitRec { u8 id; psio::bitvector<12> flags; Bits12 seen; };  // 1 + 1 + 2 + 1 + 3 = 8
+   PSIO_REFLECT(BitRec, id, flags, seen)
+   struct BitNarrow { psio::bitlist<2016> seen; };  // 1 + 1 + (252 + 1) = 255
+   PSIO_REFLECT(BitNarrow, seen)
+   struct BitWide { psio::bitlist<2024> seen; };  // 1 + 1 + 254 > 255: 2 + 2 + 254 = 258
+   PSIO_REFLECT(BitWide, seen)
+
+   // ── A record's cap bounds what lies beneath it (docs/pssz-spec.md 3.6) ─
+   //
+   // Nothing beneath a record with an explicit maxDynamicData of N can be
+   // larger than N, so a list, map, set, array, tuple or pair beneath it —
+   // down to the next record — takes its offset width as if it were
+   // bounded by N, when it has no tighter bound of its own. The member
+   // types stay the plain unbounded ones.
+   //
+   // A transfer-like action: 255 is the largest cap with 1-byte offsets.
+   // header 1 + u32 + u64 + u64 + two slots = 23 bytes; memo and data share
+   // the other 232 (a present data spends one of them on its selector).
+   struct CapTransfer { u32 token; u64 from; u64 amount; Text memo; Opt<Vec<u8>> data; };
+   PSIO_REFLECT(CapTransfer, token, from, amount, memo, data, maxDynamicData(255))
+   struct CapList { Vec<Raw> items; };  // cap 255: record 1, table 1
+   PSIO_REFLECT(CapList, items, maxDynamicData(255))
+   struct CapList2 { Vec<Raw> items; };  // cap 256: record 2, table 2
+   PSIO_REFLECT(CapList2, items, maxDynamicData(256))
+   struct CapList4 { Vec<Raw> items; };  // cap 65536: record 4, table 4
+   PSIO_REFLECT(CapList4, items, maxDynamicData(65536))
+   struct CapNested { Vec<Vec<Raw>> rows; };  // cap 255: both tables 1
+   PSIO_REFLECT(CapNested, rows, maxDynamicData(255))
+   struct CapMap { std::map<Raw, Vec<u32>> m; };  // cap 255: table 1, entries 1
+   PSIO_REFLECT(CapMap, m, maxDynamicData(255))
+   struct CapTuple { std::tuple<Raw, Vec<Raw>> t; };  // cap 255: tuple 1, table 1
+   PSIO_REFLECT(CapTuple, t, maxDynamicData(255))
+   // A tighter bound of the position's own wins (the cap would give 2).
+   struct CapTight { Vec<Raw> items; };
+   PSIO_REFLECT(CapTight, attr(items, max<8> | element(max<16>)), maxDynamicData(60000))
+   // A looser one is clamped by the cap (the bound alone would give 4).
+   struct CapClamp { Vec<Raw> items; };
+   PSIO_REFLECT(CapClamp, attr(items, max<1000> | element(max<1000>)), maxDynamicData(255))
+   // A record keeps its own width wherever it appears: R0 (unbounded, 4)
+   // beneath a cap of 255 still has 4-byte offsets; the list of R0 that
+   // holds some has a 1-byte table.
+   struct CapChild { R0 child; Vec<R0> kids; };
+   PSIO_REFLECT(CapChild, child, kids, maxDynamicData(255))
+   // And a cap does not reach out of its record: CapList inside an uncapped
+   // record is CapList; the sibling list is unbounded (4).
+   struct CapOuter { CapList inner; Vec<Raw> items; };
+   PSIO_REFLECT(CapOuter, inner, items)
+
    // ── Method argument tuples ────────────────────────────────────────────
    //
    // What `method(name, attr(p, specs)..., maxDynamicData(N))` makes of a
@@ -976,7 +1092,17 @@ namespace pssz_conf
       types<AnnTags, WrapTags, AnnRawTags, AnnGrid, AnnOpt, AnnArr, AnnMap, AnnSet, AnnTup,
             AnnVar>,
       // method argument tuples: annotated parameters and a cap (appended)
-      types<ArgsTransfer, ArgsTransferUncapped, ArgsBatch, ArgsNote, ArgsTransfer2>>::type;
+      types<ArgsTransfer, ArgsTransferUncapped, ArgsBatch, ArgsNote, ArgsTransfer2>,
+      // the thresholds of a record's own width (appended)
+      types<WidthThreshold254, WidthThreshold255, S253, S254, S65531, S65532>,
+      // a list's own offset-table width (appended)
+      types<BList1, BList2, BList2Top, BList4, BListFree, ListW1, ListW2, ListW2Top, ListW4,
+            ListFree, ListNested, MapW1, MapW2, SetW1>,
+      // a record's cap as the bound of the positions beneath it (appended)
+      types<CapTransfer, CapList, CapList2, CapList4, CapNested, CapMap, CapTuple, CapTight,
+            CapClamp, CapChild, CapOuter>,
+      // bit types have a size bound (appended)
+      types<BitRec, BitNarrow, BitWide>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)

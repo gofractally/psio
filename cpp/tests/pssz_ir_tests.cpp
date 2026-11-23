@@ -637,3 +637,46 @@ TEST_CASE("packed Bits adapters are atomic at node64", "[pssz][ir][bits][depth]"
    bit_depth_type<64, psio::bitvector<0>>::type empty;
    check(empty);
 }
+
+TEST_CASE("actual IR rejects a tuple of more than 255 elements", "[pssz][ir][metadata]")
+{
+   // docs/pssz-spec.md 8.4: a tuple has at most 255 elements.
+   ir::Schema schema;
+   const auto tuple_of = [](std::size_t count) {
+      ir::Tuple tuple;
+      for (std::size_t i = 0; i < count; ++i)
+         tuple.members.push_back(ir::Box<ir::AnyType>{ir::AnyType{ir::Int{8, false}}});
+      return ir::AnyType{std::move(tuple)};
+   };
+   const auto values_of = [](std::size_t count) {
+      runtime::Sequence values;
+      for (std::size_t i = 0; i < count; ++i)
+         values.push_back(runtime::Unsigned{i & 0xff});
+      return runtime::Value{std::move(values)};
+   };
+   const ir::AnyType at_limit = tuple_of(255), over = tuple_of(256);
+   std::vector<char> bytes;
+   REQUIRE(runtime::encode_auto(schema, at_limit, values_of(255), bytes).ok());
+   // header 2 + 255 one-byte members (1 + 255 does not fit one-byte offsets)
+   REQUIRE(bytes.size() == 257);
+   std::size_t width = 0;
+   REQUIRE(runtime::auto_width(schema, at_limit, width).ok());
+   REQUIRE(width == 2);
+   runtime::Value decoded;
+   bool           unknown = false;
+   REQUIRE(runtime::decode_auto(schema, at_limit, bytes, decoded, unknown).ok());
+   REQUIRE(decoded == values_of(255));
+
+   std::vector<char> refused{9};
+   auto status = runtime::encode_auto(schema, over, values_of(256), refused);
+   REQUIRE_FALSE(status.ok());
+   REQUIRE(std::string(status.error().what) == "pssz IR: a tuple has more than 255 elements");
+   REQUIRE(refused == std::vector<char>{9});
+   REQUIRE_FALSE(runtime::auto_width(schema, over, width).ok());
+   REQUIRE_FALSE(
+       runtime::decode_auto(schema, over, std::vector<char>(260, 0), decoded, unknown).ok());
+   REQUIRE_FALSE(runtime::encode<4>(schema, over, values_of(256), refused).ok());
+   // Nested anywhere: the schema is checked before any value is.
+   REQUIRE_FALSE(
+       runtime::encode_auto(schema, optional(over), runtime::Value::none(), refused).ok());
+}

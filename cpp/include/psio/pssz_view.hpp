@@ -35,9 +35,67 @@
 #include <span>
 #include <type_traits>
 
+namespace psio {
+   // The automatic profile at a position whose annotations (carrier A,
+   // detail/annotation_tree.hpp) narrow an offset width below it: the format
+   // of the view of such a member and of what it holds. Views name it; it is
+   // not a codec tag. A position whose annotations change no width is viewed
+   // as plain `psio::pssz`.
+   template <typename A>
+   struct pssz_at
+   {
+   };
+}  // namespace psio
+
 namespace psio::view_layout {
 
    namespace detail_pssz {
+
+      // The view format of a value of type T at a position carrying A.
+      template <typename T, typename A>
+      using format_at = std::conditional_t<
+         ::psio::detail::pssz_impl::widths_unchanged<T, A>(), ::psio::pssz, ::psio::pssz_at<A>>;
+
+      // A map / set is viewed as the list of its entries. This is that
+      // list's carrier under the map's carrier A: the same length bound, and
+      // as element(...) what keys(...) / values(...) (a map) or element(...)
+      // (a set) state for one entry.
+      template <typename M, typename A>
+      struct assoc_list_raw
+      {
+         static constexpr auto value = [] {
+            namespace ann = ::psio::detail::ann;
+            const auto entry = ann::entry_specs<M>(A::value);
+            const auto bound = [&] {
+               if constexpr (ann::has_length_bound_v<A>)
+                  return std::tuple{std::get<::psio::length_bound>(A::value)};
+               else
+                  return std::tuple<>{};
+            }();
+            if constexpr (std::tuple_size_v<std::remove_cvref_t<decltype(entry)>> == 0)
+               return bound;
+            else
+               return std::tuple_cat(
+                  bound, std::tuple{::psio::element_spec<std::remove_cvref_t<decltype(entry)>>{
+                            entry}});
+         }();
+         using value_t = std::remove_cvref_t<decltype(value)>;
+         static constexpr std::size_t cap = A::cap;
+      };
+      template <typename M, typename Fmt>
+      struct assoc_list_format
+      {
+         using type = Fmt;
+      };
+      template <typename M, typename A>
+      struct assoc_list_format<M, ::psio::pssz_at<A>>
+      {
+         using type = ::psio::pssz_at<
+            typename ::psio::detail::ann::normalized<assoc_list_raw<M, A>>::type>;
+      };
+      // The format of the list view a map / set view of format Fmt is.
+      template <typename M, typename Fmt>
+      using assoc_list_format_t = typename assoc_list_format<M, Fmt>::type;
 
       // Shared helpers parameterized on the explicit offset width W.
       // The pssz / pssz_<W> traits both forward here; the only
@@ -299,20 +357,19 @@ namespace psio::view_layout {
       static std::span<const char> record_field_span(
          std::span<const char> s, std::span<const char> = {}) noexcept
       {
-         // A child view re-selects its width from the member's type alone.
-         // That is the width the encoder used unless the member's
-         // annotations narrow a value nested in it (an array of bounded
-         // variable elements, a tuple / pair / map entry with bounded
-         // elements): such a member is not addressable through a view.
-         static_assert(
-            ::psio::detail::pssz_impl::widths_unchanged<
-               typename ::psio::detail::pssz_impl::record_traits<T>::template member_type<N>,
-               ::psio::detail::pssz_impl::member_ann<T, N>>(),
-            "psio: a pssz view cannot address this member: its annotations (element / keys / "
-            "values / at<I>) narrow the offset width of a value nested in it. State the bound "
-            "in the member's type (psio::bounded, psio::utf8_string) to view it");
          return detail_pssz::record_field_span<::psio::auto_pssz_width_v<T>, T, N>(s);
       }
+
+      // A child view re-selects its width from the member's type alone
+      // unless the member's annotations narrow an offset width in it (a
+      // bounded list of variable elements, an array of bounded variable
+      // elements, a tuple / pair / map entry with bounded elements): the
+      // view of such a member carries the annotations (psio::pssz_at).
+      template <typename T, std::size_t N>
+      using member_format = detail_pssz::format_at<
+         std::remove_cvref_t<
+            typename ::psio::detail::pssz_impl::record_traits<T>::template member_type<N>>,
+         ::psio::detail::pssz_impl::field_ann<T, ::psio::detail::pssz_impl::no_ann, N>>;
 
       template <typename T>
       static std::size_t vector_count(std::span<const char> s) noexcept
@@ -368,6 +425,114 @@ namespace psio::view_layout {
 
    };
 
+   // ── pssz_at<A> — the automatic profile under annotations A ────────────
+   //
+   // Every width is the one the codec selects for the viewed type at a
+   // position carrying A (pssz_impl::width_for<T, A>), and the carrier is
+   // threaded down exactly as the codec threads it: a list / array element
+   // gets element(...), a tuple element at<I>(...), an optional's payload the
+   // optional's own. Offsets have one compile-time width per view type, so
+   // element access stays O(1).
+   template <typename A>
+   struct traits<::psio::pssz_at<A>>
+   {
+      template <typename T>
+      static constexpr std::size_t width = ::psio::detail::pssz_impl::width_for<T, A>();
+
+      template <typename T, std::size_t N>
+         requires (::psio::detail::pssz_impl::Record<T> &&
+                   N < ::psio::detail::pssz_impl::record_traits<T>::member_count)
+      static std::span<const char> record_field_span(
+         std::span<const char> s, std::span<const char> = {}) noexcept
+      {
+         return detail_pssz::record_field_span<width<T>, T, N>(s);
+      }
+
+      template <typename T, std::size_t N>
+      using member_format = detail_pssz::format_at<
+         std::remove_cvref_t<
+            typename ::psio::detail::pssz_impl::record_traits<T>::template member_type<N>>,
+         ::psio::detail::pssz_impl::field_ann<T, A, N>>;
+
+      template <typename Parent, typename = void>
+      struct nested_format_of
+      {
+         // A reflected record's members are reached through member_format.
+         using type = ::psio::pssz;
+      };
+      template <typename E, typename Al>
+      struct nested_format_of<std::vector<E, Al>>
+      {
+         using type = detail_pssz::format_at<E, ::psio::detail::ann::element_ann<A>>;
+      };
+      template <typename E, std::size_t N>
+      struct nested_format_of<std::array<E, N>>
+      {
+         using type = detail_pssz::format_at<E, ::psio::detail::ann::element_ann<A>>;
+      };
+      template <typename V>
+      struct nested_format_of<std::optional<V>>
+      {
+         using type = detail_pssz::format_at<V, A>;
+      };
+      template <typename... Ts>
+      struct nested_format_of<std::variant<Ts...>>
+      {
+         // One view format serves every alternative of a variant view.
+         static_assert(
+            []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (::psio::detail::pssz_impl::widths_unchanged<
+                          Ts, ::psio::detail::ann::at_ann<A, Is>>() &&
+                       ...);
+            }(std::index_sequence_for<Ts...>{}),
+            "psio: a pssz view cannot address this variant: an at<I>(...) annotation narrows "
+            "the offset width of a value nested in one of its alternatives. State the bound "
+            "in the alternative's type (psio::bounded, psio::utf8_string) to view it");
+         using type = ::psio::pssz;
+      };
+      template <typename Parent>
+      using nested_format = typename nested_format_of<Parent>::type;
+
+      template <typename T>
+      static std::size_t vector_count(std::span<const char> s) noexcept
+      {
+         return detail_pssz::vector_count<width<std::vector<T>>, T>(s);
+      }
+      template <typename T>
+      static std::span<const char>
+      vector_element_span(std::span<const char> s, std::size_t i) noexcept
+      {
+         return detail_pssz::vector_element_span<width<std::vector<T>>, T>(s, i);
+      }
+      template <typename T, std::size_t N>
+      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i) noexcept
+      {
+         return detail_pssz::vector_element_span<width<std::array<T, N>>, T>(s, i);
+      }
+      template <typename T>
+      static bool optional_has_value(std::span<const char> s) noexcept
+      {
+         return detail_pssz::optional_has_value<std::optional<T>>(s);
+      }
+      template <typename T>
+      static std::span<const char>
+      optional_payload_span(std::span<const char> s) noexcept
+      {
+         return detail_pssz::optional_payload_span<std::optional<T>>(s);
+      }
+      template <typename... Ts>
+      static std::size_t variant_index(std::span<const char> s) noexcept
+      {
+         return detail_pssz::variant_index(s);
+      }
+      template <typename... Ts>
+      static std::span<const char>
+      variant_payload_span(std::span<const char> s) noexcept
+      {
+         return detail_pssz::variant_payload_span(s);
+      }
+   };
+
 }  // namespace psio::view_layout
 
 namespace psio {
@@ -375,6 +540,7 @@ namespace psio {
       template <typename F> inline constexpr bool is_pssz_format_v = false;
       template <> inline constexpr bool is_pssz_format_v<pssz> = true;
       template <std::size_t W> inline constexpr bool is_pssz_format_v<pssz_<W>> = true;
+      template <typename A> inline constexpr bool is_pssz_format_v<pssz_at<A>> = true;
    }
 
    template <typename... Ts, typename Fmt, storage Store>
@@ -402,7 +568,7 @@ namespace psio {
             if (span.size() == sizeof(F)) std::memcpy(&out, span.data(), sizeof(F));
             return out;
          }
-         else return view<F, view_layout::nested_format_t<Fmt, element_type>, Store>{span};
+         else return view<F, view_layout::member_format_t<Fmt, element_type, N>, Store>{span};
       }
    };
 
@@ -430,9 +596,12 @@ namespace psio {
    template <typename M, typename Fmt, storage Store>
       requires (detail::is_assoc_v<M> && detail::is_pssz_format_v<Fmt> &&
                 !::psio::format_should_dispatch_adapter_v<Fmt, M>)
-   class view<M, Fmt, Store> : public view<detail::assoc_list_t<M>, Fmt, Store>
+   class view<M, Fmt, Store>
+       : public view<detail::assoc_list_t<M>, view_layout::detail_pssz::assoc_list_format_t<M, Fmt>,
+                     Store>
    {
-      using base = view<detail::assoc_list_t<M>, Fmt, Store>;
+      using base = view<detail::assoc_list_t<M>,
+                        view_layout::detail_pssz::assoc_list_format_t<M, Fmt>, Store>;
 
     public:
       using element_type = M;

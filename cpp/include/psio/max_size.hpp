@@ -14,14 +14,22 @@
 // out of that merged tuple. Member beats wrapper beats type, so a field
 // can tighten a type-level default.
 //
-// Assumed wire overhead is pssz-family with W=4 (the widest offset
-// size). That is the conservative choice — if max fits in 0xff with
-// W=4 offsets, it certainly fits with W=1 offsets; the narrower the
-// offset, the fewer overhead bytes spent, so the max only shrinks.
+// The bound is the PSSZ one (docs/pssz-spec.md 3.2) and is computed bottom-up:
+// the bound of a type is a closed formula over the bounds of the types it
+// holds, never over its own offset width.
 //
-// `auto_pssz_width_v<T>` uses this bound only when T has no explicit
-// maxDynamicData budget. The W=4 bookkeeping intentionally permits threshold
-// slack rather than making width selection depend on its own result.
+//   - A list / array of variable elements, a map and a set have an offset
+//     table of one slot per element. With at most N elements of at most M
+//     bytes each the table is the narrowest of 1, 2, 4 bytes that addresses
+//     the whole value: the least W with N * (W + M) <= 2^(8W) - 1 (W = 4 when
+//     neither 1 nor 2 does), and the bound is N * (W + M) for that W
+//     (`fit` below).
+//   - A record and a tuple count their header and each variable member's
+//     slot as 4 bytes.
+//
+// `auto_pssz_width_v<T>` is the width class of this bound (1 through 255,
+// 2 through 65535, else 4) unless T has an explicit maxDynamicData budget,
+// which then rules. For a list that class is the W the formula chose.
 
 #include <psio/adapter.hpp>
 #include <psio/annotate.hpp>
@@ -97,6 +105,23 @@ namespace psio {
          static constexpr std::size_t limit = N;
       };
 
+      // Packed bits: bitvector<N> is ceil(N / 8) fixed bytes; bitlist<N>
+      // holds at most N bits and a delimiter bit.
+      template <typename T>
+      struct is_bitvector : std::false_type {};
+      template <std::size_t N>
+      struct is_bitvector<::psio::bitvector<N>> : std::true_type
+      {
+         static constexpr std::size_t bits = N;
+      };
+      template <typename T>
+      struct is_bitlist : std::false_type {};
+      template <std::size_t N>
+      struct is_bitlist<::psio::bitlist<N>> : std::true_type
+      {
+         static constexpr std::size_t bits = N;
+      };
+
       // Extract the effective count cap from a length_bound: exact wins,
       // then max. min alone does not bound the upper side.
       constexpr std::optional<std::uint32_t>
@@ -109,7 +134,7 @@ namespace psio {
          return std::nullopt;
       }
 
-      // These are conservative PSSZ payload bounds with W=4 bookkeeping.
+      // These are conservative PSSZ payload bounds (see the header comment).
       // An enclosing record adds its own field slot separately. Declared child
       // budgets are reserved in full so compatible child growth cannot silently
       // change an inferred parent width.
@@ -127,6 +152,27 @@ namespace psio {
             return std::nullopt;
          return count * *value;
       }
+      // The bound of a container that writes `slots` offset-width words (a
+      // list's or array's offset table; a record's header and member slots)
+      // and whose other bytes are bounded by `rest`: slots * W + rest for
+      // the least W in {1, 2, 4} whose total fits a W-byte offset, W = 4
+      // when neither 1 nor 2 does. The three candidates are closed formulas
+      // of `slots` and `rest`, which do not depend on W: nothing here is
+      // circular. The width class of the result is the W chosen.
+      constexpr bound fit(std::size_t slots, bound rest) noexcept
+      {
+         if (!rest) return std::nullopt;
+         if (auto one = add(multiply(slots, bound{1}), rest); one && *one <= 0xFFu)
+            return one;
+         if (auto two = add(multiply(slots, bound{2}), rest); two && *two <= 0xFFFFu)
+            return two;
+         return add(multiply(slots, bound{4}), rest);
+      }
+      // A record's / tuple's header and member slots are counted 4 wide.
+      constexpr bound record_fit(std::size_t slots, bound rest) noexcept
+      {
+         return fit(slots, rest);
+      }
       template <typename T>
       consteval bound max_bare() noexcept;
 
@@ -142,7 +188,7 @@ namespace psio {
                             ::psio::TimeValue<U> ||
                             std::is_same_v<U, ::psio::uint128> ||
                             std::is_same_v<U, ::psio::int128> ||
-                            std::is_same_v<U, ::psio::uint256>)
+                            std::is_same_v<U, ::psio::uint256> || is_bitvector<U>::value)
             return true;
          else if constexpr (is_std_array<U>::value)
             return fixed_payload<typename is_std_array<U>::element_type>();
@@ -199,23 +245,29 @@ namespace psio {
       template <typename FieldType, typename AnnotsTuple>
       consteval bound max_field_with_annots(AnnotsTuple annots) noexcept;
 
+      // `count` elements of type E at a position whose elements carry
+      // `annots`: a list, an array, the entries of a map or set. Fixed-size
+      // elements are inline; variable ones have the offset table.
       template <typename E, typename Annots>
-      consteval bound element_slot(const Annots& annots) noexcept
+      consteval bound sequence_bound(std::size_t count, const Annots& annots) noexcept
       {
-         auto element = max_field_with_annots<E>(annots);
-         if constexpr (!fixed_payload<E>()) element = add(element, 4);
-         return element;
+         const auto elements = multiply(count, max_field_with_annots<E>(annots));
+         if constexpr (fixed_payload<E>()) return elements;
+         else return fit(count, elements);
       }
 
       template <typename T, typename Annots, std::size_t... Is>
       consteval bound tuple_bound(const Annots& annots, std::index_sequence<Is...>) noexcept
       {
-         bound total = 4;
-         ((total = add(total,
-                       element_slot<std::remove_const_t<std::tuple_element_t<Is, T>>>(
-                          ::psio::detail::ann::at_specs<Is>(annots)))),
+         PSIO_REQUIRE_TUPLE_SIZE(sizeof...(Is));
+         // The header, and one slot per variable element.
+         std::size_t slots = 1;
+         bound       rest  = 0;
+         ((slots += fixed_payload<std::remove_const_t<std::tuple_element_t<Is, T>>>() ? 0 : 1,
+           rest = add(rest, max_field_with_annots<std::remove_const_t<std::tuple_element_t<Is, T>>>(
+                               ::psio::detail::ann::at_specs<Is>(annots)))),
           ...);
-         return total;
+         return record_fit(slots, rest);
       }
       template <typename T, typename Annots, std::size_t... Is>
       consteval bound variant_bound(const Annots& annots, std::index_sequence<Is...>) noexcept
@@ -262,30 +314,28 @@ namespace psio {
          {
             auto count = position_count<F>(annots);
             if (!count) return std::nullopt;
-            return multiply(*count, element_slot<typename F::value_type>(
-                                       ann::element_specs(annots)));
+            return sequence_bound<typename F::value_type>(*count, ann::element_specs(annots));
          }
          else if constexpr (ann::is_bounded<F>::value)
-            return multiply(F::max_size_value, element_slot<typename F::value_type>(
-                                                  ann::element_specs(annots)));
+            return sequence_bound<typename F::value_type>(F::max_size_value,
+                                                          ann::element_specs(annots));
          else if constexpr (::psio::detail::is_assoc_v<F>)
          {
             // A map / set is the list of its entries / elements.
             auto count = position_count<F>(annots);
             if (!count) return std::nullopt;
-            return multiply(*count, element_slot<::psio::detail::assoc_entry_t<F>>(
-                                       ann::entry_specs<F>(annots)));
+            return sequence_bound<::psio::detail::assoc_entry_t<F>>(*count,
+                                                                    ann::entry_specs<F>(annots));
          }
          else if constexpr (is_std_optional<F>::value)
             // One selector is conservative for fixed nonempty payloads, whose
             // existing optional representation needs no selector.
             return add(max_field_with_annots<typename F::value_type>(annots), 1);
          else if constexpr (is_std_array<F>::value)
-            // N elements, each its payload and — when it is not an inline
-            // fixed payload — its offset slot (docs/pssz-spec.md 5.2).
-            return multiply(is_std_array<F>::n,
-                            element_slot<typename is_std_array<F>::element_type>(
-                               ann::element_specs(annots)));
+            // N elements, and — when they are not inline fixed payloads —
+            // the offset table (docs/pssz-spec.md 5.2).
+            return sequence_bound<typename is_std_array<F>::element_type>(
+               is_std_array<F>::n, ann::element_specs(annots));
          else if constexpr (is_std_variant<F>::value)
             // One selector byte, then the widest alternative's payload
             // (docs/pssz-spec.md 3.2). Unbounded if any alternative is.
@@ -321,27 +371,34 @@ namespace psio {
          else if constexpr (std::is_enum_v<U>) return sizeof(std::underlying_type_t<U>);
          else if constexpr (::psio::TimeValue<U>) return sizeof(::psio::time_rep_t<U>);
          else if constexpr (std::is_arithmetic_v<U>) return sizeof(U);
+         // docs/pssz-spec.md 3.2: Bitvector(N) is its ceil(N / 8) bytes;
+         // Bitlist(N) is bounded by ceil(N / 8) + 1 (its bits and the
+         // delimiter).
+         else if constexpr (is_bitvector<U>::value) return (is_bitvector<U>::bits + 7) / 8;
+         else if constexpr (is_bitlist<U>::value) return (is_bitlist<U>::bits + 7) / 8 + 1;
          else if constexpr (::psio::is_transparent_v<U>)
             // The member's bound, its declared budget included.
             return child_payload<::psio::transparent_inner_t<U>>();
          else if constexpr (::psio::Record<U>)
          {
             using R = ::psio::reflect<U>;
-            bound total = ::psio::is_dwnc_v<U> ? 0 : 4;
+            // The header (extensible records), and one slot per variable
+            // member.
+            std::size_t slots = ::psio::is_dwnc_v<U> ? 0 : 1;
+            bound       rest  = 0;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                auto field = [&]<std::size_t I>() {
                   using F = typename R::template member_type<I>;
                   using eff = ::psio::effective_annotations_for<
                      U, F, R::template member_pointer<I>>;
-                  auto payload = max_field_with_annots<F>(eff::value);
                   if constexpr (!fixed_payload<F>() ||
                                 ::psio::has_as_override_v<typename eff::value_t>)
-                     payload = add(payload, 4);
-                  total = add(total, payload);
+                     ++slots;
+                  rest = add(rest, max_field_with_annots<F>(eff::value));
                };
                (field.template operator()<Is>(), ...);
             }(std::make_index_sequence<R::member_count>{});
-            return total;
+            return record_fit(slots, rest);
          }
          else if constexpr (std::is_same_v<U, std::string> || ::psio::detail::is_assoc_v<U> ||
                             is_std_vector<U>::value || is_std_optional<U>::value ||
@@ -359,9 +416,9 @@ namespace psio {
 
    // Public entry point — returns the upper bound in bytes over all
    // possible encoded values of T, or nullopt when any sub-field is
-   // unbounded. The bound assumes pssz W=4 offset overhead and is a
-   // conservative upper bound for every narrower pssz width. Child records with
-   // declared budgets reserve their full budget, not only their present fields.
+   // unbounded. It is an upper bound of the automatic-profile (psio::pssz)
+   // encoding. Child records with declared budgets reserve their full budget,
+   // not only their present fields.
    template <typename T>
    consteval std::optional<std::size_t> max_encoded_size() noexcept
    {

@@ -431,13 +431,20 @@ refuses a value outside the tree on encode (`encode` throws,
 `validate_strict`, the checked decode and the fail-fast decode; `psio::json`
 / `psio::ijson` refuse it when writing and reading; `psio::key` refuses it
 when reading a key; the schema-driven codecs enforce the bounded nodes the
-schema carries. A list's own offset table is 4 bytes wide whatever bounds it;
-a record, a tuple, a pair, a map entry and an array of variable elements take
-their width from their bound, and the annotations of their position narrow it
-exactly as the wrapper types would. A member whose annotations narrow such a
-nested value is not addressable through a `pssz_view` (state the bound in the
-type to view it), and a member with `element` / `keys` / `values` / `at`
-annotations is not addressable through a mutable view.
+schema carries. A record, a tuple, a pair, a map entry, an array of variable
+elements and a list, map or set of variable elements each take their offset
+width from their own bound, and the annotations of their position narrow it
+exactly as the wrapper types would: a `std::vector<std::string>` under
+`max<8> | element(max<16>)` has a 1-byte offset table, the unannotated vector
+a 4-byte one (`docs/pssz-type-width.md`). A record's `maxDynamicData` is also
+an implicit bound of the lists, maps, tuples and arrays beneath it (down to
+the next record): under a cap of 255 a plain `std::vector<std::string>` member
+has a 1-byte table. A view of a member whose annotations
+narrow a width carries them (`psio::pssz_at`); the one exception is a variant
+whose alternatives are narrowed by `at<I>(…)`, which is not addressable
+through a `pssz_view` (state the bound in the alternative's type to view it).
+A member with `element` / `keys` / `values` / `at` annotations is not
+addressable through a mutable view.
 
 ### Method parameters and the argument cap
 

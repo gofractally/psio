@@ -86,6 +86,17 @@
 #include <vector>
 
 namespace psio {
+   // A tuple has at most this many elements (docs/pssz-spec.md 8.4): a
+   // std::tuple, a std::pair (2), a method's argument list. Every PSSZ entry
+   // point and the schema builder refuse a longer one at compile time.
+   inline constexpr std::size_t max_tuple_elements = 255;
+   template <std::size_t N>
+   inline constexpr bool tuple_size_ok_v = N <= max_tuple_elements;
+#define PSIO_REQUIRE_TUPLE_SIZE(N)                                                              \
+   static_assert(::psio::tuple_size_ok_v<N>,                                                    \
+                 "psio: a tuple has at most 255 elements (docs/pssz-spec.md 8.4); this one has " \
+                 "more. Use a record, a list, or nested tuples")
+
 
    // ── type<T> wrapper ────────────────────────────────────────────────────
    //
@@ -238,12 +249,12 @@ namespace psio {
 
       std::uint32_t max       = 0;   // runtime upper bound; 0 = unbounded
       std::uint32_t field_num = 0;
-      // false: the bytes are checked by strict validation only (the spec as
-      // first shipped: `psio::utf8_spec{}`). true — what the `psio::utf8`
-      // helper states — the string IS a UTF-8 string, exactly as
-      // psio::utf8_string is: pssz, json and key refuse a value that is not
-      // UTF-8 on encode, validate and decode, and the schema says "utf8".
-      bool enforced = false;
+      // The annotation states what the string IS: a UTF-8 string, exactly
+      // as psio::utf8_string is. pssz, json and key refuse a value that is
+      // not UTF-8 on encode, validate and decode, and the schema says
+      // "utf8". There is no weaker, check-on-strict-validation-only form:
+      // the type (or the annotation, which is part of the member's type)
+      // encodes the restriction.
 
       constexpr bool operator==(const utf8_spec&) const = default;
 
@@ -1323,9 +1334,9 @@ namespace psio {
    // The bytes of a string are UTF-8: `utf8`, or with a byte bound
    // `utf8 | max<16>`. On a std::string it is exactly psio::utf8_string:
    // enforced by pssz, json and key on encode, validate and decode, and
-   // "utf8" in the schema. (`psio::utf8_spec{}` written out is the older,
-   // weaker statement: checked by strict validation only.)
-   inline constexpr utf8_spec utf8{.enforced = true};
+   // "utf8" in the schema. (`psio::utf8_spec{}` written out is the same
+   // statement.)
+   inline constexpr utf8_spec utf8{};
 
    inline constexpr sorted_spec sorted{};
    inline constexpr sorted_spec unique{.unique = true};

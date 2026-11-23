@@ -1080,13 +1080,13 @@ namespace evo_unbudgeted
 {
    struct U0
    {
-      std::array<std::uint8_t, 251> blob;
+      std::array<std::uint8_t, 253> blob;
       friend bool                   operator==(const U0&, const U0&) = default;
    };
    PSIO_REFLECT(U0, blob)
    struct U1
    {
-      std::array<std::uint8_t, 251> blob;
+      std::array<std::uint8_t, 253> blob;
       std::optional<std::uint8_t>   extra;
       friend bool                   operator==(const U1&, const U1&) = default;
    };
@@ -1098,17 +1098,20 @@ TEST_CASE("automatic pssz without a budget can change width when a field is appe
 {
    using namespace evo_unbudgeted;
    using F = psio::pssz;
-   STATIC_REQUIRE(psio::max_encoded_size<U0>() == std::optional<std::size_t>{255});
+   // U0: header 1 + 253. U1 adds a slot and the optional's two bytes: 1 + 253
+   // + 1 + 2 = 257 does not fit one-byte offsets, so it is 2 + 253 + 2 + 2.
+   STATIC_REQUIRE(psio::max_encoded_size<U0>() == std::optional<std::size_t>{254});
+   STATIC_REQUIRE(psio::max_encoded_size<U1>() == std::optional<std::size_t>{259});
    STATIC_REQUIRE(psio::auto_pssz_width_v<U0> == 1);
    STATIC_REQUIRE(psio::auto_pssz_width_v<U1> == 2);  // crossed the 255 threshold
 
    U0 old_value{};
    old_value.blob[0] = 9;
    const auto old_bytes = psio::encode(F{}, old_value);
-   REQUIRE(old_bytes.size() == 252);  // one-byte header
+   REQUIRE(old_bytes.size() == 254);  // one-byte header
    U1 new_value{old_value.blob, std::nullopt};
    const auto new_bytes = psio::encode(F{}, new_value);
-   REQUIRE(new_bytes.size() == 253);  // two-byte header, suffix pruned
+   REQUIRE(new_bytes.size() == 255);  // two-byte header, suffix pruned
    // Same logical content, different bytes: the revisions do not interoperate.
    REQUIRE(old_bytes != new_bytes);
    REQUIRE_FALSE(psio::validate<U1>(F{}, old_bytes).ok());

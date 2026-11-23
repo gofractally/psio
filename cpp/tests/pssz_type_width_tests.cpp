@@ -8,6 +8,14 @@ auto width_view(const std::vector<char>& bytes)
 {
    return psio::view<T,F,psio::storage::const_borrow>{bytes};
 }
+std::vector<char> hex_bytes(std::string_view hex)
+{
+   std::vector<char> out;
+   const auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+   for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+      out.push_back(static_cast<char>(nibble(hex[i]) * 16 + nibble(hex[i + 1])));
+   return out;
+}
 bool equal_bytes(std::span<const char> a, std::span<const char> b)
 {
    return a.size()==b.size() && std::equal(a.begin(),a.end(),b.begin());
@@ -112,7 +120,13 @@ TEST_CASE("nested containers retain their own tables and canonical record payloa
    REQUIRE(psio::validate<WidthNestedContainers>(psio::pssz{},wire).ok());
    REQUIRE(psio::decode<WidthNestedContainers>(psio::pssz{},wire).nested[1][0].label=="b");
    auto root=width_view<WidthNestedContainers>(wire);
-   REQUIRE(equal_bytes(psio::bytes(root.get<0>()),psio::encode(psio::pssz{},value.nested)));
+   // Beneath the record's cap of 200 the lists have one-byte tables
+   // (docs/pssz-spec.md 3.6): table 02 0a of the two rows, each row its own
+   // table 01 and one checkpoint (one-byte offsets: its own cap). On their
+   // own the same lists are unbounded and have four-byte tables.
+   REQUIRE(equal_bytes(psio::bytes(root.get<0>()),
+                       hex_bytes("020a" "01" "050100000005" "61" "01" "050200000005" "62")));
+   REQUIRE_FALSE(equal_bytes(psio::bytes(root.get<0>()),psio::encode(psio::pssz{},value.nested)));
    REQUIRE(root.get<0>()[1][0].get<0>()==2);
    REQUIRE(root.get<1>()[0].has_value());
    REQUIRE((*root.get<1>()[0]).get<1>().view_()=="c");
@@ -159,13 +173,22 @@ TEST_CASE("declared budgets reserve child growth and inference counts wire overh
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthGrowParentV1> == 2);
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthGrowParentV2> == 2);
    STATIC_REQUIRE(psio::max_encoded_size<WidthGrowParentV1>() == psio::max_encoded_size<WidthGrowParentV2>());
-   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold251>() == std::optional<std::size_t>{255});
-   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold252>() == std::optional<std::size_t>{256});
+   // The header and slots count at the type's own width (pssz-spec 3.2 fit):
+   // 1 + 251, 1 + 252, 1 + 254 = 255, then 2 + 255.
+   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold251>() == std::optional<std::size_t>{252});
+   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold252>() == std::optional<std::size_t>{253});
+   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold254>() == std::optional<std::size_t>{255});
+   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold255>() == std::optional<std::size_t>{257});
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold251> == 1);
-   STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold252> == 2);
-   STATIC_REQUIRE(psio::max_encoded_size<WidthBoundedBatch>() == std::optional<std::size_t>{280});
+   STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold252> == 1);
+   STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold254> == 1);
+   STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold255> == 2);
+   // Four checkpoints of at most 64 bytes: 4 * (1 + 64) = 260 does not fit a
+   // one-byte table, 4 * (2 + 64) = 264 does a two-byte one. The record that
+   // holds the list adds its own header and slot: 2 + 2 + 264.
+   STATIC_REQUIRE(psio::max_encoded_size<WidthBoundedBatch>() == std::optional<std::size_t>{268});
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthBoundedBatch> == 2);
-   STATIC_REQUIRE((psio::max_encoded_size<std::array<WidthCheckpoint,4>>() == std::optional<std::size_t>{272}));
+   STATIC_REQUIRE((psio::max_encoded_size<std::array<WidthCheckpoint,4>>() == std::optional<std::size_t>{264}));
    STATIC_REQUIRE((psio::auto_pssz_width_v<std::array<WidthCheckpoint,4>> == 2));
    STATIC_REQUIRE_FALSE(psio::max_encoded_size<WidthOverflowParent>().has_value());
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthOverflowParent> == 4);

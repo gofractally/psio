@@ -303,7 +303,7 @@ namespace
       "string-raw-non-utf8", "length-bound-overflow", "cap-overflow-explicit-nested", "bytes",
       "zero-fixed", "depth", "box", "nested", "nested-unknown", "nested-deferred",
       "map-set", "map-set-order", "transparent", "custom", "invariant", "annotated-bounds",
-      "method-args"};
+      "method-args", "list-width", "cap-implicit"};
 }  // namespace
 
 TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformance]")

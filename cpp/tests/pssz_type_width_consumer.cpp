@@ -42,6 +42,8 @@ int main()
    print_width<WidthGrowParentV2>("WidthGrowParentV2");
    print_width<WidthThreshold251>("WidthThreshold251");
    print_width<WidthThreshold252>("WidthThreshold252");
+   print_width<WidthThreshold254>("WidthThreshold254");
+   print_width<WidthThreshold255>("WidthThreshold255");
    print_width<WidthBoundedBatch>("WidthBoundedBatch");
    print_width<WidthOverflowParent>("WidthOverflowParent", true);
    std::printf("}\n");

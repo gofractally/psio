@@ -33,10 +33,15 @@ rounding from the bound to its width class. Each record, vector and array owns
 its header and offset slots at its own width (`PsszPack::OFFSET_WIDTH`);
 children use theirs.
 
-The inferred bound is ABI and reproduces the C++ bookkeeping exactly: four
-bytes per header and per offset slot regardless of the width finally chosen,
-one byte for every `Option`, a declared child cap reserved in full, and no
-bound for vectors, strings, tuples, variants, bit types and `Box`.
+The inferred bound is ABI and reproduces the C++ bookkeeping exactly. The
+normative rule is `docs/pssz-spec.md` §3.2 (`fit`): a type that has offsets —
+a record, tuple, array of variable elements, bounded list, map or set — counts
+its header / slots / table at its own width, the least of 1, 2, 4 whose total
+fits; one byte for every `Option`; a declared child cap reserved in full; no
+bound for unbounded vectors and strings and for `Box`. (The Rust
+implementation described here predates that rule — it counts four bytes per
+header and slot and gives lists a 4-byte table — until it is brought in line;
+`conformance/pssz-vectors.json` is the reference.)
 
 The cap also limits the complete encoded size of the value. The automatic
 profile enforces it at every node on encode, decode and validate; explicit

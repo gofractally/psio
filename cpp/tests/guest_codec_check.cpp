@@ -10,6 +10,8 @@ PSIO_REFLECT(GuestPlain, id, label)
 struct GuestUtf8 { std::string label; };
 PSIO_REFLECT(GuestUtf8, label)
 PSIO_FIELD_ATTRS(GuestUtf8, label, psio::utf8_spec{})
+struct GuestRawLabel { std::string label; };
+PSIO_REFLECT(GuestRawLabel, label)
 struct GuestBound { std::string label; };
 PSIO_REFLECT(GuestBound, label)
 PSIO_FIELD_ATTRS(GuestBound, label, psio::length_bound{.max=4})
@@ -92,8 +94,23 @@ template<class Fmt> bool check(Fmt fmt, const char* name) {
     auto bad=bytes;std::fill(bad.begin()+4,bad.end(),static_cast<char>(0xff));
     if (psio::validate<GuestPlain>(fmt,bad).ok() || psio::validate_strict<GuestPlain>(fmt,bad).ok()) return fail(__LINE__);
     const auto utf8=psio::encode(fmt,GuestUtf8{"hi"});
-    auto invalid_utf8=psio::encode(fmt,GuestUtf8{std::string(1,static_cast<char>(0xff))});
-    if (!psio::validate<GuestUtf8>(fmt,invalid_utf8).ok()) return fail(__LINE__);
+    // The utf8 annotation is the type: a pssz member that carries it is a
+    // UTF-8 string, refused by default validation as well as strict (there
+    // is no check-on-strict-only form). The bytes are those of the same
+    // record without the annotation, which a writer that skips the check
+    // would produce. The legacy frac32 prototype does not read annotations:
+    // only its strict validation refuses the frame.
+    const auto invalid_utf8=psio::encode(fmt,GuestRawLabel{std::string(1,static_cast<char>(0xff))});
+    if constexpr (std::is_same_v<Fmt, psio::experimental::frac32>) {
+        if (!psio::validate<GuestUtf8>(fmt,invalid_utf8).ok()) return fail(__LINE__);
+    } else {
+        if (psio::validate<GuestUtf8>(fmt,invalid_utf8).ok()) return fail(__LINE__);
+        if (!psio::validate<GuestRawLabel>(fmt,invalid_utf8).ok()) return fail(__LINE__);
+        if (!psio::validate<GuestUtf8>(fmt,utf8).ok()) return fail(__LINE__);
+        std::vector<char> refused;
+        if (psio::encode_pssz_checked(fmt,GuestUtf8{std::string(1,static_cast<char>(0xff))},refused).ok() ||
+            !refused.empty()) return fail(__LINE__);
+    }
     if (psio::validate_strict<GuestUtf8>(fmt,invalid_utf8).ok()) return fail(__LINE__);
     auto truncated=utf8;truncated.resize(1);
     auto status=psio::validate_strict<GuestUtf8>(fmt,truncated);

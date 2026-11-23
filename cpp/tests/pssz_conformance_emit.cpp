@@ -1274,19 +1274,35 @@ namespace
       static_assert(psio::auto_pssz_width_v<WidthNarrowEnvelope> == 1);   // cap < inferred
       static_assert(psio::auto_pssz_width_v<WidthStringPair> == 4 &&
                     psio::auto_pssz_width_v<WidthCappedPair> == 1);
-      static_assert(psio::max_encoded_size<S247>() == 255 && psio::auto_pssz_width_v<S247> == 1);
-      static_assert(psio::max_encoded_size<S248>() == 256 && psio::auto_pssz_width_v<S248> == 2);
-      static_assert(psio::max_encoded_size<S65527>() == 65535 &&
+      // A record's bound counts its header and slots at the record's own
+      // width (docs/pssz-spec.md 3.2 `fit`): record{s: raw_string<=N} is
+      // 2 * W + N, record{value: array<u8,N>} is W + N.
+      static_assert(psio::max_encoded_size<S253>() == 255 && psio::auto_pssz_width_v<S253> == 1);
+      static_assert(psio::max_encoded_size<S254>() == 258 && psio::auto_pssz_width_v<S254> == 2);
+      static_assert(psio::max_encoded_size<S65531>() == 65535 &&
+                    psio::auto_pssz_width_v<S65531> == 2);
+      static_assert(psio::max_encoded_size<S65532>() == 65540 &&
+                    psio::auto_pssz_width_v<S65532> == 4);
+      static_assert(psio::max_encoded_size<WidthThreshold254>() == 255 &&
+                    psio::auto_pssz_width_v<WidthThreshold254> == 1);
+      static_assert(psio::max_encoded_size<WidthThreshold255>() == 257 &&
+                    psio::auto_pssz_width_v<WidthThreshold255> == 2);
+      // Below the thresholds (they sat on them when the header and slots
+      // were counted as 4 bytes): all at the narrower width now.
+      static_assert(psio::max_encoded_size<S247>() == 249 && psio::auto_pssz_width_v<S247> == 1);
+      static_assert(psio::max_encoded_size<S248>() == 250 && psio::auto_pssz_width_v<S248> == 1);
+      static_assert(psio::max_encoded_size<S65527>() == 65531 &&
                     psio::auto_pssz_width_v<S65527> == 2);
-      static_assert(psio::max_encoded_size<S65528>() == 65536 &&
-                    psio::auto_pssz_width_v<S65528> == 4);
-      static_assert(psio::max_encoded_size<WidthThreshold251>() == 255 &&
+      static_assert(psio::max_encoded_size<S65528>() == 65532 &&
+                    psio::auto_pssz_width_v<S65528> == 2);
+      static_assert(psio::max_encoded_size<WidthThreshold251>() == 252 &&
                     psio::auto_pssz_width_v<WidthThreshold251> == 1);
-      static_assert(psio::max_encoded_size<WidthThreshold252>() == 256 &&
-                    psio::auto_pssz_width_v<WidthThreshold252> == 2);
-      // A vector's offset table belongs to the vector type, which has no
-      // bound of its own: four bytes, even as a bounded member of a narrow
-      // parent. An array's table follows the array's inferred bound.
+      static_assert(psio::max_encoded_size<WidthThreshold252>() == 253 &&
+                    psio::auto_pssz_width_v<WidthThreshold252> == 1);
+      // A vector's offset table belongs to the vector: an unbounded one is
+      // four bytes wide whatever holds it; one bounded by its member (two
+      // Tiny of at most 16 bytes) has its own narrow table. An array's
+      // table follows the array's inferred bound.
       static_assert(psio::auto_pssz_width_v<NarrowBatch> == 1 &&
                     psio::auto_pssz_width_v<Vec<Tiny>> == 4 && psio::auto_pssz_width_v<Tiny> == 1);
       static_assert(psio::auto_pssz_width_v<Vec<C1a>> == 4 && psio::auto_pssz_width_v<Vec<C2a>> == 4);
@@ -1297,8 +1313,8 @@ namespace
                     psio::auto_pssz_width_v<Mix4x1> == 4 && psio::auto_pssz_width_v<Mix4x4> == 4);
 
       // A bounded UTF-8 string member bounds its record: no annotation needed.
-      static_assert(psio::max_encoded_size<T16>() == 28 && psio::auto_pssz_width_v<T16> == 1);
-      static_assert(psio::max_encoded_size<T300>() == 312 && psio::auto_pssz_width_v<T300> == 2);
+      static_assert(psio::max_encoded_size<T16>() == 22 && psio::auto_pssz_width_v<T16> == 1);
+      static_assert(psio::max_encoded_size<T300>() == 308 && psio::auto_pssz_width_v<T300> == 2);
 
       using A = psio::pssz;
       // ── Pinned automatic-profile bytes ─────────────────────────────────
@@ -1320,10 +1336,13 @@ namespace
       });
 
       literal<A, WidthCheckpoint>(c, "checkpoint", {7, "main"}, hx("0507000000056d61696e"));
-      literal<A, S247>(c, "threshold_255", {"a"}, hx("010161"));
-      literal<A, S248>(c, "threshold_256", {"a"}, hx("0200020061"));
-      literal<A, S65527>(c, "threshold_65535", {"a"}, hx("0200020061"));
-      literal<A, S65528>(c, "threshold_65536", {"a"}, hx("040000000400000061"));
+      literal<A, S253>(c, "threshold_255", {"a"}, hx("010161"));
+      literal<A, S254>(c, "threshold_256", {"a"}, hx("0200020061"));
+      literal<A, S65531>(c, "threshold_65535", {"a"}, hx("0200020061"));
+      literal<A, S65532>(c, "threshold_65536", {"a"}, hx("040000000400000061"));
+      // The former threshold types, now inside their width class.
+      literal<A, S248>(c, "below_threshold_255", {"a"}, hx("010161"));
+      literal<A, S65528>(c, "below_threshold_65535", {"a"}, hx("0200020061"));
       literal<A, WidthLargeBudget>(c, "cap_larger_than_needed", {5}, hx("0100000005"));
       literal<A, WidthNarrowEnvelope>(c, "cap_smaller_than_inferred", {{5}, 9},
                                       hx("0505090000000100000005"));
@@ -1334,9 +1353,11 @@ namespace
       literal<A, WidthGrowV1>(c, "grow_v1", {7}, hx("040007000000"));
       literal<A, WidthGrowParentV2>(c, "grow_parent_v2", {{7, 9}},
                                     hx("02000200" "0600070000000600" "09000000"));
-      // NarrowBatch: one-byte record, four-byte vector table, one-byte elements.
+      // NarrowBatch: one-byte record, one-byte table of its bounded vector
+      // (2 * (1 + 16) = 34), one-byte elements. The same elements in an
+      // unbounded vector: a four-byte table.
       literal<A, NarrowBatch>(c, "bounded_vector_in_narrow_parent", {{Tiny{1}, Tiny{2}}},
-                              hx("0101" "080000000a000000" "0101" "0102"));
+                              hx("0101" "0204" "0101" "0102"));
       literal<A, Vec<Tiny>>(c, "vector_of_narrow", {Tiny{1}, Tiny{2}},
                             hx("080000000a000000" "0101" "0102"));
 
@@ -1347,8 +1368,8 @@ namespace
             const std::size_t W = F::offset_width;
             literal<F, WidthCheckpoint>(c, "checkpoint", {7, "main"},
                                         Fr{W}.o(4 + W).u32(7).o(4 + W).raw("main"));
-            literal<F, S248>(c, "threshold_256", {"a"}, Fr{W}.o(W).o(W).raw("a"));
-            literal<F, S65528>(c, "threshold_65536", {"a"}, Fr{W}.o(W).o(W).raw("a"));
+            literal<F, S254>(c, "threshold_256", {"a"}, Fr{W}.o(W).o(W).raw("a"));
+            literal<F, S65532>(c, "threshold_65536", {"a"}, Fr{W}.o(W).o(W).raw("a"));
             literal<F, WidthLargeBudget>(c, "cap_larger_than_needed", {5}, Fr{W}.o(1).byte(5));
             literal<F, WidthNarrowEnvelope>(
                c, "cap_smaller_than_inferred", {{5}, 9},
@@ -1390,6 +1411,12 @@ namespace
          for (std::size_t i = 0; i < b.value.size(); ++i) b.value[i] = static_cast<u8>(255 - i);
          corpus(c, "threshold_251_pattern", a);
          corpus(c, "threshold_252_pattern", b);
+         WidthThreshold254 d{};
+         WidthThreshold255 e{};
+         for (std::size_t i = 0; i < d.value.size(); ++i) d.value[i] = static_cast<u8>(i);
+         for (std::size_t i = 0; i < e.value.size(); ++i) e.value[i] = static_cast<u8>(255 - i);
+         corpus(c, "threshold_254_pattern", d);
+         corpus(c, "threshold_255_pattern", e);
       }
       corpus(c, "bounded_batch_empty", WidthBoundedBatch{});
       corpus(c, "bounded_batch_full",
@@ -1401,6 +1428,10 @@ namespace
       corpus(c, "s248_max", S248{std::string(248, 's')});
       corpus(c, "s65527_small", S65527{"small"});
       corpus(c, "s65528_small", S65528{"small"});
+      corpus(c, "s253_max", S253{std::string(253, 's')});
+      corpus(c, "s254_max", S254{std::string(254, 's')});
+      corpus(c, "s65531_small", S65531{"small"});
+      corpus(c, "s65532_small", S65532{"small"});
       corpus(c, "tiny", Tiny{9});
       corpus(c, "narrow_batch_empty", NarrowBatch{});
       corpus(c, "narrow_batch_full", NarrowBatch{{Tiny{1}, Tiny{2}}});
@@ -1408,13 +1439,22 @@ namespace
       // ── Every parent width over every child width ──────────────────────
       auto mix = [&]<typename M, typename C>(std::size_t own, std::size_t cw) {
          static_assert(psio::auto_pssz_width_v<M> == 0 || true);
+         // On their own a vector<C> is unbounded (4) and an array<C,2> has
+         // its inferred bound (2, or 4 for the unbounded child). Beneath M
+         // they are also bounded by M's cap (docs/pssz-spec.md 3.6): 250
+         // gives both a 1-byte table, 60000 a 2-byte one, 1000000 changes
+         // nothing. The child records keep their own width.
          const std::size_t aw = cw == 4 ? 4 : 2;  // array<C,2> inferred bound
+         const std::size_t vw_in = own;           // the vector's table in M
+         const std::size_t aw_in = std::min(aw, own);
          const C           c1{1, "a"}, c2{2, "bc"};
          const M value{c1, {c2}, {c1, c2}, c1, std::variant<u32, C>{std::in_place_index<1>, c2}};
          if (psio::auto_pssz_width_v<M> != own || psio::auto_pssz_width_v<C> != cw ||
-             psio::auto_pssz_width_v<Arr2<C>> != aw || psio::auto_pssz_width_v<Vec<C>> != 4)
+             psio::auto_pssz_width_v<Arr2<C>> != aw || psio::auto_pssz_width_v<Vec<C>> != 4 ||
+             impl::width_for<Vec<C>, impl::member_ann<M, 1>>() != vw_in ||
+             impl::width_for<Arr2<C>, impl::member_ann<M, 2>>() != aw_in)
             die("Mix width expectations are stale");
-         literal<A, M>(c, "mix_sample", value, mix_frame(own, cw, 4, aw));
+         literal<A, M>(c, "mix_sample", value, mix_frame(own, cw, vw_in, aw_in));
          formats([&]<typename F>() {
             if constexpr (!std::is_same_v<F, psio::pssz>)
             {
@@ -1499,7 +1539,7 @@ namespace
       // value. These frames are what a writer that skips the bound check
       // would produce; every reader rejects them.
       const char* c = "length-bound-overflow";
-      static_assert(psio::max_encoded_size<Bounded>() == 20 && psio::auto_pssz_width_v<Bounded> == 1);
+      static_assert(psio::max_encoded_size<Bounded>() == 11 && psio::auto_pssz_width_v<Bounded> == 1);
       corpus("corpus", "bounded_within", Bounded{"1234", {1, 2}});
       corpus("corpus", "bounded_empty", Bounded{"", {}});
       auto observed = [&]<typename T>(const std::string& vname, const T& value) {
@@ -1568,38 +1608,46 @@ namespace
       const std::string s16(16, 'a'), s17(17, 'a');
       using Text16 = psio::utf8_string<16>;
 
-      // In the bound every header and slot counts 4; a list's table is 4
-      // wide; an array, tuple, pair or map entry takes the width of its own
-      // bound, which the annotations of its position narrow.
-      static_assert(psio::max_encoded_size<AnnTags>() == 168 && psio::auto_pssz_width_v<AnnTags> == 1);
-      static_assert(psio::max_encoded_size<WrapTags>() == 168 && psio::auto_pssz_width_v<WrapTags> == 1);
-      static_assert(psio::max_encoded_size<AnnRawTags>() == 168);
-      static_assert(psio::max_encoded_size<AnnGrid>() == 44 && psio::auto_pssz_width_v<AnnGrid> == 1);
-      static_assert(psio::max_encoded_size<AnnOpt>() == 49 && psio::auto_pssz_width_v<AnnOpt> == 1);
-      static_assert(psio::max_encoded_size<AnnArr>() == 68 && psio::auto_pssz_width_v<AnnArr> == 1);
-      static_assert(psio::max_encoded_size<AnnMap>() == 168 && psio::auto_pssz_width_v<AnnMap> == 1);
-      static_assert(psio::max_encoded_size<AnnSet>() == 88 && psio::auto_pssz_width_v<AnnSet> == 1);
-      static_assert(psio::max_encoded_size<AnnTup>() == 93 && psio::auto_pssz_width_v<AnnTup> == 1);
-      static_assert(psio::max_encoded_size<AnnVar>() == 49 && psio::auto_pssz_width_v<AnnVar> == 1);
+      // Every list, array, map, set, tuple, pair and record takes the width
+      // of its own bound, which the annotations of its position narrow; in
+      // that bound its header, slots or table count at that same width
+      // (docs/pssz-spec.md 3.2 `fit`). All of these are 1 byte wide.
+      //   AnnTags: list 8 * (1 + 16) = 136; record 1 + 1 + 136.
+      static_assert(psio::max_encoded_size<AnnTags>() == 138 && psio::auto_pssz_width_v<AnnTags> == 1);
+      static_assert(psio::max_encoded_size<WrapTags>() == 138 && psio::auto_pssz_width_v<WrapTags> == 1);
+      static_assert(psio::max_encoded_size<AnnRawTags>() == 138);
+      //   AnnGrid: a row is 4 * 2 (no table); 3 * (1 + 8) = 27; record 2 + 27.
+      static_assert(psio::max_encoded_size<AnnGrid>() == 29 && psio::auto_pssz_width_v<AnnGrid> == 1);
+      //   AnnOpt: list 2 * (1 + 16) = 34; optional 1 + 34; record 2 + 35.
+      static_assert(psio::max_encoded_size<AnnOpt>() == 37 && psio::auto_pssz_width_v<AnnOpt> == 1);
+      //   AnnArr: array 3 * (1 + 16) = 51; record 2 + 51.
+      static_assert(psio::max_encoded_size<AnnArr>() == 53 && psio::auto_pssz_width_v<AnnArr> == 1);
+      //   AnnMap: entry 3 + 16 + 2 * 4 = 27; map 4 * (1 + 27) = 112; record 2 + 112.
+      static_assert(psio::max_encoded_size<AnnMap>() == 114 && psio::auto_pssz_width_v<AnnMap> == 1);
+      //   AnnSet: 4 * (1 + 16) = 68; record 2 + 68.
+      static_assert(psio::max_encoded_size<AnnSet>() == 70 && psio::auto_pssz_width_v<AnnSet> == 1);
+      //   AnnTup: tuple 3 + 16 + 4 + 5 = 28; pair 3 + 32 = 35; record 3 + 63.
+      static_assert(psio::max_encoded_size<AnnTup>() == 66 && psio::auto_pssz_width_v<AnnTup> == 1);
+      //   AnnVar: 1 + the list alternative (34); record 2 + 35.
+      static_assert(psio::max_encoded_size<AnnVar>() == 37 && psio::auto_pssz_width_v<AnnVar> == 1);
 
       using A = psio::pssz;
       // ── Pinned automatic-profile bytes ─────────────────────────────────
-      // record: header 01, slot 01; list: a 4-wide table; strings.
-      literal<A, AnnTags>(c, "tags_two", {{"ab", "c"}},
-                          hx("0101" "08000000" "0a000000" "6162" "63"));
+      // record: header 01, slot 01; list: its own 1-wide table; strings.
+      literal<A, AnnTags>(c, "tags_two", {{"ab", "c"}}, hx("0101" "0204" "6162" "63"));
       // the wrapper spelling: the same bytes
       {
          WrapTags w;
          w.tags.push_back(Text16{"ab"});
          w.tags.push_back(Text16{"c"});
-         literal<A, WrapTags>(c, "tags_two", w, hx("0101" "08000000" "0a000000" "6162" "63"));
+         literal<A, WrapTags>(c, "tags_two", w, hx("0101" "0204" "6162" "63"));
       }
       // an array of bounded strings: its own offset table is 1 wide
       literal<A, AnnArr>(c, "array_three", {{"ab", "", "c"}}, hx("0101" "030505" "6162" "63"));
       // a map entry (the pair of a bounded key and a bounded value) has a
-      // 1-wide header and slots; the map's table is 4 wide
+      // 1-wide header and slots, and so has the bounded map's own table
       literal<A, AnnMap>(c, "map_one", {{{"k", {7}}}},
-                         hx("0101" "04000000" "02" "0203" "6b" "07000000"));
+                         hx("0101" "01" "02" "0203" "6b" "07000000"));
 
       corpus(c, "tags_empty", AnnTags{});
       corpus(c, "tags_full", AnnTags{Vec<Raw>(8, s16)});
@@ -1662,6 +1710,241 @@ namespace
       });
    }
 
+   // ── A list's own offset-table width ───────────────────────────────────
+   //
+   // docs/pssz-spec.md 3.2: a list / map / set of variable elements bounded
+   // in count and in element size has an offset table 1 or 2 bytes wide —
+   // the least width that addresses its largest value — and 4 otherwise.
+   // The width belongs to the list: it does not follow the record that
+   // holds it, and the record does not follow the list.
+   void emit_list_widths()
+   {
+      const char* c = "list-width";
+      static_assert(psio::max_encoded_size<BList1>() == 255 && psio::auto_pssz_width_v<BList1> == 1);
+      static_assert(psio::max_encoded_size<BList2>() == 285 && psio::auto_pssz_width_v<BList2> == 2);
+      static_assert(psio::max_encoded_size<BList2Top>() == 65535 &&
+                    psio::auto_pssz_width_v<BList2Top> == 2);
+      static_assert(psio::max_encoded_size<BList4>() == 66304 &&
+                    psio::auto_pssz_width_v<BList4> == 4);
+      static_assert(!psio::max_encoded_size<BListFree>() && psio::auto_pssz_width_v<BListFree> == 4);
+      static_assert(!psio::max_encoded_size<Vec<Text>>() && psio::auto_pssz_width_v<Vec<Text>> == 4);
+      // As members: the record's width is its own (2 * W + the list).
+      static_assert(psio::max_encoded_size<ListW1>() == 259 && psio::auto_pssz_width_v<ListW1> == 2);
+      static_assert(psio::max_encoded_size<ListW2>() == 289 && psio::auto_pssz_width_v<ListW2> == 2);
+      static_assert(psio::max_encoded_size<ListW2Top>() == 65543 &&
+                    psio::auto_pssz_width_v<ListW2Top> == 4);
+      static_assert(psio::max_encoded_size<ListW4>() == 66312 &&
+                    psio::auto_pssz_width_v<ListW4> == 4);
+      static_assert(!psio::max_encoded_size<ListFree>() && psio::auto_pssz_width_v<ListFree> == 4);
+      static_assert(psio::max_encoded_size<ListNested>() == 5144 &&
+                    psio::auto_pssz_width_v<ListNested> == 2);
+      static_assert(psio::max_encoded_size<MapW1>() == 62 && psio::auto_pssz_width_v<MapW1> == 1);
+      static_assert(psio::max_encoded_size<MapW2>() == 2404 && psio::auto_pssz_width_v<MapW2> == 2);
+      static_assert(psio::max_encoded_size<SetW1>() == 259 && psio::auto_pssz_width_v<SetW1> == 2);
+
+      using A = psio::pssz;
+      using T16 = psio::utf8_string<16>;
+      const std::string s16(16, 'a'), s17(17, 'b');
+      const auto blist = []<typename L>(std::initializer_list<const char*> items) {
+         L out;
+         for (const char* item : items) out.push_back(typename L::value_type{item});
+         return out;
+      };
+      // ── Pinned automatic-profile bytes: the same two strings ────────────
+      // a 1-byte table: 02 04
+      literal<A, BList1>(c, "two_strings", blist.template operator()<BList1>({"ab", "c"}),
+                         hx("0204" "6162" "63"));
+      // a 2-byte table: 0400 0600
+      literal<A, BList2>(c, "two_strings", blist.template operator()<BList2>({"ab", "c"}),
+                         hx("04000600" "6162" "63"));
+      literal<A, BList2Top>(c, "two_strings", blist.template operator()<BList2Top>({"ab", "c"}),
+                            hx("04000600" "6162" "63"));
+      // a 4-byte table: bounded but too large, bounded count only, unbounded
+      literal<A, BList4>(c, "two_strings", blist.template operator()<BList4>({"ab", "c"}),
+                         hx("080000000a000000" "6162" "63"));
+      literal<A, BListFree>(c, "two_strings", blist.template operator()<BListFree>({"ab", "c"}),
+                            hx("080000000a000000" "6162" "63"));
+      literal<A, Vec<Text>>(c, "two_strings", {Text{"ab"}, Text{"c"}},
+                            hx("080000000a000000" "6162" "63"));
+      // As members: record header and slot (2 wide, or 4), then the list
+      // with its own table.
+      literal<A, ListW1>(c, "two_strings", {{"ab", "c"}}, hx("02000200" "0204" "6162" "63"));
+      literal<A, ListW2>(c, "two_strings", {{"ab", "c"}}, hx("02000200" "04000600" "6162" "63"));
+      literal<A, ListW2Top>(c, "two_strings", {{"ab", "c"}},
+                            hx("0400000004000000" "04000600" "6162" "63"));
+      literal<A, ListW4>(c, "two_strings", {{"ab", "c"}},
+                         hx("0400000004000000" "080000000a000000" "6162" "63"));
+      literal<A, ListFree>(c, "two_strings", {{"ab", "c"}},
+                           hx("0400000004000000" "080000000a000000" "6162" "63"));
+      // Nested: the record (2), the table of the rows (2: 0400 0900), the
+      // first row with its own table (1: 02 04), an empty row.
+      literal<A, ListNested>(c, "two_rows", {{{"ab", "c"}, {}}},
+                             hx("02000200" "04000900" "0204" "6162" "63"));
+      // Maps. MapW1: record 01 01; table 01; entry: header 05 (slot + u32),
+      // key slot 05, value, key. MapW2: record 0200 0200; table 0200;
+      // entry: header 05, key, value slot 05, value.
+      literal<A, MapW1>(c, "one_entry", {{{"k", 7}}}, hx("0101" "01" "05" "05" "07000000" "6b"));
+      literal<A, MapW2>(c, "one_entry", {{{7, "v"}}},
+                        hx("02000200" "0200" "05" "07000000" "05" "76"));
+      literal<A, SetW1>(c, "two_strings", {{"ab", "c"}}, hx("02000200" "0204" "6162" "63"));
+
+      // ── Corpus: empty and full ──────────────────────────────────────────
+      corpus(c, "empty", BList1{});
+      corpus(c, "empty", BList2{});
+      corpus(c, "empty", ListW1{});
+      corpus(c, "empty", ListNested{});
+      corpus(c, "empty", MapW1{});
+      {
+         // The largest values: 255 bytes with a 1-byte table (the last
+         // offset is 239), 285 with a 2-byte one.
+         BList1 full1;
+         for (int i = 0; i < 15; ++i) full1.push_back(T16{s16});
+         corpus(c, "full", full1);
+         BList2 full2;
+         for (int i = 0; i < 15; ++i) full2.push_back(psio::utf8_string<17>{s17});
+         corpus(c, "full", full2);
+         corpus(c, "full", ListW1{Vec<Raw>(15, s16)});
+         corpus(c, "full", ListW2{Vec<Raw>(15, s17)});
+         corpus(c, "full_rows", ListNested{Vec<Vec<Raw>>(20, Vec<Raw>(15, s16))});
+         corpus(c, "full", MapW1{{{"a", 1}, {"bb", 2}, {"ccc", 3}, {"dddddddd", 4}}});
+         MapW2 many;
+         for (u32 i = 0; i < 100; ++i) many.m.emplace(i, s16);
+         corpus(c, "full", many);
+         corpus(c, "full", SetW1{{"a", "b", s16}});
+      }
+
+      // ── Rejected frames of a narrow table ───────────────────────────────
+      // The 4-byte table an implementation without the rule would write
+      // is not a frame of the type: read 1 byte wide, its first slot says
+      // eight elements and its second is offset 0.
+      add<A, BList1>(c, "four_byte_table", hx("080000000a000000" "6162" "63"),
+                     reject("pssz: list offset out of range"));
+      add<A, ListW1>(c, "four_byte_table",
+                     hx("02000200" "080000000a000000" "6162" "63"),
+                     reject("pssz: list offset out of range"));
+      // and the 1-byte table is not a frame of the 2-byte type (first
+      // offset 0x0402 is past the end)
+      add<A, BList2>(c, "one_byte_table", hx("0204" "6162" "63"),
+                     reject("pssz: invalid first list offset"));
+      add<A, BList1>(c, "first_offset_zero", hx("00"), reject("pssz: invalid first list offset"));
+      add<A, BList1>(c, "first_offset_past_end", hx("0561"),
+                     reject("pssz: invalid first list offset"));
+      add<A, BList1>(c, "offsets_decrease", hx("030302" "61"),
+                     reject("pssz: list offset out of range"));
+      add<A, BList2>(c, "odd_first_offset", hx("030061"),
+                     reject("pssz: invalid first list offset"));
+      // One element more than the bound, as a writer that skips the check
+      // would produce it: 16 empty strings behind a 1-byte table.
+      add<A, BList1>(c, "sixteen_elements", Bytes(16, char(16)),
+                     reject("pssz: bounded list exceeds its bound"));
+      outside_tree(c, "sixteen_elements", ListW1{Vec<Raw>(16, "")},
+                   "pssz: member length_bound violated");
+      outside_tree(c, "element_17", ListW1{{s17}}, "pssz: member length_bound violated");
+      outside_tree(c, "row_of_sixteen", ListNested{{Vec<Raw>(16, "")}},
+                   "pssz: member length_bound violated");
+      outside_tree(c, "five_entries", MapW1{{{"a", 1}, {"b", 2}, {"c", 3}, {"d", 4}, {"e", 5}}},
+                   "pssz: member length_bound violated");
+   }
+
+   // ── A record's cap bounds what lies beneath it ────────────────────────
+   //
+   // docs/pssz-spec.md 3.6: beneath a record with an explicit cap N, a
+   // list / map / set / array / tuple / pair with no tighter bound of its
+   // own has the offset width of N's class, down to the next record.
+   void emit_cap_positions()
+   {
+      const char* c = "cap-implicit";
+      const std::string cap = "pssz: encoded size exceeds maxDynamicData cap";
+      using A = psio::pssz;
+      static_assert(psio::auto_pssz_width_v<CapTransfer> == 1 && psio::auto_pssz_width_v<CapList> == 1 &&
+                    psio::auto_pssz_width_v<CapList2> == 2 && psio::auto_pssz_width_v<CapList4> == 4 &&
+                    psio::auto_pssz_width_v<CapTight> == 2 && psio::auto_pssz_width_v<CapChild> == 1 &&
+                    psio::auto_pssz_width_v<CapOuter> == 4 && psio::auto_pssz_width_v<R0> == 4);
+
+      // ── The transfer: nothing but the two slots is spent on memo / data ─
+      // header 16 (the 22-byte fixed region), token, from, amount, slot(memo)
+      // 16, slot(data) 18, "hi", selector 01 and one byte.
+      literal<A, CapTransfer>(c, "transfer", {1, 2, 3, Text{"hi"}, Vec<u8>{0xaa}},
+                              hx("16" "01000000" "0200000000000000" "0300000000000000" "16" "18"
+                                 "6869" "01aa"));
+      // No data: the trailing optional's slot is pruned (header 15).
+      literal<A, CapTransfer>(c, "transfer_no_data", {1, 2, 3, Text{"hi"}, std::nullopt},
+                              hx("15" "01000000" "0200000000000000" "0300000000000000" "15"
+                                 "6869"));
+      {
+         // Exactly 255 bytes: 23 of framing, 231 of memo, the selector, 0
+         // bytes of data; and 233 of memo with no data at all.
+         const CapTransfer full{1, 2, 3, Text{std::string(231, 'm')}, Vec<u8>{}};
+         const CapTransfer memo_only{1, 2, 3, Text{std::string(233, 'm')}, std::nullopt};
+         const auto        at_cap = must_encode<A>(full, "transfer_at_cap");
+         if (at_cap.size() != 255 || must_encode<A>(memo_only, "memo_only").size() != 255)
+            die("CapTransfer at-cap sizes are stale");
+         corpus(c, "transfer_at_cap", full);
+         corpus(c, "transfer_memo_only_at_cap", memo_only);
+         // One byte more is refused by the encoder, and the frame a writer
+         // that skips the check would produce by every reader.
+         Bytes out;
+         if (try_encode<A>(CapTransfer{1, 2, 3, Text{std::string(232, 'm')}, Vec<u8>{}}, out) ||
+             try_encode<A>(CapTransfer{1, 2, 3, Text{std::string(231, 'm')}, Vec<u8>{0}}, out) ||
+             try_encode<A>(CapTransfer{1, 2, 3, Text{std::string(234, 'm')}, std::nullopt}, out))
+            die("the encoder accepted a CapTransfer over its cap");
+         Bytes over = at_cap;
+         over.push_back(0);  // one byte of data
+         add<A, CapTransfer>(c, "transfer_over_cap", over, reject(cap));
+      }
+
+      // ── Lists beneath a cap: the same two strings ───────────────────────
+      literal<A, CapList>(c, "two_strings", {{"ab", "c"}}, hx("0101" "0204" "6162" "63"));
+      literal<A, CapList2>(c, "two_strings", {{"ab", "c"}},
+                           hx("02000200" "04000600" "6162" "63"));
+      literal<A, CapList4>(c, "two_strings", {{"ab", "c"}},
+                           hx("0400000004000000" "080000000a000000" "6162" "63"));
+      // rows: table 02 07; the first row's own table 02 04; an empty row
+      literal<A, CapNested>(c, "two_rows", {{{"ab", "c"}, {}}},
+                            hx("0101" "0207" "0204" "6162" "63"));
+      // map: table 01; entry header 02, slots 02 03, key, value
+      literal<A, CapMap>(c, "one_entry", {{{"k", {7}}}},
+                         hx("0101" "01" "02" "0203" "6b" "07000000"));
+      // tuple: header 02, slots 02 03, "x", the list with its table 02 04
+      literal<A, CapTuple>(c, "tuple", {{"x", {"ab", "c"}}},
+                           hx("0101" "02" "0203" "78" "0204" "6162" "63"));
+      literal<A, CapTight>(c, "two_strings", {{"ab", "c"}}, hx("02000200" "0204" "6162" "63"));
+      literal<A, CapClamp>(c, "two_strings", {{"ab", "c"}}, hx("0101" "0204" "6162" "63"));
+      {
+         // R0 keeps its 4-byte offsets; the list of R0 has a 1-byte table.
+         const Bytes r0 = hx("08000000" "07000000" "08000000" "6869");
+         literal<A, CapChild>(c, "record_child", {R0{7, "hi"}, {R0{7, "hi"}}},
+                              join({hx("02" "02" "10"), r0, hx("01"), r0}));
+         // Outside the capped record: its sibling list is unbounded.
+         literal<A, CapOuter>(c, "outer", {CapList{{"ab", "c"}}, {"ab", "c"}},
+                              hx("08000000" "08000000" "0f000000" "0101" "0204" "616263"
+                                 "080000000a000000" "616263"));
+      }
+      corpus(c, "empty", CapList{});
+      corpus(c, "empty", CapNested{});
+      corpus(c, "empty", CapMap{});
+      corpus(c, "many", CapList{Vec<Raw>(100, "x")});
+      corpus(c, "many_rows", CapNested{Vec<Vec<Raw>>(20, Vec<Raw>(3, "y"))});
+      corpus(c, "entries", CapMap{{{"a", {1, 2}}, {"b", {}}, {"cc", {3}}}});
+
+      // ── Rejected ────────────────────────────────────────────────────────
+      // The frame with 4-byte tables (what the type's members would be on
+      // their own) is not a frame of the capped record.
+      add<A, CapList>(c, "four_byte_table", hx("0101" "080000000a000000" "6162" "63"),
+                      reject("pssz: list offset out of range"));
+      {
+         // Over the cap: the encoder refuses, and so does every reader.
+         Bytes out;
+         if (try_encode<A>(CapList{Vec<Raw>(127, "x")}, out) ||
+             !try_encode<A>(CapList{Vec<Raw>(126, "x")}, out) || out.size() != 254)
+            die("CapList cap expectations are stale");
+         Bytes over = must_encode<A>(CapList{Vec<Raw>(126, "x")}, "cap list");
+         over.push_back('y');
+         over.push_back('y');  // the last element grows by two bytes: 256
+         add<A, CapList>(c, "list_over_cap", over, reject(cap));
+      }
+   }
+
    // ── Method argument tuples ────────────────────────────────────────────
    void emit_method_args()
    {
@@ -1671,12 +1954,12 @@ namespace
       const std::string s16(16, 'a'), s17(17, 'a'), s80(80, 'm'), s81(81, 'm');
 
       // An explicit cap rules (256: 2-byte offsets although the parameters
-      // need at most 116 bytes); without one, the inferred bound.
+      // need at most 107 bytes); without one, the inferred bound.
       static_assert(psio::max_dynamic_data_v<ArgsTransfer> == 256 &&
                     psio::auto_pssz_width_v<ArgsTransfer> == 2);
-      static_assert(psio::max_encoded_size<ArgsTransferUncapped>() == 116 &&
+      static_assert(psio::max_encoded_size<ArgsTransferUncapped>() == 107 &&
                     psio::auto_pssz_width_v<ArgsTransferUncapped> == 1);
-      static_assert(psio::max_encoded_size<ArgsBatch>() == 65 &&
+      static_assert(psio::max_encoded_size<ArgsBatch>() == 44 &&
                     psio::auto_pssz_width_v<ArgsBatch> == 1);
       static_assert(psio::auto_pssz_width_v<ArgsNote> == 1);
       static_assert(psio::auto_pssz_width_v<ArgsTransfer2> == 2);
@@ -2078,6 +2361,35 @@ namespace
       literal_all<Bits12>(c, "bitlist_eight", bits("11111111"), hx("ff01"));
       literal_all<Bits12>(c, "bitlist_full", bits("111111111111"), hx("ff1f"));
       literal_all<Bits12>(c, "bitlist_full_zero", bits("000000000000"), hx("0010"));
+      {
+         // Bit types have a size bound (docs/pssz-spec.md 3.2): a record
+         // whose variable members are bit types is bounded without a cap.
+         static_assert(psio::max_encoded_size<psio::bitvector<12>>() == 2 &&
+                       psio::max_encoded_size<Bits12>() == 3);
+         static_assert(psio::max_encoded_size<BitRec>() == 8 && psio::auto_pssz_width_v<BitRec> == 1);
+         static_assert(psio::max_encoded_size<BitNarrow>() == 255 &&
+                       psio::auto_pssz_width_v<BitNarrow> == 1);
+         static_assert(psio::max_encoded_size<BitWide>() == 258 &&
+                       psio::auto_pssz_width_v<BitWide> == 2);
+         using A = psio::pssz;
+         // header 04 (u8, the 2 inline bytes of the bitvector, one slot),
+         // id, flags, slot(seen), the bitlist.
+         literal<A, BitRec>(c, "bit_record", {7, bitvec("100000000001"), bits("101")},
+                            hx("04" "07" "0108" "04" "0d"));
+         corpus(c, "bit_record_empty", BitRec{});
+         BitNarrow narrow;
+         BitWide   wide;
+         narrow.seen.push_back(true);
+         wide.seen.push_back(true);
+         literal<A, BitNarrow>(c, "bitlist_record_width_1", narrow, hx("0101" "03"));
+         literal<A, BitWide>(c, "bitlist_record_width_2", wide, hx("02000200" "03"));
+         for (std::size_t i = 1; i < 2016; ++i) narrow.seen.push_back(true);
+         for (std::size_t i = 1; i < 2024; ++i) wide.seen.push_back(i % 3 == 0);
+         if (must_encode<A>(narrow, "bit narrow").size() != 255)
+            die("BitNarrow full size is stale");
+         corpus(c, "bitlist_record_full", narrow);
+         corpus(c, "bitlist_record_full", wide);
+      }
       {
          psio::uint256 v{};
          for (std::size_t i = 0; i < 32; ++i)
@@ -2571,7 +2883,7 @@ namespace
       static_assert(psio::auto_pssz_width_v<Nested<u32>> == 4 &&
                     !psio::max_encoded_size<Nested<u32>>().has_value());
       static_assert(!psio::max_encoded_size<NAction>().has_value());
-      static_assert(psio::max_encoded_size<NCapped>() == 17 &&
+      static_assert(psio::max_encoded_size<NCapped>() == 11 &&
                     psio::auto_pssz_width_v<NCapped> == 1);
       static_assert(psio::pssz_evolves_from<NAction, NAction2> &&
                     psio::pssz_evolves_from<NAction, NActionLater> &&
@@ -3126,6 +3438,8 @@ int main(int argc, char** argv)
    emit_custom_assoc();
    emit_annotation_trees();
    emit_method_args();
+   emit_list_widths();
+   emit_cap_positions();
 
    if (!unregistered.empty())
    {
