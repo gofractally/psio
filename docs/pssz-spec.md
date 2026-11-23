@@ -747,18 +747,44 @@ plus the enumerator names for text) carries it through unchanged. This is
 what lets an old reader keep reading data from a writer that has since
 added enumerators.
 
-Whether a reader's **type** can represent an undeclared value is a property
-of that type, not of the format:
+**The rule, per layer.** The only criterion is that adding an enumerator
+stays compatible in both directions: data written with the new enumerator
+is still well-formed data for an old reader, and old data is unchanged for
+a new one.
 
-- a C++ `enum` holds any value of its underlying type, so C++ accepts it
-  everywhere;
-- a Rust enum holds only its variants. It opts in with a catch-all variant,
-  `#[pssz(other)] Unknown(<repr>)`: an undeclared wire value decodes into
-  it. A wire value equal to a declared enumerator always decodes to the
-  declared variant, and encoding `Unknown(n)` where `n` is a declared
-  enumerator is an error, so each value has exactly one in-memory
+| layer | rule |
+|---|---|
+| wire (PSSZ, key) | the underlying integer; **any** value of that integer is well-formed. No reader of bytes — `validate`, a view, a schema-driven codec — may reject a value because it is not a declared enumerator. |
+| Schema IR | `Enum{type, members}`: the integer plus the enumerator names. The names are for text only; they do not restrict the values. |
+| text (`docs/json.md` "Enums") | written as the enumerator's **name** when the value is a declared one and as the **number** otherwise; read as the name, the number, the number as a string, or `name:number`. An unknown *name* is an error (there is no value to give it); an undeclared *number* is a value. |
+| typed reader | language-specific: whether the reader's **type** can hold an undeclared value is a property of that type, not of the format. A type that cannot hold it must say how it opts in to carry it, and refuses the value otherwise — that refusal is a typed-layer error, never a statement about the bytes. |
+
+The typed layer in each implementation, all of which conform:
+
+- **C++**: an `enum` holds any value of its underlying type, so the typed
+  pssz, key and JSON readers accept an undeclared value everywhere, and the
+  writers write it back (as its number in text). A type that must reject
+  undeclared values says so with an invariant (§18), which makes the
+  restriction part of the schema (`Custom{enum, id}`).
+- **Rust**: an enum holds only its variants. It opts in with a catch-all
+  variant, `#[psio(other)] Unknown(<repr>)`: an undeclared wire value
+  decodes into it. A wire value equal to a declared enumerator always
+  decodes to the declared variant, and encoding `Unknown(n)` where `n` is a
+  declared enumerator is an error, so each value has exactly one in-memory
   representation. Without the catch-all, decoding an undeclared value into
-  that type is an error (`enum_out_of_range`).
+  that type is an error (`enum_out_of_range`) in pssz, key and JSON alike.
+- **Python**: `@psio.enum(repr)` refuses an undeclared value by default
+  (`DecodeError`, from pssz, key and JSON alike) and carries it as the
+  plain integer with `other=True`.
+- **JavaScript**: an enum value is its number; any in-range integer is
+  accepted and written back.
+- **Schema-driven codecs** (every language): the dynamic value is the
+  integer; any in-range value is read and written unchanged.
+
+An application that evolves an enum therefore chooses, per reader type,
+between carrying unknown enumerators (C++ default, Rust `other`, Python
+`other=True`) and refusing them at the typed layer; the bytes and the
+schema are the same either way.
 
 ## 5. Containers
 

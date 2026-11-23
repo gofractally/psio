@@ -156,11 +156,15 @@ Input, in both formats, for a named enum:
 | `"active:2"` | both; they must agree |
 
 An unknown name, a name whose stated number disagrees (`"active:3"`), and a
-non-canonical or out-of-range number are errors. A number that names no
-enumerator is accepted where the reader's type can hold it: always in C++
-and through a schema; in Rust only when the enum has a catch-all variant
-(`#[psio(other)] Unknown(i32)`), otherwise it is an error. When two
-enumerators share a value, the first declared name is written.
+non-canonical or out-of-range number are errors in every reader. A number
+that names no enumerator is a well-formed value (`docs/pssz-spec.md` §4.5
+states the rule per layer): the text layer and the schema-driven codecs
+accept it everywhere, and a typed reader accepts it where its type can hold
+it — always in C++ and JavaScript; in Rust only when the enum has a
+catch-all variant (`#[psio(other)] Unknown(i32)`); in Python only with
+`@psio.enum(repr, other=True)`. Otherwise it is an error of that typed
+reader. When two enumerators share a value, the first declared name is
+written.
 
 ### Maps and sets
 

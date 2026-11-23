@@ -294,3 +294,40 @@ TEST_CASE("reserved custom ids", "[consistency][schema]")
    refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, true}}}, "duration-bogus"}}, "5");
    refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{32, false}}}, "unknown"}}, "5");
 }
+
+// ── An undeclared enumerator is a value in every C++ reader ──────────────
+namespace cons_enum
+{
+   enum class Level : std::uint8_t { low = 0, high = 2 };
+   PSIO_REFLECT_ENUM(Level, low, high)
+   struct Holder
+   {
+      Level              level{};
+      std::vector<Level> more;
+   };
+   PSIO_REFLECT(Holder, level, more)
+}  // namespace cons_enum
+
+TEST_CASE("an undeclared enum value is carried by every typed C++ codec", "[consistency][enum]")
+{
+   // docs/pssz-spec.md 4.5: the wire is the underlying integer, any value;
+   // a C++ enum holds any value of its underlying type, so no C++ reader
+   // refuses one (adding an enumerator stays compatible both ways).
+   using namespace cons_enum;
+   const Holder value{static_cast<Level>(7), {Level::high, static_cast<Level>(200)}};
+   const auto   frame = psio::to_pssz(value);
+   CHECK(psio::validate_pssz<Holder>(bytes_of(frame)).ok());
+   CHECK(psio::validate_strict<Holder>(psio::pssz{}, bytes_of(frame)).ok());
+   CHECK(psio::from_pssz<Holder>(bytes_of(frame)).level == static_cast<Level>(7));
+   const auto key = psio::to_key(value);
+   CHECK(psio::validate_key<Holder>(bytes_of(key)).ok());
+   CHECK(psio::from_key<Holder>(bytes_of(key)).more[1] == static_cast<Level>(200));
+   // Text: the name for a declared value, the number otherwise; both read.
+   CHECK(psio::to_json(value) == R"({"level":7,"more":["high",200]})");
+   CHECK(psio::from_json<Holder>(R"({"level":7,"more":["high",200]})").more[1] ==
+         static_cast<Level>(200));
+   CHECK(psio::from_ijson<Holder>(R"({"level":"7","more":[2]})").level == static_cast<Level>(7));
+   // An unknown NAME has no value; a number outside the integer is not one.
+   CHECK(!psio::validate_json<Holder>(R"({"level":"medium","more":[]})").ok());
+   CHECK(!psio::validate_json<Holder>(R"({"level":256,"more":[]})").ok());
+}
