@@ -20,7 +20,7 @@ from ._time import reserved_time_id
 from .values import Variant
 from .errors import DecodeError, EncodeError, InternalError, JsonError, PsioError, SchemaError
 
-__all__ = ["Schema", "SchemaType", "Status", "trusted", "Handler"]
+__all__ = ["Schema", "SchemaType", "SchemaMethod", "Status", "trusted", "Handler"]
 
 Width = Union[str, int]
 
@@ -348,6 +348,24 @@ class Schema:
     def names(self) -> list:
         return [m["name"] for m in self.ir["types"]]
 
+    def method(self, interface: str, name: str, **options: Any) -> SchemaMethod:
+        """A function of an interface of this schema (``interfaces[].funcs[]``), without Python classes.
+
+        The arguments are the extensible record of the parameters, with the
+        function's ``maxDynamicData`` cap: the bytes of the typed argument tuple.
+        """
+        for i in self.ir["interfaces"]:
+            if i.get("name") != interface:
+                continue
+            for f in i.get("funcs", ()):
+                if f.get("name") != name:
+                    continue
+                cap = [a for a in f.get("attributes", ()) if a.get("name") == "maxDynamicData"]
+                args = self.type({"Object": {"members": f["params"], "attributes": cap}}, **options)
+                result = None if f.get("result") is None else self.type(f["result"], **options)
+                return SchemaMethod(interface, name, [p["name"] for p in f["params"]], args, result)
+        raise SchemaError(f'pssz: schema has no function "{name}" of an interface "{interface}"')
+
     def type(self, root: Any, *, width: Width = "auto", handlers: Optional[Mapping[str, Any]] = None,
              require_handlers: Optional[bool] = None, nested_bytes: Optional[str] = None) -> SchemaType:
         """The codec for a named type or an inline type (either IR spelling).
@@ -380,6 +398,22 @@ class Schema:
         if key is not None:
             self._types[key] = out
         return out
+
+
+class SchemaMethod:
+    """A function of an interface recorded in a schema: the codecs of its arguments and of its result."""
+
+    __slots__ = ("interface", "name", "params", "args", "result")
+
+    def __init__(self, interface: str, name: str, params: list, args: SchemaType,
+                 result: Optional[SchemaType]) -> None:
+        self.interface = interface
+        self.name = name
+        #: The parameter names, in order.
+        self.params = params
+        #: The argument tuple: a dict by parameter name in the dynamic model, an object in text.
+        self.args = args
+        self.result = result
 
 
 def key_prefix_upper_bound(prefix: Any) -> Optional[bytes]:

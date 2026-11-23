@@ -28,6 +28,7 @@ python3 "$root/tools/check-rust-package.py" "$work/rust-target/package"
 npm ci --prefix "$root/js" --ignore-scripts --no-audit --no-fund
 npm run build --prefix "$root/js"
 npm test --prefix "$root/js"
+PYTHONPATH="$root/python/src" python3 -m unittest discover -s "$root/python/tests"
 python3 "$root/tools/check-pjson-validation.py" \
   "$work/cpp/cpp/conformance/psio_pjson_validate" "$work/rust-target/debug/examples/pjson_validate"
 python3 "$root/tools/check-npm-package.py"

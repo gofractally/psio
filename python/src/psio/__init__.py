@@ -36,7 +36,7 @@ from .api import (  # noqa: F401
 from .errors import DecodeError, EncodeError, InternalError, JsonError, PsioError, SchemaError  # noqa: F401
 from .interface import Interface, Method, interface, interface_of, method  # noqa: F401
 from .ir import IR_VERSION  # noqa: F401
-from .schema import Handler, Schema, SchemaType, Status, key_prefix_upper_bound, trusted  # noqa: F401
+from .schema import Handler, Schema, SchemaMethod, SchemaType, Status, key_prefix_upper_bound, trusted  # noqa: F401
 from ._time import time_point_from_iso, time_point_to_iso  # noqa: F401
 from .typed import arguments, codec, from_text, invariant, record, schema_of, to_text, transparent  # noqa: F401
 from .typed import enum_type as enum  # noqa: F401
@@ -46,7 +46,7 @@ from .view import ListView, RecordView, TupleView, VariantView, View  # noqa: F4
 __version__ = "0.1.0"
 
 __all__ = [
-    "ir", "interface", "Annotated", "Bits", "DecodeError", "DurationMs", "DurationNs", "DurationSec", "DurationUs",
+    "ir", "interface", "SchemaMethod", "Annotated", "Bits", "DecodeError", "DurationMs", "DurationNs", "DurationSec", "DurationUs",
     "EncodeError", "Handler", "IR_VERSION", "Interface", "InternalError", "JsonError", "ListView", "Method", "NaN",
     "PsioError", "RawString", "RecordView", "Schema", "SchemaError", "SchemaType", "Some", "Status", "TimePointMs",
     "TimePointNs", "TimePointSec", "TimePointUs", "TupleView", "Variant", "VariantView", "View", "alt",

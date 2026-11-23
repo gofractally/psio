@@ -116,6 +116,23 @@ class Interfaces(unittest.TestCase):
         self.assertEqual(psio.Schema.from_pssz(schema.to_pssz()).ir, schema.ir)
         self.assertEqual(psio.Schema.from_json(schema.to_json()).to_pssz(), schema.to_pssz())
 
+    def test_schema_driven_calls(self) -> None:
+        """A tool that has only the schema (as bytes) encodes the same calls, from plain values or from text."""
+        token = psio.interface_of(Token)
+        fetched = psio.Schema.from_pssz(token.schema().to_pssz())
+        transfer = fetched.method("token", "transfer")
+        self.assertEqual(transfer.params, ["to", "amount", "memo"])
+        self.assertEqual((transfer.args.width, transfer.args.max_dynamic_data), (2, 256))
+        self.assertIsNone(transfer.result)
+        typed = token["transfer"].to_pssz("bob", 5, "hi")
+        self.assertEqual(transfer.args.to_pssz({"to": "bob", "amount": 5, "memo": "hi"}), typed)
+        self.assertEqual(transfer.args.json_to_pssz('{"to":"bob","amount":5,"memo":"hi"}'), typed)
+        self.assertEqual(transfer.args.from_pssz(typed), {"to": "bob", "amount": 5, "memo": "hi"})
+        balance = fetched.method("token", "balance_of")
+        self.assertEqual(balance.result.from_pssz((5).to_bytes(8, "little")), 5)
+        with self.assertRaises(psio.SchemaError):
+            fetched.method("token", "nope")
+
     def test_evolution_under_the_cap(self) -> None:
         @psio.interface
         class V2:

@@ -93,6 +93,8 @@ unpublished macro dependency against the workspace package. The packaging check
 has been exercised with Cargo 1.94.1. For source consumers use a path dependency
 on `rust/psio`; both crates must be retained together.
 
+Python: `python/` is a pure-Python package (pSSZ, key, JSON and I-JSON from dataclasses and type hints, or from a Schema IR); run `cd python && PYTHONPATH=src python3 -m unittest discover -s tests`, see `python/README.md`.
+
 ## JavaScript / TypeScript
 
 ```sh
