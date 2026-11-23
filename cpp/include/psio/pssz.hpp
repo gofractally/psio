@@ -38,6 +38,7 @@
 #include <psio/cpo.hpp>
 #include <psio/detail/nested_fwd.hpp>
 #include <psio/detail/assoc.hpp>
+#include <psio/detail/assoc_order.hpp>
 #include <psio/detail/unaligned_iter.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/detail/pssz_record_layout.hpp>
@@ -222,6 +223,9 @@ namespace psio {
                                   std::size_t depth, validate_flags* flags) noexcept;
       template <typename Old, typename New>
       consteval bool assoc_evolves() noexcept;
+      template <std::size_t W, bool Auto, typename T, typename A>
+      codec_status exact_assoc_distinct(std::span<const char> src, std::size_t pos,
+                                        std::size_t end, std::size_t depth) noexcept;
 
       // ── Shape classification (same as SSZ) ────────────────────────────────
 
@@ -2708,11 +2712,32 @@ namespace psio {
       //   exact          (in)  exact-schema mode (validate_strict): the bytes of
       //                  a nested value must themselves pass exact validation
       //                  as their type (nested.hpp).
+      //   spec_reach     (exact mode, walk state) whether the node being
+      //                  validated is one the semantic-spec walk
+      //                  (validate_strict_walker.hpp) reaches from the root:
+      //                  0 no, 1 yes, 2 yes as the entry of a map (whose key
+      //                  and value are then reached). Every node sets it for
+      //                  the nodes below and restores it when it returns
+      //                  (validate_value_exact).
+      //   base_depth     (in)  the node depth of the root of this walk.
+      //   in_place       (in)  exact mode also decides canonical form: the
+      //                  leaves whose encoding is user code are decoded and
+      //                  encoded again (validate_exact_value sets it; a walk
+      //                  without it is the exact-schema structural check
+      //                  alone, which the tests' reference implementation
+      //                  follows with a decode and re-encode of the root).
       struct validate_flags
       {
-         bool has_unknown = false;
-         bool exact       = false;
+         bool         has_unknown = false;
+         bool         exact       = false;
+         std::uint8_t spec_reach  = 0;
+         std::size_t  base_depth  = 0;
+         bool         in_place    = false;
       };
+      inline bool exact_in_place(const validate_flags* flags) noexcept
+      {
+         return flags && flags->exact && flags->in_place;
+      }
 
       template <std::size_t W, bool Auto, typename T, typename A = no_ann>
       codec_status validate_value(std::span<const char> src, std::size_t pos,
@@ -2985,6 +3010,325 @@ namespace psio {
             return codec_ok();
       }
 
+      // ── Exact-schema (strict) validation: the in-place checks ────────────
+      //
+      // validate_strict accepts the bytes b of a T exactly when
+      // encode(decode(b)) == b (and the semantic specs hold). The structural
+      // walk already pins the layout of every shape it knows — one header
+      // per record, offsets that start at the fixed region and delimit
+      // contiguous payloads up to the end of the span, pruned trailing
+      // optionals, one spelling of None, bool / selector / unused-bit values,
+      // ascending map / set keys, this type's offset widths — so for those
+      // the bytes are their own re-encoding and nothing is materialized.
+      // What the walk cannot see is user code: an adapter (of the type, or
+      // named by a member's as<Tag>), whose decode may read spellings its
+      // encode does not write, and a map / set container whose comparator or
+      // equality may merge keys the encoding distinguishes. Those leaves —
+      // and only those — are decoded and encoded again here, each from its
+      // own span.
+
+      [[gnu::cold]] inline codec_status noncanonical() noexcept
+      {
+         return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+      }
+
+      // User code (an adapter, a constructor, a comparator) that throws on
+      // bytes its own validate accepted is a failed status where the
+      // compiler has exceptions.
+      template <typename Body>
+      codec_status exact_guarded(Body&& body) noexcept
+      {
+#if defined(__cpp_exceptions)
+         try
+         {
+            return body();
+         }
+         catch (...)
+         {
+            return codec_fail("pssz: decode failed during validate_strict", 0, "pssz");
+         }
+#else
+         return body();
+#endif
+      }
+
+      // A type with no node below it that the spec walk could reach:
+      // validate_flags::spec_reach is left as the node above set it.
+      template <typename T>
+      inline constexpr bool spec_reach_leaf_v =
+         ::psio::format_should_dispatch_adapter_v<::psio::pssz, T> || is_nested_v<T> ||
+         std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_same_v<T, std::string> ||
+         is_utf8_string_v<T> || is_bitlist_v<T> || is_bitvector_v<T>;
+
+      // validate_flags::spec_reach of the nodes directly below a T that was
+      // itself reached with `reach`: the recursion of
+      // detail::vstrict::recurse_into, in the order validate_shape dispatches.
+      template <typename T>
+      constexpr std::uint8_t spec_reach_below(std::uint8_t reach) noexcept
+      {
+         namespace vs = ::psio::detail::vstrict;
+         if constexpr (::psio::format_should_dispatch_adapter_v<::psio::pssz, T> ||
+                       is_psio_box_v<T>)
+            return 0;
+         else if constexpr (::psio::is_transparent_v<T>)
+            return (reach != 0 && ::psio::Reflected<T>) ? 1 : 0;
+         else if constexpr (is_nested_v<T>)
+            return 0;
+         else if constexpr (is_assoc_v<T>)
+            return reach == 0 ? 0 : (::psio::detail::is_map_v<T> ? 2 : 1);
+         else if constexpr (is_bounded_v<T>)
+            return 0;
+         else if constexpr (is_std_vector_v<T>)
+         {
+            using E = typename T::value_type;
+            return (reach != 0 &&
+                    (::psio::Reflected<E> || vs::is_std_vector<E>::value ||
+                     vs::is_std_optional<E>::value || vs::is_std_variant<E>::value))
+                      ? 1
+                      : 0;
+         }
+         else if constexpr (is_std_optional_v<T> || is_std_variant_v<T>)
+            return reach != 0 ? 1 : 0;
+         else if constexpr (Record<T>)
+         {
+            if constexpr (::psio::Reflected<T> && !is_std_tuple_v<T>)
+               return reach != 0 ? 1 : 0;
+            else
+               return reach == 2 ? 1 : 0;  // the entry of a map
+         }
+         else
+            return 0;
+      }
+
+      // Whether the spec walk runs a check on member I of the reflected T
+      // that the structural walk (carrier FA at the member) has not made.
+      template <typename T, std::size_t I, typename FA>
+      consteval bool member_has_exact_specs() noexcept
+      {
+         namespace vs = ::psio::detail::vstrict;
+         using R      = ::psio::reflect<T>;
+         using F      = typename R::template member_type<I>;
+         using specs_t = std::remove_cvref_t<
+            decltype(::psio::effective_annotations_for<T, F, R::template member_pointer<I>>::value)>;
+         if constexpr (std::is_same_v<F, std::string>)
+         {
+            if constexpr (!std::is_same_v<FA, no_ann>)
+            {
+               if constexpr (ann::has_utf8_v<FA>)
+                  return vs::has_span_spec_v<specs_t, ::psio::utf8_spec>;
+               else
+                  return vs::has_span_spec_v<specs_t>;
+            }
+            else
+               return vs::has_span_spec_v<specs_t>;
+         }
+         else if constexpr (vs::is_std_vector<F>::value)
+            return std::is_same_v<typename F::value_type, std::string> &&
+                   vs::has_element_span_spec_v<specs_t>;
+         else
+            return false;
+      }
+
+      // Whether anything at or below a T asks whether the spec walk reaches
+      // it: a member with a spec to run, a member written through as<Tag>,
+      // a reflected type with a binary adapter. A walk of a type without
+      // one (most types) does not track validate_flags::spec_reach at all.
+      // (A depth-first search of the type graph; Seen closes its cycles. A
+      // nested value starts a walk of its own.)
+      template <typename T, typename... Seen>
+      consteval bool has_spec_consumer() noexcept
+      {
+         if constexpr ((std::is_same_v<T, Seen> || ...))
+            return false;
+         else if constexpr (::psio::is_source_v<T>)
+            return has_spec_consumer<::psio::wire_type_t<T>, Seen..., T>();
+         else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::pssz, T>)
+            return ::psio::Reflected<T>;
+         else if constexpr (is_psio_box_v<T>)
+            return has_spec_consumer<typename is_psio_box<T>::elem, Seen..., T>();
+         else if constexpr (::psio::is_transparent_v<T>)
+         {
+            if constexpr (::psio::Reflected<T>)
+               return member_has_exact_specs<T, 0, no_ann>() ||
+                      has_spec_consumer<::psio::transparent_inner_t<T>, Seen..., T>();
+            else
+               return has_spec_consumer<::psio::transparent_inner_t<T>, Seen..., T>();
+         }
+         else if constexpr (is_nested_v<T>)
+            return false;
+         else if constexpr (::psio::detail::is_map_v<T>)
+            return has_spec_consumer<::psio::detail::assoc_key_t<T>, Seen..., T>() ||
+                   has_spec_consumer<typename T::mapped_type, Seen..., T>();
+         else if constexpr (::psio::detail::is_set_v<T>)
+            return has_spec_consumer<::psio::detail::assoc_key_t<T>, Seen..., T>();
+         else if constexpr (is_bounded_v<T> || is_std_vector_v<T> || is_std_array_v<T> ||
+                            is_std_optional_v<T>)
+            return has_spec_consumer<typename T::value_type, Seen..., T>();
+         else if constexpr (is_std_variant_v<T>)
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (has_spec_consumer<std::variant_alternative_t<Is, T>, Seen..., T>() || ...);
+            }(std::make_index_sequence<std::variant_size_v<T>>{});
+         else if constexpr (Record<T>)
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               using R = record_traits<T>;
+               return (([] {
+                          if constexpr (::psio::has_as_override_v<
+                                           typename record_member_annotations<T, Is>::value_t>)
+                             return true;
+                          else if constexpr (::psio::Reflected<T> && !is_std_tuple_v<T>)
+                             return member_has_exact_specs<T, Is, field_ann<T, no_ann, Is>>() ||
+                                    has_spec_consumer<typename R::template member_type<Is>,
+                                                      Seen..., T>();
+                          else
+                             return has_spec_consumer<typename R::template member_type<Is>,
+                                                      Seen..., T>();
+                       }()) ||
+                       ...);
+            }(std::make_index_sequence<record_traits<T>::member_count>{});
+         else
+            return false;
+      }
+
+      // The (span) specs the spec walk runs on member I of the reflected T
+      // — those of a std::string member on its characters, the element_spec
+      // children of a std::vector<std::string> member on each element — on
+      // the member's bytes [pos, end), which the structural walk accepted.
+      template <std::size_t LegacyW, bool Auto, typename T, std::size_t I, typename FA>
+      codec_status exact_member_specs(std::span<const char> src, std::size_t pos,
+                                      std::size_t end) noexcept
+      {
+         namespace vs = ::psio::detail::vstrict;
+         using R      = ::psio::reflect<T>;
+         using F      = typename R::template member_type<I>;
+         using EA = ::psio::effective_annotations_for<T, F, R::template member_pointer<I>>;
+         if constexpr (std::is_same_v<F, std::string>)
+         {
+            // A utf8 the carrier states was checked by check_position.
+            constexpr bool utf8_done = [] {
+               if constexpr (!std::is_same_v<FA, no_ann>) return ann::has_utf8_v<FA>;
+               else return false;
+            }();
+            using Skip = std::conditional_t<utf8_done, ::psio::utf8_spec, void>;
+            return vs::run_specs_except<Skip>(
+               std::span<const char>(src.data() + pos, end - pos), EA::value);
+         }
+         else if constexpr (vs::is_std_vector<F>::value)
+         {
+            if (pos == end)
+               return codec_ok();
+            // The list's own table width at this position.
+            constexpr std::size_t W = [] {
+               if constexpr (Auto) return width_for<F, FA>();
+               else return LegacyW;
+            }();
+            const std::size_t n = read_offset<W>(src, pos) / W;
+            for (std::size_t i = 0; i < n; ++i)
+            {
+               const std::size_t begin = pos + read_offset<W>(src, pos + i * W);
+               const std::size_t stop =
+                  i + 1 < n ? pos + read_offset<W>(src, pos + (i + 1) * W) : end;
+               if (auto st = vs::run_element_specs(
+                      std::span<const char>(src.data() + begin, stop - begin), EA::value);
+                   !st.ok())
+                  return st;
+            }
+            return codec_ok();
+         }
+         else
+            return codec_ok();
+      }
+
+      // A value of a type with a binary adapter, from a payload the
+      // adapter's validate accepted: its specs (when the spec walk reaches
+      // it) and that the adapter writes these bytes for it.
+      template <typename T>
+      [[gnu::noinline]] codec_status exact_adapter_value(std::span<const char> payload,
+                                                         bool specs) noexcept
+      {
+         return exact_guarded([&]() -> codec_status {
+            using Proj    = ::psio::adapter<std::remove_cvref_t<T>, ::psio::binary_category>;
+            const T value = Proj::decode(payload);
+            if constexpr (::psio::Reflected<T>)
+            {
+               if (specs)
+                  if (auto st = ::psio::validate_specs_on_value(value); !st.ok())
+                     return st;
+            }
+            else
+               (void)specs;
+            if (Proj::packsize(value) != payload.size())
+               return noncanonical();
+            sink_t again;
+            Proj::encode(value, again);
+            if (again.size() != payload.size() ||
+                (!again.empty() && std::memcmp(again.data(), payload.data(), again.size()) != 0))
+               return noncanonical();
+            return codec_ok();
+         });
+      }
+
+      // Member I of record T, written through the adapter its as<Tag> names,
+      // from a payload that adapter's validate accepted. `depth`: the node
+      // depth of the member, counted from the root of this walk.
+      template <typename T, std::size_t I>
+      [[gnu::noinline]] codec_status exact_as_member(std::span<const char> payload, bool specs,
+                                                     std::size_t depth) noexcept
+      {
+         return exact_guarded([&]() -> codec_status {
+            using F    = typename record_traits<T>::template member_type<I>;
+            using eff  = typename record_member_annotations<T, I>::value_t;
+            using Proj = ::psio::adapter<std::remove_cvref_t<F>, ::psio::adapter_tag_of_t<eff>>;
+            using D    = std::remove_cvref_t<decltype(record_member<I>(std::declval<T&>()))>;
+            D value{};
+            value = Proj::decode(payload);
+            if constexpr (::psio::Reflected<T> && !is_std_tuple_v<T>)
+            {
+               if (specs)
+                  if (auto st = ::psio::detail::vstrict::validate_field_value<T, I>(value);
+                      !st.ok())
+                     return st;
+            }
+            else
+               (void)specs;
+            if (!check_encode_depth_impl(value, depth, {}).ok())
+               return noncanonical();
+            if (Proj::packsize(value) != payload.size())
+               return noncanonical();
+            sink_t again;
+            Proj::encode(value, again);
+            if (again.size() != payload.size() ||
+                (!again.empty() && std::memcmp(again.data(), payload.data(), again.size()) != 0))
+               return noncanonical();
+            return codec_ok();
+         });
+      }
+
+      // The materializing check, for one subtree the in-place walk cannot
+      // decide: the value of [pos, end) is decoded, and its encoding must be
+      // these bytes. `depth`: the node depth of the value, counted from the
+      // root of this walk.
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
+      [[gnu::noinline]] codec_status exact_roundtrip(std::span<const char> src, std::size_t pos,
+                                                     std::size_t end, std::size_t depth) noexcept
+      {
+         return exact_guarded([&]() -> codec_status {
+            const T decoded = decode_value<LegacyW, Auto, T, A>(src, pos, end);
+            if (!check_encode_depth_impl(decoded, depth, {}).ok())
+               return noncanonical();
+            size_check        check;
+            const std::size_t size =
+               size_of_v<LegacyW, Auto, T, A, size_check*>(decoded, &check);
+            if (check.failure || size != end - pos)
+               return noncanonical();
+            std::vector<char>       canonical(size);
+            ::psio::fast_buf_stream sink(canonical.data(), canonical.size());
+            encode_value<LegacyW, Auto, T, ::psio::fast_buf_stream, A>(decoded, sink);
+            if (size != 0 && std::memcmp(canonical.data(), src.data() + pos, size) != 0)
+               return noncanonical();
+            return codec_ok();
+         });
+      }
+
       template <std::size_t W, bool Auto, Record T, typename A, std::size_t... Is>
       codec_status validate_record(std::span<const char> src,
                                    std::size_t            pos,
@@ -3051,6 +3395,12 @@ namespace psio {
                          spans[Is].end - spans[Is].begin);
                       status = flags && flags->exact ? Proj::validate_strict(payload)
                                                      : Proj::validate(payload);
+                      // Exact-schema mode: the adapter also writes these
+                      // bytes for the value it reads from them.
+                      if (status.ok() && exact_in_place(flags))
+                         status = exact_as_member<T, Is>(
+                            payload, flags->spec_reach != 0,
+                            depth + 1 - flags->base_depth);
                    }
                 }
                 else
@@ -3073,6 +3423,13 @@ namespace psio {
                                   src, spans[Is].begin, spans[Is].end),
                                record_member_annotations<T, Is>::value,
                                "pssz: member length_bound violated", "pssz");
+                   // Exact-schema mode: the member's semantic specs, on its
+                   // bytes, where the spec walk reaches this record.
+                   if constexpr (::psio::Reflected<T> && !is_std_tuple_v<T>)
+                      if constexpr (member_has_exact_specs<T, Is, field_ann<T, A, Is>>())
+                         if (status.ok() && flags && flags->exact && flags->spec_reach != 0)
+                            status = exact_member_specs<W, Auto, T, Is, field_ann<T, A, Is>>(
+                               src, spans[Is].begin, spans[Is].end);
                 }
              }()),
             ...);
@@ -3108,19 +3465,13 @@ namespace psio {
       }
 
       template <std::size_t LegacyW, bool Auto, typename T, typename A>
-      codec_status validate_value(std::span<const char> src, std::size_t pos,
-                                  std::size_t end,
-                                  std::size_t depth,
-                                  validate_flags* flags) noexcept
+      [[gnu::always_inline]] inline codec_status validate_value_body(
+         std::span<const char> src, std::size_t pos, std::size_t end, std::size_t depth,
+         validate_flags* flags) noexcept
       {
-         // A type that only refers to a value (a view, a string_view, a
-         // tuple of references) is validated as what it is encoded as.
-         if constexpr (::psio::is_source_v<T>)
-            return validate_value<LegacyW, Auto, ::psio::wire_type_t<T>, A>(src, pos, end, depth,
-                                                                         flags);
          // The common case — no annotation at this position, no invariant —
          // is the structural walk and nothing after it.
-         else if constexpr (std::is_same_v<A, no_ann> && !::psio::has_invariant_v<T>)
+         if constexpr (std::is_same_v<A, no_ann> && !::psio::has_invariant_v<T>)
             return validate_shape<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
          else
          {
@@ -3134,6 +3485,43 @@ namespace psio {
                return ::psio::check_invariant(decode_value<LegacyW, Auto, T, A>(src, pos, end));
             else
                return codec_ok();
+         }
+      }
+
+      // Exact-schema mode, a node that has nodes below it: whether the spec
+      // walk reaches those is set for the walk of this node and put back
+      // after it. Only for a type with something below it that asks
+      // (has_spec_consumer): the walk of any other type is the plain one.
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
+      codec_status validate_value_exact(std::span<const char> src, std::size_t pos,
+                                        std::size_t end, std::size_t depth,
+                                        validate_flags* flags) noexcept
+      {
+         const std::uint8_t reach = flags->spec_reach;
+         flags->spec_reach        = spec_reach_below<T>(reach);
+         auto st = validate_value_body<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
+         flags->spec_reach = reach;
+         return st;
+      }
+
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
+      codec_status validate_value(std::span<const char> src, std::size_t pos,
+                                  std::size_t end,
+                                  std::size_t depth,
+                                  validate_flags* flags) noexcept
+      {
+         // A type that only refers to a value (a view, a string_view, a
+         // tuple of references) is validated as what it is encoded as.
+         if constexpr (::psio::is_source_v<T>)
+            return validate_value<LegacyW, Auto, ::psio::wire_type_t<T>, A>(src, pos, end, depth,
+                                                                         flags);
+         else
+         {
+            if constexpr (!spec_reach_leaf_v<T>)
+               if constexpr (has_spec_consumer<T>())
+                  if (flags && flags->exact)
+                     return validate_value_exact<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
+            return validate_value_body<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
          }
       }
 
@@ -3168,25 +3556,51 @@ namespace psio {
                                           ::psio::binary_category>;
             // Exact-schema mode (validate_strict) is the adapter's strict
             // check: what it says about its own canonical form.
+            const std::span<const char> payload(src.data() + pos, end - pos);
+            if (!(flags && flags->exact))
+               return Proj::validate(payload);
+            codec_status st;
             if constexpr (requires(std::span<const char> b) { Proj::validate_strict(b); })
-               if (flags && flags->exact)
-                  return Proj::validate_strict(std::span<const char>(
-                     src.data() + pos, end - pos));
-            return Proj::validate(std::span<const char>(
-               src.data() + pos, end - pos));
+               st = Proj::validate_strict(payload);
+            else
+               st = Proj::validate(payload);
+            if (!st.ok() || !flags->in_place)
+               return st;
+            // ... and the adapter writes these bytes for the value it reads
+            // from them (only this value is materialized).
+            // (A leaf: spec_reach is still what the node above set for it.)
+            return exact_adapter_value<T>(payload, flags->spec_reach != 0);
          }
          else if constexpr (is_psio_box_v<T>)
             return validate_value<W, Auto, typename is_psio_box<T>::elem, ann::cap_only<A>>(
                src, pos, end, depth, flags);
          else if constexpr (::psio::is_transparent_v<T>)
-            return validate_value<W, Auto, ::psio::transparent_inner_t<T>,
-                                  ann::transparent_ann<T, A>>(
+         {
+            auto st = validate_value<W, Auto, ::psio::transparent_inner_t<T>,
+                                     ann::transparent_ann<T, A>>(
                src, pos, end, depth, flags);
+            // Exact-schema mode: the semantic specs of the one member.
+            if constexpr (::psio::Reflected<T>)
+               if constexpr (member_has_exact_specs<T, 0, ann::transparent_ann<T, A>>())
+                  if (st.ok() && flags && flags->exact && flags->spec_reach != 0)
+                     st = exact_member_specs<W, Auto, T, 0, ann::transparent_ann<T, A>>(
+                        src, pos, end);
+            return st;
+         }
          else if constexpr (is_nested_v<T>)
             return ::psio::detail::nested_impl::pssz_validate<T>(
                src.subspan(pos, end - pos), depth, flags);
          else if constexpr (is_assoc_v<T>)
-            return assoc_validate<W, Auto, T, A>(src, pos, end, depth, flags);
+         {
+            auto st = assoc_validate<W, Auto, T, A>(src, pos, end, depth, flags);
+            // Exact-schema mode: a container that does not itself iterate
+            // in key order may merge keys the encoding distinguishes.
+            if constexpr (!::psio::detail::iterates_in_key_order_v<T>)
+               if (st.ok() && exact_in_place(flags))
+                  st = exact_assoc_distinct<W, Auto, T, A>(src, pos, end,
+                                                           depth - flags->base_depth);
+            return st;
+         }
          else if constexpr (is_bounded_v<T>)
          {
             // The list, with this type's own table width.
@@ -3369,80 +3783,47 @@ namespace psio {
 
       // ── Exact-schema (strict) validation ──────────────────────────────────
       //
-      // "Valid, canonical, and nothing the reader does not know": the
-      // structural validation in exact mode (unknown optional suffix fields
-      // are refused; an adapter's payload is put to its validate_strict; a
-      // nested value is checked the same way as its type), then the value
-      // is materialized to run its semantic specs and to require that its
-      // encoding is these very bytes.
+      // "Valid, canonical, and nothing the reader does not know": the bytes
+      // are accepted exactly when they are the encoding of the value they
+      // decode to, with no unknown optional suffix fields, and the value's
+      // semantic specs hold.
       //
-      // The same steps run in every build. Nothing here needs exceptions:
-      // the structural walk returns a status, a decode of bytes it accepted
-      // does not fail (every checking reader relies on that — an adapter's
-      // decode is only ever called on a payload its validate accepted,
-      // adapter.hpp — and the plain validator itself materializes members
-      // for invariants and order checks), the specs return a status, and
-      // the re-encode goes through the checked sizing pass. Where the
-      // compiler has exceptions a throw from user code (an adapter, a
-      // constructor) is turned into a failed status as well.
+      // One walk over the bytes, in place: the structural validation in
+      // exact mode. Unknown optional suffix fields are refused; a nested
+      // value is checked the same way as its type; an adapter's payload is
+      // put to its validate_strict and then decoded and encoded again (that
+      // one value only — "the in-place checks" above); the semantic specs
+      // run on the bytes of the members they are stated for. The value as a
+      // whole is never built: beyond those leaves (and the members the
+      // plain validator already materializes — a type with an invariant, a
+      // member with sorted / unique / unique_keys, one map / set key at a
+      // time) the walk uses the stack of its recursion, at most
+      // kMaxValidationDepth nodes deep, and no heap.
+      //
+      // The same steps run in every build; nothing here needs exceptions.
+      // Where the compiler has them, a throw from user code (an adapter, a
+      // constructor) is a failed status.
       //
       // `depth`: the node depth of the value's root (nonzero for the bytes
       // of a nested value, which are checked by this same function).
-      template <std::size_t W, bool Auto, typename T>
-      codec_status validate_exact_materialized(std::span<const char> bytes)
-      {
-         T decoded = decode_value<W, Auto, T>(bytes, 0, bytes.size());
-         if constexpr (::psio::Reflected<T>)
-         {
-            auto specs = ::psio::validate_specs_on_value(decoded);
-            if (!specs.ok())
-               return specs;
-         }
-         // The value came from bytes that passed every check, so its
-         // encoding exists; a custom type whose decode and encode disagree
-         // can still produce a value that has none, and that is reported,
-         // not aborted on.
-         if (auto status = check_encode_depth_impl(decoded, 0, {}); !status.ok())
-            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
-         size_check        check;
-         const std::size_t size = size_of_v<W, Auto, T, no_ann, size_check*>(decoded, &check);
-         if constexpr (Auto) enforce_max_dynamic<T>(size, &check);
-         if (check.failure || size != bytes.size())
-            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
-         std::vector<char> canonical(size);
-         ::psio::fast_buf_stream sink(canonical.data(), canonical.size());
-         encode_value<W, Auto>(decoded, sink);
-         if (!std::equal(canonical.begin(), canonical.end(), bytes.begin()))
-            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
-         return codec_ok();
-      }
-
       template <std::size_t W, bool Auto, typename T>
       codec_status validate_exact_value(std::span<const char> bytes,
                                         std::size_t depth = 0) noexcept
       {
          if (auto cap = check_max_dynamic<T>(bytes); !cap.ok())
             return cap;
-         validate_flags flags{.has_unknown = false, .exact = true};
+         validate_flags flags{.has_unknown = false,
+                              .exact       = true,
+                              .spec_reach  = ::psio::Reflected<T> ? std::uint8_t{1}
+                                                                  : std::uint8_t{0},
+                              .base_depth  = depth,
+                              .in_place    = true};
          auto st = validate_value<W, Auto, T>(bytes, 0, bytes.size(), depth, &flags);
          if (!st.ok())
             return st;
          if (flags.has_unknown)
             return codec_fail("pssz: unknown fields in exact validation", 0, "pssz");
-#if defined(__cpp_exceptions)
-         try
-         {
-            return validate_exact_materialized<W, Auto, T>(bytes);
-         }
-         catch (...)
-         {
-            return codec_fail(
-               "pssz: decode failed during validate_strict", 0,
-               "pssz");
-         }
-#else
-         return validate_exact_materialized<W, Auto, T>(bytes);
-#endif
+         return codec_ok();
       }
 
    }  // namespace detail::pssz_impl

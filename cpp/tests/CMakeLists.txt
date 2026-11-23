@@ -680,6 +680,9 @@ add_test(NAME psio_pssz_noexceptions_test COMMAND psio_pssz_noexceptions_test)
 # adapters, invariants, transparent types and bounds: the same cases natively
 # and with exceptions and RTTI disabled.
 psio_add_test(psio_pssz_strict_tests pssz_strict_tests.cpp)
+# The in-place strict validation against the reference implementation
+# (decode, encode again, compare) on generated and mutated encodings.
+psio_add_test(psio_pssz_strict_inplace_tests pssz_strict_inplace_tests.cpp)
 add_executable(psio_pssz_strict_noexceptions_test pssz_strict_noexceptions.cpp)
 target_include_directories(psio_pssz_strict_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_features(psio_pssz_strict_noexceptions_test PRIVATE cxx_std_23)
@@ -689,6 +692,23 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_pssz_strict_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_pssz_strict_noexceptions_test COMMAND psio_pssz_strict_noexceptions_test)
+# validate_strict does not allocate: messages of several megabytes, a
+# counting operator new, built the way a wasm guest builds psio (no
+# exceptions, no RTTI, the build-time abort handler). Prints the allocation
+# count, peak memory and time of the in-place walk and of the reference
+# (decode and re-encode).
+add_executable(psio_pssz_strict_alloc_check pssz_strict_alloc_check.cpp)
+target_include_directories(psio_pssz_strict_alloc_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_strict_alloc_check PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_strict_alloc_check PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_strict_alloc_check PRIVATE PSIO_EXCEPTIONS_ENABLED=0 PSIO_HAVE_SIMDJSON=0
+                           PSIO_CODEC_ABORT_HANDLER=psio_strict_alloc_abort)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_strict_alloc_check PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_strict_alloc_check COMMAND psio_pssz_strict_alloc_check)
+set_tests_properties(psio_pssz_strict_alloc_check PROPERTIES
+   PASS_REGULAR_EXPRESSION "pssz-strict-alloc=PASS")
 
 # Cross-format parity: maxFields / maxDynamicData enforcement.
 psio_add_test(psio_caps_parity_tests caps_parity_tests.cpp)

@@ -22,6 +22,14 @@
 // than from the wire (the spec interpretation only depends on the
 // payload bytes, not framing).
 //
+// psio::pssz does not decode the value: its strict validation is one walk
+// over the bytes (pssz.hpp, "Exact-schema (strict) validation"), which runs
+// the same specs on the bytes of the same members — it follows
+// recurse_into below (validate_flags::spec_reach) and calls
+// validate_field_value for a member it had to materialize. A change to
+// what this walker visits must be made there too
+// (tests/pssz_strict_inplace_tests.cpp compares the two).
+//
 // Coverage:
 //   - std::string fields → spec.validate({s.data(), s.size()})
 //   - Reflected (record) fields → recurse
@@ -342,16 +350,18 @@ namespace psio {
       // Per-field handler: runs (span)-validate specs on the field's
       // payload bytes (today: std::string), then recurses into the
       // field structure to pick up nested records.
+      // The checks of member I of T on that member's value alone (the
+      // in-place strict validators call this for a member they had to
+      // materialize, without the record around it).
       template <typename T, std::size_t I>
-      codec_status validate_field(const T& value) noexcept
+      codec_status validate_field_value(
+         const typename ::psio::reflect<T>::template member_type<I>& field_val) noexcept
       {
          using R       = ::psio::reflect<T>;
          using F       = typename R::template member_type<I>;
          constexpr auto MemPtr = R::template member_pointer<I>;
          using EA = ::psio::effective_annotations_for<T, F, MemPtr>;
          constexpr auto annotations = EA::value;
-
-         const F& field_val = value.*MemPtr;
 
          // (1) Run any (span)-validate specs against this field's bytes.
          if constexpr (std::is_same_v<F, std::string>)
@@ -405,6 +415,87 @@ namespace psio {
          // fields get checked when validate_specs_on_value processes
          // them.
          return recurse_into<F>(field_val);
+      }
+
+      template <typename T, std::size_t I>
+      codec_status validate_field(const T& value) noexcept
+      {
+         return validate_field_value<T, I>(
+            value.*(::psio::reflect<T>::template member_pointer<I>));
+      }
+
+      // Whether a spec tuple holds a spec with a (span)-validate, other
+      // than `Skip` (a spec the caller has already checked).
+      template <typename Tuple, typename Skip = void>
+      inline constexpr bool has_span_spec_v = false;
+      template <typename... S, typename Skip>
+      inline constexpr bool has_span_spec_v<std::tuple<S...>, Skip> =
+         ((has_span_validate_v<S> && !std::is_same_v<S, Skip>) || ...);
+
+      // As run_specs, without the specs of type `Skip`.
+      template <typename Skip, typename Tuple>
+      codec_status run_specs_except(std::span<const char> bytes, const Tuple& tup) noexcept
+      {
+         codec_status err = codec_ok();
+         std::apply(
+            [&](const auto&... specs) {
+               (
+                  ([&]() {
+                     using S = std::remove_cvref_t<decltype(specs)>;
+                     if (!err.ok())
+                        return;
+                     if constexpr (has_span_validate_v<S> && !std::is_same_v<S, Skip>)
+                     {
+                        codec_status s = S::validate(bytes);
+                        if (!s.ok())
+                           err = std::move(s);
+                     }
+                  }()),
+                  ...);
+            },
+            tup);
+         return err;
+      }
+
+      // The element_spec<C> children of a spec tuple that have a
+      // (span)-validate, run on one element's bytes.
+      template <typename S>
+      inline constexpr bool element_span_spec_v = false;
+      template <typename C>
+      inline constexpr bool element_span_spec_v<::psio::element_spec<C>> =
+         has_span_validate_v<C>;
+      template <typename Tuple>
+      inline constexpr bool has_element_span_spec_v = false;
+      template <typename... S>
+      inline constexpr bool has_element_span_spec_v<std::tuple<S...>> =
+         (element_span_spec_v<S> || ...);
+
+      template <typename Tuple>
+      codec_status run_element_specs(std::span<const char> bytes, const Tuple& tup) noexcept
+      {
+         codec_status err = codec_ok();
+         std::apply(
+            [&](const auto&... specs) {
+               (
+                  ([&]() {
+                     using S = std::remove_cvref_t<decltype(specs)>;
+                     if (!err.ok())
+                        return;
+                     if constexpr (is_element_spec<S>::value)
+                     {
+                        using C = typename is_element_spec<S>::child_type;
+                        if constexpr (has_span_validate_v<C>)
+                        {
+                           codec_status s = C::validate(bytes);
+                           if (!s.ok())
+                              err = std::move(s);
+                        }
+                     }
+                  }()),
+                  ...);
+            },
+            tup);
+         return err;
       }
 
    }  // namespace detail::vstrict

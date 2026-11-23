@@ -191,17 +191,51 @@ The checked decode accepts exactly what `validate_F<T>` accepts:
   `psio::decode_pssz_checked` reports whether there were any.
 
 **Strict validation** — `psio::validate_strict<T>(psio::pssz{}, bytes)` — is
-"valid, canonical, and nothing this reader does not know": the checks of
-`validate_pssz<T>`, no unknown appended members at any depth (nested values
-included), an adapter's payload put to its `validate_strict`, the value's
-semantic specs and invariants, and the requirement that encoding the value
-again gives these very bytes (`pssz: noncanonical encoding` otherwise). It
-returns a `codec_status` and gives the same answers in a build without
-exceptions (`-fno-exceptions -fno-rtti`, `PSIO_EXCEPTIONS_ENABLED=0`) as
-natively, for every type: records with binary or text adapters, invariants,
-transparent types, bounded and ordered members, constructed records. It
-decodes the value once (after the structural checks have accepted the
-bytes), so it costs about a validate, a decode and an encode.
+"valid, canonical, and nothing this reader does not know". It accepts `bytes`
+exactly when they are the encoding of the value they decode to
+(`to_pssz(from_pssz<T>(bytes)) == bytes`), with no unknown appended members
+at any depth (nested values included), and the value's semantic specs and
+invariants hold. It returns a `codec_status` and gives the same answers in a
+build without exceptions (`-fno-exceptions -fno-rtti`,
+`PSIO_EXCEPTIONS_ENABLED=0`) as natively, for every type: records with binary
+or text adapters, invariants, transparent types, bounded and ordered members,
+constructed records.
+
+It is **one walk over the bytes, in place**: the value is not built. What
+makes an encoding canonical is checked where it lies:
+
+| Rule | Checked on |
+|---|---|
+| A record's header is its fixed region; a header shorter than the layout ends at a member boundary and omits optional members only; no unknown appended slot | the header |
+| The first offset of a record is the end of the fixed region, of a list the size of its offset table; offsets do not decrease and stay inside the span; each payload ends where the next begins and the last at the end of the span — no gap, overlap or trailing byte | the offsets |
+| The last written slot of an extensible record is not an absent optional (pruning is mandatory) | the last slot |
+| `optional<V>`: None is the empty span when `V` cannot be empty, otherwise the selector `00` alone; Some is `V` (after selector `01`) | the span, the selector |
+| A fixed-size value fills its span exactly; a list of fixed elements is a whole number of them; a zero-size element list is empty | the span length |
+| `bool` is 0 or 1; a variant index names an alternative; unused bits of a `bitvector` are zero; a `bitlist` ends in its delimiter byte and is within its capacity | the byte |
+| Offset widths (1, 2 or 4 bytes) are those of the type: its `maxDynamicData`, or the bound inferred from its members | compile time |
+| `max` / `exact` / `min`, `utf8`, `psio::bounded`, `psio::utf8_string`, `maxDynamicData` | the span (length, count, bytes) |
+| Map and set entries are in strictly ascending key order | each key, one at a time |
+| A nested value (`psio::nested<T>`, `shared_pssz<T>`) is itself strictly valid as a `T` | the same walk, on its bytes |
+| A semantic spec with a `validate(span)` (a third-party spec, `element_spec`) on a string member | the member's bytes |
+
+The walk uses the stack of its recursion (at most 64 nodes deep) and **no
+heap**, whatever the size of the message; it costs about a `validate_pssz`.
+Only values whose encoding is user code are materialized, each one from its
+own span and never the message around it:
+
+- a type with a binary adapter, and a member written through `as<Tag>`: its
+  payload is put to the adapter's `validate_strict`, then decoded and encoded
+  again and compared (`pssz: noncanonical encoding`) — an adapter may read
+  spellings it does not write;
+- the keys of a map or set that does not iterate in key order by
+  construction (a hash container, a custom comparator, a key whose `<` is
+  user code): bytes whose keys the container merges are not the encoding of
+  any value (a map whose mapped type cannot be default-constructed is
+  decoded and encoded again whole);
+- what `validate_pssz` itself materializes: a value of a type with an
+  `invariant`, a member with `sorted` / `unique` / `unique_keys`, and one map
+  or set key at a time for the order check.
+
 - `json`, `ijson`: every member that is not optional must be present, in the
   checked and in the trusted decode alike (`psio::decode<T>(psio::json{}, text)`,
   `from_json<T>(psio::trusted{text})`).

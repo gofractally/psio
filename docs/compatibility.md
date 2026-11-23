@@ -99,8 +99,10 @@ languages can represent.
   sequence offset tables, bit padding or variant indices, and under the
   explicit tags does not apply the `maxDynamicData` cap. Rust has no such
   path: `from_pssz` accepts exactly what C++ `validate` accepts.
-- **Strict validation.** C++ `validate_strict` also materializes the value,
-  runs member annotation specs and compares the canonical re-encoding. The
+- **Strict validation.** C++ `validate_strict` accepts exactly the bytes
+  that are the encoding of the value they decode to, and runs member
+  annotation specs; it decides that in place, without building the value
+  (`docs/helpers.md`, "Strict validation"). The
   Rust exact readers reject unknown fields and non-UTF-8 raw strings;
   canonical comparison is `validate_canonical_for_profile`.
 - **Schema for raw strings.** A raw string is `"string"` in the schema in

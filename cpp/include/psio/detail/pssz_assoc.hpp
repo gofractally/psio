@@ -283,6 +283,54 @@ namespace psio::detail::pssz_impl
 #endif
    }
 
+   // Exact-schema mode, for a container that does not iterate in key order
+   // by construction (a hash container, a custom comparator, a key whose `<`
+   // is user code): the trusted decode refuses bytes whose keys the
+   // container merges, so those are not the encoding of any value. Only the
+   // keys are materialized, into a container of the same type; a map whose
+   // mapped type cannot be default-constructed is decoded and encoded again
+   // whole.
+   template <std::size_t W, bool Auto, typename T, typename A>
+   [[gnu::noinline]] codec_status exact_assoc_distinct(std::span<const char> src,
+                                                       std::size_t pos, std::size_t end,
+                                                       std::size_t depth) noexcept
+   {
+      constexpr bool keys_only = [] {
+         if constexpr (::psio::detail::is_map_v<T>)
+            return std::default_initializable<typename T::mapped_type>;
+         else
+            return true;
+      }();
+      if constexpr (keys_only)
+      {
+         (void)depth;
+         return exact_guarded([&]() -> codec_status {
+            using K = ::psio::detail::assoc_key_t<T>;
+            T           probe;
+            std::size_t count = 0;
+            const auto  visit = [&](const K& key) {
+               ++count;
+               if constexpr (::psio::detail::is_map_v<T>)
+                  probe.emplace_hint(probe.end(), key, typename T::mapped_type{});
+               else
+                  probe.emplace_hint(probe.end(), key);
+               return true;
+            };
+            if (auto st = assoc_for_each_key<W, Auto, T, decltype(visit)&, A>(src, pos, end, visit);
+                !st.ok())
+               return st;
+            if (probe.size() != count)
+               return codec_fail(::psio::detail::is_map_v<T>
+                                    ? "pssz: map container merged distinct keys"
+                                    : "pssz: set container merged distinct elements",
+                                 static_cast<std::uint32_t>(pos), "pssz");
+            return codec_ok();
+         });
+      }
+      else
+         return exact_roundtrip<W, Auto, T, A>(src, pos, end, depth);
+   }
+
    // Maps evolve through their value type only: a different key type has a
    // different order. Sets and maps of the same types are one value kind
    // whatever container holds them; a map is not the plain list of its

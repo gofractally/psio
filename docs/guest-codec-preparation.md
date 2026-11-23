@@ -59,18 +59,34 @@ no longer has an "unsupported" answer. It runs the same steps in a build
 without exceptions as natively, and returns the same statuses:
 
 1. the structural validation in exact mode — unknown optional suffix fields
-   are refused, an adapter's payload is put to its `validate_strict`, a
-   nested value is checked as its type by this same function;
-2. the value is decoded from the accepted bytes, and its semantic specs run;
-3. the value is sized and encoded again through the checked sizing pass, and
+   are refused, a nested value is checked as its type by this same function,
+   and the layout of every shape the walk knows (headers, offsets, pruned
+   trailing optionals, selectors, map / set order, offset widths) is the one
+   the encoder writes;
+2. the semantic specs run on the bytes of the members they are stated for;
+3. a value whose encoding is user code — a type with a binary adapter, a
+   member written through `as<Tag>` — is put to the adapter's
+   `validate_strict`, then decoded and encoded again from its own span, and
    the bytes must be the input ("pssz: noncanonical encoding" otherwise).
 
-Step 2 is not a new requirement on user code: the plain validator already
-materializes members to check invariants and order annotations, and every
-checking reader calls an adapter's `decode` only on a payload its `validate`
-accepted (`psio/adapter.hpp`). An adapter or constructor that aborts on bytes
-its own `validate` accepted is a defect of that type in every checked entry
-point, not only in this one.
+It is one walk over the bytes, in place. The message is never decoded as a
+whole and, apart from the values of step 3 (and what the plain validator
+itself materializes: a type with an invariant, a member with an order
+annotation, one map / set key at a time), nothing is allocated: a guest
+validates a transaction of any size in the stack of the walk (at most 64
+nodes deep). `docs/helpers.md` ("Strict validation") lists the rules.
+`cpp/tests/pssz_strict_alloc_check.cpp` — built with `-fno-exceptions
+-fno-rtti`, `PSIO_EXCEPTIONS_ENABLED=0` and
+`-DPSIO_CODEC_ABORT_HANDLER=...`, as a guest is — requires zero allocations
+on messages of several megabytes;
+`cpp/tests/pssz_strict_inplace_tests.cpp` requires the walk to accept exactly
+what decoding and re-encoding the whole value accepts.
+
+Step 3 is not a new requirement on user code: every checking reader calls an
+adapter's `decode` only on a payload its `validate` accepted
+(`psio/adapter.hpp`). An adapter or constructor that aborts on bytes its own
+`validate` accepted is a defect of that type in every checked entry point,
+not only in this one.
 
 The metadata-only capability check
 (`detail::vstrict::can_validate_without_materialization`) and the

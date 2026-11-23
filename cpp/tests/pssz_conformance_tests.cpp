@@ -11,9 +11,11 @@
 // consumes the same file.
 
 #include "pssz_conformance_types.hpp"
+#include "pssz_strict_oracle.hpp"
 
 #include <catch.hpp>
 
+#include <cstdio>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -221,11 +223,41 @@ namespace
       }
    }
 
+   // validate_strict is an in-place walk: on the vector and on byte
+   // mutations of it, it answers as the reference implementation does
+   // (pssz_strict_oracle.hpp: decode, encode again, compare).
+   struct StrictTally
+   {
+      std::size_t inputs   = 0;
+      std::size_t disagree = 0;
+   };
+   StrictTally& strict_tally()
+   {
+      static StrictTally tally;
+      return tally;
+   }
+   template <typename T, typename F>
+   void check_strict_in_place(const Vector& v)
+   {
+      strict_oracle::Rng rng(0x5eed + v.bytes.size());
+      strict_oracle::for_each_mutation(rng, v.bytes, v.reencoded, [&](const Bytes& input) {
+         auto& tally = strict_tally();
+         ++tally.inputs;
+         if (!strict_oracle::agree<T>(F{}, input))
+         {
+            if (tally.disagree++ < 10)
+               UNSCOPED_INFO("validate_strict disagrees with the reference on a mutation of "
+                             << v.name);
+         }
+      });
+   }
+
    // One vector against every reader entry point of T under format F.
    template <typename T, typename F>
    void check(const Vector& v)
    {
       INFO(v.name);
+      check_strict_in_place<T, F>(v);
       const Bytes& wire     = v.bytes;
       bool         reported = false;
       T            out{};
@@ -409,6 +441,12 @@ TEST_CASE("pssz conformance vectors hold for every reader entry point", "[pssz][
       CHECK(per_class[cls] > 0);
    }
    CHECK(used_types.size() == dispatch().size());
+   // The in-place strict validation and the reference agreed throughout.
+   CHECK(strict_tally().disagree == 0);
+   CHECK(strict_tally().inputs > 100000);
+   std::printf("pssz conformance vectors: validate_strict compared with the reference on %zu "
+               "inputs, %zu disagreements\n",
+               strict_tally().inputs, strict_tally().disagree);
 }
 
 // max_encoded_size is an upper bound of the encoding: no canonical frame of
