@@ -342,13 +342,22 @@ namespace psio::schema_types
          {
             _lex.expect_keyword("enum");
             auto pascal = _lex.read_ident();
-            // Optional `: type` underlying.
+            // Optional `: type` underlying. It decides the enum's width on
+            // the wire (psio/fbs_layout.hpp), so it is kept as an attribute
+            // — except `ubyte`, the type emit_fbs writes for every enum,
+            // which is the layout's default. Without one, FlatBuffers uses
+            // `int`.
+            std::vector<Attribute> enum_attrs;
             _lex.skip_ws_and_comments();
+            std::string underlying = "int";
             if (_lex.peek() == ':')
             {
                _lex.advance();
-               (void)_lex.read_ident();  // discard
+               _lex.skip_ws_and_comments();
+               underlying = _lex.read_ident();
             }
+            if (underlying != "ubyte")
+               enum_attrs.push_back(Attribute{.name = "fbs_underlying", .value = underlying});
             _lex.expect('{');
             std::vector<Member> cases;
             while (true)
@@ -376,7 +385,7 @@ namespace psio::schema_types
             }
             _s.insert(to_snake(pascal),
                       AnyType{Variant{.members    = std::move(cases),
-                                      .attributes = {}}});
+                                      .attributes = std::move(enum_attrs)}});
          }
 
          void parse_union_decl()
@@ -474,6 +483,19 @@ namespace psio::schema_types
             {
                _lex.advance();
                auto inner = parse_type();
+               // `[T:N]`: a fixed array (struct members only).
+               _lex.skip_ws_and_comments();
+               if (_lex.peek() == ':')
+               {
+                  _lex.advance();
+                  _lex.skip_ws_and_comments();
+                  const auto digits = _lex.read_digits();
+                  if (digits.empty())
+                     throw fbs_parse_error("expected the length of a fixed array", _lex.line,
+                                           _lex.column);
+                  _lex.expect(']');
+                  return AnyType{Array{Box<AnyType>{std::move(inner)}, std::stoull(std::string(digits))}};
+               }
                _lex.expect(']');
                return AnyType{List{Box<AnyType>{std::move(inner)}}};
             }

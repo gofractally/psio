@@ -13,6 +13,8 @@
 //   - on corrupted buffers, whatever psio's verifier accepts the official
 //     one accepts, and both then read the same values.
 
+#include <psio/fbs_layout.hpp>
+#include <psio/fbs_parser.hpp>
 #include <psio/flatbuf.hpp>
 #include <psio/flatbuf_view.hpp>
 
@@ -22,9 +24,11 @@
 
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <memory>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -308,6 +312,48 @@ TEST_CASE("flatbuf interop: layout is flatc's", "[flatbuf][interop]")
    static_assert(psio::flatbuf::layout<Mixed>::size() == sizeof(fbi::Mixed));
    static_assert(psio::flatbuf::layout<Mixed>::align() == alignof(fbi::Mixed));
    SUCCEED();
+}
+
+TEST_CASE("flatbuf interop: the layout psio computes from the .fbs text is flatc's",
+          "[flatbuf][interop][schema]")
+{
+   std::ifstream     in(PSIO_FLATBUF_INTEROP_FBS);
+   std::stringstream text;
+   text << in.rdbuf();
+   REQUIRE(in);
+   const auto layouts = psio::fbs_layout(psio::parse_fbs(text.str()));
+   const auto vt = [&](const char* table, const char* field) {
+      const auto* t = layouts.find(table);
+      REQUIRE(t != nullptr);
+      const auto* f = t->field(field);
+      REQUIRE(f != nullptr);
+      return static_cast<int>(f->vtable_offset);
+   };
+   CHECK(vt("order", "id") == fbi::Order::VT_ID);
+   CHECK(vt("order", "note") == fbi::Order::VT_NOTE);
+   CHECK(vt("order", "payment") == fbi::Order::VT_PAYMENT_TYPE);
+   CHECK(vt("order", "payment") + 2 == fbi::Order::VT_PAYMENT);
+   CHECK(vt("order", "position") == fbi::Order::VT_POSITION);
+   CHECK(vt("order", "discount") == fbi::Order::VT_DISCOUNT);
+   CHECK(vt("order", "by_id") == fbi::Order::VT_BY_ID);
+   CHECK(vt("order", "refund") == fbi::Order::VT_REFUND_TYPE);
+   CHECK(vt("order", "refund") + 2 == fbi::Order::VT_REFUND);
+   CHECK(vt("order", "mixed") == fbi::Order::VT_MIXED);
+   CHECK(vt("profile", "verified") == fbi::Profile::VT_VERIFIED);
+   CHECK(vt("item", "unit_price") == fbi::Item::VT_UNIT_PRICE);
+   CHECK(vt("stock_entry", "key") == fbi::StockEntry::VT_KEY);
+   CHECK(vt("item_entry", "value") == fbi::ItemEntry::VT_VALUE);
+   CHECK(vt("tree", "children") == fbi::Tree::VT_CHILDREN);
+   CHECK(vt("scalars", "ch") == fbi::Scalars::VT_CH);
+   CHECK(vt("defaults", "ratio") == fbi::Defaults::VT_RATIO);
+   CHECK(vt("renumbered", "c") == fbi::Renumbered::VT_C);
+   CHECK(vt("renumbered", "a") == fbi::Renumbered::VT_A);
+   CHECK(vt("renumbered", "b") == fbi::Renumbered::VT_B);
+   CHECK(vt("with_deprecated", "c") == fbi::WithDeprecated::VT_C);
+   REQUIRE(layouts.find("mixed") != nullptr);
+   CHECK(layouts.find("mixed")->size == sizeof(fbi::Mixed));
+   CHECK(layouts.find("mixed")->align == alignof(fbi::Mixed));
+   CHECK(layouts.find("vec3")->size == sizeof(fbi::Vec3));
 }
 
 TEST_CASE("flatbuf interop: psio writes, the official library reads", "[flatbuf][interop]")

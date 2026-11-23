@@ -896,6 +896,8 @@ endif()
 # psio::flatbuf (flatbuf.hpp, flatbuf_view.hpp): layout, codec, the verifier,
 # safe and trusted views, in-place writes.
 psio_add_test(psio_flatbuf_tests flatbuf_tests.cpp)
+target_compile_definitions(psio_flatbuf_tests PRIVATE
+   PSIO_FLATBUF_INTEROP_FBS="${CMAKE_CURRENT_SOURCE_DIR}/flatbuf/interop.fbs")
 
 # Arbitrary bytes: truncations, corruptions, random buffers. Built a second
 # time with AddressSanitizer + UndefinedBehaviorSanitizer where the toolchain
@@ -944,6 +946,8 @@ if(flatbuffers_FOUND AND PSIO_FLATC)
    psio_add_test(psio_flatbuf_interop_tests flatbuf_interop_tests.cpp
       ${PSIO_FLATBUF_INTEROP_DIR}/interop_generated.h)
    target_include_directories(psio_flatbuf_interop_tests PRIVATE ${PSIO_FLATBUF_INTEROP_DIR})
+   target_compile_definitions(psio_flatbuf_interop_tests PRIVATE
+      PSIO_FLATBUF_INTEROP_FBS="${CMAKE_CURRENT_SOURCE_DIR}/flatbuf/interop.fbs")
    target_link_libraries(psio_flatbuf_interop_tests PRIVATE flatbuffers::flatbuffers)
    message(STATUS "psio_flatbuf_interop_tests: flatbuffers found — enabled")
 else()

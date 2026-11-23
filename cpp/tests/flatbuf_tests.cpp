@@ -3,6 +3,8 @@
 // Interop with the official library is flatbuf_interop_tests.cpp; arbitrary
 // bytes are flatbuf_fuzz_tests.cpp.
 
+#include <psio/fbs_layout.hpp>
+#include <psio/fbs_parser.hpp>
 #include <psio/flatbuf.hpp>
 #include <psio/flatbuf_view.hpp>
 
@@ -11,7 +13,9 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <map>
+#include <sstream>
 #include <optional>
 #include <set>
 #include <string>
@@ -700,4 +704,125 @@ TEST_CASE("flatbuf: more than 1 KiB, and many distinct vtables", "[flatbuf][code
       s.rows.push_back(r);
    }
    round_trip(s);
+}
+
+// ── Schema: the layout computed from `.fbs` text is the codec's ───────────
+
+namespace
+{
+   // The layout psio::fbs_layout computes for IR type `name`, against the
+   // compile-time layout psio::flatbuf uses for the C++ type T.
+   template <typename T>
+   void same_layout(const psio::fbs_layouts& layouts, const std::string& name)
+   {
+      INFO(name);
+      const auto* t = layouts.find(name);
+      REQUIRE(t != nullptr);
+      using L = psio::flatbuf::layout<T>;
+      using R = psio::reflect<T>;
+      REQUIRE(t->is_struct == L::is_struct);
+      REQUIRE(t->fields.size() == R::member_count);
+      [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+         (([&] {
+             const auto* f = t->field(R::template member_name<Is>);
+             INFO(R::template member_name<Is>);
+             REQUIRE(f != nullptr);
+             if constexpr (L::is_struct)
+                CHECK(f->offset == L::offset(Is));
+             else
+             {
+                CHECK(f->slot == L::slot(Is));
+                CHECK(f->vtable_offset == L::vtable_offset(Is));
+                CHECK(f->is_union ==
+                      psio::detail::flatbuf_impl::is_variant_v<std::remove_cvref_t<
+                         typename R::template member_type<Is>>>);
+             }
+          }()),
+          ...);
+      }(std::make_index_sequence<R::member_count>{});
+      if constexpr (L::is_struct)
+      {
+         CHECK(t->size == L::size());
+         CHECK(t->align == L::align());
+      }
+      else
+         CHECK(t->slots == L::slots());
+   }
+}  // namespace
+
+TEST_CASE("flatbuf: the layout of a parsed .fbs schema is the codec's", "[flatbuf][schema]")
+{
+   // tests/flatbuf/interop.fbs declares the types of flatbuf_shapes.hpp
+   // (flatbuf_interop_tests.cpp checks the same constants against flatc's).
+   std::ifstream     in(PSIO_FLATBUF_INTEROP_FBS);
+   std::stringstream text;
+   text << in.rdbuf();
+   REQUIRE(in);
+   const auto schema  = psio::parse_fbs(text.str());
+   const auto layouts = psio::fbs_layout(schema);
+
+   same_layout<Vec3>(layouts, "vec3");
+   same_layout<Mixed>(layouts, "mixed");
+   same_layout<Point>(layouts, "point");
+   same_layout<Profile>(layouts, "profile");
+   same_layout<Item>(layouts, "item");
+   same_layout<Card>(layouts, "card");
+   same_layout<Order>(layouts, "order");
+   same_layout<Tree>(layouts, "tree");
+   same_layout<Scalars>(layouts, "scalars");
+   same_layout<Defaults>(layouts, "defaults");
+   same_layout<Renumbered>(layouts, "renumbered");      // (id: N)
+   same_layout<WithDeprecated>(layouts, "with_deprecated");
+   same_layout<Sparse>(layouts, "sparse");
+
+   const auto* order = layouts.find("order");
+   REQUIRE(order != nullptr);
+   CHECK(order->field("color")->size == 1);     // enum Color : ubyte
+   CHECK(order->field("mixed")->size == 48);    // an inline struct
+   CHECK(order->field("mixed")->align == 8);
+   CHECK(order->field("payment")->is_union);
+   CHECK(order->field("customer")->size == 4);  // an offset
+   CHECK(layouts.find("with_deprecated")->field("old")->deprecated);
+   // A map entry: `key`, then `value`.
+   CHECK(layouts.find("stock_entry")->field("key")->slot == 0);
+   CHECK(layouts.find("stock_entry")->field("value")->slot == 1);
+}
+
+TEST_CASE("flatbuf: schema layout rules", "[flatbuf][schema]")
+{
+   const auto layouts = psio::fbs_layout(psio::parse_fbs(R"(
+      enum Wide : short { a, b }
+      enum Plain { a, b }
+      struct S { e:Wide; x:ubyte; p:Plain; grid:[ushort:3]; d:double; }
+      table A { x:int; }
+      table B { y:int; }
+      union U { A, B }
+      table T {
+        tail:int (id: 3);
+        u:U (id: 2);
+        head:ubyte (id: 0);
+      }
+   )"));
+   const auto* s = layouts.find("s");
+   REQUIRE(s != nullptr);
+   REQUIRE(s->is_struct);
+   CHECK(s->field("e")->offset == 0);     // short
+   CHECK(s->field("x")->offset == 2);
+   CHECK(s->field("p")->offset == 4);     // an enum without a type is an int
+   CHECK(s->field("grid")->offset == 8);  // 3 x ushort
+   CHECK(s->field("d")->offset == 16);
+   CHECK(s->size == 24);
+   CHECK(s->align == 8);
+
+   // With explicit ids a union's id is its value; the type byte is at id - 1.
+   const auto* t = layouts.find("t");
+   REQUIRE(t != nullptr);
+   CHECK(t->field("head")->slot == 0);
+   CHECK(t->field("u")->slot == 1);
+   CHECK(t->field("u")->is_union);
+   CHECK(t->field("tail")->slot == 3);
+   CHECK(t->slots == 4);
+
+   CHECK_THROWS(psio::fbs_layout(psio::parse_fbs("table T { a:int (id: 0); b:int; }")));
+   CHECK_THROWS(psio::fbs_layout(psio::parse_fbs("table T { a:Missing; }")));
 }
