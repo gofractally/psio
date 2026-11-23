@@ -57,10 +57,9 @@
 //   psio::max_dynamic_data_v<T>        → optional<size_t>
 //      explicit cap from `maxFields(N)` / `maxDynamicData(N)` keywords
 //      in PSIO_REFLECT.
-//   psio::effective_max_fields_v<T>    → optional<size_t>
-//      min(explicit cap, reflect<T>::member_count) — cap wins downward.
 //   psio::effective_max_dynamic_v<T>   → optional<size_t>  (in max_size.hpp)
-//      min(explicit cap, max_encoded_size<T>) — cap wins downward.
+//      the explicit cap when there is one (an explicit cap always rules,
+//      docs/pssz-spec.md 3.1), else the inferred bound max_encoded_size<T>.
 //
 // Cap enforcement helpers (every format consumer reuses these):
 //
@@ -1243,10 +1242,9 @@ namespace psio {
       }
    }();
 
-   // `effective_max_dynamic_v<T>` lives in psio/max_size.hpp because it
-   // composes the explicit cap with the per-field `length_bound`-
-   // derived bound from `max_encoded_size<T>`.  Putting it there keeps
-   // the annotate.hpp → max_size.hpp dependency one-way.
+   // `effective_max_dynamic_v<T>` lives in psio/max_size.hpp: it is the
+   // explicit cap, or without one the bound `max_encoded_size<T>` infers
+   // from the fields.
 
    // ── Shared cap-enforcement helpers ────────────────────────────────────
    //

@@ -2023,9 +2023,10 @@ and emitted via `PSIO_REFLECT(...)`:
   reflect<T>::member_count)` on Reflected types).
 * `maxDynamicData(N)` — caps the total encoded payload size in bytes
   (`max_dynamic_data_spec`). Surfaced through
-  `psio::max_dynamic_data_v<T>` and composed with the per-field
-  `length_bound`-derived bound from `max_encoded_size<T>` into
-  `psio::effective_max_dynamic_v<T>` (cap wins downward; never widens).
+  `psio::max_dynamic_data_v<T>`. `psio::effective_max_dynamic_v<T>` is
+  that cap when the type declares one — an explicit cap always rules
+  (`pssz-spec.md` §3.1) — and otherwise the bound `max_encoded_size<T>`
+  infers from the per-field `length_bound`s.
 
 ### 7.1 Encoder behavior
 

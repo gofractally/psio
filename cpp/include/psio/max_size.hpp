@@ -427,32 +427,26 @@ namespace psio {
 
    // ── effective_max_dynamic_v ───────────────────────────────────────────
    //
-   // Composes an explicit `maxDynamicData(N)` cap (from annotate.hpp's
-   // `max_dynamic_data_v<T>`) with the bound inferred from per-field
-   // `length_bound` annotations (`max_encoded_size<T>`).  The explicit
-   // cap WINS DOWNWARD only — overriding upward defeats the purpose of
-   // an upper-bound assertion.
+   // docs/pssz-spec.md 3.1 / 16: the number a type's automatic offset width
+   // is the width class of.
    //
-   //   cap present, bound present → min(cap, bound)
-   //   cap present, bound nullopt → cap          (cap is the only bound)
-   //   cap nullopt, bound present → bound        (no override; trust inferred)
-   //   cap nullopt, bound nullopt → nullopt      (caller picks conservative width)
+   //   explicit maxDynamicData(N)  → N. An explicit cap always rules: it is
+   //                                 the type's lifetime width promise and is
+   //                                 not reduced to the bound inferred from
+   //                                 the fields the type has today
+   //   no cap                      → max_encoded_size<T>(), the inferred
+   //                                 bound; nullopt when a field is unbounded
    //
-   // Retained downward-bound utility for consumers needing the tighter actual
-   // bound. Automatic PSSZ width selection uses the declared budget directly
-   // instead: its lifetime width promise must not shrink to current fields.
+   // There is no min(explicit cap, inferred bound). auto_pssz_width<T>() is
+   // the width class of this value (4 for nullopt).
    template <typename T>
    inline constexpr std::optional<std::size_t> effective_max_dynamic_v = []
    {
-      constexpr auto cap   = max_dynamic_data_v<T>;
-      constexpr auto bound = max_encoded_size<T>();
-      if constexpr (cap.has_value() && bound.has_value())
-         return std::optional<std::size_t>{
-            (*cap < *bound) ? *cap : *bound};
-      else if constexpr (cap.has_value())
+      constexpr auto cap = max_dynamic_data_v<T>;
+      if constexpr (cap.has_value())
          return cap;
       else
-         return bound;
+         return max_encoded_size<T>();
    }();
 
 }  // namespace psio
