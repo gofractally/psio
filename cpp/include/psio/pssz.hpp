@@ -4353,11 +4353,43 @@ namespace psio {
          std::is_same_v<::psio::wire_type_t<S>, std::tuple<Ts...>> ||
          std::is_same_v<::psio::wire_type_t<S>, ::psio::annotated_tuple<Meta, Ts...>>;
 
-      // An argument as a source of parameter type P: itself when it is
-      // one, else converted.
+      // An argument of a call through its packed form, for parameter wire
+      // type P. It is taken exactly as an ordinary C++ call of the method
+      // would take it:
+      //   - an argument that already is a source of P (a P, a view of one,
+      //     a std::string_view for a std::string, ...) is written as it
+      //     stands, by reference: nothing is copied or converted;
+      //   - anything else is converted to P IMPLICITLY — copy-initialization,
+      //     `P p = std::forward<Arg>(arg);` — so explicit constructors and
+      //     explicit conversion operators are not considered, and a
+      //     conversion operator that is not const, or is &&-qualified, is
+      //     usable because the argument is forwarded as it was given.
       template <typename P, typename Arg>
-      using arg_source_t =
-         std::conditional_t<std::is_same_v<::psio::wire_type_t<Arg>, P>, const Arg&, P>;
+      inline constexpr bool arg_is_source_v =
+         std::is_same_v<::psio::wire_type_t<Arg>, P>;
+      template <typename P, typename Arg>
+      using arg_source_t = std::conditional_t<arg_is_source_v<P, Arg>,
+                                              const std::remove_cvref_t<Arg>&, P>;
+      template <typename P, typename Arg>
+      concept method_argument_for =
+         arg_is_source_v<P, Arg> || std::is_convertible_v<Arg, P>;
+      template <typename P, typename Arg>
+      constexpr arg_source_t<P, Arg> arg_source(Arg&& arg)
+      {
+         if constexpr (arg_is_source_v<P, Arg>)
+            return arg;
+         else
+            // The return statement copy-initializes the P.
+            return std::forward<Arg>(arg);
+      }
+      template <typename Tuple, typename... Args>
+      inline constexpr bool method_arguments_for_v = false;
+      template <typename Tuple, typename... Args>
+         requires(std::tuple_size_v<Tuple> == sizeof...(Args))
+      inline constexpr bool method_arguments_for_v<Tuple, Args...> =
+         []<std::size_t... Ns>(std::index_sequence<Ns...>) {
+            return (method_argument_for<std::tuple_element_t<Ns, Tuple>, Args> && ... && true);
+         }(std::index_sequence_for<Args...>{});
    }  // namespace detail::pssz_impl
 
    template <typename T, typename S>
@@ -4392,25 +4424,44 @@ namespace psio {
                                                                                     nullptr);
    }
 
+   // Whether `args...` can be passed to method I of T: as many as the
+   // method takes, each a source of its parameter or implicitly convertible
+   // to it — what an ordinary call `obj.method(args...)` accepts.
    template <typename T, std::size_t I, typename... Args>
-   void method_args_append_pssz(std::vector<char>& out, const Args&... args)
+   concept method_arguments =
+      detail::pssz_impl::method_arguments_for_v<
+         typename reflect<T>::template method_arg_tuple<I>, Args...>;
+
+   template <typename T, std::size_t I, typename... Args>
+   void method_args_append_pssz(std::vector<char>& out, Args&&... args)
    {
       using Tuple = typename reflect<T>::template method_arg_tuple<I>;
-      static_assert(sizeof...(Args) == std::tuple_size_v<Tuple>,
-                    "psio::method_args_to_pssz: the method takes another number of arguments");
+      static_assert(sizeof...(Args) >= std::tuple_size_v<Tuple>,
+                    "psio::method_args_to_pssz: too few arguments passed to the method");
+      static_assert(sizeof...(Args) <= std::tuple_size_v<Tuple>,
+                    "psio::method_args_to_pssz: too many arguments passed to the method");
       [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+         static_assert(
+            (detail::pssz_impl::method_argument_for<std::tuple_element_t<Ns, Tuple>, Args> &&
+             ... && true),
+            "psio::method_args_to_pssz: an argument is neither a source of its parameter's "
+            "type (psio::wire_type_t<Argument> is the parameter's wire type) nor implicitly "
+            "convertible to it; as in an ordinary call, explicit constructors and explicit "
+            "conversion operators are not used: convert the argument at the call");
+         // (Each element is the argument itself, by reference, or the
+         // parameter converted from it in place: no copy of either.)
          const std::tuple<
             detail::pssz_impl::arg_source_t<std::tuple_element_t<Ns, Tuple>, Args>...>
-            sources{static_cast<detail::pssz_impl::arg_source_t<std::tuple_element_t<Ns, Tuple>,
-                                                                  Args>>(args)...};
+            sources{detail::pssz_impl::arg_source<std::tuple_element_t<Ns, Tuple>, Args>(
+               std::forward<Args>(args))...};
          to_pssz_as<Tuple>(sources, out);
       }(std::index_sequence_for<Args...>{});
    }
    template <typename T, std::size_t I, typename... Args>
-   [[nodiscard]] std::vector<char> method_args_to_pssz(const Args&... args)
+   [[nodiscard]] std::vector<char> method_args_to_pssz(Args&&... args)
    {
       std::vector<char> out;
-      method_args_append_pssz<T, I>(out, args...);
+      method_args_append_pssz<T, I>(out, std::forward<Args>(args)...);
       return out;
    }
 

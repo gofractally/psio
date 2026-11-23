@@ -114,6 +114,32 @@ add_test(NAME psio_method_view_param_decode_into_view_compile_fail
 set_tests_properties(psio_method_view_param_decode_into_view_compile_fail PROPERTIES
    PASS_REGULAR_EXPRESSION "cannot be decoded into")
 
+# psio::method_args_to_pssz takes arguments as an ordinary call does: implicit
+# conversion only, forwarded, sources never copied.
+psio_add_test(psio_method_arg_convert_tests method_arg_convert_tests.cpp)
+add_test(NAME psio_method_arg_convert_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/method_arg_convert_fail.cpp)
+function(psio_method_arg_convert_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_method_arg_convert_${NAME}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/method_arg_convert_fail.cpp)
+   set_tests_properties(psio_method_arg_convert_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_MAC_NOT_CONVERTIBLE "nor implicitly convertible to it")
+psio_method_arg_convert_compile_fail(explicit_constructor MAC_FAIL_EXPLICIT_CONSTRUCTOR
+   "${PSIO_MAC_NOT_CONVERTIBLE}")
+psio_method_arg_convert_compile_fail(explicit_operator MAC_FAIL_EXPLICIT_OPERATOR
+   "${PSIO_MAC_NOT_CONVERTIBLE}")
+psio_method_arg_convert_compile_fail(const_operator MAC_FAIL_CONST_OPERATOR
+   "${PSIO_MAC_NOT_CONVERTIBLE}")
+psio_method_arg_convert_compile_fail(unrelated MAC_FAIL_UNRELATED
+   "${PSIO_MAC_NOT_CONVERTIBLE}")
+psio_method_arg_convert_compile_fail(too_few MAC_FAIL_TOO_FEW
+   "too few arguments passed to the method")
+psio_method_arg_convert_compile_fail(too_many MAC_FAIL_TOO_MANY
+   "too many arguments passed to the method")
+
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.
 psio_add_test(psio_mutable_view_tests mutable_view_tests.cpp)

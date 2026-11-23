@@ -519,8 +519,7 @@ using Args = psio::reflect<Token>::method_arg_tuple<0>;
 auto b = psio::to_pssz_as<Args>(std::forward_as_tuple(toView, amount, memo));
 auto n = psio::pssz_size_as<Args>(std::forward_as_tuple(toView, amount, memo));
 
-// The same from the arguments themselves; each may be the parameter's type, a
-// source of it (a view, a std::string_view, ...) or a value that converts to it:
+// The same from the arguments themselves, as a call would be written:
 auto c = psio::method_args_to_pssz<Token, 0>(toView, 5, "memo");
 psio::method_args_append_pssz<Token, 0>(out, toView, 5, "memo");
 ```
@@ -529,6 +528,26 @@ The source must be a source of exactly that type; anything else is a
 compile error. `psio::encode_method_result<T, I>(value, out)` takes a source
 of the result as well, so a method that returns a `psio::pssz_view<X>` has
 its result written as an `X`.
+
+**Arguments are taken as an ordinary C++ call takes them.**
+`method_args_to_pssz<T, I>(args...)` accepts what `obj.method(args...)`
+accepts, and nothing else:
+
+| The argument | Is |
+|--------------|----|
+| already a source of the parameter (`psio::wire_type_t<Argument>` is the parameter's wire type): the value, a view of it, a `std::string_view` or literal for a string, a span for a list, `std::cref(x)` | written as it stands, by reference. Nothing is copied, converted or unpacked |
+| anything else | converted to the parameter's type **implicitly** (copy-initialization, `P p = std::forward<A>(arg);`), then written |
+
+Explicit constructors and explicit conversion operators are not used, as in
+a call: for `struct Quantity { Quantity(std::uint64_t); explicit Quantity(double); }`
+the argument `5` is the `std::uint64_t` constructor, and a type that only
+converts explicitly is a compile error (convert it at the call). Arguments
+are forwarding references, so a conversion operator that is not `const`
+(`operator AccountNumber()` of a non-const object) or is `&&`-qualified is
+used exactly when the call would use it. The number of arguments is checked
+first ("too few" / "too many arguments passed to the method").
+`psio::method_arguments<T, I, Args...>` is the same test as a concept, for
+constraining a proxy's call operator.
 
 ## Sinks and sources
 
@@ -594,7 +613,8 @@ struct Token {
 | `psio::invoke_method_pssz<T, I>(obj, bytes)` | validates, then calls the method; returns what it returns |
 | `psio::invoke_method_pssz<T, I>(obj, psio::trusted{bytes})` | calls without validating |
 | `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result (`psio::encode_method_result`, which honours `returns(...)`); a `codec_status` |
-| `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, none copied ([above](#encoding-a-source-as-a-named-type)) |
+| `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, converted implicitly as a call converts them, none copied ([above](#encoding-a-source-as-a-named-type)) |
+| `psio::method_arguments<T, I, Args...>` | concept: `args...` can be passed to the method |
 | `reflect<T>::invoke_method<I>(obj, tuple)` | unchanged: calls with a tuple of arguments as declared (`method_params<I>`) |
 
 How a parameter is handed to the method is decided by its declared type:
