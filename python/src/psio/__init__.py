@@ -27,23 +27,23 @@ from .annotations import (  # noqa: F401
     TimePointSec, TimePointUs, alt, array, at, bitlist, bitvector, bounded, boxed, char, custom, duration, element,
     exact, f32, f64, i8, i16, i32, i64, i128, identity, ijson_number, ijson_string, json_number, json_string,
     keys, length, max, min, monotonic, name, nested, sorted, time_point, u8, u16, u32, u64, u128, u256, unique,
-    unique_keys, utf8, values,
+    unique_keys, untagged, utf8, values, JsonValue,
 )
 from .api import (  # noqa: F401
     from_ijson, from_json, from_key, from_pssz, from_pssz_trusted, json_to_pssz, key_prefix, key_size,
     pssz_size, pssz_to_json, pssz_view, to_ijson, to_json, to_key, to_pssz, validate_ijson, validate_json,
     validate_key, validate_pssz,
 )
-from .evolution import evolves_from  # noqa: F401
+from .evolution import Compatibility, equivalent, evolves_from  # noqa: F401
 from .errors import DecodeError, EncodeError, InternalError, JsonError, PsioError, SchemaError  # noqa: F401
 from .interface import Interface, Method, interface, interface_of, method  # noqa: F401
 from .ir import IR_VERSION  # noqa: F401
 from ._names import is_hash_name, method_to_number, name_to_number, number_to_method, number_to_name  # noqa: F401
-from .schema import Handler, Schema, SchemaMethod, SchemaType, Status, key_prefix_upper_bound, trusted  # noqa: F401
+from .schema import Handler, Schema, SchemaInterface, SchemaMethod, SchemaType, Status, key_prefix_upper_bound, trusted  # noqa: F401
 from ._time import time_point_from_iso, time_point_to_iso  # noqa: F401
 from .typed import arguments, codec, from_text, invariant, record, schema_of, to_text, transparent  # noqa: F401
 from .typed import enum_type as enum  # noqa: F401
-from .values import NaN, Bits, Some, Variant  # noqa: F401
+from .values import JsonNumber, NaN, Bits, Some, Variant  # noqa: F401
 from .view import ListView, RecordView, TupleView, VariantView, View  # noqa: F401
 
 __version__ = "0.1.0"
@@ -62,5 +62,5 @@ __all__ = [
     "time_point_to_iso", "to_ijson", "to_json", "to_key", "to_pssz", "to_text", "transparent", "trusted", "u128",
     "u16", "u256", "u32", "u64", "u8", "utf8", "validate_ijson", "validate_json", "validate_key", "validate_pssz",
     "sorted", "unique", "unique_keys", "is_hash_name", "method_to_number", "name_to_number", "number_to_method",
-    "number_to_name", "evolves_from",
+    "number_to_name", "untagged", "JsonValue", "JsonNumber", "evolves_from", "equivalent", "Compatibility", "SchemaInterface",
 ]

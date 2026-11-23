@@ -26,7 +26,7 @@ from .values import Variant
 __all__ = [
     "IR_VERSION", "normalize_type", "normalize_schema", "check_ir_version", "META_SCHEMA",
     "U8", "U16", "U32", "U64", "I8", "I16", "I32", "I64", "U128", "I128", "U256", "F32", "F64",
-    "BOOL", "CHAR", "STRING", "RAW_STRING", "BYTES", "int_type", "list_of", "option_of", "nested_of",
+    "BOOL", "CHAR", "STRING", "RAW_STRING", "BYTES", "JSON", "int_type", "list_of", "option_of", "nested_of",
     "array_of", "bounded_list_of", "tuple_of", "custom_of", "type_ref", "member", "attribute",
 ]
 
@@ -286,6 +286,8 @@ STRING = custom_of(list_of(U8), "utf8")
 RAW_STRING = custom_of(list_of(U8), "string")
 #: A byte list (``bytes``; hex in text).
 BYTES = custom_of(list_of(U8), "hex")
+#: Any JSON value (C++ ``psio::json_value``): a UTF-8 string holding its JSON text; inline in text.
+JSON = custom_of(STRING, "json")
 
 
 def _object(**members: Any) -> IrType:

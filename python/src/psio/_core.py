@@ -65,7 +65,7 @@ INVARIANT = "pssz IR: invariant violated"
 
 def reserved_custom_id(id: str) -> bool:
     """Ids a handler cannot be registered for."""
-    return id == "box" or id in WIRE_CUSTOM_IDS or reserved_time_id(id)
+    return id in ("box", "json") or id in WIRE_CUSTOM_IDS or reserved_time_id(id)
 
 
 def _schema(message: str) -> NoReturn:
@@ -174,7 +174,7 @@ class Node:
         "inner", "id", "boxed", "handler", "count", "bounded", "exact", "members", "stable", "cap", "time",
         "time_digits", "enumerators", "by_name", "layout_memo", "empty_memo", "width", "bound_memo",
         "fixed_payload_memo", "fields", "enc", "dec", "bind", "extra", "widths", "positions", "tuple", "max_fields",
-        "order",
+        "order", "untagged", "kinds_memo", "json",
     )
 
     def __init__(self) -> None:
@@ -188,6 +188,8 @@ class Node:
         self.text_child: Node = None
         self._wire_child: Optional[Tuple[Node, bool]] = None
         self.raw = False
+        #: A UTF-8 string that holds the text of one JSON value (the Custom id "json").
+        self.json = False
         self.assoc: Optional[str] = None
         self.opaque = False
         self.key_nested: Optional[bool] = None
@@ -205,6 +207,10 @@ class Node:
         self.max_fields: Optional[int] = None
         #: A record that is an argument list: "named" | "positional" (the ``tuple`` attribute); else None.
         self.tuple: Optional[str] = None
+        #: A variant with the attribute ``untagged``: in text the bare value of its alternative.
+        self.untagged = False
+        #: The JSON kinds the type is written as (``_json.json_kinds``), once computed.
+        self.kinds_memo: Optional[int] = None
         self.order: Any = None
         self.time: Optional[TimeKind] = None
         self.time_digits = -1
@@ -395,6 +401,9 @@ def _check_attributes(values: Sequence[Mapping[str, Any]], site: str, caps: bool
             continue
         if site == "variant_member" and name == "ijsonName" and value is not None:
             continue
+        # An untagged variant: the same bytes as any variant; in text the bare value of the alternative.
+        if site == "variant" and name == "untagged":
+            continue
         _schema("pssz IR: unsupported schema constraint or annotation")
 
 
@@ -522,6 +531,13 @@ def member_bound_admits(bound: LengthBound, node: Node, value: Any) -> bool:
     # the bytes exist (`nested_bound_admits`), not on the inner value.
     if node.kind == "nested":
         return True
+    if node.json:
+        # (the bound counts the bytes of the value's JSON text)
+        from ._json import json_value_text
+        try:
+            value = json_value_text(value)
+        except PsioError:
+            return True
     if type(value) is str:
         try:
             return bound.admits(len(value) if value.isascii() else len(value.encode("utf-8")))
@@ -691,6 +707,11 @@ class Codec:
                 node = self.nodes[key]
                 if node.assoc:
                     self._has_key(node.key_ref, [])
+                # A typed declaration of an untagged union: its alternatives are told apart by JSON
+                # kind (a schema that arrives is refused where a value of the variant is read).
+                if node.untagged and node.bind is not None:
+                    from ._json import check_untagged
+                    check_untagged(self, node)
             return out
         except RecursionError:
             for key in added:
@@ -804,8 +825,10 @@ class Codec:
                     _schema(RECORD_FIELDS)
                 form = _find_attribute(v["attributes"], "tuple")
                 node.tuple = form["value"] if form is not None else None
-            elif not v["members"] or len(v["members"]) > 256:
-                _schema("pssz IR: invalid variant schema")
+            else:
+                if not v["members"] or len(v["members"]) > 256:
+                    _schema("pssz IR: invalid variant schema")
+                node.untagged = _find_attribute(v["attributes"], "untagged") is not None
             seen = set()
             for m in v["members"]:
                 if m["name"] in seen:
@@ -848,6 +871,7 @@ class Codec:
             node.signed = ticks.value["isSigned"]
             node.size = bits // 8
             node.time = time
+            node.extra["time_id"] = id
             node.time_digits = fraction_digits(time.num, time.den) if time.point else -1
             return
         if reserved_time_id(id):
@@ -870,6 +894,18 @@ class Codec:
                 node.bounded = True
                 node.count = lst.value["maxCount"]
             node.text_child = self._build(lst.value["type"], added, d)
+            return
+        if id == "json":
+            # Any JSON value: a UTF-8 string on the wire, holding the value's compact JSON text; its
+            # text form is that value, inline (docs/json.md "Any JSON value").
+            text = self._resolve(v["type"])["value"]
+            if text.type != "Custom" or text.value["id"] != "utf8":
+                _schema("pssz IR: a json value must sit directly on a UTF-8 string")
+            string = self._build(v["type"], added, d)
+            node.kind = "string"
+            node.raw = False
+            node.json = True
+            node.text_child = string.text_child
             return
         if id not in WIRE_CUSTOM_IDS:
             # "box" or a custom type: the inner type on the wire.
@@ -1671,6 +1707,13 @@ class Codec:
             if check is not None:
                 check(len(data), _value)
             return data
+        if node.json:
+            # Any JSON value: the string holds its compact JSON text.
+            from ._json import json_value_text
+
+            def enc_json(value: Any, n: int) -> bytes:
+                return enc(json_value_text(value), n)
+            return enc_json
         return enc
 
     def _enc_hex(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
@@ -2249,6 +2292,13 @@ class Codec:
                 return data[start:end].decode("utf-8")
             except UnicodeDecodeError:
                 return _bytes(utf8_reason(data[start:end]))
+        if node.json:
+            # Any JSON value: the string holds one JSON value (any well-formed text; a writer's is compact).
+            from ._json import json_value_from_text
+
+            def dec_json(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
+                return json_value_from_text(dec(data, start, end, n, ctx))
+            return dec_json
         return dec
 
     def _dec_hex(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:

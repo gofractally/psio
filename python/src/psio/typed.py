@@ -174,6 +174,8 @@ def key_of(shape: Shape, depth: int = 0) -> str:
         out = k
     elif k == "bytes":
         out = f"{s.id}:{s.bound}:{s.n}"
+    elif k == "json":
+        out = "json"
     elif k == "bits":
         out = f"{s.id}:{s.n}"
     elif k == "option":
@@ -195,8 +197,8 @@ def key_of(shape: Shape, depth: int = 0) -> str:
     elif k == "annotated":
         out = f"Y({_json_text(s.owner)})"
     elif k == "variant":
-        out = "V(" + ",".join(f"{_json_text(a.name)}{_json_text(a.ijson_name or '')}{key_of(a.type, d)}"
-                              for a in s.alts) + ")"
+        out = ("U(" if s.untagged else "V(") + ",".join(
+            f"{_json_text(a.name)}{_json_text(a.ijson_name or '')}{key_of(a.type, d)}" for a in s.alts) + ")"
     elif k == "record":
         out = f"R({_json_text(s.name)})"
     elif k == "args":
@@ -367,6 +369,8 @@ _CHAR.py = int
 _F32.py = _F64.py = float
 _UTF8.py = str
 _RAW.py = _BYTES.py = bytes
+#: Any JSON value (psio.JsonValue): the Custom id "json" over a UTF-8 string.
+_JSON = Shape("json")
 
 _CLASS_SHAPES: Dict[Any, Shape] = {}
 _NEWTYPES: Dict[int, Shape] = {}
@@ -545,6 +549,8 @@ def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
         if out.bind is not None:
             out.ident = base.__name__
         return out
+    if _find(markers, A.JsonValueSpec) is not None:
+        return _JSON
     if base is int:
         spec = _find(markers, A.IntSpec)
         if spec is not None:
@@ -635,10 +641,13 @@ def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
         return out
     if origin is Union or (hasattr(types, "UnionType") and origin is types.UnionType):
         members = [a for a in args if a is not NoneType]
+        untagged = _find(markers, A.UntaggedSpec) is not None
         if len(members) != len(args):
-            inner = shape_of(members[0]) if len(members) == 1 else _variant(members)
+            if untagged and len(members) == 1:
+                _fail("psio: untagged marks a union of two or more alternatives")
+            inner = shape_of(members[0]) if len(members) == 1 else _variant(members, untagged)
             return Shape("option", inner=inner, py=inner.py)
-        return _variant(members)
+        return _variant(members, untagged)
     if origin is Some:
         inner = shape_of(args[0])
         if inner.k != "option":
@@ -664,7 +673,7 @@ def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
     return _fail(f"psio: no wire type for {hint!r}")
 
 
-def _variant(members: Sequence[Any]) -> Shape:
+def _variant(members: Sequence[Any], untagged: bool = False) -> Shape:
     """A union of two or more alternatives: a variant."""
     alts: List[AltShape] = []
     for index, m in enumerate(members):
@@ -675,7 +684,7 @@ def _variant(members: Sequence[Any]) -> Shape:
         alts.append(AltShape(name, shape, spec.ijson_name if spec is not None else None))
     if len({a.name for a in alts}) != len(alts):
         _fail("psio: the alternatives of a union need distinct names: Annotated[T, psio.alt(\"name\")]")
-    out = Shape("variant", alts=alts)
+    out = Shape("variant", alts=alts, untagged=untagged)
     out.bind = _variant_binding(alts)
     return out
 
@@ -1306,6 +1315,9 @@ class Builder:
             return _node("Custom", {"type": _int_ir(8, False), "id": "char"})
         if k == "bytes":
             return _node("Custom", {"type": self._byte_container(s.bound, s.n), "id": s.id})
+        if k == "json":
+            return _node("Custom", {"type": _node("Custom", {"type": self._byte_container("list", 0), "id": "utf8"}),
+                                    "id": "json"})
         if k == "bits":
             return _node("Custom", {
                 "type": _node("Array", {"type": _int_ir(1, False), "len": s.n}) if s.id == "bitvector"
@@ -1322,7 +1334,7 @@ class Builder:
         if k == "tuple":
             return _node("Tuple", {"members": [self.insert(i) for i in s.items]})
         if k == "variant":
-            return self._variant(s.alts, lambda alt, i: self.insert(alt.type))
+            return self._variant(s.alts, lambda alt, i: self.insert(alt.type), s.untagged)
         if k == "record":
             members = [self._member(f) for f in _fields_of(s)]
             attributes = []
@@ -1478,15 +1490,16 @@ class Builder:
                 if any(alt.name == str(i) for alt in s.alts):
                     return None
                 return at.get(str(i))
-            return self._variant(s.alts, lambda alt, i: self._annotated(alt.type, key_for(i)))
+            return self._variant(s.alts, lambda alt, i: self._annotated(alt.type, key_for(i)), s.untagged)
         return self.insert(s)
 
-    def _variant(self, alts: Sequence[AltShape], type_of: Callable[[AltShape, int], Dict[str, Any]]) -> Dict[str, Any]:
+    def _variant(self, alts: Sequence[AltShape], type_of: Callable[[AltShape, int], Dict[str, Any]],
+                 untagged: bool = False) -> Dict[str, Any]:
         return _node("Variant", {
             "members": [{"name": alt.name, "type": type_of(alt, i),
                          "attributes": [] if alt.ijson_name is None else [_attribute("ijsonName", alt.ijson_name)]}
                         for i, alt in enumerate(alts)],
-            "attributes": []})
+            "attributes": [_attribute("untagged", "")] if untagged else []})
 
     def _member(self, field: FieldShape) -> Dict[str, Any]:
         """``build_record_member`` / ``apply_member_annotations``."""

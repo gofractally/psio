@@ -292,8 +292,7 @@ refused(lambda: psio.from_pssz(AccountV1, psio.to_pssz(v2_some), reject_unknown=
 ```
 
 Never insert, remove, reorder or retype a member, and treat bounds as frozen.
-(Python has no `pssz_evolves_from` check: prove a revision with the C++ or
-Rust one, or with assertions like the ones above.)
+(`psio.evolves_from(Old, New)` proves a revision: step 9b.)
 
 ### Step 5 — Raw bytes or UTF-8 text
 
@@ -358,6 +357,67 @@ assert psio.to_ijson(t) == '{"supply":"9007199254740993","holders":9007199254740
 assert psio.to_ijson(Totals(5, 5, 4)) == '{"supply":"5","holders":5,"decimals":4}'
 # A reader accepts exactly the forced form.
 assert not psio.validate_ijson(Totals, '{"supply":5,"holders":5,"decimals":4}')
+# A member that is not Optional must be written: the error names it and its record.
+assert refused(lambda: psio.from_json(Totals, '{"supply":"5","holders":5}')).reason == \
+    'json: missing required member "decimals" of Totals'
+```
+
+**Untagged unions.** A union is written with its alternative named
+(`{"string":"x"}` under `ijson`, `[0,"x"]` under `json`).
+`Annotated[A | B, psio.untagged]` (C++ `psio_is_untagged`, the Variant
+attribute `untagged` in the Schema IR) is written as the bare value of its
+alternative, the same in both formats, and a reader picks the alternative by
+the *kind* of JSON value it finds — null, boolean, number, string, array,
+object — with no trial and no backtracking. The kinds two alternatives are
+written as must not overlap (the table of `docs/json.md`, "Untagged
+variants": a 64-bit integer may be a string, bytes may be a string, a map
+may be an array): a declaration whose do is a `SchemaError`. The bytes are
+those of any union.
+
+```python
+from typing import Union
+
+Extra = Annotated[Union[str, Annotated[list[str], psio.alt("list")]], psio.untagged]
+
+assert psio.to_ijson("s", Extra) == '"s"' and psio.to_json(["a", "b"], Extra) == '["a","b"]'
+assert psio.from_ijson(Extra, '["a"]') == ["a"]
+assert refused(lambda: psio.from_ijson(Extra, "7")).reason == \
+    "json: the value is none of the untagged variant's alternatives"
+assert psio.to_pssz(["a"], Extra) == psio.to_pssz(["a"], Union[str, Annotated[list[str], psio.alt("list")]])
+# u64 may be written as a string in ijson: it cannot stand beside a string.
+assert refused(lambda: psio.codec(Annotated[Union[u64, str], psio.untagged])).kind == "schema"
+```
+
+**Any JSON value.** `psio.JsonValue` (C++ `psio::json_value`) is a member
+whose shape is not known in advance: `None`, a `bool`, a number, a `str`, a
+`list`, or a `dict` with `str` keys, in the order written. In text it is that
+value, inline; in PSSZ it is a UTF-8 string holding its compact JSON text; in
+the Schema IR it is `Custom{Custom{List<u8>, "utf8"}, "json"}` (`ir.JSON`),
+and `json` is a reserved id: no custom type and no handler may take it.
+Numbers keep their text: a plain integer is an `int` (exact at any size), any
+other number is a `psio.JsonNumber` — a `float` that remembers its token, so
+`1.50` and `1e3` are written back unchanged. The formats differ in one thing
+only: under `ijson` a string holding a Unicode noncharacter is neither read
+nor written.
+
+```python
+@dataclass
+class PrettyAction:
+    service: str
+    data: psio.JsonValue
+
+action = psio.from_ijson(PrettyAction, '{"service":"tokens","data":{"amount":1.50,"memo":[true,null]}}')
+assert action.data == {"amount": 1.5, "memo": [True, None]} and action.data["amount"].text == "1.50"
+assert psio.to_ijson(action) == '{"service":"tokens","data":{"amount":1.50,"memo":[true,null]}}'
+# PSSZ: the bytes of a record whose member is the string '{"amount":1.50,"memo":[true,null]}'.
+@dataclass
+class PrettyActionText:
+    service: str
+    data: str
+
+assert psio.to_pssz(action) == psio.to_pssz(PrettyActionText("tokens", '{"amount":1.50,"memo":[true,null]}'))
+# Bytes that are not one JSON value are not a value of the type.
+assert not psio.validate_pssz(PrettyAction, psio.to_pssz(PrettyActionText("tokens", "{not json")))
 ```
 
 ### Step 7 — Keys
@@ -752,18 +812,51 @@ class CappedV2:
 
 assert psio.evolves_from(Capped, CappedV2)
 status = psio.evolves_from(CappedV2, Capped)
-assert not status and "removed" in status.reason
+assert not status and (status.code, status.path) == ("fields-removed", "(root)") and "removed" in status.reason
 assert psio.evolves_from(AccountV1, AccountV2)                         # step 4's revision
 assert not psio.evolves_from(Account2, AccountCountOnly)               # a bound dropped: the widths change
 # Two schemas, no classes: the same check over the types of two Schema IRs.
 old_ir = psio.Schema.from_pssz(psio.schema_of(Capped).to_pssz())
 new_ir = psio.Schema.from_pssz(psio.schema_of(CappedV2).to_pssz())
 assert psio.evolves_from(old_ir.type("Capped"), new_ir.type("CappedV2"))
+
+# mode="contract" (the default) also compares what a reader of the text sees; mode="wire" the bytes only.
+@psio.record(max_fields=4, max_dynamic_data=64)
+@dataclass
+class CappedRenamed:
+    a: u32
+    count: Optional[u32] = None
+
+status = psio.evolves_from(Capped, CappedRenamed)
+assert (status.code, status.path) == ("field-renamed", "(root)")
+assert psio.evolves_from(Capped, CappedRenamed, mode="wire")
+# equivalent: the same type (the same values, bytes and permitted revisions), in both directions.
+assert psio.equivalent(Capped, CappedRenamed, mode="wire")
+assert psio.equivalent(Capped, CappedV2, mode="wire").code == "field-count-changed"
 ```
 
-The result is a `Status`: truthy, or `reason` names the first rule broken and
-where. Member names are not compared (the wire does not carry them), and two
-Schema IRs do not record `sorted` / `unique`.
+The result is a `psio.Compatibility` (a `Status`): truthy, or the first rule
+broken as a stable `code` (the table of
+[`conformance/evolution-vectors.md`](../conformance/evolution-vectors.md),
+shared with C++ `psio::pssz_ir::evolves_from` / `equivalent`, Rust and
+TypeScript), a `reason` for a person and the `path` from the root (`.field`,
+`[]`, `[].0` / `[].1` for a map's key and value, `?`, `<Alt>`, `(nested)`;
+`(root)` for the root itself). `mode="contract"`, the default, compares what
+C++ `compare::contract` does: the bytes, and the names of members and
+alternatives, custom ids, enums (a revision may add enumerators), the text
+shape of a record, `json_number` / `json_string`, an alternative's I-JSON
+name and whether a variant is `untagged`. `mode="wire"` compares the bytes
+and which bytes are values, nothing else. Two Schema IRs do not record
+`sorted` / `unique` / `unique_keys`; between two Python declarations a
+difference in them is reported with the Python-only code `order-changed`.
+
+The same two functions compare two methods (`psio.interface_of(C)[name]`,
+`schema.method(interface, name)`: the argument list, path `(args)…`, and the
+result, `(result)…`, present on both sides or on neither), two interfaces
+(`psio.interface_of(C)`, `schema.interface(name)`: every function and listed
+type of the old one must exist in the new one, by name —
+`transfer(args).amount`, `type:Row`) and two whole `psio.Schema` values
+(every interface, by name: `token/transfer(args)`).
 
 ### Step 9c — Names as numbers
 
@@ -853,6 +946,8 @@ change, encode). The short name is the safe one — `from_pssz` validates.
 | `Optional[T]`, `T \| None` | optional | an optional of an optional: `Optional[psio.Some[Optional[T]]]` |
 | `dict[K, V]`, `set[T]`, `frozenset[T]` | map, set | written in key order whatever order the container has; `K` / `T` must be hashable (`@dataclass(frozen=True)`) |
 | `A \| B` | variant | alternatives are told apart by their class; name them with `Annotated[A, psio.alt("a")]`; alternatives that share a class are `psio.Variant(name, value)` |
+| `Annotated[A \| B, psio.untagged]` | variant (attribute `untagged`) | in text the bare value of the alternative, read by its JSON kind; the alternatives' kinds must not overlap |
+| `psio.JsonValue` | UTF-8 string holding JSON text (custom id `json`) | any JSON value, inline in text; numbers keep their text (`int`, `psio.JsonNumber`) |
 | `@dataclass`, `NamedTuple`, `TypedDict`, an annotated class under `@psio.record` | record | `@psio.record(...)` for the cap, a fixed layout, another name |
 | `@psio.enum(u8) class Color(Enum)` | the integer | a member's name in text; `other=True` keeps undeclared values as `int` |
 | `NewType("Id", u64)`, `@psio.transparent` class | its member | |
@@ -915,7 +1010,7 @@ For a format `F` in `pssz`, `key`, `json`, `ijson` (the names of
 | `psio.key_prefix(T, elements)`, `psio.key_prefix_upper_bound(prefix)` | prefix scans |
 | `psio.json_to_pssz(T, text)`, `psio.pssz_to_json(T, data)` | text ↔ bytes |
 | `psio.schema_of(T, ...)` | the Schema IR (`.ir`, `.to_json()`, `.to_pssz()`, `.validate()`); of an `@psio.interface` class, its `Interface` |
-| `psio.evolves_from(Old, New)` | the schema-upgrade check: a `Status` |
+| `psio.evolves_from(Old, New, mode="contract")`, `psio.equivalent(A, B, mode="contract")` | the schema-upgrade check and the same-type check over two types, methods, interfaces or schemas: a `Compatibility` (`ok`, `code`, `reason`, `path`); `mode="wire"` compares the bytes only |
 | `psio.interface_of(C)`, `schema.method(interface, name)` | methods: `args`, `result`, `named`, `max_fields`, `max_dynamic_data` |
 | `psio.method_to_number(s)`, `number_to_method(n)`, `is_hash_name(n)`, `name_to_number(s)`, `number_to_name(n)` | the name coders |
 | `psio.codec(T, width=…)` | the compiled codec: every operation as a method, plus `width`, `inferred_bound` (what the width is chosen from), `max_encoded_size` (the largest encoding), `max_dynamic_data`, `fixed_size` |
@@ -924,7 +1019,11 @@ For a format `F` in `pssz`, `key`, `json`, `ijson` (the names of
 
 A tool that holds a Schema IR (fetched as bytes or text) and no Python
 classes uses the same codec on plain values: records are `dict`, variants
-`psio.Variant(name, value)`, enums and time values `int`.
+`psio.Variant(name, value)`, enums and time values `int`, a `json` node the
+JSON value it holds. A Variant with the attribute `untagged` is written and
+read as the bare alternative (a schema whose alternatives' JSON kinds overlap
+is refused where a value of it is read), and the reader names a missing
+member (`json: missing required member "owner"`).
 
 ```python
 schema = psio.Schema.from_pssz(psio.schema_of(AccountV2).to_pssz())   # as it would arrive
@@ -1015,7 +1114,9 @@ MYPYPATH=src python -m mypy --strict tests/typing_sample.py  # user code against
 7035 vectors), `json-vectors.json`, `time-key-vectors.json` (56 types, 1164
 rows), `schema-json-vectors.json` and `interface-vectors.json` (6 methods, 55
 rows), and the pssz / key / json rows of `cpp-golden.json`, on the
-schema-driven path and on the typed path, and every row of
+schema-driven path and on the typed path, every verdict of
+`evolution-vectors.json` (100 type rows and 12 interface rows: `evolves_from`
+and `equivalent`, `wire` and `contract`, with code and path), and every row of
 `name-vectors.json` (1538 names, 617 numbers), with exact counts asserted.
 `psio.schema_of` of the Python declarations of every fixture type — and
 `psio.interface_of(Token).schema(arguments=True)` for the interface fixture —

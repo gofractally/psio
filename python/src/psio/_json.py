@@ -13,7 +13,9 @@ json; the legacy "0x" string is read).  An Enum is its enumerator's name when
 the value is listed and its number otherwise.  A non-finite float has no
 text.  A raw string holding bytes that are not UTF-8 has no text.  A Custom
 id that is not part of the binary form is its handler's text as one JSON
-string, or its inner type's text without one.
+string, or its inner type's text without one.  The id ``json`` is any JSON
+value, inline; a Variant with the attribute ``untagged`` is the bare value of
+its alternative, which a reader picks by the kind of JSON value it finds.
 
 This module is internal.
 """
@@ -26,8 +28,8 @@ from typing import NoReturn, Any, Callable, List, Optional, Tuple
 
 from ._core import MAX_DEPTH, NO_HANDLER, Codec, Ctx, Handler, Node, member_bound_admits, strip
 from ._time import text_of, tick_type_admits, ticks_of
-from .errors import EncodeError, JsonError, PsioError
-from .values import NaN, Some, Variant
+from .errors import DecodeError, EncodeError, JsonError, PsioError, SchemaError
+from .values import JsonNumber, NaN, Some, Variant
 
 SAFE_INTEGER = (1 << 53) - 1
 U64_MASK = (1 << 64) - 1
@@ -470,6 +472,176 @@ class Cursor:
             self.fail("json: trailing bytes after value")
 
 
+# ── Any JSON value (the Custom id "json") ───────────────────────────────────
+
+_PLAIN_INTEGER = re.compile(r"(?:0|-?[1-9][0-9]*)\Z")
+_NUMBER_TEXT = re.compile(_NUMBER.pattern + r"\Z")
+
+
+def read_json_value(c: Cursor) -> Any:
+    """The JSON value at the cursor, of any shape: ``None``, ``bool``, ``int``, :class:`JsonNumber`,
+    ``str``, ``list``, ``dict``.  A repeated key keeps its last value, at the position of the first."""
+    kind = c.kind()
+    if kind == "string":
+        return c.string()[0]
+    if kind == "number":
+        token = c.number()
+        # A plain integer is exact as an int; any other token is kept as written.
+        return int(token) if _PLAIN_INTEGER.match(token) is not None else JsonNumber(token)
+    if kind == "object":
+        members: dict = {}
+        c.begin_object()
+        while True:
+            key = c.next_field()
+            if key is None:
+                return members
+            members[key] = read_json_value(c)
+    if kind == "array":
+        items: List[Any] = []
+        c.begin_array()
+        while c.next_element():
+            items.append(read_json_value(c))
+        return items
+    if kind == "boolean":
+        return c.boolean()
+    c.null()
+    return None
+
+
+def json_value_from_text(text: str) -> Any:
+    """The JSON value a UTF-8 string of a "json" node holds: any well-formed JSON text."""
+    try:
+        cursor = Cursor(text, False)
+        value = read_json_value(cursor)
+        cursor.finish()
+    except (JsonError, RecursionError):
+        raise DecodeError("pssz IR: the text of a json value is not JSON") from None
+    return value
+
+
+def _json_value(value: Any, nonchar: bool, out: List[str], depth: int) -> None:
+    if value is None:
+        out.append("null")
+    elif value is True:
+        out.append("true")
+    elif value is False:
+        out.append("false")
+    elif type(value) is str:
+        out.append(quote(value, nonchar))
+    elif type(value) is int:
+        out.append(str(value))
+    elif type(value) is JsonNumber:
+        if _NUMBER_TEXT.match(value.text) is None:
+            _fail("json: a json_value number is not a JSON number")
+        out.append(value.text)
+    elif isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            _fail("json: a json_value number is not a JSON number")
+        out.append(format_float(float(value), False))
+    elif isinstance(value, dict):
+        if depth >= MAX_DEPTH:
+            _fail("json: max depth exceeded")
+        out.append("{")
+        first = True
+        for key, item in value.items():
+            if type(key) is not str:
+                _fail("json: the keys of a JSON object are strings")
+            out.append(("" if first else ",") + quote(key, nonchar) + ":")
+            first = False
+            _json_value(item, nonchar, out, depth + 1)
+        out.append("}")
+    elif isinstance(value, (list, tuple)):
+        if depth >= MAX_DEPTH:
+            _fail("json: max depth exceeded")
+        out.append("[")
+        for i, item in enumerate(value):
+            if i:
+                out.append(",")
+            _json_value(item, nonchar, out, depth + 1)
+        out.append("]")
+    elif isinstance(value, int) and not isinstance(value, bool):
+        out.append(str(int(value)))
+    else:
+        _fail(f"json: {type(value).__name__} is not a JSON value (None, bool, int, float, str, list, dict)")
+
+
+def json_value_text(value: Any, nonchar: bool = False) -> str:
+    """The compact JSON text of a JSON value (what a "json" node holds in PSSZ).  ``nonchar``: the
+    I-JSON string rule."""
+    out: List[str] = []
+    try:
+        _json_value(value, nonchar, out, 0)
+    except RecursionError:
+        _fail("json: max depth exceeded")
+    return "".join(out)
+
+
+# ── Untagged variants: the kinds of JSON value a type is written as ─────────
+
+K_NULL, K_BOOLEAN, K_NUMBER, K_STRING, K_ARRAY, K_OBJECT = 1, 2, 4, 8, 16, 32
+K_ANY = 63
+_KIND_BITS = {"null": K_NULL, "boolean": K_BOOLEAN, "number": K_NUMBER, "string": K_STRING, "array": K_ARRAY,
+              "object": K_OBJECT}
+UNTAGGED_AMBIGUOUS = "json: the alternatives of an untagged variant are not told apart by the kind of JSON value"
+
+
+def json_kinds(codec: Codec, node: Node, depth: int = 0) -> int:
+    """The kinds of JSON value ``node`` may be written as, in either format (docs/json.md "Untagged
+    variants"; C++ ``pssz_ir::json_kinds_of``)."""
+    if depth > MAX_DEPTH:
+        return K_ANY
+    k = node.kind
+    if k == "int":
+        if node.time is not None:
+            return K_STRING if node.time.point else K_NUMBER | K_STRING
+        if node.enumerators is not None:
+            return K_STRING | K_NUMBER
+        return K_NUMBER | K_STRING if node.bits >= 64 else K_NUMBER
+    if k in ("float", "char"):
+        return K_NUMBER
+    if k == "bool":
+        return K_BOOLEAN
+    if k == "string":
+        return K_ANY if node.json else K_STRING
+    if k == "hex":
+        return K_ARRAY | K_STRING
+    if k in ("list", "array"):
+        return K_OBJECT | K_ARRAY if node.assoc == "map" else K_ARRAY
+    if k == "tuple":
+        return K_ARRAY
+    if k == "record":
+        return K_OBJECT | K_ARRAY if node.tuple is not None else K_OBJECT
+    if k == "option":
+        return K_NULL | json_kinds(codec, node.text_child, depth + 1)
+    if k == "variant":
+        if not node.untagged:
+            return K_ARRAY | K_OBJECT
+        kinds = 0
+        for m in node.members:
+            kinds |= json_kinds(codec, m.text, depth + 1)
+        return kinds
+    if k == "nested":
+        return json_kinds(codec, node.text_child, depth + 1)
+    if k == "custom":
+        handler = None if node.boxed else node.handler
+        if handler is not None and (handler.to_text is not None or handler.from_text is not None):
+            return K_STRING
+        return json_kinds(codec, node.inner, depth + 1) if node.inner is not None else K_ANY
+    return K_ANY
+
+
+def check_untagged(codec: Codec, node: Node) -> None:
+    """A typed declaration: the alternatives of an untagged union are told apart by their JSON kinds."""
+    seen = 0
+    for m in node.members:
+        kinds = json_kinds(codec, m.text)
+        if kinds & seen:
+            raise SchemaError("psio: the alternatives of an untagged variant must be told apart by the kind of "
+                              f'JSON value each is written as ("{m.name}" can be written as a kind an earlier '
+                              "alternative can)")
+        seen |= kinds
+
+
 # ── Types: reading ──────────────────────────────────────────────────────────
 
 _INTEGER = re.compile(r"(0|-?[1-9][0-9]*)\Z")
@@ -845,14 +1017,30 @@ class Reader:
             if v is missing:
                 # A missing Option member is empty; any other is an error.
                 if members[i].node.kind != "option":
-                    c.fail("json: missing required member")
+                    # (a typed record names itself too: C++ `json: missing required member "event" of Ev`)
+                    cls = node.bind.cls if node.bind is not None else None
+                    c.fail(f'json: missing required member "{members[i].name}"'
+                           + (f" of {cls.__name__}" if isinstance(cls, type) else ""))
                 slots[i] = None
         return self._made(node, slots)
 
     def _variant(self, node: Node) -> Any:
         c = self.c
         members = node.members
-        if self.ijson:
+        if node.untagged:
+            # The alternative whose values are written as the kind of value found.
+            bit = _KIND_BITS[c.kind()]
+            index = -1
+            for i, m in enumerate(members):
+                if not json_kinds(self.codec, m.text) & bit:
+                    continue
+                if index >= 0:
+                    c.fail(UNTAGGED_AMBIGUOUS)
+                index = i
+            if index < 0:
+                c.fail("json: the value is none of the untagged variant's alternatives")
+            payload = self.read(members[index].text, "natural", 0)
+        elif self.ijson:
             if c.kind() != "object":
                 c.fail("ijson: expected a variant object")
             c.begin_object()
@@ -909,6 +1097,9 @@ class Reader:
                 return self._enumeration(node, form)
             return self._integer(node.bits, node.signed, form)
         if k == "string":
+            if node.json:
+                # Any JSON value, inline.
+                return read_json_value(c)
             if c.kind() != "string":
                 c.fail("json: expected a string")
             text, _ = c.string()
@@ -1185,6 +1376,13 @@ class Writer:
                 return
             return self._integer(node.bits, node.signed, form, value, node.enumerators)
         if k == "string":
+            if node.json:
+                # Any JSON value: its compact text, inline.
+                text = json_value_text(value, self.ijson)
+                if not _bytes_admit(node.child, len(text) if text.isascii() else len(text.encode("utf-8"))):
+                    _fail("json: string exceeds its bound")
+                out.append(text)
+                return
             if type(value) is str:
                 container = node.child
                 if container.bounded or container.kind == "array":
@@ -1317,7 +1515,10 @@ class Writer:
         if k == "variant":
             index, payload = self.codec.variant_splitter(node)(value)
             m = node.members[index]
-            if self.ijson:
+            if node.untagged:
+                # Untagged: the bare value of the alternative.
+                self.write(m.text, payload, "natural", n + 1)
+            elif self.ijson:
                 out.append("{" + quote(m.ijson_name, False) + ":")
                 self.write(m.text, payload, "natural", n + 1)
                 out.append("}")

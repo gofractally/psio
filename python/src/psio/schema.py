@@ -24,7 +24,7 @@ from ._time import reserved_time_id
 from .values import Variant
 from .errors import DecodeError, EncodeError, InternalError, JsonError, PsioError, SchemaError
 
-__all__ = ["Schema", "SchemaType", "SchemaMethod", "Status", "trusted", "Handler"]
+__all__ = ["Schema", "SchemaType", "SchemaMethod", "SchemaInterface", "Status", "trusted", "Handler"]
 
 Width = Union[str, int]
 
@@ -379,6 +379,8 @@ def _handler_map(handlers: Optional[Mapping[str, Any]]) -> Dict[str, Handler]:
     for id, handler in (handlers or {}).items():
         if reserved_time_id(id):
             raise SchemaError(f'pssz: custom id "{id}" is a built-in time presentation and takes no handler')
+        if id == "json":
+            raise SchemaError('pssz: custom id "json" is any JSON value, built in, and takes no handler')
         if reserved_custom_id(id):
             raise SchemaError(f'pssz: custom id "{id}" is part of the binary form and takes no handler')
         if isinstance(handler, Mapping):
@@ -479,6 +481,18 @@ class Schema:
                 if f.get("name") == name:
                     return self._method(interface, f, options)
         raise SchemaError(f'pssz: schema has no function "{name}" of an interface "{interface}"')
+
+    def interfaces(self) -> list:
+        """The names of the interfaces of this schema, in order."""
+        return [i.get("name", "") for i in self.ir["interfaces"]]
+
+    def interface(self, name: str) -> "SchemaInterface":
+        """An interface of this schema, by name: its functions (:meth:`SchemaInterface.method`) and listed
+        types; what ``psio.evolves_from`` / ``psio.equivalent`` compare two of."""
+        for i in self.ir["interfaces"]:
+            if i.get("name") == name:
+                return SchemaInterface(self, i)
+        raise SchemaError(f'pssz: schema has no interface "{name}"')
 
     def _method(self, interface: str, f: Mapping[str, Any], options: Mapping[str, Any],
                 result_order: Optional[Order] = None) -> SchemaMethod:
@@ -593,6 +607,34 @@ class SchemaMethod:
         self.max_dynamic_data = max_dynamic_data
         #: The most parameters the function will ever have (``maxFields``), or None.
         self.max_fields = max_fields
+
+
+class SchemaInterface:
+    """An interface recorded in a schema (``Schema.interface(name)``)."""
+
+    __slots__ = ("schema", "name", "type_names", "_ir")
+
+    def __init__(self, schema: Schema, ir: Mapping[str, Any]) -> None:
+        #: The schema it is an interface of.
+        self.schema = schema
+        self.name: str = ir.get("name", "")
+        #: The names of the types the interface lists.
+        self.type_names: list = list(ir.get("type_names", ()))
+        self._ir = ir
+
+    def names(self) -> list:
+        """The names of its functions, in declaration order."""
+        return [f.get("name", "") for f in self._ir.get("funcs", ())]
+
+    def method(self, name: str, **options: Any) -> SchemaMethod:
+        """A function of the interface: ``Schema.method(interface, name)``."""
+        for f in self._ir.get("funcs", ()):
+            if f.get("name") == name:
+                return self.schema._method(self.name, f, options)
+        raise SchemaError(f'pssz: interface "{self.name}" has no function "{name}"')
+
+    def __repr__(self) -> str:
+        return f"<psio.SchemaInterface {self.name}: {', '.join(self.names())}>"
 
 
 def key_prefix_upper_bound(prefix: Any) -> Optional[bytes]:

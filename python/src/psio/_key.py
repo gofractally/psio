@@ -13,7 +13,7 @@ from typing import NoReturn, Any, List, Optional, Sequence
 from ._core import (
     MAX_DEPTH, QUIET_NAN_32, QUIET_NAN_64, Codec, Ctx, Node, member_bound_admits, packed_byte_count, strip,
 )
-from .errors import DecodeError, EncodeError, SchemaError
+from .errors import DecodeError, EncodeError, PsioError, SchemaError
 from .values import Bits, NaN, Some, Variant
 
 MAP_ORDER = "key: map entries are not in strictly ascending key order"
@@ -123,6 +123,10 @@ def write_key(codec: Codec, node: Node, value: Any, out: List[bytes], n: int) ->
             _value("key: char byte value required")
         out.append(bytes((value,)))
     elif k == "string":
+        if node.json:
+            # (any JSON value: the key of the string that holds its text)
+            from ._json import json_value_text
+            value = json_value_text(value)
         if type(value) is str:
             try:
                 data = value.encode("utf-8")
@@ -393,9 +397,16 @@ def _read_key(codec: Codec, node: Node, src: _Source, n: int) -> Any:
         if node.raw:
             return data
         try:
-            return data.decode("utf-8")
+            text = data.decode("utf-8")
         except UnicodeDecodeError:
             return _bytes("key: string is not valid UTF-8")
+        if node.json:
+            from ._json import json_value_from_text
+            try:
+                return json_value_from_text(text)
+            except PsioError:
+                return _bytes("key: the text of a json value is not JSON")
+        return text
     if k == "hex":
         if node.child.kind == "array":
             return src.take(node.child.count)

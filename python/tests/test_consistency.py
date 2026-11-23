@@ -258,12 +258,13 @@ class Evolution(unittest.TestCase):
             status = psio.evolves_from(old, new)
             self.assertEqual(bool(status), ok, f"{old} -> {new}: {status.reason}")
             if why:
-                self.assertIn(why, status.reason)
+                self.assertEqual(status.code, why, status.reason)
             # The same over two fetched Schema IRs.
             a = psio.Schema.from_pssz(psio.schema_of(names={"Root": old}).to_pssz()).type("Root")
             b = psio.Schema.from_pssz(psio.schema_of(names={"Root": new}).to_pssz()).type("Root")
             fetched = psio.evolves_from(a, b)
-            self.assertEqual((bool(fetched), fetched.reason), (ok, status.reason), f"{old} -> {new} (IR)")
+            self.assertEqual((bool(fetched), fetched.code, fetched.path, fetched.reason),
+                             (ok, status.code, status.path, status.reason), f"{old} -> {new} (IR)")
 
         def record(name: str, fields: List[Any], **options: Any) -> Any:
             cls = dataclasses.make_dataclass(f"{name}{next(counter)}", fields)
@@ -285,7 +286,7 @@ class Evolution(unittest.TestCase):
         both(Var1, Var3, True)
         both(Var1, Var1, True)
         # Removed, reordered, inserted, retyped: not compatible.
-        both(Var2, Var1, False, "an alternative was removed")
+        both(Var2, Var1, False, "alternatives-removed")
         both(Var1, Union[str, u32, u64], False)
         both(Var1, Union[u32, u64, str], False)
         both(Var1, Union[u64, u32, str], False)
@@ -295,14 +296,14 @@ class Evolution(unittest.TestCase):
         # without new alternatives after it.
         both(Union[u32, alt(Alt0, "alt")], Union[u32, alt(Alt1, "alt")], True)
         both(Union[u32, alt(Alt0, "alt")], Union[u32, alt(Alt1, "alt"), u64], True)
-        both(Union[u32, alt(Alt1, "alt")], Union[u32, alt(Alt0, "alt"), u64], False, "a field was removed")
+        both(Union[u32, alt(Alt1, "alt")], Union[u32, alt(Alt0, "alt"), u64], False, "fields-removed")
         both(Union[u32, alt(Alt0, "alt")], Union[u32, alt(AltOther, "alt"), u64], False)
         # Wherever a variant is: an optional, a list, a map, a variant, a record.
         both(Optional[Var1], Optional[Var2], True)
         both(List[Var1], List[Var2], True)
         both(Dict[u32, Var1], Dict[u32, Var2], True)
         both(Union[u8, alt(Var1, "v")], Union[u8, alt(Var2, "v"), i16], True)
-        both(List[Var2], List[Var1], False, "an alternative was removed")
+        both(List[Var2], List[Var1], False, "alternatives-removed")
 
         # A larger new alternative.  The variant alone writes no offsets:
         # appending is compatible whatever the size of the new alternative.
@@ -326,21 +327,21 @@ class Evolution(unittest.TestCase):
                          [(254, 1), (254, 1), (258, 2)])
         self.assertEqual((psio.codec(capped(Small)).width, psio.codec(capped(Larger)).width), (2, 2))
         both(tight(Small), tight(Same), True)
-        both(tight(Small), tight(Larger), False, "the offset width changed (1 -> 2)")
+        both(tight(Small), tight(Larger), False, "width-changed")
         # A cap reserves the room: the same change is compatible.
         both(capped(Small), capped(Larger), True)
         both(capped(Small), capped(Same), True)
         # A tuple and an array take their width from their own bound.
         both(Tuple[Small, Pad], Tuple[Same, Pad], True)
-        both(Tuple[Small, Pad], Tuple[Larger, Pad], False, "the offset width changed (1 -> 2)")
+        both(Tuple[Small, Pad], Tuple[Larger, Pad], False, "width-changed")
         both(Annotated[List[Small], psio.array(60)], Annotated[List[Same], psio.array(60)], True)
         both(Annotated[List[Small], psio.array(60)], Annotated[List[Larger], psio.array(60)], False,
-             "the offset width changed (1 -> 2)")
+             "width-changed")
         both(Annotated[List[Small], psio.bounded(60)], Annotated[List[Larger], psio.bounded(60)], False,
-             "the offset width changed (1 -> 2)")
+             "width-changed")
         both(Annotated[Dict[u8, Small], psio.bounded(30)], Annotated[Dict[u8, Same], psio.bounded(30)], True)
         both(Annotated[Dict[u8, Small], psio.bounded(30)], Annotated[Dict[u8, Larger], psio.bounded(30)], False,
-             "the offset width changed (1 -> 2)")
+             "width-changed")
         # A bounded list inside a capped record: the record's width stays, the
         # list's table does not (60 x (1 + 3) = 240; 60 x (2 + 5) = 420).
 
@@ -349,14 +350,14 @@ class Evolution(unittest.TestCase):
 
         self.assertEqual((psio.codec(listed(Small)).width, psio.codec(listed(Larger)).width), (2, 2))
         both(listed(Small), listed(Same), True)
-        both(listed(Small), listed(Larger), False, "the offset width changed (1 -> 2)")
+        both(listed(Small), listed(Larger), False, "width-changed")
         # ... and one level further down: a tuple holding the variant, in a list.
 
         def rows(v: Any) -> Any:
             return record("Rows", [("rows", Annotated[List[Tuple[v, Pad]], psio.max(2)])], max_dynamic_data=60000)
 
         both(rows(Small), rows(Same), True)
-        both(rows(Small), rows(Larger), False, "the offset width changed (1 -> 2)")
+        both(rows(Small), rows(Larger), False, "width-changed")
 
         # Bounds on the alternatives (C++ at<I>(...)).
         def ann(v: Any, *at: Any) -> Any:
@@ -370,8 +371,8 @@ class Evolution(unittest.TestCase):
         AnnWider = ann(three, psio.at(1, psio.max(16)), psio.at(2, psio.max(4)))
         both(Ann0, Ann1, True)
         both(Ann0, AnnWider, True)
-        both(Ann0, AnnTighter, False, "tightened")
-        both(Ann1, Ann0, False, "an alternative was removed")
+        both(Ann0, AnnTighter, False, "bound-tightened")
+        both(Ann1, Ann0, False, "alternatives-removed")
 
         # The bytes agree with the check: New reads everything Old wrote, to the
         # same value and the same bytes; Old rejects the alternative it does not know.
@@ -477,7 +478,9 @@ class Evolution(unittest.TestCase):
         self.assertTrue(psio.evolves_from(P1, revision(("c", Optional[u64], None))))
         status = psio.evolves_from(P1, revision(("c", u64)))
         self.assertFalse(status)
-        self.assertIn("Optional", status.reason)
+        self.assertEqual((status.code, status.path), ("appended-field-not-optional", "(root)"))
+        self.assertIn('"c" is not optional', status.reason)
+        self.assertIn("(root): ", str(status.error))
         self.assertFalse(psio.evolves_from(revision(("c", Optional[u64], None)), P1))        # a field removed
         self.assertFalse(psio.evolves_from(P1, revision(definition_will_not_change=True)))
         self.assertFalse(psio.evolves_from(P1, dataclasses.make_dataclass("P1", [("a", psio.i32), ("b", str)])))
@@ -491,6 +494,7 @@ class Evolution(unittest.TestCase):
                                                      ("b", Optional[Annotated[str, psio.max(200)]], None)])
         self.assertEqual((psio.codec(Small).width, psio.codec(grown).width), (1, 2))
         self.assertIn("offset width", psio.evolves_from(Small, grown).reason)
+        self.assertEqual(psio.evolves_from(Small, grown).code, "width-changed")
         # Containers: the same rules below; a map's key type is fixed, its mapped type evolves.
         self.assertTrue(psio.evolves_from(List[P1], List[revision(("c", Optional[u64], None))]))
         self.assertTrue(psio.evolves_from(Dict[u32, P1], Dict[u32, revision(("c", Optional[u64], None))]))
@@ -529,6 +533,57 @@ class Evolution(unittest.TestCase):
         self.assertFalse(psio.evolves_from(new, old))
         with self.assertRaises(psio.SchemaError):
             psio.evolves_from(psio.codec(P1, width=2), P1)
+        # ... and as methods and as interfaces (C++ pssz_ir::evolves_from over Func / Interface).
+        a1, a2 = psio.interface_of(A1), psio.interface_of(A2)
+        self.assertTrue(psio.evolves_from(a1["transfer"], a2["transfer"]))
+        back = psio.evolves_from(a2["transfer"], a1["transfer"])
+        self.assertEqual((back.code, back.path), ("fields-removed", "(args)"))
+        self.assertTrue(psio.evolves_from(a1, a2))
+        back = psio.evolves_from(a2, a1)
+        self.assertEqual((back.code, back.path), ("fields-removed", "transfer(args)"))
+        self.assertEqual(psio.equivalent(a1, a2).code, "field-count-changed")
+        self.assertTrue(psio.equivalent(a1, a1))
+        self.assertTrue(psio.evolves_from(a1.schema(), a1.schema()))
+        whole = psio.evolves_from(a2.schema(), a1.schema())        # (interfaces are matched by name)
+        self.assertEqual((whole.code, whole.path), ("interface-removed", "A2/"))
+        with self.assertRaises(psio.SchemaError):
+            psio.evolves_from(a1, a1["transfer"])
+        with self.assertRaises(psio.SchemaError):
+            psio.evolves_from(P1, P1, mode="names")
+
+    def test_modes(self) -> None:
+        """``mode="wire"`` is the bytes; ``mode="contract"`` (the default) also names, custom ids, enums
+        and text forms (C++ ``pssz_ir::compare``)."""
+        @dataclass
+        class P1:
+            a: u32
+            b: str
+        renamed = dataclasses.make_dataclass("P1", [("a", u32), ("c", str)])
+        status = psio.evolves_from(P1, renamed)
+        self.assertEqual((bool(status), status.code, status.path), (False, "field-renamed", "(root)"))
+        self.assertTrue(psio.evolves_from(P1, renamed, mode="wire"))
+        self.assertTrue(psio.equivalent(P1, renamed, mode="wire"))
+        self.assertEqual(psio.equivalent(List[P1], List[renamed]).path, "[]")
+        # A renamed alternative, a time presentation, an enum, an integer's text form.
+        a = Annotated[u8, psio.alt("a")] | Annotated[str, psio.alt("b")]
+        b = Annotated[u8, psio.alt("a")] | Annotated[str, psio.alt("z")]
+        self.assertEqual(psio.evolves_from(a, b).code, "alternative-renamed")       # type: ignore[arg-type]
+        self.assertTrue(psio.evolves_from(a, b, mode="wire"))                       # type: ignore[arg-type]
+        self.assertEqual(psio.evolves_from(psio.TimePointSec, psio.DurationSec).code, "custom-id-changed")
+        self.assertTrue(psio.evolves_from(psio.TimePointSec, psio.DurationSec, mode="wire"))
+        J1 = dataclasses.make_dataclass("J", [("n", Annotated[u64, psio.json_string])])
+        J2 = dataclasses.make_dataclass("J", [("n", u64)])
+        status = psio.equivalent(J1, J2)
+        self.assertEqual((status.code, status.path), ("text-form-changed", ".n"))
+        self.assertTrue(psio.equivalent(J1, J2, mode="wire"))
+        # equivalent is symmetric where evolves_from is not.
+        grown = dataclasses.make_dataclass("P1", [("a", u32), ("b", str), ("c", Optional[u8], None)])
+        self.assertTrue(psio.evolves_from(P1, grown, mode="wire"))
+        self.assertEqual(psio.equivalent(P1, grown, mode="wire").code, "field-count-changed")
+        self.assertEqual(psio.equivalent(Annotated[str, psio.max(4)], Annotated[str, psio.max(5)]).code,
+                         "bound-changed")
+        self.assertEqual(psio.evolves_from(Annotated[str, psio.max(5)], Annotated[str, psio.max(4)]).code,
+                         "bound-tightened")
 
 
 # ── max_fields ───────────────────────────────────────────────────────────────
@@ -945,18 +1000,25 @@ class Verified(unittest.TestCase):
         full = Outer(1, Inner(2, None), [Inner(3, None)], None)
         # A missing optional member is None anywhere; a missing required member is refused anywhere.
         self.assertEqual(psio.from_json(Outer, '{"id":1,"inner":{"a":2},"items":[{"a":3}]}'), full)
-        for text in ('{"inner":{"a":2},"items":[]}', '{"id":1,"inner":{},"items":[]}', '{"id":1,"inner":{"a":2}}',
-                     '{"id":1,"inner":{"a":2},"items":[{}]}', '{"id":1,"inner":{"a":2},"items":[],"maybe":{"b":1}}'):
+        # The member and the record are named (C++: `json: missing required member "event" of Ev`).
+        for text, member, record in (
+                ('{"inner":{"a":2},"items":[]}', "id", "Outer"), ('{"id":1,"inner":{},"items":[]}', "a", "Inner"),
+                ('{"id":1,"inner":{"a":2}}', "items", "Outer"), ('{"id":1,"inner":{"a":2},"items":[{}]}', "a", "Inner"),
+                ('{"id":1,"inner":{"a":2},"items":[],"maybe":{"b":1}}', "a", "Inner")):
             for fmt, read, validate in (("json", psio.from_json, psio.validate_json),
                                         ("ijson", psio.from_ijson, psio.validate_ijson)):
                 e = refused(self, lambda: read(Outer, text), psio.JsonError)
-                self.assertEqual(e.reason, "json: missing required member", text)
+                self.assertEqual(e.reason, f'json: missing required member "{member}" of {record}', text)
                 self.assertFalse(validate(Outer, text).ok, text)
         # The same schema-driven.
         dynamic = psio.Schema.from_pssz(psio.schema_of(Outer).to_pssz()).type("Outer")
         self.assertEqual(dynamic.from_json('{"id":1,"inner":{"a":2},"items":[]}'),
                          {"id": 1, "inner": {"a": 2, "b": None}, "items": [], "maybe": None})
-        refused(self, lambda: dynamic.from_json('{"id":1,"items":[]}'), psio.JsonError)
+        # (the schema-driven reader names the member as the schema does)
+        e = refused(self, lambda: dynamic.from_json('{"id":1,"items":[]}'), psio.JsonError)
+        self.assertEqual(e.reason, 'json: missing required member "inner"')
+        e = refused(self, lambda: dynamic.json_to_pssz('{"id":1,"inner":{},"items":[]}'), psio.JsonError)
+        self.assertEqual(e.reason, 'json: missing required member "a"')
 
     def test_strict_validation_takes_a_raw_string_that_is_not_utf8(self) -> None:
         @dataclass

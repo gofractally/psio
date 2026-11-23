@@ -4,7 +4,9 @@ Everything else is a plain Python value: ``bool``, ``int`` (every integer
 width, enums and time ticks), ``float``, ``str`` (UTF-8 strings), ``bytes``
 (raw strings, byte lists), ``list`` (lists and arrays), ``tuple`` (tuples and
 pairs), ``dict`` (records by member name; maps), ``frozenset`` (sets) and
-``None`` (an absent optional).
+``None`` (an absent optional).  A value of the type "any JSON" (``psio.JsonValue``,
+the Custom id ``json``) is the JSON value itself: ``None``, ``bool``, ``int``,
+``float`` / :class:`JsonNumber`, ``str``, ``list`` and ``dict`` with ``str`` keys.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
-__all__ = ["Variant", "Some", "Bits", "NaN"]
+__all__ = ["Variant", "Some", "Bits", "NaN", "JsonNumber"]
 
 T = TypeVar("T")
 
@@ -94,3 +96,33 @@ class NaN(float):
 
     def __hash__(self) -> int:
         return hash((self.bits, self.size))
+
+
+class JsonNumber(float):
+    """A number of a JSON value (``psio.JsonValue``) that is not written as a plain integer: a ``float``
+    that remembers its token.
+
+    A JSON value keeps its numbers **as they were written** (C++ ``psio::json_numeral``): ``1.50``,
+    ``1e3`` and ``-0`` are written back unchanged.  A token that is a plain integer (``7``,
+    ``-18446744073709551616``) is read as an ``int``, which is exact at any size; every other number
+    is read as a ``JsonNumber``: equal to, and usable as, the ``float`` nearest its token, with the
+    token in ``text``.  ``JsonNumber("1.50")`` builds one; a plain ``float`` is written as its
+    shortest round-trip decimal.
+    """
+
+    __slots__ = ("text",)
+    text: str
+
+    def __new__(cls, text: str) -> "JsonNumber":
+        if type(text) is not str:
+            raise TypeError("JsonNumber takes the number's text")
+        try:
+            self = super().__new__(cls, text)
+        except ValueError:
+            # (not a number at all: refused where it is written)
+            self = super().__new__(cls, "nan")
+        self.text = text
+        return self
+
+    def __repr__(self) -> str:
+        return f"JsonNumber({self.text!r})"

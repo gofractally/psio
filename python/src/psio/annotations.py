@@ -32,7 +32,7 @@ __all__ = [
     "RawString", "length", "exact", "element", "keys", "values", "at", "utf8", "bounded", "array", "bitvector",
     "bitlist", "nested", "boxed", "identity", "name", "alt", "custom", "json_number", "json_string", "ijson_number",
     "ijson_string", "time_point", "duration", "monotonic", "TimePointSec", "TimePointMs", "TimePointUs",
-    "TimePointNs", "DurationSec", "DurationMs", "DurationUs", "DurationNs", "sorted", "unique", "unique_keys",
+    "TimePointNs", "DurationSec", "DurationMs", "DurationUs", "DurationNs", "sorted", "unique", "unique_keys", "untagged", "JsonValue",
 ]
 
 
@@ -306,6 +306,30 @@ class AltSpec(Spec):
 def alt(name: Optional[str] = None, *, ijson_name: Optional[str] = None) -> AltSpec:
     """Names an alternative of a union: ``Annotated[Circle, psio.alt("circle")] | Square``."""
     return AltSpec(name, ijson_name)
+
+
+@dataclass(frozen=True)
+class UntaggedSpec(Spec):
+    pass
+
+
+#: An untagged union: ``Annotated[Union[str, list[str]], psio.untagged]`` (C++ ``psio_is_untagged``,
+#: the Variant attribute ``untagged``).  In JSON / I-JSON it is the bare value of its alternative, and
+#: a reader picks the alternative by the kind of JSON value it finds (docs/json.md "Untagged
+#: variants"), so the kinds the alternatives are written as must not overlap.  The bytes are those of
+#: any union.
+untagged = UntaggedSpec()
+
+
+@dataclass(frozen=True)
+class JsonValueSpec(Spec):
+    pass
+
+
+#: Any JSON value (C++ ``psio::json_value``; the Custom id ``json``): ``None``, ``bool``, ``int``,
+#: ``float`` / ``psio.JsonNumber``, ``str``, ``list`` or ``dict`` with ``str`` keys.  In JSON / I-JSON
+#: it is that value, inline; in PSSZ a UTF-8 string holding its compact JSON text.
+JsonValue = Annotated[Any, JsonValueSpec()]
 
 
 @dataclass(frozen=True, eq=False)
