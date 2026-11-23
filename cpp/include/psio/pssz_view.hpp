@@ -1084,3 +1084,6 @@ struct std::tuple_element<I, psio::view<std::pair<A, B>, Fmt, Store>>
    using type =
       decltype(std::declval<const psio::view<std::pair<A, B>, Fmt, Store>&>().template get<I>());
 };
+
+// The views of psio::nested<T> and of pssz_buffer<T> / shared_pssz<T> members.
+#include <psio/nested.hpp>

@@ -33,10 +33,11 @@ Account copy           = r.unpack();         // the owned value
 psio::pssz_mutable_view<Account> w{bytes};   // writes into borrowed bytes
 w.balance() = 42;                            // or w.balance().set(42)
 
-psio::pssz_buffer<Account> owned{psio::to_pssz(account)};   // owns its bytes
-psio::shared_pssz<Account> tx{psio::to_pssz(account)};      // shared ownership
+psio::pssz_buffer<Account> owned{account};                  // a packed Account, owned
+psio::shared_pssz<Account> tx{account};                     // a packed Account, shared
 psio::shared_pssz<Account> other = tx;                      // same bytes, no copy
-auto v = psio::as_view(other);                              // read view of them
+other->owner();                                             // read through it
+Account a = other.unpack();
 ```
 
 ## The names
@@ -179,15 +180,12 @@ A view only reads. Nothing turns one into a view that writes:
   `psio::buffer<T, F, storage::shared>` (`shared_F<T>`), the types that keep
   the bytes alive, read through `psio::as_view(buffer)`.
 
-`F_buffer<T>` owns a `std::vector<char>`. `shared_F<T>` holds immutable
-bytes with shared ownership: a copy is another owner of the same bytes, made
-by copying a pointer and incrementing an atomic count, and the bytes live
-until the last copy is destroyed. It is the type for an encoded block or
-transaction that several parts of a program hold at once. Constructing one
-from a `std::vector<char>&&` takes the vector's allocation; constructing one
-from a span copies the bytes once.
+`F_buffer<T>` (`psio::buffer<T, F>`) owns a `std::vector<char>`;
+`shared_F<T>` (`psio::buffer<T, F, storage::shared>`) holds immutable bytes
+with shared ownership. The borrowing kinds (`storage::const_borrow`,
+`storage::mut_borrow`) are a typed span and nothing more.
 
-A buffer has no member functions. Its operations are free functions:
+Free functions, for every buffer kind:
 
 | Function | Meaning |
 |----------|---------|
@@ -198,6 +196,66 @@ A buffer has no member functions. Its operations are free functions:
 | `psio::as_mutable_view(b)` | the mutable view; owning and mutably borrowing buffers only |
 | `psio::to_buffer(b)` | an owning copy |
 | `psio::to_shared(b)` | a shared buffer: takes the bytes of an owning rvalue, shares a shared buffer, copies otherwise |
+
+## Packed values: `nested<T>`, `F_buffer<T>`, `shared_F<T>`
+
+An owning or shared buffer is a value that *is* the encoding of a `T`, kept
+packed. It always holds a valid encoding:
+
+| | |
+|---|---|
+| `B{}` | the encoding of `T{}`. No allocation: all default-constructed buffers of one type read one process-wide constant, built on first use |
+| `B{value}`, `B::from(value)` | encodes. (`B{value}` is left out for a `T` that could be mistaken for bytes, such as `std::vector<char>`: use `from`.) |
+| `B{bytes}` | **validates**, then holds the bytes; `psio::codec_abort` (an exception where enabled) if they are not a `T`. A `std::vector<char>&&` is adopted without a copy; a span is copied once |
+| `B{psio::trusted{bytes}}` | holds bytes the caller vouches for, unchecked |
+| `B::unchecked(vector)` | adopts a vector the caller vouches for, without a copy |
+| `B::checked(bytes, out)` | validates into `out`; returns a `codec_status` and leaves `out` unchanged on failure |
+| `B::from_checked(value, out)` | encodes into `out`; returns a `codec_status` |
+| `b.view()`, `*b`, `b.get()` | the read-only view of the `T`; `b->member()` |
+| `b.unpack()` (also `decode()`) | the `T` |
+| `b.decode_checked(out)` | validate, then decode |
+| `b.validate()`, `b.validate_strict()` | |
+| `b.bytes()`, `b.data()`, `b.size()` | the encoding |
+| `a == b` | same encoding |
+| `std::move(b).release()` | owning only: the bytes, as a vector |
+
+A copy of a `shared_F<T>` is another owner of the same bytes: a pointer copy
+and an atomic increment, and the bytes live until the last copy is
+destroyed. They are never written after construction, so copies may be read
+from different threads. It is the type for an encoded block or transaction
+that several parts of a program hold at once.
+
+There is no null state. An optional packed value is a
+`std::optional<psio::shared_pssz<T>>`, which is also what it is on the wire
+(an optional of a nested value).
+
+The three packed-value types for PSSZ differ only in who owns the bytes:
+
+| Type | Owns | Copy | In-place writes |
+|------|------|------|-----------------|
+| `psio::nested<T>` | a `std::vector<char>` | copies the bytes | through `psio::mutable_view` of the enclosing frame |
+| `psio::pssz_buffer<T>` | a `std::vector<char>` | copies the bytes | `psio::as_mutable_view(b)` |
+| `psio::shared_pssz<T>` | a share of immutable bytes | shares them | none |
+
+As a **member of a reflected record** (or an element of a list, the payload
+of an optional, an alternative of a variant) all three are the same thing
+to every format — `psio::detail::is_nested` holds for each:
+
+| Format | A packed `T` member is |
+|--------|------------------------|
+| pssz | the bytes of a byte list holding `to_pssz(T)`; every checking reader of the enclosing value validates them as `T` |
+| key | the key of that byte list |
+| json, ijson | the inner value's own text (`{"transaction": {"exp": 1, ...}}`), not hex |
+| schema | `Nested{T}` |
+| view | a nested view: `bytes()`, and `*` / `->` / `get()` giving the view of the `T`; `unpack()` gives the member's own type |
+
+So a record can declare `psio::shared_pssz<Transaction> transaction;` and be
+read by a peer that declares `psio::nested<Transaction>` or
+`std::vector<char>`: the bytes are identical. Decoding the record adopts the
+member's bytes once; copying the record then shares them.
+
+`psio::nested<T, psio::nested_validation::deferred>` remains the one form
+whose bytes a reader of the enclosing value does not look at.
 
 ## Reading through a view
 

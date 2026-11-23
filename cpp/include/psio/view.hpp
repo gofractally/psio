@@ -168,14 +168,6 @@ namespace psio {
          ::psio::codec_abort(codec_error{what, 0, "view"});
       }
 
-      // `operator->` of a view that hands out sub-views by value.
-      template <typename V>
-      struct arrow_proxy
-      {
-         V              value;
-         [[nodiscard]] const V* operator->() const noexcept { return &value; }
-      };
-
       // Random access over a view with size() and operator[] whose
       // elements are views (returned by value). The iterator holds a copy
       // of the list view, so it does not dangle when the list view was a

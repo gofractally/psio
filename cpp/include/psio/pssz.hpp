@@ -3909,6 +3909,14 @@ namespace psio {
    {
       using preferred_presentation_category = ::psio::binary_category;
 
+      // Hooks of the typed buffers (buffer.hpp): the checked encode, and
+      // the checked decode that reports unknown fields.
+      template <typename T>
+      [[nodiscard]] static codec_status encode_checked(const T& value, std::vector<char>& out);
+      template <typename T>
+      [[nodiscard]] static codec_status decode_compatible(std::span<const char> bytes, T& out,
+                                                          bool& has_unknown);
+
       template <typename T>
       friend void tag_invoke(decltype(::psio::encode), pssz,
                              const T& v, std::vector<char>& sink)
@@ -4154,6 +4162,17 @@ namespace psio {
       return codec_ok();
    }
 
+   template <typename T>
+   codec_status pssz::encode_checked(const T& value, std::vector<char>& out)
+   {
+      return encode_pssz_checked(pssz{}, value, out);
+   }
+   template <typename T>
+   codec_status pssz::decode_compatible(std::span<const char> bytes, T& out, bool& has_unknown)
+   {
+      return decode_pssz_checked(pssz{}, bytes, out, has_unknown);
+   }
+
    // ── A method's return value ───────────────────────────────────────────
    //
    // `returns(specs)` makes the result of method I of T a bounded type, as a
@@ -4348,6 +4367,56 @@ namespace psio {
       // the value, like a record member's.
       return ::psio::check_method_result<T, I>(out, "pssz");
    }
+
+   // ── Nested values (psio::nested<T>, psio::pssz_buffer<T>, shared_pssz<T>) ──
+   //
+   // The walks declared in detail/nested_fwd.hpp. N is any type for which
+   // detail::is_nested holds: its bytes are the automatic-profile encoding
+   // of is_nested<N>::inner.
+   namespace detail::nested_impl
+   {
+      // Depth counting matches the validator: the member is a node at
+      // `depth` and the inner value's root is the node below it. The inner
+      // bytes are not walked (a nested value holds a valid encoding), so
+      // only the boundary is checked here; a reader counts the levels of
+      // the inner value as well.
+      template <typename N>
+      codec_status pssz_check_encode(const N& value, std::size_t depth)
+      {
+         if constexpr (is_nested<N>::descends)
+         {
+            if (depth + 1 > kMaxValidationDepth)
+               return codec_fail("pssz: max depth exceeded", 0, "pssz");
+         }
+         else if (value.size() != 0 && depth + 1 > kMaxValidationDepth)
+            return codec_fail("pssz: max depth exceeded", 0, "pssz");
+         return codec_ok();
+      }
+
+      template <typename N, typename Flags>
+      codec_status pssz_validate(std::span<const char> bytes, std::size_t depth,
+                                 Flags* flags) noexcept
+      {
+         namespace pi = ::psio::detail::pssz_impl;
+         if constexpr (!is_nested<N>::descends)
+         {
+            // Opaque: a list of bytes.
+            if (!bytes.empty() && depth + 1 > kMaxValidationDepth)
+               return codec_fail("pssz: max depth exceeded", 0, "pssz");
+            return codec_ok();
+         }
+         else
+         {
+            using T               = typename is_nested<N>::inner;
+            constexpr std::size_t W = ::psio::auto_pssz_width<T>();
+            // Exact-schema mode: the bytes must be the one canonical
+            // encoding of a T, with no unknown fields.
+            if (flags && flags->exact)
+               return pi::validate_exact_value<W, true, T>(bytes, depth + 1);
+            return pi::validate_value<W, true, T>(bytes, 0, bytes.size(), depth + 1, flags);
+         }
+      }
+   }  // namespace detail::nested_impl
 
 }  // namespace psio
 

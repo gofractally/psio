@@ -54,6 +54,7 @@
 #include <psio/error.hpp>
 #include <psio/format.hpp>
 #include <psio/storage.hpp>
+#include <psio/trusted.hpp>
 
 #include <concepts>
 #include <cstddef>
@@ -71,15 +72,6 @@ namespace psio {
       template <typename Fmt>
       struct traits;
    }
-
-   // Marks bytes the caller vouches for: `from_F<T>(trusted{bytes})`
-   // decodes them without validating first.
-   struct trusted
-   {
-      std::span<const char> bytes;
-
-      explicit trusted(std::span<const char> b) noexcept : bytes(b) {}
-   };
 
    namespace detail::helpers {
 
