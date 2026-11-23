@@ -1080,9 +1080,16 @@ namespace psio::schema_types
                         const std::initializer_list<const char*>& pnames,
                         std::index_sequence<Is...>)
       {
-         auto it = pnames.begin();
+         // A function that names every parameter carries the names; one
+         // that does not (none, or not all of them) is positional and its
+         // parameters are "0", "1", ... — the names of the members of a
+         // `tuple = "positional"` argument list (docs/json.md "Method
+         // arguments"). Never an empty or a repeated name: the parameters
+         // are the members of a record.
+         const bool named = pnames.size() == sizeof...(Is);
+         auto       it    = pnames.begin();
          ((out.push_back(Member{
-              std::string{it != pnames.end() ? *it++ : ""},
+              named ? std::string{*it++} : std::to_string(Is),
               Box<AnyType>{
                  insert<std::remove_cvref_t<std::tuple_element_t<Is, ArgsTuple>>>()},
               {}})),

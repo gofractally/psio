@@ -59,7 +59,7 @@ it must contain, and every implementation must build identically:
 | part of the declaration | in the IR |
 |---|---|
 | method name, in declaration order | `Func.name` |
-| parameter names and types | `Func.params[i].name`, `.type`; a method that lists no names has `""` names |
+| parameter names and types | `Func.params[i].name`, `.type`; a method that does not name every parameter is positional and its parameters are named `"0"`, `"1"`, … (the member names of its `tuple = "positional"` argument list; never an empty or a repeated name) |
 | a parameter bound (`utf8`, `max`, `element(...)`) | the parameter's type is the bounded type (`Custom{BoundedList{u8, 16}, "utf8"}`); a bound with no type form is the parameter's `lengthBound` attribute |
 | the result | `Func.result` (absent for no result) |
 | `returns(...)` | the result's type is the bounded type; a bound with no type form is the Func attribute `result.lengthBound` |

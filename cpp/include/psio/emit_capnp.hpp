@@ -316,7 +316,7 @@ namespace psio::schema_types
             {
                if (i > 0)
                   _out << ", ";
-               _out << to_camel(fn.params[i].name) << " :"
+               _out << to_camel(schema_types::parameter_identifier(fn.params[i].name)) << " :"
                     << inline_any(*fn.params[i].type);
             }
             _out << ")";

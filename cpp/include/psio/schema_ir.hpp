@@ -39,6 +39,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -136,6 +137,17 @@ namespace psio::schema_types
                                              const Func&) = default;
    };
    PSIO_REFLECT(Func, name, params, result, attributes)
+
+   // A parameter of a function that does not name its parameters is
+   // positional and is called "0", "1", ... (schema_builder.hpp). Those are
+   // not identifiers: an emitter for a language that needs one writes
+   // `arg0`, `arg1`, ...
+   inline std::string parameter_identifier(std::string_view name)
+   {
+      if (name.empty() || (name.front() >= '0' && name.front() <= '9'))
+         return "arg" + std::string{name};
+      return std::string{name};
+   }
 
    // ── Records ─────────────────────────────────────────────────────────
 

@@ -3,6 +3,10 @@
 
 #include <psio/compress_name.hpp>
 #include <psio/emit_wit.hpp>
+#include <psio/json.hpp>
+#include <psio/pssz.hpp>
+#include <psio/pssz_ir.hpp>
+#include <psio/pssz_ir_json.hpp>
 #include <psio/reflect.hpp>
 #include <psio/schema_builder.hpp>
 #include <psio/structural.hpp>
@@ -600,4 +604,89 @@ TEST_CASE("resource: instance methods have an implicit self", "[structural][wit]
    CHECK(wit.find("increment: func(by: u32) -> u32;") != std::string::npos);
    // (The Schema IR models a handle as its u32 representation.)
    CHECK(wit.find("legacy: func(self: u32) -> bool;") != std::string::npos);
+}
+
+// ── Interfaces built from a reflected type: the corner cases ─────────────
+namespace iface_corner
+{
+   // A reflected type that lists no method: a service without actions.
+   struct History
+   {
+   };
+   PSIO_REFLECT(History)
+   PSIO_INTERFACE(History, name("svc.history"))
+
+   struct Svc
+   {
+      void named(std::uint32_t amount, std::optional<std::string> memo);
+      void unnamed(int a, int b);
+      void partly(int a, int b);
+      void none();
+   };
+   PSIO_REFLECT(Svc, method(named, amount, memo), method(unnamed), method(partly, a), method(none))
+   PSIO_INTERFACE(Svc, name("svc"))
+}  // namespace iface_corner
+
+TEST_CASE("an interface with no functions", "[reflect][interface][schema]")
+{
+   auto s = psio::SchemaBuilder{}.insert_interface<iface_corner::History>().build();
+   REQUIRE(s.interfaces.size() == 1);
+   CHECK(s.interfaces[0].name == "svc.history");
+   CHECK(s.interfaces[0].funcs.empty());
+   CHECK(s.interfaces[0].type_names.empty());
+   CHECK(psio::pssz_ir::validate_schema(s).ok());
+   // The schema is a value like any other.
+   const auto bytes = psio::encode(psio::pssz{}, s);
+   CHECK(psio::decode<psio::Schema>(psio::pssz{}, std::span<const char>{bytes}) == s);
+}
+
+TEST_CASE("unnamed parameters of an interface function are positional: 0, 1, ...",
+          "[reflect][interface][schema]")
+{
+   namespace st = psio::schema_types;
+   auto s = psio::SchemaBuilder{}.insert_interface<iface_corner::Svc>().build();
+   REQUIRE(psio::pssz_ir::validate_schema(s).ok());
+   const auto& funcs = s.interfaces[0].funcs;
+   REQUIRE(funcs.size() == 4);
+   auto names = [](const st::Func& f) {
+      std::vector<std::string> out;
+      for (const auto& p : f.params)
+         out.push_back(p.name);
+      return out;
+   };
+   CHECK(names(funcs[0]) == std::vector<std::string>{"amount", "memo"});
+   CHECK(names(funcs[1]) == std::vector<std::string>{"0", "1"});
+   // Not every parameter named: positional, as its argument tuple is.
+   CHECK(names(funcs[2]) == std::vector<std::string>{"0", "1"});
+   CHECK(names(funcs[3]).empty());
+
+   // The argument list of each as a type: a call packed from the schema.
+   auto tuple_form = [](const st::AnyType& args) {
+      return *psio::pssz_ir::detail::find_attribute(std::get<st::Object>(args.value).attributes,
+                                                    "tuple")
+                 ->value;
+   };
+   const auto named = psio::pssz_ir::argument_list(funcs[0]);
+   CHECK(tuple_form(named) == "named");
+   std::vector<char> bytes;
+   REQUIRE(psio::pssz_ir::json_to_pssz(s, named, psio::ijson{}, R"({"amount":5})", bytes).ok());
+   CHECK(bytes == psio::encode(psio::pssz{}, std::tuple{std::uint32_t{5},
+                                                        std::optional<std::string>{}}));
+   const auto positional = psio::pssz_ir::argument_list(funcs[1]);
+   CHECK(tuple_form(positional) == "positional");
+   bytes.clear();
+   REQUIRE(psio::pssz_ir::json_to_pssz(s, positional, psio::ijson{}, "[1,2]", bytes).ok());
+   CHECK(bytes == psio::encode(psio::pssz{}, std::tuple{1, 2}));
+   std::string text;
+   REQUIRE(psio::pssz_ir::pssz_to_json(s, positional, psio::ijson{}, std::span<const char>{bytes},
+                                       text)
+              .ok());
+   CHECK(text == "[1,2]");
+   // (what a consumer wrote before argument_list existed: the parameters as
+   // the members of a record — no duplicate "" member any more)
+   bytes.clear();
+   CHECK(psio::pssz_ir::json_to_pssz(s, st::AnyType{st::Object{funcs[1].params, {{"tuple", "named"}}}},
+                                     psio::ijson{}, "[1,2]", bytes)
+            .ok());
+   CHECK(tuple_form(psio::pssz_ir::argument_list(funcs[3])) == "named");
 }

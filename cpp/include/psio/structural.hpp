@@ -416,7 +416,9 @@ struct interface_marker
 template <typename Tag>
 struct reflected_interface
 {
-   static_assert(reflect<Tag>::is_reflected && reflect<Tag>::method_count > 0,
+   // (A reflected type that lists no method is an interface with no
+   // functions: a service without actions, an event set without events.)
+   static_assert(reflect<Tag>::is_reflected,
                  "psio: PSIO_INTERFACE without funcs(...) takes its functions from "
                  "PSIO_REFLECT(Tag, method(name, params...), ...), which must come first");
    template <std::size_t Index>

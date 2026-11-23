@@ -3,13 +3,14 @@
 // the reference text for the WIT emitters of the other implementations
 // (js/src/wit.ts emitWit).
 //
-// The whole text is pinned, including three places where it is NOT valid
+// The whole text is pinned, including two places where it is NOT valid
 // WIT today. They are asserted separately below so that a fix has to change
 // this file knowingly:
 //
-//   1. `add: func(: u32, : u32)`. method(add) lists no parameter names; the
-//      Func has "" names and the emitter prints them as they are. WIT needs
-//      an identifier before the colon.
+//   1. (fixed) method(add) lists no parameter names: its parameters are
+//      positional, named "0" and "1" in the Func, and WIT needs an
+//      identifier before the colon. The emitter writes `arg0`, `arg1`
+//      (psio::schema_types::parameter_identifier).
 //   2. `type token.transfer = /* TODO: inline record not supported */;`,
 //      one per method. The fixture registers every argument list as a named
 //      type `token.<method>` whose node is a reference to an interned Object
@@ -47,7 +48,7 @@ interface token {
   names: func(limit: u32) -> list<string>/* @psio:max=4 */;
   @maxDynamicData(64)
   note: func(text: string);
-  add: func(: u32, : u32) -> u64;
+  add: func(arg0: u32, arg1: u32) -> u64;
   ping: func();
   batch: func(names: list<string>/* @psio:max=4 */, tip: u8) -> bool;
 }
@@ -98,8 +99,9 @@ TEST_CASE("emit_wit of the interface fixture's schema: known defects", "[emit_wi
          ++n;
       return n;
    };
-   // 1. Positional parameters have no name: not valid WIT.
-   CHECK(count("add: func(: u32, : u32) -> u64;") == 1);
+   // 1. Positional parameters are arg0, arg1, ...
+   CHECK(count("add: func(arg0: u32, arg1: u32) -> u64;") == 1);
+   CHECK(count("func(:") == 0);
    // 2. One unusable alias per argument list.
    CHECK(count("/* TODO: inline record not supported */") == iface_conf::method_count);
    CHECK(count("type token.") == iface_conf::method_count);

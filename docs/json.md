@@ -240,6 +240,16 @@ changes no byte — an `Object` is positional on the wire like every record —
 and tells a schema-driven codec which of the two rows above applies. An
 `Object` without it is a record: an object in text, never an array.
 
+The parameters of a function in `Schema::interfaces` (`Func::params`) carry
+the same names: the parameter names when the method names every parameter,
+`"0"`, `"1"`, … otherwise — never an empty or a repeated name. C++
+`psio::pssz_ir::argument_list(func)` gives the argument list of a `Func` as
+that `Object` (with the function's `maxFields` / `maxDynamicData`), so a call
+is packed or printed from `Schema::interfaces` alone:
+`json_to_pssz(schema, argument_list(f), psio::ijson{}, text, bytes)`. An
+interface may have no functions (`PSIO_INTERFACE` on a reflected type that
+lists no method): its `funcs` is empty.
+
 C++: `psio::reflect<T>::method_arg_tuple<I>` (a `psio::annotated_tuple`) is
 the argument list, named when `method(name, p1, p2, ...)` lists every
 parameter. Rust: `args::<method>` (parameters always have names).

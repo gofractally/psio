@@ -763,8 +763,8 @@ different C++ spelling (`char32_t`) if it is ever wanted.
 
 **Status.** Report. `cpp/tests/interface_wit_tests.cpp` pins what C++
 `psio::emit_wit` writes today for the schema of
-`conformance/interface-vectors.json`. JS `emitWit` prints the same two
-defects because it mirrors C++; there is no correct reference yet.
+`conformance/interface-vectors.json`. JS `emitWit` mirrors C++; the first defect below is fixed in C++, the
+second stands.
 
 **The text** (C++, today):
 
@@ -778,7 +778,7 @@ interface token {
   names: func(limit: u32) -> list<string>/* @psio:max=4 */;
   @maxDynamicData(64)
   note: func(text: string);
-  add: func(: u32, : u32) -> u64;
+  add: func(arg0: u32, arg1: u32) -> u64;
   ping: func();
   batch: func(names: list<string>/* @psio:max=4 */, tip: u8) -> bool;
 }
@@ -797,12 +797,17 @@ type token.batch = /* TODO: inline record not supported */;
 
 **Defects, and what a fix has to decide.**
 
-1. *Positional parameters:* `add: func(: u32, : u32)`. A method declared
-   without names has `""` parameter names in the `Func`; WIT requires an
-   identifier. Options: synthesize `arg0`, `arg1`, … (WIT stays valid; a
+1. *Positional parameters (fixed, the first option):* the text was
+   `add: func(: u32, : u32)`: a method declared without names had `""`
+   parameter names in the `Func`, and WIT requires an identifier. Now the
+   parameters of such a function are named `"0"`, `"1"`, … in the `Func`
+   (the member names of its `tuple = "positional"` argument list, so that
+   the parameters are a well-formed record), and `emit_wit` / `emit_capnp`
+   write `arg0`, `arg1`, … (`psio::schema_types::parameter_identifier`). A
    parser must not read those back as declared names — the argument list's
-   `tuple` attribute, `"positional"`, already says which it is), or refuse
-   to emit an interface that has an unnamed parameter.
+   `tuple` attribute says which it is. JS `emitWit` has to follow. (The
+   typed generator `psio::generate_wit_text<T>()`, which does not go through
+   the IR, still prints `: u32`.)
 2. *Argument-list types:* the fixture registers each argument list as a
    named type `token.<method>` whose node is a reference to an interned
    `Object`. The emitter resolves the reference, meets an `Object` in type

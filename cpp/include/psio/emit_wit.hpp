@@ -348,7 +348,8 @@ namespace psio::schema_types
                const auto& p = fn.params[i];
                if (i > 0)
                   _out << ", ";
-               _out << to_kebab(p.name) << ": " << inline_any(*p.type);
+               _out << to_kebab(schema_types::parameter_identifier(p.name)) << ": "
+                    << inline_any(*p.type);
             }
             _out << ")";
             if (fn.result)
