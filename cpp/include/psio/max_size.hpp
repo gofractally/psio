@@ -242,6 +242,7 @@ namespace psio {
       template <typename T, typename Annots, std::size_t... Is>
       consteval bound tuple_bound(const Annots& annots, std::index_sequence<Is...>) noexcept
       {
+         PSIO_REQUIRE_TUPLE_SIZE(sizeof...(Is));
          // The header, and one slot per variable element.
          std::size_t slots = 1;
          bound       rest  = 0;

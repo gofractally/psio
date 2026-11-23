@@ -86,6 +86,17 @@
 #include <vector>
 
 namespace psio {
+   // A tuple has at most this many elements (docs/pssz-spec.md 8.4): a
+   // std::tuple, a std::pair (2), a method's argument list. Every PSSZ entry
+   // point and the schema builder refuse a longer one at compile time.
+   inline constexpr std::size_t max_tuple_elements = 255;
+   template <std::size_t N>
+   inline constexpr bool tuple_size_ok_v = N <= max_tuple_elements;
+#define PSIO_REQUIRE_TUPLE_SIZE(N)                                                              \
+   static_assert(::psio::tuple_size_ok_v<N>,                                                    \
+                 "psio: a tuple has at most 255 elements (docs/pssz-spec.md 8.4); this one has " \
+                 "more. Use a record, a list, or nested tuples")
+
 
    // ── type<T> wrapper ────────────────────────────────────────────────────
    //

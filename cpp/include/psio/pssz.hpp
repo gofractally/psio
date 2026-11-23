@@ -308,6 +308,7 @@ namespace psio {
       template <typename... Ts>
       struct record_traits<std::tuple<Ts...>>
       {
+         PSIO_REQUIRE_TUPLE_SIZE(sizeof...(Ts));
          static constexpr std::size_t member_count = sizeof...(Ts);
          template <std::size_t I>
          using member_type = std::tuple_element_t<I, std::tuple<Ts...>>;

@@ -470,6 +470,7 @@ namespace psio::schema_types
             // parameter names where the Meta has them and by position
             // otherwise.
             using Tuple = typename U::tuple_type;
+            PSIO_REQUIRE_TUPLE_SIZE(std::tuple_size_v<Tuple>);
             Object o;
             [&]<std::size_t... I>(std::index_sequence<I...>)
             {
@@ -495,6 +496,7 @@ namespace psio::schema_types
          else if constexpr (sb_detail::sb_is_tuple<U>::value)
             return [&]<std::size_t... I>(std::index_sequence<I...>)
             {
+               PSIO_REQUIRE_TUPLE_SIZE(sizeof...(I));
                return Tuple{{Box<AnyType>{insert<std::tuple_element_t<I, U>>()}...}};
             }(std::make_index_sequence<std::tuple_size_v<U>>{});
          else if constexpr (sb_detail::sb_is_variant<U>::value)

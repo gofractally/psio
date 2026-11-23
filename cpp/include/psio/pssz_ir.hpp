@@ -1819,6 +1819,9 @@ template <std::size_t W> class Codec
                 }
                 else if constexpr (std::is_same_v<T, schema_types::Tuple>)
                 {
+                   // docs/pssz-spec.md 8.4 (psio::max_tuple_elements).
+                   if (t.members.size() > 255)
+                      return fail("pssz IR: a tuple has more than 255 elements");
                    for (const auto &member : t.members)
                       PSIO_PSSZ_IR_TRY(push(member));
                 }

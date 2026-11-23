@@ -406,7 +406,7 @@ cap large enough to cover them from the start.
 | `Optional(T)`               | 1 + max_encoded_size(T) [None if T is None]   |
 | `Variant(Ts...)`            | 1 + max(max_encoded_size(T_i)) [None if any T_i is None] |
 | `Tuple(Ts...)`              | that of the extensible record with those members (§5.1.1): fit(1 + v, sum(max_encoded_size(T_i))), v = the number of variable elements [None if any element is None] |
-| `Pair(A, B)`                | that of `Tuple(A, B)`                         |
+| `Pair(A, B)`                | that of `Tuple(A, B)`. (A tuple has at most 255 elements, §8.4.) |
 | `Map(K, V)`, `Set(K)`       | that of `Vector(Tuple(K, V))`, `Vector(K)`; bounded to N entries: that of `BoundedList(Tuple(K, V), N)`, `BoundedList(K, N)` (§5.9) |
 | boxed T, a member with an alternate presentation | None                     |
 | transparent type (§5.10)         | that of its member                            |
@@ -1023,7 +1023,7 @@ locality.
 
 ### 5.6 Variants — `Variant(T_0, T_1, ..., T_{n-1})`
 
-A tagged union with up to 256 alternatives.
+A tagged union with up to 256 alternatives (§8.4).
 
 ```
 [ u8 selector | encoding(T_selector) ]
@@ -1036,9 +1036,9 @@ For a variant inside a record field, the entire variant (selector +
 payload) lives in the dynamic region; the fixed region holds an
 offset slot pointing at the selector byte.
 
-(If a variant has > 256 alternatives, it must be widened to u16.
-This is an open extension; today implementations should
-static-assert against > 256.)
+(A variant with more than 256 alternatives is not a PSSZ type, §8.4:
+implementations refuse it at compile time or when the schema is
+checked.)
 
 ### 5.7 Top-level encoding
 
@@ -1555,11 +1555,25 @@ The reference psio implementation exposes the cap as a single
 checks against that constant so the value is grep-able from one
 place.
 
-### 8.4 Variant alternatives
+### 8.4 Element counts
 
-Variant alternative count limited to 256 (selector is u8). Schemas
-exceeding 256 must split into multiple variants or use a different
-encoding.
+| what | limit | why |
+|---|---|---|
+| elements of a `Tuple` (a `Pair` is 2; a method's argument list is a tuple) | **255** | a count that fits in 8 bits, and what language tooling can reasonably instantiate |
+| alternatives of a `Variant` | **256** | the selector is one byte: indexes 0..255 |
+| fields of a record | no limit in the format | an implementation may have one (C++ reflection lists at most 255 members and keywords per record); `max-fields` (§16) is a schema-level discipline |
+
+A tuple of more than 255 elements is not a PSSZ type: a typed
+implementation refuses it when the type is built (C++: a compile-time
+error), and a schema that holds a `Tuple` of more than 255 members is
+invalid — a schema-driven implementation rejects it before reading or
+writing any value. A variant with more than 256 alternatives is refused
+the same way; split it or use a different encoding.
+
+The limit does not change any byte. A tuple's header is the byte size
+of its fixed region (§5.1.1), not its element count, and a fixed region
+of 255 members can be far larger than 255 bytes; nothing on the wire
+counts tuple elements, record fields or list elements.
 
 ## 9. Errors
 

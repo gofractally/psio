@@ -319,6 +319,23 @@ psio_annotation_tree_compile_fail(view_narrowed AT_FAIL_VIEW_NARROWED
 psio_annotation_tree_compile_fail(deep AT_FAIL_DEEP
    "bounds a std::string \\(bytes\\) or a std::vector, map or set \\(elements\\)")
 
+# A tuple has at most 255 elements (docs/pssz-spec.md 8.4): the codec, the
+# width trait and the schema builder refuse a longer one at compile time, and
+# say so. The control (255 elements) must compile.
+set(PSIO_TUPLE_LIMIT_COMMAND
+    ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -DPSIO_EXCEPTIONS_ENABLED=1
+    -ftemplate-depth=2048 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES})
+add_test(NAME psio_pssz_tuple_limit_control_compiles
+         COMMAND ${PSIO_TUPLE_LIMIT_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_tuple_limit_fail.cpp)
+foreach(case ENCODE DECODE WIDTH SCHEMA)
+   string(TOLOWER ${case} case_name)
+   add_test(NAME psio_pssz_tuple_limit_${case_name}_compile_fail
+            COMMAND ${PSIO_TUPLE_LIMIT_COMMAND} -DTUPLE_LIMIT_FAIL_${case}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/pssz_tuple_limit_fail.cpp)
+   set_tests_properties(psio_pssz_tuple_limit_${case_name}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "a tuple has at most 255 elements")
+endforeach()
+
 # Shared cross-language conformance fixture (conformance/pssz-vectors.json).
 # The emitter generates it from the implementation; the regen test fails when
 # the checked-in file is not what the implementation produces, and the
