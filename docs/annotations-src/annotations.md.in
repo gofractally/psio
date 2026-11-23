@@ -423,7 +423,8 @@ Practical guidance for types without a cap:
 "n/a" = the language states this in the type; "—" = not applicable or not
 planned; **not yet available** = the C++ behaviour of the consistency round
 (merge `85e72cf`) has no committed counterpart in that language at the
-time this table was written. The Python column uses the spellings of
+time this table was written (checked against the Rust commit `f5d825e` and
+the Python commit `326ff58`; no TypeScript commit of the round existed). The Python column uses the spellings of
 `python/src/psio` ([README](../python/README.md)). Schema IR nodes are written as in
 [json.md](json.md#the-schema-ir-as-json). Tooling that is not an annotation
 — the compatibility check, the result codec, the name coders — is in
@@ -439,16 +440,16 @@ time this table was written. The Python column uses the spellings of
 | tuple element / variant alternative | `at<I>(specs)` | tuple: `at(I, ...)`; variant: annotate the enum variant's fields | `at: { 0: { … } }` (tuple index, variant name or index) | `psio.at(i, ...)` (tuple index; union alternative index or name) | the member's bounded node | as length |
 | size cap, width budget | `maxDynamicData(N)` | `#[pssz(max_dynamic_data = N)]` | `record(name, fields, { maxDynamicData: N })` | `@psio.record(max_dynamic_data=N)` | record attribute `maxDynamicData="N"` | pssz (width + enforced), schema-driven codecs, WIT `@maxDynamicData(N)`; the C++ `validate` of the other binary formats (bin, ssz, borsh, …; not json, not key) applies it to the root input size |
 | fixed layout | `definitionWillNotChange()` | `#[psio(definition_will_not_change)]` | `record(name, fields, { fixed: true })` | `@psio.record(definition_will_not_change=True)` | record attribute `definitionWillNotChange` | pssz (no header), bin / borsh / bincode fast paths, evolution check |
-| field-count cap | `maxFields(N)`, N ≤ 255, on a record or in `method(...)` | not yet available | `{ maxFields: N }`: recorded as the attribute; enforcement not yet available | `@psio.record(max_fields=N)`: recorded as the attribute; enforcement not yet available | attribute `maxFields="N"` on the record's `Object`, on an argument list's `Object` and on its `Func` | C++: compile time (more fields than N, N > 255), `pssz_evolves_from`, the schema-driven codecs (a schema with more members than its `maxFields` is invalid), WIT `@maxFields(N)`. No byte, no width ([5.6](#56-maxfieldsn)) |
-| the type is its member | `transparent()`; the member may carry `utf8`, `max<N>` and position specs | `#[psio(transparent)]`; the member may carry `#[psio(max = N)]` | `transparent(name, T)` with a bounded `T` (`boundedUtf8(80)`) | `NewType("Name", T)`; `@psio.transparent` on a one-field class | a named alias of the member's (bounded) type | pssz, key, json/ijson, views, schema, GraphQL |
+| field-count cap | `maxFields(N)`, N ≤ 255, on a record or in `method(...)` | `#[psio(max_fields = N)]` on a record or an interface function | `{ maxFields: N }`: recorded as the attribute; enforcement not yet available | `@psio.record(max_fields=N)`, `@psio.method(max_fields=N)` | attribute `maxFields="N"` on the record's `Object`, on an argument list's `Object` and on its `Func` | where the type is declared (C++ and Rust: compile time; Python: at declaration), the schema-driven codecs (a schema with more members than its `maxFields` is invalid), C++ `pssz_evolves_from`, WIT `@maxFields(N)`. No byte, no width ([5.6](#56-maxfieldsn)) |
+| the type is its member | `transparent()`; the member may carry `utf8`, `max<N>` and position specs | `#[psio(transparent)]`; the member may carry `#[psio(max = N)]` | `transparent(name, T)` with a bounded `T` (`boundedUtf8(80)`) | `NewType("Name", T)`; `@psio.transparent` on a one-field class, whose field may carry `psio.max(N)` and position bounds | a named alias of the member's (bounded) type | pssz, key, json/ijson, views, schema, GraphQL |
 | value check | `invariant(fn)`, `PSIO_INVARIANT(T, fn)` | `#[psio(invariant = "path")]` | `custom(id, wire, { check })` | `@psio.invariant` on a method; `psio.custom(id, check=…)` | `Custom{wire type, id}` + a handler | pssz, key, json/ijson writers and checking readers; not the trusted decode, not views |
 | integer text form | `attr(f, json_string)`, `json_number`, `ijson_string`, `ijson_number`; type level via `PSIO_TYPE_ATTRS` | `#[json(json_string)]`, … on a field or the type | `field(T, { jsonInt: 'string', ijsonInt: 'number' })` | `Annotated[u64, psio.json_string]`, `psio.json_number`, `psio.ijson_string`, `psio.ijson_number` | member attributes `jsonInt`, `ijsonInt` = `"number"` / `"string"` | json, ijson, schema-driven text |
 | custom text form | `PSIO_ADAPTER(T, psio::text_category, Impl)`; per member `attr(f, as<Tag>)` | `#[psio(custom)]` + `psio::json_text_form!(T)` | `custom(id, wire, { toText, fromText })` | `@psio.to_text` / `@psio.from_text` methods; `psio.custom(id, to_text=…, from_text=…)` | `Custom{wire type, id}` (a member `as<Tag>` is not expressible) | json, ijson, GraphQL scalar; binary unchanged |
 | enumerator names | `PSIO_REFLECT_ENUM(E, a, b, …)` | the derive on a `#[repr(int)]` enum; `#[psio(name = "…")]`, `#[psio(other)]` | `enumeration(u8, { a: 0, b: 2 })` | `@psio.enum(psio.u8)` on an `enum.Enum`; `other=True` | `Enum{type, members}` | json, ijson, GraphQL; binary is the integer |
-| method arguments and result | `method(name, attr(p, specs)…, maxDynamicData(N), maxFields(N), returns(specs))` | `#[psio::interface]`: `#[psio(...)]` on a parameter, `#[pssz(max_dynamic_data = N)]` and `#[psio(returns(...))]` on the function; `max_fields`: not yet available | `argumentTuple(params, { maxDynamicData: N })`; return-value annotations and an `Interface` producer: not yet available | `@psio.interface` on a class; parameters and the return hint are `Annotated[...]`; `@psio.method(max_dynamic_data=N)`; `max_fields` on a method: not yet available | `Func{params, result, attributes: maxDynamicData, maxFields}`; the argument list is an `Object` with `tuple="named"` / `"positional"` | as records; JSON: a named list is an object or the positional array ([5.11](#511-methodname-)) |
+| method arguments and result | `method(name, attr(p, specs)…, maxDynamicData(N), maxFields(N), returns(specs))` | `#[psio::interface]`: `#[psio(...)]` on a parameter, `#[pssz(max_dynamic_data = N)]`, `#[psio(max_fields = N)]`, `#[psio(positional)]` and `#[psio(returns(...))]` on the function | `argumentTuple(params, { maxDynamicData: N })`; return-value annotations and an `Interface` producer: not yet available | `@psio.interface` on a class; parameters and the return hint are `Annotated[...]`; `@psio.method(max_dynamic_data=N, max_fields=N)` | `Func{params, result, attributes: maxDynamicData, maxFields}`; the argument list is an `Object` with `tuple="named"` / `"positional"` | as records; JSON: a named list is an object or the positional array ([5.11](#511-methodname-)) |
 | protobuf field number | `attr(f, field<N>)` | — | — | — | — | protobuf only |
 | deprecation | `attr(f, deprecated_spec{.version = "…"})` | — | — | — | — | GraphQL (`@deprecated`) only |
-| order, uniqueness of a list's elements | `sorted`, `unique` (`sorted_unique`), `sorted_spec{.ascending = false}`, `unique_keys` | not yet available | not yet available | not yet available | — (not in the Schema IR: typed codecs only) | C++ pssz, json/ijson and key writers and checking readers; order is that of the elements' key bytes ([5.13](#513-sorted-unique-unique_keys)) |
+| order, uniqueness of a list's elements | `sorted`, `unique` (`sorted_unique`), `sorted_spec{.ascending = false}`, `unique_keys` | not yet available | not yet available | `psio.sorted`, `psio.unique`, `psio.sorted(descending=True)`, `psio.unique_keys` | — (not in the Schema IR: typed codecs only) | the typed pssz, json/ijson and key writers and checking readers (C++, Python); order is that of the elements' key bytes ([5.13](#513-sorted-unique-unique_keys)) |
 | reserved vocabulary | `hex_spec`, `skip_spec`, `default_value_spec`, `default_factory_spec`, `since_spec`, `unstable_spec`, `final_v`, `canonical`, `flags`, `padding` | Rust has `#[psio(skip)]` (a different, implemented meaning) | — | — | — | RESERVED: nothing reads them ([5.14](#514-reserved-vocabulary)) |
 
 ### 4.1 Tooling per language
@@ -459,13 +460,13 @@ the table above.
 | | C++ | Rust | TypeScript | Python |
 |---|---|---|---|---|
 | compatibility check of two revisions | `psio::pssz_evolves_from<Old, New>` (compile time): fields, widths, bounds that only widen, `utf8`, order specs, caps, `maxFields` ([8](#8-evolution-what-may-change-after-publication)) | `pssz::pssz_evolves_from::<Old, New>()` (`const fn`): refuses **any** change of a bound, which is stricter than the rule; widening and the `maxFields` rule: not yet available | not yet available (no checker) | not yet available (no checker) |
-| key writer checks bounds and UTF-8 | `psio::to_key` (throws), `psio::encode_key_checked` (status) | `psio::try_to_key` on derived members; a length check in the key writer of the `BoundedString` / `BoundedList` wrapper types: not yet available | `T.encodeKey` | `psio.to_key` |
-| JSON form of an argument list | writes an object when every parameter is named, else an array; reads either for a named list | writes the object; reading the positional array: not yet available | writes the object; reading the positional array: not yet available | writes the object; reading the positional array: not yet available |
-| result encoded as its `returns(...)` type | `psio::encode_method_result<T, I>`, `decode_method_result`, `validate_method_result`, `check_method_result` | `Method::result_to_pssz` / `result_from_pssz` of `args::<method>` | not yet available | `psio.interface_of(T)[name].result.to_pssz` / `.from_pssz`; the `result.*` schema attributes: not yet available |
+| key writer checks bounds and UTF-8 | `psio::to_key` (throws), `psio::encode_key_checked` (status) | `psio::try_to_key`: derived members and the `BoundedString` / `BoundedRawString` / `BoundedList` / `BoundedMap` / `BoundedSet` wrapper types | `T.encodeKey` | `psio.to_key` |
+| JSON form of an argument list | writes an object when every parameter is named, else an array; reads either for a named list | writes the object and reads either; a function marked `#[psio(positional)]` is the array only | writes the object; reading the positional array: not yet available | a named list writes the object and reads either; a list without names (`psio.arguments(..., named=False)`) is the array only |
+| result encoded as its `returns(...)` type | `psio::encode_method_result<T, I>`, `decode_method_result`, `validate_method_result`, `check_method_result` | `Method::result_to_pssz` / `result_from_pssz` of `args::<method>` | not yet available | `result_to_pssz` / `result_from_pssz` / `validate_result` of `psio.interface_of(T)[name]` |
 | interface → Schema IR `Interface` / `Func` | `PSIO_INTERFACE` + `SchemaBuilder::insert_interface<T>()` | `#[psio::interface]` | not yet available (schema-driven reading only) | `@psio.interface` |
-| account-name coder (`name_to_number`) | `psio::name_to_number`, `psio::number_to_name` (`psio/name.hpp`) | `psio::compress_name::name_to_number`; the round-trip rule of this round: not yet available | not yet available | not yet available |
-| method-name coder (`method_to_number`) | `psio::detail::method_to_number`, `number_to_method` (`psio/compress_name.hpp`); `psio::hash_name` | `psio::compress_name::method_to_number`; the round-trip-or-hash rule: not yet available | `nameToNumber` / `numberToName` of `js/src/compress-name.ts` (the method coder, despite the name); the round-trip-or-hash rule: not yet available | not yet available |
-| tests driven by the new shared fixtures `conformance/interface-vectors.json` and `conformance/name-vectors.json` | `psio_interface_conformance_regen`, `psio_name_conformance_regen` (the emitters check the committed files) | not yet available | not yet available | not yet available |
+| account-name coder (`name_to_number`) | `psio::name_to_number`, `psio::number_to_name` (`psio/name.hpp`) | `psio::compress_name::name_to_number` | not yet available | `psio.name_to_number`, `psio.number_to_name` |
+| method-name coder (`method_to_number`) | `psio::detail::method_to_number`, `number_to_method` (`psio/compress_name.hpp`); `psio::hash_name` | `psio::compress_name::method_to_number` | `nameToNumber` / `numberToName` of `js/src/compress-name.ts` (the method coder, despite the name); the round-trip-or-hash rule: not yet available | `psio.method_to_number`, `psio.number_to_method`, `psio.is_hash_name` |
+| tests driven by the new shared fixtures `conformance/interface-vectors.json` and `conformance/name-vectors.json` | `psio_interface_conformance_regen`, `psio_name_conformance_regen` (the emitters check the committed files) | `name-vectors.json`: `rust/psio/tests/compress_name.rs`; `interface-vectors.json`: not yet available | not yet available | `python/tests/test_consistency.py` (names), `python/tests/test_interface_conformance.py` |
 
 ## 5. The annotations
 
@@ -786,9 +787,9 @@ are one positional shape and share one limit
 | | |
 |---|---|
 | C++ | `maxFields(N)` in `PSIO_REFLECT` or in `method(...)`; `PSIO_TYPE_ATTRS(T, psio::max_fields_spec{N})`; read with `psio::max_fields_v<T>`, `psio::effective_max_fields_v<T>` (the cap when declared, else today's field count), `psio::reflect<T>::method_max_fields<I>` |
-| Rust | not yet available |
+| Rust | `#[psio(max_fields = N)]` on a record or on an interface function: refused at compile time beyond N or 255; `pssz::dynamic::validate_schema` checks a whole schema. The `maxFields` rule of `pssz_evolves_from`: not yet available |
 | TypeScript | `record(name, fields, { maxFields: N })` records the attribute; enforcement: not yet available |
-| Python | `@psio.record(max_fields=N)` records the attribute; enforcement: not yet available |
+| Python | `@psio.record(max_fields=N)`, `@psio.method(max_fields=N)`: enforced at declaration and in schemas (`Schema.validate()` checks a whole schema) |
 
 **Mistakes** (compile errors):
 `psio: the record has more fields than its maxFields(N) allows`;
@@ -825,7 +826,11 @@ has a name in the application — a memo, a URL, a tag list — and appears in
 several records and argument lists: the bound is stated once, and a
 parameter of type `Memo` needs no `attr`
 ([5.11](#511-methodname-), `tut-9c`). Rust: `struct Memo(#[psio(max = 80)] String)`
-with `#[psio(transparent)]`; TypeScript: `transparent('Memo', boundedUtf8(80))`.
+with `#[psio(transparent)]`; TypeScript: `transparent('Memo', boundedUtf8(80))`;
+Python: `@psio.transparent` on a dataclass whose one field is
+`Annotated[str, psio.max(80)]`. The shared rows are the `transparent-bounds`
+class of `conformance/pssz-vectors.json` (types `Memo`, `WrapMemo`,
+`MemoRec`).
 
 | | |
 |---|---|
@@ -1014,9 +1019,9 @@ annotated `std::string`:
 
 | | |
 |---|---|
-| Rust | `#[psio::interface] trait Bank { #[pssz(max_dynamic_data = 1024)] fn transfer(&mut self, …, #[psio(max = 80)] memo: String); #[psio(returns(max = 8))] fn symbol(&self, token: u32) -> String; }`. The argument record is `bank::args::transfer`; the result codec is its `Method::result_to_pssz` / `result_from_pssz`. `max_fields`: not yet available |
+| Rust | `#[psio::interface] trait Bank { #[pssz(max_dynamic_data = 1024)] fn transfer(&mut self, …, #[psio(max = 80)] memo: String); #[psio(returns(max = 8))] fn symbol(&self, token: u32) -> String; }`. The argument record is `bank::args::transfer`; the result codec is its `Method::result_to_pssz` / `result_from_pssz`. `#[psio(max_fields = N)]` caps the parameter count; `#[psio(positional)]` drops the parameter names from the interface (JSON: the array only) |
 | TypeScript | `argumentTuple({ …, memo: field(rawString, { utf8: true, max: 80 }) }, { maxDynamicData: 1024 })`. Return-value annotations, a result codec and an `Interface` producer: not yet available |
-| Python | `@psio.interface(name="bank") class Bank(Protocol)`: parameters are `Annotated[...]` hints, `@psio.method(max_dynamic_data=1024)` caps one method, the return hint carries the result's annotations (`-> Annotated[str, psio.max(8)]`). `psio.interface_of(Bank)["transfer"].args` is the argument codec, `["symbol"].result` the result codec. `max_fields` on a method and the `result.*` schema attributes: not yet available |
+| Python | `@psio.interface(name="bank") class Bank(Protocol)`: parameters are `Annotated[...]` hints, `@psio.method(max_dynamic_data=1024)` caps one method, the return hint carries the result's annotations (`-> Annotated[str, psio.max(8)]`). `psio.interface_of(Bank)["transfer"].args` is the argument codec; `result_to_pssz` / `result_from_pssz` / `validate_result` of a method encode its result as the type the return hint describes. `@psio.method(max_fields=N)` caps the parameter count |
 | Schema IR | `PSIO_INTERFACE(T, types())` + `SchemaBuilder::insert_interface<T>()`: `Func{name, params, result, attributes}`; parameters and result are the bounded types; the caps are the function attributes `maxDynamicData` and `maxFields`. The argument list as a type is an `Object` with the attribute `tuple="named"` (every parameter has a name) or `"positional"` (members named `"0"`, `"1"`, …). `emit_wit` writes `@maxDynamicData(N)` above the function. The shared rows are [`conformance/interface-vectors.json`](../conformance/interface-vectors.md) |
 
 **Enforcement.** Arguments: as record members.
@@ -1109,7 +1114,9 @@ trusted decode, not views.
 **Schema IR.** **Not in the Schema IR**: a schema-driven reader of the same
 schema does not know the constraint. Treat it as a typed-codec check until
 the IR carries it ([pssz-spec.md §3.5](pssz-spec.md#35-bounds-by-annotation)).
-Rust, TypeScript, Python: not yet available.
+Python: `psio.sorted`, `psio.unique`, `psio.sorted(descending=True)`,
+`psio.unique_keys` in the `Annotated[...]` metadata, enforced the same way.
+Rust, TypeScript: not yet available.
 
 **Notes.** `std::map` and `std::set` carry `sorted` / `unique_keys`
 inherently, as a statement of what the type is; the codecs enforce their
@@ -1776,9 +1783,8 @@ encoding) / `psio::try_to_pssz(&v)`; `psio::from_pssz::<T>(&bytes)`
 Not available in Rust: `exact` / `min`, field numbers, a `utf8` key (the
 type decides). Not yet available (the mirror of the latest C++ consistency
 round, [4](#4-master-table) and [4.1](#41-tooling-per-language)):
-`maxFields`, `sorted` / `unique`, a widened bound in `pssz_evolves_from`,
-the positional-array form of JSON arguments, the round-trip rule of the
-name coders.
+`sorted` / `unique`, a widened bound and the `maxFields` rule in
+`pssz_evolves_from`, a test on `interface-vectors.json`.
 
 ```typescript
 import { argumentTuple, boundedUtf8, custom, field, list, optional, rawString, record, transparent, u32, u64, type Infer } from 'psio';
@@ -1898,7 +1904,4 @@ Python entry points: `psio.to_pssz(value[, T])`, `psio.from_pssz(T, data)`
 (`width`, `max_encoded_size`, `max_dynamic_data`). Every failure is a
 `psio.PsioError`. Not available in Python: a compatibility check
 (`pssz_evolves_from`), a mutable view, WIT / GraphQL emitters, protobuf
-field numbers. Not yet available ([4](#4-master-table),
-[4.1](#41-tooling-per-language)): enforcement of `maxFields`, `sorted` /
-`unique`, the positional-array form of JSON arguments, the `result.*`
-schema attributes, name coders.
+field numbers.

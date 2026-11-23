@@ -84,7 +84,7 @@ The C++ snippets are consecutive lines of
 | # | Rule | Reference |
 |---|---|---|
 | X1 | Mirror a declaration field by field. C++ `utf8 \| max<N>` on `std::string` = Rust `#[psio(max = N)] String` = TS `field(rawString, { utf8: true, max: N })` = Python `Annotated[str, psio.max(N)]`. C++ `max<N>` on `std::string` = Rust `#[psio(max = N)] RawString` = TS `field(rawString, { max: N })` = Python `Annotated[psio.RawString, psio.max(N)]`. | [4](annotations.md#4-master-table) |
-| X2 | Mirror the cap: `maxDynamicData(N)` = `#[pssz(max_dynamic_data = N)]` = `{ maxDynamicData: N }` = `@psio.record(max_dynamic_data=N)`. Mirror `definitionWillNotChange()` = `#[psio(definition_will_not_change)]` = `{ fixed: true }` = `@psio.record(definition_will_not_change=True)`. A missing or different cap changes the bytes: it selects the widths beneath the record too. | [4](annotations.md#4-master-table) |
+| X2 | Mirror the caps: `maxDynamicData(N)` = `#[pssz(max_dynamic_data = N)]` = `{ maxDynamicData: N }` = `@psio.record(max_dynamic_data=N)`; `maxFields(N)` = `#[psio(max_fields = N)]` = `{ maxFields: N }` = `@psio.record(max_fields=N)`. Mirror `definitionWillNotChange()` = `#[psio(definition_will_not_change)]` = `{ fixed: true }` = `@psio.record(definition_will_not_change=True)`. A missing or different cap changes the bytes: it selects the widths beneath the record too. | [4](annotations.md#4-master-table) |
 | X3 | Do not use `exact<N>` / `min<N>` in a type that Rust must mirror (not available there). Before relying on `maxFields`, `sorted` / `unique`, the array form of JSON arguments or a name number in another language, check its cell in the master table: what is marked "not yet available" there is C++-only. | [4](annotations.md#4-master-table), [4.1](annotations.md#41-tooling-per-language) |
 | X4 | Confirm agreement by comparing the offset width and the bytes of one sample value in each language. | [Rust, TypeScript and Python snippets](annotations.md#rust-typescript-and-python-snippets) |
 | X5 | Use only spellings of the master table. Python: `Annotated[T, psio.max(N)]`, `psio.element(...)`, `psio.keys(...)`, `psio.values(...)`, `psio.at(i, ...)`, `@psio.record(...)`, `@psio.transparent`, `@psio.invariant`, `@psio.enum(...)`, `@psio.interface`, `@psio.method(...)`. | [4](annotations.md#4-master-table) |
@@ -412,9 +412,9 @@ and is `k + r` if that is ≤ 255, else `2k + r` if that is ≤ 65535, else
 - `pssz_evolves_from` compares fields, widths, bounds, `utf8`, order specs
   and caps; it does not compare enumerators or invariants. It is
   one-directional for bounds and caps.
-- `sorted` / `unique` / `unique_keys` are enforced by the typed codecs and
-  are **not in the Schema IR**; the Rust, TypeScript and Python mirrors are
-  marked in the master table.
+- `sorted` / `unique` / `unique_keys` are enforced by the typed codecs
+  (C++, Python) and are **not in the Schema IR**; Rust and TypeScript do
+  not have them yet.
 - `maxFields` is enforced at compile time, in the schema-driven codecs and
   by `pssz_evolves_from`; it changes no byte.
 - The remaining unused specs (`hex_spec`, `padding`, `skip_spec`, …) are
