@@ -37,6 +37,15 @@
 //!   - [`BoundedString<N>`] ⇔ C++ `psio::utf8_string<N>`.
 //!   - [`RawString`] ⇔ C++ `std::string`: raw bytes, no UTF-8 check.
 //!   - [`BoundedRawString<N>`] ⇔ C++ `std::string` with `length_bound{.max=N}`.
+//!
+//! A raw string is usually text and reads like it: [`RawString`],
+//! [`BoundedRawString<N>`] and the borrowed [`RawStr`] compare with `&str`,
+//! `String` and byte slices, deref to `[u8]`, give the text with `to_str()`
+//! (an error when the bytes are not UTF-8) or `to_string_lossy()`, print
+//! with a lossy `Display` (as `String::from_utf8_lossy`) and convert to a
+//! `String` with `TryFrom`. Their `Debug` is the text, or an escaped byte
+//! string when the bytes are not UTF-8. The bounded type is built with
+//! `TryFrom`, which enforces the bound.
 
 pub use crate::pssz_dynamic as dynamic;
 pub use crate::pssz_evolves::{pssz_evolves_from, shape_evolves, shape_same, Shape, ShapeKind};
@@ -957,7 +966,32 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
 /// Raw byte string: C++ `std::string`. Same wire shape as `String` with no
 /// UTF-8 requirement: any bytes, for every reader, the exact (strict) ones
 /// included.
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// It is usually text, so it reads like text (the same API on
+/// [`BoundedRawString`] and [`RawStr`]):
+///
+/// ```
+/// use psio::pssz::RawString;
+/// let memo = RawString::from("hello");
+/// assert_eq!(memo, "hello");                    // also String, [u8], b"..."
+/// assert_eq!(memo.to_str().unwrap(), "hello");  // Err when not UTF-8
+/// assert_eq!(format!("{memo}"), "hello");       // Display is lossy
+/// assert!(memo.starts_with(b"he"));             // derefs to [u8]
+///
+/// let bytes = RawString::from(&b"a\xffb"[..]);
+/// assert!(bytes.to_str().is_err());
+/// assert_eq!(bytes.to_string_lossy(), "a\u{fffd}b");
+/// assert_eq!(format!("{bytes:?}"), r#"RawString(b"a\xffb")"#);
+/// assert!(String::try_from(bytes).is_err());
+/// ```
+///
+/// `Display` (and so `to_string()`) is lossy, as `String::from_utf8_lossy`:
+/// invalid sequences print as U+FFFD. Use [`to_str`](Self::to_str) or
+/// `String::try_from` where the difference matters. `Debug` shows the text
+/// when the bytes are UTF-8 and an escaped byte string otherwise. Equality,
+/// order and hash are those of the bytes (so `Borrow<[u8]>` holds); none of
+/// this takes part in the wire, key, JSON or schema form.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RawString(pub Vec<u8>);
 impl RawString {
     pub fn new() -> Self { Self(Vec::new()) }
@@ -965,20 +999,33 @@ impl RawString {
     pub fn as_raw_str(&self) -> RawStr<'_> { RawStr(&self.0) }
     /// The text, when the bytes happen to be UTF-8.
     pub fn to_str(&self) -> PsszResult<&str> { utf8(&self.0) }
+    pub fn into_bytes(self) -> Vec<u8> { self.0 }
 }
 impl From<Vec<u8>> for RawString { fn from(v: Vec<u8>) -> Self { Self(v) } }
 impl From<&[u8]> for RawString { fn from(v: &[u8]) -> Self { Self(v.to_vec()) } }
 impl From<&str> for RawString { fn from(v: &str) -> Self { Self(v.as_bytes().to_vec()) } }
 impl From<String> for RawString { fn from(v: String) -> Self { Self(v.into_bytes()) } }
+impl From<RawStr<'_>> for RawString { fn from(v: RawStr<'_>) -> Self { Self(v.0.to_vec()) } }
+impl From<RawString> for Vec<u8> { fn from(v: RawString) -> Self { v.0 } }
+/// The text, when the bytes are UTF-8; the error hands the bytes back.
+impl TryFrom<RawString> for String {
+    type Error = std::string::FromUtf8Error;
+    fn try_from(v: RawString) -> Result<Self, Self::Error> { String::from_utf8(v.0) }
+}
 
-/// Borrowed counterpart of [`RawString`]; encodes identically.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Borrowed counterpart of [`RawString`]; encodes identically and has the
+/// same text conveniences.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RawStr<'a>(pub &'a [u8]);
 impl<'a> RawStr<'a> {
     pub fn as_bytes(&self) -> &'a [u8] { self.0 }
+    /// The text, when the bytes happen to be UTF-8.
     pub fn to_str(&self) -> PsszResult<&'a str> { utf8(self.0) }
     pub fn to_owned(&self) -> RawString { RawString(self.0.to_vec()) }
 }
+impl<'a> From<&'a [u8]> for RawStr<'a> { fn from(v: &'a [u8]) -> Self { Self(v) } }
+impl<'a> From<&'a str> for RawStr<'a> { fn from(v: &'a str) -> Self { Self(v.as_bytes()) } }
+impl<'a> From<&'a RawString> for RawStr<'a> { fn from(v: &'a RawString) -> Self { Self(&v.0) } }
 
 /// A raw string is any bytes, for every reader: strict means exact-schema
 /// and canonical, not "strings are text" (docs/pssz-spec.md 8.3).
@@ -1054,7 +1101,11 @@ impl<F: PsszFormat> PsszValidate<F> for RawString {
 /// Raw byte string of at most N bytes: C++ `std::string` member annotated
 /// `length_bound{.max = N}`. The bound takes part in width inference exactly
 /// as in C++. Rust also enforces it on encode, decode and validate.
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// The text conveniences are those of [`RawString`]. Conversions into it
+/// are `TryFrom` (`&str`, `String`, `&[u8]`, `Vec<u8>`, `RawString`) and
+/// fail past N bytes.
+#[derive(Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BoundedRawString<const N: usize>(pub Vec<u8>);
 impl<const N: usize> BoundedRawString<N> {
     pub fn new() -> Self { Self(Vec::new()) }
@@ -1063,6 +1114,41 @@ impl<const N: usize> BoundedRawString<N> {
         Ok(Self(v))
     }
     pub fn as_bytes(&self) -> &[u8] { &self.0 }
+    pub fn as_raw_str(&self) -> RawStr<'_> { RawStr(&self.0) }
+    /// The text, when the bytes happen to be UTF-8.
+    pub fn to_str(&self) -> PsszResult<&str> { utf8(&self.0) }
+    pub fn into_bytes(self) -> Vec<u8> { self.0 }
+}
+impl<const N: usize> TryFrom<Vec<u8>> for BoundedRawString<N> {
+    type Error = PsszError;
+    fn try_from(v: Vec<u8>) -> PsszResult<Self> { Self::try_from_bytes(v) }
+}
+impl<const N: usize> TryFrom<&[u8]> for BoundedRawString<N> {
+    type Error = PsszError;
+    fn try_from(v: &[u8]) -> PsszResult<Self> {
+        // Checked before the copy: an oversized input allocates nothing.
+        if v.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
+        Ok(Self(v.to_vec()))
+    }
+}
+impl<const N: usize> TryFrom<&str> for BoundedRawString<N> {
+    type Error = PsszError;
+    fn try_from(v: &str) -> PsszResult<Self> { Self::try_from(v.as_bytes()) }
+}
+impl<const N: usize> TryFrom<String> for BoundedRawString<N> {
+    type Error = PsszError;
+    fn try_from(v: String) -> PsszResult<Self> { Self::try_from_bytes(v.into_bytes()) }
+}
+impl<const N: usize> TryFrom<RawString> for BoundedRawString<N> {
+    type Error = PsszError;
+    fn try_from(v: RawString) -> PsszResult<Self> { Self::try_from_bytes(v.0) }
+}
+impl<const N: usize> From<BoundedRawString<N>> for RawString { fn from(v: BoundedRawString<N>) -> Self { Self(v.0) } }
+impl<const N: usize> From<BoundedRawString<N>> for Vec<u8> { fn from(v: BoundedRawString<N>) -> Self { v.0 } }
+/// The text, when the bytes are UTF-8; the error hands the bytes back.
+impl<const N: usize> TryFrom<BoundedRawString<N>> for String {
+    type Error = std::string::FromUtf8Error;
+    fn try_from(v: BoundedRawString<N>) -> Result<Self, Self::Error> { String::from_utf8(v.0) }
 }
 impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedRawString<N> {
     pssz_string_consts!(Some(N), "raw_string<=", N);
@@ -1114,6 +1200,142 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedRawString<N> {
         if bytes.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         raw_string(bytes)
     }
+}
+
+/// The text side of the raw string types: what a consumer would otherwise
+/// write a helper for. Bytes in, bytes compared; text only on the way out.
+macro_rules! raw_string_text {
+    ($([$($g:tt)*] $ty:ty, $name:literal;)*) => {$(
+        impl<$($g)*> $ty {
+            /// Length in bytes.
+            #[inline]
+            pub fn len(&self) -> usize { self.as_bytes().len() }
+            #[inline]
+            pub fn is_empty(&self) -> bool { self.as_bytes().is_empty() }
+            /// The text, with each invalid UTF-8 sequence replaced by
+            /// U+FFFD, as `String::from_utf8_lossy`. Borrows when the bytes
+            /// are UTF-8.
+            pub fn to_string_lossy(&self) -> Cow<'_, str> {
+                match utf8_str(self.as_bytes()) {
+                    Some(text) => Cow::Borrowed(text),
+                    None => String::from_utf8_lossy(self.as_bytes()),
+                }
+            }
+        }
+        /// Lossy, as `String::from_utf8_lossy`: invalid UTF-8 prints as
+        /// U+FFFD. Formatter width, fill and precision apply as for `str`.
+        impl<$($g)*> std::fmt::Display for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                std::fmt::Display::fmt(&*self.to_string_lossy(), f)
+            }
+        }
+        /// The text when the bytes are UTF-8, an escaped byte string
+        /// (`b"\xff..."`) otherwise.
+        impl<$($g)*> std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let bytes = self.as_bytes();
+                match utf8_str(bytes) {
+                    Some(text) => f.debug_tuple($name).field(&text).finish(),
+                    None => f
+                        .debug_tuple($name)
+                        .field(&format_args!("b\"{}\"", bytes.escape_ascii()))
+                        .finish(),
+                }
+            }
+        }
+        impl<$($g)*> std::ops::Deref for $ty {
+            type Target = [u8];
+            #[inline]
+            fn deref(&self) -> &[u8] { self.as_bytes() }
+        }
+        impl<$($g)*> AsRef<[u8]> for $ty {
+            #[inline]
+            fn as_ref(&self) -> &[u8] { self.as_bytes() }
+        }
+        // Sound because the derived `Eq`, `Ord` and `Hash` are those of the
+        // byte slice.
+        impl<$($g)*> std::borrow::Borrow<[u8]> for $ty {
+            #[inline]
+            fn borrow(&self) -> &[u8] { self.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<str> for $ty {
+            #[inline]
+            fn eq(&self, other: &str) -> bool { self.as_bytes() == other.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<&str> for $ty {
+            #[inline]
+            fn eq(&self, other: &&str) -> bool { self.as_bytes() == other.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<String> for $ty {
+            #[inline]
+            fn eq(&self, other: &String) -> bool { self.as_bytes() == other.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<[u8]> for $ty {
+            #[inline]
+            fn eq(&self, other: &[u8]) -> bool { self.as_bytes() == other }
+        }
+        impl<$($g)*> PartialEq<&[u8]> for $ty {
+            #[inline]
+            fn eq(&self, other: &&[u8]) -> bool { self.as_bytes() == *other }
+        }
+        impl<$($g)*> PartialEq<Vec<u8>> for $ty {
+            #[inline]
+            fn eq(&self, other: &Vec<u8>) -> bool { self.as_bytes() == other.as_slice() }
+        }
+        impl<$($g)* const LEN: usize> PartialEq<[u8; LEN]> for $ty {
+            #[inline]
+            fn eq(&self, other: &[u8; LEN]) -> bool { self.as_bytes() == other.as_slice() }
+        }
+        impl<$($g)* const LEN: usize> PartialEq<&[u8; LEN]> for $ty {
+            #[inline]
+            fn eq(&self, other: &&[u8; LEN]) -> bool { self.as_bytes() == other.as_slice() }
+        }
+        impl<$($g)*> PartialEq<$ty> for str {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool { self.as_bytes() == other.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<$ty> for &str {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool { self.as_bytes() == other.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<$ty> for String {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool { self.as_bytes() == other.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<$ty> for [u8] {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool { self == other.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<$ty> for &[u8] {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool { *self == other.as_bytes() }
+        }
+        impl<$($g)*> PartialEq<$ty> for Vec<u8> {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool { self.as_slice() == other.as_bytes() }
+        }
+        impl<$($g)* const LEN: usize> PartialEq<$ty> for [u8; LEN] {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool { self.as_slice() == other.as_bytes() }
+        }
+        impl<$($g)* const LEN: usize> PartialEq<$ty> for &[u8; LEN] {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool { self.as_slice() == other.as_bytes() }
+        }
+    )*};
+}
+raw_string_text! {
+    [] RawString, "RawString";
+    ['a,] RawStr<'a>, "RawStr";
+    [const N: usize,] BoundedRawString<N>, "BoundedRawString";
+}
+impl PartialEq<RawStr<'_>> for RawString {
+    #[inline]
+    fn eq(&self, other: &RawStr<'_>) -> bool { self.0 == other.0 }
+}
+impl PartialEq<RawString> for RawStr<'_> {
+    #[inline]
+    fn eq(&self, other: &RawString) -> bool { self.0 == other.0 }
 }
 
 /// Bound C++ `inferred_bound` assigns to `psio::utf8_string<N>`.

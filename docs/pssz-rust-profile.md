@@ -268,6 +268,16 @@ that returns nothing has no result bytes.
    `pssz::validate_strict`, `PsszView::new_strict`), which check UTF-8 as
    C++ `validate_strict` does. A `String` view returns `Result<&str>` and never
    panics; a `RawString` view hands out bytes.
+
+   A raw string is usually text and reads like it in Rust. `RawString`,
+   `BoundedRawString<N>` and `RawStr` compare with `&str`, `String` and byte
+   slices, deref to `[u8]`, and give the text with `to_str()` (an error when
+   the bytes are not UTF-8), `to_string_lossy()` or `String::try_from`.
+   `Display` is lossy, as `String::from_utf8_lossy`; `Debug` shows the text,
+   or an escaped byte string when the bytes are not UTF-8. A
+   `BoundedRawString<N>` is built with `TryFrom`, which enforces the bound.
+   None of this takes part in an encoding: JSON still refuses a raw string
+   that is not UTF-8.
 7. **Enums.** A field-less enum encodes as its underlying integer and needs an
    explicit `#[repr(u8 | u16 | u32 | u64 | i8 | i16 | i32 | i64)]`; it is a
    fixed-size value stored inline. An enum with payloads is a variant, as C++
