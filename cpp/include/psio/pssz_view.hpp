@@ -155,6 +155,9 @@ namespace psio::view_layout {
             {
                off_next = static_cast<std::uint32_t>(s.size());
             }
+            // Offsets nobody validated must not select bytes outside the list.
+            if (static_cast<std::uint32_t>(off_i) > off_next || off_next > s.size())
+               return {};
             return s.subspan(static_cast<std::uint32_t>(off_i),
                               off_next - static_cast<std::uint32_t>(off_i));
          }
@@ -197,8 +200,72 @@ namespace psio::view_layout {
       // a known trailing optional the writer pruned yields the canonical
       // None payload, and unknown appended slots bound the last known
       // variable field. Getters keep their O(1) prevalidated-input contract.
+      //
+      // The part every member of one record shares — reading the header and
+      // checking that the fixed region it announces is there — is
+      // `record_state`, computed once when a record view is constructed
+      // (view.hpp "Per-record state"); `record_field_span_in` is the rest.
+      inline constexpr std::size_t no_record = ~std::size_t{0};
+
+      template <std::size_t W, typename T>
+      struct record_state
+      {
+         // Size of the fixed region the writer wrote (the header's value;
+         // the known size for a DWNC record). no_record: the bytes cannot
+         // hold the record — every member then reads as absent, exactly as
+         // when the header was examined on each access.
+         std::size_t fixed = no_record;
+
+         constexpr record_state() noexcept = default;
+         explicit record_state(std::span<const char> bytes) noexcept
+         {
+            using namespace ::psio::detail::pssz_impl;
+            constexpr auto fields = record_layout<W, T>(
+               std::make_index_sequence<record_traits<T>::member_count>{});
+            constexpr auto known_size = [&] {
+               std::size_t n = 0;
+               for (auto field : fields) n += field.fixed_size;
+               return n;
+            }();
+            std::size_t fixed_size = known_size;
+            std::size_t body       = bytes.size();
+            if constexpr (!::psio::is_dwnc_v<T>)
+            {
+               if (bytes.size() < W) return;
+               fixed_size = read_offset<W>(bytes, 0);
+               body -= W;
+            }
+            if (fixed_size > body) return;
+            fixed = fixed_size;
+         }
+      };
+
+      template <std::size_t W, typename T, std::size_t N>
+      std::span<const char> record_field_span_in(std::span<const char> bytes,
+                                                 std::size_t           fixed_size) noexcept;
+
+      // Member N given the record's state (the record's bytes include its
+      // header).
+      template <std::size_t W, typename T, std::size_t N>
+      [[gnu::always_inline]] inline std::span<const char> record_field_span(
+         std::span<const char> bytes, const record_state<W, T>& state) noexcept
+      {
+         if (state.fixed == no_record) return {};
+         if constexpr (!::psio::is_dwnc_v<T>)
+            bytes = std::span<const char>{bytes.data() + W, bytes.size() - W};
+         return record_field_span_in<W, T, N>(bytes, state.fixed);
+      }
+
       template <std::size_t W, typename T, std::size_t N>
       std::span<const char> record_field_span(std::span<const char> bytes) noexcept
+      {
+         return record_field_span<W, T, N>(bytes, record_state<W, T>{bytes});
+      }
+
+      // `bytes`: the record after its header; `fixed_size` <= bytes.size().
+      template <std::size_t W, typename T, std::size_t N>
+      [[gnu::always_inline]] inline std::span<const char> record_field_span_in(
+         std::span<const char> bytes, const std::size_t fixed_size) noexcept
       {
          using namespace ::psio::detail::pssz_impl;
          constexpr auto fields = record_layout<W, T>(
@@ -222,14 +289,6 @@ namespace psio::view_layout {
             }
             return known_size;
          }();
-         std::size_t fixed_size = known_size;
-         if constexpr (!::psio::is_dwnc_v<T>)
-         {
-            if (bytes.size() < W) return {};
-            fixed_size = read_offset<W>(bytes, 0);
-            bytes = bytes.subspan(W);
-         }
-         if (fixed_size > bytes.size()) return {};
          if (fixed_off > fixed_size || fields[N].fixed_size > fixed_size - fixed_off)
          {
             if constexpr (omittable_field_v<T, N>)
@@ -297,6 +356,13 @@ namespace psio::view_layout {
       static std::span<const char> record_field_span(
          std::span<const char> s, std::span<const char> = {}) noexcept
       { return detail_pssz::record_field_span<W, T, N>(s); }
+      template <typename T>
+         requires ::psio::detail::pssz_impl::Record<T>
+      using record_state = detail_pssz::record_state<W, T>;
+      template <typename T, std::size_t N>
+      static std::span<const char> record_field_span(
+         std::span<const char> s, std::span<const char>, const record_state<T>& state) noexcept
+      { return detail_pssz::record_field_span<W, T, N>(s, state); }
 
       template <typename T>
       static std::size_t vector_count(std::span<const char> s) noexcept
@@ -372,6 +438,15 @@ namespace psio::view_layout {
          std::span<const char> s, std::span<const char> = {}) noexcept
       {
          return detail_pssz::record_field_span<::psio::auto_pssz_width_v<T>, T, N>(s);
+      }
+      template <typename T>
+         requires ::psio::detail::pssz_impl::Record<T>
+      using record_state = detail_pssz::record_state<::psio::auto_pssz_width_v<T>, T>;
+      template <typename T, std::size_t N>
+      static std::span<const char> record_field_span(
+         std::span<const char> s, std::span<const char>, const record_state<T>& state) noexcept
+      {
+         return detail_pssz::record_field_span<::psio::auto_pssz_width_v<T>, T, N>(s, state);
       }
 
       // A child view re-selects its width from the member's type alone
@@ -469,6 +544,15 @@ namespace psio::view_layout {
          std::span<const char> s, std::span<const char> = {}) noexcept
       {
          return detail_pssz::record_field_span<width<T>, T, N>(s);
+      }
+      template <typename T>
+         requires ::psio::detail::pssz_impl::Record<T>
+      using record_state = detail_pssz::record_state<width<T>, T>;
+      template <typename T, std::size_t N>
+      static std::span<const char> record_field_span(
+         std::span<const char> s, std::span<const char>, const record_state<T>& state) noexcept
+      {
+         return detail_pssz::record_field_span<width<T>, T, N>(s, state);
       }
 
       template <typename T, std::size_t N>
@@ -686,6 +770,12 @@ namespace psio {
 
       using key_type = detail::assoc_key_t<M>;
 
+      // An integer key whose `<` is the order of its `key` encoding (char is
+      // excluded: its key form is the unsigned byte whatever the platform's
+      // char signedness).
+      static constexpr bool key_is_ordered_integer =
+         std::is_integral_v<key_type> && !std::is_same_v<key_type, char>;
+
       // The key of entry i, as a view (or a value for an arithmetic key).
       [[nodiscard]] auto key_at(std::size_t i) const noexcept
       {
@@ -719,6 +809,38 @@ namespace psio {
       template <typename K>
       [[nodiscard]] std::size_t lower_bound(const K& key) const
       {
+         // Integers and strings order exactly as their `key` encodings do,
+         // so the probe compares the key in place: no encoding, no
+         // allocation.
+         if constexpr (key_is_ordered_integer)
+         {
+            const key_type want(key);
+            std::size_t    lo = 0, hi = this->size();
+            while (lo < hi)
+            {
+               const std::size_t mid = lo + (hi - lo) / 2;
+               if (static_cast<key_type>(key_at(mid)) < want)
+                  lo = mid + 1;
+               else
+                  hi = mid;
+            }
+            return lo;
+         }
+         else if constexpr (std::is_same_v<key_type, std::string> &&
+                            std::is_convertible_v<const K&, std::string_view>)
+         {
+            const std::string_view want(key);
+            std::size_t            lo = 0, hi = this->size();
+            while (lo < hi)
+            {
+               const std::size_t mid = lo + (hi - lo) / 2;
+               if (key_at(mid).view_() < want)
+                  lo = mid + 1;
+               else
+                  hi = mid;
+            }
+            return lo;
+         }
          std::vector<char> want, have;
          ::psio::detail::append_key_bytes(key_type(key), want);
          std::size_t lo = 0, hi = this->size();
@@ -739,9 +861,15 @@ namespace psio {
       [[nodiscard]] std::size_t find(const K& key) const
       {
          const std::size_t i = lower_bound(key);
-         if (i < this->size() && key_type(::psio::value_of(key_at(i))) == key_type(key))
+         if (i == this->size())
             return i;
-         return this->size();
+         if constexpr (key_is_ordered_integer)
+            return static_cast<key_type>(key_at(i)) == key_type(key) ? i : this->size();
+         else if constexpr (std::is_same_v<key_type, std::string> &&
+                            std::is_convertible_v<const K&, std::string_view>)
+            return key_at(i).view_() == std::string_view(key) ? i : this->size();
+         else
+            return key_type(::psio::value_of(key_at(i))) == key_type(key) ? i : this->size();
       }
       template <typename K>
       [[nodiscard]] bool contains(const K& key) const

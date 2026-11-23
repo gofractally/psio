@@ -86,6 +86,14 @@ psio_add_test(psio_view_unpack_tests view_unpack_tests.cpp)
 # The view surface beyond member access: list / optional / variant views,
 # comparison, structured bindings, borrowing conversions.
 psio_add_test(psio_view_surface_tests view_surface_tests.cpp)
+
+# Views of nothing and views over bytes nobody validated: default / at()
+# read as zero, and no span leaves the buffer. Built twice: with the
+# per-record state of the PSSZ record view and without it.
+psio_add_test(psio_view_unvalidated_tests view_unvalidated_tests.cpp)
+psio_add_test(psio_view_unvalidated_stateless_tests view_unvalidated_tests.cpp)
+target_compile_definitions(psio_view_unvalidated_stateless_tests PRIVATE
+   PSIO_VIEW_NO_RECORD_STATE=1)
 # Packing from non-owning sources (std::tie, string_view, span,
 # reference_wrapper, C strings, views as values) and to_pssz_as.
 psio_add_test(psio_pssz_source_tests pssz_source_tests.cpp)

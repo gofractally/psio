@@ -404,6 +404,45 @@ namespace psio {
             std::span<const char>{}, std::span<const char>{}))>>
          : std::true_type {};
 
+      // ── Per-record state ───────────────────────────────────────────────
+      //
+      // What every member access of one record would otherwise work out
+      // again (PSSZ: the extensible-record header and whether the fixed
+      // region it announces is there) is worked out once, when the record
+      // view is constructed. A format opts in with
+      //
+      //   template <typename T> using record_state = ...;   // constructible from
+      //                                                     // the record's span,
+      //                                                     // and by default
+      //   template <typename T, std::size_t N>
+      //   static std::span<const char> record_field_span(
+      //      std::span<const char>, std::span<const char> root,
+      //      const record_state<T>&) noexcept;
+      //
+      // and must return from it exactly what the two-argument form returns
+      // for the same bytes. A default-constructed state belongs to a
+      // default-constructed (empty) view. Formats without it are untouched.
+      // Compile with PSIO_VIEW_NO_RECORD_STATE to measure the difference.
+      struct no_record_state
+      {
+         constexpr no_record_state() noexcept = default;
+         constexpr explicit no_record_state(std::span<const char>) noexcept {}
+      };
+      template <typename Fmt, typename T, typename = void>
+      struct record_state
+      {
+         using type = no_record_state;
+         static constexpr bool present = false;
+      };
+#ifndef PSIO_VIEW_NO_RECORD_STATE
+      template <typename Fmt, typename T>
+      struct record_state<Fmt, T, std::void_t<typename traits<Fmt>::template record_state<T>>>
+      {
+         using type = typename traits<Fmt>::template record_state<T>;
+         static constexpr bool present = true;
+      };
+#endif
+
    }  // namespace view_layout
 
    // ── Primitive view ────────────────────────────────────────────────────
@@ -950,11 +989,14 @@ namespace psio {
          //         that don't need pointer-following (ssz, pssz).
          std::span<const char> data_;
          std::span<const char> root_;
+         // The format's per-record state (view_layout "Per-record state");
+         // empty for a format that keeps none.
+         [[no_unique_address]] typename view_layout::record_state<Fmt, T>::type state_{};
 
        public:
          record_view_projection() = default;
          record_view_projection(std::span<const char> s, std::span<const char> r) noexcept
-            : data_(s), root_(r)
+            : data_(s), root_(r), state_(s)
          {
          }
 
@@ -963,8 +1005,12 @@ namespace psio {
          {
             using FieldT = std::remove_cvref_t<
                typename ::psio::reflect<T>::template member_type<N>>;
-            auto field_span =
-               view_layout::traits<Fmt>::template record_field_span<T, N>(
+            std::span<const char> field_span;
+            if constexpr (view_layout::record_state<Fmt, T>::present)
+               field_span = view_layout::traits<Fmt>::template record_field_span<T, N>(
+                  data_, root_, state_);
+            else
+               field_span = view_layout::traits<Fmt>::template record_field_span<T, N>(
                   data_, root_);
             if constexpr (std::is_arithmetic_v<FieldT>
                           || std::is_same_v<FieldT, bool>)
