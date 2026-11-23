@@ -427,7 +427,9 @@ pub fn reserved_custom_id(id: &str) -> bool {
     wire_custom_id(id) || id == "box" || crate::time::reserved_time_schema_id(id)
 }
 
-pub trait ToPsszSchema: 'static {
+/// The schema of a type. A type that borrows (`struct S<'a> { b: &'a [u8] }`)
+/// has the schema of its owned form: a lifetime is not part of a schema.
+pub trait ToPsszSchema {
     fn schema_name() -> Option<String> {
         None
     }
@@ -453,6 +455,40 @@ pub trait ToPsszSchema: 'static {
     }
 }
 
+/// The identity of `T` with its lifetimes erased: `TypeId::of::<T>()` for a
+/// type that is `'static`, and for one that is not, the id of that type
+/// with every lifetime replaced by `'static` (`S<'a>` and `S<'static>` are
+/// one type to a schema). Only compared: nothing is cast on its strength.
+pub(crate) fn erased_type_id<T: ?Sized>() -> TypeId {
+    trait Erased {
+        fn id(&self) -> TypeId
+        where
+            Self: 'static;
+    }
+    impl<T: ?Sized> Erased for std::marker::PhantomData<T> {
+        fn id(&self) -> TypeId
+        where
+            Self: 'static,
+        {
+            TypeId::of::<T>()
+        }
+    }
+    let marker = std::marker::PhantomData::<T>;
+    let erased: &dyn Erased = &marker;
+    // SAFETY: the transmute changes nothing but the lifetime bound of the
+    // trait object (`dyn Erased + '_` to `dyn Erased + 'static`); both are
+    // the same fat pointer, to a `PhantomData<T>`, which is zero-sized and
+    // holds no reference, and the pointer does not outlive `marker`. The
+    // one method called through it, `id`, reads nothing from `self` and
+    // returns a `TypeId`, which carries no lifetime: `TypeId::of` asks for
+    // `'static` because it cannot tell lifetimes apart, which is exactly
+    // what is wanted here. No value of type `T`, and nothing borrowed for a
+    // lifetime of `T`, exists or is touched. (The technique of the `typeid`
+    // crate.)
+    let erased = unsafe { std::mem::transmute::<&dyn Erased, &(dyn Erased + 'static)>(erased) };
+    erased.id()
+}
+
 #[derive(Default)]
 pub struct SchemaBuilder {
     schema: Schema,
@@ -464,7 +500,7 @@ impl SchemaBuilder {
         Self::default()
     }
     pub fn insert<T: ToPsszSchema>(&mut self) -> PsszResult<AnyType> {
-        let id = TypeId::of::<T>();
+        let id = erased_type_id::<T>();
         if let Some(name) = self.names.get(&id) {
             return Ok(AnyType::named(name.clone()));
         }
@@ -596,6 +632,36 @@ impl<T: ToPsszSchema> ToPsszSchema for Box<T> {
         })))
     }
 }
+// A reference is what it refers to, in a schema as on the wire: `&T` is
+// `T`, `&str` is `String` and `&[T]` is `Vec<T>`, the same named type and
+// not a second one beside it. So a record that borrows has the schema of
+// its owned form.
+macro_rules! schema_as_owned {
+    ($([$($generics:tt)*] $borrowed:ty => $owned:ty;)*) => {$(
+        impl<$($generics)*> ToPsszSchema for $borrowed {
+            fn schema_name() -> Option<String> {
+                <$owned as ToPsszSchema>::schema_name()
+            }
+            fn custom_id() -> Option<String> {
+                <$owned as ToPsszSchema>::custom_id()
+            }
+            fn member_attributes() -> Vec<Attribute> {
+                <$owned as ToPsszSchema>::member_attributes()
+            }
+            fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+                <$owned as ToPsszSchema>::build_schema(builder)
+            }
+            fn schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+                <$owned as ToPsszSchema>::schema(builder)
+            }
+        }
+    )*};
+}
+schema_as_owned! {
+    [T: ToPsszSchema] &T => T;
+    [] &str => String;
+    [T: ToPsszSchema] &[T] => Vec<T>;
+}
 impl<T: ToPsszSchema> ToPsszSchema for Option<T> {
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
         Ok(AnyType::new(AnyValue::Option(Optional {
@@ -608,7 +674,7 @@ impl<T: ToPsszSchema> ToPsszSchema for Vec<T> {
         let list = AnyType::new(AnyValue::List(List {
             r#type: Box::new(T::schema(builder)?),
         }));
-        Ok(if TypeId::of::<T>() == TypeId::of::<u8>() {
+        Ok(if erased_type_id::<T>() == TypeId::of::<u8>() {
             AnyType::new(AnyValue::Custom(Custom {
                 r#type: Box::new(list),
                 id: "hex".into(),
@@ -624,7 +690,7 @@ impl<T: ToPsszSchema, const N: usize> ToPsszSchema for [T; N] {
             r#type: Box::new(T::schema(builder)?),
             len: N as u64,
         }));
-        Ok(if TypeId::of::<T>() == TypeId::of::<u8>() {
+        Ok(if erased_type_id::<T>() == TypeId::of::<u8>() {
             AnyType::new(AnyValue::Custom(Custom {
                 r#type: Box::new(array),
                 id: "hex".into(),
@@ -641,7 +707,7 @@ impl<T: ToPsszSchema, const N: usize> ToPsszSchema for crate::pssz::BoundedList<
             maxCount: N as u64,
         }));
         // Bytes, like Vec<u8>: one hex string in IJson.
-        Ok(if TypeId::of::<T>() == TypeId::of::<u8>() {
+        Ok(if erased_type_id::<T>() == TypeId::of::<u8>() {
             AnyType::new(AnyValue::Custom(Custom {
                 r#type: Box::new(list),
                 id: "hex".into(),

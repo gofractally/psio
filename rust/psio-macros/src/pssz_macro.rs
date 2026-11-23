@@ -1433,13 +1433,6 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
     let k = &opts.krate;
     let name = &input.ident;
     let mut generics = input.generics.clone();
-    for param in input.generics.type_params() {
-        let id = &param.ident;
-        generics
-            .make_where_clause()
-            .predicates
-            .push(parse_quote!(#id: 'static));
-    }
     for (ty, _) in generic_fields(&input, &opts) {
         generics
             .make_where_clause()
@@ -1565,9 +1558,13 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             ))
         }
     };
+    // A lifetime is not part of a schema: `S<'a>` is named `S`, as its
+    // owned form is. A type or const parameter makes a family of types,
+    // each named by its full type name.
+    let type_generic = input.generics.params.iter().any(|param| !matches!(param, syn::GenericParam::Lifetime(_)));
     let schema_name = if let Some(name) = &opts.name {
         quote!(::core::option::Option::Some(#name.into()))
-    } else if input.generics.params.is_empty() {
+    } else if !type_generic {
         let text = name.to_string();
         quote!(::core::option::Option::Some(#text.into()))
     } else {
@@ -1586,7 +1583,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
     // id needs an id of its own.
     if let Some(None) = &custom {
         let implied = opts.name.clone().unwrap_or_else(|| name.to_string());
-        if input.generics.params.is_empty() && attrs::reserved_custom_id(&implied) {
+        if !type_generic && attrs::reserved_custom_id(&implied) {
             return Err(syn::Error::new_spanned(
                 name,
                 format!(

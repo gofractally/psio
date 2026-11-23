@@ -1416,7 +1416,7 @@ impl CustomHandlers {
     /// An error when `T` is not declared custom.
     pub fn add_type<T>(&mut self) -> Result<&mut Self, PsszError>
     where
-        T: TextForm + ToPsszSchema + PsszPack<Pssz> + PsszUnpack<Pssz>,
+        T: TextForm + ToPsszSchema + PsszPack<Pssz> + PsszUnpack<Pssz> + 'static,
     {
         let id = T::custom_id()
             .ok_or(PsszError::new("pssz dynamic: the type has no custom schema id"))?;
@@ -1436,7 +1436,7 @@ impl CustomHandlers {
     /// `#[psio(custom)]`). An error when `T` has no custom schema id.
     pub fn add_invariant_type<T>(&mut self) -> Result<&mut Self, PsszError>
     where
-        T: ToPsszSchema + PsszPack<Pssz> + PsszUnpack<Pssz>,
+        T: ToPsszSchema + PsszPack<Pssz> + PsszUnpack<Pssz> + 'static,
     {
         let id = T::custom_id()
             .ok_or(PsszError::new("pssz dynamic: the type has no custom schema id"))?;
