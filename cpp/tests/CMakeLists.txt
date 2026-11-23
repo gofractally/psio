@@ -1072,3 +1072,9 @@ psio_consistency_compile_fail(reserved_invariant_id CONS_FAIL_RESERVED_INVARIANT
    "${PSIO_CONS_RESERVED}")
 psio_consistency_compile_fail(reserved_reflected_name CONS_FAIL_RESERVED_REFLECTED_NAME
    "${PSIO_CONS_RESERVED}")
+psio_consistency_compile_fail(fields_over_cap CONS_FAIL_FIELDS_OVER_CAP
+   "the record has more fields than its maxFields\\(N\\) allows")
+psio_consistency_compile_fail(fields_cap_over_255 CONS_FAIL_FIELDS_CAP_OVER_255
+   "maxFields\\(N\\): N is at most 255")
+psio_consistency_compile_fail(params_over_cap CONS_FAIL_PARAMS_OVER_CAP
+   "the method has more parameters than its maxFields\\(N\\) allows")

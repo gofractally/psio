@@ -42,6 +42,7 @@
 //                                                    parameter), .result (returns(...)),
 //                                                    .max_dynamic_data (maxDynamicData(N))
 //   psio::reflect<T>::method_max_dynamic_data<I>     the argument-tuple cap (optional)
+//   psio::reflect<T>::method_max_fields<I>           maxFields(N) of the method (optional)
 //   psio::reflect<T>::method_arg_tuple<I>            method_params<I> carrying those
 //                                                    annotations and the cap: a
 //                                                    psio::annotated_tuple, the type to
@@ -578,6 +579,9 @@ namespace psio {
       //                         encoded size limit, and what fixes its offset
       //                         width for the method's lifetime (room for
       //                         optional arguments appended later)
+      //   maxFields(N)          the most parameters the method will ever
+      //                         have (at most 255): more is a compile error,
+      //                         and a revision may not exceed or raise it
       //   returns(specs)        annotations of the return value
       //
       // The macro turns each into one of the item values below;
@@ -590,6 +594,10 @@ namespace psio {
       template <typename Specs>
       method_param_item(Specs) -> method_param_item<Specs>;
       struct method_cap_item
+      {
+         std::size_t value;
+      };
+      struct method_fields_item
       {
          std::size_t value;
       };
@@ -617,6 +625,7 @@ namespace psio {
          Params                     params{};
          Result                     result{};
          std::optional<std::size_t> max_dynamic_data{};
+         std::optional<std::size_t> max_fields{};
       };
 
       template <typename Item>
@@ -650,9 +659,18 @@ namespace psio {
          if constexpr (std::is_same_v<Item, method_cap_item>)
             cap = item.value;
       }
+      template <typename Item>
+      constexpr void method_fields_part(const Item& item,
+                                        std::optional<std::size_t>& fields) noexcept
+      {
+         if constexpr (std::is_same_v<Item, method_fields_item>)
+            fields = item.value;
+      }
       template <typename... Items>
       constexpr auto make_method_meta(const Items&... items) noexcept
       {
+         static_assert((std::size_t{std::is_same_v<Items, method_fields_item>} + ... + 0) <= 1,
+                       "psio: method(...) lists maxFields(N) more than once");
          static_assert((std::size_t{std::is_same_v<Items, method_cap_item>} + ... + 0) <= 1,
                        "psio: method(...) lists maxDynamicData(N) more than once");
          static_assert((std::size_t{is_method_result_item<Items>} + ... + 0) <= 1,
@@ -661,7 +679,9 @@ namespace psio {
          auto                       result = std::tuple_cat(method_result_part(items)...);
          std::optional<std::size_t> cap;
          (method_cap_part(items, cap), ...);
-         return method_meta<decltype(params), decltype(result)>{params, result, cap};
+         std::optional<std::size_t> fields;
+         (method_fields_part(items, fields), ...);
+         return method_meta<decltype(params), decltype(result)>{params, result, cap, fields};
       }
 
       constexpr bool reflected_name_reserved(std::string_view name)
@@ -796,6 +816,7 @@ namespace psio {
 // keywords below (recognised by token pasting, as PSIO_REFLECT's own are).
 #define PSIO_REFLECT_MKW_attr(F, ...) (mattr, F, __VA_ARGS__), 1
 #define PSIO_REFLECT_MKW_maxDynamicData(N) (mcap, N), 1
+#define PSIO_REFLECT_MKW_maxFields(N) (mfields, N), 1
 #define PSIO_REFLECT_MKW_returns(...) (mret, __VA_ARGS__), 1
 // item -> FN_PLAIN(item), or FN_<kind> (kind, payload...) for a keyword.
 #define PSIO_REFLECT_MITEM_(FN, item)                                             \
@@ -816,6 +837,7 @@ namespace psio {
 #define PSIO_REFLECT_MNAME_PLAIN(item) BOOST_PP_STRINGIZE(item),
 #define PSIO_REFLECT_MNAME_mattr(kind, F, ...) BOOST_PP_STRINGIZE(F),
 #define PSIO_REFLECT_MNAME_mcap(kind, N)
+#define PSIO_REFLECT_MNAME_mfields(kind, N)
 #define PSIO_REFLECT_MNAME_mret(kind, ...)
 #define PSIO_REFLECT_METHOD_PARAMS_(kind, name, ...) \
    PSIO_PP_MITEM_EACH_(PSIO_REFLECT_MNAME_, __VA_ARGS__)
@@ -827,6 +849,7 @@ namespace psio {
 #define PSIO_REFLECT_MVALUE_mattr(kind, F, ...) \
    ::psio::detail::method_param_item{::psio::to_spec_tuple(__VA_ARGS__)},
 #define PSIO_REFLECT_MVALUE_mcap(kind, N) ::psio::detail::method_cap_item{N},
+#define PSIO_REFLECT_MVALUE_mfields(kind, N) ::psio::detail::method_fields_item{N},
 #define PSIO_REFLECT_MVALUE_mret(kind, ...) \
    ::psio::detail::method_result_item{::psio::to_spec_tuple(__VA_ARGS__)},
 #define PSIO_REFLECT_METHOD_VALUES_(kind, name, ...) \
@@ -874,8 +897,10 @@ namespace psio {
 //
 //   4. maxFields(N)                   type-level keyword
 //      → emits the type-level `psio::max_fields_spec{N}` annotation.
-//      Caps the number of declared fields a record may have; queryable
-//      via `psio::max_fields_v<T>` and `psio::effective_max_fields_v<T>`.
+//      Caps the number of fields the record will ever have (N <= 255): a
+//      record with more fields does not compile, and pssz_evolves_from
+//      refuses a revision that exceeds or raises it. Queryable via
+//      `psio::max_fields_v<T>` and `psio::effective_max_fields_v<T>`.
 //
 //   5. maxDynamicData(N)              type-level keyword
 //      → emits the type-level `psio::max_dynamic_data_spec{N}`
@@ -1423,6 +1448,9 @@ namespace psio {
       template <::std::size_t Idx>                                                       \
       static constexpr ::std::optional<::std::size_t> method_max_dynamic_data            \
          = method_annotations<Idx>.max_dynamic_data;                                     \
+      template <::std::size_t Idx>                                                       \
+      static constexpr ::std::optional<::std::size_t> method_max_fields                  \
+         = method_annotations<Idx>.max_fields;                                           \
                                                                                          \
       template <::std::size_t Idx>                                                       \
       using method_traits = ::psio::method_traits<method_type<Idx>>;                     \

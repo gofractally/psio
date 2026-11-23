@@ -14,6 +14,7 @@
 #include <psio/key.hpp>
 #include <psio/max_size.hpp>
 #include <psio/pssz.hpp>
+#include <psio/pssz_ir.hpp>
 #include <psio/pssz_ir_json.hpp>
 #include <psio/schema_builder.hpp>
 #include <psio/wrappers.hpp>
@@ -770,4 +771,114 @@ TEST_CASE("sorted / unique / unique_keys: writers and checking readers", "[consi
    using Inherent = std::tuple<psio::sorted_spec, psio::unique_keys_spec>;
    STATIC_REQUIRE(!psio::detail::ann::has_value_checks_v<std::map<std::string, int>, Inherent>);
    STATIC_REQUIRE(psio::detail::ann::has_value_checks_v<std::vector<int>, Inherent>);
+}
+
+// ── maxFields(N) caps the number of fields ───────────────────────────────
+namespace cons_fields
+{
+   struct Capped
+   {
+      std::uint32_t                a = 0;
+      std::optional<std::string>   b;
+      PSIO_REFLECT(Capped, a, b, maxFields(4))
+   };
+   struct Service
+   {
+      void put(std::uint32_t id, std::string text);
+      void plain(std::uint32_t id);
+      PSIO_REFLECT(Service,
+                   method(put, id, attr(text, max<8>), maxFields(4), maxDynamicData(64)),
+                   method(plain, id))
+   };
+   using PutArgs = psio::reflect<Service>::method_arg_tuple<0>;
+   struct ServiceApi {};
+}  // namespace cons_fields
+
+TEST_CASE("maxFields: the cap on the number of fields is enforced", "[consistency][fields]")
+{
+   using namespace cons_fields;
+   STATIC_REQUIRE(psio::max_fields_v<Capped> == std::optional<std::size_t>{4});
+   STATIC_REQUIRE(psio::effective_max_fields_v<Capped> == std::optional<std::size_t>{4});
+   STATIC_REQUIRE(psio::effective_max_fields_v<cons_cap::Capped> == std::optional<std::size_t>{2});
+   // A method's argument list takes the same cap.
+   STATIC_REQUIRE(psio::reflect<Service>::method_max_fields<0> == std::optional<std::size_t>{4});
+   STATIC_REQUIRE(!psio::reflect<Service>::method_max_fields<1>.has_value());
+   STATIC_REQUIRE(psio::max_fields_v<PutArgs> == std::optional<std::size_t>{4});
+   STATIC_REQUIRE(psio::max_dynamic_data_v<PutArgs> == std::optional<std::size_t>{64});
+
+   // In the Schema IR it is the Object's attribute, beside maxDynamicData.
+   using namespace psio::schema_types;
+   psio::SchemaBuilder builder;
+   builder.insert<Capped>("Capped");
+   builder.insert<PutArgs>("PutArgs");
+   Schema              schema = std::move(builder).build();
+   auto attribute = [&](std::string_view type, std::string_view name) -> std::optional<std::string> {
+      const AnyType* node = schema.get(type);
+      while (node)
+      {
+         if (auto ref = std::get_if<Type>(&node->value))
+         {
+            node = schema.get(ref->type);
+            continue;
+         }
+         if (auto object = std::get_if<Object>(&node->value))
+            for (const auto& a : object->attributes)
+               if (a.name == name)
+                  return a.value;
+         break;
+      }
+      return std::nullopt;
+   };
+   CHECK(attribute("Capped", "maxFields") == std::optional<std::string>{"4"});
+   CHECK(attribute("PutArgs", "maxFields") == std::optional<std::string>{"4"});
+   CHECK(attribute("PutArgs", "maxDynamicData") == std::optional<std::string>{"64"});
+   CHECK(psio::pssz_ir::validate_schema(schema).ok());
+
+   // A schema-driven reader refuses a record with more members than its
+   // maxFields, more than 255 members, or a maxFields above 255.
+   auto record = [](std::size_t members, std::optional<std::string> max_fields) {
+      Object o;
+      for (std::size_t i = 0; i < members; ++i)
+         o.members.push_back(
+            Member{"m" + std::to_string(i), Box<AnyType>{AnyType{Int{8, false}}}, {}});
+      if (max_fields)
+         o.attributes.push_back(Attribute{"maxFields", *max_fields});
+      return AnyType{std::move(o)};
+   };
+   auto reads = [](const AnyType& root) {
+      // Any schema-driven entry point starts by checking the schema.
+      const Schema empty{};
+      std::size_t  width = 0;
+      return psio::pssz_ir::auto_width(empty, root, width).ok();
+   };
+   CHECK(reads(record(3, std::nullopt)));
+   CHECK(reads(record(3, "3")));
+   CHECK(reads(record(3, "255")));
+   CHECK(!reads(record(4, "3")));
+   CHECK(!reads(record(3, "256")));
+   CHECK(!reads(record(3, "many")));
+   CHECK(reads(record(255, std::nullopt)));
+   CHECK(!reads(record(256, std::nullopt)));
+
+   // validate_schema: a function's parameter list is a tuple.
+   auto with_params = [&](std::size_t params, std::vector<Attribute> attributes) {
+      Schema    out = schema;
+      Interface api;
+      api.name = "api";
+      Func f;
+      f.name = "call";
+      for (std::size_t i = 0; i < params; ++i)
+         f.params.push_back(
+            Member{"p" + std::to_string(i), Box<AnyType>{AnyType{Int{32, false}}}, {}});
+      f.attributes = std::move(attributes);
+      api.funcs.push_back(std::move(f));
+      out.interfaces.push_back(std::move(api));
+      return out;
+   };
+   CHECK(psio::pssz_ir::validate_schema(with_params(255, {})).ok());
+   CHECK(!psio::pssz_ir::validate_schema(with_params(256, {})).ok());
+   CHECK(psio::pssz_ir::validate_schema(with_params(2, {Attribute{"maxFields", "2"}})).ok());
+   CHECK(!psio::pssz_ir::validate_schema(with_params(3, {Attribute{"maxFields", "2"}})).ok());
+   CHECK(!psio::pssz_ir::validate_schema(with_params(1, {Attribute{"maxFields", "256"}})).ok());
+   CHECK(!psio::pssz_ir::validate_schema(with_params(1, {Attribute{"maxDynamicData", "x"}})).ok());
 }

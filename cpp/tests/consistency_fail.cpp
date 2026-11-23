@@ -59,4 +59,33 @@ namespace cons_fail
    inline const auto duration_schema = psio::SchemaBuilder{}.insert<duration>();
 }  // namespace cons_fail
 
+namespace cons_fail
+{
+   // maxFields(N) is the most fields the record (parameters the method) has.
+   struct Fields
+   {
+      std::uint32_t a = 0, b = 0, c = 0;
+   };
+#if defined(CONS_FAIL_FIELDS_OVER_CAP)
+   PSIO_REFLECT(Fields, a, b, c, maxFields(2))
+#elif defined(CONS_FAIL_FIELDS_CAP_OVER_255)
+   PSIO_REFLECT(Fields, a, b, c, maxFields(256))
+#else
+   PSIO_REFLECT(Fields, a, b, c, maxFields(3))
+#endif
+   inline const auto fields_bytes = psio::to_pssz(Fields{});
+
+   struct Calls
+   {
+      void put(std::uint32_t id, std::string text);
+#if defined(CONS_FAIL_PARAMS_OVER_CAP)
+      PSIO_REFLECT(Calls, method(put, id, text, maxFields(1)))
+#else
+      PSIO_REFLECT(Calls, method(put, id, text, maxFields(2)))
+#endif
+   };
+   inline const auto calls_bytes =
+      psio::to_pssz(psio::reflect<Calls>::method_arg_tuple<0>{std::tuple{std::uint32_t{1}, std::string{}}});
+}  // namespace cons_fail
+
 int main() {}

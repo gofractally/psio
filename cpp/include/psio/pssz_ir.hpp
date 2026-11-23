@@ -239,6 +239,21 @@ inline codec_status parse_cap(const std::vector<schema_types::Attribute> &values
    out = n;
    return codec_ok();
 }
+// maxFields = "N": the most fields the record (or parameters the function)
+// will ever have; N is at most 255 (docs/pssz-spec.md 8.4, 16).
+inline codec_status parse_max_fields(const std::vector<schema_types::Attribute> &values,
+                                     std::optional<std::uint64_t> &out)
+{
+   out.reset();
+   const auto *attribute = find_attribute(values, "maxFields");
+   if (!attribute)
+      return codec_ok();
+   std::uint64_t n;
+   if (!attribute->value || !parse_u64(*attribute->value, n) || n > 255)
+      return fail("pssz IR: malformed maxFields attribute");
+   out = n;
+   return codec_ok();
+}
 enum class attribute_site
 {
    record,          // Object / Struct
@@ -1812,6 +1827,16 @@ template <std::size_t W> class Codec
                    if constexpr (!record)
                       if (t.members.empty() || t.members.size() > 256)
                          return fail("pssz IR: invalid variant schema");
+                   if constexpr (record)
+                   {
+                      // docs/pssz-spec.md 8.4 (psio::max_record_fields), 16.
+                      if (t.members.size() > 255)
+                         return fail("pssz IR: a record has more than 255 fields");
+                      std::optional<std::uint64_t> max_fields;
+                      PSIO_PSSZ_IR_TRY(parse_max_fields(t.attributes, max_fields));
+                      if (max_fields && t.members.size() > *max_fields)
+                         return fail("pssz IR: a record has more fields than its maxFields");
+                   }
                    for (const auto &member : t.members)
                    {
                       if (std::count_if(t.members.begin(), t.members.end(),
@@ -2591,6 +2616,66 @@ template <std::size_t W>
    if (status.ok() && has_unknown)
       *has_unknown = unknown;
    return status;
+}
+
+// Checks a whole schema, not only what one root reaches: every named type,
+// and every function of every interface and resource — its parameter list is
+// a tuple (at most 255 parameters, docs/pssz-spec.md 8.4; no more than its
+// maxFields), its parameter and result types are well-formed, and its
+// maxDynamicData / maxFields attributes parse. A consumer that takes a schema
+// from outside calls this once before it dispatches through it.
+[[nodiscard]] inline codec_status validate_schema(const schema_types::Schema &schema)
+{
+   detail::Codec<0> codec(schema);
+   auto function = [&](const schema_types::Func &f) -> codec_status
+   {
+      if (f.params.size() > 255)
+         return detail::fail("pssz IR: a function has more than 255 parameters");
+      std::optional<std::uint64_t> max_fields, cap;
+      if (auto status_ = detail::parse_max_fields(f.attributes, max_fields); !status_.ok())
+         return status_;
+      if (max_fields && f.params.size() > *max_fields)
+         return detail::fail("pssz IR: a function has more parameters than its maxFields");
+      if (auto status_ = detail::parse_cap(f.attributes, cap); !status_.ok())
+         return status_;
+      for (const auto &param : f.params)
+      {
+         if (!param.type.get())
+            return detail::fail("pssz IR: null schema box");
+         if (auto status_ = detail::attributes(param.attributes,
+                                             detail::attribute_site::record_member, true); !status_.ok())
+         return status_;
+         if (auto status_ = codec.metadata(*param.type); !status_.ok())
+         return status_;
+      }
+      if (f.result)
+      {
+         if (!f.result->get())
+            return detail::fail("pssz IR: null schema box");
+         if (auto status_ = codec.metadata(**f.result); !status_.ok())
+         return status_;
+      }
+      return codec_ok();
+   };
+   for (const auto &named : schema.types)
+   {
+      if (!named.type.get())
+         return detail::fail("pssz IR: null schema box");
+      if (auto resource = std::get_if<schema_types::Resource>(&named.type->value))
+      {
+         for (const auto &method : resource->methods)
+            if (auto status_ = function(method); !status_.ok())
+         return status_;
+         continue;
+      }
+      if (auto status_ = codec.metadata(*named.type); !status_.ok())
+         return status_;
+   }
+   for (const auto &interface_ : schema.interfaces)
+      for (const auto &f : interface_.funcs)
+         if (auto status_ = function(f); !status_.ok())
+         return status_;
+   return codec_ok();
 }
 
 // The offset width the automatic profile derives for `root`'s own header,

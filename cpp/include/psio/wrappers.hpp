@@ -760,6 +760,16 @@ namespace psio {
       {
          static constexpr auto value = std::tuple<>{};
       };
+      template <bool Has, std::size_t N>
+      struct fields_annotation
+      {
+         static constexpr auto value = std::tuple{max_fields_spec{N}};
+      };
+      template <std::size_t N>
+      struct fields_annotation<false, N>
+      {
+         static constexpr auto value = std::tuple<>{};
+      };
    }  // namespace detail
 
    // The annotations of the argument tuple of method I of reflected T, from
@@ -779,8 +789,19 @@ namespace psio {
       static constexpr auto annotations = detail::indexed_specs(
          meta.params, std::make_index_sequence<std::tuple_size_v<params_t>>{});
       static constexpr auto type_annotations =
-         detail::cap_annotation<meta.max_dynamic_data.has_value(),
-                                meta.max_dynamic_data.value_or(0)>::value;
+         std::tuple_cat(detail::cap_annotation<meta.max_dynamic_data.has_value(),
+                                               meta.max_dynamic_data.value_or(0)>::value,
+                        detail::fields_annotation<meta.max_fields.has_value(),
+                                                  meta.max_fields.value_or(0)>::value);
+      // maxFields(N): the method has, and will ever have, at most N
+      // parameters; N is at most 255 (docs/pssz-spec.md 8.4).
+      static_assert(!meta.max_fields.has_value() || *meta.max_fields <= max_tuple_elements,
+                    "psio: method(..., maxFields(N)): N is at most 255, the most parameters a "
+                    "method can have (docs/pssz-spec.md 8.4)");
+      static_assert(!meta.max_fields.has_value() ||
+                       std::tuple_size_v<typename reflect<T>::template method_params<I>> <=
+                          *meta.max_fields,
+                    "psio: the method has more parameters than its maxFields(N) allows");
    };
 
    // The annotations returns(...) lists for method I, and their value-side

@@ -488,6 +488,9 @@ namespace psio::schema_types
                           {}}),
                 ...);
             }(std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+            if constexpr (::psio::max_fields_v<U>.has_value())
+               o.attributes.push_back(
+                  Attribute{"maxFields", std::to_string(::psio::max_fields_v<U>.value())});
             if constexpr (::psio::max_dynamic_data_v<U>.has_value())
                o.attributes.push_back(Attribute{
                   "maxDynamicData", std::to_string(::psio::max_dynamic_data_v<U>.value())});
@@ -966,6 +969,8 @@ namespace psio::schema_types
             }
             // The cap of the argument tuple: its encoded size limit and its
             // offset width.
+            if (meta.max_fields)
+               f.attributes.push_back(Attribute{"maxFields", std::to_string(*meta.max_fields)});
             if (meta.max_dynamic_data)
                f.attributes.push_back(
                   Attribute{"maxDynamicData", std::to_string(*meta.max_dynamic_data)});

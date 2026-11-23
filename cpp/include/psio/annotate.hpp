@@ -57,6 +57,8 @@
 //   psio::max_dynamic_data_v<T>        → optional<size_t>
 //      explicit cap from `maxFields(N)` / `maxDynamicData(N)` keywords
 //      in PSIO_REFLECT.
+//   psio::effective_max_fields_v<T>    → optional<size_t>
+//      maxFields(N) when declared, else the current field count.
 //   psio::effective_max_dynamic_v<T>   → optional<size_t>  (in max_size.hpp)
 //      the explicit cap when there is one (an explicit cap always rules,
 //      docs/pssz-spec.md 3.1), else the inferred bound max_encoded_size<T>.
@@ -89,6 +91,9 @@ namespace psio {
    // std::tuple, a std::pair (2), a method's argument list. Every PSSZ entry
    // point and the schema builder refuse a longer one at compile time.
    inline constexpr std::size_t max_tuple_elements = 255;
+   // ... and so has a record: its fields, like a tuple's elements and a
+   // method's parameters, are one positional list (docs/pssz-spec.md 8.4).
+   inline constexpr std::size_t max_record_fields = 255;
    template <std::size_t N>
    inline constexpr bool tuple_size_ok_v = N <= max_tuple_elements;
 #define PSIO_REQUIRE_TUPLE_SIZE(N)                                                              \
@@ -493,14 +498,17 @@ namespace psio {
    };
    inline constexpr transparent_spec transparent{};
 
-   // Type-level cap on declared field count.  Lets formats pick a
-   // smaller slot index / vtable-width than the (potentially large)
-   // member_count would imply.  The schema author asserts the cap;
-   // validators reject decoded inputs whose declared field count
-   // exceeds it.
-   //
-   // Co-exists with `definition_will_not_change`: use both when you
-   // want a fixed layout AND a tighter slot-table.
+   // Type-level cap on the NUMBER of fields of a record (or of a method's
+   // argument list): the type has, and will ever have, at most N fields.
+   // N is at most 255, the format's own limit. Enforced:
+   //   - at compile time: a record with more than N fields, or N > 255, does
+   //     not compile (lookup_annotations; method_arg_meta for a method);
+   //   - by pssz_evolves_from: a revision has no more fields than the
+   //     original's cap and does not raise or drop it;
+   //   - by the schema-driven codecs: an Object with more members than its
+   //     maxFields attribute is a malformed schema.
+   // It is the IR attribute `maxFields` and WIT's `@maxFields(N)`. It caps
+   // a count; maxDynamicData caps bytes.
    struct max_fields_spec
    {
       using spec_category = static_spec_tag;
@@ -748,6 +756,14 @@ namespace psio {
 
    }  // namespace spec
 
+   // ── has_spec — compile-time "is this spec present?" ───────────────────
+   template <typename Wanted, typename Tuple>
+   inline constexpr bool has_spec_v = false;
+
+   template <typename Wanted, typename... Ts>
+   inline constexpr bool has_spec_v<Wanted, std::tuple<Ts...>> =
+       (std::is_same_v<std::remove_cvref_t<Ts>, Wanted> || ...);
+
    // ── Annotation trait ───────────────────────────────────────────────────
    //
    // `annotate<X>` is the tuple of spec values declared for X. It is found
@@ -976,9 +992,32 @@ namespace psio {
       {
          using K = std::remove_const_t<decltype(X)>;
          if constexpr (is_type_key<K>)
-            return merge_annotations(
-               carried_type_annotations<typename type_key_type<K>::type>(),
-               declared_annotations<X>::value);
+         {
+            using T = typename type_key_type<K>::type;
+            constexpr auto merged =
+               merge_annotations(carried_type_annotations<T>(), declared_annotations<X>::value);
+            using Merged = std::remove_cvref_t<decltype(merged)>;
+            // A record has at most 255 fields (docs/pssz-spec.md 8.4), and
+            // no more than its maxFields(N): the cap on the NUMBER of fields
+            // the type will ever have (maxDynamicData caps its bytes).
+            if constexpr (std::is_class_v<T>)
+               if constexpr (requires { requires ::psio::reflect<T>::is_reflected; })
+               {
+                  static_assert(::psio::reflect<T>::member_count <= max_record_fields,
+                                "psio: a record has at most 255 fields (docs/pssz-spec.md 8.4)");
+                  if constexpr (has_spec_v<max_fields_spec, Merged>)
+                  {
+                     static_assert(std::get<max_fields_spec>(merged).value <= max_record_fields,
+                                   "psio: maxFields(N): N is at most 255, the most fields a "
+                                   "record can have (docs/pssz-spec.md 8.4)");
+                     static_assert(::psio::reflect<T>::member_count <=
+                                      std::get<max_fields_spec>(merged).value,
+                                   "psio: the record has more fields than its maxFields(N) "
+                                   "allows");
+                  }
+               }
+            return merged;
+         }
          else if constexpr (std::is_member_pointer_v<K>)
          {
             using C = typename member_pointer_class<K>::type;
@@ -1033,13 +1072,6 @@ namespace psio {
          return std::nullopt;
    }
 
-   // ── has_spec — compile-time "is this spec present?" ───────────────────
-   template <typename Wanted, typename Tuple>
-   inline constexpr bool has_spec_v = false;
-
-   template <typename Wanted, typename... Ts>
-   inline constexpr bool has_spec_v<Wanted, std::tuple<Ts...>> =
-       (std::is_same_v<std::remove_cvref_t<Ts>, Wanted> || ...);
 
    // ── is_dwnc — "does this type carry definition_will_not_change?" ──────
    //
@@ -1211,32 +1243,21 @@ namespace psio {
 
    // ── effective_max_fields_v ────────────────────────────────────────────
    //
-   // Composes an explicit `maxFields(N)` cap with the reflected
-   // `member_count`.  When both are present, the cap WINS DOWNWARD only
-   // — it can be tighter than member_count but never looser, since
-   // overriding upward defeats the purpose of an upper-bound assertion.
-   //
-   // Returns std::nullopt only for non-Reflected types where neither a
-   // member count nor a cap exists; format consumers fall back to the
-   // format-conservative default in that case.
+   // The most fields the type will ever have: its `maxFields(N)` when it
+   // declares one (an explicit cap rules, as for maxDynamicData; the type
+   // has at most N fields by construction), else the fields it has today.
+   // nullopt for a type that is not a record and declares no cap.
 
    template <typename T>
    inline constexpr std::optional<std::size_t> effective_max_fields_v = []
    {
       constexpr auto cap = max_fields_v<T>;
-      if constexpr (::psio::Reflected<T>)
-      {
-         constexpr std::size_t mc = reflect<T>::member_count;
-         if constexpr (cap.has_value())
-            return std::optional<std::size_t>{
-               (*cap < mc) ? *cap : mc};
-         else
-            return std::optional<std::size_t>{mc};
-      }
+      if constexpr (cap.has_value())
+         return cap;
+      else if constexpr (::psio::Reflected<T>)
+         return std::optional<std::size_t>{reflect<T>::member_count};
       else
-      {
-         return cap;  // nullopt unless explicitly capped
-      }
+         return cap;
    }();
 
    // `effective_max_dynamic_v<T>` lives in psio/max_size.hpp: it is the

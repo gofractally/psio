@@ -323,7 +323,7 @@ The type-level keywords:
 | keyword | meaning | query |
 |---|---|---|
 | `definitionWillNotChange()` | fixed layout: no extensibility header, no appended fields | `psio::is_dwnc_v<T>` |
-| `maxFields(N)` | cap on the field count | `psio::max_fields_v<T>` |
+| `maxFields(N)` | cap on the number of fields the record will ever have (N ≤ 255): more fields do not compile, and a later revision may not exceed or raise it. Also `method(name, ..., maxFields(N))` for a method's parameters | `psio::max_fields_v<T>` |
 | `maxDynamicData(N)` | cap on the encoded size; selects the offset width | `psio::max_dynamic_data_v<T>` |
 | `transparent()` | the type has exactly one data member and **is** that member in every core format (pssz, key, json, ijson, Schema IR), while staying its own type for a text adapter, an invariant, its schema node and its names (`psio/transparent.hpp`; `docs/pssz-spec.md` §5.10) | `psio::is_transparent_v<T>`, `psio::transparent_inner_t<T>` |
 | `invariant(fn)` | the type's semantic invariant: `fn(const T&) noexcept -> psio::codec_status`, run by every checking reader and every writer of the core formats (`psio/invariant.hpp`; `docs/pssz-spec.md` §18) | `psio::has_invariant_v<T>`, `psio::check_invariant(value)` |

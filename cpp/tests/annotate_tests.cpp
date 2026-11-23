@@ -417,17 +417,16 @@ TEST_CASE("all_dwnc_v: reflected DWNC composition", "[annotate][caps]")
    STATIC_REQUIRE_FALSE(psio::all_dwnc_v<WrapsExt>);
 }
 
-TEST_CASE("effective_max_fields_v: explicit cap wins downward",
+TEST_CASE("effective_max_fields_v: an explicit cap rules",
           "[annotate][caps]")
 {
-   // CapOnlyRecord has 3 reflected fields and maxFields(8).  The cap
-   // is GREATER than member_count → effective is min(8, 3) = 3.
+   // maxFields(N) is the most fields the type will ever have: it is the
+   // answer when declared (the type has at most N fields by construction),
+   // and the current field count otherwise.
    REQUIRE(psio::effective_max_fields_v<CapOnlyRecord> ==
-           std::optional<std::size_t>{3});
-   // FullyBoundedRecord has 2 reflected fields and maxFields(8).
-   // min(8, 2) = 2.
+           std::optional<std::size_t>{8});
    REQUIRE(psio::effective_max_fields_v<FullyBoundedRecord> ==
-           std::optional<std::size_t>{2});
+           std::optional<std::size_t>{8});
    // Type without a cap: just member_count.
    REQUIRE(psio::effective_max_fields_v<LeafDwnc> ==
            std::optional<std::size_t>{1});

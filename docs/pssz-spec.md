@@ -1627,13 +1627,16 @@ place.
 |---|---|---|
 | elements of a `Tuple` (a `Pair` is 2; a method's argument list is a tuple) | **255** | a count that fits in 8 bits, and what language tooling can reasonably instantiate |
 | alternatives of a `Variant` | **256** | the selector is one byte: indexes 0..255 |
-| fields of a record | no limit in the format | an implementation may have one (C++ reflection lists at most 255 members and keywords per record); `max-fields` (§16) is a schema-level discipline |
+| fields of a record | **255** | a record, a tuple and a method's argument list are one positional shape (§5.1); they share one limit. `max-fields: N` (§16) lowers it for one type |
+| parameters of a function (an interface's `Func`) | **255** | its argument list is a tuple |
 
-A tuple of more than 255 elements is not a PSSZ type: a typed
-implementation refuses it when the type is built (C++: a compile-time
-error), and a schema that holds a `Tuple` of more than 255 members is
-invalid — a schema-driven implementation rejects it before reading or
-writing any value. A variant with more than 256 alternatives is refused
+A tuple of more than 255 elements, and a record of more than 255
+fields, is not a PSSZ type: a typed implementation refuses it when the
+type is built (C++: a compile-time error), and a schema that holds a
+`Tuple` or an `Object` / `Struct` of more than 255 members, or a function
+of more than 255 parameters, is invalid — a schema-driven implementation
+rejects it before reading or writing any value (C++:
+`psio::pssz_ir::validate_schema` for the functions of a whole schema). A variant with more than 256 alternatives is refused
 the same way; split it or use a different encoding.
 
 The limit does not change any byte. A tuple's header is the byte size
@@ -1986,10 +1989,22 @@ hashes regardless of which encoder produced them.
 
 pssz honors the type-level caps documented in `pjson-spec.md` §16:
 
-- **`max-fields: N`** — at decode time, the validator may reject
-  records whose declared field count exceeds N. (Today this is a
-  schema-level discipline; pssz is concerned with byte counts more
-  than field counts.)
+- **`max-fields: N`** — a cap on the **number of fields** of a record, or
+  of parameters of a method's argument list: the type has, and will ever
+  have, at most N. It is not a size: `max-dynamic-data` caps bytes. N is
+  at most 255 (§8.4). It is enforced where the field count is known:
+  - *the declaration*: a record with more than N fields, a method with
+    more than N parameters, or N > 255 is an error (C++: at compile time);
+  - *the schema*: an `Object` / `Struct` with more members than its
+    `maxFields` attribute, a function with more parameters than its, or a
+    `maxFields` that is not a number in 0..255, is a malformed schema that
+    every schema-driven reader rejects;
+  - *evolution* (§7): a revision may not have more fields than the
+    original's `max-fields`, and may not raise or drop it (lowering it to
+    no less than the current count is allowed). C++:
+    `pssz_evolves_from`; a schema-based upgrade check must apply the same
+    rule.
+  Nothing on the wire counts fields, so it adds no check of a value.
 - **`max-dynamic-data: N`** — drives both width selection (§3) and an
   explicit ceiling at encode + decode. Encoders that produce > N
   bytes throw; validators that see > N bytes in the input reject.
