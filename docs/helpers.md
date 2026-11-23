@@ -457,6 +457,14 @@ bounds a list of strings); they are enforced on encode as usual.
 `psio::wire_type` is a customization point: specialize it for a type of
 your own that packs as another type.
 
+For keys there is one more writer-side element, `psio::raw_key{bytes}`:
+bytes that already are a key, written verbatim, so that a stored prefix is
+extended without re-encoding it —
+`psio::to_key(std::tuple{psio::raw_key{prefix}, id, std::string_view{name}})`.
+See [key-spec.md §3](key-spec.md#3-composite-keys). (`psio::to_key(x)`
+returns a `std::array` for a key of fixed size; `psio::encode(psio::key{}, x)`
+always returns a `std::vector<char>`.)
+
 ### Encoding a source as a named type
 
 `to_pssz(source)` writes `wire_type_t<Source>`. When the type to write is

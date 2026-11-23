@@ -664,6 +664,9 @@ psio_add_test(psio_wit_owned_tests wit_owned_tests.cpp)
 # psio::key: tuples, composite-key helpers (key_prefix / key_prefix_upper_bound),
 # the order + prefix-free contract of every element kind, and checked reading.
 psio_add_test(psio_key_tests key_tests.cpp)
+# Keys from non-owning values (string_view, references, views) and
+# psio::raw_key, bytes that already are a key.
+psio_add_test(psio_key_source_tests key_source_tests.cpp)
 # Types with no key form, and ill-typed prefixes, must fail with a clear message.
 function(psio_key_compile_fail NAME DEFINE MESSAGE)
    add_test(NAME psio_key_${NAME}_compile_fail
@@ -678,6 +681,8 @@ psio_key_compile_fail(bitlist KEY_FAIL_BITLIST "bitlist has no key encoding")
 psio_key_compile_fail(steady_clock KEY_FAIL_STEADY_CLOCK "no matching function for call to 'to_rfc3339'")
 psio_key_compile_fail(float_rep KEY_FAIL_FLOAT_REP "needs an integer Rep")
 psio_key_compile_fail(prefix_arity KEY_FAIL_PREFIX_ARITY "more elements than the key type has")
+psio_key_compile_fail(decode_raw_key KEY_FAIL_DECODE_RAW_KEY "are write-only key elements")
+psio_key_compile_fail(decode_string_view KEY_FAIL_DECODE_STRING_VIEW "are write-only key elements")
 psio_key_compile_fail(prefix_type KEY_FAIL_PREFIX_TYPE "does not convert to the key's")
 
 # Time values (std::chrono durations / system_clock time points) in every
