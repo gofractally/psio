@@ -528,7 +528,7 @@ template <std::size_t W> class Codec
              }
              else if constexpr (std::is_same_v<T, schema_types::Custom>)
              {
-                if (t.id == "bool" || t.id == "char")
+                if (t.id == "bool" || t.id == "char" || t.id == "bitvector")
                    out = true;
                 else if (byte_adapter_id(t.id))
                 {
@@ -671,7 +671,14 @@ template <std::size_t W> class Codec
                    PSIO_PSSZ_IR_TRY(assoc_shape(t, shape));
                    return sequence(*shape.list);
                 }
-                // Bit types have no inferred bound.
+                else if (t.id == "bitvector" || t.id == "bitlist")
+                {
+                   // ceil(N / 8) bytes; a bitlist one more for its delimiter.
+                   std::size_t count;
+                   bool list;
+                   PSIO_PSSZ_IR_TRY(bit_shape(t, count, list));
+                   out = bound_add(Bound{count / 8 + (count % 8 ? 1 : 0)}, Bound{list ? 1u : 0u});
+                }
              }
              else if constexpr (std::is_same_v<T, schema_types::Struct> ||
                                 std::is_same_v<T, schema_types::Object>)

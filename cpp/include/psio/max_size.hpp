@@ -105,6 +105,23 @@ namespace psio {
          static constexpr std::size_t limit = N;
       };
 
+      // Packed bits: bitvector<N> is ceil(N / 8) fixed bytes; bitlist<N>
+      // holds at most N bits and a delimiter bit.
+      template <typename T>
+      struct is_bitvector : std::false_type {};
+      template <std::size_t N>
+      struct is_bitvector<::psio::bitvector<N>> : std::true_type
+      {
+         static constexpr std::size_t bits = N;
+      };
+      template <typename T>
+      struct is_bitlist : std::false_type {};
+      template <std::size_t N>
+      struct is_bitlist<::psio::bitlist<N>> : std::true_type
+      {
+         static constexpr std::size_t bits = N;
+      };
+
       // Extract the effective count cap from a length_bound: exact wins,
       // then max. min alone does not bound the upper side.
       constexpr std::optional<std::uint32_t>
@@ -171,7 +188,7 @@ namespace psio {
                             ::psio::TimeValue<U> ||
                             std::is_same_v<U, ::psio::uint128> ||
                             std::is_same_v<U, ::psio::int128> ||
-                            std::is_same_v<U, ::psio::uint256>)
+                            std::is_same_v<U, ::psio::uint256> || is_bitvector<U>::value)
             return true;
          else if constexpr (is_std_array<U>::value)
             return fixed_payload<typename is_std_array<U>::element_type>();
@@ -354,6 +371,11 @@ namespace psio {
          else if constexpr (std::is_enum_v<U>) return sizeof(std::underlying_type_t<U>);
          else if constexpr (::psio::TimeValue<U>) return sizeof(::psio::time_rep_t<U>);
          else if constexpr (std::is_arithmetic_v<U>) return sizeof(U);
+         // docs/pssz-spec.md 3.2: Bitvector(N) is its ceil(N / 8) bytes;
+         // Bitlist(N) is bounded by ceil(N / 8) + 1 (its bits and the
+         // delimiter).
+         else if constexpr (is_bitvector<U>::value) return (is_bitvector<U>::bits + 7) / 8;
+         else if constexpr (is_bitlist<U>::value) return (is_bitlist<U>::bits + 7) / 8 + 1;
          else if constexpr (::psio::is_transparent_v<U>)
             // The member's bound, its declared budget included.
             return child_payload<::psio::transparent_inner_t<U>>();

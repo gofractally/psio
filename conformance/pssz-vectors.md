@@ -171,7 +171,7 @@ same width and bytes from it.
 
 ## Classes
 
-354 types, 6958 vectors.
+357 types, 6973 vectors.
 
 | class | vectors | contents |
 |---|---|---|
@@ -191,7 +191,7 @@ same width and bytes from it.
 | `string-raw-non-utf8` | 48 | Non-UTF-8 bytes in a `raw_string`: valid PSSZ, recorded as `canonical`, for the typed codecs and for the schema-driven ones alike (the IR tells a raw string, Custom `string`, from a UTF-8 one, Custom `utf8`). The one exception is C++ `validate_strict`, which checks every plain string. Such a value has no JSON / I-JSON text: writing it is an error in every language. |
 | `length-bound-overflow` | 32 | Frames exceeding a member `length_bound`, as a writer that skips the bound check would produce them. Every reader rejects them; the C++ and Rust encoders refuse the values. |
 | `box` | 100 | Boxed values (`box<T>`: C++ / Rust `Box<T>`). The bytes are T's; a box gives its container no inferred size bound, so `BoxRec` uses 4-byte offsets where `BDirect` uses 1. The IR records the box (Custom `box`) and a schema-only reader derives the same widths. |
-| `bytes` | 88 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. |
+| `bytes` | 103 | Byte lists and arrays, bitvector, bitlist, u128/i128/u256. Bit types have a size bound (`docs/pssz-spec.md` §3.2: `bitvector<N>` ⌈N/8⌉, `bitlist<N>` ⌈N/8⌉ + 1), so a record of bit members needs no cap to be narrow: `BitRec` (`bit_record`: 1-byte offsets), and the 255 threshold `BitNarrow` (`record{seen:bitlist<2016>}`, bound 255: 1 byte) / `BitWide` (`bitlist<2024>`, 258: 2 bytes). `BytesRec` keeps 4-byte offsets (it has unbounded members). |
 | `zero-fixed` | 100 | Zero-field and all-fixed records and their containers. |
 | `depth` | 28 | Node depth 63 / 64 accepted, 65+ rejected (`kMaxValidationDepth` = 64). |
 | `nested` | 252 | Nested values (`docs/pssz-spec.md` §5.8). Canonical values in every position (top level, record member, nested of nested, optional, list element, variant alternative, tuple element, bounded member, self-nesting chain); the same frame read as the byte-list record (`NActionRaw`) and the byte-list frame read typed; rejections because the inner bytes are not the inner type (not a record, empty, header past the frame, a stored trailing None, a fixed-size inner value with a trailing or missing byte, each position of `NShapes`), a nested member over its `length_bound` — also where the bound is not the inner value's own length: a record (`NCapRec`: `cap_record_at_bound` at 28 bytes, `cap_record_one_over` at 29) and a list of `u16` (`NCapWords`, at most 5 bytes: `cap_words_two` is 4 bytes, `cap_words_three` is 3 elements but 6 bytes, rejected) —, and node depth across the nesting boundary (`depth_63` / `depth_64` accepted, `depth_65` / `depth_66` rejected: the inner root is one level below the nested member). |

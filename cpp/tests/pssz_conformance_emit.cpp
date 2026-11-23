@@ -2362,6 +2362,35 @@ namespace
       literal_all<Bits12>(c, "bitlist_full", bits("111111111111"), hx("ff1f"));
       literal_all<Bits12>(c, "bitlist_full_zero", bits("000000000000"), hx("0010"));
       {
+         // Bit types have a size bound (docs/pssz-spec.md 3.2): a record
+         // whose variable members are bit types is bounded without a cap.
+         static_assert(psio::max_encoded_size<psio::bitvector<12>>() == 2 &&
+                       psio::max_encoded_size<Bits12>() == 3);
+         static_assert(psio::max_encoded_size<BitRec>() == 8 && psio::auto_pssz_width_v<BitRec> == 1);
+         static_assert(psio::max_encoded_size<BitNarrow>() == 255 &&
+                       psio::auto_pssz_width_v<BitNarrow> == 1);
+         static_assert(psio::max_encoded_size<BitWide>() == 258 &&
+                       psio::auto_pssz_width_v<BitWide> == 2);
+         using A = psio::pssz;
+         // header 04 (u8, the 2 inline bytes of the bitvector, one slot),
+         // id, flags, slot(seen), the bitlist.
+         literal<A, BitRec>(c, "bit_record", {7, bitvec("100000000001"), bits("101")},
+                            hx("04" "07" "0108" "04" "0d"));
+         corpus(c, "bit_record_empty", BitRec{});
+         BitNarrow narrow;
+         BitWide   wide;
+         narrow.seen.push_back(true);
+         wide.seen.push_back(true);
+         literal<A, BitNarrow>(c, "bitlist_record_width_1", narrow, hx("0101" "03"));
+         literal<A, BitWide>(c, "bitlist_record_width_2", wide, hx("02000200" "03"));
+         for (std::size_t i = 1; i < 2016; ++i) narrow.seen.push_back(true);
+         for (std::size_t i = 1; i < 2024; ++i) wide.seen.push_back(i % 3 == 0);
+         if (must_encode<A>(narrow, "bit narrow").size() != 255)
+            die("BitNarrow full size is stale");
+         corpus(c, "bitlist_record_full", narrow);
+         corpus(c, "bitlist_record_full", wide);
+      }
+      {
          psio::uint256 v{};
          for (std::size_t i = 0; i < 32; ++i)
             reinterpret_cast<unsigned char*>(v.limb)[i] = static_cast<unsigned char>(i + 1);

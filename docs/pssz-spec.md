@@ -396,7 +396,8 @@ cap large enough to cover them from the start.
 | enum with underlying U           | sizeof(U)                                     |
 | `Array(T, N)`, T fixed      | N × max_encoded_size(T)                       |
 | `Array(T, N)`, T variable   | fit(N, N × max_encoded_size(T)): the offset table of N slots (§5.2), then the elements [None if T is None] |
-| `Bitvector(N)`, `Bitlist(N)` | None (see below)                             |
+| `Bitvector(N)`                   | ⌈N/8⌉ (fixed size)                            |
+| `Bitlist(N)`                     | ⌈N/8⌉ + 1   (the bits and the delimiter bit, §5.4.2) |
 | `BoundedString(N)`              | N                                             |
 | `BoundedList(T, N)`, T fixed    | N × max_encoded_size(T)                       |
 | `BoundedList(T, N)`, T variable | fit(N, N × max_encoded_size(T)): the offset table of N slots (§5.3.2), then the elements [None if T is None] |
@@ -520,13 +521,13 @@ included — is W bytes wide, whatever is bounded. A value that does not
 fit is refused by the encoder. Their bytes are unaffected by how the
 automatic profile infers widths.
 
-**Bit types.** `Bitvector(N)` is fixed-size (⌈N/8⌉ bytes) and
-`Bitlist(N)` holds at most ⌊N/8⌋ + 1 bytes, but the inferred bound does
-not use either fact: a bit type contributes None, so a record with a bit
-member and no explicit cap has W = 4. Give such a record
-`max-dynamic-data` to narrow it. (Every implementation computes None
-here; counting the bits would change W, and therefore the bytes, of
-records that have a bit member and no cap.)
+**Bit types.** `Bitvector(N)` is a fixed-size field of ⌈N/8⌉ bytes: it
+is inline in a record and takes no offset slot. `Bitlist(N)` is variable
+(one slot) and contributes ⌈N/8⌉ + 1: at most N bits and the delimiter
+bit. (The exact largest encoding is ⌊N/8⌋ + 1 bytes, one less when N is
+not a multiple of 8; the table's value is the bound every implementation
+uses.) A record whose only variable-size members are bit types is
+therefore bounded, and narrow, without an explicit cap.
 
 ### 3.3 fixed_size_of(T)
 

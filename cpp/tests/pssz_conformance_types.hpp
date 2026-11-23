@@ -921,6 +921,18 @@ namespace pssz_conf
    struct SetW1 { std::set<Raw> s; };
    PSIO_REFLECT(SetW1, attr(s, max<15> | element(max<16>)))
 
+   // ── Bit types have a size bound (docs/pssz-spec.md 3.2) ────────────────
+   //
+   // Bitvector(N) is ceil(N / 8) inline bytes; Bitlist(N) contributes
+   // ceil(N / 8) + 1. A record whose variable members are bit types is
+   // bounded without a cap.
+   struct BitRec { u8 id; psio::bitvector<12> flags; Bits12 seen; };  // 1 + 1 + 2 + 1 + 3 = 8
+   PSIO_REFLECT(BitRec, id, flags, seen)
+   struct BitNarrow { psio::bitlist<2016> seen; };  // 1 + 1 + (252 + 1) = 255
+   PSIO_REFLECT(BitNarrow, seen)
+   struct BitWide { psio::bitlist<2024> seen; };  // 1 + 1 + 254 > 255: 2 + 2 + 254 = 258
+   PSIO_REFLECT(BitWide, seen)
+
    // ── A record's cap bounds what lies beneath it (docs/pssz-spec.md 3.6) ─
    //
    // Nothing beneath a record with an explicit maxDynamicData of N can be
@@ -1088,7 +1100,9 @@ namespace pssz_conf
             ListFree, ListNested, MapW1, MapW2, SetW1>,
       // a record's cap as the bound of the positions beneath it (appended)
       types<CapTransfer, CapList, CapList2, CapList4, CapNested, CapMap, CapTuple, CapTight,
-            CapClamp, CapChild, CapOuter>>::type;
+            CapClamp, CapChild, CapOuter>,
+      // bit types have a size bound (appended)
+      types<BitRec, BitNarrow, BitWide>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)

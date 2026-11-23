@@ -267,3 +267,12 @@ an open-ended payload record).
 a record capped at 255 is clamped for the width and otherwise still means what
 it says (it limits the count); it is accepted silently.
 
+## Bit types have a size bound
+
+`Bitvector(N)` contributes its ⌈N/8⌉ bytes (a fixed, inline field: no slot)
+and `Bitlist(N)` ⌈N/8⌉ + 1 (its bits and the delimiter bit) to the inferred
+bound (`docs/pssz-spec.md` §3.2); before, both were unbounded and forced a
+record without a cap to 4-byte offsets. `{u8, bitvector<12>, bitlist<12>}` is
+now bounded by 8 bytes and has 1-byte offsets. `max_size.hpp` (`max_bare`,
+`fixed_payload`) and the schema-driven `bound_of` / `fixed_payload` agree.
+

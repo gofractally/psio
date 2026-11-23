@@ -144,6 +144,46 @@ namespace bound_tests
    static_assert(width<std::vector<std::tuple<u32>>> == 4 &&
                  width<std::map<u32, u8>> == 4 && width<std::set<std::tuple<u8>>> == 4);
 
+   // ── Bit types: ceil(N / 8) bytes; a bitlist one more for its delimiter ─
+   static_assert(bound<psio::bitvector<1>> == 1 && bound<psio::bitvector<8>> == 1 &&
+                 bound<psio::bitvector<9>> == 2 && bound<psio::bitvector<2040>> == 255);
+   static_assert(bound<psio::bitlist<1>> == 2 && bound<psio::bitlist<8>> == 2 &&
+                 bound<psio::bitlist<9>> == 3 && bound<psio::bitlist<12>> == 3);
+   struct BitFlags
+   {
+      u8                  id;
+      psio::bitvector<12> flags;   // inline: 2 bytes, no slot
+      psio::bitlist<12>   seen;    // one slot + at most 3 bytes
+      PSIO_REFLECT(BitFlags, id, flags, seen)
+   };
+   static_assert(bound<BitFlags> == 1 + 1 + 2 + (1 + 3) && width<BitFlags> == 1);
+   // A bitvector is a fixed field: a DWNC record of one is its bytes.
+   struct BitFixed
+   {
+      psio::bitvector<12> flags;
+      PSIO_REFLECT(BitFixed, flags, definitionWillNotChange())
+   };
+   static_assert(bound<BitFixed> == 2);
+   // The 255 / 256 threshold: record{bitlist<N>} is 2 * W + ceil(N / 8) + 1.
+   template <std::size_t N>
+   struct BitList
+   {
+      psio::bitlist<N> seen;
+   };
+   using BitList2016 = BitList<2016>;
+   using BitList2017 = BitList<2017>;
+   PSIO_REFLECT(BitList2016, seen)
+   PSIO_REFLECT(BitList2017, seen)
+   static_assert(bound<BitList2016> == 255 && width<BitList2016> == 1);
+   static_assert(bound<BitList2017> == 258 && width<BitList2017> == 2);
+   // In lists and tuples: fixed bitvectors pack with no table; bitlists
+   // have one.
+   static_assert(bound<psio::bounded<psio::bitvector<12>, 10>> == 20);
+   static_assert(bound<psio::bounded<psio::bitlist<12>, 10>> == 10 * (1 + 3) &&
+                 width<psio::bounded<psio::bitlist<12>, 10>> == 1);
+   static_assert(bound<std::tuple<psio::bitvector<12>, psio::bitlist<12>>> == 1 + 2 + 1 + 3);
+   static_assert(bound<std::optional<psio::bitlist<12>>> == 4);
+
    using Bytes = std::vector<char>;
    inline Bytes hex(std::string_view text)
    {
