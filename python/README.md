@@ -385,7 +385,7 @@ assert psio.from_key(ByOwner, psio.to_key(("bob", 7), ByOwner)) == ("bob", 7)
 
 # A record is the key of its fields in order, with the same bytes as the tuple.
 assert psio.to_key(OwnerKey("bob", 7)) == psio.to_key(("bob", 7), ByOwner)
-# The key writer checks member bounds too (as Rust and TypeScript do; C++ leaves it to the reader).
+# The key writer checks member bounds and UTF-8 too, as the pssz writer does (in every language).
 refused(lambda: psio.to_key(OwnerKey("x" * 33, 7)))
 too_long = psio.to_key(("x" * 33, 7), ByOwner)
 assert not psio.validate_key(OwnerKey, too_long)
@@ -412,6 +412,37 @@ class Money:                                      # a class of its own at run ti
 
 assert psio.codec(AccountId).fixed_size == 8 and psio.codec(Money).fixed_size == 8
 ```
+
+The member of a transparent class may carry the bounds that make a plain type
+a bounded one — `psio.max`, `psio.utf8` on a raw string, and the position
+specs below it. The wrapper then **is** that bounded type wherever it is
+held: its bytes, its width, its `max_encoded_size`, its schema node and its
+checks in every format (`docs/pssz-spec.md` §5.10).
+
+```python
+@psio.transparent
+@dataclass(frozen=True)
+class Memo:                                       # is BoundedString(80)
+    text: Annotated[str, psio.max(80)]
+
+memo = psio.codec(Memo)
+assert memo.max_encoded_size == 80 and memo.to_pssz(Memo("hi")) == b"hi"
+assert psio.to_json(Memo("hi")) == '"hi"'
+for write in (psio.to_pssz, psio.to_key, psio.to_json):
+    refused(lambda: write(Memo("m" * 81)))        # every writer
+assert not psio.validate_pssz(Memo, b"m" * 81)    # every reader
+assert not psio.validate_pssz(Memo, b"\xff")      # ... and it is UTF-8
+
+@dataclass
+class Receipt:
+    id: u32
+    memo: Memo                                    # 80 bytes at most, here too
+assert psio.codec(Receipt).max_encoded_size == (1 + 1) * 1 + 4 + 80 and psio.codec(Receipt).width == 1
+```
+
+What a type cannot say is not allowed on that member — `psio.min` /
+`psio.exact`, `psio.sorted` / `psio.unique`, an integer text form: state such
+a rule as the type's invariant.
 
 **Write** an invariant for a rule that bounds cannot express: a method that
 returns `None` when the value is a value of the type and a message when it
@@ -513,13 +544,62 @@ assert bank["transfer"].args.max_dynamic_data == 1024 and bank["transfer"].args.
 args = bank["transfer"].to_pssz(AccountId(1), AccountId(2), 500, memo="rent")
 assert len(args) == 2 + 8 + 8 + 8 + 2 + 4                           # 16-bit header and slot
 assert bank["transfer"].from_pssz(args) == (1, 2, 500, "rent")      # validated: use for untrusted calls
-# In text the arguments are an object keyed by parameter name.
-assert bank["transfer"].args.to_ijson((1, 2, 500, "rent")) == '{"from":1,"to":2,"amount":500,"memo":"rent"}'
 # A memo of 81 bytes has no encoding.
 refused(lambda: bank["transfer"].to_pssz(1, 2, 500, "m" * 81))
-# The return value is checked against its annotation.
-assert bank["symbol"].result.to_pssz("USD") == b"USD"
-refused(lambda: bank["symbol"].result.to_pssz("X" * 9))
+```
+
+In **text** an argument list has two forms (`docs/json.md`, "Method
+arguments"). A method whose parameters have names writes an object keyed by
+parameter name, and reads that object — members in any order, a missing
+`Optional` argument is `None` — or the positional array. Binary is always the
+positional tuple.
+
+```python
+transfer = bank["transfer"].args
+assert transfer.to_ijson((1, 2, 500, "rent")) == '{"from":1,"to":2,"amount":500,"memo":"rent"}'
+assert transfer.json_to_pssz('{"memo":"rent","amount":500,"to":2,"from":1}') == args    # any order
+assert transfer.json_to_pssz('[1,2,500,"rent"]') == args                                # or the array
+refused(lambda: transfer.from_json('[1,2,500]'))                                        # one element per parameter
+```
+
+A method with positional-only parameters (before `/`) has no parameter
+names, as a C++ `method(add)` that lists none: its arguments are the array,
+written and read. `max_fields` is the most parameters the method will ever
+have (at most 255) — a promise that later revisions keep.
+
+```python
+@psio.interface(name="calc")
+class Calc(Protocol):
+    def add(self, a: u32, b: u32, /) -> u64: ...
+
+    @psio.method(max_fields=4, max_dynamic_data=64)
+    def put(self, id: u32, text: Annotated[str, psio.max(8)]) -> None: ...
+
+    def names(self, limit: u32) -> Annotated[list[str], psio.max(4), psio.element(psio.max(16))]: ...
+
+calc = psio.interface_of(Calc)
+add = calc["add"]
+assert (add.named, add.params) == (False, [])
+assert add.args.to_json((1, 2)) == "[1,2]" and add.args.from_json("[1,2]") == (1, 2)
+refused(lambda: add.args.from_json('{"a":1,"b":2}'))
+assert add.to_pssz(1, 2) == psio.to_pssz((1, 2), tuple[u32, u32])
+assert calc["put"].max_fields == 4
+```
+
+The **result** is annotated like a member (C++ `returns(...)`): it is then
+that bounded type, and its bytes are that type's. `method.result` is its
+codec; `result_to_pssz` / `result_from_pssz` / `validate_result` are the
+short forms.
+
+```python
+assert bank["symbol"].result_to_pssz("USD") == b"USD"
+refused(lambda: bank["symbol"].result_to_pssz("X" * 9))
+# A bounded list of bounded strings has a 1-byte offset table, not the 4-byte one of list[str].
+names = calc["names"]
+assert names.result_to_pssz(["alice", "bob"]).hex(" ") == "02 07 61 6c 69 63 65 62 6f 62"
+assert names.result_from_pssz(bytes.fromhex("0207616c696365626f62")) == ["alice", "bob"]
+assert len(psio.to_pssz(["alice", "bob"], list[str])) == 16
+assert not names.validate_result(psio.to_pssz(["a"] * 5, Annotated[list[Annotated[str, psio.bounded(16)]], psio.bounded(8)]))
 ```
 
 Dispatch and a call proxy:
@@ -558,7 +638,154 @@ assert v2.to_pssz(1, 2, 500, "rent") == args                         # old calle
 assert v2.from_pssz(args) == (1, 2, 500, "rent", None)
 ```
 
-`bank.schema()` is the Schema IR with the `Interface` and `Func` nodes.
+`bank.schema()` (or `psio.schema_of(Bank)`) is the Schema IR with the
+`Interface` and `Func` nodes, as C++ `SchemaBuilder::insert_interface` builds
+them: per function its parameters (bounded types; `""` for a parameter
+without a name), its result, and the attributes `maxFields` /
+`maxDynamicData` (a result bound with no type form is `result.lengthBound`).
+`schema(arguments=True)` also gives every argument list a name,
+`<interface>.<method>`: an `Object` with the attribute `tuple` = `"named"` or
+`"positional"`. A tool that has only the schema looks a method up by name:
+
+```python
+fetched = psio.Schema.from_pssz(calc.schema(arguments=True).to_pssz()).validate()   # as it would arrive
+put = fetched.method("calc", "put")
+assert (put.params, put.named, put.max_fields, put.max_dynamic_data) == (["id", "text"], True, 4, 64)
+assert put.args.to_pssz({"id": 1, "text": "hi"}) == calc["put"].to_pssz(1, "hi")
+assert put.args.json_to_pssz('[1,"hi"]') == calc["put"].to_pssz(1, "hi")
+assert fetched.type("calc.put").from_pssz(calc["put"].to_pssz(1, "hi")) == {"id": 1, "text": "hi"}
+# A list without names is a tuple in the dynamic model; the result is the bounded type.
+assert fetched.method("calc", "add").args.from_pssz(add.to_pssz(1, 2)) == (1, 2)
+assert fetched.method("calc", "names").result.to_pssz(["alice", "bob"]) == names.result_to_pssz(["alice", "bob"])
+```
+
+`conformance/interface-vectors.json` pins all of this for every language;
+`tests/test_interface_conformance.py` declares its interface and replays
+every row, typed and schema-driven.
+
+### Step 9b — Order constraints, field caps, the upgrade check
+
+**Write** `psio.sorted`, `psio.unique` or `psio.unique_keys` on a list (or
+array) member, a method parameter, a result, or a position below one. Order
+and equality are those of maps and sets: bytewise comparison of the elements'
+`key` encodings, the same in every language.
+
+| annotation | the elements are |
+|---|---|
+| `psio.sorted` | in non-descending order |
+| `psio.unique` | in strictly ascending order |
+| `psio.sorted(descending=True)` | the same, descending |
+| `psio.unique_keys` | pairwise different by key: the element, or element 0 of a tuple element (no order) |
+
+```python
+@dataclass
+class Ranked:
+    scores: Annotated[list[u32], psio.sorted, psio.max(8)]
+    names: Annotated[list[str], psio.unique]
+    entries: Annotated[list[tuple[str, u32]], psio.unique_keys]
+    rows: Annotated[list[list[psio.u8]], psio.element(psio.sorted)]
+
+ok = Ranked([1, 1, 2], ["a", "ab"], [("x", 1), ("a", 1)], [[1, 2], []])
+assert psio.from_pssz(Ranked, psio.to_pssz(ok)) == ok
+bad = dataclasses.replace(ok, scores=[2, 1])
+for write in (psio.to_pssz, psio.to_json, psio.to_key):                    # every writer refuses
+    assert refused(lambda: write(bad)).reason == "sorted: elements are not in order"
+# ... and every checking reader: the frame of the same members without the constraint.
+frame = psio.to_pssz(([2, 1], [], [], []), tuple[Annotated[list[u32], psio.bounded(8)], list[str],
+                                                 list[tuple[str, u32]], list[list[psio.u8]]])
+assert psio.validate_pssz(Ranked, frame).reason == "sorted: elements are not in order"
+assert refused(lambda: psio.from_json(Ranked, '{"scores":[],"names":["a","a"],"entries":[],"rows":[]}')).reason \
+    == "sorted: elements are not in strictly ascending order"
+```
+
+**Get.** No byte, width or bound changes, and the Schema IR does not record
+the constraint: a typed reader enforces it, a schema-driven reader of the
+same schema does not know it. `psio.trusted` and views do not check it. A map
+or a set is ordered and unique by its type and takes no such annotation.
+
+**Write** `max_fields` for the most fields a record (parameters a method)
+will ever have. It is enforced where the count is known — the declaration,
+and any schema that is read: an `Object` with more members than its
+`maxFields`, with more than 255 members, or with `maxFields` above 255 is a
+malformed schema.
+
+```python
+@psio.record(max_fields=4, max_dynamic_data=64)
+@dataclass
+class Capped:
+    a: u32
+    b: Optional[u32] = None
+
+def too_many():
+    @psio.record(max_fields=1)
+    @dataclass
+    class TooMany:
+        a: u32
+        b: u32
+    return psio.codec(TooMany)
+
+assert refused(too_many).kind == "schema"
+from psio import ir
+wide = {"Object": {"members": [ir.member(f"m{i}", ir.U8) for i in range(256)], "attributes": []}}
+assert refused(lambda: psio.Schema({"Wide": wide}).type("Wide")).reason == "pssz IR: a record has more than 255 fields"
+```
+
+**Check** a revision before it ships: `psio.evolves_from(Old, New)` is the
+schema-upgrade check of `docs/pssz-spec.md` §7.5 / §7.6 (C++
+`pssz_evolves_from`). It holds when New's reader reads every value Old's
+writer can produce, with the same bytes: the old fields in order followed
+only by `Optional` ones, every offset width unchanged, a length bound only
+widened, `utf8` / raw and `sorted` / `unique` unchanged, a `max_dynamic_data`
+that admits everything the old type encodes to, and no more fields than the
+original's `max_fields` (which is neither raised nor dropped).
+
+```python
+@psio.record(max_fields=4, max_dynamic_data=64)
+@dataclass
+class CappedV2:
+    a: u32
+    b: Optional[u32] = None
+    c: Optional[Annotated[str, psio.max(8)]] = None
+
+assert psio.evolves_from(Capped, CappedV2)
+status = psio.evolves_from(CappedV2, Capped)
+assert not status and "removed" in status.reason
+assert psio.evolves_from(AccountV1, AccountV2)                         # step 4's revision
+assert not psio.evolves_from(Account2, AccountCountOnly)               # a bound dropped: the widths change
+# Two schemas, no classes: the same check over the types of two Schema IRs.
+old_ir = psio.Schema.from_pssz(psio.schema_of(Capped).to_pssz())
+new_ir = psio.Schema.from_pssz(psio.schema_of(CappedV2).to_pssz())
+assert psio.evolves_from(old_ir.type("Capped"), new_ir.type("CappedV2"))
+```
+
+The result is a `Status`: truthy, or `reason` names the first rule broken and
+where. Member names are not compared (the wire does not carry them), and two
+Schema IRs do not record `sorted` / `unique`.
+
+### Step 9c — Names as numbers
+
+`psio.method_to_number` / `number_to_method` and `psio.name_to_number` /
+`number_to_name` are the two arithmetic name coders of C++
+(`psio/compress_name.hpp`, `psio/name.hpp`): a short method name or an
+identifier name (`a`-`z`, `0`-`9`, `-`; at most 18 characters) as a 64-bit
+number. A number is a name's only if it decodes back to the name: where the
+compressed code would not, `name_to_number` gives 0 and `method_to_number`
+takes the hash form (bit 56 set, text `#` and sixteen letters).
+
+```python
+n = psio.method_to_number("transfer")
+assert psio.number_to_method(n) == "transfer" and not psio.is_hash_name(n)
+assert psio.method_to_number("Transfer") == n                          # case is ignored
+h = psio.method_to_number("getSymbolType")                             # its code would not decode back
+assert h == 0xD55DF3070B8758EB and psio.is_hash_name(h)
+assert psio.number_to_method(h) == "#hmlnslheseoypnnp" and psio.method_to_number("#hmlnslheseoypnnp") == h
+alice = psio.name_to_number("alice")
+assert alice != 0 and psio.number_to_name(alice) == "alice"
+assert psio.name_to_number("x--b") == 0 and psio.name_to_number("Alice") == 0
+```
+
+Every row of `conformance/name-vectors.json` is replayed by
+`tests/test_consistency.py`.
 
 ### Step 10 — The same declarations in C++, Rust and TypeScript
 
@@ -567,6 +794,12 @@ assert v2.from_pssz(args) == (1, 2, 500, "rent", None)
 | bounded text | `attr(owner, utf8 \| max<32>)` on `std::string` | `#[psio(max = 32)] owner: String` | `field(rawString, { utf8: true, max: 32 })` | `owner: Annotated[str, psio.max(32)]` |
 | bounded list of bounded text | `attr(tags, max<8> \| element(utf8 \| max<16>))` | `#[psio(max = 8, element(max = 16))] tags: Vec<String>` | `field(list(rawString), { max: 8, element: { utf8: true, max: 16 } })` | `tags: Annotated[list[str], psio.max(8), psio.element(psio.max(16))]` |
 | cap | `maxDynamicData(1024)` | `#[pssz(max_dynamic_data = 1024)]` | `{ maxDynamicData: 1024 }` | `@psio.record(max_dynamic_data=1024)` |
+| field-count cap | `maxFields(8)` | | | `@psio.record(max_fields=8)`, `@psio.method(max_fields=8)` |
+| order | `attr(scores, sorted)`, `unique`, `unique_keys` | | | `scores: Annotated[list[u32], psio.sorted]`, `psio.unique`, `psio.unique_keys` |
+| bounded wrapper | `PSIO_REFLECT(Memo, transparent(), attr(text, utf8 \| max<80>))` | `#[psio(transparent)] struct Memo(#[psio(max = 80)] String)` | `transparent('Memo', boundedUtf8(80))` | `@psio.transparent class Memo: text: Annotated[str, psio.max(80)]` |
+| result bound | `method(names, limit, returns(max<4> \| element(utf8 \| max<16>)))` | | | `def names(self, limit: u32) -> Annotated[list[str], psio.max(4), psio.element(psio.max(16))]` |
+| no parameter names | `method(add)` | | | `def add(self, a: u32, b: u32, /)` |
+| upgrade check | `static_assert(psio::pssz_evolves_from<Old, New>)` | | | `assert psio.evolves_from(Old, New)` |
 | fixed layout | `definitionWillNotChange()` | `#[psio(definition_will_not_change)]` | `{ fixed: true }` | `@psio.record(definition_will_not_change=True)` |
 
 Agreement is checked the way the other languages check it: the offset width
@@ -678,7 +911,10 @@ For a format `F` in `pssz`, `key`, `json`, `ijson` (the names of
 | `psio.pssz_view(T, data)` | read-only view |
 | `psio.key_prefix(T, elements)`, `psio.key_prefix_upper_bound(prefix)` | prefix scans |
 | `psio.json_to_pssz(T, text)`, `psio.pssz_to_json(T, data)` | text ↔ bytes |
-| `psio.schema_of(T, ...)` | the Schema IR (`.ir`, `.to_json()`, `.to_pssz()`) |
+| `psio.schema_of(T, ...)` | the Schema IR (`.ir`, `.to_json()`, `.to_pssz()`, `.validate()`); of an `@psio.interface` class, its `Interface` |
+| `psio.evolves_from(Old, New)` | the schema-upgrade check: a `Status` |
+| `psio.interface_of(C)`, `schema.method(interface, name)` | methods: `args`, `result`, `named`, `max_fields`, `max_dynamic_data` |
+| `psio.method_to_number(s)`, `number_to_method(n)`, `is_hash_name(n)`, `name_to_number(s)`, `number_to_name(n)` | the name coders |
 | `psio.codec(T, width=…)` | the compiled codec: every operation as a method, plus `width`, `max_encoded_size`, `max_dynamic_data`, `fixed_size` |
 
 ## Without Python classes: the schema-driven codec
@@ -732,8 +968,20 @@ entries (whose order check encodes every key).
 
 ## Limits
 
-- No mutable view, no `pssz_evolves_from` check, no pjson, no WIT / GraphQL
-  emitters, no formats outside pssz / key / json / ijson.
+- No mutable view, no pjson, no WIT / GraphQL emitters, no formats outside
+  pssz / key / json / ijson.
+- `psio.sorted` / `psio.unique` / `psio.unique_keys` are the typed
+  declaration's: the Schema IR does not record them, so a schema-driven
+  reader (and `psio.evolves_from` over two Schema IRs) does not know them.
+- `psio.evolves_from` compares wire compatibility. It does not compare
+  member names, and a transparent type is compared as its member (the Schema
+  IR resolves the alias): C++ also requires the same transparent name. It
+  follows `docs/pssz-spec.md` §7.5 in accepting an alternative appended to a
+  variant, which C++ `pssz_evolves_from` (equal alternative counts) refuses.
+- Python compares unions without regard to order (`A | B == B | A`) and
+  `typing.List[...]` / `Optional[...]` cache their results under that
+  equality, while the order of a variant's alternatives is its wire format.
+  Declare a union once, under a name, and use the name.
 - `psio.trusted` is for bytes this program wrote or validated. For any other
   input the result is a value outside the type's bounds or a `DecodeError`
   (never a read outside the input): text is still decoded as UTF-8, and a
@@ -760,7 +1008,12 @@ python -m mypy                                             # the package, strict
 MYPYPATH=src python -m mypy --strict tests/typing_sample.py  # user code against the public API
 ```
 
-`tests/` replays every vector of `conformance/pssz-vectors.json`,
-`json-vectors.json`, `time-key-vectors.json` and `schema-json-vectors.json`,
-and the pssz / key / json rows of `cpp-golden.json`, on the schema-driven
-path and on the typed path, with exact counts asserted.
+`tests/` replays every vector of `conformance/pssz-vectors.json` (360 types,
+7035 vectors), `json-vectors.json`, `time-key-vectors.json` (56 types, 1164
+rows), `schema-json-vectors.json` and `interface-vectors.json` (6 methods, 55
+rows), and the pssz / key / json rows of `cpp-golden.json`, on the
+schema-driven path and on the typed path, and every row of
+`name-vectors.json` (1538 names, 617 numbers), with exact counts asserted.
+`psio.schema_of` of the Python declarations of every fixture type — and
+`psio.interface_of(Token).schema(arguments=True)` for the interface fixture —
+is the fixture's `schema_ir` byte for byte.

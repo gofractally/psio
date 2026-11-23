@@ -215,7 +215,10 @@ class OrderConstraints(unittest.TestCase):
 
     def test_where_it_may_be_written(self) -> None:
         for hint in (Annotated[str, psio.sorted], Annotated[Dict[u8, u8], psio.unique],
-                     Annotated[set[u8], psio.sorted], Annotated[u32, psio.unique_keys]):
+                     Annotated[set[u8], psio.sorted], Annotated[u32, psio.unique_keys],
+                     Annotated[str, psio.element(psio.sorted)], Annotated[List[u8], psio.keys(psio.sorted)],
+                     Annotated[List[List[u8]], psio.at(0, psio.sorted)],
+                     Annotated[Tuple[List[u8], u8], psio.at(2, psio.sorted)]):
             @dataclass
             class Bad:
                 member: hint  # type: ignore[valid-type]

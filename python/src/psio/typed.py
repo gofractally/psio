@@ -1045,6 +1045,11 @@ def _order_of(shape: Shape, a: Position, where: str) -> Optional[Order]:
             out.element = _order_of(s.inner, a.element, f"{where}, element")
         elif k == "assoc" and s.id == "set":
             out.element = _order_of(s.entry, a.element, f"{where}, element")
+        else:
+            _fail(f"psio: {where}: element(...) is for the elements of a list, an array or a set")
+    below = [p for p in (a.keys, a.values) if p is not None and p.ordered()]
+    if below and not (k == "assoc" and s.id == "map"):
+        _fail(f"psio: {where}: keys(...) / values(...) are for a map")
     if k == "assoc" and s.id == "map":
         key, value = s.entry.items
         if a.keys is not None and a.keys.ordered():
@@ -1060,7 +1065,7 @@ def _order_of(shape: Shape, a: Position, where: str) -> Optional[Order]:
             index = _alt_index(s.alts, name, where)
             below = s.alts[index].type
         else:
-            continue  # (`_check_position` names the misuse)
+            _fail(f"psio: {where}: at({name}, ...) is for an element of a tuple or an alternative of a union")
         if out.at is None:
             out.at = {}
         out.at[index] = _order_of(below, child, f"{where}, at {name}")
