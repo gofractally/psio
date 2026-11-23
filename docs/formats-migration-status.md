@@ -6,6 +6,128 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 ## Handover (newest first)
 
+### After the frame pass (PSSZ / SSZ / WIT views, requested after F0)
+
+State: main line merged (`50092a4`, G46–G51). Two frame commits on top;
+391/391 ctest in both simdjson configurations. F1 still uncommitted in
+`~/psio-formats-scratch/f1-wip/`.
+
+What was done, and what it bought. ns/op, minimum of 11 interleaved trials,
+two runs each (run 1 / run 2), binaries built through CMake
+(`psio_bench_view_generations`), 1-minute load 5.9–7.8 throughout. "before"
+is the merged tip with the F0 lookup fix; "after" adds the two commits.
+
+| Operation | old (g1) | before | after |
+|---|---:|---:|---:|
+| PSSZ one field | 0.23 (frac 0.28) | 0.31 / 0.31 | 0.31 / 0.31 |
+| PSSZ all 5 fields | 0.70 | 2.84 / 2.82 | 2.42 / 2.63 |
+| PSSZ nested scalar | 0.24 | 1.05 / 1.04 | 0.94 / 1.02 |
+| PSSZ nested string | 0.24 | 1.42 / 1.42 | 1.41 / 1.48 |
+| PSSZ string field | 0.24 | 0.69 / 0.68 | 0.68 / 0.70 |
+| PSSZ iterate 16 records | 2.52 | 10.6 / 10.6 | 10.6 / 11.4 |
+| PSSZ iterate, all fields | 8.44 (frac 6.86) | 22.7 / 19.4 | 18.6 / 20.0 |
+| SSZ all 5 fields | 0.66 | 1.32 / 1.34 | 1.31 / 1.31 |
+| SSZ nested scalar | 0.31 | 0.48 / 0.47 | 0.42 / 0.42 |
+| SSZ iterate 16 records | 2.64 | 6.30 / 6.25 | 6.59 / 6.60 |
+| SSZ range-for | — | 6.00 / 5.86 | 9.58 / 10.4 |
+| SSZ iterate, all fields | — | 10.8 / 10.8 | 11.9 / 11.9 |
+| WIT all 5 fields | 0.53 | 0.61 / 0.61 | 0.61 / 0.61 |
+| WIT iterate 16 records | 2.96 | 4.75 / 4.71 | 4.73 / 4.69 |
+| set of 64 ints, hit | 1.41 | 2.60 / 2.73 | 2.72 / 2.85 |
+| map of 32 strings, hit | 7.7 | 19.0 / 18.0 | 17.6 / 19.1 |
+
+1. **Per-record state** (`view.hpp` "Per-record state", `pssz_view.hpp`
+   `record_state`). A PSSZ record view reads the extensible-record header
+   and checks the fixed region once, at construction, and keeps the fixed
+   size (the view grows from 32 to 40 bytes: two spans + one word). Same
+   results for every input, including empty and unusable bytes
+   (`PSIO_VIEW_NO_RECORD_STATE` builds the old path; the new tests run
+   both). It buys about 10 % on "all fields" and "nested scalar" and
+   nothing measurable elsewhere: after inlining the compiler was already
+   merging most of the repeated header work. SSZ and the canonical ABI have
+   no per-record header, so there is nothing to hoist; their one size
+   compare per field is the safety guarantee itself.
+2. **A hole in the guarantee, closed** (`pssz_view.hpp`, `ssz_view.hpp`
+   `vector_element_span`). The premise "a view never reads out of bounds on
+   unvalidated input" was NOT true before this pass and was not tested: a
+   list of variable-size elements took the element's start and end from
+   the offset table without comparing them with each other or with the
+   list, so corrupted offsets produced a span outside the buffer (the new
+   test crashed with SIGBUS on the PSSZ case and failed on the SSZ one).
+   Elements are now bounded. This is why SSZ iteration is slower after
+   than before (range-for 6.0 → ~10, iterate-all +10 %): the guarantee
+   costs two more compares per element, and for range-for a worse loop.
+   `cpp/tests/view_unvalidated_tests.cpp` (new; 15,056 assertions) pins:
+   default-constructed views and `at(i)` past the end read as zero / empty
+   for PSSZ, SSZ and WIT; every prefix and every single-byte corruption of
+   an encoded record yields only spans inside the buffer. Not covered:
+   optional / variant / map members under corruption, `unpack()` (which is
+   a trusted decode and is NOT safe on unvalidated bytes).
+3. Not done: caching the count / table base in the list view. In the
+   loops measured the compiler already hoists the count; what remains per
+   element is not bookkeeping (below).
+
+**What is left, and why.** Per element of a PSSZ list of records the safe
+view executes 4 loads and 5–6 compare-and-branch pairs (element start,
+element end, their order and bound; the element's header and its bound;
+the member against the header) where the first generation executes 2 loads
+and none. The two generations differ in three things that bookkeeping
+cannot remove:
+
+* **The guarantee.** Every offset read from the bytes is compared before it
+  is used, so that unvalidated bytes cannot make a view read outside the
+  buffer. g1 compares nothing.
+* **Eager sizes.** A sub-view is a span, so its size is computed (one more
+  load: the next offset) even when only a fixed member is then read. g1's
+  cursor is a pointer; it never learns the size.
+* **The wire's evolution rule** (PSSZ only): a member is present only if
+  the writer's header covers it. One compare per member; g1's pssz32 did
+  not implement pruned trailing optionals at all.
+
+### Proposal (NOT implemented): views of bytes already validated
+
+The remaining gap is the price of the guarantee, so closing it is a
+semantic choice: let the caller say the bytes are validated.
+
+* **Spelling.** `psio::pssz_view<T>{bytes}` stays the safe view.
+  `psio::pssz_view<T>{psio::trusted{bytes}}` — and the view returned by a
+  validating entry point (`validated_pssz_view`, `from_F`-style checked
+  constructors, `as_view(buffer)` for a buffer that validated on entry) —
+  is a distinct type, `view<T, Fmt, storage::trusted_borrow>` (a new
+  storage kind beside `const_borrow`), so trust is in the type: it
+  propagates to every sub-view, cannot be obtained by accident, and a
+  function that takes `pssz_view<T>` does not silently accept or produce
+  it. A trusted view converts to the safe view of the same bytes (one
+  way); the reverse needs `psio::trusted{}` again.
+* **What is skipped.** Every compare whose only purpose is unvalidated
+  input: element start/end order and bound, header ≤ size, variable-member
+  start/stop bounds, the scalar size test, `i < size()` inside
+  `operator[]`. Sub-view sizes are not computed until asked for (the
+  trusted cursor is a pointer plus the enclosing end, like g1's).
+* **What is kept.** The PSSZ header compare (it is the wire's meaning, not
+  a check): a member the writer did not write still reads as absent.
+  `at(i)` stays checked. A default-constructed trusted view reads as
+  zero / empty (one null test, shared by all members of the record).
+* **What the caller guarantees.** The bytes passed `validate_F<T>` for
+  this T (or were produced by `to_F` in this process, or are a row this
+  service wrote), and are not modified while the view lives. If not: out
+  of bounds reads, exactly as `from_F<T>(psio::trusted{bytes})` today.
+* **Const-safety and hand-off.** Unchanged: a trusted view is read-only
+  and borrows. `mutable_view` keeps its own rule (it already requires
+  validated bytes and only overwrites fixed-size values, which cannot
+  invalidate what a trusted view assumes).
+* **What it buys** (the g1 column is the measured ceiling for the same
+  work on the same machine): all 5 fields of a nested record 2.4 → ~0.7
+  ns; one nested scalar 0.94 → ~0.25; a string member 0.68 → ~0.25;
+  iterating 16 records 10.6 → ~2.5–3 (0.66 → ~0.17 ns per element);
+  map of strings lookup 18 → ~8. The psibase hot path — a few fields of a
+  row the service itself wrote — is the "all fields" / "nested" row:
+  roughly 3–4×.
+* **Cost.** A second instantiation of the view templates per type used
+  both ways; the format traits gain unchecked forms of each function (or
+  the capnp / flatbuf style: a format-owned cursor view). The Rust, JS and
+  Python views need the same split to keep the surface aligned.
+
 ### After F0 — view frames head to head
 
 State: F0 measured and committed. F1 (Cap'n Proto) is started but NOT
