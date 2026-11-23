@@ -67,6 +67,47 @@ pair!(AnnDeep / WrapDeep "AnnDeep" {
     deep: Vec<Vec<(u8, Vec<String>)>> => Vec<Vec<(u8, BoundedList<BoundedString<2>, 3>)>>
 });
 
+// A list's own offset table follows its own bound (docs/pssz-spec.md 3.1),
+// and a record's cap bounds what lies beneath it (3.6): the fixture's types.
+pair!(ListW1 / WrapListW1 "ListW1" {
+    #[psio(max = 15, element(max = 16))]
+    items: Vec<RawString> => BoundedList<BoundedRawString<16>, 15>
+});
+pair!(ListFree / WrapListFree "ListFree" {
+    #[psio(max = 8)]
+    items: Vec<RawString> => BoundedList<RawString, 8>
+});
+pair!(ListNested / WrapListNested "ListNested" {
+    #[psio(max = 20, element(max = 15, element(max = 16)))]
+    rows: Vec<Vec<RawString>> => BoundedList<BoundedList<BoundedRawString<16>, 15>, 20>
+});
+pair!(MapW1 / WrapMapW1 "MapW1" {
+    #[psio(max = 4, keys(max = 8))]
+    m: BTreeMap<RawString, u32> => BoundedMap<BoundedRawString<8>, u32, 4>
+});
+pair!(MapW2 / WrapMapW2 "MapW2" {
+    #[psio(max = 100, values(max = 16))]
+    m: BTreeMap<u32, RawString> => BoundedMap<u32, BoundedRawString<16>, 100>
+});
+pair!(SetW1 / WrapSetW1 "SetW1" {
+    #[psio(max = 15, element(max = 16))]
+    s: BTreeSet<RawString> => BoundedSet<BoundedRawString<16>, 15>
+});
+macro_rules! capped {
+    ($cap:literal $name:ident { $($(#[$meta:meta])* $field:ident : $ty:ty),* }) => {
+        #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, ToPsszSchema, PsszView)]
+        #[pssz(max_dynamic_data = $cap)]
+        pub struct $name { $($(#[$meta])* pub $field: $ty),* }
+    };
+}
+capped!(255 CapList { items: Vec<RawString> });
+capped!(255 CapNested { rows: Vec<Vec<RawString>> });
+capped!(255 CapMap { m: BTreeMap<RawString, Vec<u32>> });
+capped!(255 CapTuple { t: (RawString, Vec<RawString>) });
+capped!(255 CapTransfer { token: u32, from: u64, amount: u64, memo: String, data: Option<Vec<u8>> });
+capped!(60000 CapTight { #[psio(max = 8, element(max = 16))] items: Vec<RawString> });
+capped!(255 CapClamp { #[psio(max = 1000, element(max = 1000))] items: Vec<RawString> });
+
 #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, ToPsszSchema, JsonText)]
 pub struct AnnTup {
     #[psio(at(0, max = 16), at(2, max = 5))]
@@ -233,14 +274,16 @@ fn the_bounds_select_the_widths_the_fixture_pins() {
     fn bound<T: PsszPack<Pssz>>() -> (usize, Option<usize>) {
         (auto_pssz_width::<T>(), T::MAX_ENCODED_SIZE)
     }
-    assert_eq!(bound::<AnnTags>(), (1, Some(168)));
-    assert_eq!(bound::<AnnRawTags>(), (1, Some(168)));
-    assert_eq!(bound::<AnnGrid>(), (1, Some(44)));
-    assert_eq!(bound::<AnnOpt>(), (1, Some(49)));
-    assert_eq!(bound::<AnnArr>(), (1, Some(68)));
-    assert_eq!(bound::<AnnMap>(), (1, Some(168)));
-    assert_eq!(bound::<AnnSet>(), (1, Some(88)));
-    assert_eq!(bound::<AnnTup>(), (1, Some(93)));
+    assert_eq!(bound::<AnnTags>(), (1, Some(138)));
+    assert_eq!(bound::<AnnRawTags>(), (1, Some(138)));
+    assert_eq!(bound::<AnnGrid>(), (1, Some(29)));
+    assert_eq!(bound::<AnnOpt>(), (1, Some(37)));
+    assert_eq!(bound::<AnnArr>(), (1, Some(53)));
+    assert_eq!(bound::<AnnMap>(), (1, Some(114)));
+    assert_eq!(bound::<AnnSet>(), (1, Some(70)));
+    assert_eq!(bound::<AnnTup>(), (1, Some(66)));
+    // The annotated list has the list's own width: a 1-byte offset table.
+    assert_eq!(psio::to_pssz(&AnnTags { tags: vec![s("ab"), s("c")] }), [1, 1, 2, 4, b'a', b'b', b'c']);
     // The same members without the annotations are unbounded.
     #[derive(psio::PsszPack)]
     #[allow(dead_code)]
@@ -463,4 +506,139 @@ fn the_schema_of_an_annotated_member_is_the_one_cpp_writes() {
     same::<AnnMap>(&fixture, "AnnMap");
     same::<AnnSet>(&fixture, "AnnSet");
     same::<AnnTup>(&fixture, "AnnTup");
+    // Narrow list tables and position caps change no schema: the annotated
+    // member is the bounded type, the member beneath a cap the plain one.
+    same::<ListW1>(&fixture, "ListW1");
+    same::<WrapListW1>(&fixture, "ListW1");
+    same::<ListFree>(&fixture, "ListFree");
+    same::<ListNested>(&fixture, "ListNested");
+    same::<MapW1>(&fixture, "MapW1");
+    same::<MapW2>(&fixture, "MapW2");
+    same::<SetW1>(&fixture, "SetW1");
+    same::<CapList>(&fixture, "CapList");
+    same::<CapNested>(&fixture, "CapNested");
+    same::<CapMap>(&fixture, "CapMap");
+    same::<CapTuple>(&fixture, "CapTuple");
+    same::<CapTransfer>(&fixture, "CapTransfer");
+    same::<CapTight>(&fixture, "CapTight");
+    same::<CapClamp>(&fixture, "CapClamp");
+}
+
+/// The fixture's pinned bytes, written from plain `Vec` / `BTreeMap` /
+/// `BTreeSet` members; the annotation and the wrapper spelling agree, and
+/// the schema-driven codec reads and writes the same bytes from the IR
+/// Rust builds.
+#[test]
+fn list_tables_follow_their_own_bound_and_the_cap_above_them() {
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    fn pinned<T>(value: &T, expected: &str)
+    where
+        T: PsszPack<Pssz> + PsszUnpack<Pssz> + psio::pssz::schema_ir::ToPsszSchema + PartialEq + std::fmt::Debug,
+    {
+        let bytes = psio::to_pssz(value);
+        assert_eq!(hex(&bytes), expected);
+        assert_eq!(&psio::from_pssz::<T>(&bytes).unwrap(), value);
+        assert_eq!(&psio::from_pssz_trusted::<T>(&bytes), value);
+        let (schema, root) = schema_for::<T>().unwrap();
+        let dynamic = psio::pssz::dynamic::decode_exact::<Pssz>(&schema, &root, &bytes).unwrap();
+        assert_eq!(hex(&psio::pssz::dynamic::encode::<Pssz>(&schema, &root, &dynamic).unwrap()), expected);
+    }
+    let r = |text: &str| RawString::from(text);
+    let two = || vec![r("ab"), r("c")];
+    pinned(&ListW1 { items: two() }, "020002000204616263");
+    pinned(&WrapListW1 { items: BoundedList(vec![BoundedRawString(b"ab".to_vec()), BoundedRawString(b"c".to_vec())]) }, "020002000204616263");
+    pinned(&ListFree { items: two() }, "0400000004000000080000000a000000616263");
+    pinned(&ListNested { rows: vec![two(), vec![]] }, "02000200040009000204616263");
+    pinned(&SetW1 { s: two().into_iter().collect() }, "020002000204616263");
+    pinned(&CapList { items: two() }, "01010204616263");
+    pinned(&CapNested { rows: vec![two(), vec![]] }, "010102070204616263");
+    pinned(&CapTuple { t: (r("x"), two()) }, "0101020203780204616263");
+    pinned(&CapTight { items: two() }, "020002000204616263");
+    pinned(&CapClamp { items: two() }, "01010204616263");
+    pinned(
+        &CapTransfer { token: 1, from: 2, amount: 3, memo: "hi".into(), data: Some(vec![0xaa]) },
+        "1601000000020000000000000003000000000000001618686901aa",
+    );
+    assert_eq!(auto_pssz_width::<BoundedList<BoundedString<16>, 15>>(), 1);
+    assert_eq!(auto_pssz_width::<BoundedList<BoundedString<17>, 15>>(), 2);
+    assert_eq!(auto_pssz_width::<BoundedList<String, 8>>(), 4);
+
+    // Views read what lies beneath a cap at the widths the cap selects: the
+    // member's view carries the position in its format tag.
+    let bytes = psio::to_pssz(&CapNested { rows: vec![two(), vec![r("z")]] });
+    let view = psio::PsszView::<CapNested>::new(&bytes).unwrap();
+    let rows: psio::PsszView<'_, Vec<Vec<RawString>>, psio::pssz::PsszUnder<255>> = view.rows();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.get(0).get(1).view().as_bytes(), b"c");
+    assert_eq!(rows.get(1).get(0).view().as_bytes(), b"z");
+    let bytes = psio::to_pssz(&CapTuple { t: (r("x"), two()) });
+    let view = psio::PsszView::<CapTuple>::new(&bytes).unwrap();
+    assert_eq!(view.t().field::<1>().get(0).view().as_bytes(), b"ab");
+    let bytes = psio::to_pssz(&CapMap { m: BTreeMap::from([(r("k"), vec![7u32])]) });
+    assert_eq!(hex(&bytes), "0101010202036b07000000");
+    let view = psio::PsszView::<CapMap>::new(&bytes).unwrap();
+    assert_eq!(view.m().get(0).value().get(0).get(), 7);
+    // And a mutable view writes through the same widths.
+    let mut bytes = bytes;
+    {
+        use CapMapPsszMutAccessors;
+        let mut view = psio::PsszMutView::<CapMap>::new(&mut bytes).unwrap();
+        view.m_mut().get_mut(0).value_mut().get_mut(0).set(&9).unwrap();
+    }
+    assert_eq!(psio::from_pssz::<CapMap>(&bytes).unwrap().m[&r("k")], vec![9]);
+}
+
+/// A transparent type's member bound is the type's, in every format and on
+/// every entry point; so is the bound of an enum alternative.
+#[test]
+fn a_transparent_member_bound_is_enforced_everywhere() {
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, ToPsszSchema, JsonText, Key, PsszView)]
+    #[psio(transparent)]
+    struct Memo(#[psio(max = 80)] String);
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, JsonText, Key)]
+    enum Note {
+        Short(#[psio(max = 4)] String),
+        Number(u32),
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, JsonText, Key)]
+    struct Holder {
+        id: u8,
+        memo: Memo,
+    }
+    let at = Memo("m".repeat(80));
+    let over = Memo("m".repeat(81));
+    // Keys: the writer, the reader and the validator.
+    let key = psio::try_to_key(&at).unwrap();
+    assert_eq!(psio::from_key::<Memo>(&key).unwrap(), at);
+    assert_eq!(psio::validate_key::<Memo>(&key), Ok(()));
+    assert!(psio::try_to_key(&over).is_err());
+    let long = psio::to_key(&over.0);
+    assert_eq!(psio::from_key::<String>(&long).unwrap(), over.0);
+    assert!(psio::from_key::<Memo>(&long).is_err());
+    assert!(psio::validate_key::<Memo>(&long).is_err());
+    // Inside a record's key too.
+    assert!(psio::try_to_key(&Holder { id: 1, memo: over.clone() }).is_err());
+    let holder_key = psio::to_key(&(1u8, over.0.clone()));
+    assert!(psio::from_key::<Holder>(&holder_key).is_err());
+    assert!(psio::validate_key::<Holder>(&holder_key).is_err());
+    assert!(psio::from_key::<Holder>(&psio::to_key(&(1u8, at.0.clone()))).is_ok());
+    // An alternative's bound.
+    assert!(psio::try_to_key(&Note::Short("abcd".into())).is_ok());
+    assert!(psio::try_to_key(&Note::Short("abcde".into())).is_err());
+    let mut alt = vec![0u8];
+    alt.extend(psio::to_key(&"abcde".to_string()));
+    assert!(psio::from_key::<Note>(&alt).is_err() && psio::validate_key::<Note>(&alt).is_err());
+    // pSSZ and JSON agree; the view and the schema are the bounded string's.
+    assert!(psio::try_to_pssz(&over).is_err());
+    assert!(psio::from_pssz::<Memo>(over.0.as_bytes()).is_err());
+    assert!(psio::PsszView::<Memo>::new(over.0.as_bytes()).is_err());
+    assert!(psio::PsszView::<Memo>::new(at.0.as_bytes()).is_ok());
+    assert!(psio::try_to_json(&over).is_err());
+    assert!(psio::from_json::<Memo>(&format!("\"{}\"", over.0)).is_err());
+    assert_eq!(psio::from_json::<Memo>(&format!("\"{}\"", at.0)).unwrap(), at);
+    // `Memo` names the bounded UTF-8 string in the schema.
+    let schema = format!("{:?}", psio::pssz::schema_ir::schema_for::<Memo>().unwrap().0);
+    assert!(schema.contains("maxCount: 80") && schema.contains("id: \"utf8\""), "{schema}");
 }

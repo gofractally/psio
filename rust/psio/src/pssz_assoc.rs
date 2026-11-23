@@ -73,7 +73,8 @@ fn ascending<K: KeyPack>(keys: impl Iterator<Item = K>, error: PsszError) -> Pss
     Ok(())
 }
 
-fn encode_map<'a, F: PsszFormat, K, V>(
+pub(crate) fn encode_map<'a, F: PsszFormat, K, V>(
+    w: usize,
     entries: impl Iterator<Item = (&'a K, &'a V)>,
     bound: usize,
     out: &mut Vec<u8>,
@@ -87,9 +88,10 @@ where
     if sorted.len() > bound {
         return Err(MAP_BOUND);
     }
-    checked::encode_sequence::<F, (&K, &V)>(<Vec<(K, V)> as PsszPack<F>>::OFFSET_WIDTH, &sorted, out, false)
+    checked::encode_sequence::<F, (&K, &V)>(w, &sorted, out, false)
 }
-fn encode_set<'a, F: PsszFormat, K>(
+pub(crate) fn encode_set<'a, F: PsszFormat, K>(
+    w: usize,
     elements: impl Iterator<Item = &'a K>,
     bound: usize,
     out: &mut Vec<u8>,
@@ -102,18 +104,17 @@ where
     if sorted.len() > bound {
         return Err(SET_BOUND);
     }
-    checked::encode_sequence::<F, &K>(<Vec<K> as PsszPack<F>>::OFFSET_WIDTH, &sorted, out, false)
+    checked::encode_sequence::<F, &K>(w, &sorted, out, false)
 }
 /// The entries of a map frame: the list is decoded (which runs the
 /// invariants of the keys and values, in wire order), then the order is
 /// required.
-fn decode_map<F: PsszFormat, K, V>(bytes: &[u8], bound: usize) -> PsszResult<Vec<(K, V)>>
+fn decode_map<F: PsszFormat, K, V>(w: usize, bytes: &[u8], bound: usize) -> PsszResult<Vec<(K, V)>>
 where
     K: PsszPack<F> + PsszUnpack<F> + KeyPack,
     V: PsszPack<F> + PsszUnpack<F>,
 {
     let _depth = checked::DecodeDepth::enter()?;
-    let w = <Vec<(K, V)> as PsszPack<F>>::OFFSET_WIDTH;
     if checked::sequence_len::<F, (K, V)>(w, bytes, None)? > bound {
         return Err(MAP_BOUND);
     }
@@ -121,12 +122,11 @@ where
     ascending(entries.iter().map(|entry| &entry.0), MAP_ORDER)?;
     Ok(entries)
 }
-fn decode_set<F: PsszFormat, K>(bytes: &[u8], bound: usize) -> PsszResult<Vec<K>>
+fn decode_set<F: PsszFormat, K>(w: usize, bytes: &[u8], bound: usize) -> PsszResult<Vec<K>>
 where
     K: PsszPack<F> + PsszUnpack<F> + KeyPack,
 {
     let _depth = checked::DecodeDepth::enter()?;
-    let w = <Vec<K> as PsszPack<F>>::OFFSET_WIDTH;
     if checked::sequence_len::<F, K>(w, bytes, None)? > bound {
         return Err(SET_BOUND);
     }
@@ -136,14 +136,13 @@ where
 }
 /// Validation without keeping the value: the list, then the order (which
 /// needs the keys, and only the keys, as values).
-fn validate_map<F: PsszFormat, K, V>(bytes: &[u8], bound: usize) -> PsszResult<()>
+fn validate_map<F: PsszFormat, K, V>(w: usize, bytes: &[u8], bound: usize) -> PsszResult<()>
 where
     K: PsszPack<F> + PsszUnpack<F> + KeyPack,
     V: PsszPack<F> + PsszValidate<F>,
     (K, V): PsszPack<F> + PsszValidate<F>,
 {
     let _depth = checked::DecodeDepth::enter()?;
-    let w = <Vec<(K, V)> as PsszPack<F>>::OFFSET_WIDTH;
     let n = checked::sequence_len::<F, (K, V)>(w, bytes, None)?;
     if n > bound {
         return Err(MAP_BOUND);
@@ -164,12 +163,12 @@ where
     }
     ascending(keys.iter(), MAP_ORDER)
 }
-fn validate_set<F: PsszFormat, K>(bytes: &[u8], bound: usize) -> PsszResult<()>
+fn validate_set<F: PsszFormat, K>(w: usize, bytes: &[u8], bound: usize) -> PsszResult<()>
 where
     K: PsszPack<F> + PsszUnpack<F> + KeyPack,
 {
     // An element is its own key: decoding it is its validation.
-    decode_set::<F, K>(bytes, bound).map(drop)
+    decode_set::<F, K>(w, bytes, bound).map(drop)
 }
 
 macro_rules! assoc_consts {
@@ -192,8 +191,10 @@ macro_rules! assoc_consts {
             Some(n) => checked::sequence_bound(n, <$list as PsszPack<F>>::AUTO_BOUND, <$list as PsszPack<F>>::IS_FIXED_SIZE),
             None => None,
         };
-        // A list's offset table: the Vec's width, bounded or not.
-        const OFFSET_WIDTH: usize = <Vec<$list> as PsszPack<F>>::OFFSET_WIDTH;
+        // The offset table of the list of entries: its own bound, and the
+        // position cap (docs/pssz-spec.md 3.1, 3.6).
+        const OFFSET_WIDTH: usize = position_width::<F>(<Self as PsszPack<F>>::AUTO_BOUND);
+        const RECORD_WIDTH_BENEATH: usize = <$list as PsszPack<F>>::RECORD_WIDTH_BENEATH;
         fn pssz_size(&self) -> usize {
             let mut out = Vec::new();
             <Self as PsszPack<F>>::pssz_pack_checked(self, &mut out)
@@ -214,7 +215,7 @@ macro_rules! pssz_map {
             fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
                 let $s = self;
                 let bound: Option<usize> = $bound;
-                encode_map::<F, K, V>($inner.iter(), bound.unwrap_or(usize::MAX), out)
+                encode_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, $inner.iter(), bound.unwrap_or(usize::MAX), out)
             }
         }
         impl<F: PsszFormat, K, V, $($cg)*> PsszUnpack<F> for $ty
@@ -224,7 +225,7 @@ macro_rules! pssz_map {
         {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
                 let bound: Option<usize> = $bound;
-                let $items = decode_map::<F, K, V>(bytes, bound.unwrap_or(usize::MAX))?;
+                let $items = decode_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX))?;
                 let count = $items.len();
                 let out: Self = $build;
                 let $s = &out;
@@ -241,7 +242,7 @@ macro_rules! pssz_map {
         {
             fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
                 let bound: Option<usize> = $bound;
-                validate_map::<F, K, V>(bytes, bound.unwrap_or(usize::MAX))
+                validate_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX))
             }
         }
         impl<K, V, $($cg)*> crate::pssz_schema_ir::ToPsszSchema for $ty
@@ -265,7 +266,7 @@ macro_rules! pssz_set {
             fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
                 let $s = self;
                 let bound: Option<usize> = $bound;
-                encode_set::<F, K>($inner.iter(), bound.unwrap_or(usize::MAX), out)
+                encode_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, $inner.iter(), bound.unwrap_or(usize::MAX), out)
             }
         }
         impl<F: PsszFormat, K, $($cg)*> PsszUnpack<F> for $ty
@@ -274,7 +275,7 @@ macro_rules! pssz_set {
         {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
                 let bound: Option<usize> = $bound;
-                let $items = decode_set::<F, K>(bytes, bound.unwrap_or(usize::MAX))?;
+                let $items = decode_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX))?;
                 let count = $items.len();
                 let out: Self = $build;
                 let $s = &out;
@@ -290,7 +291,7 @@ macro_rules! pssz_set {
         {
             fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
                 let bound: Option<usize> = $bound;
-                validate_set::<F, K>(bytes, bound.unwrap_or(usize::MAX))
+                validate_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX))
             }
         }
         impl<K, $($cg)*> crate::pssz_schema_ir::ToPsszSchema for $ty

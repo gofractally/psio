@@ -21,7 +21,14 @@
 //! The format tag defaults to the automatic profile: `PsszView<'a, T>` is
 //! `PsszView<'a, T, Pssz>`. Offset widths come from the viewed type
 //! (`PsszPack::OFFSET_WIDTH`), so a view under `Pssz` reads each nested type
-//! at its own width. Record views honor the writer's header: a pruned
+//! at its own width. The format tag is also the position: the view of a
+//! member of a record whose cap is `C` is a `PsszView<'a, Member,
+//! PsszUnder<C>>`, which reads the lists, maps and tuples beneath the cap at
+//! the widths the cap selects (docs/pssz-spec.md 3.6); the view of a member
+//! of a record without a cap is a `PsszView<'a, Member>`. A record has the
+//! same bytes at every position: `PsszView::<Child>::trusted(view.bytes())`
+//! is the view of a child record without its position.
+//! Record views honor the writer's header: a pruned
 //! trailing optional reads as None and unknown appended slots delimit the
 //! last known field.
 //!
@@ -41,7 +48,10 @@ pub use mut_view::{PsszMutMapEntry, PsszMutView};
 
 /// Field `INDEX` of a record type, for `PsszView::field`.
 pub trait PsszField<F: PsszFormat, const INDEX: usize> {
-    type Field: PsszPack<F>;
+    /// The format of the field's position: `F` for a tuple and a
+    /// transparent type, `F::Free` or `F::Under<cap>` for a record.
+    type Beneath: PsszFormat;
+    type Field: PsszPack<Self::Beneath>;
     const LOCATION: checked::FieldLocation;
     const DWNC: bool = false;
     const TRANSPARENT: bool = false;
@@ -71,14 +81,18 @@ impl<'a, T: ?Sized, F: PsszFormat> PsszView<'a, T, F> {
     pub fn bytes(&self) -> &'a [u8] { self.data }
 
     /// Positional field access; panics on a malformed unvalidated record.
-    pub fn field<const INDEX: usize>(&self) -> PsszView<'a, <T as PsszField<F, INDEX>>::Field, F>
+    pub fn field<const INDEX: usize>(
+        &self,
+    ) -> PsszView<'a, <T as PsszField<F, INDEX>>::Field, <T as PsszField<F, INDEX>>::Beneath>
     where T: PsszField<F, INDEX> {
         self.try_field::<INDEX>().expect("pssz view: malformed record; validate first")
     }
-    pub fn try_field<const INDEX: usize>(&self) -> PsszResult<PsszView<'a, <T as PsszField<F, INDEX>>::Field, F>>
+    pub fn try_field<const INDEX: usize>(
+        &self,
+    ) -> PsszResult<PsszView<'a, <T as PsszField<F, INDEX>>::Field, <T as PsszField<F, INDEX>>::Beneath>>
     where T: PsszField<F, INDEX> {
         if <T as PsszField<F, INDEX>>::TRANSPARENT { return Ok(PsszView::trusted(self.data)); }
-        Ok(PsszView::trusted(checked::field_bytes::<F, <T as PsszField<F, INDEX>>::Field>(
+        Ok(PsszView::trusted(checked::field_bytes::<<T as PsszField<F, INDEX>>::Beneath, <T as PsszField<F, INDEX>>::Field>(
             self.data, <T as PsszField<F, INDEX>>::LOCATION, <T as PsszField<F, INDEX>>::DWNC,
         )?))
     }
@@ -202,18 +216,18 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat> PsszView<'a, Vec<T>, F> {
 impl<'a, T: PsszPack<F> + 'static, F: PsszFormat, const N: usize>
     PsszView<'a, BoundedList<T, N>, F>
 {
-    pub fn len(&self) -> usize {
-        // Same wire as Vec<T>, so construct a Vec view internally.
-        let v: PsszView<'a, Vec<T>, F> = PsszView::trusted(self.data);
-        let n = v.len();
-        assert!(n <= N, "pssz view: BoundedList overflow");
-        n
+    // The list's own offset width: that of its bound, not of a `Vec<T>`.
+    const W: usize = list_width::<F, T>(N);
+    pub fn try_len(&self) -> PsszResult<usize> {
+        bounded_len::<F, T>(Self::W, self.data, N)
     }
+    pub fn try_get(&self, i: usize) -> PsszResult<PsszView<'a, T, F>> {
+        Ok(PsszView::trusted(&self.data[bounded_element::<F, T>(Self::W, self.data, N, i)?]))
+    }
+    pub fn len(&self) -> usize { self.try_len().expect("pssz view: BoundedList overflow or malformed list") }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
     pub fn get(&self, i: usize) -> PsszView<'a, T, F> {
-        assert!(i < self.len(), "pssz view: BoundedList index out of range");
-        let v: PsszView<'a, Vec<T>, F> = PsszView::trusted(self.data);
-        v.get(i)
+        self.try_get(i).expect("pssz view: BoundedList index out of range")
     }
 }
 
@@ -301,32 +315,45 @@ impl<'a, K: PsszPack<F>, V: PsszPack<F>, F: PsszFormat> PsszMapEntry<'a, K, V, F
     pub fn bytes(&self) -> &'a [u8] { self.entry.bytes() }
 }
 
-/// `try_len` of a list of `T` holding at most `max` elements.
-fn bounded_len<F: PsszFormat, T: PsszPack<F>>(data: &[u8], max: usize) -> PsszResult<usize> {
-    let n = checked::sequence_len::<F, T>(<Vec<T> as PsszPack<F>>::OFFSET_WIDTH, data, None)?;
+/// The offset-table width of a list (or the list of a map / set) of at most
+/// `max` elements `T` at the position `F`; `usize::MAX` is no bound.
+pub(crate) const fn list_width<F: PsszFormat, T: PsszPack<F>>(max: usize) -> usize {
+    crate::pssz::position_width::<F>(if max == usize::MAX {
+        None
+    } else {
+        checked::sequence_bound(max, T::AUTO_BOUND, T::IS_FIXED_SIZE)
+    })
+}
+/// `try_len` of a list of `T` holding at most `max` elements, whose offset
+/// table is `w` wide.
+fn bounded_len<F: PsszFormat, T: PsszPack<F>>(w: usize, data: &[u8], max: usize) -> PsszResult<usize> {
+    let n = checked::sequence_len::<F, T>(w, data, None)?;
     if n > max {
-        return Err(PsszError::new("pssz view: map / set exceeds its bound"));
+        return Err(PsszError::new("pssz view: list / map / set exceeds its bound"));
     }
     Ok(n)
 }
 /// The bytes of element `i` of a list of `T` holding at most `max` elements.
 pub(crate) fn bounded_element<F: PsszFormat, T: PsszPack<F>>(
+    w: usize,
     data: &[u8],
     max: usize,
     i: usize,
 ) -> PsszResult<std::ops::Range<usize>> {
-    let n = bounded_len::<F, T>(data, max)?;
-    checked::sequence_span::<F, T>(<Vec<T> as PsszPack<F>>::OFFSET_WIDTH, data, n, i)
+    let n = bounded_len::<F, T>(w, data, max)?;
+    checked::sequence_span::<F, T>(w, data, n, i)
 }
 
 macro_rules! pssz_map_view {
     ([$($cg:tt)*], $ty:ty, $max:expr) => {
         impl<'a, K: PsszPack<F>, V: PsszPack<F>, F: PsszFormat, $($cg)*> PsszView<'a, $ty, F> {
             /// The number of entries.
-            pub fn try_len(&self) -> PsszResult<usize> { bounded_len::<F, (K, V)>(self.data, $max) }
+            pub fn try_len(&self) -> PsszResult<usize> {
+                bounded_len::<F, (K, V)>(list_width::<F, (K, V)>($max), self.data, $max)
+            }
             /// Entry `i` in ascending key order.
             pub fn try_get(&self, i: usize) -> PsszResult<PsszMapEntry<'a, K, V, F>> {
-                let span = bounded_element::<F, (K, V)>(self.data, $max, i)?;
+                let span = bounded_element::<F, (K, V)>(list_width::<F, (K, V)>($max), self.data, $max, i)?;
                 Ok(PsszMapEntry { entry: PsszView::trusted(&self.data[span]) })
             }
             pub fn len(&self) -> usize { self.try_len().expect("pssz view: malformed map") }
@@ -341,10 +368,12 @@ macro_rules! pssz_set_view {
     ([$($cg:tt)*], $ty:ty, $max:expr) => {
         impl<'a, K: PsszPack<F>, F: PsszFormat, $($cg)*> PsszView<'a, $ty, F> {
             /// The number of elements.
-            pub fn try_len(&self) -> PsszResult<usize> { bounded_len::<F, K>(self.data, $max) }
+            pub fn try_len(&self) -> PsszResult<usize> {
+                bounded_len::<F, K>(list_width::<F, K>($max), self.data, $max)
+            }
             /// Element `i` in ascending key order.
             pub fn try_get(&self, i: usize) -> PsszResult<PsszView<'a, K, F>> {
-                let span = bounded_element::<F, K>(self.data, $max, i)?;
+                let span = bounded_element::<F, K>(list_width::<F, K>($max), self.data, $max, i)?;
                 Ok(PsszView::trusted(&self.data[span]))
             }
             pub fn len(&self) -> usize { self.try_len().expect("pssz view: malformed set") }

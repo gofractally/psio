@@ -166,6 +166,10 @@ rec!(WidthGrowParentV1 { child: WidthGrowV1 });
 rec!(WidthGrowParentV2 { child: WidthGrowV2 });
 rec!(WidthThreshold251 { value: [u8; 251] });
 rec!(WidthThreshold252 { value: [u8; 252] });
+// The thresholds of the rule in force: the header counts at the record's own
+// width, so 1 + 254 = 255 is the last one-byte record of this shape.
+rec!(WidthThreshold254 { value: [u8; 254] });
+rec!(WidthThreshold255 { value: [u8; 255] });
 rec!(WidthBoundedBatch { entries: BoundedList<WidthCheckpoint, 4> });
 rec!(WidthStringPair { first: Raw, second: Raw });
 rec!(#[cap(255)] WidthCappedPair { first: Raw, second: Raw });
@@ -173,6 +177,11 @@ rec!(S247 { s: BoundedRawString<247> });
 rec!(S248 { s: BoundedRawString<248> });
 rec!(S65527 { s: BoundedRawString<65527> });
 rec!(S65528 { s: BoundedRawString<65528> });
+// (header + slot) x W + N: 255, 258, 65535, 65540.
+rec!(S253 { s: BoundedRawString<253> });
+rec!(S254 { s: BoundedRawString<254> });
+rec!(S65531 { s: BoundedRawString<65531> });
+rec!(S65532 { s: BoundedRawString<65532> });
 rec!(#[cap(16)] Tiny { v: u8 });
 rec!(NarrowBatch { entries: BoundedList<Tiny, 2> });
 
@@ -247,8 +256,9 @@ rec!(WrapTags { tags: BoundedList<BoundedString<16>, 8> });
 // The annotation spelling: the member keeps its plain type. The shape is
 // written out, since the field type no longer says it.
 macro_rules! ann {
-    ($name:ident, $shape:literal { $($(#[$meta:meta])* $f:ident : $t:ty),* $(,)? }) => {
+    ($(#[cap($cap:literal)])? $name:ident, $shape:literal { $($(#[$meta:meta])* $f:ident : $t:ty),* $(,)? }) => {
         #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::PsszView)]
+        $(#[pssz(max_dynamic_data = $cap)])?
         pub struct $name { $($(#[$meta])* pub $f: $t),* }
         impl Conf for $name {
             fn id() -> String { stringify!($name).into() }
@@ -292,6 +302,76 @@ impl Conf for AnnChoice {
     fn id() -> String { "variant<u32,string<=16,list<string<=16><=2>".into() }
 }
 rec!(AnnVar { v: AnnChoice });
+
+// A list's own offset table (docs/pssz-spec.md 3.1): the width class of the
+// list's own bound. The structural lists state their bounds in their types;
+// the records are plain `Vec` / `BTreeMap` / `BTreeSet` members bounded by
+// annotation, as C++ declares them.
+pub type BList1 = BoundedList<BoundedString<16>, 15>; // 15 + 240 = 255: 1
+pub type BList2 = BoundedList<BoundedString<17>, 15>; // 15 + 255 > 255, 30 + 255 = 285: 2
+pub type BList2Top = BoundedList<BoundedString<255>, 255>; // 510 + 65025 = 65535: 2
+pub type BList4 = BoundedList<BoundedString<255>, 256>; // 1024 + 65280: 4
+pub type BListFree = BoundedList<String, 8>; // unbounded elements: 4
+ann!(ListW1, "record{items:list<raw_string<=16><=15}" {
+    #[psio(max = 15, element(max = 16))] items: Vec<Raw>
+});
+ann!(ListW2, "record{items:list<raw_string<=17><=15}" {
+    #[psio(max = 15, element(max = 17))] items: Vec<Raw>
+});
+ann!(ListW2Top, "record{items:list<raw_string<=255><=255}" {
+    #[psio(max = 255, element(max = 255))] items: Vec<Raw>
+});
+ann!(ListW4, "record{items:list<raw_string<=255><=256}" {
+    #[psio(max = 256, element(max = 255))] items: Vec<Raw>
+});
+ann!(ListFree, "record{items:list<raw_string><=8}" {
+    #[psio(max = 8)] items: Vec<Raw>
+});
+ann!(ListNested, "record{rows:list<list<raw_string<=16><=15><=20}" {
+    #[psio(max = 20, element(max = 15, element(max = 16)))] rows: Vec<Vec<Raw>>
+});
+ann!(MapW1, "record{m:map<raw_string<=8,u32><=4}" {
+    #[psio(max = 4, keys(max = 8))] m: BTreeMap<Raw, u32>
+});
+ann!(MapW2, "record{m:map<u32,raw_string<=16><=100}" {
+    #[psio(max = 100, values(max = 16))] m: BTreeMap<u32, Raw>
+});
+ann!(SetW1, "record{s:set<raw_string<=16><=15}" {
+    #[psio(max = 15, element(max = 16))] s: BTreeSet<Raw>
+});
+
+// A record's cap bounds what lies beneath it (docs/pssz-spec.md 3.6): the
+// members are plain types, and their offset widths follow from
+// `max_dynamic_data` alone.
+rec!(#[cap(255)] CapTransfer { token: u32, from: u64, amount: u64, memo: String, data: Option<Vec<u8>> });
+rec!(#[cap(255)] CapList { items: Vec<Raw> });
+rec!(#[cap(256)] CapList2 { items: Vec<Raw> });
+rec!(#[cap(65536)] CapList4 { items: Vec<Raw> });
+rec!(#[cap(255)] CapNested { rows: Vec<Vec<Raw>> });
+rec!(#[cap(255)] CapMap { m: BTreeMap<Raw, Vec<u32>> });
+rec!(#[cap(255)] CapTuple { t: (Raw, Vec<Raw>) });
+// A tighter bound of the position's own wins; a looser one is clamped.
+ann!(#[cap(60000)] CapTight, "record{items:list<raw_string<=16><=8}@cap=60000" {
+    #[psio(max = 8, element(max = 16))] items: Vec<Raw>
+});
+ann!(#[cap(255)] CapClamp, "record{items:list<raw_string<=1000><=1000}@cap=255" {
+    #[psio(max = 1000, element(max = 1000))] items: Vec<Raw>
+});
+// A record keeps its own width: R0 beneath the cap is R0 (4-byte offsets);
+// the list that holds the records is narrowed.
+rec!(#[cap(255)] CapChild { child: R0, kids: Vec<R0> });
+// A cap does not reach out of its record: the sibling list is unbounded.
+rec!(CapOuter { inner: CapList, items: Vec<Raw> });
+const _: () = {
+    assert!(pssz_child_wider_than_cap::<CapChild>());
+    assert!(!pssz_child_wider_than_cap::<CapList>() && !pssz_child_wider_than_cap::<CapOuter>());
+    assert!(!pssz_child_wider_than_cap::<CapNested>() && !pssz_child_wider_than_cap::<CapTransfer>());
+};
+
+// Bit types have a size bound (docs/pssz-spec.md 3.2).
+rec!(BitRec { id: u8, flags: Bitvector<12>, seen: Bits12 });
+rec!(BitNarrow { seen: Bitlist<2016> });
+rec!(BitWide { seen: Bitlist<2024> });
 
 // Method argument tuples (docs/pssz-spec.md 16). Without a cap the tuple of
 // the bounded parameters; with one, the positional record of the

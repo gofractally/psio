@@ -159,23 +159,72 @@ fn decode_value(k: &syn::Path, bound: &Option<attrs::Annotated>, value: Tokens) 
     }
 }
 
-fn generic_fields(input: &DeriveInput) -> Vec<&Type> {
+/// The format of a member's position (docs/pssz-spec.md 3.6): beneath a
+/// record with a cap, beneath a record without one, or the position of the
+/// value that holds it (a transparent type, a tuple, a variant).
+#[derive(Clone, Copy, PartialEq)]
+enum Position {
+    Under(u64),
+    Free,
+    Same,
+}
+impl Position {
+    fn record(cap: Option<u64>) -> Self {
+        cap.map_or(Position::Free, Position::Under)
+    }
+    fn format(self, k: &syn::Path) -> Tokens {
+        match self {
+            Position::Under(cap) => {
+                let cap = cap as usize;
+                quote!(<__PsszFormat as #k::pssz::PsszFormat>::Under<#cap>)
+            }
+            Position::Free => quote!(<__PsszFormat as #k::pssz::PsszFormat>::Free),
+            Position::Same => quote!(__PsszFormat),
+        }
+    }
+}
+/// The position of the members of the item: of a struct's members, or of the
+/// fields of each enum variant (the fields of a struct-like variant are the
+/// members of a record without a cap; the others are a payload or a tuple).
+fn positions(input: &DeriveInput, opts: &Options) -> Vec<Position> {
+    match &input.data {
+        Data::Struct(_) if opts.transparent => vec![Position::Same],
+        Data::Struct(_) => vec![Position::record(opts.cap)],
+        Data::Enum(e) => e
+            .variants
+            .iter()
+            .map(|v| if matches!(v.fields, Fields::Named(_)) { Position::Free } else { Position::Same })
+            .collect(),
+        Data::Union(_) => vec![],
+    }
+}
+
+/// The types of the fields that name a generic parameter, each with the
+/// format of its position.
+fn generic_fields(input: &DeriveInput, opts: &Options) -> Vec<(Type, Tokens)> {
+    let k = &opts.krate;
+    let positions = positions(input, opts);
     let names: Vec<_> = input
         .generics
         .type_params()
         .map(|p| p.ident.to_string())
         .collect();
     let own_name = input.ident.to_string();
-    let fields: Vec<_> = match &input.data {
-        Data::Struct(s) => s.fields.iter().collect(),
-        Data::Enum(e) => e.variants.iter().flat_map(|v| v.fields.iter()).collect(),
-        Data::Union(u) => u.fields.named.iter().collect(),
+    let fields: Vec<(&syn::Field, Position)> = match &input.data {
+        Data::Struct(s) => s.fields.iter().map(|f| (f, positions[0])).collect(),
+        Data::Enum(e) => e
+            .variants
+            .iter()
+            .zip(&positions)
+            .flat_map(|(v, position)| v.fields.iter().map(move |f| (f, *position)))
+            .collect(),
+        Data::Union(_) => vec![],
     };
     fields
         .into_iter()
         // A skipped field is not encoded, so its type needs no codec.
-        .filter(|field| !attrs::field(field).is_ok_and(|a| a.skip))
-        .filter_map(|field| {
+        .filter(|(field, _)| !attrs::field(field).is_ok_and(|a| a.skip))
+        .filter_map(|(field, position)| {
             let ty = &field.ty;
             let text = quote!(#ty).to_string();
             let parts: Vec<_> = text
@@ -184,7 +233,7 @@ fn generic_fields(input: &DeriveInput) -> Vec<&Type> {
             if !parts.contains(&own_name.as_str())
                 && names.iter().any(|n| parts.contains(&n.as_str()))
             {
-                Some(ty)
+                Some((ty.clone(), position.format(k)))
             } else {
                 None
             }
@@ -194,31 +243,40 @@ fn generic_fields(input: &DeriveInput) -> Vec<&Type> {
 
 /// Width / cap of the record being generated: the struct itself, or for an
 /// enum alternative with several fields the equivalent positional tuple.
-struct Frame { width: Tokens, cap: Tokens }
-fn self_frame(k: &syn::Path) -> Frame {
+///
+/// `members` is the format of the members' position: a record sets the
+/// position cap for what lies beneath it (its own cap, or none); a tuple
+/// leaves the position as it is.
+struct Frame { width: Tokens, cap: Tokens, members: Tokens }
+fn self_frame(k: &syn::Path, cap: Option<u64>) -> Frame {
     Frame {
         width: quote!(<Self as #k::pssz::PsszPack<__PsszFormat>>::OFFSET_WIDTH),
         cap: quote!(<Self as #k::pssz::PsszPack<__PsszFormat>>::MAX_DYNAMIC_DATA),
+        members: Position::record(cap).format(k),
     }
 }
-fn tuple_frame(k: &syn::Path, types: &[&Type]) -> Frame {
+/// The fields of an enum variant: a tuple at the variant's position, or for
+/// a struct-like variant a record without a cap (whose width is its own).
+fn tuple_frame(k: &syn::Path, types: &[&Type], position: Position) -> Frame {
+    let members = position.format(k);
     Frame {
-        width: quote!(<(#(#types,)*) as #k::pssz::PsszPack<__PsszFormat>>::OFFSET_WIDTH),
+        width: quote!(<(#(#types,)*) as #k::pssz::PsszPack<#members>>::OFFSET_WIDTH),
         cap: quote!(::core::option::Option::None),
+        members,
     }
 }
 
 fn record_encode(k: &syn::Path, types: &[&Type], values: &[Tokens], dwnc: bool, frame: &Frame) -> Tokens {
     let indices: Vec<_> = (0..types.len()).collect();
-    let (width, cap) = (&frame.width, &frame.cap);
+    let (width, cap, m) = (&frame.width, &frame.cap, &frame.members);
     quote! {
         let __omitted: &[bool] = &[
-            #(<#types as #k::pssz::PsszPack<__PsszFormat>>::IS_OPTIONAL && #k::pssz::PsszPack::<__PsszFormat>::pssz_is_none(#values)),*
+            #(<#types as #k::pssz::PsszPack<#m>>::IS_OPTIONAL && #k::pssz::PsszPack::<#m>::pssz_is_none(#values)),*
         ];
         let __keep = #k::pssz_checked::record_kept_fields(__omitted, #dwnc);
         let _ = __keep;
         #k::pssz_checked::finish_record::<__PsszFormat>(#width, #cap, &[
-            #(#k::pssz_checked::field_if_kept::<__PsszFormat, _>(#values, #indices < __keep)?),*
+            #(#k::pssz_checked::field_if_kept::<#m, _>(#values, #indices < __keep)?),*
         ], #dwnc, out)
     }
 }
@@ -235,15 +293,15 @@ fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, 
         fields,
         &values.iter().zip(&bounds).map(|(v, bound)| decode_value(k, bound, quote!(#v))).collect::<Vec<_>>(),
     )?;
-    let (width, cap) = (&frame.width, &frame.cap);
+    let (width, cap, m) = (&frame.width, &frame.cap, &frame.members);
     Ok(quote! {
         #k::pssz_checked::enter_record::<__PsszFormat>(#cap, bytes)?;
         let __spans = #k::pssz_checked::record_spans_n(#width, [
-            #(#k::pssz_checked::Layout::of::<__PsszFormat, #types>()),*
+            #(#k::pssz_checked::Layout::of::<#m, #types>()),*
         ], bytes, #dwnc)?;
         #[allow(unused_mut)]
         let mut __spans = __spans.into_iter();
-        #(let #values = #k::pssz_checked::decode_field::<__PsszFormat, #types>(bytes,
+        #(let #values = #k::pssz_checked::decode_field::<#m, #types>(bytes,
             __spans.next().flatten())?;)*
         ::core::result::Result::Ok(#initializer)
     })
@@ -252,17 +310,15 @@ fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, 
 /// How a member is read from bytes the caller vouches for: by the trusted
 /// reader of its own type where its annotation leaves the bytes alone (the
 /// bounds are not checked), else through the described type.
-fn trusted_value(k: &syn::Path, ty: &Type, bound: &Option<attrs::Annotated>, bytes: Tokens) -> Tokens {
+///
+/// `m` is the format of the member's position.
+fn trusted_value(k: &syn::Path, m: &Tokens, ty: &Type, bound: &Option<attrs::Annotated>, bytes: Tokens) -> Tokens {
     match bound {
         Some(attrs::Annotated { own, spec }) => quote! {
-            if <#own as #k::pssz::bounds::Bounds<#spec>>::SAME_BYTES {
-                <#own as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack_trusted(#bytes)
-            } else {
-                <#own as #k::pssz::bounds::Bounds<#spec>>::from_as(
-                    <#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack_trusted(#bytes))
-            }
+            <#own as #k::pssz::bounds::Bounds<#spec>>::from_as(
+                <#ty as #k::pssz::PsszUnpack<#m>>::pssz_unpack_trusted(#bytes))
         },
-        None => quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_unpack_trusted(#bytes)),
+        None => quote!(<#ty as #k::pssz::PsszUnpack<#m>>::pssz_unpack_trusted(#bytes)),
     }
 }
 
@@ -275,20 +331,21 @@ fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc
     let values: Vec<_> = (0..info.len()).map(|i| format_ident!("__pssz_field_{i}")).collect();
     let initializer =
         attrs::construct(construct, fields, &values.iter().map(|v| quote!(#v)).collect::<Vec<_>>())?;
+    let m = &frame.members;
     let fixed_reads: Vec<_> = types
         .iter()
         .zip(&bounds)
-        .map(|(ty, bound)| trusted_value(k, ty, bound, quote!(&bytes[__at..__at + __size])))
+        .map(|(ty, bound)| trusted_value(k, m, ty, bound, quote!(&bytes[__at..__at + __size])))
         .collect();
     let span_reads: Vec<_> =
-        types.iter().zip(&bounds).map(|(ty, bound)| trusted_value(k, ty, bound, quote!(&bytes[__span]))).collect();
+        types.iter().zip(&bounds).map(|(ty, bound)| trusted_value(k, m, ty, bound, quote!(&bytes[__span]))).collect();
     let missing: Vec<_> = types
         .iter()
         .zip(&bounds)
         .map(|(ty, bound)| {
             let value = decode_value(k, bound, quote!(__missing));
             quote! {
-                match <#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_missing_optional() {
+                match <#ty as #k::pssz::PsszUnpack<#m>>::pssz_missing_optional() {
                     ::core::result::Result::Ok(__missing) => #value,
                     ::core::result::Result::Err(error) => #k::pssz::trusted_bytes_invalid(error),
                 }
@@ -301,7 +358,7 @@ fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc
             #[allow(unused_mut)]
             let mut __at = 0usize;
             #(let #values = {
-                let __size = <#types as #k::pssz::PsszPack<__PsszFormat>>::FIXED_SIZE;
+                let __size = <#types as #k::pssz::PsszPack<#m>>::FIXED_SIZE;
                 let __value = #fixed_reads;
                 __at += __size;
                 __value
@@ -310,7 +367,7 @@ fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc
             return #initializer;
         }
         let __spans = match #k::pssz_checked::record_spans_n(#width, [
-            #(#k::pssz_checked::Layout::of::<__PsszFormat, #types>()),*
+            #(#k::pssz_checked::Layout::of::<#m, #types>()),*
         ], bytes, #dwnc) {
             ::core::result::Result::Ok(spans) => spans,
             ::core::result::Result::Err(error) => #k::pssz::trusted_bytes_invalid(error),
@@ -328,16 +385,16 @@ fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc
 fn record_validate(k: &syn::Path, fields: &Fields, dwnc: bool, frame: &Frame) -> syn::Result<Tokens> {
     let info = field_info(k, fields)?;
     let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
-    let (width, cap) = (&frame.width, &frame.cap);
+    let (width, cap, m) = (&frame.width, &frame.cap, &frame.members);
     Ok(quote! {
         #k::pssz_checked::enter_record::<__PsszFormat>(#cap, bytes)?;
         let __spans = #k::pssz_checked::record_spans_n(#width, [
-            #(#k::pssz_checked::Layout::of::<__PsszFormat, #types>()),*
+            #(#k::pssz_checked::Layout::of::<#m, #types>()),*
         ], bytes, #dwnc)?;
         #[allow(unused_mut)]
         let mut __spans = __spans.into_iter();
         #(if let ::core::option::Option::Some(span) = __spans.next().flatten() {
-            <#types as #k::pssz::PsszValidate<__PsszFormat>>::pssz_validate(&bytes[span])?;
+            <#types as #k::pssz::PsszValidate<#m>>::pssz_validate(&bytes[span])?;
         })*
         ::core::result::Result::Ok(())
     })
@@ -355,11 +412,11 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
     generics
         .params
         .push(parse_quote!(__PsszFormat: #k::pssz::PsszFormat));
-    for ty in generic_fields(&input) {
+    for (ty, m) in generic_fields(&input, &opts) {
         generics.make_where_clause().predicates.push(if unpack {
-            parse_quote!(#ty: #k::pssz::PsszPack<__PsszFormat> + #k::pssz::PsszUnpack<__PsszFormat>)
+            parse_quote!(#ty: #k::pssz::PsszPack<#m> + #k::pssz::PsszUnpack<#m>)
         } else {
-            parse_quote!(#ty: #k::pssz::PsszPack<__PsszFormat>)
+            parse_quote!(#ty: #k::pssz::PsszPack<#m>)
         });
     }
     let (impl_g, _, where_c) = generics.split_for_impl();
@@ -367,8 +424,8 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
     validation_generics
         .params
         .push(parse_quote!(__PsszFormat: #k::pssz::PsszFormat));
-    for ty in generic_fields(&input) {
-        validation_generics.make_where_clause().predicates.push(parse_quote!(#ty: #k::pssz::PsszPack<__PsszFormat> + #k::pssz::PsszValidate<__PsszFormat>));
+    for (ty, m) in generic_fields(&input, &opts) {
+        validation_generics.make_where_clause().predicates.push(parse_quote!(#ty: #k::pssz::PsszPack<#m> + #k::pssz::PsszValidate<#m>));
     }
     let (validation_g, _, validation_where) = validation_generics.split_for_impl();
     let (_, type_g, _) = input.generics.split_for_impl();
@@ -401,7 +458,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 let missing = construct(quote!(<#ty as #k::pssz::PsszUnpack<__PsszFormat>>::pssz_missing_optional()?))?;
                 missing_optional = quote! { fn pssz_missing_optional() -> #k::pssz::PsszResult<Self> { ::core::result::Result::Ok(#missing) } };
                 if unpack {
-                    let inner = trusted_value(k, ty, &bounds[0], quote!(bytes));
+                    let inner = trusted_value(k, &quote!(__PsszFormat), ty, &bounds[0], quote!(bytes));
                     trusted_body = Some(attrs::construct(quote!(Self), &data.fields, &[inner])?);
                 }
                 validation_body = quote! { <#ty as #k::pssz::PsszValidate<__PsszFormat>>::pssz_validate(bytes) };
@@ -424,13 +481,19 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                             const MAX_DYNAMIC_DATA: ::core::option::Option<usize> = <#ty as #pack>::MAX_DYNAMIC_DATA;
                             const AUTO_BOUND: ::core::option::Option<usize> = <#ty as #pack>::AUTO_BOUND;
                             const OFFSET_WIDTH: usize = <#ty as #pack>::OFFSET_WIDTH;
+                            // A transparent type is its member, at the same position.
+                            const RECORD_WIDTH_BENEATH: usize = <#ty as #pack>::RECORD_WIDTH_BENEATH;
                             const SHAPE: #k::pssz::Shape = <#ty as #pack>::SHAPE;
                         },
                     },
                 )
             } else {
                 let dwnc = opts.dwnc;
-                let frame = self_frame(k);
+                let frame = self_frame(k, opts.cap);
+                // The members lie beneath this record's cap, or beneath none.
+                let m = &frame.members;
+                let mpack = quote!(#k::pssz::PsszPack<#m>);
+                let capped = opts.cap.is_some();
                 let packed = packed(&input);
                 let bounds = field_bounds(k, &data.fields)?;
                 let values = members
@@ -453,12 +516,12 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                         record_encode(k, &types, &values, dwnc, &frame)
                     },
                     Consts {
-                        fixed: quote!(#dwnc #(&& <#types as #pack>::IS_FIXED_SIZE)*),
-                        size: quote!(0usize #(.saturating_add(<#types as #pack>::FIXED_SIZE))*),
+                        fixed: quote!(#dwnc #(&& <#types as #mpack>::IS_FIXED_SIZE)*),
+                        size: quote!(0usize #(.saturating_add(<#types as #mpack>::FIXED_SIZE))*),
                         // An extensible record always has its header; a DWNC
                         // record is as small as its fixed region.
                         min: if dwnc {
-                            quote!(#k::pssz_checked::fixed_region(1, &[#(#k::pssz_checked::Layout::of::<__PsszFormat, #types>()),*]))
+                            quote!(#k::pssz_checked::fixed_region(1, &[#(#k::pssz_checked::Layout::of::<#m, #types>()),*]))
                         } else {
                             quote!(1)
                         },
@@ -467,13 +530,18 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                             const AUTO_BOUND: ::core::option::Option<usize> = match <Self as #pack>::MAX_DYNAMIC_DATA {
                                 ::core::option::Option::Some(cap) => ::core::option::Option::Some(cap),
                                 ::core::option::Option::None => #k::pssz_checked::record_bound(&[
-                                    #((<#types as #pack>::AUTO_BOUND, <#types as #pack>::IS_FIXED_SIZE)),*
+                                    #((<#types as #mpack>::AUTO_BOUND, <#types as #mpack>::IS_FIXED_SIZE)),*
                                 ], #dwnc),
                             };
                             const MAX_ENCODED_SIZE: ::core::option::Option<usize> = <Self as #pack>::AUTO_BOUND;
+                            // A record keeps its own width wherever it appears.
+                            const RECORD_WIDTH_BENEATH: usize = <Self as #pack>::OFFSET_WIDTH;
+                            const CHILD_WIDER_THAN_CAP: bool = #capped
+                                && #k::pssz_checked::widest(&[#(<#types as #mpack>::RECORD_WIDTH_BENEATH),*])
+                                    > <Self as #pack>::OFFSET_WIDTH;
                             const SHAPE: #k::pssz::Shape = #k::pssz::Shape::record(
                                 false, #dwnc, <Self as #pack>::OFFSET_WIDTH, <Self as #pack>::IS_FIXED_SIZE,
-                                &[#(<#types as #pack>::SHAPE),*]);
+                                &[#(<#types as #mpack>::SHAPE),*]);
                         },
                     },
                 )
@@ -572,6 +640,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
             let mut validate_arms = Vec::new();
             let mut shapes = Vec::new();
             let mut bounds = Vec::new();
+            let mut records = Vec::new();
             for (index, variant) in data.variants.iter().enumerate() {
                 if variant.discriminant.is_some() {
                     return Err(syn::Error::new_spanned(variant, "PSSZ selectors use declaration order; explicit discriminants are unsupported"));
@@ -585,18 +654,31 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 let tag = index as u8;
                 let single = matches!(&variant.fields, Fields::Unnamed(_)) && info.len() == 1;
                 let variant_bounds = field_bounds(k, &variant.fields)?;
-                let frame = tuple_frame(k, &types);
+                // Several unnamed fields are a tuple at the variant's
+                // position; named fields are the members of a record
+                // without a cap.
+                let named = matches!(&variant.fields, Fields::Named(_));
+                let frame = tuple_frame(k, &types, if named { Position::Free } else { Position::Same });
+                let m = &frame.members;
+                let tpack = quote!(#k::pssz::PsszPack<#m>);
                 // What the alternative reserves: nothing, its one
                 // payload, or the tuple of its fields.
                 bounds.push(match &variant.fields {
                     Fields::Unit => quote!(::core::option::Option::Some(0usize)),
                     _ if single => { let ty = types[0]; quote!(<#ty as #pack>::AUTO_BOUND) }
-                    _ => quote!(<(#(#types,)*) as #pack>::AUTO_BOUND),
+                    _ => quote!(<(#(#types,)*) as #tpack>::AUTO_BOUND),
                 });
                 shapes.push(match &variant.fields {
                     Fields::Unit => quote!(#k::pssz::Shape::record(false, true, #k::pssz::offset_width::<__PsszFormat>(::core::option::Option::Some(0)), true, &[])),
                     _ if single => { let ty = types[0]; quote!(<#ty as #pack>::SHAPE) }
-                    _ => quote!(<(#(#types,)*) as #pack>::SHAPE),
+                    _ => quote!(<(#(#types,)*) as #tpack>::SHAPE),
+                });
+                // The widest record at the alternative's position.
+                records.push(match &variant.fields {
+                    Fields::Unit => quote!(0usize),
+                    _ if single => { let ty = types[0]; quote!(<#ty as #pack>::RECORD_WIDTH_BENEATH) }
+                    _ if named => quote!(<(#(#types,)*) as #tpack>::OFFSET_WIDTH),
+                    _ => quote!(<(#(#types,)*) as #tpack>::RECORD_WIDTH_BENEATH),
                 });
                 validate_arms.push(match &variant.fields {
                     Fields::Unit => quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; if bytes.is_empty() { ::core::result::Result::Ok(()) } else { ::core::result::Result::Err(#k::pssz::PsszError::new("pssz: zero-size fixed payload must be empty")) } } },
@@ -679,6 +761,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                         const AUTO_BOUND: ::core::option::Option<usize> =
                             #k::pssz::variant_bound(&[#(#bounds),*]);
                         const MAX_ENCODED_SIZE: ::core::option::Option<usize> = <Self as #pack>::AUTO_BOUND;
+                        const RECORD_WIDTH_BENEATH: usize = #k::pssz_checked::widest(&[#(#records),*]);
                         const SHAPE: #k::pssz::Shape = #k::pssz::Shape::node(
                             #k::pssz::ShapeKind::Variant, 0, <Self as #pack>::OFFSET_WIDTH, false, &[#(#shapes),*]);
                     },
@@ -903,7 +986,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             .predicates
             .push(parse_quote!(#id: 'static));
     }
-    for ty in generic_fields(&input) {
+    for (ty, _) in generic_fields(&input, &opts) {
         generics
             .make_where_clause()
             .predicates
@@ -1104,11 +1187,11 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
     generics
         .params
         .push(parse_quote!(__PsszFormat: #k::pssz::PsszFormat));
-    for ty in generic_fields(&input) {
+    for (ty, m) in generic_fields(&input, &opts) {
         generics
             .make_where_clause()
             .predicates
-            .push(parse_quote!(#ty: #k::pssz::PsszPack<__PsszFormat>));
+            .push(parse_quote!(#ty: #k::pssz::PsszPack<#m>));
     }
     let (impl_g, trait_g, where_c) = generics.split_for_impl();
     let (_, type_g, _) = input.generics.split_for_impl();
@@ -1132,12 +1215,15 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
             field_generics
                 .params
                 .push(parse_quote!(__PsszFormat: #k::pssz::PsszFormat));
-            for ty in generic_fields(&input) {
+            for (ty, m) in generic_fields(&input, &opts) {
                 field_generics
                     .make_where_clause()
                     .predicates
-                    .push(parse_quote!(#ty: #k::pssz::PsszPack<__PsszFormat>));
+                    .push(parse_quote!(#ty: #k::pssz::PsszPack<#m>));
             }
+            // The format of the members' position: a view of a member of a
+            // capped record reads what lies beneath the cap at its widths.
+            let m = positions(&input, &opts)[0].format(k);
             let (field_g, _, field_where) = field_generics.split_for_impl();
             for (index, (member, ty)) in info.iter().enumerate() {
                 let method = match member {
@@ -1145,33 +1231,34 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
                     Member::Unnamed(index) => format_ident!("field_{}", index.index),
                 };
                 let try_method = format_ident!("try_{}", method.to_string().trim_start_matches("r#"));
-                declarations.push(quote!(fn #method(&self) -> #k::pssz_view::PsszView<'__pssz_view, #ty, __PsszFormat>;));
+                declarations.push(quote!(fn #method(&self) -> #k::pssz_view::PsszView<'__pssz_view, #ty, #m>;));
                 declarations.push(quote!(
                     /// Fallible form for unvalidated buffers.
-                    fn #try_method(&self) -> #k::pssz::PsszResult<#k::pssz_view::PsszView<'__pssz_view, #ty, __PsszFormat>>;
+                    fn #try_method(&self) -> #k::pssz::PsszResult<#k::pssz_view::PsszView<'__pssz_view, #ty, #m>>;
                 ));
-                methods.push(quote! { fn #method(&self) -> #k::pssz_view::PsszView<'__pssz_view, #ty, __PsszFormat> { self.field::<#index>() } });
-                methods.push(quote! { fn #try_method(&self) -> #k::pssz::PsszResult<#k::pssz_view::PsszView<'__pssz_view, #ty, __PsszFormat>> { self.try_field::<#index>() } });
+                methods.push(quote! { fn #method(&self) -> #k::pssz_view::PsszView<'__pssz_view, #ty, #m> { self.field::<#index>() } });
+                methods.push(quote! { fn #try_method(&self) -> #k::pssz::PsszResult<#k::pssz_view::PsszView<'__pssz_view, #ty, #m>> { self.try_field::<#index>() } });
                 let bare = method.to_string().trim_start_matches("r#").to_string();
                 let mut_method = format_ident!("{}_mut", bare);
                 let try_mut_method = format_ident!("try_{}_mut", bare);
                 mut_declarations.push(quote!(
                     /// The field for writing; panics when it is not stored in the frame.
-                    fn #mut_method(&mut self) -> #k::pssz_view::PsszMutView<'_, #ty, __PsszFormat>;
-                    fn #try_mut_method(&mut self) -> #k::pssz::PsszResult<#k::pssz_view::PsszMutView<'_, #ty, __PsszFormat>>;
+                    fn #mut_method(&mut self) -> #k::pssz_view::PsszMutView<'_, #ty, #m>;
+                    fn #try_mut_method(&mut self) -> #k::pssz::PsszResult<#k::pssz_view::PsszMutView<'_, #ty, #m>>;
                 ));
                 mut_methods.push(quote! {
-                    fn #mut_method(&mut self) -> #k::pssz_view::PsszMutView<'_, #ty, __PsszFormat> { self.field_mut::<#index>() }
-                    fn #try_mut_method(&mut self) -> #k::pssz::PsszResult<#k::pssz_view::PsszMutView<'_, #ty, __PsszFormat>> { self.try_field_mut::<#index>() }
+                    fn #mut_method(&mut self) -> #k::pssz_view::PsszMutView<'_, #ty, #m> { self.field_mut::<#index>() }
+                    fn #try_mut_method(&mut self) -> #k::pssz::PsszResult<#k::pssz_view::PsszMutView<'_, #ty, #m>> { self.try_field_mut::<#index>() }
                 });
                 let dwnc = opts.dwnc;
                 let transparent = opts.transparent;
                 field_impls.push(quote! {
                     impl #field_g #k::pssz_view::PsszField<__PsszFormat, #index> for #name #type_g #field_where {
+                        type Beneath = #m;
                         type Field = #ty;
                         const LOCATION: #k::pssz_checked::FieldLocation = #k::pssz_checked::record_location(
                             <Self as #k::pssz::PsszPack<__PsszFormat>>::OFFSET_WIDTH, &[
-                            #(#k::pssz_checked::Layout::of::<__PsszFormat, #types>()),*
+                            #(#k::pssz_checked::Layout::of::<#m, #types>()),*
                         ], #index);
                         const DWNC: bool = #dwnc;
                         const TRANSPARENT: bool = #transparent;
@@ -1227,9 +1314,11 @@ fn expand_view(input: DeriveInput) -> syn::Result<Tokens> {
                     _ => quote!((#(#types,)*)),
                 };
                 let tag = index as u8;
-                declarations.push(quote!(fn #method(&self) -> ::core::option::Option<#k::pssz_view::PsszView<'__pssz_view, #payload, __PsszFormat>>;));
+                // The fields of a struct-like variant are a record's members.
+                let m = if matches!(&variant.fields, Fields::Named(_)) { Position::Free } else { Position::Same }.format(k);
+                declarations.push(quote!(fn #method(&self) -> ::core::option::Option<#k::pssz_view::PsszView<'__pssz_view, #payload, #m>>;));
                 methods.push(quote! {
-                    fn #method(&self) -> ::core::option::Option<#k::pssz_view::PsszView<'__pssz_view, #payload, __PsszFormat>> {
+                    fn #method(&self) -> ::core::option::Option<#k::pssz_view::PsszView<'__pssz_view, #payload, #m>> {
                         if self.bytes()[0] == #tag { ::core::option::Option::Some(#k::pssz_view::PsszView::trusted(&self.bytes()[1..])) } else { ::core::option::Option::None }
                     }
                 });

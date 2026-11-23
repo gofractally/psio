@@ -69,16 +69,24 @@
 //! [`Each`], [`Entry`], [`At`], [`Plain`]) and use [`Bounds<S>`] of the
 //! field's type: `As` is the described type, which supplies every constant
 //! (bound, width, layout), the validator, the reader and the schema. A
-//! value is written from the field as it stands when the described type
-//! has the same bytes (a list, a string, a set: only the checks differ);
-//! where a bound narrows an offset width below the member (a tuple, a map
-//! entry, an array of variable elements) the value is converted to the
-//! described type first, which copies it.
+//! value is written from the field as it stands, with the described type's
+//! widths ([`PackAs`]): a bound can narrow the offset table of a list, a
+//! map or a set, the header of a tuple or a map entry, at any depth, and
+//! none of that converts or copies the value.
+//!
+//! The bounds are the member's own. The cap of the record that holds the
+//! member is not an annotation: it reaches the member through the format
+//! tag ([`PsszFormat::Under`](crate::pssz::PsszFormat::Under)), and the
+//! described type, like every type, takes it into its widths
+//! (docs/pssz-spec.md 3.6).
 
+use crate::key::KeyPack;
+use crate::pssz::assoc::{canonical_order, encode_map, MAP_DUPLICATE, SET_DUPLICATE};
 use crate::pssz::{
-    BoundedList, BoundedMap, BoundedRawString, BoundedSet, BoundedString, Pssz, PsszError, PsszFormat, PsszPack,
+    BoundedList, BoundedMap, BoundedRawString, BoundedSet, BoundedString, PsszError, PsszFormat, PsszPack,
     PsszResult, RawString, Shape,
 };
+use crate::pssz_checked as checked;
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
@@ -101,9 +109,6 @@ const VIOLATED: PsszError = PsszError::new("pssz: member length_bound violated")
 pub trait Bounds<S>: Sized {
     /// The type the annotation describes.
     type As;
-    /// Whether every value has the same pSSZ bytes as `As`, in every
-    /// profile (only the checks differ).
-    const SAME_BYTES: bool;
     /// Every bound of the annotation holds.
     fn check(&self) -> PsszResult<()>;
     /// The value as the described type. Copies; not checked (the described
@@ -115,7 +120,6 @@ pub trait Bounds<S>: Sized {
 
 impl<T: Clone> Bounds<Plain> for T {
     type As = T;
-    const SAME_BYTES: bool = true;
     fn check(&self) -> PsszResult<()> {
         Ok(())
     }
@@ -129,7 +133,6 @@ impl<T: Clone> Bounds<Plain> for T {
 
 impl<const N: usize> Bounds<Max<N>> for String {
     type As = BoundedString<N>;
-    const SAME_BYTES: bool = true;
     fn check(&self) -> PsszResult<()> {
         if self.len() > N {
             return Err(VIOLATED);
@@ -146,7 +149,6 @@ impl<const N: usize> Bounds<Max<N>> for String {
 
 impl<const N: usize> Bounds<Max<N>> for RawString {
     type As = BoundedRawString<N>;
-    const SAME_BYTES: bool = true;
     fn check(&self) -> PsszResult<()> {
         if self.0.len() > N {
             return Err(VIOLATED);
@@ -163,7 +165,6 @@ impl<const N: usize> Bounds<Max<N>> for RawString {
 
 impl<T: Bounds<E>, E, const N: usize> Bounds<Max<N, E>> for Vec<T> {
     type As = BoundedList<T::As, N>;
-    const SAME_BYTES: bool = T::SAME_BYTES;
     fn check(&self) -> PsszResult<()> {
         if self.len() > N {
             return Err(VIOLATED);
@@ -180,7 +181,6 @@ impl<T: Bounds<E>, E, const N: usize> Bounds<Max<N, E>> for Vec<T> {
 
 impl<T: Bounds<E>, E> Bounds<Each<E>> for Vec<T> {
     type As = Vec<T::As>;
-    const SAME_BYTES: bool = T::SAME_BYTES;
     fn check(&self) -> PsszResult<()> {
         self.iter().try_for_each(T::check)
     }
@@ -192,11 +192,8 @@ impl<T: Bounds<E>, E> Bounds<Each<E>> for Vec<T> {
     }
 }
 
-/// An array of variable-size elements takes its offset width from its
-/// bound, so only an array of fixed-size elements keeps its bytes.
-impl<T: Bounds<E> + PsszPack<Pssz>, E, const M: usize> Bounds<Each<E>> for [T; M] {
+impl<T: Bounds<E>, E, const M: usize> Bounds<Each<E>> for [T; M] {
     type As = [T::As; M];
-    const SAME_BYTES: bool = T::SAME_BYTES && <T as PsszPack<Pssz>>::IS_FIXED_SIZE;
     fn check(&self) -> PsszResult<()> {
         self.iter().try_for_each(T::check)
     }
@@ -213,7 +210,6 @@ where
     T::As: Ord,
 {
     type As = BoundedSet<T::As, N>;
-    const SAME_BYTES: bool = T::SAME_BYTES;
     fn check(&self) -> PsszResult<()> {
         if self.len() > N {
             return Err(VIOLATED);
@@ -233,7 +229,6 @@ where
     T::As: Ord,
 {
     type As = BTreeSet<T::As>;
-    const SAME_BYTES: bool = T::SAME_BYTES;
     fn check(&self) -> PsszResult<()> {
         self.iter().try_for_each(T::check)
     }
@@ -248,7 +243,6 @@ where
 /// A map with a bound on its entry count alone: the entries are unchanged.
 impl<K: Ord + Clone, V: Clone, const N: usize> Bounds<Max<N>> for BTreeMap<K, V> {
     type As = BoundedMap<K, V, N>;
-    const SAME_BYTES: bool = true;
     fn check(&self) -> PsszResult<()> {
         if self.len() > N {
             return Err(VIOLATED);
@@ -264,13 +258,12 @@ impl<K: Ord + Clone, V: Clone, const N: usize> Bounds<Max<N>> for BTreeMap<K, V>
 }
 
 /// A map entry is a pair, whose header width follows the bound of its key
-/// and value: the bytes are the described type's.
+/// and value.
 impl<K: Bounds<KS> + Ord, V: Bounds<VS>, KS, VS, const N: usize> Bounds<Max<N, Entry<KS, VS>>> for BTreeMap<K, V>
 where
     K::As: Ord,
 {
     type As = BoundedMap<K::As, V::As, N>;
-    const SAME_BYTES: bool = false;
     fn check(&self) -> PsszResult<()> {
         if self.len() > N {
             return Err(VIOLATED);
@@ -290,7 +283,6 @@ where
     K::As: Ord,
 {
     type As = BTreeMap<K::As, V::As>;
-    const SAME_BYTES: bool = false;
     fn check(&self) -> PsszResult<()> {
         self.iter().try_for_each(|(k, v)| k.check().and_then(|()| v.check()))
     }
@@ -307,7 +299,6 @@ macro_rules! through_option {
     ($([$($generics:tt)*] $spec:ty;)*) => {$(
         impl<T: Bounds<$spec>, $($generics)*> Bounds<$spec> for Option<T> {
             type As = Option<T::As>;
-            const SAME_BYTES: bool = T::SAME_BYTES;
             fn check(&self) -> PsszResult<()> {
                 self.as_ref().map_or(Ok(()), T::check)
             }
@@ -326,13 +317,11 @@ through_option! {
     [X] At<X>;
 }
 
-// A tuple takes its offset width from its bound: the bytes are the
-// described tuple's.
+// A tuple takes its offset width from its bound.
 macro_rules! tuple_bounds {
     ($(($ty:ident, $spec:ident, $index:tt)),+) => {
         impl<$($ty: Bounds<$spec>, $spec),+> Bounds<At<($($spec,)+)>> for ($($ty,)+) {
             type As = ($($ty::As,)+);
-            const SAME_BYTES: bool = false;
             fn check(&self) -> PsszResult<()> {
                 $(self.$index.check()?;)+
                 Ok(())
@@ -355,20 +344,240 @@ tuple_bounds!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG
 tuple_bounds!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG, 5), (H, SH, 6));
 tuple_bounds!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG, 5), (H, SH, 6), (I, SI, 7));
 
-/// A field under its annotation, as the derives write it: the constants of
-/// the described type, the field's own bytes where they are the same.
-#[doc(hidden)]
-pub struct Described<'a, T, S>(&'a T, PhantomData<S>);
+// ── Writing a value as the described type ───────────────────────────────────
 
-impl<'a, T, S> Described<'a, T, S> {
+/// Writes a value of this type under the annotation `S` with the layout of
+/// the described type `As`, from the value as it stands: nothing is
+/// converted. The bounds are not checked here ([`Bounds::check`] is, once,
+/// by [`Described`]).
+pub trait PackAs<F: PsszFormat, S>: Bounds<S> {
+    /// Appends the encoding of the value as an `As`. One depth node per
+    /// node of `As`, exactly as `As`'s own encoder.
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()>;
+    /// The value is an absent optional.
+    fn is_none_as(&self) -> bool {
+        false
+    }
+}
+
+impl<F: PsszFormat, T: PsszPack<F> + Clone> PackAs<F, Plain> for T {
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        self.pssz_pack_checked(out)
+    }
+    fn is_none_as(&self) -> bool {
+        self.pssz_is_none()
+    }
+}
+
+fn raw_bytes(bytes: &[u8], out: &mut Vec<u8>) -> PsszResult<()> {
+    let _depth = checked::EncodeDepth::enter()?;
+    out.try_reserve(bytes.len()).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+impl<F: PsszFormat, const N: usize> PackAs<F, Max<N>> for String {
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        raw_bytes(self.as_bytes(), out)
+    }
+}
+impl<F: PsszFormat, const N: usize> PackAs<F, Max<N>> for RawString {
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        raw_bytes(&self.0, out)
+    }
+}
+
+/// The elements of a list, array or set, at the offset width and with the
+/// element layout of the described sequence `L`.
+fn pack_elements<'a, F: PsszFormat, L: PsszPack<F>, T: PackAs<F, E> + 'a, E>(
+    values: impl ExactSizeIterator<Item = &'a T>,
+    known_count: bool,
+    out: &mut Vec<u8>,
+) -> PsszResult<()>
+where
+    T::As: PsszPack<F>,
+{
+    checked::encode_sequence_with(
+        <L as PsszPack<F>>::OFFSET_WIDTH,
+        <T::As as PsszPack<F>>::IS_FIXED_SIZE.then_some(<T::As as PsszPack<F>>::FIXED_SIZE),
+        values,
+        |value, out| value.pack_as(out),
+        out,
+        known_count,
+    )
+}
+
+impl<F: PsszFormat, T: PackAs<F, E>, E, const N: usize> PackAs<F, Max<N, E>> for Vec<T>
+where
+    T::As: PsszPack<F>,
+{
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let _depth = checked::EncodeDepth::enter()?;
+        pack_elements::<F, Self::As, T, E>(self.iter(), false, out)
+    }
+}
+impl<F: PsszFormat, T: PackAs<F, E>, E> PackAs<F, Each<E>> for Vec<T>
+where
+    T::As: PsszPack<F>,
+{
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let _depth = checked::EncodeDepth::enter()?;
+        pack_elements::<F, Self::As, T, E>(self.iter(), false, out)
+    }
+}
+impl<F: PsszFormat, T: PackAs<F, E>, E, const M: usize> PackAs<F, Each<E>> for [T; M]
+where
+    T::As: PsszPack<F>,
+{
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        let _depth = checked::EncodeDepth::enter()?;
+        pack_elements::<F, Self::As, T, E>(self.iter(), true, out)
+    }
+}
+
+/// The elements in canonical order. A bound does not change a key encoding:
+/// the order of the values is the order of the described values.
+fn pack_set<F: PsszFormat, L: PsszPack<F>, T: PackAs<F, E> + KeyPack, E>(
+    set: &BTreeSet<T>,
+    out: &mut Vec<u8>,
+) -> PsszResult<()>
+where
+    T::As: PsszPack<F>,
+{
+    let _depth = checked::EncodeDepth::enter()?;
+    let sorted = canonical_order(set.iter(), |element| *element, SET_DUPLICATE)?;
+    pack_elements::<F, L, T, E>(sorted.into_iter(), false, out)
+}
+impl<F: PsszFormat, T: PackAs<F, E> + KeyPack + Ord, E, const N: usize> PackAs<F, Max<N, E>> for BTreeSet<T>
+where
+    T::As: PsszPack<F> + KeyPack + Ord,
+{
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        pack_set::<F, Self::As, T, E>(self, out)
+    }
+}
+impl<F: PsszFormat, T: PackAs<F, E> + KeyPack + Ord, E> PackAs<F, Each<E>> for BTreeSet<T>
+where
+    T::As: PsszPack<F> + KeyPack + Ord,
+{
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        pack_set::<F, Self::As, T, E>(self, out)
+    }
+}
+
+impl<F: PsszFormat, K: PsszPack<F> + KeyPack + Ord + Clone, V: PsszPack<F> + Clone, const N: usize> PackAs<F, Max<N>>
+    for BTreeMap<K, V>
+{
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        encode_map::<F, K, V>(<Self::As as PsszPack<F>>::OFFSET_WIDTH, self.iter(), usize::MAX, out)
+    }
+}
+/// The entries in canonical order, each the pair of the described key and
+/// the described value, in the offset table of the described map `L`.
+fn pack_map<F: PsszFormat, L: PsszPack<F>, K, V, KS, VS>(map: &BTreeMap<K, V>, out: &mut Vec<u8>) -> PsszResult<()>
+where
+    K: PackAs<F, KS> + KeyPack,
+    V: PackAs<F, VS>,
+    K::As: PsszPack<F>,
+    V::As: PsszPack<F>,
+{
+    let _depth = checked::EncodeDepth::enter()?;
+    let sorted = canonical_order(map.iter(), |entry| entry.0, MAP_DUPLICATE)?;
+    checked::encode_sequence_with(
+        <L as PsszPack<F>>::OFFSET_WIDTH,
+        None,
+        sorted.into_iter(),
+        |(key, value), out| {
+            <(Packed<K, KS>, Packed<V, VS>) as PsszPack<F>>::pssz_pack_checked(&(Packed::new(key), Packed::new(value)), out)
+        },
+        out,
+        false,
+    )
+}
+impl<F: PsszFormat, K, V, KS, VS, const N: usize> PackAs<F, Max<N, Entry<KS, VS>>> for BTreeMap<K, V>
+where
+    K: PackAs<F, KS> + KeyPack + Ord,
+    V: PackAs<F, VS>,
+    K::As: PsszPack<F> + KeyPack + Ord,
+    V::As: PsszPack<F>,
+{
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        pack_map::<F, Self::As, K, V, KS, VS>(self, out)
+    }
+}
+impl<F: PsszFormat, K, V, KS, VS> PackAs<F, Each<Entry<KS, VS>>> for BTreeMap<K, V>
+where
+    K: PackAs<F, KS> + KeyPack + Ord,
+    V: PackAs<F, VS>,
+    K::As: PsszPack<F> + KeyPack + Ord,
+    V::As: PsszPack<F>,
+{
+    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        pack_map::<F, Self::As, K, V, KS, VS>(self, out)
+    }
+}
+
+macro_rules! pack_through_option {
+    ($([$($generics:tt)*] $spec:ty;)*) => {$(
+        impl<F: PsszFormat, T: PackAs<F, $spec>, $($generics)*> PackAs<F, $spec> for Option<T>
+        where
+            T::As: PsszPack<F>,
+        {
+            fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+                <Option<Packed<T, $spec>> as PsszPack<F>>::pssz_pack_checked(&self.as_ref().map(Packed::new), out)
+            }
+            fn is_none_as(&self) -> bool {
+                self.is_none()
+            }
+        }
+    )*};
+}
+pack_through_option! {
+    [E, const N: usize] Max<N, E>;
+    [E] Each<E>;
+    [X] At<X>;
+}
+
+macro_rules! tuple_pack {
+    ($(($ty:ident, $spec:ident, $index:tt)),+) => {
+        impl<F: PsszFormat, $($ty: PackAs<F, $spec>, $spec),+> PackAs<F, At<($($spec,)+)>> for ($($ty,)+)
+        where
+            $($ty::As: PsszPack<F>,)+
+        {
+            fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+                <($(Packed<$ty, $spec>,)+) as PsszPack<F>>::pssz_pack_checked(&($(Packed::new(&self.$index),)+), out)
+            }
+        }
+    };
+}
+tuple_pack!((A, SA, 0));
+tuple_pack!((A, SA, 0), (B, SB, 1));
+tuple_pack!((A, SA, 0), (B, SB, 1), (C, SC, 2));
+tuple_pack!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3));
+tuple_pack!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4));
+tuple_pack!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG, 5));
+tuple_pack!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG, 5), (H, SH, 6));
+tuple_pack!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG, 5), (H, SH, 6), (I, SI, 7));
+
+/// A borrowed value that encodes as the described type: its constants, its
+/// layout. `CHECK` says whether the encoder checks the annotation's bounds
+/// first: [`Described`] does, once for the whole value; the values beneath
+/// it are [`Packed`] and are not checked again.
+#[doc(hidden)]
+pub struct Carried<'a, T, S, const CHECK: bool>(&'a T, PhantomData<S>);
+/// A field under its annotation, as the derives write it.
+#[doc(hidden)]
+pub type Described<'a, T, S> = Carried<'a, T, S, true>;
+type Packed<'a, T, S> = Carried<'a, T, S, false>;
+
+impl<'a, T, S, const CHECK: bool> Carried<'a, T, S, CHECK> {
     pub fn new(value: &'a T) -> Self {
         Self(value, PhantomData)
     }
 }
 
-impl<F: PsszFormat, T, S> PsszPack<F> for Described<'_, T, S>
+impl<F: PsszFormat, T, S, const CHECK: bool> PsszPack<F> for Carried<'_, T, S, CHECK>
 where
-    T: Bounds<S> + PsszPack<F>,
+    T: PackAs<F, S>,
     T::As: PsszPack<F>,
 {
     const IS_OPTIONAL: bool = <T::As as PsszPack<F>>::IS_OPTIONAL;
@@ -380,34 +589,28 @@ where
     const MAX_DYNAMIC_DATA: Option<usize> = <T::As as PsszPack<F>>::MAX_DYNAMIC_DATA;
     const AUTO_BOUND: Option<usize> = <T::As as PsszPack<F>>::AUTO_BOUND;
     const OFFSET_WIDTH: usize = <T::As as PsszPack<F>>::OFFSET_WIDTH;
+    const RECORD_WIDTH_BENEATH: usize = <T::As as PsszPack<F>>::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = <T::As as PsszPack<F>>::SHAPE;
 
     fn pssz_is_none(&self) -> bool {
-        self.0.pssz_is_none()
+        self.0.is_none_as()
     }
     fn pssz_none_bytes() -> Option<&'static [u8]> {
         <T::As as PsszPack<F>>::pssz_none_bytes()
     }
     fn pssz_size(&self) -> usize {
-        if T::SAME_BYTES {
-            self.0.pssz_size()
-        } else {
-            self.0.to_as().pssz_size()
-        }
+        let mut out = Vec::new();
+        self.0.pack_as(&mut out).expect("pssz: a member has no encoding; use try_to_pssz");
+        out.len()
     }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         self.pssz_pack_checked(out).expect("pssz: a member is outside its annotated bound; use try_to_pssz");
     }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        if T::SAME_BYTES {
+        if CHECK {
             self.0.check()?;
-            self.0.pssz_pack_checked(out)
-        } else {
-            // The described type's encoder checks its own bounds; the
-            // field's check gives the annotation's message first.
-            self.0.check()?;
-            self.0.to_as().pssz_pack_checked(out)
         }
+        self.0.pack_as(out)
     }
 }
 

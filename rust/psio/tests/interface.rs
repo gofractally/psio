@@ -516,12 +516,12 @@ fn the_cap_and_the_parameter_bounds_select_the_width_and_are_enforced() {
     use psio::pssz::{auto_pssz_width, BoundedList, BoundedRawString, BoundedString, PsszPack, RawString};
     // conformance/pssz-vectors.json: tuple<string<=16,u64,string<=80>@cap=256
     // has 2-byte offsets (the cap rules), the uncapped tuple 1-byte ones
-    // (the inferred bound, 116).
+    // (the inferred bound, 107).
     assert_eq!(auto_pssz_width::<args::transfer>(), 2);
     assert_eq!(<args::transfer as PsszPack<psio::Pssz>>::MAX_DYNAMIC_DATA, Some(256));
     assert_eq!(auto_pssz_width::<args::transfer_uncapped>(), 1);
-    assert_eq!(<args::transfer_uncapped as PsszPack<psio::Pssz>>::MAX_ENCODED_SIZE, Some(116));
-    assert_eq!(<args::batch as PsszPack<psio::Pssz>>::MAX_ENCODED_SIZE, Some(65));
+    assert_eq!(<args::transfer_uncapped as PsszPack<psio::Pssz>>::MAX_ENCODED_SIZE, Some(107));
+    assert_eq!(<args::batch as PsszPack<psio::Pssz>>::MAX_ENCODED_SIZE, Some(44));
     assert_eq!(auto_pssz_width::<args::note>(), 1);
 
     // `method-args/transfer/...` of the fixture: ("al", 5, "hi").

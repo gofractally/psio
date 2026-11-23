@@ -29,19 +29,78 @@ type always rules: `max_dynamic_data = N` selects the width class of N
 inferred bound applies (`PsszPack::AUTO_BOUND`, the mirror of C++
 `max_encoded_size<T>()`); the bound is finite only if every variable-length
 subfield is bounded, otherwise the width is 4. The only spare capacity is the
-rounding from the bound to its width class. Each record, vector and array owns
-its header and offset slots at its own width (`PsszPack::OFFSET_WIDTH`);
-children use theirs.
+rounding from the bound to its width class. Every type that has offsets — a
+record, a tuple, an array / list / map / set of variable elements — owns its
+header, slots or table at its own width (`PsszPack::OFFSET_WIDTH`); children
+use theirs.
 
 The inferred bound is ABI and reproduces the C++ bookkeeping exactly. The
 normative rule is `docs/pssz-spec.md` §3.2 (`fit`): a type that has offsets —
 a record, tuple, array of variable elements, bounded list, map or set — counts
 its header / slots / table at its own width, the least of 1, 2, 4 whose total
 fits; one byte for every `Option`; a declared child cap reserved in full; no
-bound for unbounded vectors and strings and for `Box`. (The Rust
-implementation described here predates that rule — it counts four bytes per
-header and slot and gives lists a 4-byte table — until it is brought in line;
-`conformance/pssz-vectors.json` is the reference.)
+bound for unbounded vectors and strings and for `Box`; `Bitvector<N>` is
+⌈N/8⌉ bytes and `Bitlist<N>` ⌈N/8⌉ + 1. Rust implements it (`pssz::fit`,
+`pssz_checked::record_bound` / `sequence_bound`; the schema-driven codec
+`pssz::dynamic` computes the same numbers from the IR), and every type and
+vector of `conformance/pssz-vectors.json` is checked on both paths.
+
+**A list's own table.** `BoundedList<T, N>`, `BoundedMap`, `BoundedSet` and a
+plain `Vec` / `BTreeMap` / `BTreeSet` member bounded by `#[psio(max = N,
+element(...))]` write their offset table at the width class of the list's own
+bound: `BoundedList<BoundedString<16>, 15>` (15 + 240 = 255) has a 1-byte
+table, with strings of 17 a 2-byte one. A `Vec<T>` with no bound has a 4-byte
+table.
+
+**A record's cap bounds what lies beneath it** (`docs/pssz-spec.md` §3.6).
+Under `#[pssz(max_dynamic_data = N)]` every list, array, map, set and tuple
+beneath the record — down to the next record — takes the width class of
+min(its own bound, N); the member types stay the plain ones:
+
+```rust
+#[derive(PsszPack, PsszUnpack)]
+#[pssz(max_dynamic_data = 255)]
+struct Transfer {
+    token: u32,
+    memo: String,           // one slot, as wide as Transfer
+    tags: Vec<String>,      // 1-byte offset table
+    rows: Vec<Vec<String>>, // 1-byte tables at both levels
+}
+```
+
+The cap of a `#[psio::interface]` method (its argument record) does the same
+for the parameters. A record keeps its own width wherever it appears, so a
+child record beneath a cap is not narrowed;
+`pssz::pssz_child_wider_than_cap::<T>()` (C++
+`pssz_child_wider_than_cap_v<T>`) is a `const fn` that reports a capped
+record holding a wider one, for `const { assert!(!...) }`. It is a query, not
+an error.
+
+*How the position is carried.* A width is a property of a type at a
+position, and Rust's `OFFSET_WIDTH` is an associated constant of
+`PsszPack<F>`, so the position rides in the format tag `F`: a derived record
+encodes, reads, validates and views its members under
+`<F as PsszFormat>::Under<N>` when it has a cap and under `F::Free` when it
+has none; lists, arrays, maps, sets, optionals, variants, tuples, `Box` and
+transparent types hand their tag on; `Nested<T>` starts again at `Pssz`. For
+the automatic profile the two are `PsszUnder<N>` and `Pssz`; for an explicit
+profile both are the profile itself (caps select nothing there).
+`pssz::position_width::<F>(bound)` takes the `min`; a record uses
+`pssz::offset_width::<F>(bound)`, which does not look at the position.
+Nothing is copied or converted for it. Visible consequences:
+
+- The view of a member of a capped record is typed by its position:
+  `PsszView<'_, Vec<String>, PsszUnder<255>>` (`PsszField::Beneath`). A
+  record has the same bytes at every position;
+  `PsszView::<Child>::trusted(view.bytes())` drops the position from the view
+  of a child record.
+- A generic record's where-clauses name the member format: `struct W<T> {
+  value: T }` implements `PsszPack<F>` where `T: PsszPack<F::Free>`. For
+  `F = Pssz` that is `T: PsszPack<Pssz>`; code generic over `F` that holds a
+  `W<T>` writes the bound with `F::Free`.
+- A hand-written `PsszFormat` names `Free` and `Under`; a hand-written
+  `PsszPack` keeps the default `OFFSET_WIDTH` (its own bound, like a
+  record) unless it opts into `position_width`.
 
 The cap also limits the complete encoded size of the value. The automatic
 profile enforces it at every node on encode, decode and validate; explicit
@@ -126,12 +185,15 @@ and in keys (`rust/psio/tests/pssz_annotated_bounds.rs` compares the two
 spellings per shape and against the IR C++ wrote into the fixture).
 `psio::pssz::bounds` documents the mechanism: the derives take the
 constants, the validator, the reader and the schema from the described
-type; a value is written from the field as it stands where the bytes are
-the same (lists, strings, sets) and converted first where a bound narrows
-an offset width below the member (a tuple, a map entry, an array of
-variable elements). Not annotatable today: `HashMap` / `HashSet`,
-`Nested<T>` (its bound is the type parameter `N`), and a tuple of more than
-eight elements.
+type, and a value is written from the field as it stands with the described
+type's widths (`bounds::PackAs`): a bound can narrow a list's table, a
+tuple's or a map entry's header at any depth, and nothing is converted or
+copied to write it. (Reading builds the described value and moves it into
+the field.) A transparent type's member bound and an enum alternative's
+bound are enforced by `derive(Key)` as well, on `try_to_key`, `from_key` and
+`validate_key`. Not annotatable today: `HashMap` / `HashSet`, `Nested<T>`
+(its bound is the type parameter `N`), and a tuple of more than eight
+elements.
 
 ## Methods and interfaces
 
@@ -215,7 +277,11 @@ that returns nothing has no result bytes.
    `#[psio(variant)]` forces the variant encoding for a field-less enum.
 
 Tuples are extensible records addressed by position, as C++ `std::tuple`;
-`()` is a bare header. `Box<T>` pairs with C++ `psio::schema_types::Box<T>`:
+`()` is a bare header. A tuple is not a record for the position cap: beneath
+a capped record it is narrowed like a list. A tuple has at most 255 elements
+(`docs/pssz-spec.md` §8.4): the typed layer implements tuples of up to 12,
+and the schema-driven codec refuses a schema with a longer one
+(`pssz::dynamic::MAX_TUPLE_ELEMENTS`). `Box<T>` pairs with C++ `psio::schema_types::Box<T>`:
 wire-transparent, no inferred bound, and a `Box<Option<T>>` field is not an
 omittable optional.
 
@@ -249,7 +315,9 @@ panic or yield some value, never undefined behaviour
 `PsszPack::SHAPE` descriptors of the two types under the automatic profile:
 New is Old plus trailing `Option` fields, at an unchanged width and
 fixed-layout status, recursively through fields, vectors, arrays, optionals,
-variants and tuples. Hand-written `PsszPack` impls are opaque and never
+variants and tuples. The widths compared are those of each position, so a
+change of cap that moves the width of a list beneath it is not an evolution
+(a cap of 255 lowered to 200 is; 255 raised to 256 is not). Hand-written `PsszPack` impls are opaque and never
 evolve. A directly recursive type has no finite const descriptor; use the
 schema-based `pssz::upgrade::validate_optional_upgrade` for those.
 

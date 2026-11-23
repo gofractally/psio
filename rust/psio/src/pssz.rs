@@ -9,8 +9,12 @@
 //!     `max_dynamic_data` cap on the type selects the width class of the cap
 //!     (<=255 → 1, <=65535 → 2, else 4); without a cap the class of the
 //!     inferred bound (`PsszPack::AUTO_BOUND`, C++ `max_encoded_size<T>()`)
-//!     applies, and an unbounded type uses 4. Each record / vector / array
-//!     owns its header and offset slots at its own width; children use theirs.
+//!     applies, and an unbounded type uses 4. Every type that has offsets —
+//!     a record, a tuple, an array / list / map / set of variable elements —
+//!     owns its header, slots or table at its own width (docs/pssz-spec.md
+//!     3.1); children use theirs. Beneath a record with a cap, everything
+//!     that is not itself a record is also bounded by that cap
+//!     (docs/pssz-spec.md 3.6): see [`PsszFormat::POSITION_CAP`].
 //!   - [`Pssz8`], [`Pssz16`], [`Pssz32`] are the explicit regression /
 //!     compatibility tags (C++ `psio::pssz_<1|2|4>`): one width is inherited
 //!     through the whole recursion.
@@ -85,12 +89,44 @@ impl std::error::Error for PsszError {}
 pub type PsszResult<T> = Result<T, PsszError>;
 
 /// A pSSZ format tag.
+///
+/// # The position cap
+///
+/// A record with an explicit cap never encodes to more than the cap, so
+/// nothing beneath it does: the cap is an implicit bound of every position
+/// beneath the record, for the purpose of the offset widths there
+/// (docs/pssz-spec.md 3.6). A width is therefore a property of a type **at a
+/// position**, and the position travels where every codec already looks: in
+/// the format tag. A record encodes its members under [`PsszFormat::Under`]
+/// of its cap, or under [`PsszFormat::Free`] when it has none; a list, an
+/// array, a map, a set, an optional, a variant, a tuple, a `Box` and a
+/// transparent type hand the tag they were given to what they hold; a
+/// [`Nested`] value starts again at [`Pssz`]. Nothing is copied or converted
+/// for it: the tag only selects constants.
+///
+/// For the automatic profile the two are [`Pssz`] and [`PsszUnder<C>`]; an
+/// explicit profile ignores caps, and both are the profile itself.
 pub trait PsszFormat {
     const OFFSET_BYTES: usize;
     const HEADER_BYTES: usize;
     const MAX_TOTAL: u64;
     /// Automatic profile: every type selects its own offset width.
     const AUTO: bool = false;
+    /// The explicit cap of the nearest enclosing record (automatic profile
+    /// only): what [`position_width`] bounds a list, array, map, set or
+    /// tuple by. `None` at the root, beneath a record without a cap, and
+    /// inside a [`Nested`] value.
+    const POSITION_CAP: Option<usize> = None;
+    /// The format of the members of a record that has no cap.
+    ///
+    /// (The equalities in the bounds of `Free` and `Under` say that a
+    /// position is the nearest record's and nothing else: beneath a record
+    /// without a cap beneath any record is beneath a record without a cap.
+    /// They let a generic record that holds itself be written once for
+    /// every format.)
+    type Free: PsszFormat<Free = Self::Free>;
+    /// The format of the members of a record whose cap is `C`.
+    type Under<const C: usize>: PsszFormat<Free = Self::Free, Under<C> = Self::Under<C>>;
 }
 
 /// Automatic, type-derived widths. Equivalent to C++ `psio::pssz`.
@@ -101,6 +137,23 @@ impl PsszFormat for Pssz {
     const HEADER_BYTES: usize = 4;
     const MAX_TOTAL: u64 = 0xffff_ffff;
     const AUTO: bool = true;
+    type Free = Pssz;
+    type Under<const C: usize> = PsszUnder<C>;
+}
+
+/// The automatic profile at a position beneath a record whose explicit cap
+/// is `C` (docs/pssz-spec.md 3.6). The format of a view of such a member:
+/// `PsszView<'_, Vec<String>, PsszUnder<255>>` reads a 1-byte offset table.
+/// A record has the same bytes under `PsszUnder<C>` as under [`Pssz`].
+pub struct PsszUnder<const C: usize>;
+impl<const C: usize> PsszFormat for PsszUnder<C> {
+    const OFFSET_BYTES: usize = 4;
+    const HEADER_BYTES: usize = 4;
+    const MAX_TOTAL: u64 = 0xffff_ffff;
+    const AUTO: bool = true;
+    const POSITION_CAP: Option<usize> = Some(C);
+    type Free = Pssz;
+    type Under<const D: usize> = PsszUnder<D>;
 }
 
 pub struct Pssz8;
@@ -108,6 +161,8 @@ impl PsszFormat for Pssz8 {
     const OFFSET_BYTES: usize = 1;
     const HEADER_BYTES: usize = 1;
     const MAX_TOTAL: u64 = 0xff;
+    type Free = Pssz8;
+    type Under<const C: usize> = Pssz8;
 }
 
 pub struct Pssz16;
@@ -115,6 +170,8 @@ impl PsszFormat for Pssz16 {
     const OFFSET_BYTES: usize = 2;
     const HEADER_BYTES: usize = 2;
     const MAX_TOTAL: u64 = 0xffff;
+    type Free = Pssz16;
+    type Under<const C: usize> = Pssz16;
 }
 
 pub struct Pssz32;
@@ -122,6 +179,8 @@ impl PsszFormat for Pssz32 {
     const OFFSET_BYTES: usize = 4;
     const HEADER_BYTES: usize = 4;
     const MAX_TOTAL: u64 = 0xffff_ffff;
+    type Free = Pssz32;
+    type Under<const C: usize> = Pssz32;
 }
 
 /// Width class of a budget or bound: <=255 → 1, <=65535 → 2, else 4.
@@ -134,10 +193,69 @@ pub const fn width_class(bound: Option<usize>) -> usize {
     }
 }
 
-/// The width a type with this bound uses for its own header / offset slots
-/// under format `F`.
+/// The width a record with this bound (its explicit cap, else its inferred
+/// bound) uses for its own header / offset slots under format `F`. A
+/// record's width is its own wherever it appears: no position cap applies.
 pub const fn offset_width<F: PsszFormat>(bound: Option<usize>) -> usize {
     if F::AUTO { width_class(bound) } else { F::OFFSET_BYTES }
+}
+
+/// The width of a type with offsets that is not a record — an array, list,
+/// map or set of variable elements, a tuple — whose own bound is `bound`,
+/// at the position `F` describes: the width class of the smaller of its
+/// bound and the position cap (docs/pssz-spec.md 3.6; C++
+/// `pssz_impl::width_for<T, A>()`).
+pub const fn position_width<F: PsszFormat>(bound: Option<usize>) -> usize {
+    if !F::AUTO {
+        return F::OFFSET_BYTES;
+    }
+    width_class(match (bound, F::POSITION_CAP) {
+        (Some(bound), Some(cap)) => Some(if bound < cap { bound } else { cap }),
+        (Some(bound), None) => Some(bound),
+        (None, cap) => cap,
+    })
+}
+
+/// The bound of a type that has offsets (docs/pssz-spec.md 3.2; C++
+/// `max_size.hpp` `fit`): `words` words of the type's own width (header,
+/// slots, table entries) and other bytes bounded by `rest`, for the
+/// narrowest width whose worst case fits. The width class of the result is
+/// that width. `None` when `rest` is, or on overflow.
+pub const fn fit(words: usize, rest: Option<usize>) -> Option<usize> {
+    let rest = match rest {
+        Some(rest) => rest,
+        None => return None,
+    };
+    if let Some(total) = words.checked_add(rest) {
+        if total <= 0xff {
+            return Some(total);
+        }
+    }
+    if let Some(table) = words.checked_mul(2) {
+        if let Some(total) = table.checked_add(rest) {
+            if total <= 0xffff {
+                return Some(total);
+            }
+        }
+    }
+    match words.checked_mul(4) {
+        Some(table) => table.checked_add(rest),
+        None => None,
+    }
+}
+
+/// Whether `T` has an explicit cap and a record wider than the cap's width
+/// class lies beneath it with no other record in between (C++
+/// `psio::pssz_child_wider_than_cap_v<T>`). Such a child keeps its own
+/// width (a record's bytes never depend on what holds it), so it spends
+/// offset bytes on a capacity it can never use there; the remedy is a
+/// `max_dynamic_data` or member bounds on the child. A query, not an error:
+///
+/// ```ignore
+/// const _: () = assert!(!psio::pssz::pssz_child_wider_than_cap::<Transfer>());
+/// ```
+pub const fn pssz_child_wider_than_cap<T: PsszPack<Pssz> + ?Sized>() -> bool {
+    T::CHILD_WIDER_THAN_CAP
 }
 
 /// The automatic offset width of `T` (C++ `auto_pssz_width_v<T>`).
@@ -176,12 +294,28 @@ pub trait PsszPack<F: PsszFormat> {
 
     /// What an enclosing type reserves for this one, and what selects this
     /// type's own width: the explicit cap when declared, otherwise the
-    /// conservative bound C++ `max_encoded_size<T>()` infers with four-byte
-    /// bookkeeping. `None` is unbounded. Must match C++ exactly: it is ABI.
+    /// bound C++ `max_encoded_size<T>()` infers (docs/pssz-spec.md 3.2),
+    /// which counts each type's own header / slots / table at the width that
+    /// type ends up with ([`fit`]). `None` is unbounded. Must match C++
+    /// exactly: it is ABI. It does not depend on the position.
     const AUTO_BOUND: Option<usize> = None;
 
-    /// Width of this type's own header and offset slots under `F`.
+    /// Width of this type's own header and offset slots under `F`. The
+    /// default is a record's: the width class of `AUTO_BOUND`, whatever the
+    /// position. A type with offsets that is not a record uses
+    /// [`position_width`].
     const OFFSET_WIDTH: usize = offset_width::<F>(Self::AUTO_BOUND);
+
+    /// The widest record (its `OFFSET_WIDTH`) that lies at or beneath this
+    /// position with no other record in between; 0 when there is none. A
+    /// record reports its own width, a container the widest of what it
+    /// holds, a leaf, a `Nested` value and a hand-written codec 0.
+    #[doc(hidden)]
+    const RECORD_WIDTH_BENEATH: usize = 0;
+
+    /// See [`pssz_child_wider_than_cap`].
+    #[doc(hidden)]
+    const CHILD_WIDER_THAN_CAP: bool = false;
 
     /// Layout descriptor for the compile-time evolution check
     /// (`pssz_evolves_from`). Hand-written codecs are opaque.
@@ -589,6 +723,8 @@ macro_rules! pssz_forward_consts {
         const MAX_DYNAMIC_DATA: Option<usize> = <$T as PsszPack<F>>::MAX_DYNAMIC_DATA;
         const AUTO_BOUND: Option<usize> = <$T as PsszPack<F>>::AUTO_BOUND;
         const OFFSET_WIDTH: usize = <$T as PsszPack<F>>::OFFSET_WIDTH;
+        const RECORD_WIDTH_BENEATH: usize = <$T as PsszPack<F>>::RECORD_WIDTH_BENEATH;
+        const CHILD_WIDER_THAN_CAP: bool = <$T as PsszPack<F>>::CHILD_WIDER_THAN_CAP;
         const SHAPE: Shape = <$T as PsszPack<F>>::SHAPE;
         fn pssz_none_bytes() -> Option<&'static [u8]> { <$T as PsszPack<F>>::pssz_none_bytes() }
     };
@@ -615,8 +751,10 @@ impl<F: PsszFormat, T: PsszPack<F> + ?Sized> PsszPack<F> for Box<T> {
     const MAX_DYNAMIC_DATA: Option<usize> = <T as PsszPack<F>>::MAX_DYNAMIC_DATA;
     const AUTO_BOUND: Option<usize> = None;
     // A box has no header or table of its own (the boxed value is encoded
-    // at its own width); the width it reports is the unbounded one, as the
-    // C++ trait does for `Box<T>`.
+    // at its own width, at this position: a box passes the position cap
+    // on); the width it reports is the unbounded one, as the C++ trait does
+    // for `Box<T>`.
+    const RECORD_WIDTH_BENEATH: usize = <T as PsszPack<F>>::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape { optional: false, ..<T as PsszPack<F>>::SHAPE };
     fn pssz_size(&self) -> usize { <T as PsszPack<F>>::pssz_size(self) }
     fn pssz_pack(&self, out: &mut Vec<u8>) { <T as PsszPack<F>>::pssz_pack(self, out) }
@@ -660,6 +798,8 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for [T; N] {
     const IS_FIXED_SIZE:    bool  = T::IS_FIXED_SIZE;
     const FIXED_SIZE:       usize = if T::IS_FIXED_SIZE { N.saturating_mul(T::FIXED_SIZE) } else { 0 };
     const AUTO_BOUND: Option<usize> = checked::sequence_bound(N, T::AUTO_BOUND, T::IS_FIXED_SIZE);
+    const OFFSET_WIDTH: usize = position_width::<F>(<Self as PsszPack<F>>::AUTO_BOUND);
+    const RECORD_WIDTH_BENEATH: usize = T::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape::node(ShapeKind::Array, N, <Self as PsszPack<F>>::OFFSET_WIDTH, T::IS_FIXED_SIZE, &[T::SHAPE]);
     fn pssz_size(&self) -> usize { sequence_size::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self) }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
@@ -692,6 +832,8 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValida
 }
 
 impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for [T] {
+    const OFFSET_WIDTH: usize = position_width::<F>(None);
+    const RECORD_WIDTH_BENEATH: usize = T::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape::node(ShapeKind::List, usize::MAX, <Self as PsszPack<F>>::OFFSET_WIDTH, false, &[T::SHAPE]);
     const MIN_ENCODED_SIZE: usize         = 0;
     const MAX_ENCODED_SIZE: Option<usize> = None;
@@ -708,6 +850,8 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for [T] {
 }
 
 impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Vec<T> {
+    const OFFSET_WIDTH: usize = position_width::<F>(None);
+    const RECORD_WIDTH_BENEATH: usize = T::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape::node(ShapeKind::List, usize::MAX, <Self as PsszPack<F>>::OFFSET_WIDTH, false, &[T::SHAPE]);
     const MIN_ENCODED_SIZE: usize         = 0;
     const MAX_ENCODED_SIZE: Option<usize> = None;
@@ -772,9 +916,10 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Vec<T>
     }
 }
 
-/// C++ `std::vector<T>` member annotated `length_bound{.max = N}`. The bound
-/// feeds the enclosing type's inferred width; the list's own offset table is
-/// that of an unbounded vector, as in C++. Rust also enforces the count.
+/// C++ `psio::bounded<T, N>`, and a `std::vector<T>` member annotated
+/// `max<N>`. The list's own offset table takes its width from the list's own
+/// bound (docs/pssz-spec.md 3.1): 1 or 2 bytes when the count and the
+/// elements are bounded and the bound is small enough, 4 otherwise.
 impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for BoundedList<T, N> {
     const MIN_ENCODED_SIZE: usize = 0;
     const MAX_ENCODED_SIZE: Option<usize> = match T::MAX_ENCODED_SIZE {
@@ -784,15 +929,17 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for BoundedList<
     const IS_FIXED_SIZE:    bool  = false;
     const FIXED_SIZE:       usize = 0;
     const AUTO_BOUND: Option<usize> = checked::sequence_bound(N, T::AUTO_BOUND, T::IS_FIXED_SIZE);
-    const OFFSET_WIDTH: usize = <Vec<T> as PsszPack<F>>::OFFSET_WIDTH;
+    const OFFSET_WIDTH: usize = position_width::<F>(<Self as PsszPack<F>>::AUTO_BOUND);
+    const RECORD_WIDTH_BENEATH: usize = T::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape::node(ShapeKind::List, N, <Self as PsszPack<F>>::OFFSET_WIDTH, false, &[T::SHAPE]);
-    fn pssz_size(&self) -> usize { self.0.pssz_size() }
+    fn pssz_size(&self) -> usize { sequence_size::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, &self.0) }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: BoundedList overflow; use try_to_pssz");
     }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
         if self.0.len() > N { return Err(PsszError::new("pssz: BoundedList overflow")); }
-        self.0.pssz_pack_checked(out)
+        let _depth = checked::EncodeDepth::enter()?;
+        checked::encode_sequence::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, &self.0, out, false)
     }
 }
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F> for BoundedList<T, N> {
@@ -827,6 +974,8 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for Bitvector<N> {
     const MAX_ENCODED_SIZE: Option<usize> = Some(crate::pssz_bits::byte_count(N));
     const IS_FIXED_SIZE:    bool  = true;
     const FIXED_SIZE:       usize = crate::pssz_bits::byte_count(N);
+    // ceil(N / 8) bytes, inline (docs/pssz-spec.md 3.2).
+    const AUTO_BOUND: Option<usize> = Some(crate::pssz_bits::byte_count(N));
     const SHAPE: Shape = Shape::leaf("bitvector", N, true);
     fn pssz_size(&self) -> usize { crate::pssz_bits::byte_count(N) }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
@@ -857,6 +1006,9 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitvector<N> {
 impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
     const MIN_ENCODED_SIZE: usize         = 1;  // always ≥ delimiter byte
     const MAX_ENCODED_SIZE: Option<usize> = Some(1 + (MAX_N + 7) / 8);
+    // ceil(N / 8) + 1: the bits and the delimiter bit (docs/pssz-spec.md
+    // 3.2). The bound every implementation uses, not the exact maximum.
+    const AUTO_BOUND: Option<usize> = crate::pssz_bits::byte_count(MAX_N).checked_add(1);
     const SHAPE: Shape = Shape::leaf("bitlist", MAX_N, false);
     const IS_FIXED_SIZE:    bool  = false;
     const FIXED_SIZE:       usize = 0;
@@ -910,6 +1062,7 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Option<T> {
     // C++ reserves one selector byte for every optional, whether or not
     // this payload uses one.
     const AUTO_BOUND: Option<usize> = checked::bound_add(T::AUTO_BOUND, 1);
+    const RECORD_WIDTH_BENEATH: usize = T::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape::optional(T::MIN_ENCODED_SIZE == 0, &[T::SHAPE]);
     fn pssz_size(&self) -> usize {
         let selector = if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 };
@@ -988,10 +1141,10 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Option
 // record (a bare header), not an empty span.
 
 /// C++ `max_encoded_size<std::tuple<...>>()` (docs/pssz-spec.md 3.2): a
-/// tuple is the extensible positional record of its elements. The header,
-/// then per element its bound (its explicit cap in full when it has one)
-/// and a slot when it is not an inline fixed payload, each counted as four
-/// bytes. Unbounded when an element is.
+/// tuple is the extensible positional record of its elements: the header
+/// and one slot per element that is not an inline fixed payload, at the
+/// tuple's own width ([`fit`]), and per element its bound (its explicit cap
+/// in full when it has one). Unbounded when an element is.
 #[doc(hidden)]
 pub const fn tuple_bound(fields: &[(Option<usize>, bool)]) -> Option<usize> {
     checked::record_bound(fields, false)
@@ -1027,6 +1180,7 @@ macro_rules! pssz_tuple_fields {
     (@one [$(($ty:ident, $position:tt)),*]; $selected:ident, $index:tt) => {
         impl<F: PsszFormat, $($ty: PsszPack<F>),*> crate::pssz_view::PsszField<F, $index> for ($($ty,)*) {
             type Field = $selected;
+            type Beneath = F;
             const LOCATION: checked::FieldLocation = checked::record_location(
                 <Self as PsszPack<F>>::OFFSET_WIDTH,
                 &[$(checked::Layout::of::<F, $ty>()),*], $index);
@@ -1041,6 +1195,10 @@ macro_rules! pssz_tuple {
             const IS_FIXED_SIZE: bool = false;
             const FIXED_SIZE: usize = 0;
             const AUTO_BOUND: Option<usize> = tuple_bound(&[$((<$ty as PsszPack<F>>::AUTO_BOUND, <$ty as PsszPack<F>>::IS_FIXED_SIZE)),*]);
+            // A tuple is not a record: the position cap bounds it, and it
+            // hands the position to its elements.
+            const OFFSET_WIDTH: usize = position_width::<F>(<Self as PsszPack<F>>::AUTO_BOUND);
+            const RECORD_WIDTH_BENEATH: usize = checked::widest(&[$(<$ty as PsszPack<F>>::RECORD_WIDTH_BENEATH),*]);
             const SHAPE: Shape = Shape::record(true, false, <Self as PsszPack<F>>::OFFSET_WIDTH, false, &[$(<$ty as PsszPack<F>>::SHAPE),*]);
             fn pssz_size(&self) -> usize {
                 let mut out = Vec::new();
@@ -1104,7 +1262,7 @@ mod nested;
 pub use nested::{Checked, Deferred, Nested, NestedValidation};
 
 #[path = "pssz_assoc.rs"]
-mod assoc;
+pub(crate) mod assoc;
 pub use assoc::{BoundedMap, BoundedSet};
 pub use crate::key::ByKey;
 

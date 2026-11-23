@@ -415,12 +415,16 @@ impl PsszFormat for InvalidWidth {
     const OFFSET_BYTES: usize = 0;
     const HEADER_BYTES: usize = 0;
     const MAX_TOTAL: u64 = 0;
+    type Free = Self;
+    type Under<const C: usize> = Self;
 }
 struct InvalidHeader;
 impl PsszFormat for InvalidHeader {
     const OFFSET_BYTES: usize = 1;
     const HEADER_BYTES: usize = 4;
     const MAX_TOTAL: u64 = u32::MAX as u64;
+    type Free = Self;
+    type Under<const C: usize> = Self;
 }
 fn invalid_format<F: PsszFormat>() {
     assert!(decode::<F, Vec<String>>(&[0]).is_err());

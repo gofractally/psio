@@ -13,6 +13,7 @@ pub fn registry() -> Registry {
     reg!(WidthGrowV1, WidthGrowV2, WidthGrowParentV1, WidthGrowParentV2);
     reg!(WidthThreshold251, WidthThreshold252, WidthBoundedBatch, WidthStringPair, WidthCappedPair);
     reg!(S247, S248, S65527, S65528, Tiny, NarrowBatch);
+    reg!(WidthThreshold254, WidthThreshold255, S253, S254, S65531, S65532);
     reg!(Mix1x1, Mix1x2, Mix1x4, Mix2x1, Mix2x2, Mix2x4, Mix4x1, Mix4x2, Mix4x4);
     reg!(StrRec, Bounded, BytesRec, EnumRec, TupRec);
     reg!(T16, T300);
@@ -70,6 +71,12 @@ pub fn registry() -> Registry {
     // Bounds below the member, and method argument tuples.
     reg!(WrapTags, AnnTags, AnnRawTags, AnnGrid, AnnOpt, AnnArr, AnnMap, AnnSet, AnnTup, AnnVar);
     reg!(TransferArgs, BatchArgs, NoteCapped);
+    // A list's own width, a record's cap as the bound of what lies beneath
+    // it, bit types.
+    reg!(BList1, BList2, BList2Top, BList4, BListFree);
+    reg!(ListW1, ListW2, ListW2Top, ListW4, ListFree, ListNested, MapW1, MapW2, SetW1);
+    reg!(CapTransfer, CapList, CapList2, CapList4, CapNested, CapMap, CapTuple, CapTight, CapClamp);
+    reg!(CapChild, CapOuter, BitRec, BitNarrow, BitWide);
     crate::method_args::register(&mut r);
     r
 }

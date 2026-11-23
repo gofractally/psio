@@ -47,7 +47,8 @@ rec!(WidthGrowParentV1 { child: WidthGrowV1 });
 rec!(WidthGrowParentV2 { child: WidthGrowV2 });
 rec!(WidthThreshold251 { value: [u8; 251] });
 rec!(WidthThreshold252 { value: [u8; 252] });
-rec!(WidthGrown251 { value: [u8; 251], more: Option<u8> });
+rec!(WidthThreshold253 { value: [u8; 253] });
+rec!(WidthGrown253 { value: [u8; 253], more: Option<u8> });
 rec!(WidthBoundedBatch { entries: BoundedList<WidthCheckpoint, 4> });
 rec!(WidthStringPair { first: RawString, second: RawString });
 rec!(#[cap(255)] WidthCappedPair { first: RawString, second: RawString });
@@ -176,26 +177,32 @@ fn automatic_widths_and_bounds_match_the_cpp_static_assertions() {
     assert_eq!(auto_pssz_width::<WidthGrowParentV1>(), 2);
     assert_eq!(auto_pssz_width::<WidthGrowParentV2>(), 2);
     assert_eq!(bound::<WidthGrowParentV1>(), bound::<WidthGrowParentV2>());
-    assert_eq!(bound::<WidthThreshold251>(), Some(255));
-    assert_eq!(bound::<WidthThreshold252>(), Some(256));
+    // The header and slots count at the type's own width (pssz-spec 3.2
+    // fit): 1 + 251, 1 + 252, 1 + 253.
+    assert_eq!(bound::<WidthThreshold251>(), Some(252));
+    assert_eq!(bound::<WidthThreshold252>(), Some(253));
+    assert_eq!(bound::<WidthThreshold253>(), Some(254));
     assert_eq!(auto_pssz_width::<WidthThreshold251>(), 1);
-    assert_eq!(auto_pssz_width::<WidthThreshold252>(), 2);
-    assert_eq!(bound::<WidthBoundedBatch>(), Some(280));
+    assert_eq!(auto_pssz_width::<WidthThreshold252>(), 1);
+    // Four checkpoints of at most 64 bytes: 4 * (1 + 64) = 260 does not fit
+    // a one-byte table, 4 * (2 + 64) = 264 does a two-byte one. The record
+    // that holds the list adds its own header and slot: 2 + 2 + 264.
+    assert_eq!(bound::<WidthBoundedBatch>(), Some(268));
     assert_eq!(auto_pssz_width::<WidthBoundedBatch>(), 2);
-    assert_eq!(bound::<[WidthCheckpoint; 4]>(), Some(272));
+    assert_eq!(bound::<[WidthCheckpoint; 4]>(), Some(264));
     assert_eq!(auto_pssz_width::<[WidthCheckpoint; 4]>(), 2);
     assert_eq!(auto_pssz_width::<WidthMediumPair>(), 2);
     assert_eq!(auto_pssz_width::<WidthCappedPair>(), 1);
     assert_eq!(auto_pssz_width::<WidthStringPair>(), 4);
-    // cpp/tests/pssz_string_tests.cpp: header 4 + u32 4 + (N + slot 4).
+    // cpp/tests/pssz_string_tests.cpp: (header + slot) x W + u32 4 + N.
     assert_eq!(bound::<BoundedString<16>>(), Some(16));
-    assert_eq!(bound::<Label16>(), Some(28));
+    assert_eq!(bound::<Label16>(), Some(22));
     assert_eq!(auto_pssz_width::<Label16>(), 1);
-    assert_eq!(bound::<Label300>(), Some(312));
+    assert_eq!(bound::<Label300>(), Some(308));
     assert_eq!(auto_pssz_width::<Label300>(), 2);
     assert_eq!(bound::<LabelAny>(), None);
     assert_eq!(auto_pssz_width::<LabelAny>(), 4);
-    assert_eq!(bound::<LabelMaybe>(), Some(29));
+    assert_eq!(bound::<LabelMaybe>(), Some(23));
     assert_eq!(bound::<String>(), None);
     assert_eq!(bound::<RawString>(), None);
     assert_eq!(bound::<BoundedRawString<16>>(), Some(16));
@@ -284,16 +291,17 @@ fn automatic_profile_keeps_each_type_at_its_own_width() {
     // The same value under the explicit tags inherits one width.
     assert_eq!(try_encode::<Pssz8, _>(&narrow).unwrap(), goldens["narrow-parent-1"]);
 
-    // Nested containers: the record is width 1 (cap 200), its vectors keep
-    // four-byte tables.
+    // Nested containers: the record is width 1 (cap 200), and so are the
+    // tables of the lists beneath its cap (docs/pssz-spec.md 3.6); a
+    // checkpoint is a record and keeps its own width.
     let cp = |height, label: &str| WidthCheckpoint { height, label: BoundedRawString(label.as_bytes().to_vec()) };
     let nested = WidthNestedContainers {
         nested: vec![vec![cp(1, "a")], vec![cp(2, "b")]],
         optional: vec![Some(cp(3, "c")), None],
     };
     let wire = try_to_pssz(&nested).unwrap();
-    assert_eq!(&wire[..3], [2, 2, 2 + 8 + 2 * (4 + 7)]);
-    assert_eq!(&wire[3..11], hex("0800000013000000"));
+    assert_eq!(&wire[..3], [2, 2, 2 + 2 + 2 * (1 + 7)]);
+    assert_eq!(&wire[3..21], hex("020a01050100000005610105020000000562"));
     reads::<Pssz, _>(&wire, &nested, false);
 }
 
@@ -830,9 +838,10 @@ const _: () = {
     // An explicit cap keeps the width through growth...
     assert!(pssz_evolves_from::<WidthGrowV1, WidthGrowV2>());
     assert!(pssz_evolves_from::<WidthGrowParentV1, WidthGrowParentV2>());
-    // ...whereas an inferred bound may cross a threshold: {[u8; 251]} is
-    // one byte wide and becomes two with an appended Option<u8>.
-    assert!(!pssz_evolves_from::<WidthThreshold251, WidthGrown251>());
+    // ...whereas an inferred bound may cross a threshold: {[u8; 253]} is
+    // one byte wide (1 + 253) and becomes two with an appended Option<u8>
+    // (2 + 253 + 2 = 257 > 255).
+    assert!(!pssz_evolves_from::<WidthThreshold253, WidthGrown253>());
     // Fixed-layout records never gain fields; DWNC status cannot change.
     assert!(pssz_evolves_from::<Pair, Pair>());
     assert!(!pssz_evolves_from::<Unit, Empty>());
@@ -845,6 +854,6 @@ const _: () = {
 fn evolves_from_is_also_a_runtime_predicate() {
     assert!(pssz_evolves_from::<R0, R2>());
     assert!(!pssz_evolves_from::<R2, R0>());
-    assert_eq!(auto_pssz_width::<WidthThreshold251>(), 1);
-    assert_eq!(auto_pssz_width::<WidthGrown251>(), 2);
+    assert_eq!(auto_pssz_width::<WidthThreshold253>(), 1);
+    assert_eq!(auto_pssz_width::<WidthGrown253>(), 2);
 }

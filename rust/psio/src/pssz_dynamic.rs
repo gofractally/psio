@@ -408,6 +408,10 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
     }
     Ok(())
 }
+/// The most elements a tuple (a pair, a method's argument list) can have
+/// (docs/pssz-spec.md 8.4; C++ `psio::max_tuple_elements`).
+pub const MAX_TUPLE_ELEMENTS: usize = 255;
+
 /// Checks every type reachable from `root`. `caps` is the automatic profile.
 pub(crate) fn metadata(schema: &Schema, root: &AnyType, caps: bool) -> PsszResult<()> {
     schema.check_ir_version()?;
@@ -435,6 +439,10 @@ pub(crate) fn metadata(schema: &Schema, root: &AnyType, caps: bool) -> PsszResul
                 Some((v.members.as_slice(), Site::VariantMember))
             }
             AnyValue::Tuple(t) => {
+                // docs/pssz-spec.md 8.4.
+                if t.members.len() > MAX_TUPLE_ELEMENTS {
+                    return Err(failure("pssz dynamic: a tuple has more than 255 elements"));
+                }
                 pending.extend(t.members.iter().map(|t| t.as_ref()));
                 None
             }
@@ -751,6 +759,10 @@ fn bound_multiply(count: u64, value: Bound) -> Bound {
     }
     usize::try_from(count).ok()?.checked_mul(value?)
 }
+/// `pssz::fit` over a count the schema gives as 64 bits.
+fn fit(slots: u64, rest: Bound) -> Bound {
+    crate::pssz::fit(usize::try_from(slots).ok()?, rest)
+}
 fn record_attributes(ty: &AnyType) -> Option<&[Attribute]> {
     match &ty.value {
         AnyValue::Object(o) => Some(&o.attributes),
@@ -764,9 +776,26 @@ fn record_attributes(ty: &AnyType) -> Option<&[Attribute]> {
 struct Codec<'a> {
     schema: &'a Schema,
     w: usize,
-    /// Widths already derived for a container type (automatic profile),
-    /// keyed by the resolved type's address in `schema`.
-    widths: RefCell<HashMap<usize, usize>>,
+    /// Widths already derived for a container type at a position
+    /// (automatic profile), keyed by the resolved type's address in
+    /// `schema`, the member count that bounds a plain list, and the cap in
+    /// effect.
+    widths: RefCell<HashMap<(usize, Option<u64>, Option<u64>), usize>>,
+    /// The cap in effect at the value being read or written (automatic
+    /// profile): the explicit maxDynamicData of the nearest enclosing record
+    /// when it has one, none otherwise (the record has no cap, or the value
+    /// is the root, or the inner value of a Nested node). It bounds every
+    /// list, array, map, set and tuple beneath the record for the purpose
+    /// of its offset width (docs/pssz-spec.md 3.6). A record sets it for
+    /// its members and restores it; every other node leaves it alone.
+    active_cap: Cell<Option<u64>>,
+    /// The count (exact, else max) of the lengthBound of the record member
+    /// whose value the next `encode_shape` / `decode_shape` call handles: it
+    /// bounds a plain List (or the list of a map / set) reached through
+    /// Option, and so selects that list's offset-table width. Set around
+    /// the member's call by `encode_members` / `decode_members`, taken by
+    /// the callee.
+    position_count: Cell<Option<u64>>,
     /// The registry, when it has anything to say about a binary walk.
     handlers: Option<&'a CustomHandlers>,
     /// `NestedBytes::Opaque`: a Nested node is read and written as Bytes.
@@ -787,6 +816,8 @@ impl<'a> Codec<'a> {
             schema,
             w: if F::AUTO { 0 } else { F::OFFSET_BYTES },
             widths: RefCell::new(HashMap::new()),
+            active_cap: Cell::new(None),
+            position_count: Cell::new(None),
             handlers: options.handlers.filter(|handlers| handlers.checks_values()),
             opaque: options.nested == NestedBytes::Opaque,
             check_failed: Cell::new(false),
@@ -799,6 +830,8 @@ impl<'a> Codec<'a> {
             schema: self.schema,
             w: 0,
             widths: RefCell::new(HashMap::new()),
+            active_cap: Cell::new(None),
+            position_count: Cell::new(None),
             handlers: if handlers { self.handlers } else { None },
             opaque,
             check_failed: Cell::new(false),
@@ -850,8 +883,12 @@ impl<'a> Codec<'a> {
         if checks.is_empty() {
             return Ok(());
         }
+        // A handler reads the value as a root. Beneath a capped record the
+        // bytes in place can have narrower offsets than the root encoding
+        // (`active_cap`), so they are re-encoded for it, as under an
+        // explicit profile.
         let canonical;
-        let bytes = if self.automatic() {
+        let bytes = if self.automatic() && self.active_cap.get().is_none() {
             bytes
         } else {
             canonical = self.automatic_codec(false, self.opaque).encode_at(input, value, 0)?;
@@ -902,7 +939,7 @@ impl<'a> Codec<'a> {
         Ok(match &ty.value {
             AnyValue::Int(_) | AnyValue::Float(_) => true,
             AnyValue::Array(a) => self.fixed_payload(&a.r#type, active)?,
-            AnyValue::Custom(c) if c.id == "bool" || c.id == "char" => true,
+            AnyValue::Custom(c) if c.id == "bool" || c.id == "char" || c.id == "bitvector" => true,
             AnyValue::Custom(c) if byte_adapter_id(&c.id) => {
                 let child = self.schema.wire(&c.r#type)?;
                 matches!(child.value, AnyValue::Array(_)) && self.fixed_payload(child, active)?
@@ -916,8 +953,8 @@ impl<'a> Codec<'a> {
     /// reserves its declared cap in full when `reserve_cap`; the type's own
     /// width ignores its own cap. `annotation` is the member's lengthBound;
     /// it reaches a string or list through Option. A recursive type is
-    /// unbounded. Bookkeeping is four bytes per header and per offset slot,
-    /// whatever width is finally selected.
+    /// unbounded. A type's own header, slots and offset table are counted
+    /// at the width the type ends up with (`fit`, docs/pssz-spec.md 3.2).
     fn bound_of(
         &self,
         input: &AnyType,
@@ -944,8 +981,8 @@ impl<'a> Codec<'a> {
         active.pop();
         result
     }
-    /// N elements, each its reserved payload plus an offset slot when it is
-    /// not an inline fixed payload.
+    /// N elements, each its reserved payload, and the offset table when
+    /// they are not inline fixed payloads.
     fn bound_elements(
         &self,
         element: &AnyType,
@@ -955,11 +992,12 @@ impl<'a> Codec<'a> {
         if count == 0 {
             return Ok(Some(0));
         }
-        let mut each = self.bound_of(element, None, true, active)?;
-        if !self.fixed_payload(element, &mut Vec::new())? {
-            each = bound_add(each, 4);
+        let each = self.bound_of(element, None, true, active)?;
+        let payload = bound_multiply(count, each);
+        if self.fixed_payload(element, &mut Vec::new())? {
+            return Ok(payload);
         }
-        Ok(bound_multiply(count, each))
+        Ok(fit(count, payload))
     }
     fn bound_sequence(
         &self,
@@ -983,20 +1021,22 @@ impl<'a> Codec<'a> {
         annotation: Option<&LengthBound>,
         active: &mut Vec<usize>,
     ) -> PsszResult<Bound> {
+        // The header (extensible records), and one slot per variable member.
         let record = |members: &[Member], stable: bool, active: &mut Vec<usize>| {
-            let mut total: Bound = Some(if stable { 0 } else { 4 });
+            let mut slots: u64 = if stable { 0 } else { 1 };
+            let mut total: Bound = Some(0);
             for member in members {
                 let bound = parse_length_bound(&member.attributes)?;
-                let mut payload = self.bound_of(&member.r#type, bound.as_ref(), true, active)?;
+                let payload = self.bound_of(&member.r#type, bound.as_ref(), true, active)?;
                 if !self.fixed_payload(&member.r#type, &mut Vec::new())? {
-                    payload = bound_add(payload, 4);
+                    slots += 1;
                 }
                 total = match (total, payload) {
                     (Some(total), Some(payload)) => total.checked_add(payload),
                     _ => None,
                 };
             }
-            Ok(total)
+            Ok(fit(slots, total))
         };
         match &ty.value {
             AnyValue::Int(i) => Ok(Some(int_size(i)?)),
@@ -1027,18 +1067,19 @@ impl<'a> Codec<'a> {
             // then per member its reserved payload and, when it is not an
             // inline fixed payload, an offset slot.
             AnyValue::Tuple(t) => {
-                let mut total: Bound = Some(4);
+                let mut slots: u64 = 1;
+                let mut total: Bound = Some(0);
                 for member in &t.members {
-                    let mut payload = self.bound_of(member, None, true, active)?;
+                    let payload = self.bound_of(member, None, true, active)?;
                     if !self.fixed_payload(member, &mut Vec::new())? {
-                        payload = bound_add(payload, 4);
+                        slots += 1;
                     }
                     total = match (total, payload) {
                         (Some(total), Some(payload)) => total.checked_add(payload),
                         _ => None,
                     };
                 }
-                Ok(total)
+                Ok(fit(slots, total))
             }
             // One selector byte, then the widest alternative's payload.
             AnyValue::Variant(v) => {
@@ -1052,34 +1093,63 @@ impl<'a> Codec<'a> {
                 }
                 Ok(bound_add(widest, 1))
             }
-            // Bit types: no inferred bound.
+            // ceil(N / 8) bytes; a bitlist one more for its delimiter bit.
+            AnyValue::Custom(c) if c.id == "bitvector" || c.id == "bitlist" => {
+                let (count, list) = bit_shape(self.schema, c)?;
+                Ok(bound_add(Some(crate::pssz_bits::byte_count(count)), usize::from(list)))
+            }
             _ => Ok(None),
         }
     }
     /// The width of a record's header and slots, or of a tuple / list /
     /// array offset table. `ty` is resolved. Explicit profile: the profile's
-    /// width. Automatic: the type's own.
-    fn width_of(&self, ty: &AnyType) -> PsszResult<usize> {
+    /// width. Automatic: the type's own — the width class of its explicit
+    /// cap, else of its inferred bound. `count`: for a plain List, the count
+    /// the lengthBound of the member that holds it gives (`position_count`);
+    /// a list with no bound is 4 wide. Anything that is not a record is also
+    /// bounded by the cap in effect (`active_cap`): its width is the class
+    /// of the smaller of the two. A record's width is its own wherever it
+    /// appears.
+    fn width_of(&self, ty: &AnyType, count: Option<u64>) -> PsszResult<usize> {
         if !self.automatic() {
             return Ok(self.w);
         }
-        let key = ty as *const AnyType as usize;
+        // Only a plain List takes a bound from the member that holds it.
+        let count = if matches!(ty.value, AnyValue::List(_)) { count } else { None };
+        let limit = if record_attributes(ty).is_some() { None } else { self.active_cap.get() };
+        let key = (ty as *const AnyType as usize, count, limit);
         if let Some(width) = self.widths.borrow().get(&key) {
             return Ok(*width);
         }
-        // A list's offset table is always 4 wide (a Vec has no bound of its
-        // own; a bounded list keeps the Vec's width).
-        let width = if matches!(ty.value, AnyValue::List(_) | AnyValue::BoundedList(_)) {
-            4
-        } else {
-            let bound = match self.cap_of(ty)? {
-                Some(cap) => usize::try_from(cap).ok(),
-                None => self.bound_of(ty, None, false, &mut Vec::new())?,
-            };
-            crate::pssz::width_class(bound)
+        let bound = match self.cap_of(ty)? {
+            Some(cap) => usize::try_from(cap).ok(),
+            None => {
+                let annotation = count.map(|count| LengthBound { max: Some(count), ..LengthBound::default() });
+                let own = self.bound_of(ty, annotation.as_ref(), false, &mut Vec::new())?;
+                match limit.and_then(|limit| usize::try_from(limit).ok()) {
+                    Some(limit) if own.is_none_or(|own| own > limit) => Some(limit),
+                    _ => own,
+                }
+            }
         };
+        let width = crate::pssz::width_class(bound);
         self.widths.borrow_mut().insert(key, width);
         Ok(width)
+    }
+    /// Runs `body` with `cap` as the cap in effect.
+    fn beneath<R>(&self, cap: Option<u64>, body: impl FnOnce() -> R) -> R {
+        let saved = self.active_cap.replace(cap);
+        let result = body();
+        self.active_cap.set(saved);
+        result
+    }
+    /// Runs `body` for the value of a member whose lengthBound count is
+    /// `count`.
+    fn at_count<R>(&self, count: Option<u64>, body: impl FnOnce() -> R) -> R {
+        self.position_count.set(count);
+        let result = body();
+        self.position_count.set(None);
+        result
     }
     /// Explicit profile: the cap of the top-level type bounds the whole
     /// encoding, as in the typed `Pssz8` / `Pssz16` / `Pssz32` codecs. Nested
@@ -1124,7 +1194,8 @@ impl<'a> Codec<'a> {
     /// The inner value of a Nested node: always the automatic profile.
     fn nested_encode(&self, ty: &AnyType, value: &Value, n: usize) -> PsszResult<Vec<u8>> {
         if self.automatic() {
-            return self.encode_at(ty, value, n);
+            // The inner value is a root of its own: no cap reaches into it.
+            return self.beneath(None, || self.encode_at(ty, value, n));
         }
         let codec = self.automatic_codec(true, self.opaque);
         let result = codec.encode_at(ty, value, n);
@@ -1133,7 +1204,7 @@ impl<'a> Codec<'a> {
     }
     fn nested_decode(&self, ty: &AnyType, bytes: &[u8], n: usize) -> PsszResult<Value> {
         if self.automatic() {
-            return self.decode_at(ty, bytes, n);
+            return self.beneath(None, || self.decode_at(ty, bytes, n));
         }
         let codec = self.automatic_codec(true, self.opaque);
         let result = codec.decode_at(ty, bytes, n);
@@ -1161,6 +1232,9 @@ impl<'a> Codec<'a> {
         }
     }
     fn encode_shape(&self, ty: &AnyType, value: &Value, n: usize) -> PsszResult<Vec<u8>> {
+        // The lengthBound count of the member this value is (see
+        // `position_count`): it reaches a list through Option only.
+        let member_count = self.position_count.take();
         depth(n)?;
         let schema = self.schema;
         let ty = schema.wire(ty)?;
@@ -1249,17 +1323,22 @@ impl<'a> Codec<'a> {
                     out.push(u8::from(v.is_some()));
                 }
                 if let Some(inner) = v {
-                    out.extend(self.encode_at(&o.r#type, inner, n + 1)?);
+                    out.extend(self.at_count(member_count, || self.encode_at(&o.r#type, inner, n + 1))?);
                 }
             }
+            // The members lie beneath this record's cap, or beneath none.
             (AnyValue::Struct(s), Value::Record(values)) => {
-                let w = self.width_of(ty)?;
-                self.encode_members(&s.members, values, true, w, n, &mut out)?;
+                let w = self.width_of(ty, None)?;
+                let cap = self.cap_of(ty)?;
+                self.beneath(cap, || self.encode_members(&s.members, values, true, w, n, &mut out))?;
                 self.check_cap(ty, out.len())?;
             }
             (AnyValue::Object(o), Value::Record(values)) => {
-                let w = self.width_of(ty)?;
-                self.encode_members(&o.members, values, dwnc(&o.attributes), w, n, &mut out)?;
+                let w = self.width_of(ty, None)?;
+                let cap = self.cap_of(ty)?;
+                self.beneath(cap, || {
+                    self.encode_members(&o.members, values, dwnc(&o.attributes), w, n, &mut out)
+                })?;
                 self.check_cap(ty, out.len())?;
             }
             (AnyValue::Tuple(t), Value::Sequence(values)) => {
@@ -1280,18 +1359,18 @@ impl<'a> Codec<'a> {
                 for (ty, value) in t.members.iter().zip(values).take(keep) {
                     fields.push(self.encoded_field(ty, value, n + 1)?);
                 }
-                checked::encode_record_w(self.width_of(ty)?, &fields, false, &mut out)?;
+                checked::encode_record_w(self.width_of(ty, None)?, &fields, false, &mut out)?;
             }
             (AnyValue::List(l), Value::Sequence(values)) => {
-                let w = self.width_of(ty)?;
+                let w = self.width_of(ty, member_count)?;
                 self.encode_sequence(&l.r#type, values, None, false, w, n, &mut out)?
             }
             (AnyValue::BoundedList(l), Value::Sequence(values)) => {
-                let w = self.width_of(ty)?;
+                let w = self.width_of(ty, None)?;
                 self.encode_sequence(&l.r#type, values, Some(l.maxCount), false, w, n, &mut out)?
             }
             (AnyValue::Array(a), Value::Sequence(values)) => {
-                let w = self.width_of(ty)?;
+                let w = self.width_of(ty, None)?;
                 self.encode_sequence(&a.r#type, values, Some(a.len), true, w, n, &mut out)?
             }
             (AnyValue::Variant(v), Value::Variant { selector, value }) => {
@@ -1302,7 +1381,7 @@ impl<'a> Codec<'a> {
                 out.extend(self.encode_at(&v.members[*selector].r#type, value, n + 1)?);
             }
             (AnyValue::Custom(c), Value::Sequence(values)) if assoc_id(&c.id) => {
-                out = self.encode_assoc(c, values, n)?;
+                out = self.encode_assoc(c, values, n, member_count)?;
             }
             (AnyValue::Nested(_), Value::Bytes(bytes)) if self.opaque => {
                 if !bytes.is_empty() {
@@ -1564,10 +1643,16 @@ impl<'a> Codec<'a> {
         }
         Ok(order)
     }
-    fn encode_assoc(&self, custom: &Custom, items: &[Value], n: usize) -> PsszResult<Vec<u8>> {
+    fn encode_assoc(
+        &self,
+        custom: &Custom,
+        items: &[Value],
+        n: usize,
+        count: Option<u64>,
+    ) -> PsszResult<Vec<u8>> {
         let shape = assoc_shape(self.schema, custom)?;
         let order = self.assoc_order(&shape, items)?;
-        let w = self.width_of(shape.list)?;
+        let w = self.width_of(shape.list, count)?;
         let mut out = Vec::new();
         // Values that are already in canonical order (anything a decoder or
         // a text reader produced) are encoded as they are.
@@ -1579,9 +1664,9 @@ impl<'a> Codec<'a> {
         }
         Ok(out)
     }
-    fn decode_assoc(&self, custom: &Custom, bytes: &[u8], n: usize) -> PsszResult<Value> {
+    fn decode_assoc(&self, custom: &Custom, bytes: &[u8], n: usize, count: Option<u64>) -> PsszResult<Value> {
         let shape = assoc_shape(self.schema, custom)?;
-        let w = self.width_of(shape.list)?;
+        let w = self.width_of(shape.list, count)?;
         let items = self.decode_sequence(shape.element, bytes, shape.max, false, w, n)?;
         // The order is that of the bytes read. A decoded Nested value stands
         // for its canonical encoding, which is not what a compatible read
@@ -1592,6 +1677,9 @@ impl<'a> Codec<'a> {
                 schema: self.schema,
                 w: self.w,
                 widths: RefCell::new(HashMap::new()),
+                // The same position: the list is read at the same width.
+                active_cap: Cell::new(self.active_cap.get()),
+                position_count: Cell::new(None),
                 handlers: None,
                 opaque: true,
                 check_failed: Cell::new(false),
@@ -1654,7 +1742,8 @@ impl<'a> Codec<'a> {
         let keep = checked::record_kept_fields(&omitted, stable);
         let mut fields = Vec::new();
         for (member, value) in members.iter().zip(child_values).take(keep) {
-            let field = self.encoded_field(&member.r#type, value, n + 1)?;
+            let count = parse_length_bound(&member.attributes)?.and_then(|bound| bound.count());
+            let field = self.at_count(count, || self.encoded_field(&member.r#type, value, n + 1))?;
             if nested_member(self.schema, &member.r#type)? {
                 if let Some(bound) = parse_length_bound(&member.attributes)? {
                     self.nested_bound(&member.r#type, &field.1, &bound)?;
@@ -1710,6 +1799,9 @@ impl<'a> Codec<'a> {
         Ok(value)
     }
     fn decode_shape(&self, ty: &AnyType, bytes: &[u8], n: usize) -> PsszResult<Value> {
+        // The lengthBound count of the member this value is (see
+        // `position_count`).
+        let member_count = self.position_count.take();
         depth(n)?;
         let schema = self.schema;
         let ty = schema.wire(ty)?;
@@ -1814,7 +1906,7 @@ impl<'a> Codec<'a> {
                     match bytes.split_first() {
                         Some((&0, [])) => Value::Optional(None),
                         Some((&1, payload)) => Value::Optional(Some(Box::new(
-                            self.decode_at(&o.r#type, payload, n + 1)?,
+                            self.at_count(member_count, || self.decode_at(&o.r#type, payload, n + 1))?,
                         ))),
                         _ => {
                             return Err(failure(
@@ -1825,18 +1917,24 @@ impl<'a> Codec<'a> {
                 } else if bytes.is_empty() {
                     Value::Optional(None)
                 } else {
-                    Value::Optional(Some(Box::new(self.decode_at(&o.r#type, bytes, n + 1)?)))
+                    Value::Optional(Some(Box::new(
+                        self.at_count(member_count, || self.decode_at(&o.r#type, bytes, n + 1))?,
+                    )))
                 }
             }
             AnyValue::Struct(s) => {
                 self.check_cap(ty, bytes.len())?;
-                let w = self.width_of(ty)?;
-                Value::Record(self.decode_members(&s.members, bytes, true, w, n)?)
+                let w = self.width_of(ty, None)?;
+                let cap = self.cap_of(ty)?;
+                Value::Record(self.beneath(cap, || self.decode_members(&s.members, bytes, true, w, n))?)
             }
             AnyValue::Object(o) => {
                 self.check_cap(ty, bytes.len())?;
-                let w = self.width_of(ty)?;
-                Value::Record(self.decode_members(&o.members, bytes, dwnc(&o.attributes), w, n)?)
+                let w = self.width_of(ty, None)?;
+                let cap = self.cap_of(ty)?;
+                Value::Record(self.beneath(cap, || {
+                    self.decode_members(&o.members, bytes, dwnc(&o.attributes), w, n)
+                })?)
             }
             AnyValue::Tuple(t) => {
                 let layouts = t
@@ -1844,7 +1942,7 @@ impl<'a> Codec<'a> {
                     .iter()
                     .map(|ty| layout_of(schema, ty))
                     .collect::<PsszResult<Vec<_>>>()?;
-                let spans = checked::record_spans_w(self.width_of(ty)?, &layouts, bytes, false)?;
+                let spans = checked::record_spans_w(self.width_of(ty, None)?, &layouts, bytes, false)?;
                 let values = t
                     .members
                     .iter()
@@ -1857,11 +1955,11 @@ impl<'a> Codec<'a> {
                 Value::Sequence(values)
             }
             AnyValue::List(l) => {
-                let w = self.width_of(ty)?;
+                let w = self.width_of(ty, member_count)?;
                 Value::Sequence(self.decode_sequence(&l.r#type, bytes, None, false, w, n)?)
             }
             AnyValue::BoundedList(l) => {
-                let w = self.width_of(ty)?;
+                let w = self.width_of(ty, None)?;
                 Value::Sequence(self.decode_sequence(
                     &l.r#type,
                     bytes,
@@ -1872,7 +1970,7 @@ impl<'a> Codec<'a> {
                 )?)
             }
             AnyValue::Array(a) => {
-                let w = self.width_of(ty)?;
+                let w = self.width_of(ty, None)?;
                 Value::Sequence(self.decode_sequence(&a.r#type, bytes, Some(a.len), true, w, n)?)
             }
             AnyValue::Variant(v) => {
@@ -1891,7 +1989,7 @@ impl<'a> Codec<'a> {
                     value: Box::new(self.decode_at(&member.r#type, payload, n + 1)?),
                 }
             }
-            AnyValue::Custom(c) if assoc_id(&c.id) => self.decode_assoc(c, bytes, n)?,
+            AnyValue::Custom(c) if assoc_id(&c.id) => self.decode_assoc(c, bytes, n, member_count)?,
             AnyValue::Nested(_) if self.opaque => {
                 if !bytes.is_empty() {
                     depth(n + 1)?;
@@ -1931,7 +2029,8 @@ impl<'a> Codec<'a> {
                         if let (true, Some(bound)) = (nested, &bound) {
                             self.nested_bound(&member.r#type, &bytes[span.clone()], bound)?;
                         }
-                        self.decode_at(&member.r#type, &bytes[span], n + 1)?
+                        let count = bound.as_ref().and_then(|bound| bound.count());
+                        self.at_count(count, || self.decode_at(&member.r#type, &bytes[span], n + 1))?
                     }
                     None => Value::Optional(None),
                 };
@@ -2174,5 +2273,5 @@ pub fn auto_width(schema: &Schema, ty: &AnyType) -> PsszResult<usize> {
     if boxed {
         return Ok(4);
     }
-    codec.width_of(wire)
+    codec.width_of(wire, None)
 }

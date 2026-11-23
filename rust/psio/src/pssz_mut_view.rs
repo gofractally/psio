@@ -145,7 +145,7 @@ impl<'a, T: ?Sized, F: PsszFormat> PsszMutView<'a, T, F> {
         self.data
     }
 
-    fn narrow<U: ?Sized>(self, child: PsszResult<Range<usize>>) -> PsszResult<PsszMutView<'a, U, F>> {
+    fn narrow<U: ?Sized, G: PsszFormat>(self, child: PsszResult<Range<usize>>) -> PsszResult<PsszMutView<'a, U, G>> {
         let range = child?;
         self.data
             .get_mut(range)
@@ -154,12 +154,14 @@ impl<'a, T: ?Sized, F: PsszFormat> PsszMutView<'a, T, F> {
     }
 
     /// Positional field access, consuming the view (keeps its lifetime).
-    pub fn try_into_field<const INDEX: usize>(self) -> PsszResult<PsszMutView<'a, <T as PsszField<F, INDEX>>::Field, F>>
+    pub fn try_into_field<const INDEX: usize>(
+        self,
+    ) -> PsszResult<PsszMutView<'a, <T as PsszField<F, INDEX>>::Field, <T as PsszField<F, INDEX>>::Beneath>>
     where T: PsszField<F, INDEX> {
         if <T as PsszField<F, INDEX>>::TRANSPARENT {
             return Ok(PsszMutView::trusted(self.data));
         }
-        let range = checked::field_bytes::<F, <T as PsszField<F, INDEX>>::Field>(
+        let range = checked::field_bytes::<<T as PsszField<F, INDEX>>::Beneath, <T as PsszField<F, INDEX>>::Field>(
             self.data, <T as PsszField<F, INDEX>>::LOCATION, <T as PsszField<F, INDEX>>::DWNC,
         ).and_then(|field| subrange(self.data, field).ok_or(PsszError::new(
             "pssz mutable view: the field is not stored in the frame (a pruned trailing optional)",
@@ -168,12 +170,16 @@ impl<'a, T: ?Sized, F: PsszFormat> PsszMutView<'a, T, F> {
     }
     /// Positional field access; an error on a malformed record or a field
     /// that is not stored (a pruned trailing optional).
-    pub fn try_field_mut<const INDEX: usize>(&mut self) -> PsszResult<PsszMutView<'_, <T as PsszField<F, INDEX>>::Field, F>>
+    pub fn try_field_mut<const INDEX: usize>(
+        &mut self,
+    ) -> PsszResult<PsszMutView<'_, <T as PsszField<F, INDEX>>::Field, <T as PsszField<F, INDEX>>::Beneath>>
     where T: PsszField<F, INDEX> {
         self.reborrow().try_into_field::<INDEX>()
     }
     /// Positional field access; panics where [`Self::try_field_mut`] fails.
-    pub fn field_mut<const INDEX: usize>(&mut self) -> PsszMutView<'_, <T as PsszField<F, INDEX>>::Field, F>
+    pub fn field_mut<const INDEX: usize>(
+        &mut self,
+    ) -> PsszMutView<'_, <T as PsszField<F, INDEX>>::Field, <T as PsszField<F, INDEX>>::Beneath>
     where T: PsszField<F, INDEX> {
         self.try_field_mut::<INDEX>().expect("pssz mutable view: field not writable in place")
     }
@@ -240,7 +246,7 @@ impl<'a, T: PsszPack<F> + 'static, F: PsszFormat, const N: usize> PsszMutView<'a
     pub fn len(&self) -> usize { self.as_view().len() }
     pub fn is_empty(&self) -> bool { self.len() == 0 }
     pub fn try_get_mut(&mut self, i: usize) -> PsszResult<PsszMutView<'_, T, F>> {
-        let range = element::<F, T>(<Vec<T> as PsszPack<F>>::OFFSET_WIDTH, self.data, None, i);
+        let range = super::bounded_element::<F, T>(super::list_width::<F, T>(N), self.data, N, i);
         self.reborrow().narrow(range)
     }
     pub fn get_mut(&mut self, i: usize) -> PsszMutView<'_, T, F> {
@@ -303,7 +309,7 @@ macro_rules! pssz_map_mut_view {
             /// Entry `i` in ascending key order; an error when out of range
             /// or malformed.
             pub fn try_get_mut(&mut self, i: usize) -> PsszResult<PsszMutMapEntry<'_, K, V, F>> {
-                let range = super::bounded_element::<F, (K, V)>(self.data, $max, i);
+                let range = super::bounded_element::<F, (K, V)>(super::list_width::<F, (K, V)>($max), self.data, $max, i);
                 Ok(PsszMutMapEntry { entry: self.reborrow().narrow(range)? })
             }
             pub fn get_mut(&mut self, i: usize) -> PsszMutMapEntry<'_, K, V, F> {

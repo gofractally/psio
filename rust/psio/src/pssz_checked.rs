@@ -251,11 +251,12 @@ pub const fn fixed_region(w: usize, layouts: &[Layout]) -> usize {
     total
 }
 
-/// C++ `max_encoded_size` for a record: header (unless DWNC) plus, per field,
-/// its bound and a four-byte slot when it is not stored inline. Bookkeeping is
-/// always four bytes wide, whatever width is finally selected.
+/// C++ `max_encoded_size` for a record or tuple (docs/pssz-spec.md 3.2):
+/// the header (unless DWNC) and one slot per field that is not stored
+/// inline, at the record's own width (`fit`), plus each field's bound.
 pub const fn record_bound(fields: &[(Option<usize>, bool)], dwnc: bool) -> Option<usize> {
-    let mut total: usize = if dwnc { 0 } else { 4 };
+    let mut words: usize = if dwnc { 0 } else { 1 };
+    let mut total: usize = 0;
     let mut at = 0;
     while at < fields.len() {
         let (bound, fixed) = fields[at];
@@ -263,20 +264,22 @@ pub const fn record_bound(fields: &[(Option<usize>, bool)], dwnc: bool) -> Optio
             Some(b) => b,
             None => return None,
         };
-        let slot = if fixed { 0 } else { 4 };
+        if !fixed {
+            words += 1;
+        }
         total = match total.checked_add(bound) {
-            Some(t) => match t.checked_add(slot) {
-                Some(t) => t,
-                None => return None,
-            },
+            Some(t) => t,
             None => return None,
         };
         at += 1;
     }
-    Some(total)
+    crate::pssz::fit(words, Some(total))
 }
 
-/// C++ `max_encoded_size` for `count` elements (array, bounded list).
+/// C++ `max_encoded_size` for `count` elements (array, bounded list, the
+/// entries of a bounded map or set): the elements and, when they are not
+/// fixed-size, the offset table of `count` slots at the sequence's own
+/// width (`fit`).
 pub const fn sequence_bound(count: usize, element: Option<usize>, fixed: bool) -> Option<usize> {
     if count == 0 {
         return Some(0);
@@ -285,11 +288,29 @@ pub const fn sequence_bound(count: usize, element: Option<usize>, fixed: bool) -
         Some(e) => e,
         None => return None,
     };
-    let each = match element.checked_add(if fixed { 0 } else { 4 }) {
-        Some(e) => e,
+    let payload = match count.checked_mul(element) {
+        Some(p) => p,
         None => return None,
     };
-    count.checked_mul(each)
+    if fixed {
+        Some(payload)
+    } else {
+        crate::pssz::fit(count, Some(payload))
+    }
+}
+
+/// The largest of `widths` (0 for none): `PsszPack::RECORD_WIDTH_BENEATH`
+/// of a type that holds several.
+pub const fn widest(widths: &[usize]) -> usize {
+    let mut out = 0;
+    let mut at = 0;
+    while at < widths.len() {
+        if widths[at] > out {
+            out = widths[at];
+        }
+        at += 1;
+    }
+    out
 }
 
 pub const fn bound_add(bound: Option<usize>, extra: usize) -> Option<usize> {
@@ -861,38 +882,57 @@ pub fn encode_sequence<F: PsszFormat, T: PsszPack<F>>(
     out: &mut Vec<u8>,
     known_count: bool,
 ) -> PsszResult<()> {
+    encode_sequence_with(
+        w,
+        T::IS_FIXED_SIZE.then_some(T::FIXED_SIZE),
+        values.iter(),
+        |value, out| value.pssz_pack_checked(out),
+        out,
+        known_count,
+    )
+}
+
+/// [`encode_sequence`] over any elements: `fixed` is the elements' fixed
+/// size when they have one (no offset table), `pack` appends one element.
+pub fn encode_sequence_with<T>(
+    w: usize,
+    fixed: Option<usize>,
+    values: impl ExactSizeIterator<Item = T>,
+    mut pack: impl FnMut(T, &mut Vec<u8>) -> PsszResult<()>,
+    out: &mut Vec<u8>,
+    known_count: bool,
+) -> PsszResult<()> {
     width(w)?;
+    let count = values.len();
     let mut result = Vec::new();
-    if T::IS_FIXED_SIZE {
-        if T::FIXED_SIZE == 0 && !values.is_empty() && !known_count {
+    if let Some(size) = fixed {
+        if size == 0 && count != 0 && !known_count {
             return Err(PsszError::new(
                 "pssz: nonempty zero-size vector is unsupported",
             ));
         }
-        values
-            .len()
-            .checked_mul(T::FIXED_SIZE)
+        count
+            .checked_mul(size)
             .ok_or(PsszError::new("pssz: sequence size overflow"))?;
         for value in values {
             let before = result.len();
-            value.pssz_pack_checked(&mut result)?;
-            if result.len() - before != T::FIXED_SIZE {
+            pack(value, &mut result)?;
+            if result.len() - before != size {
                 return Err(PsszError::new("pssz: fixed encoder size mismatch"));
             }
         }
     } else {
-        let table = values
-            .len()
+        let table = count
             .checked_mul(w)
             .ok_or(PsszError::new("pssz: sequence table overflow"))?;
         result
             .try_reserve(table)
             .map_err(|_| PsszError::new("pssz: sequence allocation overflow"))?;
         result.resize(table, 0);
-        for (i, value) in values.iter().enumerate() {
+        for (i, value) in values.enumerate() {
             let offset = result.len();
             write_offset_w(&mut result[i * w..(i + 1) * w], w, offset)?;
-            value.pssz_pack_checked(&mut result)?;
+            pack(value, &mut result)?;
         }
         wire_span(result.len())?;
     }

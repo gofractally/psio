@@ -62,8 +62,9 @@ struct AccountGrown {
     #[psio(max = 8, element(max = 16))]
     tags: Vec<String>,
     balance: u64,
-    #[psio(max = 64)]
-    email: Option<String>,
+    // Account has 255 - 187 = 68 bytes of slack; this needs 1 + 1 + 100.
+    #[psio(max = 100)]
+    bio: Option<String>,
 }
 
 const _: () = {
@@ -72,6 +73,11 @@ const _: () = {
     assert!(auto_pssz_width::<AccountV1>() == 2);
     assert!(auto_pssz_width::<AccountV2>() == 2);
     assert!(pssz_evolves_from::<AccountV1, AccountV2>());
+    assert!(matches!(<Account as psio::pssz::PsszPack<psio::pssz::Pssz>>::AUTO_BOUND, Some(187)));
+    assert!(matches!(
+        <AccountGrown as psio::pssz::PsszPack<psio::pssz::Pssz>>::AUTO_BOUND,
+        Some(293) // (header + 3 slots) x 2 + 8 + 32 + 136 + 8 + (1 + 100)
+    ));
     assert!(auto_pssz_width::<AccountGrown>() == 2);
     assert!(!pssz_evolves_from::<Account, AccountGrown>());
 };
@@ -99,12 +105,18 @@ struct Totals {
 fn bounded_record() {
     let alice = Account { id: 7, owner: "alice".into(), tags: vec!["vip".into(), "beta".into()], balance: 100 };
     let bytes = psio::to_pssz(&alice);
-    // The bytes C++ writes for the same declaration.
+    // The bytes C++ writes for the same declaration: 1-byte header and
+    // slots, and a 1-byte table in the list (02 and 05, the offsets of
+    // "vip" and "beta" from the start of the list).
     assert_eq!(
         hex(&bytes),
         "12 07 00 00 00 00 00 00 00 12 17 64 00 00 00 00 00 00 00 \
-         61 6c 69 63 65 08 00 00 00 0b 00 00 00 76 69 70 62 65 74 61"
+         61 6c 69 63 65 02 05 76 69 70 62 65 74 61"
     );
+    assert_eq!(bytes.len(), 33);
+    // The same value as the plain type: 4-byte header, slots and table.
+    let plain = AccountPlain { id: 7, owner: "alice".into(), tags: vec!["vip".into(), "beta".into()], balance: 100 };
+    assert_eq!(psio::to_pssz(&plain).len(), 48);
     assert_eq!(psio::from_pssz::<Account>(&bytes).unwrap(), alice);
 
     let long_owner = Account { owner: "x".repeat(33), ..alice.clone() };
@@ -119,6 +131,8 @@ fn evolution() {
     let v2_none = AccountV2 { id: 7, owner: "alice".into(), tags: vec!["vip".into()], balance: 100, email: None };
     let v2_some = AccountV2 { email: Some("alice@example.com".into()), ..v2_none.clone() };
     assert_eq!(psio::to_pssz(&v2_none), psio::to_pssz(&v1));
+    // 2-byte header and slots (the cap), a 1-byte table in the list (its own bound).
+    assert_eq!(psio::to_pssz(&v1).len(), 2 + 8 + 2 + 2 + 8 + 5 + (1 + 3));
     assert_eq!(psio::from_pssz::<AccountV2>(&psio::to_pssz(&v1)).unwrap(), v2_none);
     assert_eq!(psio::from_pssz::<AccountV1>(&psio::to_pssz(&v2_some)).unwrap(), v1);
 }
@@ -157,6 +171,8 @@ pub trait Bank {
 
 #[test]
 fn methods() {
+    // open has no cap: (header + 2 slots) x 1 byte + owner 32 + tags 136 = 171.
+    assert_eq!(<bank::args::open as psio::pssz::PsszPack<psio::pssz::Pssz>>::AUTO_BOUND, Some(171));
     assert_eq!(auto_pssz_width::<bank::args::open>(), 1);
     assert_eq!(auto_pssz_width::<bank::args::transfer>(), 2);
     let args = bank::args::transfer { from: 1, to: 2, amount: 500, memo: "rent".into() };
