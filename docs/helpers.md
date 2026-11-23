@@ -76,8 +76,8 @@ is a constraint failure that names it, for example
 | `borsh` | `psio/borsh.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `bincode` | `psio/bincode.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `key` | `psio/key.hpp` | `std::array<char, N>` for a key of fixed size, else `std::vector<char>` | appends to `std::vector<char>`; writes to any psio stream | yes | no | no |
-| `json` | `psio/json.hpp` | `std::string` | appends to `std::string` | yes | no | no |
-| `ijson` | `psio/json.hpp` | `std::string` | appends to `std::string` | yes | no | no |
+| `json` | `psio/json.hpp` | `std::string` | appends to `std::string` or `std::vector<char>` | yes | no | no |
+| `ijson` | `psio/json.hpp` | `std::string` | appends to `std::string` or `std::vector<char>` | yes | no | no |
 | `msgpack` | `psio/msgpack.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `avro` | `psio/avro.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `bson` | `psio/bson.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |

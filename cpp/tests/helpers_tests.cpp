@@ -194,7 +194,7 @@ template <typename T>
 concept has_json_vector_sink = requires(const T& v, std::vector<char>& s) { psio::to_json(v, s); };
 static_assert(has_pssz_sink<Rec> && has_json_string_sink<Rec>);
 static_assert(!has_wit_sink<Rec>, "wit has no appending encode");
-static_assert(!has_json_vector_sink<Rec>, "JSON text is appended to a std::string");
+static_assert(has_json_vector_sink<Rec>, "JSON text is appended to a std::string or a std::vector<char>");
 
 template <typename T>
 concept has_json_literal = requires { psio::from_json<T>("{}"); psio::validate_ijson<T>("{}"); };

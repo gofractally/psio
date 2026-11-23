@@ -51,8 +51,10 @@ int main()
    // wit encodes into a fresh buffer only.
    psio::to_wit(rec, bytes);
 #elif defined(HELPERS_FAIL_JSON_VECTOR_SINK)
-   // JSON text is appended to a std::string.
-   psio::to_json(rec, bytes);
+   // JSON text is appended to a std::string or a std::vector<char>, and to
+   // nothing else.
+   std::vector<unsigned char> other;
+   psio::to_json(rec, other);
 #elif defined(HELPERS_FAIL_UNCHECKED_BYTES)
    // Skipping validation is spelled psio::trusted{bytes}, never implied.
    std::span<const char> in{bytes};
