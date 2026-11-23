@@ -26,10 +26,12 @@ Views and typed buffers (`#include <psio/pssz_view.hpp>` for the read view,
 
 ```cpp
 psio::pssz_view<Account> r{bytes};           // reads borrowed bytes
-std::string_view owner = r.get<1>().view_();
+std::string_view owner = r.owner();          // every member by its name
+std::uint64_t balance  = r.balance();
+Account copy           = r.unpack();         // the owned value
 
 psio::pssz_mutable_view<Account> w{bytes};   // writes into borrowed bytes
-w.get<0>().set(std::uint64_t{42});
+w.balance() = 42;                            // or w.balance().set(42)
 
 psio::pssz_buffer<Account> owned{psio::to_pssz(account)};   // owns its bytes
 psio::shared_pssz<Account> tx{psio::to_pssz(account)};      // shared ownership
@@ -196,6 +198,155 @@ A buffer has no member functions. Its operations are free functions:
 | `psio::as_mutable_view(b)` | the mutable view; owning and mutably borrowing buffers only |
 | `psio::to_buffer(b)` | an owning copy |
 | `psio::to_shared(b)` | a shared buffer: takes the bytes of an owning rvalue, shares a shared buffer, copies otherwise |
+
+## Reading through a view
+
+`#include <psio/pssz_view.hpp>`. A view is a pair of pointers into bytes that
+have been validated; nothing is decoded until it is asked for.
+
+### Members by name
+
+The view of a reflected record has one accessor per reflected member, with
+the member's name. (It derives from `psio::reflect<T>::proxy<...>`, the class
+`PSIO_REFLECT` generates.) `get<N>()` is the same access by index.
+
+```cpp
+struct Header { std::uint32_t num = 0; std::string producer; };
+PSIO_REFLECT(Header, num, producer)
+struct Block  { Header header; std::vector<Header> prev; std::optional<Header> next; };
+PSIO_REFLECT(Block, header, prev, next)
+
+psio::pssz_view<Block> block{bytes};
+block.header().num();                 // std::uint32_t, by value
+block.header().producer();            // a string view: converts to std::string_view
+block.prev()[0].num();                // elements of a list are views too
+block.next()->producer();             // through an optional
+for (auto h : block.prev()) use(h.num());
+```
+
+What an accessor returns:
+
+| Member type | `v.member()` is | Read it with |
+|-------------|-----------------|--------------|
+| arithmetic, `bool` | the value | |
+| enum, duration / time point, `uint256` | a scalar view | converts to the value; `.get()` |
+| `std::string`, `psio::utf8_string<N>` | a string view | converts to `std::string_view`; `.view_()`, `size()`, `empty()` |
+| reflected record | its view | its own accessors |
+| transparent type (`transparent()`) | the view of its member | as the member; `.unpack()` gives the transparent type |
+| `std::vector<T>`, `std::array<T, N>` | a list view | `size()`, `empty()`, `[i]`, `at(i)`, `front()`, `back()`, `begin()` / `end()` (random access), `rbegin()` / `rend()`; a `std::vector<char>` view converts to `std::span<const char>` |
+| `std::optional<T>` | an optional view | `has_value()`, `bool`, `*`, `->`, `value()` (checked), `value_or(x)` |
+| `std::variant<Ts...>` | a variant view | `index()`, `visit(fn)`, `get_if<I>()` / `get_if<Alt>()` (a `std::optional` of the alternative's view), `holds_alternative<Alt>()`; also `psio::get_if<Alt>(v)` |
+| `std::tuple`, `std::pair` | a tuple view | `get<N>()`; `first()` / `second()`; structured bindings |
+| `std::map`, `std::set` (and unordered) | the list view of its entries, in key order | the list operations, and `contains(k)`, `find(k)`, `lower_bound(k)` (indices; binary search), `at(k)` and `value_or(k, x)` for a map |
+| `psio::nested<T>` | a nested view | `bytes()`, `*` / `->` / `get()` (the view of the `T`) |
+
+The same names exist on `psio::view<const T, F>`, on a view of a member that
+sits under a `maxDynamicData` cap or a bounding annotation (its format is
+`psio::pssz_at<...>`: the widths of that position), on `psio::pssz_<W>` and
+`psio::ssz` views, on `psio::view<T, psio::pjson_format>`, and on
+`psio::mutable_view` (below).
+
+**Names the view itself uses.** A record view has few members of its own, so
+that members of the record are not hidden: `get`, `unpack`, `element_type`,
+`format_type`, `storage_kind`, `view`, and names beginning `psio_` or
+`_psio_`. A reflected member with one of those names is still part of the
+view — the view's own name wins and the member is read by index:
+`v.get<*psio::reflect<T>::index_of("unpack")>()`. (`size`, `data`, `bytes`,
+`index`, `value`, `empty` and the like are *not* taken: a record view has no
+such members, so a member named `size` is `v.size()`.) The bytes and size of
+any view are the free functions `psio::bytes(v)` and `psio::size(v)`.
+Reflected *methods* are not callable through a view (a compile error).
+
+### From a view to its value
+
+`v.unpack()` returns the owned C++ value of what the view designates — `T`
+for a `psio::view<T, F>` — for every kind of view: record, list, string,
+optional, variant, tuple, map, nested, scalar.
+
+```cpp
+Block b                  = block.unpack();
+std::vector<Header> prev = block.prev().unpack();
+std::string producer     = block.header().producer().unpack();
+```
+
+`psio::value_of(x)` is the same for generic code that is handed either a view
+or a value (a record view returns arithmetic members by value): `x.unpack()`
+for a view, a copy of `x` otherwise.
+
+```cpp
+template <typename V>                         // any record view
+auto first_two(const V& v) {
+   return std::pair{psio::value_of(v.template get<0>()), psio::value_of(v.template get<1>())};
+}
+```
+
+`psio::from_pssz<T>(view)` and `psio::decode<T>(psio::pssz{}, view)` are
+`view.unpack()` under the decode names.
+
+Unpacking is a **trusted** operation, like every read through a view: the
+bytes were validated when the view was made, and are not checked again. On
+bytes that were never validated it is undefined behaviour, exactly like
+`from_pssz<T>(psio::trusted{bytes})`.
+
+Use `unpack()` and not `psio::from_pssz<T>(psio::trusted{psio::bytes(sub)})`
+for a sub-view. The second is wrong whenever the member sits under a
+`maxDynamicData` cap or a bounding annotation: the offsets inside the member
+are then narrower than in a standalone value of its type, so its bytes are
+not an encoding of that type (they do not even validate as one). The view's
+format knows the position; the spelled-out form does not.
+
+There is no implicit conversion from a view to an owned value: a conversion
+that allocates is always written (`unpack()`). The conversions that borrow or
+copy a scalar are implicit: a string view to `std::string_view`, a
+`std::vector<char>` view to `std::span<const char>`, a scalar view to its
+value.
+
+### Comparison
+
+A view compares as the value it designates, with `==` (and `<`, `<=>` where
+the value type has them): with a value of its type or anything that type
+compares with, and with another view.
+
+```cpp
+block.header().producer() == "alice"          // characters, in place
+block.header() == other.header()              // needs Header::operator==
+block.next() == std::nullopt
+```
+
+Scalars and strings are compared in place. Any other comparison unpacks both
+sides, which allocates what the value type allocates; compare
+`psio::bytes(a)` with `psio::bytes(b)` to compare encodings without that.
+
+### Writing by name
+
+`psio::mutable_view<T, F>` (`#include <psio/mutable_view.hpp>`) has the same
+named accessors; each returns the mutable view of the member. A fixed-size
+member is overwritten with `set`, which reports, or with `=`:
+
+```cpp
+psio::pssz_mutable_view<Block> w{bytes};
+w.header().num() = 8;                       // psio::codec_abort if the position is absent
+bool ok = w.prev().at(3).num().set(2u);     // false: no such element, nothing written
+```
+
+Its own names are `get`, `set`, `unpack`, `element_type`, `format_type`,
+`storage_kind`, `assignable` and `psio_*` / `_psio_*`. Const safety is
+unchanged: a read view's accessors return values and read views, nothing
+converts a read view (or a named sub-view of one) to a mutable view, and a
+mutable view cannot be made from const bytes.
+
+### Compared with the view of the psiserve in-tree psio
+
+The named readers are that library's design. What differs here:
+
+| There | Here |
+|-------|------|
+| `view<T, Fmt>::from_buffer(ptr)` | `psio::pssz_view<T>{bytes}` (a span: the view knows its length) |
+| `v.name()` is a `std::string_view` | a string view that converts to `std::string_view` and compares with one |
+| `v.note()` of an absent optional string is an empty `std::string_view` | an optional view: `has_value()`, `value_or(...)` |
+| `vec_view`, `set_view`, `map_view` | one list view; a map / set view adds `contains`, `find`, `lower_bound`, `at`, `value_or` |
+| `frac_ref<T>` with `fields().member() = value`, including resizing writes | `psio::mutable_view<T, F>`: `w.member() = value` for fixed-size values only (a PSSZ frame has one canonical form; a write that changes a size is decode, modify, encode) |
+| `explicit operator bool` (null view) | a view is never null; an empty optional is an optional view |
 
 ## The generic layer
 

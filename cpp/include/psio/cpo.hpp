@@ -71,8 +71,7 @@ namespace psio {
       // without the terminator. Binary formats take a span only.
       template <typename Fmt>
       concept text_format_tag =
-         requires { typename Fmt::buffer_type; } &&
-         std::same_as<typename Fmt::buffer_type, std::string>;
+         requires { requires std::same_as<typename Fmt::buffer_type, std::string>; };
       inline std::span<const char> c_string_span(const char* s) noexcept
       {
          const std::string_view v{s};
@@ -93,6 +92,19 @@ namespace psio {
          constexpr T operator()(Fmt fmt, const char* text) const
          {
             return (*this)(fmt, c_string_span(text));
+         }
+         // From a view of a T (view.hpp): its unpack(). Trusted — a view is
+         // over validated bytes — and correct for a view of a member whose
+         // position narrows its widths, whose bytes are not a standalone T.
+         template <typename Fmt, typename V>
+            requires requires(const V& v) {
+               typename V::format_type;
+               v._psio_data();
+               { v.unpack() } -> std::same_as<T>;
+            }
+         constexpr T operator()(Fmt, const V& view) const
+         {
+            return view.unpack();
          }
       };
 

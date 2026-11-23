@@ -77,6 +77,8 @@ namespace psio {
 
    template <typename T, typename Fmt>
    class mutable_view;
+   template <typename T, typename Fmt>
+   class mutable_view_core;
    template <typename K, typename V, typename Fmt>
    class mutable_map_entry;
 
@@ -269,8 +271,19 @@ namespace psio {
    //
    // Reads of anything else go through `psio::as_view(mv)`, the read view
    // over the same bytes.
+   //
+   // A record's members are also reachable by name, as on the read view:
+   // `mv.header().number()` is `mv.get<0>().get<3>()`, and a fixed-size
+   // member is written with `mv.number().set(v)` or `mv.number() = v`.
+   // The names the view itself uses win over a reflected member of the
+   // same name — `get`, `set`, `unpack`, `element_type`, `format_type`,
+   // `storage_kind`, `assignable`, `psio_*` / `_psio_*`; such a member is
+   // addressed with `get<N>()`.
+   //
+   // `mutable_view_core` is the implementation: every operation of every
+   // shape. `mutable_view<T, Fmt>` (below) is what code names.
    template <typename T, typename Fmt>
-   class mutable_view
+   class mutable_view_core
    {
       static_assert(!std::is_const_v<T>,
                     "psio::mutable_view<const T, Fmt>: a mutable view of a const type is a "
@@ -344,12 +357,14 @@ namespace psio {
             return false;
       }();
 
-      mutable_view() = default;
+      mutable_view_core() = default;
       // `bytes` is the complete encoding of a T: the whole frame for a root
       // view. A std::vector<char>& converts implicitly.
-      explicit mutable_view(std::span<char> bytes) noexcept : data_(bytes) {}
+      explicit mutable_view_core(std::span<char> bytes) noexcept : data_(bytes) {}
 
       [[nodiscard]] std::span<char> _psio_data() const noexcept { return data_; }
+      // Marks a view that writes (psio::value_of, comparisons).
+      void psio_mutable_view_tag() const noexcept {}
 
       // ── Fixed-size value: overwrite in place ───────────────────────────
       //
@@ -450,6 +465,12 @@ namespace psio {
       {
          return get();
       }
+      // `member->field()`: the inner value / the payload, as operator*.
+      [[nodiscard]] auto operator->() const noexcept
+         requires (nested_v || optional_v)
+      {
+         return detail::arrow_proxy<decltype(**this)>{**this};
+      }
 
       // ── Vector / array: elements. Map: entries ─────────────────────────
       //
@@ -512,38 +533,7 @@ namespace psio {
          return i < size() ? (*this)[i] : decltype((*this)[i]){};
       }
 
-      class iterator
-      {
-         const mutable_view* owner_ = nullptr;
-         std::size_t         index_ = 0;
-
-        public:
-         using iterator_category = std::forward_iterator_tag;
-         using value_type        = decltype(std::declval<const mutable_view&>()[0]);
-         using difference_type   = std::ptrdiff_t;
-         using pointer           = void;
-         using reference         = value_type;
-
-         iterator() = default;
-         iterator(const mutable_view& owner, std::size_t index) noexcept
-            : owner_(&owner), index_(index)
-         {
-         }
-
-         [[nodiscard]] value_type operator*() const noexcept { return (*owner_)[index_]; }
-         iterator&                operator++() noexcept
-         {
-            ++index_;
-            return *this;
-         }
-         iterator operator++(int) noexcept
-         {
-            auto copy = *this;
-            ++index_;
-            return copy;
-         }
-         friend bool operator==(const iterator&, const iterator&) = default;
-      };
+      using iterator = detail::view_iterator<mutable_view_core>;
 
       [[nodiscard]] auto begin() const noexcept
          requires (vector_v || array_v || map_v)
@@ -630,6 +620,112 @@ namespace psio {
       }
    };
 
+   namespace detail {
+      // What reflect<T>::proxy<...> is given for a record: member I is
+      // core::get<I>(), a mutable_view of the member.
+      template <typename T, typename Fmt>
+      class mutable_record_projection : public mutable_view_core<T, Fmt>
+      {
+       public:
+         mutable_record_projection() = default;
+         explicit mutable_record_projection(std::span<char> bytes) noexcept
+            : mutable_view_core<T, Fmt>(bytes)
+         {
+         }
+         using mutable_view_core<T, Fmt>::get;
+         template <std::size_t I, auto MemberPtr>
+         [[nodiscard]] auto get() const noexcept
+         {
+            return this->mutable_view_core<T, Fmt>::template get<I>();
+         }
+      };
+
+      template <typename T, typename Fmt, typename = void>
+      struct mutable_view_base
+      {
+         using type = mutable_view_core<T, Fmt>;
+      };
+      template <typename T, typename Fmt>
+         requires (::psio::Reflected<T> && pssz_impl::Record<T> &&
+                   !::psio::format_should_dispatch_adapter_v<Fmt, T>)
+      struct mutable_view_base<
+         T, Fmt,
+         std::void_t<typename ::psio::reflect<T>::template proxy<mutable_record_projection<T, Fmt>>>>
+      {
+         using type =
+            typename ::psio::reflect<T>::template proxy<mutable_record_projection<T, Fmt>>;
+      };
+   }  // namespace detail
+
+   template <typename T, typename Fmt>
+   class mutable_view : public detail::mutable_view_base<T, Fmt>::type
+   {
+      using core = mutable_view_core<T, Fmt>;
+      using base = typename detail::mutable_view_base<T, Fmt>::type;
+
+      static base make_base(std::span<char> bytes) noexcept
+      {
+         if constexpr (std::is_same_v<base, core>)
+            return core{bytes};
+         else
+            return base{detail::mutable_record_projection<T, Fmt>{bytes}};
+      }
+
+     public:
+      using element_type                    = T;
+      using format_type                     = Fmt;
+      static constexpr storage storage_kind = storage::mut_borrow;
+      // Whether `set` / `=` is available: T is fixed-size and nothing in it
+      // is blocked.
+      static constexpr bool assignable = core::assignable;
+
+      mutable_view() = default;
+      // `bytes` is the complete encoding of a T: the whole frame for a root
+      // view. A std::vector<char>& converts explicitly; const bytes do not
+      // convert at all (the read view is psio::view).
+      explicit mutable_view(std::span<char> bytes) noexcept : base(make_base(bytes)) {}
+
+      // Record: member N (by name: the member's accessor).
+      template <std::size_t N>
+      [[nodiscard]] auto get() const noexcept
+      {
+         return this->core::template get<N>();
+      }
+      // Scalar: the value. Optional / nested: the payload's view.
+      [[nodiscard]] auto get() const noexcept
+         requires requires(const core& c) { c.get(); }
+      {
+         return this->core::get();
+      }
+
+      // Overwrite a fixed-size value in place: see mutable_view_core::set.
+      [[nodiscard]] bool set(const T& value) const noexcept { return this->core::set(value); }
+
+      // `mv.member() = value`: set, for a position that is known to exist.
+      // Where `set` would return false (the payload of an absent optional,
+      // an element index out of range, a value with no encoding) this fails
+      // through psio::codec_abort instead of silently writing nothing.
+      const mutable_view& operator=(const T& value) const
+         requires assignable
+      {
+         if (!this->core::set(value))
+            ::psio::codec_abort(codec_error{
+               "psio::mutable_view: assignment to an absent position or of a value with no "
+               "encoding",
+               0, "pssz"});
+         return *this;
+      }
+
+      // The owned value (trusted, like the read view's unpack()).
+      [[nodiscard]] T unpack() const
+      {
+         const auto data = this->core::_psio_data();
+         return view<T, Fmt, storage::const_borrow>{
+            std::span<const char>{data.data(), data.size()}}
+            .unpack();
+      }
+   };
+
    // Box<T> is transparent on the wire, and so is its view.
    template <typename T, typename Fmt>
    class mutable_view<schema_types::Box<T>, Fmt> : public mutable_view<T, Fmt>
@@ -651,11 +747,35 @@ namespace psio {
                     "(psio::detail::mutation_blocked_v)");
 
     public:
+      using inner_view = mutable_view<::psio::transparent_inner_t<T>, Fmt>;
+
+    public:
+      using element_type = T;
       using mutable_view<::psio::transparent_inner_t<T>, Fmt>::mutable_view;
       mutable_view() = default;
       mutable_view(mutable_view<::psio::transparent_inner_t<T>, Fmt> inner) noexcept
          : mutable_view<::psio::transparent_inner_t<T>, Fmt>(inner)
       {
+      }
+
+      // The member's `set`, and the same given the transparent value.
+      using inner_view::set;
+      [[nodiscard]] bool set(const T& value) const noexcept
+      {
+         return inner_view::set(::psio::transparent_inner(value));
+      }
+      const mutable_view& operator=(const T& value) const
+         requires inner_view::assignable
+      {
+         inner_view::operator=(::psio::transparent_inner(value));
+         return *this;
+      }
+      [[nodiscard]] T unpack() const
+      {
+         const auto data = this->_psio_data();
+         return view<T, Fmt, storage::const_borrow>{
+            std::span<const char>{data.data(), data.size()}}
+            .unpack();
       }
    };
 
@@ -717,6 +837,14 @@ namespace psio {
       const mutable_view<T, Fmt>& v) noexcept
    {
       return view<T, Fmt, storage::const_borrow>{bytes(v)};
+   }
+
+   // A mutable view compares as the read view over its bytes does.
+   template <typename T, typename Fmt, typename U>
+      requires requires(const view<T, Fmt, storage::const_borrow>& v, const U& u) { v == u; }
+   [[nodiscard]] bool operator==(const mutable_view<T, Fmt>& a, const U& u)
+   {
+      return as_view(a) == u;
    }
 
    // A mutable view of a buffer that owns or mutably borrows its bytes.

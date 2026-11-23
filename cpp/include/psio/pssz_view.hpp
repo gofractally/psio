@@ -284,6 +284,13 @@ namespace psio::view_layout {
    template <std::size_t W>
    struct traits<::psio::pssz_<W>>
    {
+      // The value of a view (view.hpp "View to value"): trusted decode.
+      template <typename T>
+      static T unpack(std::span<const char> s)
+      {
+         return ::psio::detail::pssz_impl::decode_value<W, false, T>(s, 0, s.size());
+      }
+
       template <typename T, std::size_t N>
          requires (::psio::detail::pssz_impl::Record<T> &&
                    N < ::psio::detail::pssz_impl::record_traits<T>::member_count)
@@ -350,6 +357,13 @@ namespace psio::view_layout {
    template <>
    struct traits<::psio::pssz>
    {
+      // The value of a view (view.hpp "View to value"): trusted decode.
+      template <typename T>
+      static T unpack(std::span<const char> s)
+      {
+         return ::psio::detail::pssz_impl::decode_value<::psio::auto_pssz_width_v<T>, true, T>(
+            s, 0, s.size());
+      }
 
       template <typename T, std::size_t N>
          requires (::psio::detail::pssz_impl::Record<T> &&
@@ -438,6 +452,15 @@ namespace psio::view_layout {
    {
       template <typename T>
       static constexpr std::size_t width = ::psio::detail::pssz_impl::width_for<T, A>();
+
+      // The value of a view (view.hpp "View to value"): trusted decode with
+      // the widths this position's annotations select — the bytes of a
+      // member under a cap are not a standalone encoding of its type.
+      template <typename T>
+      static T unpack(std::span<const char> s)
+      {
+         return ::psio::detail::pssz_impl::decode_value<width<T>, true, T, A>(s, 0, s.size());
+      }
 
       template <typename T, std::size_t N>
          requires (::psio::detail::pssz_impl::Record<T> &&
@@ -543,33 +566,64 @@ namespace psio {
       template <typename A> inline constexpr bool is_pssz_format_v<pssz_at<A>> = true;
    }
 
+   namespace detail {
+      // The view of a positional record: std::tuple<Ts...> or
+      // psio::annotated_tuple<Meta, Ts...> (a method's argument tuple, whose
+      // cap and parameter annotations select its widths).
+      template <typename Tuple, typename Fmt, storage Store>
+      class tuple_view
+      {
+         std::span<const char> data_;
+
+       public:
+         using element_type = Tuple;
+         using format_type = Fmt;
+         static constexpr storage storage_kind = Store;
+         static_assert(sizeof(detail::read_view_store<Store>) > 0);
+         tuple_view() = default;
+         explicit tuple_view(std::span<const char> s) noexcept : data_(s) {}
+         tuple_view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+         std::span<const char> _psio_data() const noexcept { return data_; }
+         // Element N: its value for an arithmetic element, its view
+         // otherwise. Structured bindings work: `auto [a, b] = tuple_view;`.
+         template <std::size_t N> auto get() const noexcept
+         {
+            using F = std::remove_cvref_t<std::tuple_element_t<N, Tuple>>;
+            auto span = view_layout::traits<Fmt>::template record_field_span<Tuple, N>(data_);
+            if constexpr (std::is_arithmetic_v<F>)
+            {
+               F out{};
+               if (span.size() == sizeof(F)) std::memcpy(&out, span.data(), sizeof(F));
+               return out;
+            }
+            else return view<F, view_layout::member_format_t<Fmt, Tuple, N>, Store>{span};
+         }
+         PSIO_VIEW_UNPACK_
+      };
+   }  // namespace detail
+
    template <typename... Ts, typename Fmt, storage Store>
       requires (detail::is_pssz_format_v<Fmt> &&
                 !::psio::format_should_dispatch_adapter_v<Fmt, std::tuple<Ts...>>)
    class view<std::tuple<Ts...>, Fmt, Store>
+       : public detail::tuple_view<std::tuple<Ts...>, Fmt, Store>
    {
-      std::span<const char> data_;
     public:
-      using element_type = std::tuple<Ts...>;
-      using format_type = Fmt;
-      static constexpr storage storage_kind = Store;
-      static_assert(sizeof(detail::read_view_store<Store>) > 0);
-      view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
-      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
-      std::span<const char> _psio_data() const noexcept { return data_; }
-      template <std::size_t N> auto get() const noexcept
-      {
-         using F = std::tuple_element_t<N, element_type>;
-         auto span = view_layout::traits<Fmt>::template record_field_span<element_type, N>(data_);
-         if constexpr (std::is_arithmetic_v<F>)
-         {
-            F out{};
-            if (span.size() == sizeof(F)) std::memcpy(&out, span.data(), sizeof(F));
-            return out;
-         }
-         else return view<F, view_layout::member_format_t<Fmt, element_type, N>, Store>{span};
-      }
+      using detail::tuple_view<std::tuple<Ts...>, Fmt, Store>::tuple_view;
+   };
+
+   // The view of an annotated tuple: `psio::pssz_view<
+   // psio::reflect<T>::method_arg_tuple<I>>` reads a method's packed
+   // arguments with the widths its cap and parameter annotations select.
+   // (Viewing those bytes as the plain std::tuple reads wrong offsets once
+   // the method has a cap.)
+   template <typename Meta, typename... Ts, typename Fmt, storage Store>
+      requires detail::is_pssz_format_v<Fmt>
+   class view<annotated_tuple<Meta, Ts...>, Fmt, Store>
+       : public detail::tuple_view<annotated_tuple<Meta, Ts...>, Fmt, Store>
+   {
+    public:
+      using detail::tuple_view<annotated_tuple<Meta, Ts...>, Fmt, Store>::tuple_view;
    };
 
    // A std::pair is the 2-tuple of its members: the tuple's view, with the
@@ -584,9 +638,12 @@ namespace psio {
 
     public:
       using element_type = std::pair<A, B>;
+      using format_type  = Fmt;
       using base::base;
       auto first() const noexcept { return this->template get<0>(); }
       auto second() const noexcept { return this->template get<1>(); }
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      PSIO_VIEW_UNPACK_
    };
 
    // A map / set is the list of its entries / elements in canonical order:
@@ -603,9 +660,90 @@ namespace psio {
       using base = view<detail::assoc_list_t<M>,
                         view_layout::detail_pssz::assoc_list_format_t<M, Fmt>, Store>;
 
+      using key_type = detail::assoc_key_t<M>;
+
+      // The key of entry i, as a view (or a value for an arithmetic key).
+      [[nodiscard]] auto key_at(std::size_t i) const noexcept
+      {
+         if constexpr (detail::is_map_v<M>)
+            return (*this)[i].template get<0>();
+         else
+            return (*this)[i];
+      }
+
     public:
       using element_type = M;
+      using format_type  = Fmt;
       using base::base;
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+
+      // ── Lookup ─────────────────────────────────────────────────────────
+      //
+      // The entries are in ascending order of the `key` encoding of their
+      // keys (docs/key-spec.md), so lookup is a binary search over that
+      // encoding: O(log n) probes, each of which unpacks one key.
+      //
+      //   lower_bound(key)   index of the first entry whose key is not
+      //                      before `key`; size() if there is none
+      //   find(key)          index of the entry with that key, or size()
+      //   contains(key)
+      //   at(key)            a map: std::optional of the mapped value's
+      //                      view (the value itself when it is arithmetic)
+      //   value_or(key, x)   a map: the mapped value, or x
+      //
+      // `key` is anything key_type is constructible from.
+      template <typename K>
+      [[nodiscard]] std::size_t lower_bound(const K& key) const
+      {
+         std::vector<char> want, have;
+         ::psio::detail::append_key_bytes(key_type(key), want);
+         std::size_t lo = 0, hi = this->size();
+         while (lo < hi)
+         {
+            const std::size_t mid = lo + (hi - lo) / 2;
+            have.clear();
+            ::psio::detail::append_key_bytes(key_type(::psio::value_of(key_at(mid))), have);
+            if (::psio::detail::compare_key_bytes(have.data(), have.size(), want.data(),
+                                                  want.size()) < 0)
+               lo = mid + 1;
+            else
+               hi = mid;
+         }
+         return lo;
+      }
+      template <typename K>
+      [[nodiscard]] std::size_t find(const K& key) const
+      {
+         const std::size_t i = lower_bound(key);
+         if (i < this->size() && key_type(::psio::value_of(key_at(i))) == key_type(key))
+            return i;
+         return this->size();
+      }
+      template <typename K>
+      [[nodiscard]] bool contains(const K& key) const
+      {
+         return find(key) != this->size();
+      }
+      template <typename K>
+         requires detail::is_map_v<M>
+      [[nodiscard]] auto at(const K& key) const
+      {
+         using R = std::optional<decltype((*this)[0].template get<1>())>;
+         const std::size_t i = find(key);
+         return i == this->size() ? R{} : R{(*this)[i].template get<1>()};
+      }
+      template <typename K, typename U>
+         requires detail::is_map_v<M>
+      [[nodiscard]] auto value_or(const K& key, U&& fallback) const
+      {
+         using Mapped        = typename M::mapped_type;
+         const std::size_t i = find(key);
+         if (i == this->size())
+            return static_cast<Mapped>(std::forward<U>(fallback));
+         return Mapped(::psio::value_of((*this)[i].template get<1>()));
+      }
+
+      PSIO_VIEW_UNPACK_
    };
 
    // utf8_string<N> is a String on the wire: the view borrows its bytes. As
@@ -629,6 +767,10 @@ namespace psio {
       {
          return std::string_view{data_.data(), data_.size()};
       }
+      operator std::string_view() const noexcept { return view_(); }
+      [[nodiscard]] std::size_t size() const noexcept { return data_.size(); }
+      [[nodiscard]] bool        empty() const noexcept { return data_.empty(); }
+      PSIO_VIEW_UNPACK_
    };
 
    // A plain enum is its underlying integer on the wire; the view reads it
@@ -654,6 +796,8 @@ namespace psio {
          if (data_.size() >= sizeof(raw)) std::memcpy(&raw, data_.data(), sizeof(raw));
          return static_cast<T>(raw);
       }
+      [[nodiscard]] T unpack() const noexcept { return get(); }
+      operator T() const noexcept { return get(); }
    };
 
    // A duration / time point is its tick count on the wire (time.hpp); the
@@ -678,6 +822,8 @@ namespace psio {
          if (data_.size() >= sizeof(raw)) std::memcpy(&raw, data_.data(), sizeof(raw));
          return ::psio::time_from_ticks<T>(raw);
       }
+      [[nodiscard]] T unpack() const noexcept { return get(); }
+      operator T() const noexcept { return get(); }
    };
 
    // uint256 is its 32 little-endian bytes on the wire; the view reads it by
@@ -702,6 +848,8 @@ namespace psio {
          if (data_.size() >= sizeof(out.limb)) std::memcpy(out.limb, data_.data(), sizeof(out.limb));
          return out;
       }
+      [[nodiscard]] uint256 unpack() const noexcept { return get(); }
+      operator uint256() const noexcept { return get(); }
    };
 
    template <typename T, typename Fmt, storage Store>
@@ -718,8 +866,17 @@ namespace psio {
                 !::psio::format_should_dispatch_adapter_v<Fmt, T>)
    class view<T, Fmt, Store> : public view<::psio::transparent_inner_t<T>, Fmt, Store>
    {
+      using base = view<::psio::transparent_inner_t<T>, Fmt, Store>;
+
     public:
-      using view<::psio::transparent_inner_t<T>, Fmt, Store>::view;
+      // Navigation is the member's; the value is T.
+      using element_type = T;
+      using format_type  = Fmt;
+      using base::base;
+      view() = default;
+      view(const base& inner) noexcept : base(inner) {}
+      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      PSIO_VIEW_UNPACK_
    };
 
    // Construction checks the complete frame; getters retain their O(1)
@@ -734,4 +891,54 @@ namespace psio {
       if (status.ok()) result.emplace(bytes);
       return status;
    }
+
+   // ── from_pssz / decode from a view ────────────────────────────────────
+   //
+   // `psio::from_pssz<T>(view)` is `view.unpack()`, for code that spells a
+   // decode the same way whatever it holds. Trusted: a view is over
+   // validated bytes.
+   template <typename T, detail::read_view V>
+      requires (std::same_as<T, typename V::element_type> &&
+                detail::is_pssz_format_v<typename V::format_type>)
+   [[nodiscard]] T from_pssz(const V& v)
+   {
+      return v.unpack();
+   }
 }
+
+// Structured bindings over a tuple / pair / annotated-tuple view:
+//    auto [socket, data, flags] = args_view;
+// Each binding is what get<N>() returns (a value for an arithmetic element,
+// a sub-view otherwise).
+template <typename... Ts, typename Fmt, psio::storage Store>
+struct std::tuple_size<psio::view<std::tuple<Ts...>, Fmt, Store>>
+   : std::integral_constant<std::size_t, sizeof...(Ts)>
+{
+};
+template <std::size_t I, typename... Ts, typename Fmt, psio::storage Store>
+struct std::tuple_element<I, psio::view<std::tuple<Ts...>, Fmt, Store>>
+{
+   using type = decltype(std::declval<const psio::view<std::tuple<Ts...>, Fmt, Store>&>().template get<I>());
+};
+template <typename Meta, typename... Ts, typename Fmt, psio::storage Store>
+struct std::tuple_size<psio::view<psio::annotated_tuple<Meta, Ts...>, Fmt, Store>>
+   : std::integral_constant<std::size_t, sizeof...(Ts)>
+{
+};
+template <std::size_t I, typename Meta, typename... Ts, typename Fmt, psio::storage Store>
+struct std::tuple_element<I, psio::view<psio::annotated_tuple<Meta, Ts...>, Fmt, Store>>
+{
+   using type = decltype(
+      std::declval<const psio::view<psio::annotated_tuple<Meta, Ts...>, Fmt, Store>&>().template get<I>());
+};
+template <typename A, typename B, typename Fmt, psio::storage Store>
+struct std::tuple_size<psio::view<std::pair<A, B>, Fmt, Store>>
+   : std::integral_constant<std::size_t, 2>
+{
+};
+template <std::size_t I, typename A, typename B, typename Fmt, psio::storage Store>
+struct std::tuple_element<I, psio::view<std::pair<A, B>, Fmt, Store>>
+{
+   using type =
+      decltype(std::declval<const psio::view<std::pair<A, B>, Fmt, Store>&>().template get<I>());
+};
