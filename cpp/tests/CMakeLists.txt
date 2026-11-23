@@ -506,6 +506,9 @@ psio_add_test(psio_schema_ir_tests schema_ir_tests.cpp)
 
 # SchemaBuilder (schema_builder.hpp) — C++ reflection → Schema IR.
 psio_add_test(psio_schema_builder_tests schema_builder_tests.cpp)
+# A byte list is one schema node whichever C++ type spells the byte
+# (std::vector<char> = std::vector<std::uint8_t> = Custom{List<u8>, "hex"}).
+psio_add_test(psio_schema_byte_list_tests schema_byte_list_tests.cpp)
 add_executable(psio_schema_builder_identity_test schema_builder_identity_main.cpp schema_builder_identity_other.cpp)
 target_include_directories(psio_schema_builder_identity_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_features(psio_schema_builder_identity_test PRIVATE cxx_std_23)

@@ -387,6 +387,29 @@ namespace psio::schema_types
             return build_plain<U>();
       }
 
+      // The element node of a list / bounded list / array of E. A byte
+      // sequence (the "hex" custom) has `u8` elements whichever C++ type
+      // spells the byte — char, unsigned char, std::byte — so that
+      // std::vector<char> and std::vector<std::uint8_t> are one schema
+      // node, the one Rust's Vec<u8> and the JS / Python byte lists build.
+      // A lone `char` member is still the "char" custom.
+      template <typename E>
+      AnyType sequence_element()
+      {
+         if constexpr (sb_detail::sb_is_byte_v<E>)
+            return insert<std::uint8_t>();
+         else
+            return insert<E>();
+      }
+      template <typename E, typename Annots>
+      AnyType annotated_element(const Annots& annots)
+      {
+         if constexpr (sb_detail::sb_is_byte_v<E>)
+            return insert<std::uint8_t>();
+         else
+            return annotated_type<E>(annots);
+      }
+
       // The wire type of T: the if-constexpr ladder.
       template <typename U>
       AnyType build_plain()
@@ -522,7 +545,8 @@ namespace psio::schema_types
          else if constexpr (sb_detail::sb_is_bounded<U>::value)
          {
             using E = typename sb_detail::sb_is_bounded<U>::elem;
-            AnyType list = BoundedList{Box<AnyType>{insert<E>()}, sb_detail::sb_is_bounded<U>::limit};
+            AnyType list = BoundedList{Box<AnyType>{sequence_element<E>()},
+                                       sb_detail::sb_is_bounded<U>::limit};
             if constexpr (sb_detail::sb_is_byte_v<E>)
                return Custom{Box<AnyType>{std::move(list)}, "hex"};
             return list;
@@ -553,7 +577,7 @@ namespace psio::schema_types
             using E = typename sb_detail::sb_is_vector<U>::elem;
             // vector<char>/vector<unsigned char>/vector<std::byte> → Custom hex
             if constexpr (sb_detail::sb_is_byte_v<E>)
-               return Custom{Box<AnyType>{List{Box<AnyType>{insert<E>()}}},
+               return Custom{Box<AnyType>{List{Box<AnyType>{sequence_element<E>()}}},
                              "hex"};
             else
                return List{Box<AnyType>{insert<E>()}};
@@ -561,7 +585,7 @@ namespace psio::schema_types
          else if constexpr (sb_detail::sb_is_array<U>::value)
          {
             using E = typename sb_detail::sb_is_array<U>::elem;
-            AnyType arr = Array{Box<AnyType>{insert<E>()},
+            AnyType arr = Array{Box<AnyType>{sequence_element<E>()},
                                 sb_detail::sb_is_array<U>::len};
             if constexpr (sb_detail::sb_is_byte_v<E>)
                return Custom{Box<AnyType>{std::move(arr)}, "hex"};
@@ -756,16 +780,16 @@ namespace psio::schema_types
                   if constexpr (!below)
                      if (!max)
                         return insert<F>();
-                  sequence = list_of(annotated_type<E>(inner));
+                  sequence = list_of(annotated_element<E>(inner));
                }
                else if constexpr (!below)
                   // The wrapper's bound / the array's length is in its type.
                   return insert<F>();
                else if constexpr (sb_detail::sb_is_bounded<F>::value)
-                  sequence = BoundedList{Box<AnyType>{annotated_type<E>(inner)},
+                  sequence = BoundedList{Box<AnyType>{annotated_element<E>(inner)},
                                          sb_detail::sb_is_bounded<F>::limit};
                else
-                  sequence = Array{Box<AnyType>{annotated_type<E>(inner)},
+                  sequence = Array{Box<AnyType>{annotated_element<E>(inner)},
                                    sb_detail::sb_is_array<F>::len};
                if constexpr (sb_detail::sb_is_byte_v<E>)
                   return Custom{Box<AnyType>{std::move(sequence)}, "hex"};

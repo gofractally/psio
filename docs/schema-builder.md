@@ -66,7 +66,12 @@ builder records everything those depend on:
   (`"uint32"`, the record's name, ...). The member *name* is still the label
   or the index: `ijsonName` is text-form metadata, not an API label.
 - **Bytes.** `std::vector` / `std::array` / `psio::bounded` of `char`,
-  `unsigned char` or `std::byte` use the hex adapter.
+  `unsigned char` or `std::byte` use the hex adapter, and all three are the
+  same node: the `"hex"` custom over a list / array of `u8`
+  (`Custom{List<u8>, "hex"}`), the one Rust `Vec<u8>` and the JS / Python
+  byte lists build. The element of a `char` sequence is `u8`, not the
+  `"char"` custom a lone `char` member is; a reader still accepts the
+  former `Custom{List<Custom{u8, "char"}>, "hex"}` of older schemas.
 - **Wide integers.** `uint128` / `int128` are `Int{128}`, `uint256` is
   `Int{256, unsigned}`.
 - **Pairs, maps and sets.** A `std::pair<A, B>` is `Tuple{[A, B]}`, the node

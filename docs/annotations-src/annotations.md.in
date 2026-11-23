@@ -1228,7 +1228,8 @@ A byte sequence is `std::vector` / `std::array` of `std::uint8_t`
 (`unsigned char`), `char` or `std::byte`, or `psio::byte_array<N>`. No
 annotation is needed for hex: `json` writes an array of numbers, `ijson`
 writes an uppercase hex string and reads either case. Bound a variable
-one with `max<N>`.
+one with `max<N>`. The three spellings of the byte are one type in every
+respect, the Schema IR included: `Custom{List<u8>, "hex"}`.
 
 @@SEC ref-bytes@@
 
