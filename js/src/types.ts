@@ -770,7 +770,11 @@ export class TypeDef<T, V = T> {
   get width(): number {
     return this.type().width;
   }
-  /** The inferred size bound (`max_encoded_size`); `null` when unbounded. See `PsszType.maxEncodedSize`. */
+  /** The inferred bound (`inferred_bound`), what widths are chosen from; `null` when unbounded. See `PsszType.inferredBound`. */
+  get inferredBound(): bigint | null {
+    return this.type().inferredBound;
+  }
+  /** The largest encoding (`max_encoded_size`); `null` when there is no finite maximum. See `PsszType.maxEncodedSize`. */
   get maxEncodedSize(): bigint | null {
     return this.type().maxEncodedSize;
   }

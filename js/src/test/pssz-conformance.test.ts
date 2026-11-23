@@ -33,7 +33,9 @@ interface PsszTypeRow {
   id: string;
   ir: boolean;
   auto_width: number;
-  /** `psio::max_encoded_size<T>()`: the inferred bound, or null when unbounded. */
+  /** `psio::inferred_bound<T>()` (pssz-spec 3.2), or null when unbounded. */
+  inferred_bound: number | null;
+  /** `psio::max_encoded_size<T>()` (pssz-spec 3.7): the largest encoding, or null. */
   max_encoded_size: number | null;
   /** The type's explicit `maxDynamicData`, or null. */
   max_dynamic_data: number | null;
@@ -163,7 +165,7 @@ const PSSZ_CLASSES: { [cls: string]: number } = {
   'map-set': 266, 'map-set-order': 352, transparent: 160, custom: 116, invariant: 128,
   'annotated-bounds': 148, 'method-args': 62, 'list-width': 89, 'cap-implicit': 40, 'transparent-bounds': 62,
 };
-// Types of pssz-vectors.json with a finite inferred bound (`max_encoded_size`).
+// Types of pssz-vectors.json with a finite inferred bound (`inferred_bound`).
 const BOUNDED_TYPES = 140;
 const NO_HANDLER = 'pssz IR: no handler registered for a custom type';
 
@@ -226,6 +228,7 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   assert.deepEqual(notExpressible, []);
   let widthsChecked = 0;
   let boundsFinite = 0;
+  let maximaFinite = 0;
   let argumentCaps = 0;
   const byName = new Map(schema.ir.types.map((m) => [m.name, m.type]));
   const manifest = new Map(fx.types.map((t) => [t.id, t]));
@@ -237,16 +240,26 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     ++widthsChecked;
     // The inferred bound is the typed codec's too, for EVERY type: each
     // header, slot and table counted at its own width (`fit`, spec 3.2).
+    assert.ok(row.inferred_bound === null || Number.isSafeInteger(row.inferred_bound), row.id);
     assert.ok(row.max_encoded_size === null || Number.isSafeInteger(row.max_encoded_size), row.id);
     // (A capped record records its bare bound, whatever its cap; so do the
     // three capped method argument tuples: 107, unbounded, 113.)
-    const bound = source.type(row.id).maxEncodedSize;
+    const bound = source.type(row.id).inferredBound;
     if (row.max_dynamic_data !== null && row.id.startsWith('tuple<')) ++argumentCaps;
-    assert.equal(bound === null ? null : Number(bound), row.max_encoded_size, `max_encoded_size of ${row.id}`);
+    assert.equal(bound === null ? null : Number(bound), row.inferred_bound, `inferred_bound of ${row.id}`);
+    assert.equal(handled.type(row.id).inferredBound, bound, `inferred_bound of ${row.id}, with handlers`);
     // The width is the class of the explicit cap, else of the bound.
-    const rules = row.max_dynamic_data ?? row.max_encoded_size;
+    const rules = row.max_dynamic_data ?? row.inferred_bound;
     assert.equal(row.auto_width, rules === null || rules > 0xffff ? 4 : rules > 0xff ? 2 : 1, `width class of ${row.id}`);
-    if (row.max_encoded_size !== null) ++boundsFinite;
+    if (row.inferred_bound !== null) ++boundsFinite;
+    // The largest encoding (spec 3.7), for EVERY type: a capped type never
+    // exceeds its cap, a type with no cap never exceeds its inferred bound.
+    const largest = source.type(row.id).maxEncodedSize;
+    assert.equal(largest === null ? null : Number(largest), row.max_encoded_size, `max_encoded_size of ${row.id}`);
+    assert.equal(handled.type(row.id).maxEncodedSize, largest, `max_encoded_size of ${row.id}, with handlers`);
+    if (row.max_dynamic_data !== null) assert.ok(largest !== null && largest <= BigInt(row.max_dynamic_data), row.id);
+    else assert.ok((largest === null) === (bound === null) && (largest === null || largest <= bound!), row.id);
+    if (largest !== null) ++maximaFinite;
     // Manifest key `custom_id`: the id of the type's Schema IR `Custom`
     // node, under which its handler is registered.
     let node = byName.get(row.id)!.value;
@@ -262,6 +275,26 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   assert.equal(widthsChecked, fx.types.length);
   assert.equal(argumentCaps, 3);
   assert.equal(boundsFinite, BOUNDED_TYPES);
+  assert.ok(maximaFinite > BOUNDED_TYPES, 'a capped type with an unbounded member has a maximum and no bound');
+
+  // max_encoded_size is an upper bound of the encoding: no canonical frame
+  // of the automatic profile, of any fixture type, is longer than the number
+  // this implementation computes for its type (which is the fixture's,
+  // above). Some vectors sit exactly on it.
+  let underMaximum = 0;
+  let atMaximum = 0;
+  for (const row of fx.vectors) {
+    if (row.format !== 'auto' || row.expect !== 'canonical') continue;
+    assert.ok(manifest.has(row.type), `${row.name}: type ${row.type}`);
+    const largest = source.type(row.type).maxEncodedSize;
+    if (largest === null) continue;
+    const size = BigInt(row.hex.length / 2);
+    assert.ok(size <= largest, `${row.name}: ${size} bytes > max_encoded_size ${largest}`);
+    ++underMaximum;
+    if (size === largest) ++atMaximum;
+  }
+  assert.ok(underMaximum > 300, String(underMaximum));
+  assert.ok(atMaximum > 0);
   assert.equal(customIds, 8);
   // A box gives its container no inferred bound; an explicit cap still does.
   const widthOf = (id: string) => source.type(id).width;

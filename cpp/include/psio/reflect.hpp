@@ -36,16 +36,21 @@
 //   psio::reflect<T>::method_param_names<I>          std::array<string_view, K> as written
 //   psio::reflect<T>::method_result<I>               return type
 //   psio::reflect<T>::method_args<I>                 std::tuple<Args...> as declared
-//   psio::reflect<T>::method_params<I>               std::tuple<remove_cvref_t<Args>...>
+//   psio::reflect<T>::method_params<I>               std::tuple<remove_cvref_t<Args>...>:
+//                                                    how the method takes them (a
+//                                                    psio::pssz_view<const X> parameter
+//                                                    is a view here)
 //   psio::reflect<T>::method_annotations<I>          what method(...) lists beyond names:
 //                                                    .params (one spec tuple per listed
 //                                                    parameter), .result (returns(...)),
 //                                                    .max_dynamic_data (maxDynamicData(N))
 //   psio::reflect<T>::method_max_dynamic_data<I>     the argument-tuple cap (optional)
 //   psio::reflect<T>::method_max_fields<I>           maxFields(N) of the method (optional)
-//   psio::reflect<T>::method_arg_tuple<I>            method_params<I> carrying those
-//                                                    annotations and the cap: a
-//                                                    psio::annotated_tuple, the type to
+//   psio::reflect<T>::method_arg_tuple<I>            the WIRE type of the arguments: a
+//                                                    psio::annotated_tuple of
+//                                                    wire_type_t<parameter> (X for a
+//                                                    view-of-X parameter) carrying those
+//                                                    annotations and the cap; the type to
 //                                                    encode / decode / validate arguments as
 //   psio::reflect<T>::method_is_static<I> / method_is_const<I>
 //   psio::reflect<T>::method_traits<I>               psio::method_traits<method_type<I>>
@@ -177,6 +182,7 @@
 #include <psio/error.hpp>
 #include <psio/fixed_string.hpp>
 #include <psio/name_lookup.hpp>
+#include <psio/wire_type.hpp>
 
 #include <boost/preprocessor.hpp>
 
@@ -398,10 +404,16 @@ namespace psio {
    {
       template <typename T, std::size_t I, typename Params>
       struct method_arg_tuple_of;
+      // Each parameter as the type it is encoded as (wire_type.hpp): a
+      // parameter declared as a view of X (psio::pssz_view<const X>), a
+      // std::string_view or a std::span<const E> is a packed X, a string, a
+      // list of E. The argument tuple is what a caller encodes and a
+      // schema describes; how the method takes the argument is its own
+      // business (method_params<I>).
       template <typename T, std::size_t I, typename... Ps>
       struct method_arg_tuple_of<T, I, std::tuple<Ps...>>
       {
-         using type = annotated_tuple<method_arg_meta<T, I>, Ps...>;
+         using type = annotated_tuple<method_arg_meta<T, I>, wire_type_t<Ps>...>;
       };
    }
 

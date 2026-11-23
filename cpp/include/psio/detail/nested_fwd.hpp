@@ -4,7 +4,9 @@
 // the trait the codecs dispatch on. The type itself is psio/nested.hpp; a
 // codec header includes only this, so nothing here depends on a format.
 
+#include <psio/buffer.hpp>
 #include <psio/error.hpp>
+#include <psio/storage.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +26,8 @@ namespace psio
    template <typename T, nested_validation V = nested_validation::eager>
    class nested;
 
+   struct pssz;
+
    namespace detail
    {
       template <typename T>
@@ -35,6 +39,23 @@ namespace psio
       {
          using inner                    = T;
          static constexpr bool descends = V == nested_validation::eager;
+      };
+      // A pssz buffer that owns or shares its bytes (psio::pssz_buffer<T>,
+      // psio::shared_pssz<T>: buffer.hpp) is a nested value with another
+      // ownership: as a member it has the bytes, key, text and schema node
+      // of psio::nested<T>, and every reader of the enclosing value
+      // validates its bytes as T.
+      template <typename T>
+      struct is_nested<::psio::buffer<T, ::psio::pssz, storage::owning>> : std::true_type
+      {
+         using inner                    = T;
+         static constexpr bool descends = true;
+      };
+      template <typename T>
+      struct is_nested<::psio::buffer<T, ::psio::pssz, storage::shared>> : std::true_type
+      {
+         using inner                    = T;
+         static constexpr bool descends = true;
       };
       template <typename T>
       inline constexpr bool is_nested_v = is_nested<T>::value;

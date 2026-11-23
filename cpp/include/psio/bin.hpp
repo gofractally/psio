@@ -1546,6 +1546,105 @@ namespace psio {
 
    PSIO_FORMAT_HELPERS(bin)
 
+   // ── Reading with a cursor (psio::input_stream, stream.hpp) ────────────
+   //
+   // For hand-written parsers of byte formats that are a sequence of bin
+   // values and LEB128 integers (WASM sections, DWARF). Each call reads
+   // one item at the cursor and advances it; malformed or truncated input
+   // fails through psio::codec_abort.
+   //
+   //   from_bin<T>(in)          one bin-encoded T (validated as it is read)
+   //   varuint32_from_bin(in)   unsigned LEB128, at most 5 bytes / 32 bits
+   //   varuint64_from_bin(in)   unsigned LEB128, at most 10 bytes
+   //   sleb32_from_bin(in)      signed LEB128
+   //   sleb64_from_bin(in)
+   //
+   // and the writers, to any psio sink (vector_stream, fixed_buf_stream,
+   // size_stream, ...):
+   //
+   //   varuint32_to_bin(v, sink)   varuint64_to_bin(v, sink)
+   //   sleb32_to_bin(v, sink)      sleb64_to_bin(v, sink)
+   //   to_bin(v, sink) of a std::vector<char> appends, as before
+   template <typename T>
+      requires ::psio::detail::helpers::decodes<::psio::bin, T>
+   [[nodiscard]] T from_bin(input_stream& in)
+   {
+      const std::span<const char> bytes = in.rest();
+      std::size_t                 end   = 0;
+      if (auto status = detail::bin_impl::validate_value<T>(bytes, end, 0); !status.ok())
+         ::psio::codec_abort(status.error());
+      std::size_t pos   = 0;
+      T           value = detail::bin_impl::decode_value<T>(bytes.first(end), pos);
+      in.skip(end);
+      return value;
+   }
+
+   namespace detail::bin_impl
+   {
+      [[noreturn]] inline void varint_failure()
+      {
+         ::psio::codec_abort(codec_error{"bin: invalid or truncated varint", 0, "bin"});
+      }
+      template <typename Result>
+      auto take_varint(input_stream& in, const Result& r)
+      {
+         if (!r.ok)
+            varint_failure();
+         in.skip(r.len);
+         return r.value;
+      }
+      inline const std::uint8_t* cursor(const input_stream& in) noexcept
+      {
+         return reinterpret_cast<const std::uint8_t*>(in.pos);
+      }
+   }  // namespace detail::bin_impl
+
+   [[nodiscard]] inline std::uint32_t varuint32_from_bin(input_stream& in)
+   {
+      return detail::bin_impl::take_varint(
+         in, varint::leb128::scalar::decode_u32(detail::bin_impl::cursor(in), in.remaining()));
+   }
+   [[nodiscard]] inline std::uint64_t varuint64_from_bin(input_stream& in)
+   {
+      return detail::bin_impl::take_varint(
+         in, varint::leb128::scalar::decode_u64(detail::bin_impl::cursor(in), in.remaining()));
+   }
+   [[nodiscard]] inline std::int32_t sleb32_from_bin(input_stream& in)
+   {
+      return detail::bin_impl::take_varint(
+         in, varint::leb128::scalar::decode_i32(detail::bin_impl::cursor(in), in.remaining()));
+   }
+   [[nodiscard]] inline std::int64_t sleb64_from_bin(input_stream& in)
+   {
+      return detail::bin_impl::take_varint(
+         in, varint::leb128::scalar::decode_i64(detail::bin_impl::cursor(in), in.remaining()));
+   }
+
+   template <typename Sink>
+   void varuint32_to_bin(std::uint32_t value, Sink& sink)
+   {
+      std::uint8_t buf[varint::leb128::max_bytes_u32];
+      sink.write(buf, varint::leb128::scalar::encode_u32(buf, value));
+   }
+   template <typename Sink>
+   void varuint64_to_bin(std::uint64_t value, Sink& sink)
+   {
+      std::uint8_t buf[varint::leb128::max_bytes_u64];
+      sink.write(buf, varint::leb128::scalar::encode_u64(buf, value));
+   }
+   template <typename Sink>
+   void sleb32_to_bin(std::int32_t value, Sink& sink)
+   {
+      std::uint8_t buf[varint::leb128::max_bytes_i32];
+      sink.write(buf, varint::leb128::scalar::encode_i32(buf, value));
+   }
+   template <typename Sink>
+   void sleb64_to_bin(std::int64_t value, Sink& sink)
+   {
+      std::uint8_t buf[varint::leb128::max_bytes_i64];
+      sink.write(buf, varint::leb128::scalar::encode_i64(buf, value));
+   }
+
 }  // namespace psio
 
 // ── Forward declarations — dynamic CPO friend overloads live in

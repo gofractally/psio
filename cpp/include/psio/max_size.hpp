@@ -58,6 +58,7 @@
 #include <psio/shapes.hpp>
 #include <psio/time.hpp>
 #include <psio/transparent.hpp>
+#include <psio/wire_type.hpp>
 #include <psio/wrappers.hpp>
 
 #include <array>
@@ -233,7 +234,7 @@ namespace psio {
       template <typename T>
       consteval bool fixed_payload() noexcept
       {
-         using U = std::remove_cvref_t<T>;
+         using U = ::psio::wire_type_t<T>;  // what T is encoded as
          if constexpr (::psio::has_adapter_v<U, ::psio::binary_category>)
             return false;
          else if constexpr (std::is_arithmetic_v<U> || std::is_enum_v<U> ||
@@ -255,7 +256,7 @@ namespace psio {
                return []<std::size_t... Is>(std::index_sequence<Is...>) {
                   return ((fixed_payload<typename R::template member_type<Is>>() &&
                            !::psio::has_binary_as_override_v<
-                              typename R::template member_type<Is>,
+                              ::psio::wire_type_t<typename R::template member_type<Is>>,
                               typename ::psio::effective_annotations_for<
                                  U, typename R::template member_type<Is>,
                                  R::template member_pointer<Is>>::value_t>) && ...);
@@ -457,7 +458,7 @@ namespace psio {
       template <typename T>
       consteval bound max_bare(mode m) noexcept
       {
-         using U = std::remove_cvref_t<T>;
+         using U = ::psio::wire_type_t<T>;  // what T is encoded as
          if constexpr (::psio::has_adapter_v<U, ::psio::binary_category>)
             return std::nullopt;
          else if constexpr (std::is_same_v<U, bool>) return 1;
@@ -496,7 +497,8 @@ namespace psio {
             bound       rest  = 0;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                auto field = [&]<std::size_t I>() {
-                  using F = typename R::template member_type<I>;
+                  // (As the type the member is encoded as: wire_type.hpp.)
+                  using F = ::psio::wire_type_t<typename R::template member_type<I>>;
                   using eff = ::psio::effective_annotations_for<
                      U, F, R::template member_pointer<I>>;
                   if constexpr (!fixed_payload<F>() ||
@@ -565,7 +567,7 @@ namespace psio {
    consteval std::optional<std::size_t> max_encoded_size() noexcept
    {
       using namespace detail::max_size_impl;
-      using U = std::remove_cvref_t<T>;
+      using U = ::psio::wire_type_t<T>;  // what T is encoded as
       const auto sum = max_bare<U>(mode{true, std::nullopt});
       if constexpr (max_dynamic_data_v<U>.has_value())
          return least(max_dynamic_data_v<U>, sum);

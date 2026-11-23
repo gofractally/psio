@@ -296,6 +296,7 @@ class Widths(unittest.TestCase):
             row = manifest[id]
             t = psio.codec(hint)
             self.assertEqual(t.width, row["auto_width"], f"width of {id}")
+            self.assertEqual(t.inferred_bound, row["inferred_bound"], f"inferred_bound of {id}")
             self.assertEqual(t.max_encoded_size, row["max_encoded_size"], f"max_encoded_size of {id}")
             self.assertEqual(t.max_dynamic_data, row["max_dynamic_data"], f"cap of {id}")
             own = psio.schema_of(names={id: hint}) if not isinstance(hint, type) else psio.schema_of(hint)
@@ -354,7 +355,9 @@ class Widths(unittest.TestCase):
         self.assertEqual(psio.to_pssz(CapList2(two)).hex(), "0200020004000600616263")
         self.assertEqual(psio.to_pssz(CapList4(two)).hex(), "0400000004000000080000000a000000616263")
         # The cap changes no bound and no schema: the member is still a plain list.
-        self.assertIsNone(psio.codec(CapList).max_encoded_size)
+        self.assertIsNone(psio.codec(CapList).inferred_bound)
+        # ... and no value is longer than the cap (spec 3.7).
+        self.assertEqual(psio.codec(CapList).max_encoded_size, psio.codec(CapList).max_dynamic_data)
         own = {m["name"]: m["type"] for m in psio.schema_of(CapList).ir["types"]}
         member = own["CapList"]["value"].value["members"][0]
         self.assertEqual(member["attributes"], [])
@@ -440,7 +443,7 @@ class Widths(unittest.TestCase):
         # The record: bound fit(2, 255) = 259, 2-byte header and slot.  The list: 255, a 1-byte table.
         self.assertEqual(expected.hex(), "0200" "0200" "0204616263")
         by_attribute = one(ir.member("items", ir.list_of(string16), bound))
-        self.assertEqual((by_attribute.width, by_attribute.max_encoded_size), (2, 259))
+        self.assertEqual((by_attribute.width, by_attribute.inferred_bound), (2, 259))
         self.assertEqual(by_attribute.to_pssz(value), expected)
         self.assertEqual(by_attribute.from_pssz(expected), value)
         self.assertEqual(walked(by_attribute.pssz_view(expected)), value)
@@ -511,13 +514,13 @@ class Widths(unittest.TestCase):
         self.assertEqual(psio.Schema({"V": {"Variant": {f"a{i}": ir.U8 for i in range(256)}}}).type("V").width, 1)
 
     def test_bit_types_are_bounded(self) -> None:
-        self.assertEqual(psio.codec(Annotated[Bits, psio.bitvector(12)]).max_encoded_size, 2)
-        self.assertEqual(psio.codec(Annotated[Bits, psio.bitlist(12)]).max_encoded_size, 3)
-        self.assertEqual(psio.codec(Annotated[Bits, psio.bitlist(16)]).max_encoded_size, 3)
+        self.assertEqual(psio.codec(Annotated[Bits, psio.bitvector(12)]).inferred_bound, 2)
+        self.assertEqual(psio.codec(Annotated[Bits, psio.bitlist(12)]).inferred_bound, 3)
+        self.assertEqual(psio.codec(Annotated[Bits, psio.bitlist(16)]).inferred_bound, 3)
         # id 1 + flags 2 inline + header 1 + seen (slot 1 + 3) = 8.
-        self.assertEqual((psio.codec(BitRec).width, psio.codec(BitRec).max_encoded_size), (1, 8))
-        self.assertEqual((psio.codec(BitNarrow).width, psio.codec(BitNarrow).max_encoded_size), (1, 255))
-        self.assertEqual((psio.codec(BitWide).width, psio.codec(BitWide).max_encoded_size), (2, 258))
+        self.assertEqual((psio.codec(BitRec).width, psio.codec(BitRec).inferred_bound), (1, 8))
+        self.assertEqual((psio.codec(BitNarrow).width, psio.codec(BitNarrow).inferred_bound), (1, 255))
+        self.assertEqual((psio.codec(BitWide).width, psio.codec(BitWide).inferred_bound), (2, 258))
 
     def test_utf8_is_always_enforced(self) -> None:
         """There is no mode in which a UTF-8 position holds other bytes: every reader, trusted included."""

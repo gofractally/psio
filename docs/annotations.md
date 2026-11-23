@@ -646,7 +646,8 @@ the table above.
 
 | | C++ | Rust | TypeScript | Python |
 |---|---|---|---|---|
-| compatibility check of two revisions | `psio::pssz_evolves_from<Old, New>` (compile time): fields, widths, bounds that only widen, `utf8`, order specs, caps, `maxFields` ([8](#8-evolution-what-may-change-after-publication)) | `pssz::pssz_evolves_from::<Old, New>()` (`const fn`): refuses **any** change of a bound, which is stricter than the rule; widening and the `maxFields` rule: not yet available | not yet available (no checker) | `psio.evolves_from(Old, New)` → a `Status` with the reason, over two declarations or two schema types: the C++ rule, bounds that only widen included |
+| compatibility check of two revisions | `psio::pssz_evolves_from<Old, New>` (compile time): fields, widths, bounds that only widen, `utf8`, order specs, caps, `maxFields` ([8](#8-evolution-what-may-change-after-publication)) | `pssz::pssz_evolves_from::<Old, New>()` (`const fn`): the C++ rule — fields, widths, bounds that only widen, caps, `max_fields`, alternatives appended to an enum with data | `psszEvolvesFrom(Old, New)` → `{ ok: true }` or `{ ok: false, reason, path }`, over two definitions or two fetched schema types: the C++ rule, appended variant alternatives included (it also refuses a renamed field or alternative) | `psio.evolves_from(Old, New)` → a `Status` with the reason, over two declarations or two schema types: the C++ rule, bounds that only widen and appended union alternatives included |
+| the inferred bound and the largest encoding ([5.4](#54-maxdynamicdatan)) | `psio::inferred_bound<T>()`, `psio::max_encoded_size<T>()` (compile time) | `pssz::inferred_bound::<T>()`, `pssz::max_encoded_size::<T>()` (`const fn`; `PsszPack::INFERRED_BOUND`, `MAX_ENCODED_SIZE`), `Option<usize>` | `T.inferredBound`, `T.maxEncodedSize`: `bigint` or `null`, of a definition or a fetched schema type | `psio.codec(T).inferred_bound`, `.max_encoded_size`: `int` or `None`, of a declaration or a schema type |
 | key writer checks bounds and UTF-8 | `psio::to_key` (throws), `psio::encode_key_checked` (status) | `psio::try_to_key`: derived members and the `BoundedString` / `BoundedRawString` / `BoundedList` / `BoundedMap` / `BoundedSet` wrapper types | `T.encodeKey` | `psio.to_key` |
 | JSON form of an argument list | writes an object when every parameter is named, else an array; reads either for a named list | writes the object and reads either; a function marked `#[psio(positional)]` is the array only | writes the object; reading the positional array: not yet available | a named list writes the object and reads either; a list without names (`psio.arguments(..., named=False)`) is the array only |
 | result encoded as its `returns(...)` type | `psio::encode_method_result<T, I>`, `decode_method_result`, `validate_method_result`, `check_method_result` | `Method::result_to_pssz` / `result_from_pssz` of `args::<method>` | not yet available | `result_to_pssz` / `result_from_pssz` / `validate_result` of `psio.interface_of(T)[name]` |
@@ -995,6 +996,12 @@ counted them (187 → 190). Size a buffer with `max_encoded_size`. When
 something inside is unbounded, `inferred_bound` is empty and
 `max_encoded_size` is the cap; with no cap and an unbounded member neither
 exists. ([pssz-spec.md §3.7](pssz-spec.md#37-max_encoded_sizet-the-largest-encoding).)
+
+The same two numbers in the other languages, with the same values (187 and
+190 for `AccountV1`): Rust `psio::pssz::inferred_bound::<T>()` and
+`max_encoded_size::<T>()` (the cap-or-bound number is `PsszPack::AUTO_BOUND`);
+TypeScript `T.inferredBound` and `T.maxEncodedSize`; Python
+`psio.codec(T).inferred_bound` and `.max_encoded_size`.
 
 **Applies to.** A reflected record (not a transparent one), and a method's
 argument tuple ([5.11](#511-methodname-)).
@@ -2879,8 +2886,8 @@ The relation is transitive and deliberately **one-directional** for bounds
 and caps: `pssz_evolves_from<Old, New>` does not imply
 `pssz_evolves_from<New, Old>`. A widened bound means a new writer can
 produce values an old reader rejects, so roll the new readers out first.
-(Rust's `pssz_evolves_from` refuses any change of a bound: stricter than
-this rule.)
+(Rust `pssz_evolves_from`, TypeScript `psszEvolvesFrom` and Python
+`psio.evolves_from` apply the same rule.)
 
 **What the check still does not see** — review by hand, and treat as frozen
 once published:
@@ -3031,17 +3038,17 @@ pub trait Bank {
     fn symbol(&self, token: u32) -> String;
 }
 // auto_pssz_width::<bank::args::transfer>() == 2
+// inferred_bound::<bank::args::transfer>() == Some(106), max_encoded_size::<bank::args::transfer>() == Some(108)
 ```
 
 Rust entry points: `psio::to_pssz(&v)` (panics on a value with no
 encoding) / `psio::try_to_pssz(&v)`; `psio::from_pssz::<T>(&bytes)`
 (validated, returns `Result`); `psio::to_json`, `psio::to_ijson`,
 `psio::try_to_json`; `psio::to_key`, `psio::try_to_key`, `psio::from_key`.
-Not available in Rust: `exact` / `min`, field numbers, a `utf8` key (the
-type decides). Not yet available (the mirror of the latest C++ consistency
-round, [4](#4-master-table) and [4.1](#41-tooling-per-language)):
-`sorted` / `unique`, a widened bound and the `maxFields` rule in
-`pssz_evolves_from`, a test on `interface-vectors.json`.
+`psio::pssz::auto_pssz_width::<T>()`, `inferred_bound::<T>()`,
+`max_encoded_size::<T>()` and `pssz_evolves_from::<Old, New>()` are
+`const fn`. Not available in Rust: `exact` / `min`, field numbers, a `utf8`
+key (the type decides).
 
 ```typescript
 import { argumentTuple, boundedUtf8, custom, field, list, optional, rawString, record, transparent, u32, u64, type Infer } from 'psio';
@@ -3054,6 +3061,7 @@ const accountFields = {
 };
 const Account   = record('Account', accountFields);                              // Account.width === 1
 const AccountV1 = record('AccountV1', accountFields, { maxDynamicData: 1024 });  // AccountV1.width === 2
+// AccountV1.inferredBound === 187n, AccountV1.maxEncodedSize === 190n
 const AccountV2 = record('AccountV2', {
   ...accountFields,
   email: field(optional(rawString), { utf8: true, max: 64 }),                   // new: optional, last
@@ -3081,8 +3089,9 @@ const Transfer = argumentTuple(
 TypeScript entry points: `T.encode(value)`, `T.decode(bytes, { rejectUnknown })`
 (always validated), `T.validate(bytes)` → `{ ok, hasUnknown }`,
 `T.view(bytes)`, `T.encodeKey`, `T.decodeKey`, `T.psszToJson(bytes, 'json' | 'ijson')`,
-`T.valueToJson`, `T.jsonToValue`, `T.width`. Not available in TypeScript:
-a compatibility check (`pssz_evolves_from`), a trusted decode,
+`T.valueToJson`, `T.jsonToValue`, `T.width`, `T.inferredBound`,
+`T.maxEncodedSize`. The compatibility check is `psszEvolvesFrom(Old, New)`.
+Not available in TypeScript: a trusted decode,
 return-value annotations, field numbers. Not yet available
 ([4](#4-master-table), [4.1](#41-tooling-per-language)): enforcement of
 `maxFields`, `sorted` / `unique`, the positional-array form of JSON
@@ -3101,7 +3110,7 @@ class Account:
     owner: Annotated[str, psio.max(32)]                                    # C++ utf8 | max<32>
     tags: Annotated[list[str], psio.max(8), psio.element(psio.max(16))]    # C++ max<8> | element(utf8 | max<16>)
     balance: u64
-# psio.codec(Account).width == 1, .max_encoded_size == 187
+# psio.codec(Account).width == 1, .inferred_bound == 187, .max_encoded_size == 187
 
 @psio.record(max_dynamic_data=1024)
 @dataclass
@@ -3158,7 +3167,7 @@ Python entry points: `psio.to_pssz(value[, T])`, `psio.from_pssz(T, data)`
 `psio.validate_pssz(T, data)` → a `Status` (`ok`, `reason`,
 `has_unknown`), `psio.pssz_view(T, data)`, `psio.to_key`, `psio.from_key`,
 `psio.to_json`, `psio.to_ijson`, `psio.schema_of(T)`, `psio.codec(T)`
-(`width`, `max_encoded_size`, `max_dynamic_data`). Every failure is a
+(`width`, `inferred_bound`, `max_encoded_size`, `max_dynamic_data`). Every failure is a
 `psio.PsioError`. The compatibility check is `psio.evolves_from(Old, New)`.
 Not available in Python: a mutable view, WIT / GraphQL emitters, protobuf
 field numbers.

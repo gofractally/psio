@@ -102,6 +102,26 @@ class PsszFixture(unittest.TestCase):
         self.assertEqual([t["id"] for t in fx["types"] if not t["ir"]], [])
         by_name = {m["name"]: m["type"] for m in schema.ir["types"]}
         manifest = {t["id"]: t for t in fx["types"]}
+        # max_encoded_size is an upper bound of the encoding (spec 3.7): no
+        # canonical frame of the automatic profile, of any fixture type, is
+        # longer than the number computed for its type (which is the
+        # fixture's, below).  Some vectors sit exactly on it.
+        largest_of = {row["id"]: source.type(row["id"]).max_encoded_size for row in fx["types"]}
+        under = at_maximum = 0
+        for v in fx["vectors"]:
+            if v["format"] != "auto" or v["expect"] != "canonical":
+                continue
+            largest = largest_of[v["type"]]
+            if largest is None:
+                continue
+            size = len(v["hex"]) // 2
+            self.assertLessEqual(size, largest, f"{v['name']}: longer than max_encoded_size")
+            under += 1
+            at_maximum += size == largest
+        self.assertGreater(under, 300)
+        self.assertGreater(at_maximum, 0)
+        self.assertGreater(sum(1 for n in largest_of.values() if n is not None), 140)
+
         custom_ids = 0
         for row in fx["types"]:
             for label, s in (("plain", source), ("handlers", handled)):
@@ -110,7 +130,18 @@ class PsszFixture(unittest.TestCase):
             t = source.type(row["id"])
             self.assertEqual(t.max_dynamic_data, row["max_dynamic_data"], row["id"])
             # (the inferred bound of spec 3.2: a cap, also an argument list's, is not part of it)
-            self.assertEqual(t.max_encoded_size, row["max_encoded_size"], f"max_encoded_size of {row['id']}")
+            self.assertEqual(t.inferred_bound, row["inferred_bound"], f"inferred_bound of {row['id']}")
+            # The largest encoding (spec 3.7): a capped type never exceeds its
+            # cap, a type with no cap never exceeds its inferred bound.
+            largest = t.max_encoded_size
+            self.assertEqual(largest, row["max_encoded_size"], f"max_encoded_size of {row['id']}")
+            self.assertEqual((handled.type(row["id"]).inferred_bound, handled.type(row["id"]).max_encoded_size),
+                             (t.inferred_bound, largest), row["id"])
+            if t.max_dynamic_data is not None:
+                self.assertTrue(largest is not None and largest <= t.max_dynamic_data, row["id"])
+            else:
+                self.assertEqual(largest is None, t.inferred_bound is None, row["id"])
+                self.assertTrue(largest is None or largest <= t.inferred_bound, row["id"])
             self.assertEqual(t.fixed_size is not None, row["fixed"], row["id"])
             self.assertEqual(t.fixed_size or 0, row["fixed_size"], row["id"])
             node = by_name[row["id"]]["value"]
