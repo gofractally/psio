@@ -92,6 +92,9 @@ psio_add_test(psio_pssz_source_tests pssz_source_tests.cpp)
 # psio::shared_pssz<T> / pssz_buffer<T>: a packed value as a type of its own
 # and as a record member that is psio::nested<T> on the wire.
 psio_add_test(psio_shared_pssz_tests shared_pssz_tests.cpp)
+# to_pssz into any psio stream, psio::input_stream with typed and LEB128
+# readers, from_hex into a fixed destination.
+psio_add_test(psio_stream_sink_tests stream_sink_tests.cpp)
 # View-typed method parameters: the argument tuple's wire type, and calling a
 # reflected method with packed arguments (psio::invoke_method_pssz).
 psio_add_test(psio_method_view_param_tests method_view_param_tests.cpp)

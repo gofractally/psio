@@ -37,6 +37,8 @@
 
 #include <algorithm>
 #include <array>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -363,7 +365,125 @@ namespace psio {
          rewrite(offset, &v, sizeof(T));
       }
 
+      // Reserve `n` zero bytes at the end, as vector_stream::skip does.
+      void skip(std::int32_t n) { data.resize(data.size() + n); }
+
       std::size_t written() const noexcept { return data.size(); }
+   };
+
+   // A sink in the sense of this header: what a format's `to_F(v, sink)`
+   // accepts besides its natural buffer.
+   template <typename S>
+   concept stream_sink = requires(S& s, const void* p, std::size_t n, std::int32_t k) {
+      s.write(p, n);
+      s.rewrite(n, p, n);
+      s.skip(k);
+      { s.written() } -> std::convertible_to<std::size_t>;
+   };
+
+   // ── input_stream — a read cursor over borrowed bytes ────────────────────
+   //
+   // The counterpart of the sinks above for code that parses a byte format
+   // by hand, one field after another: a position that advances, bounds
+   // checked on every read. Reading past the end fails through
+   // psio::codec_abort ("stream overrun"): a codec_exception where
+   // exceptions are enabled, the abort handler and std::abort otherwise.
+   // Code that must not fail tests `remaining()` first.
+   //
+   //    psio::input_stream in{bytes};
+   //    auto magic   = in.get<std::uint32_t>();        // raw little-endian host bytes
+   //    auto count   = psio::varuint32_from_bin(in);   // psio/bin.hpp
+   //    auto payload = in.read_bytes(count);           // borrowed, not copied
+   //    auto record  = psio::from_bin<Header>(in);     // one bin value, cursor advanced
+   //    in.position();  in.remaining();
+   //
+   // The typed and varint readers live with their format (psio/bin.hpp).
+   struct input_stream
+   {
+      const char* begin = nullptr;
+      const char* pos   = nullptr;
+      const char* end   = nullptr;
+
+      constexpr input_stream() noexcept = default;
+      constexpr input_stream(const char* p, std::size_t size) noexcept
+         : begin(p), pos(p), end(p + size)
+      {
+      }
+      constexpr input_stream(std::span<const char> bytes) noexcept
+         : input_stream(bytes.data(), bytes.size())
+      {
+      }
+      constexpr input_stream(std::string_view text) noexcept
+         : input_stream(text.data(), text.size())
+      {
+      }
+      input_stream(const std::vector<char>& bytes) noexcept
+         : input_stream(bytes.data(), bytes.size())
+      {
+      }
+
+      // Bytes consumed so far / still to read.
+      [[nodiscard]] constexpr std::size_t position() const noexcept
+      {
+         return static_cast<std::size_t>(pos - begin);
+      }
+      [[nodiscard]] constexpr std::size_t remaining() const noexcept
+      {
+         return static_cast<std::size_t>(end - pos);
+      }
+      [[nodiscard]] constexpr bool empty() const noexcept { return pos == end; }
+      // What is left, without consuming it.
+      [[nodiscard]] constexpr std::span<const char> rest() const noexcept
+      {
+         return std::span<const char>{pos, remaining()};
+      }
+      constexpr operator std::span<const char>() const noexcept { return rest(); }
+
+      void check_available(std::size_t size) const
+      {
+         if (size > remaining())
+            overrun();
+      }
+      void read(void* dest, std::size_t size)
+      {
+         check_available(size);
+         if (size)
+            std::memcpy(dest, pos, size);
+         pos += size;
+      }
+      // sizeof(T) raw bytes into `dest` (host byte order).
+      template <typename T>
+         requires std::is_trivially_copyable_v<T>
+      void read_raw(T& dest)
+      {
+         read(&dest, sizeof(T));
+      }
+      template <typename T>
+         requires std::is_trivially_copyable_v<T>
+      [[nodiscard]] T get()
+      {
+         T value;
+         read(&value, sizeof(T));
+         return value;
+      }
+      // The next `size` bytes, borrowed from the input.
+      [[nodiscard]] std::span<const char> read_bytes(std::size_t size)
+      {
+         check_available(size);
+         const std::span<const char> out{pos, size};
+         pos += size;
+         return out;
+      }
+      void skip(std::size_t size)
+      {
+         check_available(size);
+         pos += size;
+      }
+
+      [[noreturn]] static void overrun()
+      {
+         ::psio::codec_abort(codec_error{"stream overrun", 0, "input_stream"});
+      }
    };
 
    // ── Small on-stack buffer ───────────────────────────────────────────────

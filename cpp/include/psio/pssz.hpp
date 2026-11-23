@@ -1877,6 +1877,50 @@ namespace psio {
          encode_as<LegacyW, Auto, ::psio::wire_type_t<S>, Sink, A>(v, s);
       }
 
+      // A sink whose written() / rewrite() positions are relative to where
+      // a value starts, over a sink that may already hold bytes. The
+      // encoder addresses the offsets it patches by absolute position in
+      // its sink, which is right for a buffer it owns from byte 0 and
+      // wrong for a caller's stream holding earlier output.
+      template <typename Sink>
+      struct relative_sink
+      {
+         Sink&       sink;
+         std::size_t base;
+
+         explicit relative_sink(Sink& s) noexcept : sink(s), base(s.written()) {}
+         void about_to_write(std::size_t n) { sink.about_to_write(n); }
+         void write(char ch) { sink.write(ch); }
+         void write(const void* src, std::size_t n) { sink.write(src, n); }
+         void rewrite(std::size_t offset, const void* src, std::size_t n)
+         {
+            sink.rewrite(base + offset, src, n);
+         }
+         template <typename T>
+         void put(const T& v)
+         {
+            sink.write(&v, sizeof(T));
+         }
+         template <typename T>
+         void write_raw(const T& v)
+         {
+            put(v);
+         }
+         template <typename T>
+         void rewrite_raw(std::size_t offset, const T& v)
+         {
+            sink.rewrite(base + offset, &v, sizeof(T));
+         }
+         void        skip(std::int32_t n) { sink.skip(n); }
+         std::size_t written() const noexcept { return sink.written() - base; }
+      };
+      template <std::size_t W, bool Auto, typename S, typename Sink>
+      void encode_relative(const S& v, Sink& sink)
+      {
+         relative_sink<Sink> out{sink};
+         encode_value<W, Auto>(v, out);
+      }
+
       template <std::size_t W, bool Auto, typename T, typename A>
       T decode_value(std::span<const char> src, std::size_t pos, std::size_t end);
       template <typename T, typename S>
@@ -3920,6 +3964,42 @@ namespace psio {
       template <typename T>
       friend void tag_invoke(decltype(::psio::encode), pssz,
                              const T& v, std::vector<char>& sink)
+      {
+         constexpr std::size_t W = auto_pssz_width_v<T>;
+         detail::pssz_impl::enforce_encodable(v);
+         const std::size_t total = detail::pssz_impl::size_of_v<W, true>(v);
+         detail::pssz_impl::enforce_max_dynamic<T>(total);
+         const std::size_t orig = sink.size();
+         sink.resize(detail::pssz_impl::checked_add(orig, total));
+         ::psio::fast_buf_stream fbs(sink.data() + orig, total);
+         detail::pssz_impl::encode_value<W, true>(v, fbs);
+      }
+
+      // Into any psio stream (stream.hpp): psio::fixed_buf_stream (a
+      // caller's buffer, bounds-checked), psio::vector_stream,
+      // psio::string_stream, psio::fast_buf_stream (a buffer the caller has
+      // sized with pssz_size), psio::size_stream (counts only). The value
+      // is checked and sized first, as for a vector, so a rejected value
+      // writes nothing; offsets are relative to where the value starts, so
+      // a stream that already holds bytes is appended to.
+      template <typename T, ::psio::stream_sink Sink>
+      friend void tag_invoke(decltype(::psio::encode), pssz, const T& v, Sink& sink)
+      {
+         constexpr std::size_t W = auto_pssz_width_v<T>;
+         detail::pssz_impl::enforce_encodable(v);
+         const std::size_t total = detail::pssz_impl::size_of_v<W, true>(v);
+         detail::pssz_impl::enforce_max_dynamic<T>(total);
+         if constexpr (std::is_same_v<Sink, ::psio::size_stream>)
+            sink.size += total;
+         else
+         {
+            sink.about_to_write(total);
+            detail::pssz_impl::encode_relative<W, true>(v, sink);
+         }
+      }
+      // Appends to a std::string (a buffer some APIs hand out as text).
+      template <typename T>
+      friend void tag_invoke(decltype(::psio::encode), pssz, const T& v, std::string& sink)
       {
          constexpr std::size_t W = auto_pssz_width_v<T>;
          detail::pssz_impl::enforce_encodable(v);

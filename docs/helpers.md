@@ -70,7 +70,7 @@ is a constraint failure that names it, for example
 
 | `F` | header | `to_F(v)` returns | `to_F(v, sink)` | `from_F`, `validate_F`, `F_size` | `F_view<T>` | `F_mutable_view<T>` |
 |-----|--------|-------------------|-----------------|----------------------------------|-------------------|-------------|
-| `pssz` | `psio/pssz.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | yes (`psio/pssz_view.hpp`) | yes (`psio/mutable_view.hpp`) |
+| `pssz` | `psio/pssz.hpp` | `std::vector<char>` | appends to `std::vector<char>` or `std::string`; writes to any psio stream | yes | yes (`psio/pssz_view.hpp`) | yes (`psio/mutable_view.hpp`) |
 | `ssz` | `psio/ssz.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | yes (`psio/ssz_view.hpp`) | no |
 | `bin` | `psio/bin.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `borsh` | `psio/borsh.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
@@ -486,6 +486,48 @@ The source must be a source of exactly that type; anything else is a
 compile error. `psio::encode_method_result<T, I>(value, out)` takes a source
 of the result as well, so a method that returns a `psio::pssz_view<X>` has
 its result written as an `X`.
+
+## Sinks and sources
+
+`psio::to_pssz(v, sink)` (and `psio::encode(psio::pssz{}, v, sink)`) writes
+to:
+
+| Sink | |
+|------|---|
+| `std::vector<char>`, `std::string` | appends |
+| `psio::fixed_buf_stream{buffer, size}` | a caller's buffer, every write bounds-checked (overrun fails through `psio::codec_abort`) |
+| `psio::fast_buf_stream{buffer, size}` | a buffer the caller has sized with `psio::pssz_size(v)`; unchecked |
+| `psio::vector_stream{vec}`, `psio::string_stream{str}` | grows the container |
+| `psio::size_stream` | counts only (`sink.size`) |
+| any type satisfying `psio::stream_sink` | `write`, `rewrite`, `skip`, `written` (`psio/stream.hpp`) |
+
+The value is checked and sized before the first byte is written, so a value
+with no encoding writes nothing. A stream that already holds bytes is
+appended to. `psio::to_key(v, sink)` takes the same sinks.
+
+For reading a byte format by hand, one field after another,
+`psio::input_stream` (`psio/stream.hpp`) is a bounds-checked cursor over
+borrowed bytes, and `psio/bin.hpp` has the typed and LEB128 readers:
+
+```cpp
+psio::input_stream in{bytes};                    // a span, string_view or vector<char>
+auto magic   = psio::from_bin<std::uint32_t>(in);   // one bin value; the cursor advances
+auto count   = psio::varuint32_from_bin(in);        // also varuint64 / sleb32 / sleb64
+auto payload = in.read_bytes(count);                // borrowed, not copied
+auto flags   = in.get<std::uint16_t>();             // raw host-order bytes; read_raw(x), read(p, n)
+in.skip(4);  in.position();  in.remaining();  in.empty();  in.rest();
+```
+
+A read past the end, or a malformed varint or value, fails through
+`psio::codec_abort` and consumes nothing; test `remaining()` first where
+that must not happen. The writers are `psio::varuint32_to_bin(v, sink)`,
+`varuint64_to_bin`, `sleb32_to_bin`, `sleb64_to_bin`, and
+`psio::to_bin(v, sink)`.
+
+`psio::from_hex(text, destination)` (`psio/to_hex.hpp`) fills a destination
+of fixed size — a `std::array<unsigned char, 32>`, a `std::span<char>`, a
+`char[N]` — and returns false unless the text is exactly `2 * size` hex
+digits; the `std::vector<char>&` form grows.
 
 ## Calling a reflected method with packed arguments
 
