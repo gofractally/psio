@@ -370,6 +370,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_pssz_ir_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_pssz_ir_noexceptions_test COMMAND psio_pssz_ir_noexceptions_test)
+# The JSON API beyond one typed value in a std::string: views, untagged
+# variants, psio::json_value, cursor reads, pretty printing, sinks.
+psio_add_test(psio_json_api_tests json_api_tests.cpp)
 # Run-time schema comparison (pssz_ir_compare.hpp): equivalent / evolves_from
 # over the Schema IR, the twin of the compile-time psio::pssz_evolves_from.
 psio_add_test(psio_pssz_ir_compare_tests pssz_ir_compare_tests.cpp)

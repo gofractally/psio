@@ -446,6 +446,32 @@ exceptions); `psio::encode_json_checked(fmt, value, out)` returns a
 `codec_status` and leaves `out` unchanged on failure. Rust returns `Err`;
 the JS package throws.
 
+## C++: views, documents built by hand, sinks
+
+Beyond "one typed value to or from a `std::string`", `psio/json.hpp` has
+what code that builds or picks apart documents by hand needs. Everything in
+this section is the same for `psio::json` and `psio::ijson`.
+
+### Text and bytes from non-owning sources
+
+A writer takes text and bytes from where they are:
+
+| C++ | text |
+|---|---|
+| `std::string_view`, `const char*`, a string literal / `char[N]` (its characters up to the terminator) | a string, by the rules of `std::string` (UTF-8; no noncharacter under `ijson`). A null `const char*` is an error, "json: null C string" |
+| `std::span<T>` (const or not, any extent) | the list of its elements, `[1,2,3]` |
+| `std::span` of `char` / `unsigned char` / `std::byte` | the byte sequence it views: `"01AB"` under `ijson`, `[1,171]` under `json` |
+
+```cpp
+psio::to_ijson(std::string_view{"x"}, out);        // "x"
+psio::to_ijson("literal");                         // "literal"
+psio::to_ijson(std::tuple{name_view, "n", 3});     // ["...","n",3]
+psio::to_ijson(std::span<const unsigned char>{b}); // "01AB"
+```
+
+They are for writers only: text has no non-owning reader, so a record with
+such a member can be written and not read.
+
 ## Exception-disabled builds
 
 `cpp/tests/ijson_noexceptions.cpp` builds with `-fno-exceptions -fno-rtti`

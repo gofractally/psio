@@ -35,6 +35,11 @@
 //   float, double             shortest round-trip decimal (std::to_chars);
 //                             NaN and the infinities have no text
 //   std::string, utf8_string  "..." with JSON escaping
+//   std::string_view,
+//   const char*, "literal"    the same, for writers only (text has no
+//                             non-owning reader)
+//   std::span<T>              for writers only: the list of its elements; a
+//                             span of bytes is the byte sequence it views
 //   std::vector, std::array,
 //   psio::bounded             [ ... ]
 //   std::optional             null or the value
@@ -186,6 +191,21 @@ namespace psio {
       };
 
       template <typename T>
+      struct is_std_span : std::false_type
+      {
+      };
+      template <typename E, std::size_t N>
+      struct is_std_span<std::span<E, N>> : std::true_type
+      {
+      };
+      // `const char*`, `char*` and `char[N]`: text, for writers.
+      template <typename T>
+      inline constexpr bool is_c_string_v =
+         (std::is_pointer_v<T> &&
+          std::is_same_v<std::remove_cv_t<std::remove_pointer_t<T>>, char>) ||
+         (std::is_array_v<T> && std::is_same_v<std::remove_cv_t<std::remove_extent_t<T>>, char>);
+
+      template <typename T>
       struct is_std_optional : std::false_type
       {
       };
@@ -286,6 +306,13 @@ namespace psio {
       struct byte_seq<std::array<E, N>> : std::true_type
       {
          static constexpr bool fixed = true;
+      };
+      // A view of bytes is written as the bytes it views (std::span of
+      // char / unsigned char / std::byte, const or not).
+      template <typename E, std::size_t N>
+         requires is_byte_elem_v<std::remove_cv_t<E>>
+      struct byte_seq<std::span<E, N>> : std::true_type
+      {
       };
       template <std::size_t N>
       struct byte_seq<::psio::byte_array<N>> : std::true_type
@@ -921,8 +948,24 @@ namespace psio {
             char* const out = w.reserve(64);
             w.commit(std::to_chars(out, out + 64, v).ptr);
          }
-         else if constexpr (std::is_same_v<T, std::string>)
+         else if constexpr (std::is_same_v<T, std::string> ||
+                            std::is_same_v<T, std::string_view>)
             write_string(w, std::string_view{v}, Fmt::i_json);
+         else if constexpr (is_c_string_v<T>)
+         {
+            // A string literal / char array (its characters up to the
+            // terminator) or a C string. Written only: text has no
+            // non-owning reader. A null pointer is no string.
+            if constexpr (std::is_array_v<T>)
+               write_string(w, std::string_view{v, ::strnlen(v, std::extent_v<T>)}, Fmt::i_json);
+            else if (v)
+               write_string(w, std::string_view{v}, Fmt::i_json);
+            else
+            {
+               w.fail("json: null C string");
+               w.append("null");
+            }
+         }
          else if constexpr (is_utf8_string<T>::value)
             write_string(w, std::string_view{v.storage()}, Fmt::i_json);
          else if constexpr (is_bounded<T>::value)
@@ -939,9 +982,10 @@ namespace psio {
          else if constexpr (is_byte_array<T>::value)
             encode_value<Fmt, IM>(v.storage(), w);
          else if constexpr (is_std_array<T>::value ||
-                            is_std_vector<T>::value)
+                            is_std_vector<T>::value || is_std_span<T>::value)
          {
-            using E = typename T::value_type;
+            // (a std::span — written only — is the list of its elements)
+            using E = std::remove_cv_t<typename T::value_type>;
             // Elements of a constant text bound: one reservation for all.
             if constexpr (constexpr std::size_t bound = text_bound<Fmt, E>(); bound != 0)
                (void)w.reserve(v.size() * (bound + 1) + 2);
