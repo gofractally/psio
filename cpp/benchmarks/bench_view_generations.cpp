@@ -4,7 +4,10 @@
 //
 //   g1 = the first-generation library (psio1): the pointer-based
 //        `view<T, Fmt>` frame and its capnp / flatbuf views.
-//   g2 = this library: the span-based `view<T, Fmt, Store>` frame.
+//   g2 = this library: the span-based `view<T, Fmt, Store>` frame, in its
+//        two kinds: the safe view (`F_view<T>`, which compares every offset
+//        it reads) and the trusted view (`F_trusted_view<T>`, over bytes
+//        that validated: "g2 trusted").
 //
 // Same shapes, same values, same operations; for SSZ and the canonical ABI
 // the two generations read the same bytes. Cap'n Proto and FlatBuffers
@@ -103,6 +106,14 @@
    {                                                                       \
       std::uint32_t                        version = 0;                    \
       std::map<std::string, std::uint32_t> limits;                         \
+   };                                                                      \
+   /* A psibase-style table row: a key, two numbers, a short string. */    \
+   struct Row                                                              \
+   {                                                                       \
+      std::uint64_t key     = 0;                                           \
+      std::uint64_t balance = 0;                                           \
+      std::uint64_t updated = 0;                                           \
+      std::string   memo;                                                  \
    };
 
 namespace g1
@@ -113,6 +124,7 @@ namespace g1
    PSIO1_REFLECT(Order, id, customer, items, total, note)
    PSIO1_REFLECT(Tagged, id, tags)
    PSIO1_REFLECT(Config, version, limits)
+   PSIO1_REFLECT(Row, key, balance, updated, memo)
 }  // namespace g1
 
 namespace g2
@@ -123,6 +135,7 @@ namespace g2
    PSIO_REFLECT(Order, id, customer, items, total, note)
    PSIO_REFLECT(Tagged, id, tags)
    PSIO_REFLECT(Config, version, limits)
+   PSIO_REFLECT(Row, key, balance, updated, memo)
 }  // namespace g2
 
 static constexpr int n_items = 16;
@@ -173,6 +186,17 @@ T make_config()
    for (int i = 0; i < n_keys; ++i)
       c.limits[key_name(i)] = static_cast<std::uint32_t>(1000 + i);
    return c;
+}
+
+template <typename T>
+T make_row()
+{
+   T r;
+   r.key     = 0x0102030405060708ull;
+   r.balance = 1'000'000'007ull;
+   r.updated = 1'700'000'000ull;
+   r.memo    = "rent, march";
+   return r;
 }
 
 // ── Barriers ──────────────────────────────────────────────────────────────
@@ -377,6 +401,42 @@ auto op_iterate_all(Get get)
       consume(d);
    };
 }
+// The table-row operations: one field, two fields, all four.
+template <typename Get>
+auto op_row_one(Get get)
+{
+   return [get] { consume(static_cast<std::uint64_t>(get().balance())); };
+}
+template <typename Get>
+auto op_row_two(Get get)
+{
+   return [get] {
+      auto v = get();
+      consume(static_cast<std::uint64_t>(v.balance()));
+      consume(static_cast<std::uint64_t>(v.updated()));
+   };
+}
+template <typename Get>
+auto op_row_all(Get get)
+{
+   return [get] {
+      auto v = get();
+      consume(static_cast<std::uint64_t>(v.key()));
+      consume(static_cast<std::uint64_t>(v.balance()));
+      consume(static_cast<std::uint64_t>(v.updated()));
+      consume(std::string_view(v.memo()));
+   };
+}
+template <typename Get>
+std::vector<std::pair<std::string, cell>> row_ops(const std::string& impl, Get get)
+{
+   std::vector<std::pair<std::string, cell>> r;
+   r.emplace_back("row-1-field", make_cell(impl, op_row_one(get)));
+   r.emplace_back("row-2-fields", make_cell(impl, op_row_two(get)));
+   r.emplace_back("row-all-fields", make_cell(impl, op_row_all(get)));
+   return r;
+}
+
 // What an implementation cannot do is left out of its column (and said so
 // in the output) rather than approximated.
 struct caps
@@ -625,14 +685,20 @@ int main(int argc, char** argv)
       static const std::size_t n = b2.size();
       auto get1 = [] { return psio1::ssz_view_of<g1::Order>(std::span<const char>(hide(b1.data()), n)); };
       auto get2 = [] { return psio::ssz_view<g2::Order>(std::span<const char>(hide(b2.data()), n)); };
+      auto get2t = [] {
+         return psio::ssz_trusted_view<g2::Order>(
+            psio::trusted{std::span<const char>(hide(b2.data()), n)});
+      };
       check_order(get1());
       check_order(get2());
+      check_order(get2t());
       std::printf("# ssz: %zu bytes, identical in both generations\n", n);
       std::vector<std::vector<std::pair<std::string, cell>>> impls;
       impls.push_back(order_ops<decltype(get1), caps{false, false}>("g1 ssz_view", get1));
       std::printf("# ssz: g1 ssz_view has no begin()/end() and no view of a double member: "
                   "range-for and iterate-all are g2 only\n");
       impls.push_back(order_ops("g2 view<ssz>", get2));
+      impls.push_back(order_ops("g2 trusted view<ssz>", get2t));
       run_group("ssz", std::move(impls));
    }
 
@@ -646,13 +712,20 @@ int main(int argc, char** argv)
       static const std::size_t n2 = b2.size();
       auto get1 = [] { return psio1::wit_view<g1::Order>::from_buffer(hide(b1.data())); };
       auto get2 = [] { return psio::wit_view<g2::Order>(std::span<const char>(hide(b2.data()), n2)); };
+      auto get2t = [] {
+         return psio::wit_trusted_view<g2::Order>(
+            psio::trusted{std::span<const char>(hide(b2.data()), n2)});
+      };
+      VG_CHECK(psio::validate_wit<g2::Order>(std::span<const char>(b2)).ok());
       check_order(get1());
       check_order(get2());
+      check_order(get2t());
       std::printf("# wit: g1 %zu bytes, g2 %zu bytes, %s\n", b1.size(), b2.size(),
                   identical ? "identical" : "DIFFERENT");
       std::vector<std::vector<std::pair<std::string, cell>>> impls;
       impls.push_back(order_ops("g1 view<wit>", get1));
       impls.push_back(order_ops("g2 view<wit>", get2));
+      impls.push_back(order_ops("g2 trusted view<wit>", get2t));
       run_group("wit", std::move(impls));
    }
 
@@ -671,16 +744,62 @@ int main(int argc, char** argv)
       };
       auto getf = [] { return psio1::view<g1::Order, psio1::frac>::from_buffer(hide(bf.data())); };
       auto get2 = [] { return psio::pssz_view<g2::Order>(std::span<const char>(hide(b2.data()), n2)); };
+      auto get2t = [] {
+         return psio::pssz_trusted_view<g2::Order>(
+            psio::trusted{std::span<const char>(hide(b2.data()), n2)});
+      };
       check_order(get1());
       check_order(getf());
       check_order(get2());
+      check_order(get2t());
       std::printf("# pssz: g1 pssz32 %zu bytes, g1 fracpack %zu bytes, g2 pssz %zu bytes\n", n1,
                   bf.size(), n2);
       std::vector<std::vector<std::pair<std::string, cell>>> impls;
       impls.push_back(order_ops<decltype(get1), caps{false, true}>("g1 pssz_view(32)", get1));
       impls.push_back(order_ops("g1 view<frac>", getf));
       impls.push_back(order_ops("g2 view<pssz>", get2));
+      impls.push_back(order_ops("g2 trusted view<pssz>", get2t));
       run_group("pssz", std::move(impls));
+   }
+
+   // ── A table row (psibase-style): g1 pssz32 and fracpack, g2 PSSZ safe and
+   //    trusted; 1, 2 and all 4 fields ─────────────────────────────────────
+   if (want("row"))
+   {
+      static const std::vector<char> b1 =
+         psio1::convert_to_pssz<psio1::frac_format_pssz32>(make_row<g1::Row>());
+      static const std::vector<char> bf = psio1::to_frac(make_row<g1::Row>());
+      static const auto              b2 = psio::to_pssz(make_row<g2::Row>());
+      static const std::size_t       n1 = b1.size(), n2 = b2.size();
+      VG_CHECK(psio::validate_pssz<g2::Row>(std::span<const char>(b2)).ok());
+      auto get1 = [] {
+         return psio1::pssz_view_of<g1::Row, psio1::frac_format_pssz32>(
+            std::span<const char>(hide(b1.data()), n1));
+      };
+      auto getf = [] { return psio1::view<g1::Row, psio1::frac>::from_buffer(hide(bf.data())); };
+      auto get2 = [] { return psio::pssz_view<g2::Row>(std::span<const char>(hide(b2.data()), n2)); };
+      auto get2t = [] {
+         return psio::pssz_trusted_view<g2::Row>(
+            psio::trusted{std::span<const char>(hide(b2.data()), n2)});
+      };
+      const auto check_row = [](auto v) {
+         VG_CHECK(static_cast<std::uint64_t>(v.key()) == 0x0102030405060708ull);
+         VG_CHECK(static_cast<std::uint64_t>(v.balance()) == 1'000'000'007ull);
+         VG_CHECK(static_cast<std::uint64_t>(v.updated()) == 1'700'000'000ull);
+         VG_CHECK(same(std::string_view(v.memo()), "rent, march"));
+      };
+      check_row(get1());
+      check_row(getf());
+      check_row(get2());
+      check_row(get2t());
+      std::printf("# row: g1 pssz32 %zu bytes, g1 fracpack %zu bytes, g2 pssz %zu bytes\n", n1,
+                  bf.size(), n2);
+      std::vector<std::vector<std::pair<std::string, cell>>> impls;
+      impls.push_back(row_ops("g1 pssz_view(32)", get1));
+      impls.push_back(row_ops("g1 view<frac>", getf));
+      impls.push_back(row_ops("g2 view<pssz>", get2));
+      impls.push_back(row_ops("g2 trusted view<pssz>", get2t));
+      run_group("row", std::move(impls));
    }
 
    // ── Set / map lookup: g1 fracpack against g2 PSSZ ──────────────────────
@@ -699,6 +818,17 @@ int main(int argc, char** argv)
       auto gc1 = [] { return psio1::view<g1::Config, psio1::frac>::from_buffer(hide(c1.data())); };
       auto gt2 = [] { return psio::pssz_view<g2::Tagged>(std::span<const char>(hide(t2.data()), tn)); };
       auto gc2 = [] { return psio::pssz_view<g2::Config>(std::span<const char>(hide(c2.data()), cn)); };
+      auto gt2t = [] {
+         return psio::pssz_trusted_view<g2::Tagged>(
+            psio::trusted{std::span<const char>(hide(t2.data()), tn)});
+      };
+      auto gc2t = [] {
+         return psio::pssz_trusted_view<g2::Config>(
+            psio::trusted{std::span<const char>(hide(c2.data()), cn)});
+      };
+      VG_CHECK(gt2t().tags().contains(hit) && !gt2t().tags().contains(miss));
+      VG_CHECK(gc2t().limits().contains(khit) && !gc2t().limits().contains(kmiss));
+      VG_CHECK(gc2t().limits().value_or(khit, 0u) == 1020);
       VG_CHECK(gt1().tags().contains(hit) && !gt1().tags().contains(miss));
       VG_CHECK(gt2().tags().contains(hit) && !gt2().tags().contains(miss));
       VG_CHECK(gc1().limits().contains(std::string_view(khit)) &&
@@ -709,20 +839,28 @@ int main(int argc, char** argv)
 
       measure("assoc", "set-hit",
               {make_cell("g1 frac set_view", [gt1] { consume(gt1().tags().contains(*hide(&hit))); }),
-               make_cell("g2 pssz set view", [gt2] { consume(gt2().tags().contains(*hide(&hit))); })});
+               make_cell("g2 pssz set view", [gt2] { consume(gt2().tags().contains(*hide(&hit))); }),
+               make_cell("g2 trusted set view",
+                         [gt2t] { consume(gt2t().tags().contains(*hide(&hit))); })});
       measure("assoc", "set-miss",
               {make_cell("g1 frac set_view", [gt1] { consume(gt1().tags().contains(*hide(&miss))); }),
-               make_cell("g2 pssz set view", [gt2] { consume(gt2().tags().contains(*hide(&miss))); })});
+               make_cell("g2 pssz set view", [gt2] { consume(gt2().tags().contains(*hide(&miss))); }),
+               make_cell("g2 trusted set view",
+                         [gt2t] { consume(gt2t().tags().contains(*hide(&miss))); })});
       measure("assoc", "map-hit",
               {make_cell("g1 frac map_view",
                          [gc1] { consume(gc1().limits().value_or(std::string_view(*hide(&khit)), 0u)); }),
                make_cell("g2 pssz map view",
-                         [gc2] { consume(gc2().limits().value_or(*hide(&khit), 0u)); })});
+                         [gc2] { consume(gc2().limits().value_or(*hide(&khit), 0u)); }),
+               make_cell("g2 trusted map view",
+                         [gc2t] { consume(gc2t().limits().value_or(*hide(&khit), 0u)); })});
       measure("assoc", "map-miss",
               {make_cell("g1 frac map_view",
                          [gc1] { consume(gc1().limits().contains(std::string_view(*hide(&kmiss)))); }),
                make_cell("g2 pssz map view",
-                         [gc2] { consume(gc2().limits().contains(*hide(&kmiss))); })});
+                         [gc2] { consume(gc2().limits().contains(*hide(&kmiss))); }),
+               make_cell("g2 trusted map view",
+                         [gc2t] { consume(gc2t().limits().contains(*hide(&kmiss))); })});
    }
 
    // ── Cap'n Proto: bytes written by libcapnp ─────────────────────────────
