@@ -20,6 +20,7 @@ import keyword
 import re
 import sys
 import types
+import typing
 from typing import Annotated, Any, Dict, List, NewType, Optional, Tuple, Union
 
 from support import FIXTURE_HANDLERS
@@ -32,6 +33,13 @@ from psio.typed import _class_shape, _enum_shape
 
 class Unsupported(Exception):
     pass
+
+
+class FrozenMap(dict):  # type: ignore[type-arg]
+    """A ``dict`` that can be a key (the program's own hashable mapping: psio builds any ``dict`` subclass)."""
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        return hash(frozenset(self.items()))
 
 
 def spelling(t: Any) -> str:
@@ -405,7 +413,11 @@ class TypedFixture:
             entry = self.resolved(element)["value"]
             if entry.type != "Tuple" or len(entry.value["members"]) != 2:
                 raise Unsupported("a map over something other than 2-tuples")
-            out = Dict[self.of(entry.value["members"][0]), self.of(entry.value["members"][1])]  # type: ignore[misc]
+            key = self.of(entry.value["members"][0])
+            # A key must be hashable: a map used as a key is declared as a hashable dict.
+            if typing.get_origin(key) is dict:
+                key = FrozenMap[typing.get_args(key)]  # type: ignore[misc]
+            out = Dict[key, self.of(entry.value["members"][1])]  # type: ignore[misc]
         specs: List[Any] = []
         if limit is not None:
             specs.append(psio.bounded(limit))

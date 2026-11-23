@@ -8,6 +8,7 @@ from typing import Any
 
 from support import fixture
 from test_pssz_conformance import NO_HANDLER, sources
+from typed_fixture import TypedFixture
 
 import psio
 from psio import PsioError
@@ -210,6 +211,7 @@ class JsonFixture(unittest.TestCase):
                 e = self.rejects(lambda: schema.type(row["root"], width=width), f"{name}: type({width})")
                 self.assertEqual(e.kind, "schema", f"{name}: {e}")
             self.rejects(lambda: schema.with_handlers(handlers={}, require_handlers=True).type(row["root"]), name)
+        typed_accepts = 0
         for row in fx["schema_accepts"]:
             name = row["name"]
             self.assertNotIn(name, names)
@@ -223,6 +225,22 @@ class JsonFixture(unittest.TestCase):
             self.assertEqual(t.json_to_pssz(row["json"], "json").hex(), row["pssz"], f"{name}: json read")
             self.assertEqual(t.json_to_pssz(row["ijson"], "ijson").hex(), row["pssz"], f"{name}: ijson read")
             self.assertEqual(t.to_pssz(t.from_pssz(data)).hex(), row["pssz"], f"{name}: value")
+            # The same row through Python declarations of the row's types.
+            typed = TypedFixture(psio.Schema.from_pssz(bytes.fromhex(row["schema_ir"])).ir).type(row["root"])
+            st = typed.validate_pssz(data)
+            self.assertTrue(st.ok and not st.has_unknown, f"{name}: typed: {st.reason}")
+            self.assertEqual(typed.pssz_to_json(data, "json"), row["json"], f"{name}: typed json")
+            self.assertEqual(typed.pssz_to_json(data, "ijson"), row["ijson"], f"{name}: typed ijson")
+            self.assertEqual(typed.json_to_pssz(row["json"], "json").hex(), row["pssz"], f"{name}: typed json read")
+            self.assertEqual(typed.json_to_pssz(row["ijson"], "ijson").hex(), row["pssz"], f"{name}: typed ijson read")
+            value = typed.from_pssz(data)
+            self.assertEqual(typed.to_pssz(value).hex(), row["pssz"], f"{name}: typed value")
+            self.assertEqual(typed.to_pssz(typed.from_pssz(psio.trusted(data))).hex(), row["pssz"], f"{name}: trusted")
+            self.assertEqual(typed.from_json(typed.to_json(value)), value, f"{name}: typed text")
+            typed_accepts += 1
+        print(f"json-vectors.json schema_accepts: rows={len(fx['schema_accepts'])} schema-driven={len(fx['schema_accepts'])} "
+              f"typed={typed_accepts}")
+        self.assertEqual(typed_accepts, SCHEMA_ACCEPTS)
         self.assertEqual(len(fx["schema_rejects"]), SCHEMA_REJECTS)
         self.assertEqual(len(fx["schema_accepts"]), SCHEMA_ACCEPTS)
 
