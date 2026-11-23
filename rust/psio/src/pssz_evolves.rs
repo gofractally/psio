@@ -5,17 +5,37 @@
 //! const _: () = assert!(psio::pssz::pssz_evolves_from::<AccountV1, AccountV2>());
 //! ```
 //!
-//! `New` evolves from `Old` iff data written for either is readable as the
-//! other under the automatic (type-derived width) profile:
-//!   - New's fields are Old's fields, in order, followed only by `Option`
-//!     fields;
-//!   - the two have the same offset width. An optional field may not be added
-//!     if it would change the type's width: an explicit `max_dynamic_data`
-//!     always rules, and without one the width falls back to the bound
-//!     inferred from the fields, which an appended field can move. Reserve
-//!     room with an explicit cap to evolve;
-//!   - fixed-layout (DWNC) status is unchanged and a DWNC record gains no
-//!     fields.
+//! `New` evolves from `Old` iff the new reader reads every value the old
+//! writer can produce, and the old reader reads every new value that is also
+//! a value of the old type, under the automatic (type-derived width) profile
+//! (docs/pssz-spec.md 7.5, 7.6; docs/pssz-optional-evolution.md):
+//!   1. *Fields.* New's fields are Old's fields, in order, followed only by
+//!      `Option` fields; fixed-layout (DWNC) status is unchanged and a DWNC
+//!      record gains no fields.
+//!   2. *Widths.* The record's offset width is unchanged, and so is the
+//!      width of every list, map, set, array and tuple at and below every
+//!      member. An optional field may not be added if it would change the
+//!      type's width: an explicit `max_dynamic_data` always rules, and
+//!      without one the width falls back to the bound inferred from the
+//!      fields, which an appended field can move. Reserve room with an
+//!      explicit cap to evolve.
+//!   3. *Length bounds.* A bound may only **widen**: at the member and at
+//!      every position below it New's maximum is at least Old's (no bound
+//!      is the widest). Tightening one keeps the bytes of old values and
+//!      makes the new reader reject the old records outside it.
+//!   4. *UTF-8* is the same on both sides: `String` and `RawString` do not
+//!      evolve into each other.
+//!   5. *`sorted` / `unique` / `unique_keys`* are the same on both sides.
+//!   6. *`max_dynamic_data`.* New's cap, if it has one, is at least Old's —
+//!      or, when Old has none, at least Old's inferred bound. Dropping a
+//!      cap is allowed when rule 2 still holds.
+//!   7. *`max_fields`.* If Old has one, New has no more fields than it
+//!      allows and declares a `max_fields` that is not larger.
+//! The relation is deliberately one-directional for bounds and caps:
+//! `pssz_evolves_from::<Old, New>()` does not imply
+//! `pssz_evolves_from::<New, Old>()`. A bound is the same whether it is
+//! written as an annotation (`#[psio(max = N)]`) or as a wrapper type
+//! (`BoundedList<T, N>`): the two are one type in Rust.
 //! A prefix field may itself have evolved (a nested record, or a vector /
 //! array / optional / variant / tuple of one) under the same rules.
 //!
@@ -31,9 +51,8 @@
 //!     and a nested value is not a byte list: none evolves from or into the
 //!     other, although the bytes agree;
 //!   - the maximum of a `BoundedMap` / `BoundedSet` and the byte bound of a
-//!     `Nested<T, V, N>` are part of the type, like the bound of a
-//!     `BoundedList`: a value one side accepts and the other refuses is not
-//!     readable as both.
+//!     `Nested<T, V, N>` are bounds like that of a `BoundedList`: they may
+//!     widen (rule 3), not tighten.
 //! `BTreeMap`, `HashMap` and `BoundedMap` are all maps (likewise the sets):
 //! the container is not on the wire.
 //!
@@ -79,6 +98,16 @@ pub struct Shape {
     /// For an optional: selector form.
     pub selector: bool,
     pub dwnc: bool,
+    /// A record's explicit `max_dynamic_data`.
+    pub cap: Option<usize>,
+    /// A record's inferred bound (`PsszPack::MAX_ENCODED_SIZE`): what a cap
+    /// declared later must admit.
+    pub bound: Option<usize>,
+    /// A record's `max_fields`.
+    pub max_fields: Option<usize>,
+    /// The order constraint of a list or an array (`sorted`, `unique`,
+    /// `unique_keys`): the bits of [`Shape::SORTED`] and its neighbours.
+    pub order: u8,
     pub children: &'static [Shape],
 }
 
@@ -92,8 +121,26 @@ impl Shape {
         optional: false,
         selector: false,
         dwnc: false,
+        cap: None,
+        bound: None,
+        max_fields: None,
+        order: 0,
         children: &[],
     };
+    /// `sorted`: the elements are in non-descending key order.
+    pub const SORTED: u8 = 1;
+    /// `unique`: strictly ascending (with [`Shape::SORTED`]).
+    pub const STRICT: u8 = 2;
+    /// `unique_keys`: no two elements have the same key.
+    pub const UNIQUE_KEYS: u8 = 4;
+    /// A record's cap, inferred bound and field-count cap.
+    pub const fn limits(self, cap: Option<usize>, bound: Option<usize>, max_fields: Option<usize>) -> Shape {
+        Shape { cap, bound, max_fields, ..self }
+    }
+    /// A list or an array under an order constraint.
+    pub const fn ordered(self, order: u8) -> Shape {
+        Shape { order, ..self }
+    }
     pub const fn leaf(name: &'static str, param: usize, fixed: bool) -> Shape {
         Shape { kind: ShapeKind::Leaf, name, param, fixed, ..Shape::OPAQUE }
     }
@@ -148,6 +195,27 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
+const fn option_eq(a: Option<usize>, b: Option<usize>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a == b,
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// A leaf evolves into itself, and a bounded string into the same kind of
+/// string with a bound that is not smaller, or with none (`string<=` /
+/// `raw_string<=` with their maximum in `param`; `string` / `raw_string`).
+const fn leaf_evolves(old: &Shape, new: &Shape) -> bool {
+    if str_eq(old.name, new.name) {
+        let bounded = str_eq(old.name, "string<=") || str_eq(old.name, "raw_string<=");
+        return if bounded { new.param >= old.param } else { old.param == new.param };
+    }
+    // Dropping the bound: the name without its "<=".
+    (str_eq(old.name, "string<=") && str_eq(new.name, "string"))
+        || (str_eq(old.name, "raw_string<=") && str_eq(new.name, "raw_string"))
+}
+
 /// The two shapes describe one type: nothing differs, at any depth. What a
 /// map key or set element must be, since its key encoding orders the entries.
 /// An opaque shape is not known to be the same as anything.
@@ -161,6 +229,9 @@ pub const fn shape_same(a: &Shape, b: &Shape) -> bool {
         || a.optional != b.optional
         || a.selector != b.selector
         || a.dwnc != b.dwnc
+        || !option_eq(a.cap, b.cap)
+        || !option_eq(a.max_fields, b.max_fields)
+        || a.order != b.order
         || a.children.len() != b.children.len()
     {
         return false;
@@ -209,23 +280,28 @@ pub const fn shape_evolves(old: &Shape, new: &Shape) -> bool {
         // A leaf with children is a marked scalar (a time value): the same
         // marker over the same parts.
         ShapeKind::Leaf => {
-            str_eq(old.name, new.name)
-                && old.param == new.param
+            leaf_evolves(old, new)
                 && old.children.len() == new.children.len()
                 && all_evolve(old.children, new.children, old.children.len())
         }
         ShapeKind::Optional => {
             old.selector == new.selector && all_evolve(old.children, new.children, 1)
         }
-        ShapeKind::List => old.param == new.param && all_evolve(old.children, new.children, 1),
-        ShapeKind::Array => old.param == new.param && all_evolve(old.children, new.children, 1),
-        ShapeKind::Map => {
-            old.param == new.param && entry_evolves(&old.children[0], &new.children[0])
+        // A maximum (`param`; `usize::MAX` for none) may widen. The order
+        // constraint is the member's type.
+        ShapeKind::List => {
+            new.param >= old.param && old.order == new.order && all_evolve(old.children, new.children, 1)
         }
-        ShapeKind::Set => old.param == new.param && shape_same(&old.children[0], &new.children[0]),
+        ShapeKind::Array => {
+            old.param == new.param && old.order == new.order && all_evolve(old.children, new.children, 1)
+        }
+        ShapeKind::Map => {
+            new.param >= old.param && entry_evolves(&old.children[0], &new.children[0])
+        }
+        ShapeKind::Set => new.param >= old.param && shape_same(&old.children[0], &new.children[0]),
         // The inner value is a frame of its own: it evolves as a top-level
         // type does.
-        ShapeKind::Nested => old.param == new.param && all_evolve(old.children, new.children, 1),
+        ShapeKind::Nested => new.param >= old.param && all_evolve(old.children, new.children, 1),
         ShapeKind::Variant => {
             old.children.len() == new.children.len()
                 && all_evolve(old.children, new.children, old.children.len())
@@ -245,7 +321,25 @@ pub const fn shape_evolves(old: &Shape, new: &Shape) -> bool {
                 }
                 i += 1;
             }
-            true
+            // The cap: not lowered; one declared later admits everything
+            // the old type could encode. (Its width class is the record's
+            // width, compared above.)
+            let cap = match (old.cap, new.cap) {
+                (_, None) => true,
+                (Some(old), Some(new)) => new >= old,
+                (None, Some(new)) => match old.bound {
+                    Some(bound) => new >= bound,
+                    None => false,
+                },
+            };
+            // The field-count cap is a promise about every later revision:
+            // not exceeded, not raised, not dropped.
+            let fields = match (old.max_fields, new.max_fields) {
+                (None, _) => true,
+                (Some(old), Some(new)) => nn <= old && new <= old,
+                (Some(_), None) => false,
+            };
+            cap && fields
         }
     }
 }

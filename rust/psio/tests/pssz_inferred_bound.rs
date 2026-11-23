@@ -261,8 +261,10 @@ derives! {
 }
 const _: () = {
     use psio::pssz::{pssz_child_wider_than_cap, pssz_evolves_from};
-    // The same width class: a cap can move inside it.
-    assert!(pssz_evolves_from::<Tags255, Tags200>());
+    // The same width class: a cap can be raised inside it, not lowered
+    // (the new reader would reject old values over the new cap).
+    assert!(pssz_evolves_from::<Tags200, Tags255>());
+    assert!(!pssz_evolves_from::<Tags255, Tags200>());
     assert!(pssz_evolves_from::<Tags255, Tags255More>());
     // The record under a cap and without one differ in what lies beneath.
     assert!(!pssz_evolves_from::<Free, Tags255>());

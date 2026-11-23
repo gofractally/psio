@@ -1,6 +1,14 @@
 //! Deployment-time schema checks for the optional-suffix evolution contract.
 //! Readers do not need the writer schema; old/new schemas are compared only
 //! when an upgrade is admitted. Width must stay fixed within the lineage.
+//!
+//! `maxFields` (docs/pssz-spec.md 16) is a promise about every later
+//! revision: the new record has no more fields than the old one's cap
+//! allows, and may lower the cap (to no less than its own field count) but
+//! not raise or drop it. Every other record attribute, and every bound, is
+//! unchanged — this check is stricter than the typed
+//! [`pssz_evolves_from`](crate::pssz::pssz_evolves_from), which lets a
+//! bound widen while no offset width moves.
 use crate::pssz::{PsszError, PsszResult};
 use crate::pssz_schema_ir::{AnyType, AnyValue, Attribute, Member, Schema};
 use serde::{Deserialize, Serialize};
@@ -77,6 +85,31 @@ fn stable(attributes: &[Attribute]) -> bool {
         .iter()
         .any(|a| a.name == "definitionWillNotChange")
 }
+/// A record's attributes agree, `maxFields` aside (it has a rule of its
+/// own: [`max_fields`]).
+fn same_attributes(old: &[Attribute], new: &[Attribute]) -> bool {
+    let rest = |attributes: &'_ [Attribute]| -> Vec<Attribute> {
+        attributes.iter().filter(|a| a.name != "maxFields").cloned().collect()
+    };
+    rest(old) == rest(new)
+}
+/// The `maxFields` rule for a record with `new_count` fields. Both schemas
+/// were validated, so each attribute is a number in 0..=255 and each record
+/// has no more fields than its own.
+fn max_fields(old: &[Attribute], new: &[Attribute], new_count: usize) -> PsszResult<()> {
+    let value = |attributes: &[Attribute]| -> Option<u64> {
+        attributes.iter().find(|a| a.name == "maxFields")?.value.as_deref()?.parse().ok()
+    };
+    match (value(old), value(new)) {
+        (None, _) => Ok(()),
+        (Some(_), None) => Err(PsszError::new("pssz upgrade: maxFields dropped")),
+        (Some(old), Some(new)) if new > old => Err(PsszError::new("pssz upgrade: maxFields raised")),
+        (Some(old), Some(_)) if new_count as u64 > old => {
+            Err(PsszError::new("pssz upgrade: more fields than the original's maxFields"))
+        }
+        _ => Ok(()),
+    }
+}
 impl Checker<'_> {
     fn compare(
         &mut self,
@@ -97,15 +130,12 @@ impl Checker<'_> {
             return Ok(());
         }
         match (&old.value, &new.value) {
-            (AnyValue::Object(a), AnyValue::Object(b)) if a.attributes == b.attributes => self
-                .members(
-                    &a.members,
-                    &b.members,
-                    !stable(&a.attributes),
-                    path,
-                    depth + 1,
-                ),
-            (AnyValue::Struct(a), AnyValue::Struct(b)) if a.attributes == b.attributes => {
+            (AnyValue::Object(a), AnyValue::Object(b)) if same_attributes(&a.attributes, &b.attributes) => {
+                max_fields(&a.attributes, &b.attributes, b.members.len())?;
+                self.members(&a.members, &b.members, !stable(&a.attributes), path, depth + 1)
+            }
+            (AnyValue::Struct(a), AnyValue::Struct(b)) if same_attributes(&a.attributes, &b.attributes) => {
+                max_fields(&a.attributes, &b.attributes, b.members.len())?;
                 self.members(&a.members, &b.members, false, path, depth + 1)
             }
             (AnyValue::Tuple(a), AnyValue::Tuple(b)) => {

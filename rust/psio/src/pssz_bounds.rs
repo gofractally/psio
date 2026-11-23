@@ -50,6 +50,49 @@
 //! | `keys(...)`, `values(...)` | every key, every mapped value of a `BTreeMap` | `keys(...)`, `values(...)` |
 //! | `at(I, ...)` | element `I` of a tuple | `at<I>(...)` |
 //!
+//! | `sorted` | the elements of a `Vec` or an array are in non-descending order | `sorted` |
+//! | `unique` (`sorted_unique`) | ... in strictly ascending order | `unique`, `sorted_unique` |
+//! | `unique_keys` | no two elements have the same key: the element, or element 0 of a tuple element | `unique_keys` |
+//!
+//! The last three constrain the *content* of a list without changing any
+//! byte, width or bound (docs/pssz-spec.md 3.5, "Order constraints"). Order
+//! and equality are those of maps and sets: bytewise comparison of the
+//! elements' `key` encodings, the same in every language. A writer refuses
+//! a value that violates one and every checking reader rejects a frame that
+//! holds one, in pSSZ, Json / IJson text and keys alike. They are not in
+//! the Schema IR: a schema-driven reader does not know them.
+//!
+//! ```
+//! use psio::{PsszPack, PsszUnpack};
+//!
+//! #[derive(Debug, PartialEq, PsszPack, PsszUnpack)]
+//! struct Ranked {
+//!     #[psio(sorted, max = 4)]
+//!     scores: Vec<u32>,
+//!     #[psio(unique_keys)]
+//!     entries: Vec<(String, u32)>,
+//! }
+//! let ok = Ranked { scores: vec![1, 1, 2], entries: vec![("b".into(), 1), ("a".into(), 1)] };
+//! assert_eq!(psio::from_pssz::<Ranked>(&psio::to_pssz(&ok))?, ok);
+//! assert!(psio::try_to_pssz(&Ranked { scores: vec![2, 1], entries: vec![] }).is_err());
+//! let twice = vec![("a".to_string(), 1), ("a".to_string(), 2)];
+//! assert!(psio::try_to_pssz(&Ranked { scores: vec![], entries: twice }).is_err());
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! A record's field count has a cap of its own, `#[psio(max_fields = N)]`
+//! on the struct (docs/pssz-spec.md 16): the record has, and will ever
+//! have, at most N fields (N ≤ 255, the limit every record has). It is
+//! refused where the struct is declared, written as the `maxFields`
+//! attribute of the record's schema, and `pssz_evolves_from` holds every
+//! later revision to it.
+//!
+//! ```compile_fail
+//! #[derive(psio::PsszPack)]
+//! #[psio(max_fields = 1)] // two fields
+//! struct Pair { a: u8, b: u8 }
+//! ```
+//!
 //! The keys nest to any depth (`element(element(max = 4))`), and an `Option`
 //! is looked through: what is written for an optional member or position
 //! applies to its payload. Whether a string is UTF-8 is its type in Rust
@@ -103,7 +146,247 @@ pub struct Entry<K, V>(PhantomData<(K, V)>);
 /// `at(I, ...)`: one annotation per tuple element, as a tuple of markers.
 pub struct At<T>(PhantomData<T>);
 
+/// An order constraint `R` ([`InOrder`], [`Ascending`], [`DistinctKeys`],
+/// [`DistinctFirst`]) on a list or an array whose own annotation is `S`.
+pub struct Order<R, S = Plain>(PhantomData<(R, S)>);
+/// `sorted`: non-descending key order.
+pub struct InOrder;
+/// `unique` / `sorted_unique`: strictly ascending key order.
+pub struct Ascending;
+/// `unique_keys`: no two elements have the same key.
+pub struct DistinctKeys;
+/// `unique_keys` on a list of pairs or tuples: no two have the same
+/// element 0.
+pub struct DistinctFirst;
+
 const VIOLATED: PsszError = PsszError::new("pssz: member length_bound violated");
+const NOT_IN_ORDER: PsszError = PsszError::new("sorted: elements are not in order");
+const NOT_ASCENDING: PsszError = PsszError::new("sorted: elements are not in strictly ascending order");
+const SAME_KEY: PsszError = PsszError::new("unique_keys: two elements have the same key");
+
+/// What an order constraint requires of the elements of a list.
+pub trait Rule<I>: 'static {
+    /// The constraint as bits of `Shape::order`.
+    const ORDER: u8;
+    fn check(items: &[I]) -> PsszResult<()>;
+}
+fn in_order<I: KeyPack>(items: &[I], strict: bool) -> PsszResult<()> {
+    let mut last: Option<Vec<u8>> = None;
+    for item in items {
+        let key = crate::key::key_bytes(item);
+        if let Some(last) = &last {
+            if *last > key || (strict && *last == key) {
+                return Err(if strict { NOT_ASCENDING } else { NOT_IN_ORDER });
+            }
+        }
+        last = Some(key);
+    }
+    Ok(())
+}
+fn distinct(mut keys: Vec<Vec<u8>>) -> PsszResult<()> {
+    keys.sort();
+    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(SAME_KEY);
+    }
+    Ok(())
+}
+impl<I: KeyPack> Rule<I> for InOrder {
+    const ORDER: u8 = Shape::SORTED;
+    fn check(items: &[I]) -> PsszResult<()> {
+        in_order(items, false)
+    }
+}
+impl<I: KeyPack> Rule<I> for Ascending {
+    const ORDER: u8 = Shape::SORTED | Shape::STRICT;
+    fn check(items: &[I]) -> PsszResult<()> {
+        in_order(items, true)
+    }
+}
+impl<I: KeyPack> Rule<I> for DistinctKeys {
+    const ORDER: u8 = Shape::UNIQUE_KEYS;
+    fn check(items: &[I]) -> PsszResult<()> {
+        distinct(items.iter().map(crate::key::key_bytes).collect())
+    }
+}
+/// A pair or tuple, for `unique_keys`: its key is its first element.
+pub trait First {
+    type Head: KeyPack;
+    fn head(&self) -> &Self::Head;
+}
+macro_rules! first {
+    ($($rest:ident),*) => {
+        impl<A: KeyPack, $($rest),*> First for (A, $($rest,)*) {
+            type Head = A;
+            fn head(&self) -> &A {
+                &self.0
+            }
+        }
+    };
+}
+first!();
+first!(B);
+first!(B, C);
+first!(B, C, D);
+first!(B, C, D, E);
+first!(B, C, D, E, G);
+first!(B, C, D, E, G, H);
+first!(B, C, D, E, G, H, I);
+impl<I: First> Rule<I> for DistinctFirst {
+    const ORDER: u8 = Shape::UNIQUE_KEYS;
+    fn check(items: &[I]) -> PsszResult<()> {
+        distinct(items.iter().map(|item| crate::key::key_bytes(item.head())).collect())
+    }
+}
+
+/// The elements of a list or an array.
+pub trait Elements {
+    type Item;
+    fn elements(&self) -> &[Self::Item];
+}
+impl<T> Elements for Vec<T> {
+    type Item = T;
+    fn elements(&self) -> &[T] {
+        self
+    }
+}
+impl<T, const N: usize> Elements for BoundedList<T, N> {
+    type Item = T;
+    fn elements(&self) -> &[T] {
+        &self.0
+    }
+}
+impl<T, const M: usize> Elements for [T; M] {
+    type Item = T;
+    fn elements(&self) -> &[T] {
+        self
+    }
+}
+impl<L: Elements, R> Elements for Ordered<L, R> {
+    type Item = L::Item;
+    fn elements(&self) -> &[L::Item] {
+        self.0.elements()
+    }
+}
+
+/// The type an order constraint describes: the list `L`, whose elements
+/// satisfy `R`. The bytes, the widths, the bound and the schema are `L`'s;
+/// the writer and every checking reader also check the order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ordered<L, R>(pub L, PhantomData<R>);
+impl<L, R> Ordered<L, R> {
+    pub fn new(list: L) -> Self {
+        Self(list, PhantomData)
+    }
+}
+
+impl<F: PsszFormat, L: PsszPack<F> + Elements, R: Rule<L::Item>> PsszPack<F> for Ordered<L, R> {
+    const IS_OPTIONAL: bool = L::IS_OPTIONAL;
+    const OPTIONAL_SELECTOR: bool = L::OPTIONAL_SELECTOR;
+    const MIN_ENCODED_SIZE: usize = L::MIN_ENCODED_SIZE;
+    const MAX_ENCODED_SIZE: Option<usize> = L::MAX_ENCODED_SIZE;
+    const IS_FIXED_SIZE: bool = L::IS_FIXED_SIZE;
+    const FIXED_SIZE: usize = L::FIXED_SIZE;
+    const MAX_DYNAMIC_DATA: Option<usize> = L::MAX_DYNAMIC_DATA;
+    const AUTO_BOUND: Option<usize> = L::AUTO_BOUND;
+    const OFFSET_WIDTH: usize = L::OFFSET_WIDTH;
+    const RECORD_WIDTH_BENEATH: usize = L::RECORD_WIDTH_BENEATH;
+    // The constraint is the member's type: both sides of an evolution have
+    // it (docs/pssz-spec.md 7.5).
+    const SHAPE: Shape = L::SHAPE.ordered(L::SHAPE.order | R::ORDER);
+    fn pssz_is_none(&self) -> bool {
+        self.0.pssz_is_none()
+    }
+    fn pssz_none_bytes() -> Option<&'static [u8]> {
+        L::pssz_none_bytes()
+    }
+    fn pssz_size(&self) -> usize {
+        self.0.pssz_size()
+    }
+    fn pssz_pack(&self, out: &mut Vec<u8>) {
+        self.pssz_pack_checked(out).expect("pssz: the elements violate an order constraint; use try_to_pssz");
+    }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        checked::pack_checked::<F, Self>(self, out)
+    }
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        R::check(self.0.elements())?;
+        self.0.pssz_pack_at_depth(out, depth)
+    }
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        R::check(self.0.elements())?;
+        self.0.pssz_pack_fixed(slot, depth)
+    }
+    fn pssz_size_hint(&self) -> usize {
+        self.0.pssz_size_hint()
+    }
+}
+impl<F: PsszFormat, L: crate::pssz::PsszUnpack<F> + Elements, R: Rule<L::Item>> crate::pssz::PsszUnpack<F>
+    for Ordered<L, R>
+{
+    fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let list = L::pssz_unpack(bytes)?;
+        R::check(list.elements())?;
+        Ok(Self::new(list))
+    }
+    fn pssz_missing_optional() -> PsszResult<Self> {
+        L::pssz_missing_optional().map(Self::new)
+    }
+    // The caller vouches for the bytes: the order is not checked.
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+        Self::new(L::pssz_unpack_trusted(bytes))
+    }
+}
+// The validator does not materialise; an order needs the elements' keys, so
+// such a member is decoded from its span, as a type with an invariant is.
+impl<F: PsszFormat, L: crate::pssz::PsszUnpack<F> + Elements, R: Rule<L::Item>> crate::pssz::PsszValidate<F>
+    for Ordered<L, R>
+{
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        <Self as crate::pssz::PsszUnpack<F>>::pssz_unpack(bytes).map(drop)
+    }
+}
+// Not in the Schema IR (docs/pssz-spec.md 3.5): the schema is the list's.
+impl<L: crate::pssz::schema_ir::ToPsszSchema, R: 'static> crate::pssz::schema_ir::ToPsszSchema for Ordered<L, R> {
+    fn member_attributes() -> Vec<crate::pssz::schema_ir::Attribute> {
+        L::member_attributes()
+    }
+    fn build_schema(
+        builder: &mut crate::pssz::schema_ir::SchemaBuilder,
+    ) -> PsszResult<crate::pssz::schema_ir::AnyType> {
+        L::build_schema(builder)
+    }
+    fn schema(
+        builder: &mut crate::pssz::schema_ir::SchemaBuilder,
+    ) -> PsszResult<crate::pssz::schema_ir::AnyType> {
+        L::schema(builder)
+    }
+}
+
+macro_rules! ordered_bounds {
+    ($([$($generics:tt)*] $list:ty, $item:ty;)*) => {$(
+        impl<T, R, S, $($generics)*> Bounds<Order<R, S>> for $list
+        where
+            $list: Bounds<S>,
+            R: Rule<$item>,
+        {
+            type As = Ordered<<$list as Bounds<S>>::As, R>;
+            fn check(&self) -> PsszResult<()> {
+                <$list as Bounds<S>>::check(self)?;
+                R::check(self)
+            }
+            fn to_as(&self) -> Self::As {
+                Ordered::new(<$list as Bounds<S>>::to_as(self))
+            }
+            fn from_as(described: Self::As) -> Self {
+                <$list as Bounds<S>>::from_as(described.0)
+            }
+        }
+    )*};
+}
+ordered_bounds! {
+    [] Vec<T>, T;
+    [const M: usize] [T; M], T;
+}
 
 /// A value of this type under the annotation `S`.
 pub trait Bounds<S>: Sized {
@@ -315,6 +598,7 @@ through_option! {
     [E, const N: usize] Max<N, E>;
     [E] Each<E>;
     [X] At<X>;
+    [R, X] Order<R, X>;
 }
 
 // A tuple takes its offset width from its bound.
@@ -605,6 +889,34 @@ pack_through_option! {
     [E, const N: usize] Max<N, E>;
     [E] Each<E>;
     [X] At<X>;
+    [R, X] Order<R, X>;
+}
+
+// An ordered list is written as the list its own annotation describes: the
+// order was checked with the bounds, once ([`Described`]).
+macro_rules! ordered_pack {
+    ($([$($generics:tt)*] $list:ty, $item:ty;)*) => {$(
+        impl<F: PsszFormat, T, R, S, $($generics)*> PackAs<F, Order<R, S>> for $list
+        where
+            $list: PackAs<F, S>,
+            R: Rule<$item>,
+        {
+            #[inline]
+            fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+                <$list as PackAs<F, S>>::pack_as(self, out, depth)
+            }
+            fn pack_fixed_as(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+                <$list as PackAs<F, S>>::pack_fixed_as(self, slot, depth)
+            }
+            fn size_hint_as(&self) -> usize {
+                <$list as PackAs<F, S>>::size_hint_as(self)
+            }
+        }
+    )*};
+}
+ordered_pack! {
+    [] Vec<T>, T;
+    [const M: usize] [T; M], T;
 }
 
 macro_rules! tuple_pack {

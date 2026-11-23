@@ -14,6 +14,8 @@
 //! | `psio` | `name = "..."` | item, variant, field | the name of the type in a schema; the name of an enumerator, alternative or member in a schema and in text |
 //! | `psio` | `rename_all = "..."` | item | a case convention for the member names of a struct or the variant names of an enum |
 //! | `psio` | `skip` | field | the field is not a member of the type in any format; a reader fills it with its default |
+//! | `psio` | `max = N`, `element(...)`, `keys(...)`, `values(...)`, `at(I, ...)` | field | length bounds of the member and of the positions below it (`psio::pssz::bounds`) |
+//! | `psio` | `sorted`, `unique` (`sorted_unique`), `unique_keys` | field | the elements of a list or an array are in non-descending / strictly ascending key order, or have pairwise different keys; also inside `element(...)` and friends |
 //! | `psio` | `other` | variant | the catch-all of a field-less `#[repr(int)]` enum |
 //! | `psio` | `max_fields = N` | item | the record has, and will ever have, at most N fields (N ≤ 255); C++ `maxFields(N)` |
 //! | `psio` | `arguments = "named" \| "positional"` | item | the record is a method's argument list (written by `#[psio::interface]`): its text is an object that also reads as the positional array, or the array |
@@ -90,6 +92,14 @@ const KEYS: &[Key] = &[
           because: "bounds the member's values for every format", usage: "values(...)" },
     Key { name: "at", namespace: "psio", sites: &[Site::Field],
           because: "bounds an element of the member for every format", usage: "at(I, ...)" },
+    Key { name: "sorted", namespace: "psio", sites: &[Site::Field],
+          because: "orders the member's elements for every format", usage: "sorted" },
+    Key { name: "unique", namespace: "psio", sites: &[Site::Field],
+          because: "orders the member's elements for every format", usage: "unique" },
+    Key { name: "sorted_unique", namespace: "psio", sites: &[Site::Field],
+          because: "orders the member's elements for every format", usage: "sorted_unique" },
+    Key { name: "unique_keys", namespace: "psio", sites: &[Site::Field],
+          because: "constrains the member's elements for every format", usage: "unique_keys" },
     Key { name: "other", namespace: "psio", sites: &[Site::Variant],
           because: "describes the enum for every format", usage: "other" },
     Key { name: "max_fields", namespace: "psio", sites: &[Site::Item],
@@ -178,6 +188,11 @@ pub(crate) fn reserved_custom_id(id: &str) -> bool {
 /// itself and, nested, on the positions below it.
 #[derive(Default, Clone)]
 pub(crate) struct Bound {
+    /// `sorted` / `unique` (`sorted_unique`): the elements are in key
+    /// order; `Some(true)` is strictly ascending.
+    sorted: Option<bool>,
+    /// `unique_keys`.
+    unique_keys: bool,
     max: Option<u64>,
     element: Option<Box<Bound>>,
     keys: Option<Box<Bound>>,
@@ -206,6 +221,16 @@ impl Bound {
                     return Err(syn::Error::new_spanned(nv, "max is an integer: max = N"));
                 };
                 if self.max.replace(value.base10_parse()?).is_some() {
+                    return Err(duplicate());
+                }
+            }
+            ("sorted", Meta::Path(_)) | ("unique", Meta::Path(_)) | ("sorted_unique", Meta::Path(_)) => {
+                if self.sorted.replace(key != "sorted").is_some() {
+                    return Err(syn::Error::new_spanned(meta, "one of sorted, unique (sorted_unique) is given once"));
+                }
+            }
+            ("unique_keys", Meta::Path(_)) => {
+                if std::mem::replace(&mut self.unique_keys, true) {
                     return Err(duplicate());
                 }
             }
@@ -255,7 +280,13 @@ impl Bound {
                     "at(I, ...) annotates a tuple written out as a tuple type: (A, B, ...)",
                 ));
             };
-            if self.max.is_some() || self.element.is_some() || self.keys.is_some() || self.values.is_some() {
+            if self.max.is_some()
+                || self.element.is_some()
+                || self.keys.is_some()
+                || self.values.is_some()
+                || self.sorted.is_some()
+                || self.unique_keys
+            {
                 return Err(syn::Error::new_spanned(tuple, "a tuple takes at(I, ...) only"));
             }
             let mut specs = Vec::new();
@@ -295,7 +326,7 @@ impl Bound {
         } else {
             None
         };
-        Ok(match (self.max, inner) {
+        let mut spec = match (self.max, inner) {
             (Some(max), Some(inner)) => {
                 let max = max as usize;
                 quote!(#b::Max<#max, #inner>)
@@ -306,11 +337,51 @@ impl Bound {
             }
             (None, Some(inner)) => quote!(#b::Each<#inner>),
             (None, None) => quote!(#b::Plain),
-        })
+        };
+        // The order constraints wrap the list's own annotation: they change
+        // no byte, width or bound.
+        if self.sorted.is_some() || self.unique_keys {
+            let element = match ty {
+                Some(syn::Type::Array(array)) => Some(&*array.elem),
+                Some(list) if is_named(list, "Vec") => type_args(list).first().copied(),
+                _ => None,
+            };
+            if self.unique_keys {
+                // The key of a pair or tuple element is its first element,
+                // so the element type has to be visible here. (`sorted` on
+                // a type that is not a list or an array is a type error:
+                // the bounds are implemented for `Vec` and arrays only.)
+                let Some(element) = element else {
+                    return Err(syn::Error::new(
+                        proc_macro2::Span::call_site(),
+                        "unique_keys constrains the elements of a list or an array written out as Vec<T> or \
+                         [T; N] (the key of a tuple element is its first element); a map or a set has unique \
+                         keys by its type",
+                    ));
+                };
+                let rule = if matches!(ungroup(element), syn::Type::Tuple(tuple) if !tuple.elems.is_empty()) {
+                    quote!(#b::DistinctFirst)
+                } else {
+                    quote!(#b::DistinctKeys)
+                };
+                spec = quote!(#b::Order<#rule, #spec>);
+            }
+            if let Some(strict) = self.sorted {
+                let rule = if strict { quote!(#b::Ascending) } else { quote!(#b::InOrder) };
+                spec = quote!(#b::Order<#rule, #spec>);
+            }
+        }
+        Ok(spec)
     }
 }
 
-const BOUND_KEYS: &str = "a bound is max = N, element(...), keys(...), values(...) or at(I, ...)";
+const BOUND_KEYS: &str = "a member annotation is max = N, element(...), keys(...), values(...), at(I, ...), \
+                          sorted, unique (sorted_unique) or unique_keys";
+
+/// Whether the type is the path type `name<...>` (its last segment).
+fn is_named(ty: &syn::Type, name: &str) -> bool {
+    matches!(ungroup(ty), syn::Type::Path(path) if path.path.segments.last().is_some_and(|last| last.ident == name))
+}
 
 /// A type passed through a `macro_rules!` fragment arrives in a group.
 fn ungroup(mut ty: &syn::Type) -> &syn::Type {
@@ -485,7 +556,7 @@ fn store(out: &mut Attrs, key: &Key, meta: &Meta) -> syn::Result<()> {
             out.rename_all = Some(Case::parse(&text)?);
         }
         "other" => set_flag(&mut out.other, meta)?,
-        "max" | "element" | "keys" | "values" | "at" => {
+        "max" | "element" | "keys" | "values" | "at" | "sorted" | "unique" | "sorted_unique" | "unique_keys" => {
             out.bound.get_or_insert_with(Bound::default).store(meta)?
         }
         "max_dynamic_data" => {

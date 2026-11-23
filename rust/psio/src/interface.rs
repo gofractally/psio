@@ -102,9 +102,43 @@
 //! Each argument record converts to and from its tuple (`From` both ways,
 //! `<args::transfer as Method>::Tuple` names the tuple type).
 //!
-//! In text the two differ: the record is an object keyed by parameter name,
-//! the tuple an array. C++ `method_arg_tuple<I>` is a tuple; use the tuple
-//! type where C++'s text of the arguments is wanted.
+//! # The text of a function's arguments
+//!
+//! In Json / IJson text an argument list has two forms (docs/json.md,
+//! "Method arguments"), the same in every language:
+//!
+//! | the function | written | read |
+//! |---|---|---|
+//! | has parameter names (the default) | an **object** keyed by parameter name, in declaration order | that object by the record rule (any order, the last of a repeated key, unknown keys skipped, a missing `Option` is `None`) **or** the positional array, one element per parameter |
+//! | is declared `#[psio(positional)]` | the positional **array** | the array only |
+//!
+//! ```
+//! #[psio::interface]
+//! pub trait Token {
+//!     fn transfer(&mut self, to: String, amount: u64, memo: Option<String>);
+//!     #[psio(positional)]
+//!     fn add(&mut self, a: u32, b: u32) -> u64;
+//! }
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use psio::json::{decode, Json};
+//! let args = token::args::transfer { to: "bob".into(), amount: 5, memo: None };
+//! assert_eq!(psio::to_json(&args), r#"{"to":"bob","amount":5,"memo":null}"#);
+//! assert_eq!(decode::<Json, token::args::transfer>(r#"{"amount":5,"to":"bob"}"#)?.to, "bob");
+//! assert_eq!(decode::<Json, token::args::transfer>(r#"["bob",5,null]"#)?.amount, 5);
+//! assert_eq!(psio::to_json(&token::args::add { a: 1, b: 2 }), "[1,2]");
+//! assert!(decode::<Json, token::args::add>(r#"{"a":1,"b":2}"#).is_err());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A positional function is C++ `method(name)` without parameter names: its
+//! `MethodInfo::params` is empty, its `Func` names no parameter, and the
+//! members of its argument list are named `"0"`, `"1"`, … in a schema. In
+//! the Schema IR the argument list is an `Object` with the attribute
+//! `tuple` = `"named"` or `"positional"`, which is what tells a
+//! schema-driven codec which of the two rows applies; the bytes are those
+//! of any record. (`Method::Tuple`, the bare tuple type, is always an array
+//! in text.)
 //!
 //! A method with no result (`()`) encodes its result as no bytes, and its
 //! `Func` has no `result`.
@@ -175,7 +209,23 @@
 //! |------|------------------------|
 //! | `#[psio(max = 80)] memo: String` | `attr(memo, utf8 \| max<80>)` |
 //! | `#[pssz(max_dynamic_data = 256)]` on the function | `maxDynamicData(256)` |
+//! | `#[psio(max_fields = 8)]` on the function | `maxFields(8)` |
+//! | `#[psio(positional)]` on the function | `method(name)` with no parameter names |
 //! | `#[psio(returns(max = 32))]` on the function | `returns(utf8 \| max<32>)` |
+//!
+//! `max_fields = N` is the most parameters the function will ever have
+//! (N ≤ 255; a function has at most 255 parameters): more are refused when
+//! the trait is compiled, and the cap is the `maxFields` attribute of the
+//! `Func` and of the argument list's `Object`.
+//!
+//! ```compile_fail
+//! #[psio::interface]
+//! trait Store {
+//!     #[psio(max_fields = 1)] // two parameters
+//!     fn put(&mut self, key: String, value: Vec<u8>);
+//! }
+//! # fn main() {}
+//! ```
 //!
 //! The parameter's annotation is its member's in the argument record and
 //! the cap is the record's `max_dynamic_data`, so the record has the width

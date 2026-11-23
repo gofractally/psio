@@ -633,6 +633,10 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     Some(cap) => { let cap = cap as usize; quote!(::core::option::Option::Some(#cap)) }
                     None => quote!(::core::option::Option::None),
                 };
+                let max_fields = match opts.max_fields {
+                    Some(max) => { let max = max as usize; quote!(::core::option::Option::Some(#max)) }
+                    None => quote!(::core::option::Option::None),
+                };
                 validation_body = record_validate(k, &data.fields, dwnc, &frame, true)?;
                 if unpack {
                     trusted_body = Some(record_decode_trusted(k, &data.fields, quote!(Self), dwnc, &frame)?);
@@ -660,11 +664,14 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                             const MAX_DYNAMIC_DATA: ::core::option::Option<usize> = #cap;
                             const AUTO_BOUND: ::core::option::Option<usize> = match <Self as #pack>::MAX_DYNAMIC_DATA {
                                 ::core::option::Option::Some(cap) => ::core::option::Option::Some(cap),
-                                ::core::option::Option::None => #k::pssz_checked::record_bound(&[
-                                    #((<#types as #mpack>::AUTO_BOUND, <#types as #mpack>::IS_FIXED_SIZE)),*
-                                ], #dwnc),
+                                ::core::option::Option::None => <Self as #pack>::MAX_ENCODED_SIZE,
                             };
-                            const MAX_ENCODED_SIZE: ::core::option::Option<usize> = <Self as #pack>::AUTO_BOUND;
+                            // The bound inferred from the members (C++
+                            // `max_encoded_size<T>()`, docs/pssz-spec.md
+                            // 3.2): a cap is not part of it.
+                            const MAX_ENCODED_SIZE: ::core::option::Option<usize> = #k::pssz_checked::record_bound(&[
+                                #((<#types as #mpack>::AUTO_BOUND, <#types as #mpack>::IS_FIXED_SIZE)),*
+                            ], #dwnc);
                             // A record keeps its own width wherever it appears.
                             const RECORD_WIDTH_BENEATH: usize = <Self as #pack>::OFFSET_WIDTH;
                             const CHILD_WIDER_THAN_CAP: bool = #capped
@@ -672,7 +679,8 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                                     > <Self as #pack>::OFFSET_WIDTH;
                             const SHAPE: #k::pssz::Shape = #k::pssz::Shape::record(
                                 false, #dwnc, <Self as #pack>::OFFSET_WIDTH, <Self as #pack>::IS_FIXED_SIZE,
-                                &[#(<#types as #mpack>::SHAPE),*]);
+                                &[#(<#types as #mpack>::SHAPE),*])
+                                .limits(<Self as #pack>::MAX_DYNAMIC_DATA, <Self as #pack>::MAX_ENCODED_SIZE, #max_fields);
                         },
                     },
                 )

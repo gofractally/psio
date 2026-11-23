@@ -376,8 +376,11 @@ mod evolution {
         assert!(!pssz_evolves_from::<BTreeMap<u32, V1>, BTreeMap<i32, V1>>());
         assert!(!pssz_evolves_from::<BTreeMap<(u8,), u8>, BTreeMap<(u8, Option<u8>), u8>>());
         assert!(pssz_evolves_from::<BTreeMap<(u8, String), u8>, BTreeMap<(u8, String), u8>>());
-        // The maximum is part of the type.
-        assert!(!pssz_evolves_from::<BoundedMap<u32, V1, 4>, BoundedMap<u32, V1, 8>>());
+        // The maximum may widen while no offset width moves, never tighten
+        // (docs/pssz-spec.md 7.5).
+        assert!(pssz_evolves_from::<BoundedMap<u32, V1, 4>, BoundedMap<u32, V1, 8>>());
+        assert!(!pssz_evolves_from::<BoundedMap<u32, V1, 8>, BoundedMap<u32, V1, 4>>());
+        assert!(!pssz_evolves_from::<BoundedMap<u32, V1, 4>, BoundedMap<u32, V1, 4000>>());
         assert!(!pssz_evolves_from::<BoundedMap<u32, V1, 4>, BTreeMap<u32, V1>>());
         assert!(!pssz_evolves_from::<BTreeMap<u32, V1>, BoundedMap<u32, V1, 4>>());
         // A map is not its list of entries, in either direction.
@@ -393,7 +396,8 @@ mod evolution {
         assert!(!pssz_evolves_from::<BTreeSet<u32>, BTreeSet<u64>>());
         assert!(!pssz_evolves_from::<BTreeSet<(u8,)>, BTreeSet<(u8, Option<u8>)>>());
         assert!(!pssz_evolves_from::<BTreeSet<Nested<u32>>, BTreeSet<Nested<u64>>>());
-        assert!(!pssz_evolves_from::<BoundedSet<u32, 4>, BoundedSet<u32, 8>>());
+        assert!(pssz_evolves_from::<BoundedSet<u32, 4>, BoundedSet<u32, 8>>());
+        assert!(!pssz_evolves_from::<BoundedSet<u32, 8>, BoundedSet<u32, 4>>());
         assert!(!pssz_evolves_from::<BoundedSet<u32, 4>, BTreeSet<u32>>());
         assert!(!pssz_evolves_from::<BTreeSet<u32>, Vec<u32>>());
         assert!(!pssz_evolves_from::<Vec<u32>, BTreeSet<u32>>());
@@ -409,8 +413,9 @@ mod evolution {
         assert!(!pssz_evolves_from::<Nested<V2>, Nested<V1>>());
         assert!(!pssz_evolves_from::<Nested<V1>, Nested<Bad>>());
         assert!(!pssz_evolves_from::<Nested<u32>, Nested<u64>>());
-        // The byte bound is part of the type.
-        assert!(!pssz_evolves_from::<Nested<V1, Checked, 64>, Nested<V1, Checked, 128>>());
+        // The byte bound may widen, not tighten.
+        assert!(pssz_evolves_from::<Nested<V1, Checked, 64>, Nested<V1, Checked, 128>>());
+        assert!(!pssz_evolves_from::<Nested<V1, Checked, 128>, Nested<V1, Checked, 64>>());
         assert!(!pssz_evolves_from::<Nested<V1>, Nested<V1, Checked, 64>>());
         // A nested value is not a byte list.
         assert!(!pssz_evolves_from::<Nested<V1>, Vec<u8>>());

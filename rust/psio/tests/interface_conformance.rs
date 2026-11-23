@@ -1,0 +1,453 @@
+//! `conformance/interface-vectors.json` (described in
+//! `conformance/interface-vectors.md`): what a method declaration becomes.
+//!
+//! The interface is declared here in Rust; the fixture is what C++ built
+//! from the same declaration. Every row is checked on the typed path (the
+//! argument records and `Method::result_to_pssz` / `result_from_pssz`) and
+//! on the schema-driven path over the fixture's own schema, and the IR Rust
+//! builds is compared with the fixture's node by node.
+
+use psio::interface::{Interface, Method};
+use psio::json::{self, IJson, Json, JsonText};
+use psio::pssz::dynamic;
+use psio::pssz::schema_ir::{self, AnyType, AnyValue as V, Schema, SchemaBuilder};
+use psio::pssz::{auto_pssz_width, Pssz, PsszPack, RawString};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema, psio::JsonText)]
+pub struct Receipt {
+    pub id: u64,
+    #[psio(max = 32)]
+    pub note: String,
+}
+
+// conformance/interface-vectors.md, "The declaration".
+#[psio::interface(name = "token", package = "iface_conf", derive(Debug, Clone, PartialEq))]
+pub trait Token {
+    #[pssz(max_dynamic_data = 256)]
+    #[psio(max_fields = 8)]
+    fn transfer(
+        &mut self,
+        #[psio(max = 16)] to: String,
+        amount: u64,
+        #[psio(max = 80)] memo: Option<String>,
+    ) -> Receipt;
+    #[psio(returns(max = 4, element(max = 16)))]
+    fn names(&self, limit: u32) -> Vec<String>;
+    #[pssz(max_dynamic_data = 64)]
+    fn note(&mut self, #[psio(max = 62)] text: RawString);
+    #[psio(positional)]
+    fn add(&mut self, a: u32, b: u32) -> u64;
+    fn ping(&mut self);
+    fn batch(&mut self, #[psio(max = 4, element(max = 8))] names: Vec<RawString>, tip: u8) -> bool;
+}
+
+#[derive(serde::Deserialize)]
+struct MethodRow {
+    name: String,
+    params: Vec<String>,
+    named: bool,
+    args: String,
+    result: bool,
+    max_dynamic_data: Option<u64>,
+    max_fields: Option<u64>,
+    width: usize,
+    max_encoded_size: Option<u64>,
+}
+#[derive(serde::Deserialize)]
+struct Row {
+    name: String,
+    kind: String,
+    method: String,
+    pssz: Option<String>,
+    json: Option<String>,
+    ijson: Option<String>,
+    text: Option<String>,
+    #[allow(dead_code)]
+    reason: Option<String>,
+}
+#[derive(serde::Deserialize)]
+struct Fixture {
+    version: u32,
+    interface: String,
+    schema_ir: String,
+    schema_json: String,
+    methods: Vec<MethodRow>,
+    vectors: Vec<Row>,
+}
+
+fn fixture() -> Fixture {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../conformance/interface-vectors.json");
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+fn unhex(hex: &str) -> Vec<u8> {
+    (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect()
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A node with every reference replaced by what it refers to: the two
+/// builders number their anonymous types differently (C++ also inserts the
+/// unbounded types of the function's signature), and an argument list is a
+/// named type here and a named alias of an anonymous one there.
+fn resolved(schema: &Schema, ty: &AnyType) -> AnyType {
+    let go = |ty: &AnyType| Box::new(resolved(schema, ty));
+    let members = |members: &Vec<schema_ir::Member>| {
+        members
+            .iter()
+            .map(|m| schema_ir::Member { name: m.name.clone(), r#type: go(&m.r#type), attributes: m.attributes.clone() })
+            .collect()
+    };
+    AnyType::new(match &ty.value {
+        V::Type(reference) => return resolved(schema, schema.get(&reference.r#type).expect("a known type")),
+        V::Object(o) => V::Object(schema_ir::Object { members: members(&o.members), attributes: o.attributes.clone() }),
+        V::Struct(o) => V::Struct(schema_ir::Struct { members: members(&o.members), attributes: o.attributes.clone() }),
+        V::List(l) => V::List(schema_ir::List { r#type: go(&l.r#type) }),
+        V::BoundedList(l) => V::BoundedList(schema_ir::BoundedList { r#type: go(&l.r#type), maxCount: l.maxCount }),
+        V::Option(o) => V::Option(schema_ir::Optional { r#type: go(&o.r#type) }),
+        V::Custom(c) => V::Custom(schema_ir::Custom { r#type: go(&c.r#type), id: c.id.clone() }),
+        V::Tuple(t) => V::Tuple(schema_ir::Tuple { members: t.members.iter().map(|m| go(m)).collect() }),
+        other => other.clone(),
+    })
+}
+
+#[test]
+fn the_declaration_builds_the_fixture_schema() {
+    let fx = fixture();
+    assert_eq!(fx.version, 1);
+    assert_eq!(fx.interface, token::Tag::NAME);
+    let theirs: Schema = psio::from_pssz(&unhex(&fx.schema_ir)).unwrap();
+    // The schema's two serialized forms are one schema, and it is valid.
+    assert_eq!(json::decode::<Json, Schema>(&fx.schema_json).unwrap(), theirs);
+    assert_eq!(json::try_encode::<Json, _>(&theirs).unwrap(), fx.schema_json);
+    dynamic::validate_schema(&theirs).unwrap();
+
+    let mut builder = SchemaBuilder::new();
+    builder.insert_interface::<token::Tag>().unwrap();
+    // Every argument list is also a named type, `token.<method>`.
+    builder.insert::<token::args::transfer>().unwrap();
+    builder.insert::<token::args::names>().unwrap();
+    builder.insert::<token::args::note>().unwrap();
+    builder.insert::<token::args::add>().unwrap();
+    builder.insert::<token::args::ping>().unwrap();
+    builder.insert::<token::args::batch>().unwrap();
+    let ours = builder.finish();
+    dynamic::validate_schema(&ours).unwrap();
+
+    assert_eq!(ours.package, theirs.package);
+    assert_eq!(ours.interfaces.len(), 1);
+    let (mine, yours) = (&ours.interfaces[0], &theirs.interfaces[0]);
+    assert_eq!(mine.name, yours.name);
+    assert_eq!(mine.type_names, yours.type_names);
+    assert_eq!(mine.attributes, yours.attributes);
+    assert_eq!(mine.funcs.len(), 6);
+    assert_eq!(yours.funcs.len(), 6);
+    for (f, g) in mine.funcs.iter().zip(&yours.funcs) {
+        assert_eq!(f.name, g.name);
+        // maxFields, maxDynamicData, result.* : the same attributes in the
+        // same order.
+        assert_eq!(f.attributes, g.attributes, "{}", f.name);
+        assert_eq!(f.params.len(), g.params.len(), "{}", f.name);
+        for (p, q) in f.params.iter().zip(&g.params) {
+            assert_eq!(p.name, q.name, "{}", f.name);
+            assert_eq!(p.attributes, q.attributes, "{}.{}", f.name, p.name);
+            assert_eq!(resolved(&ours, &p.r#type), resolved(&theirs, &q.r#type), "{}.{}", f.name, p.name);
+        }
+        assert_eq!(
+            f.result.as_ref().map(|ty| resolved(&ours, ty)),
+            g.result.as_ref().map(|ty| resolved(&theirs, ty)),
+            "{}: result",
+            f.name
+        );
+        // The argument list as a type: an Object with `tuple`, then
+        // `maxFields` and `maxDynamicData` when declared.
+        let name = format!("token.{}", f.name);
+        let (mine, yours) = (ours.get(&name).expect("our type"), theirs.get(&name).expect("their type"));
+        assert_eq!(resolved(&ours, mine), resolved(&theirs, yours), "{name}");
+    }
+}
+
+fn method_row<M: Method + PsszPack<Pssz>>(row: &MethodRow) {
+    assert_eq!(M::NAME, row.name);
+    assert_eq!(M::PARAM_NAMES, row.params.iter().map(String::as_str).collect::<Vec<_>>(), "{}", row.name);
+    assert_eq!(M::NAMED, row.named, "{}", row.name);
+    assert_eq!(M::HAS_RESULT, row.result, "{}", row.name);
+    assert_eq!(<M as PsszPack<Pssz>>::MAX_DYNAMIC_DATA.map(|n| n as u64), row.max_dynamic_data, "{}", row.name);
+    assert_eq!(auto_pssz_width::<M>(), row.width, "{}", row.name);
+    // The inferred bound: the cap is not part of it.
+    assert_eq!(<M as PsszPack<Pssz>>::MAX_ENCODED_SIZE.map(|n| n as u64), row.max_encoded_size, "{}", row.name);
+    let info = &token::Tag::METHODS[M::INDEX];
+    assert_eq!((info.name, info.params, info.named, info.has_result), (M::NAME, M::PARAM_NAMES, M::NAMED, M::HAS_RESULT));
+    assert_eq!(row.args, format!("token.{}", row.name));
+}
+
+#[test]
+fn the_methods_are_what_the_fixture_says() {
+    let fx = fixture();
+    let rows: BTreeMap<&str, &MethodRow> = fx.methods.iter().map(|m| (m.name.as_str(), m)).collect();
+    assert_eq!(fx.methods.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), token::Tag::METHODS.iter().map(|m| m.name).collect::<Vec<_>>());
+    method_row::<token::args::transfer>(rows["transfer"]);
+    method_row::<token::args::names>(rows["names"]);
+    method_row::<token::args::note>(rows["note"]);
+    method_row::<token::args::add>(rows["add"]);
+    method_row::<token::args::ping>(rows["ping"]);
+    method_row::<token::args::batch>(rows["batch"]);
+    // The parameter-count cap is the Func's and the argument list's
+    // `maxFields` (compared in the schema test); the fixture restates it.
+    assert_eq!(rows["transfer"].max_fields, Some(8));
+    assert!(fx.methods.iter().filter(|m| m.name != "transfer").all(|m| m.max_fields.is_none()));
+}
+
+/// One row on the typed path. `M` is the method's argument record.
+fn typed<M>(row: &Row) -> Result<(), String>
+where
+    M: Method + JsonText + PartialEq + std::fmt::Debug + psio::pssz::PsszValidate<Pssz>,
+    M::Result: JsonText + PartialEq + std::fmt::Debug,
+{
+    let bytes = row.pssz.as_deref().map(unhex);
+    let texts = |json: &Option<String>, ijson: &Option<String>| -> Result<(String, String), String> {
+        Ok((json.clone().ok_or("no json")?, ijson.clone().ok_or("no ijson")?))
+    };
+    match row.kind.as_str() {
+        "args" => {
+            let bytes = bytes.ok_or("no pssz")?;
+            let (json_text, ijson_text) = texts(&row.json, &row.ijson)?;
+            let value = psio::from_pssz::<M>(&bytes).map_err(|e| format!("from_pssz: {e}"))?;
+            if psio::try_to_pssz(&value).map_err(|e| e.to_string())? != bytes {
+                return Err("re-encoded bytes differ".into());
+            }
+            // Without a cap the arguments are the tuple of the parameters
+            // (a tuple has no cap of its own, so under one the widths differ).
+            if <M as PsszPack<Pssz>>::MAX_DYNAMIC_DATA.is_none() {
+                psio::from_pssz::<M::Tuple>(&bytes).map_err(|e| format!("as the tuple: {e}"))?;
+            }
+            let written = json::try_encode::<Json, _>(&value).map_err(|e| e.to_string())?;
+            if written != json_text {
+                return Err(format!("json is {written}"));
+            }
+            let written = json::try_encode::<IJson, _>(&value).map_err(|e| e.to_string())?;
+            if written != ijson_text {
+                return Err(format!("ijson is {written}"));
+            }
+            if json::decode::<Json, M>(&json_text).as_ref() != Ok(&value)
+                || json::decode::<IJson, M>(&ijson_text).as_ref() != Ok(&value)
+            {
+                return Err("the text does not read back".into());
+            }
+        }
+        "args-accept" => {
+            let bytes = bytes.ok_or("no pssz")?;
+            let text = row.text.as_ref().ok_or("no text")?;
+            for (format, value) in [("json", json::decode::<Json, M>(text)), ("ijson", json::decode::<IJson, M>(text))] {
+                let value = value.map_err(|e| format!("{format}: {e}"))?;
+                if psio::try_to_pssz(&value).map_err(|e| e.to_string())? != bytes {
+                    return Err(format!("{format}: other arguments"));
+                }
+                let canonical = json::try_encode::<Json, _>(&value).map_err(|e| e.to_string())?;
+                if Some(&canonical) != row.json.as_ref() {
+                    return Err(format!("canonical text is {canonical}"));
+                }
+            }
+        }
+        "args-reject" => {
+            let text = row.text.as_ref().ok_or("no text")?;
+            if let Ok(value) = json::decode::<Json, M>(text) {
+                return Err(format!("json accepted {value:?}"));
+            }
+            if let Ok(value) = json::decode::<IJson, M>(text) {
+                return Err(format!("ijson accepted {value:?}"));
+            }
+            if json::validate::<Json, M>(text).is_ok() || json::validate::<IJson, M>(text).is_ok() {
+                return Err("validated".into());
+            }
+        }
+        "args-pssz-reject" => {
+            let bytes = bytes.ok_or("no pssz")?;
+            if let Ok(value) = psio::from_pssz::<M>(&bytes) {
+                return Err(format!("accepted {value:?}"));
+            }
+            if psio::validate_pssz::<M>(&bytes).is_ok() {
+                return Err("validated".into());
+            }
+        }
+        "result" => {
+            let bytes = bytes.ok_or("no pssz")?;
+            let (json_text, ijson_text) = texts(&row.json, &row.ijson)?;
+            // The result is encoded as the type `returns(...)` makes of it.
+            let value = M::result_from_pssz(&bytes).map_err(|e| format!("result_from_pssz: {e}"))?;
+            if M::result_to_pssz(&value).map_err(|e| e.to_string())? != bytes {
+                return Err(format!("result bytes are {}", hex(&M::result_to_pssz(&value).unwrap())));
+            }
+            let written = json::try_encode::<Json, _>(&value).map_err(|e| e.to_string())?;
+            if written != json_text {
+                return Err(format!("json is {written}"));
+            }
+            let written = json::try_encode::<IJson, _>(&value).map_err(|e| e.to_string())?;
+            if written != ijson_text {
+                return Err(format!("ijson is {written}"));
+            }
+            if json::decode::<Json, M::Result>(&json_text).as_ref() != Ok(&value)
+                || json::decode::<IJson, M::Result>(&ijson_text).as_ref() != Ok(&value)
+            {
+                return Err("the text does not read back".into());
+            }
+        }
+        "result-pssz-reject" => {
+            let bytes = bytes.ok_or("no pssz")?;
+            if let Ok(value) = M::result_from_pssz(&bytes) {
+                return Err(format!("accepted {value:?}"));
+            }
+        }
+        other => return Err(format!("unknown kind {other}")),
+    }
+    Ok(())
+}
+
+/// One row on the schema-driven path, over the fixture's own schema: the
+/// root is `token.<method>` for arguments and `Func.result` for a result.
+fn schema_driven(schema: &Schema, row: &Row) -> Result<(), String> {
+    let func = schema.interfaces[0].funcs.iter().find(|f| f.name == row.method).ok_or("no such method")?;
+    let root = if row.kind.starts_with("result") {
+        func.result.as_deref().cloned().ok_or("the method has no result")?
+    } else {
+        AnyType::named(format!("token.{}", row.method))
+    };
+    let bytes = row.pssz.as_deref().map(unhex);
+    let text = |t: &Option<String>| t.clone().ok_or("the row lacks a text");
+    match row.kind.as_str() {
+        "args" | "result" => {
+            let bytes = bytes.ok_or("no pssz")?;
+            if dynamic::validate(schema, &root, &bytes) != Ok(false) {
+                return Err("the frame does not validate".into());
+            }
+            let (json_text, ijson_text) = (text(&row.json)?, text(&row.ijson)?);
+            let (written, _) = dynamic::json::pssz_to_json::<Json>(schema, &root, &bytes).map_err(|e| e.to_string())?;
+            if written != json_text {
+                return Err(format!("json is {written}"));
+            }
+            let (written, _) = dynamic::json::pssz_to_json::<IJson>(schema, &root, &bytes).map_err(|e| e.to_string())?;
+            if written != ijson_text {
+                return Err(format!("ijson is {written}"));
+            }
+            if dynamic::json::json_to_pssz::<Json>(schema, &root, json_text.as_bytes()).as_deref() != Ok(&bytes[..])
+                || dynamic::json::json_to_pssz::<IJson>(schema, &root, ijson_text.as_bytes()).as_deref() != Ok(&bytes[..])
+            {
+                return Err("the text does not read back".into());
+            }
+        }
+        "args-accept" => {
+            let bytes = bytes.ok_or("no pssz")?;
+            let source = text(&row.text)?;
+            let a = dynamic::json::json_to_pssz::<Json>(schema, &root, source.as_bytes()).map_err(|e| e.to_string())?;
+            let b = dynamic::json::json_to_pssz::<IJson>(schema, &root, source.as_bytes()).map_err(|e| e.to_string())?;
+            if a != bytes || b != bytes {
+                return Err("other arguments".into());
+            }
+            let (canonical, _) = dynamic::json::pssz_to_json::<Json>(schema, &root, &a).map_err(|e| e.to_string())?;
+            if Some(&canonical) != row.json.as_ref() {
+                return Err(format!("canonical text is {canonical}"));
+            }
+        }
+        "args-reject" => {
+            let source = text(&row.text)?;
+            if dynamic::json::json_to_pssz::<Json>(schema, &root, source.as_bytes()).is_ok()
+                || dynamic::json::json_to_pssz::<IJson>(schema, &root, source.as_bytes()).is_ok()
+            {
+                return Err("accepted".into());
+            }
+        }
+        "args-pssz-reject" | "result-pssz-reject" => {
+            let bytes = bytes.ok_or("no pssz")?;
+            if dynamic::validate(schema, &root, &bytes).is_ok() {
+                return Err("validated".into());
+            }
+            if dynamic::decode_exact::<Pssz>(schema, &root, &bytes).is_ok() {
+                return Err("decoded".into());
+            }
+        }
+        other => return Err(format!("unknown kind {other}")),
+    }
+    Ok(())
+}
+
+#[test]
+fn every_row_holds_typed_and_schema_driven() {
+    let fx = fixture();
+    let schema: Schema = psio::from_pssz(&unhex(&fx.schema_ir)).unwrap();
+    let mut failures = Vec::new();
+    let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+    for row in &fx.vectors {
+        *kinds.entry(row.kind.as_str()).or_default() += 1;
+        let result = match row.method.as_str() {
+            "transfer" => typed::<token::args::transfer>(row),
+            "names" => typed::<token::args::names>(row),
+            "note" => typed::<token::args::note>(row),
+            "add" => typed::<token::args::add>(row),
+            "ping" => typed::<token::args::ping>(row),
+            "batch" => typed::<token::args::batch>(row),
+            other => Err(format!("unknown method {other}")),
+        };
+        if let Err(why) = result {
+            failures.push(format!("{} (typed): {why}", row.name));
+        }
+        if let Err(why) = schema_driven(&schema, row) {
+            failures.push(format!("{} (schema): {why}", row.name));
+        }
+    }
+    assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
+    // Nothing skipped: every row of every kind, on both paths.
+    let want: BTreeMap<&str, usize> = [
+        ("args", 13),
+        ("args-accept", 11),
+        ("args-reject", 17),
+        ("args-pssz-reject", 4),
+        ("result", 7),
+        ("result-pssz-reject", 3),
+    ]
+    .into();
+    assert_eq!(kinds, want);
+    assert_eq!(fx.vectors.len(), 55);
+    assert_eq!(fx.methods.len(), 6);
+}
+
+/// Dispatch reads the arguments the fixture pins and answers with the
+/// result's bounded encoding.
+#[test]
+fn dispatch_speaks_the_fixture_bytes() {
+    struct Ledger;
+    impl Token for Ledger {
+        fn transfer(&mut self, to: String, amount: u64, memo: Option<String>) -> Receipt {
+            Receipt { id: amount + 2, note: format!("{to}{}", memo.map_or(String::new(), |m| format!(":{m}"))) }
+        }
+        fn names(&self, limit: u32) -> Vec<String> {
+            ["alice", "bob", "carol", "dave", "eve"].iter().take(limit as usize).map(|s| s.to_string()).collect()
+        }
+        fn note(&mut self, _text: RawString) {}
+        fn add(&mut self, a: u32, b: u32) -> u64 {
+            a as u64 + b as u64
+        }
+        fn ping(&mut self) {}
+        fn batch(&mut self, names: Vec<RawString>, _tip: u8) -> bool {
+            !names.is_empty()
+        }
+    }
+    let mut ledger = Ledger;
+    // result/names/two: a 1-byte offset table, from `returns(...)`.
+    let reply = token::dispatch_name(&mut ledger, "names", &unhex("0402000000")).unwrap();
+    assert_eq!(hex(&reply), "0207616c696365626f62");
+    // Five names are over the result's bound: the result has no encoding.
+    assert!(matches!(
+        token::dispatch_name(&mut ledger, "names", &unhex("0405000000")),
+        Err(psio::interface::DispatchError::Result(_))
+    ));
+    // args/add/sum, args/ping/nothing, args/batch/two.
+    assert_eq!(hex(&token::dispatch_name(&mut ledger, "add", &unhex("080100000002000000")).unwrap()), "0300000000000000");
+    assert_eq!(token::dispatch_name(&mut ledger, "ping", &unhex("00")).unwrap(), b"");
+    assert_eq!(token::dispatch_name(&mut ledger, "batch", &unhex("0202070203616263")).unwrap(), [1]);
+    // args-pssz-reject/transfer/to_over_bound.
+    assert!(matches!(
+        token::dispatch_name(&mut ledger, "transfer", &unhex("0a000a0001000000000000006161616161616161616161616161616161")),
+        Err(psio::interface::DispatchError::Arguments(_))
+    ));
+}
