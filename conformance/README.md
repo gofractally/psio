@@ -251,3 +251,13 @@ The rules the rows pin:
 - For every `n = method_to_number(s) != 0`:
   `method_to_number(number_to_method(n)) == n`. For every
   `n = name_to_number(s) != 0`: `number_to_name(n) == s`.
+
+## Interfaces and method arguments
+
+`interface-vectors.json` (described in `interface-vectors.md`; emitted by
+`psio_interface_conformance_emit`, ctest `psio_interface_conformance_regen`)
+pins the `Interface` / `Func` Schema IR of a method declaration — names,
+parameter names and types, results, parameter bounds, `returns(...)`, the
+argument cap and the parameter-count cap — and the bytes and text of
+argument lists (a named object or a positional array, `docs/json.md`
+"Method arguments") and of results.

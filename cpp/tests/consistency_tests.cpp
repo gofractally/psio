@@ -1322,3 +1322,52 @@ TEST_CASE("method arguments in JSON: named object or positional array", "[consis
               .ok());
    CHECK(text == "[1,2]");
 }
+
+// ── A result is encoded as the type returns(...) makes of it ─────────────
+namespace cons_result
+{
+   struct Api
+   {
+      std::vector<std::string> names(std::uint32_t limit) const;
+      std::string              plain() const;
+      PSIO_REFLECT(Api,
+                   method(names, limit, returns(max<4> | element(utf8 | max<16>))),
+                   method(plain))
+   };
+}  // namespace cons_result
+
+TEST_CASE("a method result has the bytes of its returns(...) type", "[consistency][result]")
+{
+   using cons_result::Api;
+   const std::vector<std::string> two{"alice", "bob"};
+   std::vector<char>              bytes;
+   REQUIRE(psio::encode_method_result<Api, 0>(two, bytes).ok());
+   // BoundedList(BoundedString(16), 4): a 1-byte offset table ...
+   CHECK(psio::to_hex(std::span<const char>{bytes}) == "0207616C696365626F62");
+   CHECK(bytes == [&] {
+      psio::bounded<psio::utf8_string<16>, 4> same;
+      same.push_back(psio::utf8_string<16>{"alice"});
+      same.push_back(psio::utf8_string<16>{"bob"});
+      auto b = psio::to_pssz(same);
+      return std::vector<char>(b.begin(), b.end());
+   }());
+   // ... not the 4-byte one of the plain C++ type.
+   CHECK(psio::to_pssz(two).size() == 8 + 8);
+   CHECK(psio::validate_method_result<Api, 0>(bytes).ok());
+   std::vector<std::string> back;
+   REQUIRE(psio::decode_method_result<Api, 0>(bytes, back).ok());
+   CHECK(back == two);
+   // Outside returns(...): no encoding, and its frame is rejected.
+   std::vector<char> none;
+   CHECK(!psio::encode_method_result<Api, 0>(std::vector<std::string>(5, "a"), none).ok());
+   CHECK(!psio::encode_method_result<Api, 0>(std::vector<std::string>{"\xff"}, none).ok());
+   CHECK(none.empty());
+   const auto over = psio::detail::pssz_impl::encode_method_result_unchecked<Api, 0>(
+      std::vector<std::string>(5, "a"));
+   CHECK(!psio::validate_method_result<Api, 0>(over).ok());
+   CHECK(!psio::decode_method_result<Api, 0>(over, back).ok());
+   // Without returns(...) it is the plain codec of the result type.
+   std::vector<char> plain;
+   REQUIRE(psio::encode_method_result<Api, 1>(std::string{"hi"}, plain).ok());
+   CHECK(plain == std::vector<char>{'h', 'i'});
+}

@@ -1086,3 +1086,13 @@ psio_consistency_compile_fail(transparent_text_form CONS_FAIL_TRANSPARENT_SORTED
    "${PSIO_CONS_TRANSPARENT}")
 psio_consistency_compile_fail(transparent_max_on_int CONS_FAIL_TRANSPARENT_MAX_ON_INT
    "${PSIO_CONS_TRANSPARENT}")
+
+# Shared cross-language interface fixture (conformance/interface-vectors.json):
+# the Interface / Func IR of a method declaration, and the bytes and text of
+# its argument lists and results.
+set(PSIO_INTERFACE_VECTORS ${CMAKE_SOURCE_DIR}/conformance/interface-vectors.json)
+add_executable(psio_interface_conformance_emit interface_conformance_emit.cpp)
+target_link_libraries(psio_interface_conformance_emit PRIVATE psio)
+target_compile_features(psio_interface_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_interface_conformance_regen
+         COMMAND psio_interface_conformance_emit --check ${PSIO_INTERFACE_VECTORS})

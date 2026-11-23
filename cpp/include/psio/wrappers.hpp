@@ -877,9 +877,11 @@ namespace psio {
    };
 
    // The annotations returns(...) lists for method I, and their value-side
-   // check: a return value has no enclosing record, so whoever packs one
-   // checks it with this (the bytes of a bare string or list do not depend
-   // on its bound).
+   // check. returns(...) makes the result a bounded type: its bytes are that
+   // type's (a bounded list of variable elements has the offset table of its
+   // own bound), so a result is written and read with
+   // psio::encode_method_result / validate_method_result /
+   // decode_method_result (pssz.hpp), which run this check.
    template <typename T, std::size_t I>
    inline constexpr auto method_result_annotations =
       reflect<T>::template method_annotations<I>.result;

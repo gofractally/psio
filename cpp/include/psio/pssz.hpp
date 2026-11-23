@@ -3897,6 +3897,102 @@ namespace psio {
       return codec_ok();
    }
 
+   // ── A method's return value ───────────────────────────────────────────
+   //
+   // `returns(specs)` makes the result of method I of T a bounded type, as a
+   // parameter's attr does (docs/pssz-spec.md 3.5, 16): the Schema IR gives
+   // the function that type as its result, and the result's bytes are that
+   // type's — a `returns(max<4> | element(utf8 | max<16>))` list of strings
+   // has the 1-byte offset table of BoundedList(BoundedString(16), 4), not
+   // the 4-byte one of a plain std::vector<std::string>. These three are the
+   // codec of a result as that type (automatic profile): what a dispatcher
+   // writes and a caller reads. Without returns(...) they are the plain
+   // codec of the result type.
+   namespace detail::pssz_impl
+   {
+      template <typename T, std::size_t I>
+      using method_result_t = std::remove_cvref_t<typename ::psio::reflect<T>::template method_result<I>>;
+      template <typename T, std::size_t I>
+      using method_result_ann = ann::holder_ann<::psio::detail::method_result_holder<T, I>>;
+      // The offset width of the result's own table / header.
+      template <typename T, std::size_t I>
+      inline constexpr std::size_t method_result_width_v =
+         width_for<method_result_t<T, I>, method_result_ann<T, I>>();
+
+      // The bytes, whatever the value: for tests that need the frame of a
+      // result outside its bounds.
+      template <typename T, std::size_t I>
+      std::vector<char> encode_method_result_unchecked(const method_result_t<T, I>& value)
+      {
+         using R = method_result_t<T, I>;
+         using A = method_result_ann<T, I>;
+         constexpr std::size_t W = method_result_width_v<T, I>;
+         const std::size_t       total = size_of_v<W, true, R, A>(value, nullptr);
+         std::vector<char>       out(total);
+         ::psio::fast_buf_stream sink(out.data(), total);
+         encode_value<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
+         return out;
+      }
+   }  // namespace detail::pssz_impl
+
+   // Appends the encoding of the result of method I of T, or says why the
+   // value has none (outside returns(...), an invariant, depth, ...).
+   template <typename T, std::size_t I>
+   [[nodiscard]] codec_status encode_method_result(
+      const detail::pssz_impl::method_result_t<T, I>& value, std::vector<char>& out)
+   {
+      namespace pz = detail::pssz_impl;
+      using R      = pz::method_result_t<T, I>;
+      using A      = pz::method_result_ann<T, I>;
+      constexpr std::size_t W = pz::method_result_width_v<T, I>;
+      if (auto status = pz::check_encode_depth_impl(value, 0, {}); !status.ok())
+         return status;
+      if (auto status = ::psio::check_method_result<T, I>(value, "pssz"); !status.ok())
+         return status;
+      pz::size_check    check;
+      const std::size_t total = pz::size_of_v<W, true, R, A>(value, &check);
+      pz::enforce_max_dynamic<R>(total, &check);
+      if (check.failure)
+         return codec_fail(check.failure, 0, "pssz");
+      const std::size_t start = out.size();
+      out.resize(start + total);
+      ::psio::fast_buf_stream sink(out.data() + start, total);
+      pz::encode_value<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
+      return codec_ok();
+   }
+
+   // Checks `bytes` as the result of method I of T.
+   template <typename T, std::size_t I>
+   [[nodiscard]] codec_status validate_method_result(std::span<const char> bytes) noexcept
+   {
+      namespace pz = detail::pssz_impl;
+      using R      = pz::method_result_t<T, I>;
+      using A      = pz::method_result_ann<T, I>;
+      constexpr std::size_t W = pz::method_result_width_v<T, I>;
+      if (auto cap = pz::check_max_dynamic<R>(bytes); !cap.ok())
+         return cap;
+      pz::validate_flags flags;
+      return pz::validate_value<W, true, R, A>(bytes, 0, bytes.size(), 0, &flags);
+   }
+
+   // Validates and decodes the result of method I of T.
+   template <typename T, std::size_t I>
+   [[nodiscard]] codec_status decode_method_result(std::span<const char> bytes,
+                                                   detail::pssz_impl::method_result_t<T, I>& out)
+   {
+      namespace pz = detail::pssz_impl;
+      using R      = pz::method_result_t<T, I>;
+      using A      = pz::method_result_ann<T, I>;
+      constexpr std::size_t W = pz::method_result_width_v<T, I>;
+      if (auto status = validate_method_result<T, I>(bytes); !status.ok())
+         return status;
+      out = R{};
+      pz::decode_into<W, true, R, A>(bytes, 0, bytes.size(), out);
+      // sorted / unique in returns(...) compare whole elements: checked on
+      // the value, like a record member's.
+      return ::psio::check_method_result<T, I>(out, "pssz");
+   }
+
 }  // namespace psio
 
 #include <psio/detail/pssz_assoc.hpp>
