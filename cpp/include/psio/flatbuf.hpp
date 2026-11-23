@@ -1,39 +1,93 @@
 #pragma once
 //
-// psio/flatbuf.hpp — native (zero-dep) FlatBuffer format tag.
+// psio/flatbuf.hpp — FlatBuffers, the native wire format.
 //
-// Produces a wire-compatible FlatBuffer buffer without depending on
-// the Google FlatBuffers runtime. Intended to be byte-identical to
-// psio/flatbuf_lib.hpp on the shapes they both support — this is
-// what lets a consumer freely swap between native and library paths
-// during migration.
+// `psio::flatbuf` reads and writes the encoding the official implementation
+// uses (https://flatbuffers.dev/internals/): a root offset, tables found
+// through vtables, inline structs, strings, vectors, unions, optional
+// scalars, a file identifier, a size prefix. No dependency on the
+// FlatBuffers library. A buffer written here is read by code `flatc`
+// generates for the matching schema, and the reverse
+// (tests/flatbuf_interop_tests.cpp); for the shapes tested there the bytes
+// are the ones the official object API (`T::Pack`) writes.
 //
-// MVP scope (same as flatbuf_lib):
-//   - primitives (arithmetic + bool)
-//   - std::string
-//   - std::vector of arithmetic / std::string / nested tables
-//   - std::optional<arithmetic | bool | string>
-//   - reflected records (root or nested tables)
+//   auto bytes = psio::to_flatbuf(order);                 // std::vector<char>
+//   auto st    = psio::validate_flatbuf<Order>(bytes);    // the verifier
+//   auto back  = psio::from_flatbuf<Order>(bytes);        // validates, then decodes
+//   psio::flatbuf_view<Order> v{bytes};                   // psio/flatbuf_view.hpp
 //
-// Wire reference: FlatBuffers binary format spec
-// (https://flatbuffers.dev/internals.html). Field layout is encoded
-// via PSIO_REFLECT order — field I maps to vtable voffset 4 + 2*I.
+// How a C++ type maps (docs/flatbuffers.md has the table and the reasons):
+//
+//   bool, integers, float, double      bool, byte … ulong, float, double
+//   enum                               an enum of its underlying type
+//   std::string                        string
+//   std::vector<T>                     [T]: scalars, structs, strings, tables
+//   std::array<T, N>                   in a struct: a fixed array [T:N];
+//                                      in a table: a vector of exactly N
+//   reflected record                   table
+//   reflected record that is           struct (fixed size, inline, no vtable)
+//     definitionWillNotChange() and
+//     holds only scalars / arrays /
+//     such records
+//   std::optional<scalar>              an optional scalar (`= null`)
+//   std::optional<anything else>       the field; absent is "no value"
+//   std::variant<A, B, ...>            union of tables A, B, …; a leading
+//                                      std::monostate is NONE
+//   std::set<K>                        [K], sorted (K: scalar or string)
+//   std::map<K, V>                     [Entry], sorted by key, where
+//                                      table Entry { key:K (key); value:V; }
+//
+// Field ids. The members of a table take vtable slots in ascending order of
+// their field numbers (declaration position unless `attr(member, field<N>)`
+// says otherwise — psio/detail/field_number.hpp). A union takes two
+// consecutive slots (type, then value), as in a `.fbs` file. A member
+// annotated `deprecated` keeps its slot and is neither written nor read.
+// Struct members are laid out in declaration order with natural alignment.
+//
+// Defaults. A scalar member's default is its member initialiser: a value
+// equal to it is not written and an absent field reads as it. (Floats are
+// compared by bits, so -0.0 is written where the default is 0.0.) A string,
+// vector, set or map that is empty is not written; a nested table always
+// is. An engaged std::optional is always written.
+//
+// Validation is typed and safe on arbitrary bytes: `validate_flatbuf<T>`
+// follows everything a T can reach and checks bounds, alignment, vtables,
+// field offsets against the table's size, string terminators, vector
+// lengths, union types, the order of set / map keys — under a depth limit
+// and a table budget (the official verifier's defaults). Offsets are
+// unsigned and point forward, so a buffer cannot contain a cycle; the
+// budget bounds the work a buffer that shares sub-objects can cause.
+//
+// Not supported: vectors of unions, unions of structs or strings, nested
+// vectors without a wrapping table (FlatBuffers has none either), shared
+// strings on write, `nested_flatbuffer`, `force_align`, 64-bit offsets,
+// flexbuffers.
 
+#include <psio/adapter.hpp>
+#include <psio/annotate.hpp>
 #include <psio/cpo.hpp>
-#include <psio/detail/validate_depth.hpp>
+#include <psio/detail/field_number.hpp>
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
-#include <psio/adapter.hpp>
 #include <psio/reflect.hpp>
+#include <psio/validate_strict_walker.hpp>
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace psio {
@@ -42,1166 +96,1676 @@ namespace psio {
 
    namespace detail::flatbuf_impl {
 
-      template <typename T>
-      concept Record = ::psio::Reflected<T>;
+      static_assert(std::endian::native == std::endian::little,
+                    "psio::flatbuf reads and writes little-endian values in place");
+
+      // The largest buffer the format allows (offsets are 32 bits, and a
+      // signed offset must reach every vtable).
+      inline constexpr std::size_t max_buffer_size = 0x7fffffff;
+
+      // ── Shapes ────────────────────────────────────────────────────────
 
       template <typename T>
-      struct is_optional : std::false_type {};
-      template <typename T>
-      struct is_optional<std::optional<T>> : std::true_type {};
+      inline constexpr bool is_vector_v = false;
+      template <typename E, typename A>
+      inline constexpr bool is_vector_v<std::vector<E, A>> = true;
 
       template <typename T>
-      struct is_vector : std::false_type {};
-      template <typename T, typename A>
-      struct is_vector<std::vector<T, A>> : std::true_type {};
+      inline constexpr bool is_array_v = false;
+      template <typename E, std::size_t N>
+      inline constexpr bool is_array_v<std::array<E, N>> = true;
 
-      template <typename T, typename = void>
-      struct is_table : std::false_type {};
       template <typename T>
-      struct is_table<T, std::void_t<decltype(::psio::reflect<T>::member_count)>>
-         : std::bool_constant<!std::is_arithmetic_v<T> &&
-                              !std::is_same_v<T, std::string>> {};
+      inline constexpr bool is_optional_v = false;
+      template <typename E>
+      inline constexpr bool is_optional_v<std::optional<E>> = true;
 
-      // Back-to-front buffer: writes grow toward the front, so finished
-      // offsets count *backwards* from the buffer's "end" (its capacity).
+      template <typename T>
+      inline constexpr bool is_variant_v = false;
+      template <typename... Ts>
+      inline constexpr bool is_variant_v<std::variant<Ts...>> = true;
+
+      // Sorted containers. Only the default order is the order FlatBuffers
+      // key lookup assumes, so only std::less is accepted.
+      template <typename T>
+      inline constexpr bool is_set_v = false;
+      template <typename K, typename A>
+      inline constexpr bool is_set_v<std::set<K, std::less<K>, A>> = true;
+
+      template <typename T>
+      inline constexpr bool is_map_v = false;
+      template <typename K, typename V, typename A>
+      inline constexpr bool is_map_v<std::map<K, V, std::less<K>, A>> = true;
+
+      template <typename T>
+      concept Record = ::psio::Reflected<T> && std::is_class_v<T>;
+
+      // A value stored inline in 1, 2, 4 or 8 bytes.
+      template <typename T>
+      concept Scalar = (std::is_integral_v<T> || std::is_same_v<T, float> ||
+                        std::is_same_v<T, double> || std::is_enum_v<T>) &&
+                       sizeof(T) <= 8;
+
+      template <typename T>
+      struct array_traits;
+      template <typename E, std::size_t N>
+      struct array_traits<std::array<E, N>>
+      {
+         using element                      = E;
+         static constexpr std::size_t count = N;
+      };
+
+      // A value of fixed size that may be a struct member: a scalar, a
+      // fixed array of such, a struct.
+      template <typename T>
+      consteval bool fixed_check();
+
+      template <typename T>
+      inline constexpr bool is_fixed_v = fixed_check<T>();
+
+      template <typename T>
+      consteval bool struct_check()
+      {
+         if constexpr (!Record<T>)
+            return false;
+         else if constexpr (!::psio::is_dwnc_v<T> || ::psio::reflect<T>::member_count == 0)
+            return false;
+         else
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (fixed_check<std::remove_cvref_t<
+                          typename ::psio::reflect<T>::template member_type<Is>>>() &&
+                       ...);
+            }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
+      }
+
+      template <typename T>
+      consteval bool fixed_check()
+      {
+         if constexpr (Scalar<T>)
+            return true;
+         else if constexpr (is_array_v<T>)
+            return array_traits<T>::count > 0 &&
+                   !is_array_v<typename array_traits<T>::element> &&
+                   fixed_check<typename array_traits<T>::element>();
+         else
+            return struct_check<T>();
+      }
+
+      // A FlatBuffers struct: fixed size, stored inline, no vtable.
+      template <typename T>
+      inline constexpr bool is_struct_v = struct_check<T>();
+
+      template <typename T>
+      concept Struct = is_struct_v<T>;
+
+      template <typename T>
+      concept Table = Record<T> && !is_struct_v<T>;
+
+      // ── Struct layout ─────────────────────────────────────────────────
+
+      template <typename F>
+      consteval std::size_t fixed_size();
+      template <typename F>
+      consteval std::size_t fixed_align();
+
+      template <std::size_t N>
+      struct struct_layout_data
+      {
+         std::array<std::uint32_t, N> offset{};
+         std::uint32_t                size  = 0;
+         std::uint32_t                align = 1;
+      };
+
+      // Members in declaration order, each at its natural alignment; the
+      // size is rounded up to the largest alignment. (What `flatc` computes
+      // for a struct without force_align.)
+      template <Struct T>
+      struct struct_layout
+      {
+         using R                            = ::psio::reflect<T>;
+         static constexpr std::size_t count = R::member_count;
+         template <std::size_t I>
+         using member = std::remove_cvref_t<typename R::template member_type<I>>;
+
+         static constexpr struct_layout_data<count> value = [] {
+            struct_layout_data<count> r{};
+            std::uint32_t             pos = 0;
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               (([&] {
+                   const auto a = static_cast<std::uint32_t>(fixed_align<member<Is>>());
+                   pos          = (pos + a - 1) & ~(a - 1);
+                   r.offset[Is] = pos;
+                   pos += static_cast<std::uint32_t>(fixed_size<member<Is>>());
+                   if (a > r.align)
+                      r.align = a;
+                }()),
+                ...);
+            }(std::make_index_sequence<count>{});
+            r.size = (pos + r.align - 1) & ~(r.align - 1);
+            return r;
+         }();
+
+         static constexpr std::size_t size  = value.size;
+         static constexpr std::size_t align = value.align;
+         static constexpr std::size_t offset(std::size_t i) noexcept { return value.offset[i]; }
+      };
+
+      template <typename F>
+      consteval std::size_t fixed_size()
+      {
+         if constexpr (Scalar<F>)
+            return sizeof(F);
+         else if constexpr (is_array_v<F>)
+            return array_traits<F>::count * fixed_size<typename array_traits<F>::element>();
+         else
+            return struct_layout<F>::size;
+      }
+      template <typename F>
+      consteval std::size_t fixed_align()
+      {
+         if constexpr (Scalar<F>)
+            return sizeof(F);
+         else if constexpr (is_array_v<F>)
+            return fixed_align<typename array_traits<F>::element>();
+         else
+            return struct_layout<F>::align;
+      }
+
+      // ── Members of a table ────────────────────────────────────────────
+
+      // An element of a vector.
+      template <typename E>
+      concept Element = Scalar<E> || Struct<E> || std::is_same_v<E, std::string> || Table<E>;
+
+      template <typename K>
+      concept Key = Scalar<K> || std::is_same_v<K, std::string>;
+
+      template <typename V>
+      struct variant_traits;
+      template <typename... Ts>
+      struct variant_traits<std::variant<Ts...>>
+      {
+         static constexpr std::size_t count = sizeof...(Ts);
+         // A leading std::monostate is the union's NONE.
+         static constexpr bool has_none =
+            std::is_same_v<std::variant_alternative_t<0, std::variant<Ts...>>, std::monostate>;
+         static constexpr bool valid = [] {
+            std::size_t i  = 0;
+            bool        ok = true;
+            ((ok = ok && ((i == 0 && std::is_same_v<Ts, std::monostate>) || Table<Ts>), ++i), ...);
+            return ok;
+         }();
+      };
+
+      // Stored inline in the table: a scalar or a struct.
+      template <typename F>
+      inline constexpr bool is_inline_v = Scalar<F> || is_struct_v<F>;
+      template <typename F>
+      inline constexpr bool is_inline_v<std::optional<F>> = Scalar<F> || is_struct_v<F>;
+
+      template <typename F>
+      consteval bool member_supported();
+
+      template <typename F>
+      consteval bool offset_supported()
+      {
+         if constexpr (std::is_same_v<F, std::string>)
+            return true;
+         else if constexpr (is_vector_v<F>)
+            return Element<typename F::value_type>;
+         else if constexpr (is_array_v<F>)
+            return array_traits<F>::count > 0 && Element<typename array_traits<F>::element>;
+         else if constexpr (is_set_v<F>)
+            return Key<typename F::key_type>;
+         else if constexpr (is_map_v<F>)
+            return Key<typename F::key_type> && !is_variant_v<typename F::mapped_type> &&
+                   member_supported<typename F::mapped_type>();
+         else
+            return Table<F>;
+      }
+
+      template <typename F>
+      consteval bool member_supported()
+      {
+         if constexpr (Scalar<F> || is_struct_v<F>)
+            return true;
+         else if constexpr (is_optional_v<F>)
+         {
+            using X = typename F::value_type;
+            if constexpr (Scalar<X> || is_struct_v<X>)
+               return true;
+            else if constexpr (is_optional_v<X> || is_variant_v<X>)
+               return false;
+            else
+               return offset_supported<X>();
+         }
+         else if constexpr (is_variant_v<F>)
+            return variant_traits<F>::valid;
+         else
+            return offset_supported<F>();
+      }
+
+      // The bytes a present member occupies in its table.
+      template <typename F>
+      consteval std::size_t inline_size()
+      {
+         if constexpr (is_optional_v<F>)
+            return inline_size<typename F::value_type>();
+         else if constexpr (Scalar<F>)
+            return sizeof(F);
+         else if constexpr (is_struct_v<F>)
+            return struct_layout<F>::size;
+         else
+            return 4;
+      }
+      template <typename F>
+      consteval std::size_t inline_align()
+      {
+         if constexpr (is_optional_v<F>)
+            return inline_align<typename F::value_type>();
+         else if constexpr (Scalar<F>)
+            return sizeof(F);
+         else if constexpr (is_struct_v<F>)
+            return struct_layout<F>::align;
+         else
+            return 4;
+      }
+      // The size `flatc` sorts a field by when it orders the fields of a
+      // table (a struct counts as 4 whatever its alignment).
+      template <typename F>
+      consteval std::uint8_t sort_size()
+      {
+         if constexpr (is_optional_v<F>)
+            return sort_size<typename F::value_type>();
+         else if constexpr (Scalar<F>)
+            return static_cast<std::uint8_t>(sizeof(F));
+         else
+            return 4;
+      }
+
+      // ── Defaults ──────────────────────────────────────────────────────
+
+      template <typename T, std::size_t I>
+      constexpr auto member_default_constexpr()
+      {
+         T obj{};
+         return obj.*(::psio::reflect<T>::template member_pointer<I>);
+      }
+      template <typename T, std::size_t I>
+      concept constexpr_default =
+         requires { typename std::bool_constant<(member_default_constexpr<T, I>(), true)>; };
+
+      // The member initialiser of scalar member I: a constant where T{} is
+      // a constant expression (the usual case), else computed once.
+      template <typename T, std::size_t I>
+      [[gnu::always_inline]] inline auto member_default() noexcept
+      {
+         using F = std::remove_cvref_t<typename ::psio::reflect<T>::template member_type<I>>;
+         if constexpr (constexpr_default<T, I>)
+         {
+            constexpr F value = member_default_constexpr<T, I>();
+            return value;
+         }
+         else
+         {
+            static const F value = [] {
+               T obj{};
+               return obj.*(::psio::reflect<T>::template member_pointer<I>);
+            }();
+            return value;
+         }
+      }
+
+      template <typename T, std::size_t I>
+      inline constexpr bool member_deprecated_v = [] {
+         using R          = ::psio::reflect<T>;
+         using FieldT     = typename R::template member_type<I>;
+         constexpr auto P = R::template member_pointer<I>;
+         return ::psio::find_spec<::psio::deprecated_spec>(
+                   ::psio::effective_annotations_for_v<T, FieldT, P>)
+            .has_value();
+      }();
+
+      // ── Table definitions ─────────────────────────────────────────────
+      //
+      // What the codec needs to know about a table: its members, their
+      // vtable slots, how to reach them in the C++ object. `record_def<T>`
+      // is a reflected record; `entry_def<K, V>` is the two-field table of
+      // a std::map entry.
+
+      template <std::size_t N>
+      struct slot_data
+      {
+         std::array<std::uint16_t, N> slot{};     // by member index
+         std::array<std::uint16_t, N> by_rank{};  // member index by ascending slot
+         std::uint16_t                total = 0;
+      };
+
+      template <Table T>
+      struct record_def
+      {
+         using R                            = ::psio::reflect<T>;
+         static constexpr std::size_t count = R::member_count;
+         template <std::size_t I>
+         using member = std::remove_cvref_t<typename R::template member_type<I>>;
+
+         static constexpr slot_data<count> slots_ = [] {
+            slot_data<count>                r{};
+            std::array<std::uint8_t, count> width{};
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               ((width[Is] = is_variant_v<member<Is>> ? 2 : 1), ...);
+            }(std::make_index_sequence<count>{});
+            const auto&   order = ::psio::detail::members_by_field_number<T>;
+            std::uint32_t next  = 0;
+            for (std::size_t rank = 0; rank < count; ++rank)
+            {
+               const std::size_t m = order[rank];
+               r.slot[m]           = static_cast<std::uint16_t>(next);
+               r.by_rank[rank]     = static_cast<std::uint16_t>(m);
+               next += width[m];
+            }
+            r.total = static_cast<std::uint16_t>(next);
+            return r;
+         }();
+         static constexpr std::size_t slots = slots_.total;
+         static_assert(slots < 0x7ffe, "psio::flatbuf: a table has at most 32765 vtable slots");
+
+         static constexpr std::uint16_t slot(std::size_t i) noexcept { return slots_.slot[i]; }
+         static constexpr std::size_t   by_rank(std::size_t r) noexcept { return slots_.by_rank[r]; }
+
+         template <std::size_t I>
+         static constexpr bool deprecated = member_deprecated_v<T, I>;
+         // An empty string / vector member is not written.
+         template <std::size_t I>
+         static constexpr bool keep_empty = false;
+         template <std::size_t I>
+         static constexpr bool required = false;
+
+         template <std::size_t I>
+         [[gnu::always_inline]] static const member<I>& get(const T& v) noexcept
+         {
+            return v.*(R::template member_pointer<I>);
+         }
+         template <std::size_t I>
+         [[gnu::always_inline]] static member<I>& get(T& v) noexcept
+         {
+            return v.*(R::template member_pointer<I>);
+         }
+         template <std::size_t I>
+         [[gnu::always_inline]] static member<I> default_of() noexcept
+         {
+            return member_default<T, I>();
+         }
+      };
+
+      template <typename K, typename V>
+      struct entry_def
+      {
+         static constexpr std::size_t count = 2;
+         template <std::size_t I>
+         using member                       = std::conditional_t<I == 0, K, V>;
+         static constexpr std::size_t slots = 2;
+         static constexpr std::uint16_t slot(std::size_t i) noexcept
+         {
+            return static_cast<std::uint16_t>(i);
+         }
+         static constexpr std::size_t by_rank(std::size_t r) noexcept { return r; }
+         template <std::size_t I>
+         static constexpr bool deprecated = false;
+         // The key is `(key)` in the schema, which makes a string key a
+         // required field: it is written even when empty.
+         template <std::size_t I>
+         static constexpr bool keep_empty = I == 0;
+         template <std::size_t I>
+         static constexpr bool required = I == 0 && std::is_same_v<K, std::string>;
+
+         template <std::size_t I, typename P>
+         [[gnu::always_inline]] static auto& get(P& entry) noexcept
+         {
+            if constexpr (I == 0)
+               return entry.first;
+            else
+               return entry.second;
+         }
+         template <std::size_t I>
+         [[gnu::always_inline]] static member<I> default_of() noexcept
+         {
+            return member<I>{};
+         }
+      };
+
+      // The vtable position of slot s.
+      constexpr std::uint16_t vt_of(std::size_t slot) noexcept
+      {
+         return static_cast<std::uint16_t>(4 + 2 * slot);
+      }
+
+      template <typename Def>
+      consteval bool def_supported()
+      {
+         return []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (member_supported<typename Def::template member<Is>>() && ...);
+         }(std::make_index_sequence<Def::count>{});
+      }
+
+      // The order in which the fields of a table are written, which is
+      // `flatc`'s: by size, largest first, and within a size by descending
+      // field id. One entry per vtable slot; a union is two (its type byte,
+      // its value offset).
+      struct add_entry
+      {
+         std::uint16_t slot   = 0;
+         std::uint16_t member = 0;
+         std::uint8_t  size   = 0;
+         std::uint8_t  part   = 0;
+      };
+
+      template <typename Def>
+      inline constexpr std::array<add_entry, Def::slots> add_order = [] {
+         std::array<add_entry, Def::slots> e{};
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            (([&] {
+                using F               = typename Def::template member<Is>;
+                const std::uint16_t s = Def::slot(Is);
+                if constexpr (is_variant_v<F>)
+                {
+                   e[s]     = add_entry{s, static_cast<std::uint16_t>(Is), 1, 0};
+                   e[s + 1] = add_entry{static_cast<std::uint16_t>(s + 1),
+                                        static_cast<std::uint16_t>(Is), 4, 1};
+                }
+                else
+                   e[s] = add_entry{s, static_cast<std::uint16_t>(Is), sort_size<F>(), 0};
+             }()),
+             ...);
+         }(std::make_index_sequence<Def::count>{});
+         for (std::size_t i = 1; i < e.size(); ++i)
+            for (std::size_t j = i; j > 0; --j)
+            {
+               const bool before = e[j].size > e[j - 1].size ||
+                                   (e[j].size == e[j - 1].size && e[j].slot > e[j - 1].slot);
+               if (!before)
+                  break;
+               const auto t = e[j];
+               e[j]         = e[j - 1];
+               e[j - 1]     = t;
+            }
+         return e;
+      }();
+
+      // ── Wire primitives ───────────────────────────────────────────────
+
+      template <typename T>
+      [[gnu::always_inline]] inline T load(const std::uint8_t* p) noexcept
+      {
+         T v;
+         std::memcpy(static_cast<void*>(&v), p, sizeof(T));
+         return v;
+      }
+      template <typename T>
+      [[gnu::always_inline]] inline void store(std::uint8_t* p, T v) noexcept
+      {
+         std::memcpy(p, static_cast<const void*>(&v), sizeof(T));
+      }
+
+      template <Scalar S>
+      [[gnu::always_inline]] inline S load_scalar(const std::uint8_t* p) noexcept
+      {
+         if constexpr (std::is_same_v<S, bool>)
+            return *p != 0;
+         else
+            return load<S>(p);
+      }
+      template <Scalar S>
+      [[gnu::always_inline]] inline void store_scalar(std::uint8_t* p, S v) noexcept
+      {
+         if constexpr (std::is_same_v<S, bool>)
+            *p = v ? 1 : 0;
+         else
+            store<S>(p, v);
+      }
+
+      // Whether a scalar equals its default, i.e. is not written. Floats by
+      // bits: -0.0 and a NaN of another payload are values of their own.
+      template <Scalar S>
+      [[gnu::always_inline]] inline bool same_scalar(S a, S b) noexcept
+      {
+         if constexpr (std::is_same_v<S, float>)
+            return std::bit_cast<std::uint32_t>(a) == std::bit_cast<std::uint32_t>(b);
+         else if constexpr (std::is_same_v<S, double>)
+            return std::bit_cast<std::uint64_t>(a) == std::bit_cast<std::uint64_t>(b);
+         else
+            return a == b;
+      }
+
+      // ── Structs ───────────────────────────────────────────────────────
+
+      template <typename F>
+      inline void write_fixed(std::uint8_t* dst, const F& v) noexcept
+      {
+         if constexpr (Scalar<F>)
+            store_scalar<F>(dst, v);
+         else if constexpr (is_array_v<F>)
+         {
+            using E                    = typename array_traits<F>::element;
+            constexpr std::size_t step = fixed_size<E>();
+            if constexpr (Scalar<E> && !std::is_same_v<E, bool>)
+               std::memcpy(dst, static_cast<const void*>(v.data()), step * v.size());
+            else
+               for (std::size_t i = 0; i < v.size(); ++i)
+                  write_fixed<E>(dst + i * step, v[i]);
+         }
+         else
+         {
+            using L = struct_layout<F>;
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               (write_fixed<typename L::template member<Is>>(
+                   dst + L::offset(Is), v.*(::psio::reflect<F>::template member_pointer<Is>)),
+                ...);
+            }(std::make_index_sequence<L::count>{});
+         }
+      }
+
+      template <typename F>
+      inline void read_fixed(const std::uint8_t* src, F& out) noexcept
+      {
+         if constexpr (Scalar<F>)
+            out = load_scalar<F>(src);
+         else if constexpr (is_array_v<F>)
+         {
+            using E                    = typename array_traits<F>::element;
+            constexpr std::size_t step = fixed_size<E>();
+            if constexpr (Scalar<E> && !std::is_same_v<E, bool>)
+               std::memcpy(static_cast<void*>(out.data()), src, step * out.size());
+            else
+               for (std::size_t i = 0; i < out.size(); ++i)
+                  read_fixed<E>(src + i * step, out[i]);
+         }
+         else
+         {
+            using L = struct_layout<F>;
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               (read_fixed<typename L::template member<Is>>(
+                   src + L::offset(Is), out.*(::psio::reflect<F>::template member_pointer<Is>)),
+                ...);
+            }(std::make_index_sequence<L::count>{});
+         }
+      }
+
+      // ── Encode ────────────────────────────────────────────────────────
+
+      struct write_options
+      {
+         // Four characters, or empty for none.
+         std::string_view file_identifier{};
+         // Prefix the buffer with its size (a stream of buffers).
+         bool size_prefixed = false;
+      };
+
+      // Back to front: writes grow toward the front of the storage, and an
+      // object is named by its distance from the end, which does not change
+      // when the storage grows. The steps are the official builder's, so
+      // that the bytes are.
       class builder
       {
-         //  Small-buffer optimisation: 1 KB inline buffer held on the
-         //  stack alongside the builder.  Most bench shapes (Point /
-         //  NameRecord / Validator / FlatRecord / Record / Order ≤ 320 B
-         //  wire) fit in 1 KB and skip heap allocation entirely.  Bulk
-         //  shapes (ValidatorList(100) at ~7.7 KB) overflow into a
-         //  heap-allocated chunk via grow().  Mirrors the libflatbuffers
-         //  default 1024-byte allocator-pool slice but without going
-         //  through malloc for the common case.
-         //
-         //  Layout invariants:
-         //    - `buf_`  always points at the active backing storage:
-         //               either local_  (when heap_ is null)
-         //               or     heap_.get() (after grow()).
-         //    - `cap_`  is the size of the active backing.
-         //    - Valid bytes live at buf_[head_ .. cap_).
-         static constexpr std::size_t kLocalBytes = 1024;
-         alignas(16) std::uint8_t        local_[kLocalBytes];
-         std::uint8_t*                   buf_       = nullptr;
+         static constexpr std::size_t local_bytes = 1024;
+         static constexpr std::size_t local_vts   = 16;
+
+         alignas(16) std::uint8_t        local_[local_bytes];
+         std::uint8_t*                   buf_;
          std::unique_ptr<std::uint8_t[]> heap_;
-         std::size_t                     cap_       = 0;
-         std::size_t                     head_      = 0;
+         std::size_t                     cap_;
+         std::size_t                     head_;
          std::size_t                     min_align_ = 1;
+         std::uint32_t                   tbl_start_ = 0;
+         // The vtables written so far, for sharing.
+         std::uint32_t              vt_local_[local_vts];
+         std::size_t                vt_count_ = 0;
+         std::vector<std::uint32_t> vt_more_;
+         // Offsets of the elements of the vectors under construction.
+         std::vector<std::uint32_t> scratch_;
 
-         struct field_loc
-         {
-            std::uint32_t off;
-            std::uint16_t vt;
-         };
-         static constexpr std::size_t kMaxFields = 64;
-         field_loc                    fields_[kMaxFields]{};
-         std::size_t                  nfields_   = 0;
-
-         // Vtable deduplication cache.  libflatbuffers writes one
-         // canonical vtable per (max_vt, table_size, field-skip pattern)
-         // and shares its offset across every table that produces the
-         // same byte sequence.  For workloads like vector<Validator(100)>
-         // this collapses 100 redundant vtables to 1 — the dominant
-         // savings vs the canonical lib in the bench.
-         // Cap matches end_table's local_vt buffer (512 bytes = up to
-         // 254 fields via 4 + 2*254).  vtables larger than that fall
-         // back to a runtime check in end_table.
-         struct vt_cache_entry
-         {
-            std::uint32_t                 off;
-            std::uint16_t                 size;
-            std::array<std::uint8_t, 512> bytes;
-         };
-         std::vector<vt_cache_entry>      vt_cache_;
-         std::uint32_t                tbl_start_ = 0;
-
-         std::size_t sz() const { return cap_ - head_; }
-
-         //  Grow without zero-initialising the new trailing bytes.
-         //  First overflow from local_ allocates the heap; subsequent
-         //  growths reallocate the heap chunk.  `new u8[N]` is
-         //  default-init (no-op for u8) so the new tail past the
-         //  copied bytes is uninitialised — the bytes past head_ are
-         //  never read until written.
          void grow(std::size_t needed)
          {
             const std::size_t tail = sz();
-            const std::size_t new_cap = std::max(cap_ * 2, cap_ + needed);
+            if (needed > max_buffer_size - tail)
+               ::psio::codec_abort(
+                  codec_error{"flatbuf: the buffer would exceed 2 GiB", 0, "flatbuf"});
+            const std::size_t               new_cap = std::max(cap_ * 2, cap_ + needed);
             std::unique_ptr<std::uint8_t[]> nb(new std::uint8_t[new_cap]);
-            std::memcpy(nb.get() + new_cap - tail,
-                        buf_ + head_, tail);
+            std::memcpy(nb.get() + new_cap - tail, buf_ + head_, tail);
             heap_ = std::move(nb);
             buf_  = heap_.get();
             cap_  = new_cap;
             head_ = new_cap - tail;
          }
 
-         //  Hot-path inner functions — invoked once per field.  Force
-         //  inlining so the templated pre_create dispatch chain folds
-         //  to a flat sequence of writes rather than a chain of small
-         //  function calls.  Matches what flatc-generated CreateXxx()
-         //  achieves naturally.
+       public:
+         builder() noexcept : buf_(local_), cap_(local_bytes), head_(local_bytes) {}
+         builder(const builder&)            = delete;
+         builder& operator=(const builder&) = delete;
+
+         [[gnu::always_inline]] std::uint32_t sz() const noexcept
+         {
+            return static_cast<std::uint32_t>(cap_ - head_);
+         }
+
          [[gnu::always_inline]] std::uint8_t* alloc(std::size_t n)
          {
-            if (n > head_)
+            if (n > head_) [[unlikely]]
                grow(n);
             head_ -= n;
             return buf_ + head_;
          }
-
-         [[gnu::always_inline]] void zero_pad(std::size_t n)
-         { std::memset(alloc(n), 0, n); }
-
-         [[gnu::always_inline]] void track(std::size_t a)
+         [[gnu::always_inline]] void zero_pad(std::size_t n) { std::memset(alloc(n), 0, n); }
+         [[gnu::always_inline]] void track(std::size_t a) noexcept
          {
             if (a > min_align_)
                min_align_ = a;
          }
-
          [[gnu::always_inline]] void align(std::size_t a)
          {
-            const std::size_t p = (~sz() + 1) & (a - 1);
+            const std::size_t p = (~std::size_t{sz()} + 1) & (a - 1);
             if (p)
                zero_pad(p);
             track(a);
          }
-
-         [[gnu::always_inline]] void pre_align(std::size_t len,
-                                                std::size_t a)
+         // Pad so that, once `len` more bytes are written, the size is a
+         // multiple of `a`.
+         [[gnu::always_inline]] void pre_align(std::size_t len, std::size_t a)
          {
             if (!len)
                return;
-            const std::size_t p = (~(sz() + len) + 1) & (a - 1);
+            track(a);
+            const std::size_t p = (~(std::size_t{sz()} + len) + 1) & (a - 1);
             if (p)
                zero_pad(p);
-            track(a);
          }
-
          template <typename T>
          [[gnu::always_inline]] void push(T v)
          {
-            auto* p = alloc(sizeof(T));
-            std::memcpy(p, &v, sizeof(T));
-         }
-
-        public:
-         builder()
-            : buf_(local_), cap_(kLocalBytes), head_(kLocalBytes)
-         {
-         }
-
-         //  Pre-allocate enough heap space for `hint` bytes so the
-         //  encode never needs to grow().  Used by the two-pass
-         //  encode CPO (size walk → reserve → real encode).
-         //  Hints ≤ kLocalBytes stay on the stack buffer.
-         [[gnu::always_inline]] void reserve_capacity(std::size_t hint)
-         {
-            if (hint <= cap_) return;
-            heap_ = std::unique_ptr<std::uint8_t[]>(
-               new std::uint8_t[hint]);
-            buf_  = heap_.get();
-            cap_  = hint;
-            head_ = hint;
+            store<T>(alloc(sizeof(T)), v);
          }
 
          std::uint32_t create_string(const char* s, std::size_t len)
          {
-            pre_align(len + 1, sizeof(std::uint32_t));
-            *alloc(1) = 0;  // trailing null
+            pre_align(len + 1, 4);
+            *alloc(1) = 0;
             if (len)
                std::memcpy(alloc(len), s, len);
-            align(sizeof(std::uint32_t));
+            align(4);
             push(static_cast<std::uint32_t>(len));
-            return static_cast<std::uint32_t>(sz());
+            return sz();
          }
 
-         template <typename T>
-         std::uint32_t create_vec_scalar(const T* data, std::size_t count)
+         // A vector whose `count` elements of `elem_size` bytes the caller
+         // writes into the returned storage.
+         std::uint8_t* start_vector(std::size_t count, std::size_t elem_size, std::size_t elem_align)
          {
-            const std::size_t body = count * sizeof(T);
-            pre_align(body, sizeof(std::uint32_t));
-            pre_align(body, sizeof(T));
-            if (body)
-               std::memcpy(alloc(body), data, body);
-            align(sizeof(std::uint32_t));
+            const std::size_t body = count * elem_size;
+            pre_align(body, 4);
+            pre_align(body, elem_align);
+            return alloc(body);
+         }
+         std::uint32_t end_vector(std::size_t count)
+         {
+            align(4);
             push(static_cast<std::uint32_t>(count));
-            return static_cast<std::uint32_t>(sz());
+            return sz();
          }
 
-         std::uint32_t create_vec_offsets(const std::uint32_t* offs,
-                                          std::size_t          count)
+         // A vector of offsets to the objects `scratch_[base ..)`.
+         std::uint32_t create_offset_vector(std::size_t base)
          {
-            pre_align(count * sizeof(std::uint32_t),
-                      sizeof(std::uint32_t));
+            const std::size_t count = scratch_.size() - base;
+            pre_align(count * 4, 4);
             for (std::size_t i = count; i > 0;)
             {
                --i;
-               align(sizeof(std::uint32_t));
-               push(static_cast<std::uint32_t>(sz()) - offs[i] +
-                    std::uint32_t(4));
+               align(4);
+               const std::uint32_t at = sz() + 4;
+               push(static_cast<std::uint32_t>(at - scratch_[base + i]));
             }
-            align(sizeof(std::uint32_t));
-            push(static_cast<std::uint32_t>(count));
-            return static_cast<std::uint32_t>(sz());
+            scratch_.resize(base);
+            return end_vector(count);
+         }
+         [[nodiscard]] std::size_t scratch_mark() const noexcept { return scratch_.size(); }
+         void scratch_push(std::uint32_t off) { scratch_.push_back(off); }
+
+         [[gnu::always_inline]] void start_table() noexcept { tbl_start_ = sz(); }
+
+         template <Scalar S>
+         [[gnu::always_inline]] std::uint32_t add_scalar(S v)
+         {
+            align(sizeof(S));
+            store_scalar<S>(alloc(sizeof(S)), v);
+            return sz();
+         }
+         [[gnu::always_inline]] std::uint32_t add_offset(std::uint32_t target)
+         {
+            align(4);
+            const std::uint32_t at = sz() + 4;
+            push(static_cast<std::uint32_t>(at - target));
+            return sz();
+         }
+         template <Struct S>
+         [[gnu::always_inline]] std::uint32_t add_struct(const S& v)
+         {
+            constexpr std::size_t size = struct_layout<S>::size;
+            align(struct_layout<S>::align);
+            auto* dst = alloc(size);
+            std::memset(dst, 0, size);
+            write_fixed<S>(dst, v);
+            return sz();
          }
 
-         [[gnu::always_inline]] void start_table()
+         // `at[s]`: where the field of slot s was written (its distance
+         // from the end), 0 when it was not.
+         std::uint32_t end_table(const std::uint32_t* at, std::size_t slots)
          {
-            nfields_   = 0;
-            tbl_start_ = static_cast<std::uint32_t>(sz());
-         }
-
-         template <typename T>
-         [[gnu::always_inline]] void
-         add_scalar(std::uint16_t vt, T val, T def)
-         {
-            if (val == def)
-               return;
-            align(sizeof(T));
-            push(val);
-            fields_[nfields_++] = {static_cast<std::uint32_t>(sz()), vt};
-         }
-
-         template <typename T>
-         [[gnu::always_inline]] void
-         add_scalar_force(std::uint16_t vt, T val)
-         {
-            align(sizeof(T));
-            push(val);
-            fields_[nfields_++] = {static_cast<std::uint32_t>(sz()), vt};
-         }
-
-         [[gnu::always_inline]]
-         void add_offset_field(std::uint16_t vt, std::uint32_t off)
-         {
-            if (!off)
-               return;
-            align(sizeof(std::uint32_t));
-            // uoffset_t stored = target_addr - cell_addr. Push evaluates
-            // the value before alloc, so sz() here is the pre-push sz;
-            // the cell occupies the next 4 bytes, making its sz_at_addr
-            // sz() + 4. target sz = off. value = (sz+4) - off.
-            push(static_cast<std::uint32_t>(sz()) - off +
-                 std::uint32_t(4));
-            fields_[nfields_++] = {static_cast<std::uint32_t>(sz()), vt};
-         }
-
-         // Write N bytes at an absolute sz() position (back-to-front).
-         void store_at(std::uint32_t at_sz, const void* src,
-                       std::size_t n)
-         {
-            // buf_[cap - at_sz..cap - at_sz + n] = src
-            std::memcpy(buf_ + cap_ - at_sz, src, n);
-         }
-
-         std::uint32_t end_table()
-         {
-            // Reserve the 4-byte soffset_t back-pointer (patched later).
-            align(sizeof(std::int32_t));
+            align(4);
             push(std::int32_t{0});
-            const std::uint32_t tbl_off = static_cast<std::uint32_t>(sz());
-
-            // Vtable size = 4 (own size + table size) + 2 per slot up to
-            // max declared voffset.
-            std::uint16_t max_vt = 0;
-            for (std::size_t i = 0; i < nfields_; ++i)
-               if (fields_[i].vt > max_vt)
-                  max_vt = fields_[i].vt;
-            const std::uint16_t vt_size =
-               static_cast<std::uint16_t>(std::max<int>(max_vt + 2, 4));
-            const std::uint16_t tbl_obj_sz =
-               static_cast<std::uint16_t>(tbl_off - tbl_start_);
-
-            // Compose the vtable bytes in a stack buffer first so we can
-            // hash-match against the cache without committing to the
-            // main buffer.  Cap = 512 bytes (4 + 2*254) — well past any
-            // realistic record width.  vt_cache_entry::bytes is sized
-            // to match.
-            std::uint8_t local_vt[512] = {0};
-            std::memcpy(local_vt + 0, &vt_size, 2);
-            std::memcpy(local_vt + 2, &tbl_obj_sz, 2);
-            for (std::size_t i = 0; i < nfields_; ++i)
-            {
-               const std::uint16_t fo = static_cast<std::uint16_t>(
-                  tbl_off - fields_[i].off);
-               std::memcpy(local_vt + fields_[i].vt, &fo, 2);
-            }
-
-            // Linear-scan dedup — typical workloads have at most a few
-            // unique vtables per builder (one per record type), so a
-            // sequential scan beats any hash-table for realistic N.
-            std::uint32_t vt_off = 0;
-            for (const auto& e : vt_cache_)
-            {
-               if (e.size == vt_size
-                   && std::memcmp(e.bytes.data(), local_vt, vt_size) == 0)
+            const std::uint32_t tbl = sz();
+            while (slots > 0 && at[slots - 1] == 0)
+               --slots;
+            const std::size_t   vt_size = 4 + 2 * slots;
+            const std::uint32_t object  = tbl - tbl_start_;
+            if (object > 0xffff) [[unlikely]]
+               ::psio::codec_abort(
+                  codec_error{"flatbuf: a table's inline data exceeds 64 KiB", 0, "flatbuf"});
+            std::uint8_t* vt = alloc(vt_size);
+            store<std::uint16_t>(vt, static_cast<std::uint16_t>(vt_size));
+            store<std::uint16_t>(vt + 2, static_cast<std::uint16_t>(object));
+            for (std::size_t s = 0; s < slots; ++s)
+               store<std::uint16_t>(vt + 4 + 2 * s,
+                                    at[s] ? static_cast<std::uint16_t>(tbl - at[s])
+                                          : std::uint16_t{0});
+            std::uint32_t vt_off = sz();
+            // Share an identical vtable written earlier.
+            bool                shared = false;
+            const std::uint8_t* end    = buf_ + cap_;
+            const auto          same   = [&](std::uint32_t off) {
+               const std::uint8_t* other = end - off;
+               return load<std::uint16_t>(other) == vt_size && std::memcmp(other, vt, vt_size) == 0;
+            };
+            const std::size_t in_local = std::min(vt_count_, local_vts);
+            for (std::size_t i = 0; i < in_local && !shared; ++i)
+               if (same(vt_local_[i]))
                {
-                  vt_off = e.off;
-                  break;
+                  vt_off = vt_local_[i];
+                  shared = true;
                }
-            }
-
-            if (vt_off == 0)
+            for (std::size_t i = 0; i < vt_more_.size() && !shared; ++i)
+               if (same(vt_more_[i]))
+               {
+                  vt_off = vt_more_[i];
+                  shared = true;
+               }
+            if (shared)
+               head_ += vt_size;
+            else
             {
-               // Cache miss — commit the vtable to the main buffer.
-               std::uint8_t* vt = alloc(vt_size);
-               std::memcpy(vt, local_vt, vt_size);
-               vt_off = static_cast<std::uint32_t>(sz());
-               vt_cache_entry entry{};
-               entry.off  = vt_off;
-               entry.size = vt_size;
-               std::memcpy(entry.bytes.data(), local_vt, vt_size);
-               vt_cache_.push_back(entry);
+               if (vt_count_ < local_vts)
+                  vt_local_[vt_count_] = vt_off;
+               else
+                  vt_more_.push_back(vt_off);
+               ++vt_count_;
             }
-
-            // Patch the soffset_t in the table (at byte address
-            // buf_[cap - tbl_off]).
-            const std::int32_t soff =
-               static_cast<std::int32_t>(vt_off) -
-               static_cast<std::int32_t>(tbl_off);
-            store_at(tbl_off, &soff, 4);
-
-            return tbl_off;
+            store<std::int32_t>(buf_ + cap_ - tbl,
+                                static_cast<std::int32_t>(vt_off) - static_cast<std::int32_t>(tbl));
+            return tbl;
          }
 
-         std::vector<char> finish(std::uint32_t root)
+         void finish(std::uint32_t root, const write_options& opts, std::vector<char>& sink)
          {
-            std::vector<char> out;
-            finish_into(root, out);
-            return out;
-         }
-
-         //  Sink form — write the finished bytes into a caller-supplied
-         //  vector, reusing its capacity if it has any.  Used by the
-         //  encode-into-sink CPO so a hot-loop caller can keep one
-         //  output vector across iterations.  The builder's internal
-         //  buf_ still allocates fresh per-call (top-level builder
-         //  reuse would require a separate bench mode).
-         void finish_into(std::uint32_t       root,
-                          std::vector<char>&  sink)
-         {
-            pre_align(sizeof(std::uint32_t), min_align_);
-            align(sizeof(std::uint32_t));
-            push(static_cast<std::uint32_t>(sz()) - root +
-                 std::uint32_t(4));
-            const std::size_t out_size = sz();
-            sink.resize(out_size);
-            std::memcpy(sink.data(), buf_ + head_, out_size);
+            if (!opts.file_identifier.empty() && opts.file_identifier.size() != 4)
+               ::psio::codec_abort(codec_error{
+                  "flatbuf: a file identifier is exactly four characters", 0, "flatbuf"});
+            const std::size_t prefix = opts.size_prefixed ? 4 : 0;
+            track(prefix);
+            pre_align(prefix + 4 + opts.file_identifier.size(), min_align_);
+            if (!opts.file_identifier.empty())
+               std::memcpy(alloc(4), opts.file_identifier.data(), 4);
+            add_offset(root);
+            if (opts.size_prefixed)
+               push(static_cast<std::uint32_t>(sz()));
+            const std::size_t size = sz();
+            sink.resize(size);
+            std::memcpy(sink.data(), buf_ + head_, size);
          }
       };
 
-      //  fb_size_counter — drop-in replacement for `builder` that
-      //  counts bytes instead of writing them.  Mirrors capnp's
-      //  capnp_word_counter pattern.  pre_create runs against this
-      //  counter as a "dry pass" first, returning the exact number of
-      //  bytes the real encode will produce.  We then alloc that
-      //  many bytes once and run the real encode, eliminating all
-      //  grow() reallocs.
-      //
-      //  Note: vtable dedup is NOT mirrored here.  The counter assumes
-      //  every vtable is fresh (never deduped) so it OVER-counts by
-      //  vt_size × (n_repeated_records − 1) bytes.  That over-allocation
-      //  is fine — the heap chunk just has unused tail.  Mirroring the
-      //  full dedup logic would require duplicating the cache
-      //  machinery, which isn't worth the precision win.
-      class fb_size_counter
+      template <typename Def, typename Obj>
+      std::uint32_t write_table(builder& b, const Obj& v);
+
+      // The out-of-line part of a value: the offset of what was written
+      // (its distance from the end), or 0 for nothing. `keep_empty`: an
+      // engaged optional writes its empty string / vector.
+      template <typename F>
+      std::uint32_t write_child(builder& b, const F& v, bool keep_empty)
       {
-         std::size_t bytes_     = 0;
-         std::size_t min_align_ = 1;
-         std::size_t nfields_   = 0;
-         std::uint32_t tbl_start_ = 0;
-         std::uint16_t max_vt_  = 0;
-
-        public:
-         static constexpr bool counts_only = true;
-
-         std::size_t total() const { return bytes_; }
-         std::size_t sz() const { return bytes_; }
-
-         [[gnu::always_inline]] void track(std::size_t a)
-         {
-            if (a > min_align_) min_align_ = a;
-         }
-         [[gnu::always_inline]] void zero_pad(std::size_t n) { bytes_ += n; }
-         [[gnu::always_inline]] void align(std::size_t a)
-         {
-            const std::size_t p = (~bytes_ + 1) & (a - 1);
-            if (p) bytes_ += p;
-            track(a);
-         }
-         [[gnu::always_inline]] void pre_align(std::size_t len,
-                                                std::size_t a)
-         {
-            if (!len) return;
-            const std::size_t p = (~(bytes_ + len) + 1) & (a - 1);
-            if (p) bytes_ += p;
-            track(a);
-         }
-         template <typename T>
-         [[gnu::always_inline]] void push(T)
-         {
-            bytes_ += sizeof(T);
-         }
-
-         [[gnu::always_inline]] void start_table()
-         {
-            nfields_   = 0;
-            tbl_start_ = static_cast<std::uint32_t>(bytes_);
-            max_vt_    = 0;
-         }
-         template <typename T>
-         [[gnu::always_inline]] void add_scalar(std::uint16_t vt, T val, T def)
-         {
-            if (val == def) return;
-            align(sizeof(T));
-            bytes_ += sizeof(T);
-            ++nfields_;
-            if (vt > max_vt_) max_vt_ = vt;
-         }
-         template <typename T>
-         [[gnu::always_inline]] void add_scalar_force(std::uint16_t vt, T)
-         {
-            align(sizeof(T));
-            bytes_ += sizeof(T);
-            ++nfields_;
-            if (vt > max_vt_) max_vt_ = vt;
-         }
-         [[gnu::always_inline]] void add_offset_field(std::uint16_t vt,
-                                                      std::uint32_t off)
-         {
-            if (!off) return;
-            align(sizeof(std::uint32_t));
-            bytes_ += sizeof(std::uint32_t);
-            ++nfields_;
-            if (vt > max_vt_) max_vt_ = vt;
-         }
-
-         std::uint32_t end_table()
-         {
-            // Mirror builder's end_table: 4-byte soffset + vtable bytes.
-            align(sizeof(std::int32_t));
-            bytes_ += sizeof(std::int32_t);
-            const std::uint32_t tbl_off =
-               static_cast<std::uint32_t>(bytes_);
-            const std::uint16_t vt_size =
-               static_cast<std::uint16_t>(std::max<int>(max_vt_ + 2, 4));
-            // Always count vtable bytes (no dedup simulation).
-            bytes_ += vt_size;
-            return tbl_off;
-         }
-
-         std::uint32_t create_string(const char*, std::size_t len)
-         {
-            pre_align(len + 1, sizeof(std::uint32_t));
-            bytes_ += 1 + len;  // null terminator + chars
-            align(sizeof(std::uint32_t));
-            bytes_ += sizeof(std::uint32_t);  // length prefix
-            return static_cast<std::uint32_t>(bytes_);
-         }
-         template <typename T>
-         std::uint32_t create_vec_scalar(const T*, std::size_t count)
-         {
-            const std::size_t body = count * sizeof(T);
-            pre_align(body, sizeof(std::uint32_t));
-            pre_align(body, sizeof(T));
-            bytes_ += body;
-            align(sizeof(std::uint32_t));
-            bytes_ += sizeof(std::uint32_t);
-            return static_cast<std::uint32_t>(bytes_);
-         }
-         std::uint32_t create_vec_offsets(const std::uint32_t*,
-                                           std::size_t count)
-         {
-            const std::size_t body = count * sizeof(std::uint32_t);
-            pre_align(body, sizeof(std::uint32_t));
-            bytes_ += body;
-            align(sizeof(std::uint32_t));
-            bytes_ += sizeof(std::uint32_t);
-            return static_cast<std::uint32_t>(bytes_);
-         }
-      };
-
-      // Pre-create a record's child offsets, then emit its vtable +
-      // table. Returns the table's offset (which the caller either
-      // records in a parent table's field slot, or finishes as the
-      // root).  Generic over Builder type (real builder OR
-      // fb_size_counter).
-      template <typename Builder, typename T>
-      std::uint32_t pre_create(Builder& b, const T& val);
-
-      template <typename Builder, typename V>
-      std::uint32_t pre_create_child(Builder& b, const V& val)
-      {
-         if constexpr (std::is_arithmetic_v<V>)
+         if constexpr (is_inline_v<F>)
             return 0;
-         else if constexpr (std::is_same_v<V, std::string>)
-            return b.create_string(val.data(), val.size());
-         else if constexpr (is_optional<V>::value)
+         else if constexpr (is_optional_v<F>)
+            return v.has_value() ? write_child<typename F::value_type>(b, *v, true) : 0;
+         else if constexpr (std::is_same_v<F, std::string>)
+            return v.empty() && !keep_empty ? 0 : b.create_string(v.data(), v.size());
+         else if constexpr (is_vector_v<F> || is_array_v<F> || is_set_v<F>)
          {
-            if (val.has_value())
-               return pre_create_child<Builder,
-                  typename V::value_type>(b, *val);
-            return 0;
-         }
-         else if constexpr (is_vector<V>::value)
-         {
-            using E = typename V::value_type;
-            if (val.empty())
+            using E               = typename F::value_type;
+            const std::size_t cnt = v.size();
+            if (cnt == 0 && !keep_empty && !is_array_v<F>)
                return 0;
-            if constexpr (std::is_arithmetic_v<E>)
-               return b.create_vec_scalar(val.data(), val.size());
-            else if constexpr (std::is_same_v<E, std::string>)
+            if constexpr (Scalar<E>)
             {
-               std::vector<std::uint32_t> offs(val.size());
-               for (std::size_t i = 0; i < val.size(); ++i)
-                  offs[i] =
-                     b.create_string(val[i].data(), val[i].size());
-               return b.create_vec_offsets(offs.data(), offs.size());
+               auto* dst = b.start_vector(cnt, sizeof(E), sizeof(E));
+               if constexpr (std::is_same_v<E, bool> || is_set_v<F>)
+               {
+                  std::size_t i = 0;
+                  for (const auto& e : v)
+                     store_scalar<E>(dst + (i++) * sizeof(E), static_cast<E>(e));
+               }
+               else if (cnt)
+                  std::memcpy(dst, static_cast<const void*>(v.data()), cnt * sizeof(E));
+               return b.end_vector(cnt);
             }
-            else if constexpr (is_table<E>::value)
+            else if constexpr (Struct<E>)
             {
-               std::vector<std::uint32_t> offs(val.size());
-               for (std::size_t i = 0; i < val.size(); ++i)
-                  offs[i] = pre_create(b, val[i]);
-               return b.create_vec_offsets(offs.data(), offs.size());
+               constexpr std::size_t step = struct_layout<E>::size;
+               auto*                 dst  = b.start_vector(cnt, step, struct_layout<E>::align);
+               if (cnt)
+                  std::memset(dst, 0, cnt * step);
+               for (std::size_t i = 0; i < cnt; ++i)
+                  write_fixed<E>(dst + i * step, v[i]);
+               return b.end_vector(cnt);
             }
             else
             {
-               static_assert(sizeof(E) == 0,
-                             "psio::flatbuf: unsupported vector element");
+               const std::size_t base = b.scratch_mark();
+               for (const auto& e : v)
+                  b.scratch_push(write_child<E>(b, e, true));
+               return b.create_offset_vector(base);
             }
          }
-         else if constexpr (is_table<V>::value)
+         else if constexpr (is_map_v<F>)
          {
-            return pre_create(b, val);
+            if (v.empty() && !keep_empty)
+               return 0;
+            using Entry            = entry_def<typename F::key_type, typename F::mapped_type>;
+            const std::size_t base = b.scratch_mark();
+            for (const auto& e : v)
+               b.scratch_push(write_table<Entry>(b, e));
+            return b.create_offset_vector(base);
          }
-         else
+         else if constexpr (is_variant_v<F>)
          {
-            static_assert(sizeof(V) == 0,
-                          "psio::flatbuf: unsupported type");
-         }
-      }
-
-      //  Compile-time check: is every reflected field of T a leaf
-      //  scalar (arithmetic / bool / enum) — no children to pre-create?
-      //  When true, pre_create skips the offsets[] array entirely and
-      //  emits a flat sequence of add_scalar calls.  Matches what flatc
-      //  generates for "all-fixed" tables like Validator and Point.
-      template <typename T>
-      consteval bool all_fields_are_scalars()
-      {
-         using R = ::psio::reflect<T>;
-         return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-            return (([&]() {
-               using F = typename R::template member_type<Is>;
-               return std::is_arithmetic_v<F> || std::is_same_v<F, bool>;
-            }()) && ...);
-         }(std::make_index_sequence<R::member_count>{});
-      }
-
-      template <typename Builder, typename T>
-      [[gnu::always_inline]]
-      std::uint32_t pre_create(Builder& b, const T& val)
-      {
-         using R                 = ::psio::reflect<T>;
-         constexpr std::size_t N = R::member_count;
-
-         //  Fast path: all-scalar table (Validator, Point, NameRecord).
-         //  No children to pre-create → skip the offsets[] array and
-         //  the first fold pass.  Just start_table → reverse-order
-         //  add_scalar → end_table.
-         if constexpr (all_fields_are_scalars<T>())
-         {
-            b.start_table();
-            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-               (([&] {
-                  constexpr std::size_t i = N - 1 - Is;
-                  using F = typename R::template member_type<i>;
-                  const F& fref = val.*(R::template member_pointer<i>);
-                  const std::uint16_t vt =
-                     static_cast<std::uint16_t>(4 + 2 * i);
-                  if constexpr (std::is_same_v<F, bool>)
-                     b.template add_scalar<std::uint8_t>(
-                        vt, fref ? 1 : 0, 0);
+            return std::visit(
+               [&](const auto& alt) -> std::uint32_t {
+                  using Alt = std::remove_cvref_t<decltype(alt)>;
+                  if constexpr (std::is_same_v<Alt, std::monostate>)
+                     return 0;
                   else
-                     b.template add_scalar<F>(vt, fref, F{});
-               }()), ...);
-            }(std::make_index_sequence<N>{});
-            return b.end_table();
+                     return write_table<record_def<Alt>>(b, alt);
+               },
+               v);
+         }
+         else
+            return write_table<record_def<F>>(b, v);
+      }
+
+      // The union type byte of a variant: 0 is NONE.
+      template <typename V>
+      [[gnu::always_inline]] inline std::uint8_t union_type(const V& v) noexcept
+      {
+         return static_cast<std::uint8_t>(v.index() + (variant_traits<V>::has_none ? 0 : 1));
+      }
+
+      template <typename Def, std::size_t I, std::size_t Part, typename Obj>
+      [[gnu::always_inline]] inline void add_member(builder& b, const Obj& obj,
+                                                    const std::uint32_t* child, std::uint32_t* at)
+      {
+         using F = typename Def::template member<I>;
+         if constexpr (Def::template deprecated<I>)
+            return;
+         else
+         {
+            const auto&           v = Def::template get<I>(obj);
+            constexpr std::size_t s = Def::slot(I);
+            if constexpr (Scalar<F>)
+            {
+               if (!same_scalar<F>(v, Def::template default_of<I>()))
+                  at[s] = b.add_scalar<F>(v);
+            }
+            else if constexpr (is_struct_v<F>)
+               at[s] = b.add_struct(v);
+            else if constexpr (is_optional_v<F> && is_inline_v<F>)
+            {
+               using X = typename F::value_type;
+               if (v.has_value())
+               {
+                  if constexpr (Scalar<X>)
+                     at[s] = b.add_scalar<X>(*v);
+                  else
+                     at[s] = b.add_struct(*v);
+               }
+            }
+            else if constexpr (is_variant_v<F>)
+            {
+               if constexpr (Part == 0)
+               {
+                  if (const std::uint8_t type = union_type(v); type != 0)
+                     at[s] = b.add_scalar<std::uint8_t>(type);
+               }
+               else if (child[I])
+                  at[s + 1] = b.add_offset(child[I]);
+            }
+            else if (child[I])
+               at[s] = b.add_offset(child[I]);
+         }
+      }
+
+      template <typename Def, typename Obj>
+      std::uint32_t write_table(builder& b, const Obj& v)
+      {
+         static_assert(def_supported<Def>(),
+                       "psio::flatbuf: a member of this record has a type FlatBuffers cannot "
+                       "hold (see the mapping in psio/flatbuf.hpp)");
+         constexpr std::size_t N = Def::count;
+         constexpr std::size_t S = Def::slots;
+         std::uint32_t         child[N ? N : 1]{};
+         // Children first, in field order.
+         [&]<std::size_t... Rs>(std::index_sequence<Rs...>) {
+            (([&] {
+                constexpr std::size_t I = Def::by_rank(Rs);
+                if constexpr (!Def::template deprecated<I>)
+                   child[I] = write_child<typename Def::template member<I>>(
+                      b, Def::template get<I>(v), Def::template keep_empty<I>);
+             }()),
+             ...);
+         }(std::make_index_sequence<N>{});
+
+         b.start_table();
+         std::uint32_t at[S ? S : 1]{};
+         [&]<std::size_t... Js>(std::index_sequence<Js...>) {
+            (add_member<Def, add_order<Def>[Js].member, add_order<Def>[Js].part>(b, v, child, at),
+             ...);
+         }(std::make_index_sequence<S>{});
+         return b.end_table(at, S);
+      }
+
+      template <Table T>
+      void encode_into(const T& v, const write_options& opts, std::vector<char>& sink)
+      {
+         builder             b;
+         const std::uint32_t root = write_table<record_def<T>>(b, v);
+         b.finish(root, opts, sink);
+      }
+
+      // ── Navigation (trusted: the bytes have been validated) ───────────
+
+      [[gnu::always_inline]] inline const std::uint8_t* follow(const std::uint8_t* cell) noexcept
+      {
+         return cell + load<std::uint32_t>(cell);
+      }
+      // The cell of the field at vtable position `vt`, or nullptr.
+      [[gnu::always_inline]] inline const std::uint8_t* field_cell(const std::uint8_t* tbl,
+                                                                   std::uint16_t       vt) noexcept
+      {
+         const std::uint8_t* vtable = tbl - load<std::int32_t>(tbl);
+         if (vt >= load<std::uint16_t>(vtable))
+            return nullptr;
+         const std::uint16_t off = load<std::uint16_t>(vtable + vt);
+         return off ? tbl + off : nullptr;
+      }
+      [[gnu::always_inline]] inline std::string_view string_at(const std::uint8_t* s) noexcept
+      {
+         return {reinterpret_cast<const char*>(s + 4), load<std::uint32_t>(s)};
+      }
+      // The root table of a buffer (not size-prefixed).
+      [[gnu::always_inline]] inline const std::uint8_t* root_of(std::span<const char> bytes) noexcept
+      {
+         return follow(reinterpret_cast<const std::uint8_t*>(bytes.data()));
+      }
+
+      // ── Decode (trusted) ──────────────────────────────────────────────
+
+      template <typename Def, typename Obj>
+      void decode_table(const std::uint8_t* tbl, Obj& out);
+
+      // The value whose inline cell — a table field or a vector element —
+      // is at `cell`.
+      template <typename F>
+      void decode_cell(const std::uint8_t* cell, F& out)
+      {
+         if constexpr (Scalar<F>)
+            out = load_scalar<F>(cell);
+         else if constexpr (is_struct_v<F>)
+            read_fixed<F>(cell, out);
+         else if constexpr (is_optional_v<F>)
+            decode_cell<typename F::value_type>(cell, out.emplace());
+         else if constexpr (std::is_same_v<F, std::string>)
+            out.assign(string_at(follow(cell)));
+         else if constexpr (is_vector_v<F> || is_array_v<F>)
+         {
+            using E                           = typename F::value_type;
+            const std::uint8_t* const vec     = follow(cell);
+            const std::size_t         written = load<std::uint32_t>(vec);
+            const std::uint8_t* const data    = vec + 4;
+            std::size_t               cnt     = written;
+            if constexpr (is_array_v<F>)
+               cnt = std::min(written, out.size());
+            else
+               out.resize(cnt);
+            if constexpr (Scalar<E> && !std::is_same_v<E, bool>)
+            {
+               if (cnt)
+                  std::memcpy(static_cast<void*>(out.data()), data, cnt * sizeof(E));
+            }
+            else if constexpr (std::is_same_v<E, bool>)
+            {
+               for (std::size_t i = 0; i < cnt; ++i)
+                  out[i] = data[i] != 0;
+            }
+            else
+            {
+               constexpr std::size_t step = inline_size<E>();
+               for (std::size_t i = 0; i < cnt; ++i)
+                  decode_cell<E>(data + i * step, out[i]);
+            }
+         }
+         else if constexpr (is_set_v<F>)
+         {
+            using K                        = typename F::key_type;
+            const std::uint8_t* const vec  = follow(cell);
+            const std::size_t         cnt  = load<std::uint32_t>(vec);
+            constexpr std::size_t     step = inline_size<K>();
+            for (std::size_t i = 0; i < cnt; ++i)
+            {
+               K key{};
+               decode_cell<K>(vec + 4 + i * step, key);
+               out.insert(out.end(), std::move(key));
+            }
+         }
+         else if constexpr (is_map_v<F>)
+         {
+            using K                       = typename F::key_type;
+            using V                       = typename F::mapped_type;
+            const std::uint8_t* const vec = follow(cell);
+            const std::size_t         cnt = load<std::uint32_t>(vec);
+            for (std::size_t i = 0; i < cnt; ++i)
+            {
+               std::pair<K, V> entry{};
+               decode_table<entry_def<K, V>>(follow(vec + 4 + i * 4), entry);
+               out.insert(out.end(), std::move(entry));
+            }
+         }
+         else
+            decode_table<record_def<F>>(follow(cell), out);
+      }
+
+      template <typename Def, std::size_t I, typename Obj>
+      [[gnu::always_inline]] inline void decode_member(const std::uint8_t* tbl, Obj& out)
+      {
+         using F = typename Def::template member<I>;
+         if constexpr (Def::template deprecated<I>)
+            return;
+         else if constexpr (is_variant_v<F>)
+         {
+            constexpr std::size_t     s    = Def::slot(I);
+            const std::uint8_t* const tc   = field_cell(tbl, vt_of(s));
+            const std::uint8_t* const vc   = field_cell(tbl, vt_of(s + 1));
+            const std::size_t         type = tc ? *tc : 0;
+            if (type == 0 || vc == nullptr)
+               return;  // NONE: the default-constructed variant
+            auto&             v     = Def::template get<I>(out);
+            const std::size_t which = type - (variant_traits<F>::has_none ? 0 : 1);
+            [&]<std::size_t... Js>(std::index_sequence<Js...>) {
+               (void)((which == Js
+                          ? ([&] {
+                                using Alt = std::variant_alternative_t<Js, F>;
+                                if constexpr (!std::is_same_v<Alt, std::monostate>)
+                                   decode_table<record_def<Alt>>(follow(vc),
+                                                                 v.template emplace<Js>());
+                             }(),
+                             true)
+                          : false) ||
+                      ...);
+            }(std::make_index_sequence<variant_traits<F>::count>{});
          }
          else
          {
-            std::uint32_t offsets[N > 0 ? N : 1]{};
-            [&]<std::size_t... Is>(std::index_sequence<Is...>)
-            {
-               ((offsets[Is] =
-                    pre_create_child<Builder,
-                       typename R::template member_type<Is>>(
-                       b, val.*(R::template member_pointer<Is>))),
-                ...);
-            }(std::make_index_sequence<N>{});
-
-            b.start_table();
-            [&]<std::size_t... Is>(std::index_sequence<Is...>)
-            {
-               (([&]
-                 {
-                    constexpr std::size_t i = N - 1 - Is;
-                    using F = typename R::template member_type<i>;
-                    const F& fref = val.*(R::template member_pointer<i>);
-                    const std::uint16_t vt =
-                       static_cast<std::uint16_t>(4 + 2 * i);
-                    if constexpr (std::is_same_v<F, bool>)
-                       b.template add_scalar<std::uint8_t>(
-                          vt, fref ? 1 : 0, 0);
-                    else if constexpr (std::is_arithmetic_v<F>)
-                       b.template add_scalar<F>(vt, fref, F{});
-                    else if constexpr (is_optional<F>::value)
-                    {
-                       using Inner = typename F::value_type;
-                       if (fref.has_value())
-                       {
-                          if constexpr (std::is_same_v<Inner, bool>)
-                             b.template add_scalar_force<std::uint8_t>(
-                                vt, *fref ? 1 : 0);
-                          else if constexpr (std::is_arithmetic_v<Inner>)
-                             b.template add_scalar_force<Inner>(vt, *fref);
-                          else if (offsets[i])
-                             b.add_offset_field(vt, offsets[i]);
-                       }
-                    }
-                    else
-                    {
-                       if (offsets[i])
-                          b.add_offset_field(vt, offsets[i]);
-                    }
-                 }()),
-                ...);
-            }(std::make_index_sequence<N>{});
-            return b.end_table();
+            if (const std::uint8_t* const cell = field_cell(tbl, vt_of(Def::slot(I))))
+               decode_cell<F>(cell, Def::template get<I>(out));
          }
       }
 
-      // ── Decoder ───────────────────────────────────────────────────────
-      //
-      // Buffer layout: [u32 root_offset at byte 0]. Root offset counts
-      // forward from byte 0 to the start of the root table. A table
-      // starts with an int32 back-pointer to its vtable.
-
-      inline std::uint32_t read_u32(const std::uint8_t* p)
+      // `out` is freshly constructed: an absent member keeps its initialiser.
+      template <typename Def, typename Obj>
+      void decode_table(const std::uint8_t* tbl, Obj& out)
       {
-         std::uint32_t v;
-         std::memcpy(&v, p, 4);
-         return v;
+         static_assert(def_supported<Def>(),
+                       "psio::flatbuf: a member of this record has a type FlatBuffers cannot "
+                       "hold (see the mapping in psio/flatbuf.hpp)");
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            (decode_member<Def, Is>(tbl, out), ...);
+         }(std::make_index_sequence<Def::count>{});
       }
 
-      inline std::int32_t read_i32(const std::uint8_t* p)
-      {
-         std::int32_t v;
-         std::memcpy(&v, p, 4);
-         return v;
-      }
+      // ── Validation (typed; safe on any bytes) ─────────────────────────
 
-      inline std::uint16_t read_u16(const std::uint8_t* p)
+      struct limits
       {
-         std::uint16_t v;
-         std::memcpy(&v, p, 2);
-         return v;
-      }
+         // Tables nested inside tables.
+         std::uint32_t max_depth = 64;
+         // Tables visited in total (a table reachable twice counts twice).
+         std::uint32_t max_tables = 1'000'000;
+      };
 
-      struct table_ptr
+      struct checker
       {
          const std::uint8_t* buf;
-         std::uint32_t       tbl_pos;  // offset of table in `buf`
+         std::uint64_t       size;
+         limits              lim;
+         std::uint32_t       depth  = 0;
+         std::uint32_t       tables = 0;
+         const char*         error  = nullptr;
+         std::uint64_t       at     = 0;
 
-         const std::uint8_t* vtable() const
+         bool fail(const char* what, std::uint64_t pos) noexcept
          {
-            return buf + tbl_pos - read_i32(buf + tbl_pos);
+            if (!error)
+            {
+               error = what;
+               at    = pos;
+            }
+            return false;
          }
-
-         // Returns the field's offset relative to tbl_pos (or 0 if
-         // not present in the vtable).
-         std::uint16_t field_off(std::uint16_t voffset) const
+         [[nodiscard]] bool has(std::uint64_t pos, std::uint64_t n) const noexcept
          {
-            const std::uint8_t* vt     = vtable();
-            const std::uint16_t vtsize = read_u16(vt);
-            if (voffset + 2 > vtsize)
-               return 0;
-            return read_u16(vt + voffset);
-         }
-
-         template <typename T>
-         T scalar(std::uint16_t voff, T def) const
-         {
-            const std::uint16_t fo = field_off(voff);
-            if (!fo)
-               return def;
-            T v;
-            std::memcpy(&v, buf + tbl_pos + fo, sizeof(T));
-            return v;
-         }
-
-         std::string string_at(std::uint16_t voff) const
-         {
-            const std::uint16_t fo = field_off(voff);
-            if (!fo)
-               return {};
-            // Field cell holds a forward offset to the string header.
-            const std::uint32_t abs =
-               tbl_pos + fo + read_u32(buf + tbl_pos + fo);
-            const std::uint32_t len = read_u32(buf + abs);
-            return std::string(reinterpret_cast<const char*>(buf + abs + 4),
-                               len);
-         }
-
-         table_ptr nested_at(std::uint16_t voff) const
-         {
-            const std::uint16_t fo = field_off(voff);
-            if (!fo)
-               return {buf, 0};
-            const std::uint32_t abs =
-               tbl_pos + fo + read_u32(buf + tbl_pos + fo);
-            return {buf, abs};
-         }
-
-         std::uint32_t vector_pos(std::uint16_t voff) const
-         {
-            const std::uint16_t fo = field_off(voff);
-            if (!fo)
-               return 0;
-            return tbl_pos + fo + read_u32(buf + tbl_pos + fo);
+            return pos <= size && n <= size - pos;
          }
       };
 
-      template <typename T>
-      void unpack_table(table_ptr t, T& out);
-
-      template <typename V>
-      void unpack_field(table_ptr t, int idx, V& out)
+      // The position the offset at `cell` (4 readable bytes) points to, or
+      // 0 after recording an error.
+      inline std::uint64_t check_offset(checker& c, std::uint64_t cell) noexcept
       {
-         const std::uint16_t vt =
-            static_cast<std::uint16_t>(4 + 2 * idx);
-         if constexpr (std::is_same_v<V, bool>)
-            out = t.scalar<std::uint8_t>(vt, 0) != 0;
-         else if constexpr (std::is_arithmetic_v<V>)
-            out = t.scalar<V>(vt, V{});
-         else if constexpr (std::is_same_v<V, std::string>)
-            out = t.string_at(vt);
-         else if constexpr (is_optional<V>::value)
-         {
-            using Inner = typename V::value_type;
-            if (!t.field_off(vt))
-               return;
-            if constexpr (std::is_same_v<Inner, bool>)
-               out = t.scalar<std::uint8_t>(vt, 0) != 0;
-            else if constexpr (std::is_arithmetic_v<Inner>)
-               out = t.scalar<Inner>(vt, Inner{});
-            else if constexpr (std::is_same_v<Inner, std::string>)
-               out = t.string_at(vt);
-         }
-         else if constexpr (is_vector<V>::value)
-         {
-            using E = typename V::value_type;
-            const std::uint32_t vec_pos = t.vector_pos(vt);
-            if (!vec_pos)
-               return;
-            const std::uint32_t n = read_u32(t.buf + vec_pos);
-            out.resize(n);
-            if constexpr (std::is_arithmetic_v<E>)
-            {
-               if (n)
-                  std::memcpy(out.data(), t.buf + vec_pos + 4,
-                              n * sizeof(E));
-            }
-            else if constexpr (std::is_same_v<E, std::string>)
-            {
-               for (std::uint32_t i = 0; i < n; ++i)
-               {
-                  const std::uint32_t cell = vec_pos + 4 + i * 4;
-                  const std::uint32_t sp =
-                     cell + read_u32(t.buf + cell);
-                  const std::uint32_t slen = read_u32(t.buf + sp);
-                  out[i] = std::string(
-                     reinterpret_cast<const char*>(t.buf + sp + 4),
-                     slen);
-               }
-            }
-            else if constexpr (is_table<E>::value)
-            {
-               for (std::uint32_t i = 0; i < n; ++i)
-               {
-                  const std::uint32_t cell = vec_pos + 4 + i * 4;
-                  const std::uint32_t sub =
-                     cell + read_u32(t.buf + cell);
-                  unpack_table<E>(table_ptr{t.buf, sub}, out[i]);
-               }
-            }
-         }
-         else if constexpr (is_table<V>::value)
-         {
-            const table_ptr nested = t.nested_at(vt);
-            if (nested.tbl_pos)
-               unpack_table<V>(nested, out);
-         }
+         if (cell & 3)
+            return c.fail("flatbuf: misaligned offset", cell), 0;
+         const std::uint32_t o = load<std::uint32_t>(c.buf + cell);
+         if (o == 0)
+            return c.fail("flatbuf: null offset", cell), 0;
+         if (o > max_buffer_size || !c.has(cell + o, 4))
+            return c.fail("flatbuf: offset out of bounds", cell), 0;
+         return cell + o;
       }
 
-      template <typename T>
-      void unpack_table(table_ptr t, T& out)
+      inline bool check_string(checker& c, std::uint64_t pos) noexcept
       {
-         using R = ::psio::reflect<T>;
-         [&]<std::size_t... Is>(std::index_sequence<Is...>)
-         {
-            (unpack_field(t, static_cast<int>(Is),
-                          out.*(R::template member_pointer<Is>)),
-             ...);
-         }(std::make_index_sequence<R::member_count>{});
-      }
-
-      // ── Structural validator ─────────────────────────────────────────
-      //
-      // Walk the root table by following the same offset-resolution
-      // logic as unpack_table, but without materialising values. The
-      // walker's contract: every byte read happens through a bounds-
-      // checked accessor, and depth threads kMaxValidationDepth.
-      //
-      // flatbuf wire layout we validate:
-      //   [u32 root_offset]            byte 0
-      //   [int32 vtable back-pointer]  at root_offset (table start)
-      //   [vtable u16 size + u16 table_size + per-field u16 offsets]
-      //                                 at root_offset - back_ptr
-      //   [field cells]                 at root_offset + voffset
-      //
-      // For each variable field (string, vector, nested table) the
-      // cell holds a forward u32 offset to the payload. The payload
-      // header is u32 length (string / vector). Nested tables have
-      // their own vtable.
-
-      // Forward decl: depth-tracked table validator.
-      template <typename T>
-      bool validate_table(const std::uint8_t* buf, std::size_t size,
-                          std::uint32_t pos, std::size_t depth) noexcept;
-
-      // Validate a string at absolute position `abs` in `buf`. The
-      // string body is u32 len + len bytes (+ null terminator,
-      // optional). We only require len bytes fit inside `size`.
-      inline bool validate_string(const std::uint8_t* buf,
-                                  std::size_t size, std::uint32_t abs) noexcept
-      {
-         if (abs > size || size - abs < 4) return false;
-         std::uint32_t len = read_u32(buf + abs);
-         if (len > size - abs - 4) return false;
+         if (pos & 3)
+            return c.fail("flatbuf: misaligned string", pos);
+         const std::uint64_t len = load<std::uint32_t>(c.buf + pos);
+         if (!c.has(pos + 4, len + 1))
+            return c.fail("flatbuf: string out of bounds", pos);
+         if (c.buf[pos + 4 + len] != 0)
+            return c.fail("flatbuf: string is not NUL-terminated", pos);
          return true;
       }
 
-      // Validate a vector at absolute position `abs`. Body is u32 n
-      // + n elements of `esz` bytes each (or per-element forward
-      // offsets for non-trivial elements).
-      template <typename E>
-      bool validate_vector(const std::uint8_t* buf, std::size_t size,
-                           std::uint32_t abs, std::size_t depth) noexcept
+      // The element count of the vector at `pos` (4 readable bytes); false
+      // after recording an error.
+      inline bool check_vector(checker& c, std::uint64_t pos, std::uint64_t elem_size,
+                               std::uint64_t elem_align, std::uint64_t& count) noexcept
       {
-         if (depth > ::psio::kMaxValidationDepth) return false;
-         if (abs > size || size - abs < 4) return false;
-         std::uint32_t n = read_u32(buf + abs);
-         if constexpr (std::is_arithmetic_v<E>)
+         if (pos & 3)
+            return c.fail("flatbuf: misaligned vector", pos);
+         count = load<std::uint32_t>(c.buf + pos);
+         if (!c.has(pos + 4, count * elem_size))
+            return c.fail("flatbuf: vector out of bounds", pos);
+         if (count && ((pos + 4) & (elem_align - 1)))
+            return c.fail("flatbuf: misaligned vector elements", pos);
+         return true;
+      }
+
+      template <typename Def>
+      bool check_table(checker& c, std::uint64_t pos) noexcept;
+
+      template <typename K>
+      [[gnu::always_inline]] inline auto key_at(const std::uint8_t* cell) noexcept
+      {
+         if constexpr (std::is_same_v<K, std::string>)
+            return string_at(follow(cell));
+         else
+            return load_scalar<K>(cell);
+      }
+      // The key of the map entry whose offset is at `cell`.
+      template <typename K>
+      [[gnu::always_inline]] inline auto entry_key_at(const std::uint8_t* cell) noexcept
+      {
+         const std::uint8_t* const tbl = follow(cell);
+         const std::uint8_t* const kc  = field_cell(tbl, vt_of(0));
+         if constexpr (std::is_same_v<K, std::string>)
+            return kc ? string_at(follow(kc)) : std::string_view{};
+         else
+            return kc ? load_scalar<K>(kc) : K{};
+      }
+
+      // The value whose inline cell is at `pos` (a table field, or a vector
+      // element): its inline bytes, then what they point to.
+      template <typename F>
+      bool check_cell(checker& c, std::uint64_t pos) noexcept
+      {
+         if constexpr (is_optional_v<F>)
+            return check_cell<typename F::value_type>(c, pos);
+         else if constexpr (Scalar<F> || is_struct_v<F>)
          {
-            //  Multiplication overflow + bounds.
-            if (n > (size - abs - 4) / sizeof(E)) return false;
-            return true;
-         }
-         else if constexpr (std::is_same_v<E, std::string>)
-         {
-            if (n > (size - abs - 4) / 4) return false;
-            for (std::uint32_t i = 0; i < n; ++i)
-            {
-               std::uint32_t cell = abs + 4 + i * 4;
-               if (cell > size || size - cell < 4) return false;
-               std::uint32_t fwd = read_u32(buf + cell);
-               if (fwd > size - cell) return false;
-               std::uint32_t sp = cell + fwd;
-               if (!validate_string(buf, size, sp)) return false;
-            }
-            return true;
-         }
-         else if constexpr (is_table<E>::value)
-         {
-            if (n > (size - abs - 4) / 4) return false;
-            for (std::uint32_t i = 0; i < n; ++i)
-            {
-               std::uint32_t cell = abs + 4 + i * 4;
-               if (cell > size || size - cell < 4) return false;
-               std::uint32_t fwd = read_u32(buf + cell);
-               if (fwd > size - cell) return false;
-               std::uint32_t sub = cell + fwd;
-               if (!validate_table<E>(buf, size, sub, depth + 1))
-                  return false;
-            }
+            if (pos & (inline_align<F>() - 1))
+               return c.fail("flatbuf: misaligned field", pos);
+            if (!c.has(pos, inline_size<F>()))
+               return c.fail("flatbuf: field out of bounds", pos);
             return true;
          }
          else
          {
-            //  Unsupported vector element — reject conservatively.
-            return false;
+            if (!c.has(pos, 4))
+               return c.fail("flatbuf: field out of bounds", pos);
+            const std::uint64_t target = check_offset(c, pos);
+            if (!target)
+               return false;
+            if constexpr (std::is_same_v<F, std::string>)
+               return check_string(c, target);
+            else if constexpr (is_vector_v<F> || is_array_v<F> || is_set_v<F>)
+            {
+               using E = typename F::value_type;
+               std::uint64_t count = 0;
+               if (!check_vector(c, target, inline_size<E>(), inline_align<E>(), count))
+                  return false;
+               if constexpr (is_array_v<F>)
+               {
+                  if (count != array_traits<F>::count)
+                     return c.fail("flatbuf: a fixed-length vector has the wrong length", target);
+               }
+               if constexpr (!(Scalar<E> || is_struct_v<E>))
+               {
+                  for (std::uint64_t i = 0; i < count; ++i)
+                     if (!check_cell<E>(c, target + 4 + i * 4))
+                        return false;
+               }
+               if constexpr (is_set_v<F>)
+               {
+                  constexpr std::size_t step = inline_size<E>();
+                  for (std::uint64_t i = 1; i < count; ++i)
+                     if (!(key_at<E>(c.buf + target + 4 + (i - 1) * step) <
+                           key_at<E>(c.buf + target + 4 + i * step)))
+                        return c.fail("flatbuf: set keys are not in ascending order", target);
+               }
+               return true;
+            }
+            else if constexpr (is_map_v<F>)
+            {
+               using K = typename F::key_type;
+               using V = typename F::mapped_type;
+               std::uint64_t count = 0;
+               if (!check_vector(c, target, 4, 4, count))
+                  return false;
+               for (std::uint64_t i = 0; i < count; ++i)
+               {
+                  const std::uint64_t entry = check_offset(c, target + 4 + i * 4);
+                  if (!entry || !check_table<entry_def<K, V>>(c, entry))
+                     return false;
+               }
+               for (std::uint64_t i = 1; i < count; ++i)
+                  if (!(entry_key_at<K>(c.buf + target + 4 + (i - 1) * 4) <
+                        entry_key_at<K>(c.buf + target + 4 + i * 4)))
+                     return c.fail("flatbuf: map keys are not in ascending order", target);
+               return true;
+            }
+            else
+               return check_table<record_def<F>>(c, target);
          }
       }
 
-      template <typename T>
-      bool validate_table(const std::uint8_t* buf, std::size_t size,
-                          std::uint32_t pos, std::size_t depth) noexcept
+      // A table header that has passed its checks.
+      struct checked_table
       {
-         if (depth > ::psio::kMaxValidationDepth) return false;
-         //  Table starts with int32 vtable back-pointer.
-         if (pos > size || size - pos < 4) return false;
-         std::int32_t back = read_i32(buf + pos);
-         //  vtable position = pos - back. back may be negative
-         //  (vtable lies forward) or positive (vtable lies behind).
-         //  Use signed arithmetic; check for under/overflow.
-         std::int64_t vt_pos_s = static_cast<std::int64_t>(pos) - back;
-         if (vt_pos_s < 0) return false;
-         std::uint64_t vt_pos = static_cast<std::uint64_t>(vt_pos_s);
-         if (vt_pos > size || size - vt_pos < 4) return false;
-         std::uint16_t vtsize     = read_u16(buf + vt_pos);
-         std::uint16_t table_size = read_u16(buf + vt_pos + 2);
-         //  vtsize must cover its own header (4 bytes minimum).
-         if (vtsize < 4) return false;
-         if (vt_pos + vtsize > size) return false;
-         (void)table_size;
+         std::uint64_t pos    = 0;
+         std::uint64_t vtable = 0;
+         std::uint32_t vsize  = 0;
+         std::uint32_t object = 0;
+      };
 
-         //  Walk fields in PSIO_REFLECT order. Each field's voffset
-         //  is 4 + 2*idx; if the vtable doesn't reach that voffset
-         //  the field is absent and we skip.
-         using R       = ::psio::reflect<T>;
-         bool ok       = true;
-         [&]<std::size_t... Is>(std::index_sequence<Is...>)
+      // The position of the field at vtable position `vt` occupying `size`
+      // bytes: 0 when absent; `ok` false after recording an error.
+      inline std::uint64_t checked_field(checker& c, const checked_table& t, std::uint32_t vt,
+                                         std::uint32_t size, bool& ok) noexcept
+      {
+         if (vt + 2 > t.vsize)
+            return 0;
+         const std::uint32_t off = load<std::uint16_t>(c.buf + t.vtable + vt);
+         if (off == 0)
+            return 0;
+         if (off < 4 || off + size > t.object)
          {
-            (((ok)
-                 ? ([&]
-                    {
-                       using V = typename R::template member_type<Is>;
-                       const std::uint16_t voff =
-                          static_cast<std::uint16_t>(4 + 2 * Is);
-                       if (voff + 2 > vtsize) return;
-                       std::uint16_t fo =
-                          read_u16(buf + vt_pos + voff);
-                       if (fo == 0) return;  //  not present
-                       //  Field cell lives at pos + fo.
-                       std::uint64_t cell_pos =
-                          static_cast<std::uint64_t>(pos) + fo;
-                       if (cell_pos > size) { ok = false; return; }
+            ok = c.fail("flatbuf: field outside its table", t.vtable + vt);
+            return 0;
+         }
+         return t.pos + off;
+      }
 
-                       if constexpr (std::is_same_v<V, bool>)
-                       {
-                          if (size - cell_pos < 1) { ok = false; return; }
-                          //  Single-byte bool — value 0 or 1, but
-                          //  flatbuf treats nonzero as true so we
-                          //  don't strict-check it here.
-                       }
-                       else if constexpr (std::is_arithmetic_v<V>)
-                       {
-                          if (size - cell_pos < sizeof(V))
-                          { ok = false; return; }
-                       }
-                       else if constexpr (std::is_same_v<V, std::string>)
-                       {
-                          if (size - cell_pos < 4)
-                          { ok = false; return; }
-                          std::uint32_t fwd = read_u32(buf + cell_pos);
-                          if (fwd > size - cell_pos)
-                          { ok = false; return; }
-                          std::uint32_t abs =
-                             static_cast<std::uint32_t>(cell_pos) + fwd;
-                          if (!validate_string(buf, size, abs))
-                          { ok = false; return; }
-                       }
-                       else if constexpr (is_optional<V>::value)
-                       {
-                          using Inner = typename V::value_type;
-                          if constexpr (std::is_same_v<Inner, bool> ||
-                                        std::is_arithmetic_v<Inner>)
-                          {
-                             constexpr std::size_t sz =
-                                std::is_same_v<Inner, bool>
-                                   ? 1
-                                   : sizeof(Inner);
-                             if (size - cell_pos < sz)
-                             { ok = false; return; }
-                          }
-                          else if constexpr (std::is_same_v<
-                                                Inner, std::string>)
-                          {
-                             if (size - cell_pos < 4)
-                             { ok = false; return; }
-                             std::uint32_t fwd =
-                                read_u32(buf + cell_pos);
-                             if (fwd > size - cell_pos)
-                             { ok = false; return; }
-                             std::uint32_t abs =
-                                static_cast<std::uint32_t>(cell_pos) +
-                                fwd;
-                             if (!validate_string(buf, size, abs))
-                             { ok = false; return; }
-                          }
-                       }
-                       else if constexpr (is_vector<V>::value)
-                       {
-                          using E = typename V::value_type;
-                          if (size - cell_pos < 4)
-                          { ok = false; return; }
-                          std::uint32_t fwd = read_u32(buf + cell_pos);
-                          if (fwd > size - cell_pos)
-                          { ok = false; return; }
-                          std::uint32_t abs =
-                             static_cast<std::uint32_t>(cell_pos) + fwd;
-                          if (!validate_vector<E>(buf, size, abs,
-                                                    depth + 1))
-                          { ok = false; return; }
-                       }
-                       else if constexpr (is_table<V>::value)
-                       {
-                          if (size - cell_pos < 4)
-                          { ok = false; return; }
-                          std::uint32_t fwd = read_u32(buf + cell_pos);
-                          if (fwd > size - cell_pos)
-                          { ok = false; return; }
-                          std::uint32_t abs =
-                             static_cast<std::uint32_t>(cell_pos) + fwd;
-                          if (!validate_table<V>(buf, size, abs,
-                                                   depth + 1))
-                          { ok = false; return; }
-                       }
-                    }())
-                 : (void)0),
-             ...);
-         }(std::make_index_sequence<R::member_count>{});
+      template <typename Def, std::size_t I>
+      [[gnu::always_inline]] inline bool check_member(checker& c, const checked_table& t) noexcept
+      {
+         using F = typename Def::template member<I>;
+         if constexpr (Def::template deprecated<I>)
+            return true;
+         else if constexpr (is_variant_v<F>)
+         {
+            constexpr std::size_t s  = Def::slot(I);
+            bool                  ok = true;
+            const std::uint64_t   tc = checked_field(c, t, vt_of(s), 1, ok);
+            if (!ok)
+               return false;
+            const std::uint64_t vc = checked_field(c, t, vt_of(s + 1), 4, ok);
+            if (!ok)
+               return false;
+            const std::size_t type = tc ? c.buf[tc] : 0;
+            if (type == 0)
+               return vc ? c.fail("flatbuf: union is NONE but has a value", vc) : true;
+            const std::size_t which = type - (variant_traits<F>::has_none ? 0 : 1);
+            if (which >= variant_traits<F>::count)
+               return c.fail("flatbuf: unknown union type", tc);
+            if (!vc)
+               return c.fail("flatbuf: union has a type but no value", tc);
+            const std::uint64_t target = check_offset(c, vc);
+            if (!target)
+               return false;
+            bool result = true;
+            [&]<std::size_t... Js>(std::index_sequence<Js...>) {
+               (void)((which == Js
+                          ? ([&] {
+                                using Alt = std::variant_alternative_t<Js, F>;
+                                if constexpr (!std::is_same_v<Alt, std::monostate>)
+                                   result = check_table<record_def<Alt>>(c, target);
+                             }(),
+                             true)
+                          : false) ||
+                      ...);
+            }(std::make_index_sequence<variant_traits<F>::count>{});
+            return result;
+         }
+         else
+         {
+            bool                ok   = true;
+            const std::uint64_t cell = checked_field(
+               c, t, vt_of(Def::slot(I)), static_cast<std::uint32_t>(inline_size<F>()), ok);
+            if (!ok)
+               return false;
+            if constexpr (Def::template required<I>)
+            {
+               if (!cell)
+                  return c.fail("flatbuf: map entry has no key", t.pos);
+            }
+            return cell ? check_cell<F>(c, cell) : true;
+         }
+      }
+
+      template <typename Def>
+      bool check_table(checker& c, std::uint64_t pos) noexcept
+      {
+         static_assert(def_supported<Def>(),
+                       "psio::flatbuf: a member of this record has a type FlatBuffers cannot "
+                       "hold (see the mapping in psio/flatbuf.hpp)");
+         if (c.depth >= c.lim.max_depth)
+            return c.fail("flatbuf: tables nested too deeply", pos);
+         if (c.tables >= c.lim.max_tables)
+            return c.fail("flatbuf: too many tables", pos);
+         ++c.tables;
+         if (pos & 3)
+            return c.fail("flatbuf: misaligned table", pos);
+         if (!c.has(pos, 4))
+            return c.fail("flatbuf: table out of bounds", pos);
+         const std::int64_t vpos =
+            static_cast<std::int64_t>(pos) - load<std::int32_t>(c.buf + pos);
+         if (vpos < 0 || (vpos & 1) || !c.has(static_cast<std::uint64_t>(vpos), 4))
+            return c.fail("flatbuf: vtable out of bounds", pos);
+         checked_table t;
+         t.pos    = pos;
+         t.vtable = static_cast<std::uint64_t>(vpos);
+         t.vsize  = load<std::uint16_t>(c.buf + t.vtable);
+         t.object = load<std::uint16_t>(c.buf + t.vtable + 2);
+         if (t.vsize < 4 || (t.vsize & 1) || !c.has(t.vtable, t.vsize))
+            return c.fail("flatbuf: bad vtable size", t.vtable);
+         if (t.object < 4 || !c.has(pos, t.object))
+            return c.fail("flatbuf: bad table size", t.vtable);
+         ++c.depth;
+         const bool ok = [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (check_member<Def, Is>(c, t) && ...);
+         }(std::make_index_sequence<Def::count>{});
+         --c.depth;
          return ok;
       }
 
+      struct read_options
+      {
+         // Require this file identifier (four characters; empty: any).
+         std::string_view file_identifier{};
+         // The buffer starts with its size.
+         bool size_prefixed = false;
+      };
+
+      template <Table T>
+      codec_status validate_buffer(std::span<const char> bytes, const read_options& opts = {},
+                                   limits lim = {}) noexcept
+      {
+         checker c{reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size(), lim};
+         if (bytes.size() > max_buffer_size)
+            return codec_fail("flatbuf: buffer larger than 2 GiB", 0, "flatbuf");
+         const std::uint64_t start = opts.size_prefixed ? 4 : 0;
+         if (!c.has(0, start + 4))
+            return codec_fail("flatbuf: buffer too small", 0, "flatbuf");
+         if (opts.size_prefixed && load<std::uint32_t>(c.buf) != bytes.size() - 4)
+            return codec_fail("flatbuf: size prefix does not match the buffer", 0, "flatbuf");
+         if (!opts.file_identifier.empty())
+         {
+            if (opts.file_identifier.size() != 4 || !c.has(start, 8) ||
+                std::memcmp(c.buf + start + 4, opts.file_identifier.data(), 4) != 0)
+               return codec_fail("flatbuf: wrong file identifier",
+                                 static_cast<std::uint32_t>(start + 4), "flatbuf");
+         }
+         const std::uint64_t root = check_offset(c, start);
+         if (!root || !check_table<record_def<T>>(c, root))
+            return codec_fail(c.error, static_cast<std::uint32_t>(c.at), "flatbuf");
+         return codec_ok();
+      }
+
    }  // namespace detail::flatbuf_impl
+
+   // ── Format tag ──────────────────────────────────────────────────────────
 
    struct flatbuf : format_tag_base<flatbuf>
    {
       using preferred_presentation_category = ::psio::binary_category;
 
-      //  Single-pass encode.  Reverted from a two-pass size+write
-      //  scheme (mirror of capnp::word_count_of) because flatbuf's
-      //  encode logic is too complex to dry-walk cheaply: alignment
-      //  padding is position-dependent, vtables need mirrored
-      //  construction, offset tables need element counts, etc.  The
-      //  twin-walk cost exceeded the savings from skipping the 3-4
-      //  grow() reallocs.  SBO + dedup + uninit-growth handles the
-      //  amortisation better — see flatbuf encode bench history.
+      // The limits `validate` applies; the official verifier's defaults.
+      using limits = detail::flatbuf_impl::limits;
+      // A file identifier and / or a size prefix: `to_flatbuf(v, options)`,
+      // `validate_flatbuf<T>(bytes, options)`.
+      using options = detail::flatbuf_impl::write_options;
+
+      // The layout of T. A table: `layout<T>::slot(i)` is the field id of
+      // member i and `vtable_offset(i)` its position in the vtable — what
+      // `flatc` assigns for the schema of T. A struct: `size`, `align` and
+      // `offset(i)`.
       template <typename T>
-         requires detail::flatbuf_impl::is_table<T>::value
-      friend std::vector<char> tag_invoke(decltype(::psio::encode),
-                                          flatbuf, const T& v)
+      struct layout
       {
-         detail::flatbuf_impl::builder b;
-         const auto root = detail::flatbuf_impl::pre_create(b, v);
-         return b.finish(root);
+         static constexpr bool is_struct = detail::flatbuf_impl::is_struct_v<T>;
+         static constexpr std::size_t members = ::psio::reflect<T>::member_count;
+
+         static constexpr std::size_t slot(std::size_t i) noexcept
+            requires (!is_struct)
+         {
+            return detail::flatbuf_impl::record_def<T>::slot(i);
+         }
+         static constexpr std::size_t vtable_offset(std::size_t i) noexcept
+            requires (!is_struct)
+         {
+            return detail::flatbuf_impl::vt_of(detail::flatbuf_impl::record_def<T>::slot(i));
+         }
+         static constexpr std::size_t slots() noexcept
+            requires (!is_struct)
+         {
+            return detail::flatbuf_impl::record_def<T>::slots;
+         }
+         static constexpr std::size_t size() noexcept
+            requires is_struct
+         {
+            return detail::flatbuf_impl::struct_layout<T>::size;
+         }
+         static constexpr std::size_t align() noexcept
+            requires is_struct
+         {
+            return detail::flatbuf_impl::struct_layout<T>::align;
+         }
+         static constexpr std::size_t offset(std::size_t i) noexcept
+            requires is_struct
+         {
+            return detail::flatbuf_impl::struct_layout<T>::offset(i);
+         }
+      };
+
+      template <typename T>
+         requires detail::flatbuf_impl::Table<T>
+      friend std::vector<char> tag_invoke(decltype(::psio::encode), flatbuf, const T& v)
+      {
+         std::vector<char> out;
+         detail::flatbuf_impl::encode_into(v, {}, out);
+         return out;
       }
 
-      //  Sink-form encode — caller-supplied vector<char> reused across
-      //  iterations.  Builder still allocates its internal buf_ per
-      //  call; only the output buffer is reused.
+      // Sink form: replaces the contents of `sink`, reusing its capacity.
       template <typename T>
-         requires detail::flatbuf_impl::is_table<T>::value
-      friend void tag_invoke(decltype(::psio::encode),
-                             flatbuf,
-                             const T&            v,
-                             std::vector<char>&  sink)
+         requires detail::flatbuf_impl::Table<T>
+      friend void tag_invoke(decltype(::psio::encode), flatbuf, const T& v, std::vector<char>& sink)
       {
-         detail::flatbuf_impl::builder b;
-         const auto root = detail::flatbuf_impl::pre_create(b, v);
-         b.finish_into(root, sink);
+         detail::flatbuf_impl::encode_into(v, {}, sink);
       }
 
       template <typename T>
-         requires detail::flatbuf_impl::is_table<T>::value
-      friend T tag_invoke(decltype(::psio::decode<T>), flatbuf, T*,
-                          std::span<const char> bytes)
+         requires detail::flatbuf_impl::Table<T>
+      friend T tag_invoke(decltype(::psio::decode<T>), flatbuf, T*, std::span<const char> bytes)
       {
-         const auto* buf =
-            reinterpret_cast<const std::uint8_t*>(bytes.data());
-         const std::uint32_t root_off =
-            detail::flatbuf_impl::read_u32(buf);
          T out{};
-         detail::flatbuf_impl::unpack_table<T>(
-            detail::flatbuf_impl::table_ptr{buf, root_off}, out);
+         detail::flatbuf_impl::decode_table<detail::flatbuf_impl::record_def<T>>(
+            detail::flatbuf_impl::root_of(bytes), out);
          return out;
       }
 
       template <typename T>
-         requires detail::flatbuf_impl::is_table<T>::value
-      friend std::size_t tag_invoke(decltype(::psio::size_of), flatbuf,
-                                    const T& v)
+         requires detail::flatbuf_impl::Table<T>
+      friend std::size_t tag_invoke(decltype(::psio::size_of), flatbuf, const T& v)
       {
-         // One-shot: build the buffer, return its size. No cheaper
-         // estimate is available without replicating the pack math.
-         const auto out = tag_invoke(::psio::encode, flatbuf{}, v);
+         // Padding depends on position, so the size is found by encoding.
+         std::vector<char> out;
+         detail::flatbuf_impl::encode_into(v, {}, out);
          return out.size();
       }
 
       template <typename T>
-         requires detail::flatbuf_impl::is_table<T>::value
-      friend codec_status tag_invoke(decltype(::psio::validate<T>),
-                                     flatbuf, T*,
+         requires detail::flatbuf_impl::Table<T>
+      friend codec_status tag_invoke(decltype(::psio::validate<T>), flatbuf, T*,
                                      std::span<const char> bytes) noexcept
       {
-         if (bytes.size() < 4)
-            return codec_fail("flatbuf: buffer too small", 0, "flatbuf");
-         if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(),
-                                                         "flatbuf");
-             !st.ok())
+         if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "flatbuf"); !st.ok())
             return st;
-         //  Real structural walker — follows the root offset, then
-         //  walks the root table by vtable + per-field
-         //  offset-resolution. Mirrors the discipline the canonical
-         //  libflatbuffers Verifier provides for the same-named
-         //  type. Threads kMaxValidationDepth through every nested
-         //  table / vector level.
-         const auto* buf =
-            reinterpret_cast<const std::uint8_t*>(bytes.data());
-         std::uint32_t root_off =
-            detail::flatbuf_impl::read_u32(buf);
-         if (root_off > bytes.size())
-            return codec_fail("flatbuf: root offset past buffer",
-                              0, "flatbuf");
-         if (!detail::flatbuf_impl::validate_table<T>(
-                buf, bytes.size(), root_off, 0))
-            return codec_fail("flatbuf: structural validation failed",
-                              static_cast<std::uint32_t>(root_off),
-                              "flatbuf");
-         return codec_ok();
+         return detail::flatbuf_impl::validate_buffer<T>(bytes);
       }
 
+      // `validate`, then the annotations of T (bounds, utf8, sorted, …)
+      // checked on the decoded value.
       template <typename T>
-         requires detail::flatbuf_impl::is_table<T>::value
-      friend codec_status
-      tag_invoke(decltype(::psio::validate_strict<T>), flatbuf, T*,
-                 std::span<const char> bytes) noexcept
+         requires detail::flatbuf_impl::Table<T>
+      friend codec_status tag_invoke(decltype(::psio::validate_strict<T>), flatbuf, T*,
+                                     std::span<const char> bytes) noexcept
       {
-         return tag_invoke(::psio::validate<T>, flatbuf{}, (T*)nullptr,
-                           bytes);
+         if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "flatbuf"); !st.ok())
+            return st;
+         if (auto st = detail::flatbuf_impl::validate_buffer<T>(bytes); !st.ok())
+            return st;
+         T out{};
+         detail::flatbuf_impl::decode_table<detail::flatbuf_impl::record_def<T>>(
+            detail::flatbuf_impl::root_of(bytes), out);
+         return ::psio::validate_specs_on_value(out);
       }
 
       template <typename T>
-         requires detail::flatbuf_impl::is_table<T>::value
-      friend std::unique_ptr<T>
-      tag_invoke(decltype(::psio::make_boxed<T>), flatbuf, T*,
-                 std::span<const char> bytes) noexcept
+         requires detail::flatbuf_impl::Table<T>
+      friend std::unique_ptr<T> tag_invoke(decltype(::psio::make_boxed<T>), flatbuf, T*,
+                                           std::span<const char> bytes) noexcept
       {
          auto v = std::make_unique<T>();
-         const auto* buf =
-            reinterpret_cast<const std::uint8_t*>(bytes.data());
-         const std::uint32_t root_off =
-            detail::flatbuf_impl::read_u32(buf);
-         detail::flatbuf_impl::unpack_table<T>(
-            detail::flatbuf_impl::table_ptr{buf, root_off}, *v);
+         detail::flatbuf_impl::decode_table<detail::flatbuf_impl::record_def<T>>(
+            detail::flatbuf_impl::root_of(bytes), *v);
          return v;
       }
    };
 
    PSIO_FORMAT_HELPERS(flatbuf)
+
+   // `to_flatbuf(v, {.file_identifier = "ORDR", .size_prefixed = true})`.
+   template <typename T>
+      requires detail::flatbuf_impl::Table<T>
+   [[nodiscard]] std::vector<char> to_flatbuf(const T& v, const flatbuf::options& opts)
+   {
+      std::vector<char> out;
+      detail::flatbuf_impl::encode_into(v, opts, out);
+      return out;
+   }
+
+   // The typed check under limits other than the defaults, and / or of a
+   // buffer with a required file identifier or a size prefix.
+   template <typename T>
+      requires detail::flatbuf_impl::Table<T>
+   [[nodiscard]] codec_status validate_flatbuf(std::span<const char> bytes,
+                                               flatbuf::limits       lim) noexcept
+   {
+      return detail::flatbuf_impl::validate_buffer<T>(bytes, {}, lim);
+   }
+   template <typename T>
+      requires detail::flatbuf_impl::Table<T>
+   [[nodiscard]] codec_status validate_flatbuf(std::span<const char> bytes,
+                                               const flatbuf::options& opts,
+                                               flatbuf::limits         lim = {}) noexcept
+   {
+      return detail::flatbuf_impl::validate_buffer<T>(
+         bytes, {opts.file_identifier, opts.size_prefixed}, lim);
+   }
+
+   // The file identifier of a buffer (not size-prefixed): the four bytes
+   // after the root offset. Empty when the buffer is too short to have one.
+   // A buffer written without an identifier has other data there.
+   [[nodiscard]] inline std::string_view flatbuf_identifier(std::span<const char> bytes) noexcept
+   {
+      return bytes.size() >= 8 ? std::string_view{bytes.data() + 4, 4} : std::string_view{};
+   }
+   [[nodiscard]] inline bool flatbuf_has_identifier(std::span<const char> bytes,
+                                                    std::string_view      id) noexcept
+   {
+      return id.size() == 4 && flatbuf_identifier(bytes) == id;
+   }
+
+   // The buffer inside a size-prefixed one — what views, `from_flatbuf` and
+   // `flatbuf_identifier` take. Empty when the prefix exceeds the bytes; any
+   // bytes after the prefixed buffer (the next one of a stream) are left out.
+   [[nodiscard]] inline std::span<const char> flatbuf_size_prefixed(
+      std::span<const char> bytes) noexcept
+   {
+      if (bytes.size() < 4)
+         return {};
+      const std::uint32_t n = detail::flatbuf_impl::load<std::uint32_t>(
+         reinterpret_cast<const std::uint8_t*>(bytes.data()));
+      if (n > bytes.size() - 4)
+         return {};
+      return bytes.subspan(4, n);
+   }
 
 }  // namespace psio

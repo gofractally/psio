@@ -136,24 +136,45 @@ namespace fb_bench_adapter {
                                        note);
    }
 
+   inline fb_bench::fb_ValidatorStruct to_fb_struct(const Validator& v)
+   {
+      return fb_bench::fb_ValidatorStruct{
+         v.pubkey_lo, v.pubkey_hi, v.withdrawal_lo, v.withdrawal_hi, v.effective_balance,
+         v.slashed, v.activation_epoch, v.exit_epoch, v.withdrawable_epoch};
+   }
+   inline Validator from_fb_struct(const fb_bench::fb_ValidatorStruct& r)
+   {
+      Validator v;
+      v.pubkey_lo          = r.pubkey_lo();
+      v.pubkey_hi          = r.pubkey_hi();
+      v.withdrawal_lo      = r.withdrawal_lo();
+      v.withdrawal_hi      = r.withdrawal_hi();
+      v.effective_balance  = r.effective_balance();
+      v.slashed            = r.slashed();
+      v.activation_epoch   = r.activation_epoch();
+      v.exit_epoch         = r.exit_epoch();
+      v.withdrawable_epoch = r.withdrawable_epoch();
+      return v;
+   }
+
    inline flatbuffers::Offset<fb_bench::fb_ValidatorList>
    build(fbs& b, const ValidatorList& v)
    {
-      std::vector<flatbuffers::Offset<fb_bench::fb_Validator>> vs_v;
+      std::vector<fb_bench::fb_ValidatorStruct> vs_v;
       vs_v.reserve(v.validators.size());
       for (const auto& vd : v.validators)
-         vs_v.push_back(build(b, vd));
-      auto validators = b.CreateVector(vs_v);
+         vs_v.push_back(to_fb_struct(vd));
+      auto validators = b.CreateVectorOfStructs(vs_v);
       return fb_bench::Createfb_ValidatorList(b, v.epoch, validators);
    }
    inline flatbuffers::Offset<fb_bench::fb_ValidatorList>
    build(fbs& b, const ValidatorListBounded& v)
    {
-      std::vector<flatbuffers::Offset<fb_bench::fb_Validator>> vs_v;
+      std::vector<fb_bench::fb_ValidatorStruct> vs_v;
       vs_v.reserve(v.validators.size());
       for (const auto& vd : v.validators)
-         vs_v.push_back(build(b, vd));
-      auto validators = b.CreateVector(vs_v);
+         vs_v.push_back(to_fb_struct(vd));
+      auto validators = b.CreateVectorOfStructs(vs_v);
       return fb_bench::Createfb_ValidatorList(b, v.epoch, validators);
    }
 
@@ -391,7 +412,7 @@ namespace fb_bench_adapter {
       if (auto* vs = r->validators()) {
          vl.validators.reserve(vs->size());
          for (auto* v : *vs)
-            vl.validators.push_back(to_native<Validator>(v));
+            vl.validators.push_back(from_fb_struct(*v));
       }
       return vl;
    }
@@ -404,7 +425,7 @@ namespace fb_bench_adapter {
       if (auto* vs = r->validators()) {
          vl.validators.reserve(vs->size());
          for (auto* v : *vs)
-            vl.validators.push_back(to_native<Validator>(v));
+            vl.validators.push_back(from_fb_struct(*v));
       }
       return vl;
    }

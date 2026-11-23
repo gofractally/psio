@@ -893,6 +893,54 @@ else()
    message(STATUS "psio_capnp_interop_tests: CapnProto not found — skipping")
 endif()
 
+# psio::flatbuf (flatbuf.hpp, flatbuf_view.hpp): layout, codec, the verifier,
+# safe and trusted views, in-place writes.
+psio_add_test(psio_flatbuf_tests flatbuf_tests.cpp)
+
+# Arbitrary bytes: truncations, corruptions, random buffers. Built a second
+# time with AddressSanitizer + UndefinedBehaviorSanitizer where the toolchain
+# links them, so that a read outside the buffer fails the test.
+psio_add_test(psio_flatbuf_fuzz_tests flatbuf_fuzz_tests.cpp)
+include(CheckCXXSourceCompiles)
+set(PSIO_SAVED_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+set(PSIO_SAVED_REQUIRED_LINK_OPTIONS "${CMAKE_REQUIRED_LINK_OPTIONS}")
+set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -fsanitize=address,undefined")
+set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=address,undefined")
+check_cxx_source_compiles("int main() { return 0; }" PSIO_HAVE_ASAN_UBSAN)
+set(CMAKE_REQUIRED_FLAGS "${PSIO_SAVED_REQUIRED_FLAGS}")
+set(CMAKE_REQUIRED_LINK_OPTIONS "${PSIO_SAVED_REQUIRED_LINK_OPTIONS}")
+if(PSIO_HAVE_ASAN_UBSAN)
+   psio_add_test(psio_flatbuf_fuzz_tests_sanitized flatbuf_fuzz_tests.cpp)
+   target_compile_options(psio_flatbuf_fuzz_tests_sanitized PRIVATE
+      -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+   target_link_options(psio_flatbuf_fuzz_tests_sanitized PRIVATE -fsanitize=address,undefined)
+   message(STATUS "psio_flatbuf_fuzz_tests_sanitized: enabled")
+else()
+   message(STATUS "psio_flatbuf_fuzz_tests_sanitized: sanitizers do not link — skipping")
+endif()
+
+# The same against the official library, both directions, where it is
+# installed: tests/flatbuf/interop.fbs is compiled by `flatc`.
+find_package(flatbuffers QUIET CONFIG)
+find_program(PSIO_FLATC flatc)
+if(flatbuffers_FOUND AND PSIO_FLATC)
+   set(PSIO_FLATBUF_INTEROP_DIR ${CMAKE_CURRENT_BINARY_DIR}/flatbuf)
+   add_custom_command(
+      OUTPUT ${PSIO_FLATBUF_INTEROP_DIR}/interop_generated.h
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${PSIO_FLATBUF_INTEROP_DIR}
+      COMMAND ${PSIO_FLATC} --cpp --gen-object-api --gen-mutable --scoped-enums
+              -o ${PSIO_FLATBUF_INTEROP_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/flatbuf/interop.fbs
+      DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/flatbuf/interop.fbs
+      COMMENT "flatc tests/flatbuf/interop.fbs")
+   psio_add_test(psio_flatbuf_interop_tests flatbuf_interop_tests.cpp
+      ${PSIO_FLATBUF_INTEROP_DIR}/interop_generated.h)
+   target_include_directories(psio_flatbuf_interop_tests PRIVATE ${PSIO_FLATBUF_INTEROP_DIR})
+   target_link_libraries(psio_flatbuf_interop_tests PRIVATE flatbuffers::flatbuffers)
+   message(STATUS "psio_flatbuf_interop_tests: flatbuffers found — enabled")
+else()
+   message(STATUS "psio_flatbuf_interop_tests: flatbuffers / flatc not found — skipping")
+endif()
+
 # capnp_parser (capnp_parser.hpp) — .capnp text → Schema IR.
 psio_add_test(psio_capnp_parser_tests capnp_parser_tests.cpp)
 

@@ -69,9 +69,26 @@ table fb_Order {
    note:     string;
 }
 
+// A record that is definitionWillNotChange() and holds only scalars is a
+// FlatBuffers struct in psio::flatbuf (psio/flatbuf.hpp), so the list is a
+// vector of structs on both sides. (A struct cannot be the root of a
+// buffer: the Point / NameRecord / Validator rows above are tables, and
+// only the official library is timed on them.)
+struct fb_ValidatorStruct {
+   pubkey_lo:          uint64;
+   pubkey_hi:          uint64;
+   withdrawal_lo:      uint64;
+   withdrawal_hi:      uint64;
+   effective_balance:  uint64;
+   slashed:            bool;
+   activation_epoch:   uint64;
+   exit_epoch:         uint64;
+   withdrawable_epoch: uint64;
+}
+
 table fb_ValidatorList {
    epoch:      uint64;
-   validators: [fb_Validator];
+   validators: [fb_ValidatorStruct];
 }
 
 root_type fb_Order;

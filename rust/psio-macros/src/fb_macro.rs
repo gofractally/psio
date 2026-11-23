@@ -81,8 +81,14 @@ fn pre_create_tokens(
 
     let stmt = match cls {
         FbFieldClass::Text => {
+            // An empty string is not written (it reads back as empty): what
+            // the official object API and the C++ encoder do.
             quote! {
-                let #off_var = b.create_string(&#field_expr);
+                let #off_var = if #field_expr.is_empty() {
+                    0u32
+                } else {
+                    b.create_string(&#field_expr)
+                };
             }
         }
         FbFieldClass::VecScalar => {
@@ -127,6 +133,17 @@ fn pre_create_tokens(
     };
 
     Some((stmt, off_var))
+}
+
+/// The size `flatc` sorts a table field by: the scalar's size, 4 for
+/// anything stored as an offset.
+fn field_sort_size(cls: &FbFieldClass) -> usize {
+    match cls {
+        FbFieldClass::Bool | FbFieldClass::U8 | FbFieldClass::I8 => 1,
+        FbFieldClass::U16 | FbFieldClass::I16 => 2,
+        FbFieldClass::U64 | FbFieldClass::I64 | FbFieldClass::F64 => 8,
+        _ => 4,
+    }
 }
 
 /// Generate the add-field statement inside start_table/end_table.
@@ -306,13 +323,22 @@ fn gen_fb_pack(
         }
     }
 
-    // Match the C++ encoder's reverse declaration order. FlatBuffers permits
-    // other layouts, but psio promises deterministic cross-language bytes.
-    let add_stmts: Vec<_> = field_infos.iter().rev().map(|(i, ident, _, cls)| {
-        let field_expr = quote!(self.#ident);
-        let slot = *i as u16;
-        add_field_tokens(cls, &field_expr, slot, off_vars[*i].as_ref())
-    }).collect();
+    // The order `flatc` writes the fields of a table in, which is also the
+    // C++ encoder's (psio/flatbuf.hpp `add_order`): by size, largest first,
+    // and within a size by descending field id. FlatBuffers permits other
+    // layouts, but psio promises the same bytes in every language — and
+    // these are the bytes the official object API writes.
+    let mut add_stmts = Vec::new();
+    for size in [8usize, 4, 2, 1] {
+        for (i, ident, _, cls) in field_infos.iter().rev() {
+            if field_sort_size(cls) != size {
+                continue;
+            }
+            let field_expr = quote!(self.#ident);
+            let slot = *i as u16;
+            add_stmts.push(add_field_tokens(cls, &field_expr, slot, off_vars[*i].as_ref()));
+        }
+    }
 
     let expanded = quote! {
         impl #impl_generics #mod_path::flatbuf::FbPack for #name #ty_generics #where_clause {

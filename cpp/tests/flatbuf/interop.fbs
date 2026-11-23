@@ -1,0 +1,105 @@
+// The schema of tests/flatbuf_shapes.hpp, compiled by `flatc` for
+// flatbuf_interop_tests.cpp. Keep the two in step member for member.
+namespace fbi;
+
+enum Color : ubyte { red, green, blue }
+
+struct Vec3 { x:float; y:float; z:float; }
+
+struct Mixed {
+  a:ubyte;
+  b:ulong;
+  c:ushort;
+  d:[int:3];
+  v:Vec3;
+  e:bool;
+}
+
+table Point { x:int; y:int; }
+
+table Profile {
+  id:ulong;
+  name:string;
+  email:string;
+  age:uint;
+  verified:bool;
+}
+
+table Item {
+  product:string;
+  qty:uint = 1;
+  unit_price:double;
+}
+
+table Card { number:string; cvv:ushort; }
+table Wire { iban:string; }
+
+union Payment { Card, Wire }
+union Refund { Card, Wire }
+
+table StockEntry { key:string (key); value:uint; }
+table ItemEntry { key:uint (key); value:Item; }
+
+table Order {
+  id:ulong;
+  customer:Profile;
+  items:[Item];
+  total:double;
+  note:string;
+  payment:Payment;
+  position:Vec3;
+  origin:Vec3;
+  path:[Vec3];
+  tags:[string];
+  color:Color = green;
+  discount:int = null;
+  labels:[string];
+  stock:[StockEntry];
+  by_id:[ItemEntry];
+  blob:[ubyte];
+  flags:[bool];
+  quad:[ushort];
+  colors:[Color];
+  ids:[uint];
+  refund:Refund;
+  mixed:Mixed;
+}
+
+table Tree { value:int; name:string; children:[Tree]; }
+
+table Scalars {
+  b:bool;
+  i8:byte;
+  u8:ubyte;
+  i16:short;
+  u16:ushort;
+  i32:int;
+  u32:uint;
+  i64:long;
+  u64:ulong;
+  f:float;
+  d:double;
+  c:Color;
+  ch:byte;
+}
+
+table Defaults {
+  level:short = 7;
+  on:bool = true;
+  c:Color = green;
+  ratio:double = 0.5;
+}
+
+table Renumbered {
+  c:int (id: 2);
+  a:string (id: 0);
+  b:long (id: 1);
+}
+
+table WithDeprecated { a:int; old:int (deprecated); c:int; }
+
+table SparseRow { a:int; b:int; c:int; d:int; e:int; f:int; }
+table Sparse { rows:[SparseRow]; }
+
+root_type Order;
+file_identifier "ORDR";

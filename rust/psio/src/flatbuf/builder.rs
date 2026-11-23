@@ -46,6 +46,11 @@ pub struct FbBuilder {
     fields: [FieldLoc; MAX_FIELDS],
     nfields: usize,
     tbl_start: u32,
+
+    // The vtables written so far (their offsets from the end of the buffer):
+    // a table whose vtable has the same bytes as an earlier one shares it,
+    // as the official builder and the C++ encoder do.
+    vtables: Vec<u32>,
 }
 
 impl FbBuilder {
@@ -59,6 +64,7 @@ impl FbBuilder {
             fields: [FieldLoc { off: 0, vt: 0 }; MAX_FIELDS],
             nfields: 0,
             tbl_start: 0,
+            vtables: Vec::new(),
         }
     }
 
@@ -391,7 +397,21 @@ impl FbBuilder {
         let dest = self.alloc(vt_bytes);
         dest.copy_from_slice(&vt_buf);
 
-        let vt_off = self.sz() as u32;
+        let mut vt_off = self.sz() as u32;
+
+        // Share an identical vtable written earlier.
+        let len = self.buf.len();
+        let shared = self.vtables.iter().copied().find(|&off| {
+            let at = len - off as usize;
+            self.buf[at..].len() >= vt_bytes && self.buf[at..at + vt_bytes] == vt_buf[..]
+        });
+        match shared {
+            Some(off) => {
+                self.head += vt_bytes;
+                vt_off = off;
+            }
+            None => self.vtables.push(vt_off),
+        }
 
         // Patch the soffset in the table to point to the vtable
         // soffset = vtable_offset - table_offset (as seen from table position)
@@ -432,6 +452,7 @@ impl FbBuilder {
         self.min_align = 1;
         self.nfields = 0;
         self.tbl_start = 0;
+        self.vtables.clear();
     }
 }
 

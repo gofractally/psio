@@ -751,6 +751,12 @@ namespace {
    template <typename Fmt, typename T>
    struct fmt_supports : std::true_type {};
 
+   //  A definitionWillNotChange record of scalars is a FlatBuffers
+   //  struct, and a struct cannot be the root of a buffer.
+   template <typename T>
+      requires psio::detail::flatbuf_impl::is_struct_v<T>
+   struct fmt_supports<psio::flatbuf, T> : std::false_type {};
+
    //  vector<variable-element> is now supported in frac.hpp via the
    //  ported psio1 offset-table walker, so Order / OrderBounded /
    //  OrderDwnc encode normally.  Specialisation table kept here as
