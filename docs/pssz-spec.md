@@ -1614,7 +1614,10 @@ not change.
   checks, not by readers. In C++:
   `static_assert(psio::pssz_evolves_from<Old, New>)`, which checks
   every rule of this section and the next: an unchanged width at every
-  depth, DWNC status, member annotations and caps.)
+  depth, DWNC status, member annotations and caps. For two types known
+  only as schemas the same rules are applied at run time by
+  `psio::pssz_ir::evolves_from(oldSchema, oldType, newSchema, newType)`,
+  `docs/pssz-ir-runtime.md` "Comparing schemas at run time".)
 ✓ **Widen** a length bound — raise a `max`, lower or drop a `min`, replace
   `exact N` by a range that contains N, drop the bound — at the member or
   at any position below it (§3.5), provided no offset width changes

@@ -17,6 +17,8 @@
 
 #include <catch.hpp>
 
+#include "evolves_parity.hpp"
+
 #include <psio/wrappers.hpp>
 
 #include <algorithm>
@@ -1191,32 +1193,56 @@ TEST_CASE("pssz_evolves_from accepts only optional suffixes at an unchanged widt
    using namespace evo_check;
    // Optional suffixes, one or several steps, and identity.
    STATIC_REQUIRE(psio::pssz_evolves_from<R0, R0>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, R0);
    STATIC_REQUIRE(psio::pssz_evolves_from<R0, R1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, R1);
    STATIC_REQUIRE(psio::pssz_evolves_from<R0, R2>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, R2);
    STATIC_REQUIRE(psio::pssz_evolves_from<R1, R3>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R1, R3);
    STATIC_REQUIRE(psio::pssz_evolves_from<R0, N1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, N1);
    STATIC_REQUIRE(psio::pssz_evolves_from<R0, P1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, P1);
    STATIC_REQUIRE(psio::pssz_evolves_from<R0, evo_presence::Tail>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, evo_presence::Tail);
    // Not: removing fields, a required appended field, reordering, retyping.
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R1, R0>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R1, R0);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R3, R2>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R3, R2);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0, Bad1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, Bad1);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0, Reordered>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, Reordered);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0, Retyped>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, Retyped);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R1, N1>);  // suffix field type differs
+   PSIO_RUNTIME_EVOLVES_PARITY(R1, N1);
    // A prefix field may itself have evolved, directly or inside a container.
    STATIC_REQUIRE(psio::pssz_evolves_from<Parent0, Parent2>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Parent0, Parent2);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Parent2, Parent0>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Parent2, Parent0);
    STATIC_REQUIRE(psio::pssz_evolves_from<VecOld, VecNew>);
+   PSIO_RUNTIME_EVOLVES_PARITY(VecOld, VecNew);
    STATIC_REQUIRE(psio::pssz_evolves_from<OptOld, OptNew>);
+   PSIO_RUNTIME_EVOLVES_PARITY(OptOld, OptNew);
    STATIC_REQUIRE(psio::pssz_evolves_from<VarOld, VarNew>);
+   PSIO_RUNTIME_EVOLVES_PARITY(VarOld, VarNew);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<VecNew, VecOld>);
+   PSIO_RUNTIME_EVOLVES_PARITY(VecNew, VecOld);
    STATIC_REQUIRE_FALSE((psio::pssz_evolves_from<std::array<R0, 2>, std::array<R1, 3>>));
+   PSIO_RUNTIME_EVOLVES_PARITY(std::array<R0, 2>, std::array<R1, 3>);
    // DWNC types cannot evolve, and DWNC status cannot change.
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<evo_presence::Pair, PairPlus>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_presence::Pair, PairPlus);
    STATIC_REQUIRE(psio::pssz_evolves_from<evo_presence::Pair, PairSame>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_presence::Pair, PairSame);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0, R0Dwnc>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0, R0Dwnc);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<R0Dwnc, R0>);
+   PSIO_RUNTIME_EVOLVES_PARITY(R0Dwnc, R0);
 
    // Width. Without an explicit budget the width falls back to the inferred
    // bound, and this appended optional moves it from one byte to two: the
@@ -1224,21 +1250,31 @@ TEST_CASE("pssz_evolves_from accepts only optional suffixes at an unchanged widt
    STATIC_REQUIRE(psio::auto_pssz_width_v<evo_unbudgeted::U0> == 1);
    STATIC_REQUIRE(psio::auto_pssz_width_v<evo_unbudgeted::U1> == 2);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<evo_unbudgeted::U0, evo_unbudgeted::U1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_unbudgeted::U0, evo_unbudgeted::U1);
    // The same fields with an explicit budget reserving room: legal.
    STATIC_REQUIRE(psio::auto_pssz_width_v<B0> == 2);
    STATIC_REQUIRE(psio::auto_pssz_width_v<B1> == 2);
    STATIC_REQUIRE(psio::pssz_evolves_from<B0, B1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(B0, B1);
    // The explicit cap always rules, so a budgeted lineage evolves at every
    // width class, and changing the cap across a class does not.
    STATIC_REQUIRE(psio::pssz_evolves_from<evo_w1::V1, evo_w1::V3>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_w1::V1, evo_w1::V3);
    STATIC_REQUIRE(psio::pssz_evolves_from<evo_w2::V1, evo_w2::V2>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_w2::V1, evo_w2::V2);
    STATIC_REQUIRE(psio::pssz_evolves_from<evo_w4::V2, evo_w4::V3>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_w4::V2, evo_w4::V3);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<evo_w1::V1, evo_w2::V2>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_w1::V1, evo_w2::V2);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<evo_unbudgeted::U0, B1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_unbudgeted::U0, B1);
    // Mixed parent/child widths: evolving either side keeps both widths.
    STATIC_REQUIRE(psio::pssz_evolves_from<evo_auto::Wide0, evo_auto::Wide1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_auto::Wide0, evo_auto::Wide1);
    STATIC_REQUIRE(psio::pssz_evolves_from<evo_mixed::Narrow0, evo_mixed::NarrowChild1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_mixed::Narrow0, evo_mixed::NarrowChild1);
    STATIC_REQUIRE(psio::pssz_evolves_from<evo_mixed::Narrow0, evo_mixed::NarrowParent1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(evo_mixed::Narrow0, evo_mixed::NarrowParent1);
 
    // The trait agrees with the bytes: a legal step interoperates...
    B0 old_value{};
@@ -1357,28 +1393,47 @@ TEST_CASE("pssz_evolves_from: a variant may gain alternatives at the end",
    using namespace evo_variant;
    // Appended, once and twice; the relation is transitive.
    STATIC_REQUIRE(psio::pssz_evolves_from<Var1, Var2>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var1, Var2);
    STATIC_REQUIRE(psio::pssz_evolves_from<Var2, Var3>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var2, Var3);
    STATIC_REQUIRE(psio::pssz_evolves_from<Var1, Var3>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var1, Var3);
    STATIC_REQUIRE(psio::pssz_evolves_from<Var1, Var1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var1, Var1);
    // Removed, reordered, inserted, retyped: not compatible.
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var2, Var1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var2, Var1);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<std::string, u32, u64>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var1, variant<std::string, u32, u64>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<u32, u64, std::string>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var1, variant<u32, u64, std::string>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<u64, u32, std::string>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var1, variant<u64, u32, std::string>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<u64, std::string, u32>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var1, variant<u64, std::string, u32>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<std::int32_t, std::string, u64>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Var1, variant<std::int32_t, std::string, u64>);
    // An existing alternative evolves by the rules of its own type, with or
    // without new alternatives after it.
    STATIC_REQUIRE(psio::pssz_evolves_from<variant<u32, Alt0>, variant<u32, Alt1>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(variant<u32, Alt0>, variant<u32, Alt1>);
    STATIC_REQUIRE(psio::pssz_evolves_from<variant<u32, Alt0>, variant<u32, Alt1, u64>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(variant<u32, Alt0>, variant<u32, Alt1, u64>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<variant<u32, Alt1>, variant<u32, Alt0, u64>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(variant<u32, Alt1>, variant<u32, Alt0, u64>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<variant<u32, Alt0>, variant<u32, AltOther, u64>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(variant<u32, Alt0>, variant<u32, AltOther, u64>);
    // Wherever a variant is: an optional, a list, a map, a variant, a record.
    STATIC_REQUIRE(psio::pssz_evolves_from<std::optional<Var1>, std::optional<Var2>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(std::optional<Var1>, std::optional<Var2>);
    STATIC_REQUIRE(psio::pssz_evolves_from<std::vector<Var1>, std::vector<Var2>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(std::vector<Var1>, std::vector<Var2>);
    STATIC_REQUIRE(psio::pssz_evolves_from<std::map<u32, Var1>, std::map<u32, Var2>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(std::map<u32, Var1>, std::map<u32, Var2>);
    STATIC_REQUIRE(psio::pssz_evolves_from<variant<u8, Var1>, variant<u8, Var2, u16>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(variant<u8, Var1>, variant<u8, Var2, u16>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<std::vector<Var2>, std::vector<Var1>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(std::vector<Var2>, std::vector<Var1>);
 }
 
 TEST_CASE("pssz_evolves_from: a larger new alternative may not move an enclosing width",
@@ -1388,28 +1443,41 @@ TEST_CASE("pssz_evolves_from: a larger new alternative may not move an enclosing
    // The variant alone writes no offsets: appending is compatible whatever
    // the size of the new alternative.
    STATIC_REQUIRE(psio::pssz_evolves_from<Small, Same>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Small, Same);
    STATIC_REQUIRE(psio::pssz_evolves_from<Small, Larger>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Small, Larger);
    STATIC_REQUIRE(psio::pssz_evolves_from<variant<u8>, variant<u8, std::array<u8, 300>>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(variant<u8>, variant<u8, std::array<u8, 300>>);
 
    // A record with no cap: refused exactly when its width moves, as for an
    // appended field.
    STATIC_REQUIRE(psio::pssz_evolves_from<Tight<Small>, Tight<Same>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Tight<Small>, Tight<Same>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Tight<Small>, Tight<Larger>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Tight<Small>, Tight<Larger>);
    // A cap reserves the room: the same change is compatible.
    STATIC_REQUIRE(psio::pssz_evolves_from<Capped<Small>, Capped<Larger>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Capped<Small>, Capped<Larger>);
    STATIC_REQUIRE(psio::pssz_evolves_from<Capped<Small>, Capped<Same>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Capped<Small>, Capped<Same>);
 
    // A tuple and an array take their width from their own bound.
    using Pad = std::array<u8, 249>;
    STATIC_REQUIRE(psio::pssz_evolves_from<std::tuple<Small, Pad>, std::tuple<Same, Pad>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(std::tuple<Small, Pad>, std::tuple<Same, Pad>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<std::tuple<Small, Pad>, std::tuple<Larger, Pad>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(std::tuple<Small, Pad>, std::tuple<Larger, Pad>);
    STATIC_REQUIRE(psio::pssz_evolves_from<std::array<Small, 60>, std::array<Same, 60>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(std::array<Small, 60>, std::array<Same, 60>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<std::array<Small, 60>, std::array<Larger, 60>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(std::array<Small, 60>, std::array<Larger, 60>);
 
    // A bounded list inside a capped record: the record's width stays, the
    // list's table does not.
    STATIC_REQUIRE(psio::pssz_evolves_from<Listed<Small>, Listed<Same>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Listed<Small>, Listed<Same>);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Listed<Small>, Listed<Larger>>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Listed<Small>, Listed<Larger>);
 }
 
 TEST_CASE("pssz_evolves_from: annotations of a variant's alternatives",
@@ -1417,9 +1485,13 @@ TEST_CASE("pssz_evolves_from: annotations of a variant's alternatives",
 {
    using namespace evo_variant;
    STATIC_REQUIRE(psio::pssz_evolves_from<Ann0, Ann1>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Ann0, Ann1);
    STATIC_REQUIRE(psio::pssz_evolves_from<Ann0, AnnWider>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Ann0, AnnWider);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Ann0, AnnTighter>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Ann0, AnnTighter);
    STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Ann1, Ann0>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Ann1, Ann0);
 }
 
 TEST_CASE("an appended variant alternative: the bytes agree with the check",
@@ -1450,6 +1522,7 @@ TEST_CASE("an appended variant alternative: the bytes agree with the check",
    using Old = Capped<variant<u8, Alt0>>;
    using New = Capped<variant<u8, Alt1, u64>>;
    STATIC_REQUIRE(psio::pssz_evolves_from<Old, New>);
+   PSIO_RUNTIME_EVOLVES_PARITY(Old, New);
    Old old_record{};
    old_record.v = Alt0{5};
    const auto record_bytes = bytes_of(old_record);

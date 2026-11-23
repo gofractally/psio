@@ -147,6 +147,94 @@ through actual C++ SchemaBuilder vector/array/optional char shapes, native typed
 byte parity, signed/unsigned char builds, unknown suffixes, malformed inputs,
 zero-sized fixed values, bounds, recursion, output atomicity and canonicality.
 
+## Comparing schemas at run time
+
+`<psio/pssz_ir_compare.hpp>` answers, for two types that are only known as
+schemas, the two questions a registry of published schemas asks:
+
+```cpp
+namespace ir = psio::pssz_ir;
+// May the proposed row type replace the installed one?
+if (auto r = ir::evolves_from(installed, "Row", proposed, "Row"); !r)
+   abort(r.path + ": " + r.reason);   // ".tags[]: the length bound of the string was tightened ([0, 16] -> [0, 8])"
+// Is the key still the same type?
+if (!ir::equivalent(installed, oldKeyType, proposed, newKeyType, ir::compare::wire)) ...
+// A function, an interface, a whole schema (every interface, by name).
+ir::evolves_from(installed, installed.interfaces[0], proposed, proposed.interfaces[0]);
+ir::evolves_from(installed, proposed);
+```
+
+`evolves_from(old, Old, new, New)` is the run-time twin of the compile-time
+`psio::pssz_evolves_from<Old, New>` and applies the same rules
+(`docs/pssz-spec.md` §7.5 / §7.6 / §16): members are appended and optional,
+no offset width moves at any depth, a length bound only widens, `utf8` is
+kept, `maxDynamicData` admits everything the old writer produces, `maxFields`
+is neither exceeded, raised nor dropped, a variant gains alternatives at the
+end, a nested value's inner type evolves as a root of its own. `equivalent`
+is the symmetric relation: the same values, the same bytes, the same
+permitted revisions. A type argument is an `AnyType` of its schema or a name
+(`"Row"` converts to the reference `Type{"Row"}`).
+
+Both return `psio::pssz_ir::compatibility{ok, code, reason, path}`
+(contextually a `bool`; `status()` gives a `codec_status`): `code` is a
+stable identifier of the first rule broken, `reason` a sentence, `path` where
+(`.field`, `[]`, `?`, `<Alt>`, `(nested)`, `name(args)`; the tables are in
+`conformance/evolution-vectors.md`). Nothing throws, and a malformed schema
+or an unknown type name is the result `malformed-schema`: the comparison runs
+in a build without exceptions (a wasm guest).
+
+**What is compared.** The two types as resolved types, in the automatic
+profile. Named aliases are followed and their names are not compared: the
+order of `Schema::types`, the names of the types and how a schema shares
+subtrees are not part of a type. Recursive types are compared co-inductively.
+
+- `compare::wire`: the bytes and which bytes are values — the kind of every
+  node, integer width and signedness, array lengths, the presence form of an
+  optional, raw string / UTF-8 string / bytes (three types), length bounds as
+  the range a position admits (wherever written: `BoundedList<T, 8>` equals a
+  `List<T>` member with `lengthBound = "max=8"`), every offset width as the
+  codec derives it, `definitionWillNotChange`, `maxDynamicData`, `maxFields`,
+  boxes, and the key type of a map / element type of a set (which must be
+  equivalent in both relations). A lone `char` is the integer `u8`, and the
+  element of a byte list is not looked at, so the
+  `Custom{List<Custom{u8, "char"}>, "hex"}` of older schemas and
+  `Custom{List<u8>, "hex"}` are one type (`docs/spec-evolution-notes.md`
+  E-011). A `Tuple` and an extensible `Object` are the same record.
+- `compare::contract` (the default) adds what a consumer of the text forms
+  and of the type's identity sees: the names of record members and variant
+  alternatives (§7.6: a rename breaks consumers that use the names), an
+  alternative's `ijsonName`, custom ids, enums (`evolves_from` lets the new
+  type add enumerators; every old name keeps its value), the text shape of a
+  record (object, named argument list, positional), `jsonInt` / `ijsonInt`.
+
+Not compared, because the Schema IR does not record them: `sorted` / `unique`
+/ `unique_keys`, `as<Tag>` overrides, binary adapters, and the name of a
+transparent type (a named alias in the IR). For types that differ only in
+those the compile-time check is the stricter one. Also not compared: `doc` /
+`description` / `visible`, package, worlds and uses.
+
+**Functions, interfaces, schemas.** A function is its argument list — the
+record `psio::pssz_ir::argument_list(func)` of its parameters, with the
+function's `maxFields` / `maxDynamicData` — and its result (on both sides or
+on neither). Under `evolves_from` both evolve old to new: a new callee accepts
+every call an old caller makes, and a stored result of the old function is a
+value of the new result type. The functions of two interfaces are matched by
+name in any order — every old function exists and evolves; `equivalent`: the
+same set — and so are the names in `type_names`. The interfaces of two schemas
+are matched by name the same way.
+
+`argument_list(func)` is also what a consumer needs to pack or print a call
+from `Schema::interfaces` alone:
+`json_to_pssz(schema, argument_list(f), psio::ijson{}, R"({"amount":5})", bytes)`.
+
+**Tests and shared rows.** `conformance/evolution-vectors.json`
+(`conformance/evolution-vectors.md`) has pairs of schemas with the four
+verdicts of each, in both directions, for the run-time checkers of the other
+languages; its emitter refuses a row that disagrees with the compile-time
+check. `cpp/tests/pssz_evolution_matrix_tests.cpp` and
+`consistency_tests.cpp` replay every pair of their compile-time assertions
+through the run-time check (`evolves_parity.hpp`).
+
 ## JavaScript / TypeScript
 
 `js/src/pssz-core.ts` is a port of this codec (both profiles) for browser
