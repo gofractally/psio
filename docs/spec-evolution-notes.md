@@ -675,6 +675,90 @@ in each language is small because map / set ordering already exists.
 
 ---
 
+## E-011 — One schema node for a byte list (`std::vector<char>`)
+
+**Status.** The unification is prepared as its own commit ("SchemaBuilder:
+a byte list has u8 elements whichever C++ type spells the byte"), which
+can be dropped without touching anything else. The lone `char` question
+below is open.
+
+**Where the `"char"` element came from.** `SchemaBuilder::build_plain`
+maps the C++ type `char` to `Custom{Int{8, unsigned}, "char"}`, and built
+the element of a byte sequence with the generic `insert<E>()`. So
+
+| C++ | node before |
+|---|---|
+| `std::vector<std::uint8_t>`, `std::vector<unsigned char>` | `Custom{List<u8>, "hex"}` |
+| `std::vector<std::byte>` | the same shape (its `u8` interned as a second, identical node) |
+| `std::vector<char>` | `Custom{List<Custom{u8, "char"}>, "hex"}` |
+| `std::array<char, N>`, `psio::bounded<char, N>`, a `std::vector<char>` member with `max<N>` | the same, over `Array` / `BoundedList` |
+| `std::vector<signed char>` | `List<s8>` — a list of small integers, not bytes (unchanged) |
+
+Rust `Vec<u8>` and the JS / Python byte lists build `Custom{List<u8>,
+"hex"}`. PSSZ bytes, keys and JSON text were always identical; only the
+schema node differed.
+
+**What depended on the element being `"char"`.**
+
+- *Readers:* nothing. The C++ schema-driven codec accepts a `"hex"` list
+  over either element (`pssz_ir.hpp` byte adapter,
+  `detail/pssz_ir_assoc.hpp` key octet), and so do JS (`pssz-core.ts`) and
+  Python (`_core.py`). They still do: a schema published before the change
+  is read as before (`schema_byte_list_tests`, `pssz_ir_tests`).
+- *JSON:* nothing. Typed and schema-driven JSON of the two spellings are
+  equal, in `json` (an array of numbers) and `ijson` (a hex string).
+- *GraphQL:* not affected; `graphql.hpp` has no `char`-specific code and
+  does not read the IR.
+- *Schema emitters from the IR:* these were wrong for the `char` spelling
+  and are right for the `u8` one:
+
+  | emitter | `std::vector<char>` before | `std::vector<std::uint8_t>` (and now both) |
+  |---|---|---|
+  | `emit_wit` | `list<char>` — WIT `char` is a Unicode scalar value, not a byte | `list<u8>` |
+  | `emit_capnp` | `List(UInt32  # @psio:char)` | `List(UInt8)` |
+  | `emit_fbs` | `[uint  // @psio:char]` | `[ubyte]` |
+
+  (The typed WIT generators `wit_constexpr.hpp` / `wit_gen.hpp` do not go
+  through the IR; they still print `list<char>` for `std::vector<char>`.
+  Not changed here.)
+- *Schema comparison across languages:* the RG14 symptom — a C++ record
+  with a `std::vector<char>` member did not have the IR of its Rust twin.
+
+**What the unification changes.**
+
+- A byte sequence's element node is `u8` for `char`, `unsigned char` and
+  `std::byte` alike (`SchemaBuilder::sequence_element` /
+  `annotated_element`): vectors, `psio::bounded`, `std::array`, and
+  members bounded by annotation.
+- Fixtures: none. All six emitters (`pssz`, `interface`, `json`,
+  `time-key`, `schema-json`, `name`) write byte-identical files with the
+  change: no fixture type spells a byte sequence with `char`, so **no
+  `schema_ir` row changes** and no emitter needed editing.
+- Outside the fixtures: the Schema IR of every C++ type with a
+  `std::vector<char>` / `std::array<char, N>` member changes (its encoded
+  bytes, and so any hash of a published schema); for psibase that is the
+  446 members counted in RG14, and the 14 records then equal their Rust
+  twins. No value bytes change.
+- Mirrors: Rust, JS and Python already build the `u8` node; nothing to do.
+  They should keep accepting the former node when reading schemas.
+
+**Open: is a lone `char` a character or a byte?** Today it is a byte with
+a character's name. Every codec treats it as an 8-bit unsigned integer
+(one byte in PSSZ; a number, `65`, in typed and schema-driven JSON), but
+the schema node is `Custom{u8, "char"}` and the emitters turn that name
+into a character type: WIT `char` (a Unicode scalar value — 4 bytes in the
+component-model ABI), Cap'n Proto / FlatBuffers / protobuf `UInt32` /
+`uint` / `uint32` with a `@psio:char` comment. Options: (a) keep the node
+and document it as "an 8-bit code unit named char"; fix the emitters to
+print `u8`; (b) make a lone `char` plain `u8` in the IR, like the list
+element now — schema-only change, no bytes, and the JS / Python `char`
+type becomes an alias; (c) make `char` a real character (a Unicode scalar,
+text in JSON) — a wire and text change. Recommendation: (b), unless some
+interface relies on WIT `char`; (c) is a different type and should get a
+different C++ spelling (`char32_t`) if it is ever wanted.
+
+---
+
 ## E-012 — The WIT text of an interface's schema
 
 **Status.** Report. `cpp/tests/interface_wit_tests.cpp` pins what C++
