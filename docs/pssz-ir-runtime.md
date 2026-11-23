@@ -12,10 +12,14 @@ or 4; the `psio::pssz_<W>` tags): one width inherited by every type.
 `psio::pssz` tag): every record, array and list uses its own type-derived
 width, computed from the IR exactly as `auto_pssz_width<T>()` computes it from
 the type. A record's `maxDynamicData` attribute rules; otherwise the bound
-`max_size.hpp` infers (four bytes per header and per variable slot, one byte
-per option, a child record's cap reserved in full, bounded lists and strings,
-a member `lengthBound` attribute on an unbounded string or list); otherwise 4.
-Lists, tuples and variants always use 4. The cap limits the record's encoded
+`max_size.hpp` infers (`docs/pssz-spec.md` §3.2: a record's or tuple's header
+and variable slots and a list's or array's offset table counted at the type's
+own width through `fit`, one byte per option, a child record's cap reserved in
+full, bounded lists and strings, a member `lengthBound` attribute on an
+unbounded string or list); otherwise 4. A `BoundedList`, a map or a set of
+bounded elements, and a plain `List` whose count the holding member's
+`lengthBound` gives, therefore have a 1- or 2-byte offset table when their
+bound allows it. The cap limits the record's encoded
 size, and length bounds are enforced, on encode and decode. The bytes are those
 of the typed `psio::pssz` codec; `conformance/pssz-vectors.json` records the IR
 of all its types and `cpp/tests/schema_conformance_tests.cpp` checks every

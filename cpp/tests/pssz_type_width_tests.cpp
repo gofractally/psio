@@ -159,13 +159,22 @@ TEST_CASE("declared budgets reserve child growth and inference counts wire overh
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthGrowParentV1> == 2);
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthGrowParentV2> == 2);
    STATIC_REQUIRE(psio::max_encoded_size<WidthGrowParentV1>() == psio::max_encoded_size<WidthGrowParentV2>());
-   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold251>() == std::optional<std::size_t>{255});
-   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold252>() == std::optional<std::size_t>{256});
+   // The header and slots count at the type's own width (pssz-spec 3.2 fit):
+   // 1 + 251, 1 + 252, 1 + 254 = 255, then 2 + 255.
+   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold251>() == std::optional<std::size_t>{252});
+   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold252>() == std::optional<std::size_t>{253});
+   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold254>() == std::optional<std::size_t>{255});
+   STATIC_REQUIRE(psio::max_encoded_size<WidthThreshold255>() == std::optional<std::size_t>{257});
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold251> == 1);
-   STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold252> == 2);
-   STATIC_REQUIRE(psio::max_encoded_size<WidthBoundedBatch>() == std::optional<std::size_t>{280});
+   STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold252> == 1);
+   STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold254> == 1);
+   STATIC_REQUIRE(psio::auto_pssz_width_v<WidthThreshold255> == 2);
+   // Four checkpoints of at most 64 bytes: 4 * (1 + 64) = 260 does not fit a
+   // one-byte table, 4 * (2 + 64) = 264 does a two-byte one. The record that
+   // holds the list adds its own header and slot: 2 + 2 + 264.
+   STATIC_REQUIRE(psio::max_encoded_size<WidthBoundedBatch>() == std::optional<std::size_t>{268});
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthBoundedBatch> == 2);
-   STATIC_REQUIRE((psio::max_encoded_size<std::array<WidthCheckpoint,4>>() == std::optional<std::size_t>{272}));
+   STATIC_REQUIRE((psio::max_encoded_size<std::array<WidthCheckpoint,4>>() == std::optional<std::size_t>{264}));
    STATIC_REQUIRE((psio::auto_pssz_width_v<std::array<WidthCheckpoint,4>> == 2));
    STATIC_REQUIRE_FALSE(psio::max_encoded_size<WidthOverflowParent>().has_value());
    STATIC_REQUIRE(psio::auto_pssz_width_v<WidthOverflowParent> == 4);

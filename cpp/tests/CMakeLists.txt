@@ -315,7 +315,7 @@ psio_annotation_tree_compile_fail(utf8_on_list_element AT_FAIL_UTF8_ON_LIST_ELEM
 psio_annotation_tree_compile_fail(nested_exact AT_FAIL_NESTED_EXACT
    "below the member itself a length bound is max<N>")
 psio_annotation_tree_compile_fail(view_narrowed AT_FAIL_VIEW_NARROWED
-   "a pssz view cannot address this member")
+   "a pssz view cannot address this variant")
 psio_annotation_tree_compile_fail(deep AT_FAIL_DEEP
    "bounds a std::string \\(bytes\\) or a std::vector, map or set \\(elements\\)")
 

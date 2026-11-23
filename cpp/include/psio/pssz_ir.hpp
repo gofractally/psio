@@ -12,8 +12,10 @@
 //     auto_pssz_width<T>() computes it from the C++ type: an explicit
 //     "maxDynamicData" attribute rules, otherwise the bound inferred from
 //     bounded lists / strings and member "lengthBound" attributes
-//     (max_size.hpp bookkeeping), otherwise 4. Caps and length bounds are
-//     enforced on encode and decode.
+//     (max_size.hpp bookkeeping: each type's header / slots / offset table
+//     counted at its own width), otherwise 4. A list's offset table follows
+//     the same rule. Caps and length bounds are enforced on encode and
+//     decode.
 //
 // Attributes read by the codec (schema_builder.hpp writes them):
 //   Object  definitionWillNotChange    fixed layout (no header)
@@ -404,8 +406,21 @@ template <std::size_t W> class Codec
    static constexpr bool automatic = W == 0;
    const schema_types::Schema &schema;
    using Bound = std::optional<std::size_t>;
-   // Widths already derived for a container type (automatic profile).
-   mutable std::vector<std::pair<const schema_types::AnyType *, std::size_t>> widths;
+   // Widths already derived for a container type (automatic profile), per
+   // the count a member lengthBound gives a plain List (none: nullopt).
+   struct KnownWidth
+   {
+      const schema_types::AnyType *type;
+      std::optional<std::uint64_t> count;
+      std::size_t width;
+   };
+   mutable std::vector<KnownWidth> widths;
+   // The count (exact, else max) of the lengthBound of the record member
+   // whose value the next encode_shape / decode_shape call handles: it
+   // bounds a plain List (or the list of a map / set) reached through
+   // Option, and so selects that list's offset-table width. Set around the
+   // member's call by encode_members / decode_members, taken by the callee.
+   mutable std::optional<std::uint64_t> position_count;
 
    static Bound bound_add(Bound a, Bound b)
    {
@@ -425,6 +440,26 @@ template <std::size_t W> class Codec
    static std::size_t width_class(Bound bound)
    {
       return bound && *bound <= 0xff ? 1 : bound && *bound <= 0xffff ? 2 : 4;
+   }
+   // max_size.hpp fit(): the bound of a container that writes `slots`
+   // offset-width words and whose other bytes are bounded by `rest`, for
+   // the least width in {1, 2, 4} whose total fits it (4 when neither 1 nor
+   // 2 does). width_class of the result is that width.
+   static Bound fit(std::uint64_t slots, Bound rest)
+   {
+      if (!rest)
+         return std::nullopt;
+      if (auto one = bound_add(bound_multiply(slots, Bound{1}), rest); one && *one <= 0xff)
+         return one;
+      if (auto two = bound_add(bound_multiply(slots, Bound{2}), rest); two && *two <= 0xffff)
+         return two;
+      return bound_add(bound_multiply(slots, Bound{4}), rest);
+   }
+   // max_size.hpp record_fit(): a record's / tuple's header and member
+   // slots are counted 4 wide.
+   static Bound record_fit(std::uint64_t slots, Bound rest)
+   {
+      return fit(slots, rest);
    }
    static const std::vector<schema_types::Attribute> *
    record_attributes(const schema_types::AnyType &type)
@@ -531,8 +566,8 @@ template <std::size_t W> class Codec
          }
       }
       active.push_back(type);
-      // N elements, each its reserved payload plus an offset slot when it
-      // is not an inline fixed payload.
+      // N elements, each its reserved payload, and the offset table when
+      // they are not inline fixed payloads.
       auto elements = [&](const schema_types::Box<schema_types::AnyType> &box,
                           std::uint64_t count) -> codec_status
       {
@@ -549,9 +584,9 @@ template <std::size_t W> class Codec
          bool fixed;
          std::vector<const schema_types::AnyType *> fresh;
          PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, fresh));
-         if (!fixed)
-            element = bound_add(element, 4);
          out = bound_multiply(count, element);
+         if (!fixed)
+            out = fit(count, out);
          return codec_ok();
       };
       auto sequence = [&](const schema_types::AnyType &container) -> codec_status
@@ -621,7 +656,10 @@ template <std::size_t W> class Codec
                 bool stable = true;
                 if constexpr (std::is_same_v<T, schema_types::Object>)
                    stable = dwnc(t.attributes);
-                Bound total = stable ? 0 : 4;
+                // The header (extensible records), and one slot per
+                // variable member.
+                std::uint64_t slots = stable ? 0 : 1;
+                Bound total = 0;
                 for (const auto &member : t.members)
                 {
                    const schema_types::AnyType *child;
@@ -636,10 +674,10 @@ template <std::size_t W> class Codec
                    std::vector<const schema_types::AnyType *> fresh;
                    PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, fresh));
                    if (!fixed)
-                      payload = bound_add(payload, 4);
+                      ++slots;
                    total = bound_add(total, payload);
                 }
-                out = total;
+                out = record_fit(slots, total);
              }
              else if constexpr (std::is_same_v<T, schema_types::Nested>)
              {
@@ -653,7 +691,8 @@ template <std::size_t W> class Codec
                 // The extensible positional record of its members: the
                 // header, then per member its reserved payload and, when
                 // it is not an inline fixed payload, an offset slot.
-                Bound total = 4;
+                std::uint64_t slots = 1;
+                Bound total = 0;
                 for (const auto &member : t.members)
                 {
                    const schema_types::AnyType *child;
@@ -664,10 +703,10 @@ template <std::size_t W> class Codec
                    std::vector<const schema_types::AnyType *> fresh;
                    PSIO_PSSZ_IR_TRY(fixed_payload(*child, fixed, fresh));
                    if (!fixed)
-                      payload = bound_add(payload, 4);
+                      ++slots;
                    total = bound_add(total, payload);
                 }
-                out = total;
+                out = record_fit(slots, total);
              }
              else if constexpr (std::is_same_v<T, schema_types::Variant>)
              {
@@ -693,8 +732,12 @@ template <std::size_t W> class Codec
       return status;
    }
    // The width of a record's header and slots, or of a list / array offset
-   // table. Explicit profile: W. Automatic: the type's own (see the header).
-   codec_status width_of(const schema_types::AnyType &type, std::size_t &out) const
+   // table. Explicit profile: W. Automatic: the type's own (see the header):
+   // the width class of its explicit cap, else of its inferred bound.
+   // `count`: for a plain List, the count the lengthBound of the member that
+   // holds it gives (position_count); a list with no bound is 4 wide.
+   codec_status width_of(const schema_types::AnyType &type, std::size_t &out,
+                         std::optional<std::uint64_t> count = std::nullopt) const
    {
       if constexpr (!automatic)
       {
@@ -704,33 +747,30 @@ template <std::size_t W> class Codec
       }
       else
       {
-         for (const auto &[known, width] : widths)
-            if (known == &type)
+         // Only a plain List takes a bound from the member that holds it.
+         if (!std::holds_alternative<schema_types::List>(type.value))
+            count.reset();
+         for (const auto &known : widths)
+            if (known.type == &type && known.count == count)
             {
-               out = width;
+               out = known.width;
                return codec_ok();
             }
          out = 4;
-         // A list's offset table is always 4 wide (a std::vector has no
-         // bound of its own; a bounded list keeps the vector's width).
-         auto custom = std::get_if<schema_types::Custom>(&type.value);
-         if (!std::holds_alternative<schema_types::List>(type.value) &&
-             !std::holds_alternative<schema_types::BoundedList>(type.value) &&
-             !(custom && assoc_id(custom->id)))
+         std::optional<std::uint64_t> cap;
+         PSIO_PSSZ_IR_TRY(cap_of(type, cap));
+         if (cap)
+            out = *cap <= 0xff ? 1 : *cap <= 0xffff ? 2 : 4;
+         else
          {
-            std::optional<std::uint64_t> cap;
-            PSIO_PSSZ_IR_TRY(cap_of(type, cap));
-            if (cap)
-               out = *cap <= 0xff ? 1 : *cap <= 0xffff ? 2 : 4;
-            else
-            {
-               Bound bound;
-               std::vector<const schema_types::AnyType *> active;
-               PSIO_PSSZ_IR_TRY(bound_of(type, nullptr, false, bound, active));
-               out = width_class(bound);
-            }
+            Bound bound;
+            std::vector<const schema_types::AnyType *> active;
+            LengthBound annotation;
+            annotation.max = count;
+            PSIO_PSSZ_IR_TRY(bound_of(type, count ? &annotation : nullptr, false, bound, active));
+            out = width_class(bound);
          }
-         widths.emplace_back(&type, out);
+         widths.push_back({&type, count, out});
          return codec_ok();
       }
    }
@@ -1461,6 +1501,7 @@ template <std::size_t W> class Codec
       std::vector<const Value *> ordered;
       std::vector<const schema_types::AnyType *> types;
       std::vector<std::optional<LengthBound>> bounds;
+      std::vector<std::optional<std::uint64_t>> counts;
       std::size_t keep = 0;
       for (const auto &member : members)
       {
@@ -1481,6 +1522,7 @@ template <std::size_t W> class Codec
             return fail("pssz IR: member length bound violated");
          ordered.push_back(value);
          types.push_back(type);
+         counts.push_back(bound ? bound->count() : std::nullopt);
          // A Nested member's bound counts its encoded bytes: checked below.
          bounds.push_back(nested ? bound : std::nullopt);
          if (stable || !info.optional || !none(*value))
@@ -1489,7 +1531,10 @@ template <std::size_t W> class Codec
       std::vector<Field> fields(keep);
       for (std::size_t i = 0; i < keep; ++i)
       {
-         PSIO_PSSZ_IR_TRY(encode_field(*types[i], *ordered[i], n + 1, fields[i]));
+         position_count = counts[i];
+         auto status = encode_field(*types[i], *ordered[i], n + 1, fields[i]);
+         position_count.reset();
+         PSIO_PSSZ_IR_TRY(std::move(status));
          if (bounds[i])
             PSIO_PSSZ_IR_TRY(nested_bound(*types[i], fields[i].bytes, *bounds[i]));
       }
@@ -1549,14 +1594,19 @@ template <std::size_t W> class Codec
       for (std::size_t i = 0; i < members.size(); ++i)
       {
          Value value;
-         if (spans[i].present)
-            PSIO_PSSZ_IR_TRY(decode_at(*types[i],
-                                       bytes.subspan(spans[i].begin, spans[i].end - spans[i].begin),
-                                       value, n + 1));
-         if (unpruned_tail(fields, spans, i, stable, unknown, value))
-            return fail("pssz IR: trailing absent optional field was not pruned");
          std::optional<LengthBound> bound;
          PSIO_PSSZ_IR_TRY(parse_length_bound(members[i].attributes, bound));
+         if (spans[i].present)
+         {
+            position_count = bound ? bound->count() : std::nullopt;
+            auto status =
+                decode_at(*types[i], bytes.subspan(spans[i].begin, spans[i].end - spans[i].begin),
+                          value, n + 1);
+            position_count.reset();
+            PSIO_PSSZ_IR_TRY(std::move(status));
+         }
+         if (unpruned_tail(fields, spans, i, stable, unknown, value))
+            return fail("pssz IR: trailing absent optional field was not pruned");
          bool nested = false;
          if (bound)
             PSIO_PSSZ_IR_TRY(nested_member(*types[i], nested));
@@ -1815,6 +1865,9 @@ template <std::size_t W> class Codec
    codec_status encode_shape(const schema_types::AnyType &input, const Value &value,
                              std::vector<char> &out, std::size_t n) const
    {
+      // The lengthBound count of the member this value is (see
+      // position_count): it reaches a list through Option only.
+      const auto member_count = std::exchange(position_count, std::nullopt);
       PSIO_PSSZ_IR_TRY(depth(n));
       const schema_types::AnyType *type;
       PSIO_PSSZ_IR_TRY(resolve(input, type));
@@ -1884,7 +1937,7 @@ template <std::size_t W> class Codec
              else if constexpr (std::is_same_v<T, schema_types::Custom>)
              {
                 if (assoc_id(t.id))
-                   return encode_assoc(t, value, out, n);
+                   return encode_assoc(t, value, out, n, member_count);
                 const schema_types::AnyType *child;
                 PSIO_PSSZ_IR_TRY(inner(t.type, child));
                 if (t.id == "bool")
@@ -1966,7 +2019,12 @@ template <std::size_t W> class Codec
                 if (selector)
                    out.push_back(v->some ? 1 : 0);
                 if (v->some)
-                   PSIO_PSSZ_IR_TRY(encode_at(*child, *v->some, out, n + 1));
+                {
+                   position_count = member_count;
+                   auto status = encode_at(*child, *v->some, out, n + 1);
+                   position_count.reset();
+                   PSIO_PSSZ_IR_TRY(std::move(status));
+                }
              }
              else if constexpr (std::is_same_v<T, schema_types::Struct> ||
                                 std::is_same_v<T, schema_types::Object>)
@@ -2017,7 +2075,7 @@ template <std::size_t W> class Codec
                 const schema_types::AnyType *child;
                 PSIO_PSSZ_IR_TRY(child_of(t.type, child));
                 std::size_t w;
-                PSIO_PSSZ_IR_TRY(width_of(*type, w));
+                PSIO_PSSZ_IR_TRY(width_of(*type, w, member_count));
                 if constexpr (std::is_same_v<T, schema_types::List>)
                    PSIO_PSSZ_IR_TRY(encode_sequence(*child, *v, false, 0, false, w, out, n));
                 else if constexpr (std::is_same_v<T, schema_types::BoundedList>)
@@ -2110,16 +2168,20 @@ template <std::size_t W> class Codec
                           bool &is_signed) const;
    codec_status assoc_keys(const AssocShape &shape, const Sequence &items,
                            std::vector<std::vector<char>> &keys) const;
+   // `count`: the lengthBound count of the member holding the map / set.
    codec_status encode_assoc(const schema_types::Custom &custom, const Value &value,
-                             std::vector<char> &out, std::size_t n) const;
+                             std::vector<char> &out, std::size_t n,
+                             std::optional<std::uint64_t> count) const;
    codec_status decode_assoc(const schema_types::Custom &custom, std::span<const char> bytes,
-                             Value &out, std::size_t n);
+                             Value &out, std::size_t n, std::optional<std::uint64_t> count);
 };
 
 template <std::size_t W>
 codec_status Codec<W>::decode_shape(const schema_types::AnyType &input,
                                     std::span<const char> bytes, Value &out, std::size_t n)
 {
+   // The lengthBound count of the member this value is (see position_count).
+   const auto member_count = std::exchange(position_count, std::nullopt);
    PSIO_PSSZ_IR_TRY(depth(n));
    const schema_types::AnyType *type;
    PSIO_PSSZ_IR_TRY(resolve(input, type));
@@ -2175,7 +2237,7 @@ codec_status Codec<W>::decode_shape(const schema_types::AnyType &input,
           else if constexpr (std::is_same_v<T, schema_types::Custom>)
           {
              if (assoc_id(t.id))
-                return decode_assoc(t, bytes, out, n);
+                return decode_assoc(t, bytes, out, n, member_count);
              const schema_types::AnyType *child;
              PSIO_PSSZ_IR_TRY(inner(t.type, child));
              if (t.id == "bool")
@@ -2257,7 +2319,10 @@ codec_status Codec<W>::decode_shape(const schema_types::AnyType &input,
                 return codec_ok();
              }
              Value value;
-             PSIO_PSSZ_IR_TRY(decode_at(*child, bytes, value, n + 1));
+             position_count = member_count;
+             auto status = decode_at(*child, bytes, value, n + 1);
+             position_count.reset();
+             PSIO_PSSZ_IR_TRY(std::move(status));
              out = Value::some(std::move(value));
           }
           else if constexpr (std::is_same_v<T, schema_types::Object> ||
@@ -2315,7 +2380,7 @@ codec_status Codec<W>::decode_shape(const schema_types::AnyType &input,
              const schema_types::AnyType *child;
              PSIO_PSSZ_IR_TRY(child_of(t.type, child));
              std::size_t w;
-             PSIO_PSSZ_IR_TRY(width_of(*type, w));
+             PSIO_PSSZ_IR_TRY(width_of(*type, w, member_count));
              Sequence values;
              if constexpr (std::is_same_v<T, schema_types::List>)
                 PSIO_PSSZ_IR_TRY(decode_sequence(*child, bytes, false, 0, false, w, values, n));

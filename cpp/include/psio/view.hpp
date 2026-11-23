@@ -153,6 +153,18 @@ namespace psio {
       template <typename Fmt, typename Parent>
       using nested_format_t = typename nested_format<Fmt, Parent>::type;
 
+      // The format of the view of member N of record T: the format's own
+      // `member_format<T, N>` when it has one (a format whose layout of a
+      // member depends on which member it is), else nested_format_t.
+      template <typename Fmt, typename T, std::size_t N, typename = void>
+      struct member_format { using type = nested_format_t<Fmt, T>; };
+      template <typename Fmt, typename T, std::size_t N>
+      struct member_format<Fmt, T, N,
+                           std::void_t<typename traits<Fmt>::template member_format<T, N>>>
+      { using type = typename traits<Fmt>::template member_format<T, N>; };
+      template <typename Fmt, typename T, std::size_t N>
+      using member_format_t = typename member_format<Fmt, T, N>::type;
+
       template <typename Fmt, typename = void>
       struct has_vector_support : std::false_type {};
 
@@ -382,6 +394,7 @@ namespace psio {
       requires view_layout::has_array_support<Fmt>::value
    class view<std::array<T, N>, Fmt, Store>
    {
+      using child_format = view_layout::nested_format_t<Fmt, std::array<T, N>>;
       std::span<const char> data_;
       std::span<const char> root_;
      public:
@@ -397,14 +410,14 @@ namespace psio {
       [[nodiscard]] std::span<const char> _psio_root() const noexcept { return root_; }
       [[nodiscard]] constexpr std::size_t size() const noexcept { return N; }
       [[nodiscard]] constexpr bool empty() const noexcept { return N == 0; }
-      [[nodiscard]] view<T, Fmt, Store> operator[](std::size_t index) const noexcept
+      [[nodiscard]] view<T, child_format, Store> operator[](std::size_t index) const noexcept
       {
-         return view<T, Fmt, Store>{
+         return view<T, child_format, Store>{
             view_layout::traits<Fmt>::template array_element_span<T, N>(data_, index), root_};
       }
-      [[nodiscard]] view<T, Fmt, Store> at(std::size_t index) const noexcept
+      [[nodiscard]] view<T, child_format, Store> at(std::size_t index) const noexcept
       {
-         return index < N ? (*this)[index] : view<T, Fmt, Store>{};
+         return index < N ? (*this)[index] : view<T, child_format, Store>{};
       }
       class iterator
       {
@@ -412,7 +425,7 @@ namespace psio {
          std::size_t index_ = 0;
        public:
          using iterator_category = std::forward_iterator_tag;
-         using value_type = view<T, Fmt, Store>;
+         using value_type = view<T, child_format, Store>;
          using difference_type = std::ptrdiff_t;
          using pointer = void;
          using reference = value_type;
@@ -696,7 +709,7 @@ namespace psio {
          }
          else
          {
-            return view<FieldT, view_layout::nested_format_t<Fmt, T>, Store>{field_span, root_};
+            return view<FieldT, view_layout::member_format_t<Fmt, T, N>, Store>{field_span, root_};
          }
       }
    };

@@ -18,6 +18,10 @@
 // Otherwise, `length_bound{.max = N}` annotations bound the inferred width.
 // Unbounded types fall back to W = 4. Each nested value retains its own type's
 // width; the enclosing record/container uses its own width for its offset table.
+// That includes a list: a std::vector bounded by its member's annotations, a
+// psio::bounded, a map or a set whose count and elements are bounded writes its
+// per-element offset table 1 or 2 bytes wide when its own bound allows it
+// (docs/pssz-spec.md 3.2).
 //
 // Only one public tag: `psio::pssz`. The width choice is a compile-
 // time detail of the encode/decode path, not a user-facing knob.
@@ -1311,11 +1315,54 @@ namespace psio {
          s.rewrite(pos, &ov, W);
       }
 
+      template <std::size_t LegacyW, bool Auto = false, typename T, typename Sink,
+                typename A = no_ann>
+      void encode_value(const T& v, Sink& s);
+
+      // A list (std::vector, psio::bounded) whose offset table is W wide.
+      // EA: the carrier of one element.
+      template <std::size_t W, bool Auto, typename E, typename Sink, typename EA>
+      [[gnu::always_inline]] inline void encode_list(const std::vector<E>& v, Sink& s)
+      {
+         if constexpr (is_fixed_v<E>)
+         {
+            if constexpr (is_zero_fixed_v<E>)
+               if (!v.empty()) size_failure("pssz: nonempty zero-size vector is unsupported");
+            // Bulk memcpy for arithmetic OR memcpy-layout records.
+            constexpr bool is_arith =
+               std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
+            constexpr bool is_memcpy_record =
+               (Record<E> || ::psio::is_transparent_v<E>) &&
+               std::is_trivially_copyable_v<E> && fixed_size_of<E>() == sizeof(E);
+            if constexpr (is_arith || is_memcpy_record)
+            {
+               if (!v.empty())
+                  s.write(v.data(), v.size() * sizeof(E));
+            }
+            else
+            {
+               for (const auto& x : v)
+                  encode_value<W, Auto>(x, s);
+            }
+         }
+         else
+         {
+            const std::size_t n     = v.size();
+            const std::size_t table = s.written();
+            skip_bytes(s, checked_multiply(n, W));
+            for (std::size_t i = 0; i < n; ++i)
+            {
+               write_offset<W>(s, table + i * W,
+                               s.written() - table);
+               encode_value<W, Auto, E, Sink, EA>(v[i], s);
+            }
+         }
+      }
+
       // Sink-templated encoder. Top-level tag_invoke pre-sizes the
       // output buffer via size_of_v then walks once with
       // fast_buf_stream — same algorithm v1's convert_to_pssz uses.
-      template <std::size_t LegacyW, bool Auto = false, typename T, typename Sink,
-                typename A = no_ann>
+      template <std::size_t LegacyW, bool Auto, typename T, typename Sink, typename A>
       void encode_value(const T& v, Sink& s)
       {
          constexpr std::size_t W = [] {
@@ -1358,7 +1405,9 @@ namespace psio {
          else if constexpr (is_assoc_v<T>)
             assoc_encode<W, Auto, T, Sink, A>(v, s);
          else if constexpr (is_bounded_v<T>)
-            encode_value<W, Auto, std::vector<typename T::value_type>, Sink, A>(v.storage(), s);
+            // The list, with this type's own table width.
+            encode_list<W, Auto, typename T::value_type, Sink, ann::element_ann<A>>(v.storage(),
+                                                                                    s);
          else if constexpr (std::is_same_v<T, bool>)
             s.write(v ? '\x01' : '\x00');
          else if constexpr (std::is_same_v<T, ::psio::uint256>)
@@ -1402,42 +1451,7 @@ namespace psio {
             }
          }
          else if constexpr (is_std_vector_v<T>)
-         {
-            using E = typename T::value_type;
-            if constexpr (is_fixed_v<E>)
-            {
-               if constexpr (is_zero_fixed_v<E>)
-                  if (!v.empty()) size_failure("pssz: nonempty zero-size vector is unsupported");
-               // Bulk memcpy for arithmetic OR memcpy-layout records.
-               constexpr bool is_arith =
-                  std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
-               constexpr bool is_memcpy_record =
-                  (Record<E> || ::psio::is_transparent_v<E>) &&
-                  std::is_trivially_copyable_v<E> && fixed_size_of<E>() == sizeof(E);
-               if constexpr (is_arith || is_memcpy_record)
-               {
-                  if (!v.empty())
-                     s.write(v.data(), v.size() * sizeof(E));
-               }
-               else
-               {
-                  for (const auto& x : v)
-                     encode_value<W, Auto>(x, s);
-               }
-            }
-            else
-            {
-               const std::size_t n     = v.size();
-               const std::size_t table = s.written();
-               skip_bytes(s, checked_multiply(n, W));
-               for (std::size_t i = 0; i < n; ++i)
-               {
-                  write_offset<W>(s, table + i * W,
-                                  s.written() - table);
-                  encode_value<W, Auto, E, Sink, ann::element_ann<A>>(v[i], s);
-               }
-            }
-         }
+            encode_list<W, Auto, typename T::value_type, Sink, ann::element_ann<A>>(v, s);
          else if constexpr (std::is_same_v<T, std::string> || is_utf8_string_v<T>)
             s.write(v.data(), v.size());
          else if constexpr (is_std_optional_v<T>)
@@ -2029,8 +2043,9 @@ namespace psio {
             return assoc_decode<W, Auto, T, A>(src, pos, end);
          else if constexpr (is_bounded_v<T>)
          {
-            auto items =
-               decode_value<W, Auto, std::vector<typename T::value_type>, A>(src, pos, end);
+            // The list, with this type's own table width.
+            auto items = decode_vector<W, Auto, typename T::value_type, ann::element_ann<A>>(
+               src, pos, end);
             if (items.size() > T::max_size_value)
                size_failure("pssz: bounded list exceeds its bound");
             return T{std::move(items)};
@@ -2435,7 +2450,7 @@ namespace psio {
       // length_bound. The bound looks through std::optional, as width
       // inference does (max_size.hpp); it constrains strings and lists
       // only, every other shape has no length to check.
-      template <std::size_t LegacyW, bool Auto, typename F>
+      template <std::size_t LegacyW, bool Auto, typename F, typename A = no_ann>
       codec_status check_member_length_bound(
          std::span<const char> src, std::size_t pos, std::size_t end,
          const ::psio::length_bound& lb,
@@ -2447,13 +2462,13 @@ namespace psio {
             if constexpr (!optional_uses_selector_v<V>)
             {
                if (pos == end) return codec_ok();
-               return check_member_length_bound<LegacyW, Auto, V>(src, pos, end, lb, message);
+               return check_member_length_bound<LegacyW, Auto, V, A>(src, pos, end, lb, message);
             }
             else
             {
                if (pos == end || src[pos] == 0) return codec_ok();
-               return check_member_length_bound<LegacyW, Auto, V>(src, pos + 1, end, lb,
-                                                                  message);
+               return check_member_length_bound<LegacyW, Auto, V, A>(src, pos + 1, end, lb,
+                                                                     message);
             }
          }
          else if constexpr (is_nested_v<F>)
@@ -2480,9 +2495,9 @@ namespace psio {
                   count = (end - pos) / fixed_size_of<E>();
                else
                {
-                  // A list's offset table is 4 wide whatever bounds it.
+                  // The list's own table width at this position.
                   constexpr std::size_t W = [] {
-                     if constexpr (Auto) return ::psio::auto_pssz_width<F>();
+                     if constexpr (Auto) return width_for<F, A>();
                      else return LegacyW;
                   }();
                   count = pos == end ? 0 : read_offset<W>(src, pos) / W;
@@ -2594,7 +2609,7 @@ namespace psio {
          if constexpr (!std::is_same_v<A, no_ann> && !is_std_optional_v<T>)
          {
             if constexpr (ann::has_length_bound_v<A>)
-               if (auto st = check_member_length_bound<LegacyW, Auto, T>(
+               if (auto st = check_member_length_bound<LegacyW, Auto, T, A>(
                       src, pos, end, std::get<::psio::length_bound>(A::value));
                    !st.ok())
                   return st;
@@ -2675,10 +2690,12 @@ namespace psio {
             return assoc_validate<W, Auto, T, A>(src, pos, end, depth, flags);
          else if constexpr (is_bounded_v<T>)
          {
-            using L = std::vector<typename T::value_type>;
-            if (auto st = validate_shape<W, Auto, L, A>(src, pos, end, depth, flags); !st.ok())
+            // The list, with this type's own table width.
+            if (auto st = validate_vector_payload<W, Auto, typename T::value_type,
+                                                  ann::element_ann<A>>(src, pos, end, depth, flags);
+                !st.ok())
                return st;
-            return check_member_length_bound<W, Auto, L>(
+            return check_member_length_bound<W, Auto, T, A>(
                src, pos, end,
                ::psio::length_bound{.max = static_cast<std::uint32_t>(T::max_size_value)},
                "pssz: bounded list exceeds its bound");
@@ -2917,8 +2934,12 @@ namespace psio {
    // bytes) is selected at compile time from the explicit type-level
    // `max_dynamic_data_v<T>` budget, when present. Without that promise,
    // `max_encoded_size<T>()` provides a conservative bound inferred from the
-   // fields' annotations, including full declared child budgets and W=4
-   // bookkeeping. A declared budget takes precedence in either direction.
+   // fields' annotations, including full declared child budgets, with each
+   // type's own header / slots / offset table counted at that type's own
+   // width (max_size.hpp `fit`). A declared budget takes precedence in either
+   // direction. A list (std::vector, psio::bounded, a map, a set) follows
+   // the same rule for its offset table: 4 when unbounded, else the width
+   // class of its own bound.
    //
    //   budget/bound ≤ 0xff   → W = 1
    //   budget/bound ≤ 0xffff → W = 2
@@ -2930,34 +2951,27 @@ namespace psio {
 
    namespace detail::pssz_impl
    {
-      // The offset width of T at a position carrying A's annotations.
-      //
-      //   - A list (std::vector, psio::bounded, a map, a set) writes its
-      //     offset table 4 wide, whatever bounds it: a bound on the list
-      //     narrows the record that holds it, never the list's own table.
-      //   - Everything else — a record, an array of variable elements, a
-      //     tuple, a pair — takes its declared maxDynamicData when it has
-      //     one, else the bound inferred for it with the annotations of its
-      //     position (max_size.hpp), exactly the bound the equivalent
-      //     wrapper types would give.
+      // The offset width of T at a position carrying A's annotations: of a
+      // record's or tuple's header and member slots, of the offset table of
+      // a list (std::vector, psio::bounded, a map, a set) or array of
+      // variable elements. It is the width class of T's declared
+      // maxDynamicData when it has one, else of the bound inferred for it
+      // with the annotations of its position (max_size.hpp) — exactly the
+      // bound the equivalent wrapper types would give. An unbounded type
+      // (a plain std::vector, a record holding one) is 4 wide.
       template <typename T, typename A>
       consteval std::size_t width_for() noexcept
       {
-         if constexpr (is_std_vector_v<T> || is_bounded_v<T> || is_assoc_v<T>)
-            return 4;
-         else
-         {
-            constexpr auto m = [] {
-               if constexpr (::psio::max_dynamic_data_v<T>.has_value())
-                  return ::psio::max_dynamic_data_v<T>;
-               else
-                  return ::psio::detail::max_size_impl::max_field_with_annots<T>(A::value);
-            }();
-            if constexpr (m.has_value())
-               return *m <= 0xFFu ? 1 : *m <= 0xFFFFu ? 2 : 4;
+         constexpr auto m = [] {
+            if constexpr (::psio::max_dynamic_data_v<T>.has_value())
+               return ::psio::max_dynamic_data_v<T>;
             else
-               return 4;
-         }
+               return ::psio::detail::max_size_impl::max_field_with_annots<T>(A::value);
+         }();
+         if constexpr (m.has_value())
+            return *m <= 0xFFu ? 1 : *m <= 0xFFFFu ? 2 : 4;
+         else
+            return 4;
       }
    }  // namespace detail::pssz_impl
 
@@ -2969,21 +2983,21 @@ namespace psio {
       template <typename T, typename A>
       consteval bool widths_unchanged() noexcept
       {
-         // Only a type that writes offsets has a width to compare: an array
-         // of variable elements and a tuple / pair (a list's table is 4 wide
-         // either way; a reflected record's width is its own).
+         // Only a type that writes offsets has a width to compare: a list,
+         // array, map or set of variable elements and a tuple / pair (a
+         // reflected record's width is its own).
          if constexpr (std::is_same_v<A, no_ann>)
             return true;
          else if constexpr (is_std_optional_v<T>)
             return widths_unchanged<typename T::value_type, A>();
-         else if constexpr (is_std_vector_v<T> || is_bounded_v<T>)
-            return widths_unchanged<typename T::value_type, ann::element_ann<A>>();
-         else if constexpr (is_std_array_v<T>)
+         else if constexpr (is_std_vector_v<T> || is_bounded_v<T> || is_std_array_v<T>)
             return (is_fixed_v<typename T::value_type> ||
                     width_for<T, A>() == width_for<T, no_ann>()) &&
                    widths_unchanged<typename T::value_type, ann::element_ann<A>>();
          else if constexpr (is_assoc_v<T>)
-            return widths_unchanged<::psio::detail::assoc_entry_t<T>, ann::entry_ann<T, A>>();
+            return (is_fixed_v<::psio::detail::assoc_entry_t<T>> ||
+                    width_for<T, A>() == width_for<T, no_ann>()) &&
+                   widths_unchanged<::psio::detail::assoc_entry_t<T>, ann::entry_ann<T, A>>();
          else if constexpr (is_std_variant_v<T>)
             return []<std::size_t... Is>(std::index_sequence<Is...>) {
                return (widths_unchanged<std::variant_alternative_t<Is, T>, ann::at_ann<A, Is>>() &&
@@ -3004,10 +3018,6 @@ namespace psio {
    template <typename T>
    consteval std::size_t auto_pssz_width() noexcept
    {
-      // A list's offset table is always 4 wide (see width_for).
-      if constexpr (detail::pssz_impl::is_std_vector_v<T> ||
-                    detail::pssz_impl::is_bounded_v<T> || detail::pssz_impl::is_assoc_v<T>)
-         return 4;
       // A declared budget is the lifetime wire-width promise for this logical
       // type. It stays authoritative even while current fields need less space.
       constexpr auto m = [] {

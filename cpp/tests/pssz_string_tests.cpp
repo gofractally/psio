@@ -66,7 +66,7 @@ namespace string_fixture
       friend bool operator==(const RawTuple4&, const RawTuple4&) = default;
    };
    PSIO_REFLECT(RawTuple4, s, maxDynamicData(12))
-   static_assert(psio::max_encoded_size<std::tuple<Text4>>() == 12 &&
+   static_assert(psio::max_encoded_size<std::tuple<Text4>>() == 6 &&
                  psio::auto_pssz_width_v<std::tuple<Text4>> == 1 &&
                  psio::auto_pssz_width_v<RawTuple4> == 1 &&
                  psio::auto_pssz_width_v<std::tuple<std::string>> == 4 &&
@@ -131,22 +131,24 @@ namespace
                  psio::auto_pssz_width_v<TextRec> == 4);
    // The bounded wrapper carries its bound in the type, so it feeds bound
    // inference and the automatic width without a member annotation: N bytes
-   // bare, N + 4 as a variable member or element, N + 1 in an optional.
+   // bare, N + 1 in an optional, and N plus one slot of the holder's own
+   // width as a variable member or element.
    static_assert(psio::max_encoded_size<Text4>() == 4);
    static_assert(psio::max_encoded_size<psio::utf8_string<16>>() == 16);
    static_assert(psio::max_encoded_size<std::optional<psio::utf8_string<16>>>() == 17);
-   static_assert(psio::max_encoded_size<std::array<psio::utf8_string<16>, 2>>() == 40);
+   static_assert(psio::max_encoded_size<std::array<psio::utf8_string<16>, 2>>() == 2 * (1 + 16));
    static_assert(!psio::max_encoded_size<std::vector<psio::utf8_string<16>>>().has_value());
-   static_assert(psio::max_encoded_size<OnlyText4>() == 12 &&
+   static_assert(psio::max_encoded_size<OnlyText4>() == 1 + 1 + 4 &&
                  psio::auto_pssz_width_v<OnlyText4> == 1);
-   static_assert(psio::max_encoded_size<U32Text16>() == 28 &&
+   static_assert(psio::max_encoded_size<U32Text16>() == 1 + 4 + 1 + 16 &&
                  psio::auto_pssz_width_v<U32Text16> == 1);
-   static_assert(psio::max_encoded_size<U32Text300>() == 312 &&
+   static_assert(psio::max_encoded_size<U32Text300>() == 2 + 4 + 2 + 300 &&
                  psio::auto_pssz_width_v<U32Text300> == 2);
    static_assert(!psio::max_encoded_size<U32Text>().has_value() &&
                  psio::auto_pssz_width_v<U32Text> == 4);
-   // optional member: slot 4 + N + 1; bounded vector member: 4 + count * (N + 4).
-   static_assert(psio::max_encoded_size<TextMembers>() == 4 + (4 + 17) + (4 + 2 * 20));
+   // header 1; optional member: slot 1 + N + 1; bounded vector member: slot 1
+   // + count * (1 + N), the list's own one-byte table.
+   static_assert(psio::max_encoded_size<TextMembers>() == 1 + (1 + 17) + (1 + 2 * 17));
 
    // Inherent annotations: UTF-8 always; a length bound only when bounded.
    static_assert(std::tuple_size_v<decltype(psio::inherent_annotations<Text>::value)> == 1);

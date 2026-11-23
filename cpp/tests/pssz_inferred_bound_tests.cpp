@@ -3,9 +3,10 @@
 //   Tuple(Ts...)    the extensible record of its elements: header + per
 //                   element its payload (+ an offset slot when variable)
 //   Pair(A, B)      Tuple(A, B)
-// with every header and slot counted as 4 bytes. A bounded tuple / variant,
-// and a record that holds one, therefore gets one- or two-byte offsets
-// instead of four; the typed codec and the schema-driven one agree.
+// with the header and slots counted at the tuple's own width: the least of
+// 1, 2, 4 whose total fits (`fit`). A bounded tuple / variant, and a record
+// that holds one, therefore gets one- or two-byte offsets instead of four;
+// the typed codec and the schema-driven one agree.
 
 #include <psio/max_size.hpp>
 #include <psio/pssz.hpp>
@@ -95,24 +96,26 @@ namespace bound_tests
    static_assert(!bound<std::variant<std::vector<u8>, u8>>);
    static_assert(!bound<std::variant<u8, Free>>);
 
-   // ── Tuple: header 4, each element its payload, + 4 when variable ──────
-   static_assert(bound<std::tuple<>> == 4);
-   static_assert(bound<std::tuple<u32>> == 8);
-   static_assert(bound<std::tuple<u8, u16, u32, u64>> == 19);
-   static_assert(bound<std::tuple<Point, bool>> == 13);
-   static_assert(bound<std::tuple<Name>> == 4 + 32 + 4);
-   static_assert(bound<std::tuple<std::optional<u32>>> == 4 + 5 + 4);
-   static_assert(bound<std::tuple<std::tuple<u8>, u8>> == 4 + (5 + 4) + 1);
-   static_assert(bound<std::tuple<std::variant<u8, u32>>> == 4 + 5 + 4);
-   static_assert(bound<std::tuple<Capped, u8>> == 4 + 300 + 4 + 1);
-   static_assert(bound<std::tuple<std::array<u16, 3>>> == 4 + 6);
+   // ── Tuple: header W, each element its payload, + W when variable ──────
+   // (W = 1 for all of these but the one holding Capped.)
+   static_assert(bound<std::tuple<>> == 1);
+   static_assert(bound<std::tuple<u32>> == 1 + 4);
+   static_assert(bound<std::tuple<u8, u16, u32, u64>> == 1 + 15);
+   static_assert(bound<std::tuple<Point, bool>> == 1 + 8 + 1);
+   static_assert(bound<std::tuple<Name>> == 1 + 32 + 1);
+   static_assert(bound<std::tuple<std::optional<u32>>> == 1 + 5 + 1);
+   static_assert(bound<std::tuple<std::tuple<u8>, u8>> == 1 + (2 + 1) + 1);
+   static_assert(bound<std::tuple<std::variant<u8, u32>>> == 1 + 5 + 1);
+   // 1 + 300 + 1 + 1 = 303 does not fit one-byte offsets: 2 + 300 + 2 + 1.
+   static_assert(bound<std::tuple<Capped, u8>> == 2 + 300 + 2 + 1);
+   static_assert(bound<std::tuple<std::array<u16, 3>>> == 1 + 6);
    // An element has no member annotation: a string or list is unbounded.
    static_assert(!bound<std::tuple<u32, std::string>>);
    static_assert(!bound<std::tuple<std::vector<u8>>>);
    static_assert(!bound<std::tuple<Free>>);
    // A pair is the 2-tuple (a map's value_type included).
    static_assert(bound<std::pair<u32, u8>> == bound<std::tuple<u32, u8>> &&
-                 bound<std::pair<u32, u8>> == 9);
+                 bound<std::pair<u32, u8>> == 6);
    static_assert(bound<std::pair<const u32, Name>> == bound<std::tuple<u32, Name>>);
    static_assert(!bound<std::pair<std::string, u8>>);
 
@@ -120,15 +123,24 @@ namespace bound_tests
    static_assert(width<std::tuple<>> == 1 && width<std::tuple<u32>> == 1);
    static_assert(width<std::tuple<u64, Name, u8>> == 1);
    static_assert(width<std::pair<u32, u8>> == 1);
-   static_assert(width<std::tuple<Capped, u8>> == 2);                  // 309
-   static_assert(width<std::tuple<std::array<u64, 40>>> == 2);         // 324
+   static_assert(width<std::tuple<Capped, u8>> == 2);                  // 305
+   static_assert(width<std::tuple<std::array<u64, 40>>> == 2);         // 322
    static_assert(width<std::tuple<std::array<u64, 9000>>> == 4);       // 72004
+   // The thresholds: the header counts at the tuple's own width.
+   static_assert(bound<std::tuple<std::array<u8, 254>>> == 255 &&
+                 width<std::tuple<std::array<u8, 254>>> == 1);
+   static_assert(bound<std::tuple<std::array<u8, 255>>> == 257 &&
+                 width<std::tuple<std::array<u8, 255>>> == 2);
+   static_assert(bound<std::tuple<std::array<u8, 65533>>> == 65535 &&
+                 width<std::tuple<std::array<u8, 65533>>> == 2);
+   static_assert(bound<std::tuple<std::array<u8, 65534>>> == 65538 &&
+                 width<std::tuple<std::array<u8, 65534>>> == 4);
    static_assert(width<std::tuple<u32, std::string>> == 4);
    // A record holding a bounded variant / tuple is bounded itself.
-   static_assert(bound<Event> == 4 + 8 + (9 + 4) && width<Event> == 1);
-   static_assert(bound<Call> == 4 + 4 + (4 + 8 + 36 + 1 + 4) && width<Call> == 1);
+   static_assert(bound<Event> == 1 + 8 + (9 + 1) && width<Event> == 1);
+   static_assert(bound<Call> == 1 + 4 + (1 + 8 + 33 + 1 + 1) && width<Call> == 1);
    static_assert(!bound<Open> && width<Open> == 4);
-   // Lists keep four-byte offset tables whatever their elements.
+   // An unbounded list has a four-byte offset table whatever its elements.
    static_assert(width<std::vector<std::tuple<u32>>> == 4 &&
                  width<std::map<u32, u8>> == 4 && width<std::set<std::tuple<u8>>> == 4);
 

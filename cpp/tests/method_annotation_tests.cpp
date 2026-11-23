@@ -104,19 +104,19 @@ static_assert(std::tuple_size_v<Transfer> == 3);
 static_assert(std::is_same_v<std::tuple_element_t<2, Transfer>, std::string>);
 
 // An explicit cap rules: 256 selects 2-byte offsets although the fields
-// need at most 4 + (16 + 4) + 8 + (80 + 4) = 116 bytes.
+// need at most 1 + (1 + 16) + 8 + (1 + 80) = 107 bytes.
 static_assert(psio::max_dynamic_data_v<Transfer> == 256);
 static_assert(psio::max_encoded_size<Transfer>() == 256);
 static_assert(psio::auto_pssz_width_v<Transfer> == 2);
 // Without a cap: the inferred bound, rounded up to the next width.
 static_assert(!psio::max_dynamic_data_v<TransferUncapped>.has_value());
-static_assert(psio::max_encoded_size<TransferUncapped>() == 4 + (16 + 4) + 8 + (80 + 4));
+static_assert(psio::max_encoded_size<TransferUncapped>() == 1 + (1 + 16) + 8 + (1 + 80));
 static_assert(psio::auto_pssz_width_v<TransferUncapped> == 1);
 // No annotation: exactly the plain tuple.
 static_assert(!psio::max_encoded_size<Plain>().has_value());
 static_assert(psio::auto_pssz_width_v<Plain> == 4);
-// 4 + 4 x (8 + 4) + 4 + (selector 1 + 4)
-static_assert(psio::max_encoded_size<Batch>() == 4 + (4 * (8 + 4) + 4) + (1 + 4 + 4));
+// header 1 + slot 1 + 4 x (table slot 1 + 8) + slot 1 + (selector 1 + 4)
+static_assert(psio::max_encoded_size<Batch>() == 1 + (1 + 4 * (1 + 8)) + (1 + 1 + 4));
 static_assert(psio::auto_pssz_width_v<Batch> == 1);
 static_assert(psio::auto_pssz_width_v<Note> == 1);
 static_assert(psio::auto_pssz_width_v<Version> == 1);  // the empty tuple: its header

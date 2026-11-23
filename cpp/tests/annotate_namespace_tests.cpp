@@ -185,14 +185,14 @@ namespace chain::state::v1
    {
       std::uint64_t id = 0;
       std::string   owner;
-      PSIO_REFLECT(Uncapped, id, attr(owner, max<230>))
+      PSIO_REFLECT(Uncapped, id, attr(owner, max<240>))
    };
    struct UncappedGrown
    {
       std::uint64_t                id = 0;
       std::string                  owner;
       std::optional<std::uint64_t> note;
-      PSIO_REFLECT(UncappedGrown, id, attr(owner, max<230>), note)
+      PSIO_REFLECT(UncappedGrown, id, attr(owner, max<240>), note)
    };
 
    namespace inner

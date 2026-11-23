@@ -53,6 +53,12 @@ struct WidthThreshold251 { std::array<std::uint8_t,251> value; };
 PSIO_REFLECT(WidthThreshold251, value)
 struct WidthThreshold252 { std::array<std::uint8_t,252> value; };
 PSIO_REFLECT(WidthThreshold252, value)
+// The header counts at the record's own width: 1 + 254 = 255 is the last
+// one-byte record, 2 + 255 = 257 the first two-byte one.
+struct WidthThreshold254 { std::array<std::uint8_t,254> value; };
+PSIO_REFLECT(WidthThreshold254, value)
+struct WidthThreshold255 { std::array<std::uint8_t,255> value; };
+PSIO_REFLECT(WidthThreshold255, value)
 struct WidthBoundedBatch { std::vector<WidthCheckpoint> entries; };
 PSIO_REFLECT(WidthBoundedBatch, entries)
 PSIO_FIELD_ATTRS(WidthBoundedBatch, entries, psio::length_bound{.max=4})
