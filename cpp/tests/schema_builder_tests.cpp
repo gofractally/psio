@@ -3,6 +3,9 @@
 #include <psio/schema_builder.hpp>
 #include <psio/pssz_ir.hpp>
 #include <psio/pssz.hpp>
+#include <psio/json.hpp>
+#include <psio/pssz_ir_compare.hpp>
+#include <psio/pssz_ir_json.hpp>
 
 #include <catch.hpp>
 
@@ -314,4 +317,218 @@ TEST_CASE("SchemaBuilder: insert_world walks use-imports + interface-exports",
       if (iface.name == "sb_random")
          found_random = true;
    CHECK(found_random);
+}
+
+// ── Names: two types never become one node ────────────────────────────────
+namespace sb_names
+{
+   namespace a
+   {
+      struct Config
+      {
+         std::uint32_t x = 0;
+      };
+      PSIO_REFLECT(Config, x)
+   }
+   namespace b
+   {
+      struct Config
+      {
+         std::string  name;
+         std::uint8_t y = 0;
+      };
+      PSIO_REFLECT(Config, name, y)
+   }
+   struct Both
+   {
+      a::Config first;
+      b::Config second;
+   };
+   PSIO_REFLECT(Both, first, second)
+   struct Reversed
+   {
+      b::Config second;
+      a::Config first;
+   };
+   PSIO_REFLECT(Reversed, second, first)
+
+   template <typename T>
+   struct WithBlock
+   {
+      std::uint32_t block = 0;
+      T             data{};
+      PSIO_REFLECT(WithBlock, block, data)
+   };
+   struct Sent
+   {
+      std::uint64_t amount = 0;
+      PSIO_REFLECT(Sent, amount)
+   };
+   struct Events
+   {
+      WithBlock<Sent>         sent;
+      WithBlock<std::uint8_t> tick;
+      PSIO_REFLECT(Events, sent, tick)
+   };
+
+   namespace chosen
+   {
+      struct Config
+      {
+         std::int16_t z = 0;
+      };
+      PSIO_REFLECT(Config, z)
+      struct Other
+      {
+         std::int16_t z = 0;
+      };
+      PSIO_REFLECT(Other, z)
+   }
+}  // namespace sb_names
+template <>
+struct psio::schema_type_name<sb_names::chosen::Config>
+{
+   static constexpr std::string_view value = "NodeConfig";
+};
+template <>
+struct psio::schema_type_name<sb_names::chosen::Other>
+{
+   static constexpr std::string_view value = "NodeConfig";
+};
+
+TEST_CASE("schema builder: two types with one unqualified name are two nodes",
+          "[schema][builder][names]")
+{
+   using namespace sb_names;
+   namespace ir = psio::pssz_ir;
+   psio::SchemaBuilder builder;
+   builder.insert<Both>("Both");
+   CHECK(builder.status().ok());
+   const auto schema = builder.build();
+   // Each is named as the compiler spells it; the plain name is nobody's.
+   CHECK(schema.get("Config") == nullptr);
+   REQUIRE(schema.get("sb_names::a::Config"));
+   REQUIRE(schema.get("sb_names::b::Config"));
+   CHECK(std::get<psio::schema_types::Object>(schema.get("sb_names::a::Config")->value).members.size() == 1);
+   CHECK(std::get<psio::schema_types::Object>(schema.get("sb_names::b::Config")->value).members.size() == 2);
+   const auto& both = std::get<psio::schema_types::Object>(schema.get("Both")->value);
+   CHECK(std::get<psio::schema_types::Type>(both.members[0].type->value).type == "sb_names::a::Config");
+   CHECK(std::get<psio::schema_types::Type>(both.members[1].type->value).type == "sb_names::b::Config");
+   REQUIRE(ir::validate_schema(schema).ok());
+   const auto collisions = builder.collisions();
+   REQUIRE(collisions.size() == 1);
+   CHECK(collisions[0].name == "Config");
+   CHECK(collisions[0].types ==
+         std::vector<std::string>{"sb_names::a::Config", "sb_names::b::Config"});
+
+   // The schema describes the value (it did not: the second definition
+   // replaced the first).
+   const Both value{{7}, {"n", 1}};
+   const auto bytes = psio::encode(psio::pssz{}, value);
+   std::string text;
+   REQUIRE(ir::pssz_to_json(schema, "Both", psio::ijson{}, std::span<const char>{bytes}, text).ok());
+   CHECK(text == psio::encode(psio::ijson{}, value));
+   CHECK(text == R"({"first":{"x":7},"second":{"name":"n","y":1}})");
+
+   // The names do not depend on which of the two is met first.
+   const auto reversed = psio::SchemaBuilder{}.insert<Reversed>("Reversed").build();
+   CHECK(reversed.get("Config") == nullptr);
+   CHECK(reversed.get("sb_names::a::Config"));
+   CHECK(reversed.get("sb_names::b::Config"));
+   CHECK(ir::equivalent(schema, "sb_names::a::Config", reversed, "sb_names::a::Config"));
+   CHECK(ir::equivalent(schema, "sb_names::b::Config", reversed, "sb_names::b::Config"));
+
+   // Without a collision a record keeps its unqualified name.
+   psio::SchemaBuilder alone;
+   const auto          one = alone.insert<b::Config>("Root").build();
+   CHECK(one.get("Config"));
+   CHECK(one.get("sb_names::b::Config") == nullptr);
+   CHECK(alone.collisions().empty());
+}
+
+TEST_CASE("schema builder: two instantiations of one reflected template",
+          "[schema][builder][names]")
+{
+   using namespace sb_names;
+   namespace ir = psio::pssz_ir;
+   const auto schema = psio::SchemaBuilder{}.insert<Events>("Events").build();
+   REQUIRE(ir::validate_schema(schema).ok());
+   CHECK(schema.get("WithBlock") == nullptr);
+   const auto& events = std::get<psio::schema_types::Object>(schema.get("Events")->value);
+   const auto  first  = std::get<psio::schema_types::Type>(events.members[0].type->value).type;
+   const auto  second = std::get<psio::schema_types::Type>(events.members[1].type->value).type;
+   CHECK(first != second);
+   CHECK(first.starts_with("sb_names::WithBlock<"));
+   CHECK(second.starts_with("sb_names::WithBlock<"));
+   const Events value{{3, {9}}, {4, 5}};
+   const auto   bytes = psio::encode(psio::pssz{}, value);
+   std::string  text;
+   REQUIRE(ir::pssz_to_json(schema, "Events", psio::ijson{}, std::span<const char>{bytes}, text)
+              .ok());
+   CHECK(text == psio::encode(psio::ijson{}, value));
+}
+
+TEST_CASE("schema builder: a root name and a record's name", "[schema][builder][names]")
+{
+   using namespace sb_names;
+   namespace ir = psio::pssz_ir;
+   // The root is asked for under the unqualified name another record has:
+   // the record gives it up.
+   {
+      psio::SchemaBuilder builder;
+      builder.insert<Both>("Both").insert<std::uint64_t>("Sent").insert<Sent>("Payment");
+      CHECK(builder.status().ok());
+      const auto schema = builder.build();
+      REQUIRE(ir::validate_schema(schema).ok());
+      CHECK(std::holds_alternative<psio::schema_types::Int>(schema.get("Sent")->resolve(schema)->value));
+      CHECK(schema.get("sb_names::Sent"));
+      CHECK(std::holds_alternative<psio::schema_types::Object>(schema.get("Payment")->resolve(schema)->value));
+   }
+   {
+      psio::SchemaBuilder builder;
+      builder.insert<Sent>("Payment").insert<std::uint64_t>("Sent");
+      CHECK(builder.status().ok());
+      const auto schema = builder.build();
+      REQUIRE(ir::validate_schema(schema).ok());
+      CHECK(std::holds_alternative<psio::schema_types::Int>(schema.get("Sent")->resolve(schema)->value));
+      CHECK(std::get<psio::schema_types::Type>(schema.get("Payment")->value).type == "sb_names::Sent");
+      CHECK(std::holds_alternative<psio::schema_types::Object>(schema.get("sb_names::Sent")->value));
+   }
+   // One name for two different roots is an error that names it.
+   {
+      psio::SchemaBuilder builder;
+      builder.insert<std::uint64_t>("Id").insert<std::uint64_t>("Id");  // the same: fine
+      CHECK(builder.status().ok());
+      builder.insert<std::uint32_t>("Id");
+      const auto st = builder.status();
+      REQUIRE_FALSE(st.ok());
+      CHECK(std::string{st.error().what} ==
+            "psio::SchemaBuilder: insert<T>(\"Id\"): the name is already used in this schema for "
+            "something else");
+      CHECK_THROWS_AS(builder.build(), psio::codec_exception);
+   }
+}
+
+TEST_CASE("schema builder: a chosen name", "[schema][builder][names]")
+{
+   using namespace sb_names;
+   {
+      psio::SchemaBuilder builder;
+      const auto schema = builder.insert<chosen::Config>("Root").insert<a::Config>("A").build();
+      CHECK(schema.get("NodeConfig"));
+      // A chosen name takes no part in a collision: a::Config is alone.
+      CHECK(schema.get("Config"));
+      CHECK(builder.collisions().empty());
+   }
+   {
+      psio::SchemaBuilder builder;
+      builder.insert<chosen::Config>("Root");
+      builder.insert<chosen::Other>("Other");
+      const auto st = builder.status();
+      REQUIRE_FALSE(st.ok());
+      CHECK(std::string{st.error().what} ==
+            "psio::SchemaBuilder: the name \"NodeConfig\" chosen for sb_names::chosen::Other "
+            "(psio::schema_type_name) is already used in this schema (by "
+            "sb_names::chosen::Config)");
+   }
 }

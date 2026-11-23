@@ -85,6 +85,9 @@
 #include <psio/wit_resource.hpp>
 #include <psio/wrappers.hpp>
 
+#include <psio/error.hpp>
+
+#include <algorithm>
 #include <array>
 #include <tuple>
 #include <variant>
@@ -103,6 +106,27 @@ namespace psio
    // nonempty labels in std::variant alternative order. Unlabeled variants use
    // numeric labels; type names are never guessed to be API alternative names.
    template <typename Variant> struct schema_variant_labels
+   {
+   };
+
+   // The name of a reflected record in a schema. By default it is the
+   // record's reflected (unqualified) name — and, when two different types
+   // of one schema have the same unqualified name, each of them is named as
+   // the compiler spells it, with its namespaces and template arguments
+   // (`a::Config`, `b::Config`, `WithBlock<Sent>`): SchemaBuilder never
+   // makes one node of two types. A spelling is the compiler's; to give a
+   // type a name of your own choosing (a published schema whose bytes are
+   // hashed, a class template), specialize:
+   //
+   //    template <> struct psio::schema_type_name<b::Config>
+   //    {
+   //       static constexpr std::string_view value = "NodeConfig";
+   //    };
+   //
+   // A chosen name is never changed; two types with one chosen name, or a
+   // chosen name that another definition of the schema has, is an error
+   // (SchemaBuilder::status()).
+   template <typename T> struct schema_type_name
    {
    };
 } // namespace psio
@@ -244,23 +268,21 @@ namespace psio::schema_types
       // user-supplied name, we leave the original definition in place
       // — overwriting it with a Type{} pointing at itself would
       // produce an invalid alias cycle rather than a type definition.
+      // A name already used for something else is an error (status()),
+      // except the unqualified name of a reflected record that was named
+      // automatically: the record gives the name up and is named by its
+      // qualified name instead (see psio::schema_type_name).
       template <typename T>
       SchemaBuilder& insert(std::string name) &
       {
-         AnyType ref = insert<T>();
-         if (auto* t = std::get_if<Type>(&ref.value); t && t->type == name)
-            return *this;
-         schema_.insert(std::move(name), std::move(ref));
+         insert_as<T>(std::move(name));
          return *this;
       }
 
       template <typename T>
       SchemaBuilder&& insert(std::string name) &&
       {
-         AnyType ref = insert<T>();
-         if (auto* t = std::get_if<Type>(&ref.value); t && t->type == name)
-            return std::move(*this);
-         schema_.insert(std::move(name), std::move(ref));
+         insert_as<T>(std::move(name));
          return std::move(*this);
       }
 
@@ -273,7 +295,9 @@ namespace psio::schema_types
       //   - PSIO_REFLECT'd structs / resources use `reflect<T>::name`
       //     so emitters render `record point { … }` instead of
       //     `record @4 { … }` and downstream tooling can refer to
-      //     them by their source-level name.
+      //     them by their source-level name. Two different types with
+      //     one such name are each named by their qualified spelling
+      //     instead (psio::schema_type_name, above): never one node.
       //   - Everything else (primitives, std::vector, std::optional,
       //     std::array, etc.) uses an `@N` interning name; emitters
       //     resolve those inline at the use site rather than emit
@@ -289,7 +313,7 @@ namespace psio::schema_types
 
          std::string name;
          if constexpr (Reflected<U>)
-            name = std::string{reflect<U>::name};
+            name = record_name<U>();
          else
             name = "@" + std::to_string(id_to_name_.size());
 
@@ -336,28 +360,55 @@ namespace psio::schema_types
          return std::move(*this);
       }
 
+      // Whether every name of the schema names one thing: ok, or the first
+      // naming error — two different types under one chosen name, or a name
+      // given to insert<T>(name) that another definition has. The message
+      // names both.
+      codec_status status() const
+      {
+         if (errors_.empty())
+            return codec_ok();
+         return codec_fail_owned(errors_.front(), 0, "schema");
+      }
+
+      // The unqualified names that two or more different reflected types
+      // of this schema have, each with the names the types got instead:
+      // {"Config", {"a::Config", "b::Config"}}. Not an error: for a caller
+      // that wants to know (or to refuse) it.
+      struct Collision
+      {
+         std::string              name;
+         std::vector<std::string> types;
+      };
+      std::vector<Collision> collisions() const
+      {
+         std::vector<Collision> out;
+         for (const auto& name : collided_)
+         {
+            Collision c{name, {}};
+            for (const auto& record : records_)
+               if (record.plain == name)
+                  c.types.push_back(record.qualified);
+            out.push_back(std::move(c));
+         }
+         return out;
+      }
+
       // Finalise.  Sets the schema's package to whatever
       // PSIO_CURRENT_PACKAGE_ resolves to at the most recently
       // inserted world / interface (via the captured package_name_).
+      //
+      // A naming error (status()) fails through codec_abort: a
+      // codec_exception, or abort in a build without exceptions — check
+      // status() first there.
       Schema build() &&
       {
-         if (!package_name_.empty())
-         {
-            schema_.package.name    = package_name_;
-            schema_.package.version = package_version_;
-         }
-         return std::move(schema_);
+         return finish(std::move(schema_));
       }
 
       Schema build() const&
       {
-         Schema copy = schema_;
-         if (!package_name_.empty())
-         {
-            copy.package.name    = package_name_;
-            copy.package.version = package_version_;
-         }
-         return copy;
+         return finish(Schema{schema_});
       }
 
       // ── Internals (public so to_schema customisation can reach in
@@ -371,6 +422,212 @@ namespace psio::schema_types
       std::unordered_map<const void*, std::string> id_to_name_;
       std::string                              package_name_;
       std::string                              package_version_;
+
+      // ── Names of reflected records ─────────────────────────────────
+      //
+      // A record is named by its unqualified name while no other type of
+      // the schema has it. The second type with a name takes its qualified
+      // name at once and the first is renamed when the schema is finished
+      // (the references to it are rewritten), so the names do not depend on
+      // which of the two was met first.
+      struct RecordName
+      {
+         const void* type;
+         std::string plain;      // reflect<T>::name
+         std::string qualified;  // the compiler's spelling: a::b::T
+         bool        chosen;     // psio::schema_type_name<T>
+      };
+      std::vector<RecordName>                     records_;
+      std::vector<std::string>                    collided_;  // plain names, in order
+      std::vector<std::pair<std::string, AnyType>> deferred_;  // insert<T>(name) of a freed name
+      std::vector<std::string>                    errors_;
+
+      bool collided(std::string_view plain) const
+      {
+         return std::find(collided_.begin(), collided_.end(), plain) != collided_.end();
+      }
+      const RecordName* plain_owner(std::string_view name) const
+      {
+         for (const auto& record : records_)
+            if (!record.chosen && record.plain == name)
+               return &record;
+         return nullptr;
+      }
+
+      template <typename U>
+      std::string record_name()
+      {
+         const void*       type      = &sb_detail::type_token<U>;
+         const std::string qualified{::psio::detail::pretty_type_name<U>()};
+         if constexpr (requires { std::string_view{::psio::schema_type_name<U>::value}; })
+         {
+            std::string name{std::string_view{::psio::schema_type_name<U>::value}};
+            if (schema_.get(name))
+               errors_.push_back("psio::SchemaBuilder: the name \"" + name + "\" chosen for " +
+                                 qualified + " (psio::schema_type_name) is already used in " +
+                                 "this schema" + other_owner(name));
+            records_.push_back(RecordName{type, name, qualified, true});
+            return name;
+         }
+         else
+         {
+            std::string plain{reflect<U>::name};
+            const bool  taken = schema_.get(plain) != nullptr || collided(plain);
+            records_.push_back(RecordName{type, plain, qualified, false});
+            if (!taken)
+               return plain;
+            // Another definition has the name. If it is a record that was
+            // named automatically, both are named by their spelling.
+            if (plain_owner_before(plain, type) && !collided(plain))
+               collided_.push_back(plain);
+            if (schema_.get(qualified))
+               errors_.push_back("psio::SchemaBuilder: two types of this schema are named \"" +
+                                 qualified + "\"; give one a name with psio::schema_type_name");
+            return qualified;
+         }
+      }
+      // A record other than `type` that has the plain name `name`.
+      bool plain_owner_before(std::string_view name, const void* type) const
+      {
+         for (const auto& record : records_)
+            if (!record.chosen && record.plain == name && record.type != type)
+               return true;
+         return false;
+      }
+      std::string other_owner(std::string_view name) const
+      {
+         for (const auto& record : records_)
+            if (record.plain == name)
+               return " (by " + record.qualified + ")";
+         return {};
+      }
+
+      template <typename T>
+      void insert_as(std::string name)
+      {
+         AnyType ref = insert<T>();
+         // The type's own automatic name: its definition is the root.
+         if (auto* t = std::get_if<Type>(&ref.value); t && t->type == name)
+            return;
+         if (const AnyType* existing = schema_.get(name))
+         {
+            if (*existing == ref)
+               return;  // the same root again
+            // The unqualified name of a record that was named automatically:
+            // the record is renamed (finish) and the name is this root's.
+            if (plain_owner(name) && !deferred_named(name))
+            {
+               if (!collided(name))
+                  collided_.push_back(name);
+               deferred_.emplace_back(std::move(name), std::move(ref));
+               return;
+            }
+            errors_.push_back("psio::SchemaBuilder: insert<T>(\"" + name + "\"): the name is " +
+                              "already used in this schema for something else" +
+                              other_owner(name));
+            return;
+         }
+         if (const AnyType* pending = deferred_named(name))
+         {
+            if (!(*pending == ref))
+               errors_.push_back("psio::SchemaBuilder: insert<T>(\"" + name +
+                                 "\"): the name is already used in this schema for something else");
+            return;
+         }
+         schema_.insert(std::move(name), std::move(ref));
+      }
+      const AnyType* deferred_named(std::string_view name) const
+      {
+         for (const auto& [taken, type] : deferred_)
+            if (taken == name)
+               return &type;
+         return nullptr;
+      }
+
+      // Rewrites the references to renamed types in `type`.
+      using Renames = std::unordered_map<std::string, std::string>;
+      static void rename(Box<AnyType>& box, const Renames& renames)
+      {
+         if (box.get())
+            rename(*box, renames);
+      }
+      static void rename(std::vector<Member>& members, const Renames& renames)
+      {
+         for (auto& member : members)
+            rename(member.type, renames);
+      }
+      static void rename(Func& f, const Renames& renames)
+      {
+         rename(f.params, renames);
+         if (f.result)
+            rename(*f.result, renames);
+      }
+      static void rename(AnyType& type, const Renames& renames)
+      {
+         std::visit(
+            [&](auto& t) {
+               using N = std::decay_t<decltype(t)>;
+               if constexpr (std::is_same_v<N, Type>)
+               {
+                  if (auto to = renames.find(t.type); to != renames.end())
+                     t.type = to->second;
+               }
+               else if constexpr (std::is_same_v<N, Struct> || std::is_same_v<N, Object> ||
+                                  std::is_same_v<N, Variant>)
+                  rename(t.members, renames);
+               else if constexpr (std::is_same_v<N, Tuple>)
+                  for (auto& member : t.members)
+                     rename(member, renames);
+               else if constexpr (std::is_same_v<N, Resource>)
+                  for (auto& method : t.methods)
+                     rename(method, renames);
+               else if constexpr (requires { t.type; })
+                  rename(t.type, renames);
+            },
+            type.value);
+      }
+
+      Schema finish(Schema schema) const
+      {
+         if (auto st = status(); !st.ok())
+            ::psio::codec_abort(st.error());
+         if (!package_name_.empty())
+         {
+            schema.package.name    = package_name_;
+            schema.package.version = package_version_;
+         }
+         if (collided_.empty())
+            return schema;
+         // Every record that still has a collided plain name takes its
+         // qualified one.
+         Renames renames;
+         for (const auto& record : records_)
+            if (!record.chosen && collided(record.plain))
+               if (auto at = id_to_name_.find(record.type);
+                   at != id_to_name_.end() && at->second == record.plain)
+                  renames.emplace(record.plain, record.qualified);
+         for (auto& named : schema.types)
+         {
+            if (auto to = renames.find(named.name); to != renames.end())
+               named.name = to->second;
+            rename(named.type, renames);
+         }
+         for (auto& in : schema.interfaces)
+         {
+            for (auto& name : in.type_names)
+               if (auto to = renames.find(name); to != renames.end())
+                  name = to->second;
+            for (auto& f : in.funcs)
+               rename(f, renames);
+         }
+         for (const auto& [name, type] : deferred_)
+         {
+            AnyType root = type;
+            rename(root, renames);
+            schema.insert(name, std::move(root));
+         }
+         return schema;
+      }
 
       // ── Build an AnyType for T ─────────────────────────────────────
       //

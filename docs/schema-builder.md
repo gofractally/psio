@@ -38,6 +38,57 @@ cross-DSO identity API is promised. Output names/order retain the existing
 reflection-name/@N policy. A two-translation-unit consumer verifies repeated,
 nested generic and recursive interning with exceptions and RTTI disabled.
 
+## Names of reflected records
+
+A reflected record is a named type of the schema, under its reflected
+(unqualified) name: `struct chain::Account` is `Account`. Two different C++
+types never become one node. When two types of one schema have the same
+unqualified name — `a::Config` and `b::Config`, or two instantiations of a
+reflected class template — each of them is named as the compiler spells it,
+with its namespaces and template arguments (`a::Config`, `b::Config`,
+`WithBlock<Sent>`), whichever of the two the builder met first, and the
+unqualified name is then nobody's. A schema without such a pair is
+unchanged: every record keeps its unqualified name (the shared fixtures are
+byte-identical).
+
+```cpp
+namespace a { struct Config { std::uint32_t x; };  PSIO_REFLECT(Config, x) }
+namespace b { struct Config { std::string name; }; PSIO_REFLECT(Config, name) }
+struct Both { a::Config first; b::Config second; };
+PSIO_REFLECT(Both, first, second)
+
+psio::SchemaBuilder builder;
+auto schema = builder.insert<Both>("Both").build();
+// types: Both, a::Config, b::Config        builder.collisions(): {"Config", {"a::Config", "b::Config"}}
+```
+
+Names of types are not part of a type: the run-time comparison
+(`docs/pssz-ir-runtime.md`) follows them and does not compare them, and no
+PSSZ byte or JSON text contains the name of a record. They matter to a
+reader of the schema and to the bytes (so the hash) of the schema itself. A
+compiler's spelling of a template instantiation is its own; to give a type a
+name of your choosing, specialize `psio::schema_type_name`:
+
+```cpp
+template <> struct psio::schema_type_name<b::Config>
+{
+   static constexpr std::string_view value = "NodeConfig";
+};
+```
+
+A chosen name is never changed, and takes no part in a collision.
+
+`insert<T>(name)` adds the root `name`. A name that already means something
+else is an error, not an overwrite: `builder.status()` is then a failed
+`codec_status` whose message names the name (and the type that has it), and
+`build()` fails through `codec_abort` (a `codec_exception`; in a build
+without exceptions check `status()` first). The same holds for two types
+with one chosen name. One case is not an error: `name` is the unqualified
+name of a record that was named automatically — the record gives it up and
+takes its qualified name. `builder.collisions()` lists the unqualified names
+that were given up, with the names the types got, for a caller that wants to
+refuse them.
+
 Unknown type shapes continue to emit an explicit unknown adapter that checked
 runtime codecs reject. Arbitrary custom adapter contracts and final width/profile
 selection remain separate qualification gates.
