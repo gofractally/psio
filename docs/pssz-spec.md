@@ -796,9 +796,10 @@ no width is chosen from it. The explicit-width profiles are outside it.
 
 ### 4.1 Booleans
 
-A `bool` is one byte: `0x00` for false, `0x01` for true. Decoders
-must accept any nonzero value as true (some legacy inputs use
-`0xFF`); encoders must emit `0x01`.
+A `bool` is one byte: `0x00` for false, `0x01` for true, and nothing
+else. A value has exactly one encoding: encoders emit `0x00` or `0x01`,
+and a validating reader MUST reject any other byte (`0x02` .. `0xFF`)
+— it is not a bool.
 
 ### 4.2 Unsigned and signed integers
 
@@ -1534,16 +1535,17 @@ the writer's view. The decoder:
 1. Reads the u{W} `fixed_size` header.
 2. Walks fields 0 .. (some K such that
    `sum_{i=0..K-1}(fixed_size_of(field_i)) ≤ fixed_size`).
-3. For each field K..N-1 (those the encoder didn't write), synthesizes
-   the field's default value.
+3. For each field K..N-1 (those the encoder didn't write), reads the
+   field as absent.
 
-The default depends on the field's type:
-- Optional: None.
-- Vector / string: empty.
-- Arithmetic: 0.
-- Reflected record: recursively-defaulted record.
-- Variant: undefined; decoders should reject extension that adds a
-  variant field, since there's no canonical default.
+Only an optional field can be absent. Every field added after a type is
+first published must be `Optional(T)` (§7.2, §7.5), so the fields an
+older encoder did not write are optionals and read as None. A
+non-optional field has no default: when the header ends before a
+non-optional field of the decoder's schema, the buffer is not a value of
+that schema and the decoder MUST reject it. (Appending a non-optional
+field is therefore not a compatible change: the new reader rejects every
+old record.)
 
 ### 7.2 Trailing-default pruning (encoder)
 
