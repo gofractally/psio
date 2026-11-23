@@ -230,6 +230,157 @@ class OrderConstraints(unittest.TestCase):
         refused(self, lambda: psio.codec(Wrapper), psio.SchemaError)
 
 
+# ── evolves_from ─────────────────────────────────────────────────────────────
+
+def account(name: str, owner: Any, tags: Any, **options: Any) -> Any:
+    """``struct { u64 id; string owner; vector<string> tags; }`` under the given annotations."""
+    cls = dataclasses.make_dataclass(name, [
+        ("id", u64), ("owner", Annotated[tuple([RawString] + list(owner))]),  # type: ignore[misc]
+        ("tags", Annotated[tuple([List[RawString]] + list(tags))])])  # type: ignore[misc]
+    return psio.record(cls, **options) if options else cls
+
+
+def fields3(name: str, count: int, **options: Any) -> Any:
+    members = [("a", u32)] + [(chr(ord("b") + i), Optional[u32], None) for i in range(count - 1)]
+    return psio.record(dataclasses.make_dataclass(name, members), max_dynamic_data=64, **options)
+
+
+class Evolution(unittest.TestCase):
+    def test_member_annotations_and_caps(self) -> None:
+        # (cpp/tests/consistency_tests.cpp "pssz_evolves_from: member annotations and caps")
+        utf8, mx, el = psio.utf8, psio.max, psio.element
+        cap = {"max_dynamic_data": 1024}
+        V1 = account("V1", [utf8, mx(32)], [mx(8), el(mx(16))], **cap)
+        Same = account("Same", [utf8, mx(32)], [mx(8), el(mx(16))], **cap)
+        Wider = account("Wider", [utf8, mx(64)], [mx(8), el(mx(16))], **cap)
+        Tighter = account("Tighter", [utf8, mx(16)], [mx(8), el(mx(16))], **cap)
+        Raw = account("Raw", [mx(32)], [mx(8), el(mx(16))], **cap)
+        ElemWider = account("ElemWider", [utf8, mx(32)], [mx(8), el(mx(20))], **cap)
+        ElemTighter = account("ElemTighter", [utf8, mx(32)], [mx(8), el(mx(8))], **cap)
+        ElemUtf8 = account("ElemUtf8", [utf8, mx(32)], [mx(8), el(utf8, mx(16))], **cap)
+        CountWider = account("CountWider", [utf8, mx(32)], [mx(12), el(mx(16))], **cap)
+        WithMin = account("WithMin", [utf8, mx(32), psio.min(1)], [mx(8), el(mx(16))], **cap)
+        Unbounded = account("Unbounded", [utf8], [mx(8), el(mx(16))], **cap)
+        Sorted = account("Sorted", [utf8, mx(32)], [mx(8), psio.sorted, el(mx(16))], **cap)
+        CapWider = account("CapWider", [utf8, mx(32)], [mx(8), el(mx(16))], max_dynamic_data=4096)
+        CapTighter = account("CapTighter", [utf8, mx(32)], [mx(8), el(mx(16))], max_dynamic_data=512)
+        CapOtherWidth = account("CapOtherWidth", [utf8, mx(32)], [mx(8), el(mx(16))], max_dynamic_data=100000)
+        Open = account("Open", [utf8, mx(300)], [mx(8), el(mx(16))])
+        OpenWideList = account("OpenWideList", [utf8, mx(300)], [mx(8), el(mx(40))])
+        OpenWider = account("OpenWider", [utf8, mx(400)], [mx(8), el(mx(16))])
+        OpenCapped = account("OpenCapped", [utf8, mx(300)], [mx(8), el(mx(16))], max_dynamic_data=600)
+        OpenCappedLow = account("OpenCappedLow", [utf8, mx(300)], [mx(8), el(mx(16))], max_dynamic_data=400)
+        Fields3 = fields3("Fields3", 2, max_fields=3)
+        Fields3Grown = fields3("Fields3Grown", 3, max_fields=3)
+        Fields3Raised = fields3("Fields3Raised", 4, max_fields=8)
+        Fields3Dropped = fields3("Fields3Dropped", 3)
+        Fields3Lowered = fields3("Fields3Lowered", 2, max_fields=2)
+        self.assertTrue(400 < psio.codec(Open).max_encoded_size <= 600)
+        self.assertEqual(psio.codec(Open).width, psio.codec(OpenWideList).width)
+        expected = (
+            (V1, Same, True),
+            # A bound may only widen, and only while every width stays the same.
+            (V1, Wider, True), (V1, Tighter, False), (Wider, V1, False),
+            (V1, ElemWider, True), (V1, ElemTighter, False),
+            (V1, CountWider, True), (CountWider, V1, False),
+            (V1, Unbounded, True), (Unbounded, V1, False),
+            (V1, WithMin, False), (WithMin, V1, True),
+            # utf8 / raw and sorted are the member's type.
+            (V1, Raw, False), (Raw, V1, False), (V1, ElemUtf8, False), (V1, Sorted, False), (Sorted, V1, False),
+            # The cap may grow within its width class and may not shrink.
+            (V1, CapWider, True), (V1, CapTighter, False), (V1, CapOtherWidth, False),
+            # Adding a cap: only one the old type's inferred bound fits.  Dropping it: nothing old is refused.
+            (Open, OpenCapped, True), (Open, OpenCappedLow, False), (OpenCapped, Open, True),
+            # A widened bound that moves a nested list's offset table into another width class changes the bytes.
+            (Open, OpenWideList, False), (Open, OpenWider, True),
+            # maxFields: no more fields than the original's cap; not raised, not dropped.
+            (Fields3, Fields3Grown, True), (Fields3, Fields3Raised, False), (Fields3, Fields3Dropped, False),
+            (Fields3, Fields3Lowered, True), (Fields3Lowered, Fields3Grown, False),
+        )
+        for old, new, ok in expected:
+            status = psio.evolves_from(old, new)
+            self.assertEqual(bool(status), ok, f"{old.__name__} -> {new.__name__}: {status.reason}")
+            self.assertEqual(status.reason == "", ok)
+            # The same over two Schema IRs (which do not record sorted / unique).
+            a = psio.Schema.from_pssz(psio.schema_of(old).to_pssz()).type(old.__name__)
+            b = psio.Schema.from_pssz(psio.schema_of(new).to_pssz()).type(new.__name__)
+            self.assertEqual(bool(psio.evolves_from(a, b)), ok or Sorted in (old, new),
+                             f"{old.__name__} -> {new.__name__} (IR)")
+        # What the check promises, on bytes.
+        full = V1(0, "a" * 32, [b"b" * 16])
+        frame = psio.to_pssz(full)
+        self.assertTrue(psio.validate_pssz(Wider, frame).ok)
+        self.assertTrue(psio.validate_pssz(CapWider, frame).ok)
+        self.assertFalse(psio.validate_pssz(Tighter, frame).ok)
+        self.assertFalse(psio.validate_pssz(ElemTighter, frame).ok)
+
+    def test_shapes(self) -> None:
+        @dataclass
+        class P1:
+            a: u32
+            b: str
+
+        def revision(*members: Any, **options: Any) -> Any:
+            cls = dataclasses.make_dataclass("P1", [("a", u32), ("b", str)] + list(members))
+            return psio.record(cls, **options) if options else cls
+
+        self.assertTrue(psio.evolves_from(P1, revision(("c", Optional[u64], None))))
+        status = psio.evolves_from(P1, revision(("c", u64)))
+        self.assertFalse(status)
+        self.assertIn("Optional", status.reason)
+        self.assertFalse(psio.evolves_from(revision(("c", Optional[u64], None)), P1))        # a field removed
+        self.assertFalse(psio.evolves_from(P1, revision(definition_will_not_change=True)))
+        self.assertFalse(psio.evolves_from(P1, dataclasses.make_dataclass("P1", [("a", psio.i32), ("b", str)])))
+        self.assertFalse(psio.evolves_from(P1, dataclasses.make_dataclass("P1", [("b", str), ("a", u32)])))
+        # An appended field that moves the record's width is not compatible: reserve room with a cap.
+
+        @dataclass
+        class Small:
+            a: Annotated[str, psio.max(200)]
+        grown = dataclasses.make_dataclass("Small", [("a", Annotated[str, psio.max(200)]),
+                                                     ("b", Optional[Annotated[str, psio.max(200)]], None)])
+        self.assertEqual((psio.codec(Small).width, psio.codec(grown).width), (1, 2))
+        self.assertIn("offset width", psio.evolves_from(Small, grown).reason)
+        # Containers: the same rules below; a map's key type is fixed, its mapped type evolves.
+        self.assertTrue(psio.evolves_from(List[P1], List[revision(("c", Optional[u64], None))]))
+        self.assertTrue(psio.evolves_from(Dict[u32, P1], Dict[u32, revision(("c", Optional[u64], None))]))
+        self.assertFalse(psio.evolves_from(Dict[u32, u8], Dict[u64, u8]))
+        self.assertFalse(psio.evolves_from(Dict[Annotated[str, psio.bounded(4)], u8],
+                                           Dict[Annotated[str, psio.bounded(8)], u8]))
+        self.assertFalse(psio.evolves_from(List[Tuple[u32, u8]], Dict[u32, u8]))
+        self.assertFalse(psio.evolves_from(set[u32], List[u32]))
+        self.assertFalse(psio.evolves_from(Annotated[List[u8], psio.array(4)], Annotated[List[u8], psio.array(5)]))
+        self.assertTrue(psio.evolves_from(Annotated[List[u8], psio.bounded(4)], Annotated[List[u8], psio.bounded(5)]))
+        self.assertFalse(psio.evolves_from(Annotated[List[u8], psio.bounded(5)], Annotated[List[u8], psio.bounded(4)]))
+        self.assertFalse(psio.evolves_from(str, RawString))
+        self.assertFalse(psio.evolves_from(Optional[u32], Optional[str]))
+        self.assertTrue(psio.evolves_from(Annotated[P1, psio.nested()],
+                                          Annotated[revision(("c", Optional[u64], None)), psio.nested()]))
+        # A variant: alternatives in order; new ones are appended (spec 7.5).
+        self.assertTrue(psio.evolves_from(Annotated[u8, psio.alt("a")] | Annotated[str, psio.alt("b")],  # type: ignore[arg-type]
+                                          Annotated[u8, psio.alt("a")] | Annotated[str, psio.alt("b")]
+                                          | Annotated[u64, psio.alt("c")]))
+        self.assertFalse(psio.evolves_from(Annotated[u8, psio.alt("a")] | Annotated[str, psio.alt("b")],  # type: ignore[arg-type]
+                                           Annotated[str, psio.alt("b")] | Annotated[u8, psio.alt("a")]))
+        # Methods: an argument list evolves by an appended Optional parameter, under its cap.
+
+        @psio.interface
+        class A1:
+            @psio.method(max_dynamic_data=256, max_fields=4)
+            def transfer(self, to: Annotated[str, psio.max(16)], amount: u64) -> None: ...
+
+        @psio.interface
+        class A2:
+            @psio.method(max_dynamic_data=256, max_fields=4)
+            def transfer(self, to: Annotated[str, psio.max(16)], amount: u64, memo: Optional[str] = None) -> None: ...
+
+        old, new = psio.interface_of(A1)["transfer"].args, psio.interface_of(A2)["transfer"].args
+        self.assertTrue(psio.evolves_from(old, new))
+        self.assertFalse(psio.evolves_from(new, old))
+        with self.assertRaises(psio.SchemaError):
+            psio.evolves_from(psio.codec(P1, width=2), P1)
+
+
 # ── max_fields ───────────────────────────────────────────────────────────────
 
 class MaxFields(unittest.TestCase):
@@ -589,6 +740,19 @@ class Verified(unittest.TestCase):
         self.assertEqual(psio.to_pssz(Closed.high), b"\x02")
         self.assertFalse(psio.validate_pssz(Closed, b"\x07").ok)
         self.assertEqual(psio.from_pssz(Closed, b"\x02"), Closed.high)
+
+    def test_the_order_of_a_union_is_its_wire_format(self) -> None:
+        # Python compares unions without regard to order; the codec cache does not.
+        ab = Annotated[u8, psio.alt("a")] | Annotated[str, psio.alt("b")]
+        ba = Annotated[str, psio.alt("b")] | Annotated[u8, psio.alt("a")]
+        self.assertEqual(ab, ba)
+        self.assertEqual((psio.to_pssz(7, ab), psio.to_pssz(7, ba)), (b"\x00\x07", b"\x01\x07"))
+        self.assertEqual((psio.to_pssz([7], list[ab])[-2:], psio.to_pssz([7], list[ba])[-2:]),
+                         (b"\x00\x07", b"\x01\x07"))
+        # (`typing.List[...]` / `Optional[...]` are cached by Python itself under that equality: the
+        # first spelling wins there.  README "Limits": declare a union once, under a name.)
+        self.assertIsNot(psio.schema_of(ab), psio.schema_of(ba))
+        self.assertIs(psio.codec(ab), psio.codec(ab))
 
     def test_a_cap_is_not_applied_to_the_text(self) -> None:
         @psio.record(definition_will_not_change=True, max_dynamic_data=16)

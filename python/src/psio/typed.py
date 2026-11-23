@@ -1669,6 +1669,36 @@ def arguments(params: Any, *, max_dynamic_data: Optional[int] = None, max_fields
 
 _SCHEMAS: Dict[Any, Tuple[Schema, str]] = {}
 _CODECS: Dict[Any, SchemaType] = {}
+_ORDERED: Dict[Any, bool] = {}
+
+
+def _has_union(tp: Any, depth: int = 0) -> bool:
+    if depth > 64:
+        return True
+    origin = typing.get_origin(tp)
+    if origin is None:
+        return False
+    args = typing.get_args(tp)
+    if origin is Annotated:
+        return _has_union(args[0], depth + 1)
+    if origin is Union or (hasattr(types, "UnionType") and origin is types.UnionType):
+        if len([a for a in args if a is not NoneType]) > 1:
+            return True
+    return any(_has_union(a, depth + 1) for a in args if a is not Ellipsis)
+
+
+def _cache_key(tp: Any) -> Any:
+    """The key a type hint is cached under.
+
+    Python compares unions without regard to order (``A | B == B | A``), and
+    the order of a variant's alternatives is its wire format: a hint that
+    holds a union is keyed by its spelling too.  Raises ``TypeError`` for an
+    unhashable hint.
+    """
+    ordered = _ORDERED.get(tp)
+    if ordered is None:
+        ordered = _ORDERED[tp] = _has_union(tp)
+    return (tp, repr(tp)) if ordered else tp
 
 
 def _declared(run: Callable[[], Any]) -> Any:
@@ -1685,9 +1715,10 @@ def _declared(run: Callable[[], Any]) -> Any:
 def _root(tp: Any) -> Tuple[Schema, str]:
     """The schema of one Python type and the name the type has in it."""
     try:
-        known = _SCHEMAS.get(tp)
+        key = _cache_key(tp)
+        known = _SCHEMAS.get(key)
     except TypeError:  # an unhashable hint
-        known = None
+        key = known = None
     if known is not None:
         return known
 
@@ -1697,10 +1728,8 @@ def _root(tp: Any) -> Tuple[Schema, str]:
         ref = builder.insert(shape)
         return builder.schema(), ref["value"].value["type"]
     out = _declared(run)
-    try:
-        _SCHEMAS[tp] = out
-    except TypeError:
-        pass
+    if key is not None:
+        _SCHEMAS[key] = out
     return out
 
 
@@ -1735,9 +1764,10 @@ def codec(tp: Any, *, width: Any = "auto", require_handlers: Optional[bool] = No
     plain = width == "auto" and require_handlers is None and nested_bytes is None
     if plain:
         try:
-            known = _CODECS.get(tp)
+            key = _cache_key(tp)
+            known = _CODECS.get(key)
         except TypeError:
-            known = None
+            key = known = None
         if known is not None:
             return known
     if isinstance(tp, SchemaType):
@@ -1745,9 +1775,6 @@ def codec(tp: Any, *, width: Any = "auto", require_handlers: Optional[bool] = No
     schema, name = _root(tp)
     out = schema.type(name, width=width, require_handlers=require_handlers, nested_bytes=nested_bytes)
     out.python_type = tp
-    if plain:
-        try:
-            _CODECS[tp] = out
-        except TypeError:
-            pass
+    if plain and key is not None:
+        _CODECS[key] = out
     return out

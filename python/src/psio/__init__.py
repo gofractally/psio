@@ -34,6 +34,7 @@ from .api import (  # noqa: F401
     pssz_size, pssz_to_json, pssz_view, to_ijson, to_json, to_key, to_pssz, validate_ijson, validate_json,
     validate_key, validate_pssz,
 )
+from .evolution import evolves_from  # noqa: F401
 from .errors import DecodeError, EncodeError, InternalError, JsonError, PsioError, SchemaError  # noqa: F401
 from .interface import Interface, Method, interface, interface_of, method  # noqa: F401
 from .ir import IR_VERSION  # noqa: F401
@@ -61,5 +62,5 @@ __all__ = [
     "time_point_to_iso", "to_ijson", "to_json", "to_key", "to_pssz", "to_text", "transparent", "trusted", "u128",
     "u16", "u256", "u32", "u64", "u8", "utf8", "validate_ijson", "validate_json", "validate_key", "validate_pssz",
     "sorted", "unique", "unique_keys", "is_hash_name", "method_to_number", "name_to_number", "number_to_method",
-    "number_to_name",
+    "number_to_name", "evolves_from",
 ]

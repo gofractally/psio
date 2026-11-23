@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Optional, Type, TypeVar, overload
 
 from .schema import SchemaType, Status, trusted
-from .typed import _CODECS, codec
+from .typed import _CODECS, _cache_key, codec
 
 __all__ = [
     "to_pssz", "from_pssz", "from_pssz_trusted", "validate_pssz", "pssz_size", "pssz_view",
@@ -31,10 +31,10 @@ _T = TypeVar("_T")
 def _of(value: Any, T: Any) -> SchemaType:
     if T is None:
         T = type(value)
-    if type(T) is SchemaType:
+    if isinstance(T, SchemaType):
         return T
     try:
-        known = _CODECS.get(T)
+        known = _CODECS.get(_cache_key(T))
     except TypeError:
         known = None
     return known if known is not None else codec(T)
