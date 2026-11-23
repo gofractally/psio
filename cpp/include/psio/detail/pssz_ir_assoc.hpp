@@ -645,6 +645,7 @@ codec_status Codec<W>::decode_assoc(const schema_types::Custom &custom,
       Codec raw(schema);
       raw.opaque_nested = true;
       raw.allow_unknown = allow_unknown;
+      raw.active_cap = active_cap;
       Sequence wire;
       PSIO_PSSZ_IR_TRY(raw.decode_sequence(*element, bytes, false, shape.max ? *shape.max : 0,
                                            shape.max.has_value(), w, wire, n));

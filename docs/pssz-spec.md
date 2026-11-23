@@ -496,7 +496,8 @@ bound gets smaller), never the other way round.
   table has the W of fit(N, N × max(Tuple(K, V))); each entry is a
   tuple with its own header and slots at the tuple's own W.
 - **A capped record.** W is the width class of the cap; whatever holds
-  the record reserves the cap.
+  the record reserves the cap. The cap also bounds the positions beneath
+  the record for the purpose of their widths (§3.6).
 
 A string, a list, a map, a set and a nested value have no bound of
 their own: `String` and `Vector(T)` are None. They are bounded by their
@@ -604,6 +605,103 @@ list above has a 1-byte offset table), the
 same bytes, the same schema, and the same checks: an encoder refuses a
 value outside any bound of the tree, and every reader — validating,
 checked and fail-fast — rejects a frame that holds one (§16).
+
+### 3.6 A record's cap bounds what lies beneath it
+
+A record with an explicit cap N (`max-dynamic-data: N`; a method's
+argument list with a cap is such a record, §16) never encodes to more
+than N bytes, so nothing inside it does either. The cap is therefore an
+**implicit bound of every position beneath the record**, and the widths
+there use it:
+
+> **Position cap.** The position cap of a value is the explicit cap of
+> the nearest enclosing record, if that record has one; otherwise there
+> is none. "Nearest enclosing record" is found by walking up from the
+> value through lists, arrays, maps, sets, optionals, variants, tuples,
+> pairs, boxes and transparent types; the walk stops at the first
+> record (a reflected record, or a method argument tuple) and takes
+> that record's cap or nothing. It also stops, with nothing, at the
+> root and at a `Nested(T)` boundary (the inner value of a nested
+> member is a root of its own, §5.8).
+>
+> **Width under a position cap.** A type that has offsets and is **not
+> a record** — an array, list, map or set of variable elements, a tuple,
+> a pair — at a position whose cap is C has
+>
+> ```
+> W = width class of min(max_encoded_size at that position, C)
+> ```
+>
+> where a `max_encoded_size` of None counts as infinite. Without a
+> position cap the rule is §3 unchanged.
+
+So in
+
+```
+Record Transfer @cap=255 {
+    token:  u32
+    memo:   String
+    tags:   Vector(String)
+    rows:   Vector(Vector(String))
+}
+```
+
+the record has W = 1 (its cap), `tags` has a 1-byte offset table, and so
+have `rows` and every row in it, although `Vector(String)` on its own is
+unbounded and 4 bytes wide. With `@cap=256` all of them are 2 bytes wide,
+and with no cap the lists are 4.
+
+What the rule does and does not touch:
+
+- **It only selects widths.** The position cap is not a `max` in the
+  sense of §3.5: it adds no check of its own (the record's cap check,
+  §8.2, already covers every byte beneath it), it does not change any
+  `max_encoded_size` (a capped record contributes its cap to what holds
+  it, whatever is inside), and it does not change the schema: the member
+  is still `Vector(String)`.
+- **A tighter bound of the position's own wins**; a looser one is
+  clamped. `tags: BoundedList(BoundedString(16), 8)` under `@cap=60000`
+  has a 1-byte table (its own bound, 136); `BoundedList(BoundedString(1000),
+  1000)` under `@cap=255` has a 1-byte table too (the cap). A bound
+  larger than the cap is legal — it still limits the count and the
+  element size where the cap does not — it just cannot widen anything.
+- **Strings, byte lists and lists of fixed-size elements have nothing to
+  narrow.** Their payload is the raw bytes, with no length prefix and no
+  table (§5.3.1, §5.3.3): the only bookkeeping they cost is the one
+  offset slot in the record that holds them, which is as wide as that
+  record. A `String` member of a record with W = 1 costs exactly one
+  byte beyond its characters, whether or not the string is bounded.
+- **A record keeps its own width.** The width of a record is part of the
+  record type: its bytes are the same wherever it appears (that is what
+  lets a view of the record, and a `Nested` value of it, be read without
+  knowing what holds it). A record beneath a capped record is not
+  narrowed by the outer cap, and the positions beneath the inner record
+  take the *inner* record's cap, or none. A child record that should be
+  narrow declares its own cap or bounds.
+- **Explicit-width profiles** ignore it, like every other inference.
+
+**It is well defined and terminates.** The position cap is an inherited
+attribute: it is computed top-down, by one step per level, from a value
+that is known before the walk begins (the enclosing record's cap is
+written in the schema; it is not derived from anything beneath it). The
+bound of §3.2 is a synthesized attribute, computed bottom-up, and it
+never reads a position cap: caps only enter the final `min`, after the
+bound of the position is finished. The two passes do not feed each
+other, so there is no cycle, and each ends because the type tree is
+finite (§3.2). The chosen W is sufficient: every offset inside the value
+is at most the size of the value, which is at most C (the enclosing
+record's encoder and readers enforce C), and at most its own bound; so
+it is at most the smaller of the two, which fits in W bytes by the
+definition of the width class. And the rule is monotone: a smaller cap
+or a smaller bound never gives a larger W.
+
+**From a schema alone.** A schema-driven implementation needs nothing
+beyond what the schema already holds: the record's `maxDynamicData`
+attribute. While it walks a value it keeps the cap in effect — set to
+the record's cap (or to none) on entering a record's members, cleared on
+entering the inner value of a `Nested` node, restored on leaving, and
+left alone by every other node — and takes the `min` above when it
+derives the width of a list, array, map, set or tuple.
 
 ## 4. Scalar Encodings
 

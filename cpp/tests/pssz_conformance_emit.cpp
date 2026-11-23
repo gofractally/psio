@@ -1439,13 +1439,22 @@ namespace
       // ── Every parent width over every child width ──────────────────────
       auto mix = [&]<typename M, typename C>(std::size_t own, std::size_t cw) {
          static_assert(psio::auto_pssz_width_v<M> == 0 || true);
+         // On their own a vector<C> is unbounded (4) and an array<C,2> has
+         // its inferred bound (2, or 4 for the unbounded child). Beneath M
+         // they are also bounded by M's cap (docs/pssz-spec.md 3.6): 250
+         // gives both a 1-byte table, 60000 a 2-byte one, 1000000 changes
+         // nothing. The child records keep their own width.
          const std::size_t aw = cw == 4 ? 4 : 2;  // array<C,2> inferred bound
+         const std::size_t vw_in = own;           // the vector's table in M
+         const std::size_t aw_in = std::min(aw, own);
          const C           c1{1, "a"}, c2{2, "bc"};
          const M value{c1, {c2}, {c1, c2}, c1, std::variant<u32, C>{std::in_place_index<1>, c2}};
          if (psio::auto_pssz_width_v<M> != own || psio::auto_pssz_width_v<C> != cw ||
-             psio::auto_pssz_width_v<Arr2<C>> != aw || psio::auto_pssz_width_v<Vec<C>> != 4)
+             psio::auto_pssz_width_v<Arr2<C>> != aw || psio::auto_pssz_width_v<Vec<C>> != 4 ||
+             impl::width_for<Vec<C>, impl::member_ann<M, 1>>() != vw_in ||
+             impl::width_for<Arr2<C>, impl::member_ann<M, 2>>() != aw_in)
             die("Mix width expectations are stale");
-         literal<A, M>(c, "mix_sample", value, mix_frame(own, cw, 4, aw));
+         literal<A, M>(c, "mix_sample", value, mix_frame(own, cw, vw_in, aw_in));
          formats([&]<typename F>() {
             if constexpr (!std::is_same_v<F, psio::pssz>)
             {
@@ -1835,6 +1844,105 @@ namespace
                    "pssz: member length_bound violated");
       outside_tree(c, "five_entries", MapW1{{{"a", 1}, {"b", 2}, {"c", 3}, {"d", 4}, {"e", 5}}},
                    "pssz: member length_bound violated");
+   }
+
+   // ── A record's cap bounds what lies beneath it ────────────────────────
+   //
+   // docs/pssz-spec.md 3.6: beneath a record with an explicit cap N, a
+   // list / map / set / array / tuple / pair with no tighter bound of its
+   // own has the offset width of N's class, down to the next record.
+   void emit_cap_positions()
+   {
+      const char* c = "cap-implicit";
+      const std::string cap = "pssz: encoded size exceeds maxDynamicData cap";
+      using A = psio::pssz;
+      static_assert(psio::auto_pssz_width_v<CapTransfer> == 1 && psio::auto_pssz_width_v<CapList> == 1 &&
+                    psio::auto_pssz_width_v<CapList2> == 2 && psio::auto_pssz_width_v<CapList4> == 4 &&
+                    psio::auto_pssz_width_v<CapTight> == 2 && psio::auto_pssz_width_v<CapChild> == 1 &&
+                    psio::auto_pssz_width_v<CapOuter> == 4 && psio::auto_pssz_width_v<R0> == 4);
+
+      // ── The transfer: nothing but the two slots is spent on memo / data ─
+      // header 16 (the 22-byte fixed region), token, from, amount, slot(memo)
+      // 16, slot(data) 18, "hi", selector 01 and one byte.
+      literal<A, CapTransfer>(c, "transfer", {1, 2, 3, Text{"hi"}, Vec<u8>{0xaa}},
+                              hx("16" "01000000" "0200000000000000" "0300000000000000" "16" "18"
+                                 "6869" "01aa"));
+      // No data: the trailing optional's slot is pruned (header 15).
+      literal<A, CapTransfer>(c, "transfer_no_data", {1, 2, 3, Text{"hi"}, std::nullopt},
+                              hx("15" "01000000" "0200000000000000" "0300000000000000" "15"
+                                 "6869"));
+      {
+         // Exactly 255 bytes: 23 of framing, 231 of memo, the selector, 0
+         // bytes of data; and 233 of memo with no data at all.
+         const CapTransfer full{1, 2, 3, Text{std::string(231, 'm')}, Vec<u8>{}};
+         const CapTransfer memo_only{1, 2, 3, Text{std::string(233, 'm')}, std::nullopt};
+         const auto        at_cap = must_encode<A>(full, "transfer_at_cap");
+         if (at_cap.size() != 255 || must_encode<A>(memo_only, "memo_only").size() != 255)
+            die("CapTransfer at-cap sizes are stale");
+         corpus(c, "transfer_at_cap", full);
+         corpus(c, "transfer_memo_only_at_cap", memo_only);
+         // One byte more is refused by the encoder, and the frame a writer
+         // that skips the check would produce by every reader.
+         Bytes out;
+         if (try_encode<A>(CapTransfer{1, 2, 3, Text{std::string(232, 'm')}, Vec<u8>{}}, out) ||
+             try_encode<A>(CapTransfer{1, 2, 3, Text{std::string(231, 'm')}, Vec<u8>{0}}, out) ||
+             try_encode<A>(CapTransfer{1, 2, 3, Text{std::string(234, 'm')}, std::nullopt}, out))
+            die("the encoder accepted a CapTransfer over its cap");
+         Bytes over = at_cap;
+         over.push_back(0);  // one byte of data
+         add<A, CapTransfer>(c, "transfer_over_cap", over, reject(cap));
+      }
+
+      // ── Lists beneath a cap: the same two strings ───────────────────────
+      literal<A, CapList>(c, "two_strings", {{"ab", "c"}}, hx("0101" "0204" "6162" "63"));
+      literal<A, CapList2>(c, "two_strings", {{"ab", "c"}},
+                           hx("02000200" "04000600" "6162" "63"));
+      literal<A, CapList4>(c, "two_strings", {{"ab", "c"}},
+                           hx("0400000004000000" "080000000a000000" "6162" "63"));
+      // rows: table 02 07; the first row's own table 02 04; an empty row
+      literal<A, CapNested>(c, "two_rows", {{{"ab", "c"}, {}}},
+                            hx("0101" "0207" "0204" "6162" "63"));
+      // map: table 01; entry header 02, slots 02 03, key, value
+      literal<A, CapMap>(c, "one_entry", {{{"k", {7}}}},
+                         hx("0101" "01" "02" "0203" "6b" "07000000"));
+      // tuple: header 02, slots 02 03, "x", the list with its table 02 04
+      literal<A, CapTuple>(c, "tuple", {{"x", {"ab", "c"}}},
+                           hx("0101" "02" "0203" "78" "0204" "6162" "63"));
+      literal<A, CapTight>(c, "two_strings", {{"ab", "c"}}, hx("02000200" "0204" "6162" "63"));
+      literal<A, CapClamp>(c, "two_strings", {{"ab", "c"}}, hx("0101" "0204" "6162" "63"));
+      {
+         // R0 keeps its 4-byte offsets; the list of R0 has a 1-byte table.
+         const Bytes r0 = hx("08000000" "07000000" "08000000" "6869");
+         literal<A, CapChild>(c, "record_child", {R0{7, "hi"}, {R0{7, "hi"}}},
+                              join({hx("02" "02" "10"), r0, hx("01"), r0}));
+         // Outside the capped record: its sibling list is unbounded.
+         literal<A, CapOuter>(c, "outer", {CapList{{"ab", "c"}}, {"ab", "c"}},
+                              hx("08000000" "08000000" "0f000000" "0101" "0204" "616263"
+                                 "080000000a000000" "616263"));
+      }
+      corpus(c, "empty", CapList{});
+      corpus(c, "empty", CapNested{});
+      corpus(c, "empty", CapMap{});
+      corpus(c, "many", CapList{Vec<Raw>(100, "x")});
+      corpus(c, "many_rows", CapNested{Vec<Vec<Raw>>(20, Vec<Raw>(3, "y"))});
+      corpus(c, "entries", CapMap{{{"a", {1, 2}}, {"b", {}}, {"cc", {3}}}});
+
+      // ── Rejected ────────────────────────────────────────────────────────
+      // The frame with 4-byte tables (what the type's members would be on
+      // their own) is not a frame of the capped record.
+      add<A, CapList>(c, "four_byte_table", hx("0101" "080000000a000000" "6162" "63"),
+                      reject("pssz: list offset out of range"));
+      {
+         // Over the cap: the encoder refuses, and so does every reader.
+         Bytes out;
+         if (try_encode<A>(CapList{Vec<Raw>(127, "x")}, out) ||
+             !try_encode<A>(CapList{Vec<Raw>(126, "x")}, out) || out.size() != 254)
+            die("CapList cap expectations are stale");
+         Bytes over = must_encode<A>(CapList{Vec<Raw>(126, "x")}, "cap list");
+         over.push_back('y');
+         over.push_back('y');  // the last element grows by two bytes: 256
+         add<A, CapList>(c, "list_over_cap", over, reject(cap));
+      }
    }
 
    // ── Method argument tuples ────────────────────────────────────────────
@@ -3302,6 +3410,7 @@ int main(int argc, char** argv)
    emit_annotation_trees();
    emit_method_args();
    emit_list_widths();
+   emit_cap_positions();
 
    if (!unregistered.empty())
    {

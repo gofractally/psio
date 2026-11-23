@@ -203,3 +203,67 @@ serves all alternatives); state those bounds in the alternatives' types.
 record of that shape and `{array<u8,255>}` the first two-byte one; with the
 old 4-byte bookkeeping the step was at 251 / 252. A type that needs room to
 grow declares `maxDynamicData`, as before.
+
+## A record's cap bounds what lies beneath it
+
+`docs/pssz-spec.md` §3.6. A record with an explicit `maxDynamicData(N)` (a
+method's argument tuple with a cap is one) never encodes to more than N
+bytes, so nothing inside it does. The cap is the implicit bound of every
+position beneath the record, down to the next record, for the purpose of the
+offset widths there:
+
+```
+width of a list / map / set / array / tuple / pair at a position
+   = width class of min(its own bound at that position, the position cap)
+```
+
+where the position cap is the explicit cap of the nearest enclosing record
+(none if that record has no cap), and an unbounded type counts as infinite.
+
+```cpp
+struct Transfer
+{
+   std::uint32_t                         token;
+   std::string                           memo;   // one slot, as wide as Transfer
+   std::vector<std::string>              tags;   // 1-byte offset table
+   std::vector<std::vector<std::string>> rows;   // 1-byte tables at both levels
+   PSIO_REFLECT(Transfer, token, memo, tags, rows, maxDynamicData(255))
+};
+```
+
+**What an unbounded string or byte list costs.** Nothing of its own: its
+payload is the raw bytes, with no length prefix (its size is the distance to
+the next offset). The only bookkeeping is its offset slot in the record that
+holds it, at that record's width. In a record capped at 255 — the largest cap
+with one-byte offsets — a `std::string` or `std::vector<char>` member costs
+one byte beyond its content, bounded or not. For
+`{u32, u64, u64, utf8 string memo, optional<bytes> data}` capped at 255: 1
+(header) + 20 + 2 (slots) = 23 bytes of framing, 232 bytes for memo and data
+together (a present `data` spends one of them on its selector), and encoding
+one byte more is refused.
+
+**In code.** The cap travels with the annotation carrier of the position
+(`detail/annotation_tree.hpp`: every carrier has `cap`; `ann::capped<N>` is a
+position with no annotation beneath a cap), set by a record's member carrier
+(`pssz_impl::member_ann`) and inherited by `element_ann` / `entry_ann` /
+`at_ann`; a transparent type and a `Box` pass the cap on, a record does not.
+`pssz_impl::width_for<T, A>()` takes the `min`. The member's C++ type is
+unchanged. The schema-driven codec keeps the cap in effect while it walks
+(`pssz_ir.hpp` `active_cap`, set on entering a record's members, cleared at a
+`Nested` boundary) and needs nothing new in the IR: the record's
+`maxDynamicData` attribute is already there.
+
+**Records keep their width.** A reflected record beneath a capped record is
+not narrowed: its bytes are the same wherever it appears, which `view<Child>`,
+`nested<Child>` and every schema that names `Child` rely on. A child that is
+wider than its capped parent can never use that capacity;
+`psio::pssz_child_wider_than_cap_v<Parent>` reports it at compile time
+(`static_assert(!psio::pssz_child_wider_than_cap_v<Transfer>)`), and the
+remedy is a `maxDynamicData` or member bounds on the child. It is a query and
+not an error because such types are valid and exist (a capped envelope around
+an open-ended payload record).
+
+**No diagnostic for a bound larger than the cap.** `max<1000>` on a member of
+a record capped at 255 is clamped for the width and otherwise still means what
+it says (it limits the count); it is accepted silently.
+

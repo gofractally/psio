@@ -951,3 +951,260 @@ TEST_CASE("list width: views index a narrow table", "[annotation_tree][list_widt
       CHECK(pssz_valid<Cells>(bytes));
    }
 }
+
+// ── A record's cap bounds what lies beneath it (docs/pssz-spec.md 3.6) ────
+namespace cap_test
+{
+   namespace pz = psio::detail::pssz_impl;
+   // The action the rule was written for: every member type is the plain
+   // unbounded one. 255 is the largest cap with one-byte offsets.
+   struct Transfer
+   {
+      friend bool operator==(const Transfer&, const Transfer&) = default;
+      std::uint32_t                    token = 0;
+      std::uint64_t                    from  = 0;
+      std::uint64_t                    amount = 0;
+      psio::utf8_string<>              memo;
+      std::optional<std::vector<char>> data;
+      PSIO_REFLECT(Transfer, token, from, amount, memo, data, maxDynamicData(255))
+   };
+   struct Transfer256  // one more byte of cap: two-byte offsets
+   {
+      std::uint32_t                    token = 0;
+      std::uint64_t                    from  = 0;
+      std::uint64_t                    amount = 0;
+      psio::utf8_string<>              memo;
+      std::optional<std::vector<char>> data;
+      PSIO_REFLECT(Transfer256, token, from, amount, memo, data, maxDynamicData(256))
+   };
+   struct Child  // unbounded: 4-byte offsets, wherever it appears
+   {
+      friend bool operator==(const Child&, const Child&) = default;
+      std::uint32_t id = 0;
+      std::string   name;
+      PSIO_REFLECT(Child, id, name)
+   };
+   template <std::size_t Cap>
+   struct Capped
+   {
+      friend bool operator==(const Capped&, const Capped&) = default;
+      std::vector<std::string>                                       list;
+      std::vector<std::vector<std::string>>                          rows;
+      std::map<std::string, std::vector<std::uint32_t>>              map;
+      std::tuple<std::string, std::vector<std::string>>              tuple;
+      std::optional<std::vector<std::string>>                        opt;
+      std::variant<std::uint32_t, std::vector<std::string>>          var;
+      std::array<std::string, 2>                                     arr;
+      Child                                                          child;
+      std::vector<Child>                                             kids;
+   };
+   using Cap255   = Capped<255>;
+   using Cap256   = Capped<256>;
+   using Cap65535 = Capped<65535>;
+   using Cap65536 = Capped<65536>;
+   PSIO_REFLECT(Cap255, list, rows, map, tuple, opt, var, arr, child, kids, maxDynamicData(255))
+   PSIO_REFLECT(Cap256, list, rows, map, tuple, opt, var, arr, child, kids, maxDynamicData(256))
+   PSIO_REFLECT(Cap65535, list, rows, map, tuple, opt, var, arr, child, kids,
+                maxDynamicData(65535))
+   PSIO_REFLECT(Cap65536, list, rows, map, tuple, opt, var, arr, child, kids,
+                maxDynamicData(65536))
+   struct Free  // the same members with no cap
+   {
+      std::vector<std::string> list;
+      std::tuple<std::string, std::vector<std::string>> tuple;
+      PSIO_REFLECT(Free, list, tuple)
+   };
+   // A tighter bound of the member's own wins; a looser one is clamped.
+   struct Tight
+   {
+      std::vector<std::string> list;
+      PSIO_REFLECT(Tight, attr(list, max<8> | element(max<16>)), maxDynamicData(60000))
+   };
+   struct Loose
+   {
+      std::vector<std::string> list;
+      PSIO_REFLECT(Loose, attr(list, max<1000> | element(max<1000>)), maxDynamicData(255))
+   };
+
+   // The width of member I of R on the wire, and of what lies beneath it.
+   template <typename R, std::size_t I>
+   using member_t = std::remove_cvref_t<typename pz::record_traits<R>::template member_type<I>>;
+   template <typename R, std::size_t I>
+   constexpr std::size_t member_w = pz::width_for<member_t<R, I>, pz::member_ann<R, I>>();
+   template <typename R, std::size_t I>
+   constexpr std::size_t element_w = pz::width_for<
+      typename member_t<R, I>::value_type, pz::ann::element_ann<pz::member_ann<R, I>>>();
+
+   template <typename R, std::size_t W>
+   constexpr bool all_members_are =
+      member_w<R, 0> == W && member_w<R, 1> == W && element_w<R, 1> == W &&  // list, rows, a row
+      member_w<R, 2> == W &&                                                 // the map's table
+      pz::width_for<std::pair<std::string, std::vector<std::uint32_t>>,
+                    pz::ann::entry_ann<member_t<R, 2>, pz::member_ann<R, 2>>>() == W &&  // an entry
+      member_w<R, 3> == W &&  // the tuple
+      pz::width_for<std::vector<std::string>, pz::ann::at_ann<pz::member_ann<R, 3>, 1>>() == W &&
+      element_w<R, 4> == W &&  // the optional's list
+      pz::width_for<std::vector<std::string>, pz::ann::at_ann<pz::member_ann<R, 5>, 1>>() == W &&
+      member_w<R, 6> == W &&   // the array's table
+      member_w<R, 8> == W;     // the table of the list of records
+   static_assert(psio::auto_pssz_width_v<Cap255> == 1 && all_members_are<Cap255, 1>);
+   static_assert(psio::auto_pssz_width_v<Cap256> == 2 && all_members_are<Cap256, 2>);
+   static_assert(psio::auto_pssz_width_v<Cap65535> == 2 && all_members_are<Cap65535, 2>);
+   static_assert(psio::auto_pssz_width_v<Cap65536> == 4 && all_members_are<Cap65536, 4>);
+   // A record keeps its own width beneath any cap, and what is beneath it
+   // takes that record's cap (none).
+   static_assert(member_w<Cap255, 7> == 4 && psio::auto_pssz_width_v<Child> == 4);
+   static_assert(element_w<Cap255, 8> == 4);  // an element of kids: a Child
+   // No cap: the member types alone.
+   static_assert(member_w<Free, 0> == 4 && member_w<Free, 1> == 4);
+   static_assert(member_w<Tight, 0> == 1 && psio::auto_pssz_width_v<Tight> == 2);
+   static_assert(member_w<Loose, 0> == 1);
+   // The cap does not change any bound: a capped record is its cap.
+   static_assert(psio::max_encoded_size<std::vector<std::string>>() == std::nullopt);
+   static_assert(psio::max_encoded_size<std::tuple<Cap255, std::uint8_t>>() == 2 + 2 + 255 + 1);
+
+   // The query for a child record that cannot use its width.
+   static_assert(psio::pssz_child_wider_than_cap_v<Cap255>);   // Child (4) beneath a cap of 255
+   static_assert(!psio::pssz_child_wider_than_cap_v<Cap65536>);
+   static_assert(!psio::pssz_child_wider_than_cap_v<Transfer>);
+   static_assert(!psio::pssz_child_wider_than_cap_v<Free>);    // no cap
+   static_assert(!psio::pssz_child_wider_than_cap_v<Tight>);
+}  // namespace cap_test
+
+namespace
+{
+   // The schema-driven codec, given only the IR, accepts the typed bytes,
+   // gives the same text, and writes the same bytes back.
+   template <typename T>
+   void ir_agrees(const T& value)
+   {
+      static const psio::Schema schema = psio::SchemaBuilder{}.insert<T>("T").build();
+      const auto                bytes  = pssz_bytes(value);
+      REQUIRE(pssz_valid<T>(bytes));
+      CHECK(psio::validate_strict<T>(psio::pssz{}, std::span<const char>(bytes)).ok());
+      CHECK(psio::pssz_ir::validate_pssz(schema, "T", bytes).ok());
+      std::string text;
+      REQUIRE(psio::pssz_ir::pssz_to_json(schema, "T", psio::ijson{}, bytes, text).ok());
+      CHECK(text == psio::encode(psio::ijson{}, value));
+      std::vector<char> again;
+      REQUIRE(psio::pssz_ir::json_to_pssz(schema, "T", psio::ijson{}, std::span<const char>{text},
+                                          again)
+                 .ok());
+      CHECK(again == bytes);
+   }
+}  // namespace
+
+TEST_CASE("cap: an unbounded string or byte list costs its slot and nothing else",
+          "[annotation_tree][cap]")
+{
+   using namespace cap_test;
+   static_assert(psio::auto_pssz_width_v<Transfer> == 1 && psio::auto_pssz_width_v<Transfer256> == 2);
+   // header 16 (the fixed region: 4 + 8 + 8 + two 1-byte slots = 22), the
+   // three numbers, slot(memo) = 22, slot(data) = 24, "hi", then data:
+   // selector 01 and its one byte. No length prefix anywhere.
+   const Transfer t{1, 2, 3, psio::utf8_string<>{"hi"}, std::vector<char>{'\xaa'}};
+   CHECK(hex_of(pssz_bytes(t)) ==
+         "16" "01000000" "0200000000000000" "0300000000000000" "16" "18" "6869" "01aa");
+   // With no data its slot is pruned.
+   CHECK(hex_of(pssz_bytes(Transfer{1, 2, 3, psio::utf8_string<>{"hi"}, std::nullopt})) ==
+         "15" "01000000" "0200000000000000" "0300000000000000" "15" "6869");
+   // One byte of cap more and every offset is two bytes.
+   CHECK(hex_of(pssz_bytes(Transfer256{1, 2, 3, psio::utf8_string<>{"hi"}, std::vector<char>{'\xaa'}})) ==
+         "1800" "01000000" "0200000000000000" "0300000000000000" "1800" "1a00" "6869" "01aa");
+
+   // The budget: 255 - (header 1 + 20 + 2 slots) = 232 bytes for memo and
+   // data together, one of which is the selector of a present data.
+   const auto with = [](std::size_t memo, std::optional<std::size_t> data) {
+      Transfer v{1, 2, 3, psio::utf8_string<>{std::string(memo, 'm')}, std::nullopt};
+      if (data)
+         v.data = std::vector<char>(*data, 'd');
+      return v;
+   };
+   CHECK(pssz_bytes(with(231, 0)).size() == 255);
+   CHECK(pssz_bytes(with(0, 231)).size() == 255);
+   CHECK(pssz_bytes(with(100, 131)).size() == 255);
+   CHECK(pssz_bytes(with(233, std::nullopt)).size() == 255);  // no data: its slot is pruned too
+   CHECK_FALSE(pssz_encodes(with(232, 0)));
+   CHECK_FALSE(pssz_encodes(with(0, 232)));
+   CHECK_FALSE(pssz_encodes(with(100, 132)));
+   CHECK_FALSE(pssz_encodes(with(234, std::nullopt)));
+   // And a reader refuses the 256-byte frame.
+   auto over = pssz_bytes(with(100, 131));
+   over.push_back('d');
+   CHECK_FALSE(pssz_valid<Transfer>(over));
+   CHECK_FALSE(pssz_decodes<Transfer>(over));
+   ir_agrees(t);
+   ir_agrees(with(100, 131));
+   ir_agrees(with(233, std::nullopt));
+}
+
+TEST_CASE("cap: lists, maps and tuples beneath a capped record take the cap's width",
+          "[annotation_tree][cap]")
+{
+   using namespace cap_test;
+   const auto fill = []<typename R>() {
+      R v;
+      v.list  = {"ab", "c"};
+      v.rows  = {{"d"}, {}};
+      v.map   = {{"k", {7}}};
+      v.tuple = {"t", {"u"}};
+      v.opt   = std::vector<std::string>{"o"};
+      v.var   = std::vector<std::string>{"v"};
+      v.arr   = {"x", "y"};
+      v.child = {5, "n"};
+      v.kids  = {{6, "m"}};
+      return v;
+   };
+   // header, nine slots; then each member with one-byte offsets — except
+   // the two Child records, which keep their four-byte ones.
+   CHECK(hex_of(pssz_bytes(fill.template operator()<Cap255>())) ==
+         "09" "090e121b" "2124272b" "38"
+         "0204" "616263"                              // list
+         "0204" "01" "64"                             // rows: a row with its own table
+         "01" "02" "0203" "6b" "07000000"             // map: table, entry (header, slots)
+         "02" "0203" "74" "01" "75"                   // tuple, and the list in it
+         "01" "01" "6f"                               // optional: selector, table
+         "01" "01" "76"                               // variant: index, table
+         "0203" "78" "79"                             // array
+         "08000000" "05000000" "08000000" "6e"        // child: 4-byte offsets
+         "01" "08000000" "06000000" "08000000" "6d"); // kids: 1-byte table, 4-byte record
+   ir_agrees(fill.template operator()<Cap255>());
+   ir_agrees(fill.template operator()<Cap256>());
+   ir_agrees(fill.template operator()<Cap65535>());
+   ir_agrees(fill.template operator()<Cap65536>());
+   ir_agrees(Cap255{});
+   ir_agrees(Tight{{"ab", "c"}});
+   ir_agrees(Loose{{"ab", "c"}});
+   CHECK(hex_of(pssz_bytes(Tight{{"ab", "c"}})) == "02000200" "0204" "616263");
+   CHECK(hex_of(pssz_bytes(Loose{{"ab", "c"}})) == "0101" "0204" "616263");
+   CHECK(hex_of(pssz_bytes(Free{{"ab", "c"}, {"t", {"u"}}})) ==
+         "08000000" "08000000" "13000000" "080000000a000000" "616263"
+         "08000000" "08000000" "09000000" "74" "04000000" "75");
+
+   // Views index the narrowed tables; the record child is the plain view.
+   {
+      const auto bytes = pssz_bytes(fill.template operator()<Cap255>());
+      psio::view<Cap255, psio::pssz> v{std::span<const char>(bytes)};
+      REQUIRE(v.get<0>().size() == 2);
+      CHECK(v.get<0>()[1].view_() == "c");
+      CHECK(v.get<1>()[0][0].view_() == "d");
+      CHECK(v.get<1>()[1].size() == 0);
+      CHECK(v.get<2>()[0].get<0>().view_() == "k");
+      CHECK(v.get<2>()[0].get<1>().size() == 1);
+      CHECK(v.get<3>().get<1>()[0].view_() == "u");
+      CHECK((*v.get<4>())[0].view_() == "o");
+      CHECK(v.get<6>()[1].view_() == "y");
+      CHECK(v.get<7>().get<1>().view_() == "n");
+      static_assert(std::is_same_v<decltype(v.get<7>()), psio::view<Child, psio::pssz>>);
+      CHECK(v.get<8>()[0].get<0>() == 6);
+   }
+   {
+      // In place: a number in a record in a list beneath the cap.
+      auto bytes = pssz_bytes(fill.template operator()<Cap255>());
+      psio::mutable_view<Cap255, psio::pssz> mv{std::span<char>(bytes)};
+      REQUIRE(mv.get<8>()[0].get<0>().set(std::uint32_t{77}));
+      auto expected = fill.template operator()<Cap255>();
+      expected.kids[0].id = 77;
+      CHECK(psio::decode<Cap255>(psio::pssz{}, std::span<const char>(bytes)) == expected);
+   }
+}

@@ -212,11 +212,45 @@ namespace psio::detail::ann
    inline constexpr bool has_tree_specs_v<std::tuple<Ts...>> = (is_tree_spec_v<Ts> || ...);
 
    // ── Carriers ───────────────────────────────────────────────────────────
+   //
+   // Besides the annotation tuple of its position a carrier has `cap`: the
+   // explicit maxDynamicData of the nearest enclosing record (or method
+   // argument tuple) when the position lies beneath one, with no record in
+   // between; no_cap otherwise. Nothing beneath a capped record can be
+   // larger than the cap, so the cap is an implicit bound of every position
+   // beneath it (docs/pssz-spec.md 3.6): it narrows the offset width of a
+   // list, array, map, set, tuple or pair there, and nothing else. Every
+   // derived carrier inherits it.
+   inline constexpr std::size_t no_cap = static_cast<std::size_t>(-1);
    struct no_ann
    {
       using value_t = std::tuple<>;
-      static constexpr value_t value{};
+      static constexpr value_t     value{};
+      static constexpr std::size_t cap = no_cap;
    };
+   // A position with no annotation of its own beneath a cap of N bytes.
+   template <std::size_t N>
+   struct capped
+   {
+      using value_t = std::tuple<>;
+      static constexpr value_t     value{};
+      static constexpr std::size_t cap = N;
+   };
+   template <std::size_t N>
+   struct capped_or_none
+   {
+      using type = capped<N>;
+   };
+   template <>
+   struct capped_or_none<no_cap>
+   {
+      using type = no_ann;
+   };
+   // What of carrier A reaches through a type that is its member on the
+   // wire (a transparent type, a Box): the cap, not the annotations.
+   template <typename A>
+   using cap_only = typename capped_or_none<A::cap>::type;
+
    template <typename Raw, bool = has_tree_specs_v<typename Raw::value_t>>
    struct normalized
    {
@@ -225,7 +259,7 @@ namespace psio::detail::ann
    template <typename Raw>
    struct normalized<Raw, false>
    {
-      using type = no_ann;
+      using type = cap_only<Raw>;
    };
 
    template <typename A>
@@ -233,18 +267,21 @@ namespace psio::detail::ann
    {
       static constexpr auto value = element_specs(A::value);
       using value_t               = std::remove_cvref_t<decltype(value)>;
+      static constexpr std::size_t cap = A::cap;
    };
    template <typename C, typename A>
    struct entry_raw
    {
       static constexpr auto value = entry_specs<C>(A::value);
       using value_t               = std::remove_cvref_t<decltype(value)>;
+      static constexpr std::size_t cap = A::cap;
    };
    template <typename A, std::size_t I>
    struct at_raw
    {
       static constexpr auto value = at_specs<I>(A::value);
       using value_t               = std::remove_cvref_t<decltype(value)>;
+      static constexpr std::size_t cap = A::cap;
    };
 
    template <typename A>
@@ -293,7 +330,8 @@ namespace psio::detail::ann
    struct holder_raw
    {
       using value_t = std::remove_cvref_t<decltype(Holder::value)>;
-      static constexpr value_t value = Holder::value;
+      static constexpr value_t     value = Holder::value;
+      static constexpr std::size_t cap   = no_cap;
    };
    template <typename Holder>
    using holder_ann = typename normalized<holder_raw<Holder>>::type;

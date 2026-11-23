@@ -80,6 +80,7 @@ namespace psio::view_layout {
                             entry}});
          }();
          using value_t = std::remove_cvref_t<decltype(value)>;
+         static constexpr std::size_t cap = A::cap;
       };
       template <typename M, typename Fmt>
       struct assoc_list_format

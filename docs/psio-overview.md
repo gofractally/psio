@@ -431,7 +431,10 @@ elements and a list, map or set of variable elements each take their offset
 width from their own bound, and the annotations of their position narrow it
 exactly as the wrapper types would: a `std::vector<std::string>` under
 `max<8> | element(max<16>)` has a 1-byte offset table, the unannotated vector
-a 4-byte one (`docs/pssz-type-width.md`). A view of a member whose annotations
+a 4-byte one (`docs/pssz-type-width.md`). A record's `maxDynamicData` is also
+an implicit bound of the lists, maps, tuples and arrays beneath it (down to
+the next record): under a cap of 255 a plain `std::vector<std::string>` member
+has a 1-byte table. A view of a member whose annotations
 narrow a width carries them (`psio::pssz_at`); the one exception is a variant
 whose alternatives are narrowed by `at<I>(…)`, which is not addressable
 through a `pssz_view` (state the bound in the alternative's type to view it).

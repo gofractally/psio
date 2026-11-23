@@ -412,9 +412,32 @@ template <std::size_t W> class Codec
    {
       const schema_types::AnyType *type;
       std::optional<std::uint64_t> count;
+      std::optional<std::uint64_t> cap;
       std::size_t width;
    };
    mutable std::vector<KnownWidth> widths;
+   // The cap in effect at the value being read or written (automatic
+   // profile): the explicit maxDynamicData of the nearest enclosing record
+   // when there is one and it has a cap, none otherwise (the record has no
+   // cap, or the value is the root, or the inner value of a Nested node).
+   // Nothing beneath a capped record is larger than the cap, so the cap
+   // bounds every list, array, map, set and tuple beneath it for the purpose
+   // of its offset width (docs/pssz-spec.md 3.6). A record sets it for its
+   // members and restores it (CapScope); every other node leaves it alone.
+   mutable std::optional<std::uint64_t> active_cap;
+   struct CapScope
+   {
+      std::optional<std::uint64_t> &slot;
+      std::optional<std::uint64_t> saved;
+      CapScope(std::optional<std::uint64_t> &slot, std::optional<std::uint64_t> value)
+          : slot(slot), saved(slot)
+      {
+         slot = value;
+      }
+      ~CapScope() { slot = saved; }
+      CapScope(const CapScope &) = delete;
+      CapScope &operator=(const CapScope &) = delete;
+   };
    // The count (exact, else max) of the lengthBound of the record member
    // whose value the next encode_shape / decode_shape call handles: it
    // bounds a plain List (or the list of a map / set) reached through
@@ -736,6 +759,9 @@ template <std::size_t W> class Codec
    // the width class of its explicit cap, else of its inferred bound.
    // `count`: for a plain List, the count the lengthBound of the member that
    // holds it gives (position_count); a list with no bound is 4 wide.
+   // Anything that is not a record is also bounded by the cap in effect
+   // (active_cap): its width is the class of the smaller of the two. A
+   // record's width is its own wherever it appears.
    codec_status width_of(const schema_types::AnyType &type, std::size_t &out,
                          std::optional<std::uint64_t> count = std::nullopt) const
    {
@@ -750,8 +776,11 @@ template <std::size_t W> class Codec
          // Only a plain List takes a bound from the member that holds it.
          if (!std::holds_alternative<schema_types::List>(type.value))
             count.reset();
+         std::optional<std::uint64_t> limit = active_cap;
+         if (record_attributes(type))
+            limit.reset();
          for (const auto &known : widths)
-            if (known.type == &type && known.count == count)
+            if (known.type == &type && known.count == count && known.cap == limit)
             {
                out = known.width;
                return codec_ok();
@@ -768,9 +797,12 @@ template <std::size_t W> class Codec
             LengthBound annotation;
             annotation.max = count;
             PSIO_PSSZ_IR_TRY(bound_of(type, count ? &annotation : nullptr, false, bound, active));
+            if (limit && *limit <= std::numeric_limits<std::size_t>::max() &&
+                (!bound || *bound > *limit))
+               bound = static_cast<std::size_t>(*limit);
             out = width_class(bound);
          }
-         widths.push_back({&type, count, out});
+         widths.push_back({&type, count, limit, out});
          return codec_ok();
       }
    }
@@ -869,7 +901,11 @@ template <std::size_t W> class Codec
                               std::vector<char> &out, std::size_t n) const
    {
       if constexpr (automatic)
+      {
+         // The inner value is a root of its own: no cap reaches into it.
+         CapScope scope(active_cap, std::nullopt);
          return encode_at(type, value, out, n);
+      }
       else
       {
          // The inner value is checked like any other: same registry.
@@ -884,7 +920,10 @@ template <std::size_t W> class Codec
                               Value &out, std::size_t n)
    {
       if constexpr (automatic)
+      {
+         CapScope scope(active_cap, std::nullopt);
          return decode_at(type, bytes, out, n);
+      }
       else
       {
          Codec<0> codec(schema, customs);
@@ -1102,16 +1141,18 @@ template <std::size_t W> class Codec
    {
       if (checks.empty())
          return codec_ok();
+      // A handler reads the value as a root. Beneath a capped record the
+      // bytes in place can have narrower offsets than the root encoding
+      // (active_cap), so they are re-encoded for it, as under an explicit
+      // profile.
       std::vector<char> canonical;
-      if constexpr (!automatic)
+      if (!automatic || active_cap)
       {
          Codec<0> codec(schema);
          codec.opaque_nested = opaque_nested;
          PSIO_PSSZ_IR_TRY(codec.encode_at(input, value, canonical));
          bytes = std::span<const char>{canonical};
       }
-      else
-         (void)value, (void)input;
       for (auto at = checks.rbegin(); at != checks.rend(); ++at)
          if (auto status = (*at)->check(bytes); !status.ok())
          {
@@ -2038,6 +2079,10 @@ template <std::size_t W> class Codec
                 std::size_t w;
                 PSIO_PSSZ_IR_TRY(width_of(*type, w));
                 const std::size_t start = out.size();
+                // The members lie beneath this record's cap, or beneath none.
+                std::optional<std::uint64_t> own_cap;
+                PSIO_PSSZ_IR_TRY(cap_of(*type, own_cap));
+                CapScope scope(active_cap, own_cap);
                 PSIO_PSSZ_IR_TRY(encode_members(t.members, *v, stable, w, out, n));
                 PSIO_PSSZ_IR_TRY(check_cap(*type, out.size() - start));
              }
@@ -2335,6 +2380,9 @@ codec_status Codec<W>::decode_shape(const schema_types::AnyType &input,
              std::size_t w;
              PSIO_PSSZ_IR_TRY(width_of(*type, w));
              Record values;
+             std::optional<std::uint64_t> own_cap;
+             PSIO_PSSZ_IR_TRY(cap_of(*type, own_cap));
+             CapScope scope(active_cap, own_cap);
              PSIO_PSSZ_IR_TRY(decode_members(t.members, bytes, stable, w, values, n));
              out = std::move(values);
           }

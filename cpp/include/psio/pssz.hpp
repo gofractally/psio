@@ -368,8 +368,22 @@ namespace psio {
       // validator checks its length_bound / utf8 at each position.
       namespace ann = ::psio::detail::ann;
       using ann::no_ann;
+      // A record member's carrier: its effective annotations, and the
+      // record's explicit maxDynamicData as the cap of the positions beneath.
       template <typename T, std::size_t I>
-      using member_ann = ann::holder_ann<record_member_annotations<T, I>>;
+      struct member_raw
+      {
+         using value_t = typename record_member_annotations<T, I>::value_t;
+         static constexpr value_t     value = record_member_annotations<T, I>::value;
+         static constexpr std::size_t cap   = [] {
+            if constexpr (::psio::max_dynamic_data_v<T>.has_value())
+               return *::psio::max_dynamic_data_v<T>;
+            else
+               return ann::no_cap;
+         }();
+      };
+      template <typename T, std::size_t I>
+      using member_ann = typename ann::normalized<member_raw<T, I>>::type;
       // The carrier of field I of record T reached under carrier A: a
       // reflected record's (or an annotated tuple's) own member annotation;
       // for a plain tuple / pair, what at<I>(...) states in A.
@@ -1132,9 +1146,11 @@ namespace psio {
             return Proj::packsize(v);
          }
          else if constexpr (is_psio_box_v<T>)
-            return size_of_v<W, Auto>(*v.value, check);
+            return size_of_v<W, Auto, typename is_psio_box<T>::elem, ann::cap_only<A>>(*v.value,
+                                                                                    check);
          else if constexpr (::psio::is_transparent_v<T>)
-            return size_of_v<W, Auto>(::psio::transparent_inner(v), check);
+            return size_of_v<W, Auto, ::psio::transparent_inner_t<T>, ann::cap_only<A>>(
+               ::psio::transparent_inner(v), check);
          else if constexpr (is_nested_v<T>)
             return v.size();
          else if constexpr (is_assoc_v<T>)
@@ -1388,12 +1404,14 @@ namespace psio {
          }
          else if constexpr (is_psio_box_v<T>)
          {
-            encode_value<W, Auto>(*v.value, s);
+            encode_value<W, Auto, typename is_psio_box<T>::elem, Sink, ann::cap_only<A>>(*v.value,
+                                                                                         s);
             return;
          }
          else if constexpr (::psio::is_transparent_v<T>)
          {
-            encode_value<W, Auto>(::psio::transparent_inner(v), s);
+            encode_value<W, Auto, ::psio::transparent_inner_t<T>, Sink, ann::cap_only<A>>(
+               ::psio::transparent_inner(v), s);
             return;
          }
          else if constexpr (is_nested_v<T>)
@@ -1716,7 +1734,7 @@ namespace psio {
             return;
          }
          else if constexpr (::psio::is_transparent_v<T>)
-            decode_into<W, Auto, ::psio::transparent_inner_t<T>>(
+            decode_into<W, Auto, ::psio::transparent_inner_t<T>, ann::cap_only<A>>(
                src, pos, end, ::psio::transparent_inner(out));
          else if constexpr (std::is_same_v<T, std::string>)
          {
@@ -2028,12 +2046,12 @@ namespace psio {
          else if constexpr (is_psio_box_v<T>)
          {
             using E = typename is_psio_box<T>::elem;
-            return T{decode_value<W, Auto, E>(src, pos, end)};
+            return T{decode_value<W, Auto, E, ann::cap_only<A>>(src, pos, end)};
          }
          else if constexpr (::psio::is_transparent_v<T>)
          {
             T out{};
-            decode_into<W, Auto, ::psio::transparent_inner_t<T>>(
+            decode_into<W, Auto, ::psio::transparent_inner_t<T>, ann::cap_only<A>>(
                src, pos, end, ::psio::transparent_inner(out));
             return out;
          }
@@ -2678,10 +2696,10 @@ namespace psio {
                src.data() + pos, end - pos));
          }
          else if constexpr (is_psio_box_v<T>)
-            return validate_value<W, Auto, typename is_psio_box<T>::elem>(
+            return validate_value<W, Auto, typename is_psio_box<T>::elem, ann::cap_only<A>>(
                src, pos, end, depth, flags);
          else if constexpr (::psio::is_transparent_v<T>)
-            return validate_value<W, Auto, ::psio::transparent_inner_t<T>>(
+            return validate_value<W, Auto, ::psio::transparent_inner_t<T>, ann::cap_only<A>>(
                src, pos, end, depth, flags);
          else if constexpr (is_nested_v<T>)
             return ::psio::detail::nested_impl::pssz_validate<T>(
@@ -2951,6 +2969,14 @@ namespace psio {
 
    namespace detail::pssz_impl
    {
+      // A reflected record or an annotated tuple (a method's argument
+      // tuple): a type whose width is its own wherever it appears. A plain
+      // tuple / pair is not one: it has no name and takes the width of its
+      // position.
+      template <typename T>
+      inline constexpr bool record_boundary_v =
+         Record<T> && (!is_std_tuple_v<T> || requires { typename T::psio_annotated_tuple; });
+
       // The offset width of T at a position carrying A's annotations: of a
       // record's or tuple's header and member slots, of the offset table of
       // a list (std::vector, psio::bounded, a map, a set) or array of
@@ -2963,10 +2989,18 @@ namespace psio {
       consteval std::size_t width_for() noexcept
       {
          constexpr auto m = [] {
+            std::optional<std::size_t> own;
             if constexpr (::psio::max_dynamic_data_v<T>.has_value())
-               return ::psio::max_dynamic_data_v<T>;
+               own = ::psio::max_dynamic_data_v<T>;
             else
-               return ::psio::detail::max_size_impl::max_field_with_annots<T>(A::value);
+               own = ::psio::detail::max_size_impl::max_field_with_annots<T>(A::value);
+            // The cap of the enclosing record bounds everything beneath it
+            // (docs/pssz-spec.md 3.6). A record keeps its own width
+            // wherever it appears: the cap does not cross into one.
+            if constexpr (!record_boundary_v<T>)
+               if (A::cap != ann::no_cap && (!own || *own > A::cap))
+                  own = A::cap;
+            return own;
          }();
          if constexpr (m.has_value())
             return *m <= 0xFFu ? 1 : *m <= 0xFFFFu ? 2 : 4;
@@ -2988,6 +3022,10 @@ namespace psio {
          // reflected record's width is its own).
          if constexpr (std::is_same_v<A, no_ann>)
             return true;
+         else if constexpr (is_psio_box_v<T>)
+            return widths_unchanged<typename is_psio_box<T>::elem, ann::cap_only<A>>();
+         else if constexpr (::psio::is_transparent_v<T>)
+            return widths_unchanged<::psio::transparent_inner_t<T>, ann::cap_only<A>>();
          else if constexpr (is_std_optional_v<T>)
             return widths_unchanged<typename T::value_type, A>();
          else if constexpr (is_std_vector_v<T> || is_bounded_v<T> || is_std_array_v<T>)
@@ -3042,6 +3080,76 @@ namespace psio {
 
    template <typename T>
    inline constexpr std::size_t auto_pssz_width_v = auto_pssz_width<T>();
+
+   // ── A capped record holding a wider record ────────────────────────────
+   //
+   // The cap of a record bounds the lists, maps, tuples, ... beneath it, and
+   // they take their offset width from it (docs/pssz-spec.md 3.6). A record
+   // beneath it does not: a record's width is its own wherever it appears.
+   // So a child record that is wider than its capped parent — an unbounded
+   // Child (4-byte offsets) inside a parent capped at 255 — spends offset
+   // bytes on a capacity it can never use there.
+   //
+   // `pssz_child_wider_than_cap_v<T>` is true when T has an explicit
+   // maxDynamicData and a record (or method argument tuple) wider than the
+   // cap's width class lies beneath it, with no other record in between.
+   // The remedy is a maxDynamicData (or member bounds) on the child. It is a
+   // query, not an error: such a type is valid, and a schema can check it
+   // with
+   //
+   //   static_assert(!psio::pssz_child_wider_than_cap_v<Transfer>);
+   namespace detail::pssz_impl
+   {
+      template <typename T>
+      consteval bool holds_wider_record(std::size_t width) noexcept
+      {
+         if constexpr (is_psio_box_v<T>)
+            return holds_wider_record<typename is_psio_box<T>::elem>(width);
+         else if constexpr (::psio::format_should_dispatch_adapter_v<::psio::pssz, T> ||
+                            is_nested_v<T>)
+            return false;
+         else if constexpr (::psio::is_transparent_v<T>)
+            return holds_wider_record<::psio::transparent_inner_t<T>>(width);
+         else if constexpr (is_assoc_v<T>)
+            return holds_wider_record<::psio::detail::assoc_entry_t<T>>(width);
+         else if constexpr (is_std_optional_v<T> || is_std_vector_v<T> || is_bounded_v<T> ||
+                            is_std_array_v<T>)
+            return holds_wider_record<typename T::value_type>(width);
+         else if constexpr (is_std_variant_v<T>)
+            return []<std::size_t... Is>(std::size_t w, std::index_sequence<Is...>) {
+               return (holds_wider_record<std::variant_alternative_t<Is, T>>(w) || ...);
+            }(width, std::make_index_sequence<std::variant_size_v<T>>{});
+         else if constexpr (record_boundary_v<T>)
+            return ::psio::auto_pssz_width<T>() > width;
+         else if constexpr (is_std_tuple_v<T>)
+            return []<std::size_t... Is>(std::size_t w, std::index_sequence<Is...>) {
+               return (holds_wider_record<std::remove_const_t<std::tuple_element_t<Is, T>>>(w) ||
+                       ...);
+            }(width, std::make_index_sequence<std::tuple_size_v<T>>{});
+         else
+            return false;
+      }
+      template <typename T>
+      consteval bool child_wider_than_cap() noexcept
+      {
+         if constexpr (!record_boundary_v<T> || has_binary_adapter_v<T>)
+            return false;
+         else if constexpr (!::psio::max_dynamic_data_v<T>.has_value())
+            return false;
+         else
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               const std::size_t width = ::psio::auto_pssz_width<T>();
+               return ((!::psio::has_as_override_v<
+                           typename record_member_annotations<T, Is>::value_t> &&
+                        holds_wider_record<std::remove_cvref_t<
+                           typename record_traits<T>::template member_type<Is>>>(width)) ||
+                       ...);
+            }(std::make_index_sequence<record_traits<T>::member_count>{});
+      }
+   }  // namespace detail::pssz_impl
+   template <typename T>
+   inline constexpr bool pssz_child_wider_than_cap_v =
+      detail::pssz_impl::child_wider_than_cap<T>();
 
    // ── Evolution check ───────────────────────────────────────────────────
    //

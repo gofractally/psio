@@ -921,6 +921,47 @@ namespace pssz_conf
    struct SetW1 { std::set<Raw> s; };
    PSIO_REFLECT(SetW1, attr(s, max<15> | element(max<16>)))
 
+   // ── A record's cap bounds what lies beneath it (docs/pssz-spec.md 3.6) ─
+   //
+   // Nothing beneath a record with an explicit maxDynamicData of N can be
+   // larger than N, so a list, map, set, array, tuple or pair beneath it —
+   // down to the next record — takes its offset width as if it were
+   // bounded by N, when it has no tighter bound of its own. The member
+   // types stay the plain unbounded ones.
+   //
+   // A transfer-like action: 255 is the largest cap with 1-byte offsets.
+   // header 1 + u32 + u64 + u64 + two slots = 23 bytes; memo and data share
+   // the other 232 (a present data spends one of them on its selector).
+   struct CapTransfer { u32 token; u64 from; u64 amount; Text memo; Opt<Vec<u8>> data; };
+   PSIO_REFLECT(CapTransfer, token, from, amount, memo, data, maxDynamicData(255))
+   struct CapList { Vec<Raw> items; };  // cap 255: record 1, table 1
+   PSIO_REFLECT(CapList, items, maxDynamicData(255))
+   struct CapList2 { Vec<Raw> items; };  // cap 256: record 2, table 2
+   PSIO_REFLECT(CapList2, items, maxDynamicData(256))
+   struct CapList4 { Vec<Raw> items; };  // cap 65536: record 4, table 4
+   PSIO_REFLECT(CapList4, items, maxDynamicData(65536))
+   struct CapNested { Vec<Vec<Raw>> rows; };  // cap 255: both tables 1
+   PSIO_REFLECT(CapNested, rows, maxDynamicData(255))
+   struct CapMap { std::map<Raw, Vec<u32>> m; };  // cap 255: table 1, entries 1
+   PSIO_REFLECT(CapMap, m, maxDynamicData(255))
+   struct CapTuple { std::tuple<Raw, Vec<Raw>> t; };  // cap 255: tuple 1, table 1
+   PSIO_REFLECT(CapTuple, t, maxDynamicData(255))
+   // A tighter bound of the position's own wins (the cap would give 2).
+   struct CapTight { Vec<Raw> items; };
+   PSIO_REFLECT(CapTight, attr(items, max<8> | element(max<16>)), maxDynamicData(60000))
+   // A looser one is clamped by the cap (the bound alone would give 4).
+   struct CapClamp { Vec<Raw> items; };
+   PSIO_REFLECT(CapClamp, attr(items, max<1000> | element(max<1000>)), maxDynamicData(255))
+   // A record keeps its own width wherever it appears: R0 (unbounded, 4)
+   // beneath a cap of 255 still has 4-byte offsets; the list of R0 that
+   // holds some has a 1-byte table.
+   struct CapChild { R0 child; Vec<R0> kids; };
+   PSIO_REFLECT(CapChild, child, kids, maxDynamicData(255))
+   // And a cap does not reach out of its record: CapList inside an uncapped
+   // record is CapList; the sibling list is unbounded (4).
+   struct CapOuter { CapList inner; Vec<Raw> items; };
+   PSIO_REFLECT(CapOuter, inner, items)
+
    // ── Method argument tuples ────────────────────────────────────────────
    //
    // What `method(name, attr(p, specs)..., maxDynamicData(N))` makes of a
@@ -1044,7 +1085,10 @@ namespace pssz_conf
       types<WidthThreshold254, WidthThreshold255, S253, S254, S65531, S65532>,
       // a list's own offset-table width (appended)
       types<BList1, BList2, BList2Top, BList4, BListFree, ListW1, ListW2, ListW2Top, ListW4,
-            ListFree, ListNested, MapW1, MapW2, SetW1>>::type;
+            ListFree, ListNested, MapW1, MapW2, SetW1>,
+      // a record's cap as the bound of the positions beneath it (appended)
+      types<CapTransfer, CapList, CapList2, CapList4, CapNested, CapMap, CapTuple, CapTight,
+            CapClamp, CapChild, CapOuter>>::type;
 
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)

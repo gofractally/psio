@@ -19,7 +19,11 @@ full, bounded lists and strings, a member `lengthBound` attribute on an
 unbounded string or list); otherwise 4. A `BoundedList`, a map or a set of
 bounded elements, and a plain `List` whose count the holding member's
 `lengthBound` gives, therefore have a 1- or 2-byte offset table when their
-bound allows it. The cap limits the record's encoded
+bound allows it. Beneath a record with a `maxDynamicData`, every list, array,
+map, set and tuple down to the next record is also bounded by that cap for its
+width (`docs/pssz-spec.md` §3.6); the codec keeps the cap in effect as it
+walks. A custom handler always receives the root encoding of its value. The
+cap limits the record's encoded
 size, and length bounds are enforced, on encode and decode. The bytes are those
 of the typed `psio::pssz` codec; `conformance/pssz-vectors.json` records the IR
 of all its types and `cpp/tests/schema_conformance_tests.cpp` checks every

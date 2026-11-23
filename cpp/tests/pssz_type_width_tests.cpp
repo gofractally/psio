@@ -8,6 +8,14 @@ auto width_view(const std::vector<char>& bytes)
 {
    return psio::view<T,F,psio::storage::const_borrow>{bytes};
 }
+std::vector<char> hex_bytes(std::string_view hex)
+{
+   std::vector<char> out;
+   const auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+   for (std::size_t i = 0; i + 1 < hex.size(); i += 2)
+      out.push_back(static_cast<char>(nibble(hex[i]) * 16 + nibble(hex[i + 1])));
+   return out;
+}
 bool equal_bytes(std::span<const char> a, std::span<const char> b)
 {
    return a.size()==b.size() && std::equal(a.begin(),a.end(),b.begin());
@@ -112,7 +120,13 @@ TEST_CASE("nested containers retain their own tables and canonical record payloa
    REQUIRE(psio::validate<WidthNestedContainers>(psio::pssz{},wire).ok());
    REQUIRE(psio::decode<WidthNestedContainers>(psio::pssz{},wire).nested[1][0].label=="b");
    auto root=width_view<WidthNestedContainers>(wire);
-   REQUIRE(equal_bytes(psio::bytes(root.get<0>()),psio::encode(psio::pssz{},value.nested)));
+   // Beneath the record's cap of 200 the lists have one-byte tables
+   // (docs/pssz-spec.md 3.6): table 02 0a of the two rows, each row its own
+   // table 01 and one checkpoint (one-byte offsets: its own cap). On their
+   // own the same lists are unbounded and have four-byte tables.
+   REQUIRE(equal_bytes(psio::bytes(root.get<0>()),
+                       hex_bytes("020a" "01" "050100000005" "61" "01" "050200000005" "62")));
+   REQUIRE_FALSE(equal_bytes(psio::bytes(root.get<0>()),psio::encode(psio::pssz{},value.nested)));
    REQUIRE(root.get<0>()[1][0].get<0>()==2);
    REQUIRE(root.get<1>()[0].has_value());
    REQUIRE((*root.get<1>()[0]).get<1>().view_()=="c");
