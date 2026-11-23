@@ -919,6 +919,15 @@ else()
    message(STATUS "psio_flatbuf_fuzz_tests_sanitized: sanitizers do not link — skipping")
 endif()
 
+# Shared cross-language FlatBuffers fixture (conformance/flatbuf-vectors.json):
+# buffers of known values, and buffers a verifier must refuse.
+set(PSIO_FLATBUF_VECTORS ${CMAKE_SOURCE_DIR}/conformance/flatbuf-vectors.json)
+add_executable(psio_flatbuf_conformance_emit flatbuf_conformance_emit.cpp)
+target_link_libraries(psio_flatbuf_conformance_emit PRIVATE psio)
+target_compile_features(psio_flatbuf_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_flatbuf_conformance_regen
+         COMMAND psio_flatbuf_conformance_emit --check ${PSIO_FLATBUF_VECTORS})
+
 # The same against the official library, both directions, where it is
 # installed: tests/flatbuf/interop.fbs is compiled by `flatc`.
 find_package(flatbuffers QUIET CONFIG)

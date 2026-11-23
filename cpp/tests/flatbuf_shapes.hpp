@@ -188,6 +188,49 @@ struct Sparse
 };
 PSIO_REFLECT(Sparse, rows)
 
+// Shapes every language with a FlatBuffers codec can declare (the Rust
+// derive has no structs, unions, optionals, maps or non-zero defaults):
+// conformance/flatbuf-vectors.json is read by C++ and Rust through these.
+struct Numbers
+{
+   bool          b   = false;
+   std::int8_t   i8  = 0;
+   std::uint8_t  u8  = 0;
+   std::int16_t  i16 = 0;
+   std::uint16_t u16 = 0;
+   std::int32_t  i32 = 0;
+   std::uint32_t u32 = 0;
+   std::int64_t  i64 = 0;
+   std::uint64_t u64 = 0;
+   float         f32 = 0;
+   double        f64 = 0;
+   friend bool   operator==(const Numbers&, const Numbers&) = default;
+};
+PSIO_REFLECT(Numbers, b, i8, u8, i16, u16, i32, u32, i64, u64, f32, f64)
+
+struct Entry
+{
+   std::string   name;
+   std::uint32_t count = 0;
+   double        price = 0;
+   friend bool   operator==(const Entry&, const Entry&) = default;
+};
+PSIO_REFLECT(Entry, name, count, price)
+
+struct Basket
+{
+   std::uint64_t              id = 0;
+   Profile                    owner;
+   std::vector<Entry>         entries;
+   std::vector<std::string>   tags;
+   std::vector<std::uint16_t> codes;
+   std::vector<std::uint8_t>  bytes;
+   double                     total = 0;
+   bool                       paid  = false;
+   friend bool                operator==(const Basket&, const Basket&) = default;
+};
+PSIO_REFLECT(Basket, id, owner, entries, tags, codes, bytes, total, paid)
+
 inline Profile sample_profile()
 {
    return Profile{42, "Alice Example", "alice@example.com", 37, true};
