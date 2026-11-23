@@ -1595,6 +1595,30 @@ members may change in one way only: a bound may widen
   width.** A type without an explicit cap has only the slack between its
   inferred bound and 255 / 65535. Declare `maxDynamicData` when the type is
   first published if it may grow ([3.4](#34-how-to-pick-a-cap)).
+
+  > **The case that surprises: a type whose members are all fixed-size.**
+  > `(int32)` — a record `{ std::int32_t socket; }`, a `std::tuple<std::int32_t>`,
+  > or the arguments of `void close(std::int32_t socket)` — has an inferred
+  > bound of 5 bytes, so its header is **1 byte**. `(int32,
+  > optional<vector<u64>>)` is unbounded, so its header and slot are **4
+  > bytes**. The second is *not* a revision of the first: the new reader
+  > rejects every old value (`pssz: record fixed region truncated`), the old
+  > reader rejects every new one (`pssz: fixed record has trailing payload`),
+  > and both checks refuse the pair — `psio::pssz_evolves_from<Old, New>` is
+  > false, `psio::require_pssz_evolves_from<Old, New>()` says "the automatic
+  > offset width of the type changes", `psio::pssz_ir::evolves_from` answers
+  > `width-changed` at `(root)`. A record with a `std::string` member does not
+  > show this (it is 4 bytes wide from the start), which is why the rule
+  > looks like "fixed members cannot evolve"; the rule is about the width.
+  >
+  > Adding an unbounded optional to an uncapped bounded type is never a
+  > compatible change. A type that expects to grow declares
+  > `maxDynamicData(N)` in its **first** published version — on the record,
+  > or on the `method(...)` for an argument list — with N in the width class
+  > it will keep; or every member it will ever gain is bounded so that the
+  > inferred bound stays in the class (`optional<uint8>` after `(int32)` is
+  > fine: 7 bytes). The cap cannot be added afterwards when it changes the
+  > width.
 - The same holds one level down: a field appended to a record that is an
   element of a bounded list raises that list's bound and can move the
   list's own width. A cap on the element record fixes what the list

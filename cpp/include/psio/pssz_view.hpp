@@ -575,6 +575,21 @@ namespace psio {
       template <typename A> inline constexpr bool is_pssz_format_v<pssz_at<A>> = true;
    }
 
+   // A PSSZ view converts implicitly to its value exactly when the value is
+   // trivially copyable and of fixed encoded size (view.hpp, "From a view to
+   // what it designates"): scalars, enums, time points, uint256,
+   // std::array of such, definitionWillNotChange records of such — a
+   // 32-byte checksum, an account number. (Not a record that itself only
+   // refers to its members.)
+   namespace view_layout {
+      template <typename Fmt, typename T>
+         requires ::psio::detail::is_pssz_format_v<Fmt>
+      inline constexpr bool value_convertible_v<Fmt, T> =
+         std::is_trivially_copyable_v<T> && !::psio::is_source_v<T> &&
+         ::psio::detail::pssz_impl::plain_members_v<T> &&
+         ::psio::detail::pssz_impl::is_fixed_v<T>;
+   }
+
    namespace detail {
       // The view of a positional record: std::tuple<Ts...> or
       // psio::annotated_tuple<Meta, Ts...> (a method's argument tuple, whose

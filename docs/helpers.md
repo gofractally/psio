@@ -188,6 +188,19 @@ The checked decode accepts exactly what `validate_F<T>` accepts:
   unknown members are dropped (the compatible rule of `psio::validate`).
   `psio::validate_strict<T>(psio::pssz{}, bytes)` rejects such a frame;
   `psio::decode_pssz_checked` reports whether there were any.
+
+**Strict validation** — `psio::validate_strict<T>(psio::pssz{}, bytes)` — is
+"valid, canonical, and nothing this reader does not know": the checks of
+`validate_pssz<T>`, no unknown appended members at any depth (nested values
+included), an adapter's payload put to its `validate_strict`, the value's
+semantic specs and invariants, and the requirement that encoding the value
+again gives these very bytes (`pssz: noncanonical encoding` otherwise). It
+returns a `codec_status` and gives the same answers in a build without
+exceptions (`-fno-exceptions -fno-rtti`, `PSIO_EXCEPTIONS_ENABLED=0`) as
+natively, for every type: records with binary or text adapters, invariants,
+transparent types, bounded and ordered members, constructed records. It
+decodes the value once (after the structural checks have accepted the
+bytes), so it costs about a validate, a decode and an encode.
 - `json`, `ijson`: every member that is not optional must be present, in the
   checked and in the trusted decode alike (`psio::decode<T>(psio::json{}, text)`,
   `from_json<T>(psio::trusted{text})`).
@@ -332,9 +345,9 @@ What an accessor returns:
 | arithmetic, `bool` | the value | |
 | enum, duration / time point, `uint256` | a scalar view | converts to the value; `.get()` |
 | `std::string`, `psio::utf8_string<N>` | a string view | converts to `std::string_view`; `.view_()`, `size()`, `empty()` |
-| reflected record | its view | its own accessors |
+| reflected record | its view | its own accessors; converts to the record when that is `definitionWillNotChange`, fixed-size and trivially copyable |
 | transparent type (`transparent()`) | the view of its member | as the member; `.unpack()` gives the transparent type |
-| `std::vector<T>`, `std::array<T, N>` | a list view | `size()`, `empty()`, `[i]`, `at(i)`, `front()`, `back()`, `begin()` / `end()` (random access), `rbegin()` / `rend()`; a `std::vector<char>` view converts to `std::span<const char>` |
+| `std::vector<T>`, `std::array<T, N>` | a list view | `size()`, `empty()`, `[i]`, `at(i)`, `front()`, `back()`, `begin()` / `end()` (random access), `rbegin()` / `rend()`; a view of bytes converts to `std::span<const B>`, a view of a fixed array of fixed values to the array ([below](#from-a-view-to-its-value)) |
 | `std::optional<T>` | an optional view | `has_value()`, `bool`, `*`, `->`, `value()` (checked), `value_or(x)` |
 | `std::variant<Ts...>` | a variant view | `index()`, `visit(fn)`, `get_if<I>()` / `get_if<Alt>()` (a `std::optional` of the alternative's view), `holds_alternative<Alt>()`; also `psio::get_if<Alt>(v)` |
 | `std::tuple`, `std::pair` | a tuple view | `get<N>()`; `first()` / `second()`; structured bindings |
@@ -396,11 +409,25 @@ are then narrower than in a standalone value of its type, so its bytes are
 not an encoding of that type (they do not even validate as one). The view's
 format knows the position; the spelled-out form does not.
 
-There is no implicit conversion from a view to an owned value: a conversion
-that allocates is always written (`unpack()`). The conversions that borrow or
-copy a scalar are implicit: a string view to `std::string_view`, a
-`std::vector<char>` view to `std::span<const char>`, a scalar view to its
-value.
+**Implicit conversions.** One rule for every view:
+
+| The view designates | Converts implicitly to |
+|---------------------|------------------------|
+| a value that is trivially copyable and of fixed encoded size: a scalar, an enum, a duration / time point, `uint256`, a `std::array` of such, a `definitionWillNotChange` record of such (a 32-byte checksum, an account number: a one-member record with a text adapter), a transparent type over one | the value. Copying it costs what reading it costs |
+| a byte sequence | what borrows it: a string to `std::string_view`; a `std::vector<B>` of a byte type `B` (`char`, `signed char`, `unsigned char`, `std::byte`, `std::int8_t`, `std::uint8_t`) to `std::span<const B>`; a `std::array<B, N>` to `std::span<const B, N>` and `std::span<const B>` (and to the array, by the first row). `data()` gives the pointer |
+| anything else: a string as `std::string`, a list, an optional, a variant, a tuple, an extensible record, a record with a variable-size member, a type that is not trivially copyable | nothing: write `unpack()`. A conversion that allocates or walks is always spelled |
+
+```cpp
+void use(AccountNumber, const Checksum256&, std::span<const unsigned char>);
+use(row.owner(), row.id(), row.data());      // no unpack()
+```
+
+A span is over the element type only (`std::vector<unsigned char>` does not
+convert to `std::span<const char>`), and never over elements wider than a
+byte: the wire is not aligned for them. The rule is
+`psio::view_layout::value_convertible_v<Format, T>` for the first row; it is
+implemented for the PSSZ formats (`psio::pssz`, `pssz_<W>`, members under a
+cap).
 
 ### Comparison
 
@@ -479,8 +506,9 @@ psio::to_pssz(TxSuccessView{id, num, traceView});    // the bytes of the record 
 This is PSSZ (`to_pssz`, `pssz_size`, `encode_pssz_checked`,
 `validate_pssz<Source>`, which validates as the wire type) and `key`
 (`to_key`: `std::string_view`, C strings, `std::reference_wrapper`, views,
-tuples of references). Decoding *into* a source does not compile: decode
-`psio::wire_type_t<Source>`, or view the bytes.
+tuples of references). Decoding *into* a source compiles for the shapes
+that can borrow from the bytes ([below](#decoding-into-a-record-that-borrows));
+for the others, decode `psio::wire_type_t<Source>`, or view the bytes.
 
 **A view as a value** re-emits its bytes when they are what the position
 needs, and is decoded and encoded again when they are not. The second case
@@ -519,8 +547,7 @@ using Args = psio::reflect<Token>::method_arg_tuple<0>;
 auto b = psio::to_pssz_as<Args>(std::forward_as_tuple(toView, amount, memo));
 auto n = psio::pssz_size_as<Args>(std::forward_as_tuple(toView, amount, memo));
 
-// The same from the arguments themselves; each may be the parameter's type, a
-// source of it (a view, a std::string_view, ...) or a value that converts to it:
+// The same from the arguments themselves, as a call would be written:
 auto c = psio::method_args_to_pssz<Token, 0>(toView, 5, "memo");
 psio::method_args_append_pssz<Token, 0>(out, toView, 5, "memo");
 ```
@@ -529,6 +556,102 @@ The source must be a source of exactly that type; anything else is a
 compile error. `psio::encode_method_result<T, I>(value, out)` takes a source
 of the result as well, so a method that returns a `psio::pssz_view<X>` has
 its result written as an `X`.
+
+**Arguments are taken as an ordinary C++ call takes them.**
+`method_args_to_pssz<T, I>(args...)` accepts what `obj.method(args...)`
+accepts, and nothing else:
+
+| The argument | Is |
+|--------------|----|
+| already a source of the parameter (`psio::wire_type_t<Argument>` is the parameter's wire type): the value, a view of it, a `std::string_view` or literal for a string, a span for a list, `std::cref(x)` | written as it stands, by reference. Nothing is copied, converted or unpacked |
+| anything else | converted to the parameter's type **implicitly** (copy-initialization, `P p = std::forward<A>(arg);`), then written |
+
+Explicit constructors and explicit conversion operators are not used, as in
+a call: for `struct Quantity { Quantity(std::uint64_t); explicit Quantity(double); }`
+the argument `5` is the `std::uint64_t` constructor, and a type that only
+converts explicitly is a compile error (convert it at the call). Arguments
+are forwarding references, so a conversion operator that is not `const`
+(`operator AccountNumber()` of a non-const object) or is `&&`-qualified is
+used exactly when the call would use it. The number of arguments is checked
+first ("too few" / "too many arguments passed to the method").
+`psio::method_arguments<T, I, Args...>` is the same test as a concept, for
+constraining a proxy's call operator.
+
+### Decoding into a record that borrows
+
+A record may declare members that point into the bytes it is decoded from
+instead of owning a copy. `psio::from_pssz<T>(bytes)` (validating),
+`psio::from_pssz<T>(psio::trusted{bytes})`, `psio::decode<T>(psio::pssz{}, bytes)`
+and `psio::decode_pssz_checked` fill them; the result is valid for as long
+as `bytes` is.
+
+```cpp
+template <typename Body> struct BasicHttpRequest { std::string host; ...; Body body; };
+auto req = psio::from_pssz<BasicHttpRequest<std::span<const char>>>(bytes);  // body not copied
+psio::method_args_to_pssz<Svc, 0>(req);   // an argument for BasicHttpRequest<std::vector<char>>
+```
+
+| Member declared as | Borrows |
+|--------------------|---------|
+| `std::string_view` | a string member's characters |
+| `std::span<const B>`, `B` a byte type (`char`, `signed char`, `unsigned char`, `std::byte`, `std::int8_t`, `std::uint8_t`), dynamic extent | a `std::vector<B>` member's bytes |
+| `psio::pssz_view<X>` (`psio::view<const X, psio::pssz>`) | a member `X`, where its bytes are a standalone encoding of `X`: every reflected record, and any type when neither the record's cap nor a member annotation narrows its offset widths |
+| `std::optional` of one of these | present or absent |
+| a reflected record with such members, to any depth, and `std::vector` / `std::optional` / `std::array` of such records | member by member |
+
+Owning members of the same record are decoded as usual. The types of the
+first three rows can also be decoded by themselves
+(`psio::from_pssz<std::string_view>(bytes)`).
+
+Compile errors, each naming this list: a `std::span<const E>` of elements
+wider than a byte (the wire is not aligned for `E`) or of variable-size
+elements, a span with a fixed extent, a `std::vector<std::string_view>`, a
+`std::reference_wrapper`, a `const char*`, a tuple of references, and a view
+member whose position narrows its widths. `psio::from_pssz<T>` of a
+temporary `std::vector<char>` is deleted for a `T` that borrows
+(`psio::pssz_borrows_v<T>`).
+
+Validation is of the owning type (`validate_pssz<T>` validates
+`wire_type_t` member by member), bounds and `utf8` on a borrowed member are
+enforced as on the owning one, and such a record `psio::packs_as` the owning
+record: it can be packed again, stored, or passed as a method argument.
+
+### "A `U` packs as a `T`": `psio::packs_as`
+
+`psio::packs_as<U, T>` is the compile-time relation behind all of the above:
+it is true exactly when `psio::to_pssz(const U&)` yields the bytes of a `T`,
+so that they validate, decode and view as a `T`.
+
+| `U` | packs as `T` when |
+|-----|-------------------|
+| `T`, or a source of it: `psio::pssz_view<T>`, `std::cref(t)`, `std::string_view` for `std::string`, `std::span<const E>` for `std::vector<E>`, `std::tie(a, b)` for the tuple of values | always (`psio::wire_type_t<U>` is `T`) |
+| a reflected record | its members, in order, pack as the members of `T` (views, string views, spans, references standing for owning members, nested to any depth), with the same `definitionWillNotChange`, the same offset widths and caps class, and the same member bounds. Member names do not matter |
+| `std::vector` / `std::optional` / `std::array` / `std::variant` / tuple of such | element by element |
+| `psio::shared_pssz<X>`, `psio::pssz_buffer<X>`, `psio::nested<X>` | as a whole value: when `X` packs as `T` (its bytes are the bytes of the `X`). As a *member*, a packed `X` is a byte list and packs as a packed `X` only |
+
+Everything else is false: another member count, order or integer size, a
+tuple against a record, other bounds, a type with a binary adapter against
+anything but itself. The relation is symmetric.
+
+```cpp
+struct TxSuccessView { Checksum256 id; BlockNum blockNum; psio::pssz_view<const TransactionTrace> trace; };
+PSIO_REFLECT(TxSuccessView, id, blockNum, trace)
+static_assert(psio::packs_as<TxSuccessView, TxSuccessRecord>);
+
+template <typename U> requires psio::packs_as<U, T>      // Table<T>::put
+void put(const U& row) { store(psio::to_pssz(row)); }
+```
+
+A mismatch is one short error that names both types:
+`because 'psio::packs_as<Wrong, Rec>' evaluated to false`.
+
+`psio::to_pssz_as<T>(source)` and `psio::pssz_size_as<T>(source)` are
+constrained by `psio::pssz_source_of<Source, T>` — `packs_as<Source, T>`,
+or, for a method's argument tuple `T`, `packs_as` of the tuple of its
+elements — and each argument of `psio::method_args_to_pssz` is written as it
+stands when `psio::packs_as<Argument, Parameter>` and converted implicitly
+otherwise. So a record of views is an argument for a parameter of the owning
+record type.
 
 ## Sinks and sources
 
@@ -594,7 +717,8 @@ struct Token {
 | `psio::invoke_method_pssz<T, I>(obj, bytes)` | validates, then calls the method; returns what it returns |
 | `psio::invoke_method_pssz<T, I>(obj, psio::trusted{bytes})` | calls without validating |
 | `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result (`psio::encode_method_result`, which honours `returns(...)`); a `codec_status` |
-| `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, none copied ([above](#encoding-a-source-as-a-named-type)) |
+| `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, converted implicitly as a call converts them, none copied ([above](#encoding-a-source-as-a-named-type)) |
+| `psio::method_arguments<T, I, Args...>` | concept: `args...` can be passed to the method |
 | `reflect<T>::invoke_method<I>(obj, tuple)` | unchanged: calls with a tuple of arguments as declared (`method_params<I>`) |
 
 How a parameter is handed to the method is decided by its declared type:
@@ -624,8 +748,9 @@ taken as `psio::pssz_view`: `invoke_method_pssz` refuses at compile time and
 says to take it by value (or to state the bound in the type).
 
 `validate_pssz<Tuple>` of a tuple type that names a view (or any other
-non-owning type) validates the tuple of wire types; decoding *into* such a
-type does not compile (decode `psio::wire_type_t<Tuple>`, or view the bytes).
+non-owning type) validates the tuple of wire types; decoding *into* a tuple
+of views or references does not compile (decode `psio::wire_type_t<Tuple>`,
+view the bytes, or use `method_params_from_pssz`).
 
 ## The generic layer
 

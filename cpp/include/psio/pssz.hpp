@@ -330,6 +330,97 @@ namespace psio {
                     ... && true);
          }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
 
+      // ── Borrowing decode ──────────────────────────────────────────────
+      //
+      // A record may declare a member as a type that BORROWS from the
+      // bytes it is decoded from instead of owning a copy. Decoding such a
+      // record fills those members with pointers into the input, which
+      // must outlive the record; everything else is decoded as usual.
+      // The member shapes that borrow:
+      //
+      //   std::string_view                        a string member's characters
+      //   std::span<const B>, B a byte type       a std::vector<B> member's
+      //     (char, signed char, unsigned char,    bytes (dynamic extent)
+      //      std::byte, std::int8_t, std::uint8_t)
+      //   psio::pssz_view<X> / view<const X, pssz>  a member X, where its bytes
+      //                                           are a standalone encoding
+      //                                           of X (every reflected
+      //                                           record; any type when the
+      //                                           position carries neither a
+      //                                           cap nor a bound)
+      //   std::optional of one of these           present or not
+      //   a reflected record with such members    to any depth, and inside
+      //                                           std::vector / std::optional
+      //                                           / std::array / std::variant
+      //                                           / tuples of records
+      //
+      // Nothing else that only refers to a value can be decoded into: a
+      // std::span<const E> of elements wider than a byte (the wire is not
+      // aligned for E) or of variable-size elements, a std::span with a
+      // fixed extent, a std::vector<std::string_view>, a
+      // std::reference_wrapper, a const char*, a tuple of references. Those
+      // are compile errors that name this list.
+      template <typename D>
+      inline constexpr bool is_byte_span_v = false;
+      template <typename B>
+         requires(sizeof(B) == 1 && std::is_const_v<B> &&
+                  ((std::is_integral_v<B> && !std::is_same_v<std::remove_const_t<B>, bool>) ||
+                   std::is_same_v<std::remove_const_t<B>, std::byte>))
+      inline constexpr bool is_byte_span_v<std::span<B, std::dynamic_extent>> = true;
+
+      // A view type (view.hpp), told without including it.
+      template <typename D>
+      concept borrowed_view = ::psio::is_source_v<D> && requires(const D& v) {
+         typename D::format_type;
+         typename D::element_type;
+         { v._psio_data() } -> std::convertible_to<std::span<const char>>;
+         D{std::span<const char>{}};
+      };
+
+      // Whether a member declared as the source type D can borrow.
+      template <typename D>
+      inline constexpr bool borrowable_source_v =
+         std::is_same_v<D, std::string_view> || is_byte_span_v<D> || borrowed_view<D>;
+      template <typename D>
+         requires ::psio::is_source_v<D>
+      inline constexpr bool borrowable_source_v<std::optional<D>> = borrowable_source_v<D>;
+
+      // Whether a T can be decoded into: an owning type, a source that
+      // borrows, or a record whose members are such.
+      template <typename T>
+      inline constexpr bool decodable_v =
+         ::psio::is_source_v<T> ? borrowable_source_v<T> : true;
+      template <typename T>
+         requires(::psio::Reflected<T> && !std::is_enum_v<T> && !::psio::is_source_v<T>)
+      inline constexpr bool decodable_v<T> =
+         []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (decodable_v<std::remove_cvref_t<
+                       typename ::psio::reflect<T>::template member_type<Is>>> &&
+                    ... && true);
+         }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
+
+      // Whether decoding a T borrows from the input anywhere (so that the
+      // result must not outlive the bytes): a borrowing source, or a
+      // record / container that holds one.
+      template <typename T>
+      inline constexpr bool borrows_v = ::psio::is_source_v<T> && borrowable_source_v<T>;
+      template <typename T>
+         requires(::psio::Reflected<T> && !std::is_enum_v<T> && !::psio::is_source_v<T>)
+      inline constexpr bool borrows_v<T> =
+         []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (borrows_v<std::remove_cvref_t<
+                       typename ::psio::reflect<T>::template member_type<Is>>> ||
+                    ... || false);
+         }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
+      template <typename E, typename Al>
+         requires(!::psio::is_source_v<std::vector<E, Al>>)
+      inline constexpr bool borrows_v<std::vector<E, Al>> = borrows_v<E>;
+      template <typename E>
+         requires(!::psio::is_source_v<std::optional<E>>)
+      inline constexpr bool borrows_v<std::optional<E>> = borrows_v<E>;
+      template <typename E, std::size_t N>
+      inline constexpr bool borrows_v<std::array<E, N>> = borrows_v<E>;
+
       // ── Sources (wire_type.hpp) ───────────────────────────────────────
       //
       // The encode-side walks (preflight, sizing, writing) take the value
@@ -2013,7 +2104,7 @@ namespace psio {
             constexpr bool is_arith =
                std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
             constexpr bool is_memcpy_record =
-               (Record<E> || ::psio::is_transparent_v<E>) &&
+               (Record<E> || ::psio::is_transparent_v<E>) && plain_members_v<E> &&
                std::is_trivially_copyable_v<E> &&
                is_fixed_v<E> && fixed_size_of<E>() == sizeof(E);
             if constexpr (is_arith || is_memcpy_record)
@@ -2033,7 +2124,7 @@ namespace psio {
          {
             // Memcpy fast path mirrors decode_value's, but writes
             // directly into `out` instead of returning a fresh T.
-            if constexpr (::psio::is_dwnc_v<T> &&
+            if constexpr (::psio::is_dwnc_v<T> && plain_members_v<T> &&
                           std::is_trivially_copyable_v<T> &&
                           is_fixed_v<T>)
                if constexpr (fixed_size_of<T>() == sizeof(T))
@@ -2123,7 +2214,7 @@ namespace psio {
             constexpr bool is_arith =
                std::is_arithmetic_v<T> && !std::is_same_v<T, bool>;
             constexpr bool is_memcpy_record =
-               (Record<T> || ::psio::is_transparent_v<T>) &&
+               (Record<T> || ::psio::is_transparent_v<T>) && plain_members_v<T> &&
                std::is_trivially_copyable_v<T> && fixed_size_of<T>() == sizeof(T);
             if constexpr (is_arith || is_memcpy_record)
             {
@@ -2199,6 +2290,63 @@ namespace psio {
       // the writer's fixed-region header: known trailing optional fields the
       // writer pruned decode as None, and unknown appended slots are skipped
       // while still delimiting the last known variable payload.
+      // A member (or value) declared as the borrowing type D, whose wire
+      // type is F, read from src[pos, end): pointers into `src`, nothing
+      // copied. See "Borrowing decode" above for the shapes.
+      template <std::size_t LegacyW, bool Auto, typename D, typename F, typename A>
+      D borrow_value(std::span<const char> src, std::size_t pos, std::size_t end)
+      {
+         static_assert(borrowable_source_v<D>,
+                       "psio::pssz: this type only refers to a value and cannot borrow it from "
+                       "the bytes being decoded. The members that borrow are: std::string_view "
+                       "(a string), std::span<const B> of a byte type B with dynamic extent (a "
+                       "std::vector<B>), psio::pssz_view<X> (a member X), and std::optional of "
+                       "those. A std::span of wider or variable-size elements, a "
+                       "std::vector<std::string_view>, a std::reference_wrapper, a const char* "
+                       "and a tuple of references cannot: declare the owning type "
+                       "(psio::wire_type_t<T>), or read the bytes through a view");
+         if (pos > end || end > src.size())
+            size_failure("pssz: value span out of bounds");
+         if constexpr (std::is_same_v<D, std::string_view>)
+            return std::string_view{src.data() + pos, end - pos};
+         else if constexpr (is_byte_span_v<D>)
+            return D{reinterpret_cast<typename D::pointer>(src.data() + pos), end - pos};
+         else if constexpr (is_std_optional_v<D>)
+         {
+            using DV = typename D::value_type;
+            using FV = typename F::value_type;
+            if constexpr (!optional_uses_selector_v<FV>)
+            {
+               if (pos >= end)
+                  return D{};
+               return D{borrow_value<LegacyW, Auto, DV, FV, A>(src, pos, end)};
+            }
+            else
+            {
+               if (pos >= end)
+                  size_failure("pssz: optional selector missing");
+               if (static_cast<unsigned char>(src[pos]) == 0)
+                  return D{};
+               return D{borrow_value<LegacyW, Auto, DV, FV, A>(src, pos + 1, end)};
+            }
+         }
+         else
+         {
+            constexpr std::size_t W = [] {
+               if constexpr (Auto) return width_for<F, A>();
+               else return LegacyW;
+            }();
+            static_assert(
+               view_verbatim_v<typename D::format_type, W, Auto, F, A>,
+               "psio::pssz: this member cannot be borrowed as a view: the cap of the record "
+               "that holds it, or the member's annotations, narrow the offset widths of its "
+               "encoding, so its bytes are not a standalone encoding of its type (or the view "
+               "is of another format than the bytes). Declare the member by value, or state "
+               "the bound in its type");
+            return D{std::span<const char>(src.data() + pos, end - pos)};
+         }
+      }
+
       template <std::size_t LegacyW, bool Auto, Record T, typename A, std::size_t... Is>
       void record_decode_into(std::span<const char> src, std::size_t pos,
                               std::size_t end, T& out,
@@ -2251,6 +2399,23 @@ namespace psio {
                       src.data() + spans[Is].begin,
                       spans[Is].end - spans[Is].begin));
                 }
+                else if constexpr (!std::is_same_v<std::remove_cvref_t<decltype(fref)>, F>)
+                {
+                   // A member declared as a type that refers to its value
+                   // (std::string_view, a byte span, a view): it borrows
+                   // the member's bytes from `src`.
+                   fref = borrow_value<W, Auto, std::remove_cvref_t<decltype(fref)>, F,
+                                       field_ann<T, A, Is>>(src, spans[Is].begin,
+                                                            spans[Is].end);
+                   if constexpr (ann::has_value_checks_v<std::remove_cvref_t<F>, eff>)
+                      if (auto st = ::psio::check_member_annotations(
+                             decode_value<W, Auto, F, field_ann<T, A, Is>>(
+                                src, spans[Is].begin, spans[Is].end),
+                             record_member_annotations<T, Is>::value,
+                             "pssz: member length_bound violated", "pssz");
+                          !st.ok())
+                         status_failure(st);
+                }
                 else
                 {
                    decode_into<W, Auto, F, field_ann<T, A, Is>>(src, spans[Is].begin,
@@ -2281,14 +2446,30 @@ namespace psio {
       }
 
       template <std::size_t LegacyW, bool Auto, typename T, typename A>
+      T decode_owning(std::span<const char> src, std::size_t pos, std::size_t end);
+
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
       T decode_value(std::span<const char> src, std::size_t pos,
                      std::size_t end)
       {
-         static_assert(!::psio::is_source_v<T> && plain_members_v<T>,
-                       "psio::pssz: a type that only refers to a value (a psio::view, a "
-                       "std::string_view, a std::span, a tuple of references, a record with such "
-                       "a member) cannot be decoded into: decode psio::wire_type_t<T>, or read "
-                       "the bytes through a view");
+         static_assert(decodable_v<T>,
+                       "psio::pssz: a type that only refers to a value cannot be decoded into, "
+                       "unless it can borrow from the bytes: a record whose non-owning members "
+                       "are std::string_view, std::span<const B> of a byte type, "
+                       "psio::pssz_view<X>, or std::optional of those (and those types "
+                       "themselves). A tuple of references, a std::span of wider elements, a "
+                       "std::vector<std::string_view>, a std::reference_wrapper or a record "
+                       "with such a member cannot be decoded into: decode "
+                       "psio::wire_type_t<T>, or read the bytes through a view");
+         if constexpr (::psio::is_source_v<T>)
+            return borrow_value<LegacyW, Auto, T, ::psio::wire_type_t<T>, A>(src, pos, end);
+         else
+            return decode_owning<LegacyW, Auto, T, A>(src, pos, end);
+      }
+
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
+      T decode_owning(std::span<const char> src, std::size_t pos, std::size_t end)
+      {
          constexpr std::size_t W = [] {
             if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
@@ -2488,7 +2669,7 @@ namespace psio {
             // Memcpy fast path for DWNC packed memcpy-layout records
             // (where wire bytes match memory bytes). Single-record
             // decode hits this; vec<E> already had its own bulk path.
-            if constexpr (::psio::is_dwnc_v<T> &&
+            if constexpr (::psio::is_dwnc_v<T> && plain_members_v<T> &&
                           std::is_trivially_copyable_v<T> &&
                           is_fixed_v<T>)
                if constexpr (fixed_size_of<T>() == sizeof(T))
@@ -2865,9 +3046,11 @@ namespace psio {
                    {
                       using Proj = ::psio::adapter<
                          std::remove_cvref_t<F>, ::psio::adapter_tag_of_t<eff>>;
-                      status = Proj::validate(std::span<const char>(
+                      const std::span<const char> payload(
                          src.data() + spans[Is].begin,
-                         spans[Is].end - spans[Is].begin));
+                         spans[Is].end - spans[Is].begin);
+                      status = flags && flags->exact ? Proj::validate_strict(payload)
+                                                     : Proj::validate(payload);
                    }
                 }
                 else
@@ -2983,6 +3166,12 @@ namespace psio {
          {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
                                           ::psio::binary_category>;
+            // Exact-schema mode (validate_strict) is the adapter's strict
+            // check: what it says about its own canonical form.
+            if constexpr (requires(std::span<const char> b) { Proj::validate_strict(b); })
+               if (flags && flags->exact)
+                  return Proj::validate_strict(std::span<const char>(
+                     src.data() + pos, end - pos));
             return Proj::validate(std::span<const char>(
                src.data() + pos, end - pos));
          }
@@ -3180,17 +3369,54 @@ namespace psio {
 
       // ── Exact-schema (strict) validation ──────────────────────────────────
       //
-      // Structural validation that additionally rejects unknown optional
-      // suffix fields. Native builds then materialize the value to run its
-      // semantic specs and to require the canonical encoding (which rejects
-      // an explicitly stored trailing None the encoder would have pruned).
+      // "Valid, canonical, and nothing the reader does not know": the
+      // structural validation in exact mode (unknown optional suffix fields
+      // are refused; an adapter's payload is put to its validate_strict; a
+      // nested value is checked the same way as its type), then the value
+      // is materialized to run its semantic specs and to require that its
+      // encoding is these very bytes.
       //
-      // Exception-disabled guests never materialize: a wrapper or adapter may
-      // abort on construction, which a guest cannot catch. They report an
-      // explicit unsupported status for types that need semantic work and
-      // structural success otherwise (docs/guest-codec-preparation.md).
+      // The same steps run in every build. Nothing here needs exceptions:
+      // the structural walk returns a status, a decode of bytes it accepted
+      // does not fail (every checking reader relies on that — an adapter's
+      // decode is only ever called on a payload its validate accepted,
+      // adapter.hpp — and the plain validator itself materializes members
+      // for invariants and order checks), the specs return a status, and
+      // the re-encode goes through the checked sizing pass. Where the
+      // compiler has exceptions a throw from user code (an adapter, a
+      // constructor) is turned into a failed status as well.
+      //
       // `depth`: the node depth of the value's root (nonzero for the bytes
       // of a nested value, which are checked by this same function).
+      template <std::size_t W, bool Auto, typename T>
+      codec_status validate_exact_materialized(std::span<const char> bytes)
+      {
+         T decoded = decode_value<W, Auto, T>(bytes, 0, bytes.size());
+         if constexpr (::psio::Reflected<T>)
+         {
+            auto specs = ::psio::validate_specs_on_value(decoded);
+            if (!specs.ok())
+               return specs;
+         }
+         // The value came from bytes that passed every check, so its
+         // encoding exists; a custom type whose decode and encode disagree
+         // can still produce a value that has none, and that is reported,
+         // not aborted on.
+         if (auto status = check_encode_depth_impl(decoded, 0, {}); !status.ok())
+            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+         size_check        check;
+         const std::size_t size = size_of_v<W, Auto, T, no_ann, size_check*>(decoded, &check);
+         if constexpr (Auto) enforce_max_dynamic<T>(size, &check);
+         if (check.failure || size != bytes.size())
+            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+         std::vector<char> canonical(size);
+         ::psio::fast_buf_stream sink(canonical.data(), canonical.size());
+         encode_value<W, Auto>(decoded, sink);
+         if (!std::equal(canonical.begin(), canonical.end(), bytes.begin()))
+            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+         return codec_ok();
+      }
+
       template <std::size_t W, bool Auto, typename T>
       codec_status validate_exact_value(std::span<const char> bytes,
                                         std::size_t depth = 0) noexcept
@@ -3206,22 +3432,7 @@ namespace psio {
 #if defined(__cpp_exceptions)
          try
          {
-            T decoded = decode_value<W, Auto, T>(bytes, 0, bytes.size());
-            if constexpr (::psio::Reflected<T>)
-            {
-               auto specs = ::psio::validate_specs_on_value(decoded);
-               if (!specs.ok())
-                  return specs;
-            }
-            const std::size_t size = size_of_v<W, Auto>(decoded);
-            if (size != bytes.size())
-               return codec_fail("pssz: noncanonical encoding", 0, "pssz");
-            std::vector<char> canonical(size);
-            ::psio::fast_buf_stream sink(canonical.data(), canonical.size());
-            encode_value<W, Auto>(decoded, sink);
-            if (!std::equal(canonical.begin(), canonical.end(), bytes.begin()))
-               return codec_fail("pssz: noncanonical encoding", 0, "pssz");
-            return st;
+            return validate_exact_materialized<W, Auto, T>(bytes);
          }
          catch (...)
          {
@@ -3230,9 +3441,7 @@ namespace psio {
                "pssz");
          }
 #else
-         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
-            return codec_fail("pssz: guest strict semantic validation unsupported", 0, "pssz");
-         return st;
+         return validate_exact_materialized<W, Auto, T>(bytes);
 #endif
       }
 
@@ -3847,6 +4056,103 @@ namespace psio {
    template <typename Old, typename New>
    concept pssz_evolves_from = pssz_evolves_from_v<Old, New>;
 
+   // Why a pair does not evolve, when the reason is the one that surprises:
+   // the automatic offset width of the type itself moved. A record or tuple
+   // without an explicit cap takes its width from the bound inferred from
+   // its members (docs/pssz-spec.md 3.1), so appending an optional member
+   // that is larger, or unbounded, than the room left in the width class
+   // (255 / 65535 bytes) is NOT a compatible change: (int32) is written
+   // with 1-byte offsets and (int32, optional<vector<uint64>>) with 4-byte
+   // ones, and neither reads the other. Declare maxDynamicData on the type
+   // (or on the method, for its arguments) from its first publication.
+   //
+   //   static_assert(psio::pssz_evolves_from<Old, New>);        // yes / no
+   //   psio::require_pssz_evolves_from<Old, New>();              // says why
+   template <typename Old, typename New>
+   inline constexpr bool pssz_evolution_keeps_width_v =
+      auto_pssz_width_v<::psio::wire_type_t<Old>> == auto_pssz_width_v<::psio::wire_type_t<New>>;
+
+   template <typename Old, typename New>
+   consteval void require_pssz_evolves_from() noexcept
+   {
+      static_assert(pssz_evolution_keeps_width_v<Old, New>,
+                    "psio::pssz: New does not evolve from Old: the automatic offset width of "
+                    "the type changes (psio::auto_pssz_width_v<Old> != "
+                    "psio::auto_pssz_width_v<New>), so the two are laid out differently and "
+                    "neither reads the other's bytes. A type without an explicit cap takes its "
+                    "width from the bound inferred from its members; an appended optional member "
+                    "must fit the room left in that width class (255 / 65535 bytes). Declare "
+                    "maxDynamicData(N) on the type (on the method, for its arguments) from its "
+                    "first publication, or keep the appended member bounded within the class");
+      static_assert(pssz_evolves_from_v<Old, New>,
+                    "psio::pssz: New does not evolve from Old (docs/pssz-spec.md 7.5 / 7.6): only "
+                    "optional members may be appended; member types, order, bounds, "
+                    "definitionWillNotChange and every offset width at every depth must be "
+                    "unchanged (an appended or widened member below can move the width of a "
+                    "list, tuple or record that holds it: declare maxDynamicData there)");
+   }
+
+   // ── "A U packs as a T" ────────────────────────────────────────────────
+   //
+   // `psio::packs_as<U, T>`: `psio::to_pssz(const U&)` yields the bytes of
+   // a T — every value of U is written exactly as the T it stands for is
+   // written, so the bytes validate, decode and view as a T. It holds for
+   //
+   //   - T itself, and every source of T (wire_type.hpp): a view of a T, a
+   //     std::string_view for a std::string, a span for a list, a
+   //     std::reference_wrapper, std::tie(...) for the tuple of values;
+   //   - a reflected record whose members, in order, pack as the members of
+   //     T (views, string views, spans, references standing for the owning
+   //     members; nested to any depth, and through std::optional,
+   //     std::vector, std::array, std::variant, tuples), with the same
+   //     definitionWillNotChange, the same offset widths and the same
+   //     member bounds — what the layout of T is made of. Member names do
+   //     not matter: the wire has none;
+   //   - a packed value, as a whole value: psio::shared_pssz<X>,
+   //     psio::pssz_buffer<X> and psio::nested<X> pack as whatever X packs
+   //     as (their bytes are the bytes of the X), and an X packs as them.
+   //     (As a MEMBER a packed X is a byte list, and packs as a packed X
+   //     only.)
+   //
+   // It is false for everything else: another member type, count or order,
+   // an integer of another size, a record against a tuple, a type with a
+   // binary adapter against anything but itself.
+   //
+   // The relation is symmetric and is about bytes only. It is built from
+   // `psio::wire_type_t` and the layout rules of `psio::pssz_evolves_from`
+   // (U and T evolve from each other).
+   namespace detail::pssz_impl
+   {
+      // A packed value at the root of an encoding is its inner value.
+      template <typename T>
+      struct packed_root
+      {
+         using type = T;
+      };
+      template <typename T>
+         requires(is_nested_v<T> && is_nested<T>::descends)
+      struct packed_root<T> : packed_root<::psio::wire_type_t<typename is_nested<T>::inner>>
+      {
+      };
+      template <typename T>
+      using packed_root_t = typename packed_root<::psio::wire_type_t<T>>::type;
+
+      template <typename U, typename T>
+      consteval bool same_layout() noexcept
+      {
+         if constexpr (std::is_same_v<U, T>)
+            return true;
+         else
+            return layout_evolves<U, T>() && layout_evolves<T, U>();
+      }
+      template <typename U, typename T>
+      inline constexpr bool packs_as_v = same_layout<packed_root_t<U>, packed_root_t<T>>();
+   }  // namespace detail::pssz_impl
+
+   template <typename U, typename T>
+   concept packs_as =
+      detail::pssz_impl::packs_as_v<std::remove_cvref_t<U>, std::remove_cvref_t<T>>;
+
    // Explicit-width tag — `psio::pssz_<1|2|4>`. Not on the public
    // surface; retained so byte-parity regressions vs. v1's
    // `frac_format_pssz{8,16,32}` can name the exact width at the call
@@ -4082,6 +4388,16 @@ namespace psio {
    };
 
    PSIO_FORMAT_HELPERS(pssz)
+
+   // Decoding a type that borrows from its input (a record with
+   // std::string_view / byte-span / view members: "Borrowing decode" above)
+   // from a temporary buffer would leave it dangling: not allowed.
+   template <typename T>
+      requires detail::pssz_impl::borrows_v<T>
+   T from_pssz(std::vector<char>&&) = delete;
+   // Whether psio::from_pssz<T>(bytes) returns a T that points into `bytes`.
+   template <typename T>
+   inline constexpr bool pssz_borrows_v = detail::pssz_impl::borrows_v<T>;
 
    // ── Checked compatible reads ──────────────────────────────────────────
    //
@@ -4346,37 +4662,90 @@ namespace psio {
    // (the bytes of a std::uint32_t are not those of a std::uint64_t).
    namespace detail::pssz_impl
    {
+      // A source of T for to_pssz_as<T>: something that packs as T, or —
+      // for an annotated tuple, whose cap and element annotations the
+      // source cannot spell — as the tuple of its elements.
       template <typename T, typename S>
-      inline constexpr bool source_of_v = std::is_same_v<::psio::wire_type_t<S>, T>;
+      inline constexpr bool source_of_v = packs_as_v<S, T>;
       template <typename Meta, typename... Ts, typename S>
       inline constexpr bool source_of_v<::psio::annotated_tuple<Meta, Ts...>, S> =
-         std::is_same_v<::psio::wire_type_t<S>, std::tuple<Ts...>> ||
+         packs_as_v<S, std::tuple<Ts...>> ||
          std::is_same_v<::psio::wire_type_t<S>, ::psio::annotated_tuple<Meta, Ts...>>;
 
-      // An argument as a source of parameter type P: itself when it is
-      // one, else converted.
+      // An argument of a call through its packed form, for parameter wire
+      // type P. It is taken exactly as an ordinary C++ call of the method
+      // would take it:
+      //   - an argument that already is a source of P (a P, a view of one,
+      //     a std::string_view for a std::string, ...) is written as it
+      //     stands, by reference: nothing is copied or converted;
+      //   - anything else is converted to P IMPLICITLY — copy-initialization,
+      //     `P p = std::forward<Arg>(arg);` — so explicit constructors and
+      //     explicit conversion operators are not considered, and a
+      //     conversion operator that is not const, or is &&-qualified, is
+      //     usable because the argument is forwarded as it was given.
       template <typename P, typename Arg>
-      using arg_source_t =
-         std::conditional_t<std::is_same_v<::psio::wire_type_t<Arg>, P>, const Arg&, P>;
+      inline constexpr bool arg_is_source_v = packs_as_v<std::remove_cvref_t<Arg>, P>;
+      template <typename P, typename Arg>
+      using arg_source_t = std::conditional_t<arg_is_source_v<P, Arg>,
+                                              const std::remove_cvref_t<Arg>&, P>;
+      template <typename P, typename Arg>
+      concept method_argument_for =
+         arg_is_source_v<P, Arg> || std::is_convertible_v<Arg, P>;
+      template <typename P, typename Arg>
+      constexpr arg_source_t<P, Arg> arg_source(Arg&& arg)
+      {
+         if constexpr (arg_is_source_v<P, Arg>)
+            return arg;
+         else
+            // The return statement copy-initializes the P.
+            return std::forward<Arg>(arg);
+      }
+      template <typename Tuple, typename... Args>
+      inline constexpr bool method_arguments_for_v = false;
+      template <typename Tuple, typename... Args>
+         requires(std::tuple_size_v<Tuple> == sizeof...(Args))
+      inline constexpr bool method_arguments_for_v<Tuple, Args...> =
+         []<std::size_t... Ns>(std::index_sequence<Ns...>) {
+            return (method_argument_for<std::tuple_element_t<Ns, Tuple>, Args> && ... && true);
+         }(std::index_sequence_for<Args...>{});
+   }  // namespace detail::pssz_impl
+
+   // `to_pssz_as<T>(source)` writes a T: the source packs as T
+   // (`psio::packs_as`), or T is an annotated tuple (a method's argument
+   // tuple) and the source packs as the tuple of its elements.
+   template <typename S, typename T>
+   concept pssz_source_of =
+      detail::pssz_impl::source_of_v<std::remove_cvref_t<T>, std::remove_cvref_t<S>>;
+
+   namespace detail::pssz_impl
+   {
+      // The type the walk lays `S` out as when it is written as T: T
+      // itself when the source spells it (or cannot: an annotated tuple),
+      // else the source's own wire type, whose bytes are T's (packs_as).
+      template <typename T, typename S>
+      using encode_as_t = std::conditional_t<
+         std::is_same_v<::psio::wire_type_t<S>, T> || requires { typename T::psio_annotated_tuple; },
+         T, ::psio::wire_type_t<S>>;
    }  // namespace detail::pssz_impl
 
    template <typename T, typename S>
-      requires detail::pssz_impl::source_of_v<T, S>
+      requires pssz_source_of<S, T>
    void to_pssz_as(const S& source, std::vector<char>& out)
    {
       namespace pz = detail::pssz_impl;
-      constexpr std::size_t W = auto_pssz_width_v<T>;
-      if (auto status = pz::check_encode_as<T>(source, 0); !status.ok())
+      using E      = pz::encode_as_t<T, S>;
+      constexpr std::size_t W = auto_pssz_width_v<E>;
+      if (auto status = pz::check_encode_as<E>(source, 0); !status.ok())
          pz::status_failure(status);
       const std::size_t total =
-         pz::size_of_as<W, true, T, pz::no_ann, std::nullptr_t>(source, nullptr);
+         pz::size_of_as<W, true, E, pz::no_ann, std::nullptr_t>(source, nullptr);
       const std::size_t orig = out.size();
       out.resize(pz::checked_add(orig, total));
       ::psio::fast_buf_stream sink(out.data() + orig, total);
-      pz::encode_as<W, true, T, ::psio::fast_buf_stream, pz::no_ann>(source, sink);
+      pz::encode_as<W, true, E, ::psio::fast_buf_stream, pz::no_ann>(source, sink);
    }
    template <typename T, typename S>
-      requires detail::pssz_impl::source_of_v<T, S>
+      requires pssz_source_of<S, T>
    [[nodiscard]] std::vector<char> to_pssz_as(const S& source)
    {
       std::vector<char> out;
@@ -4384,33 +4753,53 @@ namespace psio {
       return out;
    }
    template <typename T, typename S>
-      requires detail::pssz_impl::source_of_v<T, S>
+      requires pssz_source_of<S, T>
    [[nodiscard]] std::size_t pssz_size_as(const S& source)
    {
       namespace pz = detail::pssz_impl;
-      return pz::size_of_as<auto_pssz_width_v<T>, true, T, pz::no_ann, std::nullptr_t>(source,
+      using E      = pz::encode_as_t<T, S>;
+      return pz::size_of_as<auto_pssz_width_v<E>, true, E, pz::no_ann, std::nullptr_t>(source,
                                                                                     nullptr);
    }
 
+   // Whether `args...` can be passed to method I of T: as many as the
+   // method takes, each a source of its parameter or implicitly convertible
+   // to it — what an ordinary call `obj.method(args...)` accepts.
    template <typename T, std::size_t I, typename... Args>
-   void method_args_append_pssz(std::vector<char>& out, const Args&... args)
+   concept method_arguments =
+      detail::pssz_impl::method_arguments_for_v<
+         typename reflect<T>::template method_arg_tuple<I>, Args...>;
+
+   template <typename T, std::size_t I, typename... Args>
+   void method_args_append_pssz(std::vector<char>& out, Args&&... args)
    {
       using Tuple = typename reflect<T>::template method_arg_tuple<I>;
-      static_assert(sizeof...(Args) == std::tuple_size_v<Tuple>,
-                    "psio::method_args_to_pssz: the method takes another number of arguments");
+      static_assert(sizeof...(Args) >= std::tuple_size_v<Tuple>,
+                    "psio::method_args_to_pssz: too few arguments passed to the method");
+      static_assert(sizeof...(Args) <= std::tuple_size_v<Tuple>,
+                    "psio::method_args_to_pssz: too many arguments passed to the method");
       [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+         static_assert(
+            (detail::pssz_impl::method_argument_for<std::tuple_element_t<Ns, Tuple>, Args> &&
+             ... && true),
+            "psio::method_args_to_pssz: an argument is neither a source of its parameter's "
+            "type (psio::wire_type_t<Argument> is the parameter's wire type) nor implicitly "
+            "convertible to it; as in an ordinary call, explicit constructors and explicit "
+            "conversion operators are not used: convert the argument at the call");
+         // (Each element is the argument itself, by reference, or the
+         // parameter converted from it in place: no copy of either.)
          const std::tuple<
             detail::pssz_impl::arg_source_t<std::tuple_element_t<Ns, Tuple>, Args>...>
-            sources{static_cast<detail::pssz_impl::arg_source_t<std::tuple_element_t<Ns, Tuple>,
-                                                                  Args>>(args)...};
+            sources{detail::pssz_impl::arg_source<std::tuple_element_t<Ns, Tuple>, Args>(
+               std::forward<Args>(args))...};
          to_pssz_as<Tuple>(sources, out);
       }(std::index_sequence_for<Args...>{});
    }
    template <typename T, std::size_t I, typename... Args>
-   [[nodiscard]] std::vector<char> method_args_to_pssz(const Args&... args)
+   [[nodiscard]] std::vector<char> method_args_to_pssz(Args&&... args)
    {
       std::vector<char> out;
-      method_args_append_pssz<T, I>(out, args...);
+      method_args_append_pssz<T, I>(out, std::forward<Args>(args)...);
       return out;
    }
 

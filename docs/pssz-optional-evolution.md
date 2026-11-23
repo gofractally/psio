@@ -16,6 +16,60 @@ The supported checked walkers start at depth zero and allow nodes through depth 
 
 The optional suffix contract does not choose a final psibase width profile. Compact width selection and compatible-lineage pinning must be qualified together before the wire cutover; automatically changing width after appending a field is incompatible.
 
+## Read this first: a type that will grow declares its cap
+
+**Appending an optional member is compatible only if the type's offset width
+does not change, and a type without an explicit cap takes its width from the
+bound inferred from its members.** The inferred bound of a type whose
+members are all fixed-size (or bounded) is small, so its width is narrow,
+and the only spare room is the rounding up to the top of the width class
+(255, 65 535 bytes).
+
+The example to remember:
+
+| Type | Inferred bound | Width | `{socket = 7}` |
+|------|----------------|-------|----------------|
+| `(int32)` | 5 | 1 | `04 07 00 00 00` |
+| `(int32, optional<vector<u64>>)` | none | 4 | `04 00 00 00 07 00 00 00` |
+
+These are two different layouts. `(int32)` → `(int32,
+optional<vector<u64>>)` is **not** a compatible change: the new reader
+answers `pssz: record fixed region truncated` for old bytes, the old reader
+`pssz: fixed record has trailing payload` (or `invalid record payload
+offset`) for new ones. It applies equally to a reflected record, a
+`std::tuple` and a method's argument list. A record that already holds an
+unbounded member (a `std::string`) is 4 bytes wide from the start and
+accepts any appended optional, which is why the rule can look like "records
+of fixed members do not evolve". They do, under either of:
+
+- **`maxDynamicData(N)` on both revisions, from the first publication** — on
+  the record, or on `method(...)` for its arguments. The width is the class
+  of N whatever the members are. `{int32, uint64}` with
+  `maxDynamicData(1 << 20)` gains `optional<vector<u64>>` and then
+  `optional<string>`; old and new readers read each other's bytes, and an
+  absent appended member is pruned to the old bytes.
+- **an appended member that keeps the inferred bound in the class**:
+  `(int32)` → `(int32, optional<uint8>)` is 5 → 7 bytes, still width 1.
+
+The cap cannot be added later when it changes the width (`{int32}` uncapped
+is width 1; with `maxDynamicData(65536)` it is width 4).
+
+The tooling refuses exactly the pairs whose width moves, and says so:
+
+| Check | Answer for `(int32)` → `(int32, optional<vector<u64>>)` |
+|-------|-----------|
+| `psio::pssz_evolves_from<Old, New>` | `false` |
+| `psio::pssz_evolution_keeps_width_v<Old, New>` | `false` (the reason, as a constant) |
+| `psio::require_pssz_evolves_from<Old, New>()` | compile error: "the automatic offset width of the type changes … Declare maxDynamicData(N) …" |
+| `psio::pssz_ir::evolves_from(old, "T", new, "T")` | code `width-changed`, path `(root)`, reason "the offset width of the record differs (1 / 4): … declare maxDynamicData …" |
+
+The readers' wire errors are not changed: a frame carries no schema and no
+width, so a reader cannot tell a frame of another width from a damaged one
+without guessing. `cpp/tests/pssz_width_evolution_tests.cpp` holds all of
+the above; `conformance/evolution-vectors.json` has the rows
+`record-append-moves-width`, `record-append-optional`, `cap-added`,
+`cap-other-width-class` and `tuple-append-optional` for every language.
+
 ## Status on the trunk (`codex/psibase-core-evolution`)
 
 The evolution line was merged onto the trunk's per-type automatic widths. The
