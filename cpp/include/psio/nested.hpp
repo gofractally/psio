@@ -289,6 +289,14 @@ namespace psio
          return view<T, ::psio::pssz, Store>{data_};
       }
       [[nodiscard]] view<T, ::psio::pssz, Store> operator*() const noexcept { return get(); }
+      // `member->field()`: the inner value's view.
+      [[nodiscard]] detail::arrow_proxy<view<T, ::psio::pssz, Store>> operator->() const noexcept
+      {
+         return {get()};
+      }
+      [[nodiscard]] std::size_t size() const noexcept { return data_.size(); }
+      // The nested<T> (a copy of the bytes); the inner value is get().unpack().
+      PSIO_VIEW_UNPACK_
    };
 
 }  // namespace psio

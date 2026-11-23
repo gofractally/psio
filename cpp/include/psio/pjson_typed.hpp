@@ -72,8 +72,11 @@ namespace psio {
                          R::member_count) == 0;
    }
 
+   // The implementation of view<T, pjson_format>: the bytes and member I.
+   // It is also the projection reflect<T>::proxy is given, so the view has
+   // one accessor per reflected member, by its name.
    template <typename T>
-   class view<T, pjson_format>
+   class pjson_typed_projection
    {
      public:
       using R      = reflect<T>;
@@ -81,11 +84,11 @@ namespace psio {
       static_assert(R::is_reflected,
                     "view<T,pjson_format> requires PSIO_REFLECT(T,...)");
 
-      view() = default;
+      pjson_typed_projection() = default;
 
-      static view from_pjson(pjson_view raw) noexcept
+      static pjson_typed_projection from_pjson(pjson_view raw) noexcept
       {
-         view r;
+         pjson_typed_projection r;
          r.raw_       = raw;
          r.canonical_ = is_canonical_for<T>(raw);
          return r;
@@ -95,7 +98,7 @@ namespace psio {
       // cap as a defensive ceiling on the input buffer size before
       // surfacing any field accessors.  Use this when accepting
       // untrusted pjson — it rejects oversized payloads up front.
-      static view from_pjson_checked(pjson_view raw)
+      static pjson_typed_projection from_pjson_checked(pjson_view raw)
       {
          ::psio::enforce_max_dynamic_cap<T>(raw.size(), "pjson");
          return from_pjson(raw);
@@ -118,6 +121,13 @@ namespace psio {
       {
          using FT = typename R::template member_type<I>;
          return read_as<FT>(field<I>());
+      }
+      // The projection reflect<T>::proxy calls for the member named by
+      // MemberPtr.
+      template <std::size_t I, auto MemberPtr>
+      auto get() const
+      {
+         return this->template get<I>();
       }
 
       T to_struct() const
@@ -272,6 +282,47 @@ namespace psio {
 
       pjson_view raw_;
       bool       canonical_ = false;
+   };
+
+   // view<T, pjson_format>: typed access to a pjson object as a reflected T.
+   // `v.name()` reads the member called `name` (as `v.get<I>()` does by
+   // index). The view's own names win over a member of the same name
+   // (`get`, `field`, `raw`, `is_canonical`, `to_struct`, `from_pjson`,
+   // `from_pjson_checked`, `R`, `format`); such a member is read with
+   // `get<I>()`.
+   template <typename T>
+   class view<T, pjson_format>
+       : public reflect<T>::template proxy<pjson_typed_projection<T>>
+   {
+      using projection = pjson_typed_projection<T>;
+      using base       = typename reflect<T>::template proxy<projection>;
+
+     public:
+      using R      = reflect<T>;
+      using format = pjson_format;
+
+      view() = default;
+      view(const projection& p) noexcept : base(p) {}
+
+      static view from_pjson(pjson_view raw) noexcept { return view{projection::from_pjson(raw)}; }
+      static view from_pjson_checked(pjson_view raw)
+      {
+         return view{projection::from_pjson_checked(raw)};
+      }
+
+      bool       is_canonical() const noexcept { return this->projection::is_canonical(); }
+      pjson_view raw() const noexcept { return this->projection::raw(); }
+      template <std::size_t I>
+      pjson_view field() const
+      {
+         return this->projection::template field<I>();
+      }
+      template <std::size_t I>
+      auto get() const
+      {
+         return this->projection::template get<I>();
+      }
+      T to_struct() const { return this->projection::to_struct(); }
    };
 
    // Backward-compat alias. New code should prefer view<T, pjson_format>.

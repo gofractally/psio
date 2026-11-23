@@ -77,6 +77,30 @@ psio_add_test(psio_wrapper_tests wrapper_tests.cpp)
 
 # Phase 3: buffer / view / mutable_view + access-surface rule.
 psio_add_test(psio_view_access_tests view_access_tests.cpp)
+# Named accessors on record views (reflect<T>::proxy): read views, mutable
+# views, members under caps, and the psiserve view tests adapted to PSSZ.
+psio_add_test(psio_view_named_tests view_named_tests.cpp)
+# From a view to its value: unpack(), psio::value_of, from_pssz(view) —
+# including members under a maxDynamicData cap and bounded members.
+psio_add_test(psio_view_unpack_tests view_unpack_tests.cpp)
+# View-typed method parameters: the argument tuple's wire type, and calling a
+# reflected method with packed arguments (psio::invoke_method_pssz).
+psio_add_test(psio_method_view_param_tests method_view_param_tests.cpp)
+set(PSIO_MVP_FAIL_COMMAND
+    ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -DPSIO_EXCEPTIONS_ENABLED=1
+    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES})
+add_test(NAME psio_method_view_param_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+add_test(NAME psio_method_view_param_narrowed_compile_fail
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} -DMVP_FAIL_NARROWED_VIEW_PARAM
+                 ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+set_tests_properties(psio_method_view_param_narrowed_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "this parameter cannot be taken as a psio::pssz_view")
+add_test(NAME psio_method_view_param_decode_into_view_compile_fail
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} -DMVP_FAIL_DECODE_INTO_VIEW
+                 ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+set_tests_properties(psio_method_view_param_decode_into_view_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "cannot be decoded into")
 
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.
@@ -210,6 +234,21 @@ psio_helpers_compile_fail(view_owning_scalar HELPERS_FAIL_VIEW_OWNING_SCALAR
    "the type that owns encoded bytes is psio::buffer<T, Fmt> .F_buffer<T>.")
 psio_helpers_compile_fail(view_shared_const HELPERS_FAIL_VIEW_SHARED_CONST
    "psio::buffer<T, Fmt, storage::shared> .shared_F<T>.")
+# The named accessors of a read view are as read-only as get<N>().
+psio_helpers_compile_fail(named_assign_scalar HELPERS_FAIL_NAMED_ASSIGN_SCALAR
+   "expression is not assignable")
+psio_helpers_compile_fail(named_assign_string HELPERS_FAIL_NAMED_ASSIGN_STRING
+   "no viable overloaded '='")
+psio_helpers_compile_fail(named_set HELPERS_FAIL_NAMED_SET
+   "no member named 'set' in 'psio::view<std::string, psio::pssz")
+psio_helpers_compile_fail(named_view_to_mutable HELPERS_FAIL_NAMED_VIEW_TO_MUTABLE
+   "no viable conversion from 'view<")
+psio_helpers_compile_fail(named_mutable_from_read_member HELPERS_FAIL_NAMED_MUTABLE_FROM_READ_MEMBER
+   "no matching constructor for initialization of 'psio::pssz_mutable_view<std::string>'")
+psio_helpers_compile_fail(mutable_assign_variable HELPERS_FAIL_MUTABLE_ASSIGN_VARIABLE
+   "no viable overloaded '='")
+psio_helpers_compile_fail(view_calls_method HELPERS_FAIL_VIEW_CALLS_METHOD
+   "no member named 'call' in")
 
 # native format + view_of concept: zero-cost shim adapting a live const T&
 # to the view<T, Fmt, Store> accessor surface.

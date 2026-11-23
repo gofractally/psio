@@ -22,6 +22,13 @@ struct Rec
 };
 PSIO_REFLECT(Rec, id, name)
 
+struct Svc
+{
+   std::uint32_t n = 0;
+   void          bump(std::uint32_t) {}
+   PSIO_REFLECT(Svc, n, method(bump, by))
+};
+
 int main()
 {
    Rec               rec{1, "a"};
@@ -99,6 +106,28 @@ int main()
 #elif defined(HELPERS_FAIL_VIEW_SHARED_CONST)
    // ...and through the const spelling.
    psio::view<const Rec, psio::pssz, psio::storage::shared> v{bytes};
+#elif defined(HELPERS_FAIL_NAMED_ASSIGN_SCALAR)
+   // A read view's named accessor returns a value: nothing to assign to.
+   read.id() = 2u;
+#elif defined(HELPERS_FAIL_NAMED_ASSIGN_STRING)
+   // ...or a read-only sub-view, which has no assignment from a value.
+   read.name() = std::string("b");
+#elif defined(HELPERS_FAIL_NAMED_SET)
+   // A named sub-view of a read view does not write either.
+   (void)also_read.name().set(std::string("b"));
+#elif defined(HELPERS_FAIL_NAMED_VIEW_TO_MUTABLE)
+   // A named sub-view of a read view does not become a view that writes.
+   psio::pssz_mutable_view<std::string> w = read.name();
+#elif defined(HELPERS_FAIL_NAMED_MUTABLE_FROM_READ_MEMBER)
+   psio::pssz_mutable_view<std::string> w{psio::bytes(read.name())};
+#elif defined(HELPERS_FAIL_MUTABLE_ASSIGN_VARIABLE)
+   // `=` on a mutable view is `set`: fixed-size values only.
+   write.name() = std::string("b");
+#elif defined(HELPERS_FAIL_VIEW_CALLS_METHOD)
+   // A view projects members; it does not dispatch reflected methods.
+   std::vector<char>    sb = psio::to_pssz(Svc{});
+   psio::pssz_view<Svc> sv{sb};
+   sv.bump(1u);
 #endif
    return 0;
 }

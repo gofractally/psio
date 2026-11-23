@@ -110,8 +110,7 @@ namespace psio {
       // be written as a string literal.
       template <typename Fmt>
       concept text_format =
-         requires { typename Fmt::buffer_type; } &&
-         std::same_as<typename Fmt::buffer_type, std::string>;
+         requires { requires std::same_as<typename Fmt::buffer_type, std::string>; };
 
       // A format whose read view exists once its view header is included
       // (psio/pssz_view.hpp, psio/ssz_view.hpp, psio/wit_view.hpp).
