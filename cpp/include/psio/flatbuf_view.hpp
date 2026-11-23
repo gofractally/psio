@@ -155,23 +155,24 @@ namespace psio {
       template <storage Store>
       struct table_ref;
 
+      // No table is the table without fields (`empty_table`): a field read
+      // is the vtable lookup and nothing else.
       template <>
       struct table_ref<storage::trusted_borrow>
       {
-         const std::uint8_t*                 tbl = nullptr;
+         const std::uint8_t*                 tbl = empty_table();
          [[no_unique_address]] trusted_frame f{};
 
          // The cell of the field at vtable position `vt`, or nullptr.
          [[gnu::always_inline]] const std::uint8_t* cell(std::uint16_t vt,
                                                          std::size_t /*need*/) const noexcept
          {
-            if (tbl == nullptr) [[unlikely]]
-               return nullptr;
             return field_cell(tbl, vt);
          }
+         [[nodiscard]] bool        present() const noexcept { return tbl != empty_table(); }
          [[nodiscard]] std::size_t object_size() const noexcept
          {
-            return tbl ? load<std::uint16_t>(tbl - load<std::int32_t>(tbl) + 2) : 0;
+            return present() ? load<std::uint16_t>(tbl - load<std::int32_t>(tbl) + 2) : 0;
          }
       };
 
@@ -195,6 +196,7 @@ namespace psio {
                return nullptr;
             return tbl + off;
          }
+         [[nodiscard]] bool        present() const noexcept { return tbl != nullptr; }
          [[nodiscard]] std::size_t object_size() const noexcept
          {
             if (vsize < 4)
@@ -349,6 +351,9 @@ namespace psio {
                return value_view<F, Store>{cell, t.f};
             else if constexpr (Scalar<F>)
                return cell ? load_scalar<F>(cell) : Def::template default_of<I>();
+            else if constexpr (std::is_same_v<F, std::string> && !safe_v<Store>)
+               // A select between two addresses, then one read of the length.
+               return string_in<Store>(t.f, cell ? follow(cell) : empty_string_bytes);
             else
                return cell ? read_cell<F, Store>(t.f, cell) : read_t<F, Store>{};
          }
@@ -453,6 +458,8 @@ namespace psio {
             return {reinterpret_cast<const char*>(p),
                     p ? detail::flatbuf_impl::struct_layout<T>::size : std::size_t{0}};
          }
+         else if (!this->projection::t_.present())
+            return {};
          else
             return {reinterpret_cast<const char*>(this->projection::t_.tbl),
                     this->projection::t_.object_size()};
@@ -480,8 +487,9 @@ namespace psio {
          }
          else
          {
-            if (const auto* tbl = this->projection::t_.tbl)
-               detail::flatbuf_impl::decode_table<detail::flatbuf_impl::record_def<T>>(tbl, out);
+            if (this->projection::t_.present())
+               detail::flatbuf_impl::decode_table<detail::flatbuf_impl::record_def<T>>(
+                  this->projection::t_.tbl, out);
          }
          return out;
       }
@@ -800,7 +808,7 @@ namespace psio {
          for (std::size_t i = 0; i < size(); ++i)
          {
             std::pair<K, V> e{};
-            if (const auto t = entry(i); t.tbl)
+            if (const auto t = entry(i); t.present())
                detail::flatbuf_impl::decode_table<entry_def>(t.tbl, e);
             out.insert(out.end(), std::move(e));
          }
@@ -930,6 +938,8 @@ namespace psio {
 
       [[nodiscard]] std::span<const char> _psio_data() const noexcept
       {
+         if (!t_.present())
+            return {};
          return {reinterpret_cast<const char*>(t_.tbl), t_.object_size()};
       }
 

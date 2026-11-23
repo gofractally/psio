@@ -721,8 +721,24 @@ namespace psio {
          std::uint32_t              vt_local_[local_vts];
          std::size_t                vt_count_ = 0;
          std::vector<std::uint32_t> vt_more_;
-         // Offsets of the elements of the vectors under construction.
-         std::vector<std::uint32_t> scratch_;
+         // Offsets of the elements of the vectors under construction: a
+         // stack, inline until it outgrows `local_scratch`.
+         static constexpr std::size_t     local_scratch = 128;
+         std::uint32_t                    scratch_local_[local_scratch];
+         std::unique_ptr<std::uint32_t[]> scratch_heap_;
+         std::uint32_t*                   scratch_      = scratch_local_;
+         std::size_t                      scratch_size_ = 0;
+         std::size_t                      scratch_cap_  = local_scratch;
+
+         void grow_scratch()
+         {
+            const std::size_t                cap = scratch_cap_ * 2;
+            std::unique_ptr<std::uint32_t[]> nb(new std::uint32_t[cap]);
+            std::memcpy(nb.get(), scratch_, scratch_size_ * sizeof(std::uint32_t));
+            scratch_heap_ = std::move(nb);
+            scratch_      = scratch_heap_.get();
+            scratch_cap_  = cap;
+         }
 
          void grow(std::size_t needed)
          {
@@ -816,7 +832,7 @@ namespace psio {
          // A vector of offsets to the objects `scratch_[base ..)`.
          std::uint32_t create_offset_vector(std::size_t base)
          {
-            const std::size_t count = scratch_.size() - base;
+            const std::size_t count = scratch_size_ - base;
             pre_align(count * 4, 4);
             for (std::size_t i = count; i > 0;)
             {
@@ -825,11 +841,16 @@ namespace psio {
                const std::uint32_t at = sz() + 4;
                push(static_cast<std::uint32_t>(at - scratch_[base + i]));
             }
-            scratch_.resize(base);
+            scratch_size_ = base;
             return end_vector(count);
          }
-         [[nodiscard]] std::size_t scratch_mark() const noexcept { return scratch_.size(); }
-         void scratch_push(std::uint32_t off) { scratch_.push_back(off); }
+         [[nodiscard]] std::size_t scratch_mark() const noexcept { return scratch_size_; }
+         [[gnu::always_inline]] void scratch_push(std::uint32_t off)
+         {
+            if (scratch_size_ == scratch_cap_) [[unlikely]]
+               grow_scratch();
+            scratch_[scratch_size_++] = off;
+         }
 
          [[gnu::always_inline]] void start_table() noexcept { tbl_start_ = sz(); }
 
@@ -1101,6 +1122,16 @@ namespace psio {
       }
 
       // ── Navigation (trusted: the bytes have been validated) ───────────
+
+      // A table with no fields: what a view of an absent table points at,
+      // so that reading a field needs no test for "no table".
+      alignas(4) inline constexpr std::uint8_t empty_table_bytes[8] = {4, 0, 4, 0, 4, 0, 0, 0};
+      [[gnu::always_inline]] inline const std::uint8_t* empty_table() noexcept
+      {
+         return empty_table_bytes + 4;
+      }
+      // An empty string, for the same reason.
+      alignas(4) inline constexpr std::uint8_t empty_string_bytes[8] = {};
 
       [[gnu::always_inline]] inline const std::uint8_t* follow(const std::uint8_t* cell) noexcept
       {

@@ -560,6 +560,27 @@ struct cp_order
 #endif
 
 #ifdef PSIO_HAVE_FLATBUF
+// The official builder writing `o` (generated Create functions).
+static void official_flatbuf_build(flatbuffers::FlatBufferBuilder& fbb, const g2::Order& o)
+{
+   // Children in field order, as the generated object API (`Pack`) does:
+   // the bytes are then the ones psio::flatbuf writes.
+   auto name = fbb.CreateString(o.customer.name);
+   auto mail = fbb.CreateString(o.customer.email);
+   auto cust = fb_bench::Createfb_UserProfile(fbb, o.customer.id, name, mail, o.customer.age,
+                                              o.customer.verified);
+   std::vector<flatbuffers::Offset<fb_bench::fb_LineItem>> items;
+   items.reserve(o.items.size());
+   for (auto& it : o.items)
+   {
+      auto p = fbb.CreateString(it.product);
+      items.push_back(fb_bench::Createfb_LineItem(fbb, p, it.qty, it.unit_price));
+   }
+   auto iv   = fbb.CreateVector(items);
+   auto note = fbb.CreateString(o.note);
+   auto root = fb_bench::Createfb_Order(fbb, o.id, cust, iv, o.total, note);
+   fbb.Finish(root);
+}
 static std::vector<std::uint8_t> official_flatbuf_order()
 {
    auto                                                        o = make_order<g2::Order>();
@@ -1018,8 +1039,17 @@ int main(int argc, char** argv)
          return psio::flatbuf_view<g2::Order>(
             std::span<const char>(hide(reinterpret_cast<const char*>(bytes.data())), nbytes));
       };
+      auto get2t = [] {
+         return psio::flatbuf_trusted_view<g2::Order>(psio::trusted{
+            std::span<const char>(hide(reinterpret_cast<const char*>(bytes.data())), nbytes)});
+      };
+      VG_CHECK(psio::validate_flatbuf<g2::Order>(
+                  std::span<const char>(reinterpret_cast<const char*>(bytes.data()), nbytes))
+                  .ok());
       check_order(get2());
-      impls.push_back(order_ops("g2 view<flatbuf>", get2));
+      check_order(get2t());
+      impls.push_back(order_ops("g2 view<flatbuf> (safe)", get2));
+      impls.push_back(order_ops("g2 trusted view<flatbuf>", get2t));
 #endif
       impls.push_back(order_ops("flatbuffers generated", geto));
       run_group("flatbuf", std::move(impls));
@@ -1029,7 +1059,17 @@ int main(int argc, char** argv)
       const auto        own2 = psio::to_flatbuf(o2);
       static const std::vector<char> g2bytes(own2.begin(), own2.end());
       static const std::size_t       g2n = g2bytes.size();
-      std::printf("# flatbuf: g2 psio::flatbuf encodes %zu bytes\n", g2n);
+      {
+         flatbuffers::FlatBufferBuilder fbb;
+         official_flatbuf_build(fbb, so2);
+         std::printf("# flatbuf: g2 psio::flatbuf encodes %zu bytes, %s the official builder's "
+                     "(children created in field order)\n",
+                     g2n,
+                     g2n == fbb.GetSize() &&
+                           std::memcmp(g2bytes.data(), fbb.GetBufferPointer(), g2n) == 0
+                        ? "identical to"
+                        : "DIFFERENT from");
+      }
       measure("flatbuf", "decode-all",
               {make_cell("g1 fb_unpack",
                          [] {
@@ -1044,6 +1084,13 @@ int main(int argc, char** argv)
       measure("flatbuf", "validate",
               {make_cell("g1 fb_verify",
                          [] { consume(psio1::fb_verify<g1::Order>(hide(bytes.data()), nbytes)); }),
+               make_cell("g2 validate_flatbuf",
+                         [] {
+                            consume(psio::validate_flatbuf<g2::Order>(
+                                       std::span<const char>(
+                                          hide(reinterpret_cast<const char*>(bytes.data())), nbytes))
+                                       .ok());
+                         }),
                make_cell("flatbuffers Verifier", [] {
                   flatbuffers::Verifier v(hide(bytes.data()), nbytes);
                   consume(v.VerifyBuffer<fb_bench::fb_Order>(nullptr));
@@ -1060,9 +1107,26 @@ int main(int argc, char** argv)
                             auto b = psio::to_flatbuf(*hide(&so2));
                             consume(b.data());
                          }),
-               make_cell("flatbuffers builder", [] {
-                  auto b = official_flatbuf_order();
-                  consume(b.data());
+               make_cell("g2 encode, sink reused",
+                         [] {
+                            static std::vector<char> sink;
+                            psio::to_flatbuf(*hide(&so2), sink);
+                            consume(sink.data());
+                         }),
+               // The official builder from the same held value: a builder
+               // per message, and one builder cleared and reused (its best
+               // case; the bytes stay in the builder in both).
+               make_cell("flatbuffers builder",
+                         [] {
+                            flatbuffers::FlatBufferBuilder fbb;
+                            official_flatbuf_build(fbb, *hide(&so2));
+                            consume(fbb.GetBufferPointer());
+                         }),
+               make_cell("flatbuffers builder, reused", [] {
+                  static flatbuffers::FlatBufferBuilder fbb;
+                  fbb.Clear();
+                  official_flatbuf_build(fbb, *hide(&so2));
+                  consume(fbb.GetBufferPointer());
                })});
    }
 #endif
