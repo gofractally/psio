@@ -40,7 +40,8 @@ implementation disagrees. The class marked OBSERVED ONLY is exempt.
 { "version": 1,
   "schema_ir": "<hex>",
   "types":   [ { "id", "ir", "shape", "custom_id"?, "invariant"?, "auto_width",
-                 "max_encoded_size", "max_dynamic_data", "fixed", "fixed_size" } ... ],
+                 "inferred_bound", "max_encoded_size", "max_dynamic_data", "fixed",
+                 "fixed_size" } ... ],
   "vectors": [ { "name", "class", "type", "format", "hex", "expect",
                  "reason", "reencoded", "value", "writer" } ... ] }
 ```
@@ -66,11 +67,23 @@ Types:
 - `invariant` - present (`true`) when an invariant constrains values of the
   type: its own, or that of a type it holds (`custom-types.md`).
 - `auto_width` - `auto_pssz_width_v<T>`: 1, 2 or 4.
-- `max_encoded_size` - `psio::max_encoded_size<T>()`, or null when unbounded:
-  the bound **inferred** from the type's members (`docs/pssz-spec.md` §3.2).
-  A cap is not part of it, for a record and for a method's argument tuple
-  alike (`ArgsTransfer`, capped at 256, has 107); `max_dynamic_data` is the
-  cap, and `auto_width` is the width class of the cap when there is one.
+- `inferred_bound` - `psio::inferred_bound<T>()`, or null when unbounded:
+  the bound **inferred** from the type's members (`docs/pssz-spec.md` §3.2),
+  the number a width is chosen from. A cap is not part of it, for a record
+  and for a method's argument tuple alike (`ArgsTransfer`, capped at 256,
+  has 107); `max_dynamic_data` is the cap, and `auto_width` is the width
+  class of the cap when there is one. (Until this field was added these
+  numbers were recorded under `max_encoded_size`.)
+- `max_encoded_size` - `psio::max_encoded_size<T>()`, or null when there is
+  no finite maximum: the **largest encoding** of the type in the automatic
+  profile (`docs/pssz-spec.md` §3.7) — every header, slot and table at the
+  width actually written, and at most the cap (`ArgsTransfer`: 110, its
+  header and two slots being 2 bytes wide under the cap of 256). It equals
+  `inferred_bound` for every type with no cap on it or inside it; it is
+  the cap for a capped type with an unbounded member (where
+  `inferred_bound` is null). No canonical `auto` vector of the type is
+  longer (`cpp/tests/pssz_conformance_tests.cpp` checks that for every
+  vector).
 - `max_dynamic_data` - the explicit cap, or null.
 - `fixed`, `fixed_size` - whether the type is fixed-size, and its size (0 if not).
 

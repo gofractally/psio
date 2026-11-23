@@ -435,7 +435,7 @@ naming the mistake.
 The same bounds can be stated in the type instead; a user who prefers the
 type to enforce the bound at construction picks the wrapper. The two spellings
 are one type on the wire: the same bytes, the same offset widths, the same
-`max_encoded_size`, the same Schema IR.
+`inferred_bound`, the same Schema IR.
 
 | constraint | annotation on the plain type | wrapper type | Schema IR node |
 |---|---|---|---|
@@ -522,8 +522,10 @@ declarations are unchanged.
   `psio::check_method_result<T, I>(value)` only checks. A bare string has no
   width of its own, so its bytes do not depend on the bound; a bounded list
   of variable-size elements has the narrow offset table of the bounded type.
-- `psio::max_encoded_size<Args>()` is the bound inferred from the
-  parameters, as for a record; the cap is `psio::max_dynamic_data_v<Args>`.
+- `psio::inferred_bound<Args>()` is the bound inferred from the
+  parameters, as for a record; the cap is `psio::max_dynamic_data_v<Args>`;
+  `psio::max_encoded_size<Args>()` is the largest encoding (the parameters
+  at the width the cap selects, and at most the cap).
 - In JSON an argument list whose parameters are all named is written as an
   object keyed by parameter name and read as that object or as the
   positional array; an unnamed list is the array. Binary is always the

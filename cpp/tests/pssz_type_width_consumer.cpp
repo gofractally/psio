@@ -6,7 +6,7 @@ template<typename T>
 void print_width(const char* name, bool last = false)
 {
    constexpr auto budget = psio::max_dynamic_data_v<T>;
-   constexpr auto bound = psio::max_encoded_size<T>();
+   constexpr auto bound = psio::inferred_bound<T>();
    std::printf("\"%s\":{\"width\":%zu,\"declared_budget\":", name, psio::auto_pssz_width_v<T>);
    if constexpr (budget) std::printf("%zu", *budget);
    else std::printf("null");

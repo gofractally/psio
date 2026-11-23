@@ -323,10 +323,10 @@ TEST_CASE("transparent: pssz layout is the member's", "[transparent][pssz]")
    // The member's declared budget carries through.
    static_assert(psio::auto_pssz_width_v<Capped> == 2);
    static_assert(psio::auto_pssz_width_v<CappedBox> == 2);
-   static_assert(psio::max_encoded_size<Id>() == psio::max_encoded_size<std::uint64_t>());
-   static_assert(psio::max_encoded_size<CappedBox>() == 300);
+   static_assert(psio::inferred_bound<Id>() == psio::inferred_bound<std::uint64_t>());
+   static_assert(psio::inferred_bound<CappedBox>() == 300);
    static_assert(psio::auto_pssz_width_v<Holder> == psio::auto_pssz_width_v<Plain>);
-   static_assert(psio::max_encoded_size<Holder>() == psio::max_encoded_size<Plain>());
+   static_assert(psio::inferred_bound<Holder>() == psio::inferred_bound<Plain>());
    // The optional selector rule is the member's: none for a positive
    // minimum size, one for a payload that can be empty.
    static_assert(!pi::optional_uses_selector_v<Id>);

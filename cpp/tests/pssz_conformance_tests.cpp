@@ -314,7 +314,7 @@ TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformanc
       // The seven typed properties plus "ir" (Schema IR coverage); a custom
       // type also carries the id of its schema node, and a type an
       // invariant constrains is marked.
-      CHECK(entry.size() == 8 + std::size_t{psio::schema_custom_v<T>} +
+      CHECK(entry.size() == 9 + std::size_t{psio::schema_custom_v<T>} +
                                std::size_t{psio::contains_invariant_v<T>});
       CHECK(entry.count("custom_id") == std::size_t{psio::schema_custom_v<T>});
       if constexpr (psio::schema_custom_v<T>)
@@ -327,15 +327,36 @@ TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformanc
       CHECK(str(entry, "id") == type_id<T>());
       CHECK(str(entry, "shape") == type_shape<T>());
       CHECK(entry.at("auto_width").num == psio::auto_pssz_width_v<T>);
-      constexpr auto bound = psio::max_encoded_size<T>();
+      constexpr auto bound = psio::inferred_bound<T>();
       if (bound)
       {
+         CHECK(entry.at("inferred_bound").kind == Value::number);
+         CHECK(entry.at("inferred_bound").num == *bound);
+      }
+      else
+         CHECK(entry.at("inferred_bound").kind == Value::null);
+      constexpr auto largest = psio::max_encoded_size<T>();
+      if (largest)
+      {
          CHECK(entry.at("max_encoded_size").kind == Value::number);
-         CHECK(entry.at("max_encoded_size").num == *bound);
+         CHECK(entry.at("max_encoded_size").num == *largest);
       }
       else
          CHECK(entry.at("max_encoded_size").kind == Value::null);
       constexpr auto cap = psio::max_dynamic_data_v<T>;
+      // How the three numbers relate (docs/pssz-spec.md 3.7): a capped type
+      // never exceeds its cap, and a type with no cap never exceeds its
+      // inferred bound.
+      if (cap)
+      {
+         REQUIRE(largest.has_value());
+         CHECK(*largest <= *cap);
+      }
+      else
+      {
+         CHECK(largest.has_value() == bound.has_value());
+         if (largest && bound) CHECK(*largest <= *bound);
+      }
       if (cap)
       {
          CHECK(entry.at("max_dynamic_data").kind == Value::number);
@@ -388,6 +409,47 @@ TEST_CASE("pssz conformance vectors hold for every reader entry point", "[pssz][
       CHECK(per_class[cls] > 0);
    }
    CHECK(used_types.size() == dispatch().size());
+}
+
+// max_encoded_size is an upper bound of the encoding: no canonical frame of
+// the automatic profile, of any fixture type, is longer than the number the
+// manifest records for its type. (A frame a newer writer produced — expect
+// "unknown" — is not a value of the reading type and is not covered; the
+// explicit-width profiles do not use inferred widths.)
+TEST_CASE("pssz conformance: no canonical vector exceeds max_encoded_size",
+          "[pssz][conformance][max_encoded_size]")
+{
+   const auto&                                         fx = fixture();
+   std::map<std::string, std::optional<std::uint64_t>> largest;
+   std::size_t                                         finite = 0;
+   for (const auto& entry : fx.types)
+   {
+      const auto& m = entry.at("max_encoded_size");
+      if (m.kind == Value::number)
+      {
+         largest[str(entry, "id")] = static_cast<std::uint64_t>(m.num);
+         ++finite;
+      }
+      else
+         largest[str(entry, "id")] = std::nullopt;
+   }
+   REQUIRE(finite > 100);
+   std::size_t checked = 0, at_maximum = 0;
+   for (const auto& entry : fx.vectors)
+   {
+      if (str(entry, "format") != "auto" || str(entry, "expect") != "canonical") continue;
+      const auto type = largest.find(str(entry, "type"));
+      REQUIRE(type != largest.end());
+      if (!type->second) continue;
+      INFO(str(entry, "name"));
+      const std::uint64_t size = str(entry, "hex").size() / 2;
+      CHECK(size <= *type->second);
+      ++checked;
+      at_maximum += size == *type->second;
+   }
+   CHECK(checked > 300);
+   // The bound is not vacuous: some vectors sit exactly on it.
+   CHECK(at_maximum > 0);
 }
 
 TEST_CASE("pssz conformance dispatch rejects an unknown type id", "[pssz][conformance]")

@@ -8,7 +8,7 @@
 // headers use 1, 2, or 4 bytes rather than always 4. The width is
 // picked automatically per type by `auto_pssz_width_v<T>` from
 // the type's declared `maxDynamicData` budget, or the conservative bound
-// from `max_encoded_size<T>()` when no budget is declared (see max_size.hpp):
+// from `inferred_bound<T>()` when no budget is declared (see max_size.hpp):
 //
 //   max ≤ 0xff   → W = 1
 //   max ≤ 0xffff → W = 2
@@ -2993,7 +2993,7 @@ namespace psio {
    // pssz is one format tag. Its internal offset width (1, 2, or 4
    // bytes) is selected at compile time from the explicit type-level
    // `max_dynamic_data_v<T>` budget, when present. Without that promise,
-   // `max_encoded_size<T>()` provides a conservative bound inferred from the
+   // `inferred_bound<T>()` provides a conservative bound inferred from the
    // fields' annotations, including full declared child budgets, with each
    // type's own header / slots / offset table counted at that type's own
    // width (max_size.hpp `fit`). A declared budget takes precedence in either
@@ -3103,7 +3103,7 @@ namespace psio {
       constexpr auto m = [] {
          if constexpr (::psio::max_dynamic_data_v<T>.has_value())
             return ::psio::max_dynamic_data_v<T>;
-         else return ::psio::max_encoded_size<T>();
+         else return ::psio::inferred_bound<T>();
       }();
       if constexpr (m.has_value())
       {
@@ -3421,7 +3421,7 @@ namespace psio {
                if constexpr (::psio::max_dynamic_data_v<Old>.has_value())
                   return ::psio::max_dynamic_data_v<Old>;
                else
-                  return ::psio::max_encoded_size<Old>();
+                  return ::psio::inferred_bound<Old>();
             }();
             if (!old_limit.has_value() || *old_limit > *new_cap)
                return false;

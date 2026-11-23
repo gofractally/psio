@@ -58,8 +58,8 @@ struct Account
 };
 // tags:   8 slots + 8 x 16 = 136 <= 255: the list's own table is 1 byte per slot.
 // record: (header + 2 slots) x 1 byte + id 8 + owner 32 + tags 136 + balance 8.
-static_assert(psio::max_encoded_size<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);
-static_assert(psio::max_encoded_size<Account>() == 187);        // <= 255: 8-bit offsets
+static_assert(psio::inferred_bound<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);
+static_assert(psio::inferred_bound<Account>() == 187);        // <= 255: 8-bit offsets
 static_assert(psio::auto_pssz_width_v<Account> == 1);
 ```
 
@@ -238,8 +238,10 @@ Three rules:
 1. **An explicit cap always rules.** A record (or a method's argument list)
    with `maxDynamicData(N)`: `N ≤ 255` → 1 byte, `N ≤ 65535` → 2 bytes,
    otherwise 4. The cap is not reduced to what the current fields need.
-2. **Otherwise the inferred bound**, `psio::max_encoded_size<T>()`: the
-   largest encoding the bounds allow, rounded up to the next width. If any
+2. **Otherwise the inferred bound**, `psio::inferred_bound<T>()`: the
+   largest encoding the bounds allow, rounded up to the next width. (For a
+   type with no cap this is also `psio::max_encoded_size<T>()`, the largest
+   encoding; under a cap the two differ, [5.4](#54-maxdynamicdatan).) If any
    part is unbounded there is no bound and `W = 4`. Lists, maps, sets,
    arrays, tuples and pairs have no cap of their own and always use this
    rule — together with the cap of the record they are in
@@ -254,14 +256,14 @@ written with that type's widths, and has exactly one encoding.
 Check it where the type is declared:
 
 ```cpp
-static_assert(psio::max_encoded_size<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);
-static_assert(psio::max_encoded_size<Account>() == 187);        // <= 255: 8-bit offsets
+static_assert(psio::inferred_bound<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);
+static_assert(psio::inferred_bound<Account>() == 187);        // <= 255: 8-bit offsets
 static_assert(psio::auto_pssz_width_v<Account> == 1);
 ```
 
 ### 3.1 How the inferred bound is counted
 
-([pssz-spec.md §3.2](pssz-spec.md#32-max_encoded_sizet).) A type that has
+([pssz-spec.md §3.2](pssz-spec.md#32-inferred_boundt).) A type that has
 offsets consists of `k` words of `W` bytes each — its header, its slots,
 its table entries — and of other bytes, at most `r`: the fixed-size members
 and the payloads. Its bound counts the `k` words **at the width the type
@@ -319,8 +321,8 @@ struct Raw254   // 1 + 1 + 254 = 256 does not fit: header and slot are 2 bytes
    std::string s;
    PSIO_REFLECT(Raw254, attr(s, max<254>))
 };
-static_assert(psio::max_encoded_size<Raw253>() == 255 && psio::auto_pssz_width_v<Raw253> == 1);
-static_assert(psio::max_encoded_size<Raw254>() == 258 && psio::auto_pssz_width_v<Raw254> == 2);
+static_assert(psio::inferred_bound<Raw253>() == 255 && psio::auto_pssz_width_v<Raw253> == 1);
+static_assert(psio::inferred_bound<Raw254>() == 258 && psio::auto_pssz_width_v<Raw254> == 2);
 struct Raw65531   // 2 x 2 + 65531 = 65535: the last 2-byte record of this shape
 {
    std::string s;
@@ -331,13 +333,13 @@ struct Raw65532   // header and slot are 4 bytes
    std::string s;
    PSIO_REFLECT(Raw65532, attr(s, max<65532>))
 };
-static_assert(psio::max_encoded_size<Raw65531>() == 65535 && psio::auto_pssz_width_v<Raw65531> == 2);
-static_assert(psio::max_encoded_size<Raw65532>() == 65540 && psio::auto_pssz_width_v<Raw65532> == 4);
+static_assert(psio::inferred_bound<Raw65531>() == 65535 && psio::auto_pssz_width_v<Raw65531> == 2);
+static_assert(psio::inferred_bound<Raw65532>() == 65540 && psio::auto_pssz_width_v<Raw65532> == 4);
 // A list measures itself the same way: one slot per element, then the elements.
 using Tags15x16 = psio::bounded<psio::utf8_string<16>, 15>;   // 15 + 15 x 16 = 255
 using Tags15x17 = psio::bounded<psio::utf8_string<17>, 15>;   // 15 + 255 > 255: 2 x 15 + 255
-static_assert(psio::max_encoded_size<Tags15x16>() == 255 && psio::auto_pssz_width_v<Tags15x16> == 1);
-static_assert(psio::max_encoded_size<Tags15x17>() == 285 && psio::auto_pssz_width_v<Tags15x17> == 2);
+static_assert(psio::inferred_bound<Tags15x16>() == 255 && psio::auto_pssz_width_v<Tags15x16> == 1);
+static_assert(psio::inferred_bound<Tags15x17>() == 285 && psio::auto_pssz_width_v<Tags15x17> == 2);
 ```
 
 | Shape | Last 1-byte | Last 2-byte |
@@ -566,7 +568,8 @@ child a `maxDynamicData` or bound its members, and assert
    the exception: give each its own cap or bounds, and assert
    `!psio::pssz_child_wider_than_cap_v<T>`.
 6. **Assert what you chose** next to the type: `psio::auto_pssz_width_v<T>`,
-   and `psio::max_dynamic_data_v<T>` or `psio::max_encoded_size<T>()`.
+   and `psio::max_dynamic_data_v<T>` or `psio::inferred_bound<T>()`
+   (`psio::max_encoded_size<T>()` when you size a buffer).
 7. **The same N in every language** that declares the type.
 8. **A byte cap is not a field cap.** `maxDynamicData(N)` limits the encoded
    *bytes* and selects the width. `maxFields(N)` limits the *number of
@@ -689,7 +692,7 @@ struct Limits
 };
 // max<N> and exact<N> give the inferred bound its N; min<N> alone bounds nothing.
 // (header + 3 slots) x 1 byte + digest 32 + code 8 + ids 4 x 4
-static_assert(psio::max_encoded_size<Limits>() == 4 + 32 + 8 + 4 * 4);
+static_assert(psio::inferred_bound<Limits>() == 4 + 32 + 8 + 4 * 4);
 static_assert(psio::auto_pssz_width_v<Limits> == 1);
 // min<A> | max<B> is one spec, the range psio::length_bound{.max = B, .min = A}.
 static_assert(std::get<psio::length_bound>(psio::min<2> | psio::max<8>) ==
@@ -700,7 +703,7 @@ struct AtLeast
    std::string code;
    PSIO_REFLECT(AtLeast, attr(code, min<2>))
 };
-static_assert(!psio::max_encoded_size<AtLeast>().has_value());   // no upper bound: 32-bit
+static_assert(!psio::inferred_bound<AtLeast>().has_value());   // no upper bound: 32-bit
 ```
 
 | | |
@@ -862,7 +865,7 @@ struct Grid   // a list of lists
    PSIO_REFLECT(Grid, attr(rows, max<3> | element(max<4>)))
 };
 // header 1 + slot 1 + rows: 3 slots of 1 byte + 3 x (4 x 2)
-static_assert(psio::max_encoded_size<Grid>() == 1 + 1 + (3 + 3 * (4 * 2)));
+static_assert(psio::inferred_bound<Grid>() == 1 + 1 + (3 + 3 * (4 * 2)));
 static_assert(psio::auto_pssz_width_v<Grid> == 1);
 
 struct Choice   // a variant alternative
@@ -872,7 +875,7 @@ struct Choice   // a variant alternative
    PSIO_REFLECT(Choice, attr(v, at<1>(utf8 | max<16>)))
 };
 // header 1 + slot 1 + selector 1 + the widest alternative 16
-static_assert(psio::max_encoded_size<Choice>() == 1 + 1 + 1 + 16);
+static_assert(psio::inferred_bound<Choice>() == 1 + 1 + 1 + 16);
 ```
 
 An annotated member **is** the type its annotations describe:
@@ -978,10 +981,20 @@ static_assert(psio::auto_pssz_width_v<AccountV1> == 2);
 
 (`tut-3`.)
 
-The cap is not the inferred bound: `psio::max_encoded_size<AccountV1>()` is
-still the 187 bytes its fields add up to. `psio::effective_max_dynamic_v<T>`
-is the number the width is the class of — the cap when one is declared,
-else the inferred bound.
+Three numbers, three names:
+
+| | `AccountV1` | what it is |
+|---|---|---|
+| `psio::inferred_bound<T>()` | 187 | what the fields add up to, counted as if there were no cap. It selects the width of a type that has no cap, and never reads the type's own cap |
+| `psio::effective_max_dynamic_v<T>` | 1024 | the number the width is the class of: the cap when one is declared, else the inferred bound |
+| `psio::max_encoded_size<T>()` | 190 | the largest encoding: no `AccountV1` is longer. The fields at the width the cap selects (header and two slots of 2 bytes, not 1), and never more than the cap |
+
+The inferred bound is **not** an upper bound of a capped type's encoding:
+a cap in a wider class makes the header and slots wider than the bound
+counted them (187 → 190). Size a buffer with `max_encoded_size`. When
+something inside is unbounded, `inferred_bound` is empty and
+`max_encoded_size` is the cap; with no cap and an unbounded member neither
+exists. ([pssz-spec.md §3.7](pssz-spec.md#37-max_encoded_sizet-the-largest-encoding).)
 
 **Applies to.** A reflected record (not a transparent one), and a method's
 argument tuple ([5.11](#511-methodname-)).
@@ -1075,8 +1088,8 @@ struct PointOpen   // extensible: a header, may gain optional fields
    PSIO_REFLECT(PointOpen, x, y)
 };
 static_assert(psio::is_dwnc_v<Point> && !psio::is_dwnc_v<PointOpen>);
-static_assert(psio::max_encoded_size<Point>() == 8);
-static_assert(psio::max_encoded_size<PointOpen>() == 1 + 8);
+static_assert(psio::inferred_bound<Point>() == 8);
+static_assert(psio::inferred_bound<PointOpen>() == 1 + 8);
 ```
 
 ```cpp
@@ -1223,7 +1236,7 @@ struct AccountId
 };
 // It is its member: fixed-size, 8 bytes, no header.
 static_assert(psio::is_transparent_v<AccountId>);
-static_assert(psio::max_encoded_size<AccountId>() == 8);
+static_assert(psio::inferred_bound<AccountId>() == 8);
 ```
 
 ```cpp
@@ -1233,7 +1246,7 @@ struct PublicKey
    psio::bounded<std::uint8_t, 65> data;   // the bound is in the member's type
    PSIO_REFLECT(PublicKey, transparent(), data)
 };
-static_assert(psio::max_encoded_size<PublicKey>() == 65);
+static_assert(psio::inferred_bound<PublicKey>() == 65);
 ```
 
 **A bounded member: first-class bounded types.** The one member may carry
@@ -1253,8 +1266,8 @@ struct Memo
 // Memo is the bounded type its member's annotations describe: on the wire it
 // is psio::utf8_string<80>.
 static_assert(psio::is_transparent_v<Memo>);
-static_assert(psio::max_encoded_size<Memo>() == 80);
-static_assert(psio::max_encoded_size<Memo>() == psio::max_encoded_size<psio::utf8_string<80>>());
+static_assert(psio::inferred_bound<Memo>() == 80);
+static_assert(psio::inferred_bound<Memo>() == psio::inferred_bound<psio::utf8_string<80>>());
 
 struct MemoInType   // the same type with the bound in the member's type
 {
@@ -1269,7 +1282,7 @@ struct Receipt   // a record that holds one: header 1 + id 8 + slot 1 + memo 80
    Memo          memo;
    PSIO_REFLECT(Receipt, id, memo)
 };
-static_assert(psio::max_encoded_size<Receipt>() == 1 + 8 + 1 + 80);
+static_assert(psio::inferred_bound<Receipt>() == 1 + 8 + 1 + 80);
 static_assert(psio::auto_pssz_width_v<Receipt> == 1);
 ```
 
@@ -1558,8 +1571,8 @@ struct WidePlain   // the same record without the presentation
    PSIO_REFLECT(WidePlain, id, amount)
 };
 // A text-only adapter does not reach the binary formats: the same bound and width.
-static_assert(psio::max_encoded_size<Wide>() == 1 + 4 + 16);
-static_assert(psio::max_encoded_size<Wide>() == psio::max_encoded_size<WidePlain>());
+static_assert(psio::inferred_bound<Wide>() == 1 + 4 + 16);
+static_assert(psio::inferred_bound<Wide>() == psio::inferred_bound<WidePlain>());
 static_assert(psio::auto_pssz_width_v<Wide> == 1);
 ```
 
@@ -1590,7 +1603,7 @@ are those of the record without the annotation.
 
 **Limits.** A member whose `as<Tag>` adapter writes the binary form has no
 inferred bound (the enclosing record is 4-byte unless capped,
-[pssz-spec.md §3.2](pssz-spec.md#32-max_encoded_sizet)). A member with any
+[pssz-spec.md §3.2](pssz-spec.md#32-inferred_boundt)). A member with any
 `as<Tag>` is not addressable through a mutable view. A `sortable_binary_category` adapter replaces a
 type's key bytes ([key-spec.md](key-spec.md#2-encodings)).
 
@@ -1618,14 +1631,17 @@ PSIO_INTERFACE(Bank, types())
 using OpenArgs     = psio::reflect<Bank>::method_arg_tuple<0>;
 using TransferArgs = psio::reflect<Bank>::method_arg_tuple<1>;
 // open has no cap: (header + 2 slots) x 1 byte + owner 32 + tags 136 = 171, 8-bit.
-static_assert(psio::max_encoded_size<OpenArgs>() == 3 + 32 + (8 + 8 * 16));
+static_assert(psio::inferred_bound<OpenArgs>() == 3 + 32 + (8 + 8 * 16));
 static_assert(psio::auto_pssz_width_v<OpenArgs> == 1);
 // transfer is capped: 16-bit for its lifetime.
 static_assert(psio::max_dynamic_data_v<TransferArgs> == 1024);
 static_assert(psio::auto_pssz_width_v<TransferArgs> == 2);
-// max_encoded_size is the bound inferred from the parameters, not the cap:
+// The inferred bound is that of the parameters and has no cap in it:
 // header 1 + slot 1 + from 8 + to 8 + amount 8 + memo 80.
-static_assert(psio::max_encoded_size<TransferArgs>() == 2 + 8 + 8 + 8 + 80);
+static_assert(psio::inferred_bound<TransferArgs>() == 2 + 8 + 8 + 8 + 80);
+// The largest argument list is 108 bytes: under the cap the header and the
+// slot are 2 bytes each.
+static_assert(psio::max_encoded_size<TransferArgs>() == 2 * 2 + 8 + 8 + 8 + 80);
 ```
 
 Items after the method name, in one flat list:
@@ -1651,10 +1667,13 @@ An argument list is a tuple and a record at once:
 - its `maxDynamicData(N)` is a record cap in every respect, including
   that it narrows the lists, maps and tuples among the parameters
   ([3.3](#33-a-cap-narrows-what-lies-beneath-it));
-- `psio::max_encoded_size<TransferArgs>()` is the bound inferred from the
+- `psio::inferred_bound<TransferArgs>()` is the bound inferred from the
   parameters (106), as for a record; the cap (1024) is
   `psio::max_dynamic_data_v<TransferArgs>` and is what rules the width and
-  what the list contributes to a type that holds it.
+  what the list contributes to the inferred bound of a type that holds it;
+- `psio::max_encoded_size<TransferArgs>()` is the largest argument list:
+  108 bytes, the same parameters with the 2-byte header and slot the cap
+  selects ([5.4](#54-maxdynamicdatan)).
 
 ```cpp
 // The arguments of a call are the tuple of the parameters, with the
@@ -1692,7 +1711,7 @@ struct Payments
 using PayArgs = psio::reflect<Payments>::method_arg_tuple<0>;
 // The bound travels with the type: no attr on the parameter, and the argument
 // list is the one of Bank::transfer.
-static_assert(psio::max_encoded_size<PayArgs>() == psio::max_encoded_size<TransferArgs>());
+static_assert(psio::inferred_bound<PayArgs>() == psio::inferred_bound<TransferArgs>());
 static_assert(psio::max_dynamic_data_v<PayArgs> == 1024);
 static_assert(psio::auto_pssz_width_v<PayArgs> == 2);
 ```
@@ -1945,7 +1964,7 @@ struct Amounts
    bool          frozen = false;
    PSIO_REFLECT(Amounts, count, small, large, signed_, frozen)
 };
-static_assert(psio::max_encoded_size<Amounts>() == 1 + 4 + 8 + 8 + 8 + 1);   // a 1-byte header
+static_assert(psio::inferred_bound<Amounts>() == 1 + 4 + 8 + 8 + 8 + 1);   // a 1-byte header
 
 struct AmountsNumbers   // every integer member a number in I-JSON
 {
@@ -1984,7 +2003,7 @@ struct Ticket
    PSIO_REFLECT(Ticket, id, status, definitionWillNotChange())
 };
 // An enum is its underlying integer: 4 + 1 bytes, and no header (DWNC).
-static_assert(psio::max_encoded_size<Ticket>() == 5);
+static_assert(psio::inferred_bound<Ticket>() == 5);
 ```
 
 ```cpp
@@ -2035,7 +2054,7 @@ struct Blob
    std::array<std::uint8_t, 4> tag{};     // fixed, 4 bytes, no offset
    PSIO_REFLECT(Blob, attr(data, max<64>), tag)
 };
-static_assert(psio::max_encoded_size<Blob>() == 2 + 64 + 4);   // header + slot, data, tag
+static_assert(psio::inferred_bound<Blob>() == 2 + 64 + 4);   // header + slot, data, tag
 ```
 
 ```cpp
@@ -2063,7 +2082,7 @@ struct Slots
    PSIO_REFLECT(Slots, counts, attr(names, element(utf8 | max<16>)))
 };
 // header 1 + counts 16 + slot 1 + names (3 slots of 1 byte + 3 x 16)
-static_assert(psio::max_encoded_size<Slots>() == 1 + 16 + 1 + (3 + 3 * 16));
+static_assert(psio::inferred_bound<Slots>() == 1 + 16 + 1 + (3 + 3 * 16));
 static_assert(psio::auto_pssz_width_v<Slots> == 1);
 ```
 
@@ -2103,7 +2122,7 @@ struct Grid   // a list of lists
    PSIO_REFLECT(Grid, attr(rows, max<3> | element(max<4>)))
 };
 // header 1 + slot 1 + rows: 3 slots of 1 byte + 3 x (4 x 2)
-static_assert(psio::max_encoded_size<Grid>() == 1 + 1 + (3 + 3 * (4 * 2)));
+static_assert(psio::inferred_bound<Grid>() == 1 + 1 + (3 + 3 * (4 * 2)));
 static_assert(psio::auto_pssz_width_v<Grid> == 1);
 ```
 
@@ -2127,7 +2146,7 @@ struct Profile
    PSIO_REFLECT(Profile, id, attr(bio, utf8 | max<100>), age)
 };
 // header 1 + id 8 + bio (slot 1 + selector 1 + 100) + age (slot 1 + selector 1 + 4)
-static_assert(psio::max_encoded_size<Profile>() == 1 + 8 + (1 + 1 + 100) + (1 + 1 + 4));
+static_assert(psio::inferred_bound<Profile>() == 1 + 8 + (1 + 1 + 100) + (1 + 1 + 4));
 ```
 
 ```cpp
@@ -2156,7 +2175,7 @@ struct Choice   // a variant alternative
    PSIO_REFLECT(Choice, attr(v, at<1>(utf8 | max<16>)))
 };
 // header 1 + slot 1 + selector 1 + the widest alternative 16
-static_assert(psio::max_encoded_size<Choice>() == 1 + 1 + 1 + 16);
+static_assert(psio::inferred_bound<Choice>() == 1 + 1 + 1 + 16);
 ```
 
 A variant is one selector byte plus the alternative (at most 256
@@ -2178,7 +2197,7 @@ JSON array.
 ```cpp
 using Entry = std::tuple<std::uint32_t, psio::utf8_string<16>>;
 // header 1 + u32 4 + slot 1 + 16
-static_assert(psio::max_encoded_size<Entry>() == 1 + 4 + 1 + 16);
+static_assert(psio::inferred_bound<Entry>() == 1 + 4 + 1 + 16);
 static_assert(psio::auto_pssz_width_v<Entry> == 1);
 static_assert(psio::max_tuple_elements == 255);   // a larger tuple does not compile
 ```
@@ -2209,7 +2228,7 @@ struct Book
 };
 // balances: an entry is header 1 + key (slot 1 + 8) + 8 = 18; the map is 4 slots + 4 x 18 = 76
 // record:   (header + 2 slots) x 1 byte + balances 76 + members 4 x 4
-static_assert(psio::max_encoded_size<Book>() == 3 + (4 + 4 * 18) + 4 * 4);
+static_assert(psio::inferred_bound<Book>() == 3 + (4 + 4 * 18) + 4 * 4);
 static_assert(psio::auto_pssz_width_v<Book> == 1);
 ```
 
@@ -2250,7 +2269,7 @@ struct Action
    PSIO_REFLECT(Action, sender, attr(args, max<64>))
 };
 // header 1 + sender 8 + args (slot 1 + 64)
-static_assert(psio::max_encoded_size<Action>() == 1 + 8 + (1 + 64));
+static_assert(psio::inferred_bound<Action>() == 1 + 8 + (1 + 64));
 static_assert(psio::auto_pssz_width_v<Action> == 1);
 ```
 
@@ -2295,7 +2314,7 @@ struct Line   // a child's cap is what the parent reserves for it
    PSIO_REFLECT(Line, a)
 };
 // (header + slot) x 2 bytes + the child's cap
-static_assert(psio::max_encoded_size<Line>() == 2 * 2 + 1024);
+static_assert(psio::inferred_bound<Line>() == 2 * 2 + 1024);
 static_assert(psio::auto_pssz_width_v<Line> == 2);
 ```
 
@@ -2331,7 +2350,7 @@ struct Event
    std::chrono::seconds                             ttl{}; // a duration: its tick count
    PSIO_REFLECT(Event, at, ttl, definitionWillNotChange())
 };
-static_assert(psio::max_encoded_size<Event>() == 8 + 8);
+static_assert(psio::inferred_bound<Event>() == 8 + 8);
 ```
 
 ```cpp
@@ -2438,7 +2457,7 @@ struct Flags
    PSIO_REFLECT(Flags, kind, mask, seen)
 };
 // header 1 + kind 1 + mask 2 + seen (slot 1 + 2 + 1)
-static_assert(psio::max_encoded_size<Flags>() == 1 + 1 + 2 + (1 + 2 + 1));
+static_assert(psio::inferred_bound<Flags>() == 1 + 1 + 2 + (1 + 2 + 1));
 static_assert(psio::auto_pssz_width_v<Flags> == 1);
 ```
 
@@ -2697,7 +2716,7 @@ struct AccountGrown
                 attr(bio, utf8 | max<100>))
 };
 // (header + 3 slots) x 2 bytes + id 8 + owner 32 + tags 136 + balance 8 + bio (selector 1 + 100)
-static_assert(psio::max_encoded_size<AccountGrown>() == 2 * 4 + 8 + 32 + 136 + 8 + (1 + 100));
+static_assert(psio::inferred_bound<AccountGrown>() == 2 * 4 + 8 + 32 + 136 + 8 + (1 + 100));
 static_assert(psio::auto_pssz_width_v<AccountGrown> == 2);
 static_assert(!psio::pssz_evolves_from<Account, AccountGrown>);
 ```

@@ -759,7 +759,7 @@ namespace psio {
    // It is the tuple (it derives from it, converts from it, and std::get /
    // std::apply / structured bindings work on it); the codecs read the
    // annotations of element I as they read a record member's: they bound
-   // the tuple (max_encoded_size, the offset width) and are enforced on
+   // the tuple (inferred_bound, the offset width) and are enforced on
    // encode, validate and decode. The cap is the tuple's maxDynamicData: an
    // explicit cap rules, and fixes the width for the type's lifetime.
    //

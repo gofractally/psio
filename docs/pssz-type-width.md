@@ -32,7 +32,7 @@ this repair preserves that interpretation and enforces it on nested values,
 including memcpy fast paths. The annotation's name should not be interpreted as
 a newly introduced dynamic-only cap.
 
-Without an explicit budget, `max_encoded_size<T>()` infers a conservative bound
+Without an explicit budget, `inferred_bound<T>()` infers a conservative bound
 from field/type/wrapper annotations. The corrected composition includes record
 headers, variable field slots, array/vector element offset tables, and conservative
 optional presence overhead. A child with a declared budget reserves that entire
@@ -126,7 +126,7 @@ and metadata APIs; it does not copy a codec into psibase or create a wire family
   time; reserve room with an explicit `maxDynamicData` to evolve.
 - Rust parity is no longer open for the typed codec: `rust/psio` has the
   automatic tag `Pssz` with the same width selection (`PsszPack::AUTO_BOUND`
-  mirrors `max_encoded_size`, `#[pssz(max_dynamic_data = N)]` is the explicit
+  mirrors C++ `inferred_bound`, `#[pssz(max_dynamic_data = N)]` is the explicit
   budget), checked against the shared fixture `conformance/pssz-vectors.json`.
   The schema-driven codecs (C++ `pssz_ir.hpp`, Rust `pssz::dynamic`) implement
   the automatic profile from the Schema IR (`docs/pssz-ir-runtime.md`).

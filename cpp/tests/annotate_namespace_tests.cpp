@@ -290,7 +290,7 @@ namespace
       STATIC_REQUIRE(psio::max_dynamic_data_v<T> == psio::max_dynamic_data_v<R>);
       STATIC_REQUIRE(psio::max_fields_v<T> == psio::max_fields_v<R>);
       STATIC_REQUIRE(psio::effective_max_dynamic_v<T> == psio::effective_max_dynamic_v<R>);
-      STATIC_REQUIRE(psio::max_encoded_size<T>() == psio::max_encoded_size<R>());
+      STATIC_REQUIRE(psio::inferred_bound<T>() == psio::inferred_bound<R>());
       using Refl = psio::reflect<T>;
       STATIC_REQUIRE(Refl::member_count == 5);
       STATIC_REQUIRE(Refl::method_count == 3);

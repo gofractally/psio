@@ -31,8 +31,9 @@ changes), **check** (the assertion that proves it). The headers are
 
 **Get.** The type already works in every format: `psio::to_pssz(a)`,
 `psio::to_json(a)`, `psio::to_key(a)`, a schema. But look at the two
-assertions. `psio::max_encoded_size<T>()` is the largest encoding the type
-allows; here there is none, because `owner` and `tags` can be any size.
+assertions. `psio::inferred_bound<T>()` is the size bound the type's
+members add up to; here there is none, because `owner` and `tags` can be
+any size.
 A PSSZ record locates its variable-size members with offsets, and a type
 with no size bound needs 32-bit offsets: `auto_pssz_width_v == 4`. Every
 record pays a 4-byte header and 4 bytes per variable-size member, and the

@@ -46,7 +46,7 @@
 //
 // The wrapper then IS that bounded type wherever it appears — bare, as a
 // list element, an optional payload, a map key: the bytes, widths,
-// max_encoded_size and Schema IR node of psio::utf8_string<80> (a named
+// inferred_bound and Schema IR node of psio::utf8_string<80> (a named
 // alias of the bounded UTF-8 string), and the same checks in every codec
 // (the writers refuse a value outside the bound or not UTF-8, the readers
 // reject its bytes). It is the one rule of every language (Rust:

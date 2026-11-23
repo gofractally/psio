@@ -134,7 +134,7 @@ TEST_CASE("assoc: a std::pair is the 2-tuple in every format", "[assoc][pair]")
    CHECK(std::string_view{psio::get_type_name(static_cast<const P*>(nullptr))} ==
          "tuple_uint16_string");
    static_assert(psio::auto_pssz_width_v<P> == psio::auto_pssz_width_v<T>);
-   static_assert(psio::max_encoded_size<P>() == psio::max_encoded_size<T>());
+   static_assert(psio::inferred_bound<P>() == psio::inferred_bound<T>());
    static_assert(psio::pssz_evolves_from<P, T>);
    static_assert(psio::pssz_evolves_from<T, P>);
    static_assert(!psio::pssz_evolves_from<P, std::pair<std::uint32_t, std::string>>);
@@ -424,9 +424,9 @@ TEST_CASE("assoc: views, widths, bounds, evolution", "[assoc][pssz]")
 
    // Widths and bounds follow the list.
    static_assert(psio::auto_pssz_width_v<Sized> == psio::auto_pssz_width_v<SizedLists>);
-   static_assert(psio::max_encoded_size<Sized>() == psio::max_encoded_size<SizedLists>());
-   static_assert(psio::max_encoded_size<OnlySet>() == psio::max_encoded_size<OnlyList>());
-   static_assert(psio::max_encoded_size<OnlySet>().has_value());
+   static_assert(psio::inferred_bound<Sized>() == psio::inferred_bound<SizedLists>());
+   static_assert(psio::inferred_bound<OnlySet>() == psio::inferred_bound<OnlyList>());
+   static_assert(psio::inferred_bound<OnlySet>().has_value());
    static_assert(psio::auto_pssz_width_v<OnlySet> == 1);
    static_assert(psio::auto_pssz_width_v<std::map<int, int>> ==
                  psio::auto_pssz_width_v<std::vector<std::tuple<int, int>>>);

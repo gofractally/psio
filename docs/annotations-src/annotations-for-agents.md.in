@@ -128,7 +128,7 @@ In this order ([annotations.md §3.4](annotations.md#34-how-to-pick-a-cap)):
    used in several places, declare a transparent type with a bounded member
    once (`tut-8c`), and use it as the member / parameter type:
 
-@@FROM struct Memo@@TO static_assert(psio::max_encoded_size<Memo>() == psio::max_encoded_size<psio::utf8_string<80>>());@@
+@@FROM struct Memo@@TO static_assert(psio::inferred_bound<Memo>() == psio::inferred_bound<psio::utf8_string<80>>());@@
 
    In a capped argument list (`tut-9c`):
 
@@ -206,7 +206,7 @@ A child record under a cap (`ref-cap-child`):
 | Anti-pattern | Do instead |
 |---|---|
 | `psio::bounded<std::string, 8> tags;` introduced to "add a limit" | `std::vector<std::string> tags;` + `attr(tags, max<8> \| element(utf8 \| max<16>))` |
-| `attr(tags, max<8>)` on a `std::vector<std::string>` and calling it bounded | add `element(max<N>)`; assert `max_encoded_size<T>().has_value()` |
+| `attr(tags, max<8>)` on a `std::vector<std::string>` and calling it bounded | add `element(max<N>)`; assert `inferred_bound<T>().has_value()` |
 | Publishing an uncapped record that will obviously grow | `maxDynamicData(N)` from the first version |
 | Adding a required field, or an optional field in the middle | optional, last |
 | Tightening a bound in place after publication | never; a bound may only widen (assert `pssz_evolves_from`), else a new optional field or a new type |
@@ -232,7 +232,7 @@ A child record under a cap (`ref-cap-child`):
 
 Width and bound of a type without a cap (`tut-2b`):
 
-@@FROM static_assert(psio::max_encoded_size<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);@@TO static_assert(psio::auto_pssz_width_v<Account> == 1);@@
+@@FROM static_assert(psio::inferred_bound<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);@@TO static_assert(psio::auto_pssz_width_v<Account> == 1);@@
 
 Width of a capped type (`tut-3`):
 
@@ -240,7 +240,7 @@ Width of a capped type (`tut-3`):
 
 "Still unbounded" is a fact worth asserting too (`tut-2c`):
 
-@@FROM static_assert(!psio::max_encoded_size<AccountCountOnly>().has_value());@@TO static_assert(psio::auto_pssz_width_v<AccountCountOnly> == 4);@@
+@@FROM static_assert(!psio::inferred_bound<AccountCountOnly>().has_value());@@TO static_assert(psio::auto_pssz_width_v<AccountCountOnly> == 4);@@
 
 Compatibility of a revision (`tut-4a`):
 

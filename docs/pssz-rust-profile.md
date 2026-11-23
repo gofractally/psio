@@ -27,7 +27,7 @@ regression / compatibility tags exactly as in C++.
 type always rules: `max_dynamic_data = N` selects the width class of N
 (`<= 255` → 1, `<= 65535` → 2, otherwise 4). Without a cap the class of the
 inferred bound applies (`PsszPack::AUTO_BOUND`, the mirror of C++
-`max_encoded_size<T>()`); the bound is finite only if every variable-length
+`inferred_bound<T>()`); the bound is finite only if every variable-length
 subfield is bounded, otherwise the width is 4. The only spare capacity is the
 rounding from the bound to its width class. Every type that has offsets — a
 record, a tuple, an array / list / map / set of variable elements — owns its

@@ -117,7 +117,7 @@ static_assert(!psio::from_rfc3339<sys_seconds>("2026-11-22T10:15:60Z"));
 // A fixed-layout record of time values is fixed-size in pssz.
 static_assert(psio::detail::pssz_impl::is_fixed_v<Stamps>);
 static_assert(psio::detail::pssz_impl::fixed_size_of<Stamps>() == 28);
-static_assert(psio::max_encoded_size<Stamps>() == psio::max_encoded_size<StampInts>());
+static_assert(psio::inferred_bound<Stamps>() == psio::inferred_bound<StampInts>());
 
 TEST_CASE("time: text form has exactly the unit's precision", "[time][text]")
 {

@@ -89,7 +89,7 @@ reads every new value that is also a value of the old type. Exactly:
 4. *`utf8`* is the same on both sides at every position.
 5. *`sorted` / `unique` / `unique_keys`* are the same on both sides.
 6. *`maxDynamicData`.* New's cap, if it has one, is at least Old's cap — or,
-   when Old has none, at least Old's inferred bound (`max_encoded_size`).
+   when Old has none, at least Old's inferred bound (`inferred_bound`).
    Dropping a cap is allowed when rule 2 still holds.
 7. *`maxFields`.* If Old has one, New has no more fields than it allows and
    declares a `maxFields` that is not larger.

@@ -276,6 +276,9 @@ psio_add_test(psio_pssz_length_bound_tests pssz_length_bound_tests.cpp)
 # The inferred size bound of variants, tuples and pairs, and the widths
 # that follow from it (typed and schema-driven).
 psio_add_test(psio_pssz_inferred_bound_tests pssz_inferred_bound_tests.cpp)
+# inferred_bound (what a width is chosen from) against max_encoded_size (the
+# largest encoding, at the real widths and at most the cap): cap boundaries.
+psio_add_test(psio_pssz_max_encoded_size_tests pssz_max_encoded_size_tests.cpp)
 # Bounds by annotation at any depth (element / keys / values / at<I>) and by
 # wrapper type (psio::bounded, psio::utf8_string): widths, bytes, enforcement.
 psio_add_test(psio_annotation_tree_tests annotation_tree_tests.cpp)

@@ -222,7 +222,7 @@ namespace warnings_check
       ok &= psio::decode<everything>(psio::pssz{}, std::span<const char>{bytes}).u8 == value.u8;
       static_assert(psio::pssz_evolves_from<everything, everything>);
       (void)psio::auto_pssz_width_v<everything>;
-      (void)psio::max_encoded_size<everything>();
+      (void)psio::inferred_bound<everything>();
 
       // nested: the value type and its view.
       psio::nested<inner> packed;

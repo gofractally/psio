@@ -1275,27 +1275,27 @@ namespace
       // A record's bound counts its header and slots at the record's own
       // width (docs/pssz-spec.md 3.2 `fit`): record{s: raw_string<=N} is
       // 2 * W + N, record{value: array<u8,N>} is W + N.
-      static_assert(psio::max_encoded_size<S253>() == 255 && psio::auto_pssz_width_v<S253> == 1);
-      static_assert(psio::max_encoded_size<S254>() == 258 && psio::auto_pssz_width_v<S254> == 2);
-      static_assert(psio::max_encoded_size<S65531>() == 65535 &&
+      static_assert(psio::inferred_bound<S253>() == 255 && psio::auto_pssz_width_v<S253> == 1);
+      static_assert(psio::inferred_bound<S254>() == 258 && psio::auto_pssz_width_v<S254> == 2);
+      static_assert(psio::inferred_bound<S65531>() == 65535 &&
                     psio::auto_pssz_width_v<S65531> == 2);
-      static_assert(psio::max_encoded_size<S65532>() == 65540 &&
+      static_assert(psio::inferred_bound<S65532>() == 65540 &&
                     psio::auto_pssz_width_v<S65532> == 4);
-      static_assert(psio::max_encoded_size<WidthThreshold254>() == 255 &&
+      static_assert(psio::inferred_bound<WidthThreshold254>() == 255 &&
                     psio::auto_pssz_width_v<WidthThreshold254> == 1);
-      static_assert(psio::max_encoded_size<WidthThreshold255>() == 257 &&
+      static_assert(psio::inferred_bound<WidthThreshold255>() == 257 &&
                     psio::auto_pssz_width_v<WidthThreshold255> == 2);
       // Below the thresholds (they sat on them when the header and slots
       // were counted as 4 bytes): all at the narrower width now.
-      static_assert(psio::max_encoded_size<S247>() == 249 && psio::auto_pssz_width_v<S247> == 1);
-      static_assert(psio::max_encoded_size<S248>() == 250 && psio::auto_pssz_width_v<S248> == 1);
-      static_assert(psio::max_encoded_size<S65527>() == 65531 &&
+      static_assert(psio::inferred_bound<S247>() == 249 && psio::auto_pssz_width_v<S247> == 1);
+      static_assert(psio::inferred_bound<S248>() == 250 && psio::auto_pssz_width_v<S248> == 1);
+      static_assert(psio::inferred_bound<S65527>() == 65531 &&
                     psio::auto_pssz_width_v<S65527> == 2);
-      static_assert(psio::max_encoded_size<S65528>() == 65532 &&
+      static_assert(psio::inferred_bound<S65528>() == 65532 &&
                     psio::auto_pssz_width_v<S65528> == 2);
-      static_assert(psio::max_encoded_size<WidthThreshold251>() == 252 &&
+      static_assert(psio::inferred_bound<WidthThreshold251>() == 252 &&
                     psio::auto_pssz_width_v<WidthThreshold251> == 1);
-      static_assert(psio::max_encoded_size<WidthThreshold252>() == 253 &&
+      static_assert(psio::inferred_bound<WidthThreshold252>() == 253 &&
                     psio::auto_pssz_width_v<WidthThreshold252> == 1);
       // A vector's offset table belongs to the vector: an unbounded one is
       // four bytes wide whatever holds it; one bounded by its member (two
@@ -1311,8 +1311,8 @@ namespace
                     psio::auto_pssz_width_v<Mix4x1> == 4 && psio::auto_pssz_width_v<Mix4x4> == 4);
 
       // A bounded UTF-8 string member bounds its record: no annotation needed.
-      static_assert(psio::max_encoded_size<T16>() == 22 && psio::auto_pssz_width_v<T16> == 1);
-      static_assert(psio::max_encoded_size<T300>() == 308 && psio::auto_pssz_width_v<T300> == 2);
+      static_assert(psio::inferred_bound<T16>() == 22 && psio::auto_pssz_width_v<T16> == 1);
+      static_assert(psio::inferred_bound<T300>() == 308 && psio::auto_pssz_width_v<T300> == 2);
 
       using A = psio::pssz;
       // ── Pinned automatic-profile bytes ─────────────────────────────────
@@ -1537,7 +1537,7 @@ namespace
       // value. These frames are what a writer that skips the bound check
       // would produce; every reader rejects them.
       const char* c = "length-bound-overflow";
-      static_assert(psio::max_encoded_size<Bounded>() == 11 && psio::auto_pssz_width_v<Bounded> == 1);
+      static_assert(psio::inferred_bound<Bounded>() == 11 && psio::auto_pssz_width_v<Bounded> == 1);
       corpus("corpus", "bounded_within", Bounded{"1234", {1, 2}});
       corpus("corpus", "bounded_empty", Bounded{"", {}});
       auto observed = [&]<typename T>(const std::string& vname, const T& value) {
@@ -1611,23 +1611,23 @@ namespace
       // that bound its header, slots or table count at that same width
       // (docs/pssz-spec.md 3.2 `fit`). All of these are 1 byte wide.
       //   AnnTags: list 8 * (1 + 16) = 136; record 1 + 1 + 136.
-      static_assert(psio::max_encoded_size<AnnTags>() == 138 && psio::auto_pssz_width_v<AnnTags> == 1);
-      static_assert(psio::max_encoded_size<WrapTags>() == 138 && psio::auto_pssz_width_v<WrapTags> == 1);
-      static_assert(psio::max_encoded_size<AnnRawTags>() == 138);
+      static_assert(psio::inferred_bound<AnnTags>() == 138 && psio::auto_pssz_width_v<AnnTags> == 1);
+      static_assert(psio::inferred_bound<WrapTags>() == 138 && psio::auto_pssz_width_v<WrapTags> == 1);
+      static_assert(psio::inferred_bound<AnnRawTags>() == 138);
       //   AnnGrid: a row is 4 * 2 (no table); 3 * (1 + 8) = 27; record 2 + 27.
-      static_assert(psio::max_encoded_size<AnnGrid>() == 29 && psio::auto_pssz_width_v<AnnGrid> == 1);
+      static_assert(psio::inferred_bound<AnnGrid>() == 29 && psio::auto_pssz_width_v<AnnGrid> == 1);
       //   AnnOpt: list 2 * (1 + 16) = 34; optional 1 + 34; record 2 + 35.
-      static_assert(psio::max_encoded_size<AnnOpt>() == 37 && psio::auto_pssz_width_v<AnnOpt> == 1);
+      static_assert(psio::inferred_bound<AnnOpt>() == 37 && psio::auto_pssz_width_v<AnnOpt> == 1);
       //   AnnArr: array 3 * (1 + 16) = 51; record 2 + 51.
-      static_assert(psio::max_encoded_size<AnnArr>() == 53 && psio::auto_pssz_width_v<AnnArr> == 1);
+      static_assert(psio::inferred_bound<AnnArr>() == 53 && psio::auto_pssz_width_v<AnnArr> == 1);
       //   AnnMap: entry 3 + 16 + 2 * 4 = 27; map 4 * (1 + 27) = 112; record 2 + 112.
-      static_assert(psio::max_encoded_size<AnnMap>() == 114 && psio::auto_pssz_width_v<AnnMap> == 1);
+      static_assert(psio::inferred_bound<AnnMap>() == 114 && psio::auto_pssz_width_v<AnnMap> == 1);
       //   AnnSet: 4 * (1 + 16) = 68; record 2 + 68.
-      static_assert(psio::max_encoded_size<AnnSet>() == 70 && psio::auto_pssz_width_v<AnnSet> == 1);
+      static_assert(psio::inferred_bound<AnnSet>() == 70 && psio::auto_pssz_width_v<AnnSet> == 1);
       //   AnnTup: tuple 3 + 16 + 4 + 5 = 28; pair 3 + 32 = 35; record 3 + 63.
-      static_assert(psio::max_encoded_size<AnnTup>() == 66 && psio::auto_pssz_width_v<AnnTup> == 1);
+      static_assert(psio::inferred_bound<AnnTup>() == 66 && psio::auto_pssz_width_v<AnnTup> == 1);
       //   AnnVar: 1 + the list alternative (34); record 2 + 35.
-      static_assert(psio::max_encoded_size<AnnVar>() == 37 && psio::auto_pssz_width_v<AnnVar> == 1);
+      static_assert(psio::inferred_bound<AnnVar>() == 37 && psio::auto_pssz_width_v<AnnVar> == 1);
 
       using A = psio::pssz;
       // ── Pinned automatic-profile bytes ─────────────────────────────────
@@ -1717,9 +1717,9 @@ namespace
       using A = psio::pssz;
       // The wrapper is BoundedString(80) to width inference: 80 bytes, a
       // record of it and a header fit 1-byte offsets.
-      static_assert(psio::max_encoded_size<Memo>() == 80);
-      static_assert(psio::max_encoded_size<Memo>() == psio::max_encoded_size<WrapMemo>());
-      static_assert(!psio::max_encoded_size<MemoRec>().has_value());   // memos is unbounded
+      static_assert(psio::inferred_bound<Memo>() == 80);
+      static_assert(psio::inferred_bound<Memo>() == psio::inferred_bound<WrapMemo>());
+      static_assert(!psio::inferred_bound<MemoRec>().has_value());   // memos is unbounded
 
       literal<A, Memo>(c, "memo", Memo{"hi"}, hx("6869"));
       literal<A, WrapMemo>(c, "memo", WrapMemo{psio::utf8_string<80>{"hi"}}, hx("6869"));
@@ -1764,27 +1764,27 @@ namespace
    void emit_list_widths()
    {
       const char* c = "list-width";
-      static_assert(psio::max_encoded_size<BList1>() == 255 && psio::auto_pssz_width_v<BList1> == 1);
-      static_assert(psio::max_encoded_size<BList2>() == 285 && psio::auto_pssz_width_v<BList2> == 2);
-      static_assert(psio::max_encoded_size<BList2Top>() == 65535 &&
+      static_assert(psio::inferred_bound<BList1>() == 255 && psio::auto_pssz_width_v<BList1> == 1);
+      static_assert(psio::inferred_bound<BList2>() == 285 && psio::auto_pssz_width_v<BList2> == 2);
+      static_assert(psio::inferred_bound<BList2Top>() == 65535 &&
                     psio::auto_pssz_width_v<BList2Top> == 2);
-      static_assert(psio::max_encoded_size<BList4>() == 66304 &&
+      static_assert(psio::inferred_bound<BList4>() == 66304 &&
                     psio::auto_pssz_width_v<BList4> == 4);
-      static_assert(!psio::max_encoded_size<BListFree>() && psio::auto_pssz_width_v<BListFree> == 4);
-      static_assert(!psio::max_encoded_size<Vec<Text>>() && psio::auto_pssz_width_v<Vec<Text>> == 4);
+      static_assert(!psio::inferred_bound<BListFree>() && psio::auto_pssz_width_v<BListFree> == 4);
+      static_assert(!psio::inferred_bound<Vec<Text>>() && psio::auto_pssz_width_v<Vec<Text>> == 4);
       // As members: the record's width is its own (2 * W + the list).
-      static_assert(psio::max_encoded_size<ListW1>() == 259 && psio::auto_pssz_width_v<ListW1> == 2);
-      static_assert(psio::max_encoded_size<ListW2>() == 289 && psio::auto_pssz_width_v<ListW2> == 2);
-      static_assert(psio::max_encoded_size<ListW2Top>() == 65543 &&
+      static_assert(psio::inferred_bound<ListW1>() == 259 && psio::auto_pssz_width_v<ListW1> == 2);
+      static_assert(psio::inferred_bound<ListW2>() == 289 && psio::auto_pssz_width_v<ListW2> == 2);
+      static_assert(psio::inferred_bound<ListW2Top>() == 65543 &&
                     psio::auto_pssz_width_v<ListW2Top> == 4);
-      static_assert(psio::max_encoded_size<ListW4>() == 66312 &&
+      static_assert(psio::inferred_bound<ListW4>() == 66312 &&
                     psio::auto_pssz_width_v<ListW4> == 4);
-      static_assert(!psio::max_encoded_size<ListFree>() && psio::auto_pssz_width_v<ListFree> == 4);
-      static_assert(psio::max_encoded_size<ListNested>() == 5144 &&
+      static_assert(!psio::inferred_bound<ListFree>() && psio::auto_pssz_width_v<ListFree> == 4);
+      static_assert(psio::inferred_bound<ListNested>() == 5144 &&
                     psio::auto_pssz_width_v<ListNested> == 2);
-      static_assert(psio::max_encoded_size<MapW1>() == 62 && psio::auto_pssz_width_v<MapW1> == 1);
-      static_assert(psio::max_encoded_size<MapW2>() == 2404 && psio::auto_pssz_width_v<MapW2> == 2);
-      static_assert(psio::max_encoded_size<SetW1>() == 259 && psio::auto_pssz_width_v<SetW1> == 2);
+      static_assert(psio::inferred_bound<MapW1>() == 62 && psio::auto_pssz_width_v<MapW1> == 1);
+      static_assert(psio::inferred_bound<MapW2>() == 2404 && psio::auto_pssz_width_v<MapW2> == 2);
+      static_assert(psio::inferred_bound<SetW1>() == 259 && psio::auto_pssz_width_v<SetW1> == 2);
 
       using A = psio::pssz;
       using T16 = psio::utf8_string<16>;
@@ -2001,9 +2001,9 @@ namespace
       // need at most 107 bytes); without one, the inferred bound.
       static_assert(psio::max_dynamic_data_v<ArgsTransfer> == 256 &&
                     psio::auto_pssz_width_v<ArgsTransfer> == 2);
-      static_assert(psio::max_encoded_size<ArgsTransferUncapped>() == 107 &&
+      static_assert(psio::inferred_bound<ArgsTransferUncapped>() == 107 &&
                     psio::auto_pssz_width_v<ArgsTransferUncapped> == 1);
-      static_assert(psio::max_encoded_size<ArgsBatch>() == 44 &&
+      static_assert(psio::inferred_bound<ArgsBatch>() == 44 &&
                     psio::auto_pssz_width_v<ArgsBatch> == 1);
       static_assert(psio::auto_pssz_width_v<ArgsNote> == 1);
       static_assert(psio::auto_pssz_width_v<ArgsTransfer2> == 2);
@@ -2408,12 +2408,12 @@ namespace
       {
          // Bit types have a size bound (docs/pssz-spec.md 3.2): a record
          // whose variable members are bit types is bounded without a cap.
-         static_assert(psio::max_encoded_size<psio::bitvector<12>>() == 2 &&
-                       psio::max_encoded_size<Bits12>() == 3);
-         static_assert(psio::max_encoded_size<BitRec>() == 8 && psio::auto_pssz_width_v<BitRec> == 1);
-         static_assert(psio::max_encoded_size<BitNarrow>() == 255 &&
+         static_assert(psio::inferred_bound<psio::bitvector<12>>() == 2 &&
+                       psio::inferred_bound<Bits12>() == 3);
+         static_assert(psio::inferred_bound<BitRec>() == 8 && psio::auto_pssz_width_v<BitRec> == 1);
+         static_assert(psio::inferred_bound<BitNarrow>() == 255 &&
                        psio::auto_pssz_width_v<BitNarrow> == 1);
-         static_assert(psio::max_encoded_size<BitWide>() == 258 &&
+         static_assert(psio::inferred_bound<BitWide>() == 258 &&
                        psio::auto_pssz_width_v<BitWide> == 2);
          using A = psio::pssz;
          // header 04 (u8, the 2 inline bytes of the bitvector, one slot),
@@ -2925,9 +2925,9 @@ namespace
       // inner root one node level below the member.
       const char* c = "nested";
       static_assert(psio::auto_pssz_width_v<Nested<u32>> == 4 &&
-                    !psio::max_encoded_size<Nested<u32>>().has_value());
-      static_assert(!psio::max_encoded_size<NAction>().has_value());
-      static_assert(psio::max_encoded_size<NCapped>() == 11 &&
+                    !psio::inferred_bound<Nested<u32>>().has_value());
+      static_assert(!psio::inferred_bound<NAction>().has_value());
+      static_assert(psio::inferred_bound<NCapped>() == 11 &&
                     psio::auto_pssz_width_v<NCapped> == 1);
       static_assert(psio::pssz_evolves_from<NAction, NAction2> &&
                     psio::pssz_evolves_from<NAction, NActionLater> &&
@@ -3411,7 +3411,13 @@ namespace
       if constexpr (psio::schema_custom_v<T>)
          out << ", \"custom_id\": " << jq(psio::schema_custom_id<T>());
       if constexpr (psio::contains_invariant_v<T>) out << ", \"invariant\": true";
-      out << ", \"auto_width\": " << psio::auto_pssz_width_v<T> << ", \"max_encoded_size\": ";
+      // inferred_bound: what a width is chosen from (never the type's own
+      // cap). max_encoded_size: the largest psio::pssz encoding, at the
+      // real widths and at most the cap.
+      out << ", \"auto_width\": " << psio::auto_pssz_width_v<T> << ", \"inferred_bound\": ";
+      if (constexpr auto m = psio::inferred_bound<T>(); m) out << *m;
+      else out << "null";
+      out << ", \"max_encoded_size\": ";
       if (constexpr auto m = psio::max_encoded_size<T>(); m) out << *m;
       else out << "null";
       out << ", \"max_dynamic_data\": ";

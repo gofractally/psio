@@ -81,16 +81,16 @@ namespace
    static_assert(impl::is_fixed_v<std::array<E32, 2>> &&
                  impl::fixed_size_of<std::array<E32, 2>>() == 8);
 
-   static_assert(psio::max_encoded_size<E8>() == 1 && psio::max_encoded_size<E16>() == 2 &&
-                 psio::max_encoded_size<E32>() == 4 && psio::max_encoded_size<E64>() == 8);
+   static_assert(psio::inferred_bound<E8>() == 1 && psio::inferred_bound<E16>() == 2 &&
+                 psio::inferred_bound<E32>() == 4 && psio::inferred_bound<E64>() == 8);
    static_assert(psio::auto_pssz_width_v<E8> == 1 && psio::auto_pssz_width_v<E64> == 1);
    // header 1 + 1 + 8
-   static_assert(psio::max_encoded_size<Narrow>() == 10 && psio::auto_pssz_width_v<Narrow> == 1);
-   static_assert(psio::max_encoded_size<Fixed>() == 9 && psio::auto_pssz_width_v<Fixed> == 1);
+   static_assert(psio::inferred_bound<Narrow>() == 10 && psio::auto_pssz_width_v<Narrow> == 1);
+   static_assert(psio::inferred_bound<Fixed>() == 9 && psio::auto_pssz_width_v<Fixed> == 1);
    // header 1 + 1 + 8 + (slot 1 + payload 1 + conservative selector 1)
-   static_assert(psio::max_encoded_size<NarrowV2>() == 13 &&
+   static_assert(psio::inferred_bound<NarrowV2>() == 13 &&
                  psio::auto_pssz_width_v<NarrowV2> == 1);
-   static_assert(!psio::max_encoded_size<Rec>().has_value() && psio::auto_pssz_width_v<Rec> == 4);
+   static_assert(!psio::inferred_bound<Rec>().has_value() && psio::auto_pssz_width_v<Rec> == 4);
 
    static_assert(psio::pssz_evolves_from<Narrow, NarrowV2>);
    static_assert(psio::pssz_evolves_from<E8, E8>);

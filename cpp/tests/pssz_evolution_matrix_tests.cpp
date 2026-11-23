@@ -1100,8 +1100,8 @@ TEST_CASE("automatic pssz without a budget can change width when a field is appe
    using F = psio::pssz;
    // U0: header 1 + 253. U1 adds a slot and the optional's two bytes: 1 + 253
    // + 1 + 2 = 257 does not fit one-byte offsets, so it is 2 + 253 + 2 + 2.
-   STATIC_REQUIRE(psio::max_encoded_size<U0>() == std::optional<std::size_t>{254});
-   STATIC_REQUIRE(psio::max_encoded_size<U1>() == std::optional<std::size_t>{259});
+   STATIC_REQUIRE(psio::inferred_bound<U0>() == std::optional<std::size_t>{254});
+   STATIC_REQUIRE(psio::inferred_bound<U1>() == std::optional<std::size_t>{259});
    STATIC_REQUIRE(psio::auto_pssz_width_v<U0> == 1);
    STATIC_REQUIRE(psio::auto_pssz_width_v<U1> == 2);  // crossed the 255 threshold
 
