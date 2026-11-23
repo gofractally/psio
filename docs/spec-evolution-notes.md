@@ -559,6 +559,122 @@ the JS check must both be corrected to say so.
 
 ---
 
+## E-010 — `sorted` / `unique` / `unique_keys` in the Schema IR
+
+**Status.** Design note for a later round. Not implemented.
+
+**Today.** The three order constraints (`pssz-spec.md` §3.5) are typed
+only. C++ (`psio::sorted`, `unique`, `unique_keys`), Rust
+(`#[psio(sorted)]`, …), JS (`sorted` / `unique` / `uniqueKeys` member
+options) and Python (`psio.sorted`, …) enforce them in their typed codecs.
+The Schema IR does not carry them, so a schema-driven reader of the same
+schema accepts an unordered list, `pssz_evolves_from` cannot compare them
+between two fetched schemas, and no shared fixture row covers them (each
+language tests its own typed enforcement).
+
+**How to put them in the IR.** Two candidates.
+
+*A. Wire custom ids over the list node* (recommended). The same device
+that already carries the order of a map and a set
+(`Custom{List<Tuple<K, V>>, "map"}`, `Custom{List<K>, "set"}`):
+
+| constraint | node |
+|---|---|
+| `sorted` | `Custom{<list or array>, "sorted"}` |
+| `sorted`, descending | `Custom{…, "sorted-desc"}` |
+| `unique` (`sorted_unique`) | `Custom{…, "unique"}` |
+| `unique`, descending | `Custom{…, "unique-desc"}` |
+| `unique_keys` | `Custom{…, "unique-keys"}` |
+
+`<list or array>` is `List`, `BoundedList`, `Array`, or the `"hex"` custom
+over one. `unique_keys` together with `sorted` nests, `"unique-keys"`
+outermost. It works at every depth with no extra grammar
+(`element(sorted)` is just the node of the element type), for a method
+parameter and result, and for a list that is a root type. A reader that
+does not know the ids treats the node as its wire type, which is exactly
+today's behaviour; a strict registry refuses it. The ids join the closed
+list of wire ids that take no handler (`bool`, `char`, `string`, `utf8`,
+`hex`, `bitvector`, `bitlist`, `map`, `set`, `box`, `unknown`).
+
+*B. Attributes.* On the member, in the camelCase of the existing ones
+(`lengthBound`, `maxDynamicData`, `maxFields`): `sorted` = `"asc"` |
+`"desc"`, `unique` = `"asc"` | `"desc"`, `uniqueKeys` = `""`; on a `Func`,
+`result.sorted` etc. (the existing `result.` prefix). Type nodes and type
+interning are untouched. But a constraint below the member needs a path in
+the attribute name (`element.sorted`, `values.element.unique`,
+`at1.sorted`), and a list that is not a member (a root type, a named
+alias) has nowhere to carry it. `lengthBound` avoids this only because a
+bound below the member always has a type form (`BoundedList`); an order
+constraint has none.
+
+**Which codecs must order dynamic values.** Every schema-driven entry
+point that enforces map / set order today, for the same reason and with
+the same comparison (bytewise order of the elements' `key` encodings):
+
+- PSSZ: checked validate, decode to a dynamic value, encode from one;
+- JSON / I-JSON: text → PSSZ and PSSZ → text (which validates its input);
+- key: value → key and PSSZ → key.
+
+Not the trusted decode and not views, as for the typed codecs. C++ has the
+pieces in `detail/pssz_ir_assoc.hpp` (`key_at`, `assoc_order`,
+`key_bytes_less`, `has_key`); what is new relative to a set:
+
+- `sorted` allows equal neighbours (`<=`), `unique` does not (`<`);
+- descending order;
+- `unique_keys` requires no order: compare a sorted copy of the key
+  encodings, O(n log n) time and O(n) memory, with the reader's existing
+  size limits;
+- the key of an element is the element, or element 0 of a pair / tuple
+  element for `unique_keys`;
+- an element type with no key encoding (whatever `has_key` refuses for
+  a map key: "the key type of a map / set has no key encoding") makes the
+  schema invalid, at schema validation, not per value.
+
+**Evolution.** The ids are part of the type: `pssz_evolves_from` and its
+mirrors compare them as they compare `map` / `set` (no change allowed in
+either direction, §7.6), now also between two fetched schemas.
+
+**Fixture rows needed.**
+
+- `pssz-vectors.json`: a class `list-order`. For each of the five
+  constraints × element kinds (`u32`, raw string, UTF-8 string,
+  `tuple<u32, string>`, a record) × positions (record member; below a
+  member via `element(...)`; inside an optional; an array; a list of
+  lists): one `canonical` row in order, one `canonical` row with equal
+  neighbours for plain `sorted`, and `reject` rows (out of order; equal
+  neighbours under `unique`; a repeated key under `unique_keys`). As in
+  `map-set-order`, each rejected frame appears a second time read as the
+  plain list type (`canonical`), to show that only the constraint rejects
+  it. All of these types are `ir: true`, so the schema-driven tests of
+  every language run the same rows. Order of magnitude: the existing
+  `map-set-order` class is 352 rows.
+- `json-vectors.json`: accept / reject rows for the same types (an
+  unordered JSON array is rejected, in `json` and `ijson`).
+- `time-key-vectors.json`: the key of an ordered list is the key of the
+  list; an unordered value has no key.
+- `interface-vectors.json`: one method with an ordered parameter and one
+  with an ordered result.
+- `schema-json-vectors.json`: a schema using the ids (accept), and
+  rejects: an order id over a node that is not a list or array, over a
+  map / set, over elements with no key.
+- The `schema_ir` and rows of the existing fixtures do not change: no
+  fixture type carries an order constraint today.
+
+**Mirror cost per language** (relative; C++ first because its emitters
+write the fixtures).
+
+| | schema builder | schema-driven codec | check / other |
+|---|---|---|---|
+| C++ | emit the node from the specs at the member and below it (`annotated_type`) | accept the ids in `wire_custom_id`; one ordering hook reused by PSSZ, JSON and key (the map / set hook with a mode) | emitters pass an unknown custom through already (`emit_wit`, capnp, fbs, protobuf); the fixture emitters gain the new classes |
+| Rust | the derive already records the order (`Shape::ordered`); the schema builder emits the node | `pssz::dynamic` and the dynamic JSON / key paths: the same hook | `pssz_evolves_from` already compares `order` for typed shapes |
+| JS | `types.ts` builds the node instead of keeping the option beside the record; this also lifts today's restriction that the options belong to a record member | one compiled-node flag in `pssz-core.ts`, reusing the map / set comparison; `pssz-json.ts`, `pssz-key.ts` call it | `psszEvolvesFrom` compares the ids for fetched schemas too |
+| Python | `schema.py` emits the node | `_core.py` compiled node flag, `_key.py` | `evolution.py`: drop the "typed declarations only" caveat |
+
+The largest single piece is the C++ fixture emitter work; the codec change
+in each language is small because map / set ordering already exists.
+
+---
+
 ## Conventions for this file
 
 - Each entry has a stable id (E-NNN). IDs are append-only — never reused
