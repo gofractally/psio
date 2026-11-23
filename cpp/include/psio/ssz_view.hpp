@@ -78,6 +78,9 @@ namespace psio::view_layout {
                std::memcpy(&off_next, s.data() + (i + 1) * 4u, 4);
             else
                off_next = static_cast<std::uint32_t>(s.size());
+            // Offsets nobody validated must not select bytes outside the list.
+            if (off_i > off_next || off_next > s.size())
+               return {};
             return s.subspan(off_i, off_next - off_i);
          }
       }
