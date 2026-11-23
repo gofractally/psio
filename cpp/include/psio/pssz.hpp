@@ -2759,8 +2759,9 @@ namespace psio {
          else if constexpr (std::is_same_v<T, std::string>)
          {
             // A plain std::string is Vector(u8): raw bytes pass through.
-            // UTF-8 is checked only in strict mode, by the utf8_spec
-            // annotation, and by the utf8_string<N> wrapper.
+            // UTF-8 is checked in strict mode, wherever the utf8 annotation
+            // is stated for the position (check_position: every reader and
+            // the encoder), and by the utf8_string<N> wrapper.
             if (flags && flags->strict_strings)
                return ::psio::utf8_spec::validate(
                   std::span<const char>(src.data() + pos, end - pos));

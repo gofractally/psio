@@ -53,16 +53,18 @@ selector for `optional<record>` were regenerated.
 
 **Strings.** A plain string is `Vector(u8)` carrying raw bytes: encode, decode,
 default validation and views do not check UTF-8. Strict validation checks every
-string, the `utf8_spec` annotation is checked by strict validation, and the
-`utf8_string<N>` wrapper carries the constraint in its type (enforced by
-encode, decode and both validation modes). `utf8_string<>` is the unbounded
+string. A string that must be UTF-8 says so in its type: the `utf8_string<N>`
+wrapper, or the `utf8` annotation (`psio::utf8`, `psio::utf8_spec{}`) on a
+`std::string` member or position — the two are the same type, enforced by
+encode, decode and both validation modes. There is no annotation that is
+checked by strict validation only. `utf8_string<>` is the unbounded
 UTF-8 string. The user type encodes the restriction, and pairs across
 languages as: C++ `std::string` = Rust `RawString` (raw bytes), C++
 `utf8_string<>` = Rust `String` (UTF-8), `utf8_string<N>` = UTF-8 of at most N
 bytes. A bounded `utf8_string<N>` contributes N bytes to the inferred width
-bound wherever it appears (its bound is enforced), like a `length_bound` member
-annotation on a `std::string` (which narrows the width but is not itself
-enforced by any codec path). `utf8_string<>` is unbounded.
+bound wherever it appears, exactly like a `length_bound` member annotation on
+a `std::string`; both bounds are enforced by encode, decode and validation.
+`utf8_string<>` is unbounded.
 
 **Trailing data.** A buffer holds exactly one value. Fixed-size values must
 occupy exactly their span in decode as well as validate.

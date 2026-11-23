@@ -340,14 +340,12 @@ namespace psio::detail::ann
    template <typename A>
    inline constexpr bool has_length_bound_v =
       ::psio::has_spec_v<::psio::length_bound, typename A::value_t>;
-   // Whether a tuple states an enforced UTF-8 constraint (`psio::utf8`).
+   // Whether a tuple states the UTF-8 constraint (`psio::utf8`,
+   // `psio::utf8_spec{...}`): it is always enforced.
    template <typename... Ts>
-   constexpr bool enforces_utf8(const std::tuple<Ts...>& specs) noexcept
+   constexpr bool enforces_utf8(const std::tuple<Ts...>&) noexcept
    {
-      if constexpr ((std::is_same_v<Ts, ::psio::utf8_spec> || ...))
-         return std::get<::psio::utf8_spec>(specs).enforced;
-      else
-         return false;
+      return (std::is_same_v<Ts, ::psio::utf8_spec> || ...);
    }
    template <typename A>
    inline constexpr bool has_utf8_v = enforces_utf8(A::value);
