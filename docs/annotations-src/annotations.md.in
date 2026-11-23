@@ -12,22 +12,15 @@ type is published.
 - Wire format: [pssz-spec.md](pssz-spec.md). Text: [json.md](json.md).
   Keys: [key-spec.md](key-spec.md). Helper names: [helpers.md](helpers.md).
 
-> **Pending wire change.** A commit that is not yet merged changes four
-> things this document describes: the width of a bounded list's own offset
-> table **[W1]**, a limit of 255 elements on tuples **[W2]**, where `utf8`
-> is enforced **[W3]**, and the size bound of bit types **[W4]**. Every
-> passage that depends on one of them carries its tag, and the numbers are
-> collected in [Pending wire change](#pending-wire-change). Everything else
-> describes the code as it is on `codex/psibase-core-evolution`.
-
 **How this document is checked.** Every C++ snippet is a run of consecutive
 lines of [`cpp/tests/doc_annotations_examples.cpp`](../cpp/tests/doc_annotations_examples.cpp)
 (test `psio_doc_annotations_examples`); the section name given with a
 snippet (`ref-length`, `tut-2`, …) is the comment that starts it in that
-file. The Rust and TypeScript snippets are **not compiled by the
-repository's tests**: they were compiled and run once against
-`rust/psio` and `js/` at the commit that added this document
-([Rust and TypeScript snippets](#rust-and-typescript-snippets)).
+file. The Rust, TypeScript and Python snippets are **not compile-checked
+from this document**: nothing verifies that their text is the text of a
+test. Each language has a test that declares the same types and pins the
+same bytes
+([Rust, TypeScript and Python snippets](#rust-typescript-and-python-snippets)).
 
 ## Contents
 
@@ -40,8 +33,9 @@ repository's tests**: they were compiled and run once against
 7. [Reading: views, validation, trust](#7-reading-views-validation-trust)
 8. [Evolution: what may change after publication](#8-evolution-what-may-change-after-publication)
 9. [Common mistakes and their compiler errors](#9-common-mistakes-and-their-compiler-errors)
-10. [Pending wire change](#pending-wire-change)
-11. [Rust and TypeScript snippets](#rust-and-typescript-snippets)
+10. [Rust, TypeScript and Python snippets](#rust-typescript-and-python-snippets)
+
+Looking for a number to write in `maxDynamicData`? [3.4 How to pick a cap](#34-how-to-pick-a-cap).
 
 ## 1. One declaration, every format
 
@@ -56,8 +50,8 @@ every format follows from that one statement:
 
 | Format | What the annotations above do |
 |---|---|
-| **pssz** (`psio::to_pssz`, `from_pssz`, `validate_pssz`) | The record's offsets are 8-bit instead of 32-bit (the bounds add up to 220 bytes). A value outside a bound has no encoding; bytes that hold one are rejected. |
-| **key** (`psio::to_key`, `from_key`, `validate_key`) | No change to the bytes. The reader rejects a key outside a bound; the C++ writer does not check ([limits](#72-what-is-checked-where)). |
+| **pssz** (`psio::to_pssz`, `from_pssz`, `validate_pssz`) | The record's offsets are 8-bit instead of 32-bit (the bounds add up to 187 bytes), and so is the offset table of `tags`. A value outside a bound has no encoding; bytes that hold one are rejected. |
+| **key** (`psio::to_key`, `from_key`, `validate_key`) | No change to the bytes. The reader rejects a key outside a bound or with a `utf8` member that is not UTF-8; the C++ writer does not check ([limits](#72-what-is-checked-where)). |
 | **json / ijson** (`psio::to_json`, `to_ijson`, …) | No change to the text. Writer and reader refuse a value outside a bound. |
 | **Schema IR** (`psio::SchemaBuilder`) | `owner` is `Custom{BoundedList<u8, 32>, "utf8"}`, `tags` is `BoundedList<Custom{BoundedList<u8, 16>, "utf8"}, 8>`: a reader that has only the schema derives the same width and enforces the same bounds. |
 | **WIT** (`psio::emit_wit`) | A bounded list is `list<T>/* @psio:max=N */`; a record cap is `@maxDynamicData(N)`. A string's bound is not shown. |
@@ -73,7 +67,8 @@ The owner's rules this design implements:
   spellings are byte-identical ([2.3](#23-wrapper-types)).
 - **Width is part of the type.** An explicit cap always rules; otherwise
   the inferred bound, rounded up to the next offset width. The only spare
-  capacity is the rounding ([3](#3-width-what-a-bound-buys)).
+  capacity is the rounding ([3](#3-width-what-a-bound-buys)). Every type
+  that has offsets — a record, a tuple, a list, a map — has its own width.
 - **Bounds are enforced**, not advisory.
 
 ## 2. Where annotations are written
@@ -154,7 +149,7 @@ annotation > the enclosing type's type-level annotation > the format's
 default. Type-level annotations that act as a default for members are the
 integer text forms (`PSIO_TYPE_ATTRS(T, psio::ijson_number)`).
 
-### 2.5 Rust and TypeScript
+### 2.5 Rust, TypeScript and Python
 
 Rust: `#[psio(...)]` describes the type for every derive (`PsszPack`,
 `PsszUnpack`, `PsszView`, `JsonText`, `Key`, `ToPsszSchema`);
@@ -166,87 +161,267 @@ TypeScript: types are values built with the functions of `js/src/types.ts`
 (`record`, `field`, `list`, …); annotations are the option objects of
 `field(type, options)` and `record(name, fields, options)`.
 
+Python (`python/`, [README](../python/README.md)): the types are the ones
+the program has — a `@dataclass`, `str`, `list`, `dict`, `Optional`, an
+`enum.Enum`. Member annotations are `typing.Annotated` metadata
+(`Annotated[str, psio.max(32)]`); type-level ones are the decorators
+`@psio.record(...)`, `@psio.transparent`, `@psio.enum(...)`,
+`@psio.interface` / `@psio.method(...)`, and the method markers
+`@psio.invariant`, `@psio.to_text`, `@psio.from_text`. An integer needs a
+width, so integer hints are `psio.u8` … `psio.u64`, `psio.i8` … (aliases of
+`Annotated[int, ...]`). Import the names you use: `from psio import *`
+would shadow the builtins `max` and `min`.
+
 ## 3. Width: what a bound buys
 
-Every pssz type that has offsets — a record, a tuple, a pair, an array of
-variable-size elements — writes them 1, 2 or 4 bytes wide. The width `W` is
-a compile-time property of the type ([pssz-spec.md §3](pssz-spec.md#3-width-selection)):
+Every pssz type that has offsets writes them 1, 2 or 4 bytes wide:
 
-1. **An explicit cap always rules.** With `maxDynamicData(N)`: `N ≤ 255` → 1
-   byte, `N ≤ 65535` → 2 bytes, otherwise 4. The cap is not reduced to what
-   the current fields need.
-2. **Otherwise the inferred bound**, `psio::max_encoded_size<T>()`: the sum
-   of what the bounds allow, rounded up to the next width. If any part is
-   unbounded there is no bound and `W = 4`.
-3. **The only spare capacity is the rounding.** A type whose bound is 220
-   has 35 bytes of slack before it would become 16-bit; a type whose bound
-   is 1340 has until 65535.
+- a **record**, a **tuple** and a **pair** write a header and one offset
+  slot per variable-size member;
+- a **list**, a **map**, a **set** and an **array** of variable-size
+  elements write an offset table of one slot per element.
+
+The width `W` is a compile-time property of the type, and **every type that
+has offsets has its own**: a record can have 2-byte slots and hold a list
+whose table is 1 byte wide ([pssz-spec.md §3](pssz-spec.md#3-width-selection)).
+Three rules:
+
+1. **An explicit cap always rules.** A record (or a method's argument list)
+   with `maxDynamicData(N)`: `N ≤ 255` → 1 byte, `N ≤ 65535` → 2 bytes,
+   otherwise 4. The cap is not reduced to what the current fields need.
+2. **Otherwise the inferred bound**, `psio::max_encoded_size<T>()`: the
+   largest encoding the bounds allow, rounded up to the next width. If any
+   part is unbounded there is no bound and `W = 4`. Lists, maps, sets,
+   arrays, tuples and pairs have no cap of their own and always use this
+   rule — together with the cap of the record they are in
+   ([3.3](#33-a-cap-narrows-what-lies-beneath-it)).
+3. **The only spare capacity is the rounding.** A type whose bound is 187
+   has 68 bytes of slack before it would become 16-bit; a type whose bound
+   is 1206 has until 65535.
+
+`W` is never chosen from the size of a value: every value of a type is
+written with that type's widths, and has exactly one encoding.
 
 Check it where the type is declared:
 
-@@FROM static_assert(psio::max_encoded_size<Account>() == 4 + 8 + (4 + 32) + (4 + 8 * (16 + 4)) + 8);@@TO static_assert(psio::auto_pssz_width_v<Account> == 1);@@
+@@FROM static_assert(psio::max_encoded_size<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);@@TO static_assert(psio::auto_pssz_width_v<Account> == 1);@@
 
-How the inferred bound is counted ([pssz-spec.md §3.2](pssz-spec.md#32-max_encoded_sizet)).
-Every header and offset slot counts **4 bytes**, whatever width the type
-ends up with (the bound selects `W`, so it cannot depend on `W`):
+### 3.1 How the inferred bound is counted
+
+([pssz-spec.md §3.2](pssz-spec.md#32-max_encoded_sizet).) A type that has
+offsets consists of `k` words of `W` bytes each — its header, its slots,
+its table entries — and of other bytes, at most `r`: the fixed-size members
+and the payloads. Its bound counts the `k` words **at the width the type
+ends up with**:
+
+```text
+fit(k, r) = k + r      if  k + r  <= 255       W = 1
+          = 2k + r     if 2k + r  <= 65535     W = 2
+          = 4k + r     otherwise               W = 4
+```
 
 | Part | Contribution |
 |---|---|
-| extensible record, tuple, pair | 4 (header) + its members |
-| `definitionWillNotChange()` record | its members (no header) |
-| fixed-size member (integer, bool, enum, float, fixed array, DWNC record of fixed members) | its size |
-| variable-size member | 4 (its offset slot) + its own bound |
-| string / byte list with `max<N>` or `exact<N>` | N |
-| list of ≤ N fixed-size elements | N × element size |
-| list or array of N variable-size elements **[W1]** | N × (element bound + 4) |
+| extensible record, tuple, pair | `fit(1 + v, members)`: a header and `v` slots, `v` = the number of variable-size members |
+| `definitionWillNotChange()` record | `fit(v, members)`: no header |
+| fixed-size member (integer, bool, enum, float, fixed array, `bitvector<N>`, DWNC record of fixed members) | its size; no slot |
+| variable-size member | one slot (counted in `v`) and its own bound |
+| string / byte list with `max<N>` or `exact<N>` | N (no bookkeeping of its own) |
+| list of ≤ N fixed-size elements | N × element size (no table) |
+| list or array of N variable-size elements | `fit(N, N × element bound)`: a table of N slots, then the elements |
 | `std::optional<T>` | 1 + bound of T (one selector byte is always reserved) |
 | `std::variant<…>` | 1 + the largest alternative |
 | map of ≤ N entries | as a list of N `(key, value)` tuples; set: as a list of N keys |
 | `psio::nested<T>` with member `max<N>` | N |
 | a member whose type has its own `maxDynamicData(N)` | N in full, not the member's inferred bound |
-| unbounded string / list / map / set / nested; `bitvector` / `bitlist` **[W4]**; a boxed value; a member with an `as<Tag>` override | no bound → the enclosing type is 4-byte |
+| `psio::bitvector<N>` | ⌈N/8⌉ bytes, fixed size ([6.20](#620-bit-types)) |
+| `psio::bitlist<N>` | ⌈N/8⌉ + 1 (the bits and the delimiter bit), variable size |
+| unbounded string / list / map / set / nested; a boxed value; a member with an `as<Tag>` override | no bound → the enclosing type is 4-byte |
 
-`min<N>` alone bounds nothing. A list's **own** offset table is 4 bytes
-wide whatever bounds it **[W1]**: a bound on a list narrows the record that
-holds the list, not the list's table.
+A type holding another uses that type's finished bound, which already
+contains the inner type's bookkeeping at the inner type's own width, and
+adds its own words at its own width. For `Account`: `tags` is
+`fit(8, 8 × 16)` = 8 + 128 = 136 (a 1-byte table), and the record is
+`fit(1 + 2, 8 + 32 + 136 + 8)` = 3 + 184 = 187. For `AccountWide`
+(`tags` up to 64 strings): 64 + 1024 does not fit in 255, so the list has
+2-byte slots and is 128 + 1024 = 1152; the record is 2 × 3 + 1200 = 1206
+(`tut-2a`).
 
-Practical guidance:
+`min<N>` alone bounds nothing.
+
+### 3.2 Where the width changes
+
+Because a type's own words are counted at its own width, a type is narrow
+exactly when its worst case can be addressed at that width:
+
+@@SEC ref-thresholds@@
+
+| Shape | Last 1-byte | Last 2-byte |
+|---|---|---|
+| extensible record of one raw / UTF-8 string `max<N>` | N = 253 (1 + 1 + 253 = 255) | N = 65531 (2 + 2 + 65531 = 65535) |
+| extensible record of fixed-size members only | 254 bytes of members | 65533 |
+| list of N strings of ≤ M bytes | N + N × M ≤ 255 (15 × 16) | 2N + N × M ≤ 65535 (255 × 255) |
+
+(An earlier revision of the format counted every header and slot as 4
+bytes in the bound and wrote every list table 4 bytes wide; the steps were
+at 247 / 248 and 65527 / 65528 for the first row. A type declared under
+that rule whose bound lies in between is now one class narrower:
+re-check its `static_assert`.)
+
+### 3.3 A cap narrows what lies beneath it
+
+A record with `maxDynamicData(N)` never encodes to more than N bytes, so
+nothing inside it does. The cap is therefore the implicit bound of every
+list, map, set, array, tuple and pair beneath the record, **for the purpose
+of their offset widths**
+([pssz-spec.md §3.6](pssz-spec.md#36-a-records-cap-bounds-what-lies-beneath-it)):
+
+```text
+W of a list / map / set / array / tuple / pair
+   = width class of min(its own bound at that position, the cap of the nearest enclosing record)
+```
+
+@@SEC ref-cap-positions@@
+
+@@RUN ref-cap-positions-run@@
+
+What the rule does and does not do:
+
+- **It only selects widths.** It adds no check (the record's own cap check
+  already covers every byte beneath it), changes no inferred bound (a
+  capped record contributes its cap to whatever holds it), and does not
+  change the schema or the member's C++ type: `tags` is still a
+  `std::vector<std::string>`, and an unbounded list in the Schema IR.
+- **The nearest enclosing record decides.** The walk up from a value passes
+  through lists, arrays, maps, sets, optionals, variants, tuples, pairs,
+  boxes and transparent types and stops at the first record — a reflected
+  record or a method's argument list — taking that record's cap, or
+  nothing if it has none. It also stops, with nothing, at a
+  `psio::nested<T>` boundary: the inner value is a root of its own.
+- **A tighter bound of the position's own wins; a looser one is clamped.**
+  `max<8> | element(max<16>)` (136 bytes) under a cap of 60000 has a 1-byte
+  table. `max<1000> | element(max<1000>)` under a cap of 255 has a 1-byte
+  table too; the bound is accepted without a diagnostic and still limits
+  the count and the element size.
+- **Strings, byte lists and lists of fixed-size elements have nothing to
+  narrow.** Their payload is the raw bytes with no length prefix and no
+  table; all they cost is one slot in the record that holds them, as wide
+  as that record. Under a cap of 255 a `std::string` member costs exactly
+  one byte beyond its characters, bounded or not.
+- **The explicit profiles** (`psio::pssz_<1>`, `pssz_<2>`, `pssz_<4>`)
+  ignore it, as they ignore every inference.
+
+**A worked example.** An action's arguments under the largest cap that
+keeps one-byte offsets:
+
+@@SEC ref-cap-transfer@@
+
+@@RUN ref-cap-transfer-run@@
+
+The framing is 23 bytes — a 1-byte header, 20 bytes of integers and two
+1-byte slots — and the remaining 232 bytes are shared by `memo` and `data`.
+`memo` has its own limit (80, checked as such); `data` has none, and needs
+none to be narrow: the cap is its limit. With a cap of 256 the same type
+has 2-byte offsets.
+
+**A record keeps its own width.** A reflected record beneath a capped
+record is *not* narrowed: the width of a record is part of the record
+type, and its bytes are the same wherever it appears. That is what lets
+`psio::pssz_view<Child>`, `psio::nested<Child>` and every schema that names
+`Child` read it without knowing what holds it. The positions beneath the
+inner record take the *inner* record's cap, or none.
+
+@@SEC ref-cap-child@@
+
+@@RUN ref-cap-child-run@@
+
+`psio::pssz_child_wider_than_cap_v<T>` is true when `T` has an explicit cap
+and a record (or method argument list) wider than the cap's width class
+lies beneath it with no other record in between. It is a query, not an
+error: such types are valid and sometimes intended (a capped envelope
+around an open-ended payload record). When it is not intended, give the
+child a `maxDynamicData` or bound its members, and assert
+`!psio::pssz_child_wider_than_cap_v<Parent>` next to the parent.
+
+### 3.4 How to pick a cap
+
+1. **Enforced limits first.** Write the limits the application really has
+   as member bounds (`max<N>`, `element(...)`, `utf8`). They are checked
+   one by one, in every format that enforces bounds — the text formats and
+   keys included, where the cap is not applied to members. The cap is a
+   second, coarser limit on the whole encoding — also enforced: a value
+   whose encoding exceeds it has no encoding.
+2. **Choose the width class, then the number.** Only the class changes
+   bytes: `N ≤ 255` → 1-byte offsets, `N ≤ 65535` → 2-byte, above → 4-byte.
+   Inside a class, N is purely the size limit.
+
+   | Kind of type | Aim for | Why |
+   |---|---|---|
+   | database row, table record | **16-bit**: a cap ≤ 65535 | 64 KB is more than a row should hold; costs 1 byte per header / slot / table entry over 8-bit, saves 2 over 32-bit |
+   | action / method arguments | 16-bit; 8-bit (255) for small fixed-purpose calls such as the transfer above | arguments are published API and gain parameters |
+   | small value that will stay small (a key, a short label record) | 8-bit: a cap ≤ 255 | every byte of framing counts |
+   | closed forever (a point, a hash, an id pair) | no cap: `definitionWillNotChange()` | no header at all ([5.5](#55-definitionwillnotchange)) |
+   | document, blob, anything with genuinely unbounded content | no cap, or a cap > 65535 | 32-bit offsets |
+
+3. **Reserve headroom with `maxDynamicData`, at first publication.** Adding
+   an optional field must not change the width
+   ([8.1](#81-the-compatible-change)). A type without a cap has only the
+   slack between its inferred bound and 255 / 65535 — `Account` has 68
+   bytes — and the cap cannot be added later if that changes `W`. Make N
+   at least the inferred bound of today's fields plus everything the type
+   may gain.
+4. **When unsure, go one size up.** A class that is too small can never be
+   left (the wider type is a different type, and stored data must be
+   rewritten); a class that is too large costs 1 or 2 bytes per header,
+   slot and table entry. Within a class, prefer the top (255, 65535) unless
+   the size limit itself matters.
+5. **A cap makes the plain containers beneath it narrow**
+   ([3.3](#33-a-cap-narrows-what-lies-beneath-it)), so under a cap you do
+   not need to invent bounds only to get small tables. Child *records* are
+   the exception: give each its own cap or bounds, and assert
+   `!psio::pssz_child_wider_than_cap_v<T>`.
+6. **Assert what you chose** next to the type: `psio::auto_pssz_width_v<T>`,
+   and `psio::max_dynamic_data_v<T>` or `psio::max_encoded_size<T>()`.
+7. **The same N in every language** that declares the type.
+
+Do not use a small cap on a type that is read or written as a JSON *root*
+in C++ ([5.4](#54-maxdynamicdatan), "the cap and text").
+
+Practical guidance for types without a cap:
 
 - A type with any unbounded member is 32-bit. Bounding *some* members buys
   nothing (`tut-2c`: `AccountCountOnly`).
-- For database rows and action arguments 16-bit (a cap or bound of at most
-  65535 bytes, "64 KB") is enough in most cases; 8-bit (≤ 255) suits small
-  fixed-purpose records.
 - If the type may ever gain a field, give it an explicit cap now
   ([8](#8-evolution-what-may-change-after-publication)).
 
 ## 4. Master table
 
 "n/a" = the language states this in the type; "—" = not available
-(not yet, or not applicable). Schema IR nodes are written as in
+(not yet, or not applicable). The Python column uses the spellings of
+`python/src/psio` ([README](../python/README.md)). Schema IR nodes are written as in
 [json.md](json.md#the-schema-ir-as-json).
 
-| Annotation | C++ (`PSIO_REFLECT`) | Rust | TypeScript | Schema IR | Honoured by |
-|---|---|---|---|---|---|
-| length ≤ N | `attr(f, max<N>)`; `psio::bounded<T, N>`, `psio::utf8_string<N>` | `#[psio(max = N)]`; `BoundedList<T, N>`, `BoundedString<N>`, `BoundedRawString<N>`, `BoundedMap<K, V, N>`, `BoundedSet<K, N>`, `Nested<T, V, N>` | `field(T, { max: N })`; `boundedList(T, N)`, `boundedUtf8(N)`, `boundedBytes(N)`, `map(K, V, { max: N })`, `set(K, { max: N })` | `BoundedList{type, maxCount}` (under `Custom "utf8"` / `"string"` / `"hex"` / `"map"` / `"set"`); `lengthBound="max=N"` on a `Nested` member | pssz (width + enforced), json/ijson (enforced), key (enforced on read; Rust and JS also on write), schema-driven codecs, WIT (comment on lists) |
-| length = N, length ≥ N | `attr(f, exact<N>)`, `attr(f, min<N>)`, `psio::length_bound{.max = B, .min = A}` — member only | — | `field(T, { lengthBound: { exact, min, max } })` — member only | member attribute `lengthBound="exact=N"` / `"min=A,max=B"` | as above (`min` alone gives no width) |
-| UTF-8 text | `attr(f, utf8)`; `psio::utf8_string<>` | n/a: `String` is UTF-8, `RawString` is raw bytes | `utf8` / `boundedUtf8(N)`; `field(rawString, { utf8: true })` | `Custom{…, "utf8"}` (raw: `"string"`) | pssz, json/ijson, key read, schema-driven codecs **[W3]** |
-| elements | `element(specs)` | `element(...)` | `element: { … }` | the element type's bounded node | as length |
-| map keys / values | `keys(specs)`, `values(specs)` | `keys(...)`, `values(...)` | `keys: { … }`, `values: { … }` | the entry tuple's bounded members | as length |
-| tuple element / variant alternative | `at<I>(specs)` | tuple: `at(I, ...)`; variant: annotate the enum variant's fields | `at: { 0: { … } }` (tuple index, variant name or index) | the member's bounded node | as length |
-| size cap, width budget | `maxDynamicData(N)` | `#[pssz(max_dynamic_data = N)]` | `record(name, fields, { maxDynamicData: N })` | record attribute `maxDynamicData="N"` | pssz (width + enforced), schema-driven codecs, WIT `@maxDynamicData(N)`; the C++ `validate` of json and of the other binary formats (not key) applies it to the root input size |
-| fixed layout | `definitionWillNotChange()` | `#[psio(definition_will_not_change)]` | `record(name, fields, { fixed: true })` | record attribute `definitionWillNotChange` | pssz (no header), bin / borsh / bincode fast paths, evolution check |
-| field-count cap | `maxFields(N)` | — | `{ maxFields: N }` | record attribute `maxFields="N"` | Schema IR and WIT `@maxFields(N)` only; no codec enforces it |
-| the type is its member | `transparent()` | `#[psio(transparent)]` | `transparent(name, T)` | a named alias of the member's type | pssz, key, json/ijson, views, schema, GraphQL |
-| value check | `invariant(fn)`, `PSIO_INVARIANT(T, fn)` | `#[psio(invariant = "path")]` | `custom(id, wire, { check })` | `Custom{wire type, id}` + a handler | pssz, key, json/ijson writers and checking readers; not the trusted decode, not views |
-| integer text form | `attr(f, json_string)`, `json_number`, `ijson_string`, `ijson_number`; type level via `PSIO_TYPE_ATTRS` | `#[json(json_string)]`, … on a field or the type | `field(T, { jsonInt: 'string', ijsonInt: 'number' })` | member attributes `jsonInt`, `ijsonInt` = `"number"` / `"string"` | json, ijson, schema-driven text |
-| custom text form | `PSIO_ADAPTER(T, psio::text_category, Impl)`; per member `attr(f, as<Tag>)` | `#[psio(custom)]` + `psio::json_text_form!(T)` | `custom(id, wire, { toText, fromText })` | `Custom{wire type, id}` (a member `as<Tag>` is not expressible) | json, ijson, GraphQL scalar; binary unchanged |
-| enumerator names | `PSIO_REFLECT_ENUM(E, a, b, …)` | the derive on a `#[repr(int)]` enum; `#[psio(name = "…")]`, `#[psio(other)]` | `enumeration(u8, { a: 0, b: 2 })` | `Enum{type, members}` | json, ijson, GraphQL; binary is the integer |
-| method arguments | `method(name, attr(p, specs)…, maxDynamicData(N), returns(specs))` | `#[psio::interface]`: `#[psio(...)]` on a parameter, `#[pssz(max_dynamic_data = N)]` and `#[psio(returns(...))]` on the function | `argumentTuple(params, { maxDynamicData: N })`; return value: — | `Func{params, result, attributes: maxDynamicData}` | as records |
-| protobuf field number | `attr(f, field<N>)` | — | — | — | protobuf only |
-| deprecation | `attr(f, deprecated_spec{.version = "…"})` | — | — | — | GraphQL (`@deprecated`) only |
-| sortedness, uniqueness | `sorted`, `unique`, `unique_keys` | — | — | — | not enforced by any codec ([5.13](#513-sorted-unique-unique_keys)) |
-| reserved vocabulary | `skip_spec`, `default_value_spec`, `since_spec`, `unstable_spec`, `final_v`, `canonical`, `flags`, `padding` | Rust has `#[psio(skip)]` (a different, implemented meaning) | — | — | nothing reads them ([5.15](#515-reserved-vocabulary)) |
+| Annotation | C++ (`PSIO_REFLECT`) | Rust | TypeScript | Python | Schema IR | Honoured by |
+|---|---|---|---|---|---|---|
+| length ≤ N | `attr(f, max<N>)`; `psio::bounded<T, N>`, `psio::utf8_string<N>` | `#[psio(max = N)]`; `BoundedList<T, N>`, `BoundedString<N>`, `BoundedRawString<N>`, `BoundedMap<K, V, N>`, `BoundedSet<K, N>`, `Nested<T, V, N>` | `field(T, { max: N })`; `boundedList(T, N)`, `boundedUtf8(N)`, `boundedBytes(N)`, `map(K, V, { max: N })`, `set(K, { max: N })` | `Annotated[T, psio.max(N)]`; in a type alias: `Annotated[str, psio.bounded(N)]` | `BoundedList{type, maxCount}` (under `Custom "utf8"` / `"string"` / `"hex"` / `"map"` / `"set"`); `lengthBound="max=N"` on a `Nested` member | pssz (width + enforced), json/ijson (enforced), key (enforced on read; Rust and JS also on write), schema-driven codecs, WIT (comment on lists) |
+| length = N, length ≥ N | `attr(f, exact<N>)`, `attr(f, min<N>)`, `psio::length_bound{.max = B, .min = A}` — member only | — | `field(T, { lengthBound: { exact, min, max } })` — member only | `psio.exact(N)`, `psio.min(N)`, `psio.length(min=A, max=B)` — member only | member attribute `lengthBound="exact=N"` / `"min=A,max=B"` | as above (`min` alone gives no width) |
+| UTF-8 text | `attr(f, utf8)`; `psio::utf8_string<>` | n/a: `String` is UTF-8, `RawString` is raw bytes | `utf8` / `boundedUtf8(N)`; `field(rawString, { utf8: true })` | n/a: `str` is UTF-8, `psio.RawString` is raw bytes (`bytes` in Python) | `Custom{…, "utf8"}` (raw: `"string"`) | pssz and json/ijson (writers and readers), key (readers; the C++ key encoder does not check), schema-driven codecs |
+| elements | `element(specs)` | `element(...)` | `element: { … }` | `psio.element(...)` | the element type's bounded node | as length |
+| map keys / values | `keys(specs)`, `values(specs)` | `keys(...)`, `values(...)` | `keys: { … }`, `values: { … }` | `psio.keys(...)`, `psio.values(...)` | the entry tuple's bounded members | as length |
+| tuple element / variant alternative | `at<I>(specs)` | tuple: `at(I, ...)`; variant: annotate the enum variant's fields | `at: { 0: { … } }` (tuple index, variant name or index) | `psio.at(i, ...)` (tuple index; union alternative index or name) | the member's bounded node | as length |
+| size cap, width budget | `maxDynamicData(N)` | `#[pssz(max_dynamic_data = N)]` | `record(name, fields, { maxDynamicData: N })` | `@psio.record(max_dynamic_data=N)` | record attribute `maxDynamicData="N"` | pssz (width + enforced), schema-driven codecs, WIT `@maxDynamicData(N)`; the C++ `validate` of json and of the other binary formats (not key) applies it to the root input size |
+| fixed layout | `definitionWillNotChange()` | `#[psio(definition_will_not_change)]` | `record(name, fields, { fixed: true })` | `@psio.record(definition_will_not_change=True)` | record attribute `definitionWillNotChange` | pssz (no header), bin / borsh / bincode fast paths, evolution check |
+| field-count cap | `maxFields(N)` | — | `{ maxFields: N }` | `@psio.record(max_fields=N)` | record attribute `maxFields="N"` | Schema IR and WIT `@maxFields(N)` only; no codec enforces it |
+| the type is its member | `transparent()` | `#[psio(transparent)]` | `transparent(name, T)` | `NewType("Name", T)`; `@psio.transparent` on a one-field class | a named alias of the member's type | pssz, key, json/ijson, views, schema, GraphQL |
+| value check | `invariant(fn)`, `PSIO_INVARIANT(T, fn)` | `#[psio(invariant = "path")]` | `custom(id, wire, { check })` | `@psio.invariant` on a method; `psio.custom(id, check=…)` | `Custom{wire type, id}` + a handler | pssz, key, json/ijson writers and checking readers; not the trusted decode, not views |
+| integer text form | `attr(f, json_string)`, `json_number`, `ijson_string`, `ijson_number`; type level via `PSIO_TYPE_ATTRS` | `#[json(json_string)]`, … on a field or the type | `field(T, { jsonInt: 'string', ijsonInt: 'number' })` | `Annotated[u64, psio.json_string]`, `psio.json_number`, `psio.ijson_string`, `psio.ijson_number` | member attributes `jsonInt`, `ijsonInt` = `"number"` / `"string"` | json, ijson, schema-driven text |
+| custom text form | `PSIO_ADAPTER(T, psio::text_category, Impl)`; per member `attr(f, as<Tag>)` | `#[psio(custom)]` + `psio::json_text_form!(T)` | `custom(id, wire, { toText, fromText })` | `@psio.to_text` / `@psio.from_text` methods; `psio.custom(id, to_text=…, from_text=…)` | `Custom{wire type, id}` (a member `as<Tag>` is not expressible) | json, ijson, GraphQL scalar; binary unchanged |
+| enumerator names | `PSIO_REFLECT_ENUM(E, a, b, …)` | the derive on a `#[repr(int)]` enum; `#[psio(name = "…")]`, `#[psio(other)]` | `enumeration(u8, { a: 0, b: 2 })` | `@psio.enum(psio.u8)` on an `enum.Enum`; `other=True` | `Enum{type, members}` | json, ijson, GraphQL; binary is the integer |
+| method arguments | `method(name, attr(p, specs)…, maxDynamicData(N), returns(specs))` | `#[psio::interface]`: `#[psio(...)]` on a parameter, `#[pssz(max_dynamic_data = N)]` and `#[psio(returns(...))]` on the function | `argumentTuple(params, { maxDynamicData: N })`; return value: — | `@psio.interface` on a class; parameters and the return hint are `Annotated[...]`; `@psio.method(max_dynamic_data=N)` | `Func{params, result, attributes: maxDynamicData}` | as records |
+| protobuf field number | `attr(f, field<N>)` | — | — | — | — | protobuf only |
+| deprecation | `attr(f, deprecated_spec{.version = "…"})` | — | — | — | — | GraphQL (`@deprecated`) only |
+| sortedness, uniqueness | `sorted`, `unique`, `unique_keys` | — | — | — | — | not enforced by any codec ([5.13](#513-sorted-unique-unique_keys)) |
+| reserved vocabulary | `skip_spec`, `default_value_spec`, `since_spec`, `unstable_spec`, `final_v`, `canonical`, `flags`, `padding` | Rust has `#[psio(skip)]` (a different, implemented meaning) | — | — | — | nothing reads them ([5.15](#515-reserved-vocabulary)) |
 
 ## 5. The annotations
 
@@ -277,20 +452,25 @@ applies to the payload). Below the member (inside `element` / `keys` /
 | C++ | `attr(f, max<N>)`; separate: `PSIO_FIELD_ATTRS(T, f, psio::max<N>)`; wrapper: `psio::bounded<T, N>`, `psio::utf8_string<N>` |
 | Rust | `#[psio(max = N)]` on a field, an enum variant's field or an interface parameter. `exact` / `min`: not available. Wrappers: `BoundedString<N>`, `BoundedRawString<N>`, `BoundedList<T, N>`, `BoundedMap`, `BoundedSet`, `Nested<T, V, N>` |
 | TypeScript | `field(T, { max: N })`; `field(T, { lengthBound: { exact, min, max } })`; wrappers `boundedUtf8(N)`, `boundedBytes(N)`, `boundedList(T, N)`, `map(K, V, { max })`, `set(K, { max })` |
+| Python | `Annotated[T, psio.max(N)]`, `psio.exact(N)`, `psio.min(N)`, `psio.length(min=A, max=B)`. `psio.bounded(N)` says `max` as part of a type alias (`Tag = Annotated[str, psio.bounded(16)]`; same bytes, the schema records the bound in the type) |
 | Schema IR | `max` alone on a string, byte list, list, map or set: the bounded node (`BoundedList{type, maxCount: N}`, inside `Custom{…, "utf8" \| "string" \| "hex" \| "map" \| "set"}` for those kinds). `exact` / `min`, and any bound on a `Nested` member: member attribute `lengthBound = "exact=N"` / `"min=A,max=B"` / `"max=N"` |
 
 | Format | Effect |
 |---|---|
 | pssz | `max` / `exact` enter the inferred bound (width). Enforced by `to_pssz` / `psio::encode` (throws `codec_exception`: `pssz: member length_bound violated`), `encode_pssz_checked` (status), `validate_pssz`, `validate_strict`, `decode_pssz_checked`, `from_pssz`, and the fail-fast `psio::decode` |
-| key | Bytes unchanged. `validate_key`, `from_key`, `psio::decode` reject a key outside the bound. The C++ key **encoder does not check** (Rust `try_to_key` and JS `encodeKey` do) |
+| key | Bytes unchanged. `validate_key`, `from_key`, `psio::decode` reject a key outside the bound. The C++ key **encoder does not check** (Rust `try_to_key`, JS `encodeKey` and Python `psio.to_key` do) |
 | json / ijson | Text unchanged. Writer (`to_json` throws; `encode_json_checked` returns a status) and readers refuse a value outside the bound |
 | schema-driven codecs (`psio::pssz_ir`) | The same width and the same rejections, from the IR alone |
 | WIT | `list<T>/* @psio:max=N */` for a bounded list, map or set; a bounded string is `string` |
 | GraphQL, other binary formats | Not read |
 
-**Wire / width.** A bound is part of the type: it can change the record's
-`W`, and the `W` of a tuple, pair, map entry or array of variable elements
-below the member. It never changes the bytes of the bounded value itself.
+**Wire / width.** A bound is part of the type: it can change the `W` of
+the record, and the `W` of the list, map, set, array, tuple, pair or map
+entry it bounds — the member itself or a position below it. A
+`std::vector<std::string>` under `max<8> | element(max<16>)` has a 1-byte
+offset table; unannotated (and with no cap above it) a 4-byte one. A
+string, a byte list and a list of fixed-size elements have no offsets, and
+their bytes never change.
 
 **Evolution.** Treat a published bound as frozen. Tightening it makes
 readers reject stored values; loosening it lets new writers produce values
@@ -322,16 +502,17 @@ text. Across languages:
 | C++ | `std::string` + `utf8`, `psio::utf8_string<>`, `psio::utf8_string<N>` | `std::string` |
 | Rust | `String`, `BoundedString<N>` | `RawString`, `BoundedRawString<N>` |
 | TypeScript | `utf8`, `boundedUtf8(N)`, `field(rawString, { utf8: true })` → JS `string` | `rawString` → JS `Uint8Array` |
+| Python | `str` | `psio.RawString` (a `bytes` value); `bytes` itself is a byte list, hex in I-JSON |
 | Schema IR | `Custom{List<u8> \| BoundedList<u8, N>, "utf8"}` | `Custom{…, "string"}` |
 
 @@SEC ref-utf8@@
 
 **Applies to.** `std::string` (member or position), through `std::optional`.
 
-| Format | Effect **[W3]** |
+| Format | Effect |
 |---|---|
-| pssz | Bytes unchanged. A `utf8` string that is not UTF-8 is refused by the encoder (`utf8_spec: invalid leading byte` and similar), `validate_pssz`, `validate_strict`, the checked decode and the fail-fast decode. A raw string holds any bytes; `validate_strict` checks every string, raw ones included |
-| key | Bytes unchanged (raw and UTF-8 strings have one key form). The reader validates a `utf8` string; the C++ key encoder does not check |
+| pssz | Bytes unchanged. A `utf8` string that is not UTF-8 is refused by the encoder (`utf8_spec: invalid leading byte` and similar), `validate_pssz`, `validate_strict`, the checked decode and the fail-fast decode. A raw string holds any bytes; the exact-schema check `validate_strict` is stricter than the type and refuses a raw string that is not UTF-8 too (`tutorial 5`) |
+| key | Bytes unchanged (raw and UTF-8 strings have one key form). The readers (`validate_key`, `from_key`) refuse a `utf8` string that is not UTF-8. The C++ key encoder does not check, for the annotation or for `psio::utf8_string` (`tutorial 7`). In Rust, TypeScript and Python a text value is UTF-8 by its type |
 | json / ijson | Both kinds are JSON strings. JSON text is UTF-8, so a **raw string that is not UTF-8 has no JSON**: the writer fails |
 | Schema IR | `"utf8"` vs `"string"`; schema-driven codecs enforce `"utf8"` |
 
@@ -342,9 +523,11 @@ removing it lets writers produce bytes that `utf8` readers reject.
 `pssz_evolves_from` treats `std::string` → `psio::utf8_string<>` as
 incompatible, but does not see an added or removed `utf8` *annotation*.
 
-**Notes.** `psio::utf8` is `psio::utf8_spec{.enforced = true}`. The spelled-out
-`psio::utf8_spec{}` (and `psio::hex_spec{}`) is the older, weaker statement:
-checked by `validate_strict` only ([5.14](#514-strict-only-specs-utf8_spec-hex_spec)).
+**Notes.** `utf8` is always enforced: the annotation states what the
+string *is*, exactly as the type `psio::utf8_string` does. `psio::utf8` is
+`psio::utf8_spec{}`, and the spelled-out `attr(f, psio::utf8_spec{})` is
+the same statement — there is no form that only `validate_strict` checks
+(test `reference: utf8 annotation and wrapper`, `NamesSpelled`).
 
 **Mistakes.** `utf8` on a non-string member is the `applies_to` error of
 [5.1](#51-maxn-exactn-minn--length-bounds); below the member:
@@ -376,25 +559,37 @@ every depth, same bytes, same schema, same checks
 |---|---|
 | Rust | `#[psio(max = 8, element(max = 16))] tags: Vec<String>`, `#[psio(max = 4, keys(max = 16), values(max = 2))] m: BTreeMap<String, Vec<u32>>`, `#[psio(at(0, max = 16), at(2, max = 5))] t: (String, u32, Vec<u8>)`. There is no `utf8` key (the type says it). A variant's alternatives are annotated on the fields of the enum's variants: `Text(#[psio(max = 16)] String)` |
 | TypeScript | `field(list(rawString), { max: 8, element: { utf8: true, max: 16 } })`, `field(map(K, V), { max: 4, keys: { max: 16 }, values: { max: 2 } })`, `field(tuple(…), { at: { 0: { utf8: true, max: 16 } } })`; for a variant `at` takes the alternative's name or index |
+| Python | `Annotated[list[str], psio.max(8), psio.element(psio.max(16))]`, `Annotated[dict[str, list[u32]], psio.max(4), psio.keys(psio.max(16)), psio.values(psio.max(2))]`, `psio.at(0, psio.max(16))` (tuple index; for a union the alternative's index or name). There is no `utf8` to write: `str` is UTF-8 |
 | Schema IR | No attribute: the member's type is written as the bounded nodes |
 
 **Formats, enforcement, width.** As [5.1](#51-maxn-exactn-minn--length-bounds)
-and [5.2](#52-utf8--text-or-raw-bytes), at every depth. In addition a tuple,
-a pair, a map entry and an array of variable elements below the member
-take their own `W` from the bounds of their position.
+and [5.2](#52-utf8--text-or-raw-bytes), at every depth. Every list, map,
+set, array of variable elements, tuple, pair and map entry at or below the
+member takes its own `W` from the bounds of its position
+([3.1](#31-how-the-inferred-bound-is-counted)).
 
-**Limits.**
+**Views and limits.**
 
-- A member whose annotations narrow a value *nested in it* (an array of
-  bounded variable elements, a tuple / pair / map entry with bounded
-  elements) is not addressable through a `pssz_view`: the view selects
-  widths from the member's type alone. State the bound in the type
-  (`psio::utf8_string<N>`, `psio::bounded<T, N>`) to view it. The error
-  starts `psio: a pssz view cannot address this member: its annotations (element / keys / …`.
-  A list of bounded strings (`tags` above) *is* viewable **[W1]**.
+- **Views.** A member whose annotations (or whose record's cap) narrow an
+  offset width at or below it is readable through a `pssz_view` like any
+  other: the view of such a member has the format `psio::pssz_at<A>`,
+  which carries the member's annotations down the view exactly as the
+  codec carries them. You do not name that format; `view.get<I>()` returns
+  it.
+
+  One case is not addressable: a `std::variant` member in which an
+  `at<I>(...)` annotation narrows the offset width of a value nested in an
+  alternative (one view format serves all alternatives). The error starts
+  `psio: a pssz view cannot address this variant: an at<I>(...) annotation narrows`.
+  State that bound in the alternative's type (`psio::bounded<T, N>`,
+  `psio::utf8_string<N>`) to view it. A bound that narrows nothing — a
+  string alternative under `at<1>(utf8 | max<16>)`, as in `Choice`
+  ([6.10](#610-variant)) — is viewable.
 - A member with `element` / `keys` / `values` / `at` annotations is not
   addressable through a mutable view:
   `a member whose annotations constrain its content is not addressable in place`.
+
+@@RUN ref-view-annotated-run@@
 
 **Mistakes** (each a compile error with this text):
 
@@ -412,10 +607,12 @@ Each is followed by `psio: a member annotation does not fit the member's type`
 
 ### 5.4 `maxDynamicData(N)`
 
-**Purpose.** Two things at once: the **limit of the encoded size** of a
+**Purpose.** Three things at once: the **limit of the encoded size** of a
 value of the type (the whole encoding, header included — despite the
-name), and the type's **width budget for its lifetime**. It is how a type
-reserves room for fields added later.
+name); the type's **width budget for its lifetime**, which is how a type
+reserves room for fields added later; and the bound that selects the
+offset widths of the **lists, maps, sets, arrays and tuples beneath it**
+([3.3](#33-a-cap-narrows-what-lies-beneath-it)).
 
 @@FROM struct AccountV1@@TO static_assert(psio::auto_pssz_width_v<AccountV1> == 2);@@
 
@@ -429,11 +626,12 @@ argument tuple ([5.11](#511-methodname-)).
 | C++ | `maxDynamicData(N)` in `PSIO_REFLECT`; `PSIO_TYPE_ATTRS(T, psio::max_dynamic_data_spec{N})`; read with `psio::max_dynamic_data_v<T>` |
 | Rust | `#[pssz(max_dynamic_data = N)]` on the struct (or on an interface function) |
 | TypeScript | `record(name, fields, { maxDynamicData: N })`, `argumentTuple(params, { maxDynamicData: N })` |
+| Python | `@psio.record(max_dynamic_data=N)` above the `@dataclass`; `@psio.method(max_dynamic_data=N)` on an interface method; read with `psio.codec(T).max_dynamic_data` |
 | Schema IR | record attribute `{"name":"maxDynamicData","value":"N"}`; on a `Func` for a method |
 
 | Format | Effect |
 |---|---|
-| pssz | `W` follows from `N` alone. The encoder refuses a value whose encoding exceeds `N` (`pssz: encoded size exceeds maxDynamicData cap`); every reader rejects a longer frame. Enforced on nested values of the type too |
+| pssz | The record's `W` follows from `N` alone. The encoder refuses a value whose encoding exceeds `N` (`pssz: encoded size exceeds maxDynamicData cap`); every reader rejects a longer frame. Enforced on nested values of the type too. Lists, maps, sets, arrays, tuples and pairs beneath the record, down to the next record, take the width class of `min(their own bound, N)` |
 | a parent record | reserves `N` bytes for a member of this type (`ref-records`: `Line`) |
 | json / ijson and the other C++ binary formats (not key) | `validate` applies the **root** type's cap to the size of **its own input** — the JSON text, the bin bytes (`cpp/tests/caps_parity_tests.cpp`). The JSON writer does not apply it. See the limit below |
 | schema-driven codecs, WIT | the same width and limit; `@maxDynamicData(N)` above the record or function |
@@ -449,13 +647,15 @@ reader refuses:
 Do not read or write a small-capped type as a JSON *root* in C++; hold it
 in a member, or give it a cap that also covers its text.
 
-**Choosing N.** At least the inferred bound of the current fields plus
-everything the type may gain. 65535 keeps 16-bit offsets and is enough for
-most database rows and action arguments. `psio::effective_max_dynamic_v<T>`
-(`min(cap, inferred bound)`) is a utility for the tighter of the two; it
-does not select the width.
+**Choosing N.** [3.4 How to pick a cap](#34-how-to-pick-a-cap). In short:
+at least the inferred bound of the current fields plus everything the type
+may gain; 65535 keeps 16-bit offsets and is enough for most database rows
+and action arguments; when unsure, one class up.
+`psio::effective_max_dynamic_v<T>` (`min(cap, inferred bound)`) is a
+utility for the tighter of the two; it does not select the width.
 
-**Evolution.** `N` may not move across a width class (255 / 65535).
+**Evolution.** `N` may not move across a width class (255 / 65535): that
+changes the record's own offsets and those of the containers beneath it.
 Raising it within a class keeps the bytes and passes `pssz_evolves_from`,
 but old readers still reject values above their own `N`.
 
@@ -469,7 +669,7 @@ record then has no header and no extension point (pssz-spec §5.1.2); a
 record of only fixed-size members becomes a fixed-size value with zero
 overhead.
 
-@@FROM struct Point   // fixed layout: no header, cannot gain fields@@TO static_assert(psio::max_encoded_size<PointOpen>() == 4 + 8);@@
+@@FROM struct Point   // fixed layout: no header, cannot gain fields@@TO static_assert(psio::max_encoded_size<PointOpen>() == 1 + 8);@@
 
 @@RUN ref-records-run@@
 
@@ -478,6 +678,7 @@ overhead.
 | C++ | `definitionWillNotChange()`; `PSIO_TYPE_ATTRS(T, psio::definition_will_not_change{})`; read with `psio::is_dwnc_v<T>` |
 | Rust | `#[psio(definition_will_not_change)]` |
 | TypeScript | `record(name, fields, { fixed: true })` |
+| Python | `@psio.record(definition_will_not_change=True)` |
 | Schema IR | record attribute `definitionWillNotChange` (empty value) |
 
 **Formats.** pssz: no header, never pruned, never extended. bin / borsh /
@@ -495,7 +696,8 @@ have. **No C++ codec enforces it and it does not affect pssz bytes or
 width.** It is recorded in the Schema IR (`maxFields="N"`), written by
 `emit_wit` as `@maxFields(N)`, and readable with `psio::max_fields_v<T>` /
 `psio::effective_max_fields_v<T>`. Rust: not available. TypeScript:
-`record(name, fields, { maxFields: N })` (attribute only).
+`record(name, fields, { maxFields: N })` (attribute only). Python:
+`@psio.record(max_fields=N)` (attribute only).
 
 ### 5.7 `transparent()`
 
@@ -512,6 +714,7 @@ text form.
 | C++ | `PSIO_REFLECT(T, transparent(), member)`; `PSIO_TYPE_ATTRS(T, psio::transparent)`; `psio::is_transparent_v<T>`, `psio::transparent_inner_t<T>` |
 | Rust | `#[psio(transparent)]` on a struct with one member |
 | TypeScript | `transparent(name, T)` |
+| Python | `AccountId = NewType("AccountId", u64)` (an `int` at run time), or `@psio.transparent` on a class of one field |
 | Schema IR | a named alias: `{"name":"AccountId","type": <the member's type>}` |
 
 **Formats.** pssz, key, json / ijson, views, the Schema IR and the
@@ -548,6 +751,7 @@ encoding, and bytes or text that decode to one are rejected
 | C++ | `invariant(fn)` in `PSIO_REFLECT`; for an enum, `std::variant`, `std::tuple` or other class: `PSIO_INVARIANT(Type, fn[, "SchemaId"])` at global scope. `fn(const T&) noexcept -> psio::codec_status` |
 | Rust | `#[psio(invariant = "path")]`, `fn(&Self) -> Result<(), E>` |
 | TypeScript | `custom(id, wire, { check })`; `check` returns an error string or nothing |
+| Python | `@psio.invariant` on a method that returns `None` for a value of the type and a message otherwise; over any type: `Annotated[T, psio.custom("Id", check=fn)]` |
 | Schema IR | `Custom{wire type, id}`; a schema cannot carry a predicate, so schema-driven codecs take it as the `check` of the handler registered for `id` |
 
 **Where it runs.** pssz `to_pssz` / `encode`, `encode_pssz_checked`,
@@ -586,6 +790,7 @@ variants. At type level it is the default for every integer member.
 | C++ | `attr(f, json_string)`, `attr(f, json_string \| ijson_number)`; `PSIO_TYPE_ATTRS(T, psio::ijson_number)` |
 | Rust | `#[json(json_string)]`, `#[json(json_string, ijson_number)]` on a field or the type |
 | TypeScript | `field(T, { jsonInt: 'string', ijsonInt: 'number' })` |
+| Python | `Annotated[u64, psio.json_string, psio.ijson_string]`, `psio.json_number`, `psio.ijson_number` on a member |
 | Schema IR | member attributes `jsonInt` / `ijsonInt` = `"number"` / `"string"` |
 
 **Formats.** json, ijson and schema-driven text only. No effect on any
@@ -626,6 +831,7 @@ writes text only). Use it on types that are only written as text.
 |---|---|
 | Rust | `#[psio(custom)]` / `#[psio(custom = "id")]` and `psio::json_text_form!(T)` with a `TextForm` implementation |
 | TypeScript | `custom(id, wire, { toText, fromText })` |
+| Python | `@psio.to_text` on a method and `@psio.from_text` on a `classmethod` of the class; over any type: `Annotated[T, psio.custom("Id", to_text=…, from_text=…)]` |
 | Schema IR | `Custom{wire type, id}` (id: the adapter's `schema_id`, else the reflected name). A member `as<Tag>` override is not expressible in the IR |
 
 **Limits.** A member with an `as<Tag>` override has no inferred bound
@@ -655,12 +861,23 @@ Items after the method name, in one flat list:
 validate arguments as: a `psio::annotated_tuple` that derives from and
 converts from `std::tuple<decayed parameters…>`.
 
+An argument list is a tuple and a record at once:
+
+- it has **at most 255 parameters** (the tuple limit,
+  [6.11](#611-tuple-and-pair));
+- its bound and width are those of the extensible record of its
+  parameters: `OpenArgs` is (header + 2 slots) + 32 + 136 = 171, 8-bit;
+- its `maxDynamicData(N)` is a record cap in every respect, including
+  that it narrows the lists, maps and tuples among the parameters
+  ([3.3](#33-a-cap-narrows-what-lies-beneath-it)).
+
 @@RUN tut-9-run@@
 
 | | |
 |---|---|
 | Rust | `#[psio::interface] trait Bank { #[pssz(max_dynamic_data = 1024)] fn transfer(&mut self, …, #[psio(max = 80)] memo: String); #[psio(returns(max = 8))] fn symbol(&self, token: u32) -> String; }`. The argument record is `bank::args::transfer` |
 | TypeScript | `argumentTuple({ …, memo: field(rawString, { utf8: true, max: 80 }) }, { maxDynamicData: 1024 })`. Return-value annotations: not available |
+| Python | `@psio.interface(name="bank") class Bank(Protocol)`: parameters are `Annotated[...]` hints, `@psio.method(max_dynamic_data=1024)` caps one method, the return hint carries the result's annotations (`-> Annotated[str, psio.max(8)]`). `psio.interface_of(Bank)["transfer"].args` is the argument codec |
 | Schema IR | `PSIO_INTERFACE(T, types())` + `SchemaBuilder::insert_interface<T>()`: `Func{name, params, result, attributes}`; parameters and result are the bounded types; the cap is the function attribute `maxDynamicData`. `emit_wit` writes `@maxDynamicData(N)` above the function |
 
 **Enforcement.** Arguments: as record members. Return value:
@@ -683,6 +900,7 @@ cannot be reflected. `psio: method(...) lists more parameters than the function 
 `psio: method(...) lists maxDynamicData(N) more than once`;
 `psio: method(...) lists returns(...) more than once`;
 `psio: a returns(...) annotation does not fit the method's return type`.
+More than 255 parameters: the tuple-limit error of [6.11](#611-tuple-and-pair).
 
 ### 5.12 `PSIO_REFLECT_ENUM` and `field<N>`
 
@@ -713,15 +931,17 @@ uniqueness matters,
 use `std::set` / `std::map` — every reader rejects entries that are not in
 strictly ascending key order — or write an invariant.
 
-### 5.14 Strict-only specs: `utf8_spec{}`, `hex_spec{}`
+### 5.14 Strict-only spec: `hex_spec{}`
 
-`attr(f, utf8_spec{})` and `attr(f, hex_spec{})` (also
-`psio::spec::utf8<N>`, `psio::spec::hex<N>`) on a `std::string` member are
-checked by `psio::validate_strict` only: `validate`, the encoder and the
-decoders accept any bytes. Prefer `utf8` ([5.2](#52-utf8--text-or-raw-bytes)).
-A third-party spec struct with a
+`attr(f, hex_spec{})` (also `psio::spec::hex<N>`) on a `std::string` member
+is checked by `psio::validate_strict` only: `validate`, the encoder and
+the decoders accept any bytes. A third-party spec struct with a
 `static codec_status validate(std::span<const char>) noexcept` member is
-run the same way (`psio/validate_strict_walker.hpp`). **[W3]**
+run the same way (`psio/validate_strict_walker.hpp`). This form is **not
+covered by the examples test**.
+
+`utf8` is not such a spec: `psio::utf8_spec{}` is `psio::utf8`, enforced
+by every writer and reader ([5.2](#52-utf8--text-or-raw-bytes)).
 
 ### 5.15 Reserved vocabulary
 
@@ -777,6 +997,8 @@ Names exist for text only:
   one another.
 - Rust: `#[repr(u8)] enum Status { Pending = 0, Active = 2, #[psio(other)] Unknown(u8) }`.
   TypeScript: `enumeration(u8, { pending: 0, active: 2, closed: 3 })`.
+  Python: `@psio.enum(psio.u8)` above `class Status(enum.Enum)`;
+  `@psio.enum(psio.u8, other=True)` keeps an undeclared value as its `int`.
 
 ### 6.4 Strings: raw or UTF-8
 
@@ -809,21 +1031,39 @@ offset table, whose width comes from the elements' bounds:
 @@SEC ref-arrays@@
 
 `element(...)` is the only position spec an array takes; an array has no
-length to bound. A member like `names` cannot be read through a
-`pssz_view` ([5.3](#53-element-keys-values-ati--positions-below-the-member));
-write `std::array<psio::utf8_string<16>, 3>` if it must be.
+length to bound. `names` has a 1-byte table (3 + 3 × 16 = 51), and a
+`pssz_view` reads it at that width
+([5.3](#53-element-keys-values-ati--positions-below-the-member)).
 
 ### 6.7 Vectors
 
-`attr(v, max<N>)` bounds the count. If the element is variable-size, bound
-it too with `element(...)`, or the type stays unbounded. The list's own
-offset table is 4 bytes wide **[W1]**.
+`attr(v, max<N>)` bounds the count. A list of fixed-size elements is the
+elements, back to back, with no table. A list of variable-size elements
+starts with an offset table of one slot per element, and the table has the
+list's own width:
+
+| The list is | Table slot |
+|---|---|
+| bounded in count and in its elements, `N + N × element bound ≤ 255` | 1 byte |
+| the same, `2N + N × element bound ≤ 65535` | 2 bytes |
+| unbounded in count or in its elements, in a record with `maxDynamicData(C)` | the width class of C (of `min(bound, C)` if it is bounded) |
+| unbounded, with no capped record above it | 4 bytes |
+
+So if the element is variable-size, bound it too with `element(...)`, or
+the type stays unbounded (`tut-2c`) — unless the record has a cap
+([3.3](#33-a-cap-narrows-what-lies-beneath-it)). `tags` of `Account`
+(8 strings of ≤ 16 bytes: 136) has 1-byte slots; in the frame of
+[tutorial step 2](tutorial-annotations.md#step-2--add-bounds-until-the-width-drops)
+they are the bytes `02 05`.
 
 ### 6.8 Nested vectors
 
 @@FROM struct Grid   // a list of lists@@TO static_assert(psio::auto_pssz_width_v<Grid> == 1);@@
 
 One `element(...)` per level: `max<2> | element(max<2> | element(max<3>))`.
+Each level has its own table width: here a row is 4 × 2 fixed bytes with no
+table, and the outer list is 3 slots + 3 × 8 = 27 bytes with a 1-byte
+table.
 
 ### 6.9 Optional
 
@@ -843,7 +1083,7 @@ added after publication ([8](#8-evolution-what-may-change-after-publication)).
 
 `at<I>(specs)` annotates alternative `I`:
 
-@@FROM struct Choice   // a variant alternative@@TO static_assert(psio::max_encoded_size<Choice>() == 4 + 4 + 1 + 16);@@
+@@FROM struct Choice   // a variant alternative@@TO static_assert(psio::max_encoded_size<Choice>() == 1 + 1 + 1 + 16);@@
 
 A variant is one selector byte plus the alternative (at most 256
 alternatives). Text: `[index, value]` in `json`, `{"name": value}` in
@@ -856,9 +1096,26 @@ alternative).
 
 `at<I>(specs)` annotates element `I` (`author` in `Post`,
 [5.3](#53-element-keys-values-ati--positions-below-the-member)). A tuple is
-laid out as the extensible record of its elements and takes its own width
-from their bounds; a `std::pair` is the 2-tuple. Text: a JSON array.
-**[W2]**
+laid out as the extensible record of its elements — a header and one slot
+per variable-size element — and takes its own width from their bounds (or
+from the cap of the record it is in); a `std::pair` is the 2-tuple. Text: a
+JSON array.
+
+@@SEC ref-tuple@@
+
+**A tuple has at most 255 elements.** A `std::tuple` with more — and so a
+method with more than 255 parameters — is not a PSSZ type: every pssz
+entry point, the width and bound traits and the schema builder refuse it
+at compile time with
+
+`psio: a tuple has at most 255 elements (docs/pssz-spec.md 8.4); this one has more. Use a record, a list, or nested tuples`
+
+(tests `psio_pssz_tuple_limit_*_compile_fail`), and a schema-driven reader
+rejects a schema that holds such a `Tuple` before reading any value. The
+limit changes no byte: a tuple's header is the size of its fixed region,
+not a count. A variant has at most 256 alternatives; the format sets no
+limit on the fields of a record
+([pssz-spec.md §8.4](pssz-spec.md#84-element-counts)).
 
 ### 6.12 Map and set
 
@@ -870,9 +1127,11 @@ from their bounds; a `std::pair` is the 2-tuple. Text: a JSON array.
 (`element(...)` for a set). On the wire a map is the list of its
 `(key, value)` entries in ascending key-byte order and a set the list of
 its elements ([pssz-spec.md §5.9](pssz-spec.md#59-pairs-maps-and-sets--paira-b-mapk-v-setk));
-readers reject entries out of order or duplicated. Text: an object when
-the key's text is a string, else an array of pairs. There is no bounded
-map *type*; the count is always an annotation.
+readers reject entries out of order or duplicated. The widths follow the
+list rule ([6.7](#67-vectors)): `balances` has a 1-byte table (4 slots +
+4 × 18), and each entry is a tuple with its own 1-byte header and key slot.
+Text: an object when the key's text is a string, else an array of pairs.
+There is no bounded map *type*; the count is always an annotation.
 
 ### 6.13 `psio::nested<T>`
 
@@ -888,7 +1147,10 @@ Without a bound a nested member is unbounded. Its bytes are validated as a
 `psio::nested<T, psio::nested_validation::deferred>`. Schema IR:
 `Nested{T}` plus the member attribute `lengthBound="max=N"`. As a key
 element it orders by its bytes, not by the inner value. Rust:
-`Nested<T, V, N>`; TypeScript: `nested(T)` with `field(…, { max: N })`.
+`Nested<T, V, N>`; TypeScript: `nested(T)` with `field(…, { max: N })`;
+Python: `Annotated[T, psio.nested(), psio.max(N)]`. The inner value is a
+root of its own: a cap of the enclosing record does not reach into it
+([3.3](#33-a-cap-narrows-what-lies-beneath-it)).
 
 ### 6.14 Records
 
@@ -905,7 +1167,10 @@ its inferred bound:
 @@FROM struct Line   // a child's cap is what the parent reserves for it@@TO static_assert(psio::auto_pssz_width_v<Line> == 2);@@
 
 Each record owns its width: a child keeps its own `W` wherever it is
-nested ([pssz-type-width.md](pssz-type-width.md)).
+nested, also beneath a parent with a smaller cap
+([3.3](#33-a-cap-narrows-what-lies-beneath-it),
+[pssz-type-width.md](pssz-type-width.md)). `Line` is (header + slot) × 2
+bytes + the child's cap of 1024.
 
 ### 6.15 Transparent wrappers
 
@@ -958,9 +1223,23 @@ of its fields ([key-spec.md](key-spec.md)).
   the longer tuple, so prefix scans work
   ([key-spec.md §3](key-spec.md#3-composite-keys)).
 - The row itself: bound it and cap it at 65535 or less unless it holds
-  genuinely unbounded content.
+  genuinely unbounded content ([3.4](#34-how-to-pick-a-cap)).
 - Validate a key that arrives from outside (`validate_key` / `from_key`);
-  the C++ key encoder does not check member bounds or `utf8`.
+  the C++ key encoder does not check member bounds or `utf8` (the Rust, JS
+  and Python key writers do).
+
+### 6.20 Bit types
+
+`psio::bitvector<N>` is exactly N bits: a fixed-size member of ⌈N/8⌉ bytes,
+inline, with no offset slot. `psio::bitlist<N>` is at most N bits: a
+variable-size member (one slot) of at most ⌈N/8⌉ + 1 bytes, the bits and a
+delimiter bit. Both count in the inferred bound, so a record whose only
+variable-size members are bit types is bounded and narrow without a cap:
+
+@@SEC ref-bits@@
+
+No annotation applies to a `bitvector`; `max<N>` applies to a `bitlist`
+member. A `bitlist` is not a key type.
 
 ## 7. Reading: views, validation, trust
 
@@ -1047,7 +1326,11 @@ width.** Nothing else.
 - **You cannot add an optional field if it would change the implicit
   width.** A type without an explicit cap has only the slack between its
   inferred bound and 255 / 65535. Declare `maxDynamicData` when the type is
-  first published if it may grow.
+  first published if it may grow ([3.4](#34-how-to-pick-a-cap)).
+- The same holds one level down: a field appended to a record that is an
+  element of a bounded list raises that list's bound and can move the
+  list's own width. A cap on the element record fixes what the list
+  reserves for it.
 
 ### 8.2 What is not compatible, and how the tooling catches it
 
@@ -1056,7 +1339,9 @@ each published revision and assert it.
 
 @@FROM struct AccountGrown@@TO static_assert(!psio::pssz_evolves_from<Account, AccountGrown>);@@
 
-(`tut-4b`, case 1: no cap, so the new field moves the width.) The same
+(`tut-4b`, case 1: no cap, and the new field needs more than the 68 bytes
+of slack `Account` has, so it moves the width. A smaller field would have
+fit — which is the trap: the next one would not.) The same
 section of the examples file asserts four more, each
 `!psio::pssz_evolves_from<AccountV1, …>`: a new field that is not optional
 (`AccountRequired`), an optional field that is not last
@@ -1091,7 +1376,8 @@ existing enumerators as frozen once published.
 | append `std::optional` field, inferred width changes | **no** — reserve with `maxDynamicData` |
 | append a required field; insert, remove, reorder or retype a field | no |
 | change `maxDynamicData` within its width class | bytes yes; old readers reject larger values |
-| change `maxDynamicData` across 255 / 65535, add or remove it when that changes `W` | no |
+| change `maxDynamicData` across 255 / 65535, add or remove it when that changes `W` of the record or of a container beneath it | no |
+| add a parameter or element that takes a tuple past 255 elements | no: not a type |
 | tighten or loosen a member bound; add or remove `utf8` | not safely (see 8.3) |
 | add an enumerator at a new value | yes in binary; text readers reject an unknown name |
 | change an enum's underlying type; renumber | no |
@@ -1105,7 +1391,11 @@ existing enumerators as frozen once published.
 | Mistake | What happens |
 |---|---|
 | Changing a member's type to express a bound | Works, but forces the wrapper on all code. Annotate instead |
-| Bounding a list's count but not its variable-size elements | Compiles; the type stays 32-bit. `static_assert` the width |
+| Bounding a list's count but not its variable-size elements | Compiles; without a cap the type stays 32-bit. `static_assert` the width |
+| A member bound larger than the record's cap (`max<1000>` under `maxDynamicData(255)`) | Compiles, no diagnostic: the bound still limits the count, the cap selects the width ([3.3](#33-a-cap-narrows-what-lies-beneath-it)) |
+| An unbounded child record inside a parent with a small cap | Compiles; the child keeps 4-byte offsets. `static_assert(!psio::pssz_child_wider_than_cap_v<Parent>)` |
+| A `std::tuple` or parameter list of more than 255 elements | `psio: a tuple has at most 255 elements (docs/pssz-spec.md 8.4); this one has more. Use a record, a list, or nested tuples` |
+| Expecting `attr(f, utf8_spec{})` to be a weaker `utf8` | It is `utf8`: enforced by every writer and reader |
 | `min<A> \| max<B>` | `type occurs more than once in type list` (libc++). Use `psio::length_bound{.max = B, .min = A}` |
 | A bound on a non-length member | `psio: a spec in the effective annotations is attached to a field whose shape is not in the spec's applies_to set. …` |
 | A position spec on the wrong shape | the messages of [5.3](#53-element-keys-values-ati--positions-below-the-member) |
@@ -1120,54 +1410,25 @@ existing enumerators as frozen once published.
 | Expecting `sorted`, `maxFields`, `padding`, `skip_spec`, `default_value_spec` to do something | nothing reads them |
 | Writing a capped root type as JSON | the reader may refuse it ([5.4](#54-maxdynamicdatan)) |
 
-## Pending wire change
+## Rust, TypeScript and Python snippets
 
-One place to update when the pending commit merges. Tags in the text refer
-here.
+**Not compile-checked from this document.** The C++ snippets above are
+verified to be lines of a test; these are not. Each language has a test
+that declares the same types and asserts the same bytes as the C++
+`Account` of [tutorial step 2](tutorial-annotations.md#step-2--add-bounds-until-the-width-drops)
+— `rust/psio/tests/doc_annotations.rs`,
+`js/src/test/doc-annotations.test.ts`, and the `python` blocks of
+[`python/README.md`](../python/README.md), run by
+`python/tests/test_readme.py` — but nothing ties the text below to those
+files.
 
-**[W1] List offset tables.** Today a list (`std::vector`, `psio::bounded`,
-map, set) of variable-size elements writes its own offset table 4 bytes
-wide whatever bounds it; the pending change gives a bounded list a narrow
-table. Passages and numbers that depend on it:
+The frame all four languages write for
+`Account{7, "alice", {"vip", "beta"}, 100}` (33 bytes; inferred bound 187,
+width 1):
 
-| Where | Today |
-|---|---|
-| [3](#3-width-what-a-bound-buys), row "list or array of N variable-size elements" and the sentence after the table | contribution `N × (element bound + 4)`; table width 4 |
-| [5.3](#53-element-keys-values-ati--positions-below-the-member) limits | a list of bounded strings is viewable because its table is 4 wide either way |
-| [6.7](#67-vectors) | "The list's own offset table is 4 bytes wide" |
-| tutorial step 2, the frame of `Account{7, "alice", {"vip", "beta"}, 100}` | 39 bytes: `12 07 00 00 00 00 00 00 00 12 17 64 00 00 00 00 00 00 00 61 6c 69 63 65 08 00 00 00 0b 00 00 00 76 69 70 62 65 74 61` — the two groups `08 00 00 00` and `0b 00 00 00` are the list's table |
-| tutorial step 3 | `AccountV1` is 3 bytes longer than `Account` for the same value (header and two slots go from 1 to 2 bytes; the list table does not change) |
-| examples test | `tutorial 2` (`hex(bytes)`, `bytes.size() == 39`, plain type 48), `tutorial 3` (`+ 3`); and in `cpp/tests/annotation_tree_tests.cpp`: `auto_pssz_width_v<psio::bounded<Text16, 8>> == 4` |
-| inferred bounds that contain a list of variable-size elements | `Account` 220, `AccountWide` 1340, `AccountGrown` 289, `OpenArgs` 204, `Book` 136, `Post` (16-bit). They change only if the pending commit changes the `+ 4` per element in the bound formula |
-| Rust / TypeScript snippets | the same 39-byte frame; JS README `'0101080000000a000000616263'` |
-
-**[W2] Tuples.** Today a tuple has no element-count limit beyond what its
-width can address; the pending change limits a tuple to 255 elements.
-Passage: [6.11](#611-tuple-and-pair). Method argument tuples
-([5.11](#511-methodname-)) are tuples.
-
-**[W3] `utf8` enforcement.** Today: `utf8` (and `psio::utf8_string`) is
-enforced by pssz encode / validate / decode, by JSON, and by the key
-*reader*; the C++ key *encoder* does not check; `utf8_spec{}` spelled out
-is checked by `validate_strict` only; `validate_strict` checks every
-string including raw ones. The pending change enforces `utf8` everywhere.
-Passages: [5.2](#52-utf8--text-or-raw-bytes) (format table, notes),
-[5.14](#514-strict-only-specs-utf8_spec-hex_spec),
-[7.2](#72-what-is-checked-where) (key row), [6.19](#619-tables-and-keys)
-(last bullet), tutorial steps 5 and 7, agents guide rule on keys.
-
-**[W4] Bit types.** Today `psio::bitvector<N>` and `psio::bitlist<N>`
-contribute no inferred bound, so a record with a bit member and no
-explicit cap is 4-byte; the pending change gives them bounds. Passage:
-[3](#3-width-what-a-bound-buys), last table row.
-
-## Rust and TypeScript snippets
-
-Not compiled by the repository's tests. They are excerpts of two test
-files that were compiled and run against `rust/psio` (commit `f62003e`)
-and `js/` (commit `878dead`) outside the tree; those files are not in the
-repository yet. The declarations are the running example of the tutorial
-and produce the same bytes as the C++ `Account` (asserted in those runs).
+```text
+12 07 00 00 00 00 00 00 00 12 17 64 00 00 00 00 00 00 00 61 6c 69 63 65 02 05 76 69 70 62 65 74 61
+```
 
 ```rust
 use psio::pssz::{auto_pssz_width, pssz_evolves_from, RawString};
@@ -1282,3 +1543,77 @@ TypeScript entry points: `T.encode(value)`, `T.decode(bytes, { rejectUnknown })`
 a compatibility check (`pssz_evolves_from`), a trusted decode,
 return-value annotations, field numbers. 64-bit and wider integers are
 `bigint`.
+
+```python
+from dataclasses import dataclass
+from typing import Annotated, NewType, Optional, Protocol
+import psio
+from psio import RawString, u32, u64
+
+@dataclass
+class Account:
+    id: u64
+    owner: Annotated[str, psio.max(32)]                                    # C++ utf8 | max<32>
+    tags: Annotated[list[str], psio.max(8), psio.element(psio.max(16))]    # C++ max<8> | element(utf8 | max<16>)
+    balance: u64
+# psio.codec(Account).width == 1, .max_encoded_size == 187
+
+@psio.record(max_dynamic_data=1024)
+@dataclass
+class AccountV2:
+    id: u64
+    owner: Annotated[str, psio.max(32)]
+    tags: Annotated[list[str], psio.max(8), psio.element(psio.max(16))]
+    balance: u64
+    email: Annotated[Optional[str], psio.max(64)] = None                   # new: optional, last
+# psio.codec(AccountV2).width == 2
+
+@dataclass
+class Note:
+    blob: Annotated[RawString, psio.max(64)]      # raw bytes: C++ std::string
+    text: Annotated[str, psio.max(64)]            # UTF-8: C++ utf8
+
+@dataclass
+class Totals:
+    supply: Annotated[u64, psio.json_string, psio.ijson_string]
+    holders: Annotated[u64, psio.ijson_number]
+    decimals: u32
+
+AccountId = NewType("AccountId", u64)             # transparent
+
+@dataclass
+class Symbol:
+    code: Annotated[str, psio.max(8)]
+
+    @psio.invariant
+    def _upper_case(self) -> Optional[str]:
+        return None if self.code.isascii() and self.code.isupper() else "symbol is not upper case"
+
+@psio.record(definition_will_not_change=True)
+@dataclass
+class Point:
+    x: u32
+    y: u32
+
+@psio.interface(name="bank")
+class Bank(Protocol):
+    def open(self, owner: Annotated[str, psio.max(32)],
+             tags: Annotated[list[str], psio.max(8), psio.element(psio.max(16))]) -> None: ...
+
+    @psio.method(max_dynamic_data=1024)
+    def transfer(self, from_: AccountId, to: AccountId, amount: u64,
+                 memo: Annotated[str, psio.max(80)]) -> None: ...
+
+    def symbol(self, token: u32) -> Annotated[str, psio.max(8)]: ...
+# psio.interface_of(Bank)["transfer"].args.width == 2
+```
+
+Python entry points: `psio.to_pssz(value[, T])`, `psio.from_pssz(T, data)`
+(validates, then decodes), `psio.from_pssz(T, psio.trusted(data))`,
+`psio.validate_pssz(T, data)` → a `Status` (`ok`, `reason`,
+`has_unknown`), `psio.pssz_view(T, data)`, `psio.to_key`, `psio.from_key`,
+`psio.to_json`, `psio.to_ijson`, `psio.schema_of(T)`, `psio.codec(T)`
+(`width`, `max_encoded_size`, `max_dynamic_data`). Every failure is a
+`psio.PsioError`. Not available in Python: a compatibility check
+(`pssz_evolves_from`), a mutable view, WIT / GraphQL emitters, protobuf
+field numbers.

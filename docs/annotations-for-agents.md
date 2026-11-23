@@ -6,12 +6,6 @@ justifies it; the walk-through is [tutorial-annotations.md](tutorial-annotations
 Do not invent syntax: every spelling you may use is in the
 [master table](annotations.md#4-master-table).
 
-> **Pending wire change.** List offset-table widths **[W1]**, a 255-element
-> tuple limit **[W2]**, `utf8` enforcement **[W3]** and bit-type bounds
-> **[W4]** are changing in a commit that is not yet merged. Rules that
-> depend on one carry its tag; see
-> [annotations.md, Pending wire change](annotations.md#pending-wire-change).
-
 The C++ snippets are consecutive lines of
 [`cpp/tests/doc_annotations_examples.cpp`](../cpp/tests/doc_annotations_examples.cpp)
 (test `psio_doc_annotations_examples`).
@@ -23,7 +17,9 @@ The C++ snippets are consecutive lines of
 2. Bounds are written **on the member**, not by changing its type.
 3. The pssz offset width (1, 2 or 4 bytes) is **part of the type**: an
    explicit `maxDynamicData` always rules, else the inferred bound rounded
-   up to the next width.
+   up to the next width. Every type with offsets — record, tuple, list,
+   map, set, array — has its own width; a record's cap also narrows the
+   non-record containers beneath it.
 4. A published type changes in exactly one way: `std::optional` members
    appended at the end, at an unchanged width.
 5. Untrusted bytes are validated; views and `psio::trusted` check nothing
@@ -35,11 +31,11 @@ The C++ snippets are consecutive lines of
 
 | # | Rule | Why / reference |
 |---|---|---|
-| D1 | Keep the member types the code wants (`std::string`, `std::vector<T>`, `std::map<K, V>`). **Never change a member's type to express a bound; annotate** with `attr(member, specs)`. Use `psio::bounded<T, N>` / `psio::utf8_string<N>` only where the existing code already uses them or the member must be read through a view under a narrowed nested width. | [2.3](annotations.md#23-wrapper-types), [5.3](annotations.md#53-element-keys-values-ati--positions-below-the-member) |
-| D2 | **If a member is variable-size, give it a bound** (`max<N>`) unless it is genuinely unbounded content (a document body, a blob). One unbounded member makes the whole type 32-bit. | [3](annotations.md#3-width-what-a-bound-buys) |
-| D3 | Bound **every level**: `max<N> \| element(max<M>)` for a list of strings, `keys(...)` / `values(...)` for a map, `at<I>(...)` for a tuple, pair or variant. A count without element bounds bounds nothing. | [5.3](annotations.md#53-element-keys-values-ati--positions-below-the-member) |
-| D4 | **Human-readable text is `utf8`; bytes are raw.** `std::string` without `utf8` is raw bytes (Rust `RawString`); with `utf8` it is Rust `String`. Byte data: `std::vector<std::uint8_t>` / `std::array<std::uint8_t, N>`. **[W3]** | [5.2](annotations.md#52-utf8--text-or-raw-bytes), [6.5](annotations.md#65-bytes-and-hex) |
-| D5 | **Set `maxDynamicData(N)` on every type that may gain a field** (rows, action arguments, messages). Pick N ≥ the current inferred bound + planned growth. Default choice: a 16-bit budget (N ≤ 65535). | [5.4](annotations.md#54-maxdynamicdatan) |
+| D1 | Keep the member types the code wants (`std::string`, `std::vector<T>`, `std::map<K, V>`). **Never change a member's type to express a bound; annotate** with `attr(member, specs)`. Use `psio::bounded<T, N>` / `psio::utf8_string<N>` only where the existing code already uses them, or for a variant alternative whose narrowed content must be read through a view. | [2.3](annotations.md#23-wrapper-types), [5.3](annotations.md#53-element-keys-values-ati--positions-below-the-member) |
+| D2 | **If a member is variable-size, give it a bound** (`max<N>`) unless it is genuinely unbounded content (a document body, a blob). One unbounded member makes a type without a cap 32-bit. | [3](annotations.md#3-width-what-a-bound-buys) |
+| D3 | Bound **every level**: `max<N> \| element(max<M>)` for a list of strings, `keys(...)` / `values(...)` for a map, `at<I>(...)` for a tuple, pair or variant. A count without element bounds bounds nothing. Each bounded list / map / tuple gets its own narrow offsets. | [5.3](annotations.md#53-element-keys-values-ati--positions-below-the-member) |
+| D4 | **Human-readable text is `utf8`; bytes are raw.** `std::string` without `utf8` is raw bytes (Rust `RawString`); with `utf8` it is Rust `String`. Byte data: `std::vector<std::uint8_t>` / `std::array<std::uint8_t, N>`. `utf8` is always enforced; `utf8_spec{}` spelled out is the same thing. | [5.2](annotations.md#52-utf8--text-or-raw-bytes), [6.5](annotations.md#65-bytes-and-hex) |
+| D5 | **Set `maxDynamicData(N)` on every type that may gain a field** (rows, action arguments, messages), from its first version. Pick N by [the cap rules below](#how-to-pick-a-cap). | [3.4](annotations.md#34-how-to-pick-a-cap), [5.4](annotations.md#54-maxdynamicdatan) |
 | D6 | Use `definitionWillNotChange()` only for values closed forever (point, hash, id pair). It removes the header and all evolution. | [5.5](annotations.md#55-definitionwillnotchange) |
 | D7 | Wrap ids, keys and quantities in a `transparent()` type; put the bound in the member's **type** (a transparent member takes no `attr`). | [5.7](annotations.md#57-transparent) |
 | D8 | A rule bounds cannot express is an `invariant(fn)`: `noexcept`, returns `psio::codec_status`, never throws, depends only on the value. | [5.8](annotations.md#58-invariantfn) |
@@ -48,15 +44,18 @@ The C++ snippets are consecutive lines of
 | D11 | A method's parameters are annotated like members; give `method(...)` a `maxDynamicData(N)` if it may ever gain a parameter; annotate bounded results with `returns(...)`. | [5.11](annotations.md#511-methodname-) |
 | D12 | `static_assert` the width (and, when no cap is declared, the inferred bound) next to every published type. | [3](annotations.md#3-width-what-a-bound-buys) |
 | D13 | A range is one spec: `psio::length_bound{.max = B, .min = A}`. `exact<N>` / `min<N>` are for the member itself only. | [5.1](annotations.md#51-maxn-exactn-minn--length-bounds) |
+| D14 | **A child record keeps its own width under any cap.** Give every record that is held by a capped record its own cap or member bounds, and `static_assert(!psio::pssz_child_wider_than_cap_v<Parent>)`. | [3.3](annotations.md#33-a-cap-narrows-what-lies-beneath-it) |
+| D15 | **A tuple and a method's parameter list have at most 255 elements.** Use a record or a list beyond that. | [6.11](annotations.md#611-tuple-and-pair) |
+| D16 | Do not write a member bound to "get a narrow table" when the record has a cap: the cap already narrows lists, maps and tuples beneath it. Write bounds for limits the application has. | [3.3](annotations.md#33-a-cap-narrows-what-lies-beneath-it) |
 
 ### Changing a published type
 
 | # | Rule | Why / reference |
 |---|---|---|
 | E1 | **New fields are `std::optional<T>` and go last.** Trailing `None` is pruned, so old bytes stay valid and new writers that leave the field out write old bytes. | [8.1](annotations.md#81-the-compatible-change) |
-| E2 | **A new field must not change the width.** Without an explicit cap there is only the rounding slack; if the inferred bound crosses 255 or 65535 the change is incompatible. Reserve with `maxDynamicData` *before* publication. | [8.1](annotations.md#81-the-compatible-change), [8.2](annotations.md#82-what-is-not-compatible-and-how-the-tooling-catches-it) |
+| E2 | **A new field must not change the width** — of the record, or of a bounded list / map / tuple that holds the record. Without an explicit cap there is only the rounding slack; if an inferred bound crosses 255 or 65535 the change is incompatible. Reserve with `maxDynamicData` *before* publication. | [8.1](annotations.md#81-the-compatible-change), [8.2](annotations.md#82-what-is-not-compatible-and-how-the-tooling-catches-it) |
 | E3 | Never insert, remove, reorder or retype an existing member. | [8.2](annotations.md#82-what-is-not-compatible-and-how-the-tooling-catches-it) |
-| E4 | Never move `maxDynamicData` across a width class (255 / 65535), and never add or remove `definitionWillNotChange()` or `transparent()`. | [8.4](annotations.md#84-summary) |
+| E4 | Never move `maxDynamicData` across a width class (255 / 65535) — it changes the record's offsets and those of the containers beneath it — and never add or remove `definitionWillNotChange()` or `transparent()`. | [8.4](annotations.md#84-summary) |
 | E5 | **Treat member bounds, `utf8` and invariants as frozen.** `pssz_evolves_from` does not compare them. | [8.3](annotations.md#83-what-pssz_evolves_from-does-not-see) |
 | E6 | **Enums: only add enumerators.** Never change the underlying type, renumber or reuse a value. | [6.3](annotations.md#63-enums) |
 | E7 | Do not add a variant alternative to a published variant; do not change an array length. | [8.2](annotations.md#82-what-is-not-compatible-and-how-the-tooling-catches-it) |
@@ -70,7 +69,7 @@ The C++ snippets are consecutive lines of
 | R1 | **Validate untrusted bytes**: action arguments, cross-service data, user input. `psio::from_pssz<T>(bytes)` or `psio::validate_pssz<T>(bytes)` first. | [7.3](annotations.md#73-the-trust-rule) |
 | R2 | **`psio::trusted{bytes}` and views only for bytes your own service wrote and stored**, or validated earlier in the same flow. | [7.3](annotations.md#73-the-trust-rule) |
 | R3 | A `pssz_view` checks nothing: not structure, not bounds, not invariants. Use `psio::validated_pssz_view` on untrusted bytes. | [7.2](annotations.md#72-what-is-checked-where) |
-| R4 | Validate keys from outside with `validate_key` / `from_key`: the C++ key **encoder** does not check member bounds or `utf8`. **[W3]** | [6.19](annotations.md#619-tables-and-keys) |
+| R4 | Validate keys from outside with `validate_key` / `from_key`: the C++ key **encoder** does not check member bounds or `utf8`. | [6.19](annotations.md#619-tables-and-keys) |
 | R5 | Read views are const: do not try to write through one. In-place writes use `psio::pssz_mutable_view<T>`, fixed-size values only. | [7.4](annotations.md#74-const-safety) |
 | R6 | Handle the failure: `to_pssz` / `to_json` throw `psio::codec_exception` (abort without exceptions) for a value outside its bounds; use `encode_pssz_checked` / `encode_json_checked` / `validate_*` where a status is needed. | [5.1](annotations.md#51-maxn-exactn-minn--length-bounds) |
 | R7 | Do not use a small-capped type as a JSON root in C++: the JSON validator applies the cap to the text size. | [5.4](annotations.md#54-maxdynamicdatan) |
@@ -79,10 +78,64 @@ The C++ snippets are consecutive lines of
 
 | # | Rule | Reference |
 |---|---|---|
-| X1 | Mirror a declaration field by field. C++ `utf8 \| max<N>` on `std::string` = Rust `#[psio(max = N)] String` = TS `field(rawString, { utf8: true, max: N })`. C++ `max<N>` on `std::string` = Rust `#[psio(max = N)] RawString` = TS `field(rawString, { max: N })`. | [4](annotations.md#4-master-table) |
-| X2 | Mirror the cap: `maxDynamicData(N)` = `#[pssz(max_dynamic_data = N)]` = `{ maxDynamicData: N }`. Mirror `definitionWillNotChange()` = `#[psio(definition_will_not_change)]` = `{ fixed: true }`. | [4](annotations.md#4-master-table) |
+| X1 | Mirror a declaration field by field. C++ `utf8 \| max<N>` on `std::string` = Rust `#[psio(max = N)] String` = TS `field(rawString, { utf8: true, max: N })` = Python `Annotated[str, psio.max(N)]`. C++ `max<N>` on `std::string` = Rust `#[psio(max = N)] RawString` = TS `field(rawString, { max: N })` = Python `Annotated[psio.RawString, psio.max(N)]`. | [4](annotations.md#4-master-table) |
+| X2 | Mirror the cap: `maxDynamicData(N)` = `#[pssz(max_dynamic_data = N)]` = `{ maxDynamicData: N }` = `@psio.record(max_dynamic_data=N)`. Mirror `definitionWillNotChange()` = `#[psio(definition_will_not_change)]` = `{ fixed: true }` = `@psio.record(definition_will_not_change=True)`. A missing or different cap changes the bytes: it selects the widths beneath the record too. | [4](annotations.md#4-master-table) |
 | X3 | Do not use `exact<N>` / `min<N>` / `maxFields` in a type that Rust must mirror (not available there). | [4](annotations.md#4-master-table) |
-| X4 | Confirm agreement by comparing the offset width and the bytes of one sample value in each language. | [Rust and TypeScript snippets](annotations.md#rust-and-typescript-snippets) |
+| X4 | Confirm agreement by comparing the offset width and the bytes of one sample value in each language. | [Rust, TypeScript and Python snippets](annotations.md#rust-typescript-and-python-snippets) |
+| X5 | Use only spellings of the master table. Python: `Annotated[T, psio.max(N)]`, `psio.element(...)`, `psio.keys(...)`, `psio.values(...)`, `psio.at(i, ...)`, `@psio.record(...)`, `@psio.transparent`, `@psio.invariant`, `@psio.enum(...)`, `@psio.interface`, `@psio.method(...)`. | [4](annotations.md#4-master-table) |
+
+## How to pick a cap
+
+In this order ([annotations.md §3.4](annotations.md#34-how-to-pick-a-cap)):
+
+1. **Enforced limits first.** Bound each member with the limit the
+   application has (`max<N>`, `element(...)`, `utf8`). Do not replace
+   member bounds by a cap: they are separate checks.
+2. **Pick the width class.** `N ≤ 255` → 1-byte offsets; `N ≤ 65535` →
+   2-byte; larger → 4-byte. Only the class changes bytes.
+   - Database rows, table records: **16-bit** (`N ≤ 65535`).
+   - Action / method arguments: 16-bit; 255 for a small fixed-purpose
+     call.
+   - Small values that stay small: 8-bit (`N ≤ 255`).
+   - Closed forever: no cap, `definitionWillNotChange()`.
+   - Genuinely unbounded content: no cap (32-bit).
+3. **Reserve headroom with `maxDynamicData`.** Adding an optional field
+   must not change the width. N ≥ the inferred bound of the current fields
+   + everything the type may gain. Declare it in the first published
+   version; it cannot be added later if that changes a width.
+4. **When unsure, go one size up.** Too small is permanent; too large
+   costs 1–2 bytes per header, slot and table entry. If nothing argues for
+   a specific number, use the top of the class (255, 65535).
+5. **Check the children.** Lists, maps, sets, arrays and tuples beneath the
+   record are narrowed by the cap; child records are not. Assert
+   `!psio::pssz_child_wider_than_cap_v<T>`.
+6. **Assert** `psio::auto_pssz_width_v<T>` and `psio::max_dynamic_data_v<T>`
+   next to the type, and use the same N in every language.
+
+What fits under 255 (`ref-cap-transfer`): the framing is 23 bytes, the
+other 232 are shared by `memo` and `data`.
+
+```cpp
+struct Transfer
+{
+   friend bool operator==(const Transfer&, const Transfer&) = default;
+   std::uint32_t                            token  = 0;
+   std::uint64_t                            from   = 0;
+   std::uint64_t                            amount = 0;
+   std::string                              memo;
+   std::optional<std::vector<std::uint8_t>> data;    // unbounded: the cap is its only limit
+   PSIO_REFLECT(Transfer, token, from, amount, attr(memo, utf8 | max<80>), data,
+                maxDynamicData(255))
+};
+static_assert(psio::auto_pssz_width_v<Transfer> == 1);   // 255: the largest cap with 1-byte offsets
+```
+
+A child record under a cap (`ref-cap-child`):
+
+```cpp
+static_assert(psio::auto_pssz_width_v<Item> == 4);
+static_assert(psio::pssz_child_wider_than_cap_v<Order>);   // Item cannot use its width here
+```
 
 ## Checklist: adding a type
 
@@ -92,9 +145,10 @@ The C++ snippets are consecutive lines of
    and optionals / variants / tuples that contain one): add `max<N>` and
    bounds for every level below it, or record why it is unbounded.
 3. Mark text `utf8`.
-4. Decide growth: `maxDynamicData(N)` (may grow),
-   `definitionWillNotChange()` (closed forever), or neither (accepts that
-   only the rounding slack is available).
+4. Decide growth: `maxDynamicData(N)` (may grow;
+   [how to pick a cap](#how-to-pick-a-cap)), `definitionWillNotChange()`
+   (closed forever), or neither (accepts that only the rounding slack is
+   available). With a cap: check that no child record is wider than it.
 5. Add the assertions (below) for width and bound.
 6. Add a round-trip test, one rejection at bound + 1 per bounded member,
    and — if the type has an invariant — one violating value.
@@ -120,6 +174,10 @@ The C++ snippets are consecutive lines of
 - [ ] Every new variable-size member is bounded at every level, or
       justified as unbounded.
 - [ ] Width is asserted; it is the same as before for a changed type.
+- [ ] A new or changed `maxDynamicData` stays in its width class, and no
+      child record is wider than the cap
+      (`psio::pssz_child_wider_than_cap_v`).
+- [ ] No tuple or parameter list exceeds 255 elements.
 - [ ] New members of a published type are optional and last.
 - [ ] No published bound, `utf8`, cap class, DWNC, enum value, variant
       alternative list or member order changed.
@@ -129,7 +187,8 @@ The C++ snippets are consecutive lines of
       (nothing enforces or reads them —
       [5.13](annotations.md#513-sorted-unique-unique_keys),
       [5.15](annotations.md#515-reserved-vocabulary)).
-- [ ] Rust / TypeScript mirrors updated with the same bounds and cap.
+- [ ] Rust / TypeScript / Python mirrors updated with the same bounds and
+      cap.
 
 ## Anti-patterns
 
@@ -149,14 +208,19 @@ The C++ snippets are consecutive lines of
 | An invariant that throws or calls a throwing parser | catch inside; return `psio::codec_fail(...)` |
 | Renumbering an enum, changing its underlying type | append enumerators only |
 | A different `maxDynamicData` per language | the same N everywhere |
+| `maxDynamicData(255)` on a row "to save bytes" when the row may grow | a 16-bit cap (≤ 65535); when unsure, one size up |
+| `attr(tags, max<1000> \| element(max<1000>))` added under `maxDynamicData(255)` only to narrow the table | nothing: the cap already narrows it; write real limits |
+| An unbounded record as a member or list element of a record capped at 255 | cap or bound the child; assert `!psio::pssz_child_wider_than_cap_v<Parent>` |
+| `std::tuple` of 300 elements, a method with 300 parameters | a record, a list, or nested tuples (limit: 255) |
+| Assuming a list's offset table is 4 bytes wide when computing a size by hand | the list has its own width: 1, 2 or 4 by its bound and the cap above it |
 
 ## Snippets to paste
 
 Width and bound of a type without a cap (`tut-2b`):
 
 ```cpp
-static_assert(psio::max_encoded_size<Account>() == 4 + 8 + (4 + 32) + (4 + 8 * (16 + 4)) + 8);
-static_assert(psio::max_encoded_size<Account>() == 220);        // <= 255: 8-bit offsets
+static_assert(psio::max_encoded_size<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);
+static_assert(psio::max_encoded_size<Account>() == 187);        // <= 255: 8-bit offsets
 static_assert(psio::auto_pssz_width_v<Account> == 1);
 ```
 
@@ -186,8 +250,8 @@ Method arguments (`tut-9a`, `tut-9b`):
 ```cpp
 using OpenArgs     = psio::reflect<Bank>::method_arg_tuple<0>;
 using TransferArgs = psio::reflect<Bank>::method_arg_tuple<1>;
-// open has no cap: header 4 + owner (4 + 32) + tags (4 + 8 x (16 + 4)) = 204, 8-bit.
-static_assert(psio::max_encoded_size<OpenArgs>() == 4 + (4 + 32) + (4 + 8 * (16 + 4)));
+// open has no cap: (header + 2 slots) x 1 byte + owner 32 + tags 136 = 171, 8-bit.
+static_assert(psio::max_encoded_size<OpenArgs>() == 3 + 32 + (8 + 8 * 16));
 static_assert(psio::auto_pssz_width_v<OpenArgs> == 1);
 // transfer is capped: 16-bit for its lifetime.
 static_assert(psio::max_dynamic_data_v<TransferArgs> == 1024);
@@ -271,16 +335,26 @@ CHECK(psio::from_pssz<AccountV2>(psio::trusted{bytes}) == alice);
 ```
 
 How the inferred bound adds up, for writing the expected number in an
-assertion ([annotations.md §3](annotations.md#3-width-what-a-bound-buys)):
-4 per extensible record / tuple header; a fixed-size member is its size; a
-variable-size member is 4 (slot) + its bound; a list of N variable-size
-elements is N × (element bound + 4) **[W1]**; an optional adds 1; a
-variant is 1 + its largest alternative; a member whose type has its own
-cap contributes the cap.
+assertion ([annotations.md §3.1](annotations.md#31-how-the-inferred-bound-is-counted)).
+Count bottom-up; each type with offsets is `k` words and `r` other bytes,
+and is `k + r` if that is ≤ 255, else `2k + r` if that is ≤ 65535, else
+`4k + r`:
+
+- extensible record, tuple, pair: `k` = 1 (header) + the number of
+  variable-size members; `r` = the sum of the members;
+- DWNC record: `k` = the number of variable-size members;
+- list or array of N variable-size elements: `k` = N; `r` = N × the element
+  bound; a list of fixed-size elements is N × size, no `k`;
+- a fixed-size member is its size; a bounded string or byte list is its N;
+- an optional adds 1; a variant is 1 + its largest alternative;
+- a member whose type has its own cap contributes the cap;
+- `bitvector<N>` is ⌈N/8⌉ (fixed), `bitlist<N>` is ⌈N/8⌉ + 1.
+
+`Account`: `tags` = 8 + 8 × 16 = 136; record = 3 + (8 + 32 + 136 + 8) = 187.
 
 ## Limits to state honestly
 
-- The C++ key encoder does not check member bounds or `utf8` **[W3]**.
+- The C++ key encoder does not check member bounds or `utf8`.
 - Views are not validated on construction.
 - `pssz_evolves_from` does not compare bounds, `utf8`, enumerators or
   invariants.
@@ -288,7 +362,17 @@ cap contributes the cap.
   enforced.
 - `psio::validate_json` applies a root type's `maxDynamicData` to the text
   size; the JSON writer does not.
-- A member whose annotations narrow a nested tuple / pair / map entry /
-  array of variable elements cannot be read through a `pssz_view`.
-- Rust has no `exact` / `min` / `maxFields`; TypeScript has no
-  `pssz_evolves_from` and no return-value annotation.
+- A variant member whose `at<I>(...)` annotation narrows an offset width
+  inside an alternative cannot be read through a `pssz_view`. Every other
+  annotated or capped member can.
+- A member with `element` / `keys` / `values` / `at` annotations cannot be
+  written through a mutable view.
+- A bound larger than the enclosing cap is accepted silently.
+- `psio::pssz_child_wider_than_cap_v` is a query; nothing fails by itself
+  when a child record is wider than its parent's cap.
+- `validate_strict` refuses a raw (non-`utf8`) string that is not UTF-8;
+  `validate_pssz` accepts it.
+- Rust has no `exact` / `min` / `maxFields`; TypeScript and Python have no
+  `pssz_evolves_from`; TypeScript has no return-value annotation.
+- The Rust, TypeScript and Python snippets of the reference are not
+  compile-checked from the documents.

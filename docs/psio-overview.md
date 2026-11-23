@@ -131,25 +131,39 @@ in `docs/helpers.md`.
 
 ### 2.5 Annotation channel
 
-Per-type and per-field metadata that drives wire-form selection
-without changing the field's runtime type. The annotation channel is
-**format-agnostic** — the same annotation can be honored differently
-by each format, but its presence is uniform.
+Per-type and per-member metadata that is part of the type without changing
+the member's runtime type. A type is declared and annotated **once**; every
+format reads the annotations it has a use for and ignores the rest. The
+reference is [annotations.md](annotations.md) (tutorial:
+[tutorial-annotations.md](tutorial-annotations.md); rules for agents and
+reviewers: [annotations-for-agents.md](annotations-for-agents.md)).
 
-**Examples:**
+The annotations that exist, in their C++ spelling (the other languages'
+spellings are in the [master table](annotations.md#4-master-table)):
 
-```
-@bytes_encoding("hex")        — bytes field rendered as lowercase hex in JSON-text formats
-@numeric_string                — integer field rendered as quoted JSON string (snowflake IDs)
-@key_suffix(".unix_ms")        — object key written with this suffix
-@as_decimal                    — float-valued field encoded as exact decimal (not IEEE binary)
-@sorted_keys                   — object's keys are guaranteed sorted (sets the is_sorted hint)
-@is_sorted                     — array's elements are guaranteed sorted
-```
+| annotation | states | read by |
+|---|---|---|
+| `max<N>`, `exact<N>`, `min<N>` | the length of a string, list, map, set or nested value | pssz (offset widths, enforced), json / ijson and key (enforced), the Schema IR, WIT |
+| `utf8` | a string is UTF-8 text, not raw bytes; always enforced | pssz, json / ijson, key readers, the Schema IR |
+| `element(...)`, `keys(...)`, `values(...)`, `at<I>(...)` | the same, for the positions below a member | as the two rows above |
+| `maxDynamicData(N)` | the limit of a record's (or an argument list's) encoded size; its offset width for its lifetime; the bound that selects the widths of the lists, maps and tuples beneath it | pssz, the Schema IR, WIT |
+| `definitionWillNotChange()` | the record never gains a field: no header | pssz, bin / borsh / bincode fast paths |
+| `maxFields(N)` | a declared field-count cap | the Schema IR and WIT only |
+| `transparent()` | the type is its one member | pssz, key, json / ijson, views, schema, GraphQL |
+| `invariant(fn)` | a predicate every value of the type satisfies | pssz, key, json / ijson writers and checking readers |
+| `json_string`, `json_number`, `ijson_string`, `ijson_number` | the text form of an integer member | json, ijson |
+| `PSIO_ADAPTER(T, psio::text_category, Impl)`, `as<Tag>` | a custom text form | json, ijson, GraphQL |
+| `PSIO_REFLECT_ENUM(E, …)` | the names of an enum's values | json, ijson, GraphQL |
+| `field<N>` | a protobuf field number | protobuf |
 
-Every host MUST support a uniform annotation taxonomy. Format
-implementations consult the annotation channel during dispatch; the
-binding is **annotation determines wire form**, not the value.
+What does **not** exist: there is no `@bytes_encoding`, `@numeric_string`,
+`@key_suffix`, `@as_decimal`, `@sorted_keys` or `@is_sorted` annotation in
+any language. A byte list is hex in I-JSON and a number array in JSON by
+its type; a 64-bit integer is a string in I-JSON by the format's rule or by
+`ijson_string`; `sorted` / `unique` can be attached in C++ but no codec
+checks them ([annotations.md §5.13](annotations.md#513-sorted-unique-unique_keys)).
+The starter taxonomy of [§6](#6-annotation-taxonomy-initial) is an early
+design sketch, not a description of the code.
 
 ### 2.6 Nested value
 
@@ -558,17 +572,17 @@ package named after the tag's namespace with no version.
 
 ### 4.2 Annotation channel
 
-A way to attach per-type and per-field metadata, accessible during
-the reflection walk. Same taxonomy across hosts (§2.5).
+A way to attach per-type and per-member metadata, accessible during the
+reflection walk. Same vocabulary across hosts (§2.5); every spelling is in
+the [master table of annotations.md](annotations.md#4-master-table).
 
 | Host  | Mechanism |
 |-------|-----------|
-| C++   | `attr(field, spec)` and the type-level keywords inside `PSIO_REFLECT` (any namespace, in-class or after the type), or `PSIO_FIELD_ATTRS` / `PSIO_TYPE_ATTRS` as separate statements; read through `psio::annotate<X>` |
-| Rust  | `#[psio(annotation = "value")]` attribute on the field/struct |
-| Python| Class decorator with field metadata, OR `Annotated[T, psio.AnnotationName]` from `typing` |
-| Go    | Extended field-tag syntax: `` `psio:"name,bytes_encoding=hex"` `` |
-| Java  | `@PsioAnnotate(...)` field annotation |
-| JS/TS | Decorators (TC39) or schema-builder fluent API |
+| C++   | `attr(field, spec)` and the type-level keywords inside `PSIO_REFLECT` (any namespace, in-class or after the type), or `PSIO_FIELD_ATTRS` / `PSIO_TYPE_ATTRS` / `PSIO_ATTRS` as separate statements; wrapper types (`psio::bounded<T, N>`, `psio::utf8_string<N>`) say the same in the type; read through `psio::annotate<X>` |
+| Rust  | Derive attributes: `#[psio(...)]` describes the type for every derive (`#[psio(max = 32)]`, `#[psio(element(max = 16))]`, `#[psio(transparent)]`, `#[psio(definition_will_not_change)]`, `#[psio(invariant = "path")]`); `#[pssz(max_dynamic_data = N)]` and `#[json(json_string)]` hold what is specific to one format. There is no `#[psio(annotation = "value")]` form. Bounded wrapper types (`BoundedString<N>`, `BoundedList<T, N>`) exist as well |
+| JS/TS | No decorators. Types are values built with functions (`record`, `field`, `list`, …); annotations are the option objects: `field(rawString, { utf8: true, max: 32 })`, `record(name, fields, { maxDynamicData: N })` |
+| Python| `typing.Annotated` metadata on the hints of a `@dataclass` (`Annotated[str, psio.max(32)]`, `psio.element(...)`), and decorators for the type level: `@psio.record(max_dynamic_data=N)`, `@psio.transparent`, `@psio.enum(...)`, `@psio.interface`, `@psio.method(...)`, `@psio.invariant` |
+| Go, Java | no implementation in this repository |
 
 ### 4.3 Format-tag dispatch
 

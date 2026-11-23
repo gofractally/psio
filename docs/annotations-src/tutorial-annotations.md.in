@@ -8,13 +8,6 @@ annotation does to the bytes, the text, the keys and the schema.
   [annotations.md](annotations.md).
 - The short rule list is [annotations-for-agents.md](annotations-for-agents.md).
 
-> **Pending wire change.** A commit that is not yet merged changes the
-> width of a bounded list's own offset table **[W1]**, limits tuples to 255
-> elements **[W2]**, changes where `utf8` is enforced **[W3]** and gives bit
-> types a size bound **[W4]**. Passages that depend on one of them carry
-> its tag; the numbers are collected in
-> [annotations.md, Pending wire change](annotations.md#pending-wire-change).
-
 **How to follow along.** Every C++ snippet is a run of consecutive lines of
 [`cpp/tests/doc_annotations_examples.cpp`](../cpp/tests/doc_annotations_examples.cpp);
 each step names its section (`tut-1`, `tut-2-run`, …). Build and run:
@@ -42,7 +35,8 @@ assertions. `psio::max_encoded_size<T>()` is the largest encoding the type
 allows; here there is none, because `owner` and `tags` can be any size.
 A PSSZ record locates its variable-size members with offsets, and a type
 with no size bound needs 32-bit offsets: `auto_pssz_width_v == 4`. Every
-record pays a 4-byte header and 4 bytes per variable-size member.
+record pays a 4-byte header and 4 bytes per variable-size member, and the
+list `tags` pays 4 more bytes per element for its own offset table.
 
 **Check.** The two `static_assert`s. Put them next to every type you
 publish: the width is part of the type, and you want the compiler to tell
@@ -62,17 +56,26 @@ types; annotate them with `attr(member, specs)` (`tut-2a`):
 - `spec | spec` combines.
 
 **Get.** Every variable-size part is now bounded, so the type has an
-inferred bound — the comment above the assertion shows how it adds up — and
-the bound selects the width: at most 255 bytes → 8-bit offsets, at most
-65535 → 16-bit, otherwise 32-bit. 1340 gives 16-bit.
+inferred bound, and the bound selects the width: at most 255 bytes → 8-bit
+offsets, at most 65535 → 16-bit, otherwise 32-bit.
+
+Two things in this type have offsets, and **each gets its own width**: the
+record (a header and a slot for `owner` and for `tags`) and the list (a
+table of one slot per tag). Each is measured at the width it ends up with —
+the comment above the assertion does the sum. The list is 64 slots and
+1024 bytes of strings: too much for 1-byte slots, so 2 × 64 + 1024 = 1152.
+The record is 3 words and 1200 other bytes: 2 × 3 + 1200 = 1206, 16-bit.
 
 A tighter bound gets the next width (`tut-2b`):
 
 @@SEC tut-2b@@
 
+Now the list is 8 + 128 = 136 bytes with a 1-byte table, and the record
+3 + 184 = 187 with a 1-byte header and slots.
+
 **The rule to remember:** the bound is rounded up to the next width, and
 *the only spare capacity you get is the rounding*. `Account` can grow by
-35 bytes of bound before it stops being 8-bit.
+68 bytes of bound before it stops being 8-bit.
 
 Bounding only part of a member bounds nothing (`tut-2c`):
 
@@ -86,8 +89,8 @@ A value outside its bounds has no encoding, and readers reject bytes that
 hold one (`pssz: member length_bound violated`,
 `utf8_spec: invalid leading byte`).
 
-What you saved **[W1]**: `Account{7, "alice", {"vip", "beta"}, 100}` is 39
-bytes; the same value as `AccountPlain` is 48. The frame:
+What you saved: `Account{7, "alice", {"vip", "beta"}, 100}` is 33 bytes;
+the same value as `AccountPlain` is 48. The frame:
 
 ```text
 12                         header: the fixed region is 0x12 = 18 bytes
@@ -96,7 +99,7 @@ bytes; the same value as `AccountPlain` is 48. The frame:
 17                         tags: offset
 64 00 00 00 00 00 00 00    balance
 61 6c 69 63 65             "alice"
-08 00 00 00 0b 00 00 00    the list's own offset table (4 bytes per element)
+02 05                      the list's own offset table (1 byte per element)
 76 69 70 62 65 74 61       "vip" "beta"
 ```
 
@@ -108,7 +111,7 @@ identical bytes, widths, JSON and schema
 
 ## Step 3 — Reserve room for growth
 
-`Account` is as tight as it can be, which is the problem: it has 35 bytes
+`Account` is as tight as it can be, which is the problem: it has 68 bytes
 of slack. The day a field is added whose bound exceeds that, the width
 changes from 8-bit to 16-bit and **every stored record becomes
 unreadable**. Width is part of the type.
@@ -126,19 +129,43 @@ unreadable**. Width is part of the type.
 
 @@RUN tut-3-run@@
 
-The price of the reservation is 3 bytes per record here (the header and
-two offset slots are 2 bytes instead of 1) **[W1]**.
+The price of the reservation is 3 bytes per record here: the header and
+two offset slots are 2 bytes instead of 1. The list's table stays 1 byte
+wide, because the list's own bound (136) is tighter than the cap.
 
 **Check** the limit (`tut-3-cap`, on a small type with a 16-byte cap):
 
 @@RUN tut-3-cap@@
 
-**Choosing N.** Cover the current inferred bound plus everything the type
-may gain. For database rows and action arguments a 16-bit budget — a cap
-of at most 65535 — is enough in most cases. Use 8-bit (≤ 255) for small
-records you are sure about, and
-[`definitionWillNotChange()`](annotations.md#55-definitionwillnotchange)
-for values that are closed forever (a point, a hash).
+**A cap also narrows what is beneath it.** A record with a cap never
+encodes to more than N bytes, so no list, map or tuple inside it does
+either, and they take their offset width from `min(their own bound, N)`.
+Under a cap you get narrow tables without bounding every element. An
+action's arguments under 255, the largest cap with 1-byte offsets
+(`ref-cap-transfer`):
+
+@@SEC ref-cap-transfer@@
+
+@@RUN ref-cap-transfer-run@@
+
+`data` has no bound of its own; the cap is its limit. A *record* beneath a
+cap is the exception: it keeps its own width wherever it appears, so give
+child records their own cap or bounds
+([annotations.md §3.3](annotations.md#33-a-cap-narrows-what-lies-beneath-it)).
+
+**Choosing N** ([annotations.md §3.4](annotations.md#34-how-to-pick-a-cap)).
+
+- State the limits the application has as member bounds first; they are
+  enforced one by one.
+- Then pick the width class: for database rows and action arguments aim
+  for 16-bit, a cap of at most 65535. Use 8-bit (≤ 255) for small records
+  you are sure about, and
+  [`definitionWillNotChange()`](annotations.md#55-definitionwillnotchange)
+  for values that are closed forever (a point, a hash).
+- Cover the current inferred bound plus everything the type may gain:
+  adding an optional field must not change the width.
+- When unsure, go one size up. A width that is too small cannot be changed
+  after publication; one that is too large costs a byte or two per offset.
 
 ## Step 4 — Add a field compatibly
 
@@ -165,8 +192,11 @@ assert against it.
 @@SEC tut-4b@@
 
 Case (1) is the one the cap exists for: *you cannot add an optional field
-if it would change the implicit width.* Without `maxDynamicData` the same
-`email` field moves `Account` from 8-bit to 16-bit.
+if it would change the implicit width.* Without `maxDynamicData`, `Account`
+has 68 bytes of slack. The `email` field of `AccountV2` (slot 1 + selector
+1 + 64 = 66) would have squeezed in; `bio` (102) does not, and moves
+`Account` from 8-bit to 16-bit. Whether a future field fits should not
+depend on such arithmetic: declare the cap.
 
 **What the check does not see** (`tut-4c`):
 
@@ -187,9 +217,12 @@ languages: C++ `std::string` = Rust `RawString`; C++ `std::string` + `utf8`
 
 @@SEC tut-5@@
 
-**Get / check** (`tut-5-run`) **[W3]**:
+**Get / check** (`tut-5-run`):
 
 @@RUN tut-5-run@@
+
+`utf8` is always enforced — by every pssz and JSON writer and reader, and
+by the key readers. There is no weaker form.
 
 Use `utf8` for anything a person reads (names, memos, URLs) and plain
 bytes for hashes, signatures and packed data. For byte data proper,
@@ -230,13 +263,14 @@ whose bytewise order is the value's order ([key-spec.md](key-spec.md)).
 
 @@SEC tut-7@@
 
-**Get / check** (`tut-7-run`) **[W3]**:
+**Get / check** (`tut-7-run`):
 
 @@RUN tut-7-run@@
 
 - Annotations do not change key bytes, and a key has no offset width.
 - **Limit:** the C++ key encoder does not check member bounds or `utf8`;
-  the key readers do. Validate keys that arrive from outside.
+  the key readers do. Validate keys that arrive from outside. (The Rust,
+  TypeScript and Python key writers check bounds.)
 
 ## Step 8 — Transparent wrappers and invariants
 
@@ -268,11 +302,14 @@ record's members take (`tut-9a`):
 
 - `attr(p, specs)` names and annotates a parameter; a bare name is a
   parameter without annotations.
-- `maxDynamicData(N)` caps the argument tuple and fixes its width.
+- `maxDynamicData(N)` caps the argument tuple and fixes its width; like a
+  record's cap it also narrows the lists and maps among the arguments.
 - `returns(specs)` annotates the return value.
+- A method has at most 255 parameters: an argument list is a tuple, and a
+  tuple has at most 255 elements.
 
 **Get.** `psio::reflect<Bank>::method_arg_tuple<I>` is the type to encode,
-decode and validate arguments as **[W2]**:
+decode and validate arguments as:
 
 @@RUN tut-9-run@@
 
@@ -288,11 +325,12 @@ the same types (`psio::SchemaBuilder{}.insert_interface<Bank>()`,
 Action arguments arrive from outside: always read them with the validating
 `from_pssz<Args>(bytes)`.
 
-## Step 10 — The same declarations in Rust and TypeScript
+## Step 10 — The same declarations in Rust, TypeScript and Python
 
-These snippets are **not compiled by the repository's tests**
-([annotations.md](annotations.md#rust-and-typescript-snippets)). They
-produce the same 39-byte frame as Step 2.
+These snippets are **not compile-checked from this document**
+([annotations.md](annotations.md#rust-typescript-and-python-snippets)).
+The declarations produce the same 33-byte frame as Step 2 in every
+language; each language's own test pins it.
 
 Rust (`rust/psio`): `#[psio(...)]` on the field; `String` is UTF-8 and
 `RawString` is raw bytes, so there is no `utf8` key.
@@ -363,11 +401,51 @@ const Transfer = argumentTuple(
   { maxDynamicData: 1024 });
 ```
 
+Python (`python/`): the bounds are `typing.Annotated` metadata on the
+hints of a `@dataclass`; `str` is UTF-8 and `psio.RawString` is raw bytes;
+the cap is a decorator.
+
+```python
+from dataclasses import dataclass
+from typing import Annotated, NewType, Optional, Protocol
+import psio
+from psio import u32, u64
+
+@psio.record(max_dynamic_data=1024)
+@dataclass
+class AccountV1:
+    id: u64
+    owner: Annotated[str, psio.max(32)]
+    tags: Annotated[list[str], psio.max(8), psio.element(psio.max(16))]
+    balance: u64
+
+@psio.record(max_dynamic_data=1024)
+@dataclass
+class AccountV2:
+    id: u64
+    owner: Annotated[str, psio.max(32)]
+    tags: Annotated[list[str], psio.max(8), psio.element(psio.max(16))]
+    balance: u64
+    email: Annotated[Optional[str], psio.max(64)] = None      # new: optional, last
+
+psio.codec(AccountV1).width                                    # 2
+
+AccountId = NewType("AccountId", u64)
+
+@psio.interface(name="bank")
+class Bank(Protocol):
+    @psio.method(max_dynamic_data=1024)
+    def transfer(self, from_: AccountId, to: AccountId, amount: u64,
+                 memo: Annotated[str, psio.max(80)]) -> None: ...
+
+    def symbol(self, token: u32) -> Annotated[str, psio.max(8)]: ...
+```
+
 Differences to know: Rust has no `exact` / `min` / `maxFields`; TypeScript
-has no compile-time `pssz_evolves_from` (compare `.width` and test old
-bytes against the new type) and no return-value annotation; Rust and
-TypeScript check member bounds when they *write* a key, C++ only when it
-reads one. The full table is in
+and Python have no compile-time `pssz_evolves_from` (compare the widths
+and test old bytes against the new type); TypeScript has no return-value
+annotation; Rust, TypeScript and Python check member bounds when they
+*write* a key, C++ only when it reads one. The full table is in
 [annotations.md §4](annotations.md#4-master-table).
 
 ## Step 11 — Reading: views, validated and trusted

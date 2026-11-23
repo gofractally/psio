@@ -121,9 +121,12 @@ struct AccountWide
                 attr(tags, max<64> | element(utf8 | max<16>)),  // <= 64 strings of <= 16 bytes
                 balance)
 };
-// header 4 + id 8 + owner (slot 4 + 32) + tags (slot 4 + 64 x (16 + slot 4)) + balance 8
-static_assert(psio::max_encoded_size<AccountWide>() == 4 + 8 + (4 + 32) + (4 + 64 * (16 + 4)) + 8);
-static_assert(psio::max_encoded_size<AccountWide>() == 1340);   // <= 65535: 16-bit offsets
+// tags:   a table of 64 slots, then 64 strings of <= 16 bytes. With 1-byte slots that
+//         would be 64 + 1024 = 1088 > 255, so the slots are 2 bytes: 2 x 64 + 1024 = 1152.
+// record: a header and 2 slots (owner, tags), then id 8 + owner 32 + tags 1152 + balance 8
+//         = 1200. 3 + 1200 > 255, so header and slots are 2 bytes: 2 x 3 + 1200 = 1206.
+static_assert(psio::max_encoded_size<AccountWide>() == 2 * 3 + 8 + 32 + (2 * 64 + 64 * 16) + 8);
+static_assert(psio::max_encoded_size<AccountWide>() == 1206);   // <= 65535: 16-bit offsets
 static_assert(psio::auto_pssz_width_v<AccountWide> == 2);
 
 // ── tut-2b: a tighter bound, the next width down ───────────────────────────
@@ -140,8 +143,10 @@ struct Account
                 attr(tags, max<8> | element(utf8 | max<16>)),
                 balance)
 };
-static_assert(psio::max_encoded_size<Account>() == 4 + 8 + (4 + 32) + (4 + 8 * (16 + 4)) + 8);
-static_assert(psio::max_encoded_size<Account>() == 220);        // <= 255: 8-bit offsets
+// tags:   8 slots + 8 x 16 = 136 <= 255: the list's own table is 1 byte per slot.
+// record: (header + 2 slots) x 1 byte + id 8 + owner 32 + tags 136 + balance 8.
+static_assert(psio::max_encoded_size<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);
+static_assert(psio::max_encoded_size<Account>() == 187);        // <= 255: 8-bit offsets
 static_assert(psio::auto_pssz_width_v<Account> == 1);
 
 // ── tut-2c: bounding only part of a member bounds nothing ──────────────────
@@ -172,7 +177,7 @@ struct AccountV1
                 balance,
                 maxDynamicData(1024))
 };
-// The cap rules: 16-bit offsets, although today's fields need at most 220 bytes.
+// The cap rules: 16-bit offsets, although today's fields need at most 187 bytes.
 static_assert(psio::max_dynamic_data_v<AccountV1> == 1024);
 static_assert(psio::auto_pssz_width_v<AccountV1> == 2);
 
@@ -197,23 +202,25 @@ static_assert(psio::auto_pssz_width_v<AccountV2> == 2);
 static_assert(psio::pssz_evolves_from<AccountV1, AccountV2>);
 
 // ── tut-4b: revisions that are not compatible ──────────────────────────────
-// (1) No cap: the same new field pushes the inferred bound from 220 to 289,
-//     the width from 1 to 2, and every existing record becomes unreadable.
+// (1) No cap: Account has 255 - 187 = 68 bytes of slack. A new field that needs
+//     more (slot 1 + selector 1 + 100) moves the width from 1 to 2, and every
+//     existing record becomes unreadable.
 struct AccountGrown
 {
    std::uint64_t              id = 0;
    std::string                owner;
    std::vector<std::string>   tags;
    std::uint64_t              balance = 0;
-   std::optional<std::string> email;
+   std::optional<std::string> bio;
    PSIO_REFLECT(AccountGrown,
                 id,
                 attr(owner, utf8 | max<32>),
                 attr(tags, max<8> | element(utf8 | max<16>)),
                 balance,
-                attr(email, utf8 | max<64>))
+                attr(bio, utf8 | max<100>))
 };
-static_assert(psio::max_encoded_size<AccountGrown>() == 220 + (4 + 1 + 64));
+// (header + 3 slots) x 2 bytes + id 8 + owner 32 + tags 136 + balance 8 + bio (selector 1 + 100)
+static_assert(psio::max_encoded_size<AccountGrown>() == 2 * 4 + 8 + 32 + 136 + 8 + (1 + 100));
 static_assert(psio::auto_pssz_width_v<AccountGrown> == 2);
 static_assert(!psio::pssz_evolves_from<Account, AccountGrown>);
 
@@ -382,8 +389,8 @@ PSIO_INTERFACE(Bank, types())
 
 using OpenArgs     = psio::reflect<Bank>::method_arg_tuple<0>;
 using TransferArgs = psio::reflect<Bank>::method_arg_tuple<1>;
-// open has no cap: header 4 + owner (4 + 32) + tags (4 + 8 x (16 + 4)) = 204, 8-bit.
-static_assert(psio::max_encoded_size<OpenArgs>() == 4 + (4 + 32) + (4 + 8 * (16 + 4)));
+// open has no cap: (header + 2 slots) x 1 byte + owner 32 + tags 136 = 171, 8-bit.
+static_assert(psio::max_encoded_size<OpenArgs>() == 3 + 32 + (8 + 8 * 16));
 static_assert(psio::auto_pssz_width_v<OpenArgs> == 1);
 // transfer is capped: 16-bit for its lifetime.
 static_assert(psio::max_dynamic_data_v<TransferArgs> == 1024);
@@ -448,8 +455,8 @@ struct Limits
                 attr(ids, max<4>))                                         // <= 4 elements
 };
 // max<N> and exact<N> give the inferred bound its N; min<N> alone bounds nothing.
-// header 4 + digest (4 + 32) + code (4 + 8) + ids (4 + 4 x 4)
-static_assert(psio::max_encoded_size<Limits>() == 4 + (4 + 32) + (4 + 8) + (4 + 4 * 4));
+// (header + 3 slots) x 1 byte + digest 32 + code 8 + ids 4 x 4
+static_assert(psio::max_encoded_size<Limits>() == 4 + 32 + 8 + 4 * 4);
 static_assert(psio::auto_pssz_width_v<Limits> == 1);
 
 struct AtLeast
@@ -476,6 +483,12 @@ struct NamesW
    PSIO_REFLECT(NamesW, raw, text, label)
 };
 
+struct NamesSpelled   // psio::utf8_spec{} is psio::utf8
+{
+   std::string text;
+   PSIO_REFLECT(NamesSpelled, attr(text, psio::utf8_spec{}))
+};
+
 // ── ref-bytes: byte sequences ──────────────────────────────────────────────
 struct Blob
 {
@@ -484,7 +497,7 @@ struct Blob
    std::array<std::uint8_t, 4> tag{};     // fixed, 4 bytes, no offset
    PSIO_REFLECT(Blob, attr(data, max<64>), tag)
 };
-static_assert(psio::max_encoded_size<Blob>() == 4 + (4 + 64) + 4);
+static_assert(psio::max_encoded_size<Blob>() == 2 + 64 + 4);   // header + slot, data, tag
 
 // ── ref-sorted: declared, not enforced ─────────────────────────────────────
 struct Ranked
@@ -517,8 +530,8 @@ struct Grid   // a list of lists
    std::vector<std::vector<std::uint16_t>> rows;
    PSIO_REFLECT(Grid, attr(rows, max<3> | element(max<4>)))
 };
-// header 4 + slot 4 + 3 x (4 x 2 + slot 4)
-static_assert(psio::max_encoded_size<Grid>() == 4 + 4 + 3 * (4 * 2 + 4));
+// header 1 + slot 1 + rows: 3 slots of 1 byte + 3 x (4 x 2)
+static_assert(psio::max_encoded_size<Grid>() == 1 + 1 + (3 + 3 * (4 * 2)));
 static_assert(psio::auto_pssz_width_v<Grid> == 1);
 
 struct Choice   // a variant alternative
@@ -527,8 +540,8 @@ struct Choice   // a variant alternative
    std::variant<std::uint32_t, std::string> v;
    PSIO_REFLECT(Choice, attr(v, at<1>(utf8 | max<16>)))
 };
-// header 4 + slot 4 + selector 1 + the widest alternative 16
-static_assert(psio::max_encoded_size<Choice>() == 4 + 4 + 1 + 16);
+// header 1 + slot 1 + selector 1 + the widest alternative 16
+static_assert(psio::max_encoded_size<Choice>() == 1 + 1 + 1 + 16);
 
 // ── ref-integers: integers in JSON ─────────────────────────────────────────
 struct Amounts
@@ -541,7 +554,7 @@ struct Amounts
    bool          frozen = false;
    PSIO_REFLECT(Amounts, count, small, large, signed_, frozen)
 };
-static_assert(psio::max_encoded_size<Amounts>() == 4 + 4 + 8 + 8 + 8 + 1);
+static_assert(psio::max_encoded_size<Amounts>() == 1 + 4 + 8 + 8 + 8 + 1);   // a 1-byte header
 
 struct AmountsNumbers   // every integer member a number in I-JSON
 {
@@ -573,8 +586,8 @@ struct Slots
    std::array<std::string, 3>   names;      // variable elements: its own offset table
    PSIO_REFLECT(Slots, counts, attr(names, element(utf8 | max<16>)))
 };
-// header 4 + 16 + names (slot 4 + 3 x (16 + slot 4))
-static_assert(psio::max_encoded_size<Slots>() == 4 + 16 + (4 + 3 * (16 + 4)));
+// header 1 + counts 16 + slot 1 + names (3 slots of 1 byte + 3 x 16)
+static_assert(psio::max_encoded_size<Slots>() == 1 + 16 + 1 + (3 + 3 * 16));
 static_assert(psio::auto_pssz_width_v<Slots> == 1);
 
 // ── ref-optional: optionals ────────────────────────────────────────────────
@@ -586,8 +599,8 @@ struct Profile
    std::optional<std::uint32_t> age;
    PSIO_REFLECT(Profile, id, attr(bio, utf8 | max<100>), age)
 };
-// header 4 + id 8 + bio (slot 4 + selector 1 + 100) + age (slot 4 + selector 1 + 4)
-static_assert(psio::max_encoded_size<Profile>() == 4 + 8 + (4 + 1 + 100) + (4 + 1 + 4));
+// header 1 + id 8 + bio (slot 1 + selector 1 + 100) + age (slot 1 + selector 1 + 4)
+static_assert(psio::max_encoded_size<Profile>() == 1 + 8 + (1 + 1 + 100) + (1 + 1 + 4));
 
 // ── ref-maps: maps and sets ────────────────────────────────────────────────
 struct Book
@@ -597,8 +610,9 @@ struct Book
    std::set<std::uint32_t>              members;
    PSIO_REFLECT(Book, attr(balances, max<4> | keys(utf8 | max<8>)), attr(members, max<4>))
 };
-// balances: an entry is header 4 + key (4 + 8) + 8 = 24; 4 x (24 + slot 4)
-static_assert(psio::max_encoded_size<Book>() == 4 + (4 + 4 * (24 + 4)) + (4 + 4 * 4));
+// balances: an entry is header 1 + key (slot 1 + 8) + 8 = 18; the map is 4 slots + 4 x 18 = 76
+// record:   (header + 2 slots) x 1 byte + balances 76 + members 4 x 4
+static_assert(psio::max_encoded_size<Book>() == 3 + (4 + 4 * 18) + 4 * 4);
 static_assert(psio::auto_pssz_width_v<Book> == 1);
 
 // ── ref-nested: nested values ──────────────────────────────────────────────
@@ -614,8 +628,8 @@ struct Action
    psio::nested<Memo> args;          // on the wire: a byte list holding a Memo
    PSIO_REFLECT(Action, sender, attr(args, max<64>))
 };
-// header 4 + sender 8 + args (slot 4 + 64)
-static_assert(psio::max_encoded_size<Action>() == 4 + 8 + (4 + 64));
+// header 1 + sender 8 + args (slot 1 + 64)
+static_assert(psio::max_encoded_size<Action>() == 1 + 8 + (1 + 64));
 static_assert(psio::auto_pssz_width_v<Action> == 1);
 
 // ── ref-records: record-level keywords ─────────────────────────────────────
@@ -634,14 +648,15 @@ struct PointOpen   // extensible: a header, may gain optional fields
 };
 static_assert(psio::is_dwnc_v<Point> && !psio::is_dwnc_v<PointOpen>);
 static_assert(psio::max_encoded_size<Point>() == 8);
-static_assert(psio::max_encoded_size<PointOpen>() == 4 + 8);
+static_assert(psio::max_encoded_size<PointOpen>() == 1 + 8);
 
 struct Line   // a child's cap is what the parent reserves for it
 {
    tut::AccountV1 a;   // maxDynamicData(1024)
    PSIO_REFLECT(Line, a)
 };
-static_assert(psio::max_encoded_size<Line>() == 4 + (4 + 1024));
+// (header + slot) x 2 bytes + the child's cap
+static_assert(psio::max_encoded_size<Line>() == 2 * 2 + 1024);
 static_assert(psio::auto_pssz_width_v<Line> == 2);
 
 struct Capped
@@ -657,6 +672,122 @@ struct CappedHolder
    Capped inner;
    PSIO_REFLECT(CappedHolder, inner)
 };
+
+// ── ref-thresholds: where the width changes ────────────────────────────────
+struct Raw253   // header 1 + slot 1 + 253 = 255: the last 1-byte record of this shape
+{
+   std::string s;
+   PSIO_REFLECT(Raw253, attr(s, max<253>))
+};
+struct Raw254   // 1 + 1 + 254 = 256 does not fit: header and slot are 2 bytes
+{
+   std::string s;
+   PSIO_REFLECT(Raw254, attr(s, max<254>))
+};
+static_assert(psio::max_encoded_size<Raw253>() == 255 && psio::auto_pssz_width_v<Raw253> == 1);
+static_assert(psio::max_encoded_size<Raw254>() == 258 && psio::auto_pssz_width_v<Raw254> == 2);
+struct Raw65531   // 2 x 2 + 65531 = 65535: the last 2-byte record of this shape
+{
+   std::string s;
+   PSIO_REFLECT(Raw65531, attr(s, max<65531>))
+};
+struct Raw65532   // header and slot are 4 bytes
+{
+   std::string s;
+   PSIO_REFLECT(Raw65532, attr(s, max<65532>))
+};
+static_assert(psio::max_encoded_size<Raw65531>() == 65535 && psio::auto_pssz_width_v<Raw65531> == 2);
+static_assert(psio::max_encoded_size<Raw65532>() == 65540 && psio::auto_pssz_width_v<Raw65532> == 4);
+// A list measures itself the same way: one slot per element, then the elements.
+using Tags15x16 = psio::bounded<psio::utf8_string<16>, 15>;   // 15 + 15 x 16 = 255
+using Tags15x17 = psio::bounded<psio::utf8_string<17>, 15>;   // 15 + 255 > 255: 2 x 15 + 255
+static_assert(psio::max_encoded_size<Tags15x16>() == 255 && psio::auto_pssz_width_v<Tags15x16> == 1);
+static_assert(psio::max_encoded_size<Tags15x17>() == 285 && psio::auto_pssz_width_v<Tags15x17> == 2);
+
+// ── ref-cap-transfer: what fits under the largest 1-byte cap ───────────────
+struct Transfer
+{
+   friend bool operator==(const Transfer&, const Transfer&) = default;
+   std::uint32_t                            token  = 0;
+   std::uint64_t                            from   = 0;
+   std::uint64_t                            amount = 0;
+   std::string                              memo;
+   std::optional<std::vector<std::uint8_t>> data;    // unbounded: the cap is its only limit
+   PSIO_REFLECT(Transfer, token, from, amount, attr(memo, utf8 | max<80>), data,
+                maxDynamicData(255))
+};
+static_assert(psio::auto_pssz_width_v<Transfer> == 1);   // 255: the largest cap with 1-byte offsets
+
+// ── ref-cap-positions: a cap narrows the containers beneath it ─────────────
+struct Batch   // plain member types; the cap is the only bound
+{
+   friend bool operator==(const Batch&, const Batch&) = default;
+   std::uint32_t                      id = 0;
+   std::vector<std::string>           tags;     // under the cap: a 1-byte offset table
+   std::map<std::string, std::string> labels;   // 1-byte table, 1-byte entry header and slots
+   PSIO_REFLECT(Batch, id, tags, labels, maxDynamicData(255))
+};
+struct BatchOpen   // the same members with no cap: everything is 4 bytes wide
+{
+   std::uint32_t                      id = 0;
+   std::vector<std::string>           tags;
+   std::map<std::string, std::string> labels;
+   PSIO_REFLECT(BatchOpen, id, tags, labels)
+};
+static_assert(psio::auto_pssz_width_v<Batch> == 1);
+static_assert(psio::auto_pssz_width_v<BatchOpen> == 4);
+
+// ── ref-cap-child: a record beneath a cap keeps its own width ──────────────
+struct Item   // unbounded: 4-byte offsets, wherever it appears
+{
+   friend bool operator==(const Item&, const Item&) = default;
+   std::uint32_t id = 0;
+   std::string   name;
+   PSIO_REFLECT(Item, id, name)
+};
+struct Order
+{
+   std::uint32_t     id = 0;
+   std::vector<Item> items;   // the list's table is 1 byte; each Item still has 4-byte offsets
+   PSIO_REFLECT(Order, id, items, maxDynamicData(255))
+};
+static_assert(psio::auto_pssz_width_v<Item> == 4);
+static_assert(psio::pssz_child_wider_than_cap_v<Order>);   // Item cannot use its width here
+
+struct SmallItem   // bounded: header 1 + id 4 + slot 1 + 32 = 38, 1-byte offsets
+{
+   friend bool operator==(const SmallItem&, const SmallItem&) = default;
+   std::uint32_t id = 0;
+   std::string   name;
+   PSIO_REFLECT(SmallItem, id, attr(name, utf8 | max<32>))
+};
+struct SmallOrder
+{
+   std::uint32_t          id = 0;
+   std::vector<SmallItem> items;
+   PSIO_REFLECT(SmallOrder, id, items, maxDynamicData(255))
+};
+static_assert(psio::auto_pssz_width_v<SmallItem> == 1);
+static_assert(!psio::pssz_child_wider_than_cap_v<SmallOrder>);
+
+// ── ref-bits: bit types are bounded ────────────────────────────────────────
+struct Flags
+{
+   std::uint8_t        kind = 0;
+   psio::bitvector<12> mask;   // fixed: 2 bytes inline, no slot
+   psio::bitlist<12>   seen;   // variable: at most 12 bits and the delimiter bit
+   PSIO_REFLECT(Flags, kind, mask, seen)
+};
+// header 1 + kind 1 + mask 2 + seen (slot 1 + 2 + 1)
+static_assert(psio::max_encoded_size<Flags>() == 1 + 1 + 2 + (1 + 2 + 1));
+static_assert(psio::auto_pssz_width_v<Flags> == 1);
+
+// ── ref-tuple: a tuple is the extensible record of its elements ────────────
+using Entry = std::tuple<std::uint32_t, psio::utf8_string<16>>;
+// header 1 + u32 4 + slot 1 + 16
+static_assert(psio::max_encoded_size<Entry>() == 1 + 4 + 1 + 16);
+static_assert(psio::auto_pssz_width_v<Entry> == 1);
+static_assert(psio::max_tuple_elements == 255);   // a larger tuple does not compile
 
 // ── ref-transparent: transparent wrappers ──────────────────────────────────
 struct PublicKey
@@ -765,13 +896,12 @@ TEST_CASE("tutorial 2: a bounded record round-trips and refuses bound + 1", "[do
    CHECK_THROWS_AS(psio::to_pssz(not_text), psio::codec_exception);
    // ── /tut-2-run ──
 
-   // The frame: 1-byte header and slots; the list's own table is 4 bytes wide.
-   // [W1] (docs/annotations.md, "Pending wire change"): 08 00 00 00 and
-   // 0b 00 00 00 are the list's table.
+   // The frame: 1-byte header and slots, and a 1-byte table in the list
+   // (02 and 05, the offsets of "vip" and "beta" from the start of the list).
    CHECK(hex(bytes) ==
          "12 07 00 00 00 00 00 00 00 12 17 64 00 00 00 00 00 00 00 "
-         "61 6c 69 63 65 08 00 00 00 0b 00 00 00 76 69 70 62 65 74 61");
-   CHECK(bytes.size() == 39);
+         "61 6c 69 63 65 02 05 76 69 70 62 65 74 61");
+   CHECK(bytes.size() == 33);
    // The same value as the plain type: 4-byte header and slots.
    CHECK(psio::to_pssz(AccountPlain{7, "alice", {"vip", "beta"}, 100}).size() == 48);
 
@@ -803,7 +933,8 @@ TEST_CASE("tutorial 3: the cap is enforced on the encoded size", "[doc][tut-3]")
 {
    // ── tut-3-run ──
    const AccountV1 alice{7, "alice", {"vip", "beta"}, 100};
-   // 2-byte header and slots now: 3 bytes more than the 8-bit Account.
+   // 2-byte header and slots now: 3 bytes more than the 8-bit Account. The
+   // list keeps its 1-byte table: its own bound (136) is tighter than the cap.
    CHECK(psio::to_pssz(alice).size() == psio::to_pssz(Account{7, "alice", {"vip", "beta"}, 100}).size() + 3);
    CHECK(psio::from_pssz<AccountV1>(psio::to_pssz(alice)) == alice);
    // ── /tut-3-run ──
@@ -874,6 +1005,11 @@ TEST_CASE("tutorial 5: raw bytes and UTF-8 text", "[doc][tut-5]")
    // ── /tut-5-run ──
    const auto frame = unchecked(Note{"", "\xff"});
    CHECK_FALSE(psio::validate_pssz<Note>(frame).ok());
+   // The exact-schema check is stricter than the type: it refuses a raw string
+   // that is not UTF-8, which validate_pssz accepts.
+   CHECK(psio::validate_pssz<Note>(psio::to_pssz(binary)).ok());
+   CHECK_FALSE(
+      psio::validate_strict<Note>(psio::pssz{}, std::span<const char>(psio::to_pssz(binary))).ok());
 }
 
 TEST_CASE("tutorial 6: JSON presentation", "[doc][tut-6]")
@@ -1115,6 +1251,11 @@ TEST_CASE("reference: utf8 annotation and wrapper", "[doc][ref-utf8]")
    CHECK_FALSE(encodes(Names{"", "\xff", ""}));
    CHECK_FALSE(encodes(Names{"", "", "\xff"}));
    CHECK_FALSE(encodes(Names{"", "", std::string(17, 'x')}));
+   // utf8_spec{} spelled out is the same statement: enforced everywhere.
+   CHECK(encodes(NamesSpelled{"caf\xc3\xa9"}));
+   CHECK_FALSE(encodes(NamesSpelled{"\xff"}));
+   CHECK_FALSE(psio::validate_pssz<NamesSpelled>(unchecked(NamesSpelled{"\xff"})).ok());
+   CHECK(contains(schema_text<NamesSpelled>("N"), R"("id":"utf8")"));
    // The schema says which is which.
    const std::string text = schema_text<Names>("Names");
    CHECK(contains(text, R"({"name":"text","type":{"value":{"Custom":{"type":{"value":{"List":)"));
@@ -1378,6 +1519,105 @@ TEST_CASE("reference: the Schema IR of an annotated record", "[doc][ref-schema]"
    AccountV2 over = a;
    over.owner     = std::string(33, 'x');
    CHECK_FALSE(psio::pssz_ir::validate_pssz(schema, "AccountV2", unchecked(over)).ok());
+}
+
+TEST_CASE("reference: what fits under a cap of 255", "[doc][ref-cap-transfer]")
+{
+   using namespace ref;
+   // ── ref-cap-transfer-run ──
+   // Framing: header 1 + token 4 + from 8 + amount 8 + 2 slots = 23 bytes.
+   // The other 232 bytes are shared by memo and data; a present data spends
+   // one of them on its selector byte.
+   const std::string memo(80, 'm');
+   const Transfer    full{1, 2, 3, memo, std::vector<std::uint8_t>(151, 0)};
+   CHECK(psio::to_pssz(full).size() == 23 + 80 + 1 + 151);               // 255: exactly the cap
+   CHECK(psio::from_pssz<Transfer>(psio::to_pssz(full)) == full);
+   // One byte more has no encoding ...
+   CHECK_THROWS_AS(psio::to_pssz(Transfer{1, 2, 3, memo, std::vector<std::uint8_t>(152, 0)}),
+                   psio::codec_exception);
+   // ... and a short memo leaves its bytes to data.
+   CHECK(psio::to_pssz(Transfer{1, 2, 3, "", std::vector<std::uint8_t>(231, 0)}).size() == 255);
+   // An absent trailing data is pruned with its slot: 22 bytes of framing.
+   CHECK(psio::to_pssz(Transfer{1, 2, 3, "rent", std::nullopt}).size() == 22 + 4);
+   // ── /ref-cap-transfer-run ──
+   try
+   {
+      (void)psio::to_pssz(Transfer{1, 2, 3, memo, std::vector<std::uint8_t>(152, 0)});
+   }
+   catch (const psio::codec_exception& e)
+   {
+      CHECK(std::string_view{e.what()} == "pssz: encoded size exceeds maxDynamicData cap");
+   }
+   auto frame = psio::to_pssz(full);
+   frame.push_back(0);
+   CHECK_FALSE(psio::validate_pssz<Transfer>(frame).ok());
+}
+
+TEST_CASE("reference: a cap narrows the containers beneath it", "[doc][ref-cap-positions]")
+{
+   using namespace ref;
+   // ── ref-cap-positions-run ──
+   const Batch     capped{1, {"a", "bc"}, {{"k", "v"}}};
+   const BatchOpen open{1, {"a", "bc"}, {{"k", "v"}}};
+   // tags is the table 02 03, then "a" "bc"; labels is the table 01, then one
+   // entry: header 02, slots 02 03, "k" "v". Every one of them is 1 byte wide.
+   CHECK(hex(psio::to_pssz(capped)) ==
+         "06 01 00 00 00 06 0b 02 03 61 62 63 01 02 02 03 6b 76");
+   CHECK(psio::to_pssz(capped).size() == 18);
+   // Without the cap the same value has 4-byte headers, slots and tables.
+   CHECK(psio::to_pssz(open).size() == 45);
+   CHECK(psio::from_pssz<Batch>(psio::to_pssz(capped)) == capped);
+   // A view follows the same widths.
+   const auto                   bytes = psio::to_pssz(capped);
+   const psio::pssz_view<Batch> view{bytes};
+   CHECK(view.get<1>()[1].view_() == "bc");
+   // ── /ref-cap-positions-run ──
+
+   // ── ref-cap-child-run ──
+   // The list's table is 1 byte wide under the cap; each Item is the same
+   // bytes it is everywhere else, with its own 4-byte header and slot.
+   const Item item{7, "x"};
+   CHECK(psio::to_pssz(item).size() == 4 + 4 + 4 + 1);
+   CHECK(psio::to_pssz(Order{1, {item}}).size() == (1 + 4 + 1) + 1 + 13);
+   // The bounded child is 1 + 4 + 1 + 1 = 7 bytes.
+   CHECK(psio::to_pssz(SmallOrder{1, {SmallItem{7, "x"}}}).size() == (1 + 4 + 1) + 1 + 7);
+   // ── /ref-cap-child-run ──
+}
+
+TEST_CASE("reference: views read members under annotations", "[doc][ref-view-annotated]")
+{
+   using namespace ref;
+   // ── ref-view-annotated-run ──
+   // names: std::array<std::string, 3> under element(utf8 | max<16>) has a
+   // 1-byte table; the view reads it at that width.
+   const Slots s{{1, 2, 3, 4}, {"a", "", "last"}};
+   const auto  slot_bytes = psio::to_pssz(s);
+   const psio::pssz_view<Slots> slots{slot_bytes};
+   CHECK(slots.get<1>()[2].view_() == "last");
+
+   // votes: a map under max<32> | keys(utf8 | max<16>); author: a pair under at<0>(...).
+   const Post p{"hello", {"a", "b"}, {{"alice", 3}}, std::nullopt, {"bob", 9}};
+   const auto post_bytes = psio::to_pssz(p);
+   const psio::pssz_view<Post> post{post_bytes};
+   CHECK(post.get<1>()[1].view_() == "b");
+   CHECK(post.get<2>()[0].get<0>().view_() == "alice");
+   CHECK(post.get<2>()[0].get<1>() == 3u);
+   CHECK(post.get<4>().get<0>().view_() == "bob");
+   // ── /ref-view-annotated-run ──
+
+   // A variant whose at<I>(...) narrows no width is viewable.
+   const auto choice_bytes = psio::to_pssz(Choice{std::string("s")});
+   CHECK(psio::pssz_view<Choice>{choice_bytes}.get<0>().index() == 1);
+}
+
+TEST_CASE("reference: bit types", "[doc][ref-bits]")
+{
+   using namespace ref;
+   Flags f;
+   f.kind = 1;
+   const auto bytes = psio::to_pssz(f);
+   CHECK(psio::validate_pssz<Flags>(bytes).ok());
+   CHECK(bytes.size() <= *psio::max_encoded_size<Flags>());
 }
 
 TEST_CASE("reference: mutable views write fixed-size values only", "[doc][ref-mutable-view]")

@@ -102,7 +102,12 @@ A value outside the bounds its type declares — a member `max<N>`, the bounds
 of its elements, keys and values (`element` / `keys` / `values` / `at<I>`), a
 `psio::bounded` or `psio::utf8_string`, a `maxDynamicData` cap — has no
 encoding: `to_F` throws, and `from_F` / `validate_F` refuse bytes that hold
-one. See [bounds by annotation](psio-overview.md#bounds-by-annotation).
+one. That is the behaviour of `pssz`, `json` and `ijson`. `to_key` is an
+exception: the C++ key encoder does not check member bounds or `utf8`;
+`from_key` and `validate_key` do. Which format reads which annotation:
+[annotations.md §1](annotations.md#1-one-declaration-every-format) and
+[§7.2](annotations.md#72-what-is-checked-where); see also
+[bounds by annotation](psio-overview.md#bounds-by-annotation).
 
 ## Checked and trusted decode
 
