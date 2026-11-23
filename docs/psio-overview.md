@@ -309,7 +309,7 @@ namespace chain::state {
       PSIO_REFLECT(account,
                    attr(id, json_string),          // field: JSON integer form
                    attr(owner, max<32>),           // field: length bound
-                   attr(tags, max<4> | sorted),    // field: several specs
+                   attr(tags, max<4> | sorted),    // field: several specs, all enforced
                    method(balance_of, asset),
                    definitionWillNotChange(),      // type: fixed layout
                    maxFields(8),                   // type: field-count cap

@@ -774,7 +774,7 @@ namespace psio {
             // A member outside its declared annotations (its length_bound
             // / utf8, and those of its elements, keys, values and tuple
             // elements at any depth) has no text: the reader would reject it.
-            if constexpr (::psio::detail::ann::has_tree_specs_v<eff>)
+            if constexpr (::psio::detail::ann::has_value_checks_v<F, eff>)
                if (auto st = ::psio::check_member_annotations(
                       fref, eff_for::value, "json: member length_bound violated", "json");
                    !st.ok())
@@ -1496,10 +1496,11 @@ namespace psio {
          else
          {
             constexpr int_mode mode = field_mode<Fmt, eff>(eff_for::value);
-            if constexpr (::psio::detail::ann::has_tree_specs_v<eff>)
+            if constexpr (::psio::detail::ann::has_value_checks_v<F, eff>)
             {
                // The member's annotations are part of its type: its
-               // length_bound / utf8 and those of every position below it.
+               // length_bound / utf8 / sorted / unique and those of every
+               // position below it.
                // They are checked on the value read, so the member is
                // materialized even when only validating.
                F  scratch{};

@@ -596,6 +596,27 @@ An `Optional` is looked through: what is written for an optional member
 or position applies to its payload. The position specs nest to any
 depth, and below the member itself a length bound is `max N`.
 
+**Order constraints.** Two more annotations constrain the *content* of a
+list or array, at the member or at a position below it, without changing
+any byte, width or bound:
+
+| annotation | the elements are |
+|---|---|
+| `sorted` | in non-descending order |
+| `unique` (`sorted_unique`) | in strictly ascending order |
+| `sorted` descending | the same, descending |
+| `unique_keys` | pairwise different by key: the element, or element 0 of a pair / tuple element. No order is required |
+
+Order and equality are those of maps and sets (§5.9.1): bytewise
+comparison of the elements' `key` encodings, the same in every language.
+A writer refuses a value that violates one and every checking reader
+rejects a frame that holds one, in PSSZ, JSON and key alike; a map or set
+carries its order by type (§5.9) and needs no annotation. **These two are
+not in the Schema IR yet**: a typed C++ reader enforces them, a
+schema-driven reader of the same schema does not know them. (C++:
+`psio::sorted`, `psio::unique`, `psio::unique_keys`; the other
+implementations have no such annotation.)
+
 An annotated member is exactly the type the annotations describe:
 `Vector(String)` annotated `max 8, element(utf8, max 16)` **is**
 `BoundedList(BoundedString(16), 8)`. It has that type's

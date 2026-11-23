@@ -348,6 +348,12 @@ namespace psio {
       constexpr bool operator==(const hex_spec&) const = default;
    };
 
+   // The elements of a list or array are in order (annotation_tree.hpp
+   // "Order specs"): non-descending, or strictly ascending with `unique`;
+   // descending with `ascending = false`. The order is that of the elements'
+   // `key` encodings, as for maps and sets. Enforced by the pssz, json and
+   // key writers and by every checking reader, at the member and at any
+   // position below it; a mutable view does not address such a member.
    struct sorted_spec
    {
       using spec_category = runtime_spec_tag;
@@ -424,6 +430,9 @@ namespace psio {
       constexpr bool operator==(const at_spec&) const = default;
    };
 
+   // RESERVED — not implemented: no codec reads default_value_spec or
+   // default_factory_spec. A member that may be absent is a std::optional
+   // (a missing optional member is None); there is no other default.
    template <typename T>
    struct default_value_spec
    {
@@ -443,6 +452,8 @@ namespace psio {
       constexpr bool operator==(const default_factory_spec&) const = default;
    };
 
+   // A protobuf field number: read by psio::protobuf (protobuf.hpp) and by
+   // nothing else. RESERVED for every other format.
    struct field_num_spec
    {
       using spec_category = static_spec_tag;
@@ -451,6 +462,8 @@ namespace psio {
       constexpr bool operator==(const field_num_spec&) const = default;
    };
 
+   // RESERVED — not implemented: no codec skips a member. Every reflected
+   // member is encoded.
    struct skip_spec
    {
       using spec_category = static_spec_tag;
@@ -514,20 +527,19 @@ namespace psio {
       constexpr bool operator==(const max_dynamic_data_spec&) const = default;
    };
 
-   // ── WIT attribute specs ────────────────────────────────────────────
+   // ── Reserved specs ─────────────────────────────────────────────────
    //
-   // These specs map onto the WIT @-attribute vocabulary at schema
-   // emission time.  v1 maintained a parallel `type_attrs_of<T>()` /
-   // `member_attrs_of<MP>()` ADL registry; v3 unifies them into the
-   // single annotation channel by registering the same information
-   // as specs.  The WIT generator (wit_gen.hpp) reads them from
-   // `effective_annotations_for<T, F, &T::F>` and emits `@final`,
-   // `@sorted`, etc.
+   // RESERVED — not implemented. The specs of this block name WIT-style
+   // attributes. Nothing reads them: no codec, no validator, and no schema
+   // emitter (the Schema IR, WIT, capnp, protobuf and flatbuffers outputs do
+   // not carry them). Attaching one to a type or member changes nothing; the
+   // names are kept so that a later implementation does not collide with
+   // user code. The exceptions are stated at the spec: unique_keys_spec
+   // (enforced) and deprecated_spec (read by psio::graphql only).
 
-   // @final — the record is closed; receivers reject trailing unknown
-   // fields.  Distinct from definition_will_not_change (which is a
-   // wire-format optimisation choosing Struct over Object); @final
-   // is a semantic contract about future schema evolution.
+   // RESERVED — not implemented. (A record that will never change says
+   // definitionWillNotChange(); a reader that must refuse unknown fields
+   // uses validate_strict.)
    struct final_spec
    {
       using spec_category = static_spec_tag;
@@ -535,27 +547,26 @@ namespace psio {
       constexpr bool operator==(const final_spec&) const = default;
    };
 
-   // @canonical — there is exactly one admissible wire form for this
-   // type.  Decoders may reject any other byte sequence that round-
-   // trips to the same value.
+   // RESERVED — not implemented. (Every pssz / key value already has
+   // exactly one encoding.)
    struct canonical_spec
    {
       using spec_category = static_spec_tag;
       constexpr bool operator==(const canonical_spec&) const = default;
    };
 
-   // @unique-keys — the keys (or elements, for sets) are unique.
-   // sorted_spec.unique covers the same logical claim but only on
-   // sequence types; this version applies to map-shaped types and
-   // any future associative containers.
+   // No two elements of a list or array have the same key: the element
+   // itself, or element 0 of a pair / tuple element (annotation_tree.hpp
+   // "Order specs"). Enforced by the pssz, json and key writers and by every
+   // checking reader. A std::map / std::set carries it inherently, as a
+   // statement of what the type is.
    struct unique_keys_spec
    {
       using spec_category = static_spec_tag;
       constexpr bool operator==(const unique_keys_spec&) const = default;
    };
 
-   // @flags — emit this enum-shaped type as WIT `flags` (bitset)
-   // rather than `enum` (single-discriminant choice).
+   // RESERVED — not implemented.
    struct flags_spec
    {
       using spec_category = static_spec_tag;
@@ -563,19 +574,15 @@ namespace psio {
       constexpr bool operator==(const flags_spec&) const = default;
    };
 
-   // @padding — this member is reserved/padding and should not be
-   // exposed in schema output (parsers preserve the slot for binary
-   // compatibility but generators skip it from the API surface).
+   // RESERVED — not implemented: a member annotated padding is encoded and
+   // listed in every schema like any other.
    struct padding_spec
    {
       using spec_category = static_spec_tag;
       constexpr bool operator==(const padding_spec&) const = default;
    };
 
-   // @since(version="X.Y.Z") — earliest version this item appears in.
-   // Stored as a runtime string to keep the annotation expression
-   // ergonomic; constexpr-string templating would require a custom
-   // FixedString and complicate user-side instantiation.
+   // RESERVED — not implemented.
    struct since_spec
    {
       using spec_category = runtime_spec_tag;
@@ -583,7 +590,7 @@ namespace psio {
       constexpr bool operator==(const since_spec&) const = default;
    };
 
-   // @unstable(feature="name") — guarded by a feature flag.
+   // RESERVED — not implemented.
    struct unstable_spec
    {
       using spec_category = runtime_spec_tag;
@@ -591,7 +598,9 @@ namespace psio {
       constexpr bool operator==(const unstable_spec&) const = default;
    };
 
-   // @deprecated(version="X.Y.Z") — version this item is deprecated as of.
+   // Read by psio::graphql only (a deprecated field of the GraphQL schema,
+   // `version` as the reason). RESERVED for every other format and schema
+   // output.
    struct deprecated_spec
    {
       using spec_category = runtime_spec_tag;
@@ -1324,23 +1333,23 @@ namespace psio {
    // statement.)
    inline constexpr utf8_spec utf8{};
 
+   // The elements of a list or array are in non-descending order
+   // (`sorted`) or strictly ascending (`unique`, `sorted_unique`): enforced
+   // by every writer and checking reader (sorted_spec).
    inline constexpr sorted_spec sorted{};
    inline constexpr sorted_spec unique{.unique = true};
    inline constexpr sorted_spec sorted_unique{.unique = true};
 
    inline constexpr definition_will_not_change dwnc{};
 
-   // WIT attribute helpers — used inside attr(field, ...) expressions.
+   inline constexpr unique_keys_spec  unique_keys{};
+   // RESERVED — not implemented (see the specs): nothing reads these.
    inline constexpr final_spec        final_v{};        // `final` is a C++ keyword
    inline constexpr canonical_spec    canonical{};
-   inline constexpr unique_keys_spec  unique_keys{};
    inline constexpr flags_spec        flags{};
    inline constexpr padding_spec      padding{};
-
-   // `since`, `unstable`, `deprecated` carry string args, so they're
-   // constructed at the call site rather than pre-instantiated:
-   //   attr(field, since_spec{.version = "0.2.0"})
-   // (No bare `since`/etc. helpers because they need an argument.)
+   // (since_spec / unstable_spec / deprecated_spec take a string and are
+   // written out: attr(field, deprecated_spec{.version = "0.2.0"}).)
 
 }  // namespace psio
 

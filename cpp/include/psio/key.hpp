@@ -567,8 +567,9 @@ namespace psio {
          {
             using R = ::psio::reflect<U>;
             return []<std::size_t... Is>(std::index_sequence<Is...>) {
-               return ((::psio::detail::ann::has_value_checks_v<std::remove_cvref_t<
-                           typename ::psio::effective_annotations_for<
+               return ((::psio::detail::ann::has_value_checks_v<
+                           std::remove_cvref_t<typename R::template member_type<Is>>,
+                           std::remove_cvref_t<typename ::psio::effective_annotations_for<
                               U, typename R::template member_type<Is>,
                               R::template member_pointer<Is>>::value_t>> ||
                         has_writer_checks<typename R::template member_type<Is>, Invariants,
@@ -673,7 +674,7 @@ namespace psio {
                       using eff        = std::remove_cvref_t<decltype(Ann::value)>;
                       const auto& member = v.*(R::template member_pointer<Is>);
                       status = check_encode<Invariants>(member);
-                      if constexpr (::psio::detail::ann::has_value_checks_v<eff>)
+                      if constexpr (::psio::detail::ann::has_value_checks_v<F, eff>)
                          if (status.ok())
                             status = ::psio::check_member_annotations(
                                member, Ann::value, "key: member length_bound violated", "key");
@@ -1209,7 +1210,7 @@ namespace psio {
                using F   = typename R::template member_type<I>;
                using Ann = ::psio::effective_annotations_for<T, F, R::template member_pointer<I>>;
                using eff = std::remove_cvref_t<decltype(Ann::value)>;
-               if constexpr (::psio::detail::ann::has_value_checks_v<eff> &&
+               if constexpr (::psio::detail::ann::has_value_checks_v<F, eff> &&
                              !::psio::has_binary_as_override_v<F, eff>)
                {
                   F        scratch{};

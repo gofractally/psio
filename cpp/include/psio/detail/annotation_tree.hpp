@@ -34,8 +34,10 @@
 #include <psio/detail/nested_fwd.hpp>
 #include <psio/error.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <optional>
 #include <span>
 #include <string>
@@ -45,13 +47,29 @@
 #include <variant>
 #include <vector>
 
+namespace psio::detail
+{
+   // detail/assoc_order.hpp: appends the `key` encoding of `value` (the
+   // bytes map entries and set elements are ordered by). A codec that checks
+   // `sorted` / `unique_keys` includes psio/key.hpp, as pssz.hpp and json.hpp
+   // do.
+   template <typename K>
+   void append_key_bytes(const K& value, std::vector<char>& out);
+}  // namespace psio::detail
+
 namespace psio::detail::ann
 {
    // ── Shapes ─────────────────────────────────────────────────────────────
    template <typename T>
-   struct is_optional : std::false_type {};
+   struct is_optional : std::false_type
+   {
+      using payload = T;
+   };
    template <typename U>
-   struct is_optional<std::optional<U>> : std::true_type {};
+   struct is_optional<std::optional<U>> : std::true_type
+   {
+      using payload = U;
+   };
 
    template <typename T>
    struct is_vector : std::false_type {};
@@ -211,10 +229,62 @@ namespace psio::detail::ann
    template <typename... Ts>
    inline constexpr bool has_tree_specs_v<std::tuple<Ts...>> = (is_tree_spec_v<Ts> || ...);
 
-   // Whether a member's annotations ask for a check of its value: what a
-   // codec gates its call of check_member_annotations on.
+   // ── Order specs ────────────────────────────────────────────────────────
+   //
+   // `sorted` (sorted_spec) and `unique_keys` constrain the elements of a
+   // list or array, at the member or at a position below it:
+   //
+   //   sorted          the elements are in non-descending order
+   //   unique /        ... in strictly ascending order (sorted, no two
+   //   sorted_unique   equal)
+   //   sorted_spec{.ascending = false}   the same, descending
+   //   unique_keys     no two elements have the same key: the element
+   //                   itself, or element 0 of a pair / tuple element (a
+   //                   list of entries that is a map by content). No order
+   //                   is required
+   //
+   // "Order" and "equal" are those of maps and sets, the same in every
+   // language: bytewise comparison of the elements' `key` encodings
+   // (docs/key-spec.md, detail/assoc_order.hpp). For integers, strings,
+   // times and tuples of them it is the order of the values.
+   //
+   // A std::map / std::set / unordered container carries both specs
+   // inherently (wrappers.hpp): they say what the type is, and the codecs
+   // enforce them as part of the type (docs/pssz-spec.md 5.9), not here.
+   template <typename S>
+   inline constexpr bool is_order_spec_v =
+      std::is_same_v<S, ::psio::sorted_spec> || std::is_same_v<S, ::psio::unique_keys_spec>;
    template <typename Tuple>
-   inline constexpr bool has_value_checks_v = has_tree_specs_v<Tuple>;
+   inline constexpr bool has_order_specs_v = false;
+   template <typename... Ts>
+   inline constexpr bool has_order_specs_v<std::tuple<Ts...>> = (is_order_spec_v<Ts> || ...);
+
+   // ... at the member or anywhere below it.
+   template <typename S>
+   struct spec_has_order_deep : std::bool_constant<is_order_spec_v<S>> {};
+   template <typename Tuple>
+   inline constexpr bool has_order_specs_deep_v = spec_has_order_deep<Tuple>::value;
+   template <typename... Ts>
+   struct spec_has_order_deep<std::tuple<Ts...>>
+      : std::bool_constant<(spec_has_order_deep<Ts>::value || ...)> {};
+   template <typename C>
+   struct spec_has_order_deep<::psio::element_spec<C>> : spec_has_order_deep<C> {};
+   template <typename C>
+   struct spec_has_order_deep<::psio::keys_spec<C>> : spec_has_order_deep<C> {};
+   template <typename C>
+   struct spec_has_order_deep<::psio::values_spec<C>> : spec_has_order_deep<C> {};
+   template <std::size_t I, typename C>
+   struct spec_has_order_deep<::psio::at_spec<I, C>> : spec_has_order_deep<C> {};
+
+   // Whether a member's annotations ask for a check of its value: what a
+   // codec gates its call of check_member_annotations on. F: the member's
+   // type (a map's or set's own order is not checked here).
+   template <typename F, typename Tuple>
+   inline constexpr bool has_value_checks_v =
+      has_tree_specs_v<Tuple> ||
+      (has_order_specs_v<Tuple> && !::psio::detail::is_assoc_v<F> &&
+       !(is_optional<F>::value &&
+         ::psio::detail::is_assoc_v<typename is_optional<F>::payload>));
 
    // ── Carriers ───────────────────────────────────────────────────────────
    //
@@ -414,6 +484,16 @@ namespace psio::detail::ann
                        "not a string");
          return true;
       }
+      else if constexpr (is_order_spec_v<S>)
+      {
+         static_assert(Top || is_list_v<T> || is_array<T>::value ||
+                          ::psio::detail::is_assoc_v<T>,
+                       "psio: sorted / unique / unique_keys inside element(...), keys(...), "
+                       "values(...) or at<I>(...) constrains the elements of a list "
+                       "(std::vector, psio::bounded) or a std::array; this position is none of "
+                       "those");
+         return true;
+      }
       else if constexpr (is_element_spec<S>::value)
       {
          static_assert(has_elements_v<T>,
@@ -506,12 +586,82 @@ namespace psio::detail::ann
                (lb.min && count < *lb.min));
    }
 
+   // sorted / unique_keys on the elements of `value` (a list or an array).
+   template <typename T, typename... Ss>
+   codec_status check_order(const T& value, const std::tuple<Ss...>& specs,
+                            std::string_view format) noexcept
+   {
+      using Specs = std::tuple<Ss...>;
+      using E     = typename T::value_type;
+      const std::size_t count = value.size();
+      if (count < 2)
+         return codec_ok();
+      struct slice
+      {
+         std::size_t begin, end;
+      };
+      auto compare = [](const std::vector<char>& bytes, const slice& a, const slice& b) noexcept {
+         const std::size_t an = a.end - a.begin, bn = b.end - b.begin;
+         const std::size_t n  = an < bn ? an : bn;
+         if (n)
+            if (const int c = std::memcmp(bytes.data() + a.begin, bytes.data() + b.begin, n))
+               return c;
+         return an < bn ? -1 : an > bn ? 1 : 0;
+      };
+      if constexpr (::psio::has_spec_v<::psio::sorted_spec, Specs>)
+      {
+         const ::psio::sorted_spec order = std::get<::psio::sorted_spec>(specs);
+         std::vector<char>         bytes;
+         slice                     previous{0, 0};
+         std::size_t               index = 0;
+         for (auto&& item : value)
+         {
+            const std::size_t begin = bytes.size();
+            ::psio::detail::append_key_bytes(static_cast<const E&>(item), bytes);
+            const slice current{begin, bytes.size()};
+            if (index++)
+            {
+               int c = compare(bytes, previous, current);
+               if (!order.ascending)
+                  c = -c;
+               if (c > 0 || (c == 0 && order.unique))
+                  return codec_fail(order.unique
+                                       ? "sorted: elements are not in strictly ascending order"
+                                       : "sorted: elements are not in order",
+                                    0, format);
+            }
+            previous = current;
+         }
+      }
+      if constexpr (::psio::has_spec_v<::psio::unique_keys_spec, Specs>)
+      {
+         std::vector<char>  bytes;
+         std::vector<slice> slices;
+         slices.reserve(count);
+         for (auto&& item : value)
+         {
+            const std::size_t begin = bytes.size();
+            if constexpr (is_tuple<E>::value)
+               ::psio::detail::append_key_bytes(std::get<0>(static_cast<const E&>(item)), bytes);
+            else
+               ::psio::detail::append_key_bytes(static_cast<const E&>(item), bytes);
+            slices.push_back(slice{begin, bytes.size()});
+         }
+         std::sort(slices.begin(), slices.end(),
+                   [&](const slice& a, const slice& b) { return compare(bytes, a, b) < 0; });
+         for (std::size_t i = 1; i < slices.size(); ++i)
+            if (compare(bytes, slices[i - 1], slices[i]) == 0)
+               return codec_fail("unique_keys: two elements have the same key", 0, format);
+      }
+      return codec_ok();
+   }
+
    template <typename T, typename... Ss>
    codec_status check_value(const T& value, const std::tuple<Ss...>& specs,
                             const char* length_message, std::string_view format) noexcept
    {
       using Specs = std::tuple<Ss...>;
-      if constexpr (!has_tree_specs_v<Specs>)
+      if constexpr (!has_tree_specs_v<Specs> && !has_order_specs_v<Specs>)
          return codec_ok();
       else if constexpr (is_optional<T>::value)
       {
@@ -530,9 +680,13 @@ namespace psio::detail::ann
                       std::span<const char>(value.data(), value.size()));
                    !st.ok())
                   return st;
+         if constexpr (has_order_specs_v<Specs> && (is_list_v<T> || is_array<T>::value))
+            if (auto st = check_order(value, specs, format); !st.ok())
+               return st;
          if constexpr (has_elements_v<T>)
          {
-            if constexpr (has_tree_specs_v<std::remove_cvref_t<decltype(element_specs(specs))>>)
+            if constexpr (has_tree_specs_v<std::remove_cvref_t<decltype(element_specs(specs))>> ||
+                          has_order_specs_v<std::remove_cvref_t<decltype(element_specs(specs))>>)
             {
                const auto inner = element_specs(specs);
                for (const auto& item : value)
@@ -545,7 +699,9 @@ namespace psio::detail::ann
             const auto key_inner   = key_specs(specs);
             const auto value_inner = value_specs(specs);
             if constexpr (has_tree_specs_v<std::remove_cvref_t<decltype(key_inner)>> ||
-                          has_tree_specs_v<std::remove_cvref_t<decltype(value_inner)>>)
+                          has_tree_specs_v<std::remove_cvref_t<decltype(value_inner)>> ||
+                          has_order_specs_v<std::remove_cvref_t<decltype(key_inner)>> ||
+                          has_order_specs_v<std::remove_cvref_t<decltype(value_inner)>>)
                for (const auto& item : value)
                {
                   if (auto st = check_value(item.first, key_inner, length_message, format);

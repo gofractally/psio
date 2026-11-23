@@ -944,7 +944,10 @@ namespace psio {
                      using eff = typename record_member_annotations<T, Is>::value_t;
                      // The member's whole annotation tree: its own
                      // length_bound / utf8 and those of the positions below.
-                     if constexpr (ann::has_tree_specs_v<eff> &&
+                     if constexpr (ann::has_value_checks_v<
+                                      std::remove_cvref_t<
+                                         typename record_traits<T>::template member_type<Is>>,
+                                      eff> &&
                                    !::psio::has_as_override_v<eff>)
                         if (status.ok() && bounds)
                            status = ::psio::check_member_annotations(
@@ -1999,7 +2002,7 @@ namespace psio {
                    // with): the fail-fast decode refuses a member outside
                    // its length_bound / utf8 at any depth, as the validator
                    // and the encoder do.
-                   if constexpr (ann::has_tree_specs_v<eff>)
+                   if constexpr (ann::has_value_checks_v<std::remove_cvref_t<F>, eff>)
                       if (auto st = ::psio::check_member_annotations(
                              fref, record_member_annotations<T, Is>::value,
                              "pssz: member length_bound violated", "pssz");
@@ -2603,6 +2606,18 @@ namespace psio {
                    status = validate_value<W, Auto, F, field_ann<T, A, Is>>(
                       src, spans[Is].begin, spans[Is].end, depth + 1,
                       flags);
+                   // sorted / unique / unique_keys compare the elements'
+                   // keys: checked on the member materialised from exactly
+                   // this span (as an invariant is), once its structure and
+                   // bounds have been accepted.
+                   if constexpr (ann::has_order_specs_deep_v<eff>)
+                      if constexpr (ann::has_value_checks_v<std::remove_cvref_t<F>, eff>)
+                         if (status.ok())
+                            status = ::psio::check_member_annotations(
+                               decode_value<W, Auto, F, field_ann<T, A, Is>>(
+                                  src, spans[Is].begin, spans[Is].end),
+                               record_member_annotations<T, Is>::value,
+                               "pssz: member length_bound violated", "pssz");
                 }
              }()),
             ...);

@@ -18,7 +18,9 @@
 #include <psio/schema_builder.hpp>
 #include <psio/wrappers.hpp>
 
+#include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -653,4 +655,119 @@ TEST_CASE("pssz_evolves_from: member annotations and caps", "[consistency][evolv
    STATIC_REQUIRE(!pssz_evolves_from<Fields3, Fields3Dropped>);
    STATIC_REQUIRE(pssz_evolves_from<Fields3, Fields3Lowered>);
    STATIC_REQUIRE(!pssz_evolves_from<Fields3Lowered, Fields3Grown>);
+}
+
+// ── sorted / unique / unique_keys are enforced by every codec ────────────
+namespace cons_order
+{
+   struct Ranked
+   {
+      std::vector<std::uint32_t>                         scores;    // sorted
+      std::vector<std::string>                           names;     // strictly ascending
+      std::vector<std::int32_t>                          falling;   // descending
+      std::vector<std::pair<std::string, std::uint32_t>> entries;   // unique by .first
+      std::vector<std::vector<std::uint8_t>>             rows;      // every row sorted
+      std::array<std::int16_t, 3>                        triple{};  // sorted
+      friend bool operator==(const Ranked&, const Ranked&) = default;
+   };
+   PSIO_REFLECT(Ranked,
+                attr(scores, sorted | max<8>),
+                attr(names, unique),
+                attr(falling, sorted_spec{.ascending = false}),
+                attr(entries, unique_keys),
+                attr(rows, element(sorted)),
+                attr(triple, sorted))
+   // The same record with no constraint: what an unchecked writer produces.
+   struct Loose
+   {
+      std::vector<std::uint32_t>                         scores;
+      std::vector<std::string>                           names;
+      std::vector<std::int32_t>                          falling;
+      std::vector<std::pair<std::string, std::uint32_t>> entries;
+      std::vector<std::vector<std::uint8_t>>             rows;
+      std::array<std::int16_t, 3>                        triple{};
+   };
+   PSIO_REFLECT(Loose, attr(scores, max<8>), names, falling, entries, rows, triple)
+
+   inline Ranked good()
+   {
+      return Ranked{{1, 1, 2, 300}, {"a", "ab", "b"}, {5, 5, -1}, {{"x", 1}, {"a", 1}},
+                    {{1, 2, 2}, {}, {9}}, {-5, 0, 0}};
+   }
+   inline Loose loose(const Ranked& r)
+   {
+      return Loose{r.scores, r.names, r.falling, r.entries, r.rows, r.triple};
+   }
+}  // namespace cons_order
+
+TEST_CASE("sorted / unique / unique_keys: writers and checking readers", "[consistency][order]")
+{
+   using namespace cons_order;
+   const Ranked ok = good();
+   const auto   frame = psio::to_pssz(ok);
+   const auto   text  = psio::to_json(ok);
+   const auto   key   = psio::to_key(ok);
+   CHECK(psio::validate_pssz<Ranked>(bytes_of(frame)).ok());
+   CHECK(psio::validate_strict<Ranked>(psio::pssz{}, bytes_of(frame)).ok());
+   CHECK(psio::from_pssz<Ranked>(bytes_of(frame)) == ok);
+   CHECK(psio::from_json<Ranked>(sp(text)) == ok);
+   CHECK(psio::validate_key<Ranked>(bytes_of(key)).ok());
+   CHECK(psio::from_key<Ranked>(bytes_of(key)) == ok);
+   // The constraints change no byte and no width.
+   CHECK(std::vector<char>(frame.begin(), frame.end()) ==
+         [&] { auto b = psio::to_pssz(loose(ok)); return std::vector<char>(b.begin(), b.end()); }());
+   STATIC_REQUIRE(psio::max_encoded_size<Ranked>() == psio::max_encoded_size<Loose>());
+
+   auto refused = [](const char* what, auto&& change, std::string_view message) {
+      INFO(what);
+      Ranked bad = good();
+      change(bad);
+      // Writers.
+      std::vector<char> out;
+      const auto        status = psio::encode_pssz_checked(psio::pssz{}, bad, out);
+      REQUIRE(!status.ok());
+      CHECK(std::string_view{status.error().what} == message);
+      CHECK_THROWS_AS(psio::to_pssz(bad), psio::codec_exception);
+      std::string json;
+      CHECK(!psio::encode_json_checked(psio::json{}, bad, json).ok());
+      CHECK(!psio::encode_json_checked(psio::ijson{}, bad, json).ok());
+      CHECK(!psio::encode_key_checked(bad, out).ok());
+      CHECK_THROWS_AS(psio::to_key(bad), psio::codec_exception);
+      // Readers, on what an unchecked writer produces.
+      const Loose raw      = loose(bad);
+      const auto  frame    = psio::to_pssz(raw);
+      const auto  raw_text = psio::to_json(raw);
+      const auto  raw_key  = psio::to_key(raw);
+      const auto  st       = psio::validate_pssz<Ranked>(bytes_of(frame));
+      REQUIRE(!st.ok());
+      CHECK(std::string_view{st.error().what} == message);
+      CHECK(!psio::validate_strict<Ranked>(psio::pssz{}, bytes_of(frame)).ok());
+      CHECK_THROWS_AS(psio::from_pssz<Ranked>(bytes_of(frame)), psio::codec_exception);
+      CHECK_THROWS_AS(psio::decode<Ranked>(psio::pssz{}, bytes_of(frame)), psio::codec_exception);
+      Ranked decoded;
+      bool   unknown = false;
+      CHECK(!psio::decode_pssz_checked(psio::pssz{}, bytes_of(frame), decoded, unknown).ok());
+      CHECK(!psio::validate_json<Ranked>(sp(raw_text)).ok());
+      CHECK(!psio::validate<Ranked>(psio::ijson{}, sp(psio::to_ijson(raw))).ok());
+      CHECK(!psio::decode_json_checked(psio::json{}, sp(raw_text), decoded).ok());
+      CHECK(!psio::validate_key<Ranked>(bytes_of(raw_key)).ok());
+      CHECK_THROWS_AS(psio::from_key<Ranked>(bytes_of(raw_key)), psio::codec_exception);
+   };
+   const std::string_view order  = "sorted: elements are not in order";
+   const std::string_view strict = "sorted: elements are not in strictly ascending order";
+   refused("scores descend", [](Ranked& r) { r.scores = {2, 1}; }, order);
+   refused("names repeat", [](Ranked& r) { r.names = {"a", "a"}; }, strict);
+   refused("names descend", [](Ranked& r) { r.names = {"b", "a"}; }, strict);
+   refused("falling ascends", [](Ranked& r) { r.falling = {1, 2}; }, order);
+   refused("key order, not signed order", [](Ranked& r) { r.falling = {-1, 1}; }, order);
+   refused("entries repeat a key", [](Ranked& r) { r.entries = {{"a", 1}, {"b", 2}, {"a", 3}}; },
+           "unique_keys: two elements have the same key");
+   refused("a row descends", [](Ranked& r) { r.rows = {{1}, {3, 2}}; }, order);
+   refused("the array descends", [](Ranked& r) { r.triple = {1, 0, 2}; }, order);
+
+   // A map / set is ordered and unique by type; the specs it carries
+   // inherently are not checked a second time.
+   using Inherent = std::tuple<psio::sorted_spec, psio::unique_keys_spec>;
+   STATIC_REQUIRE(!psio::detail::ann::has_value_checks_v<std::map<std::string, int>, Inherent>);
+   STATIC_REQUIRE(psio::detail::ann::has_value_checks_v<std::vector<int>, Inherent>);
 }
