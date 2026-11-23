@@ -594,7 +594,7 @@ argumentTuple({ id: u32 }, { maxFields: 256 });
 const grown = record('Account', { id: u32, name: optional(utf8), email: optional(utf8) }, { maxFields: 3 });
 psszEvolvesFrom(Account, grown);     // { ok: true }
 const raised = record('Account', { id: u32, name: optional(utf8) }, { maxFields: 8 });
-psszEvolvesFrom(Account, raised);    // { ok: false, reason: 'maxFields was raised (3 -> 8)', path: '(root)' }
+psszEvolvesFrom(Account, raised);    // { ok: false, code: 'max-fields', reason: 'maxFields was raised (3 -> 8)', path: '(root)' }
 ```
 
 - **The declaration**: a record with more than `n` fields, a method with
@@ -662,8 +662,8 @@ Token.methods.ping.result;                                            // null: i
   `Token.methods.add.args` takes `[number, number]`, `names.result.decode`
   gives `string[]`, and `ping.result` is `null`.
 - **The schema.** `Token.schema` is the Schema IR: `interfaces[0]` holds a
-  `Func` per method — its name, the parameter names (`""` for a parameter
-  without one) and bounded types, `result` as `returns` types it, a bound
+  `Func` per method — its name, the parameter names (`"0"`, `"1"`, … for a
+  method declared with an array of parameters: positional) and bounded types, `result` as `returns` types it, a bound
   with no type form (`min` / `exact`) as the attribute `result.lengthBound`,
   then `maxFields` and `maxDynamicData` — followed by every argument list as
   the named type `<interface>.<method>` (`token.transfer`), so that a reader
@@ -710,7 +710,11 @@ published type and a revision that silently changes its bytes.
 `older` can produce, and a reader of `older` every value of `newer` that is
 also one of its own. It takes typed definitions, types of fetched schemas
 (`schema.type(...)`), or one of each, and returns `{ ok: true }` or the
-first rule broken and where.
+first rule broken: `{ ok: false, code, reason, path }` — `code` a stable
+identifier of the rule (`bound-tightened`, `width-changed`,
+`appended-field-not-optional`, …: the table of
+`conformance/evolution-vectors.md`, shared with C++ `psio::pssz_ir::evolves_from`),
+`reason` a sentence, `path` where.
 
 ```typescript
 import { record, field, list, optional, rawString, u64, psszEvolvesFrom, PsszSchema, generateSchema } from 'psio';
@@ -727,18 +731,53 @@ psszEvolvesFrom(V1, post(64, 16));                              // { ok: true }:
 psszEvolvesFrom(V1, post(32, 16, { note: optional(rawString) }));   // { ok: true }: an optional field appended
 psszEvolvesFrom(V1, post(32, 16, {}, 4096));                    // { ok: true }: the cap raised within its width class
 psszEvolvesFrom(V1, post(16, 16));
-// { ok: false, reason: 'the length bound of the string was tightened ([0, 32] -> [0, 16])', path: '.owner' }
+// { ok: false, code: 'bound-tightened',
+//   reason: 'the length bound of the string was tightened ([0, 32] -> [0, 16])', path: '.owner' }
 psszEvolvesFrom(V1, post(32, 8)).ok;                            // false: tightened, at '.tags[]'
 psszEvolvesFrom(V1, post(32, 16, { count: u64 }));
-// { ok: false, reason: 'the appended field "count" is not optional', path: '(root)' }
+// { ok: false, code: 'appended-field-not-optional',
+//   reason: 'the appended field "count" is not optional (old data has no value for it)', path: '(root)' }
 psszEvolvesFrom(V1, post(32, 16, {}, 100000));
-// { ok: false, reason: 'the offset width of the record changed (2 -> 4)', path: '(root)' }
+// { ok: false, code: 'width-changed', reason: 'the offset width of the record differs (2 / 4)', path: '(root)' }
 
 // Two schemas as they travel: the check a registry runs before it accepts an upgrade.
 const fetched = (def: typeof V1) => PsszSchema.decode(generateSchema({ Post: def }).encode()).type('Post');
 psszEvolvesFrom(fetched(V1), fetched(post(64, 16))).ok;         // true
 psszEvolvesFrom(fetched(V1), fetched(post(16, 16))).ok;         // false
 ```
+
+**Wire or contract.** A comparison is asked for one of two things
+(`{ compare }`). `'contract'`, the default, is everything a consumer sees:
+the bytes, and also the names of fields and alternatives, custom ids, enums
+(a revision may add enumerators), the text shape of a record, `jsonInt` /
+`ijsonInt`, `ijsonName` and whether a variant is `untagged`. `'wire'` is the
+bytes and which bytes are values, nothing else: a renamed field is
+compatible there.
+
+```typescript
+import { psszEquivalent } from 'psio';
+
+const A = record('P', { id: u64, name: optional(rawString) });
+const renamed = record('P', { id: u64, title: optional(rawString) });
+psszEvolvesFrom(A, renamed);
+// { ok: false, code: 'field-renamed', reason: 'field 1 was renamed or reordered ("name" -> "title")', path: '(root)' }
+psszEvolvesFrom(A, renamed, { compare: 'wire' });               // { ok: true }: the same bytes
+
+// The same type? (the same values, bytes and permitted revisions; under 'contract' the same text)
+psszEquivalent(V1, post(32, 16));                               // { ok: true }
+psszEquivalent(V1, post(64, 16)).ok;                            // false: code 'bound-changed' at '.owner'
+psszEquivalent(A, renamed, { compare: 'wire' });                // { ok: true }
+```
+
+Both functions also compare two methods (`PsszMethod`: the argument list
+and the result), two interfaces (`schema.interface(name)` or a typed
+`defineInterface(...)`: every method and listed type of the older one must
+exist in the newer and evolve, matched by name) and two whole schemas
+(`PsszSchema`: every interface, by name). The path then starts with the
+method: `transfer(args).amount`, `names(result)`, `token/transfer(args)`.
+`conformance/evolution-vectors.json` pins the verdict, code and path of 50
+type pairs and 6 interface pairs, in both directions and both modes, for
+every language.
 
 | Compatible | Not compatible |
 |---|---|
@@ -758,9 +797,11 @@ type that will grow declares `maxDynamicData` from the start.
 
 What the check does not see: the names of the types themselves (the Schema
 IR does not say which named alias is a transparent type, so a transparent
-type is checked as its member), handlers and text forms (`jsonInt`, a custom
-type's `toText`), and — between two fetched schemas — `sorted` / `unique` /
-`uniqueKeys`, which are not in the Schema IR. Both sides are taken in the
+type is checked as its member), handlers (a custom type's `toText` or
+`check`; its id is compared under `'contract'`), and — between two fetched
+schemas — `sorted` / `unique` / `uniqueKeys`, which are not in the Schema IR
+(between typed definitions a difference is reported with the code
+`order-changed`). Both sides are taken in the
 automatic width profile.
 
 ## Views
@@ -879,6 +920,58 @@ To hand a value to code that expects plain JSON data, use
 `JSON.parse(type.valueToJson(value))` — under `'ijson'` every number in it is
 safe. The member options `jsonInt` / `ijsonInt` force a number or a string
 for one field. The full rules are under [Text](#text).
+
+**Untagged variants.** `variant(alternatives, { untagged: true })` is, in
+both text formats, the bare value of its alternative, and a reader picks the
+alternative by the kind of JSON value it finds (C++ `psio_is_untagged`; the
+Schema IR attribute `untagged`, which a fetched schema carries and the
+codecs follow). The bytes and the JavaScript value are those of any variant.
+
+```typescript
+import { variant, list, utf8 } from 'psio';
+
+const Extra = variant({ text: utf8, items: list(utf8) }, { untagged: true });
+Extra.valueToJson({ type: 'items', value: ['a'] });         // '["a"]'   (tagged: '{"items":["a"]}')
+Extra.valueToJson({ type: 'text', value: 's' }, 'json');    // '"s"'
+Extra.jsonToValue('["a","b"]');                             // { type: 'items', value: ['a', 'b'] }
+Extra.jsonToValue('7');
+// throws: json: the value is none of the untagged variant's alternatives
+```
+
+The kinds two alternatives may be written as, in either format, must not
+overlap — `u32` and `f64` are both numbers, a `u64` may be a string, bytes
+may be a string (the table is in `docs/json.md`, "Untagged variants") — and
+such a variant is refused when a value is read or written: "json: the
+alternatives of an untagged variant are not told apart by the kind of JSON
+value".
+
+**Any JSON value.** `jsonValue` is a document whose shape is not known in
+advance (C++ `psio::json_value`; Schema IR
+`Custom{ Custom{List<u8>, "utf8"}, "json" }`, an id no handler may claim).
+In text it is that value, inline; in PSSZ it is a UTF-8 string holding the
+value's compact JSON text.
+
+```typescript
+import { record, jsonValue, optional, utf8, PsszJsonText } from 'psio';
+
+const Action = record('Action', { service: utf8, data: jsonValue, more: optional(jsonValue) });
+const bytes = Action.jsonToPssz('{"service":"tokens","data":{"amount":"5","memo":[1.50,null]}}');
+Action.psszToJson(bytes);       // '{"service":"tokens","data":{"amount":"5","memo":[1.50,null]},"more":null}'
+Action.decode(bytes).data;      // { amount: '5', memo: [1.5, null] }
+Action.encode({ service: 's', data: [true, { k: 1 }], more: null });          // data is the string '[true,{"k":1}]'
+Action.encode({ service: 's', data: new PsszJsonText('{ "n": 1.50 }'), more: null });   // stored as '{"n":1.50}'
+```
+
+`jsonToPssz` and `psszToJson` carry the text itself, so a number stays the
+token it was written as (`1.50`, `1e3`, `18446744073709551616`), members
+keep their order and loose text stored by another writer comes out compact.
+`decode` gives a plain JavaScript value — objects, arrays, strings,
+booleans, `null`, numbers (an integer beyond 2^53 as a `bigint`) — which is
+the same JSON value but not always the same text: `1.50` is `1.5`, and the
+integer-like keys of an object move to the front. Where the exact text
+matters, encode a `PsszJsonText`. Bytes that are not one JSON value are not
+a value of the type; a missing `jsonValue` member is an error (`null` has to
+be written), `optional(jsonValue)` is the member that may be left out.
 
 ## Custom types
 
@@ -1076,6 +1169,7 @@ throw. pjson failures are a `PjsonError`.
 | UTF-8 string (`utf8` adapter: C++ `utf8_string`, Rust `String`) | `string` (validated UTF-8 on the wire; an unpaired surrogate is an error) |
 | raw string (`string` adapter: C++ `std::string`, Rust `RawString`) | `Uint8Array`: any bytes, not validated. `encode` and `valueToJson` also accept a JavaScript `string` (its UTF-8) |
 | boxed value (`box`) | the value of the boxed type |
+| any JSON value (`Custom` id `json` over a UTF-8 string; typed: `jsonValue`) | a plain JSON value: `null`, `boolean`, `number` (an integer beyond 2^53: `bigint`), `string`, array, object. `encode` also takes a `PsszJsonText` (the exact text). On the wire: the compact JSON text; in text: the value, inline |
 | custom type (any other `Custom` id) | the value of its wire type; a handler gives it a text form and / or an invariant |
 | map (`Custom` id `map` over a list of 2-tuples) | `Map`, iterating in canonical (key) order; `encode` takes a `Map` or any iterable of `[key, value]` entries. A float key that is −0 is `PsszNegativeZero.value` |
 | set (`Custom` id `set` over a list) | `Set`, in the same order; `encode` takes a `Set` or any iterable |
@@ -1101,8 +1195,11 @@ and a variant as `[index, value]`. `'ijson'` writes a 64-bit integer as a bare
 number while its magnitude is at most 2^53 - 1 and as a decimal string beyond
 (both are read), bytes as uppercase hex (either case is read) and a variant as
 `{"Name": value}`. Member attributes `jsonInt` / `ijsonInt` and the variant
-attribute `ijsonName` are honoured. A repeated key is read again and the last
-one wins; unknown keys are skipped.
+attribute `ijsonName` are honoured; a variant with the attribute `untagged`
+is the bare value of its alternative in both. A repeated key is read again
+and the last one wins; unknown keys are skipped; a record whose text leaves
+out a member that is not optional is refused with the member named
+(`json: missing required member "amount"`).
 
 **Maps, sets and nested values.** A set is an array of its elements. A map
 is an object `{"key": value, ...}` when its key type is a string by type — a
@@ -1354,13 +1451,13 @@ numberToMethod(methodToNumber('getSymbolType')); // '#hmlnslheseoypnnp'
 
 | | |
 |---|---|
-| Schema-driven | `PsszSchema`, `PsszType`, `PsszInterface`, `PsszMethod`, `PsszError`, `PsszNaN`, `PsszNegativeZero`, `IR_VERSION`, `jsonToPssz`, `psszToJson`, `validatePssz`, `keyPrefixUpperBound`, `psszEvolvesFrom` |
+| Schema-driven | `PsszSchema`, `PsszType`, `PsszInterface`, `PsszMethod`, `PsszError`, `PsszNaN`, `PsszNegativeZero`, `PsszJsonText`, `IR_VERSION`, `jsonToPssz`, `psszToJson`, `validatePssz`, `keyPrefixUpperBound`, `psszEvolvesFrom`, `psszEquivalent` |
 | Views | `PsszView`, `RecordView`, `TupleView`, `ListView`, `VariantView` |
-| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `argumentTuple`, `defineInterface`, `method`, `InterfaceDef`, `MethodDef`, `Method`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `pair`, `map`, `set`, `nested`, `transparent`, `enumeration`, `timePoint`, `duration`, `monotonic`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
+| Typed definitions | `TypeDef`, `generateSchema`, `record`, `field`, `argumentTuple`, `defineInterface`, `method`, `InterfaceDef`, `MethodDef`, `Method`, `variant`, `alt`, `optional`, `list`, `boundedList`, `array`, `tuple`, `pair`, `map`, `set`, `nested`, `transparent`, `enumeration`, `timePoint`, `duration`, `monotonic`, `custom`, `box`, `lazy`, `bool`, `char`, `u8` `u16` `u32` `u64` `u128` `u256`, `i8` `i16` `i32` `i64` `i128`, `f32` `f64`, `utf8`, `boundedUtf8`, `rawString`, `jsonValue`, `bytes`, `boundedBytes`, `fixedBytes`, `bitvector`, `bitlist`, `Field`, `Alt` |
 | Time | `timePointToIso`, `timePointFromIso`, `timePointToDate`, `timePointFromDate`, `timeSchemaId`, `parseTimeSchemaId`, `reservedTimeId`, `timeFractionDigits` |
 | Other | `emitWit`, `toHex`, `fromHex`, `nameToNumber`, `numberToName`, `methodToNumber`, `numberToMethod`, `isHashName`, `isCompressedName` |
 | pjson | `pjsonEncode`, `pjsonDecode`, `pjsonValidate`, `PJSON_WIRE_REVISION`, `PjsonError`, `PjsonDecimal`, `PjsonFloat`, `PjsonString`, `PjsonTypedArray`, `PjsonRows`, `PjsonObject` |
-| Types | `Infer`, `InferView`, `CustomHandler`, `AssocOptions`, `FieldOptions`, `PositionOptions`, `ArgumentTupleOptions`, `MethodOptions`, `InterfaceOptions`, `MethodOf`, `MethodParameters`, `ArgumentsOf`, `ArgumentViewsOf`, `Bounded`, `BoundedView`, `AltOptions`, `RecordOptions`, `LengthBoundOption`, `IntText`, `TypeDefOptions`, `JsonFormat`, `PsszWidth`, `PsszErrorKind`, `PsszValidation`, `PsszKeyValidation`, `PsszSchemaValidation`, `PsszCompatibility`, `PsszTypeLike`, `PsszDecodeOptions`, `PsszTypeOptions`, `PsszSchemaOptions`, `PsszCustomHandler`, `PsszCustomHandlers`, `PsszNestedBytes`, `PsszSchemaInput`, `PsszTypeInput`, `CompactType`, `CompactEnumerator`, `Some`, `VariantValue`, `BitsValue`, `TimeKind`, `TimeUnit`, `TickType`, `PjsonValue`, and the IR: `IrSchema`, `IrAnyType`, `IrTypeValue`, `IrMember`, `IrAttribute`, `IrEnum`, `IrEnumerator`, `IrFunc`, `IrResource`, `IrInterface`, `IrWorld`, `IrUse` |
+| Types | `Infer`, `InferView`, `CustomHandler`, `AssocOptions`, `FieldOptions`, `PositionOptions`, `ArgumentTupleOptions`, `MethodOptions`, `InterfaceOptions`, `MethodOf`, `MethodParameters`, `ArgumentsOf`, `ArgumentViewsOf`, `Bounded`, `BoundedView`, `AltOptions`, `VariantOptions`, `JsonValue`, `RecordOptions`, `LengthBoundOption`, `IntText`, `TypeDefOptions`, `JsonFormat`, `PsszWidth`, `PsszErrorKind`, `PsszValidation`, `PsszKeyValidation`, `PsszSchemaValidation`, `PsszCompatibility`, `PsszCompatibilityCode`, `PsszCompare`, `PsszCompareOptions`, `PsszComparable`, `PsszTypeLike`, `PsszDecodeOptions`, `PsszTypeOptions`, `PsszSchemaOptions`, `PsszCustomHandler`, `PsszCustomHandlers`, `PsszNestedBytes`, `PsszSchemaInput`, `PsszTypeInput`, `CompactType`, `CompactEnumerator`, `Some`, `VariantValue`, `BitsValue`, `TimeKind`, `TimeUnit`, `TickType`, `PjsonValue`, and the IR: `IrSchema`, `IrAnyType`, `IrTypeValue`, `IrMember`, `IrAttribute`, `IrEnum`, `IrEnumerator`, `IrFunc`, `IrResource`, `IrInterface`, `IrWorld`, `IrUse` |
 
 ## Performance
 
