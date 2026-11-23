@@ -282,8 +282,10 @@ namespace psio::graphql
       std::uint16_t    arg_count = 0;
       std::uint16_t    slot      = 0;  // index of the resolver in the type's handler table
       std::uint32_t    cost      = 1;
-      // Arguments named `first` / `last` (Int): the page size that multiplies
-      // the cost of the selection below; -1 when the field has none.
+      // Arguments named `first` / `last` (Int), -1 when the field has none:
+      // the page size of a field that returns a list (it multiplies the cost
+      // of the selection below) or a connection (it multiplies the cost of
+      // an edge). Not read for any other field.
       std::int8_t      first_arg  = -1;
       std::int8_t      last_arg   = -1;
       bool             deprecated = false;

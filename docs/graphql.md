@@ -572,9 +572,10 @@ holds of a row depends on the selection. `limits::max_response_bytes`
 remains the bound on the response.
 
 `paginate` reads one page — its rows, plus one step on each side for
-`pageInfo` — whatever the size of the index. A paged field's arguments
+`pageInfo` — whatever the size of the index. A connection field's arguments
 named `first` / `last` (of type `Int`, whether parameters or members of a
-group) are its page size for the complexity limit.
+group) are its page size for the complexity limit: the length of its
+`edges` ([Complexity](#complexity)).
 
 **A connection built by hand** (rows of a query in another system):
 `connection_builder<Node>` — `add(node, cursor_bytes)`, then
@@ -610,16 +611,97 @@ response limits.
 | `max_input_depth` — lists / input objects in argument and variable values | 16 | parse, variable coercion |
 | `max_variables_bytes` | 64 KiB | variable coercion |
 | `max_errors` — errors reported | 16 | all phases |
-| `max_complexity` | 100 000 | before execution, per request |
-| `default_list_size` — assumed length of a list without a page-size argument | 10 | (complexity) |
+| `max_complexity` — estimated number of field values in the response ([Complexity](#complexity)) | 100 000 | before execution, per request |
+| `default_list_size` — assumed length of a list, or of a connection's page, without a page-size argument | 10 | (complexity) |
 | `max_response_fields` — fields and list elements written | 1 000 000 | execution |
 | `max_response_bytes` | 16 MiB | execution |
 
-*Complexity* is the sum over selected fields of the field's cost
-(`psio::graphql::cost`, default 1), where the cost of the selection below a
-list field is multiplied by its page size: the `first` / `last` argument when
-the field has one and it is given (a literal or a variable), else
-`default_list_size`; an element of a list of scalars costs 1.
+### Complexity
+
+The complexity of a request is an estimate, made before execution, of the
+number of field values its response holds. It is computed from the query,
+the variables and the schema only:
+
+```
+cost(selection set) = Σ cost(field)            over the fields selected
+cost(field)         = c + size × cost(the field's selection set)
+```
+
+- `c` is the field's own cost: 1, or what `psio::graphql::cost{n}` on the
+  member says.
+- `size` is how many values the field's selection is resolved for:
+  - **a list** (`[T]`): its page size — the field's `first` / `last`
+    argument (of type `Int`; a literal or a variable; the larger when both
+    are given) when it has one and it is given, else `default_list_size`
+    (10). A list of lists multiplies by `default_list_size` per further
+    level. An element of a list of scalars counts 1.
+  - **a connection** (an object type with a list field `edges` and a field
+    `pageInfo` — what `paginate` and `connection_builder` return, or a type
+    of that shape of your own): 1 for the connection object, and its page
+    size — `first` / `last` as above, else `default_list_size` — is the
+    `size` of the `edges` list inside it. The page is counted once.
+  - **anything else** (a scalar, an object): 1. An `Int` argument that
+    happens to be named `first` or `last` on such a field
+    (`installed(gt:, first:)` returning one record) is an argument like any
+    other.
+- A leaf has no selection set: it costs `c`. `__typename` costs 0.
+- For a union, the selection set is that of the most expensive member.
+- Fragments are expanded and aliases counted where they are selected;
+  `@skip` / `@include` are not evaluated (a guarded field counts).
+
+A request whose complexity exceeds `max_complexity` is refused with
+`Query complexity exceeds the limit of N.` before anything runs.
+
+This is the estimate GitHub and Shopify publish for their APIs: the
+requested page size stands for the number of rows, each row costs what is
+selected in it, and nested connections multiply. (GitHub counts only the
+nodes and allows 500 000 per query; Shopify counts objects and connections
+and not scalars. Here every field counts, scalars included, because every
+field is resolved and written.)
+
+**Worked examples** (default costs; `K` node fields, page size `N`):
+
+| Query | Cost |
+|---|---:|
+| `{ parent { id } }` | 1 + 1 = 2 |
+| `{ list { a b } }` — a list without a page-size argument | 1 + 10 × 2 = 21 |
+| `{ numbers(first: 250) }` — a list of scalars | 1 + 250 = 251 |
+| `{ rows(first: N) { edges { node { K fields } } } }` | 1 (`rows`) + 1 (`edges`) + N × (1 (`node`) + K) = **2 + N × (1 + K)** |
+| … `first: 1000`, nine node fields | 2 + 1000 × 10 = 10 002 |
+| … `first: 9000`, one node field | 2 + 9000 × 2 = 18 002 |
+| … no `first` / `last`, three node fields | 2 + 10 × 4 = 42 |
+| `edges { cursor node { … } }` | + N (one more field per edge) |
+| `pageInfo { hasNextPage endCursor }` beside `edges` | + 3 (`pageInfo` and its two fields; not per edge) |
+| `{ rows(first: 100) { edges { cursor node { a } } pageInfo { hasNextPage endCursor } } }` | 2 + 100 × 3 + 3 = 305 |
+| `{ parents(first: N) { edges { node { id children(first: M) { edges { node { a } } } } } } }` — nested connections | 2 + N × (1 (`node`) + 1 (`id`) + 1 (`children`) + 1 (`edges`) + M × 2) = **2 + N × (4 + 2 M)**; N = 20, M = 50: 2 082 |
+| … N = M = 100, two node fields in the inner page | 2 + 100 × (3 + 100 × 3) = 30 302 |
+| `{ installed(gt: 5, first: 100000) { a b } }` — one record, `first` is not a page size | 1 + 2 = 3 |
+
+**What the default admits.** `max_complexity` is 100 000: a response of at
+most that many field values (the hard stop on a response that turns out
+larger is `max_response_fields`, 1 000 000). With a single connection that
+is `N × (1 + K) ≤ 99 998`: a page of 1 000 rows with up to 98 fields each,
+of 9 999 rows with nine fields, of 49 999 rows with one. With two nested
+connections of 100 rows each, up to 8 fields per inner row; three nested
+connections of 100 rows each (over 2 000 000) are refused, as are two of
+1 000. A service that serves larger pages than that passes its own
+`limits`; one whose pages are bounded some other way (a byte budget, see
+`page_budget`) can leave the default: the estimate bounds the *requested*
+size, the budget what is read.
+
+The estimate knows the page size the query asks for, not the one the
+resolver grants: a connection queried without `first` / `last` is assumed
+to have `default_list_size` rows even though `paginate` then returns up to
+`max_page_size` (100), and a list is assumed to have `default_list_size`
+elements whatever it holds. Raise `default_list_size` to the page a
+resolver returns by default if that matters; `max_response_fields` and
+`max_response_bytes` bound what is actually written.
+
+(Before this formula a connection's page size multiplied the whole
+selection below the connection field *and* its `edges` list was counted as
+a list of `default_list_size` on top, so a page cost
+`1 + N × (1 + 10 × (1 + K))` — ten times too much — and any non-list field
+with an `Int` argument named `first` was multiplied by it.)
 
 Alias and fragment bombs are bounded by `max_fields` (every selection
 visited during expansion counts, whether or not it yields a field); fragment
