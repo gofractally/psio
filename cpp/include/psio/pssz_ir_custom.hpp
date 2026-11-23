@@ -178,9 +178,11 @@ class CustomHandlers
    // builder gives T, adapter.hpp schema_custom_id): to_text / from_text
    // from T's text_category adapter when it has one, check from T's
    // invariant when it has one (the typed `validate<T>(psio::pssz{}, bytes)`,
-   // which runs the invariants of T's members too). T's typed psio::pssz
-   // encoding is the wire type's bytes by construction. Needs
-   // pssz_ir_json.hpp.
+   // which runs the invariants of T's members too). A type that has only a
+   // schema id (schemaId("Id") in PSIO_REFLECT) gets a handler with nothing
+   // in it: the wire type's text, no check — register your own under the id
+   // instead. T's typed psio::pssz encoding is the wire type's bytes by
+   // construction. Needs pssz_ir_json.hpp.
    template <typename T> CustomHandlers &add(std::string id = std::string{schema_custom_id<T>()})
    {
       return add(std::move(id), detail::typed_custom_handler<T>::make());

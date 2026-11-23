@@ -1117,6 +1117,20 @@ struct Message
    std::string   text;
    PSIO_REFLECT(Message, attr(code, field<3>), attr(text, field<7>))
 };
+
+// ── ref-schema-id: a schema id and nothing else ────────────────────────────
+struct Call
+{
+   std::uint64_t     sender  = 0;
+   std::uint64_t     service = 0;
+   std::uint32_t     method  = 0;
+   std::vector<char> data;   // the arguments, packed: only the service's schema explains them
+   PSIO_REFLECT(Call, schemaId("Action"), sender, service, method, data)
+};
+static_assert(psio::schema_custom_v<Call>);                 // Custom{record, "Action"} in a schema
+static_assert(psio::schema_custom_id<Call>() == "Action");
+static_assert(!psio::has_invariant_v<Call>);                // no check
+static_assert(!psio::detail::mutation_blocked_v<Call>);     // addressable by psio::mutable_view
 }  // namespace ref
 
 using namespace tut;
@@ -1948,6 +1962,42 @@ TEST_CASE("reference: protobuf field numbers", "[doc][ref-field-number]")
    using namespace ref;
    // field 3 varint (tag 0x18), field 7 length-delimited (tag 0x3a)
    CHECK(hex(psio::to_protobuf(Message{1, "x"})) == "18 01 3a 01 78");
+}
+
+TEST_CASE("reference: a schema id and nothing else", "[doc][ref-schema-id]")
+{
+   using ref::Call;
+   // ── ref-schema-id-run ──
+   const psio::Schema schema = psio::SchemaBuilder{}.insert<Call>("Call").build();
+   CHECK(contains(psio::to_ijson(schema), R"("id":"Action")"));
+
+   Call call{1, 2, 3, {'h', 'i'}};
+   auto bytes = psio::to_pssz(call);
+   // Without a handler the node is its wire type: the record's own text.
+   std::string text;
+   CHECK(psio::pssz_ir::pssz_to_json(schema, "Call", psio::json{}, std::span<const char>{bytes}, text).ok());
+   CHECK(text == psio::to_json(call));
+   // A handler registered for the id presents it: any one JSON value.
+   psio::pssz_ir::CustomHandlers handlers;
+   handlers.add("Action",
+                {.to_json = [](std::span<const char> pssz, const psio::pssz_ir::JsonContext&,
+                               std::string& json) -> psio::codec_status {
+                    const Call c = psio::from_pssz<Call>(psio::trusted{pssz});
+                    json += R"({"call":")" + std::to_string(c.service) + "::" +
+                            std::to_string(c.method) + R"(","args":")" +
+                            std::string{c.data.begin(), c.data.end()} + R"("})";
+                    return psio::codec_ok();
+                 }});
+   text.clear();
+   CHECK(psio::pssz_ir::pssz_to_json(schema, "Call", psio::json{}, std::span<const char>{bytes}, text,
+                                     nullptr, &handlers)
+            .ok());
+   CHECK(text == R"({"call":"2::3","args":"hi"})");
+   // The record is overwritten in place like any other.
+   CHECK(psio::mutable_view<Call, psio::pssz>{bytes}.get<0>().set(9));
+   call.sender = 9;
+   CHECK(bytes == psio::to_pssz(call));
+   // ── /ref-schema-id-run ──
 }
 
 TEST_CASE("reference: the Schema IR of an annotated record", "[doc][ref-schema]")

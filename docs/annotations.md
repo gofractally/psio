@@ -108,6 +108,7 @@ sees private members). A function-local struct cannot be reflected. Items:
 | `maxFields(N)` | cap on the number of fields, N ≤ 255 ([5.6](#56-maxfieldsn)) |
 | `transparent()` | the type is its one member ([5.7](#57-transparent)) |
 | `invariant(fn)` | a value check ([5.8](#58-invariantfn)) |
+| `schemaId("Id")` | the type's id in a schema, and nothing else ([5.15](#515-schemaidid)) |
 
 The spec expression of `attr` is evaluated with `using namespace psio` in
 effect, so the helpers are written bare: `max<32>`, `utf8`, `element(...)`.
@@ -630,6 +631,7 @@ last checked against the tree in which all three run every row of
 | field-count cap | `maxFields(N)`, N ≤ 255, on a record or in `method(...)` | `#[psio(max_fields = N)]` on a record or an interface function | `record(name, fields, { maxFields: N })`, `argumentTuple(params, { maxFields: N })`, `method(params, { maxFields: N })` | `@psio.record(max_fields=N)`, `@psio.method(max_fields=N)` | attribute `maxFields="N"` on the record's `Object`, on an argument list's `Object` and on its `Func` | where the type is declared (C++ and Rust: compile time; TypeScript and Python: at declaration), the schema-driven codecs (a schema with more members than its `maxFields` is invalid), the compatibility checks of every language ([4.1](#41-tooling-per-language)), WIT `@maxFields(N)`. No byte, no width ([5.6](#56-maxfieldsn)) |
 | the type is its member | `transparent()`; the member may carry `utf8`, `max<N>` and position specs | `#[psio(transparent)]`; the member may carry `#[psio(max = N)]` | `transparent(name, T)` with a bounded `T` (`boundedUtf8(80)`) | `NewType("Name", T)`; `@psio.transparent` on a one-field class, whose field may carry `psio.max(N)` and position bounds | a named alias of the member's (bounded) type | pssz, key, json/ijson, views, schema, GraphQL |
 | value check | `invariant(fn)`, `PSIO_INVARIANT(T, fn)` | `#[psio(invariant = "path")]` | `custom(id, wire, { check })` | `@psio.invariant` on a method; `psio.custom(id, check=…)` | `Custom{wire type, id}` + a handler | pssz, key, json/ijson writers and checking readers; not the trusted decode, not views |
+| schema id only | `schemaId("Id")` | `#[psio(custom = "Id")]` (without a text form or an invariant) | `custom(id, wire)` (no handler) | `psio.custom("Id")` (no functions) | `Custom{wire type, id}` | the Schema IR only: a schema-driven tool may register a handler for the id. No codec, validator or view reads it ([5.15](#515-schemaidid)) |
 | integer text form | `attr(f, json_string)`, `json_number`, `ijson_string`, `ijson_number`; type level via `PSIO_TYPE_ATTRS` | `#[json(json_string)]`, … on a field or the type | `field(T, { jsonInt: 'string', ijsonInt: 'number' })` | `Annotated[u64, psio.json_string]`, `psio.json_number`, `psio.ijson_string`, `psio.ijson_number` | member attributes `jsonInt`, `ijsonInt` = `"number"` / `"string"` | json, ijson, schema-driven text |
 | custom text form | `PSIO_ADAPTER(T, psio::text_category, Impl)`; per member `attr(f, as<Tag>)` | `#[psio(custom)]` + `psio::json_text_form!(T)` | `custom(id, wire, { toText, fromText })` | `@psio.to_text` / `@psio.from_text` methods; `psio.custom(id, to_text=…, from_text=…)` | `Custom{wire type, id}` (a member `as<Tag>` is not expressible) | json, ijson, GraphQL scalar; binary unchanged |
 | enumerator names | `PSIO_REFLECT_ENUM(E, a, b, …)` | the derive on a `#[repr(int)]` enum; `#[psio(name = "…")]`, `#[psio(other)]` | `enumeration(u8, { a: 0, b: 2 })` | `@psio.enum(psio.u8)` on an `enum.Enum`; `other=True` | `Enum{type, members}` | json, ijson, GraphQL; binary is the integer |
@@ -1404,7 +1406,7 @@ CHECK_FALSE(psio::validate_json<Symbol>(R"({"code":"usd"})").ok());
 
 | | |
 |---|---|
-| C++ | `invariant(fn)` in `PSIO_REFLECT`; for an enum, `std::variant`, `std::tuple` or other class: `PSIO_INVARIANT(Type, fn[, "SchemaId"])` at global scope. `fn(const T&) noexcept -> psio::codec_status` |
+| C++ | `invariant(fn)` in `PSIO_REFLECT`; for an enum, `std::variant`, `std::tuple` or other class: `PSIO_INVARIANT(Type, fn[, "SchemaId"])` at global scope. `fn(const T&) noexcept -> psio::codec_status`. (A schema id without a check is `schemaId("Id")`, [5.15](#515-schemaidid), not an invariant that accepts everything: a type with an invariant has no mutable view) |
 | Rust | `#[psio(invariant = "path")]`, `fn(&Self) -> Result<(), E>` |
 | TypeScript | `custom(id, wire, { check })`; `check` returns an error string or nothing |
 | Python | `@psio.invariant` on a method that returns `None` for a value of the type and a message otherwise; over any type: `Annotated[T, psio.custom("Id", check=fn)]` |
@@ -1953,6 +1955,96 @@ Read by one format only: `field<N>` by protobuf
 by GraphQL (the member is `@deprecated`). GraphQL has its own annotations
 (`psio::graphql::name_as`, `doc`, `hidden`, `id`, `cost`, `deprecated` —
 [graphql.md](graphql.md#customisation)).
+
+### 5.15 `schemaId("Id")`
+
+**Purpose.** Name a record in the Schema IR so that a schema-driven tool can
+present it its own way — and change nothing else. The record's schema node
+becomes `Custom{<the record>, "Id"}`; a tool that walks bytes with the
+schema (`psio::pssz_ir::pssz_to_json` and friends) looks up the handler
+registered for `"Id"` and, when there is one, lets it write and read the
+value. The typical case is a record whose bytes only another schema
+explains: a packed call, shown with its arguments decoded.
+
+```cpp
+struct Call
+{
+   std::uint64_t     sender  = 0;
+   std::uint64_t     service = 0;
+   std::uint32_t     method  = 0;
+   std::vector<char> data;   // the arguments, packed: only the service's schema explains them
+   PSIO_REFLECT(Call, schemaId("Action"), sender, service, method, data)
+};
+static_assert(psio::schema_custom_v<Call>);                 // Custom{record, "Action"} in a schema
+static_assert(psio::schema_custom_id<Call>() == "Action");
+static_assert(!psio::has_invariant_v<Call>);                // no check
+static_assert(!psio::detail::mutation_blocked_v<Call>);     // addressable by psio::mutable_view
+```
+
+```cpp
+const psio::Schema schema = psio::SchemaBuilder{}.insert<Call>("Call").build();
+CHECK(contains(psio::to_ijson(schema), R"("id":"Action")"));
+
+Call call{1, 2, 3, {'h', 'i'}};
+auto bytes = psio::to_pssz(call);
+// Without a handler the node is its wire type: the record's own text.
+std::string text;
+CHECK(psio::pssz_ir::pssz_to_json(schema, "Call", psio::json{}, std::span<const char>{bytes}, text).ok());
+CHECK(text == psio::to_json(call));
+// A handler registered for the id presents it: any one JSON value.
+psio::pssz_ir::CustomHandlers handlers;
+handlers.add("Action",
+             {.to_json = [](std::span<const char> pssz, const psio::pssz_ir::JsonContext&,
+                            std::string& json) -> psio::codec_status {
+                 const Call c = psio::from_pssz<Call>(psio::trusted{pssz});
+                 json += R"({"call":")" + std::to_string(c.service) + "::" +
+                         std::to_string(c.method) + R"(","args":")" +
+                         std::string{c.data.begin(), c.data.end()} + R"("})";
+                 return psio::codec_ok();
+              }});
+text.clear();
+CHECK(psio::pssz_ir::pssz_to_json(schema, "Call", psio::json{}, std::span<const char>{bytes}, text,
+                                  nullptr, &handlers)
+         .ok());
+CHECK(text == R"({"call":"2::3","args":"hi"})");
+// The record is overwritten in place like any other.
+CHECK(psio::mutable_view<Call, psio::pssz>{bytes}.get<0>().set(9));
+call.sender = 9;
+CHECK(bytes == psio::to_pssz(call));
+```
+
+| | |
+|---|---|
+| C++ | `schemaId("Id")` in `PSIO_REFLECT`, anywhere in the list. `psio::has_schema_id_v<T>`, `psio::reflected_schema_id<T>()`; `psio::schema_custom_v<T>` is true and `psio::schema_custom_id<T>()` is the id |
+| Rust | `#[psio(custom = "Id")]` on a type without a `TextForm` and without `#[psio(invariant)]` |
+| TypeScript | `custom(id, wire)` without a handler |
+| Python | `Annotated[T, psio.custom("Id")]` without functions |
+| Schema IR | `Custom{wire type, id}` |
+
+**What it does not do.** The bytes, the offset width, the key, the typed
+`json` / `ijson` text, validation (`validate_pssz`, `validate_strict`),
+views and GraphQL are those of the record without the keyword. It is not an
+invariant: nothing is checked, and — unlike a type with `invariant(fn)` —
+the record is addressable by `psio::mutable_view`. It is not an annotation:
+`reflect<T>::type_annotations` does not hold it. Without a handler for the
+id a schema-driven codec treats the node as its wire type.
+
+**Which declaration to use.** A text form of its own (one JSON string):
+`PSIO_ADAPTER` ([5.10](#510-custom-text-psio_adapter-astag)). A rule the
+value must satisfy: `invariant(fn)` ([5.8](#58-invariantfn)). Only a name
+for tools: `schemaId`. A type has one schema id: `schemaId` together with a
+text adapter's `schema_id` or the id of `PSIO_INVARIANT(T, fn, "Id")` is a
+compile error; `schemaId` together with `invariant(fn)` names the checked
+type.
+
+**Evolution.** Not on the wire. The schema comparison reports a changed id
+(`custom-id-changed`), as for every custom type.
+
+**Mistakes.** An id PSIO gives a meaning itself
+([json.md](json.md#custom-types-through-a-schema)):
+`psio: schemaId(...) in PSIO_REFLECT(T) names an id reserved for one of PSIO's own types (bool, char, string, utf8, hex, bitvector, bitlist, map, set, box, json, unknown, time-point..., duration..., monotonic...)`.
+Twice: `psio: PSIO_REFLECT(T) declares schemaId(...) twice: a type has one schema id`.
+Empty: `psio: schemaId("Id") in PSIO_REFLECT(T) needs an id that is not empty`.
 
 ## 6. How do I annotate …
 
@@ -2969,6 +3061,8 @@ once published:
 | An unsorted value in a member declared `sorted` | no encoding: the writers throw, the readers reject ([5.13](#513-sorted-unique-unique_keys)) |
 | `to_key` of a value outside a member bound | throws `codec_exception`; use `psio::encode_key_checked` for a status |
 | An invariant that is not `noexcept` | `psio: invariant(fn) in PSIO_REFLECT(T) needs fn callable as fn(const T&), declared noexcept and returning psio::codec_status` |
+| Declaring an invariant that accepts everything to give a record a schema id | the record loses its mutable view (`psio::mutable_view: in-place mutation is blocked for this type`); write `schemaId("Id")` ([5.15](#515-schemaidid)) |
+| `schemaId("string")`, `schemaId("hex")`, … | `psio: schemaId(...) in PSIO_REFLECT(T) names an id reserved for one of PSIO's own types …` |
 | `PSIO_REFLECT` in a function-local struct | does not compile (`templates cannot be declared inside of a local class`) |
 | A field and a method with one name; a member named `psio_get_proxy` | compile error (duplicate / reserved name) |
 | Adding a field to a published type without a cap | compiles; `pssz_evolves_from` is false when the width moves; otherwise you used up slack |

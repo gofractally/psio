@@ -8,6 +8,7 @@
 #include <psio/graphql.hpp>
 #include <psio/json.hpp>
 #include <psio/key.hpp>
+#include <psio/mutable_view.hpp>
 #include <psio/pssz.hpp>
 #include <psio/pssz_ir_json.hpp>
 #include <psio/pssz_view.hpp>
@@ -1457,4 +1458,336 @@ TEST_CASE("graphql: custom text types of any shape and transparent leaves are sc
    CHECK(sdl.find("scalar DerKey") != std::string::npos);
    CHECK(sdl.find("endpoint: Endpoint!") != std::string::npos);
    CHECK(sdl.find("id: Id!") != std::string::npos);
+}
+
+// ── schemaId("Id"): a schema id and nothing else ───────────────────────────
+//
+// A record a schema-driven tool presents its own way (a handler for the id)
+// and that is an ordinary record everywhere else: same bytes, width, key,
+// text and checks as the record without the keyword, and addressable in
+// place.
+namespace ct::sid
+{
+   struct Call
+   {
+      std::uint64_t     sender  = 0;
+      std::uint64_t     service = 0;
+      std::uint32_t     method  = 0;
+      std::vector<char> data;
+      friend bool       operator==(const Call&, const Call&) = default;
+      PSIO_REFLECT(Call, schemaId("Action"), sender, service, method, data)
+   };
+   // The keyword anywhere in the list, with other keywords, at namespace
+   // scope.
+   struct Fixed
+   {
+      std::uint32_t a = 0;
+      std::uint16_t b = 0;
+      friend bool   operator==(const Fixed&, const Fixed&) = default;
+   };
+   PSIO_REFLECT(Fixed, a, definitionWillNotChange(), b, schemaId("ct.Fixed"))
+   // With an invariant declared by keyword: the id is the keyword's.
+   struct Even
+   {
+      std::uint32_t             n = 0;
+      static psio::codec_status even(const Even& e) noexcept
+      {
+         return e.n % 2 == 0 ? psio::codec_ok() : psio::codec_fail("odd", 0, "Even");
+      }
+      PSIO_REFLECT(Even, n, invariant(even), schemaId("EvenNumber"))
+   };
+   struct Holder
+   {
+      std::string       note;
+      std::vector<Call> calls;
+      Fixed             fixed;
+      friend bool       operator==(const Holder&, const Holder&) = default;
+      PSIO_REFLECT(Holder, note, calls, fixed)
+   };
+   struct Query
+   {
+      Call call;
+      PSIO_REFLECT(Query, call)
+   };
+}  // namespace ct::sid
+// The same declarations without the keyword.
+namespace ct::plain
+{
+   struct Call
+   {
+      std::uint64_t     sender  = 0;
+      std::uint64_t     service = 0;
+      std::uint32_t     method  = 0;
+      std::vector<char> data;
+      PSIO_REFLECT(Call, sender, service, method, data)
+   };
+   struct Fixed
+   {
+      std::uint32_t a = 0;
+      std::uint16_t b = 0;
+   };
+   PSIO_REFLECT(Fixed, a, definitionWillNotChange(), b)
+   struct Holder
+   {
+      std::string       note;
+      std::vector<Call> calls;
+      Fixed             fixed;
+      PSIO_REFLECT(Holder, note, calls, fixed)
+   };
+}  // namespace ct::plain
+
+namespace
+{
+   static_assert(psio::has_schema_id_v<ct::sid::Call>);
+   static_assert(psio::reflected_schema_id<ct::sid::Call>() == "Action");
+   static_assert(psio::schema_custom_v<ct::sid::Call>);
+   static_assert(psio::schema_custom_id<ct::sid::Call>() == "Action");
+   static_assert(psio::schema_custom_id<ct::sid::Fixed>() == "ct.Fixed");
+   static_assert(psio::schema_custom_id<ct::sid::Even>() == "EvenNumber");
+   static_assert(!psio::has_schema_id_v<ct::plain::Call>);
+   static_assert(!psio::schema_custom_v<ct::plain::Call>);
+   static_assert(!psio::has_schema_id_v<ct::sid::Holder>);
+   static_assert(!psio::has_schema_id_v<std::uint32_t>);
+   static_assert(!psio::has_schema_id_v<std::vector<ct::sid::Call>>);
+   // Not an invariant, not a text form, not an annotation, not blocked.
+   static_assert(!psio::has_invariant_v<ct::sid::Call>);
+   static_assert(!psio::detail::text_adapter_is_custom<ct::sid::Call>());
+   static_assert(!psio::detail::mutation_blocked_v<ct::sid::Call>);
+   static_assert(std::tuple_size_v<decltype(psio::reflect<ct::sid::Call>::type_annotations)> == 0);
+   static_assert(std::tuple_size_v<decltype(psio::reflect<ct::sid::Fixed>::type_annotations)> ==
+                 std::tuple_size_v<decltype(psio::reflect<ct::plain::Fixed>::type_annotations)>);
+   static_assert(psio::reflect<ct::sid::Call>::member_count == 4);
+   static_assert(psio::reflect<ct::sid::Call>::name == "Call");
+   // Width and fixed size are the plain record's.
+   static_assert(psio::auto_pssz_width_v<ct::sid::Call> ==
+                 psio::auto_pssz_width_v<ct::plain::Call>);
+   static_assert(psio::auto_pssz_width_v<ct::sid::Holder> ==
+                 psio::auto_pssz_width_v<ct::plain::Holder>);
+   static_assert(pi::is_fixed_v<ct::sid::Fixed> && pi::is_fixed_v<ct::plain::Fixed>);
+   static_assert(pi::fixed_size_of<ct::sid::Fixed>() == pi::fixed_size_of<ct::plain::Fixed>());
+   static_assert(!pi::is_fixed_v<ct::sid::Call>);
+   static_assert(psio::pssz_evolves_from<ct::sid::Call, ct::sid::Call>);
+
+   ct::sid::Holder sid_sample()
+   {
+      return {"n", {{1, 2, 3, {'a', 'b'}}, {4, 5, 6, {}}}, {7, 8}};
+   }
+   ct::plain::Holder plain_sample()
+   {
+      return {"n", {{1, 2, 3, {'a', 'b'}}, {4, 5, 6, {}}}, {7, 8}};
+   }
+}  // namespace
+
+TEST_CASE("schemaId: bytes, key, text and checks are the plain record's", "[custom][schema_id]")
+{
+   const auto with  = sid_sample();
+   const auto plain = plain_sample();
+   const auto bytes = pssz_of(with);
+   CHECK(bytes == pssz_of(plain));
+   CHECK(psio::encode(psio::pssz16{}, with) == psio::encode(psio::pssz16{}, plain));
+   CHECK(psio::encode(psio::key{}, with) == psio::encode(psio::key{}, plain));
+   CHECK(psio::encode(psio::key{}, with.calls[0]) == psio::encode(psio::key{}, plain.calls[0]));
+   CHECK(psio::encode(psio::json{}, with) == psio::encode(psio::json{}, plain));
+   CHECK(psio::encode(psio::ijson{}, with) == psio::encode(psio::ijson{}, plain));
+   CHECK(psio::encode(psio::json{}, with.calls[0]) ==
+         R"({"sender":1,"service":2,"method":3,"data":[97,98]})");
+   CHECK(psio::decode<ct::sid::Holder>(psio::pssz{}, sp(bytes)) == with);
+   CHECK(psio::decode<ct::sid::Holder>(psio::json{}, sp(psio::encode(psio::json{}, plain))) ==
+         with);
+   CHECK(psio::validate<ct::sid::Holder>(psio::pssz{}, sp(bytes)).ok());
+   CHECK(psio::validate_strict<ct::sid::Holder>(psio::pssz{}, sp(bytes)).ok());
+   // Every truncation is refused or accepted exactly as for the plain record.
+   for (std::size_t n = 0; n < bytes.size(); ++n)
+   {
+      const std::span<const char> cut{bytes.data(), n};
+      CHECK(psio::validate<ct::sid::Holder>(psio::pssz{}, cut).ok() ==
+            psio::validate<ct::plain::Holder>(psio::pssz{}, cut).ok());
+   }
+}
+
+TEST_CASE("schemaId: the record is addressable in place", "[custom][schema_id][mutable_view]")
+{
+   ct::sid::Call call{1, 2, 3, {'x', 'y', 'z'}};
+   auto          bytes = pssz_of(call);
+   const auto    size  = bytes.size();
+   psio::mutable_view<ct::sid::Call, psio::pssz> mv{bytes};
+   REQUIRE(mv.get<0>().get() == 1);
+   REQUIRE(mv.get<0>().set(100));
+   REQUIRE(mv.get<1>().set(200));
+   REQUIRE(mv.get<2>().set(300));
+   call.sender  = 100;
+   call.service = 200;
+   call.method  = 300;
+   CHECK(bytes.size() == size);
+   CHECK(bytes == pssz_of(call));
+   CHECK(psio::decode<ct::sid::Call>(psio::pssz{}, sp(bytes)) == call);
+
+   // Through a record that holds it, and as a whole fixed-size value.
+   auto holder       = sid_sample();
+   auto holder_bytes = pssz_of(holder);
+   psio::mutable_view<ct::sid::Holder, psio::pssz> hv{holder_bytes};
+   REQUIRE(hv.get<2>().get<0>().set(70));
+   holder.fixed.a = 70;
+   CHECK(holder_bytes == pssz_of(holder));
+   REQUIRE(hv.get<2>().set(ct::sid::Fixed{9, 10}));
+   holder.fixed = {9, 10};
+   CHECK(holder_bytes == pssz_of(holder));
+}
+
+TEST_CASE("schemaId: the schema node is Custom{record, id}", "[custom][schema_id][schema]")
+{
+   const auto schema = psio::SchemaBuilder{}
+                          .insert<ct::sid::Holder>("Holder")
+                          .insert<ct::sid::Even>("Even")
+                          .build();
+   const auto plain = psio::SchemaBuilder{}.insert<ct::plain::Holder>("Holder").build();
+   auto       custom = [&](std::string_view name) -> const st::Custom& {
+      const auto* c = std::get_if<st::Custom>(&resolved(schema, named(schema, name)).value);
+      REQUIRE(c);
+      return *c;
+   };
+   CHECK(custom("Call").id == "Action");
+   CHECK(custom("Fixed").id == "ct.Fixed");
+   CHECK(custom("Even").id == "EvenNumber");
+   // The wire type is the record the plain declaration gives.
+   const auto* object = std::get_if<st::Object>(&custom("Call").type->value);
+   REQUIRE(object);
+   const auto* plain_object = std::get_if<st::Object>(&resolved(plain, named(plain, "Call")).value);
+   REQUIRE(plain_object);
+   REQUIRE(object->members.size() == plain_object->members.size());
+   for (std::size_t i = 0; i < object->members.size(); ++i)
+      CHECK(object->members[i].name == plain_object->members[i].name);
+   CHECK(custom("Fixed").type->value.index() ==
+         resolved(plain, named(plain, "Fixed")).value.index());
+   // The record that only holds one is not custom.
+   CHECK(std::holds_alternative<st::Object>(resolved(schema, named(schema, "Holder")).value));
+}
+
+TEST_CASE("schemaId: schema-driven json, without and with a handler for the id",
+          "[custom][schema_id][schema][json]")
+{
+   const auto        schema = psio::SchemaBuilder{}.insert<ct::sid::Holder>("Holder").build();
+   const auto        value  = sid_sample();
+   const auto        bytes  = pssz_of(value);
+   const st::AnyType root   = st::Type{"Holder"};
+
+   // No handler, the type's own (empty) handler, handlers bound once: the
+   // record's text, both ways.
+   for (auto fmt_ijson : {false, true})
+   {
+      const std::string typed =
+         fmt_ijson ? psio::encode(psio::ijson{}, value) : psio::encode(psio::json{}, value);
+      auto to_json = [&](const ir::CustomHandlers* handlers, const ir::JsonNames* names) {
+         std::string out;
+         auto        status = fmt_ijson ? ir::pssz_to_json(schema, root, psio::ijson{}, sp(bytes),
+                                                           out, nullptr, handlers, names)
+                                        : ir::pssz_to_json(schema, root, psio::json{}, sp(bytes),
+                                                           out, nullptr, handlers, names);
+         REQUIRE(status.ok());
+         return out;
+      };
+      ir::CustomHandlers own;
+      own.add<ct::sid::Call>();
+      CHECK(own.find("Action") != nullptr);
+      const ir::JsonNames names(schema, own);
+      CHECK(to_json(nullptr, nullptr) == typed);
+      CHECK(to_json(&own, nullptr) == typed);
+      CHECK(to_json(nullptr, &names) == typed);
+      std::vector<char> again;
+      auto status = fmt_ijson ? ir::json_to_pssz(schema, root, psio::ijson{}, sp(typed), again)
+                              : ir::json_to_pssz(schema, root, psio::json{}, sp(typed), again);
+      REQUIRE(status.ok());
+      CHECK(again == bytes);
+   }
+
+   // A handler that presents the value as any JSON value (to_json /
+   // from_json): the call with its data shown as text.
+   ir::CustomHandlers shown;
+   shown.add("Action",
+             {.to_json = [](std::span<const char> pssz, const ir::JsonContext&,
+                            std::string& json) -> psio::codec_status {
+                 const auto call = psio::decode<ct::sid::Call>(psio::pssz{}, pssz);
+                 json += R"({"call":")" + std::to_string(call.service) +
+                         "::" + std::to_string(call.method) + R"(","by":)" +
+                         std::to_string(call.sender) + R"(,"data":{"text":")" +
+                         std::string{call.data.begin(), call.data.end()} + R"("}})";
+                 return psio::codec_ok();
+              },
+              .from_json = [](std::string_view json, const ir::JsonContext&,
+                              std::vector<char>& pssz) -> psio::codec_status {
+                 psio::json_value v;
+                 if (auto status = psio::decode_json_checked(psio::json{}, json, v); !status.ok())
+                    return status;
+                 const auto* name = v.find("call");
+                 const auto* by   = v.find("by");
+                 const auto* data = v.find("data");
+                 if (!name || !name->as_string() || !by || !by->as_number() || !data ||
+                     !data->find("text") || !data->find("text")->as_string())
+                    return psio::codec_fail("a call is {call, by, data}", 0, "Action");
+                 const std::string& n   = *name->as_string();
+                 const auto         sep = n.find("::");
+                 if (sep == n.npos)
+                    return psio::codec_fail("a call is service::method", 0, "Action");
+                 const std::string& text = *data->find("text")->as_string();
+                 const ct::sid::Call call{*by->as_number()->as_uint64(),
+                                          std::stoull(n.substr(0, sep)),
+                                          static_cast<std::uint32_t>(std::stoul(n.substr(sep + 2))),
+                                          {text.begin(), text.end()}};
+                 const auto bytes = psio::encode(psio::pssz{}, call);
+                 pssz.insert(pssz.end(), bytes.begin(), bytes.end());
+                 return psio::codec_ok();
+              }});
+   std::string text;
+   REQUIRE(ir::pssz_to_json(schema, root, psio::json{}, sp(bytes), text, nullptr, &shown).ok());
+   CHECK(text == R"({"note":"n","calls":[{"call":"2::3","by":1,"data":{"text":"ab"}},)"
+                 R"({"call":"5::6","by":4,"data":{"text":""}}],"fixed":{"a":7,"b":8}})");
+   std::vector<char> again;
+   REQUIRE(ir::json_to_pssz(schema, root, psio::json{}, sp(text), again, nullptr,
+                            psio::json_parser::automatic, &shown)
+              .ok());
+   CHECK(again == bytes);
+   // Bound once to the schema's nodes: the same text.
+   {
+      const ir::JsonNames names(schema, shown);
+      std::string         bound;
+      REQUIRE(ir::pssz_to_json(schema, root, psio::json{}, sp(bytes), bound, nullptr, nullptr,
+                               &names)
+                 .ok());
+      CHECK(bound == text);
+   }
+   // The handler's text is not the record's text.
+   again.clear();
+   CHECK_FALSE(ir::json_to_pssz(schema, root, psio::json{}, sp(psio::encode(psio::json{}, value)),
+                                again, nullptr, psio::json_parser::automatic, &shown)
+                  .ok());
+
+   // A handler that presents the value as one JSON string (to_text /
+   // from_text).
+   ir::CustomHandlers as_text;
+   as_text.add("Action",
+               {.to_text = [](std::span<const char> pssz, std::string& out) -> psio::codec_status {
+                   const auto call = psio::decode<ct::sid::Call>(psio::pssz{}, pssz);
+                   out += std::to_string(call.sender) + ">" + std::to_string(call.service) + "." +
+                          std::to_string(call.method);
+                   return psio::codec_ok();
+                }});
+   text.clear();
+   REQUIRE(ir::pssz_to_json(schema, root, psio::json{}, sp(bytes), text, nullptr, &as_text).ok());
+   CHECK(text == R"({"note":"n","calls":["1>2.3","4>5.6"],"fixed":{"a":7,"b":8}})");
+
+   // A reserved id is still refused by the registry.
+   ir::CustomHandlers reserved;
+   CHECK_FALSE(reserved.try_add("string", {}).ok());
+}
+
+TEST_CASE("schemaId: in GraphQL the record is the object type it would be anyway",
+          "[custom][schema_id][graphql]")
+{
+   using api = psio::graphql::schema<ct::sid::Query>;
+   const ct::sid::Query q{{1, 2, 3, {'a'}}};
+   std::string          out;
+   api::run(q, "{ call { sender service method } }", out);
+   CHECK(out == R"({"data":{"call":{"sender":1,"service":2,"method":3}}})");
+   CHECK(api::sdl().find("type Call") != std::string::npos);
+   CHECK(api::sdl().find("Action") == std::string::npos);
 }

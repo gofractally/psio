@@ -1030,8 +1030,20 @@ namespace psio::graphql
       }
 
       // Complexity of a selection set (limits::max_complexity); saturates
-      // just above the limit.
-      inline std::uint64_t page_size(const exec& e, const plan_field& f)
+      // just above the limit. docs/graphql.md "Complexity" has the formula:
+      //
+      //    cost(set)   = sum over its fields of cost(field)
+      //    cost(field) = the field's own cost + size(field) * cost(its set)
+      //
+      // where size is the estimated number of values the field's selection
+      // is resolved for: the page size for a list, 1 for anything else — and
+      // for a connection (connection_type below) 1 for the connection itself
+      // and its page size for the `edges` list inside it, so that a page is
+      // counted once.
+
+      // The `first` / `last` argument of a field when it has one and it is
+      // given, else `default_list_size`.
+      inline std::uint64_t requested_size(const exec& e, const plan_field& f)
       {
          const field_desc& d     = *f.desc;
          std::int64_t      given = -1;
@@ -1043,15 +1055,23 @@ namespace psio::graphql
                   if (read_leaf<std::int64_t>(r.token(), &v))
                      given = std::max<std::int64_t>(given, std::max<std::int64_t>(v, 0));
                }
-         const bool paged = d.first_arg >= 0 || d.last_arg >= 0;
-         if (d.type.depth == 0 && !paged)
-            return 1;
-         std::uint64_t size = given >= 0 ? static_cast<std::uint64_t>(given) : e.lim.default_list_size;
-         for (unsigned level = 1; level < d.type.depth; ++level)
-            size *= e.lim.default_list_size;
-         return size;
+         return given >= 0 ? static_cast<std::uint64_t>(given) : e.lim.default_list_size;
       }
-      inline std::uint64_t complexity(const exec& e, std::uint32_t set_id)
+      // A connection (the Relay shape, whichever C++ type gives it): an
+      // object with a list field `edges` and a field `pageInfo`. The page
+      // size its field is given is the length of `edges`.
+      inline bool connection_type(const type_ref& type) noexcept
+      {
+         const type_desc& t = *type.named;
+         if (type.depth != 0 || t.kind != type_kind::object || t.find == nullptr)
+            return false;
+         const std::size_t edges = t.find("edges");
+         return edges < t.field_count && t.fields[edges].name == "edges" &&
+                t.fields[edges].type.depth != 0 && t.find("pageInfo") < t.field_count;
+      }
+      // `page` is the page size of the connection this set is the selection
+      // of, or 0 when it is not the selection of a connection.
+      inline std::uint64_t complexity(const exec& e, std::uint32_t set_id, std::uint64_t page = 0)
       {
          const std::uint64_t cap  = e.lim.max_complexity + 1;
          const plan_set      set  = e.doc.sets[set_id];
@@ -1063,20 +1083,37 @@ namespace psio::graphql
                continue;
             const field_desc& d = *f.desc;
             cost += d.cost;
+            // How many values the selection below is resolved for.
+            std::uint64_t size       = 1;
+            std::uint64_t page_below = 0;
+            if (d.type.depth != 0)
+            {
+               // A list: the page of the connection it is the `edges` of,
+               // else its own `first` / `last`, else the default.
+               size = page != 0 && d.name == "edges" ? page : requested_size(e, f);
+               for (unsigned level = 1; level < d.type.depth; ++level)
+               {
+                  if (e.lim.default_list_size != 0 && size > cap / e.lim.default_list_size)
+                     return cap;
+                  size *= e.lim.default_list_size;
+               }
+            }
+            else if (connection_type(d.type))
+               // Never 0 here: a page of no rows still has the `edges` field.
+               page_below = std::max<std::uint64_t>(requested_size(e, f), 1);
             std::uint64_t below = 0;
             if (f.child != nil)
             {
                const std::uint32_t count =
                   d.type.named->kind == type_kind::union_ ? d.type.named->possible_count : 1;
                for (std::uint32_t k = 0; k < count; ++k)
-                  below = std::max(below, complexity(e, f.child + k));
+                  below = std::max(below, complexity(e, f.child + k, page_below));
             }
             // Each element of a list costs at least one.
-            if (d.type.depth != 0 || d.first_arg >= 0 || d.last_arg >= 0)
+            if (d.type.depth != 0)
                below = std::max<std::uint64_t>(below, 1);
-            if (below == 0)
+            if (below == 0 || size == 0)
                continue;
-            const std::uint64_t size = page_size(e, f);
             if (size > cap / below)
                return cap;
             cost += size * below;

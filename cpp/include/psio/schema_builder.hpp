@@ -56,7 +56,8 @@
 //   - a transparent type (transparent.hpp) is a named alias: its reflected
 //     name, defined as its member's type;
 //   - a custom type — one with a text_category adapter, an invariant
-//     (invariant.hpp), or both, of ANY shape: record, transparent wrapper,
+//     (invariant.hpp), a schemaId("Id") in its PSIO_REFLECT, or several of
+//     these, of ANY shape: record, transparent wrapper,
 //     enum, variant, tuple, list — is Custom{wire type, id} (adapter.hpp
 //     schema_custom_id), for which the schema-driven codecs take a handler
 //     (pssz_ir_custom.hpp).
@@ -635,8 +636,8 @@ namespace psio::schema_types
       // ── Build an AnyType for T ─────────────────────────────────────
       //
       // A custom type (adapter.hpp schema_custom_v: a text presentation,
-      // an invariant, or both) is Custom{its wire type, id}, whatever its
-      // shape; everything else is its wire type.
+      // an invariant, a declared schema id) is Custom{its wire type, id},
+      // whatever its shape; everything else is its wire type.
       template <typename U>
       AnyType build_anytype()
       {

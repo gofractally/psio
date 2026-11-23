@@ -40,7 +40,10 @@ namespace psio::graphql
       // Sum over selected fields of the field's cost (psio::graphql::cost,
       // default 1), where the selection below a list field is multiplied by
       // its page size: the `first` / `last` argument when the field has one
-      // and it is given, `default_list_size` otherwise.
+      // and it is given, `default_list_size` otherwise. A connection's page
+      // size is the length of its `edges`, counted once; an Int argument
+      // named `first` / `last` of a field that returns neither a list nor a
+      // connection is not a page size. docs/graphql.md "Complexity".
       std::uint64_t max_complexity    = 100'000;
       std::uint32_t default_list_size = 10;
       // Fields and list elements actually written / bytes of the response;

@@ -2295,7 +2295,10 @@ The reference implementation rejects each of these at compile time:
   that declaration — wherever it sits: a record member, a list element,
   a mapped value, the value inside nested bytes, a transparent wrapper
   with an invariant. (A transparent wrapper without one is its member:
-  navigation and `set` are the member's.) The extension point for any
+  navigation and `set` are the member's. A record that declares only a
+  schema id, `schemaId("Id")` in `PSIO_REFLECT`, has no invariant and is
+  not blocked: give a record a schema id that way, not with an invariant
+  that accepts every value.) The extension point for any
   other constraint is `psio::detail::mutation_blocked_v<T>`, specialized
   to `true` for a type or an annotation spec;
 - any write to the **key** of a map entry or to an element of a
@@ -2420,8 +2423,11 @@ the invariant's status; none throws or aborts.
 Schema IR node is `Custom{<wire type>, id}`, as for a type with a custom
 text form (`docs/json.md`, "Custom types through a schema"). The id is the
 text adapter's `schema_id` if the type has one, else the id given to
-`PSIO_INVARIANT`, else the reflected record or enum name; a type with none
-of these must provide one. A schema cannot carry a predicate, so the
+`PSIO_INVARIANT`, else the id given by `schemaId("Id")` in `PSIO_REFLECT`,
+else the reflected record or enum name; a type with none of these must
+provide one. (`schemaId("Id")` without an invariant makes the same node and
+is not an invariant: nothing is checked and nothing in this section
+applies to it.) A schema cannot carry a predicate, so the
 schema-driven codecs take it as the `check` of the handler registered for
 the id:
 

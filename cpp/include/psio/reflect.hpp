@@ -133,7 +133,8 @@
 // macro. At namespace scope every listed member must be accessible (public).
 //
 // `attr(field, spec)` and the type-level keywords (definitionWillNotChange(),
-// maxFields(N), maxDynamicData(N), transparent(), invariant(fn)) work in
+// maxFields(N), maxDynamicData(N), transparent(), invariant(fn),
+// schemaId("Id")) work in
 // every PSIO_REFLECT: at namespace
 // scope and in a class body, for a type in any (nested) namespace. The
 // annotations are members of the metadata the macro binds to the type, and
@@ -951,6 +952,15 @@ namespace psio {
 //      declared anywhere in the class; at namespace scope it is looked up
 //      where the macro is written. At most one per type.
 //
+//   9. schemaId("Id")                 type-level keyword
+//      → the type's id in the Schema IR: its schema node is
+//      `Custom{the type's wire type, "Id"}`, so that a schema-driven tool can
+//      attach a handler to the id (pssz_ir_custom.hpp CustomHandlers), and
+//      NOTHING else: bytes, width, key, text, validation, views and in-place
+//      mutation are those of the type without the keyword (adapter.hpp
+//      "Custom types in the Schema IR"). At most one per type; not empty;
+//      not an id reserved for PSIO's own types (reserved_custom_id below).
+//
 // All type-level keywords (3-5, 7) are aggregated into one
 // `annotate<type<T>{}>` specialization via `std::tuple_cat`, so they
 // compose freely.  Per-keyword paren form (`maxFields(N)`, NOT
@@ -964,8 +974,8 @@ namespace psio {
 //
 // The keywords are recognised by token pasting only: no macro named `attr`,
 // `method`, `definitionWillNotChange`, `maxFields`, `maxDynamicData`,
-// `transparent` or `invariant` is defined, so they do not collide with user
-// identifiers.
+// `transparent`, `invariant` or `schemaId` is defined, so they do not collide
+// with user identifiers.
 
 #define PSIO_PP_FIRST(a, ...) a
 #define PSIO_PP_APPLY_FIRST(a) PSIO_PP_FIRST(a)
@@ -995,6 +1005,8 @@ namespace psio {
 #define PSIO_REFLECT_KW_transparent(...) (typeattr_transparent), 1
 // invariant(fn) → (typeattr_invariant, fn), 1
 #define PSIO_REFLECT_KW_invariant(...) (typeattr_invariant, __VA_ARGS__), 1
+// schemaId("Id") → (typeattr_schema_id, "Id"), 1
+#define PSIO_REFLECT_KW_schemaId(...) (typeattr_schema_id, __VA_ARGS__), 1
 
 // Classify each item into `(KIND, payload...)`.  Bare ident → (field, ident).
 #define PSIO_REFLECT_CLASSIFY(s, _, item)                                  \
@@ -1018,6 +1030,7 @@ namespace psio {
 #define PSIO_REFLECT_KIND_method                 5
 #define PSIO_REFLECT_KIND_typeattr_transparent   6
 #define PSIO_REFLECT_KIND_typeattr_invariant     7
+#define PSIO_REFLECT_KIND_typeattr_schema_id     8
 #define PSIO_REFLECT_KEEP_METHOD(s, _, kt) \
    BOOST_PP_EQUAL(5, BOOST_PP_CAT(PSIO_REFLECT_KIND_, BOOST_PP_TUPLE_ELEM(0, kt)))
 
@@ -1084,6 +1097,7 @@ namespace psio {
 #define PSIO_REFLECT_TYPEATTR_TUPLE_typeattr_transparent(kt)                   \
    , ::std::tuple{::psio::transparent_spec{}}
 #define PSIO_REFLECT_TYPEATTR_TUPLE_typeattr_invariant(kt)                     /**/
+#define PSIO_REFLECT_TYPEATTR_TUPLE_typeattr_schema_id(kt)                     /**/
 
 #define PSIO_REFLECT_TYPEATTR_PRESENT(s, _, kt)                                \
    BOOST_PP_CAT(PSIO_REFLECT_TYPEATTR_PRESENT_, BOOST_PP_TUPLE_ELEM(0, kt))
@@ -1095,6 +1109,7 @@ namespace psio {
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_max_dyn_data  1
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_transparent   1
 #define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_invariant     /**/
+#define PSIO_REFLECT_TYPEATTR_PRESENT_typeattr_schema_id     /**/
 
 #define PSIO_REFLECT_TYPE_ANN_(TYPE, KIND_SEQ)                                             \
    BOOST_PP_IIF(BOOST_PP_CHECK_EMPTY(                                                      \
@@ -1123,6 +1138,7 @@ namespace psio {
 #define PSIO_REFLECT_INVARIANT_FN_typeattr_max_fields(TYPE, I, kt)    /**/
 #define PSIO_REFLECT_INVARIANT_FN_typeattr_max_dyn_data(TYPE, I, kt)  /**/
 #define PSIO_REFLECT_INVARIANT_FN_typeattr_transparent(TYPE, I, kt)   /**/
+#define PSIO_REFLECT_INVARIANT_FN_typeattr_schema_id(TYPE, I, kt)  /**/
 #define PSIO_REFLECT_INVARIANT_FN_typeattr_invariant(TYPE, I, kt)                          \
       static ::psio::codec_status _psio_invariant_(                                        \
          ::std::integral_constant<::std::size_t, I>, const psio_T_& psio_v_) noexcept      \
@@ -1149,6 +1165,7 @@ namespace psio {
 #define PSIO_REFLECT_INVARIANT_ONE_typeattr_max_fields(I)    /**/
 #define PSIO_REFLECT_INVARIANT_ONE_typeattr_max_dyn_data(I)  /**/
 #define PSIO_REFLECT_INVARIANT_ONE_typeattr_transparent(I)   /**/
+#define PSIO_REFLECT_INVARIANT_ONE_typeattr_schema_id(I)  /**/
 #define PSIO_REFLECT_INVARIANT_ONE_typeattr_invariant(I)     +1
 #define PSIO_REFLECT_INVARIANT_AT_(r, _, I, kt) \
    BOOST_PP_CAT(PSIO_REFLECT_INVARIANT_AT_, BOOST_PP_TUPLE_ELEM(0, kt))(I)
@@ -1159,6 +1176,7 @@ namespace psio {
 #define PSIO_REFLECT_INVARIANT_AT_typeattr_max_fields(I)    /**/
 #define PSIO_REFLECT_INVARIANT_AT_typeattr_max_dyn_data(I)  /**/
 #define PSIO_REFLECT_INVARIANT_AT_typeattr_transparent(I)   /**/
+#define PSIO_REFLECT_INVARIANT_AT_typeattr_schema_id(I)  /**/
 #define PSIO_REFLECT_INVARIANT_AT_typeattr_invariant(I)     +(I)
 #define PSIO_REFLECT_INVARIANT_(TYPE, KIND_SEQ)                                            \
       static constexpr ::std::size_t _psio_invariant_count_ =                              \
@@ -1169,6 +1187,82 @@ namespace psio {
                     "psio: PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)                         \
                     ") declares invariant(...) twice: a type has one invariant");          \
       PSIO_PP_SEQ_FOR_EACH_I_(PSIO_REFLECT_INVARIANT_FN_, TYPE, KIND_SEQ)
+
+namespace psio
+{
+   // ── Reserved Custom ids ─────────────────────────────────────────────
+   //
+   // The ids PSIO's own types have in the Schema IR. A schema-driven codec
+   // reads a meaning of its own into each, so no custom type may claim one:
+   //
+   //   "bool", "char"               Int{1}, Int{8} read as a boolean / a char
+   //   "string", "utf8", "hex"      a byte list / array: raw string, UTF-8
+   //                                string, bytes written as hex
+   //   "bitvector", "bitlist"       the bit types
+   //   "map", "set"                 a list in canonical key order
+   //   "box"                        psio::Box: the inner type, boxed
+   //   "json"                       psio::json_value: a UTF-8 string holding
+   //                                JSON text, presented as that JSON value
+   //   "unknown"                    a type the schema builder has no node for
+   //   "time-point", "duration",    the time values (time.hpp), alone or
+   //   "monotonic"                  followed by "-...": "time-point-seconds",
+   //                                "duration-1/60", ...
+   //
+   // The schemaId keyword below and schema_custom_id (adapter.hpp) refuse
+   // one at compile time (every id a C++ type can give is a constant),
+   // CustomHandlers::add at run time, and Rust's derives and schema builder
+   // likewise (pssz_schema_ir.rs reserved_custom_id).
+   constexpr bool reserved_custom_id(std::string_view id) noexcept
+   {
+      for (const std::string_view word :
+           {std::string_view{"bool"}, std::string_view{"char"}, std::string_view{"string"},
+            std::string_view{"utf8"}, std::string_view{"hex"}, std::string_view{"bitvector"},
+            std::string_view{"bitlist"}, std::string_view{"map"}, std::string_view{"set"},
+            std::string_view{"box"}, std::string_view{"json"}, std::string_view{"unknown"}})
+         if (id == word)
+            return true;
+      for (const std::string_view word : {std::string_view{"time-point"},
+                                          std::string_view{"duration"},
+                                          std::string_view{"monotonic"}})
+         if (id == word || (id.starts_with(word) && id[word.size()] == '-'))
+            return true;
+      return false;
+   }
+}  // namespace psio
+
+// The schema id: every `schemaId("Id")` becomes one element of an array (after
+// a leading empty one, so that the array always has an element type), which
+// gives both the id and the "declared twice" diagnostic. adapter.hpp reads
+// `_psio_schema_id_` (reflected_schema_id, schema_custom_v, schema_custom_id).
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_(r, _, kt) \
+   BOOST_PP_CAT(PSIO_REFLECT_SCHEMA_ID_ELEM_, BOOST_PP_TUPLE_ELEM(0, kt))(kt)
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_field(kt)                  /**/
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_attrfield(kt)              /**/
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_method(kt)                 /**/
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_typeattr_dwnc(kt)          /**/
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_typeattr_max_fields(kt)    /**/
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_typeattr_max_dyn_data(kt)  /**/
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_typeattr_transparent(kt)   /**/
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_typeattr_invariant(kt)     /**/
+#define PSIO_REFLECT_SCHEMA_ID_ELEM_typeattr_schema_id(kt) \
+   , ::std::string_view{PSIO_PP_REST1_ kt}
+#define PSIO_REFLECT_SCHEMA_ID_(TYPE, KIND_SEQ)                                            \
+      static constexpr ::std::array _psio_schema_ids_{                                     \
+         ::std::string_view{}                                                              \
+         PSIO_PP_SEQ_FOR_EACH_(PSIO_REFLECT_SCHEMA_ID_ELEM_, _, KIND_SEQ)};                \
+      static_assert(_psio_schema_ids_.size() <= 2,                                         \
+                    "psio: PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)                         \
+                    ") declares schemaId(...) twice: a type has one schema id");           \
+      static constexpr ::std::string_view _psio_schema_id_ = _psio_schema_ids_.back();     \
+      static_assert(_psio_schema_ids_.size() == 1 || !_psio_schema_id_.empty(),            \
+                    "psio: schemaId(\"Id\") in PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)     \
+                    ") needs an id that is not empty");                                    \
+      static_assert(!::psio::reserved_custom_id(_psio_schema_id_),                         \
+                    "psio: schemaId(...) in PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)        \
+                    ") names an id reserved for one of PSIO's own types (bool, char, "     \
+                    "string, utf8, hex, bitvector, bitlist, map, set, box, json, "         \
+                    "unknown, time-point..., duration..., monotonic...): a schema-driven " \
+                    "codec would read the built-in meaning into it");
 
 // PSIO_REFLECT(TYPE)             — zero-field marker (resource opt-in)
 // PSIO_REFLECT(TYPE, f1, f2, …)  — record / struct
@@ -1543,6 +1637,7 @@ namespace psio {
       PSIO_REFLECT_MEMBER_ANN_(FKSEQ)                                                    \
       PSIO_REFLECT_TYPE_ANN_(TYPE, KIND_SEQ)                                             \
       PSIO_REFLECT_INVARIANT_(TYPE, KIND_SEQ)                                            \
+      PSIO_REFLECT_SCHEMA_ID_(TYPE, KIND_SEQ)                                            \
       static_assert(::psio::detail::reflected_names_distinct(_names_array_, method_names), \
                     "psio: PSIO_REFLECT(" BOOST_PP_STRINGIZE(TYPE)                       \
                     ") lists a name twice (a field and a method may not share a name)"); \

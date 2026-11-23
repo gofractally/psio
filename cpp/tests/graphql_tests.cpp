@@ -10,7 +10,10 @@
 #include <catch.hpp>
 
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1290,15 +1293,16 @@ TEST_CASE("graphql: limits", "[graphql][limits]")
    CHECK(first_message(limited("{ items { id name } }", lim)) == "Query complexity exceeds the limit of 20.");
    lim.default_list_size = 2;  // 1 + 2 * 2
    CHECK(first_message(limited("{ items { id name } }", lim)) == "");
-   // accounts (1) + first * (edges (1) + 10 * (node (1) + id (1)))
+   // A connection's page is counted once, as the length of `edges`:
+   // accounts (1) + edges (1) + first * (node (1) + id (1))
    lim                = {};
-   lim.max_complexity = 1 + 3 * 21;
+   lim.max_complexity = 2 + 3 * 2;
    CHECK(first_message(limited("{ accounts(first: 3) { edges { node { id } } } }", lim)) == "");
-   CHECK(first_message(limited("{ accounts(first: 4) { edges { node { id } } } }", lim)) == "Query complexity exceeds the limit of 64.");
+   CHECK(first_message(limited("{ accounts(first: 4) { edges { node { id } } } }", lim)) == "Query complexity exceeds the limit of 8.");
    // ... also when the page size is a variable (checked per request).
    CHECK(first_message(limited("query ($n: Int) { accounts(first: $n) { edges { node { id } } } }", lim, R"({"n": 3})")) == "");
    CHECK(first_message(limited("query ($n: Int) { accounts(last: $n) { edges { node { id } } } }", lim, R"({"n": 4})")) ==
-         "Query complexity exceeds the limit of 64.");
+         "Query complexity exceeds the limit of 8.");
    // A list of scalars costs its length; a huge page is refused up front.
    lim = {};
    CHECK(first_message(limited("{ squares(first: 2147483647) }", lim)) == "Query complexity exceeds the limit of 100000.");
@@ -1433,4 +1437,237 @@ TEST_CASE("graphql: time scalars are named per unit", "[graphql][time]")
          "MonotonicMilliseconds_u32");
    CHECK(name.operator()<c::time_point<c::steady_clock, c::duration<std::int64_t, std::ratio<60>>>>() ==
          "Monotonic_60_1");
+}
+
+// ── The complexity estimate (docs/graphql.md "Complexity") ─────────────────
+//
+// cost(field) = its own cost + size * cost(its selection); size is the page
+// size for a list, 1 otherwise; a connection's page size is the length of
+// its `edges` and is counted there, once.
+namespace gcost
+{
+   struct Row
+   {
+      int a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0, i = 0;
+      PSIO_REFLECT(Row, a, b, c, d, e, f, g, h, i)
+   };
+   struct Index
+   {
+      using table    = std::map<std::string, Row, std::less<>>;
+      using iterator = table::const_iterator;
+      const table* t;
+      iterator     begin() const { return t->begin(); }
+      iterator     end() const { return t->end(); }
+      iterator     lower_bound(std::span<const char> k) const
+      {
+         return t->lower_bound(std::string_view{k.data(), k.size()});
+      }
+      iterator upper_bound(std::span<const char> k) const
+      {
+         return t->upper_bound(std::string_view{k.data(), k.size()});
+      }
+      std::span<const char> key(iterator it) const { return {it->first.data(), it->first.size()}; }
+      Row                   row(iterator it) const { return it->second; }
+   };
+   const Index::table& rows_table()
+   {
+      static const Index::table t = [] {
+         Index::table rows;
+         for (int n = 0; n < 3; ++n)
+            rows[std::string(1, static_cast<char>('a' + n))] = Row{n};
+         return rows;
+      }();
+      return t;
+   }
+   struct Parent
+   {
+      int  id = 0;
+      auto children(gql::page_args page) const { return gql::paginate(Index{&rows_table()}, page, 100000); }
+      // A list with a page-size argument, and one without.
+      std::vector<Row> some(std::optional<std::int32_t> first) const
+      {
+         return std::vector<Row>(static_cast<std::size_t>(first.value_or(1)));
+      }
+      PSIO_REFLECT(Parent, id, method(children, page), method(some, first))
+   };
+   struct ParentIndex
+   {
+      using table    = std::map<std::string, Parent, std::less<>>;
+      using iterator = table::const_iterator;
+      const table* t;
+      iterator     begin() const { return t->begin(); }
+      iterator     end() const { return t->end(); }
+      iterator     lower_bound(std::span<const char> k) const
+      {
+         return t->lower_bound(std::string_view{k.data(), k.size()});
+      }
+      iterator upper_bound(std::span<const char> k) const
+      {
+         return t->upper_bound(std::string_view{k.data(), k.size()});
+      }
+      std::span<const char> key(iterator it) const { return {it->first.data(), it->first.size()}; }
+      Parent                row(iterator it) const { return it->second; }
+   };
+   const ParentIndex::table& parents_table()
+   {
+      static const ParentIndex::table t{{"p", Parent{1}}, {"q", Parent{2}}};
+      return t;
+   }
+   struct Query
+   {
+      auto rows(gql::page_args page) const { return gql::paginate(Index{&rows_table()}, page, 100000); }
+      auto parents(gql::page_args page) const
+      {
+         return gql::paginate(ParentIndex{&parents_table()}, page, 100000);
+      }
+      std::vector<Row>              list() const { return std::vector<Row>(2); }
+      std::vector<std::vector<int>> grid() const { return {{1, 2}, {3}}; }
+      std::vector<int>              numbers(std::optional<std::int32_t> first) const
+      {
+         return std::vector<int>(static_cast<std::size_t>(first.value_or(1)));
+      }
+      // Neither a list nor a connection: `first` is an argument like any
+      // other, not a page size.
+      Row installed(std::optional<std::int32_t> gt, std::optional<std::int32_t> first) const
+      {
+         return Row{gt.value_or(0) + first.value_or(0)};
+      }
+      int    count(std::optional<std::int32_t> first, std::optional<std::int32_t> last) const
+      {
+         return first.value_or(0) + last.value_or(0);
+      }
+      Parent parent() const { return Parent{7}; }
+      PSIO_REFLECT(Query,
+                   method(rows, page),
+                   method(parents, page),
+                   method(list),
+                   method(grid),
+                   method(numbers, first),
+                   method(installed, gt, first),
+                   method(count, first, last),
+                   method(parent))
+   };
+   using api = gql::schema<Query>;
+
+   bool admitted(std::string_view text, std::uint64_t limit, std::string_view variables,
+                 std::uint32_t default_list_size)
+   {
+      gql::limits lim;
+      lim.max_complexity    = limit;
+      lim.default_list_size = default_list_size;
+      // The estimate is made before execution: keep what runs small.
+      lim.max_response_fields = 1;
+      std::string out;
+      api::run(Query{}, text, out, gql::request{.variables = variables}, lim);
+      return out.find("Query complexity exceeds the limit") == std::string::npos;
+   }
+   // The cost of a query: the smallest limit that admits it.
+   std::uint64_t cost_of(std::string_view text, std::string_view variables = {},
+                         std::uint32_t default_list_size = 10)
+   {
+      std::uint64_t lo = 0, hi = std::uint64_t{1} << 40;
+      REQUIRE(admitted(text, hi, variables, default_list_size));
+      while (lo < hi)
+      {
+         const std::uint64_t mid = lo + (hi - lo) / 2;
+         if (admitted(text, mid, variables, default_list_size))
+            hi = mid;
+         else
+            lo = mid + 1;
+      }
+      return lo;
+   }
+}  // namespace gcost
+
+TEST_CASE("graphql: the cost of a query", "[graphql][limits][complexity]")
+{
+   using gcost::cost_of;
+   // Scalars and objects: one per field.
+   CHECK(cost_of("{ parent { id } }") == 2);
+   CHECK(cost_of("{ a: parent { id } b: parent { id x: id } }") == 5);
+   CHECK(cost_of("{ __typename }") == 0);  // a meta field costs nothing
+   CHECK(cost_of("{ parent { __typename id } }") == 2);
+
+   // A list: the selection below times its length — `first` / `last` when
+   // the field has one and it is given, default_list_size otherwise.
+   CHECK(cost_of("{ list { a b } }") == 1 + 10 * 2);
+   CHECK(cost_of("{ list { a b } }", {}, 3) == 1 + 3 * 2);
+   CHECK(cost_of("{ numbers }") == 1 + 10);
+   CHECK(cost_of("{ numbers(first: 250) }") == 1 + 250);
+   CHECK(cost_of("{ numbers(first: 0) }") == 1);
+   CHECK(cost_of("query ($n: Int) { numbers(first: $n) }", R"({"n": 40})") == 1 + 40);
+   CHECK(cost_of("{ grid }") == 1 + 10 * 10);
+   CHECK(cost_of("{ parent { some(first: 7) { a b c } } }") == 1 + 1 + 7 * 3);
+   CHECK(cost_of("{ parent { some { a b c } } }") == 1 + 1 + 10 * 3);
+
+   // A connection: the page is the length of `edges`, counted once.
+   // rows (1) + edges (1) + N * (node (1) + K fields)
+   CHECK(cost_of("{ rows(first: 1000) { edges { node { a b c d e f g h i } } } }") ==
+         2 + 1000 * (1 + 9));
+   CHECK(cost_of("{ rows(last: 1000) { edges { node { a b c d e f g h i } } } }") ==
+         2 + 1000 * (1 + 9));
+   CHECK(cost_of("{ rows(first: 9000) { edges { node { a } } } }") == 2 + 9000 * 2);
+   CHECK(cost_of("{ rows(first: 1) { edges { node { a } } } }") == 2 + 2);
+   CHECK(cost_of("query ($n: Int) { rows(first: $n) { edges { node { a } } } }", R"({"n": 50})") ==
+         2 + 50 * 2);
+   // No page size given: default_list_size.
+   CHECK(cost_of("{ rows { edges { node { a b c } } } }") == 2 + 10 * 4);
+   CHECK(cost_of("{ rows { edges { node { a b c } } } }", {}, 25) == 2 + 25 * 4);
+   // `cursor` is one more field per edge; `pageInfo` is not per edge.
+   CHECK(cost_of("{ rows(first: 100) { edges { cursor node { a } } } }") == 2 + 100 * 3);
+   CHECK(cost_of("{ rows(first: 100) { edges { cursor } } }") == 2 + 100);
+   CHECK(cost_of("{ rows(first: 100) { edges { node { a } } pageInfo { hasNextPage endCursor } } }") ==
+         2 + 100 * 2 + 3);
+   CHECK(cost_of("{ rows(first: 100) { pageInfo { hasNextPage hasPreviousPage startCursor endCursor } } }") ==
+         1 + 5);
+   // An aliased `edges` is the page too; a fragment changes nothing.
+   CHECK(cost_of("{ rows(first: 100) { page: edges { node { a } } } }") == 2 + 100 * 2);
+   CHECK(cost_of("{ rows(first: 100) { ...P } } fragment P on RowConnection { edges { node { a } } }") ==
+         2 + 100 * 2);
+
+   // Nested connections multiply:
+   // parents (1) + edges (1) + N * (node (1) + id (1) + children (1) + edges (1) + M * (node (1) + a (1)))
+   CHECK(cost_of("{ parents(first: 20) { edges { node { id children(first: 50) { edges { node { a } } } } } } }") ==
+         2 + 20 * (4 + 50 * 2));
+   CHECK(cost_of("{ parents(first: 100) { edges { node { children(first: 100) { edges { node { a b } } } } } } }") ==
+         2 + 100 * (3 + 100 * 3));
+   // A list inside an edge takes its own size, not the page's.
+   CHECK(cost_of("{ parents(first: 20) { edges { node { some(first: 3) { a } } } } }") ==
+         2 + 20 * (2 + 3));
+   CHECK(cost_of("{ parents(first: 20) { edges { node { some { a } } } } }") == 2 + 20 * (2 + 10));
+
+   // A field that returns neither a list nor a connection: an Int argument
+   // named `first` or `last` is not a page size.
+   CHECK(cost_of("{ installed(gt: 5, first: 100000) { a b } }") == 3);
+   CHECK(cost_of("{ installed { a b } }") == 3);
+   CHECK(cost_of("{ count(first: 2000000000) }") == 1);
+   CHECK(cost_of("{ count(last: 2000000000) }") == 1);
+   CHECK(cost_of("{ count }") == 1);
+}
+
+TEST_CASE("graphql: what the default complexity limit admits", "[graphql][limits][complexity]")
+{
+   auto run = [](std::string_view text) {
+      std::string out;
+      gcost::api::run(gcost::Query{}, text, out);
+      return out;
+   };
+   const std::string refused = "Query complexity exceeds the limit of 100000.";
+   // The report that prompted the fix (psibase G53): a page of 1000 with
+   // nine node fields.
+   CHECK(run("{ rows(first: 1000) { edges { node { a b c d e f g h i } } } }").find("errors") ==
+         std::string::npos);
+   CHECK(run("{ rows(first: 9000) { edges { node { a } } } }").find("errors") == std::string::npos);
+   // 2 + N * (1 + K) <= 100 000: 9 999 rows of nine fields, not 10 000.
+   CHECK(run("{ rows(first: 9999) { edges { node { a b c d e f g h i } } } }").find("errors") ==
+         std::string::npos);
+   CHECK(run("{ rows(first: 10000) { edges { node { a b c d e f g h i } } } }").find(refused) !=
+         std::string::npos);
+   // Two levels of 100 with a few fields each fit; three levels of 100 do not.
+   CHECK(run("{ parents(first: 100) { edges { node { id children(first: 100) { edges { cursor node { a b c } } } } } } }")
+            .find("errors") == std::string::npos);
+   CHECK(run("{ parents(first: 1000) { edges { node { children(first: 1000) { edges { node { a } } } } } } }")
+            .find(refused) != std::string::npos);
+   // A page size no response could hold is refused up front.
+   CHECK(run("{ rows(first: 2147483647) { edges { cursor } } }").find(refused) != std::string::npos);
 }

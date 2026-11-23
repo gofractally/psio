@@ -1360,6 +1360,16 @@ psio_custom_compile_fail(transparent_length_bound CT_FAIL_TRANSPARENT_LENGTH_BOU
    "attached to a field whose shape is not in the spec's applies_to set")
 psio_custom_compile_fail(transparent_graphql_record CT_FAIL_TRANSPARENT_GRAPHQL_RECORD
    "a transparent type over a record, a list or a variant has no GraphQL mapping")
+psio_custom_compile_fail(schema_id_reserved CT_FAIL_SCHEMA_ID_RESERVED
+   "names an id reserved for one of PSIO's own types")
+psio_custom_compile_fail(schema_id_reserved_prefix CT_FAIL_SCHEMA_ID_RESERVED_PREFIX
+   "names an id reserved for one of PSIO's own types")
+psio_custom_compile_fail(schema_id_empty CT_FAIL_SCHEMA_ID_EMPTY
+   "needs an id that is not empty")
+psio_custom_compile_fail(schema_id_twice CT_FAIL_SCHEMA_ID_TWICE
+   "declares schemaId\\(...\\) twice: a type has one schema id")
+psio_custom_compile_fail(schema_id_and_invariant_id CT_FAIL_SCHEMA_ID_AND_INVARIANT_ID
+   "the schema id of this type is declared twice")
 psio_custom_compile_fail(invariant_twice CT_FAIL_INVARIANT_TWICE
    "declares invariant\\(...\\) twice: a type has one invariant")
 psio_custom_compile_fail(invariant_not_noexcept CT_FAIL_INVARIANT_NOT_NOEXCEPT
