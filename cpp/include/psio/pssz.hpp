@@ -3220,6 +3220,12 @@ namespace psio {
    //     inferred bound); New has no more fields than Old's maxFields and
    //     does not raise it.
    //
+   //   - a variant may gain alternatives at the end (docs/pssz-spec.md 7.5):
+   //     New's alternatives are Old's, in order, each evolved by these
+   //     rules, then new ones. A new alternative that is larger raises the
+   //     variant's bound; it is refused when that moves the width of
+   //     anything that holds the variant, as an appended field is.
+   //
    // A prefix field may itself have evolved (a nested record, or a vector /
    // array / optional / variant of one) provided it meets the same rules and
    // keeps its own width and presence form. The wire carries no schema, so
@@ -3323,7 +3329,9 @@ namespace psio {
             }
             else if constexpr (is_std_variant_v<TO> && is_std_variant_v<TN>)
             {
-               if constexpr (std::variant_size_v<TO> != std::variant_size_v<TN>)
+               // Old's alternatives; what at<I>(...) says for an appended
+               // one constrains no old value.
+               if constexpr (std::variant_size_v<TN> < std::variant_size_v<TO>)
                   return false;
                else
                   return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
@@ -3370,13 +3378,20 @@ namespace psio {
                                            ::psio::detail::assoc_entry_t<TN>,
                                            ann::entry_ann<TN, AN>>();
          else if constexpr (is_std_variant_v<TO> && is_std_variant_v<TN>)
-            return []<std::size_t... Is>(std::index_sequence<Is...>) {
-               return (annotation_widths_agree<std::variant_alternative_t<Is, TO>,
-                                               ann::at_ann<AO, Is>,
-                                               std::variant_alternative_t<Is, TN>,
-                                               ann::at_ann<AN, Is>>() &&
-                       ...);
-            }(std::make_index_sequence<std::variant_size_v<TO>>{});
+         {
+            // Old's alternatives (New may have appended some; fewer is not
+            // an evolution, and layout_evolves says so).
+            if constexpr (std::variant_size_v<TN> < std::variant_size_v<TO>)
+               return false;
+            else
+               return []<std::size_t... Is>(std::index_sequence<Is...>) {
+                  return (annotation_widths_agree<std::variant_alternative_t<Is, TO>,
+                                                  ann::at_ann<AO, Is>,
+                                                  std::variant_alternative_t<Is, TN>,
+                                                  ann::at_ann<AN, Is>>() &&
+                          ...);
+               }(std::make_index_sequence<std::variant_size_v<TO>>{});
+         }
          else if constexpr (is_std_tuple_v<TO> && is_std_tuple_v<TN> &&
                             !requires { typename TO::psio_annotated_tuple; } &&
                             !requires { typename TN::psio_annotated_tuple; })
@@ -3499,6 +3514,37 @@ namespace psio {
             else
                return false;
          }
+         else if constexpr (is_std_variant_v<Old> && is_std_variant_v<New>)
+         {
+            // docs/pssz-spec.md 7.5: alternatives may be appended. New's
+            // alternatives are Old's, in order, each evolved by these same
+            // rules, followed by any number of new ones (a variant has at
+            // most 256: its selector is one byte, and the codecs refuse a
+            // larger one at compile time). New's reader reads every value
+            // Old's writer produced — the selector and the payload are
+            // unchanged — and Old's reader rejects a value that holds an
+            // alternative it does not know, exactly as it rejects any value
+            // outside its type.
+            //
+            // A variant writes no offsets, so it has no width of its own to
+            // compare (auto_pssz_width of a variant is only the class of
+            // its bound). An appended alternative can raise that bound, 1 +
+            // the largest alternative, and with it the width of what holds
+            // the variant: a record, a tuple, an array, a bounded list or
+            // map. Each of those compares its own width where it is
+            // checked (the test just below this branch for a type,
+            // annotation_widths_agree for an annotated position), so a
+            // larger alternative that moves an enclosing width is refused
+            // there, as an appended field is.
+            if constexpr (std::variant_size_v<New> < std::variant_size_v<Old>)
+               return false;
+            else
+               return []<std::size_t... Is>(std::index_sequence<Is...>) {
+                  return (layout_evolves<std::variant_alternative_t<Is, Old>,
+                                         std::variant_alternative_t<Is, New>>() &&
+                          ...);
+               }(std::make_index_sequence<std::variant_size_v<Old>>{});
+         }
          else if constexpr (::psio::auto_pssz_width<Old>() != ::psio::auto_pssz_width<New>() ||
                             is_fixed_v<Old> != is_fixed_v<New>)
             return false;
@@ -3522,17 +3568,6 @@ namespace psio {
                return false;
             else
                return layout_evolves<typename Old::value_type, typename New::value_type>();
-         }
-         else if constexpr (is_std_variant_v<Old> && is_std_variant_v<New>)
-         {
-            if constexpr (std::variant_size_v<Old> != std::variant_size_v<New>)
-               return false;
-            else
-               return []<std::size_t... Is>(std::index_sequence<Is...>) {
-                  return (layout_evolves<std::variant_alternative_t<Is, Old>,
-                                         std::variant_alternative_t<Is, New>>() &&
-                          ...);
-               }(std::make_index_sequence<std::variant_size_v<Old>>{});
          }
          else if constexpr (Record<Old> && Record<New>)
             return record_evolves<Old, New>();

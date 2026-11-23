@@ -1303,9 +1303,18 @@ added after publication ([8](#8-evolution-what-may-change-after-publication)).
 A variant is one selector byte plus the alternative (at most 256
 alternatives). Text: `[index, value]` in `json`, `{"name": value}` in
 `ijson`, where the name is the alternative's type name
-([json.md](json.md#variant-alternative-names)). Adding an alternative is
-**not** accepted by `pssz_evolves_from` (old readers cannot read the new
-alternative).
+([json.md](json.md#variant-alternative-names)). **Alternatives may be
+appended** ([pssz-spec.md §7.5](pssz-spec.md#75-what-you-can-change-without-breaking-old-decoders)):
+`pssz_evolves_from<variant<A, B>, variant<A, B, C>>` is true. The new
+reader reads everything the old writer produced; an old reader rejects a
+value that holds the new alternative, as it rejects any value outside its
+type, so upgrade readers before writers. Removing, reordering, inserting or
+retyping an alternative is not compatible. A new alternative that is larger
+than the others raises the variant's bound (1 + the largest alternative);
+if that moves the offset width of what holds the variant — a record without
+a cap, a tuple, an array, a bounded list or map — the check refuses it,
+exactly as it refuses an appended field that moves a width
+([8.4](#84-summary)).
 
 ### 6.11 Tuple and pair
 
@@ -1604,8 +1613,10 @@ section of the examples file asserts four more, each
 
 Also incompatible, and rejected by the check: adding or removing
 `definitionWillNotChange()`; adding a field to a DWNC record; adding or
-removing `transparent()`; adding a variant alternative; changing an array
-length; replacing an enum by another enum type or changing a time unit.
+removing `transparent()`; removing, reordering, inserting or retyping a
+variant alternative (appending one is compatible,
+[6.10](#610-variant)); changing an array length; replacing an enum by
+another enum type or changing a time unit.
 
 ### 8.3 Annotations: bounds may only widen
 
@@ -1615,6 +1626,8 @@ rule, as [pssz-optional-evolution.md](pssz-optional-evolution.md) states it:
 
 1. **Fields.** `New`'s fields are `Old`'s, in order, followed only by
    optional fields; DWNC status is unchanged and a DWNC record gains none.
+   **Alternatives.** `New`'s variant alternatives are `Old`'s, in order,
+   followed by any number of new ones.
 2. **Widths.** The record's offset width is unchanged, and so is the width
    of every list, map, set, array, tuple and pair at and below every member.
 3. **Length bounds may only widen.** `New`'s range contains `Old`'s —
@@ -1670,7 +1683,9 @@ once published:
 | add a parameter or element that takes a tuple past 255 elements, a field that takes a record past 255 fields | no: not a type |
 | add an enumerator at a new value | yes in binary; text readers reject an unknown name (not seen by the check) |
 | change an enum's underlying type; renumber | no |
-| add a variant alternative | no |
+| append a variant alternative, no width moves | yes, one way: new readers read old data; old readers reject a value holding the new alternative |
+| append a variant alternative that is larger, so that the width of the record / tuple / array / bounded list holding the variant moves | **no** — reserve with `maxDynamicData` |
+| remove, reorder, insert or retype a variant alternative | no |
 | append an optional method parameter under the method's cap | yes |
 | change `json_string` / `ijson_number` | binary yes; breaks text clients |
 | rename a field | binary and key yes; breaks text and schema clients |

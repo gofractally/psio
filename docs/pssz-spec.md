@@ -1627,7 +1627,16 @@ not change.
 ✓ Raise a record's `max-dynamic-data` within the same width class, or
   declare one that is at least the bound inferred for the old type.
 ✓ Add a new alternative to a variant (provided the new alt is at the
-  end of the variant's alternative list).
+  end of the variant's alternative list). The new reader reads every old
+  value; an old reader rejects a value that holds the new alternative,
+  exactly as it rejects any value outside its type. A variant writes no
+  offsets, so it has no W of its own — but its bound is 1 + its largest
+  alternative (§3.2), and a new alternative larger than the others raises
+  it. As for an appended field, the change is compatible only if no W
+  changes: not that of the record, tuple, array, list, map or set that
+  holds the variant, at any depth. Under a record cap nothing moves; a
+  type that has only its rounding slack (§3.1) can lose it to a larger
+  alternative. A variant has at most 256 alternatives (§5.6).
 ✓ Evolve the inner type of a `Nested(T)` member by these same rules
   (§5.8). The member itself stays a byte list.
 

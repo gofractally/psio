@@ -76,6 +76,11 @@ reads every new value that is also a value of the old type. Exactly:
 
 1. *Fields.* New's fields are Old's, in order, followed only by optional
    fields; DWNC status is unchanged and a DWNC record gains none.
+   *Alternatives.* New's variant alternatives are Old's, in order, each
+   evolved by these rules, followed by any number of new ones
+   (`pssz-spec.md` §7.5). A variant writes no offsets and has no width of
+   its own; a new alternative that is larger raises its bound, and rule 2
+   refuses the change when that moves the width of what holds the variant.
 2. *Widths.* The record's automatic offset width is unchanged, and so is the
    width of every list, map, set, array, tuple and pair at and below every
    member (a member annotation, or the record's cap, can move those without
