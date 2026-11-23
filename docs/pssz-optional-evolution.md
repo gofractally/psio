@@ -52,8 +52,9 @@ fixtures and Rust agree. The trunk's explicit-profile goldens that pinned a
 selector for `optional<record>` were regenerated.
 
 **Strings.** A plain string is `Vector(u8)` carrying raw bytes: encode, decode,
-default validation and views do not check UTF-8. Strict validation checks every
-string. A string that must be UTF-8 says so in its type: the `utf8_string<N>`
+validation (default and strict) and views do not check UTF-8: a raw string is
+any bytes, and "strict" means exact-schema and canonical, not "strings are
+text". A string that must be UTF-8 says so in its type: the `utf8_string<N>`
 wrapper, or the `utf8` annotation (`psio::utf8`, `psio::utf8_spec{}`) on a
 `std::string` member or position — the two are the same type, enforced by
 encode, decode and both validation modes. There is no annotation that is

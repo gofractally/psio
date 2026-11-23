@@ -331,37 +331,21 @@ namespace psio {
       }
    };
 
+   // RESERVED — not implemented. No codec, schema emitter or validator
+   // reads hex_spec: attaching it to a member changes nothing. (It used to
+   // be checked by validate_strict alone; an annotation is either enforced
+   // by every codec or it is not an annotation.) Bytes that are written as
+   // hex text are a byte list (std::vector<std::uint8_t>,
+   // psio::byte_array<N>), whose ijson form is hex.
    struct hex_spec
    {
       using spec_category = runtime_spec_tag;
       using applies_to    = shape_set<ByteStringShape>;
 
-      std::uint32_t bytes     = 0;   // source byte count; wire length = 2 * bytes
+      std::uint32_t bytes     = 0;
       std::uint32_t field_num = 0;
 
       constexpr bool operator==(const hex_spec&) const = default;
-
-      // Semantic validator — every byte must be a hex digit. Length
-      // parity (even) is also required since hex strings encode pairs.
-      [[nodiscard]] static codec_status
-      validate(std::span<const char> bytes) noexcept
-      {
-         if ((bytes.size() & 1u) != 0u)
-            return codec_fail("hex_spec: odd-length hex string", 0,
-                               "hex_spec");
-         for (std::size_t i = 0; i < bytes.size(); ++i)
-         {
-            const auto c = static_cast<unsigned char>(bytes[i]);
-            const bool ok = (c >= '0' && c <= '9') ||
-                            (c >= 'a' && c <= 'f') ||
-                            (c >= 'A' && c <= 'F');
-            if (!ok)
-               return codec_fail("hex_spec: non-hex character",
-                                  static_cast<std::uint32_t>(i),
-                                  "hex_spec");
-         }
-         return codec_ok();
-      }
    };
 
    struct sorted_spec

@@ -2247,17 +2247,13 @@ namespace psio {
       //                  suffix slots this reader's layout does not know. Such
       //                  frames are structurally valid (compatible read);
       //                  exact-schema callers reject them.
-      //   strict_strings (in)  strict mode: every plain string must be UTF-8.
-      //                  By default a String is Vector(u8) carrying raw bytes
-      //                  and passes through unchecked.
       //   exact          (in)  exact-schema mode (validate_strict): the bytes of
       //                  a nested value must themselves pass exact validation
       //                  as their type (nested.hpp).
       struct validate_flags
       {
-         bool has_unknown    = false;
-         bool strict_strings = false;
-         bool exact          = false;
+         bool has_unknown = false;
+         bool exact       = false;
       };
 
       template <std::size_t W, bool Auto, typename T, typename A = no_ann>
@@ -2758,13 +2754,12 @@ namespace psio {
          }
          else if constexpr (std::is_same_v<T, std::string>)
          {
-            // A plain std::string is Vector(u8): raw bytes pass through.
-            // UTF-8 is checked in strict mode, wherever the utf8 annotation
-            // is stated for the position (check_position: every reader and
-            // the encoder), and by the utf8_string<N> wrapper.
-            if (flags && flags->strict_strings)
-               return ::psio::utf8_spec::validate(
-                  std::span<const char>(src.data() + pos, end - pos));
+            // A plain std::string is Vector(u8): any bytes, in every mode
+            // (strict validation included: "strict" is exact-schema and
+            // canonical, not "strings are text"). UTF-8 is checked where the
+            // utf8 annotation is stated for the position (check_position:
+            // every reader and the encoder) and by the utf8_string<N>
+            // wrapper.
             return codec_ok();
          }
          else if constexpr (is_std_array_v<T>)
@@ -2905,7 +2900,7 @@ namespace psio {
       {
          if (auto cap = check_max_dynamic<T>(bytes); !cap.ok())
             return cap;
-         validate_flags flags{.has_unknown = false, .strict_strings = true, .exact = true};
+         validate_flags flags{.has_unknown = false, .exact = true};
          auto st = validate_value<W, Auto, T>(bytes, 0, bytes.size(), depth, &flags);
          if (!st.ok())
             return st;

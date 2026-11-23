@@ -1116,7 +1116,7 @@ list**. (C++ `psio::nested<T>`, `#include <psio/nested.hpp>`; Schema IR
   | reader of the enclosing value | inner bytes must be |
   |---|---|
   | compatible (`validate`, `validate_or_throw`, `validate_pssz_compatible`, `decode_pssz_checked`, checked views) | a valid T; unknown appended optional fields inside it are accepted and reported with the enclosing value's |
-  | exact (`validate_strict`) | the one canonical encoding of a T: no unknown fields, strict strings, every type-level rule of T |
+  | exact (`validate_strict`) | the one canonical encoding of a T: no unknown fields, every type-level rule of T |
 
   Bytes that are not a T, a fixed-size T followed by a trailing byte, an
   inner record that stores a trailing `None` (§7.2) — all are rejections of
@@ -1624,9 +1624,10 @@ A pssz decoder can produce the following error categories:
   position N-1.
 - **bitlist_no_delimiter** — bitlist payload contains no 1-bit, so
   no length can be derived.
-- **utf8_invalid** — a string field contains bytes not forming valid
-  UTF-8 (strict mode only; default decoders pass strings through
-  uninterpreted).
+- **utf8_invalid** — a UTF-8 string (`String`: schema id `utf8`) contains
+  bytes not forming valid UTF-8. Every reader and the encoder report it. A
+  raw string (schema id `string`) is any bytes and is never checked, in
+  strict validation either: strict means exact-schema and canonical.
 - **cap_exceeded** — buffer size exceeds the type's
   `max-dynamic-data: N` cap.
 - **entries_not_ascending** — the entries of a map or the elements of a

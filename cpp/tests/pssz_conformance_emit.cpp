@@ -85,7 +85,7 @@ namespace
    // ── What the implementation does with a frame ─────────────────────────
    struct Seen
    {
-      std::string expect;  // canonical | canonical-nonstrict | unknown | reject
+      std::string expect;  // canonical | unknown | reject
       std::string reason;
       Bytes       reencoded;
    };
@@ -153,7 +153,8 @@ namespace
       }
       if (again != bytes)
          die(where + ": a valid frame without unknown fields does not re-encode to itself");
-      return {strict ? "canonical" : "canonical-nonstrict", "", {}};
+      if (!strict) die(where + ": validate_strict rejects a canonical frame validate accepts");
+      return {"canonical", "", {}};
    }
 
    // ── What the rules say it should do ───────────────────────────────────
@@ -164,7 +165,6 @@ namespace
       std::optional<Bytes> reencoded;
    };
    Want canonical() { return {"canonical", "", {}}; }
-   Want nonstrict() { return {"canonical-nonstrict", "", {}}; }
    Want unknown(Bytes reencoded) { return {"unknown", "", std::move(reencoded)}; }
    Want reject(std::string reason = "") { return {"reject", std::move(reason), {}}; }
    Want record_only() { return {"", "", {}}; }
@@ -190,14 +190,12 @@ namespace
             die(name + ": expected re-encoding " + to_hex(*want.reencoded) + ", got " +
                 to_hex(seen.reencoded));
       }
-      else if (seen.expect == "canonical-nonstrict")
-         die(name + ": unexpected strict-only rejection");
       Row row{name,
               cls,
               type,
               std::string(format_name<F>()),
               to_hex(bytes),
-              seen.expect == "canonical-nonstrict" ? "canonical" : seen.expect,
+              seen.expect,
               seen.reason,
               to_hex(seen.reencoded),
               value,
@@ -1652,12 +1650,12 @@ namespace
       corpus(c, "tags_empty", AnnTags{});
       corpus(c, "tags_full", AnnTags{Vec<Raw>(8, s16)});
       corpus(c, "raw_tags", AnnRawTags{{"ab", s16}});
-      // A raw string element carries any bytes (strict validation, which
-      // checks every plain string, is the one reader that refuses them):
-      // with the other raw non-UTF-8 rows, which have no JSON text.
+      // A raw string element carries any bytes, for every reader (strict
+      // validation included): with the other raw non-UTF-8 rows, which
+      // have no JSON text.
       formats([&]<typename F>() {
          add<F, AnnRawTags>("string-raw-non-utf8", "annotated_raw_tags",
-                            must_encode<F>(AnnRawTags{{"\xff", s16}}, c), nonstrict());
+                            must_encode<F>(AnnRawTags{{"\xff", s16}}, c), canonical());
       });
       corpus(c, "grid", AnnGrid{{{1, 2, 3, 4}, {}, {5}}});
       corpus(c, "opt_none", AnnOpt{});
@@ -2274,14 +2272,14 @@ namespace
          {
             const std::string n = std::string("invalid_") + s.name;
             const char*       r = "string-raw-non-utf8";
-            // A raw string carries any bytes. Every entry point accepts them
-            // except C++ validate_strict, which checks every plain string.
-            add<F, Raw>(r, n, text(s.bytes), nonstrict());
+            // A raw string carries any bytes. Every entry point accepts them,
+            // validate_strict included.
+            add<F, Raw>(r, n, text(s.bytes), canonical());
             add<F, Vec<Raw>>(r, n + "/in_vector", list.template operator()<Vec<Raw>>(s.bytes),
-                             nonstrict());
-            add<F, Opt<Raw>>(r, n + "/in_optional", some(s.bytes), nonstrict());
-            add<F, StrRec>(r, n + "/in_record", record(s.bytes, "ok", "ok"), nonstrict());
-            add<F, R0>(r, n + "/in_r0", rec_as(wof<F, R0>(), 7, s.bytes), nonstrict());
+                             canonical());
+            add<F, Opt<Raw>>(r, n + "/in_optional", some(s.bytes), canonical());
+            add<F, StrRec>(r, n + "/in_record", record(s.bytes, "ok", "ok"), canonical());
+            add<F, R0>(r, n + "/in_r0", rec_as(wof<F, R0>(), 7, s.bytes), canonical());
             // The UTF-8 types reject them everywhere.
             add<F, Text>(c, n, text(s.bytes), reject(reason(s)));
             add<F, Text4>(c, n, text(s.bytes), reject(reason(s)));
@@ -2305,7 +2303,7 @@ namespace
                       reject("utf8_spec: codepoint out of range"));
          add<F, Text>(c, "invalid_above_10ffff", hx("f4908080"),
                       reject("utf8_spec: codepoint out of range"));
-         add<F, Raw>("string-raw-non-utf8", "invalid_surrogate", hx("eda080"), nonstrict());
+         add<F, Raw>("string-raw-non-utf8", "invalid_surrogate", hx("eda080"), canonical());
          add<F, Text>(c, "valid_nul", hx("00"), canonical());
          add<F, Text>(c, "valid_max_scalar", hx("f48fbfbf"), canonical());
 
