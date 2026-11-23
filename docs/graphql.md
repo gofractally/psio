@@ -112,9 +112,10 @@ shape.
 | 64-bit integers | `Int64`, `UInt64` — a number up to 2^53 − 1, a string beyond |
 | `psio::uint128`, `int128`, `uint256` | `UInt128`, `Int128`, `UInt256` — decimal strings |
 | byte sequences (`vector`/`array` of `char`/`unsigned char`/`std::byte`, `byte_array<N>`) | `Bytes` — hex string |
-| `system_clock` time point | `DateTime` — RFC 3339 UTC |
+| `system_clock` time point | `DateTimeSeconds`, `DateTimeMilliseconds`, `DateTimeMicroseconds`, `DateTimeNanoseconds`, or `DateTime_<num>_<den>`, by the unit of its ticks — RFC 3339 UTC |
 | `std::chrono::duration` | `Seconds`, `Milliseconds`, `Microseconds`, `Nanoseconds`, or `Duration_<num>_<den>` — the tick count |
 | time point of another clock (monotonic) | `MonotonicSeconds`, `MonotonicMilliseconds`, `MonotonicMicroseconds`, `MonotonicNanoseconds`, or `Monotonic_<num>_<den>` — the tick count |
+| any of the three with a tick integer that is not a signed 64-bit one | the name above followed by `_i32`, `_u32`, `_u64`, …: `Seconds_u32`, `DateTimeMilliseconds_i32` |
 | type with a text adapter (`PSIO_ADAPTER(T, psio::text_category, …)`), of any shape — record, enum, transparent wrapper, `std::variant`, `std::tuple` | scalar named after the type (the adapter's `schema_id`, else the reflected name) — a string holding the adapter's text |
 | transparent type (`PSIO_REFLECT(T, transparent(), member)`) over a scalar | scalar named after the type (its reflected name), with the member's text: `Id` over a 64-bit integer reads and writes as `UInt64` does, a wrapped byte list as `Bytes` does. A transparent type over a record, a list or a variant has no mapping without a text adapter (a compile error): expose its member |
 | `psio::view<T, Fmt, Store>`, `psio::buffer<T, Fmt, Store>`, `std::reference_wrapper<T>` | `T` (see [Views](#views)). The same record reached through different sources is one GraphQL type |
@@ -127,9 +128,17 @@ violates it a field error ("Cannot represent value: ...").
 
 Scalars are written by `psio::ijson`'s writer and arguments and variables
 are read by its typed reader, including the custom scalars: `UInt64` accepts
-`7` and `"18446744073709551615"`, `DateTime` any RFC 3339 date-time,
+`7` and `"18446744073709551615"`, a `DateTime…` scalar any RFC 3339
+date-time its unit can hold,
 `Bytes` hex of either case. `Int` arguments are checked against the C++
 parameter (an `std::int8_t` parameter rejects `300` at validation).
+
+A time scalar is named per unit (and per tick integer) because the value a
+name admits depends on both: `DateTimeSeconds` refuses a fractional second
+that `DateTimeMilliseconds` accepts, and `Seconds_u32` refuses a negative
+count. These are the names Rust's `async-graphql` scalars have
+(`psio::graphql_scalars`), so one schema describes a service written in
+either language.
 
 Decisions worth knowing:
 
@@ -397,7 +406,7 @@ WebAssembly (no WASI sysroot on the machine).
   at most `max_errors` errors are returned.
 - Custom scalars are checked by name for variables only where every C++ type
   with that name accepts the same values (`UInt64`, `Int64`, …); a variable
-  of type `Int`, `Float`, `String`, `Bytes`, `DateTime` or a duration that
+  of type `Int`, `Float`, `String`, `Bytes`, a time point or a duration that
   the specific C++ parameter rejects (an `std::int8_t` given `300`) is a
   field error at the field that uses it, not a request error.
 
