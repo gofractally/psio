@@ -30,14 +30,26 @@ use std::ops::Range;
 /// C++ `kMaxValidationDepth`.
 pub const MAX_DEPTH: usize = 64;
 
-thread_local! { static DECODE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-thread_local! { static ENCODE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-thread_local! {
+/// What the readers of one thread share: one thread-local, so that a
+/// top-level read reaches it once on the way in and once on the way out.
+struct ReaderState {
+    /// The depth of the node a reader called now would be.
+    depth: std::cell::Cell<usize>,
     // Outside a session (a direct trait call) unknown optional suffix fields
     // are accepted, as C++ `decode` / `validate` do.
-    static ALLOW_UNKNOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
-    static SAW_UNKNOWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    allow_unknown: std::cell::Cell<bool>,
+    saw_unknown: std::cell::Cell<bool>,
 }
+thread_local! {
+    static READER: ReaderState = const {
+        ReaderState {
+            depth: std::cell::Cell::new(0),
+            allow_unknown: std::cell::Cell::new(true),
+            saw_unknown: std::cell::Cell::new(false),
+        }
+    };
+}
+thread_local! { static ENCODE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 /// Scope of one top-level decode or validation. `allow == false` is the exact
 /// reader: an unknown optional suffix field anywhere in the tree is an error.
@@ -47,40 +59,96 @@ pub struct DecodeSession {
 }
 impl DecodeSession {
     pub fn enter(allow: bool) -> Self {
-        Self {
-            previous_allow: ALLOW_UNKNOWN.with(|v| v.replace(allow)),
-            previous_unknown: SAW_UNKNOWN.with(|v| v.replace(false)),
-        }
+        Self::enter_at(allow).0
+    }
+    /// [`enter`](Self::enter), and the depth of the node a reader called now
+    /// would be ([`decode_depth`]).
+    #[inline]
+    pub fn enter_at(allow: bool) -> (Self, usize) {
+        READER.with(|reader| {
+            (
+                Self {
+                    previous_allow: reader.allow_unknown.replace(allow),
+                    previous_unknown: reader.saw_unknown.replace(false),
+                },
+                reader.depth.get(),
+            )
+        })
     }
     pub fn has_unknown(&self) -> bool {
-        SAW_UNKNOWN.with(|v| v.get())
+        READER.with(|reader| reader.saw_unknown.get())
     }
 }
 impl Drop for DecodeSession {
+    #[inline]
     fn drop(&mut self) {
-        ALLOW_UNKNOWN.with(|v| v.set(self.previous_allow));
-        SAW_UNKNOWN.with(|v| v.set(self.previous_unknown || v.get()));
+        READER.with(|reader| {
+            reader.allow_unknown.set(self.previous_allow);
+            reader.saw_unknown.set(self.previous_unknown || reader.saw_unknown.get());
+        })
     }
 }
+#[cold]
 fn unknown_fields() -> PsszResult<()> {
-    SAW_UNKNOWN.with(|v| v.set(true));
-    if ALLOW_UNKNOWN.with(|v| v.get()) {
-        Ok(())
-    } else {
-        Err(PsszError::new("pssz: unknown fields rejected by exact reader"))
+    READER.with(|reader| {
+        reader.saw_unknown.set(true);
+        if reader.allow_unknown.get() {
+            Ok(())
+        } else {
+            Err(PsszError::new("pssz: unknown fields rejected by exact reader"))
+        }
+    })
+}
+
+/// Scope in which a checked reader runs inside a trusted read (a type
+/// without a trusted reader of its own): unknown fields are accepted, as a
+/// compatible reader does, and what the scope saw stays in it.
+pub struct TrustedScope {
+    allow: bool,
+    unknown: bool,
+}
+impl TrustedScope {
+    pub fn enter() -> Self {
+        READER.with(|reader| Self { allow: reader.allow_unknown.replace(true), unknown: reader.saw_unknown.get() })
+    }
+}
+impl Drop for TrustedScope {
+    fn drop(&mut self) {
+        READER.with(|reader| {
+            reader.allow_unknown.set(self.allow);
+            reader.saw_unknown.set(self.unknown);
+        })
     }
 }
 
+/// The default `PsszUnpack::pssz_unpack_trusted`: the checked reader, in a
+/// [`TrustedScope`]; bytes it refuses are a panic.
+#[track_caller]
+pub fn unpack_trusted_by_checking<F: PsszFormat, T: PsszUnpack<F>>(bytes: &[u8]) -> T {
+    let result = {
+        let _scope = TrustedScope::enter();
+        T::pssz_unpack(bytes)
+    };
+    match result {
+        Ok(value) => value,
+        Err(error) => crate::pssz::trusted_bytes_invalid(error),
+    }
+}
+
+/// The guard of a reader that reads its depth from the thread (a
+/// hand-written codec): the readers in this crate and the derives are handed
+/// their depth (`PsszUnpack::pssz_unpack_at_depth`).
 pub struct DecodeDepth;
 impl DecodeDepth {
     #[inline]
     pub fn enter() -> PsszResult<Self> {
-        DECODE_DEPTH.with(|depth| {
+        READER.with(|reader| {
             // Root is node 0. Node 64 is allowed; a child at 65 is rejected.
-            if depth.get() > MAX_DEPTH {
+            let depth = reader.depth.get();
+            if depth > MAX_DEPTH {
                 return Err(PsszError::new("pssz: max depth exceeded"));
             }
-            depth.set(depth.get() + 1);
+            reader.depth.set(depth + 1);
             Ok(Self)
         })
     }
@@ -88,7 +156,7 @@ impl DecodeDepth {
 impl Drop for DecodeDepth {
     #[inline]
     fn drop(&mut self) {
-        DECODE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        READER.with(|reader| reader.depth.set(reader.depth.get().saturating_sub(1)));
     }
 }
 
@@ -96,10 +164,43 @@ impl Drop for DecodeDepth {
 /// string, a bit type): the same check, with nothing to count and undo.
 #[inline]
 pub fn decode_leaf() -> PsszResult<()> {
-    if DECODE_DEPTH.with(|depth| depth.get()) > MAX_DEPTH {
-        return Err(PsszError::new("pssz: max depth exceeded"));
+    decode_node(decode_depth())
+}
+
+/// The check [`DecodeDepth::enter`] makes, for a reader that is handed the
+/// depth of its node: node `depth` exists iff `depth <= MAX_DEPTH`.
+#[inline(always)]
+pub fn decode_node(depth: usize) -> PsszResult<()> {
+    if depth > MAX_DEPTH {
+        Err(DEPTH_EXCEEDED)
+    } else {
+        Ok(())
     }
-    Ok(())
+}
+
+/// The depth of the node a reader called now would be: 0 at the root, and
+/// inside a hand-written codec that entered [`DecodeDepth`] the depth of its
+/// children.
+#[inline]
+pub fn decode_depth() -> usize {
+    READER.with(|reader| reader.depth.get())
+}
+
+/// Scope in which the thread's decode depth is `depth`: how a reader that is
+/// handed its depth calls one that reads the counter (the default
+/// `PsszUnpack::pssz_unpack_at_depth`, for a hand-written codec).
+pub struct DecodeDepthAt(usize);
+impl DecodeDepthAt {
+    #[inline]
+    pub fn enter(depth: usize) -> Self {
+        Self(READER.with(|reader| reader.depth.replace(depth)))
+    }
+}
+impl Drop for DecodeDepthAt {
+    #[inline]
+    fn drop(&mut self) {
+        READER.with(|reader| reader.depth.set(self.0));
+    }
 }
 
 /// Checked encoding uses the same node budget as the checked readers. Wire-
@@ -660,6 +761,301 @@ pub fn fixed_record_frame(w: usize, size: usize, len: usize, optional_fixed: boo
     Ok(())
 }
 
+const FIELD_SPAN: PsszError = PsszError::new("pssz: field span out of range");
+
+/// A field the writer's frame does not hold: what [`RecordFrame::field`]
+/// and [`TrustedFrame::field`] return in place of where it starts.
+pub const ABSENT: usize = usize::MAX;
+
+/// The size of the fixed region of the reader's fields: [`fixed_region`],
+/// one field at a time, so that it is a constant of a generated reader.
+/// `None` on overflow.
+#[inline(always)]
+pub const fn add_slot<F: PsszFormat, T: PsszPack<F> + ?Sized>(known: Option<usize>, w: usize) -> Option<usize> {
+    match known {
+        Some(known) => known.checked_add(slot::<F, T>(w)),
+        None => None,
+    }
+}
+
+/// [`record_spans_into`] for a generated reader, one field at a time: the
+/// same checks, in the same order, with the same errors, on constants of the
+/// record instead of a table of layouts, and scalars instead of an array of
+/// spans.
+///
+/// [`begin`](Self::begin) reads the header; [`field`](Self::field), once per
+/// field in declaration order, gives where the field starts (or [`ABSENT`]);
+/// [`finish`](Self::finish) walks the slots this reader does not know,
+/// applies the rules of the whole frame and gives where the last variable
+/// field ends. A variable field ends where the next present one starts.
+pub struct RecordFrame {
+    fixed_start: usize,
+    fixed_size: usize,
+    payload_size: usize,
+    cursor: usize,
+    previous_offset: usize,
+    seen_variable: bool,
+    missing: bool,
+    unknown: bool,
+    known: usize,
+    w: usize,
+    dwnc: bool,
+    /// The last present field is an optional that starts here (the
+    /// mandatory-pruning rule); [`ABSENT`] when it is not an optional.
+    last_optional: usize,
+    last_selector: bool,
+}
+impl RecordFrame {
+    /// `known`: the fixed region of the reader's fields ([`add_slot`]);
+    /// `invalid`: a field claims to be both an optional and fixed-size;
+    /// `all_fixed`: every field is fixed-size.
+    #[inline(always)]
+    pub fn begin(
+        w: usize,
+        known: Option<usize>,
+        invalid: bool,
+        all_fixed: bool,
+        dwnc: bool,
+        bytes: &[u8],
+    ) -> PsszResult<Self> {
+        width(w)?;
+        let known = match known {
+            Some(known) if !invalid => known,
+            _ => return Err(PsszError::new("pssz: invalid reader field layout")),
+        };
+        let mut fixed_start = 0usize;
+        let mut fixed_size = known;
+        if !dwnc {
+            if bytes.len() < w {
+                return Err(PsszError::new("pssz: record header truncated"));
+            }
+            fixed_size = read_offset_w(bytes, w)?;
+            fixed_start = w;
+        }
+        let payload_size = bytes.len() - fixed_start;
+        if fixed_size > payload_size {
+            return Err(PsszError::new("pssz: record fixed region truncated"));
+        }
+        if fixed_size > known && (fixed_size - known) % w != 0 {
+            return Err(PsszError::new("pssz: partial unknown optional slot"));
+        }
+        let unknown = fixed_size > known;
+        if unknown || !(dwnc && all_fixed) {
+            wire_span(payload_size)?;
+        }
+        Ok(Self {
+            fixed_start,
+            fixed_size,
+            payload_size,
+            cursor: 0,
+            previous_offset: fixed_size,
+            seen_variable: false,
+            missing: false,
+            unknown,
+            known,
+            w,
+            dwnc,
+            last_optional: ABSENT,
+            last_selector: false,
+        })
+    }
+
+    #[inline(always)]
+    fn accept(&mut self, bytes: &[u8], at: usize) -> PsszResult<usize> {
+        let offset = read_offset_w(bytes.get(at..).ok_or(FIELD_SPAN)?, self.w)?;
+        if offset > self.payload_size
+            || offset < self.previous_offset
+            || (!self.seen_variable && offset != self.fixed_size)
+        {
+            return Err(PsszError::new("pssz: invalid record payload offset"));
+        }
+        self.previous_offset = offset;
+        self.seen_variable = true;
+        Ok(self.fixed_start + offset)
+    }
+
+    /// The next field: where its bytes start in `bytes` (a fixed-size
+    /// field's slot, a variable field's payload), or [`ABSENT`] for a
+    /// trailing optional the writer did not store.
+    #[inline(always)]
+    pub fn field<F: PsszFormat, T: PsszPack<F> + ?Sized>(&mut self, bytes: &[u8]) -> PsszResult<usize> {
+        let slot = slot::<F, T>(self.w);
+        if self.missing || slot > self.fixed_size - self.cursor {
+            if self.cursor != self.fixed_size {
+                return Err(PsszError::new("pssz: header cuts a known field"));
+            }
+            if !T::IS_OPTIONAL || self.dwnc {
+                return Err(PsszError::new("pssz: required record field missing"));
+            }
+            self.missing = true;
+            return Ok(ABSENT);
+        }
+        let at = self.fixed_start + self.cursor;
+        self.cursor += slot;
+        if T::IS_FIXED_SIZE {
+            // (An optional is never fixed-size: `begin` refused that.)
+            self.last_optional = ABSENT;
+            Ok(at)
+        } else {
+            let start = self.accept(bytes, at)?;
+            self.last_optional = if T::IS_OPTIONAL { start } else { ABSENT };
+            self.last_selector = T::OPTIONAL_SELECTOR;
+            Ok(start)
+        }
+    }
+
+    /// After the last field: where the last present variable field ends.
+    /// Reports unknown fields to the active session (an exact reader fails
+    /// here).
+    #[inline(always)]
+    pub fn finish(&mut self, bytes: &[u8]) -> PsszResult<usize> {
+        let mut tail = bytes.len();
+        if self.unknown {
+            tail = self.unknown_slots(bytes)?;
+        }
+        if !self.seen_variable && self.payload_size != self.fixed_size {
+            return Err(PsszError::new("pssz: fixed record has trailing payload"));
+        }
+        // Mandatory pruning: see `record_spans_into`.
+        if !self.dwnc && !self.unknown && self.last_optional != ABSENT {
+            let start = self.last_optional;
+            if start >= bytes.len() || (self.last_selector && bytes.get(start) == Some(&0)) {
+                return Err(PsszError::new(
+                    "pssz: trailing absent optional field was not pruned",
+                ));
+            }
+        }
+        if self.unknown {
+            unknown_fields()?;
+        }
+        Ok(tail)
+    }
+
+    /// The slots a newer writer appended: each is an offset, and the first
+    /// ends the last field this reader knows.
+    #[cold]
+    #[inline(never)]
+    fn unknown_slots(&mut self, bytes: &[u8]) -> PsszResult<usize> {
+        let mut tail = bytes.len();
+        let mut at = self.known;
+        while at < self.fixed_size {
+            let start = self.accept(bytes, self.fixed_start + at)?;
+            if at == self.known {
+                tail = start;
+            }
+            at += self.w;
+        }
+        Ok(tail)
+    }
+}
+
+/// Field of a record read through a [`RecordFrame`]: `start` is what
+/// [`RecordFrame::field`] gave, `end` where a variable field ends (unused
+/// for a fixed-size one); the field is node `depth`.
+#[inline(always)]
+pub fn decode_frame_field<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    depth: usize,
+) -> PsszResult<T> {
+    if start == ABSENT {
+        return T::pssz_missing_optional();
+    }
+    let end = if T::IS_FIXED_SIZE { start.wrapping_add(T::FIXED_SIZE) } else { end };
+    T::pssz_unpack_at_depth(bytes.get(start..end).ok_or(FIELD_SPAN)?, depth)
+}
+
+/// [`decode_frame_field`] for a validator.
+#[inline(always)]
+pub fn validate_frame_field<F: PsszFormat, T: PsszPack<F> + crate::pssz::PsszValidate<F> + ?Sized>(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    depth: usize,
+) -> PsszResult<()> {
+    if start == ABSENT {
+        return Ok(());
+    }
+    let end = if T::IS_FIXED_SIZE { start.wrapping_add(T::FIXED_SIZE) } else { end };
+    T::pssz_validate_at_depth(bytes.get(start..end).ok_or(FIELD_SPAN)?, depth)
+}
+
+/// A record frame the caller vouches for (`from_pssz_trusted`): the header
+/// is believed, so a field is where the header and the slots say and nothing
+/// is compared with anything; every access to the bytes is still
+/// bounds-checked, by the slicing (a frame that lies is a panic).
+pub struct TrustedFrame {
+    fixed_start: usize,
+    fixed_size: usize,
+    cursor: usize,
+    w: usize,
+}
+impl TrustedFrame {
+    #[inline(always)]
+    pub fn begin(w: usize, known: usize, dwnc: bool, bytes: &[u8]) -> Self {
+        if dwnc {
+            Self { fixed_start: 0, fixed_size: known, cursor: 0, w }
+        } else {
+            Self { fixed_start: w, fixed_size: trusted_offset(bytes, 0, w), cursor: 0, w }
+        }
+    }
+    /// Where the next field starts, or [`ABSENT`] when the writer's fixed
+    /// region ends before it.
+    #[inline(always)]
+    pub fn field<F: PsszFormat, T: PsszPack<F> + ?Sized>(&mut self, bytes: &[u8]) -> usize {
+        let slot = slot::<F, T>(self.w);
+        if slot > self.fixed_size.saturating_sub(self.cursor) {
+            self.cursor = self.fixed_size;
+            return ABSENT;
+        }
+        let at = self.fixed_start.saturating_add(self.cursor);
+        self.cursor += slot;
+        if T::IS_FIXED_SIZE {
+            at
+        } else {
+            self.fixed_start.saturating_add(trusted_offset(bytes, at, self.w))
+        }
+    }
+    /// Where the last variable field the reader knows ends: at the payload
+    /// of the first slot it does not know, else at the end of the frame.
+    #[inline(always)]
+    pub fn finish(&self, known: usize, bytes: &[u8]) -> usize {
+        if self.fixed_size > known {
+            self.fixed_start
+                .saturating_add(trusted_offset(bytes, self.fixed_start.saturating_add(known), self.w))
+        } else {
+            bytes.len()
+        }
+    }
+}
+
+/// The offset `w` bytes wide at `at`. Panics when it is not in `bytes`.
+#[inline(always)]
+pub fn trusted_offset(bytes: &[u8], at: usize, w: usize) -> usize {
+    let slot = &bytes[at..][..w];
+    match w {
+        1 => slot[0] as usize,
+        2 => u16::from_le_bytes([slot[0], slot[1]]) as usize,
+        4 => u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]) as usize,
+        _ => crate::pssz::trusted_bytes_invalid(PsszError::new("pssz: unsupported offset/header width")),
+    }
+}
+
+/// Field of a record read through a [`TrustedFrame`]. Panics when the span
+/// is not in `bytes`.
+#[inline(always)]
+pub fn trusted_frame_field<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8], start: usize, end: usize) -> T {
+    if start == ABSENT {
+        return match T::pssz_missing_optional() {
+            Ok(value) => value,
+            Err(error) => crate::pssz::trusted_bytes_invalid(error),
+        };
+    }
+    let end = if T::IS_FIXED_SIZE { start.saturating_add(T::FIXED_SIZE) } else { end };
+    T::pssz_unpack_trusted(&bytes[start..end])
+}
+
 /// Stack-array frame resolution for generated record readers. Reports
 /// unknown fields to the active session (an exact reader fails here).
 #[inline]
@@ -728,6 +1124,21 @@ pub fn field<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<(L
     let mut layout = Layout::of::<F, T>();
     layout.omit = T::IS_OPTIONAL && value.pssz_is_none();
     Ok((layout, bytes))
+}
+
+/// Where variable field `index` of a frame ends: where the next present
+/// variable field starts (`starts` is what the frame gave for each field,
+/// `variable` says which are not fixed-size), else at `tail`.
+#[inline(always)]
+pub fn field_end(starts: &[usize], variable: &[bool], index: usize, tail: usize) -> usize {
+    let mut at = index + 1;
+    while at < starts.len() && at < variable.len() {
+        if variable[at] && starts[at] != ABSENT {
+            return starts[at];
+        }
+        at += 1;
+    }
+    tail
 }
 
 /// Number of leading fields the encoder writes: everything up to and
@@ -950,6 +1361,174 @@ impl RecordEncoder {
     }
 }
 
+// ── The size pass ───────────────────────────────────────────────────────────
+//
+// Every writer has a twin that runs the same checks in the same order and
+// writes nothing: `PsszPack::pssz_size_at_depth` of `pssz_pack_at_depth`
+// (it returns the number of bytes the writer appends) and
+// `PsszPack::pssz_size_fixed` of `pssz_pack_fixed`. Each function below is
+// the twin of one writer above and is kept in its shape: [`RecordSize`] of
+// [`RecordEncoder`], [`size_sequence_with_at_depth`] of
+// [`encode_sequence_with_at_depth`], [`size_fixed_by_size`] of
+// [`pack_fixed_by_append`]. A sum
+// that does not fit `usize` saturates; the writer could not have allocated
+// it, and the checks that follow (an offset width, the 32-bit span) refuse
+// it on a 64-bit target.
+
+const FIXED_MISMATCH: PsszError = PsszError::new("pssz: fixed encoder size mismatch");
+
+/// `pssz_size_at_depth` of a codec that only writes (a hand-written one):
+/// the value is encoded and measured.
+pub fn size_by_encoding<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, depth: usize) -> PsszResult<usize> {
+    let mut out = Vec::new();
+    value.pssz_pack_at_depth(&mut out, depth)?;
+    Ok(out.len())
+}
+
+/// The twin of [`pack_fixed_by_append`]: the value's own size pass, and its
+/// size is that of its slot (`T::FIXED_SIZE` bytes, which is what every
+/// writer in this crate hands a fixed-size value).
+#[inline(always)]
+pub fn size_fixed_by_size<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, depth: usize) -> PsszResult<()> {
+    if value.pssz_size_at_depth(depth)? != T::FIXED_SIZE {
+        return Err(FIXED_MISMATCH);
+    }
+    Ok(())
+}
+
+/// The size pass of one record (or tuple) frame: [`RecordEncoder`] without
+/// the output.
+pub struct RecordSize {
+    /// The fixed region and the payloads behind it, so far.
+    payload: usize,
+    w: usize,
+    header: usize,
+    fixed: usize,
+    last: usize,
+    child_depth: usize,
+}
+impl RecordSize {
+    #[inline(always)]
+    pub fn begin(w: usize, dwnc: bool, fixed: usize, depth: usize) -> Self {
+        Self { payload: fixed, w, header: if dwnc { 0 } else { w }, fixed, last: 0, child_depth: depth + 1 }
+    }
+
+    /// The next kept field.
+    #[inline(always)]
+    pub fn field<F: PsszFormat, T: PsszPack<F> + ?Sized>(&mut self, value: &T) -> PsszResult<()> {
+        if T::IS_FIXED_SIZE {
+            value.pssz_size_fixed(self.child_depth)
+        } else {
+            self.last = self.payload;
+            self.payload = self.payload.saturating_add(value.pssz_size_at_depth(self.child_depth)?);
+            Ok(())
+        }
+    }
+
+    #[inline(always)]
+    pub fn finish<F: PsszFormat>(self, cap: Option<usize>) -> PsszResult<usize> {
+        width(self.w)?;
+        let limit = offset_limit(self.w);
+        if (self.header != 0 && self.fixed > limit) || self.last > limit {
+            return Err(OFFSET_OVERFLOW);
+        }
+        wire_span(self.payload)?;
+        let size = self.payload.saturating_add(self.header);
+        if F::AUTO {
+            check_cap(cap, size)?;
+        }
+        Ok(size)
+    }
+}
+
+/// The size pass of [`encode_sequence_at_depth`].
+#[inline]
+pub fn size_sequence_at_depth<F: PsszFormat, T: PsszPack<F>>(
+    w: usize,
+    values: &[T],
+    known_count: bool,
+    depth: usize,
+) -> PsszResult<usize> {
+    if T::IS_FIXED_SIZE {
+        if let Some(bytes) = T::pssz_bulk_bytes(values) {
+            width(w)?;
+            if !values.is_empty() {
+                encode_node(depth + 1)?;
+            }
+            return Ok(bytes.len());
+        }
+    }
+    size_sequence_with_at_depth(
+        w,
+        T::IS_FIXED_SIZE.then_some(T::FIXED_SIZE),
+        values.iter(),
+        |value: &T, depth| value.pssz_size_at_depth(depth),
+        |value: &T, depth| value.pssz_size_fixed(depth),
+        known_count,
+        depth,
+    )
+}
+
+/// The size pass of [`encode_sequence_with_at_depth`]: `size` is the size
+/// pass of one element (node `depth + 1`), `size_fixed` that of a fixed-size
+/// one in its slot.
+#[inline]
+pub fn size_sequence_with_at_depth<T>(
+    w: usize,
+    fixed: Option<usize>,
+    values: impl ExactSizeIterator<Item = T>,
+    mut size: impl FnMut(T, usize) -> PsszResult<usize>,
+    mut size_fixed: impl FnMut(T, usize) -> PsszResult<()>,
+    known_count: bool,
+    depth: usize,
+) -> PsszResult<usize> {
+    width(w)?;
+    let count = values.len();
+    if let Some(element) = fixed {
+        if element == 0 && count != 0 && !known_count {
+            return Err(PsszError::new(
+                "pssz: nonempty zero-size vector is unsupported",
+            ));
+        }
+        let total = count
+            .checked_mul(element)
+            .ok_or(PsszError::new("pssz: sequence size overflow"))?;
+        if element == 0 {
+            for value in values {
+                size_fixed(value, depth + 1)?;
+            }
+            return Ok(0);
+        }
+        // As the writer: at most `count` elements, and exactly that many.
+        let mut written = 0usize;
+        for value in values.take(count) {
+            size_fixed(value, depth + 1)?;
+            written += 1;
+        }
+        if written != count {
+            return Err(FIXED_MISMATCH);
+        }
+        Ok(total)
+    } else {
+        let table = count
+            .checked_mul(w)
+            .ok_or(PsszError::new("pssz: sequence table overflow"))?;
+        let limit = offset_limit(w);
+        let mut total = table;
+        for (i, value) in values.enumerate() {
+            if total > limit {
+                return Err(OFFSET_OVERFLOW);
+            }
+            if i >= count {
+                return Err(PsszError::new("pssz: sequence length mismatch"));
+            }
+            total = total.saturating_add(size(value, depth + 1)?);
+        }
+        wire_span(total)?;
+        Ok(total)
+    }
+}
+
 /// Reader-side counterpart of `finish_record`.
 pub fn enter_record<F: PsszFormat>(cap: Option<usize>, bytes: &[u8]) -> PsszResult<()> {
     if F::AUTO {
@@ -1003,6 +1582,7 @@ pub const fn record_location(w: usize, layouts: &[Layout], index: usize) -> Fiel
 /// O(1) field access. Returns an error, never panics, on a malformed frame;
 /// full validation (including pruning) is `PsszView::try_new`. A trailing
 /// optional the writer pruned yields the static encoding of None.
+#[inline(always)]
 pub fn field_bytes<'a, F: PsszFormat, T: PsszPack<F> + ?Sized>(
     bytes: &'a [u8],
     location: FieldLocation,
@@ -1113,7 +1693,10 @@ pub fn sequence_len<F: PsszFormat, T: PsszPack<F>>(
     Ok(n)
 }
 
-/// Callers first check `sequence_len` on this same byte span and count.
+/// Element `index` of a sequence frame of `count` elements
+/// ([`sequence_count`] or [`sequence_len`] of this same byte span): O(1),
+/// and the span is inside `bytes`.
+#[inline]
 pub fn sequence_span<F: PsszFormat, T: PsszPack<F>>(
     w: usize,
     bytes: &[u8],
@@ -1164,7 +1747,191 @@ pub fn sequence_span<F: PsszFormat, T: PsszPack<F>>(
     Ok(begin..end)
 }
 
-/// A Vec owns each initialized element throughout errors and unwinding.
+const ELEMENT_SPAN: PsszError = PsszError::new("pssz: element span out of range");
+
+/// The element count of a sequence frame, from its length or its first
+/// offset alone: what a view needs to index it. [`sequence_len`] checks the
+/// whole table.
+#[inline]
+pub fn sequence_count<F: PsszFormat, T: PsszPack<F>>(w: usize, bytes: &[u8], count: Option<usize>) -> PsszResult<usize> {
+    width(w)?;
+    if T::IS_FIXED_SIZE {
+        let size = T::FIXED_SIZE;
+        let n = match count {
+            Some(n) => n,
+            None if bytes.is_empty() => 0,
+            None if size == 0 => {
+                return Err(PsszError::new(
+                    "pssz: nonempty zero-size vector is unsupported",
+                ))
+            }
+            None if bytes.len() % size == 0 => bytes.len() / size,
+            None => return Err(PsszError::new("pssz: fixed sequence span mismatch")),
+        };
+        if n.checked_mul(size) != Some(bytes.len()) {
+            return Err(PsszError::new(
+                "pssz: fixed sequence span mismatch or overflow",
+            ));
+        }
+        return Ok(n);
+    }
+    let n = match count {
+        Some(n) => n,
+        None if bytes.is_empty() => 0,
+        None => {
+            let first = read_offset_w(bytes, w)?;
+            if first == 0 || first % w != 0 || first > bytes.len() {
+                return Err(PsszError::new("pssz: invalid sequence offset table"));
+            }
+            first / w
+        }
+    };
+    let table = n
+        .checked_mul(w)
+        .ok_or(PsszError::new("pssz: sequence table overflow"))?;
+    if table > bytes.len() || (n == 0 && !bytes.is_empty()) {
+        return Err(PsszError::new("pssz: sequence table mismatch"));
+    }
+    Ok(n)
+}
+
+/// Calls `element(index, bytes of the element)` for each element of a
+/// sequence frame whose table [`sequence_len`] accepted (`n` is what it
+/// returned): one pass over the offsets.
+#[inline(always)]
+pub fn for_each_element<F: PsszFormat, T: PsszPack<F>>(
+    w: usize,
+    bytes: &[u8],
+    n: usize,
+    mut element: impl FnMut(usize, &[u8]) -> PsszResult<()>,
+) -> PsszResult<()> {
+    if T::IS_FIXED_SIZE {
+        let size = T::FIXED_SIZE;
+        if size == 0 {
+            for index in 0..n {
+                element(index, &[])?;
+            }
+            return Ok(());
+        }
+        for (index, chunk) in bytes.chunks_exact(size).enumerate() {
+            element(index, chunk)?;
+        }
+        return Ok(());
+    }
+    let mut begin = n.wrapping_mul(w);
+    for index in 0..n {
+        let end = if index + 1 < n {
+            read_offset_w(bytes.get((index + 1) * w..).ok_or(ELEMENT_SPAN)?, w)?
+        } else {
+            bytes.len()
+        };
+        element(index, bytes.get(begin..end).ok_or(ELEMENT_SPAN)?)?;
+        begin = end;
+    }
+    Ok(())
+}
+
+/// The elements of a sequence frame; they are nodes `depth`. A Vec owns each
+/// initialized element throughout errors and unwinding.
+#[inline]
+pub fn decode_sequence_at_depth<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(
+    w: usize,
+    bytes: &[u8],
+    count: Option<usize>,
+    depth: usize,
+) -> PsszResult<Vec<T>> {
+    let n = sequence_len::<F, T>(w, bytes, count)?;
+    decode_elements_at_depth::<F, T>(w, bytes, n, depth)
+}
+
+/// The `n` elements of a sequence frame whose table [`sequence_len`]
+/// accepted; they are nodes `depth`.
+#[inline]
+pub fn decode_elements_at_depth<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(
+    w: usize,
+    bytes: &[u8],
+    n: usize,
+    depth: usize,
+) -> PsszResult<Vec<T>> {
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(n)
+        .map_err(|_| PsszError::new("pssz: sequence allocation overflow"))?;
+    if T::IS_FIXED_SIZE && T::FIXED_SIZE != 0 && n != 0 && T::BULK {
+        // Leaves whose bytes are their values: what is left of each one's
+        // own reader is its depth check.
+        decode_node(depth)?;
+        T::pssz_unpack_bulk(bytes, &mut result);
+        if result.len() == n {
+            return Ok(result);
+        }
+        result.clear();
+    }
+    for_each_element::<F, T>(w, bytes, n, |_, element| {
+        result.push(T::pssz_unpack_at_depth(element, depth)?);
+        Ok(())
+    })?;
+    Ok(result)
+}
+
+/// The elements of an array frame, without a heap allocation; they are
+/// nodes `depth`.
+#[inline]
+pub fn decode_array_at_depth<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>, const N: usize>(
+    w: usize,
+    bytes: &[u8],
+    depth: usize,
+) -> PsszResult<[T; N]> {
+    sequence_len::<F, T>(w, bytes, Some(N))?;
+    if T::IS_FIXED_SIZE && T::FIXED_SIZE != 0 && N != 0 && T::BULK {
+        decode_node(depth)?;
+        if let Some(array) = T::pssz_unpack_bulk_array::<N>(bytes) {
+            return Ok(array);
+        }
+    }
+    // `array::from_fn` cannot stop: after the first error the rest are
+    // skipped, and no element is `None` when there was none.
+    let mut error: Option<PsszError> = None;
+    let mut begin = N.wrapping_mul(w);
+    let items: [Option<T>; N] = std::array::from_fn(|index| {
+        if error.is_some() {
+            return None;
+        }
+        let element = if T::IS_FIXED_SIZE {
+            let size = T::FIXED_SIZE;
+            bytes.get(index.wrapping_mul(size)..index.wrapping_mul(size).wrapping_add(size))
+        } else {
+            let end = if index + 1 < N {
+                bytes.get((index + 1).wrapping_mul(w)..).and_then(|slot| read_offset_w(slot, w).ok())
+            } else {
+                Some(bytes.len())
+            };
+            let span = end.and_then(|end| bytes.get(begin..end).map(|element| (element, end)));
+            span.map(|(element, end)| {
+                begin = end;
+                element
+            })
+        };
+        match element.ok_or(ELEMENT_SPAN).and_then(|element| T::pssz_unpack_at_depth(element, depth)) {
+            Ok(value) => Some(value),
+            Err(failed) => {
+                error = Some(failed);
+                None
+            }
+        }
+    });
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok(items.map(|item| match item {
+        Some(value) => value,
+        None => unreachable!("every element was decoded"),
+    }))
+}
+
+/// [`decode_sequence_at_depth`] for a reader that reads its depth from the
+/// thread. A Vec owns each initialized element throughout errors and
+/// unwinding.
 pub fn decode_sequence<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(
     w: usize,
     bytes: &[u8],

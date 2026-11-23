@@ -120,19 +120,22 @@ impl<T: PsszPack<Pssz> + PsszValidate<Pssz>, V: NestedValidation, const N: usize
     /// What a reader of the enclosing value does with the bytes: the rule
     /// of the reader in progress (compatible or exact), or nothing for a
     /// deferred value. The inner root is one node level below this one.
-    fn descend(bytes: &[u8]) -> PsszResult<()> {
+    /// `depth`: the depth of the inner root.
+    fn descend(bytes: &[u8], depth: usize) -> PsszResult<()> {
         if bytes.len() > N {
             return Err(OVERFLOW);
         }
         if V::DEFERRED {
-            let _inner = if bytes.is_empty() { None } else { Some(checked::DecodeDepth::enter()?) };
+            if !bytes.is_empty() {
+                checked::decode_node(depth)?;
+            }
             return Ok(());
         }
-        <T as PsszValidate<Pssz>>::pssz_validate(bytes)
+        <T as PsszValidate<Pssz>>::pssz_validate_at_depth(bytes, depth)
     }
     /// Adopts bytes read from an enclosing value (PSSZ or key).
     pub(crate) fn adopt(bytes: Vec<u8>) -> PsszResult<Self> {
-        Self::descend(&bytes)?;
+        Self::descend(&bytes, checked::decode_depth())?;
         Ok(Self::unchecked(bytes))
     }
 }
@@ -228,6 +231,16 @@ impl<F: PsszFormat, T: PsszPack<Pssz>, V: NestedValidation, const N: usize> Pssz
         }
         checked::append(out, &self.bytes)
     }
+    fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
+        checked::encode_node(depth)?;
+        if !(V::DEFERRED && self.bytes.is_empty()) {
+            checked::encode_node(depth + 1)?;
+        }
+        if self.bytes.len() > N {
+            return Err(OVERFLOW);
+        }
+        Ok(self.bytes.len())
+    }
     fn pssz_size_hint(&self) -> usize {
         self.bytes.len()
     }
@@ -238,8 +251,11 @@ where
     V: NestedValidation,
 {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
-        Self::descend(bytes)?;
+        <Self as PsszUnpack<F>>::pssz_unpack_at_depth(bytes, checked::decode_depth())
+    }
+    fn pssz_unpack_at_depth(bytes: &[u8], depth: usize) -> PsszResult<Self> {
+        checked::decode_node(depth)?;
+        Self::descend(bytes, depth + 1)?;
         let mut out = Vec::new();
         out.try_reserve(bytes.len()).map_err(|_| PsszError::new("pssz: nested allocation overflow"))?;
         out.extend_from_slice(bytes);
@@ -252,8 +268,11 @@ where
     V: NestedValidation,
 {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
-        Self::descend(bytes)
+        <Self as PsszValidate<F>>::pssz_validate_at_depth(bytes, checked::decode_depth())
+    }
+    fn pssz_validate_at_depth(bytes: &[u8], depth: usize) -> PsszResult<()> {
+        checked::decode_node(depth)?;
+        Self::descend(bytes, depth + 1)
     }
 }
 

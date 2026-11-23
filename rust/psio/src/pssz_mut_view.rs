@@ -225,7 +225,7 @@ impl<'a, T: PsszPack<F>, F: PsszFormat> PsszMutView<'a, T, F> {
 // ── Sequences ───────────────────────────────────────────────────────────────
 
 fn element<F: PsszFormat, T: PsszPack<F>>(w: usize, data: &[u8], fixed_len: Option<usize>, i: usize) -> PsszResult<Range<usize>> {
-    let n = checked::sequence_len::<F, T>(w, data, fixed_len)?;
+    let n = checked::sequence_count::<F, T>(w, data, fixed_len)?;
     checked::sequence_span::<F, T>(w, data, n, i)
 }
 

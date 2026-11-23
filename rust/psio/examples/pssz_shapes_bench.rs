@@ -13,13 +13,20 @@
 //! Operations: `size` is `pssz_size`, `encode new` is `to_pssz` (a fresh
 //! `Vec` per call, like C++ "encode (new)"), `encode reused` is
 //! `to_pssz_into` a cleared buffer, `decode` is `from_pssz`, `trusted` is
-//! `from_pssz_trusted`, `validate` is `validate_pssz`.
+//! `from_pssz_trusted`, `validate` is `validate_pssz`. `alloc` is not pSSZ:
+//! one `Vec<u8>` of the encoding's size made and dropped, the allocator's
+//! share of `encode new`.
+//!
+//! The shapes with a view also have: `view all`, every field of the value
+//! read through `PsszView::trusted` (a service's own table row); `view one`,
+//! one field of it; `view checked`, `PsszView::new` (which validates) and
+//! then every field.
 //!
 //! `PSSZ_BENCH_BATCHES` (default 15) and `PSSZ_BENCH_BATCH_MS` (default 20)
 //! set the number and the length of the timed batches; `PSSZ_BENCH_OP`
 //! keeps the operations whose name contains it (for a profiler).
 
-use psio::pssz::{Pssz, PsszPack, PsszUnpack, PsszValidate};
+use psio::pssz::{Pssz, PsszPack, PsszUnpack, PsszValidate, PsszView};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -78,7 +85,7 @@ struct Record {
     score: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack)]
+#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView)]
 #[psio(definition_will_not_change)]
 struct Validator {
     pubkey_lo: u64,
@@ -92,14 +99,14 @@ struct Validator {
     withdrawable_epoch: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack)]
+#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView)]
 struct LineItem {
     product: String,
     qty: u32,
     unit_price: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack)]
+#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView)]
 struct UserProfile {
     id: u64,
     name: String,
@@ -108,7 +115,7 @@ struct UserProfile {
     verified: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack)]
+#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView)]
 struct Order {
     id: u64,
     customer: UserProfile,
@@ -264,6 +271,86 @@ struct WideRecord {
     f24: u32, f25: u32, f26: u32, f27: u32, f28: u32, f29: u32, f30: u32, f31: u32,
 }
 
+/// Not in the C++ benchmark: a typical small table row of a service (a
+/// key, two numbers, one short string), extensible as rows are.
+#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView)]
+struct TableRow {
+    key: u64,
+    balance: u64,
+    updated: u64,
+    name: String,
+}
+
+// ── Reading through a view ──────────────────────────────────────────────────
+
+fn text(view: PsszView<'_, String>) -> u64 {
+    view.view().expect("the benchmark's strings are UTF-8").len() as u64
+}
+fn order_fields(order: PsszView<'_, Order>) -> u64 {
+    let customer = order.customer();
+    let mut sum = order.id().get()
+        ^ customer.id().get()
+        ^ text(customer.name())
+        ^ text(customer.email())
+        ^ customer.age().get() as u64
+        ^ customer.verified().get() as u64
+        ^ order.total().get().to_bits();
+    for item in order.items().iter() {
+        sum ^= text(item.product()) ^ item.qty().get() as u64 ^ item.unit_price().get().to_bits();
+    }
+    if let Some(note) = order.note().get() {
+        sum ^= text(note);
+    }
+    sum
+}
+fn validator_fields(v: PsszView<'_, Validator>) -> u64 {
+    v.pubkey_lo().get()
+        ^ v.pubkey_hi().get()
+        ^ v.withdrawal_lo().get()
+        ^ v.withdrawal_hi().get()
+        ^ v.effective_balance().get()
+        ^ v.slashed().get() as u64
+        ^ v.activation_epoch().get()
+        ^ v.exit_epoch().get()
+        ^ v.withdrawable_epoch().get()
+}
+fn row_fields(row: PsszView<'_, TableRow>) -> u64 {
+    row.key().get() ^ row.balance().get() ^ row.updated().get() ^ text(row.name())
+}
+
+/// What a shape with a view adds: every field, one field, and every field
+/// of a view that was validated first.
+struct Views {
+    all: fn(&[u8]) -> u64,
+    one: fn(&[u8]) -> u64,
+    checked: fn(&[u8]) -> u64,
+}
+const ORDER_VIEWS: Views = Views {
+    all: |bytes| order_fields(PsszView::trusted(bytes)),
+    one: |bytes| PsszView::<Order>::trusted(bytes).total().get().to_bits(),
+    checked: |bytes| order_fields(PsszView::new(bytes).unwrap()),
+};
+const VALIDATOR_VIEWS: Views = Views {
+    all: |bytes| validator_fields(PsszView::trusted(bytes)),
+    one: |bytes| PsszView::<Validator>::trusted(bytes).effective_balance().get(),
+    checked: |bytes| validator_fields(PsszView::new(bytes).unwrap()),
+};
+const ROW_VIEWS: Views = Views {
+    all: |bytes| row_fields(PsszView::trusted(bytes)),
+    one: |bytes| PsszView::<TableRow>::trusted(bytes).balance().get(),
+    checked: |bytes| row_fields(PsszView::new(bytes).unwrap()),
+};
+const ORDERS_VIEWS: Views = Views {
+    all: |bytes| PsszView::<Vec<Order>>::trusted(bytes).iter().fold(0, |sum, order| sum ^ order_fields(order)),
+    one: |bytes| {
+        let orders = PsszView::<Vec<Order>>::trusted(bytes);
+        orders.get(orders.len() / 2).total().get().to_bits()
+    },
+    checked: |bytes| {
+        PsszView::<Vec<Order>>::new(bytes).unwrap().iter().fold(0, |sum, order| sum ^ order_fields(order))
+    },
+};
+
 // ── Sample values (namespace psio_bench in shapes.hpp) ──────────────────────
 
 fn validator(i: u64) -> Validator {
@@ -371,6 +458,13 @@ fn shape<T>(settings: &Settings, filters: &[String], name: &str, value: T)
 where
     T: PsszPack<Pssz> + PsszUnpack<Pssz> + PsszValidate<Pssz> + PartialEq + std::fmt::Debug,
 {
+    shape_with_views(settings, filters, name, value, None)
+}
+
+fn shape_with_views<T>(settings: &Settings, filters: &[String], name: &str, value: T, views: Option<&Views>)
+where
+    T: PsszPack<Pssz> + PsszUnpack<Pssz> + PsszValidate<Pssz> + PartialEq + std::fmt::Debug,
+{
     if !filters.is_empty() && !filters.iter().any(|f| name.contains(f.as_str())) {
         return;
     }
@@ -412,6 +506,21 @@ where
     if wanted("validate") {
         line("validate", measure(settings, || psio::validate_pssz::<T>(black_box(bytes)).unwrap()));
     }
+    if wanted("alloc") {
+        line("alloc", measure(settings, || Vec::<u8>::with_capacity(black_box(bytes.len()))));
+    }
+    if let Some(views) = views {
+        assert_eq!((views.all)(bytes), (views.checked)(bytes));
+        if wanted("view all") {
+            line("view all", measure(settings, || (views.all)(black_box(bytes))));
+        }
+        if wanted("view one") {
+            line("view one", measure(settings, || (views.one)(black_box(bytes))));
+        }
+        if wanted("view checked") {
+            line("view checked", measure(settings, || (views.checked)(black_box(bytes))));
+        }
+    }
 }
 
 fn setting(name: &str, default: u64) -> u64 {
@@ -435,8 +544,8 @@ fn main() {
     shape(s, f, "NameRecord", NameRecord { account: 0x0123_4567_89AB_CDEF, limit: 1_000_000 });
     shape(s, f, "FlatRecord", FlatRecord { id: 9, label: "flat-cap".into(), values: vec![3, 5, 8, 13, 21, 34] });
     shape(s, f, "Record", Record { id: 7, label: "oracle".into(), values: vec![1, 2, 65535, 4096, 32768, 0], score: Some(99) });
-    shape(s, f, "Validator", validator(1));
-    shape(s, f, "Order", order());
+    shape_with_views(s, f, "Validator", validator(1), Some(&VALIDATOR_VIEWS));
+    shape_with_views(s, f, "Order", order(), Some(&ORDER_VIEWS));
     shape(s, f, "ValidatorList(100)", ValidatorList { epoch: 42, validators: validators(100) });
     shape(
         s,
@@ -459,4 +568,13 @@ fn main() {
     // A list of records, as a root.
     shape(s, f, "Vec<LineItem> x3", order().items);
     shape(s, f, "Vec<Order> x16", (0..16).map(|_| order()).collect::<Vec<_>>());
+    // What a service reads: a small table row, and a long list of records.
+    shape_with_views(
+        s,
+        f,
+        "TableRow",
+        TableRow { key: 0x0123_4567_89AB_CDEF, balance: 1_000_000, updated: 1_795_342_530, name: "alice.stone".into() },
+        Some(&ROW_VIEWS),
+    );
+    shape_with_views(s, f, "Vec<Order> x1000", (0..1000).map(|_| order()).collect::<Vec<_>>(), Some(&ORDERS_VIEWS));
 }

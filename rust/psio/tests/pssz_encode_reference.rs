@@ -10,16 +10,27 @@
 //! where every node was encoded into a buffer of its own and copied).
 //!
 //! The readers are recorded the same way: `decode`, `validate` and
-//! `validate_strict` on what was written and on damaged copies of it.
+//! `validate_strict` on what was written and on damaged copies of it; and,
+//! in a second transcript recorded before the readers were rewritten
+//! (`RECORDED_READERS`), `decode_strict`, `decode_checked` and
+//! `validate_compatible` on the same buffers, every reader on a newer
+//! writer's bytes (unknown appended members), and nesting up to and beyond
+//! the depth limit through derived and hand-written readers.
+//!
+//! Two things have no recording and are asserted on every value of the
+//! stream instead: the size pass (`pssz_size_at_depth`, `try_size_of`)
+//! gives the size the writer wrote or the error it returned, and the
+//! trusted reader gives the checked reader's value for every buffer the
+//! checked reader accepts (on any other it panics or returns a value).
 //!
 //! So: any change to a byte, to an error, or to which of two errors is
 //! reported first, fails here. To see what changed, set
 //! `PSSZ_ENCODE_TRANSCRIPT=<file>` on both sides and diff the files.
 
 use psio::pssz::{
-    decode, decode_trusted, encode_into, try_encode, validate, validate_strict, Bitlist, Bitvector, BoundedList,
-    BoundedString, Pssz, Pssz16, Pssz32, Pssz8, PsszError, PsszFormat, PsszPack, PsszResult, PsszUnpack,
-    PsszValidate, Uint256,
+    decode, decode_checked, decode_strict, decode_trusted, encode_into, try_encode, validate, validate_compatible,
+    validate_strict, Bitlist, Bitvector, BoundedList, BoundedString, Pssz, Pssz16, Pssz32, Pssz8, PsszError,
+    PsszFormat, PsszPack, PsszResult, PsszUnpack, PsszValidate, Uint256,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -285,6 +296,75 @@ fn deep_numbers(records: usize, numbers: Option<Vec<u16>>, flags: Option<Vec<boo
     deep
 }
 
+/// `Plain` as a newer writer has it: two members appended.
+#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+struct PlainNewer {
+    a: u32,
+    s: String,
+    v: Vec<u16>,
+    o: Option<u32>,
+    later: Option<String>,
+    last: Option<u16>,
+}
+/// `Choice` whose record alternative is the newer one.
+#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+enum ChoiceNewer {
+    #[allow(dead_code)]
+    Unit,
+    #[allow(dead_code)]
+    One(String),
+    #[allow(dead_code)]
+    Two(u32, String),
+    #[allow(dead_code)]
+    Named { a: u8, b: Option<String> },
+    Record(PlainNewer),
+}
+
+/// Nesting whose bytes are one selector per level: `[1, 1, 2, 1, 0]`.
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+enum Peel {
+    End,
+    More(Box<Peel>),
+    Held(HandPeel),
+}
+impl Peel {
+    fn levels(&self) -> usize {
+        match self {
+            Peel::End => 0,
+            Peel::More(inner) => 1 + inner.levels(),
+            Peel::Held(inner) => 1 + inner.0.levels(),
+        }
+    }
+}
+/// A hand-written reader that holds a derived value: a node of its own,
+/// counted on the thread, between readers that are handed their depth.
+#[derive(Debug, Clone, PartialEq)]
+struct HandPeel(Box<Peel>);
+impl<F: PsszFormat> PsszPack<F> for HandPeel {
+    const MIN_ENCODED_SIZE: usize = 1;
+    const MAX_ENCODED_SIZE: Option<usize> = None;
+    const IS_FIXED_SIZE: bool = false;
+    const FIXED_SIZE: usize = 0;
+    fn pssz_size(&self) -> usize {
+        <Peel as PsszPack<F>>::pssz_size(&self.0)
+    }
+    fn pssz_pack(&self, out: &mut Vec<u8>) {
+        <Peel as PsszPack<F>>::pssz_pack(&self.0, out)
+    }
+}
+impl<F: PsszFormat> PsszUnpack<F> for HandPeel {
+    fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+        let _node = psio::pssz_checked::DecodeDepth::enter()?;
+        Ok(HandPeel(Box::new(<Peel as PsszUnpack<F>>::pssz_unpack(bytes)?)))
+    }
+}
+impl<F: PsszFormat> PsszValidate<F> for HandPeel {
+    fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+        let _node = psio::pssz_checked::DecodeDepth::enter()?;
+        <Peel as PsszValidate<F>>::pssz_validate(bytes)
+    }
+}
+
 // ── Values ──────────────────────────────────────────────────────────────────
 
 struct Random(u64);
@@ -493,6 +573,14 @@ fn chain(links: usize, hold: usize) -> Chain {
 struct Transcript {
     text: String,
     entries: usize,
+    /// The other readers (`decode_strict`, `decode_checked`,
+    /// `validate_compatible`), recorded apart: see [`RECORDED_READERS`].
+    readers: String,
+    reader_entries: usize,
+    /// Values whose size pass was compared with the writer.
+    sized: usize,
+    /// Trusted reads compared with the checked reader's value.
+    trusted: usize,
 }
 impl Transcript {
     fn one<F: PsszFormat, T: PsszPack<F>>(&mut self, profile: &str, name: &str, value: &T) {
@@ -505,6 +593,27 @@ impl Transcript {
         let checked = value.pssz_pack_checked(&mut packed);
         assert_eq!(&appended[..3], [9, 8, 7]);
         assert_eq!(&packed[..3], [9, 8, 7]);
+        // size-pass:begin
+        // The size pass is the writer without the bytes: the same size, or
+        // the same error, for every value of the stream (`pssz_pack_checked`
+        // is the writer at depth 0, and `try_size_of` adds what `try_encode`
+        // adds).
+        let sized = value.pssz_size_at_depth(0);
+        match (&checked, &sized) {
+            (Ok(()), Ok(size)) => assert_eq!(*size, packed.len() - 3, "size of {name} {profile}"),
+            (Err(written), Err(sized)) => assert_eq!(written, sized, "size error of {name} {profile}"),
+            _ => panic!("size pass disagrees on {name} {profile}: {checked:?} / {sized:?}"),
+        }
+        assert_eq!(
+            psio::pssz::try_size_of::<F, T>(value),
+            result.as_ref().map(Vec::len).map_err(Clone::clone),
+            "{name} {profile}"
+        );
+        if let Ok(bytes) = &result {
+            assert_eq!(psio::pssz::size_of::<F, T>(value), bytes.len(), "{name} {profile}");
+        }
+        self.sized += 1;
+        // size-pass:end
         match &result {
             Ok(bytes) => {
                 assert_eq!(into, Ok(()), "{name} {profile}");
@@ -569,6 +678,7 @@ impl Transcript {
         copies.push((0..bytes.len()).map(|_| r.next() as u8).collect());
         copies.push(vec![]);
         for (index, copy) in copies.iter().enumerate() {
+            self.other_readers::<F, T>(profile, name, index, copy);
             write!(self.text, "read {name} {profile} #{index} ").unwrap();
             match decode::<F, T>(copy) {
                 Ok(value) => write!(self.text, "{:016x}", fnv1a(format!("{value:?}").as_bytes())).unwrap(),
@@ -583,6 +693,120 @@ impl Transcript {
             self.text.push('\n');
             self.entries += 1;
         }
+    }
+    /// `decode_strict`, `decode_checked` and `validate_compatible` on one
+    /// buffer, into the second transcript; and the trusted reader, which has
+    /// no recording to agree with (what it does with bytes that are not
+    /// valid is its own business, and changed): whatever the checked reader
+    /// accepts, it reads as the same value, and anything else is a panic or
+    /// a value.
+    fn other_readers<F: PsszFormat, T>(&mut self, profile: &str, name: &str, index: usize, bytes: &[u8])
+    where
+        T: PsszPack<F> + PsszUnpack<F> + PsszValidate<F> + PartialEq + std::fmt::Debug,
+    {
+        let hash = |value: &T| fnv1a(format!("{value:?}").as_bytes());
+        write!(self.readers, "{name} {profile} #{index} ").unwrap();
+        match decode_strict::<F, T>(bytes) {
+            Ok(value) => write!(self.readers, "{:016x}", hash(&value)).unwrap(),
+            Err(error) => write!(self.readers, "error: {error}").unwrap(),
+        }
+        match decode_checked::<F, T>(bytes) {
+            Ok(decoded) => write!(self.readers, " | {:016x} {}", hash(&decoded.value), decoded.has_unknown).unwrap(),
+            Err(error) => write!(self.readers, " | error: {error}").unwrap(),
+        }
+        match validate_compatible::<F, T>(bytes) {
+            Ok(unknown) => writeln!(self.readers, " | {unknown}").unwrap(),
+            Err(error) => writeln!(self.readers, " | error: {error}").unwrap(),
+        }
+        self.reader_entries += 1;
+
+        let checked = decode::<F, T>(bytes);
+        let trusted = quietly(|| decode_trusted::<F, T>(bytes));
+        if let Ok(value) = checked {
+            assert_eq!(trusted.as_ref(), Some(&value), "trusted read of {name} {profile} #{index}");
+            self.trusted += 1;
+        }
+    }
+    /// The readers on bytes a newer writer made (`value` is of the newer
+    /// type `N`, read as `T`): unknown appended members, at the root and
+    /// beneath it.
+    fn read_newer<N, T>(&mut self, name: &str, value: &N)
+    where
+        N: PsszPack<Pssz> + PsszPack<Pssz8> + PsszPack<Pssz16> + PsszPack<Pssz32>,
+        T: PartialEq + std::fmt::Debug,
+        T: PsszPack<Pssz> + PsszUnpack<Pssz> + PsszValidate<Pssz>,
+        T: PsszPack<Pssz8> + PsszUnpack<Pssz8> + PsszValidate<Pssz8>,
+        T: PsszPack<Pssz16> + PsszUnpack<Pssz16> + PsszValidate<Pssz16>,
+        T: PsszPack<Pssz32> + PsszUnpack<Pssz32> + PsszValidate<Pssz32>,
+    {
+        fn one<F: PsszFormat, N: PsszPack<F>, T>(t: &mut Transcript, profile: &str, name: &str, value: &N)
+        where
+            T: PsszPack<F> + PsszUnpack<F> + PsszValidate<F> + PartialEq + std::fmt::Debug,
+        {
+            let Ok(bytes) = try_encode::<F, N>(value) else { return };
+            let mut copies = vec![bytes.clone(), bytes[..bytes.len().saturating_sub(1)].to_vec()];
+            for at in 0..bytes.len().min(12) {
+                let mut copy = bytes.clone();
+                copy[at] = copy[at].wrapping_add(1);
+                copies.push(copy);
+            }
+            for (index, copy) in copies.iter().enumerate() {
+                t.other_readers::<F, T>(profile, name, index, copy);
+                write!(t.readers, "  {name} {profile} #{index} ").unwrap();
+                match decode::<F, T>(copy) {
+                    Ok(value) => write!(t.readers, "{:016x}", fnv1a(format!("{value:?}").as_bytes())).unwrap(),
+                    Err(error) => write!(t.readers, "error: {error}").unwrap(),
+                }
+                for result in [validate::<F, T>(copy), validate_strict::<F, T>(copy)] {
+                    match result {
+                        Ok(()) => t.readers.push_str(" | ok"),
+                        Err(error) => write!(t.readers, " | error: {error}").unwrap(),
+                    }
+                }
+                t.readers.push('\n');
+                t.reader_entries += 1;
+            }
+        }
+        one::<Pssz, N, T>(self, "auto", name, value);
+        one::<Pssz8, N, T>(self, "8", name, value);
+        one::<Pssz16, N, T>(self, "16", name, value);
+        one::<Pssz32, N, T>(self, "32", name, value);
+    }
+    /// The readers on bytes that nest: `path` is the selector of each
+    /// level of a [`Peel`] (1: derived, 2: through a hand-written reader),
+    /// the same bytes under every profile. The depth limit is met by the
+    /// readers alone (the writer would have refused such a value).
+    fn read_peel(&mut self, path: &[u8]) {
+        let mut bytes = path.to_vec();
+        bytes.push(0);
+        fn one<F: PsszFormat>(t: &mut Transcript, profile: &str, bytes: &[u8])
+        where
+            Peel: PsszPack<F> + PsszUnpack<F> + PsszValidate<F>,
+        {
+            write!(t.readers, "peel {profile} {} ", bytes.len()).unwrap();
+            for byte in bytes {
+                write!(t.readers, "{byte}").unwrap();
+            }
+            match decode::<F, Peel>(bytes) {
+                Ok(value) => write!(t.readers, " {}", value.levels()).unwrap(),
+                Err(error) => write!(t.readers, " error: {error}").unwrap(),
+            }
+            for result in [validate::<F, Peel>(bytes), validate_strict::<F, Peel>(bytes)] {
+                match result {
+                    Ok(()) => t.readers.push_str(" | ok"),
+                    Err(error) => write!(t.readers, " | error: {error}").unwrap(),
+                }
+            }
+            // Through the trait, as a hand-written codec calls a reader.
+            match <Peel as PsszUnpack<F>>::pssz_unpack(bytes) {
+                Ok(value) => writeln!(t.readers, " | {}", value.levels()).unwrap(),
+                Err(error) => writeln!(t.readers, " | error: {error}").unwrap(),
+            }
+            t.reader_entries += 1;
+        }
+        one::<Pssz>(self, "auto", &bytes);
+        one::<Pssz8>(self, "8", &bytes);
+        one::<Pssz32>(self, "32", &bytes);
     }
     fn read<T>(&mut self, name: &str, value: &T)
     where
@@ -609,6 +833,26 @@ impl Transcript {
     }
 }
 
+thread_local! { static QUIET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// `f`, with a panic turned into `None` and not reported (the trusted
+/// reader panics on most damaged buffers; that is its contract).
+fn quietly<R>(f: impl FnOnce() -> R) -> Option<R> {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !QUIET.with(|quiet| quiet.get()) {
+                previous(info);
+            }
+        }));
+    });
+    QUIET.with(|quiet| quiet.set(true));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    QUIET.with(|quiet| quiet.set(false));
+    result.ok()
+}
+
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01b3))
 }
@@ -617,7 +861,14 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// checks the memory accesses and has no use for the hash).
 fn transcript(full: bool) -> Transcript {
     let rounds = |n: usize| if full { n } else { 2 };
-    let mut t = Transcript { text: String::new(), entries: 0 };
+    let mut t = Transcript {
+        text: String::new(),
+        entries: 0,
+        readers: String::new(),
+        reader_entries: 0,
+        sized: 0,
+        trusted: 0,
+    };
     let mut r = Random(0x9E37_79B9_7F4A_7C15);
     for _ in 0..rounds(400) {
         t.all("plain", &r.plain());
@@ -688,12 +939,64 @@ fn transcript(full: bool) -> Transcript {
         t.all(&format!("chain {links}/0"), &chain(links, 0));
         t.all(&format!("chain {links}/7"), &chain(links, 7));
     }
+    // The second transcript: a newer writer's bytes, and the depth limit of
+    // the readers, with hand-written readers between the derived ones.
+    for _ in 0..rounds(60) {
+        let plain = r.plain();
+        let newer = PlainNewer { a: plain.a, s: plain.s, v: plain.v, o: plain.o, later: r.maybe(Random::text), last: r.maybe(|r| r.next() as u16) };
+        t.read_newer::<_, Plain>("newer", &newer);
+        t.read_newer::<_, Vec<Plain>>("newers", &vec![newer.clone(), newer.clone()]);
+        t.read_newer::<_, (u8, Plain, Option<Plain>)>("newer-in-tuple", &(r.next() as u8, newer.clone(), r.maybe(|_| newer.clone())));
+        t.read_newer::<_, Choice>("newer-in-choice", &ChoiceNewer::Record(newer.clone()));
+        t.read_newer::<_, BTreeMap<u32, Plain>>("newer-in-map", &BTreeMap::from([(r.next() as u32, newer.clone()), (r.next() as u32, newer)]));
+    }
+    // Arrays and lists of every kind of element (the transcript above has
+    // few of them as roots), as their own type.
+    for _ in 0..rounds(60) {
+        let texts = [r.text(), r.text(), r.text()];
+        t.read_newer::<_, [String; 3]>("array-of-strings", &texts);
+        t.read_newer::<_, [Vec<u16>; 2]>("array-of-lists", &[r.list(3, |r| r.next() as u16), r.list(3, |r| r.next() as u16)]);
+        t.read_newer::<_, [u32; 5]>("array-of-numbers", &[r.next() as u32; 5]);
+        let mut hash = [0u8; 32];
+        hash.iter_mut().for_each(|byte| *byte = r.next() as u8);
+        t.read_newer::<_, [u8; 32]>("hash", &hash);
+        t.read_newer::<_, (u64, [u8; 32], Option<[u16; 2]>, Box<[i64; 2]>)>(
+            "row-with-arrays",
+            &(r.next(), hash, r.maybe(|r| [r.next() as u16; 2]), Box::new([r.next() as i64, r.next() as i64])),
+        );
+        t.read_newer::<_, Vec<u8>>("bytes", &r.list(40, |r| r.next() as u8));
+        t.read_newer::<_, Vec<u64>>("longs", &r.list(6, Random::next));
+        t.read_newer::<_, Vec<f64>>("doubles", &r.list(4, |r| r.next() as f64 / 3.0));
+        t.read_newer::<_, [Plain; 2]>("array-of-records", &[r.plain(), r.plain()]);
+        t.read_newer::<_, [bool; 3]>("array-of-flags", &[r.chance(2), r.chance(2), r.chance(2)]);
+        t.read_newer::<_, [[u16; 2]; 2]>("grid", &[[r.next() as u16; 2], [r.next() as u16; 2]]);
+        t.read_newer::<_, [(); 3]>("units", &[(), (), ()]);
+        t.read_newer::<_, Vec<[u8; 0]>>("empties", &Vec::<[u8; 0]>::new());
+        t.read_newer::<_, Box<Plain>>("boxed", &Box::new(r.plain()));
+        t.read_newer::<_, Vec<Option<String>>>("maybes", &r.list(3, |r| r.maybe(Random::text)));
+    }
+    for length in if full { 0..80 } else { 62..68 } {
+        for hold in [0u64, 1, 2, 3, 7] {
+            let path: Vec<u8> = (0..length).map(|level| if hold != 0 && (level + 1) % hold == 0 { 2 } else { 1 }).collect();
+            t.read_peel(&path);
+        }
+        let random: Vec<u8> = (0..length).map(|_| 1 + r.below(2) as u8).collect();
+        t.read_peel(&random);
+    }
     t
 }
 
 /// Entries and FNV-1a of the transcript at commit c6d9940 (before the
 /// encoder wrote in place).
 const RECORDED: (usize, u64) = (141673, 0x4dc0_e089_a0b5_a52d);
+
+/// Entries and FNV-1a of the second transcript (`decode_strict`,
+/// `decode_checked` and `validate_compatible` on every buffer of the first;
+/// every reader on a newer writer's bytes and on nesting up to and beyond
+/// the depth limit, through derived and hand-written readers) at commit
+/// b5cea0d: before the readers were handed their depth and the record
+/// frame was resolved field by field.
+const RECORDED_READERS: (usize, u64) = (231829, 0xf209_61d9_8d6e_c323);
 
 #[test]
 fn bytes_and_errors_are_those_recorded() {
@@ -706,8 +1009,25 @@ fn bytes_and_errors_are_those_recorded() {
     println!("entries {} errors {} hash {:#018x}", transcript.entries, errors, fnv1a(transcript.text.as_bytes()));
     // The stream has to exercise the refusals as well as the bytes.
     assert!(errors > transcript.entries / 20, "too few errors: {errors}");
+    if let Ok(path) = std::env::var("PSSZ_READERS_TRANSCRIPT") {
+        std::fs::write(path, &transcript.readers).unwrap();
+    }
+    println!(
+        "readers: entries {} errors {} unknown {} hash {:#018x}; sized {}; trusted reads compared {}",
+        transcript.reader_entries,
+        transcript.readers.matches("error: ").count(),
+        transcript.readers.matches("true").count(),
+        fnv1a(transcript.readers.as_bytes()),
+        transcript.sized,
+        transcript.trusted
+    );
     if full {
         assert_eq!((transcript.entries, fnv1a(transcript.text.as_bytes())), RECORDED);
+        assert_eq!((transcript.reader_entries, fnv1a(transcript.readers.as_bytes())), RECORDED_READERS);
+        // The second transcript has to meet unknown fields and the limit.
+        assert!(transcript.readers.matches("unknown fields rejected").count() > 1000);
+        assert!(transcript.readers.matches("max depth exceeded").count() > 300);
+        assert!(transcript.trusted > 20_000, "{}", transcript.trusted);
     }
 }
 

@@ -626,15 +626,35 @@ macro_rules! time_value {
             fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
                 self.ticks.pssz_pack_fixed(slot, depth)
             }
+            #[inline]
+            fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
+                self.ticks.pssz_size_at_depth(depth)
+            }
+            #[inline]
+            fn pssz_size_fixed(&self, depth: usize) -> PsszResult<()> {
+                self.ticks.pssz_size_fixed(depth)
+            }
         }
         impl<F: PsszFormat, U: Unit, R: Tick + PsszUnpack<F>> PsszUnpack<F> for $name<U, R> {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
                 R::pssz_unpack(bytes).map(Self::from_ticks)
             }
+            #[inline]
+            fn pssz_unpack_at_depth(bytes: &[u8], depth: usize) -> PsszResult<Self> {
+                R::pssz_unpack_at_depth(bytes, depth).map(Self::from_ticks)
+            }
+            #[inline]
+            fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
+                Self::from_ticks(R::pssz_unpack_trusted(bytes))
+            }
         }
         impl<F: PsszFormat, U: Unit, R: Tick + PsszValidate<F>> PsszValidate<F> for $name<U, R> {
             fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
                 R::pssz_validate(bytes)
+            }
+            #[inline]
+            fn pssz_validate_at_depth(bytes: &[u8], depth: usize) -> PsszResult<()> {
+                R::pssz_validate_at_depth(bytes, depth)
             }
         }
         impl<'a, F: PsszFormat, U: Unit, R: Tick + PsszUnpack<F>> PsszView<'a, $name<U, R>, F> {

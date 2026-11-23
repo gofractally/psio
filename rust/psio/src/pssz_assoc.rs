@@ -111,66 +111,75 @@ where
 /// The entries of a map frame: the list is decoded (which runs the
 /// invariants of the keys and values, in wire order), then the order is
 /// required.
-fn decode_map<F: PsszFormat, K, V>(w: usize, bytes: &[u8], bound: usize) -> PsszResult<Vec<(K, V)>>
+fn decode_map<F: PsszFormat, K, V>(w: usize, bytes: &[u8], bound: usize, depth: usize) -> PsszResult<Vec<(K, V)>>
 where
     K: PsszPack<F> + PsszUnpack<F> + KeyPack,
     V: PsszPack<F> + PsszUnpack<F>,
 {
-    let _depth = checked::DecodeDepth::enter()?;
-    if checked::sequence_len::<F, (K, V)>(w, bytes, None)? > bound {
+    checked::decode_node(depth)?;
+    let n = checked::sequence_len::<F, (K, V)>(w, bytes, None)?;
+    if n > bound {
         return Err(MAP_BOUND);
     }
-    let entries = checked::decode_sequence::<F, (K, V)>(w, bytes, None)?;
+    let entries = checked::decode_elements_at_depth::<F, (K, V)>(w, bytes, n, depth + 1)?;
     ascending(entries.iter().map(|entry| &entry.0), MAP_ORDER)?;
     Ok(entries)
 }
-fn decode_set<F: PsszFormat, K>(w: usize, bytes: &[u8], bound: usize) -> PsszResult<Vec<K>>
+fn decode_set<F: PsszFormat, K>(w: usize, bytes: &[u8], bound: usize, depth: usize) -> PsszResult<Vec<K>>
 where
     K: PsszPack<F> + PsszUnpack<F> + KeyPack,
 {
-    let _depth = checked::DecodeDepth::enter()?;
-    if checked::sequence_len::<F, K>(w, bytes, None)? > bound {
+    checked::decode_node(depth)?;
+    let n = checked::sequence_len::<F, K>(w, bytes, None)?;
+    if n > bound {
         return Err(SET_BOUND);
     }
-    let elements = checked::decode_sequence::<F, K>(w, bytes, None)?;
+    let elements = checked::decode_elements_at_depth::<F, K>(w, bytes, n, depth + 1)?;
     ascending(elements.iter(), SET_ORDER)?;
     Ok(elements)
 }
 /// Validation without keeping the value: the list, then the order (which
 /// needs the keys, and only the keys, as values).
-fn validate_map<F: PsszFormat, K, V>(w: usize, bytes: &[u8], bound: usize) -> PsszResult<()>
+fn validate_map<F: PsszFormat, K, V>(w: usize, bytes: &[u8], bound: usize, depth: usize) -> PsszResult<()>
 where
     K: PsszPack<F> + PsszUnpack<F> + KeyPack,
     V: PsszPack<F> + PsszValidate<F>,
     (K, V): PsszPack<F> + PsszValidate<F>,
 {
-    let _depth = checked::DecodeDepth::enter()?;
+    checked::decode_node(depth)?;
     let n = checked::sequence_len::<F, (K, V)>(w, bytes, None)?;
     if n > bound {
         return Err(MAP_BOUND);
     }
-    for i in 0..n {
-        <(K, V)>::pssz_validate(&bytes[checked::sequence_span::<F, (K, V)>(w, bytes, n, i)?])?;
-    }
+    checked::for_each_element::<F, (K, V)>(w, bytes, n, |_, entry| {
+        <(K, V)>::pssz_validate_at_depth(entry, depth + 1)
+    })?;
     let mut keys = Vec::new();
-    for i in 0..n {
-        let entry = &bytes[checked::sequence_span::<F, (K, V)>(w, bytes, n, i)?];
+    checked::for_each_element::<F, (K, V)>(w, bytes, n, |_, entry| {
         let [key, _] = checked::record_spans_n(
             <(K, V) as PsszPack<F>>::OFFSET_WIDTH,
             [checked::Layout::of::<F, K>(), checked::Layout::of::<F, V>()],
             entry,
             false,
         )?;
-        keys.push(checked::decode_field::<F, K>(entry, key)?);
-    }
+        // The key of a valid entry: its depth was checked with the entry.
+        keys.push(match key {
+            Some(span) => K::pssz_unpack_at_depth(
+                entry.get(span).ok_or(PsszError::new("pssz: field span out of range"))?,
+                depth + 2,
+            )?,
+            None => K::pssz_missing_optional()?,
+        });
+        Ok(())
+    })?;
     ascending(keys.iter(), MAP_ORDER)
 }
-fn validate_set<F: PsszFormat, K>(w: usize, bytes: &[u8], bound: usize) -> PsszResult<()>
+fn validate_set<F: PsszFormat, K>(w: usize, bytes: &[u8], bound: usize, depth: usize) -> PsszResult<()>
 where
     K: PsszPack<F> + PsszUnpack<F> + KeyPack,
 {
     // An element is its own key: decoding it is its validation.
-    decode_set::<F, K>(w, bytes, bound).map(drop)
+    decode_set::<F, K>(w, bytes, bound, depth).map(drop)
 }
 
 macro_rules! assoc_consts {
@@ -226,8 +235,11 @@ macro_rules! pssz_map {
             V: PsszPack<F> + PsszUnpack<F>,
         {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+                <Self as PsszUnpack<F>>::pssz_unpack_at_depth(bytes, checked::decode_depth())
+            }
+            fn pssz_unpack_at_depth(bytes: &[u8], depth: usize) -> PsszResult<Self> {
                 let bound: Option<usize> = $bound;
-                let $items = decode_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX))?;
+                let $items = decode_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX), depth)?;
                 let count = $items.len();
                 let out: Self = $build;
                 let $s = &out;
@@ -243,8 +255,11 @@ macro_rules! pssz_map {
             V: PsszPack<F> + PsszValidate<F>,
         {
             fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+                <Self as PsszValidate<F>>::pssz_validate_at_depth(bytes, checked::decode_depth())
+            }
+            fn pssz_validate_at_depth(bytes: &[u8], depth: usize) -> PsszResult<()> {
                 let bound: Option<usize> = $bound;
-                validate_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX))
+                validate_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX), depth)
             }
         }
         impl<K, V, $($cg)*> crate::pssz_schema_ir::ToPsszSchema for $ty
@@ -279,8 +294,11 @@ macro_rules! pssz_set {
             K: PsszPack<F> + PsszUnpack<F> + KeyPack + $($kb)*,
         {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
+                <Self as PsszUnpack<F>>::pssz_unpack_at_depth(bytes, checked::decode_depth())
+            }
+            fn pssz_unpack_at_depth(bytes: &[u8], depth: usize) -> PsszResult<Self> {
                 let bound: Option<usize> = $bound;
-                let $items = decode_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX))?;
+                let $items = decode_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX), depth)?;
                 let count = $items.len();
                 let out: Self = $build;
                 let $s = &out;
@@ -295,8 +313,11 @@ macro_rules! pssz_set {
             K: PsszPack<F> + PsszUnpack<F> + KeyPack + $($kb)*,
         {
             fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
+                <Self as PsszValidate<F>>::pssz_validate_at_depth(bytes, checked::decode_depth())
+            }
+            fn pssz_validate_at_depth(bytes: &[u8], depth: usize) -> PsszResult<()> {
                 let bound: Option<usize> = $bound;
-                validate_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX))
+                validate_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, bytes, bound.unwrap_or(usize::MAX), depth)
             }
         }
         impl<K, $($cg)*> crate::pssz_schema_ir::ToPsszSchema for $ty
@@ -361,14 +382,31 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for ByKey<T> {
     fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
         <T as PsszPack<F>>::pssz_pack_fixed(&self.0, slot, depth)
     }
+    #[inline]
+    fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
+        <T as PsszPack<F>>::pssz_size_at_depth(&self.0, depth)
+    }
+    #[inline]
+    fn pssz_size_fixed(&self, depth: usize) -> PsszResult<()> {
+        <T as PsszPack<F>>::pssz_size_fixed(&self.0, depth)
+    }
     fn pssz_size_hint(&self) -> usize { <T as PsszPack<F>>::pssz_size_hint(&self.0) }
 }
 impl<F: PsszFormat, T: PsszUnpack<F>> PsszUnpack<F> for ByKey<T> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> { T::pssz_unpack(bytes).map(ByKey) }
+    #[inline]
+    fn pssz_unpack_at_depth(bytes: &[u8], depth: usize) -> PsszResult<Self> {
+        T::pssz_unpack_at_depth(bytes, depth).map(ByKey)
+    }
     fn pssz_missing_optional() -> PsszResult<Self> { T::pssz_missing_optional().map(ByKey) }
+    fn pssz_unpack_trusted(bytes: &[u8]) -> Self { ByKey(T::pssz_unpack_trusted(bytes)) }
 }
 impl<F: PsszFormat, T: PsszValidate<F>> PsszValidate<F> for ByKey<T> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> { T::pssz_validate(bytes) }
+    #[inline]
+    fn pssz_validate_at_depth(bytes: &[u8], depth: usize) -> PsszResult<()> {
+        T::pssz_validate_at_depth(bytes, depth)
+    }
 }
 impl<T: crate::pssz_schema_ir::ToPsszSchema> crate::pssz_schema_ir::ToPsszSchema for ByKey<T> {
     fn schema_name() -> Option<String> { T::schema_name() }
