@@ -2,8 +2,8 @@
 //
 // psio/json.hpp — the JSON text formats: `psio::json` and `psio::ijson`.
 //
-// Both tags write to a `std::string` and read a `std::span<const char>` of
-// UTF-8 text. They share one reflection-driven engine and differ in three
+// Both tags write to a `std::string` (or append to a `std::vector<char>`)
+// and read a `std::span<const char>` of UTF-8 text. They share one reflection-driven engine and differ in three
 // rules only.
 //
 //   psio::json    RFC 8259. Every integer is a bare number, byte sequences
@@ -512,34 +512,57 @@ namespace psio {
 
       // ── Encoding ──────────────────────────────────────────────────────────
       //
-      // The writer owns the tail of the output string as a raw buffer: text
-      // is written through a pointer after one capacity check per value
-      // (`reserve`), and the string's size is set once at the end
-      // (`finish`). While a writer is live, `s.size()` is the buffer's
-      // extent, not the text's length; `n` is the length.
+      // The writer owns the tail of its sink (a std::string or a
+      // std::vector<char>) as a raw buffer: text is written through a
+      // pointer after one capacity check per value (`reserve`), and the
+      // sink's size is set once at the end (`finish`). While a writer is
+      // live, the sink's size is the buffer's extent, not the text's
+      // length; `n` is the length.
 
       struct writer
       {
-         std::string&     s;
          std::string_view format;
          bool             fail_fast = true;
          std::string_view err{};
-         std::size_t      n = s.size();  // bytes of `s` that are text
+         std::size_t      n = 0;  // bytes of the sink that are text
          // The status of a violated invariant, reported unchanged.
          ::psio::codec_error invariant{};
          bool                has_invariant = false;
 
+         // The text is appended to `sink`: a std::string or a
+         // std::vector<char>.
+         writer(std::string& sink, std::string_view format, bool fail_fast = true)
+             : format(format),
+               fail_fast(fail_fast),
+               n(sink.size()),
+               sink_(&sink),
+               data_(sink.data()),
+               size_(sink.size()),
+               resize_(&resize_string)
+         {
+         }
+         writer(std::vector<char>& sink, std::string_view format, bool fail_fast = true)
+             : format(format),
+               fail_fast(fail_fast),
+               n(sink.size()),
+               sink_(&sink),
+               data_(sink.data()),
+               size_(sink.size()),
+               resize_(&resize_vector)
+         {
+         }
+
          // Room for `k` more bytes; returns where they go.
          char* reserve(std::size_t k)
          {
-            if (s.size() - n < k) [[unlikely]]
+            if (size_ - n < k) [[unlikely]]
                grow(k);
-            return s.data() + n;
+            return data_ + n;
          }
          // The bytes [reserve(), end) are now text.
          void commit(const char* end) noexcept
          {
-            n = static_cast<std::size_t>(end - s.data());
+            n = static_cast<std::size_t>(end - data_);
          }
          void put(char c)
          {
@@ -561,8 +584,12 @@ namespace psio {
             std::memcpy(reserve(N), text.data(), N);
             n += N;
          }
-         // Ends the buffer phase: `s` is exactly the text.
-         void finish() { s.resize(n); }
+         // Ends the buffer phase: the sink is exactly the text.
+         void finish()
+         {
+            data_ = resize_(sink_, n, false);
+            size_ = n;
+         }
 
          void fail(std::string_view what)
          {
@@ -592,14 +619,39 @@ namespace psio {
          }
 
         private:
+         // The sink, as a raw buffer: [data_, data_ + size_).
+         void*       sink_;
+         char*       data_;
+         std::size_t size_;
+         // Sets the sink's size (growing: the new bytes need no value) and
+         // returns its data.
+         char* (*resize_)(void* sink, std::size_t size, bool growing);
+
+         static char* resize_string(void* sink, std::size_t size, bool growing)
+         {
+            auto& s = *static_cast<std::string*>(sink);
+#if defined(__cpp_lib_string_resize_and_overwrite)
+            if (growing)
+               s.resize_and_overwrite(size, [&](char*, std::size_t) { return size; });
+            else
+               s.resize(size);
+#else
+            (void)growing;
+            s.resize(size);
+#endif
+            return s.data();
+         }
+         static char* resize_vector(void* sink, std::size_t size, bool)
+         {
+            auto& v = *static_cast<std::vector<char>*>(sink);
+            v.resize(size);
+            return v.data();
+         }
          void grow(std::size_t k)
          {
-            const std::size_t want = std::max({n + k, s.size() * 2, std::size_t{128}});
-#if defined(__cpp_lib_string_resize_and_overwrite)
-            s.resize_and_overwrite(want, [&](char*, std::size_t) { return want; });
-#else
-            s.resize(want);
-#endif
+            const std::size_t want = std::max({n + k, size_ * 2, std::size_t{128}});
+            data_                  = resize_(sink_, want, true);
+            size_                  = want;
          }
       };
 
@@ -1375,7 +1427,7 @@ namespace psio {
          }
       }
 
-      // Encodes one whole value and leaves `w.s` as the text.
+      // Encodes one whole value and leaves the sink as the text.
       template <typename Fmt, typename T>
       void encode_document(const T& v, writer& w)
       {
@@ -1457,6 +1509,55 @@ namespace psio {
                return true;
          }
          return c.fail("json: unexpected character at value start");
+      }
+
+      // Reads one value of any shape from `c` and writes it laid out for a
+      // person: one member or element per line, `indent` spaces per level,
+      // `"key": value`, an empty array or object as `[]` / `{}`. Strings
+      // and numbers as capture_value writes them.
+      template <typename C>
+      bool pretty_value(C& c, writer& w, std::size_t indent, std::size_t level)
+      {
+         json_kind k;
+         if (!c.kind(k))
+            return false;
+         if (k != json_kind::object && k != json_kind::array)
+            return capture_value(c, w);
+         const bool       object = k == json_kind::object;
+         std::string_view key;
+         bool             has = false;
+         auto newline = [&](std::size_t depth) {
+            w.put('\n');
+            char* out = w.reserve(depth * indent);
+            std::memset(out, ' ', depth * indent);
+            w.commit(out + depth * indent);
+         };
+         if (!(object ? c.begin_object() : c.begin_array()))
+            return false;
+         w.put(object ? '{' : '[');
+         bool any = false;
+         for (;;)
+         {
+            if (!(object ? c.next_field(has, key) : c.next_element(has)))
+               return false;
+            if (!has)
+               break;
+            if (any)
+               w.put(',');
+            any = true;
+            newline(level + 1);
+            if (object)
+            {
+               write_string(w, key, false);
+               w.append(": ");
+            }
+            if (!pretty_value(c, w, indent, level + 1))
+               return false;
+         }
+         if (any)
+            newline(level);
+         w.put(object ? '}' : ']');
+         return true;
       }
 
       // ── Reading ───────────────────────────────────────────────────────────
@@ -1936,6 +2037,44 @@ namespace psio {
          }
       }
 
+      // "json: missing required member "amount" of Transfer": the message
+      // for member I of T, in static storage (a cursor keeps a view).
+      template <typename T, std::size_t I>
+      struct missing_member
+      {
+         static constexpr std::string_view prefix = "json: missing required member \"";
+         static constexpr std::string_view name   = ::psio::reflect<T>::template member_name<I>;
+         static constexpr std::string_view middle = "\" of ";
+         static constexpr std::string_view type   = ::psio::reflect<T>::name;
+         static constexpr auto             storage = [] {
+            std::array<char, prefix.size() + name.size() + middle.size() + type.size()> text{};
+            std::size_t at = 0;
+            for (std::string_view part : {prefix, name, middle, type})
+               for (char ch : part)
+                  text[at++] = ch;
+            return text;
+         }();
+         static constexpr std::string_view value{storage.data(), storage.size()};
+      };
+
+      // The same for parameter I of a named argument list T
+      // (psio::annotated_tuple): "json: missing required member "amount"".
+      template <typename T, std::size_t I>
+      struct missing_argument
+      {
+         static constexpr std::string_view prefix = "json: missing required member \"";
+         static constexpr std::string_view name{T::meta_type::names[I]};
+         static constexpr auto             storage = [] {
+            std::array<char, prefix.size() + name.size() + 1> text{};
+            std::size_t                                       at = 0;
+            for (std::string_view part : {prefix, name, std::string_view{"\""}})
+               for (char ch : part)
+                  text[at++] = ch;
+            return text;
+         }();
+         static constexpr std::string_view value{storage.data(), storage.size()};
+      };
+
       // Member readers by index, for keys that arrive out of order.
       template <typename Fmt, typename T, typename C>
       struct member_readers
@@ -1993,8 +2132,8 @@ namespace psio {
                return false;
          }
          // A missing std::optional member is empty; any other missing
-         // member is an error.
-         bool complete = true;
+         // member is an error that names the first one.
+         std::string_view missing{};
          [&]<std::size_t... Is>(std::index_sequence<Is...>) {
             (
                ([&]
@@ -2007,13 +2146,13 @@ namespace psio {
                       if (out)
                          (out->*(R::template member_pointer<Is>)).reset();
                    }
-                   else
-                      complete = false;
+                   else if (missing.empty())
+                      missing = missing_member<T, Is>::value;
                 }()),
                ...);
          }(std::make_index_sequence<N>{});
-         if (!complete)
-            return r.c.fail("json: missing required member");
+         if (!missing.empty())
+            return r.c.fail(missing);
          return true;
       }
 
@@ -2414,20 +2553,20 @@ namespace psio {
                      if (!r.c.next_field(more, key))
                         return false;
                   }
-                  bool complete = true;
+                  std::string_view missing{};
                   [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                      (([&] {
                          if (seen[Is])
                             return;
                          if constexpr (is_std_optional<std::tuple_element_t<Is, Tuple>>::value)
                             std::get<Is>(*dst).reset();
-                         else
-                            complete = false;
+                         else if (missing.empty())
+                            missing = missing_argument<T, Is>::value;
                       }()),
                       ...);
                   }(std::make_index_sequence<N>{});
-                  if (!complete)
-                     return r.c.fail("json: missing required member");
+                  if (!missing.empty())
+                     return r.c.fail(missing);
                }
             }
             else if (!read_value<Fmt, int_mode::natural, Tuple>(r, dst))
@@ -2539,6 +2678,15 @@ namespace psio {
          template <typename T>
          friend void tag_invoke(decltype(::psio::encode), Derived, const T& v,
                                 std::string& sink)
+         {
+            writer w{sink, Derived::name};
+            encode_document<Derived>(v, w);
+         }
+
+         // The same into a std::vector<char> (an HTTP body): appended.
+         template <typename T>
+         friend void tag_invoke(decltype(::psio::encode), Derived, const T& v,
+                                std::vector<char>& sink)
          {
             writer w{sink, Derived::name};
             encode_document<Derived>(v, w);
@@ -2805,10 +2953,11 @@ namespace psio {
       return detail::json_impl::read_document<Fmt, T>(text, nullptr, parser);
    }
 
-   // Appends the text of `value` to `out`. On failure `out` is restored.
-   template <detail::json_impl::json_family Fmt, typename T>
-   [[nodiscard]] codec_status encode_json_checked(Fmt, const T& value,
-                                                  std::string& out)
+   // Appends the text of `value` to `out`, a std::string or a
+   // std::vector<char>. On failure `out` is restored.
+   template <detail::json_impl::json_family Fmt, typename T, typename Sink>
+      requires(std::same_as<Sink, std::string> || std::same_as<Sink, std::vector<char>>)
+   [[nodiscard]] codec_status encode_json_checked(Fmt, const T& value, Sink& out)
    {
       const std::size_t           start = out.size();
       detail::json_impl::writer w{out, Fmt::name, false};
@@ -2819,6 +2968,58 @@ namespace psio {
       if (w.has_invariant)
          return codec_status{w.invariant};
       return codec_fail(w.err, static_cast<std::uint32_t>(start), Fmt::name);
+   }
+
+   // ── Pretty printing ────────────────────────────────────────────────────
+   //
+   // `format_json` lays any JSON text out for a person:
+   //
+   //    psio::format_json(psio::to_ijson(value))
+   //
+   //    {
+   //        "name": "n",
+   //        "tags": [
+   //            "a",
+   //            "b"
+   //        ],
+   //        "empty": {}
+   //    }
+   //
+   // One member or element per line, `indent` spaces per level (4), a space
+   // after the colon, empty containers closed on the spot. The values are
+   // untouched: numbers as written, strings escaped as PSIO escapes them,
+   // members in their order. The text must be one JSON value (it is checked
+   // as every reader checks it); what comes out is the same value.
+   struct json_layout
+   {
+      std::size_t indent = 4;  // spaces per nesting level
+   };
+   // Appends the laid-out text of `json` to `out` (a std::string or a
+   // std::vector<char>). On failure `out` is restored.
+   template <typename Sink>
+      requires(std::same_as<Sink, std::string> || std::same_as<Sink, std::vector<char>>)
+   [[nodiscard]] codec_status format_json(std::string_view json, Sink& out, json_layout layout = {})
+   {
+      const std::size_t         start = out.size();
+      json_text_cursor          c{std::span<const char>{json.data(), json.size()}, false};
+      detail::json_impl::writer w{out, "json", false};
+      const bool ok = detail::json_impl::pretty_value(c, w, layout.indent, 0) && c.finish();
+      w.finish();
+      if (ok && w.err.empty())
+         return codec_ok();
+      out.resize(start);
+      if (!ok)
+         return c.status("json");
+      return codec_fail(w.err, 0, "json");
+   }
+   // The same, fail-fast: a codec_exception (abort without exceptions) for
+   // text that is not JSON.
+   [[nodiscard]] inline std::string format_json(std::string_view json, json_layout layout = {})
+   {
+      std::string out;
+      if (auto st = format_json(json, out, layout); !st.ok())
+         ::psio::codec_abort(st.error());
+      return out;
    }
 
    // ── psio::json_value in the binary formats ─────────────────────────────

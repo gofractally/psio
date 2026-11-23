@@ -50,6 +50,19 @@ int main()
    if (!psio::decode_pssz_checked(psio::pssz{}, std::span<const char>{bytes}, back, unknown).ok() ||
        !(back.config == p.config))
       return 9;
+   // An error names the member that is missing.
+   Pass missing;
+   const auto st = psio::decode_json_checked(psio::ijson{}, R"({"name":"n"})", missing);
+   if (st.ok() || st.error().what != R"(json: missing required member "config" of Pass)")
+      return 10;
+   // A std::vector<char> sink, and a document laid out for a person.
+   std::vector<char> body;
+   if (!psio::encode_json_checked(psio::ijson{}, p, body).ok() || body.empty())
+      return 11;
+   std::string pretty;
+   if (!psio::format_json(R"({"a":[1]})", pretty).ok() ||
+       pretty != "{\n    \"a\": [\n        1\n    ]\n}")
+      return 12;
    std::puts("json_value noexceptions ok");
    return 0;
 }

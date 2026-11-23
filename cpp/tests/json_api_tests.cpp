@@ -37,6 +37,7 @@ namespace japi
    struct Point
    {
       int x = 0, y = 0;
+      friend bool operator==(const Point&, const Point&) = default;
       PSIO_REFLECT(Point, x, y)
    };
    using Mixed = std::variant<bool, std::int32_t, std::string, std::vector<int>, Point>;
@@ -863,4 +864,112 @@ TEST_CASE("json: untagged variants in a record, in PSSZ and through the schema",
    const auto bare = psio::SchemaBuilder{}.insert<japi::Extra>("E").build();
    CHECK(ir::equivalent(tagged, "E", bare, "E", ir::compare::wire));
    CHECK(ir::equivalent(tagged, "E", bare, "E").code == "text-form-changed");
+}
+
+// ── Sinks, pretty printing, and errors that name the member ────────────────
+TEST_CASE("json: a std::vector<char> is a sink", "[json][ijson][sink]")
+{
+   const japi::Ev ev{3, "x", 5};
+   std::vector<char> body;
+   psio::to_ijson(ev, body);  // (the probe of the gap)
+   const std::string text = psio::to_ijson(ev);
+   CHECK(std::string(body.begin(), body.end()) == text);
+   // Appended, like the std::string sink.
+   body.assign({'[', ' '});
+   psio::to_json(ev, body);
+   psio::encode(psio::ijson{}, std::string_view{"tail"}, body);
+   CHECK(std::string(body.begin(), body.end()) == "[ " + text + R"("tail")");
+   // A long document grows the vector as it grows a string.
+   const std::vector<std::uint64_t> many(5000, 18446744073709551615ull);
+   std::vector<char>                big;
+   psio::to_ijson(many, big);
+   CHECK(std::string(big.begin(), big.end()) == psio::to_ijson(many));
+   // Checked: restored on failure.
+   body.assign({'k'});
+   CHECK_FALSE(psio::encode_json_checked(psio::ijson{}, std::string_view{"\xff"}, body).ok());
+   CHECK(body == std::vector<char>{'k'});
+   REQUIRE(psio::encode_json_checked(psio::json{}, 7, body).ok());
+   CHECK(body == std::vector<char>{'k', '7'});
+}
+
+TEST_CASE("json: format_json lays a document out for a person", "[json][pretty]")
+{
+   const std::string_view compact =
+      R"({"name":"n","tags":["a","b"],"empty":{},"none":[],"n":1.50,"deep":{"k":[{"x":null}]}})";
+   const std::string_view pretty = R"({
+    "name": "n",
+    "tags": [
+        "a",
+        "b"
+    ],
+    "empty": {},
+    "none": [],
+    "n": 1.50,
+    "deep": {
+        "k": [
+            {
+                "x": null
+            }
+        ]
+    }
+})";
+   CHECK(psio::format_json(compact) == pretty);
+   // Laying out what is already laid out changes nothing; and it is the
+   // same value.
+   CHECK(psio::format_json(pretty) == pretty);
+   CHECK(psio::from_ijson<psio::json_value>(std::span<const char>{pretty.data(), pretty.size()}) ==
+         psio::from_ijson<psio::json_value>(
+            std::span<const char>{compact.data(), compact.size()}));
+   CHECK(psio::format_json(R"([1,{"a":true}])", {.indent = 2}) ==
+         "[\n  1,\n  {\n    \"a\": true\n  }\n]");
+   CHECK(psio::format_json(" 7 ") == "7");
+   CHECK(psio::format_json(R"("a\u0041")") == R"("aA")");
+   CHECK(psio::format_json("[]") == "[]");
+   // With a typed value.
+   CHECK(psio::format_json(psio::to_ijson(japi::Ev{3, "x", {}})) ==
+         "{\n    \"inviteId\": 3,\n    \"event\": \"x\",\n    \"opt\": null\n}");
+   // Text that is not JSON: a status and an untouched sink, or an exception.
+   std::string out = "kept";
+   CHECK_FALSE(psio::format_json(R"({"a":)", out).ok());
+   CHECK(out == "kept");
+   CHECK_THROWS_AS(psio::format_json("[1 2]"), psio::codec_exception);
+   std::vector<char> body;
+   REQUIRE(psio::format_json("[1]", body).ok());
+   CHECK(std::string(body.begin(), body.end()) == "[\n    1\n]");
+}
+
+TEST_CASE("json: a missing required member is named", "[json][ijson][errors]")
+{
+   japi::Ev ev;
+   auto     st = psio::decode_json_checked(psio::ijson{}, R"({"inviteId":3})", ev);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == R"(json: missing required member "event" of Ev)");
+   st = psio::decode_json_checked(psio::json{}, R"({"event":"x","opt":1})", ev);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == R"(json: missing required member "inviteId" of Ev)");
+   CHECK(psio::validate_json<japi::Ev>(psio::ijson{}, R"({})").error().what ==
+         R"(json: missing required member "inviteId" of Ev)");
+   // The record that lacks it is the one named, at any depth.
+   std::vector<japi::Pretty> rows;
+   st = psio::decode_json_checked(psio::ijson{}, R"([{"service":"s","list":[]}])", rows);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == R"(json: missing required member "data" of Pretty)");
+   // The fail-fast reader says the same.
+   try
+   {
+      (void)psio::from_ijson<japi::Ev>(R"({"event":"x"})");
+      FAIL("accepted");
+   }
+   catch (const psio::codec_exception& e)
+   {
+      CHECK(std::string_view{e.what()}.find(R"(missing required member "inviteId" of Ev)") !=
+            std::string_view::npos);
+   }
+   // Through a schema: the member, as the schema names it.
+   namespace ir = psio::pssz_ir;
+   const auto schema = psio::SchemaBuilder{}.insert<japi::Ev>("Ev").build();
+   std::vector<char> bytes;
+   st = ir::json_to_pssz(schema, "Ev", psio::ijson{}, R"({"inviteId":3})", bytes);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == R"(json: missing required member "event")");
 }

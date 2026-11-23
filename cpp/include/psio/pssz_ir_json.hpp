@@ -1134,7 +1134,14 @@ template <JsonCursor C> class Reader
             const AnyType *type =
                 members[i].type.get() ? shape_of(schema, *members[i].type) : nullptr;
             if (!type || !std::holds_alternative<Option>(type->value))
+            {
+               // (named: the message is kept in `failure`)
+               if (failure.ok())
+                  failure = codec_fail_owned(
+                      "json: missing required member \"" + members[i].name + "\"", 0,
+                      ijson ? "ijson" : "json");
                return c.fail("json: missing required member");
+            }
             slots[i] = Value::none();
          }
          values.emplace_back(members[i].name, std::move(*slots[i]));

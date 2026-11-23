@@ -642,12 +642,69 @@ so the exact text of a value as it was written is `kind(k)`, `from =
 offset()`, `skip()`, `text.substr(from, offset() - from)` (the simdjson
 cursors read a padded copy and have no exact position; `raw` works on all).
 
+### Sinks
+
+`psio::to_json` / `to_ijson` / `psio::encode` and `encode_json_checked`
+write into a `std::string` or a `std::vector<char>` (an HTTP body), in both
+cases **appending**:
+
+```cpp
+std::vector<char> body;
+psio::to_ijson(reply, body);                              // no intermediate string
+auto st = psio::encode_json_checked(psio::ijson{}, reply, body);   // restored on failure
+```
+
+PSIO's stream sinks (`stream.hpp`) are not JSON sinks; write to a vector
+and hand it over.
+
+### Pretty printing
+
+`psio::format_json(text)` lays any JSON text out for a person — one member
+or element per line, four spaces per level (`{.indent = N}` for another
+width), a space after the colon, empty containers closed on the spot:
+
+```cpp
+psio::format_json(psio::to_ijson(value));
+psio::format_json(text, out);            // appends; a codec_status; `out` restored on failure
+```
+
+```
+{
+    "name": "n",
+    "tags": [
+        "a"
+    ],
+    "empty": {}
+}
+```
+
+It reads its input by the rules of every reader (text that is not one JSON
+value is an error) and writes the same value: numbers as they were written,
+strings escaped as PSIO escapes them, members in their order. It works on
+any JSON, so it also lays out the output of the schema-driven
+`pssz_to_json`.
+
+### Errors that name the member
+
+A record whose text leaves out a member that is not `std::optional` is
+rejected with the member and the record named, in builds with and without
+exceptions (the message is a constant of the type):
+
+```
+json: missing required member "event" of Ev
+```
+
+The schema-driven reader names the member as the schema does (`json: missing
+required member "event"`), and so does a named argument list.
+
 ## Exception-disabled builds
 
 `cpp/tests/ijson_noexceptions.cpp` builds with `-fno-exceptions -fno-rtti`
 and exercises `validate`, `validate_strict`, `decode_json_checked` and
 `encode_json_checked` for both formats on valid, truncated, mutated and
-depth-bomb input.
+depth-bomb input. `cpp/tests/json_value_noexceptions.cpp` does the same for
+`psio::json_value` (text and PSSZ), the vector sink, `format_json` and the
+named missing-member error.
 
 ## Two layers: syntax and types
 
