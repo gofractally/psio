@@ -114,6 +114,117 @@ add_test(NAME psio_method_view_param_decode_into_view_compile_fail
 set_tests_properties(psio_method_view_param_decode_into_view_compile_fail PROPERTIES
    PASS_REGULAR_EXPRESSION "cannot be decoded into")
 
+# psio::method_args_to_pssz takes arguments as an ordinary call does: implicit
+# conversion only, forwarded, sources never copied.
+psio_add_test(psio_method_arg_convert_tests method_arg_convert_tests.cpp)
+add_test(NAME psio_method_arg_convert_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/method_arg_convert_fail.cpp)
+function(psio_method_arg_convert_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_method_arg_convert_${NAME}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/method_arg_convert_fail.cpp)
+   set_tests_properties(psio_method_arg_convert_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_MAC_NOT_CONVERTIBLE "nor implicitly convertible to it")
+psio_method_arg_convert_compile_fail(explicit_constructor MAC_FAIL_EXPLICIT_CONSTRUCTOR
+   "${PSIO_MAC_NOT_CONVERTIBLE}")
+psio_method_arg_convert_compile_fail(explicit_operator MAC_FAIL_EXPLICIT_OPERATOR
+   "${PSIO_MAC_NOT_CONVERTIBLE}")
+psio_method_arg_convert_compile_fail(const_operator MAC_FAIL_CONST_OPERATOR
+   "${PSIO_MAC_NOT_CONVERTIBLE}")
+psio_method_arg_convert_compile_fail(unrelated MAC_FAIL_UNRELATED
+   "${PSIO_MAC_NOT_CONVERTIBLE}")
+psio_method_arg_convert_compile_fail(too_few MAC_FAIL_TOO_FEW
+   "too few arguments passed to the method")
+psio_method_arg_convert_compile_fail(too_many MAC_FAIL_TOO_MANY
+   "too many arguments passed to the method")
+
+# psio::packs_as<U, T>: "a U packs as a T" at compile time; to_pssz_as and
+# method arguments constrained by it.
+psio_add_test(psio_pssz_packs_as_tests pssz_packs_as_tests.cpp)
+add_test(NAME psio_pssz_packs_as_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_packs_as_fail.cpp)
+function(psio_packs_as_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_pssz_packs_as_${NAME}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/pssz_packs_as_fail.cpp)
+   set_tests_properties(psio_pssz_packs_as_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_packs_as_compile_fail(put PA_FAIL_PUT "psio::packs_as<Wrong, Rec>")
+psio_packs_as_compile_fail(to_pssz_as PA_FAIL_TO_PSSZ_AS "pssz_source_of<Wrong, Rec>")
+psio_packs_as_compile_fail(size_as PA_FAIL_SIZE_AS "pssz_source_of<unsigned long long, Rec>")
+psio_packs_as_compile_fail(method_arg PA_FAIL_METHOD_ARG
+   "no viable conversion from returned value of type 'Wrong'")
+
+# Borrowing decode: from_pssz into a record whose members are
+# std::string_view / byte spans / views pointing into the input; natively
+# and with exceptions and RTTI disabled.
+psio_add_test(psio_pssz_borrow_tests pssz_borrow_tests.cpp)
+add_executable(psio_pssz_borrow_noexceptions_test pssz_borrow_noexceptions.cpp)
+target_include_directories(psio_pssz_borrow_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_borrow_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_borrow_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_borrow_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_borrow_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_borrow_noexceptions_test COMMAND psio_pssz_borrow_noexceptions_test)
+add_test(NAME psio_pssz_borrow_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_borrow_fail.cpp)
+function(psio_borrow_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_pssz_borrow_${NAME}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/pssz_borrow_fail.cpp)
+   set_tests_properties(psio_pssz_borrow_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_BORROW_CANNOT "cannot borrow it from the bytes being decoded")
+psio_borrow_compile_fail(wide_span BORROW_FAIL_WIDE_SPAN "${PSIO_BORROW_CANNOT}")
+psio_borrow_compile_fail(string_span BORROW_FAIL_STRING_SPAN "${PSIO_BORROW_CANNOT}")
+psio_borrow_compile_fail(view_list BORROW_FAIL_VIEW_LIST "${PSIO_BORROW_CANNOT}")
+psio_borrow_compile_fail(reference BORROW_FAIL_REFERENCE "${PSIO_BORROW_CANNOT}")
+psio_borrow_compile_fail(narrowed_view BORROW_FAIL_NARROWED_VIEW
+   "this member cannot be borrowed as a view")
+psio_borrow_compile_fail(temporary BORROW_FAIL_TEMPORARY "call to deleted function 'from_pssz'")
+
+# From a view to what it designates, implicitly: the value when it is
+# trivially copyable and of fixed size, a borrowed span / string_view for a
+# byte sequence, nothing else.
+psio_add_test(psio_view_convert_tests view_convert_tests.cpp)
+add_test(NAME psio_view_convert_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/view_convert_fail.cpp)
+foreach(case EXTENSIBLE_RECORD VARIABLE_RECORD NOT_TRIVIAL STRING VECTOR RECORD_VECTOR OPTIONAL
+             WIDE_SPAN WIDE_ARRAY_SPAN OTHER_BYTE_SPAN ROOT)
+   string(TOLOWER ${case} case_name)
+   add_test(NAME psio_view_convert_${case_name}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -DVC_FAIL_${case}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/view_convert_fail.cpp)
+   set_tests_properties(psio_view_convert_${case_name}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "no viable conversion from")
+endforeach()
+
+# Evolution and offset width: all-fixed records and tuples evolve both ways
+# when the width is kept (a cap, or a bounded appended member); a moved width
+# is refused by the compile-time and run-time checks, which name the remedy.
+psio_add_test(psio_pssz_width_evolution_tests pssz_width_evolution_tests.cpp)
+add_test(NAME psio_pssz_width_evolution_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_width_evolution_fail.cpp)
+function(psio_width_evolution_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_pssz_width_evolution_${NAME}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/pssz_width_evolution_fail.cpp)
+   set_tests_properties(psio_pssz_width_evolution_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_width_evolution_compile_fail(record_width WE_FAIL_RECORD_WIDTH
+   "the automatic offset width of the type changes")
+psio_width_evolution_compile_fail(tuple_width WE_FAIL_TUPLE_WIDTH
+   "the automatic offset width of the type changes")
+psio_width_evolution_compile_fail(other_reason WE_FAIL_OTHER_REASON
+   "only optional members may be appended")
+
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.
 psio_add_test(psio_mutable_view_tests mutable_view_tests.cpp)
@@ -516,6 +627,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_pssz_noexceptions_test PRIVATE -fno-exceptions)
 endif()
 add_test(NAME psio_pssz_noexceptions_test COMMAND psio_pssz_noexceptions_test)
+
+# validate_strict ("valid, canonical, no unknown fields") on records with
+# adapters, invariants, transparent types and bounds: the same cases natively
+# and with exceptions and RTTI disabled.
+psio_add_test(psio_pssz_strict_tests pssz_strict_tests.cpp)
+add_executable(psio_pssz_strict_noexceptions_test pssz_strict_noexceptions.cpp)
+target_include_directories(psio_pssz_strict_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_strict_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_strict_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_strict_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_strict_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_strict_noexceptions_test COMMAND psio_pssz_strict_noexceptions_test)
 
 # Cross-format parity: maxFields / maxDynamicData enforcement.
 psio_add_test(psio_caps_parity_tests caps_parity_tests.cpp)

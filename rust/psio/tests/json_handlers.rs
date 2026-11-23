@@ -47,8 +47,8 @@ pub trait Tokens {
 fn tokens_schema() -> Schema {
     let mut builder = SchemaBuilder::new();
     builder.insert_interface::<tokens::Tag>().unwrap();
-    builder.insert::<tokens::args::credit>().unwrap();
-    builder.insert::<tokens::args::relay>().unwrap();
+    // Every argument list under its name, `tokens.<method>`.
+    builder.insert_argument_lists::<tokens::Tag>().unwrap();
     builder.finish()
 }
 

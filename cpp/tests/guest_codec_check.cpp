@@ -30,12 +30,15 @@ struct GuestGuardAdapter {
     template<class Sink> static void encode(const GuestGuarded& x, Sink& sink) {
         psio::encode(psio::experimental::frac32{},x.id,sink);
     }
+    // Reached only on bytes validate accepted (adapter.hpp). The pssz strict
+    // validator materializes in a guest as it does natively; the frac32
+    // prototype still reports "unsupported" there and must not get here.
+    static inline bool guest_decode_allowed = true;
     static GuestGuarded decode(std::span<const char> bytes) {
-#if defined(__cpp_exceptions)
-        return {psio::decode<std::uint32_t>(psio::experimental::frac32{},bytes)};
-#else
-        std::abort(); // A guest strict validator must never reach this.
+#if !defined(__cpp_exceptions)
+        if (!guest_decode_allowed) std::abort();
 #endif
+        return {psio::decode<std::uint32_t>(psio::experimental::frac32{},bytes)};
     }
     static psio::codec_status validate(std::span<const char> bytes) {
         return psio::validate<std::uint32_t>(psio::experimental::frac32{},bytes);
@@ -64,12 +67,19 @@ static_assert(!can_validate_without_materialization<GuestGuarded>());
 static_assert(!can_validate_without_materialization<GuestNestedGuard>());
 static_assert(!can_validate_without_materialization<std::vector<GuestUtf8>>());
 
+// Types whose strict validation needs semantic work (annotations, adapters,
+// constructed records). PSSZ validates them strictly in every build; the
+// frac32 prototype reports "unsupported" in a guest.
 template<class T, class Fmt> bool unsupported_in_guest(Fmt fmt, const T& value) {
     const auto bytes=psio::encode(fmt,value);
+    constexpr bool frac=std::is_same_v<Fmt, psio::experimental::frac32>;
+    GuestGuardAdapter::guest_decode_allowed=!frac;
     auto status=psio::validate_strict<T>(fmt,bytes);
+    GuestGuardAdapter::guest_decode_allowed=true;
 #if defined(__cpp_exceptions)
     return status.ok(); // Existing native semantic behavior is retained.
 #else
+    if (!frac) return status.ok();
     return !status.ok() && status.error().what.find("unsupported")!=std::string_view::npos;
 #endif
 }
@@ -120,7 +130,9 @@ template<class Fmt> bool check(Fmt fmt, const char* name) {
         !unsupported_in_guest(fmt,GuestConstructed{}) ||
         !unsupported_in_guest(fmt,GuestNestedGuard{{9}})) return fail(__LINE__);
 #if !defined(__cpp_exceptions)
-    if (!unsupported_in_guest(fmt,GuestBound{std::string(8,'x')})) return fail(__LINE__);
+    // (frac32 only: a pssz writer refuses a member outside its bound.)
+    if constexpr (std::is_same_v<Fmt, psio::experimental::frac32>)
+        if (!unsupported_in_guest(fmt,GuestBound{std::string(8,'x')})) return fail(__LINE__);
 #endif
     std::printf("%s=",name);for(unsigned char c:bytes)std::printf("%02x",c);std::puts("");
     return true;

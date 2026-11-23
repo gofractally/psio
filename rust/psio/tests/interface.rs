@@ -174,7 +174,9 @@ fn the_argument_record_has_text_and_a_schema() {
     assert_eq!(psio::to_json(&tuple), r#"["bob",5,"hi"]"#);
 
     let (schema, root) = schema_ir::schema_for::<token::args::transfer>().unwrap();
-    assert_eq!(root, schema_ir::AnyType::named("token.transfer"));
+    // An argument list has no name of its own: a schema names it
+    // (`SchemaBuilder::insert_named`, `insert_argument_lists`).
+    assert_eq!(root, schema_ir::AnyType::named("@0"));
     let AnyValue::Object(object) = &schema.resolve(&root).unwrap().value else { panic!("an object") };
     let names: Vec<_> = object.members.iter().map(|m| m.name.as_str()).collect();
     assert_eq!(names, ["to", "amount", "memo"]);

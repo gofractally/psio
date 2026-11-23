@@ -188,8 +188,12 @@ fn same_type<A: All + PartialEq, W: All>(ann: &A, wrap: &W) {
     bytes::<Pssz8, A, W>(ann, wrap);
     bytes::<Pssz16, A, W>(ann, wrap);
     bytes::<Pssz32, A, W>(ann, wrap);
-    // One Schema IR, whole.
-    assert_eq!(schema_for::<A>().unwrap(), schema_for::<W>().unwrap());
+    // One type in the Schema IR. (Not one text of it: an annotated member
+    // is its bounded type written inline, a wrapper type is a node of its
+    // own that the member refers to — as in C++.)
+    let ((a, at), (w, wt)) = (schema_for::<A>().unwrap(), schema_for::<W>().unwrap());
+    let same = psio::pssz::dynamic::equivalent(&a, &at, &w, &wt, psio::pssz::dynamic::Compare::Contract);
+    assert!(same.ok, "{same:?}");
     // One text.
     assert_eq!(psio::to_ijson(ann), psio::to_ijson(wrap));
     assert_eq!(psio::from_ijson::<A>(psio::to_ijson(wrap)).unwrap(), *ann);

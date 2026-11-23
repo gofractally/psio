@@ -108,6 +108,18 @@ In this order ([annotations.md §3.4](annotations.md#34-how-to-pick-a-cap)):
    must not change the width. N ≥ the inferred bound of the current fields
    + everything the type may gain. Declare it in the first published
    version; it cannot be added later if that changes a width.
+   **Worked example — do not get this wrong:** `(int32)` (a record of one
+   `int32`, a `tuple<int32>`, a method taking one `int32`) has a 1-byte
+   header; `(int32, optional<vector<u64>>)` has 4-byte offsets. Appending
+   that unbounded optional to the uncapped type is **not** a compatible
+   change: neither side reads the other's bytes (`record fixed region
+   truncated` / `fixed record has trailing payload`),
+   `psio::pssz_evolves_from` is false and `pssz_ir::evolves_from` says
+   `width-changed`. Types with only fixed-size or bounded members are the
+   ones at risk (a type with a plain string is already 4 bytes wide). Fix
+   at first publication: `maxDynamicData(N)` on the record or on the
+   `method(...)`; `psio::require_pssz_evolves_from<Old, New>()` in a test
+   names the cause.
 4. **When unsure, go one size up.** Too small is permanent; too large
    costs 1–2 bytes per header, slot and table entry. If nothing argues for
    a specific number, use the top of the class (255, 65535).
