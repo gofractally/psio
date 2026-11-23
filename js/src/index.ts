@@ -21,6 +21,9 @@ export {
   psszToJson,
   validatePssz,
   keyPrefixUpperBound,
+  PsszInterface,
+  PsszMethod,
+  type PsszSchemaValidation,
   type PsszKeyValidation,
   type PsszErrorKind,
   type PsszWidth,
@@ -68,6 +71,7 @@ export {
   bitvector, bitlist,
   optional, list, boundedList, array, tuple, pair, map, set, nested, transparent,
   record, field, argumentTuple, variant, alt,
+  defineInterface, method, InterfaceDef, MethodDef, Method,
   enumeration, timePoint, duration, monotonic, custom, box, lazy,
   type Infer,
   type InferView,
@@ -76,6 +80,12 @@ export {
   type FieldOptions,
   type PositionOptions,
   type ArgumentTupleOptions,
+  type MethodOptions,
+  type InterfaceOptions,
+  type MethodOf,
+  type MethodParameters,
+  type ArgumentsOf,
+  type ArgumentViewsOf,
   type Bounded,
   type BoundedView,
   type AltOptions,
@@ -100,16 +110,21 @@ export {
   type TickType,
 } from './time.js';
 
+// The schema-upgrade check (the port of C++ psio::pssz_evolves_from)
+export { psszEvolvesFrom, type PsszCompatibility, type PsszTypeLike } from './pssz-evolve.js';
+
 export { toHex, fromHex } from './hex.js';
 
 // WIT text of a schema (the port of C++ psio::emit_wit)
 export { emitWit } from './wit.js';
 
 export {
-  // Account-name compression (a 64-bit number <-> a short name)
+  // Names as 64-bit numbers: identifiers (psio/name.hpp) and method names
+  // (psio/compress_name.hpp)
   nameToNumber,
   numberToName,
-  hashName,
+  methodToNumber,
+  numberToMethod,
   isHashName,
   isCompressedName,
 } from './compress-name.js';

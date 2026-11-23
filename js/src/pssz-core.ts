@@ -272,7 +272,7 @@ function normalizeAttributes(x: unknown): IrAttribute[] {
     return { name: toStr(a.name, 'attribute name'), value };
   });
 }
-function normalizeMember(x: unknown, depth: number): IrMember {
+export function normalizeMember(x: unknown, depth = 0): IrMember {
   if (!isObject(x)) return schemaError('pssz IR: malformed member');
   return {
     name: toStr(x.name, 'member name'),
@@ -575,6 +575,8 @@ export class MemberInfo {
     readonly ijsonInt: IntForm,
     /** Variant alternative's I-JSON name. */
     readonly ijsonName: string,
+    /** Typed-only order constraints of the member and the positions below it. */
+    readonly order: OrderTree | null = null,
   ) {}
   /** The member's type on the wire. */
   get node(): Node {
@@ -585,6 +587,25 @@ export class MemberInfo {
     return (this.wire ??= strip(this.text)).boxed;
   }
 }
+
+/**
+ * The order constraints of one position (`docs/pssz-spec.md` §3.5, "Order
+ * constraints"): `sorted` / `unique` / `unique_keys` on a list or array, and
+ * those of the positions below it. They are typed-only — not in the Schema
+ * IR — and are handed to the codec beside the schema.
+ */
+export interface OrderTree {
+  /** The elements are in order: ascending (1) or descending (-1) key bytes; `strict`: no two equal. */
+  sorted?: { direction: 1 | -1; strict: boolean };
+  /** No two elements have the same key (the element, or element 0 of a pair / tuple). */
+  uniqueKeys?: boolean;
+  element?: OrderTree;
+  keys?: OrderTree;
+  values?: OrderTree;
+  at?: ReadonlyMap<string, OrderTree>;
+}
+/** Named type -> member name -> the member's order constraints. */
+export type OrderTable = ReadonlyMap<string, ReadonlyMap<string, OrderTree>>;
 
 export type NodeKind =
   | 'int' | 'float' | 'bool' | 'char' | 'string' | 'hex' | 'bitvector' | 'bitlist'
@@ -666,6 +687,15 @@ export class Node {
   /** record: explicit maxDynamicData. */
   cap: bigint | null = null;
   /**
+   * record: an argument list (the `tuple` attribute). `named`: an object in
+   * text, and a reader takes the positional array too. `positional`: the
+   * members are named "0", "1", ...; the text and the JavaScript value are
+   * the array.
+   */
+  tuple: 'named' | 'positional' | null = null;
+  /** record: its `maxFields` cap (automatic profile), or null. */
+  maxFields: number | null = null;
+  /**
    * int: a time value (Custom time id over the tick integer, docs/time.md).
    * Its value is always a bigint tick count.
    */
@@ -700,7 +730,7 @@ interface FieldLayout {
   optional: boolean;
 }
 
-function findAttribute(attributes: IrAttribute[], name: string): IrAttribute | undefined {
+export function findAttribute(attributes: IrAttribute[], name: string): IrAttribute | undefined {
   for (const a of attributes) if (a.name === name) return a;
   return undefined;
 }
@@ -709,7 +739,7 @@ function parseU64(text: string): bigint | null {
   const v = BigInt(text);
   return v > U64_MAX ? null : v;
 }
-function parseLengthBound(attributes: IrAttribute[]): LengthBound | null {
+export function parseLengthBound(attributes: IrAttribute[]): LengthBound | null {
   const attribute = findAttribute(attributes, 'lengthBound');
   if (!attribute) return null;
   if (attribute.value === null || attribute.value === '')
@@ -725,12 +755,20 @@ function parseLengthBound(attributes: IrAttribute[]): LengthBound | null {
   }
   return bound;
 }
-function parseCap(attributes: IrAttribute[]): bigint | null {
+export function parseCap(attributes: IrAttribute[]): bigint | null {
   const attribute = findAttribute(attributes, 'maxDynamicData');
   if (!attribute) return null;
   const n = attribute.value === null ? null : parseU64(attribute.value);
   if (n === null) return schemaError('pssz IR: malformed maxDynamicData attribute');
   return n;
+}
+/** `maxFields = "N"`: the most fields a record / parameters a function will ever have; N <= 255. */
+export function parseMaxFields(attributes: IrAttribute[]): number | null {
+  const attribute = findAttribute(attributes, 'maxFields');
+  if (!attribute) return null;
+  const n = attribute.value === null ? null : parseU64(attribute.value);
+  if (n === null || n > 255n) return schemaError('pssz IR: malformed maxFields attribute');
+  return Number(n);
 }
 function intForm(attributes: IrAttribute[], name: string): IntForm {
   const a = findAttribute(attributes, name);
@@ -742,11 +780,16 @@ type Site = 'record' | 'record_member' | 'variant' | 'variant_member';
 
 // `caps`: the automatic profile, which also takes maxFields; an explicit
 // profile rejects that constraint, as the typed psio::pssz_<W> codecs do.
-function checkAttributes(values: IrAttribute[], site: Site, caps: boolean): void {
+export function checkAttributes(values: IrAttribute[], site: Site, caps: boolean): void {
   for (const { name, value } of values) {
     if (name === 'doc' || name === 'description' || name === 'visible') continue;
     if (site === 'record' && name === 'definitionWillNotChange') continue;
     if (site === 'record' && (name === 'maxDynamicData' || (caps && name === 'maxFields'))) continue;
+    // An argument list: the same bytes as any record; its text form differs.
+    if (site === 'record' && name === 'tuple') {
+      if (value !== 'named' && value !== 'positional') schemaError('pssz IR: malformed tuple attribute');
+      continue;
+    }
     if (site === 'record_member' && (name === 'lengthBound' || name === 'jsonInt' || name === 'ijsonInt')) {
       if (name !== 'lengthBound' && value !== 'number' && value !== 'string')
         schemaError('pssz IR: malformed integer form attribute');
@@ -938,6 +981,29 @@ export interface CodecOptions {
   deferred?: ReadonlySet<string>;
   /** The automatic-profile codec of the same schema (explicit profiles). */
   auto?: Codec;
+  /** Typed-only order constraints (sorted / unique / uniqueKeys), by named type and member. */
+  orders?: OrderTable;
+}
+
+/**
+ * The member values of a record value: an object keyed by member name, or —
+ * a positional argument list — the array of its arguments. Returns the
+ * lookup of member `i` (undefined: not given).
+ */
+export function recordFields(
+  node: Node, value: unknown, fail: (m: string) => never, strict = true,
+): (member: MemberInfo, i: number) => unknown {
+  if (node.tuple === 'positional') {
+    if (!Array.isArray(value)) return fail('pssz IR: a positional argument list is an array');
+    if (value.length > node.members.length) fail('pssz IR: more arguments than parameters');
+    return (_member, i) => value[i];
+  }
+  if (!isObject(value) || value instanceof Uint8Array || value instanceof Map || value instanceof Set)
+    return fail('pssz IR: record value required');
+  if (strict)
+    for (const key of Object.keys(value))
+      if (value[key] !== undefined && !node.byName!.has(key)) fail(`pssz IR: unknown record value "${key}"`);
+  return (member) => (Object.prototype.hasOwnProperty.call(value, member.name) ? value[member.name] : undefined);
 }
 
 export function setField(target: Record<string, unknown>, name: string, value: unknown): void {
@@ -962,6 +1028,7 @@ export class Codec {
   /** Every Nested node is opaque. */
   readonly opaqueNested: boolean;
   private readonly deferred: ReadonlySet<string>;
+  private readonly orders: OrderTable;
   /** A handler has a `check`, or every custom id needs a handler. */
   readonly checksValues: boolean;
   // Scoped switches, shared with `auto`: `quiet` > 0 runs no handler (the
@@ -981,6 +1048,7 @@ export class Codec {
       this.named.set(member.name, this.named.has(member.name) ? null : member);
     this.opaqueNested = options.opaqueNested ?? false;
     this.deferred = options.deferred ?? new Set();
+    this.orders = options.orders ?? new Map();
     this.auto = W === 0 ? this : options.auto ?? new Codec(schema, 0, handlers, requireHandlers, options);
     this.state = W === 0 ? { quiet: 0, opaque: 0 } : this.auto.state;
     let checks = requireHandlers;
@@ -1070,10 +1138,12 @@ export class Codec {
     }
   }
 
-  private build(input: IrAnyType, added: IrAnyType[], depth: number): Node {
+  // `owner`: the named type a Custom written in place belongs to.
+  private build(input: IrAnyType, added: IrAnyType[], depth: number, owner?: string): Node {
     if (depth > 512) schemaError('pssz IR: schema nesting too deep');
     const via: { name?: string } = {};
     const type = this.resolve(input, via);
+    const named = via.name ?? owner;
     const known = this.nodes.get(type);
     if (known) return known;
     const node = new Node();
@@ -1151,10 +1221,19 @@ export class Codec {
         const record = t.type !== 'Variant';
         node.kind = record ? 'record' : 'variant';
         checkAttributes(t.value.attributes, record ? 'record' : 'variant', this.automatic);
+        const orders = record && named !== undefined ? this.orders.get(named) : undefined;
         if (record) {
           node.stable =
             t.type === 'Struct' || t.value.attributes.some((a) => a.name === 'definitionWillNotChange');
           node.cap = parseCap(t.value.attributes);
+          const form = findAttribute(t.value.attributes, 'tuple');
+          if (form) node.tuple = form.value as 'named' | 'positional';
+          // docs/pssz-spec.md 8.4, 16.
+          if (t.value.members.length > 255) schemaError('pssz IR: a record has more than 255 fields');
+          const maxFields = parseMaxFields(t.value.attributes);
+          node.maxFields = maxFields;
+          if (maxFields !== null && t.value.members.length > maxFields)
+            schemaError('pssz IR: a record has more fields than its maxFields');
         } else if (t.value.members.length === 0 || t.value.members.length > 256)
           schemaError('pssz IR: invalid variant schema');
         const seen = new Set<string>();
@@ -1170,8 +1249,10 @@ export class Codec {
             record ? intForm(member.attributes, 'jsonInt') : 'natural',
             record ? intForm(member.attributes, 'ijsonInt') : 'natural',
             name && name.value !== null ? name.value : member.name,
+            orders?.get(member.name) ?? null,
           ));
         }
+        if (orders) for (const member of node.members) if (member.order) this.orderFits(member.text, member.order);
         node.byName = new Map(node.members.map((m, i) => [m.name, i]));
         break;
       }
@@ -1226,7 +1307,7 @@ export class Codec {
           node.id = id;
           node.boxed = id === 'box';
           if (!node.boxed) node.handler = this.handlers.get(id);
-          node.inner = this.build(t.value.type, added, d);
+          node.inner = this.build(t.value.type, added, d, named);
           break;
         }
         const inner = this.direct(t.value.type);
@@ -1700,15 +1781,15 @@ export class Codec {
    * `encodeAt` of a top-level value, with the explicit profiles' cap check.
    * `root` is the type as written: its custom nodes are checked.
    */
-  encodeTop(root: Node, value: unknown): Uint8Array {
-    const out = this.encodeAt(root, value, 0);
+  encodeTop(root: Node, value: unknown, count: bigint | null = null): Uint8Array {
+    const out = this.encodeAt(root, value, 0, null, count);
     this.checkTopCap(strip(root).node, out.length, valueError);
     return out;
   }
   /** `decodeAt` of a whole top-level frame, with the explicit profiles' cap check. */
-  decodeTop(root: Node, bytes: Uint8Array, ctx: DecodeContext): unknown {
+  decodeTop(root: Node, bytes: Uint8Array, ctx: DecodeContext, count: bigint | null = null): unknown {
     this.checkTopCap(strip(root).node, bytes.length, bytesError);
-    return this.decodeAt(root, bytes, 0, bytes.length, 0, ctx);
+    return this.decodeAt(root, bytes, 0, bytes.length, 0, ctx, null, count);
   }
 
   // ── Custom types: handlers on the binary entry points ─────────────────────
@@ -1757,6 +1838,110 @@ export class Codec {
     } catch (e) {
       if (!(e instanceof PsszError) || e.kind === kind) throw e;
       throw new PsszError(kind, e.message, undefined, e.invariant);
+    }
+  }
+
+  // ── Order constraints (typed-only: sorted / unique / uniqueKeys) ──────────
+
+  // The constraints fit the type they are written for, and every element
+  // they compare has a key encoding.
+  orderFits(ref: Node, tree: OrderTree, depth = 0): void {
+    if (depth > MAX_DEPTH) schemaError('pssz IR: order constraints nested too deep');
+    let node = strip(ref).node;
+    while (node.kind === 'option') node = node.child;
+    const sequence = (node.kind === 'list' || node.kind === 'array') && !node.assoc;
+    if (tree.sorted || tree.uniqueKeys) {
+      if (!sequence) schemaError('pssz IR: sorted / unique / uniqueKeys constrain a list or an array');
+      this.hasKey(node.textChild, []);
+    }
+    if (tree.element) {
+      if (!sequence && node.assoc !== 'set') schemaError('pssz IR: element order constraints need a list, an array or a set');
+      this.orderFits(node.textChild, tree.element, depth + 1);
+    }
+    if (tree.keys || tree.values) {
+      if (node.assoc !== 'map') schemaError('pssz IR: keys / values order constraints need a map');
+      if (tree.keys) this.orderFits(node.keyRef, tree.keys, depth + 1);
+      if (tree.values) this.orderFits(node.valueRef, tree.values, depth + 1);
+    }
+    if (tree.at) {
+      if (node.kind !== 'tuple' && node.kind !== 'variant')
+        schemaError('pssz IR: at order constraints need a tuple or a variant');
+      for (const [key, child] of tree.at) {
+        const index = node.byName?.get(key) ?? (/^(0|[1-9][0-9]*)$/.test(key) ? Number(key) : -1);
+        if (index < 0 || index >= node.members.length) schemaError('pssz IR: at order constraint names no position');
+        this.orderFits(node.members[index].text, child, depth + 1);
+      }
+    }
+  }
+
+  /**
+   * Checks a member's value against the member's order constraints
+   * (`docs/pssz-spec.md` §3.5): order and equality are those of the
+   * elements' key bytes. Runs no handler. `fail` gets the C++ message.
+   */
+  checkOrder(member: MemberInfo, value: unknown, fail: (m: string) => never): void {
+    if (member.order) this.quietly(() => this.orderAt(member.text, member.order!, value, fail));
+  }
+
+  private orderAt(ref: Node, tree: OrderTree, value: unknown, fail: (m: string) => never): void {
+    let node = strip(ref).node;
+    while (node.kind === 'option') {
+      if (value === null || value === undefined) return;
+      if (node.child.kind === 'option') {
+        if (!isObject(value) || !('some' in value)) return;
+        value = value.some;
+      }
+      node = node.child;
+    }
+    // (A value of the wrong shape is the writer's to refuse.)
+    if (node.kind === 'list' || node.kind === 'array') {
+      const items = assocItems(value);
+      if (!items) return;
+      if (node.assoc === 'map') {
+        for (const entry of items) {
+          if (!Array.isArray(entry) || entry.length !== 2) return;
+          if (tree.keys) this.orderAt(node.keyRef, tree.keys, entry[0], fail);
+          if (tree.values) this.orderAt(node.valueRef, tree.values, entry[1], fail);
+        }
+        return;
+      }
+      if (tree.element) for (const item of items) this.orderAt(node.textChild, tree.element, item, fail);
+      if (node.assoc || items.length < 2) return;
+      const element = node.child;
+      if (tree.sorted) {
+        const { direction, strict } = tree.sorted;
+        let previous = encodeKey(this, element, items[0]);
+        for (let i = 1; i < items.length; ++i) {
+          const current = encodeKey(this, element, items[i]);
+          const c = direction * compareBytes(previous, current);
+          if (c > 0 || (c === 0 && strict))
+            fail(strict ? 'sorted: elements are not in strictly ascending order' : 'sorted: elements are not in order');
+          previous = current;
+        }
+      }
+      if (tree.uniqueKeys) {
+        const first = element.kind === 'tuple' && element.members.length > 0 ? element.members[0].node : null;
+        const keys = items.map((item) => {
+          if (!first) return encodeKey(this, element, item);
+          if (!Array.isArray(item)) return valueError('pssz IR: tuple value required');
+          return encodeKey(this, first, item[0]);
+        });
+        keys.sort(compareBytes);
+        for (let i = 1; i < keys.length; ++i)
+          if (compareBytes(keys[i - 1], keys[i]) === 0) fail('unique_keys: two elements have the same key');
+      }
+      return;
+    }
+    if (!tree.at) return;
+    if (node.kind === 'tuple') {
+      if (!Array.isArray(value)) return;
+      for (const [key, child] of tree.at) this.orderAt(node.members[Number(key)].text, child, value[Number(key)], fail);
+    } else if (node.kind === 'variant') {
+      if (!isObject(value) || typeof value.type !== 'string') return;
+      const index = node.byName!.get(value.type);
+      if (index === undefined) return;
+      const child = tree.at.get(value.type) ?? (node.byName!.has(String(index)) ? undefined : tree.at.get(String(index)));
+      if (child) this.orderAt(node.members[index].text, child, value.value, fail);
     }
   }
 
@@ -2010,20 +2195,15 @@ export class Codec {
         return out;
       }
       case 'record': {
-        if (!isObject(value) || value instanceof Uint8Array)
-          return valueError('pssz IR: record value required');
-        for (const key of Object.keys(value))
-          if (value[key] !== undefined && !node.byName!.has(key))
-            valueError(`pssz IR: unknown record value "${key}"`);
+        const fields = recordFields(node, value, valueError);
         const w = this.widthOf(node);
         const values: unknown[] = [];
         const layouts: Layout[] = [];
         let keep = 0;
-        for (const member of node.members) {
+        for (let i = 0; i < node.members.length; ++i) {
+          const member = node.members[i];
           const info = this.layout(member.node);
-          const own = Object.prototype.hasOwnProperty.call(value, member.name)
-            ? value[member.name]
-            : undefined;
+          const own = fields(member, i);
           if (own === undefined && !info.optional)
             valueError(`pssz IR: missing required record value "${member.name}"`);
           let field: unknown = own === undefined ? null : own;
@@ -2032,6 +2212,7 @@ export class Codec {
             if (!memberBoundAdmits(member.bound, member.node, field))
               valueError('pssz IR: member length bound violated');
           }
+          if (member.order) this.checkOrder(member, field, valueError);
           values.push(field);
           layouts.push(info);
           if (node.stable || !info.optional || field !== null) keep = values.length;
@@ -2250,6 +2431,7 @@ export class Codec {
         !this.nestedBoundAdmits(member.bound, member.node, bytes, begins[i], ends[i])
       )
         bytesError('pssz IR: member length bound violated');
+      if (member.order) this.checkOrder(member, value, bytesError);
       values.push(value);
     }
     return values;
@@ -2386,6 +2568,8 @@ export class Codec {
       case 'record': {
         if (this.overCap(node, size)) bytesError('pssz IR: encoded size exceeds maxDynamicData cap');
         const values = this.decodeMembers(node, bytes, start, end, node.stable, n, ctx, cap);
+        // A positional argument list is the array of its arguments.
+        if (node.tuple === 'positional') return values;
         const out: Record<string, unknown> = {};
         for (let i = 0; i < values.length; ++i) setField(out, node.members[i].name, values[i]);
         return out;

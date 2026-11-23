@@ -138,7 +138,7 @@ test('bounds at any depth: the hand-written declarations are the C++ types', () 
     { name: '@3', attributes: [], type: U16 },
   ]);
   // A parameter's plain type is not registered; every argument tuple is a
-  // type of its own, an unnamed Object carrying the cap.
+  // type of its own, an unnamed Object carrying `tuple` and the cap.
   const two = generateSchema({ transfer: ArgsTransfer, uncapped: ArgsTransferUncapped }).ir.types;
   assert.deepEqual(two.map((m) => m.name), ['@0', '@1', '@2', 'transfer', '@3', 'uncapped']);
   assert.deepEqual(two[1].type, U8);
@@ -147,8 +147,8 @@ test('bounds at any depth: the hand-written declarations are the C++ types', () 
     { name: 'to', type: text(16n), attributes: [] }, { name: 'amount', type: ref('@2'), attributes: [] },
     { name: 'memo', type: text(80n), attributes: [] },
   ];
-  assert.deepEqual(two[0].type, { value: { type: 'Object', value: { members: parameters, attributes: [{ name: 'maxDynamicData', value: '256' }] } } });
-  assert.deepEqual(two[4].type, { value: { type: 'Object', value: { members: parameters, attributes: [] } } });
+  assert.deepEqual(two[0].type, { value: { type: 'Object', value: { members: parameters, attributes: [{ name: 'tuple', value: 'named' }, { name: 'maxDynamicData', value: '256' }] } } });
+  assert.deepEqual(two[4].type, { value: { type: 'Object', value: { members: parameters, attributes: [{ name: 'tuple', value: 'named' }] } } });
   // (the schema travels and comes back the same)
   const travelled = generateSchema({ AnnTags, AnnMap, AnnTup, AnnVar, transfer: ArgsTransfer });
   assert.deepEqual(PsszSchema.decode(travelled.encode()).ir, travelled.ir);

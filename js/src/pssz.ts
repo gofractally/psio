@@ -31,8 +31,11 @@
 //   const to   = keyPrefixUpperBound(from);         // ... lies in [from, to)
 
 import {
-  Codec, IR_VERSION, Node, PsszError, checkIrVersion, normalizeSchema, normalizeType, reservedCustomId,
-  type DecodeContext, type IrAnyType, type IrSchema, type PsszCustomHandler, type PsszSchemaInput,
+  Codec, IR_VERSION, MemberInfo, Node, PsszError, boundCount, checkAttributes, checkIrVersion, findAttribute,
+  memberBoundAdmits, nestedMember, normalizeMember, normalizeSchema, normalizeType, parseCap, parseLengthBound,
+  parseMaxFields, reservedCustomId, settleMember,
+  type DecodeContext, type IrAnyType, type IrAttribute, type IrFunc, type IrInterface, type IrSchema,
+  type OrderTable, type OrderTree, type PsszCustomHandler, type PsszErrorKind, type PsszSchemaInput,
   type PsszTypeInput,
 } from './pssz-core.js';
 import { jsonToValue, valueToJson, type JsonFormat } from './pssz-json.js';
@@ -85,6 +88,8 @@ export interface PsszSchemaOptions {
   nestedBytes?: PsszNestedBytes;
   /** @internal Named types whose Nested node is opaque (typed deferred members). */
   deferredNested?: Iterable<string>;
+  /** @internal Typed-only order constraints (sorted / unique / uniqueKeys), by named type and member. */
+  orders?: OrderTable;
 }
 export interface PsszTypeOptions extends PsszSchemaOptions {
   /** Offset-width profile; default `auto`. */
@@ -98,6 +103,17 @@ export interface PsszDecodeOptions {
   rejectUnknown?: boolean;
 }
 export type PsszKeyValidation = { ok: true } | { ok: false; error: PsszError };
+/** The outcome of `PsszSchema.validate()`. */
+export type PsszSchemaValidation = { ok: true } | { ok: false; error: PsszError };
+/**
+ * @internal What a root type carries that a record member would: the bound
+ * and order constraints `returns(...)` gives a method result.
+ */
+export interface PsszRootOptions {
+  /** The value of a `lengthBound` attribute. */
+  lengthBound?: string | null;
+  order?: OrderTree | null;
+}
 export type PsszValidation =
   | { ok: true; /** Unknown appended optional fields were present. */ hasUnknown: boolean }
   | { ok: false; error: PsszError };
@@ -128,9 +144,43 @@ export class PsszType<T = unknown, V = unknown> {
   private readonly node: Node;
   private readonly boxed: boolean;
 
-  /** @internal `ref` is the type as written (the text walk starts there). */
-  constructor(private readonly codec: Codec, private readonly ref: Node) {
+  // The count a root length bound gives the list it holds (its offset width).
+  private readonly count: bigint | null;
+
+  /**
+   * @internal `ref` is the type as written (the text walk starts there).
+   * `root`: the bound and order constraints of a root that has them (a
+   * method result), held as a member's are.
+   */
+  constructor(private readonly codec: Codec, private readonly ref: Node, private readonly root: MemberInfo | null = null) {
     ({ node: this.node, boxed: this.boxed } = codec.wireOf(ref));
+    this.count = boundCount(root?.bound ?? null);
+  }
+
+  /** @internal The codec and the type as written (`psszEvolvesFrom`). */
+  get internals(): { codec: Codec; ref: Node; root: MemberInfo | null } {
+    return { codec: this.codec, ref: this.ref, root: this.root };
+  }
+
+  // A root with constraints: the value against them, as a member's is.
+  private admit(value: unknown, kind: PsszErrorKind): unknown {
+    const root = this.root;
+    if (!root) return value;
+    if (root.bound) {
+      value = settleMember(root.node, value);
+      if (!memberBoundAdmits(root.bound, root.node, value)) throw new PsszError(kind, 'pssz IR: member length bound violated');
+    }
+    if (root.order)
+      this.codec.checkOrder(root, value, (message) => {
+        throw new PsszError(kind, message);
+      });
+    return value;
+  }
+  // ... and a nested root's bound, which counts its encoded bytes.
+  private admitBytes(bytes: Uint8Array, kind: PsszErrorKind): void {
+    const root = this.root;
+    if (root?.bound && nestedMember(root.node) && !this.codec.nestedBoundAdmits(root.bound, root.node, bytes, 0, bytes.length))
+      throw new PsszError(kind, 'pssz IR: member length bound violated');
   }
 
   /**
@@ -138,7 +188,7 @@ export class PsszType<T = unknown, V = unknown> {
    * boxed value has no inferred bound: 4 under the automatic profile.
    */
   get width(): number {
-    return guarded(() => (this.boxed && this.codec.W === 0 ? 4 : this.codec.widthOf(this.node)));
+    return guarded(() => (this.boxed && this.codec.W === 0 ? 4 : this.codec.widthOf(this.node, null, this.count)));
   }
 
   /**
@@ -151,7 +201,7 @@ export class PsszType<T = unknown, V = unknown> {
    * contributes its cap.
    */
   get maxEncodedSize(): bigint | null {
-    return guarded(() => (this.boxed ? null : this.codec.inferredBound(this.node)));
+    return guarded(() => (this.boxed ? null : this.codec.inferredBound(this.node, this.count)));
   }
 
   /**
@@ -169,7 +219,11 @@ export class PsszType<T = unknown, V = unknown> {
 
   /** The canonical PSSZ bytes of `value`. */
   encode(value: T): Uint8Array {
-    return guarded(() => this.codec.encodeTop(this.ref, value));
+    return guarded(() => {
+      const out = this.codec.encodeTop(this.ref, this.admit(value, 'value'), this.count);
+      this.admitBytes(out, 'value');
+      return out;
+    });
   }
 
   /** Decodes fully validated PSSZ bytes. */
@@ -177,8 +231,17 @@ export class PsszType<T = unknown, V = unknown> {
     return guarded(() => {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false };
-      return this.codec.decodeTop(this.ref, input, ctx) as T;
+      return this.read(input, ctx) as T;
     });
+  }
+
+  private read(input: Uint8Array, ctx: DecodeContext): unknown {
+    const value = this.codec.decodeTop(this.ref, input, ctx, this.count);
+    if (this.root) {
+      this.admit(value, 'bytes');
+      this.admitBytes(input, 'bytes');
+    }
+    return value;
   }
 
   /**
@@ -195,7 +258,7 @@ export class PsszType<T = unknown, V = unknown> {
       this.codec.checkTopCap(this.node, input.length, (m) => {
         throw new PsszError('bytes', m);
       });
-      return viewAt(this.codec, this.ref, input, 0, input.length, 0) as V;
+      return viewAt(this.codec, this.ref, input, 0, input.length, 0, null, this.count) as V;
     });
   }
 
@@ -204,7 +267,7 @@ export class PsszType<T = unknown, V = unknown> {
     try {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: true, hasUnknown: false };
-      guarded(() => this.codec.decodeTop(this.ref, input, ctx));
+      guarded(() => this.read(input, ctx));
       return { ok: true, hasUnknown: ctx.hasUnknown };
     } catch (e) {
       return { ok: false, error: e as PsszError };
@@ -218,8 +281,9 @@ export class PsszType<T = unknown, V = unknown> {
    */
   encodeKey(value: T): Uint8Array {
     return guarded(() => {
-      this.codec.checkValue(this.ref, value, 'value');
-      return encodeKey(this.codec, this.node, value);
+      const admitted = this.admit(value, 'value');
+      this.codec.checkValue(this.ref, admitted, 'value');
+      return encodeKey(this.codec, this.node, admitted);
     });
   }
 
@@ -228,7 +292,7 @@ export class PsszType<T = unknown, V = unknown> {
    * whole input, or a PsszError.
    */
   decodeKey(bytes: Uint8Array): T {
-    return guarded(() => decodeKey(this.codec, this.ref, asBytes(bytes))) as T;
+    return guarded(() => this.admit(decodeKey(this.codec, this.ref, asBytes(bytes)), 'bytes')) as T;
   }
 
   /** Checks key bytes against the type. Never throws. */
@@ -252,17 +316,17 @@ export class PsszType<T = unknown, V = unknown> {
 
   /** JSON / I-JSON text -> value. */
   jsonToValue(text: string | Uint8Array, format: JsonFormat = 'ijson'): T {
-    return guarded(() => jsonToValue(this.codec, this.ref, format, text)) as T;
+    return guarded(() => this.admit(jsonToValue(this.codec, this.ref, format, text), 'json')) as T;
   }
 
   /** Value -> JSON / I-JSON text. */
   valueToJson(value: T, format: JsonFormat = 'ijson'): string {
-    return guarded(() => valueToJson(this.codec, this.ref, format, value));
+    return guarded(() => valueToJson(this.codec, this.ref, format, this.admit(value, 'value')));
   }
 
   /** JSON / I-JSON text -> canonical PSSZ bytes. */
   jsonToPssz(text: string | Uint8Array, format: JsonFormat = 'ijson'): Uint8Array {
-    return guarded(() => this.codec.encodeTop(this.ref, jsonToValue(this.codec, this.ref, format, text)));
+    return this.encode(this.jsonToValue(text, format));
   }
 
   /** PSSZ bytes (fully validated) -> JSON / I-JSON text. */
@@ -303,6 +367,7 @@ export class PsszSchema {
   private readonly requireHandlers: boolean;
   private readonly nestedBytes: PsszNestedBytes;
   private readonly deferred: ReadonlySet<string>;
+  private readonly orders: OrderTable;
 
   /**
    * `input` is a `psio::Schema` value (as `PsszSchema.decode` produces), or
@@ -318,6 +383,7 @@ export class PsszSchema {
       throw new PsszError('schema', 'pssz: nestedBytes must be "typed" or "opaque"');
     this.nestedBytes = nested;
     this.deferred = new Set(options?.deferredNested ?? []);
+    this.orders = options?.orders ?? new Map();
   }
 
   // The same schema under other options (absent: this schema's).
@@ -330,6 +396,7 @@ export class PsszSchema {
         requireHandlers: options.requireHandlers ?? this.requireHandlers,
         nestedBytes: options.nestedBytes ?? this.nestedBytes,
         deferredNested: this.deferred,
+        orders: this.orders,
       });
     });
   }
@@ -340,6 +407,7 @@ export class PsszSchema {
       const options = {
         opaqueNested: this.nestedBytes === 'opaque',
         deferred: this.deferred,
+        orders: this.orders,
         // The bytes inside a nested value are always the automatic profile.
         auto: w === 0 ? undefined : this.codec(0),
       };
@@ -396,6 +464,13 @@ export class PsszSchema {
    * when the schema carries no `ir_version` (or one newer than `IR_VERSION`).
    */
   type<T = unknown, V = unknown>(root: string | PsszTypeInput, options?: PsszTypeOptions): PsszType<T, V> {
+    return this.rootType<T, V>(root, options);
+  }
+
+  /** @internal `type`, of a root that carries a member's constraints (a method result). */
+  rootType<T = unknown, V = unknown>(
+    root: string | PsszTypeInput, options?: PsszTypeOptions, constraints?: PsszRootOptions,
+  ): PsszType<T, V> {
     return guarded(() => {
       // A schema written before the IR was versioned would give other
       // widths and other values: refused, not guessed at.
@@ -410,11 +485,196 @@ export class PsszSchema {
         (options?.requireHandlers !== undefined && options.requireHandlers !== this.requireHandlers) ||
         (options?.nestedBytes !== undefined && options.nestedBytes !== this.nestedBytes)
       )
-        return this.derive(options).type<T, V>(root, { width });
+        return this.derive(options).rootType<T, V>(root, { width }, constraints);
       const codec = this.codec(w);
       const ir: IrAnyType = normalizeType(root);
-      return new PsszType<T, V>(codec, codec.node(ir));
+      const ref = codec.node(ir);
+      const bound = constraints?.lengthBound == null
+        ? null : parseLengthBound([{ name: 'lengthBound', value: constraints.lengthBound }]);
+      const order = constraints?.order ?? null;
+      if (order) codec.orderFits(ref, order);
+      const member = bound || order ? new MemberInfo('', ref, bound, 'natural', 'natural', '', order) : null;
+      return new PsszType<T, V>(codec, ref, member);
     });
+  }
+
+  /**
+   * Checks the whole schema, not only what one root reaches (C++
+   * `psio::pssz_ir::validate_schema`): every named type is a PSSZ type, and
+   * every function of every interface and resource has at most 255
+   * parameters and no more than its `maxFields`, well-formed parameter and
+   * result types, and caps that parse. Call it once on a schema taken from
+   * outside before dispatching through it. Never throws.
+   */
+  validate(): PsszSchemaValidation {
+    try {
+      guarded(() => {
+        checkIrVersion(this.ir);
+        const codec = this.codec(0);
+        for (const named of this.ir.types) {
+          if (named.type.value.type === 'Resource') {
+            const methods = (named.type.value.value as { methods?: unknown }).methods;
+            if (!Array.isArray(methods)) throw new PsszError('schema', 'pssz IR: malformed resource');
+            for (const f of methods) checkFunc(codec, normalizeFunc(f));
+          } else codec.node(named.type);
+        }
+        for (const entry of this.ir.interfaces) for (const f of normalizeInterface(entry).funcs) checkFunc(codec, f);
+      });
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e as PsszError };
+    }
+  }
+
+  /** The names of the schema's interfaces, in order. */
+  get interfaceNames(): string[] {
+    return guarded(() => this.ir.interfaces.map((entry) => normalizeInterface(entry).name));
+  }
+
+  /**
+   * An interface of the schema, by name (the only one when no name is
+   * given): its methods, each with the codec of its argument list and of
+   * its result. Throws a `schema` error when there is none, or when a
+   * function is malformed (more than 255 parameters, more than its
+   * `maxFields`, a cap that does not parse, a type that is not PSSZ).
+   */
+  interface(name?: string, /** @internal */ results?: ReadonlyMap<string, OrderTree>): PsszInterface {
+    return guarded(() => {
+      checkIrVersion(this.ir);
+      const all = this.ir.interfaces.map(normalizeInterface);
+      let found: IrInterface | undefined;
+      if (name === undefined) {
+        if (all.length !== 1) throw new PsszError('schema', `pssz: the schema has ${all.length} interfaces; name one`);
+        found = all[0];
+      } else found = all.find((entry) => entry.name === name);
+      if (!found) throw new PsszError('schema', `pssz: the schema has no interface "${name}"`);
+      return new PsszInterface(this, found, this.codec(0), results);
+    });
+  }
+}
+
+function isRecord(x: unknown): x is { [key: string]: unknown } {
+  return typeof x === 'object' && x !== null && !Array.isArray(x);
+}
+function normalizeAttributeList(x: unknown): IrAttribute[] {
+  return normalizeMember({ name: '', type: { Tuple: [] }, attributes: x }).attributes;
+}
+function normalizeFunc(x: unknown): IrFunc {
+  if (!isRecord(x) || typeof x.name !== 'string' || !Array.isArray(x.params))
+    throw new PsszError('schema', 'pssz IR: malformed function');
+  return {
+    name: x.name,
+    params: x.params.map((p) => normalizeMember(p)),
+    result: x.result === undefined || x.result === null ? null : normalizeType(x.result),
+    attributes: normalizeAttributeList(x.attributes),
+  };
+}
+function normalizeInterface(x: unknown): IrInterface {
+  if (!isRecord(x) || typeof x.name !== 'string' || !Array.isArray(x.funcs))
+    throw new PsszError('schema', 'pssz IR: malformed interface');
+  const names = Array.isArray(x.type_names) ? x.type_names : [];
+  if (names.some((n) => typeof n !== 'string')) throw new PsszError('schema', 'pssz IR: malformed interface');
+  return { name: x.name, type_names: names as string[], funcs: x.funcs.map(normalizeFunc), attributes: normalizeAttributeList(x.attributes) };
+}
+
+// A function's parameter list is a tuple (docs/pssz-spec.md 8.4, 16).
+function checkFunc(codec: Codec, f: IrFunc): { maxFields: number | null; cap: bigint | null } {
+  if (f.params.length > 255) throw new PsszError('schema', 'pssz IR: a function has more than 255 parameters');
+  const maxFields = parseMaxFields(f.attributes);
+  if (maxFields !== null && f.params.length > maxFields)
+    throw new PsszError('schema', 'pssz IR: a function has more parameters than its maxFields');
+  const cap = parseCap(f.attributes);
+  for (const param of f.params) {
+    checkAttributes(param.attributes, 'record_member', true);
+    codec.node(param.type);
+  }
+  if (f.result) codec.node(f.result);
+  return { maxFields, cap };
+}
+
+/**
+ * One function of an interface, from the Schema IR (`Func`): what it
+ * declares, the codec of its argument list and the codec of its result.
+ *
+ * The arguments are, in binary, the tuple of the parameters. As a
+ * JavaScript value and in text they are an object keyed by parameter name
+ * when every parameter has a name (`named`; a reader takes the positional
+ * array too), and the array of the arguments otherwise (`docs/json.md`
+ * "Method arguments").
+ *
+ * A result is encoded as the type `returns(...)` makes of it: `result` is
+ * the codec of `Func.result` under the function's `result.lengthBound`.
+ */
+export class PsszMethod<A = unknown, R = unknown> {
+  readonly name: string;
+  /** The parameter names, in order (`""` where the declaration gives none). */
+  readonly params: readonly string[];
+  /** Every parameter has a name: the arguments are an object in text. */
+  readonly named: boolean;
+  /** The cap on the encoded arguments, or null. */
+  readonly maxDynamicData: bigint | null;
+  /** The cap on the number of parameters, or null. */
+  readonly maxFields: number | null;
+  /** The argument list as a type: the `Object` C++ gives `method_arg_tuple`. */
+  readonly argsIr: IrAnyType;
+  /** The codec of the argument list. */
+  readonly args: PsszType<A>;
+  /** The codec of the result; null: the function returns nothing. */
+  readonly result: PsszType<R> | null;
+
+  /** @internal */
+  constructor(schema: PsszSchema, readonly func: IrFunc, codec: Codec, resultOrder: OrderTree | null = null) {
+    const { maxFields, cap } = checkFunc(codec, func);
+    this.name = func.name;
+    this.params = func.params.map((p) => p.name);
+    this.named = func.params.every((p) => p.name !== '');
+    this.maxDynamicData = cap;
+    this.maxFields = maxFields;
+    const attributes: IrAttribute[] = [{ name: 'tuple', value: this.named ? 'named' : 'positional' }];
+    for (const name of ['maxFields', 'maxDynamicData']) {
+      const attribute = findAttribute(func.attributes, name);
+      if (attribute) attributes.push(attribute);
+    }
+    this.argsIr = {
+      value: {
+        type: 'Object',
+        value: {
+          members: func.params.map((p, i) => ({ name: this.named ? p.name : String(i), type: p.type, attributes: p.attributes })),
+          attributes,
+        },
+      },
+    };
+    this.args = schema.type<A>(this.argsIr);
+    const bound = findAttribute(func.attributes, 'result.lengthBound');
+    this.result = func.result
+      ? schema.rootType<R>(func.result, undefined, { lengthBound: bound ? bound.value ?? '' : null, order: resultOrder })
+      : null;
+  }
+}
+
+/** One interface of a schema (`PsszSchema.interface`). */
+export class PsszInterface {
+  readonly name: string;
+  /** The methods, in declaration order. */
+  readonly methods: readonly PsszMethod[];
+  private readonly byName: Map<string, PsszMethod>;
+
+  /** @internal */
+  constructor(schema: PsszSchema, readonly ir: IrInterface, codec: Codec, results?: ReadonlyMap<string, OrderTree>) {
+    this.name = ir.name;
+    this.methods = ir.funcs.map((f) => new PsszMethod(schema, f, codec, results?.get(f.name) ?? null));
+    this.byName = new Map();
+    for (const method of this.methods) {
+      if (this.byName.has(method.name)) throw new PsszError('schema', `pssz IR: interface "${ir.name}" has two functions "${method.name}"`);
+      this.byName.set(method.name, method);
+    }
+  }
+
+  /** The method `name`; a `schema` error when the interface has none. */
+  method<A = unknown, R = unknown>(name: string): PsszMethod<A, R> {
+    const found = this.byName.get(name);
+    if (!found) throw new PsszError('schema', `pssz: interface "${this.name}" has no method "${name}"`);
+    return found as PsszMethod<A, R>;
   }
 }
 

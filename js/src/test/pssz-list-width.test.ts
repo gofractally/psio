@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import {
   ListView, PsszError, PsszSchema, RecordView, TupleView, argumentTuple, array, bitlist, bitvector, boundedList,
   boundedUtf8, box, field, generateSchema, list, map, nested, optional, pair, rawString, record, set, toHex, tuple, u32,
-  u8, utf8, variant, type PsszType, type TypeDef,
+  u8, utf8, variant, type PsszType, type PsszTypeInput, type TypeDef,
 } from '../index.js';
 
 const fromHex = (hex: string) => Uint8Array.from(Buffer.from(hex.replace(/ /g, ''), 'hex'));
@@ -330,7 +330,15 @@ test('a tuple has at most 255 elements', () => {
   const parameters = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`p${i}`, u8]));
   assert.equal(argumentTuple(parameters(255)).width, 2);
   refuses(() => argumentTuple(parameters(256)), 'schema', /at most 255 parameters/);
-  // A record has no such limit in the format.
-  const big = record('Big', parameters(300), { fixed: true });
-  assert.equal(big.encode(Object.fromEntries(Object.keys(parameters(300)).map((k) => [k, 1]))).length, 300);
+  assert.equal(argumentTuple(Array(255).fill(u8) as []).width, 2);
+  refuses(() => argumentTuple(Array(256).fill(u8) as []), 'schema', /at most 255 parameters/);
+  // A record shares the limit (docs/pssz-spec.md 8.4): 255 fields.
+  const big = record('Big', parameters(255), { fixed: true });
+  assert.equal(big.encode(Object.fromEntries(Object.keys(parameters(255)).map((k) => [k, 1]))).length, 255);
+  refuses(() => record('Bigger', parameters(256), { fixed: true }), 'schema', /more than 255 fields/);
+  const fields = (n: number): { [name: string]: PsszTypeInput } =>
+    Object.fromEntries(Array.from({ length: n }, (_, i) => [`m${i}`, { Int: { bits: 8, isSigned: false } }]));
+  assert.equal(new PsszSchema({ R: { Struct: fields(255) } }).type('R').encode(Object.fromEntries(Object.keys(fields(255)).map((k) => [k, 1]))).length, 255);
+  for (const kind of ['Struct', 'Object'])
+    refuses(() => new PsszSchema({ R: { [kind]: fields(256) } as PsszTypeInput }).type('R'), 'schema', /a record has more than 255 fields/);
 });

@@ -19,7 +19,7 @@
 // This file is internal. The public API is `pssz.ts`.
 
 import {
-  Codec, MAX_DEPTH, Node, PsszError, PsszNaN, PsszNegativeZero, assocItems, isNoncharacter, memberBoundAdmits, setField, settleMember,
+  Codec, MAX_DEPTH, Node, PsszError, PsszNaN, PsszNegativeZero, assocItems, isNoncharacter, memberBoundAdmits, recordFields, setField, settleMember,
   unwrapOption, utf8CodePoint, utf8Valid, utf8Decode, utf8Encode, utf8Length, utf8Multibyte, wellFormed, wrapSome,
   type IntForm, type IrEnumerator, type PsszCustomHandler, type VariantValue,
 } from './pssz-core.js';
@@ -819,8 +819,30 @@ class Reader {
     return items;
   }
 
-  private record(node: Node): Record<string, unknown> {
+  // An argument list given positionally: exactly one element per parameter.
+  private recordFromArray(node: Node): unknown {
     const c = this.c;
+    const values: unknown[] = [];
+    this.arrayItems(node.members.length, true, () => {
+      const member = node.members[values.length];
+      const value = this.read(member.text, this.ijson ? member.ijsonInt : member.jsonInt, 0);
+      if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
+        c.fail('json: member length_bound violated');
+      if (member.order) this.codec.checkOrder(member, value, (m) => c.fail(m));
+      values.push(value);
+    });
+    if (node.tuple === 'positional') return values;
+    const out: Record<string, unknown> = {};
+    values.forEach((value, i) => setField(out, node.members[i].name, value));
+    return out;
+  }
+
+  private record(node: Node): unknown {
+    const c = this.c;
+    // An argument list: "positional" is the array; "named" is the object,
+    // and a reader takes the positional array as well.
+    if (node.tuple === 'positional' || (node.tuple === 'named' && c.kind() === 'array'))
+      return this.recordFromArray(node);
     c.beginObject();
     // One slot per member, filled as keys arrive; a repeated key overwrites
     // its slot (last one wins).
@@ -839,6 +861,7 @@ class Reader {
       // encoder, where they exist.)
       if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
         c.fail('json: member length_bound violated');
+      if (member.order) this.codec.checkOrder(member, value, (m) => c.fail(m));
       slots[index] = value;
     }
     const out: Record<string, unknown> = {};
@@ -1286,13 +1309,13 @@ class Writer {
         out.push(']');
         return;
       case 'record': {
-        if (typeof value !== 'object' || value === null || Array.isArray(value) || value instanceof Uint8Array)
-          return fail('pssz IR: record value required');
-        const fields = value as Record<string, unknown>;
-        out.push('{');
-        let first = true;
-        for (const member of node.members) {
-          const own = Object.prototype.hasOwnProperty.call(fields, member.name) ? fields[member.name] : undefined;
+        // A positional argument list is written as the array.
+        const positional = node.tuple === 'positional';
+        const fields = recordFields(node, value, fail, false);
+        out.push(positional ? '[' : '{');
+        for (let i = 0; i < node.members.length; ++i) {
+          const member = node.members[i];
+          const own = fields(member, i);
           if (own === undefined && member.node.kind !== 'option')
             fail(`pssz IR: missing required record value "${member.name}"`);
           let field: unknown = own === undefined ? null : own;
@@ -1300,13 +1323,15 @@ class Writer {
             field = settleMember(member.node, field);
             if (!memberBoundAdmits(member.bound, member.node, field)) fail('json: member length_bound violated');
           }
-          if (!first) out.push(',');
-          first = false;
-          writeString(out, member.name, false);
-          out.push(':');
+          if (member.order) this.codec.checkOrder(member, field, fail);
+          if (i) out.push(',');
+          if (!positional) {
+            writeString(out, member.name, false);
+            out.push(':');
+          }
           this.write(member.text, field, this.ijson ? member.ijsonInt : member.jsonInt, n + 1);
         }
-        out.push('}');
+        out.push(positional ? ']' : '}');
         return;
       }
       case 'variant': {

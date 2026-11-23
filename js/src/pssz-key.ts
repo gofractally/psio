@@ -226,10 +226,11 @@ function writeKey(codec: Codec, node: Node, value: unknown, out: Sink, n: number
       for (let i = 0; i < node.members.length; ++i) writeKey(codec, node.members[i].node, value[i], out, n + 1);
       return;
     case 'record': {
-      if (typeof value !== 'object' || value === null || Array.isArray(value))
-        return valueError('key: record value required');
+      const positional = node.tuple === 'positional';
+      if (typeof value !== 'object' || value === null || Array.isArray(value) !== positional)
+        return valueError(positional ? 'key: a positional argument list is an array' : 'key: record value required');
       const record = value as Record<string, unknown>;
-      for (const member of node.members) writeMember(codec, node, member.name, record[member.name], out, n);
+      node.members.forEach((member, i) => writeMember(codec, node, i, record[positional ? i : member.name], out, n));
       return;
     }
     case 'variant': {
@@ -247,14 +248,15 @@ function writeKey(codec: Codec, node: Node, value: unknown, out: Sink, n: number
   }
 }
 
-function writeMember(codec: Codec, node: Node, name: string, value: unknown, out: Sink, n: number): void {
-  const member = node.members[node.byName!.get(name)!];
+function writeMember(codec: Codec, node: Node, index: number, value: unknown, out: Sink, n: number): void {
+  const member = node.members[index];
   // An absent optional member may be omitted from the object.
   let v = value === undefined && member.node.kind === 'option' ? null : value;
   if (member.bound) {
     v = settleMember(member.node, v);
     if (!memberBoundAdmits(member.bound, member.node, v)) valueError('key: member length bound violated');
   }
+  if (member.order) codec.checkOrder(member, v, valueError);
   writeKey(codec, member.node, v, out, n + 1);
 }
 
@@ -286,7 +288,7 @@ export function encodeKeyPrefix(codec: Codec, ref: Node, elements: unknown): Uin
       const absent = elements[i] === undefined && member.node.kind === 'option';
       codec.checkValue(member.text, absent ? null : elements[i], 'value');
     }
-    if (node.kind === 'record') writeMember(codec, node, member.name, elements[i], out, 0);
+    if (node.kind === 'record') writeMember(codec, node, i, elements[i], out, 0);
     else writeKey(codec, member.node, elements[i], out, 1);
   }
   return out.finish();
@@ -526,13 +528,16 @@ function readKey(codec: Codec, node: Node, src: Source, n: number): unknown {
       return node.members.map((member) => readKey(codec, member.node, src, n + 1));
     case 'record': {
       const out: Record<string, unknown> = {};
+      const values: unknown[] = [];
       for (const member of node.members) {
         const value = readKey(codec, member.node, src, n + 1);
         if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
           bytesError('key: member length bound violated');
+        if (member.order) codec.checkOrder(member, value, bytesError);
         setField(out, member.name, value);
+        values.push(value);
       }
-      return out;
+      return node.tuple === 'positional' ? values : out;
     }
     case 'variant': {
       const index = src.byte();

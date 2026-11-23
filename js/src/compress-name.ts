@@ -1,30 +1,48 @@
-// compress-name.ts — Arithmetic coding name compression
+// compress-name.ts — the two PSIO name coders: arithmetic coding of short
+// names into 64-bit numbers, with a frequency table per preceding character.
 //
-// Ported from C++ psio1::detail::compress_name.hpp
-// Compresses short lowercase names into 64-bit values using context-aware
-// frequency tables. Falls back to seahash for names that don't compress.
+// - `nameToNumber` / `numberToName` (C++ `psio::name_to_number` /
+//   `number_to_name`, psio/name.hpp): identifiers of a-z, 0-9 and '-' (an
+//   account, a service, a table). A bijection: a text that has no exact code
+//   has no number (0).
+// - `methodToNumber` / `numberToMethod` (C++ `psio::detail::method_to_number`
+//   / `number_to_method`, psio/compress_name.hpp): method names. A name the
+//   coder cannot represent exactly takes a hash of its bytes with bit 56 set,
+//   written "#" + 16 letters.
+//
+// Both give a number only to a text it decodes back to; every row of
+// conformance/name-vectors.json is checked (test/compress-name.test.ts).
+//
+// Derived from Mark Nelson's "Data Compression With Arithmetic Coding" (MIT
+// license, 2014), adapted by Daniel Larimer for short names; ported from the
+// C++ headers, whose tables these are.
+
+interface Model {
+  /** Symbol -> character code (symbol 0 ends the name). */
+  readonly symbolToChar: readonly number[];
+  /** Character code -> symbol; 0: not in the alphabet. */
+  readonly charToSymbol: Uint8Array;
+  /** Cumulative frequencies of the next symbol, by the previous symbol. */
+  readonly cf: readonly (readonly number[])[];
+  readonly width: number;
+}
 
 // prettier-ignore
-const SYMBOL_TO_CHAR = [
-  0, 101, 97, 105, 111, 116, 110, 114, 115,  // \0 e a i o t n r s
-  108, 99, 117, 104, 100, 112, 109, 121, 103, // l c u h d p m y g
-  98, 102, 119, 118, 107, 122, 120, 113, 106  // b f w v k z x q j
-];
-
-// prettier-ignore
-const CHAR_TO_SYMBOL = new Uint8Array([
+const METHOD_MODEL: Model = {
+  symbolToChar: [
+  0,101,97,105,111,116,110,114,115,108,99,117,104,100,112,109,121,103,98,102,119,118,107,122,120,113,106,
+  ],
+  charToSymbol: new Uint8Array([
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,2,3,4,5,6,7,8,9,10,0,0,0,0,0,0,
-  0,2,18,10,13,1,19,17,12,3,26,22,9,15,6,4,14,25,7,8,5,11,21,20,24,16,23,
-  0,0,0,0,25,0,2,18,10,13,1,19,17,12,3,26,22,9,15,6,4,14,25,7,8,5,11,21,20,24,16,23,
+  0,2,18,10,13,1,19,17,12,3,26,22,9,15,6,4,14,25,7,8,5,11,21,20,24,16,23,0,0,0,0,25,
+  0,2,18,10,13,1,19,17,12,3,26,22,9,15,6,4,14,25,7,8,5,11,21,20,24,16,23,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
   0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-]);
-
-// prettier-ignore
-const MODEL_CF: readonly (readonly number[])[] = [
+  ]),
+  cf: [
   [0,0,1956,4146,6063,7423,9305,10276,11226,13687,14907,16131,17056,18369,19922,21644,23210,24604,25065,26398,28475,30408,31395,31725,32367,32402,32623,32767],
   [0,4880,5243,6669,7714,8472,9634,11619,15233,16738,18031,18650,18993,20913,22653,25217,25802,26404,26589,28244,29312,31398,31845,32080,32183,32478,32695,32767],
   [0,1737,2901,3020,3666,3734,8543,12634,15523,17208,21367,22949,23407,24602,25562,26470,28001,28323,29045,30727,31040,31251,32084,32387,32496,32598,32745,32767],
@@ -52,267 +70,327 @@ const MODEL_CF: readonly (readonly number[])[] = [
   [0,3478,6497,8308,12600,13818,17038,17122,17152,17528,20748,21906,22255,22599,22677,24481,25735,28777,28815,28891,29073,31075,31424,31433,31485,31485,32764,32767],
   [0,17596,18281,18455,19256,19875,20521,20599,20949,21038,21413,21416,23479,24932,25804,26610,28270,29555,29557,30312,31584,32451,32516,32525,32623,32701,32703,32767],
   [0,392,8308,10995,11504,13348,22180,22194,22231,22248,23981,23981,26646,26978,27000,27014,30409,30435,30435,30457,30474,30503,30697,30704,30818,30818,31861,32767],
-];
+  ],
+  width: 27,
+};
 
-const MODEL_WIDTH = 27;
-const CODE_VALUE_BITS = 17; // (32 + 3) / 2 = 17
-const MAX_CODE = (1 << CODE_VALUE_BITS) - 1;       // 0x1FFFF
-const ONE_FOURTH = 1 << (CODE_VALUE_BITS - 2);     // 0x08000
-const ONE_HALF = 2 * ONE_FOURTH;                    // 0x10000
-const THREE_FOURTHS = 3 * ONE_FOURTH;               // 0x18000
+// prettier-ignore
+const NAME_MODEL: Model = {
+  symbolToChar: [
+  0,101,97,111,114,105,110,116,115,108,100,104,109,99,117,121,103,98,112,107,119,45,102,49,50,118,48,106,51,122,57,120,
+  52,55,56,53,54,113,
+  ],
+  charToSymbol: new Uint8Array([
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,21,0,0,26,23,24,28,32,35,36,33,34,30,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,2,17,13,10,1,22,16,11,5,27,19,9,12,6,3,18,37,4,8,7,14,25,20,31,15,29,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+  ]),
+  cf: [
+  [0,1,862,2908,3513,4989,6103,7218,9965,13074,14397,16325,17420,19736,21713,22054,22398,23522,25457,26970,28069,28930,28930,30084,30084,30084,30545,30545,31987,31987,32323,32350,32620,32620,32620,32620,32620,32620,32767],
+  [0,2970,4543,6487,6925,12439,12956,15504,16967,19523,21497,23208,23513,24517,25327,25530,26230,26817,27435,28069,28429,28969,29806,30287,30557,30715,31284,31358,31508,31585,31835,31919,32396,32477,32538,32607,32656,32711,32767],
+  [0,1374,1626,1999,2143,5560,6497,11473,13950,15929,18544,19981,20449,22327,23821,24325,25836,26671,27478,28292,29068,30170,30499,30848,30992,31070,31636,31675,31851,31888,32300,32344,32560,32594,32627,32662,32689,32715,32767],
+  [0,1564,1978,2446,4579,7810,8289,12895,14707,16261,18122,19108,19564,21212,22096,23951,24391,25080,26020,27000,27679,29772,30101,30949,31111,31200,31798,31847,31986,32032,32197,32249,32561,32601,32639,32680,32710,32741,32767],
+  [0,2907,7236,10894,14971,15898,18953,19736,21142,22320,23011,24214,24427,25092,25644,26675,27607,28157,28642,29089,29845,30036,30647,30954,31278,31453,31642,31788,31911,32031,32150,32252,32330,32434,32506,32595,32656,32731,32767],
+  [0,1057,2826,4202,5416,6850,7227,13303,16130,19092,21221,22456,22606,23952,26558,26769,26850,28177,28572,29178,29933,30053,30340,30895,30985,31035,31613,31649,31764,31798,32248,32280,32578,32603,32625,32652,32671,32690,32767],
+  [0,3420,6470,8938,11134,11400,13626,14759,17307,18772,19106,21674,21926,22277,23313,23821,24535,27595,27993,28230,29224,29399,30084,30446,30848,31070,31232,31375,31666,31792,32024,32151,32263,32371,32463,32569,32642,32722,32767],
+  [0,2631,6465,9246,12000,13826,16438,16663,18266,19589,20155,20388,26137,26538,27122,27990,29067,29281,29609,29826,29964,30358,31071,31344,31580,31715,31812,31904,32013,32101,32328,32395,32468,32549,32597,32653,32698,32747,32767],
+  [0,4601,7052,9239,10945,11204,12968,13469,18236,20065,20745,21180,23716,24545,25548,26644,27068,27332,27668,28711,29443,29924,30683,31005,31352,31550,31642,31744,31883,31980,32044,32149,32211,32321,32395,32480,32536,32602,32767],
+  [0,1854,7276,11228,14640,14858,18704,18852,19618,20487,24125,25101,25257,25715,26035,27365,28845,29073,29425,29868,30266,30421,30911,31393,31584,31691,31946,32040,32146,32233,32400,32460,32517,32579,32621,32674,32708,32745,32767],
+  [0,3064,7929,11787,15109,16895,20069,20413,20870,22044,22641,24010,24378,24930,25323,26536,27562,28098,28579,28890,29127,29470,30289,30805,31107,31284,31495,31618,31921,32045,32185,32278,32373,32476,32543,32619,32674,32736,32767],
+  [0,1963,9365,14894,18210,20909,24587,25164,26225,26600,26914,27189,27529,27941,28123,29379,30071,30259,30532,30691,30849,31027,31400,31577,31791,31911,31974,32076,32204,32309,32354,32417,32473,32552,32599,32663,32703,32742,32767],
+  [0,1528,6875,14214,17481,18268,21728,22062,22396,23176,23398,23672,23822,24981,25645,26757,28009,28230,29351,30529,30683,30806,31385,31561,31754,31857,31926,32025,32175,32268,32367,32425,32488,32565,32606,32675,32710,32745,32767],
+  [0,1181,3832,7968,12348,14055,15358,15503,16705,17174,18245,18459,24081,24331,25091,26139,26567,26744,26944,27140,31302,31388,31666,31808,31954,32044,32123,32210,32312,32372,32452,32498,32554,32606,32640,32678,32706,32733,32767],
+  [0,1067,2429,3271,3443,7106,8245,12093,14270,18945,20816,22038,22323,24071,25799,26074,26848,27851,28920,30174,30771,30879,31059,31579,31668,31726,31882,31908,32022,32056,32356,32384,32600,32629,32654,32681,32715,32735,32767],
+  [0,6050,7445,9167,11306,12106,12666,13745,14916,16756,17885,18822,19274,20361,21338,21859,22497,23084,24271,25221,25620,26091,27776,28424,29375,29913,30074,30333,30647,30910,31143,31443,31615,31884,32089,32321,32506,32705,32767],
+  [0,2679,6956,10400,13634,15952,18416,19038,19621,20629,21786,22182,24335,24789,25050,27247,27683,29110,29571,29820,29966,30239,30879,31254,31528,31684,31768,31882,32031,32138,32258,32339,32395,32498,32558,32628,32681,32739,32767],
+  [0,1114,5932,10662,15286,18135,21137,21279,21537,22258,25401,25644,25853,26058,26298,28722,29632,29765,30895,30997,31108,31215,31414,31546,31734,31834,31943,32064,32212,32299,32409,32460,32502,32574,32613,32662,32698,32732,32767],
+  [0,1746,6320,10438,13833,16087,19082,19259,20327,21545,23659,23900,25815,26373,26659,27901,28677,28818,29032,30766,30939,31102,31432,31627,31832,31944,32057,32155,32243,32338,32419,32474,32512,32583,32622,32667,32704,32741,32767],
+  [0,3312,9511,12974,14670,15553,20214,21091,21640,23232,24116,24462,24973,25465,25782,26721,28129,28318,28692,28937,29497,29814,30463,30743,31132,31339,31430,31557,31813,31969,32094,32214,32278,32397,32482,32592,32661,32733,32767],
+  [0,1760,4960,15877,18514,19158,22852,24093,24586,25371,25814,26141,28194,28536,28715,29018,29373,29619,30002,30189,30533,30927,31341,31538,31762,31904,31955,32054,32149,32239,32319,32382,32428,32524,32569,32627,32671,32712,32767],
+  [0,1962,2657,4725,5743,6965,8078,9093,11298,13716,14863,16412,17403,19661,21279,21751,22219,23348,25242,26704,27396,28319,28319,29530,30017,30319,30663,30850,31428,31560,31727,31894,32078,32241,32342,32464,32544,32649,32767],
+  [0,1619,4706,8870,11995,14927,18474,18670,19986,20581,22796,23232,23499,23821,24170,26674,27092,27503,27768,27974,28180,28456,29023,31461,31661,31781,31862,31943,32160,32248,32300,32356,32464,32546,32595,32649,32692,32735,32767],
+  [0,8697,8777,8908,8970,9047,9096,9293,9425,9595,9680,9774,9811,9905,10027,10064,10092,10174,10242,10305,10378,10414,10514,10572,13817,19018,19054,21820,21848,23999,24036,26746,26801,28130,29410,30455,31691,32743,32767],
+  [0,8819,8884,8978,9055,9132,9181,9281,9418,9555,9630,9767,9834,9945,10053,10109,10149,10235,10377,10473,10682,10746,10874,10961,13794,16344,16372,20413,20458,25815,25831,26762,26824,28561,29652,30627,31892,32740,32767],
+  [0,1447,13594,18104,20353,20786,27618,27847,28061,28506,28841,29067,29185,29364,29580,29875,30355,30517,30716,30908,31027,31106,31274,31390,31587,31728,32011,32092,32174,32313,32386,32434,32510,32576,32616,32673,32711,32747,32767],
+  [0,8241,8310,8419,8555,8954,9032,9554,9824,10139,10353,10563,10647,10891,11045,11183,11264,11380,11609,11791,11945,12191,12379,12515,17069,18607,18685,24852,24900,26012,26068,27495,27685,28657,29984,31075,31985,32742,32767],
+  [0,1141,4960,12209,18241,18880,20789,21056,21405,22130,22460,23114,23639,24188,24631,28135,28264,28564,29020,29410,29978,30267,30556,30943,31128,31259,31386,31517,32073,32181,32260,32327,32401,32504,32558,32619,32676,32718,32767],
+  [0,12167,12274,12500,12577,13281,13362,13655,13877,14102,14299,14627,14720,14883,15017,15071,15173,15285,15402,15528,15659,15755,15914,16026,17978,20258,20344,21885,21945,24472,24528,25336,25471,28636,29765,30638,31770,32729,32767],
+  [0,5472,10004,13943,16168,16494,18855,19238,19615,19933,20747,21018,21424,21923,22164,23067,25043,25245,25583,25769,26043,26245,26665,26818,27287,27518,27614,27813,27922,28095,31808,31962,32220,32351,32452,32568,32638,32718,32767],
+  [0,9975,10040,10106,10139,10183,10223,10264,10336,10402,10434,10486,10519,10566,10610,10637,10659,10705,10752,10793,10830,10857,10949,10993,13156,15085,15100,17344,17374,18996,19012,23469,23540,25016,26800,29793,31178,32754,32767],
+  [0,7536,9234,10748,11865,12350,14855,15212,16672,17494,18034,18809,19151,19823,20719,21185,22265,22601,23162,24261,24537,24798,25680,26080,26730,27131,27371,27611,27838,28129,28410,28623,31836,32047,32226,32401,32537,32685,32767],
+  [0,10773,11042,11229,11301,11669,11767,12075,12434,12694,13130,13372,13518,13790,14018,14290,14458,14630,14784,14968,15116,15246,15452,15626,17197,20518,20591,21841,21927,23565,23615,24516,24611,26441,27774,28783,31723,32729,32767],
+  [0,14426,14532,14652,14714,14796,14865,14924,15041,15156,15213,15292,15383,15467,15550,15618,15680,15747,15826,15885,15945,15993,16117,16186,17811,19298,19339,20534,20586,21818,21842,23144,23246,24453,27792,29965,31245,32740,32767],
+  [0,10296,10393,10497,10566,10691,10769,10835,10992,11107,11166,11260,11329,11425,11501,11569,11623,11686,11808,11870,11930,11984,12102,12179,13865,15605,15642,17333,17385,18879,18899,21974,22036,23604,26227,29545,31075,32739,32767],
+  [0,13101,13222,13362,13432,13535,13621,13687,13915,14036,14100,14193,14331,14435,14524,14591,14670,14751,14831,14912,14997,15055,15194,15281,17048,18640,18681,20670,20756,22068,22087,23158,23231,25115,26474,27559,30112,32732,32767],
+  [0,12082,12164,12266,12321,12397,12473,12528,12648,12757,12810,12894,12958,13035,13116,13171,13235,13303,13388,13452,13519,13569,13680,13772,15279,16565,16603,17957,18021,19069,19087,22955,23024,24461,26471,27610,29268,32736,32767],
+  [0,2750,3286,4170,4546,4935,5546,5762,6296,6745,7026,7244,7440,7672,7943,26911,27065,27190,27484,27743,27956,29557,29810,29969,30288,30499,30629,30741,30866,31039,31201,31282,31444,31574,31675,31806,31900,31985,32767],
+  ],
+  width: 38,
+};
 
-// SeaHash — deterministic hash for fallback
-function seahash(input: string): bigint {
-  const p = 0x6eed0e9da4d94a4fn;
+const CODE_VALUE_BITS = 17; // (32 + 3) / 2
+const MAX_CODE = (1 << CODE_VALUE_BITS) - 1;
+const ONE_FOURTH = 1 << (CODE_VALUE_BITS - 2);
+const ONE_HALF = 2 * ONE_FOURTH;
+const THREE_FOURTHS = 3 * ONE_FOURTH;
+const HASH_BIT = 1n << 56n;
+const U64_MASK = (1n << 64n) - 1n;
+/** What the C++ decoders write for a number no coder produced and cannot be read. */
+const LOGIC_ERROR = 'RUNTIME LOGIC ERROR';
 
-  const g = (x: bigint): bigint => {
-    x = BigInt.asUintN(64, x * p);
-    x = x ^ ((x >> 32n) >> (x >> 60n));
-    x = BigInt.asUintN(64, x * p);
-    return x;
-  };
-
-  const state = [
-    0x16f11fe89b0d677cn,
-    0xb480a793d8e6c86cn,
-    0x6fe2e5aaf078ebc9n,
-    0x14f994a4c5259381n,
-  ];
-
-  for (let i = 0; i < input.length; i += 8) {
-    let n = 0n;
-    const bytes = Math.min(input.length - i, 8);
-    for (let j = 0; j < bytes; j++) {
-      n += BigInt(input.charCodeAt(i + j)) << BigInt(j * 8);
-    }
-    const idx = (i >> 3) & 3;
-    state[idx] = g(state[idx] ^ n);
-  }
-
-  return g(state[0] ^ state[1] ^ state[2] ^ state[3] ^ BigInt(input.length));
+function symbolOf(model: Model, text: string, at: number): number {
+  const code = text.charCodeAt(at);
+  return code < 256 ? model.charToSymbol[code] : 0;
 }
 
-/** Compress a name string to a 64-bit value.
- *  Short lowercase names are arithmetically coded.
- *  Others fall back to seahash with a marker bit. */
-export function nameToNumber(input: string): bigint {
-  if (input.length === 0) return 0n;
-
-  // Hash name decode: "#" + 16 chars
-  if (input[0] === '#') {
-    if (input.length !== 17) return 0xFFFFFFFFFFFFFFFFn; // -1 as u64
-    let output = 0n;
-    for (let i = 1; i < 17; i++) {
-      const sym = BigInt(CHAR_TO_SYMBOL[input.charCodeAt(i)] - 1);
-      output |= (sym & 0xFn) << BigInt(4 * (i - 1));
-    }
-    return output;
-  }
-
-  // Check all chars are compressible
-  for (let i = 0; i < input.length; i++) {
-    if (!CHAR_TO_SYMBOL[input.charCodeAt(i)]) return 0n;
-  }
-
-  // Arithmetic encoding
-  let lastByte = CHAR_TO_SYMBOL[0]; // context state
-  let inputIdx = 0;
-
+// The arithmetic encoder shared by the two coders. `method`: the method
+// coder's bit sink (a one at bit 63 voids the code; trailing bits past 64
+// are dropped); otherwise the name coder's (bits past 64 void the code).
+// 0: the text has no code.
+function compress(model: Model, input: string, method: boolean): bigint {
+  let at = 0;
+  let last = 0;
   let bit = 0;
   let nextByte = 0;
   let mask = 0x80;
   let output = 0n;
   let bitc = 0;
-
   const putBit = (b: boolean) => {
-    if (b && bitc === 63) {
+    if (method && b && bitc === 63) {
       output = 0n;
       bit = 64;
-    } else {
-      bitc++;
-      if (b) nextByte |= mask;
-      mask >>= 1;
-      if (!mask && bit < 64) {
-        output |= BigInt(nextByte) << BigInt(bit);
-        bit += 8;
-        mask = 0x80;
-        nextByte = 0;
-      }
+      return;
     }
+    ++bitc;
+    if (b) nextByte |= mask;
+    mask >>= 1;
+    if (mask) return;
+    if (method) {
+      if (bit >= 64) return;
+      output |= BigInt(nextByte) << BigInt(bit);
+    } else if (bit < 64) output |= BigInt(nextByte) << BigInt(bit);
+    bit += 8;
+    mask = 0x80;
+    nextByte = 0;
   };
-
-  const getByte = (): number => {
-    if (inputIdx >= input.length) return 0;
-    const c = CHAR_TO_SYMBOL[input.charCodeAt(inputIdx)];
-    inputIdx++;
-    return c;
-  };
-
-  let pendingBits = 0;
+  let pending = 0;
   let low = 0;
   let high = MAX_CODE;
-
   const putBitPlusPending = (b: boolean) => {
     putBit(b);
-    while (pendingBits) { putBit(!b); pendingBits--; }
+    for (; pending; --pending) putBit(!b);
   };
-
   let c = 1;
   while (c !== 0 && bit < 64) {
-    c = getByte();
-
-    const cf = MODEL_CF[lastByte];
-    const pLow = cf[c];
-    const pHigh = cf[c + 1];
-    const pCount = cf[MODEL_WIDTH];
-    lastByte = c;
-
-    if (pCount === 0) return 0n;
-
+    c = at < input.length ? symbolOf(model, input, at++) : 0;
+    const cf = model.cf[last];
+    const count = cf[model.width];
+    last = c;
+    if (count === 0) return 0n;
     const range = high - low + 1;
-    high = low + Math.floor(range * pHigh / pCount) - 1;
-    low  = low + Math.floor(range * pLow / pCount);
-
+    high = low + Math.floor((range * cf[c + 1]) / count) - 1;
+    low = low + Math.floor((range * cf[c]) / count);
     while (bit < 64) {
-      if (high < ONE_HALF) {
-        putBitPlusPending(false);
-      } else if (low >= ONE_HALF) {
-        putBitPlusPending(true);
-      } else if (low >= ONE_FOURTH && high < THREE_FOURTHS) {
-        pendingBits++;
+      if (high < ONE_HALF) putBitPlusPending(false);
+      else if (low >= ONE_HALF) putBitPlusPending(true);
+      else if (low >= ONE_FOURTH && high < THREE_FOURTHS) {
+        ++pending;
         low -= ONE_FOURTH;
         high -= ONE_FOURTH;
-      } else {
-        break;
-      }
+      } else break;
       high = ((high << 1) + 1) & MAX_CODE;
-      low  = (low << 1) & MAX_CODE;
+      low = (low << 1) & MAX_CODE;
     }
   }
-
-  pendingBits++;
-  if (low < ONE_FOURTH) putBitPlusPending(false);
-  else putBitPlusPending(true);
-
-  if (mask !== 0x80 && bit < 64) {
-    output |= BigInt(nextByte) << BigInt(bit);
+  ++pending;
+  putBitPlusPending(low >= ONE_FOURTH);
+  if (mask !== 0x80) {
+    if (bit < 64) output |= BigInt(nextByte) << BigInt(bit);
+    else if (!method) output = 0n;
   }
-
-  if (inputIdx < input.length || c !== 0) output = 0n;
-
-  // Fall back to hash if compression failed
-  if (output === 0n) {
-    output = seahash(input);
-    output |= 1n << 56n;
-  }
-
-  return output;
+  if (at < input.length || c !== 0) return 0n;
+  return output & U64_MASK;
 }
 
-/** Decompress a 64-bit value back to a name string. */
-export function numberToName(input: bigint): string {
-  if (input === 0n) return '';
-
-  // Hash name: marker bit set at bit 56
-  if ((input & (1n << 56n)) !== 0n) {
-    let s = '#';
-    let r = input;
-    for (let i = 0; i < 16; i++) {
-      s += String.fromCharCode(SYMBOL_TO_CHAR[(Number(r & 0xFn)) + 1]);
-      r >>= 4n;
-    }
-    return s;
-  }
-
-  // Arithmetic decoding
-  let lastByte = CHAR_TO_SYMBOL[0]; // context state
+// The arithmetic decoder (C++ 32-bit unsigned arithmetic): the text `input`
+// decodes to, or null for a number the decoder cannot read.
+function decompress(model: Model, input: bigint): string | null {
+  let last = 0;
   let currentByte = 0;
   let lastMask = 1;
-  let notEof = 64 + 16;
-
-  const getBit = (): boolean => {
+  let notEof = 64 + 16; // extra bits are brought in: they improve accuracy
+  const getBit = (): number => {
     if (lastMask === 1) {
-      currentByte = Number(input & 0xFFn);
+      currentByte = Number(input & 0xffn);
       input >>= 8n;
       lastMask = 0x80;
-    } else {
-      lastMask >>= 1;
-    }
-    notEof--;
-    return (currentByte & lastMask) !== 0;
+    } else lastMask >>= 1;
+    --notEof;
+    return currentByte & lastMask ? 1 : 0;
   };
-
   let out = '';
   let high = MAX_CODE;
   let low = 0;
   let value = 0;
-
-  for (let i = 0; i < CODE_VALUE_BITS && notEof; i++) {
-    value = (value << 1) + (getBit() ? 1 : 0);
-  }
-
+  for (let i = 0; i < CODE_VALUE_BITS && notEof; ++i) value = ((value * 2) + getBit()) >>> 0;
   while (notEof) {
-    const range = high - low + 1;
-    if (range === 0) return out;
-
-    const cf = MODEL_CF[lastByte];
-    const count = cf[MODEL_WIDTH];
-    const scaledValue = Math.floor(((value - low + 1) * count - 1) / range);
-
-    // Find symbol
+    const range = (high - low + 1) >>> 0;
+    if (range === 0) return null;
+    const cf = model.cf[last];
+    const count = cf[model.width];
+    const scaled = Math.floor((((((value - low + 1) >>> 0) * count) - 1) >>> 0) / range);
     let c = 0;
-    for (let i = 0; i < MODEL_WIDTH; i++) {
-      if (scaledValue < cf[i + 1]) {
+    for (let i = 0; i < model.width; ++i)
+      if (scaled < cf[i + 1]) {
         c = i;
         break;
       }
-    }
-
-    const pLow = cf[c];
-    const pHigh = cf[c + 1];
-    const pCount = cf[MODEL_WIDTH];
-    lastByte = c;
-
-    if (c === 0) break; // null terminator
-    out += String.fromCharCode(SYMBOL_TO_CHAR[c]);
-
-    if (pCount === 0) return out;
-
-    high = low + Math.floor(range * pHigh / pCount) - 1;
-    low  = low + Math.floor(range * pLow / pCount);
-
+    if (c === 0) break;
+    last = c;
+    out += String.fromCharCode(model.symbolToChar[c]);
+    high = (low + Math.floor(((range * cf[c + 1]) >>> 0) / count) - 1) >>> 0;
+    low = (low + Math.floor(((range * cf[c]) >>> 0) / count)) >>> 0;
     while (notEof) {
       if (high < ONE_HALF) {
-        // do nothing
+        // the bit is a zero
       } else if (low >= ONE_HALF) {
-        value -= ONE_HALF;
-        low -= ONE_HALF;
-        high -= ONE_HALF;
+        value = (value - ONE_HALF) >>> 0;
+        low = (low - ONE_HALF) >>> 0;
+        high = (high - ONE_HALF) >>> 0;
       } else if (low >= ONE_FOURTH && high < THREE_FOURTHS) {
-        value -= ONE_FOURTH;
-        low -= ONE_FOURTH;
-        high -= ONE_FOURTH;
-      } else {
-        break;
-      }
-      low = (low << 1);
-      high = (high << 1) + 1;
-      value = (value << 1) + (getBit() ? 1 : 0);
+        value = (value - ONE_FOURTH) >>> 0;
+        low = (low - ONE_FOURTH) >>> 0;
+        high = (high - ONE_FOURTH) >>> 0;
+      } else break;
+      low = (low * 2) >>> 0;
+      high = (high * 2 + 1) >>> 0;
+      value = (value * 2 + getBit()) >>> 0;
     }
   }
-
   return out;
 }
 
-/** Check if a 64-bit name value uses hash encoding (not compressed). */
-export function isHashName(h: bigint): boolean {
-  return (h & (1n << 56n)) !== 0n;
+function asU64(number: bigint): bigint {
+  if (typeof number !== 'bigint' || number < 0n || number > U64_MASK)
+    throw new RangeError('a name number is an unsigned 64-bit bigint');
+  return number;
 }
 
-/** Check if a 64-bit name value was successfully compressed. */
-export function isCompressedName(h: bigint): boolean {
-  return !isHashName(h);
+// SeaHash of the name's bytes (every character is ASCII here).
+function seahash(input: string): bigint {
+  const p = 0x6eed0e9da4d94a4fn;
+  const g = (x: bigint): bigint => {
+    x = BigInt.asUintN(64, x * p);
+    x = x ^ ((x >> 32n) >> (x >> 60n));
+    return BigInt.asUintN(64, x * p);
+  };
+  const state = [0x16f11fe89b0d677cn, 0xb480a793d8e6c86cn, 0x6fe2e5aaf078ebc9n, 0x14f994a4c5259381n];
+  for (let i = 0; i < input.length; i += 8) {
+    let n = 0n;
+    const bytes = Math.min(input.length - i, 8);
+    for (let j = 0; j < bytes; ++j) n += BigInt(input.charCodeAt(i + j)) << BigInt(j * 8);
+    const index = (i >> 3) & 3;
+    state[index] = g(state[index] ^ n);
+  }
+  return g(state[0] ^ state[1] ^ state[2] ^ state[3] ^ BigInt(input.length));
 }
 
-/** Public alias: compress a name string to a 64-bit value. */
-export const hashName = nameToNumber;
+// ── Method names (psio/compress_name.hpp) ───────────────────────────────────
+
+/**
+ * The number of a method name (C++ `psio::detail::method_to_number`):
+ *
+ * - a name the coder represents exactly: its compressed number, and
+ *   `numberToMethod(number)` is the name in canonical form (lower case; a
+ *   digit or `_` as the letter of its symbol);
+ * - any other name made of the coder's characters (letters, digits, `_`): a
+ *   hash of its bytes with bit 56 set (`isHashName`), written `#` + 16
+ *   letters — also a name whose code does not decode back to it
+ *   (`getSymbolType`) or lands on bit 56;
+ * - `#` + 16 letters of a hash number: that number;
+ * - the empty name, a name with a character outside the alphabet, malformed
+ *   `#` text: `0n`.
+ *
+ * So `methodToNumber(numberToMethod(n)) === n` for every `n` it returns.
+ */
+export function methodToNumber(name: string): bigint {
+  if (name.length === 0) return 0n;
+  const model = METHOD_MODEL;
+  if (name[0] === '#') {
+    // '#' and sixteen of the letters "eaiotnrslcuhdpmy", one per 4 bits,
+    // of a number with bit 56 set; anything else has no number.
+    if (name.length !== 17) return 0n;
+    let output = 0n;
+    for (let i = 1; i < 17; ++i) {
+      const symbol = symbolOf(model, name, i);
+      if (symbol < 1 || symbol > 16) return 0n;
+      output |= BigInt(symbol - 1) << BigInt(4 * (i - 1));
+    }
+    return output & HASH_BIT ? output : 0n;
+  }
+  for (let i = 0; i < name.length; ++i) if (!symbolOf(model, name, i)) return 0n;
+  const output = compress(model, name, true);
+  // A compressed number is the name's only if it decodes back to the name
+  // in its canonical form and is not a hash number.
+  if (output !== 0n && !(output & HASH_BIT)) {
+    let canonical = '';
+    for (let i = 0; i < name.length; ++i) canonical += String.fromCharCode(model.symbolToChar[symbolOf(model, name, i)]);
+    if (decompress(model, output) === canonical) return output;
+  }
+  return seahash(name) | HASH_BIT;
+}
+
+/** The text of a method number (C++ `psio::detail::number_to_method`): the name, or `#` + 16 letters of a hash number. */
+export function numberToMethod(number: bigint): string {
+  let input = asU64(number);
+  if (input === 0n) return '';
+  if (isHashName(input)) {
+    let text = '#';
+    for (let i = 0; i < 16; ++i) {
+      text += String.fromCharCode(METHOD_MODEL.symbolToChar[Number(input & 0xfn) + 1]);
+      input >>= 4n;
+    }
+    return text;
+  }
+  return decompress(METHOD_MODEL, input) ?? LOGIC_ERROR;
+}
+
+/** Whether a method number is a hash number (bit 56), not a compressed name. */
+export function isHashName(number: bigint): boolean {
+  return (number & HASH_BIT) !== 0n;
+}
+
+/** Whether a method number is a compressed name. */
+export function isCompressedName(number: bigint): boolean {
+  return !isHashName(number);
+}
+
+// ── Identifiers (psio/name.hpp) ─────────────────────────────────────────────
+
+/**
+ * The number of a name (C++ `psio::name_to_number`): 1 to 18 characters of
+ * a-z, 0-9 and `-`, starting with a letter. The coding is a bijection: a
+ * text whose code does not read back as the text — a doubled hyphen, a code
+ * that needs more than 64 bits (most texts of 12 or more characters) — is
+ * not a name and has no number, `0n`.
+ */
+export function nameToNumber(name: string): bigint {
+  if (name.length === 0 || name.length > 18) return 0n;
+  if (name.charCodeAt(0) <= 0x39) return 0n;
+  for (let i = 0; i < name.length; ++i) if (!symbolOf(NAME_MODEL, name, i)) return 0n;
+  const output = compress(NAME_MODEL, name, false);
+  return output !== 0n && decompress(NAME_MODEL, output) === name ? output : 0n;
+}
+
+/**
+ * The text a number decodes to (C++ `psio::number_to_name`). Most numbers
+ * are no name's: `nameToNumber(numberToName(n)) === n` says whether `n` is.
+ */
+export function numberToName(number: bigint): string {
+  return decompress(NAME_MODEL, asU64(number)) ?? LOGIC_ERROR;
+}

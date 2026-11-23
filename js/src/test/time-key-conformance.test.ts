@@ -224,11 +224,11 @@ for (const path of ['schema-driven', 'typed'] as const) test(`time/key conforman
   assert.equal(total, fixture.vectors.length);
   assert.ok(total >= 500);
   console.log(`time-key-vectors.json (${path}):`, JSON.stringify({ types: fixture.types.length, vectors: total, ...counts }));
-  assert.equal(fixture.types.length, 55);
-  assert.equal(fixture.vectors.length, 1147);
+  assert.equal(fixture.types.length, 56);
+  assert.equal(fixture.vectors.length, 1164);
   // The file as checked in, by kind (conformance/time-key-vectors.md).
   assert.deepEqual(counts, {
-    value: 354, 'key-order': 53, 'text-accept': 56, 'text-reject': 124, 'key-reject': 141, 'key-prefix': 387,
+    value: 359, 'key-order': 54, 'text-accept': 56, 'text-reject': 124, 'key-reject': 148, 'key-prefix': 391,
     'key-order-bits': 5, bound: 17, 'key-invariant': 10,
   });
   // The monotonic time points: every row of theirs was replayed above.

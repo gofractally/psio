@@ -78,6 +78,11 @@ export class TypedFixture implements TypeSource {
   // A named alias that other types refer to (or that precedes its target)
   // is a transparent type, not a name given to `insert<T>(name)`.
   private readonly transparents = new Set<string>();
+  // An interned node that is the bounded type a transparent type makes of
+  // its member (`transparent(name, field(type, bounds))`): C++ gives it an
+  // identity of its own, so it stands beside the interned wrapper type of
+  // the same spelling, and only its transparent type refers to it.
+  private readonly memberBounded = new Set<string>();
 
   constructor(readonly ir: IrSchema, private readonly handlers: Handlers = {}) {
     this.byName = new Map(ir.types.map((m) => [m.name, m]));
@@ -100,6 +105,7 @@ export class TypedFixture implements TypeSource {
       visit(m.type);
     }
     const groups = new Map<string, string[]>();
+    const sameNode = new Map<string, string[]>();
     // `@N` is the N-th interned type: the count of the interned entries
     // before it says how many of the named aliases since the previous
     // `@N` are transparent types (interned) and not names given to
@@ -143,9 +149,19 @@ export class TypedFixture implements TypeSource {
       if (!m.name.startsWith('@')) continue;
       const twoTuple = t.type === 'Tuple' && t.value.members.length === 2;
       const assoc = t.type === 'Custom' && (t.value.id === 'map' || t.value.id === 'set');
-      if (!twoTuple && !assoc) continue;
+      if (!twoTuple && !assoc) {
+        const key = spelling(m.type);
+        if (key !== '') sameNode.set(key, [...(sameNode.get(key) ?? []), m.name]);
+        continue;
+      }
       const key = spelling(m.type);
       groups.set(key, [...(groups.get(key) ?? []), m.name]);
+    }
+    for (const names of sameNode.values()) {
+      if (names.length < 2) continue;
+      // The interned type is the one something else refers to (else the last).
+      const interned = names.find((name) => referenced.has(name)) ?? names[names.length - 1];
+      for (const name of names) if (name !== interned) this.memberBounded.add(name);
     }
     for (const names of groups.values()) {
       // The entry of a map is the tuple; otherwise the first is.
@@ -203,7 +219,14 @@ export class TypedFixture implements TypeSource {
     switch (t.type) {
       case 'Type':
         // A transparent type: a named alias of its member's type.
-        if (slot !== undefined && this.transparents.has(slot)) return transparent(slot, this.def(t.value.type));
+        if (slot !== undefined && this.transparents.has(slot)) {
+          if (this.memberBounded.has(t.value.type)) {
+            const member = this.bounded(this.byName.get(t.value.type)!.type);
+            if (!member) return unsupported('a transparent type over a bounded member the typed layer cannot declare');
+            return transparent(slot, member.o ? field(member.def, member.o) : member.def);
+          }
+          return transparent(slot, this.def(t.value.type));
+        }
         return this.def(t.value.type);
       case 'Nested':
         return slot !== undefined && this.deferred.has(slot)
@@ -328,12 +351,20 @@ export class TypedFixture implements TypeSource {
 
   private argumentTuple(members: IrMember[], attributes: IrAttribute[]): Def {
     let maxDynamicData: bigint | undefined;
+    let maxFields: number | undefined;
+    let form: string | null = null;
     for (const a of attributes) {
       if (a.name === 'maxDynamicData') maxDynamicData = BigInt(a.value!);
+      else if (a.name === 'maxFields') maxFields = Number(a.value!);
+      else if (a.name === 'tuple') form = a.value;
       else return unsupported(`argument tuple attribute ${a.name}`);
     }
+    if (form !== 'named' && form !== 'positional') return unsupported('an interned Object that is not an argument list');
     for (const m of members) if (m.attributes.length) return unsupported('argument tuple member attributes');
-    return argumentTuple(this.members(members), { maxDynamicData });
+    const parameters = this.members(members);
+    // Positional: the members are named "0", "1", ...; declared as the array.
+    if (form === 'positional') return argumentTuple(members.map((m) => parameters[m.name]) as [], { maxDynamicData, maxFields });
+    return argumentTuple(parameters, { maxDynamicData, maxFields });
   }
 
   private members(members: IrMember[]): { [name: string]: Def | ReturnType<typeof field> } {

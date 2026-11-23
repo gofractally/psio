@@ -161,10 +161,10 @@ const PSSZ_CLASSES: { [cls: string]: number } = {
   'enum-unknown-value': 36, string: 308, 'string-raw-non-utf8': 48, 'length-bound-overflow': 32, box: 100,
   bytes: 103, 'zero-fixed': 100, depth: 28, nested: 252, 'nested-unknown': 20, 'nested-deferred': 24,
   'map-set': 266, 'map-set-order': 352, transparent: 160, custom: 116, invariant: 128,
-  'annotated-bounds': 148, 'method-args': 62, 'list-width': 89, 'cap-implicit': 40,
+  'annotated-bounds': 148, 'method-args': 62, 'list-width': 89, 'cap-implicit': 40, 'transparent-bounds': 62,
 };
 // Types of pssz-vectors.json with a finite inferred bound (`max_encoded_size`).
-const BOUNDED_TYPES = 139;
+const BOUNDED_TYPES = 140;
 const NO_HANDLER = 'pssz IR: no handler registered for a custom type';
 
 // Classes `annotated-bounds` and `method-args`: the C++ reason of a rejected
@@ -175,6 +175,7 @@ const TREE_REASONS: { [reason: string]: RegExp } = {
   'pssz: bounded list exceeds its bound': /^pssz IR: sequence bound exceeded$/,
   'pssz: utf8_string exceeds its bound': /^pssz IR: byte count bound exceeded$/,
   'utf8_spec: invalid leading byte': /^pssz IR: string is not valid UTF-8$/,
+  'utf8_spec: overlong encoding': /^pssz IR: string is not valid UTF-8$/,
   [CAP]: /^pssz IR: encoded size exceeds maxDynamicData cap$/,
 };
 const KEY_BOUND = /^key: (list exceeds its bound|string exceeds its bound|bytes exceed their bound)$/;
@@ -237,15 +238,11 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     // The inferred bound is the typed codec's too, for EVERY type: each
     // header, slot and table counted at its own width (`fit`, spec 3.2).
     assert.ok(row.max_encoded_size === null || Number.isSafeInteger(row.max_encoded_size), row.id);
-    // (A capped record records its bare bound, whatever its cap. The three
-    // capped method argument tuples record the cap instead: C++
-    // `max_encoded_size` of a `method_arg_tuple` with a cap is the cap.)
+    // (A capped record records its bare bound, whatever its cap; so do the
+    // three capped method argument tuples: 107, unbounded, 113.)
     const bound = source.type(row.id).maxEncodedSize;
-    const argumentsCap = row.max_dynamic_data !== null && row.id.startsWith('tuple<');
-    if (argumentsCap) {
-      assert.equal(row.max_encoded_size, row.max_dynamic_data, `max_encoded_size of ${row.id}`);
-      ++argumentCaps;
-    } else assert.equal(bound === null ? null : Number(bound), row.max_encoded_size, `max_encoded_size of ${row.id}`);
+    if (row.max_dynamic_data !== null && row.id.startsWith('tuple<')) ++argumentCaps;
+    assert.equal(bound === null ? null : Number(bound), row.max_encoded_size, `max_encoded_size of ${row.id}`);
     // The width is the class of the explicit cap, else of the bound.
     const rules = row.max_dynamic_data ?? row.max_encoded_size;
     assert.equal(row.auto_width, rules === null || rules > 0xffff ? 4 : rules > 0xff ? 2 : 1, `width class of ${row.id}`);
@@ -455,6 +452,12 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
           assert.match(rejects(() => reader.decode(bytes, { rejectUnknown: true }), name).message, BOUND, `${name}: exact decode`);
           for (const format of ['json', 'ijson'] as const)
             assert.match(rejects(() => reader.psszToJson(bytes, format), name).message, BOUND, `${name}: ${format}`);
+          // (A bare transparent string is a leaf: its view is the value
+          // itself, read — and refused — when the view is asked for.)
+          if (cls === 'transparent-bounds' && row.type !== 'MemoRec') {
+            assert.match(rejects(() => reader.view(bytes), name).message, BOUND, `${name}: view of a leaf`);
+            continue;
+          }
           const view = reader.view(bytes);
           assert.ok(view instanceof PsszView, `${name}: view`);
           assert.match(rejects(() => view.toValue(), name).message, BOUND, `${name}: view.toValue`);
@@ -472,7 +475,12 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
       // parameter's bounds, and arguments over the cap. Every reader refuses
       // the frame for the reason recorded; then every writer and every text
       // / key reader refuses the value the frame holds.
-      if (cls === 'annotated-bounds' || cls === 'method-args') {
+      // The same for a transparent type that bounds its member (class
+      // `transparent-bounds`, docs/pssz-spec.md 5.10): the wrapper is the
+      // bounded type bare, as a record member, as an optional payload and
+      // as a list element, in both spellings (`Memo`: bounds on the member;
+      // `WrapMemo`: a wrapper type).
+      if (cls === 'annotated-bounds' || cls === 'method-args' || cls === 'transparent-bounds') {
         const expected = TREE_REASONS[row.reason];
         assert.ok(expected, `${row.name}: reason ${row.reason}`);
         everyReader(expected);
@@ -502,8 +510,7 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
             const written = rejects(() => reader.encode(outside), `${row.name}: encode`);
             assert.equal(written.kind, 'value', row.name);
             assert.match(written.message, VALUE_BOUND, `${row.name}: encode`);
-            // The key writer too. (C++ `psio::key` writes such a key and only
-            // its reader refuses it; here both do.)
+            // The key writer too (C++ `psio::encode_key_checked` / `to_key`).
             const keyWritten = rejects(() => reader.encodeKey(outside), `${row.name}: encodeKey`);
             assert.equal(keyWritten.kind, 'value', row.name);
             assert.match(keyWritten.message, VALUE_BOUND, `${row.name}: encodeKey`);
@@ -617,21 +624,24 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   assert.equal(a.nestedUnknown + e.nestedUnknown, 16);
   // Every rejected frame of the two classes went through every reader, and
   // its value (one frame aside: the cap) through every writer.
-  const treeRejects = fx.vectors.filter((v) => (v.class === 'annotated-bounds' || v.class === 'method-args') && v.expect === 'reject');
-  assert.equal(treeRejects.length, 109);
+  const treeRejects = fx.vectors.filter(
+    (v) => (v.class === 'annotated-bounds' || v.class === 'method-args' || v.class === 'transparent-bounds') && v.expect === 'reject');
+  assert.equal(treeRejects.length, 109 + 32);
   assert.equal(a.treeReject + e.treeReject, treeRejects.length);
   assert.deepEqual(
     [a.treeWriterRefused + e.treeWriterRefused, a.treeNotUtf8 + e.treeNotUtf8, a.treeOverCap + e.treeOverCap],
-    [96, 12, 1],
+    // (96 + 12 + 1 of `annotated-bounds` and `method-args`; 20 + 12 of `transparent-bounds`)
+    [116, 24, 1],
   );
+  assert.equal(fx.vectors.filter((v) => v.class === 'transparent-bounds' && v.expect === 'reject').length, 32);
   assert.ok(a.rawNonUtf8NoText >= 11);
   // Top-level caps under an explicit width are rejections that were replayed.
   const explicitCap = fx.vectors.filter(
     (v) => v.format !== 'auto' && v.name.startsWith('width/') && v.name.includes('cap') && v.expect === 'reject',
   );
   assert.equal(explicitCap.length, 12);
-  assert.equal(fx.types.length, 357);
-  assert.equal(fx.vectors.length, 6973);
+  assert.equal(fx.types.length, 360);
+  assert.equal(fx.vectors.length, 7035);
 });
 
 for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, () => {
