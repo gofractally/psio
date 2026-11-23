@@ -79,6 +79,7 @@ pub fn strict_strings() -> bool {
 
 pub struct DecodeDepth;
 impl DecodeDepth {
+    #[inline]
     pub fn enter() -> PsszResult<Self> {
         DECODE_DEPTH.with(|depth| {
             // Root is node 0. Node 64 is allowed; a child at 65 is rejected.
@@ -91,9 +92,20 @@ impl DecodeDepth {
     }
 }
 impl Drop for DecodeDepth {
+    #[inline]
     fn drop(&mut self) {
         DECODE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
+}
+
+/// [`DecodeDepth::enter`] for a node that holds no other (a number, a
+/// string, a bit type): the same check, with nothing to count and undo.
+#[inline]
+pub fn decode_leaf() -> PsszResult<()> {
+    if DECODE_DEPTH.with(|depth| depth.get()) > MAX_DEPTH {
+        return Err(PsszError::new("pssz: max depth exceeded"));
+    }
+    Ok(())
 }
 
 /// Checked encoding uses the same node budget as the checked readers. Wire-
@@ -339,6 +351,7 @@ pub fn wire_span(len: usize) -> PsszResult<()> {
     Ok(())
 }
 
+#[inline]
 pub fn read_offset_w(bytes: &[u8], w: usize) -> PsszResult<usize> {
     let b = bytes.get(..w).ok_or(PsszError::new("pssz: offset underrun"))?;
     Ok(match w {
@@ -507,6 +520,7 @@ fn span_is_none(bytes: &[u8], span: &Range<usize>, selector: bool) -> bool {
 /// Resolve a record frame. `spans[i]` is `None` for a trailing optional the
 /// writer pruned. Returns whether the writer appended slots this reader does
 /// not know. Does not allocate.
+#[inline]
 pub fn record_spans_into(
     w: usize,
     layouts: &[Layout],
@@ -633,8 +647,28 @@ pub fn record_spans_into(
     Ok(unknown)
 }
 
+/// [`record_spans_into`] for a fixed-size record (fixed layout, every field
+/// fixed-size): the fields lie at constant positions, so the frame is right
+/// iff it has the record's size. The same errors in the same order.
+/// `optional_fixed`: a field claims to be both an optional and fixed-size.
+#[inline]
+pub fn fixed_record_frame(w: usize, size: usize, len: usize, optional_fixed: bool) -> PsszResult<()> {
+    width(w)?;
+    if optional_fixed {
+        return Err(PsszError::new("pssz: invalid reader field layout"));
+    }
+    if size > len {
+        return Err(PsszError::new("pssz: record fixed region truncated"));
+    }
+    if size != len {
+        return Err(PsszError::new("pssz: fixed record has trailing payload"));
+    }
+    Ok(())
+}
+
 /// Stack-array frame resolution for generated record readers. Reports
 /// unknown fields to the active session (an exact reader fails here).
+#[inline]
 pub fn record_spans_n<const N: usize>(
     w: usize,
     layouts: [Layout; N],

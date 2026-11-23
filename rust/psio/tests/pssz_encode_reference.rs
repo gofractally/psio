@@ -9,13 +9,17 @@
 //! from the encoder as it was before it wrote in place (commit c6d9940,
 //! where every node was encoded into a buffer of its own and copied).
 //!
+//! The readers are recorded the same way: `decode`, `validate` and
+//! `validate_strict` on what was written and on damaged copies of it.
+//!
 //! So: any change to a byte, to an error, or to which of two errors is
 //! reported first, fails here. To see what changed, set
 //! `PSSZ_ENCODE_TRANSCRIPT=<file>` on both sides and diff the files.
 
 use psio::pssz::{
-    encode_into, try_encode, Bitlist, Bitvector, BoundedList, BoundedString, Pssz, Pssz16, Pssz32, Pssz8,
-    PsszError, PsszFormat, PsszPack, PsszResult, Uint256,
+    decode, decode_trusted, encode_into, try_encode, validate, validate_strict, Bitlist, Bitvector, BoundedList,
+    BoundedString, Pssz, Pssz16, Pssz32, Pssz8, PsszError, PsszFormat, PsszPack, PsszResult, PsszUnpack,
+    PsszValidate, Uint256,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -87,7 +91,7 @@ impl<F: PsszFormat> PsszPack<F> for Holder {
 
 // ── Derived shapes ──────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 struct Plain {
     a: u32,
     s: String,
@@ -95,7 +99,7 @@ struct Plain {
     o: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[psio(definition_will_not_change)]
 struct Fixed {
     a: u8,
@@ -109,7 +113,7 @@ struct Fixed {
     i: Uint256,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[psio(definition_will_not_change)]
 struct FixedOuter {
     x: Fixed,
@@ -117,7 +121,7 @@ struct FixedOuter {
     z: i8,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[psio(definition_will_not_change)]
 struct FrozenVariable {
     id: u32,
@@ -126,7 +130,7 @@ struct FrozenVariable {
     last: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[pssz(max_dynamic_data = 255)]
 struct Capped {
     tags: Vec<String>,
@@ -134,7 +138,7 @@ struct Capped {
     note: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[pssz(max_dynamic_data = 40000)]
 struct CappedWide {
     tags: Vec<String>,
@@ -142,7 +146,7 @@ struct CappedWide {
     capped: Vec<Capped>,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 struct Annotated {
     #[psio(max = 8, element(max = 16))]
     tags: Vec<String>,
@@ -156,7 +160,7 @@ struct Annotated {
     map: BTreeMap<String, Vec<u8>>,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 struct Trailing {
     a: u8,
     b: Option<u8>,
@@ -165,7 +169,7 @@ struct Trailing {
     e: Option<Option<u16>>,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 enum Choice {
     Unit,
     One(String),
@@ -175,7 +179,7 @@ enum Choice {
     Fixed(u64),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, Copy, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[repr(u8)]
 enum Color {
     Red = 1,
@@ -191,7 +195,7 @@ fn even(value: &Even) -> Result<(), &'static str> {
         Err("even: the number is odd")
     }
 }
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[psio(definition_will_not_change, invariant = "even")]
 struct Even {
     n: u16,
@@ -204,13 +208,13 @@ fn short(value: &Short) -> Result<(), String> {
         Err(format!("short: {} bytes", value.text.len()))
     }
 }
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[psio(invariant = "short")]
 struct Short {
     text: String,
 }
 
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 #[psio(transparent)]
 struct Wrapped(Vec<String>);
 
@@ -267,7 +271,7 @@ struct Chain {
 
 /// Lists of numbers at a chosen depth: record `k` is node `2k`, its lists
 /// are nodes `2k + 2` and their elements `2k + 3`.
-#[derive(Debug, Clone, PartialEq, psio::PsszPack)]
+#[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
 struct DeepNumbers {
     numbers: Option<Vec<u16>>,
     flags: Option<Vec<bool>>,
@@ -533,6 +537,67 @@ impl Transcript {
         }
         self.entries += 1;
     }
+    /// The readers, on the value's encoding and on damaged copies of it:
+    /// what `decode`, `validate` and `validate_strict` say (the value by the
+    /// hash of its `Debug` text, or the error).
+    fn read_one<F: PsszFormat, T>(&mut self, profile: &str, name: &str, value: &T, salt: u64)
+    where
+        T: PsszPack<F> + PsszUnpack<F> + PsszValidate<F> + PartialEq + std::fmt::Debug,
+    {
+        let Ok(bytes) = try_encode::<F, T>(value) else { return };
+        assert_eq!(decode::<F, T>(&bytes).as_ref(), Ok(value), "{name} {profile}");
+        assert_eq!(&decode_trusted::<F, T>(&bytes), value, "{name} {profile}");
+        let mut r = Random(salt | 1);
+        let mut copies: Vec<Vec<u8>> = vec![bytes.clone()];
+        copies.push(bytes[..bytes.len().saturating_sub(1)].to_vec());
+        copies.push(bytes[..bytes.len() / 2].to_vec());
+        copies.push(bytes.iter().copied().chain([0]).collect());
+        copies.push(bytes.iter().copied().chain([1, 0, 0, 0]).collect());
+        for _ in 0..6 {
+            let mut copy = bytes.clone();
+            if !copy.is_empty() {
+                let at = r.below(copy.len() as u64) as usize;
+                copy[at] = match r.below(4) {
+                    0 => copy[at].wrapping_add(1),
+                    1 => copy[at].wrapping_sub(1),
+                    2 => copy[at] ^ 0x80,
+                    _ => r.next() as u8,
+                };
+            }
+            copies.push(copy);
+        }
+        copies.push((0..bytes.len()).map(|_| r.next() as u8).collect());
+        copies.push(vec![]);
+        for (index, copy) in copies.iter().enumerate() {
+            write!(self.text, "read {name} {profile} #{index} ").unwrap();
+            match decode::<F, T>(copy) {
+                Ok(value) => write!(self.text, "{:016x}", fnv1a(format!("{value:?}").as_bytes())).unwrap(),
+                Err(error) => write!(self.text, "error: {error}").unwrap(),
+            }
+            for result in [validate::<F, T>(copy), validate_strict::<F, T>(copy)] {
+                match result {
+                    Ok(()) => self.text.push_str(" | ok"),
+                    Err(error) => write!(self.text, " | error: {error}").unwrap(),
+                }
+            }
+            self.text.push('\n');
+            self.entries += 1;
+        }
+    }
+    fn read<T>(&mut self, name: &str, value: &T)
+    where
+        T: PartialEq + std::fmt::Debug,
+        T: PsszPack<Pssz> + PsszUnpack<Pssz> + PsszValidate<Pssz>,
+        T: PsszPack<Pssz8> + PsszUnpack<Pssz8> + PsszValidate<Pssz8>,
+        T: PsszPack<Pssz16> + PsszUnpack<Pssz16> + PsszValidate<Pssz16>,
+        T: PsszPack<Pssz32> + PsszUnpack<Pssz32> + PsszValidate<Pssz32>,
+    {
+        let salt = (self.entries as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.text.len() as u64;
+        self.read_one::<Pssz, T>("auto", name, value, salt);
+        self.read_one::<Pssz8, T>("8", name, value, salt);
+        self.read_one::<Pssz16, T>("16", name, value, salt);
+        self.read_one::<Pssz32, T>("32", name, value, salt);
+    }
     fn all<T>(&mut self, name: &str, value: &T)
     where
         T: PsszPack<Pssz> + PsszPack<Pssz8> + PsszPack<Pssz16> + PsszPack<Pssz32>,
@@ -548,10 +613,13 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01b3))
 }
 
-fn transcript() -> Transcript {
+/// `full`: the recorded stream. Otherwise the start of it (for Miri, which
+/// checks the memory accesses and has no use for the hash).
+fn transcript(full: bool) -> Transcript {
+    let rounds = |n: usize| if full { n } else { 2 };
     let mut t = Transcript { text: String::new(), entries: 0 };
     let mut r = Random(0x9E37_79B9_7F4A_7C15);
-    for _ in 0..400 {
+    for _ in 0..rounds(400) {
         t.all("plain", &r.plain());
         t.all("fixed", &r.fixed());
         t.all("trailing", &r.trailing());
@@ -575,17 +643,40 @@ fn transcript() -> Transcript {
             },
         );
     }
-    for _ in 0..150 {
+    for _ in 0..rounds(150) {
         t.all("everything", &r.everything(2));
     }
+    // The readers, on what was written and on damaged copies of it.
+    for _ in 0..rounds(120) {
+        t.read("plain", &r.plain());
+        t.read("fixed", &r.fixed());
+        t.read("fixed-outer", &FixedOuter { x: r.fixed(), y: [r.fixed(), r.fixed()], z: r.next() as i8 });
+        t.read("fixeds", &r.list(4, Random::fixed));
+        t.read("frozen", &FrozenVariable { id: r.next() as u32, s: r.text(), t: r.list(3, Random::text), last: 7 });
+        t.read("trailing", &r.trailing());
+        t.read("choice", &r.choice());
+        t.read("capped", &r.capped());
+        t.read("annotated", &r.annotated());
+        t.read("even", &Even { n: r.next() as u16 & 0xfffe });
+        t.read("evens", &r.list(4, |r| Even { n: r.next() as u16 & 0xfffe }));
+        t.read("short", &Short { text: "abc".into() });
+        t.read("color", &r.color());
+        t.read("colors", &(r.color(), [r.color(), r.color()], r.list(3, Random::color)));
+        t.read("wrapped", &Wrapped(r.list(3, Random::text)));
+        t.read("pair", &(r.text(), r.next() as u16, r.maybe(Random::text)));
+        t.read("words", &r.list(9, |r| r.next() as u16));
+        t.read("flags", &(r.chance(2), [r.chance(2), r.chance(2)], r.list(5, |r| r.chance(2))));
+        t.read("map", &r.list(3, |r| (r.next() as u32, r.text())).into_iter().collect::<BTreeMap<_, _>>());
+        t.read("deep", &deep_numbers(1 + r.below(34) as usize, Some(vec![1, 2]), Some(vec![true])));
+    }
     // The depth limit: records only, and with hand-written nodes between.
-    for links in 28..40 {
+    for links in if full { 28..40 } else { 31..33 } {
         for hold in [0, 1, 2, 3, 5] {
             t.all(&format!("chain {links}/{hold}"), &chain(links, hold));
         }
     }
     // The elements of a list are nodes, also where they are written in bulk.
-    for records in 29..=34 {
+    for records in if full { 29..=34 } else { 32..=32 } {
         for numbers in [None, Some(vec![]), Some(vec![1u16, 2, 3])] {
             t.all(&format!("deep numbers {records}"), &deep_numbers(records, numbers, None));
         }
@@ -602,11 +693,12 @@ fn transcript() -> Transcript {
 
 /// Entries and FNV-1a of the transcript at commit c6d9940 (before the
 /// encoder wrote in place).
-const RECORDED: (usize, u64) = (25024, 0xe71a_9ac5_c37a_2732);
+const RECORDED: (usize, u64) = (141673, 0x4dc0_e089_a0b5_a52d);
 
 #[test]
 fn bytes_and_errors_are_those_recorded() {
-    let transcript = transcript();
+    let full = !cfg!(miri);
+    let transcript = transcript(full);
     if let Ok(path) = std::env::var("PSSZ_ENCODE_TRANSCRIPT") {
         std::fs::write(path, &transcript.text).unwrap();
     }
@@ -614,7 +706,9 @@ fn bytes_and_errors_are_those_recorded() {
     println!("entries {} errors {} hash {:#018x}", transcript.entries, errors, fnv1a(transcript.text.as_bytes()));
     // The stream has to exercise the refusals as well as the bytes.
     assert!(errors > transcript.entries / 20, "too few errors: {errors}");
-    assert_eq!((transcript.entries, fnv1a(transcript.text.as_bytes())), RECORDED);
+    if full {
+        assert_eq!((transcript.entries, fnv1a(transcript.text.as_bytes())), RECORDED);
+    }
 }
 
 // ── What the recording cannot show ──────────────────────────────────────────

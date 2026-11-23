@@ -339,7 +339,23 @@ fn record_hint(k: &syn::Path, values: &[Tokens], dwnc: bool, frame: &Frame) -> T
     }}
 }
 
-fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, frame: &Frame) -> syn::Result<Tokens> {
+/// The check of the frame of a fixed-size record, whose fields then lie at
+/// constant positions (`pssz_checked::fixed_record_frame`).
+fn fixed_frame(k: &syn::Path, types: &[&Type], frame: &Frame) -> Tokens {
+    let (width, m) = (&frame.width, &frame.members);
+    quote! {
+        #k::pssz_checked::fixed_record_frame(
+            #width,
+            <Self as #k::pssz::PsszPack<__PsszFormat>>::FIXED_SIZE,
+            bytes.len(),
+            false #(|| (<#types as #k::pssz::PsszPack<#m>>::IS_OPTIONAL && <#types as #k::pssz::PsszPack<#m>>::IS_FIXED_SIZE))*,
+        )?;
+    }
+}
+
+/// `record`: the frame is the item's own (a struct), which may be
+/// fixed-size; an enum alternative's never is.
+fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, frame: &Frame, record: bool) -> syn::Result<Tokens> {
     let info = field_info(k, fields)?;
     let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
     let values: Vec<_> = (0..info.len())
@@ -352,8 +368,29 @@ fn record_decode(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc: bool, 
         &values.iter().zip(&bounds).map(|(v, bound)| decode_value(k, bound, quote!(#v))).collect::<Vec<_>>(),
     )?;
     let (width, cap, m) = (&frame.width, &frame.cap, &frame.members);
+    let fixed = if record {
+        let check = fixed_frame(k, &types, frame);
+        quote! {
+            if <Self as #k::pssz::PsszPack<__PsszFormat>>::IS_FIXED_SIZE {
+                #check
+                #[allow(unused_mut)]
+                let mut __at = 0usize;
+                #(let #values = {
+                    let __size = <#types as #k::pssz::PsszPack<#m>>::FIXED_SIZE;
+                    let __value = <#types as #k::pssz::PsszUnpack<#m>>::pssz_unpack(&bytes[__at..__at + __size])?;
+                    __at += __size;
+                    __value
+                };)*
+                let _ = __at;
+                return ::core::result::Result::Ok(#initializer);
+            }
+        }
+    } else {
+        quote!()
+    };
     Ok(quote! {
         #k::pssz_checked::enter_record::<__PsszFormat>(#cap, bytes)?;
+        #fixed
         let __spans = #k::pssz_checked::record_spans_n(#width, [
             #(#k::pssz_checked::Layout::of::<#m, #types>()),*
         ], bytes, #dwnc)?;
@@ -440,12 +477,32 @@ fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc
     })
 }
 
-fn record_validate(k: &syn::Path, fields: &Fields, dwnc: bool, frame: &Frame) -> syn::Result<Tokens> {
+fn record_validate(k: &syn::Path, fields: &Fields, dwnc: bool, frame: &Frame, record: bool) -> syn::Result<Tokens> {
     let info = field_info(k, fields)?;
     let types: Vec<_> = info.iter().map(|(_, ty)| *ty).collect();
     let (width, cap, m) = (&frame.width, &frame.cap, &frame.members);
+    let fixed = if record {
+        let check = fixed_frame(k, &types, frame);
+        quote! {
+            if <Self as #k::pssz::PsszPack<__PsszFormat>>::IS_FIXED_SIZE {
+                #check
+                #[allow(unused_mut)]
+                let mut __at = 0usize;
+                #({
+                    let __size = <#types as #k::pssz::PsszPack<#m>>::FIXED_SIZE;
+                    <#types as #k::pssz::PsszValidate<#m>>::pssz_validate(&bytes[__at..__at + __size])?;
+                    __at += __size;
+                })*
+                let _ = __at;
+                return ::core::result::Result::Ok(());
+            }
+        }
+    } else {
+        quote!()
+    };
     Ok(quote! {
         #k::pssz_checked::enter_record::<__PsszFormat>(#cap, bytes)?;
+        #fixed
         let __spans = #k::pssz_checked::record_spans_n(#width, [
             #(#k::pssz_checked::Layout::of::<#m, #types>()),*
         ], bytes, #dwnc)?;
@@ -569,7 +626,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                     Some(cap) => { let cap = cap as usize; quote!(::core::option::Option::Some(#cap)) }
                     None => quote!(::core::option::Option::None),
                 };
-                validation_body = record_validate(k, &data.fields, dwnc, &frame)?;
+                validation_body = record_validate(k, &data.fields, dwnc, &frame, true)?;
                 if unpack {
                     trusted_body = Some(record_decode_trusted(k, &data.fields, quote!(Self), dwnc, &frame)?);
                 } else {
@@ -578,7 +635,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 }
                 (
                     if unpack {
-                        record_decode(k, &data.fields, quote!(Self), dwnc, &frame)?
+                        record_decode(k, &data.fields, quote!(Self), dwnc, &frame, true)?
                     } else {
                         record_encode(k, &types, &values, dwnc, &frame)
                     },
@@ -759,7 +816,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                 validate_arms.push(match &variant.fields {
                     Fields::Unit => quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; if bytes.is_empty() { ::core::result::Result::Ok(()) } else { ::core::result::Result::Err(#k::pssz::PsszError::new("pssz: zero-size fixed payload must be empty")) } } },
                     _ if single => { let ty = types[0]; quote! { #tag => { <#ty as #k::pssz::PsszValidate<__PsszFormat>>::pssz_validate(bytes) } } }
-                    _ => { let body = record_validate(k, &variant.fields, false, &frame)?; quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; #body } } }
+                    _ => { let body = record_validate(k, &variant.fields, false, &frame, false)?; quote! { #tag => { let _payload = #k::pssz_checked::DecodeDepth::enter()?; #body } } }
                 });
                 if unpack {
                     let decode = match &variant.fields {
@@ -772,7 +829,7 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
                             quote! { ::core::result::Result::Ok(Self::#vname(#value)) }
                         }
                         _ => {
-                            let body = record_decode(k, &variant.fields, quote!(Self::#vname), false, &frame)?;
+                            let body = record_decode(k, &variant.fields, quote!(Self::#vname), false, &frame, false)?;
                             quote! { let _payload_depth = #k::pssz_checked::DecodeDepth::enter()?; #body }
                         }
                     };

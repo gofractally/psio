@@ -495,7 +495,7 @@ macro_rules! pssz_impl_primitive_le {
         }
         impl<F: PsszFormat> PsszUnpack<F> for $ty {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-                let _depth = checked::DecodeDepth::enter()?;
+                checked::decode_leaf()?;
                 const S: usize = std::mem::size_of::<$ty>();
                 if bytes.len() != S { return Err(PsszError::new("pssz: primitive span mismatch")); }
                 let mut buf = [0u8; S];
@@ -512,7 +512,7 @@ macro_rules! pssz_impl_primitive_le {
         }
         impl<F: PsszFormat> PsszValidate<F> for $ty {
             fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-                let _depth = checked::DecodeDepth::enter()?;
+                checked::decode_leaf()?;
                 if bytes.len() != std::mem::size_of::<$ty>() {
                     return Err(PsszError::new("pssz validate: primitive span mismatch"));
                 }
@@ -557,7 +557,7 @@ impl<F: PsszFormat> PsszPack<F> for Uint256 {
 }
 impl<F: PsszFormat> PsszUnpack<F> for Uint256 {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         if bytes.len() != 32 { return Err(PsszError::new("pssz: uint256 span mismatch")); }
         let mut limb = [0u64; 4];
         for i in 0..4 {
@@ -570,7 +570,7 @@ impl<F: PsszFormat> PsszUnpack<F> for Uint256 {
 }
 impl<F: PsszFormat> PsszValidate<F> for Uint256 {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         if bytes.len() != 32 { return Err(PsszError::new("pssz validate: uint256 span mismatch")); }
         Ok(())
     }
@@ -602,7 +602,7 @@ impl<F: PsszFormat> PsszPack<F> for bool {
 }
 impl<F: PsszFormat> PsszUnpack<F> for bool {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         if bytes.len() != 1 { return Err(PsszError::new("pssz: bool span mismatch")); }
         match bytes[0] {
             0 => Ok(false),
@@ -617,7 +617,7 @@ impl<F: PsszFormat> PsszUnpack<F> for bool {
 }
 impl<F: PsszFormat> PsszValidate<F> for bool {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         if bytes.len() != 1 { return Err(PsszError::new("pssz validate: bool span mismatch")); }
         if bytes[0] > 1 { return Err(PsszError::new("pssz: bool is not 0/1")); }
         Ok(())
@@ -669,7 +669,7 @@ impl<F: PsszFormat> PsszPack<F> for str {
 }
 impl<F: PsszFormat> PsszUnpack<F> for String {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         utf8(bytes).map(str::to_owned)
     }
     /// UTF-8 is still verified: a `String` that is not UTF-8 is undefined
@@ -684,7 +684,7 @@ impl<F: PsszFormat> PsszUnpack<F> for String {
 }
 impl<F: PsszFormat> PsszValidate<F> for String {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         utf8(bytes).map(|_| ())
     }
 }
@@ -710,7 +710,7 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedString<N> {
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedString<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         if bytes.len() > N { return Err(PsszError::new("pssz: BoundedString overflow")); }
         Ok(BoundedString(utf8(bytes)?.to_owned()))
     }
@@ -721,7 +721,7 @@ impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedString<N> {
 }
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         if bytes.len() > N { return Err(PsszError::new("pssz: BoundedString overflow")); }
         utf8(bytes).map(|_| ())
     }
@@ -784,7 +784,7 @@ impl<F: PsszFormat> PsszPack<F> for RawStr<'_> {
 }
 impl<F: PsszFormat> PsszUnpack<F> for RawString {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         raw_string(bytes)?;
         let mut out = Vec::new();
         out.try_reserve(bytes.len()).map_err(|_| PsszError::new("pssz: string allocation overflow"))?;
@@ -798,7 +798,7 @@ impl<F: PsszFormat> PsszUnpack<F> for RawString {
 }
 impl<F: PsszFormat> PsszValidate<F> for RawString {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         raw_string(bytes)
     }
 }
@@ -834,7 +834,7 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedRawString<N> {
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedRawString<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         if bytes.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         raw_string(bytes)?;
         Ok(BoundedRawString(bytes.to_vec()))
@@ -846,7 +846,7 @@ impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedRawString<N> {
 }
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedRawString<N> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         if bytes.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         raw_string(bytes)
     }
@@ -1193,14 +1193,14 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for Bitvector<N> {
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for Bitvector<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         crate::pssz_bits::validate_data(bytes, N)?;
         Ok(Bitvector { bytes: bytes.to_vec() })
     }
 }
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitvector<N> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         crate::pssz_bits::validate_data(bytes, N)
     }
 }
@@ -1230,14 +1230,14 @@ impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
 }
 impl<F: PsszFormat, const MAX_N: usize> PsszUnpack<F> for Bitlist<MAX_N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         crate::pssz_bits::list_count(bytes, MAX_N)?;
         Self::unpack_bits(bytes).map_err(PsszError::new)
     }
 }
 impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitlist<N> {
     fn pssz_validate(bytes: &[u8]) -> PsszResult<()> {
-        let _depth = checked::DecodeDepth::enter()?;
+        checked::decode_leaf()?;
         crate::pssz_bits::list_count(bytes, N).map(|_| ())
     }
 }
