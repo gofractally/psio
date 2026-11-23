@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  bool, defineInterface, isCompressedName, isHashName, method, methodToNumber, numberToMethod, psszEvolvesFrom,
   PsszSchema, RecordView, argumentTuple, field, rawString, boundedList, boundedUtf8, bytes, custom, emitWit, fixedBytes, fromHex, generateSchema, i32,
   i64, keyPrefixUpperBound, lazy, list, nameToNumber, numberToName, optional, pjsonDecode, pjsonEncode, pjsonValidate,
   PjsonObject, PsszError, map, nested, pair, record, set, toHex, transparent, tuple, u16, u32, u64, u8, utf8, timePoint, variant,
@@ -369,5 +370,166 @@ test('README: bounds at any depth, method arguments', () => {
   const ir = generateSchema({ transfer: Transfer }).ir.types;
   assert.deepEqual(ir.map((m) => m.name), ['@0', '@1', '@2', 'transfer']);
   assert.equal(ir[0].type.value.type, 'Object');
-  assert.deepEqual((ir[0].type.value.value as { attributes: unknown[] }).attributes, [{ name: 'maxDynamicData', value: '256' }]);
+  assert.deepEqual((ir[0].type.value.value as { attributes: unknown[] }).attributes,
+    [{ name: 'tuple', value: 'named' }, { name: 'maxDynamicData', value: '256' }]);
+  // In text: the object, or the positional array.
+  assert.deepEqual(Transfer.jsonToValue('{"memo":"hi","to":"al","amount":5}'), { to: 'al', amount: 5n, memo: 'hi' });
+  assert.deepEqual(Transfer.jsonToValue('["al",5,"hi"]'), { to: 'al', amount: 5n, memo: 'hi' });
+  // Parameters without names: the array.
+  const Add = argumentTuple([u32, u32]);
+  assert.equal(toHex(Add.encode([1, 2])), '080100000002000000');
+  assert.equal(Add.valueToJson([1, 2]), '[1,2]');
+  const fetchedAdd = PsszSchema.decode(generateSchema({ add: Add }).encode()).type('add');
+  assert.deepEqual(fetchedAdd.decode(Add.encode([1, 2])), [1, 2]);
+  assert.equal(fetchedAdd.valueToJson([1, 2]), '[1,2]');
+});
+
+test('README: a transparent type with a bounded member', () => {
+  const Memo = transparent('Memo', field(rawString, { utf8: true, max: 80 }));
+  assert.equal(Memo.maxEncodedSize, 80n);
+  assert.equal(toHex(Memo.encode('hi')), '6869');
+  assert.throws(() => Memo.encode('x'.repeat(81)), (e: unknown) => e instanceof PsszError && e.message === 'pssz IR: byte count bound exceeded');
+  const Wrapped = transparent('Memo', boundedUtf8(80));
+  assert.equal(toHex(Wrapped.encode('hi')), '6869');
+  assert.equal(Wrapped.maxEncodedSize, 80n);
+  assert.deepEqual(generateSchema({ Memo }).ir, generateSchema({ Memo: Wrapped }).ir);
+});
+
+test('README: order constraints', () => {
+  const Ranked = record('Ranked', {
+    scores: field(list(u32), { sorted: true, max: 8 }),
+    names: field(list(utf8), { unique: true }),
+    entries: field(list(pair(utf8, u32)), { uniqueKeys: true }),
+    rows: field(list(list(u8)), { element: { sorted: true } }),
+  });
+  const refused = (run: () => unknown, message: string) =>
+    assert.throws(run, (e: unknown) => e instanceof PsszError && e.kind === 'value' && e.message === message);
+  refused(() => Ranked.encode({ scores: [2, 1], names: [], entries: [], rows: [] }), 'sorted: elements are not in order');
+  refused(() => Ranked.encode({ scores: [], names: ['a', 'a'], entries: [], rows: [] }), 'sorted: elements are not in strictly ascending order');
+  refused(() => Ranked.encode({ scores: [], names: [], entries: [['a', 1], ['b', 2], ['a', 3]], rows: [] }), 'unique_keys: two elements have the same key');
+  const ok = { scores: [1, 1, 2, 300], names: ['a', 'ab', 'b'], entries: [['x', 1], ['a', 1]] as [string, number][], rows: [[1, 2, 2], [], [9]] };
+  assert.deepEqual(Ranked.decode(Ranked.encode(ok)), ok);
+  // Not in the Schema IR: a fetched schema does not know them.
+  const Plain = record('Ranked', {
+    scores: field(list(u32), { max: 8 }), names: list(utf8), entries: list(pair(utf8, u32)), rows: list(list(u8)),
+  });
+  assert.equal(toHex(generateSchema({ Ranked }).encode()), toHex(generateSchema({ Ranked: Plain }).encode()));
+  const unsorted = Plain.encode({ ...ok, scores: [2, 1] });
+  assert.equal(Ranked.validate(unsorted).ok, false);
+  assert.equal(PsszSchema.decode(generateSchema({ Ranked }).encode()).type('Ranked').validate(unsorted).ok, true);
+  assert.equal(psszEvolvesFrom(Plain, Ranked).ok, false);
+});
+
+test('README: maxFields', () => {
+  const Account = record('Account', { id: u32, name: optional(utf8) }, { maxFields: 3 });
+  const schemaError = (run: () => unknown, message: string) =>
+    assert.throws(run, (e: unknown) => e instanceof PsszError && e.kind === 'schema' && e.message === `typed schema: ${message}`);
+  schemaError(() => record('Account', { a: u32, b: u32, c: u32 }, { maxFields: 2 }), 'record "Account" has more fields than its maxFields (2)');
+  schemaError(() => argumentTuple({ id: u32 }, { maxFields: 256 }), 'maxFields of the method must be an integer from 0 to 255');
+  const grown = record('Account', { id: u32, name: optional(utf8), email: optional(utf8) }, { maxFields: 3 });
+  assert.deepEqual(psszEvolvesFrom(Account, grown), { ok: true });
+  const raised = record('Account', { id: u32, name: optional(utf8) }, { maxFields: 8 });
+  assert.deepEqual(psszEvolvesFrom(Account, raised), { ok: false, reason: 'maxFields was raised (3 -> 8)', path: '(root)' });
+  // The schema: more members than its maxFields is malformed.
+  const ir = JSON.parse(JSON.stringify(generateSchema({ Account }).ir));
+  ir.types[0].type.value.value.attributes[0].value = '1';
+  assert.throws(() => new PsszSchema(ir).type('Account'), (e: unknown) =>
+    e instanceof PsszError && e.kind === 'schema' && e.message === 'pssz IR: a record has more fields than its maxFields');
+  assert.equal(new PsszSchema(ir).validate().ok, false);
+});
+
+test('README: interfaces', () => {
+  const Receipt = record('Receipt', { id: u64, note: field(rawString, { utf8: true, max: 32 }) });
+  const Token = defineInterface('token', {
+    transfer: method(
+      { to: field(rawString, { utf8: true, max: 16 }), amount: u64, memo: field(optional(rawString), { utf8: true, max: 80 }) },
+      { returns: Receipt, maxDynamicData: 256, maxFields: 8 }),
+    names: method({ limit: u32 }, { returns: field(list(rawString), { max: 4, element: { utf8: true, max: 16 } }) }),
+    note: method({ text: field(rawString, { max: 62 }) }, { maxDynamicData: 64 }),
+    add: method([u32, u32], { returns: u64 }),
+    ping: method({}),
+    batch: method({ names: field(list(rawString), { max: 4, element: { max: 8 } }), tip: u8 }, { returns: bool }),
+  });
+  const transfer = Token.methods.transfer;
+  assert.equal(toHex(transfer.args.encode({ to: 'bob', amount: 5n, memo: 'hi' })), '0c000c0005000000000000000f00626f62016869');
+  assert.equal(transfer.args.valueToJson({ to: 'bob', amount: 5n, memo: 'hi' }), '{"to":"bob","amount":5,"memo":"hi"}');
+  assert.deepEqual(transfer.args.jsonToValue('["bob",5,null]'), { to: 'bob', amount: 5n, memo: null });
+  assert.equal(toHex(Token.methods.add.args.encode([1, 2])), '080100000002000000');
+  assert.equal(toHex(Token.methods.names.result.encode(['alice', 'bob'])), '0207616c696365626f62');
+  assert.deepEqual(Token.methods.names.result.decode(new Uint8Array(0)), []);
+  assert.equal(Token.methods.add.result.decode(new Uint8Array(8)), 0n);
+  assert.equal(Token.methods.transfer.result.psszToJson(Token.methods.transfer.result.encode({ id: 7n, note: 'ok' })), '{"id":7,"note":"ok"}');
+  assert.equal(Token.methods.ping.result, null);
+  // The static types.
+  const decoded: { to: string; amount: bigint; memo: string | null } = transfer.args.decode(transfer.args.encode({ to: 'bob', amount: 5n, memo: null }));
+  assert.deepEqual(decoded, { to: 'bob', amount: 5n, memo: null });
+  const strings: string[] = Token.methods.names.result.decode(fromHex('0207616c696365626f62'));
+  assert.deepEqual(strings, ['alice', 'bob']);
+  // A result outside returns(...).
+  const refused = (run: () => unknown) => assert.throws(run, (e: unknown) => e instanceof PsszError);
+  refused(() => Token.methods.names.result.encode(['a', 'b', 'c', 'd', 'e']));
+  refused(() => Token.methods.names.result.encode(['a'.repeat(17)]));
+  assert.equal(Token.methods.names.result.validate(Uint8Array.of(1, 0xff)).ok, false);
+  // The schema.
+  const funcs = Token.schema.ir.interfaces[0].funcs;
+  assert.deepEqual(funcs.map((f) => f.name), ['transfer', 'names', 'note', 'add', 'ping', 'batch']);
+  assert.deepEqual(funcs[0].attributes, [{ name: 'maxFields', value: '8' }, { name: 'maxDynamicData', value: '256' }]);
+  assert.deepEqual(funcs[3].params.map((p) => p.name), ['', '']);
+  assert.ok(Token.schema.ir.types.some((m) => m.name === 'token.transfer'));
+  const bare = defineInterface('token', { ping: method({}) }, { argumentLists: false, package: 'pkg', version: '1.0' });
+  assert.deepEqual(bare.schema.ir.types, []);
+  assert.deepEqual(bare.schema.ir.package, { name: 'pkg', version: '1.0', attributes: [] });
+  const both = generateSchema({ Receipt }, { interfaces: [Token] });
+  assert.equal(both.ir.interfaces.length, 1);
+  assert.equal(toHex(both.encode()), toHex(Token.schema.encode()));
+
+  // From a fetched schema.
+  const schema = PsszSchema.decode(Token.schema.encode());
+  assert.deepEqual(schema.validate(), { ok: true });
+  const names = schema.interface('token').method('names');
+  assert.deepEqual(names.params, ['limit']);
+  assert.equal(names.named, true);
+  assert.equal(toHex(names.args.jsonToPssz('{"limit":10}')), '040a000000');
+  assert.deepEqual(names.args.decode(names.args.jsonToPssz('[10]')), { limit: 10 });
+  assert.deepEqual(names.result!.decode(Uint8Array.of(2, 7, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x62, 0x6f, 0x62)), ['alice', 'bob']);
+  assert.deepEqual(schema.interface('token').method('add').args.decode(Uint8Array.of(8, 1, 0, 0, 0, 2, 0, 0, 0)), [1, 2]);
+  assert.equal(toHex(schema.type('token.transfer').encode({ to: 'bob', amount: 5n, memo: 'hi' })), '0c000c0005000000000000000f00626f62016869');
+  assert.equal(schema.interface().name, 'token');
+  assert.throws(() => schema.interface('nope'), (e: unknown) => e instanceof PsszError && e.kind === 'schema');
+  assert.throws(() => schema.interface('token').method('nope'), (e: unknown) => e instanceof PsszError && e.kind === 'schema');
+  assert.equal(names.argsIr.value.type, 'Object');
+});
+
+test('README: compatibility checking', () => {
+  const post = (owner: number, tag: number, extra = {}, cap = 1024) => record('Post', {
+    id: u64,
+    owner: field(rawString, { utf8: true, max: owner }),
+    tags: field(list(rawString), { max: 8, element: { max: tag } }),
+    ...extra,
+  }, { maxDynamicData: cap });
+  const V1 = post(32, 16);
+  assert.deepEqual(psszEvolvesFrom(V1, post(64, 16)), { ok: true });
+  assert.deepEqual(psszEvolvesFrom(V1, post(32, 16, { note: optional(rawString) })), { ok: true });
+  assert.deepEqual(psszEvolvesFrom(V1, post(32, 16, {}, 4096)), { ok: true });
+  assert.deepEqual(psszEvolvesFrom(V1, post(16, 16)),
+    { ok: false, reason: 'the length bound of the string was tightened ([0, 32] -> [0, 16])', path: '.owner' });
+  const tags = psszEvolvesFrom(V1, post(32, 8));
+  assert.ok(!tags.ok && tags.path === '.tags[]');
+  assert.deepEqual(psszEvolvesFrom(V1, post(32, 16, { count: u64 })),
+    { ok: false, reason: 'the appended field "count" is not optional', path: '(root)' });
+  assert.deepEqual(psszEvolvesFrom(V1, post(32, 16, {}, 100000)),
+    { ok: false, reason: 'the offset width of the record changed (2 -> 4)', path: '(root)' });
+  const fetched = (def: typeof V1) => PsszSchema.decode(generateSchema({ Post: def }).encode()).type('Post');
+  assert.equal(psszEvolvesFrom(fetched(V1), fetched(post(64, 16))).ok, true);
+  assert.equal(psszEvolvesFrom(fetched(V1), fetched(post(16, 16))).ok, false);
+  assert.equal(psszEvolvesFrom(V1, fetched(post(64, 16))).ok, true);
+});
+
+test('README: names', () => {
+  assert.equal(numberToName(nameToNumber('alice')), 'alice');
+  assert.equal(nameToNumber('x--b'), 0n);
+  assert.equal(numberToMethod(methodToNumber('transfer')), 'transfer');
+  assert.equal(isHashName(methodToNumber('getSymbolType')), true);
+  assert.equal(numberToMethod(methodToNumber('getSymbolType')), '#hmlnslheseoypnnp');
+  assert.equal(isCompressedName(methodToNumber('transfer')), true);
 });
