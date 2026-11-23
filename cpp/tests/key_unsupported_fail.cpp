@@ -24,6 +24,13 @@ int main()
    auto k = psio::key_prefix<std::tuple<int, int>>(1, 2, 3);
 #elif defined(KEY_FAIL_PREFIX_TYPE)
    auto k = psio::key_prefix<std::tuple<int, std::string>>(1, 2);
+#elif defined(KEY_FAIL_DECODE_RAW_KEY)
+   // A run of raw key bytes does not say where it ends: write-only.
+   std::vector<char> k;
+   auto v = psio::from_key<std::tuple<psio::raw_key, int>>(k);
+#elif defined(KEY_FAIL_DECODE_STRING_VIEW)
+   std::vector<char> k;
+   auto v = psio::validate_key<std::tuple<int, std::string_view>>(k);
 #endif
    return static_cast<int>(k.size());
 }

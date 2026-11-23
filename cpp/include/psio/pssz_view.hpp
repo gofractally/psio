@@ -559,6 +559,15 @@ namespace psio::view_layout {
 }  // namespace psio::view_layout
 
 namespace psio {
+   namespace detail::pssz_impl {
+      // A view given to the encoder as a value (pssz.hpp "Sources"): the
+      // bytes of a view of a position carrying VA are what is written at a
+      // position carrying A when the two are the same position kind, or
+      // when neither changes a width in T.
+      template <typename VA, std::size_t W, typename T, typename A>
+      inline constexpr bool view_verbatim_v<::psio::pssz_at<VA>, W, true, T, A> =
+         std::is_same_v<VA, A> || (widths_unchanged<T, VA>() && widths_unchanged<T, A>());
+   }  // namespace detail::pssz_impl
    namespace detail {
       template <typename F> inline constexpr bool is_pssz_format_v = false;
       template <> inline constexpr bool is_pssz_format_v<pssz> = true;
@@ -1075,3 +1084,6 @@ struct std::tuple_element<I, psio::view<std::pair<A, B>, Fmt, Store>>
    using type =
       decltype(std::declval<const psio::view<std::pair<A, B>, Fmt, Store>&>().template get<I>());
 };
+
+// The views of psio::nested<T> and of pssz_buffer<T> / shared_pssz<T> members.
+#include <psio/nested.hpp>

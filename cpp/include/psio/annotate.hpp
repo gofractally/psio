@@ -1291,7 +1291,9 @@ namespace psio {
                "encoded size exceeds maxDynamicData cap",
                static_cast<std::uint32_t>(total), format_name}};
 #else
-            std::abort();
+            ::psio::codec_abort_without_exceptions(codec_error{
+               "encoded size exceeds maxDynamicData cap",
+               static_cast<std::uint32_t>(total), format_name});
 #endif
          }
       }
