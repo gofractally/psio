@@ -11,6 +11,7 @@
 #include <psio/invariant.hpp>
 #include <psio/pssz.hpp>
 #include <psio/pssz_ir.hpp>
+#include <psio/pssz_ir_compare.hpp>
 #include <psio/pssz_ir_json.hpp>
 #include <psio/schema_builder.hpp>
 
@@ -25,8 +26,37 @@
 #include <tuple>
 #include <vector>
 
+#include <map>
+#include <variant>
+
+// Untagged variants: declared before the first use of the type.
 namespace japi
 {
+   // A configuration value: one string, or a list of them.
+   using Extra = std::variant<std::string, std::vector<std::string>>;
+   struct Point
+   {
+      int x = 0, y = 0;
+      PSIO_REFLECT(Point, x, y)
+   };
+   using Mixed = std::variant<bool, std::int32_t, std::string, std::vector<int>, Point>;
+}  // namespace japi
+namespace psio
+{
+   constexpr bool psio_is_untagged(const japi::Extra*) { return true; }
+   constexpr bool psio_is_untagged(const japi::Mixed*) { return true; }
+}  // namespace psio
+
+namespace japi
+{
+   struct Config
+   {
+      std::map<std::string, Extra> extra;
+      std::optional<Extra>         one;
+      std::vector<Mixed>           mixed;
+      PSIO_REFLECT(Config, extra, one, mixed)
+   };
+
    struct Views
    {
       std::string_view      name;
@@ -707,4 +737,130 @@ TEST_CASE("schema-driven json: a handler cannot make the document malformed",
                  .ok());
       CHECK(out == R"({"note":"n","actions":[)" + std::string{text} + "]}");
    }
+}
+
+// ── Untagged variants ──────────────────────────────────────────────────────
+static_assert(psio::is_untagged_v<japi::Extra>);
+static_assert(psio::is_untagged_v<japi::Mixed>);
+static_assert(!psio::is_untagged_v<std::variant<int, std::string>>);
+static_assert(!psio::is_untagged_v<int>);
+
+TEST_CASE("json: an untagged variant is the bare value of its alternative",
+          "[json][ijson][untagged]")
+{
+   using japi::Extra;
+   // (the probe of the gap)
+   CHECK(psio::to_ijson(Extra{std::vector<std::string>{"a"}}) == R"(["a"])");
+   CHECK(psio::to_ijson(Extra{std::string{"s"}}) == R"("s")");
+   CHECK(psio::to_json(Extra{std::vector<std::string>{"a", "b"}}) == R"(["a","b"])");
+   CHECK(psio::to_json(Extra{std::string{"s"}}) == R"("s")");
+   Extra e;
+   REQUIRE(psio::decode_json_checked(psio::ijson{}, "[\"a\"]", e).ok());
+   CHECK(e == Extra{std::vector<std::string>{"a"}});
+   REQUIRE(psio::decode_json_checked(psio::json{}, R"( "x" )", e).ok());
+   CHECK(e == Extra{std::string{"x"}});
+   REQUIRE(psio::decode_json_checked(psio::ijson{}, "[]", e).ok());
+   CHECK(e.index() == 1);
+   // A value of no alternative's kind; a value of the right kind that is
+   // not the alternative.
+   auto st = psio::decode_json_checked(psio::ijson{}, "7", e);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == "json: the value is none of the untagged variant's alternatives");
+   CHECK_FALSE(psio::decode_json_checked(psio::ijson{}, "[1]", e).ok());
+   CHECK_FALSE(psio::decode_json_checked(psio::ijson{}, R"({"string":"x"})", e).ok());
+   CHECK_FALSE(psio::decode_json_checked(psio::json{}, R"([0,"x"])", e).ok());
+
+   // Five kinds, five alternatives.
+   using japi::Mixed;
+   const std::vector<Mixed> all{true, 7, std::string{"s"}, std::vector<int>{1, 2},
+                                japi::Point{3, 4}};
+   const std::string_view   text = R"([true,7,"s",[1,2],{"x":3,"y":4}])";
+   CHECK(psio::to_ijson(all) == text);
+   CHECK(psio::to_json(all) == text);
+   CHECK(psio::from_ijson<std::vector<Mixed>>(std::span<const char>{text.data(), text.size()}) ==
+         all);
+   CHECK(psio::from_json<std::vector<Mixed>>(std::span<const char>{text.data(), text.size()}) ==
+         all);
+   Mixed m;
+   CHECK_FALSE(psio::decode_json_checked(psio::ijson{}, "null", m).ok());
+   CHECK_FALSE(psio::decode_json_checked(psio::ijson{}, "1.5", m).ok());  // a number: the i32
+}
+
+TEST_CASE("json: untagged variants in a record, in PSSZ and through the schema",
+          "[json][ijson][pssz][schema][untagged]")
+{
+   namespace ir = psio::pssz_ir;
+   const japi::Config value{
+      {{"hosts", japi::Extra{std::vector<std::string>{"a", "b"}}},
+       {"name", japi::Extra{std::string{"n"}}}},
+      japi::Extra{std::string{"one"}},
+      {japi::Mixed{japi::Point{1, 2}}, japi::Mixed{false}}};
+   const std::string_view text =
+      R"({"extra":{"hosts":["a","b"],"name":"n"},"one":"one","mixed":[{"x":1,"y":2},false]})";
+   CHECK(psio::to_ijson(value) == text);
+   CHECK(psio::to_json(value) == text);
+   japi::Config back;
+   REQUIRE(psio::decode_json_checked(psio::ijson{}, text, back).ok());
+   CHECK(back.extra == value.extra);
+   CHECK(back.one == value.one);
+   CHECK(back.mixed == value.mixed);
+   // An optional untagged variant: null is none.
+   REQUIRE(psio::decode_json_checked(psio::ijson{}, R"({"extra":{},"one":null,"mixed":[]})", back)
+              .ok());
+   CHECK_FALSE(back.one.has_value());
+
+   // Binary forms are untouched: the selector byte, then the alternative.
+   const auto one = psio::encode(psio::pssz{}, japi::Extra{std::vector<std::string>{"a"}});
+   REQUIRE_FALSE(one.empty());
+   CHECK(one[0] == 1);
+   CHECK(one == psio::encode(psio::pssz{}, std::variant<std::string, std::vector<std::string>>{
+                                              std::vector<std::string>{"a"}}));
+
+   // The schema says `untagged`, and the schema-driven codecs follow.
+   const auto schema = psio::SchemaBuilder{}.insert<japi::Config>("Config").build();
+   REQUIRE(ir::validate_schema(schema).ok());
+   std::size_t untagged = 0;
+   for (const auto& named : schema.types)
+      if (auto v = std::get_if<psio::schema_types::Variant>(&named.type->value))
+         untagged += ir::detail::find_attribute(v->attributes, "untagged") ? 1 : 0;
+   CHECK(untagged == 2);
+   const auto  bytes = psio::encode(psio::pssz{}, value);
+   std::string out;
+   REQUIRE(ir::pssz_to_json(schema, "Config", psio::ijson{}, std::span<const char>{bytes}, out)
+              .ok());
+   CHECK(out == text);
+   out.clear();
+   REQUIRE(
+      ir::pssz_to_json(schema, "Config", psio::json{}, std::span<const char>{bytes}, out).ok());
+   CHECK(out == text);
+   std::vector<char> packed;
+   REQUIRE(ir::json_to_pssz(schema, "Config", psio::ijson{}, text, packed).ok());
+   CHECK(packed == bytes);
+   packed.clear();
+   auto st = ir::json_to_pssz(schema, "Config", psio::ijson{},
+                              R"({"extra":{"k":7},"one":null,"mixed":[]})", packed);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == "json: the value is none of the untagged variant's alternatives");
+
+   // A schema whose alternatives cannot be told apart is refused where a
+   // value is read.
+   namespace st_ = psio::schema_types;
+   auto box = [](st_::AnyType t) { return st_::Box<st_::AnyType>{std::move(t)}; };
+   st_::Schema ambiguous;
+   ambiguous.insert("V", st_::Variant{{st_::Member{"0", box(st_::Int{32, false}), {}},
+                                       st_::Member{"1", box(st_::Float{11, 53}), {}}},
+                                      {st_::Attribute{"untagged", ""}}});
+   REQUIRE(ir::validate_schema(ambiguous).ok());
+   st = ir::json_to_pssz(ambiguous, "V", psio::ijson{}, "1", packed);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what ==
+         "json: the alternatives of an untagged variant are not told apart by the kind of JSON "
+         "value");
+   // Whether a variant is untagged is part of its text contract.
+   const auto tagged = psio::SchemaBuilder{}
+                          .insert<std::variant<std::string, std::vector<std::string>>>("E")
+                          .build();
+   const auto bare = psio::SchemaBuilder{}.insert<japi::Extra>("E").build();
+   CHECK(ir::equivalent(tagged, "E", bare, "E", ir::compare::wire));
+   CHECK(ir::equivalent(tagged, "E", bare, "E").code == "text-form-changed");
 }

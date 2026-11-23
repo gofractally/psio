@@ -44,6 +44,9 @@
 //   psio::bounded             [ ... ]
 //   std::optional             null or the value
 //   schema_types::Box<T>      the T it holds (transparent, as in pssz)
+//   untagged std::variant     the bare value of its alternative, in both
+//                             formats (untagged.hpp): the alternatives are
+//                             told apart by the kind of JSON value
 //   std::tuple                [ e0, e1, ... ] in order; tuple<> is []
 //   reflected record          {"field": value, ...} in declaration order
 //   chrono duration           its tick count, as an integer (time.hpp)
@@ -128,6 +131,7 @@
 #include <psio/reflect.hpp>
 #include <psio/time.hpp>
 #include <psio/transparent.hpp>
+#include <psio/untagged.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for, byte_array, ...
 
 #include <algorithm>
@@ -401,6 +405,110 @@ namespace psio {
                   return false;
          return true;
       }
+
+      // ── Untagged variants (untagged.hpp) ──────────────────────────────────
+      //
+      // The kinds of JSON value a T may be written as, in either format (a
+      // bit per json_kind). A reader of an untagged variant picks the
+      // alternative by the kind of the value it finds, so the alternatives'
+      // sets must not overlap. The sets are those of both formats together
+      // — a 64-bit integer is a number or a string, bytes an array or a
+      // string — so that one variant is untagged the same way in both.
+      inline constexpr unsigned kind_null = 1, kind_boolean = 2, kind_number = 4,
+                                kind_string = 8, kind_array = 16, kind_object = 32,
+                                kind_any = 63;
+      constexpr unsigned kind_bit(json_kind k) noexcept
+      {
+         switch (k)
+         {
+            case json_kind::null: return kind_null;
+            case json_kind::boolean: return kind_boolean;
+            case json_kind::number: return kind_number;
+            case json_kind::string: return kind_string;
+            case json_kind::array: return kind_array;
+            case json_kind::object: return kind_object;
+         }
+         return 0;
+      }
+      template <typename Fmt, typename T>
+      constexpr unsigned json_kinds() noexcept
+      {
+         if constexpr (dispatch_adapter_v<Fmt, T>)
+            return kind_string;
+         else if constexpr (std::is_same_v<T, ::psio::json_value>)
+            return kind_any;
+         else if constexpr (is_box<T>::value)
+            return json_kinds<Fmt, typename is_box<T>::elem>();
+         else if constexpr (::psio::is_transparent_v<T>)
+            return json_kinds<Fmt, ::psio::transparent_inner_t<T>>();
+         else if constexpr (::psio::detail::is_nested_v<T>)
+            return json_kinds<Fmt, typename ::psio::detail::is_nested<T>::inner>();
+         else if constexpr (std::is_same_v<T, bool>)
+            return kind_boolean;
+         else if constexpr (std::is_enum_v<T> && !std::is_same_v<T, std::byte>)
+            return ::psio::ReflectedEnum<T>
+                      ? kind_string | kind_number
+                      : (sizeof(T) >= 8 ? kind_number | kind_string : kind_number);
+         else if constexpr (is_wide_int_v<T>)
+            return kind_number | kind_string;
+         else if constexpr (std::is_same_v<T, std::byte> || std::is_integral_v<T>)
+            return sizeof(T) >= 8 ? kind_number | kind_string : kind_number;
+         else if constexpr (::psio::TickTextValue<T>)
+            return kind_number | kind_string;
+         else if constexpr (::psio::TimePointValue<T>)
+            return kind_string;
+         else if constexpr (std::is_floating_point_v<T>)
+            return kind_number;
+         else if constexpr (std::is_same_v<T, std::string> ||
+                            std::is_same_v<T, std::string_view> || is_c_string_v<T> ||
+                            is_utf8_string<T>::value)
+            return kind_string;
+         else if constexpr (byte_seq<T>::value || is_byte_array<T>::value ||
+                            is_bounded_bytes<T>::value)
+            return kind_array | kind_string;
+         else if constexpr (is_bounded<T>::value || is_std_array<T>::value ||
+                            is_std_vector<T>::value || is_std_span<T>::value)
+            return kind_array;
+         else if constexpr (::psio::detail::is_map_v<T>)
+            return kind_object | kind_array;
+         else if constexpr (::psio::detail::is_assoc_v<T>)
+            return kind_array;
+         else if constexpr (is_std_optional<T>::value)
+            return kind_null | json_kinds<Fmt, typename T::value_type>();
+         else if constexpr (is_std_variant<T>::value)
+         {
+            if constexpr (::psio::is_untagged_v<T>)
+               return []<std::size_t... Is>(std::index_sequence<Is...>) {
+                  return (0u | ... | json_kinds<Fmt, std::variant_alternative_t<Is, T>>());
+               }(std::make_index_sequence<std::variant_size_v<T>>{});
+            else
+               return kind_array | kind_object;
+         }
+         else if constexpr (requires { typename T::psio_annotated_tuple; })
+            return kind_object | kind_array;
+         else if constexpr (is_std_tuple<T>::value)
+            return kind_array;
+         else if constexpr (Record<T>)
+            return kind_object;
+         else
+            return kind_any;
+      }
+      template <typename Fmt, typename V>
+      struct untagged_kinds
+      {
+         static constexpr auto value = []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return std::array<unsigned, sizeof...(Is)>{
+               json_kinds<Fmt, std::variant_alternative_t<Is, V>>()...};
+         }(std::make_index_sequence<std::variant_size_v<V>>{});
+         // No kind of value is two alternatives'.
+         static constexpr bool distinct = [] {
+            for (std::size_t a = 0; a < value.size(); ++a)
+               for (std::size_t b = a + 1; b < value.size(); ++b)
+                  if (value[a] & value[b])
+                     return false;
+            return true;
+         }();
+      };
 
       // ── Encoding ──────────────────────────────────────────────────────────
       //
@@ -1166,6 +1274,17 @@ namespace psio {
                encode_value<Fmt, IM>(*v, w);
             else
                w.append("null");
+         }
+         else if constexpr (is_std_variant<T>::value && ::psio::is_untagged_v<T>)
+         {
+            // Untagged (untagged.hpp): the bare value of the alternative.
+            static_assert(untagged_kinds<Fmt, T>::distinct,
+                          "psio::json: the alternatives of an untagged variant must be told "
+                          "apart by the kind of JSON value each is written as (null, boolean, "
+                          "number, string, array, object; a 64-bit integer may be a number or "
+                          "a string, bytes an array or a string)");
+            std::visit(
+               [&](const auto& alt) { encode_value<Fmt, int_mode::natural>(alt, w); }, v);
          }
          else if constexpr (is_std_variant<T>::value)
          {
@@ -2174,7 +2293,26 @@ namespace psio {
                return ok;
             };
             bool has = false;
-            if constexpr (Fmt::i_json)
+            if constexpr (::psio::is_untagged_v<T>)
+            {
+               // Untagged (untagged.hpp): the alternative whose values are
+               // written as the kind of value found.
+               static_assert(untagged_kinds<Fmt, T>::distinct,
+                             "psio::json: the alternatives of an untagged variant must be told "
+                             "apart by the kind of JSON value each is written as (null, "
+                             "boolean, number, string, array, object; a 64-bit integer may be "
+                             "a number or a string, bytes an array or a string)");
+               json_kind kind;
+               if (!r.c.kind(kind))
+                  return false;
+               const unsigned bit = kind_bit(kind);
+               for (std::size_t index = 0; index < N; ++index)
+                  if (untagged_kinds<Fmt, T>::value[index] & bit)
+                     return alternative(index);
+               (void)has;
+               return r.c.fail("json: the value is none of the untagged variant's alternatives");
+            }
+            else if constexpr (Fmt::i_json)
             {
                static_assert(alt_names_unique<T>(),
                              "psio::ijson: variant alternatives must have "

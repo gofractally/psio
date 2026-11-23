@@ -472,6 +472,67 @@ psio::to_ijson(std::span<const unsigned char>{b}); // "01AB"
 They are for writers only: text has no non-owning reader, so a record with
 such a member can be written and not read.
 
+### Untagged variants
+
+A `std::variant` is written with its alternative named: `{"string":"x"}`
+under `ijson`, `[0,"x"]` under `json`. A variant marked **untagged**
+(`psio/untagged.hpp`) is written as the bare value of its alternative, the
+same in both formats:
+
+```cpp
+using Extra = std::variant<std::string, std::vector<std::string>>;
+namespace psio { constexpr bool psio_is_untagged(const Extra*) { return true; } }
+
+psio::to_ijson(Extra{"s"});                           // "s"
+psio::to_ijson(Extra{std::vector<std::string>{"a"}}); // ["a"]
+psio::from_ijson<Extra>(R"(["a"])");                  // the list
+```
+
+The hook is declared for the variant type, before the type is first written
+or read, in namespace `psio` or in the namespace of the variant or of one
+of its alternatives; `psio::is_untagged_v<T>` is what the codecs ask.
+
+**How a reader picks the alternative.** By the *kind* of the JSON value it
+finds — null, boolean, number, string, array, object — in one pass, with no
+trial and no backtracking. Each type has the set of kinds it may be written
+as, in either format:
+
+| type | kinds |
+|---|---|
+| `bool` | boolean |
+| integers below 64 bits, floats | number |
+| integers of 64 bits and more, durations | number, string |
+| strings, time points, a type with a text adapter | string |
+| reflected enums | string, number |
+| byte sequences | array, string |
+| lists, arrays, tuples, sets | array |
+| maps | object, array |
+| records | object (a method's argument list: object, array) |
+| `std::optional<T>` | null, and `T`'s |
+| a tagged variant | array, object; an untagged one: its alternatives' |
+| `psio::json_value` | every kind |
+| `Box<T>`, a transparent type, `psio::nested<T>` | the inner type's |
+
+The sets of two alternatives of an untagged variant **must not overlap**:
+`variant<int, double>` (both numbers), `variant<std::uint64_t, std::string>`
+(a 64-bit integer may be a string), `variant<std::string,
+std::vector<char>>` (bytes may be a string) do not compile, with "the
+alternatives of an untagged variant must be told apart by the kind of JSON
+value each is written as". The sets are those of both formats together, so a
+variant is untagged the same way in `json` and `ijson`. A value of a kind no
+alternative has is "json: the value is none of the untagged variant's
+alternatives"; a value of the right kind is then read as that alternative,
+by its rules.
+
+**Binary and schema.** Untagged is a rule of the text formats: in PSSZ the
+variant has its selector byte as always. In the Schema IR the `Variant` node
+carries the attribute `untagged`, and the C++ schema-driven codecs follow it
+with the same table (a custom type counts as a string when a text handler is
+registered for its id, as any kind with a JSON-value handler, and as its
+wire type with none); a schema whose alternatives overlap is refused where a
+value of the variant is read. Whether a variant is untagged is part of its
+text contract (`equivalent` / `evolves_from` under `compare::contract`).
+
 ### Any JSON value: `psio::json_value`
 
 `psio::json_value` (`psio/json_value.hpp`) is a document whose shape is not

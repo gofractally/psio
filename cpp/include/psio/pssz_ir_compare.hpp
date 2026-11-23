@@ -73,7 +73,8 @@
 //     the same set;
 //   * the text shape of a record: an object, a named argument list
 //     (`tuple = "named"`), or positional (`Tuple`, `tuple = "positional"`);
-//   * the member attributes `jsonInt` / `ijsonInt`.
+//   * the member attributes `jsonInt` / `ijsonInt`, and whether a variant is
+//     `untagged`.
 //
 // Never compared: `doc` / `description` / `visible` attributes, package,
 // worlds and uses, and — because the Schema IR does not record them — the
@@ -945,6 +946,9 @@ class Comparer
             return fail("alternatives-removed", "variant alternatives were removed (" +
                                                     std::to_string(va.members.size()) + " -> " +
                                                     std::to_string(vb.members.size()) + ")");
+         if (names && !find_attribute(va.attributes, "untagged") !=
+                          !find_attribute(vb.attributes, "untagged"))
+            return fail("text-form-changed", "an untagged variant on one side only");
          for (std::size_t i = 0; i < va.members.size(); ++i)
          {
             const auto &ma = va.members[i], &mb = vb.members[i];

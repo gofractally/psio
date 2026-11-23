@@ -30,6 +30,8 @@
 //   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
 //           jsonInt / ijsonInt = "number" | "string"   (pssz_ir_json.hpp)
 //   Variant member  ijsonName = "..."                   (pssz_ir_json.hpp)
+//   Variant  untagged                  text: the bare value of the alternative
+//                                      (pssz_ir_json.hpp); no effect on bytes
 //
 // Nested{type} is a byte list holding the PSSZ encoding of a `type` value,
 // always in the automatic profile whatever the profile around it. Its
@@ -305,6 +307,10 @@ inline codec_status attributes(const std::vector<schema_types::Attribute> &value
          continue;
       }
       if (site == attribute_site::variant_member && name == "ijsonName" && value.value)
+         continue;
+      // An untagged variant (untagged.hpp): the same bytes as any variant;
+      // in text the bare value of the alternative (pssz_ir_json.hpp).
+      if (site == attribute_site::variant && name == "untagged")
          continue;
       return fail("pssz IR: unsupported schema constraint or annotation");
    }

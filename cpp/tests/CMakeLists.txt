@@ -373,6 +373,12 @@ add_test(NAME psio_pssz_ir_noexceptions_test COMMAND psio_pssz_ir_noexceptions_t
 # The JSON API beyond one typed value in a std::string: views, untagged
 # variants, psio::json_value, cursor reads, pretty printing, sinks.
 psio_add_test(psio_json_api_tests json_api_tests.cpp)
+add_test(NAME psio_json_untagged_ambiguous_compile_fail
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/json_untagged_ambiguous_fail.cpp)
+set_tests_properties(psio_json_untagged_ambiguous_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "the alternatives of an untagged variant must be told apart")
 add_executable(psio_json_value_noexceptions_test json_value_noexceptions.cpp)
 target_include_directories(psio_json_value_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_features(psio_json_value_noexceptions_test PRIVATE cxx_std_23)

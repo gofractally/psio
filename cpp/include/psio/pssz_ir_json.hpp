@@ -17,7 +17,10 @@
 //                     read again and the last one wins
 //   tuple             array of exactly its arity
 //   variant           ijson {"Name": value} (Name: the member's ijsonName
-//                     attribute, else its name); json [index, value]
+//                     attribute, else its name); json [index, value]. With
+//                     the attribute `untagged`: the bare value of the
+//                     alternative, which a reader picks by the kind of JSON
+//                     value (below, "Untagged variants")
 //   option            null or the value
 //   list / array      array (exact count for an array, at most N bounded)
 //   set               array of its elements, in any order; a repeated
@@ -470,6 +473,115 @@ inline int hex_value(char c)
    if (c >= 'A' && c <= 'F')
       return c - 'A' + 10;
    return -1;
+}
+
+// ── Untagged variants ──────────────────────────────────────────────────────
+//
+// A Variant with the attribute `untagged` is, in text, the bare value of
+// its alternative. A reader picks the alternative by the kind of JSON value
+// it finds: the kinds a type may be written as, in either format, are
+// (json.hpp json_kinds, of which this is the schema-driven twin)
+//
+//   bool                         boolean
+//   integers below 64 bits, floats, "char"      number
+//   integers of 64 bits and more, durations     number or string
+//   strings, time points, a type with a text handler      string
+//   bytes ("hex")                array or string
+//   lists, arrays, tuples, sets  array
+//   maps                         object or array
+//   records                      object (an argument list: object or array)
+//   enums                        string or number
+//   option                       null, or its payload's
+//   a tagged variant             array or object;  untagged: its alternatives'
+//   box, nested, an id with no handler          the inner type's
+//   "json", a handler with a JSON form          any
+//
+// The sets of two alternatives must not overlap; a schema whose do is
+// refused where a value of the variant is read.
+using psio::detail::json_impl::kind_any;
+using psio::detail::json_impl::kind_array;
+using psio::detail::json_impl::kind_bit;
+using psio::detail::json_impl::kind_boolean;
+using psio::detail::json_impl::kind_null;
+using psio::detail::json_impl::kind_number;
+using psio::detail::json_impl::kind_object;
+using psio::detail::json_impl::kind_string;
+inline unsigned json_kinds_of(const Schema &schema, const AnyType &input,
+                              const custom_lookup &customs, std::size_t depth = 0)
+{
+   if (depth > kMaxValidationDepth)
+      return kind_any;
+   const AnyType *type = input.resolve(schema);
+   if (!type)
+      return kind_any;
+   auto inner = [&](const Box<AnyType> &box) -> unsigned
+   {
+      return box.get() ? json_kinds_of(schema, *box, customs, depth + 1) : kind_any;
+   };
+   return std::visit(
+       [&](const auto &t) -> unsigned
+       {
+          using T = std::decay_t<decltype(t)>;
+          if constexpr (std::is_same_v<T, Int>)
+             return t.bits >= 64 ? kind_number | kind_string : kind_number;
+          else if constexpr (std::is_same_v<T, Float>)
+             return kind_number;
+          else if constexpr (std::is_same_v<T, Struct>)
+             return kind_object;
+          else if constexpr (std::is_same_v<T, Object>)
+             return detail::find_attribute(t.attributes, "tuple") ? kind_object | kind_array
+                                                                  : kind_object;
+          else if constexpr (std::is_same_v<T, Tuple> || std::is_same_v<T, List> ||
+                             std::is_same_v<T, BoundedList> || std::is_same_v<T, Array>)
+             return kind_array;
+          else if constexpr (std::is_same_v<T, Option>)
+             return kind_null | inner(t.type);
+          else if constexpr (std::is_same_v<T, schema_types::Variant>)
+          {
+             if (!detail::find_attribute(t.attributes, "untagged"))
+                return kind_array | kind_object;
+             unsigned all = 0;
+             for (const auto &member : t.members)
+                all |= inner(member.type);
+             return all;
+          }
+          else if constexpr (std::is_same_v<T, Enum>)
+             return kind_string | kind_number;
+          else if constexpr (std::is_same_v<T, Nested>)
+             return inner(t.type);
+          else if constexpr (std::is_same_v<T, Custom>)
+          {
+             if (t.id == "bool")
+                return kind_boolean;
+             if (t.id == "char")
+                return kind_number;
+             if (detail::text_adapter_id(t.id))
+                return kind_string;
+             if (t.id == "hex")
+                return kind_array | kind_string;
+             if (t.id == "map")
+                return kind_object | kind_array;
+             if (t.id == "set")
+                return kind_array;
+             if (t.id == "json" || detail::wire_custom_id(t.id))
+                return kind_any;
+             if (t.id == "box")
+                return inner(t.type);
+             if (auto kind = ::psio::parse_time_schema_id(t.id))
+                return kind->point ? kind_string : kind_number | kind_string;
+             if (auto handler = customs.find(t))
+             {
+                if (handler->to_json || handler->from_json)
+                   return kind_any;
+                if (handler->to_text || handler->from_text)
+                   return kind_string;
+             }
+             return inner(t.type);
+          }
+          else
+             return kind_any;
+       },
+       type->value);
 }
 
 // ── Reading: the type walk over a cursor ───────────────────────────────────
@@ -1058,8 +1170,39 @@ template <JsonCursor C> class Reader
       return true;
    }
 
+   // An untagged variant: the alternative whose values are written as the
+   // kind of value found.
+   bool untagged(const schema_types::Variant &type, Value &out)
+   {
+      json_kind kind;
+      if (!c.kind(kind))
+         return false;
+      const unsigned bit = kind_bit(kind);
+      std::size_t index = type.members.size();
+      for (std::size_t i = 0; i < type.members.size(); ++i)
+      {
+         if (!type.members[i].type.get())
+            return c.fail("pssz IR: null schema box");
+         if (!(json_kinds_of(schema, *type.members[i].type, customs) & bit))
+            continue;
+         if (index != type.members.size())
+            return c.fail("json: the alternatives of an untagged variant are not told apart by "
+                          "the kind of JSON value");
+         index = i;
+      }
+      if (index == type.members.size())
+         return c.fail("json: the value is none of the untagged variant's alternatives");
+      Value payload;
+      if (!read(*type.members[index].type, int_form::natural, 0, payload))
+         return false;
+      out = Value::variant(index, std::move(payload));
+      return true;
+   }
+
    bool variant(const schema_types::Variant &type, [[maybe_unused]] std::size_t n, Value &out)
    {
+      if (detail::find_attribute(type.attributes, "untagged"))
+         return untagged(type, out);
       std::size_t index = type.members.size();
       Value payload;
       auto alternative = [&] {
@@ -1675,7 +1818,10 @@ class Writer
                     !t.members[v->selector].type.get())
                    return w.fail("pssz IR: invalid explicit variant");
                 const Member &member = t.members[v->selector];
-                if (ijson)
+                if (detail::find_attribute(t.attributes, "untagged"))
+                   // Untagged: the bare value of the alternative.
+                   write(*member.type, *v->payload, int_form::natural, n + 1);
+                else if (ijson)
                 {
                    w.put('{');
                    psio::detail::json_impl::write_string(w, variant_name(member), false);

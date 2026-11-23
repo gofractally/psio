@@ -42,7 +42,8 @@
 //     `min`, or on a utf8_string, is the member attribute
 //     lengthBound = "exact=N" / "min=A,max=B";
 //   - member integer forms: jsonInt / ijsonInt = "number" | "string";
-//   - a variant alternative's I-JSON name: ijsonName (get_type_name);
+//   - a variant alternative's I-JSON name: ijsonName (get_type_name); an
+//     untagged variant (untagged.hpp): the Variant attribute `untagged`;
 //   - type-level definitionWillNotChange / maxDynamicData / maxFields.
 //   - string kinds: std::string is the Custom "string" (raw bytes),
 //     utf8_string the Custom "utf8" (validated UTF-8), each over its byte
@@ -948,10 +949,15 @@ namespace psio::schema_types
                       std::string(std::string_view{get_type_name(static_cast<const A *>(nullptr))})});
                return out;
             };
+            // An untagged variant (untagged.hpp) says so: its text is the
+            // bare value of the alternative.
+            std::vector<Attribute> flags;
+            if constexpr (::psio::is_untagged_v<U>)
+               flags.push_back(Attribute{"untagged", ""});
             return Variant{
                 {Member{name(I), Box<AnyType>{alternative.template operator()<I>()},
                         attributes(std::type_identity<std::variant_alternative_t<I, U>>{})}...},
-                {}};
+                std::move(flags)};
          }(std::make_index_sequence<count>{});
       }
 
