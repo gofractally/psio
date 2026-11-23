@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import NoReturn, Any, Iterator, List, Optional, Tuple
 
-from ._core import CAP, DEPTH, LIST_BOUND, MAX_DEPTH, Codec, Ctx, Node, strip
+from ._core import CAP, DEPTH, LIST_BOUND, MAX_DEPTH, ROOT, Codec, Ctx, Node, Pos, strip
 from .errors import DecodeError, PsioError
 from .values import Some
 
@@ -29,9 +29,10 @@ def _bytes(message: str) -> NoReturn:
 class View:
     """A composite value read in place."""
 
-    __slots__ = ("_codec", "_node", "_data", "_start", "_end", "_depth", "_ref", "_spans")
+    __slots__ = ("_codec", "_node", "_data", "_start", "_end", "_depth", "_ref", "_spans", "_pos")
 
-    def __init__(self, codec: Codec, node: Node, data: bytes, start: int, end: int, depth: int, ref: Node) -> None:
+    def __init__(self, codec: Codec, node: Node, data: bytes, start: int, end: int, depth: int, ref: Node,
+                 pos: Pos = ROOT) -> None:
         self._codec = codec
         self._node = node
         self._data = data
@@ -39,6 +40,8 @@ class View:
         self._end = end
         self._depth = depth
         self._ref = ref
+        #: Where the value sits: the cap above it selects its offset width (spec 3.6).
+        self._pos = pos
         self._spans: Any = None
 
     def view_bytes(self) -> memoryview:
@@ -48,7 +51,7 @@ class View:
     def to_value(self, *, reject_unknown: bool = False) -> Any:
         """Decodes this value in full, with everything ``from_pssz`` checks."""
         try:
-            return self._codec.decoder(self._ref)(self._data, self._start, self._end, self._depth,
+            return self._codec.decoder(self._ref, self._pos)(self._data, self._start, self._end, self._depth,
                                                   Ctx(not reject_unknown))
         except PsioError:
             raise
@@ -63,15 +66,18 @@ class View:
             record = node.kind == "record"
             if record and codec.over_cap(node, self._end - self._start):
                 _bytes(CAP)
-            self._spans = codec.record_spans(self._data, self._start, self._end, codec.width_of(node),
-                                             record and node.stable, codec.field_layouts(node))
+            w = codec.width_of(node, self._pos)
+            self._spans = codec.record_spans(self._data, self._start, self._end, w,
+                                             record and node.stable, codec.field_layouts(node, w))
         return self._spans
 
     def _member(self, i: int) -> Any:
         begins, ends, present, _ = self._frame()
         if not present[i]:
             return None
-        return view_at(self._codec, self._node.members[i].text, self._data, begins[i], ends[i], self._depth + 1)
+        codec, node = self._codec, self._node
+        pos = codec.member_positions(node)[i] if node.kind == "record" else codec.below(self._pos)
+        return view_at(codec, node.members[i].text, self._data, begins[i], ends[i], self._depth + 1, pos)
 
 
 class RecordView(View):
@@ -137,7 +143,7 @@ class ListView(View):
             return m
         codec, node = self._codec, self._node
         size = self._end - self._start
-        w = codec.width_of(node)
+        w = codec.width_of(node, self._pos)
         fixed, esize, _ = codec.layout(node.child)
         if node.exact:
             count = node.count
@@ -176,16 +182,17 @@ class ListView(View):
         index %= count
         codec, data, start = self._codec, self._data, self._start
         element = self._node.text_child
+        below = codec.below(self._pos)
         if esize >= 0:
             at = start + index * esize
-            return view_at(codec, element, data, at, at + esize, self._depth + 1)
+            return view_at(codec, element, data, at, at + esize, self._depth + 1, below)
         size = self._end - start
         at = start + index * w
         begin = int.from_bytes(data[at:at + w], "little")
         stop = int.from_bytes(data[at + w:at + 2 * w], "little") if index + 1 < count else size
         if begin < count * w or begin > stop or stop > size:
             _bytes("pssz: list offset out of range")
-        return view_at(codec, element, data, start + begin, start + stop, self._depth + 1)
+        return view_at(codec, element, data, start + begin, start + stop, self._depth + 1, below)
 
     def __iter__(self) -> Iterator[Any]:
         return (self[i] for i in range(len(self)))
@@ -215,11 +222,12 @@ class VariantView(View):
     def value(self) -> Any:
         """What the alternative holds: a value or a view."""
         m = self._node.members[self.index]
-        return view_at(self._codec, m.text, self._data, self._start + 1, self._end, self._depth + 1)
+        return view_at(self._codec, m.text, self._data, self._start + 1, self._end, self._depth + 1,
+                       self._codec.below(self._pos))
 
 
-def view_at(codec: Codec, ref: Node, data: bytes, start: int, end: int, n: int) -> Any:
-    """What a view returns for the value of ``ref`` (a type as written) at ``[start, end)``."""
+def view_at(codec: Codec, ref: Node, data: bytes, start: int, end: int, n: int, pos: Pos = ROOT) -> Any:
+    """What a view returns for the value of ``ref`` (a type as written) at ``[start, end)``, a value at ``pos``."""
     if n > MAX_DEPTH:
         _bytes(DEPTH)
     node = strip(ref)[0]
@@ -227,11 +235,11 @@ def view_at(codec: Codec, ref: Node, data: bytes, start: int, end: int, n: int) 
     if k == "record":
         return RecordView(codec, node, data, start, end, n, ref)
     if k == "tuple":
-        return TupleView(codec, node, data, start, end, n, ref)
+        return TupleView(codec, node, data, start, end, n, ref, pos)
     if k in ("list", "array"):
-        return ListView(codec, node, data, start, end, n, ref)
+        return ListView(codec, node, data, start, end, n, ref, pos)
     if k == "variant":
-        return VariantView(codec, node, data, start, end, n, ref)
+        return VariantView(codec, node, data, start, end, n, ref, pos)
     if k == "nested":
         if codec.is_opaque(node):
             if end > start and n + 1 > MAX_DEPTH:
@@ -252,7 +260,7 @@ def view_at(codec: Codec, ref: Node, data: bytes, start: int, end: int, n: int) 
             start += 1
         elif size == 0:
             return None
-        inner = view_at(codec, node.text_child, data, start, end, n + 1)
+        inner = view_at(codec, node.text_child, data, start, end, n + 1, pos)
         return Some(inner) if node.child.kind == "option" else inner
     if k == "hex" or (k == "string" and node.raw):
         # Checked like a decode (the bound), returned without a copy.

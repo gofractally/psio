@@ -23,14 +23,15 @@ from psio import PsioError
 # looked at.
 PSSZ_CLASSES = {
     "corpus": 956, "evolution-forward": 660, "evolution-backward": 1380, "pruning": 212, "malformed": 419,
-    "optional-presence": 400, "width": 309, "cap-overflow-explicit-nested": 15, "tuple": 60, "variant": 48,
+    "optional-presence": 400, "width": 335, "cap-overflow-explicit-nested": 15, "tuple": 60, "variant": 48,
     "enum": 76, "enum-unknown-value": 36, "string": 308, "string-raw-non-utf8": 48,
-    "length-bound-overflow": 32, "box": 100, "bytes": 88, "zero-fixed": 100, "depth": 28, "nested": 252,
+    "length-bound-overflow": 32, "box": 100, "bytes": 103, "zero-fixed": 100, "depth": 28, "nested": 252,
     "nested-unknown": 20, "nested-deferred": 24, "map-set": 266, "map-set-order": 352, "transparent": 160,
-    "custom": 116, "invariant": 128, "annotated-bounds": 148, "method-args": 62,
+    "custom": 116, "invariant": 128, "annotated-bounds": 148, "method-args": 62, "list-width": 89,
+    "cap-implicit": 40,
 }
-TYPES = 323
-VECTORS = 6803
+TYPES = 357
+VECTORS = 6973
 NO_HANDLER = "pssz IR: no handler registered for a custom type"
 CAP = "pssz: encoded size exceeds maxDynamicData cap"
 KEY_BOUND = ("key: list exceeds its bound", "key: string exceeds its bound", "key: bytes exceed their bound")
@@ -298,8 +299,14 @@ class PsszFixture(unittest.TestCase):
                         self.assertIn(self.rejects(lambda: reader.from_pssz(data), n).reason, expected, n)
                         self.assertIn(self.rejects(lambda: reader.from_pssz(data, reject_unknown=True), n).reason,
                                       expected, n)
-                        self.assertIn(self.rejects(lambda: reader.from_pssz(psio.trusted(data)), n).reason,
-                                      expected, f"{n}: a bound is checked by the trusted decode too")
+                        # The trusted decode does not check bounds or caps
+                        # (the caller vouches for the bytes): it reads the
+                        # value the frame holds, or fails as a decode error.
+                        try:
+                            reader.from_pssz(psio.trusted(data))
+                            c["trustedReadOutside"] += 1 if label == "plain" else 0
+                        except PsioError as e:
+                            self.assertEqual(e.kind, "bytes", f"{n}: trusted: {e}")
                         for fmt in ("json", "ijson"):
                             self.assertIn(self.rejects(lambda: reader.pssz_to_json(data, fmt), n).reason, expected, n)
                         view = reader.pssz_view(data)
@@ -459,7 +466,7 @@ class PsszFixture(unittest.TestCase):
         self.assertGreaterEqual(a["rawNonUtf8NoText"], 11)
         rejects = sum(1 for v in fx["vectors"] if v["expect"] == "reject" and v["class"] != "invariant")
         self.assertEqual(reasons_exact + reasons_family, rejects)
-        self.assertEqual(reasons_family, 124)
+        self.assertEqual(reasons_family, 140)
         self.assertEqual(len(fx["types"]), TYPES)
         self.assertEqual(len(fx["vectors"]), VECTORS)
 

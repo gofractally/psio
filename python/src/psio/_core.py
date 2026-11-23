@@ -3,7 +3,8 @@
 A port of the checked runtime codec ``cpp/include/psio/pssz_ir.hpp`` (and its
 Rust and JavaScript twins): the same width derivation, the same frame parser,
 the same accept / reject set.  Every type is compiled once into a pair of
-closures (``Codec.encoder`` / ``Codec.decoder``); the typed layer
+closures per position (``Codec.encoder`` / ``Codec.decoder``; a position is
+the cap above a value, which selects its offset widths: spec 3.6); the typed layer
 (``psio.typed``) reuses the same compiled plan and only supplies *bindings*:
 how a Python class gives up its members and is built from them.
 
@@ -39,6 +40,10 @@ QUIET_NAN_64 = 0x7FF8000000000000
 # Custom ids that are part of the binary form (pssz_ir.hpp "Custom ids").
 # Any other id is "box" or a custom type: its inner type on the wire.
 WIRE_CUSTOM_IDS = frozenset(("bool", "char", "string", "utf8", "hex", "bitvector", "bitlist", "map", "set", "unknown"))
+
+#: A tuple (a pair, a method's argument list) has at most this many elements (spec 8.4).
+MAX_TUPLE_ELEMENTS = 255
+TUPLE_SIZE = "pssz IR: a tuple has more than 255 elements"
 
 DEPTH = "pssz: max depth exceeded"
 CAP = "pssz: encoded size exceeds maxDynamicData cap"
@@ -162,7 +167,7 @@ class Node:
         "kind", "bits", "signed", "size", "text_child", "_wire_child", "raw", "assoc", "opaque", "key_nested",
         "inner", "id", "boxed", "handler", "count", "bounded", "exact", "members", "stable", "cap", "time",
         "time_digits", "enumerators", "by_name", "layout_memo", "empty_memo", "width", "bound_memo",
-        "fixed_payload_memo", "fields", "enc", "dec", "bind", "extra",
+        "fixed_payload_memo", "fields", "enc", "dec", "bind", "extra", "widths", "positions",
     )
 
     def __init__(self) -> None:
@@ -198,9 +203,15 @@ class Node:
         self.width: Optional[int] = None
         self.bound_memo: List[Any] = [False, False]
         self.fixed_payload_memo: Optional[bool] = None
-        self.fields: Optional[List[Tuple[int, bool, bool]]] = None
-        self.enc: Optional[Callable[[Any, int], bytes]] = None
-        self.dec: Optional[Callable[[bytes, int, int, int, "Ctx"], Any]] = None
+        #: Per own width: the member layouts of a record / tuple.
+        self.fields: Dict[int, List[Tuple[int, bool, bool]]] = {}
+        #: Per position (``Codec.position``): the compiled writer / reader.
+        self.enc: Dict[Pos, Callable[[Any, int], bytes]] = {}
+        self.dec: Dict[Pos, Callable[[bytes, int, int, int, "Ctx"], Any]] = {}
+        #: Per (cap class, member count): the width of a container that is not a record.
+        self.widths: Dict[Tuple[int, Optional[int]], int] = {}
+        #: A record: the positions of its members.
+        self.positions: Optional[List[Pos]] = None
         #: The typed layer's binding of this node to a Python type, or None.
         self.bind: Any = None
         self.extra: Dict[str, Any] = {}
@@ -327,6 +338,29 @@ def width_class(bound: Optional[int]) -> int:
     if bound is not None and bound <= 0xFFFF:
         return 2
     return 4
+
+
+#: Where a value sits (spec 3.5, 3.6): the width class of the position cap (the
+#: explicit cap of the nearest enclosing record; 4: none), the count the
+#: ``lengthBound`` of the record member that holds the value gives a plain list
+#: (it reaches the list through Option only), and whether the reader trusts
+#: its input (``psio.trusted``).
+Pos = Tuple[int, Optional[int], bool]
+ROOT: Pos = (4, None, False)
+TRUSTED: Pos = (4, None, True)
+
+
+def fit(k: int, r: Optional[int]) -> Optional[int]:
+    """The bound of a type that has offsets (spec 3.2): ``k`` words of its own width W and ``r`` other bytes,
+    for the narrowest W whose worst case fits."""
+    if r is None:
+        return None
+    if k + r <= 0xFF:
+        return k + r
+    if 2 * k + r <= 0xFFFF:
+        return 2 * k + r
+    n = 4 * k + r
+    return None if n > U64_MAX else n
 
 
 def _bound_add(a: Optional[int], b: Optional[int]) -> Optional[int]:
@@ -685,6 +719,9 @@ class Codec:
             node.text_child = self._build(v["type"], added, d)
         elif kind == "Tuple":
             node.kind = "tuple"
+            # docs/pssz-spec.md 8.4.
+            if len(v["members"]) > MAX_TUPLE_ELEMENTS:
+                _schema(TUPLE_SIZE)
             node.members = [Member(str(i), self._build(m, added, d)) for i, m in enumerate(v["members"])]
         elif kind in ("Struct", "Object", "Variant"):
             record = kind != "Variant"
@@ -945,10 +982,6 @@ class Codec:
 
     # ── Width derivation (spec 3) ────────────────────────────────────────────
 
-    #: Bytes one offset slot or header reserves in a size bound (spec 3.2):
-    #: the bound selects W, so it cannot depend on W.
-    SLOT = 4
-
     def _fixed_payload(self, node: Node, active: List[Node]) -> bool:
         if any(node is a for a in active):
             return False
@@ -957,7 +990,7 @@ class Codec:
         active.append(node)
         out = False
         k = node.kind
-        if k in ("int", "float", "bool", "char"):
+        if k in ("int", "float", "bool", "char", "bitvector"):
             out = True
         elif k == "array":
             out = self._fixed_payload(node.child, active)
@@ -985,16 +1018,16 @@ class Codec:
         if annotation is None and node.bound_memo[slot] is not False:
             return node.bound_memo[slot]
         active.append(node)
-        SLOT = self.SLOT
 
         def elements(child: Node, boxed: bool, count: int) -> Optional[int]:
+            # N elements, each its reserved payload, behind an offset table
+            # of N slots when they are not inline fixed payloads.
             if count == 0:
                 return 0
             # A boxed value has no inferred bound (the typed codecs give it none).
             element = None if boxed else self.bound_of(child, None, True, active)
-            if not self._fixed_payload(child, []):
-                element = _bound_add(element, SLOT)
-            return _bound_multiply(count, element)
+            total = _bound_multiply(count, element)
+            return total if self._fixed_payload(child, []) else fit(count, total)
 
         def sequence(container: Node) -> Optional[int]:
             if container.kind == "list" and not container.bounded:
@@ -1006,6 +1039,9 @@ class Codec:
         k = node.kind
         if k in ("int", "float", "bool", "char"):
             out = node.size
+        elif k in ("bitvector", "bitlist"):
+            # ceil(N / 8) bytes; a bitlist one more for its delimiter bit.
+            out = packed_byte_count(node.size) + (1 if k == "bitlist" else 0)
         elif k in ("list", "array"):
             out = sequence(node)
         elif k == "option":
@@ -1014,14 +1050,17 @@ class Codec:
         elif k in ("string", "hex"):
             out = None if node.child_boxed else sequence(node.child)
         elif k in ("record", "tuple"):
-            # A tuple is the extensible positional record of its elements.
-            total: Optional[int] = 0 if (k == "record" and node.stable) else SLOT
+            # The header (a tuple is the extensible positional record of its
+            # elements) and one slot per variable member, each this type's
+            # own width; then what the members reserve.
+            slots = 0 if (k == "record" and node.stable) else 1
+            total: Optional[int] = 0
             for m in node.members:
                 payload = None if m.boxed else self.bound_of(m.node, m.bound if k == "record" else None, True, active)
                 if not self._fixed_payload(m.node, []):
-                    payload = _bound_add(payload, SLOT)
+                    slots += 1
                 total = _bound_add(total, payload)
-            out = total
+            out = fit(slots, total)
         elif k == "nested":
             # No bound of its own; a member lengthBound bounds its bytes.
             out = annotation.limit if annotation is not None else None
@@ -1040,32 +1079,63 @@ class Codec:
             node.bound_memo[slot] = out
         return out
 
-    def width_of(self, node: Node) -> int:
-        """Width of a record's header and slots, or of a list / array offset table.
+    def width_of(self, node: Node, pos: Pos = ROOT) -> int:
+        """Width of a record's header and slots, or of a list / array / map / set offset table.
 
-        THE one place that decides an offset width.  A list's own table is
-        handled by :meth:`_list_table_width`.
+        THE one place that decides an offset width (spec 3.1, 3.6).  Explicit
+        profile: W.  Automatic: the type's own - the width class of its
+        explicit cap, else of its inferred bound.  A type that is not a
+        record is also bounded by the cap of the position it is at; a
+        record's width is its own wherever it appears.
         """
         if not self.automatic:
             return self.W
-        if node.width is not None:
+        if node.kind == "record":
+            if node.width is None:
+                node.width = width_class(node.cap if node.cap is not None else self.bound_of(node, None, False, []))
             return node.width
-        if node.kind == "list":
-            out = self._list_table_width(node)
-        elif node.cap is not None:
-            out = width_class(node.cap)
-        else:
-            out = width_class(self.bound_of(node, None, False, []))
-        node.width = out
+        # Only a plain list takes a bound from the member that holds it.
+        count = pos[1] if node.kind == "list" and not node.bounded else None
+        key = (pos[0], count)
+        out = node.widths.get(key)
+        if out is None:
+            annotation = None
+            if count is not None:
+                annotation = LengthBound()
+                annotation.max = count
+            # width class of min(bound, cap) = the smaller of the two classes.
+            out = node.widths[key] = min(width_class(self.bound_of(node, annotation, False, [])), pos[0])
         return out
 
-    def _list_table_width(self, node: Node) -> int:
-        """The width of a list's own offset table under the automatic profile (spec 3.1, 5.3.2).
+    # ── Positions (spec 3.6) ─────────────────────────────────────────────────
 
-        The single home of the list-table rule: today a list's table is 4
-        wide, bounded or not.
-        """
-        return 4
+    def position(self, node: Node, pos: Pos) -> Pos:
+        """``pos`` reduced to what the node at it depends on: the key of its compiled writer / reader."""
+        trusted = pos[2]
+        if not self.automatic:
+            return TRUSTED if trusted else ROOT
+        k = node.kind
+        if k in ("custom", "option") or (k == "list" and not node.bounded):
+            return pos
+        if k in ("list", "array", "tuple", "variant"):
+            return pos if pos[1] is None else (pos[0], None, trusted)
+        # A record's bytes are the same wherever it appears; a nested value is a root of its own.
+        return TRUSTED if trusted else ROOT
+
+    @staticmethod
+    def below(pos: Pos) -> Pos:
+        """The position of the elements / members of a container that is not a record: the same cap."""
+        return pos if pos[1] is None else (pos[0], None, pos[2])
+
+    def member_positions(self, node: Node, trusted: bool = False) -> List[Pos]:
+        """The positions of a record's members: beneath this record's cap, or beneath none."""
+        out = node.positions
+        if out is None:
+            cap = width_class(node.cap) if self.automatic and node.cap is not None else 4
+            out = node.positions = [
+                (cap, m.bound.limit if self.automatic and m.bound is not None else None, False)
+                for m in node.members]
+        return [(p[0], p[1], True) for p in out] if trusted else out
 
     def over_cap(self, node: Node, size: int) -> bool:
         return self.automatic and node.cap is not None and size > node.cap
@@ -1083,6 +1153,17 @@ class Codec:
     def decode_top(self, root: Node, data: bytes, ctx: Ctx) -> Any:
         self.check_top_cap(strip(root)[0], len(data), _bytes)
         return self.decoder(root)(data, 0, len(data), 0, ctx)
+
+    def decode_trusted(self, root: Node, data: bytes) -> Any:
+        """Reads bytes the caller states are a valid encoding (``psio.trusted``).
+
+        What that statement makes unnecessary is not done: the length bounds
+        and caps, the canonical-form rules (pruned optionals, map / set
+        order, unused bits) and the invariants of custom types.  The frames
+        are parsed as always, so nothing outside ``data`` is read, and bytes
+        that cannot be parsed are still an error.
+        """
+        return self.decoder(root, TRUSTED)(data, 0, len(data), 0, Ctx(True))
 
     # ── Custom types: handlers on the binary entry points ────────────────────
 
@@ -1195,43 +1276,45 @@ class Codec:
                 start += 1
         return bound.admits(end - start)
 
-    def field_layouts(self, node: Node) -> List[Tuple[int, bool, bool]]:
-        """Per member: ``(fixed_size, variable, optional)`` under this node's width."""
-        if node.fields is None:
-            w = self.width_of(node)
+    def field_layouts(self, node: Node, w: int) -> List[Tuple[int, bool, bool]]:
+        """Per member: ``(fixed_size, variable, optional)`` of a record / tuple whose width is ``w``."""
+        out = node.fields.get(w)
+        if out is None:
             out = []
             for m in node.members:
                 fixed, size, optional = self.layout(m.node)
                 out.append((size if fixed else w, not fixed, optional))
-            node.fields = out
-        return node.fields
+            node.fields[w] = out
+        return out
 
     # ── Encode ───────────────────────────────────────────────────────────────
 
-    def encoder(self, node: Node) -> Callable[[Any, int], bytes]:
-        """The compiled writer of ``node``: ``(value, depth) -> bytes``."""
-        f = node.enc
+    def encoder(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
+        """The compiled writer of ``node`` at ``pos``: ``(value, depth) -> bytes``."""
+        key = self.position(node, pos)
+        f = node.enc.get(key)
         if f is not None:
             return f
-        if "enc_busy" in node.extra:
+        busy = node.extra.setdefault("enc_busy", set())
+        if key in busy:
             # A recursive type: forward to the closure once it exists.
-            return lambda value, n: node.enc(value, n)
-        node.extra["enc_busy"] = True
+            return lambda value, n: node.enc[key](value, n)
+        busy.add(key)
         try:
-            f = self._compile_encoder(node)
+            f = self._compile_encoder(node, key)
             bind = node.bind
             if bind is not None and bind.pre is not None:
                 raw, pre = f, bind.pre
                 f = lambda value, n: raw(pre(value), n)  # noqa: E731
-            node.enc = f
+            node.enc[key] = f
         finally:
-            del node.extra["enc_busy"]
+            busy.discard(key)
         return f
 
-    def _compile_encoder(self, node: Node) -> Callable[[Any, int], bytes]:
-        return getattr(self, "_enc_" + node.kind)(node)
+    def _compile_encoder(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
+        return getattr(self, "_enc_" + node.kind)(node, pos)
 
-    def _enc_int(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_int(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         size, signed, bits = node.size, node.signed, node.bits
         if bits == 1:
             lo, hi = (-1, 0) if signed else (0, 1)
@@ -1257,7 +1340,7 @@ class Codec:
                 return _value("pssz: integer value required")
         return enc
 
-    def _enc_float(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_float(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         size = node.size
         pack = struct.Struct("<f" if size == 4 else "<d").pack
         quiet = QUIET_NAN_32.to_bytes(4, "little") if size == 4 else QUIET_NAN_64.to_bytes(8, "little")
@@ -1283,7 +1366,7 @@ class Codec:
             return _value("pssz: float value required")
         return enc
 
-    def _enc_bool(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_bool(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         def enc(value: Any, n: int) -> bytes:
             if n > MAX_DEPTH:
                 _value(DEPTH)
@@ -1294,7 +1377,7 @@ class Codec:
             return _value("pssz: bool value required")
         return enc
 
-    def _enc_char(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_char(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         def enc(value: Any, n: int) -> bytes:
             if n > MAX_DEPTH:
                 _value(DEPTH)
@@ -1323,7 +1406,7 @@ class Codec:
             return bounded
         return lambda n, fail: None
 
-    def _enc_string(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_string(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         raw = node.raw
         container = node.child
         check = self._byte_bound(container, True) if container.kind == "array" or container.bounded else None
@@ -1345,7 +1428,7 @@ class Codec:
             return data
         return enc
 
-    def _enc_hex(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_hex(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         container = node.child
         check = self._byte_bound(container, False) if container.kind == "array" or container.bounded else None
 
@@ -1363,7 +1446,7 @@ class Codec:
             return value
         return enc
 
-    def _enc_bits(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_bits(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         is_list = node.kind == "bitlist"
         size = node.size
 
@@ -1390,9 +1473,9 @@ class Codec:
     _enc_bitvector = _enc_bits
     _enc_bitlist = _enc_bits
 
-    def _enc_option(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_option(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         selector = self.can_be_empty(node.child)
-        inner = self.encoder(node.text_child)
+        inner = self.encoder(node.text_child, pos)
         nested = node.child.kind == "option"
         none = b"\x00" if selector else b""
 
@@ -1452,7 +1535,7 @@ class Codec:
             return out
         return get
 
-    def _enc_record(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_record(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         members = node.members
         count = len(members)
         w = self.width_of(node)
@@ -1460,7 +1543,7 @@ class Codec:
         layouts = [self.layout(m.node) for m in members]
         optional = [info[2] for info in layouts]
         fixed = [info[0] for info in layouts]
-        encs = [self.encoder(m.text) for m in members]
+        encs = [self.encoder(m.text, p) for m, p in zip(members, self.member_positions(node))]
         # prefix[k]: the fixed region of the first k fields.
         prefix = [0]
         for info in layouts:
@@ -1518,13 +1601,14 @@ class Codec:
             return out
         return enc
 
-    def _enc_tuple(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_tuple(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         members = node.members
         count = len(members)
-        w = self.width_of(node)
+        w = self.width_of(node, pos)
         layouts = [self.layout(m.node) for m in members]
         optional = [info[2] for info in layouts]
-        encs = [self.encoder(m.text) for m in members]
+        below = self.below(pos)
+        encs = [self.encoder(m.text, below) for m in members]
         prefix = [0]
         for info in layouts:
             prefix.append(prefix[-1] + (info[1] if info[0] else w))
@@ -1557,11 +1641,11 @@ class Codec:
             return b"".join(head) + b"".join(tail)
         return enc
 
-    def _sequence_writer(self, node: Node) -> Callable[[Sequence[Any], int], bytes]:
+    def _sequence_writer(self, node: Node, pos: Pos) -> Callable[[Sequence[Any], int], bytes]:
         """Writes the elements of a list / array / map / set in the order given."""
-        w = self.width_of(node)
+        w = self.width_of(node, pos)
         fixed, size, _ = self.layout(node.child)
-        inner = self.encoder(node.text_child)
+        inner = self.encoder(node.text_child, self.below(pos))
         bounded, exact, limit = node.bounded, node.exact, node.count
 
         def write(items: Sequence[Any], n: int) -> bytes:
@@ -1585,8 +1669,8 @@ class Codec:
             return b"".join(table) + b"".join(parts)
         return write
 
-    def _enc_list(self, node: Node) -> Callable[[Any, int], bytes]:
-        write = self._sequence_writer(node)
+    def _enc_list(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
+        write = self._sequence_writer(node, pos)
         if node.assoc:
             assoc_sorted = self.assoc_sorted
 
@@ -1621,9 +1705,10 @@ class Codec:
                 return _value(f'pssz: unknown variant alternative "{value.type}"')
         return split
 
-    def _enc_variant(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_variant(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         split = self.variant_splitter(node)
-        encs = [self.encoder(m.text) for m in node.members]
+        below = self.below(pos)
+        encs = [self.encoder(m.text, below) for m in node.members]
         tags = [bytes((i,)) for i in range(len(encs))]
 
         def enc(value: Any, n: int) -> bytes:
@@ -1633,7 +1718,7 @@ class Codec:
             return tags[index] + encs[index](payload, n + 1)
         return enc
 
-    def _enc_nested(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_nested(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         auto = self.auto
         is_opaque = self.is_opaque
         text_child = node.text_child
@@ -1652,9 +1737,9 @@ class Codec:
             return auto.encoder(text_child)(value, n + 1)
         return enc
 
-    def _enc_custom(self, node: Node) -> Callable[[Any, int], bytes]:
+    def _enc_custom(self, node: Node, pos: Pos = ROOT) -> Callable[[Any, int], bytes]:
         inner_node: Node = node.inner
-        inner = self.encoder(inner_node)
+        inner = self.encoder(inner_node, pos)
         handler = node.handler
         checks = not node.boxed and ((handler is not None and handler.check is not None)
                                      or (handler is None and self.require_handlers))
@@ -1674,7 +1759,7 @@ class Codec:
                 if has_check:
                     state.quiet += 1
                     try:
-                        held = decoder(inner_node)(out, 0, len(out), n, Ctx(False))
+                        held = decoder(inner_node, pos)(out, 0, len(out), n, Ctx(False))
                     finally:
                         state.quiet -= 1
                 check_custom(node, held, "value")
@@ -1752,16 +1837,27 @@ class Codec:
             _bytes("pssz: fixed record has trailing payload")
         return begins, ends, present, unknown
 
-    def _members_reader(self, node: Node, stable: bool) -> Callable[[bytes, int, int, int, Ctx], List[Any]]:
-        w = self.width_of(node)
-        fields = self.field_layouts(node)
+    def _members_reader(self, node: Node, stable: bool, w: int,
+                        positions: Sequence[Pos], trusted: bool) -> Callable[[bytes, int, int, int, Ctx], List[Any]]:
+        fields = self.field_layouts(node, w)
         members = node.members
         count = len(members)
-        decs = [self.decoder(m.text) for m in members]
+        decs = [self.decoder(m.text, p) for m, p in zip(members, positions)]
         optional = [f[2] for f in fields]
         bounds = [(i, m.bound, m.node, nested_member(m.node)) for i, m in enumerate(members) if m.bound is not None]
         record_spans = self.record_spans
         nested_bound_admits = self.nested_bound_admits
+
+        def read_trusted(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> List[Any]:
+            # The frame is parsed as always (every span lies inside this
+            # one); the member bounds and the pruning rule are the writer's.
+            begins, ends, present, unknown = record_spans(data, start, end, w, stable, fields)
+            if unknown:
+                ctx.has_unknown = True
+            n1 = n + 1
+            return [decs[i](data, begins[i], ends[i], n1, ctx) if present[i] else None for i in range(count)]
+        if trusted:
+            return read_trusted
 
         def read(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> List[Any]:
             begins, ends, present, unknown = record_spans(data, start, end, w, stable, fields)
@@ -1791,26 +1887,31 @@ class Codec:
             return values
         return read
 
-    def decoder(self, node: Node) -> Callable[[bytes, int, int, int, Ctx], Any]:
-        """The compiled checked reader of ``node``: ``(data, start, end, depth, ctx) -> value``."""
-        f = node.dec
+    def decoder(self, node: Node, pos: Pos = ROOT) -> Callable[[bytes, int, int, int, Ctx], Any]:
+        """The compiled reader of ``node`` at ``pos``: ``(data, start, end, depth, ctx) -> value``.
+
+        Checked, unless the position says the input is trusted (``TRUSTED``).
+        """
+        key = self.position(node, pos)
+        f = node.dec.get(key)
         if f is not None:
             return f
-        if "dec_busy" in node.extra:
-            return lambda data, start, end, n, ctx: node.dec(data, start, end, n, ctx)
-        node.extra["dec_busy"] = True
+        busy = node.extra.setdefault("dec_busy", set())
+        if key in busy:
+            return lambda data, start, end, n, ctx: node.dec[key](data, start, end, n, ctx)
+        busy.add(key)
         try:
-            f = getattr(self, "_dec_" + node.kind)(node)
+            f = getattr(self, "_dec_" + node.kind)(node, key)
             bind = node.bind
             if bind is not None and bind.post is not None:
                 raw, post = f, bind.post
                 f = lambda data, start, end, n, ctx: post(raw(data, start, end, n, ctx))  # noqa: E731
-            node.dec = f
+            node.dec[key] = f
         finally:
-            del node.extra["dec_busy"]
+            busy.discard(key)
         return f
 
-    def _dec_int(self, node: Node) -> Callable[..., Any]:
+    def _dec_int(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         size, signed, bits = node.size, node.signed, node.bits
         from_bytes = int.from_bytes
 
@@ -1830,7 +1931,7 @@ class Codec:
             return raw
         return dec_bit
 
-    def _dec_float(self, node: Node) -> Callable[..., Any]:
+    def _dec_float(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         size = node.size
         unpack = struct.Struct("<f" if size == 4 else "<d").unpack_from
         quiet = QUIET_NAN_32 if size == 4 else QUIET_NAN_64
@@ -1848,7 +1949,7 @@ class Codec:
             return value
         return dec
 
-    def _dec_bool(self, node: Node) -> Callable[..., Any]:
+    def _dec_bool(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         def dec(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
             if n > MAX_DEPTH:
                 _bytes(DEPTH)
@@ -1860,7 +1961,7 @@ class Codec:
             return b == 1
         return dec
 
-    def _dec_char(self, node: Node) -> Callable[..., Any]:
+    def _dec_char(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         def dec(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
             if n > MAX_DEPTH:
                 _bytes(DEPTH)
@@ -1869,10 +1970,12 @@ class Codec:
             return data[start]
         return dec
 
-    def _dec_string(self, node: Node) -> Callable[..., Any]:
+    def _dec_string(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         raw = node.raw
         container = node.child
         check = self._byte_bound(container, True) if container.kind == "array" or container.bounded else None
+        if pos[2]:
+            check = None
 
         def dec(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
             if n > MAX_DEPTH:
@@ -1887,9 +1990,11 @@ class Codec:
                 return _bytes(utf8_reason(data[start:end]))
         return dec
 
-    def _dec_hex(self, node: Node) -> Callable[..., Any]:
+    def _dec_hex(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         container = node.child
         check = self._byte_bound(container, False) if container.kind == "array" or container.bounded else None
+        if pos[2]:
+            check = None
 
         def dec(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
             if n > MAX_DEPTH:
@@ -1901,9 +2006,10 @@ class Codec:
             return data[start:end]
         return dec
 
-    def _dec_bits(self, node: Node) -> Callable[..., Any]:
+    def _dec_bits(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         is_list = node.kind == "bitlist"
         bound = node.size
+        trusted = pos[2]
 
         def dec(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
             if n > MAX_DEPTH:
@@ -1917,13 +2023,17 @@ class Codec:
                 if last == 0:
                     _bytes("pssz: bitlist missing delimiter")
                 count = (size - 1) * 8 + last.bit_length() - 1
-                if count > bound:
+                if count > bound and not trusted:
                     _bytes("pssz: bitlist bit_count exceeds bound")
             else:
                 if size != packed_byte_count(count):
                     _bytes("pssz: fixed primitive span mismatch")
                 if count % 8 and data[end - 1] >> (count % 8):
-                    _bytes("pssz: nonzero unused bitvector bits")
+                    if not trusted:
+                        _bytes("pssz: nonzero unused bitvector bits")
+                    packed = bytearray(data[start:end])
+                    packed[-1] &= (1 << (count % 8)) - 1
+                    return Bits(bytes(packed), count)
             packed = bytearray(data[start:start + packed_byte_count(count)])
             if is_list and count % 8:
                 packed[-1] &= (1 << (count % 8)) - 1
@@ -1933,9 +2043,9 @@ class Codec:
     _dec_bitvector = _dec_bits
     _dec_bitlist = _dec_bits
 
-    def _dec_option(self, node: Node) -> Callable[..., Any]:
+    def _dec_option(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         selector = self.can_be_empty(node.child)
-        inner = self.decoder(node.text_child)
+        inner = self.decoder(node.text_child, pos)
         nested = node.child.kind == "option"
         info = self.layout(node.child)
         fixed_size = info[1] if info[0] else None
@@ -1962,9 +2072,11 @@ class Codec:
             return Some(value) if nested else value
         return dec
 
-    def _dec_record(self, node: Node) -> Callable[..., Any]:
-        read = self._members_reader(node, node.stable)
-        cap = node.cap if self.automatic else None
+    def _dec_record(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
+        trusted = pos[2]
+        read = self._members_reader(node, node.stable, self.width_of(node), self.member_positions(node, trusted),
+                                    trusted)
+        cap = node.cap if self.automatic and not trusted else None
         bind = node.bind
         make = bind.make if bind is not None and bind.make is not None else None
         names = [m.name for m in node.members]
@@ -1985,8 +2097,9 @@ class Codec:
             return dict(zip(names, values))
         return dec
 
-    def _dec_tuple(self, node: Node) -> Callable[..., Any]:
-        read = self._members_reader(node, False)
+    def _dec_tuple(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
+        read = self._members_reader(node, False, self.width_of(node, pos),
+                                    [self.below(pos)] * len(node.members), pos[2])
 
         def dec(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
             if n > MAX_DEPTH:
@@ -1994,11 +2107,12 @@ class Codec:
             return tuple(read(data, start, end, n, ctx))
         return dec
 
-    def _sequence_reader(self, node: Node) -> Callable[[bytes, int, int, int, Ctx], List[Any]]:
-        w = self.width_of(node)
+    def _sequence_reader(self, node: Node, pos: Pos) -> Callable[[bytes, int, int, int, Ctx], List[Any]]:
+        w = self.width_of(node, pos)
         fixed, esize, _ = self.layout(node.child)
-        inner = self.decoder(node.text_child)
-        bounded, exact, limit = node.bounded, node.exact, node.count
+        inner = self.decoder(node.text_child, self.below(pos))
+        # (a trusted read does not count the elements of a bounded list)
+        bounded, exact, limit = node.bounded and (node.exact or not pos[2]), node.exact, node.count
         from_bytes = int.from_bytes
         first_message = "pssz: invalid array first offset" if exact else "pssz: invalid first list offset"
         range_message = "pssz: array offset out of range" if exact else "pssz: list offset out of range"
@@ -2060,8 +2174,8 @@ class Codec:
             return out
         return read
 
-    def _dec_list(self, node: Node) -> Callable[..., Any]:
-        read = self._sequence_reader(node)
+    def _dec_list(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
+        read = self._sequence_reader(node, pos)
         if not node.assoc:
             def dec(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
                 if n > MAX_DEPTH:
@@ -2069,6 +2183,15 @@ class Codec:
                 return read(data, start, end, n, ctx)
             return dec
         is_map = node.assoc == "map"
+        if pos[2]:
+            # The entries are in canonical order: the writer's statement.
+            assoc_value = self.assoc_value
+
+            def dec_assoc_trusted(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
+                if n > MAX_DEPTH:
+                    _bytes(DEPTH)
+                return assoc_value(node, read(data, start, end, n, ctx))
+            return dec_assoc_trusted
 
         def dec_assoc(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
             if n > MAX_DEPTH:
@@ -2091,8 +2214,9 @@ class Codec:
 
     _dec_array = _dec_list
 
-    def _dec_variant(self, node: Node) -> Callable[..., Any]:
-        decs = [self.decoder(m.text) for m in node.members]
+    def _dec_variant(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
+        below = self.below(pos)
+        decs = [self.decoder(m.text, below) for m in node.members]
         names = [m.name for m in node.members]
         count = len(decs)
         bind = node.bind
@@ -2112,10 +2236,11 @@ class Codec:
             return Variant(names[index], value)
         return dec
 
-    def _dec_nested(self, node: Node) -> Callable[..., Any]:
+    def _dec_nested(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
         auto = self.auto
         is_opaque = self.is_opaque
         text_child = node.text_child
+        root = TRUSTED if pos[2] else ROOT
 
         def dec(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> Any:
             if n > MAX_DEPTH:
@@ -2125,14 +2250,15 @@ class Codec:
                     _bytes(DEPTH)
                 return data[start:end]
             # The bytes are read as the inner type, in the automatic profile,
-            # under the same unknown-field rule; its root is one level below.
-            return auto.decoder(text_child)(data, start, end, n + 1, ctx)
+            # under the same unknown-field rule; its root is one level below
+            # (and a root: no cap reaches into it).
+            return auto.decoder(text_child, root)(data, start, end, n + 1, ctx)
         return dec
 
-    def _dec_custom(self, node: Node) -> Callable[..., Any]:
-        inner = self.decoder(node.inner)
+    def _dec_custom(self, node: Node, pos: Pos = ROOT) -> Callable[..., Any]:
+        inner = self.decoder(node.inner, pos)
         handler = node.handler
-        if node.boxed or (handler is None and not self.require_handlers) or (
+        if pos[2] or node.boxed or (handler is None and not self.require_handlers) or (
                 handler is not None and handler.check is None):
             return inner
         check_custom = self.check_custom

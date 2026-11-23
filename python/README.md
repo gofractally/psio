@@ -90,24 +90,33 @@ class Account2:
     balance: u64
 
 t = psio.codec(Account2)
-assert t.max_encoded_size == 4 + 8 + (4 + 32) + (4 + 8 * (16 + 4)) + 8 == 220    # <= 255: 8-bit offsets
+# The list: 8 one-byte slots and 8 strings of 16 bytes.
+tags = psio.codec(Annotated[list[Annotated[str, psio.max(16)]], psio.bounded(8)])
+assert tags.max_encoded_size == 8 * 1 + 8 * 16 == 136 and tags.width == 1
+# The record: a header and two slots of one byte each, then what the members hold.
+assert t.max_encoded_size == (1 + 2) * 1 + 8 + 32 + 136 + 8 == 187               # <= 255: 8-bit offsets
 assert t.width == 1
 ```
 
 **Get.** Every level is bounded, so the type has a size bound, and the bound
-selects the width: 1 byte up to 255, 2 bytes up to 65535, 4 above. The same
-value is 9 bytes smaller:
+selects the width: 1 byte up to 255, 2 bytes up to 65535, 4 above. Every type
+that has offsets does this for itself: the record (its header and one slot
+per variable member) and the list inside it (one slot per element) each take
+the narrowest width whose worst case fits. The same value is 15 bytes
+smaller:
 
 ```python
 alice = Account2(7, "alice", ["vip", "beta"], 100)
 data = psio.to_pssz(alice)
-assert data.hex(" ") == ("12 07 00 00 00 00 00 00 00 12 17 64 00 00 00 00 00 00 00 "
-                         "61 6c 69 63 65 08 00 00 00 0b 00 00 00 76 69 70 62 65 74 61")
-assert len(data) == 39 and len(psio.to_pssz(AccountPlain(7, "alice", ["vip", "beta"], 100))) == 48
+assert data.hex(" ") == ("12 07 00 00 00 00 00 00 00 12 17 64 00 00 00 00 00 00 00 "   # header, id, 2 slots, balance
+                         "61 6c 69 63 65 "                                             # "alice"
+                         "02 05 76 69 70 62 65 74 61")                                 # 2 one-byte slots, "vip" "beta"
+assert len(data) == 33 and len(psio.to_pssz(AccountPlain(7, "alice", ["vip", "beta"], 100))) == 48
 ```
 
 (These are the bytes of the C++, Rust and TypeScript tutorials.) A bound on
-the list alone bounds nothing — the strings in it are still unbounded:
+the list alone bounds nothing — the strings in it are still unbounded, and so
+the list's own table stays 4 bytes wide:
 
 ```python
 @dataclass
@@ -167,12 +176,12 @@ class Account2b:
     balance: u64
 
 assert psio.to_pssz(Account2b(7, "alice", ["vip", "beta"], 100)) == data
-assert psio.codec(Account2b).max_encoded_size == 220
+assert psio.codec(Account2b).max_encoded_size == 187
 ```
 
 ### Step 3 — Reserve room for growth
 
-`Account2` is as tight as it can be, which is the problem: it has 35 bytes of
+`Account2` is as tight as it can be, which is the problem: it has 68 bytes of
 slack. The day a field is added whose bound exceeds that, the width changes
 from 8-bit to 16-bit and every stored record becomes unreadable. Width is
 part of the type.
@@ -188,7 +197,7 @@ class AccountV1:
     tags: Annotated[list[str], psio.max(8), psio.element(psio.max(16))]
     balance: u64
 
-# The cap rules: 16-bit offsets, although today's fields need at most 220 bytes.
+# The cap rules: 16-bit offsets, although today's fields need at most 187 bytes.
 assert psio.codec(AccountV1).max_dynamic_data == 1024
 assert psio.codec(AccountV1).width == 2
 ```
@@ -210,6 +219,31 @@ class Capped:
 assert len(psio.to_pssz(Capped("x" * 14))) == 16                    # 1 + 1 + 14
 refused(lambda: psio.to_pssz(Capped("x" * 15)))
 assert not psio.validate_pssz(Capped, psio.to_pssz(Capped("x" * 14)) + b"x")
+```
+
+The cap widens only the record. The list in it keeps its own 1-byte table
+(its bound, 136, is the tighter one). The other way round, a cap narrows what
+lies beneath it: nothing inside a record of at most 255 bytes is larger than
+255 bytes, so every list, map, set and tuple beneath it has 1-byte offsets
+without a bound of its own — down to the next record, which keeps its own
+width, and not into a nested value.
+
+```python
+@psio.record(max_dynamic_data=255)
+@dataclass
+class Memo:
+    lines: list[str]                              # no bound: the cap is the bound
+    grid: list[list[str]]
+
+@dataclass
+class MemoFree:
+    lines: list[str]
+    grid: list[list[str]]
+
+assert psio.codec(Memo).width == 1
+assert psio.to_pssz(Memo(["ab", "c"], [["x"]])).hex(" ") == "02 02 07 02 04 61 62 63 01 01 78"
+assert len(psio.to_pssz(MemoFree(["ab", "c"], [["x"]]))) == 12 + 11 + 9
+assert psio.codec(Memo).max_encoded_size is None  # the cap changes widths, not bounds: lines is still list[str]
 ```
 
 `@psio.record(definition_will_not_change=True)` is for values closed forever
@@ -465,8 +499,8 @@ class Bank(Protocol):
 bank = psio.interface_of(Bank)
 assert [m.name for m in bank] == ["open", "transfer", "symbol"]
 assert bank["transfer"].params == ["from", "to", "amount", "memo"]   # from_ is `from` on the wire
-# open has no cap: header 4 + owner (4 + 32) + tags (4 + 8 x (16 + 4)) = 204, 8-bit.
-assert bank["open"].args.max_encoded_size == 4 + (4 + 32) + (4 + 8 * (16 + 4))
+# open has no cap: header 1 + owner (1 + 32) + tags (1 + 8 x (1 + 16)) = 171, 8-bit.
+assert bank["open"].args.max_encoded_size == 1 + (1 + 32) + (1 + 8 * (1 + 16)) == 171
 assert bank["open"].args.width == 1
 # transfer is capped: 16-bit for its lifetime.
 assert bank["transfer"].args.max_dynamic_data == 1024 and bank["transfer"].args.width == 2
@@ -579,7 +613,7 @@ change, encode). The short name is the safe one — `from_pssz` validates.
 | `psio.RawString` | raw string | `bytes` in Python, a JSON string in text |
 | `Annotated[bytes, psio.array(N)]`, `Annotated[list[T], psio.array(N)]` | fixed array | |
 | `list[T]`, `tuple[T, ...]` | list | |
-| `tuple[A, B]` | tuple (an extensible positional record) | |
+| `tuple[A, B]` | tuple (an extensible positional record) | at most 255 elements; so has a method's parameter list |
 | `Optional[T]`, `T \| None` | optional | an optional of an optional: `Optional[psio.Some[Optional[T]]]` |
 | `dict[K, V]`, `set[T]`, `frozenset[T]` | map, set | written in key order whatever order the container has; `K` / `T` must be hashable (`@dataclass(frozen=True)`) |
 | `A \| B` | variant | alternatives are told apart by their class; name them with `Annotated[A, psio.alt("a")]`; alternatives that share a class are `psio.Variant(name, value)` |
@@ -686,13 +720,24 @@ Each type is compiled once into closures; `psio.to_pssz(v)` of a dataclass
 is one dictionary lookup and a call. `python/bench/bench.py` reports encode
 / decode / view numbers. The codec's seam for a native accelerator is
 `Codec.encoder(node)` / `Codec.decoder(node)` in `psio/_core.py` (plain
-callables per node); none is built.
+callables per node and position); none is built.
+
+`psio.from_pssz(T, psio.trusted(data))` leaves out what the statement "these
+bytes are a valid encoding" makes unnecessary — length bounds and caps,
+pruning and map / set order, unused bits, invariants — and parses the frames
+as always, so it never reads outside `data`. The gain is what there was to
+leave out (`bench.py`, CPython 3.14): about 3% on a record with no bounds,
+1.36x on a list of 1,000 bounded, capped records, 1.38x on a map of 1,000
+entries (whose order check encodes every key).
 
 ## Limits
 
 - No mutable view, no `pssz_evolves_from` check, no pjson, no WIT / GraphQL
   emitters, no formats outside pssz / key / json / ijson.
-- `psio.trusted` skips invariants only: this reader still bounds-checks.
+- `psio.trusted` is for bytes this program wrote or validated. For any other
+  input the result is a value outside the type's bounds or a `DecodeError`
+  (never a read outside the input): text is still decoded as UTF-8, and a
+  frame that cannot be parsed is still refused.
 - The Schema IR records a bound, not how it was declared, so a reader's
   message for a value outside a bound is one of
   `pssz: member length_bound violated`, `pssz: bounded list exceeds its bound`,

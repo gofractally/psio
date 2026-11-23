@@ -57,7 +57,7 @@ class Interfaces(unittest.TestCase):
         self.assertIsNone(token.index_of("nope"))
         # transfer: an explicit cap rules (2-byte offsets); balance_of: the inferred bound (1-byte).
         self.assertEqual((token["transfer"].args.width, token["transfer"].args.max_dynamic_data), (2, 256))
-        self.assertEqual((token["balance_of"].args.width, token["balance_of"].args.max_encoded_size), (1, 24))
+        self.assertEqual((token["balance_of"].args.width, token["balance_of"].args.max_encoded_size), (1, 18))
         self.assertEqual(token["version"].params, [])
 
     def test_arguments_are_the_tuple_of_the_parameters(self) -> None:

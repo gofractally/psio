@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Union
 
 from . import ir as _ir
-from ._core import Binding, Codec, Ctx, Handler, Node, reserved_custom_id, strip
+from ._core import MAX_TUPLE_ELEMENTS, TUPLE_SIZE, Binding, Codec, Ctx, Handler, Node, reserved_custom_id, strip
 from ._key import decode_key, encode_key, encode_key_prefix
 from ._time import reserved_time_id
 from .values import Variant
@@ -28,9 +28,12 @@ Width = Union[str, int]
 class trusted:
     """The caller's statement that ``data`` is a valid encoding: ``from_pssz(T, trusted(data))``.
 
-    The decode then skips what trust makes unnecessary: the invariants of
-    custom types are not run.  (This pure-Python reader still bounds-checks
-    every frame it walks.)
+    The decode then skips what trust makes unnecessary: length bounds and
+    caps, the canonical-form rules (pruned optionals, map / set order) and
+    the invariants of custom types.  Use it only for bytes this program wrote
+    or validated: for any other input the result is a value of the wrong
+    shape or a ``DecodeError``.  The frames are still parsed in full, so
+    nothing outside ``data`` is ever read.
     """
 
     __slots__ = ("data",)
@@ -151,11 +154,11 @@ class SchemaType:
         return len(self.to_pssz(value))
 
     def from_pssz(self, data: Any, *, reject_unknown: bool = False) -> Any:
-        """Validates, then decodes.  ``trusted(data)`` skips the invariants of custom types."""
+        """Validates, then decodes.  ``trusted(data)`` skips what trust makes unnecessary (``Codec.decode_trusted``)."""
         codec = self._codec
         if type(data) is trusted:
             raw = _as_bytes(data.data)
-            return codec.quietly(lambda: _reading(lambda: codec.decode_top(self._ref, raw, Ctx(True))))
+            return codec.quietly(lambda: _reading(lambda: codec.decode_trusted(self._ref, raw)))
         raw = _as_bytes(data)
         ctx = Ctx(not reject_unknown)
         return _reading(lambda: codec.decode_top(self._ref, raw, ctx))
@@ -361,6 +364,9 @@ class Schema:
                 if f.get("name") != name:
                     continue
                 cap = [a for a in f.get("attributes", ()) if a.get("name") == "maxDynamicData"]
+                # The argument list is a tuple (docs/pssz-spec.md 8.4).
+                if len(f["params"]) > MAX_TUPLE_ELEMENTS:
+                    raise SchemaError(TUPLE_SIZE)
                 args = self.type({"Object": {"members": f["params"], "attributes": cap}}, **options)
                 result = None if f.get("result") is None else self.type(f["result"], **options)
                 return SchemaMethod(interface, name, [p["name"] for p in f["params"]], args, result)

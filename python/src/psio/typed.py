@@ -34,7 +34,7 @@ from typing import (
 
 from . import annotations as A
 from . import ir as _ir
-from ._core import Binding, Handler, reserved_custom_id
+from ._core import MAX_TUPLE_ELEMENTS, Binding, Handler, reserved_custom_id
 from ._time import TimeKind, schema_id, unit_period
 from .errors import DecodeError, EncodeError, PsioError, SchemaError
 from .schema import Schema, SchemaType
@@ -575,6 +575,8 @@ def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
         if not args and origin is None:
             _fail("psio: tuple needs its element types: tuple[A, B]")
         items = [] if args in ((), ((),)) else [shape_of(a) for a in args]
+        if len(items) > MAX_TUPLE_ELEMENTS:
+            _fail("psio: a tuple has more than 255 elements")
         return Shape("tuple", items=items, py=tuple)
     if origin in (dict, typing.Dict) or base is dict or (isinstance(origin, type) and issubclass(origin, typing.Mapping)):
         if len(args) != 2:
@@ -1475,6 +1477,9 @@ def arguments(params: Any, *, max_dynamic_data: Optional[int] = None) -> Shape:
         names = [f.name for f in fields]
         if len(set(names)) != len(names):
             _fail("psio: two parameters have the same name")
+        # A method's argument list is a tuple (docs/pssz-spec.md 8.4).
+        if len(fields) > MAX_TUPLE_ELEMENTS:
+            _fail("psio: a method has more than 255 parameters")
         count = len(fields)
         out = Shape("args", uid=next(_ARGS), fields=fields, max_dynamic_data=max_dynamic_data, py=tuple)
 

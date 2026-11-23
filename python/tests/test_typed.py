@@ -234,7 +234,8 @@ class Typed(unittest.TestCase):
             frame = loose.to_pssz(bad)
             wide = psio.codec(Book, width=4)
             self.assertFalse(wide.validate_pssz(frame), bad)
-            self.assertEqual(self.rejects(lambda: wide.from_pssz(psio.trusted(frame))).kind, "bytes")
+            # (the trusted decode does not check bounds: it reads the value the frame holds)
+            self.assertEqual(wide.from_pssz(psio.trusted(frame)), bad)
             self.assertFalse(psio.validate_json(Book, loose.to_json(bad)), bad)
             self.assertFalse(psio.validate_key(Book, loose.to_key(bad)), bad)
 

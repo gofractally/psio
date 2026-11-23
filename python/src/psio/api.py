@@ -52,8 +52,8 @@ def from_pssz(T: Any, data: Any, *, reject_unknown: bool = False) -> Any: ...
 def from_pssz(T: Any, data: Any, *, reject_unknown: bool = False) -> Any:
     """Validates ``data`` as a ``T``, then decodes it.
 
-    ``from_pssz(T, trusted(data))`` skips what trust makes unnecessary (the
-    invariants of custom types).  ``reject_unknown``: a frame carrying
+    ``from_pssz(T, trusted(data))`` skips what trust makes unnecessary (bounds,
+    caps, canonical-form checks and the invariants of custom types).  ``reject_unknown``: a frame carrying
     appended optional fields this type does not know is an error instead of
     being read without them.
     """

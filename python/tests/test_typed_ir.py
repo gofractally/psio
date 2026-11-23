@@ -15,7 +15,7 @@ from typed_fixture import TypedFixture
 
 import psio
 
-FIXTURES = (("pssz-vectors.json", 591), ("json-vectors.json", 223), ("time-key-vectors.json", 140))
+FIXTURES = (("pssz-vectors.json", 638), ("json-vectors.json", 223), ("time-key-vectors.json", 140))
 
 
 class TypedIr(unittest.TestCase):
