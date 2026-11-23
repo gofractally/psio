@@ -240,3 +240,57 @@ TEST_CASE("method_to_number: compressed only when the number decodes to the name
       }
    }
 }
+
+// ── PSIO's own Custom ids cannot be claimed, and sit on their wire shape ──
+TEST_CASE("reserved custom ids", "[consistency][schema]")
+{
+   for (std::string_view id : {"bool", "char", "string", "utf8", "hex", "bitvector", "bitlist", "map",
+                               "set", "box", "unknown", "time-point", "time-point-seconds",
+                               "duration", "duration-1/60", "monotonic-millis"})
+      CHECK(psio::reserved_custom_id(id));
+   for (std::string_view id : {"", "Bool", "AccountNumber", "time", "durations", "time-points",
+                               "monotonically", "hexadecimal", "Memo"})
+      CHECK(!psio::reserved_custom_id(id));
+
+   // A handler cannot be registered under one.
+   psio::pssz_ir::CustomHandlers handlers;
+   CHECK(!handlers.try_add("time-point-seconds", {}).ok());
+   CHECK(!handlers.try_add("hex", {}).ok());
+   CHECK(handlers.try_add("AccountNumber", {}).ok());
+   CHECK_THROWS_AS(handlers.add("bool", psio::pssz_ir::CustomHandlers::Handler{}),
+                   psio::codec_exception);
+   CHECK(handlers.find("bool") == nullptr);
+   CHECK(handlers.find("AccountNumber") != nullptr);
+
+   // A schema in which a reserved id sits on another wire shape is malformed
+   // for every schema-driven reader.
+   using namespace psio::schema_types;
+   auto refuses = [](AnyType root, const char* text) {
+      const Schema      schema{};
+      std::vector<char> out;
+      bool              unknown = false;
+      psio::pssz_ir::Value value;
+      const std::vector<char> zero(8, 0);
+      INFO(text);
+      CHECK(!psio::pssz_ir::json_to_pssz(schema, root, psio::json{}, text, out).ok());
+      CHECK(!psio::pssz_ir::validate_auto(schema, root, zero, &unknown).ok());
+      CHECK(!psio::pssz_ir::validate_auto(schema, root, std::span<const char>{}, &unknown).ok());
+   };
+   auto u8list = [] { return AnyType{List{Box<AnyType>{AnyType{Int{8, false}}}}}; };
+   refuses(AnyType{Custom{Box<AnyType>{u8list()}, "bool"}}, "true");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{32, false}}}, "bool"}}, "true");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{32, false}}}, "char"}}, "\"a\"");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, false}}}, "string"}}, "\"a\"");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, false}}}, "utf8"}}, "\"a\"");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, false}}}, "hex"}}, "\"00\"");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, false}}}, "bitlist"}}, "\"0\"");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, false}}}, "bitvector"}}, "\"0\"");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, false}}}, "map"}}, "{}");
+   refuses(AnyType{Custom{Box<AnyType>{u8list()}, "map"}}, "{}");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, false}}}, "set"}}, "[]");
+   refuses(AnyType{Custom{Box<AnyType>{u8list()}, "time-point-seconds"}}, "\"1970-01-01T00:00:00Z\"");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Float{11, 52}}}, "duration-millis"}}, "5");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, true}}}, "time-point"}}, "5");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{64, true}}}, "duration-bogus"}}, "5");
+   refuses(AnyType{Custom{Box<AnyType>{AnyType{Int{32, false}}}, "unknown"}}, "5");
+}

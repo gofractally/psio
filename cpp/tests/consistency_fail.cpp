@@ -27,4 +27,36 @@ namespace cons_fail
    inline const auto bounds_bytes = psio::to_pssz(Bounds{"abc"});
 }  // namespace cons_fail
 
+namespace cons_fail
+{
+   // A custom type cannot take the id of one of PSIO's own types.
+   struct Stamp
+   {
+      std::int64_t seconds = 0;
+   };
+   PSIO_REFLECT(Stamp, definitionWillNotChange(), seconds)
+   inline psio::codec_status stamp_ok(const Stamp&) noexcept { return psio::codec_ok(); }
+   struct duration   // the reflected name is the default id
+   {
+      std::int64_t ticks = 0;
+   };
+   PSIO_REFLECT(duration, definitionWillNotChange(), ticks)
+   inline psio::codec_status duration_ok(const duration&) noexcept { return psio::codec_ok(); }
+}  // namespace cons_fail
+#if defined(CONS_FAIL_RESERVED_INVARIANT_ID)
+PSIO_INVARIANT(cons_fail::Stamp, cons_fail::stamp_ok, "time-point-seconds")
+#else
+PSIO_INVARIANT(cons_fail::Stamp, cons_fail::stamp_ok, "Stamp")
+#endif
+#if defined(CONS_FAIL_RESERVED_REFLECTED_NAME)
+PSIO_INVARIANT(cons_fail::duration, cons_fail::duration_ok)
+#else
+PSIO_INVARIANT(cons_fail::duration, cons_fail::duration_ok, "Span")
+#endif
+namespace cons_fail
+{
+   inline const auto stamp_schema    = psio::SchemaBuilder{}.insert<Stamp>();
+   inline const auto duration_schema = psio::SchemaBuilder{}.insert<duration>();
+}  // namespace cons_fail
+
 int main() {}

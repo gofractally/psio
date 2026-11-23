@@ -804,11 +804,34 @@ Custom { type: <the wire type>, id: "<the type's id>" }
 ```
 
 The wire type says exactly what the bytes are; the id names the type.
-(The ids PSIO itself gives a binary meaning to — `bool`, `char`, `string`,
-`utf8`, `hex`, `bitvector`, `bitlist`, `map`, `set`, `box` — are fixed; every other id
-never changes the bytes or the widths.) A transparent type with neither a
-text form nor an invariant is not custom: it is a named alias of its
-member's type.
+A transparent type with neither a text form nor an invariant is not custom:
+it is a named alias of its member's type.
+
+**Reserved ids.** PSIO's own types use `Custom` nodes too, and the
+schema-driven codecs read a fixed meaning into each of their ids:
+
+| id | on | meaning |
+|---|---|---|
+| `bool` | `Int{1}` | a boolean |
+| `char` | `Int{8}` | a character |
+| `string`, `utf8` | a list of `u8` | a raw string, a UTF-8 string |
+| `hex` | a list or array of bytes | bytes, written as hex in `ijson` |
+| `bitvector`, `bitlist` | an array / a bounded list of `Int{1}` | the bit types |
+| `map`, `set` | a list (of 2-tuples for a map) | entries in canonical key order |
+| `box` | any type | the type, held indirectly |
+| `unknown` | — | a type the schema builder had no node for; not readable |
+| `time-point…`, `duration…`, `monotonic…` | an 8/16/32/64-bit `Int` | a time value (`docs/time.md`); the word alone or followed by `-<unit>` |
+
+A custom type cannot take one of these ids — it would be read as the
+built-in type. Every language refuses it where the id is declared: C++ at
+compile time (`schema_custom_id`: the id of a text adapter, of
+`PSIO_INVARIANT`, or the reflected name) and in `CustomHandlers::try_add` /
+`add`; Rust in the derives and in `SchemaBuilder::insert`; JavaScript in
+`custom()` and when a handler is registered; Python in `custom(...)` and
+`register`. A schema in which a reserved id sits on any other wire shape
+(`Custom{List, "bool"}`, `Custom{String, "time-point-seconds"}`, a time word
+with a unit that does not parse) is malformed, and every schema-driven
+reader rejects it. Every other id never changes the bytes or the widths.
 
 **Maps and sets.** `Custom{ List{ Tuple{[K, V]} }, "map" }` and
 `Custom{ List{ K }, "set" }` (`BoundedList` in place of `List` under a

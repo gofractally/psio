@@ -287,26 +287,80 @@ namespace psio {
    inline constexpr bool schema_custom_v =
       detail::text_adapter_is_custom<std::remove_cvref_t<T>>() || has_invariant_v<T>;
 
+   // ── Reserved Custom ids ─────────────────────────────────────────────
+   //
+   // The ids PSIO's own types have in the Schema IR. A schema-driven codec
+   // reads a meaning of its own into each, so no custom type may claim one:
+   //
+   //   "bool", "char"               Int{1}, Int{8} read as a boolean / a char
+   //   "string", "utf8", "hex"      a byte list / array: raw string, UTF-8
+   //                                string, bytes written as hex
+   //   "bitvector", "bitlist"       the bit types
+   //   "map", "set"                 a list in canonical key order
+   //   "box"                        psio::Box: the inner type, boxed
+   //   "unknown"                    a type the schema builder has no node for
+   //   "time-point", "duration",    the time values (time.hpp), alone or
+   //   "monotonic"                  followed by "-...": "time-point-seconds",
+   //                                "duration-1/60", ...
+   //
+   // schema_custom_id refuses one at compile time (every id a C++ type can
+   // give is a constant), CustomHandlers::add at run time, and Rust's
+   // derives and schema builder likewise (pssz_schema_ir.rs
+   // reserved_custom_id).
+   constexpr bool reserved_custom_id(std::string_view id) noexcept
+   {
+      for (const std::string_view word :
+           {std::string_view{"bool"}, std::string_view{"char"}, std::string_view{"string"},
+            std::string_view{"utf8"}, std::string_view{"hex"}, std::string_view{"bitvector"},
+            std::string_view{"bitlist"}, std::string_view{"map"}, std::string_view{"set"},
+            std::string_view{"box"}, std::string_view{"unknown"}})
+         if (id == word)
+            return true;
+      for (const std::string_view word : {std::string_view{"time-point"},
+                                          std::string_view{"duration"},
+                                          std::string_view{"monotonic"}})
+         if (id == word || (id.starts_with(word) && id[word.size()] == '-'))
+            return true;
+      return false;
+   }
+
+   namespace detail
+   {
+      template <typename U>
+      constexpr std::string_view declared_schema_custom_id() noexcept
+      {
+         using A = adapter<U, text_category>;
+         if constexpr (requires { std::string_view{A::schema_id}; })
+            return std::string_view{A::schema_id};
+         else if constexpr (!invariant_schema_id<U>().empty())
+            return invariant_schema_id<U>();
+         else if constexpr (std::is_class_v<U> && Reflected<U>)
+            return reflect<U>::name;
+         else
+         {
+            static_assert(ReflectedEnum<U>,
+                          "psio: a custom type that is not a reflected record or enum (a "
+                          "std::variant, a std::tuple, ...) needs a schema id: give its text "
+                          "adapter a `static constexpr std::string_view schema_id`, or pass "
+                          "the id to PSIO_INVARIANT(Type, fn, \"Id\")");
+            return reflect_enum<U>::name;
+         }
+      }
+   }  // namespace detail
+
    template <typename T>
    constexpr std::string_view schema_custom_id() noexcept
    {
       using U = std::remove_cvref_t<T>;
-      using A = adapter<U, text_category>;
-      if constexpr (requires { std::string_view{A::schema_id}; })
-         return std::string_view{A::schema_id};
-      else if constexpr (!invariant_schema_id<U>().empty())
-         return invariant_schema_id<U>();
-      else if constexpr (std::is_class_v<U> && Reflected<U>)
-         return reflect<U>::name;
-      else
-      {
-         static_assert(ReflectedEnum<U>,
-                       "psio: a custom type that is not a reflected record or enum (a "
-                       "std::variant, a std::tuple, ...) needs a schema id: give its text "
-                       "adapter a `static constexpr std::string_view schema_id`, or pass "
-                       "the id to PSIO_INVARIANT(Type, fn, \"Id\")");
-         return reflect_enum<U>::name;
-      }
+      constexpr std::string_view id = detail::declared_schema_custom_id<U>();
+      static_assert(!reserved_custom_id(id),
+                    "psio: this custom type's schema id is reserved for one of PSIO's own "
+                    "types (bool, char, string, utf8, hex, bitvector, bitlist, map, set, box, "
+                    "unknown, time-point..., duration..., monotonic...): a schema-driven codec "
+                    "would read the built-in meaning into it. Give the type another id: "
+                    "`static constexpr std::string_view schema_id` in its text adapter, or "
+                    "PSIO_INVARIANT(Type, fn, \"Id\")");
+      return id;
    }
 
    // ── Member-level adapter override (§5.3.7) ──────────────────────────

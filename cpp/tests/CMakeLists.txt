@@ -1067,3 +1067,8 @@ target_link_libraries(psio_name_conformance_emit PRIVATE psio)
 target_compile_features(psio_name_conformance_emit PRIVATE cxx_std_23)
 add_test(NAME psio_name_conformance_regen
          COMMAND psio_name_conformance_emit --check ${PSIO_NAME_VECTORS})
+set(PSIO_CONS_RESERVED "this custom type's schema id is reserved for one of PSIO's own types")
+psio_consistency_compile_fail(reserved_invariant_id CONS_FAIL_RESERVED_INVARIANT_ID
+   "${PSIO_CONS_RESERVED}")
+psio_consistency_compile_fail(reserved_reflected_name CONS_FAIL_RESERVED_REFLECTED_NAME
+   "${PSIO_CONS_RESERVED}")

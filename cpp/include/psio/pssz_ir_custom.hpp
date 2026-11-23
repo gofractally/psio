@@ -44,8 +44,10 @@
 //
 // Built-in presentations. The time ids ("time-point-<unit>", "duration-
 // <unit>", "monotonic-<unit>", time.hpp) are presentations the codecs supply
-// themselves; "box" is its inner type. They take no handler (one registered
-// under such an id is never consulted) and are not subject to `require_all`.
+// themselves; "box" is its inner type. They, and the other ids of PSIO's
+// own types (adapter.hpp reserved_custom_id), take no handler — registering
+// one is an error (try_add returns it, add fails through codec_abort) — and
+// are not subject to `require_all`.
 //
 // A handler cannot express a presentation that is not a single JSON string
 // (an object, a bare number), or one that depends on the text format or on
@@ -92,12 +94,23 @@ class CustomHandlers
    // A custom node with no handler is an error rather than its wire type.
    bool require_all = false;
 
+   // Registers `handler` under `id`, or says why it cannot: an id reserved
+   // for PSIO's own types (adapter.hpp reserved_custom_id) has a built-in
+   // meaning that no handler replaces.
+   [[nodiscard]] codec_status try_add(std::string id, Handler handler)
+   {
+      if (reserved_custom_id(id))
+         return codec_fail("pssz IR: a custom handler claims an id reserved for PSIO's own types",
+                           0, "pssz");
+      add_unchecked(std::move(id), std::move(handler));
+      return codec_ok();
+   }
+   // The same, failing through codec_abort (codec_exception, or abort
+   // without exceptions) on a reserved id.
    CustomHandlers &add(std::string id, Handler handler)
    {
-      handlers_.insert_or_assign(std::move(id), std::move(handler));
-      checks_ = 0;
-      for (const auto &entry : handlers_)
-         checks_ += entry.second.check ? 1 : 0;
+      if (auto status = try_add(std::move(id), std::move(handler)); !status.ok())
+         ::psio::codec_abort(status.error());
       return *this;
    }
    // The handler of the C++ type T under `id` (default: the id the schema
@@ -120,6 +133,13 @@ class CustomHandlers
    bool checks_values() const noexcept { return require_all || checks_ != 0; }
 
  private:
+   void add_unchecked(std::string id, Handler handler)
+   {
+      handlers_.insert_or_assign(std::move(id), std::move(handler));
+      checks_ = 0;
+      for (const auto &entry : handlers_)
+         checks_ += entry.second.check ? 1 : 0;
+   }
    std::unordered_map<std::string, Handler> handlers_;
    std::size_t checks_ = 0;
 };
