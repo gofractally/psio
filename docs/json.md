@@ -472,6 +472,52 @@ psio::to_ijson(std::span<const unsigned char>{b}); // "01AB"
 They are for writers only: text has no non-owning reader, so a record with
 such a member can be written and not read.
 
+### Typed reads from an open cursor
+
+A reader written by hand walks a cursor (`psio::json_text_cursor`, or a
+simdjson cursor; "Two layers" below) and hands the typed parts of its
+document to PSIO through `psio::json_reader`:
+
+```cpp
+// {"rowid":"7", <members of T>..., "extra": <anything>}
+template <typename T, psio::JsonCursor C>
+bool read_row(psio::json_reader<psio::ijson, C>& r, SqlRow<T>& out)
+{
+   C& c = r.cursor();
+   bool has = false, known = false;
+   std::string_view key;
+   if (!c.begin_object()) return false;
+   for (;;)
+   {
+      if (!c.next_field(has, key)) return false;
+      if (!has) return true;
+      if (key == "rowid")      { if (!r.read(out.rowid_text)) return false; }
+      else if (key == "extra") { if (!r.raw(out.extra)) return false; }
+      else if (!r.read_member(key, out.data, known) || (!known && !r.skip()))
+         return false;
+   }
+}
+
+psio::json_text_cursor c{text, /*ijson*/ true};
+psio::json_reader      r{psio::ijson{}, c};
+if (!read_row(r, row) || !c.finish()) return r.status();
+```
+
+| `json_reader` | |
+|---|---|
+| `read(T& out)` | one value of `T` at the cursor, by the typed reader's rules (it is the typed reader) |
+| `validate<T>()` | the same, checked and not kept |
+| `read_member(key, record, known)` | the member `key` of a reflected record, by the member's own rules (annotations, integer form). `known == false`: the record has no such member and nothing was consumed |
+| `raw(std::string& text)` | appends the compact text of the next value — no whitespace, strings escaped as PSIO escapes them, a number as it was written, members in their order — on any cursor |
+| `skip()` | one value of any shape, checked and dropped |
+| `status()` | the first error: a violated invariant's own status, else the cursor's |
+
+Every function returns `false` after recording the error; nothing throws or
+aborts. `json_text_cursor::offset()` is the cursor's position in the text,
+so the exact text of a value as it was written is `kind(k)`, `from =
+offset()`, `skip()`, `text.substr(from, offset() - from)` (the simdjson
+cursors read a padded copy and have no exact position; `raw` works on all).
+
 ## Exception-disabled builds
 
 `cpp/tests/ijson_noexceptions.cpp` builds with `-fno-exceptions -fno-rtti`

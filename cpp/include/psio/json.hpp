@@ -1108,6 +1108,80 @@ namespace psio {
          w.finish();
       }
 
+      // Reads one value of any shape from `c` and writes its compact text
+      // (no whitespace; strings re-escaped by the writer's rule; a number as
+      // its token; members in order, a repeated key repeated). The value is
+      // checked exactly as a skipped one is.
+      template <typename C>
+      bool capture_value(C& c, writer& w)
+      {
+         json_kind k;
+         if (!c.kind(k))
+            return false;
+         std::string_view text;
+         bool             flag = false;
+         switch (k)
+         {
+            case json_kind::object:
+               if (!c.begin_object())
+                  return false;
+               w.put('{');
+               for (bool first = true;; first = false)
+               {
+                  if (!c.next_field(flag, text))
+                     return false;
+                  if (!flag)
+                     break;
+                  if (!first)
+                     w.put(',');
+                  write_string(w, text, false);
+                  w.put(':');
+                  if (!capture_value(c, w))
+                     return false;
+               }
+               w.put('}');
+               return true;
+            case json_kind::array:
+               if (!c.begin_array())
+                  return false;
+               w.put('[');
+               for (bool first = true;; first = false)
+               {
+                  if (!c.next_element(flag))
+                     return false;
+                  if (!flag)
+                     break;
+                  if (!first)
+                     w.put(',');
+                  if (!capture_value(c, w))
+                     return false;
+               }
+               w.put(']');
+               return true;
+            case json_kind::string:
+               if (!c.string(text, flag))
+                  return false;
+               write_string(w, text, false);
+               return true;
+            case json_kind::number:
+               if (!c.number(text))
+                  return false;
+               w.append(text);
+               return true;
+            case json_kind::boolean:
+               if (!c.boolean(flag))
+                  return false;
+               w.append(flag ? std::string_view{"true"} : std::string_view{"false"});
+               return true;
+            case json_kind::null:
+               if (!c.null())
+                  return false;
+               w.append("null");
+               return true;
+         }
+         return c.fail("json: unexpected character at value start");
+      }
+
       // ── Reading ───────────────────────────────────────────────────────────
       //
       // One typed reader, written against the JsonCursor concept
@@ -2281,6 +2355,98 @@ namespace psio {
 
    PSIO_FORMAT_HELPERS(json)
    PSIO_FORMAT_HELPERS(ijson)
+
+   // ── Typed reads from an open cursor ────────────────────────────────────
+   //
+   // For a reader written by hand over a JsonCursor (json_cursor.hpp) that
+   // delegates the typed parts of its document to PSIO:
+   //
+   //    psio::json_text_cursor c{text, true};          // or a simdjson cursor
+   //    psio::json_reader      r{psio::ijson{}, c};
+   //    bool has = false, known = false;  std::string_view key;
+   //    if (!c.begin_object()) ...
+   //    while (c.next_field(has, key) && has)
+   //    {
+   //       if (key == "rowid")      ok = r.read(rowid);            // any T
+   //       else if (key == "raw")   ok = r.raw(raw_text);          // kept unparsed
+   //       else                     ok = r.read_member(key, row, known) &&
+   //                                     (known || r.skip());      // a member of T
+   //    }
+   //    if (!c.finish() || !r.status().ok()) ...
+   //
+   // Each function reads exactly one value at the cursor, by the rules of
+   // the typed reader (it IS the typed reader), and returns false after
+   // recording the error; `status()` is the first error: a violated
+   // invariant's own status, else the cursor's. Nothing throws or aborts.
+   // The json_reader must outlive every use of the cursor's status: an
+   // invariant's message may be text the reader owns.
+   template <detail::json_impl::json_family Fmt, JsonCursor C>
+   class json_reader
+   {
+      detail::json_impl::typed_reader<C> r_;
+
+     public:
+      json_reader(Fmt, C& cursor) : r_{cursor} {}
+      json_reader(const json_reader&)            = delete;
+      json_reader& operator=(const json_reader&) = delete;
+
+      C& cursor() noexcept { return r_.c; }
+
+      // One value of T, stored in `out` (unspecified on failure).
+      template <typename T>
+      [[nodiscard]] bool read(T& out)
+      {
+         return detail::json_impl::read_value<Fmt, detail::json_impl::int_mode::natural, T>(r_,
+                                                                                           &out);
+      }
+      // One value of T, checked and not kept.
+      template <typename T>
+      [[nodiscard]] bool validate()
+      {
+         return detail::json_impl::read_value<Fmt, detail::json_impl::int_mode::natural, T>(
+            r_, nullptr);
+      }
+      // The member `key` of the reflected record T, read into `record` by
+      // the member's own rules (its annotations, its integer form). When T
+      // has no member of that name `known` is false and nothing is
+      // consumed: the caller reads or skips the value itself.
+      template <detail::json_impl::Record T>
+      [[nodiscard]] bool read_member(std::string_view key, T& record, bool& known)
+      {
+         constexpr std::size_t N     = ::psio::reflect<T>::member_count;
+         const std::size_t     index = ::psio::reflect<T>::find_index(key);
+         known                       = index < N;
+         if (!known)
+            return r_.c.status(Fmt::name).ok();
+         return detail::json_impl::member_readers<Fmt, T, C>::table[index](r_, &record);
+      }
+      // The compact text of the next value, appended to `text`: no
+      // whitespace, strings escaped as PSIO's writers escape them, a number
+      // as it was written, the members of an object in their order (a
+      // repeated key repeated). On failure `text` is restored.
+      [[nodiscard]] bool raw(std::string& text)
+      {
+         const std::size_t         start = text.size();
+         detail::json_impl::writer w{text, Fmt::name, false};
+         const bool                ok = detail::json_impl::capture_value(r_.c, w);
+         w.finish();
+         if (ok && w.err.empty())
+            return true;
+         text.resize(start);
+         return ok ? r_.c.fail(w.err) : false;
+      }
+      // One value of any shape, checked and dropped.
+      [[nodiscard]] bool skip() { return r_.c.skip(); }
+
+      [[nodiscard]] codec_status status() const
+      {
+         if (!r_.invariant.ok())
+            return codec_status{r_.invariant.error()};
+         return r_.c.status(Fmt::name);
+      }
+   };
+   template <typename Fmt, typename C>
+   json_reader(Fmt, C&) -> json_reader<Fmt, C>;
 
    // ── Status-returning entry points ──────────────────────────────────────
    //

@@ -62,6 +62,12 @@
 //                                     double: the RFC 8259 grammar, an
 //                                     error when out of range
 //
+// Hand-written readers. A reader of a document that is partly typed walks
+// the cursor itself — begin_object / next_field / ... — and hands the typed
+// parts to PSIO through psio::json_reader (json.hpp): `read(value)` for one
+// value of a C++ type, `read_member(key, record, known)` for a member of a
+// reflected record, `raw(text)` to keep a sub-document unparsed.
+//
 // Three cursors implement it: `json_text_cursor` (here) over the hand-written
 // lexer of detail/json_syntax.hpp, and, when PSIO_HAVE_SIMDJSON,
 // `simdjson_index_cursor` (simdjson's stage 1 plus a walk over its token
@@ -209,6 +215,21 @@ namespace psio
 
       bool fail(std::string_view what) { return r_.fail(what); }
       bool failed() const { return !r_.err.empty(); }
+
+      // Where the cursor is: the offset in the text of the first byte it
+      // has not consumed. After `kind()` that is the first byte of the next
+      // value (kind skips the whitespace before it); after a value was read
+      // or skipped it is the byte after the value. So the exact text of a
+      // value, as it was written, is
+      //
+      //    json_kind k;
+      //    c.kind(k);  const auto from = c.offset();
+      //    c.skip();   text.substr(from, c.offset() - from)
+      //
+      // (json_text_cursor only: the simdjson cursors read a padded copy and
+      // have no exact position. psio::json_reader::raw gives the compact
+      // text of a value on every cursor.)
+      std::size_t offset() const noexcept { return static_cast<std::size_t>(r_.p - r_.begin); }
 
       codec_status status(std::string_view format) const
       {
