@@ -177,50 +177,50 @@ using namespace at_test;
 // the types below are one byte wide at every level.
 
 // header 1 + slot 1 + 8 x (table slot 1 + 16)
-static_assert(psio::max_encoded_size<TagsA>() == 1 + 1 + 8 * (1 + 16));
-static_assert(psio::max_encoded_size<TagsW>() == psio::max_encoded_size<TagsA>());
-static_assert(psio::max_encoded_size<TagsRaw>() == psio::max_encoded_size<TagsA>());
+static_assert(psio::inferred_bound<TagsA>() == 1 + 1 + 8 * (1 + 16));
+static_assert(psio::inferred_bound<TagsW>() == psio::inferred_bound<TagsA>());
+static_assert(psio::inferred_bound<TagsRaw>() == psio::inferred_bound<TagsA>());
 static_assert(psio::auto_pssz_width_v<TagsA> == 1);
 static_assert(psio::auto_pssz_width_v<TagsW> == 1);
 static_assert(psio::auto_pssz_width_v<TagsRaw> == 1);
 // The count alone bounds nothing: the strings are unbounded.
-static_assert(!psio::max_encoded_size<TagsCountOnly>().has_value());
+static_assert(!psio::inferred_bound<TagsCountOnly>().has_value());
 static_assert(psio::auto_pssz_width_v<TagsCountOnly> == 4);
 
 // header 1 + slot 1 + 3 x (table slot 1 + 4 x 2)
-static_assert(psio::max_encoded_size<GridA>() == 1 + 1 + 3 * (1 + 4 * 2));
-static_assert(psio::max_encoded_size<GridW>() == psio::max_encoded_size<GridA>());
+static_assert(psio::inferred_bound<GridA>() == 1 + 1 + 3 * (1 + 4 * 2));
+static_assert(psio::inferred_bound<GridW>() == psio::inferred_bound<GridA>());
 static_assert(psio::auto_pssz_width_v<GridA> == 1 && psio::auto_pssz_width_v<GridW> == 1);
 // 1 + 1 + 2 x (1 + 2 x (1 + 2 x (1 + 3)))
-static_assert(psio::max_encoded_size<DeepA>() == 1 + 1 + 2 * (1 + 2 * (1 + 2 * (1 + 3))));
+static_assert(psio::inferred_bound<DeepA>() == 1 + 1 + 2 * (1 + 2 * (1 + 2 * (1 + 3))));
 static_assert(psio::auto_pssz_width_v<DeepA> == 1);
 
 // header 1 + slot 1 + selector 1 + 2 x (1 + 16)
-static_assert(psio::max_encoded_size<OptA>() == 1 + 1 + 1 + 2 * (1 + 16));
-static_assert(psio::max_encoded_size<OptW>() == psio::max_encoded_size<OptA>());
+static_assert(psio::inferred_bound<OptA>() == 1 + 1 + 1 + 2 * (1 + 16));
+static_assert(psio::inferred_bound<OptW>() == psio::inferred_bound<OptA>());
 // header 1 + slot 1 + 3 x (1 + 16)
-static_assert(psio::max_encoded_size<ArrA>() == 1 + 1 + 3 * (1 + 16));
-static_assert(psio::max_encoded_size<ArrW>() == psio::max_encoded_size<ArrA>());
-static_assert(psio::max_encoded_size<std::array<Text16, 3>>() == 3 * (1 + 16));
+static_assert(psio::inferred_bound<ArrA>() == 1 + 1 + 3 * (1 + 16));
+static_assert(psio::inferred_bound<ArrW>() == psio::inferred_bound<ArrA>());
+static_assert(psio::inferred_bound<std::array<Text16, 3>>() == 3 * (1 + 16));
 static_assert(psio::auto_pssz_width_v<std::array<Text16, 3>> == 1);
 static_assert(psio::auto_pssz_width_v<std::array<std::string, 3>> == 4);
 
 // entry: header 1 + (1 + 16) + (1 + 2 x 4) = 27; map: 4 x (1 + 27)
-static_assert(psio::max_encoded_size<MapA>() == 1 + 1 + 4 * (1 + 1 + (1 + 16) + (1 + 2 * 4)));
-static_assert(psio::max_encoded_size<MapW>() == psio::max_encoded_size<MapA>());
-static_assert(psio::max_encoded_size<SetA>() == 1 + 1 + 4 * (1 + 16));
-static_assert(psio::max_encoded_size<SetW>() == psio::max_encoded_size<SetA>());
+static_assert(psio::inferred_bound<MapA>() == 1 + 1 + 4 * (1 + 1 + (1 + 16) + (1 + 2 * 4)));
+static_assert(psio::inferred_bound<MapW>() == psio::inferred_bound<MapA>());
+static_assert(psio::inferred_bound<SetA>() == 1 + 1 + 4 * (1 + 16));
+static_assert(psio::inferred_bound<SetW>() == psio::inferred_bound<SetA>());
 
 // t: 1 + (1 + 16) + 4 + (1 + 5) = 28; p: 1 + 17 + 17 = 35
-static_assert(psio::max_encoded_size<TupA>() == 1 + (1 + 28) + (1 + 35));
-static_assert(psio::max_encoded_size<TupW>() == psio::max_encoded_size<TupA>());
+static_assert(psio::inferred_bound<TupA>() == 1 + (1 + 28) + (1 + 35));
+static_assert(psio::inferred_bound<TupW>() == psio::inferred_bound<TupA>());
 // selector 1 + widest alternative: 2 x (1 + 16) = 34
-static_assert(psio::max_encoded_size<VarA>() == 1 + 1 + 1 + 2 * (1 + 16));
-static_assert(psio::max_encoded_size<VarW>() == psio::max_encoded_size<VarA>());
+static_assert(psio::inferred_bound<VarA>() == 1 + 1 + 1 + 2 * (1 + 16));
+static_assert(psio::inferred_bound<VarW>() == psio::inferred_bound<VarA>());
 
 // A wrapper type is bounded wherever it appears, as a bare type too.
-static_assert(psio::max_encoded_size<psio::bounded<std::uint32_t, 5>>() == 20);
-static_assert(psio::max_encoded_size<psio::bounded<Text16, 8>>() == 8 * (1 + 16));
+static_assert(psio::inferred_bound<psio::bounded<std::uint32_t, 5>>() == 20);
+static_assert(psio::inferred_bound<psio::bounded<Text16, 8>>() == 8 * (1 + 16));
 // A list's offset table takes the width of the list's own bound: one byte
 // here, four for the unbounded vector.
 static_assert(psio::auto_pssz_width_v<psio::bounded<Text16, 8>> == 1);
@@ -233,7 +233,7 @@ static_assert(psio::auto_pssz_width_v<std::vector<Text16>> == 4);
 template <std::size_t M, std::size_t N>
 using BList = psio::bounded<psio::utf8_string<M>, N>;
 template <typename T>
-constexpr auto bound_of = psio::max_encoded_size<T>();
+constexpr auto bound_of = psio::inferred_bound<T>();
 template <typename T>
 constexpr std::size_t width_of = psio::auto_pssz_width_v<T>;
 // 255 / 256: 15 * (1 + 16) = 255 is the last 1-byte table.
@@ -1060,8 +1060,8 @@ namespace cap_test
    static_assert(member_w<Tight, 0> == 1 && psio::auto_pssz_width_v<Tight> == 2);
    static_assert(member_w<Loose, 0> == 1);
    // The cap does not change any bound: a capped record is its cap.
-   static_assert(psio::max_encoded_size<std::vector<std::string>>() == std::nullopt);
-   static_assert(psio::max_encoded_size<std::tuple<Cap255, std::uint8_t>>() == 2 + 2 + 255 + 1);
+   static_assert(psio::inferred_bound<std::vector<std::string>>() == std::nullopt);
+   static_assert(psio::inferred_bound<std::tuple<Cap255, std::uint8_t>>() == 2 + 2 + 255 + 1);
 
    // The query for a child record that cannot use its width.
    static_assert(psio::pssz_child_wider_than_cap_v<Cap255>);   // Child (4) beneath a cap of 255

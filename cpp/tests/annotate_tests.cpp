@@ -439,13 +439,13 @@ TEST_CASE("effective_max_dynamic_v: an explicit cap always rules",
    // The bound inferred from the fields is smaller than the cap; the cap is
    // the type's lifetime width promise and is what rules
    // (docs/pssz-spec.md 3.1, 16): there is no min(cap, inferred bound).
-   STATIC_REQUIRE(*psio::max_encoded_size<FullyBoundedRecord>() < 4096);
+   STATIC_REQUIRE(*psio::inferred_bound<FullyBoundedRecord>() < 4096);
    STATIC_REQUIRE(psio::effective_max_dynamic_v<FullyBoundedRecord> ==
                   std::optional<std::size_t>{4096});
 
    // LeafDwnc: no cap, so the inferred bound: its fixed encoded size.
    STATIC_REQUIRE(psio::effective_max_dynamic_v<LeafDwnc> ==
-                  psio::max_encoded_size<LeafDwnc>());
+                  psio::inferred_bound<LeafDwnc>());
    STATIC_REQUIRE(psio::effective_max_dynamic_v<LeafDwnc> == std::optional<std::size_t>{4});
 
    // No cap and an unbounded member: no bound at all.

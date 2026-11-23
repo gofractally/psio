@@ -17,8 +17,13 @@
 
 #include <catch.hpp>
 
+#include <psio/wrappers.hpp>
+
 #include <algorithm>
+#include <array>
 #include <cstring>
+#include <map>
+#include <tuple>
 #include <span>
 #include <type_traits>
 
@@ -1100,8 +1105,8 @@ TEST_CASE("automatic pssz without a budget can change width when a field is appe
    using F = psio::pssz;
    // U0: header 1 + 253. U1 adds a slot and the optional's two bytes: 1 + 253
    // + 1 + 2 = 257 does not fit one-byte offsets, so it is 2 + 253 + 2 + 2.
-   STATIC_REQUIRE(psio::max_encoded_size<U0>() == std::optional<std::size_t>{254});
-   STATIC_REQUIRE(psio::max_encoded_size<U1>() == std::optional<std::size_t>{259});
+   STATIC_REQUIRE(psio::inferred_bound<U0>() == std::optional<std::size_t>{254});
+   STATIC_REQUIRE(psio::inferred_bound<U1>() == std::optional<std::size_t>{259});
    STATIC_REQUIRE(psio::auto_pssz_width_v<U0> == 1);
    STATIC_REQUIRE(psio::auto_pssz_width_v<U1> == 2);  // crossed the 255 threshold
 
@@ -1245,4 +1250,214 @@ TEST_CASE("pssz_evolves_from accepts only optional suffixes at an unchanged widt
                               psio::encode(psio::pssz{}, B1{old_value.blob, std::uint8_t{1}}))
               .ok());
    // ...and the illegal one does not (pinned in the unbudgeted test above).
+}
+
+// ── A variant gains alternatives at the end (docs/pssz-spec.md 7.5) ───────
+namespace evo_variant
+{
+   using u8  = std::uint8_t;
+   using u16 = std::uint16_t;
+   using u32 = std::uint32_t;
+   using u64 = std::uint64_t;
+   using std::variant;
+
+   struct Alt0
+   {
+      u32 a = 0;
+      friend bool operator==(const Alt0&, const Alt0&) = default;
+      PSIO_REFLECT(Alt0, a, maxDynamicData(64))
+   };
+   struct Alt1
+   {
+      u32                a = 0;
+      std::optional<u32> b;
+      friend bool operator==(const Alt1&, const Alt1&) = default;
+      PSIO_REFLECT(Alt1, a, b, maxDynamicData(64))
+   };
+   struct AltOther
+   {
+      u64 z = 0;
+      PSIO_REFLECT(AltOther, z, maxDynamicData(64))
+   };
+
+   using Var1 = variant<u32, std::string>;
+   using Var2 = variant<u32, std::string, u64>;
+   using Var3 = variant<u32, std::string, u64, Alt0>;
+
+   // A record with no cap: its width is the class of its inferred bound,
+   // which contains the variant's (1 + the largest alternative).
+   //   header 1 + slot 1 + (1 + 2) + 249 = 254: one byte wide.
+   template <typename V>
+   struct Tight
+   {
+      V                   v;
+      std::array<u8, 249> pad{};
+      PSIO_REFLECT(Tight, v, pad)
+   };
+   // The same members under a cap: the cap rules the width.
+   template <typename V>
+   struct Capped
+   {
+      V                   v;
+      std::array<u8, 249> pad{};
+      PSIO_REFLECT(Capped, v, pad, maxDynamicData(1000))
+   };
+   using Small  = variant<u8, u16>;
+   using Same   = variant<u8, u16, u8>;    // a new alternative no larger than the others
+   using Larger = variant<u8, u16, u32>;   // a new alternative that raises the bound by 2
+   static_assert(psio::inferred_bound<Tight<Small>>() == 254 &&
+                 psio::auto_pssz_width_v<Tight<Small>> == 1);
+   static_assert(psio::inferred_bound<Tight<Same>>() == 254 &&
+                 psio::auto_pssz_width_v<Tight<Same>> == 1);
+   static_assert(psio::inferred_bound<Tight<Larger>>() == 258 &&
+                 psio::auto_pssz_width_v<Tight<Larger>> == 2);
+   static_assert(psio::auto_pssz_width_v<Capped<Small>> == 2 &&
+                 psio::auto_pssz_width_v<Capped<Larger>> == 2);
+
+   // A bounded list of variants inside a capped record: the record's width
+   // is the cap's, and the list's own table is what a larger alternative
+   // moves (60 x (1 + 3) = 240, one byte; 60 x (2 + 5) = 420, two bytes).
+   template <typename V>
+   struct Listed
+   {
+      std::vector<V> items;
+      PSIO_REFLECT(Listed, attr(items, max<60>), maxDynamicData(60000))
+   };
+   static_assert(psio::auto_pssz_width_v<Listed<Small>> == 2 &&
+                 psio::auto_pssz_width_v<Listed<Larger>> == 2);
+   static_assert(psio::auto_pssz_width_v<psio::bounded<Small, 60>> == 1 &&
+                 psio::auto_pssz_width_v<psio::bounded<Larger, 60>> == 2);
+
+   // Annotations on the alternatives.
+   struct Ann0
+   {
+      variant<u32, std::string> v;
+      PSIO_REFLECT(Ann0, attr(v, at<1>(max<8>)), maxDynamicData(200))
+   };
+   struct Ann1   // a third alternative with a bound of its own
+   {
+      variant<u32, std::string, std::string> v;
+      PSIO_REFLECT(Ann1, attr(v, at<1>(max<8>) | at<2>(max<4>)), maxDynamicData(200))
+   };
+   struct AnnTighter   // ... but an existing alternative's bound may not shrink
+   {
+      variant<u32, std::string, std::string> v;
+      PSIO_REFLECT(AnnTighter, attr(v, at<1>(max<4>) | at<2>(max<4>)), maxDynamicData(200))
+   };
+   struct AnnWider   // ... it may widen, as anywhere
+   {
+      variant<u32, std::string, std::string> v;
+      PSIO_REFLECT(AnnWider, attr(v, at<1>(max<16>) | at<2>(max<4>)), maxDynamicData(200))
+   };
+}  // namespace evo_variant
+
+TEST_CASE("pssz_evolves_from: a variant may gain alternatives at the end",
+          "[pssz][evolution][variant]")
+{
+   using namespace evo_variant;
+   // Appended, once and twice; the relation is transitive.
+   STATIC_REQUIRE(psio::pssz_evolves_from<Var1, Var2>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<Var2, Var3>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<Var1, Var3>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<Var1, Var1>);
+   // Removed, reordered, inserted, retyped: not compatible.
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var2, Var1>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<std::string, u32, u64>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<u32, u64, std::string>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<u64, u32, std::string>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<u64, std::string, u32>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Var1, variant<std::int32_t, std::string, u64>>);
+   // An existing alternative evolves by the rules of its own type, with or
+   // without new alternatives after it.
+   STATIC_REQUIRE(psio::pssz_evolves_from<variant<u32, Alt0>, variant<u32, Alt1>>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<variant<u32, Alt0>, variant<u32, Alt1, u64>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<variant<u32, Alt1>, variant<u32, Alt0, u64>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<variant<u32, Alt0>, variant<u32, AltOther, u64>>);
+   // Wherever a variant is: an optional, a list, a map, a variant, a record.
+   STATIC_REQUIRE(psio::pssz_evolves_from<std::optional<Var1>, std::optional<Var2>>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<std::vector<Var1>, std::vector<Var2>>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<std::map<u32, Var1>, std::map<u32, Var2>>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<variant<u8, Var1>, variant<u8, Var2, u16>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<std::vector<Var2>, std::vector<Var1>>);
+}
+
+TEST_CASE("pssz_evolves_from: a larger new alternative may not move an enclosing width",
+          "[pssz][evolution][variant]")
+{
+   using namespace evo_variant;
+   // The variant alone writes no offsets: appending is compatible whatever
+   // the size of the new alternative.
+   STATIC_REQUIRE(psio::pssz_evolves_from<Small, Same>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<Small, Larger>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<variant<u8>, variant<u8, std::array<u8, 300>>>);
+
+   // A record with no cap: refused exactly when its width moves, as for an
+   // appended field.
+   STATIC_REQUIRE(psio::pssz_evolves_from<Tight<Small>, Tight<Same>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Tight<Small>, Tight<Larger>>);
+   // A cap reserves the room: the same change is compatible.
+   STATIC_REQUIRE(psio::pssz_evolves_from<Capped<Small>, Capped<Larger>>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<Capped<Small>, Capped<Same>>);
+
+   // A tuple and an array take their width from their own bound.
+   using Pad = std::array<u8, 249>;
+   STATIC_REQUIRE(psio::pssz_evolves_from<std::tuple<Small, Pad>, std::tuple<Same, Pad>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<std::tuple<Small, Pad>, std::tuple<Larger, Pad>>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<std::array<Small, 60>, std::array<Same, 60>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<std::array<Small, 60>, std::array<Larger, 60>>);
+
+   // A bounded list inside a capped record: the record's width stays, the
+   // list's table does not.
+   STATIC_REQUIRE(psio::pssz_evolves_from<Listed<Small>, Listed<Same>>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Listed<Small>, Listed<Larger>>);
+}
+
+TEST_CASE("pssz_evolves_from: annotations of a variant's alternatives",
+          "[pssz][evolution][variant]")
+{
+   using namespace evo_variant;
+   STATIC_REQUIRE(psio::pssz_evolves_from<Ann0, Ann1>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<Ann0, AnnWider>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Ann0, AnnTighter>);
+   STATIC_REQUIRE_FALSE(psio::pssz_evolves_from<Ann1, Ann0>);
+}
+
+TEST_CASE("an appended variant alternative: the bytes agree with the check",
+          "[pssz][evolution][variant]")
+{
+   using namespace evo_variant;
+   const auto bytes_of = [](const auto& value) { return psio::encode(psio::pssz{}, value); };
+   const auto valid    = []<typename T>(const std::vector<char>& bytes) {
+      return psio::validate<T>(psio::pssz{}, bytes).ok();
+   };
+   // New reads everything Old wrote, to the same value and the same bytes.
+   for (const Var1& old_value : {Var1{u32{7}}, Var1{std::string{"hello"}}, Var1{std::string{}}})
+   {
+      const auto bytes = bytes_of(old_value);
+      REQUIRE(valid.template operator()<Var2>(bytes));
+      const auto as_new = psio::decode<Var2>(psio::pssz{}, bytes);
+      REQUIRE(as_new.index() == old_value.index());
+      REQUIRE(bytes_of(as_new) == bytes);
+      // ... and Old reads a New value that is a value of Old's type.
+      REQUIRE(valid.template operator()<Var1>(bytes_of(as_new)));
+   }
+   // Old rejects the alternative it does not know.
+   const auto added = bytes_of(Var2{u64{9}});
+   REQUIRE(valid.template operator()<Var2>(added));
+   REQUIRE_FALSE(valid.template operator()<Var1>(added));
+
+   // Inside a record, with the alternative itself evolved.
+   using Old = Capped<variant<u8, Alt0>>;
+   using New = Capped<variant<u8, Alt1, u64>>;
+   STATIC_REQUIRE(psio::pssz_evolves_from<Old, New>);
+   Old old_record{};
+   old_record.v = Alt0{5};
+   const auto record_bytes = bytes_of(old_record);
+   REQUIRE(valid.template operator()<New>(record_bytes));
+   const auto new_record = psio::decode<New>(psio::pssz{}, record_bytes);
+   REQUIRE(std::get<Alt1>(new_record.v) == Alt1{5, std::nullopt});
+   REQUIRE(bytes_of(new_record) == record_bytes);
+   New grown{};
+   grown.v = u64{1};
+   REQUIRE_FALSE(valid.template operator()<Old>(bytes_of(grown)));
 }

@@ -276,6 +276,9 @@ psio_add_test(psio_pssz_length_bound_tests pssz_length_bound_tests.cpp)
 # The inferred size bound of variants, tuples and pairs, and the widths
 # that follow from it (typed and schema-driven).
 psio_add_test(psio_pssz_inferred_bound_tests pssz_inferred_bound_tests.cpp)
+# inferred_bound (what a width is chosen from) against max_encoded_size (the
+# largest encoding, at the real widths and at most the cap): cap boundaries.
+psio_add_test(psio_pssz_max_encoded_size_tests pssz_max_encoded_size_tests.cpp)
 # Bounds by annotation at any depth (element / keys / values / at<I>) and by
 # wrapper type (psio::bounded, psio::utf8_string): widths, bytes, enforcement.
 psio_add_test(psio_annotation_tree_tests annotation_tree_tests.cpp)
@@ -503,6 +506,9 @@ psio_add_test(psio_schema_ir_tests schema_ir_tests.cpp)
 
 # SchemaBuilder (schema_builder.hpp) — C++ reflection → Schema IR.
 psio_add_test(psio_schema_builder_tests schema_builder_tests.cpp)
+# A byte list is one schema node whichever C++ type spells the byte
+# (std::vector<char> = std::vector<std::uint8_t> = Custom{List<u8>, "hex"}).
+psio_add_test(psio_schema_byte_list_tests schema_byte_list_tests.cpp)
 add_executable(psio_schema_builder_identity_test schema_builder_identity_main.cpp schema_builder_identity_other.cpp)
 target_include_directories(psio_schema_builder_identity_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_features(psio_schema_builder_identity_test PRIVATE cxx_std_23)
@@ -515,6 +521,9 @@ add_test(NAME psio_schema_builder_identity_test COMMAND psio_schema_builder_iden
 
 # emit_wit (emit_wit.hpp) — Schema IR → WIT text emitter.
 psio_add_test(psio_emit_wit_tests emit_wit_tests.cpp)
+# The WIT text of the interface fixture's schema, pinned (the reference for
+# the other implementations' WIT emitters), with its known defects.
+psio_add_test(psio_interface_wit_tests interface_wit_tests.cpp)
 
 # pSSZ round-trip on Schema IR — the canonical schema-schema wire form.
 psio_add_test(psio_schema_pssz_tests schema_pssz_tests.cpp)

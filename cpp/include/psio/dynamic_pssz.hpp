@@ -405,7 +405,7 @@ namespace psio {
    // no bounded-size metadata today, so we cannot compute a narrower
    // width at runtime. Callers that know the schema is bounded should
    // use the static `psio::encode(pssz{}, value)` path, which picks
-   // the narrowest W via `max_encoded_size<T>()`.
+   // the narrowest W via `inferred_bound<T>()`.
    inline std::vector<char> tag_invoke(decltype(::psio::encode_dynamic),
                                        pssz, const schema& sc,
                                        const dynamic_value& dv)

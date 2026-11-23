@@ -2026,7 +2026,7 @@ and emitted via `PSIO_REFLECT(...)`:
   (`max_dynamic_data_spec`). Surfaced through
   `psio::max_dynamic_data_v<T>`. `psio::effective_max_dynamic_v<T>` is
   that cap when the type declares one — an explicit cap always rules
-  (`pssz-spec.md` §3.1) — and otherwise the bound `max_encoded_size<T>`
+  (`pssz-spec.md` §3.1) — and otherwise the bound `inferred_bound<T>`
   infers from the per-field `length_bound`s.
 
 ### 7.1 Encoder behavior

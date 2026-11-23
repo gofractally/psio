@@ -69,7 +69,7 @@ TEST_CASE("min<A> | max<B> merge into one length_bound", "[consistency][annotate
       psio::to_spec_tuple(psio::element(psio::max<1> | psio::max<2>))));
 
    // Both limits are enforced by every codec, and the upper one bounds the width.
-   STATIC_REQUIRE(psio::max_encoded_size<Ranged>().has_value());
+   STATIC_REQUIRE(psio::inferred_bound<Ranged>().has_value());
    const Ranged good{"abc", {"x"}};
    const auto   frame = psio::to_pssz(good);
    CHECK(psio::validate_pssz<Ranged>(bytes_of(frame)).ok());
@@ -497,9 +497,9 @@ TEST_CASE("as<hex_tag> on a wide integer is a text presentation only", "[consist
    STATIC_REQUIRE(!psio::has_binary_as_override_v<
                   psio::uint128,
                   psio::effective_annotations_for<Wide, psio::uint128, &Wide::amount>::value_t>);
-   STATIC_REQUIRE(psio::max_encoded_size<Wide>() == psio::max_encoded_size<Plain>());
+   STATIC_REQUIRE(psio::inferred_bound<Wide>() == psio::inferred_bound<Plain>());
    STATIC_REQUIRE(psio::auto_pssz_width_v<Wide> == psio::auto_pssz_width_v<Plain>);
-   STATIC_REQUIRE(psio::max_encoded_size<WideFixed>() == std::optional<std::size_t>{16});
+   STATIC_REQUIRE(psio::inferred_bound<WideFixed>() == std::optional<std::size_t>{16});
    const auto frame = psio::to_pssz(w);
    CHECK(std::vector<char>(frame.begin(), frame.end()) ==
          [&] { auto b = psio::to_pssz(p); return std::vector<char>(b.begin(), b.end()); }());
@@ -628,8 +628,8 @@ TEST_CASE("pssz_evolves_from: member annotations and caps", "[consistency][evolv
    STATIC_REQUIRE(!pssz_evolves_from<V1, CapTighter>);
    STATIC_REQUIRE(!pssz_evolves_from<V1, CapOtherWidth>);
    // Adding a cap: only one the old type's inferred bound fits.
-   STATIC_REQUIRE(*psio::max_encoded_size<Open>() <= 600);
-   STATIC_REQUIRE(*psio::max_encoded_size<Open>() > 400);
+   STATIC_REQUIRE(*psio::inferred_bound<Open>() <= 600);
+   STATIC_REQUIRE(*psio::inferred_bound<Open>() > 400);
    STATIC_REQUIRE(pssz_evolves_from<Open, OpenCapped>);
    STATIC_REQUIRE(!pssz_evolves_from<Open, OpenCappedLow>);
    STATIC_REQUIRE(pssz_evolves_from<OpenCapped, Open>);   // dropping it: nothing old is refused
@@ -718,7 +718,7 @@ TEST_CASE("sorted / unique / unique_keys: writers and checking readers", "[consi
    // The constraints change no byte and no width.
    CHECK(std::vector<char>(frame.begin(), frame.end()) ==
          [&] { auto b = psio::to_pssz(loose(ok)); return std::vector<char>(b.begin(), b.end()); }());
-   STATIC_REQUIRE(psio::max_encoded_size<Ranked>() == psio::max_encoded_size<Loose>());
+   STATIC_REQUIRE(psio::inferred_bound<Ranked>() == psio::inferred_bound<Loose>());
 
    auto refused = [](const char* what, auto&& change, std::string_view message) {
       INFO(what);
@@ -1036,15 +1036,15 @@ TEST_CASE("transparent: a bounded member makes the wrapper that bounded type",
    using namespace cons_tr;
    // Width inference sees the bound, exactly as it sees utf8_string<80>.
    STATIC_REQUIRE(psio::is_transparent_v<ann::Memo>);
-   STATIC_REQUIRE(psio::max_encoded_size<ann::Memo>() == std::optional<std::size_t>{80});
-   STATIC_REQUIRE(psio::max_encoded_size<ann::Memo>() == psio::max_encoded_size<wrap::Memo>());
-   STATIC_REQUIRE(psio::max_encoded_size<ann::Tags>() == psio::max_encoded_size<wrap::Tags>());
-   STATIC_REQUIRE(psio::max_encoded_size<ann::Tags>().has_value());
-   STATIC_REQUIRE(!psio::max_encoded_size<Unbounded>().has_value());
-   STATIC_REQUIRE(psio::max_encoded_size<AnnHolder>() == psio::max_encoded_size<WrapHolder>());
+   STATIC_REQUIRE(psio::inferred_bound<ann::Memo>() == std::optional<std::size_t>{80});
+   STATIC_REQUIRE(psio::inferred_bound<ann::Memo>() == psio::inferred_bound<wrap::Memo>());
+   STATIC_REQUIRE(psio::inferred_bound<ann::Tags>() == psio::inferred_bound<wrap::Tags>());
+   STATIC_REQUIRE(psio::inferred_bound<ann::Tags>().has_value());
+   STATIC_REQUIRE(!psio::inferred_bound<Unbounded>().has_value());
+   STATIC_REQUIRE(psio::inferred_bound<AnnHolder>() == psio::inferred_bound<WrapHolder>());
    STATIC_REQUIRE(psio::auto_pssz_width_v<AnnHolder> == psio::auto_pssz_width_v<WrapHolder>);
-   STATIC_REQUIRE(psio::max_encoded_size<std::vector<ann::Memo>>() ==
-                  psio::max_encoded_size<std::vector<wrap::Memo>>());
+   STATIC_REQUIRE(psio::inferred_bound<std::vector<ann::Memo>>() ==
+                  psio::inferred_bound<std::vector<wrap::Memo>>());
    STATIC_REQUIRE(psio::auto_pssz_width_v<Small> == 1);   // 80 bytes, a header and a slot
 
    // The same Schema IR as the wrapper-type spelling: a named alias of the
@@ -1169,23 +1169,31 @@ TEST_CASE("transparent: a bounded member makes the wrapper that bounded type",
    STATIC_REQUIRE(!psio::pssz_evolves_from<ann::Memo, raw::Memo>);
 }
 
-// ── max_encoded_size is the inferred bound, for an argument tuple too ─────
-TEST_CASE("max_encoded_size of a capped argument tuple is its inferred bound", "[consistency][caps]")
+// ── The inferred bound has no cap in it, for an argument tuple too ────────
+TEST_CASE("the inferred bound of a capped argument tuple does not read its cap",
+          "[consistency][caps]")
 {
-   // docs/pssz-spec.md 3.2: the cap is not part of max_encoded_size, for a
+   // docs/pssz-spec.md 3.2: the cap is not part of the inferred bound, for a
    // record and for a method's argument tuple alike. The cap rules the width
-   // (3.1) and is what the type contributes to one that holds it.
+   // (3.1) and is what the type contributes to one that holds it. The
+   // largest encoding is max_encoded_size (3.7): at the real width, and at
+   // most the cap.
    using cons_fields::PutArgs;   // (u32, string max 8), maxDynamicData(64)
    STATIC_REQUIRE(psio::max_dynamic_data_v<PutArgs> == std::optional<std::size_t>{64});
-   STATIC_REQUIRE(psio::max_encoded_size<PutArgs>() == std::optional<std::size_t>{1 + 4 + 1 + 8});
+   STATIC_REQUIRE(psio::inferred_bound<PutArgs>() == std::optional<std::size_t>{1 + 4 + 1 + 8});
    STATIC_REQUIRE(psio::effective_max_dynamic_v<PutArgs> == std::optional<std::size_t>{64});
    STATIC_REQUIRE(psio::auto_pssz_width_v<PutArgs> == 1);
+   STATIC_REQUIRE(psio::max_encoded_size<PutArgs>() == std::optional<std::size_t>{1 + 4 + 1 + 8});
    // The same for a record with the same members and cap.
    STATIC_REQUIRE(psio::max_dynamic_data_v<cons_cap::Capped> == std::optional<std::size_t>{16});
+   STATIC_REQUIRE(psio::inferred_bound<cons_cap::Capped>() == std::optional<std::size_t>{16});
    STATIC_REQUIRE(psio::max_encoded_size<cons_cap::Capped>() == std::optional<std::size_t>{16});
    // Held by another type, a capped tuple reserves its cap.
-   STATIC_REQUIRE(psio::max_encoded_size<std::tuple<PutArgs>>() ==
+   STATIC_REQUIRE(psio::inferred_bound<std::tuple<PutArgs>>() ==
                   std::optional<std::size_t>{1 + 1 + 64});
+   // ... and encodes to at most the tuple's own maximum.
+   STATIC_REQUIRE(psio::max_encoded_size<std::tuple<PutArgs>>() ==
+                  std::optional<std::size_t>{1 + 1 + 14});
 }
 
 // ── The JSON form of a method's arguments ────────────────────────────────

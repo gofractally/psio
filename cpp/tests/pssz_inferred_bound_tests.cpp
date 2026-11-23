@@ -1,5 +1,5 @@
 // The inferred size bound of variants and tuples (docs/pssz-spec.md 3.2):
-//   Variant(Ts...)  1 + max(max_encoded_size(T_i))
+//   Variant(Ts...)  1 + max(inferred_bound(T_i))
 //   Tuple(Ts...)    the extensible record of its elements: header + per
 //                   element its payload (+ an offset slot when variable)
 //   Pair(A, B)      Tuple(A, B)
@@ -36,7 +36,7 @@ namespace bound_tests
    using Name = psio::utf8_string<32>;
 
    template <typename T>
-   constexpr std::optional<std::size_t> bound = psio::max_encoded_size<T>();
+   constexpr std::optional<std::size_t> bound = psio::inferred_bound<T>();
    template <typename T>
    constexpr std::size_t width = psio::auto_pssz_width_v<T>;
 

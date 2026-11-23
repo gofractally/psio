@@ -79,7 +79,7 @@ namespace nested_assoc_cases
 
    // A map / set is the list it is, a nested value the byte list it is.
    static_assert(psio::pssz_evolves_from<psio::nested<Index>, psio::nested<Index>>);
-   static_assert(!psio::max_encoded_size<ByName>().has_value());
+   static_assert(!psio::inferred_bound<ByName>().has_value());
    static_assert(psio::detail::key_impl::orders_entries_v<NTransfer>);
    static_assert(psio::detail::key_impl::orders_entries_v<std::tuple<std::uint8_t, NLater>>);
    static_assert(!psio::detail::iterates_in_key_order_v<Seen>);

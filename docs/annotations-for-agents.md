@@ -62,7 +62,7 @@ The C++ snippets are consecutive lines of
 | E4 | Never move `maxDynamicData` across a width class (255 / 65535) — it changes the record's offsets and those of the containers beneath it — and never lower it; raising it within its class is allowed. Never exceed, raise or drop a `maxFields`. Never add or remove `definitionWillNotChange()` or `transparent()`. | [8.4](annotations.md#84-summary) |
 | E5 | **A member bound may only widen** (larger `max`, smaller `min`), and only if no offset width moves; never tighten one. `utf8`, `sorted` / `unique` / `unique_keys` never change. `pssz_evolves_from` checks all of this. Widening is one-way: old readers reject the new larger values, so upgrade readers first. Invariants and enumerator meanings are not checked: treat them as frozen. | [8.3](annotations.md#83-annotations-bounds-may-only-widen) |
 | E6 | **Enums: only add enumerators.** Never change the underlying type, renumber or reuse a value. | [6.3](annotations.md#63-enums) |
-| E7 | Do not add a variant alternative to a published variant; do not change an array length. | [8.2](annotations.md#82-what-is-not-compatible-and-how-the-tooling-catches-it) |
+| E7 | **Variants: only append alternatives**; never remove, reorder, insert or retype one. A new alternative larger than the existing ones raises the variant's bound and is incompatible if it moves the width of whatever holds the variant (same remedy as E2: a cap declared before publication). Old readers reject a value holding the new alternative: upgrade readers first. Do not change an array length. | [8.2](annotations.md#82-what-is-not-compatible-and-how-the-tooling-catches-it) |
 | E8 | Methods: append `std::optional` parameters only, under the method's cap. | [5.11](annotations.md#511-methodname-) |
 | E9 | Prove every revision: `static_assert(psio::pssz_evolves_from<Old, New>)` against a kept copy of the previous declaration. | [8.2](annotations.md#82-what-is-not-compatible-and-how-the-tooling-catches-it) |
 
@@ -138,8 +138,8 @@ struct Memo
 // Memo is the bounded type its member's annotations describe: on the wire it
 // is psio::utf8_string<80>.
 static_assert(psio::is_transparent_v<Memo>);
-static_assert(psio::max_encoded_size<Memo>() == 80);
-static_assert(psio::max_encoded_size<Memo>() == psio::max_encoded_size<psio::utf8_string<80>>());
+static_assert(psio::inferred_bound<Memo>() == 80);
+static_assert(psio::inferred_bound<Memo>() == psio::inferred_bound<psio::utf8_string<80>>());
 ```
 
    In a capped argument list (`tut-9c`):
@@ -153,7 +153,7 @@ struct Payments
 using PayArgs = psio::reflect<Payments>::method_arg_tuple<0>;
 // The bound travels with the type: no attr on the parameter, and the argument
 // list is the one of Bank::transfer.
-static_assert(psio::max_encoded_size<PayArgs>() == psio::max_encoded_size<TransferArgs>());
+static_assert(psio::inferred_bound<PayArgs>() == psio::inferred_bound<TransferArgs>());
 static_assert(psio::max_dynamic_data_v<PayArgs> == 1024);
 static_assert(psio::auto_pssz_width_v<PayArgs> == 2);
 ```
@@ -246,7 +246,7 @@ static_assert(psio::pssz_child_wider_than_cap_v<Order>);   // Item cannot use it
 | Anti-pattern | Do instead |
 |---|---|
 | `psio::bounded<std::string, 8> tags;` introduced to "add a limit" | `std::vector<std::string> tags;` + `attr(tags, max<8> \| element(utf8 \| max<16>))` |
-| `attr(tags, max<8>)` on a `std::vector<std::string>` and calling it bounded | add `element(max<N>)`; assert `max_encoded_size<T>().has_value()` |
+| `attr(tags, max<8>)` on a `std::vector<std::string>` and calling it bounded | add `element(max<N>)`; assert `inferred_bound<T>().has_value()` |
 | Publishing an uncapped record that will obviously grow | `maxDynamicData(N)` from the first version |
 | Adding a required field, or an optional field in the middle | optional, last |
 | Tightening a bound in place after publication | never; a bound may only widen (assert `pssz_evolves_from`), else a new optional field or a new type |
@@ -273,8 +273,8 @@ static_assert(psio::pssz_child_wider_than_cap_v<Order>);   // Item cannot use it
 Width and bound of a type without a cap (`tut-2b`):
 
 ```cpp
-static_assert(psio::max_encoded_size<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);
-static_assert(psio::max_encoded_size<Account>() == 187);        // <= 255: 8-bit offsets
+static_assert(psio::inferred_bound<Account>() == 3 + 8 + 32 + (8 + 8 * 16) + 8);
+static_assert(psio::inferred_bound<Account>() == 187);        // <= 255: 8-bit offsets
 static_assert(psio::auto_pssz_width_v<Account> == 1);
 ```
 
@@ -288,7 +288,7 @@ static_assert(psio::auto_pssz_width_v<AccountV1> == 2);
 "Still unbounded" is a fact worth asserting too (`tut-2c`):
 
 ```cpp
-static_assert(!psio::max_encoded_size<AccountCountOnly>().has_value());
+static_assert(!psio::inferred_bound<AccountCountOnly>().has_value());
 static_assert(psio::auto_pssz_width_v<AccountCountOnly> == 4);
 ```
 
@@ -305,7 +305,7 @@ Method arguments (`tut-9a`, `tut-9b`):
 using OpenArgs     = psio::reflect<Bank>::method_arg_tuple<0>;
 using TransferArgs = psio::reflect<Bank>::method_arg_tuple<1>;
 // open has no cap: (header + 2 slots) x 1 byte + owner 32 + tags 136 = 171, 8-bit.
-static_assert(psio::max_encoded_size<OpenArgs>() == 3 + 32 + (8 + 8 * 16));
+static_assert(psio::inferred_bound<OpenArgs>() == 3 + 32 + (8 + 8 * 16));
 static_assert(psio::auto_pssz_width_v<OpenArgs> == 1);
 // transfer is capped: 16-bit for its lifetime.
 static_assert(psio::max_dynamic_data_v<TransferArgs> == 1024);

@@ -61,7 +61,7 @@
 //      maxFields(N) when declared, else the current field count.
 //   psio::effective_max_dynamic_v<T>   → optional<size_t>  (in max_size.hpp)
 //      the explicit cap when there is one (an explicit cap always rules,
-//      docs/pssz-spec.md 3.1), else the inferred bound max_encoded_size<T>.
+//      docs/pssz-spec.md 3.1), else inferred_bound<T> (the inferred bound).
 //
 // Cap enforcement helpers (every format consumer reuses these):
 //
@@ -1261,7 +1261,7 @@ namespace psio {
    }();
 
    // `effective_max_dynamic_v<T>` lives in psio/max_size.hpp: it is the
-   // explicit cap, or without one the bound `max_encoded_size<T>` infers
+   // explicit cap, or without one the bound `inferred_bound<T>` infers
    // from the fields.
 
    // ── Shared cap-enforcement helpers ────────────────────────────────────

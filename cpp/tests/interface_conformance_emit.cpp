@@ -50,10 +50,11 @@ namespace
       std::optional<std::uint64_t> max_dynamic_data;
       std::optional<std::uint64_t> max_fields;
       std::uint32_t                width = 0;
-      std::optional<std::uint64_t> max_encoded_size;
+      std::optional<std::uint64_t> inferred_bound;     // what a width is chosen from
+      std::optional<std::uint64_t> max_encoded_size;   // the largest encoding
    };
    PSIO_REFLECT(MethodRow, name, params, named, args, result, max_dynamic_data, max_fields, width,
-                max_encoded_size)
+                inferred_bound, max_encoded_size)
    struct Row
    {
       std::string                name;
@@ -104,8 +105,10 @@ namespace
       if (R::method_max_fields<I>)
          m.max_fields = *R::method_max_fields<I>;
       m.width = static_cast<std::uint32_t>(psio::auto_pssz_width_v<Args<I>>);
-      if (constexpr auto bound = psio::max_encoded_size<Args<I>>(); bound)
-         m.max_encoded_size = *bound;
+      if (constexpr auto bound = psio::inferred_bound<Args<I>>(); bound)
+         m.inferred_bound = *bound;
+      if (constexpr auto largest = psio::max_encoded_size<Args<I>>(); largest)
+         m.max_encoded_size = *largest;
       // The schema says the same.
       std::size_t width = 0;
       if (!ir::auto_width(schema(), args_root(I), width).ok() || width != m.width)

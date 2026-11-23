@@ -118,7 +118,7 @@ namespace nested_cases
       std::optional<std::vector<std::uint8_t>> maybe;
       PSIO_REFLECT(RawCapped, attr(note, max<8>), attr(maybe, max<4>))
    };
-   static_assert(psio::max_encoded_size<Capped>() == psio::max_encoded_size<RawCapped>());
+   static_assert(psio::inferred_bound<Capped>() == psio::inferred_bound<RawCapped>());
    static_assert(psio::auto_pssz_width_v<Capped> == psio::auto_pssz_width_v<RawCapped>);
    static_assert(psio::auto_pssz_width_v<Capped> == 1);
 
@@ -197,9 +197,9 @@ namespace nested_cases
    };
 
    // Width, size and evolution: a nested value is a byte list.
-   static_assert(!psio::max_encoded_size<psio::nested<std::uint32_t>>().has_value());
+   static_assert(!psio::inferred_bound<psio::nested<std::uint32_t>>().has_value());
    static_assert(psio::auto_pssz_width_v<psio::nested<std::uint32_t>> == 4);
-   static_assert(!psio::max_encoded_size<Action>().has_value());
+   static_assert(!psio::inferred_bound<Action>().has_value());
    static_assert(psio::pssz_evolves_from<psio::nested<Transfer>, psio::nested<TransferV2>>);
    static_assert(psio::pssz_evolves_from<Action, ActionV2>);
    static_assert(psio::pssz_evolves_from<Action, DeferredAction>);

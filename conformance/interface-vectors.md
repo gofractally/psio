@@ -44,7 +44,8 @@ it). An implementation declares the same interface in its own syntax.
   "schema_ir":   "<hex of pssz(Schema)>",
   "schema_json": "<the psio::json text of the same Schema>",
   "methods": [ { "name", "params", "named", "args", "result",
-                 "max_dynamic_data", "max_fields", "width", "max_encoded_size" } ],
+                 "max_dynamic_data", "max_fields", "width", "inferred_bound",
+                 "max_encoded_size" } ],
   "vectors": [ { "name", "kind", "method", "pssz", "json", "ijson", "text", "reason" } ] }
 ```
 
@@ -71,8 +72,11 @@ it must contain, and every implementation must build identically:
 parameter: the text form is the object), `args` (the schema name of the
 argument list), `result` (whether there is one), the two caps, `width` (the
 automatic offset width of the argument list: its cap's width class, else its
-inferred bound's) and `max_encoded_size` (the inferred bound of
-`docs/pssz-spec.md` §3.2 — the cap is not part of it).
+inferred bound's), `inferred_bound` (the inferred bound of
+`docs/pssz-spec.md` §3.2 — the cap is not part of it; this number was
+recorded as `max_encoded_size` before) and `max_encoded_size` (the largest
+encoding of the argument list, §3.7: the parameters at the width actually
+written, and at most the cap).
 
 ## Rows
 

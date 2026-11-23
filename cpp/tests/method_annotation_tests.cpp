@@ -106,20 +106,22 @@ static_assert(std::is_same_v<std::tuple_element_t<2, Transfer>, std::string>);
 // An explicit cap rules: 256 selects 2-byte offsets although the fields
 // need at most 1 + (1 + 16) + 8 + (1 + 80) = 107 bytes.
 static_assert(psio::max_dynamic_data_v<Transfer> == 256);
-// (max_encoded_size is the inferred bound, as for a capped record: the cap
-// is not in it. docs/pssz-spec.md 3.2.)
-static_assert(psio::max_encoded_size<Transfer>() == 1 + (1 + 16) + 8 + (1 + 80));
+// (The cap is not in the inferred bound, as for a capped record:
+// docs/pssz-spec.md 3.2. The largest encoding counts the header and the two
+// slots at the cap's 2 bytes: 3.7.)
+static_assert(psio::inferred_bound<Transfer>() == 1 + (1 + 16) + 8 + (1 + 80));
+static_assert(psio::max_encoded_size<Transfer>() == 2 + (2 + 16) + 8 + (2 + 80));
 static_assert(psio::effective_max_dynamic_v<Transfer> == 256);
 static_assert(psio::auto_pssz_width_v<Transfer> == 2);
 // Without a cap: the inferred bound, rounded up to the next width.
 static_assert(!psio::max_dynamic_data_v<TransferUncapped>.has_value());
-static_assert(psio::max_encoded_size<TransferUncapped>() == 1 + (1 + 16) + 8 + (1 + 80));
+static_assert(psio::inferred_bound<TransferUncapped>() == 1 + (1 + 16) + 8 + (1 + 80));
 static_assert(psio::auto_pssz_width_v<TransferUncapped> == 1);
 // No annotation: exactly the plain tuple.
-static_assert(!psio::max_encoded_size<Plain>().has_value());
+static_assert(!psio::inferred_bound<Plain>().has_value());
 static_assert(psio::auto_pssz_width_v<Plain> == 4);
 // header 1 + slot 1 + 4 x (table slot 1 + 8) + slot 1 + (selector 1 + 4)
-static_assert(psio::max_encoded_size<Batch>() == 1 + (1 + 4 * (1 + 8)) + (1 + 1 + 4));
+static_assert(psio::inferred_bound<Batch>() == 1 + (1 + 4 * (1 + 8)) + (1 + 1 + 4));
 static_assert(psio::auto_pssz_width_v<Batch> == 1);
 static_assert(psio::auto_pssz_width_v<Note> == 1);
 static_assert(psio::auto_pssz_width_v<Version> == 1);  // the empty tuple: its header
@@ -207,7 +209,7 @@ TEST_CASE("method annotations: the argument tuple encodes with its annotations",
    CHECK(bytes.size() == 1 + 1 + 8 + 1 + 5 + 6);
    // The same bytes as the tuple of the equivalent wrapper types.
    using W = std::tuple<psio::utf8_string<16>, std::uint64_t, psio::utf8_string<80>>;
-   static_assert(psio::max_encoded_size<W>() == psio::max_encoded_size<TransferUncapped>());
+   static_assert(psio::inferred_bound<W>() == psio::inferred_bound<TransferUncapped>());
    CHECK(bytes == bytes_of(W{psio::utf8_string<16>{"alice"}, 5, psio::utf8_string<80>{"thanks"}}));
    // Not those of the plain tuple, whose offsets are 4 wide.
    CHECK(bytes_of(args).size() == 4 + 4 + 8 + 4 + 5 + 6);
