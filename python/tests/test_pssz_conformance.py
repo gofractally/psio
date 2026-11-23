@@ -356,7 +356,9 @@ class PsszFixture(unittest.TestCase):
                                     self.assertIn(e.kind, ("value", "json"), name)
                                     self.assertIn(e.reason, set(TEXT_BOUND) | BOUND_REASONS
                                                   | {"json: member length bound violated"}, f"{name}: {fmt}")
-                        c["treeNotUtf8" if not_utf8 else "treeWriterRefused"] += 1
+                        c["treeNotUtf8" if not_utf8 else "treeOutsideValue"] += 1
+                        if path == "schema" and not not_utf8:
+                            c["treeWriterRefused"] += 1
                 c["validateReject"] += 1
                 continue
 
@@ -448,8 +450,12 @@ class PsszFixture(unittest.TestCase):
         tree = [v for v in fx["vectors"] if v["class"] in ("annotated-bounds", "method-args") and v["expect"] == "reject"]
         self.assertEqual(len(tree), 109)
         self.assertEqual(a["treeReject"] + e["treeReject"], len(tree))
-        self.assertEqual([a["treeWriterRefused"] + e["treeWriterRefused"], a["treeNotUtf8"] + e["treeNotUtf8"],
+        self.assertEqual([a["treeOutsideValue"] + e["treeOutsideValue"], a["treeNotUtf8"] + e["treeNotUtf8"],
                           a["treeOverCap"] + e["treeOverCap"]], [96, 12, 1])
+        # Every writer refuses the value outside its bounds.  (Schema-driven:
+        # the value is read by a twin schema without bounds, which exists
+        # only in the dynamic model.  Typed writers: test_typed.py.)
+        self.assertEqual(a["treeWriterRefused"] + e["treeWriterRefused"], 96 if path == "schema" else 0)
         self.assertGreaterEqual(a["rawNonUtf8NoText"], 11)
         rejects = sum(1 for v in fx["vectors"] if v["expect"] == "reject" and v["class"] != "invariant")
         self.assertEqual(reasons_exact + reasons_family, rejects)
@@ -460,9 +466,8 @@ class PsszFixture(unittest.TestCase):
     def test_schema_driven(self) -> None:
         self.replay("schema")
 
-    if hasattr(psio, "schema_of"):  # (until the typed layer lands)
-        def test_typed(self) -> None:
-            self.replay("typed")
+    def test_typed(self) -> None:
+        self.replay("typed")
 
     def test_corruption_sweep(self) -> None:
         """Truncations and single-byte corruptions of the valid frames never escape as a non-psio error."""

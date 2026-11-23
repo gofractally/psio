@@ -164,9 +164,8 @@ class TimeKeyFixture(unittest.TestCase):
     def test_schema_driven(self) -> None:
         self.replay("schema")
 
-    if hasattr(psio, "schema_of"):  # (until the typed layer lands)
-        def test_typed(self) -> None:
-            self.replay("typed")
+    def test_typed(self) -> None:
+        self.replay("typed")
 
     def test_time_ids(self) -> None:
         """The schema marks time values with their ids; ticks are ints at every width."""

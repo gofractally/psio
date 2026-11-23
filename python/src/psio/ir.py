@@ -283,7 +283,7 @@ CHAR = custom_of(U8, "char")
 #: UTF-8 text (``str``).
 STRING = custom_of(list_of(U8), "utf8")
 #: A raw string: any bytes (``bytes``).
-RAW_STRING = custom_of(list_of(CHAR), "string")
+RAW_STRING = custom_of(list_of(U8), "string")
 #: A byte list (``bytes``; hex in text).
 BYTES = custom_of(list_of(U8), "hex")
 

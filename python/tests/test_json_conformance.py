@@ -192,9 +192,8 @@ class JsonFixture(unittest.TestCase):
     def test_schema_driven(self) -> None:
         self.replay("schema")
 
-    if hasattr(psio, "schema_of"):  # (until the typed layer lands)
-        def test_typed(self) -> None:
-            self.replay("typed")
+    def test_typed(self) -> None:
+        self.replay("typed")
 
     def test_malformed_schemas(self) -> None:
         """Malformed schemas are refused at every schema-driven entry point; their neighbours work."""

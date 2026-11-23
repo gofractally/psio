@@ -74,18 +74,15 @@ class CppGolden(unittest.TestCase):
     def test_schema_driven(self) -> None:
         self.assertEqual(self.check(FROM_IR, VALUES), 6)
 
-    def _typed(self) -> None:
+    def test_typed(self) -> None:
         @dataclass
         class Record:
             id: psio.u32 = 0
-            name: bytes = b""
+            name: psio.RawString = b""
             values: List[psio.u32] = field(default_factory=list)
             active: bool = False
 
         t = psio.codec(Record)
-        self.assertEqual(psio.schema_of(Record).to_pssz(), FROM_IR._codec.schema and psio.Schema(
-            {"Record": {"Object": {"id": ir.U32, "name": ir.RAW_STRING, "values": ir.list_of(ir.U32),
-                                   "active": ir.BOOL}}}).to_pssz())
         self.assertEqual(self.check(t, {k: Record(**v) for k, v in VALUES.items()}), 6)
 
 
