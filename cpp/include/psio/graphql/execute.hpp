@@ -727,8 +727,20 @@ namespace psio::graphql
             }
          }
 
+         // `_` of a record without members.
+         static bool placeholder_slot(exec& e, const void*, const plan_field&)
+         {
+            e.w.append(std::string_view{"true"});
+            return true;
+         }
+
+         // Indexed by field_desc::slot.
          static constexpr auto table = []<std::size_t... Is>(std::index_sequence<Is...>) {
-            return std::array<handler, sizeof...(Is)>{&slot<Is>...};
+            std::array<handler, def::slot_count == 0 ? 1 : def::slot_count> out{};
+            ((out[Is] = &slot<Is>), ...);
+            if constexpr (def::slot_count == 0)
+               out[0] = &placeholder_slot;
+            return out;
          }(std::make_index_sequence<def::slot_count>{});
       };
 

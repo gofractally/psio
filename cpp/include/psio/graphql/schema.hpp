@@ -1295,15 +1295,15 @@ namespace psio::graphql
          f.deprecated         = m.deprecated;
          f.description        = m.description;
          f.deprecation_reason = m.reason;
-         if constexpr (std::is_void_v<typename S::result>)
+         using V = typename S::result;
+         if constexpr (std::is_void_v<V>)
             f.type = type_ref{&leaf_type<bool>::value, 0, 1};
          else
-            f.type = PSIO_GRAPHQL_OUT_REF(typename S::result);
+            f.type = PSIO_GRAPHQL_OUT_REF(V);
          if constexpr (m.is_id)
          {
-            static_assert(!std::is_void_v<typename S::result> &&
-                             out_wrap<typename S::result>::info.depth == 0 &&
-                             shape_of<typename out_wrap<typename S::result>::named>() == shape::leaf,
+            static_assert(!std::is_void_v<V> && out_wrap<V>::info.depth == 0 &&
+                             shape_of<typename out_wrap<V>::named>() == shape::leaf,
                           "psio::graphql::id annotates a scalar member");
             f.type.named = &id_type;
          }
@@ -1317,14 +1317,25 @@ namespace psio::graphql
          return f;
       }
 
+      // The field of an object type without members or methods (see
+      // object_fields::placeholder).
+      inline constexpr std::string_view placeholder_name = "_";
+
       template <typename T, bool Mutation>
       struct object_fields
       {
          static constexpr std::size_t slot_count = object_def<T>::slot_count;
 
-         static constexpr std::size_t count = []<std::size_t... Is>(std::index_sequence<Is...>) {
+         // GraphQL has no object type without fields. A record with no
+         // members and no methods (a marker: `struct TLSInfo {}`) gets the
+         // one field `_: Boolean`, which is always true — what servers with
+         // SDL-first schemas write for an empty type.
+         static constexpr bool placeholder = slot_count == 0;
+
+         static constexpr std::size_t real_count = []<std::size_t... Is>(std::index_sequence<Is...>) {
             return (std::size_t{slot_visible<T, Mutation, Is>()} + ... + 0);
          }(std::make_index_sequence<slot_count>{});
+         static constexpr std::size_t count = real_count + (placeholder ? 1 : 0);
 
          static constexpr auto value = [] {
             std::array<field_desc, count> out{};
@@ -1336,6 +1347,10 @@ namespace psio::graphql
                 }()),
                 ...);
             }(std::make_index_sequence<slot_count>{});
+            if constexpr (placeholder)
+               out[n++] = field_desc{.name = placeholder_name,
+                                     .type = type_ref{&leaf_type<bool>::value, 0, 0},
+                                     .slot = 0};
             return out;
          }();
 

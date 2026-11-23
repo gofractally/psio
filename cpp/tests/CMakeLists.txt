@@ -747,6 +747,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_graphql_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_graphql_noexceptions_test COMMAND psio_graphql_noexceptions_test)
+# The engine as a service uses it: each rule on a small schema.
+psio_add_test(psio_graphql_service_tests graphql_service_tests.cpp)
 # Schemas that must not compile, each with a message naming the reason.
 function(psio_graphql_compile_fail NAME DEFINE MESSAGE)
    add_test(NAME psio_graphql_${NAME}_compile_fail

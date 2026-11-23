@@ -93,6 +93,7 @@ shape.
 | C++ | GraphQL |
 |---|---|
 | reflected record | Object. Fields: the reflected data members, then the reflected `const` (or static) methods. A method with parameters is a field with arguments named by the reflected parameter names (`method(find, id, limit)`; every parameter must be named). A `const` method returning `void` is not a field |
+| reflected record without members or methods (`struct TLSInfo { PSIO_REFLECT(TLSInfo) };`) | Object with the one field `_: Boolean`, always `true` ([Records without members](#records-without-members)) |
 | the same record as a parameter | Input object named `<Name>Input` (unchanged if the name already ends in `Input`); must be default-constructible |
 | `std::optional<T>`, `T*`, `unique_ptr`, `shared_ptr` | nullable `T`; every other type is non-null |
 | `psio::graphql::result<T>` (or any type with `has_value()`, `*`, `error()`) | nullable `T`; an error becomes a field error |
@@ -178,6 +179,26 @@ Descriptions (`doc`) and deprecation appear in introspection and SDL.
 Enum values, arguments and input fields of methods have no place for an
 annotation and so no description.
 
+### Records without members
+
+GraphQL has no object type without fields, and a selection set cannot be
+empty. A reflected record with no members and no methods — a marker such as
+`struct TLSInfo { PSIO_REFLECT(TLSInfo) };`, an alternative of a union that
+carries no data — is the object type
+
+```graphql
+type TLSInfo { _: Boolean }
+```
+
+whose field `_` is always `true`. This is the placeholder SDL-first servers
+write for a type that has no field yet (`_: Boolean` in graphql-tools and
+Apollo schemas); the type keeps its name, so `__typename` and `... on
+TLSInfo` work, an `std::optional<TLSInfo>` is still `null` or an object, and
+a client that only wants presence selects `tls { _ }` or
+`tls { __typename }`. The same holds for a query root without members. A
+record whose members are all *hidden* is still a compile error (that is a
+mistake, not a marker), and so is an empty record as an input object.
+
 ### Compile-time errors
 
 Rejected with a `static_assert` that names the reason
@@ -186,7 +207,7 @@ same GraphQL name (including `Foo`'s input object against a type named
 `FooInput`), two members of a type with the same name, a member whose type
 has no mapping, a `std::variant` alternative that is not a record, a method
 with unnamed parameters, an unsupported argument type, an optional of an
-optional, `id` on a non-scalar, an object type with no visible field.
+optional, `id` on a non-scalar, an object type whose members are all hidden.
 A `psio::nested<T, nested_validation::deferred>` member is a type with no
 mapping (an enclosing reader has not checked that its bytes are a `T`: hide
 it, or expose the `T` from a method after validating), and a nested value
@@ -395,8 +416,7 @@ WebAssembly (no WASI sysroot on the machine).
 - **Subscriptions.**
 - **Interfaces.** Reflection has no notion that maps to them; unions
   (`std::variant`) are the only abstract types.
-- **Argument and input-field default values**; `ID` as an argument type
-  (a method parameter cannot be annotated).
+- **Argument and input-field default values**; `ID` as an argument type.
 - **Custom directives**; only `@skip` and `@include` (and `@deprecated` in
   the schema). `@specifiedBy` is not listed and `specifiedByURL` is null.
 - **Descriptions of enum values, arguments and input fields of methods.**
@@ -422,6 +442,7 @@ WebAssembly (no WASI sysroot on the machine).
 | `cpp/include/psio/graphql/introspection.hpp` | `__schema` / `__type`, `sdl()` |
 | `cpp/include/psio/graphql/connection.hpp` | `row_source`, `paginate`, `connection` |
 | `cpp/tests/graphql_tests.cpp`, `graphql_fixture.hpp` | the conformance suite and its schema |
+| `cpp/tests/graphql_service_tests.cpp` | the rules a service leans on (markers), each on a small schema |
 | `cpp/tests/graphql_noexceptions.cpp` | exception-disabled build-and-run check |
 | `cpp/tests/graphql_schema_fail.cpp` | schemas that must not compile |
 | `cpp/benchmarks/bench_graphql.cpp` | benchmark against the previous engine |
