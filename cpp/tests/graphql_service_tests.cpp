@@ -105,3 +105,55 @@ TEST_CASE("graphql: instantiations of a class template have distinct names", "[g
    static_assert(gql::affixed_name<"Pre", gap_template::Box<std::int32_t>, "Post"> == "PreBox_IntPost");
    static_assert(gql::affixed_name<"", std::string, "Row"> == "StringRow");
 }
+
+// ── Flattened members ───────────────────────────────────────────────────────
+namespace gap_flatten
+{
+   using gap_empty::Nothing;
+   struct Inner
+   {
+      std::int32_t a      = 1;
+      std::int32_t secret = 2;
+      std::int32_t twice() const { return 2 * a; }
+      std::string  echo(std::string s) const { return s + std::to_string(a); }
+      PSIO_REFLECT(Inner, a, attr(secret, psio::graphql::hidden), method(twice), method(echo, s))
+   };
+   struct Deep
+   {
+      std::int32_t d = 4;
+      Inner        inner;
+      PSIO_REFLECT(Deep, d, attr(inner, psio::graphql::flatten))
+   };
+   struct Outer
+   {
+      std::int32_t b = 3;
+      Deep         deep;
+      Nothing      none;
+      std::int32_t z = 5;
+      PSIO_REFLECT(Outer, b, attr(deep, psio::graphql::flatten), attr(none, psio::graphql::flatten), z)
+   };
+   struct Query
+   {
+      Outer outer() const { return {}; }
+      PSIO_REFLECT(Query, method(outer))
+   };
+   using api = gql::schema<Query>;
+   inline std::string run(std::string_view text, std::string_view variables = {})
+   {
+      return run_on<api>(Query{}, text, variables);
+   }
+}  // namespace gap_flatten
+
+TEST_CASE("graphql: flattened members", "[graphql][service]")
+{
+   // The fields of Deep and, through it, of Inner stand where `deep` is;
+   // a flattened record without members adds nothing; hidden stays hidden.
+   CHECK(gap_flatten::api::sdl().find("type Outer {\n  b: Int!\n  d: Int!\n  a: Int!\n  twice: Int!\n  echo(s: String!): String!\n  z: Int!\n}\n") !=
+         std::string::npos);
+   CHECK(gap_flatten::run(R"({ outer { z echo(s: "n") twice a d b e2: echo(s: "m") __typename } })") ==
+         R"({"data":{"outer":{"z":5,"echo":"n1","twice":2,"a":1,"d":4,"b":3,"e2":"m1","__typename":"Outer"}}})");
+   CHECK(gap_flatten::run("{ outer { deep { d } } }").find(R"(Cannot query field \"deep\" on type \"Outer\".)") != std::string::npos);
+   CHECK(gap_flatten::run("{ outer { secret } }").find(R"(Cannot query field \"secret\" on type \"Outer\".)") != std::string::npos);
+   // The member's own type is unchanged.
+   CHECK(gap_flatten::api::sdl().find("type Deep") == std::string::npos);
+}

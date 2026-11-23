@@ -56,6 +56,12 @@ struct Tagged
    int v = 0;
    PSIO_REFLECT(Tagged, v)
 };
+struct Part
+{
+   int ok   = 0;
+   int more = 0;
+   PSIO_REFLECT(Part, ok, more)
+};
 struct Query
 {
    int ok = 0;
@@ -105,6 +111,13 @@ struct Query
 #elif defined(GQL_FAIL_TEMPLATE_ARG)
    Tagged<Tag> tagged;
    PSIO_REFLECT(Query, ok, tagged)
+#elif defined(GQL_FAIL_FLATTEN_NAME)
+   // Part has a member named `ok` too.
+   Part part;
+   PSIO_REFLECT(Query, ok, attr(part, psio::graphql::flatten))
+#elif defined(GQL_FAIL_FLATTEN_SCALAR)
+   std::optional<Part> part;
+   PSIO_REFLECT(Query, ok, attr(part, psio::graphql::flatten))
 #else
    PSIO_REFLECT(Query, ok)
 #endif

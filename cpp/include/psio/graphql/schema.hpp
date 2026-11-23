@@ -121,6 +121,21 @@ namespace psio::graphql
       constexpr bool operator==(const deprecated&) const = default;
    };
 
+   // The member's own fields are presented as fields of the enclosing object
+   // type, in the member's place (output only; the member must be a
+   // reflected record):
+   //    template <typename T> struct WithBlock {
+   //       BlockInfo block; T data;
+   //       PSIO_REFLECT(WithBlock, block, attr(data, psio::graphql::flatten))
+   //    };
+   // gives `{ block {...} <the fields of T> }`. Two fields with one name are
+   // a compile error.
+   struct flatten_spec
+   {
+      using spec_category = static_spec_tag;
+      constexpr bool operator==(const flatten_spec&) const = default;
+   };
+   inline constexpr flatten_spec flatten{};
    // Name of a type that cannot be annotated. Specialise with
    //    static constexpr std::string_view value = "SearchResult";
    // `input_type_name<T>` names T used as an input object (default: the
@@ -946,6 +961,7 @@ namespace psio::graphql
          bool             hidden     = false;
          bool             is_id      = false;
          bool             deprecated = false;
+         bool             flatten    = false;
          std::uint32_t    cost       = 1;
          std::string_view description{};
          std::string_view reason{};
@@ -961,6 +977,8 @@ namespace psio::graphql
             m.hidden = true;
          if constexpr (has_spec_v<id_spec, A>)
             m.is_id = true;
+         if constexpr (has_spec_v<flatten_spec, A>)
+            m.flatten = true;
          if constexpr (has_spec_v<::psio::graphql::cost, A>)
             m.cost = std::get<::psio::graphql::cost>(annotate<Ptr>).value;
          if constexpr (has_spec_v<doc, A>)
@@ -1020,6 +1038,11 @@ namespace psio::graphql
             return m;
          }
 
+         // Slot I is a member annotated graphql::flatten (and not hidden):
+         // its fields stand in its place.
+         template <std::size_t I>
+         static constexpr bool is_flat = I < field_slots && meta<I>().flatten && !meta<I>().hidden;
+
          // Field slot I of a value or of a view.
          template <std::size_t I, typename Src>
          static decltype(auto) get(Src& src)
@@ -1039,6 +1062,8 @@ namespace psio::graphql
          static constexpr std::size_t slot_count  = sizeof...(Ts);
          template <std::size_t I>
          static constexpr bool is_method = false;
+         template <std::size_t I>
+         static constexpr bool is_flat = false;
 
          struct namer
          {
@@ -1093,6 +1118,43 @@ namespace psio::graphql
          static constexpr bool is_const  = reflect<T>::template method_is_const<J>;
          static constexpr bool is_static = reflect<T>::template method_is_static<J>;
       };
+
+      // A flattened member's record type.
+      template <typename T, std::size_t I>
+      struct flat_member
+      {
+         using type = typename slot_types<T, I>::result;
+         static_assert(Reflected<type> && !std::is_enum_v<type> && shape_of<type>() == shape::object,
+                       "psio::graphql::flatten annotates a member that is a reflected record "
+                       "(held by value)");
+      };
+      // Resolver slots: one per member or method, and for a flattened
+      // member one per slot of its record. A field's slot is its position
+      // in this numbering.
+      template <typename T, std::size_t I>
+      constexpr std::size_t slot_width() noexcept;
+      template <typename T>
+      constexpr std::size_t flat_slot_count() noexcept
+      {
+         return []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (slot_width<T, Is>() + ... + std::size_t{0});
+         }(std::make_index_sequence<object_def<T>::slot_count>{});
+      }
+      template <typename T, std::size_t I>
+      constexpr std::size_t slot_width() noexcept
+      {
+         if constexpr (object_def<T>::template is_flat<I>)
+            return flat_slot_count<typename flat_member<T, I>::type>();
+         else
+            return 1;
+      }
+      template <typename T, std::size_t I>
+      constexpr std::size_t slot_base() noexcept
+      {
+         return []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (slot_width<T, Is>() + ... + std::size_t{0});
+         }(std::make_index_sequence<I>{});
+      }
 
       // ── Type references, at the type level ───────────────────────────────
       //
@@ -1337,7 +1399,7 @@ namespace psio::graphql
          using S               = slot_types<T, I>;
          field_desc f;
          f.name               = m.name;
-         f.slot               = static_cast<std::uint16_t>(I);
+         f.slot               = static_cast<std::uint16_t>(slot_base<T, I>());
          f.cost               = m.cost;
          f.deprecated         = m.deprecated;
          f.description        = m.description;
@@ -1379,8 +1441,19 @@ namespace psio::graphql
          // SDL-first schemas write for an empty type.
          static constexpr bool placeholder = slot_count == 0;
 
+         // Fields slot I contributes.
+         template <std::size_t I>
+         static constexpr std::size_t fields_of() noexcept
+         {
+            if constexpr (!slot_visible<T, Mutation, I>())
+               return 0;
+            else if constexpr (object_def<T>::template is_flat<I>)
+               return object_fields<typename flat_member<T, I>::type, false>::real_count;
+            else
+               return 1;
+         }
          static constexpr std::size_t real_count = []<std::size_t... Is>(std::index_sequence<Is...>) {
-            return (std::size_t{slot_visible<T, Mutation, Is>()} + ... + 0);
+            return (fields_of<Is>() + ... + std::size_t{0});
          }(std::make_index_sequence<slot_count>{});
          static constexpr std::size_t count = real_count + (placeholder ? 1 : 0);
 
@@ -1389,7 +1462,20 @@ namespace psio::graphql
             std::size_t                   n = 0;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                (([&] {
-                   if constexpr (slot_visible<T, Mutation, Is>())
+                   if constexpr (!slot_visible<T, Mutation, Is>())
+                      return;
+                   else if constexpr (object_def<T>::template is_flat<Is>)
+                   {
+                      using M = typename flat_member<T, Is>::type;
+                      for (std::size_t k = 0; k < object_fields<M, false>::real_count; ++k)
+                      {
+                         out[n] = object_fields<M, false>::value[k];
+                         out[n].slot =
+                            static_cast<std::uint16_t>(out[n].slot + slot_base<T, Is>());
+                         ++n;
+                      }
+                   }
+                   else
                       out[n++] = make_field<T, Mutation, Is>();
                 }()),
                 ...);

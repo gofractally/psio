@@ -727,6 +727,19 @@ namespace psio::graphql
             }
          }
 
+         // Slot K of the record held by the flattened member I.
+         template <std::size_t I, std::size_t K>
+         static bool flat_slot(exec& e, const void* source, const plan_field& f)
+         {
+            using M  = typename flat_member<T, I>::type;
+            Src& src = *static_cast<Src*>(const_cast<void*>(source));
+            decltype(auto) member = def::template get<I>(src);
+            using U               = std::remove_cvref_t<decltype(member)>;
+            if constexpr (is_view_v<U>)
+               return handlers<M, const U>::table[K](e, &member, f);
+            else
+               return handlers<M, const M>::table[K](e, &member, f);
+         }
          // `_` of a record without members.
          static bool placeholder_slot(exec& e, const void*, const plan_field&)
          {
@@ -734,10 +747,21 @@ namespace psio::graphql
             return true;
          }
 
+         template <std::size_t I, std::size_t N>
+         static constexpr void fill(std::array<handler, N>& out)
+         {
+            constexpr std::size_t base = slot_base<T, I>();
+            if constexpr (def::template is_flat<I>)
+               [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
+                  ((out[base + Ks] = &flat_slot<I, Ks>), ...);
+               }(std::make_index_sequence<slot_width<T, I>()>{});
+            else
+               out[base] = &slot<I>;
+         }
          // Indexed by field_desc::slot.
          static constexpr auto table = []<std::size_t... Is>(std::index_sequence<Is...>) {
-            std::array<handler, def::slot_count == 0 ? 1 : def::slot_count> out{};
-            ((out[Is] = &slot<Is>), ...);
+            std::array<handler, def::slot_count == 0 ? 1 : flat_slot_count<T>()> out{};
+            (fill<Is>(out), ...);
             if constexpr (def::slot_count == 0)
                out[0] = &placeholder_slot;
             return out;

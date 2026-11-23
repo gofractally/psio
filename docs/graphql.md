@@ -92,7 +92,7 @@ shape.
 
 | C++ | GraphQL |
 |---|---|
-| reflected record | Object. Fields: the reflected data members, then the reflected `const` (or static) methods. A method with parameters is a field with arguments named by the reflected parameter names (`method(find, id, limit)`; every parameter must be named). A `const` method returning `void` is not a field |
+| reflected record | Object. Fields: the reflected data members, then the reflected `const` (or static) methods. A method with parameters is a field with arguments named by the reflected parameter names (`method(find, id, limit)`; every parameter must be named). A `const` method returning `void` is not a field. A member annotated `psio::graphql::flatten` is replaced by its own fields ([Flattened members](#flattened-members)) |
 | reflected record without members or methods (`struct TLSInfo { PSIO_REFLECT(TLSInfo) };`) | Object with the one field `_: Boolean`, always `true` ([Records without members](#records-without-members)) |
 | instantiation of a reflected class template, `Box<A>` | Object named `Box_A` ([Class templates](#class-templates)) |
 | the same record as a parameter | Input object named `<Name>Input` (unchanged if the name already ends in `Input`); must be default-constructible |
@@ -246,6 +246,41 @@ and through a view is one type.)
 `<Node>Connection` and `<Node>Edge` by such specialisations; specialise
 `type_name<connection<X>>` to rename one.
 
+### Flattened members
+
+`psio::graphql::flatten` on a data member puts the member's fields in the
+enclosing object type, in the member's place:
+
+```cpp
+template <typename T>
+struct WithBlockContext {
+   EventBlockInfo block;
+   T              data;
+   PSIO_REFLECT(WithBlockContext, block, attr(data, psio::graphql::flatten))
+};
+// type InviteEventWithBlockContext { block: EventBlockInfo!  inviteId: Int!  actor: AccountNumber!  event: String! }
+```
+
+- The member must be a reflected record held by value (not an optional, a
+  list or a variant: those have no fields to lift). Its data members and its
+  methods (with their arguments) become fields; a member it hides stays
+  hidden; flattening nests (a flattened member of a flattened member).
+- **Two fields with one name are a compile error** ("two members of an
+  object type have the same GraphQL name"): rename one with `name_as` or
+  hide it.
+- The member itself is not a field (`data { ... }` is unknown), and its type
+  appears in the schema only if something else refers to it.
+- Resolution costs one extra indirect call per flattened field; through a
+  view the member is the sub-view, so only selected fields are read.
+- **GraphQL only.** The record's encodings — PSSZ, JSON, the key — and its
+  schema (`psio::schema`) are unchanged: `data` remains a nested member
+  there. As an *input* object the type also keeps `data` as a nested input
+  object. In Rust the same shape is `#[graphql(flatten)]` on the field of an
+  `async-graphql` `SimpleObject`, which is likewise GraphQL-only; serde's
+  `#[serde(flatten)]` (a JSON-level flatten) has no psio counterpart and the
+  psio derives reject it, so the JSON of the two languages stays the same
+  nested form.
+
 ### Compile-time errors
 
 Rejected with a `static_assert` that names the reason
@@ -255,7 +290,8 @@ same GraphQL name (including `Foo`'s input object against a type named
 has no mapping, a `std::variant` alternative that is not a record, a method
 with unnamed parameters, an unsupported argument type, an optional of an
 optional, `id` on a non-scalar, an object type whose members are all hidden,
-a template argument without a GraphQL name.
+`flatten` on a member that is not a reflected record, a template argument
+without a GraphQL name.
 A `psio::nested<T, nested_validation::deferred>` member is a type with no
 mapping (an enclosing reader has not checked that its bytes are a `T`: hide
 it, or expose the `T` from a method after validating), and a nested value
@@ -490,7 +526,7 @@ WebAssembly (no WASI sysroot on the machine).
 | `cpp/include/psio/graphql/introspection.hpp` | `__schema` / `__type`, `sdl()` |
 | `cpp/include/psio/graphql/connection.hpp` | `row_source`, `paginate`, `connection` |
 | `cpp/tests/graphql_tests.cpp`, `graphql_fixture.hpp` | the conformance suite and its schema |
-| `cpp/tests/graphql_service_tests.cpp` | the rules a service leans on (markers, class templates), each on a small schema |
+| `cpp/tests/graphql_service_tests.cpp` | the rules a service leans on (markers, class templates, flattened members), each on a small schema |
 | `cpp/tests/graphql_noexceptions.cpp` | exception-disabled build-and-run check |
 | `cpp/tests/graphql_schema_fail.cpp` | schemas that must not compile |
 | `cpp/benchmarks/bench_graphql.cpp` | benchmark against the previous engine |

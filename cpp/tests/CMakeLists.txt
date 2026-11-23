@@ -770,6 +770,8 @@ psio_graphql_compile_fail(id_on_object GQL_FAIL_ID "psio::graphql::id annotates 
 psio_graphql_compile_fail(empty_object GQL_FAIL_EMPTY "needs at least one visible field")
 psio_graphql_compile_fail(template_name_conflict GQL_FAIL_TEMPLATE_NAME "have the same GraphQL type name")
 psio_graphql_compile_fail(template_argument_unnamed GQL_FAIL_TEMPLATE_ARG "has no GraphQL name")
+psio_graphql_compile_fail(flatten_collision GQL_FAIL_FLATTEN_NAME "have the same GraphQL name")
+psio_graphql_compile_fail(flatten_scalar GQL_FAIL_FLATTEN_SCALAR "flatten annotates a member that is a reflected record")
 
 # Consumer warning hygiene: every public header, with the core codecs
 # instantiated, compiles under -Wall -Wextra -Werror with PSIO's include
