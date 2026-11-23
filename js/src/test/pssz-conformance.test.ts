@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  IR_VERSION, PsszError, PsszSchema, PsszView, validatePssz, type IrSchema, type JsonFormat, type PsszNestedBytes, type PsszType,
+  IR_VERSION, ListView, PsszError, PsszNegativeZero, PsszSchema, PsszView, RecordView, TupleView, VariantView, validatePssz, type IrSchema, type JsonFormat, type PsszNestedBytes, type PsszType,
   type PsszWidth,
 } from '../index.js';
 import { fixtureHandlers } from './support/custom-handlers.js';
@@ -33,6 +33,10 @@ interface PsszTypeRow {
   id: string;
   ir: boolean;
   auto_width: number;
+  /** `psio::max_encoded_size<T>()`: the inferred bound, or null when unbounded. */
+  max_encoded_size: number | null;
+  /** The type's explicit `maxDynamicData`, or null. */
+  max_dynamic_data: number | null;
   /** The id of the type's `Custom` node: its handler is registered under it. */
   custom_id?: string;
   /** An invariant constrains values of the type (its own, or one it holds). */
@@ -92,6 +96,49 @@ function rejects(run: () => unknown, name: string): PsszError {
   return assert.fail(`${name}: accepted`);
 }
 
+// Reads a value through its view, position by position (every field of every
+// record, every element of every list, map, set, array and tuple, the
+// alternative of every variant), and compares each leaf with the decoded
+// value: the view derives every width on the way down by itself — a record's
+// own, a list's from its bound, and those a record's cap selects beneath it.
+// Returns the number of composite views walked.
+function walkView(view: unknown, expected: unknown, name: string): number {
+  if (view instanceof RecordView) {
+    let n = 1;
+    const record = expected as Record<string, unknown>;
+    for (const field of view.fields) n += walkView(view.get(field), record[field], `${name}.${field}`);
+    return n;
+  }
+  if (view instanceof TupleView) {
+    let n = 1;
+    const items = expected as unknown[];
+    assert.equal(view.length, items.length, name);
+    for (let i = 0; i < items.length; ++i) n += walkView(view.at(i), items[i], `${name}[${i}]`);
+    return n;
+  }
+  if (view instanceof ListView) {
+    let n = 1;
+    const items = expected instanceof Map || expected instanceof Set ? [...expected] : (expected as unknown[]);
+    assert.ok(Array.isArray(items), name);
+    assert.equal(view.length, items.length, name);
+    for (let i = 0; i < items.length; ++i) n += walkView(view.at(i), items[i], `${name}[${i}]`);
+    return n;
+  }
+  if (view instanceof VariantView) {
+    const variant = expected as { type: string; value: unknown };
+    assert.equal(view.type, variant.type, name);
+    return 1 + walkView(view.value, variant.value, `${name}.${variant.type}`);
+  }
+  // Some(x) of a nested optional.
+  if (typeof view === 'object' && view !== null && !(view instanceof Uint8Array) &&
+      Object.keys(view).length === 1 && 'some' in view &&
+      typeof expected === 'object' && expected !== null && 'some' in expected)
+    return walkView((view as { some: unknown }).some, (expected as { some: unknown }).some, name);
+  if (expected instanceof PsszNegativeZero) assert.ok(Object.is(view, -0), name);
+  else assert.deepEqual(view, expected, name);
+  return 0;
+}
+
 // JSON has one null: Some(None) of a nested optional reads back as None (in
 // the typed text codecs too), so such a value does not round-trip via text.
 function hasSomeNone(value: unknown): boolean {
@@ -110,12 +157,14 @@ function hasSomeNone(value: unknown): boolean {
 // be looked at.
 const PSSZ_CLASSES: { [cls: string]: number } = {
   corpus: 956, 'evolution-forward': 660, 'evolution-backward': 1380, pruning: 212, malformed: 419,
-  'optional-presence': 400, width: 309, 'cap-overflow-explicit-nested': 15, tuple: 60, variant: 48, enum: 76,
+  'optional-presence': 400, width: 335, 'cap-overflow-explicit-nested': 15, tuple: 60, variant: 48, enum: 76,
   'enum-unknown-value': 36, string: 308, 'string-raw-non-utf8': 48, 'length-bound-overflow': 32, box: 100,
-  bytes: 88, 'zero-fixed': 100, depth: 28, nested: 252, 'nested-unknown': 20, 'nested-deferred': 24,
+  bytes: 103, 'zero-fixed': 100, depth: 28, nested: 252, 'nested-unknown': 20, 'nested-deferred': 24,
   'map-set': 266, 'map-set-order': 352, transparent: 160, custom: 116, invariant: 128,
-  'annotated-bounds': 148, 'method-args': 62,
+  'annotated-bounds': 148, 'method-args': 62, 'list-width': 89, 'cap-implicit': 40,
 };
+// Types of pssz-vectors.json with a finite inferred bound (`max_encoded_size`).
+const BOUNDED_TYPES = 139;
 const NO_HANDLER = 'pssz IR: no handler registered for a custom type';
 
 // Classes `annotated-bounds` and `method-args`: the C++ reason of a rejected
@@ -175,6 +224,8 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   const notExpressible = fx.types.filter((t) => !t.ir).map((t) => t.id);
   assert.deepEqual(notExpressible, []);
   let widthsChecked = 0;
+  let boundsFinite = 0;
+  let argumentCaps = 0;
   const byName = new Map(schema.ir.types.map((m) => [m.name, m.type]));
   const manifest = new Map(fx.types.map((t) => [t.id, t]));
   let customIds = 0;
@@ -183,6 +234,22 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     assert.equal(source.type(row.id).width, row.auto_width, `auto width of ${row.id}`);
     assert.equal(handled.type(row.id).width, row.auto_width, `auto width of ${row.id}, with handlers`);
     ++widthsChecked;
+    // The inferred bound is the typed codec's too, for EVERY type: each
+    // header, slot and table counted at its own width (`fit`, spec 3.2).
+    assert.ok(row.max_encoded_size === null || Number.isSafeInteger(row.max_encoded_size), row.id);
+    // (A capped record records its bare bound, whatever its cap. The three
+    // capped method argument tuples record the cap instead: C++
+    // `max_encoded_size` of a `method_arg_tuple` with a cap is the cap.)
+    const bound = source.type(row.id).maxEncodedSize;
+    const argumentsCap = row.max_dynamic_data !== null && row.id.startsWith('tuple<');
+    if (argumentsCap) {
+      assert.equal(row.max_encoded_size, row.max_dynamic_data, `max_encoded_size of ${row.id}`);
+      ++argumentCaps;
+    } else assert.equal(bound === null ? null : Number(bound), row.max_encoded_size, `max_encoded_size of ${row.id}`);
+    // The width is the class of the explicit cap, else of the bound.
+    const rules = row.max_dynamic_data ?? row.max_encoded_size;
+    assert.equal(row.auto_width, rules === null || rules > 0xffff ? 4 : rules > 0xff ? 2 : 1, `width class of ${row.id}`);
+    if (row.max_encoded_size !== null) ++boundsFinite;
     // Manifest key `custom_id`: the id of the type's Schema IR `Custom`
     // node, under which its handler is registered.
     let node = byName.get(row.id)!.value;
@@ -196,6 +263,8 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     assert.ok(row.invariant === undefined || row.invariant === true, row.id);
   }
   assert.equal(widthsChecked, fx.types.length);
+  assert.equal(argumentCaps, 3);
+  assert.equal(boundsFinite, BOUNDED_TYPES);
   assert.equal(customIds, 8);
   // A box gives its container no inferred bound; an explicit cap still does.
   const widthOf = (id: string) => source.type(id).width;
@@ -232,12 +301,12 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
       jsonRoundTrip: 0, ijsonRoundTrip: 0, someNoneLossy: 0, noJsonForm: 0,
       ijsonNoncharacter: 0, rawNonUtf8NoText: 0, handlerTextRoundTrip: 0,
       invariant: 0, nestedUnknown: 0, nestedDeferred: 0, lengthBoundReject: 0,
-      treeReject: 0, treeWriterRefused: 0, treeNotUtf8: 0, treeOverCap: 0,
+      treeReject: 0, treeWriterRefused: 0, treeNotUtf8: 0, treeOverCap: 0, viewWalks: 0, viewNodes: 0,
     },
     explicit: {
       vectors: 0, validateAccept: 0, validateReject: 0, canonicalReencode: 0,
       unknownReencode: 0, invariant: 0, nestedUnknown: 0, nestedDeferred: 0, lengthBoundReject: 0,
-      treeReject: 0, treeWriterRefused: 0, treeNotUtf8: 0, treeOverCap: 0,
+      treeReject: 0, treeWriterRefused: 0, treeNotUtf8: 0, treeOverCap: 0, viewWalks: 0, viewNodes: 0,
     },
   };
   const classes = new Map<string, number>();
@@ -460,6 +529,11 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     assert.equal(result.hasUnknown, row.expect === 'unknown', row.name);
     ++c.validateAccept;
     const value = type.decode(bytes);
+    // The same value through the view, read position by position.
+    const viewed = type.view(bytes);
+    c.viewNodes += walkView(viewed, value, row.name);
+    if (viewed instanceof PsszView) assert.deepEqual(viewed.toValue(), value, `${row.name}: view.toValue`);
+    ++c.viewWalks;
     const again = toHex(type.encode(value));
     if (row.expect === 'unknown') {
       assert.equal(again, row.reencoded, row.name);
@@ -530,6 +604,10 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
   assert.equal(a.jsonRoundTrip + a.someNoneLossy + a.noJsonForm, a.canonicalReencode - a.nestedDeferred);
   assert.equal(e.validateAccept + e.validateReject + e.invariant, e.vectors);
   assert.equal(e.canonicalReencode + e.unknownReencode, e.validateAccept);
+  // Every accepted frame the general path replays (all but the deferred and
+  // nested-unknown rows handled above) was also read through its view.
+  assert.equal(a.viewWalks, a.validateAccept - a.nestedDeferred - a.nestedUnknown);
+  assert.equal(e.viewWalks, e.validateAccept - e.nestedDeferred - e.nestedUnknown);
   // The fixture as checked in (a change to it must be looked at): every
   // class of conformance/pssz-vectors.md, at its recorded size.
   assert.deepEqual(Object.fromEntries([...classes].sort()), Object.fromEntries(Object.entries(PSSZ_CLASSES).sort()));
@@ -552,8 +630,8 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
     (v) => v.format !== 'auto' && v.name.startsWith('width/') && v.name.includes('cap') && v.expect === 'reject',
   );
   assert.equal(explicitCap.length, 12);
-  assert.equal(fx.types.length, 323);
-  assert.equal(fx.vectors.length, 6803);
+  assert.equal(fx.types.length, 357);
+  assert.equal(fx.vectors.length, 6973);
 });
 
 for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, () => {

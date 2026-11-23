@@ -3,17 +3,18 @@
 //   Tuple(Ts...)    the extensible record of its elements: header, then per
 //                   element its payload (+ an offset slot when variable)
 //   Pair(A, B)      Tuple(A, B)
-// with every header and slot counted as 4 bytes. A bounded tuple / variant,
-// and a record that holds one, gets one- or two-byte offsets instead of
-// four. The widths and golden bytes are those of
+// with the header and slots counted at the type's own width: the least of
+// 1, 2 and 4 bytes whose worst case fits (`fit`, docs/pssz-spec.md 3.2). A
+// bounded tuple / variant, and a record that holds one, gets one- or
+// two-byte offsets instead of four. Bit types are bounded too. The widths and golden bytes are those of
 // cpp/tests/pssz_inferred_bound_tests.cpp; the typed layer and the
 // schema-driven codec (over the schema as it travels) agree on each.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PsszSchema, array, boundedUtf8, generateSchema, list, map, optional, pair, record, set, tuple, u16, u32, u64, u8,
-  utf8, variant, type TypeDef,
+  PsszSchema, array, bitlist, bitvector, boundedList, boundedUtf8, generateSchema, list, map, optional, pair, record,
+  set, tuple, u16, u32, u64, u8, utf8, variant, type TypeDef,
 } from '../index.js';
 
 const toHex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -50,30 +51,33 @@ function agree<T>(def: TypeDef<T, any>, value: T, wire: string): void {
 
 test('pssz inferred bound: the width a tuple, pair or variant-holding record takes', () => {
   // (A variant has no header or slots of its own; its bound shows in the
-  // width of the tuple / record that holds it.) 4 + (1 + widest + 4) <= 255.
+  // width of the tuple / record that holds it.) W + (1 + widest) + W <= 255.
   assert.equal(width(tuple(variant({ a: u8 }))), 1);
-  assert.equal(width(tuple(variant({ a: u8, b: Name }))), 1);                  // 4 + 33 + 4
+  assert.equal(width(tuple(variant({ a: u8, b: Name }))), 1);                  // 1 + 33 + 1
   assert.equal(width(tuple(variant({ a: u8, b: variant({ c: u16, d: u64 }) }))), 1);
-  assert.equal(width(tuple(variant({ a: u8, b: array(u8, 246) }))), 1);        // 4 + 247 + 4 = 255
-  assert.equal(width(tuple(variant({ a: u8, b: array(u8, 247) }))), 2);        // 256
+  assert.equal(width(tuple(variant({ a: u8, b: array(u8, 252) }))), 1);        // 1 + 253 + 1 = 255
+  assert.equal(width(tuple(variant({ a: u8, b: array(u8, 253) }))), 2);        // 2 + 254 + 2
   // An alternative with an explicit cap contributes the cap.
-  assert.equal(width(tuple(variant({ a: u8, b: Capped }))), 2);                // 4 + 301 + 4
+  assert.equal(width(tuple(variant({ a: u8, b: Capped }))), 2);                // 2 + 301 + 2
   // Unbounded if any alternative is.
   assert.equal(width(tuple(variant({ a: u8, b: utf8 }))), 4);
   assert.equal(width(tuple(variant({ a: list(u8), b: u8 }))), 4);
   assert.equal(width(tuple(variant({ a: u8, b: Free }))), 4);
 
-  // Tuple: header 4, each element its payload, + 4 when variable.
+  // Tuple: header W, each element its payload, + W when variable.
   assert.equal(width(tuple()), 1);
   assert.equal(width(tuple(u32)), 1);
   assert.equal(width(tuple(u8, u16, u32, u64)), 1);
   assert.equal(width(tuple(u64, Name, u8)), 1);
   assert.equal(width(tuple(optional(u32))), 1);
   assert.equal(width(tuple(tuple(u8), u8)), 1);
-  assert.equal(width(tuple(array(u8, 251))), 1);                               // 4 + 251 = 255
-  assert.equal(width(tuple(array(u8, 252))), 2);                               // 256
-  assert.equal(width(tuple(Capped, u8)), 2);                                   // 309
-  assert.equal(width(tuple(array(u64, 40))), 2);                               // 324
+  // The thresholds: the header counts at the tuple's own width.
+  assert.equal(width(tuple(array(u8, 254))), 1);                               // 1 + 254 = 255
+  assert.equal(width(tuple(array(u8, 255))), 2);                               // 2 + 255 = 257
+  assert.equal(width(tuple(array(u8, 65533))), 2);                             // 2 + 65533 = 65535
+  assert.equal(width(tuple(array(u8, 65534))), 4);                             // 4 + 65534 = 65538
+  assert.equal(width(tuple(Capped, u8)), 2);                                   // 2 + 300 + 2 + 1 = 305
+  assert.equal(width(tuple(array(u64, 40))), 2);                               // 322
   assert.equal(width(tuple(array(u64, 9000))), 4);                             // 72004
   // An element has no member annotation: a string or list is unbounded.
   assert.equal(width(tuple(u32, utf8)), 4);
@@ -88,10 +92,19 @@ test('pssz inferred bound: the width a tuple, pair or variant-holding record tak
   assert.equal(width(Event), 1);
   assert.equal(width(Call), 1);
   assert.equal(width(Open), 4);
-  // Lists keep four-byte offset tables whatever their elements.
+  // An unbounded list has a four-byte offset table whatever its elements.
   assert.equal(width(list(tuple(u32))), 4);
   assert.equal(width(map(u32, u8)), 4);
   assert.equal(width(set(tuple(u8))), 4);
+
+  // Bit types: ceil(N / 8) bytes; a bitlist one more for its delimiter. A
+  // bitvector is inline (no slot); a bitlist has one slot.
+  assert.equal(width(record('BitFlags', { id: u8, flags: bitvector(12), seen: bitlist(12) })), 1);
+  // record{bitlist<N>} is 2 * W + ceil(N / 8) + 1.
+  assert.equal(width(record('BitList2016', { seen: bitlist(2016) })), 1);     // 255
+  assert.equal(width(record('BitList2017', { seen: bitlist(2017) })), 2);     // 258
+  assert.equal(width(boundedList(bitlist(12), 10)), 1);                        // 10 * (1 + 3)
+  assert.equal(width(tuple(bitvector(12), bitlist(12))), 1);                   // 1 + 2 + 1 + 3
 });
 
 test('pssz inferred bound: tuples take the width their bound allows', () => {
@@ -122,7 +135,7 @@ test('pssz inferred bound: a variant bounds the record that holds it', () => {
 });
 
 test('pssz inferred bound: map entries are bounded tuples', () => {
-  // The list's offset table stays four bytes wide; each entry is the
+  // An unbounded list's offset table is four bytes wide; each entry is the
   // 2-tuple at its own width (one byte: header 5, u32, u8).
   agree(map(u32, u8), new Map([[1, 2], [3, 4]]), '08000000 0e000000 05 01000000 02 05 03000000 04');
   agree(list(tuple(u32, u8)), [[1, 2]], '04000000 05 01000000 02');

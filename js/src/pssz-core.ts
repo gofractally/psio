@@ -675,10 +675,16 @@ export class Node {
 
   layoutMemo?: Memo<Layout>;
   emptyMemo?: Memo<boolean>;
+  /** record: the width of its header and slots (its own wherever it is). */
   width?: number;
   boundMemo: (bigint | null | undefined)[] = [undefined, undefined];
+  /** Not a record: its own bound (no position cap), per member count. */
+  ownBound?: bigint | null;
+  ownBoundDone = false;
+  countBound?: Map<bigint, bigint | null>;
   fixedPayloadMemo?: boolean;
-  fields?: FieldLayout[];
+  /** Field layouts, by offset width. */
+  fields?: FieldLayout[][];
   byName?: Map<string, number>;
   /**
    * An Enum (kind `int`, the underlying integer): the enumerators in
@@ -779,6 +785,18 @@ function boundMultiply(count: bigint, value: bigint | null): bigint | null {
   return product > U64_MAX ? null : product;
 }
 
+// max_size.hpp fit(): the bound of a type that writes `slots` offset-width
+// words (header, slots, table entries) and whose other bytes are bounded by
+// `rest`, for the least width in {1, 2, 4} whose total fits it. The width
+// class of the result is that width (docs/pssz-spec.md 3.2).
+function fit(slots: bigint, rest: bigint | null): bigint | null {
+  if (rest === null) return null;
+  if (slots + rest <= 0xffn) return slots + rest;
+  if (2n * slots + rest <= 0xffffn) return 2n * slots + rest;
+  const out = 4n * slots + rest;
+  return out > U64_MAX ? null : out;
+}
+
 function packedByteCount(count: number): number {
   return Math.floor(count / 8) + (count % 8 !== 0 ? 1 : 0);
 }
@@ -864,6 +882,11 @@ export function memberBoundAdmits(bound: LengthBound, node: Node, value: unknown
   if (Array.isArray(value)) return boundAdmits(bound, value.length);
   if (value instanceof Map || value instanceof Set) return boundAdmits(bound, value.size);
   return true;
+}
+
+/** The count a member `lengthBound` gives the list it holds: exact, else max. */
+export function boundCount(bound: LengthBound | null): bigint | null {
+  return bound === null ? null : bound.exact ?? bound.max;
 }
 
 /** Whether a member type is a nested value, looking through Option. */
@@ -1115,6 +1138,8 @@ export class Codec {
         node.textChild = this.build(t.value.type, added, d);
         break;
       case 'Tuple':
+        // docs/pssz-spec.md 8.4: a tuple has at most 255 elements.
+        if (t.value.members.length > 255) schemaError('pssz IR: a tuple has more than 255 elements');
         node.kind = 'tuple';
         node.members = t.value.members.map(
           (m, i) => new MemberInfo(String(i), this.build(m, added, d), null, 'natural', 'natural', ''),
@@ -1447,6 +1472,7 @@ export class Codec {
       case 'float':
       case 'bool':
       case 'char':
+      case 'bitvector': // ceil(N / 8) bytes inline: no offset slot
         out = true;
         break;
       case 'array':
@@ -1476,14 +1502,14 @@ export class Codec {
     const slot = reserveCap ? 1 : 0;
     if (annotation === null && node.boundMemo[slot] !== undefined) return node.boundMemo[slot]!;
     active.push(node);
-    // N elements, each its reserved payload plus an offset slot when it is
-    // not an inline fixed payload.
+    // N elements, each its reserved payload, and the offset table (at the
+    // container's own width) when they are not inline fixed payloads.
     const elements = (child: Node, boxed: boolean, count: bigint): bigint | null => {
       if (count === 0n) return 0n;
       // A boxed value has no inferred bound (the typed codecs give it none).
-      let element = boxed ? null : this.boundOf(child, null, true, active);
-      if (!this.fixedPayload(child, [])) element = boundAdd(element, 4n);
-      return boundMultiply(count, element);
+      const element = boxed ? null : this.boundOf(child, null, true, active);
+      const total = boundMultiply(count, element);
+      return this.fixedPayload(child, []) ? total : fit(count, total);
     };
     const sequence = (container: Node): bigint | null => {
       if (container.kind === 'list' && !container.bounded) {
@@ -1513,13 +1539,16 @@ export class Codec {
         out = node.childBoxed ? null : sequence(node.child);
         break;
       case 'record': {
-        let total: bigint | null = node.stable ? 0n : 4n;
+        // The header (extensible records) and one slot per variable member,
+        // at the record's own width.
+        let slots = node.stable ? 0n : 1n;
+        let total: bigint | null = 0n;
         for (const member of node.members) {
-          let payload = member.boxed ? null : this.boundOf(member.node, member.bound, true, active);
-          if (!this.fixedPayload(member.node, [])) payload = boundAdd(payload, 4n);
+          const payload = member.boxed ? null : this.boundOf(member.node, member.bound, true, active);
+          if (!this.fixedPayload(member.node, [])) ++slots;
           total = boundAdd(total, payload);
         }
-        out = total;
+        out = fit(slots, total);
         break;
       }
       case 'nested':
@@ -1530,13 +1559,14 @@ export class Codec {
         // The extensible positional record of its elements (an element has
         // no member annotation): the header, then per element its reserved
         // payload and, when it is not an inline fixed payload, a slot.
-        let total: bigint | null = 4n;
+        let slots = 1n;
+        let total: bigint | null = 0n;
         for (const member of node.members) {
-          let payload = member.boxed ? null : this.boundOf(member.node, null, true, active);
-          if (!this.fixedPayload(member.node, [])) payload = boundAdd(payload, 4n);
+          const payload = member.boxed ? null : this.boundOf(member.node, null, true, active);
+          if (!this.fixedPayload(member.node, [])) ++slots;
           total = boundAdd(total, payload);
         }
-        out = total;
+        out = fit(slots, total);
         break;
       }
       case 'variant': {
@@ -1551,27 +1581,104 @@ export class Codec {
         out = boundAdd(widest, 1n);
         break;
       }
+      case 'bitvector':
+      case 'bitlist':
+        // ceil(N / 8) bytes; a bitlist one more for its delimiter bit.
+        out = BigInt(packedByteCount(node.size) + (node.kind === 'bitlist' ? 1 : 0));
+        break;
       default:
-        break; // bit types: no inferred bound
+        break;
     }
     active.pop();
     if (annotation === null) node.boundMemo[slot] = out;
     return out;
   }
 
-
-  /** Width of a record's header and slots, or of a list / array table. */
-  widthOf(node: Node): number {
-    if (!this.automatic) return this.W;
-    if (node.width !== undefined) return node.width;
-    let out = 4;
-    // A list's offset table is always 4 wide.
-    if (node.kind !== 'list') {
-      if (node.cap !== null) out = node.cap <= 0xffn ? 1 : node.cap <= 0xffffn ? 2 : 4;
-      else out = widthClass(this.boundOf(node, null, false, []));
+  /**
+   * `max_encoded_size` of the type itself (its explicit cap is not looked
+   * at), or null: unbounded. `count`: for a plain list (or the list of a map
+   * / set), the count the `lengthBound` of the member holding it gives.
+   */
+  inferredBound(node: Node, count: bigint | null = null): bigint | null {
+    if (count !== null && !(node.kind === 'list' && !node.bounded)) count = null;
+    if (count === null) {
+      if (!node.ownBoundDone) {
+        node.ownBound = this.boundOf(node, null, false, []);
+        node.ownBoundDone = true;
+      }
+      return node.ownBound!;
     }
-    node.width = out;
+    const memo = (node.countBound ??= new Map());
+    let out = memo.get(count);
+    if (out === undefined) {
+      out = this.boundOf(node, { exact: null, max: count, min: null }, false, []);
+      memo.set(count, out);
+    }
     return out;
+  }
+
+  /**
+   * Width of a record's header and slots, or of a list / array / map / set
+   * offset table, or of a tuple's header and slots. Explicit profile: W.
+   * Automatic: the type's own — the width class of its explicit cap, else of
+   * its inferred bound (docs/pssz-spec.md 3.1).
+   *
+   * `cap`: the position cap (spec 3.6), the explicit cap of the nearest
+   * enclosing record. Anything that is not a record is also bounded by it:
+   * its width is the class of the smaller of the two. A record's width is
+   * its own wherever it appears. `count`: the count (exact, else max) of the
+   * `lengthBound` of the member holding a plain list.
+   */
+  widthOf(node: Node, cap: bigint | null = null, count: bigint | null = null): number {
+    if (!this.automatic) return this.W;
+    if (node.kind === 'record') {
+      if (node.width === undefined)
+        node.width = widthClass(node.cap !== null ? node.cap : this.inferredBound(node));
+      return node.width;
+    }
+    let bound = this.inferredBound(node, count);
+    if (cap !== null && (bound === null || bound > cap)) bound = cap;
+    return widthClass(bound);
+  }
+
+  /**
+   * The position cap of the members of `node`: a record's explicit cap (or
+   * none); `cap`, unchanged, for anything else. Explicit profiles have none.
+   */
+  capBeneath(node: Node, cap: bigint | null): bigint | null {
+    if (!this.automatic) return null;
+    return node.kind === 'record' ? node.cap : cap;
+  }
+
+  /**
+   * C++ `psio::pssz_child_wider_than_cap_v<T>`: the record has an explicit
+   * cap and a record wider than the cap's width class lies beneath it, with
+   * no other record in between. Such a child keeps its own width (spec 3.6)
+   * and spends offset bytes on a capacity it can never use there; the remedy
+   * is a cap or member bounds on the child. A query, not an error.
+   */
+  childWiderThanCap(node: Node): boolean {
+    if (!this.automatic || node.kind !== 'record' || node.cap === null) return false;
+    const width = this.widthOf(node);
+    const seen = new Set<Node>();
+    const holds = (at: Node): boolean => {
+      if (seen.has(at)) return false;
+      seen.add(at);
+      switch (at.kind) {
+        case 'record':
+          return this.widthOf(at) > width;
+        case 'option':
+        case 'list':
+        case 'array':
+          return holds(at.child);
+        case 'tuple':
+        case 'variant':
+          return at.members.some((member) => holds(member.node));
+        default:
+          return false; // scalars, strings, bit types; nested: a root of its own
+      }
+    };
+    return node.members.some((member) => holds(member.node));
   }
 
   // A record over its explicit cap is not a value of its type. The automatic
@@ -1679,7 +1786,9 @@ export class Codec {
     }));
   }
 
-  private encodeAssoc(node: Node, value: unknown, n: number): Uint8Array {
+  private encodeAssoc(
+    node: Node, value: unknown, n: number, cap: bigint | null, count: bigint | null,
+  ): Uint8Array {
     let items = assocItems(value);
     if (!items) return valueError('pssz IR: sequence value required');
     const order = this.assocOrder(node, items);
@@ -1691,13 +1800,14 @@ export class Codec {
       const given = items;
       items = order.map((index) => given[index]);
     }
-    return this.encodeSequence(node, items, n);
+    return this.encodeSequence(node, items, n, cap, count);
   }
 
   private decodeAssoc(
     node: Node, bytes: Uint8Array, start: number, end: number, n: number, ctx: DecodeContext,
+    cap: bigint | null, count: bigint | null,
   ): unknown {
-    const items = this.decodeSequence(node, bytes, start, end, n, ctx);
+    const items = this.decodeSequence(node, bytes, start, end, n, ctx, cap, count);
     // The order is that of the bytes read. A decoded Nested value stands
     // for its canonical encoding, which is not what a compatible read saw
     // when the inner bytes carry unknown fields: keys holding a Nested node
@@ -1706,7 +1816,7 @@ export class Codec {
     if (this.keyHasNested(node) && !this.opaqueNested && this.state.opaque === 0) {
       keys = this.rawly(() => {
         const raw: DecodeContext = { allowUnknown: ctx.allowUnknown, hasUnknown: false };
-        return this.assocKeys(node, this.decodeSequence(node, bytes, start, end, n, raw));
+        return this.assocKeys(node, this.decodeSequence(node, bytes, start, end, n, raw, cap, count));
       });
     } else keys = this.assocKeys(node, items);
     for (let i = 1; i < keys.length; ++i)
@@ -1748,14 +1858,14 @@ export class Codec {
     return boundAdmits(bound, end - start);
   }
 
+  // `w`: the width of the node at its position (a tuple's can differ from
+  // one position to another, under a position cap).
   fieldLayouts(node: Node, w: number): FieldLayout[] {
-    if (!node.fields) {
-      node.fields = node.members.map((member) => {
-        const info = this.layout(member.node);
-        return { fixedSize: info.fixed ? info.size : w, variable: !info.fixed, optional: info.optional };
-      });
-    }
-    return node.fields;
+    const memo = (node.fields ??= []);
+    return (memo[w] ??= node.members.map((member) => {
+      const info = this.layout(member.node);
+      return { fixedSize: info.fixed ? info.size : w, variable: !info.fixed, optional: info.optional };
+    }));
   }
 
   // ── Encode ────────────────────────────────────────────────────────────────
@@ -1801,7 +1911,14 @@ export class Codec {
     if (n > MAX_DEPTH) fail('pssz IR: node depth limit exceeded');
   }
 
-  encodeAt(node: Node, value: unknown, n: number): Uint8Array {
+  /**
+   * `cap`: the position cap of the value (spec 3.6; none at a root).
+   * `count`: the `lengthBound` count of the record member the value is; it
+   * reaches a list through Option only.
+   */
+  encodeAt(
+    node: Node, value: unknown, n: number, cap: bigint | null = null, count: bigint | null = null,
+  ): Uint8Array {
     this.checkDepth(n, valueError);
     switch (node.kind) {
       case 'int': {
@@ -1885,7 +2002,7 @@ export class Codec {
         const [some, payload] = unwrapOption(node, value, valueError);
         const selector = this.canBeEmpty(node.child);
         if (!some) return selector ? Uint8Array.of(0) : new Uint8Array(0);
-        const inner = this.encodeAt(node.textChild, payload, n + 1);
+        const inner = this.encodeAt(node.textChild, payload, n + 1, cap, count);
         if (!selector) return inner;
         const out = new Uint8Array(inner.length + 1);
         out[0] = 1;
@@ -1920,9 +2037,11 @@ export class Codec {
           if (node.stable || !info.optional || field !== null) keep = values.length;
         }
         const parts: Uint8Array[] = [];
+        // The members lie beneath this record's cap, or beneath none.
+        const beneath = this.capBeneath(node, cap);
         for (let i = 0; i < keep; ++i) {
           const member = node.members[i];
-          const part = this.encodeAt(member.text, values[i], n + 1);
+          const part = this.encodeAt(member.text, values[i], n + 1, beneath, boundCount(member.bound));
           // A nested member's bound counts its encoded bytes.
           if (
             member.bound && nestedMember(member.node) &&
@@ -1947,21 +2066,21 @@ export class Codec {
           if (!info.optional || (value[i] !== null && value[i] !== undefined)) keep = i + 1;
         }
         const parts: Uint8Array[] = [];
-        for (let i = 0; i < keep; ++i) parts.push(this.encodeAt(node.members[i].text, value[i], n + 1));
+        for (let i = 0; i < keep; ++i) parts.push(this.encodeAt(node.members[i].text, value[i], n + 1, cap));
         layouts.length = keep;
-        return this.encodeFields(layouts, parts, false, this.widthOf(node));
+        return this.encodeFields(layouts, parts, false, this.widthOf(node, cap));
       }
       case 'list':
       case 'array':
-        if (node.assoc) return this.encodeAssoc(node, value, n);
+        if (node.assoc) return this.encodeAssoc(node, value, n, cap, count);
         if (!Array.isArray(value)) return valueError('pssz IR: sequence value required');
-        return this.encodeSequence(node, value, n);
+        return this.encodeSequence(node, value, n, cap, count);
       case 'variant': {
         if (!isObject(value) || typeof value.type !== 'string')
           return valueError('pssz IR: a variant value is { type, value }');
         const selector = node.byName!.get(value.type);
         if (selector === undefined) return valueError(`pssz IR: unknown variant alternative "${value.type}"`);
-        const inner = this.encodeAt(node.members[selector].text, value.value, n + 1);
+        const inner = this.encodeAt(node.members[selector].text, value.value, n + 1, cap);
         const out = new Uint8Array(inner.length + 1);
         out[0] = selector;
         out.set(inner, 1);
@@ -1975,17 +2094,19 @@ export class Codec {
           return new Uint8Array(value);
         }
         // The inner value's canonical encoding, always in the automatic
-        // profile; its root is one node level below the nested node.
+        // profile; its root is one node level below the nested node. It is
+        // a root of its own: no position cap reaches into it.
         return this.auto.encodeAt(node.textChild, value, n + 1);
       }
       case 'custom': {
         // A wrapper adds nothing to the bytes. The values inside it were
         // checked as they were written; then this one, as `decode` gives it.
-        const out = this.encodeAt(node.inner!, value, n);
+        const out = this.encodeAt(node.inner!, value, n, cap, count);
         if (!node.boxed && this.state.quiet === 0 && (node.handler?.check || (!node.handler && this.requireHandlers))) {
           const inner = node.inner!;
           const held = node.handler?.check
-            ? this.quietly(() => this.decodeAt(inner, out, 0, out.length, n, { allowUnknown: false, hasUnknown: false }))
+            ? this.quietly(() =>
+              this.decodeAt(inner, out, 0, out.length, n, { allowUnknown: false, hasUnknown: false }, cap, count))
             : undefined;
           this.checkCustom(node, held, (message, invariant) => {
             throw new PsszError('value', message, undefined, invariant);
@@ -1997,17 +2118,19 @@ export class Codec {
   }
 
   // The elements of a list / array / map / set, in the order given.
-  private encodeSequence(node: Node, value: unknown[], n: number): Uint8Array {
+  private encodeSequence(
+    node: Node, value: unknown[], n: number, cap: bigint | null, count: bigint | null,
+  ): Uint8Array {
     if (node.bounded && (node.exact ? value.length !== node.countNum : value.length > node.countNum))
       valueError('pssz IR: sequence bound exceeded');
-    const w = this.widthOf(node);
+    const w = this.widthOf(node, cap, count);
     const info = this.layout(node.child);
     if (!node.exact && info.fixed && !info.size && value.length)
       valueError('pssz IR: ambiguous zero-size list');
     const parts: Uint8Array[] = [];
     const layouts: Layout[] = [];
     for (let i = 0; i < value.length; ++i) {
-      parts.push(this.encodeAt(node.textChild, value[i], n + 1));
+      parts.push(this.encodeAt(node.textChild, value[i], n + 1, cap));
       layouts.push(info);
     }
     return this.encodeFields(layouts, parts, true, w);
@@ -2096,9 +2219,11 @@ export class Codec {
 
   private decodeMembers(
     node: Node, bytes: Uint8Array, start: number, end: number, stable: boolean, n: number,
-    ctx: DecodeContext,
+    ctx: DecodeContext, cap: bigint | null,
   ): unknown[] {
-    const w = this.widthOf(node);
+    const w = this.widthOf(node, cap);
+    // A record's members lie beneath its cap, or beneath none.
+    const beneath = this.capBeneath(node, cap);
     const fields = this.fieldLayouts(node, w);
     const { begins, ends, present, unknown } = this.recordSpans(bytes, start, end, w, stable, fields);
     if (unknown && !ctx.allowUnknown) bytesError('pssz IR: unknown fields in exact decode');
@@ -2107,7 +2232,9 @@ export class Codec {
     for (let i = 0; i < fields.length; ++i) {
       const member = node.members[i];
       // A field the writer did not store is an absent optional.
-      const value = present[i] ? this.decodeAt(member.text, bytes, begins[i], ends[i], n + 1, ctx) : null;
+      const value = present[i]
+        ? this.decodeAt(member.text, bytes, begins[i], ends[i], n + 1, ctx, beneath, boundCount(member.bound))
+        : null;
       // Pruning is mandatory: the last slot a writer emits is never an
       // absent optional. A frame with unknown appended slots is not judged.
       if (
@@ -2130,9 +2257,10 @@ export class Codec {
 
   private decodeSequence(
     node: Node, bytes: Uint8Array, start: number, end: number, n: number, ctx: DecodeContext,
+    cap: bigint | null, count_: bigint | null,
   ): unknown[] {
     const element = node.child;
-    const w = this.widthOf(node);
+    const w = this.widthOf(node, cap, count_);
     const info = this.layout(element);
     const size = end - start;
     let count: number;
@@ -2159,7 +2287,7 @@ export class Codec {
         bytesError('pssz IR: zero-size array count exceeds the implementation limit');
       for (let i = 0; i < count; ++i) {
         const at = start + i * info.size;
-        out.push(this.decodeAt(node.textChild, bytes, at, at + info.size, n + 1, ctx));
+        out.push(this.decodeAt(node.textChild, bytes, at, at + info.size, n + 1, ctx, cap));
       }
     } else {
       if (count > Math.floor(size / w) || (!count && size)) bytesError('pssz IR: list table span mismatch');
@@ -2170,14 +2298,18 @@ export class Codec {
         const stop = i + 1 < count ? this.readOffset(bytes, start + (i + 1) * w, w) : size;
         if ((!i && begin !== table) || begin < previous || begin > stop || stop > size)
           bytesError('pssz IR: invalid list offsets');
-        out.push(this.decodeAt(node.textChild, bytes, start + begin, start + stop, n + 1, ctx));
+        out.push(this.decodeAt(node.textChild, bytes, start + begin, start + stop, n + 1, ctx, cap));
         previous = begin;
       }
     }
     return out;
   }
 
-  decodeAt(node: Node, bytes: Uint8Array, start: number, end: number, n: number, ctx: DecodeContext): unknown {
+  /** `cap`, `count`: as for `encodeAt`. */
+  decodeAt(
+    node: Node, bytes: Uint8Array, start: number, end: number, n: number, ctx: DecodeContext,
+    cap: bigint | null = null, count: bigint | null = null,
+  ): unknown {
     this.checkDepth(n, bytesError);
     const size = end - start;
     switch (node.kind) {
@@ -2249,21 +2381,21 @@ export class Codec {
           if (bytes[start] !== 1) bytesError('pssz IR: invalid optional selector');
           ++start;
         } else if (size === 0) return null;
-        return wrapSome(node, this.decodeAt(node.textChild, bytes, start, end, n + 1, ctx));
+        return wrapSome(node, this.decodeAt(node.textChild, bytes, start, end, n + 1, ctx, cap, count));
       }
       case 'record': {
         if (this.overCap(node, size)) bytesError('pssz IR: encoded size exceeds maxDynamicData cap');
-        const values = this.decodeMembers(node, bytes, start, end, node.stable, n, ctx);
+        const values = this.decodeMembers(node, bytes, start, end, node.stable, n, ctx, cap);
         const out: Record<string, unknown> = {};
         for (let i = 0; i < values.length; ++i) setField(out, node.members[i].name, values[i]);
         return out;
       }
       case 'tuple':
-        return this.decodeMembers(node, bytes, start, end, false, n, ctx);
+        return this.decodeMembers(node, bytes, start, end, false, n, ctx, cap);
       case 'list':
       case 'array':
-        if (node.assoc) return this.decodeAssoc(node, bytes, start, end, n, ctx);
-        return this.decodeSequence(node, bytes, start, end, n, ctx);
+        if (node.assoc) return this.decodeAssoc(node, bytes, start, end, n, ctx, cap, count);
+        return this.decodeSequence(node, bytes, start, end, n, ctx, cap, count);
       case 'variant': {
         if (size === 0) bytesError('pssz IR: variant selector missing');
         const selector = bytes[start];
@@ -2271,7 +2403,7 @@ export class Codec {
         const member = node.members[selector];
         const value: VariantValue = {
           type: member.name,
-          value: this.decodeAt(member.text, bytes, start + 1, end, n + 1, ctx),
+          value: this.decodeAt(member.text, bytes, start + 1, end, n + 1, ctx, cap),
         };
         return value;
       }
@@ -2285,7 +2417,7 @@ export class Codec {
         return this.auto.decodeAt(node.textChild, bytes, start, end, n + 1, ctx);
       case 'custom': {
         // The values inside were checked as they were read; then this one.
-        const value = this.decodeAt(node.inner!, bytes, start, end, n, ctx);
+        const value = this.decodeAt(node.inner!, bytes, start, end, n, ctx, cap, count);
         this.checkCustom(node, value, (message, invariant) => {
           throw new PsszError('bytes', message, undefined, invariant);
         });

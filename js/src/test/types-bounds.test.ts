@@ -261,14 +261,15 @@ test('bounds at any depth: every fixture vector of the types, through the hand-w
   // method-args (62), and annotated_raw_tags of string-raw-non-utf8 (4).
   assert.deepEqual(count, { vectors: 214, canonical: 101, unknown: 4, reject: 109, text: 97 });
 
-  // The pinned bytes (conformance/pssz-vectors.md).
-  assert.equal(toHex(AnnTags.encode({ tags: ['ab', 'c'] })), '0101080000000a000000616263');
-  assert.equal(toHex(WrapTags.encode({ tags: ['ab', 'c'] })), '0101080000000a000000616263');
+  // The pinned bytes (conformance/pssz-vectors.md). A bounded list's own
+  // offset table is as wide as its bound allows (02 04: two 1-byte offsets).
+  assert.equal(toHex(AnnTags.encode({ tags: ['ab', 'c'] })), '01010204616263');
+  assert.equal(toHex(WrapTags.encode({ tags: ['ab', 'c'] })), '01010204616263');
   // an array of bounded strings: its own offset table is 1 wide
   assert.equal(toHex(AnnArr.encode({ names: ['ab', '', 'c'] })), '0101030505616263');
-  // a map entry of a bounded key and value: a 1-wide header in the map's 4-wide table
-  assert.equal(toHex(AnnMap.encode({ m: new Map([['k', [7]]]) })), '0101040000000202036b07000000');
-  // the inferred bound (116: 1-byte offsets), and the explicit cap that rules (256: 2-byte)
+  // a map entry of a bounded key and value: a 1-wide header in the map's own 1-wide table
+  assert.equal(toHex(AnnMap.encode({ m: new Map([['k', [7]]]) })), '0101010202036b07000000');
+  // the inferred bound (107: 1-byte offsets), and the explicit cap that rules (256: 2-byte)
   const transfer = { to: 'al', amount: 5n, memo: 'hi' };
   assert.equal(toHex(ArgsTransferUncapped.encode(transfer)), '0a0a05000000000000000c616c6869');
   assert.equal(toHex(ArgsTransfer.encode(transfer)), '0c000c0005000000000000000e00616c6869');

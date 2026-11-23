@@ -36,15 +36,26 @@ test('doc: widths', () => {
   assert.equal(Account.width, 1);
   assert.equal(AccountV1.width, 2);
   assert.equal(AccountV2.width, 2);
-  // Without the cap the same field moves the width: not a compatible change.
-  assert.equal(record('AccountGrown', { ...accountFields, email: field(optional(rawString), { utf8: true, max: 64 }) }).width, 2);
+  // Without the cap: Account is 187 bytes at most (header and three slots of
+  // 1 byte, 8 + 32 + 136 + 8), so it has 255 - 187 = 68 bytes of slack. A new
+  // field that needs more (slot 1 + selector 1 + 100) moves the width from 1
+  // to 2: not a compatible change. (C++ tut-4b `AccountGrown`.)
+  assert.equal(Account.maxEncodedSize, 187n);
+  const AccountGrown = record('AccountGrown', { ...accountFields, bio: field(optional(rawString), { utf8: true, max: 100 }) });
+  assert.equal(AccountGrown.maxEncodedSize, BigInt(2 * 4 + 8 + 32 + 136 + 8 + (1 + 100)));
+  assert.equal(AccountGrown.width, 2);
+  // The 64-byte email of AccountV2 would have fit the slack (253).
+  assert.equal(record('AccountEmail', { ...accountFields, email: field(optional(rawString), { utf8: true, max: 64 }) }).width, 1);
 });
 
 test('doc: a bounded record', () => {
   const alice: Account = { id: 7n, owner: 'alice', tags: ['vip', 'beta'], balance: 100n };
   const data = Account.encode(alice);
-  // The bytes C++ and Rust write for the same declaration.
-  assert.equal(toHex(data), '12070000000000000012176400000000000000616c696365080000000b00000076697062657461');
+  // The bytes C++ and Rust write for the same declaration: 1-byte header
+  // and slots, and the list's own table (02 05) is 1 byte wide too, since
+  // the list is bounded (8 strings of at most 16 bytes: 136).
+  assert.equal(toHex(data), '12070000000000000012176400000000000000616c696365020576697062657461');
+  assert.equal(data.length, 33);
   assert.deepEqual(Account.decode(data), alice);
   assert.throws(() => Account.encode({ ...alice, owner: 'x'.repeat(33) }));
   assert.throws(() => Account.encode({ ...alice, tags: Array(9).fill('t') }));

@@ -141,6 +141,32 @@ export class PsszType<T = unknown, V = unknown> {
     return guarded(() => (this.boxed && this.codec.W === 0 ? 4 : this.codec.widthOf(this.node)));
   }
 
+  /**
+   * The inferred size bound of the type (`max_encoded_size`,
+   * `docs/pssz-spec.md` §3.2): the largest encoding in the automatic
+   * profile, each header, slot and offset table counted at its own width;
+   * `null` when unbounded (a plain string or list, a boxed value, anything
+   * holding one). The type's own `maxDynamicData` is not looked at — it
+   * rules the width whatever this is — while a capped record inside
+   * contributes its cap.
+   */
+  get maxEncodedSize(): bigint | null {
+    return guarded(() => (this.boxed ? null : this.codec.inferredBound(this.node)));
+  }
+
+  /**
+   * Whether this record has a `maxDynamicData` cap and holds — with no
+   * other record in between — a record whose offsets are wider than the
+   * cap's width class (C++ `psio::pssz_child_wider_than_cap_v<T>`). The cap
+   * narrows the lists, maps, sets and tuples beneath it, but a record keeps
+   * its own width wherever it appears, so such a child spends offset bytes
+   * on a capacity it cannot use there: give it a cap or member bounds of
+   * its own. A query, not an error; `false` under an explicit width.
+   */
+  get childWiderThanCap(): boolean {
+    return guarded(() => !this.boxed && this.codec.childWiderThanCap(this.node));
+  }
+
   /** The canonical PSSZ bytes of `value`. */
   encode(value: T): Uint8Array {
     return guarded(() => this.codec.encodeTop(this.ref, value));

@@ -26,7 +26,7 @@
 //
 // This file is internal. The public API is `pssz.ts`.
 
-import { Codec, Node, PsszError, wrapSome, type DecodeContext } from './pssz-core.js';
+import { Codec, Node, PsszError, boundCount, wrapSome, type DecodeContext } from './pssz-core.js';
 
 function bytesError(message: string): never {
   throw new PsszError('bytes', message);
@@ -46,6 +46,14 @@ export abstract class PsszView<T = unknown> {
     /** @internal */ protected readonly end: number,
     /** @internal */ protected readonly depth: number,
     /** @internal The type as written: `node` under its custom wrappers. */ protected readonly ref: Node = node,
+    /**
+     * @internal The position cap of the value (docs/pssz-spec.md 3.6): the
+     * explicit cap of the nearest enclosing record, which selects the offset
+     * widths of the lists, maps, sets and tuples beneath it.
+     */
+    protected readonly cap: bigint | null = null,
+    /** @internal The `lengthBound` count of the record member this value is. */
+    protected readonly memberCount: bigint | null = null,
   ) {}
 
   /** The encoding of this value: a subarray of the input, not a copy. */
@@ -59,7 +67,9 @@ export abstract class PsszView<T = unknown> {
    */
   toValue(options?: { rejectUnknown?: boolean }): T {
     const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false };
-    return guarded(() => this.codec.decodeAt(this.ref, this.input, this.start, this.end, this.depth, ctx)) as T;
+    return guarded(() => this.codec.decodeAt(
+      this.ref, this.input, this.start, this.end, this.depth, ctx, this.cap, this.memberCount,
+    )) as T;
   }
 }
 
@@ -85,7 +95,7 @@ abstract class MembersView<T> extends PsszView<T> {
       const record = node.kind === 'record';
       if (record && codec.overCap(node, this.end - this.start))
         bytesError('pssz IR: encoded size exceeds maxDynamicData cap');
-      const w = codec.widthOf(node);
+      const w = codec.widthOf(node, this.cap);
       return (this.spans = codec.recordSpans(
         this.input, this.start, this.end, w, record && node.stable, codec.fieldLayouts(node, w),
       ));
@@ -96,7 +106,12 @@ abstract class MembersView<T> extends PsszView<T> {
   protected member(i: number): unknown {
     const spans = this.frame();
     if (!spans.present[i]) return null;
-    return viewAt(this.codec, this.node.members[i].text, this.input, spans.begins[i], spans.ends[i], this.depth + 1);
+    const member = this.node.members[i];
+    // A record's members lie beneath its cap, or beneath none.
+    return viewAt(
+      this.codec, member.text, this.input, spans.begins[i], spans.ends[i], this.depth + 1,
+      this.codec.capBeneath(this.node, this.cap), boundCount(member.bound),
+    );
   }
 }
 
@@ -149,7 +164,7 @@ export class ListView<T = unknown, E = unknown> extends PsszView<T> {
     return guarded(() => {
       const { codec, node } = this;
       const size = this.end - this.start;
-      const w = codec.widthOf(node);
+      const w = codec.widthOf(node, this.cap, this.memberCount);
       const info = codec.layout(node.child);
       let count: number;
       if (node.exact) {
@@ -191,13 +206,13 @@ export class ListView<T = unknown, E = unknown> extends PsszView<T> {
       const element = this.node.textChild;
       if (this.elementSize >= 0) {
         const at = start + index * this.elementSize;
-        return viewAt(codec, element, input, at, at + this.elementSize, this.depth + 1) as E;
+        return viewAt(codec, element, input, at, at + this.elementSize, this.depth + 1, this.cap) as E;
       }
       const size = this.end - start;
       const begin = codec.readOffset(input, start + index * w, w);
       const stop = index + 1 < count ? codec.readOffset(input, start + (index + 1) * w, w) : size;
       if (begin < count * w || begin > stop || stop > size) bytesError('pssz IR: invalid list offsets');
-      return viewAt(codec, element, input, start + begin, start + stop, this.depth + 1) as E;
+      return viewAt(codec, element, input, start + begin, start + stop, this.depth + 1, this.cap) as E;
     });
   }
 
@@ -230,7 +245,7 @@ export class VariantView<T = unknown, K extends string = string, V = unknown> ex
 
   get value(): V {
     const member = this.node.members[this.selector()];
-    return viewAt(this.codec, member.text, this.input, this.start + 1, this.end, this.depth + 1) as V;
+    return viewAt(this.codec, member.text, this.input, this.start + 1, this.end, this.depth + 1, this.cap) as V;
   }
 }
 
@@ -238,24 +253,28 @@ export class VariantView<T = unknown, K extends string = string, V = unknown> ex
  * What a view returns for the value of `ref` (a type as written) at
  * `[start, end)`.
  */
-export function viewAt(codec: Codec, ref: Node, bytes: Uint8Array, start: number, end: number, n: number): unknown {
+export function viewAt(
+  codec: Codec, ref: Node, bytes: Uint8Array, start: number, end: number, n: number,
+  cap: bigint | null = null, count: bigint | null = null,
+): unknown {
   return guarded(() => {
     codec.checkDepth(n, bytesError);
     // A custom type, a box: the view of the wire type.
     const node = codec.wireOf(ref).node;
     switch (node.kind) {
       case 'record':
-        return new RecordView(codec, node, bytes, start, end, n, ref);
+        return new RecordView(codec, node, bytes, start, end, n, ref, cap, count);
       case 'tuple':
-        return new TupleView(codec, node, bytes, start, end, n, ref);
+        return new TupleView(codec, node, bytes, start, end, n, ref, cap, count);
       case 'list':
       case 'array':
-        return new ListView(codec, node, bytes, start, end, n, ref);
+        return new ListView(codec, node, bytes, start, end, n, ref, cap, count);
       case 'variant':
-        return new VariantView(codec, node, bytes, start, end, n, ref);
+        return new VariantView(codec, node, bytes, start, end, n, ref, cap, count);
       case 'nested':
         // The view of the inner value over the inner bytes (the automatic
-        // profile, one node level below); opaque: the bytes.
+        // profile, one node level below, a root of its own: no position
+        // cap reaches into it); opaque: the bytes.
         if (codec.isOpaque(node)) {
           if (end > start) codec.checkDepth(n + 1, bytesError);
           return bytes.subarray(start, end);
@@ -272,7 +291,7 @@ export function viewAt(codec: Codec, ref: Node, bytes: Uint8Array, start: number
           if (bytes[start] !== 1) bytesError('pssz IR: invalid optional selector');
           ++start;
         } else if (size === 0) return null;
-        return wrapSome(node, viewAt(codec, node.textChild, bytes, start, end, n + 1));
+        return wrapSome(node, viewAt(codec, node.textChild, bytes, start, end, n + 1, cap, count));
       }
       case 'hex':
         codec.boundBytes(node.child, end - start, bytesError);

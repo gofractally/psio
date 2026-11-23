@@ -652,6 +652,18 @@ export class TypeDef<T, V = T> {
   get width(): number {
     return this.type().width;
   }
+  /** The inferred size bound (`max_encoded_size`); `null` when unbounded. See `PsszType.maxEncodedSize`. */
+  get maxEncodedSize(): bigint | null {
+    return this.type().maxEncodedSize;
+  }
+  /**
+   * Whether this capped record holds a record wider than its cap's width
+   * class (C++ `psio::pssz_child_wider_than_cap_v<T>`): a query, not an
+   * error. See `PsszType.childWiderThanCap`.
+   */
+  get childWiderThanCap(): boolean {
+    return this.type().childWiderThanCap;
+  }
   /** The canonical PSSZ bytes of `value`. */
   encode(value: T): Uint8Array {
     return this.type().encode(value);
@@ -798,11 +810,18 @@ export function array<T, V>(element: TypeDef<T, V>, length: number | bigint): Ty
   return new TypeDef({ k: 'array', inner: isDef(element, 'an array element'), n: count(length, 'a length') });
 }
 
+/** C++ `psio::max_tuple_elements`: a pair is 2, a method's argument list is a tuple. */
+const MAX_TUPLE_ELEMENTS = 255;
+
 type ValuesOf<D extends readonly AnyDef[]> = { -readonly [I in keyof D]: Infer<D[I]> };
 type ViewsOf<D extends readonly AnyDef[]> = { -readonly [I in keyof D]: InferView<D[I]> };
 
-/** Positional elements of different types. Trailing optionals may be absent on the wire. */
+/**
+ * Positional elements of different types. Trailing optionals may be absent
+ * on the wire. A tuple has at most 255 elements (`docs/pssz-spec.md` §8.4).
+ */
 export function tuple<D extends readonly AnyDef[]>(...elements: D): TypeDef<ValuesOf<D>, TupleView<ValuesOf<D>, ViewsOf<D>>> {
+  if (elements.length > MAX_TUPLE_ELEMENTS) schemaError('typed schema: a tuple has at most 255 elements');
   return new TypeDef({ k: 'tuple', items: elements.map((e) => isDef(e, 'a tuple element')), pair: false });
 }
 
@@ -1137,6 +1156,7 @@ export function argumentTuple<P extends { [name: string]: TypeDef<any, any> | Fi
 ): TypeDef<{ [K in keyof P]: MemberValue<P[K]> }, RecordView<{ [K in keyof P]: MemberValue<P[K]> }, { [K in keyof P]: MemberView<P[K]> }>> {
   if (typeof parameters !== 'object' || parameters === null) schemaError('typed schema: parameters must be an object');
   const fields = fieldShapes(parameters, 'parameter');
+  if (fields.length > MAX_TUPLE_ELEMENTS) schemaError('typed schema: a method has at most 255 parameters');
   const maxDynamicData = options?.maxDynamicData;
   if (maxDynamicData !== undefined) count(maxDynamicData, 'maxDynamicData');
   return new TypeDef({ k: 'args', uid: ++argumentTuples, fields, maxDynamicData });

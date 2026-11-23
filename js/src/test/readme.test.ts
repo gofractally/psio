@@ -51,9 +51,24 @@ test('README: typed definitions', () => {
   assert.equal(record('Note', { text: utf8 }, { maxDynamicData: 200 }).width, 1);
   assert.equal(record('Open', { text: utf8 }).width, 4);
   assert.equal(tuple(u64, boundedUtf8(32), u8).width, 1);
+  assert.equal(tuple(u64, boundedUtf8(32), u8).maxEncodedSize, 43n);
+  assert.equal(record('Open', { text: utf8 }).maxEncodedSize, null);
+  assert.equal(boundedList(boundedUtf8(16), 15).width, 1);
+  assert.equal(boundedList(boundedUtf8(17), 15).width, 2);
+  assert.equal(list(boundedUtf8(16)).width, 4);
   assert.equal(record('Event', { at: u64, what: variant({ tick: u8, point: tuple(u32, u32) }) }).width, 1);
   assert.equal(tuple(u32, utf8).width, 4);
   assert.equal(Small.type({ width: 2 }).width, 2);
+
+  // A record's cap bounds what lies beneath it.
+  const Memo = record('Memo', { token: u32, memo: utf8, tags: list(utf8), rows: list(list(utf8)) }, { maxDynamicData: 255 });
+  assert.equal(toHex(Memo.encode({ token: 1, memo: 'hi', tags: ['ab', 'c'], rows: [['x']] })),
+    '07' + '01000000' + '07' + '09' + '0e' + '6869' + '0204' + '6162' + '63' + '01' + '01' + '78');
+  assert.deepEqual(Memo.decode(Memo.encode({ token: 1, memo: 'hi', tags: ['ab', 'c'], rows: [['x']] })),
+    { token: 1, memo: 'hi', tags: ['ab', 'c'], rows: [['x']] });
+  assert.equal(Memo.childWiderThanCap, false);
+  const Envelope = record('Envelope', { body: record('Body', { text: utf8 }) }, { maxDynamicData: 255 });
+  assert.equal(Envelope.childWiderThanCap, true);
 
   interface Tree { label: string; children: Tree[] }
   const Tree: TypeDef<Tree, RecordView<Tree>> = record('Tree', { label: utf8, children: list(lazy(() => Tree)) });
@@ -280,16 +295,21 @@ test('README: bounds at any depth, method arguments', () => {
   } = post;
   assert.deepEqual(Post.decode(Post.encode(typed)), post);
   assert.equal(Post.width, 2);
-  // 4 (header) + title 84 + tags 164 + votes 164 + origin 41 + body 1141 + reply 77
-  assert.equal(4 + (4 + 80) + (4 + 8 * 20) + (4 + 4 * 40) + (4 + 4 + 20 + 4 + 9) + (4 + 1 + 4 * 284) + (4 + 1 + 2 * 36), 1675);
+  // Each type counts its own header / slots / table at its own width:
+  // title 80; tags 8 * (1 + 16) = 136; votes 4 * (1 + 27) = 112, an entry
+  // being 1 + (1 + 16) + (1 + 8) = 27; origin 1 + (1 + 16) + 4 + (1 + 5) =
+  // 28; body 1 + 4 * (2 + 280) = 1129; reply 1 + 2 * (1 + 32) = 67; and the
+  // record's own header and six slots at 2 bytes.
+  assert.equal(2 * 7 + 80 + 136 + 112 + 28 + 1129 + 67, 1566);
+  assert.equal(Post.maxEncodedSize, 1566n);
   // Some at-the-bound values fit; the widest (the four parts) does too.
   const full: Post = { ...post, body: { type: 'Parts', value: Array(4).fill('x'.repeat(280)) }, tags: Array(8).fill('t'.repeat(16)) };
-  assert.ok(Post.encode(full).length <= 1675);
+  assert.ok(Post.encode(full).length <= 1566);
 
   const Tags = record('Tags', { tags: field(list(rawString), { max: 8, element: { utf8: true, max: 16 } }) });
   const Wrapped = record('Tags', { tags: boundedList(boundedUtf8(16), 8) });
-  assert.equal(toHex(Tags.encode({ tags: ['ab', 'c'] })), '0101080000000a000000616263');
-  assert.equal(toHex(Wrapped.encode({ tags: ['ab', 'c'] })), '0101080000000a000000616263');
+  assert.equal(toHex(Tags.encode({ tags: ['ab', 'c'] })), '01010204616263');
+  assert.equal(toHex(Wrapped.encode({ tags: ['ab', 'c'] })), '01010204616263');
   assert.deepEqual(Wrapped.decode(Tags.encode({ tags: ['ab', 'c'] })), { tags: ['ab', 'c'] });
   // The plain type registered and the bounded type in the member; a registered type of its own.
   const inPlace = generateSchema({ Tags }).ir.types;
@@ -333,6 +353,7 @@ test('README: bounds at any depth, method arguments', () => {
   const Transfer2 = argumentTuple({ ...parameters, fee: optional(u32) }, { maxDynamicData: 256 });
   assert.equal(Transfer.width, 2);
   assert.equal(argumentTuple(parameters).width, 1);
+  assert.equal(argumentTuple(parameters).maxEncodedSize, 107n);
   const args = Transfer.encode({ to: 'al', amount: 5n, memo: 'hi' });
   assert.equal(toHex(args), '0c000c0005000000000000000e00616c6869');
   assert.deepEqual(Transfer2.decode(args), { to: 'al', amount: 5n, memo: 'hi', fee: null });
