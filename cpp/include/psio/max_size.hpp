@@ -361,16 +361,23 @@ namespace psio {
       consteval bound variant_bound(const Annots& annots, std::index_sequence<Is...>,
                                     mode m = {}) noexcept
       {
+         // `widest` is never reset to empty. Emptying an engaged optional and
+         // then copying it is not a constant expression for clang with
+         // libstdc++ (the copy reads the destroyed value), and every use of
+         // this function is at compile time.
          bound widest      = 0;
+         bool  unbounded   = false;
          auto  alternative = [&](bound payload) {
-            if (!payload || !widest)
-               widest = std::nullopt;
+            if (!payload)
+               unbounded = true;
             else if (*payload > *widest)
                widest = payload;
          };
          (alternative(max_field_with_annots<std::variant_alternative_t<Is, T>>(
              ::psio::detail::ann::at_specs<Is>(annots), m)),
           ...);
+         if (unbounded)
+            return std::nullopt;
          return add(widest, 1);
       }
 
