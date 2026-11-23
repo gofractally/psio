@@ -6,6 +6,53 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 ## Handover (newest first)
 
+### After F1 (Cap'n Proto) — tip of this note
+
+State: F1 committed (`babc96a`), main `2c17312` merged (`4ec83a4`);
+393/393 ctest in both simdjson configurations (the two new targets are
+`psio_capnp_tests`, 823 assertions, and `psio_capnp_interop_tests`, 3,621
+assertions against libcapnp 1.3.0). `capnp.hpp` + `capnp_view.hpp` compile
+with `-fno-exceptions -fno-rtti` (syntax check of a view / edit program;
+not wired into ctest). User documentation: `docs/capnp.md`.
+
+Measured with the new view doing what the official reader does (struct
+size bounds, far pointers, native unions, bit lists); message written by
+libcapnp; one run, load 7.4, min of 11 trials, ns/op
+(`~/psio-formats-logs/f1-capnp-run1.txt`):
+
+| Operation | g1 view | g2 `capnp_view` | libcapnp, reader per op | libcapnp, held root |
+|---|---:|---:|---:|---:|
+| one field of the root | 0.38 | 0.54 | 17.6 | 0.25 |
+| all 5 fields of a nested struct | 1.67 | 2.40 | 29.8 | 12.4 |
+| nested scalar | 0.70 | 0.99 | 21.6 | 3.59 |
+| nested string | 1.07 | 1.65 | 25.3 | 7.58 |
+| string field | 0.75 | 1.01 | 21.7 | 3.84 |
+| iterate 16 structs (range-for) | 3.10 | 3.55 | 49.5 | 31.8 |
+| iterate, all fields | 8.20 | 8.83 | 115 | 97.6 |
+| decode to a C++ struct | 96 | 92 | 203 | |
+| validate | 58 | 55 (typed) | | |
+| encode | 229 | 121 | 461 | |
+
+So, today: against a reader constructed per message psio is 12–33× faster
+on reads; against a held root 3.5–11×, EXCEPT a single scalar of the root
+struct where libcapnp's held root is 2× faster (the psio view resolves the
+root pointer each time it is constructed; libcapnp did that when the
+reader was made). Encode 3.8×, decode 2.2× faster. The new view is 1.1–1.5×
+slower than the first generation's, which is the price of the checks g1
+skipped. Needs a second run for spread before the numbers go into
+`docs/format-comparison.md` (F6).
+
+Not done in F1 (carry to later stages): the safe / trusted split for the
+capnp views (they are "trusted" in the sense of the proposal below: they
+rely on validation); switching a union member through `capnp_document`;
+`std::map` / `std::set` / `std::tuple` / wrapper types; packed encoding;
+porting the first generation's 74 view tests one by one (the new tests
+cover the same surface on the native layout, but it is not a port — g1's
+union tests assert the non-native layout); a `-fno-exceptions` ctest
+target; the existing `emit_capnp` has not been checked against the new
+mapping (F3: it must emit unions for variants / optional scalars and
+defaults for initialisers).
+
 ### After the frame pass (PSSZ / SSZ / WIT views, requested after F0)
 
 State: main line merged (`50092a4`, G46–G51). Two frame commits on top;
@@ -293,16 +340,7 @@ Reads are at parity with Google's accessors (both are a vtable lookup);
 "faster than their native API" holds for FlatBuffers **encode** only (g1:
 2.2×, with a 12 % larger buffer), not for reads or verification.
 
-## F1 work in progress (not committed)
-
-In `~/psio-formats-scratch/f1-wip/`: `capnp.hpp` (rewrite: native layout,
-far pointers, typed validation, unions, optionals, bit lists) and
-`capnp_view.hpp` (views, in-place scalar writes, `capnp_document`
-append-and-repoint editor; not yet compiled). In the tree, untracked:
-`cpp/include/psio/detail/field_number.hpp` (one field number for protobuf /
-capnp / flatbuf) and `cpp/tests/capnp/layout_fuzz.py`.
-
-Established so far for F1:
+## F1 findings
 
 * `psio::capnp::layout<T>` is a constexpr port of the official compiler's
   `StructLayout` (holes, union members sharing and growing locations,
