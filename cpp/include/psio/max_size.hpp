@@ -256,7 +256,7 @@ namespace psio {
                return []<std::size_t... Is>(std::index_sequence<Is...>) {
                   return ((fixed_payload<typename R::template member_type<Is>>() &&
                            !::psio::has_binary_as_override_v<
-                              typename R::template member_type<Is>,
+                              ::psio::wire_type_t<typename R::template member_type<Is>>,
                               typename ::psio::effective_annotations_for<
                                  U, typename R::template member_type<Is>,
                                  R::template member_pointer<Is>>::value_t>) && ...);
@@ -497,7 +497,8 @@ namespace psio {
             bound       rest  = 0;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                auto field = [&]<std::size_t I>() {
-                  using F = typename R::template member_type<I>;
+                  // (As the type the member is encoded as: wire_type.hpp.)
+                  using F = ::psio::wire_type_t<typename R::template member_type<I>>;
                   using eff = ::psio::effective_annotations_for<
                      U, F, R::template member_pointer<I>>;
                   if constexpr (!fixed_payload<F>() ||

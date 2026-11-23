@@ -25,6 +25,7 @@
 #include <psio/annotate.hpp>
 #include <psio/error.hpp>
 #include <psio/shapes.hpp>
+#include <psio/wire_type.hpp>
 
 namespace psio
 {
@@ -556,7 +557,9 @@ namespace psio {
    template <typename FieldType, auto MemberPtr>
    struct effective_annotations
    {
-      using field_t = std::remove_cvref_t<FieldType>;
+      // (What the member is encoded as: an annotation of a std::string_view
+      // member is an annotation of a string.)
+      using field_t = ::psio::wire_type_t<FieldType>;
 
       static constexpr auto inherent_value =
          inherent_annotations<field_t>::value;
@@ -582,7 +585,9 @@ namespace psio {
    template <typename EnclosingT, typename FieldType, auto MemberPtr>
    struct effective_annotations_for
    {
-      using field_t = std::remove_cvref_t<FieldType>;
+      // (What the member is encoded as: an annotation of a std::string_view
+      // member is an annotation of a string.)
+      using field_t = ::psio::wire_type_t<FieldType>;
 
       static constexpr auto member_value =
          detail::member_annotations_in<EnclosingT, MemberPtr>();

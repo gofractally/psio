@@ -327,13 +327,78 @@ namespace psio {
             return (!::psio::is_source_v<typename ::psio::reflect<T>::template member_type<Is>> &&
                     ... && true);
          }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
+
+      // ── Sources (wire_type.hpp) ───────────────────────────────────────
+      //
+      // The encode-side walks (preflight, sizing, writing) take the value
+      // to encode as any SOURCE of the type they lay out: `T` below is
+      // always the wire type, and the value may be a T, or something that
+      // is encoded as one — a std::string_view for a std::string, a
+      // std::span for a std::vector, a tuple of references for the tuple
+      // of values, a std::reference_wrapper, a view. Sub-values are passed
+      // down as they are, so sources nest.
+      template <typename X>
+      using src_t = std::remove_cvref_t<X>;
+
+      template <typename S>
+      inline constexpr bool is_ref_wrapper_v = false;
+      template <typename X>
+      inline constexpr bool is_ref_wrapper_v<std::reference_wrapper<X>> = true;
+
+      // A C string: const char*, char*, char[N] — its characters without
+      // the terminating NUL.
+      template <typename S>
+      inline constexpr bool is_c_string_v =
+         std::is_same_v<S, const char*> || std::is_same_v<S, char*> ||
+         (std::is_array_v<S> && std::is_same_v<std::remove_extent_t<S>, char>);
+
+      // A view given as a value: validated bytes of a T in the view's
+      // format.
+      template <typename S>
+      concept view_source = ::psio::is_source_v<S> && requires(const S& v) {
+         typename S::format_type;
+         { v._psio_data() } -> std::convertible_to<std::span<const char>>;
+         v.unpack();
+      };
+
+      // Whether the bytes of a view of format Fmt are, as they stand, the
+      // encoding the walk would write for a T at this position (offset
+      // width W, automatic profile or not, carrier A). When they are, a
+      // view is re-emitted byte for byte; when they are not — the view is
+      // of a member under a cap and is written where there is none, or
+      // the other way round — its value is unpacked and encoded again.
+      template <typename Fmt, std::size_t W, bool Auto, typename T, typename A>
+      inline constexpr bool view_verbatim_v = false;
+
+      // The owned value a source designates (defined after the encoder).
+      template <typename T, typename S>
+      T materialize(const S& source);
+
+      // What a member's value checks (length bounds, utf8, order, ...) look
+      // at: the value itself, or — for a source that carries such checks,
+      // which are written against the owning type — the value it designates.
+      template <typename S>
+      decltype(auto) checkable(const S& value)
+      {
+         if constexpr (view_source<S>)
+            return value.unpack();
+         else if constexpr (is_ref_wrapper_v<S>)
+            return checkable(value.get());
+         else if constexpr (::psio::is_source_v<S>)
+            return materialize<::psio::wire_type_t<S>>(value);
+         else
+            return (value);
+      }
       template <typename... Ts>
       struct record_traits<std::tuple<Ts...>>
       {
          PSIO_REQUIRE_TUPLE_SIZE(sizeof...(Ts));
          static constexpr std::size_t member_count = sizeof...(Ts);
+         // (A tuple of references — std::tie, std::forward_as_tuple — has
+         // the members of the tuple of values.)
          template <std::size_t I>
-         using member_type = std::tuple_element_t<I, std::tuple<Ts...>>;
+         using member_type =
+            ::psio::detail::wire_element_t<std::tuple_element_t<I, std::tuple<Ts...>>>;
       };
 
       template <typename Meta, typename... Ts>
@@ -347,7 +412,8 @@ namespace psio {
       {
          static constexpr std::size_t member_count = 2;
          template <std::size_t I>
-         using member_type = std::remove_const_t<std::tuple_element_t<I, std::pair<A, B>>>;
+         using member_type = std::remove_const_t<
+            ::psio::detail::wire_element_t<std::tuple_element_t<I, std::pair<A, B>>>>;
       };
 
       template <typename T, std::size_t I, bool = is_std_tuple_v<T>>
@@ -752,8 +818,8 @@ namespace psio {
                return count;
             }(std::make_index_sequence<R::member_count>{});
       }
-      template <Record T>
-      std::size_t emitted_field_count(const T& value) noexcept
+      template <Record T, typename S>
+      std::size_t emitted_field_count(const S& value) noexcept
       {
          constexpr std::size_t N = record_traits<T>::member_count;
          constexpr std::size_t F = required_field_count<T>();
@@ -867,31 +933,48 @@ namespace psio {
          constexpr explicit operator bool() const noexcept { return bounds; }
       };
 
-      template <typename T>
-      codec_status check_encode_shape(const T& value, std::size_t depth,
-                                      encode_preflight bounds);
-
-      template <typename T>
-      codec_status check_encode_depth_impl(const T& value, std::size_t depth,
-                                           encode_preflight bounds = {})
+      // T: the wire type; value: a source of it (see "Sources").
+      template <typename T, typename S>
+      codec_status check_encode_shape_as(const S& value, std::size_t depth,
+                                         encode_preflight bounds);
+      template <typename S>
+      codec_status check_encode_shape(const S& value, std::size_t depth, encode_preflight bounds)
       {
-         if constexpr (::psio::has_invariant_v<T>)
+         return check_encode_shape_as<::psio::wire_type_t<S>>(value, depth, bounds);
+      }
+
+      // The preflight of `value` encoded as T.
+      template <typename T, typename S>
+      codec_status check_encode_as(const S& value, std::size_t depth, encode_preflight bounds = {})
+      {
+         if constexpr (::psio::has_invariant_v<T> && std::is_same_v<T, S>)
          {
-            if (auto status = check_encode_shape(value, depth, bounds); !status.ok())
+            if (auto status = check_encode_shape_as<T>(value, depth, bounds); !status.ok())
                return status;
             return bounds.invariants ? ::psio::check_invariant(value) : codec_ok();
          }
          else
-            return check_encode_shape(value, depth, bounds);
+            return check_encode_shape_as<T>(value, depth, bounds);
+      }
+      template <typename S>
+      codec_status check_encode_depth_impl(const S& value, std::size_t depth,
+                                           encode_preflight bounds = {})
+      {
+         return check_encode_as<::psio::wire_type_t<S>>(value, depth, bounds);
       }
 
-      template <typename T>
-      codec_status check_encode_shape(const T& value, std::size_t depth,
-                                      encode_preflight bounds)
+      template <typename T, typename S>
+      codec_status check_encode_shape_as(const S& value, std::size_t depth,
+                                         encode_preflight bounds)
       {
          if (depth > kMaxValidationDepth)
             return codec_fail("pssz: max depth exceeded", 0, "pssz");
-         if constexpr (is_psio_box_v<T>)
+         if constexpr (is_ref_wrapper_v<S>)
+            return check_encode_as<T>(value.get(), depth, bounds);
+         else if constexpr (view_source<S> || is_c_string_v<S>)
+            // A view is over validated bytes; a C string is its characters.
+            return codec_ok();
+         else if constexpr (is_psio_box_v<T>)
          {
             if (!value.value) return codec_fail("pssz: null Box", 0, "pssz");
             return check_encode_depth_impl(*value.value, depth, bounds);
@@ -946,7 +1029,7 @@ namespace psio {
             else
                for (const auto& element : value)
                {
-                  auto status = check_encode_depth_impl<E>(element, depth + 1, bounds);
+                  auto status = check_encode_depth_impl(element, depth + 1, bounds);
                   if (!status.ok()) return status;
                }
          }
@@ -966,7 +1049,7 @@ namespace psio {
          else if constexpr (Record<T>)
             return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                codec_status status;
-               const auto count = emitted_field_count(value);
+               const auto count = emitted_field_count<T>(value);
                (([&] {
                   if (status.ok() && Is < count)
                   {
@@ -982,7 +1065,7 @@ namespace psio {
                                    !::psio::has_as_override_v<eff>)
                         if (status.ok() && bounds)
                            status = ::psio::check_member_annotations(
-                              record_member<Is>(value),
+                              checkable(record_member<Is>(value)),
                               record_member_annotations<T, Is>::value,
                               "pssz: member length_bound violated", "pssz");
                   }
@@ -1172,10 +1255,25 @@ namespace psio {
                 typename P = std::nullptr_t>
       std::size_t size_of_v(const T& v, P check = nullptr);
 
-      template <std::size_t W, bool Auto, typename T, typename A, typename P>
-      std::size_t size_of_v_impl(const T& v, P check)
+      // T: the wire type; v: a source of it (see "Sources").
+      template <std::size_t W, bool Auto, typename T, typename A, typename P, typename S>
+      std::size_t size_of_v_impl(const S& v, P check)
       {
-         if constexpr (::psio::format_should_dispatch_adapter_v<
+         if constexpr (is_ref_wrapper_v<S>)
+            return size_of_v_impl<W, Auto, T, A, P>(v.get(), check);
+         else if constexpr (is_c_string_v<S>)
+            return ::psio::detail::c_string_view(v).size();
+         else if constexpr (view_source<S>)
+         {
+            if constexpr (view_verbatim_v<typename S::format_type, W, Auto, T, A>)
+               return v._psio_data().size();
+            else
+            {
+               const T owned = v.unpack();
+               return size_of_v_impl<W, Auto, T, A, P>(owned, check);
+            }
+         }
+         else if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::pssz, T>)
          {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
@@ -1205,7 +1303,7 @@ namespace psio {
             for (const auto& x : v)
             {
                last = sum.total;
-               sum.add(size_of_v<W, Auto, typename T::value_type, ann::element_ann<A>>(x, check));
+               sum.add(size_of_v<W, Auto, src_t<decltype(x)>, ann::element_ann<A>>(x, check));
             }
             enforce_container<W>(sum, last, check);
             return sum.total;
@@ -1228,7 +1326,7 @@ namespace psio {
                for (const auto& x : v)
                {
                   last = sum.total;
-                  sum.add(size_of_v<W, Auto, E, ann::element_ann<A>>(x, check));
+                  sum.add(size_of_v<W, Auto, src_t<decltype(x)>, ann::element_ann<A>>(x, check));
                }
                enforce_container<W>(sum, last, check);
                return sum.total;
@@ -1242,10 +1340,11 @@ namespace psio {
             // Positive-minimum V needs no selector; a V that can encode to
             // zero bytes uses the 1-byte selector plus its payload.
             if constexpr (!optional_uses_selector_v<V>)
-               return v.has_value() ? size_of_v<W, Auto, V, A>(*v, check) : 0;
+               return v.has_value() ? size_of_v<W, Auto, src_t<decltype(*v)>, A>(*v, check) : 0;
             else
-               return checked_add(1, v.has_value() ? size_of_v<W, Auto, V, A>(*v, check) : 0,
-                                  check);
+               return checked_add(
+                  1, v.has_value() ? size_of_v<W, Auto, src_t<decltype(*v)>, A>(*v, check) : 0,
+                  check);
          }
          else if constexpr (is_bitlist_v<T>)
             return (v.size() + 8) / 8;
@@ -1280,7 +1379,7 @@ namespace psio {
                // written: their share of the region is a constant, and only
                // the trailing ones are tested against the count.
                constexpr std::size_t required = required_field_count<T>();
-               const std::size_t     count    = emitted_field_count(v);
+               const std::size_t     count    = emitted_field_count<T>(v);
                std::size_t fixed_region       = required_fixed_region<W, T>();
                ((Is >= required && Is < count
                     ? fixed_region += pssz_member_fixed_size_full<W, T, Is>()
@@ -1316,8 +1415,8 @@ namespace psio {
                       else if constexpr (!is_fixed_v<F>)
                       {
                          last = sum.total;
-                         sum.add(size_of_v<W, Auto, F, field_ann<T, A, Is>>(
-                            record_member<Is>(v), check));
+                         sum.add(size_of_v<W, Auto, src_t<decltype(record_member<Is>(v))>,
+                                           field_ann<T, A, Is>>(record_member<Is>(v), check));
                       }
                    }()),
                   ...);
@@ -1343,8 +1442,9 @@ namespace psio {
          }(std::make_index_sequence<required_field_count<T>()>{});
       }
 
-      template <std::size_t LegacyW, bool Auto, typename T, typename A, typename P>
-      std::size_t size_of_v(const T& value, P check)
+      // The size of `value` encoded as T (T: the wire type).
+      template <std::size_t LegacyW, bool Auto, typename T, typename A, typename P, typename S>
+      std::size_t size_of_as(const S& value, P check)
       {
          constexpr std::size_t W = [] {
             if constexpr (Auto) return width_for<T, A>();
@@ -1354,6 +1454,12 @@ namespace psio {
          const auto total = size_of_v_impl<W, Auto, T, A, P>(value, check);
          if constexpr (Auto) enforce_max_dynamic<T>(total, check);
          return total;
+      }
+      // S: the type of the value, which may be a source of its wire type.
+      template <std::size_t LegacyW, bool Auto, typename S, typename A, typename P>
+      std::size_t size_of_v(const S& value, P check)
+      {
+         return size_of_as<LegacyW, Auto, ::psio::wire_type_t<S>, A, P>(value, check);
       }
 
       // ── Encoding ──────────────────────────────────────────────────────────
@@ -1374,8 +1480,10 @@ namespace psio {
 
       // A list (std::vector, psio::bounded) whose offset table is W wide.
       // EA: the carrier of one element.
-      template <std::size_t W, bool Auto, typename E, typename Sink, typename EA>
-      [[gnu::always_inline]] inline void encode_list(const std::vector<E>& v, Sink& s)
+      // v: a std::vector<E>, or any source of one (a std::span, a vector of
+      // sources of E): size(), empty(), operator[] and iteration.
+      template <std::size_t W, bool Auto, typename E, typename Sink, typename EA, typename L>
+      [[gnu::always_inline]] inline void encode_list(const L& v, Sink& s)
       {
          if constexpr (is_fixed_v<E>)
          {
@@ -1385,9 +1493,13 @@ namespace psio {
             constexpr bool is_arith =
                std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
             constexpr bool is_memcpy_record =
-               (Record<E> || ::psio::is_transparent_v<E>) &&
+               (Record<E> || ::psio::is_transparent_v<E>) && plain_members_v<E> &&
                std::is_trivially_copyable_v<E> && fixed_size_of<E>() == sizeof(E);
-            if constexpr (is_arith || is_memcpy_record)
+            // (Only when the list really holds E objects, contiguously.)
+            constexpr bool holds_wire =
+               std::is_same_v<src_t<typename L::value_type>, E> &&
+               requires { { v.data() } -> std::convertible_to<const E*>; };
+            if constexpr ((is_arith || is_memcpy_record) && holds_wire)
             {
                if (!v.empty())
                   s.write(v.data(), v.size() * sizeof(E));
@@ -1407,7 +1519,7 @@ namespace psio {
             {
                write_offset<W>(s, table + i * W,
                                s.written() - table);
-               encode_value<W, Auto, E, Sink, EA>(v[i], s);
+               encode_value<W, Auto, src_t<decltype(v[i])>, Sink, EA>(v[i], s);
             }
          }
       }
@@ -1415,20 +1527,45 @@ namespace psio {
       // Sink-templated encoder. Top-level tag_invoke pre-sizes the
       // output buffer via size_of_v then walks once with
       // fast_buf_stream — same algorithm v1's convert_to_pssz uses.
-      template <std::size_t LegacyW, bool Auto, typename T, typename Sink, typename A>
-      void encode_value(const T& v, Sink& s)
+      //
+      // T: the wire type; v: a source of it (see "Sources"). W is resolved.
+      template <std::size_t W, bool Auto, typename T, typename Sink, typename A, typename S>
+      void encode_value_impl(const S& v, Sink& s)
       {
-         constexpr std::size_t W = [] {
-            if constexpr (Auto) return width_for<T, A>();
-            else return LegacyW;
-         }();
+         if constexpr (is_ref_wrapper_v<S>)
+         {
+            encode_value_impl<W, Auto, T, Sink, A>(v.get(), s);
+            return;
+         }
+         else if constexpr (is_c_string_v<S>)
+         {
+            const auto text = ::psio::detail::c_string_view(v);
+            if (!text.empty())
+               s.write(text.data(), text.size());
+            return;
+         }
+         else if constexpr (view_source<S>)
+         {
+            if constexpr (view_verbatim_v<typename S::format_type, W, Auto, T, A>)
+            {
+               const std::span<const char> bytes = v._psio_data();
+               if (!bytes.empty())
+                  s.write(bytes.data(), bytes.size());
+            }
+            else
+            {
+               const T owned = v.unpack();
+               encode_value_impl<W, Auto, T, Sink, A>(owned, s);
+            }
+            return;
+         }
          // Adapter dispatch must be the FIRST branch of the if-else
          // chain — separating it from the chain leaves the trailing
          // `else { static_assert(sizeof(T)==0, ...) }` instantiated for
          // non-reflected adapter types, which trips at compile time
          // even though the runtime path returns from the adapter
          // branch. Chaining via `else if constexpr` discards the tail.
-         if constexpr (::psio::format_should_dispatch_adapter_v<
+         else if constexpr (::psio::format_should_dispatch_adapter_v<
                           ::psio::pssz, T>)
          {
             // Adapter encode methods assume a vector<char>-like sink;
@@ -1501,7 +1638,8 @@ namespace psio {
                {
                   write_offset<W>(s, table + i * W,
                                   s.written() - table);
-                  encode_value<W, Auto, E, Sink, ann::element_ann<A>>(v[i], s);
+                  encode_value<W, Auto, src_t<decltype(v[i])>, Sink, ann::element_ann<A>>(v[i],
+                                                                                       s);
                }
             }
          }
@@ -1520,7 +1658,7 @@ namespace psio {
             if constexpr (!optional_uses_selector_v<V>)
             {
                if (v.has_value())
-                  encode_value<W, Auto, V, Sink, A>(*v, s);
+                  encode_value<W, Auto, src_t<decltype(*v)>, Sink, A>(*v, s);
                // None → no bytes appended.
             }
             else
@@ -1528,7 +1666,7 @@ namespace psio {
                if (v.has_value())
                {
                   s.write('\x01');
-                  encode_value<W, Auto, V, Sink, A>(*v, s);
+                  encode_value<W, Auto, src_t<decltype(*v)>, Sink, A>(*v, s);
                }
                else
                {
@@ -1596,7 +1734,8 @@ namespace psio {
             // (For non-DWNC records the u{W} header forces the
             // walker; for DWNC + padded records the walker is also
             // needed because layout doesn't match.)
-            if constexpr (::psio::is_dwnc_v<T> &&
+            if constexpr (::psio::is_dwnc_v<T> && std::is_same_v<S, T> &&
+                          plain_members_v<T> &&
                           std::is_trivially_copyable_v<T> &&
                           is_fixed_v<T>)
                if constexpr (fixed_size_of<T>() == sizeof(T))
@@ -1610,7 +1749,7 @@ namespace psio {
                // absent optionals are pruned (see emitted_field_count).
                // (Only the trailing optionals are tested: see size_of_v_impl.)
                constexpr std::size_t required = required_field_count<T>();
-               const std::size_t     count    = emitted_field_count(v);
+               const std::size_t     count    = emitted_field_count<T>(v);
                std::size_t fixed_region       = required_fixed_region<W, T>();
                ((Is >= required && Is < count
                     ? fixed_region += pssz_member_fixed_size_full<W, T, Is>()
@@ -1643,20 +1782,23 @@ namespace psio {
                       constexpr bool override_v =
                          ::psio::has_as_override_v<eff>;
 
+                      // The member is held as its wire type (not through a
+                      // reference wrapper, a view, ...): its object is its bytes.
+                      constexpr bool held = std::is_same_v<src_t<decltype(fref)>, F>;
                       if constexpr (!override_v && is_fixed_v<F>)
                       {
-                         if constexpr (std::is_same_v<F, bool>)
+                         if constexpr (held && std::is_same_v<F, bool>)
                          {
                             char b = fref ? '\x01' : '\x00';
                             s.rewrite(fixed_cursor, &b, 1);
                          }
-                         else if constexpr (std::is_arithmetic_v<F> ||
-                                            std::is_enum_v<F>)
+                         else if constexpr (held && (std::is_arithmetic_v<F> ||
+                                                     std::is_enum_v<F>))
                          {
                             // sizeof(enum) == sizeof(its underlying type).
                             s.rewrite(fixed_cursor, &fref, sizeof(F));
                          }
-                         else if constexpr (is_std_array_v<F>)
+                         else if constexpr (held && is_std_array_v<F>)
                          {
                             using E = typename F::value_type;
                             if constexpr (std::is_arithmetic_v<E> &&
@@ -1700,7 +1842,8 @@ namespace psio {
                          }
                          else
                          {
-                            encode_value<W, Auto, F, Sink, field_ann<T, A, Is>>(fref, s);
+                            encode_value<W, Auto, src_t<decltype(fref)>, Sink,
+                                         field_ann<T, A, Is>>(fref, s);
                          }
                       }
                    }()),
@@ -1715,6 +1858,37 @@ namespace psio {
             static_assert(sizeof(T) == 0,
                           "psio::pssz: unsupported type in encode_value");
          }
+      }
+
+      // Writes `v` encoded as T (T: the wire type).
+      template <std::size_t LegacyW, bool Auto, typename T, typename Sink, typename A, typename S>
+      void encode_as(const S& v, Sink& s)
+      {
+         constexpr std::size_t W = [] {
+            if constexpr (Auto) return width_for<T, A>();
+            else return LegacyW;
+         }();
+         encode_value_impl<W, Auto, T, Sink, A>(v, s);
+      }
+      // S: the type of the value, which may be a source of its wire type.
+      template <std::size_t LegacyW, bool Auto, typename S, typename Sink, typename A>
+      void encode_value(const S& v, Sink& s)
+      {
+         encode_as<LegacyW, Auto, ::psio::wire_type_t<S>, Sink, A>(v, s);
+      }
+
+      template <std::size_t W, bool Auto, typename T, typename A>
+      T decode_value(std::span<const char> src, std::size_t pos, std::size_t end);
+      template <typename T, typename S>
+      T materialize(const S& source)
+      {
+         constexpr std::size_t W = width_for<T, no_ann>();
+         const std::size_t     total =
+            size_of_as<W, true, T, no_ann, std::nullptr_t>(source, nullptr);
+         std::vector<char>       bytes(total);
+         ::psio::fast_buf_stream sink(bytes.data(), total);
+         encode_as<W, true, T, ::psio::fast_buf_stream, no_ann>(source, sink);
+         return decode_value<W, true, T, no_ann>(std::span<const char>{bytes}, 0, total);
       }
 
       // ── Decoding ──────────────────────────────────────────────────────────
@@ -3131,6 +3305,18 @@ namespace psio {
       }
    }  // namespace detail::pssz_impl
 
+   namespace detail::pssz_impl
+   {
+      // A plain automatic-profile view: its bytes are the encoding of T
+      // wherever the position's annotations change no width in T.
+      template <std::size_t W, typename T, typename A>
+      inline constexpr bool view_verbatim_v<::psio::pssz, W, true, T, A> =
+         widths_unchanged<T, A>();
+      // An explicit-width view: every offset in it is VW wide.
+      template <std::size_t VW, std::size_t W, typename T, typename A>
+      inline constexpr bool view_verbatim_v<::psio::pssz_<VW>, W, false, T, A> = VW == W;
+   }  // namespace detail::pssz_impl
+
    template <typename T>
    consteval std::size_t auto_pssz_width() noexcept
    {
@@ -3981,8 +4167,10 @@ namespace psio {
    // codec of the result type.
    namespace detail::pssz_impl
    {
+      // The wire type of the result: X for a method that returns a view of X.
       template <typename T, std::size_t I>
-      using method_result_t = std::remove_cvref_t<typename ::psio::reflect<T>::template method_result<I>>;
+      using method_result_t =
+         ::psio::wire_type_t<typename ::psio::reflect<T>::template method_result<I>>;
       template <typename T, std::size_t I>
       using method_result_ann = ann::holder_ann<::psio::detail::method_result_holder<T, I>>;
       // The offset width of the result's own table / header.
@@ -4008,28 +4196,125 @@ namespace psio {
 
    // Appends the encoding of the result of method I of T, or says why the
    // value has none (outside returns(...), an invariant, depth, ...).
-   template <typename T, std::size_t I>
-   [[nodiscard]] codec_status encode_method_result(
-      const detail::pssz_impl::method_result_t<T, I>& value, std::vector<char>& out)
+   // `value` is the result, or any source of it (wire_type.hpp): what a
+   // method that returns a psio::pssz_view<X> hands back is written as an X.
+   template <typename T, std::size_t I, typename S>
+      requires std::same_as<::psio::wire_type_t<S>, detail::pssz_impl::method_result_t<T, I>>
+   [[nodiscard]] codec_status encode_method_result(const S& value, std::vector<char>& out)
    {
       namespace pz = detail::pssz_impl;
       using R      = pz::method_result_t<T, I>;
       using A      = pz::method_result_ann<T, I>;
       constexpr std::size_t W = pz::method_result_width_v<T, I>;
-      if (auto status = pz::check_encode_depth_impl(value, 0, {}); !status.ok())
+      if (auto status = pz::check_encode_as<R>(value, 0, {}); !status.ok())
          return status;
-      if (auto status = ::psio::check_method_result<T, I>(value, "pssz"); !status.ok())
+      if (auto status = ::psio::check_method_result<T, I>(pz::checkable(value), "pssz");
+          !status.ok())
          return status;
       pz::size_check    check;
-      const std::size_t total = pz::size_of_v<W, true, R, A>(value, &check);
+      const std::size_t total =
+         pz::size_of_as<W, true, R, A, pz::size_check*>(value, &check);
       pz::enforce_max_dynamic<R>(total, &check);
       if (check.failure)
          return codec_fail(check.failure, 0, "pssz");
       const std::size_t start = out.size();
       out.resize(start + total);
       ::psio::fast_buf_stream sink(out.data() + start, total);
-      pz::encode_value<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
+      pz::encode_as<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
       return codec_ok();
+   }
+
+   // ── Encoding a source AS a type ───────────────────────────────────────
+   //
+   // `to_pssz(source)` writes the bytes of `psio::wire_type_t<Source>`: a
+   // std::tie(a, b) as the tuple of values, a std::string_view as a string,
+   // a view as the value it designates (wire_type.hpp). `to_pssz_as<T>`
+   // names the type instead, for a T that the source's type does not spell:
+   // a method's argument tuple (which carries the method's cap and
+   // parameter annotations), or any type with the same members.
+   //
+   //   to_pssz_as<T>(source)          a fresh buffer
+   //   to_pssz_as<T>(source, out)     appends
+   //   pssz_size_as<T>(source)
+   //   method_args_to_pssz<T, I>(args...)   the argument tuple of method I
+   //   method_args_append_pssz<T, I>(out, args...)
+   //                                  of T from the arguments themselves,
+   //                                  none of them copied: each may be the
+   //                                  parameter's type, a source of it (a
+   //                                  view, a std::string_view, ...) or a
+   //                                  value that converts to it
+   //
+   // The source must be a source of exactly T: `wire_type_t<Source>` is T,
+   // or T's tuple for an annotated tuple. Anything else is a compile error
+   // (the bytes of a std::uint32_t are not those of a std::uint64_t).
+   namespace detail::pssz_impl
+   {
+      template <typename T, typename S>
+      inline constexpr bool source_of_v = std::is_same_v<::psio::wire_type_t<S>, T>;
+      template <typename Meta, typename... Ts, typename S>
+      inline constexpr bool source_of_v<::psio::annotated_tuple<Meta, Ts...>, S> =
+         std::is_same_v<::psio::wire_type_t<S>, std::tuple<Ts...>> ||
+         std::is_same_v<::psio::wire_type_t<S>, ::psio::annotated_tuple<Meta, Ts...>>;
+
+      // An argument as a source of parameter type P: itself when it is
+      // one, else converted.
+      template <typename P, typename Arg>
+      using arg_source_t =
+         std::conditional_t<std::is_same_v<::psio::wire_type_t<Arg>, P>, const Arg&, P>;
+   }  // namespace detail::pssz_impl
+
+   template <typename T, typename S>
+      requires detail::pssz_impl::source_of_v<T, S>
+   void to_pssz_as(const S& source, std::vector<char>& out)
+   {
+      namespace pz = detail::pssz_impl;
+      constexpr std::size_t W = auto_pssz_width_v<T>;
+      if (auto status = pz::check_encode_as<T>(source, 0); !status.ok())
+         pz::status_failure(status);
+      const std::size_t total =
+         pz::size_of_as<W, true, T, pz::no_ann, std::nullptr_t>(source, nullptr);
+      const std::size_t orig = out.size();
+      out.resize(pz::checked_add(orig, total));
+      ::psio::fast_buf_stream sink(out.data() + orig, total);
+      pz::encode_as<W, true, T, ::psio::fast_buf_stream, pz::no_ann>(source, sink);
+   }
+   template <typename T, typename S>
+      requires detail::pssz_impl::source_of_v<T, S>
+   [[nodiscard]] std::vector<char> to_pssz_as(const S& source)
+   {
+      std::vector<char> out;
+      to_pssz_as<T>(source, out);
+      return out;
+   }
+   template <typename T, typename S>
+      requires detail::pssz_impl::source_of_v<T, S>
+   [[nodiscard]] std::size_t pssz_size_as(const S& source)
+   {
+      namespace pz = detail::pssz_impl;
+      return pz::size_of_as<auto_pssz_width_v<T>, true, T, pz::no_ann, std::nullptr_t>(source,
+                                                                                    nullptr);
+   }
+
+   template <typename T, std::size_t I, typename... Args>
+   void method_args_append_pssz(std::vector<char>& out, const Args&... args)
+   {
+      using Tuple = typename reflect<T>::template method_arg_tuple<I>;
+      static_assert(sizeof...(Args) == std::tuple_size_v<Tuple>,
+                    "psio::method_args_to_pssz: the method takes another number of arguments");
+      [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+         const std::tuple<
+            detail::pssz_impl::arg_source_t<std::tuple_element_t<Ns, Tuple>, Args>...>
+            sources{static_cast<detail::pssz_impl::arg_source_t<std::tuple_element_t<Ns, Tuple>,
+                                                                  Args>>(args)...};
+         to_pssz_as<Tuple>(sources, out);
+      }(std::index_sequence_for<Args...>{});
+   }
+   template <typename T, std::size_t I, typename... Args>
+   [[nodiscard]] std::vector<char> method_args_to_pssz(const Args&... args)
+   {
+      std::vector<char> out;
+      method_args_append_pssz<T, I>(out, args...);
+      return out;
    }
 
    // Checks `bytes` as the result of method I of T.

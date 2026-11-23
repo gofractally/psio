@@ -348,6 +348,79 @@ The named readers are that library's design. What differs here:
 | `frac_ref<T>` with `fields().member() = value`, including resizing writes | `psio::mutable_view<T, F>`: `w.member() = value` for fixed-size values only (a PSSZ frame has one canonical form; a write that changes a size is decode, modify, encode) |
 | `explicit operator bool` (null view) | a view is never null; an empty optional is an optional view |
 
+## Packing from values that do not own their data
+
+`to_F`, `F_size` and the checked encoders take a value, or something that
+only refers to one. A source is encoded as the owning type it stands for —
+`psio::wire_type_t<Source>` (`psio/wire_type.hpp`) — and writes exactly the
+bytes that type writes, without copying what it refers to:
+
+| Source | Encoded as (`wire_type_t`) |
+|--------|----------------------------|
+| `std::string_view`, `const char*`, a string literal | `std::string` (a C string without its NUL; give a `std::string_view` for text with embedded NULs) |
+| `std::span<E>`, `std::span<const E>` | `std::vector<E>` |
+| `std::reference_wrapper<X>` (`std::ref`, `std::cref`) | `X` |
+| `std::tuple` / `std::pair` of references or of sources (`std::tie(a, b)`, `std::forward_as_tuple(...)`) | the tuple / pair of the values |
+| `std::vector<S>`, `std::optional<S>` of a source | the vector / optional of what `S` is encoded as |
+| `psio::view<X, F>` (any view, given as a value) | `X` |
+| a reflected record with members of the kinds above | the record with owning members (same layout, same widths, same bounds) |
+
+```cpp
+psio::to_pssz(std::tie(id, trace));                  // == to_pssz(std::tuple{id, trace}); nothing copied
+psio::to_pssz(std::string_view{"abc"});              // == to_pssz(std::string{"abc"})
+psio::to_pssz(std::span<const Item>{items});         // == to_pssz(items)
+
+struct TxSuccessView { Checksum256 id; BlockNum blockNum; psio::pssz_view<const TransactionTrace> trace; };
+PSIO_REFLECT(TxSuccessView, id, blockNum, trace)
+psio::to_pssz(TxSuccessView{id, num, traceView});    // the bytes of the record holding a TransactionTrace
+```
+
+This is PSSZ (`to_pssz`, `pssz_size`, `encode_pssz_checked`,
+`validate_pssz<Source>`, which validates as the wire type) and `key`
+(`to_key`: `std::string_view`, C strings, `std::reference_wrapper`, views,
+tuples of references). Decoding *into* a source does not compile: decode
+`psio::wire_type_t<Source>`, or view the bytes.
+
+**A view as a value** re-emits its bytes when they are what the position
+needs, and is decoded and encoded again when they are not. The second case
+is real: a member that sits under a `maxDynamicData` cap or a bounding
+annotation has narrower offsets than the same type standing alone, so a
+view of a standalone `std::vector<std::string>` written into a capped
+record (or the view of such a member written standalone) cannot be copied
+byte for byte. Which case applies is decided at compile time from the
+view's format and the position; either way the bytes are those of the
+value. The view is over validated bytes, so nothing is validated again;
+bounds, caps and invariants of the enclosing value still apply.
+
+Annotations on a source member are those of the type it is encoded as
+(`attr(names, max<4>)` on a `std::span<const std::string_view>` member
+bounds a list of strings); they are enforced on encode as usual.
+
+`psio::wire_type` is a customization point: specialize it for a type of
+your own that packs as another type.
+
+### Encoding a source as a named type
+
+`to_pssz(source)` writes `wire_type_t<Source>`. When the type to write is
+one the source does not spell — a method's argument tuple, which carries
+the method's cap and parameter annotations — name it:
+
+```cpp
+using Args = psio::reflect<Token>::method_arg_tuple<0>;
+auto b = psio::to_pssz_as<Args>(std::forward_as_tuple(toView, amount, memo));
+auto n = psio::pssz_size_as<Args>(std::forward_as_tuple(toView, amount, memo));
+
+// The same from the arguments themselves; each may be the parameter's type, a
+// source of it (a view, a std::string_view, ...) or a value that converts to it:
+auto c = psio::method_args_to_pssz<Token, 0>(toView, 5, "memo");
+psio::method_args_append_pssz<Token, 0>(out, toView, 5, "memo");
+```
+
+The source must be a source of exactly that type; anything else is a
+compile error. `psio::encode_method_result<T, I>(value, out)` takes a source
+of the result as well, so a method that returns a `psio::pssz_view<X>` has
+its result written as an `X`.
+
 ## Calling a reflected method with packed arguments
 
 The arguments of method `I` of a reflected `T` travel as one value: the
@@ -370,6 +443,7 @@ struct Token {
 | `psio::invoke_method_pssz<T, I>(obj, bytes)` | validates, then calls the method; returns what it returns |
 | `psio::invoke_method_pssz<T, I>(obj, psio::trusted{bytes})` | calls without validating |
 | `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result (`psio::encode_method_result`, which honours `returns(...)`); a `codec_status` |
+| `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, none copied ([above](#encoding-a-source-as-a-named-type)) |
 | `reflect<T>::invoke_method<I>(obj, tuple)` | unchanged: calls with a tuple of arguments as declared (`method_params<I>`) |
 
 How a parameter is handed to the method is decided by its declared type:
