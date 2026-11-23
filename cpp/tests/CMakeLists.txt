@@ -626,6 +626,13 @@ add_test(NAME psio_json_untagged_ambiguous_compile_fail
                  ${CMAKE_CURRENT_SOURCE_DIR}/json_untagged_ambiguous_fail.cpp)
 set_tests_properties(psio_json_untagged_ambiguous_compile_fail PROPERTIES
    PASS_REGULAR_EXPRESSION "the alternatives of an untagged variant must be told apart")
+# Stated variant labels (psio::variant_labels) are distinct.
+add_test(NAME psio_variant_labels_duplicate_compile_fail
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/variant_labels_duplicate_fail.cpp)
+set_tests_properties(psio_variant_labels_duplicate_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "states one nonempty label per alternative")
 add_executable(psio_json_value_noexceptions_test json_value_noexceptions.cpp)
 target_include_directories(psio_json_value_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 target_compile_features(psio_json_value_noexceptions_test PRIVATE cxx_std_23)
@@ -1492,3 +1499,13 @@ target_link_libraries(psio_interface_conformance_emit PRIVATE psio)
 target_compile_features(psio_interface_conformance_emit PRIVATE cxx_std_23)
 add_test(NAME psio_interface_conformance_regen
          COMMAND psio_interface_conformance_emit --check ${PSIO_INTERFACE_VECTORS})
+
+# Shared cross-language variant label fixture
+# (conformance/variant-label-vectors.json): the label of every alternative,
+# the Schema IR that carries it, and the text keyed by it.
+set(PSIO_VARIANT_LABEL_VECTORS ${CMAKE_SOURCE_DIR}/conformance/variant-label-vectors.json)
+add_executable(psio_variant_label_conformance_emit variant_label_conformance_emit.cpp)
+target_link_libraries(psio_variant_label_conformance_emit PRIVATE psio)
+target_compile_features(psio_variant_label_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_variant_label_conformance_regen
+         COMMAND psio_variant_label_conformance_emit --check ${PSIO_VARIANT_LABEL_VECTORS})

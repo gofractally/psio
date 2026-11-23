@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   bool, defineInterface, f64, isCompressedName, isHashName, jsonValue, method, methodToNumber, numberToMethod, psszEquivalent, psszEvolvesFrom, PsszJsonText,
-  PsszSchema, RecordView, argumentTuple, field, rawString, boundedList, boundedUtf8, bytes, custom, emitWit, fixedBytes, fromHex, generateSchema, i32,
+  PsszSchema, RecordView, SchemaBuilder, functionTypeToJson, argumentTuple, field, rawString, boundedList, boundedUtf8, bytes, custom, emitWit, fixedBytes, fromHex, generateSchema, i32,
   i64, keyPrefixUpperBound, lazy, list, nameToNumber, numberToName, optional, pjsonDecode, pjsonEncode, pjsonValidate,
   PjsonObject, PsszError, map, nested, pair, record, set, toHex, transparent, tuple, u16, u32, u64, u8, utf8, timePoint, variant,
   type Infer, type ListView, type PsszCustomHandler, type TypeDef,
@@ -469,6 +469,25 @@ test('README: interfaces', () => {
   assert.equal(Token.methods.add.result.decode(new Uint8Array(8)), 0n);
   assert.equal(Token.methods.transfer.result.psszToJson(Token.methods.transfer.result.encode({ id: 7n, note: 'ok' })), '{"id":7,"note":"ok"}');
   assert.equal(Token.methods.ping.result, null);
+  // The result in one call each way.
+  const twoNames = Uint8Array.of(2, 7, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x62, 0x6f, 0x62);
+  assert.equal(toHex(Token.methods.names.resultToPssz(['alice', 'bob'])), '0207616c696365626f62');
+  assert.deepEqual(Token.methods.names.resultFromPssz(twoNames), ['alice', 'bob']);
+  assert.equal(Token.methods.names.validateResult(new Uint8Array(1)).ok, false);
+  assert.equal(Token.methods.names.resultView(twoNames).at(1), 'bob');
+  assert.equal(Token.methods.ping.resultFromPssz(new Uint8Array(0)), undefined);
+  // A method without the Interface envelope.
+  const functions = new SchemaBuilder();
+  const namesType = functions.insertMethod(Token.methods.names);
+  assert.equal(namesType.result!.value.type, 'BoundedList');
+  assert.deepEqual(Token.methods.names.functionType(new SchemaBuilder()), namesType);
+  assert.equal(functions.insertMethod(Token.methods.ping).result, null);
+  assert.equal(functionTypeToJson(functions.insertMethod(Token.methods.ping), 'json').endsWith('"result":null}'), true);
+  assert.deepEqual(functions.build().validate(), { ok: true });
+  // One label per alternative; pairs for an integer label that is not first.
+  const labelled = variant([['uint32', u32], ['1', utf8], ['2', utf8]]);
+  assert.equal(labelled.valueToJson({ type: '2', value: 'b' }), '{"2":"b"}');
+  assert.equal(variant({ uint32: u32, string: utf8, 'string[]': list(utf8) }).valueToJson({ type: 'string[]', value: ['a'] }), '{"string[]":["a"]}');
   // The static types.
   const decoded: { to: string; amount: bigint; memo: string | null } = transfer.args.decode(transfer.args.encode({ to: 'bob', amount: 5n, memo: null }));
   assert.deepEqual(decoded, { to: 'bob', amount: 5n, memo: null });

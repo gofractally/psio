@@ -25,7 +25,10 @@ object keyed by parameter name (the positional array is read too); a method with
 parameters has no names, and its arguments are the array (docs/json.md "Method arguments").
 
 The return annotation is annotated like a member too (C++ ``returns(...)``): the result is then that
-bounded type, and its bytes are that type's (``Method.result``).
+bounded type, and its bytes are that type's (``Method.result``): ``result_to_pssz`` /
+``result_from_pssz`` (validating; ``psio.trusted(data)`` or ``result_from_pssz_trusted`` for bytes
+already validated) / ``validate_result`` / ``result_view`` write, read, check and view it as that type.
+``Method.function_type(builder)`` is the method as a Schema IR ``FunctionType`` with that result node.
 """
 
 from __future__ import annotations
@@ -34,8 +37,8 @@ import inspect
 import typing
 from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, Union, overload
 
-from .errors import EncodeError, SchemaError
-from .schema import Schema, SchemaType, Status
+from .errors import DecodeError, EncodeError, SchemaError
+from .schema import Schema, SchemaType, Status, trusted
 from .typed import Builder, FieldShape, Shape, _declared, _field, _wire_name, arguments, codec, shape_of
 
 __all__ = ["interface", "interface_of", "method", "Interface", "Method"]
@@ -125,17 +128,105 @@ class Method:
                 self._result = _declared(run)
         return self._result
 
+    # ── The result, in one call each way ────────────────────────────────────────────────────────────
+    #
+    # Every one of these writes or reads the result AS THE RETURN ANNOTATION TYPES IT (C++
+    # ``returns(...)``): its bounds, ``utf8`` and element rules applied, and the offset widths of the
+    # bounded type.  ``psio.to_pssz(value, PlainReturnType)`` is not the result's encoding.
+    #
+    # An empty optional result is ZERO BYTES when its payload cannot be empty (a number, a record:
+    # docs/pssz-spec.md 5.5.1) — "the callee returned no bytes" and "the callee returned None" are then
+    # the same frame, and a present value is its own encoding.  An optional whose payload can itself be
+    # empty (a string, a list: 5.5.2) has a selector byte: ``None`` is ``00``, a present value ``01``
+    # and its encoding, and no bytes are not a result of such a method.  A method that returns nothing
+    # has no result bytes: only ``b""`` is its result.
+
     def result_to_pssz(self, value: Any) -> bytes:
-        """The PSSZ bytes of a result (C++ ``encode_method_result``)."""
-        return self._result_codec().to_pssz(value)
+        """The PSSZ bytes of a result (C++ ``method_result_to_pssz``); refuses a value outside the
+        return annotation.  ``b""`` for a method that returns nothing (``value`` is then ``None``)."""
+        result = self.result
+        if result is None:
+            if value is not None:
+                raise EncodeError(f"psio: {self.name} returns nothing")
+            return b""
+        return result.to_pssz(value)
 
     def result_from_pssz(self, data: Any) -> Any:
-        """Validates and decodes an encoded result (C++ ``decode_method_result``)."""
-        return self._result_codec().from_pssz(data)
+        """Validates and decodes an encoded result (C++ ``method_result_from_pssz``).
+
+        ``result_from_pssz(psio.trusted(data))`` skips what trust makes unnecessary.  A method that
+        returns nothing accepts only no bytes and gives ``None``.
+        """
+        result = self.result
+        if result is None:
+            raw = data.data if type(data) is trusted else data
+            if len(bytes(raw)) != 0:
+                raise DecodeError("pssz: a method with no result returned bytes")
+            return None
+        return result.from_pssz(data)
+
+    def result_from_pssz_trusted(self, data: Any) -> Any:
+        """``result_from_pssz(psio.trusted(data))``: for bytes ``validate_result`` accepted."""
+        return self.result_from_pssz(trusted(data))
 
     def validate_result(self, data: Any) -> Status:
-        """Whether ``data`` is a valid encoded result (C++ ``validate_method_result``).  Never raises."""
-        return self._result_codec().validate_pssz(data)
+        """Whether ``data`` is a valid encoded result (C++ ``validate_method_result``).  Never raises.
+
+        A method that returns nothing: only no bytes.
+        """
+        result = self.result
+        if result is None:
+            try:
+                empty = len(bytes(data)) == 0
+            except Exception:
+                empty = False
+            return Status(True) if empty else Status(
+                False, error=DecodeError("pssz: a method with no result returned bytes"))
+        return result.validate_pssz(data)
+
+    def result_view(self, data: Any) -> Any:
+        """Validates ``data`` as a result, then reads it in place (C++ ``validated_method_result_view``).
+
+        The view is of the type the return annotation describes — it reads that type's offset tables,
+        which a ``psio.pssz_view`` of the plain return type would not.  A scalar or text result is its
+        value; an empty optional result is ``None``.  Raises :class:`DecodeError` for bytes that are
+        not a result; a method that returns nothing has nothing to view.
+        """
+        result = self._result_codec()
+        status = result.validate_pssz(data)
+        if not status.ok:
+            raise status.error if status.error is not None else DecodeError("pssz: not a result")
+        return result.pssz_view(data)
+
+    def function_type(self, builder: Builder) -> Dict[str, Any]:
+        """The method as a Schema IR ``FunctionType`` — ``{"params": node, "result": node or None}`` —
+        for a schema that lists functions its own way, without the ``Interface`` envelope (C++
+        ``SchemaBuilder::insert_method<T, I>()``).
+
+        ``params`` is the argument list (the parameters with their bounds, the method's cap);
+        ``result`` is the result as the return annotation types it (the bounded type), ``None`` for a
+        method that returns nothing.  The types are interned in ``builder`` (``psio.SchemaBuilder()``;
+        ``builder.schema()`` is the schema).  A return bound that has no type form (``psio.exact``,
+        ``psio.min``, an integer text form) is an attribute of a ``Func`` only (``Interface.schema``):
+        asking for the bare node is a :class:`SchemaError` rather than a schema that says less than the
+        declaration.
+        """
+        def run() -> Dict[str, Any]:
+            params = builder.insert(self._shape)
+            field = self._returns()
+            node = None
+            if field is not None:
+                # (the plain type first, as C++ inserts it; then what the annotation makes of it)
+                builder.insert(field.type)
+                member = builder._member(field)
+                if member["attributes"]:
+                    raise SchemaError(
+                        f"psio: the return annotation of {self._owner}.{self.name} states "
+                        f"{member['attributes'][0]['name']}, which has no type form: only the Func of an "
+                        "Interface carries it (Interface.schema)")
+                node = member["type"]
+            return {"params": params, "result": node}
+        return _declared(run)
 
     def _result_codec(self) -> SchemaType:
         result = self.result
@@ -219,6 +310,14 @@ class Interface:
         out = getattr(implementation, m.attr)(*args)
         return b"" if m.result is None else m.result_to_pssz(out)
 
+    def function_types(self) -> "tuple[Schema, Dict[str, Dict[str, Any]]]":
+        """Every method as a ``FunctionType``, and the schema of the types they use: what a schema that
+        maps a name to ``{params, result}`` holds (``Method.function_type`` for each method in
+        declaration order, on a fresh builder; C++ ``SchemaBuilder::insert_method<T, I>()`` in a loop)."""
+        builder = Builder()
+        functions = {m.name: m.function_type(builder) for m in self.methods}
+        return _declared(builder.schema), functions
+
     def proxy(self, caller: Callable[[Method, bytes], Any]) -> Any:
         """An object with one function per method that hands the encoded arguments to ``caller``.
 
@@ -295,9 +394,7 @@ class _Proxy:
     def _bind(m: Method, caller: Callable[[Method, bytes], Any]) -> Callable[..., Any]:
         def call(*args: Any, **kwargs: Any) -> Any:
             reply = caller(m, m.to_pssz(*args, **kwargs))
-            if m.result is None:
-                return None
-            return m.result.from_pssz(reply)
+            return m.result_from_pssz(b"" if reply is None else reply)
         call.__name__ = m.attr
         return call
 

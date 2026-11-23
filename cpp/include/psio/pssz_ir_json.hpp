@@ -16,8 +16,8 @@
 //                     missing member must be an Option; a repeated key is
 //                     read again and the last one wins
 //   tuple             array of exactly its arity
-//   variant           ijson {"Name": value} (Name: the member's ijsonName
-//                     attribute, else its name); json [index, value]. With
+//   variant           ijson {"Name": value} (Name: the member's name, the
+//                     alternative's label); json [index, value]. With
 //                     the attribute `untagged`: the bare value of the
 //                     alternative, which a reader picks by the kind of JSON
 //                     value (below, "Untagged variants")
@@ -316,8 +316,6 @@ inline int_form member_form(const std::vector<Attribute> &attributes, bool ijson
 
 inline std::string_view variant_name(const Member &member)
 {
-   if (auto a = detail::find_attribute(member.attributes, "ijsonName"); a && a->value)
-      return *a->value;
    return member.name;
 }
 

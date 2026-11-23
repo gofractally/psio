@@ -17,8 +17,8 @@
 //!   member must be an Option; a repeated key is read again and the last one
 //!   wins
 //! * tuple: array of exactly its arity
-//! * variant: IJson `{"Name": value}` (Name: the member's `ijsonName`
-//!   attribute, else its name); Json `[index, value]`
+//! * variant: IJson `{"Name": value}` (Name: the member's name, the
+//!   alternative's label); Json `[index, value]`
 //! * option: null or the value
 //! * list / array: array (exact count for an array, at most N bounded)
 //! * string / utf8 adapter: JSON string (UTF-8; IJson: no noncharacters). A
@@ -225,7 +225,7 @@ fn json_kinds_of(schema: &Schema, input: &AnyType, handlers: Option<&CustomHandl
 }
 
 fn variant_name(member: &Member) -> &str {
-    find(&member.attributes, "ijsonName").unwrap_or(&member.name)
+    &member.name
 }
 
 /// The byte container under a string / hex adapter.

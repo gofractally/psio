@@ -21,8 +21,8 @@ import { PsszInterface, PsszMethod, PsszSchema, type PsszType } from './pssz.js'
  * text forms and of the type's identity sees — the names of record members
  * and variant alternatives, custom ids, enums, the text shape of a record
  * (an object, a named or a positional argument list), `jsonInt` /
- * `ijsonInt`, an alternative's `ijsonName`, and whether a variant is
- * `untagged`.
+ * `ijsonInt`, and whether a variant is `untagged`. (An alternative's name
+ * is its label, the key of its I-JSON form.)
  */
 export type PsszCompare = 'wire' | 'contract';
 
@@ -410,11 +410,7 @@ class Walk {
           const other = b.members[i];
           if (this.names && m.name !== other.name)
             this.fail('alternative-renamed', `alternative ${i} was renamed or reordered ("${m.name}" -> "${other.name}")`);
-          this.at(`<${m.name}>`, () => {
-            this.type(m.text, other.text, belowA, belowB, exact);
-            if (this.names && (m.ijsonNameSet !== other.ijsonNameSet || m.ijsonName !== other.ijsonName))
-              this.fail('text-form-changed', 'the I-JSON name of the alternative differs');
-          });
+          this.at(`<${m.name}>`, () => this.type(m.text, other.text, belowA, belowB, exact));
         });
         return;
       }

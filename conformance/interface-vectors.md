@@ -29,6 +29,8 @@ interface token {
    add(u32, u32) -> u64                               (no parameter names)
    ping()
    batch(names: list of at most 4 raw strings of at most 8 bytes, tip: u8) -> bool
+   find(id: u64) -> optional<Receipt>
+   label(id: u64) -> optional<utf8 string of at most 8 bytes>
 }
 ```
 
@@ -43,9 +45,11 @@ it). An implementation declares the same interface in its own syntax.
   "declaration": [ "...", ... ],
   "schema_ir":   "<hex of pssz(Schema)>",
   "schema_json": "<the psio::json text of the same Schema>",
+  "function_schema_ir":   "<hex of pssz(Schema)>",
+  "function_schema_json": "<the psio::json text of the same Schema>",
   "methods": [ { "name", "params", "named", "args", "result",
                  "max_dynamic_data", "max_fields", "width", "inferred_bound",
-                 "max_encoded_size" } ],
+                 "max_encoded_size", "function" } ],
   "vectors": [ { "name", "kind", "method", "pssz", "json", "ijson", "text", "reason" } ] }
 ```
 
@@ -67,6 +71,20 @@ it must contain, and every implementation must build identically:
 | the parameter-count cap | Func attribute `maxFields` |
 | the argument list as a type | `token.<method>`: an `Object` whose members are the parameters (bounded types), with the attributes `tuple` = `"named"` or `"positional"` (members named `"0"`, `"1"`, … when positional), then `maxFields`, `maxDynamicData` when declared |
 
+**`function_schema_ir`** is the same methods for a schema that lists
+functions its own way, **without the `Interface` envelope**: on a fresh
+builder, in declaration order, each method's `FunctionType{params, result}`
+is taken with C++ `SchemaBuilder::insert_method<token, I>()` (Rust
+`SchemaBuilder::insert_method::<token::args::m>()`), and the schema is what
+the builder then holds. Per method the argument list is inserted first
+(the anonymous `@N` Object of the parameters), then the plain type of the
+result, then the result **as `returns(...)` types it**. `methods[i].function`
+is the `psio::json` text of that `FunctionType`: `params` refers to the
+argument list, `result` is the bounded type (`null` for a method that
+returns nothing) — for `names`, `BoundedList{Custom{BoundedList{u8, 16},
+"utf8"}, 4}`, the same node as `Func.result`, not the plain list of strings
+that inserting the return type alone gives.
+
 **`methods`** restates, per method, what a typed implementation derives:
 `params` (the names the declaration lists), `named` (a name for every
 parameter: the text form is the object), `args` (the schema name of the
@@ -86,8 +104,9 @@ written, and at most the cap).
 | `args-accept` | `text`, `pssz`, `json` | read `text`, under json and under ijson, as the arguments whose encoding is `pssz` (`json` is their canonical text) |
 | `args-reject` | `text` | reject `text` under json and under ijson |
 | `args-pssz-reject` | `pssz`, `reason` | reject the frame as an argument list (`reason`: the C++ typed validator's message) |
-| `result` | `pssz`, `json`, `ijson` | encode the result **as the type `returns(...)` makes of it** to exactly `pssz` (schema-driven: root `Func.result`), write and read the texts |
+| `result` | `pssz`, `json`, `ijson` | encode the result **as the type `returns(...)` makes of it** to exactly `pssz` (schema-driven: root `Func.result`, and the `result` of the method's `FunctionType` in `function_schema_ir`), write and read the texts; validate, decode (validating and trusted) and view the frame |
 | `result-pssz-reject` | `pssz`, `reason` | reject the frame as that method's result |
+| `result-void` | `pssz` (empty) | the method returns nothing: its result is no bytes, the schema gives it no result, and any other frame is rejected (`result-pssz-reject/ping/a_byte`) |
 
 What the argument rows pin (`docs/json.md` "Method arguments"):
 
@@ -108,6 +127,21 @@ What the argument rows pin (`docs/json.md` "Method arguments"):
 What the result rows pin: `returns(max 4, element(utf8, max 16))` makes the
 result `BoundedList(BoundedString(16), 4)`, whose offset table is 1 byte
 wide — `result/names/two` is `02 07 616c696365 626f62`, not the 4-byte
-table of an unbounded list of strings (C++: `psio::encode_method_result` /
-`validate_method_result` / `decode_method_result`; Rust:
-`Method::result_to_pssz` / `result_from_pssz`).
+table of an unbounded list of strings (C++:
+`psio::method_result_to_pssz` / `method_result_from_pssz` /
+`validate_method_result` / `validated_method_result_view`; Rust:
+`Method::result_to_pssz` / `result_from_pssz` / `validate_result` /
+`result_view`).
+
+An optional result (`docs/pssz-spec.md` §5.5):
+
+- `find` returns an optional record, whose payload cannot be empty: **an
+  empty optional result is zero bytes** (`result/find/none` is `""`), and a
+  present one is the record's own encoding (`result/find/some` equals
+  `result/transfer/receipt`);
+- `label` returns an optional string, whose payload can be empty: it has a
+  selector byte — `result/label/none` is `00`, `result/label/some_empty` is
+  `01`, `result/label/some` is `01 676f6c64` — and no bytes are not a result
+  (`result-pssz-reject/label/no_bytes`). `returns(utf8 | max<8>)` reaches the
+  payload through the optional (`result-pssz-reject/label/over_bound`,
+  `/not_utf8`).

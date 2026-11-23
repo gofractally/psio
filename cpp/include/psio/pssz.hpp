@@ -52,6 +52,7 @@
 #include <psio/stream.hpp>
 #include <psio/time.hpp>
 #include <psio/transparent.hpp>
+#include <psio/trusted.hpp>
 #include <psio/validate_strict_walker.hpp>
 #include <psio/wire_type.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
@@ -5184,18 +5185,32 @@ namespace psio {
       return out;
    }
 
-   // Checks `bytes` as the result of method I of T.
+   // The type the result of method I of T is encoded as: X for a method
+   // that returns a psio::pssz_view<X> (wire_type.hpp); void for a method
+   // that returns nothing.
+   template <typename T, std::size_t I>
+   using method_result_t = detail::pssz_impl::method_result_t<T, I>;
+
+   // Checks `bytes` as the result of method I of T. A method that returns
+   // nothing has no result bytes: only the empty span is its result.
    template <typename T, std::size_t I>
    [[nodiscard]] codec_status validate_method_result(std::span<const char> bytes) noexcept
    {
       namespace pz = detail::pssz_impl;
       using R      = pz::method_result_t<T, I>;
-      using A      = pz::method_result_ann<T, I>;
-      constexpr std::size_t W = pz::method_result_width_v<T, I>;
-      if (auto cap = pz::check_max_dynamic<R>(bytes); !cap.ok())
-         return cap;
-      pz::validate_flags flags;
-      return pz::validate_value<W, true, R, A>(bytes, 0, bytes.size(), 0, &flags);
+      if constexpr (std::is_void_v<R>)
+         return bytes.empty() ? codec_ok()
+                              : codec_fail("pssz: a method with no result returned bytes", 0,
+                                           "pssz");
+      else
+      {
+         using A                 = pz::method_result_ann<T, I>;
+         constexpr std::size_t W = pz::method_result_width_v<T, I>;
+         if (auto cap = pz::check_max_dynamic<R>(bytes); !cap.ok())
+            return cap;
+         pz::validate_flags flags;
+         return pz::validate_value<W, true, R, A>(bytes, 0, bytes.size(), 0, &flags);
+      }
    }
 
    // Validates and decodes the result of method I of T.
@@ -5214,6 +5229,84 @@ namespace psio {
       // sorted / unique in returns(...) compare whole elements: checked on
       // the value, like a record member's.
       return ::psio::check_method_result<T, I>(out, "pssz");
+   }
+
+   // ── A result in one call ──────────────────────────────────────────────
+   //
+   // The mirror of method_args_to_pssz / invoke_method_pssz for the value
+   // that travels back. Every one of them writes or reads the result AS
+   // returns(...) TYPES IT — its caps, `utf8` and element rules applied, and
+   // the offset widths of the bounded type — which the plain codec of the
+   // return type (psio::to_pssz / from_pssz<R>) does not.
+   //
+   //   method_result_to_pssz<T, I>(value)            the callee: a fresh buffer
+   //   method_result_append_pssz<T, I>(out, value)   ... appended
+   //   method_result_from_pssz<T, I>(bytes)          the caller: validate, decode
+   //   method_result_from_pssz<T, I>(trusted{bytes}) decode without validating
+   //   validate_method_result<T, I>(bytes)           codec_status
+   //   validated_method_result_view<T, I>(bytes)     validate, then view
+   //                                                 (pssz_view.hpp)
+   //
+   // The first four fail through psio::codec_abort (a codec_exception where
+   // exceptions are enabled); encode_method_result / decode_method_result
+   // are the same operations returning a codec_status.
+   //
+   // An EMPTY OPTIONAL RESULT IS ZERO BYTES when its payload cannot be
+   // (docs/pssz-spec.md 5.5.1: a number, a record, a variant, ...): "the
+   // callee returned no bytes" and "the callee returned None" are then the
+   // same frame, the empty span validates and decodes as std::nullopt, and
+   // a present value is its own encoding with nothing added. An optional
+   // whose payload can itself be empty (a string, a list: 5.5.2) carries a
+   // selector byte instead — None is `00`, a present value `01` and its
+   // encoding — and the empty span is not a result of such a method. A
+   // method that returns nothing has no result bytes;
+   // method_result_from_pssz of it accepts only the empty span.
+   template <typename T, std::size_t I, typename S>
+      requires std::same_as<::psio::wire_type_t<S>, detail::pssz_impl::method_result_t<T, I>>
+   void method_result_append_pssz(std::vector<char>& out, const S& value)
+   {
+      if (auto status = encode_method_result<T, I>(value, out); !status.ok())
+         ::psio::codec_abort(status.error());
+   }
+   template <typename T, std::size_t I, typename S>
+      requires std::same_as<::psio::wire_type_t<S>, detail::pssz_impl::method_result_t<T, I>>
+   [[nodiscard]] std::vector<char> method_result_to_pssz(const S& value)
+   {
+      std::vector<char> out;
+      method_result_append_pssz<T, I>(out, value);
+      return out;
+   }
+
+   template <typename T, std::size_t I>
+   [[nodiscard]] method_result_t<T, I> method_result_from_pssz(trusted bytes)
+   {
+      namespace pz = detail::pssz_impl;
+      using R      = pz::method_result_t<T, I>;
+      if constexpr (!std::is_void_v<R>)
+      {
+         using A                 = pz::method_result_ann<T, I>;
+         constexpr std::size_t W = pz::method_result_width_v<T, I>;
+         R                     out{};
+         pz::decode_into<W, true, R, A>(bytes.bytes, 0, bytes.bytes.size(), out);
+         return out;
+      }
+   }
+   template <typename T, std::size_t I>
+   [[nodiscard]] method_result_t<T, I> method_result_from_pssz(std::span<const char> bytes)
+   {
+      using R = detail::pssz_impl::method_result_t<T, I>;
+      if constexpr (std::is_void_v<R>)
+      {
+         if (auto status = validate_method_result<T, I>(bytes); !status.ok())
+            ::psio::codec_abort(status.error());
+      }
+      else
+      {
+         R out{};
+         if (auto status = decode_method_result<T, I>(bytes, out); !status.ok())
+            ::psio::codec_abort(status.error());
+         return out;
+      }
    }
 
    // ── Nested values (psio::nested<T>, psio::pssz_buffer<T>, shared_pssz<T>) ──

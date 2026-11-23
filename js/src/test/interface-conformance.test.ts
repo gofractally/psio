@@ -14,8 +14,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  PsszError, PsszSchema, bool, defineInterface, field, generateSchema, list, method, optional, rawString, record, u32, u64,
-  u8, type JsonFormat, type PsszType,
+  PsszError, PsszSchema, SchemaBuilder, bool, defineInterface, field, functionTypeToJson, generateSchema, list, method,
+  optional, rawString, record, u32, u64, u8, type IrFunctionType, type JsonFormat, type PsszType,
 } from '../index.js';
 
 interface MethodRow {
@@ -23,14 +23,17 @@ interface MethodRow {
   max_dynamic_data: number | null; max_fields: number | null; width: number;
   /** pssz-spec 3.2: what the width is chosen from; 3.7: the largest argument list. */
   inferred_bound: number | null; max_encoded_size: number | null;
+  /** The json text of the method's FunctionType (C++ `SchemaBuilder::insert_method<T, I>()`). */
+  function: string;
 }
 interface Row {
   name: string;
-  kind: 'args' | 'args-accept' | 'args-reject' | 'args-pssz-reject' | 'result' | 'result-pssz-reject';
+  kind: 'args' | 'args-accept' | 'args-reject' | 'args-pssz-reject' | 'result' | 'result-pssz-reject' | 'result-void';
   method: string; pssz: string | null; json: string | null; ijson: string | null; text: string | null; reason: string | null;
 }
 interface Fixture {
   version: number; interface: string; declaration: string[]; schema_ir: string; schema_json: string;
+  function_schema_ir: string; function_schema_json: string;
   methods: MethodRow[]; vectors: Row[];
 }
 const fixture: Fixture = JSON.parse(readFileSync(new URL('../../../conformance/interface-vectors.json', import.meta.url), 'utf8'));
@@ -50,6 +53,8 @@ const Token = defineInterface('token', {
   add: method([u32, u32], { returns: u64 }),
   ping: method({}),
   batch: method({ names: field(list(rawString), { max: 4, element: { max: 8 } }), tip: u8 }, { returns: bool }),
+  find: method({ id: u64 }, { returns: optional(Receipt) }),
+  label: method({ id: u64 }, { returns: field(optional(rawString), { utf8: true, max: 8 }) }),
 }, { package: 'iface_conf' });
 
 function rejects(run: () => unknown, name: string): PsszError {
@@ -68,6 +73,8 @@ const REASONS: { [reason: string]: RegExp } = {
   'pssz: member length_bound violated': /^pssz IR: (byte count|sequence) bound exceeded$/,
   'utf8_spec: invalid leading byte': /^pssz IR: string is not valid UTF-8$/,
   'pssz: encoded size exceeds maxDynamicData cap': /^pssz IR: encoded size exceeds maxDynamicData cap$/,
+  'pssz: optional<var> missing selector': /^pssz IR: /,
+  'pssz: a method with no result returned bytes': /^pssz: a method with no result returned bytes$/,
 };
 
 test('interface-vectors.json: the typed declaration is the C++ Interface / Func Schema IR', () => {
@@ -104,13 +111,65 @@ test('interface-vectors.json: the typed declaration is the C++ Interface / Func 
   assert.equal(toHex(bare.methods.add.args.encode([1, 2])), '080100000002000000');
 });
 
+test('interface-vectors.json: the methods as FunctionTypes, without the Interface envelope', () => {
+  // What C++ does: a fresh builder, insert_method<token, I>() per method in
+  // declaration order.
+  const builder = new SchemaBuilder();
+  const functions: { [name: string]: IrFunctionType } = {};
+  for (const row of fixture.methods) functions[row.name] = builder.insertMethod(Token.method(row.name as 'ping'));
+  const schema = builder.build();
+  for (const row of fixture.methods) {
+    assert.equal(functionTypeToJson(functions[row.name], 'json'), row.function, row.name);
+    assert.equal(functions[row.name].result !== null, row.result, row.name);
+  }
+  // The same schema, byte for byte and as text.
+  assert.equal(toHex(schema.encode()), fixture.function_schema_ir);
+  assert.equal(schema.toJson('json'), fixture.function_schema_json);
+  assert.deepEqual(schema.validate(), { ok: true });
+  assert.deepEqual(schema.ir.interfaces, []);
+
+  // The result node carries returns(...): the bounded list of bounded UTF-8
+  // strings, where the plain result type is a list of raw strings.
+  assert.equal(functions.names.result!.value.type, 'BoundedList');
+  assert.equal(functions.label.result!.value.type, 'Option');
+  assert.equal(functions.ping.result, null);
+  // The spellings: method.functionType(builder), and the parts.
+  const again = new SchemaBuilder();
+  assert.deepEqual(Token.methods.transfer.functionType(again), functions.transfer);
+  const parts = new SchemaBuilder();
+  assert.deepEqual(parts.insertMethodArgs(Token.methods.transfer), functions.transfer.params);
+  assert.deepEqual(parts.insertMethodResult(Token.methods.transfer), functions.transfer.result);
+  assert.equal(parts.insertMethodResult(Token.methods.ping), null);
+
+  // Every result row against the FunctionType's result node.
+  let checked = 0;
+  for (const row of fixture.vectors) {
+    const node = functions[row.method].result;
+    if (!node || (row.kind !== 'result' && row.kind !== 'result-pssz-reject')) continue;
+    const codec = schema.type(node);
+    assert.equal(codec.validate(fromHex(row.pssz!)).ok, row.kind === 'result', row.name);
+    if (row.kind === 'result')
+      for (const format of FORMATS) assert.equal(codec.psszToJson(fromHex(row.pssz!), format), row[format], `${row.name}: ${format}`);
+    ++checked;
+  }
+  assert.equal(checked, 14 + 6);
+
+  // A returns bound with no type form is carried by a Func only: the bare
+  // node is refused instead of saying less than the declaration.
+  const api = defineInterface('api', { code: method({}, { returns: field(list(u8), { lengthBound: { min: 1, max: 3 } }) }) });
+  for (const run of [() => new SchemaBuilder().insertMethod(api.methods.code), () => new SchemaBuilder().insertMethodResult(api.methods.code)])
+    assert.throws(run, (e: unknown) => e instanceof PsszError && e.kind === 'schema' && /lengthBound, which has no type form/.test(e.message));
+  assert.equal(new SchemaBuilder().insertMethodArgs(api.methods.code).value.type, 'Type');
+  assert.throws(() => new SchemaBuilder().insertMethod({} as never), (e: unknown) => e instanceof PsszError && e.kind === 'schema');
+});
+
 test('interface-vectors.json: the methods manifest, typed and schema-driven', () => {
   const fetched = PsszSchema.decode(fromHex(fixture.schema_ir));
   const lookup = fetched.interface('token');
   assert.equal(lookup, lookup);
   assert.equal(fetched.interface().name, 'token');
   assert.equal(lookup.methods.length, fixture.methods.length);
-  assert.equal(fixture.methods.length, 6);
+  assert.equal(fixture.methods.length, 8);
   for (const row of fixture.methods) {
     const typed = Token.method(row.name as 'ping');
     const func = lookup.method(row.name);
@@ -159,7 +218,52 @@ test('interface-vectors.json: every row, typed and schema-driven', () => {
     counts[row.kind] = (counts[row.kind] ?? 0) + 1;
     const typed = Token.method(row.method as 'ping');
     const func = lookup.method(row.method);
+    // A method that returns nothing: its result is no bytes, and only those.
+    if (!typed.result) {
+      assert.equal(func.result, null, row.name);
+      assert.ok(row.kind === 'result-void' || row.kind === 'result-pssz-reject' || !row.kind.startsWith('result'), row.name);
+    }
+    if (row.kind === 'result-void' || (row.kind === 'result-pssz-reject' && !typed.result)) {
+      const bytes = fromHex(row.pssz!);
+      for (const [label, m] of [['typed', typed], ['schema func', func]] as const) {
+        const name = `${row.name} (${label})`;
+        ++codecsRun;
+        if (row.kind === 'result-void') {
+          assert.equal(row.pssz, '', name);
+          assert.deepEqual(m.validateResult(bytes), { ok: true, hasUnknown: false }, name);
+          assert.equal(m.resultFromPssz(bytes), undefined, name);
+          assert.equal(m.resultView(bytes), undefined, name);
+          assert.equal(toHex(m.resultToPssz(undefined as never)), '', name);
+          rejects(() => m.resultToPssz(1 as never), `${name}: a value`);
+        } else {
+          const refused = m.validateResult(bytes);
+          assert.ok(!refused.ok && refused.error.kind === 'bytes', `${name}: accepted`);
+          assert.match(refused.error.message, REASONS[row.reason!], name);
+          rejects(() => m.resultFromPssz(bytes), name);
+          rejects(() => m.resultView(bytes), `${name}: view`);
+        }
+      }
+      continue;
+    }
     const isResult = row.kind === 'result' || row.kind === 'result-pssz-reject';
+    // The one-call result helpers are the result codec.
+    if (isResult) {
+      const bytes = fromHex(row.pssz!);
+      for (const [label, m] of [['typed', typed], ['schema func', func]] as const) {
+        const name = `${row.name} (${label} helpers)`;
+        if (row.kind === 'result') {
+          assert.deepEqual(m.validateResult(bytes), { ok: true, hasUnknown: false }, name);
+          const value = m.resultFromPssz(bytes);
+          assert.equal(toHex(m.resultToPssz(value as never)), row.pssz, name);
+          assert.deepEqual(value, (m.result as unknown as PsszType).decode(bytes), name);
+          m.resultView(bytes);
+        } else {
+          assert.equal(m.validateResult(bytes).ok, false, name);
+          rejects(() => m.resultFromPssz(bytes), name);
+          rejects(() => m.resultView(bytes), `${name}: view`);
+        }
+      }
+    }
     // The codecs of the row: [label, codec].
     const codecs: [string, PsszType<any, any>][] = isResult
       ? [['typed', typed.result as unknown as PsszType], ['schema func', func.result!]]
@@ -215,13 +319,13 @@ test('interface-vectors.json: every row, typed and schema-driven', () => {
     }
   }
   console.log('interface-vectors.json:', JSON.stringify({ methods: fixture.methods.length, vectors: fixture.vectors.length, codecsRun, ...counts }));
-  // The file as checked in (conformance/README.md): 6 methods, 55 rows.
-  assert.equal(fixture.vectors.length, 55);
+  // The file as checked in (conformance/README.md): 8 methods, 69 rows.
+  assert.equal(fixture.vectors.length, 69);
   assert.deepEqual(counts, {
-    args: 13, 'args-accept': 11, 'args-reject': 17, 'args-pssz-reject': 4, result: 7, 'result-pssz-reject': 3,
+    args: 15, 'args-accept': 11, 'args-reject': 17, 'args-pssz-reject': 4, result: 14, 'result-pssz-reject': 7, 'result-void': 1,
   });
   // Argument rows through three codecs, result rows through two.
-  assert.equal(codecsRun, (13 + 11 + 17 + 4) * 3 + (7 + 3) * 2);
+  assert.equal(codecsRun, (15 + 11 + 17 + 4) * 3 + (14 + 7 + 1) * 2);
 });
 
 test('interface: the JavaScript values of arguments and results are statically typed', () => {
@@ -252,6 +356,27 @@ test('interface: the JavaScript values of arguments and results are statically t
   assert.equal(Token.methods.names.result.width, 1);
   assert.equal(Token.methods.names.result.inferredBound, 68n);
   assert.equal(toHex(list(rawString).encode([Buffer.from('alice'), Buffer.from('bob')])), '080000000d000000616c696365626f62');
+  // The result in one call, as returns types it; the view reads the bounded type's offsets.
+  assert.equal(toHex(Token.methods.names.resultToPssz(['alice', 'bob'])), '0207616c696365626f62');
+  const read: string[] = Token.methods.names.resultFromPssz(fromHex('0207616c696365626f62'));
+  assert.deepEqual(read, ['alice', 'bob']);
+  assert.equal(Token.methods.names.validateResult(fromHex('05060708096161616161')).ok, false);
+  const view = Token.methods.names.resultView(fromHex('0207616c696365626f62'));
+  assert.equal(view.length, 2);
+  assert.equal(view.at(1), 'bob');
+  rejects(() => Token.methods.names.resultToPssz(['a', 'b', 'c', 'd', 'e']), 'five names');
+  // An empty optional result is zero bytes when its payload cannot be empty ...
+  assert.equal(toHex(Token.methods.find.resultToPssz(null)), '');
+  const found: { id: bigint; note: string } | null = Token.methods.find.resultFromPssz(new Uint8Array(0));
+  assert.equal(found, null);
+  assert.deepEqual(Token.methods.find.resultFromPssz(fromHex('090700000000000000096f6b')), { id: 7n, note: 'ok' });
+  // ... and has a selector byte when it can (a string).
+  assert.equal(toHex(Token.methods.label.resultToPssz(null)), '00');
+  assert.equal(toHex(Token.methods.label.resultToPssz('')), '01');
+  assert.equal(Token.methods.label.validateResult(new Uint8Array(0)).ok, false);
+  // A method that returns nothing: no bytes.
+  const nothing: undefined = Token.methods.ping.resultFromPssz(new Uint8Array(0));
+  assert.equal(nothing, undefined);
   // Every writer refuses a result outside returns(...).
   for (const run of [
     () => Token.methods.names.result.encode(['a', 'b', 'c', 'd', 'e']),

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  ListView, PsszError, PsszSchema, RecordView, TupleView, TypeDef, VariantView, alt, argumentTuple, array, boundedList,
+  ListView, PsszError, PsszSchema, RecordView, TupleView, TypeDef, VariantView, argumentTuple, array, boundedList,
   boundedUtf8, bytes, field, generateSchema, list, map, nested, optional, pair, rawString, record, set, tuple, u16, u32,
   u64, u8, utf8, variant,
   type Bounded, type FieldOptions, type Infer, type InferView, type IrAnyType, type IrSchema, type PsszWidth,
@@ -69,10 +69,9 @@ const AnnTup = record('AnnTup', {
 const AnnVar = record('AnnVar', {
   v: field(
     variant({
-      0: alt(u32, { ijsonName: 'uint32' }), 1: alt(rawString, { ijsonName: 'string' }),
-      2: alt(list(rawString), { ijsonName: 'string[]' }),
+      uint32: u32, string: rawString, 'string[]': list(rawString),
     }),
-    { at: { 1: TEXT16, 2: { max: 2, element: TEXT16 } } },
+    { at: { string: TEXT16, 'string[]': { max: 2, element: TEXT16 } } },
   ),
 });
 
@@ -167,7 +166,7 @@ test('bounds at any depth: the decoded value is statically typed', () => {
   sameType<Infer<typeof AnnTup>, { t: [string, number, Uint8Array]; p: [string, string] }>(true);
   sameType<
     Infer<typeof AnnVar>,
-    { v: { type: '0'; value: number } | { type: '1'; value: string } | { type: '2'; value: string[] } }
+    { v: { type: 'uint32'; value: number } | { type: 'string'; value: string } | { type: 'string[]'; value: string[] } }
   >(true);
   sameType<Infer<typeof ArgsTransfer>, { to: string; amount: bigint; memo: string }>(true);
   sameType<Infer<typeof ArgsBatch>, { names: Uint8Array[]; tip: number | null }>(true);
@@ -203,9 +202,9 @@ test('bounds at any depth: the decoded value is statically typed', () => {
     InferView<typeof AnnVar>,
     RecordView<Infer<typeof AnnVar>, {
       v:
-        | VariantView<{ type: '0'; value: number }, '0', number>
-        | VariantView<{ type: '1'; value: string }, '1', string>
-        | VariantView<{ type: '2'; value: string[] }, '2', ListView<string[], string>>;
+        | VariantView<{ type: 'uint32'; value: number }, 'uint32', number>
+        | VariantView<{ type: 'string'; value: string }, 'string', string>
+        | VariantView<{ type: 'string[]'; value: string[] }, 'string[]', ListView<string[], string>>;
     }>
   >(true);
   sameType<
@@ -222,8 +221,8 @@ test('bounds at any depth: the decoded value is statically typed', () => {
   assert.deepEqual([...m.m], [['k', [7]]]);
   const t = AnnTup.decode(AnnTup.encode({ t: ['x', 1, Uint8Array.of(1, 2)], p: ['a', 'b'] }));
   assert.deepEqual(t, { t: ['x', 1, Uint8Array.of(1, 2)], p: ['a', 'b'] });
-  const v = AnnVar.decode(AnnVar.encode({ v: { type: '2', value: ['x'] } }));
-  assert.deepEqual(v, { v: { type: '2', value: ['x'] } });
+  const v = AnnVar.decode(AnnVar.encode({ v: { type: 'string[]', value: ['x'] } }));
+  assert.deepEqual(v, { v: { type: 'string[]', value: ['x'] } });
   assert.equal(AnnTags.view(AnnTags.encode({ tags: ['ab', 'c'] })).get('tags').at(1), 'c');
   assert.deepEqual(ArgsTransfer.decode(ArgsTransfer.encode({ to: 'al', amount: 5n, memo: 'hi' })), { to: 'al', amount: 5n, memo: 'hi' });
   assert.equal(ArgsTransfer.view(ArgsTransfer.encode({ to: 'al', amount: 5n, memo: 'hi' })).get('amount'), 5n);
@@ -334,9 +333,9 @@ test('bounds at any depth: every writer and reader refuses a value outside a bou
     },
     {
       name: 'AnnVar', type: AnnVar,
-      twin: record('AnnVar', { v: variant({ 0: alt(u32, { ijsonName: 'uint32' }), 1: alt(utf8, { ijsonName: 'string' }), 2: alt(list(utf8), { ijsonName: 'string[]' }) }) }),
-      at: { v: { type: '2', value: ['x', s16] } },
-      past: [{ v: { type: '1', value: s17 } }, { v: { type: '2', value: ['a', 'b', 'c'] } }, { v: { type: '2', value: [s17] } }],
+      twin: record('AnnVar', { v: variant({ uint32: u32, string: utf8, 'string[]': list(utf8) }) }),
+      at: { v: { type: 'string[]', value: ['x', s16] } },
+      past: [{ v: { type: 'string', value: s17 } }, { v: { type: 'string[]', value: ['a', 'b', 'c'] } }, { v: { type: 'string[]', value: [s17] } }],
     },
     {
       name: 'transfer', type: ArgsTransfer, twin: argumentTuple({ to: utf8, amount: u64, memo: utf8 }, { maxDynamicData: 256 }),

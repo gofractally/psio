@@ -40,7 +40,8 @@ whose `wire` verdict differs from the compile-time
   `wire` is the bytes and which bytes are values; `contract` (the default in
   C++) adds what a consumer of the text forms and of the type's identity sees
   — member and alternative names, custom ids, enums, the text shape of a
-  record, `jsonInt` / `ijsonInt`, `ijsonName`.
+  record, `jsonInt` / `ijsonInt`. (An alternative's name is its label, the
+  key of its I-JSON form: there is no second name to compare.)
 - Every pair appears in both directions: `name` and `name~reverse`.
 
 ## Codes
@@ -62,7 +63,7 @@ whose `wire` verdict differs from the compile-time
 | `alternatives-removed`, `alternative-count-changed` (`equivalent`), `alternative-renamed` (contract) | variants |
 | `dwnc-changed`, `fields-removed`, `field-count-changed` (`equivalent`), `dwnc-gained-fields`, `field-renamed` (contract), `appended-field-not-optional` | records, tuples, argument lists |
 | `max-dynamic-data`, `max-fields` | caps (§16) |
-| `text-form-changed` | contract: an object against a named or positional argument list; `jsonInt` / `ijsonInt`; an alternative's `ijsonName` |
+| `text-form-changed` | contract: an object against a named or positional argument list; `jsonInt` / `ijsonInt`; an untagged variant on one side only |
 | `result-changed` | a function result on one side only |
 | `function-removed`, `function-added` (`equivalent`), `type-removed`, `type-added` (`equivalent`) | interfaces |
 | `interface-removed`, `interface-added` (`equivalent`) | whole schemas |
@@ -105,8 +106,7 @@ the binary form):
      `equivalent` in both relations: `key-type-changed`), then for a map the
      width of the entry tuple and the mapped values;
    - variant: the count, then per old alternative: contract
-     `alternative-renamed`, the types, contract `text-form-changed`
-     (`ijsonName`);
+     `alternative-renamed` (the label), the types;
    - record: `fixed-size-changed`, `dwnc-changed`, contract
      `text-form-changed` (text shape), the count (`field-count-changed`,
      `fields-removed`, `dwnc-gained-fields`), `width-changed`, then per old

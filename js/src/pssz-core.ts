@@ -107,6 +107,14 @@ export interface IrFunc {
   result: IrAnyType | null;
   attributes: IrAttribute[];
 }
+/**
+ * `psio::schema_types::FunctionType`: a function outside an `Interface` —
+ * its argument list and its result as `returns` types it (`null`: none).
+ */
+export interface IrFunctionType {
+  params: IrAnyType;
+  result: IrAnyType | null;
+}
 /** `psio::schema_types::Resource`. */
 export interface IrResource {
   name: string;
@@ -586,8 +594,6 @@ function strip(ref: Node): { node: Node; boxed: boolean } {
 /** One member of a record / tuple / variant. */
 export class MemberInfo {
   private wire?: { node: Node; boxed: boolean };
-  /** Variant alternative: the schema states an `ijsonName` (it is not the default, the name). */
-  ijsonNameSet = false;
   constructor(
     readonly name: string,
     /** The member's type as written: wrappers included (the text walk). */
@@ -595,8 +601,6 @@ export class MemberInfo {
     readonly bound: LengthBound | null,
     readonly jsonInt: IntForm,
     readonly ijsonInt: IntForm,
-    /** Variant alternative's I-JSON name. */
-    readonly ijsonName: string,
     /** Typed-only order constraints of the member and the positions below it. */
     readonly order: OrderTree | null = null,
   ) {}
@@ -828,7 +832,6 @@ export function checkAttributes(values: IrAttribute[], site: Site, caps: boolean
         schemaError('pssz IR: malformed integer form attribute');
       continue;
     }
-    if (site === 'variant_member' && name === 'ijsonName' && value !== null) continue;
     // An untagged variant: the same bytes; in text the bare alternative.
     if (site === 'variant' && name === 'untagged') continue;
     schemaError('pssz IR: unsupported schema constraint or annotation');
@@ -1257,7 +1260,7 @@ export class Codec {
         if (t.value.members.length > 255) schemaError('pssz IR: a tuple has more than 255 elements');
         node.kind = 'tuple';
         node.members = t.value.members.map(
-          (m, i) => new MemberInfo(String(i), this.build(m, added, d), null, 'natural', 'natural', ''),
+          (m, i) => new MemberInfo(String(i), this.build(m, added, d), null, 'natural', 'natural'),
         );
         break;
       case 'Struct':
@@ -1289,17 +1292,14 @@ export class Codec {
           if (seen.has(member.name)) schemaError('pssz IR: duplicate schema member');
           seen.add(member.name);
           checkAttributes(member.attributes, record ? 'record_member' : 'variant_member', this.automatic);
-          const name = record ? undefined : findAttribute(member.attributes, 'ijsonName');
           const info = new MemberInfo(
             member.name,
             this.build(member.type, added, d),
             record ? parseLengthBound(member.attributes) : null,
             record ? intForm(member.attributes, 'jsonInt') : 'natural',
             record ? intForm(member.attributes, 'ijsonInt') : 'natural',
-            name && name.value !== null ? name.value : member.name,
             orders?.get(member.name) ?? null,
           );
-          info.ijsonNameSet = !!name && name.value !== null;
           node.members.push(info);
         }
         if (orders) for (const member of node.members) if (member.order) this.orderFits(member.text, member.order);

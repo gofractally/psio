@@ -114,7 +114,7 @@ export const endpointHandler: PsszCustomHandler = {
   toText(value) {
     const v = value as EndpointValue;
     const a = v.value.address;
-    if (v.type === '0') return `${a[0]}.${a[1]}.${a[2]}.${a[3]}:${v.value.port}`;
+    if (v.type === 'V4') return `${a[0]}.${a[1]}.${a[2]}.${a[3]}:${v.value.port}`;
     const groups: string[] = [];
     for (let i = 0; i < 8; ++i) groups.push(((a[2 * i] << 8) | a[2 * i + 1]).toString(16).padStart(4, '0'));
     return `[${groups.join(':')}]:${v.value.port}`;
@@ -128,14 +128,14 @@ export const endpointHandler: PsszCustomHandler = {
         address[2 * i] = parseInt(group.slice(0, 2), 16);
         address[2 * i + 1] = parseInt(group.slice(2), 16);
       });
-      return { type: '1', value: { address, port: Number(decimal(match[2], 65535n)) } };
+      return { type: 'V6', value: { address, port: Number(decimal(match[2], 65535n)) } };
     }
     const colon = text.lastIndexOf(':');
     if (colon < 0) throw new Error('endpoint: no port');
     const octets = text.slice(0, colon).split('.');
     if (octets.length !== 4) throw new Error('endpoint: bad V4');
     return {
-      type: '0',
+      type: 'V4',
       value: {
         address: Uint8Array.from(octets.map((octet) => Number(decimal(octet, 255n)))),
         port: Number(decimal(text.slice(colon + 1), 65535n)),
@@ -174,17 +174,17 @@ interface RefValue {
 export const refHandler: PsszCustomHandler = {
   toText(value) {
     const v = value as RefValue;
-    if (v.type === '0') return `#${v.value}`;
+    if (v.type === 'uint64') return `#${v.value}`;
     return '@' + new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(v.value as Uint8Array);
   },
   fromText(text) {
-    if (text.startsWith('#')) return { type: '0', value: decimal(text.slice(1), (1n << 64n) - 1n) };
-    if (text.startsWith('@')) return { type: '1', value: new TextEncoder().encode(text.slice(1)) };
+    if (text.startsWith('#')) return { type: 'uint64', value: decimal(text.slice(1), (1n << 64n) - 1n) };
+    if (text.startsWith('@')) return { type: 'string', value: new TextEncoder().encode(text.slice(1)) };
     throw new Error('ref: neither #n nor @name');
   },
   check(value) {
     const v = value as RefValue;
-    return v.type === '1' && (v.value as Uint8Array).length === 0 ? 'Ref: a name is not empty' : undefined;
+    return v.type === 'string' && (v.value as Uint8Array).length === 0 ? 'Ref: a name is not empty' : undefined;
   },
 };
 

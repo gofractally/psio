@@ -1736,28 +1736,51 @@ CHECK_THROWS_AS(psio::to_pssz(PayArgs{AccountId{1}, AccountId{2}, 500, Memo{std:
 
 | | |
 |---|---|
-| Rust | `#[psio::interface] trait Bank { #[pssz(max_dynamic_data = 1024)] fn transfer(&mut self, …, #[psio(max = 80)] memo: String); #[psio(returns(max = 8))] fn symbol(&self, token: u32) -> String; }`. The argument record is `bank::args::transfer`; the result codec is its `Method::result_to_pssz` / `result_from_pssz`. `#[psio(max_fields = N)]` caps the parameter count; `#[psio(positional)]` drops the parameter names from the interface (JSON: the array only) |
-| TypeScript | `defineInterface('bank', { transfer: method({ …, memo: field(rawString, { utf8: true, max: 80 }) }, { maxDynamicData: 1024 }), symbol: method({ token: u32 }, { returns: field(rawString, { utf8: true, max: 8 }) }) })`: `Bank.methods.transfer.args` is the argument codec, `Bank.methods.symbol.result` the result codec (the type `returns` describes), `Bank.schema` the Schema IR with its `Interface`. `method(params, { maxFields: N })` caps the parameter count; `method([...])` without parameter names is positional (JSON: the array only). `argumentTuple(params, { maxDynamicData: 1024 })` is an argument list on its own |
-| Python | `@psio.interface(name="bank") class Bank(Protocol)`: parameters are `Annotated[...]` hints, `@psio.method(max_dynamic_data=1024)` caps one method, the return hint carries the result's annotations (`-> Annotated[str, psio.max(8)]`). `psio.interface_of(Bank)["transfer"].args` is the argument codec; `result_to_pssz` / `result_from_pssz` / `validate_result` of a method encode its result as the type the return hint describes. `@psio.method(max_fields=N)` caps the parameter count |
+| Rust | `#[psio::interface] trait Bank { #[pssz(max_dynamic_data = 1024)] fn transfer(&mut self, …, #[psio(max = 80)] memo: String); #[psio(returns(max = 8))] fn symbol(&self, token: u32) -> String; }`. The argument record is `bank::args::transfer`; the result codec is its `Method::result_to_pssz` / `result_from_pssz` / `result_from_pssz_trusted` / `validate_result` / `result_view` (a view of `Method::ResultAs`, the type `returns` makes of the result). `SchemaBuilder::insert_method::<bank::args::transfer>()` is the method's `FunctionType` (`insert_method_args`, `insert_method_result` its parts). `#[psio(max_fields = N)]` caps the parameter count; `#[psio(positional)]` drops the parameter names from the interface (JSON: the array only) |
+| TypeScript | `defineInterface('bank', { transfer: method({ …, memo: field(rawString, { utf8: true, max: 80 }) }, { maxDynamicData: 1024 }), symbol: method({ token: u32 }, { returns: field(rawString, { utf8: true, max: 8 }) }) })`: `Bank.methods.transfer.args` is the argument codec, `Bank.methods.symbol.result` the result codec (the type `returns` describes; `resultToPssz` / `resultFromPssz` / `validateResult` / `resultView` of the method use it; `new SchemaBuilder().insertMethod(method)` is its `FunctionType`, `insertMethodArgs` / `insertMethodResult` its parts), `Bank.schema` the Schema IR with its `Interface`. `method(params, { maxFields: N })` caps the parameter count; `method([...])` without parameter names is positional (JSON: the array only). `argumentTuple(params, { maxDynamicData: 1024 })` is an argument list on its own |
+| Python | `@psio.interface(name="bank") class Bank(Protocol)`: parameters are `Annotated[...]` hints, `@psio.method(max_dynamic_data=1024)` caps one method, the return hint carries the result's annotations (`-> Annotated[str, psio.max(8)]`). `psio.interface_of(Bank)["transfer"].args` is the argument codec; `result_to_pssz` / `result_from_pssz` / `validate_result` / `result_view` of a method encode, read and view its result as the type the return hint describes; `result_from_pssz_trusted` reads validated bytes; `method.function_type(psio.SchemaBuilder())` is its `FunctionType`, `Interface.function_types()` all of them. `@psio.method(max_fields=N)` caps the parameter count |
 | Schema IR | `PSIO_INTERFACE(T, types())` + `SchemaBuilder::insert_interface<T>()`: `Func{name, params, result, attributes}`; parameters and result are the bounded types; the caps are the function attributes `maxDynamicData` and `maxFields`. The argument list as a type is an `Object` with the attribute `tuple="named"` (every parameter has a name) or `"positional"` (members named `"0"`, `"1"`, …). `emit_wit` writes `@maxDynamicData(N)` above the function. The shared rows are [`conformance/interface-vectors.json`](../conformance/interface-vectors.md) |
 
 **Enforcement.** Arguments: as record members.
 
 **The result.** `returns(specs)` makes the result the type the annotations
-describe, and a result is encoded as that type:
-`psio::encode_method_result<T, I>(value, out)`,
-`psio::validate_method_result<T, I>(bytes)` and
-`psio::decode_method_result<T, I>(bytes, out)` return a status;
-`psio::check_method_result<T, I>(value)` only checks. A bare string has no
-width of its own, so `returns(utf8 | max<8>)` does not change its bytes; a
-list of variable-size elements does — its offset table takes the width of
-the bounded type:
+describe, and a result is written, read, validated and viewed **as that
+type** — the mirror of the argument helpers
+([helpers.md](helpers.md#the-result-of-a-method)):
+
+| | |
+|---|---|
+| `psio::method_result_to_pssz<T, I>(value)`, `method_result_append_pssz<T, I>(out, value)` | the callee's side: the bytes of the result, its bounds checked |
+| `psio::method_result_from_pssz<T, I>(bytes)` | the caller's side: validates as the `returns(...)` type, then decodes |
+| `psio::method_result_from_pssz<T, I>(psio::trusted{bytes})` | decodes bytes already validated |
+| `psio::validate_method_result<T, I>(bytes)` | a `codec_status` |
+| `psio::validated_method_result_view<T, I>(bytes)` | validates, then views in place: a `psio::checked_view` of `psio::method_result_trusted_view<T, I>`; `psio::method_result_view<T, I>` is the safe view |
+| `psio::encode_method_result` / `decode_method_result<T, I>(…, out)` | the same operations returning a `codec_status` instead of failing through `psio::codec_abort`; `psio::check_method_result<T, I>(value)` only checks |
+| `psio::method_result_t<T, I>` | the type a result is encoded as: `X` for a method that returns a `psio::pssz_view<X>`, `void` for one that returns nothing |
+
+A bare string has no width of its own, so `returns(utf8 | max<8>)` does not
+change its bytes; a list of variable-size elements does — its offset table
+takes the width of the bounded type, which is why the plain codec of the
+return type (`psio::to_pssz` / `from_pssz<R>`, `psio::pssz_view<R>`) is the
+wrong one for a result:
 
 ```cpp
+struct Listing
+{
+   friend bool operator==(const Listing&, const Listing&) = default;
+   std::uint64_t id = 0;
+   std::string   note;
+   PSIO_REFLECT(Listing, id, attr(note, utf8 | max<32>))
+};
 struct Directory
 {
    std::vector<std::string> names(std::uint32_t limit) const;
-   PSIO_REFLECT(Directory, method(names, limit, returns(max<4> | element(utf8 | max<16>))))
+   std::optional<Listing>     find(std::uint64_t id) const;
+   void                     touch(std::uint64_t id);
+   PSIO_REFLECT(Directory,
+                method(names, limit, returns(max<4> | element(utf8 | max<16>))),
+                method(find, id),
+                method(touch, id))
 };
 ```
 
@@ -1780,7 +1803,76 @@ CHECK_FALSE(psio::encode_method_result<Directory, 0>(std::vector<std::string>{"\
 CHECK(none.empty());
 ```
 
+```cpp
+const std::vector<std::string> two{"alice", "bob"};
+// The callee: the result as returns(...) types it.
+const std::vector<char> bytes = psio::method_result_to_pssz<Directory, 0>(two);
+CHECK(hex(bytes) == "02 07 61 6c 69 63 65 62 6f 62");
+// The caller: validate and decode, decode what is already validated, or view in place.
+CHECK(psio::method_result_from_pssz<Directory, 0>(std::span<const char>{bytes}) == two);
+CHECK(psio::method_result_from_pssz<Directory, 0>(psio::trusted{bytes}) == two);
+const auto view = psio::validated_method_result_view<Directory, 0>(bytes);
+REQUIRE(view.ok());
+CHECK(view->size() == 2);
+CHECK(std::string_view{(*view)[1]} == "bob");
+// An empty optional result is zero bytes when its payload cannot be empty ...
+CHECK(psio::method_result_to_pssz<Directory, 1>(std::optional<Listing>{}).empty());
+CHECK(psio::method_result_from_pssz<Directory, 1>(std::span<const char>{}) == std::nullopt);
+// ... and a present one is the value's own encoding.
+CHECK(psio::method_result_to_pssz<Directory, 1>(std::optional<Listing>{Listing{7, "ok"}}) ==
+      psio::to_pssz(Listing{7, "ok"}));
+// A method that returns nothing has no result bytes.
+CHECK(psio::validate_method_result<Directory, 2>({}).ok());
+```
+
+**An empty optional result is zero bytes** when its payload cannot be empty
+(a number, a record, a variant — [pssz-spec.md §5.5.1](pssz-spec.md)): "the
+callee returned no bytes" and "the callee returned `None`" are the same
+frame, and a present value is its own encoding with nothing added. An
+optional whose payload can itself be empty (a string, a list — §5.5.2)
+carries a selector byte: `None` is `00`, a present value `01` followed by
+its encoding, and no bytes are not a result of such a method. A method that
+returns nothing has no result bytes: `validate_method_result` accepts only
+the empty span.
+
 Without `returns(...)` the result is the plain codec of the result type.
+
+**The result in a schema.** `SchemaBuilder::insert_interface<T>()` writes
+each method as a `Func` whose `result` is the bounded type. A schema that
+lists functions its own way — a map of name to `FunctionType`, without the
+`Interface` envelope — takes the same nodes one method at a time:
+
+| | |
+|---|---|
+| `builder.insert_method<T, I>()` | a `FunctionType{params, result}`: the argument list and the result as `returns(...)` types it |
+| `builder.insert_method_args<T, I>()` | the argument list: the node of `reflect<T>::method_arg_tuple<I>` |
+| `builder.insert_method_result<T, I>()` | the result node (`std::optional`; empty for a method that returns nothing) |
+
+`builder.insert<psio::method_result_t<T, I>>()` is **not** the result: it is
+the plain return type, without `returns(...)`.
+
+```cpp
+// A schema that lists functions its own way, without the Interface envelope.
+psio::SchemaBuilder                builder;
+const psio::schema_types::FunctionType names = builder.insert_method<Directory, 0>();
+const psio::schema_types::FunctionType touch = builder.insert_method<Directory, 2>();
+const psio::Schema                 schema = std::move(builder).build();
+// The result node is the bounded type of returns(...): at most 4 strings ...
+const auto& list = std::get<psio::schema_types::BoundedList>((*names.result)->value);
+CHECK(list.maxCount == 4);
+// ... each UTF-8 of at most 16 bytes.
+CHECK(std::get<psio::schema_types::Custom>(list.type->value).id == "utf8");
+CHECK_FALSE(touch.result.has_value());
+// A schema-driven reader checks a result against that node.
+bool unknown = false;
+CHECK(psio::pssz_ir::validate_auto(schema, **names.result, bytes, &unknown).ok());
+```
+
+A `returns(...)` item with no type form — `exact<N>` / `min<N>`, a bound on
+a `psio::utf8_string` or a nested value, an integer text form — is the
+`Func` attribute `result.<name>`; a bare result node cannot carry it, so
+`insert_method_result` reports an error (`builder.status()`) instead of a
+schema that says less than the declaration.
 
 **Text.** Binary is always the positional tuple. In JSON and I-JSON an
 argument list has two forms ([json.md](json.md#method-arguments)):
@@ -2281,9 +2373,9 @@ static_assert(psio::inferred_bound<Choice>() == 1 + 1 + 1 + 16);
 ```
 
 A variant is one selector byte plus the alternative (at most 256
-alternatives). Text: `[index, value]` in `json`, `{"name": value}` in
-`ijson`, where the name is the alternative's type name
-([json.md](json.md#variant-alternative-names)). **Alternatives may be
+alternatives). Text: `[index, value]` in `json`, `{"label": value}` in
+`ijson`, where the label is the alternative's one name
+([below](#variant-alternative-labels)). **Alternatives may be
 appended** ([pssz-spec.md §7.5](pssz-spec.md#75-what-you-can-change-without-breaking-old-decoders)):
 `pssz_evolves_from<variant<A, B>, variant<A, B, C>>` is true. The new
 reader reads everything the old writer produced; an old reader rejects a
@@ -2295,6 +2387,135 @@ if that moves the offset width of what holds the variant — a record without
 a cap, a tuple, an array, a bounded list or map — the check refuses it,
 exactly as it refuses an appended field that moves a width
 ([8.4](#84-summary)).
+
+#### Variant alternative labels
+
+An alternative has **one label**. It is the key of the tagged text form
+(`{"label": value}`), the name of the alternative in the Schema IR
+(`Variant.members[i].name`) and what a schema comparison calls it. A binary
+format has no labels: an alternative is selected by its position, so a
+label can change without changing a byte.
+
+The rule is the same in every language:
+
+1. **The name the declaration gives the alternative**, where the language
+   names alternatives: a Rust enum variant's identifier, the key of a
+   TypeScript `variant({...})`.
+2. **Else the name of the alternative's type, as its language declares
+   it.** A `std::variant` or a Python `Union` names no alternative, so the
+   label is the type's name: a reflected record's (enum's, transparent
+   type's) name, and for the types that have no declared name
+
+   | type | label |
+   |---|---|
+   | `bool`; integers; floats | `bool`; `int8` `uint8` `int16` `uint16` `int32` `uint32` `int64` `uint64` `int128` `uint128`; `float32` `double` |
+   | a string (raw or UTF-8, bounded or not) | `string` |
+   | a list / bounded list of `T`; bytes | `T[]`; `uint8[]` (C++ `std::vector<char>`: `char[]`) |
+   | an array of `N` `T` | `T[N]` |
+   | an optional `T` | `T?` |
+   | a tuple / pair of `A`, `B` | `tuple_A_B` |
+   | a map from `K` to `V`; a set of `K` | `map_K_V`; `set_K` |
+   | a variant of `A`, `B` | `variant_A_B` |
+
+   built from the labels of the types they hold (`string[]`, `Circle?`,
+   `tuple_uint32_string`).
+3. **Else its position**, `"0"`, `"1"`, …: for a type with no name at all,
+   and for an alternative whose type name another alternative of the same
+   variant has too. `std::variant<std::uint32_t, std::string, std::string>`
+   is labelled `uint32`, `1`, `2`.
+
+A variant therefore always has labels and they are always distinct. To
+**state** a label — to match a name imposed from outside, or to give two
+alternatives of one type names of their own — use the language's
+annotation:
+
+| | |
+|---|---|
+| C++ | specialize `psio::variant_labels<V>` with one label per alternative, in order (`psio/variant_label.hpp`); `psio::variant_label<V, I>()` is the label in force |
+| Rust | `#[psio(name = "…")]` (or `#[serde(rename = "…")]`, the enum's `rename_all`) on the enum variant |
+| TypeScript | the key *is* the label: `variant({ uint32: u32, string: utf8 })`; `variant([['uint32', u32], ['1', utf8], ['2', utf8]])` when a label is an integer that is not first (JavaScript reorders integer keys) |
+| Python | `Annotated[T, psio.alt("…")]` on the alternative |
+
+Stated labels are nonempty and distinct (a compile-time / declaration-time
+error otherwise).
+
+```cpp
+struct Circle
+{
+   friend bool operator==(const Circle&, const Circle&) = default;
+   std::uint32_t radius = 0;
+   PSIO_REFLECT(Circle, radius)
+};
+struct Square
+{
+   friend bool operator==(const Square&, const Square&) = default;
+   std::uint32_t side = 0;
+   PSIO_REFLECT(Square, side)
+};
+// The name of the alternative's type: a reflected type's name, the table for the rest.
+using Shape = std::variant<Circle, Square, std::uint32_t, std::vector<std::string>>;
+static_assert(psio::variant_label<Shape, 0>() == "Circle");
+static_assert(psio::variant_label<Shape, 2>() == "uint32");
+static_assert(psio::variant_label<Shape, 3>() == "string[]");
+// A type name two alternatives share is no label: they are labelled by position.
+using Repeated = std::variant<std::uint32_t, std::string, std::string>;
+static_assert(psio::variant_label<Repeated, 0>() == "uint32");
+static_assert(psio::variant_label<Repeated, 1>() == "1");
+static_assert(psio::variant_label<Repeated, 2>() == "2");
+using Sized = std::variant<Circle, Square, std::uint32_t>;   // its labels are stated below
+```
+
+```cpp
+// Stated labels: one per alternative, in order.
+template <>
+struct psio::variant_labels<ref::Sized>
+{
+   static constexpr std::array<std::string_view, 3> names{"circle", "square", "side"};
+};
+static_assert(psio::variant_label<ref::Sized, 2>() == "side");
+```
+
+```cpp
+// The label is the key of the tagged text form ...
+CHECK(psio::encode(psio::ijson{}, Shape{Circle{3}}) == R"({"Circle":{"radius":3}})");
+CHECK(psio::encode(psio::ijson{}, Shape{std::uint32_t{7}}) == R"({"uint32":7})");
+CHECK(psio::encode(psio::ijson{}, Repeated{std::in_place_index<2>, "b"}) == R"({"2":"b"})");
+CHECK(psio::encode(psio::ijson{}, Sized{Square{4}}) == R"({"square":{"side":4}})");
+CHECK(psio::decode<Sized>(psio::ijson{}, std::string_view{R"({"side":5})"}) ==
+      Sized{std::uint32_t{5}});
+// ... and the name of the alternative in the schema.
+psio::SchemaBuilder builder;
+const auto          type   = builder.insert<Sized>();
+const psio::Schema  schema = std::move(builder).build();
+const auto& members = std::get<psio::schema_types::Variant>(type.resolve(schema)->value).members;
+CHECK(members[0].name == "circle");
+CHECK(members[2].name == "side");
+// Binary has no labels: an alternative is its position.
+CHECK(hex(psio::to_pssz(Sized{std::uint32_t{5}})) == "02 05 00 00 00");
+```
+
+The implementing language is the naming authority: the twin of a type in
+another language renames to match it. The Rust twin of
+`std::variant<std::uint32_t, std::string>` is
+`enum V { #[psio(name = "uint32")] Number(u32), #[psio(name = "string")] Text(String) }`;
+the C++ twin of a Rust `enum Shape { Circle(Circle), Side(u32) }` states
+`{"Circle", "Side"}` with `psio::variant_labels`. The Schema IR carries
+nothing else about an alternative's name (there is no `ijsonName`
+attribute), so two declarations with the same labels are one schema node.
+The shared rows are
+[`conformance/variant-label-vectors.json`](../conformance/variant-label-vectors.md).
+
+GraphQL: a `std::variant` of records is a union of the alternatives' object
+types, each under its GraphQL type name — the label, unless
+`psio::graphql::type_name` renames the type. A label cannot rename a member
+of a union: GraphQL names types, not alternatives.
+
+**Evolution.** A label is part of the text contract: `psio::pssz_ir::evolves_from`
+/ `equivalent` under `compare::contract` report a changed label as
+`alternative-renamed`; under `compare::wire` labels are not compared. Rule 3
+means that appending a second alternative of a type the variant already
+holds relabels the first (`string` becomes `1`): state the labels of a
+published variant that may grow that way.
 
 ### 6.11 Tuple and pair
 
@@ -2483,9 +2704,12 @@ another clock is its tick count. Schema IR: `Custom{Int, "time-point-millis"}`,
 
 [5.11](#511-methodname-). Treat every action's argument tuple as a
 published type: bound each variable-size parameter, declare
-`maxDynamicData`, validate arguments that arrive from outside. Encode a
-result with `psio::encode_method_result<T, I>` so that it has the bytes of
-its `returns(...)` type. In JSON a named argument list is an object; accept
+`maxDynamicData`, validate arguments that arrive from outside. Write a
+result with `psio::method_result_to_pssz<T, I>` and read it with
+`psio::method_result_from_pssz<T, I>` (or view it with
+`psio::validated_method_result_view<T, I>`) so that it has the bytes of its
+`returns(...)` type; put it in a schema with
+`SchemaBuilder::insert_method<T, I>()`. In JSON a named argument list is an object; accept
 the positional array too.
 
 ### 6.19 Tables and keys

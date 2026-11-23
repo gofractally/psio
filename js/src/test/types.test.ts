@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  ListView, PsszError, PsszSchema, RecordView, TupleView, TypeDef, VariantView, alt, array, bitlist, bool,
+  ListView, PsszError, PsszSchema, RecordView, TupleView, TypeDef, VariantView, array, bitlist, bool,
   boundedBytes, boundedList, boundedUtf8, box, bytes, custom, duration, enumeration, f32, f64, field, fixedBytes, monotonic,
   generateSchema, i128, i16, i32, i64, i8, keyPrefixUpperBound, lazy, list, nameToNumber, numberToName, optional,
   rawString, record, timePoint, tuple, u128, u16, u256, u32, u64, u8, utf8, variant,
@@ -69,8 +69,7 @@ const Overrides = record('Overrides', {
 });
 const Inner = record('Inner', { id: u64, label: utf8, flag: bool });
 const Choice = variant({
-  0: alt(u32, { ijsonName: 'uint32' }), 1: alt(u64, { ijsonName: 'uint64' }), 2: alt(rawString, { ijsonName: 'string' }),
-  3: alt(Inner, { ijsonName: 'Inner' }), 4: alt(bytes, { ijsonName: 'uint8[]' }),
+  uint32: u32, uint64: u64, string: rawString, Inner, 'uint8[]': bytes,
 });
 const Holder = record('Holder', { choice: Choice, choices: list(Choice) });
 // cpp/tests/time_key_conformance_types.hpp
@@ -201,8 +200,8 @@ test('typed layer: the decoded value is statically typed', () => {
     since: { major: number; minor: number } | null;
   }>(true);
   sameType<Infer<typeof Choice>,
-    | { type: '0'; value: number } | { type: '1'; value: bigint } | { type: '2'; value: Uint8Array }
-    | { type: '3'; value: { id: bigint; label: string; flag: boolean } } | { type: '4'; value: Uint8Array }>(true);
+    | { type: 'uint32'; value: number } | { type: 'uint64'; value: bigint } | { type: 'string'; value: Uint8Array }
+    | { type: 'Inner'; value: { id: bigint; label: string; flag: boolean } } | { type: 'uint8[]'; value: Uint8Array }>(true);
   const Pair = tuple(u32, utf8, optional(i64));
   sameType<Infer<typeof Pair>, [number, string, bigint | null]>(true);
   const Nested = optional(optional(u8));
@@ -224,8 +223,8 @@ test('typed layer: the decoded value is statically typed', () => {
   assert.deepEqual(Pair.decode(Pair.encode([7, 'x', null])), [7, 'x', null]);
   assert.deepEqual(Nested.decode(Nested.encode({ some: null })), { some: null });
   assert.equal(Nested.decode(Nested.encode(null)), null);
-  const choice = Choice.decode(Choice.encode({ type: '3', value: { id: 9n, label: 'l', flag: true } }));
-  if (choice.type === '3') assert.equal(choice.value.label, 'l');
+  const choice = Choice.decode(Choice.encode({ type: 'Inner', value: { id: 9n, label: 'l', flag: true } }));
+  if (choice.type === 'Inner') assert.equal(choice.value.label, 'l');
   else assert.fail();
 });
 

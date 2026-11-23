@@ -150,7 +150,7 @@ namespace
       s.insert("option", Option{B{Option{B{Int{128, false}}}}});
       s.insert("variant",
                Variant{{Member{"none", B{Tuple{}}, {}},
-                        Member{"some", B{Type{"point"}}, {Attribute{"ijsonName", "Point"}}},
+                        Member{"Point", B{Type{"point"}}, {}},
                         Member{"text", B{Type{"text"}}, {}}},
                        {flag}});
       s.insert("tuple-empty", Tuple{});

@@ -125,8 +125,9 @@ value of a Nested node its `Bytes`, read and written without being examined
 and of a typed reader that keeps the member's bytes. Reachable schema metadata is checked
 before encoding/decoding; constraints are never bypassed by an omitted Option.
 DWNC and collection count bounds are implemented, as are the member attributes
-`lengthBound` (enforced), `jsonInt` / `ijsonInt` and the variant-member
-attribute `ijsonName` (text forms). `maxDynamicData` is implemented by the
+`lengthBound` (enforced) and `jsonInt` / `ijsonInt` (text forms); a variant
+member carries no attribute — its name is the alternative's label, the key
+of its tagged text form. `maxDynamicData` is implemented by the
 automatic profile and rejected by the explicit one; `maxFields` likewise is
 accepted (as descriptive) only by the automatic profile. Unrecognized
 attributes are rejected; doc/description/visible are whitelisted descriptive
@@ -202,8 +203,8 @@ subtrees are not part of a type. Recursive types are compared co-inductively.
   E-011). A `Tuple` and an extensible `Object` are the same record.
 - `compare::contract` (the default) adds what a consumer of the text forms
   and of the type's identity sees: the names of record members and variant
-  alternatives (§7.6: a rename breaks consumers that use the names), an
-  alternative's `ijsonName`, custom ids, enums (`evolves_from` lets the new
+  alternatives (§7.6: a rename breaks consumers that use the names; an
+  alternative's name is its label, the key of its I-JSON form), custom ids, enums (`evolves_from` lets the new
   type add enumerators; every old name keeps its value), the text shape of a
   record (object, named argument list, positional), `jsonInt` / `ijsonInt`.
 

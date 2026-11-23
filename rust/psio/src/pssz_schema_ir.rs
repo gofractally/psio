@@ -140,15 +140,15 @@ pub enum AnyValue {
 // which has no name of its own in a schema, so this one has none either.
 impl ToPsszSchema for AnyValue {
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
-        // A std::variant's alternatives are numbered; the name each has in
-        // text is its `ijsonName`.
+        // Each alternative is named by its label: the C++ type's name, which
+        // is this enum's variant identifier.
         let mut members = Vec::new();
         macro_rules! alternatives {
             ($($name:ident: $ty:ty),*) => {$(
                 members.push(Member {
-                    name: members.len().to_string(),
+                    name: stringify!($name).into(),
                     r#type: Box::new(<$ty as ToPsszSchema>::schema(builder)?),
-                    attributes: vec![Attribute { name: "ijsonName".into(), value: Some(stringify!($name).into()) }],
+                    attributes: vec![],
                 });
             )*};
         }
@@ -551,6 +551,45 @@ pub(crate) fn erased_type_id<T: ?Sized>() -> TypeId {
 /// The schema therefore depends on the order of the calls, exactly as in
 /// C++: types then interfaces is another schema than interfaces then types,
 /// though the two describe the same thing.
+///
+/// # Variant alternative labels
+///
+/// An alternative of a variant has one label: its `Member::name` in the
+/// schema and the key of its tagged text form (`{"label": value}` in
+/// I-JSON). For a derived enum it is the variant's identifier, or what
+/// `#[psio(name = "...")]` (`#[serde(rename)]`, the enum's `rename_all`)
+/// states — use that to match the twin of a type declared in another
+/// language (a C++ `std::variant` labels its alternatives by type name:
+/// `uint32`, `string`, `Circle`, ..., and by position where a name repeats).
+/// There is no second name: the schema has no `ijsonName` attribute.
+/// docs/annotations.md, "Variant alternative labels";
+/// `conformance/variant-label-vectors.json`.
+///
+/// ```
+/// use psio::pssz::schema_ir::{schema_for, AnyValue};
+/// #[derive(psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema, psio::JsonText)]
+/// enum Shape {
+///     Circle(u32),
+///     #[psio(name = "side")]
+///     Square(u32),
+/// }
+/// let (schema, root) = schema_for::<Shape>().unwrap();
+/// let AnyValue::Variant(variant) = &schema.resolve(&root).unwrap().value else { panic!() };
+/// assert_eq!(variant.members[0].name, "Circle");
+/// assert_eq!(variant.members[1].name, "side");
+/// assert_eq!(psio::json::try_encode::<psio::json::IJson, _>(&Shape::Square(4)).unwrap(), r#"{"side":4}"#);
+/// ```
+///
+/// Labels are distinct:
+///
+/// ```compile_fail
+/// #[derive(psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
+/// enum Shape {
+///     Circle(u32),
+///     #[psio(name = "Circle")] // the label of the alternative above
+///     Square(u32),
+/// }
+/// ```
 #[derive(Default)]
 pub struct SchemaBuilder {
     schema: Schema,

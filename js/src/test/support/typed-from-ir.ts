@@ -8,7 +8,7 @@
 // skipped silently.
 
 import {
-  PsszSchema, TypeDef, alt, argumentTuple, array, bitlist, bitvector, bool, boundedBytes, boundedList, boundedUtf8, box, bytes,
+  PsszSchema, TypeDef, argumentTuple, array, bitlist, bitvector, bool, boundedBytes, boundedList, boundedUtf8, box, bytes,
   char, custom, duration, enumeration, f32, f64, field, fixedBytes, generateSchema, i128, i16, i32, i64, i8,
   lazy, list, map, monotonic, nested, optional, pair, parseTimeSchemaId, rawString, record, set, timePoint, transparent,
   tuple, u128, u16, u256, u32, u64, u8,
@@ -251,11 +251,11 @@ export class TypedFixture implements TypeSource {
         return tuple(...t.value.members.map((m) => this.of(m)));
       case 'Variant': {
         if (t.value.attributes.length) return unsupported('variant attributes');
-        const alts: { [name: string]: Def | ReturnType<typeof alt> } = {};
+        // (entries: a label may be an integer that is not its position)
+        const alts: [string, Def][] = [];
         for (const m of t.value.members) {
-          const names = m.attributes.filter((a) => a.name === 'ijsonName');
-          if (names.length !== m.attributes.length) return unsupported('variant member attributes');
-          alts[m.name] = names.length ? alt(this.of(m.type), { ijsonName: names[0].value! }) : this.of(m.type);
+          if (m.attributes.length) return unsupported('variant member attributes');
+          alts.push([m.name, this.of(m.type)]);
         }
         return variant(alts);
       }
@@ -427,13 +427,12 @@ export class TypedFixture implements TypeSource {
       }
       case 'Variant': {
         if (t.value.attributes.length) return null;
-        const alts: { [name: string]: Def | ReturnType<typeof alt> } = {};
+        const alts: [string, Def][] = [];
         const at: { [name: string]: PositionOptions } = {};
         for (const m of t.value.members) {
-          const names = m.attributes.filter((a) => a.name === 'ijsonName');
           const x = this.bounded(m.type);
-          if (names.length !== m.attributes.length || !x) return null;
-          alts[m.name] = names.length ? alt(x.def, { ijsonName: names[0].value! }) : x.def;
+          if (m.attributes.length || !x) return null;
+          alts.push([m.name, x.def]);
           if (x.o) at[m.name] = x.o;
         }
         return { def: variant(alts), o: { at } };

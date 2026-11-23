@@ -1589,6 +1589,46 @@ namespace psio {
             invoke_method_pssz<T, I>(std::forward<Obj>(obj), bytes), result);
    }
 
+   // ── Viewing a method's result ─────────────────────────────────────────
+   //
+   // The read view of the result of method I of T, as returns(...) types
+   // it. Where returns(...) narrows an offset width (a `max<4> |
+   // element(utf8 | max<16>)` list of strings has a 1-byte offset table)
+   // the view of the plain return type would read wrong offsets; this one
+   // reads the result's own.
+   //
+   //   method_result_view<T, I>             the safe view
+   //   method_result_trusted_view<T, I>     the trusted view
+   //   validated_method_result_view<T, I>(bytes)
+   //                                        validate_method_result, then the
+   //                                        trusted view in a checked_view
+   //
+   // An empty optional result whose payload cannot be empty is zero bytes
+   // (pssz.hpp "A result in one call"): its view is the empty optional
+   // view (`!view.has_value()`).
+   namespace detail
+   {
+      template <typename T, std::size_t I>
+      using method_result_format = view_layout::detail_pssz::format_at<
+         pssz_impl::method_result_t<T, I>, pssz_impl::method_result_ann<T, I>>;
+   }
+   template <typename T, std::size_t I>
+   using method_result_view =
+      view<method_result_t<T, I>, detail::method_result_format<T, I>, storage::const_borrow>;
+   template <typename T, std::size_t I>
+   using method_result_trusted_view =
+      view<method_result_t<T, I>, detail::method_result_format<T, I>, storage::trusted_borrow>;
+
+   template <typename T, std::size_t I>
+   [[nodiscard]] checked_view<method_result_t<T, I>, detail::method_result_format<T, I>>
+   validated_method_result_view(std::span<const char> bytes) noexcept
+   {
+      using View = checked_view<method_result_t<T, I>, detail::method_result_format<T, I>>;
+      if (auto status = validate_method_result<T, I>(bytes); !status.ok())
+         return View{std::move(status)};
+      return View{trusted{bytes}};
+   }
+
    // ── from_pssz / decode from a view ────────────────────────────────────
    //
    // `psio::from_pssz<T>(view)` is `view.unpack()`, for code that spells a

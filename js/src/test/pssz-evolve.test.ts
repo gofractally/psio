@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PsszError, PsszSchema, argumentTuple, array, boundedList, boundedUtf8, defineInterface, field, generateSchema, lazy, list, map,
-  fixedBytes, i32, method, nested, optional, psszEquivalent, psszEvolvesFrom, enumeration, custom, timePoint, duration, box, alt, rawString, record, set, transparent, tuple, u16, u32, u64, u8, utf8, variant,
+  fixedBytes, i32, method, nested, optional, psszEquivalent, psszEvolvesFrom, enumeration, custom, timePoint, duration, box, rawString, record, set, transparent, tuple, u16, u32, u64, u8, utf8, variant,
   type FieldOptions, type PsszCompatibility, type RecordOptions, type TypeDef,
 } from '../index.js';
 
@@ -345,7 +345,9 @@ test('psszEvolvesFrom / psszEquivalent: wire and contract, codes, methods, inter
   const V = variant({ A: u32, B: utf8 });
   assert.equal(code(psszEvolvesFrom(V, variant({ A: u32, C: utf8 }))), 'alternative-renamed @ (root)');
   assert.deepEqual(psszEvolvesFrom(V, variant({ A: u32, C: utf8 }), { compare: 'wire' }), { ok: true });
-  assert.equal(code(psszEquivalent(V, variant({ A: u32, B: alt(utf8, { ijsonName: 'b' }) }))), 'text-form-changed @ <B>');
+  // An alternative has one name — its label, the I-JSON key: another is a rename.
+  assert.equal(code(psszEquivalent(V, variant({ A: u32, b: utf8 }))), 'alternative-renamed @ (root)');
+  assert.deepEqual(psszEquivalent(V, variant({ A: u32, b: utf8 }), { compare: 'wire' }), { ok: true });
   // Custom ids and enums.
   const Level = enumeration(u8, { low: 0, high: 1 });
   const Level3 = enumeration(u8, { low: 0, high: 1, top: 2 });

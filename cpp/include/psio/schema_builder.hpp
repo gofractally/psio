@@ -42,8 +42,9 @@
 //     `min`, or on a utf8_string, is the member attribute
 //     lengthBound = "exact=N" / "min=A,max=B";
 //   - member integer forms: jsonInt / ijsonInt = "number" | "string";
-//   - a variant alternative's I-JSON name: ijsonName (get_type_name); an
-//     untagged variant (untagged.hpp): the Variant attribute `untagged`;
+//   - a variant alternative is named by its label (variant_label.hpp), the
+//     key of its tagged text form; an untagged variant (untagged.hpp): the
+//     Variant attribute `untagged`;
 //   - type-level definitionWillNotChange / maxDynamicData / maxFields.
 //   - string kinds: std::string is the Custom "string" (raw bytes),
 //     utf8_string the Custom "utf8" (validated UTF-8), each over its byte
@@ -80,12 +81,14 @@
 #include <psio/detail/assoc.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/get_type_name.hpp>
+#include <psio/variant_label.hpp>
 #include <psio/json_value.hpp>
 #include <psio/reflect.hpp>
 #include <psio/schema_ir.hpp>
 #include <psio/structural.hpp>
 #include <psio/time.hpp>
 #include <psio/transparent.hpp>
+#include <psio/wire_type.hpp>
 #include <psio/wit_resource.hpp>
 #include <psio/wrappers.hpp>
 
@@ -106,13 +109,6 @@
 
 namespace psio
 {
-   // Optional metadata-only customization. Supply a constexpr array of unique,
-   // nonempty labels in std::variant alternative order. Unlabeled variants use
-   // numeric labels; type names are never guessed to be API alternative names.
-   template <typename Variant> struct schema_variant_labels
-   {
-   };
-
    // The name of a reflected record in a schema. By default it is the
    // record's reflected (unqualified) name — and, when two different types
    // of one schema have the same unqualified name, each of them is named as
@@ -238,22 +234,6 @@ namespace psio::schema_types
       {
          static constexpr auto limit = N;
       };
-      template <typename T> consteval bool valid_variant_labels()
-      {
-         if constexpr (requires { ::psio::schema_variant_labels<T>::names; })
-         {
-            constexpr auto &labels = ::psio::schema_variant_labels<T>::names;
-            for (std::size_t i = 0; i < std::size(labels); ++i)
-            {
-               if (std::string_view(labels[i]).empty())
-                  return false;
-               for (std::size_t j = 0; j < i; ++j)
-                  if (std::string_view(labels[i]) == std::string_view(labels[j]))
-                     return false;
-            }
-         }
-         return true;
-      }
    }  // namespace sb_detail
 
    // ─────────────────────────────────────────────────────────────────────
@@ -362,6 +342,73 @@ namespace psio::schema_types
       {
          schema_.worlds.push_back(build_world<WorldTag>());
          return std::move(*this);
+      }
+
+      // ── A reflected method outside an Interface ───────────────────────
+      //
+      // insert_interface<Tag>() writes a method as a Func of an Interface. A
+      // schema that lists functions its own way (a map of name ->
+      // FunctionType, say) takes the same nodes from here, for method I of
+      // the reflected type T:
+      //
+      //   insert_method_args<T, I>()     the argument list: the node of
+      //                                  reflect<T>::method_arg_tuple<I>, with
+      //                                  the parameter annotations and the cap
+      //   insert_method_result<T, I>()   the result AS returns(...) TYPES IT
+      //                                  (the bounded type, `utf8`, element
+      //                                  rules): the type whose bytes
+      //                                  psio::method_result_to_pssz writes
+      //                                  and method_result_from_pssz reads.
+      //                                  nullopt for a method that returns
+      //                                  nothing. The plain type of a method
+      //                                  without returns(...)
+      //   insert_method<T, I>()          both, as a FunctionType
+      //
+      // The result is the wire type of what the method returns: X for a
+      // method that returns a psio::pssz_view<X>.
+      //
+      // A returns(...) item that has no type form — a length bound with
+      // `exact` or `min`, a bound on a psio::utf8_string or a nested value,
+      // an integer text form — is an attribute of a Func (`result.<name>`,
+      // insert_interface). A bare result node cannot carry it, so asking for
+      // one is an error (status()) rather than a schema that says less than
+      // the declaration.
+      template <typename T, std::size_t I>
+      AnyType insert_method_args()
+      {
+         return insert<typename reflect<T>::template method_arg_tuple<I>>();
+      }
+
+      template <typename T, std::size_t I>
+      std::optional<AnyType> insert_method_result()
+      {
+         using R        = reflect<T>;
+         using Declared = typename R::template method_result<I>;
+         if constexpr (std::is_void_v<Declared>)
+            return std::nullopt;
+         else
+         {
+            using Result = ::psio::wire_type_t<Declared>;
+            Member result{"", Box<AnyType>{insert<Result>()}, {}};
+            apply_member_annotations<Result>(result, R::template method_annotations<I>.result);
+            for (const auto& attribute : result.attributes)
+               errors_.push_back(
+                  "psio::SchemaBuilder: returns(...) of " + std::string{R::name} + "::" +
+                  std::string{R::template method_name<I>} + " states " + attribute.name +
+                  (attribute.value ? " = \"" + *attribute.value + "\"" : std::string{}) +
+                  ", which has no type form: only the Func of an Interface carries it "
+                  "(insert_interface)");
+            return std::move(*result.type);
+         }
+      }
+
+      template <typename T, std::size_t I>
+      FunctionType insert_method()
+      {
+         FunctionType type{Box<AnyType>{insert_method_args<T, I>()}, std::nullopt};
+         if (auto result = insert_method_result<T, I>())
+            type.result = Box<AnyType>{std::move(*result)};
+         return type;
       }
 
       // Whether every name of the schema names one thing: ok, or the first
@@ -926,38 +973,19 @@ namespace psio::schema_types
       {
          constexpr auto count = std::variant_size_v<U>;
          static_assert(count <= 256, "schema variant exceeds u8 selector capacity");
-         if constexpr (requires { ::psio::schema_variant_labels<U>::names; })
-            static_assert(std::size(::psio::schema_variant_labels<U>::names) == count,
-                          "schema variant label count must match alternatives");
-         static_assert(sb_detail::valid_variant_labels<U>(),
-                       "schema variant labels must be nonempty and unique");
+         // An alternative's name is its label (variant_label.hpp): the
+         // key of its tagged text form.
+         PSIO_REQUIRE_VARIANT_LABELS(U);
          return [&]<std::size_t... I>(std::index_sequence<I...>)
          {
-            auto name = [](std::size_t i)
-            {
-               if constexpr (requires { ::psio::schema_variant_labels<U>::names; })
-                  return std::string(::psio::schema_variant_labels<U>::names[i]);
-               else
-                  return std::to_string(i);
-            };
-            // The I-JSON form names an alternative by its type name.
-            auto attributes = []<typename A>(std::type_identity<A>)
-            {
-               std::vector<Attribute> out;
-               if constexpr (requires { get_type_name(static_cast<const A *>(nullptr)); })
-                  out.push_back(Attribute{
-                      "ijsonName",
-                      std::string(std::string_view{get_type_name(static_cast<const A *>(nullptr))})});
-               return out;
-            };
             // An untagged variant (untagged.hpp) says so: its text is the
             // bare value of the alternative.
             std::vector<Attribute> flags;
             if constexpr (::psio::is_untagged_v<U>)
                flags.push_back(Attribute{"untagged", ""});
             return Variant{
-                {Member{name(I), Box<AnyType>{alternative.template operator()<I>()},
-                        attributes(std::type_identity<std::variant_alternative_t<I, U>>{})}...},
+                {Member{std::string{::psio::variant_label<U, I>()},
+                        Box<AnyType>{alternative.template operator()<I>()}, {}}...},
                 std::move(flags)};
          }(std::make_index_sequence<count>{});
       }

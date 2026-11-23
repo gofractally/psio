@@ -1543,6 +1543,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                 ));
             }
             let mut members = Vec::new();
+            let mut labels = ::std::collections::BTreeSet::new();
             for variant in &data.variants {
                 if variant.discriminant.is_some() {
                     return Err(syn::Error::new_spanned(
@@ -1550,7 +1551,6 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                         "PSSZ selectors use declaration order",
                     ));
                 }
-                let variant_name = variant.ident.to_string();
                 let variant_attrs = attrs::variant(variant)?;
                 let ty = match &variant.fields {
                     Fields::Unit => {
@@ -1576,15 +1576,18 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                         variant_attrs.rename_all.or(opts.rename_all_fields),
                     )?,
                 };
-                // The I-JSON form names an alternative by `#[psio(name)]` /
-                // `#[serde(rename)]`, or by the enum's `rename_all`.
-                let text_name = attrs::variant_name(variant, &variant_attrs, opts.rename_all);
-                let attributes: Vec<_> = Some(&text_name)
-                    .filter(|name| **name != variant_name)
-                    .iter()
-                    .map(|name| schema_attribute(k, "ijsonName", name))
-                    .collect();
-                members.push(quote! { #k::pssz::schema_ir::Member { name: #variant_name.into(), r#type: ::std::boxed::Box::new(#ty), attributes: ::std::vec![#(#attributes),*] } });
+                // The alternative's label — its one name, in the schema and
+                // as the key of the tagged text form: the variant's
+                // identifier, or what `#[psio(name)]` / `#[serde(rename)]` /
+                // the enum's `rename_all` makes of it.
+                let label = attrs::variant_name(variant, &variant_attrs, opts.rename_all);
+                if label.is_empty() || !labels.insert(label.clone()) {
+                    return Err(syn::Error::new_spanned(
+                        variant,
+                        format!("the alternatives of a variant have distinct, nonempty labels: \"{label}\" is given twice or is empty"),
+                    ));
+                }
+                members.push(quote! { #k::pssz::schema_ir::Member { name: #label.into(), r#type: ::std::boxed::Box::new(#ty), attributes: ::std::vec![] } });
             }
             // An untagged variant: in text the bare value of the alternative.
             let untagged: Vec<_> =

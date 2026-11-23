@@ -16,8 +16,9 @@
 //                 floats are always numbers. Byte sequences (std::vector / std::array
 //                 of char, unsigned char, std::byte, and psio::byte_array<N>)
 //                 are one UPPERCASE hex string. std::variant is
-//                 `{"Name": value}` where Name is get_type_name of the
-//                 alternative ("uint32", "string", the record's name, ...).
+//                 `{"Label": value}` where Label is the alternative's label
+//                 (variant_label.hpp: "uint32", "string", the record's
+//                 name, ..., or what psio::variant_labels<V> states).
 //
 // Everything else is the same in both:
 //
@@ -129,6 +130,7 @@
 #include <psio/format.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/get_type_name.hpp>
+#include <psio/variant_label.hpp>
 #include <psio/json_cursor.hpp>
 #include <psio/json_value.hpp>
 #include <psio/reflect.hpp>
@@ -390,34 +392,17 @@ namespace psio {
          IM == int_mode::string ||
          (IM == int_mode::natural && Fmt::i_json && sizeof(I) >= 8);
 
-      // Name of variant alternative I under ijson.
+      // The label of variant alternative I (variant_label.hpp): the key of
+      // the tagged form.
       template <typename V, std::size_t I>
       constexpr std::string_view alt_name() noexcept
       {
-         return std::string_view{get_type_name(
-            static_cast<const std::variant_alternative_t<I, V>*>(nullptr))};
+         return ::psio::variant_label<V, I>();
       }
 
-      // The alternative names of V, as a lookup table source.
+      // The labels of V, as a lookup table source.
       template <typename V>
-      struct alt_names
-      {
-         static constexpr auto _names_array_ =
-            []<std::size_t... Is>(std::index_sequence<Is...>) {
-               return std::array<std::string_view, sizeof...(Is)>{alt_name<V, Is>()...};
-            }(std::make_index_sequence<std::variant_size_v<V>>{});
-      };
-
-      template <typename V>
-      constexpr bool alt_names_unique() noexcept
-      {
-         const auto& names = alt_names<V>::_names_array_;
-         for (std::size_t a = 0; a < names.size(); ++a)
-            for (std::size_t b = a + 1; b < names.size(); ++b)
-               if (names[a] == names[b])
-                  return false;
-         return true;
-      }
+      using alt_names = ::psio::variant_label_table<V>;
 
       // ── Untagged variants (untagged.hpp) ──────────────────────────────────
       //
@@ -1365,9 +1350,7 @@ namespace psio {
             if constexpr (Fmt::i_json)
             {
                // Named form: {"AlternativeName": value}.
-               static_assert(alt_names_unique<T>(),
-                             "psio::ijson: variant alternatives must have "
-                             "distinct type names");
+               PSIO_REQUIRE_VARIANT_LABELS(T);
                [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                   (void)((v.index() == Is
                              ? (w.put('{'),
@@ -2475,9 +2458,7 @@ namespace psio {
             }
             else if constexpr (Fmt::i_json)
             {
-               static_assert(alt_names_unique<T>(),
-                             "psio::ijson: variant alternatives must have "
-                             "distinct type names");
+               PSIO_REQUIRE_VARIANT_LABELS(T);
                json_kind kind;
                if (!r.c.kind(kind))
                   return false;

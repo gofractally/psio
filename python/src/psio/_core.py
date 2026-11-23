@@ -138,18 +138,16 @@ def strip(ref: "Node") -> Tuple["Node", bool]:
 class Member:
     """One member of a record / tuple / variant."""
 
-    __slots__ = ("name", "text", "bound", "json_int", "ijson_int", "ijson_name", "_wire")
+    __slots__ = ("name", "text", "bound", "json_int", "ijson_int", "_wire")
 
     def __init__(self, name: str, text: "Node", bound: Optional[LengthBound] = None, json_int: str = "natural",
-                 ijson_int: str = "natural", ijson_name: str = "") -> None:
+                 ijson_int: str = "natural") -> None:
         self.name = name
         #: The member's type as written: wrappers included (the text walk).
         self.text = text
         self.bound = bound
         self.json_int = json_int
         self.ijson_int = ijson_int
-        #: Variant alternative's I-JSON name.
-        self.ijson_name = ijson_name
         self._wire: Optional[Tuple[Node, bool]] = None
 
     @property
@@ -398,8 +396,6 @@ def _check_attributes(values: Sequence[Mapping[str, Any]], site: str, caps: bool
         if site == "record_member" and name in ("lengthBound", "jsonInt", "ijsonInt"):
             if name != "lengthBound" and value not in ("number", "string"):
                 _schema("pssz IR: malformed integer form attribute")
-            continue
-        if site == "variant_member" and name == "ijsonName" and value is not None:
             continue
         # An untagged variant: the same bytes as any variant; in text the bare value of the alternative.
         if site == "variant" and name == "untagged":
@@ -835,13 +831,11 @@ class Codec:
                     _schema("pssz IR: duplicate schema member")
                 seen.add(m["name"])
                 _check_attributes(m["attributes"], "record_member" if record else "variant_member", self.automatic)
-                name = None if record else _find_attribute(m["attributes"], "ijsonName")
                 node.members.append(Member(
                     m["name"], self._build(m["type"], added, d),
                     _parse_length_bound(m["attributes"]) if record else None,
                     _int_form(m["attributes"], "jsonInt") if record else "natural",
                     _int_form(m["attributes"], "ijsonInt") if record else "natural",
-                    name["value"] if name is not None and name["value"] is not None else m["name"],
                 ))
             node.by_name = {m.name: i for i, m in enumerate(node.members)}
         elif kind == "Custom":

@@ -29,7 +29,8 @@
 //                                      record; explicit: the top-level type)
 //   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
 //           jsonInt / ijsonInt = "number" | "string"   (pssz_ir_json.hpp)
-//   Variant member  ijsonName = "..."                   (pssz_ir_json.hpp)
+//   Variant member  (none: its name is the alternative's label, the key of
+//                   its tagged text form — variant_label.hpp)
 //   Variant  untagged                  text: the bare value of the alternative
 //                                      (pssz_ir_json.hpp); no effect on bytes
 //
@@ -306,8 +307,6 @@ inline codec_status attributes(const std::vector<schema_types::Attribute> &value
             return fail("pssz IR: malformed integer form attribute");
          continue;
       }
-      if (site == attribute_site::variant_member && name == "ijsonName" && value.value)
-         continue;
       // An untagged variant (untagged.hpp): the same bytes as any variant;
       // in text the bare value of the alternative (pssz_ir_json.hpp).
       if (site == attribute_site::variant && name == "untagged")

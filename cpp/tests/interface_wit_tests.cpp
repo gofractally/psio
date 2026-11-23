@@ -51,9 +51,11 @@ interface token {
   add: func(arg0: u32, arg1: u32) -> u64;
   ping: func();
   batch: func(names: list<string>/* @psio:max=4 */, tip: u8) -> bool;
+  find: func(id: u64) -> option<receipt>;
+  label: func(id: u64) -> option<string>;
 }
 )";
-   // The named types: Receipt, then the six argument lists.
+   // The named types: Receipt, then the eight argument lists.
    constexpr const char* types_block = R"(
 record receipt {
   id: u64,
@@ -65,6 +67,8 @@ type token.note = /* TODO: inline record not supported */;
 type token.add = /* TODO: inline record not supported */;
 type token.ping = /* TODO: inline record not supported */;
 type token.batch = /* TODO: inline record not supported */;
+type token.find = /* TODO: inline record not supported */;
+type token.label = /* TODO: inline record not supported */;
 )";
 }  // namespace
 

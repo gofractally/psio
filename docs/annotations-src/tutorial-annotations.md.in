@@ -258,7 +258,9 @@ Nothing to write: the reflected type already has its text. There are two
 text formats ([json.md](json.md)). `psio::json` is plain JSON with every
 integer a number. `psio::ijson` (I-JSON) is the form for JavaScript
 clients: a 64-bit integer above 2^53 − 1 is a decimal string, bytes are
-hex, a variant is `{"name": value}`.
+hex, a variant is `{"label": value}` — the label is the alternative's type
+name unless one is stated
+([annotations.md §6.10](annotations.md#variant-alternative-labels)).
 
 **Write** an annotation only where a client needs one fixed form
 (`tut-6`):
@@ -371,9 +373,14 @@ list, byte for byte (`tut-9c`):
 
 @@RUN tut-9c-run@@
 
-A result is encoded as the type its `returns(...)` describes, with
-`psio::encode_method_result<T, I>(value, out)` /
-`psio::decode_method_result<T, I>(bytes, out)`
+A result is written, read and viewed as the type its `returns(...)`
+describes: `psio::method_result_to_pssz<T, I>(value)` on the callee's side,
+`psio::method_result_from_pssz<T, I>(bytes)` (validating) or
+`psio::validated_method_result_view<T, I>(bytes)` on the caller's. An empty
+optional result whose payload cannot be empty is zero bytes. A schema that
+lists functions without the `Interface` envelope takes the method's
+`FunctionType` — its argument list and its result with `returns(...)`
+applied — from `SchemaBuilder::insert_method<T, I>()`
 ([annotations.md §5.11](annotations.md#511-methodname-)).
 
 **Check.** The assertions above; and the schema of the interface carries

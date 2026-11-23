@@ -242,6 +242,60 @@
 //! carrying `maxDynamicData`. `Method::Tuple` is the tuple of the bounded
 //! parameter types (a tuple has no cap of its own).
 //!
+//! # The result of a method
+//!
+//! A result travels as the type `returns(...)` makes of it
+//! ([`Method::ResultAs`]); every helper of the argument record applies it:
+//!
+//! | | |
+//! |---|---|
+//! | `M::result_to_pssz(&value)` | the callee: the bytes, the bounds checked |
+//! | `M::result_from_pssz(bytes)` | the caller: validates, then decodes |
+//! | `M::result_from_pssz_trusted(bytes)` | decodes bytes already validated |
+//! | `M::validate_result(bytes)` | whether the bytes are a result |
+//! | `M::result_view(bytes)`, `M::result_view_trusted(bytes)` | a `PsszView` of `M::ResultAs`, in place |
+//!
+//! ```
+//! use psio::interface::Method;
+//! #[derive(Debug, PartialEq, psio::PsszPack, psio::PsszUnpack, psio::ToPsszSchema)]
+//! pub struct Entry { pub id: u64 }
+//! #[psio::interface]
+//! pub trait Directory {
+//!     #[psio(returns(max = 4, element(max = 16)))]
+//!     fn names(&self, limit: u32) -> Vec<String>;
+//!     fn find(&self, id: u64) -> Option<Entry>;
+//!     fn touch(&mut self, id: u64);
+//! }
+//! # fn main() {
+//! use directory::args;
+//! let two = vec!["alice".to_string(), "bob".to_string()];
+//! // A 1-byte offset table: the bounded list `returns` describes.
+//! let bytes = args::names::result_to_pssz(&two).unwrap();
+//! assert_eq!(bytes, [2, 7, b'a', b'l', b'i', b'c', b'e', b'b', b'o', b'b']);
+//! assert_eq!(args::names::result_from_pssz(&bytes).unwrap(), two);
+//! assert_eq!(args::names::result_view(&bytes).unwrap().len(), 2);
+//! assert!(args::names::result_to_pssz(&vec![String::new(); 5]).is_err());
+//! // An empty optional result whose payload cannot be empty is zero bytes
+//! // (docs/pssz-spec.md 5.5.1); one whose payload can be empty (a string, a
+//! // list) has a selector byte instead: `None` is `00`.
+//! assert_eq!(args::find::result_to_pssz(&None).unwrap(), b"");
+//! assert_eq!(args::find::result_from_pssz(b"").unwrap(), None);
+//! // A method that returns nothing has no result bytes.
+//! assert!(args::touch::validate_result(b"").is_ok());
+//! assert!(args::touch::validate_result(&[0]).is_err());
+//!
+//! // In a schema without the `Interface` envelope: the result node carries
+//! // `returns(...)`.
+//! let mut builder = psio::pssz::schema_ir::SchemaBuilder::new();
+//! let names = builder.insert_method::<args::names>().unwrap();
+//! assert!(matches!(
+//!     names.result.unwrap().value,
+//!     psio::pssz::schema_ir::AnyValue::BoundedList(ref list) if list.maxCount == 4
+//! ));
+//! assert!(builder.insert_method::<args::touch>().unwrap().result.is_none());
+//! # }
+//! ```
+//!
 //! # The schema of an interface
 //!
 //! `SchemaBuilder` builds, for a declaration, the schema C++
@@ -257,6 +311,11 @@
 //! | `builder.insert_named::<token::args::transfer>("token.transfer")` | the argument list, an anonymous `@N` Object, and the name as an alias of it | `builder.insert<reflect<token>::method_arg_tuple<I>>("token.transfer")` |
 //! | `builder.insert_argument_lists::<token::Tag>()` | that, for every method in order, as `<interface>.<method>` | the same in a loop |
 //! | `builder.insert::<T>()`, `builder.insert_named::<T>(name)` | an ordinary type; under another name too | `builder.insert<T>()`, `builder.insert<T>(name)` |
+//! | `builder.insert_method::<token::args::transfer>()` | the method as a `FunctionType`, for a schema that lists functions without the `Interface` envelope: its argument list and its result as `returns(...)` types it | `builder.insert_method<token, I>()` |
+//! | `builder.insert_method_args::<M>()`, `builder.insert_method_result::<M>()` | the two nodes of that, one at a time (`None`: the method returns nothing) | `builder.insert_method_args<token, I>()`, `builder.insert_method_result<token, I>()` |
+//!
+//! `builder.insert::<<M as Method>::Result>()` is not the result of a
+//! method: it is the plain return type, without `returns(...)`.
 //!
 //! The calls are made in the order C++ makes them: a schema that inserts
 //! its types and then its interfaces numbers its anonymous types
@@ -357,11 +416,54 @@ pub trait Method: PsszPack<Pssz> + PsszUnpack<Pssz> + Sized {
     const NAMED: bool;
     const HAS_RESULT: bool;
 
+    /// What a result is on the wire: `Self::Result` as `returns(...)` types
+    /// it (`-> Vec<String>` under `returns(max = 4, element(max = 16))` is a
+    /// `BoundedList<BoundedString<16>, 4>`), `Self::Result` itself without
+    /// `returns`, `()` for a method that returns nothing. The type a view of
+    /// a result is a view of.
+    type ResultAs;
+
     /// The pSSZ of a result; no bytes for a method that returns nothing.
+    /// Refuses a value outside `returns(...)`.
     fn result_to_pssz(result: &Self::Result) -> PsszResult<Vec<u8>>;
-    /// Reads a result (validated); a method that returns nothing accepts
-    /// only no bytes.
+    /// Reads a result (validated, `returns(...)` applied); a method that
+    /// returns nothing accepts only no bytes.
+    ///
+    /// An empty optional result whose payload cannot be empty (a number, a
+    /// record, ...) is zero bytes (docs/pssz-spec.md 5.5.1): no bytes read
+    /// as `None`. One whose payload can be empty (a string, a list) has a
+    /// selector byte: `None` is `00`.
     fn result_from_pssz(bytes: &[u8]) -> PsszResult<Self::Result>;
+    /// Reads a result from bytes the caller vouches for
+    /// ([`validate_result`](Self::validate_result) accepted them, or this
+    /// program wrote them): [`from_pssz_trusted`](crate::pssz::from_pssz_trusted)
+    /// of the result's wire type.
+    fn result_from_pssz_trusted(bytes: &[u8]) -> Self::Result;
+    /// Whether `bytes` are a result of this method: the validator of the
+    /// type `returns(...)` makes of it. Never panics.
+    fn validate_result(bytes: &[u8]) -> PsszResult<()>;
+    /// The Schema IR node of the result as `returns(...)` types it; `None`
+    /// for a method that returns nothing. Use
+    /// [`SchemaBuilder::insert_method_result`](schema_ir::SchemaBuilder::insert_method_result).
+    fn result_schema(builder: &mut schema_ir::SchemaBuilder) -> PsszResult<Option<schema_ir::AnyType>>;
+
+    /// Validates `bytes` as a result and views them in place (C++
+    /// `psio::validated_method_result_view`). The view reads the offsets of
+    /// the bounded type, which a view of `Self::Result` would not.
+    fn result_view(bytes: &[u8]) -> PsszResult<crate::pssz::PsszView<'_, Self::ResultAs>>
+    where
+        Self::ResultAs: PsszPack<Pssz> + crate::pssz::PsszValidate<Pssz>,
+    {
+        Self::validate_result(bytes)?;
+        Ok(crate::pssz::PsszView::trusted(bytes))
+    }
+    /// The view of a result the caller vouches for.
+    fn result_view_trusted(bytes: &[u8]) -> crate::pssz::PsszView<'_, Self::ResultAs>
+    where
+        Self::ResultAs: PsszPack<Pssz>,
+    {
+        crate::pssz::PsszView::trusted(bytes)
+    }
 }
 
 /// What a proxy hands each call to (C++: the `P` of `reflect<T>::proxy<P>`).
@@ -500,6 +602,50 @@ impl schema_ir::SchemaBuilder {
         I::insert_argument_lists(self)?;
         Ok(self)
     }
+
+    /// The argument list of the method `M` (its argument record
+    /// `<interface>::args::<method>`): the node of the parameters with their
+    /// bounds and the method's cap (C++
+    /// `SchemaBuilder::insert_method_args<T, I>()`).
+    pub fn insert_method_args<M: Method + schema_ir::ToPsszSchema>(&mut self) -> PsszResult<schema_ir::AnyType> {
+        self.insert::<M>()
+    }
+
+    /// The result of the method `M` as `returns(...)` types it — the type
+    /// whose bytes `Method::result_to_pssz` writes; `None` for a method that
+    /// returns nothing (C++ `SchemaBuilder::insert_method_result<T, I>()`).
+    /// A `returns(...)` bound that has no type form is an attribute of the
+    /// `Func` of an interface only: asking for the bare node is an error.
+    pub fn insert_method_result<M: Method>(&mut self) -> PsszResult<Option<schema_ir::AnyType>> {
+        M::result_schema(self)
+    }
+
+    /// The method `M` for a schema that lists functions its own way, without
+    /// the `Interface` envelope: its argument list and its result as
+    /// `returns(...)` types it (C++ `SchemaBuilder::insert_method<T, I>()`).
+    pub fn insert_method<M: Method + schema_ir::ToPsszSchema>(&mut self) -> PsszResult<schema_ir::FunctionType> {
+        let params = Box::new(self.insert_method_args::<M>()?);
+        let result = self.insert_method_result::<M>()?.map(Box::new);
+        Ok(schema_ir::FunctionType { params, result })
+    }
+}
+
+/// The bare node of a method's result: `node`, unless the result's described
+/// type `T` carries what only a `Func` can (`result.<attribute>`). Used by
+/// the generated `Method::result_schema`.
+#[doc(hidden)]
+pub fn bare_result<T: schema_ir::ToPsszSchema>(
+    method: &str,
+    node: schema_ir::AnyType,
+) -> PsszResult<Option<schema_ir::AnyType>> {
+    if let Some(attribute) = T::member_attributes().first() {
+        return Err(PsszError::from(format!(
+            "interface: returns(...) of {method} states {}, which has no type form: only the Func of an \
+             Interface carries it (insert_interface)",
+            attribute.name
+        )));
+    }
+    Ok(Some(node))
 }
 
 /// The name a type has in `builder`'s schema, inserting it if needed

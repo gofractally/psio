@@ -11,7 +11,9 @@
 #include <psio/key.hpp>
 #include <psio/pssz.hpp>
 #include <psio/pssz_ir.hpp>
+#include <psio/pssz_ir_compare.hpp>
 #include <psio/pssz_ir_json.hpp>
+#include <psio/pssz_view.hpp>
 #include <psio/schema_builder.hpp>
 #include <psio/structural.hpp>
 
@@ -33,6 +35,8 @@
    "   u64 add(u32 a, u32 b);",                                                                \
    "   void ping();",                                                                          \
    "   bool batch(vector<string> names, u8 tip);",                                             \
+   "   optional<Receipt> find(u64 id) const;",                                                 \
+   "   optional<string> label(u64 id) const;",                                                 \
    "   PSIO_REFLECT(token,",                                                                   \
    "      method(transfer, attr(to, utf8 | max<16>), amount, attr(memo, utf8 | max<80>),",    \
    "             maxDynamicData(256), maxFields(8)),",                                         \
@@ -40,7 +44,9 @@
    "      method(note, attr(text, max<62>), maxDynamicData(64)),",                             \
    "      method(add),",                                                                       \
    "      method(ping),",                                                                      \
-   "      method(batch, attr(names, max<4> | element(max<8>)), tip))",                         \
+   "      method(batch, attr(names, max<4> | element(max<8>)), tip),",                         \
+   "      method(find, id),",                                                                  \
+   "      method(label, id, returns(utf8 | max<8>)))",                                         \
    "};",                                                                                       \
    "PSIO_INTERFACE(token, types())"
 
@@ -66,6 +72,8 @@ namespace iface_conf
       u64                      add(u32 a, u32 b);
       void                     ping();
       bool                     batch(std::vector<std::string> names, u8 tip);
+      std::optional<Receipt>   find(u64 id) const;
+      std::optional<std::string> label(u64 id) const;
       PSIO_REFLECT(token,
                    method(transfer, attr(to, utf8 | max<16>), amount, attr(memo, utf8 | max<80>),
                           maxDynamicData(256), maxFields(8)),
@@ -73,7 +81,9 @@ namespace iface_conf
                    method(note, attr(text, max<62>), maxDynamicData(64)),
                    method(add),
                    method(ping),
-                   method(batch, attr(names, max<4> | element(max<8>)), tip))
+                   method(batch, attr(names, max<4> | element(max<8>)), tip),
+                   method(find, id),
+                   method(label, id, returns(utf8 | max<8>)))
    };
    PSIO_INTERFACE(token, types())
 
@@ -95,5 +105,29 @@ namespace iface_conf
          return std::move(builder).build();
       }();
       return schema;
+   }
+
+   // The same methods as a schema that lists functions its own way, without
+   // the Interface envelope: one FunctionType per method — the argument list
+   // and the result as returns(...) types it — from
+   // SchemaBuilder::insert_method<T, I>(), in declaration order on a fresh
+   // builder.
+   struct Functions
+   {
+      psio::Schema                                  schema;
+      std::vector<psio::schema_types::FunctionType> types;
+   };
+   inline const Functions& fixture_functions()
+   {
+      static const Functions functions = [] {
+         psio::SchemaBuilder builder;
+         Functions           out;
+         [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+            (out.types.push_back(builder.insert_method<token, Is>()), ...);
+         }(std::make_index_sequence<method_count>{});
+         out.schema = std::move(builder).build();
+         return out;
+      }();
+      return functions;
    }
 }  // namespace iface_conf

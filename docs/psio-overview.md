@@ -81,7 +81,7 @@ applicable) `view` operations dispatched by the tag.
 | `pjson` | `docs/pjson-spec.md` | Primary schemaless binary format; binary peer of JSON |
 | `pssz` | `docs/pssz-spec.md` | Primary schema-driven binary format |
 | `json` | RFC 8259 | Text serialization for human/JS interop |
-| `ijson` | RFC 7493 (`docs/json.md`) | I-JSON: 64-bit integers as strings, bytes as hex, named variants |
+| `ijson` | RFC 7493 (`docs/json.md`) | I-JSON: 64-bit integers as strings, bytes as hex, variants keyed by the alternative's label |
 | `capnp` | Cap'n Proto wire | Cross-language IDL-driven format |
 | `flatbuf` | FlatBuffers wire | IDL-driven, alignment-strict |
 | `ssz` | Eth2 SSZ | Beacon-chain and content-addressed payloads |
@@ -516,10 +516,17 @@ declarations are unchanged.
   `psio::pssz_evolves_from<OldArgs, NewArgs>` is true. Without a cap the width
   is the inferred bound's; an added argument that crosses 255 or 65 535 bytes
   changes it, and `pssz_evolves_from` is false at compile time.
-- A result is encoded as the type `returns(...)` makes of it:
-  `psio::encode_method_result<T, I>(value, out)`,
-  `validate_method_result<T, I>(bytes)`, `decode_method_result<T, I>(bytes, out)`;
-  `psio::check_method_result<T, I>(value)` only checks. A bare string has no
+- A result is written, read and viewed as the type `returns(...)` makes of
+  it: `psio::method_result_to_pssz<T, I>(value)`,
+  `method_result_from_pssz<T, I>(bytes)` (or `psio::trusted{bytes}`),
+  `validate_method_result<T, I>(bytes)`,
+  `validated_method_result_view<T, I>(bytes)`; `encode_method_result` /
+  `decode_method_result` are the same returning a status, and
+  `psio::check_method_result<T, I>(value)` only checks
+  (`docs/helpers.md`, "The result of a method"). An empty optional result
+  whose payload cannot be empty is zero bytes. In a schema without the
+  `Interface` envelope the method is
+  `SchemaBuilder::insert_method<T, I>()`. A bare string has no
   width of its own, so its bytes do not depend on the bound; a bounded list
   of variable-size elements has the narrow offset table of the bounded type.
 - `psio::inferred_bound<Args>()` is the bound inferred from the

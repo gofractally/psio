@@ -258,13 +258,28 @@ shared rows are `conformance/interface-vectors.json`.
 
 ### Variant alternative names
 
-C++ uses `get_type_name` of the alternative: a record's reflected name, and
-`bool int8 uint8 int16 uint16 int32 uint32 int64 uint64 float32 double
-string` for primitives, `T[]` for a vector, `T[N]` for an array, `T?` for an
-optional, `tuple_A_B` (also for a `std::pair<A, B>`), `map_K_V` for a map and
-`set_K` for a set (whatever container holds them). Alternatives must have distinct names (checked at
-compile time). In Rust the name is the enum variant's identifier unless
-`#[psio(name = "uint32")]` renames it; use that to pair with a C++ variant.
+An alternative has one **label**: the key of its I-JSON form, and its name
+in the Schema IR. The rule is the same in every language
+([annotations.md](annotations.md#variant-alternative-labels)):
+
+1. the name the declaration gives the alternative — a Rust enum variant's
+   identifier, the key of a TypeScript `variant({...})`;
+2. else the name of the alternative's type (C++ `std::variant`, Python
+   `Union`): a record's reflected name, and `bool int8 uint8 int16 uint16
+   int32 uint32 int64 uint64 int128 uint128 float32 double string` for
+   primitives, `T[]` for a list, `T[N]` for an array, `T?` for an optional,
+   `tuple_A_B` (also for a `std::pair<A, B>`), `map_K_V` for a map and
+   `set_K` for a set (whatever container holds them), `variant_A_B`;
+3. else its position (`"0"`, `"1"`, …): a type with no name, and a type
+   name that two alternatives of the variant share
+   (`std::variant<std::uint32_t, std::string, std::string>`: `uint32`, `1`,
+   `2`).
+
+To state a label: C++ `psio::variant_labels<V>` (one per alternative), Rust
+`#[psio(name = "uint32")]` on the enum variant, Python
+`Annotated[T, psio.alt("uint32")]`; in TypeScript the key is the label. Use
+it to pair a type with its twin in another language: the implementing
+language's labels are the ones to match. Stated labels are distinct.
 
 ### Integer form per member
 
@@ -1065,8 +1080,8 @@ The IR carries what that needs (the C++ `SchemaBuilder` and the Rust
   bounded form of the member's type, any other bound the member attribute
   `lengthBound = "exact=N"` / `"min=A,max=B"`;
 - text forms: member attributes `jsonInt` / `ijsonInt` (`"number"` /
-  `"string"`), and the variant-member attribute `ijsonName` (the alternative's
-  I-JSON name; without it the member name is used).
+  `"string"`); a variant member's name is the alternative's label, the key
+  of its I-JSON form.
 
 **JavaScript / TypeScript.** The `psio` package (`js/`) implements only this
 schema-driven path: `PsszSchema.decode(schemaBytes).type("Transfer")` gives

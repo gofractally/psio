@@ -1049,7 +1049,7 @@ class Reader:
                 return c.fail("ijson: variant object must have one key")
             index = -1
             for i, m in enumerate(members):
-                if m.ijson_name == key:
+                if m.name == key:
                     index = i
                     break
             if index < 0:
@@ -1519,7 +1519,7 @@ class Writer:
                 # Untagged: the bare value of the alternative.
                 self.write(m.text, payload, "natural", n + 1)
             elif self.ijson:
-                out.append("{" + quote(m.ijson_name, False) + ":")
+                out.append("{" + quote(m.name, False) + ":")
                 self.write(m.text, payload, "natural", n + 1)
                 out.append("}")
             else:

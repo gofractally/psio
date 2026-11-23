@@ -40,6 +40,9 @@ pub trait Token {
     fn add(&mut self, a: u32, b: u32) -> u64;
     fn ping(&mut self);
     fn batch(&mut self, #[psio(max = 4, element(max = 8))] names: Vec<RawString>, tip: u8) -> bool;
+    fn find(&self, id: u64) -> Option<Receipt>;
+    #[psio(returns(max = 8))]
+    fn label(&self, id: u64) -> Option<String>;
 }
 
 #[derive(serde::Deserialize)]
@@ -54,6 +57,7 @@ struct MethodRow {
     width: usize,
     inferred_bound: Option<u64>,
     max_encoded_size: Option<u64>,
+    function: String,
 }
 #[derive(serde::Deserialize)]
 struct Row {
@@ -73,6 +77,8 @@ struct Fixture {
     interface: String,
     schema_ir: String,
     schema_json: String,
+    function_schema_ir: String,
+    function_schema_json: String,
     methods: Vec<MethodRow>,
     vectors: Vec<Row>,
 }
@@ -124,6 +130,8 @@ fn the_declaration_builds_the_fixture_schema() {
     builder.insert_named::<token::args::ping>("token.ping").unwrap();
     builder.insert_named::<token::args::batch>("token.batch").unwrap();
     builder.insert_named::<token::args::batch>("token.batch").unwrap();
+    builder.insert_named::<token::args::find>("token.find").unwrap();
+    builder.insert_named::<token::args::label>("token.label").unwrap();
     builder.insert_argument_lists::<token::Tag>().unwrap();
     // A name another entry has is refused.
     assert!(builder.insert_named::<u8>("token.batch").is_err());
@@ -134,14 +142,72 @@ fn the_declaration_builds_the_fixture_schema() {
     // of its `@N` node, an Object with `tuple`, then `maxFields` and
     // `maxDynamicData` when declared.
     let alias = ours.types.iter().position(|entry| entry.name == "token.transfer").unwrap();
-    assert_eq!(ours.types[alias - 1].name, "@8");
-    assert_eq!(*ours.types[alias].r#type, AnyType::named("@8"));
+    assert_eq!(ours.types[alias - 1].name, "@9");
+    assert_eq!(*ours.types[alias].r#type, AnyType::named("@9"));
     match &ours.types[alias - 1].r#type.value {
         V::Object(o) => assert_eq!(
             o.attributes.iter().map(|a| (a.name.as_str(), a.value.as_deref())).collect::<Vec<_>>(),
             [("tuple", Some("named")), ("maxFields", Some("8")), ("maxDynamicData", Some("256"))]
         ),
         other => panic!("{other:?}"),
+    }
+}
+
+/// The methods without the `Interface` envelope: one `FunctionType` each,
+/// from `SchemaBuilder::insert_method` — the argument list and the result as
+/// `returns(...)` types it. The fixture is what C++
+/// `SchemaBuilder::insert_method<token, I>()` builds, on a fresh builder in
+/// declaration order.
+#[test]
+fn insert_method_builds_the_fixture_function_types() {
+    use psio::pssz::schema_ir::FunctionType;
+    let fx = fixture();
+    let mut builder = SchemaBuilder::new();
+    let ours: Vec<FunctionType> = vec![
+        builder.insert_method::<token::args::transfer>().unwrap(),
+        builder.insert_method::<token::args::names>().unwrap(),
+        builder.insert_method::<token::args::note>().unwrap(),
+        builder.insert_method::<token::args::add>().unwrap(),
+        builder.insert_method::<token::args::ping>().unwrap(),
+        builder.insert_method::<token::args::batch>().unwrap(),
+        builder.insert_method::<token::args::find>().unwrap(),
+        builder.insert_method::<token::args::label>().unwrap(),
+    ];
+    let schema = builder.finish();
+    dynamic::validate_schema(&schema).unwrap();
+    for (function, row) in ours.iter().zip(&fx.methods) {
+        assert_eq!(json::try_encode::<Json, _>(function).unwrap(), row.function, "{}", row.name);
+        assert_eq!(function.result.is_some(), row.result, "{}", row.name);
+    }
+    assert_eq!(json::try_encode::<Json, _>(&schema).unwrap(), fx.function_schema_json);
+    assert_eq!(hex(&psio::to_pssz(&schema)), fx.function_schema_ir);
+
+    // The result node carries returns(...): the bounded list of bounded
+    // UTF-8 strings, not the plain list of strings.
+    let names = ours[1].result.as_deref().unwrap();
+    assert!(matches!(&names.value, V::BoundedList(list) if list.maxCount == 4), "{names:?}");
+    // The parts are the same nodes, and a method that returns nothing has no result.
+    let mut again = SchemaBuilder::new();
+    assert_eq!(again.insert_method_args::<token::args::transfer>().unwrap(), *ours[0].params);
+    let mut parts = SchemaBuilder::new();
+    parts.insert_method_args::<token::args::names>().unwrap();
+    assert!(matches!(
+        parts.insert_method_result::<token::args::names>().unwrap().unwrap().value,
+        V::BoundedList(_)
+    ));
+    assert_eq!(parts.insert_method_result::<token::args::ping>().unwrap(), None);
+
+    // Every result row validates against the FunctionType's result node.
+    let by_name: BTreeMap<&str, &FunctionType> =
+        fx.methods.iter().map(|m| m.name.as_str()).zip(&ours).collect();
+    for row in &fx.vectors {
+        let Some(result) = by_name[row.method.as_str()].result.as_deref() else { continue };
+        let bytes = unhex(row.pssz.as_deref().unwrap_or(""));
+        match row.kind.as_str() {
+            "result" => assert_eq!(dynamic::validate(&schema, result, &bytes), Ok(false), "{}", row.name),
+            "result-pssz-reject" => assert!(dynamic::validate(&schema, result, &bytes).is_err(), "{}", row.name),
+            _ => {}
+        }
     }
 }
 
@@ -174,6 +240,8 @@ fn the_methods_are_what_the_fixture_says() {
     method_row::<token::args::add>(rows["add"]);
     method_row::<token::args::ping>(rows["ping"]);
     method_row::<token::args::batch>(rows["batch"]);
+    method_row::<token::args::find>(rows["find"]);
+    method_row::<token::args::label>(rows["label"]);
     // The parameter-count cap is the Func's and the argument list's
     // `maxFields` (compared in the schema test); the fixture restates it.
     assert_eq!(rows["transfer"].max_fields, Some(8));
@@ -260,6 +328,11 @@ where
             if M::result_to_pssz(&value).map_err(|e| e.to_string())? != bytes {
                 return Err(format!("result bytes are {}", hex(&M::result_to_pssz(&value).unwrap())));
             }
+            // The validator and the trusted reader are the same result.
+            M::validate_result(&bytes).map_err(|e| format!("validate_result: {e}"))?;
+            if M::result_from_pssz_trusted(&bytes) != value {
+                return Err("the trusted reader reads another value".into());
+            }
             let written = json::try_encode::<Json, _>(&value).map_err(|e| e.to_string())?;
             if written != json_text {
                 return Err(format!("json is {written}"));
@@ -279,6 +352,20 @@ where
             if let Ok(value) = M::result_from_pssz(&bytes) {
                 return Err(format!("accepted {value:?}"));
             }
+            if M::validate_result(&bytes).is_ok() {
+                return Err("validated".into());
+            }
+        }
+        // A method that returns nothing: its result is no bytes.
+        "result-void" => {
+            if M::HAS_RESULT || bytes.as_deref() != Some(&[][..]) {
+                return Err("not a method without a result".into());
+            }
+            M::validate_result(&[]).map_err(|e| e.to_string())?;
+            M::result_from_pssz(&[]).map_err(|e| e.to_string())?;
+            if !M::result_to_pssz(&M::result_from_pssz_trusted(&[])).map_err(|e| e.to_string())?.is_empty() {
+                return Err("a result was written".into());
+            }
         }
         other => return Err(format!("unknown kind {other}")),
     }
@@ -289,6 +376,10 @@ where
 /// root is `token.<method>` for arguments and `Func.result` for a result.
 fn schema_driven(schema: &Schema, row: &Row) -> Result<(), String> {
     let func = schema.interfaces[0].funcs.iter().find(|f| f.name == row.method).ok_or("no such method")?;
+    if func.result.is_none() && row.kind.starts_with("result") {
+        // Nothing to drive: the schema gives the method no result.
+        return Ok(());
+    }
     let root = if row.kind.starts_with("result") {
         func.result.as_deref().cloned().ok_or("the method has no result")?
     } else {
@@ -367,6 +458,8 @@ fn every_row_holds_typed_and_schema_driven() {
             "add" => typed::<token::args::add>(row),
             "ping" => typed::<token::args::ping>(row),
             "batch" => typed::<token::args::batch>(row),
+            "find" => typed::<token::args::find>(row),
+            "label" => typed::<token::args::label>(row),
             other => Err(format!("unknown method {other}")),
         };
         if let Err(why) = result {
@@ -379,17 +472,46 @@ fn every_row_holds_typed_and_schema_driven() {
     assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     // Nothing skipped: every row of every kind, on both paths.
     let want: BTreeMap<&str, usize> = [
-        ("args", 13),
+        ("args", 15),
         ("args-accept", 11),
         ("args-reject", 17),
         ("args-pssz-reject", 4),
-        ("result", 7),
-        ("result-pssz-reject", 3),
+        ("result", 14),
+        ("result-pssz-reject", 7),
+        ("result-void", 1),
     ]
     .into();
     assert_eq!(kinds, want);
-    assert_eq!(fx.vectors.len(), 55);
-    assert_eq!(fx.methods.len(), 6);
+    assert_eq!(fx.vectors.len(), 69);
+    assert_eq!(fx.methods.len(), 8);
+}
+
+/// A result is viewed in place as the type `returns(...)` makes of it: the
+/// view reads the 1-byte offset table of the bounded list, and an empty
+/// optional result is the empty optional view.
+#[test]
+fn a_result_is_viewed_as_returns_types_it() {
+    use psio::pssz::{BoundedList, BoundedString};
+    // result/names/two.
+    let bytes = unhex("0207616c696365626f62");
+    let view = token::args::names::result_view(&bytes).unwrap();
+    let _: psio::pssz::PsszView<'_, BoundedList<BoundedString<16>, 4>> = view;
+    assert_eq!(view.len(), 2);
+    assert_eq!(view.get(1).view().unwrap(), "bob");
+    assert_eq!(token::args::names::result_view_trusted(&bytes).len(), 2);
+    // result-pssz-reject/names/five_names.
+    assert!(token::args::names::result_view(&unhex("05060708096161616161")).is_err());
+    // result/find/none: an optional whose payload cannot be empty is no
+    // bytes when it is empty.
+    assert!(!token::args::find::result_view(&[]).unwrap().has_value());
+    assert_eq!(token::args::find::result_from_pssz(&[]).unwrap(), None);
+    assert_eq!(token::args::find::result_to_pssz(&None).unwrap(), b"");
+    assert!(token::args::find::result_view(&unhex("090700000000000000096f6b")).unwrap().has_value());
+    // result/label/none: one whose payload can be empty has a selector byte.
+    assert_eq!(token::args::label::result_to_pssz(&None).unwrap(), [0]);
+    assert_eq!(token::args::label::result_to_pssz(&Some(String::new())).unwrap(), [1]);
+    assert!(token::args::label::result_from_pssz(&[]).is_err());
+    assert!(!token::args::label::result_view(&[0]).unwrap().has_value());
 }
 
 /// Dispatch reads the arguments the fixture pins and answers with the
@@ -412,6 +534,12 @@ fn dispatch_speaks_the_fixture_bytes() {
         fn batch(&mut self, names: Vec<RawString>, _tip: u8) -> bool {
             !names.is_empty()
         }
+        fn find(&self, id: u64) -> Option<Receipt> {
+            (id == 7).then(|| Receipt { id, note: "ok".into() })
+        }
+        fn label(&self, id: u64) -> Option<String> {
+            (id == 7).then(|| "gold".to_string())
+        }
     }
     let mut ledger = Ledger;
     // result/names/two: a 1-byte offset table, from `returns(...)`.
@@ -426,6 +554,11 @@ fn dispatch_speaks_the_fixture_bytes() {
     assert_eq!(hex(&token::dispatch_name(&mut ledger, "add", &unhex("080100000002000000")).unwrap()), "0300000000000000");
     assert_eq!(token::dispatch_name(&mut ledger, "ping", &unhex("00")).unwrap(), b"");
     assert_eq!(token::dispatch_name(&mut ledger, "batch", &unhex("0202070203616263")).unwrap(), [1]);
+    // result/find/none and /some, result/label/none and /some.
+    assert_eq!(token::dispatch_name(&mut ledger, "find", &unhex("080000000000000000")).unwrap(), b"");
+    assert_eq!(hex(&token::dispatch_name(&mut ledger, "find", &unhex("080700000000000000")).unwrap()), "090700000000000000096f6b");
+    assert_eq!(token::dispatch_name(&mut ledger, "label", &unhex("080000000000000000")).unwrap(), [0]);
+    assert_eq!(hex(&token::dispatch_name(&mut ledger, "label", &unhex("080700000000000000")).unwrap()), "01676f6c64");
     // args-pssz-reject/transfer/to_over_bound.
     assert!(matches!(
         token::dispatch_name(&mut ledger, "transfer", &unhex("0a000a0001000000000000006161616161616161616161616161616161")),

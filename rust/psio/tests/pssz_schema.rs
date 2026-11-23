@@ -533,9 +533,9 @@ fn derives_record_caps_integer_forms_and_variant_names() {
     assert_eq!(
         members,
         [
-            ("Number", vec![attribute("ijsonName", "uint32")]),
+            ("uint32", vec![]),
             ("Plain", vec![]),
-            ("Bytes", vec![attribute("ijsonName", "uint8[]")]),
+            ("uint8[]", vec![]),
         ]
     );
 

@@ -37,7 +37,7 @@ using test_sb::Bag;
 using test_sb::Point;
 
 using LabeledSchemaVariant=std::variant<std::uint16_t,bool>;
-template<> struct psio::schema_variant_labels<LabeledSchemaVariant>
+template<> struct psio::variant_labels<LabeledSchemaVariant>
 {
    static constexpr std::array<std::string_view,2> names{"Code","Ready"};
 };
@@ -64,7 +64,8 @@ TEST_CASE("SchemaBuilder emits actual tuple and ordered variant IR", "[schema_bu
    REQUIRE(std::get<ir::Tuple>(zero.resolve(schema)->value).members.empty());
    REQUIRE(std::get<ir::Tuple>(pair.resolve(schema)->value).members.size()==2);
    const auto& variants=std::get<ir::Variant>(choice.resolve(schema)->value);
-   REQUIRE(variants.members[0].name=="0");REQUIRE(variants.members[1].name=="1");
+   REQUIRE(variants.members[0].name=="uint32");REQUIRE(variants.members[1].name=="string");
+   REQUIRE(variants.members[0].attributes.empty());REQUIRE(variants.members[1].attributes.empty());
    const auto& labeled=std::get<ir::Variant>(named.resolve(schema)->value);
    REQUIRE(labeled.members[0].name=="Code");REQUIRE(labeled.members[1].name=="Ready");
    std::vector<char> bytes;codec::Value decoded;
@@ -76,6 +77,90 @@ TEST_CASE("SchemaBuilder emits actual tuple and ordered variant IR", "[schema_bu
    REQUIRE(codec::encode<4>(schema,choice,value,bytes).ok());
    REQUIRE(bytes==psio::encode(psio::pssz32{},std::variant<std::uint32_t,std::string>{std::in_place_index<1>,"hello"}));
    REQUIRE(codec::decode_exact<4>(schema,choice,bytes,decoded).ok());REQUIRE(decoded==value);
+}
+
+// An alternative has one label (psio/variant_label.hpp): its name in the
+// schema and the key of its tagged text form.
+namespace label_test
+{
+   struct Circle
+   {
+      std::uint32_t radius = 0;
+      friend bool   operator==(const Circle&, const Circle&) = default;
+   };
+   PSIO_REFLECT(Circle, radius)
+   struct Opaque  // a type with no name: not reflected, no get_type_name
+   {
+   };
+   using Repeated = std::variant<std::uint32_t, std::string, std::string, Circle>;
+   using Nameless = std::variant<Circle, Opaque>;
+   using Generic  = std::variant<std::vector<std::uint32_t>, std::optional<Circle>,
+                                 std::tuple<std::uint8_t, std::string>, std::array<std::uint16_t, 2>>;
+}  // namespace label_test
+
+TEST_CASE("variant labels: one label per alternative, in the schema and in text",
+          "[schema_builder][variant][label]")
+{
+   using namespace label_test;
+   namespace ir = psio::schema_types;
+   // Rule 2: the type's name.
+   static_assert(psio::variant_label<Generic, 0>() == "uint32[]");
+   static_assert(psio::variant_label<Generic, 1>() == "Circle?");
+   static_assert(psio::variant_label<Generic, 2>() == "tuple_uint8_string");
+   static_assert(psio::variant_label<Generic, 3>() == "uint16[2]");
+   // Rule 3: a type name two alternatives share, and a type with no name,
+   // are no label: the position is.
+   static_assert(psio::variant_label<Repeated, 0>() == "uint32");
+   static_assert(psio::variant_label<Repeated, 1>() == "1");
+   static_assert(psio::variant_label<Repeated, 2>() == "2");
+   static_assert(psio::variant_label<Repeated, 3>() == "Circle");
+   static_assert(psio::variant_label<Nameless, 0>() == "Circle");
+   static_assert(psio::variant_label<Nameless, 1>() == "1");
+   // Stated labels.
+   static_assert(psio::variant_label<LabeledSchemaVariant, 0>() == "Code");
+   static_assert(psio::variant_labels_ok<LabeledSchemaVariant>());
+   static_assert(psio::variant_labels_ok<Repeated>());
+
+   psio::SchemaBuilder builder;
+   const auto repeated = builder.insert<Repeated>();
+   const auto labeled  = builder.insert<LabeledSchemaVariant>();
+   const auto schema   = std::move(builder).build();
+   const auto& members = std::get<ir::Variant>(repeated.resolve(schema)->value).members;
+   REQUIRE(members.size() == 4);
+   REQUIRE(members[0].name == "uint32");
+   REQUIRE(members[1].name == "1");
+   REQUIRE(members[2].name == "2");
+   REQUIRE(members[3].name == "Circle");
+   for (const auto& member : members)
+      REQUIRE(member.attributes.empty());
+
+   // The typed text and the schema-driven text are keyed by the same label.
+   const Repeated second{std::in_place_index<2>, "b"};
+   REQUIRE(psio::encode(psio::ijson{}, second) == R"({"2":"b"})");
+   REQUIRE(psio::decode<Repeated>(psio::ijson{}, std::string_view{R"({"2":"b"})"}) == second);
+   REQUIRE(psio::decode<Repeated>(psio::ijson{}, std::string_view{R"({"Circle":{"radius":3}})"}) ==
+           Repeated{Circle{3}});
+   std::string text;
+   bool        unknown = false;
+   REQUIRE(psio::pssz_ir::pssz_to_json(schema, repeated, psio::ijson{},
+                                       psio::encode(psio::pssz{}, second), text, &unknown)
+              .ok());
+   REQUIRE(text == R"({"2":"b"})");
+
+   // A stated label is the text key as well as the schema name.
+   const LabeledSchemaVariant ready{true};
+   REQUIRE(psio::encode(psio::ijson{}, ready) == R"({"Ready":true})");
+   REQUIRE(psio::decode<LabeledSchemaVariant>(psio::ijson{}, std::string_view{R"({"Code":7})"}) ==
+           LabeledSchemaVariant{std::uint16_t{7}});
+   text.clear();
+   REQUIRE(psio::pssz_ir::pssz_to_json(schema, labeled, psio::ijson{},
+                                       psio::encode(psio::pssz{}, ready), text, &unknown)
+              .ok());
+   REQUIRE(text == R"({"Ready":true})");
+   // The default label of the type is not read once labels are stated.
+   LabeledSchemaVariant out;
+   REQUIRE_FALSE(
+      psio::decode_json_checked(psio::ijson{}, std::string_view{R"({"bool":true})"}, out).ok());
 }
 
 TEST_CASE("SchemaBuilder emits count bounds and packed bit metadata", "[schema_builder][bounds]")

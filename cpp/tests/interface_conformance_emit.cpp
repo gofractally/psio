@@ -52,9 +52,10 @@ namespace
       std::uint32_t                width = 0;
       std::optional<std::uint64_t> inferred_bound;     // what a width is chosen from
       std::optional<std::uint64_t> max_encoded_size;   // the largest encoding
+      std::string                  function;           // json of its FunctionType
    };
    PSIO_REFLECT(MethodRow, name, params, named, args, result, max_dynamic_data, max_fields, width,
-                inferred_bound, max_encoded_size)
+                inferred_bound, max_encoded_size, function)
    struct Row
    {
       std::string                name;
@@ -117,6 +118,16 @@ namespace
       if (f.name != m.name || f.params.size() != std::tuple_size_v<typename Args<I>::tuple_type> ||
           f.result.has_value() != m.result)
          die(m.name + ": the Func does not describe the method");
+      // The method without the Interface envelope: the same result node.
+      const auto& fn = fixture_functions().types.at(I);
+      if (fn.result.has_value() != m.result ||
+          (m.result && !ir::equivalent(schema(), **f.result, fixture_functions().schema,
+                                       **fn.result)
+                           .ok))
+         die(m.name + ": insert_method and insert_interface disagree on the result");
+      if (!ir::equivalent(schema(), args_root(I), fixture_functions().schema, *fn.params).ok)
+         die(m.name + ": insert_method and insert_interface disagree on the arguments");
+      m.function = psio::encode(psio::json{}, fn);
       methods.push_back(std::move(m));
    }
 
@@ -239,6 +250,23 @@ namespace
       if (!psio::validate_method_result<token, I>(bytes).ok() ||
           !psio::decode_method_result<token, I>(bytes, back).ok() || !(back == value))
          die(r.name + ": the result does not read back");
+      // The one-call helpers agree, validated and trusted, and so does the view.
+      if (psio::method_result_to_pssz<token, I>(value) != bytes ||
+          !(psio::method_result_from_pssz<token, I>(std::span<const char>{bytes}) == value) ||
+          !(psio::method_result_from_pssz<token, I>(psio::trusted{bytes}) == value))
+         die(r.name + ": the result helpers disagree");
+      {
+         auto view = psio::validated_method_result_view<token, I>(bytes);
+         if (!view.ok() || !(view->unpack() == value))
+            die(r.name + ": the result view disagrees");
+      }
+      // The FunctionType of the method (insert_method) reads the same frame.
+      {
+         bool        unknown = false;
+         const auto& fn      = fixture_functions();
+         if (!ir::validate_auto(fn.schema, **fn.types.at(I).result, bytes, &unknown).ok())
+            die(r.name + ": the FunctionType's result does not accept the frame");
+      }
       const std::string json  = psio::encode(psio::json{}, value);
       const std::string ijson = psio::encode(psio::ijson{}, value);
       const auto&       root  = **func(I).result;
@@ -274,8 +302,47 @@ namespace
       bool unknown = false;
       if (ir::validate_auto(schema(), **func(I).result, bytes, &unknown).ok())
          die(r.name + ": the schema-driven validator accepts the result");
+      if (psio::validated_method_result_view<token, I>(bytes).ok())
+         die(r.name + ": the result view accepts the frame");
+      {
+         bool        fn_unknown = false;
+         const auto& fn         = fixture_functions();
+         if (ir::validate_auto(fn.schema, **fn.types.at(I).result, bytes, &fn_unknown).ok())
+            die(r.name + ": the FunctionType's result accepts the frame");
+      }
       r.pssz   = to_hex(bytes);
       r.reason = reason;
+   }
+   // A frame that is not the method's result, given as bytes.
+   template <std::size_t I>
+   void result_frame_reject(const std::string& name, const Bytes& bytes, const std::string& reason)
+   {
+      Row&       r      = add("result-pssz-reject", std::string{R::method_names[I]}, name);
+      const auto status = psio::validate_method_result<token, I>(bytes);
+      if (status.ok() || std::string{status.error().what} != reason)
+         die(r.name + ": expected the typed validator to say '" + reason + "', it says '" +
+             (status.ok() ? std::string{"ok"} : std::string{status.error().what}) + "'");
+      if constexpr (!std::is_void_v<psio::method_result_t<token, I>>)
+      {
+         bool unknown = false;
+         if (ir::validate_auto(schema(), **func(I).result, bytes, &unknown).ok())
+            die(r.name + ": the schema-driven validator accepts the result");
+      }
+      r.pssz   = to_hex(bytes);
+      r.reason = reason;
+   }
+   // A method that returns nothing: its result is no bytes.
+   template <std::size_t I>
+   void result_void(const std::string& name)
+   {
+      static_assert(std::is_void_v<psio::method_result_t<token, I>>);
+      Row& r = add("result-void", std::string{R::method_names[I]}, name);
+      if (!psio::validate_method_result<token, I>({}).ok())
+         die(r.name + ": no bytes are not accepted");
+      psio::method_result_from_pssz<token, I>(std::span<const char>{});
+      if (func(I).result || fixture_functions().types.at(I).result)
+         die(r.name + ": the schema gives the method a result");
+      r.pssz = "";
    }
 
    void emit()
@@ -385,6 +452,30 @@ namespace
 
       // transfer's result: a record with a bounded member.
       result_value<0>("receipt", Receipt{7, "ok"});
+
+      // ping() returns nothing: no result bytes, and only those.
+      result_void<4>("nothing");
+      result_frame_reject<4>("a_byte", Bytes{0}, "pssz: a method with no result returned bytes");
+
+      // find(id): an optional whose payload cannot be empty (a record). None
+      // is zero bytes; a present value is its own encoding.
+      args_value<6>("id", Args<6>{std::tuple{u64{7}}});
+      result_value<6>("none", std::optional<Receipt>{});
+      result_value<6>("some", std::optional<Receipt>{Receipt{7, "ok"}});
+      result_value<6>("some_empty_note", std::optional<Receipt>{Receipt{}});
+
+      // label(id): an optional whose payload can be empty (a string), bounded
+      // by returns(utf8 | max<8>). It has a selector byte: None is 00, and
+      // no bytes are not a result.
+      args_value<7>("id", Args<7>{std::tuple{u64{7}}});
+      result_value<7>("none", std::optional<Text>{});
+      result_value<7>("some", std::optional<Text>{"gold"});
+      result_value<7>("some_empty", std::optional<Text>{""});
+      result_value<7>("at_the_bound", std::optional<Text>{Text(8, 'x')});
+      result_reject<7>("over_bound", std::optional<Text>{Text(9, 'x')},
+                       "pssz: member length_bound violated");
+      result_reject<7>("not_utf8", std::optional<Text>{"\xff"}, "utf8_spec: invalid leading byte");
+      result_frame_reject<7>("no_bytes", Bytes{}, "pssz: optional<var> missing selector");
    }
 
    std::string render()
@@ -397,6 +488,12 @@ namespace
                 (i + 1 < std::size(declaration) ? ",\n" : "\n");
       out += "],\n\"schema_ir\":\"" + to_hex(ir_bytes) + "\",\n";
       out += "\"schema_json\":" + psio::encode(psio::json{}, psio::encode(psio::json{}, schema())) +
+             ",\n";
+      out += "\"function_schema_ir\":\"" +
+             to_hex(psio::encode(psio::pssz{}, fixture_functions().schema)) + "\",\n";
+      out += "\"function_schema_json\":" +
+             psio::encode(psio::json{},
+                          psio::encode(psio::json{}, fixture_functions().schema)) +
              ",\n";
       out += "\"methods\":[\n";
       for (std::size_t i = 0; i < methods.size(); ++i)

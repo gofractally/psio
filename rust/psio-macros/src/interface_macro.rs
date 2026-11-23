@@ -545,6 +545,56 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 },
             ),
         };
+        // The result as `returns(...)` types it: its type, its validator,
+        // the trusted reader and its Schema IR node.
+        let (result_as, result_validate, result_trusted) = match (&m.result, &result_bound) {
+            (Some(_), Some(crate::attrs::Annotated { own, spec })) => (
+                quote!(<#own as #k::pssz::bounds::Bounds<#spec>>::As),
+                quote!(#k::pssz::validate_pssz::<<#own as #k::pssz::bounds::Bounds<#spec>>::As>(bytes)),
+                quote! {
+                    <#own as #k::pssz::bounds::Bounds<#spec>>::from_as(
+                        #k::pssz::from_pssz_trusted::<<#own as #k::pssz::bounds::Bounds<#spec>>::As>(bytes),
+                    )
+                },
+            ),
+            (Some(ty), None) => (
+                quote!(#ty),
+                quote!(#k::pssz::validate_pssz::<Self::Result>(bytes)),
+                quote!(#k::pssz::from_pssz_trusted::<Self::Result>(bytes)),
+            ),
+            (None, _) => (
+                quote!(()),
+                quote! {
+                    if bytes.is_empty() {
+                        ::core::result::Result::Ok(())
+                    } else {
+                        ::core::result::Result::Err(#k::pssz::PsszError::new(
+                            "interface: a method with no result returned bytes",
+                        ))
+                    }
+                },
+                quote!(()),
+            ),
+        };
+        let result_node = match (&m.result, &result_bound) {
+            (Some(ty), Some(crate::attrs::Annotated { own, spec })) => {
+                let wire = wire_type(returns, ty, &k)?;
+                quote! {
+                    let _ = <<#own as #k::pssz::bounds::SchemaAs<#spec>>::Plain
+                        as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?;
+                    let __node = <#own as #k::pssz::bounds::SchemaAs<#spec>>::annotated(builder)?;
+                    #k::interface::bare_result::<#wire>(Self::NAME, __node)
+                }
+            }
+            (Some(ty), None) => {
+                let wire = wire_type(returns, ty, &k)?;
+                quote! {
+                    let __node = <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?;
+                    #k::interface::bare_result::<#wire>(Self::NAME, __node)
+                }
+            }
+            (None, _) => quote!(::core::result::Result::Ok(::core::option::Option::None)),
+        };
         let doc = format!("The arguments of `{}::{}`.", unraw(&trait_ident), name);
         records.push(quote! {
             #[doc = #doc]
@@ -576,6 +626,7 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 type Interface = super::Tag;
                 type Tuple = (#(#param_wire,)*);
                 type Result = #result_type;
+                type ResultAs = #result_as;
                 const INDEX: usize = #index;
                 const NAME: &'static str = #name;
                 const PARAM_NAMES: &'static [&'static str] = &[#(#param_names),*];
@@ -587,6 +638,19 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 }
                 fn result_from_pssz(bytes: &[u8]) -> #k::pssz::PsszResult<Self::Result> {
                     #result_from
+                }
+                #[allow(unused_variables)]
+                fn result_from_pssz_trusted(bytes: &[u8]) -> Self::Result {
+                    #result_trusted
+                }
+                fn validate_result(bytes: &[u8]) -> #k::pssz::PsszResult<()> {
+                    #result_validate
+                }
+                #[allow(unused_variables)]
+                fn result_schema(
+                    builder: &mut #k::pssz::schema_ir::SchemaBuilder,
+                ) -> #k::pssz::PsszResult<::core::option::Option<#k::pssz::schema_ir::AnyType>> {
+                    #result_node
                 }
             }
         });

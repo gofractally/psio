@@ -709,9 +709,10 @@ psio::method_args_append_pssz<Token, 0>(out, toView, 5, "memo");
 ```
 
 The source must be a source of exactly that type; anything else is a
-compile error. `psio::encode_method_result<T, I>(value, out)` takes a source
+compile error. `psio::method_result_to_pssz<T, I>(value)` takes a source
 of the result as well, so a method that returns a `psio::pssz_view<X>` has
-its result written as an `X`.
+its result written as an `X`
+([below](#the-result-of-a-method)).
 
 **Arguments are taken as an ordinary C++ call takes them.**
 `method_args_to_pssz<T, I>(args...)` accepts what `obj.method(args...)`
@@ -872,7 +873,7 @@ struct Token {
 | `psio::method_params_from_pssz<T, I>(psio::trusted{bytes})` | a `method_params<I>`: each argument as the method declares it |
 | `psio::invoke_method_pssz<T, I>(obj, bytes)` | validates, then calls the method; returns what it returns |
 | `psio::invoke_method_pssz<T, I>(obj, psio::trusted{bytes})` | calls without validating |
-| `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result (`psio::encode_method_result`, which honours `returns(...)`); a `codec_status` |
+| `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result ([the result as `returns(...)` types it](#the-result-of-a-method)); a `codec_status` |
 | `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, converted implicitly as a call converts them, none copied ([above](#encoding-a-source-as-a-named-type)) |
 | `psio::method_arguments<T, I, Args...>` | concept: `args...` can be passed to the method |
 | `reflect<T>::invoke_method<I>(obj, tuple)` | unchanged: calls with a tuple of arguments as declared (`method_params<I>`) |
@@ -907,6 +908,62 @@ says to take it by value (or to state the bound in the type).
 non-owning type) validates the tuple of wire types; decoding *into* a tuple
 of views or references does not compile (decode `psio::wire_type_t<Tuple>`,
 view the bytes, or use `method_params_from_pssz`).
+
+### The result of a method
+
+What travels back is the mirror of the above. A method's `returns(...)`
+makes its result a bounded type — with the offset widths of that type, its
+caps, `utf8` and element rules — so a result is written and read through
+the method, never with the plain codec of the return type:
+
+```cpp
+struct Directory {
+   std::vector<std::string> names(std::uint32_t limit) const;
+   std::optional<Entry>     find(std::uint64_t id) const;
+   PSIO_REFLECT(Directory, method(names, limit, returns(max<4> | element(utf8 | max<16>))),
+                           method(find, id))
+};
+auto bytes = psio::method_result_to_pssz<Directory, 0>(names);        // 1-byte offset table
+auto back  = psio::method_result_from_pssz<Directory, 0>(bytes);      // validates, then decodes
+auto view  = psio::validated_method_result_view<Directory, 0>(bytes); // validates, then views
+```
+
+| Name | Is |
+|------|----|
+| `psio::method_result_t<T, I>` | the type a result is encoded as: `psio::wire_type_t` of what the method returns (`X` for a `psio::pssz_view<X>`); `void` when it returns nothing |
+| `psio::method_result_to_pssz<T, I>(value)` | the callee's side: a fresh buffer. `value` is the result or any source of it. Fails through `psio::codec_abort` for a value outside `returns(...)` |
+| `psio::method_result_append_pssz<T, I>(out, value)` | the same, appended |
+| `psio::method_result_from_pssz<T, I>(bytes)` | the caller's side: validates the bytes as the `returns(...)` type and decodes; fails through `psio::codec_abort` |
+| `psio::method_result_from_pssz<T, I>(psio::trusted{bytes})` | decodes without validating |
+| `psio::validate_method_result<T, I>(bytes)` | `codec_status`: are the bytes a result of the method |
+| `psio::validated_method_result_view<T, I>(bytes)` | validates, then hands back the trusted view in a `psio::checked_view` (`ok()`, `error()`, `*r`, `r->…`) |
+| `psio::method_result_view<T, I>`, `psio::method_result_trusted_view<T, I>` | the safe / trusted read view of a result. Where `returns(...)` narrows an offset width these read the result's own offsets; `psio::pssz_view<ReturnType>` would not |
+| `psio::encode_method_result<T, I>(value, out)`, `psio::decode_method_result<T, I>(bytes, out)` | the write and the validating read returning a `codec_status` instead of failing |
+| `psio::check_method_result<T, I>(value)` | only checks a value against `returns(...)` |
+
+**An empty optional result is zero bytes** when its payload cannot be empty
+(`std::optional<Entry>`, `std::optional<std::uint32_t>`:
+[pssz-spec.md §5.5.1](pssz-spec.md)). "No bytes came back" and "`None` came
+back" are then one frame: the empty span validates and decodes as
+`std::nullopt`, its view is an empty optional view, and a present value is
+its own encoding with nothing added. An optional whose payload can itself
+be empty (`std::optional<std::string>`, an optional list: §5.5.2) has a
+selector byte — `None` is `00`, a present value `01` and its encoding — and
+no bytes are not a result of such a method. A method that returns nothing
+has no result bytes: `validate_method_result` accepts exactly the empty
+span, and `method_result_from_pssz` returns `void`.
+
+**In a schema.** `psio::SchemaBuilder::insert_interface<T>()` gives each
+`Func` the bounded result type. A schema that lists functions without the
+`Interface` envelope takes them one method at a time:
+`builder.insert_method<T, I>()` is the `FunctionType{params, result}`,
+`builder.insert_method_args<T, I>()` and
+`builder.insert_method_result<T, I>()` are its two nodes. (Not
+`builder.insert<psio::method_result_t<T, I>>()`: that is the plain return
+type, without `returns(...)`.) Rust: `M::result_to_pssz` /
+`result_from_pssz` / `result_from_pssz_trusted` / `validate_result` /
+`result_view` on the argument record `M`, and
+`SchemaBuilder::insert_method::<M>()`.
 
 ## The generic layer
 

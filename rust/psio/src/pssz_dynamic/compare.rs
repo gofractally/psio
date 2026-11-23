@@ -41,7 +41,8 @@
 //! (equivalent in both relations). [`Compare::Contract`] (the default) adds
 //! what a consumer of the text forms and of the type's identity sees: member
 //! and alternative names, custom ids, enums, the text shape of a record,
-//! `jsonInt` / `ijsonInt`, `ijsonName`, and whether a variant is `untagged`.
+//! `jsonInt` / `ijsonInt`, and whether a variant is `untagged`. (An alternative's
+//! label is its name: one renamed is `alternative-renamed`.)
 //!
 //! The result is a [`Compatibility`]: `ok`, or the first rule broken as a
 //! stable `code` (shared with every language through
@@ -935,17 +936,8 @@ impl<'a> Comparer<'a> {
                             ),
                         );
                     }
-                    let names = self.names;
                     self.at(&format!("<{}>", ma.name), |this| {
-                        this.walk(&ma.r#type, &mb.r#type, &below_a, &below_b, exact)?;
-                        if names
-                            && attribute_value(&ma.attributes, "ijsonName")
-                                != attribute_value(&mb.attributes, "ijsonName")
-                        {
-                            return this
-                                .fail("text-form-changed", "the I-JSON name of the alternative differs");
-                        }
-                        Ok(())
+                        this.walk(&ma.r#type, &mb.r#type, &below_a, &below_b, exact)
                     })?;
                 }
                 Ok(())

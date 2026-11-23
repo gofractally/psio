@@ -1080,10 +1080,22 @@ static_assert(psio::inferred_bound<Wide>() == psio::inferred_bound<WidePlain>())
 static_assert(psio::auto_pssz_width_v<Wide> == 1);
 
 // ── ref-result: a result is encoded as its returns(...) type ───────────────
+struct Listing
+{
+   friend bool operator==(const Listing&, const Listing&) = default;
+   std::uint64_t id = 0;
+   std::string   note;
+   PSIO_REFLECT(Listing, id, attr(note, utf8 | max<32>))
+};
 struct Directory
 {
    std::vector<std::string> names(std::uint32_t limit) const;
-   PSIO_REFLECT(Directory, method(names, limit, returns(max<4> | element(utf8 | max<16>))))
+   std::optional<Listing>     find(std::uint64_t id) const;
+   void                     touch(std::uint64_t id);
+   PSIO_REFLECT(Directory,
+                method(names, limit, returns(max<4> | element(utf8 | max<16>))),
+                method(find, id),
+                method(touch, id))
 };
 
 // ── ref-names: names as numbers ────────────────────────────────────────────
@@ -1132,6 +1144,41 @@ static_assert(psio::schema_custom_id<Call>() == "Action");
 static_assert(!psio::has_invariant_v<Call>);                // no check
 static_assert(!psio::detail::mutation_blocked_v<Call>);     // addressable by psio::mutable_view
 }  // namespace ref
+
+namespace ref
+{
+// ── ref-labels: the label of a variant alternative ─────────────────────────
+struct Circle
+{
+   friend bool operator==(const Circle&, const Circle&) = default;
+   std::uint32_t radius = 0;
+   PSIO_REFLECT(Circle, radius)
+};
+struct Square
+{
+   friend bool operator==(const Square&, const Square&) = default;
+   std::uint32_t side = 0;
+   PSIO_REFLECT(Square, side)
+};
+// The name of the alternative's type: a reflected type's name, the table for the rest.
+using Shape = std::variant<Circle, Square, std::uint32_t, std::vector<std::string>>;
+static_assert(psio::variant_label<Shape, 0>() == "Circle");
+static_assert(psio::variant_label<Shape, 2>() == "uint32");
+static_assert(psio::variant_label<Shape, 3>() == "string[]");
+// A type name two alternatives share is no label: they are labelled by position.
+using Repeated = std::variant<std::uint32_t, std::string, std::string>;
+static_assert(psio::variant_label<Repeated, 0>() == "uint32");
+static_assert(psio::variant_label<Repeated, 1>() == "1");
+static_assert(psio::variant_label<Repeated, 2>() == "2");
+using Sized = std::variant<Circle, Square, std::uint32_t>;   // its labels are stated below
+}  // namespace ref
+// Stated labels: one per alternative, in order.
+template <>
+struct psio::variant_labels<ref::Sized>
+{
+   static constexpr std::array<std::string_view, 3> names{"circle", "square", "side"};
+};
+static_assert(psio::variant_label<ref::Sized, 2>() == "side");
 
 using namespace tut;
 
@@ -1929,6 +1976,74 @@ TEST_CASE("reference: a method result has the bytes of its returns(...) type", "
    REQUIRE(psio::encode_method_result<Bank, 2>(std::string("USD"), symbol).ok());
    CHECK(hex(symbol) == "55 53 44");
    CHECK_FALSE(psio::encode_method_result<Bank, 2>(std::string(9, 'X'), symbol).ok());
+}
+
+TEST_CASE("reference: a method result in one call", "[doc][ref-result]")
+{
+   using namespace ref;
+   // ── ref-result-call-run ──
+   const std::vector<std::string> two{"alice", "bob"};
+   // The callee: the result as returns(...) types it.
+   const std::vector<char> bytes = psio::method_result_to_pssz<Directory, 0>(two);
+   CHECK(hex(bytes) == "02 07 61 6c 69 63 65 62 6f 62");
+   // The caller: validate and decode, decode what is already validated, or view in place.
+   CHECK(psio::method_result_from_pssz<Directory, 0>(std::span<const char>{bytes}) == two);
+   CHECK(psio::method_result_from_pssz<Directory, 0>(psio::trusted{bytes}) == two);
+   const auto view = psio::validated_method_result_view<Directory, 0>(bytes);
+   REQUIRE(view.ok());
+   CHECK(view->size() == 2);
+   CHECK(std::string_view{(*view)[1]} == "bob");
+   // An empty optional result is zero bytes when its payload cannot be empty ...
+   CHECK(psio::method_result_to_pssz<Directory, 1>(std::optional<Listing>{}).empty());
+   CHECK(psio::method_result_from_pssz<Directory, 1>(std::span<const char>{}) == std::nullopt);
+   // ... and a present one is the value's own encoding.
+   CHECK(psio::method_result_to_pssz<Directory, 1>(std::optional<Listing>{Listing{7, "ok"}}) ==
+         psio::to_pssz(Listing{7, "ok"}));
+   // A method that returns nothing has no result bytes.
+   CHECK(psio::validate_method_result<Directory, 2>({}).ok());
+   // ── /ref-result-call-run ──
+   CHECK_THROWS_AS((psio::method_result_to_pssz<Directory, 0>(std::vector<std::string>(5, "a"))),
+                   psio::codec_exception);
+
+   // ── ref-result-schema-run ──
+   // A schema that lists functions its own way, without the Interface envelope.
+   psio::SchemaBuilder                builder;
+   const psio::schema_types::FunctionType names = builder.insert_method<Directory, 0>();
+   const psio::schema_types::FunctionType touch = builder.insert_method<Directory, 2>();
+   const psio::Schema                 schema = std::move(builder).build();
+   // The result node is the bounded type of returns(...): at most 4 strings ...
+   const auto& list = std::get<psio::schema_types::BoundedList>((*names.result)->value);
+   CHECK(list.maxCount == 4);
+   // ... each UTF-8 of at most 16 bytes.
+   CHECK(std::get<psio::schema_types::Custom>(list.type->value).id == "utf8");
+   CHECK_FALSE(touch.result.has_value());
+   // A schema-driven reader checks a result against that node.
+   bool unknown = false;
+   CHECK(psio::pssz_ir::validate_auto(schema, **names.result, bytes, &unknown).ok());
+   // ── /ref-result-schema-run ──
+}
+
+TEST_CASE("reference: variant alternative labels", "[doc][ref-labels]")
+{
+   using namespace ref;
+   // ── ref-labels-run ──
+   // The label is the key of the tagged text form ...
+   CHECK(psio::encode(psio::ijson{}, Shape{Circle{3}}) == R"({"Circle":{"radius":3}})");
+   CHECK(psio::encode(psio::ijson{}, Shape{std::uint32_t{7}}) == R"({"uint32":7})");
+   CHECK(psio::encode(psio::ijson{}, Repeated{std::in_place_index<2>, "b"}) == R"({"2":"b"})");
+   CHECK(psio::encode(psio::ijson{}, Sized{Square{4}}) == R"({"square":{"side":4}})");
+   CHECK(psio::decode<Sized>(psio::ijson{}, std::string_view{R"({"side":5})"}) ==
+         Sized{std::uint32_t{5}});
+   // ... and the name of the alternative in the schema.
+   psio::SchemaBuilder builder;
+   const auto          type   = builder.insert<Sized>();
+   const psio::Schema  schema = std::move(builder).build();
+   const auto& members = std::get<psio::schema_types::Variant>(type.resolve(schema)->value).members;
+   CHECK(members[0].name == "circle");
+   CHECK(members[2].name == "side");
+   // Binary has no labels: an alternative is its position.
+   CHECK(hex(psio::to_pssz(Sized{std::uint32_t{5}})) == "02 05 00 00 00");
+   // ── /ref-labels-run ──
 }
 
 TEST_CASE("reference: names as numbers", "[doc][ref-names]")

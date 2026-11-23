@@ -15,6 +15,8 @@
 #include <psio/max_size.hpp>
 #include <psio/pssz.hpp>
 #include <psio/pssz_ir.hpp>
+#include <psio/pssz_ir_compare.hpp>
+#include <psio/pssz_view.hpp>
 #include <psio/reflect.hpp>
 #include <psio/schema_builder.hpp>
 #include <psio/structural.hpp>
@@ -291,6 +293,173 @@ TEST_CASE("method annotations: returns(...) is checked on the value", "[method_a
    CHECK(psio::check_method_result<token, 2>(std::string(32, 'n')).ok());
    CHECK_FALSE(psio::check_method_result<token, 2>(std::string(33, 'n')).ok());
    CHECK_FALSE(psio::check_method_result<token, 2>(std::string("\xff")).ok());
+}
+
+// The result of a method, in one call each way, and in a schema that does
+// not use the Interface envelope.
+namespace mr_test
+{
+   struct Entry
+   {
+      std::uint64_t id = 0;
+      std::string   note;
+      friend bool   operator==(const Entry&, const Entry&) = default;
+   };
+   PSIO_REFLECT(Entry, id, note)
+   struct directory
+   {
+      std::vector<std::string>   names(std::uint32_t limit) const;
+      std::optional<Entry>       find(std::uint64_t id) const;
+      std::optional<std::string> label(std::uint64_t id) const;
+      void                       touch(std::uint64_t id);
+      std::string                digest(std::uint64_t id) const;
+      std::string                host(std::string host) const;
+      PSIO_REFLECT(directory,
+                   method(names, limit, returns(max<4> | element(utf8 | max<16>))),
+                   method(find, id),
+                   method(label, id, returns(utf8 | max<8>)),
+                   method(touch, id),
+                   method(digest, id, returns(exact<32>)),
+                   method(host, attr(host, utf8), returns(utf8)))
+   };
+   PSIO_INTERFACE(directory, types())
+}  // namespace mr_test
+
+TEST_CASE("method results: one call to write, read, validate and view", "[method_annotations][result]")
+{
+   using mr_test::directory;
+   using mr_test::Entry;
+   using Names = std::vector<std::string>;
+
+   // names: returns(max<4> | element(utf8 | max<16>)) — a 1-byte offset table.
+   const Names two{"alice", "bob"};
+   const auto  bytes = psio::method_result_to_pssz<directory, 0>(two);
+   REQUIRE(bytes == std::vector<char>{2, 7, 'a', 'l', 'i', 'c', 'e', 'b', 'o', 'b'});
+   REQUIRE(bytes != psio::to_pssz(two));  // the plain type has a 4-byte table
+   REQUIRE(psio::validate_method_result<directory, 0>(bytes).ok());
+   REQUIRE(psio::method_result_from_pssz<directory, 0>(std::span<const char>{bytes}) == two);
+   REQUIRE(psio::method_result_from_pssz<directory, 0>(psio::trusted{bytes}) == two);
+   std::vector<char> appended{'x'};
+   psio::method_result_append_pssz<directory, 0>(appended, two);
+   REQUIRE(std::vector<char>(appended.begin() + 1, appended.end()) == bytes);
+
+   // The view reads the result's own offsets; a view of the plain type would not.
+   psio::method_result_view<directory, 0> safe{bytes};
+   REQUIRE(safe.size() == 2);
+   REQUIRE(std::string_view{safe[1]} == "bob");
+   const auto checked = psio::validated_method_result_view<directory, 0>(bytes);
+   REQUIRE(checked.ok());
+   REQUIRE(checked->size() == 2);
+   REQUIRE(checked->unpack() == two);
+
+   // Outside returns(...): refused when written, when read, when viewed.
+   const Names five(5, "a");
+   REQUIRE_THROWS_AS((psio::method_result_to_pssz<directory, 0>(five)), psio::codec_exception);
+   const auto frame = psio::detail::pssz_impl::encode_method_result_unchecked<directory, 0>(five);
+   REQUIRE_FALSE(psio::validate_method_result<directory, 0>(frame).ok());
+   REQUIRE_THROWS_AS((psio::method_result_from_pssz<directory, 0>(std::span<const char>{frame})),
+                     psio::codec_exception);
+   REQUIRE_FALSE(psio::validated_method_result_view<directory, 0>(frame).ok());
+
+   // find: an optional whose payload cannot be empty. None is zero bytes.
+   REQUIRE(psio::method_result_to_pssz<directory, 1>(std::optional<Entry>{}).empty());
+   REQUIRE(psio::validate_method_result<directory, 1>({}).ok());
+   REQUIRE(psio::method_result_from_pssz<directory, 1>(std::span<const char>{}) == std::nullopt);
+   REQUIRE(psio::method_result_from_pssz<directory, 1>(psio::trusted{std::span<const char>{}}) ==
+           std::nullopt);
+   REQUIRE_FALSE(psio::validated_method_result_view<directory, 1>({})->has_value());
+   const std::optional<Entry> some{Entry{7, "ok"}};
+   const auto                 some_bytes = psio::method_result_to_pssz<directory, 1>(some);
+   REQUIRE(some_bytes == psio::to_pssz(Entry{7, "ok"}));  // the value's own encoding
+   REQUIRE(psio::method_result_from_pssz<directory, 1>(std::span<const char>{some_bytes}) == some);
+   REQUIRE(psio::validated_method_result_view<directory, 1>(some_bytes)->has_value());
+
+   // label: an optional whose payload can be empty has a selector byte.
+   REQUIRE(psio::method_result_to_pssz<directory, 2>(std::optional<std::string>{}) ==
+           std::vector<char>{0});
+   REQUIRE(psio::method_result_to_pssz<directory, 2>(std::optional<std::string>{""}) ==
+           std::vector<char>{1});
+   REQUIRE_FALSE(psio::validate_method_result<directory, 2>({}).ok());
+   REQUIRE_THROWS_AS(
+      (psio::method_result_to_pssz<directory, 2>(std::optional<std::string>{"123456789"})),
+      psio::codec_exception);
+
+   // touch returns nothing: no result bytes, and only those.
+   static_assert(std::is_void_v<psio::method_result_t<directory, 3>>);
+   REQUIRE(psio::validate_method_result<directory, 3>({}).ok());
+   psio::method_result_from_pssz<directory, 3>(std::span<const char>{});
+   const std::vector<char> one{0};
+   REQUIRE_FALSE(psio::validate_method_result<directory, 3>(one).ok());
+   REQUIRE_THROWS_AS((psio::method_result_from_pssz<directory, 3>(std::span<const char>{one})),
+                     psio::codec_exception);
+}
+
+TEST_CASE("method results: a schema without the Interface envelope carries returns(...)",
+          "[method_annotations][result][schema]")
+{
+   using mr_test::directory;
+   namespace ir = psio::schema_types;
+
+   psio::SchemaBuilder iface;
+   iface.insert_interface<directory>();
+   const auto with = std::move(iface).build();
+
+   psio::SchemaBuilder builder;
+   const auto names = builder.insert_method<directory, 0>();
+   const auto find  = builder.insert_method<directory, 1>();
+   const auto touch = builder.insert_method<directory, 3>();
+   const auto host  = builder.insert_method<directory, 5>();
+   REQUIRE(builder.status().ok());
+   const auto schema = builder.build();
+
+   // The bounded list of bounded UTF-8 strings, not the plain list.
+   REQUIRE(names.result);
+   const auto& list = std::get<ir::BoundedList>((*names.result)->value);
+   REQUIRE(list.maxCount == 4);
+   const auto& text = std::get<ir::Custom>((*list.type).value);
+   REQUIRE(text.id == "utf8");
+   REQUIRE(std::get<ir::BoundedList>((*text.type).value).maxCount == 16);
+   // returns(utf8) on a string: the "utf8" node, not the raw "string".
+   REQUIRE(std::get<ir::Custom>((*host.result)->value).id == "utf8");
+   // The same node the Interface gives the function, for every method.
+   const auto same = [&](const ir::FunctionType& fn, std::size_t i) {
+      const auto& f = with.interfaces.at(0).funcs.at(i);
+      return fn.result.has_value() == f.result.has_value() &&
+             (!fn.result ||
+              psio::pssz_ir::equivalent(with, **f.result, schema, **fn.result).ok);
+   };
+   REQUIRE(same(names, 0));
+   REQUIRE(same(find, 1));
+   REQUIRE(same(touch, 3));
+   REQUIRE(same(host, 5));
+   REQUIRE_FALSE(touch.result);
+
+   // The parts: the argument list is the node of method_arg_tuple<I>.
+   psio::SchemaBuilder parts;
+   const auto          args = parts.insert_method_args<directory, 0>();
+   REQUIRE(args == parts.insert<psio::reflect<directory>::method_arg_tuple<0>>());
+   REQUIRE(parts.insert_method_result<directory, 0>().has_value());
+   REQUIRE_FALSE(parts.insert_method_result<directory, 3>().has_value());
+   REQUIRE(parts.status().ok());
+
+   // The frame of a result validates against the bare node, and a frame
+   // outside returns(...) does not.
+   bool       unknown = false;
+   const auto good    = psio::method_result_to_pssz<directory, 0>(std::vector<std::string>{"a"});
+   REQUIRE(psio::pssz_ir::validate_auto(schema, **names.result, good, &unknown).ok());
+   const auto bad = psio::detail::pssz_impl::encode_method_result_unchecked<directory, 0>(
+      std::vector<std::string>(5, "a"));
+   REQUIRE_FALSE(psio::pssz_ir::validate_auto(schema, **names.result, bad, &unknown).ok());
+
+   // returns(exact<32>) has no type form: a Func carries it as an attribute,
+   // a bare result node cannot, and says so instead of dropping it.
+   psio::SchemaBuilder lossy;
+   (void)lossy.insert_method_result<directory, 4>();
+   REQUIRE_FALSE(lossy.status().ok());
+   REQUIRE(std::string{lossy.status().error().what}.find("lengthBound") != std::string::npos);
+   const auto& digest = with.interfaces.at(0).funcs.at(4);
+   REQUIRE(digest.attributes.size() == 1);
+   REQUIRE(digest.attributes[0].name == "result.lengthBound");
 }
 
 TEST_CASE("method annotations: the interface schema carries them", "[method_annotations][schema]")

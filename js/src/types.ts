@@ -14,7 +14,7 @@
 // `pssz.ts` on that IR: one implementation of PSSZ, key, JSON and views.
 
 import {
-  IR_VERSION, PsszError, PsszJsonText, reservedCustomId, type BitsValue, type IrAnyType, type IrAttribute, type IrFunc, type IrInterface,
+  IR_VERSION, PsszError, PsszJsonText, reservedCustomId, type BitsValue, type IrAnyType, type IrAttribute, type IrFunc, type IrFunctionType, type IrInterface,
   type IrMember, type IrSchema, type OrderTree, type PsszCustomHandler, type Some,
 } from './pssz-core.js';
 import type { JsonFormat } from './pssz-json.js';
@@ -67,7 +67,6 @@ interface FieldShape {
 interface AltShape {
   name: string;
   type: AnyDef;
-  ijsonName?: string;
 }
 type Shape =
   | { k: 'int'; bits: number; signed: boolean }
@@ -197,12 +196,6 @@ export interface VariantOptions {
   untagged?: boolean;
 }
 
-/** Options of a variant alternative (`alt`). */
-export interface AltOptions {
-  /** The alternative's key in I-JSON (default: its name). */
-  ijsonName?: string;
-}
-
 /** Options of `record`. */
 export interface RecordOptions {
   /**
@@ -276,7 +269,7 @@ function keyOf(def: AnyDef, depth = 0): string {
     case 'nested': out = `N${s.deferred ? 'D' : ''}(${k(s.inner)})`; break;
     case 'transparent': out = `W(${JSON.stringify(s.name)})`; break;
     case 'variant':
-      out = `${s.untagged ? 'U' : ''}V(${s.alts.map((a) => `${JSON.stringify([a.name, a.ijsonName ?? null])}${k(a.type)}`).join(',')})`;
+      out = `${s.untagged ? 'U' : ''}V(${s.alts.map((a) => `${JSON.stringify(a.name)}${k(a.type)}`).join(',')})`;
       break;
     case 'record': out = `R(${JSON.stringify(s.name)})`; break;
     case 'args': out = `G(${s.uid})`; break;
@@ -585,7 +578,8 @@ class Builder {
       members: alts.map((alt, i): IrMember => ({
         name: alt.name,
         type: type(alt, i),
-        attributes: alt.ijsonName === undefined ? [] : [attribute('ijsonName', alt.ijsonName)],
+        // (its name is its label: the key of its tagged text form)
+        attributes: [],
       })),
       attributes: untagged ? [attribute('untagged', '')] : [],
     });
@@ -698,6 +692,33 @@ class Builder {
     if (options.argumentLists !== false) for (const m of methods) this.insertNamed(`${name}.${m.name}`, m.args);
   }
 
+  /** `SchemaBuilder::insert_method_args<T, I>()`: the argument list, an `@N` node. */
+  insertMethodArgs(m: MethodShape): IrAnyType {
+    return this.insert(m.args);
+  }
+
+  /**
+   * `SchemaBuilder::insert_method_result<T, I>()`: the result as `returns`
+   * types it (the plain type is interned first, as for a `Func`); null for
+   * a method that returns nothing. A bound with no type form is an
+   * attribute of a `Func` only: a bare node cannot carry it.
+   */
+  insertMethodResult(m: MethodShape): IrAnyType | null {
+    if (!m.result) return null;
+    this.insert(m.result.type);
+    const member = this.member(m.result, false);
+    if (member.attributes.length)
+      schemaError(`typed schema: returns of method "${m.name}" states ${member.attributes[0].name}, which has no type form: ` +
+        'only the Func of an interface carries it (the interface\'s schema)');
+    return member.type;
+  }
+
+  /** `SchemaBuilder::insert_method<T, I>()`. */
+  insertMethod(m: MethodShape): IrFunctionType {
+    const params = this.insertMethodArgs(m);
+    return { params, result: this.insertMethodResult(m) };
+  }
+
   schema(requireHandlers?: boolean): PsszSchema {
     const schema: IrSchema = {
       package: { name: this.packageName, version: this.packageVersion, attributes: [] },
@@ -741,6 +762,77 @@ export function generateSchema(
     }
     return builder.schema(options?.requireHandlers);
   });
+}
+
+/**
+ * Builds a Schema IR one call at a time, as C++ `psio::SchemaBuilder` does:
+ * the same calls in the same order give the same schema, `@N` numbers
+ * included. `generateSchema` and `InterfaceDef.schema` are the one-call
+ * forms; this is for a schema that lists functions its own way — a map of
+ * name to `FunctionType`, without the `Interface` envelope:
+ *
+ *     const builder = new SchemaBuilder();
+ *     const actions = Object.fromEntries(
+ *       Object.entries(Token.methods).map(([name, m]) => [name, builder.insertMethod(m)]));
+ *     const types = builder.build();
+ *
+ * `insertMethod(m).result` is the result **as `returns` types it** (the
+ * bounded type); `builder.insert(name, resultType)` of the plain type is
+ * not.
+ */
+export class SchemaBuilder {
+  private readonly builder = new Builder();
+
+  /** `insert<T>(name)`: the type under a name; the reference to it. */
+  insert(name: string, type: TypeDef<any, any>): IrAnyType {
+    return declared(() => {
+      if (!(type instanceof TypeDef)) schemaError(`typed schema: "${name}" is not a type definition`);
+      this.builder.insertNamed(name, type);
+      return this.builder.insert(type);
+    });
+  }
+
+  /** `insert_interface<T>()`: the `Interface` with a `Func` per method (and its argument lists, unless `argumentLists: false`). */
+  insertInterface(def: InterfaceDef<any>): this {
+    declared(() => {
+      if (!(def instanceof InterfaceDef)) schemaError('typed schema: interfaces must be interface definitions');
+      this.builder.insertInterface(def);
+    });
+    return this;
+  }
+
+  /**
+   * `insert_method<T, I>()`: the method as a `FunctionType` — its argument
+   * list and its result as `returns` types it (`null`: it returns nothing).
+   */
+  insertMethod(method: Method<any, any, any, any>): IrFunctionType {
+    return declared(() => this.builder.insertMethod(methodShape(method)));
+  }
+
+  /** `insert_method_args<T, I>()`: the argument list of the method. */
+  insertMethodArgs(method: Method<any, any, any, any>): IrAnyType {
+    return declared(() => this.builder.insertMethodArgs(methodShape(method)));
+  }
+
+  /**
+   * `insert_method_result<T, I>()`: the result as `returns` types it; `null`
+   * for a method that returns nothing. A `returns` bound with no type form
+   * (`lengthBound` with `exact` / `min`, a bound on a `boundedUtf8` or a
+   * nested value) is a `schema` error: only a `Func` carries it.
+   */
+  insertMethodResult(method: Method<any, any, any, any>): IrAnyType | null {
+    return declared(() => this.builder.insertMethodResult(methodShape(method)));
+  }
+
+  /** The schema built so far. */
+  build(options?: { requireHandlers?: boolean }): PsszSchema {
+    return declared(() => this.builder.schema(options?.requireHandlers));
+  }
+}
+
+function methodShape(method: Method<any, any, any, any>): MethodShape {
+  if (!(method instanceof Method)) schemaError('typed schema: a method of a declared interface is expected (Interface.methods.name)');
+  return method.shape;
 }
 
 // ── TypeDef ─────────────────────────────────────────────────────────────────
@@ -1178,17 +1270,7 @@ export function field<T, V, const O extends FieldOptions>(
   return new Field(isDef(type, 'a field type') as never, options ?? {});
 }
 
-/** A variant alternative with options (`alt`). */
-export class Alt<T, V = T> {
-  /** @internal */
-  constructor(readonly type: TypeDef<T, V>, readonly options: AltOptions) {}
-}
-/** A variant alternative with an I-JSON name. */
-export function alt<T, V>(type: TypeDef<T, V>, options: AltOptions): Alt<T, V> {
-  return new Alt(isDef(type, 'an alternative type'), options ?? {});
-}
-
-type MemberInput = TypeDef<any, any> | Field<any, any> | Alt<any, any>;
+type MemberInput = TypeDef<any, any> | Field<any, any>;
 type MemberValue<M> = M extends TypeDef<infer T, any> ? T : M extends { type: TypeDef<infer T, any> } ? T : never;
 type MemberView<M> = M extends TypeDef<any, infer V> ? V : M extends { type: TypeDef<any, infer V> } ? V : never;
 type Name<K> = K extends string | number ? `${K}` : never;
@@ -1543,6 +1625,45 @@ export class Method<A, AV, R, RV> {
   get result(): [R] extends [undefined] ? null : PsszType<R, RV> {
     return this.owner.lookup.method(this.name).result as never;
   }
+
+  /** @internal */
+  get shape(): MethodShape {
+    return this.owner.shape.methods.find((m) => m.name === this.name)!;
+  }
+
+  // The result in one call, as the type `returns` makes of it. An empty
+  // optional result is zero bytes when its payload cannot be empty (a
+  // number, a record); one whose payload can be empty (a string, a list)
+  // has a selector byte (`null` is `00`). A method that returns nothing has
+  // no result bytes.
+
+  /** The PSSZ bytes of a result (C++ `psio::method_result_to_pssz`); no bytes for a method that returns nothing. */
+  resultToPssz(value: R): Uint8Array {
+    return this.owner.lookup.method<A, R>(this.name).resultToPssz(value);
+  }
+
+  /** Validates and decodes a result (C++ `psio::method_result_from_pssz`). */
+  resultFromPssz(bytes: Uint8Array): R {
+    return this.owner.lookup.method<A, R>(this.name).resultFromPssz(bytes);
+  }
+
+  /** Whether `bytes` are a result of this method (C++ `psio::validate_method_result`). Never throws. */
+  validateResult(bytes: Uint8Array): PsszValidation {
+    return this.owner.lookup.method(this.name).validateResult(bytes);
+  }
+
+  /** Validates a result, then views it in place (C++ `psio::validated_method_result_view`). */
+  resultView(bytes: Uint8Array): RV {
+    return this.owner.lookup.method(this.name).resultView<RV>(bytes);
+  }
+
+  /**
+   * The method as a `FunctionType` in `builder`'s schema: its argument list
+   * and its result as `returns` types it (`builder.insertMethod(this)`).
+   */
+  functionType(builder: SchemaBuilder): IrFunctionType {
+    return builder.insertMethod(this);
+  }
 }
 
 /** Options of `defineInterface`. */
@@ -1649,30 +1770,66 @@ export function defineInterface<M extends { [name: string]: MethodDef }>(
   return new InterfaceDef(name, methods, { ...options });
 }
 
+/** The alternatives of a variant in order: `[label, definition]` pairs. */
+export type VariantEntries = readonly (readonly [string, TypeDef<any, any>])[];
+type EntryValues<E> = E extends readonly (infer P)[]
+  ? P extends readonly [infer K, infer D] ? { type: Name<K>; value: MemberValue<D> } : never
+  : never;
+type EntryViews<E> = E extends readonly (infer P)[]
+  ? P extends readonly [infer K, infer D] ? VariantView<{ type: Name<K>; value: MemberValue<D> }, Name<K>, MemberView<D>> : never
+  : never;
+
 /**
- * A tagged union: `{ type: 'Name', value }` in JavaScript. An alternative is
- * a definition, or `alt(definition, { ijsonName })`. For a C++
- * `std::variant` without labels the names are the indices: `{ 0: u32, 1: utf8 }`.
+ * A tagged union: `{ type: 'Label', value }` in JavaScript. Each alternative
+ * has one label — the key it is declared under. The label is the
+ * alternative's name in the Schema IR and the key of its I-JSON form
+ * (`{"Label": value}`); binary has no labels (an alternative is its
+ * position).
+ *
+ * The twin of a C++ `std::variant` uses the labels C++ gives its
+ * alternatives (`docs/annotations.md` "Variant alternative labels"): the
+ * name of the alternative's type — `variant({ uint32: u32, string: utf8,
+ * Circle })` — or its position for a type with no name and for a type name
+ * two alternatives share.
+ *
+ * Alternatives are given as an object, or as an array of `[label,
+ * definition]` pairs. JavaScript lists integer-like keys of an object
+ * first, so the array form is the one for labels such as `"1"` that are
+ * not first: `variant([['uint32', u32], ['1', utf8], ['2', utf8]])`.
+ *
  * `{ untagged: true }`: in text the bare value of the alternative
  * (`VariantOptions`).
  */
-export function variant<C extends { [name: string]: TypeDef<any, any> | Alt<any, any> }>(
+export function variant<const E extends VariantEntries>(
+  alternatives: E, options?: VariantOptions,
+): TypeDef<EntryValues<E>, EntryViews<E>>;
+export function variant<C extends { [name: string]: TypeDef<any, any> }>(
   alternatives: C, options?: VariantOptions,
 ): TypeDef<
   { [K in keyof C]: { type: Name<K>; value: MemberValue<C[K]> } }[keyof C],
   { [K in keyof C]: VariantView<{ type: Name<K>; value: MemberValue<C[K]> }, Name<K>, MemberView<C[K]>> }[keyof C]
-> {
+>;
+export function variant(
+  alternatives: VariantEntries | { [name: string]: TypeDef<any, any> }, options?: VariantOptions,
+): TypeDef<any, any> {
   if (typeof alternatives !== 'object' || alternatives === null)
-    schemaError('typed schema: variant alternatives must be an object');
-  const alts = memberNames(alternatives, 'alternative name').map((name): AltShape => {
-    const a = alternatives[name] as MemberInput;
-    if (a instanceof Alt) {
-      const ijsonName = a.options.ijsonName;
-      if (ijsonName !== undefined && typeof ijsonName !== 'string') schemaError('typed schema: ijsonName must be a string');
-      return { name, type: a.type, ijsonName };
-    }
-    return { name, type: isDef(a, `alternative "${name}"`) };
-  });
+    schemaError('typed schema: variant alternatives must be an object or an array of [label, definition] pairs');
+  let alts: AltShape[];
+  if (Array.isArray(alternatives)) {
+    const seen = new Set<string>();
+    alts = alternatives.map((entry: unknown): AltShape => {
+      if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string')
+        schemaError('typed schema: a variant alternative is a [label, definition] pair');
+      const [name, def] = entry as [string, unknown];
+      if (seen.has(name)) schemaError(`typed schema: alternative label "${name}" is given twice`);
+      seen.add(name);
+      return { name, type: isDef(def, `alternative "${name}"`) };
+    });
+  } else {
+    const byName = alternatives as { [name: string]: TypeDef<any, any> };
+    alts = memberNames(byName, 'alternative name').map((name): AltShape => ({ name, type: isDef(byName[name], `alternative "${name}"`) }));
+  }
+  if (alts.some((a) => a.name === '')) schemaError('typed schema: an alternative label is not empty');
   if (alts.length === 0 || alts.length > 256) schemaError('typed schema: a variant has 1 to 256 alternatives');
   if (options !== undefined && (typeof options !== 'object' || options === null))
     schemaError('typed schema: variant options must be an object');

@@ -63,8 +63,9 @@
 // and of the type's identity sees (docs/pssz-spec.md 7.6: "Rename a field
 // ... consumers using reflected names will break"):
 //
-//   * the names of record members and of variant alternatives, and an
-//     alternative's `ijsonName`;
+//   * the names of record members and the labels of variant alternatives
+//     (variant_label.hpp: an alternative's one name, in the schema and in
+//     text);
 //   * custom ids (`Custom{.., id}` whose id is not part of the binary form:
 //     a time presentation, a type with a text adapter or an invariant): the
 //     same ids in the same order on both sides;
@@ -150,7 +151,7 @@
 //   appended-field-not-optional
 //   max-dynamic-data        max-fields
 //   text-form-changed       contract: record text shape, jsonInt/ijsonInt,
-//                           ijsonName
+//                           untagged
 //   result-changed          a result on one side only
 //   function-removed  function-added  type-removed  type-added
 //   interface-removed interface-added
@@ -969,9 +970,6 @@ class Comparer
                return fail("malformed-schema", "null schema box");
             if (!walk(*ma.type, *mb.type, below_a, below_b, exact))
                return false;
-            if (names && attribute_value(ma.attributes, "ijsonName") !=
-                             attribute_value(mb.attributes, "ijsonName"))
-               return fail("text-form-changed", "the I-JSON name of the alternative differs");
          }
          return true;
       }

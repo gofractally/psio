@@ -317,10 +317,9 @@ class TypedFixture:
     def union(self, alts: List[Tuple[Any, Any]]) -> Any:
         members = []
         for m, hint in alts:
-            names = [a for a in m["attributes"] if a["name"] == "ijsonName"]
-            if len(names) != len(m["attributes"]):
+            if m["attributes"]:
                 raise Unsupported("variant member attributes")
-            members.append(Annotated[hint, psio.alt(m["name"], ijson_name=names[0]["value"] if names else None)])
+            members.append(Annotated[hint, psio.alt(m["name"])])
         if len(members) < 2:
             raise Unsupported("a variant of one alternative (a Python union of one type is that type)")
         return Union[tuple(members)]  # type: ignore[return-value]

@@ -86,7 +86,7 @@ def _blob_from_text(text: str) -> bytes:
 
 def _endpoint_to_text(v: Variant) -> str:
     a, port = v.value["address"], v.value["port"]
-    if v.type == "0":
+    if v.type == "V4":
         return f"{a[0]}.{a[1]}.{a[2]}.{a[3]}:{port}"
     groups = ":".join(f"{a[2 * i] << 8 | a[2 * i + 1]:04x}" for i in range(8))
     return f"[{groups}]:{port}"
@@ -101,14 +101,14 @@ def _endpoint_from_text(text: str) -> Variant:
         if not m:
             raise ValueError("endpoint: bad V6")
         address = bytes.fromhex(m.group(1).replace(":", ""))
-        return Variant("1", {"address": address, "port": _decimal(m.group(2), 65535)})
+        return Variant("V6", {"address": address, "port": _decimal(m.group(2), 65535)})
     host, colon, port = text.rpartition(":")
     if not colon:
         raise ValueError("endpoint: no port")
     octets = host.split(".")
     if len(octets) != 4:
         raise ValueError("endpoint: bad V4")
-    return Variant("0", {"address": bytes(_decimal(o, 255) for o in octets), "port": _decimal(port, 65535)})
+    return Variant("V4", {"address": bytes(_decimal(o, 255) for o in octets), "port": _decimal(port, 65535)})
 
 
 def _ratio_from_text(text: str) -> Any:
@@ -123,16 +123,16 @@ def _ratio_from_text(text: str) -> Any:
 
 
 def _ref_to_text(v: Variant) -> str:
-    if v.type == "0":
+    if v.type == "uint64":
         return f"#{v.value}"
     return "@" + v.value.decode("utf-8")
 
 
 def _ref_from_text(text: str) -> Variant:
     if text.startswith("#"):
-        return Variant("0", _decimal(text[1:], (1 << 64) - 1))
+        return Variant("uint64", _decimal(text[1:], (1 << 64) - 1))
     if text.startswith("@"):
-        return Variant("1", text[1:].encode("utf-8"))
+        return Variant("string", text[1:].encode("utf-8"))
     raise ValueError("ref: neither #n nor @name")
 
 
@@ -147,7 +147,7 @@ CUSTOM_TYPE_HANDLERS = {
     "Endpoint": Handler(to_text=_endpoint_to_text, from_text=_endpoint_from_text),
     "Ratio": Handler(to_text=lambda v: f"{v[0]}/{v[1]}", from_text=_ratio_from_text),
     "Ref": Handler(to_text=_ref_to_text, from_text=_ref_from_text,
-                   check=lambda v: "Ref: a name is not empty" if v.type == "1" and len(v.value) == 0 else None),
+                   check=lambda v: "Ref: a name is not empty" if v.type == "string" and len(v.value) == 0 else None),
     "Name": Handler(check=lambda v: None if v["value"] >> 60 == 0 else "Name: value is not a canonical name"),
     "DerKey": Handler(check=_der_check),
     "Range": Handler(check=lambda r: None if r["lo"] <= r["hi"] else "Range: lo is greater than hi"),

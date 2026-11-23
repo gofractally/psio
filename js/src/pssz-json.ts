@@ -1146,7 +1146,7 @@ class Reader {
       c.beginObject();
       const key = c.nextField();
       if (key === null) return c.fail('ijson: variant object must have one key');
-      index = node.members.findIndex((m) => m.ijsonName === key);
+      index = node.members.findIndex((m) => m.name === key);
       if (index < 0) c.fail('ijson: unknown variant alternative');
       payload = this.read(node.members[index].text, 'natural', 0);
       if (c.nextField() !== null) c.fail('ijson: variant object must have one key');
@@ -1638,7 +1638,7 @@ class Writer {
         }
         if (this.ijson) {
           out.push('{');
-          writeString(out, member.ijsonName, false);
+          writeString(out, member.name, false);
           out.push(':');
           this.write(member.text, v.value, 'natural', n + 1);
           out.push('}');

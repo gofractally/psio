@@ -73,7 +73,8 @@
 //!           jsonInt / ijsonInt = "number" | "string"   (`json` submodule)
 //!   Variant  untagged                  text: the bare value of the
 //!                                      alternative (`json` submodule)
-//!   Variant member  ijsonName = "..."                   (`json` submodule)
+//!   Variant member  (none: its name is the alternative's label, the key
+//!                   of its tagged text form)
 //! The JSON / I-JSON text path over the same IR is the `json` submodule.
 use crate::pssz::{Decoded, Pssz, PsszError, PsszFormat, PsszResult};
 use crate::pssz_checked::{self as checked, Layout};
@@ -484,7 +485,6 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
                     return Err(failure("pssz dynamic: malformed integer form attribute"));
                 }
             }
-            "ijsonName" if site == Site::VariantMember && value.value.is_some() => (),
             // An untagged variant: the same bytes as any variant; in text
             // the bare value of the alternative (`json` submodule).
             "untagged" if site == Site::Variant => (),

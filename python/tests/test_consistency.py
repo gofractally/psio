@@ -382,7 +382,7 @@ class Evolution(unittest.TestCase):
             as_new = psio.from_pssz(Var2, data)
             self.assertEqual(psio.to_pssz(as_new, Var2), data)
             self.assertTrue(psio.validate_pssz(Var1, psio.to_pssz(as_new, Var2)).ok)
-        added = psio.to_pssz(psio.Variant("u64", 9), Var2)
+        added = psio.to_pssz(psio.Variant("uint64", 9), Var2)
         self.assertTrue(psio.validate_pssz(Var2, added).ok)
         self.assertFalse(psio.validate_pssz(Var1, added).ok)
         refused(self, lambda: psio.from_pssz(Var1, added), psio.DecodeError)
@@ -395,7 +395,7 @@ class Evolution(unittest.TestCase):
         new_record = psio.from_pssz(New, record_bytes)
         self.assertEqual(new_record.v, Alt1(5, None))
         self.assertEqual(psio.to_pssz(new_record), record_bytes)
-        self.assertFalse(psio.validate_pssz(Old, psio.to_pssz(New(psio.Variant("u64", 1), bytes(249)))).ok)
+        self.assertFalse(psio.validate_pssz(Old, psio.to_pssz(New(psio.Variant("uint64", 1), bytes(249)))).ok)
 
     def test_member_annotations_and_caps(self) -> None:
         # (cpp/tests/consistency_tests.cpp "pssz_evolves_from: member annotations and caps")

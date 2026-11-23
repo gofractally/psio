@@ -144,12 +144,13 @@ class FieldShape:
 
 
 class AltShape:
-    __slots__ = ("name", "type", "ijson_name")
+    """An alternative of a variant: its label (its one name, in the schema and in text) and its type."""
 
-    def __init__(self, name: str, type: Shape, ijson_name: Optional[str]) -> None:
+    __slots__ = ("name", "type")
+
+    def __init__(self, name: str, type: Shape) -> None:
         self.name = name
         self.type = type
-        self.ijson_name = ijson_name
 
 
 def _json_text(s: str) -> str:
@@ -198,7 +199,7 @@ def key_of(shape: Shape, depth: int = 0) -> str:
         out = f"Y({_json_text(s.owner)})"
     elif k == "variant":
         out = ("U(" if s.untagged else "V(") + ",".join(
-            f"{_json_text(a.name)}{_json_text(a.ijson_name or '')}{key_of(a.type, d)}" for a in s.alts) + ")"
+            f"{_json_text(a.name)}{key_of(a.type, d)}" for a in s.alts) + ")"
     elif k == "record":
         out = f"R({_json_text(s.name)})"
     elif k == "args":
@@ -674,38 +675,89 @@ def _core(base: Any, markers: Sequence[Any], hint: Any) -> Shape:
 
 
 def _variant(members: Sequence[Any], untagged: bool = False) -> Shape:
-    """A union of two or more alternatives: a variant."""
-    alts: List[AltShape] = []
-    for index, m in enumerate(members):
-        base, meta = _split(m)
+    """A union of two or more alternatives: a variant.
+
+    Each alternative has one label (docs/annotations.md "Variant alternative labels"): what
+    ``psio.alt("name")`` states, else the name of its type (``_type_label``), else — a type with no name,
+    or a type name another alternative without a stated label has too — its position.
+    """
+    shapes = [shape_of(m) for m in members]
+    stated: List[Optional[str]] = []
+    for m in members:
+        _, meta = _split(m)
         spec = _find(meta, A.AltSpec)
-        shape = shape_of(m)
-        name = spec.name if spec is not None and spec.name is not None else _default_alt_name(base, shape)
-        alts.append(AltShape(name, shape, spec.ijson_name if spec is not None else None))
-    if len({a.name for a in alts}) != len(alts):
-        _fail("psio: the alternatives of a union need distinct names: Annotated[T, psio.alt(\"name\")]")
+        stated.append(spec.name if spec is not None else None)
+    # (The type name of an alternative with a stated label is not a label: it does not count.)
+    type_labels = [_type_label(s) if stated[i] is None else None for i, s in enumerate(shapes)]
+    alts: List[AltShape] = []
+    for index, shape in enumerate(shapes):
+        name = stated[index]
+        if name is None:
+            label = type_labels[index]
+            name = label if label is not None and type_labels.count(label) == 1 else str(index)
+        alts.append(AltShape(name, shape))
+    if any(not a.name for a in alts) or len({a.name for a in alts}) != len(alts):
+        _fail("psio: the alternatives of a union have distinct, nonempty labels: "
+              "Annotated[T, psio.alt(\"name\")]")
     out = Shape("variant", alts=alts, untagged=untagged)
     out.bind = _variant_binding(alts)
     return out
 
 
-def _default_alt_name(base: Any, shape: Shape) -> str:
-    if shape.k in ("record", "transparent"):
-        return shape.name
-    if shape.k == "custom":
-        inner = shape.inner
-        return inner.name if inner.k in ("record", "transparent") else shape.id
-    if isinstance(base, type) and issubclass(base, enum.Enum):
-        return base.__name__
-    if shape.k == "int":
-        return f"{'i' if shape.signed else 'u'}{shape.bits}"
-    if shape.k == "float":
-        return f"f{shape.bits}"
-    if shape.k == "bytes" and shape.bound == "list":
-        return {"utf8": "string", "string": "raw_string", "hex": "bytes"}[shape.id]
-    if shape.k == "bool":
-        return "bool"
-    return _fail(f"psio: name this alternative of the union: Annotated[{base!r}, psio.alt(\"name\")]")
+def _type_label(shape: Shape, depth: int = 0) -> Optional[str]:
+    """The name of a type as a variant alternative's default label; ``None`` for a type with no name.
+
+    A class's declared name; for the types without one the shared table (C++ ``get_type_name``): ``bool``,
+    ``int8`` .. ``uint64``, ``int128``, ``uint128``, ``float32``, ``double``, ``char``, ``string`` (UTF-8 or
+    raw, bounded or not), ``uint8[]`` (bytes), ``T[]``, ``T[N]``, ``T?``, ``tuple_A_B``, ``map_K_V``,
+    ``set_K``, ``variant_A_B``, built from the names of the types they hold.
+    """
+    if depth > 64:
+        return None
+    s = shape
+    k = s.k
+    d = depth + 1
+    if k in ("record", "transparent"):
+        return s.name
+    if k == "custom":
+        inner = s.inner
+        return inner.name if inner.k in ("record", "transparent") else s.id
+    if k == "enum":
+        return getattr(s.py, "__name__", None)
+    if k == "annotated":
+        return _type_label(s.inner, d)
+    if k == "int":
+        return f"{'int' if s.signed else 'uint'}{s.bits}"
+    if k == "float":
+        return "float32" if s.bits == 32 else "double"
+    if k in ("bool", "char"):
+        return k
+    if k == "bytes":
+        if s.id in ("utf8", "string"):
+            return "string"
+        return f"uint8[{s.n}]" if s.bound == "exact" else "uint8[]"
+
+    def join(prefix: str, parts: Sequence[Shape]) -> Optional[str]:
+        labels = [_type_label(p, d) for p in parts]
+        if any(label is None for label in labels):
+            return None
+        return "_".join([prefix] + [label for label in labels if label is not None])
+
+    if k in ("option", "list", "array"):
+        inner_label = _type_label(s.inner, d)
+        if inner_label is None:
+            return None
+        return inner_label + {"option": "?", "list": "[]"}.get(k, f"[{getattr(s, 'n', 0)}]")
+    if k == "tuple":
+        return join("tuple", s.items)
+    if k == "assoc":
+        if s.id == "map":
+            entry = s.entry
+            return join("map", entry.items) if entry.k == "tuple" else None
+        return join("set", [s.entry])
+    if k == "variant":
+        return join("variant", [a.type for a in s.alts])
+    return None
 
 
 def _runtime_class(shape: Shape) -> Any:
@@ -1183,7 +1235,7 @@ def _own(shape: Shape, a: Position, where: str) -> Shape:
         alts = list(s.alts)
         for key, child in (a.at or {}).items():
             index = _alt_index(alts, key, where)
-            alts[index] = AltShape(alts[index].name, _own(alts[index].type, child, where), alts[index].ijson_name)
+            alts[index] = AltShape(alts[index].name, _own(alts[index].type, child, where))
         return s.copy(alts=alts)
     return _fail(f"psio: {where}: this type takes no bounds")
 
@@ -1496,8 +1548,7 @@ class Builder:
     def _variant(self, alts: Sequence[AltShape], type_of: Callable[[AltShape, int], Dict[str, Any]],
                  untagged: bool = False) -> Dict[str, Any]:
         return _node("Variant", {
-            "members": [{"name": alt.name, "type": type_of(alt, i),
-                         "attributes": [] if alt.ijson_name is None else [_attribute("ijsonName", alt.ijson_name)]}
+            "members": [{"name": alt.name, "type": type_of(alt, i), "attributes": []}
                         for i, alt in enumerate(alts)],
             "attributes": [_attribute("untagged", "")] if untagged else []})
 

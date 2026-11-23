@@ -707,14 +707,9 @@ TEST_CASE("annotation tree: the annotation and the wrapper spelling give the sam
    CHECK(member_type<SetA>("s") == member_type<SetW>("s"));
    CHECK(member_type<TupA>("t") == member_type<TupW>("t"));
    CHECK(member_type<TupA>("p") == member_type<TupW>("p"));
-   // A variant alternative is named in I-JSON by its C++ type name, which
-   // the two spellings do not share: equal apart from that attribute.
-   const auto unnamed = [](AnyType type) {
-      for (auto& m : std::get<Variant>(type.value).members)
-         m.attributes.clear();
-      return type;
-   };
-   CHECK(unnamed(member_type<VarA>("v")) == unnamed(member_type<VarW>("v")));
+   // A variant alternative is labelled by its type's name, and a wrapper
+   // type is named as what it bounds: the two spellings are one node.
+   CHECK(member_type<VarA>("v") == member_type<VarW>("v"));
 
    // The nodes themselves: a bounded list of bounded UTF-8 strings, and of
    // bounded raw strings.

@@ -196,8 +196,8 @@ class Typed(unittest.TestCase):
                      psio.SchemaError)   # alternatives need distinct names
         # Alternatives of one Python class are told apart by name.
         both = Union[u32, u64]
-        self.assertEqual(psio.to_pssz(psio.Variant("u64", 1), both).hex(), "010100000000000000")
-        self.assertEqual(psio.from_pssz(both, bytes.fromhex("0001000000")), psio.Variant("u32", 1))
+        self.assertEqual(psio.to_pssz(psio.Variant("uint64", 1), both).hex(), "010100000000000000")
+        self.assertEqual(psio.from_pssz(both, bytes.fromhex("0001000000")), psio.Variant("uint32", 1))
         self.rejects(lambda: psio.to_pssz(1, both), psio.EncodeError)
         self.rejects(lambda: psio.codec(typing.Any), psio.SchemaError)
         self.rejects(lambda: psio.to_pssz(object()), psio.SchemaError)

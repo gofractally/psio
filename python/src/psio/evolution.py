@@ -348,8 +348,6 @@ class _Compare:
 
                 def alternative(ma: Member = ma, mb: Member = mb) -> None:
                     self.walk(ma.text, mb.text, below_a, below_b, exact)
-                    if self.names and ma.ijson_name != mb.ijson_name:
-                        _no("text-form-changed", "the I-JSON name of the alternative differs")
                 self._at(f"<{ma.name}>", alternative)
         elif k == "record":
             fixed_size()

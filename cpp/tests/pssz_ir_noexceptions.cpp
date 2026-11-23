@@ -96,10 +96,8 @@ static int schema_driven()
                                         {ir::Attribute{"lengthBound", "min=1,max=2"}}},
                              ir::Member{"kind",
                                         ir::AnyType{ir::Variant{
-                                            {ir::Member{"0", ir::AnyType{ir::Int{32, false}},
-                                                        {ir::Attribute{"ijsonName", "uint32"}}},
-                                             ir::Member{"1", bounded_string(4),
-                                                        {ir::Attribute{"ijsonName", "string"}}}},
+                                            {ir::Member{"uint32", ir::AnyType{ir::Int{32, false}}, {}},
+                                             ir::Member{"string", bounded_string(4), {}}},
                                             {}}},
                                         {}},
                              ir::Member{"extra",

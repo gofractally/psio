@@ -182,9 +182,19 @@ or the encoded bytes of a nested member (through `optional`), or
 `unique` and `uniqueKeys` for
 [order constraints](#order-constraints-sorted-unique-uniquekeys); and
 `jsonInt` / `ijsonInt: 'number' | 'string'` for the text form of its
-integers. A variant alternative's I-JSON key is its name, or
-`alt(type, { ijsonName })`; a C++ `std::variant` without labels is
-`variant({ 0: alt(u32, { ijsonName: 'uint32' }), 1: ... })`.
+integers.
+
+A variant alternative has **one label**: the key it is declared under. It is
+the `type` of the JavaScript value, the alternative's name in the Schema IR
+and the key of its I-JSON form (`{"label": value}`); binary has no labels.
+The twin of a C++ `std::variant` uses the labels C++ gives its alternatives
+(`docs/annotations.md`, "Variant alternative labels") — the name of the
+alternative's type, or its position for a type with no name and for a type
+name two alternatives share: `variant({ uint32: u32, string: utf8,
+'string[]': list(utf8), Circle })`. JavaScript lists integer-like keys of an
+object first, so a variant with a label such as `"1"` that is not first is
+declared as pairs: `variant([['uint32', u32], ['1', utf8], ['2', utf8]])`.
+The shared rows are `conformance/variant-label-vectors.json`.
 
 **Widths, caps and bounds.** Offset widths are derived from the type, and
 every type that has offsets takes its own: a record, a tuple or a pair (a
@@ -648,6 +658,15 @@ Token.methods.add.result.decode(new Uint8Array(8));                   // 0n
 Token.methods.transfer.result.psszToJson(Token.methods.transfer.result.encode({ id: 7n, note: 'ok' }));
                                                                        // '{"id":7,"note":"ok"}'
 Token.methods.ping.result;                                            // null: it returns nothing
+
+// The result in one call each way.
+toHex(Token.methods.names.resultToPssz(['alice', 'bob']));            // '0207616c696365626f62'
+Token.methods.names.resultFromPssz(Uint8Array.of(2, 7, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x62, 0x6f, 0x62));
+                                                                       // ['alice', 'bob'] (validated)
+Token.methods.names.validateResult(new Uint8Array(1)).ok;             // false
+Token.methods.names.resultView(Uint8Array.of(2, 7, 0x61, 0x6c, 0x69, 0x63, 0x65, 0x62, 0x6f, 0x62)).at(1);
+                                                                       // 'bob', read in place
+Token.methods.ping.resultFromPssz(new Uint8Array(0));                 // undefined: no result bytes
 ```
 
 - **A result is encoded as the type `returns` gives it.** `returns:
@@ -655,8 +674,30 @@ Token.methods.ping.result;                                            // null: i
   bounded list of bounded strings: `names` above has a 1-byte offset table
   (`02 07 616c696365 626f62`), not the 4-byte table of an unbounded list of
   strings, and a writer refuses — and a reader rejects — five names, a name
-  of 17 bytes or one that is not UTF-8 (C++ `psio::encode_method_result` /
-  `validate_method_result` / `decode_method_result`).
+  of 17 bytes or one that is not UTF-8. `method.resultToPssz(value)`,
+  `resultFromPssz(bytes)` (validates, then decodes), `validateResult(bytes)`
+  and `resultView(bytes)` (validates, then views in place) are the one-call
+  forms, on a typed `Method` and on a schema-driven `PsszMethod` (C++
+  `psio::method_result_to_pssz` / `method_result_from_pssz` /
+  `validate_method_result` / `validated_method_result_view`). A method that
+  returns nothing has no result bytes: it accepts only the empty array.
+- **An empty optional result is zero bytes** when its payload cannot be
+  empty (a number, a record): `returns: optional(Receipt)` writes `null` as
+  no bytes and reads no bytes as `null`. An optional whose payload can be
+  empty (a string, a list) has a selector byte: `null` is `00`, a present
+  value `01` and its encoding, and no bytes are not a result.
+- **A method without the `Interface` envelope.** A schema that lists
+  functions its own way takes each method as a `FunctionType`:
+  `const builder = new SchemaBuilder(); builder.insertMethod(Token.methods.names)`
+  (or `Token.methods.names.functionType(builder)`) is `{ params, result }` —
+  the argument list and the result **as `returns` types it**, here a
+  `BoundedList` of bounded UTF-8 strings; `result` is `null` for a method
+  that returns nothing. `insertMethodArgs` / `insertMethodResult` are the
+  parts, `builder.build()` the schema, `functionTypeToJson(type)` its text.
+  The same calls in the same order give the schema C++
+  `SchemaBuilder::insert_method<T, I>()` gives, byte for byte. A `returns`
+  bound with no type form is carried by a `Func` only, so asking for the
+  bare node is a `schema` error.
 - **The values are statically typed**: `transfer.args.decode(bytes)` is
   `{ to: string; amount: bigint; memo: string | null }`,
   `Token.methods.add.args` takes `[number, number]`, `names.result.decode`
@@ -750,7 +791,8 @@ psszEvolvesFrom(fetched(V1), fetched(post(16, 16))).ok;         // false
 (`{ compare }`). `'contract'`, the default, is everything a consumer sees:
 the bytes, and also the names of fields and alternatives, custom ids, enums
 (a revision may add enumerators), the text shape of a record, `jsonInt` /
-`ijsonInt`, `ijsonName` and whether a variant is `untagged`. `'wire'` is the
+`ijsonInt` and whether a variant is `untagged` (an alternative's name is its
+label, the I-JSON key). `'wire'` is the
 bytes and which bytes are values, nothing else: a renamed field is
 compatible there.
 
@@ -1194,8 +1236,8 @@ inner value).
 and a variant as `[index, value]`. `'ijson'` writes a 64-bit integer as a bare
 number while its magnitude is at most 2^53 - 1 and as a decimal string beyond
 (both are read), bytes as uppercase hex (either case is read) and a variant as
-`{"Name": value}`. Member attributes `jsonInt` / `ijsonInt` and the variant
-attribute `ijsonName` are honoured; a variant with the attribute `untagged`
+`{"Name": value}`, where the name is the alternative's (its label). Member
+attributes `jsonInt` / `ijsonInt` are honoured; a variant with the attribute `untagged`
 is the bare value of its alternative in both. A repeated key is read again
 and the last one wins; unknown keys are skipped; a record whose text leaves
 out a member that is not optional is refused with the member named

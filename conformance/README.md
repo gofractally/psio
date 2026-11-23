@@ -260,4 +260,16 @@ pins the `Interface` / `Func` Schema IR of a method declaration — names,
 parameter names and types, results, parameter bounds, `returns(...)`, the
 argument cap and the parameter-count cap — and the bytes and text of
 argument lists (a named object or a positional array, `docs/json.md`
-"Method arguments") and of results.
+"Method arguments") and of results — a bounded result, an optional result
+empty and present, a method that returns nothing — and the same methods as
+`FunctionType`s, without the `Interface` envelope.
+
+## Variant alternative labels
+
+`variant-label-vectors.json` (described in `variant-label-vectors.md`;
+emitted by `psio_variant_label_conformance_emit`, ctest
+`psio_variant_label_conformance_regen`) pins the label of every alternative
+of five variants — reflected records, scalars, generic types, one type held
+twice, stated labels — the Schema IR that names each alternative by its
+label, and one value per alternative with its bytes and its text keyed by
+the label.

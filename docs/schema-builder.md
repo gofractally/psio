@@ -6,22 +6,29 @@ graphs. Plain tuples use Tuple IR, never a numeric-name Object surrogate.
 `psio::bounded<T,N>` uses BoundedList; `utf8_string<N>` uses the string adapter
 over BoundedList<u8,N>.
 
-An unlabeled `std::variant` emits alternatives named "0", "1", and so on, in
-declaration order. These names add no payload bytes; the wire selector remains
-the u8 alternative index. A shared C++/Rust SDK type must select matching declared
-labels when the API schema needs named alternatives. C++ type names are not
-inferred to be labels. Customize metadata explicitly:
+A `std::variant` emits its alternatives in declaration order, each named by
+its **label** (`psio/variant_label.hpp`; `docs/annotations.md` "Variant
+alternative labels"): the name of the alternative's type — a reflected
+type's name, `uint32`, `string`, `T[]`, `T?`, `tuple_A_B`, ... — or, for a
+type with no name and for a type name two alternatives of the variant
+share, its position (`"0"`, `"1"`, ...). The label is also the key of the
+alternative's tagged I-JSON form, so the schema carries no second name for
+it. Labels add no payload bytes; the wire selector remains the u8
+alternative index. To state the labels (to match the declared names of a
+Rust enum, say), specialize:
 
 ```cpp
 using Choice = std::variant<std::uint16_t, bool>;
-template <> struct psio::schema_variant_labels<Choice>
+template <> struct psio::variant_labels<Choice>
 {
    static constexpr std::array<std::string_view, 2> names{"Code", "Ready"};
 };
 ```
 
-Labels must be nonempty, unique, and match the alternative count; invalid
-customizations fail compilation. Reordering alternatives changes the wire ABI.
+Stated labels must be nonempty, unique, and match the alternative count;
+invalid customizations fail compilation. They are the labels of the type
+everywhere: `psio::ijson` writes and reads `{"Ready": true}`. Reordering
+alternatives changes the wire ABI.
 
 Bit metadata uses existing IR alternatives: Custom "bitvector" wraps
 Array<Int1 unsigned,N>, and Custom "bitlist" wraps
@@ -112,10 +119,9 @@ builder records everything those depend on:
 - **Integer text forms.** `psio::json_number` / `json_string` / `ijson_number`
   / `ijson_string`, from the member or the type-level default, are the member
   attributes `jsonInt` / `ijsonInt` = `"number"` | `"string"`.
-- **Variant names in I-JSON.** Every alternative carries the attribute
-  `ijsonName`, the `get_type_name` the typed `psio::ijson` writes
-  (`"uint32"`, the record's name, ...). The member *name* is still the label
-  or the index: `ijsonName` is text-form metadata, not an API label.
+- **Variant names in I-JSON.** An alternative's member *name* is its label,
+  which is the key the typed `psio::ijson` writes (`"uint32"`, the record's
+  name, ...). There is no separate text name (no `ijsonName` attribute).
 - **Bytes.** `std::vector` / `std::array` / `psio::bounded` of `char`,
   `unsigned char` or `std::byte` use the hex adapter, and all three are the
   same node: the `"hex"` custom over a list / array of `u8`
@@ -222,5 +228,6 @@ children, a `max`-only member length bound written into the member type,
 bytes `SchemaBuilder` produces for the equivalent C++ types.
 `js/src/test/typed-ir.test.ts` declares every type of the three shared
 fixtures this way and requires the generated schema to equal each fixture's
-`schema_ir`. A variant alternative's `ijsonName` is stated explicitly there
-(`alt(type, { ijsonName })`): JavaScript has no `get_type_name`.
+`schema_ir`. A variant alternative's label is its key there
+(`variant({ uint32: u32, string: utf8 })`): JavaScript has no
+`get_type_name`.

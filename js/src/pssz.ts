@@ -36,7 +36,7 @@ import {
   Codec, IR_VERSION, MemberInfo, Node, PsszError, boundCount, checkAttributes, checkIrVersion, findAttribute,
   memberBoundAdmits, nestedMember, normalizeMember, normalizeSchema, normalizeType, parseCap, parseLengthBound,
   parseMaxFields, reservedCustomId, settleMember,
-  type DecodeContext, type IrAnyType, type IrAttribute, type IrFunc, type IrInterface, type IrSchema,
+  type DecodeContext, type IrAnyType, type IrAttribute, type IrFunc, type IrFunctionType, type IrInterface, type IrSchema,
   type OrderTable, type OrderTree, type PsszCustomHandler, type PsszErrorKind, type PsszSchemaInput,
   type PsszTypeInput,
 } from './pssz-core.js';
@@ -48,7 +48,7 @@ import { viewAt } from './pssz-view.js';
 export {
   PsszError, PsszNaN, PsszNegativeZero, PsszJsonText, IR_VERSION,
   type PsszErrorKind, type IrSchema, type IrAnyType, type IrMember, type IrAttribute, type IrTypeValue,
-  type IrEnum, type IrEnumerator, type IrFunc, type IrResource, type IrInterface, type IrWorld, type IrUse,
+  type IrEnum, type IrEnumerator, type IrFunc, type IrFunctionType, type IrResource, type IrInterface, type IrWorld, type IrUse,
   type CompactEnumerator, type PsszCustomHandler,
   type CompactType, type PsszSchemaInput, type PsszTypeInput, type Some, type VariantValue, type BitsValue,
 } from './pssz-core.js';
@@ -524,7 +524,7 @@ export class PsszSchema {
         ? null : parseLengthBound([{ name: 'lengthBound', value: constraints.lengthBound }]);
       const order = constraints?.order ?? null;
       if (order) codec.orderFits(ref, order);
-      const member = bound || order ? new MemberInfo('', ref, bound, 'natural', 'natural', '', order) : null;
+      const member = bound || order ? new MemberInfo('', ref, bound, 'natural', 'natural', order) : null;
       return new PsszType<T, V>(codec, ref, member);
     });
   }
@@ -687,6 +687,67 @@ export class PsszMethod<A = unknown, R = unknown> {
       ? schema.rootType<R>(func.result, undefined, { lengthBound: bound ? bound.value ?? '' : null, order: resultOrder })
       : null;
   }
+
+  // ── The result in one call (C++ `psio::method_result_to_pssz`, ...) ──────
+  //
+  // Each writes or reads the result AS `returns(...)` TYPES IT: its bounds,
+  // `utf8` and element rules applied, and the offset widths of the bounded
+  // type. A method that returns nothing has no result bytes.
+  //
+  // An empty optional result is ZERO BYTES when its payload cannot be empty
+  // (a number, a record, a variant: docs/pssz-spec.md 5.5.1) — "no bytes"
+  // and `null` are then the same frame. An optional whose payload can be
+  // empty (a string, a list: 5.5.2) has a selector byte: `null` is `00`, a
+  // present value `01` and its encoding, and no bytes are not its result.
+
+  /** The PSSZ bytes of a result (the callee's side); no bytes for a method that returns nothing. */
+  resultToPssz(value: R): Uint8Array {
+    if (this.result) return this.result.encode(value);
+    if (value !== undefined && value !== null)
+      throw new PsszError('value', `pssz: method "${this.name}" returns nothing`);
+    return new Uint8Array(0);
+  }
+
+  /** Validates and decodes a result (the caller's side); `undefined` for a method that returns nothing, which accepts only no bytes. */
+  resultFromPssz(bytes: Uint8Array, options?: PsszDecodeOptions): R {
+    if (this.result) return this.result.decode(bytes, options);
+    const checked = this.validateResult(bytes);
+    if (!checked.ok) throw checked.error;
+    return undefined as R;
+  }
+
+  /** Whether `bytes` are a result of this method. Never throws. */
+  validateResult(bytes: Uint8Array): PsszValidation {
+    if (this.result) return this.result.validate(bytes);
+    try {
+      if (asBytes(bytes).length !== 0) throw new PsszError('bytes', 'pssz: a method with no result returned bytes');
+      return { ok: true, hasUnknown: false };
+    } catch (e) {
+      return { ok: false, error: e as PsszError };
+    }
+  }
+
+  /**
+   * Validates a result, then views it in place (C++
+   * `psio::validated_method_result_view`): the view reads the offsets of the
+   * type `returns(...)` makes of the result. `undefined` for a method that
+   * returns nothing.
+   */
+  resultView<V = unknown>(bytes: Uint8Array): V {
+    const checked = this.validateResult(bytes);
+    if (!checked.ok) throw checked.error;
+    return (this.result ? this.result.view(bytes) : undefined) as V;
+  }
+}
+
+/**
+ * The JSON / I-JSON text of a `FunctionType`, byte for byte the C++ and
+ * Rust text (`psio::encode(psio::json{}, functionType)`).
+ */
+export function functionTypeToJson(type: IrFunctionType, format: JsonFormat = 'ijson'): string {
+  return PsszSchema.meta()
+    .type<IrFunctionType>({ Object: { params: 'AnyType', result: { Option: 'AnyType' } } })
+    .valueToJson(type, format);
 }
 
 /** One interface of a schema (`PsszSchema.interface`). */

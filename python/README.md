@@ -652,7 +652,17 @@ assert calc["put"].max_fields == 4
 The **result** is annotated like a member (C++ `returns(...)`): it is then
 that bounded type, and its bytes are that type's. `method.result` is its
 codec; `result_to_pssz` / `result_from_pssz` / `validate_result` are the
-short forms.
+short forms, `result_from_pssz(psio.trusted(data))` (or
+`result_from_pssz_trusted`) reads bytes already validated, and
+`result_view(data)` validates and then reads the result in place — as the
+bounded type, whose offset tables a `psio.pssz_view` of the plain return type
+would misread. Never write a result with `psio.to_pssz(value, ReturnType)`.
+
+An empty optional result is **zero bytes** when its payload cannot be empty
+(a number, a record: `docs/pssz-spec.md` §5.5.1): "no bytes" and `None` are
+then the same frame. An optional whose payload can itself be empty (a string,
+a list) has a selector byte: `None` is `00`. A method that returns nothing has
+no result bytes: `validate_result` accepts only `b""`.
 
 ```python
 assert bank["symbol"].result_to_pssz("USD") == b"USD"
@@ -663,6 +673,25 @@ assert names.result_to_pssz(["alice", "bob"]).hex(" ") == "02 07 61 6c 69 63 65 
 assert names.result_from_pssz(bytes.fromhex("0207616c696365626f62")) == ["alice", "bob"]
 assert len(psio.to_pssz(["alice", "bob"], list[str])) == 16
 assert not names.validate_result(psio.to_pssz(["a"] * 5, Annotated[list[Annotated[str, psio.bounded(16)]], psio.bounded(8)]))
+view = names.result_view(bytes.fromhex("0207616c696365626f62"))     # validated, read in place
+assert (len(view), view[1]) == (2, "bob")
+assert names.result_from_pssz(psio.trusted(bytes.fromhex("0207616c696365626f62"))) == ["alice", "bob"]
+```
+
+A schema that lists functions its own way — a map of name to
+`{params, result}`, without the `Interface` envelope — takes each method's
+`FunctionType` from `method.function_type(builder)` (C++
+`SchemaBuilder::insert_method<T, I>()`): the argument list, and the result
+**as the return annotation types it**. `interface.function_types()` is every
+method on a fresh builder.
+
+```python
+builder = psio.SchemaBuilder()
+fn = names.function_type(builder)                    # {"params": ..., "result": ...}
+assert fn["result"]["value"].type == "BoundedList"   # not the plain list of strings
+assert builder.schema().type(fn["result"]).validate_pssz(bytes.fromhex("0207616c696365626f62"))
+schema, functions = calc.function_types()
+assert list(functions) == [m.name for m in calc]
 ```
 
 Dispatch and a call proxy:
@@ -945,7 +974,7 @@ change, encode). The short name is the safe one — `from_pssz` validates.
 | `tuple[A, B]` | tuple (an extensible positional record) | at most 255 elements; so has a method's parameter list |
 | `Optional[T]`, `T \| None` | optional | an optional of an optional: `Optional[psio.Some[Optional[T]]]` |
 | `dict[K, V]`, `set[T]`, `frozenset[T]` | map, set | written in key order whatever order the container has; `K` / `T` must be hashable (`@dataclass(frozen=True)`) |
-| `A \| B` | variant | alternatives are told apart by their class; name them with `Annotated[A, psio.alt("a")]`; alternatives that share a class are `psio.Variant(name, value)` |
+| `A \| B` | variant | alternatives are told apart by their class; alternatives that share a class are `psio.Variant(label, value)`. An alternative has one **label** — the key of its I-JSON form and its name in the schema: the name of its type (`Circle`; `uint32`, `string`, `uint8[]`, `T[]`, `T?`, `tuple_A_B`, … for a type without a declared name), its position (`"0"`, `"1"`, …) for a type with no name or a type name two alternatives share, or what `Annotated[A, psio.alt("a")]` states (`docs/annotations.md` "Variant alternative labels") |
 | `Annotated[A \| B, psio.untagged]` | variant (attribute `untagged`) | in text the bare value of the alternative, read by its JSON kind; the alternatives' kinds must not overlap |
 | `psio.JsonValue` | UTF-8 string holding JSON text (custom id `json`) | any JSON value, inline in text; numbers keep their text (`int`, `psio.JsonNumber`) |
 | `@dataclass`, `NamedTuple`, `TypedDict`, an annotated class under `@psio.record` | record | `@psio.record(...)` for the cap, a fixed layout, another name |

@@ -25,6 +25,7 @@ if sys.version_info >= (3, 9):
 else:  # pragma: no cover
     raise ImportError("psio needs Python 3.10 or newer")
 
+from .errors import SchemaError
 from .values import Bits
 
 __all__ = [
@@ -299,13 +300,24 @@ def name(text: str) -> NameSpec:
 
 @dataclass(frozen=True)
 class AltSpec(Spec):
-    name: Optional[str] = None
-    ijson_name: Optional[str] = None
+    name: str = ""
 
 
-def alt(name: Optional[str] = None, *, ijson_name: Optional[str] = None) -> AltSpec:
-    """Names an alternative of a union: ``Annotated[Circle, psio.alt("circle")] | Square``."""
-    return AltSpec(name, ijson_name)
+def alt(name: str) -> AltSpec:
+    """States the label of an alternative of a union: ``Annotated[Circle, psio.alt("circle")] | Square``.
+
+    An alternative has one label: the key of its I-JSON form (``{"circle": ...}``) and its name in the
+    Schema IR.  Without ``alt`` it is the name of the alternative's type — a class's name, and ``bool``,
+    ``int8`` .. ``uint64``, ``int128``, ``uint128``, ``float32``, ``double``, ``string``, ``uint8[]``
+    (bytes), ``T[]``, ``T[N]``, ``T?``, ``tuple_A_B``, ``map_K_V``, ``set_K``, ``variant_A_B`` for the
+    types that have no declared name — or, for a type with no name and for a type name two alternatives
+    of the union share, its position (``"0"``, ``"1"``, ...).  Stated labels are nonempty and distinct.
+    Use it to match the labels of the type's twin in another language (docs/annotations.md "Variant
+    alternative labels").
+    """
+    if not isinstance(name, str) or not name:
+        raise SchemaError("psio: alt(name): the label of an alternative is a nonempty string")
+    return AltSpec(name)
 
 
 @dataclass(frozen=True)

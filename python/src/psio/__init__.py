@@ -42,6 +42,7 @@ from ._names import is_hash_name, method_to_number, name_to_number, number_to_me
 from .schema import Handler, Schema, SchemaInterface, SchemaMethod, SchemaType, Status, key_prefix_upper_bound, trusted  # noqa: F401
 from ._time import time_point_from_iso, time_point_to_iso  # noqa: F401
 from .typed import arguments, codec, from_text, invariant, record, schema_of, to_text, transparent  # noqa: F401
+from .typed import Builder as SchemaBuilder  # noqa: F401
 from .typed import enum_type as enum  # noqa: F401
 from .values import JsonNumber, NaN, Bits, Some, Variant  # noqa: F401
 from .view import ListView, RecordView, TupleView, VariantView, View  # noqa: F401
@@ -62,5 +63,5 @@ __all__ = [
     "time_point_to_iso", "to_ijson", "to_json", "to_key", "to_pssz", "to_text", "transparent", "trusted", "u128",
     "u16", "u256", "u32", "u64", "u8", "utf8", "validate_ijson", "validate_json", "validate_key", "validate_pssz",
     "sorted", "unique", "unique_keys", "is_hash_name", "method_to_number", "name_to_number", "number_to_method",
-    "number_to_name", "untagged", "JsonValue", "JsonNumber", "evolves_from", "equivalent", "Compatibility", "SchemaInterface",
+    "number_to_name", "untagged", "SchemaBuilder", "JsonValue", "JsonNumber", "evolves_from", "equivalent", "Compatibility", "SchemaInterface",
 ]
