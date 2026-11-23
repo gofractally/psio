@@ -4,13 +4,13 @@
 //! The interface is declared here in Rust; the fixture is what C++ built
 //! from the same declaration. Every row is checked on the typed path (the
 //! argument records and `Method::result_to_pssz` / `result_from_pssz`) and
-//! on the schema-driven path over the fixture's own schema, and the IR Rust
-//! builds is compared with the fixture's node by node.
+//! on the schema-driven path over the fixture's own schema, and the schema
+//! Rust builds is the fixture's byte for byte (its PSSZ and its Json text).
 
 use psio::interface::{Interface, Method};
 use psio::json::{self, IJson, Json, JsonText};
 use psio::pssz::dynamic;
-use psio::pssz::schema_ir::{self, AnyType, AnyValue as V, Schema, SchemaBuilder};
+use psio::pssz::schema_ir::{AnyType, AnyValue as V, Schema, SchemaBuilder};
 use psio::pssz::{auto_pssz_width, Pssz, PsszPack, RawString};
 use std::collections::BTreeMap;
 
@@ -88,31 +88,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A node with every reference replaced by what it refers to: the two
-/// builders number their anonymous types differently (C++ also inserts the
-/// unbounded types of the function's signature), and an argument list is a
-/// named type here and a named alias of an anonymous one there.
-fn resolved(schema: &Schema, ty: &AnyType) -> AnyType {
-    let go = |ty: &AnyType| Box::new(resolved(schema, ty));
-    let members = |members: &Vec<schema_ir::Member>| {
-        members
-            .iter()
-            .map(|m| schema_ir::Member { name: m.name.clone(), r#type: go(&m.r#type), attributes: m.attributes.clone() })
-            .collect()
-    };
-    AnyType::new(match &ty.value {
-        V::Type(reference) => return resolved(schema, schema.get(&reference.r#type).expect("a known type")),
-        V::Object(o) => V::Object(schema_ir::Object { members: members(&o.members), attributes: o.attributes.clone() }),
-        V::Struct(o) => V::Struct(schema_ir::Struct { members: members(&o.members), attributes: o.attributes.clone() }),
-        V::List(l) => V::List(schema_ir::List { r#type: go(&l.r#type) }),
-        V::BoundedList(l) => V::BoundedList(schema_ir::BoundedList { r#type: go(&l.r#type), maxCount: l.maxCount }),
-        V::Option(o) => V::Option(schema_ir::Optional { r#type: go(&o.r#type) }),
-        V::Custom(c) => V::Custom(schema_ir::Custom { r#type: go(&c.r#type), id: c.id.clone() }),
-        V::Tuple(t) => V::Tuple(schema_ir::Tuple { members: t.members.iter().map(|m| go(m)).collect() }),
-        other => other.clone(),
-    })
-}
-
 #[test]
 fn the_declaration_builds_the_fixture_schema() {
     let fx = fixture();
@@ -124,48 +99,49 @@ fn the_declaration_builds_the_fixture_schema() {
     assert_eq!(json::try_encode::<Json, _>(&theirs).unwrap(), fx.schema_json);
     dynamic::validate_schema(&theirs).unwrap();
 
+    // What the C++ emitter does: the interface, then every argument list
+    // under the name `token.<method>`.
     let mut builder = SchemaBuilder::new();
     builder.insert_interface::<token::Tag>().unwrap();
-    // Every argument list is also a named type, `token.<method>`.
-    builder.insert::<token::args::transfer>().unwrap();
-    builder.insert::<token::args::names>().unwrap();
-    builder.insert::<token::args::note>().unwrap();
-    builder.insert::<token::args::add>().unwrap();
-    builder.insert::<token::args::ping>().unwrap();
-    builder.insert::<token::args::batch>().unwrap();
+    builder.insert_argument_lists::<token::Tag>().unwrap();
     let ours = builder.finish();
     dynamic::validate_schema(&ours).unwrap();
 
-    assert_eq!(ours.package, theirs.package);
-    assert_eq!(ours.interfaces.len(), 1);
-    let (mine, yours) = (&ours.interfaces[0], &theirs.interfaces[0]);
-    assert_eq!(mine.name, yours.name);
-    assert_eq!(mine.type_names, yours.type_names);
-    assert_eq!(mine.attributes, yours.attributes);
-    assert_eq!(mine.funcs.len(), 6);
-    assert_eq!(yours.funcs.len(), 6);
-    for (f, g) in mine.funcs.iter().zip(&yours.funcs) {
-        assert_eq!(f.name, g.name);
-        // maxFields, maxDynamicData, result.* : the same attributes in the
-        // same order.
-        assert_eq!(f.attributes, g.attributes, "{}", f.name);
-        assert_eq!(f.params.len(), g.params.len(), "{}", f.name);
-        for (p, q) in f.params.iter().zip(&g.params) {
-            assert_eq!(p.name, q.name, "{}", f.name);
-            assert_eq!(p.attributes, q.attributes, "{}.{}", f.name, p.name);
-            assert_eq!(resolved(&ours, &p.r#type), resolved(&theirs, &q.r#type), "{}.{}", f.name, p.name);
-        }
-        assert_eq!(
-            f.result.as_ref().map(|ty| resolved(&ours, ty)),
-            g.result.as_ref().map(|ty| resolved(&theirs, ty)),
-            "{}: result",
-            f.name
-        );
-        // The argument list as a type: an Object with `tuple`, then
-        // `maxFields` and `maxDynamicData` when declared.
-        let name = format!("token.{}", f.name);
-        let (mine, yours) = (ours.get(&name).expect("our type"), theirs.get(&name).expect("their type"));
-        assert_eq!(resolved(&ours, mine), resolved(&theirs, yours), "{name}");
+    // The same schema, byte for byte: named and anonymous nodes, the order
+    // of `types`, the `@N` numbering, the aliases and the attributes.
+    assert_eq!(json::try_encode::<Json, _>(&ours).unwrap(), fx.schema_json);
+    assert_eq!(hex(&psio::to_pssz(&ours)), fx.schema_ir);
+    assert_eq!(ours, theirs);
+
+    // Naming the argument lists one by one is the same thing, and naming
+    // one again adds nothing.
+    let mut builder = SchemaBuilder::new();
+    builder.insert_interface::<token::Tag>().unwrap();
+    builder.insert_named::<token::args::transfer>("token.transfer").unwrap();
+    builder.insert_named::<token::args::names>("token.names").unwrap();
+    builder.insert_named::<token::args::note>("token.note").unwrap();
+    builder.insert_named::<token::args::add>("token.add").unwrap();
+    builder.insert_named::<token::args::ping>("token.ping").unwrap();
+    builder.insert_named::<token::args::batch>("token.batch").unwrap();
+    builder.insert_named::<token::args::batch>("token.batch").unwrap();
+    builder.insert_argument_lists::<token::Tag>().unwrap();
+    // A name another entry has is refused.
+    assert!(builder.insert_named::<u8>("token.batch").is_err());
+    assert!(builder.insert_named::<u8>("@99").is_err());
+    assert_eq!(builder.finish(), theirs);
+
+    // An argument list is an anonymous type: `token.transfer` is an alias
+    // of its `@N` node, an Object with `tuple`, then `maxFields` and
+    // `maxDynamicData` when declared.
+    let alias = ours.types.iter().position(|entry| entry.name == "token.transfer").unwrap();
+    assert_eq!(ours.types[alias - 1].name, "@8");
+    assert_eq!(*ours.types[alias].r#type, AnyType::named("@8"));
+    match &ours.types[alias - 1].r#type.value {
+        V::Object(o) => assert_eq!(
+            o.attributes.iter().map(|a| (a.name.as_str(), a.value.as_deref())).collect::<Vec<_>>(),
+            [("tuple", Some("named")), ("maxFields", Some("8")), ("maxDynamicData", Some("256"))]
+        ),
+        other => panic!("{other:?}"),
     }
 }
 

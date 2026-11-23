@@ -503,6 +503,54 @@ pub(crate) fn erased_type_id<T: ?Sized>() -> TypeId {
     erased.id()
 }
 
+/// Builds a [`Schema`] from Rust types, node for node what C++
+/// `psio::SchemaBuilder` builds from the same declarations made in the same
+/// order: the PSSZ bytes and the Json / IJson text of the two schemas are
+/// identical (`conformance/interface-vectors.json` pins one).
+///
+/// # The rules (C++ `schema_builder.hpp`; JS and Python follow them too)
+///
+/// * **Interning.** A type is in a schema once. The first
+///   [`insert`](Self::insert) of a type appends one entry to
+///   `Schema::types`; every later one is a reference (`Type{name}`) to it.
+/// * **Names.** A type with a schema name (a derived record or enum, C++: a
+///   reflected type) is entered under it. Every other type — an integer, a
+///   `Vec`, an `Option`, a tuple, a method's argument list — is entered as
+///   `@N`, where `N` is **the number of types interned before it, named
+///   ones included**. So `@N` is not the entry's index, and a number is
+///   skipped wherever a named type was interned: `@0 @1 @2 @3 Receipt @5`.
+/// * **Order.** A type takes its entry (and its number) *before* its
+///   children are visited, and children are visited in declaration order:
+///   members first to last, a list before its element's children, a map's
+///   key before its value. `Schema::types` is that pre-order.
+/// * **Annotated members.** A record member is its type's reference. A
+///   member with bounds (`#[psio(max = 32)] note: String`) first interns
+///   its plain type like any member, and is then the annotated type written
+///   inline, not interned: `Custom{BoundedList{@u8, 32}, "utf8"}`
+///   ([`bounds::SchemaAs`](crate::pssz::bounds::SchemaAs) has the plain
+///   type of each Rust type; a wrapper type such as `BoundedString<32>` is
+///   an interned type of its own, as C++ `psio::utf8_string<32>` is).
+/// * **Interfaces.** [`insert_interface`](Self::insert_interface) interns
+///   the types the interface owns (`types(...)`), then per function, in
+///   declaration order: the plain type of each parameter, the plain type of
+///   the result, and only then the annotated types of the parameters and of
+///   the result. It appends the `Interface`; it does not add the argument
+///   lists.
+/// * **Argument lists.** A method's argument list
+///   (`<module>::args::<method>`) is an anonymous type: an `@N` `Object`
+///   with the attribute `tuple`, whose members are the annotated parameter
+///   types (the plain types are not interned on its account).
+///   [`insert_named`](Self::insert_named) gives it a name, as an alias:
+///   `{"token.transfer", Type{@8}}` right after `@8`.
+///   [`insert_argument_lists`](Self::insert_argument_lists) does that for
+///   every method of an interface, as `<interface>.<method>`.
+/// * **Aliases.** `insert_named::<T>(name)` interns `T` and appends
+///   `{name, Type{T's entry}}` — nothing when `name` is `T`'s own name or
+///   already names that reference.
+///
+/// The schema therefore depends on the order of the calls, exactly as in
+/// C++: types then interfaces is another schema than interfaces then types,
+/// though the two describe the same thing.
 #[derive(Default)]
 pub struct SchemaBuilder {
     schema: Schema,
@@ -513,6 +561,32 @@ impl SchemaBuilder {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Interns `T` and gives it the name `name` as well (C++
+    /// `SchemaBuilder::insert<T>(name)`): the entry `{name, Type{T's entry}}`
+    /// is appended after `T`'s. Nothing is appended when `name` is the name
+    /// `T` already has, or already names `T`. A name another entry has, and
+    /// one that starts with `@`, is an error.
+    pub fn insert_named<T: ToPsszSchema>(&mut self, name: impl Into<String>) -> PsszResult<&mut Self> {
+        let name: String = name.into();
+        if name.starts_with('@') {
+            return Err(PsszError::new("pssz schema: a chosen type name does not start with @"));
+        }
+        let reference = self.insert::<T>()?;
+        if matches!(&reference.value, AnyValue::Type(own) if own.r#type == name) {
+            return Ok(self);
+        }
+        if let Some(existing) = self.schema.types.iter().find(|entry| entry.name == name) {
+            if *existing.r#type == reference {
+                return Ok(self);
+            }
+            return Err(PsszError::new("pssz schema: conflicting named types"));
+        }
+        self.owners.insert(name.clone(), erased_type_id::<T>());
+        self.schema.types.push(Member { name, r#type: Box::new(reference), attributes: vec![] });
+        Ok(self)
+    }
+    /// Interns `T` (C++ `SchemaBuilder::insert<T>()`) and returns the
+    /// reference to its entry; see the rules on [`SchemaBuilder`].
     pub fn insert<T: ToPsszSchema>(&mut self) -> PsszResult<AnyType> {
         let id = erased_type_id::<T>();
         if let Some(name) = self.names.get(&id) {

@@ -30,11 +30,11 @@
 //! assert!(psio::try_to_pssz(&long).is_err());
 //! let nine = psio::to_pssz(&vec![String::new(); 9]);
 //! assert!(psio::from_pssz::<Vec<String>>(&nine).is_ok());
-//! // The schema is the bounded types'.
-//! assert_eq!(
-//!     psio::pssz::schema_ir::schema_for::<Post>()?.0,
-//!     psio::pssz::schema_ir::schema_for::<Wrapped>()?.0
-//! );
+//! // The schema is the bounded types': the same type, with the annotated
+//! // member's nodes written inline where a wrapper type is a node of its own.
+//! use psio::pssz::{dynamic, schema_ir::schema_for};
+//! let ((a, post), (b, wrapped)) = (schema_for::<Post>()?, schema_for::<Wrapped>()?);
+//! assert!(dynamic::equivalent(&a, &post, &b, &wrapped, dynamic::Compare::Contract).ok);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -103,8 +103,11 @@
 //! An annotated member **is** the type the annotation describes:
 //! `Vec<String>` under `max = 8, element(max = 16)` is
 //! `BoundedList<BoundedString<16>, 8>`. It has that type's bound and
-//! widths at every depth, the same bytes, the same schema and the same
-//! checks in pSSZ, in Json / IJson text and in keys.
+//! widths at every depth, the same bytes, the same schema type and the same
+//! checks in pSSZ, in Json / IJson text and in keys. In the Schema IR the
+//! annotated type is written inline in the member, after the member's plain
+//! type is interned — the nodes C++ `SchemaBuilder` writes for
+//! `attr(tags, max<8> | element(utf8 | max<16>))` ([`SchemaAs`]).
 //!
 //! # How it works
 //!
@@ -643,6 +646,270 @@ tuple_bounds!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4));
 tuple_bounds!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG, 5));
 tuple_bounds!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG, 5), (H, SH, 6));
 tuple_bounds!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG, 5), (H, SH, 6), (I, SI, 7));
+
+// ── The Schema IR of an annotated position ──────────────────────────────────
+
+use crate::pssz_schema_ir as ir;
+use crate::pssz_schema_ir::{AnyType, SchemaBuilder, ToPsszSchema};
+
+/// The Schema IR of a value of this type under the annotation `S`: the nodes
+/// C++ `psio::SchemaBuilder` writes for the same declaration, in the order it
+/// writes them (`annotated_type<F>(annots)` of `schema_builder.hpp`).
+///
+/// C++ declares an annotated member as its plain type with the bounds beside
+/// it (`attr(note, utf8 | max<32>)` on a `std::string`), so a schema holds
+/// two things for it:
+///
+/// 1. the **plain type** ([`Plain`](SchemaAs::Plain)), interned as every
+///    type is (`insert<F>()`: a node of its own, `@N` or its name), whether
+///    or not anything then refers to it;
+/// 2. the **annotated type**, written *inline* where the member is — never a
+///    node of its own: `Custom{BoundedList{u8, 32}, "utf8"}`. Only what the
+///    annotation does not reach is a reference to an interned type (the
+///    `u8`, an element with nothing said about it).
+///
+/// The plain type of a Rust type is the type itself, with one exception that
+/// follows from what the annotation means in C++: a `String` *that a `max`
+/// lands on* is C++ `std::string` under `utf8 | max<N>`, so its plain type
+/// is [`RawString`] (the node of `std::string`). A `String` with no bound of
+/// its own is C++ `psio::utf8_string<>`, at any depth.
+///
+/// The described type ([`Bounds::As`]) still supplies the bytes, the widths
+/// and the checks; a schema of it (`BoundedList<BoundedString<16>, 8>`) has
+/// the same nodes, each interned, as the C++ wrapper types
+/// (`psio::bounded<psio::utf8_string<16>, 8>`) have.
+pub trait SchemaAs<S>: Bounds<S> {
+    /// The type C++ declares at this position (`F` of `insert<F>()`).
+    type Plain: ToPsszSchema;
+    /// The annotation says something a schema holds here (C++
+    /// `has_tree_specs_v`): a bound or a position below. Order constraints
+    /// are not in a schema.
+    const SPECS: bool;
+    /// The annotated type (C++ `annotated_type<F>(annots)`): inline nodes
+    /// down to what the annotation does not reach. Does not intern the
+    /// plain type first.
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType>;
+    /// The type of a record member or of a function's parameter / result:
+    /// the plain type is interned, then the annotated type is the member's
+    /// (C++ `build_record_member`).
+    fn member(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Self::Plain::schema(builder)?;
+        Self::annotated(builder)
+    }
+}
+
+fn node(value: ir::AnyValue) -> AnyType {
+    AnyType::new(value)
+}
+fn list_of(element: AnyType, max: Option<usize>) -> AnyType {
+    node(match max {
+        Some(max) => ir::AnyValue::BoundedList(ir::BoundedList { r#type: Box::new(element), maxCount: max as u64 }),
+        None => ir::AnyValue::List(ir::List { r#type: Box::new(element) }),
+    })
+}
+fn custom(inner: AnyType, id: &str) -> AnyType {
+    node(ir::AnyValue::Custom(ir::Custom { r#type: Box::new(inner), id: id.into() }))
+}
+fn is_byte<T: ?Sized>() -> bool {
+    ir::erased_type_id::<T>() == std::any::TypeId::of::<u8>()
+}
+
+impl<T: Clone + ToPsszSchema> SchemaAs<Plain> for T {
+    type Plain = T;
+    const SPECS: bool = false;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        T::schema(builder)
+    }
+}
+
+// C++ `std::string` under `utf8 | max<N>`.
+impl<const N: usize> SchemaAs<Max<N>> for String {
+    type Plain = RawString;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Ok(custom(list_of(u8::schema(builder)?, Some(N)), "utf8"))
+    }
+}
+// C++ `std::string` under `max<N>`.
+impl<const N: usize> SchemaAs<Max<N>> for RawString {
+    type Plain = RawString;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Ok(custom(list_of(u8::schema(builder)?, Some(N)), "string"))
+    }
+}
+
+impl<T: SchemaAs<E>, E, const N: usize> SchemaAs<Max<N, E>> for Vec<T> {
+    type Plain = Vec<T::Plain>;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        let list = list_of(T::annotated(builder)?, Some(N));
+        Ok(if is_byte::<T::Plain>() { custom(list, "hex") } else { list })
+    }
+}
+impl<T: SchemaAs<E>, E> SchemaAs<Each<E>> for Vec<T> {
+    type Plain = Vec<T::Plain>;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        // Nothing a schema holds below, and no bound: the plain type.
+        if !T::SPECS {
+            return Self::Plain::schema(builder);
+        }
+        Ok(list_of(T::annotated(builder)?, None))
+    }
+}
+impl<T: SchemaAs<E>, E, const M: usize> SchemaAs<Each<E>> for [T; M] {
+    type Plain = [T::Plain; M];
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        if !T::SPECS {
+            return Self::Plain::schema(builder);
+        }
+        Ok(node(ir::AnyValue::Array(ir::Array { r#type: Box::new(T::annotated(builder)?), len: M as u64 })))
+    }
+}
+
+impl<T: SchemaAs<E> + Ord, E, const N: usize> SchemaAs<Max<N, E>> for BTreeSet<T>
+where
+    T::As: Ord,
+    T::Plain: Ord,
+{
+    type Plain = BTreeSet<T::Plain>;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Ok(custom(list_of(T::annotated(builder)?, Some(N)), "set"))
+    }
+}
+impl<T: SchemaAs<E> + Ord, E> SchemaAs<Each<E>> for BTreeSet<T>
+where
+    T::As: Ord,
+    T::Plain: Ord,
+{
+    type Plain = BTreeSet<T::Plain>;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        if !T::SPECS {
+            return Self::Plain::schema(builder);
+        }
+        Ok(custom(list_of(T::annotated(builder)?, None), "set"))
+    }
+}
+
+impl<K: Ord + Clone + ToPsszSchema, V: Clone + ToPsszSchema, const N: usize> SchemaAs<Max<N>> for BTreeMap<K, V> {
+    type Plain = BTreeMap<K, V>;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Ok(custom(list_of(<(K, V)>::schema(builder)?, Some(N)), "map"))
+    }
+}
+/// The entry of a map under `keys(...)` / `values(...)`: the pair of the
+/// annotated types, inline, when either says something a schema holds (in
+/// this order: the key's types are interned first); else the interned pair.
+fn entry_of<K: SchemaAs<KS>, V: SchemaAs<VS>, KS, VS>(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+    if !(K::SPECS || V::SPECS) {
+        return <(K::Plain, V::Plain)>::schema(builder);
+    }
+    let key = K::annotated(builder)?;
+    let value = V::annotated(builder)?;
+    Ok(node(ir::AnyValue::Tuple(ir::Tuple { members: vec![Box::new(key), Box::new(value)] })))
+}
+impl<K: SchemaAs<KS> + Ord, V: SchemaAs<VS>, KS, VS, const N: usize> SchemaAs<Max<N, Entry<KS, VS>>> for BTreeMap<K, V>
+where
+    K::As: Ord,
+    K::Plain: Ord,
+{
+    type Plain = BTreeMap<K::Plain, V::Plain>;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        Ok(custom(list_of(entry_of::<K, V, KS, VS>(builder)?, Some(N)), "map"))
+    }
+}
+impl<K: SchemaAs<KS> + Ord, V: SchemaAs<VS>, KS, VS> SchemaAs<Each<Entry<KS, VS>>> for BTreeMap<K, V>
+where
+    K::As: Ord,
+    K::Plain: Ord,
+{
+    type Plain = BTreeMap<K::Plain, V::Plain>;
+    const SPECS: bool = true;
+    fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+        if !(K::SPECS || V::SPECS) {
+            return Self::Plain::schema(builder);
+        }
+        Ok(custom(list_of(entry_of::<K, V, KS, VS>(builder)?, None), "map"))
+    }
+}
+
+// An optional is looked through. When the annotation makes nothing else of
+// the payload than its plain type, the optional is the plain optional.
+macro_rules! schema_through_option {
+    ($([$($generics:tt)*] $spec:ty;)*) => {$(
+        impl<T: SchemaAs<$spec>, $($generics)*> SchemaAs<$spec> for Option<T> {
+            type Plain = Option<T::Plain>;
+            const SPECS: bool = T::SPECS;
+            fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+                if !T::SPECS {
+                    return Self::Plain::schema(builder);
+                }
+                let inner = T::annotated(builder)?;
+                if inner == T::Plain::schema(builder)? {
+                    return Self::Plain::schema(builder);
+                }
+                Ok(node(ir::AnyValue::Option(ir::Optional { r#type: Box::new(inner) })))
+            }
+        }
+    )*};
+}
+schema_through_option! {
+    [E, const N: usize] Max<N, E>;
+    [E] Each<E>;
+    [X] At<X>;
+    [R, X] Order<R, X>;
+}
+
+// The order constraints are not in a schema: the list's own annotation.
+macro_rules! ordered_schema {
+    ($([$($generics:tt)*] $list:ty, $item:ty;)*) => {$(
+        impl<T, R, S, $($generics)*> SchemaAs<Order<R, S>> for $list
+        where
+            $list: SchemaAs<S>,
+            R: Rule<$item>,
+        {
+            type Plain = <$list as SchemaAs<S>>::Plain;
+            const SPECS: bool = <$list as SchemaAs<S>>::SPECS;
+            fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+                <$list as SchemaAs<S>>::annotated(builder)
+            }
+        }
+    )*};
+}
+ordered_schema! {
+    [] Vec<T>, T;
+    [const M: usize] [T; M], T;
+}
+
+// A tuple with `at(I, ...)`: the tuple of the annotated elements, inline.
+macro_rules! tuple_schema {
+    ($(($ty:ident, $spec:ident)),+) => {
+        impl<$($ty: SchemaAs<$spec>, $spec),+> SchemaAs<At<($($spec,)+)>> for ($($ty,)+) {
+            type Plain = ($($ty::Plain,)+);
+            const SPECS: bool = true;
+            fn annotated(builder: &mut SchemaBuilder) -> PsszResult<AnyType> {
+                // (in order: an element's types are interned before the next's)
+                let mut members = Vec::new();
+                $(members.push(Box::new($ty::annotated(builder)?));)+
+                Ok(node(ir::AnyValue::Tuple(ir::Tuple { members })))
+            }
+        }
+    };
+}
+tuple_schema!((A, SA));
+tuple_schema!((A, SA), (B, SB));
+tuple_schema!((A, SA), (B, SB), (C, SC));
+tuple_schema!((A, SA), (B, SB), (C, SC), (D, SD));
+tuple_schema!((A, SA), (B, SB), (C, SC), (D, SD), (E, SE));
+tuple_schema!((A, SA), (B, SB), (C, SC), (D, SD), (E, SE), (G, SG));
+tuple_schema!((A, SA), (B, SB), (C, SC), (D, SD), (E, SE), (G, SG), (H, SH));
+tuple_schema!((A, SA), (B, SB), (C, SC), (D, SD), (E, SE), (G, SG), (H, SH), (I, SI));
 
 // ── Writing a value as the described type ───────────────────────────────────
 

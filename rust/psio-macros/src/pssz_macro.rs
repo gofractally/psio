@@ -1410,8 +1410,28 @@ fn schema_record(k: &syn::Path, fields: &Fields, info: RecordInfo, forms: Forms,
             return Err(syn::Error::new_spanned(members[i].field, "duplicate member name"));
         }
     }
-    // A member with bounds is described as the type its annotation says.
+    // A member with bounds is described as the type its annotation says:
+    // that type states the attributes with no type form (`lengthBound`).
     let types: Vec<_> = field_info(k, fields)?.into_iter().map(|(_, ty)| ty).collect();
+    // The member's node, as C++ SchemaBuilder writes it. A record member:
+    // its plain type is interned, and under an annotation the member is the
+    // annotated type, inline (`build_record_member`). A parameter of an
+    // argument list: the annotated type alone (`psio_annotated_tuple`).
+    let nodes: Vec<_> = members
+        .iter()
+        .map(|m| {
+            let ty = &m.field.ty;
+            Ok(match attrs::annotated(m.field, &m.attrs, k)? {
+                Some(attrs::Annotated { own, spec }) if arguments.is_some() => {
+                    quote!(<#own as #k::pssz::bounds::SchemaAs<#spec>>::annotated(builder)?)
+                }
+                Some(attrs::Annotated { own, spec }) => {
+                    quote!(<#own as #k::pssz::bounds::SchemaAs<#spec>>::member(builder)?)
+                }
+                None => quote!(<#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?),
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
     let member_attributes = members
         .iter()
         .map(|m| schema_int_forms(k, m.field, forms))
@@ -1433,7 +1453,7 @@ fn schema_record(k: &syn::Path, fields: &Fields, info: RecordInfo, forms: Forms,
     Ok(quote! {
         #k::pssz::schema_ir::AnyType::new(#k::pssz::schema_ir::AnyValue::Object(#k::pssz::schema_ir::Object {
             members: ::std::vec![#(#k::pssz::schema_ir::Member {
-                name: #names.into(), r#type: ::std::boxed::Box::new(<#types as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?),
+                name: #names.into(), r#type: ::std::boxed::Box::new(#nodes),
                 attributes: {
                     #[allow(unused_mut)]
                     let mut __attributes: ::std::vec::Vec<#k::pssz::schema_ir::Attribute> = ::std::vec![#(#member_attributes),*];
@@ -1582,7 +1602,12 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
     // owned form is. A type or const parameter makes a family of types,
     // each named by its full type name.
     let type_generic = input.generics.params.iter().any(|param| !matches!(param, syn::GenericParam::Lifetime(_)));
-    let schema_name = if let Some(name) = &opts.name {
+    let schema_name = if opts.arguments.is_some() {
+        // A method's argument list has no name of its own (C++: the
+        // argument tuple, an `@N` node); a schema names it with
+        // `SchemaBuilder::insert_named`.
+        quote!(::core::option::Option::None)
+    } else if let Some(name) = &opts.name {
         quote!(::core::option::Option::Some(#name.into()))
     } else if !type_generic {
         let text = name.to_string();

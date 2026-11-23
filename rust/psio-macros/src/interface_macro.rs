@@ -483,6 +483,7 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
     let mut records = Vec::new();
     let mut infos = Vec::new();
     let mut funcs = Vec::new();
+    let mut argument_lists = Vec::new();
     let mut arms = Vec::new();
     let mut proxies = Vec::new();
     for (index, m) in methods.iter().enumerate() {
@@ -603,16 +604,52 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 has_result: #has_result,
             }
         });
+        // C++ `build_func`: the plain type of each parameter and of the
+        // result is interned first, in order ...
+        let mut plain = Vec::new();
+        // ... then what the declaration says of them
+        // (`apply_member_annotations`): the annotated type, inline.
+        let mut annotated_params = Vec::new();
+        for (i, p) in m.params.iter().enumerate() {
+            let slot = quote::format_ident!("__plain_{}", i);
+            let ty = &p.ty;
+            match annotation(&p.attrs, ty, &k)? {
+                Some(crate::attrs::Annotated { own, spec }) => {
+                    plain.push(quote! {
+                        let #slot = <<#own as #k::pssz::bounds::SchemaAs<#spec>>::Plain
+                            as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?;
+                    });
+                    annotated_params.push(quote!(<#own as #k::pssz::bounds::SchemaAs<#spec>>::annotated(builder)?));
+                }
+                None => {
+                    plain.push(quote! {
+                        let #slot = <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?;
+                    });
+                    annotated_params.push(quote!(#slot));
+                }
+            }
+        }
         let (result_schema, result_attributes) = match &m.result {
             Some(ty) => {
-                let ty = wire_type(returns, ty, &k)?;
+                let wire = wire_type(returns, ty, &k)?;
+                let node = match &result_bound {
+                    Some(crate::attrs::Annotated { own, spec }) => {
+                        plain.push(quote! {
+                            let __plain_result = <<#own as #k::pssz::bounds::SchemaAs<#spec>>::Plain
+                                as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?;
+                        });
+                        quote!(<#own as #k::pssz::bounds::SchemaAs<#spec>>::annotated(builder)?)
+                    }
+                    None => {
+                        plain.push(quote! {
+                            let __plain_result = <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?;
+                        });
+                        quote!(__plain_result)
+                    }
+                };
                 (
-                    quote! {
-                        ::core::option::Option::Some(::std::boxed::Box::new(
-                            <#ty as #k::pssz::schema_ir::ToPsszSchema>::schema(builder)?,
-                        ))
-                    },
-                    quote!(#k::interface::result_attributes::<#ty>()),
+                    quote!(::core::option::Option::Some(::std::boxed::Box::new(#node))),
+                    quote!(#k::interface::result_attributes::<#wire>()),
                 )
             }
             None => (quote!(::core::option::Option::None), quote!(::std::vec::Vec::new())),
@@ -643,10 +680,11 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
             }
             None => quote!(),
         };
-        funcs.push(quote! {
+        funcs.push(quote! {{
+            #(#plain)*
             #k::pssz::schema_ir::Func {
                 name: #name.into(),
-                params: ::std::vec![#(#k::interface::param::<#param_wire>(builder, #func_param_names)?),*],
+                params: ::std::vec![#(#k::interface::param::<#param_wire>(#func_param_names, #annotated_params)),*],
                 result: #result_schema,
                 attributes: {
                     #[allow(unused_mut)]
@@ -656,7 +694,8 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                     __attributes
                 },
             }
-        });
+        }});
+        argument_lists.push(quote!(builder.insert_named::<args::#ident>(#schema_name)?;));
         let call = match m.receiver {
             Receiver::None => quote!(<__T as #trait_ident>::#ident(#(__args.#param_idents),*)),
             _ => quote!(<__T as #trait_ident>::#ident(target #(, __args.#param_idents)*)),
@@ -725,8 +764,8 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                     builder: &mut #k::pssz::schema_ir::SchemaBuilder,
                 ) -> #k::pssz::PsszResult<#k::pssz::schema_ir::Interface> {
                     // The order C++ SchemaBuilder::build_interface walks:
-                    // the owned types, then each function's parameters and
-                    // result.
+                    // the owned types, then per function the plain types of
+                    // its parameters and result, then their annotated types.
                     let type_names = ::std::vec![
                         #(#k::interface::type_name_for::<#owned_types>(builder)?),*
                     ];
@@ -737,6 +776,13 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                         funcs,
                         attributes: ::std::vec![],
                     })
+                }
+                #[allow(unused_variables)]
+                fn insert_argument_lists(
+                    builder: &mut #k::pssz::schema_ir::SchemaBuilder,
+                ) -> #k::pssz::PsszResult<()> {
+                    #(#argument_lists)*
+                    ::core::result::Result::Ok(())
                 }
             }
 

@@ -340,7 +340,7 @@ fn max_fields_is_the_cap_on_the_number_of_fields() {
     // In the Schema IR it is the Object's attribute, beside maxDynamicData.
     let mut builder = schema_ir::SchemaBuilder::new();
     builder.insert::<Capped>().unwrap();
-    builder.insert::<service::args::put>().unwrap();
+    builder.insert_named::<service::args::put>("Service.put").unwrap();
     builder.insert_interface::<service::Tag>().unwrap();
     let schema = builder.finish();
     assert_eq!(attribute(&schema, "Capped", "maxFields").as_deref(), Some("4"));
