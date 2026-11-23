@@ -492,8 +492,9 @@ psio::to_pssz(TxSuccessView{id, num, traceView});    // the bytes of the record 
 This is PSSZ (`to_pssz`, `pssz_size`, `encode_pssz_checked`,
 `validate_pssz<Source>`, which validates as the wire type) and `key`
 (`to_key`: `std::string_view`, C strings, `std::reference_wrapper`, views,
-tuples of references). Decoding *into* a source does not compile: decode
-`psio::wire_type_t<Source>`, or view the bytes.
+tuples of references). Decoding *into* a source compiles for the shapes
+that can borrow from the bytes ([below](#decoding-into-a-record-that-borrows));
+for the others, decode `psio::wire_type_t<Source>`, or view the bytes.
 
 **A view as a value** re-emits its bytes when they are what the position
 needs, and is decoded and encoded again when they are not. The second case
@@ -561,6 +562,45 @@ used exactly when the call would use it. The number of arguments is checked
 first ("too few" / "too many arguments passed to the method").
 `psio::method_arguments<T, I, Args...>` is the same test as a concept, for
 constraining a proxy's call operator.
+
+### Decoding into a record that borrows
+
+A record may declare members that point into the bytes it is decoded from
+instead of owning a copy. `psio::from_pssz<T>(bytes)` (validating),
+`psio::from_pssz<T>(psio::trusted{bytes})`, `psio::decode<T>(psio::pssz{}, bytes)`
+and `psio::decode_pssz_checked` fill them; the result is valid for as long
+as `bytes` is.
+
+```cpp
+template <typename Body> struct BasicHttpRequest { std::string host; ...; Body body; };
+auto req = psio::from_pssz<BasicHttpRequest<std::span<const char>>>(bytes);  // body not copied
+psio::method_args_to_pssz<Svc, 0>(req);   // an argument for BasicHttpRequest<std::vector<char>>
+```
+
+| Member declared as | Borrows |
+|--------------------|---------|
+| `std::string_view` | a string member's characters |
+| `std::span<const B>`, `B` a byte type (`char`, `signed char`, `unsigned char`, `std::byte`, `std::int8_t`, `std::uint8_t`), dynamic extent | a `std::vector<B>` member's bytes |
+| `psio::pssz_view<X>` (`psio::view<const X, psio::pssz>`) | a member `X`, where its bytes are a standalone encoding of `X`: every reflected record, and any type when neither the record's cap nor a member annotation narrows its offset widths |
+| `std::optional` of one of these | present or absent |
+| a reflected record with such members, to any depth, and `std::vector` / `std::optional` / `std::array` of such records | member by member |
+
+Owning members of the same record are decoded as usual. The types of the
+first three rows can also be decoded by themselves
+(`psio::from_pssz<std::string_view>(bytes)`).
+
+Compile errors, each naming this list: a `std::span<const E>` of elements
+wider than a byte (the wire is not aligned for `E`) or of variable-size
+elements, a span with a fixed extent, a `std::vector<std::string_view>`, a
+`std::reference_wrapper`, a `const char*`, a tuple of references, and a view
+member whose position narrows its widths. `psio::from_pssz<T>` of a
+temporary `std::vector<char>` is deleted for a `T` that borrows
+(`psio::pssz_borrows_v<T>`).
+
+Validation is of the owning type (`validate_pssz<T>` validates
+`wire_type_t` member by member), bounds and `utf8` on a borrowed member are
+enforced as on the owning one, and such a record `psio::packs_as` the owning
+record: it can be packed again, stored, or passed as a method argument.
 
 ### "A `U` packs as a `T`": `psio::packs_as`
 
@@ -694,8 +734,9 @@ taken as `psio::pssz_view`: `invoke_method_pssz` refuses at compile time and
 says to take it by value (or to state the bound in the type).
 
 `validate_pssz<Tuple>` of a tuple type that names a view (or any other
-non-owning type) validates the tuple of wire types; decoding *into* such a
-type does not compile (decode `psio::wire_type_t<Tuple>`, or view the bytes).
+non-owning type) validates the tuple of wire types; decoding *into* a tuple
+of views or references does not compile (decode `psio::wire_type_t<Tuple>`,
+view the bytes, or use `method_params_from_pssz`).
 
 ## The generic layer
 

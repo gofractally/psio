@@ -330,6 +330,97 @@ namespace psio {
                     ... && true);
          }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
 
+      // ── Borrowing decode ──────────────────────────────────────────────
+      //
+      // A record may declare a member as a type that BORROWS from the
+      // bytes it is decoded from instead of owning a copy. Decoding such a
+      // record fills those members with pointers into the input, which
+      // must outlive the record; everything else is decoded as usual.
+      // The member shapes that borrow:
+      //
+      //   std::string_view                        a string member's characters
+      //   std::span<const B>, B a byte type       a std::vector<B> member's
+      //     (char, signed char, unsigned char,    bytes (dynamic extent)
+      //      std::byte, std::int8_t, std::uint8_t)
+      //   psio::pssz_view<X> / view<const X, pssz>  a member X, where its bytes
+      //                                           are a standalone encoding
+      //                                           of X (every reflected
+      //                                           record; any type when the
+      //                                           position carries neither a
+      //                                           cap nor a bound)
+      //   std::optional of one of these           present or not
+      //   a reflected record with such members    to any depth, and inside
+      //                                           std::vector / std::optional
+      //                                           / std::array / std::variant
+      //                                           / tuples of records
+      //
+      // Nothing else that only refers to a value can be decoded into: a
+      // std::span<const E> of elements wider than a byte (the wire is not
+      // aligned for E) or of variable-size elements, a std::span with a
+      // fixed extent, a std::vector<std::string_view>, a
+      // std::reference_wrapper, a const char*, a tuple of references. Those
+      // are compile errors that name this list.
+      template <typename D>
+      inline constexpr bool is_byte_span_v = false;
+      template <typename B>
+         requires(sizeof(B) == 1 && std::is_const_v<B> &&
+                  ((std::is_integral_v<B> && !std::is_same_v<std::remove_const_t<B>, bool>) ||
+                   std::is_same_v<std::remove_const_t<B>, std::byte>))
+      inline constexpr bool is_byte_span_v<std::span<B, std::dynamic_extent>> = true;
+
+      // A view type (view.hpp), told without including it.
+      template <typename D>
+      concept borrowed_view = ::psio::is_source_v<D> && requires(const D& v) {
+         typename D::format_type;
+         typename D::element_type;
+         { v._psio_data() } -> std::convertible_to<std::span<const char>>;
+         D{std::span<const char>{}};
+      };
+
+      // Whether a member declared as the source type D can borrow.
+      template <typename D>
+      inline constexpr bool borrowable_source_v =
+         std::is_same_v<D, std::string_view> || is_byte_span_v<D> || borrowed_view<D>;
+      template <typename D>
+         requires ::psio::is_source_v<D>
+      inline constexpr bool borrowable_source_v<std::optional<D>> = borrowable_source_v<D>;
+
+      // Whether a T can be decoded into: an owning type, a source that
+      // borrows, or a record whose members are such.
+      template <typename T>
+      inline constexpr bool decodable_v =
+         ::psio::is_source_v<T> ? borrowable_source_v<T> : true;
+      template <typename T>
+         requires(::psio::Reflected<T> && !std::is_enum_v<T> && !::psio::is_source_v<T>)
+      inline constexpr bool decodable_v<T> =
+         []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (decodable_v<std::remove_cvref_t<
+                       typename ::psio::reflect<T>::template member_type<Is>>> &&
+                    ... && true);
+         }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
+
+      // Whether decoding a T borrows from the input anywhere (so that the
+      // result must not outlive the bytes): a borrowing source, or a
+      // record / container that holds one.
+      template <typename T>
+      inline constexpr bool borrows_v = ::psio::is_source_v<T> && borrowable_source_v<T>;
+      template <typename T>
+         requires(::psio::Reflected<T> && !std::is_enum_v<T> && !::psio::is_source_v<T>)
+      inline constexpr bool borrows_v<T> =
+         []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (borrows_v<std::remove_cvref_t<
+                       typename ::psio::reflect<T>::template member_type<Is>>> ||
+                    ... || false);
+         }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
+      template <typename E, typename Al>
+         requires(!::psio::is_source_v<std::vector<E, Al>>)
+      inline constexpr bool borrows_v<std::vector<E, Al>> = borrows_v<E>;
+      template <typename E>
+         requires(!::psio::is_source_v<std::optional<E>>)
+      inline constexpr bool borrows_v<std::optional<E>> = borrows_v<E>;
+      template <typename E, std::size_t N>
+      inline constexpr bool borrows_v<std::array<E, N>> = borrows_v<E>;
+
       // ── Sources (wire_type.hpp) ───────────────────────────────────────
       //
       // The encode-side walks (preflight, sizing, writing) take the value
@@ -2013,7 +2104,7 @@ namespace psio {
             constexpr bool is_arith =
                std::is_arithmetic_v<E> && !std::is_same_v<E, bool>;
             constexpr bool is_memcpy_record =
-               (Record<E> || ::psio::is_transparent_v<E>) &&
+               (Record<E> || ::psio::is_transparent_v<E>) && plain_members_v<E> &&
                std::is_trivially_copyable_v<E> &&
                is_fixed_v<E> && fixed_size_of<E>() == sizeof(E);
             if constexpr (is_arith || is_memcpy_record)
@@ -2033,7 +2124,7 @@ namespace psio {
          {
             // Memcpy fast path mirrors decode_value's, but writes
             // directly into `out` instead of returning a fresh T.
-            if constexpr (::psio::is_dwnc_v<T> &&
+            if constexpr (::psio::is_dwnc_v<T> && plain_members_v<T> &&
                           std::is_trivially_copyable_v<T> &&
                           is_fixed_v<T>)
                if constexpr (fixed_size_of<T>() == sizeof(T))
@@ -2123,7 +2214,7 @@ namespace psio {
             constexpr bool is_arith =
                std::is_arithmetic_v<T> && !std::is_same_v<T, bool>;
             constexpr bool is_memcpy_record =
-               (Record<T> || ::psio::is_transparent_v<T>) &&
+               (Record<T> || ::psio::is_transparent_v<T>) && plain_members_v<T> &&
                std::is_trivially_copyable_v<T> && fixed_size_of<T>() == sizeof(T);
             if constexpr (is_arith || is_memcpy_record)
             {
@@ -2199,6 +2290,63 @@ namespace psio {
       // the writer's fixed-region header: known trailing optional fields the
       // writer pruned decode as None, and unknown appended slots are skipped
       // while still delimiting the last known variable payload.
+      // A member (or value) declared as the borrowing type D, whose wire
+      // type is F, read from src[pos, end): pointers into `src`, nothing
+      // copied. See "Borrowing decode" above for the shapes.
+      template <std::size_t LegacyW, bool Auto, typename D, typename F, typename A>
+      D borrow_value(std::span<const char> src, std::size_t pos, std::size_t end)
+      {
+         static_assert(borrowable_source_v<D>,
+                       "psio::pssz: this type only refers to a value and cannot borrow it from "
+                       "the bytes being decoded. The members that borrow are: std::string_view "
+                       "(a string), std::span<const B> of a byte type B with dynamic extent (a "
+                       "std::vector<B>), psio::pssz_view<X> (a member X), and std::optional of "
+                       "those. A std::span of wider or variable-size elements, a "
+                       "std::vector<std::string_view>, a std::reference_wrapper, a const char* "
+                       "and a tuple of references cannot: declare the owning type "
+                       "(psio::wire_type_t<T>), or read the bytes through a view");
+         if (pos > end || end > src.size())
+            size_failure("pssz: value span out of bounds");
+         if constexpr (std::is_same_v<D, std::string_view>)
+            return std::string_view{src.data() + pos, end - pos};
+         else if constexpr (is_byte_span_v<D>)
+            return D{reinterpret_cast<typename D::pointer>(src.data() + pos), end - pos};
+         else if constexpr (is_std_optional_v<D>)
+         {
+            using DV = typename D::value_type;
+            using FV = typename F::value_type;
+            if constexpr (!optional_uses_selector_v<FV>)
+            {
+               if (pos >= end)
+                  return D{};
+               return D{borrow_value<LegacyW, Auto, DV, FV, A>(src, pos, end)};
+            }
+            else
+            {
+               if (pos >= end)
+                  size_failure("pssz: optional selector missing");
+               if (static_cast<unsigned char>(src[pos]) == 0)
+                  return D{};
+               return D{borrow_value<LegacyW, Auto, DV, FV, A>(src, pos + 1, end)};
+            }
+         }
+         else
+         {
+            constexpr std::size_t W = [] {
+               if constexpr (Auto) return width_for<F, A>();
+               else return LegacyW;
+            }();
+            static_assert(
+               view_verbatim_v<typename D::format_type, W, Auto, F, A>,
+               "psio::pssz: this member cannot be borrowed as a view: the cap of the record "
+               "that holds it, or the member's annotations, narrow the offset widths of its "
+               "encoding, so its bytes are not a standalone encoding of its type (or the view "
+               "is of another format than the bytes). Declare the member by value, or state "
+               "the bound in its type");
+            return D{std::span<const char>(src.data() + pos, end - pos)};
+         }
+      }
+
       template <std::size_t LegacyW, bool Auto, Record T, typename A, std::size_t... Is>
       void record_decode_into(std::span<const char> src, std::size_t pos,
                               std::size_t end, T& out,
@@ -2251,6 +2399,23 @@ namespace psio {
                       src.data() + spans[Is].begin,
                       spans[Is].end - spans[Is].begin));
                 }
+                else if constexpr (!std::is_same_v<std::remove_cvref_t<decltype(fref)>, F>)
+                {
+                   // A member declared as a type that refers to its value
+                   // (std::string_view, a byte span, a view): it borrows
+                   // the member's bytes from `src`.
+                   fref = borrow_value<W, Auto, std::remove_cvref_t<decltype(fref)>, F,
+                                       field_ann<T, A, Is>>(src, spans[Is].begin,
+                                                            spans[Is].end);
+                   if constexpr (ann::has_value_checks_v<std::remove_cvref_t<F>, eff>)
+                      if (auto st = ::psio::check_member_annotations(
+                             decode_value<W, Auto, F, field_ann<T, A, Is>>(
+                                src, spans[Is].begin, spans[Is].end),
+                             record_member_annotations<T, Is>::value,
+                             "pssz: member length_bound violated", "pssz");
+                          !st.ok())
+                         status_failure(st);
+                }
                 else
                 {
                    decode_into<W, Auto, F, field_ann<T, A, Is>>(src, spans[Is].begin,
@@ -2281,14 +2446,30 @@ namespace psio {
       }
 
       template <std::size_t LegacyW, bool Auto, typename T, typename A>
+      T decode_owning(std::span<const char> src, std::size_t pos, std::size_t end);
+
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
       T decode_value(std::span<const char> src, std::size_t pos,
                      std::size_t end)
       {
-         static_assert(!::psio::is_source_v<T> && plain_members_v<T>,
-                       "psio::pssz: a type that only refers to a value (a psio::view, a "
-                       "std::string_view, a std::span, a tuple of references, a record with such "
-                       "a member) cannot be decoded into: decode psio::wire_type_t<T>, or read "
-                       "the bytes through a view");
+         static_assert(decodable_v<T>,
+                       "psio::pssz: a type that only refers to a value cannot be decoded into, "
+                       "unless it can borrow from the bytes: a record whose non-owning members "
+                       "are std::string_view, std::span<const B> of a byte type, "
+                       "psio::pssz_view<X>, or std::optional of those (and those types "
+                       "themselves). A tuple of references, a std::span of wider elements, a "
+                       "std::vector<std::string_view>, a std::reference_wrapper or a record "
+                       "with such a member cannot be decoded into: decode "
+                       "psio::wire_type_t<T>, or read the bytes through a view");
+         if constexpr (::psio::is_source_v<T>)
+            return borrow_value<LegacyW, Auto, T, ::psio::wire_type_t<T>, A>(src, pos, end);
+         else
+            return decode_owning<LegacyW, Auto, T, A>(src, pos, end);
+      }
+
+      template <std::size_t LegacyW, bool Auto, typename T, typename A>
+      T decode_owning(std::span<const char> src, std::size_t pos, std::size_t end)
+      {
          constexpr std::size_t W = [] {
             if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
@@ -2488,7 +2669,7 @@ namespace psio {
             // Memcpy fast path for DWNC packed memcpy-layout records
             // (where wire bytes match memory bytes). Single-record
             // decode hits this; vec<E> already had its own bulk path.
-            if constexpr (::psio::is_dwnc_v<T> &&
+            if constexpr (::psio::is_dwnc_v<T> && plain_members_v<T> &&
                           std::is_trivially_copyable_v<T> &&
                           is_fixed_v<T>)
                if constexpr (fixed_size_of<T>() == sizeof(T))
@@ -4171,6 +4352,16 @@ namespace psio {
    };
 
    PSIO_FORMAT_HELPERS(pssz)
+
+   // Decoding a type that borrows from its input (a record with
+   // std::string_view / byte-span / view members: "Borrowing decode" above)
+   // from a temporary buffer would leave it dangling: not allowed.
+   template <typename T>
+      requires detail::pssz_impl::borrows_v<T>
+   T from_pssz(std::vector<char>&&) = delete;
+   // Whether psio::from_pssz<T>(bytes) returns a T that points into `bytes`.
+   template <typename T>
+   inline constexpr bool pssz_borrows_v = detail::pssz_impl::borrows_v<T>;
 
    // ── Checked compatible reads ──────────────────────────────────────────
    //

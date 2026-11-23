@@ -158,6 +158,37 @@ psio_packs_as_compile_fail(size_as PA_FAIL_SIZE_AS "pssz_source_of<unsigned long
 psio_packs_as_compile_fail(method_arg PA_FAIL_METHOD_ARG
    "no viable conversion from returned value of type 'Wrong'")
 
+# Borrowing decode: from_pssz into a record whose members are
+# std::string_view / byte spans / views pointing into the input; natively
+# and with exceptions and RTTI disabled.
+psio_add_test(psio_pssz_borrow_tests pssz_borrow_tests.cpp)
+add_executable(psio_pssz_borrow_noexceptions_test pssz_borrow_noexceptions.cpp)
+target_include_directories(psio_pssz_borrow_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_borrow_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_borrow_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_borrow_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_borrow_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_borrow_noexceptions_test COMMAND psio_pssz_borrow_noexceptions_test)
+add_test(NAME psio_pssz_borrow_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_borrow_fail.cpp)
+function(psio_borrow_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_pssz_borrow_${NAME}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/pssz_borrow_fail.cpp)
+   set_tests_properties(psio_pssz_borrow_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_BORROW_CANNOT "cannot borrow it from the bytes being decoded")
+psio_borrow_compile_fail(wide_span BORROW_FAIL_WIDE_SPAN "${PSIO_BORROW_CANNOT}")
+psio_borrow_compile_fail(string_span BORROW_FAIL_STRING_SPAN "${PSIO_BORROW_CANNOT}")
+psio_borrow_compile_fail(view_list BORROW_FAIL_VIEW_LIST "${PSIO_BORROW_CANNOT}")
+psio_borrow_compile_fail(reference BORROW_FAIL_REFERENCE "${PSIO_BORROW_CANNOT}")
+psio_borrow_compile_fail(narrowed_view BORROW_FAIL_NARROWED_VIEW
+   "this member cannot be borrowed as a view")
+psio_borrow_compile_fail(temporary BORROW_FAIL_TEMPORARY "call to deleted function 'from_pssz'")
+
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.
 psio_add_test(psio_mutable_view_tests mutable_view_tests.cpp)
