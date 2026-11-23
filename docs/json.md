@@ -337,10 +337,12 @@ One typed reader per language defines the accepted set. In C++ it backs
   (`kMaxValidationDepth`), on typed and skipped values alike.
 
 The C++ fail-fast `psio::decode` raises the reader's error as
-`codec_exception` (aborts when exceptions are disabled). For `psio::json`
-only, it keeps one leniency of the old decoder: a missing non-optional
-member is left value-initialized. `validate` and `decode_json_checked` are
-the entry points for untrusted text.
+`codec_exception` (aborts when exceptions are disabled). It runs the same
+reader as `validate` and `decode_json_checked` and accepts exactly the same
+texts, in both formats: a missing member that is not optional is an error
+here too. (`psio::json` used to leave such a member value-initialized in
+this one entry point; a type that wants a member to be omissible declares
+it `std::optional`.)
 
 ## Member lookup
 

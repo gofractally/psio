@@ -412,13 +412,14 @@ TEST_CASE("helpers: an owning buffer gives both views", "[helpers]")
 
 TEST_CASE("helpers: the checked decode accepts what validate accepts", "[helpers]")
 {
-   // JSON: psio::decode fills a missing member with its default; validate
-   // rejects the text, and so does the checked decode.
+   // JSON: a missing member that is not optional is an error in every
+   // reader: validate, the checked decode and the fail-fast decode.
    const std::string_view partial = R"({"id":7,"name":"alice"})";
    const auto             text    = span_of(partial);
    CHECK_FALSE(psio::validate_json<Rec>(text).ok());
    CHECK_THROWS_AS(psio::from_json<Rec>(text), psio::codec_exception);
-   CHECK(psio::from_json<Rec>(psio::trusted{text}) == Rec{7, "alice", {}});
+   CHECK_THROWS_AS(psio::from_json<Rec>(psio::trusted{text}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::decode<Rec>(psio::json{}, text), psio::codec_exception);
 
    // A string literal is its characters, without the terminator.
    CHECK(psio::from_json<Rec>(R"({"id":7,"name":"alice","xs":[1,2,3]})") == sample);

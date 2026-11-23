@@ -1055,7 +1055,6 @@ namespace psio {
       struct typed_reader
       {
          C&   c;
-         bool lenient_missing = false;
          // The status of a violated invariant, reported unchanged.
          codec_status invariant{};
       };
@@ -1589,7 +1588,7 @@ namespace psio {
                       if (out)
                          (out->*(R::template member_pointer<Is>)).reset();
                    }
-                   else if (!r.lenient_missing)
+                   else
                       complete = false;
                 }()),
                ...);
@@ -1950,9 +1949,9 @@ namespace psio {
 
       // Reads exactly one value of T, which must be the whole document.
       template <typename Fmt, typename T, typename C>
-      codec_status read_with(C& cursor, T* out, bool lenient_missing)
+      codec_status read_with(C& cursor, T* out)
       {
-         typed_reader<C> r{cursor, lenient_missing};
+         typed_reader<C> r{cursor};
          if (read_value<Fmt, int_mode::natural, T>(r, out))
             (void)cursor.finish();
          if (!r.invariant.ok())
@@ -1963,7 +1962,6 @@ namespace psio {
       // Reads `bytes` as one T through the syntax layer `parser` selects.
       template <typename Fmt, typename T>
       codec_status read_document(std::span<const char> bytes, T* out,
-                                 bool        lenient_missing,
                                  json_parser parser = json_parser::automatic)
       {
 #if PSIO_HAVE_SIMDJSON
@@ -1972,22 +1970,22 @@ namespace psio {
             if (parser == json_parser::simdjson)
             {
                simdjson_cursor cursor(bytes, Fmt::i_json);
-               return read_with<Fmt, T>(cursor, out, lenient_missing);
+               return read_with<Fmt, T>(cursor, out);
             }
             simdjson_index_cursor cursor(bytes, Fmt::i_json);
-            return read_with<Fmt, T>(cursor, out, lenient_missing);
+            return read_with<Fmt, T>(cursor, out);
          }
 #else
          (void)parser;
 #endif
          json_text_cursor cursor(bytes, Fmt::i_json);
-         return read_with<Fmt, T>(cursor, out, lenient_missing);
+         return read_with<Fmt, T>(cursor, out);
       }
 
       // `text` has at least json_padding readable bytes after it: simdjson
       // parses it in place, with no copy.
       template <typename Fmt, typename T>
-      codec_status read_document(padded_json text, T* out, bool lenient_missing,
+      codec_status read_document(padded_json text, T* out,
                                  json_parser parser = json_parser::automatic)
       {
 #if PSIO_HAVE_SIMDJSON
@@ -1996,16 +1994,16 @@ namespace psio {
             if (parser == json_parser::simdjson)
             {
                simdjson_cursor cursor(text, Fmt::i_json);
-               return read_with<Fmt, T>(cursor, out, lenient_missing);
+               return read_with<Fmt, T>(cursor, out);
             }
             simdjson_index_cursor cursor(text, Fmt::i_json);
-            return read_with<Fmt, T>(cursor, out, lenient_missing);
+            return read_with<Fmt, T>(cursor, out);
          }
 #else
          (void)parser;
 #endif
          json_text_cursor cursor(text.text, Fmt::i_json);
-         return read_with<Fmt, T>(cursor, out, lenient_missing);
+         return read_with<Fmt, T>(cursor, out);
       }
 
       // ── Tag operations shared by psio::json and psio::ijson ──────────────
@@ -2044,8 +2042,7 @@ namespace psio {
                              std::span<const char> bytes)
          {
             T out{};
-            if (auto st = read_document<Derived, T>(bytes, &out,
-                                                    !Derived::i_json);
+            if (auto st = read_document<Derived, T>(bytes, &out);
                 !st.ok())
                ::psio::codec_abort(st.error());
             return out;
@@ -2057,7 +2054,7 @@ namespace psio {
          [[nodiscard]] static codec_status decode_checked(
             std::span<const char> bytes, T& out)
          {
-            return read_document<Derived, T>(bytes, &out, false);
+            return read_document<Derived, T>(bytes, &out);
          }
 
          // ── size_of ─────────────────────────────────────────────────────
@@ -2085,7 +2082,7 @@ namespace psio {
             // (A type's maxDynamicData caps its encoded PSSZ size, not the
             // length of its text: the text of a value within the cap may be
             // longer than the cap.)
-            return read_document<Derived, T>(bytes, nullptr, false);
+            return read_document<Derived, T>(bytes, nullptr);
          }
 
          template <typename T>
@@ -2093,7 +2090,7 @@ namespace psio {
                                         Derived, T*,
                                         std::span<const char> bytes) noexcept
          {
-            return read_document<Derived, T>(bytes, nullptr, false);
+            return read_document<Derived, T>(bytes, nullptr);
          }
 
          // ── make_boxed ──────────────────────────────────────────────────
@@ -2105,7 +2102,7 @@ namespace psio {
             std::span<const char> bytes) noexcept
          {
             auto out = std::make_unique<T>();
-            if (!read_document<Derived, T>(bytes, out.get(), !Derived::i_json)
+            if (!read_document<Derived, T>(bytes, out.get())
                     .ok())
                return nullptr;
             return out;
@@ -2152,7 +2149,7 @@ namespace psio {
       Fmt, std::span<const char> text, T& out, json_parser parser = json_parser::automatic)
    {
       out = T{};
-      return detail::json_impl::read_document<Fmt, T>(text, &out, false, parser);
+      return detail::json_impl::read_document<Fmt, T>(text, &out, parser);
    }
 
    // A string literal / C string is its characters, without the terminator
@@ -2174,7 +2171,7 @@ namespace psio {
       Fmt, padded_json text, T& out, json_parser parser = json_parser::automatic)
    {
       out = T{};
-      return detail::json_impl::read_document<Fmt, T>(text, &out, false, parser);
+      return detail::json_impl::read_document<Fmt, T>(text, &out, parser);
    }
 
    // Checks that `text` is one T without building it.
@@ -2182,7 +2179,7 @@ namespace psio {
    [[nodiscard]] codec_status validate_json(Fmt, std::span<const char> text,
                                             json_parser parser = json_parser::automatic)
    {
-      return detail::json_impl::read_document<Fmt, T>(text, nullptr, false, parser);
+      return detail::json_impl::read_document<Fmt, T>(text, nullptr, parser);
    }
    template <typename T, detail::json_impl::json_family Fmt>
    [[nodiscard]] codec_status validate_json(Fmt fmt, const char* text,
@@ -2195,7 +2192,7 @@ namespace psio {
    [[nodiscard]] codec_status validate_json(Fmt, padded_json text,
                                             json_parser parser = json_parser::automatic)
    {
-      return detail::json_impl::read_document<Fmt, T>(text, nullptr, false, parser);
+      return detail::json_impl::read_document<Fmt, T>(text, nullptr, parser);
    }
 
    // Appends the text of `value` to `out`. On failure `out` is restored.

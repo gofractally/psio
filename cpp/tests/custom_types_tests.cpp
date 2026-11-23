@@ -1052,8 +1052,7 @@ TEST_CASE("invariant: json and ijson readers and writers", "[invariant][json]")
       g.pair[1] = static_cast<Level>(100);
       text_refuses(g, "Level: not a listed level");
    }
-   // Without the leniency of psio::json's decode, a missing member is not
-   // an invariant matter.
+   // A missing member is not an invariant matter.
    CHECK_FALSE(psio::validate<Range>(psio::json{}, sp(std::string{R"({"lo":1})"})).ok());
 }
 
