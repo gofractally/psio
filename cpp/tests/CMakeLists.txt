@@ -518,6 +518,9 @@ add_test(NAME psio_schema_builder_identity_test COMMAND psio_schema_builder_iden
 
 # emit_wit (emit_wit.hpp) — Schema IR → WIT text emitter.
 psio_add_test(psio_emit_wit_tests emit_wit_tests.cpp)
+# The WIT text of the interface fixture's schema, pinned (the reference for
+# the other implementations' WIT emitters), with its known defects.
+psio_add_test(psio_interface_wit_tests interface_wit_tests.cpp)
 
 # pSSZ round-trip on Schema IR — the canonical schema-schema wire form.
 psio_add_test(psio_schema_pssz_tests schema_pssz_tests.cpp)
