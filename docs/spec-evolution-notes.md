@@ -675,6 +675,72 @@ in each language is small because map / set ordering already exists.
 
 ---
 
+## E-012 — The WIT text of an interface's schema
+
+**Status.** Report. `cpp/tests/interface_wit_tests.cpp` pins what C++
+`psio::emit_wit` writes today for the schema of
+`conformance/interface-vectors.json`. JS `emitWit` prints the same two
+defects because it mirrors C++; there is no correct reference yet.
+
+**The text** (C++, today):
+
+```
+package iface_conf;
+
+interface token {
+  @maxFields(8)
+  @maxDynamicData(256)
+  transfer: func(to: string, amount: u64, memo: option<string>) -> receipt;
+  names: func(limit: u32) -> list<string>/* @psio:max=4 */;
+  @maxDynamicData(64)
+  note: func(text: string);
+  add: func(: u32, : u32) -> u64;
+  ping: func();
+  batch: func(names: list<string>/* @psio:max=4 */, tip: u8) -> bool;
+}
+
+record receipt {
+  id: u64,
+  note: string
+}
+type token.transfer = /* TODO: inline record not supported */;
+type token.names = /* TODO: inline record not supported */;
+type token.note = /* TODO: inline record not supported */;
+type token.add = /* TODO: inline record not supported */;
+type token.ping = /* TODO: inline record not supported */;
+type token.batch = /* TODO: inline record not supported */;
+```
+
+**Defects, and what a fix has to decide.**
+
+1. *Positional parameters:* `add: func(: u32, : u32)`. A method declared
+   without names has `""` parameter names in the `Func`; WIT requires an
+   identifier. Options: synthesize `arg0`, `arg1`, … (WIT stays valid; a
+   parser must not read those back as declared names — the argument list's
+   `tuple` attribute, `"positional"`, already says which it is), or refuse
+   to emit an interface that has an unnamed parameter.
+2. *Argument-list types:* the fixture registers each argument list as a
+   named type `token.<method>` whose node is a reference to an interned
+   `Object`. The emitter resolves the reference, meets an `Object` in type
+   position and prints the TODO; and `token.transfer` is not a WIT
+   identifier (kebab-case, no dots). Options: do not emit a named type
+   whose `Object` carries the `tuple` attribute (it restates the `func`
+   line above it); or emit it as `record token-transfer-args { … }` when
+   every member is named and skip it when positional. The same resolution
+   step would make any alias of a record print the TODO, so the general
+   fix is: a named type whose resolved node is an `Object` / `Struct` /
+   `Variant` is declared as `record` / `variant` under its own name.
+3. *Bounds* (by design, valid WIT): a bounded list is
+   `list<T>/* @psio:max=N */`; the bound of a string (`to` ≤ 16, `memo` ≤
+   80, `text` ≤ 62, the elements of `names`) and `utf8` are dropped,
+   because both raw and UTF-8 strings print as `string`.
+
+**For the JS fix.** Match the pinned C++ text for everything outside
+defects 1 and 2; change those two in both implementations together, and
+update `interface_wit_tests.cpp` in the same change.
+
+---
+
 ## Conventions for this file
 
 - Each entry has a stable id (E-NNN). IDs are append-only — never reused
