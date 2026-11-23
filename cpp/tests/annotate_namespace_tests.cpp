@@ -364,7 +364,17 @@ namespace
          CHECK_FALSE(psio::validate<R>(psio::pssz{}, std::span<const char>{frame}).ok());
          std::string text;
          CHECK_FALSE(psio::encode_json_checked(psio::json{}, bad, text).ok());
-         const auto key = psio::encode(psio::key{}, bad);
+         // No key writer takes the value; the key an unchecked writer would
+         // produce is rejected by the readers.
+         CHECK_THROWS_AS(psio::encode(psio::key{}, bad), psio::codec_exception);
+         Bytes refused;
+         CHECK_FALSE(psio::encode_key_checked(bad, refused).ok());
+         CHECK_FALSE(psio::encode_key_checked(*bad_ref, refused).ok());
+         Bytes key;
+         {
+            psio::detail::order_key_stream unchecked{key};
+            psio::detail::key_impl::encode_value(bad, unchecked);
+         }
          CHECK_FALSE(psio::validate<T>(psio::key{}, std::span<const char>{key}).ok());
          CHECK_FALSE(psio::validate<R>(psio::key{}, std::span<const char>{key}).ok());
       }
