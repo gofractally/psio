@@ -202,9 +202,11 @@ namespace psio {
                using R = ::psio::reflect<U>;
                return []<std::size_t... Is>(std::index_sequence<Is...>) {
                   return ((fixed_payload<typename R::template member_type<Is>>() &&
-                           !::psio::has_as_override_v<typename ::psio::effective_annotations_for<
-                              U, typename R::template member_type<Is>,
-                              R::template member_pointer<Is>>::value_t>) && ...);
+                           !::psio::has_binary_as_override_v<
+                              typename R::template member_type<Is>,
+                              typename ::psio::effective_annotations_for<
+                                 U, typename R::template member_type<Is>,
+                                 R::template member_pointer<Is>>::value_t>) && ...);
                }(std::make_index_sequence<R::member_count>{});
             }
          }
@@ -290,7 +292,7 @@ namespace psio {
       {
          using F = std::remove_cvref_t<FieldType>;
          namespace ann = ::psio::detail::ann;
-         if constexpr (::psio::has_as_override_v<AnnotsTuple>)
+         if constexpr (::psio::has_binary_as_override_v<F, AnnotsTuple>)
             return std::nullopt; // opaque alternate presentation
          else if constexpr (::psio::max_dynamic_data_v<F>.has_value())
             return ::psio::max_dynamic_data_v<F>;
@@ -377,8 +379,16 @@ namespace psio {
          else if constexpr (is_bitvector<U>::value) return (is_bitvector<U>::bits + 7) / 8;
          else if constexpr (is_bitlist<U>::value) return (is_bitlist<U>::bits + 7) / 8 + 1;
          else if constexpr (::psio::is_transparent_v<U>)
-            // The member's bound, its declared budget included.
-            return child_payload<::psio::transparent_inner_t<U>>();
+         {
+            // The member's bound, its declared budget included; with the
+            // bounds the type gives its member (transparent.hpp), the bound
+            // of that bounded type.
+            if constexpr (::psio::transparent_member_checked_v<U>)
+               return max_field_with_annots<::psio::transparent_inner_t<U>>(
+                  ::psio::transparent_member_annotations<U>::value);
+            else
+               return child_payload<::psio::transparent_inner_t<U>>();
+         }
          else if constexpr (::psio::Record<U>)
          {
             using R = ::psio::reflect<U>;
@@ -392,7 +402,7 @@ namespace psio {
                   using eff = ::psio::effective_annotations_for<
                      U, F, R::template member_pointer<I>>;
                   if constexpr (!fixed_payload<F>() ||
-                                ::psio::has_as_override_v<typename eff::value_t>)
+                                ::psio::has_binary_as_override_v<F, typename eff::value_t>)
                      ++slots;
                   rest = add(rest, max_field_with_annots<F>(eff::value));
                };
@@ -400,6 +410,16 @@ namespace psio {
             }(std::make_index_sequence<R::member_count>{});
             return record_fit(slots, rest);
          }
+         else if constexpr (requires { typename U::psio_annotated_tuple; })
+            // An annotated tuple (a method's argument tuple): the bound of
+            // its elements under their annotations. Its cap is not in it —
+            // max_encoded_size is the INFERRED bound (docs/pssz-spec.md 3.2),
+            // as for a capped record; the cap rules the width and is what
+            // the tuple contributes to a type that holds it
+            // (max_field_with_annots).
+            return tuple_bound<typename U::tuple_type>(
+               U::psio_annotations,
+               std::make_index_sequence<std::tuple_size_v<typename U::tuple_type>>{});
          else if constexpr (std::is_same_v<U, std::string> || ::psio::detail::is_assoc_v<U> ||
                             is_std_vector<U>::value || is_std_optional<U>::value ||
                             is_utf8_string<U>::value || is_std_array<U>::value ||
@@ -427,32 +447,26 @@ namespace psio {
 
    // ── effective_max_dynamic_v ───────────────────────────────────────────
    //
-   // Composes an explicit `maxDynamicData(N)` cap (from annotate.hpp's
-   // `max_dynamic_data_v<T>`) with the bound inferred from per-field
-   // `length_bound` annotations (`max_encoded_size<T>`).  The explicit
-   // cap WINS DOWNWARD only — overriding upward defeats the purpose of
-   // an upper-bound assertion.
+   // docs/pssz-spec.md 3.1 / 16: the number a type's automatic offset width
+   // is the width class of.
    //
-   //   cap present, bound present → min(cap, bound)
-   //   cap present, bound nullopt → cap          (cap is the only bound)
-   //   cap nullopt, bound present → bound        (no override; trust inferred)
-   //   cap nullopt, bound nullopt → nullopt      (caller picks conservative width)
+   //   explicit maxDynamicData(N)  → N. An explicit cap always rules: it is
+   //                                 the type's lifetime width promise and is
+   //                                 not reduced to the bound inferred from
+   //                                 the fields the type has today
+   //   no cap                      → max_encoded_size<T>(), the inferred
+   //                                 bound; nullopt when a field is unbounded
    //
-   // Retained downward-bound utility for consumers needing the tighter actual
-   // bound. Automatic PSSZ width selection uses the declared budget directly
-   // instead: its lifetime width promise must not shrink to current fields.
+   // There is no min(explicit cap, inferred bound). auto_pssz_width<T>() is
+   // the width class of this value (4 for nullopt).
    template <typename T>
    inline constexpr std::optional<std::size_t> effective_max_dynamic_v = []
    {
-      constexpr auto cap   = max_dynamic_data_v<T>;
-      constexpr auto bound = max_encoded_size<T>();
-      if constexpr (cap.has_value() && bound.has_value())
-         return std::optional<std::size_t>{
-            (*cap < *bound) ? *cap : *bound};
-      else if constexpr (cap.has_value())
+      constexpr auto cap = max_dynamic_data_v<T>;
+      if constexpr (cap.has_value())
          return cap;
       else
-         return bound;
+         return max_encoded_size<T>();
    }();
 
 }  // namespace psio

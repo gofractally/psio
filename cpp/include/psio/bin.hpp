@@ -366,7 +366,7 @@ namespace psio {
                       typename ::psio::effective_annotations_for<
                          T, F,
                          R::template member_pointer<Is>>::value_t;
-                   if constexpr (::psio::has_as_override_v<eff>)
+                   if constexpr (::psio::has_binary_as_override_v<F, eff>)
                    {
                       using Tag = ::psio::adapter_tag_of_t<eff>;
                       using Proj = ::psio::adapter<
@@ -431,7 +431,7 @@ namespace psio {
                       typename ::psio::effective_annotations_for<
                          T, F,
                          R::template member_pointer<Is>>::value_t;
-                   if constexpr (::psio::has_as_override_v<eff>)
+                   if constexpr (::psio::has_binary_as_override_v<F, eff>)
                    {
                       // Member-level adapter: opaque [varuint length +
                       // bytes]. No nested record slots in sizes[].
@@ -619,7 +619,7 @@ namespace psio {
                             R::template member_pointer<Is>>::value_t;
                       // Member-level overrides emit opaque adapter bytes
                       // — no nested record slots required for them.
-                      if constexpr (::psio::has_as_override_v<eff>)
+                      if constexpr (::psio::has_binary_as_override_v<F, eff>)
                          return;
                       else if constexpr (!fully_fixed<F>())
                          k += bin_count_records(
@@ -792,7 +792,7 @@ namespace psio {
                             typename ::psio::effective_annotations_for<
                                T, F,
                                R::template member_pointer<Is>>::value_t;
-                         if constexpr (::psio::has_as_override_v<eff>)
+                         if constexpr (::psio::has_binary_as_override_v<F, eff>)
                          {
                             using Tag = ::psio::adapter_tag_of_t<eff>;
                             using Proj = ::psio::adapter<
@@ -1093,7 +1093,7 @@ namespace psio {
                          typename ::psio::effective_annotations_for<
                             T, F,
                             R::template member_pointer<Is>>::value_t;
-                      if constexpr (::psio::has_as_override_v<eff>)
+                      if constexpr (::psio::has_binary_as_override_v<F, eff>)
                       {
                          using Tag = ::psio::adapter_tag_of_t<eff>;
                          using Proj = ::psio::adapter<

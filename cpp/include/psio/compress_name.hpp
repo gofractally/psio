@@ -49,12 +49,14 @@ change based on the prior element.
 //   method_to_number(string_view) → u64
 //   number_to_method(u64)         → std::string
 //   is_hash_name(u64)             → true when input did not compress
-//                                    (bit 7 set; the u64 carries a
+//                                    (bit 56 set; the u64 carries a
 //                                    fallback hash, not arithmetic-
 //                                    coded bits).
 //
-// Wire-compatible with psio v1 — the frequency tables below are the
-// authoritative source.
+// The frequency tables below are those of psio v1 and are the
+// authoritative source. A name is given its compressed number only when
+// that number decodes back to the name; v1 kept a cut-off code for names
+// whose code overflowed 64 bits (see method_to_number).
 
 #include <cstdint>
 #include <limits>
@@ -255,7 +257,22 @@ namespace psio
          return g(state[0] ^ state[1] ^ state[2] ^ state[3] ^ input.size());
       }
 
-      // TODO: what happened to the _-elimination rule?
+      inline constexpr bool is_hash_name(uint64_t h);
+      constexpr bool        method_decodes_to(uint64_t number, std::string_view text);
+
+      // The number of a method name.
+      //
+      //   - a name the coder can represent exactly: its compressed number,
+      //     and number_to_method(number) is the name in canonical form
+      //     (lower case; a digit or '_' as the letter of its symbol);
+      //   - any other name made of the coder's characters: a hash of its
+      //     bytes with bit 56 set (is_hash_name), written "#" + 16 letters;
+      //   - "#" + 16 letters of a hash number: that number;
+      //   - the empty name, a name with a character outside the alphabet,
+      //     malformed "#" text: 0.
+      //
+      // So for every n = method_to_number(s) != 0:
+      //   method_to_number(number_to_method(n)) == n.
       inline constexpr uint64_t method_to_number(std::string_view m_input)
       {
          if (m_input.size() == 0)
@@ -263,17 +280,23 @@ namespace psio
 
          if (m_input[0] == '#')
          {
+            // The text of a hash number: '#' and sixteen of the letters
+            // "eaiotnrslcuhdpmy", one per 4 bits. Anything else that starts
+            // with '#' is not a method name and has no number: 0. So is a
+            // well-formed text whose number is not a hash number (bit 56
+            // clear): number_to_method would not write it back.
             if (m_input.size() != 17)
-               return -1;
+               return 0;
 
             uint64_t output = 0;
             for (uint32_t i = 1; i < 17; ++i)
             {
-               uint64_t sym = uint8_t((func_model::char_to_symbol[uint8_t(m_input[i])]) - 1);
-               sym <<= 4 * (i - 1);
-               output |= sym;
+               const uint8_t symbol = func_model::char_to_symbol[uint8_t(m_input[i])];
+               if (symbol < 1 || symbol > 16)
+                  return 0;
+               output |= uint64_t(symbol - 1) << (4 * (i - 1));
             }
-            return output;
+            return (output & (uint64_t(0x01) << (64 - 8))) ? output : 0;
          }
 
          func_model                       m_model;
@@ -401,6 +424,16 @@ namespace psio
          if (m_in_itr != m_input.end() || c != '\0')
             m_output = 0;
 
+         // A compressed number is the name's only if it decodes back to the
+         // name (in its canonical form: method_decodes_to). The code of some
+         // names does not: its last bits run past 64 and are cut
+         // ("getSymbolType" read back as "getsymboltyp"), it lands on a hash
+         // number (bit 56), or it passes a pair of letters the model gives
+         // no frequency. Such a name takes the hash form, like any other
+         // name that does not fit.
+         if (m_output != 0 && (is_hash_name(m_output) || !method_decodes_to(m_output, m_input)))
+            m_output = 0;
+
          // TODO: replace with hash function which has been ported to other languages
          // TODO: why is this different from (and somewhat redundant with) the hashing
          //       in hash_name()?
@@ -413,29 +446,19 @@ namespace psio
          return m_output;
       }  // name_to_number
 
+      // Whether a number is a hash number rather than a compressed name:
+      // bit 56. method_to_number never returns a compressed number with
+      // that bit set.
       inline constexpr bool is_hash_name(uint64_t h)
       {
          return (h & (uint64_t(0x01) << (64 - 8))) > 0;
       }
 
-      inline std::string number_to_method(uint64_t input)
+      // The arithmetic decoder: emit(char) for every character the
+      // compressed number `input` decodes to. Not for hash numbers.
+      template <typename Emit>
+      constexpr bool decode_compressed_method(uint64_t input, Emit&& emit)
       {
-         if (not input)
-            return std::string();
-         //if (input & (uint64_t(0x01) << (64 - 8)))
-         if (is_hash_name(input))
-         {
-            std::string str = "#";
-            /// then it is a hash
-            uint64_t r = input;
-            for (uint32_t i = 0; i < 16; ++i)
-            {
-               str += func_model::symbol_to_char[uint8_t((r & 0x0f)) + 1];
-               r >>= 4;
-            }
-            return str;
-         }
-
          typedef typename func_model::code_value code_value;
          typedef typename func_model::prob       prob;
 
@@ -458,9 +481,6 @@ namespace psio
             return (current_byte & last_mask) != 0;
          };
 
-         std::string out;
-         out.reserve(15);
-
          code_value high  = func_model::MAX_CODE;
          code_value low   = 0;
          code_value value = 0;
@@ -474,7 +494,7 @@ namespace psio
             code_value range = high - low + 1;
 
             if (range == 0)
-               return "RUNTIME LOGIC ERROR";
+               return false;
 
             code_value scaled_value = ((value - low + 1) * m_model.getCount() - 1) / range;
             int        c;
@@ -482,10 +502,10 @@ namespace psio
             if (c == '\0')
                break;
 
-            out += m_model.symbol_to_char[uint8_t(c)];
+            emit(m_model.symbol_to_char[uint8_t(c)]);
 
             if (p.count == 0)
-               return "RUNTIME LOGIC ERROR";
+               return false;
 
             high = low + (range * p.high) / p.count - 1;
             low  = low + (range * p.low) / p.count;
@@ -518,6 +538,44 @@ namespace psio
                value += get_bit() ? 1 : 0;
             }
          }
+         return true;
+      }
+
+      // Whether the compressed `number` decodes to exactly the canonical
+      // form of `text`: each character as the letter of its symbol (the
+      // coding ignores case, and reads a digit or '_' as a letter's symbol).
+      constexpr bool method_decodes_to(uint64_t number, std::string_view text)
+      {
+         std::size_t at   = 0;
+         bool        same = true;
+         const bool  ok   = decode_compressed_method(number, [&](char c) {
+            same = same && at < text.size() &&
+                   func_model::symbol_to_char[func_model::char_to_symbol[uint8_t(text[at])]] == c;
+            ++at;
+         });
+         return ok && same && at == text.size();
+      }
+
+      inline std::string number_to_method(uint64_t input)
+      {
+         if (not input)
+            return std::string();
+         if (is_hash_name(input))
+         {
+            std::string str = "#";
+            /// then it is a hash
+            uint64_t r = input;
+            for (uint32_t i = 0; i < 16; ++i)
+            {
+               str += func_model::symbol_to_char[uint8_t((r & 0x0f)) + 1];
+               r >>= 4;
+            }
+            return str;
+         }
+         std::string out;
+         out.reserve(15);
+         if (!decode_compressed_method(input, [&](char c) { out += c; }))
+            return "RUNTIME LOGIC ERROR";
          return out;
       }
 

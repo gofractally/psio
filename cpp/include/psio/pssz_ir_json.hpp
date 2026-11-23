@@ -276,6 +276,21 @@ class JsonNames
 namespace json_detail
 {
 
+// The text form of a record node (schema_builder.hpp, an argument list).
+enum class tuple_text : std::uint8_t
+{
+   none,        // a record: an object
+   named,       // an object keyed by the member names; a reader also takes the array
+   positional,  // the array
+};
+inline tuple_text tuple_form(const std::vector<Attribute> &attributes) noexcept
+{
+   const auto *attribute = psio::pssz_ir::detail::find_attribute(attributes, "tuple");
+   if (!attribute || !attribute->value)
+      return tuple_text::none;
+   return *attribute->value == "positional" ? tuple_text::positional : tuple_text::named;
+}
+
 enum class int_form : std::uint8_t
 {
    natural,
@@ -964,6 +979,33 @@ template <JsonCursor C> class Reader
       return true;
    }
 
+   // The members of an argument list, given positionally: exactly one
+   // element per member.
+   bool record_from_array(const std::vector<Member> &members, Value &out)
+   {
+      Record values;
+      values.reserve(members.size());
+      std::size_t index = 0;
+      if (!array_items(members.size(), true, [&] {
+             const Member &member = members[index++];
+             if (!member.type.get())
+                return c.fail("pssz IR: null schema box");
+             Value value;
+             if (!read(*member.type, member_form(member.attributes, ijson), 0, value))
+                return false;
+             std::optional<detail::LengthBound> bound;
+             if (!detail::parse_length_bound(member.attributes, bound).ok())
+                return c.fail("pssz IR: malformed lengthBound attribute");
+             if (bound && !nested_member(schema, *member.type) && !admits(*bound, value))
+                return c.fail("json: member length_bound violated");
+             values.emplace_back(member.name, std::move(value));
+             return true;
+          }))
+         return false;
+      out = std::move(values);
+      return true;
+   }
+
    bool variant(const schema_types::Variant &type, [[maybe_unused]] std::size_t n, Value &out)
    {
       std::size_t index = type.members.size();
@@ -1138,7 +1180,28 @@ template <JsonCursor C> class Reader
                 return true;
              }
              else if constexpr (std::is_same_v<T, Object> || std::is_same_v<T, Struct>)
+             {
+                // An argument list (the `tuple` attribute): "positional" is
+                // the array; "named" is the object, and a reader takes the
+                // positional array as well.
+                switch (json_detail::tuple_form(t.attributes))
+                {
+                   case json_detail::tuple_text::positional:
+                      return record_from_array(t.members, out);
+                   case json_detail::tuple_text::named:
+                   {
+                      json_kind kind;
+                      if (!c.kind(kind))
+                         return false;
+                      if (kind == json_kind::array)
+                         return record_from_array(t.members, out);
+                      return record(t.members, n, out);
+                   }
+                   case json_detail::tuple_text::none:
+                      break;
+                }
                 return record(t.members, n, out);
+             }
              else if constexpr (std::is_same_v<T, schema_types::Variant>)
                 return variant(t, n, out);
              else if constexpr (std::is_same_v<T, Nested>)
@@ -1487,7 +1550,10 @@ class Writer
                 if (!fields)
                    return w.fail("pssz IR: ordered record value required");
                 const Value absent = Value::none();
-                w.put('{');
+                // An argument list without parameter names is the array.
+                const bool positional =
+                    json_detail::tuple_form(t.attributes) == json_detail::tuple_text::positional;
+                w.put(positional ? '[' : '{');
                 bool first = true;
                 for (const auto &member : t.members)
                 {
@@ -1516,11 +1582,14 @@ class Writer
                    if (!first)
                       w.put(',');
                    first = false;
-                   psio::detail::json_impl::write_string(w, member.name, false);
-                   w.put(':');
+                   if (!positional)
+                   {
+                      psio::detail::json_impl::write_string(w, member.name, false);
+                      w.put(':');
+                   }
                    write(*member_type, *field, member_form(member.attributes, ijson), n + 1);
                 }
-                w.put('}');
+                w.put(positional ? ']' : '}');
              }
              else if constexpr (std::is_same_v<T, schema_types::Variant>)
              {
@@ -1630,6 +1699,20 @@ template <psio::detail::json_impl::json_family Fmt>
    return run(cursor);
 }
 
+// A string literal / C string is its characters, without the terminator.
+template <psio::detail::json_impl::json_family Fmt>
+[[nodiscard]] codec_status json_to_value(const schema_types::Schema &schema,
+                                         const schema_types::AnyType &root, Fmt format,
+                                         const char *text, Value &output,
+                                         const JsonNames *names = nullptr,
+                                         json_parser parser = json_parser::automatic,
+                                         const CustomHandlers *custom = nullptr)
+{
+   const std::string_view view{text};
+   return json_to_value(schema, root, format, std::span<const char>{view.data(), view.size()},
+                        output, names, parser, custom);
+}
+
 // Appends the text of `value`; `out` is unchanged on failure. The handlers'
 // checks run on the value's custom types before any text is returned
 // (`run_checks = false`: the value was just decoded with the same registry).
@@ -1675,6 +1758,19 @@ template <psio::detail::json_impl::json_family Fmt>
        !status.ok())
       return status;
    return encode_auto(schema, root, value, out);
+}
+
+template <psio::detail::json_impl::json_family Fmt>
+[[nodiscard]] codec_status json_to_pssz(const schema_types::Schema &schema,
+                                        const schema_types::AnyType &root, Fmt format,
+                                        const char *text, std::vector<char> &out,
+                                        const JsonNames *names = nullptr,
+                                        json_parser parser = json_parser::automatic,
+                                        const CustomHandlers *custom = nullptr)
+{
+   const std::string_view view{text};
+   return json_to_pssz(schema, root, format, std::span<const char>{view.data(), view.size()},
+                       out, names, parser, custom);
 }
 
 // PSSZ bytes of a `root` value -> its JSON / I-JSON text (appended to `out`,

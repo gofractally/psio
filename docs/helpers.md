@@ -142,9 +142,9 @@ The checked decode accepts exactly what `validate_F<T>` accepts:
   unknown members are dropped (the compatible rule of `psio::validate`).
   `psio::validate_strict<T>(psio::pssz{}, bytes)` rejects such a frame;
   `psio::decode_pssz_checked` reports whether there were any.
-- `json`, `ijson`: every member must be present. `psio::decode<T>(psio::json{}, text)`,
-  and so `from_json<T>(psio::trusted{text})`, fills a missing member with its
-  default instead.
+- `json`, `ijson`: every member that is not optional must be present, in the
+  checked and in the trusted decode alike (`psio::decode<T>(psio::json{}, text)`,
+  `from_json<T>(psio::trusted{text})`).
 - `json`, `ijson`, `key`: the reader checks as it reads, so the checked decode
   reads the input once, and the trusted decode still fails through
   `psio::codec_abort` on malformed input.

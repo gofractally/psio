@@ -323,7 +323,7 @@ namespace chain::state {
       PSIO_REFLECT(account,
                    attr(id, json_string),          // field: JSON integer form
                    attr(owner, max<32>),           // field: length bound
-                   attr(tags, max<4> | sorted),    // field: several specs
+                   attr(tags, max<4> | sorted),    // field: several specs, all enforced
                    method(balance_of, asset),
                    definitionWillNotChange(),      // type: fixed layout
                    maxFields(8),                   // type: field-count cap
@@ -337,7 +337,7 @@ The type-level keywords:
 | keyword | meaning | query |
 |---|---|---|
 | `definitionWillNotChange()` | fixed layout: no extensibility header, no appended fields | `psio::is_dwnc_v<T>` |
-| `maxFields(N)` | cap on the field count | `psio::max_fields_v<T>` |
+| `maxFields(N)` | cap on the number of fields the record will ever have (N ≤ 255): more fields do not compile, and a later revision may not exceed or raise it. Also `method(name, ..., maxFields(N))` for a method's parameters | `psio::max_fields_v<T>` |
 | `maxDynamicData(N)` | cap on the encoded size; selects the offset width | `psio::max_dynamic_data_v<T>` |
 | `transparent()` | the type has exactly one data member and **is** that member in every core format (pssz, key, json, ijson, Schema IR), while staying its own type for a text adapter, an invariant, its schema node and its names (`psio/transparent.hpp`; `docs/pssz-spec.md` §5.10) | `psio::is_transparent_v<T>`, `psio::transparent_inner_t<T>` |
 | `invariant(fn)` | the type's semantic invariant: `fn(const T&) noexcept -> psio::codec_status`, run by every checking reader and every writer of the core formats (`psio/invariant.hpp`; `docs/pssz-spec.md` §18) | `psio::has_invariant_v<T>`, `psio::check_invariant(value)` |
@@ -358,7 +358,11 @@ struct SubjectPublicKeyInfo {
 `transparent()` is also `PSIO_TYPE_ATTRS(T, psio::transparent)`. It does not
 compile with zero or several data members, with `definitionWillNotChange` /
 `maxFields` / `maxDynamicData` (a transparent type has no record layout),
-with an annotation on its member, or over a `std::optional`. `invariant(fn)`
+or over a `std::optional`. Its member may carry the annotations that make it
+a bounded type — `attr(text, utf8 | max<80>)`: the wrapper is then exactly
+`psio::utf8_string<80>` in bytes, width inference, schema and checks
+(`docs/pssz-spec.md` §5.10) — and no other (`exact` / `min`, `sorted`, an
+integer text form, `as<Tag>` do not compile there). `invariant(fn)`
 takes any expression callable as `fn(const T&)`: in a class body a static
 member declared anywhere in the class, at namespace scope a name looked up
 where the macro is written, or a lambda. It must be `noexcept` and return

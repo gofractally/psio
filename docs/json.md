@@ -156,11 +156,15 @@ Input, in both formats, for a named enum:
 | `"active:2"` | both; they must agree |
 
 An unknown name, a name whose stated number disagrees (`"active:3"`), and a
-non-canonical or out-of-range number are errors. A number that names no
-enumerator is accepted where the reader's type can hold it: always in C++
-and through a schema; in Rust only when the enum has a catch-all variant
-(`#[psio(other)] Unknown(i32)`), otherwise it is an error. When two
-enumerators share a value, the first declared name is written.
+non-canonical or out-of-range number are errors in every reader. A number
+that names no enumerator is a well-formed value (`docs/pssz-spec.md` §4.5
+states the rule per layer): the text layer and the schema-driven codecs
+accept it everywhere, and a typed reader accepts it where its type can hold
+it — always in C++ and JavaScript; in Rust only when the enum has a
+catch-all variant (`#[psio(other)] Unknown(i32)`); in Python only with
+`@psio.enum(repr, other=True)`. Otherwise it is an error of that typed
+reader. When two enumerators share a value, the first declared name is
+written.
 
 ### Maps and sets
 
@@ -211,6 +215,36 @@ values.
 - A C++ container whose comparator or equality merges keys the encoding
   distinguishes cannot hold what was read: `decode` reports `json: map
   container merged distinct keys`.
+
+### Method arguments
+
+The arguments of a method are, in binary, the tuple of its parameters
+(`docs/pssz-spec.md` §16): positional, and that does not change. In text an
+argument list has two forms, and which one is *written* depends on whether
+the declaration has parameter names:
+
+| the method declares | written | read |
+|---|---|---|
+| a name for every parameter | an **object** keyed by parameter name, members in declaration order: `{"to":"bob","amount":5,"memo":null}` | that object by the record rule — members in any order, the last of a repeated key, unknown keys skipped, a missing optional argument is None, any other missing argument an error — **or** the positional array `["bob",5,null]` with exactly one element per parameter |
+| no names (or not for every parameter) | the positional **array**: `[1,2]` | the array only |
+
+Named arguments are for people and for tools; the array is what a
+dispatcher that only knows positions writes. Neither is how a call is
+dispatched (calls are PSSZ), so a reader takes both. A method with no
+parameters is `{}` (and reads `[]` too).
+
+In the Schema IR an argument list is the `Object` of its parameters with the
+attribute `tuple`: `"named"` (the members carry the parameter names) or
+`"positional"` (the members are named `"0"`, `"1"`, …). The attribute
+changes no byte — an `Object` is positional on the wire like every record —
+and tells a schema-driven codec which of the two rows above applies. An
+`Object` without it is a record: an object in text, never an array.
+
+C++: `psio::reflect<T>::method_arg_tuple<I>` (a `psio::annotated_tuple`) is
+the argument list, named when `method(name, p1, p2, ...)` lists every
+parameter. Rust: `args::<method>` (parameters always have names).
+JavaScript: `argumentTuple({...})`. Python: `psio.arguments(...)`. The
+shared rows are `conformance/interface-vectors.json`.
 
 ### Variant alternative names
 
@@ -337,10 +371,12 @@ One typed reader per language defines the accepted set. In C++ it backs
   (`kMaxValidationDepth`), on typed and skipped values alike.
 
 The C++ fail-fast `psio::decode` raises the reader's error as
-`codec_exception` (aborts when exceptions are disabled). For `psio::json`
-only, it keeps one leniency of the old decoder: a missing non-optional
-member is left value-initialized. `validate` and `decode_json_checked` are
-the entry points for untrusted text.
+`codec_exception` (aborts when exceptions are disabled). It runs the same
+reader as `validate` and `decode_json_checked` and accepts exactly the same
+texts, in both formats: a missing member that is not optional is an error
+here too. (`psio::json` used to leave such a member value-initialized in
+this one entry point; a type that wants a member to be omissible declares
+it `std::optional`.)
 
 ## Member lookup
 
@@ -802,11 +838,34 @@ Custom { type: <the wire type>, id: "<the type's id>" }
 ```
 
 The wire type says exactly what the bytes are; the id names the type.
-(The ids PSIO itself gives a binary meaning to — `bool`, `char`, `string`,
-`utf8`, `hex`, `bitvector`, `bitlist`, `map`, `set`, `box` — are fixed; every other id
-never changes the bytes or the widths.) A transparent type with neither a
-text form nor an invariant is not custom: it is a named alias of its
-member's type.
+A transparent type with neither a text form nor an invariant is not custom:
+it is a named alias of its member's type.
+
+**Reserved ids.** PSIO's own types use `Custom` nodes too, and the
+schema-driven codecs read a fixed meaning into each of their ids:
+
+| id | on | meaning |
+|---|---|---|
+| `bool` | `Int{1}` | a boolean |
+| `char` | `Int{8}` | a character |
+| `string`, `utf8` | a list of `u8` | a raw string, a UTF-8 string |
+| `hex` | a list or array of bytes | bytes, written as hex in `ijson` |
+| `bitvector`, `bitlist` | an array / a bounded list of `Int{1}` | the bit types |
+| `map`, `set` | a list (of 2-tuples for a map) | entries in canonical key order |
+| `box` | any type | the type, held indirectly |
+| `unknown` | — | a type the schema builder had no node for; not readable |
+| `time-point…`, `duration…`, `monotonic…` | an 8/16/32/64-bit `Int` | a time value (`docs/time.md`); the word alone or followed by `-<unit>` |
+
+A custom type cannot take one of these ids — it would be read as the
+built-in type. Every language refuses it where the id is declared: C++ at
+compile time (`schema_custom_id`: the id of a text adapter, of
+`PSIO_INVARIANT`, or the reflected name) and in `CustomHandlers::try_add` /
+`add`; Rust in the derives and in `SchemaBuilder::insert`; JavaScript in
+`custom()` and when a handler is registered; Python in `custom(...)` and
+`register`. A schema in which a reserved id sits on any other wire shape
+(`Custom{List, "bool"}`, `Custom{String, "time-point-seconds"}`, a time word
+with a unit that does not parse) is malformed, and every schema-driven
+reader rejects it. Every other id never changes the bytes or the widths.
 
 **Maps and sets.** `Custom{ List{ Tuple{[K, V]} }, "map" }` and
 `Custom{ List{ K }, "set" }` (`BoundedList` in place of `List` under a

@@ -69,6 +69,18 @@ row is `key-order-bits`: keys order by the inner bytes, and the type has no
 value order. `string` is a raw string (Schema IR id `string`) and holds UTF-8 in every vector;
 `bytes` is a list of u8.
 
+`KBound` is the record `{shard: u32, name: utf8 string of at most 4 bytes,
+tags: list of at most 2 raw strings of at most 3 bytes}` (C++
+`attr(name, utf8 | max<4>), attr(tags, max<2> | element(max<3>))`; in the
+Schema IR the members are the bounded types): a key with bounds
+(`docs/key-spec.md` §5.1). Its `value` rows are values at and inside the
+bounds (`raw_tag_bytes` has no text: a raw tag that is not UTF-8); its
+`key-reject` rows are the keys an unchecked writer would produce for a
+value past a bound or with a `name` that is not UTF-8 — the key of the same
+record without the constraints. Every reader rejects them, and a writer
+must refuse the value they would be the key of (C++ `to_key` and
+`encode_key_checked`, checked by the emitter).
+
 `Id`, `Blob`, `Endpoint`, `Ratio`, `Ref`, `Name`, `DerKey`, `Range`, `Level`
 are the transparent wrappers and custom types of `custom-types.md`;
 `ShardKey` is a transparent wrapper of `tuple<u32,string>` (a composite key:

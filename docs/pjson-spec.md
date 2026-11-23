@@ -2018,14 +2018,16 @@ pjson honors two type-level annotations declared in `psio/annotate.hpp`
 and emitted via `PSIO_REFLECT(...)`:
 
 * `maxFields(N)` — caps the number of declared fields on a reflected
-  record (`max_fields_spec`). Surfaced through `psio::max_fields_v<T>`
-  and the composite `psio::effective_max_fields_v<T>` (`min(cap,
-  reflect<T>::member_count)` on Reflected types).
+  record (`max_fields_spec`); N is at most 255 and a record with more
+  than N fields does not compile (`pssz-spec.md` §16). Surfaced through
+  `psio::max_fields_v<T>`; `psio::effective_max_fields_v<T>` is that cap
+  when declared and the current field count otherwise.
 * `maxDynamicData(N)` — caps the total encoded payload size in bytes
   (`max_dynamic_data_spec`). Surfaced through
-  `psio::max_dynamic_data_v<T>` and composed with the per-field
-  `length_bound`-derived bound from `max_encoded_size<T>` into
-  `psio::effective_max_dynamic_v<T>` (cap wins downward; never widens).
+  `psio::max_dynamic_data_v<T>`. `psio::effective_max_dynamic_v<T>` is
+  that cap when the type declares one — an explicit cap always rules
+  (`pssz-spec.md` §3.1) — and otherwise the bound `max_encoded_size<T>`
+  infers from the per-field `length_bound`s.
 
 ### 7.1 Encoder behavior
 

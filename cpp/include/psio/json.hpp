@@ -774,7 +774,7 @@ namespace psio {
             // A member outside its declared annotations (its length_bound
             // / utf8, and those of its elements, keys, values and tuple
             // elements at any depth) has no text: the reader would reject it.
-            if constexpr (::psio::detail::ann::has_tree_specs_v<eff>)
+            if constexpr (::psio::detail::ann::has_value_checks_v<F, eff>)
                if (auto st = ::psio::check_member_annotations(
                       fref, eff_for::value, "json: member length_bound violated", "json");
                    !st.ok())
@@ -827,7 +827,15 @@ namespace psio {
             encode_value<Fmt, IM>(*v.value, w);
          }
          else if constexpr (::psio::is_transparent_v<T>)
+         {
+            // A member outside the bounds its type gives it has no text.
+            if constexpr (::psio::transparent_member_checked_v<T>)
+               if (auto st = ::psio::check_transparent_member(
+                      v, "json: member length_bound violated", "json");
+                   !st.ok())
+                  w.fail(st.error());
             encode_value<Fmt, IM>(::psio::transparent_inner(v), w);
+         }
          else if constexpr (::psio::detail::is_nested_v<T>)
          {
             // The inner value's own text. The bytes are validated before
@@ -1001,7 +1009,22 @@ namespace psio {
                    v.tuple(), T::psio_annotations, "json: member length_bound violated", "json");
                 !st.ok())
                w.fail(st.error());
-            encode_value<Fmt, int_mode::natural>(v.tuple(), w);
+            // A method's arguments (docs/json.md "Method arguments"): an
+            // object keyed by parameter name, in declaration order, when the
+            // method names its parameters; the positional array otherwise.
+            if constexpr (::psio::annotated_tuple_named_v<T>)
+            {
+               w.put('{');
+               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                  (((Is ? w.put(',') : void()),
+                    write_string(w, T::meta_type::names[Is], Fmt::i_json), w.put(':'),
+                    encode_value<Fmt, int_mode::natural>(std::get<Is>(v.tuple()), w)),
+                   ...);
+               }(std::make_index_sequence<std::tuple_size_v<typename T::tuple_type>>{});
+               w.put('}');
+            }
+            else
+               encode_value<Fmt, int_mode::natural>(v.tuple(), w);
          }
          else if constexpr (is_std_tuple<T>::value)
          {
@@ -1055,7 +1078,6 @@ namespace psio {
       struct typed_reader
       {
          C&   c;
-         bool lenient_missing = false;
          // The status of a violated invariant, reported unchanged.
          codec_status invariant{};
       };
@@ -1497,10 +1519,11 @@ namespace psio {
          else
          {
             constexpr int_mode mode = field_mode<Fmt, eff>(eff_for::value);
-            if constexpr (::psio::detail::ann::has_tree_specs_v<eff>)
+            if constexpr (::psio::detail::ann::has_value_checks_v<F, eff>)
             {
                // The member's annotations are part of its type: its
-               // length_bound / utf8 and those of every position below it.
+               // length_bound / utf8 / sorted / unique and those of every
+               // position below it.
                // They are checked on the value read, so the member is
                // materialized even when only validating.
                F  scratch{};
@@ -1589,7 +1612,7 @@ namespace psio {
                       if (out)
                          (out->*(R::template member_pointer<Is>)).reset();
                    }
-                   else if (!r.lenient_missing)
+                   else
                       complete = false;
                 }()),
                ...);
@@ -1641,8 +1664,26 @@ namespace psio {
             return read_value<Fmt, IM, E>(r, out->value.get());
          }
          else if constexpr (::psio::is_transparent_v<T>)
-            return read_value<Fmt, IM, ::psio::transparent_inner_t<T>>(
-               r, out ? &::psio::transparent_inner(*out) : nullptr);
+         {
+            if constexpr (::psio::transparent_member_checked_v<T>)
+            {
+               // Checked on the value read, so it is materialised even when
+               // only validating (as an annotated record member is).
+               T        scratch{};
+               T* const dst = out ? out : &scratch;
+               if (!read_value<Fmt, IM, ::psio::transparent_inner_t<T>>(
+                      r, &::psio::transparent_inner(*dst)))
+                  return false;
+               if (auto st = ::psio::check_transparent_member(
+                      *dst, "json: member length_bound violated", "json");
+                   !st.ok())
+                  return r.c.fail(st.error().what);
+               return true;
+            }
+            else
+               return read_value<Fmt, IM, ::psio::transparent_inner_t<T>>(
+                  r, out ? &::psio::transparent_inner(*out) : nullptr);
+         }
          else if constexpr (::psio::detail::is_nested_v<T>)
          {
             // The inner value's text, stored as its canonical encoding. The
@@ -1913,7 +1954,67 @@ namespace psio {
             using Tuple = typename T::tuple_type;
             Tuple        scratch{};
             Tuple* const dst = out ? &out->tuple() : &scratch;
-            if (!read_value<Fmt, int_mode::natural, Tuple>(r, dst))
+            // A named argument list reads from either form: the object
+            // keyed by parameter name (any member order, the last of a
+            // repeated key, unknown keys skipped, a missing optional
+            // argument empty — the record rule) or the positional array.
+            bool as_object = false;
+            if constexpr (::psio::annotated_tuple_named_v<T>)
+            {
+               json_kind kind;
+               if (!r.c.kind(kind))
+                  return false;
+               as_object = kind == json_kind::object;
+            }
+            if (as_object)
+            {
+               if constexpr (::psio::annotated_tuple_named_v<T>)
+               {
+                  constexpr std::size_t N = std::tuple_size_v<Tuple>;
+                  if (!r.c.begin_object())
+                     return false;
+                  std::array<bool, N + 1> seen{};
+                  std::string_view        key;
+                  bool                    more = false;
+                  if (!r.c.next_field(more, key))
+                     return false;
+                  while (more)
+                  {
+                     bool found = false, ok = true;
+                     [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                        (void)((key == T::meta_type::names[Is]
+                                   ? (found = true, seen[Is] = true,
+                                      ok = read_value<Fmt, int_mode::natural,
+                                                      std::tuple_element_t<Is, Tuple>>(
+                                         r, &std::get<Is>(*dst)),
+                                      true)
+                                   : false) ||
+                               ...);
+                     }(std::make_index_sequence<N>{});
+                     if (!ok)
+                        return false;
+                     if (!found && !r.c.skip())
+                        return false;
+                     if (!r.c.next_field(more, key))
+                        return false;
+                  }
+                  bool complete = true;
+                  [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                     (([&] {
+                         if (seen[Is])
+                            return;
+                         if constexpr (is_std_optional<std::tuple_element_t<Is, Tuple>>::value)
+                            std::get<Is>(*dst).reset();
+                         else
+                            complete = false;
+                      }()),
+                      ...);
+                  }(std::make_index_sequence<N>{});
+                  if (!complete)
+                     return r.c.fail("json: missing required member");
+               }
+            }
+            else if (!read_value<Fmt, int_mode::natural, Tuple>(r, dst))
                return false;
             if (auto st = ::psio::detail::ann::check_value(
                    *dst, T::psio_annotations, "json: member length_bound violated", "json");
@@ -1950,9 +2051,9 @@ namespace psio {
 
       // Reads exactly one value of T, which must be the whole document.
       template <typename Fmt, typename T, typename C>
-      codec_status read_with(C& cursor, T* out, bool lenient_missing)
+      codec_status read_with(C& cursor, T* out)
       {
-         typed_reader<C> r{cursor, lenient_missing};
+         typed_reader<C> r{cursor};
          if (read_value<Fmt, int_mode::natural, T>(r, out))
             (void)cursor.finish();
          if (!r.invariant.ok())
@@ -1963,7 +2064,6 @@ namespace psio {
       // Reads `bytes` as one T through the syntax layer `parser` selects.
       template <typename Fmt, typename T>
       codec_status read_document(std::span<const char> bytes, T* out,
-                                 bool        lenient_missing,
                                  json_parser parser = json_parser::automatic)
       {
 #if PSIO_HAVE_SIMDJSON
@@ -1972,22 +2072,22 @@ namespace psio {
             if (parser == json_parser::simdjson)
             {
                simdjson_cursor cursor(bytes, Fmt::i_json);
-               return read_with<Fmt, T>(cursor, out, lenient_missing);
+               return read_with<Fmt, T>(cursor, out);
             }
             simdjson_index_cursor cursor(bytes, Fmt::i_json);
-            return read_with<Fmt, T>(cursor, out, lenient_missing);
+            return read_with<Fmt, T>(cursor, out);
          }
 #else
          (void)parser;
 #endif
          json_text_cursor cursor(bytes, Fmt::i_json);
-         return read_with<Fmt, T>(cursor, out, lenient_missing);
+         return read_with<Fmt, T>(cursor, out);
       }
 
       // `text` has at least json_padding readable bytes after it: simdjson
       // parses it in place, with no copy.
       template <typename Fmt, typename T>
-      codec_status read_document(padded_json text, T* out, bool lenient_missing,
+      codec_status read_document(padded_json text, T* out,
                                  json_parser parser = json_parser::automatic)
       {
 #if PSIO_HAVE_SIMDJSON
@@ -1996,16 +2096,16 @@ namespace psio {
             if (parser == json_parser::simdjson)
             {
                simdjson_cursor cursor(text, Fmt::i_json);
-               return read_with<Fmt, T>(cursor, out, lenient_missing);
+               return read_with<Fmt, T>(cursor, out);
             }
             simdjson_index_cursor cursor(text, Fmt::i_json);
-            return read_with<Fmt, T>(cursor, out, lenient_missing);
+            return read_with<Fmt, T>(cursor, out);
          }
 #else
          (void)parser;
 #endif
          json_text_cursor cursor(text.text, Fmt::i_json);
-         return read_with<Fmt, T>(cursor, out, lenient_missing);
+         return read_with<Fmt, T>(cursor, out);
       }
 
       // ── Tag operations shared by psio::json and psio::ijson ──────────────
@@ -2044,8 +2144,7 @@ namespace psio {
                              std::span<const char> bytes)
          {
             T out{};
-            if (auto st = read_document<Derived, T>(bytes, &out,
-                                                    !Derived::i_json);
+            if (auto st = read_document<Derived, T>(bytes, &out);
                 !st.ok())
                ::psio::codec_abort(st.error());
             return out;
@@ -2057,7 +2156,7 @@ namespace psio {
          [[nodiscard]] static codec_status decode_checked(
             std::span<const char> bytes, T& out)
          {
-            return read_document<Derived, T>(bytes, &out, false);
+            return read_document<Derived, T>(bytes, &out);
          }
 
          // ── size_of ─────────────────────────────────────────────────────
@@ -2082,11 +2181,10 @@ namespace psio {
                                         Derived, T*,
                                         std::span<const char> bytes) noexcept
          {
-            if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(),
-                                                           Derived::name);
-                !st.ok())
-               return st;
-            return read_document<Derived, T>(bytes, nullptr, false);
+            // (A type's maxDynamicData caps its encoded PSSZ size, not the
+            // length of its text: the text of a value within the cap may be
+            // longer than the cap.)
+            return read_document<Derived, T>(bytes, nullptr);
          }
 
          template <typename T>
@@ -2094,7 +2192,7 @@ namespace psio {
                                         Derived, T*,
                                         std::span<const char> bytes) noexcept
          {
-            return read_document<Derived, T>(bytes, nullptr, false);
+            return read_document<Derived, T>(bytes, nullptr);
          }
 
          // ── make_boxed ──────────────────────────────────────────────────
@@ -2106,7 +2204,7 @@ namespace psio {
             std::span<const char> bytes) noexcept
          {
             auto out = std::make_unique<T>();
-            if (!read_document<Derived, T>(bytes, out.get(), !Derived::i_json)
+            if (!read_document<Derived, T>(bytes, out.get())
                     .ok())
                return nullptr;
             return out;
@@ -2153,7 +2251,19 @@ namespace psio {
       Fmt, std::span<const char> text, T& out, json_parser parser = json_parser::automatic)
    {
       out = T{};
-      return detail::json_impl::read_document<Fmt, T>(text, &out, false, parser);
+      return detail::json_impl::read_document<Fmt, T>(text, &out, parser);
+   }
+
+   // A string literal / C string is its characters, without the terminator
+   // (a char array converted to a span would include the NUL, which no JSON
+   // text ends with).
+   template <detail::json_impl::json_family Fmt, typename T>
+   [[nodiscard]] codec_status decode_json_checked(
+      Fmt fmt, const char* text, T& out, json_parser parser = json_parser::automatic)
+   {
+      const std::string_view view{text};
+      return decode_json_checked(fmt, std::span<const char>{view.data(), view.size()}, out,
+                                 parser);
    }
 
    // The same for text the caller has padded (padded_json): simdjson then
@@ -2163,7 +2273,7 @@ namespace psio {
       Fmt, padded_json text, T& out, json_parser parser = json_parser::automatic)
    {
       out = T{};
-      return detail::json_impl::read_document<Fmt, T>(text, &out, false, parser);
+      return detail::json_impl::read_document<Fmt, T>(text, &out, parser);
    }
 
    // Checks that `text` is one T without building it.
@@ -2171,13 +2281,20 @@ namespace psio {
    [[nodiscard]] codec_status validate_json(Fmt, std::span<const char> text,
                                             json_parser parser = json_parser::automatic)
    {
-      return detail::json_impl::read_document<Fmt, T>(text, nullptr, false, parser);
+      return detail::json_impl::read_document<Fmt, T>(text, nullptr, parser);
+   }
+   template <typename T, detail::json_impl::json_family Fmt>
+   [[nodiscard]] codec_status validate_json(Fmt fmt, const char* text,
+                                            json_parser parser = json_parser::automatic)
+   {
+      const std::string_view view{text};
+      return validate_json<T>(fmt, std::span<const char>{view.data(), view.size()}, parser);
    }
    template <typename T, detail::json_impl::json_family Fmt>
    [[nodiscard]] codec_status validate_json(Fmt, padded_json text,
                                             json_parser parser = json_parser::automatic)
    {
-      return detail::json_impl::read_document<Fmt, T>(text, nullptr, false, parser);
+      return detail::json_impl::read_document<Fmt, T>(text, nullptr, parser);
    }
 
    // Appends the text of `value` to `out`. On failure `out` is restored.

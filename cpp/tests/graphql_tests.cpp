@@ -485,8 +485,8 @@ TEST_CASE("graphql: 5.6 values", "[graphql][validate]")
    rejects("{ big(value: ~-1) }", "Expected value of type \"UInt64\", found -1.");
    rejects("{ big(value: ~1.5) }", "Expected value of type \"UInt64\", found 1.5.");
    rejects("{ big(value: ~18446744073709551616) }", "Expected value of type \"UInt64\", found 18446744073709551616.");
-   rejects("{ later(at: ~\"yesterday\") }", "Expected value of type \"DateTime\", found \"yesterday\".");
-   rejects("{ later(at: ~5) }", "Expected value of type \"DateTime\", found 5.");
+   rejects("{ later(at: ~\"yesterday\") }", "Expected value of type \"DateTimeSeconds\", found \"yesterday\".");
+   rejects("{ later(at: ~5) }", "Expected value of type \"DateTimeSeconds\", found 5.");
    rejects("{ owner(name: ~\"bob\") }", "Expected value of type \"AccountName\", found \"bob\".");
    rejects("{ bytes(data: ~\"0g\") }", "Expected value of type \"Bytes\", found \"0g\".");
    rejects("{ bytes(data: ~[1, 2]) }", "Expected value of type \"Bytes\", found a list.");
@@ -561,7 +561,7 @@ TEST_CASE("graphql: 5.8 variables", "[graphql][validate]")
    rejects("query ($a: FilterInput = ~{}) { describe(filter: $a) }",
            "Field \"FilterInput.names\" of required type \"[String!]!\" was not provided.");
    accepts("query ($a: Int = 3) { add(a: $a, b: 1) }");
-   accepts("query ($a: Int!, $l: [Int!]!, $f: FilterInput!, $s: Status, $n: AccountName!, $t: DateTime!) "
+   accepts("query ($a: Int!, $l: [Int!]!, $f: FilterInput!, $s: Status, $n: AccountName!, $t: DateTimeSeconds!) "
            "{ add(a: $a, b: $a) ints(values: $l) i2: ints(values: [$a, 2]) describe(filter: $f) "
            "d2: describe(filter: {names: [], status: $s}) owner(name: $n) later(at: $t) }");
 }
@@ -692,7 +692,7 @@ TEST_CASE("graphql: variables", "[graphql][execute]")
 {
    const std::string_view q =
       "query Q($a: Int!, $b: Int = 10, $t: String, $l: [Int!]!, $f: FilterInput!, $s: Status = closed, "
-      "$n: AccountName!, $u: UInt64!, $at: DateTime!, $x: Bytes!) { add(a: $a, b: $b) maybe(text: $t) "
+      "$n: AccountName!, $u: UInt64!, $at: DateTimeSeconds!, $x: Bytes!) { add(a: $a, b: $b) maybe(text: $t) "
       "ints(values: $l) i2: ints(values: [$a, $b]) describe(filter: $f) d2: describe(filter: {names: [], status: $s, "
       "range: {lo: $a, hi: $b}}) owner(name: $n) big(value: $u) later(at: $at) bytes(data: $x) }";
    CHECK(run(q, R"({"a": 1, "l": [4, 5], "f": {"names": ["v"], "status": "active", "minCount": 3},
@@ -1055,7 +1055,7 @@ TEST_CASE("graphql: SDL", "[graphql][introspection]")
            "type ItemConnection {\n  edges: [ItemEdge!]!\n  pageInfo: PageInfo!\n}\n",
            "type ItemEdge {\n  node: Item!\n  cursor: String!\n}\n",
            "type PageInfo {\n  hasNextPage: Boolean!\n  hasPreviousPage: Boolean!\n  startCursor: String\n  endCursor: String\n}",
-           "scalar AccountName\n", "scalar UInt64\n", "scalar Int64\n", "scalar Bytes\n", "scalar DateTime\n",
+           "scalar AccountName\n", "scalar UInt64\n", "scalar Int64\n", "scalar Bytes\n", "scalar DateTimeSeconds\n",
            "scalar Milliseconds\n",
            "  range: [Int!]!\n  pair: Tuple_Int_String!\n  detail: Tag_or_Extra!\n  big: Int64!\n  small: Int!\n"
            "  best: Tag\n  rev: Int\n  title: String!\n  scaled(by: Int!): Int!\n}\n",
@@ -1400,4 +1400,31 @@ TEST_CASE("graphql: deeply nested and oversized input is refused, not recursed i
    lim.max_variables_bytes = 1 << 20;
    CHECK(first_message(run(q, "query ($g: [[Int!]!]!) { total(grid: $g) }", gql::request{.variables = vars}, lim)) ==
          "Variables are not a valid JSON object.");
+}
+
+// The names of the time scalars: kind, unit and — unless it is a signed
+// 64-bit count — the tick integer, as Rust's async-graphql scalars are named
+// (rust/psio/src/graphql_scalars.rs).
+TEST_CASE("graphql: time scalars are named per unit", "[graphql][time]")
+{
+   namespace c = std::chrono;
+   using namespace psio::graphql::detail;
+   auto name = []<typename T>() { return std::string_view{stored_name<duration_namer<T>>::value}; };
+   using sys = c::system_clock;
+   CHECK(name.operator()<c::time_point<sys, c::seconds>>() == "DateTimeSeconds");
+   CHECK(name.operator()<c::time_point<sys, c::milliseconds>>() == "DateTimeMilliseconds");
+   CHECK(name.operator()<c::time_point<sys, c::microseconds>>() == "DateTimeMicroseconds");
+   CHECK(name.operator()<c::time_point<sys, c::nanoseconds>>() == "DateTimeNanoseconds");
+   CHECK(name.operator()<c::time_point<sys, c::duration<std::int32_t, std::ratio<60>>>>() == "DateTime_60_1_i32");
+   CHECK(name.operator()<c::time_point<sys, c::duration<std::uint32_t>>>() == "DateTimeSeconds_u32");
+   CHECK(name.operator()<c::seconds>() == "Seconds");
+   CHECK(name.operator()<c::milliseconds>() == "Milliseconds");
+   CHECK(name.operator()<c::duration<std::int64_t, std::ratio<60>>>() == "Duration_60_1");
+   CHECK(name.operator()<c::duration<std::uint32_t>>() == "Seconds_u32");
+   CHECK(name.operator()<c::duration<std::int32_t, std::milli>>() == "Milliseconds_i32");
+   CHECK(name.operator()<c::time_point<c::steady_clock, c::milliseconds>>() == "MonotonicMilliseconds");
+   CHECK(name.operator()<c::time_point<c::steady_clock, c::duration<std::uint32_t, std::milli>>>() ==
+         "MonotonicMilliseconds_u32");
+   CHECK(name.operator()<c::time_point<c::steady_clock, c::duration<std::int64_t, std::ratio<60>>>>() ==
+         "Monotonic_60_1");
 }

@@ -300,9 +300,10 @@ TEST_CASE("fail-fast decode raises codec_exception on bad text", "[json][ijson][
    CHECK_THROWS_AS(psio::decode<Point>(psio::json{}, bad(R"({"x":1,"y":)")), psio::codec_exception);
    CHECK_THROWS_AS(psio::decode<std::uint8_t>(psio::json{}, bad("256")), psio::codec_exception);
    CHECK(psio::make_boxed<Point>(psio::ijson{}, bad("[]")) == nullptr);
-   // psio::json keeps its leniency for a missing member in the fail-fast
-   // decode; validate and the checked decode report it.
-   CHECK(psio::decode<Point>(psio::json{}, bad(R"({"x":5})")) == Point{5, 0});
+   // A missing member is an error in the fail-fast decode as in validate
+   // and the checked decode, in both formats.
+   CHECK_THROWS_AS(psio::decode<Point>(psio::json{}, bad(R"({"x":5})")), psio::codec_exception);
+   CHECK(psio::make_boxed<Point>(psio::json{}, bad(R"({"x":5})")) == nullptr);
    CHECK(!valid<psio::json, Point>(R"({"x":5})"));
    Point p;
    CHECK(!psio::decode_json_checked(psio::json{}, bad(R"({"x":5})"), p).ok());

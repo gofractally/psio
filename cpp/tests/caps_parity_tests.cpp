@@ -74,6 +74,8 @@ TEST_CASE("caps: every format's validate rejects oversized input",
    expect_validate_rejects_oversized(psio::msgpack{},  "msgpack");
    expect_validate_rejects_oversized(psio::protobuf{}, "protobuf");
    expect_validate_rejects_oversized(psio::wit{},      "wit");
+   // (json: 128 zero bytes are not JSON text. The cap itself is not applied
+   // to the length of a text; cpp/tests/consistency_tests.cpp.)
    expect_validate_rejects_oversized(psio::json{},     "json");
    expect_validate_rejects_oversized(psio::bson{},     "bson");
    expect_validate_rejects_oversized(psio::capnp{},    "capnp");

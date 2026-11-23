@@ -417,37 +417,39 @@ TEST_CASE("all_dwnc_v: reflected DWNC composition", "[annotate][caps]")
    STATIC_REQUIRE_FALSE(psio::all_dwnc_v<WrapsExt>);
 }
 
-TEST_CASE("effective_max_fields_v: explicit cap wins downward",
+TEST_CASE("effective_max_fields_v: an explicit cap rules",
           "[annotate][caps]")
 {
-   // CapOnlyRecord has 3 reflected fields and maxFields(8).  The cap
-   // is GREATER than member_count → effective is min(8, 3) = 3.
+   // maxFields(N) is the most fields the type will ever have: it is the
+   // answer when declared (the type has at most N fields by construction),
+   // and the current field count otherwise.
    REQUIRE(psio::effective_max_fields_v<CapOnlyRecord> ==
-           std::optional<std::size_t>{3});
-   // FullyBoundedRecord has 2 reflected fields and maxFields(8).
-   // min(8, 2) = 2.
+           std::optional<std::size_t>{8});
    REQUIRE(psio::effective_max_fields_v<FullyBoundedRecord> ==
-           std::optional<std::size_t>{2});
+           std::optional<std::size_t>{8});
    // Type without a cap: just member_count.
    REQUIRE(psio::effective_max_fields_v<LeafDwnc> ==
            std::optional<std::size_t>{1});
 }
 
-TEST_CASE("effective_max_dynamic_v: cap and inferred bound interplay",
+TEST_CASE("effective_max_dynamic_v: an explicit cap always rules",
           "[annotate][caps]")
 {
    // FullyBoundedRecord has maxDynamicData(4096) + attr(payload, max<256>).
-   // The per-field max=256 is tighter than the type-level 4096, so
-   // max_encoded_size<T> ≤ 256 + (slot/header overhead) < 4096.
-   // effective_max_dynamic_v should pick the inferred (smaller) bound.
-   constexpr auto eff = psio::effective_max_dynamic_v<FullyBoundedRecord>;
-   REQUIRE(eff.has_value());
-   REQUIRE(*eff <= 4096);
+   // The bound inferred from the fields is smaller than the cap; the cap is
+   // the type's lifetime width promise and is what rules
+   // (docs/pssz-spec.md 3.1, 16): there is no min(cap, inferred bound).
+   STATIC_REQUIRE(*psio::max_encoded_size<FullyBoundedRecord>() < 4096);
+   STATIC_REQUIRE(psio::effective_max_dynamic_v<FullyBoundedRecord> ==
+                  std::optional<std::size_t>{4096});
 
-   // LeafDwnc: no cap, inferred bound is its fixed encoded size.  Some
-   // value must come back (a DWNC u32 record has a finite bound).
-   constexpr auto leaf = psio::effective_max_dynamic_v<LeafDwnc>;
-   REQUIRE(leaf.has_value());
+   // LeafDwnc: no cap, so the inferred bound: its fixed encoded size.
+   STATIC_REQUIRE(psio::effective_max_dynamic_v<LeafDwnc> ==
+                  psio::max_encoded_size<LeafDwnc>());
+   STATIC_REQUIRE(psio::effective_max_dynamic_v<LeafDwnc> == std::optional<std::size_t>{4});
+
+   // No cap and an unbounded member: no bound at all.
+   STATIC_REQUIRE(!psio::effective_max_dynamic_v<std::vector<std::uint32_t>>.has_value());
 }
 
 TEST_CASE("length_bound on optional<T> reaches the inner T",

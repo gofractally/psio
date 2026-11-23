@@ -596,6 +596,27 @@ An `Optional` is looked through: what is written for an optional member
 or position applies to its payload. The position specs nest to any
 depth, and below the member itself a length bound is `max N`.
 
+**Order constraints.** Two more annotations constrain the *content* of a
+list or array, at the member or at a position below it, without changing
+any byte, width or bound:
+
+| annotation | the elements are |
+|---|---|
+| `sorted` | in non-descending order |
+| `unique` (`sorted_unique`) | in strictly ascending order |
+| `sorted` descending | the same, descending |
+| `unique_keys` | pairwise different by key: the element, or element 0 of a pair / tuple element. No order is required |
+
+Order and equality are those of maps and sets (§5.9.1): bytewise
+comparison of the elements' `key` encodings, the same in every language.
+A writer refuses a value that violates one and every checking reader
+rejects a frame that holds one, in PSSZ, JSON and key alike; a map or set
+carries its order by type (§5.9) and needs no annotation. **These two are
+not in the Schema IR yet**: a typed C++ reader enforces them, a
+schema-driven reader of the same schema does not know them. (C++:
+`psio::sorted`, `psio::unique`, `psio::unique_keys`; the other
+implementations have no such annotation.)
+
 An annotated member is exactly the type the annotations describe:
 `Vector(String)` annotated `max 8, element(utf8, max 16)` **is**
 `BoundedList(BoundedString(16), 8)`. It has that type's
@@ -747,18 +768,44 @@ plus the enumerator names for text) carries it through unchanged. This is
 what lets an old reader keep reading data from a writer that has since
 added enumerators.
 
-Whether a reader's **type** can represent an undeclared value is a property
-of that type, not of the format:
+**The rule, per layer.** The only criterion is that adding an enumerator
+stays compatible in both directions: data written with the new enumerator
+is still well-formed data for an old reader, and old data is unchanged for
+a new one.
 
-- a C++ `enum` holds any value of its underlying type, so C++ accepts it
-  everywhere;
-- a Rust enum holds only its variants. It opts in with a catch-all variant,
-  `#[pssz(other)] Unknown(<repr>)`: an undeclared wire value decodes into
-  it. A wire value equal to a declared enumerator always decodes to the
-  declared variant, and encoding `Unknown(n)` where `n` is a declared
-  enumerator is an error, so each value has exactly one in-memory
+| layer | rule |
+|---|---|
+| wire (PSSZ, key) | the underlying integer; **any** value of that integer is well-formed. No reader of bytes — `validate`, a view, a schema-driven codec — may reject a value because it is not a declared enumerator. |
+| Schema IR | `Enum{type, members}`: the integer plus the enumerator names. The names are for text only; they do not restrict the values. |
+| text (`docs/json.md` "Enums") | written as the enumerator's **name** when the value is a declared one and as the **number** otherwise; read as the name, the number, the number as a string, or `name:number`. An unknown *name* is an error (there is no value to give it); an undeclared *number* is a value. |
+| typed reader | language-specific: whether the reader's **type** can hold an undeclared value is a property of that type, not of the format. A type that cannot hold it must say how it opts in to carry it, and refuses the value otherwise — that refusal is a typed-layer error, never a statement about the bytes. |
+
+The typed layer in each implementation, all of which conform:
+
+- **C++**: an `enum` holds any value of its underlying type, so the typed
+  pssz, key and JSON readers accept an undeclared value everywhere, and the
+  writers write it back (as its number in text). A type that must reject
+  undeclared values says so with an invariant (§18), which makes the
+  restriction part of the schema (`Custom{enum, id}`).
+- **Rust**: an enum holds only its variants. It opts in with a catch-all
+  variant, `#[psio(other)] Unknown(<repr>)`: an undeclared wire value
+  decodes into it. A wire value equal to a declared enumerator always
+  decodes to the declared variant, and encoding `Unknown(n)` where `n` is a
+  declared enumerator is an error, so each value has exactly one in-memory
   representation. Without the catch-all, decoding an undeclared value into
-  that type is an error (`enum_out_of_range`).
+  that type is an error (`enum_out_of_range`) in pssz, key and JSON alike.
+- **Python**: `@psio.enum(repr)` refuses an undeclared value by default
+  (`DecodeError`, from pssz, key and JSON alike) and carries it as the
+  plain integer with `other=True`.
+- **JavaScript**: an enum value is its number; any in-range integer is
+  accepted and written back.
+- **Schema-driven codecs** (every language): the dynamic value is the
+  integer; any in-range value is read and written unchanged.
+
+An application that evolves an enum therefore chooses, per reader type,
+between carrying unknown enumerators (C++ default, Rust `other`, Python
+`other=True`) and refusing them at the typed layer; the bytes and the
+schema are the same either way.
 
 ## 5. Containers
 
@@ -1090,7 +1137,7 @@ list**. (C++ `psio::nested<T>`, `#include <psio/nested.hpp>`; Schema IR
   | reader of the enclosing value | inner bytes must be |
   |---|---|
   | compatible (`validate`, `validate_or_throw`, `validate_pssz_compatible`, `decode_pssz_checked`, checked views) | a valid T; unknown appended optional fields inside it are accepted and reported with the enclosing value's |
-  | exact (`validate_strict`) | the one canonical encoding of a T: no unknown fields, strict strings, every type-level rule of T |
+  | exact (`validate_strict`) | the one canonical encoding of a T: no unknown fields, every type-level rule of T |
 
   Bytes that are not a T, a fixed-size T followed by a trailing byte, an
   inner record that stores a trailing `None` (§7.2) — all are rejections of
@@ -1332,13 +1379,36 @@ Everything the format derives from a type is the member's:
 A transparent type is therefore **not a record**: a frame that encodes it
 as a one-field record (a header and the member) is a different, and for the
 wrapper invalid, encoding. It has no `definitionWillNotChange`, no
-`max-fields` and no `max-dynamic-data` of its own, its member takes no
-member annotation, and its member is not an `Optional` (presence belongs to
-the record that holds the value: hold an `Optional(Wrapper)`). A record
-member of a transparent type takes the annotations that reach a value
-through any type (the integer text form); a length bound on it is an error,
-as on any member that is not itself a string or a list — bound the member's
-type.
+`max-fields` and no `max-dynamic-data` of its own, and its member is not an
+`Optional` (presence belongs to the record that holds the value: hold an
+`Optional(Wrapper)`). A record member of a transparent type takes the
+annotations that reach a value through any type (the integer text form); a
+length bound on it is an error, as on any member that is not itself a
+string or a list — bound the wrapper's own member instead.
+
+**A bounded member.** The single member of a transparent type may carry the
+annotations of §3.5 that make a type a bounded type: `utf8` on a string,
+`max N` on a string, list, map or set, and `element` / `keys` / `values` /
+`at I` below it. The wrapper then **is** that bounded type, everywhere it
+appears — bare, a list element, an optional payload, a map key or value:
+
+```
+Memo = transparent { text: String  @utf8 @max(80) }      // is BoundedString(80)
+```
+
+It has the bytes, the `max_encoded_size` (80), the widths, the schema node
+(`types: [{name: "Memo", type: -> BoundedString(80)}]`) and the checks of
+`BoundedString(80)`: every writer refuses a `Memo` over 80 bytes or not
+UTF-8 and every reader rejects its bytes, in PSSZ, key and text alike. This
+is one rule for every language (C++ `PSIO_REFLECT(Memo, transparent(),
+attr(text, utf8 | max<80>))`; Rust `#[psio(transparent)] struct
+Memo(#[psio(max = 80)] String)`; JavaScript `transparent('Memo',
+boundedUtf8(80))`; Python `Annotated[str, max(80)]` in a
+`@psio.transparent` class). An annotation that a type cannot say is not
+allowed there: `exact N` / `min N` (a member attribute in the Schema IR,
+and a transparent type has no member in it), `sorted` / `unique`, an
+integer text form, a text presentation. Such a constraint is the type's
+invariant (§18).
 
 What the wrapper keeps is its **identity**: its name, a text form of its own
 (`docs/json.md`), an invariant (§18) and its Schema IR node — a named alias
@@ -1475,11 +1545,20 @@ not change.
   field has no way to be absent: old data is rejected by the new reader.
   The wire carries no schema, so this rule is enforced by schema-upgrade
   checks, not by readers. In C++:
-  `static_assert(psio::pssz_evolves_from<Old, New>)`, which also
-  requires an unchanged width and DWNC status.)
-✓ Change a field's `length_bound{.max}` annotation to a tighter or
-  looser value, provided W doesn't change. (If W changes, callers
-  must rebuild against the new schema; the wire format is incompatible.)
+  `static_assert(psio::pssz_evolves_from<Old, New>)`, which checks
+  every rule of this section and the next: an unchanged width at every
+  depth, DWNC status, member annotations and caps.)
+✓ **Widen** a length bound — raise a `max`, lower or drop a `min`, replace
+  `exact N` by a range that contains N, drop the bound — at the member or
+  at any position below it (§3.5), provided no offset width changes
+  anywhere (the member's own list / map / tuple, and the record). The new
+  reader then accepts every value the old writer produced. An old reader
+  rejects a new value that uses the added room, exactly as it would reject
+  any value outside its type: widen a bound only once every reader that
+  must read the new values has the new schema. (If a W changes, the wire
+  format is incompatible.)
+✓ Raise a record's `max-dynamic-data` within the same width class, or
+  declare one that is at least the bound inferred for the old type.
 ✓ Add a new alternative to a variant (provided the new alt is at the
   end of the variant's alternative list).
 ✓ Evolve the inner type of a `Nested(T)` member by these same rules
@@ -1499,9 +1578,18 @@ not change.
 ✗ Reorder variant alternatives.
 ✗ Change the key type of a map or the element type of a set, or turn a
   list into a map / set of the same entries (§5.9.4).
-✗ Decrease a field's `length_bound{.max}` to a value smaller than
-  any encoded buffer. (Width may shift narrower, breaking old wire
-  bytes.)
+✗ **Tighten** a length bound — lower a `max`, raise or add a `min`, add a
+  bound where there was none, turn a range into `exact N` — at any depth.
+  The bytes of an old value may be unchanged, but the new reader rejects
+  every old record outside the new bound (and a narrower W would change
+  the bytes).
+✗ Change `utf8` at any position, in either direction: a raw string is any
+  bytes and a UTF-8 string is text; a reader of one is not a reader of the
+  other, although the bytes of a valid text are the same.
+✗ Change `sorted` / `unique` / `unique_keys` on a list member.
+✗ Lower a record's `max-dynamic-data`, or move it to another width class.
+✗ Give a record more fields than its `max-fields`, raise `max-fields`, or
+  drop it (§16): the cap is a promise about every later revision.
 ✗ Add the `dwnc` flag to a previously-extensible record.
   (DWNC removes the header, so old decoders reading a header where
   there isn't one will misinterpret bytes.)
@@ -1562,13 +1650,16 @@ place.
 |---|---|---|
 | elements of a `Tuple` (a `Pair` is 2; a method's argument list is a tuple) | **255** | a count that fits in 8 bits, and what language tooling can reasonably instantiate |
 | alternatives of a `Variant` | **256** | the selector is one byte: indexes 0..255 |
-| fields of a record | no limit in the format | an implementation may have one (C++ reflection lists at most 255 members and keywords per record); `max-fields` (§16) is a schema-level discipline |
+| fields of a record | **255** | a record, a tuple and a method's argument list are one positional shape (§5.1); they share one limit. `max-fields: N` (§16) lowers it for one type |
+| parameters of a function (an interface's `Func`) | **255** | its argument list is a tuple |
 
-A tuple of more than 255 elements is not a PSSZ type: a typed
-implementation refuses it when the type is built (C++: a compile-time
-error), and a schema that holds a `Tuple` of more than 255 members is
-invalid — a schema-driven implementation rejects it before reading or
-writing any value. A variant with more than 256 alternatives is refused
+A tuple of more than 255 elements, and a record of more than 255
+fields, is not a PSSZ type: a typed implementation refuses it when the
+type is built (C++: a compile-time error), and a schema that holds a
+`Tuple` or an `Object` / `Struct` of more than 255 members, or a function
+of more than 255 parameters, is invalid — a schema-driven implementation
+rejects it before reading or writing any value (C++:
+`psio::pssz_ir::validate_schema` for the functions of a whole schema). A variant with more than 256 alternatives is refused
 the same way; split it or use a different encoding.
 
 The limit does not change any byte. A tuple's header is the byte size
@@ -1598,9 +1689,10 @@ A pssz decoder can produce the following error categories:
   position N-1.
 - **bitlist_no_delimiter** — bitlist payload contains no 1-bit, so
   no length can be derived.
-- **utf8_invalid** — a string field contains bytes not forming valid
-  UTF-8 (strict mode only; default decoders pass strings through
-  uninterpreted).
+- **utf8_invalid** — a UTF-8 string (`String`: schema id `utf8`) contains
+  bytes not forming valid UTF-8. Every reader and the encoder report it. A
+  raw string (schema id `string`) is any bytes and is never checked, in
+  strict validation either: strict means exact-schema and canonical.
 - **cap_exceeded** — buffer size exceeds the type's
   `max-dynamic-data: N` cap.
 - **entries_not_ascending** — the entries of a map or the elements of a
@@ -1920,10 +2012,22 @@ hashes regardless of which encoder produced them.
 
 pssz honors the type-level caps documented in `pjson-spec.md` §16:
 
-- **`max-fields: N`** — at decode time, the validator may reject
-  records whose declared field count exceeds N. (Today this is a
-  schema-level discipline; pssz is concerned with byte counts more
-  than field counts.)
+- **`max-fields: N`** — a cap on the **number of fields** of a record, or
+  of parameters of a method's argument list: the type has, and will ever
+  have, at most N. It is not a size: `max-dynamic-data` caps bytes. N is
+  at most 255 (§8.4). It is enforced where the field count is known:
+  - *the declaration*: a record with more than N fields, a method with
+    more than N parameters, or N > 255 is an error (C++: at compile time);
+  - *the schema*: an `Object` / `Struct` with more members than its
+    `maxFields` attribute, a function with more parameters than its, or a
+    `maxFields` that is not a number in 0..255, is a malformed schema that
+    every schema-driven reader rejects;
+  - *evolution* (§7): a revision may not have more fields than the
+    original's `max-fields`, and may not raise or drop it (lowering it to
+    no less than the current count is allowed). C++:
+    `pssz_evolves_from`; a schema-based upgrade check must apply the same
+    rule.
+  Nothing on the wire counts fields, so it adds no check of a value.
 - **`max-dynamic-data: N`** — drives both width selection (§3) and an
   explicit ceiling at encode + decode. Encoders that produce > N
   bytes throw; validators that see > N bytes in the input reject.

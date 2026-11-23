@@ -55,6 +55,13 @@
 // (fixed width, or self-terminating). This is a separate slot from
 // `binary_category`: wire and sort encodings usually differ.
 //
+// Bounds and UTF-8. A value outside a length bound or a UTF-8 constraint of
+// its type (psio::bounded, psio::utf8_string, a record member's annotations
+// at any depth) has no key, as it has no pssz encoding: `encode` / `to_key`
+// fail on it (codec_exception, or abort without exceptions),
+// `encode_key_checked` returns the status, and `validate` / `decode` reject
+// its bytes. A key type with no such constraint pays nothing for this.
+//
 // Invariants (invariant.hpp). A value that violates its type's invariant has
 // no key: `encode` / `to_key` fail on it (codec_exception, or
 // abort without exceptions) and `validate` / `decode` reject its bytes with
@@ -510,6 +517,199 @@ namespace psio {
          }
       }
 
+      // ── Writer checks ─────────────────────────────────────────────────
+      //
+      // A value outside a bound or a UTF-8 constraint of its type has no
+      // key, exactly as it has no pssz encoding: the bound of a
+      // psio::bounded / psio::utf8_string, the UTF-8 of a utf8_string, and a
+      // record member's annotations (length_bound / utf8 / sorted / unique,
+      // at any depth). The readers reject such a key; the writers refuse
+      // the value.
+      //
+      // has_writer_checks<T, Invariants>(): whether a T, or anything nested
+      // in it, has such a constraint (with Invariants: or an invariant). It
+      // is false for a key of plain scalars, strings, tuples and records
+      // without annotations, and then no entry point runs any check.
+      template <typename T, bool Invariants, typename... Seen>
+      consteval bool has_writer_checks() noexcept
+      {
+         using U = std::remove_cvref_t<T>;
+         if constexpr ((std::is_same_v<U, Seen> || ...))
+            return false;  // a type that holds itself: already being inspected
+         else if constexpr (unsupported_v<U> ||
+                            ::psio::format_should_dispatch_adapter_v<::psio::key, U>)
+            return false;
+         else if constexpr (Invariants && ::psio::has_invariant_v<U>)
+            return true;
+         else if constexpr (::psio::is_transparent_v<U>)
+            return ::psio::transparent_member_checked_v<U> ||
+                   has_writer_checks<::psio::transparent_inner_t<U>, Invariants, Seen..., U>();
+         else if constexpr (::psio::detail::is_nested_v<U>)
+            return false;
+         else if constexpr (::psio::detail::is_assoc_v<U>)
+            return has_writer_checks<::psio::detail::assoc_entry_t<U>, Invariants, Seen..., U>();
+         else if constexpr (is_utf8_string<U>::value || is_bounded<U>::value)
+            return true;
+         else if constexpr (is_std_optional<U>::value || is_std_vector<U>::value ||
+                            is_std_array<U>::value)
+            return has_writer_checks<typename U::value_type, Invariants, Seen..., U>();
+         else if constexpr (is_std_variant<U>::value)
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (has_writer_checks<std::variant_alternative_t<Is, U>, Invariants, Seen...,
+                                         U>() ||
+                       ...);
+            }(std::make_index_sequence<std::variant_size_v<U>>{});
+         else if constexpr (is_std_tuple<U>::value)
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (has_writer_checks<std::tuple_element_t<Is, U>, Invariants, Seen..., U>() ||
+                       ...);
+            }(std::make_index_sequence<std::tuple_size_v<U>>{});
+         else if constexpr (Record<U>)
+         {
+            using R = ::psio::reflect<U>;
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return ((::psio::detail::ann::has_value_checks_v<
+                           std::remove_cvref_t<typename R::template member_type<Is>>,
+                           std::remove_cvref_t<typename ::psio::effective_annotations_for<
+                              U, typename R::template member_type<Is>,
+                              R::template member_pointer<Is>>::value_t>> ||
+                        has_writer_checks<typename R::template member_type<Is>, Invariants,
+                                          Seen..., U>()) ||
+                       ...);
+            }(std::make_index_sequence<R::member_count>{});
+         }
+         else
+            return false;
+      }
+
+      // The first constraint `v` violates, or ok. Mirrors encode_shape.
+      template <bool Invariants, typename T>
+      codec_status check_encode(const T& v) noexcept
+      {
+         if constexpr (!has_writer_checks<T, Invariants>())
+            return codec_ok();
+         else
+         {
+            if constexpr (::psio::is_transparent_v<T>)
+            {
+               if (auto st = ::psio::check_transparent_member(
+                      v, "key: member length_bound violated", "key");
+                   !st.ok())
+                  return st;
+               if (auto st = check_encode<Invariants>(::psio::transparent_inner(v)); !st.ok())
+                  return st;
+            }
+            else if constexpr (::psio::detail::is_map_v<T>)
+            {
+               for (const auto& entry : v)
+               {
+                  if (auto st = check_encode<Invariants>(entry.first); !st.ok())
+                     return st;
+                  if (auto st = check_encode<Invariants>(entry.second); !st.ok())
+                     return st;
+               }
+            }
+            else if constexpr (::psio::detail::is_assoc_v<T>)
+            {
+               for (const auto& element : v)
+                  if (auto st = check_encode<Invariants>(element); !st.ok())
+                     return st;
+            }
+            else if constexpr (is_utf8_string<T>::value)
+            {
+               if (v.size() > T::max_size_value)
+                  return codec_fail("key: utf8_string exceeds its bound", 0, "key");
+               if (!::psio::utf8_spec::validate(std::span<const char>(v.data(), v.size())).ok())
+                  return codec_fail("key: utf8_string is not valid UTF-8", 0, "key");
+            }
+            else if constexpr (is_std_optional<T>::value)
+            {
+               if (v.has_value())
+                  if (auto st = check_encode<Invariants>(*v); !st.ok())
+                     return st;
+            }
+            else if constexpr (is_bounded<T>::value)
+            {
+               if (v.size() > T::max_size_value)
+                  return codec_fail("key: bounded list exceeds its bound", 0, "key");
+               if (auto st = check_encode<Invariants>(v.storage()); !st.ok())
+                  return st;
+            }
+            else if constexpr (is_std_vector<T>::value || is_std_array<T>::value)
+            {
+               using E = typename T::value_type;
+               if constexpr (has_writer_checks<E, Invariants>())
+                  for (const auto& element : v)
+                     if (auto st = check_encode<Invariants>(element); !st.ok())
+                        return st;
+            }
+            else if constexpr (is_std_variant<T>::value)
+            {
+               if (auto st = std::visit(
+                      [](const auto& alt) { return check_encode<Invariants>(alt); }, v);
+                   !st.ok())
+                  return st;
+            }
+            else if constexpr (is_std_tuple<T>::value)
+            {
+               codec_status status;
+               std::apply(
+                  [&](const auto&... element) {
+                     (([&] {
+                         if (status.ok())
+                            status = check_encode<Invariants>(element);
+                      }()),
+                      ...);
+                  },
+                  v);
+               if (!status.ok())
+                  return status;
+            }
+            else if constexpr (Record<T>)
+            {
+               using R = ::psio::reflect<T>;
+               codec_status status;
+               [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                  (([&] {
+                      if (!status.ok())
+                         return;
+                      using F   = typename R::template member_type<Is>;
+                      using Ann = ::psio::effective_annotations_for<
+                         T, F, R::template member_pointer<Is>>;
+                      using eff        = std::remove_cvref_t<decltype(Ann::value)>;
+                      const auto& member = v.*(R::template member_pointer<Is>);
+                      status = check_encode<Invariants>(member);
+                      if constexpr (::psio::detail::ann::has_value_checks_v<F, eff>)
+                         if (status.ok())
+                            status = ::psio::check_member_annotations(
+                               member, Ann::value, "key: member length_bound violated", "key");
+                   }()),
+                   ...);
+               }(std::make_index_sequence<R::member_count>{});
+               if (!status.ok())
+                  return status;
+            }
+            if constexpr (Invariants && ::psio::has_invariant_v<T>)
+               return ::psio::check_invariant(v);
+            return codec_ok();
+         }
+      }
+
+      // What every writing entry point calls: the checks of the value (once,
+      // on the write: a sizing pass and the bytes entries are ordered by
+      // check nothing), then its bytes. Invariants are checked by
+      // encode_value as it writes.
+      template <typename T, typename S>
+      void encode_root(const T& v, S& s)
+      {
+         if constexpr (has_writer_checks<T, false>() &&
+                       !std::is_same_v<S, ::psio::size_stream> &&
+                       !std::is_same_v<S, ::psio::detail::order_key_stream>)
+            if (auto st = check_encode<false>(v); !st.ok())
+               ::psio::codec_abort(st.error());
+         encode_value(v, s);
+      }
+
       // Compile-time EXACT encoded size of a key, or nullopt when it depends on the value
       // (strings, vectors, optionals, adapter types). A consumer can give a fixed-width key
       // — double, integer, enum, time point, fixed tuple or reflected struct — a stack
@@ -863,8 +1063,23 @@ namespace psio {
             return true;
          }
          else if constexpr (::psio::is_transparent_v<T>)
-            return read_value<::psio::transparent_inner_t<T>>(
-               r, out ? &::psio::transparent_inner(*out) : nullptr);
+         {
+            if constexpr (::psio::transparent_member_checked_v<T>)
+            {
+               T        scratch{};
+               T* const dst = out ? out : &scratch;
+               if (!read_value<::psio::transparent_inner_t<T>>(r, &::psio::transparent_inner(*dst)))
+                  return false;
+               if (auto st = ::psio::check_transparent_member(
+                      *dst, "key: member length_bound violated", "key");
+                   !st.ok())
+                  return r.fail(st.error().what.data());
+               return true;
+            }
+            else
+               return read_value<::psio::transparent_inner_t<T>>(
+                  r, out ? &::psio::transparent_inner(*out) : nullptr);
+         }
          else if constexpr (::psio::detail::is_nested_v<T>)
          {
             // A byte list whose bytes are the PSSZ encoding of the inner
@@ -1015,8 +1230,8 @@ namespace psio {
                using F   = typename R::template member_type<I>;
                using Ann = ::psio::effective_annotations_for<T, F, R::template member_pointer<I>>;
                using eff = std::remove_cvref_t<decltype(Ann::value)>;
-               if constexpr (::psio::detail::ann::has_tree_specs_v<eff> &&
-                             !::psio::has_as_override_v<eff>)
+               if constexpr (::psio::detail::ann::has_value_checks_v<F, eff> &&
+                             !::psio::has_binary_as_override_v<F, eff>)
                {
                   F        scratch{};
                   F* const dst = out ? &(out->*(R::template member_pointer<I>)) : &scratch;
@@ -1114,7 +1329,7 @@ namespace psio {
       void encode_prefix_element(const Arg& arg, S& s)
       {
          if constexpr (std::is_same_v<E, Arg>)
-            encode_value<E>(arg, s);
+            encode_root<E>(arg, s);
          else if constexpr (std::is_same_v<E, std::string> &&
                             std::is_convertible_v<const Arg&, std::string_view>)
          {
@@ -1125,7 +1340,7 @@ namespace psio {
          else
          {
             const E converted = arg;
-            encode_value<E>(converted, s);
+            encode_root<E>(converted, s);
          }
       }
 
@@ -1149,7 +1364,7 @@ namespace psio {
       template <typename T, typename Sink>
       friend void tag_invoke(decltype(::psio::encode), key, const T& v, Sink& sink)
       {
-         detail::key_impl::encode_value(v, sink);
+         detail::key_impl::encode_root(v, sink);
       }
 
       template <typename T>
@@ -1157,7 +1372,7 @@ namespace psio {
                              std::vector<char>& sink)
       {
          ::psio::vector_stream s{sink};  // appends, matching the other formats
-         detail::key_impl::encode_value(v, s);
+         detail::key_impl::encode_root(v, s);
       }
 
       template <typename T>
@@ -1166,7 +1381,7 @@ namespace psio {
       {
          std::vector<char>    out;
          ::psio::vector_stream s{out};
-         detail::key_impl::encode_value(v, s);
+         detail::key_impl::encode_root(v, s);
          return out;
       }
 
@@ -1233,7 +1448,7 @@ namespace psio {
          {
             std::array<char, *fixed> out;
             fast_buf_stream          fs{out.data(), out.size()};
-            detail::key_impl::encode_value(v, fs);
+            detail::key_impl::encode_root(v, fs);
             return out;
          }
          else
@@ -1242,7 +1457,7 @@ namespace psio {
             detail::key_impl::encode_value(v, ss);
             std::vector<char> out(ss.size);
             fast_buf_stream   fs{out.data(), out.size()};
-            detail::key_impl::encode_value(v, fs);
+            detail::key_impl::encode_root(v, fs);
             return out;
          }
       }
@@ -1259,6 +1474,27 @@ namespace psio {
 
    // psio::to_key(v), from_key<T>(bytes), validate_key<T>(bytes), key_size(v).
    PSIO_FORMAT_HELPERS(key)
+
+   // ── Checked encode ──────────────────────────────────────────────────────────
+   //
+   // Appends the key of `value` to `out`, or returns why the value has none
+   // and leaves `out` unchanged: a psio::utf8_string that is not UTF-8 or
+   // over its bound, a psio::bounded over its bound, a record member outside
+   // its annotations (length_bound / utf8 / sorted / unique, at any depth),
+   // a value that violates its type's invariant (reported with the
+   // invariant's own status). It never throws and never aborts on a value:
+   // usable with exceptions disabled. psio::encode(psio::key{}, ...) /
+   // psio::to_key refuse the same values through codec_abort.
+   template <typename T>
+   [[nodiscard]] codec_status encode_key_checked(const T& value, std::vector<char>& out)
+   {
+      if (auto status = detail::key_impl::check_encode<true>(value); !status.ok())
+         return status;
+      // (order_key_stream: the bytes, with the checks already done.)
+      detail::order_key_stream s{out};
+      detail::key_impl::encode_value(value, s);
+      return codec_ok();
+   }
 
    // ── Composite keys ──────────────────────────────────────────────────────────
    //

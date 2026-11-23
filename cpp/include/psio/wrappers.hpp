@@ -36,6 +36,7 @@ namespace psio
    class bitlist;
 }
 #include <psio/detail/annotation_tree.hpp>
+#include <psio/transparent.hpp>
 
 // shape_tag_of<T> lives in shapes.hpp
 
@@ -635,6 +636,8 @@ namespace psio {
          "field's shape (e.g. attaching length_bound to a Record is "
          "meaningless).");
 
+      static_assert(detail::length_bounds_consistent(value), PSIO_LENGTH_BOUND_CONFLICT_MSG);
+
       // Position specs (element / keys / values / at<I>) and the specs
       // below them must fit the member's type at every depth.
       static_assert(detail::ann::tree_ok<field_t, effective_annotations_for>(),
@@ -651,6 +654,65 @@ namespace psio {
                                          std::string_view format) noexcept
    {
       return detail::ann::check_value(value, annotations, length_message, format);
+   }
+
+   // ── The member of a transparent type ──────────────────────────────────
+   //
+   // A transparent type (transparent.hpp) may bound its member:
+   // `attr(text, utf8 | max<80>)`. The wrapper is then that bounded type
+   // wherever it appears, so every codec reads the member's annotations at
+   // the place it steps from the wrapper to the member.
+   //
+   //   transparent_member_annotations<T>   the annotations T declares for it
+   //   ann::transparent_ann<T, A>           the member's carrier under carrier
+   //                                        A: those annotations and A's cap.
+   //                                        With no annotation it is
+   //                                        ann::cap_only<A>, as before.
+   //   check_transparent_member(v, ...)     the value-side check
+   template <typename T>
+   struct transparent_member_annotations
+   {
+      using member_t = std::remove_cv_t<typename reflect<T>::template member_type<0>>;
+      // What the type declares for its member (not what the member's own
+      // type carries inherently: a psio::utf8_string<80> member already is
+      // its bound).
+      static constexpr auto value =
+         detail::member_annotations_in<T, reflect<T>::template member_pointer<0>>();
+      using value_t = std::remove_cvref_t<decltype(value)>;
+      // They fit the member's shape (effective_annotations_for's checks).
+      static constexpr bool checked = [] {
+         if constexpr (std::tuple_size_v<value_t> != 0)
+            return sizeof(effective_annotations_for<
+                             T, member_t, reflect<T>::template member_pointer<0>>) > 0;
+         else
+            return true;
+      }();
+   };
+   template <typename T>
+   inline constexpr bool transparent_member_checked_v =
+      detail::ann::has_tree_specs_v<typename transparent_member_annotations<T>::value_t>;
+   namespace detail::ann
+   {
+      template <typename T, typename A>
+      struct transparent_raw
+      {
+         using value_t = typename ::psio::transparent_member_annotations<T>::value_t;
+         static constexpr value_t     value = ::psio::transparent_member_annotations<T>::value;
+         static constexpr std::size_t cap   = A::cap;
+      };
+      template <typename T, typename A>
+      using transparent_ann = typename normalized<transparent_raw<T, A>>::type;
+   }  // namespace detail::ann
+   template <typename T>
+   codec_status check_transparent_member(const T& value, const char* length_message,
+                                         std::string_view format) noexcept
+   {
+      if constexpr (transparent_member_checked_v<T>)
+         return detail::ann::check_value(::psio::transparent_inner(value),
+                                         transparent_member_annotations<T>::value,
+                                         length_message, format);
+      else
+         return codec_ok();
    }
 
    // ── length_bound on a value ───────────────────────────────────────────
@@ -727,7 +789,21 @@ namespace psio {
       };
       static_assert(detail::ann::tree_ok<tuple_type, psio_annotation_holder_>(),
                     "psio: an annotation of this tuple does not fit its element's type");
+      static_assert(detail::length_bounds_consistent(Meta::annotations),
+                    PSIO_LENGTH_BOUND_CONFLICT_MSG);
    };
+
+   // Whether an annotated tuple has a name for every element: a method that
+   // lists all of its parameters in method(...). Its text is then an object
+   // keyed by those names (docs/json.md "Method arguments"); otherwise it is
+   // the positional array any tuple is.
+   template <typename T>
+   inline constexpr bool annotated_tuple_named_v = [] {
+      if constexpr (requires { T::meta_type::names; })
+         return T::meta_type::names.size() == std::tuple_size_v<typename T::tuple_type>;
+      else
+         return false;
+   }();
 
    namespace detail
    {
@@ -756,6 +832,16 @@ namespace psio {
       {
          static constexpr auto value = std::tuple<>{};
       };
+      template <bool Has, std::size_t N>
+      struct fields_annotation
+      {
+         static constexpr auto value = std::tuple{max_fields_spec{N}};
+      };
+      template <std::size_t N>
+      struct fields_annotation<false, N>
+      {
+         static constexpr auto value = std::tuple<>{};
+      };
    }  // namespace detail
 
    // The annotations of the argument tuple of method I of reflected T, from
@@ -775,14 +861,27 @@ namespace psio {
       static constexpr auto annotations = detail::indexed_specs(
          meta.params, std::make_index_sequence<std::tuple_size_v<params_t>>{});
       static constexpr auto type_annotations =
-         detail::cap_annotation<meta.max_dynamic_data.has_value(),
-                                meta.max_dynamic_data.value_or(0)>::value;
+         std::tuple_cat(detail::cap_annotation<meta.max_dynamic_data.has_value(),
+                                               meta.max_dynamic_data.value_or(0)>::value,
+                        detail::fields_annotation<meta.max_fields.has_value(),
+                                                  meta.max_fields.value_or(0)>::value);
+      // maxFields(N): the method has, and will ever have, at most N
+      // parameters; N is at most 255 (docs/pssz-spec.md 8.4).
+      static_assert(!meta.max_fields.has_value() || *meta.max_fields <= max_tuple_elements,
+                    "psio: method(..., maxFields(N)): N is at most 255, the most parameters a "
+                    "method can have (docs/pssz-spec.md 8.4)");
+      static_assert(!meta.max_fields.has_value() ||
+                       std::tuple_size_v<typename reflect<T>::template method_params<I>> <=
+                          *meta.max_fields,
+                    "psio: the method has more parameters than its maxFields(N) allows");
    };
 
    // The annotations returns(...) lists for method I, and their value-side
-   // check: a return value has no enclosing record, so whoever packs one
-   // checks it with this (the bytes of a bare string or list do not depend
-   // on its bound).
+   // check. returns(...) makes the result a bounded type: its bytes are that
+   // type's (a bounded list of variable elements has the offset table of its
+   // own bound), so a result is written and read with
+   // psio::encode_method_result / validate_method_result /
+   // decode_method_result (pssz.hpp), which run this check.
    template <typename T, std::size_t I>
    inline constexpr auto method_result_annotations =
       reflect<T>::template method_annotations<I>.result;
@@ -799,6 +898,8 @@ namespace psio {
    {
       static_assert(detail::ann::tree_ok<R, detail::method_result_holder<T, I>>(),
                     "psio: a returns(...) annotation does not fit the method's return type");
+      static_assert(detail::length_bounds_consistent(method_result_annotations<T, I>),
+                    PSIO_LENGTH_BOUND_CONFLICT_MSG);
       return detail::ann::check_value(value, method_result_annotations<T, I>,
                                       "psio: return value length_bound violated", format);
    }

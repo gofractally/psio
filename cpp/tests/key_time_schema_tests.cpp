@@ -252,19 +252,22 @@ TEST_CASE("typed and schema-driven codecs agree on enum, strings and time togeth
       CHECK(back == bytes);
    }
 
-   // A handler registered under a time id is never consulted.
+   // A handler cannot be registered under a time id: the presentation is
+   // the codec's own.
    ir::CustomHandlers hijack;
    bool               called = false;
-   hijack.add("time-point-micros",
-              {[&](std::span<const char>, std::string& text) {
-                  called = true;
-                  text   = "hijacked";
-                  return psio::codec_ok();
-               },
-               [&](std::string_view, std::vector<char>&) {
-                  called = true;
-                  return psio::codec_ok();
-               }});
+   CHECK_FALSE(hijack
+                  .try_add("time-point-micros",
+                           {[&](std::span<const char>, std::string& text) {
+                               called = true;
+                               text   = "hijacked";
+                               return psio::codec_ok();
+                            },
+                            [&](std::string_view, std::vector<char>&) {
+                               called = true;
+                               return psio::codec_ok();
+                            }})
+                  .ok());
    std::string out;
    REQUIRE(ir::pssz_to_json(schema, root, psio::json{}, std::span<const char>{bytes}, out, nullptr,
                             &hijack)

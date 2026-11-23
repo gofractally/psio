@@ -244,7 +244,7 @@ namespace psio {
          using F = typename R::template member_type<I>;
          using eff = typename ::psio::effective_annotations_for<
             T, F, R::template member_pointer<I>>::value_t;
-         return ::psio::has_as_override_v<eff>;
+         return ::psio::has_binary_as_override_v<F, eff>;
       }
 
       template <typename T>
@@ -829,7 +829,7 @@ namespace psio {
                using eff =
                   typename ::psio::effective_annotations_for<
                      T, F, R::template member_pointer<I>>::value_t;
-               return ::psio::has_as_override_v<eff>;
+               return ::psio::has_binary_as_override_v<F, eff>;
             };
 
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
@@ -1084,7 +1084,7 @@ namespace psio {
                          T, F,
                          R::template member_pointer<Is>>::value_t;
                    constexpr bool override_v =
-                      ::psio::has_as_override_v<eff>;
+                      ::psio::has_binary_as_override_v<F, eff>;
 
                    if constexpr (is_std_optional_v<F> && !override_v)
                    {
@@ -1575,7 +1575,7 @@ namespace psio {
                using eff =
                   typename ::psio::effective_annotations_for<
                      T, F, R::template member_pointer<I>>::value_t;
-               return ::psio::has_as_override_v<eff>;
+               return ::psio::has_binary_as_override_v<F, eff>;
             };
 
             // Size the same emitted prefix as the encoder.
@@ -2191,7 +2191,7 @@ namespace psio {
                using eff =
                   typename ::psio::effective_annotations_for<
                      T, F, R::template member_pointer<I>>::value_t;
-               return ::psio::has_as_override_v<eff>;
+               return ::psio::has_binary_as_override_v<F, eff>;
             };
 
             constexpr std::size_t fixed_region =
@@ -2644,7 +2644,7 @@ namespace psio {
                      if (cursor == fixed_end) return;
                   using eff = typename ::psio::effective_annotations_for<
                      T, F, R::template member_pointer<Is>>::value_t;
-                  if constexpr (!::psio::has_as_override_v<eff> && is_fixed_v<F>)
+                  if constexpr (!::psio::has_binary_as_override_v<F, eff> && is_fixed_v<F>)
                      cursor += fixed_size_of<F>();
                   else
                   {
@@ -2652,7 +2652,7 @@ namespace psio {
                      const auto slot = read_word<W>(src, cursor);
                      cursor += W;
                      const auto field_end = record_next_payload<W, T>(src, fixed_start, fixed_end, Is, end);
-                     if constexpr (::psio::has_as_override_v<eff>)
+                     if constexpr (::psio::has_binary_as_override_v<F, eff>)
                         tail = field_end; // opaque adapter payload has no typed size walker
                      else if constexpr (is_std_optional_v<F>)
                      {

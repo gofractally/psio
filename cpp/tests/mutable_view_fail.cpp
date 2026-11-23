@@ -53,15 +53,33 @@ struct FailRecord
    std::vector<std::uint32_t>               sorted;
    std::string                              text;
    std::vector<std::array<std::uint8_t, 2>> keyed;
-   std::pair<std::uint16_t, std::uint16_t>  limits;
+   std::pair<std::array<std::uint16_t, 2>, std::uint16_t> limits;
 };
 PSIO_REFLECT(FailRecord, id, name, numbers, maybe, choice, bits, point, range, holder, shown,
              sorted, text, keyed, limits)
 // Position specs constrain content below the member, as sorted does.
 PSIO_FIELD_ATTRS(FailRecord, keyed, psio::element(psio::sorted))
-PSIO_FIELD_ATTRS(FailRecord, limits, psio::at<0>(psio::unique_keys))
+PSIO_FIELD_ATTRS(FailRecord, limits, psio::at<0>(psio::unique_keys))  // of the array's elements
 PSIO_FIELD_ATTRS(FailRecord, sorted, psio::sorted_spec{})
 PSIO_FIELD_ATTRS(FailRecord, text, psio::utf8_spec{})
+// An as<Tag> whose adapter writes bytes replaces the member's wire form (a
+// text-only one would leave the member a plain, addressable u32).
+struct FailHexBytes
+{
+   static std::size_t packsize(const std::uint32_t&) noexcept { return 8; }
+   template <typename Sink>
+   static void encode(const std::uint32_t&, Sink& s)
+   {
+      s.insert(s.end(), 8, '0');
+   }
+   static std::uint32_t      decode(std::span<const char>) noexcept { return 0; }
+   static psio::codec_status validate(std::span<const char>) noexcept { return psio::codec_ok(); }
+   static psio::codec_status validate_strict(std::span<const char>) noexcept
+   {
+      return psio::codec_ok();
+   }
+};
+PSIO_ADAPTER(std::uint32_t, psio::hex_tag, FailHexBytes)
 template <>
 inline constexpr auto psio::annotate<&FailRecord::shown> = std::tuple{psio::as<psio::hex_tag>};
 
@@ -114,7 +132,7 @@ int main()
 #elif defined(MV_FAIL_ELEMENT_MEMBER)
    ok = psio::size(mv.get<12>()) != 0;
 #elif defined(MV_FAIL_AT_MEMBER)
-   ok = mv.get<13>().get<0>().set(5);
+   ok = mv.get<13>().get<0>()[0].set(5);
 #elif defined(MV_FAIL_FORMAT)
    ok = psio::mutable_view<FailPoint, FailFormat>{bytes}.set(FailPoint{});
 #endif

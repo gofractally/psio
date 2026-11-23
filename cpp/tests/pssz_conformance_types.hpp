@@ -881,6 +881,24 @@ namespace pssz_conf
    struct AnnVar { std::variant<u32, Raw, Vec<Raw>> v; };  // alternatives by index
    PSIO_REFLECT(AnnVar, attr(v, at<1>(utf8 | max<16>) | at<2>(max<2> | element(utf8 | max<16>))))
 
+   // ── A transparent type that bounds its member (docs/pssz-spec.md 5.10) ─
+   //
+   // Memo IS BoundedString(80): UTF-8, at most 80 bytes, wherever it is
+   // held. WrapMemo says the same with a wrapper type, and is one type with
+   // Memo to a schema reader.
+   struct Memo { Raw text; };
+   PSIO_REFLECT(Memo, transparent(), attr(text, utf8 | max<80>))
+   struct WrapMemo { psio::utf8_string<80> text; };
+   PSIO_REFLECT(WrapMemo, transparent(), text)
+   struct MemoRec
+   {
+      u32       id = 0;
+      Memo      memo;
+      Opt<Memo> note;
+      Vec<Memo> memos;
+   };
+   PSIO_REFLECT(MemoRec, id, memo, note, memos)
+
    // ── A list's own offset-table width (docs/pssz-spec.md 3.2) ───────────
    //
    // A list / map / set of variable elements writes one offset slot per
@@ -1098,6 +1116,8 @@ namespace pssz_conf
       // a list's own offset-table width (appended)
       types<BList1, BList2, BList2Top, BList4, BListFree, ListW1, ListW2, ListW2Top, ListW4,
             ListFree, ListNested, MapW1, MapW2, SetW1>,
+      // a transparent type that bounds its member (appended)
+      types<Memo, WrapMemo, MemoRec>,
       // a record's cap as the bound of the positions beneath it (appended)
       types<CapTransfer, CapList, CapList2, CapList4, CapNested, CapMap, CapTuple, CapTight,
             CapClamp, CapChild, CapOuter>,

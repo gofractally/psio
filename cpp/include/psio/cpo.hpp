@@ -30,7 +30,10 @@
 #include <psio/error.hpp>
 
 #include <memory>
+#include <concepts>
 #include <span>
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -63,6 +66,19 @@ namespace psio {
       };
 
       // ── decode ────────────────────────────────────────────────────────
+      // A format whose encoding is text (psio::json, psio::ijson): a string
+      // literal / C string given to decode / validate is its characters,
+      // without the terminator. Binary formats take a span only.
+      template <typename Fmt>
+      concept text_format_tag =
+         requires { typename Fmt::buffer_type; } &&
+         std::same_as<typename Fmt::buffer_type, std::string>;
+      inline std::span<const char> c_string_span(const char* s) noexcept
+      {
+         const std::string_view v{s};
+         return std::span<const char>{v.data(), v.size()};
+      }
+
       template <typename T>
       struct decode_fn
       {
@@ -72,6 +88,11 @@ namespace psio {
                tag_invoke(*this, fmt, static_cast<T*>(nullptr), b)))
          {
             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+         }
+         template <text_format_tag Fmt>
+         constexpr T operator()(Fmt fmt, const char* text) const
+         {
+            return (*this)(fmt, c_string_span(text));
          }
       };
 
@@ -101,6 +122,11 @@ namespace psio {
          operator()(Fmt fmt, std::span<const char> b) const noexcept
          {
             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+         }
+         template <text_format_tag Fmt>
+         [[nodiscard]] constexpr codec_status operator()(Fmt fmt, const char* text) const noexcept
+         {
+            return (*this)(fmt, c_string_span(text));
          }
       };
 
@@ -143,6 +169,11 @@ namespace psio {
          {
             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
          }
+         template <text_format_tag Fmt>
+         [[nodiscard]] constexpr codec_status operator()(Fmt fmt, const char* text) const noexcept
+         {
+            return (*this)(fmt, c_string_span(text));
+         }
       };
 
       // ── validate_strict_or_throw (structural + semantic, throwing) ────
@@ -171,6 +202,12 @@ namespace psio {
          operator()(Fmt fmt, std::span<const char> b) const noexcept
          {
             return tag_invoke(*this, fmt, static_cast<T*>(nullptr), b);
+         }
+         template <text_format_tag Fmt>
+         [[nodiscard]] constexpr std::unique_ptr<T> operator()(Fmt fmt,
+                                                               const char* text) const noexcept
+         {
+            return (*this)(fmt, c_string_span(text));
          }
       };
 

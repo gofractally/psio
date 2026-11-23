@@ -981,9 +981,9 @@ psio_custom_compile_fail(transparent_max_dynamic_data CT_FAIL_TRANSPARENT_MAX_DY
 psio_custom_compile_fail(transparent_type_attrs_dwnc CT_FAIL_TRANSPARENT_TYPE_ATTRS_DWNC
    "cannot be combined with definitionWillNotChange / maxFields / maxDynamicData")
 psio_custom_compile_fail(transparent_member_attr CT_FAIL_TRANSPARENT_MEMBER_ATTR
-   "the member of a transparent\\(\\) type takes no annotation")
+   "the member of a transparent\\(\\) type takes only the annotations that make it a bounded type")
 psio_custom_compile_fail(transparent_field_attrs CT_FAIL_TRANSPARENT_FIELD_ATTRS
-   "the member of a transparent\\(\\) type takes no annotation")
+   "the member of a transparent\\(\\) type takes only the annotations that make it a bounded type")
 psio_custom_compile_fail(transparent_twice CT_FAIL_TRANSPARENT_TWICE
    "lists a type-level attribute twice")
 psio_custom_compile_fail(transparent_and_type_attrs CT_FAIL_TRANSPARENT_AND_TYPE_ATTRS
@@ -1039,3 +1039,60 @@ psio_mutable_view_assoc_compile_fail(invariant_contained MV_FAIL_INVARIANT_CONTA
 # and schema-driven (the exception-disabled run is part of
 # psio_custom_noexceptions_test).
 psio_add_test(psio_custom_assoc_tests custom_assoc_tests.cpp)
+
+# The cross-language consistency round: one section per rule (merged length
+# bounds, key writer checks, reserved custom ids, ...).
+psio_add_test(psio_consistency_tests consistency_tests.cpp)
+add_test(NAME psio_consistency_control_compiles
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/consistency_fail.cpp)
+function(psio_consistency_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_consistency_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/consistency_fail.cpp)
+   set_tests_properties(psio_consistency_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_CONS_BOUNDS "contradictory length bounds on one member or position")
+psio_consistency_compile_fail(max_twice CONS_FAIL_MAX_TWICE "${PSIO_CONS_BOUNDS}")
+psio_consistency_compile_fail(min_above_max CONS_FAIL_MIN_ABOVE_MAX "${PSIO_CONS_BOUNDS}")
+
+# Shared vectors of the two name coders (conformance/name-vectors.json):
+# psio/name.hpp identifier names and psio/compress_name.hpp method names.
+set(PSIO_NAME_VECTORS ${CMAKE_SOURCE_DIR}/conformance/name-vectors.json)
+add_executable(psio_name_conformance_emit name_conformance_emit.cpp)
+target_link_libraries(psio_name_conformance_emit PRIVATE psio)
+target_compile_features(psio_name_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_name_conformance_regen
+         COMMAND psio_name_conformance_emit --check ${PSIO_NAME_VECTORS})
+set(PSIO_CONS_RESERVED "this custom type's schema id is reserved for one of PSIO's own types")
+psio_consistency_compile_fail(reserved_invariant_id CONS_FAIL_RESERVED_INVARIANT_ID
+   "${PSIO_CONS_RESERVED}")
+psio_consistency_compile_fail(reserved_reflected_name CONS_FAIL_RESERVED_REFLECTED_NAME
+   "${PSIO_CONS_RESERVED}")
+psio_consistency_compile_fail(fields_over_cap CONS_FAIL_FIELDS_OVER_CAP
+   "the record has more fields than its maxFields\\(N\\) allows")
+psio_consistency_compile_fail(fields_cap_over_255 CONS_FAIL_FIELDS_CAP_OVER_255
+   "maxFields\\(N\\): N is at most 255")
+psio_consistency_compile_fail(params_over_cap CONS_FAIL_PARAMS_OVER_CAP
+   "the method has more parameters than its maxFields\\(N\\) allows")
+set(PSIO_CONS_TRANSPARENT
+   "the member of a transparent\\(\\) type takes only the annotations that make it a bounded type")
+psio_consistency_compile_fail(transparent_exact CONS_FAIL_TRANSPARENT_EXACT "${PSIO_CONS_TRANSPARENT}")
+psio_consistency_compile_fail(transparent_min CONS_FAIL_TRANSPARENT_MIN "${PSIO_CONS_TRANSPARENT}")
+psio_consistency_compile_fail(transparent_text_form CONS_FAIL_TRANSPARENT_SORTED
+   "${PSIO_CONS_TRANSPARENT}")
+psio_consistency_compile_fail(transparent_max_on_int CONS_FAIL_TRANSPARENT_MAX_ON_INT
+   "${PSIO_CONS_TRANSPARENT}")
+
+# Shared cross-language interface fixture (conformance/interface-vectors.json):
+# the Interface / Func IR of a method declaration, and the bytes and text of
+# its argument lists and results.
+set(PSIO_INTERFACE_VECTORS ${CMAKE_SOURCE_DIR}/conformance/interface-vectors.json)
+add_executable(psio_interface_conformance_emit interface_conformance_emit.cpp)
+target_link_libraries(psio_interface_conformance_emit PRIVATE psio)
+target_compile_features(psio_interface_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_interface_conformance_regen
+         COMMAND psio_interface_conformance_emit --check ${PSIO_INTERFACE_VECTORS})

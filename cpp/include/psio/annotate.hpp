@@ -58,9 +58,10 @@
 //      explicit cap from `maxFields(N)` / `maxDynamicData(N)` keywords
 //      in PSIO_REFLECT.
 //   psio::effective_max_fields_v<T>    → optional<size_t>
-//      min(explicit cap, reflect<T>::member_count) — cap wins downward.
+//      maxFields(N) when declared, else the current field count.
 //   psio::effective_max_dynamic_v<T>   → optional<size_t>  (in max_size.hpp)
-//      min(explicit cap, max_encoded_size<T>) — cap wins downward.
+//      the explicit cap when there is one (an explicit cap always rules,
+//      docs/pssz-spec.md 3.1), else the inferred bound max_encoded_size<T>.
 //
 // Cap enforcement helpers (every format consumer reuses these):
 //
@@ -90,6 +91,9 @@ namespace psio {
    // std::tuple, a std::pair (2), a method's argument list. Every PSSZ entry
    // point and the schema builder refuse a longer one at compile time.
    inline constexpr std::size_t max_tuple_elements = 255;
+   // ... and so has a record: its fields, like a tuple's elements and a
+   // method's parameters, are one positional list (docs/pssz-spec.md 8.4).
+   inline constexpr std::size_t max_record_fields = 255;
    template <std::size_t N>
    inline constexpr bool tuple_size_ok_v = N <= max_tuple_elements;
 #define PSIO_REQUIRE_TUPLE_SIZE(N)                                                              \
@@ -237,6 +241,10 @@ namespace psio {
       std::optional<std::uint32_t> exact = std::nullopt;
       std::optional<std::uint32_t> max   = std::nullopt;
       std::optional<std::uint32_t> min   = std::nullopt;
+      // Set by `bound | bound` when the two state one limit differently
+      // (`max<8> | max<16>`): a contradiction, refused where the annotation
+      // is attached (detail::length_bounds_consistent). Never set by hand.
+      bool conflict = false;
 
       // Used by the conflict-checker in effective_annotations.
       constexpr bool operator==(const length_bound&) const = default;
@@ -328,39 +336,29 @@ namespace psio {
       }
    };
 
+   // RESERVED — not implemented. No codec, schema emitter or validator
+   // reads hex_spec: attaching it to a member changes nothing. (It used to
+   // be checked by validate_strict alone; an annotation is either enforced
+   // by every codec or it is not an annotation.) Bytes that are written as
+   // hex text are a byte list (std::vector<std::uint8_t>,
+   // psio::byte_array<N>), whose ijson form is hex.
    struct hex_spec
    {
       using spec_category = runtime_spec_tag;
       using applies_to    = shape_set<ByteStringShape>;
 
-      std::uint32_t bytes     = 0;   // source byte count; wire length = 2 * bytes
+      std::uint32_t bytes     = 0;
       std::uint32_t field_num = 0;
 
       constexpr bool operator==(const hex_spec&) const = default;
-
-      // Semantic validator — every byte must be a hex digit. Length
-      // parity (even) is also required since hex strings encode pairs.
-      [[nodiscard]] static codec_status
-      validate(std::span<const char> bytes) noexcept
-      {
-         if ((bytes.size() & 1u) != 0u)
-            return codec_fail("hex_spec: odd-length hex string", 0,
-                               "hex_spec");
-         for (std::size_t i = 0; i < bytes.size(); ++i)
-         {
-            const auto c = static_cast<unsigned char>(bytes[i]);
-            const bool ok = (c >= '0' && c <= '9') ||
-                            (c >= 'a' && c <= 'f') ||
-                            (c >= 'A' && c <= 'F');
-            if (!ok)
-               return codec_fail("hex_spec: non-hex character",
-                                  static_cast<std::uint32_t>(i),
-                                  "hex_spec");
-         }
-         return codec_ok();
-      }
    };
 
+   // The elements of a list or array are in order (annotation_tree.hpp
+   // "Order specs"): non-descending, or strictly ascending with `unique`;
+   // descending with `ascending = false`. The order is that of the elements'
+   // `key` encodings, as for maps and sets. Enforced by the pssz, json and
+   // key writers and by every checking reader, at the member and at any
+   // position below it; a mutable view does not address such a member.
    struct sorted_spec
    {
       using spec_category = runtime_spec_tag;
@@ -437,6 +435,9 @@ namespace psio {
       constexpr bool operator==(const at_spec&) const = default;
    };
 
+   // RESERVED — not implemented: no codec reads default_value_spec or
+   // default_factory_spec. A member that may be absent is a std::optional
+   // (a missing optional member is None); there is no other default.
    template <typename T>
    struct default_value_spec
    {
@@ -456,6 +457,8 @@ namespace psio {
       constexpr bool operator==(const default_factory_spec&) const = default;
    };
 
+   // A protobuf field number: read by psio::protobuf (protobuf.hpp) and by
+   // nothing else. RESERVED for every other format.
    struct field_num_spec
    {
       using spec_category = static_spec_tag;
@@ -464,6 +467,8 @@ namespace psio {
       constexpr bool operator==(const field_num_spec&) const = default;
    };
 
+   // RESERVED — not implemented: no codec skips a member. Every reflected
+   // member is encoded.
    struct skip_spec
    {
       using spec_category = static_spec_tag;
@@ -493,14 +498,17 @@ namespace psio {
    };
    inline constexpr transparent_spec transparent{};
 
-   // Type-level cap on declared field count.  Lets formats pick a
-   // smaller slot index / vtable-width than the (potentially large)
-   // member_count would imply.  The schema author asserts the cap;
-   // validators reject decoded inputs whose declared field count
-   // exceeds it.
-   //
-   // Co-exists with `definition_will_not_change`: use both when you
-   // want a fixed layout AND a tighter slot-table.
+   // Type-level cap on the NUMBER of fields of a record (or of a method's
+   // argument list): the type has, and will ever have, at most N fields.
+   // N is at most 255, the format's own limit. Enforced:
+   //   - at compile time: a record with more than N fields, or N > 255, does
+   //     not compile (lookup_annotations; method_arg_meta for a method);
+   //   - by pssz_evolves_from: a revision has no more fields than the
+   //     original's cap and does not raise or drop it;
+   //   - by the schema-driven codecs: an Object with more members than its
+   //     maxFields attribute is a malformed schema.
+   // It is the IR attribute `maxFields` and WIT's `@maxFields(N)`. It caps
+   // a count; maxDynamicData caps bytes.
    struct max_fields_spec
    {
       using spec_category = static_spec_tag;
@@ -527,20 +535,19 @@ namespace psio {
       constexpr bool operator==(const max_dynamic_data_spec&) const = default;
    };
 
-   // ── WIT attribute specs ────────────────────────────────────────────
+   // ── Reserved specs ─────────────────────────────────────────────────
    //
-   // These specs map onto the WIT @-attribute vocabulary at schema
-   // emission time.  v1 maintained a parallel `type_attrs_of<T>()` /
-   // `member_attrs_of<MP>()` ADL registry; v3 unifies them into the
-   // single annotation channel by registering the same information
-   // as specs.  The WIT generator (wit_gen.hpp) reads them from
-   // `effective_annotations_for<T, F, &T::F>` and emits `@final`,
-   // `@sorted`, etc.
+   // RESERVED — not implemented. The specs of this block name WIT-style
+   // attributes. Nothing reads them: no codec, no validator, and no schema
+   // emitter (the Schema IR, WIT, capnp, protobuf and flatbuffers outputs do
+   // not carry them). Attaching one to a type or member changes nothing; the
+   // names are kept so that a later implementation does not collide with
+   // user code. The exceptions are stated at the spec: unique_keys_spec
+   // (enforced) and deprecated_spec (read by psio::graphql only).
 
-   // @final — the record is closed; receivers reject trailing unknown
-   // fields.  Distinct from definition_will_not_change (which is a
-   // wire-format optimisation choosing Struct over Object); @final
-   // is a semantic contract about future schema evolution.
+   // RESERVED — not implemented. (A record that will never change says
+   // definitionWillNotChange(); a reader that must refuse unknown fields
+   // uses validate_strict.)
    struct final_spec
    {
       using spec_category = static_spec_tag;
@@ -548,27 +555,26 @@ namespace psio {
       constexpr bool operator==(const final_spec&) const = default;
    };
 
-   // @canonical — there is exactly one admissible wire form for this
-   // type.  Decoders may reject any other byte sequence that round-
-   // trips to the same value.
+   // RESERVED — not implemented. (Every pssz / key value already has
+   // exactly one encoding.)
    struct canonical_spec
    {
       using spec_category = static_spec_tag;
       constexpr bool operator==(const canonical_spec&) const = default;
    };
 
-   // @unique-keys — the keys (or elements, for sets) are unique.
-   // sorted_spec.unique covers the same logical claim but only on
-   // sequence types; this version applies to map-shaped types and
-   // any future associative containers.
+   // No two elements of a list or array have the same key: the element
+   // itself, or element 0 of a pair / tuple element (annotation_tree.hpp
+   // "Order specs"). Enforced by the pssz, json and key writers and by every
+   // checking reader. A std::map / std::set carries it inherently, as a
+   // statement of what the type is.
    struct unique_keys_spec
    {
       using spec_category = static_spec_tag;
       constexpr bool operator==(const unique_keys_spec&) const = default;
    };
 
-   // @flags — emit this enum-shaped type as WIT `flags` (bitset)
-   // rather than `enum` (single-discriminant choice).
+   // RESERVED — not implemented.
    struct flags_spec
    {
       using spec_category = static_spec_tag;
@@ -576,19 +582,15 @@ namespace psio {
       constexpr bool operator==(const flags_spec&) const = default;
    };
 
-   // @padding — this member is reserved/padding and should not be
-   // exposed in schema output (parsers preserve the slot for binary
-   // compatibility but generators skip it from the API surface).
+   // RESERVED — not implemented: a member annotated padding is encoded and
+   // listed in every schema like any other.
    struct padding_spec
    {
       using spec_category = static_spec_tag;
       constexpr bool operator==(const padding_spec&) const = default;
    };
 
-   // @since(version="X.Y.Z") — earliest version this item appears in.
-   // Stored as a runtime string to keep the annotation expression
-   // ergonomic; constexpr-string templating would require a custom
-   // FixedString and complicate user-side instantiation.
+   // RESERVED — not implemented.
    struct since_spec
    {
       using spec_category = runtime_spec_tag;
@@ -596,7 +598,7 @@ namespace psio {
       constexpr bool operator==(const since_spec&) const = default;
    };
 
-   // @unstable(feature="name") — guarded by a feature flag.
+   // RESERVED — not implemented.
    struct unstable_spec
    {
       using spec_category = runtime_spec_tag;
@@ -604,7 +606,9 @@ namespace psio {
       constexpr bool operator==(const unstable_spec&) const = default;
    };
 
-   // @deprecated(version="X.Y.Z") — version this item is deprecated as of.
+   // Read by psio::graphql only (a deprecated field of the GraphQL schema,
+   // `version` as the reason). RESERVED for every other format and schema
+   // output.
    struct deprecated_spec
    {
       using spec_category = runtime_spec_tag;
@@ -751,6 +755,14 @@ namespace psio {
       inline constexpr definition_will_not_change definition_will_not_change_v{};
 
    }  // namespace spec
+
+   // ── has_spec — compile-time "is this spec present?" ───────────────────
+   template <typename Wanted, typename Tuple>
+   inline constexpr bool has_spec_v = false;
+
+   template <typename Wanted, typename... Ts>
+   inline constexpr bool has_spec_v<Wanted, std::tuple<Ts...>> =
+       (std::is_same_v<std::remove_cvref_t<Ts>, Wanted> || ...);
 
    // ── Annotation trait ───────────────────────────────────────────────────
    //
@@ -980,9 +992,32 @@ namespace psio {
       {
          using K = std::remove_const_t<decltype(X)>;
          if constexpr (is_type_key<K>)
-            return merge_annotations(
-               carried_type_annotations<typename type_key_type<K>::type>(),
-               declared_annotations<X>::value);
+         {
+            using T = typename type_key_type<K>::type;
+            constexpr auto merged =
+               merge_annotations(carried_type_annotations<T>(), declared_annotations<X>::value);
+            using Merged = std::remove_cvref_t<decltype(merged)>;
+            // A record has at most 255 fields (docs/pssz-spec.md 8.4), and
+            // no more than its maxFields(N): the cap on the NUMBER of fields
+            // the type will ever have (maxDynamicData caps its bytes).
+            if constexpr (std::is_class_v<T>)
+               if constexpr (requires { requires ::psio::reflect<T>::is_reflected; })
+               {
+                  static_assert(::psio::reflect<T>::member_count <= max_record_fields,
+                                "psio: a record has at most 255 fields (docs/pssz-spec.md 8.4)");
+                  if constexpr (has_spec_v<max_fields_spec, Merged>)
+                  {
+                     static_assert(std::get<max_fields_spec>(merged).value <= max_record_fields,
+                                   "psio: maxFields(N): N is at most 255, the most fields a "
+                                   "record can have (docs/pssz-spec.md 8.4)");
+                     static_assert(::psio::reflect<T>::member_count <=
+                                      std::get<max_fields_spec>(merged).value,
+                                   "psio: the record has more fields than its maxFields(N) "
+                                   "allows");
+                  }
+               }
+            return merged;
+         }
          else if constexpr (std::is_member_pointer_v<K>)
          {
             using C = typename member_pointer_class<K>::type;
@@ -1037,13 +1072,6 @@ namespace psio {
          return std::nullopt;
    }
 
-   // ── has_spec — compile-time "is this spec present?" ───────────────────
-   template <typename Wanted, typename Tuple>
-   inline constexpr bool has_spec_v = false;
-
-   template <typename Wanted, typename... Ts>
-   inline constexpr bool has_spec_v<Wanted, std::tuple<Ts...>> =
-       (std::is_same_v<std::remove_cvref_t<Ts>, Wanted> || ...);
 
    // ── is_dwnc — "does this type carry definition_will_not_change?" ──────
    //
@@ -1215,38 +1243,26 @@ namespace psio {
 
    // ── effective_max_fields_v ────────────────────────────────────────────
    //
-   // Composes an explicit `maxFields(N)` cap with the reflected
-   // `member_count`.  When both are present, the cap WINS DOWNWARD only
-   // — it can be tighter than member_count but never looser, since
-   // overriding upward defeats the purpose of an upper-bound assertion.
-   //
-   // Returns std::nullopt only for non-Reflected types where neither a
-   // member count nor a cap exists; format consumers fall back to the
-   // format-conservative default in that case.
+   // The most fields the type will ever have: its `maxFields(N)` when it
+   // declares one (an explicit cap rules, as for maxDynamicData; the type
+   // has at most N fields by construction), else the fields it has today.
+   // nullopt for a type that is not a record and declares no cap.
 
    template <typename T>
    inline constexpr std::optional<std::size_t> effective_max_fields_v = []
    {
       constexpr auto cap = max_fields_v<T>;
-      if constexpr (::psio::Reflected<T>)
-      {
-         constexpr std::size_t mc = reflect<T>::member_count;
-         if constexpr (cap.has_value())
-            return std::optional<std::size_t>{
-               (*cap < mc) ? *cap : mc};
-         else
-            return std::optional<std::size_t>{mc};
-      }
+      if constexpr (cap.has_value())
+         return cap;
+      else if constexpr (::psio::Reflected<T>)
+         return std::optional<std::size_t>{reflect<T>::member_count};
       else
-      {
-         return cap;  // nullopt unless explicitly capped
-      }
+         return cap;
    }();
 
-   // `effective_max_dynamic_v<T>` lives in psio/max_size.hpp because it
-   // composes the explicit cap with the per-field `length_bound`-
-   // derived bound from `max_encoded_size<T>`.  Putting it there keeps
-   // the annotate.hpp → max_size.hpp dependency one-way.
+   // `effective_max_dynamic_v<T>` lives in psio/max_size.hpp: it is the
+   // explicit cap, or without one the bound `max_encoded_size<T>` infers
+   // from the fields.
 
    // ── Shared cap-enforcement helpers ────────────────────────────────────
    //
@@ -1338,23 +1354,23 @@ namespace psio {
    // statement.)
    inline constexpr utf8_spec utf8{};
 
+   // The elements of a list or array are in non-descending order
+   // (`sorted`) or strictly ascending (`unique`, `sorted_unique`): enforced
+   // by every writer and checking reader (sorted_spec).
    inline constexpr sorted_spec sorted{};
    inline constexpr sorted_spec unique{.unique = true};
    inline constexpr sorted_spec sorted_unique{.unique = true};
 
    inline constexpr definition_will_not_change dwnc{};
 
-   // WIT attribute helpers — used inside attr(field, ...) expressions.
+   inline constexpr unique_keys_spec  unique_keys{};
+   // RESERVED — not implemented (see the specs): nothing reads these.
    inline constexpr final_spec        final_v{};        // `final` is a C++ keyword
    inline constexpr canonical_spec    canonical{};
-   inline constexpr unique_keys_spec  unique_keys{};
    inline constexpr flags_spec        flags{};
    inline constexpr padding_spec      padding{};
-
-   // `since`, `unstable`, `deprecated` carry string args, so they're
-   // constructed at the call site rather than pre-instantiated:
-   //   attr(field, since_spec{.version = "0.2.0"})
-   // (No bare `since`/etc. helpers because they need an argument.)
+   // (since_spec / unstable_spec / deprecated_spec take a string and are
+   // written out: attr(field, deprecated_spec{.version = "0.2.0"}).)
 
 }  // namespace psio
 
@@ -1374,13 +1390,101 @@ namespace psio {
       return t;
    }
 
+   namespace detail
+   {
+      // `min<A> | max<B>`: one length_bound stating both. A limit stated
+      // twice with two values is marked, and refused where the annotation is
+      // attached.
+      constexpr length_bound merge_length_bounds(length_bound a, const length_bound& b) noexcept
+      {
+         auto take = [&](std::optional<std::uint32_t> length_bound::* limit) {
+            if (!(b.*limit))
+               return;
+            if ((a.*limit) && *(a.*limit) != *(b.*limit))
+               a.conflict = true;
+            a.*limit = b.*limit;
+         };
+         take(&length_bound::exact);
+         take(&length_bound::max);
+         take(&length_bound::min);
+         a.conflict = a.conflict || b.conflict;
+         return a;
+      }
+      // One bound says something a value can satisfy.
+      constexpr bool length_bound_consistent(const length_bound& lb) noexcept
+      {
+         if (lb.conflict)
+            return false;
+         if (lb.min && lb.max && *lb.min > *lb.max)
+            return false;
+         if (lb.exact && ((lb.max && *lb.exact > *lb.max) || (lb.min && *lb.exact < *lb.min)))
+            return false;
+         return true;
+      }
+      // Every length_bound of a spec tuple, at any depth (inside element(...),
+      // keys(...), values(...), at<I>(...)).
+      template <typename... Ts>
+      constexpr bool length_bounds_consistent(const std::tuple<Ts...>& specs) noexcept;
+      template <typename S>
+      constexpr bool spec_length_bounds_consistent(const S& spec) noexcept
+      {
+         if constexpr (std::is_same_v<S, length_bound>)
+            return length_bound_consistent(spec);
+         else if constexpr (requires { spec.child; })
+            return length_bounds_consistent(::psio::to_spec_tuple(spec.child));
+         else
+            return true;
+      }
+      template <typename... Ts>
+      constexpr bool length_bounds_consistent(const std::tuple<Ts...>& specs) noexcept
+      {
+         return std::apply(
+            [](const auto&... s) { return (spec_length_bounds_consistent(s) && ... && true); },
+            specs);
+      }
+
+      template <typename S>
+      constexpr auto unless_length_bound(const S& spec) noexcept
+      {
+         if constexpr (std::is_same_v<S, length_bound>)
+            return std::tuple<>{};
+         else
+            return std::tuple<S>{spec};
+      }
+   }  // namespace detail
+
+// What the codecs' static_asserts say about a contradictory bound.
+#define PSIO_LENGTH_BOUND_CONFLICT_MSG                                                         \
+   "psio: contradictory length bounds on one member or position: a limit is stated twice "     \
+   "with different values (max<8> | max<16>), min<N> is greater than max<M>, or exact<N> "     \
+   "lies outside min / max"
+
    // `spec | spec` composes into a tuple. Only enabled for non-arithmetic
    // types so it does not compete with the bitwise `|` on integers.
+   //
+   // Length bounds merge: `min<2> | max<8>` is the one
+   // length_bound{.max = 8, .min = 2} (a tuple holds each spec type once).
    template <typename A, typename B>
       requires(!std::is_arithmetic_v<A> && !std::is_arithmetic_v<B>)
    constexpr auto operator|(const A& a, const B& b) noexcept
    {
-      return std::tuple_cat(to_spec_tuple(a), to_spec_tuple(b));
+      auto       ta = to_spec_tuple(a);
+      const auto tb = to_spec_tuple(b);
+      using TA      = std::remove_cvref_t<decltype(ta)>;
+      using TB      = std::remove_cvref_t<decltype(tb)>;
+      if constexpr (has_spec_v<length_bound, TA> && has_spec_v<length_bound, TB>)
+      {
+         std::get<length_bound>(ta) = detail::merge_length_bounds(std::get<length_bound>(ta),
+                                                                  std::get<length_bound>(tb));
+         return std::tuple_cat(
+            ta, std::apply(
+                   [](const auto&... s) {
+                      return std::tuple_cat(detail::unless_length_bound(s)...);
+                   },
+                   tb));
+      }
+      else
+         return std::tuple_cat(ta, tb);
    }
 
    // Position helpers (see keys_spec above): `element(max<16>)`,

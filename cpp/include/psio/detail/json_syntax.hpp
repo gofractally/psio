@@ -109,7 +109,6 @@ namespace psio::detail::json_impl
       const char*      begin;
       const char*      p;
       const char*      end;
-      bool             lenient_missing = false;
       std::string_view err{};
       const char*      err_at = nullptr;
 

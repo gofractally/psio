@@ -94,10 +94,12 @@ namespace psio::schema_types
 
    // ── Attribute ───────────────────────────────────────────────────────
    //
-   // WIT-style annotation that flows from C++ reflection through the
-   // IR to every emitter.  `value` is nullopt for bare flags
-   // (@sorted, @canonical, @final), otherwise the rendered argument
-   // form ("5", "\"1.2\"", "feature = \"foo\"").
+   // A name / value pair on an IR node. `value` is nullopt for a bare
+   // flag (definitionWillNotChange), otherwise the rendered argument
+   // ("5", "max=32", "string"). The attributes the schema builder writes
+   // and the codecs read are listed in pssz_ir.hpp; the C++ annotations
+   // marked RESERVED in annotate.hpp (final, canonical, flags, padding,
+   // since, unstable, ...) are not written here or by any emitter.
    //
    // Carried first-class on Member, Func, Variant cases, Object,
    // Resource, Package, Use, Interface, World — every IR site that

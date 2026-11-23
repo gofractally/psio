@@ -85,12 +85,12 @@ TEMPLATE_TEST_CASE("checked readers enforce node depth and malformed payloads co
  REQUIRE(psio::validate<Units>(F{},std::vector<char>{}).ok());
  REQUIRE_FALSE(psio::validate<std::vector<std::string>>(F{},std::vector<char>(F::offset_width,0)).ok());
  // A plain String is Vector(u8) carrying raw bytes: default validation passes
- // them through, strict validation checks every string, and the utf8_string
+ // them through, strict validation does too (a raw string is any bytes), and the utf8_string
  // wrapper carries the constraint in its type (rejected in both modes).
  const std::vector<char> not_utf8{char(0xc0),char(0x80)};
  REQUIRE(psio::validate<std::string>(F{},not_utf8).ok());
  REQUIRE(psio::decode<std::string>(F{},not_utf8).size()==2);
- REQUIRE_FALSE(psio::validate_strict<std::string>(F{},not_utf8).ok());
+ REQUIRE(psio::validate_strict<std::string>(F{},not_utf8).ok());
  REQUIRE_FALSE(psio::validate<psio::utf8_string<8>>(F{},not_utf8).ok());
  REQUIRE_FALSE(psio::validate_strict<psio::utf8_string<8>>(F{},not_utf8).ok());
  REQUIRE_THROWS_AS(psio::decode<psio::utf8_string<8>>(F{},not_utf8),psio::codec_exception);

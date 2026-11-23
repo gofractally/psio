@@ -114,6 +114,12 @@ namespace psio::schema_types
    {
       // Private static identity within one linked image. The address is never
       // serialized; the token avoids RTTI and is not a cross-DSO identity API.
+      // The identity of the bounded type a transparent type U makes of its
+      // member (transparent.hpp "Bounds on the member").
+      template <typename U>
+      struct transparent_member_of
+      {
+      };
       template<typename T> inline unsigned char type_token = 0;
       // ── Std-container detectors (v3-local) ──────────────────────────
       template <typename T>
@@ -466,9 +472,14 @@ namespace psio::schema_types
             // argument tuple). A Tuple node has no attributes, so it is
             // written as what a tuple is on the wire — the extensible record
             // of its elements (docs/pssz-spec.md 3.2) — which can carry the
-            // cap: an Object whose members are the elements, named by the
-            // parameter names where the Meta has them and by position
-            // otherwise.
+            // cap: an Object whose members are the elements. Its `tuple`
+            // attribute says what it is — positional on the wire like any
+            // record, and in text an argument list (docs/json.md "Method
+            // arguments"): "named" when the method names every parameter
+            // (the members carry the names; the text is an object, and a
+            // reader also takes the positional array), "positional"
+            // otherwise (the members are named "0", "1", ...; the text is
+            // the array).
             using Tuple = typename U::tuple_type;
             PSIO_REQUIRE_TUPLE_SIZE(std::tuple_size_v<Tuple>);
             Object o;
@@ -476,10 +487,10 @@ namespace psio::schema_types
             {
                auto name = [](std::size_t i) -> std::string
                {
-                  if constexpr (requires { U::meta_type::names; })
-                     if (i < U::meta_type::names.size())
-                        return std::string{U::meta_type::names[i]};
-                  return std::to_string(i);
+                  if constexpr (::psio::annotated_tuple_named_v<U>)
+                     return std::string{U::meta_type::names[i]};
+                  else
+                     return std::to_string(i);
                };
                (o.members.push_back(
                    Member{name(I),
@@ -488,6 +499,11 @@ namespace psio::schema_types
                           {}}),
                 ...);
             }(std::make_index_sequence<std::tuple_size_v<Tuple>>{});
+            o.attributes.push_back(Attribute{
+               "tuple", ::psio::annotated_tuple_named_v<U> ? "named" : "positional"});
+            if constexpr (::psio::max_fields_v<U>.has_value())
+               o.attributes.push_back(
+                  Attribute{"maxFields", std::to_string(::psio::max_fields_v<U>.value())});
             if constexpr (::psio::max_dynamic_data_v<U>.has_value())
                o.attributes.push_back(Attribute{
                   "maxDynamicData", std::to_string(::psio::max_dynamic_data_v<U>.value())});
@@ -553,8 +569,25 @@ namespace psio::schema_types
          }
          else if constexpr (::psio::is_transparent_v<U>)
             // A transparent type is its member: a named alias of the
-            // member's type.
-            return insert<::psio::transparent_inner_t<U>>();
+            // member's type — of the bounded type, when it bounds its member
+            // (attr(text, utf8 | max<80>) is the node of utf8_string<80>).
+            // The bounded type is an anonymous type of its own that the
+            // alias refers to, as a wrapper type is:
+            //    Memo -> @1,  @1 = Custom{BoundedList{u8, 80}, "utf8"}
+            if constexpr (::psio::transparent_member_checked_v<U>)
+            {
+               const void* idx = &sb_detail::type_token<sb_detail::transparent_member_of<U>>;
+               if (auto it = id_to_name_.find(idx); it != id_to_name_.end())
+                  return Type{it->second};
+               std::string name = "@" + std::to_string(id_to_name_.size());
+               id_to_name_[idx] = name;
+               schema_.insert(name, AnyType{});  // placeholder, as in insert()
+               schema_.insert(name, annotated_type<::psio::transparent_inner_t<U>>(
+                                       ::psio::transparent_member_annotations<U>::value));
+               return Type{name};
+            }
+            else
+               return insert<::psio::transparent_inner_t<U>>();
          else if constexpr (is_wit_resource_v<U>)
          {
             // Resource: opaque handle — methods come from
@@ -805,7 +838,7 @@ namespace psio::schema_types
       {
          using eff_t = std::remove_cvref_t<Annots>;
          if constexpr (::psio::detail::ann::has_tree_specs_v<eff_t> &&
-                       !::psio::has_as_override_v<eff_t>)
+                       !::psio::has_binary_as_override_v<F, eff_t>)
          {
             bool as_attribute = false;
             if constexpr (::psio::has_spec_v<::psio::length_bound, eff_t>)
@@ -966,6 +999,8 @@ namespace psio::schema_types
             }
             // The cap of the argument tuple: its encoded size limit and its
             // offset width.
+            if (meta.max_fields)
+               f.attributes.push_back(Attribute{"maxFields", std::to_string(*meta.max_fields)});
             if (meta.max_dynamic_data)
                f.attributes.push_back(
                   Attribute{"maxDynamicData", std::to_string(*meta.max_dynamic_data)});

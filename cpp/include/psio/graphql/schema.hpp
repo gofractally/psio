@@ -608,9 +608,17 @@ namespace psio::graphql
             return out;
          }
       };
-      // The scalar of a time value whose text is its tick count: a duration
-      // (`Seconds`, `Duration_60_1`) or a monotonic time point
-      // (`MonotonicSeconds`, `Monotonic_60_1`).
+      // The scalar of a time value. Its name carries the kind, the unit and,
+      // when it is not a signed 64-bit count, the tick integer — the names
+      // Rust's async-graphql scalars have (rust/psio graphql_scalars.rs),
+      // where two types cannot share one scalar name:
+      //
+      //   time point          DateTimeSeconds, DateTimeMilliseconds,
+      //                       DateTimeMicroseconds, DateTimeNanoseconds,
+      //                       DateTime_<num>_<den>         RFC 3339 UTC text
+      //   duration            Seconds, ..., Duration_<num>_<den>     tick count
+      //   monotonic point     MonotonicSeconds, ..., Monotonic_<num>_<den>
+      //   tick integer        suffix _i32, _u32, _u64, ... (none for int64)
       template <typename T>
       struct duration_namer
       {
@@ -618,21 +626,28 @@ namespace psio::graphql
          {
             using Tr = time_traits<T>;
             name_buf out;
-            if constexpr (Tr::is_monotonic)
-               out.add("Monotonic");
+            const char* const kind =
+               Tr::is_monotonic ? "Monotonic" : Tr::is_point ? "DateTime" : "";
+            const char* const ratio_kind =
+               Tr::is_monotonic ? "Monotonic" : Tr::is_point ? "DateTime" : "Duration";
             if (Tr::num == 1 && Tr::den == 1)
-               out.add("Seconds");
+               out.add(kind).add("Seconds");
             else if (Tr::num == 1 && Tr::den == 1000)
-               out.add("Milliseconds");
+               out.add(kind).add("Milliseconds");
             else if (Tr::num == 1 && Tr::den == 1000000)
-               out.add("Microseconds");
+               out.add(kind).add("Microseconds");
             else if (Tr::num == 1 && Tr::den == 1000000000)
-               out.add("Nanoseconds");
+               out.add(kind).add("Nanoseconds");
             else
-               out.add(Tr::is_monotonic ? "_" : "Duration_")
+               out.add(ratio_kind)
+                  .add("_")
                   .add(static_cast<std::uintmax_t>(Tr::num))
                   .add("_")
                   .add(static_cast<std::uintmax_t>(Tr::den));
+            using Rep = typename Tr::rep;
+            if constexpr (!(std::is_signed_v<Rep> && sizeof(Rep) == 8))
+               out.add(std::is_signed_v<Rep> ? "_i" : "_u")
+                  .add(static_cast<std::uintmax_t>(sizeof(Rep) * 8));
             return out;
          }
       };
@@ -731,7 +746,7 @@ namespace psio::graphql
          else if constexpr (std::is_floating_point_v<T>)
             return {"Float", scalar_class::floating, true};
          else if constexpr (TimePointValue<T>)
-            return {"DateTime", scalar_class::custom, true};
+            return {stored_name<duration_namer<T>>::value, scalar_class::custom, true};
          else if constexpr (TickTextValue<T>)
             return {stored_name<duration_namer<T>>::value, scalar_class::custom, true};
          else if constexpr (is_string_v<T>)

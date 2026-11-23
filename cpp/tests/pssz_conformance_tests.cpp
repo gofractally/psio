@@ -261,10 +261,6 @@ namespace
       CHECK(psio::size_of(F{}, out) == canonical.size());
       if (unknown)
          CHECK_FALSE(psio::validate_strict<T>(F{}, wire).ok());
-      else if (v.cls == "string-raw-non-utf8")
-         // Raw bytes that are not UTF-8: accepted by every entry point except
-         // strict validation, which checks every plain string.
-         CHECK_FALSE(psio::validate_strict<T>(F{}, wire).ok());
       else
          CHECK(psio::validate_strict<T>(F{}, wire).ok());
       if (!unknown)
@@ -303,7 +299,7 @@ namespace
       "string-raw-non-utf8", "length-bound-overflow", "cap-overflow-explicit-nested", "bytes",
       "zero-fixed", "depth", "box", "nested", "nested-unknown", "nested-deferred",
       "map-set", "map-set-order", "transparent", "custom", "invariant", "annotated-bounds",
-      "method-args", "list-width", "cap-implicit"};
+      "method-args", "list-width", "cap-implicit", "transparent-bounds"};
 }  // namespace
 
 TEST_CASE("pssz conformance fixture describes the C++ types", "[pssz][conformance]")

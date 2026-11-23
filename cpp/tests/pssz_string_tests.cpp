@@ -5,8 +5,8 @@
 //   psio::utf8_string<N>   UTF-8, at most N bytes
 //
 // The user type carries the restriction. A std::string is never checked for
-// UTF-8 by encode, decode, default validation or views (strict validation
-// checks every string). A utf8_string is checked by encode, decode, validate
+// UTF-8 by encode, decode, validation (default or strict) or views: it is
+// any bytes. A utf8_string is checked by encode, decode, validate
 // and validate_strict, wherever it is nested.
 
 #include <psio/pssz.hpp>
@@ -256,15 +256,16 @@ TEMPLATE_TEST_CASE("pssz std::string is raw bytes", "[pssz][string]", STRING_FOR
       REQUIRE(psio::decode_pssz_checked(F{}, wire, out, unknown).ok());
       REQUIRE(out == text);
       REQUIRE(psio::view<std::string, F, psio::storage::const_borrow>{wire}.view_() == text);
-      // Strict validation checks every string.
-      REQUIRE_FALSE(psio::validate_strict<std::string>(F{}, wire).ok());
+      // Strict validation too: a raw string is any bytes. Strict means
+      // exact-schema and canonical, not "strings are text".
+      REQUIRE(psio::validate_strict<std::string>(F{}, wire).ok());
 
       // Nested: record field, vector element, optional payload.
       const RawRec nested{1, text, {text, "ok"}, text};
       const auto   bytes = psio::encode(F{}, nested);
       REQUIRE(psio::validate<RawRec>(F{}, bytes).ok());
       REQUIRE(psio::decode<RawRec>(F{}, bytes) == nested);
-      REQUIRE_FALSE(psio::validate_strict<RawRec>(F{}, bytes).ok());
+      REQUIRE(psio::validate_strict<RawRec>(F{}, bytes).ok());
       auto view = psio::view<RawRec, F, psio::storage::const_borrow>{bytes};
       REQUIRE(view.template get<1>().view_() == text);
       REQUIRE(view.template get<2>()[0].view_() == text);
