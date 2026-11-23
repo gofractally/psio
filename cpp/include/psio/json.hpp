@@ -2082,10 +2082,9 @@ namespace psio {
                                         Derived, T*,
                                         std::span<const char> bytes) noexcept
          {
-            if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(),
-                                                           Derived::name);
-                !st.ok())
-               return st;
+            // (A type's maxDynamicData caps its encoded PSSZ size, not the
+            // length of its text: the text of a value within the cap may be
+            // longer than the cap.)
             return read_document<Derived, T>(bytes, nullptr, false);
          }
 

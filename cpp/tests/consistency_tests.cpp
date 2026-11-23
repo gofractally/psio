@@ -104,3 +104,32 @@ TEST_CASE("text entry points take a C string without its terminator", "[consiste
    psio::pssz_ir::Value value;
    CHECK(psio::pssz_ir::json_to_value(schema, root, psio::ijson{}, "200", value).ok());
 }
+
+// ── maxDynamicData caps the encoded PSSZ size, not the JSON text ─────────
+namespace cons_cap
+{
+   struct Capped
+   {
+      std::uint64_t a = 0;
+      std::uint64_t b = 0;
+   };
+   PSIO_REFLECT(Capped, definitionWillNotChange(), maxDynamicData(16), a, b)
+}  // namespace cons_cap
+
+TEST_CASE("a type's cap is not applied to the length of its text", "[consistency][json]")
+{
+   using cons_cap::Capped;
+   const Capped value{~std::uint64_t{0}, 2};
+   REQUIRE(psio::to_pssz(value).size() == 16);   // within the cap
+   const std::string text = psio::to_json(value);
+   REQUIRE(text.size() > 16);                    // 35 characters of text
+   // Every reader of the type's own text accepts it.
+   CHECK(psio::validate<Capped>(psio::json{}, sp(text)).ok());
+   CHECK(psio::validate<Capped>(psio::ijson{}, sp(psio::to_ijson(value))).ok());
+   CHECK(psio::validate_strict<Capped>(psio::json{}, sp(text)).ok());
+   CHECK(psio::validate_json<Capped>(sp(text)).ok());
+   CHECK(psio::from_json<Capped>(sp(text)).b == 2);
+   // Padding does not matter either: the text is not what is capped.
+   const std::string padded = "   " + text + std::string(64, ' ');
+   CHECK(psio::validate<Capped>(psio::json{}, sp(padded)).ok());
+}
