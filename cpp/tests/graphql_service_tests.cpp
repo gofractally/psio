@@ -256,3 +256,190 @@ TEST_CASE("graphql: argument groups", "[graphql][service]")
    CHECK(gap_arguments::run("{ later(add: 2, base: 40) }") == R"({"data":{"later":42}})");
    CHECK(gap_arguments::run("{ later(base: 40) }").find(R"(argument \"add\" of type \"Int!\" is required)") != std::string::npos);
 }
+
+// ── Key ranges over any source ─────────────────────────────────────────────
+namespace gap_ranges
+{
+   using gap_template::Box;
+   // A row_source with the required members only: ten rows keyed by one byte.
+   struct Digits
+   {
+      int  at = 10;
+      char k  = 0;
+      bool on() const { return at >= 0 && at < 10; }
+      bool seek_first()
+      {
+         at = 0;
+         return true;
+      }
+      bool seek_last()
+      {
+         at = 9;
+         return true;
+      }
+      bool seek_after(std::span<const char> key)
+      {
+         at = key.empty() ? 0 : static_cast<unsigned char>(key[0]) + 1;
+         return on();
+      }
+      bool seek_before(std::span<const char> key)
+      {
+         at = key.empty() ? -1 : std::min<int>(static_cast<unsigned char>(key[0]), 10) - 1;
+         return on();
+      }
+      bool next()
+      {
+         ++at;
+         return on();
+      }
+      bool prev()
+      {
+         --at;
+         return on();
+      }
+      std::span<const char> key()
+      {
+         k = static_cast<char>(at);
+         return {&k, 1};
+      }
+      std::int32_t row() const { return at * at; }
+   };
+   // An ordered_index whose rows are strings and whose keys are owned.
+   struct Words
+   {
+      using map_t    = std::map<std::string, std::string, std::less<>>;
+      using iterator = map_t::const_iterator;
+      const map_t* rows;
+      iterator     begin() const { return rows->begin(); }
+      iterator     end() const { return rows->end(); }
+      iterator     lower_bound(std::span<const char> k) const { return rows->lower_bound(std::string_view{k.data(), k.size()}); }
+      iterator     upper_bound(std::span<const char> k) const { return rows->upper_bound(std::string_view{k.data(), k.size()}); }
+      std::string  key(iterator it) const { return it->first; }
+      const std::string& row(iterator it) const { return it->second; }
+   };
+   template <typename K>
+   std::string key_of(const K& k)
+   {
+      const auto bytes = psio::to_key(k);
+      return std::string(bytes.data(), bytes.size());
+   }
+
+   struct Query
+   {
+      Words::map_t words;  // by the word
+      Words::map_t pairs;  // by (number, word)
+
+      auto  digits(std::optional<std::int32_t> from, std::optional<std::int32_t> below, gql::page_args page) const
+      {
+         gql::key_bounds bounds;
+         if (from)
+         {
+            const char k = static_cast<char>(*from);
+            bounds.at_least({&k, 1});
+         }
+         if (below)
+         {
+            const char k = static_cast<char>(*below);
+            bounds.below({&k, 1});
+         }
+         return gql::paginate(Digits{}, bounds, page, 4);
+      }
+      auto wordsIn(gql::key_range<std::string> range, gql::page_args page) const
+      {
+         return gql::paginate(Words{&words}, range, page);
+      }
+      // The key is (number, word); the range is over its first element.
+      auto pairsIn(gql::key_range<std::uint32_t> range, gql::page_args page) const
+      {
+         return gql::paginate(gql::transform(Words{&pairs}, [](const std::string& w) { return Box<std::string>{w}; }),
+                              range, page);
+      }
+   };
+   PSIO_REFLECT(Query,
+                attr(words, psio::graphql::hidden),
+                attr(pairs, psio::graphql::hidden),
+                method(digits, from, below, page),
+                method(wordsIn, range, page),
+                method(pairsIn, range, page))
+   using api = gql::schema<Query>;
+
+   inline Query make()
+   {
+      Query q;
+      for (const char* w : {"a", "ab", "abc", "b", "", "ba"})
+         q.words[key_of(std::string{w})] = w;
+      for (std::uint32_t n = 0; n < 4; ++n)
+         for (const char* w : {"x", "y"})
+            q.pairs[key_of(std::tuple<std::uint32_t, std::string>{n, w})] = std::to_string(n) + w;
+      return q;
+   }
+   inline std::string run(std::string_view text, std::string_view variables = {})
+   {
+      static const Query q = make();
+      return run_on<api>(q, text, variables);
+   }
+}  // namespace gap_ranges
+
+TEST_CASE("graphql: key ranges over any source", "[graphql][service][connection]")
+{
+   auto nodes = [](const std::string& out) {
+      // The text between "edges":[ and ]: the nodes, compactly.
+      std::string s;
+      constexpr std::string_view key = "\"node\":";
+      for (std::size_t at = out.find(key); at != std::string::npos; at = out.find(key, at + 1))
+      {
+         const std::size_t from = at + key.size();
+         s += out.substr(from, out.find('}', from) - from) + " ";
+      }
+      return s;
+   };
+   // key_bounds over a source that has neither seek_at_or_after nor
+   // row_bytes; a page of at most 4.
+   CHECK(gap_ranges::run("{ digits(from: 3, below: 9) { edges { node } pageInfo { hasNextPage hasPreviousPage startCursor endCursor } } }") ==
+         R"({"data":{"digits":{"edges":[{"node":9},{"node":16},{"node":25},{"node":36}],"pageInfo":{"hasNextPage":true,"hasPreviousPage":false,"startCursor":"03","endCursor":"06"}}}})");
+   CHECK(nodes(gap_ranges::run(R"({ digits(from: 3, below: 9, after: "06") { edges { node } } })")) == "49 64 ");
+   CHECK(nodes(gap_ranges::run(R"({ digits(from: 0, last: 2) { edges { node } } })")) == "64 81 ");
+   CHECK(nodes(gap_ranges::run(R"({ digits(from: 3, below: 9, last: 2, before: "05") { edges { node } } })")) == "9 16 ");
+   CHECK(nodes(gap_ranges::run(R"({ digits(below: 2) { edges { node } } })")) == "0 1 ");
+   CHECK(nodes(gap_ranges::run(R"({ digits(from: 9) { edges { node } } })")) == "81 ");
+   CHECK(nodes(gap_ranges::run(R"({ digits(from: 5, below: 5) { edges { node } } })")).empty());
+   CHECK(gap_ranges::api::sdl().find("type IntConnection {\n  edges: [IntEdge!]!\n  pageInfo: PageInfo!\n}\n") != std::string::npos);
+
+   // String keys: a longer word is not "inside" its prefix — `gt: "a"`
+   // keeps "ab" (the key encoding of a whole value is no prefix of another).
+   CHECK(nodes(gap_ranges::run(R"({ wordsIn(gt: "a") { edges { node } } })")) == R"("ab" "abc" "b" "ba" )");
+   CHECK(nodes(gap_ranges::run(R"({ wordsIn(le: "a") { edges { node } } })")) == R"("" "a" )");
+   CHECK(nodes(gap_ranges::run(R"({ wordsIn(ge: "ab", lt: "b") { edges { node } } })")) == R"("ab" "abc" )");
+   CHECK(nodes(gap_ranges::run(R"({ wordsIn(gt: "abc", le: "b", last: 5) { edges { node } } })")) == R"("b" )");
+
+   // A range over the first element of a composite key: `gt` skips, and
+   // `le` includes, every row that starts with the bound.
+   CHECK(nodes(gap_ranges::run("{ pairsIn(gt: 1) { edges { node { v } } } }")) == R"({"v":"2x" {"v":"2y" {"v":"3x" {"v":"3y" )");
+   CHECK(nodes(gap_ranges::run("{ pairsIn(le: 1) { edges { node { v } } } }")) == R"({"v":"0x" {"v":"0y" {"v":"1x" {"v":"1y" )");
+   CHECK(nodes(gap_ranges::run("{ pairsIn(ge: 1, lt: 3, last: 3) { edges { node { v } } } }")) == R"({"v":"1y" {"v":"2x" {"v":"2y" )");
+   CHECK(nodes(gap_ranges::run("{ pairsIn(ge: 2, le: 2) { edges { node { v } } } }")) == R"({"v":"2x" {"v":"2y" )");
+
+   // A bound that has no key is a field error.
+   CHECK(gap_ranges::run("{ wordsIn(ge: \"\xff\") { edges { node } } }").find("errors") != std::string::npos);
+}
+
+// The concepts, as the documentation states them.
+static_assert(gql::row_source<gap_ranges::Digits>);
+static_assert(!gql::ordered_index<gap_ranges::Digits>);
+static_assert(gql::ordered_index<gap_ranges::Words>);
+static_assert(gql::row_source<gql::index_source<gap_ranges::Words>>);
+static_assert(gql::argument_group<gql::page_args> && gql::argument_group<gql::key_range<int>>);
+static_assert(!gql::argument_group<gap_arguments::Point> && !gql::argument_group<int>);
+
+// ── A service-shaped schema ────────────────────────────────────────────────
+#include "graphql_service_checks.hpp"
+
+static_assert(gql::ordered_index<gqls::Index<gqls::Block, std::uint32_t>>);
+
+TEST_CASE("graphql: a service-shaped schema", "[graphql][service]")
+{
+   const std::vector<std::string> failures = gqls::service_failures();
+   for (const std::string& f : failures)
+      FAIL_CHECK(f);
+   CHECK(failures.empty());
+}

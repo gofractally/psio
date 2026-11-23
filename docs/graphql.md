@@ -18,12 +18,12 @@ PSIO_REFLECT(Account, id, name, memo)
 struct Query {
    const Db* db;
    std::optional<Account> account(std::uint64_t id) const;            // account(id: UInt64!): Account
-   auto accounts(std::optional<std::int32_t> first, std::optional<std::string> after) const
-   {                                                                   // accounts(first: Int, after: String): AccountConnection
-      return psio::graphql::paginate(db->accounts_by_id(), {first, {}, {}, after});
+   auto accounts(psio::graphql::page_args page) const                  // accounts(first: Int, last: Int, before: String,
+   {                                                                   //          after: String): AccountConnection
+      return psio::graphql::paginate(db->accounts_by_id(), page);
    }
 };
-PSIO_REFLECT(Query, attr(db, psio::graphql::hidden), method(account, id), method(accounts, first, after))
+PSIO_REFLECT(Query, attr(db, psio::graphql::hidden), method(account, id), method(accounts, page))
 
 using api = psio::graphql::schema<Query>;
 std::string out;
@@ -294,7 +294,8 @@ with unnamed parameters, an unsupported argument type, an optional of an
 optional, `id` on a non-scalar, an object type whose members are all hidden,
 `flatten` on a member that is not a reflected record, two arguments of a
 field with one name (a parameter and a member of an argument group), a
-template argument without a GraphQL name.
+template argument without a GraphQL name, `page_budget` with a source that
+has no `row_bytes()`.
 A `psio::nested<T, nested_validation::deferred>` member is a type with no
 mapping (an enclosing reader has not checked that its bytes are a `T`: hide
 it, or expose the `T` from a method after validating), and a nested value
@@ -387,7 +388,7 @@ psio::graphql::argument_group<Range<K>> = true;`.
   member is a nullable argument, any other a required one); `name_as`,
   `hidden` (not an argument; keeps its default) and `doc` apply.
 - A member that is itself a group is taken apart the same way, so groups
-  compose.
+  compose (`struct IndexArgs { key_range<K> range; page_args page; }`).
 - The parameter's own name is not used. Two arguments of one field with the
   same name are a compile error.
 - A group must be default-constructible. Only a parameter (or a group's
@@ -397,7 +398,8 @@ psio::graphql::argument_group<Range<K>> = true;`.
   — so variables, validation, introspection and plan reuse see ordinary
   arguments.
 
-`psio::graphql::page_args` (`first`, `last`, `before`, `after`) is a group
+`psio::graphql::page_args` (`first`, `last`, `before`, `after`) and
+`psio::graphql::key_range<K>` (`gt`, `ge`, `lt`, `le`) are groups
 ([Connections](#connections)).
 
 ### Results with arguments of their own
@@ -409,15 +411,21 @@ group), and its value — and so its GraphQL type — is what `resolve`
 returns:
 
 ```cpp
-template <typename Row>
-struct psio::graphql::resolver<TableIndex<Row>> {
-   using arguments = psio::graphql::page_args;
-   static auto resolve(TableIndex<Row>&& index, const arguments& page)     // optionally a third: context&
-   { return psio::graphql::paginate(Source{std::move(index)}, page); }
+template <typename Key>
+struct IndexArgs { psio::graphql::key_range<Key> range; psio::graphql::page_args page;
+                   PSIO_REFLECT(IndexArgs, range, page) };
+template <typename Key>
+inline constexpr bool psio::graphql::argument_group<IndexArgs<Key>> = true;
+
+template <typename Row, typename Key>
+struct psio::graphql::resolver<TableIndex<Row, Key>> {
+   using arguments = IndexArgs<Key>;
+   static auto resolve(TableIndex<Row, Key>&& index, const arguments& a)   // optionally a third: context&
+   { return psio::graphql::paginate(IndexView{std::move(index)}, a.range, a.page); }
 };
 
 auto users() const { return table.getIndex<0>(); }   // method(users)
-// users(first: Int, last: Int, before: String, after: String): UserConnection
+// users(gt: K, ge: K, lt: K, le: K, first: Int, last: Int, before: String, after: String): UserConnection
 ```
 
 Written once by the embedder for its index type, this makes every method
@@ -433,8 +441,53 @@ Subscriptions are rejected at validation.
 
 ## Connections
 
-`graphql/connection.hpp` implements Relay cursor connections over a *row
-source*: a cursor over rows ordered by opaque key bytes.
+`graphql/connection.hpp` implements Relay cursor connections (the GraphQL
+Cursor Connections Specification) over rows the embedder supplies, ordered
+by opaque key bytes. There is no database code in psio.
+
+```cpp
+struct Query {
+   // accounts(gt: AccountNumber, ge: AccountNumber, lt: AccountNumber, le: AccountNumber,
+   //          first: Int, last: Int, before: String, after: String): AccountConnection
+   auto accounts(psio::graphql::key_range<AccountNumber> range, psio::graphql::page_args page) const
+   { return psio::graphql::paginate(accounts_index(), range, page); }
+};
+PSIO_REFLECT(Query, method(accounts, range, page))
+```
+
+```graphql
+type AccountConnection { edges: [AccountEdge!]!  pageInfo: PageInfo! }
+type AccountEdge       { node: Account!  cursor: String! }
+type PageInfo          { hasNextPage: Boolean!  hasPreviousPage: Boolean!  startCursor: String  endCursor: String }
+```
+
+### The source
+
+The embedder supplies one of two things; `paginate` takes either.
+
+**An ordered index** — what a database index has: positions from `begin()`
+to `end()`, found by key bytes.
+
+```cpp
+template <typename X>
+concept ordered_index = requires(const X& x, std::span<const char> key, /* position */ it) {
+   x.begin();  x.end();           // bidirectional positions: ++it, --it, it == it
+   x.lower_bound(key);            // first position with key >= `key`, else end()
+   x.upper_bound(key);            // first position with key >  `key`, else end()
+   x.key(it);                     // the key bytes there: a span, or an owning container
+   x.row(it);                     // the row there: a value, or a view / buffer of an encoded row
+   // optional: x.row_bytes(it)   // its size, for a byte budget
+};
+```
+
+An index over part of a table (the rows under a key prefix) answers within
+its part: its bounds never leave `[begin(), end())`, and its keys are the
+bytes after the prefix. The index is held by value when it is passed as an
+rvalue and by reference when it is an lvalue, so make it a cheap handle.
+
+**A row source** — a cursor with seek and step, for a store that is not
+iterator-shaped. `index_source<X>` is the row source over an ordered index;
+`paginate` works on this form.
 
 ```cpp
 template <typename S>
@@ -444,30 +497,89 @@ concept row_source = requires(S& s, std::span<const char> key) {
    { s.seek_before(key) } -> bool;    // last row with key < `key`
    { s.next() } -> bool;              { s.prev() } -> bool;
    { s.key() } -> std::span<const char>;
-   s.row();                           // a value, or a view / buffer of an encoded row
+   s.row();
+   // optional: s.seek_at_or_after(key) -> bool   (else: seek_before + next)
+   // optional: s.row_bytes() -> std::size_t      (for a byte budget)
 };
-
-result<connection<Node>> paginate(Source&&, const page_args& {first, last, before, after}, std::size_t max_page_size = 100);
 ```
 
-For a database index the key bytes are the `psio::key` encoding of the index
-key (it sorts bytewise as the values do), and a source restricted to a key
-prefix seeks within `[prefix, psio::key_prefix_upper_bound(prefix))`
-(`psio::key_prefix<Key>(…)` builds the prefix). There is no database code
-in psio; `cpp/tests/graphql_fixture.hpp` has an in-memory source
-(`IndexSource` over a `std::map`) that shows both.
+`psio::graphql::transform(source, fn)` is the source whose rows are
+`fn(row)` — a stored row shown as another record. Keys and cursors are the
+underlying source's. When the rows are views and are not transformed, only
+the selected fields of each node are read from the encoded row.
 
-`paginate` reads one page — at most `max_page_size` rows, plus one row on
-each side for `pageInfo` — whatever the size of the index. `first` pages
-forward from `after`, `last` backward from `before`; `before` / `after`
-together bound a window; `first` with `last`, a negative size and a
-malformed cursor are field errors. A cursor is the hex of the row's key.
-The page's type is `<Node>Connection { edges: [<Node>Edge!]! pageInfo:
-PageInfo! }`, `<Node>Edge { node cursor }`. When the rows are views, only
-the selected fields of each node are read.
+The key bytes are whatever orders the rows. For a database index they are
+the `psio::key` encoding of the index key, which sorts bytewise as the
+values do (`cpp/tests/graphql_service_fixture.hpp` has such an index over a
+`std::map`: `Index<Row, Key>`).
 
-A paged field's arguments named `first` / `last` (of type `Int`) are its
-page size for the complexity limit.
+### Pages, ranges, budgets
+
+```cpp
+paginate(source, page)                 // all rows
+paginate(source, range, page)          // the rows in a key_range<K>
+paginate(source, bounds, page)         // the rows in key_bounds (bytes)
+   // each with an optional last argument:
+   //   page_limits  — a number: the largest page (default 100)
+   //   page_budget{.max_bytes = N, .max_page_size = 100}
+-> result<connection<Node>>            // Node: what source.row() yields
+```
+
+**`page_args`** — `first`, `last` (`Int`), `before`, `after` (`String`).
+`first` pages forward from `after`, `last` backward from `before`; with
+neither, the first `max_page_size` rows. `before` and `after` together bound
+a window. `first` with `last`, a negative size and a malformed cursor are
+field errors. A page never has more than `max_page_size` edges, whatever
+`first` says.
+
+**`pageInfo`** follows the Relay algorithm. Paging forward, `hasNextPage`
+is true when the range has a row beyond the page — one that `first`, the
+page-size cap or the byte budget left out, or one at or after `before` —
+and `hasPreviousPage` when `after` is given and the range has a row before
+the page. Paging backward, the mirror image. `startCursor` / `endCursor`
+are `null` for a page without edges.
+
+**Cursors** are the key bytes of the row in **hex** (`String`): a cursor is
+the row's position in the index, so it stays valid when rows are inserted or
+removed around it, and one index needs no cursor state. Hex rather than
+base64 because the engine writes it from the key with no intermediate
+buffer, it reads in either case, it is safe in a URL and in JSON without
+escaping, and it is the form psibase's cursors already have; base64 would
+save a third of the cursor's length and nothing else. Clients must treat it
+as opaque.
+
+**`key_range<K>`** — `gt`, `ge`, `lt`, `le`, each an optional `K`, the
+arguments typed by the key (`gt: AccountNumber`). The bounds are encoded
+with `psio::key` (`to_bounds(range) -> result<key_bounds>`) and combined
+with the cursors: a page shows rows inside the range *and* between the
+cursors, and a cursor outside the range does not widen it. `K` may be a
+leading part of the index key — the first element of a composite key
+`(owner, id)`: `ge` / `lt` then bound by that element, `gt` skips and `le`
+includes every row that starts with it (`key_bounds::beyond` / `through`
+use `psio::key_prefix_upper_bound`). For a whole key the two readings
+coincide: no key encoding is a prefix of another's. A bound that has no key
+(a string that is not UTF-8) is a field error. A service that computes its
+range builds the `key_range` (`{.ge = start}`) or the `key_bounds` itself.
+
+**`page_budget`** — a page's rows together have at most `max_bytes` bytes,
+as the source counts them (`row_bytes()`: the stored size of the row; a
+compile error if the source has none). A page that has rows to show always
+has at least one edge, however large the row, and a page cut short says so
+in `pageInfo`, so a client that follows `endCursor` sees every row. The
+budget is on what the page *reads*, not on the response text: `paginate`
+returns before a byte of the response is written, and what the response
+holds of a row depends on the selection. `limits::max_response_bytes`
+remains the bound on the response.
+
+`paginate` reads one page — its rows, plus one step on each side for
+`pageInfo` — whatever the size of the index. A paged field's arguments
+named `first` / `last` (of type `Int`, whether parameters or members of a
+group) are its page size for the complexity limit.
+
+**A connection built by hand** (rows of a query in another system):
+`connection_builder<Node>` — `add(node, cursor_bytes)`, then
+`std::move(b).finish(has_previous_page, has_next_page)`. The cursor bytes
+are what the client hands back, in hex.
 
 ## Introspection and SDL
 
@@ -560,12 +672,24 @@ only `psio::ijson` encoding, 84.7 KiB with the engine and no introspection
 (+77.5 KiB), 101.1 KiB with introspection (+94 KiB). Not measured for
 WebAssembly (no WASI sysroot on the machine).
 
+Connections, measured the same way (`__text` bytes, no introspection): the
+program above is 82.1 KiB; with one connection field over an ordered index
+of a `std::map`, taking the four page arguments as parameters and a
+hand-written row source, 91.1 KiB (+9 KiB for `paginate`, the connection
+types and the map); with `key_range<std::uint64_t>` and `page_args` as
+parameters over the same index through `index_source`, 93.6 KiB (+2.5 KiB:
+the key encoding of the bounds, the range checks, the adapter); with a
+`page_budget`, 93.8 KiB. Argument groups, flattened members, template names
+and the `_` field cost a program that does not use them 0.2 KiB.
+
 ## Not supported
 
 - **Subscriptions.**
 - **Interfaces.** Reflection has no notion that maps to them; unions
   (`std::variant`) are the only abstract types.
 - **Argument and input-field default values**; `ID` as an argument type.
+- **A byte budget on the response text of a page** (`page_budget` counts
+  the rows read; see [Connections](#connections)).
 - **Custom directives**; only `@skip` and `@include` (and `@deprecated` in
   the schema). `@specifiedBy` is not listed and `specifiedByURL` is null.
 - **Descriptions of enum values and of method parameters** (a member of an
@@ -590,9 +714,9 @@ WebAssembly (no WASI sysroot on the machine).
 | `cpp/include/psio/graphql/plan.hpp` | validation, `document`, `plan_cache` |
 | `cpp/include/psio/graphql/execute.hpp` | `request`, the executor, response writing |
 | `cpp/include/psio/graphql/introspection.hpp` | `__schema` / `__type`, `sdl()` |
-| `cpp/include/psio/graphql/connection.hpp` | `row_source`, `paginate`, `connection` |
+| `cpp/include/psio/graphql/connection.hpp` | `ordered_index`, `row_source`, `transform`, `page_args`, `key_range`, `paginate`, `connection` |
 | `cpp/tests/graphql_tests.cpp`, `graphql_fixture.hpp` | the conformance suite and its schema |
-| `cpp/tests/graphql_service_tests.cpp` | the rules a service leans on (markers, class templates, flattened members, argument groups), each on a small schema |
-| `cpp/tests/graphql_noexceptions.cpp` | exception-disabled build-and-run check |
+| `cpp/tests/graphql_service_tests.cpp`, `graphql_service_fixture.hpp`, `graphql_service_checks.hpp` | a query root shaped like a psibase service's (connections over indexes, key ranges, a byte budget, transformed rows, flattened members, class templates, markers) and the rules behind it |
+| `cpp/tests/graphql_noexceptions.cpp`, `graphql_service_noexceptions.cpp` | exception-disabled build-and-run checks |
 | `cpp/tests/graphql_schema_fail.cpp` | schemas that must not compile |
 | `cpp/benchmarks/bench_graphql.cpp` | benchmark against the previous engine |

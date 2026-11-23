@@ -4,6 +4,7 @@
 
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
@@ -62,6 +63,19 @@ struct Part
    int more = 0;
    PSIO_REFLECT(Part, ok, more)
 };
+// Ten rows without sizes.
+struct Unsized
+{
+   bool                  seek_first() { return false; }
+   bool                  seek_last() { return false; }
+   bool                  seek_after(std::span<const char>) { return false; }
+   bool                  seek_before(std::span<const char>) { return false; }
+   bool                  next() { return false; }
+   bool                  prev() { return false; }
+   std::span<const char> key() { return {}; }
+   int                   row() { return 0; }
+};
+
 struct Query
 {
    int ok = 0;
@@ -121,6 +135,12 @@ struct Query
 #elif defined(GQL_FAIL_ARGUMENT_NAME)
    int rows(int first, psio::graphql::page_args page) const { return first + page.first.value_or(0); }
    PSIO_REFLECT(Query, ok, method(rows, first, page))
+#elif defined(GQL_FAIL_BUDGET)
+   auto rows(psio::graphql::page_args page) const
+   {
+      return psio::graphql::paginate(Unsized{}, page, psio::graphql::page_budget{.max_bytes = 64});
+   }
+   PSIO_REFLECT(Query, ok, method(rows, page))
 #else
    PSIO_REFLECT(Query, ok)
 #endif

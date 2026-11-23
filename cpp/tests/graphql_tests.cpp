@@ -1003,7 +1003,8 @@ TEST_CASE("graphql: Relay connections", "[graphql][connection]")
    std::reverse(seen.begin(), seen.end());
    CHECK(seen == expected);
 
-   // A window: after and before together.
+   // A window: after and before together. The row at `before` is a row
+   // beyond the page (Relay: hasNextPage when rows exist following `before`).
    const J all = parse_json(run(q, "{ accountsOf(owner: \"acct-0\", first: 100) { edges { cursor node { id owner } } } }"));
    const auto& edges = all["data"]["accountsOf"]["edges"].items;
    REQUIRE(edges.size() == 4);  // owners are n % 3: n = 0, 3, 6, 9
@@ -1011,7 +1012,12 @@ TEST_CASE("graphql: Relay connections", "[graphql][connection]")
       CHECK(e["node"]["owner"].text == "acct-0");
    CHECK(run(q, page, gql::request{.variables = R"({"first": 10, "after": ")" + edges[0]["cursor"].text + R"(", "before": ")" +
                                                 edges[3]["cursor"].text + "\"}"})
-            .find(R"("pageInfo":{"hasNextPage":false,"hasPreviousPage":true,)") != std::string::npos);
+            .find(R"("pageInfo":{"hasNextPage":true,"hasPreviousPage":true,)") != std::string::npos);
+   // ... and a page without edges still says what lies on either side.
+   CHECK(run(q, page, gql::request{.variables = R"({"first": 5, "after": ")" + edges[3]["cursor"].text + R"(", "before": ")" +
+                                                edges[3]["cursor"].text + "\"}"})
+            .find(R"({"edges":[],"pageInfo":{"hasNextPage":true,"hasPreviousPage":true,"startCursor":null,"endCursor":null}})") !=
+         std::string::npos);
    // A key prefix restricts the source; an owner without rows is empty.
    CHECK(run(q, "{ accountsOf(owner: \"acct-7\") { edges { cursor } pageInfo { hasNextPage hasPreviousPage startCursor endCursor } } }") ==
          R"({"data":{"accountsOf":{"edges":[],"pageInfo":{"hasNextPage":false,"hasPreviousPage":false,"startCursor":null,"endCursor":null}}}})");
