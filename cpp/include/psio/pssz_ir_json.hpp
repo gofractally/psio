@@ -1630,6 +1630,20 @@ template <psio::detail::json_impl::json_family Fmt>
    return run(cursor);
 }
 
+// A string literal / C string is its characters, without the terminator.
+template <psio::detail::json_impl::json_family Fmt>
+[[nodiscard]] codec_status json_to_value(const schema_types::Schema &schema,
+                                         const schema_types::AnyType &root, Fmt format,
+                                         const char *text, Value &output,
+                                         const JsonNames *names = nullptr,
+                                         json_parser parser = json_parser::automatic,
+                                         const CustomHandlers *custom = nullptr)
+{
+   const std::string_view view{text};
+   return json_to_value(schema, root, format, std::span<const char>{view.data(), view.size()},
+                        output, names, parser, custom);
+}
+
 // Appends the text of `value`; `out` is unchanged on failure. The handlers'
 // checks run on the value's custom types before any text is returned
 // (`run_checks = false`: the value was just decoded with the same registry).
@@ -1675,6 +1689,19 @@ template <psio::detail::json_impl::json_family Fmt>
        !status.ok())
       return status;
    return encode_auto(schema, root, value, out);
+}
+
+template <psio::detail::json_impl::json_family Fmt>
+[[nodiscard]] codec_status json_to_pssz(const schema_types::Schema &schema,
+                                        const schema_types::AnyType &root, Fmt format,
+                                        const char *text, std::vector<char> &out,
+                                        const JsonNames *names = nullptr,
+                                        json_parser parser = json_parser::automatic,
+                                        const CustomHandlers *custom = nullptr)
+{
+   const std::string_view view{text};
+   return json_to_pssz(schema, root, format, std::span<const char>{view.data(), view.size()},
+                       out, names, parser, custom);
 }
 
 // PSSZ bytes of a `root` value -> its JSON / I-JSON text (appended to `out`,

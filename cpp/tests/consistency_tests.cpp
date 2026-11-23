@@ -7,6 +7,7 @@
 #include <psio/key.hpp>
 #include <psio/max_size.hpp>
 #include <psio/pssz.hpp>
+#include <psio/pssz_ir_json.hpp>
 #include <psio/schema_builder.hpp>
 #include <psio/wrappers.hpp>
 
@@ -69,4 +70,37 @@ TEST_CASE("min<A> | max<B> merge into one length_bound", "[consistency][annotate
    CHECK(!psio::validate_json<Ranged>(R"({"name":"a","tags":["x"]})").ok());
    CHECK(!psio::validate_json<Ranged>(R"({"name":"abc","tags":[]})").ok());
    CHECK(psio::validate_json<Ranged>(R"({"name":"ab","tags":["x"]})").ok());
+}
+
+// ── A string literal is its characters at every text entry point ─────────
+TEST_CASE("text entry points take a C string without its terminator", "[consistency][json]")
+{
+   // The span of a char array includes the NUL: "200" would be four bytes,
+   // which is not a JSON text. Every entry point that takes text has the
+   // overload the to_/from_ helpers have.
+   std::uint8_t v = 0;
+   CHECK(psio::decode_json_checked(psio::json{}, "200", v).ok());
+   CHECK(v == 200);
+   CHECK(psio::decode_json_checked(psio::ijson{}, "7", v, psio::json_parser::text).ok());
+   CHECK(v == 7);
+   CHECK(!psio::decode_json_checked(psio::json{}, "256", v).ok());
+   CHECK(psio::validate_json<std::uint8_t>(psio::json{}, "200").ok());
+   CHECK(!psio::validate_json<std::uint8_t>(psio::json{}, "2 0").ok());
+   CHECK(psio::decode<std::uint8_t>(psio::json{}, "200") == 200);
+   CHECK(psio::validate<std::uint8_t>(psio::json{}, "200").ok());
+   CHECK(psio::validate_strict<std::uint8_t>(psio::ijson{}, "200").ok());
+   CHECK(*psio::make_boxed<std::uint8_t>(psio::json{}, "200") == 200);
+   // The span of the same literal is still what it says: four bytes.
+   const char literal[] = "200";
+   CHECK(!psio::validate_json<std::uint8_t>(psio::json{}, std::span<const char>{literal}).ok());
+
+   // The schema-driven codec.
+   psio::SchemaBuilder builder;
+   const auto          root   = builder.insert<std::uint8_t>();
+   const auto          schema = std::move(builder).build();
+   std::vector<char>   bytes;
+   CHECK(psio::pssz_ir::json_to_pssz(schema, root, psio::json{}, "200", bytes).ok());
+   CHECK(bytes == std::vector<char>{static_cast<char>(200)});
+   psio::pssz_ir::Value value;
+   CHECK(psio::pssz_ir::json_to_value(schema, root, psio::ijson{}, "200", value).ok());
 }

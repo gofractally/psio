@@ -2156,6 +2156,18 @@ namespace psio {
       return detail::json_impl::read_document<Fmt, T>(text, &out, false, parser);
    }
 
+   // A string literal / C string is its characters, without the terminator
+   // (a char array converted to a span would include the NUL, which no JSON
+   // text ends with).
+   template <detail::json_impl::json_family Fmt, typename T>
+   [[nodiscard]] codec_status decode_json_checked(
+      Fmt fmt, const char* text, T& out, json_parser parser = json_parser::automatic)
+   {
+      const std::string_view view{text};
+      return decode_json_checked(fmt, std::span<const char>{view.data(), view.size()}, out,
+                                 parser);
+   }
+
    // The same for text the caller has padded (padded_json): simdjson then
    // parses it in place instead of copying it into a padded buffer.
    template <detail::json_impl::json_family Fmt, typename T>
@@ -2172,6 +2184,13 @@ namespace psio {
                                             json_parser parser = json_parser::automatic)
    {
       return detail::json_impl::read_document<Fmt, T>(text, nullptr, false, parser);
+   }
+   template <typename T, detail::json_impl::json_family Fmt>
+   [[nodiscard]] codec_status validate_json(Fmt fmt, const char* text,
+                                            json_parser parser = json_parser::automatic)
+   {
+      const std::string_view view{text};
+      return validate_json<T>(fmt, std::span<const char>{view.data(), view.size()}, parser);
    }
    template <typename T, detail::json_impl::json_family Fmt>
    [[nodiscard]] codec_status validate_json(Fmt, padded_json text,
