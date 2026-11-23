@@ -616,3 +616,47 @@ test('non-finite float: the error names the format', () => {
   rejects(() => f64.psszToJson(fromHex('000000000000f07f'), 'json'), 'value', /^json: non-finite/);
   rejects(() => f64.psszToJson(fromHex('010000000000f07f'), 'ijson'), 'value', /^ijson: non-finite/);
 });
+
+// C++ `std::vector<char>` now builds Custom{List<u8>, "hex"}, the node every
+// byte list has (cpp/tests/schema_byte_list_tests.cpp). A published schema
+// may still hold the former node, Custom{List<Custom{u8, "char"}>, "hex"}:
+// it is read as the same bytes, with the same text, width, bounds and key.
+test('byte lists: the former char-element node is still read as bytes', () => {
+  const CHAR = { Custom: { type: U8, id: 'char' } };
+  const hexOf = (element: PsszTypeInput, shape: 'List' | 'Array' = 'List'): PsszTypeInput =>
+    ({ Custom: { type: shape === 'List' ? { List: element } : { Array: { type: element, len: 3 } }, id: 'hex' } });
+  const bytes = Uint8Array.of(0, 128, 255);
+  for (const shape of ['List', 'Array'] as const) {
+    const schema = new PsszSchema({
+      Former: hexOf(CHAR, shape), Now: hexOf(U8, shape),
+      FormerRec: { Object: { id: U32, data: hexOf(CHAR, shape), tail: { Option: hexOf(CHAR, shape) } } },
+      NowRec: { Object: { id: U32, data: hexOf(U8, shape), tail: { Option: hexOf(U8, shape) } } },
+    });
+    // The schema with the former node survives its own PSSZ encoding.
+    const fetched = PsszSchema.decode(schema.encode());
+    for (const source of [schema, fetched]) {
+      const former = source.type('Former');
+      const now = source.type('Now');
+      assert.deepEqual(former.validate(bytes), { ok: true, hasUnknown: false });
+      assert.deepEqual(former.decode(bytes), bytes);
+      assert.deepEqual(former.decode(bytes), now.decode(bytes));
+      assert.equal(hex(former.encode(bytes)), hex(now.encode(bytes)));
+      for (const format of FORMATS) {
+        const text = now.psszToJson(bytes, format);
+        assert.equal(text, format === 'ijson' ? '"0080FF"' : '[0,128,255]');
+        assert.equal(former.psszToJson(bytes, format), text);
+        assert.equal(hex(former.jsonToPssz(text, format)), '0080ff');
+      }
+      assert.equal(hex(former.encodeKey(bytes)), hex(now.encodeKey(bytes)));
+      assert.deepEqual([former.width, former.inferredBound, former.maxEncodedSize], [now.width, now.inferredBound, now.maxEncodedSize]);
+      const value = { id: 7, data: bytes, tail: bytes };
+      const formerRec = source.type('FormerRec');
+      const nowRec = source.type('NowRec');
+      const frame = nowRec.encode(value);
+      assert.equal(hex(formerRec.encode(value)), hex(frame));
+      assert.deepEqual(formerRec.decode(frame), value);
+      assert.equal(formerRec.psszToJson(frame), nowRec.psszToJson(frame));
+      assert.deepEqual([formerRec.width, formerRec.inferredBound, formerRec.maxEncodedSize], [nowRec.width, nowRec.inferredBound, nowRec.maxEncodedSize]);
+    }
+  }
+});

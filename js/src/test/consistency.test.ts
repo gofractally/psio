@@ -73,7 +73,7 @@ test('sorted / unique / uniqueKeys: writers and checking readers (C++ "[consiste
   // The constraints change no byte, no width, no bound — and are not in the Schema IR.
   assert.equal(toHex(frame), toHex(Loose.encode(ok)));
   assert.equal(toHex(key), toHex(Loose.encodeKey(ok)));
-  assert.equal(Ranked.maxEncodedSize, Loose.maxEncodedSize);
+  assert.equal(Ranked.inferredBound, Loose.inferredBound);
   assert.equal(Ranked.width, Loose.width);
   assert.equal(toHex(generateSchema({ Ranked }).encode()), toHex(generateSchema({ Ranked: Loose }).encode()));
 
@@ -468,15 +468,15 @@ test('transparent: a bounded member makes the wrapper that bounded type (C++ "[c
   const memo: string = Memo.decode(fromHex('6869'));
   assert.equal(memo, 'hi');
   assert.equal(toHex(Memo.encode('hi')), '6869');
-  assert.equal(Memo.maxEncodedSize, 80n);
+  assert.equal(Memo.inferredBound, 80n);
   assert.equal(Memo.width, 1);
   assert.equal(toHex(Memo.encodeKey('hi')), toHex(boundedUtf8(80).encodeKey('hi')));
   assert.equal(Memo.valueToJson('hi'), '"hi"');
-  assert.equal(Tags.maxEncodedSize, 4n * (1n + 8n));
+  assert.equal(Tags.inferredBound, 4n * (1n + 8n));
   // Both spellings: the same bytes, widths and bounds, wherever the type appears.
   assert.equal(toHex(Ann.encode(value)), toHex(holder(WrapMemo, Tags).encode(value)));
   assert.equal(Ann.width, holder(WrapMemo, Tags).width);
-  assert.equal(Ann.maxEncodedSize, holder(WrapMemo, Tags).maxEncodedSize);
+  assert.equal(Ann.inferredBound, holder(WrapMemo, Tags).inferredBound);
   assert.deepEqual(Ann.decode(Ann.encode(value), { rejectUnknown: true }), value);
   void Wrap;
   // The Schema IR: a named alias of the bounded type, an anonymous type of its own.
@@ -512,7 +512,7 @@ test('transparent: a bounded member makes the wrapper that bounded type (C++ "[c
   schemaError(() => transparent('M', field(u32, { max: 4 })), /max bounds a rawString or bytes/);
   schemaError(() => transparent('M', field(optional(rawString), { max: 4 })), /not an optional/);
   // bytes and maps take a bound too.
-  assert.equal(transparent('Blob', field(bytes, { max: 4 })).maxEncodedSize, 4n);
-  assert.equal(transparent('Votes', field(map(u8, u8), { max: 3 })).maxEncodedSize, map(u8, u8, { max: 3 }).maxEncodedSize);
-  assert.notEqual(map(u8, u8, { max: 3 }).maxEncodedSize, null);
+  assert.equal(transparent('Blob', field(bytes, { max: 4 })).inferredBound, 4n);
+  assert.equal(transparent('Votes', field(map(u8, u8), { max: 3 })).inferredBound, map(u8, u8, { max: 3 }).inferredBound);
+  assert.notEqual(map(u8, u8, { max: 3 }).inferredBound, null);
 });

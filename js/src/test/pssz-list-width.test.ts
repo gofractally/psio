@@ -36,7 +36,7 @@ function agree<T>(def: TypeDef<T, any>, value: T, wire: string, text = true): vo
   assert.deepEqual(def.decode(fromHex(hex), { rejectUnknown: true }), value);
   const other = fetched(def);
   assert.equal(other.width, def.width);
-  assert.equal(other.maxEncodedSize, def.maxEncodedSize);
+  assert.equal(other.inferredBound, def.inferredBound);
   assert.deepEqual(other.validate(fromHex(hex)), { ok: true, hasUnknown: false });
   assert.equal(toHex(other.encode(other.decode(fromHex(hex)))), hex);
   // Text and back derives the same widths.
@@ -55,7 +55,7 @@ function refuses(run: () => unknown, kind: string, message?: RegExp): void {
   assert.fail('accepted');
 }
 
-const bound = (def: TypeDef<any, any>) => [def.maxEncodedSize, def.width];
+const bound = (def: TypeDef<any, any>) => [def.inferredBound, def.width];
 
 test('list width: fit(k, r) — the bound and the width of a bounded list', () => {
   // docs/pssz-spec.md 3.2, the examples.
@@ -78,7 +78,7 @@ test('list width: fit(k, r) — the bound and the width of a bounded list', () =
   assert.deepEqual(bound(tuple(optional(boundedList(boundedUtf8(16), 8)))), [1n + 1n + 137n, 1]);
   // Maps and sets: the list of the entries / elements.
   const entry = 1n + (1n + 16n) + 4n;                       // tuple(string<=16, u32)
-  assert.equal(pair(boundedUtf8(16), u32).maxEncodedSize, entry);
+  assert.equal(pair(boundedUtf8(16), u32).inferredBound, entry);
   const Counts = record('Counts', { m: field(map(rawString, u32), { max: 4, keys: { utf8: true, max: 16 } }) }, { fixed: true });
   assert.deepEqual(bound(Counts), [1n + 4n * (1n + entry), 1]);
   const Names = record('Names', { s: field(set(rawString), { max: 4, element: { utf8: true, max: 16 } }) }, { fixed: true });
@@ -173,7 +173,9 @@ test('position cap: every list, map, tuple and array beneath a capped record tak
     const Capped = record('Capped', cappedFields, { maxDynamicData: cap });
     assert.equal(Capped.width, w);
     // The cap changes no bound and no schema: the members are the plain types.
-    assert.equal(Capped.maxEncodedSize, null);
+    assert.equal(Capped.inferredBound, null);
+    // ... and no value is longer than the cap.
+    assert.equal(Capped.maxEncodedSize, BigInt(cap));
     assert.equal(Capped.childWiderThanCap, false);
     // With no record beneath it, the frame is the explicit profile's of the
     // same width: every header, slot and table is as wide as the cap allows.

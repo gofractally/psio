@@ -20,7 +20,9 @@ import {
 
 interface MethodRow {
   name: string; params: string[]; named: boolean; args: string; result: boolean;
-  max_dynamic_data: number | null; max_fields: number | null; width: number; max_encoded_size: number | null;
+  max_dynamic_data: number | null; max_fields: number | null; width: number;
+  /** pssz-spec 3.2: what the width is chosen from; 3.7: the largest argument list. */
+  inferred_bound: number | null; max_encoded_size: number | null;
 }
 interface Row {
   name: string;
@@ -123,10 +125,13 @@ test('interface-vectors.json: the methods manifest, typed and schema-driven', ()
       assert.equal(m.maxFields, row.max_fields, name);
       assert.equal(m.result !== null, row.result, name);
       assert.equal(m.args.width, row.width, name);
-      const bound = m.args.maxEncodedSize;
-      assert.equal(bound === null ? null : Number(bound), row.max_encoded_size, name);
+      const bound = m.args.inferredBound;
+      assert.equal(bound === null ? null : Number(bound), row.inferred_bound, name);
+      const largest = m.args.maxEncodedSize;
+      assert.equal(largest === null ? null : Number(largest), row.max_encoded_size, name);
     }
     assert.equal(root.width, row.width, row.name);
+    assert.equal(root.inferredBound === null ? null : Number(root.inferredBound), row.inferred_bound, row.name);
     assert.equal(root.maxEncodedSize === null ? null : Number(root.maxEncodedSize), row.max_encoded_size, row.name);
     // The argument list a Func describes is the named type C++ emits for it.
     const named = fetched.ir.types.find((m) => m.name === row.args)!.type.value;
@@ -243,7 +248,7 @@ test('interface: the JavaScript values of arguments and results are statically t
   assert.equal(Token.methods.note.result, null);
   // The result is the bounded type: a 1-byte offset table, not the 4 of a list of strings.
   assert.equal(Token.methods.names.result.width, 1);
-  assert.equal(Token.methods.names.result.maxEncodedSize, 68n);
+  assert.equal(Token.methods.names.result.inferredBound, 68n);
   assert.equal(toHex(list(rawString).encode([Buffer.from('alice'), Buffer.from('bob')])), '080000000d000000616c696365626f62');
   // Every writer refuses a result outside returns(...).
   for (const run of [
@@ -274,7 +279,7 @@ test('interface: a result bound with no type form is result.lengthBound, enforce
     assert.equal(code.validate(fromHex('01020304')).ok, false);
     assert.equal(code.validate(new Uint8Array(0)).ok, false);
     assert.equal(rejects(() => code.jsonToValue('[]'), 'text').kind, 'json');
-    assert.equal(code.maxEncodedSize, 3n);
+    assert.equal(code.inferredBound, 3n);
   }
   for (const tag of [api.methods.tag.result as PsszType<string>, fetched.method<unknown, string>('tag').result!]) {
     assert.equal(toHex(tag.encode('ab')), '6162');

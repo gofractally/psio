@@ -713,6 +713,8 @@ export class Node {
   ownBoundDone = false;
   countBound?: Map<bigint, bigint | null>;
   fixedPayloadMemo?: boolean;
+  /** `Codec.maxEncodedSize` of the node at the top level, once computed. */
+  maxSize?: bigint | null;
   /** Field layouts, by offset width. */
   fields?: FieldLayout[][];
   byName?: Map<string, number>;
@@ -1676,9 +1678,113 @@ export class Codec {
   }
 
   /**
-   * `max_encoded_size` of the type itself (its explicit cap is not looked
-   * at), or null: unbounded. `count`: for a plain list (or the list of a map
-   * / set), the count the `lengthBound` of the member holding it gives.
+   * The maximum encoded size (docs/pssz-spec.md 3.7) of a value of `node`
+   * at a position whose cap is `cap`, or null: no finite maximum. The walk
+   * of `boundOf` with three differences: a type's header, slots and offset
+   * table are counted at the width it really has (`widthOf`); what it holds
+   * counts as its own maximum; and a capped record is the smaller of its cap
+   * and that sum, the cap when something inside is unbounded. The two
+   * conservatisms of the inferred bound stay: one selector byte for every
+   * optional, ceil(N / 8) + 1 for a bitlist.
+   */
+  private maxOf(node: Node, annotation: LengthBound | null, cap: bigint | null, active: Node[]): bigint | null {
+    if (active.includes(node)) return null;
+    active.push(node);
+    const elements = (container: Node, count: bigint, own: bigint | null): bigint | null => {
+      if (count === 0n) return 0n;
+      const element = container.childBoxed ? null : this.maxOf(container.child, null, cap, active);
+      const total = boundMultiply(count, element);
+      if (this.fixedPayload(container.child, [])) return total;
+      return boundAdd(total, count * BigInt(this.widthOf(container, cap, own)));
+    };
+    const sequence = (container: Node): bigint | null => {
+      if (container.kind === 'list' && !container.bounded) {
+        const count = annotation ? annotation.exact ?? annotation.max : null;
+        return count !== null ? elements(container, count, count) : null;
+      }
+      return elements(container, container.count, null);
+    };
+    // A record's or tuple's header and slots at `width`, and its members.
+    const members = (slots: bigint, width: number, beneath: bigint | null, annotated: boolean): bigint | null => {
+      let total: bigint | null = 0n;
+      for (const member of node.members) {
+        const payload = member.boxed ? null : this.maxOf(member.node, annotated ? member.bound : null, beneath, active);
+        if (!this.fixedPayload(member.node, [])) ++slots;
+        total = boundAdd(total, payload);
+      }
+      return boundAdd(total, slots * BigInt(width));
+    };
+    let out: bigint | null = null;
+    switch (node.kind) {
+      case 'int':
+      case 'float':
+      case 'bool':
+      case 'char':
+        out = BigInt(node.size);
+        break;
+      case 'list':
+      case 'array':
+        out = sequence(node);
+        break;
+      case 'option':
+        out = node.childBoxed ? null : boundAdd(this.maxOf(node.child, annotation, cap, active), 1n);
+        break;
+      case 'string':
+      case 'hex':
+        out = node.childBoxed ? null : sequence(node.child);
+        break;
+      case 'record':
+        // A record is a boundary for the position cap: its members are
+        // beneath its own cap, or beneath none.
+        out = members(node.stable ? 0n : 1n, this.widthOf(node), this.capBeneath(node, cap), true);
+        if (node.cap !== null && (out === null || out > node.cap)) out = node.cap;
+        break;
+      case 'nested':
+        out = annotation ? annotation.exact ?? annotation.max : null;
+        break;
+      case 'tuple':
+        out = members(1n, this.widthOf(node, cap), cap, false);
+        break;
+      case 'variant': {
+        let widest: bigint | null = 0n;
+        for (const member of node.members) {
+          const payload = member.boxed ? null : this.maxOf(member.node, null, cap, active);
+          if (payload === null || widest === null) widest = null;
+          else if (payload > widest) widest = payload;
+        }
+        out = boundAdd(widest, 1n);
+        break;
+      }
+      case 'bitvector':
+      case 'bitlist':
+        out = BigInt(packedByteCount(node.size) + (node.kind === 'bitlist' ? 1 : 0));
+        break;
+      default:
+        break;
+    }
+    active.pop();
+    return out;
+  }
+
+  /**
+   * `max_encoded_size` of the type (docs/pssz-spec.md 3.7): no encoding of
+   * a value of it in the automatic profile is longer; null when there is no
+   * finite maximum. `count` as for `inferredBound`.
+   */
+  maxEncodedSize(node: Node, count: bigint | null = null): bigint | null {
+    if (count !== null && !(node.kind === 'list' && !node.bounded)) count = null;
+    if (count === null) {
+      if (node.maxSize === undefined) node.maxSize = this.maxOf(node, null, null, []);
+      return node.maxSize;
+    }
+    return this.maxOf(node, { exact: null, max: count, min: null }, null, []);
+  }
+
+  /**
+   * `inferred_bound` of the type itself (docs/pssz-spec.md 3.2; its explicit
+   * cap is not looked at), or null: unbounded. `count`: for a plain list (or
+   * the list of a map / set), the count the `lengthBound` of the member
+   * holding it gives.
    */
   inferredBound(node: Node, count: bigint | null = null): bigint | null {
     if (count !== null && !(node.kind === 'list' && !node.bounded)) count = null;

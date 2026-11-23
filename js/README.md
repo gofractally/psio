@@ -86,7 +86,8 @@ Transfer.view(bytes).get('amount');                   // 18446744073709551615n, 
 | `type.encodeKey(value)` / `type.decodeKey(bytes)` / `type.validateKey(bytes)` | The `key` format ([keys](#keys)). |
 | `type.encodeKeyPrefix(elements)` / `keyPrefixUpperBound(bytes)` | A prefix key and the exclusive end of its range. |
 | `type.width` | The offset width of the type's own header / slots / offset table. |
-| `type.maxEncodedSize` | The inferred size bound (`max_encoded_size`) as a `bigint`, or `null` when unbounded. |
+| `type.inferredBound` | The inferred bound (`inferred_bound`, pssz-spec §3.2): the number offset widths are chosen from, as a `bigint`, or `null` when unbounded. It never reads the type's own `maxDynamicData`. |
+| `type.maxEncodedSize` | The largest encoding (`max_encoded_size`, pssz-spec §3.7) as a `bigint`: no value of the type encodes to more bytes; `null` when there is no finite maximum. For a capped record it is at most the cap, and the cap when a member is unbounded. Size buffers with this one. |
 | `type.childWiderThanCap` | A capped record holds a record wider than its cap allows ([widths](#typed-definitions)): a query, not an error. |
 | `jsonToPssz(schema, root, format, text)`, `psszToJson(schema, root, format, bytes)`, `validatePssz(schema, root, bytes)` | The text conversions and validation under the C++ / Rust names. |
 
@@ -208,9 +209,14 @@ const Small = record('Small', { tag: boundedUtf8(8), ids: boundedList(u16, 4), k
 Small.width;                                    // 1
 record('Note', { text: utf8 }, { maxDynamicData: 200 }).width;   // 1
 record('Open', { text: utf8 }).width;           // 4
-record('Open', { text: utf8 }).maxEncodedSize;  // null: unbounded
+record('Open', { text: utf8 }).inferredBound;   // null: unbounded
 tuple(u64, boundedUtf8(32), u8).width;          // 1
-tuple(u64, boundedUtf8(32), u8).maxEncodedSize; // 43n   (1 + 8 + (1 + 32) + 1)
+tuple(u64, boundedUtf8(32), u8).inferredBound;  // 43n   (1 + 8 + (1 + 32) + 1)
+tuple(u64, boundedUtf8(32), u8).maxEncodedSize; // 43n   (no cap anywhere: the same number)
+record('Note', { text: utf8 }, { maxDynamicData: 200 }).inferredBound;    // null: the cap is not part of it
+record('Note', { text: utf8 }, { maxDynamicData: 200 }).maxEncodedSize;   // 200n: no Note is longer than its cap
+record('Row', { id: u64, memo: boundedUtf8(80) }, { maxDynamicData: 1024 }).inferredBound;    // 90n    (2 * 1 + 8 + 80)
+record('Row', { id: u64, memo: boundedUtf8(80) }, { maxDynamicData: 1024 }).maxEncodedSize;   // 92n    (2 * 2 + 8 + 80: the cap makes the header and the slot 2 bytes wide)
 record('Event', { at: u64, what: variant({ tick: u8, point: tuple(u32, u32) }) }).width;   // 1
 tuple(u32, utf8).width;                         // 4   (an unbounded element)
 boundedList(boundedUtf8(16), 15).width;         // 1   (15 * (1 + 16) = 255: a 1-byte offset table)
@@ -357,7 +363,7 @@ record member, a list element, an optional payload, a map key or value.
 import { transparent, field, rawString, boundedUtf8, toHex } from 'psio';
 
 const Memo = transparent('Memo', field(rawString, { utf8: true, max: 80 }));   // is a UTF-8 string of at most 80 bytes
-Memo.maxEncodedSize;                 // 80n
+Memo.inferredBound;                  // 80n
 toHex(Memo.encode('hi'));            // '6869': the bytes of the string
 Memo.encode('x'.repeat(81));         // throws PsszError: pssz IR: byte count bound exceeded
 transparent('Memo', boundedUtf8(80));   // the same type, spelled with a wrapper type
@@ -403,7 +409,7 @@ type Post = Infer<typeof Post>;
 // { title: string; tags: string[]; votes: Map<string, number[]>; origin: [string, number, Uint8Array];
 //   body: { type: 'Text'; value: string } | { type: 'Parts'; value: string[] }; reply: Uint8Array[] | null }
 Post.width;                                    // 2: every position is bounded
-Post.maxEncodedSize;                           // 1566n
+Post.inferredBound;                            // 1566n
 ```
 
 | Option | Bounds |
