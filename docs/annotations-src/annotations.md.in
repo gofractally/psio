@@ -424,7 +424,8 @@ Practical guidance for types without a cap:
 planned; **not yet available** = the C++ behaviour of the consistency round
 (merge `85e72cf`) has no committed counterpart in that language at the
 time this table was written (checked against the Rust commit `f5d825e` and
-the Python commit `326ff58`; no TypeScript commit of the round existed). The Python column uses the spellings of
+the Python commits `326ff58` and `b17003d`; no TypeScript commit of the
+round existed). The Python column uses the spellings of
 `python/src/psio` ([README](../python/README.md)). Schema IR nodes are written as in
 [json.md](json.md#the-schema-ir-as-json). Tooling that is not an annotation
 — the compatibility check, the result codec, the name coders — is in
@@ -459,7 +460,7 @@ the table above.
 
 | | C++ | Rust | TypeScript | Python |
 |---|---|---|---|---|
-| compatibility check of two revisions | `psio::pssz_evolves_from<Old, New>` (compile time): fields, widths, bounds that only widen, `utf8`, order specs, caps, `maxFields` ([8](#8-evolution-what-may-change-after-publication)) | `pssz::pssz_evolves_from::<Old, New>()` (`const fn`): refuses **any** change of a bound, which is stricter than the rule; widening and the `maxFields` rule: not yet available | not yet available (no checker) | not yet available (no checker) |
+| compatibility check of two revisions | `psio::pssz_evolves_from<Old, New>` (compile time): fields, widths, bounds that only widen, `utf8`, order specs, caps, `maxFields` ([8](#8-evolution-what-may-change-after-publication)) | `pssz::pssz_evolves_from::<Old, New>()` (`const fn`): refuses **any** change of a bound, which is stricter than the rule; widening and the `maxFields` rule: not yet available | not yet available (no checker) | `psio.evolves_from(Old, New)` → a `Status` with the reason, over two declarations or two schema types: the C++ rule, bounds that only widen included |
 | key writer checks bounds and UTF-8 | `psio::to_key` (throws), `psio::encode_key_checked` (status) | `psio::try_to_key`: derived members and the `BoundedString` / `BoundedRawString` / `BoundedList` / `BoundedMap` / `BoundedSet` wrapper types | `T.encodeKey` | `psio.to_key` |
 | JSON form of an argument list | writes an object when every parameter is named, else an array; reads either for a named list | writes the object and reads either; a function marked `#[psio(positional)]` is the array only | writes the object; reading the positional array: not yet available | a named list writes the object and reads either; a list without names (`psio.arguments(..., named=False)`) is the array only |
 | result encoded as its `returns(...)` type | `psio::encode_method_result<T, I>`, `decode_method_result`, `validate_method_result`, `check_method_result` | `Method::result_to_pssz` / `result_from_pssz` of `args::<method>` | not yet available | `result_to_pssz` / `result_from_pssz` / `validate_result` of `psio.interface_of(T)[name]` |
@@ -1902,6 +1903,6 @@ Python entry points: `psio.to_pssz(value[, T])`, `psio.from_pssz(T, data)`
 `has_unknown`), `psio.pssz_view(T, data)`, `psio.to_key`, `psio.from_key`,
 `psio.to_json`, `psio.to_ijson`, `psio.schema_of(T)`, `psio.codec(T)`
 (`width`, `max_encoded_size`, `max_dynamic_data`). Every failure is a
-`psio.PsioError`. Not available in Python: a compatibility check
-(`pssz_evolves_from`), a mutable view, WIT / GraphQL emitters, protobuf
+`psio.PsioError`. The compatibility check is `psio.evolves_from(Old, New)`.
+Not available in Python: a mutable view, WIT / GraphQL emitters, protobuf
 field numbers.

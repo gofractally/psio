@@ -1142,10 +1142,10 @@ class Bank(Protocol):
     def symbol(self, token: u32) -> Annotated[str, psio.max(8)]: ...
 ```
 
-Differences to know: Rust has no `exact` / `min`; TypeScript and Python
-have no `pssz_evolves_from` (compare the widths and test old bytes against
-the new type), and Rust's refuses every change of a bound where C++ allows
-widening; TypeScript has no return-value annotation. What a language has
+Differences to know: Rust has no `exact` / `min`; TypeScript has no
+`pssz_evolves_from` (compare the widths and test old bytes against the new
+type), Python's is the run-time `psio.evolves_from(Old, New)`, and Rust's
+refuses every change of a bound where C++ and Python allow widening; TypeScript has no return-value annotation. What a language has
 not yet mirrored of the latest C++ consistency round — `sorted` / `unique`
 (Python has them), enforced `maxFields` and the array form of JSON
 arguments (Rust and Python have them), the round-trip rule of the name
