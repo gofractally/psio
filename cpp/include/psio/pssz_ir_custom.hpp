@@ -17,6 +17,13 @@
 //                         adapter). Optional: a type with an invariant and
 //                         no text form registers neither, and its text
 //                         stays the wire type's.
+//   to_json / from_json   a presentation that is ANY JSON value — an
+//                         object, an array, a number — instead of one
+//                         string: between the PSSZ bytes of the wire type
+//                         and the JSON text of the value. Optional; where a
+//                         handler has both forms, a value is presented by
+//                         to_json / from_json and an object KEY (a map whose
+//                         key is the type) by to_text / from_text.
 //   check                 the invariant: whether the PSSZ bytes of the wire
 //                         type are a value of the type. Optional.
 //
@@ -49,9 +56,40 @@
 // one is an error (try_add returns it, add fails through codec_abort) — and
 // are not subject to `require_all`.
 //
-// A handler cannot express a presentation that is not a single JSON string
-// (an object, a bare number), or one that depends on the text format or on
-// the surrounding value.
+// A JSON-value presentation (to_json / from_json). The handler is handed a
+// JsonContext: the schema being walked, the registry in use (for the types
+// nested in its value: it calls pssz_to_json / json_to_pssz itself, with
+// this schema or with another one it looks up), and the text format.
+//
+//   handlers.add("Action", {
+//      .to_json = [&](std::span<const char> pssz, const JsonContext& ctx, std::string& json) {
+//         // {"service":"tokens","method":"credit","data":{...}}: `data` is
+//         // decoded with the schema of the called service
+//         ...
+//         return psio::codec_ok();
+//      },
+//      .from_json = [&](std::string_view json, const JsonContext& ctx, std::vector<char>& pssz) {
+//         ...   // e.g. psio::decode_json_checked(psio::ijson{}, json, parsed)
+//      }});
+//
+//   to_json     appends the JSON text of the value to `json`. The codec
+//               checks that what was appended is exactly ONE well-formed
+//               JSON value (under ijson: by the I-JSON string rule) and
+//               writes it compact; anything else is the error "json: a
+//               custom handler wrote text that is not one JSON value".
+//   from_json   receives the compact text of the value at that position
+//               (whatever its shape; whitespace removed, strings escaped as
+//               PSIO writes them, numbers as written) and appends the PSSZ
+//               bytes of the wire type. The bytes are then read as the wire
+//               type — which checks the custom values nested in it — and
+//               `check` runs, as for a text handler.
+//
+// A failed status from either is passed through unchanged (the message may
+// be built at run time: codec_fail_owned). The PSSZ validators
+// (validate_pssz, decode_auto, ...) do not present values and call neither.
+//
+// A handler cannot express a presentation that depends on the surrounding
+// value.
 
 #include <psio/adapter.hpp>
 #include <psio/error.hpp>
@@ -65,9 +103,22 @@
 #include <utility>
 #include <vector>
 
+namespace psio::schema_types
+{
+struct Schema;
+}
+
 namespace psio::pssz_ir
 {
 class CustomHandlers;
+
+// What a to_json / from_json handler is told about the walk it is part of.
+struct JsonContext
+{
+   const schema_types::Schema &schema;  // the schema being read or written
+   const CustomHandlers *handlers;      // the registry in use (never null in a handler)
+   bool ijson;                          // psio::ijson (true) or psio::json
+};
 
 namespace detail
 {
@@ -89,6 +140,16 @@ class CustomHandlers
       // Whether structurally valid PSSZ bytes of the wire type are a value
       // of the type: its invariant.
       std::function<codec_status(std::span<const char> pssz)> check = {};
+      // PSSZ bytes of the wire type -> the JSON text of the value
+      // (appended): any one JSON value.
+      std::function<codec_status(std::span<const char> pssz, const JsonContext &context,
+                                 std::string &json)>
+          to_json = {};
+      // The compact JSON text of one value -> PSSZ bytes of the wire type
+      // (appended). An error for a value that is not this presentation.
+      std::function<codec_status(std::string_view json, const JsonContext &context,
+                                 std::vector<char> &pssz)>
+          from_json = {};
    };
 
    // A custom node with no handler is an error rather than its wire type.

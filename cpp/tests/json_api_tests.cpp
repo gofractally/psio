@@ -129,7 +129,31 @@ namespace japi
       std::vector<std::string>         list;
       PSIO_REFLECT(PrettyText, service, data, more, list)
    };
+
+   // An action inside the arguments of another: {service, method, rawData}
+   // on the wire, shown with its arguments decoded by the called service's
+   // schema.
+   struct Action
+   {
+      std::uint64_t     service = 0, method = 0;
+      std::vector<char> rawData;
+      PSIO_REFLECT(Action, service, method, rawData)
+   };
+   inline psio::codec_status action_ok(const Action&) noexcept { return psio::codec_ok(); }
+   struct Holder
+   {
+      std::string         note;
+      std::vector<Action> actions;
+      PSIO_REFLECT(Holder, note, actions)
+   };
+   struct Credit
+   {
+      std::uint64_t              amount = 0;
+      std::optional<std::string> memo;
+      PSIO_REFLECT(Credit, amount, memo)
+   };
 }  // namespace japi
+PSIO_INVARIANT(japi::Action, japi::action_ok, "Action")
 PSIO_INVARIANT(japi::Positive, japi::positive, "Positive")
 
 // ── Non-owning sources have text (writers) ─────────────────────────────────
@@ -499,4 +523,188 @@ TEST_CASE("json_value: a member of a reflected record, in text and in PSSZ",
    // No handler may claim the id.
    ir::CustomHandlers handlers;
    CHECK_FALSE(handlers.try_add("json", {}).ok());
+}
+
+// ── Custom handlers that present any JSON value ────────────────────────────
+namespace
+{
+   // The schema of the called service: one type per method number.
+   const psio::Schema& tokens_schema()
+   {
+      static const psio::Schema s = psio::SchemaBuilder{}.insert<japi::Credit>("3").build();
+      return s;
+   }
+   template <typename Out>
+   psio::codec_status args_to_json(bool ijson, const japi::Action& a, Out& json,
+                                   const psio::pssz_ir::CustomHandlers* handlers)
+   {
+      namespace ir = psio::pssz_ir;
+      const psio::AnyType args{std::to_string(a.method)};
+      return ijson ? ir::pssz_to_json(tokens_schema(), args, psio::ijson{},
+                                      std::span<const char>{a.rawData}, json, nullptr, handlers)
+                   : ir::pssz_to_json(tokens_schema(), args, psio::json{},
+                                      std::span<const char>{a.rawData}, json, nullptr, handlers);
+   }
+   psio::pssz_ir::CustomHandlers action_handlers()
+   {
+      namespace ir = psio::pssz_ir;
+      ir::CustomHandlers h;
+      h.add("Action",
+            {.to_json = [](std::span<const char> pssz, const ir::JsonContext& ctx,
+                           std::string& json) -> psio::codec_status {
+                const auto a = psio::decode<japi::Action>(psio::pssz{}, pssz);
+                if (a.service != 2)
+                   return psio::codec_fail_owned(
+                      "no schema for service " + std::to_string(a.service), 0, "Action");
+                json += R"({"service":"tokens","method":)" + std::to_string(a.method) +
+                        R"(, "data" : )";
+                if (auto st = args_to_json(ctx.ijson, a, json, ctx.handlers); !st.ok())
+                   return st;
+                json += " }";
+                return psio::codec_ok();
+             },
+             .from_json = [](std::string_view json, const ir::JsonContext& ctx,
+                             std::vector<char>& pssz) -> psio::codec_status {
+                psio::json_value v;
+                if (auto st = psio::decode_json_checked(psio::json{}, json, v); !st.ok())
+                   return st;
+                const auto* service = v.find("service");
+                const auto* method  = v.find("method");
+                const auto* data    = v.find("data");
+                if (!v.is_object() || !service || !service->as_string() || !method ||
+                    !method->as_number() || !method->as_number()->as_uint64() || !data)
+                   return psio::codec_fail("an action is {service, method, data}", 0, "Action");
+                if (*service->as_string() != "tokens")
+                   return psio::codec_fail_owned("no schema for service " + *service->as_string(),
+                                                 0, "Action");
+                japi::Action a{2, *method->as_number()->as_uint64(), {}};
+                const psio::AnyType args{std::to_string(a.method)};
+                const std::string   text = psio::to_json(*data);
+                auto st = ctx.ijson ? ir::json_to_pssz(tokens_schema(), args, psio::ijson{},
+                                                       std::string_view{text}, a.rawData,
+                                                       nullptr, psio::json_parser::automatic,
+                                                       ctx.handlers)
+                                    : ir::json_to_pssz(tokens_schema(), args, psio::json{},
+                                                       std::string_view{text}, a.rawData,
+                                                       nullptr, psio::json_parser::automatic,
+                                                       ctx.handlers);
+                if (!st.ok())
+                   return st;
+                const auto bytes = psio::encode(psio::pssz{}, a);
+                pssz.insert(pssz.end(), bytes.begin(), bytes.end());
+                return psio::codec_ok();
+             }});
+      return h;
+   }
+}  // namespace
+
+TEST_CASE("schema-driven json: a custom handler presents a JSON value",
+          "[json][ijson][schema][custom]")
+{
+   namespace ir = psio::pssz_ir;
+   const auto schema = psio::SchemaBuilder{}.insert<japi::Holder>("Holder").build();
+   const japi::Holder value{
+      "n",
+      {japi::Action{2, 3, psio::encode(psio::pssz{}, japi::Credit{5, "hi"})},
+       japi::Action{2, 3, psio::encode(psio::pssz{}, japi::Credit{7, {}})}}};
+   const auto bytes    = psio::encode(psio::pssz{}, value);
+   const auto handlers = action_handlers();
+   // An object where a text handler gave one string: compact, whatever
+   // spacing the handler wrote.
+   const std::string expected =
+      R"({"note":"n","actions":[{"service":"tokens","method":3,"data":{"amount":5,"memo":"hi"}},)"
+      R"({"service":"tokens","method":3,"data":{"amount":7,"memo":null}}]})";
+   std::string out;
+   REQUIRE(ir::pssz_to_json(schema, "Holder", psio::ijson{}, std::span<const char>{bytes}, out,
+                            nullptr, &handlers)
+              .ok());
+   CHECK(out == expected);
+   out.clear();
+   REQUIRE(ir::pssz_to_json(schema, "Holder", psio::json{}, std::span<const char>{bytes}, out,
+                            nullptr, &handlers)
+              .ok());
+   CHECK(out == expected);
+   // And back: members in any order, any spacing, a missing optional.
+   const std::string_view input =
+      R"({ "actions" : [ {"data":{"memo":"hi","amount":5}, "method":3, "service":"tokens"},)"
+      R"( {"service":"tokens","method":3,"data":{"amount":7}} ], "note":"n" })";
+   for (const auto parser : {psio::json_parser::text, psio::json_parser::automatic,
+                             psio::json_parser::simdjson})
+   {
+      std::vector<char> back;
+      REQUIRE(ir::json_to_pssz(schema, "Holder", psio::ijson{}, input, back, nullptr, parser,
+                               &handlers)
+                 .ok());
+      CHECK(back == bytes);
+   }
+   // Without the handler the node is its wire type.
+   out.clear();
+   REQUIRE(ir::pssz_to_json(schema, "Holder", psio::ijson{}, std::span<const char>{bytes}, out)
+              .ok());
+   CHECK(out.starts_with(R"({"note":"n","actions":[{"service":2,"method":3,"rawData":")"));
+
+   // The handler's own status is the conversion's.
+   const japi::Holder other{"n", {japi::Action{9, 3, {}}}};
+   const auto         other_bytes = psio::encode(psio::pssz{}, other);
+   out.clear();
+   auto st = ir::pssz_to_json(schema, "Holder", psio::ijson{}, std::span<const char>{other_bytes},
+                              out, nullptr, &handlers);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == "no schema for service 9");
+   std::vector<char> back;
+   st = ir::json_to_pssz(schema, "Holder", psio::ijson{},
+                         R"({"note":"n","actions":[{"service":"nft","method":3,"data":{}}]})",
+                         back, nullptr, psio::json_parser::automatic, &handlers);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == "no schema for service nft");
+   st = ir::json_to_pssz(schema, "Holder", psio::ijson{}, R"({"note":"n","actions":["x"]})",
+                         back, nullptr, psio::json_parser::automatic, &handlers);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == "an action is {service, method, data}");
+   // An error inside the nested conversion comes through too.
+   st = ir::json_to_pssz(
+      schema, "Holder", psio::ijson{},
+      R"({"note":"n","actions":[{"service":"tokens","method":3,"data":{"memo":"x"}}]})", back,
+      nullptr, psio::json_parser::automatic, &handlers);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what.starts_with("json: missing required member"));
+}
+
+TEST_CASE("schema-driven json: a handler cannot make the document malformed",
+          "[json][ijson][schema][custom]")
+{
+   namespace ir = psio::pssz_ir;
+   const auto schema = psio::SchemaBuilder{}.insert<japi::Holder>("Holder").build();
+   const auto bytes  = psio::encode(psio::pssz{}, japi::Holder{"n", {japi::Action{2, 3, {}}}});
+   for (std::string_view text : {R"({"a":1)", R"(1,2)", "", R"({"a":1} x)", "nul"})
+   {
+      INFO(text);
+      ir::CustomHandlers h;
+      h.add("Action", {.to_json = [text](std::span<const char>, const ir::JsonContext&,
+                                         std::string& json) {
+               json += text;
+               return psio::codec_ok();
+            }});
+      std::string out = "kept";
+      const auto  st  = ir::pssz_to_json(schema, "Holder", psio::ijson{},
+                                         std::span<const char>{bytes}, out, nullptr, &h);
+      REQUIRE_FALSE(st.ok());
+      CHECK(st.error().what == "json: a custom handler wrote text that is not one JSON value");
+      CHECK(out == "kept");
+   }
+   // Any one value will do: a number, an array, a string.
+   for (std::string_view text : {"17", R"([1,"a"])", R"("text")", "null"})
+   {
+      ir::CustomHandlers h;
+      h.add("Action", {.to_json = [text](std::span<const char>, const ir::JsonContext&,
+                                         std::string& json) {
+               json += text;
+               return psio::codec_ok();
+            }});
+      std::string out;
+      REQUIRE(ir::pssz_to_json(schema, "Holder", psio::ijson{}, std::span<const char>{bytes}, out,
+                               nullptr, &h)
+                 .ok());
+      CHECK(out == R"({"note":"n","actions":[)" + std::string{text} + "]}");
+   }
 }

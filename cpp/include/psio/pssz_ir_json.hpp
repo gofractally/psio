@@ -103,7 +103,8 @@ struct map_key_text;
 // only), or an error under `require_all`.
 //
 // In text, a handler with `to_text` / `from_text` reads and writes the value
-// as ONE JSON string; a handler with only `check` leaves the wire type's
+// as ONE JSON string; one with `to_json` / `from_json` as any JSON value
+// (pssz_ir_custom.hpp); a handler with only `check` leaves the wire type's
 // text. Either way `check` runs on every value read (after the text was
 // accepted) and written (before any text is returned), and its status is
 // passed through unchanged. Text a handler's `from_text` refuses is
@@ -757,6 +758,8 @@ template <JsonCursor C> class Reader
          auto handler = customs.find(type);
          if (!handler && customs.required())
             return c.fail("pssz IR: no handler registered for a custom type");
+         if (handler && handler->from_json)
+            return presented_json(type, *handler, out);
          if (handler && handler->from_text)
             return presented(type, *handler, out);
          if (handler && handler->check)
@@ -802,6 +805,38 @@ template <JsonCursor C> class Reader
       std::vector<char> bytes;
       if (!handler.from_text || !handler.from_text(text, bytes).ok())
          return c.fail("json: text is not a value of the custom type");
+      return from_handler(type, handler, bytes, out);
+   }
+   // A custom presentation that is any JSON value: the compact text of the
+   // value at the cursor, turned by its handler into the PSSZ bytes of the
+   // inner type. The handler's own status is reported unchanged.
+   bool presented_json(const Custom &type, const CustomHandlers::Handler &handler, Value &out)
+   {
+      std::string text;
+      {
+         psio::detail::json_impl::writer w{text, "json", false};
+         if (!psio::detail::json_impl::capture_value(c, w))
+            return false;
+         w.finish();
+         if (!w.err.empty())
+            return c.fail(w.err);
+      }
+      std::vector<char> bytes;
+      const JsonContext context{schema, customs.registry(), ijson};
+      if (auto status = handler.from_json(std::string_view{text}, context, bytes); !status.ok())
+      {
+         const std::string_view what = status.error().what;
+         if (failure.ok())
+            failure = std::move(status);
+         return c.fail(what.empty() ? std::string_view{"json: text is not a value of the custom type"}
+                                    : what);
+      }
+      return from_handler(type, handler, bytes, out);
+   }
+   // The bytes a handler produced, read as a value of the inner type.
+   bool from_handler(const Custom &type, const CustomHandlers::Handler &handler,
+                     const std::vector<char> &bytes, Value &out)
+   {
       // The bytes are read as the wire type, which checks the custom values
       // nested in it; then this one.
       detail::Codec<0> codec(schema, customs.registry());
@@ -1371,7 +1406,7 @@ class Writer
             if (!handler && customs.required())
                return w.fail("pssz IR: no handler registered for a custom type");
             const bool check = handler && handler->check && checks;
-            if (handler && (handler->to_text || check))
+            if (handler && (handler->to_text || handler->to_json || check))
             {
                // The inner value as PSSZ bytes — which checks the custom
                // values nested in it — then this one's check, then the
@@ -1387,6 +1422,20 @@ class Writer
                if (check)
                   if (auto st = handler->check(std::span<const char>{bytes}); !st.ok())
                      return w.fail(st.error());
+               if (handler->to_json)
+               {
+                  // Any JSON value: checked to be exactly one, written
+                  // compact.
+                  std::string       text;
+                  const JsonContext context{schema, customs.registry(), ijson};
+                  if (auto st = handler->to_json(std::span<const char>{bytes}, context, text);
+                      !st.ok())
+                     return w.fail(st.error());
+                  psio::json_text_cursor c{std::span<const char>{text.data(), text.size()}, ijson};
+                  if (!psio::detail::json_impl::capture_value(c, w) || !c.finish())
+                     return w.fail("json: a custom handler wrote text that is not one JSON value");
+                  return;
+               }
                if (handler->to_text)
                {
                   std::string text;

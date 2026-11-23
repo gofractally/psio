@@ -998,6 +998,7 @@ schema-driven codecs read a fixed meaning into each of their ids:
 | `bitvector`, `bitlist` | an array / a bounded list of `Int{1}` | the bit types |
 | `map`, `set` | a list (of 2-tuples for a map) | entries in canonical key order |
 | `box` | any type | the type, held indirectly |
+| `json` | a UTF-8 string | any JSON value (C++ `psio::json_value`): the string holds its JSON text, and its text form is that value, inline ("Any JSON value" above) |
 | `unknown` | — | a type the schema builder had no node for; not readable |
 | `time-point…`, `duration…`, `monotonic…` | an 8/16/32/64-bit `Int` | a time value (`docs/time.md`); the word alone or followed by `-<unit>` |
 
@@ -1057,6 +1058,7 @@ optional:
 | part | role |
 |---|---|
 | `to_text` / `from_text` (JS `toText` / `fromText`) | the text form, between a value of the wire type and its text. The text is carried as ONE JSON string in both formats, the rule of a typed text adapter. Without them the type's text is its wire type's |
+| `to_json` / `from_json` (C++) | a text form that is **any JSON value** — an object, an array, a number — instead of one string; see "A handler that presents a JSON value" below |
 | `check` | the invariant: whether a structurally valid value of the wire type is a value of the type |
 
 In C++ and Rust a handler works on the **PSSZ bytes of the wire type**
@@ -1107,10 +1109,61 @@ bytes from both. Its `invariant` rows hold values that violate an invariant
 — the typed text, the bytes, the fallback texts and the invariant's message
 — for the three registries above (`conformance/custom-types.md`).
 
-A handler cannot express a presentation that is not a single JSON string
-(an object, a bare number, a different shape per format), one that depends
-on the surrounding value, or a different binary form — the wire type is
-fixed by the schema.
+**A handler that presents a JSON value (C++).** Some types are shown as a
+structure that their wire type does not have: an action held in the
+arguments of another action is `{service, method, rawData}` on the wire and
+`{"service":"tokens","method":"credit","data":{"amount":5}}` to a person,
+with `data` decoded by the schema of the called service. A handler states
+that with `to_json` / `from_json`:
+
+```cpp
+psio::pssz_ir::CustomHandlers handlers;
+handlers.add("Action", {
+   .to_json = [&](std::span<const char> pssz, const psio::pssz_ir::JsonContext& ctx,
+                  std::string& json) -> psio::codec_status {
+      auto action = psio::decode<Action>(psio::pssz{}, pssz);   // the wire type's bytes
+      const auto& service = schemas.at(action.service);        // another schema
+      json += R"({"service":)" + ... + R"(,"data":)";
+      auto st = psio::pssz_ir::pssz_to_json(service, argsOf(action.method),
+                                            ctx.ijson ? ... , action.rawData, json,
+                                            nullptr, ctx.handlers);
+      json += '}';
+      return st;
+   },
+   .from_json = [&](std::string_view json, const psio::pssz_ir::JsonContext& ctx,
+                    std::vector<char>& pssz) -> psio::codec_status { ... }});
+```
+
+- `JsonContext` is `{schema, handlers, ijson}`: the schema being walked,
+  the registry in use (for nested conversions, with this schema or another),
+  and the text format.
+- `to_json` appends the value's text. The codec checks that what was
+  appended is exactly **one well-formed JSON value** (under `ijson` by the
+  I-JSON string rule) and writes it compact; otherwise the conversion fails
+  with "json: a custom handler wrote text that is not one JSON value" — a
+  handler cannot make a document malformed.
+- `from_json` receives the **compact text of the value at that position**,
+  whatever its shape, and appends the PSSZ bytes of the wire type; they are
+  then read as the wire type (which checks the custom values nested in
+  them) and `check` runs, exactly as for a text handler. It parses the text
+  with whatever suits: `psio::json_value`, a typed
+  `decode_json_checked`, a nested `json_to_pssz`.
+- A failed status of either is the conversion's status, unchanged (its
+  message may be built at run time).
+- Text handlers are unchanged. A handler may have both forms: a value is
+  then presented by `to_json` / `from_json`, and the key of a map whose key
+  type is the custom type (an object key is a string) by `to_text` /
+  `from_text`. A type with only the JSON form is not a string by type, so
+  such a map is the array of `[key, value]` pairs.
+- The PSSZ validators (`validate_pssz`, `decode_auto`, …) present nothing
+  and call neither; the typed codecs have no such form (a typed text
+  adapter is one string), so this is a presentation for schema-driven
+  tools.
+
+JS, Rust and Python handlers have `toText` / `fromText` (one string) only.
+
+A handler cannot express a presentation that depends on the surrounding
+value, or a different binary form — the wire type is fixed by the schema.
 
 Not expressible in the IR, so not available through a schema:
 
