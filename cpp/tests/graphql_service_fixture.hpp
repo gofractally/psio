@@ -357,7 +357,7 @@ namespace gqls
       {
          return gql::paginate(gql::transform(Index<PeerRow, std::int32_t>{&db->peers},
                                              [](pssz_view<PeerRow> row) {
-                                                PeerRow r = psio::decode<PeerRow>(psio::pssz{}, row._psio_data());
+                                                PeerRow r = row.unpack();
                                                 return Peer{r.socket, std::move(r.urls), std::move(r.tls),
                                                             std::move(r.endpoint)};
                                              }),

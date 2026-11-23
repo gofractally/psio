@@ -1528,7 +1528,6 @@ namespace psio::graphql
       constexpr field_desc make_field() noexcept
       {
          constexpr slot_meta m = object_def<T>::template meta<I>();
-         using S               = slot_types<T, I>;
          field_desc f;
          f.name               = m.name;
          f.slot               = static_cast<std::uint16_t>(slot_base<T, I>());

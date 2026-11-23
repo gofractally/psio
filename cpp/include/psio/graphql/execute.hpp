@@ -361,7 +361,7 @@ namespace psio::graphql
          {
             // A leaf with a wire form of its own and no value accessor (a
             // record or enum with a text adapter): decode that one value.
-            const L value = ::psio::decode<L>(typename V::format_type{}, v._psio_data());
+            const L value = v.unpack();
             return write_leaf<L>(e, value, f);
          }
       }
@@ -757,8 +757,7 @@ namespace psio::graphql
                else if constexpr (by_view)
                {
                   // A method needs the object: decode it from the view.
-                  const T object =
-                     ::psio::decode<T>(typename std::remove_cv_t<Src>::format_type{}, src._psio_data());
+                  const T object = src.unpack();
                   return invoke<I>(e, object, f);
                }
                else
