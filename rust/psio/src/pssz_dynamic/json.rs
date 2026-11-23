@@ -105,6 +105,16 @@ impl From<PsszError> for SchemaJsonError {
         Self::Pssz(e)
     }
 }
+/// The description, so a handler passes on the error of a nested
+/// conversion with `?`.
+impl From<SchemaJsonError> for PsszError {
+    fn from(e: SchemaJsonError) -> Self {
+        match e {
+            SchemaJsonError::Pssz(e) => e,
+            SchemaJsonError::Json(e) => PsszError(e.what),
+        }
+    }
+}
 impl From<JsonTextError> for SchemaJsonError {
     fn from(e: JsonTextError) -> Self {
         Self::Json(e)
@@ -141,6 +151,7 @@ fn untagged(ty: &Variant) -> bool {
 //   integers below 64 bits, floats, "char"        number
 //   integers of 64 bits and more, durations       number or string
 //   strings, time points, an id with a text handler      string
+//   an id with a JSON-value handler               any
 //   bytes ("hex")                                 array or string
 //   lists, arrays, tuples, sets                   array
 //   maps                                          object or array
@@ -203,6 +214,7 @@ fn json_kinds_of(schema: &Schema, input: &AnyType, handlers: Option<&CustomHandl
                 Some(kind) if kind.point => STRING,
                 Some(_) => NUMBER | STRING,
                 None => match handlers.and_then(|all| all.find(id)) {
+                    Some(handler) if handler.to_json.is_some() || handler.from_json.is_some() => ANY,
                     Some(handler) if handler.to_text.is_some() || handler.from_text.is_some() => STRING,
                     _ => inner(&c.r#type),
                 },
@@ -582,6 +594,31 @@ impl<C: JsonCursor> Reader<'_, C> {
             let handler = self.handlers.and_then(|all| all.find(&ty.id));
             if handler.is_none() && self.handlers.is_some_and(|all| all.strict) {
                 return self.fail(NO_HANDLER);
+            }
+            // A presentation that is any JSON value: the compact text of
+            // the value at the cursor, turned by its handler into the PSSZ
+            // bytes of the inner type. The handler's error is passed on.
+            if let (Some(from_json), Some(handlers)) =
+                (handler.and_then(|handler| handler.from_json.as_ref()), self.handlers)
+            {
+                let mut w = Writer::new(false);
+                capture_value(self.c, &mut w)?;
+                let Ok(text) = String::from_utf8(w.into_bytes()) else {
+                    return self.fail("json: string is not valid UTF-8");
+                };
+                let context = JsonContext { schema: self.schema, handlers, ijson: self.ijson };
+                let bytes = match from_json(&text, &context) {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.0.is_empty() => {
+                        return self.fail("json: text is not a value of the custom type")
+                    }
+                    Err(error) => return self.fail(error.0),
+                };
+                return match super::decode_compatible::<Pssz>(self.schema, &ty.r#type, &bytes) {
+                    Ok(decoded) if !decoded.has_unknown => Ok(decoded.value),
+                    _ => self
+                        .fail("json: custom handler produced bytes that are not the inner type"),
+                };
             }
             // A handler with only a `check` leaves the wire type's text.
             if let Some(from_text) = handler.and_then(|handler| handler.from_text.as_ref()) {
@@ -1116,6 +1153,31 @@ impl ValueWriter<'_> {
                 if handler.is_none() && self.handlers.is_some_and(|all| all.strict) {
                     return self.fail(NO_HANDLER);
                 }
+                // A presentation that is any JSON value: checked to be
+                // exactly one, written compact. The handler's error is
+                // passed on.
+                if let (Some(to_json), Some(handlers)) =
+                    (handler.and_then(|handler| handler.to_json.as_ref()), self.handlers)
+                {
+                    let Ok(bytes) = super::encode::<Pssz>(self.schema, &ty.r#type, value) else {
+                        return self
+                            .fail("pssz dynamic: custom value does not match its inner type");
+                    };
+                    let ijson = self.w.is_ijson();
+                    let context = JsonContext { schema: self.schema, handlers, ijson };
+                    let text = match to_json(&bytes, &context) {
+                        Ok(text) => text,
+                        Err(error) => return self.fail(error.0),
+                    };
+                    let captured = TextCursor::new(text.as_bytes(), ijson).and_then(|mut cursor| {
+                        capture_value(&mut cursor, &mut self.w)?;
+                        cursor.finish()
+                    });
+                    return match captured {
+                        Ok(()) => Ok(()),
+                        Err(_) => self.fail("json: a custom handler wrote text that is not one JSON value"),
+                    };
+                }
                 // A handler with only a `check` leaves the wire type's text.
                 if let Some(to_text) = handler.and_then(|handler| handler.to_text.as_ref()) {
                     // The inner value as PSSZ bytes, then the handler's
@@ -1436,10 +1498,34 @@ impl ValueWriter<'_> {
 // handler registered the presentation is exactly its text: the plain form
 // is not also accepted.
 //
-// A handler cannot express a presentation that is not a single JSON string
-// (an object, a bare number), or one that depends on the text format or on
-// the surrounding value.
+// A JSON-value presentation (`CustomHandlers::add_json`; C++ `to_json` /
+// `from_json`) is ANY one JSON value instead of one string: an object, an
+// array, a number. Its handler is handed a `JsonContext` — the schema being
+// walked, the registry in use (for the types nested in its value: it calls
+// `pssz_to_json_with` / `json_to_pssz_with` itself, with this schema or with
+// another one it looks up) and the text format. What `to_json` returns is
+// checked to be exactly one well-formed JSON value (under IJson by the
+// I-JSON string rule) and written compact; `from_json` receives the compact
+// text of the value at that position, whatever its shape. Where an id has
+// both forms, a value is presented by the JSON form and an object KEY (a map
+// whose key is the type) by the text form.
+//
+// A handler cannot express a presentation that depends on the surrounding
+// value.
 
+/// What a JSON-value handler ([`CustomHandlers::add_json`]) is told about
+/// the walk it is part of (C++ `psio::pssz_ir::JsonContext`).
+#[derive(Clone, Copy)]
+pub struct JsonContext<'a> {
+    /// The schema being read or written.
+    pub schema: &'a Schema,
+    /// The registry in use: what a nested conversion is given.
+    pub handlers: &'a CustomHandlers,
+    /// `IJson` (true) or `Json`.
+    pub ijson: bool,
+}
+type ToJson = dyn Fn(&[u8], &JsonContext<'_>) -> Result<String, PsszError> + Send + Sync;
+type FromJson = dyn Fn(&str, &JsonContext<'_>) -> Result<Vec<u8>, PsszError> + Send + Sync;
 type ToText = dyn Fn(&[u8]) -> Result<String, PsszError> + Send + Sync;
 type FromText = dyn Fn(&str) -> Result<Vec<u8>, PsszError> + Send + Sync;
 /// The invariant of a custom type: whether structurally valid PSSZ bytes of
@@ -1457,6 +1543,11 @@ pub(crate) struct CustomHandler {
     pub(crate) from_text: Option<Box<FromText>>,
     /// The invariant.
     pub(crate) check: Option<Box<Check>>,
+    /// PSSZ bytes of the wire type -> the JSON text of the value: any one
+    /// JSON value.
+    pub(crate) to_json: Option<Box<ToJson>>,
+    /// The compact JSON text of one value -> PSSZ bytes of the wire type.
+    pub(crate) from_json: Option<Box<FromJson>>,
 }
 
 /// The handlers of the custom types of a schema, by Custom id: a text form
@@ -1592,6 +1683,58 @@ impl CustomHandlers {
     /// Whether `id` has a handler.
     pub fn contains(&self, id: &str) -> bool {
         self.handlers.contains_key(id)
+    }
+    /// Registers (or replaces) the JSON-value presentation of `id` (C++
+    /// `to_json` / `from_json`): `to_json` turns the PSSZ bytes of the wire
+    /// type into the JSON text of the value — any ONE JSON value, which the
+    /// codec checks and writes compact — and `from_json` the compact text of
+    /// the value found into those bytes. Both are handed the
+    /// [`JsonContext`] and may fail; their error is passed through
+    /// unchanged. A text form or `check` registered for the id is kept: a
+    /// value is then presented by the JSON form, an object key by the text
+    /// form.
+    ///
+    /// ```
+    /// use psio::pssz::dynamic::{pssz_to_json_with, CustomHandlers, JsonContext};
+    /// use psio::pssz::schema_ir::schema_for;
+    /// use psio::{IJson, PsszPack, PsszUnpack, ToPsszSchema};
+    ///
+    /// #[derive(PsszPack, PsszUnpack, ToPsszSchema)]
+    /// #[psio(custom = "Point")]
+    /// struct Point { x: i32, y: i32 }
+    ///
+    /// let mut handlers = CustomHandlers::new();
+    /// handlers.add_json(
+    ///     "Point",
+    ///     |pssz: &[u8], _: &JsonContext<'_>| {
+    ///         let p: Point = psio::from_pssz(pssz)?;
+    ///         Ok(format!("[ {}, {} ]", p.x, p.y))
+    ///     },
+    ///     |json: &str, context: &JsonContext<'_>| {
+    ///         let (x, y): (i32, i32) =
+    ///             if context.ijson { psio::from_ijson(json) } else { psio::from_json(json) }
+    ///                 .map_err(|e| e.what.to_string())?;
+    ///         Ok(psio::to_pssz(&Point { x, y }))
+    ///     },
+    /// );
+    /// let (schema, root) = schema_for::<Point>().unwrap();
+    /// let bytes = psio::to_pssz(&Point { x: 1, y: -2 });
+    /// assert_eq!(pssz_to_json_with::<IJson>(&schema, &root, &bytes, &handlers).unwrap().0, "[1,-2]");
+    /// ```
+    pub fn add_json(
+        &mut self,
+        id: impl Into<String>,
+        to_json: impl Fn(&[u8], &JsonContext<'_>) -> Result<String, PsszError> + Send + Sync + 'static,
+        from_json: impl Fn(&str, &JsonContext<'_>) -> Result<Vec<u8>, PsszError> + Send + Sync + 'static,
+    ) -> &mut Self {
+        let handler = self.handlers.entry(id.into()).or_default();
+        handler.to_json = Some(Box::new(to_json));
+        handler.from_json = Some(Box::new(from_json));
+        self
+    }
+    /// Whether `id` has a JSON-value presentation registered.
+    pub fn has_json_form(&self, id: &str) -> bool {
+        self.find(id).is_some_and(|h| h.to_json.is_some() || h.from_json.is_some())
     }
     /// Whether `id` has a text form / an invariant registered.
     pub fn has_text_form(&self, id: &str) -> bool {

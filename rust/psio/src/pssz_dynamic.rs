@@ -98,7 +98,7 @@ pub use key::{
 pub use json::{
     json_to_pssz, json_to_pssz_with, json_to_value, json_to_value_with, pssz_to_json,
     pssz_to_json_with, read_json, read_json_with, validate_pssz, validate_pssz_with,
-    value_to_json, value_to_json_with, CustomHandlers, SchemaJsonError,
+    value_to_json, value_to_json_with, CustomHandlers, JsonContext, SchemaJsonError,
 };
 
 /// What the codec does with the bytes of a `Nested` node.
