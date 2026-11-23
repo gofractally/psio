@@ -132,7 +132,9 @@ namespace psio {
                   "pssz: encoded size exceeds maxDynamicData cap",
                   static_cast<std::uint32_t>(total), "pssz"}};
 #else
-               std::abort();
+               ::psio::codec_abort_without_exceptions(codec_error{
+                  "pssz: encoded size exceeds maxDynamicData cap",
+                  static_cast<std::uint32_t>(total), "pssz"});
 #endif
             }
          }
@@ -1092,8 +1094,7 @@ namespace psio {
 #if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
          throw codec_exception{codec_error{message, 0, "pssz"}};
 #else
-         (void)message;
-         std::abort();
+         ::psio::codec_abort_without_exceptions(codec_error{message, 0, "pssz"});
 #endif
       }
       // Canonical encodings carry no trailing data. A fixed-size value
@@ -1115,8 +1116,7 @@ namespace psio {
 #if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
          throw codec_exception{status.error()};
 #else
-         (void)status;
-         std::abort();
+         ::psio::codec_abort_without_exceptions(status.error());
 #endif
       }
       // Encoder preflight (see check_encode_depth). Runs before sizing so a
@@ -3166,9 +3166,7 @@ namespace psio {
 #if defined(__cpp_exceptions) && defined(PSIO_EXCEPTIONS_ENABLED) && PSIO_EXCEPTIONS_ENABLED
          throw codec_exception{codec_error{msg, off, "pssz"}};
 #else
-         (void)msg;
-         (void)off;
-         std::abort();
+         ::psio::codec_abort_without_exceptions(codec_error{msg, off, "pssz"});
 #endif
       }
 

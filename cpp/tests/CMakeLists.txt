@@ -187,6 +187,43 @@ add_test(NAME psio_helpers_noexceptions_test COMMAND psio_helpers_noexceptions_t
 add_test(NAME psio_helpers_noexceptions_checked_decode_aborts
          COMMAND sh -c "\"$1\" abort; test $? -eq 134" sh
                  $<TARGET_FILE:psio_helpers_noexceptions_test>)
+# The abort handler: without exceptions a fail-fast operation hands its error
+# to the embedder before std::abort() — through psio::set_codec_abort_handler
+# (run time) or -DPSIO_CODEC_ABORT_HANDLER=fn (build time, no registration).
+function(psio_add_abort_handler_check TARGET)
+   add_executable(${TARGET} codec_abort_handler_check.cpp)
+   target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+   target_compile_features(${TARGET} PRIVATE cxx_std_23)
+   target_link_libraries(${TARGET} PRIVATE Boost::headers)
+   target_compile_definitions(${TARGET} PRIVATE PSIO_EXCEPTIONS_ENABLED=0 ${ARGN})
+   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+      target_compile_options(${TARGET} PRIVATE -fno-exceptions -fno-rtti)
+   endif()
+endfunction()
+psio_add_abort_handler_check(psio_codec_abort_handler_check)
+psio_add_abort_handler_check(psio_codec_abort_handler_linktime_check
+                             PSIO_CODEC_ABORT_HANDLER=psio_test_abort)
+function(psio_abort_handler_case NAME MESSAGE)
+   foreach(kind "" "_linktime")
+      add_test(NAME psio_codec_abort_handler${kind}_${NAME}
+               COMMAND sh -c "\"$1\" \"$2\"; echo \" rc=$?\"" sh
+                       $<TARGET_FILE:psio_codec_abort_handler${kind}_check> ${NAME})
+      set_tests_properties(psio_codec_abort_handler${kind}_${NAME} PROPERTIES
+         PASS_REGULAR_EXPRESSION "psio-abort: ${MESSAGE} rc=7")
+   endforeach()
+endfunction()
+psio_abort_handler_case(pssz "pssz: record header truncated .pssz.")
+psio_abort_handler_case(json "json: [^[]* .i?json.")
+psio_abort_handler_case(key "key: [^[]* .key.")
+psio_abort_handler_case(encode "pssz: encoded size exceeds maxDynamicData cap .pssz.")
+psio_abort_handler_case(overrun "stream overrun .fixed_buf_stream.")
+psio_abort_handler_case(cursor "stream overrun .input_stream.")
+psio_abort_handler_case(absent "psio::view<std::optional<T>>::value..: no value .view.")
+# With no handler installed the failure is still an abort (SIGABRT, 134).
+add_test(NAME psio_codec_abort_handler_none_aborts
+         COMMAND sh -c "\"$1\" pssz nohandler; test $? -eq 134" sh
+                 $<TARGET_FILE:psio_codec_abort_handler_check>)
+
 # A helper its format does not have must not compile, and the diagnostic
 # names the helper. The control (no case selected) must compile.
 set(PSIO_HELPERS_FAIL_COMMAND

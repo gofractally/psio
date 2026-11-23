@@ -73,8 +73,7 @@ namespace psio {
     (!defined(PSIO_EXCEPTIONS_ENABLED) || PSIO_EXCEPTIONS_ENABLED)
          throw std::length_error(message);
 #else
-         (void)message;
-         std::abort();
+         ::psio::codec_abort_without_exceptions(codec_error{message, 0, "psio"});
 #endif
       }
    }

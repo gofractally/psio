@@ -121,7 +121,50 @@ with the validator's error, which
 - throws `psio::codec_exception` in a build with exceptions
   (`PSIO_EXCEPTIONS_ENABLED=1`, the default), and
 - calls `std::abort` in a build without them (`PSIO_EXCEPTIONS_ENABLED=0`,
-  `-fno-exceptions`; a WebAssembly guest).
+  `-fno-exceptions`; a WebAssembly guest), after giving the error to the
+  [abort handler](#getting-the-error-text-without-exceptions) if there is one.
+
+### Getting the error text without exceptions
+
+A build without exceptions can still learn *why* before it aborts. Every
+fail-fast path — the checked decode, `to_F` of a value with no encoding, a
+bounds-checked stream that overruns, `value()` of an absent optional view —
+hands its `psio::codec_error` to the embedder's abort handler first. There
+are two ways to provide one (`psio/error.hpp`):
+
+```cpp
+// 1. At run time: a process-wide function pointer.
+void on_psio_abort(const psio::codec_error& e) noexcept {
+   host_abort_message(e.what.data(), e.what.size());   // may not return
+}
+psio::set_codec_abort_handler(on_psio_abort);          // returns the previous handler
+
+// 2. At build time: compile every translation unit with
+//       -DPSIO_CODEC_ABORT_HANDLER=my_psio_abort
+//    and define once:
+extern "C" void my_psio_abort(const char* what, std::size_t what_size, std::uint32_t byte_offset,
+                              const char* format, std::size_t format_size) { ... }
+```
+
+| | Run-time handler | Build-time handler |
+|---|---|---|
+| Cost when no failure occurs | none | none |
+| Cost on the failure path | one load and null test | a direct call |
+| Data | one pointer, constant-initialized to null | none |
+| Set-up | one call, any time before the first failure — including from a static initializer (the slot has no dynamic initialization to order) | none: nothing runs at start-up |
+| Rule | install once, before other threads decode (the slot is read without synchronization) | the macro must have the same definition in **every** translation unit that includes psio (`codec_abort` is inline: a mixed build violates the one-definition rule) |
+
+Neither needs exceptions or RTTI. The text (`error.what`) is not
+NUL-terminated and is valid for the duration of the call; `format_name` says
+which codec failed. If the handler returns, `std::abort()` follows. A build
+that uses neither pays one null test on the failure path and nothing else.
+In a build *with* exceptions the handler is not called: the
+`psio::codec_exception` is the report.
+
+A WebAssembly guest normally uses the build-time form, since it needs no
+initialization and adds no data.
+
+### Asking first
 
 Code that must handle bad input without exceptions asks first, then decodes
 what was accepted:

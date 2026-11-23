@@ -212,7 +212,8 @@ namespace psio {
          throw codec_exception{
             codec_error{"stream overrun", 0, "fixed_buf_stream"}};
 #else
-         std::abort();
+         ::psio::codec_abort_without_exceptions(
+            codec_error{"stream overrun", 0, "fixed_buf_stream"});
 #endif
       }
    };
