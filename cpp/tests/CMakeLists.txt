@@ -94,6 +94,30 @@ psio_add_test(psio_view_unvalidated_tests view_unvalidated_tests.cpp)
 psio_add_test(psio_view_unvalidated_stateless_tests view_unvalidated_tests.cpp)
 target_compile_definitions(psio_view_unvalidated_stateless_tests PRIVATE
    PSIO_VIEW_NO_RECORD_STATE=1)
+# Safe and trusted views (view.hpp "Safe and trusted views"): the read surface
+# for both storage kinds, the one-way conversion, what a trusted view still
+# guarantees, and — for every corruption validation accepts — that the trusted
+# view reads inside the bytes. Built three ways: as shipped, without the
+# per-record state, and with PSIO_DEBUG_VIEWS (the trusted view makes the
+# compares it skips; on valid bytes none may fail).
+psio_add_test(psio_view_trusted_tests view_trusted_tests.cpp)
+psio_add_test(psio_view_trusted_stateless_tests view_trusted_tests.cpp)
+target_compile_definitions(psio_view_trusted_stateless_tests PRIVATE PSIO_VIEW_NO_RECORD_STATE=1)
+psio_add_test(psio_view_trusted_debug_tests view_trusted_tests.cpp)
+target_compile_definitions(psio_view_trusted_debug_tests PRIVATE PSIO_DEBUG_VIEWS=1)
+# With PSIO_DEBUG_VIEWS a trusted view over bytes that are not a valid encoding
+# aborts with a message instead of reading out of bounds.
+add_executable(psio_view_trusted_debug_abort view_trusted_debug_abort.cpp)
+target_link_libraries(psio_view_trusted_debug_abort PRIVATE psio)
+target_compile_features(psio_view_trusted_debug_abort PRIVATE cxx_std_23)
+target_compile_definitions(psio_view_trusted_debug_abort PRIVATE PSIO_DEBUG_VIEWS=1)
+add_test(NAME psio_view_trusted_debug_valid COMMAND psio_view_trusted_debug_abort valid)
+foreach(case pssz-record-header pssz-member-offset pssz-truncated pssz-index pssz-scalar
+             ssz-offset ssz-truncated wit-pointer)
+   add_test(NAME psio_view_trusted_debug_abort_${case}
+            COMMAND ${CMAKE_COMMAND} -DPROGRAM=$<TARGET_FILE:psio_view_trusted_debug_abort>
+                    -DCASE=${case} -P ${CMAKE_CURRENT_SOURCE_DIR}/view_trusted_debug_abort.cmake)
+endforeach()
 # Packing from non-owning sources (std::tie, string_view, span,
 # reference_wrapper, C strings, views as values) and to_pssz_as.
 psio_add_test(psio_pssz_source_tests pssz_source_tests.cpp)
@@ -211,6 +235,22 @@ foreach(case EXTENSIBLE_RECORD VARIABLE_RECORD NOT_TRIVIAL STRING VECTOR RECORD_
                     ${CMAKE_CURRENT_SOURCE_DIR}/view_convert_fail.cpp)
    set_tests_properties(psio_view_convert_${case_name}_compile_fail PROPERTIES
       PASS_REGULAR_EXPRESSION "no viable conversion from")
+endforeach()
+
+# Trust is only obtained explicitly: no trusted view from a span, a vector, a
+# mutable span or a safe view (the reverse conversion is implicit).
+add_test(NAME psio_view_trusted_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/view_trusted_fail.cpp)
+foreach(case SAFE_TO_TRUSTED SAFE_TO_TRUSTED_EXPLICIT SAFE_SUBVIEW_TO_TRUSTED
+             SAFE_ELEMENT_TO_TRUSTED BARE_SPAN BARE_SPAN_ASSIGN VECTOR MUTABLE_SPAN SPAN_AND_ROOT
+             SUBVIEW_FROM_SPAN SSZ_BARE_SPAN IMPLICIT_TAG SAFE_FROM_TAG)
+   string(TOLOWER ${case} case_name)
+   add_test(NAME psio_view_trusted_${case_name}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -DVT_FAIL_${case}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/view_trusted_fail.cpp)
+   set_tests_properties(psio_view_trusted_${case_name}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION
+      "no viable conversion from|no matching constructor for initialization of|no matching function for call to 'read_trusted'")
 endforeach()
 
 # Evolution and offset width: all-fixed records and tuples evolve both ways

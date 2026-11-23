@@ -243,24 +243,36 @@ namespace psio
       using format_type                     = Fmt;
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
+      // The kind of the inner value's view. Validating the enclosing value
+      // validates an eager member's bytes, so trust carries over; it never
+      // looks at a deferred member's, so the inner view of one is the safe
+      // view whatever the enclosing view is.
+      static constexpr storage inner_storage =
+         V == nested_validation::eager ? Store : storage::const_borrow;
+      using inner_view = view<T, ::psio::pssz, inner_storage>;
+
       view() = default;
-      explicit view(std::span<const char> s) noexcept : data_(s) {}
-      view(std::span<const char> s, std::span<const char>) noexcept : data_(s) {}
+      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>) noexcept
+         : data_(detail::view_source_bytes(s))
+      {
+      }
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
       [[nodiscard]] std::span<const char> bytes() const noexcept { return data_; }
-      [[nodiscard]] view<T, ::psio::pssz, Store> get() const noexcept
+      [[nodiscard]] inner_view get() const noexcept
       {
-         return view<T, ::psio::pssz, Store>{data_};
+         return inner_view{detail::view_src<inner_storage>(data_)};
       }
-      [[nodiscard]] view<T, ::psio::pssz, Store> operator*() const noexcept { return get(); }
+      [[nodiscard]] inner_view operator*() const noexcept { return get(); }
       // `member->field()`: the inner value's view.
-      [[nodiscard]] detail::arrow_proxy<view<T, ::psio::pssz, Store>> operator->() const noexcept
+      [[nodiscard]] detail::arrow_proxy<inner_view> operator->() const noexcept
       {
          return {get()};
       }
       [[nodiscard]] std::size_t size() const noexcept { return data_.size(); }
       // The nested<T> (a copy of the bytes); the inner value is get().unpack().
       PSIO_VIEW_UNPACK_
+      PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
    // The view of a pssz_buffer<T> / shared_pssz<T> member is the view of
@@ -278,7 +290,9 @@ namespace psio
       using base::base;
       view() = default;
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      static constexpr storage storage_kind = Store;
       PSIO_VIEW_UNPACK_
+      PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
 }  // namespace psio

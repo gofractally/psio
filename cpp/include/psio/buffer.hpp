@@ -32,7 +32,12 @@
 //   B::checked(bytes, out)     validates into `out`, returning a codec_status
 //   B::from_checked(value, out) encodes into `out`, returning a codec_status
 //
-//   b.view() / *b / b.get()    the read-only view of the T; b->member()
+//   b.view() / *b / b.get()    the read-only view of the T; b->member().
+//                              It is the TRUSTED view (view.hpp "Safe and
+//                              trusted views"): the buffer holds a valid
+//                              encoding, so no access checks it again.
+//                              psio::as_view(b) is the safe view of the
+//                              same bytes
 //   b.unpack()                 the T (trusted decode); decode() is the same
 //   b.decode_checked(out)      validate, then decode
 //   b.validate() / validate_strict()
@@ -41,6 +46,18 @@
 //
 // There is no null state: an optional packed value is a
 // std::optional<psio::shared_pssz<T>>.
+//
+// What "holds a valid encoding" rests on, per way of construction:
+//   B{} / B{value} / B::from(value) / B::from_checked   encoded here
+//   B{bytes} / B::checked(bytes, out)                   validated here
+//   B{psio::trusted{bytes}} / B::unchecked(vector)      the CALLER's word.
+//       Bytes that are not a valid T make view() / unpack() undefined
+//       behaviour, as the trusted decode always was; a caller that cannot
+//       vouch for them reads through psio::as_view(b), or validate()s.
+// A format without a validator (buffer_validates) holds what it is given.
+// Writing through psio::mutable_bytes(b) while a view of b is in use is the
+// caller's responsibility as well (psio::mutable_view only overwrites
+// fixed-size values in place, which keeps the encoding valid).
 //
 // The borrowing kinds only carry a span and its type: they have the free
 // functions below and nothing else.
@@ -74,6 +91,11 @@ namespace psio {
 
    template <typename T, typename Fmt, storage Store>
    class view;
+
+   namespace view_layout {
+      template <typename Fmt>
+      struct traits;
+   }
 
    namespace detail {
 
@@ -156,18 +178,24 @@ namespace psio {
          [[nodiscard]] std::size_t size() const noexcept { return self().bytes().size(); }
          [[nodiscard]] const char* data() const noexcept { return self().bytes().data(); }
 
-         // The read-only view of the T. As for every view the bytes are
-         // valid — which a buffer guarantees unless it was built through
-         // `trusted` / `unchecked`.
+         // The read-only view of the T: the trusted view, because the
+         // buffer holds a valid encoding (see the top of this file for
+         // what that rests on when the buffer was built through `trusted`
+         // / `unchecked`). It converts implicitly to the safe view,
+         // psio::view<T, Fmt>; psio::as_view(buffer) is that directly.
+         // (A format whose views have one kind hands that out.)
          [[nodiscard]] auto view() const noexcept
          {
-            return ::psio::view<T, Fmt, storage::const_borrow>{self().bytes()};
+            if constexpr (requires { requires view_layout::traits<Fmt>::trusted_views; })
+               return ::psio::view<T, Fmt, storage::trusted_borrow>{trusted{self().bytes()}};
+            else
+               return ::psio::view<T, Fmt, storage::const_borrow>{self().bytes()};
          }
          [[nodiscard]] auto get() const noexcept { return view(); }
          [[nodiscard]] auto operator*() const noexcept { return view(); }
          [[nodiscard]] auto operator->() const noexcept
          {
-            return arrow_proxy<::psio::view<T, Fmt, storage::const_borrow>>{view()};
+            return arrow_proxy<decltype(view())>{view()};
          }
 
          // The T: a trusted decode of the bytes.

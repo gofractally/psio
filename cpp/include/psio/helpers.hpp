@@ -17,15 +17,25 @@
 //    from_F<T>(trusted{bytes})  decode without the validation pass
 //    validate_F<T>(bytes)       codec_status, never throws or aborts
 //    F_size(v)                  size of the encoding of v
-//    F_view<T>                  read-only view over borrowed bytes;
+//    F_view<T>                  read-only view over borrowed bytes — the
+//                               SAFE view: bytes nobody validated cannot
+//                               make it read outside them;
 //                               F_view<const T> is the same type
+//    F_trusted_view<T>          the TRUSTED view: the same surface, without
+//                               the per-access checks, over bytes the caller
+//                               vouches for — `F_trusted_view<T>{
+//                               psio::trusted{bytes}}`, or what
+//                               psio::validated_view<T>(psio::F{}, bytes)
+//                               and `F_buffer<T>::view()` hand out. Converts
+//                               implicitly to F_view<T>; never the reverse.
+//                               See view.hpp "Safe and trusted views"
 //    F_mutable_view<T>          view that writes into borrowed bytes
 //    F_buffer<T>                owning typed bytes
 //    shared_F<T>                reference-counted typed bytes; copies share them
 //
 // Each name exists only where the format has the operation (no F_view
-// for a format without views, no to_F(v, sink) for a format that cannot
-// append): using a missing one is a constraint failure naming the helper.
+// for a format without views, no F_trusted_view for one without a trusted
+// view, no to_F(v, sink) for a format that cannot append): using a missing one is a constraint failure naming the helper.
 //
 // Failure of the checked decode. `from_F<T>(bytes)` returns a T or does not
 // return: on bytes `validate_F<T>` rejects it calls psio::codec_abort,
@@ -120,6 +130,12 @@ namespace psio {
       // the use of the alias, when the format's view header has been seen.
       template <typename X, typename Fmt>
       concept read_viewable = read_view_format<Fmt>;
+
+      // `F_trusted_view<T>`: the format has a trusted view (its traits say
+      // `trusted_views`: view.hpp "Safe and trusted views").
+      template <typename X, typename Fmt>
+      concept trusted_viewable =
+         read_view_format<Fmt> && requires { requires view_layout::traits<Fmt>::trusted_views; };
 
       // `F_mutable_view<T>`: the format has a mutable view and T is not
       // const. Writing is never the meaning of a name that does not say so.
@@ -236,6 +252,10 @@ namespace psio {
       requires ::psio::detail::helpers::read_viewable<X, TAG>                             \
    using NAME##_view =                                                                    \
       ::psio::view<std::remove_const_t<X>, TAG, ::psio::storage::const_borrow>;           \
+   template <typename X>                                                                  \
+      requires ::psio::detail::helpers::trusted_viewable<X, TAG>                          \
+   using NAME##_trusted_view =                                                            \
+      ::psio::view<std::remove_const_t<X>, TAG, ::psio::storage::trusted_borrow>;         \
    template <typename X>                                                                  \
       requires ::psio::detail::helpers::mutable_viewable<X, TAG>                          \
    using NAME##_mutable_view = ::psio::mutable_view<X, TAG>;                              \
