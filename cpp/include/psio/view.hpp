@@ -227,11 +227,50 @@ namespace psio {
       };
    }  // namespace detail
 
+   // ── From a view to what it designates, implicitly ─────────────────────
+   //
+   // One rule for every view:
+   //
+   //   - a view converts implicitly to its VALUE exactly when the value is
+   //     a trivially copyable type of fixed encoded size — a scalar, an
+   //     enum, a time point, uint256, a std::array of such, a
+   //     definitionWillNotChange record of such (and a transparent type
+   //     over one). Copying such a value costs what reading it costs;
+   //   - a view of a BYTE SEQUENCE converts implicitly to what borrows it:
+   //     a string to std::string_view, a std::vector<B> of a byte type B
+   //     to std::span<const B>, a std::array<B, N> to std::span<const B, N>
+   //     and std::span<const B>;
+   //   - everything else — a string to std::string, a list, an optional, a
+   //     variant, an extensible record, a record with a variable-size
+   //     member, a type that is not trivially copyable — is unpack(): a
+   //     conversion that allocates, or walks, is always written.
+   //
+   // `view_layout::value_convertible_v<Fmt, T>` is the first clause for
+   // format Fmt; a format's view header specializes it (pssz_view.hpp).
+   namespace view_layout {
+      template <typename Fmt, typename T>
+      inline constexpr bool value_convertible_v = false;
+   }
+   namespace detail {
+      // A byte type: its sequence can be handed out as a span over the
+      // encoded bytes (no alignment, every bit pattern a value).
+      template <typename B>
+      inline constexpr bool view_byte_v =
+         sizeof(B) == 1 && !std::is_same_v<B, bool> &&
+         (std::is_integral_v<B> || std::is_same_v<B, std::byte>);
+   }
+
    // The members every read view has. `unpack()`: see "View to value".
 #define PSIO_VIEW_UNPACK_                                                                  \
    [[nodiscard]] element_type unpack() const                                               \
    {                                                                                       \
       return view_layout::traits<format_type>::template unpack<element_type>(_psio_data()); \
+   }                                                                                       \
+   /* A trivially copyable value of fixed size: the view is its value. */                  \
+   operator element_type() const                                                           \
+      requires view_layout::value_convertible_v<format_type, element_type>                 \
+   {                                                                                       \
+      return unpack();                                                                     \
    }
 
    // ── view<const T, Fmt, Store> ─────────────────────────────────────────
@@ -528,16 +567,16 @@ namespace psio {
       [[nodiscard]] reverse_iterator rbegin() const noexcept { return reverse_iterator{end()}; }
       [[nodiscard]] reverse_iterator rend() const noexcept { return reverse_iterator{begin()}; }
 
-      // A byte list is its bytes.
-      operator std::span<const char>() const noexcept
-         requires std::same_as<T, char>
+      // A byte list is its bytes, borrowed.
+      operator std::span<const T>() const noexcept
+         requires detail::view_byte_v<T>
       {
-         return data_;
+         return std::span<const T>{data(), data_.size()};
       }
-      [[nodiscard]] const char* data() const noexcept
-         requires std::same_as<T, char>
+      [[nodiscard]] const T* data() const noexcept
+         requires detail::view_byte_v<T>
       {
-         return data_.data();
+         return reinterpret_cast<const T*>(data_.data());
       }
 
       PSIO_VIEW_UNPACK_
@@ -585,6 +624,23 @@ namespace psio {
       [[nodiscard]] iterator end() const noexcept { return {*this, N}; }
       [[nodiscard]] reverse_iterator rbegin() const noexcept { return reverse_iterator{end()}; }
       [[nodiscard]] reverse_iterator rend() const noexcept { return reverse_iterator{begin()}; }
+
+      // A fixed array of bytes is its bytes, borrowed.
+      operator std::span<const T, N>() const noexcept
+         requires detail::view_byte_v<T>
+      {
+         return std::span<const T, N>{data(), N};
+      }
+      operator std::span<const T>() const noexcept
+         requires (detail::view_byte_v<T> && N != std::dynamic_extent)
+      {
+         return std::span<const T>{data(), N};
+      }
+      [[nodiscard]] const T* data() const noexcept
+         requires detail::view_byte_v<T>
+      {
+         return reinterpret_cast<const T*>(data_.data());
+      }
 
       PSIO_VIEW_UNPACK_
    };
@@ -837,6 +893,12 @@ namespace psio {
       // themselves with the appropriate adapter-specific viewer.
       [[nodiscard]] T get() const { return decode(); }
       [[nodiscard]] T unpack() const { return decode(); }
+      // A trivially copyable value of fixed size: the view is its value.
+      operator T() const
+         requires view_layout::value_convertible_v<Fmt, T>
+      {
+         return decode();
+      }
    };
 
    // ── view<T, Fmt, Store> for Reflected struct T ────────────────────────

@@ -345,9 +345,9 @@ What an accessor returns:
 | arithmetic, `bool` | the value | |
 | enum, duration / time point, `uint256` | a scalar view | converts to the value; `.get()` |
 | `std::string`, `psio::utf8_string<N>` | a string view | converts to `std::string_view`; `.view_()`, `size()`, `empty()` |
-| reflected record | its view | its own accessors |
+| reflected record | its view | its own accessors; converts to the record when that is `definitionWillNotChange`, fixed-size and trivially copyable |
 | transparent type (`transparent()`) | the view of its member | as the member; `.unpack()` gives the transparent type |
-| `std::vector<T>`, `std::array<T, N>` | a list view | `size()`, `empty()`, `[i]`, `at(i)`, `front()`, `back()`, `begin()` / `end()` (random access), `rbegin()` / `rend()`; a `std::vector<char>` view converts to `std::span<const char>` |
+| `std::vector<T>`, `std::array<T, N>` | a list view | `size()`, `empty()`, `[i]`, `at(i)`, `front()`, `back()`, `begin()` / `end()` (random access), `rbegin()` / `rend()`; a view of bytes converts to `std::span<const B>`, a view of a fixed array of fixed values to the array ([below](#from-a-view-to-its-value)) |
 | `std::optional<T>` | an optional view | `has_value()`, `bool`, `*`, `->`, `value()` (checked), `value_or(x)` |
 | `std::variant<Ts...>` | a variant view | `index()`, `visit(fn)`, `get_if<I>()` / `get_if<Alt>()` (a `std::optional` of the alternative's view), `holds_alternative<Alt>()`; also `psio::get_if<Alt>(v)` |
 | `std::tuple`, `std::pair` | a tuple view | `get<N>()`; `first()` / `second()`; structured bindings |
@@ -409,11 +409,25 @@ are then narrower than in a standalone value of its type, so its bytes are
 not an encoding of that type (they do not even validate as one). The view's
 format knows the position; the spelled-out form does not.
 
-There is no implicit conversion from a view to an owned value: a conversion
-that allocates is always written (`unpack()`). The conversions that borrow or
-copy a scalar are implicit: a string view to `std::string_view`, a
-`std::vector<char>` view to `std::span<const char>`, a scalar view to its
-value.
+**Implicit conversions.** One rule for every view:
+
+| The view designates | Converts implicitly to |
+|---------------------|------------------------|
+| a value that is trivially copyable and of fixed encoded size: a scalar, an enum, a duration / time point, `uint256`, a `std::array` of such, a `definitionWillNotChange` record of such (a 32-byte checksum, an account number: a one-member record with a text adapter), a transparent type over one | the value. Copying it costs what reading it costs |
+| a byte sequence | what borrows it: a string to `std::string_view`; a `std::vector<B>` of a byte type `B` (`char`, `signed char`, `unsigned char`, `std::byte`, `std::int8_t`, `std::uint8_t`) to `std::span<const B>`; a `std::array<B, N>` to `std::span<const B, N>` and `std::span<const B>` (and to the array, by the first row). `data()` gives the pointer |
+| anything else: a string as `std::string`, a list, an optional, a variant, a tuple, an extensible record, a record with a variable-size member, a type that is not trivially copyable | nothing: write `unpack()`. A conversion that allocates or walks is always spelled |
+
+```cpp
+void use(AccountNumber, const Checksum256&, std::span<const unsigned char>);
+use(row.owner(), row.id(), row.data());      // no unpack()
+```
+
+A span is over the element type only (`std::vector<unsigned char>` does not
+convert to `std::span<const char>`), and never over elements wider than a
+byte: the wire is not aligned for them. The rule is
+`psio::view_layout::value_convertible_v<Format, T>` for the first row; it is
+implemented for the PSSZ formats (`psio::pssz`, `pssz_<W>`, members under a
+cap).
 
 ### Comparison
 

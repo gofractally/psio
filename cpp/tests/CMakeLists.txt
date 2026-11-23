@@ -189,6 +189,42 @@ psio_borrow_compile_fail(narrowed_view BORROW_FAIL_NARROWED_VIEW
    "this member cannot be borrowed as a view")
 psio_borrow_compile_fail(temporary BORROW_FAIL_TEMPORARY "call to deleted function 'from_pssz'")
 
+# From a view to what it designates, implicitly: the value when it is
+# trivially copyable and of fixed size, a borrowed span / string_view for a
+# byte sequence, nothing else.
+psio_add_test(psio_view_convert_tests view_convert_tests.cpp)
+add_test(NAME psio_view_convert_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/view_convert_fail.cpp)
+foreach(case EXTENSIBLE_RECORD VARIABLE_RECORD NOT_TRIVIAL STRING VECTOR RECORD_VECTOR OPTIONAL
+             WIDE_SPAN WIDE_ARRAY_SPAN OTHER_BYTE_SPAN ROOT)
+   string(TOLOWER ${case} case_name)
+   add_test(NAME psio_view_convert_${case_name}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -DVC_FAIL_${case}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/view_convert_fail.cpp)
+   set_tests_properties(psio_view_convert_${case_name}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "no viable conversion from")
+endforeach()
+
+# Evolution and offset width: all-fixed records and tuples evolve both ways
+# when the width is kept (a cap, or a bounded appended member); a moved width
+# is refused by the compile-time and run-time checks, which name the remedy.
+psio_add_test(psio_pssz_width_evolution_tests pssz_width_evolution_tests.cpp)
+add_test(NAME psio_pssz_width_evolution_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_width_evolution_fail.cpp)
+function(psio_width_evolution_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_pssz_width_evolution_${NAME}_compile_fail
+            COMMAND ${PSIO_MVP_FAIL_COMMAND} -D${DEFINE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/pssz_width_evolution_fail.cpp)
+   set_tests_properties(psio_pssz_width_evolution_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+psio_width_evolution_compile_fail(record_width WE_FAIL_RECORD_WIDTH
+   "the automatic offset width of the type changes")
+psio_width_evolution_compile_fail(tuple_width WE_FAIL_TUPLE_WIDTH
+   "the automatic offset width of the type changes")
+psio_width_evolution_compile_fail(other_reason WE_FAIL_OTHER_REASON
+   "only optional members may be appended")
+
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.
 psio_add_test(psio_mutable_view_tests mutable_view_tests.cpp)
