@@ -52,6 +52,7 @@
 #include <psio/time.hpp>
 #include <psio/transparent.hpp>
 #include <psio/validate_strict_walker.hpp>
+#include <psio/wire_type.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
 
 #include <algorithm>
@@ -303,8 +304,29 @@ namespace psio {
       template <typename T>
       inline constexpr bool is_std_tuple_v = is_std_tuple<T>::value;
 
+      // A member is seen as the type it is encoded as (wire_type.hpp): a
+      // record may hold a psio::view<X>, a std::string_view, a
+      // std::span<const E> or a shared packed value, and is laid out,
+      // sized and validated as the record holding X, a string, a list of E.
       template <typename T>
-      struct record_traits : ::psio::reflect<T> {};
+      struct record_traits : ::psio::reflect<T>
+      {
+         template <std::size_t I>
+         using member_type =
+            ::psio::wire_type_t<typename ::psio::reflect<T>::template member_type<I>>;
+      };
+      // Whether every member of a reflected record is declared as the type
+      // it is encoded as (no view / string_view / span member): only then
+      // can the record's memory be its wire image, or the record be decoded.
+      template <typename T>
+      inline constexpr bool plain_members_v = true;
+      template <typename T>
+         requires(::psio::Reflected<T> && !std::is_enum_v<T>)
+      inline constexpr bool plain_members_v<T> =
+         []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (!::psio::is_source_v<typename ::psio::reflect<T>::template member_type<Is>> &&
+                    ... && true);
+         }(std::make_index_sequence<::psio::reflect<T>::member_count>{});
       template <typename... Ts>
       struct record_traits<std::tuple<Ts...>>
       {
@@ -2044,6 +2066,11 @@ namespace psio {
       T decode_value(std::span<const char> src, std::size_t pos,
                      std::size_t end)
       {
+         static_assert(!::psio::is_source_v<T> && plain_members_v<T>,
+                       "psio::pssz: a type that only refers to a value (a psio::view, a "
+                       "std::string_view, a std::span, a tuple of references, a record with such "
+                       "a member) cannot be decoded into: decode psio::wire_type_t<T>, or read "
+                       "the bytes through a view");
          constexpr std::size_t W = [] {
             if constexpr (Auto) return width_for<T, A>();
             else return LegacyW;
@@ -2685,9 +2712,14 @@ namespace psio {
                                   std::size_t depth,
                                   validate_flags* flags) noexcept
       {
+         // A type that only refers to a value (a view, a string_view, a
+         // tuple of references) is validated as what it is encoded as.
+         if constexpr (::psio::is_source_v<T>)
+            return validate_value<LegacyW, Auto, ::psio::wire_type_t<T>, A>(src, pos, end, depth,
+                                                                         flags);
          // The common case — no annotation at this position, no invariant —
          // is the structural walk and nothing after it.
-         if constexpr (std::is_same_v<A, no_ann> && !::psio::has_invariant_v<T>)
+         else if constexpr (std::is_same_v<A, no_ann> && !::psio::has_invariant_v<T>)
             return validate_shape<LegacyW, Auto, T, A>(src, pos, end, depth, flags);
          else
          {
@@ -2895,6 +2927,10 @@ namespace psio {
          else
          {
             PSIO_REJECT_MULTI_ASSOC("psio::pssz", T);
+            // Not a run-time rejection: a type that has no encoding cannot
+            // be validated, and saying "invalid bytes" for valid bytes of
+            // the type the caller meant would be a wrong answer.
+            static_assert(sizeof(T) == 0, "psio::pssz: unsupported type in validate");
             return codec_fail("pssz: unsupported type in validate",
                               static_cast<std::uint32_t>(pos), "pssz");
          }

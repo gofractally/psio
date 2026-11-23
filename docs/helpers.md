@@ -348,6 +348,60 @@ The named readers are that library's design. What differs here:
 | `frac_ref<T>` with `fields().member() = value`, including resizing writes | `psio::mutable_view<T, F>`: `w.member() = value` for fixed-size values only (a PSSZ frame has one canonical form; a write that changes a size is decode, modify, encode) |
 | `explicit operator bool` (null view) | a view is never null; an empty optional is an optional view |
 
+## Calling a reflected method with packed arguments
+
+The arguments of method `I` of a reflected `T` travel as one value: the
+encoding of `psio::reflect<T>::method_arg_tuple<I>`.
+
+```cpp
+struct Token {
+   void transfer(psio::pssz_view<const Account> to, std::uint64_t amount, std::string_view memo);
+   PSIO_REFLECT(Token, method(transfer, to, amount, memo, maxDynamicData(4096)))
+};
+```
+
+| Name | Is |
+|------|----|
+| `reflect<T>::method_arg_tuple<I>` | the **wire** type of the arguments: a `psio::annotated_tuple` of `psio::wire_type_t<parameter>` carrying the method's cap and parameter annotations. Above: `(Account, std::uint64_t, std::string)`. The type to encode, validate and decode arguments as, and what a schema describes |
+| `reflect<T>::method_params<I>` | how the method **takes** them: `std::tuple<remove_cvref_t<parameter>...>`. Above: `(psio::pssz_view<Account>, std::uint64_t, std::string_view)` |
+| `psio::validate_method_args<T, I>(bytes)` | `codec_status`: are the bytes that argument tuple |
+| `psio::method_args_view<T, I>` | the read view of the argument tuple (`get<N>()`, structured bindings); correct under the method's cap, where the view of the plain `std::tuple` reads wrong offsets |
+| `psio::method_params_from_pssz<T, I>(psio::trusted{bytes})` | a `method_params<I>`: each argument as the method declares it |
+| `psio::invoke_method_pssz<T, I>(obj, bytes)` | validates, then calls the method; returns what it returns |
+| `psio::invoke_method_pssz<T, I>(obj, psio::trusted{bytes})` | calls without validating |
+| `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result (`psio::encode_method_result`, which honours `returns(...)`); a `codec_status` |
+| `reflect<T>::invoke_method<I>(obj, tuple)` | unchanged: calls with a tuple of arguments as declared (`method_params<I>`) |
+
+How a parameter is handed to the method is decided by its declared type:
+
+| Declared as | Wire type | The method receives |
+|-------------|-----------|---------------------|
+| `psio::pssz_view<X>`, `psio::pssz_view<const X>`, `psio::view<const X, psio::pssz>` | `X` | a view into the argument bytes |
+| `std::string_view` | `std::string` | the characters, borrowed from the argument bytes |
+| `std::span<const char>` (or of another byte type) | `std::vector<char>` | the bytes, borrowed |
+| anything else (`X`, `const X&`, `X&&`) | `X` | the unpacked value |
+
+What is borrowed points into `bytes`, which must outlive the call.
+
+The validated / unvalidated split is explicit. The span overload of
+`invoke_method_pssz` checks the bytes and fails through `psio::codec_abort`
+before the method runs; `psio::trusted{bytes}` is the caller's statement
+that `validate_method_args` (or `validate_pssz<method_arg_tuple<I>>`)
+accepted them. A dispatcher that reports errors itself validates, reports,
+and then calls with `trusted`.
+
+A view parameter needs the argument's bytes to be a standalone encoding of
+its type. That is so for every reflected record, whatever the method's cap,
+and for any type when the method has no cap and the parameter no
+annotations. A parameter whose position narrows offset widths — a
+`std::vector<std::string>` under the method's `maxDynamicData` — cannot be
+taken as `psio::pssz_view`: `invoke_method_pssz` refuses at compile time and
+says to take it by value (or to state the bound in the type).
+
+`validate_pssz<Tuple>` of a tuple type that names a view (or any other
+non-owning type) validates the tuple of wire types; decoding *into* such a
+type does not compile (decode `psio::wire_type_t<Tuple>`, or view the bytes).
+
 ## The generic layer
 
 The helpers are one-line calls of the customization point objects in

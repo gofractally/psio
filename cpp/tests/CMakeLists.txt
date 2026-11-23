@@ -83,6 +83,24 @@ psio_add_test(psio_view_named_tests view_named_tests.cpp)
 # From a view to its value: unpack(), psio::value_of, from_pssz(view) —
 # including members under a maxDynamicData cap and bounded members.
 psio_add_test(psio_view_unpack_tests view_unpack_tests.cpp)
+# View-typed method parameters: the argument tuple's wire type, and calling a
+# reflected method with packed arguments (psio::invoke_method_pssz).
+psio_add_test(psio_method_view_param_tests method_view_param_tests.cpp)
+set(PSIO_MVP_FAIL_COMMAND
+    ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -DPSIO_EXCEPTIONS_ENABLED=1
+    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES})
+add_test(NAME psio_method_view_param_control_compiles
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+add_test(NAME psio_method_view_param_narrowed_compile_fail
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} -DMVP_FAIL_NARROWED_VIEW_PARAM
+                 ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+set_tests_properties(psio_method_view_param_narrowed_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "this parameter cannot be taken as a psio::pssz_view")
+add_test(NAME psio_method_view_param_decode_into_view_compile_fail
+         COMMAND ${PSIO_MVP_FAIL_COMMAND} -DMVP_FAIL_DECODE_INTO_VIEW
+                 ${CMAKE_CURRENT_SOURCE_DIR}/method_view_param_fail.cpp)
+set_tests_properties(psio_method_view_param_decode_into_view_compile_fail PROPERTIES
+   PASS_REGULAR_EXPRESSION "cannot be decoded into")
 
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.

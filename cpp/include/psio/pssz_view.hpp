@@ -892,6 +892,139 @@ namespace psio {
       return status;
    }
 
+   // ── Calling a reflected method with packed arguments ──────────────────
+   //
+   // The arguments of method I of T travel as ONE value: the encoding of
+   // `reflect<T>::method_arg_tuple<I>`, a tuple of the parameters' wire
+   // types (a parameter declared `psio::pssz_view<const X>` is a packed X)
+   // carrying the method's parameter annotations and cap.
+   //
+   //   validate_method_args<T, I>(bytes)        codec_status: are the bytes that tuple
+   //   method_args_view<T, I>                   the read view of that tuple: get<N>(),
+   //                                            structured bindings
+   //   method_params_from_pssz<T, I>(trusted)   every argument as the method DECLARES it,
+   //                                            in a reflect<T>::method_params<I>: a
+   //                                            view parameter is a view into the
+   //                                            bytes, a std::string_view / std::span<
+   //                                            const char> parameter borrows them, a
+   //                                            value parameter is unpacked
+   //   invoke_method_pssz<T, I>(obj, bytes)     validate, then call; returns what the
+   //                                            method returns
+   //   invoke_method_pssz<T, I>(obj, trusted)   call without validating
+   //   call_method_pssz<T, I>(obj, trusted,     call and append the encoded result
+   //                          result_bytes)     (psio::encode_method_result, which
+   //                                            honours returns(...)); a codec_status
+   //
+   // The split is explicit: the span overload checks the bytes and fails
+   // through psio::codec_abort (codec_exception where exceptions are
+   // enabled) before the method runs; `psio::trusted{bytes}` is the
+   // caller's statement that validate_method_args has accepted them.
+   // Views and borrowed strings handed to the method point into `bytes`,
+   // which must outlive the call.
+   //
+   // A view parameter needs the argument's bytes to be a standalone
+   // encoding of its type. That holds for every reflected record, and for
+   // any type when the method has neither a cap nor annotations on that
+   // parameter. A parameter whose position narrows offset widths (a
+   // std::vector<std::string> under the method's maxDynamicData, say) can be
+   // taken by value but not as psio::pssz_view: a compile error says so.
+   template <typename T, std::size_t I>
+   using method_args_view =
+      view<typename reflect<T>::template method_arg_tuple<I>, pssz, storage::const_borrow>;
+
+   template <typename T, std::size_t I>
+   [[nodiscard]] codec_status validate_method_args(std::span<const char> bytes) noexcept
+   {
+      return ::psio::validate<typename reflect<T>::template method_arg_tuple<I>>(pssz{}, bytes);
+   }
+
+   namespace detail {
+      template <typename P>
+      inline constexpr bool is_byte_span_v = false;
+      template <typename B, std::size_t N>
+         requires (sizeof(B) == 1 && std::is_const_v<B> &&
+                   (std::is_integral_v<B> || std::is_same_v<std::remove_const_t<B>, std::byte>))
+      inline constexpr bool is_byte_span_v<std::span<B, N>> = true;
+
+      // Argument N of the packed argument tuple `Args`, as parameter type P.
+      template <typename Args, std::size_t N, typename P>
+      [[nodiscard]] P method_param_from(std::span<const char> bytes)
+      {
+         using layout = view_layout::traits<pssz>;
+         using Format = view_layout::member_format_t<pssz, Args, N>;
+         using Wire   = std::tuple_element_t<N, typename Args::tuple_type>;
+         const auto part = layout::template record_field_span<Args, N>(bytes);
+         if constexpr (is_view_v<P>)
+         {
+            static_assert(std::is_same_v<std::remove_const_t<typename P::element_type>, Wire>);
+            static_assert(std::is_same_v<typename P::format_type, pssz>,
+                          "psio: a view-typed method parameter is a psio::pssz_view "
+                          "(psio::view<X, psio::pssz>)");
+            static_assert(std::is_same_v<Format, pssz>,
+                          "psio: this parameter cannot be taken as a psio::pssz_view: the "
+                          "method's cap or the parameter's annotations narrow the offset widths "
+                          "of its encoding, so its bytes are not a standalone encoding of its "
+                          "type. Take it by value, or state the bound in the type "
+                          "(psio::bounded, a record with its own maxDynamicData)");
+            return P{part};
+         }
+         else if constexpr (std::is_same_v<P, std::string_view>)
+            return std::string_view{part.data(), part.size()};
+         else if constexpr (is_byte_span_v<P>)
+            return P{reinterpret_cast<typename P::pointer>(part.data()), part.size()};
+         else
+         {
+            static_assert(std::is_same_v<P, Wire>,
+                          "psio: a method parameter that only refers to its argument must be a "
+                          "psio::pssz_view<X>, a std::string_view or a std::span of const bytes");
+            return view_layout::traits<Format>::template unpack<Wire>(part);
+         }
+      }
+   }  // namespace detail
+
+   // Every argument as the method declares it. Trusted: see above.
+   template <typename T, std::size_t I>
+   [[nodiscard]] typename reflect<T>::template method_params<I> method_params_from_pssz(
+      trusted bytes)
+   {
+      using Args   = typename reflect<T>::template method_arg_tuple<I>;
+      using Params = typename reflect<T>::template method_params<I>;
+      return [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+         return Params{
+            detail::method_param_from<Args, Ns, std::tuple_element_t<Ns, Params>>(bytes.bytes)...};
+      }(std::make_index_sequence<std::tuple_size_v<Params>>{});
+   }
+
+   template <typename T, std::size_t I, typename Obj>
+   decltype(auto) invoke_method_pssz(Obj&& obj, trusted bytes)
+   {
+      return reflect<T>::template invoke_method<I>(std::forward<Obj>(obj),
+                                                   method_params_from_pssz<T, I>(bytes));
+   }
+   template <typename T, std::size_t I, typename Obj>
+   decltype(auto) invoke_method_pssz(Obj&& obj, std::span<const char> bytes)
+   {
+      if (auto status = validate_method_args<T, I>(bytes); !status.ok())
+         ::psio::codec_abort(status.error());
+      return invoke_method_pssz<T, I>(std::forward<Obj>(obj), trusted{bytes});
+   }
+
+   // Calls method I and appends its encoded result to `result` (nothing
+   // for a void method). The status is that of encoding the result: a
+   // value outside returns(...), over a cap, with no encoding.
+   template <typename T, std::size_t I, typename Obj>
+   [[nodiscard]] codec_status call_method_pssz(Obj&& obj, trusted bytes, std::vector<char>& result)
+   {
+      if constexpr (std::is_void_v<typename reflect<T>::template method_result<I>>)
+      {
+         invoke_method_pssz<T, I>(std::forward<Obj>(obj), bytes);
+         return codec_ok();
+      }
+      else
+         return ::psio::encode_method_result<T, I>(
+            invoke_method_pssz<T, I>(std::forward<Obj>(obj), bytes), result);
+   }
+
    // ── from_pssz / decode from a view ────────────────────────────────────
    //
    // `psio::from_pssz<T>(view)` is `view.unpack()`, for code that spells a
