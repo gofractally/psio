@@ -68,6 +68,8 @@
 //!           maxDynamicData = "N"       explicit cap (automatic profile)
 //!   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
 //!           jsonInt / ijsonInt = "number" | "string"   (`json` submodule)
+//!   Variant  untagged                  text: the bare value of the
+//!                                      alternative (`json` submodule)
 //!   Variant member  ijsonName = "..."                   (`json` submodule)
 //! The JSON / I-JSON text path over the same IR is the `json` submodule.
 use crate::pssz::{Decoded, Pssz, PsszError, PsszFormat, PsszResult};
@@ -79,8 +81,14 @@ use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
+mod compare;
 pub mod json;
 mod key;
+pub use compare::{
+    argument_list, equivalent, equivalent_func, equivalent_interface, equivalent_schema,
+    evolves_from, evolves_from_func, evolves_from_interface, evolves_from_schema, Compare,
+    Compatibility,
+};
 pub use key::{
     from_key, from_key_with, key_prefix, key_prefix_with, validate_key, validate_key_with,
 };
@@ -442,6 +450,9 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
                 }
             }
             "ijsonName" if site == Site::VariantMember && value.value.is_some() => (),
+            // An untagged variant: the same bytes as any variant; in text
+            // the bare value of the alternative (`json` submodule).
+            "untagged" if site == Site::Variant => (),
             _ => return Err(failure(UNSUPPORTED_CONSTRAINT)),
         }
     }

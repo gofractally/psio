@@ -496,7 +496,13 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
         let param_names: Vec<_> =
             if m.positional { Vec::new() } else { m.params.iter().map(|p| unraw(&p.ident)).collect() };
         let func_param_names: Vec<_> =
-            m.params.iter().map(|p| if m.positional { String::new() } else { unraw(&p.ident) }).collect();
+            m.params
+                .iter()
+                .enumerate()
+                // A positional parameter is named by its position ("0", "1",
+                // …): the member names of its argument list, never empty.
+                .map(|(i, p)| if m.positional { i.to_string() } else { unraw(&p.ident) })
+                .collect();
         let named = !m.positional;
         let arguments = if named { "named" } else { "positional" };
         let record_max_fields = m.max_fields.map(|n| quote!(#[psio(max_fields = #n)]));

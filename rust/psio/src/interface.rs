@@ -132,8 +132,8 @@
 //! ```
 //!
 //! A positional function is C++ `method(name)` without parameter names: its
-//! `MethodInfo::params` is empty, its `Func` names no parameter, and the
-//! members of its argument list are named `"0"`, `"1"`, … in a schema. In
+//! `MethodInfo::params` is empty, and in a schema the parameters of its
+//! `Func` and the members of its argument list are named `"0"`, `"1"`, … In
 //! the Schema IR the argument list is an `Object` with the attribute
 //! `tuple` = `"named"` or `"positional"`, which is what tells a
 //! schema-driven codec which of the two rows applies; the bytes are those
