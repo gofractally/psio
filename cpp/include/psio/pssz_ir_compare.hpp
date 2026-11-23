@@ -472,8 +472,16 @@ class Comparer
       if (!width(true, a, pa, was) || !width(false, b, pb, is))
          return false;
       if (was != is)
-         return fail("width-changed", std::string{"the offset width of "} + what + " differs (" +
-                                          std::to_string(was) + " / " + std::to_string(is) + ")");
+         // (The first sentence is the one every implementation gives; the
+         // advice is what to do about it.)
+         return fail("width-changed",
+                     std::string{"the offset width of "} + what + " differs (" +
+                        std::to_string(was) + " / " + std::to_string(is) +
+                        "): the bytes of the two are laid out differently and neither reads the "
+                        "other's. A type whose bound is inferred from its members keeps its width "
+                        "only while that bound stays in the same class (255 / 65535 bytes); to "
+                        "leave room for appended optional members, declare maxDynamicData (or "
+                        "bounded members) from the first publication");
       return true;
    }
    // The container a string / bytes adapter sits on.

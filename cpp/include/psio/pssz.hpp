@@ -4056,6 +4056,42 @@ namespace psio {
    template <typename Old, typename New>
    concept pssz_evolves_from = pssz_evolves_from_v<Old, New>;
 
+   // Why a pair does not evolve, when the reason is the one that surprises:
+   // the automatic offset width of the type itself moved. A record or tuple
+   // without an explicit cap takes its width from the bound inferred from
+   // its members (docs/pssz-spec.md 3.1), so appending an optional member
+   // that is larger, or unbounded, than the room left in the width class
+   // (255 / 65535 bytes) is NOT a compatible change: (int32) is written
+   // with 1-byte offsets and (int32, optional<vector<uint64>>) with 4-byte
+   // ones, and neither reads the other. Declare maxDynamicData on the type
+   // (or on the method, for its arguments) from its first publication.
+   //
+   //   static_assert(psio::pssz_evolves_from<Old, New>);        // yes / no
+   //   psio::require_pssz_evolves_from<Old, New>();              // says why
+   template <typename Old, typename New>
+   inline constexpr bool pssz_evolution_keeps_width_v =
+      auto_pssz_width_v<::psio::wire_type_t<Old>> == auto_pssz_width_v<::psio::wire_type_t<New>>;
+
+   template <typename Old, typename New>
+   consteval void require_pssz_evolves_from() noexcept
+   {
+      static_assert(pssz_evolution_keeps_width_v<Old, New>,
+                    "psio::pssz: New does not evolve from Old: the automatic offset width of "
+                    "the type changes (psio::auto_pssz_width_v<Old> != "
+                    "psio::auto_pssz_width_v<New>), so the two are laid out differently and "
+                    "neither reads the other's bytes. A type without an explicit cap takes its "
+                    "width from the bound inferred from its members; an appended optional member "
+                    "must fit the room left in that width class (255 / 65535 bytes). Declare "
+                    "maxDynamicData(N) on the type (on the method, for its arguments) from its "
+                    "first publication, or keep the appended member bounded within the class");
+      static_assert(pssz_evolves_from_v<Old, New>,
+                    "psio::pssz: New does not evolve from Old (docs/pssz-spec.md 7.5 / 7.6): only "
+                    "optional members may be appended; member types, order, bounds, "
+                    "definitionWillNotChange and every offset width at every depth must be "
+                    "unchanged (an appended or widened member below can move the width of a "
+                    "list, tuple or record that holds it: declare maxDynamicData there)");
+   }
+
    // ── "A U packs as a T" ────────────────────────────────────────────────
    //
    // `psio::packs_as<U, T>`: `psio::to_pssz(const U&)` yields the bytes of
