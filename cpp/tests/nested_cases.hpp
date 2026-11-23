@@ -497,9 +497,9 @@ namespace nested_cases
       // The decoded member still holds the writer's bytes.
       NESTED_CHECK(pssz_of(out) == newer);
 
-      // Strict mode reaches inner strings: a plain string must be UTF-8.
+      // A raw inner string is any bytes, in strict mode too.
       const Bytes raw_text = with(pssz_of(Transfer{std::string(1, char(0xff)), 1, {}}));
-      NESTED_CHECK(valid<Action>(raw_text) && strict_rejects<Action>(raw_text));
+      NESTED_CHECK(valid<Action>(raw_text) && !strict_rejects<Action>(raw_text));
 
       // A nested value two levels down is checked the same way.
       {
