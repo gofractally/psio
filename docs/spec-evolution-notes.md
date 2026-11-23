@@ -483,6 +483,82 @@ remains as a compatibility layer for users who don't migrate.
 
 ---
 
+## E-009 — Renamed fields in the PSSZ compatibility check
+
+**Status.** Open: owner decision. No behaviour was changed.
+
+**What the spec says.** `pssz-spec.md` §7.6 lists "Rename a field" under
+what cannot change, and says in the same line why it is different from
+every other entry there: "the wire format doesn't carry names …, so this
+is a no-op for the wire but consumers using reflected names will break".
+§7.5 says the C++ check `pssz_evolves_from` "checks every rule of this
+section and the next", which for this one rule it does not.
+`annotations.md` §8.4 has the row "rename a field: binary and key yes;
+breaks text and schema clients".
+
+**What each implementation does.**
+
+| | record field renamed | variant alternative renamed | type renamed |
+|---|---|---|---|
+| C++ `pssz_evolves_from` | accepted (members are compared by position and type) | accepted | accepted, except a `transparent()` type, which must keep its name |
+| Rust `pssz_evolves_from` | accepted (`Shape` carries no member names) | accepted | accepted |
+| Python `psio.evolves_from` | accepted, and documented: "Member *names* are not compared: the wire does not carry them" | accepted | accepted |
+| JS `psszEvolvesFrom` | **rejected**: `field N was renamed or reordered ("a" -> "b")` | **rejected** | accepted ("the names of the types themselves are not compared") |
+
+A tuple element has no name in any of them.
+
+**What a rename breaks.** Not PSSZ bytes and not keys (both positional).
+It breaks every surface that names the member: JSON / I-JSON objects (and
+the object form of a method's named arguments), the published Schema IR
+(`Member.name`, `Func.params[i].name`), GraphQL field names, WIT and the
+other schema emitters, and any stored JSON.
+
+**Options.**
+
+- **(a) Reject a rename always.** One rule everywhere; the check then
+  covers the text contract as well as the bytes. Cost: C++ / Rust / Python
+  start refusing revisions they accept today (C++ has the member names at
+  compile time; Rust's `Shape` needs them added by the derive; Python has
+  them in the compiled node). A binary-only user loses the ability to say
+  "these bytes are compatible" for a renamed field unless the layout-only
+  check stays available under its own name.
+- **(b) Reject by default, with an explicit "renamed from" annotation.**
+  `attr(owner_id, renamed_from("owner"))` makes the rename deliberate and
+  visible to the check, and could later let text readers accept the old
+  key. Cost: a new annotation and a Schema IR attribute (`renamedFrom`) in
+  four languages, plus the question of whether readers honour it (an
+  alias) or only the check does. It is the only option that can make a
+  rename *compatible* for text; it is also the largest.
+- **(c) Ignore names, as C++ / Rust / Python do now**, and document that
+  JSON and schema names are part of the contract and are not covered by
+  the check. Cost: JS has to drop its name comparison (or keep it behind
+  an option) to agree; the most common accidental break of a JSON API
+  stays invisible to the tool whose job is to catch breaks.
+
+**Recommendation.** Two checks with honest names rather than one check
+with two meanings, then (a) as the default:
+
+1. Keep the layout relation exactly as C++ / Rust / Python compute it
+   today, under a name that says "bytes": it answers "does the new reader
+   read the old bytes".
+2. Make the headline check (`pssz_evolves_from`, `psszEvolvesFrom`,
+   `evolves_from`) that relation **plus** equal member names — record
+   fields, variant alternatives, and the parameter names of an argument
+   list whose text form is the object. Type names are not compared (the
+   old revision is normally kept as a copy under another name). That is
+   JS's behaviour today, so JS does not change.
+3. Defer (b) until a real rename needs to be carried through a schema; it
+   layers on top of (a) without changing it.
+
+The reason for (a) over (c): services publish their Schema IR and clients
+pack arguments and read rows by name, so a rename is the change most
+likely to be made by accident and least likely to be noticed by a test of
+bytes. If the owner prefers the check to stay bytes-only, (c) is coherent
+too, but then §7.5's "checks every rule of this section and the next" and
+the JS check must both be corrected to say so.
+
+---
+
 ## Conventions for this file
 
 - Each entry has a stable id (E-NNN). IDs are append-only — never reused
