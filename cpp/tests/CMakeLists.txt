@@ -768,6 +768,8 @@ psio_graphql_compile_fail(unsupported_argument GQL_FAIL_ARGUMENT "an argument mu
 psio_graphql_compile_fail(nested_optional GQL_FAIL_OPTIONAL "an optional of an optional has no GraphQL type")
 psio_graphql_compile_fail(id_on_object GQL_FAIL_ID "psio::graphql::id annotates a scalar member")
 psio_graphql_compile_fail(empty_object GQL_FAIL_EMPTY "needs at least one visible field")
+psio_graphql_compile_fail(template_name_conflict GQL_FAIL_TEMPLATE_NAME "have the same GraphQL type name")
+psio_graphql_compile_fail(template_argument_unnamed GQL_FAIL_TEMPLATE_ARG "has no GraphQL name")
 
 # Consumer warning hygiene: every public header, with the core codecs
 # instantiated, compiles under -Wall -Wextra -Werror with PSIO's include

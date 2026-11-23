@@ -37,6 +37,25 @@ struct Empty
 };
 PSIO_REFLECT(Empty, attr(hidden_member, psio::graphql::hidden))
 
+// A class template with a non-type argument cannot be taken apart: its
+// instantiations share the reflected name unless type_name<T> names them.
+// (Two that have the same fields would be one GraphQL type.)
+template <bool Wide>
+struct Sized
+{
+   std::conditional_t<Wide, std::string, int> v{};
+   PSIO_REFLECT(Sized, v)
+};
+// A template argument that has no GraphQL name.
+struct Tag
+{
+};
+template <typename T>
+struct Tagged
+{
+   int v = 0;
+   PSIO_REFLECT(Tagged, v)
+};
 struct Query
 {
    int ok = 0;
@@ -79,6 +98,13 @@ struct Query
 #elif defined(GQL_FAIL_EMPTY)
    Empty empty;
    PSIO_REFLECT(Query, ok, empty)
+#elif defined(GQL_FAIL_TEMPLATE_NAME)
+   Sized<false> one;
+   Sized<true>  two;
+   PSIO_REFLECT(Query, ok, one, two)
+#elif defined(GQL_FAIL_TEMPLATE_ARG)
+   Tagged<Tag> tagged;
+   PSIO_REFLECT(Query, ok, tagged)
 #else
    PSIO_REFLECT(Query, ok)
 #endif

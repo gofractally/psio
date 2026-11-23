@@ -94,6 +94,7 @@ shape.
 |---|---|
 | reflected record | Object. Fields: the reflected data members, then the reflected `const` (or static) methods. A method with parameters is a field with arguments named by the reflected parameter names (`method(find, id, limit)`; every parameter must be named). A `const` method returning `void` is not a field |
 | reflected record without members or methods (`struct TLSInfo { PSIO_REFLECT(TLSInfo) };`) | Object with the one field `_: Boolean`, always `true` ([Records without members](#records-without-members)) |
+| instantiation of a reflected class template, `Box<A>` | Object named `Box_A` ([Class templates](#class-templates)) |
 | the same record as a parameter | Input object named `<Name>Input` (unchanged if the name already ends in `Input`); must be default-constructible |
 | `std::optional<T>`, `T*`, `unique_ptr`, `shared_ptr` | nullable `T`; every other type is non-null |
 | `psio::graphql::result<T>` (or any type with `has_value()`, `*`, `error()`) | nullable `T`; an error becomes a field error |
@@ -199,6 +200,52 @@ a client that only wants presence selects `tls { _ }` or
 record whose members are all *hidden* is still a compile error (that is a
 mistake, not a marker), and so is an empty record as an input object.
 
+### Class templates
+
+`PSIO_REFLECT` gives every instantiation of a class template the template's
+own name, so two instantiations in one schema would be two types with one
+name. The GraphQL name of an instantiation whose template arguments are all
+types is therefore
+
+```
+<Template>_<Arg>_<Arg>...        Box<Account> -> Box_Account     Pair<A, B> -> Pair_A_B
+```
+
+where each argument is written as in a tuple's or a union's name: its
+GraphQL name (`Int`, `String`, `Account`, `Box_Account`), `Optional<T>` for
+an optional, `<T>List` for a list (`Box<std::vector<Box<int>>>` is
+`Box_Box_IntList`). Its input object is `<that>Input`. The name depends only
+on the type, not on the schema or on which instantiations appear, so it is
+the same in every build. An argument that has no GraphQL name (a tag type)
+is a compile error asking for a `type_name` specialisation.
+
+To choose the name, specialise `type_name` for the template — the existing
+mechanism; a partial specialisation covers all instantiations:
+
+```cpp
+// by a string that is a template argument
+template <typename Node, psio::fixed_string Name>
+struct psio::graphql::type_name<Page<Node, Name>> { static constexpr std::string_view value = Name.view(); };
+
+// composed from the argument's GraphQL name: Account -> AccountWithBlockContext
+template <typename T>
+struct psio::graphql::type_name<WithBlockContext<T>> {
+   static constexpr std::string_view value = psio::graphql::affixed_name<"", T, "WithBlockContext">;
+};
+```
+
+`affixed_name<Prefix, T, Suffix>` is `Prefix` + the GraphQL name of `T` +
+`Suffix`. A template with non-type arguments (`Page<Node, "AccountPage">`)
+cannot be taken apart by the library: without a `type_name` every
+instantiation has the template's name, which is a compile error as soon as
+two that differ meet in a schema. (Two C++ types with one name and the same
+fields are one GraphQL type; that is how a record reached through a value
+and through a view is one type.)
+
+`psio::graphql::connection<Node>` and `edge<Node>` are named
+`<Node>Connection` and `<Node>Edge` by such specialisations; specialise
+`type_name<connection<X>>` to rename one.
+
 ### Compile-time errors
 
 Rejected with a `static_assert` that names the reason
@@ -207,7 +254,8 @@ same GraphQL name (including `Foo`'s input object against a type named
 `FooInput`), two members of a type with the same name, a member whose type
 has no mapping, a `std::variant` alternative that is not a record, a method
 with unnamed parameters, an unsupported argument type, an optional of an
-optional, `id` on a non-scalar, an object type whose members are all hidden.
+optional, `id` on a non-scalar, an object type whose members are all hidden,
+a template argument without a GraphQL name.
 A `psio::nested<T, nested_validation::deferred>` member is a type with no
 mapping (an enclosing reader has not checked that its bytes are a `T`: hide
 it, or expose the `T` from a method after validating), and a nested value
@@ -442,7 +490,7 @@ WebAssembly (no WASI sysroot on the machine).
 | `cpp/include/psio/graphql/introspection.hpp` | `__schema` / `__type`, `sdl()` |
 | `cpp/include/psio/graphql/connection.hpp` | `row_source`, `paginate`, `connection` |
 | `cpp/tests/graphql_tests.cpp`, `graphql_fixture.hpp` | the conformance suite and its schema |
-| `cpp/tests/graphql_service_tests.cpp` | the rules a service leans on (markers), each on a small schema |
+| `cpp/tests/graphql_service_tests.cpp` | the rules a service leans on (markers, class templates), each on a small schema |
 | `cpp/tests/graphql_noexceptions.cpp` | exception-disabled build-and-run check |
 | `cpp/tests/graphql_schema_fail.cpp` | schemas that must not compile |
 | `cpp/benchmarks/bench_graphql.cpp` | benchmark against the previous engine |

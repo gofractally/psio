@@ -44,6 +44,7 @@
 #include <psio/annotate.hpp>
 #include <psio/detail/nested_fwd.hpp>
 #include <psio/ext_int.hpp>
+#include <psio/fixed_string.hpp>
 #include <psio/json.hpp>
 #include <psio/name_lookup.hpp>
 #include <psio/reflect.hpp>
@@ -518,6 +519,8 @@ namespace psio::graphql
       {
          char        d[192]{};
          std::size_t n = 0;
+         // (A name longer than the buffer indexes past it: a compile error,
+         // as every name is built in a constant expression.)
          constexpr name_buf& add(std::string_view s)
          {
             for (char c : s)
@@ -652,6 +655,48 @@ namespace psio::graphql
          }
       };
 
+      // An instantiation of a reflected class template whose arguments are
+      // all types is named `<Template>_<Arg>_<Arg>...` (WithBlock<Account> is
+      // `WithBlock_Account`), each argument by its GraphQL name as in a
+      // tuple's or a union's name. A template with non-type arguments cannot
+      // be taken apart: name it with type_name<T>.
+      template <typename T>
+      constexpr bool composable() noexcept
+      {
+         using L = logical_t<T>;
+         if constexpr (Nullable<L>)
+            return composable<typename nullable_inner<L>::type>();
+         else
+            return shape_of<L>() != shape::unsupported;
+      }
+      template <typename T>
+      struct template_args
+      {
+         static constexpr bool is_instance = false;
+      };
+      template <template <typename...> class C, typename... Ts>
+      struct template_args<C<Ts...>>
+      {
+         static constexpr bool is_instance = sizeof...(Ts) != 0;
+         static constexpr bool nameable    = (composable<Ts>() && ...);
+         static constexpr void add(name_buf& out) { ((out.add("_"), compose_name<Ts>(out)), ...); }
+      };
+      template <typename T>
+      struct template_namer
+      {
+         static constexpr name_buf make()
+         {
+            static_assert(template_args<T>::nameable,
+                          "psio::graphql: a template argument of this reflected class template "
+                          "has no GraphQL name, so the instantiation has none: specialise "
+                          "psio::graphql::type_name<T>");
+            name_buf out;
+            out.add(reflect<T>::name);
+            template_args<T>::add(out);
+            return out;
+         }
+      };
+
       // The annotated or reflected name of a record / enum / adapter type.
       template <typename T>
       constexpr std::string_view declared_name() noexcept
@@ -662,6 +707,8 @@ namespace psio::graphql
             return std::string_view{std::get<name_as>(annotate<type<T>{}>).value};
          else if constexpr (is_text_adapter_v<T> && schema_custom_v<T>)
             return schema_custom_id<T>();
+         else if constexpr (Reflected<T> && template_args<T>::is_instance)
+            return stored_name<template_namer<T>>::value;
          else if constexpr (Reflected<T>)
             return reflect<T>::name;
          else if constexpr (ReflectedEnum<T>)
@@ -1619,6 +1666,31 @@ namespace psio::graphql
          return out;
       }
    }  // namespace detail
+
+   // A name built from the GraphQL name of `T`, for a type_name
+   // specialisation of a class template:
+   //    template <typename T>
+   //    struct psio::graphql::type_name<WithBlock<T>> {
+   //       static constexpr std::string_view value =
+   //          psio::graphql::affixed_name<"", T, "WithBlock">;   // AccountWithBlock
+   //    };
+   namespace detail
+   {
+      template <fixed_string Prefix, typename T, fixed_string Suffix>
+      struct affix_namer
+      {
+         static constexpr name_buf make()
+         {
+            return name_buf{}
+               .add(Prefix.view())
+               .add(named_type_name<typename out_wrap<T>::named>())
+               .add(Suffix.view());
+         }
+      };
+   }  // namespace detail
+   template <fixed_string Prefix, typename T, fixed_string Suffix>
+   inline constexpr std::string_view affixed_name =
+      detail::stored_name<detail::affix_namer<Prefix, T, Suffix>>::value;
 
    struct exec;
    struct plan_field;
