@@ -52,6 +52,11 @@ namespace psio::view_layout {
                return 0;
             std::uint32_t first = 0;
             std::memcpy(&first, s.data(), 4);
+            // The offset table lies inside the list: a first offset nobody
+            // validated must not announce more elements than that (every
+            // index below the count then has its offsets in the bytes).
+            if (first > s.size())
+               return 0;
             return first / 4u;
          }
       }
@@ -64,6 +69,11 @@ namespace psio::view_layout {
          {
             constexpr std::size_t esz =
                ::psio::detail::ssz_impl::fixed_size_of<T>();
+            // An index past the end is an empty view, never a span outside
+            // the bytes.
+            if constexpr (esz != 0)
+               if (i >= s.size() / esz)
+                  return {};
             return s.subspan(i * esz, esz);
          }
          else

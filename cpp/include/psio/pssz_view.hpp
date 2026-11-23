@@ -122,6 +122,11 @@ namespace psio::view_layout {
             using O = typename ::psio::detail::pssz_impl::width_info<W>::offset_t;
             O first{};
             std::memcpy(&first, s.data(), W);
+            // The offset table lies inside the list: a first offset nobody
+            // validated must not announce more elements than that (every
+            // index below the count then has its offsets in the bytes).
+            if (static_cast<std::size_t>(first) > s.size())
+               return 0;
             return static_cast<std::size_t>(first) / W;
          }
       }
@@ -134,6 +139,12 @@ namespace psio::view_layout {
          {
             constexpr std::size_t esz =
                ::psio::detail::pssz_impl::fixed_size_of<T>();
+            // An element the bytes do not hold (an index past the end, an
+            // array whose span is short) is an empty view, never a span
+            // outside the bytes.
+            if constexpr (esz != 0)
+               if (i >= s.size() / esz)
+                  return {};
             return s.subspan(i * esz, esz);
          }
          else

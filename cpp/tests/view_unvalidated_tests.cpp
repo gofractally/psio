@@ -19,6 +19,7 @@
 
 #include <catch.hpp>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -117,8 +118,11 @@ namespace
       auto items = v.items();
       b.check(items._psio_data());
       const std::size_t n = items.size();
-      // A corrupted count must not turn into unbounded work or reads.
-      for (std::size_t i = 0; i < n && i < 64; ++i)
+      // A corrupted count must not turn into unbounded work or reads: a
+      // list never reports more elements than its bytes can hold, and
+      // every index below size() is read inside them.
+      CHECK(n <= b.whole.size());
+      for (std::size_t i = 0; i < n; ++i)
       {
          auto it = items[i];
          b.check(it._psio_data());
@@ -193,6 +197,83 @@ TEST_CASE("view: at(i) past the end reads as zero / empty", "[view][unvalidated]
    check(psio::pssz_view<UvOrder>{std::span<const char>{p}});
    check(psio::ssz_view<UvOrder>{std::span<const char>{s}});
    check(psio::wit_view<UvOrder>{std::span<const char>{w}});
+}
+
+namespace
+{
+   struct UvShapes
+   {
+      std::uint32_t                           id = 0;
+      std::array<UvPoint, 3>                  corners{};
+      std::vector<std::uint32_t>              numbers;
+      std::optional<std::array<UvPoint, 3>>   maybe_corners;
+      std::vector<std::string>                words;
+   };
+   PSIO_REFLECT(UvShapes, id, corners, numbers, maybe_corners, words)
+}  // namespace
+
+TEST_CASE("view: fixed-size elements the bytes do not hold read as zero / empty",
+          "[view][unvalidated]")
+{
+   // An array always has N elements; a view of nothing has N empty ones.
+   psio::pssz_view<UvShapes> none{};
+   CHECK(none.corners().at(0).x() == 0);
+   CHECK(none.corners().at(2).y() == 0);
+   CHECK(none.corners()[1].x() == 0);
+   CHECK(psio::bytes(none.corners()[2]).empty());
+   CHECK(psio::pssz_view<std::array<UvPoint, 3>>{std::span<const char>{}}[2].y() == 0);
+   // An array whose span is short (here: 12 bytes for three 8-byte points).
+   const std::vector<char>                    twelve(12, char(1));
+   const psio::pssz_view<std::array<UvPoint, 3>> cut{std::span<const char>{twelve}};
+   CHECK(cut[0].x() == 0x01010101);
+   CHECK(psio::bytes(cut[1]).empty());
+   CHECK(cut[1].x() == 0);
+   CHECK(cut.at(2).y() == 0);
+
+   // operator[] past the end of a list of fixed-size elements.
+   UvShapes value;
+   value.numbers = {1, 2, 3};
+   value.words   = {"a", "b"};
+   const auto                 p = psio::to_pssz(value);
+   const auto                 s = psio::to_ssz(value.numbers);
+   psio::pssz_view<UvShapes>  v{std::span<const char>{p}};
+   CHECK(v.numbers()[2] == 3u);
+   CHECK(v.numbers()[3] == 0u);
+   CHECK(v.numbers()[1000] == 0u);
+   CHECK(psio::bytes(v.numbers()[1000]).empty());
+   CHECK(v.numbers()[~std::size_t{0} / 4] == 0u);
+   psio::ssz_view<std::vector<std::uint32_t>> sv{std::span<const char>{s}};
+   CHECK(sv[2] == 3u);
+   CHECK(sv[3] == 0u);
+   CHECK(psio::bytes(sv[1u << 20]).empty());
+}
+
+TEST_CASE("view: a list never reports more elements than its bytes hold", "[view][unvalidated]")
+{
+   // The first offset of a list of variable-size elements is its count
+   // times the offset width. One nobody validated, pointing past the list,
+   // must not become a count whose offsets lie outside the bytes.
+   const std::vector<std::string> words{"alpha", "beta", "gamma"};
+   {
+      const auto        good = psio::to_pssz(words);
+      std::vector<char> bad(good.begin(), good.end());
+      const std::size_t width = psio::auto_pssz_width_v<std::vector<std::string>>;
+      for (std::size_t i = 0; i < width; ++i)
+         bad[i] = char(0xff);
+      psio::pssz_view<std::vector<std::string>> v{std::span<const char>{bad}};
+      CHECK(v.size() == 0);
+      CHECK(v.empty());
+      CHECK(v.begin() == v.end());
+      CHECK(v.at(0).view_().empty());
+   }
+   {
+      const auto        good = psio::to_ssz(words);
+      std::vector<char> bad(good.begin(), good.end());
+      bad[0] = bad[1] = bad[2] = char(0xff);
+      psio::ssz_view<std::vector<std::string>> v{std::span<const char>{bad}};
+      CHECK(v.size() == 0);
+      CHECK(v.at(0).view_().empty());
+   }
 }
 
 TEST_CASE("view: a valid record reads the same through every member", "[view][unvalidated]")
