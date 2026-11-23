@@ -83,6 +83,9 @@ psio_add_test(psio_view_named_tests view_named_tests.cpp)
 # From a view to its value: unpack(), psio::value_of, from_pssz(view) —
 # including members under a maxDynamicData cap and bounded members.
 psio_add_test(psio_view_unpack_tests view_unpack_tests.cpp)
+# The view surface beyond member access: list / optional / variant views,
+# comparison, structured bindings, borrowing conversions.
+psio_add_test(psio_view_surface_tests view_surface_tests.cpp)
 # View-typed method parameters: the argument tuple's wire type, and calling a
 # reflected method with packed arguments (psio::invoke_method_pssz).
 psio_add_test(psio_method_view_param_tests method_view_param_tests.cpp)
