@@ -351,9 +351,25 @@ tuple_bounds!((A, SA, 0), (B, SB, 1), (C, SC, 2), (D, SD, 3), (E, SE, 4), (G, SG
 /// converted. The bounds are not checked here ([`Bounds::check`] is, once,
 /// by [`Described`]).
 pub trait PackAs<F: PsszFormat, S>: Bounds<S> {
-    /// Appends the encoding of the value as an `As`. One depth node per
-    /// node of `As`, exactly as `As`'s own encoder.
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()>;
+    /// Appends the encoding of the value as an `As`, node `depth` of the
+    /// tree being written. One depth node per node of `As`, exactly as
+    /// `As`'s own encoder (`PsszPack::pssz_pack_at_depth`).
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()>;
+    /// When `As` is fixed-size: its encoding, into its slot
+    /// (`PsszPack::pssz_pack_fixed`).
+    fn pack_fixed_as(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        let mut bytes = Vec::new();
+        self.pack_as(&mut bytes, depth)?;
+        if bytes.len() != slot.len() {
+            return Err(PsszError::new("pssz: fixed encoder size mismatch"));
+        }
+        slot.copy_from_slice(&bytes);
+        Ok(())
+    }
+    /// `PsszPack::pssz_size_hint` of the value as an `As`.
+    fn size_hint_as(&self) -> usize {
+        0
+    }
     /// The value is an absent optional.
     fn is_none_as(&self) -> bool {
         false
@@ -361,28 +377,43 @@ pub trait PackAs<F: PsszFormat, S>: Bounds<S> {
 }
 
 impl<F: PsszFormat, T: PsszPack<F> + Clone> PackAs<F, Plain> for T {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        self.pssz_pack_checked(out)
+    #[inline]
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        self.pssz_pack_at_depth(out, depth)
+    }
+    #[inline]
+    fn pack_fixed_as(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        self.pssz_pack_fixed(slot, depth)
+    }
+    fn size_hint_as(&self) -> usize {
+        self.pssz_size_hint()
     }
     fn is_none_as(&self) -> bool {
         self.pssz_is_none()
     }
 }
 
-fn raw_bytes(bytes: &[u8], out: &mut Vec<u8>) -> PsszResult<()> {
-    let _depth = checked::EncodeDepth::enter()?;
-    out.try_reserve(bytes.len()).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
-    out.extend_from_slice(bytes);
-    Ok(())
+#[inline]
+fn raw_bytes(bytes: &[u8], out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+    checked::encode_node(depth)?;
+    checked::append(out, bytes)
 }
 impl<F: PsszFormat, const N: usize> PackAs<F, Max<N>> for String {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        raw_bytes(self.as_bytes(), out)
+    #[inline]
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        raw_bytes(self.as_bytes(), out, depth)
+    }
+    fn size_hint_as(&self) -> usize {
+        self.len()
     }
 }
 impl<F: PsszFormat, const N: usize> PackAs<F, Max<N>> for RawString {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        raw_bytes(&self.0, out)
+    #[inline]
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        raw_bytes(&self.0, out, depth)
+    }
+    fn size_hint_as(&self) -> usize {
+        self.0.len()
     }
 }
 
@@ -392,45 +423,76 @@ fn pack_elements<'a, F: PsszFormat, L: PsszPack<F>, T: PackAs<F, E> + 'a, E>(
     values: impl ExactSizeIterator<Item = &'a T>,
     known_count: bool,
     out: &mut Vec<u8>,
+    depth: usize,
 ) -> PsszResult<()>
 where
     T::As: PsszPack<F>,
 {
-    checked::encode_sequence_with(
+    checked::encode_sequence_with_at_depth(
         <L as PsszPack<F>>::OFFSET_WIDTH,
         <T::As as PsszPack<F>>::IS_FIXED_SIZE.then_some(<T::As as PsszPack<F>>::FIXED_SIZE),
         values,
-        |value, out| value.pack_as(out),
+        |value: &T, out: &mut Vec<u8>, depth| value.pack_as(out, depth),
+        |value: &T, slot: &mut [u8], depth| value.pack_fixed_as(slot, depth),
         out,
         known_count,
+        depth,
     )
+}
+
+/// `size_hint_as` of the elements of a sequence whose described type is `L`.
+fn elements_size_hint<'a, F: PsszFormat, L: PsszPack<F>, T: PackAs<F, E> + 'a, E>(
+    values: impl ExactSizeIterator<Item = &'a T>,
+) -> usize
+where
+    T::As: PsszPack<F>,
+{
+    let count = values.len();
+    if <T::As as PsszPack<F>>::IS_FIXED_SIZE {
+        count.saturating_mul(<T::As as PsszPack<F>>::FIXED_SIZE)
+    } else {
+        values.fold(count.saturating_mul(<L as PsszPack<F>>::OFFSET_WIDTH), |total, value| {
+            total.saturating_add(value.size_hint_as())
+        })
+    }
 }
 
 impl<F: PsszFormat, T: PackAs<F, E>, E, const N: usize> PackAs<F, Max<N, E>> for Vec<T>
 where
     T::As: PsszPack<F>,
 {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
-        pack_elements::<F, Self::As, T, E>(self.iter(), false, out)
+    #[inline]
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        pack_elements::<F, Self::As, T, E>(self.iter(), false, out, depth)
+    }
+    fn size_hint_as(&self) -> usize {
+        elements_size_hint::<F, Self::As, T, E>(self.iter())
     }
 }
 impl<F: PsszFormat, T: PackAs<F, E>, E> PackAs<F, Each<E>> for Vec<T>
 where
     T::As: PsszPack<F>,
 {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
-        pack_elements::<F, Self::As, T, E>(self.iter(), false, out)
+    #[inline]
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        pack_elements::<F, Self::As, T, E>(self.iter(), false, out, depth)
+    }
+    fn size_hint_as(&self) -> usize {
+        elements_size_hint::<F, Self::As, T, E>(self.iter())
     }
 }
 impl<F: PsszFormat, T: PackAs<F, E>, E, const M: usize> PackAs<F, Each<E>> for [T; M]
 where
     T::As: PsszPack<F>,
 {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
-        pack_elements::<F, Self::As, T, E>(self.iter(), true, out)
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        pack_elements::<F, Self::As, T, E>(self.iter(), true, out, depth)
+    }
+    fn size_hint_as(&self) -> usize {
+        elements_size_hint::<F, Self::As, T, E>(self.iter())
     }
 }
 
@@ -439,58 +501,62 @@ where
 fn pack_set<F: PsszFormat, L: PsszPack<F>, T: PackAs<F, E> + KeyPack, E>(
     set: &BTreeSet<T>,
     out: &mut Vec<u8>,
+    depth: usize,
 ) -> PsszResult<()>
 where
     T::As: PsszPack<F>,
 {
-    let _depth = checked::EncodeDepth::enter()?;
+    checked::encode_node(depth)?;
     let sorted = canonical_order(set.iter(), |element| *element, SET_DUPLICATE)?;
-    pack_elements::<F, L, T, E>(sorted.into_iter(), false, out)
+    pack_elements::<F, L, T, E>(sorted.into_iter(), false, out, depth)
 }
 impl<F: PsszFormat, T: PackAs<F, E> + KeyPack + Ord, E, const N: usize> PackAs<F, Max<N, E>> for BTreeSet<T>
 where
     T::As: PsszPack<F> + KeyPack + Ord,
 {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        pack_set::<F, Self::As, T, E>(self, out)
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        pack_set::<F, Self::As, T, E>(self, out, depth)
     }
 }
 impl<F: PsszFormat, T: PackAs<F, E> + KeyPack + Ord, E> PackAs<F, Each<E>> for BTreeSet<T>
 where
     T::As: PsszPack<F> + KeyPack + Ord,
 {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        pack_set::<F, Self::As, T, E>(self, out)
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        pack_set::<F, Self::As, T, E>(self, out, depth)
     }
 }
 
 impl<F: PsszFormat, K: PsszPack<F> + KeyPack + Ord + Clone, V: PsszPack<F> + Clone, const N: usize> PackAs<F, Max<N>>
     for BTreeMap<K, V>
 {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        encode_map::<F, K, V>(<Self::As as PsszPack<F>>::OFFSET_WIDTH, self.iter(), usize::MAX, out)
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        encode_map::<F, K, V>(<Self::As as PsszPack<F>>::OFFSET_WIDTH, self.iter(), usize::MAX, out, depth)
     }
 }
 /// The entries in canonical order, each the pair of the described key and
 /// the described value, in the offset table of the described map `L`.
-fn pack_map<F: PsszFormat, L: PsszPack<F>, K, V, KS, VS>(map: &BTreeMap<K, V>, out: &mut Vec<u8>) -> PsszResult<()>
+fn pack_map<F: PsszFormat, L: PsszPack<F>, K, V, KS, VS>(map: &BTreeMap<K, V>, out: &mut Vec<u8>, depth: usize) -> PsszResult<()>
 where
     K: PackAs<F, KS> + KeyPack,
     V: PackAs<F, VS>,
     K::As: PsszPack<F>,
     V::As: PsszPack<F>,
 {
-    let _depth = checked::EncodeDepth::enter()?;
+    checked::encode_node(depth)?;
     let sorted = canonical_order(map.iter(), |entry| entry.0, MAP_DUPLICATE)?;
-    checked::encode_sequence_with(
+    checked::encode_sequence_with_at_depth(
         <L as PsszPack<F>>::OFFSET_WIDTH,
         None,
         sorted.into_iter(),
-        |(key, value), out| {
-            <(Packed<K, KS>, Packed<V, VS>) as PsszPack<F>>::pssz_pack_checked(&(Packed::new(key), Packed::new(value)), out)
+        |(key, value): (&K, &V), out: &mut Vec<u8>, depth| {
+            <(Packed<K, KS>, Packed<V, VS>) as PsszPack<F>>::pssz_pack_at_depth(&(Packed::new(key), Packed::new(value)), out, depth)
         },
+        // An entry is a tuple: never fixed-size.
+        |_: (&K, &V), _: &mut [u8], _| Err(PsszError::new("pssz: fixed encoder size mismatch")),
         out,
         false,
+        depth,
     )
 }
 impl<F: PsszFormat, K, V, KS, VS, const N: usize> PackAs<F, Max<N, Entry<KS, VS>>> for BTreeMap<K, V>
@@ -500,8 +566,8 @@ where
     K::As: PsszPack<F> + KeyPack + Ord,
     V::As: PsszPack<F>,
 {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        pack_map::<F, Self::As, K, V, KS, VS>(self, out)
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        pack_map::<F, Self::As, K, V, KS, VS>(self, out, depth)
     }
 }
 impl<F: PsszFormat, K, V, KS, VS> PackAs<F, Each<Entry<KS, VS>>> for BTreeMap<K, V>
@@ -511,8 +577,8 @@ where
     K::As: PsszPack<F> + KeyPack + Ord,
     V::As: PsszPack<F>,
 {
-    fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        pack_map::<F, Self::As, K, V, KS, VS>(self, out)
+    fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        pack_map::<F, Self::As, K, V, KS, VS>(self, out, depth)
     }
 }
 
@@ -522,8 +588,12 @@ macro_rules! pack_through_option {
         where
             T::As: PsszPack<F>,
         {
-            fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-                <Option<Packed<T, $spec>> as PsszPack<F>>::pssz_pack_checked(&self.as_ref().map(Packed::new), out)
+            #[inline]
+            fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+                <Option<Packed<T, $spec>> as PsszPack<F>>::pssz_pack_at_depth(&self.as_ref().map(Packed::new), out, depth)
+            }
+            fn size_hint_as(&self) -> usize {
+                <Option<Packed<T, $spec>> as PsszPack<F>>::pssz_size_hint(&self.as_ref().map(Packed::new))
             }
             fn is_none_as(&self) -> bool {
                 self.is_none()
@@ -543,8 +613,11 @@ macro_rules! tuple_pack {
         where
             $($ty::As: PsszPack<F>,)+
         {
-            fn pack_as(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-                <($(Packed<$ty, $spec>,)+) as PsszPack<F>>::pssz_pack_checked(&($(Packed::new(&self.$index),)+), out)
+            fn pack_as(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+                <($(Packed<$ty, $spec>,)+) as PsszPack<F>>::pssz_pack_at_depth(&($(Packed::new(&self.$index),)+), out, depth)
+            }
+            fn size_hint_as(&self) -> usize {
+                <($(Packed<$ty, $spec>,)+) as PsszPack<F>>::pssz_size_hint(&($(Packed::new(&self.$index),)+))
             }
         }
     };
@@ -600,17 +673,31 @@ where
     }
     fn pssz_size(&self) -> usize {
         let mut out = Vec::new();
-        self.0.pack_as(&mut out).expect("pssz: a member has no encoding; use try_to_pssz");
+        self.0.pack_as(&mut out, checked::encode_depth()).expect("pssz: a member has no encoding; use try_to_pssz");
         out.len()
     }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         self.pssz_pack_checked(out).expect("pssz: a member is outside its annotated bound; use try_to_pssz");
     }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        checked::pack_checked::<F, Self>(self, out)
+    }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
         if CHECK {
             self.0.check()?;
         }
-        self.0.pack_as(out)
+        self.0.pack_as(out, depth)
+    }
+    #[inline]
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        if CHECK {
+            self.0.check()?;
+        }
+        self.0.pack_fixed_as(slot, depth)
+    }
+    fn pssz_size_hint(&self) -> usize {
+        self.0.size_hint_as()
     }
 }
 

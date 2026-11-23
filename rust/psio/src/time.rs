@@ -617,6 +617,15 @@ macro_rules! time_value {
             fn pssz_pack(&self, out: &mut Vec<u8>) {
                 self.ticks.pssz_pack(out)
             }
+            // The tick integer's writers: one node, the integer's.
+            #[inline]
+            fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+                self.ticks.pssz_pack_at_depth(out, depth)
+            }
+            #[inline]
+            fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+                self.ticks.pssz_pack_fixed(slot, depth)
+            }
         }
         impl<F: PsszFormat, U: Unit, R: Tick + PsszUnpack<F>> PsszUnpack<F> for $name<U, R> {
             fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {

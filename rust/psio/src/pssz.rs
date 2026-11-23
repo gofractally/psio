@@ -336,6 +336,53 @@ pub trait PsszPack<F: PsszFormat> {
         self.pssz_pack(out);
         Ok(())
     }
+
+    /// [`pssz_pack_checked`](Self::pssz_pack_checked) for a value that is
+    /// node `depth` of the tree being written (the root is node 0): what the
+    /// writers in this crate and the derives call for what they hold, so the
+    /// depth is an argument instead of a thread-local counter.
+    ///
+    /// The bytes and the errors are those of `pssz_pack_checked`. On error
+    /// `out` may be longer than it was (never shorter, and nothing that was
+    /// there is changed): the entry point that owns the transaction
+    /// truncates. The default is for a hand-written codec: it runs
+    /// `pssz_pack_checked` with the thread's counter at `depth`. A codec
+    /// that implements this implements `pssz_pack_checked` as
+    /// `pssz_checked::pack_checked(self, out)`.
+    #[doc(hidden)]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        let _scope = checked::EncodeDepthAt::enter(depth);
+        self.pssz_pack_checked(out)
+    }
+
+    /// For a fixed-size type (`IS_FIXED_SIZE`): writes the encoding of this
+    /// value, node `depth`, into `slot`, which is `FIXED_SIZE` bytes inside
+    /// the frame that holds it. The default encodes the value on its own and
+    /// copies it.
+    #[doc(hidden)]
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        checked::pack_fixed_by_append::<F, Self>(self, slot, depth)
+    }
+
+    /// The bytes of `values` when they are, as they lie in memory, the
+    /// concatenation of the values' encodings and encoding one cannot fail
+    /// (the integers and floats of a little-endian target). A list of such
+    /// values is written with one copy.
+    #[doc(hidden)]
+    fn pssz_bulk_bytes(values: &[Self]) -> Option<&[u8]>
+    where
+        Self: Sized,
+    {
+        let _ = values;
+        None
+    }
+
+    /// About how many bytes the encoding takes, to reserve the output once.
+    /// Never trusted: any number is harmless. 0 when unknown.
+    #[doc(hidden)]
+    fn pssz_size_hint(&self) -> usize {
+        if Self::IS_FIXED_SIZE { Self::FIXED_SIZE } else { 0 }
+    }
 }
 
 /// Legacy helper kept for callers that pick an explicit tag from a bound.
@@ -392,6 +439,31 @@ pub trait PsszValidate<F: PsszFormat> {
 
 // ── Primitives ──────────────────────────────────────────────────────────────
 
+/// `&[$ty]` as its bytes, where those are the little-endian encodings.
+#[cfg(target_endian = "little")]
+macro_rules! bulk_le_bytes {
+    ($ty:ty, $values:ident) => {{
+        // SAFETY: `$ty` is one of the primitive integer and floating-point
+        // types this macro is instantiated with below (never a type
+        // parameter). Such a type has no padding and no uninitialized
+        // bytes, so the `size_of_val` bytes of the slice are initialized
+        // `u8`s; `u8` has alignment 1, so the pointer is aligned for it; the
+        // returned slice borrows `$values`, so the memory stays valid and
+        // unaliased by a writer for as long as it lives. On a little-endian
+        // target those bytes are each value's `to_le_bytes`, in order.
+        Some(unsafe {
+            std::slice::from_raw_parts($values.as_ptr().cast::<u8>(), std::mem::size_of_val($values))
+        })
+    }};
+}
+#[cfg(not(target_endian = "little"))]
+macro_rules! bulk_le_bytes {
+    ($ty:ty, $values:ident) => {{
+        let _ = $values;
+        None
+    }};
+}
+
 macro_rules! pssz_impl_primitive_le {
     ($($ty:ty),* $(,)?) => {$(
         impl<F: PsszFormat> PsszPack<F> for $ty {
@@ -404,6 +476,21 @@ macro_rules! pssz_impl_primitive_le {
             fn pssz_size(&self) -> usize { std::mem::size_of::<$ty>() }
             fn pssz_pack(&self, out: &mut Vec<u8>) {
                 out.extend_from_slice(&self.to_le_bytes());
+            }
+            #[inline]
+            fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+                checked::encode_node(depth)?;
+                checked::append(out, &self.to_le_bytes())
+            }
+            #[inline(always)]
+            fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+                checked::encode_node(depth)?;
+                slot.copy_from_slice(&self.to_le_bytes());
+                Ok(())
+            }
+            #[inline]
+            fn pssz_bulk_bytes(values: &[Self]) -> Option<&[u8]> {
+                bulk_le_bytes!($ty, values)
             }
         }
         impl<F: PsszFormat> PsszUnpack<F> for $ty {
@@ -451,6 +538,22 @@ impl<F: PsszFormat> PsszPack<F> for Uint256 {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         for l in &self.limb { out.extend_from_slice(&l.to_le_bytes()); }
     }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::reserve(out, 32)?;
+        <Self as PsszPack<F>>::pssz_pack(self, out);
+        Ok(())
+    }
+    #[inline]
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        for (limb, bytes) in self.limb.iter().zip(slot.chunks_exact_mut(8)) {
+            bytes.copy_from_slice(&limb.to_le_bytes());
+        }
+        Ok(())
+    }
 }
 impl<F: PsszFormat> PsszUnpack<F> for Uint256 {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -483,6 +586,18 @@ impl<F: PsszFormat> PsszPack<F> for bool {
     fn pssz_size(&self) -> usize { 1 }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         out.push(if *self { 1 } else { 0 });
+    }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::append(out, &[*self as u8])
+    }
+    #[inline(always)]
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        slot.copy_from_slice(&[*self as u8]);
+        Ok(())
     }
 }
 impl<F: PsszFormat> PsszUnpack<F> for bool {
@@ -532,11 +647,25 @@ impl<F: PsszFormat> PsszPack<F> for String {
     pssz_string_consts!(None, "string", 0);
     fn pssz_size(&self) -> usize { self.len() }
     fn pssz_pack(&self, out: &mut Vec<u8>) { out.extend_from_slice(self.as_bytes()); }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::append(out, self.as_bytes())
+    }
+    fn pssz_size_hint(&self) -> usize { <Self as PsszPack<F>>::pssz_size(self) }
 }
 impl<F: PsszFormat> PsszPack<F> for str {
     pssz_string_consts!(None, "string", 0);
     fn pssz_size(&self) -> usize { self.len() }
     fn pssz_pack(&self, out: &mut Vec<u8>) { out.extend_from_slice(self.as_bytes()); }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::append(out, self.as_bytes())
+    }
+    fn pssz_size_hint(&self) -> usize { <Self as PsszPack<F>>::pssz_size(self) }
 }
 impl<F: PsszFormat> PsszUnpack<F> for String {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -570,13 +699,14 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedString<N> {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: BoundedString overflow; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
         if self.0.len() > N { return Err(PsszError::new("pssz: BoundedString overflow")); }
-        out.try_reserve(self.0.len()).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
-        out.extend_from_slice(self.0.as_bytes());
-        Ok(())
+        checked::append(out, self.0.as_bytes())
     }
+    fn pssz_size_hint(&self) -> usize { self.0.len() }
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedString<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -632,11 +762,25 @@ impl<F: PsszFormat> PsszPack<F> for RawString {
     pssz_string_consts!(None, "raw_string", 0);
     fn pssz_size(&self) -> usize { self.0.len() }
     fn pssz_pack(&self, out: &mut Vec<u8>) { out.extend_from_slice(&self.0); }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::append(out, &self.0)
+    }
+    fn pssz_size_hint(&self) -> usize { <Self as PsszPack<F>>::pssz_size(self) }
 }
 impl<F: PsszFormat> PsszPack<F> for RawStr<'_> {
     pssz_string_consts!(None, "raw_string", 0);
     fn pssz_size(&self) -> usize { self.0.len() }
     fn pssz_pack(&self, out: &mut Vec<u8>) { out.extend_from_slice(self.0); }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::append(out, self.0)
+    }
+    fn pssz_size_hint(&self) -> usize { <Self as PsszPack<F>>::pssz_size(self) }
 }
 impl<F: PsszFormat> PsszUnpack<F> for RawString {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -679,13 +823,14 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedRawString<N> {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: BoundedRawString overflow; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
         if self.0.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
-        out.try_reserve(self.0.len()).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
-        out.extend_from_slice(&self.0);
-        Ok(())
+        checked::append(out, &self.0)
     }
+    fn pssz_size_hint(&self) -> usize { self.0.len() }
 }
 impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedRawString<N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -736,6 +881,11 @@ impl<F: PsszFormat, T: PsszPack<F> + ?Sized> PsszPack<F> for &T {
     fn pssz_size(&self) -> usize { <T as PsszPack<F>>::pssz_size(self) }
     fn pssz_pack(&self, out: &mut Vec<u8>) { <T as PsszPack<F>>::pssz_pack(self, out) }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { <T as PsszPack<F>>::pssz_pack_checked(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> { <T as PsszPack<F>>::pssz_pack_at_depth(self, out, depth) }
+    #[inline]
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> { <T as PsszPack<F>>::pssz_pack_fixed(self, slot, depth) }
+    fn pssz_size_hint(&self) -> usize { <T as PsszPack<F>>::pssz_size_hint(self) }
 }
 
 // Box<T> pairs with C++ `psio::schema_types::Box<T>`: wire-transparent (same
@@ -759,6 +909,11 @@ impl<F: PsszFormat, T: PsszPack<F> + ?Sized> PsszPack<F> for Box<T> {
     fn pssz_size(&self) -> usize { <T as PsszPack<F>>::pssz_size(self) }
     fn pssz_pack(&self, out: &mut Vec<u8>) { <T as PsszPack<F>>::pssz_pack(self, out) }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { <T as PsszPack<F>>::pssz_pack_checked(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> { <T as PsszPack<F>>::pssz_pack_at_depth(self, out, depth) }
+    #[inline]
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> { <T as PsszPack<F>>::pssz_pack_fixed(self, slot, depth) }
+    fn pssz_size_hint(&self) -> usize { <T as PsszPack<F>>::pssz_size_hint(self) }
 }
 impl<F: PsszFormat, T: PsszUnpack<F>> PsszUnpack<F> for Box<T> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> { T::pssz_unpack_boxed(bytes) }
@@ -776,6 +931,15 @@ fn sequence_size<F: PsszFormat, T: PsszPack<F>>(w: usize, values: &[T]) -> usize
         let mut total = values.len().checked_mul(w).expect("pssz: sequence table overflow");
         for e in values { total = total.checked_add(e.pssz_size()).expect("pssz: sequence size overflow"); }
         total
+    }
+}
+
+/// `pssz_size_hint` of a sequence: saturating, never a panic.
+fn sequence_size_hint<F: PsszFormat, T: PsszPack<F>>(w: usize, values: &[T]) -> usize {
+    if T::IS_FIXED_SIZE {
+        values.len().saturating_mul(T::FIXED_SIZE)
+    } else {
+        values.iter().fold(values.len().saturating_mul(w), |total, e| total.saturating_add(e.pssz_size_hint()))
     }
 }
 
@@ -805,10 +969,31 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for [T; N] {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: array encode failed; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
-        checked::encode_sequence::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self, out, true)
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::encode_sequence_at_depth::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self, out, true, depth)
     }
+    #[inline]
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        if !T::IS_FIXED_SIZE || T::FIXED_SIZE == 0 || slot.len() != N.saturating_mul(T::FIXED_SIZE) {
+            return checked::pack_fixed_by_append::<F, Self>(self, slot, depth);
+        }
+        checked::encode_node(depth)?;
+        if let Some(bytes) = T::pssz_bulk_bytes(self) {
+            if N != 0 {
+                checked::encode_node(depth + 1)?;
+            }
+            slot.copy_from_slice(bytes);
+            return Ok(());
+        }
+        for (value, element) in self.iter().zip(slot.chunks_exact_mut(T::FIXED_SIZE)) {
+            value.pssz_pack_fixed(element, depth + 1)?;
+        }
+        Ok(())
+    }
+    fn pssz_size_hint(&self) -> usize { sequence_size_hint::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self) }
 }
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F> for [T; N] {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -843,10 +1028,13 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for [T] {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: slice encode failed; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
-        checked::encode_sequence::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self, out, false)
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::encode_sequence_at_depth::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self, out, false, depth)
     }
+    fn pssz_size_hint(&self) -> usize { sequence_size_hint::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self) }
 }
 
 impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Vec<T> {
@@ -861,10 +1049,13 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Vec<T> {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: vector encode failed; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
-        checked::encode_sequence::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self, out, false)
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::encode_sequence_at_depth::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self, out, false, depth)
     }
+    fn pssz_size_hint(&self) -> usize { sequence_size_hint::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, self) }
 }
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>> PsszUnpack<F> for Vec<T> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -936,11 +1127,14 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for BoundedList<
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: BoundedList overflow; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
         if self.0.len() > N { return Err(PsszError::new("pssz: BoundedList overflow")); }
-        let _depth = checked::EncodeDepth::enter()?;
-        checked::encode_sequence::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, &self.0, out, false)
+        checked::encode_node(depth)?;
+        checked::encode_sequence_at_depth::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, &self.0, out, false, depth)
     }
+    fn pssz_size_hint(&self) -> usize { sequence_size_hint::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, &self.0) }
 }
 impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F> for BoundedList<T, N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -981,11 +1175,19 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for Bitvector<N> {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: invalid bitvector; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
         crate::pssz_bits::validate_data(&self.bytes, N)?;
-        out.try_reserve(self.bytes.len()).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
-        out.extend_from_slice(&self.bytes);
+        checked::append(out, &self.bytes)
+    }
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        crate::pssz_bits::validate_data(&self.bytes, N)?;
+        if slot.len() != self.bytes.len() {
+            return Err(PsszError::new("pssz: fixed encoder size mismatch"));
+        }
+        slot.copy_from_slice(&self.bytes);
         Ok(())
     }
 }
@@ -1016,13 +1218,15 @@ impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: bitlist exceeds bound; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
         if self.bits.len() > MAX_N { return Err(PsszError::new("pssz: bitlist count exceeds bound")); }
-        out.try_reserve(self.bits.len() / 8 + 1).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
+        checked::reserve(out, self.bits.len() / 8 + 1)?;
         self.pack_bits(out); // wire-identical with SSZ
         Ok(())
     }
+    fn pssz_size_hint(&self) -> usize { self.bits.len() / 8 + 1 }
 }
 impl<F: PsszFormat, const MAX_N: usize> PsszUnpack<F> for Bitlist<MAX_N> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
@@ -1071,19 +1275,23 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Option<T> {
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: optional encode failed; use try_to_pssz");
     }
-    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
-        let mut result = Vec::new();
-        if T::MIN_ENCODED_SIZE == 0 { result.push(if self.is_some() { 1 } else { 0 }); }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        if T::MIN_ENCODED_SIZE == 0 { checked::append(out, &[self.is_some() as u8])?; }
         if let Some(v) = self {
-            v.pssz_pack_checked(&mut result)?;
-            if T::MIN_ENCODED_SIZE != 0 && result.is_empty() {
+            let start = out.len();
+            v.pssz_pack_at_depth(out, depth + 1)?;
+            if T::MIN_ENCODED_SIZE != 0 && out.len() <= start {
                 return Err(PsszError::new("pssz: optional payload encoded empty without a selector"));
             }
         }
-        out.try_reserve(result.len()).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
-        out.extend_from_slice(&result);
         Ok(())
+    }
+    fn pssz_size_hint(&self) -> usize {
+        let selector = if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 };
+        match self { Some(v) => v.pssz_size_hint().saturating_add(selector), None => selector }
     }
 }
 
@@ -1201,20 +1409,29 @@ macro_rules! pssz_tuple {
             const RECORD_WIDTH_BENEATH: usize = checked::widest(&[$(<$ty as PsszPack<F>>::RECORD_WIDTH_BENEATH),*]);
             const SHAPE: Shape = Shape::record(true, false, <Self as PsszPack<F>>::OFFSET_WIDTH, false, &[$(<$ty as PsszPack<F>>::SHAPE),*]);
             fn pssz_size(&self) -> usize {
-                let mut out = Vec::new();
-                <Self as PsszPack<F>>::pssz_pack_checked(self, &mut out).expect("pssz: tuple encode failed; use try_to_pssz");
-                out.len()
+                checked::encoded_len::<F, Self>(self).expect("pssz: tuple encode failed; use try_to_pssz")
             }
             fn pssz_pack(&self, out: &mut Vec<u8>) { <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: tuple encode failed; use try_to_pssz"); }
-            #[allow(unused_variables)]
-            fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-                let _depth = checked::EncodeDepth::enter()?;
+            fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
+            #[allow(unused_variables, unused_mut)]
+            #[inline]
+            fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+                checked::encode_node(depth)?;
                 let keep = checked::record_kept_fields(&[
                     $(<$ty as PsszPack<F>>::IS_OPTIONAL && <$ty as PsszPack<F>>::pssz_is_none(&self.$index)),*
                 ], false);
-                checked::finish_record::<F>(<Self as PsszPack<F>>::OFFSET_WIDTH, None, &[
-                    $(checked::field_if_kept::<F, $ty>(&self.$index, $index < keep)?),*
-                ], false, out)
+                let w = <Self as PsszPack<F>>::OFFSET_WIDTH;
+                let fixed = 0usize $(.saturating_add(if $index < keep { checked::slot::<F, $ty>(w) } else { 0 }))*;
+                let mut record = checked::RecordEncoder::begin(out, w, false, fixed, depth)?;
+                $(if $index < keep { record.field::<F, $ty>(out, &self.$index)?; })*
+                record.finish::<F>(out, None)
+            }
+            #[allow(unused_mut)]
+            fn pssz_size_hint(&self) -> usize {
+                let w = <Self as PsszPack<F>>::OFFSET_WIDTH;
+                let mut total = w;
+                $(total = total.saturating_add(checked::field_size_hint::<F, $ty>(w, &self.$index));)*
+                total
             }
         }
         impl<F: PsszFormat, $($ty: PsszPack<F> + PsszUnpack<F>),*> PsszUnpack<F> for ($($ty,)*) {
@@ -1294,14 +1511,16 @@ pub fn try_encode<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResu
     Ok(out)
 }
 
+
 /// `psio::encode(fmt, v, sink)`: appends the encoding of `value` to `out`.
 /// On error `out` is left as it was.
 pub fn encode_into<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
     checked::format::<F>()?;
     let start = out.len();
+    checked::reserve_hint::<F, T>(value, out);
     let result = value
-        .pssz_pack_checked(out)
-        .and_then(|()| checked::check_cap(T::MAX_DYNAMIC_DATA, out.len() - start));
+        .pssz_pack_at_depth(out, checked::encode_depth())
+        .and_then(|()| checked::check_cap(T::MAX_DYNAMIC_DATA, out.len().saturating_sub(start)));
     if result.is_err() {
         out.truncate(start);
     }

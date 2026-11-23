@@ -14,6 +14,14 @@
 //!
 //! Nothing here uses unsafe code or raw memory copies, and no function panics
 //! on untrusted input.
+//!
+//! The writers of the typed codecs ([`RecordEncoder`],
+//! [`encode_sequence_at_depth`]) write a value once, where it belongs in the
+//! destination: the fixed region is reserved, each payload is appended behind
+//! it and its offset is written back into its slot. Nothing is encoded into a
+//! buffer of its own. The depth of a node travels as an argument
+//! (`PsszPack::pssz_pack_at_depth`); the thread-local counter is only read
+//! where a hand-written codec joins in.
 use crate::pssz::{PsszError, PsszFormat, PsszPack, PsszResult, PsszUnpack};
 use std::ops::Range;
 
@@ -108,6 +116,175 @@ impl Drop for EncodeDepth {
     }
 }
 
+const DEPTH_EXCEEDED: PsszError = PsszError::new("pssz: max depth exceeded");
+
+/// The check [`EncodeDepth::enter`] makes, for a writer that is handed the
+/// depth of its node: node `depth` exists iff `depth <= MAX_DEPTH`.
+#[inline(always)]
+pub fn encode_node(depth: usize) -> PsszResult<()> {
+    if depth > MAX_DEPTH {
+        Err(DEPTH_EXCEEDED)
+    } else {
+        Ok(())
+    }
+}
+
+/// The depth of the node an encoder called now would be: 0 at the root, and
+/// inside a hand-written codec's `pssz_pack_checked` the depth of its
+/// children.
+#[inline]
+pub fn encode_depth() -> usize {
+    ENCODE_DEPTH.with(|depth| depth.get())
+}
+
+/// Scope in which the thread-local encode depth is `depth`: how a writer
+/// that is handed its depth calls one that reads the counter (the default
+/// `PsszPack::pssz_pack_at_depth`, for a hand-written codec).
+pub struct EncodeDepthAt(usize);
+impl EncodeDepthAt {
+    #[inline]
+    pub fn enter(depth: usize) -> Self {
+        Self(ENCODE_DEPTH.with(|current| current.replace(depth)))
+    }
+}
+impl Drop for EncodeDepthAt {
+    #[inline]
+    fn drop(&mut self) {
+        ENCODE_DEPTH.with(|current| current.set(self.0));
+    }
+}
+
+/// `pssz_pack_checked` of a codec that implements `pssz_pack_at_depth`: the
+/// depth is the thread's, and on error `out` is left as it was.
+#[inline]
+pub fn pack_checked<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
+    let start = out.len();
+    let result = value.pssz_pack_at_depth(out, encode_depth());
+    if result.is_err() {
+        out.truncate(start);
+    }
+    result
+}
+
+/// The most an encoder reserves on the word of `PsszPack::pssz_size_hint`,
+/// which is a safe method: a wrong hint costs at most this much memory.
+pub const SIZE_HINT_LIMIT: usize = 1 << 30;
+
+/// Room for the whole value where its size is known ahead: one allocation.
+/// The hint is not trusted, and failing to reserve it is not an error.
+#[inline]
+pub fn reserve_hint<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, out: &mut Vec<u8>) {
+    let hint = value.pssz_size_hint();
+    if hint > out.capacity() - out.len() && hint <= SIZE_HINT_LIMIT {
+        let _ = out.try_reserve_exact(hint);
+    }
+}
+
+/// `pssz_size` of a type whose size is that of its encoding: the value is
+/// encoded and measured, so a value that has no encoding is the error.
+pub fn encoded_len<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<usize> {
+    let mut out = Vec::new();
+    reserve_hint::<F, T>(value, &mut out);
+    value.pssz_pack_at_depth(&mut out, encode_depth())?;
+    Ok(out.len())
+}
+
+/// `pssz_pack_fixed` of a codec that only appends: the value is encoded on
+/// its own and copied into its slot. The length is checked, as [`field`]
+/// does for a member of a record.
+pub fn pack_fixed_by_append<F: PsszFormat, T: PsszPack<F> + ?Sized>(
+    value: &T,
+    slot: &mut [u8],
+    depth: usize,
+) -> PsszResult<()> {
+    let mut bytes = Vec::new();
+    value.pssz_pack_at_depth(&mut bytes, depth)?;
+    if bytes.len() != slot.len() {
+        return Err(PsszError::new("pssz: fixed encoder size mismatch"));
+    }
+    slot.copy_from_slice(&bytes);
+    Ok(())
+}
+
+const ALLOCATION: PsszError = PsszError::new("pssz: output allocation overflow");
+const OFFSET_OVERFLOW: PsszError = PsszError::new("pssz: value exceeds the static offset width");
+
+/// Room for `additional` more bytes, as an error instead of an abort.
+#[inline(always)]
+pub fn reserve(out: &mut Vec<u8>, additional: usize) -> PsszResult<()> {
+    if out.capacity() - out.len() < additional {
+        reserve_slow(out, additional)
+    } else {
+        Ok(())
+    }
+}
+#[cold]
+#[inline(never)]
+fn reserve_slow(out: &mut Vec<u8>, additional: usize) -> PsszResult<()> {
+    out.try_reserve(additional).map_err(|_| ALLOCATION)
+}
+
+/// Appends `count` zero bytes: a fixed region or an offset table, before it
+/// is filled in. A small region (every one whose size is a constant of the
+/// type) is a copy of constant length, which the compiler turns into a few
+/// stores; `Vec::resize` is a call to `memset`.
+#[inline(always)]
+pub fn append_zeros(out: &mut Vec<u8>, count: usize) -> PsszResult<()> {
+    const ZEROS: [u8; 128] = [0; 128];
+    reserve(out, count)?;
+    match ZEROS.get(..count) {
+        Some(zeros) => out.extend_from_slice(zeros),
+        None => out.resize(out.len() + count, 0),
+    }
+    Ok(())
+}
+
+/// Appends `bytes` (a leaf's whole encoding).
+#[inline(always)]
+pub fn append(out: &mut Vec<u8>, bytes: &[u8]) -> PsszResult<()> {
+    reserve(out, bytes.len())?;
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+/// The largest value an offset or header `w` bytes wide holds.
+#[inline(always)]
+const fn offset_limit(w: usize) -> usize {
+    match w {
+        1 => 0xff,
+        2 => 0xffff,
+        _ => 0xffff_ffff,
+    }
+}
+
+/// Stores the low `w` bytes of `value` at `at`. The caller compares the
+/// value with [`offset_limit`]: at once (a sequence) or, for the largest one,
+/// when the frame is complete (a record). A slot that is not there (a
+/// hand-written child took bytes away) is left to that check.
+#[inline(always)]
+fn store_offset(out: &mut [u8], at: usize, w: usize, value: usize) {
+    match w {
+        1 => {
+            if let Some(slot) = out.get_mut(at) {
+                *slot = value as u8;
+            }
+        }
+        2 => {
+            if let Some(slot) = out.get_mut(at..at.wrapping_add(2)) {
+                slot.copy_from_slice(&(value as u16).to_le_bytes());
+            }
+        }
+        4 => {
+            if let Some(slot) = out.get_mut(at..at.wrapping_add(4)) {
+                slot.copy_from_slice(&(value as u32).to_le_bytes());
+            }
+        }
+        _ => {}
+    }
+}
+
+const SHRUNK: PsszError = PsszError::new("pssz: an encoder removed bytes from the output");
+
 // ── Invariants ──────────────────────────────────────────────────────────────
 
 thread_local! { static WRITE_UNCHECKED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
@@ -142,6 +319,7 @@ pub fn format<F: PsszFormat>() -> PsszResult<()> {
     Ok(())
 }
 
+#[inline]
 fn width(w: usize) -> PsszResult<()> {
     if matches!(w, 1 | 2 | 4) {
         Ok(())
@@ -151,6 +329,7 @@ fn width(w: usize) -> PsszResult<()> {
 }
 
 /// C++ `wire_span_fits`: a variable payload is addressed by at most 32 bits.
+#[inline]
 pub fn wire_span(len: usize) -> PsszResult<()> {
     if len as u128 > u32::MAX as u128 {
         return Err(PsszError::new(
@@ -196,6 +375,7 @@ pub fn write_offset<F: PsszFormat>(bytes: &mut [u8], value: usize) -> PsszResult
 
 /// `maxDynamicData` check, shared by encode, decode and validate. Like C++
 /// it compares the complete encoded size of the value against the cap.
+#[inline]
 pub fn check_cap(cap: Option<usize>, len: usize) -> PsszResult<()> {
     match cap {
         Some(cap) if len > cap => Err(PsszError::new(
@@ -524,6 +704,7 @@ pub fn field<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<(L
 
 /// Number of leading fields the encoder writes: everything up to and
 /// including the last field that is not an absent optional (all, for DWNC).
+#[inline]
 pub fn record_kept_fields(omitted: &[bool], dwnc: bool) -> usize {
     if dwnc {
         omitted.len()
@@ -638,6 +819,107 @@ pub fn finish_record<F: PsszFormat>(
         .map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
     out.extend_from_slice(&result);
     Ok(())
+}
+
+/// What a field of type `T` takes in the fixed region of a record whose
+/// slots are `w` wide: [`Layout::slot`], as an expression that folds to a
+/// constant in a generated writer.
+#[inline(always)]
+pub const fn slot<F: PsszFormat, T: PsszPack<F> + ?Sized>(w: usize) -> usize {
+    if T::IS_FIXED_SIZE {
+        T::FIXED_SIZE
+    } else {
+        w
+    }
+}
+
+/// What a field of a record whose slots are `w` wide adds to the record's
+/// `pssz_size_hint`: its slot, and behind it the payload of a variable one.
+#[inline]
+pub fn field_size_hint<F: PsszFormat, T: PsszPack<F> + ?Sized>(w: usize, value: &T) -> usize {
+    if T::IS_FIXED_SIZE {
+        T::FIXED_SIZE
+    } else {
+        value.pssz_size_hint().saturating_add(w)
+    }
+}
+
+/// Writes one record (or tuple) frame into the output, in place: the same
+/// bytes and the same errors, in the same order, as encoding every field on
+/// its own and assembling them with [`encode_record_w`] and
+/// [`finish_record`].
+///
+/// [`begin`](Self::begin) appends the header and a zeroed fixed region for the
+/// kept fields; each [`field`](Self::field), in declaration order, writes a
+/// fixed-size value into its slot or appends a payload and stores its offset;
+/// [`finish`](Self::finish) checks the offsets against the record's width,
+/// the 32-bit span and the cap.
+///
+/// On error the output may be longer than it was (never shorter, and nothing
+/// before the record is touched): the caller that owns the transaction
+/// (`pssz_pack_checked`, `encode_into`) truncates.
+pub struct RecordEncoder {
+    /// Where the fixed region starts (behind the header).
+    body: usize,
+    /// Where the next field's slot starts.
+    cursor: usize,
+    w: usize,
+    header: usize,
+    fixed: usize,
+    /// The largest offset stored: offsets only grow, so the last one.
+    last: usize,
+    child_depth: usize,
+}
+impl RecordEncoder {
+    /// `fixed` is the sum of the [`slot`]s of the kept fields; `depth` the
+    /// depth of the record's own node.
+    #[inline(always)]
+    pub fn begin(out: &mut Vec<u8>, w: usize, dwnc: bool, fixed: usize, depth: usize) -> PsszResult<Self> {
+        let header = if dwnc { 0 } else { w };
+        let base = out.len();
+        append_zeros(out, header.saturating_add(fixed))?;
+        store_offset(out, base, header, fixed);
+        Ok(Self { body: base + header, cursor: base + header, w, header, fixed, last: 0, child_depth: depth + 1 })
+    }
+
+    /// The next kept field.
+    #[inline(always)]
+    pub fn field<F: PsszFormat, T: PsszPack<F> + ?Sized>(&mut self, out: &mut Vec<u8>, value: &T) -> PsszResult<()> {
+        if T::IS_FIXED_SIZE {
+            // (A range that wraps is not in the output: an error.)
+            let end = self.cursor.wrapping_add(T::FIXED_SIZE);
+            let slot = out.get_mut(self.cursor..end).ok_or(SHRUNK)?;
+            value.pssz_pack_fixed(slot, self.child_depth)?;
+            self.cursor = end;
+        } else {
+            let offset = out.len().checked_sub(self.body).ok_or(SHRUNK)?;
+            store_offset(out, self.cursor, self.w, offset);
+            self.last = offset;
+            self.cursor += self.w;
+            value.pssz_pack_at_depth(out, self.child_depth)?;
+        }
+        Ok(())
+    }
+
+    /// `cap` is the record's `maxDynamicData` (the automatic profile checks
+    /// it at every record; explicit profiles only at the top level).
+    #[inline(always)]
+    pub fn finish<F: PsszFormat>(self, out: &mut Vec<u8>, cap: Option<usize>) -> PsszResult<()> {
+        width(self.w)?;
+        let payload = out.len().checked_sub(self.body).ok_or(SHRUNK)?;
+        if payload < self.fixed {
+            return Err(SHRUNK);
+        }
+        let limit = offset_limit(self.w);
+        if (self.header != 0 && self.fixed > limit) || self.last > limit {
+            return Err(OFFSET_OVERFLOW);
+        }
+        wire_span(payload)?;
+        if F::AUTO {
+            check_cap(cap, payload + self.header)?;
+        }
+        Ok(())
+    }
 }
 
 /// Reader-side counterpart of `finish_record`.
@@ -939,5 +1221,104 @@ pub fn encode_sequence_with<T>(
     out.try_reserve(result.len())
         .map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
     out.extend_from_slice(&result);
+    Ok(())
+}
+
+/// [`encode_sequence`], written into the output in place; the sequence is
+/// node `depth`, whose guard the caller has passed. On error the output may
+/// be longer than it was: the caller that owns the transaction truncates.
+#[inline]
+pub fn encode_sequence_at_depth<F: PsszFormat, T: PsszPack<F>>(
+    w: usize,
+    values: &[T],
+    out: &mut Vec<u8>,
+    known_count: bool,
+    depth: usize,
+) -> PsszResult<()> {
+    if T::IS_FIXED_SIZE {
+        if let Some(bytes) = T::pssz_bulk_bytes(values) {
+            // The elements are leaves whose bytes are the encoding: all
+            // that is left of each one's own writer is its depth check.
+            width(w)?;
+            if !values.is_empty() {
+                encode_node(depth + 1)?;
+            }
+            return append(out, bytes);
+        }
+    }
+    encode_sequence_with_at_depth(
+        w,
+        T::IS_FIXED_SIZE.then_some(T::FIXED_SIZE),
+        values.iter(),
+        |value: &T, out: &mut Vec<u8>, depth| value.pssz_pack_at_depth(out, depth),
+        |value: &T, slot: &mut [u8], depth| value.pssz_pack_fixed(slot, depth),
+        out,
+        known_count,
+        depth,
+    )
+}
+
+/// [`encode_sequence_with`], in place: `pack` appends one element (node
+/// `depth + 1`), `pack_fixed` writes a fixed-size one into its slot.
+#[inline]
+pub fn encode_sequence_with_at_depth<T>(
+    w: usize,
+    fixed: Option<usize>,
+    values: impl ExactSizeIterator<Item = T>,
+    mut pack: impl FnMut(T, &mut Vec<u8>, usize) -> PsszResult<()>,
+    mut pack_fixed: impl FnMut(T, &mut [u8], usize) -> PsszResult<()>,
+    out: &mut Vec<u8>,
+    known_count: bool,
+    depth: usize,
+) -> PsszResult<()> {
+    width(w)?;
+    let count = values.len();
+    let base = out.len();
+    if let Some(size) = fixed {
+        if size == 0 && count != 0 && !known_count {
+            return Err(PsszError::new(
+                "pssz: nonempty zero-size vector is unsupported",
+            ));
+        }
+        let total = count
+            .checked_mul(size)
+            .ok_or(PsszError::new("pssz: sequence size overflow"))?;
+        if size == 0 {
+            for value in values {
+                pack_fixed(value, &mut [], depth + 1)?;
+            }
+            return Ok(());
+        }
+        append_zeros(out, total)?;
+        // `values` may hold fewer elements than it said (a safe trait): the
+        // zip stops at the shorter and the length is compared.
+        let mut written = 0usize;
+        for (value, slot) in values.zip(out[base..].chunks_exact_mut(size)) {
+            pack_fixed(value, slot, depth + 1)?;
+            written += 1;
+        }
+        if written != count {
+            return Err(PsszError::new("pssz: fixed encoder size mismatch"));
+        }
+    } else {
+        let table = count
+            .checked_mul(w)
+            .ok_or(PsszError::new("pssz: sequence table overflow"))?;
+        append_zeros(out, table)?;
+        let limit = offset_limit(w);
+        for (i, value) in values.enumerate() {
+            let offset = out.len().checked_sub(base).ok_or(SHRUNK)?;
+            if offset > limit {
+                return Err(OFFSET_OVERFLOW);
+            }
+            if i >= count {
+                // More elements than the iterator said: no slot for this one.
+                return Err(PsszError::new("pssz: sequence length mismatch"));
+            }
+            store_offset(out, base + i * w, w, offset);
+            pack(value, out, depth + 1)?;
+        }
+        wire_span(out.len().checked_sub(base).ok_or(SHRUNK)?)?;
+    }
     Ok(())
 }

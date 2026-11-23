@@ -214,20 +214,22 @@ impl<F: PsszFormat, T: PsszPack<Pssz>, V: NestedValidation, const N: usize> Pssz
             .expect("pssz: nested value exceeds its bound or the depth limit; use try_to_pssz");
     }
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
-        let _depth = checked::EncodeDepth::enter()?;
+        checked::pack_checked::<F, Self>(self, out)
+    }
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
         // The member must leave one level for the inner root; the levels
         // inside the bytes are the readers' to check.
-        let _inner = if V::DEFERRED && self.bytes.is_empty() {
-            None
-        } else {
-            Some(checked::EncodeDepth::enter()?)
-        };
+        if !(V::DEFERRED && self.bytes.is_empty()) {
+            checked::encode_node(depth + 1)?;
+        }
         if self.bytes.len() > N {
             return Err(OVERFLOW);
         }
-        out.try_reserve(self.bytes.len()).map_err(|_| PsszError::new("pssz: output allocation overflow"))?;
-        out.extend_from_slice(&self.bytes);
-        Ok(())
+        checked::append(out, &self.bytes)
+    }
+    fn pssz_size_hint(&self) -> usize {
+        self.bytes.len()
     }
 }
 impl<F: PsszFormat, T, V, const N: usize> PsszUnpack<F> for Nested<T, V, N>

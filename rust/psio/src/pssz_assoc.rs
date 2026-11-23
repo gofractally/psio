@@ -78,33 +78,35 @@ pub(crate) fn encode_map<'a, F: PsszFormat, K, V>(
     entries: impl Iterator<Item = (&'a K, &'a V)>,
     bound: usize,
     out: &mut Vec<u8>,
+    depth: usize,
 ) -> PsszResult<()>
 where
     K: PsszPack<F> + KeyPack + 'a,
     V: PsszPack<F> + 'a,
 {
-    let _depth = checked::EncodeDepth::enter()?;
+    checked::encode_node(depth)?;
     let sorted = canonical_order(entries, |entry| entry.0, MAP_DUPLICATE)?;
     if sorted.len() > bound {
         return Err(MAP_BOUND);
     }
-    checked::encode_sequence::<F, (&K, &V)>(w, &sorted, out, false)
+    checked::encode_sequence_at_depth::<F, (&K, &V)>(w, &sorted, out, false, depth)
 }
 pub(crate) fn encode_set<'a, F: PsszFormat, K>(
     w: usize,
     elements: impl Iterator<Item = &'a K>,
     bound: usize,
     out: &mut Vec<u8>,
+    depth: usize,
 ) -> PsszResult<()>
 where
     K: PsszPack<F> + KeyPack + 'a,
 {
-    let _depth = checked::EncodeDepth::enter()?;
+    checked::encode_node(depth)?;
     let sorted = canonical_order(elements, |element| *element, SET_DUPLICATE)?;
     if sorted.len() > bound {
         return Err(SET_BOUND);
     }
-    checked::encode_sequence::<F, &K>(w, &sorted, out, false)
+    checked::encode_sequence_at_depth::<F, &K>(w, &sorted, out, false, depth)
 }
 /// The entries of a map frame: the list is decoded (which runs the
 /// invariants of the keys and values, in wire order), then the order is
@@ -196,10 +198,7 @@ macro_rules! assoc_consts {
         const OFFSET_WIDTH: usize = position_width::<F>(<Self as PsszPack<F>>::AUTO_BOUND);
         const RECORD_WIDTH_BENEATH: usize = <$list as PsszPack<F>>::RECORD_WIDTH_BENEATH;
         fn pssz_size(&self) -> usize {
-            let mut out = Vec::new();
-            <Self as PsszPack<F>>::pssz_pack_checked(self, &mut out)
-                .expect("pssz: map / set encode failed; use try_to_pssz");
-            out.len()
+            checked::encoded_len::<F, Self>(self).expect("pssz: map / set encode failed; use try_to_pssz")
         }
         fn pssz_pack(&self, out: &mut Vec<u8>) {
             <Self as PsszPack<F>>::pssz_pack_checked(self, out)
@@ -213,9 +212,12 @@ macro_rules! pssz_map {
         impl<F: PsszFormat, K: PsszPack<F> + KeyPack + $($kb)*, V: PsszPack<F>, $($cg)*> PsszPack<F> for $ty {
             assoc_consts!(Map, (K, V), $bound);
             fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+                checked::pack_checked::<F, Self>(self, out)
+            }
+            fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
                 let $s = self;
                 let bound: Option<usize> = $bound;
-                encode_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, $inner.iter(), bound.unwrap_or(usize::MAX), out)
+                encode_map::<F, K, V>(<Self as PsszPack<F>>::OFFSET_WIDTH, $inner.iter(), bound.unwrap_or(usize::MAX), out, depth)
             }
         }
         impl<F: PsszFormat, K, V, $($cg)*> PsszUnpack<F> for $ty
@@ -264,9 +266,12 @@ macro_rules! pssz_set {
         impl<F: PsszFormat, K: PsszPack<F> + KeyPack + $($kb)*, $($cg)*> PsszPack<F> for $ty {
             assoc_consts!(Set, K, $bound);
             fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+                checked::pack_checked::<F, Self>(self, out)
+            }
+            fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
                 let $s = self;
                 let bound: Option<usize> = $bound;
-                encode_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, $inner.iter(), bound.unwrap_or(usize::MAX), out)
+                encode_set::<F, K>(<Self as PsszPack<F>>::OFFSET_WIDTH, $inner.iter(), bound.unwrap_or(usize::MAX), out, depth)
             }
         }
         impl<F: PsszFormat, K, $($cg)*> PsszUnpack<F> for $ty
@@ -348,6 +353,15 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for ByKey<T> {
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
         <T as PsszPack<F>>::pssz_pack_checked(&self.0, out)
     }
+    #[inline]
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        <T as PsszPack<F>>::pssz_pack_at_depth(&self.0, out, depth)
+    }
+    #[inline]
+    fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
+        <T as PsszPack<F>>::pssz_pack_fixed(&self.0, slot, depth)
+    }
+    fn pssz_size_hint(&self) -> usize { <T as PsszPack<F>>::pssz_size_hint(&self.0) }
 }
 impl<F: PsszFormat, T: PsszUnpack<F>> PsszUnpack<F> for ByKey<T> {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> { T::pssz_unpack(bytes).map(ByKey) }
