@@ -9,10 +9,15 @@
 #include <catch.hpp>
 
 #include <psio/invariant.hpp>
+#include <psio/pssz.hpp>
+#include <psio/pssz_ir.hpp>
+#include <psio/pssz_ir_json.hpp>
+#include <psio/schema_builder.hpp>
 
 #include <array>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -105,6 +110,25 @@ namespace japi
                                                      " is not positive",
                                                   0, "Positive");
    }
+
+   // "Any JSON here" as members of a reflected record.
+   struct Pretty
+   {
+      std::string                     service;
+      psio::json_value                data;
+      std::optional<psio::json_value> more;
+      std::vector<psio::json_value>   list;
+      PSIO_REFLECT(Pretty, service, data, more, list)
+   };
+   // The same bytes: the JSON texts as UTF-8 strings.
+   struct PrettyText
+   {
+      std::string                      service;
+      std::string                      data;
+      std::optional<std::string>       more;
+      std::vector<std::string>         list;
+      PSIO_REFLECT(PrettyText, service, data, more, list)
+   };
 }  // namespace japi
 PSIO_INVARIANT(japi::Positive, japi::positive, "Positive")
 
@@ -285,4 +309,194 @@ TEST_CASE("json_text_cursor: the offset gives the text of a value as written",
    CHECK_FALSE(has);
    CHECK(c.finish());
    CHECK(c.offset() == text.size());
+}
+
+// ── psio::json_value: any JSON value ───────────────────────────────────────
+TEST_CASE("json_value: a document read and written again is the same text",
+          "[json][ijson][json_value]")
+{
+   // Numbers keep their text: nothing is rounded, renormalised or widened.
+   const std::string_view text =
+      R"({"a":1.50,"b":"x\n","c":[1,2,{"d":null}],"big":18446744073709551616,"e":1e3,"neg":-0,"z":true,"o":{}})";
+   for (const bool ijson : {false, true})
+   {
+      psio::json_value v;
+      REQUIRE((ijson ? psio::decode_json_checked(psio::ijson{}, text, v)
+                     : psio::decode_json_checked(psio::json{}, text, v))
+                 .ok());
+      CHECK((ijson ? psio::to_ijson(v) : psio::to_json(v)) == text);
+      REQUIRE(v.is_object());
+      CHECK(v.as_object()->size() == 8);
+      CHECK(v.find("a")->as_number()->text == "1.50");
+      CHECK(v.find("a")->as_number()->as_double() == 1.5);
+      CHECK_FALSE(v.find("a")->as_number()->as_int64());
+      CHECK(v.find("big")->as_number()->text == "18446744073709551616");
+      CHECK_FALSE(v.find("big")->as_number()->as_uint64());
+      CHECK(*v.find("b")->as_string() == "x\n");
+      CHECK(v.find("c")->as_array()->size() == 3);
+      CHECK((*v.find("c")->as_array())[1].as_number()->as_int64() == 2);
+      CHECK((*v.find("c")->as_array())[2].find("d")->is_null());
+      CHECK(*v.find("z")->as_bool());
+      CHECK(v.find("missing") == nullptr);
+      CHECK(v.find("o")->as_object()->empty());
+   }
+   CHECK(psio::from_ijson<psio::json_value>(" [ 1 , \"a\" ] ") ==
+         psio::json_value{psio::json_value::array{1, "a"}});
+   // Scalars at the root.
+   CHECK(psio::to_ijson(psio::from_ijson<psio::json_value>("null")) == "null");
+   CHECK(psio::to_ijson(psio::from_ijson<psio::json_value>("-12.5e-3")) == "-12.5e-3");
+
+   // Not JSON: an error, on every reading entry point.
+   for (std::string_view bad : {R"({"a":1,})", "[1 2]", "", "01", R"({"a":1}x)", "nul"})
+   {
+      INFO(bad);
+      psio::json_value v;
+      CHECK_FALSE(psio::decode_json_checked(psio::ijson{}, bad, v).ok());
+      CHECK_FALSE(psio::validate_json<psio::json_value>(
+                     psio::json{}, std::span<const char>{bad.data(), bad.size()})
+                     .ok());
+   }
+   // Nesting is bounded like every reader's.
+   const std::string deep(psio::kMaxValidationDepth + 1, '[');
+   psio::json_value   v;
+   CHECK_FALSE(psio::decode_json_checked(psio::json{}, std::string_view{deep}, v).ok());
+}
+
+TEST_CASE("json_value: a repeated key keeps its last value, at the first position",
+          "[json][ijson][json_value]")
+{
+   const auto v = psio::from_ijson<psio::json_value>(R"({"a":1,"b":2,"a":{"x":[]},"b":3})");
+   CHECK(psio::to_ijson(v) == R"({"a":{"x":[]},"b":3})");
+   REQUIRE(v.as_object()->size() == 2);
+   // A hand-built object that holds a key twice is written with the last.
+   psio::json_value built{psio::json_value::object{{"k", 1}, {"j", 2}, {"k", "last"}}};
+   CHECK(*built.find("k")->as_string() == "last");
+   CHECK(psio::to_json(built) == R"({"j":2,"k":"last"})");
+}
+
+TEST_CASE("json_value: built and edited in code", "[json][ijson][json_value]")
+{
+   psio::json_value v;
+   CHECK(v.is_null());
+   v.set("service", "tokens");
+   v.set("amount", std::uint64_t{18446744073709551615ull});
+   v.set("ratio", 0.25);
+   v.set("ok", true);
+   v.set("none", nullptr);
+   v.set("list", psio::json_value::array{1, -2, "three"});
+   v.set("amount", 5);  // replaced where it is
+   CHECK(psio::to_ijson(v) ==
+         R"({"service":"tokens","amount":5,"ratio":0.25,"ok":true,"none":null,"list":[1,-2,"three"]})");
+   CHECK(v.erase("none") == 1);
+   CHECK(v.erase("none") == 0);
+   v.find("list")->as_array()->pop_back();
+   CHECK(psio::to_json(v) == R"({"service":"tokens","amount":5,"ratio":0.25,"ok":true,"list":[1,-2]})");
+   // A number is its text; a json_value does not know its width, so ijson
+   // writes it as it is.
+   CHECK(psio::to_ijson(psio::json_value{std::uint64_t{18446744073709551615ull}}) ==
+         "18446744073709551615");
+   CHECK(psio::json_number{std::int64_t{-7}}.as_int64() == -7);
+   CHECK_FALSE(psio::json_number{std::int64_t{-7}}.as_uint64());
+
+   // A value with no JSON text is an error, not output.
+   std::string out = "kept";
+   auto        st  = psio::encode_json_checked(psio::ijson{},
+                                               psio::json_value{psio::json_number{"0x10"}}, out);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == "json: a json_value number is not a JSON number");
+   CHECK(out == "kept");
+   CHECK_FALSE(psio::encode_json_checked(psio::json{},
+                                         psio::json_value{std::numeric_limits<double>::infinity()},
+                                         out)
+                  .ok());
+   CHECK_FALSE(psio::encode_json_checked(psio::json{}, psio::json_value{std::string{"\xff"}}, out)
+                  .ok());
+   // The I-JSON string rule is the only difference between the formats.
+   const psio::json_value nonchar{std::string{"\xEF\xBF\xBF"}};
+   CHECK(psio::encode_json_checked(psio::json{}, nonchar, out).ok());
+   CHECK_FALSE(psio::encode_json_checked(psio::ijson{}, nonchar, out).ok());
+   CHECK_THROWS_AS(psio::to_ijson(nonchar), psio::codec_exception);
+}
+
+TEST_CASE("json_value: a member of a reflected record, in text and in PSSZ",
+          "[json][ijson][pssz][schema][json_value]")
+{
+   namespace ir = psio::pssz_ir;
+   const std::string_view text =
+      R"({"service":"tokens","data":{"amount":"5","memo":[1.0,null]},"more":7,"list":[true,"x",{}]})";
+   japi::Pretty p;
+   REQUIRE(psio::decode_json_checked(psio::ijson{}, text, p).ok());
+   CHECK(psio::to_ijson(p) == text);
+   CHECK(*p.data.find("amount")->as_string() == "5");
+   // A missing optional member is none; a missing json_value is an error
+   // (null is a value: it has to be written).
+   japi::Pretty q;
+   REQUIRE(psio::decode_json_checked(psio::ijson{}, R"({"service":"s","data":null,"list":[]})", q)
+              .ok());
+   CHECK(q.data.is_null());
+   CHECK_FALSE(q.more.has_value());
+   CHECK_FALSE(psio::decode_json_checked(psio::ijson{}, R"({"service":"s","list":[]})", q).ok());
+
+   // PSSZ: each json_value is a UTF-8 string holding its compact text.
+   const japi::PrettyText twin{"tokens", R"({"amount":"5","memo":[1.0,null]})", "7",
+                               {"true", R"("x")", "{}"}};
+   const auto bytes = psio::encode(psio::pssz{}, p);
+   CHECK(bytes == psio::encode(psio::pssz{}, twin));
+   REQUIRE(psio::validate<japi::Pretty>(psio::pssz{}, std::span<const char>{bytes}).ok());
+   REQUIRE(psio::validate_strict<japi::Pretty>(psio::pssz{}, std::span<const char>{bytes}).ok());
+   CHECK(psio::to_ijson(psio::decode<japi::Pretty>(psio::pssz{}, std::span<const char>{bytes})) ==
+         text);
+   // Bytes that are not JSON text are not a value; text that is JSON but
+   // not compact is a value with another, canonical, encoding.
+   auto bad = twin;
+   bad.data = "{not json";
+   const auto bad_bytes = psio::encode(psio::pssz{}, bad);
+   CHECK_FALSE(psio::validate<japi::Pretty>(psio::pssz{}, std::span<const char>{bad_bytes}).ok());
+   auto loose = twin;
+   loose.data = R"({ "amount" : "5" })";
+   const auto loose_bytes = psio::encode(psio::pssz{}, loose);
+   CHECK(psio::validate<japi::Pretty>(psio::pssz{}, std::span<const char>{loose_bytes}).ok());
+   CHECK_FALSE(
+      psio::validate_strict<japi::Pretty>(psio::pssz{}, std::span<const char>{loose_bytes}).ok());
+
+   // The schema: Custom "json" over a UTF-8 string; and the schema-driven
+   // codecs agree with the typed ones on bytes and on text.
+   const auto schema = psio::SchemaBuilder{}.insert<japi::Pretty>("Pretty").build();
+   REQUIRE(ir::validate_schema(schema).ok());
+   const auto& record = std::get<psio::schema_types::Object>(schema.get("Pretty")->value);
+   const auto* node   = record.members[1].type->resolve(schema);
+   REQUIRE(node);
+   const auto& custom = std::get<psio::schema_types::Custom>(node->value);
+   CHECK(custom.id == "json");
+   CHECK(std::get<psio::schema_types::Custom>(custom.type->value).id == "utf8");
+   for (const bool ijson : {false, true})
+   {
+      INFO(ijson);
+      const std::string typed = ijson ? psio::to_ijson(p) : psio::to_json(p);
+      std::string       out;
+      REQUIRE((ijson ? ir::pssz_to_json(schema, "Pretty", psio::ijson{},
+                                        std::span<const char>{bytes}, out)
+                     : ir::pssz_to_json(schema, "Pretty", psio::json{},
+                                        std::span<const char>{bytes}, out))
+                 .ok());
+      CHECK(out == typed);
+      std::vector<char> back;
+      REQUIRE((ijson ? ir::json_to_pssz(schema, "Pretty", psio::ijson{}, std::string_view{typed},
+                                        back)
+                     : ir::json_to_pssz(schema, "Pretty", psio::json{}, std::string_view{typed},
+                                        back))
+                 .ok());
+      CHECK(back == bytes);
+   }
+   CHECK(ir::validate_pssz(schema, "Pretty", std::span<const char>{bytes}).ok());
+   CHECK_FALSE(ir::validate_pssz(schema, "Pretty", std::span<const char>{bad_bytes}).ok());
+   // Loose text in the bytes is presented compact.
+   std::string out;
+   REQUIRE(ir::pssz_to_json(schema, "Pretty", psio::ijson{}, std::span<const char>{loose_bytes},
+                            out)
+              .ok());
+   CHECK(out == text);
+   // No handler may claim the id.
+   ir::CustomHandlers handlers;
+   CHECK_FALSE(handlers.try_add("json", {}).ok());
 }

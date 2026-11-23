@@ -31,6 +31,9 @@
 //                     UTF-8 by type; a raw "string" whose bytes are not
 //                     UTF-8 is valid PSSZ but has no text (an error)
 //   box               the inner type's text
+//   json              any JSON value, inline (C++ psio::json_value): the
+//                     value's compact text is the content of the UTF-8
+//                     string the node sits on
 //   Nested            the inner value's text (its dynamic value is the inner
 //                     value; the bytes are its canonical encoding). A member
 //                     lengthBound on it counts encoded bytes and is checked
@@ -731,6 +734,20 @@ template <JsonCursor C> class Reader
    {
       if (!type.type.get())
          return c.fail("pssz IR: null schema box");
+      if (type.id == "json")
+      {
+         // Any JSON value: its compact text is the value of the UTF-8
+         // string underneath.
+         std::string                     text;
+         psio::detail::json_impl::writer w{text, "json", false};
+         if (!psio::detail::json_impl::capture_value(c, w))
+            return false;
+         w.finish();
+         if (!w.err.empty())
+            return c.fail(w.err);
+         out = std::move(text);
+         return true;
+      }
       if (type.id != "box")
       {
          if (auto kind = ::psio::parse_time_schema_id(type.id))
@@ -1333,6 +1350,17 @@ class Writer
       {
          if (!type.type.get())
             return w.fail("pssz IR: null schema box");
+         if (type.id == "json")
+         {
+            // Any JSON value: the text the string holds, inline and compact.
+            auto v = std::get_if<std::string>(&value.value);
+            if (!v)
+               return w.fail("pssz IR: string value required");
+            psio::json_text_cursor c{std::span<const char>{v->data(), v->size()}, ijson};
+            if (!psio::detail::json_impl::capture_value(c, w) || !c.finish())
+               return w.fail("json: the text of a json value is not JSON");
+            return;
+         }
          if (type.id != "box")
          {
             if (auto kind = ::psio::parse_time_schema_id(type.id))

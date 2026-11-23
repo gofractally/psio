@@ -31,6 +31,7 @@
 //   Wide integers       uint128 / int128 (Int 128), uint256 (Int 256)
 //   Time                std::chrono::duration / system_clock time_point
 //                       (Custom over the tick-count Int; id from time.hpp)
+//   Any JSON            psio::json_value (Custom "json" over a UTF-8 string)
 //
 // What a schema-driven codec (pssz_ir.hpp, pssz_ir_json.hpp) needs beyond
 // the shape is recorded too:
@@ -77,6 +78,7 @@
 #include <psio/detail/assoc.hpp>
 #include <psio/ext_int.hpp>
 #include <psio/get_type_name.hpp>
+#include <psio/json_value.hpp>
 #include <psio/reflect.hpp>
 #include <psio/schema_ir.hpp>
 #include <psio/structural.hpp>
@@ -675,6 +677,13 @@ namespace psio::schema_types
             return Custom{Box<AnyType>{Int{1, false}}, "bool"};
          else if constexpr (std::is_same_v<U, char>)
             return Custom{Box<AnyType>{Int{8, false}}, "char"};
+         else if constexpr (std::is_same_v<U, ::psio::json_value>)
+            // Any JSON value: on the wire a UTF-8 string holding its JSON
+            // text; the id says its text form is that value, inline.
+            return Custom{
+                Box<AnyType>{AnyType{Custom{
+                    Box<AnyType>{List{Box<AnyType>{insert<std::uint8_t>()}}}, "utf8"}}},
+                "json"};
          else if constexpr (std::is_integral_v<U>)
             return Int{static_cast<std::uint32_t>(8 * sizeof(U)),
                        std::is_signed_v<U>};

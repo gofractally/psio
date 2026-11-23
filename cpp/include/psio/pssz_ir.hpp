@@ -48,6 +48,7 @@
 // values first — and, when the registry says `require_all`, a custom node
 // with no handler is an error. Without a registry a custom node is its wire
 // type: structure only.
+#include <psio/detail/json_syntax.hpp>
 #include <psio/detail/pssz_record_layout.hpp>
 #include <psio/detail/validate_depth.hpp>
 #include <psio/pssz_ir_custom.hpp>
@@ -403,6 +404,13 @@ inline codec_status bitlist_count(std::span<const char> wire, std::size_t bound,
 //                          give a boxed value no bound, so a type holding
 //                          one gets the same offset width from the schema
 //
+//   json                   (not part of the binary form, but built in) any
+//                          JSON value (C++ psio::json_value): on the wire a
+//                          UTF-8 string, directly under the node, holding
+//                          the value's JSON text. The codec checks that the
+//                          string is one JSON value; its text form is that
+//                          value, inline (pssz_ir_json.hpp). Takes no handler
+//
 // "unknown" marks a C++ type the schema builder could not describe and has
 // no codec. Every other id adds nothing to the bytes: on the wire the node
 // is exactly its inner type. The time ids ("time-point-<unit>",
@@ -421,6 +429,17 @@ inline bool text_adapter_id(std::string_view id) noexcept
 inline bool assoc_id(std::string_view id) noexcept
 {
    return id == "map" || id == "set";
+}
+// Whether `text` is exactly one JSON value (RFC 8259; any whitespace).
+inline codec_status json_text(std::string_view text)
+{
+   ::psio::detail::json_impl::reader r{text.data(), text.data(), text.data() + text.size()};
+   if (text.empty() || !::psio::detail::json_impl::skip_value(r, 0, false))
+      return fail("pssz IR: the text of a json value is not JSON");
+   r.ws();
+   if (r.p != r.end)
+      return fail("pssz IR: the text of a json value is not JSON");
+   return codec_ok();
 }
 inline bool wire_custom_id(std::string_view id) noexcept
 {
@@ -1060,8 +1079,10 @@ template <std::size_t W> class Codec
          return fail("pssz IR: an enum needs an underlying integer");
       return codec_ok();
    }
+   // `json` reports a "json" node on the way: the string below it holds
+   // JSON text.
    codec_status resolve(const schema_types::AnyType &input, const schema_types::AnyType *&out,
-                        bool *boxed = nullptr) const
+                        bool *boxed = nullptr, bool *json = nullptr) const
    {
       out = &input;
       // Wrappers (Enum, Custom) between two aliases are finite in a valid
@@ -1082,7 +1103,17 @@ template <std::size_t W> class Codec
                return fail("pssz IR: null schema box");
             if (boxed && custom->id == "box")
                *boxed = true;
-            if (::psio::parse_time_schema_id(custom->id))
+            if (custom->id == "json")
+            {
+               const schema_types::AnyType *text;
+               PSIO_PSSZ_IR_TRY(alias(*custom->type, text));
+               auto string = std::get_if<schema_types::Custom>(&text->value);
+               if (!string || string->id != "utf8")
+                  return fail("pssz IR: a json value must sit directly on a UTF-8 string");
+               if (json)
+                  *json = true;
+            }
+            else if (::psio::parse_time_schema_id(custom->id))
                PSIO_PSSZ_IR_TRY(time_ticks(*custom->type));
             else if (::psio::reserved_time_schema_id(custom->id))
                return fail("pssz IR: unsupported custom adapter");
@@ -1149,7 +1180,8 @@ template <std::size_t W> class Codec
          {
             if (wire_custom_id(custom->id) || !custom->type.get())
                return codec_ok();
-            if (custom->id != "box" && !::psio::parse_time_schema_id(custom->id) &&
+            if (custom->id != "box" && custom->id != "json" &&
+                !::psio::parse_time_schema_id(custom->id) &&
                 !::psio::reserved_time_schema_id(custom->id))
             {
                const auto *handler = customs->find(custom->id);
@@ -1965,7 +1997,16 @@ template <std::size_t W> class Codec
       const auto member_count = std::exchange(position_count, std::nullopt);
       PSIO_PSSZ_IR_TRY(depth(n));
       const schema_types::AnyType *type;
-      PSIO_PSSZ_IR_TRY(resolve(input, type));
+      bool is_json = false;
+      PSIO_PSSZ_IR_TRY(resolve(input, type, nullptr, &is_json));
+      if (is_json)
+      {
+         // The string of a "json" node holds one JSON value.
+         auto text = std::get_if<std::string>(&value.value);
+         if (!text)
+            return fail("pssz IR: string value required");
+         PSIO_PSSZ_IR_TRY(json_text(*text));
+      }
       return std::visit(
           [&](const auto &t) -> codec_status
           {
@@ -2283,7 +2324,11 @@ codec_status Codec<W>::decode_shape(const schema_types::AnyType &input,
    const auto member_count = std::exchange(position_count, std::nullopt);
    PSIO_PSSZ_IR_TRY(depth(n));
    const schema_types::AnyType *type;
-   PSIO_PSSZ_IR_TRY(resolve(input, type));
+   bool is_json = false;
+   PSIO_PSSZ_IR_TRY(resolve(input, type, nullptr, &is_json));
+   // The string of a "json" node holds one JSON value.
+   if (is_json)
+      PSIO_PSSZ_IR_TRY(json_text(std::string_view{bytes.data(), bytes.size()}));
    return std::visit(
        [&](const auto &t) -> codec_status
        {

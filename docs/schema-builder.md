@@ -145,6 +145,10 @@ builder records everything those depend on:
   The validation policy of `psio::nested<T, nested_validation::deferred>` is
   not recorded: both forms produce the same node.
 
+- **Any JSON.** `psio::json_value` is `Custom{ Custom{List<u8>, "utf8"},
+  "json" }`: a UTF-8 string on the wire, whose content is the value's JSON
+  text and whose text form is that value itself (`docs/json.md`, "Any JSON
+  value"). `json` is a reserved id.
 - **Transparent types.** A `transparent()` type is inserted under its
   reflected name as a named alias of its member's type:
   `{name: "SubjectPublicKeyInfo", type: <the member's type>}`. Nothing else

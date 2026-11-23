@@ -124,6 +124,7 @@
 #include <psio/format_tag_base.hpp>
 #include <psio/get_type_name.hpp>
 #include <psio/json_cursor.hpp>
+#include <psio/json_value.hpp>
 #include <psio/reflect.hpp>
 #include <psio/time.hpp>
 #include <psio/transparent.hpp>
@@ -811,6 +812,161 @@ namespace psio {
          }
       }
 
+      // ── psio::json_value (json_value.hpp): any JSON value ─────────────────
+      //
+      // Whether `token` is exactly one RFC 8259 number.
+      inline bool is_number_token(std::string_view token)
+      {
+         if (token.empty())
+            return false;
+         reader r{token.data(), token.data(), token.data() + token.size()};
+         return skip_number(r) && r.p == r.end;
+      }
+      // The text of `v`: compact, members in their order, the last value
+      // of a key an object holds twice. `nonchar`: the I-JSON string rule.
+      inline void write_any(const ::psio::json_value& v, writer& w, bool nonchar,
+                            std::size_t depth = 0)
+      {
+         using value_t = ::psio::json_value;
+         if (v.is_null())
+            w.append("null");
+         else if (const bool* b = v.as_bool())
+            w.append(*b ? std::string_view{"true"} : std::string_view{"false"});
+         else if (const auto* n = v.as_number())
+         {
+            if (is_number_token(n->text))
+               w.append(std::string_view{n->text});
+            else
+            {
+               w.fail("json: a json_value number is not a JSON number");
+               w.append("null");
+            }
+         }
+         else if (const auto* text = v.as_string())
+            write_string(w, std::string_view{*text}, nonchar);
+         else if (depth >= kMaxValidationDepth)
+         {
+            // (deeper than any reader accepts)
+            w.fail("json: max depth exceeded");
+            w.append("null");
+         }
+         else if (const value_t::array* items = v.as_array())
+         {
+            w.put('[');
+            bool first = true;
+            for (const value_t& item : *items)
+            {
+               if (!first)
+                  w.put(',');
+               first = false;
+               write_any(item, w, nonchar, depth + 1);
+            }
+            w.put(']');
+         }
+         else if (const value_t::object* members = v.as_object())
+         {
+            w.put('{');
+            bool first = true;
+            for (std::size_t i = 0; i < members->size(); ++i)
+            {
+               // A key held twice: its last value, once.
+               bool later = false;
+               for (std::size_t j = i + 1; j < members->size() && !later; ++j)
+                  later = (*members)[j].first == (*members)[i].first;
+               if (later)
+                  continue;
+               if (!first)
+                  w.put(',');
+               first = false;
+               write_string(w, std::string_view{(*members)[i].first}, nonchar);
+               w.put(':');
+               write_any((*members)[i].second, w, nonchar, depth + 1);
+            }
+            w.put('}');
+         }
+      }
+      // Reads one value of any shape. A repeated key keeps its last value,
+      // at the position of the first. `out == nullptr`: checked only.
+      template <typename C>
+      bool read_any(C& c, ::psio::json_value* out)
+      {
+         using value_t = ::psio::json_value;
+         if (!out)
+            return c.skip();
+         json_kind k;
+         if (!c.kind(k))
+            return false;
+         std::string_view text;
+         bool             flag = false;
+         switch (k)
+         {
+            case json_kind::null:
+               if (!c.null())
+                  return false;
+               out->value = std::monostate{};
+               return true;
+            case json_kind::boolean:
+               if (!c.boolean(flag))
+                  return false;
+               out->value = flag;
+               return true;
+            case json_kind::number:
+               if (!c.number(text))
+                  return false;
+               out->value = ::psio::json_number{std::string{text}};
+               return true;
+            case json_kind::string:
+               if (!c.string(text, flag))
+                  return false;
+               out->value = std::string{text};
+               return true;
+            case json_kind::array:
+            {
+               if (!c.begin_array())
+                  return false;
+               value_t::array items;
+               for (;;)
+               {
+                  if (!c.next_element(flag))
+                     return false;
+                  if (!flag)
+                     break;
+                  if (!read_any(c, &items.emplace_back()))
+                     return false;
+               }
+               out->value = std::move(items);
+               return true;
+            }
+            case json_kind::object:
+            {
+               if (!c.begin_object())
+                  return false;
+               value_t::object members;
+               for (;;)
+               {
+                  if (!c.next_field(flag, text))
+                     return false;
+                  if (!flag)
+                     break;
+                  value_t* slot = nullptr;
+                  for (auto& m : members)
+                     if (m.first == text)
+                     {
+                        slot = &m.second;
+                        break;
+                     }
+                  if (!slot)
+                     slot = &members.emplace_back(std::string{text}, value_t{}).second;
+                  if (!read_any(c, slot))
+                     return false;
+               }
+               out->value = std::move(members);
+               return true;
+            }
+         }
+         return c.fail("json: unexpected character at value start");
+      }
+
       // Every value is written through here: its text (encode_shape), then
       // — for a type that has one — its invariant, so nested values are
       // checked innermost first.
@@ -841,6 +997,8 @@ namespace psio {
             Proj::encode(v, payload);
             write_string(w, std::string_view{payload}, Fmt::i_json);
          }
+         else if constexpr (std::is_same_v<T, ::psio::json_value>)
+            write_any(v, w, Fmt::i_json);
          else if constexpr (is_box<T>::value)
          {
             // Transparent: the text of the boxed value. An empty box (a
@@ -1771,6 +1929,8 @@ namespace psio {
          if constexpr (dispatch_adapter_v<Fmt, T>)
             return read_adapted<Fmt, ::psio::adapter<std::remove_cvref_t<T>,
                                                      ::psio::text_category>>(r, out);
+         else if constexpr (std::is_same_v<T, ::psio::json_value>)
+            return read_any(r.c, out);
          else if constexpr (is_box<T>::value)
          {
             // Transparent: the boxed value's text, read into the box.
@@ -2523,6 +2683,64 @@ namespace psio {
       return codec_fail(w.err, static_cast<std::uint32_t>(start), Fmt::name);
    }
 
+   // ── psio::json_value in the binary formats ─────────────────────────────
+   //
+   // A json_value is, in PSSZ and every other binary format, its compact
+   // psio::json text: the bytes of a UTF-8 string (json_value.hpp). The
+   // checking readers accept any well-formed JSON text; `validate_strict`
+   // only the text a writer produces (compact, one value per key), so that
+   // a value has one encoding.
+   namespace detail::json_impl
+   {
+      struct json_value_binary
+      {
+         static std::string text_of(const ::psio::json_value& v)
+         {
+            std::string out;
+            writer      w{out, "json"};
+            encode_document<::psio::json>(v, w);
+            return out;
+         }
+         static std::size_t packsize(const ::psio::json_value& v) { return text_of(v).size(); }
+         template <typename Sink>
+         static void encode(const ::psio::json_value& v, Sink& out)
+         {
+            const std::string text = text_of(v);
+            out.insert(out.end(), text.begin(), text.end());
+         }
+         static ::psio::json_value decode(std::span<const char> bytes)
+         {
+            ::psio::json_value out;
+            if (auto st = read_document<::psio::json, ::psio::json_value>(bytes, &out); !st.ok())
+               ::psio::codec_abort(st.error());
+            return out;
+         }
+         static codec_status validate(std::span<const char> bytes) noexcept
+         {
+            return read_document<::psio::json, ::psio::json_value>(bytes, nullptr);
+         }
+         static codec_status validate_strict(std::span<const char> bytes) noexcept
+         {
+            ::psio::json_value value;
+            if (auto st = read_document<::psio::json, ::psio::json_value>(bytes, &value);
+                !st.ok())
+               return st;
+            std::string text;
+            writer      w{text, "json", false};
+            encode_document<::psio::json>(value, w);
+            if (!w.err.empty() || text.size() != bytes.size() ||
+                !std::equal(text.begin(), text.end(), bytes.begin()))
+               return codec_fail("json: a json_value's bytes are not its compact text", 0,
+                                 "json");
+            return codec_ok();
+         }
+      };
+   }  // namespace detail::json_impl
+
 }  // namespace psio
+
+PSIO_ADAPTER(::psio::json_value,
+             ::psio::binary_category,
+             ::psio::detail::json_impl::json_value_binary)
 
 #include <psio/detail/json_assoc.hpp>

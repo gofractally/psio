@@ -300,6 +300,8 @@ namespace psio {
    //   "bitvector", "bitlist"       the bit types
    //   "map", "set"                 a list in canonical key order
    //   "box"                        psio::Box: the inner type, boxed
+   //   "json"                       psio::json_value: a UTF-8 string holding
+   //                                JSON text, presented as that JSON value
    //   "unknown"                    a type the schema builder has no node for
    //   "time-point", "duration",    the time values (time.hpp), alone or
    //   "monotonic"                  followed by "-...": "time-point-seconds",
@@ -315,7 +317,7 @@ namespace psio {
            {std::string_view{"bool"}, std::string_view{"char"}, std::string_view{"string"},
             std::string_view{"utf8"}, std::string_view{"hex"}, std::string_view{"bitvector"},
             std::string_view{"bitlist"}, std::string_view{"map"}, std::string_view{"set"},
-            std::string_view{"box"}, std::string_view{"unknown"}})
+            std::string_view{"box"}, std::string_view{"json"}, std::string_view{"unknown"}})
          if (id == word)
             return true;
       for (const std::string_view word : {std::string_view{"time-point"},
@@ -357,7 +359,7 @@ namespace psio {
       constexpr std::string_view id = detail::declared_schema_custom_id<U>();
       static_assert(!reserved_custom_id(id),
                     "psio: this custom type's schema id is reserved for one of PSIO's own "
-                    "types (bool, char, string, utf8, hex, bitvector, bitlist, map, set, box, "
+                    "types (bool, char, string, utf8, hex, bitvector, bitlist, map, set, box, json, "
                     "unknown, time-point..., duration..., monotonic...): a schema-driven codec "
                     "would read the built-in meaning into it. Give the type another id: "
                     "`static constexpr std::string_view schema_id` in its text adapter, or "

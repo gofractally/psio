@@ -373,6 +373,15 @@ add_test(NAME psio_pssz_ir_noexceptions_test COMMAND psio_pssz_ir_noexceptions_t
 # The JSON API beyond one typed value in a std::string: views, untagged
 # variants, psio::json_value, cursor reads, pretty printing, sinks.
 psio_add_test(psio_json_api_tests json_api_tests.cpp)
+add_executable(psio_json_value_noexceptions_test json_value_noexceptions.cpp)
+target_include_directories(psio_json_value_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_json_value_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_json_value_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_json_value_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_json_value_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_json_value_noexceptions_test COMMAND psio_json_value_noexceptions_test)
 # Run-time schema comparison (pssz_ir_compare.hpp): equivalent / evolves_from
 # over the Schema IR, the twin of the compile-time psio::pssz_evolves_from.
 psio_add_test(psio_pssz_ir_compare_tests pssz_ir_compare_tests.cpp)

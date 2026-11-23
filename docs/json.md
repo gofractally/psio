@@ -472,6 +472,69 @@ psio::to_ijson(std::span<const unsigned char>{b}); // "01AB"
 They are for writers only: text has no non-owning reader, so a record with
 such a member can be written and not read.
 
+### Any JSON value: `psio::json_value`
+
+`psio::json_value` (`psio/json_value.hpp`) is a document whose shape is not
+known when the program is compiled: null, a bool, a number, a string, an
+array, or an object. It is a value like any other to both formats — read
+with `from_ijson` / `decode_json_checked`, written with `to_ijson` /
+`encode_json_checked`, a member of a reflected record, an element of a list,
+the payload of an optional — and it needs no exceptions, no RTTI and no
+simdjson, so a wasm guest can use it.
+
+```cpp
+auto v = psio::from_ijson<psio::json_value>(R"({"a":1.50,"b":[true,null]})");
+v.find("a")->as_number()->text;      // "1.50"
+v.set("c", "x");  v.erase("b");
+psio::to_ijson(v);                   // {"a":1.50,"c":"x"}
+
+struct PrettyAction { std::string service, method; psio::json_value data; };
+PSIO_REFLECT(PrettyAction, service, method, data)   // "any JSON here"
+```
+
+| JSON | held as | |
+|---|---|---|
+| `null`, `true` / `false` | `std::monostate`, `bool` | |
+| number | `psio::json_number{text}` | the token **as it was written**: `1.50`, `1e3`, `-0` and `18446744073709551616` are written back unchanged. `as_int64()` / `as_uint64()` (an in-range integer written without fraction or exponent) and `as_double()` convert on request |
+| string | `std::string` | UTF-8 |
+| array | `std::vector<json_value>` | |
+| object | `std::vector<std::pair<std::string, json_value>>` | members **in the order written**. Reading keeps the last value of a repeated key, at the position of the first (one pass); writing a hand-built object that holds a key twice writes its last value once |
+
+Accessors: `is_null()` … `is_object()`, `as_bool()` … `as_object()` (a
+pointer, null for another kind), `find(key)`, `set(key, value)` (replaced in
+place or appended), `erase(key)`; the alternatives are also reachable
+directly as `v.value`, a `std::variant`.
+
+Rules:
+
+- A text is read by the syntax rules of every reader (one value, UTF-8,
+  nesting at most 64 levels); nothing about its shape is checked.
+- The two formats differ for a `json_value` in one thing only: under
+  `ijson` a string holding a Unicode noncharacter is neither read nor
+  written. Numbers are their text in both: a `json_value` does not know
+  that a number is a 64-bit integer, so it cannot give it `ijson`'s string
+  form — a document that came in as I-JSON goes out as I-JSON.
+- A value with no JSON text is an error on writing, as always: a
+  `json_number` whose text is not an RFC 8259 number (also what a
+  non-finite `double` makes), a string that is not UTF-8, nesting deeper
+  than a reader accepts.
+- As a record member a missing `json_value` is an error (`null` is a value
+  and has to be written); `std::optional<json_value>` is the member that may
+  be left out, and it reads `null` as empty.
+
+**In PSSZ** (and every binary format) a `json_value` is a UTF-8 string
+holding its compact `psio::json` text: byte for byte a `utf8_string` member
+with that content. `validate` accepts any well-formed JSON text there;
+`validate_strict` only the compact text a writer produces. Include
+`psio/json.hpp` where such a record is packed. **In the Schema IR** it is
+`Custom{ Custom{List<u8>, "utf8"}, "json" }`. The id `json` is reserved
+(no handler may claim it) and built into the C++ schema-driven codecs:
+`validate_pssz` / `encode_auto` / `decode_auto` check that the string is one
+JSON value, and `pssz_to_json` / `json_to_pssz` present it as that value,
+inline — the typed text. An implementation that does not know the id reads
+the node as its wire type: correct bytes, and a JSON *string* holding the
+text where the typed codecs write the value itself.
+
 ### Typed reads from an open cursor
 
 A reader written by hand walks a cursor (`psio::json_text_cursor`, or a
