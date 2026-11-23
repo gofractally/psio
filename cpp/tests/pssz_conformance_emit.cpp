@@ -1708,6 +1708,52 @@ namespace
       });
    }
 
+   // ── A transparent type that bounds its member ─────────────────────────
+   void emit_transparent_bounds()
+   {
+      const char*       c  = "transparent-bounds";
+      const std::string lb = "pssz: member length_bound violated";
+      const std::string s80(80, 'm'), s81(81, 'm');
+      using A = psio::pssz;
+      // The wrapper is BoundedString(80) to width inference: 80 bytes, a
+      // record of it and a header fit 1-byte offsets.
+      static_assert(psio::max_encoded_size<Memo>() == 80);
+      static_assert(psio::max_encoded_size<Memo>() == psio::max_encoded_size<WrapMemo>());
+      static_assert(!psio::max_encoded_size<MemoRec>().has_value());   // memos is unbounded
+
+      literal<A, Memo>(c, "memo", Memo{"hi"}, hx("6869"));
+      literal<A, WrapMemo>(c, "memo", WrapMemo{psio::utf8_string<80>{"hi"}}, hx("6869"));
+      corpus(c, "memo_empty", Memo{});
+      corpus(c, "memo_full", Memo{s80});
+      corpus(c, "memo_multibyte", Memo{"h\xc3\xa9"});
+      corpus(c, "rec", MemoRec{7, Memo{"a"}, Memo{"b"}, {Memo{"c"}, Memo{s80}}});
+      corpus(c, "rec_empty", MemoRec{});
+      corpus(c, "rec_none", MemoRec{1, Memo{s80}, std::nullopt, {}});
+
+      // One byte past the bound, and not UTF-8: bare and wherever it is held.
+      outside_tree(c, "memo_81", Memo{s81}, lb);
+      outside_tree(c, "memo_not_utf8", Memo{"\xff"}, "utf8_spec: invalid leading byte");
+      outside_tree(c, "rec_memo_81", MemoRec{1, Memo{s81}, std::nullopt, {}}, lb);
+      outside_tree(c, "rec_note_81", MemoRec{1, Memo{}, Memo{s81}, {}}, lb);
+      outside_tree(c, "rec_note_not_utf8", MemoRec{1, Memo{}, Memo{"\xc0\x80"}, {}},
+                   "utf8_spec: overlong encoding");
+      outside_tree(c, "rec_element_81", MemoRec{1, Memo{}, std::nullopt, {Memo{"ok"}, Memo{s81}}},
+                   lb);
+
+      // The wrapper-type spelling reads the same frames and refuses the
+      // same ones, with the wrapper's own messages.
+      formats([&]<typename F>() {
+         const auto frame = [](const Memo& value) {
+            return psio::detail::pssz_impl::encode_ignoring_length_bounds(F{}, value);
+         };
+         add<F, WrapMemo>(c, "wrap_from_annotated", frame(Memo{s80}), canonical());
+         add<F, WrapMemo>(c, "wrap_81", frame(Memo{s81}),
+                          reject("pssz: utf8_string exceeds its bound"));
+         add<F, WrapMemo>(c, "wrap_not_utf8", frame(Memo{"\xff"}),
+                          reject("utf8_spec: invalid leading byte"));
+      });
+   }
+
    // ── A list's own offset-table width ───────────────────────────────────
    //
    // docs/pssz-spec.md 3.2: a list / map / set of variable elements bounded
@@ -3437,6 +3483,7 @@ int main(int argc, char** argv)
    emit_annotation_trees();
    emit_method_args();
    emit_list_widths();
+   emit_transparent_bounds();
    emit_cap_positions();
 
    if (!unregistered.empty())
