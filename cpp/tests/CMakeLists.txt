@@ -1039,3 +1039,22 @@ psio_mutable_view_assoc_compile_fail(invariant_contained MV_FAIL_INVARIANT_CONTA
 # and schema-driven (the exception-disabled run is part of
 # psio_custom_noexceptions_test).
 psio_add_test(psio_custom_assoc_tests custom_assoc_tests.cpp)
+
+# The cross-language consistency round: one section per rule (merged length
+# bounds, key writer checks, reserved custom ids, ...).
+psio_add_test(psio_consistency_tests consistency_tests.cpp)
+add_test(NAME psio_consistency_control_compiles
+         COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                 -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/consistency_fail.cpp)
+function(psio_consistency_compile_fail NAME DEFINE MESSAGE)
+   add_test(NAME psio_consistency_${NAME}_compile_fail
+            COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only -D${DEFINE}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/../include -I${PSIO_BOOST_INCLUDES}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/consistency_fail.cpp)
+   set_tests_properties(psio_consistency_${NAME}_compile_fail PROPERTIES
+      PASS_REGULAR_EXPRESSION "${MESSAGE}")
+endfunction()
+set(PSIO_CONS_BOUNDS "contradictory length bounds on one member or position")
+psio_consistency_compile_fail(max_twice CONS_FAIL_MAX_TWICE "${PSIO_CONS_BOUNDS}")
+psio_consistency_compile_fail(min_above_max CONS_FAIL_MIN_ABOVE_MAX "${PSIO_CONS_BOUNDS}")

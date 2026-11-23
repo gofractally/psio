@@ -1,0 +1,72 @@
+// Cross-language consistency round: one section per rule C++ was the looser
+// or the inconsistent side of. Each section names the rule it pins.
+#include <catch.hpp>
+
+#include <psio/annotate.hpp>
+#include <psio/json.hpp>
+#include <psio/key.hpp>
+#include <psio/max_size.hpp>
+#include <psio/pssz.hpp>
+#include <psio/schema_builder.hpp>
+#include <psio/wrappers.hpp>
+
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace
+{
+   std::span<const char> sp(std::string_view text) { return {text.data(), text.size()}; }
+   template <typename B>
+   std::span<const char> bytes_of(const B& b) { return {b.data(), b.size()}; }
+}  // namespace
+
+// ── `min<A> | max<B>` is one length bound ────────────────────────────────
+namespace cons_bounds
+{
+   struct Ranged
+   {
+      std::string              name;
+      std::vector<std::string> tags;
+   };
+   PSIO_REFLECT(Ranged,
+                attr(name, min<2> | max<8>),
+                attr(tags, max<4> | json_number | min<1> | element(max<3> | utf8)))
+}  // namespace cons_bounds
+
+TEST_CASE("min<A> | max<B> merge into one length_bound", "[consistency][annotate]")
+{
+   using namespace cons_bounds;
+   constexpr auto both = psio::min<2> | psio::max<8>;
+   STATIC_REQUIRE(std::tuple_size_v<decltype(both)> == 1);
+   STATIC_REQUIRE(std::get<psio::length_bound>(both) ==
+                  psio::length_bound{.max = 8, .min = 2});
+   // Order and what stands between them do not matter; the other specs stay.
+   constexpr auto mixed = psio::max<8> | psio::utf8 | psio::min<2>;
+   STATIC_REQUIRE(std::tuple_size_v<decltype(mixed)> == 2);
+   STATIC_REQUIRE(std::get<psio::length_bound>(mixed) == std::get<psio::length_bound>(both));
+   // The same limit twice with one value is one statement.
+   STATIC_REQUIRE(psio::detail::length_bounds_consistent(psio::max<8> | psio::max<8>));
+   STATIC_REQUIRE(!psio::detail::length_bounds_consistent(psio::max<8> | psio::max<16>));
+   STATIC_REQUIRE(!psio::detail::length_bounds_consistent(psio::min<9> | psio::max<8>));
+   STATIC_REQUIRE(!psio::detail::length_bounds_consistent(psio::exact<9> | psio::max<8>));
+   STATIC_REQUIRE(!psio::detail::length_bounds_consistent(
+      psio::to_spec_tuple(psio::element(psio::max<1> | psio::max<2>))));
+
+   // Both limits are enforced by every codec, and the upper one bounds the width.
+   STATIC_REQUIRE(psio::max_encoded_size<Ranged>().has_value());
+   const Ranged good{"abc", {"x"}};
+   const auto   frame = psio::to_pssz(good);
+   CHECK(psio::validate_pssz<Ranged>(bytes_of(frame)).ok());
+   CHECK(psio::from_json<Ranged>(psio::to_json(good).c_str()).name == "abc");
+   std::vector<char> out;
+   CHECK(!psio::encode_pssz_checked(psio::pssz{}, Ranged{"a", {"x"}}, out).ok());           // below min
+   CHECK(!psio::encode_pssz_checked(psio::pssz{}, Ranged{"abcdefghi", {"x"}}, out).ok());   // above max
+   CHECK(!psio::encode_pssz_checked(psio::pssz{}, Ranged{"abc", {}}, out).ok());            // below min
+   CHECK(!psio::validate_json<Ranged>(R"({"name":"a","tags":["x"]})").ok());
+   CHECK(!psio::validate_json<Ranged>(R"({"name":"abc","tags":[]})").ok());
+   CHECK(psio::validate_json<Ranged>(R"({"name":"ab","tags":["x"]})").ok());
+}

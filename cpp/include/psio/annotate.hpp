@@ -236,6 +236,10 @@ namespace psio {
       std::optional<std::uint32_t> exact = std::nullopt;
       std::optional<std::uint32_t> max   = std::nullopt;
       std::optional<std::uint32_t> min   = std::nullopt;
+      // Set by `bound | bound` when the two state one limit differently
+      // (`max<8> | max<16>`): a contradiction, refused where the annotation
+      // is attached (detail::length_bounds_consistent). Never set by hand.
+      bool conflict = false;
 
       // Used by the conflict-checker in effective_annotations.
       constexpr bool operator==(const length_bound&) const = default;
@@ -1372,13 +1376,101 @@ namespace psio {
       return t;
    }
 
+   namespace detail
+   {
+      // `min<A> | max<B>`: one length_bound stating both. A limit stated
+      // twice with two values is marked, and refused where the annotation is
+      // attached.
+      constexpr length_bound merge_length_bounds(length_bound a, const length_bound& b) noexcept
+      {
+         auto take = [&](std::optional<std::uint32_t> length_bound::* limit) {
+            if (!(b.*limit))
+               return;
+            if ((a.*limit) && *(a.*limit) != *(b.*limit))
+               a.conflict = true;
+            a.*limit = b.*limit;
+         };
+         take(&length_bound::exact);
+         take(&length_bound::max);
+         take(&length_bound::min);
+         a.conflict = a.conflict || b.conflict;
+         return a;
+      }
+      // One bound says something a value can satisfy.
+      constexpr bool length_bound_consistent(const length_bound& lb) noexcept
+      {
+         if (lb.conflict)
+            return false;
+         if (lb.min && lb.max && *lb.min > *lb.max)
+            return false;
+         if (lb.exact && ((lb.max && *lb.exact > *lb.max) || (lb.min && *lb.exact < *lb.min)))
+            return false;
+         return true;
+      }
+      // Every length_bound of a spec tuple, at any depth (inside element(...),
+      // keys(...), values(...), at<I>(...)).
+      template <typename... Ts>
+      constexpr bool length_bounds_consistent(const std::tuple<Ts...>& specs) noexcept;
+      template <typename S>
+      constexpr bool spec_length_bounds_consistent(const S& spec) noexcept
+      {
+         if constexpr (std::is_same_v<S, length_bound>)
+            return length_bound_consistent(spec);
+         else if constexpr (requires { spec.child; })
+            return length_bounds_consistent(::psio::to_spec_tuple(spec.child));
+         else
+            return true;
+      }
+      template <typename... Ts>
+      constexpr bool length_bounds_consistent(const std::tuple<Ts...>& specs) noexcept
+      {
+         return std::apply(
+            [](const auto&... s) { return (spec_length_bounds_consistent(s) && ... && true); },
+            specs);
+      }
+
+      template <typename S>
+      constexpr auto unless_length_bound(const S& spec) noexcept
+      {
+         if constexpr (std::is_same_v<S, length_bound>)
+            return std::tuple<>{};
+         else
+            return std::tuple<S>{spec};
+      }
+   }  // namespace detail
+
+// What the codecs' static_asserts say about a contradictory bound.
+#define PSIO_LENGTH_BOUND_CONFLICT_MSG                                                         \
+   "psio: contradictory length bounds on one member or position: a limit is stated twice "     \
+   "with different values (max<8> | max<16>), min<N> is greater than max<M>, or exact<N> "     \
+   "lies outside min / max"
+
    // `spec | spec` composes into a tuple. Only enabled for non-arithmetic
    // types so it does not compete with the bitwise `|` on integers.
+   //
+   // Length bounds merge: `min<2> | max<8>` is the one
+   // length_bound{.max = 8, .min = 2} (a tuple holds each spec type once).
    template <typename A, typename B>
       requires(!std::is_arithmetic_v<A> && !std::is_arithmetic_v<B>)
    constexpr auto operator|(const A& a, const B& b) noexcept
    {
-      return std::tuple_cat(to_spec_tuple(a), to_spec_tuple(b));
+      auto       ta = to_spec_tuple(a);
+      const auto tb = to_spec_tuple(b);
+      using TA      = std::remove_cvref_t<decltype(ta)>;
+      using TB      = std::remove_cvref_t<decltype(tb)>;
+      if constexpr (has_spec_v<length_bound, TA> && has_spec_v<length_bound, TB>)
+      {
+         std::get<length_bound>(ta) = detail::merge_length_bounds(std::get<length_bound>(ta),
+                                                                  std::get<length_bound>(tb));
+         return std::tuple_cat(
+            ta, std::apply(
+                   [](const auto&... s) {
+                      return std::tuple_cat(detail::unless_length_bound(s)...);
+                   },
+                   tb));
+      }
+      else
+         return std::tuple_cat(ta, tb);
    }
 
    // Position helpers (see keys_spec above): `element(max<16>)`,

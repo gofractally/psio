@@ -635,6 +635,8 @@ namespace psio {
          "field's shape (e.g. attaching length_bound to a Record is "
          "meaningless).");
 
+      static_assert(detail::length_bounds_consistent(value), PSIO_LENGTH_BOUND_CONFLICT_MSG);
+
       // Position specs (element / keys / values / at<I>) and the specs
       // below them must fit the member's type at every depth.
       static_assert(detail::ann::tree_ok<field_t, effective_annotations_for>(),
@@ -727,6 +729,8 @@ namespace psio {
       };
       static_assert(detail::ann::tree_ok<tuple_type, psio_annotation_holder_>(),
                     "psio: an annotation of this tuple does not fit its element's type");
+      static_assert(detail::length_bounds_consistent(Meta::annotations),
+                    PSIO_LENGTH_BOUND_CONFLICT_MSG);
    };
 
    namespace detail
@@ -799,6 +803,8 @@ namespace psio {
    {
       static_assert(detail::ann::tree_ok<R, detail::method_result_holder<T, I>>(),
                     "psio: a returns(...) annotation does not fit the method's return type");
+      static_assert(detail::length_bounds_consistent(method_result_annotations<T, I>),
+                    PSIO_LENGTH_BOUND_CONFLICT_MSG);
       return detail::ann::check_value(value, method_result_annotations<T, I>,
                                       "psio: return value length_bound violated", format);
    }
