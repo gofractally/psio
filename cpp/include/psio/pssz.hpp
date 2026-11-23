@@ -876,7 +876,16 @@ namespace psio {
          }
          else if constexpr (::psio::is_transparent_v<T> &&
                             !::psio::format_should_dispatch_adapter_v<::psio::pssz, T>)
+         {
+            // The member's own bounds (a transparent type may bound its
+            // member: it is then that bounded type).
+            if (bounds)
+               if (auto st = ::psio::check_transparent_member(
+                      value, "pssz: member length_bound violated", "pssz");
+                   !st.ok())
+                  return st;
             return check_encode_depth_impl(::psio::transparent_inner(value), depth, bounds);
+         }
          else if constexpr (is_nested_v<T>)
             return ::psio::detail::nested_impl::pssz_check_encode(value, depth);
          else if constexpr (is_assoc_v<T>)
@@ -1155,7 +1164,7 @@ namespace psio {
             return size_of_v<W, Auto, typename is_psio_box<T>::elem, ann::cap_only<A>>(*v.value,
                                                                                     check);
          else if constexpr (::psio::is_transparent_v<T>)
-            return size_of_v<W, Auto, ::psio::transparent_inner_t<T>, ann::cap_only<A>>(
+            return size_of_v<W, Auto, ::psio::transparent_inner_t<T>, ann::transparent_ann<T, A>>(
                ::psio::transparent_inner(v), check);
          else if constexpr (is_nested_v<T>)
             return v.size();
@@ -1416,8 +1425,8 @@ namespace psio {
          }
          else if constexpr (::psio::is_transparent_v<T>)
          {
-            encode_value<W, Auto, ::psio::transparent_inner_t<T>, Sink, ann::cap_only<A>>(
-               ::psio::transparent_inner(v), s);
+            encode_value<W, Auto, ::psio::transparent_inner_t<T>, Sink,
+                         ann::transparent_ann<T, A>>(::psio::transparent_inner(v), s);
             return;
          }
          else if constexpr (is_nested_v<T>)
@@ -1740,8 +1749,17 @@ namespace psio {
             return;
          }
          else if constexpr (::psio::is_transparent_v<T>)
-            decode_into<W, Auto, ::psio::transparent_inner_t<T>, ann::cap_only<A>>(
+         {
+            decode_into<W, Auto, ::psio::transparent_inner_t<T>, ann::transparent_ann<T, A>>(
                src, pos, end, ::psio::transparent_inner(out));
+            // The fail-fast decode refuses a member outside its bounds, as
+            // it does for a record member.
+            if constexpr (::psio::transparent_member_checked_v<T>)
+               if (auto st = ::psio::check_transparent_member(
+                      out, "pssz: member length_bound violated", "pssz");
+                   !st.ok())
+                  status_failure(st);
+         }
          else if constexpr (std::is_same_v<T, std::string>)
          {
             // pSSZ string: raw bytes from pos to end (no length).
@@ -2057,8 +2075,17 @@ namespace psio {
          else if constexpr (::psio::is_transparent_v<T>)
          {
             T out{};
-            decode_into<W, Auto, ::psio::transparent_inner_t<T>, ann::cap_only<A>>(
+         {
+            decode_into<W, Auto, ::psio::transparent_inner_t<T>, ann::transparent_ann<T, A>>(
                src, pos, end, ::psio::transparent_inner(out));
+            // The fail-fast decode refuses a member outside its bounds, as
+            // it does for a record member.
+            if constexpr (::psio::transparent_member_checked_v<T>)
+               if (auto st = ::psio::check_transparent_member(
+                      out, "pssz: member length_bound violated", "pssz");
+                   !st.ok())
+                  status_failure(st);
+         }
             return out;
          }
          else if constexpr (is_nested_v<T>)
@@ -2713,7 +2740,8 @@ namespace psio {
             return validate_value<W, Auto, typename is_psio_box<T>::elem, ann::cap_only<A>>(
                src, pos, end, depth, flags);
          else if constexpr (::psio::is_transparent_v<T>)
-            return validate_value<W, Auto, ::psio::transparent_inner_t<T>, ann::cap_only<A>>(
+            return validate_value<W, Auto, ::psio::transparent_inner_t<T>,
+                                  ann::transparent_ann<T, A>>(
                src, pos, end, depth, flags);
          else if constexpr (is_nested_v<T>)
             return ::psio::detail::nested_impl::pssz_validate<T>(
@@ -3039,7 +3067,7 @@ namespace psio {
          else if constexpr (is_psio_box_v<T>)
             return widths_unchanged<typename is_psio_box<T>::elem, ann::cap_only<A>>();
          else if constexpr (::psio::is_transparent_v<T>)
-            return widths_unchanged<::psio::transparent_inner_t<T>, ann::cap_only<A>>();
+            return widths_unchanged<::psio::transparent_inner_t<T>, ann::transparent_ann<T, A>>();
          else if constexpr (is_std_optional_v<T>)
             return widths_unchanged<typename T::value_type, A>();
          else if constexpr (is_std_vector_v<T> || is_bounded_v<T> || is_std_array_v<T>)
@@ -3321,8 +3349,10 @@ namespace psio {
             return annotation_widths_agree<typename is_psio_box<TO>::elem, ann::cap_only<AO>,
                                            typename is_psio_box<TN>::elem, ann::cap_only<AN>>();
          else if constexpr (::psio::is_transparent_v<TO> && ::psio::is_transparent_v<TN>)
-            return annotation_widths_agree<::psio::transparent_inner_t<TO>, ann::cap_only<AO>,
-                                           ::psio::transparent_inner_t<TN>, ann::cap_only<AN>>();
+            return annotation_widths_agree<::psio::transparent_inner_t<TO>,
+                                           ann::transparent_ann<TO, AO>,
+                                           ::psio::transparent_inner_t<TN>,
+                                           ann::transparent_ann<TN, AN>>();
          else if constexpr (is_std_optional_v<TO> && is_std_optional_v<TN>)
             return annotation_widths_agree<typename TO::value_type, AO, typename TN::value_type,
                                            AN>();
@@ -3453,9 +3483,19 @@ namespace psio {
             // A transparent type keeps its identity: it evolves only from a
             // transparent type of the same name, as far as the members do.
             if constexpr (::psio::is_transparent_v<Old> && ::psio::is_transparent_v<New>)
+               // ... and as far as the bounds of the member allow (they are
+               // the type: member_annotations_evolve's rules).
                return ::psio::reflect<Old>::name == ::psio::reflect<New>::name &&
                       layout_evolves<::psio::transparent_inner_t<Old>,
-                                     ::psio::transparent_inner_t<New>>();
+                                     ::psio::transparent_inner_t<New>>() &&
+                      annotation_widths_agree<::psio::transparent_inner_t<Old>,
+                                              ann::transparent_ann<Old, no_ann>,
+                                              ::psio::transparent_inner_t<New>,
+                                              ann::transparent_ann<New, no_ann>>() &&
+                      annotation_specs_evolve<::psio::transparent_inner_t<Old>,
+                                              ::psio::transparent_inner_t<New>>(
+                         ::psio::transparent_member_annotations<Old>::value,
+                         ::psio::transparent_member_annotations<New>::value);
             else
                return false;
          }

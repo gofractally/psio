@@ -542,7 +542,8 @@ namespace psio {
          else if constexpr (Invariants && ::psio::has_invariant_v<U>)
             return true;
          else if constexpr (::psio::is_transparent_v<U>)
-            return has_writer_checks<::psio::transparent_inner_t<U>, Invariants, Seen..., U>();
+            return ::psio::transparent_member_checked_v<U> ||
+                   has_writer_checks<::psio::transparent_inner_t<U>, Invariants, Seen..., U>();
          else if constexpr (::psio::detail::is_nested_v<U>)
             return false;
          else if constexpr (::psio::detail::is_assoc_v<U>)
@@ -591,6 +592,10 @@ namespace psio {
          {
             if constexpr (::psio::is_transparent_v<T>)
             {
+               if (auto st = ::psio::check_transparent_member(
+                      v, "key: member length_bound violated", "key");
+                   !st.ok())
+                  return st;
                if (auto st = check_encode<Invariants>(::psio::transparent_inner(v)); !st.ok())
                   return st;
             }
@@ -1058,8 +1063,23 @@ namespace psio {
             return true;
          }
          else if constexpr (::psio::is_transparent_v<T>)
-            return read_value<::psio::transparent_inner_t<T>>(
-               r, out ? &::psio::transparent_inner(*out) : nullptr);
+         {
+            if constexpr (::psio::transparent_member_checked_v<T>)
+            {
+               T        scratch{};
+               T* const dst = out ? out : &scratch;
+               if (!read_value<::psio::transparent_inner_t<T>>(r, &::psio::transparent_inner(*dst)))
+                  return false;
+               if (auto st = ::psio::check_transparent_member(
+                      *dst, "key: member length_bound violated", "key");
+                   !st.ok())
+                  return r.fail(st.error().what.data());
+               return true;
+            }
+            else
+               return read_value<::psio::transparent_inner_t<T>>(
+                  r, out ? &::psio::transparent_inner(*out) : nullptr);
+         }
          else if constexpr (::psio::detail::is_nested_v<T>)
          {
             // A byte list whose bytes are the PSSZ encoding of the inner

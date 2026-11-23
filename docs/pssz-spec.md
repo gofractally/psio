@@ -1379,13 +1379,36 @@ Everything the format derives from a type is the member's:
 A transparent type is therefore **not a record**: a frame that encodes it
 as a one-field record (a header and the member) is a different, and for the
 wrapper invalid, encoding. It has no `definitionWillNotChange`, no
-`max-fields` and no `max-dynamic-data` of its own, its member takes no
-member annotation, and its member is not an `Optional` (presence belongs to
-the record that holds the value: hold an `Optional(Wrapper)`). A record
-member of a transparent type takes the annotations that reach a value
-through any type (the integer text form); a length bound on it is an error,
-as on any member that is not itself a string or a list — bound the member's
-type.
+`max-fields` and no `max-dynamic-data` of its own, and its member is not an
+`Optional` (presence belongs to the record that holds the value: hold an
+`Optional(Wrapper)`). A record member of a transparent type takes the
+annotations that reach a value through any type (the integer text form); a
+length bound on it is an error, as on any member that is not itself a
+string or a list — bound the wrapper's own member instead.
+
+**A bounded member.** The single member of a transparent type may carry the
+annotations of §3.5 that make a type a bounded type: `utf8` on a string,
+`max N` on a string, list, map or set, and `element` / `keys` / `values` /
+`at I` below it. The wrapper then **is** that bounded type, everywhere it
+appears — bare, a list element, an optional payload, a map key or value:
+
+```
+Memo = transparent { text: String  @utf8 @max(80) }      // is BoundedString(80)
+```
+
+It has the bytes, the `max_encoded_size` (80), the widths, the schema node
+(`types: [{name: "Memo", type: -> BoundedString(80)}]`) and the checks of
+`BoundedString(80)`: every writer refuses a `Memo` over 80 bytes or not
+UTF-8 and every reader rejects its bytes, in PSSZ, key and text alike. This
+is one rule for every language (C++ `PSIO_REFLECT(Memo, transparent(),
+attr(text, utf8 | max<80>))`; Rust `#[psio(transparent)] struct
+Memo(#[psio(max = 80)] String)`; JavaScript `transparent('Memo',
+boundedUtf8(80))`; Python `Annotated[str, max(80)]` in a
+`@psio.transparent` class). An annotation that a type cannot say is not
+allowed there: `exact N` / `min N` (a member attribute in the Schema IR,
+and a transparent type has no member in it), `sorted` / `unique`, an
+integer text form, a text presentation. Such a constraint is the type's
+invariant (§18).
 
 What the wrapper keeps is its **identity**: its name, a text form of its own
 (`docs/json.md`), an invariant (§18) and its Schema IR node — a named alias

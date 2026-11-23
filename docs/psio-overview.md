@@ -344,7 +344,11 @@ struct SubjectPublicKeyInfo {
 `transparent()` is also `PSIO_TYPE_ATTRS(T, psio::transparent)`. It does not
 compile with zero or several data members, with `definitionWillNotChange` /
 `maxFields` / `maxDynamicData` (a transparent type has no record layout),
-with an annotation on its member, or over a `std::optional`. `invariant(fn)`
+or over a `std::optional`. Its member may carry the annotations that make it
+a bounded type — `attr(text, utf8 | max<80>)`: the wrapper is then exactly
+`psio::utf8_string<80>` in bytes, width inference, schema and checks
+(`docs/pssz-spec.md` §5.10) — and no other (`exact` / `min`, `sorted`, an
+integer text form, `as<Tag>` do not compile there). `invariant(fn)`
 takes any expression callable as `fn(const T&)`: in a class body a static
 member declared anywhere in the class, at namespace scope a name looked up
 where the macro is written, or a lambda. It must be `noexcept` and return

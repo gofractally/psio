@@ -827,7 +827,15 @@ namespace psio {
             encode_value<Fmt, IM>(*v.value, w);
          }
          else if constexpr (::psio::is_transparent_v<T>)
+         {
+            // A member outside the bounds its type gives it has no text.
+            if constexpr (::psio::transparent_member_checked_v<T>)
+               if (auto st = ::psio::check_transparent_member(
+                      v, "json: member length_bound violated", "json");
+                   !st.ok())
+                  w.fail(st.error());
             encode_value<Fmt, IM>(::psio::transparent_inner(v), w);
+         }
          else if constexpr (::psio::detail::is_nested_v<T>)
          {
             // The inner value's own text. The bytes are validated before
@@ -1641,8 +1649,26 @@ namespace psio {
             return read_value<Fmt, IM, E>(r, out->value.get());
          }
          else if constexpr (::psio::is_transparent_v<T>)
-            return read_value<Fmt, IM, ::psio::transparent_inner_t<T>>(
-               r, out ? &::psio::transparent_inner(*out) : nullptr);
+         {
+            if constexpr (::psio::transparent_member_checked_v<T>)
+            {
+               // Checked on the value read, so it is materialised even when
+               // only validating (as an annotated record member is).
+               T        scratch{};
+               T* const dst = out ? out : &scratch;
+               if (!read_value<Fmt, IM, ::psio::transparent_inner_t<T>>(
+                      r, &::psio::transparent_inner(*dst)))
+                  return false;
+               if (auto st = ::psio::check_transparent_member(
+                      *dst, "json: member length_bound violated", "json");
+                   !st.ok())
+                  return r.c.fail(st.error().what);
+               return true;
+            }
+            else
+               return read_value<Fmt, IM, ::psio::transparent_inner_t<T>>(
+                  r, out ? &::psio::transparent_inner(*out) : nullptr);
+         }
          else if constexpr (::psio::detail::is_nested_v<T>)
          {
             // The inner value's text, stored as its canonical encoding. The

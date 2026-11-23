@@ -882,3 +882,288 @@ TEST_CASE("maxFields: the cap on the number of fields is enforced", "[consistenc
    CHECK(!psio::pssz_ir::validate_schema(with_params(1, {Attribute{"maxFields", "256"}})).ok());
    CHECK(!psio::pssz_ir::validate_schema(with_params(1, {Attribute{"maxDynamicData", "x"}})).ok());
 }
+
+// ── A transparent type may bound its member: it is then that bounded type ─
+namespace cons_tr
+{
+   namespace ann
+   {
+      // psibase's Memo: a first-class type that is UTF-8 and at most 80 bytes.
+      struct Memo
+      {
+         std::string text;
+         friend bool operator==(const Memo&, const Memo&)  = default;
+         friend auto operator<=>(const Memo&, const Memo&) = default;
+         PSIO_REFLECT(Memo, transparent(), attr(text, utf8 | max<80>))
+      };
+      struct Tags   // bounds below the member
+      {
+         std::vector<std::string> list;
+         friend bool operator==(const Tags&, const Tags&) = default;
+         PSIO_REFLECT(Tags, transparent(), attr(list, max<4> | element(utf8 | max<8>)))
+      };
+   }  // namespace ann
+   namespace wrap
+   {
+      // The same types spelled with wrapper types.
+      struct Memo
+      {
+         psio::utf8_string<80> text;
+         friend bool operator==(const Memo&, const Memo&)  = default;
+         friend auto operator<=>(const Memo&, const Memo&) = default;
+         PSIO_REFLECT(Memo, transparent(), text)
+      };
+      struct Tags
+      {
+         psio::bounded<psio::utf8_string<8>, 4> list;
+         PSIO_REFLECT(Tags, transparent(), list)
+      };
+   }  // namespace wrap
+   template <typename M, typename T>
+   struct Holder
+   {
+      std::uint32_t                  id = 0;
+      M                              memo;
+      std::optional<M>               maybe;
+      std::vector<M>                 many;
+      std::map<std::uint8_t, M>      by_id;
+      T                              tags;
+      PSIO_REFLECT(Holder, id, memo, maybe, many, by_id, tags)
+   };
+   using AnnHolder  = Holder<ann::Memo, ann::Tags>;
+   using WrapHolder = Holder<wrap::Memo, wrap::Tags>;
+   struct Unbounded
+   {
+      std::string text;
+      PSIO_REFLECT(Unbounded, transparent(), text)
+   };
+   namespace wider
+   {
+      struct Memo
+      {
+         std::string text;
+         PSIO_REFLECT(Memo, transparent(), attr(text, utf8 | max<120>))
+      };
+   }
+   namespace raw
+   {
+      struct Memo
+      {
+         std::string text;
+         PSIO_REFLECT(Memo, transparent(), attr(text, max<80>))
+      };
+   }
+
+   struct Small
+   {
+      ann::Memo a;
+      PSIO_REFLECT(Small, a)
+   };
+
+   template <typename T>
+   std::vector<char> ir_of(std::string name)
+   {
+      psio::SchemaBuilder builder;
+      builder.insert<T>(std::move(name));
+      const auto bytes = psio::to_pssz(std::move(builder).build());
+      return std::vector<char>(bytes.begin(), bytes.end());
+   }
+   // The node of `name` with every reference to an anonymous (@N) type
+   // replaced by that type's node: what the schema says, whichever of its
+   // parts happen to be interned.
+   inline void inline_anonymous(const psio::Schema& schema, psio::schema_types::AnyType& node,
+                                int depth = 0)
+   {
+      using namespace psio::schema_types;
+      if (depth > 32)
+         return;
+      if (auto ref = std::get_if<Type>(&node.value); ref && ref->type.starts_with("@"))
+      {
+         if (const AnyType* target = schema.get(ref->type))
+         {
+            AnyType copy = *target;
+            node         = std::move(copy);
+            inline_anonymous(schema, node, depth + 1);
+         }
+         return;
+      }
+      std::visit(
+         [&](auto& t) {
+            if constexpr (requires { t.type.get(); })
+            {
+               if (t.type.get())
+                  inline_anonymous(schema, *t.type, depth + 1);
+            }
+            else if constexpr (requires { t.members; })
+               for (auto& member : t.members)
+               {
+                  if constexpr (requires { member.type; })
+                  {
+                     if (member.type.get())
+                        inline_anonymous(schema, *member.type, depth + 1);
+                  }
+                  else if (member.get())
+                     inline_anonymous(schema, *member, depth + 1);
+               }
+         },
+         node.value);
+   }
+   template <typename T>
+   std::string node_of(const std::string& name, std::initializer_list<const char*> also = {})
+   {
+      psio::SchemaBuilder builder;
+      builder.insert<T>(name);
+      const auto schema = std::move(builder).build();
+      std::string out;
+      auto add = [&](const std::string& n) {
+         psio::schema_types::AnyType node = *schema.get(n);
+         inline_anonymous(schema, node);
+         out += n + "=" + psio::to_json(node) + ";";
+      };
+      add(name);
+      for (const char* n : also)
+         add(n);
+      return out;
+   }
+   template <typename B>
+   std::vector<char> vec(const B& b) { return std::vector<char>(b.begin(), b.end()); }
+}  // namespace cons_tr
+
+TEST_CASE("transparent: a bounded member makes the wrapper that bounded type",
+          "[consistency][transparent]")
+{
+   using namespace cons_tr;
+   // Width inference sees the bound, exactly as it sees utf8_string<80>.
+   STATIC_REQUIRE(psio::is_transparent_v<ann::Memo>);
+   STATIC_REQUIRE(psio::max_encoded_size<ann::Memo>() == std::optional<std::size_t>{80});
+   STATIC_REQUIRE(psio::max_encoded_size<ann::Memo>() == psio::max_encoded_size<wrap::Memo>());
+   STATIC_REQUIRE(psio::max_encoded_size<ann::Tags>() == psio::max_encoded_size<wrap::Tags>());
+   STATIC_REQUIRE(psio::max_encoded_size<ann::Tags>().has_value());
+   STATIC_REQUIRE(!psio::max_encoded_size<Unbounded>().has_value());
+   STATIC_REQUIRE(psio::max_encoded_size<AnnHolder>() == psio::max_encoded_size<WrapHolder>());
+   STATIC_REQUIRE(psio::auto_pssz_width_v<AnnHolder> == psio::auto_pssz_width_v<WrapHolder>);
+   STATIC_REQUIRE(psio::max_encoded_size<std::vector<ann::Memo>>() ==
+                  psio::max_encoded_size<std::vector<wrap::Memo>>());
+   STATIC_REQUIRE(psio::auto_pssz_width_v<Small> == 1);   // 80 bytes, a header and a slot
+
+   // The same Schema IR as the wrapper-type spelling: a named alias of the
+   // bounded UTF-8 string / the bounded list of bounded UTF-8 strings.
+   // The Memo schema is byte for byte the wrapper spelling's:
+   //    Memo -> @1,  @1 = Custom{BoundedList{u8, 80}, "utf8"}
+   CHECK(ir_of<ann::Memo>("Memo") == ir_of<wrap::Memo>("Memo"));
+   CHECK(node_of<ann::Memo>("Memo") ==
+         R"(Memo={"value":[11,{"type":{"value":[4,{"type":{"value":[8,{"bits":8,"isSigned":false}]},"maxCount":80}]},"id":"utf8"}]};)");
+   // Deeper bounds are the same nodes; which of them is interned as an
+   // anonymous type differs between the spellings, as it does for an
+   // annotated record member.
+   CHECK(node_of<ann::Tags>("Tags") == node_of<wrap::Tags>("Tags"));
+   CHECK(node_of<AnnHolder>("Holder", {"Memo", "Tags"}) ==
+         node_of<WrapHolder>("Holder", {"Memo", "Tags"}));
+   CHECK(node_of<ann::Memo>("Memo") != node_of<Unbounded>("Memo"));
+   CHECK(node_of<ann::Memo>("Memo") != node_of<raw::Memo>("Memo"));
+
+   // The same bytes, key and text, bare and wherever it is held.
+   AnnHolder a;
+   a.id    = 7;
+   a.memo  = ann::Memo{"h\xc3\xa9llo"};
+   a.maybe = ann::Memo{""};
+   a.many  = {ann::Memo{"a"}, ann::Memo{std::string(80, 'x')}};
+   a.by_id = {{1, ann::Memo{"one"}}};
+   a.tags  = ann::Tags{{"t1", "t2"}};
+   WrapHolder w;
+   w.id    = 7;
+   w.memo  = wrap::Memo{psio::utf8_string<80>{"h\xc3\xa9llo"}};
+   w.maybe = wrap::Memo{psio::utf8_string<80>{""}};
+   w.many  = {wrap::Memo{psio::utf8_string<80>{"a"}},
+              wrap::Memo{psio::utf8_string<80>{std::string(80, 'x')}}};
+   w.by_id = {{1, wrap::Memo{psio::utf8_string<80>{"one"}}}};
+   w.tags.list.push_back(psio::utf8_string<8>{"t1"});
+   w.tags.list.push_back(psio::utf8_string<8>{"t2"});
+   const auto frame = vec(psio::to_pssz(a));
+   CHECK(frame == vec(psio::to_pssz(w)));
+   CHECK(vec(psio::to_pssz(a.memo)) == vec(psio::to_pssz(w.memo)));
+   CHECK(vec(psio::to_pssz(a.memo)) == vec(psio::to_pssz(psio::utf8_string<80>{"h\xc3\xa9llo"})));
+   CHECK(vec(psio::to_key(a)) == vec(psio::to_key(w)));
+   CHECK(psio::to_json(a) == psio::to_json(w));
+   CHECK(psio::to_ijson(a.memo) == "\"h\xc3\xa9llo\"");
+   CHECK(psio::validate_pssz<AnnHolder>(frame).ok());
+   CHECK(psio::validate_strict<AnnHolder>(psio::pssz{}, frame).ok());
+   CHECK(psio::from_pssz<AnnHolder>(frame).many[1].text.size() == 80);
+   CHECK(psio::from_json<AnnHolder>(sp(psio::to_json(a))).memo == a.memo);
+   CHECK(psio::from_key<AnnHolder>(bytes_of(psio::to_key(a))).memo == a.memo);
+   // A schema-driven reader of the schema reads the typed bytes.
+   {
+      psio::SchemaBuilder builder;
+      const auto          root   = builder.insert<AnnHolder>();
+      const auto          schema = std::move(builder).build();
+      bool                unknown = false;
+      CHECK(psio::pssz_ir::validate_auto(schema, root, frame, &unknown).ok());
+   }
+
+   // Every writer refuses, and every reader rejects, a value outside the
+   // bound or not UTF-8 — bare, and at every place it is held.
+   auto refused = [&](const char* what, auto&& change) {
+      INFO(what);
+      AnnHolder bad = a;
+      change(bad);
+      std::vector<char> out;
+      CHECK(!psio::encode_pssz_checked(psio::pssz{}, bad, out).ok());
+      CHECK_THROWS_AS(psio::to_pssz(bad), psio::codec_exception);
+      std::string text;
+      CHECK(!psio::encode_json_checked(psio::json{}, bad, text).ok());
+      CHECK(!psio::encode_key_checked(bad, out).ok());
+      CHECK_THROWS_AS(psio::to_key(bad), psio::codec_exception);
+      // What an unchecked writer produces: the same record over plain strings.
+      Holder<Unbounded, std::vector<std::string>> raw;
+      raw.id   = bad.id;
+      raw.memo = Unbounded{bad.memo.text};
+      if (bad.maybe)
+         raw.maybe = Unbounded{bad.maybe->text};
+      for (const auto& m : bad.many)
+         raw.many.push_back(Unbounded{m.text});
+      for (const auto& [k, m] : bad.by_id)
+         raw.by_id.emplace(k, Unbounded{m.text});
+      raw.tags = bad.tags.list;
+      // (Its widths are those of unbounded strings; compare through the
+      // schema-free forms instead: text and key.)
+      std::string raw_text;   // (bytes that are not UTF-8 have no text at all)
+      if (psio::encode_json_checked(psio::json{}, raw, raw_text).ok())
+      {
+         CHECK(!psio::validate_json<AnnHolder>(sp(raw_text)).ok());
+         AnnHolder decoded;
+         CHECK(!psio::decode_json_checked(psio::json{}, sp(raw_text), decoded).ok());
+         CHECK_THROWS_AS(psio::from_json<AnnHolder>(sp(raw_text)), psio::codec_exception);
+      }
+      const auto raw_key = psio::to_key(raw);
+      CHECK(!psio::validate_key<AnnHolder>(bytes_of(raw_key)).ok());
+      const auto bytes = psio::detail::pssz_impl::encode_ignoring_length_bounds(psio::pssz{}, bad);
+      CHECK(!psio::validate_pssz<AnnHolder>(bytes).ok());
+      CHECK(!psio::validate_strict<AnnHolder>(psio::pssz{}, bytes).ok());
+      CHECK_THROWS_AS(psio::decode<AnnHolder>(psio::pssz{}, bytes), psio::codec_exception);
+      // The wrapper-type spelling rejects the same bytes.
+      CHECK(!psio::validate_pssz<WrapHolder>(bytes).ok());
+   };
+   refused("memo over 80 bytes", [](AnnHolder& h) { h.memo.text.assign(81, 'x'); });
+   refused("memo not UTF-8", [](AnnHolder& h) { h.memo.text = "\xff"; });
+   refused("optional memo over the bound", [](AnnHolder& h) { h.maybe->text.assign(81, 'x'); });
+   refused("list element not UTF-8", [](AnnHolder& h) { h.many[0].text = "\xc0\x80"; });
+   refused("map value over the bound", [](AnnHolder& h) { h.by_id[1].text.assign(81, 'x'); });
+   refused("too many tags", [](AnnHolder& h) { h.tags.list.assign(5, "t"); });
+   refused("tag over its bound", [](AnnHolder& h) { h.tags.list = {"123456789"}; });
+   // Bare.
+   {
+      std::vector<char> out;
+      CHECK(!psio::encode_pssz_checked(psio::pssz{}, ann::Memo{std::string(81, 'x')}, out).ok());
+      CHECK(!psio::validate_pssz<ann::Memo>(std::vector<char>(81, 'x')).ok());
+      CHECK(psio::validate_pssz<ann::Memo>(std::vector<char>(80, 'x')).ok());
+      CHECK(!psio::validate_pssz<ann::Memo>(std::vector<char>{char(0xff)}).ok());
+      CHECK(!psio::validate_json<ann::Memo>(sp("\"" + std::string(81, 'x') + "\"")).ok());
+      CHECK(psio::validate_json<ann::Memo>(sp("\"" + std::string(80, 'x') + "\"")).ok());
+   }
+
+   // Evolution: the wrapper keeps its identity, and its bound may only widen.
+   STATIC_REQUIRE(psio::pssz_evolves_from<ann::Memo, ann::Memo>);
+   STATIC_REQUIRE(psio::pssz_evolves_from<ann::Memo, wider::Memo>);
+   STATIC_REQUIRE(!psio::pssz_evolves_from<wider::Memo, ann::Memo>);
+   STATIC_REQUIRE(!psio::pssz_evolves_from<ann::Memo, raw::Memo>);
+}

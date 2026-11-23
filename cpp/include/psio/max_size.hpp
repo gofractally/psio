@@ -379,8 +379,16 @@ namespace psio {
          else if constexpr (is_bitvector<U>::value) return (is_bitvector<U>::bits + 7) / 8;
          else if constexpr (is_bitlist<U>::value) return (is_bitlist<U>::bits + 7) / 8 + 1;
          else if constexpr (::psio::is_transparent_v<U>)
-            // The member's bound, its declared budget included.
-            return child_payload<::psio::transparent_inner_t<U>>();
+         {
+            // The member's bound, its declared budget included; with the
+            // bounds the type gives its member (transparent.hpp), the bound
+            // of that bounded type.
+            if constexpr (::psio::transparent_member_checked_v<U>)
+               return max_field_with_annots<::psio::transparent_inner_t<U>>(
+                  ::psio::transparent_member_annotations<U>::value);
+            else
+               return child_payload<::psio::transparent_inner_t<U>>();
+         }
          else if constexpr (::psio::Record<U>)
          {
             using R = ::psio::reflect<U>;

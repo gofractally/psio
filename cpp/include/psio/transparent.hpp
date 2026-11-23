@@ -26,14 +26,39 @@
 //   - combined with definitionWillNotChange / maxFields / maxDynamicData:
 //     they describe a record layout, and a transparent type has none (a cap
 //     or a fixed layout is a property of the member's type);
-//   - an annotation on the member (attr(...) / PSIO_FIELD_ATTRS): the type
-//     is its member wherever it appears — bare, as a list element, as an
-//     optional payload — and a member annotation has no enclosing record to
-//     act in. Bound the member's type instead (psio::bounded<T, N>,
-//     psio::utf8_string<N>) or state the constraint as the type's invariant;
+//   - an annotation on the member that the Schema IR cannot state as a type
+//     (see "Bounds on the member" below);
 //   - the member is a std::optional: presence belongs to the record that
 //     holds the value (its trailing absent members are pruned). Wrap the
 //     payload and hold a std::optional<Wrapper>.
+//
+// Bounds on the member. The member may carry the annotations that make a
+// plain type a bounded one:
+//
+//     struct Memo {
+//        std::string text;
+//        PSIO_REFLECT(Memo, transparent(), attr(text, utf8 | max<80>))
+//     };
+//
+//   utf8                on a std::string: a UTF-8 string
+//   max<N>              on a std::string, a std::vector, a map or a set
+//   element / keys / values / at<I>(...)   the same below the member
+//
+// The wrapper then IS that bounded type wherever it appears — bare, as a
+// list element, an optional payload, a map key: the bytes, widths,
+// max_encoded_size and Schema IR node of psio::utf8_string<80> (a named
+// alias of the bounded UTF-8 string), and the same checks in every codec
+// (the writers refuse a value outside the bound or not UTF-8, the readers
+// reject its bytes). It is the one rule of every language (Rust:
+// `#[psio(transparent)] struct Memo(#[psio(max = 80)] String)`).
+//
+// Any other member annotation is a compile error, because the wrapper
+// would differ from its member in a way a type cannot say: exact<N> /
+// min<N> (a member attribute in the IR, and a transparent type has no
+// member there), sorted / unique, the integer text forms, as<Tag>, and
+// max<N> on a type with no bounded form (psio::utf8_string, a nested
+// value: the bound is already in the type). State such a constraint as the
+// type's invariant.
 //
 // A record that holds a member of a transparent type may give that member
 // the annotations that reach a value through any type (the integer text
@@ -50,9 +75,11 @@
 
 #include <cstddef>
 #include <optional>
+#include <string>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace psio
 {
@@ -75,6 +102,52 @@ namespace psio
             return false;
       }
 
+      // What the member of a transparent type may be annotated with: only
+      // what turns its type into a bounded type (see the header comment).
+      template <typename M>
+      inline constexpr bool transparent_bound_form_v = false;
+      template <typename C, typename Tr, typename A>
+      inline constexpr bool transparent_bound_form_v<std::basic_string<C, Tr, A>> = true;
+      template <typename E, typename A>
+      inline constexpr bool transparent_bound_form_v<std::vector<E, A>> = true;
+      template <typename M>
+         requires requires { typename M::key_type; }
+      inline constexpr bool transparent_bound_form_v<M> = true;
+
+      template <typename S>
+      inline constexpr bool transparent_position_spec_v = false;
+      template <typename C>
+      inline constexpr bool transparent_position_spec_v<element_spec<C>> = true;
+      template <typename C>
+      inline constexpr bool transparent_position_spec_v<keys_spec<C>> = true;
+      template <typename C>
+      inline constexpr bool transparent_position_spec_v<values_spec<C>> = true;
+      template <std::size_t I, typename C>
+      inline constexpr bool transparent_position_spec_v<at_spec<I, C>> = true;
+
+      template <typename M, typename... Ss>
+      constexpr bool transparent_member_specs_ok(const std::tuple<Ss...>& specs) noexcept
+      {
+         // Only bounds, utf8 and position specs (whose own content
+         // effective_annotations_for checks against the member's shape).
+         if (!((std::is_same_v<Ss, length_bound> || std::is_same_v<Ss, utf8_spec> ||
+                transparent_position_spec_v<Ss>) &&
+               ... && true))
+            return false;
+         if constexpr ((std::is_same_v<Ss, length_bound> || ...))
+         {
+            const length_bound lb = std::get<length_bound>(specs);
+            if (lb.exact || lb.min || !lb.max || lb.conflict)
+               return false;
+            if (!transparent_bound_form_v<M>)
+               return false;
+         }
+         if constexpr ((std::is_same_v<Ss, utf8_spec> || ...))
+            if (!std::is_same_v<M, std::string>)
+               return false;
+         return true;
+      }
+
       // The rules a declaration must meet. Each one is its own
       // static_assert so the diagnostic names the reason.
       template <typename T>
@@ -93,11 +166,13 @@ namespace psio
          if constexpr (R::member_count == 1)
          {
             static_assert(
-               std::tuple_size_v<std::remove_cvref_t<
-                     decltype(annotate<R::template member_pointer<0>>)>> == 0,
-               "psio: the member of a transparent() type takes no annotation "
-               "(attr / PSIO_FIELD_ATTRS): bound the member's type or declare an "
-               "invariant");
+               transparent_member_specs_ok<std::remove_cv_t<typename R::template member_type<0>>>(
+                  detail::member_annotations_in<T, R::template member_pointer<0>>()),
+               "psio: the member of a transparent() type takes only the annotations that "
+               "make it a bounded type: utf8 on a std::string, max<N> on a std::string, "
+               "std::vector, map or set, and element / keys / values / at<I>(...) below it. "
+               "exact / min, sorted / unique, integer text forms and as<Tag> are not a type: "
+               "declare an invariant");
             static_assert(
                !is_std_optional_type_v<std::remove_cv_t<typename R::template member_type<0>>>,
                "psio: the member of a transparent() type is not a std::optional: "

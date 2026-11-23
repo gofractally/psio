@@ -114,6 +114,12 @@ namespace psio::schema_types
    {
       // Private static identity within one linked image. The address is never
       // serialized; the token avoids RTTI and is not a cross-DSO identity API.
+      // The identity of the bounded type a transparent type U makes of its
+      // member (transparent.hpp "Bounds on the member").
+      template <typename U>
+      struct transparent_member_of
+      {
+      };
       template<typename T> inline unsigned char type_token = 0;
       // ── Std-container detectors (v3-local) ──────────────────────────
       template <typename T>
@@ -556,8 +562,25 @@ namespace psio::schema_types
          }
          else if constexpr (::psio::is_transparent_v<U>)
             // A transparent type is its member: a named alias of the
-            // member's type.
-            return insert<::psio::transparent_inner_t<U>>();
+            // member's type — of the bounded type, when it bounds its member
+            // (attr(text, utf8 | max<80>) is the node of utf8_string<80>).
+            // The bounded type is an anonymous type of its own that the
+            // alias refers to, as a wrapper type is:
+            //    Memo -> @1,  @1 = Custom{BoundedList{u8, 80}, "utf8"}
+            if constexpr (::psio::transparent_member_checked_v<U>)
+            {
+               const void* idx = &sb_detail::type_token<sb_detail::transparent_member_of<U>>;
+               if (auto it = id_to_name_.find(idx); it != id_to_name_.end())
+                  return Type{it->second};
+               std::string name = "@" + std::to_string(id_to_name_.size());
+               id_to_name_[idx] = name;
+               schema_.insert(name, AnyType{});  // placeholder, as in insert()
+               schema_.insert(name, annotated_type<::psio::transparent_inner_t<U>>(
+                                       ::psio::transparent_member_annotations<U>::value));
+               return Type{name};
+            }
+            else
+               return insert<::psio::transparent_inner_t<U>>();
          else if constexpr (is_wit_resource_v<U>)
          {
             // Resource: opaque handle — methods come from

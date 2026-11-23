@@ -981,9 +981,9 @@ psio_custom_compile_fail(transparent_max_dynamic_data CT_FAIL_TRANSPARENT_MAX_DY
 psio_custom_compile_fail(transparent_type_attrs_dwnc CT_FAIL_TRANSPARENT_TYPE_ATTRS_DWNC
    "cannot be combined with definitionWillNotChange / maxFields / maxDynamicData")
 psio_custom_compile_fail(transparent_member_attr CT_FAIL_TRANSPARENT_MEMBER_ATTR
-   "the member of a transparent\\(\\) type takes no annotation")
+   "the member of a transparent\\(\\) type takes only the annotations that make it a bounded type")
 psio_custom_compile_fail(transparent_field_attrs CT_FAIL_TRANSPARENT_FIELD_ATTRS
-   "the member of a transparent\\(\\) type takes no annotation")
+   "the member of a transparent\\(\\) type takes only the annotations that make it a bounded type")
 psio_custom_compile_fail(transparent_twice CT_FAIL_TRANSPARENT_TWICE
    "lists a type-level attribute twice")
 psio_custom_compile_fail(transparent_and_type_attrs CT_FAIL_TRANSPARENT_AND_TYPE_ATTRS
@@ -1078,3 +1078,11 @@ psio_consistency_compile_fail(fields_cap_over_255 CONS_FAIL_FIELDS_CAP_OVER_255
    "maxFields\\(N\\): N is at most 255")
 psio_consistency_compile_fail(params_over_cap CONS_FAIL_PARAMS_OVER_CAP
    "the method has more parameters than its maxFields\\(N\\) allows")
+set(PSIO_CONS_TRANSPARENT
+   "the member of a transparent\\(\\) type takes only the annotations that make it a bounded type")
+psio_consistency_compile_fail(transparent_exact CONS_FAIL_TRANSPARENT_EXACT "${PSIO_CONS_TRANSPARENT}")
+psio_consistency_compile_fail(transparent_min CONS_FAIL_TRANSPARENT_MIN "${PSIO_CONS_TRANSPARENT}")
+psio_consistency_compile_fail(transparent_text_form CONS_FAIL_TRANSPARENT_SORTED
+   "${PSIO_CONS_TRANSPARENT}")
+psio_consistency_compile_fail(transparent_max_on_int CONS_FAIL_TRANSPARENT_MAX_ON_INT
+   "${PSIO_CONS_TRANSPARENT}")

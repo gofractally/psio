@@ -88,4 +88,33 @@ namespace cons_fail
       psio::to_pssz(psio::reflect<Calls>::method_arg_tuple<0>{std::tuple{std::uint32_t{1}, std::string{}}});
 }  // namespace cons_fail
 
+namespace cons_fail
+{
+   // A transparent member takes only what makes it a bounded type.
+   struct Memo
+   {
+      std::string text;
+#if defined(CONS_FAIL_TRANSPARENT_EXACT)
+      PSIO_REFLECT(Memo, transparent(), attr(text, exact<8>))
+#elif defined(CONS_FAIL_TRANSPARENT_MIN)
+      PSIO_REFLECT(Memo, transparent(), attr(text, min<1> | max<8>))
+#elif defined(CONS_FAIL_TRANSPARENT_SORTED)
+      PSIO_REFLECT(Memo, transparent(), attr(text, utf8 | json_string))
+#else
+      PSIO_REFLECT(Memo, transparent(), attr(text, utf8 | max<80>))
+#endif
+   };
+   inline const auto memo_bytes = psio::to_pssz(Memo{"hi"});
+   struct Code
+   {
+      std::uint64_t value = 0;
+#if defined(CONS_FAIL_TRANSPARENT_MAX_ON_INT)
+      PSIO_REFLECT(Code, transparent(), attr(value, max<8>))
+#else
+      PSIO_REFLECT(Code, transparent(), value)
+#endif
+   };
+   inline const auto code_bytes = psio::to_pssz(Code{});
+}  // namespace cons_fail
+
 int main() {}

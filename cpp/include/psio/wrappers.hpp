@@ -36,6 +36,7 @@ namespace psio
    class bitlist;
 }
 #include <psio/detail/annotation_tree.hpp>
+#include <psio/transparent.hpp>
 
 // shape_tag_of<T> lives in shapes.hpp
 
@@ -653,6 +654,65 @@ namespace psio {
                                          std::string_view format) noexcept
    {
       return detail::ann::check_value(value, annotations, length_message, format);
+   }
+
+   // ── The member of a transparent type ──────────────────────────────────
+   //
+   // A transparent type (transparent.hpp) may bound its member:
+   // `attr(text, utf8 | max<80>)`. The wrapper is then that bounded type
+   // wherever it appears, so every codec reads the member's annotations at
+   // the place it steps from the wrapper to the member.
+   //
+   //   transparent_member_annotations<T>   the annotations T declares for it
+   //   ann::transparent_ann<T, A>           the member's carrier under carrier
+   //                                        A: those annotations and A's cap.
+   //                                        With no annotation it is
+   //                                        ann::cap_only<A>, as before.
+   //   check_transparent_member(v, ...)     the value-side check
+   template <typename T>
+   struct transparent_member_annotations
+   {
+      using member_t = std::remove_cv_t<typename reflect<T>::template member_type<0>>;
+      // What the type declares for its member (not what the member's own
+      // type carries inherently: a psio::utf8_string<80> member already is
+      // its bound).
+      static constexpr auto value =
+         detail::member_annotations_in<T, reflect<T>::template member_pointer<0>>();
+      using value_t = std::remove_cvref_t<decltype(value)>;
+      // They fit the member's shape (effective_annotations_for's checks).
+      static constexpr bool checked = [] {
+         if constexpr (std::tuple_size_v<value_t> != 0)
+            return sizeof(effective_annotations_for<
+                             T, member_t, reflect<T>::template member_pointer<0>>) > 0;
+         else
+            return true;
+      }();
+   };
+   template <typename T>
+   inline constexpr bool transparent_member_checked_v =
+      detail::ann::has_tree_specs_v<typename transparent_member_annotations<T>::value_t>;
+   namespace detail::ann
+   {
+      template <typename T, typename A>
+      struct transparent_raw
+      {
+         using value_t = typename ::psio::transparent_member_annotations<T>::value_t;
+         static constexpr value_t     value = ::psio::transparent_member_annotations<T>::value;
+         static constexpr std::size_t cap   = A::cap;
+      };
+      template <typename T, typename A>
+      using transparent_ann = typename normalized<transparent_raw<T, A>>::type;
+   }  // namespace detail::ann
+   template <typename T>
+   codec_status check_transparent_member(const T& value, const char* length_message,
+                                         std::string_view format) noexcept
+   {
+      if constexpr (transparent_member_checked_v<T>)
+         return detail::ann::check_value(::psio::transparent_inner(value),
+                                         transparent_member_annotations<T>::value,
+                                         length_message, format);
+      else
+         return codec_ok();
    }
 
    // ── length_bound on a value ───────────────────────────────────────────
