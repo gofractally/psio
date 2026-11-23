@@ -202,9 +202,11 @@ namespace psio {
                using R = ::psio::reflect<U>;
                return []<std::size_t... Is>(std::index_sequence<Is...>) {
                   return ((fixed_payload<typename R::template member_type<Is>>() &&
-                           !::psio::has_as_override_v<typename ::psio::effective_annotations_for<
-                              U, typename R::template member_type<Is>,
-                              R::template member_pointer<Is>>::value_t>) && ...);
+                           !::psio::has_binary_as_override_v<
+                              typename R::template member_type<Is>,
+                              typename ::psio::effective_annotations_for<
+                                 U, typename R::template member_type<Is>,
+                                 R::template member_pointer<Is>>::value_t>) && ...);
                }(std::make_index_sequence<R::member_count>{});
             }
          }
@@ -290,7 +292,7 @@ namespace psio {
       {
          using F = std::remove_cvref_t<FieldType>;
          namespace ann = ::psio::detail::ann;
-         if constexpr (::psio::has_as_override_v<AnnotsTuple>)
+         if constexpr (::psio::has_binary_as_override_v<F, AnnotsTuple>)
             return std::nullopt; // opaque alternate presentation
          else if constexpr (::psio::max_dynamic_data_v<F>.has_value())
             return ::psio::max_dynamic_data_v<F>;
@@ -392,7 +394,7 @@ namespace psio {
                   using eff = ::psio::effective_annotations_for<
                      U, F, R::template member_pointer<I>>;
                   if constexpr (!fixed_payload<F>() ||
-                                ::psio::has_as_override_v<typename eff::value_t>)
+                                ::psio::has_binary_as_override_v<F, typename eff::value_t>)
                      ++slots;
                   rest = add(rest, max_field_with_annots<F>(eff::value));
                };

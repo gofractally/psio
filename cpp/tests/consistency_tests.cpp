@@ -3,6 +3,10 @@
 #include <catch.hpp>
 
 #include <psio/annotate.hpp>
+#include <psio/bin.hpp>
+#include <psio/ext_int.hpp>
+#include <psio/frac.hpp>
+#include <psio/ssz.hpp>
 #include <psio/compress_name.hpp>
 #include <psio/get_type_name.hpp>
 #include <psio/name.hpp>
@@ -437,4 +441,87 @@ TEST_CASE("key: the writer refuses a value outside a bound or not UTF-8", "[cons
 
    // The sizing pass checks nothing (the write that follows does).
    CHECK(psio::key_size(Bounded{1, "abcde", {}}) == over.size());
+}
+
+// ── A text-only as<Tag> does not reach the binary formats ────────────────
+namespace cons_as
+{
+   // as<hex_tag> on a wide integer selects its "0x" text in JSON / I-JSON.
+   struct Wide
+   {
+      std::uint32_t id = 0;
+      psio::uint128 amount{};
+      psio::uint256 hash{};
+      std::string   note;
+   };
+   PSIO_REFLECT(Wide, id, attr(amount, as<hex_tag>), attr(hash, as<hex_tag>), note)
+   // The same record without the presentation.
+   struct Plain
+   {
+      std::uint32_t id = 0;
+      psio::uint128 amount{};
+      psio::uint256 hash{};
+      std::string   note;
+   };
+   PSIO_REFLECT(Plain, id, amount, hash, note)
+   struct WideFixed
+   {
+      psio::uint128 amount{};
+   };
+   PSIO_REFLECT(WideFixed, definitionWillNotChange(), attr(amount, as<hex_tag>))
+}  // namespace cons_as
+
+TEST_CASE("as<hex_tag> on a wide integer is a text presentation only", "[consistency][adapter]")
+{
+   using namespace cons_as;
+   Wide w;
+   w.id     = 7;
+   w.amount = (static_cast<psio::uint128>(1) << 100) + 5;
+   w.note   = "n";
+   const Plain p{w.id, w.amount, w.hash, w.note};
+
+   // JSON: the member is written in its "0x" form and read back.
+   const auto text = psio::to_json(w);
+   CHECK(text.find("\"amount\":\"0x") != std::string::npos);
+   CHECK(psio::to_json(p).find("0x") == std::string::npos);
+   CHECK(psio::from_json<Wide>(sp(text)).amount == w.amount);
+   CHECK(psio::from_ijson<Wide>(sp(psio::to_ijson(w))).amount == w.amount);
+
+   // Every binary format: exactly the bytes of the record without it.
+   STATIC_REQUIRE(psio::has_as_override_v<psio::effective_annotations_for<
+                     Wide, psio::uint128, &Wide::amount>::value_t>);
+   STATIC_REQUIRE(!psio::has_binary_as_override_v<
+                  psio::uint128,
+                  psio::effective_annotations_for<Wide, psio::uint128, &Wide::amount>::value_t>);
+   STATIC_REQUIRE(psio::max_encoded_size<Wide>() == psio::max_encoded_size<Plain>());
+   STATIC_REQUIRE(psio::auto_pssz_width_v<Wide> == psio::auto_pssz_width_v<Plain>);
+   STATIC_REQUIRE(psio::max_encoded_size<WideFixed>() == std::optional<std::size_t>{16});
+   const auto frame = psio::to_pssz(w);
+   CHECK(std::vector<char>(frame.begin(), frame.end()) ==
+         [&] { auto b = psio::to_pssz(p); return std::vector<char>(b.begin(), b.end()); }());
+   CHECK(psio::validate_pssz<Wide>(bytes_of(frame)).ok());
+   CHECK(psio::validate_strict<Wide>(psio::pssz{}, bytes_of(frame)).ok());
+   CHECK(psio::from_pssz<Wide>(bytes_of(frame)).amount == w.amount);
+   CHECK(psio::to_pssz(WideFixed{w.amount}).size() == 16);
+   CHECK(psio::encode(psio::key{}, w) == psio::encode(psio::key{}, p));
+   CHECK(psio::from_key<Wide>(bytes_of(psio::to_key(w))).amount == w.amount);
+   CHECK(psio::encode(psio::bin{}, w) == psio::encode(psio::bin{}, p));
+   CHECK(psio::decode<Wide>(psio::bin{}, bytes_of(psio::encode(psio::bin{}, w))).amount == w.amount);
+   CHECK(psio::encode(psio::ssz{}, w) == psio::encode(psio::ssz{}, p));
+   CHECK(psio::encode(psio::experimental::frac32{}, w) ==
+         psio::encode(psio::experimental::frac32{}, p));
+
+   // The Schema IR: the members are the plain integers (the builder gives
+   // the two records the same member types).
+   auto object_of = []<typename T>() {
+      psio::SchemaBuilder builder;
+      builder.insert<T>("R");
+      const auto schema = std::move(builder).build();
+      for (const auto& entry : schema.types)
+         if (auto object = std::get_if<psio::schema_types::Object>(&entry.type->value))
+            return *object;
+      return psio::schema_types::Object{};
+   };
+   CHECK(object_of.operator()<Wide>().members.size() == 4);
+   CHECK(object_of.operator()<Wide>() == object_of.operator()<Plain>());
 }

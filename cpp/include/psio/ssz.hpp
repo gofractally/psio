@@ -195,7 +195,7 @@ namespace psio {
          using F = typename R::template member_type<I>;
          using eff = typename ::psio::effective_annotations_for<
             T, F, R::template member_pointer<I>>::value_t;
-         constexpr bool override_v = ::psio::has_as_override_v<eff>;
+         constexpr bool override_v = ::psio::has_binary_as_override_v<F, eff>;
          if constexpr (!override_v && is_fixed_v<F>)
             return fixed_size_of<F>();
          else
@@ -352,7 +352,7 @@ namespace psio {
                             T, F,
                             R::template member_pointer<Is>>::value_t;
                       constexpr bool override_v =
-                         ::psio::has_as_override_v<eff>;
+                         ::psio::has_binary_as_override_v<F, eff>;
                       if constexpr (override_v)
                       {
                          // Member-level `as<Tag>` forces the field through
@@ -660,7 +660,7 @@ namespace psio {
                             T, F,
                             R::template member_pointer<Is>>::value_t;
                       constexpr bool override_v =
-                         ::psio::has_as_override_v<eff>;
+                         ::psio::has_binary_as_override_v<F, eff>;
 
                       if constexpr (!override_v && is_fixed_v<F>)
                       {
@@ -1017,7 +1017,7 @@ namespace psio {
                    typename ::psio::effective_annotations_for<
                       T, F, R::template member_pointer<Is>>::value_t;
                 constexpr bool override_v =
-                   ::psio::has_as_override_v<eff>;
+                   ::psio::has_binary_as_override_v<F, eff>;
                 if constexpr (!override_v && is_fixed_v<F>)
                 {
                    is_var[Is]       = false;
@@ -1058,7 +1058,7 @@ namespace psio {
                    typename ::psio::effective_annotations_for<
                       T, F, R::template member_pointer<Is>>::value_t;
                 constexpr bool override_v =
-                   ::psio::has_as_override_v<eff>;
+                   ::psio::has_binary_as_override_v<F, eff>;
 
                 if constexpr (!override_v && is_fixed_v<F>)
                 {

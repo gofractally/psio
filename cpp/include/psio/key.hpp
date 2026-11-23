@@ -1210,7 +1210,7 @@ namespace psio {
                using Ann = ::psio::effective_annotations_for<T, F, R::template member_pointer<I>>;
                using eff = std::remove_cvref_t<decltype(Ann::value)>;
                if constexpr (::psio::detail::ann::has_value_checks_v<eff> &&
-                             !::psio::has_as_override_v<eff>)
+                             !::psio::has_binary_as_override_v<F, eff>)
                {
                   F        scratch{};
                   F* const dst = out ? &(out->*(R::template member_pointer<I>)) : &scratch;

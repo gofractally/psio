@@ -73,7 +73,9 @@
 #include <cstddef>
 #include <span>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
+#include <vector>
 
 namespace psio {
 
@@ -437,6 +439,55 @@ namespace psio {
    template <typename Tuple>
    inline constexpr bool has_as_override_v =
       !std::is_void_v<adapter_tag_of_t<Tuple>>;
+
+   // ── Text-only overrides and the binary formats ──────────────────────
+   //
+   // `as<Tag>` on a member selects adapter<F, Tag> for that member. An
+   // adapter that only writes text (its encode takes a std::string: the
+   // "0x" form of the wide integers, as<hex_tag>) is a text presentation:
+   // it changes the member's JSON and nothing else. The binary formats
+   // (pssz, key, bin, frac, ssz, the Schema IR, width inference) honour an
+   // override only when its adapter can write bytes
+   // (`encode(value, std::vector<char>&)`); otherwise the member is its
+   // plain type there.
+   namespace detail
+   {
+      template <typename F, typename Tag>
+      concept adapter_writes_bytes = requires(const F& v, std::vector<char>& s) {
+         adapter<F, Tag>::encode(v, s);
+      };
+
+      template <typename F, typename S>
+      constexpr auto keep_for_binary(const S& spec) noexcept
+      {
+         if constexpr (is_as_spec<S>::value)
+         {
+            if constexpr (adapter_writes_bytes<F, typename S::adapter_tag>)
+               return std::tuple<S>{spec};
+            else
+               return std::tuple<>{};
+         }
+         else
+            return std::tuple<S>{spec};
+      }
+   }  // namespace detail
+
+   template <typename F, typename Tuple>
+   inline constexpr bool has_binary_as_override_v =
+      has_as_override_v<Tuple> &&
+      detail::adapter_writes_bytes<std::remove_cvref_t<F>, adapter_tag_of_t<Tuple>>;
+
+   // The annotations of a member of type F as a binary format sees them:
+   // without a text-only as<Tag>.
+   template <typename F, typename... Ts>
+   constexpr auto binary_annotations(const std::tuple<Ts...>& specs) noexcept
+   {
+      return std::apply(
+         [](const auto&... s) {
+            return std::tuple_cat(detail::keep_for_binary<std::remove_cvref_t<F>>(s)...);
+         },
+         specs);
+   }
 
 }  // namespace psio
 

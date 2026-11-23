@@ -333,10 +333,12 @@ namespace psio {
       {
          using R = record_traits<T>;
          using F = typename R::template member_type<I>;
-         using value_t = typename ::psio::effective_annotations_for<
-            T, F, R::template member_pointer<I>>::value_t;
-         static constexpr value_t value = ::psio::effective_annotations_for<
-            T, F, R::template member_pointer<I>>::value;
+         // (A text-only as<Tag> — one whose adapter cannot write bytes — is
+         // a JSON presentation and no business of a binary format: the
+         // member is its plain type here. adapter.hpp binary_annotations.)
+         static constexpr auto value = ::psio::binary_annotations<F>(
+            ::psio::effective_annotations_for<T, F, R::template member_pointer<I>>::value);
+         using value_t = std::remove_cvref_t<decltype(value)>;
       };
       // A plain tuple / pair element has no annotation of its own; an
       // annotated tuple (psio::annotated_tuple: a method's argument tuple)

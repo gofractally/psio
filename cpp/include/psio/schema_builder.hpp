@@ -805,7 +805,7 @@ namespace psio::schema_types
       {
          using eff_t = std::remove_cvref_t<Annots>;
          if constexpr (::psio::detail::ann::has_tree_specs_v<eff_t> &&
-                       !::psio::has_as_override_v<eff_t>)
+                       !::psio::has_binary_as_override_v<F, eff_t>)
          {
             bool as_attribute = false;
             if constexpr (::psio::has_spec_v<::psio::length_bound, eff_t>)
