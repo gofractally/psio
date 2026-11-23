@@ -370,6 +370,31 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_pssz_ir_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_pssz_ir_noexceptions_test COMMAND psio_pssz_ir_noexceptions_test)
+# Run-time schema comparison (pssz_ir_compare.hpp): equivalent / evolves_from
+# over the Schema IR, the twin of the compile-time psio::pssz_evolves_from.
+psio_add_test(psio_pssz_ir_compare_tests pssz_ir_compare_tests.cpp)
+add_executable(psio_pssz_ir_compare_noexceptions_test pssz_ir_compare_noexceptions.cpp)
+target_include_directories(psio_pssz_ir_compare_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_ir_compare_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_ir_compare_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_ir_compare_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_ir_compare_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_ir_compare_noexceptions_test COMMAND psio_pssz_ir_compare_noexceptions_test)
+# Shared cross-language evolution fixture (conformance/evolution-vectors.json):
+# pairs of schemas with the verdicts of evolves_from / equivalent. Emitted
+# here (and checked against the compile-time psio::pssz_evolves_from), for
+# the run-time checkers of the other languages.
+set(PSIO_EVOLUTION_VECTORS ${CMAKE_SOURCE_DIR}/conformance/evolution-vectors.json)
+add_executable(psio_evolution_conformance_emit evolution_conformance_emit.cpp)
+target_link_libraries(psio_evolution_conformance_emit PRIVATE psio)
+target_compile_features(psio_evolution_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_evolution_conformance_regen
+         COMMAND psio_evolution_conformance_emit --check ${PSIO_EVOLUTION_VECTORS})
+psio_add_test(psio_evolution_conformance_tests evolution_conformance_tests.cpp)
+target_compile_definitions(psio_evolution_conformance_tests PRIVATE
+   PSIO_EVOLUTION_VECTORS="${PSIO_EVOLUTION_VECTORS}")
 psio_add_test(psio_pssz_optional_contract_tests pssz_optional_contract_tests.cpp)
 # Cross-version matrix: field evolution, mandatory pruning, golden bytes.
 psio_add_test(psio_pssz_evolution_matrix_tests pssz_evolution_matrix_tests.cpp)

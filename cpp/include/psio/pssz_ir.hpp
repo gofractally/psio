@@ -428,9 +428,14 @@ inline bool wire_custom_id(std::string_view id) noexcept
           id == "bitlist" || assoc_id(id) || id == "unknown";
 }
 
+// The run-time schema comparison (pssz_ir_compare.hpp) derives widths,
+// bounds and layouts exactly as the codec does.
+class Comparer;
+
 // W = 1, 2, 4: the explicit profile. W = 0: the automatic profile.
 template <std::size_t W> class Codec
 {
+   friend class Comparer;
    static_assert(W == 0 || W == 1 || W == 2 || W == 4);
    static constexpr bool automatic = W == 0;
    const schema_types::Schema &schema;
@@ -2690,6 +2695,36 @@ template <std::size_t W>
          if (auto status_ = function(f); !status_.ok())
          return status_;
    return codec_ok();
+}
+
+// The argument list of a function, as the type its bytes and its text are a
+// value of (docs/json.md "Method arguments"): the Object of its parameters
+// with the attribute `tuple` — "named" when every parameter has a name (the
+// text is an object keyed by them; a reader also takes the positional
+// array), "positional" otherwise (the members are "0", "1", ...; the text is
+// the array) — and the function's `maxFields` / `maxDynamicData`. It is what
+// SchemaBuilder builds for reflect<T>::method_arg_tuple<I>:
+//
+//    auto args = psio::pssz_ir::argument_list(schema.interfaces[0].funcs[i]);
+//    json_to_pssz(schema, args, psio::ijson{}, R"({"amount":5})", bytes);
+[[nodiscard]] inline schema_types::AnyType argument_list(const schema_types::Func &f)
+{
+   schema_types::Object o;
+   // Positional names are "0", "1", ...: no parameter is named so.
+   bool named = true;
+   for (std::size_t i = 0; i < f.params.size(); ++i)
+      named = named && !f.params[i].name.empty() && f.params[i].name != std::to_string(i);
+   for (std::size_t i = 0; i < f.params.size(); ++i)
+   {
+      o.members.push_back(f.params[i]);
+      if (!named)
+         o.members.back().name = std::to_string(i);
+   }
+   o.attributes.push_back({"tuple", named ? "named" : "positional"});
+   for (std::string_view name : {"maxFields", "maxDynamicData"})
+      if (auto found = detail::find_attribute(f.attributes, name))
+         o.attributes.push_back(*found);
+   return o;
 }
 
 // The offset width the automatic profile derives for `root`'s own header,
