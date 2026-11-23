@@ -2865,9 +2865,11 @@ namespace psio {
                    {
                       using Proj = ::psio::adapter<
                          std::remove_cvref_t<F>, ::psio::adapter_tag_of_t<eff>>;
-                      status = Proj::validate(std::span<const char>(
+                      const std::span<const char> payload(
                          src.data() + spans[Is].begin,
-                         spans[Is].end - spans[Is].begin));
+                         spans[Is].end - spans[Is].begin);
+                      status = flags && flags->exact ? Proj::validate_strict(payload)
+                                                     : Proj::validate(payload);
                    }
                 }
                 else
@@ -2983,6 +2985,12 @@ namespace psio {
          {
             using Proj = ::psio::adapter<std::remove_cvref_t<T>,
                                           ::psio::binary_category>;
+            // Exact-schema mode (validate_strict) is the adapter's strict
+            // check: what it says about its own canonical form.
+            if constexpr (requires(std::span<const char> b) { Proj::validate_strict(b); })
+               if (flags && flags->exact)
+                  return Proj::validate_strict(std::span<const char>(
+                     src.data() + pos, end - pos));
             return Proj::validate(std::span<const char>(
                src.data() + pos, end - pos));
          }
@@ -3180,17 +3188,54 @@ namespace psio {
 
       // ── Exact-schema (strict) validation ──────────────────────────────────
       //
-      // Structural validation that additionally rejects unknown optional
-      // suffix fields. Native builds then materialize the value to run its
-      // semantic specs and to require the canonical encoding (which rejects
-      // an explicitly stored trailing None the encoder would have pruned).
+      // "Valid, canonical, and nothing the reader does not know": the
+      // structural validation in exact mode (unknown optional suffix fields
+      // are refused; an adapter's payload is put to its validate_strict; a
+      // nested value is checked the same way as its type), then the value
+      // is materialized to run its semantic specs and to require that its
+      // encoding is these very bytes.
       //
-      // Exception-disabled guests never materialize: a wrapper or adapter may
-      // abort on construction, which a guest cannot catch. They report an
-      // explicit unsupported status for types that need semantic work and
-      // structural success otherwise (docs/guest-codec-preparation.md).
+      // The same steps run in every build. Nothing here needs exceptions:
+      // the structural walk returns a status, a decode of bytes it accepted
+      // does not fail (every checking reader relies on that — an adapter's
+      // decode is only ever called on a payload its validate accepted,
+      // adapter.hpp — and the plain validator itself materializes members
+      // for invariants and order checks), the specs return a status, and
+      // the re-encode goes through the checked sizing pass. Where the
+      // compiler has exceptions a throw from user code (an adapter, a
+      // constructor) is turned into a failed status as well.
+      //
       // `depth`: the node depth of the value's root (nonzero for the bytes
       // of a nested value, which are checked by this same function).
+      template <std::size_t W, bool Auto, typename T>
+      codec_status validate_exact_materialized(std::span<const char> bytes)
+      {
+         T decoded = decode_value<W, Auto, T>(bytes, 0, bytes.size());
+         if constexpr (::psio::Reflected<T>)
+         {
+            auto specs = ::psio::validate_specs_on_value(decoded);
+            if (!specs.ok())
+               return specs;
+         }
+         // The value came from bytes that passed every check, so its
+         // encoding exists; a custom type whose decode and encode disagree
+         // can still produce a value that has none, and that is reported,
+         // not aborted on.
+         if (auto status = check_encode_depth_impl(decoded, 0, {}); !status.ok())
+            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+         size_check        check;
+         const std::size_t size = size_of_v<W, Auto, T, no_ann, size_check*>(decoded, &check);
+         if constexpr (Auto) enforce_max_dynamic<T>(size, &check);
+         if (check.failure || size != bytes.size())
+            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+         std::vector<char> canonical(size);
+         ::psio::fast_buf_stream sink(canonical.data(), canonical.size());
+         encode_value<W, Auto>(decoded, sink);
+         if (!std::equal(canonical.begin(), canonical.end(), bytes.begin()))
+            return codec_fail("pssz: noncanonical encoding", 0, "pssz");
+         return codec_ok();
+      }
+
       template <std::size_t W, bool Auto, typename T>
       codec_status validate_exact_value(std::span<const char> bytes,
                                         std::size_t depth = 0) noexcept
@@ -3206,22 +3251,7 @@ namespace psio {
 #if defined(__cpp_exceptions)
          try
          {
-            T decoded = decode_value<W, Auto, T>(bytes, 0, bytes.size());
-            if constexpr (::psio::Reflected<T>)
-            {
-               auto specs = ::psio::validate_specs_on_value(decoded);
-               if (!specs.ok())
-                  return specs;
-            }
-            const std::size_t size = size_of_v<W, Auto>(decoded);
-            if (size != bytes.size())
-               return codec_fail("pssz: noncanonical encoding", 0, "pssz");
-            std::vector<char> canonical(size);
-            ::psio::fast_buf_stream sink(canonical.data(), canonical.size());
-            encode_value<W, Auto>(decoded, sink);
-            if (!std::equal(canonical.begin(), canonical.end(), bytes.begin()))
-               return codec_fail("pssz: noncanonical encoding", 0, "pssz");
-            return st;
+            return validate_exact_materialized<W, Auto, T>(bytes);
          }
          catch (...)
          {
@@ -3230,9 +3260,7 @@ namespace psio {
                "pssz");
          }
 #else
-         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
-            return codec_fail("pssz: guest strict semantic validation unsupported", 0, "pssz");
-         return st;
+         return validate_exact_materialized<W, Auto, T>(bytes);
 #endif
       }
 

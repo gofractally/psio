@@ -188,6 +188,19 @@ The checked decode accepts exactly what `validate_F<T>` accepts:
   unknown members are dropped (the compatible rule of `psio::validate`).
   `psio::validate_strict<T>(psio::pssz{}, bytes)` rejects such a frame;
   `psio::decode_pssz_checked` reports whether there were any.
+
+**Strict validation** — `psio::validate_strict<T>(psio::pssz{}, bytes)` — is
+"valid, canonical, and nothing this reader does not know": the checks of
+`validate_pssz<T>`, no unknown appended members at any depth (nested values
+included), an adapter's payload put to its `validate_strict`, the value's
+semantic specs and invariants, and the requirement that encoding the value
+again gives these very bytes (`pssz: noncanonical encoding` otherwise). It
+returns a `codec_status` and gives the same answers in a build without
+exceptions (`-fno-exceptions -fno-rtti`, `PSIO_EXCEPTIONS_ENABLED=0`) as
+natively, for every type: records with binary or text adapters, invariants,
+transparent types, bounded and ordered members, constructed records. It
+decodes the value once (after the structural checks have accepted the
+bytes), so it costs about a validate, a decode and an encode.
 - `json`, `ijson`: every member that is not optional must be present, in the
   checked and in the trusted decode alike (`psio::decode<T>(psio::json{}, text)`,
   `from_json<T>(psio::trusted{text})`).

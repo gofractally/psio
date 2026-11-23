@@ -51,3 +51,31 @@ type that carries length bounds, as described above.
 Independent activation gates remain open: schema and language parity (Rust has
 no evolution or pruning) and all other format headers. Passing the guest preparation consumer does not qualify the entire
 SDK.
+
+## PSSZ strict validation in a guest
+
+`psio::validate_strict<T>(psio::pssz{}, bytes)` (and the explicit-width tags)
+no longer has an "unsupported" answer. It runs the same steps in a build
+without exceptions as natively, and returns the same statuses:
+
+1. the structural validation in exact mode — unknown optional suffix fields
+   are refused, an adapter's payload is put to its `validate_strict`, a
+   nested value is checked as its type by this same function;
+2. the value is decoded from the accepted bytes, and its semantic specs run;
+3. the value is sized and encoded again through the checked sizing pass, and
+   the bytes must be the input ("pssz: noncanonical encoding" otherwise).
+
+Step 2 is not a new requirement on user code: the plain validator already
+materializes members to check invariants and order annotations, and every
+checking reader calls an adapter's `decode` only on a payload its `validate`
+accepted (`psio/adapter.hpp`). An adapter or constructor that aborts on bytes
+its own `validate` accepted is a defect of that type in every checked entry
+point, not only in this one.
+
+The metadata-only capability check
+(`detail::vstrict::can_validate_without_materialization`) and the
+`guest strict semantic validation unsupported` status remain for the
+experimental frac32 prototype and for `psio::ssz`. Everything above that
+describes them is about those two formats.
+`cpp/tests/pssz_strict_noexceptions.cpp` runs the PSSZ cases with
+`-fno-exceptions -fno-rtti`.

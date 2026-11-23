@@ -543,6 +543,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 add_test(NAME psio_pssz_noexceptions_test COMMAND psio_pssz_noexceptions_test)
 
+# validate_strict ("valid, canonical, no unknown fields") on records with
+# adapters, invariants, transparent types and bounds: the same cases natively
+# and with exceptions and RTTI disabled.
+psio_add_test(psio_pssz_strict_tests pssz_strict_tests.cpp)
+add_executable(psio_pssz_strict_noexceptions_test pssz_strict_noexceptions.cpp)
+target_include_directories(psio_pssz_strict_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_pssz_strict_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_pssz_strict_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_pssz_strict_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_pssz_strict_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_pssz_strict_noexceptions_test COMMAND psio_pssz_strict_noexceptions_test)
+
 # Cross-format parity: maxFields / maxDynamicData enforcement.
 psio_add_test(psio_caps_parity_tests caps_parity_tests.cpp)
 

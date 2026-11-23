@@ -246,22 +246,12 @@ namespace nested_cases
    {
       return psio::validate<T>(psio::pssz{}, bytes).ok();
    }
-   // Exact validation succeeds. Without exceptions a type whose strict
-   // check needs materialisation (a tuple, a utf8_string, ...) reports
-   // "unsupported" instead: that status is what must come back there.
+   // Exact validation succeeds: the same answer with and without
+   // exceptions (PSSZ strict validation returns a status in every build).
    template <typename T>
    bool strict(std::span<const char> bytes)
    {
-      const auto status = psio::validate_strict<T>(psio::pssz{}, bytes);
-#if defined(__cpp_exceptions)
-      return status.ok();
-#else
-      if (psio::detail::vstrict::can_validate_without_materialization<T>())
-         return status.ok();
-      return !status.ok() &&
-             status.error().what ==
-                std::string_view{"pssz: guest strict semantic validation unsupported"};
-#endif
+      return psio::validate_strict<T>(psio::pssz{}, bytes).ok();
    }
    template <typename T>
    bool strict_rejects(std::span<const char> bytes)
